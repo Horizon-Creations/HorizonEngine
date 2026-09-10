@@ -25,6 +25,7 @@
 #include "AnimatorStateMachineEditorPanel.h"
 #include "AudioEditorPanel.h"
 #include "EditorAssetTypeCache.h"
+#include "AssetStubWriter.h"             // what a newborn asset of each type contains
 #include "GitController.h"        // per-file source-control status for the tile badge
 #include "AssetThumbnailCache.h"         // rendered mesh/material tiles for the grid
 #ifdef HE_HAVE_LIBSSH2
@@ -387,21 +388,8 @@ void clearQuietRefreshRequest() { s_quietContentRefresh = false; }
 int  browsedRootKind()          { return s_selectedRootKind; }
 std::string browsedFolderPath() { return s_browsedFolderPath; }
 
-// Starter template for a freshly created script, by language (0 = Lua, 1 = Python).
-static const char* scriptStarterTemplate(int lang)
-{
-	static const char* kLua =
-		"local M = {}\n\n"
-		"function M.onStart(self)\nend\n\n"
-		"function M.onUpdate(self, dt)\nend\n\n"
-		"return M\n";
-	static const char* kPy =
-		"import horizon\n\n"
-		"class NewScript(horizon.Behavior):\n"
-		"    def on_start(self):\n        pass\n\n"
-		"    def on_update(self, dt):\n        pass\n";
-	return (lang == 1) ? kPy : kLua;
-}
+// (The starter template for a freshly created script moved to AssetStubWriter.cpp
+// with the rest of the stub writer — the panel is a caller now, not the owner.)
 
 // An item just moved on disk: hand the old/new ABSOLUTE paths to the content
 // manager as the content-relative ones references are stored in, so everything
@@ -2148,84 +2136,18 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				std::string relative = ctx.contentManager->toContentRelativePath(path);
 
 				// Write a minimal binary asset stub so the file exists on disk.
-				// The UUID minted here is the asset's permanent identity.
+				// The UUID minted inside is the asset's permanent identity.
+				//
+				// The body of this used to sit right here, which meant "what is
+				// inside a brand-new Input Action" was only answerable from inside
+				// an ImGui popup. The MCP asset tools create the same files, so it
+				// moved to AssetStubWriter.h — one writer, two callers, no second
+				// theory of what a newborn asset contains.
 				{
-					const HE::UUID assetId = HE::UUID::generate();
-					HAsset::Writer w;
-					std::vector<uint8_t> meta;
-					HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(type));
-					HAsset::Writer::appendPOD(meta, assetId.hi);
-					HAsset::Writer::appendPOD(meta, assetId.lo);
-					HAsset::Writer::appendString(meta, defaultName);
-					HAsset::Writer::appendString(meta, relative);
-					w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
-					// Scripts are born with a language and a starter template. The
-					// language byte (CHUNK_SLNG) is the single source of truth for
-					// routing Lua vs Python, so it must be written here at birth —
-					// this stub bypasses the ContentManager save path.
-					if (type == HE::AssetType::Script)
-					{
-						const int lang = static_cast<int>(scriptLang);
-						const char* starter = scriptStarterTemplate(lang);
-						w.addChunk(HAsset::CHUNK_SRC, starter, std::char_traits<char>::length(starter));
-						const uint8_t lb = static_cast<uint8_t>(lang);
-						w.addChunk(HAsset::CHUNK_SLNG, &lb, 1);
-					}
-					// UI widgets are born with an empty 1920×1080 tree so the widget
-					// editor has valid JSON to open straight away.
-					if (type == HE::AssetType::Widget)
-					{
-						const std::string tree = HE::uiWidgetTreeToJson(HE::UIWidgetTree{});
-						w.addChunk(HAsset::CHUNK_UIWT, tree.data(), tree.size());
-					}
-					// A theme is born as the shipped default, not as an empty
-					// file: an author edits colours, they do not invent nine
-					// roles from nothing, and an empty theme would be black.
-					if (type == HE::AssetType::Theme)
-					{
-						const std::string json = HE::uiThemeToJson(HE::uiDefaultTheme());
-						w.addChunk(HAsset::CHUNK_THEM, json.data(), json.size());
-					}
-					if (type == HE::AssetType::HorizonCodeClass)
-					{
-						const std::string graph = HorizonCode::toJson(HorizonCode::Graph{});
-						w.addChunk(HAsset::CHUNK_HCGR, graph.data(), graph.size());
-						// The base class decides the event catalog (e.g. input events on
-						// PlayerController/PlayerCharacter), so it is part of the asset's
-						// identity from birth. Absent chunk = plain Object.
-						if (hcBaseClass && *hcBaseClass)
-							w.addChunk(HAsset::CHUNK_HCBC, hcBaseClass, std::strlen(hcBaseClass));
-					}
-					// Input assets are born with valid minimal JSON so their editors and
-					// the runtime parser never see an empty payload.
-					if (type == HE::AssetType::InputAction)
-					{
-						const char* json = "{\"valueType\":\"Button\"}";
-						w.addChunk(HAsset::CHUNK_IACT, json, std::strlen(json));
-					}
-					if (type == HE::AssetType::InputMappingContext)
-					{
-						const char* json = "{\"entries\":[]}";
-						w.addChunk(HAsset::CHUNK_IMAP, json, std::strlen(json));
-					}
-					// Type-definition assets are born with valid empty JSON so the
-					// TypeAssetPanel and the TypeRegistry never see an empty payload.
-					if (type == HE::AssetType::StructType)
-					{
-						const char* json = "{\"fields\":[]}";
-						w.addChunk(HAsset::CHUNK_STDF, json, std::strlen(json));
-					}
-					if (type == HE::AssetType::EnumType)
-					{
-						const char* json = "{\"entries\":[]}";
-						w.addChunk(HAsset::CHUNK_ENDF, json, std::strlen(json));
-					}
-					if (type == HE::AssetType::SaveGameTemplate)
-					{
-						const char* json = "{\"fields\":[]}";
-						w.addChunk(HAsset::CHUNK_SGTP, json, std::strlen(json));
-					}
-					w.write(path, static_cast<uint16_t>(type));
+					HE::Ed::AssetStubSpec spec;
+					spec.scriptLanguage = scriptLang;
+					if (hcBaseClass && *hcBaseClass) spec.horizonCodeBaseClass = hcBaseClass;
+					HE::Ed::writeAssetStub(path, relative, defaultName, type, spec);
 				}
 				// A path that was probed while it was still free (or held a deleted
 				// asset) has a stale entry in the shared type cache — this asset is

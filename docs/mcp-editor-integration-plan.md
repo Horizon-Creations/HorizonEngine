@@ -678,6 +678,8 @@ Schrittliste in Kapitel 3.
 | Werkzeug-Registry und Kernwerkzeuge (`ping`, `scene_info`) | `src/HE_Editor/McpToolRegistry.h/.cpp` |
 | Entity-Werkzeuge: `entity_create`, `entity_destroy`, `entity_reparent`, `entity_set_transform`, `entity_set_components`, `entity_list`, `entity_get` | `src/HE_Editor/McpToolsEntity.cpp` |
 | Dreizehn HorizonCode-Werkzeuge (lesend und autorenschaftlich) | `src/HE_Editor/McpToolsHc.cpp` |
+| Asset-Werkzeuge: `asset_resolve`, `asset_list`, `asset_create`, `asset_delete`, `asset_move` — Pfad→UUID, Ordner lesen, autorierte Typen anlegen, Löschen mit Referenz-Scan davor, Verschieben mit Retarget | `src/HE_Editor/McpToolsAsset.cpp` |
+| Was in einem frisch angelegten Asset jedes Typs steht — aus dem Create-Menü des Content Browsers herausgezogen, damit Panel und Werkzeuge dieselbe Datei schreiben | `src/HE_Editor/AssetStubWriter.h/.cpp` |
 | 233 Werkzeuge aus der `HE::api`-Registry, Schema aus `params`, Beschreibung aus `NodeDocs::engineCall` | `src/HE_Editor/McpToolsApi.h/.cpp` |
 | Ein/Aus-Schalter, Port, Zustandsanzeige, „Try Again" | Preferences → Editor → **Remote Control** |
 | Fußzeilen-Anzeige mit Tooltip, Klick öffnet die Seite | `src/HE_Editor/McpStatusBar.h/.cpp` |
@@ -1352,3 +1354,79 @@ Deploy ohnehin tut.
   fängt eine falsche Zuordnung ab — aber Windows und Linux sind ungeprüft.
 * **Zwei Editoren, eine Endpunktdatei.** Sichtbar gemacht, nicht gelöst.
 * **Die Website ist nicht deployt** (7.5).
+
+## 8. Nachtrag: die Asset-Werkzeuge (Folgethema 29, Schritt 1)
+
+Ein Nutzungstest aus einer echten Claude-Sitzung hat die Lücke benannt, die
+alles davor unbenutzbar machte: Entities setzen und HorizonCode schreiben geht,
+aber **kein Werkzeug konnte ein Asset benennen**. Jede Mesh-Referenz, jedes
+Material, jede Klasse zum Spawnen wird über einen Pfad oder eine UUID
+adressiert, und die bekam ein Client nirgends her.
+
+Fünf Werkzeuge schließen das: `asset_resolve` (Pfad → UUID, Typ, geladen?),
+`asset_list` (Ordner lesen, rekursiv, nach Typ gefiltert), `asset_create`,
+`asset_delete`, `asset_move`.
+
+### 8.1 Kein EditorCommands darunter, und das ist eine Entscheidung
+
+Das Gateway kennt fünf Entity-Befehle und legt zu jedem einen Undo-Eintrag an.
+Für Assets gibt es keinen: „Löschen ist die eine Content-Browser-Operation ohne
+Undo" (`AssetRefScan.h`), und ein Rename ist ein Dateisystem-Move plus das
+Umschreiben jedes Referrers auf der Platte. Dem Gateway das Invertieren
+beizubringen hieße, ein Undo zu erfinden, das der Editor selbst nicht anbietet —
+eine Verhaltensänderung im Kostüm einer Verkabelung. Also derselbe Hooks-Weg wie
+bei `McpHcHooks`: die Prüfungen, die ein Mensch vom Content Browser geschenkt
+bekommt, werden hier einmal gestellt, und die Absagen behalten die Drahtnamen
+der Entity-Werkzeuge.
+
+### 8.2 Die drei Regeln, die wichtiger sind als die Werkzeuge
+
+* **Ein Leser lädt nicht.** `asset_resolve` und `asset_list` antworten aus dem
+  META-Chunk der Datei, dem Pfad-Index und dem Header-Sniff-Cache. `loadAsset`
+  würde den dichten Asset-Pool verschieben und jeden Zeiger ungültig machen, den
+  der Editor gerade hält. Eine Frage darf die Antwort nicht verändern.
+  * Dazu gehört die Reihenfolge: **die Platte zuerst, der Index als Rückfall.**
+    `already_exists` schickt den Client auf „lösch das erst" — und ein Löschen
+    entlädt nicht (so macht es der Content Browser auch), das alte Asset bleibt
+    also unter dem freigewordenen Pfad resident. Über den Index gefragt käme die
+    UUID einer Datei zurück, die es nicht mehr gibt.
+* **Der Stub-Writer ist geteilt.** Er lag als Lambda im Create-Menü und war
+  damit nur aus einem ImGui-Popup erreichbar. Jetzt `AssetStubWriter.h`, zwei
+  Aufrufer, keine zweite Theorie davon, was in einem frischen Input Action
+  steckt.
+* **In einer Session sind Löschen und Verschieben Anfragen**, keine Taten: sie
+  brechen jede Referenz auf den alten Namen, also entscheidet der Host und alle
+  Maschinen bewegen sich gleichzeitig. Die Werkzeuge melden `applied: false,
+  requested: true`, statt eine Änderung zu behaupten, die sie nicht gemacht
+  haben.
+
+### 8.3 Die Grenze
+
+Das Registry-Kopfstück verspricht einem externen Client keinen Dateizugriff.
+Diese Werkzeuge nehmen Pfade, also ist das Versprechen nur so gut wie
+`checkPath`: jedes Argument ist content-relativ, wird über
+`resolveAbsolutePath` aufgelöst und danach daraufhin geprüft, ob es wirklich
+**in** einem bekannten Root *landet*. Ein absoluter Pfad wird als solcher
+abgelehnt, nicht stillschweigend um den führenden Schrägstrich gekürzt: „/Materials/Rock.hasset"
+und „/Users/jemand/.ssh/id_rsa" sind danach dieselbe Sorte String, und der
+zweite käme als schlichtes „nicht gefunden" zurück.
+
+### 8.4 Was bewusst offen bleibt
+
+* **Ordner** werden weder gelöscht noch verschoben. Beides zieht einen ganzen
+  Teilbaum mit, und die Liste dazu sieht nur der Content Browser.
+* **`Engine/`** ist schreibgeschützt — dieselbe Sperre, die der Panel-Kontext
+  `engineLocked` nennt.
+* **Szenen anlegen** gehört Schritt 2 (`scene_create`): eine `.hescene` ist
+  JSON, kein HAsset, und der Stub-Writer schriebe dort das Falsche.
+* **Material-, Widget-, Input- und Terrain-Inhalte** ändern die Werkzeuge nicht.
+  Sie legen die Dateien an und bewegen sie; was drin steht, sind die Schritte 3
+  bis 6 dieses Themas.
+
+### 8.5 Nebenbei gefunden
+
+`HE::assetTypeName` (`Types/Enums.h`) kannte `BoneMask` und `BlendSpace` nicht —
+genau der Durchfall, den der Kommentar über dem Switch vorhersagt, samt Warnung.
+Beide meldeten sich gegenüber `content.typeName`, der C-ABI und allem, was
+Assets nach Typnamen auflistet, als unbekannt. Ein Test hält Hin- und
+Rückrichtung jetzt zusammen.

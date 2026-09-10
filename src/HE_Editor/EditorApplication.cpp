@@ -6363,6 +6363,126 @@ void EditorApplication::setupMcpTools()
 		return HE::Ed::uuidOf(*m_editorWorld, e);
 	};
 	HE::Ed::registerApiTools(m_mcp.registry(), std::move(api));
+
+	// ── The files a project is made of ───────────────────────────────────────
+	// Resolve, list, create, delete, move. Hooks rather than a pointer to this
+	// object for the third time in this function, and here it buys the most:
+	// every claim these tools make ("the file moved", "the material that named
+	// it followed") is a question about a directory, and a test can put it to a
+	// real ContentManager over a temporary content root.
+	HE::Ed::McpAssetHooks assets;
+	assets.isPlaying = [this] { return m_isPlaying; };
+	// The key a session addresses a file by — NOT always the content-relative
+	// path (a C++ class lives under Source, a sibling of Content), which is why
+	// this goes through the editor's own mapping.
+	assets.collabKey = [this](const std::string& absPath, bool isFolder) {
+		return collabSyncKey(absPath, isFolder);
+	};
+	assets.lockedByOther = [this](const std::string& key) {
+		return m_collab.assetLockedByOther(key);
+	};
+	// Inside a session a delete and a rename are REQUESTS: they break every
+	// reference to the old name, so the host decides and every machine moves at
+	// once. Both answer false when there is no session, which is the ordinary
+	// case and means "just do it".
+	assets.requestDelete = [this](const std::string& key, bool folder) {
+		return m_collab.inSession() && m_collab.requestAssetDelete(key, folder);
+	};
+	assets.requestMove = [this](const std::string& oldKey, const std::string& newKey,
+	                            bool folder) {
+		return m_collab.inSession() && m_collab.requestAssetRename(oldKey, newKey, folder);
+	};
+	assets.publishCreate = [this](const std::string& rel, const std::string& abs) {
+		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
+	};
+	// The on-disk half of a retarget goes on the editor's single queue, never
+	// inline: the collaboration path rewrites the same files from a worker, and
+	// two walks over one file lose one of the two rewrites outright.
+	assets.enqueueRetarget = [this](const std::string& oldRel, const std::string& newRel,
+	                                bool folder) {
+		enqueueRetargetOnDisk(oldRel, newRel, folder);
+	};
+	// What the Content Browser's create menu would offer in THIS project. Same
+	// rule as kLevelScriptExcluded above: MCP must not create what the menu
+	// refuses. The two gates are the project's scripting language (one language
+	// per project) and Advanced Shader Effects.
+	assets.creatableTypes = [this] {
+		const auto& proj = m_projectManager.currentProject();
+		std::vector<HE::AssetType> out {
+			HE::AssetType::Widget,
+			HE::AssetType::Theme,
+			HE::AssetType::InputAction,
+			HE::AssetType::InputMappingContext,
+			HE::AssetType::ParticleSystem,
+			HE::AssetType::AnimatorStateMachine,
+			HE::AssetType::BoneMask,
+			HE::AssetType::BlendSpace,
+			HE::AssetType::StructType,
+			HE::AssetType::EnumType,
+			HE::AssetType::SaveGameTemplate,
+		};
+		if (proj.advancedShaderEffects)
+		{
+			out.push_back(HE::AssetType::Material);
+			out.push_back(HE::AssetType::MaterialFunction);
+		}
+		switch (proj.scriptLanguage)
+		{
+		case ProjectScriptLanguage::HorizonCode:
+			out.push_back(HE::AssetType::HorizonCodeClass);
+			break;
+		case ProjectScriptLanguage::Lua:
+		case ProjectScriptLanguage::Python:
+			out.push_back(HE::AssetType::Script);
+			break;
+		// A C++ project's logic asset is a source file under Source/, written by
+		// the C++ class dialog rather than by a .hasset stub. Nothing to offer
+		// here — and offering a Script would quietly make it a two-language
+		// project.
+		case ProjectScriptLanguage::Cpp:
+			break;
+		}
+		return out;
+	};
+	assets.scriptLanguage = [this] {
+		return m_projectManager.currentProject().scriptLanguage == ProjectScriptLanguage::Python
+			? HE::ScriptLanguage::Python : HE::ScriptLanguage::Lua;
+	};
+	// The editor's bookkeeping around a file that appeared, moved or went away.
+	// The thumbnail cache and the open tabs are the two the tools cannot reach
+	// themselves, and a tab left open on a deleted asset is the expensive one:
+	// Save All works off the panel behind it and would write the asset back.
+	assets.onAssetGone = [this](const std::string& abs) {
+		AssetThumbnailCache::invalidate(abs);
+		AppContext ctx = makeContext();
+		for (auto& t : ctx.tabs)
+			if (t.closable && t.assetPath == abs) t.open = false;
+		EditorUI::discardPanelState(ctx, abs);
+		m_contentRefreshPending = true;
+	};
+	assets.onAssetAppeared = [this](const std::string&) {
+		m_contentRefreshPending = true;
+	};
+	assets.onAssetMoved = [this](const std::string& oldAbs, const std::string& newAbs, bool) {
+		AssetThumbnailCache::invalidate(oldAbs);
+		AssetThumbnailCache::invalidate(newAbs);
+		AppContext ctx = makeContext();
+		for (auto& t : ctx.tabs)
+			if (t.assetPath == oldAbs)
+			{
+				t.assetPath = newAbs;
+				t.label     = std::filesystem::path(newAbs).stem().string();
+			}
+		m_contentRefreshPending = true;
+	};
+	assets.projectRoot = [this] {
+		const std::string projFile = m_projectManager.currentProject().path;
+		return projFile.empty() ? std::string()
+		                        : std::filesystem::path(projFile).parent_path().string();
+	};
+	assets.contentDirName = [] { return std::string("Content"); };
+
+	HE::Ed::registerAssetTools(m_mcp.registry(), contentManager(), std::move(assets));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────
