@@ -129,6 +129,7 @@ add_executable(he_tests
     test_mcp_bridge.cpp
     test_mcp_tools_entity.cpp
     test_mcp_tools_asset.cpp
+    test_mcp_tools_scene.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -210,6 +211,13 @@ add_executable(he_tests
     # "does a path with '..' in it get out of the root" — none of which a running
     # editor could be asked without a project and a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsAsset.cpp
+    # The scene tools, and this binary is where their central claim is provable
+    # at all: a real HorizonWorld plus a real SceneSerializer over a temporary
+    # content root answers "did what scene_save wrote come back out of
+    # scene_open with the same entities under the same uuids" — the round trip
+    # a running editor could only be asked about with a project and a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsScene.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
     # Compiled in so the editor's real network↔scene bridge is covered

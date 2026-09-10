@@ -331,4 +331,68 @@ struct McpAssetHooks
 void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
                         McpAssetHooks hooks);
 
+// ─── The scene as a file ─────────────────────────────────────────────────────
+// Three tools — save, create, open — and they close the one gap that made every
+// entity tool provisional: a client could place a hundred objects and had no way
+// to make any of it outlast the session, no way to start a second level, and no
+// way to move to one that already existed. `scene_info` told it the scene was
+// dirty and offered nothing to do about that.
+//
+// ── Why these do NOT go through EditorCommands ───────────────────────────────
+// The same answer as McpAssetHooks, and for a sharper reason. The gateway knows
+// five entity commands and records an undo entry that inverts each. Opening a
+// scene REPLACES the world and then clears the undo history outright
+// (EditorApplication::openScene) — there is no inverse to record, and inventing
+// one would be inventing an undo the editor itself does not offer. So the
+// checks a human gets from the UI for free are asked here, once, through hooks,
+// and the refusals keep the wire names the entity tools use.
+//
+// ── The guard that has to be replicated by hand ──────────────────────────────
+// A human never reaches `openScene` directly: File > Open Scene goes through
+// `requestGuarded` (EditorUI.cpp), which raises the save prompt when the scene
+// is dirty. A client cannot see that prompt, so `scene_open` refuses a dirty
+// scene with `dirty` unless it says `discard_changes: true`. Silently throwing
+// away an hour of somebody's placement is the one lie that would be most
+// expensive here, and it is invisible to the caller by construction.
+//
+// ── What is deliberately NOT here ────────────────────────────────────────────
+//   • Additive load. It is a merge into the running world with its own physics
+//     and undo rules (openSceneAdditive), which is a different question from
+//     scene persistence.
+//   • A "new empty scene" that discards the current world without writing it
+//     anywhere. `scene_create` writes a file and can open it; there is no tool
+//     whose only effect is to throw the open scene away.
+//   • Refusing inside a collaboration session. A human is not refused either,
+//     and a gate MCP has but the File menu does not would be a behaviour change
+//     dressed as plumbing. The session state is reported in the result instead.
+struct McpSceneHooks
+{
+	// Absolute path of the scene the editor world was last saved to or loaded
+	// from. Empty = a new, never-saved scene, which is a real state.
+	std::function<std::string()> currentScenePath;
+	std::function<bool()>        sceneDirty;
+	std::function<bool()>        isPlaying;
+	std::function<bool()>        inSession;
+	std::function<int()>         entityCount;   // -1 = no world
+	std::function<std::string()> rootUuid;      // world root, "" = no world
+
+	// Write the editor world to this absolute path / replace it with what is at
+	// this absolute path. False = the editor could not. Both are the editor's
+	// own members, so an MCP save takes the scene thumbnail and an MCP open
+	// preloads the asset references exactly as the File menu's do.
+	std::function<bool(const std::string& absPath)> saveScene;
+	std::function<bool(const std::string& absPath)> openScene;
+
+	// A file that was not there before. Same pair the asset tools use, and for
+	// the same reason: a create IS published (nothing refers to a brand-new file
+	// yet, so there is nothing to arbitrate), and the editor's own bookkeeping
+	// has to hear that something appeared.
+	std::function<void(const std::string& contentRel, const std::string& absPath)> publishCreate;
+	std::function<void(const std::string& absPath)> onAssetAppeared;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerSceneTools(McpToolRegistry& registry, ContentManager& content,
+                        McpSceneHooks hooks);
+
 } // namespace HE::Ed

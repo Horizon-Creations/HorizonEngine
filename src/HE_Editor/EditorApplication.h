@@ -970,12 +970,16 @@ private:
 	// is the undo revision at that point; the scene is dirty when it differs.
 	std::string m_currentScenePath;
 	uint64_t    m_savedRevision = 0;
-	void saveSceneToPath(const std::string& path);
+	// Both answer whether the file was actually written / read. The UI callers
+	// ignore it (the editor log and the title bar already say so); the MCP scene
+	// tools are the caller that HAS to know, because the client on the other end
+	// cannot see either.
+	bool saveSceneToPath(const std::string& path);
 	// Hand the current viewport image to the thumbnail cache as this scene's
 	// tile. A scene has nothing to render a preview FROM, so its picture is
 	// taken at save time instead of generated on demand.
 	void captureSceneThumbnail(const std::string& scenePath);
-	void openScene(const std::string& path);
+	bool openScene(const std::string& path);
 	void openSceneAdditive(const std::string& path);
 	void newScene();
 	// Build the node-graph material pipelines referenced by the current world ahead

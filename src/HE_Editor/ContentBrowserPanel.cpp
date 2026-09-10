@@ -2143,6 +2143,19 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// an ImGui popup. The MCP asset tools create the same files, so it
 				// moved to AssetStubWriter.h — one writer, two callers, no second
 				// theory of what a newborn asset contains.
+				//
+				// A SCENE is the exception, and it is not a small one: it is JSON
+				// at a .hescene path, not an HAsset container. Writing a stub here
+				// produced a file this very panel then offered to open and could
+				// not — SceneSerializer::loadJSON reads it as "not valid JSON",
+				// openScene logs a failure and leaves an empty world with no path.
+				// It writes what an empty world serialises to instead, which is the
+				// same file File > Save As produces.
+				if (type == HE::AssetType::Scene)
+				{
+					HE::Ed::writeEmptySceneFile(path);
+				}
+				else
 				{
 					HE::Ed::AssetStubSpec spec;
 					spec.scriptLanguage = scriptLang;

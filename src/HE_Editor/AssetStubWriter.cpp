@@ -2,11 +2,14 @@
 
 #include <ContentManager/HAsset.h>
 #include <HorizonCode/HorizonCode.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/SceneSerializer.h>
 #include <UIWidget/UITheme.h>
 #include <UIWidget/UIWidgetTree.h>
 #include <Types/UUID.h>
 
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -118,6 +121,17 @@ bool writeAssetStub(const std::string& absolutePath,
 	}
 
 	return w.write(absolutePath, static_cast<uint16_t>(type));
+}
+
+bool writeEmptySceneFile(const std::string& absolutePath)
+{
+	// A default-constructed world is exactly what New Scene leaves behind:
+	// HorizonWorld() creates the root entity and nothing else, and clear() drops
+	// everything but that root. So this file is byte-for-byte what saving a
+	// freshly-new scene produces — see HorizonWorld::clear().
+	HorizonWorld    world;
+	SceneSerializer serializer;
+	return serializer.save(world, std::filesystem::path(absolutePath), SerializeFormat::JSON);
 }
 
 bool isCreatableAssetType(HE::AssetType type)

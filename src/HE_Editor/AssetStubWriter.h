@@ -65,6 +65,20 @@ bool writeAssetStub(const std::string& absolutePath,
 // form a tool can check an argument against.
 bool isCreatableAssetType(HE::AssetType type);
 
+// ── The one newborn file that is not an .hasset ──────────────────────────────
+// A scene is JSON at a .hescene path, so `writeAssetStub` cannot make one: it
+// would write an HAsset container, and SceneSerializer::loadJSON refuses that as
+// "not valid JSON" — a file the Content Browser shows, offers to open, and then
+// cannot. (It did exactly that until the scene tools were written: the create
+// menu's "Scene" row called writeAssetStub with AssetType::Scene.)
+//
+// What it writes is what an empty world serialises to, not a hand-written
+// literal, so a scene created here and a scene saved by File > Save As go
+// through the SAME code and cannot drift apart. Same principle as the stub
+// writer above: one writer, two callers, no second theory of what a newborn
+// file contains.
+bool writeEmptySceneFile(const std::string& absolutePath);
+
 // `HE::assetTypeName`'s inverse, for the boundaries that carry the type as a
 // string — the MCP tools' `type` argument. Unknown for a name nothing matches.
 // Case-sensitive on purpose: the names are the enumerator spellings, and a

@@ -134,6 +134,13 @@ add_executable(HorizonEditor WIN32
 	# checks a human gets from the Content Browser are asked through hooks, and
 	# the create path shares the panel's stub writer rather than copying it.
 	McpToolsAsset.cpp
+	# Save, create, open. The half without which everything the entity tools do
+	# dies with the session — and the one place a guard had to be replicated by
+	# hand rather than reused, because a client cannot answer a save prompt.
+	McpToolsScene.cpp
+	# The argument readers and the ONE confinement rule both of the above use.
+	# Two copies of a boundary are two boundaries.
+	McpToolCommon.cpp
 	# What a newborn asset of each type contains. Extracted OUT of the Content
 	# Browser's create menu so the panel and the MCP tools write the same file.
 	AssetStubWriter.cpp

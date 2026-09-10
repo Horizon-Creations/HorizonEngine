@@ -6483,6 +6483,39 @@ void EditorApplication::setupMcpTools()
 	assets.contentDirName = [] { return std::string("Content"); };
 
 	HE::Ed::registerAssetTools(m_mcp.registry(), contentManager(), std::move(assets));
+
+	// ── The scene as a file ─────────────────────────────────────────────────
+	// The save/create/open half of the entity tools: without it a client could
+	// place a hundred objects and nothing outlived the session.
+	//
+	// `saveScene` and `openScene` are this class's OWN members rather than a
+	// re-implementation, so an MCP save takes the scene thumbnail and an MCP open
+	// preloads the asset references and warms the material pipelines exactly as
+	// the File menu's do. The one thing the menu has that MCP does not is the
+	// save prompt — that guard is replicated inside the tools (see McpSceneHooks).
+	HE::Ed::McpSceneHooks scene;
+	scene.currentScenePath = [this] { return m_currentScenePath; };
+	scene.sceneDirty       = [this] { return m_undo.revision() != m_savedRevision; };
+	scene.isPlaying        = [this] { return m_isPlaying; };
+	scene.inSession        = [this] { return m_collab.inSession(); };
+	scene.entityCount      = [this]() -> int {
+		if (!m_editorWorld) return -1;
+		int n = 0;
+		m_editorWorld->registry().view<entt::entity>().each([&](auto) { ++n; });
+		return n;
+	};
+	scene.rootUuid = [this]() -> std::string {
+		if (!m_editorWorld) return {};
+		return HE::Ed::uuidOf(*m_editorWorld, m_editorWorld->rootEntity());
+	};
+	scene.saveScene      = [this](const std::string& abs) { return saveSceneToPath(abs); };
+	scene.openScene      = [this](const std::string& abs) { return openScene(abs); };
+	scene.publishCreate  = [this](const std::string& rel, const std::string& abs) {
+		if (m_collab.inSession()) m_collab.publishAssetCreate(rel, abs);
+	};
+	scene.onAssetAppeared = [this](const std::string&) { m_contentRefreshPending = true; };
+
+	HE::Ed::registerSceneTools(m_mcp.registry(), contentManager(), std::move(scene));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────
@@ -7861,9 +7894,9 @@ void EditorApplication::enqueueRetargetOnDisk(const std::string& oldRel,
 	}));
 }
 
-void EditorApplication::saveSceneToPath(const std::string& path)
+bool EditorApplication::saveSceneToPath(const std::string& path)
 {
-	if (!m_editorWorld || path.empty()) return;
+	if (!m_editorWorld || path.empty()) return false;
 
 	SceneSerializer serializer;
 	if (serializer.save(*m_editorWorld, path, SerializeFormat::JSON))
@@ -7872,11 +7905,10 @@ void EditorApplication::saveSceneToPath(const std::string& path)
 		m_savedRevision    = m_undo.revision(); // scene is now clean
 		captureSceneThumbnail(path);
 		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene saved to " + path).c_str());
+		return true;
 	}
-	else
-	{
-		HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());
-	}
+	HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());
+	return false;
 }
 
 // The scene's Content-Browser tile: the viewport as it looked when the scene was
@@ -7936,9 +7968,9 @@ void EditorApplication::warmupWorldMaterials()
 	renderer()->WarmupMaterials(SceneSystems::collectAssetRefs(*m_editorWorld));
 }
 
-void EditorApplication::openScene(const std::string& path)
+bool EditorApplication::openScene(const std::string& path)
 {
-	if (!m_editorWorld || path.empty()) return;
+	if (!m_editorWorld || path.empty()) return false;
 
 	if (m_isPlaying) setPlayMode(false); // leave play mode before switching scenes
 
@@ -7946,8 +7978,10 @@ void EditorApplication::openScene(const std::string& path)
 	m_editorWorld->clear();
 	// A different scene brings a different level script — see onWorldReplaced.
 	m_levelScriptMirror = {};
+	bool loaded = false;
 	if (serializer.load(*m_editorWorld, path, SerializeFormat::JSON))
 	{
+		loaded = true;
 		m_currentScenePath = path;
 		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 		warmupWorldMaterials(); // build custom-material pipelines before the first draw
@@ -7963,6 +7997,7 @@ void EditorApplication::openScene(const std::string& path)
 	m_editorWorld->markHierarchyDirty();
 	m_undo.clearHistory();
 	m_savedRevision = m_undo.revision();
+	return loaded;
 }
 
 void EditorApplication::openSceneAdditive(const std::string& path)
