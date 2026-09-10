@@ -24,6 +24,12 @@ namespace BlendSpacePanel
 
 	bool isDirty(const std::string& path);
 	bool reloadFromDisk(const std::string& assetPath);
+
+	// The same two questions addressed CONTENT-RELATIVELY, which is how MCP
+	// addresses an asset — the states above are keyed by the tab bar's absolute
+	// path. Same pair, same reason and same shape as InputAssetPanel's.
+	bool isDirtyByContentPath(const std::string& contentPath);
+	bool reloadByContentPath(const std::string& contentPath);
 	void appendDirtyPaths(std::vector<std::string>& out);
 	bool save(AppContext& ctx, const std::string& path);
 	void forget(const std::string& path);

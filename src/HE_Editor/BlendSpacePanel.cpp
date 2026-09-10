@@ -240,6 +240,43 @@ bool BlendSpacePanel::reloadFromDisk(const std::string& assetPath)
 	return true;
 }
 
+// ── Addressed content-relatively (the MCP blend-space tools) ────────────────
+// This panel's states are keyed by the tab bar's ABSOLUTE path; MCP addresses
+// assets content-relatively. So the lookup is a walk on PanelState::relPath, the
+// same shape InputAssetPanel's and TypeAssetPanel's have and for the same
+// reason. Deliberately NOT keyed on `loaded` — after a reload that flag is false
+// while the tab still holds the asset.
+namespace
+{
+PanelState* stateByContentPath(const std::string& contentPath)
+{
+	if (contentPath.empty()) return nullptr;
+	PanelState* found = nullptr;
+	s_states.forEach([&](const std::string&, PanelState& st) {
+		if (!found && st.relPath == contentPath) found = &st;
+	});
+	return found;
+}
+} // namespace
+
+bool BlendSpacePanel::isDirtyByContentPath(const std::string& contentPath)
+{
+	const PanelState* st = stateByContentPath(contentPath);
+	return st && st->dirty;
+}
+
+bool BlendSpacePanel::reloadByContentPath(const std::string& contentPath)
+{
+	PanelState* st = stateByContentPath(contentPath);
+	if (!st) return false;
+	// The same two lines reloadFromDisk sets, and safe for the same reason: the
+	// MCP tools refuse outright when this tab has unsaved edits
+	// (McpAnimatorHooks), so there is never anything precious to clear here.
+	st->loaded = false;
+	st->dirty  = false;
+	return true;
+}
+
 void BlendSpacePanel::appendDirtyPaths(std::vector<std::string>& out)
 { s_states.appendDirtyPaths(out); }
 

@@ -135,6 +135,44 @@ bool reloadFromDisk(const std::string& assetPath)
 	return true;
 }
 
+// ── Addressed content-relatively (the MCP particle tools) ───────────────────
+// This panel's states are keyed by the tab bar's ABSOLUTE path; MCP addresses
+// assets content-relatively. So the lookup is a walk on State::relPath, the same
+// shape InputAssetPanel's and TypeAssetPanel's have and for the same reason: two
+// conventions, one of which is the tab bar's and not ours to change. Deliberately
+// NOT keyed on `loaded` — after a reload that flag is false while the tab still
+// holds the asset.
+namespace
+{
+State* stateByContentPath(const std::string& contentPath)
+{
+	if (contentPath.empty()) return nullptr;
+	State* found = nullptr;
+	s_states.forEach([&](const std::string&, State& st) {
+		if (!found && st.relPath == contentPath) found = &st;
+	});
+	return found;
+}
+} // namespace
+
+bool isDirtyByContentPath(const std::string& contentPath)
+{
+	const State* st = stateByContentPath(contentPath);
+	return st && st->dirty;
+}
+
+bool reloadByContentPath(const std::string& contentPath)
+{
+	State* st = stateByContentPath(contentPath);
+	if (!st) return false;
+	// The same three lines reloadFromDisk sets, and safe for the same reason: the
+	// MCP tools refuse outright when this tab has unsaved edits
+	// (McpParticleHooks), so there is never anything precious to clear here.
+	st->loaded = false;
+	st->dirty  = false;
+	st->collabMirror = {};
+	return true;
+}
 
 bool save(AppContext& ctx, const std::string& assetPath)
 {
