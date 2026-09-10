@@ -701,4 +701,160 @@ struct McpMaterialHooks
 void registerMaterialTools(McpToolRegistry& registry, ContentManager& content,
                            McpMaterialHooks hooks);
 
+// ─── Placing an authored subtree: the prefab tools ───────────────────────────
+// Four tools: `prefab_info` (the catalogue, and one prefab's contents),
+// `prefab_instantiate` (place one in the open scene), `prefab_save` (turn a
+// scene subtree into a prefab asset) and `prefab_instances` (which entities in
+// the scene came from a given prefab).
+//
+// ── Why a prefab needs tools of its own ──────────────────────────────────────
+// `entity_create` builds ONE entity out of component JSON the client writes by
+// hand. A prefab is the opposite: a whole authored subtree — a vehicle with its
+// wheels, a lamp post with its light — that somebody already got right, and the
+// only unit of reuse the editor has. Neither of the two path-level tools reaches
+// it. `asset_create` refuses the type outright (AssetStubWriter: "a prefab with
+// no PFAB payload is an empty file, not an empty prefab"), and a client could
+// not have read the payload anyway: it is CBOR, and the one thing this whole
+// interface refuses to do is hand a model base64 to edit.
+//
+// So before these, an MCP client could see that Prefabs/Lamp.hasset exists and
+// do nothing whatsoever with it, while a human placed one by dragging it into
+// the viewport.
+//
+// ── The rule: one command, and the placement rides in the BLOB ───────────────
+// `prefab_instantiate` is a single `Command::create` through the gateway — the
+// same CBOR subtree that `Command::create` already takes for duplicate, paste
+// and a peer's create, so undo, the structural publish, the play-mode refusal
+// and the lock gate all come from the one place they come from everywhere else.
+// `preserveIds` stays FALSE: the blob carries the uuids of the entities it was
+// captured from, and two placements of one prefab must be two identities.
+//
+// Where the client's position/rotation/scale/name go is the part worth reading
+// twice: they are patched INTO the root record of the blob before the command,
+// not written afterwards with a second `Command::setTransform`. A second command
+// would be a second undo entry (one Ctrl+Z would move the prefab back to its
+// authored spot and leave it in the scene) and a second publish. Only the axes
+// the client actually sent are patched — the prefab's own authored transform is
+// part of what was saved, and resetting the rest of it would silently un-author
+// the thing, which is the reason the viewport's drag-drop only overwrites the
+// position too.
+//
+// ── prefab_save does NOT go through the gateway, on purpose ──────────────────
+// It reads the scene and writes a CONTENT file. The gateway speaks scene changes
+// (its five commands are all "the world now looks like this"), and a prefab
+// asset is not one — nothing in the world changes. Same decision, same reason as
+// the asset tools (8.1 of the plan): the asset half of the editor has its own
+// wiring, and pretending it is a scene command would only make the undo stack
+// promise something it cannot deliver.
+//
+// ── The link, and what it is not ─────────────────────────────────────────────
+// Every entity placed by `prefab_instantiate` (and by the viewport's drag-drop)
+// carries a `PrefabLinkComponent` naming the asset it came from — the "prefab"
+// key in the scene file. That is what makes `prefab_instances` answerable and
+// what makes deleting a prefab report the scenes that use it (AssetRefScan finds
+// any uuid inside a "components" block). It is NOT prefab inheritance: editing
+// the asset does not update placed instances, and there is no override tracking.
+// A placement is still a copy; it now knows where it came from.
+struct McpPrefabHooks
+{
+	// Play-in-editor. `prefab_instantiate` does not need it — the gateway refuses
+	// Origin::External while play runs — but `prefab_save` writes an asset file
+	// and has no gateway underneath, exactly like the asset and material tools.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther. The argument is the
+	// content-relative path, which is the collab key for anything under Content.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// A file that was not there before — the same pair the asset, scene and
+	// material tools carry, for the same two reasons: a create IS published
+	// (nothing refers to a brand-new file yet, so there is nothing for the host to
+	// arbitrate), and the editor's own bookkeeping has to hear that something
+	// appeared. `publishCreate` is also what claims the name at the host, which is
+	// what stops two people saving an "Arm" prefab at the same moment from
+	// overwriting each other (see OutlinerPanel's "Save as Prefab").
+	std::function<void(const std::string& contentRel, const std::string& absPath)> publishCreate;
+	std::function<void(const std::string& absPath)> onAssetAppeared;
+};
+
+// Both references are captured, so `content` and `cmds` have to outlive the
+// registry. Two of them because a prefab lives on both sides of the editor: the
+// asset is content, the placement is a scene change.
+void registerPrefabTools(McpToolRegistry& registry, ContentManager& content,
+                         EditorCommands& cmds, McpPrefabHooks hooks);
+
+// ─── A project's own types: the Struct / Enum tools ──────────────────────────
+// Five tools: `type_info` (the catalogue, and one definition in full),
+// `type_field_set` / `type_field_remove` (a struct's or a savegame template's
+// fields) and `type_enum_set` / `type_enum_remove` (an enum's entries).
+//
+// ── Why they need tools of their own ─────────────────────────────────────────
+// A Struct or Enum asset is a definition every other frontend then speaks:
+// HorizonCode pins and variables, Lua tables and Python dicts, the generated C++
+// header, savegame template fields. `asset_create` can make the file — and the
+// file it makes is an empty definition with no fields and no entries, which
+// nothing can be built on. The payload is the CHUNK_STDF / CHUNK_ENDF JSON, and
+// handing a model that to rewrite would be the base64 mistake with nicer
+// characters: `type` is an integer enum, a container field carries FOUR coupled
+// fields (isArray, container, keyType, keyTypeName) whose illegal combinations
+// the loader silently repairs, and the default value's encoding depends on the
+// field's own type.
+//
+// So these speak the vocabulary the Type Editor speaks: a field NAME, a type by
+// its editor label ("Float", "Vec3", "Enum"), a container by name, and a default
+// in the shape that type's default has.
+//
+// ── The two gates the panel has, and this must have too ──────────────────────
+//   • A CYCLE IS REFUSED. `structWouldCycle` is what the panel's Save checks
+//     before it writes, because a struct that (directly or through another one)
+//     contains itself never finishes seeding a default value. Refused here for
+//     the same reason and with the same question.
+//   • A NAME COLLISION IS REPORTED, NOT REFUSED. Two definitions with the same
+//     display name would generate colliding `horizon.enums.<Name>` and C++
+//     symbols. The panel WARNS and still saves (the file has to be nameable
+//     before it can be renamed), so the result carries `nameCollision` rather
+//     than refusing a write the human could have made.
+//
+// ── What a save does besides writing the file ────────────────────────────────
+// Two things, and skipping either is a silent divergence from the panel:
+// the definition is RE-REGISTERED in HE::TypeRegistry (or every type dropdown in
+// the editor still offers yesterday's fields), and in a C++ project the
+// generated types header is rewritten (or gameplay code compiles against a
+// struct that no longer matches the asset). The second one is `onTypesChanged`.
+//
+// ── Why an open tab is REFUSED rather than edited ────────────────────────────
+// The same answer as the input and material tools: unsaved edits in an open Type
+// Editor tab are refused with `dirty`, a clean tab is told to re-read the file.
+// The panel's tab state is the truth while it is dirty, and there is no way to
+// land an edit in it that does not need an AppContext this file cannot have.
+struct McpTypeHooks
+{
+	// Play-in-editor. A definition change reaches the running session's script
+	// bootstrap and its type dropdowns, so it is refused like every other asset
+	// write while play runs.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Type Editor tab have edits the file
+	// does not? Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read the file. TRUE when a tab was actually holding the
+	// asset. Absent = no tabs.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// A definition changed: in a C++ project, rewrite the generated types header
+	// (HE::writeCppTypesHeader), exactly as TypeAssetPanel::saveState does. Absent
+	// = there is no project, which is a test.
+	std::function<void()> onTypesChanged;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerTypeTools(McpToolRegistry& registry, ContentManager& content,
+                       McpTypeHooks hooks);
+
 } // namespace HE::Ed

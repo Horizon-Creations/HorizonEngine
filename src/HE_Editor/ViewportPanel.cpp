@@ -1,5 +1,6 @@
 #include "ViewportPanel.h"
 #include <HorizonScene/Components/MaterialComponent.h> // a spawned mesh follows its MREF material
+#include <HorizonScene/Components/PrefabLinkComponent.h> // a dropped prefab remembers its file
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, EditorCamera, EditorUndo
 #include "EditorInput.h"                 // pointer-device grammar (trackpad swipe vs mouse wheel)
@@ -622,6 +623,16 @@ void render(AppContext& ctx, float dt)
 										TransformComponent tc; tc.position = spawnPos;
 										ctx.world->addComponent(root, tc);
 									}
+									// Where it came from (PrefabLinkComponent). Written
+									// HERE and not inside instantiatePrefab, which also
+									// serves paste, duplicate and a peer's create —
+									// none of those is a prefab placement, and stamping
+									// a link there would make three quarters of the
+									// links in a scene lies. Without this line the
+									// prefabs a HUMAN drops are the ones prefab_instances
+									// cannot see.
+									ctx.world->registry().emplace_or_replace<PrefabLinkComponent>(
+										root, PrefabLinkComponent{ id });
 									ctx.world->markHierarchyDirty();
 									ctx.selectedEntity = root;
 									HE_LOG_INFO(Editor, "%s",

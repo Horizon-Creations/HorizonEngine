@@ -134,6 +134,8 @@ add_executable(he_tests
     test_mcp_tools_widget.cpp
     test_mcp_tools_input.cpp
     test_mcp_tools_material.cpp
+    test_mcp_tools_prefab.cpp
+    test_mcp_tools_type.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -248,6 +250,17 @@ add_executable(he_tests
     # every edit", and only a real ContentManager over a temporary content root
     # plus the real HE::generateFragment can answer it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsMaterial.cpp
+    # The prefab tools sit on both halves of the editor at once — the gateway for
+    # the placement, a real ContentManager over a temporary content root for the
+    # asset — and the claim worth testing spans both: does a placement really come
+    # back out of the undo stack, and does the file a placement was made from
+    # still round-trip through SceneSerializer afterwards.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsPrefab.cpp
+    # The type tools, and the same argument as the input ones: their claim is
+    # "the definition the rest of the engine now sees is the one that was asked
+    # for", and only a real ContentManager over a temporary content root plus the
+    # real HE::TypeRegistry round-trip can answer it.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsType.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
