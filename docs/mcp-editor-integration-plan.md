@@ -10,6 +10,15 @@ Kein Feature-Code.
 Branch: `claude/mcp-editor-integration`. Kein Merge nach main aus diesem Zweig
 heraus.
 
+> **Stand, September 2026.** Kapitel 1 bis 8 sind der ursprüngliche Plan und
+> seine Umsetzung; Kapitel 9 bis 18 sind die Nachträge des Folgethemas „Ausbau
+> für echte Nutzbarkeit", je einer pro Werkzeugfamilie, in der Reihenfolge, in
+> der sie gebaut wurden. **Wer nur wissen will, was heute steht und was fehlt,
+> liest Kapitel 19** — die Gesamtübersicht mit dem vollständigen
+> Werkzeugverzeichnis und der gesammelten Restliste. Die Kapitel davor bleiben
+> stehen, wie sie geschrieben wurden: sie erklären, *warum* etwas so aussieht,
+> und das verliert seinen Wert, wenn man es nachträglich glattzieht.
+
 Die Kernaussage vorweg, weil alles Weitere daran hängt: **der Editor hat heute
 keinen zentralen Weg, auf dem eine Szenenänderung hereinkommt.** Drei Pfade
 mutieren die Welt (UI-Handler, Collab-Remote-Handler, EngineApi-Registry), und
@@ -2301,3 +2310,521 @@ Antwort auf 16.2) sind zwei Schritte mit zwei verschiedenen Fallen, und
 AnimationClip ist ein dritter, der wahrscheinlich mit „gar nicht, es ist ein
 Import" endet. Wer zuerst die drei `ByContentPath`-Paare nachrüstet, hat für
 beide danach dieselbe Grundlage wie Input, Material und Typen.
+
+---
+
+## 17. Animation und Partikel, gebaut (Schritt 7c/7d)
+
+Der Befund aus Abschnitt 16 ist abgearbeitet. Achtzehn Werkzeuge, registriert in
+drei Aufrufen (Partikel, Animator samt Blend Space, Clip), und die Empfehlung aus
+16.3 hat sich in einem Punkt als falsch erwiesen — dazu 17.4.
+
+Die Vorbedingung zuerst: die drei `ByContentPath`-Paare, die 16.3 verlangt, sind
+nachgerüstet (`AnimatorStateMachineEditorPanel`, `ParticleGraphEditorPanel`,
+`BlendSpacePanel`). Ohne sie kann kein Werkzeug fragen, ob ein Tab
+ungespeicherte Änderungen hat: die Werkzeuge adressieren content-relativ, die
+Tab-Zustände hängen am absoluten Pfad.
+
+| Familie | Werkzeuge | Adresse eines Wertes |
+|---|---|---|
+| Partikel | `particle_info`, `particle_set`, `particle_slot_set` | der **Pin-Name** des Emitter Output |
+| Animator | `animator_info`, `animator_state_set`/`_remove`, `animator_transition_set`/`_remove`, `animator_param_set`/`_remove` | Zustand und Parameter beim **Namen**, ein Übergang über das **Tripel** |
+| Blend Space | `blendspace_info`, `blendspace_set`, `blendspace_sample_set`/`_remove` | ein Sample über seinen **Index** |
+| Animation Clip | `clip_info`, `clip_notify_set`/`clip_notify_remove`, `clip_root_motion_set` | ein Notify über seinen **Index** |
+
+### 17.1 Partikel: der Pin ist die Adresse, nicht der Knoten
+
+Ein Partikel-Asset ist ein Knotengraph, und jeder authorierte Wert steckt in
+einem Const-Knoten, der an einem der siebzehn Eingänge des Emitter Output hängt.
+Einem Client dieses JSON zum Umschreiben zu geben, wäre derselbe Fehler wie
+Base64: der Pin-**Index** ist On-Disk-Format (`ParticleGraph.h`: Pins dürfen nur
+angehängt werden), eine Verbindung sind vier nackte Zahlen, und `type` ist ein
+Anzeigename statt des Enums.
+
+16.3 hatte „die Werte vorhandener Knoten" vorgeschlagen, Vorbild
+`material_set_param`. Wörtlich genommen ist das ein Werkzeug, das auf einem
+frischen Asset **nichts** tun kann: `ParticleGraph::makeDefault` ist genau ein
+Knoten, der Emitter Output, mit unverbundenen Pins. Es gibt keinen Wert, den man
+setzen könnte. Also ist der Pin die Adresse, buchstabiert wie die Slot-Liste des
+Panels ihn buchstabiert („Emit Rate", „Start Color"), und gesetzt wird die
+kleinste Änderung, die diesen Wert wahr macht:
+
+* Pin unverbunden → ein Const-Knoten wird angelegt, gesetzt und verdrahtet (bei
+  den beiden Farb-Pins ein Const Color, weil das Panel dort das hinlegt),
+* Pin hängt an einem Const-Knoten, der **nur** diesen Pin speist → der Wert wird
+  an Ort und Stelle geändert,
+* Pin hängt an irgendetwas anderem — Random Range, Add, Lerp, oder ein Const,
+  den sich ein zweiter Pin teilt → **abgelehnt**, unter Nennung des Knotens.
+
+Der letzte Punkt ist die Grenze, die 16.3 gezogen hat, und sie ist die ehrliche:
+einen Graphen umzuverdrahten ist ein anderes Werkzeug als einen Wert zu setzen,
+und einem Autor still seinen Mathe-Knoten abzuhängen, um eine Konstante
+hineinzuzwingen, wäre eine Änderung, die niemand bestellt hat.
+
+Jede Antwort trägt zusätzlich die **ausgewertete** Emitter-Konfiguration, also
+dasselbe POD, das die Simulation bekommt — was der Client wollte, war ein
+Partikelverhalten, keine Graphänderung. Steckt eine Random Range darin, sagt die
+Antwort dazu, dass sie einmal pro Auswertung würfelt und das laufende Spiel
+eigenständig würfelt.
+
+### 17.2 Animator: was mit einem Übergang passiert, wenn sein Parameter geht
+
+Jede Familie musste eine Frage zuerst beantworten (16.2). Für die
+Zustandsmaschine ist es diese, und die Antwort steht in
+`AnimationStateMachineSystem::evalTransition`: ein Übergang, dessen Parameter
+nicht in der Live-Map steht, liefert `false` — jeden Frame, für immer. Kein
+Fehler, keine Logzeile, ein Übergang, der still nie wieder feuert. Daraus folgt:
+
+* **`animator_param_remove` lehnt ab**, solange ein Übergang den Parameter nennt,
+  und zählt diese Übergänge auf. `force` nimmt ihn trotzdem heraus, denn ein
+  Sync-Graph oder ein Skript darf den Parameter zur Laufzeit schreiben, ohne dass
+  er je als Default deklariert war — die Map ist offen. Abgelehnt wird, es aus
+  Versehen zu tun.
+* **`animator_state_set` kann umbenennen** und macht die Nacharbeit, die das
+  Panel von Hand macht: jeder Übergangs-Endpunkt und `startState`, der den alten
+  Namen nannte, wird mitgezogen. Ohne das blieben baumelnde Endpunkte zurück, die
+  das System genauso still überspringt wie den fehlenden Parameter.
+* **`animator_state_remove` kaskadiert**: die Übergänge, die den Zustand
+  berühren, fallen weg, und `startState` wird geleert, wenn er dorthin zeigte.
+
+Ein Übergang hat **keine Id** (`AnimatorStateMachineGraph.h` sagt das und sagt
+auch, warum es noch nicht behoben ist). Die Kollaboration schlüsselt einen, indem
+sie from/to/param hasht — also adressieren diese Werkzeuge ihn genauso, über das
+Tripel. Ein passendes Tripel wird an Ort und Stelle geändert, alles andere
+angehängt; erst das macht zwei Übergänge zwischen denselben zwei Zuständen auf
+**verschiedenen** Parametern überhaupt adressierbar.
+
+### 17.3 Der Blend Space gehört in dieselbe Familie
+
+Weil ein Zustand statt auf einen Clip auf einen Blend Space zeigen kann und
+`blendSpaceId` dabei **gewinnt**. Die Maschine authorieren zu können, ohne den
+Raum authorieren zu können, in den sie blendet, wäre ein halbes Werkzeug. Samples
+haben keine Id und zwei dürfen denselben Clip nennen, also ist der **Index** die
+einzige ehrliche Adresse; `blendspace_info` meldet ihn mit.
+
+Die Live-Invalidierung (`markConfigDirty`) macht nur die Zustandsmaschine, nicht
+der Blend Space — weil `BlendSpacePanel::save` sie auch nicht macht. Ein
+Werkzeug, das mehr ungültig macht als das Panel, wäre ein zweiter, leise anderer
+Speicherpfad.
+
+### 17.4 Animation Clip: 16.2 lag falsch, und das war prüfbar
+
+16.2 vermutete, ein AnimationClip ende bei „gar nicht editierbar, es ist ein
+Import" — `AssetStubWriter` lehnt ihn ab wie ein Mesh oder eine Textur, und
+anlegen kann ihn niemand. Der Beleg dagegen ist ein Panel: der **Skeletal Mesh
+Editor** authoriert die Notify-Timeline eines Clips und seinen
+Root-Motion-Schalter, speichert beides mit `ContentManager::saveAsset`, und beide
+liegen in einem eigenen Chunk (`CHUNK_ANOT`). Die authorierte Hälfte ist also
+real, sie ist klein, und sie ist von außen genau so editierbar wie im Tab.
+
+Die **Keyframes** bleiben draußen (`CHUNK_ANIM`). Die sind der Import: ein
+Werkzeug, das einen Kanal schriebe, würde Animation neu authorieren, die ein
+DCC-Werkzeug besitzt, und der nächste Re-Import würfe es kommentarlos weg.
+
+Drei Dinge sind an dieser Familie anders als an den anderen:
+
+* **Gelesen wird aus der Datei, geschrieben durch den geladenen Clip.** Die
+  Leseseite holt aus `CHUNK_ANIM` nur die ersten zwei Felder und dazu
+  `CHUNK_ANOT` — eine Frage nach einem Clip lädt also nie seine Keyframes, und
+  ein Walk-Cycle mit 300 Kanälen ist megabyteweise Samples, die niemand bestellt
+  hat. Die Schreibseite hat diese Wahl nicht: die Notify-Liste lebt im
+  Clip-Asset, `saveAsset` schreibt die ganze Datei daraus, und das ist der Weg,
+  den das Panel selbst nimmt. Genau deshalb prüfen die tragenden Tests nach jeder
+  Änderung, dass die **Kanäle noch da sind**.
+* **Kein Reload-Hook.** Der geladene Clip **ist** der Editierpuffer des Tabs
+  (`getAnimationClipMutable`), und die Notify-Spur liest diese Liste jeden Frame.
+  Auch die Simulation liest sie direkt (`AnimationNotify.cpp`), es gibt also
+  nichts Aufgelöstes zu invalidieren.
+* **Die Tab-Frage geht über den CLIP-Pfad.** `SkeletalMeshEditorPanel` schlüsselt
+  seine ungespeicherten Clip-Änderungen nach dem Clip, nicht nach dem Tab (der
+  zeigt ein Mesh), und `ContentAsset::path` ist content-relativ. Diese Familie
+  braucht deshalb als einzige kein `ByContentPath`-Paar.
+
+Eine Zeitangabe außerhalb des Clips wird **abgelehnt, nicht geklemmt**: ein
+Notify hinter dem Ende feuert nie (die Feuerregel in `AnimationNotify.h`), und
+ein Werkzeug, das ihn still nach innen schöbe, erfände einen Zeitpunkt, während
+eines, das ihn draußen ließe, ein totes Ereignis schriebe und Erfolg meldete. Die
+Ablehnung nennt die Länge des Clips, also die Zahl, die dem Client fehlte.
+
+### 17.5 Was bewusst offen bleibt
+
+* **Der Partikel-Graph selbst.** Knoten anlegen und verdrahten ist ein eigener
+  Schritt, genau wie beim Material-Graphen (13.7). Was hier geht, sind Werte.
+* **Kein Anlegen und kein Umbenennen von Assets**, wie bei Input (12.6), Material
+  (13.7) und Typen (15.5): `asset_create` und `asset_move`. Für einen Clip gilt
+  auch das nicht — er entsteht beim Import eines Skeletal Mesh.
+* **`PropertyAnimClip`** ist ein anderes Asset mit einem anderen Chunk und ist
+  nicht abgedeckt.
+* **Keine Bone Masks.** `BoneMaskPanel` hat dieselbe Paarung wie die drei anderen
+  Panels, und eine Maske ist das, was ein Layer einer Zustandsmaschine
+  einschränkt — die nächstliegende vierte Familie in dieser Ecke.
+* **Kein Veröffentlichen in eine Kollaborationssitzung**: der Fremd-Lock wird
+  geprüft und abgelehnt, publiziert wird nichts.
+
+---
+
+## 18. Bauen und Einstellen (Folgethema 29, Schritt 12)
+
+Fünf Werkzeuge, und sie schließen die zwei Lücken, die das Lückenaudit des
+Themas unter P2 als Punkte 6 bis 9 geführt hat: **`project_package`** (Build ▸
+Export Project), **`project_build`** (Build ▸ Build and Reload Game Logic),
+**`project_build_status`** (was das Build-Fenster zeigt) sowie **`settings_get`**
+und **`settings_set`** über die beiden Bereiche `project` und `editor`.
+
+Vorher endete jedes der 79 anderen Werkzeuge bei einer Datei im Projekt. Keines
+produzierte etwas, das ein Mensch starten kann, und ob ein HorizonCode-Graph
+überhaupt übersetzbar ist, erfährt man zum ersten Mal beim Export — der außer
+Reichweite lag. Mit diesen fünf sind es 84 (nachgezählt statt geschätzt: die
+eindeutigen `t.name`-Literale über alle `McpTools*.cpp` plus
+`McpToolRegistry.cpp`; die aus `HE::api::registry()` erzeugten Zeilen sind wie
+in der Zählung von `mcp-integration-im-15` nicht mitgezählt, nur `api_list`).
+
+### 18.1 Beides ist asynchron, und darum hängt der ganze Entwurf daran
+
+Der Export läuft auf einem Worker (`ExportDialogPanel`), der Game-Logic-Compile
+auf einem zweiten (`GameLogicBuildPanel`), und beide berichten in **ein**
+Fenster (`BuildProgressDialog`), dessen Modell die einzige Aufzeichnung dessen
+ist, was passiert ist.
+
+* `project_package` und `project_build` antworten, sobald der Lauf **gestartet**
+  ist — `started: true` und sonst nichts über Erfolg, weil in diesem Moment
+  nichts über Erfolg bekannt ist. Ein Werkzeug, das hier blockierte, hielte die
+  Frame-Schleife an: die Handler laufen auf dem UI-Thread, zwischen der
+  Kollaborations-Pumpe und dem Rendern, und die Reload-Hälfte eines
+  Game-Logic-Builds passiert absichtlich erst im **nächsten** Frame.
+* `project_build_status` ist die Stelle, an der die Antwort ankommt. Pollen ist
+  die vorgesehene Nutzung.
+
+### 18.2 Das Fenster musste erst lesbar werden
+
+`BuildProgressDialog` hatte von außen `running()`, `runKind()`, `isOpen()` und
+`interpretedClasses()` — Schritte, Logtext und Ergebnis hatten **keinen**
+Accessor. Ein Werkzeug hätte nur „läuft noch / läuft nicht mehr" sagen können,
+nicht ob es geklappt hat. Neu ist deshalb `BuildProgressDialog::snapshot()`: eine
+**Kopie** unter dem Mutex des Modells, weil der Worker aus einem anderen Thread
+hineinschreibt. Das Log kommt ganz heraus und wird erst im Werkzeug beschnitten —
+der Aufrufer ist der, der weiß, ob er die Fehlerzeile oder das Protokoll will.
+
+`project_build_status` gibt darum den **Schwanz** des Logs zurück (Standard 100
+Zeilen, hart bei 2000), filterbar nach Schritt und nach Schweregrad. `minSeverity: 2`
+ist die Zeile des Compilers ohne die tausend, die funktioniert haben.
+
+### 18.3 Ein Override gilt für DIESEN Lauf und nie für das Profil
+
+`ExportDialogPanel::startFromProfile` nimmt das Profil **als Wert**.
+`project_package` kopiert das gespeicherte `ExportProfile`, flickt die Kopie und
+reicht die Kopie weiter; nichts wird zurückgeschrieben und `saveProject` läuft
+nicht. Ein einmaliges „bau mir eine Linux-Kopie" darf nicht zu dem werden, was
+das nächste Export Project des Menschen tut — und das Zurückschreiben ist etwas,
+das der Dialog auf seinem Save-Knopf macht, mit einem Menschen davor.
+
+Geprüft wird dabei die Zielplattform gegen die **Namen des Enums selbst**, nicht
+über `exportPlatformFromName`: das bildet alles Unbekannte auf `Host` ab, ein
+vertipptes „linx" wäre also ein vollständiger Host-Export in einen Ordner, der
+nach einer anderen Plattform heißt, und niemand hätte es gesagt bekommen.
+
+### 18.4 Ein Fenster, ein Lauf
+
+`Kind` existiert genau dafür, dass ein Export und ein Game-Logic-Build einander
+nicht die Knöpfe wegnehmen. Keines der beiden Werkzeuge startet etwas, solange
+die andere Art das Fenster hält: beide lehnen mit `busy` ab und **nennen die
+Art**, die hält — ein „busy" ohne das lässt einen Client am falschen Werkzeug
+pollen.
+
+### 18.5 Warum die Einstellungen EIN Paar Werkzeuge sind
+
+Weil der Editor sie so zeigt. Es gibt keine Projekt-Einstellungs-Oberfläche, also
+hängen die Projektseiten in den Preferences neben den Editor-Seiten
+(`EditorSettingsPanel::Page`, mit genau dieser Begründung im Header). Ein Client,
+der wissen müsste, zu welchem von zwei Werkzeugen eine Einstellung gehört, müsste
+etwas wissen, das der Editor selbst nicht sichtbar macht. Der Bereich wird aus
+dem Schlüssel abgeleitet.
+
+### 18.6 Die Editor-Seite brauchte erst einen Katalog
+
+Die Preferences schreiben ihre Einstellungen als `row("bloom", "Post-Processing",
+widget)` in `EditorSettingsPanel.cpp`, und das ist Dokumentation, die nur ein
+Mensch lesen kann, der auf ein Bedienelement schaut. Die zwei ehrlichen
+Alternativen waren beide schlechter: einem Modell einen freien Config-Schlüssel
+geben (nichts sagte ihm, dass `AntiAliasing` 0..4 nimmt, eine 7 würde
+geschrieben und irgendwo stillschweigend geklemmt) oder es ein Panel parsen
+lassen, das sich ohne Fenster nicht übersetzen lässt.
+
+Also `EditorSettingsCatalog.h/.cpp`: dieselbe Liste als **Daten**, mit den
+Bereichen, die die Widgets ohnehin erzwingen, und den Kategorienamen der Panels
+wörtlich. Dafür sind `EditorConfig` und `EditorMode` aus `EditorApplication.h` in
+ein eigenes `EditorConfig.h` gezogen worden — dieselbe Datei zieht ImGui, SDL,
+den Renderer und die Physik herein, und das hielt die Einstellungen des Editors
+aus allem heraus, was nicht der Editor ist, also auch aus dem Testbinary.
+
+Drei Sorten Zeile, und nur die erste ist ein schlichtes Feld:
+
+* ein Feld von `EditorConfig` (über Member-Zeiger gelesen und geschrieben),
+* ein Feld, das **zusätzlich** irgendwohin reisen muss (`apply`): `MaxFps`
+  erreicht die Frame-Taktung über `AppContext::setMaxFps`, und ein Schreiben,
+  das nur die Struktur setzt, wäre eine Zahl in einer Datei, die bis zum
+  nächsten Start nichts ändert;
+* gar kein Feld von `EditorConfig` (`SettingStorage::External`): VSync lebt auf
+  der Application, der Backend-Name auf dem AppContext. Die trägt der Aufrufer
+  über eigene Hooks.
+
+### 18.7 Persistenz wird gemeldet, nie angenommen
+
+Ein Projekt-Schreiben ruft `ProjectManager::saveProject`, das Ergebnis sagt
+`persisted`. Schlägt das fehl, ist die Antwort `write_failed` — mit dem Satz,
+dass der Wert im Speicher steht: so zu tun, als sei nichts passiert, macht das
+nächste Lesen unerklärlich.
+
+Beim Editor lag die Sache anders: `config.json` wurde **ausschließlich** in
+`OnShutdown` geschrieben, in einem Block von 52 Zeilen, der als einziger die
+Schlüssel zu den Feldern kannte. Der ist jetzt
+`EditorApplication::writeEditorConfig()` — dieselbe Stelle, von OnShutdown und
+vom Werkzeug gerufen. Eine zweite Kopie dieser Zuordnung wäre die, die an dem Tag
+aufhört zu passen, an dem jemand ein Feld hinzufügt. Ohne diesen Hook lautet die
+ehrliche Antwort `persisted: false` mit dem Grund, statt einer Behauptung, die
+erst nach einem Absturz auffliegt.
+
+### 18.8 Drei Ablehnungen, die vor der Benutzung zu lesen sind
+
+* **Die Kategorie `Remote Control` wird nie geschrieben.** Das ist die Seite, auf
+  der diese Brücke eingeschaltet und ihr Port gewählt wird. Ein Werkzeug, das
+  seinen eigenen Listener abschalten kann, ist im besten Fall nutzlos und im
+  schlechtesten unerklärlich. Lesbar bleibt sie, damit ein Client den Zustand
+  sieht, in dem er lebt. (Der Vorschlag stammt aus dem Audit-Nachtrag von
+  `mcp-integration-im-15`.)
+* **`name`, `path`, `id`, `scriptLanguage` und `appProject`** sind lesbar und
+  nicht schreibbar. Die fünf sagen, was das Projekt IST — die Skriptsprache
+  entscheidet, was überhaupt angelegt werden darf, das App-Flag, ob es eine Welt
+  gibt —, und das unter einem Projekt voller Assets zu ändern ist keine
+  Einstellung, sondern eine Umwandlung, die niemand geschrieben hat.
+* **`project.startupScene` ist lesbar und nicht schreibbar**, und das ist kein
+  Prinzip, sondern ein Befund: `ProjectManager::saveProject` ist ein
+  Read-Modify-Write, der den Schlüssel des Manifests bewahrt und dieses Feld
+  **nie** zurückschreibt. Ein Setter hätte die Struktur bewegt, `persisted: true`
+  gemeldet (die Datei WURDE ja geschrieben) und den Wert beim nächsten Laden
+  verloren — das schlechteste der drei möglichen Verhalten. Der Editor hat dafür
+  auch keine Oberfläche. Was ein BUILD startet, ist das `startupScene` des
+  Export-Profils, und das nimmt `project_package` als Argument.
+
+**Keine Play-Mode-Sperre**, absichtlich. Ein Mensch kann die Preferences auch
+während einer laufenden Vorschau öffnen, und eine Schranke, die MCP hat und die
+Oberfläche nicht, wäre eine Verhaltensänderung im Gewand von Verkabelung. Wo ein
+Wert eine LAUFENDE Simulation nur über einen Callback erreicht — die
+Kollisionsmatrix —, wird der Callback gerufen.
+
+### 18.9 Die Kollisionsmatrix passt in kein Schlüssel-Wert-Paar
+
+Sechzehn Namen und ein 16×16-Dreieck. Statt einer Zeile je Zelle gibt es zwei
+Schlüssel-**Formen**:
+
+```
+project.collisionLayers.name.<i>
+project.collisionLayers.collides.<a>.<b>
+```
+
+`settings_get` liest beide Hälften ganz aus, damit ein Client nie raten muss,
+welche Indizes es gibt: die 16 Namen mit ihren Schlüsseln und die Paare, die
+**nicht** kollidieren (alles kollidiert, solange es nicht in `blockedPairs`
+steht). Geschrieben wird über `setCollides`, das **beide** Zellen setzt — Jolt
+verspricht nicht, in welcher Reihenfolge es fragt, und eine halb gefüllte Matrix
+kollidiert in manchen Frames und in anderen nicht.
+
+### 18.10 Was bewusst offen bleibt
+
+* **Kein `project_open` / `project_create`.** Das steht im Audit als eigener
+  Punkt (B) und hat eine eigene Falle — `dialog-static-leaks-across-projects` —,
+  die vor dem Bauen untersucht gehört.
+* **Keine Export-Profile anlegen, umbenennen oder löschen.** `settings_get` listet
+  sie, `project_package` läuft eines, `project.activeExportProfile` wählt eines
+  aus. Ein Profil zu erzeugen ist die Arbeit des Dialogs.
+* **Kein Starten des fertigen Builds.** `project_build_status` nennt die
+  Executable und ob diese Maschine sie ausführen könnte; ein Spiel zu starten ist
+  etwas anderes als es zu bauen.
+* **Kein `hc_check`.** Punkt 10 des Audits, und der teuerste: der `ClassSource`-
+  Sammler steht inline im Export-Worker und müsste erst herausgelöst werden.
+  Solange das so ist, ist `project_package` mit `compileHorizonCode: true` der
+  einzige Weg, einen nicht übersetzbaren Graphen zu erfahren — und
+  `project_build_status` meldet ihn unter `interpreted`.
+* **`documentTypes`, `appIconName`-Auswahl und die Font-Maske jenseits von Griechisch
+  und Kyrillisch** sind nicht abgedeckt.
+
+---
+
+## 19. Gesamtübersicht: was steht, was fehlt (Abschluss Folgethema 29)
+
+Dieses Kapitel ist der Stand, nicht die Geschichte. Es zählt aus, was die
+Registry heute trägt, sagt, wo das dokumentiert ist, und sammelt die Restliste
+aus allen „Was bewusst offen bleibt"-Abschnitten an einer Stelle ein. Alles
+darin ist aus dem Quelltext oder aus einem Testlauf abgelesen, nichts ist aus
+den Hive-Beiträgen abgeschrieben.
+
+### 19.1 Die Zahl, und wie sie zustande kommt
+
+**84 handgeschriebene Werkzeuge**, verteilt auf 17 Übersetzungseinheiten, plus
+**248 dynamische `api_*`-Werkzeuge** — eines je aufrufbarer Zeile der
+`HE::api`-Registry. Zusammen **332**.
+
+Die 84 sind gezählt, nicht geschätzt:
+
+```
+grep -rhoE '\.name *= *"[a-z0-9_]+"' src/HE_Editor/McpTool*.cpp \
+  | sed 's/.*"\(.*\)"/\1/' | sort -u | wc -l      → 84
+```
+
+Die 248 sind nicht grep-bar, weil ihr Name zur Laufzeit aus `ApiFn::id`
+entsteht (`apiToolName`, `McpToolsApi.cpp:388`). Sie stehen im Testlauf:
+`he_tests -tc="Every admitted registry row becomes exactly one legal tool" -s`
+druckt `CHECK( 249 == 249 )` — 248 aufrufbare Zeilen plus `api_list`. Wer die
+Zahl in dieser Datei prüfen will, ruft genau das auf; sie wandert mit der
+Engine-API und ist deshalb nirgends fest hinterlegt.
+
+### 19.2 Das Verzeichnis
+
+Die letzte Spalte trennt zwei Dinge, die man nicht verwechseln darf: **auf
+main** steht der Merge-Commit, **auf dem Zweig** der Commit, der noch auf einen
+Merge wartet.
+
+| Familie | n | Datei | Nachtrag | Stand |
+|---|---:|---|---|---|
+| `ping`, `scene_info` | 2 | `McpToolRegistry.cpp` | §1–7 | auf main (Vorthema) |
+| `entity_*` | 7 | `McpToolsEntity.cpp` | §8 | auf main (Vorthema) |
+| `hc_*` | 13 | `McpToolsHc.cpp` | §8 | auf main (Vorthema) |
+| `api_list` + `api_*` | 1 + 248 | `McpToolsApi.cpp` | §8 | auf main (Vorthema) |
+| `asset_*` | 5 | `McpToolsAsset.cpp` | §8.1 ff. | auf main, `d92ab5a2` |
+| `scene_create/open/save` | 3 | `McpToolsScene.cpp` | §9 | auf main, `87584a0a` |
+| `terrain_*` | 4 | `McpToolsTerrain.cpp` | §10 | auf main, `022a2568` |
+| `widget_*` | 8 | `McpToolsWidget.cpp` | §11 | auf main, `47fdab61` |
+| `input_*` | 6 | `McpToolsInput.cpp` | §12 | auf main, `a14a7912` |
+| `material_*` | 3 | `McpToolsMaterial.cpp` | §13 | auf main, `be9fc05f` |
+| `prefab_*` | 4 | `McpToolsPrefab.cpp` | §14 | auf main, `2c44b074` |
+| `type_*` | 5 | `McpToolsType.cpp` | §15 | auf main, `2c44b074` |
+| `particle_*` | 3 | `McpToolsParticle.cpp` | §17 | **Zweig**, `16f78d8a` |
+| `animator_*`, `blendspace_*` | 11 | `McpToolsAnimator.cpp` | §17 | **Zweig**, `16f78d8a` |
+| `clip_*` | 4 | `McpToolsClip.cpp` | §17.4 | **Zweig**, `dfa9bc95` |
+| `project_build`, `project_build_status`, `project_package` | 3 | `McpToolsBuild.cpp` | §18 | **Zweig**, `8df49958` |
+| `settings_get`, `settings_set` | 2 | `McpToolsSettings.cpp` | §18.5 ff. | **Zweig**, `8df49958` |
+
+Auf dem Zweig warten außerdem `bc54c7e5` (drei Editor-Tabs waren nur unter
+ihrem absoluten Pfad zu finden), `5c46831a` und `1c34e830` (Nachträge zu §17
+und §18) sowie die Commits dieses Abschlusskapitels.
+
+Die vollständigen Namen stehen im Quelltext und in der Handbuch-Tabelle
+(19.4); sie hier ein drittes Mal abzuschreiben hieße, eine dritte Liste zu
+pflegen, die als erste veraltet.
+
+### 19.3 Die Regeln, die über alle Familien hinweg gelten
+
+Sie sind über die Nachträge verstreut entstanden und werden hier zum ersten
+Mal zusammen gesagt, weil ein Client sie als Ganzes braucht:
+
+1. **Ein Werkzeug ohne Schema wird nicht registriert.** `McpToolRegistry::add`
+   lehnt fehlenden Handler, fehlendes Objekt-Schema, doppelten Namen und jeden
+   Namen ab, den die Messages-API nicht annimmt. Das Schema *ist* die
+   Dokumentation, die das Modell liest, deshalb ist es keine Kür.
+2. **Nichts wird im Play-Modus geändert.** Jedes mutierende Werkzeug
+   antwortet `play_mode`; der Stopp stellt die Welt wieder her und hätte den
+   Edit ohnehin weggeworfen.
+3. **Ein offener, schmutziger Tab gehört dem Menschen.** Input, Material,
+   Typen, Partikel, Animator und Clip lehnen mit `dirty` ab. Die
+   HorizonCode- und die Widget-Werkzeuge gehen den anderen Weg: sie bearbeiten
+   das Dokument, das der Tab hält, setzen den Undo-Schnappschuss wie ein
+   menschlicher Edit und überlassen das Speichern dem Menschen (§11.2). Die
+   Widget-Werkzeuge sagen dazu in `target`, welchen der beiden Wege sie
+   genommen haben.
+4. **Eine Liste lädt nicht.** Die Listenform beantwortet sich aus dem
+   Header-Sniff, damit eine Frage nicht den halben Asset-Pool verschiebt
+   (§12.4, §13.6). Die **Einzelform lädt sehr wohl** — die Parameterschicht
+   eines Materials oder der Baum eines Widgets steht nirgendwo sonst —, und
+   jedes dieser Werkzeuge sagt das in seiner eigenen Beschreibung.
+5. **Undo deckt die Szene, nicht den Content-Ordner.** Was durch das Gateway
+   geht (Entities, Terrain, das Platzieren eines Prefabs, ein Widget im
+   offenen Tab), liegt im Undo-Stack und wird in einer Sitzung publiziert. Was
+   eine Asset-Datei schreibt, ist mit der Antwort auf der Platte: kein Undo
+   (§8.1, §11.2, §14.7) und keine Item-Level-Publikation (§12.6, §13.7, §15.5,
+   §17.5). Der Fremd-Lock wird trotzdem geprüft und die Schreiboperation
+   abgelehnt.
+
+Dazu die Fehlercodes, die ein Client kennen sollte, nach Häufigkeit im
+Quelltext: `invalid_payload` (75), `failed` (36), `invalid_path` (20),
+`not_found` (19), `play_mode` (11), `locked_by_other` (10), `invalid_args`
+(10), `invalid_argument` (9), `dirty` (8), `no_project` (7). Dass es
+`invalid_args` **und** `invalid_argument` **und** `invalid_payload` gibt, ist
+kein Entwurf, sondern gewachsen; es zu vereinheitlichen ist eine eigene
+kleine Aufräumarbeit und steht in 19.5.
+
+### 19.4 Wo das dokumentiert ist
+
+Drei Orte, und jeder hat einen eigenen Grund:
+
+* **Das Schema am Werkzeug** (`McpTool::description` + `inputSchema`). Das ist
+  die Doku, die das Modell tatsächlich liest — der Shim reicht `tools/list`
+  unverändert durch. Alle 84 tragen eine nichtleere `description`; die
+  dynamischen bauen ihre aus `ApiFn`.
+* **Das Handbuch im Editor und die Website**, Abschnitt *Collaboration ▸
+  Remote Control ▸ What a client may do*
+  (`Website/HorizonEngineDocs/collaboration.html`). Dort steht das
+  Familienverzeichnis als Tabelle und die Regeln aus 19.3, in der Sprache
+  eines Nutzers statt eines Clients. Das In-Engine-Handbuch ist dieselbe
+  Quelle, durch `scripts/build_docs_bundle.py` nach
+  `EditorDeps/Docs/he-docs.json` gebacken — die Datei ist eingecheckt, damit
+  ein frischer Klon das Handbuch hat, ohne den Website-Checkout zu brauchen.
+* **Die Bedienelemente der Fernsteuerung** (`Preferences ▸ Editor ▸ Remote
+  Control`) liegen in `EditorHelp.cpp:2161–2186` und sind vom
+  Deckungs-Test erfasst wie jedes andere Bedienelement. Die Werkzeuge selbst
+  sind keine Bedienelemente und stehen dort bewusst nicht.
+
+### 19.5 Die gesammelte Restliste
+
+Jeder Punkt steht ausführlich in seinem Nachtrag; hier ist er nur auffindbar.
+
+**Graphen — die größte zusammenhängende Lücke.** Material (§13.7), Partikel
+(§17.5) und der Logikgraph eines Widgets (§11.5) sind über MCP *Werte*, nicht
+*Struktur*. Knoten anlegen und verdrahten kann heute nur `hc_*`, und nur für
+HorizonCode-Dokumente. Ein Material- oder Partikelgraph-Editor über MCP ist
+der nächste große Schritt, nicht ein Nachtrag.
+
+**Anlegen läuft überall über `asset_create`.** Input-Actions, Material-Master,
+Struct-/Enum-Typen: keine Familie hat ein eigenes Anlegen bekommen, weil ein
+zweiter Weg eine zweite Theorie darüber wäre, was in einer frischen Datei
+steckt (§12.6, §13.7, §15.5, §17.5). Wer das ändert, ändert es an einer
+Stelle: dem Stub-Writer.
+
+**Umbenennen ist Anlegen + Entfernen**, und für Struct-Felder ist das eine
+echte Grenze: der Rename-Retarget fehlt in der ganzen Engine (§15.5). Ein
+`type_field_rename` würde etwas versprechen, das darunter niemand hält.
+
+**Nichts von den Asset-Editoren publiziert in eine Collab-Sitzung.** Der
+Fremd-Lock wird geprüft und abgelehnt, aber eine Item-Level-Publikation eines
+Widget-, Input-, Material-, Typ-, Partikel- oder Animator-Edits gibt es in
+`CollabDocSync` nicht (§11.5, §12.6, §13.7, §15.5, §17.5). In einer Sitzung
+arbeitet man am offenen Tab, und der Weg ist gedeckt; der Plattenweg ist es
+nicht.
+
+**Projekt-Ebene.** Kein `project_open`/`project_create` (und davor gehört
+`dialog-static-leaks-across-projects` untersucht), keine Export-Profile
+anlegen/umbenennen/löschen, kein Starten des fertigen Builds, kein `hc_check`
+ohne vorheriges Herauslösen des `ClassSource`-Sammlers aus dem Export-Worker
+(§18.10).
+
+**Kleineres, je an seinem Ort:** `terrain_set_heights` und Ramp (§10.6),
+`widget_set_canvas` und `widget_duplicate` (§11.5), Bone Masks und
+`PropertyAnimClip` (§17.5), Thumbnail-Invalidierung nach `material_set_param`
+und `prefab_save` (§13.7, §14.7), `PrefabLinkComponent` im Inspector (§14.7),
+Prefab-Vererbung mit Overrides (§14.7 — der Punkt aus der Lückenliste des
+Masterplans, und deutlich mehr als ein Nachtrag), sowie die drei
+Ungültig-Fehlercodes aus 19.3.
+
+### 19.6 Was dieser Abschluss nicht behauptet
+
+**Kein Werkzeug dieses Ausbaus ist je gegen einen laufenden Editor gelaufen.**
+Verifiziert ist: Kaltbau aus einem frischen Verzeichnis und die volle
+ctest-Suite, also die Werkzeuge gegen ihre Hooks und gegen echte Dateien auf
+der Platte. Der Weg Client → Shim → Socket → Editor-Frame ist durch
+`test_mcp_bridge` und `test_mcp_claude_probe` gedeckt, aber der Handschlag mit
+einer echten Claude-Sitzung an einem echten Fenster steht für diesen Ausbau
+aus. Das ist der eine Punkt, den nur ein Mensch mit einem offenen Editor
+abhaken kann.
+
+Ebenfalls nicht behauptet: dass die Restliste in 19.5 vollständig *gewünscht*
+ist. Sie ist die Liste dessen, was bewusst nicht gebaut wurde — nicht
+dieselbe Liste wie „was als Nächstes gebaut werden sollte".

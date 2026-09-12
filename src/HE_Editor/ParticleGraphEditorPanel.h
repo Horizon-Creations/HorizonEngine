@@ -25,6 +25,12 @@ namespace ParticleGraphEditorPanel
 
 	// Re-read the file on the next frame (collab: a peer's change landed).
 	bool reloadFromDisk(const std::string& assetPath);
+
+	// The same two questions addressed CONTENT-RELATIVELY, which is how MCP
+	// addresses an asset — the states above are keyed by the tab bar's absolute
+	// path. Same pair, same reason and same shape as InputAssetPanel's.
+	bool isDirtyByContentPath(const std::string& contentPath);
+	bool reloadByContentPath(const std::string& contentPath);
 	// Paths of every unsaved tab this panel holds, open or already closed.
 	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
 	// state but leaves the tab vector, so the quit guard must ask here.

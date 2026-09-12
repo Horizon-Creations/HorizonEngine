@@ -168,6 +168,34 @@ add_executable(HorizonEditor WIN32
 	# savegame fields). asset_create makes the file; without these it stays an
 	# empty definition nothing can be built on.
 	McpToolsType.cpp
+	# An emitter's values. A Particle System asset is a node graph, so what looks
+	# like a field ("Emit Rate") is a Const node wired to one of the Emitter
+	# Output's pins — these tools speak the pin names and keep the wiring to
+	# themselves.
+	McpToolsParticle.cpp
+	# The animation assets: the state machine (states, transitions, parameters)
+	# and the blend space a state can pose from instead of a clip. The rename
+	# fix-up the panel does by hand lives in here too.
+	McpToolsAnimator.cpp
+	# A clip is imported, but the events on its timeline are not: the notify lane
+	# and the root-motion switch are authored in the Skeletal Mesh Editor and live
+	# in a chunk of their own, so that half is editable from outside too.
+	McpToolsClip.cpp
+	# Making the project run: Build ▸ Export Project and Build ▸ Build and Reload
+	# Game Logic, plus the reading of the window both of them report into. The
+	# only asynchronous family here — both tools answer "started", and the
+	# verdict, the steps and the log come back from project_build_status.
+	McpToolsBuild.cpp
+	# The knobs, over two scopes: the .heproj manifest (permissions, fonts,
+	# startup scene, collision layers) and this editor's own preferences. One
+	# pair of tools for both, because that is how the editor presents them —
+	# there is no project settings surface, so the project pages live in
+	# Preferences next to the editor ones.
+	McpToolsSettings.cpp
+	# …and the editor half of what those two write: the Preferences settings as a
+	# TABLE rather than as a screen. `row("bloom", …)` in EditorSettingsPanel.cpp
+	# is documentation only a human looking at a widget can read.
+	EditorSettingsCatalog.cpp
 	# The argument readers, the ONE confinement rule and the one content walk that
 	# all of the above use. Two copies of a boundary are two boundaries.
 	McpToolCommon.cpp

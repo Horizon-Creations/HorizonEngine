@@ -252,6 +252,33 @@ InterpretedSummary interpretedClasses()
 	return InterpretedSummary{ s_hcHeadline, s_hcInterpreted };
 }
 
+Snapshot snapshot()
+{
+	std::lock_guard<std::mutex> lk(s_mutex);
+	Snapshot out;
+	// `hasRun` is the difference between "the last build failed" and "nothing
+	// has ever been built here", and the model only knows it as "there are no
+	// steps and nothing is running".
+	out.hasRun       = !s_steps.empty() || s_running;
+	out.running      = s_running;
+	out.kind         = s_kind;
+	out.current      = s_current;
+	out.activity     = s_activity;
+	out.finished     = s_finished;
+	out.success      = s_success;
+	out.message      = s_message;
+	out.executable   = s_exePath;
+	out.runnableHere = s_runnableHere;
+	out.interpreted  = InterpretedSummary{ s_hcHeadline, s_hcInterpreted };
+	out.steps.reserve(s_steps.size());
+	for (const Step& s : s_steps)
+		out.steps.push_back(StepView{ s.name, s.state, s.progress, s.indeterminate, s.detail });
+	out.log.reserve(s_log.size());
+	for (const LogLine& l : s_log)
+		out.log.push_back(LogView{ l.step, l.severity, l.text });
+	return out;
+}
+
 void requestOpen() { s_openRequest = true; }
 
 bool isOpen() { return s_visible; }

@@ -27,11 +27,18 @@
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 class ContentManager;
 namespace HorizonCode { struct Graph; }
 namespace HE { struct UIWidgetTree; }
+// The three types the build and settings hooks speak, all at global scope and
+// all behind headers this one refuses to pull in: ProjectManager.h drags HE_Tools
+// in, EditorConfig.h is the editor's own. A hook signature only needs the name.
+struct ProjectData;     // ProjectManager.h (HE_Tools)
+struct ExportProfile;   // ProjectManager.h (HE_Tools)
+struct EditorConfig;    // EditorConfig.h
 
 namespace HE::Ed
 {
@@ -856,5 +863,397 @@ struct McpTypeHooks
 // The reference is captured, so `content` has to outlive the registry.
 void registerTypeTools(McpToolRegistry& registry, ContentManager& content,
                        McpTypeHooks hooks);
+
+// ─── An emitter's values: the particle tools ─────────────────────────────────
+// Three tools: `particle_info` (the catalogue, and one emitter in full),
+// `particle_set` (one Emitter Output input) and `particle_slot_set` (the mesh
+// and material the emitter draws with).
+//
+// ── Why an emitter needs tools of its own ────────────────────────────────────
+// A ParticleSystem asset is a NODE GRAPH (HE::ParticleGraph): what the emitter
+// actually emits is the result of evaluating it, and every authored value sits
+// in a Const node wired to one of the seventeen Emitter Output pins. Handing a
+// client that JSON to rewrite would be the base64 mistake again — the pin INDEX
+// is on-disk format (ParticleGraph.h: pins may only ever be appended), a link is
+// four bare integers, and `type` is a display name rather than the enum.
+//
+// ── Why the graph is addressed by PIN NAME and not by node ───────────────────
+// The handoff of the step before this one (docs/mcp-editor-integration-plan.md
+// §16.3) proposed "the values of existing nodes", modelled on
+// `material_set_param`. Taken literally that is a tool that works on no fresh
+// asset at all: `ParticleGraph::makeDefault` is ONE node — the Emitter Output —
+// with every pin unconnected and therefore at its registry default. There is
+// nothing whose value could be set.
+//
+// So a pin is the address, spelled the way the editor's own slot list spells it
+// ("Emit Rate", "Start Color"), and setting one does the smallest thing that
+// makes that value true:
+//   • pin unconnected  → a Const node is created, set and wired (Const Color for
+//     the two colour pins, because that is what the panel puts there),
+//   • pin driven by a Const node that feeds ONLY this pin → its value is changed
+//     in place,
+//   • pin driven by anything else — Random Range, Add, Lerp, or a Const shared
+//     with a second pin → REFUSED, naming the node. That is the boundary §16.3
+//     drew and it is the honest one: rewiring a graph is a different tool from
+//     setting a value, and silently detaching an author's math node to force a
+//     constant in would be an edit nobody asked for.
+//
+// ── Why an open tab is REFUSED rather than edited ────────────────────────────
+// The same answer as the input, material and type tools: unsaved edits in an
+// open Particle Graph tab are refused with `dirty`, a clean tab is told to
+// re-read the file. There is no `particle_save` — these tools never leave
+// something unsaved behind them.
+struct McpParticleHooks
+{
+	// Play-in-editor. Like the asset, scene, material and type tools and unlike
+	// the entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Particle Graph tab have edits the
+	// file does not? Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read the file. TRUE when a tab was actually holding the
+	// asset. Absent = no tabs.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// The graph on disk changed: every LIVE ParticleSystemComponent already using
+	// this asset has to re-resolve, or the edit only shows up the next time its
+	// own particleAssetId changes. This is the second half of
+	// ParticleGraphEditorPanel::saveToDisk (ParticleSystem::markConfigDirty) and
+	// leaving it out is a silent divergence from the panel's own Save. Absent =
+	// there is no world, which is a test.
+	std::function<void(const std::string& contentRel)> onGraphChanged;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerParticleTools(McpToolRegistry& registry, ContentManager& content,
+                           McpParticleHooks hooks);
+
+// ─── The animation assets: the animator and blend-space tools ────────────────
+// Eleven tools. The state machine: `animator_info` (the catalogue, and one
+// machine in full), `animator_state_set` / `animator_state_remove`,
+// `animator_transition_set` / `animator_transition_remove`, `animator_param_set`
+// / `animator_param_remove`. The blend space: `blendspace_info`,
+// `blendspace_set` and `blendspace_sample_set` / `blendspace_sample_remove`.
+//
+// ── The question this family had to answer first ─────────────────────────────
+// Every earlier family had one (§16.2 of the plan doc names them): for materials
+// it was "where does a value really live", for input "the loader stays silent",
+// for types "the registry is the truth, not the file". For a state machine it is
+// WHAT HAPPENS TO A TRANSITION WHEN THE PARAMETER IT NAMES GOES AWAY — a
+// transition names its parameter by name, and its two endpoint STATES by name
+// too, and nothing in the format ties either back.
+//
+// The answer, read out of AnimationStateMachineSystem::evalTransition: a
+// transition whose parameter is not in the live map returns false, every frame,
+// forever. Not an error, not a log line — a transition that silently never
+// fires. So:
+//   • `animator_param_remove` REFUSES while any transition names the parameter,
+//     and lists them. `force` takes it out anyway, because a sync graph or a
+//     script may well be writing that parameter at runtime without it ever being
+//     declared as a default — the map is open. What is refused is doing it by
+//     accident.
+//   • `animator_state_set` can RENAME, and does the fix-up the panel does by
+//     hand (AnimatorStateMachineEditorPanel's name field): every transition
+//     endpoint and `startState` that named the old name is rewritten. A rename
+//     that skipped it would leave dangling endpoints, which the system skips as
+//     silently as the missing parameter.
+//   • `animator_state_remove` drops the transitions that touch the state and
+//     clears `startState` if it pointed there — the same cascade the panel's
+//     node deletion performs.
+//
+// ── Why a transition is addressed by a TRIPLE ────────────────────────────────
+// A transition has no id (AnimatorStateMachineGraph.h says so, and says why it
+// is not fixed yet). Collaboration keys one by hashing from/to/param, so these
+// tools address one the same way: the (from, to, param) triple. A matching
+// triple is updated in place, anything else is appended — which is also what
+// makes two transitions between the same pair of states on DIFFERENT parameters
+// addressable at all.
+//
+// ── Why the blend space is in this family ────────────────────────────────────
+// Because a state points at one instead of a clip (`blendSpaceId` WINS over
+// `clipId`), so authoring the machine without being able to author the space it
+// blends is half a tool. Samples have no id and two of them may name the same
+// clip, so an INDEX is the only honest address; `blendspace_info` reports them.
+struct McpAnimatorHooks
+{
+	std::function<bool()>                             isPlaying;
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// The two tab questions, asked of the panel that owns the addressed asset —
+	// AnimatorStateMachineEditorPanel for a state machine, BlendSpacePanel for a
+	// blend space. Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// A state machine on disk changed: every LIVE AnimatorStateMachineComponent
+	// using it has to re-resolve, exactly as AnimatorStateMachineEditorPanel's
+	// Save does (AnimationStateMachineSystem::markConfigDirty). Deliberately NOT
+	// called for a blend space: BlendSpacePanel's own Save does not do it either,
+	// and a tool that invalidated more than the panel would be a second, quietly
+	// different save path. Absent = there is no world, which is a test.
+	std::function<void(const std::string& contentRel)> onGraphChanged;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerAnimatorTools(McpToolRegistry& registry, ContentManager& content,
+                           McpAnimatorHooks hooks);
+
+// ─── What a clip announces: the animation-clip tools ─────────────────────────
+// Four tools: `clip_info` (the catalogue, and one clip's authored half),
+// `clip_notify_set` / `clip_notify_remove` (the events on its timeline) and
+// `clip_root_motion_set` (its per-clip root-motion switch).
+//
+// ── Why an IMPORTED asset has tools at all ───────────────────────────────────
+// The handoff that asked for this family (docs/mcp-editor-integration-plan.md
+// §16.2) guessed that an AnimationClip would end at "not editable, it is an
+// import" — `AssetStubWriter` refuses to stub one, like a mesh or a texture, and
+// nothing can create one. That guess is wrong, and the evidence is a panel: the
+// Skeletal Mesh Editor authors a clip's NOTIFY TIMELINE and its root-motion
+// switch, saves them with `ContentManager::saveAsset`, and both live in a chunk
+// of their own (`CHUNK_ANOT`). So the authored half is real, it is small, and it
+// is exactly as editable from outside as it is from the tab.
+//
+// The KEYFRAMES stay out. Those are `CHUNK_ANIM` and they are the import: a tool
+// that wrote a channel would be re-authoring animation a DCC tool owns, and the
+// next re-import would throw it away without telling anyone.
+//
+// ── Why an INDEX addresses a notify ──────────────────────────────────────────
+// A notify is a name, a time and a duration, and nothing else — no id. Two of
+// them may legitimately carry the same name (two footsteps), so the position in
+// the list is the only address there is; `SkeletalMeshEditorPanel` reaches for
+// the same one and says so. That makes every answer from these tools list the
+// notifies WITH their current indices, because a removal shifts the rest.
+//
+// ── Why there is no reload hook here ─────────────────────────────────────────
+// The other families tell a clean tab to re-read the file after a write. A clip
+// cannot need that: the loaded clip IS the tab's edit buffer
+// (`ContentManager::getAnimationClipMutable`), and the notify lane reads that
+// list every frame, so the edit is on screen on the next one. The same is true
+// of the running simulation — `AnimationNotify.cpp` walks the asset's own vector,
+// so there is no resolved copy to invalidate either.
+struct McpClipHooks
+{
+	// Play-in-editor. Like the asset, scene, material, type and particle tools
+	// and unlike the entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does the Skeletal Mesh Editor hold unsaved notify or root-motion edits for
+	// this clip? Asked with the CLIP's content-relative path, not a tab's: the tab
+	// shows a mesh, the edits belong to the clip scrubbed in it, and
+	// SkeletalMeshEditorPanel::isDirty is keyed that way already. Absent = there
+	// are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerClipTools(McpToolRegistry& registry, ContentManager& content,
+                       McpClipHooks hooks);
+
+// ─── Turning the project into something that runs: the build tools ───────────
+// Three tools: `project_package` (Build ▸ Export Project — pack the game),
+// `project_build` (Build ▸ Build and Reload Game Logic — compile the native
+// module and swap it into the running preview) and `project_build_status` (what
+// the Build window shows: the steps, the log and the verdict).
+//
+// ── Why a client needs these ─────────────────────────────────────────────────
+// Every one of the tool families above ends at a file in the project. None of
+// them produces something a person can start. A client could author a scene, a
+// material, a state machine and a UI and had no way to find out whether the
+// thing even builds — the first moment a HorizonCode graph that cannot be
+// translated is reported is the export, and the export was out of reach.
+//
+// ── Both of these are ASYNCHRONOUS, and that is the whole design ─────────────
+// The export runs on a worker (ExportDialogPanel) and the game-logic compile on
+// another (GameLogicBuildPanel); both report into ONE window
+// (BuildProgressDialog), whose model is the only record of what happened. So:
+//
+//   • `project_package` and `project_build` return as soon as the run STARTED.
+//     They report `started: true` and nothing about success, because at that
+//     moment nothing about success is known. A tool that blocked here would
+//     hold the editor's frame loop — these handlers run on the UI thread,
+//     between the collaboration pump and the render, and the reload half of a
+//     game-logic build happens in a LATER frame by design.
+//   • `project_build_status` is where the answer arrives: `running`, the steps
+//     with their state, the current activity, and once `finished` is true the
+//     `success` flag, the message, the executable that was produced and the
+//     HorizonCode classes that had to ship interpreted. Polling it is the
+//     intended use.
+//
+// ── One window, so one run ───────────────────────────────────────────────────
+// The window is shared and `Kind` is what keeps an export and a game-logic build
+// from taking each other's buttons. Neither tool starts anything while the other
+// kind owns it: both refuse with `busy` and say which kind is holding it. That
+// is the same refusal GameLogicBuildPanel::start already gives a human.
+//
+// ── What an override does NOT do ─────────────────────────────────────────────
+// `project_package` takes the export profile's fields as optional arguments, and
+// they apply TO THIS RUN ONLY: the tool copies the stored ExportProfile, patches
+// the copy and hands the copy over. Nothing is written back and the project is
+// not saved. Persisting an override would mean a client's one-off "just build me
+// a Linux copy" silently became what the human's next Export Project does — and
+// the profile write-back is a thing the export dialog does on its Save button,
+// with the human looking at it.
+struct McpBuildStep
+{
+	std::string name;
+	std::string state;          // "pending", "running", "done", "failed"
+	float       progress = 0.0f;
+	bool        indeterminate = true;   // running, length unknown
+	std::string detail;         // "128 / 340", "62 %"
+};
+
+struct McpBuildLogLine
+{
+	int         step     = 0;
+	int         severity = 0;   // 0 info, 1 warning, 2 error
+	std::string text;
+};
+
+// One reading of the Build window's model. Everything in it is a copy taken
+// under the window's own lock — the worker writes into that model from another
+// thread, so a tool may not hold a reference into it.
+struct McpBuildStatus
+{
+	bool        hasRun  = false;   // false = nothing has ever been built this session
+	bool        running = false;
+	std::string kind;              // "export" | "gamelogic"
+
+	std::vector<McpBuildStep> steps;
+	int         currentStep = -1;
+	std::string activity;
+
+	bool        finished = false;
+	bool        success  = false;
+	std::string message;
+
+	// What the finished export produced, and whether this machine could run it
+	// (false for a cross-platform target). Empty when no runtime was shipped.
+	std::string executable;
+	bool        runnableHere = false;
+
+	// The HorizonCode classes this run ships INTERPRETED instead of compiled,
+	// with the reason each one could not be translated. This is the one thing a
+	// SUCCESSFUL export is quietly worth less for, so it travels with the
+	// verdict rather than being left in the log.
+	std::string                                          interpretedHeadline;
+	std::vector<std::pair<std::string, std::string>>     interpretedClasses;  // label, reason
+
+	std::vector<McpBuildLogLine> log;
+};
+
+struct McpBuildHooks
+{
+	// The open project, or null. Everything here refuses with `no_project`
+	// without one, which is a real state: the editor starts without one.
+	std::function<ProjectData*()> project;
+
+	// Start an export from THIS profile — a value, not a name, because the
+	// overrides a client sent were applied to a copy (see above). False +
+	// `outError` when the editor could not start it.
+	std::function<bool(const ExportProfile& profile, std::string& outError)> startExport;
+
+	// Build ▸ Build and Reload Game Logic. `available` is the same predicate the
+	// menu row greys out on: a C++ project with a Source/CMakeLists.txt. Absent
+	// `available` reads as "no", which is what a test without a project wants.
+	std::function<bool()>                 gameLogicAvailable;
+	std::function<bool(std::string& err)> startGameLogicBuild;
+
+	// The shared Build window. `buildRunning` is asked BEFORE either start, so
+	// the refusal names the kind that is holding it (out of `buildStatus`).
+	std::function<bool()>           buildRunning;
+	std::function<McpBuildStatus()> buildStatus;
+};
+
+void registerBuildTools(McpToolRegistry& registry, McpBuildHooks hooks);
+
+// ─── The knobs: the settings tools ───────────────────────────────────────────
+// Two tools, `settings_get` and `settings_set`, over two scopes: `project` (the
+// .heproj manifest — what the project IS and what it allows) and `editor` (this
+// editor's own preferences).
+//
+// ── Why both scopes are one pair of tools ────────────────────────────────────
+// Because that is how the editor presents them: there is no project settings
+// surface, so the project pages live in Preferences next to the editor ones
+// (EditorSettingsPanel::Page — "they live in Preferences because there is no
+// project settings surface yet"). A client that had to know which of two tools a
+// setting belonged to would have to know something the editor itself does not
+// bother to make visible.
+//
+// ── Why the editor scope needs a table and the project scope does not ────────
+// A project setting is a named field of ProjectData, and the list of them that
+// may be written is short and decided here. The editor's are sixty fields drawn
+// by a panel that cannot be compiled without a window, so they go through
+// EditorSettingsCatalog.h — the same list, written as data, with the ranges the
+// widgets enforce by construction.
+//
+// ── Three refusals worth reading before using these ──────────────────────────
+//   • The `Remote Control` category is NEVER writable. It is the page on which
+//     this bridge is switched on and its port chosen; a tool that can turn its
+//     own listener off is useless in the best case and inexplicable in the
+//     worst. Readable, so a client can see the state it is living in.
+//   • `name`, `path`, `id`, `scriptLanguage` and `appProject` are readable and
+//     not writable. Those five say what the project IS — the scripting language
+//     gates what may be created at all and the app flag decides whether there is
+//     a world — and changing one under a project full of assets is not a setting
+//     change, it is a conversion nobody wrote.
+//   • There is no play-mode gate, deliberately. A human can open Preferences
+//     while a preview runs, and a gate MCP has but the UI does not would be a
+//     behaviour change dressed as plumbing. Where a value only reaches a RUNNING
+//     simulation through a callback (the collision matrix), the callback is
+//     called — see applyCollisionLayers.
+//
+// ── Persistence is reported, never assumed ───────────────────────────────────
+// A project write is followed by ProjectManager::saveProject; the result says
+// `persisted`. The editor's config is a different story: the editor writes
+// config.json in OnShutdown and nowhere else, so unless the caller supplies
+// `persistEditorConfig` the honest answer is `persisted: false` with the reason
+// — "in effect now, written to disk when the editor closes". Claiming otherwise
+// would be the kind of lie that is only found out after a crash.
+struct McpSettingsHooks
+{
+	// ── project scope ───────────────────────────────────────────────────────
+	std::function<ProjectData*()> project;
+	// ProjectManager::saveProject(proj.path). False = the manifest could not be
+	// written, which the result reports rather than swallowing.
+	std::function<bool()> saveProject;
+	// Push the project's collision matrix into the RUNNING simulation, exactly
+	// as the Collision Layers page does after its own save. A no-op outside play
+	// mode, which is correct: the next play start reads the matrix afresh.
+	std::function<void()> applyCollisionLayers;
+
+	// ── editor scope ────────────────────────────────────────────────────────
+	// The live config. Null = no editor (a test that only exercises the project
+	// scope), and the editor scope then reports itself unavailable.
+	std::function<EditorConfig*()> editorConfig;
+	// Write config.json NOW. Absent = it is written on shutdown, and the result
+	// says so instead of claiming a file was touched.
+	std::function<bool()> persistEditorConfig;
+
+	// The rows of the catalogue that are not fields of EditorConfig at all
+	// (SettingStorage::External): VSync lives on the Application, the backend
+	// name on the AppContext. Absent hooks make those rows read as unavailable
+	// rather than as false.
+	std::function<bool(const std::string& key, nlohmann::json& out)> readExternalSetting;
+	std::function<bool(const std::string& key, const nlohmann::json& in,
+	                   std::string& outError)>                       writeExternalSetting;
+
+	// A field that IS in EditorConfig and additionally has to travel somewhere:
+	// the catalogue's `apply` name ("maxfps") and the config as it now stands.
+	// Absent = the field is set and nothing else happens, which is right for a
+	// value the renderer re-reads every frame and wrong for the two that do not.
+	std::function<void(const std::string& apply, const EditorConfig& cfg)> applySetting;
+};
+
+void registerSettingsTools(McpToolRegistry& registry, McpSettingsHooks hooks);
 
 } // namespace HE::Ed
