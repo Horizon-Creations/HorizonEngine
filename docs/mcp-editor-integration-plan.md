@@ -10,6 +10,15 @@ Kein Feature-Code.
 Branch: `claude/mcp-editor-integration`. Kein Merge nach main aus diesem Zweig
 heraus.
 
+> **Stand, September 2026.** Kapitel 1 bis 8 sind der ursprüngliche Plan und
+> seine Umsetzung; Kapitel 9 bis 18 sind die Nachträge des Folgethemas „Ausbau
+> für echte Nutzbarkeit", je einer pro Werkzeugfamilie, in der Reihenfolge, in
+> der sie gebaut wurden. **Wer nur wissen will, was heute steht und was fehlt,
+> liest Kapitel 19** — die Gesamtübersicht mit dem vollständigen
+> Werkzeugverzeichnis und der gesammelten Restliste. Die Kapitel davor bleiben
+> stehen, wie sie geschrieben wurden: sie erklären, *warum* etwas so aussieht,
+> und das verliert seinen Wert, wenn man es nachträglich glattzieht.
+
 Die Kernaussage vorweg, weil alles Weitere daran hängt: **der Editor hat heute
 keinen zentralen Weg, auf dem eine Szenenänderung hereinkommt.** Drei Pfade
 mutieren die Welt (UI-Handler, Collab-Remote-Handler, EngineApi-Registry), und
@@ -2638,3 +2647,165 @@ kollidiert in manchen Frames und in anderen nicht.
   `project_build_status` meldet ihn unter `interpreted`.
 * **`documentTypes`, `appIconName`-Auswahl und die Font-Maske jenseits von Griechisch
   und Kyrillisch** sind nicht abgedeckt.
+
+---
+
+## 19. Gesamtübersicht: was steht, was fehlt (Abschluss Folgethema 29)
+
+Dieses Kapitel ist der Stand, nicht die Geschichte. Es zählt aus, was die
+Registry heute trägt, sagt, wo das dokumentiert ist, und sammelt die Restliste
+aus allen „Was bewusst offen bleibt"-Abschnitten an einer Stelle ein. Alles
+darin ist aus dem Quelltext oder aus einem Testlauf abgelesen, nichts ist aus
+den Hive-Beiträgen abgeschrieben.
+
+### 19.1 Die Zahl, und wie sie zustande kommt
+
+**84 handgeschriebene Werkzeuge**, verteilt auf 17 Übersetzungseinheiten, plus
+**248 dynamische `api_*`-Werkzeuge** — eines je aufrufbarer Zeile der
+`HE::api`-Registry. Zusammen **332**.
+
+Die 84 sind gezählt, nicht geschätzt:
+
+```
+grep -rhoE '\.name *= *"[a-z0-9_]+"' src/HE_Editor/McpTool*.cpp \
+  | sed 's/.*"\(.*\)"/\1/' | sort -u | wc -l      → 84
+```
+
+Die 248 sind nicht grep-bar, weil ihr Name zur Laufzeit aus `ApiFn::id`
+entsteht (`apiToolName`, `McpToolsApi.cpp:388`). Sie stehen im Testlauf:
+`he_tests -tc="Every admitted registry row becomes exactly one legal tool" -s`
+druckt `CHECK( 249 == 249 )` — 248 aufrufbare Zeilen plus `api_list`. Wer die
+Zahl in dieser Datei prüfen will, ruft genau das auf; sie wandert mit der
+Engine-API und ist deshalb nirgends fest hinterlegt.
+
+### 19.2 Das Verzeichnis
+
+| Familie | n | Datei | Nachtrag | Merge |
+|---|---:|---|---|---|
+| `ping`, `scene_info` | 2 | `McpToolRegistry.cpp` | §1–7 | — |
+| `entity_*` | 7 | `McpToolsEntity.cpp` | §8 | — |
+| `hc_*` | 13 | `McpToolsHc.cpp` | §8 | — |
+| `api_list` + `api_*` | 1 + 248 | `McpToolsApi.cpp` | §8 | — |
+| `asset_*` | 5 | `McpToolsAsset.cpp` | §8.1 ff. | `d92ab5a2` |
+| `scene_create/open/save` | 3 | `McpToolsScene.cpp` | §9 | `87584a0a` |
+| `terrain_*` | 4 | `McpToolsTerrain.cpp` | §10 | `022a2568` |
+| `widget_*` | 8 | `McpToolsWidget.cpp` | §11 | `47fdab61` |
+| `input_*` | 6 | `McpToolsInput.cpp` | §12 | `a14a7912` |
+| `material_*` | 3 | `McpToolsMaterial.cpp` | §13 | `be9fc05f` |
+| `prefab_*` | 4 | `McpToolsPrefab.cpp` | §14 | `2c44b074` |
+| `type_*` | 5 | `McpToolsType.cpp` | §15 | `2c44b074` |
+| `particle_*` | 3 | `McpToolsParticle.cpp` | §17 | `16f78d8a` |
+| `animator_*`, `blendspace_*` | 11 | `McpToolsAnimator.cpp` | §17 | `16f78d8a` |
+| `clip_*` | 4 | `McpToolsClip.cpp` | §17.4 | `dfa9bc95` |
+| `project_build`, `project_build_status`, `project_package` | 3 | `McpToolsBuild.cpp` | §18 | `8df49958` |
+| `settings_get`, `settings_set` | 2 | `McpToolsSettings.cpp` | §18.5 ff. | `8df49958` |
+
+Die vollständigen Namen stehen im Quelltext und in der Handbuch-Tabelle
+(19.4); sie hier ein drittes Mal abzuschreiben hieße, eine dritte Liste zu
+pflegen, die als erste veraltet.
+
+### 19.3 Die vier Regeln, die über alle Familien hinweg gelten
+
+Sie sind über die Nachträge verstreut entstanden und werden hier zum ersten
+Mal zusammen gesagt, weil ein Client sie als Ganzes braucht:
+
+1. **Ein Werkzeug ohne Schema wird nicht registriert.** `McpToolRegistry::add`
+   lehnt fehlenden Handler, fehlendes Objekt-Schema, doppelten Namen und jeden
+   Namen ab, den die Messages-API nicht annimmt. Das Schema *ist* die
+   Dokumentation, die das Modell liest, deshalb ist es keine Kür.
+2. **Nichts wird im Play-Modus geändert.** Jedes mutierende Werkzeug
+   antwortet `play_mode`; der Stopp stellt die Welt wieder her und hätte den
+   Edit ohnehin weggeworfen.
+3. **Ein offener, schmutziger Tab gehört dem Menschen.** Input, Material,
+   Typen, Partikel, Animator und Clip lehnen mit `dirty` ab. Die
+   Widget-Werkzeuge sind die bewusste Ausnahme (§11.2): sie schreiben in den
+   Tab, setzen den Undo-Schnappschuss wie ein menschlicher Edit und sagen in
+   `target`, welchen der beiden Wege sie genommen haben.
+4. **Ein Leser lädt nicht.** Die berichtenden Werkzeuge lesen die Datei,
+   statt das Asset in den ContentManager zu ziehen (§12.4, §13.6) — eine
+   Frage an den Editor verändert nicht, was er im Speicher hält.
+
+Dazu die Fehlercodes, die ein Client kennen sollte, nach Häufigkeit im
+Quelltext: `invalid_payload` (75), `failed` (36), `invalid_path` (20),
+`not_found` (19), `play_mode` (11), `locked_by_other` (10), `invalid_args`
+(10), `invalid_argument` (9), `dirty` (8), `no_project` (7). Dass es
+`invalid_args` **und** `invalid_argument` **und** `invalid_payload` gibt, ist
+kein Entwurf, sondern gewachsen; es zu vereinheitlichen ist eine eigene
+kleine Aufräumarbeit und steht in 19.5.
+
+### 19.4 Wo das dokumentiert ist
+
+Drei Orte, und jeder hat einen eigenen Grund:
+
+* **Das Schema am Werkzeug** (`McpTool::description` + `inputSchema`). Das ist
+  die Doku, die das Modell tatsächlich liest — der Shim reicht `tools/list`
+  unverändert durch. Alle 84 tragen eine nichtleere `description`; die
+  dynamischen bauen ihre aus `ApiFn`.
+* **Das Handbuch im Editor und die Website**, Abschnitt *Collaboration ▸
+  Remote Control ▸ What a client may do*
+  (`Website/HorizonEngineDocs/collaboration.html`). Dort steht das
+  Familienverzeichnis als Tabelle und die vier Regeln aus 19.3, in der Sprache
+  eines Nutzers statt eines Clients. Das In-Engine-Handbuch ist dieselbe
+  Quelle, durch `scripts/build_docs_bundle.py` nach
+  `EditorDeps/Docs/he-docs.json` gebacken — die Datei ist eingecheckt, damit
+  ein frischer Klon das Handbuch hat, ohne den Website-Checkout zu brauchen.
+* **Die Bedienelemente der Fernsteuerung** (`Preferences ▸ Editor ▸ Remote
+  Control`) liegen in `EditorHelp.cpp:2161–2186` und sind vom
+  Deckungs-Test erfasst wie jedes andere Bedienelement. Die Werkzeuge selbst
+  sind keine Bedienelemente und stehen dort bewusst nicht.
+
+### 19.5 Die gesammelte Restliste
+
+Jeder Punkt steht ausführlich in seinem Nachtrag; hier ist er nur auffindbar.
+
+**Graphen — die größte zusammenhängende Lücke.** Material (§13.7), Partikel
+(§17.5) und der Logikgraph eines Widgets (§11.5) sind über MCP *Werte*, nicht
+*Struktur*. Knoten anlegen und verdrahten kann heute nur `hc_*`, und nur für
+HorizonCode-Dokumente. Ein Material- oder Partikelgraph-Editor über MCP ist
+der nächste große Schritt, nicht ein Nachtrag.
+
+**Anlegen läuft überall über `asset_create`.** Input-Actions, Material-Master,
+Struct-/Enum-Typen: keine Familie hat ein eigenes Anlegen bekommen, weil ein
+zweiter Weg eine zweite Theorie darüber wäre, was in einer frischen Datei
+steckt (§12.6, §13.7, §15.5, §17.5). Wer das ändert, ändert es an einer
+Stelle: dem Stub-Writer.
+
+**Umbenennen ist Anlegen + Entfernen**, und für Struct-Felder ist das eine
+echte Grenze: der Rename-Retarget fehlt in der ganzen Engine (§15.5). Ein
+`type_field_rename` würde etwas versprechen, das darunter niemand hält.
+
+**Nichts von den Asset-Editoren publiziert in eine Collab-Sitzung.** Der
+Fremd-Lock wird geprüft und abgelehnt, aber eine Item-Level-Publikation eines
+Widget-, Input-, Material-, Typ-, Partikel- oder Animator-Edits gibt es in
+`CollabDocSync` nicht (§11.5, §12.6, §13.7, §15.5, §17.5). In einer Sitzung
+arbeitet man am offenen Tab, und der Weg ist gedeckt; der Plattenweg ist es
+nicht.
+
+**Projekt-Ebene.** Kein `project_open`/`project_create` (und davor gehört
+`dialog-static-leaks-across-projects` untersucht), keine Export-Profile
+anlegen/umbenennen/löschen, kein Starten des fertigen Builds, kein `hc_check`
+ohne vorheriges Herauslösen des `ClassSource`-Sammlers aus dem Export-Worker
+(§18.10).
+
+**Kleineres, je an seinem Ort:** `terrain_set_heights` und Ramp (§10.6),
+`widget_set_canvas` und `widget_duplicate` (§11.5), Bone Masks und
+`PropertyAnimClip` (§17.5), Thumbnail-Invalidierung nach `material_set_param`
+und `prefab_save` (§13.7, §14.7), `PrefabLinkComponent` im Inspector (§14.7),
+Prefab-Vererbung mit Overrides (§14.7 — der Punkt aus der Lückenliste des
+Masterplans, und deutlich mehr als ein Nachtrag), sowie die drei
+Ungültig-Fehlercodes aus 19.3.
+
+### 19.6 Was dieser Abschluss nicht behauptet
+
+**Kein Werkzeug dieses Ausbaus ist je gegen einen laufenden Editor gelaufen.**
+Verifiziert ist: Kaltbau aus einem frischen Verzeichnis und die volle
+ctest-Suite, also die Werkzeuge gegen ihre Hooks und gegen echte Dateien auf
+der Platte. Der Weg Client → Shim → Socket → Editor-Frame ist durch
+`test_mcp_bridge` und `test_mcp_claude_probe` gedeckt, aber der Handschlag mit
+einer echten Claude-Sitzung an einem echten Fenster steht für diesen Ausbau
+aus. Das ist der eine Punkt, den nur ein Mensch mit einem offenen Editor
+abhaken kann.
+
+Ebenfalls nicht behauptet: dass die Restliste in 19.5 vollständig *gewünscht*
+ist. Sie ist die Liste dessen, was bewusst nicht gebaut wurde — nicht
+dieselbe Liste wie „was als Nächstes gebaut werden sollte".
