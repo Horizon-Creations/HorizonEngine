@@ -2301,3 +2301,153 @@ Antwort auf 16.2) sind zwei Schritte mit zwei verschiedenen Fallen, und
 AnimationClip ist ein dritter, der wahrscheinlich mit „gar nicht, es ist ein
 Import" endet. Wer zuerst die drei `ByContentPath`-Paare nachrüstet, hat für
 beide danach dieselbe Grundlage wie Input, Material und Typen.
+
+---
+
+## 17. Animation und Partikel, gebaut (Schritt 7c/7d)
+
+Der Befund aus Abschnitt 16 ist abgearbeitet. Achtzehn Werkzeuge, registriert in
+drei Aufrufen (Partikel, Animator samt Blend Space, Clip), und die Empfehlung aus
+16.3 hat sich in einem Punkt als falsch erwiesen — dazu 17.4.
+
+Die Vorbedingung zuerst: die drei `ByContentPath`-Paare, die 16.3 verlangt, sind
+nachgerüstet (`AnimatorStateMachineEditorPanel`, `ParticleGraphEditorPanel`,
+`BlendSpacePanel`). Ohne sie kann kein Werkzeug fragen, ob ein Tab
+ungespeicherte Änderungen hat: die Werkzeuge adressieren content-relativ, die
+Tab-Zustände hängen am absoluten Pfad.
+
+| Familie | Werkzeuge | Adresse eines Wertes |
+|---|---|---|
+| Partikel | `particle_info`, `particle_set`, `particle_slot_set` | der **Pin-Name** des Emitter Output |
+| Animator | `animator_info`, `animator_state_set`/`_remove`, `animator_transition_set`/`_remove`, `animator_param_set`/`_remove` | Zustand und Parameter beim **Namen**, ein Übergang über das **Tripel** |
+| Blend Space | `blendspace_info`, `blendspace_set`, `blendspace_sample_set`/`_remove` | ein Sample über seinen **Index** |
+| Animation Clip | `clip_info`, `clip_notify_set`/`clip_notify_remove`, `clip_root_motion_set` | ein Notify über seinen **Index** |
+
+### 17.1 Partikel: der Pin ist die Adresse, nicht der Knoten
+
+Ein Partikel-Asset ist ein Knotengraph, und jeder authorierte Wert steckt in
+einem Const-Knoten, der an einem der siebzehn Eingänge des Emitter Output hängt.
+Einem Client dieses JSON zum Umschreiben zu geben, wäre derselbe Fehler wie
+Base64: der Pin-**Index** ist On-Disk-Format (`ParticleGraph.h`: Pins dürfen nur
+angehängt werden), eine Verbindung sind vier nackte Zahlen, und `type` ist ein
+Anzeigename statt des Enums.
+
+16.3 hatte „die Werte vorhandener Knoten" vorgeschlagen, Vorbild
+`material_set_param`. Wörtlich genommen ist das ein Werkzeug, das auf einem
+frischen Asset **nichts** tun kann: `ParticleGraph::makeDefault` ist genau ein
+Knoten, der Emitter Output, mit unverbundenen Pins. Es gibt keinen Wert, den man
+setzen könnte. Also ist der Pin die Adresse, buchstabiert wie die Slot-Liste des
+Panels ihn buchstabiert („Emit Rate", „Start Color"), und gesetzt wird die
+kleinste Änderung, die diesen Wert wahr macht:
+
+* Pin unverbunden → ein Const-Knoten wird angelegt, gesetzt und verdrahtet (bei
+  den beiden Farb-Pins ein Const Color, weil das Panel dort das hinlegt),
+* Pin hängt an einem Const-Knoten, der **nur** diesen Pin speist → der Wert wird
+  an Ort und Stelle geändert,
+* Pin hängt an irgendetwas anderem — Random Range, Add, Lerp, oder ein Const,
+  den sich ein zweiter Pin teilt → **abgelehnt**, unter Nennung des Knotens.
+
+Der letzte Punkt ist die Grenze, die 16.3 gezogen hat, und sie ist die ehrliche:
+einen Graphen umzuverdrahten ist ein anderes Werkzeug als einen Wert zu setzen,
+und einem Autor still seinen Mathe-Knoten abzuhängen, um eine Konstante
+hineinzuzwingen, wäre eine Änderung, die niemand bestellt hat.
+
+Jede Antwort trägt zusätzlich die **ausgewertete** Emitter-Konfiguration, also
+dasselbe POD, das die Simulation bekommt — was der Client wollte, war ein
+Partikelverhalten, keine Graphänderung. Steckt eine Random Range darin, sagt die
+Antwort dazu, dass sie einmal pro Auswertung würfelt und das laufende Spiel
+eigenständig würfelt.
+
+### 17.2 Animator: was mit einem Übergang passiert, wenn sein Parameter geht
+
+Jede Familie musste eine Frage zuerst beantworten (16.2). Für die
+Zustandsmaschine ist es diese, und die Antwort steht in
+`AnimationStateMachineSystem::evalTransition`: ein Übergang, dessen Parameter
+nicht in der Live-Map steht, liefert `false` — jeden Frame, für immer. Kein
+Fehler, keine Logzeile, ein Übergang, der still nie wieder feuert. Daraus folgt:
+
+* **`animator_param_remove` lehnt ab**, solange ein Übergang den Parameter nennt,
+  und zählt diese Übergänge auf. `force` nimmt ihn trotzdem heraus, denn ein
+  Sync-Graph oder ein Skript darf den Parameter zur Laufzeit schreiben, ohne dass
+  er je als Default deklariert war — die Map ist offen. Abgelehnt wird, es aus
+  Versehen zu tun.
+* **`animator_state_set` kann umbenennen** und macht die Nacharbeit, die das
+  Panel von Hand macht: jeder Übergangs-Endpunkt und `startState`, der den alten
+  Namen nannte, wird mitgezogen. Ohne das blieben baumelnde Endpunkte zurück, die
+  das System genauso still überspringt wie den fehlenden Parameter.
+* **`animator_state_remove` kaskadiert**: die Übergänge, die den Zustand
+  berühren, fallen weg, und `startState` wird geleert, wenn er dorthin zeigte.
+
+Ein Übergang hat **keine Id** (`AnimatorStateMachineGraph.h` sagt das und sagt
+auch, warum es noch nicht behoben ist). Die Kollaboration schlüsselt einen, indem
+sie from/to/param hasht — also adressieren diese Werkzeuge ihn genauso, über das
+Tripel. Ein passendes Tripel wird an Ort und Stelle geändert, alles andere
+angehängt; erst das macht zwei Übergänge zwischen denselben zwei Zuständen auf
+**verschiedenen** Parametern überhaupt adressierbar.
+
+### 17.3 Der Blend Space gehört in dieselbe Familie
+
+Weil ein Zustand statt auf einen Clip auf einen Blend Space zeigen kann und
+`blendSpaceId` dabei **gewinnt**. Die Maschine authorieren zu können, ohne den
+Raum authorieren zu können, in den sie blendet, wäre ein halbes Werkzeug. Samples
+haben keine Id und zwei dürfen denselben Clip nennen, also ist der **Index** die
+einzige ehrliche Adresse; `blendspace_info` meldet ihn mit.
+
+Die Live-Invalidierung (`markConfigDirty`) macht nur die Zustandsmaschine, nicht
+der Blend Space — weil `BlendSpacePanel::save` sie auch nicht macht. Ein
+Werkzeug, das mehr ungültig macht als das Panel, wäre ein zweiter, leise anderer
+Speicherpfad.
+
+### 17.4 Animation Clip: 16.2 lag falsch, und das war prüfbar
+
+16.2 vermutete, ein AnimationClip ende bei „gar nicht editierbar, es ist ein
+Import" — `AssetStubWriter` lehnt ihn ab wie ein Mesh oder eine Textur, und
+anlegen kann ihn niemand. Der Beleg dagegen ist ein Panel: der **Skeletal Mesh
+Editor** authoriert die Notify-Timeline eines Clips und seinen
+Root-Motion-Schalter, speichert beides mit `ContentManager::saveAsset`, und beide
+liegen in einem eigenen Chunk (`CHUNK_ANOT`). Die authorierte Hälfte ist also
+real, sie ist klein, und sie ist von außen genau so editierbar wie im Tab.
+
+Die **Keyframes** bleiben draußen (`CHUNK_ANIM`). Die sind der Import: ein
+Werkzeug, das einen Kanal schriebe, würde Animation neu authorieren, die ein
+DCC-Werkzeug besitzt, und der nächste Re-Import würfe es kommentarlos weg.
+
+Drei Dinge sind an dieser Familie anders als an den anderen:
+
+* **Gelesen wird aus der Datei, geschrieben durch den geladenen Clip.** Die
+  Leseseite holt aus `CHUNK_ANIM` nur die ersten zwei Felder und dazu
+  `CHUNK_ANOT` — eine Frage nach einem Clip lädt also nie seine Keyframes, und
+  ein Walk-Cycle mit 300 Kanälen ist megabyteweise Samples, die niemand bestellt
+  hat. Die Schreibseite hat diese Wahl nicht: die Notify-Liste lebt im
+  Clip-Asset, `saveAsset` schreibt die ganze Datei daraus, und das ist der Weg,
+  den das Panel selbst nimmt. Genau deshalb prüfen die tragenden Tests nach jeder
+  Änderung, dass die **Kanäle noch da sind**.
+* **Kein Reload-Hook.** Der geladene Clip **ist** der Editierpuffer des Tabs
+  (`getAnimationClipMutable`), und die Notify-Spur liest diese Liste jeden Frame.
+  Auch die Simulation liest sie direkt (`AnimationNotify.cpp`), es gibt also
+  nichts Aufgelöstes zu invalidieren.
+* **Die Tab-Frage geht über den CLIP-Pfad.** `SkeletalMeshEditorPanel` schlüsselt
+  seine ungespeicherten Clip-Änderungen nach dem Clip, nicht nach dem Tab (der
+  zeigt ein Mesh), und `ContentAsset::path` ist content-relativ. Diese Familie
+  braucht deshalb als einzige kein `ByContentPath`-Paar.
+
+Eine Zeitangabe außerhalb des Clips wird **abgelehnt, nicht geklemmt**: ein
+Notify hinter dem Ende feuert nie (die Feuerregel in `AnimationNotify.h`), und
+ein Werkzeug, das ihn still nach innen schöbe, erfände einen Zeitpunkt, während
+eines, das ihn draußen ließe, ein totes Ereignis schriebe und Erfolg meldete. Die
+Ablehnung nennt die Länge des Clips, also die Zahl, die dem Client fehlte.
+
+### 17.5 Was bewusst offen bleibt
+
+* **Der Partikel-Graph selbst.** Knoten anlegen und verdrahten ist ein eigener
+  Schritt, genau wie beim Material-Graphen (13.7). Was hier geht, sind Werte.
+* **Kein Anlegen und kein Umbenennen von Assets**, wie bei Input (12.6), Material
+  (13.7) und Typen (15.5): `asset_create` und `asset_move`. Für einen Clip gilt
+  auch das nicht — er entsteht beim Import eines Skeletal Mesh.
+* **`PropertyAnimClip`** ist ein anderes Asset mit einem anderen Chunk und ist
+  nicht abgedeckt.
+* **Keine Bone Masks.** `BoneMaskPanel` hat dieselbe Paarung wie die drei anderen
+  Panels, und eine Maske ist das, was ein Layer einer Zustandsmaschine
+  einschränkt — die nächstliegende vierte Familie in dieser Ecke.
+* **Kein Veröffentlichen in eine Kollaborationssitzung**: der Fremd-Lock wird
+  geprüft und abgelehnt, publiziert wird nichts.
