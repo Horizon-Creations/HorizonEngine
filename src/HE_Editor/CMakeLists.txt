@@ -181,6 +181,21 @@ add_executable(HorizonEditor WIN32
 	# and the root-motion switch are authored in the Skeletal Mesh Editor and live
 	# in a chunk of their own, so that half is editable from outside too.
 	McpToolsClip.cpp
+	# Making the project run: Build ▸ Export Project and Build ▸ Build and Reload
+	# Game Logic, plus the reading of the window both of them report into. The
+	# only asynchronous family here — both tools answer "started", and the
+	# verdict, the steps and the log come back from project_build_status.
+	McpToolsBuild.cpp
+	# The knobs, over two scopes: the .heproj manifest (permissions, fonts,
+	# startup scene, collision layers) and this editor's own preferences. One
+	# pair of tools for both, because that is how the editor presents them —
+	# there is no project settings surface, so the project pages live in
+	# Preferences next to the editor ones.
+	McpToolsSettings.cpp
+	# …and the editor half of what those two write: the Preferences settings as a
+	# TABLE rather than as a screen. `row("bloom", …)` in EditorSettingsPanel.cpp
+	# is documentation only a human looking at a widget can read.
+	EditorSettingsCatalog.cpp
 	# The argument readers, the ONE confinement rule and the one content walk that
 	# all of the above use. Two copies of a boundary are two boundaries.
 	McpToolCommon.cpp

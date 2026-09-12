@@ -2451,3 +2451,187 @@ Ablehnung nennt die Länge des Clips, also die Zahl, die dem Client fehlte.
   einschränkt — die nächstliegende vierte Familie in dieser Ecke.
 * **Kein Veröffentlichen in eine Kollaborationssitzung**: der Fremd-Lock wird
   geprüft und abgelehnt, publiziert wird nichts.
+
+---
+
+## 18. Bauen und Einstellen (Folgethema 29, Schritt 12)
+
+Fünf Werkzeuge, und sie schließen die zwei Lücken, die das Lückenaudit des
+Themas unter P2 als Punkte 6 bis 9 geführt hat: **`project_package`** (Build ▸
+Export Project), **`project_build`** (Build ▸ Build and Reload Game Logic),
+**`project_build_status`** (was das Build-Fenster zeigt) sowie **`settings_get`**
+und **`settings_set`** über die beiden Bereiche `project` und `editor`.
+
+Vorher endete jede der 64 anderen Werkzeuge bei einer Datei im Projekt. Keines
+produzierte etwas, das ein Mensch starten kann, und ob ein HorizonCode-Graph
+überhaupt übersetzbar ist, erfährt man zum ersten Mal beim Export — der außer
+Reichweite lag.
+
+### 18.1 Beides ist asynchron, und darum hängt der ganze Entwurf daran
+
+Der Export läuft auf einem Worker (`ExportDialogPanel`), der Game-Logic-Compile
+auf einem zweiten (`GameLogicBuildPanel`), und beide berichten in **ein**
+Fenster (`BuildProgressDialog`), dessen Modell die einzige Aufzeichnung dessen
+ist, was passiert ist.
+
+* `project_package` und `project_build` antworten, sobald der Lauf **gestartet**
+  ist — `started: true` und sonst nichts über Erfolg, weil in diesem Moment
+  nichts über Erfolg bekannt ist. Ein Werkzeug, das hier blockierte, hielte die
+  Frame-Schleife an: die Handler laufen auf dem UI-Thread, zwischen der
+  Kollaborations-Pumpe und dem Rendern, und die Reload-Hälfte eines
+  Game-Logic-Builds passiert absichtlich erst im **nächsten** Frame.
+* `project_build_status` ist die Stelle, an der die Antwort ankommt. Pollen ist
+  die vorgesehene Nutzung.
+
+### 18.2 Das Fenster musste erst lesbar werden
+
+`BuildProgressDialog` hatte von außen `running()`, `runKind()`, `isOpen()` und
+`interpretedClasses()` — Schritte, Logtext und Ergebnis hatten **keinen**
+Accessor. Ein Werkzeug hätte nur „läuft noch / läuft nicht mehr" sagen können,
+nicht ob es geklappt hat. Neu ist deshalb `BuildProgressDialog::snapshot()`: eine
+**Kopie** unter dem Mutex des Modells, weil der Worker aus einem anderen Thread
+hineinschreibt. Das Log kommt ganz heraus und wird erst im Werkzeug beschnitten —
+der Aufrufer ist der, der weiß, ob er die Fehlerzeile oder das Protokoll will.
+
+`project_build_status` gibt darum den **Schwanz** des Logs zurück (Standard 100
+Zeilen, hart bei 2000), filterbar nach Schritt und nach Schweregrad. `minSeverity: 2`
+ist die Zeile des Compilers ohne die tausend, die funktioniert haben.
+
+### 18.3 Ein Override gilt für DIESEN Lauf und nie für das Profil
+
+`ExportDialogPanel::startFromProfile` nimmt das Profil **als Wert**.
+`project_package` kopiert das gespeicherte `ExportProfile`, flickt die Kopie und
+reicht die Kopie weiter; nichts wird zurückgeschrieben und `saveProject` läuft
+nicht. Ein einmaliges „bau mir eine Linux-Kopie" darf nicht zu dem werden, was
+das nächste Export Project des Menschen tut — und das Zurückschreiben ist etwas,
+das der Dialog auf seinem Save-Knopf macht, mit einem Menschen davor.
+
+Geprüft wird dabei die Zielplattform gegen die **Namen des Enums selbst**, nicht
+über `exportPlatformFromName`: das bildet alles Unbekannte auf `Host` ab, ein
+vertipptes „linx" wäre also ein vollständiger Host-Export in einen Ordner, der
+nach einer anderen Plattform heißt, und niemand hätte es gesagt bekommen.
+
+### 18.4 Ein Fenster, ein Lauf
+
+`Kind` existiert genau dafür, dass ein Export und ein Game-Logic-Build einander
+nicht die Knöpfe wegnehmen. Keines der beiden Werkzeuge startet etwas, solange
+die andere Art das Fenster hält: beide lehnen mit `busy` ab und **nennen die
+Art**, die hält — ein „busy" ohne das lässt einen Client am falschen Werkzeug
+pollen.
+
+### 18.5 Warum die Einstellungen EIN Paar Werkzeuge sind
+
+Weil der Editor sie so zeigt. Es gibt keine Projekt-Einstellungs-Oberfläche, also
+hängen die Projektseiten in den Preferences neben den Editor-Seiten
+(`EditorSettingsPanel::Page`, mit genau dieser Begründung im Header). Ein Client,
+der wissen müsste, zu welchem von zwei Werkzeugen eine Einstellung gehört, müsste
+etwas wissen, das der Editor selbst nicht sichtbar macht. Der Bereich wird aus
+dem Schlüssel abgeleitet.
+
+### 18.6 Die Editor-Seite brauchte erst einen Katalog
+
+Die Preferences schreiben ihre Einstellungen als `row("bloom", "Post-Processing",
+widget)` in `EditorSettingsPanel.cpp`, und das ist Dokumentation, die nur ein
+Mensch lesen kann, der auf ein Bedienelement schaut. Die zwei ehrlichen
+Alternativen waren beide schlechter: einem Modell einen freien Config-Schlüssel
+geben (nichts sagte ihm, dass `AntiAliasing` 0..4 nimmt, eine 7 würde
+geschrieben und irgendwo stillschweigend geklemmt) oder es ein Panel parsen
+lassen, das sich ohne Fenster nicht übersetzen lässt.
+
+Also `EditorSettingsCatalog.h/.cpp`: dieselbe Liste als **Daten**, mit den
+Bereichen, die die Widgets ohnehin erzwingen, und den Kategorienamen der Panels
+wörtlich. Dafür sind `EditorConfig` und `EditorMode` aus `EditorApplication.h` in
+ein eigenes `EditorConfig.h` gezogen worden — dieselbe Datei zieht ImGui, SDL,
+den Renderer und die Physik herein, und das hielt die Einstellungen des Editors
+aus allem heraus, was nicht der Editor ist, also auch aus dem Testbinary.
+
+Drei Sorten Zeile, und nur die erste ist ein schlichtes Feld:
+
+* ein Feld von `EditorConfig` (über Member-Zeiger gelesen und geschrieben),
+* ein Feld, das **zusätzlich** irgendwohin reisen muss (`apply`): `MaxFps`
+  erreicht die Frame-Taktung über `AppContext::setMaxFps`, und ein Schreiben,
+  das nur die Struktur setzt, wäre eine Zahl in einer Datei, die bis zum
+  nächsten Start nichts ändert;
+* gar kein Feld von `EditorConfig` (`SettingStorage::External`): VSync lebt auf
+  der Application, der Backend-Name auf dem AppContext. Die trägt der Aufrufer
+  über eigene Hooks.
+
+### 18.7 Persistenz wird gemeldet, nie angenommen
+
+Ein Projekt-Schreiben ruft `ProjectManager::saveProject`, das Ergebnis sagt
+`persisted`. Schlägt das fehl, ist die Antwort `write_failed` — mit dem Satz,
+dass der Wert im Speicher steht: so zu tun, als sei nichts passiert, macht das
+nächste Lesen unerklärlich.
+
+Beim Editor lag die Sache anders: `config.json` wurde **ausschließlich** in
+`OnShutdown` geschrieben, in einem Block von 52 Zeilen, der als einziger die
+Schlüssel zu den Feldern kannte. Der ist jetzt
+`EditorApplication::writeEditorConfig()` — dieselbe Stelle, von OnShutdown und
+vom Werkzeug gerufen. Eine zweite Kopie dieser Zuordnung wäre die, die an dem Tag
+aufhört zu passen, an dem jemand ein Feld hinzufügt. Ohne diesen Hook lautet die
+ehrliche Antwort `persisted: false` mit dem Grund, statt einer Behauptung, die
+erst nach einem Absturz auffliegt.
+
+### 18.8 Drei Ablehnungen, die vor der Benutzung zu lesen sind
+
+* **Die Kategorie `Remote Control` wird nie geschrieben.** Das ist die Seite, auf
+  der diese Brücke eingeschaltet und ihr Port gewählt wird. Ein Werkzeug, das
+  seinen eigenen Listener abschalten kann, ist im besten Fall nutzlos und im
+  schlechtesten unerklärlich. Lesbar bleibt sie, damit ein Client den Zustand
+  sieht, in dem er lebt. (Der Vorschlag stammt aus dem Audit-Nachtrag von
+  `mcp-integration-im-15`.)
+* **`name`, `path`, `id`, `scriptLanguage` und `appProject`** sind lesbar und
+  nicht schreibbar. Die fünf sagen, was das Projekt IST — die Skriptsprache
+  entscheidet, was überhaupt angelegt werden darf, das App-Flag, ob es eine Welt
+  gibt —, und das unter einem Projekt voller Assets zu ändern ist keine
+  Einstellung, sondern eine Umwandlung, die niemand geschrieben hat.
+* **`project.startupScene` ist lesbar und nicht schreibbar**, und das ist kein
+  Prinzip, sondern ein Befund: `ProjectManager::saveProject` ist ein
+  Read-Modify-Write, der den Schlüssel des Manifests bewahrt und dieses Feld
+  **nie** zurückschreibt. Ein Setter hätte die Struktur bewegt, `persisted: true`
+  gemeldet (die Datei WURDE ja geschrieben) und den Wert beim nächsten Laden
+  verloren — das schlechteste der drei möglichen Verhalten. Der Editor hat dafür
+  auch keine Oberfläche. Was ein BUILD startet, ist das `startupScene` des
+  Export-Profils, und das nimmt `project_package` als Argument.
+
+**Keine Play-Mode-Sperre**, absichtlich. Ein Mensch kann die Preferences auch
+während einer laufenden Vorschau öffnen, und eine Schranke, die MCP hat und die
+Oberfläche nicht, wäre eine Verhaltensänderung im Gewand von Verkabelung. Wo ein
+Wert eine LAUFENDE Simulation nur über einen Callback erreicht — die
+Kollisionsmatrix —, wird der Callback gerufen.
+
+### 18.9 Die Kollisionsmatrix passt in kein Schlüssel-Wert-Paar
+
+Sechzehn Namen und ein 16×16-Dreieck. Statt einer Zeile je Zelle gibt es zwei
+Schlüssel-**Formen**:
+
+```
+project.collisionLayers.name.<i>
+project.collisionLayers.collides.<a>.<b>
+```
+
+`settings_get` liest beide Hälften ganz aus, damit ein Client nie raten muss,
+welche Indizes es gibt: die 16 Namen mit ihren Schlüsseln und die Paare, die
+**nicht** kollidieren (alles kollidiert, solange es nicht in `blockedPairs`
+steht). Geschrieben wird über `setCollides`, das **beide** Zellen setzt — Jolt
+verspricht nicht, in welcher Reihenfolge es fragt, und eine halb gefüllte Matrix
+kollidiert in manchen Frames und in anderen nicht.
+
+### 18.10 Was bewusst offen bleibt
+
+* **Kein `project_open` / `project_create`.** Das steht im Audit als eigener
+  Punkt (B) und hat eine eigene Falle — `dialog-static-leaks-across-projects` —,
+  die vor dem Bauen untersucht gehört.
+* **Keine Export-Profile anlegen, umbenennen oder löschen.** `settings_get` listet
+  sie, `project_package` läuft eines, `project.activeExportProfile` wählt eines
+  aus. Ein Profil zu erzeugen ist die Arbeit des Dialogs.
+* **Kein Starten des fertigen Builds.** `project_build_status` nennt die
+  Executable und ob diese Maschine sie ausführen könnte; ein Spiel zu starten ist
+  etwas anderes als es zu bauen.
+* **Kein `hc_check`.** Punkt 10 des Audits, und der teuerste: der `ClassSource`-
+  Sammler steht inline im Export-Worker und müsste erst herausgelöst werden.
+  Solange das so ist, ist `project_package` mit `compileHorizonCode: true` der
+  einzige Weg, einen nicht übersetzbaren Graphen zu erfahren — und
+  `project_build_status` meldet ihn unter `interpreted`.
+* **`documentTypes`, `appIconName`-Auswahl und die Font-Maske jenseits von Griechisch
+  und Kyrillisch** sind nicht abgedeckt.

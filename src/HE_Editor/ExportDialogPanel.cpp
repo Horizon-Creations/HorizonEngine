@@ -408,6 +408,28 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
 }
 
+// The window/backend rows are not part of the profile — they ride to the game in
+// config.json and live in the editor's own settings under the keys the game
+// reads them by. Reloaded so a run starts on what the last export shipped, from
+// both doors into this panel: the modal (open) and startFromProfile.
+static void reloadGameConfigRows(AppContext& ctx)
+{
+	if (!ctx.globalState) return;
+	GlobalState& gs = *ctx.globalState;
+	s_exportWindowWidth  = gs.getCustomConfigInt("GameWindowWidth",     s_exportWindowWidth);
+	s_exportWindowHeight = gs.getCustomConfigInt("GameWindowHeight",    s_exportWindowHeight);
+	s_exportWindowMode   = gs.getCustomConfigString("GameWindowMode",   s_exportWindowMode);
+	s_exportGameVSync    = gs.getCustomConfigBool("GameVSync",          s_exportGameVSync);
+	s_exportBackend      = gs.getCustomConfigString("GameBackend",      s_exportBackend);
+	// …and only if it is a backend this dialog would offer for SOME target.
+	// A settings file written by an editor that still forced "Software" into
+	// this key while exporting an application carries that word forever
+	// otherwise, and the next game export ships it. Dropping it means "the
+	// platform default", which is what the row shows when nothing was picked.
+	if (!s_exportBackend.empty() && !HE::BackendRules::isOffered(s_exportBackend))
+		s_exportBackend.clear();
+}
+
 // Read the dialog fields back into a profile (the name stays as-is).
 static void exportDialogToProfile(ExportProfile& p)
 {
@@ -458,28 +480,47 @@ void open(AppContext& ctx)
 		it.increment(ec);
 	}
 
-	// The window/backend rows are not part of the profile — they ride to the game
-	// in config.json and live in the editor's own settings under the keys the game
-	// reads them by. Reload them so the dialog opens on what the last export shipped.
-	if (ctx.globalState)
-	{
-		GlobalState& gs = *ctx.globalState;
-		s_exportWindowWidth  = gs.getCustomConfigInt("GameWindowWidth",     s_exportWindowWidth);
-		s_exportWindowHeight = gs.getCustomConfigInt("GameWindowHeight",    s_exportWindowHeight);
-		s_exportWindowMode   = gs.getCustomConfigString("GameWindowMode",   s_exportWindowMode);
-		s_exportGameVSync    = gs.getCustomConfigBool("GameVSync",          s_exportGameVSync);
-		s_exportBackend      = gs.getCustomConfigString("GameBackend",      s_exportBackend);
-		// …and only if it is a backend this dialog would offer for SOME target.
-		// A settings file written by an editor that still forced "Software" into
-		// this key while exporting an application carries that word forever
-		// otherwise, and the next game export ships it. Dropping it means "the
-		// platform default", which is what the row shows when nothing was picked.
-		if (!s_exportBackend.empty() && !HE::BackendRules::isOffered(s_exportBackend))
-			s_exportBackend.clear();
-	}
+	reloadGameConfigRows(ctx);
 
 	s_exportBundleKey.clear(); // re-stat the runtime bundle on open
 	s_showExportModal = true;
+}
+
+bool startFromProfile(AppContext& ctx, const ExportProfile& profile, std::string* outError)
+{
+	const auto fail = [outError](const char* why) { if (outError) *outError = why; return false; };
+
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+		return fail("no project is open");
+	if (!ctx.contentManager)
+		return fail("this editor has no content manager");
+	// One window, one run. The same refusal a human gets from
+	// GameLogicBuildPanel::start, asked here so a caller hears it as an answer
+	// rather than as two runs writing into one model.
+	if (s_exportRunning.load() || BuildProgressDialog::Build::running())
+		return fail("a build is already running");
+
+	auto& proj = ctx.projectManager->currentProject();
+	const std::filesystem::path projectRoot =
+		std::filesystem::path(proj.path).parent_path();
+
+	// The dialog mirror is the only thing startExport reads, so filling it IS
+	// selecting the profile. The index is moved along with it: nothing here
+	// persists, but the dialog's own Save button writes into
+	// exportProfiles[s_exportProfileIdx], and leaving that pointing at a
+	// different profile than the fields now show is how a Save would land in the
+	// wrong one.
+	exportProfileToDialog(profile, projectRoot);
+	for (int i = 0; i < static_cast<int>(proj.exportProfiles.size()); ++i)
+		if (proj.exportProfiles[i].name == profile.name) { s_exportProfileIdx = i; break; }
+
+	// The window/backend rows are not part of the profile and are read from the
+	// editor config, exactly as opening the dialog does.
+	reloadGameConfigRows(ctx);
+	s_exportBundleKey.clear();
+
+	startExport(ctx);
+	return true;
 }
 
 // ─── The modal itself (drawn every frame; also reaps a finished worker) ──────

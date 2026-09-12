@@ -139,6 +139,8 @@ add_executable(he_tests
     test_mcp_tools_particle.cpp
     test_mcp_tools_animator.cpp
     test_mcp_tools_clip.cpp
+    test_mcp_tools_build.cpp
+    test_mcp_tools_settings.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -275,6 +277,19 @@ add_executable(he_tests
     # afterwards carries the events that were asked for, and only a real
     # AnimationClipAsset round-trip through a real ContentManager answers it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsClip.cpp
+    # The build tools. In here because the two things they actually decide can
+    # be decided without a build machine: WHICH profile a run is made from (and
+    # that a one-off override never reaches the stored one), and whether the one
+    # shared Build window is free. The export itself is a worker thread behind a
+    # hook, and a test plays that hook.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsBuild.cpp
+    # The settings tools and the table underneath them, and this is the binary
+    # where their central claim is provable: the project half runs against a REAL
+    # ProjectManager over a temporary directory, so "did the manifest actually
+    # keep it" is answered by loading the project again rather than by reading
+    # back the struct we just wrote.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsSettings.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp

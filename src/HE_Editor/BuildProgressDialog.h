@@ -99,6 +99,51 @@ namespace BuildProgressDialog
 	};
 	InterpretedSummary interpretedClasses();
 
+	// ── The model, read out whole ────────────────────────────────────────────
+	// Everything above this line is written INTO the window. This is the one way
+	// to get it back out, and it exists because the window is a window: a human
+	// watching the rings is the only reader it ever had, and an MCP client that
+	// starts a build (McpToolsBuild.cpp) has no eyes. Without it the honest
+	// answer a tool could give was "a build is running" / "no build is running",
+	// which does not say whether the last one worked.
+	//
+	// A COPY, taken under the model's own mutex: the export worker writes into
+	// it from another thread, so a reference into it would be read while it is
+	// being appended to. The log is the whole log — the caller decides what to
+	// keep, because it is the caller that knows whether it wants the error line
+	// or the transcript.
+	struct StepView
+	{
+		std::string name;
+		int         state = 0;          // Pending 0, Running 1, Done 2, Failed 3
+		float       progress = 0.0f;
+		bool        indeterminate = true;
+		std::string detail;
+	};
+	struct LogView
+	{
+		int         step = 0;
+		int         severity = 0;       // 0 info, 1 warning, 2 error
+		std::string text;
+	};
+	struct Snapshot
+	{
+		bool                  hasRun  = false;   // false = nothing built this session
+		bool                  running = false;
+		Kind                  kind    = Kind::Export;
+		std::vector<StepView> steps;
+		int                   current = -1;
+		std::string           activity;
+		bool                  finished = false;
+		bool                  success  = false;
+		std::string           message;
+		std::filesystem::path executable;
+		bool                  runnableHere = false;
+		InterpretedSummary    interpreted;
+		std::vector<LogView>  log;
+	};
+	Snapshot snapshot();
+
 	// ── Dialog ───────────────────────────────────────────────────────────────
 
 	// What the user asked for on the finished run. Polled once per frame by the

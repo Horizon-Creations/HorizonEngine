@@ -27,11 +27,18 @@
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 class ContentManager;
 namespace HorizonCode { struct Graph; }
 namespace HE { struct UIWidgetTree; }
+// The three types the build and settings hooks speak, all at global scope and
+// all behind headers this one refuses to pull in: ProjectManager.h drags HE_Tools
+// in, EditorConfig.h is the editor's own. A hook signature only needs the name.
+struct ProjectData;     // ProjectManager.h (HE_Tools)
+struct ExportProfile;   // ProjectManager.h (HE_Tools)
+struct EditorConfig;    // EditorConfig.h
 
 namespace HE::Ed
 {
@@ -1051,5 +1058,202 @@ struct McpClipHooks
 // The reference is captured, so `content` has to outlive the registry.
 void registerClipTools(McpToolRegistry& registry, ContentManager& content,
                        McpClipHooks hooks);
+
+// ─── Turning the project into something that runs: the build tools ───────────
+// Three tools: `project_package` (Build ▸ Export Project — pack the game),
+// `project_build` (Build ▸ Build and Reload Game Logic — compile the native
+// module and swap it into the running preview) and `project_build_status` (what
+// the Build window shows: the steps, the log and the verdict).
+//
+// ── Why a client needs these ─────────────────────────────────────────────────
+// Every one of the tool families above ends at a file in the project. None of
+// them produces something a person can start. A client could author a scene, a
+// material, a state machine and a UI and had no way to find out whether the
+// thing even builds — the first moment a HorizonCode graph that cannot be
+// translated is reported is the export, and the export was out of reach.
+//
+// ── Both of these are ASYNCHRONOUS, and that is the whole design ─────────────
+// The export runs on a worker (ExportDialogPanel) and the game-logic compile on
+// another (GameLogicBuildPanel); both report into ONE window
+// (BuildProgressDialog), whose model is the only record of what happened. So:
+//
+//   • `project_package` and `project_build` return as soon as the run STARTED.
+//     They report `started: true` and nothing about success, because at that
+//     moment nothing about success is known. A tool that blocked here would
+//     hold the editor's frame loop — these handlers run on the UI thread,
+//     between the collaboration pump and the render, and the reload half of a
+//     game-logic build happens in a LATER frame by design.
+//   • `project_build_status` is where the answer arrives: `running`, the steps
+//     with their state, the current activity, and once `finished` is true the
+//     `success` flag, the message, the executable that was produced and the
+//     HorizonCode classes that had to ship interpreted. Polling it is the
+//     intended use.
+//
+// ── One window, so one run ───────────────────────────────────────────────────
+// The window is shared and `Kind` is what keeps an export and a game-logic build
+// from taking each other's buttons. Neither tool starts anything while the other
+// kind owns it: both refuse with `busy` and say which kind is holding it. That
+// is the same refusal GameLogicBuildPanel::start already gives a human.
+//
+// ── What an override does NOT do ─────────────────────────────────────────────
+// `project_package` takes the export profile's fields as optional arguments, and
+// they apply TO THIS RUN ONLY: the tool copies the stored ExportProfile, patches
+// the copy and hands the copy over. Nothing is written back and the project is
+// not saved. Persisting an override would mean a client's one-off "just build me
+// a Linux copy" silently became what the human's next Export Project does — and
+// the profile write-back is a thing the export dialog does on its Save button,
+// with the human looking at it.
+struct McpBuildStep
+{
+	std::string name;
+	std::string state;          // "pending", "running", "done", "failed"
+	float       progress = 0.0f;
+	bool        indeterminate = true;   // running, length unknown
+	std::string detail;         // "128 / 340", "62 %"
+};
+
+struct McpBuildLogLine
+{
+	int         step     = 0;
+	int         severity = 0;   // 0 info, 1 warning, 2 error
+	std::string text;
+};
+
+// One reading of the Build window's model. Everything in it is a copy taken
+// under the window's own lock — the worker writes into that model from another
+// thread, so a tool may not hold a reference into it.
+struct McpBuildStatus
+{
+	bool        hasRun  = false;   // false = nothing has ever been built this session
+	bool        running = false;
+	std::string kind;              // "export" | "gamelogic"
+
+	std::vector<McpBuildStep> steps;
+	int         currentStep = -1;
+	std::string activity;
+
+	bool        finished = false;
+	bool        success  = false;
+	std::string message;
+
+	// What the finished export produced, and whether this machine could run it
+	// (false for a cross-platform target). Empty when no runtime was shipped.
+	std::string executable;
+	bool        runnableHere = false;
+
+	// The HorizonCode classes this run ships INTERPRETED instead of compiled,
+	// with the reason each one could not be translated. This is the one thing a
+	// SUCCESSFUL export is quietly worth less for, so it travels with the
+	// verdict rather than being left in the log.
+	std::string                                          interpretedHeadline;
+	std::vector<std::pair<std::string, std::string>>     interpretedClasses;  // label, reason
+
+	std::vector<McpBuildLogLine> log;
+};
+
+struct McpBuildHooks
+{
+	// The open project, or null. Everything here refuses with `no_project`
+	// without one, which is a real state: the editor starts without one.
+	std::function<ProjectData*()> project;
+
+	// Start an export from THIS profile — a value, not a name, because the
+	// overrides a client sent were applied to a copy (see above). False +
+	// `outError` when the editor could not start it.
+	std::function<bool(const ExportProfile& profile, std::string& outError)> startExport;
+
+	// Build ▸ Build and Reload Game Logic. `available` is the same predicate the
+	// menu row greys out on: a C++ project with a Source/CMakeLists.txt. Absent
+	// `available` reads as "no", which is what a test without a project wants.
+	std::function<bool()>                 gameLogicAvailable;
+	std::function<bool(std::string& err)> startGameLogicBuild;
+
+	// The shared Build window. `buildRunning` is asked BEFORE either start, so
+	// the refusal names the kind that is holding it (out of `buildStatus`).
+	std::function<bool()>           buildRunning;
+	std::function<McpBuildStatus()> buildStatus;
+};
+
+void registerBuildTools(McpToolRegistry& registry, McpBuildHooks hooks);
+
+// ─── The knobs: the settings tools ───────────────────────────────────────────
+// Two tools, `settings_get` and `settings_set`, over two scopes: `project` (the
+// .heproj manifest — what the project IS and what it allows) and `editor` (this
+// editor's own preferences).
+//
+// ── Why both scopes are one pair of tools ────────────────────────────────────
+// Because that is how the editor presents them: there is no project settings
+// surface, so the project pages live in Preferences next to the editor ones
+// (EditorSettingsPanel::Page — "they live in Preferences because there is no
+// project settings surface yet"). A client that had to know which of two tools a
+// setting belonged to would have to know something the editor itself does not
+// bother to make visible.
+//
+// ── Why the editor scope needs a table and the project scope does not ────────
+// A project setting is a named field of ProjectData, and the list of them that
+// may be written is short and decided here. The editor's are sixty fields drawn
+// by a panel that cannot be compiled without a window, so they go through
+// EditorSettingsCatalog.h — the same list, written as data, with the ranges the
+// widgets enforce by construction.
+//
+// ── Three refusals worth reading before using these ──────────────────────────
+//   • The `Remote Control` category is NEVER writable. It is the page on which
+//     this bridge is switched on and its port chosen; a tool that can turn its
+//     own listener off is useless in the best case and inexplicable in the
+//     worst. Readable, so a client can see the state it is living in.
+//   • `name`, `path`, `id`, `scriptLanguage` and `appProject` are readable and
+//     not writable. Those five say what the project IS — the scripting language
+//     gates what may be created at all and the app flag decides whether there is
+//     a world — and changing one under a project full of assets is not a setting
+//     change, it is a conversion nobody wrote.
+//   • There is no play-mode gate, deliberately. A human can open Preferences
+//     while a preview runs, and a gate MCP has but the UI does not would be a
+//     behaviour change dressed as plumbing. Where a value only reaches a RUNNING
+//     simulation through a callback (the collision matrix), the callback is
+//     called — see applyCollisionLayers.
+//
+// ── Persistence is reported, never assumed ───────────────────────────────────
+// A project write is followed by ProjectManager::saveProject; the result says
+// `persisted`. The editor's config is a different story: the editor writes
+// config.json in OnShutdown and nowhere else, so unless the caller supplies
+// `persistEditorConfig` the honest answer is `persisted: false` with the reason
+// — "in effect now, written to disk when the editor closes". Claiming otherwise
+// would be the kind of lie that is only found out after a crash.
+struct McpSettingsHooks
+{
+	// ── project scope ───────────────────────────────────────────────────────
+	std::function<ProjectData*()> project;
+	// ProjectManager::saveProject(proj.path). False = the manifest could not be
+	// written, which the result reports rather than swallowing.
+	std::function<bool()> saveProject;
+	// Push the project's collision matrix into the RUNNING simulation, exactly
+	// as the Collision Layers page does after its own save. A no-op outside play
+	// mode, which is correct: the next play start reads the matrix afresh.
+	std::function<void()> applyCollisionLayers;
+
+	// ── editor scope ────────────────────────────────────────────────────────
+	// The live config. Null = no editor (a test that only exercises the project
+	// scope), and the editor scope then reports itself unavailable.
+	std::function<EditorConfig*()> editorConfig;
+	// Write config.json NOW. Absent = it is written on shutdown, and the result
+	// says so instead of claiming a file was touched.
+	std::function<bool()> persistEditorConfig;
+
+	// The rows of the catalogue that are not fields of EditorConfig at all
+	// (SettingStorage::External): VSync lives on the Application, the backend
+	// name on the AppContext. Absent hooks make those rows read as unavailable
+	// rather than as false.
+	std::function<bool(const std::string& key, nlohmann::json& out)> readExternalSetting;
+	std::function<bool(const std::string& key, const nlohmann::json& in,
+	                   std::string& outError)>                       writeExternalSetting;
+
+	// A field that IS in EditorConfig and additionally has to travel somewhere:
+	// the catalogue's `apply` name ("maxfps") and the config as it now stands.
+	// Absent = the field is set and nothing else happens, which is right for a
+	// value the renderer re-reads every frame and wrong for the two that do not.
+	std::function<void(const std::string& apply, const EditorConfig& cfg)> applySetting;
+};
+
+void registerSettingsTools(McpToolRegistry& registry, McpSettingsHooks hooks);
 
 } // namespace HE::Ed

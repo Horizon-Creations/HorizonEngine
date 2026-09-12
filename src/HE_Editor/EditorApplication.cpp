@@ -23,6 +23,10 @@
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
+#include "ExportDialogPanel.h"     // the packing worker the MCP build tools start
+#include "GameLogicBuildPanel.h"   // …and the native compile they start the other way
+#include "BuildProgressDialog.h"   // …and the one window both of them report into
+#include "HcFallbackReport.h"      // which classes an export had to ship interpreted
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Platform/PathSafety.h>    // an asset path off the wire must stay in the project
@@ -6730,6 +6734,133 @@ void EditorApplication::setupMcpTools()
 		return SkeletalMeshEditorPanel::isDirty(rel);
 	};
 	HE::Ed::registerClipTools(m_mcp.registry(), contentManager(), std::move(clips));
+
+	// ── Making the project run ───────────────────────────────────────────────
+	// The two Build menu actions and the window they both report into. Neither
+	// start hook decides anything: the panels own the worker, the refusals and
+	// the step list, exactly as they do when the human presses the row, and the
+	// tools only supply the profile and read the model back out.
+	HE::Ed::McpBuildHooks build;
+	build.project = [this]() -> ProjectData* {
+		auto& p = m_projectManager.currentProject();
+		return p.path.empty() ? nullptr : &p;
+	};
+	build.startExport = [this](const ExportProfile& p, std::string& err) {
+		AppContext ctx = makeContext();
+		return ExportDialogPanel::startFromProfile(ctx, p, &err);
+	};
+	build.gameLogicAvailable = [this] {
+		const AppContext ctx = makeContext();
+		return GameLogicBuildPanel::available(ctx);
+	};
+	build.startGameLogicBuild = [this](std::string& err) {
+		// `start` refuses with a notification rather than a return value, so the
+		// two conditions it refuses on are asked here first — a client that gets
+		// "started: true" and then sees nothing happen has no way to find out why.
+		AppContext ctx = makeContext();
+		if (!GameLogicBuildPanel::available(ctx))
+		{ err = "this project has no native game logic"; return false; }
+		if (GameLogicBuildPanel::running() || BuildProgressDialog::Build::running())
+		{ err = "a build is already running"; return false; }
+		GameLogicBuildPanel::start(ctx);
+		return true;
+	};
+	// Both halves, because the two panels own two different workers and either
+	// one holds the single Build window.
+	build.buildRunning = [] {
+		return BuildProgressDialog::Build::running() || GameLogicBuildPanel::running();
+	};
+	build.buildStatus = [] {
+		const BuildProgressDialog::Snapshot s = BuildProgressDialog::snapshot();
+		HE::Ed::McpBuildStatus out;
+		out.hasRun       = s.hasRun;
+		out.running      = s.running;
+		out.kind         = s.kind == BuildProgressDialog::Kind::GameLogic
+		                       ? "gamelogic" : "export";
+		out.currentStep  = s.current;
+		out.activity     = s.activity;
+		out.finished     = s.finished;
+		out.success      = s.success;
+		out.message      = s.message;
+		out.executable   = s.executable.string();
+		out.runnableHere = s.runnableHere;
+		out.interpretedHeadline = s.interpreted.headline;
+		for (const HcFallbackReport::Notice& n : s.interpreted.classes)
+			out.interpretedClasses.emplace_back(n.label, HcFallbackReport::describe(n));
+		for (const auto& st : s.steps)
+		{
+			HE::Ed::McpBuildStep step;
+			step.name          = st.name;
+			step.state         = st.state == 1 ? "running"
+			                   : st.state == 2 ? "done"
+			                   : st.state == 3 ? "failed" : "pending";
+			step.progress      = st.progress;
+			step.indeterminate = st.indeterminate;
+			step.detail        = st.detail;
+			out.steps.push_back(std::move(step));
+		}
+		for (const auto& l : s.log)
+			out.log.push_back(HE::Ed::McpBuildLogLine{ l.step, l.severity, l.text });
+		return out;
+	};
+	HE::Ed::registerBuildTools(m_mcp.registry(), std::move(build));
+
+	// ── The knobs ────────────────────────────────────────────────────────────
+	// Three of these hooks are the whole reason the settings tools are not just
+	// a struct write: the manifest has to be SAVED, the collision matrix has to
+	// reach a running simulation, and the two values that are not in EditorConfig
+	// at all (VSync, the backend name) live on the AppContext.
+	HE::Ed::McpSettingsHooks settings;
+	settings.project = [this]() -> ProjectData* {
+		auto& p = m_projectManager.currentProject();
+		return p.path.empty() ? nullptr : &p;
+	};
+	settings.saveProject = [this] {
+		auto& p = m_projectManager.currentProject();
+		return !p.path.empty() && m_projectManager.saveProject(p.path);
+	};
+	settings.applyCollisionLayers = [this] {
+		// The same body AppContext::applyCollisionLayers carries, and the same
+		// reason it is a callback rather than a PhysicsWorld pointer: that world
+		// is created at play start and destroyed at play stop. Doing nothing
+		// outside play mode is correct — the next play start reads the matrix
+		// from the project itself.
+		if (m_physicsWorld)
+			m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
+	};
+	settings.editorConfig = [this] { return &m_editorConfig; };
+	// The editor writes config.json in OnShutdown and nowhere else, so without
+	// this hook the honest answer would be "in effect now, on disk later". With
+	// it, a setting a client asked for survives a crash.
+	settings.persistEditorConfig = [this] { writeEditorConfig(); return true; };
+	settings.readExternalSetting = [this](const std::string& key, nlohmann::json& out) {
+		if (key == "display.vsync")   { out = m_vsync;        return true; }
+		if (key == "display.backend") { out = m_backend_name; return true; }
+		return false;
+	};
+	settings.writeExternalSetting = [this](const std::string& key,
+	                                       const nlohmann::json& in, std::string& err) {
+		if (key == "display.vsync")
+		{
+			if (!in.is_boolean()) { err = "expected a boolean"; return false; }
+			// Through the Application AND the flag, which is exactly what
+			// AppContext::setVSync does: the profiler's capture saves and
+			// restores the app's vsync, so a flag set behind its back is a
+			// capture that restores a stale value.
+			const bool v = in.get<bool>();
+			setVSync(v);
+			m_vsync = v;
+			return true;
+		}
+		err = "'" + key + "' is not writable";
+		return false;
+	};
+	settings.applySetting = [this](const std::string& what, const EditorConfig& cfg) {
+		// The field is already written; this is the half that reaches the frame
+		// pacer, the same call AppContext::setMaxFps makes.
+		if (what == "maxfps") setMaxFps(cfg.MaxFps);
+	};
+	HE::Ed::registerSettingsTools(m_mcp.registry(), std::move(settings));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────
@@ -8529,6 +8660,16 @@ void EditorApplication::OnShutdown()
 
 	m_audioEngine.shutdown();
 
+	// The editor's own settings, out to config.json. Factored out of OnShutdown
+	// because it was the ONLY place that knew the key for each field, and a
+	// second copy of that mapping is one that stops matching the first the day
+	// somebody adds a setting. `settings_set` calls it so a value an external
+	// client asked for survives a crash instead of waiting for a clean exit.
+	writeEditorConfig();
+}
+
+void EditorApplication::writeEditorConfig()
+{
 	GlobalState& globalstate = GlobalState::getInstance();
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
 	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknowledged", m_editorConfig.KeepCPUAssetsInfoAcknowledged);
