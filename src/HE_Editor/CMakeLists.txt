@@ -177,6 +177,10 @@ add_executable(HorizonEditor WIN32
 	# and the blend space a state can pose from instead of a clip. The rename
 	# fix-up the panel does by hand lives in here too.
 	McpToolsAnimator.cpp
+	# A clip is imported, but the events on its timeline are not: the notify lane
+	# and the root-motion switch are authored in the Skeletal Mesh Editor and live
+	# in a chunk of their own, so that half is editable from outside too.
+	McpToolsClip.cpp
 	# The argument readers, the ONE confinement rule and the one content walk that
 	# all of the above use. Two copies of a boundary are two boundaries.
 	McpToolCommon.cpp

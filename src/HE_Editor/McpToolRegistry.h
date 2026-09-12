@@ -997,4 +997,59 @@ struct McpAnimatorHooks
 void registerAnimatorTools(McpToolRegistry& registry, ContentManager& content,
                            McpAnimatorHooks hooks);
 
+// ─── What a clip announces: the animation-clip tools ─────────────────────────
+// Four tools: `clip_info` (the catalogue, and one clip's authored half),
+// `clip_notify_set` / `clip_notify_remove` (the events on its timeline) and
+// `clip_root_motion_set` (its per-clip root-motion switch).
+//
+// ── Why an IMPORTED asset has tools at all ───────────────────────────────────
+// The handoff that asked for this family (docs/mcp-editor-integration-plan.md
+// §16.2) guessed that an AnimationClip would end at "not editable, it is an
+// import" — `AssetStubWriter` refuses to stub one, like a mesh or a texture, and
+// nothing can create one. That guess is wrong, and the evidence is a panel: the
+// Skeletal Mesh Editor authors a clip's NOTIFY TIMELINE and its root-motion
+// switch, saves them with `ContentManager::saveAsset`, and both live in a chunk
+// of their own (`CHUNK_ANOT`). So the authored half is real, it is small, and it
+// is exactly as editable from outside as it is from the tab.
+//
+// The KEYFRAMES stay out. Those are `CHUNK_ANIM` and they are the import: a tool
+// that wrote a channel would be re-authoring animation a DCC tool owns, and the
+// next re-import would throw it away without telling anyone.
+//
+// ── Why an INDEX addresses a notify ──────────────────────────────────────────
+// A notify is a name, a time and a duration, and nothing else — no id. Two of
+// them may legitimately carry the same name (two footsteps), so the position in
+// the list is the only address there is; `SkeletalMeshEditorPanel` reaches for
+// the same one and says so. That makes every answer from these tools list the
+// notifies WITH their current indices, because a removal shifts the rest.
+//
+// ── Why there is no reload hook here ─────────────────────────────────────────
+// The other families tell a clean tab to re-read the file after a write. A clip
+// cannot need that: the loaded clip IS the tab's edit buffer
+// (`ContentManager::getAnimationClipMutable`), and the notify lane reads that
+// list every frame, so the edit is on screen on the next one. The same is true
+// of the running simulation — `AnimationNotify.cpp` walks the asset's own vector,
+// so there is no resolved copy to invalidate either.
+struct McpClipHooks
+{
+	// Play-in-editor. Like the asset, scene, material, type and particle tools
+	// and unlike the entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does the Skeletal Mesh Editor hold unsaved notify or root-motion edits for
+	// this clip? Asked with the CLIP's content-relative path, not a tab's: the tab
+	// shows a mesh, the edits belong to the clip scrubbed in it, and
+	// SkeletalMeshEditorPanel::isDirty is keyed that way already. Absent = there
+	// are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerClipTools(McpToolRegistry& registry, ContentManager& content,
+                       McpClipHooks hooks);
+
 } // namespace HE::Ed

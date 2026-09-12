@@ -19,6 +19,7 @@
 #include "ParticleGraphEditorPanel.h"        // …and the MCP particle tools ask this one
 #include "AnimatorStateMachineEditorPanel.h" // …and the animator tools these two
 #include "BlendSpacePanel.h"
+#include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
@@ -6711,6 +6712,24 @@ void EditorApplication::setupMcpTools()
 			if (sm.stateMachineAssetId == id) AnimationStateMachineSystem::markConfigDirty(sm);
 	};
 	HE::Ed::registerAnimatorTools(m_mcp.registry(), contentManager(), std::move(anim));
+
+	// ── What a clip announces ────────────────────────────────────────────────
+	// Three gates instead of four, and the dirty one is asked differently: the
+	// Skeletal Mesh Editor's unsaved clip edits are keyed by the CLIP's
+	// content-relative path (ContentManager stores `asset.path` relative), not by
+	// the tab's absolute one — so this family needs no ByContentPath pair. There
+	// is no reload hook either: the loaded clip is that tab's edit buffer, so it
+	// shows the write on its next frame, and AnimationNotify walks the same
+	// vector, so nothing resolved needs invalidating.
+	HE::Ed::McpClipHooks clips;
+	clips.isPlaying     = [this] { return m_isPlaying; };
+	clips.lockedByOther = [this](const std::string& rel) {
+		return m_collab.assetLockedByOther(rel);
+	};
+	clips.isDirty = [](const std::string& rel) {
+		return SkeletalMeshEditorPanel::isDirty(rel);
+	};
+	HE::Ed::registerClipTools(m_mcp.registry(), contentManager(), std::move(clips));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────

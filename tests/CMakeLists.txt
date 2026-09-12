@@ -138,6 +138,7 @@ add_executable(he_tests
     test_mcp_tools_type.cpp
     test_mcp_tools_particle.cpp
     test_mcp_tools_animator.cpp
+    test_mcp_tools_clip.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -270,6 +271,10 @@ add_executable(he_tests
     # stubbed.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsParticle.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsAnimator.cpp
+    # Same reason once more: the claim is that the clip the simulation reads
+    # afterwards carries the events that were asked for, and only a real
+    # AnimationClipAsset round-trip through a real ContentManager answers it.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsClip.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
