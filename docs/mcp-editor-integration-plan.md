@@ -2680,31 +2680,39 @@ Engine-API und ist deshalb nirgends fest hinterlegt.
 
 ### 19.2 Das Verzeichnis
 
-| Familie | n | Datei | Nachtrag | Merge |
+Die letzte Spalte trennt zwei Dinge, die man nicht verwechseln darf: **auf
+main** steht der Merge-Commit, **auf dem Zweig** der Commit, der noch auf einen
+Merge wartet.
+
+| Familie | n | Datei | Nachtrag | Stand |
 |---|---:|---|---|---|
-| `ping`, `scene_info` | 2 | `McpToolRegistry.cpp` | §1–7 | — |
-| `entity_*` | 7 | `McpToolsEntity.cpp` | §8 | — |
-| `hc_*` | 13 | `McpToolsHc.cpp` | §8 | — |
-| `api_list` + `api_*` | 1 + 248 | `McpToolsApi.cpp` | §8 | — |
-| `asset_*` | 5 | `McpToolsAsset.cpp` | §8.1 ff. | `d92ab5a2` |
-| `scene_create/open/save` | 3 | `McpToolsScene.cpp` | §9 | `87584a0a` |
-| `terrain_*` | 4 | `McpToolsTerrain.cpp` | §10 | `022a2568` |
-| `widget_*` | 8 | `McpToolsWidget.cpp` | §11 | `47fdab61` |
-| `input_*` | 6 | `McpToolsInput.cpp` | §12 | `a14a7912` |
-| `material_*` | 3 | `McpToolsMaterial.cpp` | §13 | `be9fc05f` |
-| `prefab_*` | 4 | `McpToolsPrefab.cpp` | §14 | `2c44b074` |
-| `type_*` | 5 | `McpToolsType.cpp` | §15 | `2c44b074` |
-| `particle_*` | 3 | `McpToolsParticle.cpp` | §17 | `16f78d8a` |
-| `animator_*`, `blendspace_*` | 11 | `McpToolsAnimator.cpp` | §17 | `16f78d8a` |
-| `clip_*` | 4 | `McpToolsClip.cpp` | §17.4 | `dfa9bc95` |
-| `project_build`, `project_build_status`, `project_package` | 3 | `McpToolsBuild.cpp` | §18 | `8df49958` |
-| `settings_get`, `settings_set` | 2 | `McpToolsSettings.cpp` | §18.5 ff. | `8df49958` |
+| `ping`, `scene_info` | 2 | `McpToolRegistry.cpp` | §1–7 | auf main (Vorthema) |
+| `entity_*` | 7 | `McpToolsEntity.cpp` | §8 | auf main (Vorthema) |
+| `hc_*` | 13 | `McpToolsHc.cpp` | §8 | auf main (Vorthema) |
+| `api_list` + `api_*` | 1 + 248 | `McpToolsApi.cpp` | §8 | auf main (Vorthema) |
+| `asset_*` | 5 | `McpToolsAsset.cpp` | §8.1 ff. | auf main, `d92ab5a2` |
+| `scene_create/open/save` | 3 | `McpToolsScene.cpp` | §9 | auf main, `87584a0a` |
+| `terrain_*` | 4 | `McpToolsTerrain.cpp` | §10 | auf main, `022a2568` |
+| `widget_*` | 8 | `McpToolsWidget.cpp` | §11 | auf main, `47fdab61` |
+| `input_*` | 6 | `McpToolsInput.cpp` | §12 | auf main, `a14a7912` |
+| `material_*` | 3 | `McpToolsMaterial.cpp` | §13 | auf main, `be9fc05f` |
+| `prefab_*` | 4 | `McpToolsPrefab.cpp` | §14 | auf main, `2c44b074` |
+| `type_*` | 5 | `McpToolsType.cpp` | §15 | auf main, `2c44b074` |
+| `particle_*` | 3 | `McpToolsParticle.cpp` | §17 | **Zweig**, `16f78d8a` |
+| `animator_*`, `blendspace_*` | 11 | `McpToolsAnimator.cpp` | §17 | **Zweig**, `16f78d8a` |
+| `clip_*` | 4 | `McpToolsClip.cpp` | §17.4 | **Zweig**, `dfa9bc95` |
+| `project_build`, `project_build_status`, `project_package` | 3 | `McpToolsBuild.cpp` | §18 | **Zweig**, `8df49958` |
+| `settings_get`, `settings_set` | 2 | `McpToolsSettings.cpp` | §18.5 ff. | **Zweig**, `8df49958` |
+
+Auf dem Zweig warten außerdem `bc54c7e5` (drei Editor-Tabs waren nur unter
+ihrem absoluten Pfad zu finden), `5c46831a` und `1c34e830` (Nachträge zu §17
+und §18) sowie die Commits dieses Abschlusskapitels.
 
 Die vollständigen Namen stehen im Quelltext und in der Handbuch-Tabelle
 (19.4); sie hier ein drittes Mal abzuschreiben hieße, eine dritte Liste zu
 pflegen, die als erste veraltet.
 
-### 19.3 Die vier Regeln, die über alle Familien hinweg gelten
+### 19.3 Die Regeln, die über alle Familien hinweg gelten
 
 Sie sind über die Nachträge verstreut entstanden und werden hier zum ersten
 Mal zusammen gesagt, weil ein Client sie als Ganzes braucht:
@@ -2718,12 +2726,23 @@ Mal zusammen gesagt, weil ein Client sie als Ganzes braucht:
    Edit ohnehin weggeworfen.
 3. **Ein offener, schmutziger Tab gehört dem Menschen.** Input, Material,
    Typen, Partikel, Animator und Clip lehnen mit `dirty` ab. Die
-   Widget-Werkzeuge sind die bewusste Ausnahme (§11.2): sie schreiben in den
-   Tab, setzen den Undo-Schnappschuss wie ein menschlicher Edit und sagen in
-   `target`, welchen der beiden Wege sie genommen haben.
-4. **Ein Leser lädt nicht.** Die berichtenden Werkzeuge lesen die Datei,
-   statt das Asset in den ContentManager zu ziehen (§12.4, §13.6) — eine
-   Frage an den Editor verändert nicht, was er im Speicher hält.
+   HorizonCode- und die Widget-Werkzeuge gehen den anderen Weg: sie bearbeiten
+   das Dokument, das der Tab hält, setzen den Undo-Schnappschuss wie ein
+   menschlicher Edit und überlassen das Speichern dem Menschen (§11.2). Die
+   Widget-Werkzeuge sagen dazu in `target`, welchen der beiden Wege sie
+   genommen haben.
+4. **Eine Liste lädt nicht.** Die Listenform beantwortet sich aus dem
+   Header-Sniff, damit eine Frage nicht den halben Asset-Pool verschiebt
+   (§12.4, §13.6). Die **Einzelform lädt sehr wohl** — die Parameterschicht
+   eines Materials oder der Baum eines Widgets steht nirgendwo sonst —, und
+   jedes dieser Werkzeuge sagt das in seiner eigenen Beschreibung.
+5. **Undo deckt die Szene, nicht den Content-Ordner.** Was durch das Gateway
+   geht (Entities, Terrain, das Platzieren eines Prefabs, ein Widget im
+   offenen Tab), liegt im Undo-Stack und wird in einer Sitzung publiziert. Was
+   eine Asset-Datei schreibt, ist mit der Antwort auf der Platte: kein Undo
+   (§8.1, §11.2, §14.7) und keine Item-Level-Publikation (§12.6, §13.7, §15.5,
+   §17.5). Der Fremd-Lock wird trotzdem geprüft und die Schreiboperation
+   abgelehnt.
 
 Dazu die Fehlercodes, die ein Client kennen sollte, nach Häufigkeit im
 Quelltext: `invalid_payload` (75), `failed` (36), `invalid_path` (20),
@@ -2744,7 +2763,7 @@ Drei Orte, und jeder hat einen eigenen Grund:
 * **Das Handbuch im Editor und die Website**, Abschnitt *Collaboration ▸
   Remote Control ▸ What a client may do*
   (`Website/HorizonEngineDocs/collaboration.html`). Dort steht das
-  Familienverzeichnis als Tabelle und die vier Regeln aus 19.3, in der Sprache
+  Familienverzeichnis als Tabelle und die Regeln aus 19.3, in der Sprache
   eines Nutzers statt eines Clients. Das In-Engine-Handbuch ist dieselbe
   Quelle, durch `scripts/build_docs_bundle.py` nach
   `EditorDeps/Docs/he-docs.json` gebacken — die Datei ist eingecheckt, damit
