@@ -16,6 +16,9 @@
 #include "ConsolePanel.h"          // the log sink behind View ▸ Console
 #include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
 #include "TypeAssetPanel.h"        // the MCP type tools ask this tab whether it is dirty
+#include "ParticleGraphEditorPanel.h"        // …and the MCP particle tools ask this one
+#include "AnimatorStateMachineEditorPanel.h" // …and the animator tools these two
+#include "BlendSpacePanel.h"
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
@@ -6652,6 +6655,62 @@ void EditorApplication::setupMcpTools()
 		if (!projectPath.empty()) HE::writeCppTypesHeader(projectPath);
 	};
 	HE::Ed::registerTypeTools(m_mcp.registry(), contentManager(), std::move(types));
+
+	// ── An emitter's values ──────────────────────────────────────────────────
+	// The same four gates as material and types, plus the one thing a particle
+	// save does besides writing the file: every live ParticleSystemComponent
+	// already using the asset has to re-resolve, or the edit shows up only the
+	// next time that entity's own particleAssetId changes. That is the second
+	// half of ParticleGraphEditorPanel::saveToDisk.
+	HE::Ed::McpParticleHooks particles;
+	particles.isPlaying     = [this] { return m_isPlaying; };
+	particles.lockedByOther = [this](const std::string& rel) {
+		return m_collab.assetLockedByOther(rel);
+	};
+	particles.isDirty = [](const std::string& rel) {
+		return ParticleGraphEditorPanel::isDirtyByContentPath(rel);
+	};
+	particles.reloadFromDisk = [](const std::string& rel) {
+		return ParticleGraphEditorPanel::reloadByContentPath(rel);
+	};
+	particles.onGraphChanged = [this](const std::string& rel) {
+		if (!m_editorWorld) return;
+		// idForPath, not loadAsset: this runs right after the write, and the only
+		// question is which resident asset the path stands for.
+		const HE::UUID id = contentManager().idForPath(rel);
+		if (id == HE::UUID{}) return;
+		for (auto [e, ps] : m_editorWorld->registry().view<ParticleSystemComponent>().each())
+			if (ps.particleAssetId == id) ParticleSystem::markConfigDirty(ps);
+	};
+	HE::Ed::registerParticleTools(m_mcp.registry(), contentManager(), std::move(particles));
+
+	// ── The animation assets ─────────────────────────────────────────────────
+	// Two panels behind one family, so the two tab questions dispatch on which
+	// one holds the path — the same "ask everyone, the owner answers" shape the
+	// save and reload chains use. The live-invalidate is deliberately only for
+	// the state machine: BlendSpacePanel's own Save does not do it either.
+	HE::Ed::McpAnimatorHooks anim;
+	anim.isPlaying     = [this] { return m_isPlaying; };
+	anim.lockedByOther = [this](const std::string& rel) {
+		return m_collab.assetLockedByOther(rel);
+	};
+	anim.isDirty = [](const std::string& rel) {
+		return AnimatorStateMachineEditorPanel::isDirtyByContentPath(rel) ||
+		       BlendSpacePanel::isDirtyByContentPath(rel);
+	};
+	anim.reloadFromDisk = [](const std::string& rel) {
+		const bool a = AnimatorStateMachineEditorPanel::reloadByContentPath(rel);
+		const bool b = BlendSpacePanel::reloadByContentPath(rel);
+		return a || b;
+	};
+	anim.onGraphChanged = [this](const std::string& rel) {
+		if (!m_editorWorld) return;
+		const HE::UUID id = contentManager().idForPath(rel);
+		if (id == HE::UUID{}) return;
+		for (auto [e, sm] : m_editorWorld->registry().view<AnimatorStateMachineComponent>().each())
+			if (sm.stateMachineAssetId == id) AnimationStateMachineSystem::markConfigDirty(sm);
+	};
+	HE::Ed::registerAnimatorTools(m_mcp.registry(), contentManager(), std::move(anim));
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────

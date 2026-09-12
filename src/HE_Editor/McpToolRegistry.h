@@ -857,4 +857,144 @@ struct McpTypeHooks
 void registerTypeTools(McpToolRegistry& registry, ContentManager& content,
                        McpTypeHooks hooks);
 
+// ─── An emitter's values: the particle tools ─────────────────────────────────
+// Three tools: `particle_info` (the catalogue, and one emitter in full),
+// `particle_set` (one Emitter Output input) and `particle_slot_set` (the mesh
+// and material the emitter draws with).
+//
+// ── Why an emitter needs tools of its own ────────────────────────────────────
+// A ParticleSystem asset is a NODE GRAPH (HE::ParticleGraph): what the emitter
+// actually emits is the result of evaluating it, and every authored value sits
+// in a Const node wired to one of the seventeen Emitter Output pins. Handing a
+// client that JSON to rewrite would be the base64 mistake again — the pin INDEX
+// is on-disk format (ParticleGraph.h: pins may only ever be appended), a link is
+// four bare integers, and `type` is a display name rather than the enum.
+//
+// ── Why the graph is addressed by PIN NAME and not by node ───────────────────
+// The handoff of the step before this one (docs/mcp-editor-integration-plan.md
+// §16.3) proposed "the values of existing nodes", modelled on
+// `material_set_param`. Taken literally that is a tool that works on no fresh
+// asset at all: `ParticleGraph::makeDefault` is ONE node — the Emitter Output —
+// with every pin unconnected and therefore at its registry default. There is
+// nothing whose value could be set.
+//
+// So a pin is the address, spelled the way the editor's own slot list spells it
+// ("Emit Rate", "Start Color"), and setting one does the smallest thing that
+// makes that value true:
+//   • pin unconnected  → a Const node is created, set and wired (Const Color for
+//     the two colour pins, because that is what the panel puts there),
+//   • pin driven by a Const node that feeds ONLY this pin → its value is changed
+//     in place,
+//   • pin driven by anything else — Random Range, Add, Lerp, or a Const shared
+//     with a second pin → REFUSED, naming the node. That is the boundary §16.3
+//     drew and it is the honest one: rewiring a graph is a different tool from
+//     setting a value, and silently detaching an author's math node to force a
+//     constant in would be an edit nobody asked for.
+//
+// ── Why an open tab is REFUSED rather than edited ────────────────────────────
+// The same answer as the input, material and type tools: unsaved edits in an
+// open Particle Graph tab are refused with `dirty`, a clean tab is told to
+// re-read the file. There is no `particle_save` — these tools never leave
+// something unsaved behind them.
+struct McpParticleHooks
+{
+	// Play-in-editor. Like the asset, scene, material and type tools and unlike
+	// the entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Particle Graph tab have edits the
+	// file does not? Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read the file. TRUE when a tab was actually holding the
+	// asset. Absent = no tabs.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// The graph on disk changed: every LIVE ParticleSystemComponent already using
+	// this asset has to re-resolve, or the edit only shows up the next time its
+	// own particleAssetId changes. This is the second half of
+	// ParticleGraphEditorPanel::saveToDisk (ParticleSystem::markConfigDirty) and
+	// leaving it out is a silent divergence from the panel's own Save. Absent =
+	// there is no world, which is a test.
+	std::function<void(const std::string& contentRel)> onGraphChanged;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerParticleTools(McpToolRegistry& registry, ContentManager& content,
+                           McpParticleHooks hooks);
+
+// ─── The animation assets: the animator and blend-space tools ────────────────
+// Eleven tools. The state machine: `animator_info` (the catalogue, and one
+// machine in full), `animator_state_set` / `animator_state_remove`,
+// `animator_transition_set` / `animator_transition_remove`, `animator_param_set`
+// / `animator_param_remove`. The blend space: `blendspace_info`,
+// `blendspace_set` and `blendspace_sample_set` / `blendspace_sample_remove`.
+//
+// ── The question this family had to answer first ─────────────────────────────
+// Every earlier family had one (§16.2 of the plan doc names them): for materials
+// it was "where does a value really live", for input "the loader stays silent",
+// for types "the registry is the truth, not the file". For a state machine it is
+// WHAT HAPPENS TO A TRANSITION WHEN THE PARAMETER IT NAMES GOES AWAY — a
+// transition names its parameter by name, and its two endpoint STATES by name
+// too, and nothing in the format ties either back.
+//
+// The answer, read out of AnimationStateMachineSystem::evalTransition: a
+// transition whose parameter is not in the live map returns false, every frame,
+// forever. Not an error, not a log line — a transition that silently never
+// fires. So:
+//   • `animator_param_remove` REFUSES while any transition names the parameter,
+//     and lists them. `force` takes it out anyway, because a sync graph or a
+//     script may well be writing that parameter at runtime without it ever being
+//     declared as a default — the map is open. What is refused is doing it by
+//     accident.
+//   • `animator_state_set` can RENAME, and does the fix-up the panel does by
+//     hand (AnimatorStateMachineEditorPanel's name field): every transition
+//     endpoint and `startState` that named the old name is rewritten. A rename
+//     that skipped it would leave dangling endpoints, which the system skips as
+//     silently as the missing parameter.
+//   • `animator_state_remove` drops the transitions that touch the state and
+//     clears `startState` if it pointed there — the same cascade the panel's
+//     node deletion performs.
+//
+// ── Why a transition is addressed by a TRIPLE ────────────────────────────────
+// A transition has no id (AnimatorStateMachineGraph.h says so, and says why it
+// is not fixed yet). Collaboration keys one by hashing from/to/param, so these
+// tools address one the same way: the (from, to, param) triple. A matching
+// triple is updated in place, anything else is appended — which is also what
+// makes two transitions between the same pair of states on DIFFERENT parameters
+// addressable at all.
+//
+// ── Why the blend space is in this family ────────────────────────────────────
+// Because a state points at one instead of a clip (`blendSpaceId` WINS over
+// `clipId`), so authoring the machine without being able to author the space it
+// blends is half a tool. Samples have no id and two of them may name the same
+// clip, so an INDEX is the only honest address; `blendspace_info` reports them.
+struct McpAnimatorHooks
+{
+	std::function<bool()>                             isPlaying;
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// The two tab questions, asked of the panel that owns the addressed asset —
+	// AnimatorStateMachineEditorPanel for a state machine, BlendSpacePanel for a
+	// blend space. Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// A state machine on disk changed: every LIVE AnimatorStateMachineComponent
+	// using it has to re-resolve, exactly as AnimatorStateMachineEditorPanel's
+	// Save does (AnimationStateMachineSystem::markConfigDirty). Deliberately NOT
+	// called for a blend space: BlendSpacePanel's own Save does not do it either,
+	// and a tool that invalidated more than the panel would be a second, quietly
+	// different save path. Absent = there is no world, which is a test.
+	std::function<void(const std::string& contentRel)> onGraphChanged;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerAnimatorTools(McpToolRegistry& registry, ContentManager& content,
+                           McpAnimatorHooks hooks);
+
 } // namespace HE::Ed

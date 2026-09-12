@@ -136,6 +136,8 @@ add_executable(he_tests
     test_mcp_tools_material.cpp
     test_mcp_tools_prefab.cpp
     test_mcp_tools_type.cpp
+    test_mcp_tools_particle.cpp
+    test_mcp_tools_animator.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -261,6 +263,13 @@ add_executable(he_tests
     # for", and only a real ContentManager over a temporary content root plus the
     # real HE::TypeRegistry round-trip can answer it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsType.cpp
+    # The particle and animation tools. Their claim is "the emitter the
+    # simulation gets afterwards is the one that was asked for" — which only the
+    # real HE::ParticleGraph / HE::AnimatorStateMachineGraph round-trip through a
+    # real ContentManager can answer, so the sources are compiled in rather than
+    # stubbed.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsParticle.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsAnimator.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp

@@ -168,6 +168,15 @@ add_executable(HorizonEditor WIN32
 	# savegame fields). asset_create makes the file; without these it stays an
 	# empty definition nothing can be built on.
 	McpToolsType.cpp
+	# An emitter's values. A Particle System asset is a node graph, so what looks
+	# like a field ("Emit Rate") is a Const node wired to one of the Emitter
+	# Output's pins — these tools speak the pin names and keep the wiring to
+	# themselves.
+	McpToolsParticle.cpp
+	# The animation assets: the state machine (states, transitions, parameters)
+	# and the blend space a state can pose from instead of a clip. The rename
+	# fix-up the panel does by hand lives in here too.
+	McpToolsAnimator.cpp
 	# The argument readers, the ONE confinement rule and the one content walk that
 	# all of the above use. Two copies of a boundary are two boundaries.
 	McpToolCommon.cpp
