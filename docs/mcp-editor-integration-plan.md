@@ -2462,10 +2462,13 @@ Export Project), **`project_build`** (Build ▸ Build and Reload Game Logic),
 **`project_build_status`** (was das Build-Fenster zeigt) sowie **`settings_get`**
 und **`settings_set`** über die beiden Bereiche `project` und `editor`.
 
-Vorher endete jede der 64 anderen Werkzeuge bei einer Datei im Projekt. Keines
+Vorher endete jedes der 79 anderen Werkzeuge bei einer Datei im Projekt. Keines
 produzierte etwas, das ein Mensch starten kann, und ob ein HorizonCode-Graph
 überhaupt übersetzbar ist, erfährt man zum ersten Mal beim Export — der außer
-Reichweite lag.
+Reichweite lag. Mit diesen fünf sind es 84 (nachgezählt statt geschätzt: die
+eindeutigen `t.name`-Literale über alle `McpTools*.cpp` plus
+`McpToolRegistry.cpp`; die aus `HE::api::registry()` erzeugten Zeilen sind wie
+in der Zählung von `mcp-integration-im-15` nicht mitgezählt, nur `api_list`).
 
 ### 18.1 Beides ist asynchron, und darum hängt der ganze Entwurf daran
 
