@@ -21,9 +21,12 @@ Each KEY=VAL becomes HE_DUMP_<KEY>. Common keys (see dumpFrameHeadless):
 Examples:
     scripts/he_shot.py /tmp/a.png TOD=0.30 COVERAGE=0.7 PITCH=10
     scripts/he_shot.py /tmp/b.png TOD=0.0 NEBQUALITY=2 MILKYWAY=1 AURORA=0.6
+    scripts/he_shot.py /tmp/c.png SECTIONTEST=1 TOD=0.5 PITCH=0 RENDERPATH=1
+        (three-slot sphere: red/green/blue bands; SECTIONTEST=override → all yellow)
 
 Notes:
   * Renders at 1280x720. Forces Metal by default (HE_DUMP_RHI=Metal).
+  * A Debug deploy needs ~160 s before its first frame: HE_SHOT_TIMEOUT=400.
   * The editor currently segfaults on the dump-quit teardown AFTER writing the
     file — harmless; the BMP is flushed first. We validate the output and retry
     once if it's missing/short.
@@ -32,7 +35,10 @@ import os, sys, subprocess, shutil, pathlib
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 EDITOR = REPO / "out" / "deploy" / "Editor" / "HorizonEditor"
-TIMEOUT = 90
+# A Release editor dumps within seconds; a DEBUG deploy spends ~160 s in the
+# Metal init before its first frame, so a fixed 90 s reported "no image" for a
+# run that was merely slow. Override per shell: HE_SHOT_TIMEOUT=400.
+TIMEOUT = int(os.environ.get("HE_SHOT_TIMEOUT", "90"))
 
 
 def run_once(out_png: str, kv: dict) -> bool:

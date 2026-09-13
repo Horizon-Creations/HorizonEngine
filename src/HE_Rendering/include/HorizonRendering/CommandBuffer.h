@@ -17,6 +17,18 @@ struct DrawCall {
     HE::UUID     materialAssetId;                       // optional material override (null = mesh's own)
     RenderHandle mesh          = RenderHandle::invalid();
     RenderHandle material      = RenderHandle::invalid();
+    // Index range of this draw. indexCount == 0 means "the whole mesh" — the
+    // shape every draw had before sections existed and still the only shape a
+    // one-section mesh produces. A multi-section mesh arrives as one DrawCall
+    // per section (GeometryPass expands RenderObject::sections), each with the
+    // section's [indexOffset, indexCount) and its own materialAssetId, and
+    // sectionIndex says which slot it is (-1 = whole mesh). A backend that draws
+    // per section applies the range; a backend that does not (D3D11/D3D12/
+    // Vulkan today) skips sectionIndex > 0 and draws slot 0 whole — see
+    // RenderSorter::partitionByOpacity.
+    uint32_t     indexOffset   = 0;
+    uint32_t     indexCount    = 0;
+    int32_t      sectionIndex  = -1;
     glm::mat4    transform     = glm::mat4(1.0f);      // first instance (or sole) transform
     uint32_t     instanceCount = 1;
     uint32_t     entityId      = 0;                    // editor picking / debug

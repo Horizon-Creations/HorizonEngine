@@ -29,6 +29,24 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+// The index range a DrawCall covers on the mesh it ends up drawing. A whole-mesh
+// draw (indexCount 0 — every one-section mesh, every draw before sections
+// existed) spans the buffer; a section draw takes its own [offset, count),
+// CLAMPED to the buffer: the draw loops substitute the default cube when the
+// real mesh is not resident yet, and a range taken from the real asset must not
+// read past the cube's EBO. Count is what glDrawElements takes, offset the byte
+// pointer it takes.
+struct GlIndexRange { int count; const void* offset; };
+static inline GlIndexRange DrawIndexRange(const DrawCall& dc, int meshIndexCount)
+{
+	if (dc.indexCount == 0) return { meshIndexCount, nullptr };
+	const uint32_t total = meshIndexCount > 0 ? static_cast<uint32_t>(meshIndexCount) : 0u;
+	const uint32_t off   = std::min(dc.indexOffset, total);
+	const uint32_t cnt   = std::min(dc.indexCount, total - off);
+	return { static_cast<int>(cnt),
+	         reinterpret_cast<const void*>(static_cast<uintptr_t>(off) * sizeof(uint32_t)) };
+}
+
 // Builds the six cube faces of the image-based-ambient environment map for the
 // given sun direction (face = +X,-X,+Y,-Y,+Z,-Z in GL order). Returns tightly
 // packed RGBA32F, faces back to back, faceN texels each.
@@ -6899,11 +6917,12 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 			ResolveMaterialParams(dc.materialAssetId, dcBase, dcMetal, dcRough, dcOpacity);
 			if (uRoughMetal >= 0) glUniform2f(uRoughMetal, dcRough, dcMetal);
 			glBindVertexArray(mesh->vao);
+			const GlIndexRange range = DrawIndexRange(dc, mesh->indexCount); // section or whole
 			auto drawOne = [&](const glm::mat4& t)
 			{
 				glUniformMatrix4fv(uMVP,   1, GL_FALSE, glm::value_ptr(viewProj * t));
 				glUniformMatrix4fv(uModel, 1, GL_FALSE, glm::value_ptr(t));
-				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+				glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
 			};
 			if (!dc.instanceTransforms.empty())
 				for (const glm::mat4& t : dc.instanceTransforms) drawOne(t);
@@ -7541,6 +7560,7 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 		const GpuMesh* mesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
 		if (!mesh) continue;
 		glBindVertexArray(mesh->vao);
+		const GlIndexRange range = DrawIndexRange(dc, mesh->indexCount); // section or whole
 
 		// Instanced batches: draw each instance separately with its own transform.
 		// The SSAO pre-pass uses per-draw uniforms, not the instance VBO.
@@ -7549,13 +7569,13 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 			for (const glm::mat4& t : dc.instanceTransforms)
 			{
 				pushDraw(t);
-				glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+				glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
 			}
 		}
 		else
 		{
 			pushDraw(dc.transform);
-			glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+			glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
 		}
 	}
 	// Back to a single draw buffer so nothing downstream inherits the MRT state.
@@ -11312,7 +11332,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		                unsigned int gtex[4] = { 0, 0, 0, 0 }; int gtexCount = 0;
 		                // Deferred forward-routed opaque draws only: the landscape
 		                // weightmap resolved at collect time (0 → layer-0 default).
-		                unsigned int wmTex = 0; };
+		                unsigned int wmTex = 0;
+		                // Section draw: byte offset into the EBO (nullptr = from the
+		                // start, which is every whole-mesh draw). Trailing + defaulted
+		                // so the positional initialisers above stay as they are.
+		                const void* indexOffset = nullptr; };
 		std::vector<TPDraw> transparent;
 		// Deferred: opaque draws whose custom material has no G-buffer variant —
 		// replayed forward right after the lighting resolve.
@@ -11465,7 +11489,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				const GpuMesh* drawMesh = mesh ? mesh : ResolveMesh(HE::kDefaultCubeMeshId);
 				if (!drawMesh) continue;
 				const unsigned int vao        = drawMesh->vao;
-				const int          indexCount = drawMesh->indexCount;
+				// Section draw → its own slice of the EBO; whole-mesh draw → all of it.
+				const GlIndexRange range      = DrawIndexRange(dc, drawMesh->indexCount);
+				const int          indexCount = range.count;
+				const void* const  indexOffset = range.offset;
 
 				// Custom-material programs: forward (transparency + forward-routing)
 				// and, when the material has a G-buffer variant, its MRT program.
@@ -11512,6 +11539,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						TPDraw tp{ viewProj * t, t, baseColor,
 						           cMetallic, cRoughness, opacity, tex, vao, indexCount,
 						           RenderSorter::backToFrontKey(t, camPos) };
+						tp.indexOffset    = indexOffset;
 						tp.receivesShadow = dc.receivesShadow;
 						tp.matProg = matProg;
 						tp.params  = mParams;
@@ -11543,7 +11571,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glUniform1i(m_uGBInstHasTexture, tex != 0);
 					glActiveTexture(GL_TEXTURE0);
 					glBindTexture(GL_TEXTURE_2D, tex);
-					glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr,
+					glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset,
 					                        static_cast<GLsizei>(dc.instanceTransforms.size()));
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(indexCount / 3) *
@@ -11556,6 +11584,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					// No G-buffer variant → forward replay after the resolve.
 					TPDraw tp{ viewProj * dc.transform, dc.transform, baseColor,
 					           cMetallic, cRoughness, opacity, tex, vao, indexCount, 0.0f };
+					tp.indexOffset    = indexOffset;
 					tp.receivesShadow = dc.receivesShadow;
 					tp.matProg = matProg;
 					tp.params  = mParams;
@@ -11618,7 +11647,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 					}
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
 					glUseProgram(m_gbufferProgram);
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(indexCount / 3);
@@ -11636,7 +11665,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1i(m_uGBHasTexture, tex != 0);
 				glActiveTexture(GL_TEXTURE0);
 				glBindTexture(GL_TEXTURE_2D, tex);
-				glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+				glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			}
@@ -11683,7 +11712,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			const GpuMesh* drawMesh  = mesh ? mesh : ResolveMesh(HE::kDefaultCubeMeshId);
 			if (!drawMesh) continue;
 			const unsigned int vao        = drawMesh->vao;
-			const int          indexCount = drawMesh->indexCount;
+			// Section draw → its own slice of the EBO; whole-mesh draw → all of it.
+			const GlIndexRange range      = DrawIndexRange(dc, drawMesh->indexCount);
+			const int          indexCount = range.count;
+			const void* const  indexOffset = range.offset;
 
 			if (opacity < RenderSorter::kOpaqueOpacityThreshold)
 			{
@@ -11724,6 +11756,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					TPDraw tp{ viewProj * t, t, baseColor,
 					           cMetallic, cRoughness, opacity, tex, vao, indexCount,
 					           RenderSorter::backToFrontKey(t, camPos) };
+					tp.indexOffset    = indexOffset;
 					tp.receivesShadow = dc.receivesShadow;
 					tp.matProg = tpProg;
 					tp.params  = tpParams;
@@ -11758,7 +11791,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glBindVertexArray(vao);
 				glUniform1i(m_uInstHasTexture, tex != 0);
 				glBindTexture(GL_TEXTURE_2D, tex);
-				glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr,
+				glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset,
 				                        static_cast<GLsizei>(dc.instanceTransforms.size()));
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3) *
@@ -11877,7 +11910,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 						glActiveTexture(GL_TEXTURE0);
 					}
-					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+					glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
 					glUseProgram(m_unlitProgram); // restore for the next single-draw
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(indexCount / 3);
@@ -11893,7 +11926,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glBindVertexArray(vao);
 				glUniform1i(m_uHasTexture, tex != 0);
 				glBindTexture(GL_TEXTURE_2D, tex);
-				glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+				glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			}
@@ -12162,7 +12195,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, t.wmTex);
 					}
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 					continue;
@@ -12179,7 +12212,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1i(m_uHasTexture, t.tex != 0);
 				glBindVertexArray(t.vao);
 				glBindTexture(GL_TEXTURE_2D, t.tex);
-				glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+				glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 			}
@@ -12404,7 +12437,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, t.gtex[i]);
 					}
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					glUseProgram(m_unlitProgram); // restore the built-in blend program
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
@@ -12420,7 +12453,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1i(m_uHasTexture, t.tex != 0);
 				glBindVertexArray(t.vao);
 				glBindTexture(GL_TEXTURE_2D, t.tex);
-				glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, nullptr);
+				glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 			}

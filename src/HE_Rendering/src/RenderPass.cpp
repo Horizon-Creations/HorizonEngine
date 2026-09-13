@@ -49,6 +49,12 @@ void GeometryPass::execute(const RenderWorld&           world,
 			// Landscape chunks of DIFFERENT terrains share mesh+material but each
 			// samples its own painted weightmap, so they can't share a draw.
 			if (next.weightmapTextureId != first.weightmapTextureId) break;
+			// A multi-section mesh is drawn as one draw PER section (below), all
+			// of them sharing the batch's instance list — so the run must agree
+			// on the section table. Same mesh + same override normally means the
+			// same table; comparing is what makes that a guarantee rather than an
+			// assumption, and both lists are empty for every one-section mesh.
+			if (next.sections != first.sections) break;
 			++j;
 		}
 
@@ -79,7 +85,33 @@ void GeometryPass::execute(const RenderWorld&           world,
 				dc.instanceTransforms.push_back(world.objects[sortedIndices[k]].transform);
 		}
 
-		outCmds.recordDraw(dc);
+		if (first.sections.empty())
+		{
+			// One-section mesh (and every primitive, terrain chunk, override):
+			// exactly the draw this pass always recorded — whole index buffer,
+			// one material, one DrawCall per run.
+			outCmds.recordDraw(dc);
+		}
+		else
+		{
+			// Multi-section mesh: one DrawCall per material slot over the same
+			// instance list. The slot's own material rides in materialAssetId, so
+			// the backends resolve it through the very same path as an entity
+			// override — nothing downstream learns a new way to pick a material.
+			for (size_t s = 0; s < first.sections.size(); ++s)
+			{
+				const RenderSection& sec = first.sections[s];
+				// An empty slot has nothing to draw — and indexCount 0 would read
+				// as "whole mesh" downstream, which is the one thing it must not.
+				if (sec.indexCount == 0) continue;
+				DrawCall sd        = dc;
+				sd.indexOffset     = sec.indexOffset;
+				sd.indexCount      = sec.indexCount;
+				sd.sectionIndex    = static_cast<int32_t>(s);
+				sd.materialAssetId = sec.materialAssetId;
+				outCmds.recordDraw(sd);
+			}
+		}
 		i = j;
 	}
 

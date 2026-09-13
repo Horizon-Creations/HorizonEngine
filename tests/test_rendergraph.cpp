@@ -397,3 +397,150 @@ TEST_CASE("RenderGraph sink dispatches each pass with its declared target")
 	CHECK(recs[2].out  == kBackbufferTarget);
 	CHECK(recs[2].inputs == 1);
 }
+
+// ─── Mesh sections (material slots) ─────────────────────────────────────────
+// A multi-section mesh reaches the pass as ONE RenderObject carrying its slot
+// table (RenderObject::sections); GeometryPass expands it into one DrawCall per
+// slot. The one-section shape — the only one every pre-section asset produces —
+// must come out exactly as before: one whole-mesh draw.
+
+namespace {
+	std::vector<RenderSection> twoSlots()
+	{
+		HE::UUID matA; matA.hi = 11; matA.lo = 1;
+		HE::UUID matB; matB.hi = 22; matB.lo = 2;
+		RenderSection a; a.indexOffset = 0;  a.indexCount = 36; a.materialAssetId = matA;
+		RenderSection b; b.indexOffset = 36; b.indexCount = 24; b.materialAssetId = matB;
+		return { a, b };
+	}
+}
+
+TEST_CASE("GeometryPass: a one-section object records exactly one whole-mesh draw (regression guard)")
+{
+	RenderWorld world;
+	world.objects.push_back(makeObj(5, { 0, 0, 0 })); // sections empty = legacy shape
+	std::vector<uint32_t> sorted = { 0 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 1);
+	const DrawCall& dc = cmds.drawCalls()[0];
+	CHECK(dc.indexOffset  == 0);
+	CHECK(dc.indexCount   == 0);   // 0 = the whole index buffer
+	CHECK(dc.sectionIndex == -1);  // not a section draw
+	CHECK(dc.materialAssetId == HE::UUID{});
+}
+
+TEST_CASE("GeometryPass expands a two-section object into one draw per slot")
+{
+	RenderWorld world;
+	RenderObject o = makeObj(7, { 1, 2, 3 });
+	o.sections = twoSlots();
+	world.objects.push_back(o);
+	std::vector<uint32_t> sorted = { 0 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 2);
+	const DrawCall& d0 = cmds.drawCalls()[0];
+	const DrawCall& d1 = cmds.drawCalls()[1];
+	// Both draws are the same entity + mesh + transform, differing only in the slot.
+	CHECK(d0.meshAssetId == o.meshAssetId);
+	CHECK(d1.meshAssetId == o.meshAssetId);
+	CHECK(d0.entityId == 7);
+	CHECK(d1.entityId == 7);
+	CHECK(d0.transform == o.transform);
+	CHECK(d1.transform == o.transform);
+	CHECK(d0.sectionIndex == 0);
+	CHECK(d0.indexOffset  == 0);
+	CHECK(d0.indexCount   == 36);
+	CHECK(d0.materialAssetId == o.sections[0].materialAssetId);
+	CHECK(d1.sectionIndex == 1);
+	CHECK(d1.indexOffset  == 36);
+	CHECK(d1.indexCount   == 24);
+	CHECK(d1.materialAssetId == o.sections[1].materialAssetId);
+}
+
+TEST_CASE("GeometryPass skips an empty slot instead of drawing the whole mesh with it")
+{
+	RenderWorld world;
+	RenderObject o = makeObj(8, { 0, 0, 0 });
+	o.sections = twoSlots();
+	o.sections[1].indexCount = 0; // an empty section (allowed by the loader)
+	world.objects.push_back(o);
+	std::vector<uint32_t> sorted = { 0 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 1);
+	CHECK(cmds.drawCalls()[0].sectionIndex == 0);
+	CHECK(cmds.drawCalls()[0].indexCount   == 36);
+}
+
+TEST_CASE("GeometryPass batches same-mesh objects with identical sections: one instanced draw per slot")
+{
+	HE::UUID sharedMesh; sharedMesh.hi = 77; sharedMesh.lo = 3;
+	RenderWorld world;
+	addSameMeshObjects(world, sharedMesh, 3);
+	for (RenderObject& o : world.objects) o.sections = twoSlots();
+	std::vector<uint32_t> sorted = { 0, 1, 2 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 2);
+	for (size_t s = 0; s < 2; ++s)
+	{
+		const DrawCall& dc = cmds.drawCalls()[s];
+		CHECK(dc.sectionIndex == static_cast<int32_t>(s));
+		CHECK(dc.instanceCount == 3);
+		REQUIRE(dc.instanceTransforms.size() == 3);
+		CHECK(dc.instanceTransforms[0] == world.objects[0].transform);
+		CHECK(dc.instanceTransforms[2] == world.objects[2].transform);
+		CHECK(dc.materialAssetId == world.objects[0].sections[s].materialAssetId);
+	}
+}
+
+TEST_CASE("GeometryPass does not batch same-mesh objects whose section tables differ")
+{
+	HE::UUID sharedMesh; sharedMesh.hi = 78; sharedMesh.lo = 4;
+	RenderWorld world;
+	addSameMeshObjects(world, sharedMesh, 2);
+	world.objects[0].sections = twoSlots();
+	world.objects[1].sections = twoSlots();
+	world.objects[1].sections[1].materialAssetId.lo = 99; // slot 1 re-pointed
+	std::vector<uint32_t> sorted = { 0, 1 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	// Two objects × two slots, none instanced together.
+	REQUIRE(cmds.drawCalls().size() == 4);
+	for (const DrawCall& dc : cmds.drawCalls())
+	{
+		CHECK(dc.instanceCount == 1);
+		CHECK(dc.instanceTransforms.empty());
+	}
+}
+
+TEST_CASE("GeometryPass does not batch a sectioned object with a plain one of the same mesh")
+{
+	HE::UUID sharedMesh; sharedMesh.hi = 79; sharedMesh.lo = 5;
+	RenderWorld world;
+	addSameMeshObjects(world, sharedMesh, 2);
+	world.objects[0].sections = twoSlots(); // e.g. no override
+	// objects[1] keeps an empty table (an entity override made it draw whole)
+	std::vector<uint32_t> sorted = { 0, 1 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 3); // 2 slot draws + 1 whole-mesh draw
+	CHECK(cmds.drawCalls()[0].sectionIndex == 0);
+	CHECK(cmds.drawCalls()[1].sectionIndex == 1);
+	CHECK(cmds.drawCalls()[2].sectionIndex == -1);
+	CHECK(cmds.drawCalls()[2].indexCount == 0);
+}

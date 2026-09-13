@@ -18,6 +18,7 @@
 #include "TestFsUtil.h"
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/MaterialComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -286,6 +287,126 @@ TEST_CASE("Repro: a placed mesh dead-center in view must not be culled")
 	culler.cull(rw, vis);
 	REQUIRE(vis.size() == 1);
 	CHECK(vis[0] == 1u);   // dead-center placed mesh must be visible
+}
+
+// ─── Mesh sections through the extractor ─────────────────────────────────────
+// The extractor is the one place a MeshSection's material reference becomes a
+// draw-ready UUID (RenderObject::sections). Three reference shapes exist: a
+// baked UUID (packed build), a loose path (editor content, resolved through
+// loadAsset once and cached), and an empty one (= the mesh's own material).
+
+TEST_CASE("RenderExtractor resolves a multi-section mesh's slots to material UUIDs")
+{
+	const std::filesystem::path root = std::filesystem::temp_directory_path() / "he_test_sections";
+	he_test::removeAllQuiet(root);
+	std::filesystem::create_directories(root);
+	ContentManager cm(root.string());
+
+	// Slot 1's material lives on disk under a path only (loose content).
+	MaterialAsset onDisk;
+	onDisk.type = HE::AssetType::Material; onDisk.name = "slot1"; onDisk.path = "slot1.hasset";
+	REQUIRE(cm.saveAsset(onDisk));
+	// Slot 0's material is referenced by baked UUID (a registered runtime asset).
+	MaterialAsset baked; baked.type = HE::AssetType::Material; baked.name = "slot0";
+	const HE::UUID bakedId = cm.registerMaterial(baked);
+
+	StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "multi";
+	mesh.indices = { 0,1,2, 3,4,5, 6,7,8 };
+	mesh.boundsMin[0]=mesh.boundsMin[1]=mesh.boundsMin[2]=-1.0f;
+	mesh.boundsMax[0]=mesh.boundsMax[1]=mesh.boundsMax[2]= 1.0f;
+	MeshSection s0; s0.indexOffset = 0; s0.indexCount = 3; s0.materialId   = bakedId;
+	MeshSection s1; s1.indexOffset = 3; s1.indexCount = 3; s1.materialPath = "slot1.hasset";
+	MeshSection s2; s2.indexOffset = 6; s2.indexCount = 3; // empty = the mesh's own material
+	mesh.sections = { s0, s1, s2 };
+	const HE::UUID meshId = cm.registerStaticMesh(mesh);
+
+	HorizonWorld world;
+	auto e = world.createEntity("multi");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = meshId;
+	world.registry().emplace<MeshComponent>(e, mc);
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+	REQUIRE(rw.objects.size() == 1); // still ONE object: sections ride on it, not beside it
+	const RenderObject& o = rw.objects[0];
+	REQUIRE(o.sections.size() == 3);
+	CHECK(o.sections[0].indexOffset == 0); CHECK(o.sections[0].indexCount == 3);
+	CHECK(o.sections[0].materialAssetId == bakedId);
+	CHECK(o.sections[1].indexOffset == 3);
+	CHECK(o.sections[1].materialAssetId == cm.idForPath("slot1.hasset")); // loaded on the way
+	CHECK(o.sections[1].materialAssetId != HE::UUID{});
+	CHECK(o.sections[2].indexOffset == 6);
+	CHECK(o.sections[2].materialAssetId == HE::UUID{});
+	// The bounds were read before the slot resolution could move the asset pool.
+	CHECK(o.worldBounds.min.x == doctest::Approx(-1.0f));
+
+	// Second frame: the path is answered from the cache, same result.
+	RenderWorld rw2;
+	ex.extract(world, rw2, 1.0f);
+	REQUIRE(rw2.objects.size() == 1);
+	REQUIRE(rw2.objects[0].sections.size() == 3);
+	CHECK(rw2.objects[0].sections[1].materialAssetId == o.sections[1].materialAssetId);
+
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("RenderExtractor: an entity material override replaces every slot (whole-mesh draw)")
+{
+	ContentManager cm;
+	MaterialAsset a; a.type = HE::AssetType::Material; a.name = "a";
+	MaterialAsset b; b.type = HE::AssetType::Material; b.name = "b";
+	const HE::UUID idA = cm.registerMaterial(a);
+	const HE::UUID idB = cm.registerMaterial(b);
+	MaterialAsset ov; ov.type = HE::AssetType::Material; ov.name = "override";
+	const HE::UUID idOv = cm.registerMaterial(ov);
+
+	StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "multi";
+	mesh.indices = { 0,1,2, 3,4,5 };
+	MeshSection s0; s0.indexCount = 3; s0.materialId = idA;
+	MeshSection s1; s1.indexOffset = 3; s1.indexCount = 3; s1.materialId = idB;
+	mesh.sections = { s0, s1 };
+	const HE::UUID meshId = cm.registerStaticMesh(mesh);
+
+	HorizonWorld world;
+	auto e = world.createEntity("multi");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = meshId;
+	world.registry().emplace<MeshComponent>(e, mc);
+	world.registry().emplace<MaterialComponent>(e, MaterialComponent{ idOv });
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+	REQUIRE(rw.objects.size() == 1);
+	CHECK(rw.objects[0].sections.empty());        // no per-slot draws …
+	CHECK(rw.objects[0].materialAssetId == idOv); // … the override draws the whole mesh
+}
+
+TEST_CASE("RenderExtractor: a one-section mesh carries no slot table (legacy draw path)")
+{
+	ContentManager cm;
+	MaterialAsset a; a.type = HE::AssetType::Material; a.name = "a";
+	const HE::UUID idA = cm.registerMaterial(a);
+	StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "single";
+	mesh.indices = { 0,1,2 };
+	MeshSection s0; s0.indexCount = 3; s0.materialId = idA;
+	mesh.sections = { s0 };
+	const HE::UUID meshId = cm.registerStaticMesh(mesh);
+
+	HorizonWorld world;
+	auto e = world.createEntity("single");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = meshId;
+	world.registry().emplace<MeshComponent>(e, mc);
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+	REQUIRE(rw.objects.size() == 1);
+	CHECK(rw.objects[0].sections.empty());
+	CHECK(rw.objects[0].materialAssetId == HE::UUID{}); // the mesh's own material, as always
 }
 
 // ─── Shared cross-backend renderer helpers (audit 1a) ─────────────────────────
@@ -800,6 +921,26 @@ TEST_CASE("RenderSorter: transparency partition uses the tinted opacity")
 	CHECK(opaque[1] == &calls[3]);
 	CHECK(transparent[0] == &calls[1]);
 	CHECK(transparent[1] == &calls[2]);
+}
+
+TEST_CASE("RenderSorter: the section-unaware partition keeps slot 0 and drops the other slots")
+{
+	// D3D11/D3D12/Vulkan collect through partitionByOpacity and draw the whole
+	// index buffer per DrawCall — so of a multi-section mesh's per-slot draws only
+	// slot 0 may reach them (the mesh's own material, one draw, as before
+	// sections existed). Whole-mesh draws (sectionIndex -1) pass untouched.
+	std::vector<DrawCall> calls(4);
+	calls[0].sectionIndex = -1;                                   // plain one-section mesh
+	calls[1].sectionIndex = 0;  calls[1].indexCount = 36;         // slot 0 of a sectioned mesh
+	calls[2].sectionIndex = 1;  calls[2].indexOffset = 36; calls[2].indexCount = 24;
+	calls[3].sectionIndex = 2;  calls[3].opacity = 0.5f;          // a translucent later slot
+
+	std::vector<const DrawCall*> opaque, transparent;
+	RenderSorter::partitionByOpacity(calls, opaque, transparent);
+	REQUIRE(opaque.size() == 2);
+	CHECK(opaque[0] == &calls[0]);
+	CHECK(opaque[1] == &calls[1]);
+	CHECK(transparent.empty());
 }
 
 TEST_CASE("RenderSorter: blended pass is ordered farthest-first")

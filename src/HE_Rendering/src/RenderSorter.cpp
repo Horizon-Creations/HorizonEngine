@@ -47,7 +47,18 @@ void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
 	outTransparent.clear();
 	outOpaque.reserve(drawCalls.size());
 	for (const DrawCall& dc : drawCalls)
+	{
+		// Only the section-UNAWARE backends collect through here (D3D11, D3D12,
+		// Vulkan — GL and Metal classify inline and honour DrawCall::indexOffset/
+		// indexCount). They draw the whole index buffer per DrawCall, so a
+		// multi-section mesh's second, third… draw would repaint the entire mesh
+		// in another material. Handing them slot 0 alone keeps them where they
+		// were before sections existed: one draw, the mesh's own material. A
+		// one-section mesh never carries sectionIndex > 0, so nothing changes
+		// for it.
+		if (dc.sectionIndex > 0) continue;
 		(isTransparent(dc) ? outTransparent : outOpaque).push_back(&dc);
+	}
 }
 
 void RenderSorter::sortBackToFront(std::vector<const DrawCall*>& transparent,

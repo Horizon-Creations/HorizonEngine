@@ -4,6 +4,9 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/mat4x4.hpp>
+#include <Types/UUID.h>
+#include <string>
+#include <unordered_map>
 
 class HorizonWorld;
 class RenderWorld;
@@ -123,6 +126,15 @@ private:
     void applyDayNight(RenderWorld& out) const;
 
     ContentManager* m_contentManager = nullptr;
+    // Section material references of loose assets are PATHS (the UUID is only
+    // baked at pack time); a draw needs the UUID. Resolved once per path and
+    // remembered here, so a multi-section mesh costs one map lookup per slot per
+    // frame rather than a ContentManager::loadAsset — and a path whose .hasset is
+    // missing is remembered as null instead of failing (and logging) every
+    // frame. Same lifetime rule the GL mesh upload has for the mesh's own
+    // material: a material that appears on disk AFTER first sight is picked up
+    // on the next editor start. Keyed by path; baked UUIDs never come through.
+    std::unordered_map<std::string, HE::UUID> m_sectionMaterialByPath;
     bool      m_dayNight       = false;
     float     m_timeOfDay      = 0.5f;
     glm::vec3 m_sunColor       = glm::vec3(1.0f, 0.97f, 0.90f);
