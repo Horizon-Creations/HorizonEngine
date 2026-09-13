@@ -342,13 +342,47 @@ TEST_CASE("RenderExtractor resolves a multi-section mesh's slots to material UUI
 	// The bounds were read before the slot resolution could move the asset pool.
 	CHECK(o.worldBounds.min.x == doctest::Approx(-1.0f));
 
-	// Second frame: the path is answered from the cache, same result.
+	// Second frame: the path is now resident and answered by idForPath, same result.
 	RenderWorld rw2;
 	ex.extract(world, rw2, 1.0f);
 	REQUIRE(rw2.objects.size() == 1);
 	REQUIRE(rw2.objects[0].sections.size() == 3);
 	CHECK(rw2.objects[0].sections[1].materialAssetId == o.sections[1].materialAssetId);
 
+	he_test::removeAllQuiet(root);
+}
+
+TEST_CASE("RenderExtractor: a slot whose material path does not exist resolves to null and stays quiet")
+{
+	const std::filesystem::path root = std::filesystem::temp_directory_path() / "he_test_sections_missing";
+	he_test::removeAllQuiet(root);
+	std::filesystem::create_directories(root);
+	ContentManager cm(root.string());
+
+	StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "multi";
+	mesh.indices = { 0,1,2, 3,4,5 };
+	MeshSection s0; s0.indexCount = 3; s0.materialPath = "nowhere/a.hasset";
+	MeshSection s1; s1.indexOffset = 3; s1.indexCount = 3; s1.materialPath = "nowhere/b.hasset";
+	mesh.sections = { s0, s1 };
+	const HE::UUID meshId = cm.registerStaticMesh(mesh);
+
+	HorizonWorld world;
+	auto e = world.createEntity("multi");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = meshId;
+	world.registry().emplace<MeshComponent>(e, mc);
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	for (int frame = 0; frame < 3; ++frame) // the miss is remembered, not retried per frame
+	{
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.objects.size() == 1);
+		REQUIRE(rw.objects[0].sections.size() == 2);
+		CHECK(rw.objects[0].sections[0].materialAssetId == HE::UUID{}); // = the mesh's own material
+		CHECK(rw.objects[0].sections[1].materialAssetId == HE::UUID{});
+		CHECK(rw.objects[0].sections[1].indexOffset == 3);          // the range is still intact
+	}
 	he_test::removeAllQuiet(root);
 }
 

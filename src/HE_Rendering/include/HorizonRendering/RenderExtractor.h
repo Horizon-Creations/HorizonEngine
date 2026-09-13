@@ -6,7 +6,7 @@
 #include <glm/mat4x4.hpp>
 #include <Types/UUID.h>
 #include <string>
-#include <unordered_map>
+#include <unordered_set>
 
 class HorizonWorld;
 class RenderWorld;
@@ -95,7 +95,15 @@ public:
     // usable bounds the world bounds are left INVALID (= never culled) rather than
     // proxied by a unit cube, so a large mesh can't disappear while in view; the
     // backend fills in the real bounds once it resolves the asset.
-    void setContentManager(ContentManager* cm) { m_contentManager = cm; }
+    // Called every frame by the backends with the same manager; a DIFFERENT one
+    // (another project's content) forgets which section-material paths were
+    // missing, since they are missing from a content root that no longer
+    // applies.
+    void setContentManager(ContentManager* cm)
+    {
+        if (cm != m_contentManager) m_sectionMaterialMissing.clear();
+        m_contentManager = cm;
+    }
 
     // Day-night cycle: when enabled, the extractor drives the sun from the time
     // of day (0..1: 0.25 sunrise, 0.5 noon, 0.75 sunset, 0/1 midnight) instead of
@@ -127,14 +135,15 @@ private:
 
     ContentManager* m_contentManager = nullptr;
     // Section material references of loose assets are PATHS (the UUID is only
-    // baked at pack time); a draw needs the UUID. Resolved once per path and
-    // remembered here, so a multi-section mesh costs one map lookup per slot per
-    // frame rather than a ContentManager::loadAsset — and a path whose .hasset is
-    // missing is remembered as null instead of failing (and logging) every
-    // frame. Same lifetime rule the GL mesh upload has for the mesh's own
-    // material: a material that appears on disk AFTER first sight is picked up
-    // on the next editor start. Keyed by path; baked UUIDs never come through.
-    std::unordered_map<std::string, HE::UUID> m_sectionMaterialByPath;
+    // baked at pack time); a draw needs the UUID. A resident material is answered
+    // by the ContentManager's own path index every frame (a lookup, never a
+    // load), so nothing here can go stale against it. What IS remembered is the
+    // failure: a path whose .hasset was not there when first seen, so it is not
+    // retried — and logged — every frame. Same lifetime rule the GL mesh upload
+    // has for the mesh's own material: a material that appears on disk AFTER
+    // first sight is picked up on the next editor start (or the next
+    // ContentManager, see setContentManager). Baked UUIDs never come through.
+    std::unordered_set<std::string> m_sectionMaterialMissing;
     bool      m_dayNight       = false;
     float     m_timeOfDay      = 0.5f;
     glm::vec3 m_sunColor       = glm::vec3(1.0f, 0.97f, 0.90f);

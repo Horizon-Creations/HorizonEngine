@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 
 // extract() is split into one free function per phase (the banners this file used
 // to carry inline). The phases run in the order extract() calls them and each one
@@ -109,10 +110,13 @@ namespace
 	// The material slots of a multi-section mesh, ready for the draw: each
 	// MeshSection's reference turned into a UUID. A baked UUID (packed build) is
 	// taken as is — made resident, the streaming closure usually already did
-	// that. A loose path goes through loadAsset ONCE and is remembered in
-	// `byPath` (see RenderExtractor::m_sectionMaterialByPath). An empty
-	// reference stays null = the mesh's own material, which is what the backends
-	// resolve for a null materialAssetId anyway.
+	// that. A loose path is answered by the ContentManager itself while the
+	// material is resident (idForPath, a pure lookup); only an unknown path goes
+	// through loadAsset, and one that FAILED is remembered in `missing` (see
+	// RenderExtractor::m_sectionMaterialMissing) so it is not retried — and
+	// logged — every frame. An empty reference stays null = the mesh's own
+	// material, which is what the backends resolve for a null materialAssetId
+	// anyway.
 	//
 	// Takes the sections BY VALUE on purpose: resolveMaterialRef → loadAsset can
 	// grow the dense asset vectors, and with them every StaticMeshAsset pointer
@@ -120,7 +124,7 @@ namespace
 	// documented on ContentManager's getters.
 	std::vector<RenderSection> resolveSections(std::vector<MeshSection> sections,
 	                                           ContentManager& cm,
-	                                           std::unordered_map<std::string, HE::UUID>& byPath)
+	                                           std::unordered_set<std::string>& missing)
 	{
 		std::vector<RenderSection> out;
 		out.reserve(sections.size());
@@ -136,13 +140,13 @@ namespace
 			}
 			else if (!sec.materialPath.empty())
 			{
-				auto it = byPath.find(sec.materialPath);
-				if (it == byPath.end())
+				rs.materialAssetId = cm.idForPath(sec.materialPath);
+				if (rs.materialAssetId == HE::UUID{} && !missing.contains(sec.materialPath))
 				{
 					const MaterialAsset* ma = cm.resolveMaterialRef({}, sec.materialPath);
-					it = byPath.emplace(sec.materialPath, ma ? ma->id : HE::UUID{}).first;
+					if (ma) rs.materialAssetId = ma->id;
+					else    missing.insert(sec.materialPath);
 				}
-				rs.materialAssetId = it->second;
 			}
 			out.push_back(rs);
 		}
@@ -155,7 +159,7 @@ namespace
 	// KEEP THE PHASES APART: every registry / ContentManager read belongs in the
 	// gather loop, the parallel_for must stay pure maths over `items`.
 	void extractMeshes(entt::registry& reg, RenderWorld& out, ContentManager* contentManager,
-	                   std::unordered_map<std::string, HE::UUID>& sectionMaterialByPath)
+	                   std::unordered_set<std::string>& sectionMaterialMissing)
 	{
 		struct EntityData {
 			glm::mat4 world;
@@ -278,7 +282,7 @@ namespace
 					// is why the bounds were read first and the table is copied in.
 					if (m->sections.size() > 1 && d.matId == HE::UUID{})
 						d.sections = resolveSections(m->sections, *contentManager,
-						                             sectionMaterialByPath);
+						                             sectionMaterialMissing);
 				}
 			items.push_back(d);
 		}
@@ -871,7 +875,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	extractCamera(reg, out, aspectRatio, editorCam);
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
-	extractMeshes(reg, out, m_contentManager, m_sectionMaterialByPath);
+	extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
 	extractFoliage(reg, out);
