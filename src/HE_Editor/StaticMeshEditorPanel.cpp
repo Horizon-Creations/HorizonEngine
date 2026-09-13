@@ -9,7 +9,9 @@
 #include "EditorWidgets.h"          // WrapText — text wraps at the pane edge, never runs off it
 #include "EditorCamera.h"           // the Scene window's camera, one per tab
 #include "EditorViewportNav.h"      // …and its navigation grammar, shared
+#include "MeshMaterialSlots.h"      // the material-slot list, shared with the skeletal tab
 #include <ContentManager/ContentManager.h>
+#include <Diagnostics/Log.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -71,6 +73,10 @@ struct State
 	// Ground + grid + origin marker. On by default (scale is hard to read against
 	// nothing), off for a clean look at the silhouette.
 	bool         showGrid3d = true;
+
+	// The material slots' undo stack + missing-path cache. The one thing this
+	// tab EDITS: a slot change is written into the asset and saved at once.
+	HE::Ed::MeshMaterialSlots::Session slots;
 };
 
 AssetPanelState<State> s_states;
@@ -306,6 +312,34 @@ void drawMeshView(AppContext& ctx, const StaticMeshAsset& mesh, State& st, const
 	(void)org;
 }
 
+// ── Material slots ──────────────────────────────────────────────────────────
+// Writes an edited slot table into the asset and saves it. Fetched BY ID here,
+// never handed a pointer: the picker that produced the edit may have loaded a
+// material, and a load moves every mesh pointer taken before it.
+void commitSlots(AppContext& ctx, State& st, const HE::Ed::MeshMaterialSlots::Table& table)
+{
+	if (!ctx.contentManager) return;
+	StaticMeshAsset* mesh = ctx.contentManager->getStaticMeshMutable(st.meshId);
+	if (!mesh) return;
+	HE::Ed::MeshMaterialSlots::applyTo(table, *mesh);
+	if (ctx.contentManager->saveAsset(*mesh))
+		HE_LOG_INFO(Editor, "%s", ("StaticMeshEditor: saved material slots of '" + st.relPath + "'").c_str());
+	else
+		HE_LOG_WARN(Editor, "%s", ("StaticMeshEditor: could not save '" + st.relPath + "'").c_str());
+}
+
+// The picker for one slot, as the panels draw it. undo = false: the world's undo
+// system snapshots entities, and a mesh asset's slot is not one — the tab's own
+// Session is what Cmd+Z steps through here.
+EditorWidgets::SlotAction drawSlotWidget(AppContext& ctx, size_t index, HE::UUID& target,
+                                         const char* emptyText)
+{
+	char idSuffix[24];
+	std::snprintf(idSuffix, sizeof(idSuffix), "smslot%zu", index);
+	return EditorWidgets::assetDropSlot(ctx, nullptr, target, HE::AssetType::Material, idSuffix,
+	                                    emptyText, "material", /*showClear=*/true, /*undo=*/false);
+}
+
 } // namespace
 
 bool isStaticMeshAsset(const std::string& path)
@@ -366,8 +400,9 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	if (!st.statsDone) { st.stats = computeStats(*mesh); st.statsDone = true; }
 
 	// ── Toolbar ──────────────────────────────────────────────────────────────
-	// A viewer, so no Save: what the strip carries is what is open and the two
-	// switches that change how the unwrap reads.
+	// No Save on the strip: the one edit this tab makes (a material slot, in the
+	// left pane) is saved the moment it is made. What the strip carries is what
+	// is open and the two switches that change how the unwrap reads.
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
@@ -432,8 +467,23 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		ImGui::Text("Bounds X  %.3f .. %.3f", mesh->boundsMin[0], mesh->boundsMax[0]);
 		ImGui::Text("       Y  %.3f .. %.3f", mesh->boundsMin[1], mesh->boundsMax[1]);
 		ImGui::Text("       Z  %.3f .. %.3f", mesh->boundsMin[2], mesh->boundsMax[2]);
-		if (!mesh->materialPath.empty())
-			ImGui::TextWrapped("Material  %s", mesh->materialPath.c_str());
+
+		// ── Material slots ───────────────────────────────────────────────
+		// One row per section, each a material picker — the only thing in
+		// this tab that edits the asset. Drawn on a COPY of the table: the
+		// picker can load a material, and a load moves `mesh`, which is why it
+		// is re-fetched right after. Nothing else in this pane reads it; the
+		// right pane does, and gives up below if it is gone.
+		{
+			namespace MS = HE::Ed::MeshMaterialSlots;
+			MS::Table table = MS::tableOf(*mesh);
+			const bool changed = MS::draw(ctx.contentManager, table, st.slots,
+				[&](size_t i, HE::UUID& target, const char* emptyText) {
+					return drawSlotWidget(ctx, i, target, emptyText);
+				});
+			if (changed) commitSlots(ctx, st, table);
+			mesh = ctx.contentManager->getStaticMesh(st.meshId);
+		}
 
 		ImGui::SeparatorText("UVs");
 		if (!st.stats.haveUVs)
@@ -509,6 +559,15 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	}
 	ImGui::EndChild();
 
+	// The slot picker above may have moved the asset pool; `mesh` was taken
+	// again after it, and an asset that is no longer there ends the frame here —
+	// outside the pane, so its wrap scope has already been popped in order.
+	if (!mesh)
+	{
+		ImGui::End();
+		return;
+	}
+
 	// ── Right: the mesh, or its unwrap ───────────────────────────────────────
 	ImGui::SameLine();
 	// NoScrollWithMouse: in the 3D view the wheel is the camera's dolly, and
@@ -524,6 +583,15 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		else           drawMeshView(ctx, *mesh, st, ImGui::GetContentRegionAvail());
 	}
 	ImGui::EndChild();
+
+	// Cmd/Ctrl+Z over the tab steps the slot edits back (and forward again);
+	// each step is written and saved like the edit it undoes. In the host
+	// window, after both panes, so "hovered" covers the whole tab.
+	{
+		namespace MS = HE::Ed::MeshMaterialSlots;
+		MS::Table restored;
+		if (MS::handleUndoKeys(restored, st.slots)) commitSlots(ctx, st, restored);
+	}
 
 	ImGui::End();
 }

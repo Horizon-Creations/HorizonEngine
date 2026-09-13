@@ -17,6 +17,11 @@
 // because a notify placed without a visible pose is a guess, which is the whole
 // reason the timeline sits in this tab rather than in an editor of its own.
 //
+// The mesh itself has one editable thing: its material slots (one per section,
+// see MeshMaterialSlots.h), listed above the bone tree. Picking a material for
+// a slot writes it into the MESH asset and saves it at once — no dirty flag,
+// unlike the clip — and Cmd/Ctrl+Z over the tab steps those edits back.
+//
 // Still nothing here touches an ECS entity: the preview poses an asset.
 namespace SkeletalMeshEditorPanel
 {

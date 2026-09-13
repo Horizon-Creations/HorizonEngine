@@ -76,6 +76,11 @@ public:
 	// ancestor chain).
 	const StaticMeshAsset*     getStaticMesh(HE::UUID id) const;
 	const SkeletalMeshAsset*   getSkeletalMesh(HE::UUID id) const;
+	// Mutable for the mesh editors' material slots: the loaded mesh IS the edit
+	// buffer (same reasoning as getMaterialMutable), a slot assigned there is
+	// what the renderer draws next frame, and saveAsset() persists it.
+	StaticMeshAsset*           getStaticMeshMutable(HE::UUID id);
+	SkeletalMeshAsset*         getSkeletalMeshMutable(HE::UUID id);
 	const TextureAsset*        getTexture(HE::UUID id) const;
 	const MaterialAsset*       getMaterial(HE::UUID id) const;
 	const AudioAsset*          getAudio(HE::UUID id) const;

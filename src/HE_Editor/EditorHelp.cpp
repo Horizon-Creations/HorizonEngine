@@ -4225,6 +4225,17 @@ namespace
 	  "which is what tells the eye how big the model is and where its origin "
 	  "sits. A view aid in this tab only; nothing about the asset changes.",
 	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Material Slots", "Material Slots",
+	  "The mesh's material slots, one per section the importer found — a glTF "
+	  "with three materials arrives as three slots, each over its own run of "
+	  "triangles. Click to pick a material or drop one from the Content Browser; "
+	  "the choice is written into the MESH asset and saved at once, so every "
+	  "entity using the mesh picks it up. Slot 0 is the mesh's own material, "
+	  "which the single-material draw paths still use for the whole mesh; a "
+	  "slot left empty draws with slot 0. A Material component on an entity "
+	  "overrides all slots for that entity alone. Cmd/Ctrl+Z steps back over "
+	  "slot changes while this tab is hovered.",
+	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Clip:", "Preview Clip",
 	  "An animation clip to pose this skeleton with, dropped from the Content "
 	  "Browser. Empty leaves it in its bind pose. Choosing one is preview state on "

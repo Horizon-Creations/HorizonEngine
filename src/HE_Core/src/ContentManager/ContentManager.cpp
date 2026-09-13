@@ -1938,6 +1938,8 @@ static T* lookupAssetMutable(const std::unordered_map<HE::UUID, SlotHandle>& ind
 
 const StaticMeshAsset*    ContentManager::getStaticMesh(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
 const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
+StaticMeshAsset*          ContentManager::getStaticMeshMutable(HE::UUID id)   { return lookupAssetMutable(m_handleToUUID, m_staticMeshAssets, id); }
+SkeletalMeshAsset*        ContentManager::getSkeletalMeshMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_skeletalMeshAssets, id); }
 const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
 const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }

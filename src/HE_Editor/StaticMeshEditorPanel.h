@@ -12,6 +12,11 @@
 // unwrapped — whether it has UVs at all, whether they overflow the tile (so a
 // texture repeats), and whether an import mirrored them. Plus the geometry stats
 // (vertices/triangles/bounds) and a UV health summary.
+//
+// One thing here is an EDITOR, not a viewer: the mesh's material slots (one per
+// section, see MeshMaterialSlots.h). Picking a material for a slot writes it
+// into the asset and saves the .hasset at once; Cmd/Ctrl+Z over the tab steps
+// those edits back.
 namespace StaticMeshEditorPanel
 {
 	void render(AppContext& ctx, const std::string& assetPath,

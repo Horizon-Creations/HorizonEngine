@@ -381,6 +381,10 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		// The Source Control window's commit button says "Commit 3 changes", so
 		// there is no fixed label either.
 		"sc.commit",
+		// A mesh's material slots are rows labelled by their NUMBER, so the
+		// shared helper (MeshMaterialSlots) looks the entry up by key from
+		// inside both mesh tabs' "Mesh Viewer" scope.
+		"Mesh Viewer/Material Slots",
 	};
 	for (const char* k : byKey)
 	{
