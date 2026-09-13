@@ -2572,3 +2572,211 @@ TEST_CASE("Importer::reimport without a resolvable material keeps the mesh's mat
 	REQUIRE(mesh->vertices.size() == 9);
 	CHECK(mesh->vertices[3] == doctest::Approx(3.0f));   // the re-import did run
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Material sections (MeshSection, chunk MSEC). Every mesh written before the
+// chunk existed carries none; it has to come back as the ONE section it always
+// drew as, and a mesh that never had a table has to save exactly as it did.
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace
+{
+	// The bytes an older build wrote for a one-material mesh: META, MREF, INDX,
+	// VERT — and no MSEC anywhere.
+	void writeLegacyMesh(const fs::path& file, const HE::UUID& id,
+	                     const std::string& relPath, const std::string& material,
+	                     const std::vector<uint32_t>& indices)
+	{
+		std::vector<uint8_t> meta;
+		HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::StaticMesh));
+		HAsset::Writer::appendPOD(meta, id.hi);
+		HAsset::Writer::appendPOD(meta, id.lo);
+		HAsset::Writer::appendString(meta, "Legacy");
+		HAsset::Writer::appendString(meta, relPath);
+
+		std::vector<uint8_t> mref; HAsset::Writer::appendString(mref, material);
+		std::vector<uint8_t> indx; HAsset::Writer::appendVec(indx, indices);
+		std::vector<uint8_t> vert;
+		HAsset::Writer::appendVec(vert, std::vector<float>{ 0,0,0, 1,0,0, 0,1,0, 1,1,0 });
+
+		HAsset::Writer w;
+		w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+		w.addChunk(HAsset::CHUNK_MREF, mref.data(), mref.size());
+		w.addChunk(HAsset::CHUNK_INDX, indx.data(), indx.size());
+		w.addChunk(HAsset::CHUNK_VERT, vert.data(), vert.size());
+		REQUIRE(w.write(file.string(), static_cast<uint16_t>(HE::AssetType::StaticMesh)));
+	}
+
+	bool hasChunk(const fs::path& file, uint32_t id)
+	{
+		HAsset::Reader r;
+		return r.open(file.string()) && r.findChunk(id) != nullptr;
+	}
+}
+
+TEST_CASE("A one-material mesh from before sections loads as exactly one section")
+{
+	TempContentDir dir("he_test_sections_legacy");
+	const HE::UUID oldId{0x5EC1, 0x5EC2};
+	writeLegacyMesh(dir.path / "Old.hasset", oldId, "Old.hasset", "Mats/Wood.hasset",
+	                { 0,1,2,  2,3,0 });
+
+	ContentManager cm(dir.path.string());
+	const HE::UUID id = cm.loadAsset("Old.hasset");
+	CHECK(id == oldId);
+	const StaticMeshAsset* m = cm.getStaticMesh(id);
+	REQUIRE(m != nullptr);
+	CHECK(m->materialPath == "Mats/Wood.hasset");     // unchanged
+	REQUIRE(m->sections.size() == 1);                  // the whole mesh, one slot
+	CHECK(m->sections[0].indexOffset == 0);
+	CHECK(m->sections[0].indexCount  == 6);
+	CHECK(m->sections[0].materialPath == "Mats/Wood.hasset");
+	CHECK(m->sections[0].materialId   == HE::UUID{});
+	CHECK(HE::meshSectionsCover(m->sections, m->indices.size()));
+
+	// The in-memory shape an asset assembled by hand (the built-in primitives,
+	// a terrain chunk) has — no table at all — reads the same way.
+	StaticMeshAsset bare;
+	bare.indices      = { 0,1,2 };
+	bare.materialPath = "Mats/Bare.hasset";
+	const std::vector<MeshSection> eff = HE::meshSectionsOf(bare);
+	REQUIRE(eff.size() == 1);
+	CHECK(eff[0].indexOffset == 0);
+	CHECK(eff[0].indexCount  == 3);
+	CHECK(eff[0].materialPath == "Mats/Bare.hasset");
+}
+
+TEST_CASE("A mesh without a section table saves byte-identically to before")
+{
+	// The section chunk is written only when the asset carries a table. An
+	// in-memory mesh (every test fixture, every procedural mesh) therefore
+	// produces exactly the file it always did — no MSEC, same bytes.
+	TempContentDir dir("he_test_sections_bytes");
+	ContentManager cm(dir.path.string());
+
+	StaticMeshAsset mesh;
+	mesh.type         = HE::AssetType::StaticMesh;
+	mesh.name         = "tri";
+	mesh.path         = "tri.hasset";
+	mesh.vertices     = { 0,0,0,  1,0,0,  0,1,0 };
+	mesh.indices      = { 0, 1, 2 };
+	mesh.materialPath = "mat.hasset";
+	REQUIRE(cm.saveAsset(mesh));
+	CHECK_FALSE(hasChunk(dir.path / "tri.hasset", HAsset::CHUNK_MSEC));
+
+	// Loading synthesises the one section; saving THAT asset back writes the
+	// table — and the second load reads it rather than synthesising again.
+	const HE::UUID id = cm.loadAsset("tri.hasset");
+	const StaticMeshAsset* loaded = cm.getStaticMesh(id);
+	REQUIRE(loaded != nullptr);
+	REQUIRE(loaded->sections.size() == 1);
+	StaticMeshAsset copy = *loaded;
+	copy.path = "tri2.hasset";
+	copy.id   = HE::UUID{};
+	REQUIRE(cm.saveAsset(copy));
+	CHECK(hasChunk(dir.path / "tri2.hasset", HAsset::CHUNK_MSEC));
+	const StaticMeshAsset* again = cm.getStaticMesh(cm.loadAsset("tri2.hasset"));
+	REQUIRE(again != nullptr);
+	REQUIRE(again->sections.size() == 1);
+	CHECK(again->sections[0].indexCount   == 3);
+	CHECK(again->sections[0].materialPath == "mat.hasset");
+}
+
+TEST_CASE("A multi-section mesh round-trips through save and load")
+{
+	TempContentDir dir("he_test_sections_roundtrip");
+	ContentManager cm(dir.path.string());
+
+	StaticMeshAsset mesh;
+	mesh.type         = HE::AssetType::StaticMesh;
+	mesh.name         = "quad";
+	mesh.path         = "quad.hasset";
+	mesh.vertices     = { 0,0,0,  1,0,0,  0,1,0,  1,1,0 };
+	mesh.indices      = { 0,1,2,  2,3,0 };
+	mesh.materialPath = "Mats/A.hasset";
+	mesh.sections     = { { 0, 3, "Mats/A.hasset", {} },
+	                      { 3, 3, "Mats/B.hasset", {} } };
+	REQUIRE(cm.saveAsset(mesh));
+
+	const StaticMeshAsset* m = cm.getStaticMesh(cm.loadAsset("quad.hasset"));
+	REQUIRE(m != nullptr);
+	REQUIRE(m->sections.size() == 2);
+	CHECK(m->sections[0].indexOffset == 0);
+	CHECK(m->sections[0].indexCount  == 3);
+	CHECK(m->sections[0].materialPath == "Mats/A.hasset");
+	CHECK(m->sections[1].indexOffset == 3);
+	CHECK(m->sections[1].indexCount  == 3);
+	CHECK(m->sections[1].materialPath == "Mats/B.hasset");
+	CHECK(m->materialPath == "Mats/A.hasset");
+
+	// The same table on a skeletal mesh — same chunk, same reader.
+	SkeletalMeshAsset skel;
+	skel.type         = HE::AssetType::SkeletalMesh;
+	skel.name         = "rig";
+	skel.path         = "rig.hasset";
+	skel.vertices     = mesh.vertices;
+	skel.indices      = mesh.indices;
+	skel.boneIDs      = std::vector<uint32_t>(16, 0);
+	skel.boneWeights  = std::vector<float>(16, 0.25f);
+	skel.materialPath = "Mats/A.hasset";
+	skel.sections     = mesh.sections;
+	REQUIRE(cm.saveAsset(skel));
+	const SkeletalMeshAsset* s = cm.getSkeletalMesh(cm.loadAsset("rig.hasset"));
+	REQUIRE(s != nullptr);
+	REQUIRE(s->sections.size() == 2);
+	CHECK(s->sections[1].materialPath == "Mats/B.hasset");
+	CHECK(s->sections[1].indexOffset  == 3);
+}
+
+TEST_CASE("A section table that does not cover the index buffer falls back to one section")
+{
+	// A truncated or hand-edited table must never reach a per-section draw: the
+	// loader checks coverage and, failing it, draws the mesh as it did before
+	// sections existed rather than reading past the buffer.
+	TempContentDir dir("he_test_sections_malformed");
+	const fs::path file = dir.path / "Bad.hasset";
+	{
+		std::vector<uint8_t> meta;
+		HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::StaticMesh));
+		HAsset::Writer::appendPOD(meta, static_cast<uint64_t>(0x5EC3));
+		HAsset::Writer::appendPOD(meta, static_cast<uint64_t>(0x5EC4));
+		HAsset::Writer::appendString(meta, "Bad");
+		HAsset::Writer::appendString(meta, "Bad.hasset");
+		std::vector<uint8_t> mref; HAsset::Writer::appendString(mref, "Mats/A.hasset");
+		std::vector<uint8_t> indx; HAsset::Writer::appendVec(indx, std::vector<uint32_t>{ 0,1,2, 2,3,0 });
+		std::vector<uint8_t> vert;
+		HAsset::Writer::appendVec(vert, std::vector<float>{ 0,0,0, 1,0,0, 0,1,0, 1,1,0 });
+		// Two sections claiming nine indices of a six-index buffer.
+		const std::vector<uint8_t> msec = HE::encodeMeshSections(
+			{ { 0, 3, "Mats/A.hasset", {} }, { 3, 6, "Mats/B.hasset", {} } });
+
+		HAsset::Writer w;
+		w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+		w.addChunk(HAsset::CHUNK_MREF, mref.data(), mref.size());
+		w.addChunk(HAsset::CHUNK_MSEC, msec.data(), msec.size());
+		w.addChunk(HAsset::CHUNK_INDX, indx.data(), indx.size());
+		w.addChunk(HAsset::CHUNK_VERT, vert.data(), vert.size());
+		REQUIRE(w.write(file.string(), static_cast<uint16_t>(HE::AssetType::StaticMesh)));
+	}
+
+	ContentManager cm(dir.path.string());
+	const StaticMeshAsset* m = cm.getStaticMesh(cm.loadAsset("Bad.hasset"));
+	REQUIRE(m != nullptr);
+	REQUIRE(m->sections.size() == 1);
+	CHECK(m->sections[0].indexCount   == 6);
+	CHECK(m->sections[0].materialPath == "Mats/A.hasset");
+
+	// The coverage rule itself, on the shapes that matter.
+	CHECK(HE::meshSectionsCover({ { 0, 3, "", {} }, { 3, 3, "", {} } }, 6));
+	CHECK_FALSE(HE::meshSectionsCover({ { 0, 3, "", {} }, { 3, 3, "", {} } }, 9));  // short
+	CHECK_FALSE(HE::meshSectionsCover({ { 0, 3, "", {} }, { 4, 2, "", {} } }, 6));  // gap
+	CHECK_FALSE(HE::meshSectionsCover({ { 0, 4, "", {} }, { 3, 3, "", {} } }, 6));  // overlap
+	CHECK_FALSE(HE::meshSectionsCover({}, 0));                                        // no table
+	CHECK(HE::meshSectionsCover({ { 0, 0, "", {} } }, 0));                            // empty mesh
+
+	// A truncated chunk is rejected by the decoder before the ranges are looked at.
+	std::vector<uint8_t> whole = HE::encodeMeshSections({ { 0, 3, "Mats/A.hasset", {} } });
+	whole.resize(whole.size() - 5);
+	std::vector<MeshSection> out;
+	CHECK_FALSE(HE::decodeMeshSections(whole, out));
+}

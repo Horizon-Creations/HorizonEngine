@@ -86,10 +86,42 @@ struct ContentAsset
 
 struct RuntimeAsset : public ContentAsset {};
 
+// One material slot of a mesh: a contiguous run of the index buffer and the
+// material it is drawn with. A multi-material glTF imports as one section per
+// material (chunk MSEC); everything that existed before sections did is one
+// section over the whole buffer.
+//
+// The material reference has the same dual form as the mesh-level one below:
+// `materialPath` for loose/editor assets, `materialId` baked in its place by the
+// packer. An EMPTY reference (both fields null) means "the mesh's own material" —
+// StaticMeshAsset::materialPath / materialId, or the entity's MaterialComponent
+// where a draw carries one — which is what a primitive without a glTF material
+// and a slot the user has not assigned yet both resolve to.
+struct MeshSection
+{
+	uint32_t    indexOffset = 0;  // first index into `indices`
+	uint32_t    indexCount  = 0;  // number of indices (triangles × 3)
+	std::string materialPath;     // content-relative; "" = the mesh's own material
+	HE::UUID    materialId;       // pack-time baked from materialPath; {} for loose/editor assets
+};
+
 struct StaticMeshAsset : public RuntimeAsset
 {
+	// The mesh's own material: what every renderer resolved before sections
+	// existed and what the section-unaware draw paths (D3D11/D3D12/Vulkan, the
+	// skeletal path) still resolve for the whole mesh. Kept equal to
+	// `sections[0]`'s material by the importer and the loader; whoever edits slot
+	// 0 (the inspector) mirrors it back here so those paths do not drift.
 	std::string            materialPath;
 	HE::UUID               materialId;   // pack-time baked from materialPath; {} for loose/editor assets
+	// The material slots (chunk MSEC), in index-buffer order, contiguous and
+	// covering `indices` exactly. EMPTY for an asset that never carried a table:
+	// the built-in primitives, terrain chunks, anything assembled in memory. That
+	// is not an error state but the legacy shape — draw it as one section over
+	// the whole buffer with the mesh's own material; meshSectionsOf() below
+	// spells that out. The loader never leaves it empty: a file without MSEC
+	// comes back as exactly that one section.
+	std::vector<MeshSection> sections;
 	std::vector<float>     vertices;
 	std::vector<uint32_t>  indices;
 	std::vector<float>     normals;
@@ -117,8 +149,14 @@ struct SkeletonJoint
 
 struct SkeletalMeshAsset : public RuntimeAsset
 {
+	// Same contract as StaticMeshAsset: the mesh's own material, equal to slot 0.
 	std::string                 materialPath;
 	HE::UUID                    materialId;   // pack-time baked; {} for loose/editor assets
+	// The same MSEC table the static asset carries — the importer writes one per
+	// glTF material here too. The skeletal DRAW path does not read it yet and
+	// still draws the whole mesh with `materialPath`; the table is what a later
+	// per-section skinned draw finds already in place.
+	std::vector<MeshSection>    sections;
 	std::vector<float>          vertices;
 	std::vector<uint32_t>       indices;
 	std::vector<float>          normals;
@@ -127,6 +165,42 @@ struct SkeletalMeshAsset : public RuntimeAsset
 	std::vector<float>          boneWeights;  // 4 weights per vertex, flat
 	std::vector<SkeletonJoint>  skeleton;     // joint hierarchy
 };
+
+namespace HE
+{
+	// The section table a draw (or an inspector) iterates for either mesh type.
+	// An asset whose `sections` is empty — the built-in primitives, terrain
+	// chunks, anything assembled in memory rather than loaded — is exactly what
+	// every mesh was before sections existed: one section over the whole index
+	// buffer, drawn with the mesh's own material. Spelled out here once so no
+	// draw path invents its own reading of "no table".
+	template<typename Mesh>
+	std::vector<MeshSection> meshSectionsOf(const Mesh& mesh)
+	{
+		if (!mesh.sections.empty()) return mesh.sections;
+		MeshSection whole;
+		whole.indexOffset  = 0;
+		whole.indexCount   = static_cast<uint32_t>(mesh.indices.size());
+		whole.materialPath = mesh.materialPath;
+		whole.materialId   = mesh.materialId;
+		return { whole };
+	}
+
+	// True when `sections` describes `indexCount` indices exactly: contiguous
+	// from 0, no gaps, no overlap, summing to the buffer. (An empty section is
+	// allowed — an empty mesh's one section has zero indices.) The loader refuses
+	// a table that fails this and falls back to the one-section shape, so a
+	// per-section draw never indexes past the buffer.
+	HE_API bool meshSectionsCover(const std::vector<MeshSection>& sections, size_t indexCount);
+
+	// MSEC chunk (de)serialization — the single source of truth for the section
+	// byte layout (documented at HAsset::CHUNK_MSEC), shared by saveAsset, the
+	// loader and the packer's reference rewrite. decode is bounds-checked and
+	// answers false for a truncated table; it does NOT validate the ranges —
+	// that is meshSectionsCover's job, once the index count is known.
+	HE_API std::vector<uint8_t> encodeMeshSections(const std::vector<MeshSection>& sections);
+	HE_API bool decodeMeshSections(const std::vector<uint8_t>& bytes, std::vector<MeshSection>& out);
+}
 
 struct MaterialAsset : public RuntimeAsset
 {

@@ -445,3 +445,92 @@ TEST_CASE("SkeletalMeshImporter's material reference resolves as a material")
 
     he_test::removeAllQuiet(dir);
 }
+
+// The skeletal importer shares the section bookkeeping with the static one: a
+// rigged file with several materials gets one section per material and its
+// index buffer regrouped to match — while every per-VERTEX stream, the skin
+// streams included, stays exactly as baked and index-parallel. (The skinned
+// DRAW path still ignores the table; this pins down the asset, not the draw.)
+TEST_CASE("SkeletalMeshImporter writes one section per material and keeps the skin streams parallel")
+{
+    const fs::path dir     = fs::temp_directory_path() / "he_test_skelsections";
+    const fs::path content = dir / "content";
+    he_test::removeAllQuiet(dir);
+    fs::create_directories(dir);
+    fs::create_directories(content);
+    REQUIRE(writeTestGltf(dir)); // writes sm_skin_test.bin, reused here
+
+    // Three mesh nodes: the skinned body (M_Skin), a prop (M_Prop), a second
+    // prop back on M_Skin — so the M_Skin section has to gather primitives 0 and
+    // 2 around primitive 1.
+    const std::string gltf = R"({
+"asset":{"version":"2.0"},
+"scene":0,
+"scenes":[{"nodes":[0,2,3,4]}],
+"nodes":[
+  {"name":"root","children":[1]},
+  {"name":"hip"},
+  {"name":"skinned","mesh":0,"skin":0},
+  {"name":"prop","mesh":1,"translation":[10,0,0]},
+  {"name":"prop2","mesh":2,"translation":[20,0,0]}
+],
+"skins":[{"inverseBindMatrices":4,"joints":[0,1],"name":"Armature"}],
+"materials":[{"name":"M_Skin"},{"name":"M_Prop"}],
+"meshes":[
+  {"name":"SkinnedMesh","primitives":[{
+    "attributes":{"POSITION":0,"JOINTS_0":2,"WEIGHTS_0":3},"indices":1,"mode":4,"material":0}]},
+  {"name":"PropMesh","primitives":[{
+    "attributes":{"POSITION":0},"indices":1,"mode":4,"material":1}]},
+  {"name":"PropMesh2","primitives":[{
+    "attributes":{"POSITION":0},"indices":1,"mode":4,"material":0}]}
+],
+"accessors":[
+  {"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},
+  {"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"},
+  {"bufferView":2,"componentType":5121,"count":3,"type":"VEC4"},
+  {"bufferView":3,"componentType":5126,"count":3,"type":"VEC4"},
+  {"bufferView":4,"componentType":5126,"count":2,"type":"MAT4"}
+],
+"bufferViews":[
+  {"buffer":0,"byteOffset":0,  "byteLength":36},
+  {"buffer":0,"byteOffset":36, "byteLength":6},
+  {"buffer":0,"byteOffset":44, "byteLength":12},
+  {"buffer":0,"byteOffset":56, "byteLength":48},
+  {"buffer":0,"byteOffset":104,"byteLength":128}
+],
+"buffers":[{"uri":"sm_skin_test.bin","byteLength":232}]
+})";
+    {
+        std::ofstream f(dir / "sm_sections_test.gltf");
+        REQUIRE(f.good());
+        f << gltf;
+    }
+
+    auto mesh = SkeletalMeshImporter::import(dir / "sm_sections_test.gltf", content, "Imported");
+    REQUIRE(mesh != nullptr);
+    REQUIRE(mesh->vertices.size() == 27);              // 9 verts, in bake order
+    REQUIRE(mesh->indices.size()  == 9);
+    CHECK(mesh->boneIDs.size()     == 9 * 4);          // skin streams stay per vertex…
+    CHECK(mesh->boneWeights.size() == 9 * 4);
+    CHECK(mesh->vertices[9]  == doctest::Approx(10.0f)); // …and the vertex order is the bake's
+    CHECK(mesh->vertices[18] == doctest::Approx(20.0f));
+
+    REQUIRE(mesh->sections.size() == 2);
+    CHECK(mesh->sections[0].materialPath == "Imported/M_Skin.hasset");
+    CHECK(mesh->sections[0].indexOffset  == 0);
+    CHECK(mesh->sections[0].indexCount   == 6);        // primitives 0 and 2
+    CHECK(mesh->sections[1].materialPath == "Imported/M_Prop.hasset");
+    CHECK(mesh->sections[1].indexOffset  == 6);
+    CHECK(mesh->sections[1].indexCount   == 3);        // primitive 1
+    CHECK(mesh->materialPath == "Imported/M_Skin.hasset");
+    CHECK(mesh->indices == std::vector<uint32_t>{ 0,1,2,  6,7,8,  3,4,5 });
+
+    ContentManager cm(content.string());
+    const SkeletalMeshAsset* loaded = cm.getSkeletalMesh(cm.loadAsset(mesh->path));
+    REQUIRE(loaded != nullptr);
+    REQUIRE(loaded->sections.size() == 2);
+    CHECK(loaded->sections[1].materialPath == "Imported/M_Prop.hasset");
+    CHECK(loaded->indices == mesh->indices);
+
+    he_test::removeAllQuiet(dir);
+}

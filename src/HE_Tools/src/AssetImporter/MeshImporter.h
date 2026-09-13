@@ -5,12 +5,13 @@
 #include "ImporterCommon.h"   // Importer::OutputTargets
 
 // Imports glTF 2.0 (.gltf / .glb) into a StaticMeshAsset. All primitives of
-// all scene nodes are baked into one mesh (the engine has no submesh concept
-// yet); node world transforms are applied to the vertex data.
+// all scene nodes are baked into one vertex/index buffer with node world
+// transforms applied; primitives sharing a glTF material become one material
+// SECTION (MeshSection, chunk MSEC), so a multi-material file keeps every
+// material on the geometry it was authored on.
 //
-// If the glTF references a base-color texture, it is imported alongside the
-// mesh and a MaterialAsset referencing it is generated; the mesh's MREF then
-// points at that material.
+// Every glTF material is imported as a MaterialAsset (with its textures) and
+// bound to its section; the mesh's MREF points at section 0's material.
 class MeshImporter {
 public:
     struct ImportSettings {

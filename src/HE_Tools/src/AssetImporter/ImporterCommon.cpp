@@ -323,6 +323,91 @@ void appendSkinning(const GltfPrimitiveAttributes& attrs,
 	}
 }
 
+// ─── Material sections ───────────────────────────────────────────────────────
+
+const cgltf_material* gltfPrimaryMaterial(const cgltf_data* data)
+{
+	if (!data) return nullptr;
+	for (cgltf_size n = 0; n < data->nodes_count; ++n)
+	{
+		const cgltf_node& node = data->nodes[n];
+		if (!node.mesh) continue;
+		for (cgltf_size p = 0; p < node.mesh->primitives_count; ++p)
+			if (node.mesh->primitives[p].material)
+				return node.mesh->primitives[p].material;
+	}
+	for (cgltf_size mi = 0; mi < data->meshes_count; ++mi)
+		for (cgltf_size p = 0; p < data->meshes[mi].primitives_count; ++p)
+			if (data->meshes[mi].primitives[p].material)
+				return data->meshes[mi].primitives[p].material;
+	// Primitives without a material still get the file's first material bound
+	// rather than nothing: a glTF that declares materials but leaves a primitive
+	// unassigned would otherwise import a mesh with no material reference at all,
+	// which blanks the MREF every scene resolves through.
+	return data->materials_count > 0 ? &data->materials[0] : nullptr;
+}
+
+std::vector<MeshSection> buildMeshSections(const cgltf_data*                  data,
+                                           const std::vector<BakedPrimitive>& baked,
+                                           const cgltf_material*              primary,
+                                           const std::vector<std::string>&    materialPaths,
+                                           std::vector<uint32_t>&             indices)
+{
+	// One group per distinct material, in order of first appearance; the
+	// primitives of a group keep their bake order inside it.
+	struct Group
+	{
+		const cgltf_material* material = nullptr;
+		std::vector<size_t>   prims;   // indices into `baked`
+	};
+	std::vector<Group> groups;
+	for (size_t i = 0; i < baked.size(); ++i)
+	{
+		if (static_cast<size_t>(baked[i].indexStart) + baked[i].indexCount > indices.size())
+			return {};   // a record that does not describe this buffer — see below
+		const cgltf_material* key = baked[i].material ? baked[i].material : primary;
+		auto it = std::find_if(groups.begin(), groups.end(),
+		                       [key](const Group& g) { return g.material == key; });
+		if (it == groups.end()) { groups.push_back({ key, {} }); it = groups.end() - 1; }
+		it->prims.push_back(i);
+	}
+
+	// Regroup the index buffer so each section is one contiguous run. The
+	// single-group case (every mesh imported before sections existed) copies the
+	// ranges back in their original order — the buffer comes out unchanged.
+	std::vector<uint32_t> regrouped;
+	regrouped.reserve(indices.size());
+	std::vector<MeshSection> sections;
+	sections.reserve(groups.size());
+	for (const Group& g : groups)
+	{
+		MeshSection s;
+		s.indexOffset = static_cast<uint32_t>(regrouped.size());
+		for (size_t pi : g.prims)
+		{
+			const BakedPrimitive& b = baked[pi];
+			regrouped.insert(regrouped.end(),
+			                 indices.begin() + b.indexStart,
+			                 indices.begin() + b.indexStart + b.indexCount);
+		}
+		s.indexCount = static_cast<uint32_t>(regrouped.size()) - s.indexOffset;
+		if (g.material && data && data->materials)
+		{
+			const size_t mi = static_cast<size_t>(g.material - data->materials);
+			if (mi < materialPaths.size()) s.materialPath = materialPaths[mi];
+		}
+		sections.push_back(std::move(s));
+	}
+	// Every index the bake produced is accounted for by exactly one primitive
+	// range — nothing else ever writes the buffer between the two. Should a
+	// caller ever break that, no table at all (the mesh saves and loads as one
+	// section) beats a table whose ranges point at a buffer it does not describe.
+	if (regrouped.size() != indices.size())
+		return {};
+	indices = std::move(regrouped);
+	return sections;
+}
+
 // ─── Source routing ──────────────────────────────────────────────────────────
 
 namespace
@@ -518,7 +603,12 @@ std::vector<std::string> meshSidecarAssets(const std::filesystem::path& meshAsse
 		return out;
 
 	// Only the two mesh asset types carry MREF, so every other asset type leaves
-	// here with an empty list.
+	// here with an empty list. Deliberately MREF only, not the section table:
+	// reimport() reads this list POSITIONALLY (material first, then its base-colour
+	// texture), so the other sections' materials cannot be spliced in here without
+	// shifting the texture redirect onto a material. They are named after their
+	// glTF material, which is stable across re-imports, so they need no redirect;
+	// what they lack is the up-to-date probe below noticing when one is deleted.
 	const auto* mref = reader.findChunk(HAsset::CHUNK_MREF);
 	if (!mref)
 		return out;

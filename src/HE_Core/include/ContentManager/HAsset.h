@@ -30,6 +30,11 @@ inline constexpr char     k_magic[4]  = { 'H', 'A', 'S', 'T' };
 // that breaks one of those two properties (v1→v2 inserted the UUID in the
 // MIDDLE); spending one on an append-only tail would only make old files look
 // unreadable to code that gates on the number.
+//
+// Still 2 after mesh sections (CHUNK_MSEC) for the same reason: a whole NEW
+// chunk that old readers never look for and new readers treat as optional. An
+// old build draws a sectioned mesh with its MREF material, a new build draws an
+// old mesh as one section — both properties hold without a number.
 inline constexpr uint16_t k_version   = 2;
 
 // ── File header (32 bytes) ────────────────────────────────────────────────────
@@ -83,6 +88,20 @@ inline constexpr uint32_t CHUNK_BWGT = makeChunkId('B','W','G','T'); // bone wei
 inline constexpr uint32_t CHUNK_SKEL = makeChunkId('S','K','E','L'); // skeleton hierarchy
 inline constexpr uint32_t CHUNK_MREF = makeChunkId('M','R','E','F'); // material path
 inline constexpr uint32_t CHUNK_MRFU = makeChunkId('M','R','F','U'); // material UUID (pack-time baked; POD HE::UUID)
+// Material sections (submeshes) of a static or skeletal mesh — the slot table a
+// multi-material glTF imports into. Layout:
+//   uint32 sectionCount
+//   per section: uint32 indexOffset, uint32 indexCount,
+//                string materialPath (length-prefixed; "" in a pack),
+//                uint64 materialId.hi, uint64 materialId.lo (null when loose)
+// One chunk carries both reference forms (unlike MREF → MRFU): the packer keeps
+// the chunk and rewrites each entry's path into its UUID in place. The path is a
+// length-prefixed string on purpose — that is the form the reference scan and the
+// rename retarget recognise in a binary chunk, so a section material renames and
+// reports like the MREF one. ABSENT (every mesh written before sections existed)
+// = one section over the whole index buffer with the MREF/MRFU material, which is
+// exactly how those meshes always drew; no file-version bump, see k_version.
+inline constexpr uint32_t CHUNK_MSEC = makeChunkId('M','S','E','C'); // material sections
 
 // Texture
 inline constexpr uint32_t CHUNK_TXMI = makeChunkId('T','X','M','I'); // texture meta

@@ -153,24 +153,60 @@ namespace Importer
 	                    std::vector<uint32_t>&         boneIDs,
 	                    std::vector<float>&            boneWeights);
 
+	// ─── Material sections ────────────────────────────────────────────────────
+
+	// Where one baked primitive landed in the merged index buffer, as recorded by
+	// the mesh importers around each appendPrimitive() call (indices.size() before
+	// and after), with the glTF material it was authored with.
+	struct BakedPrimitive
+	{
+		uint32_t              indexStart = 0;
+		uint32_t              indexCount = 0;
+		const cgltf_material* material   = nullptr;  // null = the primitive has none
+	};
+
+	// The material a mesh binds at mesh level (chunk MREF) — which is also its
+	// section 0: the material of the first primitive that carries one, in the SAME
+	// order the importers bake geometry (mesh-bearing nodes first, bare meshes only
+	// when the glTF has no node hierarchy), so "the material the mesh got" is the
+	// one belonging to the first triangles in the buffer rather than an arbitrary
+	// index into data->materials. A glTF whose primitives are all unassigned still
+	// gets its first declared material; null only for a glTF that declares none.
+	const cgltf_material* gltfPrimaryMaterial(const cgltf_data* data);
+
+	// Turns the baked primitives into the mesh's section table (MeshSection, chunk
+	// MSEC) and regroups `indices` to match: primitives sharing a glTF material
+	// become ONE section, in the order their material first appears in the bake,
+	// each a contiguous run of the index buffer. Only whole primitive ranges move
+	// and only inside `indices` — the vertex streams stay as baked, so every
+	// per-vertex array (positions, UVs, joints…) remains index-parallel and the
+	// per-primitive UV-set choice keeps its exact meaning.
+	//
+	// A primitive without a material joins `primary`'s section (the rule every
+	// import has always applied: unassigned geometry takes the first material), so
+	// section 0 is `primary`'s and the mesh-level MREF stays equal to slot 0. Each
+	// section's materialPath is `materialPaths[index of its material]` — EMPTY when
+	// materials were not imported or that one failed to write, which the engine
+	// reads as "the mesh's own material" (see MeshSection). A single-material glTF
+	// therefore yields one section over the whole buffer, indices untouched.
+	std::vector<MeshSection> buildMeshSections(const cgltf_data*                  data,
+	                                           const std::vector<BakedPrimitive>& baked,
+	                                           const cgltf_material*              primary,
+	                                           const std::vector<std::string>&    materialPaths,
+	                                           std::vector<uint32_t>&             indices);
+
 	// The result of importing every material a glTF declares.
 	struct GltfMaterialImport
 	{
-		// Content-relative path of the material the MESH binds (chunk MREF) — the
-		// first primitive's, in the order the mesh importers bake geometry. Empty
-		// when the glTF declares no materials, or when writing that one failed.
+		// Content-relative path of the material the MESH binds (chunk MREF) — that
+		// of gltfPrimaryMaterial(), which is also section 0's. Empty when the glTF
+		// declares no materials, or when writing that one failed.
 		std::string              primary;
 		// Every material, index-parallel to `cgltf_data::materials`. An entry is
-		// empty when that material failed to write.
+		// empty when that material failed to write. This is what buildMeshSections
+		// binds section by section, so a multi-material glTF imports with every one
+		// of its materials assigned to the geometry it was authored on.
 		std::vector<std::string> paths;
-		// The ones that were written but could not be bound, because a mesh asset
-		// holds exactly one material reference (the engine has no submesh concept)
-		// and an entity one MaterialComponent. They are NOT assignable by hand — the
-		// primitives they belong to are baked into the same buffer as the bound
-		// material's — so the import reports them as unusable-on-this-mesh rather
-		// than as a to-do. They exist as assets, which is what makes a DCC re-export
-		// per material, or a later mesh-sections feature, able to pick them up.
-		std::vector<std::string> unbound;
 	};
 
 	// Imports EVERY material of the glTF as its own MaterialAsset — each with a PBR
@@ -180,7 +216,8 @@ namespace Importer
 	// once no matter how many materials or channels share it.
 	//
 	// The caller puts `primary` into StaticMeshAsset/SkeletalMeshAsset's `materialPath`
-	// (chunk MREF), which every renderer resolves as a material reference.
+	// (chunk MREF), which every renderer resolves as a material reference, and
+	// `paths` into the section table via buildMeshSections.
 	//
 	// `outputs.material` / `outputs.texture` redirect the bound material and its
 	// base-colour texture onto files that already exist (a re-import of a mesh whose

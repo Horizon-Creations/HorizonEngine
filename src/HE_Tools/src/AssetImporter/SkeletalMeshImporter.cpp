@@ -88,6 +88,9 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
     mesh->name = outputs.asset.empty() ? stem : out.name;
 
     // ── Geometry ────────────────────────────────────────────────────────────────
+    // Where each primitive's indices land, for the section table built after the
+    // bake — the same bookkeeping MeshImporter keeps.
+    std::vector<Importer::BakedPrimitive> baked;
     for (cgltf_size ni = 0; ni < data->nodes_count; ++ni)
     {
         const cgltf_node& node = data->nodes[ni];
@@ -118,10 +121,14 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
             // The UV set follows the primitive's own material — see MeshImporter.
             const cgltf_primitive& prim = node.mesh->primitives[pi];
             const int wantedUv = Importer::gltfMaterialUvSet(prim.material);
+            const auto indexStart = static_cast<uint32_t>(mesh->indices.size());
             const auto attrs = Importer::appendPrimitive(
                 prim, world, settings.uniformScale,
                 streams, mesh->indices, wantedUv);
             if (!attrs.position) continue;
+            baked.push_back({ indexStart,
+                              static_cast<uint32_t>(mesh->indices.size()) - indexStart,
+                              prim.material });
             if (attrs.uvSet != wantedUv)
                 HE_LOG_WARN(Tool, "%s",
                     ("SkeletalMeshImporter: " + sourcePath.filename().string()
@@ -180,9 +187,11 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
     // images, and it stays derived from the SOURCE, never from the mesh's own
     // (possibly renamed) name — so ordinary imports keep writing exactly the file
     // names they always have.
+    Importer::GltfMaterialImport materials;
     if (settings.importMaterials)
-        mesh->materialPath = Importer::importGltfMaterials(
-            data, sourcePath, contentRoot, relativeOutputDir, stem, outputs).primary;
+        materials = Importer::importGltfMaterials(
+            data, sourcePath, contentRoot, relativeOutputDir, stem, outputs);
+    mesh->materialPath = materials.primary;
     // Nothing resolved — importMaterials is off, or the glTF declares no materials.
     // MREF is written unconditionally from this freshly built
     // asset, so an empty field here BLANKS the material reference of every scene that
@@ -191,6 +200,15 @@ std::unique_ptr<SkeletalMeshAsset> SkeletalMeshImporter::import(
     // reference, read off the mesh by reimport() before it ran.
     if (mesh->materialPath.empty())
         mesh->materialPath = outputs.material;
+
+    // Sections, exactly as the static importer builds them (one per material,
+    // indices regrouped; the skin streams are per VERTEX and untouched). The
+    // skinned DRAW path does not read the table yet — it still draws the whole
+    // mesh with `materialPath` — but the asset carries it from here on.
+    mesh->sections = Importer::buildMeshSections(
+        data, baked, Importer::gltfPrimaryMaterial(data), materials.paths, mesh->indices);
+    if (!mesh->sections.empty() && mesh->sections[0].materialPath.empty())
+        mesh->sections[0].materialPath = mesh->materialPath;
 
     cgltf_free(data);
 
