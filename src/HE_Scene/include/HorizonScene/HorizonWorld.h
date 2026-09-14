@@ -42,6 +42,20 @@ public:
 	// Moves `entity` under `newParent`. Fails (returns false) when the move
 	// would create a cycle, target the root itself, or parent is invalid.
 	bool   reparentEntity(Entity entity, Entity newParent);
+	// ── Sibling order ────────────────────────────────────────────────────────
+	// HierarchyComponent::children IS the order the Outliner lists a parent's
+	// children in, and the order they are written to the scene file in; until
+	// now the only thing that decided it was creation order (reparentEntity
+	// appends). These two edit it in place. Both mark the hierarchy dirty and
+	// return whether anything moved.
+	//   moveChild: shift `entity` `delta` places among its siblings (-1 = one
+	//   up, +1 = one down), clamped at the ends. False for the root, a built-in
+	//   or an entity with no parent.
+	//   sortChildrenByName: this parent's DIRECT children, A→Z by name, case-
+	//   insensitively; ties keep their order. Deeper levels are untouched —
+	//   what the user asked to sort is the list under one row.
+	bool   moveChild(Entity entity, int delta);
+	bool   sortChildrenByName(Entity parent);
 	// Destroys every entity except the root (used by scene load / play-mode
 	// restore).
 	void   clear();

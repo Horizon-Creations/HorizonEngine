@@ -3,6 +3,7 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/TerrainChunkComponent.h>
+#include <HorizonScene/Components/EditorLockComponent.h>   // a locked entity is not under the cursor
 #include <limits>
 
 namespace ViewportPick
@@ -43,6 +44,13 @@ Entity pick(const RenderWorld& snapshot, entt::registry& reg, const BoxLookup& b
 		{
 			if (auto* cc = reg.try_get<TerrainChunkComponent>(e)) terrainOwner = cc->terrain;
 			else if (reg.all_of<TerrainComponent>(e))            terrainOwner = e;
+		}
+		// Locked in the Outliner: the click passes through to whatever is
+		// behind. Decided after the terrain lookup so a locked landscape's
+		// chunks answer for the landscape's lock, not their own.
+		{
+			const Entity owner = (terrainOwner != entt::null) ? terrainOwner : e;
+			if (reg.valid(owner) && reg.all_of<EditorLockComponent>(owner)) continue;
 		}
 
 		if (terrainOwner != entt::null)

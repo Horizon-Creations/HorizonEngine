@@ -1639,6 +1639,26 @@ namespace
 	  "Saves this entity and everything under it as a reusable asset, so the "
 	  "same thing can be dropped into any scene.",
 	  "", "scenes#prefabs" },
+	{ "World Outliner/Move Up", "",
+	  "Moves this entity one place up among its siblings. The order under a "
+	  "parent is part of the scene, not just of this list.",
+	  "", "editor#outliner" },
+	{ "World Outliner/Move Down", "",
+	  "Moves this entity one place down among its siblings.",
+	  "", "editor#outliner" },
+	{ "World Outliner/Sort Children by Name", "",
+	  "Puts the entities directly under this one in alphabetical order. "
+	  "Deeper levels are left as they are.",
+	  "", "editor#outliner" },
+	{ "World Outliner/Lock", "",
+	  "Locks every selected entity: the viewport's click, selection frame and "
+	  "gizmo leave them alone. The padlock on a row does one entity; this does "
+	  "the whole selection.",
+	  "", "editor#outliner" },
+	{ "World Outliner/Unlock", "",
+	  "Unlocks every selected entity, so the viewport can pick and move them "
+	  "again.",
+	  "", "editor#outliner" },
 
 	// ── Content Browser ──────────────────────────────────────────────────────
 	{ "Content Browser/Create Asset", "",
@@ -2022,6 +2042,31 @@ namespace
 	  "Saves this entity and its children as a reusable asset, so the same thing "
 	  "can be dropped into any scene.",
 	  "", "scenes#prefabs" },
+	{ "outliner.search", "Search",
+	  "Narrows the tree to entities whose name contains this text, in any case. "
+	  "Every entity in the scene is searched, including those under folded "
+	  "rows. Hits are shown with the rows above them, dimmed, so you can see "
+	  "where each one lives; clearing the box puts the tree back as it was.",
+	  "", "editor#outliner" },
+	{ "outliner.type-filter", "Type filter",
+	  "Shows only entities that carry the chosen component, such as every Light "
+	  "or every Camera. An entity is the sum of its components, so this is what "
+	  "\"type\" means here. Combined with the search box, both have to match.",
+	  "", "editor#outliner" },
+	{ "outliner.visibility", "Visibility",
+	  "Hides or shows this entity and everything under it: every mesh, light, "
+	  "particle system, foliage, rope and trail in the subtree is switched off "
+	  "or on. This is the same Visible flag the Details panel and scripts use, "
+	  "so it is saved with the scene and applies in the game too. A row with "
+	  "nothing to draw under it has no eye. One undo step.",
+	  "", "editor#outliner" },
+	{ "outliner.lock", "Lock",
+	  "Keeps the mouse in the viewport off this entity: a click passes through "
+	  "it to whatever is behind, the selection frame does not take it, and the "
+	  "gizmo will not move it. It can still be selected here and edited in the "
+	  "Details panel. Lock the floor and the walls, and the props in front of "
+	  "them stop being hard to grab. Saved with the scene.",
+	  "", "editor#outliner" },
 
 	// ── Details panel ────────────────────────────────────────────────────────
 	{ "details.add-component", "Add Component",

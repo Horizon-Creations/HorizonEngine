@@ -173,6 +173,10 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "View",            "Console" },
 		{ "Help",            "Documentation" },
 		{ "World Outliner",  "Save as Prefab" },
+		// The context menu's lock verb is a ternary ("Lock" / "Unlock"), which
+		// the static scan cannot read as a literal.
+		{ "World Outliner",  "Lock" },
+		{ "World Outliner",  "Unlock" },
 		{ "New Entity",      "Cube" },
 		{ "New Entity",      "Rope" },
 		{ "New Entity",      "Trail" },
@@ -385,6 +389,9 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		// shared helper (MeshMaterialSlots) looks the entry up by key from
 		// inside both mesh tabs' "Mesh Viewer" scope.
 		"Mesh Viewer/Material Slots",
+		// The Outliner's eye and padlock are drawn from primitives over an
+		// invisible button — no label at all, so they are keyed by hand.
+		"outliner.visibility", "outliner.lock",
 	};
 	for (const char* k : byKey)
 	{
