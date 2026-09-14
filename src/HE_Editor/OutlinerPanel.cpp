@@ -5,6 +5,7 @@
 #include "EditorHelp.h"                  // scopes for the context and create menus
 #include "EditorTheme.h"                 // the accent the prefab badge is drawn in
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/EntityVisibility.h> // what the eye on a row flips, and reads
 #include <ContentManager/ContentManager.h> // the prefab badge names the asset
 #include <ContentManager/Assets.h>
 #include <UIWidget/WidgetManager.h>   // application projects list widgets, not entities
@@ -151,6 +152,141 @@ namespace
         item("Rope",  Preset::Rope);
         item("Trail", Preset::Trail);
         return picked;
+    }
+
+    // ── The eye and the padlock ──────────────────────────────────────────────
+    // Drawn from primitives rather than glyphs: the editor font has no eye or
+    // lock in it, and a shape drawn through GetColorU32 dims with the row the
+    // way a glyph would not. `min` is the top-left of a `size`×`size` box.
+    void drawEye(ImDrawList* dl, const ImVec2& min, float size, ImU32 col, bool open)
+    {
+        const ImVec2 c(min.x + size * 0.5f, min.y + size * 0.5f);
+        const float  rx = size * 0.44f, ry = size * 0.27f;
+        const float  th = std::max(1.0f, size * 0.09f);
+        dl->AddEllipse(c, ImVec2(rx, ry), col, 0.0f, 0, th);
+        if (open)
+            dl->AddCircleFilled(c, size * 0.14f, col);
+        else
+            // Shut: a slash through it, corner to corner, the universal "not".
+            dl->AddLine(ImVec2(c.x - rx, c.y + ry), ImVec2(c.x + rx, c.y - ry), col, th);
+    }
+
+    void drawPadlock(ImDrawList* dl, const ImVec2& min, float size, ImU32 col, bool locked)
+    {
+        const float th = std::max(1.0f, size * 0.09f);
+        const float w  = size * 0.56f;                 // body width
+        const float x0 = min.x + (size - w) * 0.5f, x1 = x0 + w;
+        const float y1 = min.y + size * 0.92f;         // body bottom
+        const float y0 = min.y + size * 0.50f;         // body top
+        dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), col, size * 0.08f);
+        // The shackle: an arc over the body when locked; when open it stands
+        // beside it, one leg lifted, so the two states read apart at a glance.
+        const float r  = w * 0.32f;
+        const float cx = locked ? (x0 + x1) * 0.5f : x1 - r * 0.15f;
+        const float cy = y0 - r * 0.15f;
+        dl->PathClear();
+        dl->PathArcTo(ImVec2(cx, cy), r, IM_PI, IM_PI * 2.0f, 12);
+        if (locked)
+        {
+            dl->PathLineTo(ImVec2(cx + r, y0));
+            dl->PathStroke(col, ImDrawFlags_None, th);
+            dl->PathLineTo(ImVec2(cx - r, cy));
+            dl->PathLineTo(ImVec2(cx - r, y0));
+            dl->PathStroke(col, ImDrawFlags_None, th);
+        }
+        else
+        {
+            dl->PathLineTo(ImVec2(cx + r, cy + r * 0.4f));
+            dl->PathStroke(col, ImDrawFlags_None, th);
+            dl->PathLineTo(ImVec2(cx - r, cy));
+            dl->PathLineTo(ImVec2(cx - r, y0));
+            dl->PathStroke(col, ImDrawFlags_None, th);
+        }
+    }
+
+    // The two buttons at the right edge of one Outliner row. Called after
+    // the row and its badges, on the same line; places itself at the edge.
+    void drawRowIcons(AppContext& ctx, Entity entity)
+    {
+        auto& reg = ctx.world->registry();
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const float sz    = ImGui::GetTextLineHeight();
+        const float total = sz * 2.0f + style.ItemInnerSpacing.x;
+
+        ImGui::SameLine();
+        // To the right edge, or as far right as the name leaves room for.
+        const float slack = ImGui::GetContentRegionAvail().x - total;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, slack));
+        // Down to the text's line, less a pixel: the glyphs' optical centre
+        // sits above the line box's middle (descenders), and the icons are
+        // drawn about their box's middle.
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + style.FramePadding.y - 1.0f);
+
+        ImGui::PushID(static_cast<int>(entt::to_integral(entity)));
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const bool editable = !ctx.isPlaying;
+
+        // ── Eye ──
+        const HE::Visibility vis = HE::subtreeVisibility(reg, entity);
+        if (vis == HE::Visibility::None)
+        {
+            // Nothing to draw anywhere below: keep the column, show no eye.
+            ImGui::Dummy(ImVec2(sz, sz));
+        }
+        else
+        {
+            const bool shown = vis == HE::Visibility::Visible;
+            ImGui::InvisibleButton("##eye", ImVec2(sz, sz));
+            const bool hot = editable && ImGui::IsItemHovered();
+            const ImVec4 base = shown ? ImGui::GetStyleColorVec4(ImGuiCol_Text)
+                                      : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled);
+            const ImU32 col = ImGui::GetColorU32(hot ? HE::Ed::Theme::AccentBright
+                                                     : HE::Ed::Theme::alpha(base, shown ? 0.85f : 1.0f));
+            drawEye(dl, ImGui::GetItemRectMin(), sz, col, shown);
+            EditorWidgets::helpForKey("outliner.visibility");
+            if (editable && ImGui::IsItemClicked(ImGuiMouseButton_Left))
+            {
+                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                HE::setSubtreeVisible(reg, entity, !shown);
+                // Every entity touched, named for the prefab-override
+                // recording: none of them need be selected (see
+                // AppContext::noteEntityEdited).
+                if (ctx.noteEntityEdited)
+                {
+                    std::function<void(Entity)> note = [&](Entity e)
+                    {
+                        if (!reg.valid(e)) return;
+                        ctx.noteEntityEdited(e);
+                        if (const auto* h = reg.try_get<HierarchyComponent>(e))
+                            for (const Entity c : h->children) note(c);
+                    };
+                    note(entity);
+                }
+            }
+        }
+
+        // ── Padlock ──
+        ImGui::SameLine(0.0f, style.ItemInnerSpacing.x);
+        const bool locked = reg.all_of<EditorLockComponent>(entity);
+        ImGui::InvisibleButton("##lock", ImVec2(sz, sz));
+        {
+            const bool hot = editable && ImGui::IsItemHovered();
+            // Locked is loud, unlocked barely there: the row's normal state
+            // should not wear a badge.
+            const ImU32 col = ImGui::GetColorU32(
+                hot    ? HE::Ed::Theme::AccentBright
+              : locked ? HE::Ed::Theme::Accent
+                       : HE::Ed::Theme::alpha(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled), 0.45f));
+            drawPadlock(dl, ImGui::GetItemRectMin(), sz, col, locked);
+            EditorWidgets::helpForKey("outliner.lock");
+            if (editable && ImGui::IsItemClicked(ImGuiMouseButton_Left))
+            {
+                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                if (locked) reg.remove<EditorLockComponent>(entity);
+                else        reg.emplace_or_replace<EditorLockComponent>(entity);
+            }
+        }
+        ImGui::PopID();
     }
 }
 #endif
@@ -459,9 +595,13 @@ void render(AppContext& ctx)
                 --prevDepth;
             }
 
+            // AllowOverlap: the eye and the lock sit at the row's right edge,
+            // ON the row (SpanAvailWidth stretches it under them), and this
+            // is what lets them take the click instead of the row.
             ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow
                                      | ImGuiTreeNodeFlags_SpanAvailWidth
-                                     | ImGuiTreeNodeFlags_DefaultOpen;
+                                     | ImGuiTreeNodeFlags_DefaultOpen
+                                     | ImGuiTreeNodeFlags_AllowOverlap;
             if (!hasChildren)
                 flags |= ImGuiTreeNodeFlags_Leaf;
             if (ctx.selection.contains(node.entity))
@@ -505,6 +645,12 @@ void render(AppContext& ctx)
             if (filterActive && hasChildren)
                 ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 
+            // Both halves of "overlap": the tree-node FLAG only reaches the
+            // row's own button behaviour, while the IsItemClicked() below
+            // asks IsItemHovered(), which reads the ITEM flags — and those
+            // are set by this call alone. Without it a click on the eye also
+            // selected the row (found by tests/test_outliner_ui.cpp).
+            ImGui::SetNextItemAllowOverlap();
             bool open = ImGui::TreeNodeEx(
                 reinterpret_cast<void*>(static_cast<uintptr_t>(
                     static_cast<uint32_t>(node.entity))),
@@ -512,66 +658,13 @@ void render(AppContext& ctx)
 
             if (pushedText) ImGui::PopStyleColor();
 
-            // ── Placed prefabs ────────────────────────────────────────────
-            // The root of a placement wears the asset's name, and a mark when
-            // something on the placement was changed here — that is the row a
-            // reader looks at to know whether the thing under it is still
-            // what the prefab says. Read from the registry every frame rather
-            // than the hierarchy cache above: an override comes and goes
-            // without the hierarchy ever being dirty.
-            if (const auto* inst = ctx.world->registry().try_get<PrefabInstanceComponent>(node.entity))
-            {
-                const PrefabAsset* asset =
-                    ctx.contentManager ? ctx.contentManager->getPrefab(inst->asset) : nullptr;
-                const size_t changed = inst->overrides.size() + node.structuralChanges;
-                ImGui::SameLine();
-                ImGui::TextColored(changed ? HE::Ed::Theme::AccentBright
-                                           : HE::Ed::Theme::alpha(HE::Ed::Theme::Accent, 0.75f),
-                                   changed ? "[%s *]" : "[%s]",
-                                   asset && !asset->name.empty() ? asset->name.c_str() : "Prefab");
-                if (ImGui::IsItemHovered())
-                {
-                    if (!asset)
-                        ImGui::SetTooltip("Placed from a prefab that is not loaded.");
-                    else if (changed)
-                        ImGui::SetTooltip("Placed from %s\n%zu change(s) made here — the prefab's "
-                                          "values do not reach those. See Prefab Instance in the "
-                                          "Details panel.",
-                                          asset->path.c_str(), changed);
-                    else
-                        ImGui::SetTooltip("Placed from %s\nExactly what the prefab says.",
-                                          asset->path.c_str());
-                }
-            }
-            else if (node.addedHere)
-            {
-                // The top of something added to a placement here: the prefab
-                // knows nothing of it, and a push would write it in.
-                ImGui::SameLine();
-                ImGui::TextColored(HE::Ed::Theme::alpha(HE::Ed::Theme::Accent, 0.75f), "[+]");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Added to a placed prefab here — not part of the prefab. "
-                                      "See Prefab Instance in the Details panel.");
-            }
-
-            if (lock)
-            {
-                ImGui::SameLine();
-                if (lockedByMe)
-                {
-                    ImGui::TextDisabled("[you]");
-                }
-                else
-                {
-                    float rgb[3];
-                    ctx.collab->colorFor(lock->owner, rgb);
-                    ImGui::TextColored(ImVec4(rgb[0], rgb[1], rgb[2], 1.0f),
-                                       "[%s]", lock->ownerName.c_str());
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip(lockedByMe ? "You are editing this."
-                                                 : "Someone else is editing this.");
-            }
+            // Everything below that asks about "the item just submitted" —
+            // the click, the drag, the context menu — runs NOW, while that
+            // item is still the row. The badges and the eye/lock buttons are
+            // drawn after all of it (further down), because they are items of
+            // their own: a click test placed behind a "[Prefab]" badge would
+            // be asking about the badge, and BeginPopupContextItem behind a
+            // Text item has no id to hang the popup on.
 
             // Click (not on the arrow) → select. Ctrl (Cmd on macOS — ImGui
             // swaps the two under ConfigMacOSXBehaviors, so io.KeyCtrl is the
@@ -639,6 +732,67 @@ void render(AppContext& ctx)
                     std::strncpy(s_entityRenameBuf, node.name.c_str(), sizeof(s_entityRenameBuf) - 1);
                     s_entityRenameBuf[sizeof(s_entityRenameBuf) - 1] = '\0';
                     s_openEntityRename = true;
+                }
+                // ── Sibling order ─────────────────────────────────────────
+                // The order under a parent is authored data (it is the order
+                // the file lists the children in), and until now the only way
+                // to change it was to delete and recreate. Up/down move this
+                // row one place among its siblings; the sort puts this row's
+                // DIRECT children A→Z. Not while playing — same rule as every
+                // other edit in this menu.
+                {
+                    int siblingIndex = -1, siblingCount = 0;
+                    if (!isRoot)
+                        if (const auto* hier = ctx.world->registry().try_get<HierarchyComponent>(node.entity);
+                            hier && hier->parent != entt::null)
+                            if (const auto* ph = ctx.world->registry().try_get<HierarchyComponent>(hier->parent))
+                            {
+                                const auto& ch = ph->children;
+                                const auto it = std::find(ch.begin(), ch.end(), node.entity);
+                                siblingCount = static_cast<int>(ch.size());
+                                siblingIndex = it == ch.end() ? -1 : static_cast<int>(it - ch.begin());
+                            }
+                    ImGui::Separator();
+                    const bool canUp   = !ctx.isPlaying && siblingIndex > 0;
+                    const bool canDown = !ctx.isPlaying && siblingIndex >= 0 &&
+                                         siblingIndex < siblingCount - 1;
+                    if (EditorWidgets::menuItem("Move Up", nullptr, false, canUp))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        ctx.world->moveChild(node.entity, -1);
+                    }
+                    if (EditorWidgets::menuItem("Move Down", nullptr, false, canDown))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        ctx.world->moveChild(node.entity, +1);
+                    }
+                    if (EditorWidgets::menuItem("Sort Children by Name", nullptr, false,
+                                                !ctx.isPlaying && node.hasChildren))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        ctx.world->sortChildrenByName(node.entity);
+                    }
+                }
+                // ── Lock / unlock the whole selection ─────────────────────
+                // The padlock on the row does one entity; this does every
+                // selected one at once, the way Delete does. The verb is
+                // decided by THIS row: a locked row offers Unlock, and the
+                // rest of the selection follows it either way.
+                if (!isRoot)
+                {
+                    auto& reg = ctx.world->registry();
+                    const bool thisLocked = reg.all_of<EditorLockComponent>(node.entity);
+                    if (EditorWidgets::menuItem(thisLocked ? "Unlock" : "Lock", nullptr, false,
+                                                !ctx.isPlaying))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        for (const Entity e : ctx.selection.entities())
+                        {
+                            if (!reg.valid(e) || e == ctx.world->rootEntity()) continue;
+                            if (thisLocked) reg.remove<EditorLockComponent>(e);
+                            else            reg.emplace_or_replace<EditorLockComponent>(e);
+                        }
+                    }
                 }
                 // ── Duplicate / cut / copy / paste ────────────────────────
                 // The SAME hooks the Edit menu and the keyboard use. They act on
@@ -756,6 +910,85 @@ void render(AppContext& ctx)
                 }
                 ImGui::EndPopup();
             }
+
+            // ── Badges beside the name ────────────────────────────────────
+            // Drawn after the row's own interaction (see the note above the
+            // click handling); on screen they follow the name as before.
+            //
+            // Placed prefabs: the root of a placement wears the asset's name,
+            // and a mark when something on the placement was changed here —
+            // that is the row a reader looks at to know whether the thing
+            // under it is still what the prefab says. Read from the registry
+            // every frame rather than the hierarchy cache above: an override
+            // comes and goes without the hierarchy ever being dirty.
+            if (const auto* inst = ctx.world->registry().try_get<PrefabInstanceComponent>(node.entity))
+            {
+                const PrefabAsset* asset =
+                    ctx.contentManager ? ctx.contentManager->getPrefab(inst->asset) : nullptr;
+                const size_t changed = inst->overrides.size() + node.structuralChanges;
+                ImGui::SameLine();
+                ImGui::TextColored(changed ? HE::Ed::Theme::AccentBright
+                                           : HE::Ed::Theme::alpha(HE::Ed::Theme::Accent, 0.75f),
+                                   changed ? "[%s *]" : "[%s]",
+                                   asset && !asset->name.empty() ? asset->name.c_str() : "Prefab");
+                if (ImGui::IsItemHovered())
+                {
+                    if (!asset)
+                        ImGui::SetTooltip("Placed from a prefab that is not loaded.");
+                    else if (changed)
+                        ImGui::SetTooltip("Placed from %s\n%zu change(s) made here — the prefab's "
+                                          "values do not reach those. See Prefab Instance in the "
+                                          "Details panel.",
+                                          asset->path.c_str(), changed);
+                    else
+                        ImGui::SetTooltip("Placed from %s\nExactly what the prefab says.",
+                                          asset->path.c_str());
+                }
+            }
+            else if (node.addedHere)
+            {
+                // The top of something added to a placement here: the prefab
+                // knows nothing of it, and a push would write it in.
+                ImGui::SameLine();
+                ImGui::TextColored(HE::Ed::Theme::alpha(HE::Ed::Theme::Accent, 0.75f), "[+]");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Added to a placed prefab here — not part of the prefab. "
+                                      "See Prefab Instance in the Details panel.");
+            }
+
+            if (lock)
+            {
+                ImGui::SameLine();
+                if (lockedByMe)
+                {
+                    ImGui::TextDisabled("[you]");
+                }
+                else
+                {
+                    float rgb[3];
+                    ctx.collab->colorFor(lock->owner, rgb);
+                    ImGui::TextColored(ImVec4(rgb[0], rgb[1], rgb[2], 1.0f),
+                                       "[%s]", lock->ownerName.c_str());
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip(lockedByMe ? "You are editing this."
+                                                 : "Someone else is editing this.");
+            }
+
+            // ── Eye and padlock at the right edge ─────────────────────────
+            // Two buttons per row, right-aligned, the way every outliner
+            // since Unreal's draws them. The eye flips `visible` on every
+            // renderable in the subtree (EntityVisibility.h — there is no
+            // entity-level flag, and none inherited, so "hide the house"
+            // has to reach the doors); a row with nothing to draw anywhere
+            // under it has no eye. The padlock sets EditorLockComponent on
+            // this row: not clicked, not framed, not moved in the viewport.
+            // Both are edits and take an undo step; neither runs while
+            // playing (play runs on a copy, thrown away on stop).
+            // The state is read from the registry every frame: a `visible`
+            // flip never dirties the hierarchy cache.
+            if (!isRoot)
+                drawRowIcons(ctx, node.entity);
 
             if (open)
                 prevDepth = node.depth;

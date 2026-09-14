@@ -682,9 +682,19 @@ void render(AppContext& ctx, float dt)
 					// The whole selection, roots only: a child whose parent is
 					// selected too moves through the parent (see
 					// EditorSelection::roots), and one entity is the plain
-					// single-object gizmo it always was.
+					// single-object gizmo it always was. Minus anything locked
+					// in the Outliner: such an entity can be selected there and
+					// edited in Details, but the gizmo does not take hold of it
+					// — with nothing else selected there is no gizmo at all.
+					std::vector<Entity> movable = ctx.selection.roots(ctx.world->registry());
+					{
+						auto& reg = ctx.world->registry();
+						movable.erase(std::remove_if(movable.begin(), movable.end(),
+						                             [&reg](Entity e) { return reg.all_of<EditorLockComponent>(e); }),
+						              movable.end());
+					}
 					gizmoActive = EditorTransformGizmo::manipulate(
-						*ctx.world, ctx.selection.roots(ctx.world->registry()),
+						*ctx.world, movable,
 						s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
 						rectMin, rectMax, s_tb,
 						/*enabled=*/!navigating && !io.KeyAlt, ctx.undoSys);
@@ -767,6 +777,8 @@ void render(AppContext& ctx, float dt)
 						const Entity e = static_cast<Entity>(entityId);
 						if (!reg.valid(e) || !seen.insert(entityId).second) return;
 						if (reg.any_of<TerrainChunkComponent, TerrainComponent>(e)) return;
+						// Locked in the Outliner: not framed, as it is not clicked.
+						if (reg.all_of<EditorLockComponent>(e)) return;
 						const HE::AABB* box = (meshId != HE::UUID{} && ctx.contentManager)
 						                    ? meshBounds(*ctx.contentManager, meshId) : nullptr;
 						if (EditorMarquee::encloses(viewProj, frame, box ? *box : ViewportPick::fallbackBox(), model))

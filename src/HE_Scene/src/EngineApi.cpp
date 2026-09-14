@@ -21,6 +21,7 @@
 #include "HorizonScene/Components/NavAgentComponent.h"
 #include "HorizonScene/NavigationSystem.h"   // the pathfinder behind the nav group
 #include "HorizonScene/EntityHost.h"
+#include "HorizonScene/EntityVisibility.h"   // the one list of what "visible" flips
 #include <UIWidget/UIShortcut.h>   // a menu entry's chord is checked where it is taken in
 #include <glm/gtc/quaternion.hpp>
 #include "HorizonScene/Components/LightComponent.h"
@@ -86,17 +87,15 @@ namespace HE::api {
 void log(Ctx&, const std::string& message) { ScriptApi::log(message.c_str()); }
 
 namespace {
-// Flip every renderable component the entity carries. One definition for both
-// callers — the per-entity toggle (entity::setVisible) and zone hiding
-// (scene::setZoneVisible) mean exactly the same thing by "visible", so a
-// component type added here must show up in both. Caller validates the entity.
+// Flip every renderable component the entity carries. One definition for all
+// callers — the per-entity toggle (entity::setVisible), zone hiding
+// (scene::setZoneVisible) and the Outliner's eye mean exactly the same thing
+// by "visible" — and that definition lives in EntityVisibility.h now, so the
+// editor and this API cannot drift on which components count. Caller
+// validates the entity.
 void setEntityVisible(entt::registry& reg, entt::entity e, bool visible)
 {
-    if (auto* m  = reg.try_get<MeshComponent>(e))           m->visible  = visible;
-    if (auto* sm = reg.try_get<SkeletalMeshComponent>(e))   sm->visible = visible;
-    if (auto* l  = reg.try_get<LightComponent>(e))          l->visible  = visible;
-    if (auto* ps = reg.try_get<ParticleSystemComponent>(e)) ps->visible = visible;
-    if (auto* f  = reg.try_get<FoliageComponent>(e))        f->visible  = visible;
+    HE::setEntityVisible(reg, e, visible);
 }
 
 // ── The local↔world boundary ─────────────────────────────────────────────────
@@ -367,14 +366,8 @@ void setVisible(Ctx& c, Entity e, bool visible)
 bool getVisible(Ctx& c, Entity e)
 {
     if (!c.world || !c.world->registry().valid((entt::entity)e)) return true;
-    auto& reg = c.world->registry();
-    const auto en = (entt::entity)e;
-    if (const auto* m  = reg.try_get<MeshComponent>(en))           return m->visible;
-    if (const auto* sm = reg.try_get<SkeletalMeshComponent>(en))   return sm->visible;
-    if (const auto* l  = reg.try_get<LightComponent>(en))          return l->visible;
-    if (const auto* ps = reg.try_get<ParticleSystemComponent>(en)) return ps->visible;
-    if (const auto* f  = reg.try_get<FoliageComponent>(en))        return f->visible;
-    return true;
+    // An entity with nothing to draw answers "visible", as it always did.
+    return HE::entityVisibility(c.world->registry(), (entt::entity)e) != HE::Visibility::Hidden;
 }
 
 // ── Savegame state ───────────────────────────────────────────────────────────

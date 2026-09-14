@@ -25,7 +25,9 @@ class RenderWorld;
 // nearest mesh hit wins. Terrain is a category of its own — a landscape chunk's
 // box is huge and loose, its near face sits closer to the camera than a small
 // prop resting on it, so terrain only answers when nothing else is under the
-// cursor, and then it is the owning Landscape entity, never a raw chunk.
+// cursor, and then it is the owning Landscape entity, never a raw chunk. An
+// entity locked in the Outliner (EditorLockComponent) is not under the cursor
+// at all: the click lands on whatever is behind it.
 namespace ViewportPick
 {
 	// Local box for an object whose mesh asset the lookup cannot resolve: the

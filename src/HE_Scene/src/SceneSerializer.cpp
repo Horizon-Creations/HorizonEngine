@@ -19,6 +19,7 @@
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
+#include "HorizonScene/Components/EditorLockComponent.h"   // the Outliner's lock, an entity-level field
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
@@ -850,6 +851,13 @@ namespace
 			// re-parenting anything that referenced it. See EntityIdComponent.h.
 			eJson["uuid"] = uuidToJson(entityUuid(registry, entity));
 			eJson["name"] = registry.get<NameComponent>(entity).name;
+			// The Outliner's lock, beside the name and NOT in the components
+			// block: that block is what the prefab machinery diffs, and a lock
+			// is where the user parked the mouse, not a change to the prefab.
+			// Written only when set, so an unlocked scene is byte-for-byte what
+			// it was. See EditorLockComponent.h.
+			if (registry.all_of<EditorLockComponent>(entity))
+				eJson["locked"] = true;
 
 			if (auto* hier = registry.try_get<HierarchyComponent>(entity))
 			{
@@ -1872,6 +1880,8 @@ namespace
 
 			if (eJson.contains("components"))
 				applyComponents(registry, e, eJson["components"]);
+			if (eJson.value("locked", false))
+				registry.emplace_or_replace<EditorLockComponent>(e);
 		}
 
 		// ── Pass 2: rebuild parent/child links ────────────────────────────────
@@ -1924,6 +1934,11 @@ namespace
 
 			if (eJson.contains("components"))
 				applyComponents(registry, e, eJson["components"]);
+			// A lock rides along with an additive load — the entity arrives as
+			// it was in its own scene — but never with a prefab or the
+			// clipboard (serializeSubtree does not write it).
+			if (eJson.value("locked", false))
+				registry.emplace_or_replace<EditorLockComponent>(e);
 		}
 
 		// Pass 2: rebuild hierarchy (only within the newly loaded entities)

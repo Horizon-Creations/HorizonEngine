@@ -36,6 +36,12 @@ add_executable(he_tests
     test_editor_marquee.cpp
     test_editor_multi_edit.cpp
     test_outliner_filter.cpp
+    # The eye, the padlock and the sibling order behind each Outliner row.
+    test_outliner_row_actions.cpp
+    # …and the row itself, driven headless: the two buttons sit ON the tree
+    # node (AllowOverlap), and whether a click reaches them or selects the row
+    # is a question only a pointer can answer.
+    test_outliner_ui.cpp
     test_editorcamera.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
@@ -454,6 +460,11 @@ add_executable(he_tests
     # target alone defines); the per-file definition below turns it on for this
     # one source and its test, and for nothing else in the binary.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTransformGizmo.cpp
+    # The World Outliner, for test_outliner_ui.cpp: it needs a real AppContext
+    # (built there) and ImGui, and nothing else in this binary. Same per-file
+    # HE_IMGUI_ENABLED as the gizmo — AppContext's layout depends on it, so the
+    # panel and its test are the only two sources here that see that layout.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -465,6 +476,8 @@ add_executable(he_tests
 set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTransformGizmo.cpp
     test_viewport_gizmo.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
+    test_outliner_ui.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE

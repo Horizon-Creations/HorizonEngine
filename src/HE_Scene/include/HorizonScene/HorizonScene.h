@@ -5,6 +5,7 @@
 
 #include "Components/NameComponent.h"
 #include "Components/SaveStateComponent.h"
+#include "Components/EditorLockComponent.h"
 #include "Components/TransformComponent.h"
 #include "Components/Transform2DComponent.h"
 #include "Components/HierarchyComponent.h"

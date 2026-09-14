@@ -250,6 +250,14 @@ struct AppContext
 	std::function<bool(Entity root, const HE::UUID& templateEntity)> revertPrefabRemoval;
 	std::function<bool(Entity root, Entity entity)>                  revertPrefabAddition;
 	std::function<bool(Entity root)> pushToPrefab;
+	// "I just edited this entity's components, and it may not be selected."
+	// The override recording (recordPrefabEdits) works off the SELECTION,
+	// because a human edits what is selected — except for the Outliner's eye,
+	// which flips `visible` on a whole subtree without selecting any of it. A
+	// placed prefab's child hidden that way would be put back by the save-time
+	// sync, silently. Naming the entity here makes the next recording pass
+	// look at it as if it had been selected.
+	std::function<void(Entity)> noteEntityEdited;
 
 	// Editor/hub flags (mutable)
 	bool& projectLoaded;

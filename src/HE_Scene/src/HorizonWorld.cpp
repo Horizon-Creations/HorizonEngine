@@ -550,6 +550,66 @@ bool HorizonWorld::reparentEntity(Entity entity, Entity newParent)
     return true;
 }
 
+bool HorizonWorld::moveChild(Entity entity, int delta)
+{
+    if (delta == 0 || !m_registry.valid(entity) || isBuiltin(entity))
+        return false;
+    auto* h = m_registry.try_get<HierarchyComponent>(entity);
+    if (!h || h->parent == entt::null)
+        return false;
+    auto* ph = m_registry.try_get<HierarchyComponent>(h->parent);
+    if (!ph)
+        return false;
+    auto& ch = ph->children;
+    const auto it = std::find(ch.begin(), ch.end(), entity);
+    if (it == ch.end())
+        return false;
+    const int from = static_cast<int>(it - ch.begin());
+    const int to   = std::clamp(from + delta, 0, static_cast<int>(ch.size()) - 1);
+    if (to == from)
+        return false;
+    // Rotate rather than swap: "two down" passes over two siblings, and each
+    // keeps its place relative to the others.
+    if (to > from) std::rotate(ch.begin() + from, ch.begin() + from + 1, ch.begin() + to + 1);
+    else           std::rotate(ch.begin() + to,   ch.begin() + from,     ch.begin() + from + 1);
+    m_hierarchyDirty = true;
+    return true;
+}
+
+bool HorizonWorld::sortChildrenByName(Entity parent)
+{
+    if (!m_registry.valid(parent))
+        return false;
+    auto* ph = m_registry.try_get<HierarchyComponent>(parent);
+    if (!ph || ph->children.size() < 2)
+        return false;
+    auto nameOf = [this](Entity e) -> const std::string&
+    {
+        static const std::string kNone;
+        const auto* n = m_registry.try_get<NameComponent>(e);
+        return n ? n->name : kNone;
+    };
+    auto lessNoCase = [](const std::string& a, const std::string& b)
+    {
+        const size_t n = std::min(a.size(), b.size());
+        for (size_t i = 0; i < n; ++i)
+        {
+            const unsigned char ca = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(a[i])));
+            const unsigned char cb = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(b[i])));
+            if (ca != cb) return ca < cb;
+        }
+        return a.size() < b.size();
+    };
+    std::vector<Entity> sorted = ph->children;
+    std::stable_sort(sorted.begin(), sorted.end(),
+                     [&](Entity a, Entity b) { return lessNoCase(nameOf(a), nameOf(b)); });
+    if (sorted == ph->children)
+        return false;
+    ph->children = std::move(sorted);
+    m_hierarchyDirty = true;
+    return true;
+}
+
 void HorizonWorld::renameEntity(Entity entity, const std::string& newName)
 {
     if (auto* n = m_registry.try_get<NameComponent>(entity))

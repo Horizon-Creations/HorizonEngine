@@ -7658,6 +7658,17 @@ AppContext EditorApplication::makeContext()
 		.revertPrefabRemoval  = [this](Entity root, const HE::UUID& t) { return revertPrefabRemoval(root, t); },
 		.revertPrefabAddition = [this](Entity root, Entity e) { return revertPrefabAddition(root, e); },
 		.pushToPrefab        = [this](Entity root) { return pushToPrefab(root); },
+		.noteEntityEdited    = [this](Entity e) {
+			// Into last frame's selection: recordPrefabEdits folds that into
+			// its targets on the next revision bump, which the edit's own undo
+			// snapshot provides. By uuid, like the rest of that list.
+			if (!m_editorWorld) return;
+			const auto& reg = m_editorWorld->registry();
+			if (const auto* idc = reg.valid(e) ? reg.try_get<EntityIdComponent>(e) : nullptr)
+				if (std::find(m_prefabEditLastSelection.begin(), m_prefabEditLastSelection.end(), idc->id)
+				    == m_prefabEditLastSelection.end())
+					m_prefabEditLastSelection.push_back(idc->id);
+		},
 		.projectLoaded       = m_projectLoaded,
 		.contentRefreshPending = m_contentRefreshPending,
 		.contentRefreshDone  = m_contentRefreshDone,
