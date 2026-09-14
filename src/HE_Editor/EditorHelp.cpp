@@ -1991,8 +1991,15 @@ namespace
 	  "Copies the selected entity with all its components, alongside the original.",
 	  "Ctrl+D", "editor#outliner" },
 	{ "outliner.delete", "Delete",
-	  "Removes the selected entity and everything parented under it.",
+	  "Removes every selected entity and everything parented under it. One "
+	  "undo step brings the whole selection back.",
 	  "Delete", "editor#outliner" },
+	{ "outliner.multiselect", "Selecting several entities",
+	  "Click selects one entity. Ctrl-click (Cmd on macOS) adds or removes a "
+	  "row, Shift-click selects everything between the last plain click and "
+	  "this row. The last one clicked is the active entity — the one the gizmo "
+	  "moves and the Details panel edits.",
+	  "Ctrl+Click, Shift+Click", "editor#outliner" },
 	{ "outliner.prefab", "Save as Prefab",
 	  "Saves this entity and its children as a reusable asset, so the same thing "
 	  "can be dropped into any scene.",
@@ -2006,6 +2013,19 @@ namespace
 	{ "details.name", "Name",
 	  "What this entity is called in the Outliner and to scripts that look it up "
 	  "by name.",
+	  "", "editor#details" },
+	{ "details.multi.count", "Entities selected",
+	  "How many entities the selection holds, and which. The one marked active "
+	  "is the last one clicked; its values are what the rows below show.",
+	  "", "editor#details" },
+	{ "details.multi.active-only", "Edits change the active entity only",
+	  "With several entities selected the panel shows the components they all "
+	  "share, with the active entity's values. Changing a value here changes the "
+	  "active entity; the others keep theirs.",
+	  "", "editor#details" },
+	{ "details.multi.partial", "Not on every selected entity",
+	  "Components the active entity has but at least one other selected entity "
+	  "does not. They are left out above because there is no shared value to show.",
 	  "", "editor#details" },
 
 	// ── Content Browser ──────────────────────────────────────────────────────

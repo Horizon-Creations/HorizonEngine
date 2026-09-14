@@ -417,7 +417,7 @@ void EditorApplication::OnInit()
 		if (!m_editorWorld) return;
 		const auto e = static_cast<Entity>(static_cast<entt::id_type>(handle));
 		if (!m_editorWorld->registry().valid(e)) return;
-		if (m_selectedEntity == e) m_selectedEntity = entt::null;
+		m_selection.remove(e);
 		m_structureKnown.erase(e);
 		m_editorWorld->destroyEntity(e);
 	});
@@ -719,7 +719,7 @@ void EditorApplication::OnInit()
 		}
 		m_collab.seedNetIds();
 
-		m_selectedEntity = entt::null;
+		m_selection.clear();
 		// Every snapshot in the undo stack belongs to the replaced world, so
 		// undoing into one would restore a scene the session no longer shares.
 		m_undo.clearHistory();
@@ -2817,15 +2817,16 @@ void EditorApplication::OnRender(float dt)
 			return in;
 		};
 
+		Entity selected = m_selection.primary();
 		if (m_isPlaying && m_physicsWorld && m_editorWorld && s_playPose.valid &&
-		    m_selectedEntity != entt::null &&
-		    static_cast<uint32_t>(m_selectedEntity) == s_playPose.entity &&
-		    m_editorWorld->registry().valid(m_selectedEntity))
+		    selected != entt::null &&
+		    static_cast<uint32_t>(selected) == s_playPose.entity &&
+		    m_editorWorld->registry().valid(selected))
 		{
 			auto&          reg = m_editorWorld->registry();
-			const uint32_t id  = static_cast<uint32_t>(m_selectedEntity);
-			const auto*    tc  = reg.try_get<TransformComponent>(m_selectedEntity);
-			const PlayPhysicsInputs now = samplePhysicsInputs(reg, m_selectedEntity);
+			const uint32_t id  = static_cast<uint32_t>(selected);
+			const auto*    tc  = reg.try_get<TransformComponent>(selected);
+			const PlayPhysicsInputs now = samplePhysicsInputs(reg, selected);
 			if (!(now == s_playPose.build))
 			{
 				// A rebuild covers the move as well — addEntity builds from the
@@ -2863,7 +2864,7 @@ void EditorApplication::OnRender(float dt)
 				// the whole question for a character; for everything else a rotate
 				// drag counts too.
 				const bool isCharacter =
-					reg.all_of<CharacterControllerComponent>(m_selectedEntity);
+					reg.all_of<CharacterControllerComponent>(selected);
 				// The COMPARISON above and below stays local-against-local:
 				// s_playPose caches tc->position/rotation verbatim, so both
 				// sides of it are in the same space and "did the author move
@@ -2889,7 +2890,7 @@ void EditorApplication::OnRender(float dt)
 				// tc->position bit for bit — so the unparented case, which is
 				// every case that worked before, comes out unchanged.
 				const glm::mat4 worldXf =
-					HE::worldMatrixOf(*m_editorWorld, m_selectedEntity);
+					HE::worldMatrixOf(*m_editorWorld, selected);
 				const glm::vec3 worldPos = glm::vec3(worldXf[3]);
 				// Velocity is kept on purpose in both branches: dragging a
 				// falling crate aside should not stop it falling.
@@ -2900,7 +2901,7 @@ void EditorApplication::OnRender(float dt)
 					// not bit for bit, so running the unparented case through the
 					// matrix would hand Jolt a different (if equivalent)
 					// quaternion than before. Only a real parent goes that way.
-					const auto* h = reg.try_get<HierarchyComponent>(m_selectedEntity);
+					const auto* h = reg.try_get<HierarchyComponent>(selected);
 					const bool  parented = h && h->parent != entt::null &&
 					                       h->parent != m_editorWorld->rootEntity();
 					glm::quat worldRot = glm::quat(glm::radians(tc->rotation));
@@ -3144,19 +3145,23 @@ void EditorApplication::OnRender(float dt)
 		// precisely the one the author is about to give a Rigid Body in the
 		// Details panel, and gating here would mean that addition is the one edit
 		// the compare could never see.
+		//
+		// Re-read: the selection may have changed between the compare above and
+		// here (a click lands in between).
+		selected = m_selection.primary();
 		if (m_isPlaying && m_physicsWorld && m_editorWorld &&
-		    m_selectedEntity != entt::null &&
-		    m_editorWorld->registry().valid(m_selectedEntity))
+		    selected != entt::null &&
+		    m_editorWorld->registry().valid(selected))
 		{
 			auto&       reg = m_editorWorld->registry();
-			const auto* tc  = reg.try_get<TransformComponent>(m_selectedEntity);
+			const auto* tc  = reg.try_get<TransformComponent>(selected);
 			s_playPose.valid = tc != nullptr;
 			if (tc)
 			{
-				s_playPose.entity   = static_cast<uint32_t>(m_selectedEntity);
+				s_playPose.entity   = static_cast<uint32_t>(selected);
 				s_playPose.position = tc->position;
 				s_playPose.rotation = tc->rotation;
-				s_playPose.build    = samplePhysicsInputs(reg, m_selectedEntity);
+				s_playPose.build    = samplePhysicsInputs(reg, selected);
 			}
 		}
 		else
@@ -3329,16 +3334,20 @@ void EditorApplication::OnRender(float dt)
 		{
 			DebugDrawBuffer dbg;
 
-			// Selected-entity marker: unit AABB centered on transform position
-			if (m_selectedEntity != entt::null && m_editorWorld->registry().valid(m_selectedEntity))
+			// Selected-entity markers: unit AABB centered on each member's
+			// transform position. The primary is the bright one; the rest of a
+			// multi-selection get the same amber a shade dimmer, so which one
+			// the gizmo will move is visible without reading the outliner.
+			for (Entity sel : m_selection.entities())
 			{
-				auto* tc = m_editorWorld->registry().try_get<TransformComponent>(m_selectedEntity);
-				if (tc)
-				{
-					const glm::vec3 p = tc->position;
-					dbg.aabb(p - glm::vec3(0.5f), p + glm::vec3(0.5f),
-					         glm::vec3(1.0f, 0.8f, 0.0f));
-				}
+				if (!m_editorWorld->registry().valid(sel)) continue;
+				auto* tc = m_editorWorld->registry().try_get<TransformComponent>(sel);
+				if (!tc) continue;
+				const glm::vec3 p = tc->position;
+				const glm::vec3 color = (sel == m_selection.primary())
+					? glm::vec3(1.0f, 0.8f, 0.0f)
+					: glm::vec3(0.8f, 0.6f, 0.05f);
+				dbg.aabb(p - glm::vec3(0.5f), p + glm::vec3(0.5f), color);
 			}
 
 			// Collider wireframes: cyan for solid, magenta for triggers
@@ -3467,7 +3476,7 @@ void EditorApplication::OnRender(float dt)
 					// Amber for the selected entity's joint, dim orange for the
 					// rest — the same "this is the one you are editing" the
 					// selection marker above uses.
-					const bool      lit   = (entity == m_selectedEntity || other == m_selectedEntity);
+					const bool      lit   = m_selection.contains(entity) || m_selection.contains(other);
 					const glm::vec3 color = lit ? glm::vec3(1.0f, 0.65f, 0.15f)
 					                            : glm::vec3(0.55f, 0.40f, 0.15f);
 					// A direction in A's space, drawn a metre long: an axis has
@@ -3545,23 +3554,24 @@ void EditorApplication::OnRender(float dt)
 			// TransformComponent::worldMatrix: this block runs right after
 			// tickWorld, which propagates nothing, so the stored matrix is a
 			// frame old and plain identity for anything created this frame.
-			if (m_selectedEntity != entt::null &&
-			    m_editorWorld->registry().valid(m_selectedEntity))
+			const Entity selected = m_selection.primary();
+			if (selected != entt::null &&
+			    m_editorWorld->registry().valid(selected))
 			{
 				// Not gated on `visible`. A hidden rope is the one that most needs
 				// its handles: with nothing drawn and nothing to grab, the only way
 				// back to it is the Outliner, and switching Visible off would have
 				// meant losing the thing you were in the middle of shaping.
 				auto& reg = m_editorWorld->registry();
-				if (const auto* rope = reg.try_get<RopeComponent>(m_selectedEntity))
+				if (const auto* rope = reg.try_get<RopeComponent>(selected))
 				{
 					RopeTrailSystem::appendRopeGuides(
 						*rope,
 						RopeTrailSystem::resolveControlPoints(*m_editorWorld,
-						                                      m_selectedEntity, *rope),
-						HE::worldMatrixOf(*m_editorWorld, m_selectedEntity), dbg);
+						                                      selected, *rope),
+						HE::worldMatrixOf(*m_editorWorld, selected), dbg);
 				}
-				if (const auto* trail = reg.try_get<TrailComponent>(m_selectedEntity))
+				if (const auto* trail = reg.try_get<TrailComponent>(selected))
 					RopeTrailSystem::appendTrailGuides(*trail, dbg);
 			}
 
@@ -3742,12 +3752,13 @@ void EditorApplication::OnRender(float dt)
 			// selection: a scene full of characters would be a scene full of
 			// lines, and the question ("does this clip go where I meant it to")
 			// is asked about one figure at a time.
-			if (m_selectedEntity != entt::null && m_editorWorld->registry().valid(m_selectedEntity))
+			if (const Entity selected = m_selection.primary();
+			    selected != entt::null && m_editorWorld->registry().valid(selected))
 				{
-					appendRootMotionPreview(*m_editorWorld, contentManager(), m_selectedEntity, dbg);
+					appendRootMotionPreview(*m_editorWorld, contentManager(), selected, dbg);
 					// And where its head is aimed, for the same one-figure-at-a-time
 					// reason.
-					appendLookAtPreview(*m_editorWorld, contentManager(), m_selectedEntity, dbg);
+					appendLookAtPreview(*m_editorWorld, contentManager(), selected, dbg);
 				}
 
 			// The ground grid, last of the editor's own lines: it is the biggest
@@ -3923,24 +3934,27 @@ void EditorApplication::OnRender(float dt)
 		if (m_collab.inSession()) updateAssetCollabSync(nowMs);
 
 		// Claim the selected entity, so everyone else sees it is being worked on
-		// before they click it themselves.
+		// before they click it themselves. The PRIMARY only: a lock is one
+		// subject, and the entity the gizmo moves is the one a peer must not
+		// edit underneath us.
 		if (m_collab.inSession())
 		{
+			const Entity        selected = m_selection.primary();
 			const std::uint64_t subject =
-				m_selectedEntity == entt::null
+				selected == entt::null
 					? 0ull
 					: m_collab.subjectFor(static_cast<std::uint32_t>(
-						entt::to_integral(m_selectedEntity)));
+						entt::to_integral(selected)));
 			m_collab.followSelection(subject);
 
 			// Publish its transform while we hold it. Sending unconditionally is
 			// fine — publishTransform drops unchanged values and rate-limits the
 			// rest, so a still object costs nothing.
 			if (subject != 0 && m_editorWorld &&
-			    m_editorWorld->registry().valid(m_selectedEntity))
+			    m_editorWorld->registry().valid(selected))
 			{
 				if (auto* tc = m_editorWorld->registry()
-				                   .try_get<TransformComponent>(m_selectedEntity))
+				                   .try_get<TransformComponent>(selected))
 				{
 					const float p[3] = { tc->position.x, tc->position.y, tc->position.z };
 					const float r[3] = { tc->rotation.x, tc->rotation.y, tc->rotation.z };
@@ -3981,11 +3995,11 @@ void EditorApplication::OnRender(float dt)
 				{
 					SceneSerializer serializer;
 					const std::vector<std::uint8_t> comps =
-						serializer.serializeEntityComponents(*m_editorWorld, m_selectedEntity);
+						serializer.serializeEntityComponents(*m_editorWorld, selected);
 					if (!comps.empty())
 					{
 						m_collab.publishComponents(
-							static_cast<std::uint32_t>(entt::to_integral(m_selectedEntity)),
+							static_cast<std::uint32_t>(entt::to_integral(selected)),
 							comps);
 					}
 				}
@@ -4004,9 +4018,10 @@ void EditorApplication::OnRender(float dt)
 			const float r[4] = { rot.x, rot.y, rot.z, rot.w };
 
 			std::vector<std::uint64_t> selection;
-			if (m_selectedEntity != entt::null)
+			selection.reserve(m_selection.size());
+			for (Entity sel : m_selection.entities())
 				selection.push_back(m_collab.subjectFor(static_cast<std::uint32_t>(
-					entt::to_integral(m_selectedEntity))));
+					entt::to_integral(sel))));
 
 			m_collab.setLocalPresence(p, r, selection);
 		}
@@ -6998,7 +7013,7 @@ void EditorApplication::setupEditorCommands()
 		// exists is what the inspector dereferences next frame.
 		if (m_isPlaying && m_physicsWorld)
 			m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(e));
-		if (m_selectedEntity == e) m_selectedEntity = entt::null;
+		m_selection.remove(e);
 
 		// ONLY for a peer's delete, and this is the echo protection rather than
 		// bookkeeping: syncStructuralChanges publishes a destroy for everything
@@ -7268,7 +7283,7 @@ Entity EditorApplication::siblingParentFor(Entity source) const
 void EditorApplication::duplicateSelectedEntity()
 {
 	if (!m_editorWorld) return;
-	const Entity src = m_selectedEntity;
+	const Entity src = m_selection.primary();
 	if (src == entt::null || !m_editorWorld->registry().valid(src) ||
 	    m_editorWorld->isBuiltin(src))
 		return;
@@ -7300,14 +7315,14 @@ void EditorApplication::duplicateSelectedEntity()
 		m_physicsWorld->addEntityTree(*m_editorWorld, static_cast<uint32_t>(copy));
 	// Selecting the copy is what makes the gesture useful: the next drag moves
 	// the new object, not the one it came from.
-	m_selectedEntity = copy;
+	m_selection.set(copy);
 	m_editorWorld->markHierarchyDirty();
 }
 
 void EditorApplication::copySelectedEntity(bool cut)
 {
 	if (!m_editorWorld) return;
-	const Entity src = m_selectedEntity;
+	const Entity src = m_selection.primary();
 	if (src == entt::null || !m_editorWorld->registry().valid(src) ||
 	    m_editorWorld->isBuiltin(src))
 		return;
@@ -7320,7 +7335,7 @@ void EditorApplication::copySelectedEntity(bool cut)
 	m_entityClipboard = std::move(blob);
 
 	if (!cut) return;
-	m_selectedEntity = entt::null;
+	m_selection.remove(src);
 	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
 	// Same rule as the destroy service: the bodies go before the entities, while
 	// the hierarchy that names them still exists.
@@ -7335,7 +7350,7 @@ void EditorApplication::pasteEntityClipboard()
 
 	// Beside the selection, not inside it: pasting a cube while a cube is
 	// selected should give two cubes side by side, not one parented to the other.
-	const Entity parent = siblingParentFor(m_selectedEntity);
+	const Entity parent = siblingParentFor(m_selection.primary());
 	SceneSerializer serializer;
 	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
 	const Entity pasted = serializer.instantiatePrefab(*m_editorWorld, m_entityClipboard, parent);
@@ -7347,31 +7362,49 @@ void EditorApplication::pasteEntityClipboard()
 	// Pasting during play is a spawn — see duplicateSelectedEntity().
 	if (m_isPlaying && m_physicsWorld)
 		m_physicsWorld->addEntityTree(*m_editorWorld, static_cast<uint32_t>(pasted));
-	m_selectedEntity = pasted;
+	m_selection.set(pasted);
 	m_editorWorld->markHierarchyDirty();
 }
 
 void EditorApplication::deleteSelectedEntity()
 {
 	if (!m_editorWorld) return;
-	const Entity target = m_selectedEntity;
-	if (target == entt::null || !m_editorWorld->registry().valid(target) ||
-	    m_editorWorld->isBuiltin(target))
-		return;
+	// The whole selection, not just the primary: with a set, "select three,
+	// press Delete, one goes" is the bug. Built-ins (root, sun, moon) stay.
+	std::vector<Entity> targets;
+	for (Entity e : m_selection.entities())
+		if (e != entt::null && m_editorWorld->registry().valid(e) &&
+		    !m_editorWorld->isBuiltin(e))
+			targets.push_back(e);
+	if (targets.empty()) return;
 
-	m_selectedEntity = entt::null;
+	m_selection.clear();
+	// ONE snapshot for the lot, so one Ctrl+Z brings all of them back.
 	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
-	// Deleting during play takes the bodies with it, and takes them first: after
-	// destroyEntity the subtree cannot be walked. step()'s reap would catch the
-	// leftovers a frame later, but a frame of invisible wall where an object was
-	// just deleted is exactly the ghost collider this pass removes.
-	if (m_isPlaying && m_physicsWorld)
-		m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(target));
-	m_editorWorld->destroyEntity(target);
+	for (Entity target : targets)
+	{
+		// A parent and its child both selected: the child went with the
+		// parent's subtree, so its handle is dead by the time the loop reaches
+		// it. entt reuses handles, so a stale one could name something else —
+		// re-check rather than trust the list.
+		if (!m_editorWorld->registry().valid(target)) continue;
+		// Deleting during play takes the bodies with it, and takes them first: after
+		// destroyEntity the subtree cannot be walked. step()'s reap would catch the
+		// leftovers a frame later, but a frame of invisible wall where an object was
+		// just deleted is exactly the ghost collider this pass removes.
+		if (m_isPlaying && m_physicsWorld)
+			m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(target));
+		m_editorWorld->destroyEntity(target);
+	}
 }
 
 AppContext EditorApplication::makeContext()
 {
+	// Drop what the world no longer has BEFORE any panel reads the selection:
+	// a peer's delete, a script's destroy or a hierarchy delete of a parent
+	// whose child was also selected all leave handles behind, and the
+	// contract on AppContext::selection is that every member is valid.
+	if (m_editorWorld) m_selection.prune(m_editorWorld->registry());
 	m_sdlDialogBridge.pendingDirResult  = &m_pendingDirResult;
 	m_sdlDialogBridge.pendingDirReady   = &m_pendingDirReady;
 	m_sdlDialogBridge.pendingFileResult = &m_pendingFileResult;
@@ -7414,7 +7447,7 @@ AppContext EditorApplication::makeContext()
 		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
-		.selectedEntity      = m_selectedEntity,
+		.selection           = m_selection,
 		.isPlaying           = m_isPlaying,
 		.appLivePreview      = m_projectManager.currentProject().appProject,
 		// The toolbar button, and the ONE path that deliberately drops the
@@ -7516,11 +7549,11 @@ AppContext EditorApplication::makeContext()
 		// unreachable one.
 		.undo                = [this]{
 			if (m_isPlaying) return;
-			if (m_undo.undo()) m_selectedEntity = entt::null;
+			if (m_undo.undo()) m_selection.clear();
 		},
 		.redo                = [this]{
 			if (m_isPlaying) return;
-			if (m_undo.redo()) m_selectedEntity = entt::null;
+			if (m_undo.redo()) m_selection.clear();
 		},
 		.duplicateEntity     = [this]{ duplicateSelectedEntity(); },
 		.copyEntity          = [this]{ copySelectedEntity(false); },
@@ -8052,7 +8085,7 @@ void EditorApplication::setPlayMode(bool play)
 		if (!serializer.load(*m_editorWorld, snapshot, SerializeFormat::Binary))
 			HE_LOG_ERROR(Editor, "%s",
 				"EditorApplication: play-mode restore failed — world may be empty");
-		m_selectedEntity = entt::null;
+		m_selection.clear();
 		m_editorWorld->markHierarchyDirty();
 		m_isPlaying = false;
 		m_undo.clearHistory();
@@ -8421,7 +8454,7 @@ bool EditorApplication::openScene(const std::string& path)
 		HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to open scene from " + path).c_str());
 	}
 
-	m_selectedEntity = entt::null;
+	m_selection.clear();
 	m_editorWorld->markHierarchyDirty();
 	m_undo.clearHistory();
 	m_savedRevision = m_undo.revision();
@@ -8471,7 +8504,7 @@ void EditorApplication::newScene()
 
 	m_editorWorld->clear(); // keeps the root entity, drops all children
 	m_currentScenePath.clear();
-	m_selectedEntity = entt::null;
+	m_selection.clear();
 	m_editorWorld->markHierarchyDirty();
 	m_undo.clearHistory();
 	m_savedRevision = m_undo.revision();

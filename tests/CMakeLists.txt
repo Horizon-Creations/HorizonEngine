@@ -32,6 +32,7 @@ add_executable(he_tests
     test_world_preview_grid.cpp
     test_gi_bvh.cpp
     test_undo.cpp
+    test_editor_selection.cpp
     test_editorcamera.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
@@ -172,6 +173,9 @@ add_executable(he_tests
     # thing about "Schicht 0" that used to need a GPU and a pair of eyes.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Software/SoftwareRaster.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorUndo.cpp
+    # The editor's selection set: handles in, handles out, no ImGui — so what
+    # a Ctrl-click, a Shift-range and a peer's delete do to it is answerable here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSelection.cpp
     # The single door every scene change goes through — the UI's structural
     # commands, a peer's edit and, later, an external MCP client. It is
     # deliberately free of ImGui and of EditorApplication (which is NOT in this

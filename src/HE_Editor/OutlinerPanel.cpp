@@ -4,6 +4,7 @@
 #include "EditorHelp.h"                  // scopes for the context and create menus
 #include <HorizonScene/HorizonScene.h>
 #include <UIWidget/WidgetManager.h>   // application projects list widgets, not entities
+#include <algorithm>                     // find/min/max/reverse for the Shift-click range
 #include <functional>
 #include <Diagnostics/Logger.h>
 #include <cstdio>
@@ -305,12 +306,22 @@ void render(AppContext& ctx)
         int prevDepth      = -1;
         int skipBelowDepth = INT_MAX; // skip children of closed nodes
 
+        // The rows that were actually DRAWN this frame, top to bottom. A
+        // Shift-click selects "everything between the anchor and this row", and
+        // "between" means in the order the user sees — closed subtrees are not
+        // in it. Collected during the loop and resolved after it, because the
+        // clicked row may lie above the anchor.
+        std::vector<Entity> visibleRows;
+        visibleRows.reserve(s_outlinerCache.size());
+        Entity shiftRangeTarget = entt::null;
+
         for (const auto& node : s_outlinerCache)
         {
             // If a parent was closed, skip all its children
             if (node.depth > skipBelowDepth)
                 continue;
             skipBelowDepth = INT_MAX; // back at or above the closed level → reset
+            visibleRows.push_back(node.entity);
 
             // Close tree levels we've left
             while (prevDepth >= node.depth)
@@ -324,7 +335,7 @@ void render(AppContext& ctx)
                                      | ImGuiTreeNodeFlags_DefaultOpen;
             if (!node.hasChildren)
                 flags |= ImGuiTreeNodeFlags_Leaf;
-            if (node.entity == ctx.selectedEntity)
+            if (ctx.selection.contains(node.entity))
                 flags |= ImGuiTreeNodeFlags_Selected;
 
             // ── Collaboration lock state ──────────────────────────────────
@@ -373,9 +384,21 @@ void render(AppContext& ctx)
                                                  : "Someone else is editing this.");
             }
 
-            // Click (not on the arrow) → select
+            // Click (not on the arrow) → select. Ctrl (Cmd on macOS — ImGui
+            // swaps the two under ConfigMacOSXBehaviors, so io.KeyCtrl is the
+            // platform's multi-select key either way) toggles the row in and
+            // out of the set; Shift extends from the anchor to this row; a
+            // plain click replaces the set with this row and moves the anchor.
             if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())
-                ctx.selectedEntity = node.entity;
+            {
+                const ImGuiIO& io = ImGui::GetIO();
+                if (io.KeyShift && ctx.selection.anchor() != entt::null)
+                    shiftRangeTarget = node.entity;
+                else if (io.KeyCtrl)
+                    ctx.selection.toggle(node.entity);
+                else
+                    ctx.selection.set(node.entity);
+            }
 
             // ── Drag & drop reparenting ───────────────────────────────────
             const bool isRoot = (node.entity == ctx.world->rootEntity());
@@ -402,7 +425,12 @@ void render(AppContext& ctx)
             {
                 // Every row is looked up as "World Outliner/<its label>".
                 HE::Ed::Help::Scope helpScope("World Outliner");
-                ctx.selectedEntity = node.entity;
+                // Right-clicking a row that is already part of the selection
+                // keeps the selection: the menu then acts on all of it (Delete
+                // takes the set). A row outside it becomes the selection, as a
+                // left-click would.
+                if (!ctx.selection.contains(node.entity))
+                    ctx.selection.set(node.entity);
                 if (ImGui::BeginMenu("Create Child"))
                 {
                     Preset preset{};
@@ -411,7 +439,7 @@ void render(AppContext& ctx)
                         if (ctx.undoSys) ctx.undoSys->snapshotNow();
                         const Entity child = createPreset(*ctx.world, preset);
                         ctx.world->reparentEntity(child, node.entity);
-                        ctx.selectedEntity = child;
+                        ctx.selection.set(child);
                         ctx.world->markHierarchyDirty();
                     }
                     ImGui::EndMenu();
@@ -524,10 +552,18 @@ void render(AppContext& ctx)
                 if (!isRoot) EditorWidgets::helpForKey("outliner.delete");
                 if (doDelete)
                 {
-                    if (ctx.selectedEntity == node.entity)
-                        ctx.selectedEntity = entt::null;
-                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
-                    ctx.world->destroyEntity(node.entity);
+                    // Through the shared gesture when it is bound: that one
+                    // deletes the WHOLE selection (this row is part of it, see
+                    // the top of the popup) under one undo step. The fallback
+                    // is the single-row delete for a context without it.
+                    if (ctx.deleteEntity)
+                        ctx.deleteEntity();
+                    else
+                    {
+                        ctx.selection.remove(node.entity);
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        ctx.world->destroyEntity(node.entity);
+                    }
                 }
                 ImGui::EndPopup();
             }
@@ -542,6 +578,30 @@ void render(AppContext& ctx)
         {
             ImGui::TreePop();
             --prevDepth;
+        }
+
+        // ── Shift-click range, now that the visible order is complete ─────
+        // Anchor and target both have to be visible rows; if the anchor's
+        // subtree was folded away since it was set, fall back to a plain
+        // select of the clicked row rather than guessing a range.
+        if (shiftRangeTarget != entt::null)
+        {
+            const auto anchorIt = std::find(visibleRows.begin(), visibleRows.end(),
+                                            ctx.selection.anchor());
+            const auto targetIt = std::find(visibleRows.begin(), visibleRows.end(),
+                                            shiftRangeTarget);
+            if (anchorIt == visibleRows.end() || targetIt == visibleRows.end())
+                ctx.selection.set(shiftRangeTarget);
+            else
+            {
+                const auto first = std::min(anchorIt, targetIt);
+                const auto last  = std::max(anchorIt, targetIt);
+                std::vector<Entity> range(first, last + 1);
+                // Anchor first so it is the one the range grows from, target
+                // last so it is the primary — the row just clicked.
+                if (targetIt < anchorIt) std::reverse(range.begin(), range.end());
+                ctx.selection.setMany(range);
+            }
         }
 
         // ── Drop onto the empty area below the tree → un-parent to the World root ──
@@ -575,7 +635,7 @@ void render(AppContext& ctx)
             if (drawCreateMenu(preset))
             {
                 if (ctx.undoSys) ctx.undoSys->snapshotNow();
-                ctx.selectedEntity = createPreset(*ctx.world, preset);
+                ctx.selection.set(createPreset(*ctx.world, preset));
                 ctx.world->markHierarchyDirty();
             }
             ImGui::EndPopup();

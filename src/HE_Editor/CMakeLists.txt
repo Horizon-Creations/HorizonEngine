@@ -101,6 +101,7 @@ add_executable(HorizonEditor WIN32
 	main.cpp
 	EditorApplication.cpp
 	EditorUndo.cpp
+	EditorSelection.cpp
 	EditorCommands.cpp
 	# The local listener external MCP clients talk to, and the closed list of
 	# what they may ask for. Both are ImGui- and EditorApplication-free, so the

@@ -54,6 +54,77 @@ void inertEnvironmentNote(bool isActive, const char* kind)
 	ImGui::PopStyleColor();
 	ImGui::Separator();
 }
+
+// ─── Several entities selected ────────────────────────────────────────────────
+// Count and names first, then the component sections every member has — the
+// primary's rows, drawn through the very same renderFor(onlyComponent) the
+// class tab uses, so a component that gains a field shows it here too. A
+// component only SOME members carry is listed, greyed, rather than dropped
+// silently: "why is Light missing" has an answer on screen.
+void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
+{
+	auto& registry = world.registry();
+	const std::vector<Entity>& members = ctx.selection.entities();
+
+	ImGui::Text("%zu entities selected", members.size());
+	EditorWidgets::helpForKey("details.multi.count");
+	{
+		// The names, one line each; the primary is marked because it is the
+		// one the fields below belong to.
+		ImGui::Indent();
+		for (Entity e : members)
+		{
+			const auto* nc = registry.try_get<NameComponent>(e);
+			const char* name = (nc && !nc->name.empty()) ? nc->name.c_str() : "(unnamed)";
+			if (e == primary) ImGui::BulletText("%s  (active)", name);
+			else              ImGui::BulletText("%s", name);
+		}
+		ImGui::Unindent();
+	}
+	ImGui::Separator();
+
+	// Intersection of the component lists, in the primary's order.
+	std::vector<std::string> common;
+	InspectorPanel::listComponents(ctx, world, primary, common);
+	std::vector<std::string> partial; // on the primary but not on every member
+	for (Entity e : members)
+	{
+		if (e == primary) continue;
+		std::vector<std::string> theirs;
+		InspectorPanel::listComponents(ctx, world, e, theirs);
+		for (auto it = common.begin(); it != common.end();)
+		{
+			if (std::find(theirs.begin(), theirs.end(), *it) != theirs.end()) { ++it; continue; }
+			if (std::find(partial.begin(), partial.end(), *it) == partial.end())
+				partial.push_back(*it);
+			it = common.erase(it);
+		}
+	}
+
+	hint("Edits below change the active entity only; the other selected "
+	     "entities keep their values.");
+	EditorWidgets::helpForKey("details.multi.active-only");
+	ImGui::Separator();
+
+	if (common.empty())
+		ImGui::TextDisabled("(no component shared by all selected entities)");
+	// One renderFor per shared section. Each call capturePre()s on the mouse
+	// press inside the window — a handful of whole-world captures on one frame,
+	// which is the price of not duplicating the component editor.
+	for (const std::string& label : common)
+		InspectorPanel::renderFor(ctx, world, primary, ctx.undoSys, label.c_str());
+
+	if (!partial.empty())
+	{
+		ImGui::Separator();
+		ImGui::TextDisabled("Not on every selected entity:");
+		EditorWidgets::helpForKey("details.multi.partial");
+		ImGui::Indent();
+		for (const std::string& label : partial)
+			ImGui::TextDisabled("%s", label.c_str());
+		ImGui::Unindent();
+	}
+}
 #endif
 
 // ─── Inspector (Details panel) ────────────────────────────────────────────────
@@ -64,10 +135,24 @@ void render(AppContext& ctx)
 	ImGui::Begin("Details");
 	if (ctx.fontHeading) ImGui::PopFont();
 
-	if (!ctx.world || ctx.selectedEntity == entt::null ||
-	    !ctx.world->registry().valid(ctx.selectedEntity))
+	const Entity primary = ctx.selection.primary();
+	if (!ctx.world || primary == entt::null ||
+	    !ctx.world->registry().valid(primary))
 	{
 		ImGui::TextDisabled("(no entity selected)");
+		ImGui::End();
+		return;
+	}
+
+	// ── More than one entity: the fields they have in common ─────────────────
+	// The header says how many and which; below it, every component section
+	// that EVERY member carries, in the primary's order. The rows are the
+	// primary's values and an edit lands on the primary alone — that is said
+	// on screen rather than left to be discovered, because "three selected,
+	// one changed" reads as a bug until the multi-edit step lands.
+	if (ctx.selection.size() > 1)
+	{
+		renderMultiSelection(ctx, *ctx.world, primary);
 		ImGui::End();
 		return;
 	}
@@ -78,7 +163,7 @@ void render(AppContext& ctx)
 	if (ctx.collab && ctx.collab->inSession())
 	{
 		const auto subject = ctx.collab->subjectFor(
-			static_cast<std::uint32_t>(entt::to_integral(ctx.selectedEntity)));
+			static_cast<std::uint32_t>(entt::to_integral(primary)));
 		if (const HE::Net::LockInfo* lock = ctx.collab->lockFor(subject);
 		    lock && lock->owner != ctx.collab->localParticipant())
 		{
@@ -94,7 +179,7 @@ void render(AppContext& ctx)
 		}
 	}
 
-	InspectorPanel::renderFor(ctx, *ctx.world, ctx.selectedEntity, ctx.undoSys);
+	InspectorPanel::renderFor(ctx, *ctx.world, primary, ctx.undoSys);
 
 	ImGui::End();
 #else

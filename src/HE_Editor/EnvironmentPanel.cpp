@@ -56,12 +56,12 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
         if (const Entity sky = world.environmentEntity(); sky != entt::null)
         {
             ImGui::TextUnformatted("Sky is in the scene.");
-            if (EditorWidgets::button("Select##sky")) ctx.selectedEntity = sky;
+            if (EditorWidgets::button("Select##sky")) ctx.selection.set(sky);
             ImGui::SameLine();
             if (EditorWidgets::dangerButton("Remove##sky"))
             {
                 snapshot();
-                if (ctx.selectedEntity == sky) ctx.selectedEntity = entt::null;
+                ctx.selection.remove(sky);
                 world.removeSky();
             }
         }
@@ -71,7 +71,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
             if (EditorWidgets::button("Add Sky"))
             {
                 snapshot();
-                ctx.selectedEntity = world.addSky();
+                ctx.selection.set(world.addSky());
             }
         }
 
@@ -82,12 +82,12 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
             ImGui::TextUnformatted("Weather is in the scene.");
             if (world.environmentEntity() == entt::null)
                 ImGui::TextDisabled("(needs a Sky to drive — add one above)");
-            if (EditorWidgets::button("Select##weather")) ctx.selectedEntity = weather;
+            if (EditorWidgets::button("Select##weather")) ctx.selection.set(weather);
             ImGui::SameLine();
             if (EditorWidgets::dangerButton("Remove##weather"))
             {
                 snapshot();
-                if (ctx.selectedEntity == weather) ctx.selectedEntity = entt::null;
+                ctx.selection.remove(weather);
                 world.removeWeather();
             }
         }
@@ -97,7 +97,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
             if (EditorWidgets::button("Add Weather"))
             {
                 snapshot();
-                ctx.selectedEntity = world.addWeather();
+                ctx.selection.set(world.addWeather());
             }
         }
     }

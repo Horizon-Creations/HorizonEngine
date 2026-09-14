@@ -483,13 +483,13 @@ void render(AppContext& ctx, float dt)
 					// everything parented under it (see selectionFocusSphere).
 					if (imageHovered && !io.WantTextInput && !navigating &&
 					    ImGui::IsKeyPressed(ImGuiKey_F) &&
-					    ctx.world && ctx.selectedEntity != entt::null &&
-					    ctx.world->registry().valid(ctx.selectedEntity))
+					    ctx.world && ctx.selection.primary() != entt::null &&
+					    ctx.world->registry().valid(ctx.selection.primary()))
 					{
 						glm::vec3 center(0.0f);
 						float     radius = 0.0f;
 						if (selectionFocusSphere(*ctx.world, ctx.contentManager,
-						                         ctx.selectedEntity, s_sceneSnapshot,
+						                         ctx.selection.primary(), s_sceneSnapshot,
 						                         center, radius))
 							cam.focusOn(center, radius);
 					}
@@ -599,7 +599,7 @@ void render(AppContext& ctx, float dt)
 											 + "', which did not load — spawned without it").c_str());
 								}
 								ctx.world->markHierarchyDirty();
-								ctx.selectedEntity = e; // select the freshly spawned mesh
+								ctx.selection.set(e); // select the freshly spawned mesh
 								HE_LOG_INFO(Editor, "%s",
 									("Editor: spawned '" + meshName + "' into the scene via drag-drop").c_str());
 							}
@@ -634,7 +634,7 @@ void render(AppContext& ctx, float dt)
 									ctx.world->registry().emplace_or_replace<PrefabLinkComponent>(
 										root, PrefabLinkComponent{ id });
 									ctx.world->markHierarchyDirty();
-									ctx.selectedEntity = root;
+									ctx.selection.set(root);
 									HE_LOG_INFO(Editor, "%s",
 										("Editor: instantiated prefab '" + prefab->name + "' into the scene via drag-drop").c_str());
 								}
@@ -667,8 +667,10 @@ void render(AppContext& ctx, float dt)
 					// see EditorTransformGizmo for why a second copy would be a bug.
 					// Suppressed while the camera is being driven so Alt+LMB orbit
 					// and RMB fly-look don't fight the manipulator for the button.
+					// The PRIMARY entity for now: a gizmo over the whole set is
+					// the group-gizmo step that follows the selection model.
 					gizmoActive = EditorTransformGizmo::manipulate(
-						*ctx.world, ctx.selectedEntity,
+						*ctx.world, ctx.selection.primary(),
 						s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
 						rectMin, rectMax, s_tb,
 						/*enabled=*/!navigating && !io.KeyAlt, ctx.undoSys);
@@ -741,8 +743,17 @@ void render(AppContext& ctx, float dt)
 							meshDist = t; meshHit = e;
 						}
 					}
-					// miss = deselect
-					ctx.selectedEntity = (meshHit != entt::null) ? meshHit : terrainHit;
+					// miss = deselect. Ctrl/Cmd (io.KeyCtrl is the platform's
+					// multi-select key, see OutlinerPanel) toggles the hit in
+					// and out of the set instead of replacing it; a miss with the
+					// modifier held leaves the selection alone.
+					const Entity hit = (meshHit != entt::null) ? meshHit : terrainHit;
+					if (ImGui::GetIO().KeyCtrl)
+					{
+						if (hit != entt::null) ctx.selection.toggle(hit);
+					}
+					else
+						ctx.selection.set(hit);
 				}
 
 				// ── Landscape brush cursor + sculpt ────────────────────────
