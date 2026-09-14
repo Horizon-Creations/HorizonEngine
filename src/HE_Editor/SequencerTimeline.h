@@ -107,7 +107,21 @@ namespace HE::Ed::Sequencer
 		// The curve view's value range, kept between frames so it can be held
 		// still while a key is dragged (see draw()).
 		float axisLo = 0.0f, axisHi = 1.0f;
+		// The transport. While `playing`, the panel moves the playhead by the
+		// frame's dt (advancePlayhead) and drives every entity that plays this
+		// clip to it. `loop` wraps at the clip's end; otherwise the playhead
+		// stops there and `playing` goes false — the runtime's own rule.
+		bool  playing = false;
+		bool  loop    = true;
 	};
+
+	// The playhead after `dt` seconds of playback, by the rule a Property
+	// Animator uses in-game (PropertyAnimationSystem::advance): looping wraps
+	// into [0, duration), otherwise the end is where it stops. Nothing happens
+	// unless the view is playing, and a clip of no length cannot play — it
+	// stops instead, so a Play on an empty clip does not sit "playing" forever.
+	// True when the playhead moved.
+	bool advancePlayhead(View& view, float duration, float dt);
 
 	// The toolbar's zoom buttons record their intent up there and it is applied
 	// down here, once the lane's width is known — zooming around a point needs

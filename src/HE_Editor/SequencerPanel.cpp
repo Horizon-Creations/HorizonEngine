@@ -9,7 +9,10 @@
 
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
-#include <HorizonScene/PropertyAnimationSystem.h> // sampleChannel — Add Key pins the curve
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/NameComponent.h>
+#include <HorizonScene/Components/PropertyAnimatorComponent.h>
+#include <HorizonScene/PropertyAnimationSystem.h> // sampleChannel — Add Key pins the curve; applyAt — the preview
 #include <Types/Enums.h>
 
 #include <imgui.h>
@@ -151,6 +154,27 @@ void drawControls(PanelState& st, PropertyAnimClipAsset& clip, HE::Ed::Sequencer
 	int transformTracks = 0, materialTracks = 0;
 	for (const PropertyAnimChannel& ch : clip.channels)
 		(Seq::targetGroup(ch.target)[0] == 'T' ? transformTracks : materialTracks)++;
+
+	// ── The transport ────────────────────────────────────────────────────────
+	// Play runs the playhead at the clip's own pace and drives every entity in
+	// the scene that plays this clip (see previewActors); Stop puts it back to
+	// the start. The button says where it GOES, like the view toggle below.
+	// The advance itself happens in render(), before this row, so the time
+	// printed beside the buttons is this frame's.
+	if (EditorWidgets::smallButton(st.view.playing ? "Pause##seq_play" : "Play##seq_play"))
+		st.view.playing = !st.view.playing;
+	EditorWidgets::helpForKey("sequencer.play");
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton("Stop"))
+	{
+		st.view.playing  = false;
+		st.view.playhead = 0.0f;
+	}
+	ImGui::SameLine();
+	EditorWidgets::checkbox("Loop##seq_loop", &st.view.loop);
+	ImGui::SameLine();
+	ImGui::TextDisabled("·");
+	ImGui::SameLine();
 
 	char lenTxt[24], nowTxt[24];
 	fmtTime(lenTxt, sizeof(lenTxt), clip.duration, clip.duration);
@@ -327,6 +351,98 @@ void drawSelectionReadout(PanelState& st, PropertyAnimClipAsset& clip)
 	if (ImGui::IsItemDeactivatedAfterEdit()) pushUndo(st, clip);
 }
 
+// ── The actors ───────────────────────────────────────────────────────────────
+// A clip is played by a Property Animator component, and any number of
+// entities may carry one pointing at this clip. The Sequencer calls them the
+// clip's actors: they are what the preview moves, and this row is where they
+// are listed, picked and bound.
+
+// The entities whose Property Animator plays this clip, in registry order.
+std::vector<entt::entity> actorsOf(const AppContext& ctx, HE::UUID clipId)
+{
+	std::vector<entt::entity> out;
+	if (!ctx.world || clipId == HE::UUID{}) return out;
+	for (auto [e, pa] : ctx.world->registry().view<PropertyAnimatorComponent>().each())
+		if (pa.clipId == clipId) out.push_back(e);
+	return out;
+}
+
+const char* actorName(const AppContext& ctx, entt::entity e)
+{
+	const auto* n = ctx.world->registry().try_get<NameComponent>(e);
+	return (n && !n->name.empty()) ? n->name.c_str() : "(unnamed)";
+}
+
+// The row above the strip: who plays this clip, and a way to add the selected
+// entity to them.
+void drawActors(PanelState& st, AppContext& ctx, const std::vector<entt::entity>& actors)
+{
+	HE::Ed::Help::Scope helpScope("Sequencer");
+	if (!ctx.world) return;
+	auto& reg = ctx.world->registry();
+
+	ImGui::TextDisabled("Actors");
+	ImGui::SameLine();
+	if (actors.empty())
+	{
+		ImGui::TextDisabled("none — no entity in this scene plays this clip yet.");
+	}
+	for (size_t i = 0; i < actors.size(); ++i)
+	{
+		if (i > 0) { ImGui::SameLine(); ImGui::TextDisabled("·"); }
+		ImGui::SameLine();
+		// A name is data, so the row explains itself by key; the ##id keeps
+		// two actors of the same name apart for ImGui.
+		const std::string label = std::string(actorName(ctx, actors[i])) + "##seq_actor" +
+		                          std::to_string(static_cast<unsigned>(entt::to_integral(actors[i])));
+		const bool selected = ctx.selection.contains(actors[i]);
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 1.0f));
+		if (ImGui::Selectable(label.c_str(), selected, ImGuiSelectableFlags_None,
+		                      ImVec2(ImGui::CalcTextSize(actorName(ctx, actors[i])).x + 8.0f, 0.0f)))
+			ctx.selection.set(actors[i]);
+		ImGui::PopStyleVar();
+		EditorWidgets::helpForKey("sequencer.actor");
+	}
+
+	// The selected entity becomes an actor: a Property Animator with this
+	// clip, or its existing one pointed here. Disabled when it already plays
+	// this clip — there is nothing to do — and when nothing is selected.
+	const entt::entity primary = ctx.selection.primary();
+	const bool haveSel = primary != entt::null && reg.valid(primary);
+	const auto* already = haveSel ? reg.try_get<PropertyAnimatorComponent>(primary) : nullptr;
+	const bool bound = already && already->clipId == st.assetId;
+	ImGui::SameLine();
+	ImGui::TextDisabled("·");
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!haveSel || bound);
+	if (EditorWidgets::smallButton("Bind Selected"))
+	{
+		if (ctx.undoSys) ctx.undoSys->snapshotNow();
+		PropertyAnimatorComponent& pa = reg.get_or_emplace<PropertyAnimatorComponent>(primary);
+		pa.clipId       = st.assetId;
+		pa.playbackTime = 0.0f;
+	}
+	ImGui::EndDisabled();
+}
+
+// The preview: every actor driven to the playhead, the way the runtime would
+// write it there. Only on a frame the playhead MOVED — a tab that merely sits
+// open must not pin its actors, and an actor whose own Playing flag is on
+// keeps its own clock the rest of the time. Its playback time is set as well,
+// so a self-playing actor carries on from where the scrub left it instead of
+// overwriting the write on its next tick.
+void previewActors(AppContext& ctx, const std::vector<entt::entity>& actors,
+                   const PropertyAnimClipAsset& clip, float playhead)
+{
+	if (!ctx.world || !ctx.contentManager) return;
+	auto& reg = ctx.world->registry();
+	for (entt::entity e : actors)
+	{
+		if (auto* pa = reg.try_get<PropertyAnimatorComponent>(e)) pa->playbackTime = playhead;
+		PropertyAnimationSystem::applyAt(*ctx.world, *ctx.contentManager, e, clip, playhead);
+	}
+}
+
 } // namespace
 
 bool SequencerPanel::isSequencerAsset(const std::string& path)
@@ -446,8 +562,17 @@ void SequencerPanel::render(AppContext& ctx, const std::string& assetPath,
 		return;
 	}
 
+	// The transport's tick, before anything that prints or draws the playhead
+	// this frame. A scrub, a click on a key or the Stop button move it too;
+	// the comparison at the end catches all of them at once.
+	const float playheadBefore = st.view.playhead;
+	const bool  advanced = HE::Ed::Sequencer::advancePlayhead(st.view, clip->duration,
+	                                                          ImGui::GetIO().DeltaTime);
+
 	HE::Ed::Sequencer::Intent intent;
 	drawControls(st, *clip, intent);
+	const std::vector<entt::entity> actors = actorsOf(ctx, st.assetId);
+	drawActors(st, ctx, actors);
 
 	// ── The strip, then the selection under it ───────────────────────────────
 	// The readout's height is fixed and taken off the strip, so the strip is
@@ -465,6 +590,11 @@ void SequencerPanel::render(AppContext& ctx, const std::string& assetPath,
 
 	drawSelectionReadout(st, *clip);
 
+	// The actors follow the playhead whenever it moved this frame — by the
+	// transport, a scrub, a key click, Stop, or the key-time field above.
+	if (advanced || r.playheadMoved || st.view.playhead != playheadBefore)
+		previewActors(ctx, actors, *clip, st.view.playhead);
+
 	// ── Keyboard shortcuts (skip while typing in a field) ────────────────────
 	// WantTextInput as well as IsAnyItemActive: a number field that has
 	// keyboard focus without being "active" this frame still owns the keys.
@@ -474,6 +604,7 @@ void SequencerPanel::render(AppContext& ctx, const std::string& assetPath,
 	if (!typing && ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))
 	{
 		const bool ctrl = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeySuper;
+		if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) st.view.playing = !st.view.playing;
 		if (ctrl && ImGui::IsKeyPressed(ImGuiKey_S)) saveState(st, ctx);
 		if (ctrl && !ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z))
 			restoreSnapshot(st, *clip, st.undoPos - 1);

@@ -1,5 +1,7 @@
 #include "SequencerTimeline.h"
 
+#include <HorizonScene/PropertyAnimationSystem.h>   // sampleChannel + advance — the runtime's rules
+
 #include <cstdio>
 
 namespace HE::Ed::Sequencer
@@ -193,6 +195,17 @@ float setDuration(PropertyAnimClipAsset& clip, float duration)
 	return clip.duration;
 }
 
+bool advancePlayhead(View& view, float duration, float dt)
+{
+	if (!view.playing) return false;
+	if (duration <= 0.0f) { view.playing = false; return false; }
+	const float before = view.playhead;
+	// Speed 1: the transport previews the clip as authored. A Property
+	// Animator's own speed is that component's setting, not the clip's.
+	PropertyAnimationSystem::advance(view.playhead, view.playing, 1.0f, view.loop, duration, dt);
+	return view.playhead != before;
+}
+
 void valueRange(const PropertyAnimChannel& ch, float& lo, float& hi)
 {
 	const size_t n = std::min(ch.times.size(), ch.values.size());
@@ -225,7 +238,6 @@ void valueRange(const PropertyAnimChannel& ch, float& lo, float& hi)
 #include "EditorHelp.h"                          // Help::Scope — "Sequencer/<label>"
 #include "EditorWidgets.h"                       // helpForKey — the strip's tooltips
 #include "UITimelineMath.h"                      // seconds ⇄ pixels, the 1-2-5 ruler
-#include <HorizonScene/PropertyAnimationSystem.h> // sampleChannel — the runtime's rule
 
 #include <imgui.h>
 

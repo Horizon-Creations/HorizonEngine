@@ -2804,6 +2804,13 @@ namespace
 	  "into a whole strafe set. Made here and edited in its own tab; a state or "
 	  "an animation layer then points at it instead of at a single clip.",
 	  "", "systems#animation" },
+	{ "New Asset/Property Animation Clip", "",
+	  "A clip that moves, turns, scales or recolours an entity over time — "
+	  "position, rotation and scale, or the material's colour, metallic, "
+	  "roughness and opacity, each as its own track of keys. Made here as an "
+	  "empty clip, filled with tracks in the Sequencer, and played by a "
+	  "Property Animator component on the entity.",
+	  "", "systems#animation" },
 	{ "Blend Space Editor/Kind", "",
 	  "1D reads one parameter and interpolates along a line — speed into "
 	  "walk/jog/run. 2D reads two and mixes freely placed samples in a plane, "

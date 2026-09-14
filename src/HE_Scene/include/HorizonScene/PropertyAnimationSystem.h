@@ -1,7 +1,10 @@
 #pragma once
+#include <entt/entt.hpp>
+
 class HorizonWorld;
 class ContentManager;
 struct PropertyAnimChannel;
+struct PropertyAnimClipAsset;
 
 namespace PropertyAnimationSystem {
     void update(HorizonWorld& world, ContentManager& cm, float dt);
@@ -12,4 +15,18 @@ namespace PropertyAnimationSystem {
     // prints the value under its playhead with THIS function — a readout that
     // interpolated by its own rule would be right until the two disagreed.
     float sampleChannel(const PropertyAnimChannel& ch, float t);
+
+    // Every channel of `clip` at time `t`, written into `e`'s Transform and
+    // material — the per-entity half of update(), without the playhead. The
+    // Sequencer's preview drives the entities that play this clip with it, so
+    // what scrubbing shows in the viewport is what the runtime would write
+    // there, by construction rather than by a second switch kept in step.
+    void applyAt(HorizonWorld& world, ContentManager& cm, entt::entity e,
+                 const PropertyAnimClipAsset& clip, float t);
+
+    // The playhead rule the runtime uses for a Property Animator, exposed for
+    // the Sequencer's transport: looping wraps into [0, duration), otherwise
+    // the playhead stops at the end and `playing` goes false. `duration` > 0.
+    void advance(float& playbackTime, bool& playing,
+                 float playbackSpeed, bool looping, float duration, float dt);
 }

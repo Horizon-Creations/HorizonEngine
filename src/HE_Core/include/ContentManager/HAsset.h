@@ -176,6 +176,12 @@ inline constexpr uint32_t CHUNK_ANIM = makeChunkId('A','N','I','M'); // duration
 // Layout: uint8 hasRootMotion, uint32 notifyCount, then that many notifies, each
 // a string name followed by float time and float duration.
 inline constexpr uint32_t CHUNK_ANOT = makeChunkId('A','N','O','T'); // root-motion flag + notifies
+// A Property Animation Clip: scalar channels over time, written by the Sequencer
+// and played by PropertyAnimatorComponent. Layout: float duration, uint32
+// channelCount, then per channel a uint8 PropTarget followed by the times and
+// the values as length-prefixed float vectors (appendVec). Absent = an empty
+// clip of no length, which is what a freshly created stub is.
+inline constexpr uint32_t CHUNK_PANM = makeChunkId('P','A','N','M'); // property-animation clip
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Writer
