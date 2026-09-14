@@ -435,6 +435,25 @@ TEST_CASE("Only the axes the client sent are overwritten")
 		CHECK(f.countNamed("Corner lamp") == 1);
 		// The children keep theirs — the override is the root's alone.
 		CHECK(f.countNamed("Bulb") == 2);
+		// And it is on record as authored here: propagation would otherwise
+		// rename the root back to the template's on the next scene open.
+		const Entity e = HE::Ed::entityByUuid(f.world, r.content["uuid"]);
+		const auto* link = f.world.registry().try_get<PrefabInstanceComponent>(e);
+		REQUIRE(link != nullptr);
+		const HE::UUID tRoot = link->templateOf(f.world.entityId(e));
+		CHECK(tRoot != HE::UUID{});
+		CHECK(link->hasOverride(tRoot, "__name"));
+		CHECK(link->overrides.size() == 1);
+	}
+
+	SUBCASE("without a name nothing is marked as authored")
+	{
+		const ToolResult r = f.call("prefab_instantiate", json{ { "path", "Prefabs/Lamp.hasset" } });
+		REQUIRE_MESSAGE(!r.isError, codeOf(r));
+		const Entity e = HE::Ed::entityByUuid(f.world, r.content["uuid"]);
+		const auto* link = f.world.registry().try_get<PrefabInstanceComponent>(e);
+		REQUIRE(link != nullptr);
+		CHECK(link->overrides.empty());
 	}
 
 	SUBCASE("a two-element position is refused, not half-applied")

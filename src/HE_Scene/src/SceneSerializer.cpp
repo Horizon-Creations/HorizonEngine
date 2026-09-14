@@ -1193,8 +1193,11 @@ namespace
 			PrefabInstanceComponent pl;
 			pl.asset = jsonToUuid(c.value("asset", json()));
 			// Both lists optional: a scene written before instances carried them
-			// loads as a plain link. A binding with a null id on either side is
-			// dropped — it could never be matched to anything — and an override
+			// loads as a plain link. A binding without a template entity names
+			// no record and is dropped; one with a NULL instance entity is kept —
+			// it says "no counterpart in this placement" (see the component
+			// header), and dropping it would make propagation read the record as
+			// new in the asset and create it on the next open. An override
 			// without a template entity or a component key names nothing.
 			if (auto it = c.find("bindings"); it != c.end() && it->is_array())
 				for (const json& b : *it)
@@ -1203,8 +1206,7 @@ namespace
 					PrefabInstanceComponent::Binding bind;
 					bind.templateEntity = jsonToUuid(b.value("template", json()));
 					bind.instanceEntity = jsonToUuid(b.value("entity",   json()));
-					if (bind.templateEntity == HE::UUID{} || bind.instanceEntity == HE::UUID{})
-						continue;
+					if (bind.templateEntity == HE::UUID{}) continue;
 					pl.bindings.push_back(bind);
 				}
 			if (auto it = c.find("overrides"); it != c.end() && it->is_array())

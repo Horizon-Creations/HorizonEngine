@@ -444,6 +444,14 @@ void addInstantiate(McpToolRegistry& registry, ContentManager& content,
 			}
 			comps["prefab"] = json{ { "asset", uuidJson(p.id) } };
 			if (!bindings.empty()) comps["prefab"]["bindings"] = std::move(bindings);
+			// A display name the client chose is authored here, not in the
+			// asset: marked as an override on the root's name, or the next
+			// propagation (scene open, save) would rename it back to the
+			// template's. Same key the sync reads for the name, "__name".
+			if (!newName.empty())
+				if (auto u = root->find("uuid"); u != root->end())
+					comps["prefab"]["overrides"] = json::array({
+						json{ { "entity", *u }, { "component", "__name" } } });
 		}
 
 		const Command cmd =

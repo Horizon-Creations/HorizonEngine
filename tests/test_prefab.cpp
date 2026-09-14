@@ -1031,6 +1031,24 @@ TEST_CASE("PrefabSync: adoption binds an ambiguous child to nothing rather than 
     REQUIRE(ser.syncPrefabInstance(scene, root, t.capture(), &rep));
     CHECK(rep.entitiesCreated == 0);
     CHECK(reg.get<HierarchyComponent>(root).children.size() == 2);
+
+    // The "no counterpart" bindings have to survive a save, or the next open
+    // would read both records as new in the asset and create them after all.
+    std::vector<uint8_t> saved;
+    REQUIRE(ser.saveToMemory(scene, saved));
+    HorizonWorld reopened;
+    REQUIRE(ser.loadFromMemory(reopened, saved));
+    Entity again = entt::null;
+    for (auto [e, n] : reopened.registry().view<NameComponent>().each())
+        if (n.name == "Lamp") again = e;
+    REQUIRE((again != entt::null));
+    const auto& reloaded = reopened.registry().get<PrefabInstanceComponent>(again);
+    CHECK(reloaded.bindings.size() == 3);
+    CHECK(reloaded.bindings == inst.bindings);
+    SceneSerializer::PrefabSyncReport afterReload;
+    REQUIRE(ser.syncPrefabInstance(reopened, again, t.capture(), &afterReload));
+    CHECK(afterReload.entitiesCreated == 0);
+    CHECK(reopened.registry().get<HierarchyComponent>(again).children.size() == 2);
 }
 
 TEST_CASE("PrefabSync: a binding whose record the asset lost is counted, its entity left standing")
