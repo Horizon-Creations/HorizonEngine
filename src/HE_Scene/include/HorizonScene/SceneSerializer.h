@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <vector>
 #include <entt/entt.hpp>
+#include "HorizonScene/Components/PrefabInstanceComponent.h"
 
 class HorizonWorld;
 using SerializeFormat = HE::SerializeFormat;
@@ -93,10 +94,20 @@ public:
     // fresh ones. Only for collaboration's structural replication, where both
     // peers must know the new subtree under the SAME identities; a prefab drop
     // must keep the default, or two drops would claim one identity twice.
+    //
+    // outBindings, when given, receives one entry per record — the record's
+    // uuid on the template side, the created entity's uuid on the instance
+    // side — for a caller that is placing a prefab ASSET and is about to stamp
+    // a PrefabInstanceComponent on the root. Nothing is stamped here: this
+    // function also serves paste, duplicate and a peer's create, none of which
+    // is a placement. A blob whose records already carry the component (a
+    // duplicate of an instance, a redo) has its bindings re-pointed at the
+    // entities this call created, so no caller needs the parameter for that.
     Entity instantiatePrefab(HorizonWorld& world,
                              const std::vector<uint8_t>& data,
                              Entity parent = entt::null,
-                             bool preserveIds = false);
+                             bool preserveIds = false,
+                             std::vector<PrefabInstanceComponent::Binding>* outBindings = nullptr);
 
 private:
     bool saveJSON  (const HorizonWorld& world, const std::filesystem::path& path);

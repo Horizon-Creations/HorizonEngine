@@ -35,7 +35,7 @@
 #include <HorizonScene/Components/AudioListenerComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonScene/Components/LODComponent.h>
-#include <HorizonScene/Components/PrefabLinkComponent.h>
+#include <HorizonScene/Components/PrefabInstanceComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/UICanvasComponent.h>
 #include <HorizonScene/Components/UIElementComponent.h>
@@ -1497,7 +1497,7 @@ namespace
 		AudioListenerComponent         audioListener;
 		ParticleSystemComponent        particleSystem;
 		LODComponent                   lod;
-		PrefabLinkComponent            prefabLink;
+		PrefabInstanceComponent            prefabLink;
 		NavAgentComponent              navAgent;
 		TerrainComponent               terrain;
 		FoliageComponent               foliage;
@@ -1745,8 +1745,17 @@ namespace
 		// is the field whose loss would be invisible: everything renders and
 		// moves exactly the same, only nothing can tell any more that the lamp
 		// post came out of Prefabs/Lamp.hasset.
+		// Bindings and overrides go with it: which entity of the placement is
+		// which record of the template, and which properties were edited here.
+		// Losing either is as invisible as losing the link — until the asset
+		// changes and propagation either overwrites a human's edit or cannot
+		// find the entity it is meant for.
 		a.prefabLink.asset = HE::UUID::generate();
-		reg.emplace<PrefabLinkComponent>(actor, a.prefabLink);
+		a.prefabLink.bindings.push_back({ HE::UUID::generate(), HE::UUID::generate() });
+		a.prefabLink.bindings.push_back({ HE::UUID::generate(), HE::UUID::generate() });
+		a.prefabLink.overrides.push_back({ a.prefabLink.bindings[1].templateEntity, "light", "intensity" });
+		a.prefabLink.overrides.push_back({ a.prefabLink.bindings[0].templateEntity, "mesh", "" });
+		reg.emplace<PrefabInstanceComponent>(actor, a.prefabLink);
 
 		a.navAgent.targetPos    = { 4.0f, 1.0f, -2.0f };
 		a.navAgent.speed        = 6.0f;
@@ -2087,9 +2096,11 @@ namespace
 			}
 		}
 		{
-			const auto* pl = reg.try_get<PrefabLinkComponent>(actor);
+			const auto* pl = reg.try_get<PrefabInstanceComponent>(actor);
 			REQUIRE(pl != nullptr);
 			CHECK(pl->asset == a.prefabLink.asset);
+			CHECK(pl->bindings  == a.prefabLink.bindings);
+			CHECK(pl->overrides == a.prefabLink.overrides);
 		}
 		{
 			const auto* na = reg.try_get<NavAgentComponent>(actor);

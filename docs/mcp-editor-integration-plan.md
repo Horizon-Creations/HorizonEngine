@@ -2112,6 +2112,16 @@ stimmen der Pfad→UUID-Eintrag und die Datei überein.
 
 ### 14.6 Die Verknüpfung, und was sie ausdrücklich nicht ist
 
+> **Nachtrag 14.09.2026 (Thema 33):** `PrefabLinkComponent` heißt jetzt
+> `PrefabInstanceComponent` und trägt neben `asset` eine Bindungsliste
+> (Template-Record ↔ platzierte Entity) und eine Override-Liste
+> (Template-Entity, Komponentenschlüssel, Property). Schlüssel `"prefab"` im
+> Szenenformat bleibt, `bindings`/`overrides` sind optionale Zusätze, alte
+> Szenen laden unverändert. Was unten über „keine Vererbung" steht, beschreibt
+> den Stand dieses Themas (29); die Propagation und die Inspector-UI sind die
+> Folgeschritte von Thema 33. Die Entwurfsbegründung steht im Header der
+> Komponente.
+
 `PrefabLinkComponent` hält die UUID des Prefab-Assets, auf der **Wurzel** der
 Platzierung (die Kinder sind Teil der Instanz, nicht eigene Instanzen).
 Schlüssel `"prefab"` im Szenenformat — geschrieben, gelesen **und** in

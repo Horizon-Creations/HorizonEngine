@@ -756,7 +756,7 @@ void registerMaterialTools(McpToolRegistry& registry, ContentManager& content,
 //
 // ── The link, and what it is not ─────────────────────────────────────────────
 // Every entity placed by `prefab_instantiate` (and by the viewport's drag-drop)
-// carries a `PrefabLinkComponent` naming the asset it came from — the "prefab"
+// carries a `PrefabInstanceComponent` naming the asset it came from — the "prefab"
 // key in the scene file. That is what makes `prefab_instances` answerable and
 // what makes deleting a prefab report the scenes that use it (AssetRefScan finds
 // any uuid inside a "components" block). It is NOT prefab inheritance: editing

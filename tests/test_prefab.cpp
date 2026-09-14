@@ -7,6 +7,8 @@
 #include <HorizonScene/Components/AudioSourceComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
+#include <HorizonScene/Components/EntityIdComponent.h>
+#include <HorizonScene/Components/PrefabInstanceComponent.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 
@@ -444,4 +446,203 @@ TEST_CASE("Prefab: a template still mints fresh ids for every instance")
     CHECK(ha->children[0] != hb->children[0]);
     CHECK(uuidOf(ha->children[0]) != childId);
     CHECK(uuidOf(ha->children[0]) != uuidOf(hb->children[0]));
+}
+
+// ─── PrefabInstanceComponent: bindings and overrides ─────────────────────────
+// The component is a record on the ROOT of a placement: which asset, which
+// entity is which template record, which properties were edited here. Nothing
+// in the serializer applies any of it; what it promises is that the record
+// survives a save/load, and that instantiating a blob that carries one leaves
+// the bindings pointing at the entities that call was made of.
+
+namespace
+{
+    HE::UUID idOf(entt::registry& reg, Entity e)
+    {
+        const auto* c = reg.try_get<EntityIdComponent>(e);
+        return c ? c->id : HE::UUID{};
+    }
+}
+
+TEST_CASE("PrefabInstance: bindings and overrides survive a memory round-trip")
+{
+    HorizonWorld world;
+    const Entity root  = world.createEntity("Lamp");
+    const Entity child = world.createEntity("Bulb");
+    world.reparentEntity(child, root);
+    auto& reg = world.registry();
+
+    PrefabInstanceComponent inst;
+    inst.asset = HE::UUID::generate();
+    const HE::UUID tRoot = HE::UUID::generate(), tBulb = HE::UUID::generate();
+    inst.bindings = { { tRoot, idOf(reg, root) }, { tBulb, idOf(reg, child) } };
+    inst.setOverride(tBulb, "light", "intensity");
+    inst.setOverride(tBulb, "transform", "position");
+    inst.setOverride(tRoot, "mesh");   // whole component
+    reg.emplace<PrefabInstanceComponent>(root, inst);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, bytes));
+
+    auto& lreg = loaded.registry();
+    const PrefabInstanceComponent* got = nullptr;
+    for (auto e : lreg.view<PrefabInstanceComponent>()) got = &lreg.get<PrefabInstanceComponent>(e);
+    REQUIRE(got != nullptr);
+    CHECK(got->asset == inst.asset);
+    // Same entries, same order — the order is what the Inspector lists.
+    CHECK(got->bindings  == inst.bindings);
+    CHECK(got->overrides == inst.overrides);
+    CHECK(got->instanceOf(tBulb) == idOf(reg, child));
+    CHECK(got->templateOf(idOf(reg, root)) == tRoot);
+}
+
+TEST_CASE("PrefabInstance: a scene written before bindings existed loads as a plain link")
+{
+    // Exactly what the previous format wrote: "prefab": { "asset": [hi, lo] }
+    // and nothing else. It must load as an instance with empty lists, not be
+    // refused and not be dropped.
+    HorizonWorld world;
+    const Entity root = world.createEntity("Lamp");
+    PrefabInstanceComponent link;
+    link.asset = HE::UUID::generate();
+    world.registry().emplace<PrefabInstanceComponent>(root, link);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    // A link with no lists writes no list keys — that IS the old format, so
+    // the round-trip here is the compatibility check, not a tautology.
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, bytes));
+    const PrefabInstanceComponent* got = nullptr;
+    for (auto e : loaded.registry().view<PrefabInstanceComponent>())
+        got = &loaded.registry().get<PrefabInstanceComponent>(e);
+    REQUIRE(got != nullptr);
+    CHECK(got->asset == link.asset);
+    CHECK(got->bindings.empty());
+    CHECK(got->overrides.empty());
+}
+
+TEST_CASE("PrefabInstance: instantiatePrefab reports which record became which entity")
+{
+    HorizonWorld world;
+    const Entity root  = world.createEntity("Lamp");
+    const Entity child = world.createEntity("Bulb");
+    world.reparentEntity(child, root);
+    auto& reg = world.registry();
+    const HE::UUID tRoot = idOf(reg, root), tBulb = idOf(reg, child);
+
+    SceneSerializer ser;
+    const auto blob = ser.serializeSubtree(world, root);
+
+    std::vector<PrefabInstanceComponent::Binding> bindings;
+    const Entity placed = ser.instantiatePrefab(world, blob, entt::null, false, &bindings);
+    REQUIRE((placed != entt::null));
+    // Nothing stamped by the call itself: it also serves paste and duplicate.
+    CHECK(reg.try_get<PrefabInstanceComponent>(placed) == nullptr);
+
+    // One per record, template side = the record's uuid (the source entity's
+    // id, which is what the asset file will carry), instance side = the new one.
+    REQUIRE(bindings.size() == 2);
+    PrefabInstanceComponent inst;
+    inst.bindings = bindings;
+    const HE::UUID newRoot = inst.instanceOf(tRoot), newBulb = inst.instanceOf(tBulb);
+    CHECK(newRoot == idOf(reg, placed));
+    CHECK(newBulb == idOf(reg, reg.get<HierarchyComponent>(placed).children.at(0)));
+    CHECK(newRoot != tRoot);
+    CHECK(newBulb != tBulb);
+}
+
+TEST_CASE("PrefabInstance: a duplicate of an instance binds to its own children")
+{
+    HorizonWorld world;
+    const Entity root  = world.createEntity("Lamp");
+    const Entity child = world.createEntity("Bulb");
+    world.reparentEntity(child, root);
+    auto& reg = world.registry();
+
+    // The original placement, bound and with an override on the bulb.
+    const HE::UUID tRoot = HE::UUID::generate(), tBulb = HE::UUID::generate();
+    PrefabInstanceComponent inst;
+    inst.asset    = HE::UUID::generate();
+    inst.bindings = { { tRoot, idOf(reg, root) }, { tBulb, idOf(reg, child) } };
+    inst.setOverride(tBulb, "light", "intensity");
+    reg.emplace<PrefabInstanceComponent>(root, inst);
+
+    // Duplicate = serialise the instance, instantiate the blob with fresh ids.
+    SceneSerializer ser;
+    const auto blob = ser.serializeSubtree(world, root);
+    const Entity copy = ser.instantiatePrefab(world, blob);
+    REQUIRE((copy != entt::null));
+    const Entity copyBulb = reg.get<HierarchyComponent>(copy).children.at(0);
+
+    const auto* dup = reg.try_get<PrefabInstanceComponent>(copy);
+    REQUIRE(dup != nullptr);
+    CHECK(dup->asset == inst.asset);
+    REQUIRE(dup->bindings.size() == 2);
+    // Template side untouched, instance side re-pointed at the copy's entities.
+    CHECK(dup->instanceOf(tRoot) == idOf(reg, copy));
+    CHECK(dup->instanceOf(tBulb) == idOf(reg, copyBulb));
+    CHECK(dup->instanceOf(tBulb) != idOf(reg, child));
+    // Overrides are keyed by template entity: they travel without translation.
+    CHECK(dup->overrides == inst.overrides);
+    CHECK(dup->hasOverride(tBulb, "light", "intensity"));
+
+    // The original is what it was.
+    const auto* orig = reg.try_get<PrefabInstanceComponent>(root);
+    REQUIRE(orig != nullptr);
+    CHECK(orig->bindings == inst.bindings);
+}
+
+TEST_CASE("PrefabInstance: preserveIds keeps bindings as they are, a deleted child's binding survives")
+{
+    HorizonWorld world;
+    const Entity root  = world.createEntity("Lamp");
+    const Entity child = world.createEntity("Bulb");
+    world.reparentEntity(child, root);
+    auto& reg = world.registry();
+    const HE::UUID rootId = idOf(reg, root), childId = idOf(reg, child);
+
+    const HE::UUID tRoot = HE::UUID::generate(), tBulb = HE::UUID::generate(),
+                   tGone = HE::UUID::generate();
+    PrefabInstanceComponent inst;
+    inst.asset    = HE::UUID::generate();
+    // A third binding to an entity that is not in the subtree any more: the
+    // human deleted that child. That is an override, not a broken entry.
+    inst.bindings = { { tRoot, rootId }, { tBulb, childId }, { tGone, HE::UUID::generate() } };
+    reg.emplace<PrefabInstanceComponent>(root, inst);
+
+    SceneSerializer ser;
+    const auto blob = ser.serializeSubtree(world, root);
+    HorizonWorld peer;
+    const Entity mirrored = ser.instantiatePrefab(peer, blob, entt::null, /*preserveIds=*/true);
+    REQUIRE((mirrored != entt::null));
+    const auto* got = peer.registry().try_get<PrefabInstanceComponent>(mirrored);
+    REQUIRE(got != nullptr);
+    CHECK(got->bindings == inst.bindings);
+}
+
+TEST_CASE("PrefabInstance: the override set is idempotent and a whole-component entry covers its properties")
+{
+    PrefabInstanceComponent inst;
+    const HE::UUID t = HE::UUID::generate();
+    CHECK(inst.setOverride(t, "light", "intensity"));
+    CHECK_FALSE(inst.setOverride(t, "light", "intensity"));
+    CHECK(inst.overrides.size() == 1);
+    CHECK(inst.hasOverride(t, "light", "intensity"));
+    CHECK_FALSE(inst.hasOverride(t, "light", "color"));
+    CHECK_FALSE(inst.hasOverride(t, "light"));   // whole component was not claimed
+
+    CHECK(inst.setOverride(t, "light"));         // now it is
+    CHECK(inst.hasOverride(t, "light", "color"));
+    CHECK(inst.hasOverride(t, "light"));
+
+    CHECK(inst.clearOverride(t, "light", "intensity"));
+    CHECK(inst.hasOverride(t, "light", "intensity"));   // still covered by the whole-component entry
+    CHECK(inst.clearOverride(t, "light"));              // empty property clears every entry of the component
+    CHECK(inst.overrides.empty());
+    CHECK_FALSE(inst.clearOverride(t, "light"));
 }

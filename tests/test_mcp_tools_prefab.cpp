@@ -19,7 +19,8 @@
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
-#include <HorizonScene/Components/PrefabLinkComponent.h>
+#include <HorizonScene/Components/PrefabInstanceComponent.h>
+#include <HorizonScene/Components/EntityIdComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 
 #include <filesystem>
@@ -698,7 +699,7 @@ TEST_CASE("A placement remembers which prefab it came from")
 	REQUIRE((placed != entt::null));
 
 	auto& reg = f.world.registry();
-	const auto* link = reg.try_get<PrefabLinkComponent>(placed);
+	const auto* link = reg.try_get<PrefabInstanceComponent>(placed);
 	REQUIRE(link != nullptr);
 	CHECK(link->asset == assetId);
 
@@ -707,7 +708,56 @@ TEST_CASE("A placement remembers which prefab it came from")
 	// one placement three times.
 	const auto& kids = reg.get<HierarchyComponent>(placed).children;
 	REQUIRE(kids.size() == 1);
-	CHECK(reg.try_get<PrefabLinkComponent>(kids[0]) == nullptr);
+	CHECK(reg.try_get<PrefabInstanceComponent>(kids[0]) == nullptr);
+
+	// And which of its entities is which record of the template: one binding
+	// per record (post, bulb, glass), the instance side naming the entity that
+	// was actually made — not the record's own uuid, which is what the tool
+	// patched into the blob and what instantiatePrefab re-pointed.
+	REQUIRE(link->bindings.size() == 3);
+	const Entity bulb  = kids[0];
+	const Entity glass = reg.get<HierarchyComponent>(bulb).children.at(0);
+	CHECK(link->templateOf(reg.get<EntityIdComponent>(placed).id) != HE::UUID{});
+	CHECK(link->templateOf(reg.get<EntityIdComponent>(bulb).id)   != HE::UUID{});
+	CHECK(link->templateOf(reg.get<EntityIdComponent>(glass).id)  != HE::UUID{});
+	for (const auto& b : link->bindings)
+		CHECK_FALSE(b.templateEntity == b.instanceEntity);
+	CHECK(link->overrides.empty());
+}
+
+TEST_CASE("Two placements of one prefab share template ids and own their entities")
+{
+	Fixture f("link_twice");
+	const Entity source = f.makeSubtree();
+	f.writePrefabFile("Prefabs/Lamp.hasset", source);
+	f.world.destroyEntity(source);
+
+	const ToolResult r1 = f.call("prefab_instantiate", json{ { "path", "Prefabs/Lamp.hasset" } });
+	const ToolResult r2 = f.call("prefab_instantiate", json{ { "path", "Prefabs/Lamp.hasset" } });
+	REQUIRE_MESSAGE(!r1.isError, codeOf(r1));
+	REQUIRE_MESSAGE(!r2.isError, codeOf(r2));
+	auto& reg = f.world.registry();
+	const auto* a = reg.try_get<PrefabInstanceComponent>(HE::Ed::entityByUuid(f.world, r1.content["uuid"]));
+	const auto* b = reg.try_get<PrefabInstanceComponent>(HE::Ed::entityByUuid(f.world, r2.content["uuid"]));
+	REQUIRE(a != nullptr);
+	REQUIRE(b != nullptr);
+	REQUIRE(a->bindings.size() == 3);
+	REQUIRE(b->bindings.size() == 3);
+	// The template side is the asset's: the same for both placements. The
+	// instance side is each placement's own: never the same entity twice.
+	auto exists = [&](const HE::UUID& id)
+	{
+		for (auto e : reg.view<EntityIdComponent>())
+			if (reg.get<EntityIdComponent>(e).id == id) return true;
+		return false;
+	};
+	for (size_t i = 0; i < 3; ++i)
+	{
+		CHECK(a->bindings[i].templateEntity == b->bindings[i].templateEntity);
+		CHECK_FALSE(a->bindings[i].instanceEntity == b->bindings[i].instanceEntity);
+		CHECK(exists(a->bindings[i].instanceEntity));
+		CHECK(exists(b->bindings[i].instanceEntity));
+	}
 }
 
 TEST_CASE("The link rides in the command, so undo and redo keep it")
@@ -730,7 +780,16 @@ TEST_CASE("The link rides in the command, so undo and redo keep it")
 	// would bring the lamp back without its link.
 	const Entity again = HE::Ed::entityByUuid(f.world, uuid);
 	REQUIRE((again != entt::null));
-	CHECK(f.world.registry().try_get<PrefabLinkComponent>(again) != nullptr);
+	const auto* link = f.world.registry().try_get<PrefabInstanceComponent>(again);
+	REQUIRE(link != nullptr);
+	// The bindings come back pointing at the entities the redo made, not at
+	// the ones the undo destroyed: the redo replays a blob captured from the
+	// world, and instantiatePrefab re-points every binding it finds.
+	REQUIRE(link->bindings.size() == 3);
+	auto& reg = f.world.registry();
+	CHECK(link->templateOf(reg.get<EntityIdComponent>(again).id) != HE::UUID{});
+	const Entity bulb = reg.get<HierarchyComponent>(again).children.at(0);
+	CHECK(link->templateOf(reg.get<EntityIdComponent>(bulb).id) != HE::UUID{});
 }
 
 TEST_CASE("prefab_instances answers which entities came from a prefab")
@@ -802,7 +861,7 @@ TEST_CASE("Saving an instance as a new prefab does not bake in the old link")
 		HE::AssetRefs::assetUuidOfFile((f.root / "Prefabs/TallLamp.hasset").string());
 	const Entity e = HE::Ed::entityByUuid(f.world, second.content["uuid"]);
 	REQUIRE((e != entt::null));
-	const auto* link = f.world.registry().try_get<PrefabLinkComponent>(e);
+	const auto* link = f.world.registry().try_get<PrefabInstanceComponent>(e);
 	REQUIRE(link != nullptr);
 	CHECK(link->asset == tallId);
 
@@ -831,8 +890,8 @@ TEST_CASE("A link survives the scene file, and the delete dialog can see it")
 	const HE::UUID assetId =
 		HE::AssetRefs::assetUuidOfFile((f.root / "Prefabs/Lamp.hasset").string());
 	int linked = 0;
-	for (auto e : reloaded.registry().view<PrefabLinkComponent>())
-		if (reloaded.registry().get<PrefabLinkComponent>(e).asset == assetId) ++linked;
+	for (auto e : reloaded.registry().view<PrefabInstanceComponent>())
+		if (reloaded.registry().get<PrefabInstanceComponent>(e).asset == assetId) ++linked;
 	CHECK(linked == 1);
 
 	// And because the id sits where every other asset id sits — inside a

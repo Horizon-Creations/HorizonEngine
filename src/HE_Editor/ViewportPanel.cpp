@@ -1,6 +1,6 @@
 #include "ViewportPanel.h"
 #include <HorizonScene/Components/MaterialComponent.h> // a spawned mesh follows its MREF material
-#include <HorizonScene/Components/PrefabLinkComponent.h> // a dropped prefab remembers its file
+#include <HorizonScene/Components/PrefabInstanceComponent.h> // a dropped prefab remembers its file
 #include <cstdint>
 #include "EditorApplication.h"           // AppContext, EditorCamera, EditorUndo
 #include "EditorInput.h"                 // pointer-device grammar (trackpad swipe vs mouse wheel)
@@ -614,7 +614,10 @@ void render(AppContext& ctx, float dt)
 								// them would make two drops of the same prefab claim one
 								// identity (see SceneSerializer::instantiatePrefab).
 								SceneSerializer ser;
-								const Entity root = ser.instantiatePrefab(*ctx.world, prefab->data);
+								std::vector<PrefabInstanceComponent::Binding> bindings;
+								const Entity root = ser.instantiatePrefab(*ctx.world, prefab->data,
+								                                          entt::null, /*preserveIds=*/false,
+								                                          &bindings);
 								if (root != entt::null)
 								{
 									// Only the position is overwritten — the prefab's own
@@ -627,16 +630,21 @@ void render(AppContext& ctx, float dt)
 										TransformComponent tc; tc.position = spawnPos;
 										ctx.world->addComponent(root, tc);
 									}
-									// Where it came from (PrefabLinkComponent). Written
+									// Where it came from (PrefabInstanceComponent). Written
 									// HERE and not inside instantiatePrefab, which also
 									// serves paste, duplicate and a peer's create —
 									// none of those is a prefab placement, and stamping
 									// a link there would make three quarters of the
 									// links in a scene lies. Without this line the
 									// prefabs a HUMAN drops are the ones prefab_instances
-									// cannot see.
-									ctx.world->registry().emplace_or_replace<PrefabLinkComponent>(
-										root, PrefabLinkComponent{ id });
+									// cannot see. The bindings come from the same call
+									// that minted the entities: which template record
+									// became which entity is known nowhere else.
+									PrefabInstanceComponent inst;
+									inst.asset    = id;
+									inst.bindings = std::move(bindings);
+									ctx.world->registry().emplace_or_replace<PrefabInstanceComponent>(
+										root, std::move(inst));
 									ctx.world->markHierarchyDirty();
 									ctx.selection.set(root);
 									HE_LOG_INFO(Editor, "%s",

@@ -19,7 +19,7 @@
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
-#include "HorizonScene/Components/PrefabLinkComponent.h"
+#include "HorizonScene/Components/PrefabInstanceComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/TerrainChunkComponent.h"
@@ -440,12 +440,38 @@ namespace
 				{ "saveVisibility", ss->saveVisibility },
 			};
 		}
-		if (auto* pl = registry.try_get<PrefabLinkComponent>(entity))
+		if (auto* pl = registry.try_get<PrefabInstanceComponent>(entity))
 		{
 			// Written like every other asset reference — [hi, lo] inside the
 			// components block — which is also what makes AssetRefScan find an
 			// instance when someone deletes the prefab it came from.
-			comps["prefab"] = { { "asset", uuidToJson(pl->asset) } };
+			//
+			// Bindings and overrides are written only when there are any: a scene
+			// that never used them stays byte-for-byte what it was, and the loader
+			// treats a missing list as empty either way. Order is preserved on
+			// both — the Inspector lists overrides in the order they were made.
+			json prefab = { { "asset", uuidToJson(pl->asset) } };
+			if (!pl->bindings.empty())
+			{
+				json bindings = json::array();
+				for (const auto& b : pl->bindings)
+					bindings.push_back({ { "template", uuidToJson(b.templateEntity) },
+					                     { "entity",   uuidToJson(b.instanceEntity) } });
+				prefab["bindings"] = std::move(bindings);
+			}
+			if (!pl->overrides.empty())
+			{
+				json overrides = json::array();
+				for (const auto& o : pl->overrides)
+				{
+					json ov = { { "entity",    uuidToJson(o.templateEntity) },
+					            { "component", o.component } };
+					if (!o.property.empty()) ov["property"] = o.property;
+					overrides.push_back(std::move(ov));
+				}
+				prefab["overrides"] = std::move(overrides);
+			}
+			comps["prefab"] = std::move(prefab);
 		}
 		if (auto* e = registry.try_get<EnvironmentComponent>(entity))
 		{
@@ -1162,13 +1188,40 @@ namespace
 		if (comps.contains("prefab"))
 		{
 			const json& c = comps["prefab"];
-			PrefabLinkComponent pl;
+			PrefabInstanceComponent pl;
 			pl.asset = jsonToUuid(c.value("asset", json()));
+			// Both lists optional: a scene written before instances carried them
+			// loads as a plain link. A binding with a null id on either side is
+			// dropped — it could never be matched to anything — and an override
+			// without a template entity or a component key names nothing.
+			if (auto it = c.find("bindings"); it != c.end() && it->is_array())
+				for (const json& b : *it)
+				{
+					if (!b.is_object()) continue;
+					PrefabInstanceComponent::Binding bind;
+					bind.templateEntity = jsonToUuid(b.value("template", json()));
+					bind.instanceEntity = jsonToUuid(b.value("entity",   json()));
+					if (bind.templateEntity == HE::UUID{} || bind.instanceEntity == HE::UUID{})
+						continue;
+					pl.bindings.push_back(bind);
+				}
+			if (auto it = c.find("overrides"); it != c.end() && it->is_array())
+				for (const json& o : *it)
+				{
+					if (!o.is_object()) continue;
+					PrefabInstanceComponent::Override ov;
+					ov.templateEntity = jsonToUuid(o.value("entity", json()));
+					ov.component      = o.value("component", std::string());
+					ov.property       = o.value("property",  std::string());
+					if (ov.templateEntity == HE::UUID{} || ov.component.empty())
+						continue;
+					pl.setOverride(ov.templateEntity, ov.component, ov.property);
+				}
 			// A link to nothing is not a link. An asset id that failed to parse
 			// would otherwise leave the entity claiming to be an instance of the
 			// null prefab, which is a claim every reader has to special-case.
 			if (!(pl.asset == HE::UUID{}))
-				registry.emplace_or_replace<PrefabLinkComponent>(entity, pl);
+				registry.emplace_or_replace<PrefabInstanceComponent>(entity, pl);
 		}
 		if (comps.contains("script"))
 		{
@@ -1988,7 +2041,8 @@ namespace
 	}
 
 	Entity applyPrefabJson(HorizonWorld& world, const json& scene, Entity prefabParent,
-	                       bool preserveIds = false)
+	                       bool preserveIds = false,
+	                       std::vector<PrefabInstanceComponent::Binding>* outBindings = nullptr)
 	{
 		if (!scene.contains("entities")) return entt::null;
 
@@ -2029,6 +2083,51 @@ namespace
 		if (prefabRoot == entt::null) return entt::null;
 
 		rebuildHierarchy(registry, scene, idMap);
+
+		// ── Prefab instances inside the blob ─────────────────────────────────
+		// A record that carries a PrefabInstanceComponent was itself a placement
+		// when it was captured — this blob is a duplicate, a paste, an undo
+		// entry's redo, a peer's copy, or a template the tool patched a link
+		// into. Its bindings name the entities of the placement it was captured
+		// FROM, i.e. this blob's record keys, and those were just re-minted (or
+		// kept, under preserveIds, in which case this is the identity). Pointed
+		// at the entities this call made, so a duplicate binds to ITS children.
+		// A binding whose instance is not in the blob is kept as it is: it
+		// records a child deleted from the placement, and the deletion is part of
+		// what was copied. Every record is checked, not just the root — a nested
+		// placement is an instance of its own.
+		for (const auto& [key, e] : idMap)
+		{
+			(void)key;
+			auto* inst = registry.try_get<PrefabInstanceComponent>(e);
+			if (!inst) continue;
+			for (auto& b : inst->bindings)
+			{
+				auto hit = idMap.find(b.instanceEntity);
+				if (hit != idMap.end())
+					b.instanceEntity = entityUuid(registry, hit->second);
+			}
+		}
+
+		// For a caller that is placing a template (viewport drop): which record
+		// became which entity, in record order, so it can write the bindings of
+		// the instance it is about to stamp on the root. Template side = the
+		// record's uuid, which is what the asset will still call it tomorrow. A
+		// legacy blob whose records carry no uuid has nothing stable to bind to
+		// — its keys are ordinals that the next re-save renumbers — so those
+		// records are left unbound rather than bound to a number.
+		if (outBindings)
+		{
+			outBindings->clear();
+			for (auto& eJson : scene["entities"])
+			{
+				if (!eJson.contains("uuid")) continue;
+				const HE::UUID key = entityKeyOf(eJson);
+				auto hit = idMap.find(key);
+				if (hit == idMap.end()) continue;
+				outBindings->push_back({ key, entityUuid(registry, hit->second) });
+			}
+		}
 
 		// createEntity() writes BOTH sides of the root link — the new entity's
 		// `parent` and the root's `children` entry. rebuildHierarchy then re-points
@@ -2122,7 +2221,7 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"movement",
 		"decal", "environment", "foliage", "joint", "light", "lod", "material", "mesh",
 		"navagent", "navmesh", "particlesystem",
-		// Which prefab an entity was instantiated from (PrefabLinkComponent).
+		// Which prefab an entity was instantiated from (PrefabInstanceComponent).
 		"prefab",
 		"propertyanimator",
 		"rigidbody", "rope", "saveState", "script", "skeletalmesh", "terrain",
@@ -2381,7 +2480,8 @@ bool SceneSerializer::applyEntityComponents(HorizonWorld& world, Entity entity,
 Entity SceneSerializer::instantiatePrefab(HorizonWorld& world,
                                           const std::vector<uint8_t>& data,
                                           Entity parent,
-                                          bool preserveIds)
+                                          bool preserveIds,
+                                          std::vector<PrefabInstanceComponent::Binding>* outBindings)
 {
     json scene = json::from_cbor(data, true, false);
     if (scene.is_discarded())
@@ -2390,5 +2490,5 @@ Entity SceneSerializer::instantiatePrefab(HorizonWorld& world,
                                 "(%zu bytes)", data.size());
         return entt::null;
     }
-    return applyPrefabJson(world, scene, parent, preserveIds);
+    return applyPrefabJson(world, scene, parent, preserveIds, outBindings);
 }
