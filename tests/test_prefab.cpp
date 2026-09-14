@@ -1113,6 +1113,91 @@ TEST_CASE("PrefabSync: a lost record whose entity was changed here stays, as a c
         CHECK(reg.valid(p.bulb));
         CHECK(reg.valid(mine));
     }
+    SUBCASE("the entity is itself a nested placement with changes of its own")
+    {
+        // Outer asset: Lamp → Bulb → (nested) Lamp' → Bulb'. Capture it as the
+        // asset, place it, change something in the nested one's own list,
+        // then let the outer asset lose the Bulb.
+        HorizonWorld outerTemplate;
+        const Entity oLamp = outerTemplate.createEntity("Lamp");
+        const Entity oBulb = outerTemplate.createEntity("Bulb");
+        outerTemplate.reparentEntity(oBulb, oLamp);
+        std::vector<PrefabInstanceComponent::Binding> nb;
+        const Entity oNested = ser.instantiatePrefab(outerTemplate, t.capture(), oBulb, false, &nb);
+        REQUIRE((oNested != entt::null));
+        PrefabInstanceComponent nestedInst;
+        nestedInst.asset    = HE::UUID::generate();
+        nestedInst.bindings = nb;
+        outerTemplate.registry().emplace_or_replace<PrefabInstanceComponent>(oNested, nestedInst);
+        const auto outerBlob = ser.serializeSubtree(outerTemplate, oLamp);
+        const HE::UUID tOBulb = idOf(outerTemplate.registry(), oBulb);
+
+        HorizonWorld scene;
+        std::vector<PrefabInstanceComponent::Binding> bindings;
+        const Entity root = ser.instantiatePrefab(scene, outerBlob, entt::null, false, &bindings);
+        REQUIRE((root != entt::null));
+        PrefabInstanceComponent inst;
+        inst.asset    = HE::UUID::generate();
+        inst.bindings = bindings;
+        scene.registry().emplace_or_replace<PrefabInstanceComponent>(root, inst);
+        auto& reg = scene.registry();
+        const Entity bulb   = childNamed(scene, root, "Bulb");
+        const Entity nested = childNamed(scene, bulb, "Lamp");
+        REQUIRE((nested != entt::null));
+        REQUIRE(reg.all_of<PrefabInstanceComponent>(nested));
+        reg.get<PrefabInstanceComponent>(nested).setOverride(t.tBulb, "light", "intensity");
+
+        outerTemplate.destroyEntity(oBulb);
+        SceneSerializer::PrefabSyncReport rep;
+        REQUIRE(ser.syncPrefabInstance(scene, root, ser.serializeSubtree(outerTemplate, oLamp), &rep));
+        CHECK(rep.entitiesRemoved == 0);
+        CHECK(reg.valid(bulb));     // kept: the nested placement under it has changes
+        CHECK(reg.valid(nested));
+        CHECK(reg.get<PrefabInstanceComponent>(root).instanceOf(tOBulb) == HE::UUID{});
+
+        // And the nested root as the lost record ITSELF, with its own changes:
+        // outer asset loses the nested Lamp, keeps the Bulb.
+        HorizonWorld scene2;
+        std::vector<PrefabInstanceComponent::Binding> bindings2;
+        const Entity root2 = ser.instantiatePrefab(scene2, outerBlob, entt::null, false, &bindings2);
+        PrefabInstanceComponent inst2;
+        inst2.asset    = HE::UUID::generate();
+        inst2.bindings = bindings2;
+        scene2.registry().emplace_or_replace<PrefabInstanceComponent>(root2, inst2);
+        const Entity nested2 = childNamed(scene2, childNamed(scene2, root2, "Bulb"), "Lamp");
+        REQUIRE((nested2 != entt::null));
+        scene2.registry().get<PrefabInstanceComponent>(nested2).setOverride(t.tBulb, "light", "intensity");
+        HorizonWorld outer2;   // the outer asset without the nested placement: Lamp → Bulb only
+        const Entity l2 = outer2.createEntity("Lamp");
+        const Entity b2 = outer2.createEntity("Bulb");
+        outer2.reparentEntity(b2, l2);
+        outer2.registry().get<EntityIdComponent>(l2).id = idOf(outerTemplate.registry(), oLamp);
+        outer2.registry().get<EntityIdComponent>(b2).id = tOBulb;
+        SceneSerializer::PrefabSyncReport rep2;
+        REQUIRE(ser.syncPrefabInstance(scene2, root2, ser.serializeSubtree(outer2, l2), &rep2));
+        CHECK(rep2.entitiesRemoved == 0);
+        CHECK(rep2.unboundEntities == 1);
+        CHECK(scene2.registry().valid(nested2));
+
+        // Without changes of its own, a nested placement the outer asset lost
+        // goes with everything under it — its own records included, which
+        // are the nested placement's and go with their root.
+        HorizonWorld scene3;
+        std::vector<PrefabInstanceComponent::Binding> bindings3;
+        const Entity root3 = ser.instantiatePrefab(scene3, outerBlob, entt::null, false, &bindings3);
+        PrefabInstanceComponent inst3;
+        inst3.asset    = HE::UUID::generate();
+        inst3.bindings = bindings3;
+        scene3.registry().emplace_or_replace<PrefabInstanceComponent>(root3, inst3);
+        REQUIRE(scene3.registry().get<PrefabInstanceComponent>(root3).bindings.size() == 4);
+        SceneSerializer::PrefabSyncReport rep3;
+        REQUIRE(ser.syncPrefabInstance(scene3, root3, ser.serializeSubtree(outer2, l2), &rep3));
+        CHECK(rep3.entitiesRemoved == 1);   // the nested Lamp' subtree
+        CHECK(rep3.unboundEntities == 0);
+        CHECK((childNamed(scene3, root3, "Bulb") != entt::null));
+        CHECK((childNamed(scene3, childNamed(scene3, root3, "Bulb"), "Lamp") == entt::null));
+        CHECK(scene3.registry().get<PrefabInstanceComponent>(root3).bindings.size() == 2);
+    }
     SUBCASE("nothing under it: the whole subtree goes, bindings included")
     {
         // The asset grows a Shade under the Bulb, is placed, then loses the Bulb.

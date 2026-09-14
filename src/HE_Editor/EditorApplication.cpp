@@ -8465,11 +8465,12 @@ void EditorApplication::syncPrefabInstances(const char* when)
 	const size_t synced = serializer.syncPrefabInstances(*m_editorWorld, contentManager(), &rep);
 	// The save-time pass rewrites what a human may have been looking at, so
 	// say when it did — one line, only when something moved.
-	if (synced && (rep.componentsApplied || rep.componentsRemoved || rep.entitiesCreated))
+	if (synced && (rep.componentsApplied || rep.componentsRemoved || rep.entitiesCreated ||
+	               rep.entitiesRemoved))
 		HE_LOG_INFO(Editor, "Prefab sync (%s): %zu instance(s), %zu component(s) applied, "
-		                    "%zu removed, %zu entity/-ies created, %zu override(s) kept",
+		                    "%zu removed, %zu entity/-ies created, %zu removed, %zu override(s) kept",
 		            when, synced, rep.componentsApplied, rep.componentsRemoved,
-		            rep.entitiesCreated, rep.overridesKept);
+		            rep.entitiesCreated, rep.entitiesRemoved, rep.overridesKept);
 }
 
 void EditorApplication::recordPrefabEdits()

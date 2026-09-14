@@ -2798,6 +2798,14 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
                 if (entityKeyOf(*r) == key) return true;
             return false;
         };
+        // Bound by a placement other than this one and other than itself —
+        // i.e. a record of a nested placement, not that placement's root.
+        auto insideNestedPlacement = [&](Entity s)
+        {
+            for (Entity r : prefabInstancesBinding(world, s))
+                if (r != root && r != s) return true;
+            return false;
+        };
         std::vector<Entity>   destroy;
         std::vector<HE::UUID> unbind;   // template keys whose binding goes either way
         for (const auto& b : work.bindings)
@@ -2807,6 +2815,12 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
             if (e == entt::null) continue;
             unbind.push_back(b.templateEntity);
             if (e == root) continue;
+            // A record of a NESTED placement (bound by that placement's own
+            // table, and not its root): the nested asset says whether it
+            // exists, and the nested placement's own sync is what acts on
+            // that. The outer table merely stops naming it; whether it goes is
+            // decided with its nested root, below or in another iteration.
+            if (insideNestedPlacement(e)) continue;
 
             // Anything authored here, on it or under it?
             std::vector<Entity> subtree;
@@ -2814,12 +2828,16 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
             bool authored = false;
             for (Entity s : subtree)
             {
+                // A nested placement's own records are its business (above);
+                // the nested ROOT is judged like any entity, plus by its own
+                // list: changes in there were made here too.
+                if (insideNestedPlacement(s)) continue;
+                if (const auto* nested = registry.try_get<PrefabInstanceComponent>(s);
+                    nested && !nested->overrides.empty()) { authored = true; break; }
                 const HE::UUID key = work.templateOf(entityUuid(registry, s));
                 if (key == HE::UUID{}) { authored = true; break; }         // added here
                 if (recordPresent(key)) { authored = true; break; }        // the asset still wants it
                 if (anyOverrideOnRecord(work, key)) { authored = true; break; }
-                if (const auto* nested = s != e ? registry.try_get<PrefabInstanceComponent>(s) : nullptr;
-                    nested && !nested->overrides.empty()) { authored = true; break; }
             }
             if (authored)
             {
