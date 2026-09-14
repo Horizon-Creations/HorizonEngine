@@ -16979,7 +16979,23 @@ TEST_CASE("NamedSlot: what the page puts under the WidgetRef lands in the compon
         HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
         HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
     }
-    registerWidget(cm, page);
+    // The PAGE's graph listens on the button it gave away: a click on it, in
+    // the card's slot, must still be the page's OnClicked and not the card's.
+    const int label = page.add(HE::UIWidgetType::Text);
+    page.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    page.find(label)->hitTestable = false;
+    page.find(label)->posX = 350.0f; page.find(label)->posY = 350.0f;
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = given;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "PAGE";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = label;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    g.connect(evId, 0, setId, 0);
+    g.connect(litId, 0, setId, 2);
+    registerWidget(cm, page, &g);
 
     WidgetManager wm;
     const int id = createShown(wm, cm, "mem://w.hasset");
@@ -17009,8 +17025,11 @@ TEST_CASE("NamedSlot: what the page puts under the WidgetRef lands in the compon
     CHECK_FALSE(fallbackShown);
     // It still belongs to the PAGE's script, not the card's: a click on it
     // is the page's OnClicked. The press lands in the slot's half.
-    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 170.0f, true, true));
     CHECK_FALSE(wm.processPointer(400.0f, 400.0f, 100.0f, 120.0f, true, true));
+    wm.processPointer(400.0f, 400.0f, 100.0f, 120.0f, false, true);
+    CHECK(live->find(label)->getProp("Text").s.empty());
+    clickAt(wm, 100.0f, 170.0f);
+    CHECK(live->find(label)->getProp("Text").s == "PAGE");
 }
 
 TEST_CASE("NamedSlot: a component with no slot keeps the default content and the page's children")
