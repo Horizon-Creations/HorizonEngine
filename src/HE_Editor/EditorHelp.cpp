@@ -2874,6 +2874,43 @@ namespace
 	  "four samples are ever evaluated at once: a fifth with real weight means "
 	  "the space is packed tighter than anyone can see.",
 	  "", "systems#animation" },
+
+	// ── The Sequencer: a Property Animation Clip on a timeline ───────────────
+	// A track is one property of the entity the clip plays on — Position X,
+	// Roughness — and a key is what that property is at a moment. The same
+	// three words the UI Designer's strip uses, on the scene side.
+	{ "Sequencer/Zoom In", "",
+	  "Spreads the time axis out around the playhead, so keys milliseconds "
+	  "apart become separate things you can point at. The ruler follows: its "
+	  "labels turn from seconds into milliseconds by themselves. The wheel over "
+	  "the lane does the same around the pointer, and Shift+wheel slides along.",
+	  "", "systems#animation" },
+	{ "Sequencer/Zoom Out", "",
+	  "Back towards the whole clip in one lane. Zoom stops at fit — there is "
+	  "nothing outside a clip to look at.",
+	  "", "systems#animation" },
+	{ "Sequencer/Fit", "",
+	  "The whole clip across the lane again, from the start. The way back when "
+	  "zooming has left you somewhere in the middle of a long clip.",
+	  "", "systems#animation" },
+	{ "sequencer.ruler", "Time ruler",
+	  "Drag along it to scrub: the playhead follows the pointer and every "
+	  "track's value beside its name is the value at that moment — the same "
+	  "number the Property Animator would write into the entity there. The "
+	  "labels sit on whole seconds, or milliseconds once you have zoomed in.",
+	  "", "systems#animation" },
+	{ "sequencer.track", "Track",
+	  "One animated property of the entity this clip plays on. Blue tracks "
+	  "write into the Transform — position, rotation, scale — and violet ones "
+	  "into the material: colour, metallic, roughness, opacity. The number on "
+	  "the right is its value at the playhead. Click to select the track.",
+	  "", "systems#animation" },
+	{ "sequencer.key", "Key",
+	  "A value at a moment. Clicking a key selects it and puts the playhead on "
+	  "it, so the readout under the strip shows this key's own time and value, "
+	  "and every track's number beside its name is what it holds at that "
+	  "instant.",
+	  "", "systems#animation" },
 	{ "Bone Mask Editor/Reference Skeleton", "",
 	  "A skeleton to pick joints from. It is this editor's own reference and is "
 	  "NOT saved into the mask: a mask holds joint names, so it works on every "
@@ -5195,6 +5232,8 @@ namespace
 		{ "Notify Timeline/",           "editor-animation", "Animation Editors", "Notify timeline" },
 		{ "Bone Mask Editor/",          "editor-animation", "Animation Editors", "Bone mask editor" },
 		{ "Blend Space Editor/",        "editor-animation", "Animation Editors", "Blend space editor" },
+		{ "Sequencer/",                 "editor-animation", "Animation Editors", "Sequencer" },
+		{ "sequencer.",                 "editor-animation", "Animation Editors", "Sequencer" },
 		// ── Build, diagnose, collaborate ─────────────────────────────────────
 		{ "export.",       "editor-export", "Export & Diagnostics", "Export" },
 		{ "profiler.",     "editor-export", "Export & Diagnostics", "Profiler" },

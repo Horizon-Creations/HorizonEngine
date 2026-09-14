@@ -1965,6 +1965,7 @@ const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { 
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
 AnimationClipAsset*            ContentManager::getAnimationClipMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_animClipAssets, id); }
 const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_propAnimClipAssets, id); }
+PropertyAnimClipAsset*         ContentManager::getPropertyAnimClipMutable(HE::UUID id)  { return lookupAssetMutable(m_handleToUUID, m_propAnimClipAssets, id); }
 const ThemeAsset*            ContentManager::getTheme(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_themeAssets, id); }
 ThemeAsset*                  ContentManager::getThemeMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_themeAssets, id); }
 const BoneMaskAsset*         ContentManager::getBoneMask(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_boneMaskAssets, id); }

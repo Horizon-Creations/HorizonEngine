@@ -19,6 +19,7 @@
 #include "ThemeAssetPanel.h"
 #include "BoneMaskPanel.h"
 #include "BlendSpacePanel.h"
+#include "SequencerPanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -1237,7 +1238,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			      ParticleGraphEditorPanel::isParticleAsset(fullPath) ||
 			      AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(fullPath) ||
 			      BoneMaskPanel::isBoneMaskAsset(fullPath) ||
-			      BlendSpacePanel::isBlendSpaceAsset(fullPath)))
+			      BlendSpacePanel::isBlendSpaceAsset(fullPath) ||
+			      SequencerPanel::isSequencerAsset(fullPath)))
 				return; // no dedicated editor for this type — same no-op the old inline dispatch had
 
 			const std::string tabLabel = std::filesystem::path(fullPath).stem().string();

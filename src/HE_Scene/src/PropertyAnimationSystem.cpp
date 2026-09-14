@@ -11,7 +11,7 @@
 #include <cmath>
 
 // Sample a scalar keyframe track via linear interpolation.
-static float sampleChannel(const PropertyAnimChannel& ch, float t)
+float PropertyAnimationSystem::sampleChannel(const PropertyAnimChannel& ch, float t)
 {
     if (ch.times.empty() || ch.values.empty()) return 0.0f;
     if (t <= ch.times.front()) return ch.values.front();

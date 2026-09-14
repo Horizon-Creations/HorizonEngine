@@ -109,6 +109,9 @@ public:
 	// already what the animators fire against — no copy to keep in step.
 	AnimationClipAsset*        getAnimationClipMutable(HE::UUID id);
 	const PropertyAnimClipAsset* getPropertyAnimClip(HE::UUID id) const;
+	// Same contract as the animation clip above: the Sequencer edits the loaded
+	// asset in place, so what it shows is what the Property Animator plays.
+	PropertyAnimClipAsset*       getPropertyAnimClipMutable(HE::UUID id);
 	const ThemeAsset*            getTheme(HE::UUID id) const;
 	ThemeAsset*                  getThemeMutable(HE::UUID id);
 	const BoneMaskAsset*         getBoneMask(HE::UUID id) const;

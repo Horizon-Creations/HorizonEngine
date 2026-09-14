@@ -80,6 +80,7 @@ add_executable(he_tests
     test_animation_notify.cpp
     test_animation_layers.cpp
     test_blend_space.cpp
+    test_sequencer_timeline.cpp
     test_animation_ik.cpp
     test_navigation.cpp
     test_particles.cpp
@@ -387,6 +388,11 @@ add_executable(he_tests
     # that draws a slot, never AppContext — which is what lets the UI-shot test
     # draw it over an in-memory mesh and assert what a slot edit writes back.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/MeshMaterialSlots.cpp
+    # The Sequencer's strip — tracks, ruler, scrubbing — over a
+    # PropertyAnimClipAsset and a View, never AppContext, for the same reason:
+    # "does a drag on the ruler land the playhead where the ruler says" is a
+    # question about arithmetic and hit tests, not about a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/SequencerTimeline.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
