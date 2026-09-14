@@ -283,6 +283,13 @@ const UITheme& uiAmberTheme()
         check.set("Check Color", col(accentL, accentD));
         check.set("Text Color",  col(textL, textD));
 
+        // A radio button is a checkbox with a round box, and its three colours
+        // are the checkbox's three, so a form that mixes the two matches.
+        UIThemeStyle& radio = d.styleMut("RadioButton");
+        radio.set("Box Color",   col(fieldL, fieldD));
+        radio.set("Check Color", col(accentL, accentD));
+        radio.set("Text Color",  col(textL, textD));
+
         UIThemeStyle& slider = d.styleMut("Slider");
         slider.set("Track Color",  col({ 0.86f, 0.83f, 0.78f, 1.0f }, { 0.22f, 0.20f, 0.17f, 1.0f }));
         slider.set("Fill Color",   col(accentL, accentD));
@@ -324,6 +331,15 @@ const UITheme& uiAmberTheme()
         list.set("Back Color",          col(surfaceL, surfaceD));
         list.set("Row Hover Color",     col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f }));
         list.set("Row Selected Color",  col({ 0.95f, 0.82f, 0.58f, 1.0f }, { 0.38f, 0.28f, 0.12f, 1.0f }));
+
+        // A tree's rows are the list's rows: same surface, same two highlights.
+        UIThemeStyle& tree = d.styleMut("TreeView");
+        tree.set("Back Color",          col(surfaceL, surfaceD));
+        tree.set("Text Color",          col(textL, textD));
+        tree.set("Arrow Color",         col(mutedL, mutedD));
+        tree.set("Row Hover Color",     col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f }));
+        tree.set("Row Selected Color",  col({ 0.95f, 0.82f, 0.58f, 1.0f }, { 0.38f, 0.28f, 0.12f, 1.0f }));
+        tree.set("Bar Color",           col(borderL, borderD));
 
         d.styleMut("ScrollBox").set("Bar Color", col(borderL, borderD));
         d.styleMut("Splitter").set("Divider Color", col(borderL, borderD));

@@ -3654,6 +3654,90 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		}
 		break;
 	}
+	case UIWidgetType::RadioButton:
+	{
+		// The checkbox's row with a circle in it: same box size, same gap, so a
+		// form that mixes the two lines up here exactly as it does at runtime.
+		const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
+		const float boxSz = std::min(mx.y - mn.y, fs * 1.15f);
+		const float cy = (mn.y + mx.y) * 0.5f;
+		const ImVec2 c(mn.x + boxSz * 0.5f, cy);
+		dl->AddCircleFilled(c, boxSz * 0.5f, C(propColorOr(n, "Box Color", { 0.20f,0.20f,0.20f,1 })));
+		dl->AddCircle(c, boxSz * 0.5f, IM_COL32(200,200,210,90));
+		if (propBoolOr(n, "Checked", false))
+			dl->AddCircleFilled(c, boxSz * 0.22f,
+				C(propColorOr(n, "Check Color", { 0.30f,0.80f,0.40f,1 })));
+		const std::string lbl = propStringOr(n, "Label", "");
+		if (!lbl.empty())
+			dl->AddText(nullptr, fs, ImVec2(mn.x + boxSz + 0.4f * boxSz, cy - fs * 0.5f),
+				C(propColorOr(n, "Text Color", { 1,1,1,1 })), lbl.c_str());
+		break;
+	}
+	case UIWidgetType::TreeView:
+	{
+		// Its surface is drawn above. The rows are AUTHORED here (unlike a
+		// list's), so the designer can show the tree itself: every node, at its
+		// indent, with the fold arrow it will have. All open — folds are runtime
+		// state and the designer has none.
+		const auto* tv = dynamic_cast<const HE::UITreeView*>(&n);
+		if (!tv) break;
+		const float pad  = propFloatOr(n, "Padding", 4.0f) * s;
+		const float rowH = std::max(2.0f, propFloatOr(n, "Row Height", 24.0f) * s);
+		const float ind  = propFloatOr(n, "Indent", 18.0f) * s;
+		const float fs   = std::max(6.0f, propFloatOr(n, "FontSize", 14.0f) * s);
+		const ImU32 tc = C(propColorOr(n, "Text Color", { 0.92f,0.92f,0.95f,1 }));
+		const ImU32 ac = C(propColorOr(n, "Arrow Color", { 0.75f,0.75f,0.80f,0.9f }));
+		const std::vector<HE::UITreeView::Node>& ns = tv->nodes();
+		dl->PushClipRect(ImVec2(mn.x + pad, mn.y + pad), ImVec2(mx.x - pad, mx.y - pad), true);
+		float y = mn.y + pad;
+		for (std::size_t i = 0; i < ns.size() && y < mx.y - pad; ++i, y += rowH)
+		{
+			const HE::UITreeView::Node& node = ns[i];
+			if (node.hasChildren)
+			{
+				// The same arithmetic render() draws with, so the arrow sits
+				// where a press will find it.
+				const HE::UITreeView::Arrow a =
+					HE::UITreeView::arrowIn(mn.x + pad, y, rowH, ind, node.depth);
+				const float hw = a.size * 0.5f, hh = a.size * 0.3f;
+				dl->AddTriangleFilled(ImVec2(a.cx - hw, a.cy - hh), ImVec2(a.cx + hw, a.cy - hh),
+				                      ImVec2(a.cx, a.cy + hh), ac);
+			}
+			dl->AddText(nullptr, fs, ImVec2(mn.x + pad + ind * (node.depth + 1), y + (rowH - fs) * 0.5f),
+			            tc, node.label.c_str());
+		}
+		dl->PopClipRect();
+		if (ns.empty())
+			dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
+				ImVec2(mn.x + pad + 4, mn.y + pad + 2),
+				IM_COL32(210, 200, 160, 200), "no Items: one node per line, indent = depth");
+		break;
+	}
+	case UIWidgetType::NamedSlot:
+	{
+		// A hole with a name on it. Dashed so it reads as "something goes here"
+		// and not as a panel somebody forgot to colour; the name is what the
+		// page's child has to be called to land in it.
+		const ImU32 col = IM_COL32(230, 190, 120, 140);
+		const float dash = 6.0f, gap = 4.0f;
+		auto dashed = [&](ImVec2 a, ImVec2 b)
+		{
+			const float len = std::hypot(b.x - a.x, b.y - a.y);
+			if (len <= 0.0f) return;
+			const ImVec2 d((b.x - a.x) / len, (b.y - a.y) / len);
+			for (float t = 0.0f; t < len; t += dash + gap)
+			{
+				const float e = std::min(len, t + dash);
+				dl->AddLine(ImVec2(a.x + d.x * t, a.y + d.y * t),
+				            ImVec2(a.x + d.x * e, a.y + d.y * e), col);
+			}
+		};
+		dashed(mn, ImVec2(mx.x, mn.y)); dashed(ImVec2(mx.x, mn.y), mx);
+		dashed(mx, ImVec2(mn.x, mx.y)); dashed(ImVec2(mn.x, mx.y), mn);
+		const std::string cap = "[" + (n.name.empty() ? std::string("slot") : n.name) + "]";
+		dl->AddText(nullptr, 12.0f * std::max(0.6f, s), ImVec2(mn.x + 4, mn.y + 3), col, cap.c_str());
+		break;
+	}
 	default: break;
 	}
 
@@ -3706,12 +3790,75 @@ void drawElementIn(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree
 	drawElementPreview(dl, n, mn, mx, s, texHandle, alpha, dim, &tree);
 }
 
+// The embedded widget's canvas laid against `slotW` x `slotH` host units — the
+// one call both the drawing and the slot lookup go through, so the two cannot
+// place a component's roots differently. See drawEmbeddedTree for why the slot
+// is handed over in canvas units and not screen pixels.
+HE::UIWidgetCanvas embeddedCanvasFor(const HE::UIWidgetTree& tree, float slotW, float slotH)
+{
+	return HE::uiResolveCanvas(tree, std::max(1.0f, slotW), std::max(1.0f, slotH));
+}
+
+// The embedded copy as it will be measured: parameters applied, auto-size run.
+// A COPY, because auto-size mutates the tree it measures and the cached one
+// must stay as the asset wrote it.
+HE::UIWidgetTree laidEmbeddedCopy(const HE::UIWidgetTree& tree, const HE::UIWidgetRef* ref,
+                                  const HE::UIWidgetCanvas& canvas)
+{
+	HE::UIWidgetTree laid = tree;
+	if (ref && !ref->paramValues.empty())
+		HE::uiApplyWidgetParams(laid, ref->paramValues);
+	HE::uiApplyAutoSize(laid, &canvas);
+	HE::uiUpdateScrollExtents(laid);
+	return laid;
+}
+
+// ── Where a page's content lands inside a component (NamedSlot) ─────────────
+// Once per frame, before the page is laid out: every WidgetRef learns where the
+// NamedSlots of the widget it embeds are, so a child authored under the ref is
+// placed into the slot here exactly as the graft will place it at runtime. The
+// rects are in the EMBEDDED widget's units — UIWidgetTree's parentRectOf does
+// the scale-mode arithmetic — and the canvas size and mode go with them, since
+// that arithmetic needs both and only the graft used to fill them in.
+//
+// A ref with no children skips the layout: it costs a full pass over the
+// embedded tree, and a page of thirty form rows has thirty refs and no content
+// in any of them.
+void refreshDesignSlots(AppContext& ctx, HE::UIWidgetTree& page, const HE::UIWidgetCanvas* canvas)
+{
+	for (auto& ep : page.elements)
+	{
+		auto* ref = ep ? dynamic_cast<HE::UIWidgetRef*>(ep.get()) : nullptr;
+		if (!ref) continue;
+		ref->designSlots.clear();
+		const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, ref->widgetPath);
+		if (!sub) { ref->contentW = ref->contentH = 0.0f; continue; }
+		ref->contentW    = sub->canvasWidth;
+		ref->contentH    = sub->canvasHeight;
+		ref->contentMode = sub->scaleMode;
+		bool hasChild = false;
+		for (const auto& cp : page.elements)
+			if (cp && cp->parentId == ref->id) { hasChild = true; break; }
+		if (!hasChild) continue;
+
+		const HE::UIWidgetRect r = HE::uiElementRect(page, *ref, canvas);
+		const HE::UIWidgetCanvas subCanvas = embeddedCanvasFor(*sub, r.w, r.h);
+		const HE::UIWidgetTree laid = laidEmbeddedCopy(*sub, ref, subCanvas);
+		for (const auto& sp : laid.elements)
+			if (sp && sp->type() == UIWidgetType::NamedSlot)
+				ref->designSlots.push_back({ sp->name, HE::uiElementRect(laid, *sp, &subCanvas) });
+	}
+}
+
 // Draw `tree` into the rect [mn, mx] — the whole tree, in paint order, with the
 // same clipping rule the runtime uses. `depth` bounds the recursion so a circle
-// of widgets embedding each other cannot hang the editor.
+// of widgets embedding each other cannot hang the editor. `host` is the tree
+// the ref sits in, when the caller has it: with it, a slot the page has filled
+// hides its default content here as it will at runtime.
 void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree,
                       const HE::UIWidgetRef* ref,
-                      const ImVec2& mn, const ImVec2& mx, float s, int depth)
+                      const ImVec2& mn, const ImVec2& mx, float s, int depth,
+                      const HE::UIWidgetTree* host = nullptr)
 {
 	constexpr int kMaxDepth = 4;
 	if (depth > kMaxDepth) return;
@@ -3727,16 +3874,13 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	// meant one SCREEN pixel, and the embedded widget came out 1/zoom too big.
 	const float slotW = std::max(1.0f, (mx.x - mn.x) / std::max(0.0001f, s));
 	const float slotH = std::max(1.0f, (mx.y - mn.y) / std::max(0.0001f, s));
-	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(tree, slotW, slotH);
+	const HE::UIWidgetCanvas canvas = embeddedCanvasFor(tree, slotW, slotH);
 	// canvas.scale converts one of ITS units into a host canvas unit; `s` then
 	// takes that to the screen.
 	const float subX = canvas.scaleX * s, subY = canvas.scaleY * s;
 	auto toScreen = [&](float x, float y)
 	{ return ImVec2(mn.x + x * subX, mn.y + y * subY); };
 
-	// A copy, because auto-size mutates the tree it measures and the cached one
-	// must stay as the asset wrote it.
-	HE::UIWidgetTree laid = tree;
 	// What this particular copy was told, applied BEFORE it is measured: a
 	// parameter that changes a label changes how wide that label wants to be.
 	//
@@ -3745,10 +3889,28 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	// would leave a page of five form rows showing five identical labels here
 	// and five different ones at runtime — and the designer would be lying
 	// about the one thing it exists to show.
-	if (ref && !ref->paramValues.empty())
-		HE::uiApplyWidgetParams(laid, ref->paramValues);
-	HE::uiApplyAutoSize(laid, &canvas);
-	HE::uiUpdateScrollExtents(laid);
+	HE::UIWidgetTree laid = laidEmbeddedCopy(tree, ref, canvas);
+
+	// A slot the page has filled hides its default content, as the graft makes
+	// it. The rule is the graft's: a child named after a slot fills that one,
+	// any other child fills the first. ownIdFloor 0 = every child of the slot
+	// is "its own" here, since nothing of the page's is in this copy.
+	if (host && ref)
+	{
+		std::vector<HE::UINamedSlot*> slots;
+		for (auto& sp : laid.elements)
+			if (auto* ns = sp ? dynamic_cast<HE::UINamedSlot*>(sp.get()) : nullptr)
+				slots.push_back(ns);
+		if (!slots.empty())
+			for (const auto& cp : host->elements)
+			{
+				if (!cp || cp->parentId != ref->id) continue;
+				HE::UINamedSlot* target = slots.front();
+				for (HE::UINamedSlot* ns : slots) if (ns->name == cp->name) { target = ns; break; }
+				target->filled = true;
+				target->ownIdFloor = 0;
+			}
+	}
 
 	struct Item { const UIElement* n; int key; HE::UIWidgetRect r; };
 	std::vector<Item> items;
@@ -3943,6 +4105,9 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// Auto-sizing elements fit themselves before the rects resolve, so the
 	// designer shows the same box the runtime will (see uiApplyAutoSize).
 	HE::uiApplyAutoSize(st.tree, layoutCanvas);
+	// …and every WidgetRef learns where its component's slots are, so a child
+	// authored under it resolves into the slot below, not over the whole ref.
+	refreshDesignSlots(ctx, st.tree, layoutCanvas);
 
 	// Paint order: (layer, depth) ascending — same rule as the runtime.
 	struct DrawItem { const UIElement* n; int layer; int depth; Rect r; };
@@ -3993,7 +4158,8 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			const std::string wp = it.n->getProp("Widget").s;
 			if (const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, wp))
 				drawEmbeddedTree(dl, ctx, *sub,
-				                 dynamic_cast<const HE::UIWidgetRef*>(it.n), mn, mx, s, 0);
+				                 dynamic_cast<const HE::UIWidgetRef*>(it.n), mn, mx, s, 0,
+				                 &st.tree);
 			else
 			{
 				const std::string label = wp.empty()
@@ -4482,6 +4648,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 		UIWidgetType::Panel, UIWidgetType::Image, UIWidgetType::Text,
 		UIWidgetType::Button, UIWidgetType::CheckBox, UIWidgetType::Slider,
 		UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
+		UIWidgetType::RadioButton, UIWidgetType::TreeView,
 	};
 	for (UIWidgetType t : kTypeOrder)
 	{

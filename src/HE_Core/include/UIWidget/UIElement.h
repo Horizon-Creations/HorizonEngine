@@ -108,6 +108,22 @@ enum class UIWidgetType : uint8_t
     // the sum of the open ones. Its CHILDREN are the sections and each child's
     // NAME is its heading, the same design as the Tab Box's pages.
     Accordion,
+    // One of several, where exactly one is on. A CheckBox is a bool; a radio
+    // button is a CHOICE, and the difference is that pressing one turns the
+    // others in its group off. The group is a name: buttons that share it are
+    // one question, and an empty name means "my siblings".
+    RadioButton,
+    // Rows with an indent and a fold arrow: a file browser, an outliner, a
+    // table of contents. Self-contained like a ComboBox's options, NOT a row
+    // template like a ListView — the nodes are lines of text, one per line,
+    // and their indentation is their depth. A graph can therefore write the
+    // whole tree as one string, which a StringList could never be handed.
+    TreeView,
+    // A hole in a component that the page using it fills. Inside the widget
+    // asset it is a placeholder with a name; where that asset is embedded, the
+    // children of the WidgetRef are moved into the slot of the same name. A
+    // dialog frame with a "Content" slot is the reason it exists.
+    NamedSlot,
     COUNT
 };
 

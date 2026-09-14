@@ -235,7 +235,26 @@ namespace
                              canvas ? canvas->height : tree.canvasHeight };
         if (e.parentId != 0)
             if (const UIElement* p = tree.find(e.parentId))
+            {
                 parent = uiElementRect(tree, *p, canvas);
+                // A child of a WidgetRef in the DESIGNER: its parent is really
+                // the component's NamedSlot, which the designer has located
+                // (designSlots) but not grafted. The slot's rect is in the
+                // embedded widget's units; the ref's rect is that widget's
+                // screen, so the same scale-mode arithmetic the graft uses
+                // turns one into the other. At runtime designSlots is empty
+                // and the child's parent IS the slot, so this never runs.
+                if (const auto* ref = dynamic_cast<const UIWidgetRef*>(p))
+                    if (const UIWidgetRef::DesignSlot* s = ref->designSlotFor(e.name);
+                        s && ref->contentW > 0.0f && ref->contentH > 0.0f)
+                    {
+                        const UIWidgetCanvas sub = uiResolveCanvasFor(
+                            ref->contentW, ref->contentH, ref->contentMode, parent.w, parent.h);
+                        parent = { parent.x + s->rect.x * sub.scaleX,
+                                   parent.y + s->rect.y * sub.scaleY,
+                                   s->rect.w * sub.scaleX, s->rect.h * sub.scaleY };
+                    }
+            }
         return parent;
     }
 }
@@ -1526,6 +1545,14 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
             lv->scrollOffset  = std::clamp(lv->scrollOffset, 0.0f, lv->maxScroll());
             continue;
         }
+        // A tree measures itself from the rows its folds leave visible — the
+        // same idea as the list's count, with the fold state in the sum.
+        if (auto* tv = dynamic_cast<UITreeView*>(bp.get()))
+        {
+            tv->contentExtent = tv->measuredExtent();
+            tv->scrollOffset  = std::clamp(tv->scrollOffset, 0.0f, tv->maxScroll());
+            continue;
+        }
         // An accordion measures the same walk twice over: what its headings say
         // and how tall its bodies are is exactly what its content extent is
         // made of, so the caches render() draws from are filled HERE — after
@@ -2406,6 +2433,7 @@ const char* surfacePropOf(const UIElement& e)
     // marker ring against them would report a number about a colour the author
     // did not choose.
     case UIWidgetType::ColorPicker: return "Back Color";
+    case UIWidgetType::TreeView:    return "Back Color";
     default:                        return nullptr;
     }
 }
@@ -2422,6 +2450,8 @@ const char* textPropOf(const UIElement& e)
     case UIWidgetType::TabBox:    return "Text Color";
     case UIWidgetType::Accordion: return "Text Color";
     case UIWidgetType::DatePicker: return "Text Color";
+    case UIWidgetType::RadioButton: return "Text Color";
+    case UIWidgetType::TreeView:   return "Text Color";
     default:                      return nullptr;
     }
 }

@@ -139,6 +139,10 @@ public:
     // owner and not a thing that happened to the data.
     virtual void onHeaderClicked(int elem, int column)
     { fireEvent("OnHeaderClicked", elem, Value::ofInt(column)); }
+    // A tree's node was folded open or shut. The argument is the NODE index;
+    // which way it went is the tree's "Collapsed" property, read afterwards.
+    virtual void onNodeToggled(int elem, int node)
+    { fireEvent("OnNodeToggled", elem, Value::ofInt(node)); }
     virtual void onRightClicked(int elem) { fireEvent("OnRightClicked", elem, Value{}); }
     // A file was dropped on this element from the desktop. One call per file,
     // the argument being its absolute path — a drop of three files is three

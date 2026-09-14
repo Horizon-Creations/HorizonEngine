@@ -911,11 +911,37 @@ public:
     int rowIndex = -1;
     int rowBound = -1;
 
+    // ── Where the component's NamedSlots are, for the DESIGNER ──────────────
+    // At runtime the graft MOVES a page's children into the slots, so the
+    // ordinary tree walk places them. The designer never grafts: the embedded
+    // widget is only drawn. So it lays that widget out once per frame and
+    // writes each slot's rect here, in the EMBEDDED widget's canvas units, and
+    // parentRectOf turns that into this ref's space with the same scale-mode
+    // arithmetic the graft would — so a child authored under this ref sits in
+    // the designer exactly where it will sit when the page runs.
+    //
+    // Empty everywhere but the designer, and never serialized; the runtime
+    // never reads it because the runtime's children are already in the slot.
+    struct DesignSlot { std::string name; UIWidgetRect rect; };
+    std::vector<DesignSlot> designSlots;
+    // The slot a child of this ref would land in: the one with its name, else
+    // the first. Null when there are none (or no embedded widget is known).
+    const DesignSlot* designSlotFor(const std::string& childName) const
+    {
+        if (designSlots.empty()) return nullptr;
+        for (const DesignSlot& s : designSlots) if (s.name == childName) return &s;
+        return &designSlots.front();
+    }
+
     UIWidgetRef() { sizeX = 300.0f; sizeY = 200.0f; hitTestable = false; }
     UIWidgetType type() const override { return UIWidgetType::WidgetRef; }
     const char*  typeName() const override { return "WidgetRef"; }
     std::unique_ptr<UIElement> clone() const override
     { return std::make_unique<UIWidgetRef>(*this); }
+    // A page may put content INTO the component (see UINamedSlot): the children
+    // are moved into its slots at graft time. Without a slot in the component
+    // they stay here and draw over it, which the graft says once in the log.
+    bool acceptsChildren() const override { return true; }
 
     const UIPropTable& propTable() const override;
     void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
@@ -1910,6 +1936,267 @@ public:
                 float, std::vector<UIRenderObject>&) const override;
     void writeJson(nlohmann::json&) const override;
     void readJson(const nlohmann::json&) override;
+};
+
+// ── RadioButton ──────────────────────────────────────────────────────────────
+// A CheckBox that is one of a SET. Same bool, same label, same event — the one
+// thing it adds is the group, and the one thing it takes away is unchecking:
+// pressing a radio button that is on leaves it on, because a question with no
+// answer is not a state a group of radio buttons has. Turning one on turns the
+// others in its group off, and each of those fires OnCheckChanged(false) so a
+// graph listening on any of them hears the whole change.
+//
+// The group is a NAME so that buttons need not be siblings: a form may spread
+// "Small / Medium / Large" over three rows of a grid. Empty means "the radio
+// buttons under the same parent", which is the common case and needs no
+// typing. Both are scoped to the tree the button lives in, and an embedded
+// component's elements are part of the host's tree — so two copies of a card
+// that each carry a group "Size" would be ONE group. The manager scopes the
+// search to the embed the button belongs to for exactly that reason.
+class HE_API UIRadioButton final : public UIElement
+{
+public:
+    bool        checked = false;
+    std::string label = "Option";
+    std::string group;
+    float       fontSize = 18.0f;
+    glm::vec4   boxColor{ 0.20f, 0.20f, 0.20f, 1.0f };
+    glm::vec4   checkColor{ 0.30f, 0.80f, 0.40f, 1.0f };
+    glm::vec4   textColor{ 1.0f, 1.0f, 1.0f, 1.0f };
+    bool        autoSize = false;
+
+    // The circle is the checkbox's box, unchanged: the two share a row height
+    // and a label gap, so a form that mixes them lines up.
+    static UICheckBox::BoxMetrics metricsFor(float fontPx, float heightLimit)
+    { return UICheckBox::metricsFor(fontPx, heightLimit, /*asSwitch=*/false); }
+
+    UIRadioButton() { sizeX = 200.0f; sizeY = 28.0f; }
+    UIWidgetType type() const override { return UIWidgetType::RadioButton; }
+    const char*  typeName() const override { return "RadioButton"; }
+    bool interactive() const override { return true; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UIRadioButton>(*this); }
+
+    void applyAutoSize(float resolvedWidth, float fontScale = 1.0f) override;
+    int  autoSizedAxes() const override
+    { return autoSize ? ((kAxisX | kAxisY) & ~stretchedAxes()) : 0; }
+
+    // Whether `other` answers the same question as this one. Same group name,
+    // or — with no name on either — the same parent. A named button and an
+    // unnamed one are never one group, even as siblings: the name was given to
+    // reach ACROSS parents, not to be ignored inside one.
+    bool sharesGroupWith(const UIRadioButton& other) const
+    {
+        if (&other == this) return false;
+        if (!group.empty() || !other.group.empty()) return group == other.group;
+        return parentId == other.parentId;
+    }
+
+    const UIPropTable& propTable() const override;
+    std::vector<UIEventDesc> events() const override
+    { return { { "OnCheckChanged", UIPropType::Bool, true },
+               { "OnHovered" }, { "OnUnhovered" } }; }
+
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+};
+
+// ── TreeView ─────────────────────────────────────────────────────────────────
+// Rows with a depth and a fold. The DATA is one multi-line string: each line is
+// a node, and the number of leading tabs (or pairs of spaces) is its depth. So
+//
+//     Assets
+//       Textures
+//         wood.png
+//       Meshes
+//     Settings
+//
+// is five nodes, two of them roots. Chosen over a StringList because a graph
+// can hand a String to a property and cannot hand it a list (UIWidgetBinding
+// turns a list into its first entry), and over a row template like the
+// ListView's because a tree's rows are not interchangeable: the thing that
+// makes it a tree is that a row knows which rows are under it, and a template
+// that is asked "fill in row 7" cannot be told that.
+//
+// Node INDICES are the line numbers, in the order written, and are what every
+// event and property carries: a selection is a node index, a fold is a node
+// index. Collapsing a node hides its descendants without renumbering anything,
+// so an index a graph stored stays valid while the tree is folded and
+// unfolded — it only changes when the Items text does.
+//
+// A depth that jumps by more than one ("a child with no parent") is clamped to
+// one deeper than the line above it, so a stray extra tab never makes a row
+// vanish; the repair is the one YAML readers make, and it is the one an
+// author expects from looking at the text.
+class HE_API UITreeView final : public UIElement
+{
+public:
+    // ── Authored ─────────────────────────────────────────────────────────────
+    std::string items;             // one node per line, indentation = depth
+    float rowHeight = 24.0f;       // canvas units
+    float indent    = 18.0f;       // per level, canvas units
+    float padding   = 4.0f;
+    float fontSize  = 14.0f;
+    glm::vec4 backColor{ 0.10f, 0.10f, 0.12f, 1.0f };
+    glm::vec4 textColor{ 0.92f, 0.92f, 0.95f, 1.0f };
+    glm::vec4 rowHoverColor{ 1.0f, 1.0f, 1.0f, 0.06f };
+    glm::vec4 rowSelectedColor{ 0.20f, 0.42f, 0.74f, 0.55f };
+    glm::vec4 arrowColor{ 0.75f, 0.75f, 0.80f, 0.9f };
+    float barWidth = 6.0f;
+    glm::vec4 barColor{ 0.75f, 0.75f, 0.80f, 0.65f };
+
+    // ── State ────────────────────────────────────────────────────────────────
+    // Which node is picked (-1 = none), and which nodes are folded shut, as
+    // text: "2,5". A string for the same reason Column Widths is one — there is
+    // no int-list property type, and a fold is something a PERSON did, so it
+    // travels across a preview reload with the selection. Empty = everything
+    // open, which is what a tree authored before this existed means.
+    int         selected = -1;
+    std::string collapsed;
+    float       scrollOffset = 0.0f;
+    float       contentExtent = 0.0f;   // set by the layout pass, canvas units
+    int         hoveredRow = -1;        // VISIBLE row index, transient
+
+    // ── Derived from `items`, on demand ──────────────────────────────────────
+    struct Node
+    {
+        std::string label;
+        int         depth = 0;
+        int         parent = -1;    // node index, -1 for a root
+        bool        hasChildren = false;
+    };
+    // Parsed once per Items text and cached; the cache key is the text itself,
+    // so a graph that writes the same string twice pays nothing the second time.
+    const std::vector<Node>& nodes() const;
+    int nodeCount() const { return static_cast<int>(nodes().size()); }
+    // The rows the view shows, top to bottom, as node indices: every node whose
+    // ancestors are all open.
+    std::vector<int> visibleRows() const;
+    bool isCollapsed(int node) const;
+    // Fold or unfold; true when the state changed. Unfolding a leaf is a no-op
+    // — a leaf has nothing to hide, and marking it folded would be a value a
+    // graph reads back and cannot explain.
+    bool setCollapsed(int node, bool on);
+    // The same three numbers the list derives everything from.
+    float rowStep() const { return rowHeight; }
+    float innerHeight() const
+    {
+        const float h = sizeY - 2.0f * padding;
+        return h > 0.0f ? h : 0.0f;
+    }
+    float measuredExtent() const
+    { return static_cast<float>(visibleRows().size()) * rowHeight; }
+    float maxScroll() const
+    {
+        const float over = measuredExtent() - innerHeight();
+        return over > 0.0f ? over : 0.0f;
+    }
+    float* scrollOffsetPtr() override { return &scrollOffset; }
+    float  maxScrollAmount() const override { return maxScroll(); }
+    bool   scrollBar(UIScrollBarStyle& s) const override
+    { s = { barWidth, padding, measuredExtent(), barColor }; return true; }
+
+    // Which VISIBLE row is under `localY` canvas units below the element's top
+    // edge; -1 in the padding or past the end.
+    int rowAt(float localY) const
+    {
+        if (rowHeight <= 0.0f) return -1;
+        const float y = localY - padding + scrollOffset;
+        if (y < 0.0f) return -1;
+        const int i = static_cast<int>(y / rowHeight);
+        return i < static_cast<int>(visibleRows().size()) ? i : -1;
+    }
+    // Whether `localX` (canvas units from the element's left edge) is on the
+    // fold arrow of a row at `depth`. The arrow's box is one row high and one
+    // indent wide, sitting at the row's own indent — so a click on the arrow
+    // folds, and a click on the label picks, which is what every file browser
+    // does and what makes a tree browsable with one button.
+    bool onArrow(float localX, int depth) const
+    {
+        const float x0 = padding + depth * indent;
+        return localX >= x0 && localX < x0 + indent;
+    }
+    // Scroll so that visible row `row` is inside the view; true when it moved.
+    bool scrollToRow(int row);
+
+    // Where the arrow of a row goes, in whatever units `rowRect` is in — shared
+    // by render() and the designer's preview so they cannot disagree.
+    struct Arrow { float cx = 0.0f, cy = 0.0f, size = 0.0f; };
+    static Arrow arrowIn(float rowX, float rowY, float rowH, float indentPx, int depth);
+
+    UITreeView()
+    {
+        sizeX = 260.0f; sizeY = 320.0f;
+        clipChildren = true;
+        cornerRadius = glm::vec4(4.0f);
+    }
+    UIWidgetType type() const override { return UIWidgetType::TreeView; }
+    const char*  typeName() const override { return "TreeView"; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UITreeView>(*this); }
+    bool interactive() const override { return true; }
+    bool hasSurfaceStyle() const override { return true; }
+
+    const UIPropTable& propTable() const override;
+    std::vector<UIEventDesc> events() const override
+    {
+        return { { "OnSelectionChanged", UIPropType::Int, true },
+                 { "OnRowActivated", UIPropType::Int, true },
+                 { "OnNodeToggled", UIPropType::Int, true } };
+    }
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override;
+    void writeJson(nlohmann::json&) const override;
+    void readJson(const nlohmann::json&) override;
+
+private:
+    mutable bool              m_parsedValid = false;
+    mutable std::string       m_parsedFor;
+    mutable std::vector<Node> m_nodes;
+};
+
+// ── NamedSlot ────────────────────────────────────────────────────────────────
+// Nothing, with a name: a place inside a component where the page that uses
+// the component puts its own content. Authored in the component as an ordinary
+// container (children of it are the slot's DEFAULT content, shown when the
+// page puts nothing in). When the component is grafted into a page, the
+// children the page authored under its WidgetRef are moved into the slot whose
+// name matches theirs — or, when the component has exactly one slot, into that
+// one, whatever they are called. The default content is hidden the moment
+// anything arrives.
+//
+// It draws nothing at runtime. The designer draws its outline and its name, so
+// an author of a component can see where the hole is.
+class HE_API UINamedSlot final : public UIElement
+{
+public:
+    // Transient: set by the graft when the page filled this slot, so the
+    // authored default children know to step aside. Never serialized.
+    bool filled = false;
+
+    UINamedSlot() { sizeX = 200.0f; sizeY = 120.0f; hitTestable = false; }
+    UIWidgetType type() const override { return UIWidgetType::NamedSlot; }
+    const char*  typeName() const override { return "NamedSlot"; }
+    std::unique_ptr<UIElement> clone() const override
+    { return std::make_unique<UINamedSlot>(*this); }
+    bool acceptsChildren() const override { return true; }
+    // The default content steps aside once the page has put something in. A
+    // page's element carries an id from the HOST's range; the default children
+    // are the component's own, renumbered above it — see hidesChild in the
+    // .cpp for how the two are told apart.
+    bool hidesChild(const UIWidgetTree&, const UIElement& child) const override;
+
+    const UIPropTable& propTable() const override;
+    void render(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                float, std::vector<UIRenderObject>&) const override {}
+    void writeJson(nlohmann::json&) const override {}
+    void readJson(const nlohmann::json&) override {}
+
+    // Set by the graft alongside `filled`: the smallest id the component's own
+    // elements were renumbered to. Anything below it came from the page.
+    int ownIdFloor = 0;
 };
 
 } // namespace HE

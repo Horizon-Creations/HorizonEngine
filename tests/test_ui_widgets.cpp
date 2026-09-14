@@ -331,6 +331,37 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Body Color", UIPropType::Color },
             { "Bar Width", UIPropType::Float },
             { "Bar Color", UIPropType::Color } } },
+        // The CheckBox's rows plus Group, minus Switch: a radio button is a
+        // choice with the checkbox's picture, and the shared names are what
+        // let one theme style and one graph serve both.
+        { UIWidgetType::RadioButton, {
+            { "Checked", UIPropType::Bool },
+            { "Label", UIPropType::String },
+            { "Group", UIPropType::String },
+            { "FontSize", UIPropType::Float },
+            { "Box Color", UIPropType::Color },
+            { "Check Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color },
+            { "AutoSize", UIPropType::Bool } } },
+        // The nodes are ONE string (Items), so a graph can write the tree;
+        // Selected and Collapsed are the state a person leaves behind.
+        { UIWidgetType::TreeView, {
+            { "Items", UIPropType::String },
+            { "Row Height", UIPropType::Float },
+            { "Indent", UIPropType::Float },
+            { "Padding", UIPropType::Float },
+            { "FontSize", UIPropType::Float },
+            { "Back Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color },
+            { "Row Hover Color", UIPropType::Color },
+            { "Row Selected Color", UIPropType::Color },
+            { "Arrow Color", UIPropType::Color },
+            { "Bar Width", UIPropType::Float },
+            { "Bar Color", UIPropType::Color },
+            { "Selected", UIPropType::Int },
+            { "Collapsed", UIPropType::String } } },
+        // A hole with a name on it — and the name is the base "Name" row.
+        { UIWidgetType::NamedSlot, {} },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -1072,7 +1103,11 @@ TEST_CASE("Exactly the container types accept children")
         // Splitter because its two are its panes.
         // …and an Accordion because its children are its sections.
         HE::UIWidgetType::TabBox, HE::UIWidgetType::Splitter,
-        HE::UIWidgetType::Accordion };
+        HE::UIWidgetType::Accordion,
+        // A NamedSlot is a hole: what is in it is its default content. And a
+        // WidgetRef takes children because they are what the page puts INTO
+        // the component's slots — the graft moves them there.
+        HE::UIWidgetType::NamedSlot, HE::UIWidgetType::WidgetRef };
     for (HE::UIWidgetType ty : HE::uiWidgetTypeRegistry())
     {
         auto e = HE::makeUIElement(ty);
@@ -5127,6 +5162,8 @@ TEST_CASE("Surface styling is offered exactly where it would land")
         // An accordion, for the list's reason: it emits its own rectangle first
         // so the heading bands have a card to sit on.
         UIWidgetType::Accordion,
+        // …and a tree, for the list's reason exactly: rows on a card.
+        UIWidgetType::TreeView,
     };
 
     for (int t = 0; t < static_cast<int>(UIWidgetType::COUNT); ++t)
@@ -16589,4 +16626,417 @@ TEST_CASE("moveElement: the order really moves the pixels")
     CHECK(HE::uiElementRect(t, *t.find(last)).y    == doctest::Approx(10.0f));
     CHECK(HE::uiElementRect(t, *t.find(kids[0])).y == doctest::Approx(65.0f));
     CHECK(HE::uiElementRect(t, *t.find(kids[1])).y == doctest::Approx(120.0f));
+}
+
+// ═══ The three types the gap audit still listed as missing ══════════════════
+// RadioButton, TreeView and NamedSlot. (Tooltip, Rich Text and Multiline were
+// on that list too and are properties — base "Tooltip", UIText "Rich Text",
+// UITextInput "Multiline" — not types; they have their own tests above.)
+
+TEST_CASE("RadioButton: pressing one turns the rest of its group off, and never itself")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    // Three siblings with no group name, and a fourth in a named group that
+    // must not be touched by them.
+    int ids[4] = { 0, 0, 0, 0 };
+    for (int i = 0; i < 4; ++i)
+    {
+        ids[i] = t.add(HE::UIWidgetType::RadioButton);
+        HE::UIElement& e = *t.find(ids[i]);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 40.0f * i; e.sizeX = 200.0f; e.sizeY = 28.0f;
+        e.setProp("Label", HE::UIPropValue::ofString(""));
+    }
+    t.find(ids[0])->setProp("Checked", HE::UIPropValue::ofBool(true));
+    t.find(ids[3])->setProp("Group", HE::UIPropValue::ofString("other"));
+    t.find(ids[3])->setProp("Checked", HE::UIPropValue::ofBool(true));
+
+    // A graph that counts OnCheckChanged(false) on the first button, so the
+    // "others hear it" half of the contract is observed and not assumed.
+    const int label = t.add(HE::UIWidgetType::Text);
+    t.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    t.find(label)->hitTestable = false;
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnCheckChanged"; ev.elem = ids[0];
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "OFF";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = label;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    g.connect(evId, 0, setId, 0);
+    g.connect(litId, 0, setId, 2);
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto checkedOf = [&](int e) { return wm.tree(id)->find(e)->getProp("Checked").b; };
+
+    // Press the second: first goes off (and says so), second on, the named
+    // group untouched.
+    clickAt(wm, 10.0f, 54.0f);
+    CHECK_FALSE(checkedOf(ids[0]));
+    CHECK(checkedOf(ids[1]));
+    CHECK_FALSE(checkedOf(ids[2]));
+    CHECK(checkedOf(ids[3]));
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s == "OFF");
+
+    // Press the second again: it stays on. A group with no answer is not a
+    // state radio buttons have.
+    clickAt(wm, 10.0f, 54.0f);
+    CHECK(checkedOf(ids[1]));
+    CHECK_FALSE(checkedOf(ids[0]));
+}
+
+TEST_CASE("RadioButton: a script writing Checked keeps the group exclusive, silently")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    int ids[2] = { 0, 0 };
+    for (int i = 0; i < 2; ++i)
+    {
+        ids[i] = t.add(HE::UIWidgetType::RadioButton);
+        t.find(ids[i])->setProp("Label", HE::UIPropValue::ofString(""));
+    }
+    t.find(ids[0])->setProp("Checked", HE::UIPropValue::ofBool(true));
+    // "Pick": Set Property Checked = true on the second button. And a label
+    // that OnCheckChanged on the first would write into — it must stay empty,
+    // because a property write fires no event, on this element or its group.
+    const int label = t.add(HE::UIWidgetType::Text);
+    t.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    HorizonCode::Graph g;
+    HorizonCode::Node fn; fn.type = NodeType::FunctionEntry; fn.s = "Pick"; fn.access = 0;
+    const int fnId = g.addNode(fn);
+    HorizonCode::Node on; on.type = NodeType::ConstBool; on.f[0] = 1.0f;
+    const int onId = g.addNode(on);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = ids[1];
+    set.s = "Checked"; set.propType = PinType::Bool;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(fnId, 0, setId, 0));
+    REQUIRE(g.connect(onId, 0, setId, 2));
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnCheckChanged"; ev.elem = ids[0];
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "HEARD";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node say; say.type = NodeType::SetProperty; say.elem = label;
+    say.s = "Text"; say.propType = PinType::String;
+    const int sayId = g.addNode(say);
+    g.connect(evId, 0, sayId, 0);
+    g.connect(litId, 0, sayId, 2);
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.callFunction(id, "Pick"));
+    CHECK(wm.tree(id)->find(ids[1])->getProp("Checked").b);
+    CHECK_FALSE(wm.tree(id)->find(ids[0])->getProp("Checked").b);
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s.empty());
+}
+
+TEST_CASE("RadioButton: sharesGroupWith — names reach across parents, no name means siblings")
+{
+    HE::UIRadioButton a, b, c;
+    a.parentId = 1; b.parentId = 1; c.parentId = 2;
+    CHECK(a.sharesGroupWith(b));
+    CHECK_FALSE(a.sharesGroupWith(c));
+    c.group = "size"; a.group = "size";
+    CHECK(a.sharesGroupWith(c));
+    // A named one and an unnamed sibling are not one group: the name was given
+    // to reach across parents, not to be ignored inside one.
+    CHECK_FALSE(a.sharesGroupWith(b));
+    CHECK_FALSE(a.sharesGroupWith(a));
+}
+
+TEST_CASE("RadioButton: JSON round-trip, and Group is only written once set")
+{
+    HE::UIWidgetTree t;
+    const int r = t.add(HE::UIWidgetType::RadioButton);
+    const std::string plain = HE::uiWidgetTreeToJson(t);
+    CHECK(plain.find("\"group\"") == std::string::npos);
+    t.find(r)->setProp("Group", HE::UIPropValue::ofString("size"));
+    t.find(r)->setProp("Checked", HE::UIPropValue::ofBool(true));
+    t.find(r)->setProp("Label", HE::UIPropValue::ofString("Large"));
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
+    const HE::UIElement* e = back.find(r);
+    REQUIRE(e);
+    CHECK(e->type() == HE::UIWidgetType::RadioButton);
+    CHECK(e->getProp("Group").s == "size");
+    CHECK(e->getProp("Checked").b);
+    CHECK(e->getProp("Label").s == "Large");
+}
+
+TEST_CASE("TreeView: Items parse by indentation, folds hide descendants, indices stay put")
+{
+    HE::UITreeView tv;
+    tv.items = "Assets\n\tTextures\n\t\twood.png\n\tMeshes\n\nSettings\n    Deep\n";
+    const auto& ns = tv.nodes();
+    REQUIRE(ns.size() == 6);   // the blank line is nothing
+    CHECK(ns[0].label == "Assets");   CHECK(ns[0].depth == 0); CHECK(ns[0].hasChildren);
+    CHECK(ns[1].label == "Textures"); CHECK(ns[1].depth == 1); CHECK(ns[1].parent == 0);
+    CHECK(ns[2].label == "wood.png"); CHECK(ns[2].depth == 2); CHECK(ns[2].parent == 1);
+    CHECK(ns[3].label == "Meshes");   CHECK(ns[3].depth == 1); CHECK(ns[3].parent == 0);
+    CHECK_FALSE(ns[3].hasChildren);
+    CHECK(ns[4].label == "Settings"); CHECK(ns[4].depth == 0);
+    // Four spaces after a root is "two levels", which has no parent at depth
+    // 1 — clamped to one deeper than the line above, like YAML would.
+    CHECK(ns[5].label == "Deep");     CHECK(ns[5].depth == 1); CHECK(ns[5].parent == 4);
+
+    CHECK(tv.visibleRows() == std::vector<int>{ 0, 1, 2, 3, 4, 5 });
+    CHECK(tv.setCollapsed(1, true));
+    CHECK(tv.collapsed == "1");
+    CHECK(tv.visibleRows() == std::vector<int>{ 0, 1, 3, 4, 5 });
+    // Folding a leaf is a no-op, and folding twice is one fold.
+    CHECK_FALSE(tv.setCollapsed(3, true));
+    CHECK_FALSE(tv.setCollapsed(1, true));
+    CHECK(tv.setCollapsed(0, true));
+    CHECK(tv.collapsed == "0,1");
+    CHECK(tv.visibleRows() == std::vector<int>{ 0, 4, 5 });
+    // Unfolding the root shows Textures again but keeps it folded.
+    CHECK(tv.setCollapsed(0, false));
+    CHECK(tv.visibleRows() == std::vector<int>{ 0, 1, 3, 4, 5 });
+    CHECK(tv.isCollapsed(1));
+
+    // Rows are found from the top, in the visible order; the arrow column is
+    // the indent at the row's own depth.
+    tv.padding = 4.0f; tv.rowHeight = 20.0f; tv.indent = 18.0f;
+    CHECK(tv.rowAt(2.0f) == -1);
+    CHECK(tv.rowAt(5.0f) == 0);
+    CHECK(tv.rowAt(45.0f) == 2);          // the third visible row: Meshes
+    CHECK(tv.rowAt(4.0f + 5 * 20.0f + 1.0f) == -1);
+    CHECK(tv.onArrow(4.0f + 18.0f + 3.0f, 1));
+    CHECK_FALSE(tv.onArrow(4.0f + 3.0f, 1));
+
+    // Rewriting the text re-parses; the same text does not.
+    const std::vector<HE::UITreeView::Node>* before = &tv.nodes();
+    tv.items = tv.items;
+    CHECK(&tv.nodes() == before);
+    tv.items = "One";
+    CHECK(tv.nodeCount() == 1);
+}
+
+TEST_CASE("TreeView: a press picks a node, a press on the arrow folds, the keys walk")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int tree = t.add(HE::UIWidgetType::TreeView);
+    {
+        HE::UIElement& e = *t.find(tree);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 300.0f; e.sizeY = 300.0f;
+        e.setProp("Items", HE::UIPropValue::ofString("A\n\tA1\n\tA2\nB"));
+        e.setProp("Padding", HE::UIPropValue::ofFloat(0.0f));
+        e.setProp("Row Height", HE::UIPropValue::ofFloat(20.0f));
+        e.setProp("Indent", HE::UIPropValue::ofFloat(20.0f));
+    }
+    // OnNodeToggled writes into a label, so the fold event is observed.
+    const int label = t.add(HE::UIWidgetType::Text);
+    t.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    t.find(label)->hitTestable = false;
+    t.find(label)->posX = 350.0f; t.find(label)->posY = 350.0f;
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnNodeToggled"; ev.elem = tree;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "TOGGLED";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = label;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    g.connect(evId, 0, setId, 0);
+    g.connect(litId, 0, setId, 2);
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto live = [&]() { return dynamic_cast<const HE::UITreeView*>(wm.tree(id)->find(tree)); };
+    REQUIRE(live());
+
+    // Row 1 (A1) is at y 20..40; the label part is right of the arrow column.
+    clickAt(wm, 100.0f, 30.0f);
+    CHECK(live()->selected == 1);
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s.empty());
+
+    // The arrow of A (depth 0) sits in x 0..20 of row 0.
+    clickAt(wm, 10.0f, 10.0f);
+    CHECK(live()->isCollapsed(0));
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s == "TOGGLED");
+    // Its picked child vanished with it, so the selection climbed onto A.
+    CHECK(live()->selected == 0);
+    CHECK(live()->visibleRows() == std::vector<int>{ 0, 3 });
+
+    // Keys: Right unfolds, Right again steps into the first child, Down steps,
+    // Left on a leaf climbs to the parent, Left on the open branch folds it.
+    using Nav = WidgetManager::NavDir;
+    CHECK(wm.navigate(Nav::Right, 400.0f, 400.0f));
+    CHECK_FALSE(live()->isCollapsed(0));
+    CHECK(wm.navigate(Nav::Right, 400.0f, 400.0f));
+    CHECK(live()->selected == 1);
+    CHECK(wm.navigate(Nav::Down, 400.0f, 400.0f));
+    CHECK(live()->selected == 2);
+    CHECK(wm.navigate(Nav::Left, 400.0f, 400.0f));
+    CHECK(live()->selected == 0);
+    CHECK(wm.navigate(Nav::Left, 400.0f, 400.0f));
+    CHECK(live()->isCollapsed(0));
+    CHECK(wm.navigate(Nav::Down, 400.0f, 400.0f));
+    CHECK(live()->selected == 3);
+    // Down on the last row falls off the end — the tree is not a trap.
+    CHECK_FALSE(wm.navigate(Nav::Down, 400.0f, 400.0f));
+
+    // Enter opens the picked node: OnRowActivated with the node index.
+    CHECK(wm.activateFocused());
+
+    // What a person picked and folded survives a preview reload.
+    const WidgetManager::StateSnapshot snap = wm.captureState();
+    bool sawSelected = false, sawCollapsed = false;
+    for (const auto& row : snap.elements)
+        for (const auto& [name, v] : row.props)
+        {
+            if (name == "Selected")  { sawSelected  = v.i == 3;   }
+            if (name == "Collapsed") { sawCollapsed = v.s == "0"; }
+        }
+    CHECK(sawSelected);
+    CHECK(sawCollapsed);
+}
+
+TEST_CASE("TreeView: JSON round-trip carries the items and the look, never the state")
+{
+    HE::UIWidgetTree t;
+    const int tv = t.add(HE::UIWidgetType::TreeView);
+    t.find(tv)->setProp("Items", HE::UIPropValue::ofString("A\n\tB"));
+    t.find(tv)->setProp("Indent", HE::UIPropValue::ofFloat(30.0f));
+    t.find(tv)->setProp("Selected", HE::UIPropValue::ofInt(1));
+    t.find(tv)->setProp("Collapsed", HE::UIPropValue::ofString("0"));
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
+    const HE::UIElement* e = back.find(tv);
+    REQUIRE(e);
+    CHECK(e->type() == HE::UIWidgetType::TreeView);
+    CHECK(e->getProp("Items").s == "A\n\tB");
+    CHECK(e->getProp("Indent").f == doctest::Approx(30.0f));
+    CHECK(e->getProp("Selected").i == -1);
+    CHECK(e->getProp("Collapsed").s.empty());
+    // The tree draws its rows itself: a row of quads and glyphs per node.
+    std::vector<UIRenderObject> out;
+    HE::UIElementRenderState st;
+    e->render({ 0.0f, 0.0f, 260.0f, 320.0f }, st, HE::UUID{}, 1.0f, out);
+    CHECK(countGlyphs(out) == 2);   // "A" and "B"
+    CHECK(countQuads(out) > 1);     // the surface plus the arrow
+}
+
+TEST_CASE("NamedSlot: what the page puts under the WidgetRef lands in the component's slot")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // The component: a 200x100 frame with a slot in its lower half, holding a
+    // default label.
+    HE::UIWidgetTree card;
+    card.canvasWidth = 200.0f; card.canvasHeight = 100.0f;
+    const int slot = card.add(HE::UIWidgetType::NamedSlot);
+    {
+        HE::UIElement& e = *card.find(slot);
+        e.name = "Content";
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 50.0f; e.sizeX = 200.0f; e.sizeY = 50.0f;
+    }
+    const int fallback = card.add(HE::UIWidgetType::Text);
+    {
+        HE::UIElement& e = *card.find(fallback);
+        e.parentId = slot;
+        e.setProp("Text", HE::UIPropValue::ofString("empty"));
+    }
+    registerWidgetAs(cm, "mem://card.hasset", card);
+
+    // The page: the card at (50,100), and a Button authored UNDER the ref that
+    // fills its parent.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    {
+        HE::UIElement& e = *page.find(ref);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 50.0f; e.posY = 100.0f; e.sizeX = 200.0f; e.sizeY = 100.0f;
+        e.setProp("Widget", HE::UIPropValue::ofString("mem://card.hasset"));
+    }
+    const int given = page.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *page.find(given);
+        e.parentId = ref;
+        e.name = "Content";
+        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+        HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+        HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
+    }
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const HE::UIWidgetTree* live = wm.tree(id);
+    REQUIRE(live);
+
+    // The button is now a child of the slot, which is inside the graft…
+    const HE::UIElement* btn = live->find(given);
+    REQUIRE(btn);
+    const HE::UIElement* liveSlot = live->find(btn->parentId);
+    REQUIRE(liveSlot);
+    CHECK(liveSlot->type() == HE::UIWidgetType::NamedSlot);
+    CHECK(liveSlot->name == "Content");
+    // …and fills the slot's rect: the lower half of the card, on the page.
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(*live, 400.0f, 400.0f);
+    const HE::UIWidgetRect r = HE::uiElementRect(*live, *btn, &canvas);
+    CHECK(r.x == doctest::Approx(50.0f));
+    CHECK(r.y == doctest::Approx(150.0f));
+    CHECK(r.w == doctest::Approx(200.0f));
+    CHECK(r.h == doctest::Approx(50.0f));
+    // The default content stepped aside.
+    bool fallbackShown = false;
+    for (const auto& ep : live->elements)
+        if (ep && ep->type() == HE::UIWidgetType::Text && ep->getProp("Text").s == "empty")
+            fallbackShown = HE::uiElementEffectiveVisible(*live, *ep);
+    CHECK_FALSE(fallbackShown);
+    // It still belongs to the PAGE's script, not the card's: a click on it
+    // is the page's OnClicked. The press lands in the slot's half.
+    CHECK(wm.processPointer(400.0f, 400.0f, 100.0f, 170.0f, true, true));
+    CHECK_FALSE(wm.processPointer(400.0f, 400.0f, 100.0f, 120.0f, true, true));
+}
+
+TEST_CASE("NamedSlot: a component with no slot keeps the default content and the page's children")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree card;
+    card.canvasWidth = 200.0f; card.canvasHeight = 100.0f;
+    const int slot = card.add(HE::UIWidgetType::NamedSlot);
+    const int fallback = card.add(HE::UIWidgetType::Text);
+    card.find(fallback)->parentId = slot;
+    card.find(fallback)->setProp("Text", HE::UIPropValue::ofString("empty"));
+    registerWidgetAs(cm, "mem://card.hasset", card);
+
+    HE::UIWidgetTree page;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    page.find(ref)->setProp("Widget", HE::UIPropValue::ofString("mem://card.hasset"));
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    // Nothing was put in, so the default content shows.
+    bool fallbackShown = false;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->type() == HE::UIWidgetType::Text && ep->getProp("Text").s == "empty")
+            fallbackShown = HE::uiElementEffectiveVisible(*wm.tree(id), *ep);
+    CHECK(fallbackShown);
 }

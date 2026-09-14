@@ -2251,6 +2251,10 @@ const std::vector<EngineEventDesc>& engineEvents()
         // array and calls refreshList — the same reason the list cannot answer
         // what is in row five.
         { "OnHeaderClicked",      "onHeaderClicked",      P::Int,    true  },
+        // A tree's node was folded open or shut, by NODE index. Whether it is
+        // open now is the tree's Collapsed property, so the event carries the
+        // one number a graph cannot work out for itself.
+        { "OnNodeToggled",        "onNodeToggled",        P::Int,    true  },
         // The other mouse button, on an element. Its own event rather than a
         // flag on OnClicked, because a right-click means something different
         // everywhere it means anything: it opens a menu, it never presses.

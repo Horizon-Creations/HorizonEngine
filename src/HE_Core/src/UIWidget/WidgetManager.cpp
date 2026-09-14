@@ -134,6 +134,7 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 		// immediately so the set is visible this frame, not on the next reload.
 		if (prop == "Material" || prop == "Font")
 			refreshElementAssets(*w, *e);
+		afterScriptWrite(*w, *e, prop);
 	};
 	// The same two through a reference, addressing the element by NAME. Same
 	// resolution as above — the target's own script owner and offset — so a page
@@ -157,6 +158,7 @@ HorizonCode::HostBindings WidgetManager::makeBindings()
 		e->setPropAny(prop, HE::uiHcValueToProp(v, e->getPropAny(prop).type));
 		m_visualDirty = true;
 		if (prop == "Material" || prop == "Font") refreshElementAssets(*w, *e);
+		afterScriptWrite(*w, *e, prop);
 	};
 	// "Self" for an EMBEDDED widget is that widget, not the whole page it sits
 	// on: showing itself shows its WidgetRef element, and nothing around it.
@@ -340,6 +342,47 @@ void WidgetManager::embedWidgetRefs(Instance& w, ContentManager& content,
 		ref->contentW    = sub.canvasWidth;
 		ref->contentH    = sub.canvasHeight;
 		ref->contentMode = sub.scaleMode;
+
+		// ── What the page put INTO the component (NamedSlot) ─────────────────
+		// The children the page authored under this reference keep their host
+		// ids (at or below `offset`) and are moved into the component's slots:
+		// the slot whose name is the child's, or — when the component has only
+		// one — that one whatever the child is called. A component with no slot
+		// leaves them where they are, drawn over it, and says so once; a child
+		// no slot is named after goes into the first slot, and says so too.
+		{
+			std::vector<HE::UINamedSlot*> slots;
+			for (const auto& ep : w.tree.elements)
+				if (ep && ep->id > offset && ep->id <= em.idMax)
+					if (auto* ns = dynamic_cast<HE::UINamedSlot*>(ep.get()))
+						slots.push_back(ns);
+			std::vector<HE::UIElement*> given;
+			for (const auto& ep : w.tree.elements)
+				if (ep && ep->parentId == refId && ep->id <= offset) given.push_back(ep.get());
+			if (!given.empty() && slots.empty())
+				HE_LOG_WARN(Widget, "WidgetRef '%s' has %d children of its own, but that "
+				                    "widget has no NamedSlot to put them in — they are "
+				                    "drawn over it", ref->widgetPath.c_str(),
+				            static_cast<int>(given.size()));
+			for (HE::UIElement* child : given)
+			{
+				if (slots.empty()) break;
+				HE::UINamedSlot* target = nullptr;
+				for (HE::UINamedSlot* s : slots) if (s->name == child->name) { target = s; break; }
+				if (!target)
+				{
+					target = slots.front();
+					if (slots.size() > 1)
+						HE_LOG_WARN(Widget, "WidgetRef '%s': child '%s' names no slot of that "
+						                    "widget (it has %d) — it goes into '%s'",
+						            ref->widgetPath.c_str(), child->name.c_str(),
+						            static_cast<int>(slots.size()), target->name.c_str());
+				}
+				child->parentId   = target->id;
+				target->filled    = true;
+				target->ownIdFloor = offset + 1;
+			}
+		}
 
 		// …and the widget it just brought in may embed further widgets. ONLY the
 		// elements this graft added are queued, each with THIS reference's
@@ -1470,6 +1513,91 @@ void WidgetManager::selectListRow(Instance& w, HE::UIListView& lv, int item)
 	rt().fireOnSelectionChanged(t.scriptId, t.elem, lv.firstSelected());
 }
 
+void WidgetManager::selectTreeNode(Instance& w, HE::UITreeView& tv, int node)
+{
+	if (node >= tv.nodeCount()) node = -1;
+	if (node < 0) node = -1;
+	if (node == tv.selected) return;
+	tv.selected = node;
+	m_visualDirty = true;
+	const ScriptTarget t = scriptTargetFor(w, tv.id);
+	rt().fireOnSelectionChanged(t.scriptId, t.elem, node);
+}
+
+void WidgetManager::toggleTreeNode(Instance& w, HE::UITreeView& tv, int node)
+{
+	if (!tv.setCollapsed(node, !tv.isCollapsed(node))) return;
+	m_visualDirty = true;
+	// Folding shut what the selection sits under would leave a highlight on a
+	// row nobody can see; the selection moves up to the node that hid it, which
+	// is where every file browser puts it.
+	if (tv.isCollapsed(node) && tv.selected >= 0)
+	{
+		const auto& ns = tv.nodes();
+		for (int p = tv.selected; p >= 0; p = ns[static_cast<std::size_t>(p)].parent)
+			if (p == node && tv.selected != node) { selectTreeNode(w, tv, node); break; }
+	}
+	tv.scrollOffset = std::clamp(tv.scrollOffset, 0.0f, tv.maxScroll());
+	const ScriptTarget t = scriptTargetFor(w, tv.id);
+	rt().fireOnNodeToggled(t.scriptId, t.elem, node);
+}
+
+void WidgetManager::afterScriptWrite(Instance& w, HE::UIElement& e, const std::string& prop)
+{
+	// Checked = true on a radio button turns its group off, silently — the
+	// write itself fired nothing, so the consequence fires nothing either.
+	// Checked = false is left alone: a script may want a group with no answer
+	// (a form reset), and only a press refuses that.
+	if (prop == "Checked")
+		if (auto* rb = dynamic_cast<HE::UIRadioButton*>(&e); rb && rb->checked)
+			checkRadioButton(w, *rb, /*notify=*/false);
+}
+
+void WidgetManager::checkRadioButton(Instance& w, HE::UIRadioButton& rb, bool notify)
+{
+	// The range of ids this button's group may be found in: its embed, or the
+	// host's own elements when it is not inside one. Anything outside is a
+	// different copy of a component and therefore a different question.
+	int lo = 0, hi = std::numeric_limits<int>::max();
+	for (auto it = w.embeds.rbegin(); it != w.embeds.rend(); ++it)
+		if (rb.id > it->idOffset && rb.id <= it->idMax) { lo = it->idOffset; hi = it->idMax; break; }
+	if (lo == 0)
+		// A host element: everything that is NOT in an embed. The embeds are
+		// contiguous ranges above the host's ids, so "below the first offset"
+		// is the host — and a host with no embeds is the whole tree.
+		for (const Instance::Embed& em : w.embeds) hi = std::min(hi, em.idOffset);
+
+	const bool was = rb.checked;
+	const int  self = rb.id;
+	rb.checked = true;
+	m_visualDirty = true;
+	// The others first, so a graph that hears "this one is on" and asks the
+	// group finds exactly one answer. All the flipping happens BEFORE any event
+	// goes out: an event runs graph code, and graph code may add or remove
+	// elements — which moves the vector this walk is standing in.
+	std::vector<int> flipped;
+	for (auto& ep : w.tree.elements)
+	{
+		auto* other = dynamic_cast<HE::UIRadioButton*>(ep.get());
+		if (!other || other == &rb || !other->checked) continue;
+		if (other->id <= lo || other->id > hi) continue;
+		if (!rb.sharesGroupWith(*other)) continue;
+		other->checked = false;
+		flipped.push_back(other->id);
+	}
+	if (!notify) return;
+	for (const int id : flipped)
+	{
+		const ScriptTarget t = scriptTargetFor(w, id);
+		rt().fireOnCheckChanged(t.scriptId, t.elem, false);
+	}
+	if (!was)
+	{
+		const ScriptTarget t = scriptTargetFor(w, self);
+		rt().fireOnCheckChanged(t.scriptId, t.elem, true);
+	}
+}
+
 void WidgetManager::syncLists()
 {
 	if (!m_content) return;
@@ -2482,6 +2610,26 @@ namespace
 		return lv.rowAt((mouseY / canvas.scaleY - r.y) / vs);
 	}
 
+	// The pointer in a TREE's own units, measured from its top-left corner.
+	// Both axes divided by the Y factor, because that is the one factor
+	// UITreeView::render draws with (it has no other — see the note there), and
+	// a hit test that used the X factor would grab the fold arrow a little to
+	// the side of where it is drawn under a non-uniform Stretch canvas.
+	bool treeLocalPoint(const HE::UIWidgetTree& tree, const HE::UITreeView& tv,
+	                    const HE::UIWidgetCanvas& canvas, float mouseX, float mouseY,
+	                    float& localX, float& localY)
+	{
+		if (canvas.scaleX <= 0.0f || canvas.scaleY <= 0.0f) return false;
+		const HE::UIWidgetRect r = HE::uiElementRect(tree, tv, &canvas);
+		float us = 1.0f, vs = 1.0f;
+		HE::uiElementUnitScale(tree, tv, us, vs, &canvas);
+		if (vs <= 0.0f) return false;
+		const float k = canvas.scaleY * vs;   // one tree unit, in pixels
+		localX = (mouseX - r.x * canvas.scaleX) / k;
+		localY = (mouseY - r.y * canvas.scaleY) / k;
+		return true;
+	}
+
 	// A list's rect in the element's own PIXEL space — the space render() lays
 	// the header out in, and therefore the only space a hit test on it may ask
 	// its questions in. One helper because the hover cursor, the press and the
@@ -3203,6 +3351,24 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 				: -1;
 			if (lv->hoveredRow != was) m_visualDirty = true;
 		}
+		// …and the hovered row of every tree, which has nothing inside its rows
+		// and so only needs the pointer to be on the tree itself.
+		for (auto& ep : w.tree.elements)
+		{
+			auto* tv = dynamic_cast<HE::UITreeView*>(ep.get());
+			if (!tv) continue;
+			const int was = tv->hoveredRow;
+			tv->hoveredRow = -1;
+			if (isTop && topHit == tv->id)
+			{
+				float lx = 0.0f, ly = 0.0f;
+				if (treeLocalPoint(w.tree, *tv,
+				                   resolveCanvas(w.tree, w.windowId, vpWidth, vpHeight),
+				                   mouseX, mouseY, lx, ly))
+					tv->hoveredRow = tv->rowAt(ly);
+			}
+			if (tv->hoveredRow != was) m_visualDirty = true;
+		}
 
 		// …and the hovered DAY of every calendar, for exactly the same reason:
 		// the pointer never leaves the picker while it travels from day to day.
@@ -3513,6 +3679,30 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 						fireP(&HorizonCode::Runtime::fireOnUnfocused, w.focusedElem);
 						w.focusedElem = 0;
 						if (m_focusWidget == w.id) m_focusWidget = 0;
+					}
+					// A press in a tree: on the fold arrow it folds, anywhere else
+					// on the row it picks. The tree has nothing inside its rows,
+					// so what took the press is the tree itself and no walk up
+					// is needed. It takes the focus for the same reason the list
+					// does — the arrows then step through its rows.
+					if (auto* tv = dynamic_cast<HE::UITreeView*>(w.tree.find(hot)))
+					{
+						setFocus(w.id, tv->id);
+						float lx = 0.0f, ly = 0.0f;
+						if (treeLocalPoint(w.tree, *tv,
+						                   resolveCanvas(w.tree, w.windowId, vpWidth, vpHeight),
+						                   mouseX, mouseY, lx, ly))
+						{
+							const int row = tv->rowAt(ly);
+							const std::vector<int> rows = tv->visibleRows();
+							const int node = row >= 0 ? rows[static_cast<std::size_t>(row)] : -1;
+							if (node >= 0 &&
+							    tv->nodes()[static_cast<std::size_t>(node)].hasChildren &&
+							    tv->onArrow(lx, tv->nodes()[static_cast<std::size_t>(node)].depth))
+								toggleTreeNode(w, *tv, node);
+							else
+								selectTreeNode(w, *tv, node);
+						}
 					}
 					// A press in a list picks the row under it — and takes the
 					// keyboard focus, so the arrows step through the list rather
@@ -4646,8 +4836,13 @@ const std::vector<std::string>* statePropsOf(HE::UIWidgetType t)
 	// The calendar's three, because the date is three properties.
 	static const std::vector<std::string> kDate   = { "Year", "Month", "Day" };
 	static const std::vector<std::string> kColor  = { "Color" };
+	// A tree's picked node and its folds are the list's selection and the
+	// accordion's folds in one element: both a person's doing.
+	static const std::vector<std::string> kTree   = { "Selected", "Collapsed" };
 	switch (t)
 	{
+		case HE::UIWidgetType::RadioButton: return &kCheck;
+		case HE::UIWidgetType::TreeView:    return &kTree;
 		case HE::UIWidgetType::TabBox:      return &kTab;
 		case HE::UIWidgetType::Splitter:    return &kSplit;
 		case HE::UIWidgetType::Accordion:   return &kAcc;
@@ -4877,6 +5072,12 @@ void WidgetManager::activateElement(Instance& w, int elemId)
 			cb->checked = !cb->checked;
 			rt().fireOnCheckChanged(target.scriptId, target.elem, cb->checked);
 		}
+		break;
+	case HE::UIWidgetType::RadioButton:
+		// On, never off: a group with no answer is not a state a set of radio
+		// buttons has. The others in its group go off inside.
+		if (auto* rb = dynamic_cast<HE::UIRadioButton*>(e))
+			checkRadioButton(w, *rb);
 		break;
 	case HE::UIWidgetType::ComboBox:
 		// It OPENS. It used to advance to the next option, which was usable with
@@ -5143,6 +5344,14 @@ bool WidgetManager::activateFocused()
 		rt().fireOnRowActivated(t.scriptId, t.elem, item);
 		return true;
 	}
+	// …and a tree opens its picked NODE, for the same reason.
+	if (auto* tv = dynamic_cast<HE::UITreeView*>(w->tree.find(w->focusedElem)))
+	{
+		if (tv->selected < 0 || tv->selected >= tv->nodeCount()) return false;
+		const ScriptTarget t = scriptTargetFor(*w, tv->id);
+		rt().fireOnRowActivated(t.scriptId, t.elem, tv->selected);
+		return true;
+	}
 	activateElement(*w, w->focusedElem);
 	return true;
 }
@@ -5167,17 +5376,35 @@ bool WidgetManager::activateAtPointer(float vpWidth, float vpHeight,
 		for (auto& ep : w.tree.elements)
 		{
 			auto* lv = dynamic_cast<HE::UIListView*>(ep.get());
-			if (!lv) continue;
-			if (!HE::uiElementEffectiveVisible(w.tree, *lv)) continue;
-			if (!HE::uiElementEffectiveEnabled(w.tree, *lv)) continue;
-			const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *lv, &canvas);
+			auto* tv = dynamic_cast<HE::UITreeView*>(ep.get());
+			if (!lv && !tv) continue;
+			const HE::UIElement& e = *ep;
+			if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
+			if (!HE::uiElementEffectiveEnabled(w.tree, e)) continue;
+			const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
 			if (mouseX < r.x * canvas.scaleX || mouseX > (r.x + r.w) * canvas.scaleX ||
 			    mouseY < r.y * canvas.scaleY || mouseY > (r.y + r.h) * canvas.scaleY)
 				continue;
-			const int item = listRowAtPointer(w.tree, *lv, canvas, mouseY);
-			if (item < 0) continue;
-			const ScriptTarget t = scriptTargetFor(w, lv->id);
-			rt().fireOnRowActivated(t.scriptId, t.elem, item);
+			if (lv)
+			{
+				const int item = listRowAtPointer(w.tree, *lv, canvas, mouseY);
+				if (item < 0) continue;
+				const ScriptTarget t = scriptTargetFor(w, lv->id);
+				rt().fireOnRowActivated(t.scriptId, t.elem, item);
+				return true;
+			}
+			// A tree: the NODE under the pointer opens. A double-click on a
+			// branch also folds it, because that is what every file browser
+			// does and a person's hands know it before their eyes do.
+			float lx = 0.0f, ly = 0.0f;
+			if (!treeLocalPoint(w.tree, *tv, canvas, mouseX, mouseY, lx, ly)) continue;
+			const int row = tv->rowAt(ly);
+			if (row < 0) continue;
+			const int node = tv->visibleRows()[static_cast<std::size_t>(row)];
+			const HE::UITreeView::Node& n = tv->nodes()[static_cast<std::size_t>(node)];
+			if (n.hasChildren && !tv->onArrow(lx, n.depth)) toggleTreeNode(w, *tv, node);
+			const ScriptTarget t = scriptTargetFor(w, tv->id);
+			rt().fireOnRowActivated(t.scriptId, t.elem, node);
 			return true;
 		}
 	}
@@ -5255,6 +5482,57 @@ bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 				lv->scrollToItem(next);
 				syncLists(*w);
 				return true;
+			}
+		}
+
+	// A focused tree takes all four arrows. Up and down step through the
+	// VISIBLE rows and fall off at either end like the list does; left folds
+	// the picked branch or, on a leaf or a folded branch, climbs to its parent;
+	// right unfolds a branch or, on an open one, steps into its first child.
+	// That is the keyboard every outliner and file browser has had for thirty
+	// years, and a tree that takes only two of the keys is one you have to reach
+	// for the mouse to fold.
+	if (w->focusedElem != 0)
+		if (auto* tv = dynamic_cast<HE::UITreeView*>(w->tree.find(w->focusedElem)))
+		{
+			const std::vector<int> rows = tv->visibleRows();
+			const auto& ns = tv->nodes();
+			if (!rows.empty())
+			{
+				int curRow = -1;
+				for (std::size_t i = 0; i < rows.size(); ++i)
+					if (rows[i] == tv->selected) { curRow = static_cast<int>(i); break; }
+				if (dir == NavDir::Up || dir == NavDir::Down)
+				{
+					const int next = curRow < 0
+						? (dir == NavDir::Down ? 0 : static_cast<int>(rows.size()) - 1)
+						: curRow + (dir == NavDir::Down ? 1 : -1);
+					if (next >= 0 && next < static_cast<int>(rows.size()))
+					{
+						selectTreeNode(*w, *tv, rows[static_cast<std::size_t>(next)]);
+						tv->scrollToRow(next);
+						return true;
+					}
+				}
+				else if (curRow >= 0)
+				{
+					const int node = tv->selected;
+					const HE::UITreeView::Node& n = ns[static_cast<std::size_t>(node)];
+					if (dir == NavDir::Left)
+					{
+						if (n.hasChildren && !tv->isCollapsed(node)) { toggleTreeNode(*w, *tv, node); return true; }
+						if (n.parent >= 0) { selectTreeNode(*w, *tv, n.parent); return true; }
+						return false;
+					}
+					if (n.hasChildren && tv->isCollapsed(node)) { toggleTreeNode(*w, *tv, node); return true; }
+					if (n.hasChildren && curRow + 1 < static_cast<int>(rows.size()))
+					{
+						selectTreeNode(*w, *tv, rows[static_cast<std::size_t>(curRow + 1)]);
+						tv->scrollToRow(curRow + 1);
+						return true;
+					}
+					return false;
+				}
 			}
 		}
 

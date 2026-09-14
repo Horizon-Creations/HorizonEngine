@@ -721,6 +721,8 @@ HE_HC_VALUE_EVENT(fireOnRowActivated, "OnRowActivated", int,
                   onRowActivated(elem, v), Value::ofInt(v))
 HE_HC_VALUE_EVENT(fireOnHeaderClicked, "OnHeaderClicked", int,
                   onHeaderClicked(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnNodeToggled, "OnNodeToggled", int,
+                  onNodeToggled(elem, v), Value::ofInt(v))
 HE_HC_VALUE_EVENT(fireOnFileDropped, "OnFileDropped", const std::string&,
                   onFileDropped(elem, v), Value::ofString(v))
 HE_HC_VALUE_EVENT(fireOnTrayItem, "OnTrayItem", const std::string&,

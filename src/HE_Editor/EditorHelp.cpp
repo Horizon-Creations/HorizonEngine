@@ -3216,6 +3216,27 @@ namespace
 	  "bare type — you pick the widget itself from Components or User Defined, "
 	  "which is the same thing without an empty slot to point somewhere first.",
 	  "", "ui#elements" },
+	{ "UI Palette/RadioButton", "",
+	  "One of several, where exactly one is on. Pressing one turns the others in "
+	  "its Group off, each firing OnCheckChanged(false); pressing the one that is "
+	  "already on leaves it on. Buttons with the same Group name are one question, "
+	  "wherever they sit; with no name, the radio buttons under the same parent are.",
+	  "", "ui#elements" },
+	{ "UI Palette/TreeView", "",
+	  "Rows with an indent and a fold arrow: an outliner, a file browser, a table "
+	  "of contents. The nodes are the lines of Items, and a line's indentation "
+	  "(tabs, or two spaces a level) is its depth. Self-contained like a "
+	  "ComboBox, not a row template like a ListView — a graph writes the whole "
+	  "tree as one string. Events carry the NODE index, the line number, which "
+	  "does not change when something folds.",
+	  "", "ui#elements" },
+	{ "UI Palette/NamedSlot", "",
+	  "A hole in a component that the page using it fills. Put one inside a "
+	  "widget you mean to embed, name it; on the page, add children under the "
+	  "embedded widget and they land in the slot with the same name — or in the "
+	  "only slot, whatever they are called. Children you put in the slot here are "
+	  "its default content, shown when the page puts nothing in.",
+	  "", "ui#elements" },
 
 	// ── Lining elements up while dragging ────────────────────────────────────
 	{ "ui.snap", "Snap",
@@ -3526,6 +3547,41 @@ namespace
 	  "child, the first section is bit 1. The tick boxes above set it; a graph can "
 	  "set the number directly to open a set of sections at once. At most 32 "
 	  "sections, because that is how many bits there are.",
+	  "", "ui#elements" },
+	{ "UI Widget/Group", "",
+	  "Which radio buttons answer the same question. Buttons with the same name "
+	  "are one group wherever they sit on the page — three rows of a grid, say. "
+	  "Empty means the radio buttons under the same parent, which is the usual "
+	  "case and needs no typing. Inside an embedded component the group stays "
+	  "inside that copy, so two cards with a \"Size\" group are two questions.",
+	  "", "ui#elements" },
+	{ "UI Widget/Items", "",
+	  "The tree, as text: one node per line, and the line's indentation is its "
+	  "depth — a tab or two spaces per level. A line indented deeper than one "
+	  "level below the line above is pulled back to that, so a stray tab never "
+	  "loses a row. Events and Selected use the LINE NUMBER as the node index, "
+	  "counting from 0 and skipping blank lines.",
+	  "", "ui#elements" },
+	{ "UI Widget/Indent", "",
+	  "How far each level steps in, in canvas units. It is also the width of the "
+	  "fold arrow's column at the row's own level: a press there folds, a press "
+	  "anywhere else on the row picks.",
+	  "", "ui#elements" },
+	{ "UI Widget/Arrow Color", "",
+	  "The colour of the fold arrows, which point down on an open branch and "
+	  "right on a folded one. Leaves have no arrow.",
+	  "", "ui#elements" },
+	{ "UI Widget/Selected", "",
+	  "The picked node, as its index in Items (the line number from 0), or -1 "
+	  "for none. A node, not a row: folding a branch above it hides the "
+	  "highlight but does not change the number, and unfolding brings it back. "
+	  "Carried across a preview reload like anything a person picked.",
+	  "", "ui#elements" },
+	{ "UI Widget/Collapsed", "",
+	  "Which branches are folded shut, as node indices: \"2,5\". Empty is "
+	  "everything open, which is how a tree starts. Folding a branch that the "
+	  "selection sits under moves the selection up onto it. A graph can set this "
+	  "to fold a whole tree at once; OnNodeToggled fires when a person does.",
 	  "", "ui#elements" },
 	{ "UI Widget/Allow Multiple", "",
 	  "On, any number of sections can be open at the same time. Off, opening one "

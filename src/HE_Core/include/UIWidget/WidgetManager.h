@@ -1106,6 +1106,24 @@ private:
     // Pick one row and fire what that means. Shared by the press and by the
     // keyboard, so the two cannot drift.
     void selectListRow(Instance& w, HE::UIListView& lv, int item);
+    // The tree's two: pick a NODE (-1 clears), and fold one open or shut. Both
+    // fire only when something changed, and both are shared by the press and
+    // the keyboard for the reason above.
+    void selectTreeNode(Instance& w, HE::UITreeView& tv, int node);
+    void toggleTreeNode(Instance& w, HE::UITreeView& tv, int node);
+    // Turn one radio button on and the rest of its group off, firing
+    // OnCheckChanged for each that flipped. The group is searched within the
+    // embed the button belongs to, not the whole host tree — two copies of a
+    // component each carrying a group "Size" are two questions, not one.
+    // `notify` false = the silent form a script write goes through: a Set
+    // Property never fires the element's own event, so it must not fire its
+    // neighbours' either.
+    void checkRadioButton(Instance& w, HE::UIRadioButton& rb, bool notify = true);
+    // What a property write from a SCRIPT has to keep consistent that the
+    // generic setter cannot know about: a radio button's group, today. The
+    // setter writes one field of one element; "exactly one of these is on" is
+    // a fact about several, and it lives here.
+    void afterScriptWrite(Instance& w, HE::UIElement& e, const std::string& prop);
 
     // ── One question, asked by every input entry point ───────────────────────
     // While a layer is up, everything under it is inert — and "everything" has
