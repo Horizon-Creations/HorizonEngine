@@ -8,6 +8,7 @@
 #include "EditorMultiEdit.h"             // one edit, every selected entity
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -2888,6 +2889,26 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (componentHeader("Foliage", true, removed))
 		{
 			EditorWidgets::WrapText wrap;
+			// The layer had no way to be pointed at a mesh from here at all:
+			// a Foliage component added from "Add Component" kept a null mesh
+			// and scattered nothing, with only a log line to say why. Same
+			// drop-target shape as the Mesh component's slot above.
+			if (EditorWidgets::assetDropSlot(ctx, "Mesh", fol->meshAssetId,
+					HE::AssetType::StaticMesh, "folmeshslot",
+					"(none — drop a mesh here; nothing is scattered)", "static mesh",
+					/*showClear=*/true) != EditorWidgets::SlotAction::None)
+				fol->dirty = true;
+			EditorWidgets::helpForKey("Foliage/Mesh");
+			if (EditorWidgets::assetDropSlot(ctx, "Material", fol->materialAssetId,
+					HE::AssetType::Material, "folmatslot",
+					"(none — the mesh's own)", "material",
+					/*showClear=*/true) != EditorWidgets::SlotAction::None)
+			{
+				fol->dirty = true;
+				if (ctx.renderer && fol->materialAssetId != HE::UUID{})
+					ctx.renderer->InvalidateMaterial(fol->materialAssetId);
+			}
+			EditorWidgets::helpForKey("Foliage/Material");
 			Row::dragFloat("Density##fol",       &fol->density,      0.01f, 0.001f, 10.f); if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragFloat("Draw Distance##fol", &fol->drawDistance, 1.0f,  1.0f,  500.f); trackEdit();
 			Row::dragFloat("Min Scale##fol",     &fol->minScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
@@ -2895,6 +2916,22 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragInt("Seed##fol", &fol->seed, 1);                    if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			ImGui::Text("Instances: %zu", fol->cachedInstances.size());
 			if (ImGui::Button("Regenerate")) { fol->dirty = true; trackEdit(); }
+			// The painted density mask is authored in Landscape mode's Foliage
+			// brush; here it is only reported and, if need be, dropped.
+			if (fol->densityMask.empty())
+				ImGui::TextDisabled("Mask: none (uniform) — paint one in Landscape mode");
+			else
+			{
+				ImGui::Text("Mask: %u x %u, %.0f %% of the landscape",
+				            fol->maskRes, fol->maskRes, FoliagePaint::coverage(*fol) * 100.0f);
+				ImGui::SameLine();
+				if (EditorWidgets::dangerSmallButton("Reset Mask##fol"))
+				{
+					if (undo) undo->snapshotNow();
+					FoliagePaint::clearMask(*fol);
+				}
+				EditorWidgets::helpForLabel("Reset Mask##fol");
+			}
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<FoliageComponent>(entity); }
 	}
