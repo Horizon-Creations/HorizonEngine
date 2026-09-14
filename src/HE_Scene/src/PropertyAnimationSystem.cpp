@@ -11,7 +11,7 @@
 #include <cmath>
 
 // Sample a scalar keyframe track via linear interpolation.
-static float sampleChannel(const PropertyAnimChannel& ch, float t)
+float PropertyAnimationSystem::sampleChannel(const PropertyAnimChannel& ch, float t)
 {
     if (ch.times.empty() || ch.values.empty()) return 0.0f;
     if (t <= ch.times.front()) return ch.values.front();
@@ -25,6 +25,63 @@ static float sampleChannel(const PropertyAnimChannel& ch, float t)
     const float tLo = ch.times[lo], tHi = ch.times[hi];
     const float alpha = (t - tLo) / (tHi - tLo);
     return ch.values[lo] + alpha * (ch.values[hi] - ch.values[lo]);
+}
+
+void PropertyAnimationSystem::advance(float& playbackTime, bool& playing,
+                                      float playbackSpeed, bool looping, float duration, float dt)
+{
+    advancePlayback(playbackTime, playing, playbackSpeed, looping, duration, dt);
+}
+
+void PropertyAnimationSystem::applyAt(HorizonWorld& world, ContentManager& cm, entt::entity e,
+                                      const PropertyAnimClipAsset& clip, float t)
+{
+    auto& reg = world.registry();
+    TransformComponent* tc = reg.try_get<TransformComponent>(e);
+    MaterialComponent*  mc = reg.try_get<MaterialComponent>(e);
+
+    for (const auto& ch : clip.channels)
+    {
+        const float v = sampleChannel(ch, t);
+        switch (ch.target)
+        {
+            // Transform channels
+            case PropTarget::PosX:   if (tc) { tc->position.x = v; tc->dirty = true; } break;
+            case PropTarget::PosY:   if (tc) { tc->position.y = v; tc->dirty = true; } break;
+            case PropTarget::PosZ:   if (tc) { tc->position.z = v; tc->dirty = true; } break;
+            case PropTarget::RotX:   if (tc) { tc->rotation.x = v; tc->dirty = true; } break;
+            case PropTarget::RotY:   if (tc) { tc->rotation.y = v; tc->dirty = true; } break;
+            case PropTarget::RotZ:   if (tc) { tc->rotation.z = v; tc->dirty = true; } break;
+            case PropTarget::ScaleX: if (tc) { tc->scale.x    = v; tc->dirty = true; } break;
+            case PropTarget::ScaleY: if (tc) { tc->scale.y    = v; tc->dirty = true; } break;
+            case PropTarget::ScaleZ: if (tc) { tc->scale.z    = v; tc->dirty = true; } break;
+
+            // Material channels — written directly to the shared MaterialAsset
+            case PropTarget::MatColorR:
+            case PropTarget::MatColorG:
+            case PropTarget::MatColorB:
+            case PropTarget::MatMetallic:
+            case PropTarget::MatRoughness:
+            case PropTarget::MatOpacity:
+            {
+                if (!mc) break;
+                MaterialAsset* ma = cm.getMaterialMutable(mc->materialAssetId);
+                if (!ma) break;
+                switch (ch.target)
+                {
+                    case PropTarget::MatColorR:    ma->baseColor[0] = v; break;
+                    case PropTarget::MatColorG:    ma->baseColor[1] = v; break;
+                    case PropTarget::MatColorB:    ma->baseColor[2] = v; break;
+                    case PropTarget::MatMetallic:  ma->metallic     = v; break;
+                    case PropTarget::MatRoughness: ma->roughness    = v; break;
+                    case PropTarget::MatOpacity:   ma->opacity      = v; break;
+                    default: break;
+                }
+                mc->dirty = true;
+                break;
+            }
+        }
+    }
 }
 
 void PropertyAnimationSystem::update(HorizonWorld& world, ContentManager& cm, float dt)
@@ -42,52 +99,6 @@ void PropertyAnimationSystem::update(HorizonWorld& world, ContentManager& cm, fl
         advancePlayback(pa.playbackTime, pa.playing,
                         pa.playbackSpeed, pa.looping, clip->duration, dt);
 
-        const float t = pa.playbackTime;
-
-        TransformComponent* tc = reg.try_get<TransformComponent>(e);
-        MaterialComponent*  mc = reg.try_get<MaterialComponent>(e);
-
-        for (const auto& ch : clip->channels)
-        {
-            const float v = sampleChannel(ch, t);
-            switch (ch.target)
-            {
-                // Transform channels
-                case PropTarget::PosX:   if (tc) { tc->position.x = v; tc->dirty = true; } break;
-                case PropTarget::PosY:   if (tc) { tc->position.y = v; tc->dirty = true; } break;
-                case PropTarget::PosZ:   if (tc) { tc->position.z = v; tc->dirty = true; } break;
-                case PropTarget::RotX:   if (tc) { tc->rotation.x = v; tc->dirty = true; } break;
-                case PropTarget::RotY:   if (tc) { tc->rotation.y = v; tc->dirty = true; } break;
-                case PropTarget::RotZ:   if (tc) { tc->rotation.z = v; tc->dirty = true; } break;
-                case PropTarget::ScaleX: if (tc) { tc->scale.x    = v; tc->dirty = true; } break;
-                case PropTarget::ScaleY: if (tc) { tc->scale.y    = v; tc->dirty = true; } break;
-                case PropTarget::ScaleZ: if (tc) { tc->scale.z    = v; tc->dirty = true; } break;
-
-                // Material channels — written directly to the shared MaterialAsset
-                case PropTarget::MatColorR:
-                case PropTarget::MatColorG:
-                case PropTarget::MatColorB:
-                case PropTarget::MatMetallic:
-                case PropTarget::MatRoughness:
-                case PropTarget::MatOpacity:
-                {
-                    if (!mc) break;
-                    MaterialAsset* ma = cm.getMaterialMutable(mc->materialAssetId);
-                    if (!ma) break;
-                    switch (ch.target)
-                    {
-                        case PropTarget::MatColorR:    ma->baseColor[0] = v; break;
-                        case PropTarget::MatColorG:    ma->baseColor[1] = v; break;
-                        case PropTarget::MatColorB:    ma->baseColor[2] = v; break;
-                        case PropTarget::MatMetallic:  ma->metallic     = v; break;
-                        case PropTarget::MatRoughness: ma->roughness    = v; break;
-                        case PropTarget::MatOpacity:   ma->opacity      = v; break;
-                        default: break;
-                    }
-                    mc->dirty = true;
-                    break;
-                }
-            }
-        }
+        applyAt(world, cm, e, *clip, pa.playbackTime);
     }
 }

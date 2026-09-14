@@ -2804,6 +2804,13 @@ namespace
 	  "into a whole strafe set. Made here and edited in its own tab; a state or "
 	  "an animation layer then points at it instead of at a single clip.",
 	  "", "systems#animation" },
+	{ "New Asset/Property Animation Clip", "",
+	  "A clip that moves, turns, scales or recolours an entity over time — "
+	  "position, rotation and scale, or the material's colour, metallic, "
+	  "roughness and opacity, each as its own track of keys. Made here as an "
+	  "empty clip, filled with tracks in the Sequencer, and played by a "
+	  "Property Animator component on the entity.",
+	  "", "systems#animation" },
 	{ "Blend Space Editor/Kind", "",
 	  "1D reads one parameter and interpolates along a line — speed into "
 	  "walk/jog/run. 2D reads two and mixes freely placed samples in a plane, "
@@ -2873,6 +2880,127 @@ namespace
 	  "Another clip in the space, placed where the preview cursor stands. At most "
 	  "four samples are ever evaluated at once: a fifth with real weight means "
 	  "the space is packed tighter than anyone can see.",
+	  "", "systems#animation" },
+
+	// ── The Sequencer: a Property Animation Clip on a timeline ───────────────
+	// A track is one property of the entity the clip plays on — Position X,
+	// Roughness — and a key is what that property is at a moment. The same
+	// three words the UI Designer's strip uses, on the scene side.
+	{ "Sequencer/Zoom In", "",
+	  "Spreads the time axis out around the playhead, so keys milliseconds "
+	  "apart become separate things you can point at. The ruler follows: its "
+	  "labels turn from seconds into milliseconds by themselves. The wheel over "
+	  "the lane does the same around the pointer, and Shift+wheel slides along.",
+	  "", "systems#animation" },
+	{ "Sequencer/Zoom Out", "",
+	  "Back towards the whole clip in one lane. Zoom stops at fit — there is "
+	  "nothing outside a clip to look at.",
+	  "", "systems#animation" },
+	{ "Sequencer/Fit", "",
+	  "The whole clip across the lane again, from the start. The way back when "
+	  "zooming has left you somewhere in the middle of a long clip.",
+	  "", "systems#animation" },
+	{ "sequencer.ruler", "Time ruler",
+	  "Drag along it to scrub: the playhead follows the pointer and every "
+	  "track's value beside its name is the value at that moment — the same "
+	  "number the Property Animator would write into the entity there. The "
+	  "labels sit on whole seconds, or milliseconds once you have zoomed in.",
+	  "", "systems#animation" },
+	{ "sequencer.track", "Track",
+	  "One animated property of the entity this clip plays on. Blue tracks "
+	  "write into the Transform — position, rotation, scale — and violet ones "
+	  "into the material: colour, metallic, roughness, opacity. The number on "
+	  "the right is its value at the playhead. Click to select the track; "
+	  "double-click its lane to add a key there; right-click the name to "
+	  "remove the whole track.",
+	  "", "systems#animation" },
+	{ "sequencer.key", "Key",
+	  "A value at a moment. Clicking a key selects it and puts the playhead on "
+	  "it, so the readout under the strip shows this key's own time and value, "
+	  "and every track's number beside its name is what it holds at that "
+	  "instant. Drag it to move it in time — in the curve view, in value too. "
+	  "Keys can pass each other; the track stays in order. Right-click for "
+	  "the menu, or press Delete to remove the selected one.",
+	  "", "systems#animation" },
+	{ "sequencer.length", "Length",
+	  "How long the clip runs, in seconds. It cannot be made shorter than the "
+	  "last key on any track: a key past the end would be one nobody could "
+	  "reach to move or delete. Move or delete that key first, then shorten.",
+	  "", "systems#animation" },
+	{ "sequencer.view", "Curves / Dope Sheet",
+	  "Switches the lane between the dope sheet — every track a row, every key "
+	  "a diamond, time across — and the curve view, where the selected track "
+	  "is one graph of value over time and a key is a point you drag in both "
+	  "directions. The curve is straight between keys and flat beyond the first "
+	  "and last, because that is exactly what the Property Animator plays.",
+	  "", "systems#animation" },
+	{ "Sequencer/Add Track", "",
+	  "Another property of the entity to animate: one of the nine transform "
+	  "values or the six material ones. A property already in the clip is "
+	  "greyed out — a second track for it would only overwrite the first. The "
+	  "new track starts with one key at zero holding the property's rest value "
+	  "(1 for scale, colour and opacity, 0 for the rest).",
+	  "", "systems#animation" },
+	{ "sequencer.add-target", "Property",
+	  "The property the new track animates. Greyed if the clip already has a "
+	  "track for it.",
+	  "", "systems#animation" },
+	{ "Sequencer/Add Key", "",
+	  "A key on the selected track at the playhead, holding what the track "
+	  "already is at that moment — so adding a key pins the curve where it is "
+	  "and bends nothing. Change the value afterwards in the readout below, or "
+	  "drag the point in the curve view. Double-clicking a lane does the same "
+	  "at the pointer.",
+	  "", "systems#animation" },
+	{ "Sequencer/Remove Track", "",
+	  "Removes the selected track with all its keys. The property it animated "
+	  "is simply left alone from then on.",
+	  "", "systems#animation" },
+	{ "Sequencer/Delete Key", "",
+	  "Removes this key. The track keeps the others, and a track with one key "
+	  "left is simply a constant.",
+	  "", "systems#animation" },
+	{ "sequencer.key-time", "Key time",
+	  "When this key happens, in seconds from the clip's start. Dragging it "
+	  "past a neighbouring key is fine: the keys swap places and the track "
+	  "stays in order.",
+	  "", "systems#animation" },
+	{ "sequencer.key-value", "Key value",
+	  "What the property is at this key. Position and scale in scene units, "
+	  "rotation in degrees, colour channels and the material scalars from 0 "
+	  "to 1. Between keys the runtime blends in a straight line.",
+	  "", "systems#animation" },
+	// The transport and the actors: the clip played back in the viewport, on
+	// the entities that carry it.
+	{ "sequencer.play", "Play / Pause",
+	  "Runs the playhead along the clip at its own pace and moves every actor "
+	  "with it, so the viewport shows the clip the way the Property Animator "
+	  "will play it. Pause holds the playhead where it is; scrubbing the ruler "
+	  "while paused moves the actors too. A clip of no length has nothing to "
+	  "play and stays stopped.",
+	  "Space", "systems#animation" },
+	{ "Sequencer/Stop", "",
+	  "Stops playback and puts the playhead back to the start, the actors "
+	  "with it.",
+	  "", "systems#animation" },
+	{ "Sequencer/Loop", "",
+	  "Whether playback wraps round at the end of the clip or stops there. "
+	  "This is the transport's own setting for previewing; how an entity plays "
+	  "the clip in the game is the Looping switch on its Property Animator.",
+	  "", "systems#animation" },
+	{ "sequencer.actor", "Actor",
+	  "An entity in the open scene whose Property Animator plays this clip. "
+	  "While this tab is in front, every actor follows the playhead — scrub, "
+	  "play or click a key and it moves in the viewport — so a property the "
+	  "clip animates cannot be placed by hand meanwhile. Click to select the "
+	  "entity in the scene; the Details panel then shows its Property "
+	  "Animator.",
+	  "", "systems#animation" },
+	{ "Sequencer/Bind Selected", "",
+	  "Makes the selected entity an actor of this clip: it gets a Property "
+	  "Animator pointing here, or the one it has is pointed here. Greyed when "
+	  "nothing is selected or the selection already plays this clip. Undo in "
+	  "the scene takes it back.",
 	  "", "systems#animation" },
 	{ "Bone Mask Editor/Reference Skeleton", "",
 	  "A skeleton to pick joints from. It is this editor's own reference and is "
@@ -5195,6 +5323,8 @@ namespace
 		{ "Notify Timeline/",           "editor-animation", "Animation Editors", "Notify timeline" },
 		{ "Bone Mask Editor/",          "editor-animation", "Animation Editors", "Bone mask editor" },
 		{ "Blend Space Editor/",        "editor-animation", "Animation Editors", "Blend space editor" },
+		{ "Sequencer/",                 "editor-animation", "Animation Editors", "Sequencer" },
+		{ "sequencer.",                 "editor-animation", "Animation Editors", "Sequencer" },
 		// ── Build, diagnose, collaborate ─────────────────────────────────────
 		{ "export.",       "editor-export", "Export & Diagnostics", "Export" },
 		{ "profiler.",     "editor-export", "Export & Diagnostics", "Profiler" },

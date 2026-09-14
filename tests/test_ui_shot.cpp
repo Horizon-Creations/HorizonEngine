@@ -12,6 +12,8 @@
 #include "GraphEditor.h"   // the canvas under test: node draw order vs on-node widgets
 #include "EditorReference.h"
 #include "MeshMaterialSlots.h"   // the mesh tabs' slot list, over an in-memory mesh
+#include "SequencerTimeline.h"   // the sequencer's strip, over an in-memory clip
+#include "UITimelineMath.h"
 
 #include <ContentManager/ContentManager.h>
 #include <HorizonCode/HorizonCode.h>
@@ -2138,4 +2140,133 @@ TEST_CASE("mesh material slots: undo keys step the session only over the tab")
 	CHECK_FALSE(stepped);
 	CHECK(session.canUndo());
 	frame(350.0f, 180.0f, false, false);
+}
+
+// ── The Sequencer's strip ────────────────────────────────────────────────────
+// The scrub, the key hit boxes and the zoom are asserted in
+// test_sequencer_timeline.cpp; what has no witness there is the PICTURE — a
+// ruler with labels, a row per track with its name and value, diamonds on the
+// lane, a playhead. This is the coarse check that all of it draws, plus the one
+// colour question worth asking: the playhead line lands where the arithmetic
+// says the playhead is.
+TEST_CASE("ui shot: sequencer strip with two tracks and a playhead")
+{
+	namespace Seq = HE::Ed::Sequencer;
+	constexpr int W = 640, H = 200;
+	Harness harness(W, H);
+
+	PropertyAnimClipAsset clip;
+	clip.duration = 2.0f;
+	PropertyAnimChannel pos;
+	pos.target = PropTarget::PosX;
+	pos.times  = { 0.0f, 0.5f, 2.0f };
+	pos.values = { 0.0f, 1.0f, 3.0f };
+	PropertyAnimChannel rough;
+	rough.target = PropTarget::MatRoughness;
+	rough.times  = { 0.0f, 1.0f };
+	rough.values = { 0.2f, 0.8f };
+	clip.channels = { pos, rough };
+
+	Seq::View view;
+	view.playhead = 0.5f;
+	view.trackSel = 0;
+	view.keySel   = 1;
+	Seq::Result res;
+
+	const he_ui::Image img = shoot("sequencer_strip", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("Sequencer", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		res = Seq::draw(clip, view, ImVec2(0.0f, 0.0f));
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	// Ruler, two rows, names, values, diamonds: a strip this size draws
+	// thousands of pixels, and a blank one would be the bug this exists for.
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 20000);
+
+	// The playhead's warm line stands at xOf(0.5 s), through the rows. Read a
+	// pixel on it below the ruler and one a dozen pixels to the side: the line
+	// is bright, the lane beside it is not.
+	const HE::Ed::UITimelineView tv{ res.laneX, res.laneW, clip.duration, view.zoom, view.scroll };
+	const int px = int(std::lround(tv.xOf(0.5f)));
+	const int py = int(res.top + Seq::metrics().rulerH + 2.0f + Seq::metrics().rowH * 1.5f);
+	std::uint8_t r, g, b, a;
+	img.pixel(px, py, r, g, b, a);
+	CHECK(int(r) > 180);
+	img.pixel(px + 14, py + 8, r, g, b, a);
+	CHECK(int(r) < 90);
+}
+
+// The same clip in curve view: the track list stays on the left, the right is
+// one graph of the selected track. The one thing worth reading off the picture
+// is that the curve is where the arithmetic says — a straight line between the
+// keys, in the track's group colour — and that the value axis reported back is
+// the one it was drawn with.
+TEST_CASE("ui shot: sequencer curve view of one track")
+{
+	namespace Seq = HE::Ed::Sequencer;
+	constexpr int W = 640, H = 240;
+	Harness harness(W, H);
+
+	PropertyAnimClipAsset clip;
+	clip.duration = 2.0f;
+	PropertyAnimChannel pos;
+	pos.target = PropTarget::PosX;
+	pos.times  = { 0.0f, 0.5f, 2.0f };
+	pos.values = { 0.0f, 1.0f, 3.0f };
+	PropertyAnimChannel rough;
+	rough.target = PropTarget::MatRoughness;
+	rough.times  = { 0.0f, 1.0f };
+	rough.values = { 0.2f, 0.8f };
+	clip.channels = { pos, rough };
+
+	Seq::View view;
+	view.curves   = true;
+	view.playhead = 1.0f;
+	view.trackSel = 0;
+	view.keySel   = 1;
+	Seq::Result res;
+
+	const he_ui::Image img = shoot("sequencer_curves", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("Sequencer", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		res = Seq::draw(clip, view, ImVec2(0.0f, 0.0f));
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 20000);
+
+	// The axis the strip reports is the track's own range with its margin.
+	float lo = 0.0f, hi = 0.0f;
+	Seq::valueRange(pos, lo, hi);
+	CHECK(res.valueLo == doctest::Approx(lo));
+	CHECK(res.valueHi == doctest::Approx(hi));
+	CHECK(res.graphH > 40.0f);
+
+	// Halfway along the last segment — 1.25 s, value 2 — the curve passes in
+	// the transform group's blue. A pixel there is blue; one thirty pixels
+	// below it is graph floor.
+	const HE::Ed::UITimelineView tv{ res.laneX, res.laneW, clip.duration, view.zoom, view.scroll };
+	const Seq::ValueAxis axis{ res.graphTop, res.graphH, res.valueLo, res.valueHi };
+	const int px = int(std::lround(tv.xOf(1.25f)));
+	const int py = int(std::lround(axis.yOf(2.0f)));
+	std::uint8_t r, g, b, a;
+	// The line is two pixels wide and anti-aliased; the brightest of a short
+	// column is the line itself.
+	int bestB = 0, bestR = 255;
+	for (int dy = -2; dy <= 2; ++dy)
+	{
+		img.pixel(px, py + dy, r, g, b, a);
+		if (int(b) > bestB) { bestB = int(b); bestR = int(r); }
+	}
+	CHECK(bestB > 180);
+	CHECK(bestR < 170);
+	img.pixel(px, py + 30, r, g, b, a);
+	CHECK(int(b) < 90);
 }

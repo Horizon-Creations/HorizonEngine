@@ -581,6 +581,36 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		}
 		handle = m_animClipAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::PropertyAnimClip:
+	{
+		// No chunk is an empty clip, not a failure: a stub from the Content
+		// Browser's create menu is META alone, and the Sequencer's job is to
+		// put tracks into it.
+		PropertyAnimClipAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_PANM))
+		{
+			size_t o = 0;
+			HAsset::Reader::readPOD(c->data, o, a.duration);
+			uint32_t channelCount = 0;
+			HAsset::Reader::readPOD(c->data, o, channelCount);
+			a.channels.reserve(channelCount);
+			for (uint32_t i = 0; i < channelCount; ++i)
+			{
+				PropertyAnimChannel ch;
+				uint8_t targetByte = 0;
+				// Stop at the first short read rather than appending a channel
+				// with times and no values — the runtime would sample it and
+				// index past the end.
+				if (!HAsset::Reader::readPOD(c->data, o, targetByte)) break;
+				ch.target = static_cast<PropTarget>(targetByte);
+				HAsset::Reader::readVec(c->data, o, ch.times);
+				HAsset::Reader::readVec(c->data, o, ch.values);
+				if (ch.times.size() != ch.values.size()) break;
+				a.channels.push_back(std::move(ch));
+			}
+		}
+		handle = m_propAnimClipAssets.insert(std::move(a)); break;
+	}
 	default:
 		return HE::UUID();
 	}
@@ -1742,6 +1772,23 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		w.addChunk(HAsset::CHUNK_ANOT, n.data(), n.size());
 		break;
 	}
+	case HE::AssetType::PropertyAnimClip:
+	{
+		// Written even when empty, so a clip whose tracks were all removed
+		// reads back as an empty clip of that length rather than a stub.
+		auto& a = static_cast<PropertyAnimClipAsset&>(asset);
+		std::vector<uint8_t> b;
+		HAsset::Writer::appendPOD(b, a.duration);
+		HAsset::Writer::appendPOD(b, static_cast<uint32_t>(a.channels.size()));
+		for (const auto& ch : a.channels)
+		{
+			HAsset::Writer::appendPOD(b, static_cast<uint8_t>(ch.target));
+			HAsset::Writer::appendVec(b, ch.times);
+			HAsset::Writer::appendVec(b, ch.values);
+		}
+		w.addChunk(HAsset::CHUNK_PANM, b.data(), b.size());
+		break;
+	}
 	default:
 		return false;
 	}
@@ -1965,6 +2012,7 @@ const PrefabAsset*        ContentManager::getPrefab(HE::UUID id) const        { 
 const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_animClipAssets,     id); }
 AnimationClipAsset*            ContentManager::getAnimationClipMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_animClipAssets, id); }
 const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_propAnimClipAssets, id); }
+PropertyAnimClipAsset*         ContentManager::getPropertyAnimClipMutable(HE::UUID id)  { return lookupAssetMutable(m_handleToUUID, m_propAnimClipAssets, id); }
 const ThemeAsset*            ContentManager::getTheme(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_themeAssets, id); }
 ThemeAsset*                  ContentManager::getThemeMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_themeAssets, id); }
 const BoneMaskAsset*         ContentManager::getBoneMask(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_boneMaskAssets, id); }

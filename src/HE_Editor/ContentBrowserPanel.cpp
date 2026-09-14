@@ -19,6 +19,7 @@
 #include "ThemeAssetPanel.h"
 #include "BoneMaskPanel.h"
 #include "BlendSpacePanel.h"
+#include "SequencerPanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -939,6 +940,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{ "Animation Clip",    HE::AssetType::AnimationClip },
 			{ "Bone Mask",         HE::AssetType::BoneMask },
 			{ "Blend Space",       HE::AssetType::BlendSpace },
+			{ "Property Animation", HE::AssetType::PropertyAnimClip },
 			{ "Input Action",      HE::AssetType::InputAction },
 			{ "Input Mapping",     HE::AssetType::InputMappingContext },
 			{ "Audio",             HE::AssetType::Audio },
@@ -1237,7 +1239,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			      ParticleGraphEditorPanel::isParticleAsset(fullPath) ||
 			      AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(fullPath) ||
 			      BoneMaskPanel::isBoneMaskAsset(fullPath) ||
-			      BlendSpacePanel::isBlendSpaceAsset(fullPath)))
+			      BlendSpacePanel::isBlendSpaceAsset(fullPath) ||
+			      SequencerPanel::isSequencerAsset(fullPath)))
 				return; // no dedicated editor for this type — same no-op the old inline dispatch had
 
 			const std::string tabLabel = std::filesystem::path(fullPath).stem().string();
@@ -2308,6 +2311,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				if (EditorWidgets::menuItem("Animator State Machine")) tryCreate("NewStateMachine", ".hasset", HE::AssetType::AnimatorStateMachine);
 				if (EditorWidgets::menuItem("Bone Mask")) tryCreate("NewBoneMask", ".hasset", HE::AssetType::BoneMask);
 				if (EditorWidgets::menuItem("Blend Space")) tryCreate("NewBlendSpace", ".hasset", HE::AssetType::BlendSpace);
+				// Not a character thing, but animation all the same: a clip the
+				// Sequencer fills with tracks and a Property Animator plays.
+				if (EditorWidgets::menuItem("Property Animation Clip")) tryCreate("NewPropertyAnimation", ".hasset", HE::AssetType::PropertyAnimClip);
 				ImGui::EndMenu();
 			}
 
