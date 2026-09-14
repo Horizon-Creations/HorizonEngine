@@ -1,6 +1,7 @@
 #include "ContentManager/ContentManager.h"
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
+#include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
 #include "ContentManager/HAsset.h"
 #include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
 #include "Hpak/HpakReader.h"
@@ -2963,4 +2964,99 @@ void ContentManager::initDefaultAssets()
 	terrainMat.roughness     = 0.8f;
 	terrainMat.doubleSided   = true;
 	registerMaterial(std::move(terrainMat));
+
+	// ── Editor icons (kEditorIcon*TextureId / kEditorIcon*MaterialId) ────────
+	// The billboards the scene view draws for lights, cameras and audio sources
+	// (RenderExtractor::extractEditorIcons). Each texture is one glyph of the
+	// engine's icon face, white on a dark 1-px halo, over a transparent ground;
+	// each material is an UNLIT Translucent graph sampling it — unlit so a lamp
+	// icon does not go black at night, translucent so its corners stay see-through.
+	//
+	// Rows are written bottom-up: the engine's textures put v = 0 at the bottom
+	// (TextureImporter flips on load for the same reason) and the billboard quad
+	// maps v = 0 to its lower edge, while stb rasterizes top-down.
+	{
+		struct IconDef { const char* glyph; const char* name; HE::UUID texId; HE::UUID matId; };
+		static const IconDef kIcons[] = {
+			{ "lightbulb",    "EditorIconPointLight",       HE::kEditorIconPointLightTextureId,       HE::kEditorIconPointLightMaterialId },
+			{ "highlight",    "EditorIconSpotLight",        HE::kEditorIconSpotLightTextureId,        HE::kEditorIconSpotLightMaterialId },
+			{ "wb_sunny",     "EditorIconDirectionalLight", HE::kEditorIconDirectionalLightTextureId, HE::kEditorIconDirectionalLightMaterialId },
+			{ "videocam",     "EditorIconCamera",           HE::kEditorIconCameraTextureId,           HE::kEditorIconCameraMaterialId },
+			{ "volume_up",    "EditorIconAudioSource",      HE::kEditorIconAudioSourceTextureId,      HE::kEditorIconAudioSourceMaterialId },
+		};
+		constexpr int px = HE::kEditorIconTextureSize;
+		for (const IconDef& def : kIcons)
+		{
+			// Coverage of the glyph; an icon the face does not carry (never, the
+			// names are checked by test_editor_icons) leaves a blank — still a
+			// clickable quad, just an invisible one.
+			std::vector<uint8_t> glyph;
+			if (!HE::uiRasterizeIcon(def.glyph, px, glyph))
+				glyph.assign(static_cast<size_t>(px) * px, 0);
+			auto cov = [&](int x, int y) -> int {
+				if (x < 0 || y < 0 || x >= px || y >= px) return 0;
+				return glyph[static_cast<size_t>(y) * px + x];
+			};
+			std::vector<uint8_t> pixels(static_cast<size_t>(px) * px * 4, 0);
+			for (int y = 0; y < px; ++y)
+				for (int x = 0; x < px; ++x)
+				{
+					// Halo = the glyph dilated by one pixel; the glyph itself sits
+					// on top of it. Straight (non-premultiplied) alpha, which is what
+					// the Texture Sample node's A pin feeds the blend with.
+					int halo = 0;
+					for (int dy = -1; dy <= 1; ++dy)
+						for (int dx = -1; dx <= 1; ++dx)
+							halo = std::max(halo, cov(x + dx, y + dy));
+					const float g = cov(x, y) / 255.0f;
+					const float h = halo / 255.0f;
+					const float a = std::max(g, h * 0.85f);
+					// Between the dark halo (0.08) and the white glyph, by glyph coverage.
+					const float c = 0.08f + (1.0f - 0.08f) * g;
+					const uint8_t cb = static_cast<uint8_t>(std::lround(c * 255.0f));
+					const size_t o = (static_cast<size_t>(px - 1 - y) * px + x) * 4; // bottom-up
+					pixels[o + 0] = cb;
+					pixels[o + 1] = cb;
+					pixels[o + 2] = cb;
+					pixels[o + 3] = static_cast<uint8_t>(std::lround(a * 255.0f));
+				}
+			TextureAsset tex;
+			tex.id       = def.texId;
+			tex.name     = std::string(def.name) + "Texture";
+			tex.path     = "mem://" + std::string(def.name) + "_tex";
+			tex.data     = std::move(pixels);
+			tex.width    = px;
+			tex.height   = px;
+			tex.channels = 4;
+			registerTexture(std::move(tex));
+
+			// Unlit + Translucent: UV → Texture Sample (slot 0 = this material's
+			// own texture, heTex0) → BaseColor, its A → Opacity. The UV node is
+			// not optional: an unconnected UV pin bakes to the CONSTANT (0, 0),
+			// which samples the transparent corner over the whole quad.
+			HE::MaterialGraph g;
+			const int out = g.addNode(HE::MatNodeType::Output);
+			g.findNode(out)->p[0] = 0.0f;                                        // unlit
+			g.findNode(out)->p[1] = static_cast<float>(HE::MatBlendMode::Translucent);
+			const int uv  = g.addNode(HE::MatNodeType::UV);
+			const int smp = g.addNode(HE::MatNodeType::TextureSample);
+			g.connect(uv,  0, smp, 0);
+			g.connect(smp, 0, out, HE::kMatOutputBaseColorPin);
+			g.connect(smp, 1, out, HE::kMatOutputOpacityPin);
+			const HE::MatShaderGen gen = HE::generateFragment(g);
+
+			MaterialAsset mat;
+			mat.id                   = def.matId;
+			mat.name                 = std::string(def.name) + "Material";
+			mat.path                 = "mem://" + std::string(def.name) + "_material";
+			mat.textureIds           = { def.texId };
+			mat.doubleSided          = true;   // seen from behind while orbiting past it
+			mat.nodeGraphJson        = HE::materialGraphToJson(g);
+			mat.customShaderFragGlsl = gen.glsl;
+			mat.customShaderGBufGlsl = gen.glslGBuffer;
+			mat.blendMode            = gen.blendMode;
+			mat.domain               = gen.domain;
+			registerMaterial(std::move(mat));
+		}
+	}
 }

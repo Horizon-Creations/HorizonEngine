@@ -49,4 +49,32 @@ constexpr UUID kDefaultSnowflakeMeshId = { 0x0000000000000007ULL, 0x000000000000
 // channel 0 makes an unpainted terrain show layer 0, which is what you want.
 constexpr UUID kDefaultLayer0WeightTextureId = { 0x0000000000000008ULL, 0x0000000000000001ULL };
 
+// ── Editor icons ─────────────────────────────────────────────────────────────
+// The billboards the scene view draws for entities that have no geometry of
+// their own — a light, a camera, an audio source — so they can be seen and
+// clicked (RenderExtractor emits them only under an active editor camera, so
+// a packaged game never draws one). 64×64 RGBA8 each, rasterized at
+// construction from the engine's icon face (UIFont's Material Symbols): a
+// white glyph with a dark halo, which reads on a bright sky and on a dark
+// wall alike. Texture row 0 is the BOTTOM, the engine's texture convention.
+constexpr UUID kEditorIconPointLightTextureId       = { 0x0000000000000009ULL, 0x0000000000000001ULL };
+constexpr UUID kEditorIconSpotLightTextureId        = { 0x000000000000000AULL, 0x0000000000000001ULL };
+constexpr UUID kEditorIconDirectionalLightTextureId = { 0x000000000000000BULL, 0x0000000000000001ULL };
+constexpr UUID kEditorIconCameraTextureId           = { 0x000000000000000CULL, 0x0000000000000001ULL };
+constexpr UUID kEditorIconAudioSourceTextureId      = { 0x000000000000000DULL, 0x0000000000000001ULL };
+
+// One unlit, alpha-blended, double-sided material per icon texture above:
+// an unlit Translucent node graph (Texture Sample → BaseColor + Opacity), so
+// the icon keeps its colour at night and its transparent corners stay
+// transparent. Authored as a graph rather than hand-written GLSL so it goes
+// through exactly the codegen every project material goes through.
+constexpr UUID kEditorIconPointLightMaterialId       = { 0x000000000000000EULL, 0x0000000000000001ULL };
+constexpr UUID kEditorIconSpotLightMaterialId        = { 0x000000000000000FULL, 0x0000000000000001ULL };
+constexpr UUID kEditorIconDirectionalLightMaterialId = { 0x0000000000000010ULL, 0x0000000000000001ULL };
+constexpr UUID kEditorIconCameraMaterialId           = { 0x0000000000000011ULL, 0x0000000000000001ULL };
+constexpr UUID kEditorIconAudioSourceMaterialId      = { 0x0000000000000012ULL, 0x0000000000000001ULL };
+
+// Pixel size of the editor icon textures above.
+constexpr int kEditorIconTextureSize = 64;
+
 } // namespace HE

@@ -780,9 +780,9 @@ void render(AppContext& ctx, float dt)
 				// encloses — see EditorMarquee for the rule. Meshes only, never
 				// terrain: a landscape is hundreds of chunk entities, and "the
 				// ground" is not what anyone frames on purpose; a click still
-				// selects it. Entities that draw nothing (lights, cameras,
-				// empties) are not on screen to be framed, so they are left out
-				// until the viewport draws them.
+				// selects it. Lights, cameras and audio sources are on screen
+				// as their icon quads (RenderExtractor's editor icons), so they
+				// frame like any mesh; a bare empty draws nothing and stays out.
 				auto entitiesInFrame = [&](const ImVec2& a, const ImVec2& b) -> std::vector<Entity>
 				{
 					const float w = std::max(rectMax.x - rectMin.x, 1.0f);

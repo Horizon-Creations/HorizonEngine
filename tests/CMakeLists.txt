@@ -113,6 +113,7 @@ add_executable(he_tests
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_rope_trail.cpp
+    test_editor_icons.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
     test_gamelogic_services.cpp
