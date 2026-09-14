@@ -10,6 +10,7 @@
 #include "EditorWidgets.h"          // asset drop slot + WrapText (text wraps, never runs off)
 #include "EditorInput.h"            // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include "UITimelineMath.h"         // seconds ⇄ pixels, shared with the UI designer's strip
+#include "MeshMaterialSlots.h"      // the material-slot list, shared with the static tab
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/AnimationPreview.h>
@@ -54,6 +55,11 @@ struct State
 
 	// Orbit camera, same feel as MaterialEditorPanel's preview.
 	float previewYaw = 0.6f, previewPitch = 0.35f, previewDist = 2.2f;
+
+	// The material slots' undo stack + missing-path cache — the one edit this
+	// tab makes to the MESH (everything else it edits is the clip). Written
+	// into the asset and saved at once, unlike the clip's dirty flag.
+	HE::Ed::MeshMaterialSlots::Session slots;
 };
 
 static AssetPanelState<State> s_states;
@@ -72,6 +78,33 @@ static State& stateFor(const std::string& path, AppContext& ctx)
 	st.meshId = openPanelAsset(ctx, path, st.name, st.relPath);
 	st.loaded = true;
 	return st;
+}
+
+// ── Material slots ──────────────────────────────────────────────────────────
+// Writes an edited slot table into the mesh and saves it — the same shape as
+// the static tab's commitSlots. By ID, never through a pointer taken earlier:
+// the picker that produced the edit may have loaded a material and moved it.
+static void commitSlots(AppContext& ctx, State& st, const HE::Ed::MeshMaterialSlots::Table& table)
+{
+	if (!ctx.contentManager) return;
+	SkeletalMeshAsset* mesh = ctx.contentManager->getSkeletalMeshMutable(st.meshId);
+	if (!mesh) return;
+	HE::Ed::MeshMaterialSlots::applyTo(table, *mesh);
+	if (ctx.contentManager->saveAsset(*mesh))
+		HE_LOG_INFO(Editor, "%s", ("SkeletalMeshEditor: saved material slots of '" + st.relPath + "'").c_str());
+	else
+		HE_LOG_WARN(Editor, "%s", ("SkeletalMeshEditor: could not save '" + st.relPath + "'").c_str());
+}
+
+// undo = false for the same reason as the clip slot below: the world's undo
+// system snapshots entities, and the tab's own Session is what steps this back.
+static EditorWidgets::SlotAction drawSlotWidget(AppContext& ctx, size_t index, HE::UUID& target,
+                                                const char* emptyText)
+{
+	char idSuffix[24];
+	std::snprintf(idSuffix, sizeof(idSuffix), "skslot%zu", index);
+	return EditorWidgets::assetDropSlot(ctx, nullptr, target, HE::AssetType::Material, idSuffix,
+	                                    emptyText, "material", /*showClear=*/true, /*undo=*/false);
 }
 
 // The loaded clip IS the edit buffer (see ContentManager::getAnimationClipMutable),
@@ -281,8 +314,8 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		}
 		bar.endGroup();
 
-		// Only the clip can be dirty here, and only when one is loaded — the mesh
-		// itself is still view-only in this tab.
+		// Only the clip can be dirty here, and only when one is loaded — the one
+		// edit the tab makes to the mesh (a material slot) is saved as it is made.
 		bar.rightGroup(bar.iconGroupWidth(1));
 		if (bar.item("##skelSaveClip", T::iconSave, nullptr, false, clipDirty,
 		             "Save the clip's notifies and root-motion switch",
@@ -304,7 +337,28 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 
 		ImGui::TextDisabled("%s — %zu joint(s)", st.name.c_str(), mesh->skeleton.size());
 		ImGui::Separator();
-		if (mesh->skeleton.empty())
+
+		// ── Material slots ───────────────────────────────────────────────
+		// The mesh's sections, each with a material picker. Edits the MESH
+		// asset (the skeletal draw path still draws the whole mesh with slot
+		// 0's material; the table is what a per-section skinned draw will
+		// read). On a COPY, then `mesh` is re-fetched: the picker can load a
+		// material, and a load moves every mesh pointer taken before it.
+		{
+			namespace MS = HE::Ed::MeshMaterialSlots;
+			MS::Table table = MS::tableOf(*mesh);
+			const bool changed = MS::draw(ctx.contentManager, table, st.slots,
+				[&](size_t i, HE::UUID& target, const char* emptyText) {
+					return drawSlotWidget(ctx, i, target, emptyText);
+				});
+			if (changed) commitSlots(ctx, st, table);
+			mesh = ctx.contentManager->getSkeletalMesh(st.meshId);
+		}
+
+		ImGui::SeparatorText("Skeleton");
+		if (!mesh)
+			ImGui::TextDisabled("(mesh no longer loaded)");   // the frame ends after the pane
+		else if (mesh->skeleton.empty())
 			ImGui::TextDisabled("(no skeleton data)");
 		else
 		{
@@ -322,6 +376,15 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		}
 	}
 	ImGui::EndChild();
+
+	// The slot picker may have moved the asset pool; `mesh` was taken again
+	// after it, and an asset that is no longer there ends the frame here —
+	// outside the pane, so its wrap scope has already been popped in order.
+	if (!mesh)
+	{
+		ImGui::End();
+		return;
+	}
 
 	// ── Right: clip scrub controls + live preview ──────────────────────────
 	ImGui::SameLine();
@@ -348,9 +411,13 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 
 		// Fetched AFTER the slot, never before and never cached on the State: the
 		// picker inside assetDropSlot can load an asset, and a load moves the dense
-		// vector every clip pointer points into.
+		// vector every clip pointer points into. The MESH pointer too — the pose
+		// evaluation below reads it, so it is taken again here for the same
+		// reason, and a mesh that is gone leaves the preview in its bind pose.
 		AnimationClipAsset* clip = (st.clipId != HE::UUID{} && ctx.contentManager)
 			? ctx.contentManager->getAnimationClipMutable(st.clipId) : nullptr;
+		mesh = ctx.contentManager ? ctx.contentManager->getSkeletalMesh(st.meshId) : nullptr;
+		if (!mesh) clip = nullptr;
 		if (clip)
 		{
 			ImGui::SetNextItemWidth(-FLT_MIN);
@@ -664,6 +731,16 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			st.previewDist = std::clamp(st.previewDist - ImGui::GetIO().MouseWheel * 0.1f, 0.5f, 8.0f);
 	}
 	ImGui::EndChild();
+
+	// Cmd/Ctrl+Z over the tab steps the material-slot edits back (and forward
+	// again); each step is written and saved like the edit it undoes. In the
+	// host window, after both panes, so "hovered" covers the whole tab.
+	{
+		namespace MS = HE::Ed::MeshMaterialSlots;
+		MS::Table restored;
+		if (MS::handleUndoKeys(restored, st.slots)) commitSlots(ctx, st, restored);
+	}
+
 	ImGui::End();
 }
 

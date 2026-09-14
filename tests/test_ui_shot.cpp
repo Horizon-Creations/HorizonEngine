@@ -11,7 +11,9 @@
 #include "HcNodeReference.h"
 #include "GraphEditor.h"   // the canvas under test: node draw order vs on-node widgets
 #include "EditorReference.h"
+#include "MeshMaterialSlots.h"   // the mesh tabs' slot list, over an in-memory mesh
 
+#include <ContentManager/ContentManager.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
 
@@ -21,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
 
 // ── Editor UI, rendered without a GPU ────────────────────────────────────────
 // The headless tests could already DRIVE ImGui — a context and a display size
@@ -1923,4 +1926,216 @@ TEST_CASE("ui shot: a pin's dropdown fits inside its node")
 	     << " wide, default is " << int(GraphEditor::kNodeW) << "), slot ends at " << slotRight);
 	CHECK(nodeRight - nodeLeft > int(GraphEditor::kNodeW));
 	CHECK(slotRight < nodeRight - 2);
+}
+
+// ── Mesh material slots ──────────────────────────────────────────────────────
+// The list both mesh tabs show: one row per section with a material picker.
+// Drawn here over an in-memory mesh with a plain button standing in for the
+// picker (the panels hand in assetDropSlot, which needs the editor's context),
+// which is exactly why the list takes the widget as a parameter. What the scene
+// checks is the part with no other witness: what an empty slot SAYS, what an
+// assignment writes into the table, that slot 0 mirrors into the mesh-level
+// material and that the session steps it all back.
+TEST_CASE("ui shot: a mesh's material slots, assigned and undone")
+{
+	namespace MS = HE::Ed::MeshMaterialSlots;
+	constexpr int W = 420, H = 260;
+	Harness harness(W, H);
+
+	ContentManager cm;
+	MaterialAsset stone; stone.name = "Stone"; stone.path = "Materials/Stone.hasset";
+	MaterialAsset wood;  wood.name  = "Wood";  wood.path  = "Materials/Wood.hasset";
+	const HE::UUID stoneId = cm.registerMaterial(std::move(stone));
+	const HE::UUID woodId  = cm.registerMaterial(std::move(wood));
+	REQUIRE(stoneId != HE::UUID{});
+	REQUIRE(woodId  != HE::UUID{});
+
+	// Three sections: slot 0 bound, slot 1 unassigned, slot 2 pointing at a
+	// material that is not there — every state a row can be in.
+	StaticMeshAsset mesh;
+	mesh.name = "Crate";
+	mesh.indices.resize(36);
+	mesh.materialPath = "Materials/Stone.hasset";
+	mesh.sections = {
+		{ 0,  12, "Materials/Stone.hasset", {} },
+		{ 12, 12, "",                       {} },
+		{ 24, 12, "Materials/Gone.hasset",  {} },
+	};
+	const HE::UUID meshId = cm.registerStaticMesh(std::move(mesh));
+	REQUIRE(meshId != HE::UUID{});
+
+	MS::Session session;
+	MS::Table   table = MS::tableOf(*cm.getStaticMesh(meshId));
+	REQUIRE(table.sections.size() == 3);
+
+	// The stand-in picker: draws a button with what the real one would show,
+	// records the empty text it was handed, and on request "picks" a material.
+	std::vector<std::string> shown(3);
+	int    assignSlot = -1;
+	HE::UUID assignId;
+	auto slot = [&](size_t i, HE::UUID& target, const char* emptyText) {
+		std::string label = emptyText;
+		if (target != HE::UUID{})
+			if (const MaterialAsset* m = cm.getMaterial(target)) label = m->name;
+		shown[i] = label;
+		ImGui::Button((label + "##slot" + std::to_string(i)).c_str());
+		if (static_cast<int>(i) == assignSlot)
+		{
+			assignSlot = -1;
+			target = assignId;
+			return assignId == HE::UUID{} ? EditorWidgets::SlotAction::Cleared
+			                              : EditorWidgets::SlotAction::Assigned;
+		}
+		return EditorWidgets::SlotAction::None;
+	};
+
+	bool changedThisFrame = false;
+	auto scene = [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("Mesh Viewer", nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		{
+			Help::Scope scope("Mesh Viewer");
+			EditorWidgets::WrapText wrap;
+			ImGui::Text("Vertices  8");
+			ImGui::Text("Triangles 12");
+			changedThisFrame = MS::draw(&cm, table, session, slot);
+		}
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+	};
+
+	// 1. As loaded: slot 0 names its material, slot 1 says it follows slot 0,
+	//    slot 2 names the path it cannot find — never a bare "(none)" for a
+	//    reference that is still in the asset.
+	const he_ui::Image img = shoot("mesh-material-slots", W, H, 3, scene);
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 3000);
+	CHECK(shown[0] == "Stone");
+	CHECK(shown[1] == "(same as slot 0)");
+	CHECK(shown[2] == "(missing: Materials/Gone.hasset)");
+	CHECK_FALSE(changedThisFrame);
+	// The missing one was looked for once and remembered, not retried per frame.
+	CHECK(session.missing.count("Materials/Gone.hasset") == 1);
+	// Seeded with the as-loaded table: nothing to undo yet.
+	CHECK_FALSE(session.canUndo());
+
+	// 2. Assign slot 1 → written as the material's PATH (the editor's form of
+	//    the reference); the mesh-level material is NOT touched — that is slot 0's.
+	assignSlot = 1; assignId = woodId;
+	shoot("mesh-material-slots-assign", W, H, 1, scene);
+	CHECK(changedThisFrame);
+	CHECK(table.sections[1].materialPath == "Materials/Wood.hasset");
+	CHECK(table.sections[1].materialId == HE::UUID{});
+	CHECK(table.ownPath == "Materials/Stone.hasset");
+	CHECK(session.canUndo());
+	shoot("mesh-material-slots-assigned", W, H, 1, scene);
+	CHECK(shown[1] == "Wood");
+
+	// 3. Assign slot 0 → the mirror moves with it (Assets.h: the mesh's own
+	//    material equals slot 0, and the single-material draw paths read it).
+	assignSlot = 0; assignId = woodId;
+	shoot("mesh-material-slots-slot0", W, H, 1, scene);
+	CHECK(changedThisFrame);
+	CHECK(table.sections[0].materialPath == "Materials/Wood.hasset");
+	CHECK(table.ownPath == "Materials/Wood.hasset");
+	CHECK(table.ownId == HE::UUID{});
+
+	// 4. Clear slot 0 → no material at all, mirror included.
+	assignSlot = 0; assignId = HE::UUID{};
+	shoot("mesh-material-slots-clear", W, H, 1, scene);
+	CHECK(changedThisFrame);
+	CHECK(table.sections[0].materialPath.empty());
+	CHECK(table.ownPath.empty());
+	shoot("mesh-material-slots-cleared", W, H, 1, scene);
+	CHECK(shown[0] == "(none)");
+
+	// 5. Undo, three times: each step is the table as it was before that edit,
+	//    down to the floor — and one more is refused rather than wrapping.
+	MS::Table restored;
+	REQUIRE(session.step(-1, restored));
+	CHECK(restored.sections[0].materialPath == "Materials/Wood.hasset");
+	CHECK(restored.ownPath == "Materials/Wood.hasset");
+	REQUIRE(session.step(-1, restored));
+	CHECK(restored.sections[0].materialPath == "Materials/Stone.hasset");
+	CHECK(restored.sections[1].materialPath == "Materials/Wood.hasset");
+	REQUIRE(session.step(-1, restored));
+	CHECK(restored.sections[1].materialPath.empty());
+	CHECK(restored.ownPath == "Materials/Stone.hasset");
+	CHECK_FALSE(session.canUndo());
+	CHECK_FALSE(session.step(-1, restored));
+	// …and redo walks forward again.
+	CHECK(session.canRedo());
+	REQUIRE(session.step(+1, restored));
+	CHECK(restored.sections[1].materialPath == "Materials/Wood.hasset");
+
+	// 6. Written back, the table is what the loader's shape promises: the
+	//    section bytes survive a round trip through the asset unchanged.
+	StaticMeshAsset* live = cm.getStaticMeshMutable(meshId);
+	REQUIRE(live != nullptr);
+	MS::applyTo(restored, *live);
+	CHECK(live->materialPath == "Materials/Stone.hasset");
+	CHECK(live->sections.size() == 3);
+	CHECK(live->sections[1].materialPath == "Materials/Wood.hasset");
+	CHECK(MS::tableOf(*live) == restored);
+}
+
+// The keyboard half: Cmd/Ctrl+Z over the tab steps the session, Shift+Z steps
+// it forward, and neither fires while the pointer is somewhere else — the
+// world's undo owns the keys everywhere but here.
+TEST_CASE("mesh material slots: undo keys step the session only over the tab")
+{
+	namespace MS = HE::Ed::MeshMaterialSlots;
+	constexpr int W = 400, H = 200;
+	Harness harness(W, H);
+
+	MS::Session session;
+	MS::Table   floor;
+	floor.sections = { { 0, 6, "", {} } };
+	session.seed(floor);
+	MS::Table edited = floor;
+	edited.sections[0].materialPath = "Materials/Wood.hasset";
+	edited.ownPath = "Materials/Wood.hasset";
+	session.push(edited);
+
+	MS::Table out;
+	bool stepped = false;
+	ImGuiIO& io = ImGui::GetIO();
+	auto frame = [&](float mx, float my, bool z, bool shift) {
+		io.AddMousePosEvent(mx, my);
+		io.AddKeyEvent(ImGuiMod_Ctrl, z);
+		io.AddKeyEvent(ImGuiMod_Shift, z && shift);
+		io.AddKeyEvent(ImGuiKey_Z, z);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(200.0f, 150.0f));
+		ImGui::Begin("Tab", nullptr, ImGuiWindowFlags_NoSavedSettings);
+		ImGui::BeginChild("pane", ImVec2(0, 0), true);
+		ImGui::TextUnformatted("slots");
+		ImGui::EndChild();
+		stepped = MS::handleUndoKeys(out, session);
+		ImGui::End();
+		ImGui::Render();
+	};
+
+	frame(60.0f, 60.0f, false, false);   // settle: the window needs a frame to exist
+	frame(60.0f, 60.0f, false, false);
+	// Over the tab: Cmd+Z undoes to the floor.
+	frame(60.0f, 60.0f, true, false);
+	CHECK(stepped);
+	CHECK(out.sections[0].materialPath.empty());
+	CHECK_FALSE(session.canUndo());
+	frame(60.0f, 60.0f, false, false);   // key up
+	// Shift+Cmd+Z redoes.
+	frame(60.0f, 60.0f, true, true);
+	CHECK(stepped);
+	CHECK(out.sections[0].materialPath == "Materials/Wood.hasset");
+	frame(60.0f, 60.0f, false, false);
+	// Off the tab: nothing happens, the session stays where it was.
+	frame(350.0f, 180.0f, true, false);
+	CHECK_FALSE(stepped);
+	CHECK(session.canUndo());
+	frame(350.0f, 180.0f, false, false);
 }

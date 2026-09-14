@@ -312,10 +312,11 @@ TEST_CASE("glTF PBR material imports every channel into one graph")
 	he_test::removeAllQuiet(dir);
 }
 
-// A mesh asset holds exactly ONE material reference (no submesh concept), so a
-// multi-material glTF cannot be bound in full. Importing every material anyway —
-// and saying which ones went unbound — beats dropping them: the assets are
-// complete, the user only has to assign them.
+// A multi-material glTF imports as one material SECTION per material: every
+// material is written, and each is bound to the index range holding the
+// primitives authored with it. The mesh-level reference (MREF) is section 0's,
+// which is the first primitive's — what the section-unaware draw paths keep
+// resolving for the whole mesh.
 TEST_CASE("a multi-material glTF writes every material and binds the first primitive's")
 {
 	const fs::path dir = fs::temp_directory_path() / "he_test_gltf_multimat";
@@ -347,10 +348,30 @@ TEST_CASE("a multi-material glTF writes every material and binds the first primi
 	REQUIRE(mesh != nullptr);
 	CHECK(mesh->materialPath == "Imported/M_Body.hasset");
 
-	// The unbound one is still a complete asset on disk. Its name comes from the
-	// glTF material with the space sanitised — a raw DCC name can carry characters
+	// Two sections, one per material, each over its primitive's three indices.
+	REQUIRE(mesh->sections.size() == 2);
+	CHECK(mesh->sections[0].indexOffset  == 0);
+	CHECK(mesh->sections[0].indexCount   == 3);
+	CHECK(mesh->sections[0].materialPath == "Imported/M_Body.hasset");
+	CHECK(mesh->sections[1].indexOffset  == 3);
+	CHECK(mesh->sections[1].indexCount   == 3);
+	CHECK(mesh->sections[1].materialPath == "Imported/M_Glass.hasset");
+	CHECK(HE::meshSectionsCover(mesh->sections, mesh->indices.size()));
+
+	// The second one is a complete asset on disk. Its name comes from the glTF
+	// material with the space sanitised — a raw DCC name can carry characters
 	// that are not legal in a file name at all.
 	REQUIRE(fs::exists(contentRoot / "Imported/M_Glass.hasset"));
+
+	// …and the table survives the trip through disk the way the engine reads it.
+	{
+		ContentManager cm(contentRoot.string());
+		const StaticMeshAsset* loaded = cm.getStaticMesh(cm.loadAsset(mesh->path));
+		REQUIRE(loaded != nullptr);
+		REQUIRE(loaded->sections.size() == 2);
+		CHECK(loaded->sections[1].materialPath == "Imported/M_Glass.hasset");
+		CHECK(loaded->sections[1].indexOffset  == 3);
+	}
 
 	LoadedMaterial glass(contentRoot, "Imported/M_Glass.hasset");
 	REQUIRE(glass.mat != nullptr);
@@ -363,6 +384,120 @@ TEST_CASE("a multi-material glTF writes every material and binds the first primi
 	// Translucent DOES read the Opacity pin, so it has to be driven — here by the
 	// base-colour factor's alpha, since the material has no base-colour texture.
 	CHECK(pinSource(g, outputNodeId(g), HE::kMatOutputOpacityPin) != nullptr);
+
+	he_test::removeAllQuiet(dir);
+}
+
+// Primitives are baked in file order, but a section has to be ONE contiguous
+// run of the index buffer. A file whose materials alternate (A, B, A) therefore
+// gets its index buffer regrouped — whole primitive ranges only, and only the
+// indices: every vertex stays where the bake put it. A primitive with no
+// material at all joins the primary's section, as unassigned geometry always
+// took the first material.
+TEST_CASE("interleaved materials regroup the index buffer into one section each")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_gltf_interleaved";
+	he_test::removeAllQuiet(dir);
+	writeTriangleBin(dir);
+
+	// Four primitives over the same triangle: A, B, A, none. Each primitive gets
+	// its own copy of the three vertices, so primitive k owns indices 3k..3k+2 —
+	// which is what makes the regrouping visible in the buffer itself.
+	std::ofstream f(dir / "abab.gltf");
+	f << R"({
+  "asset": { "version": "2.0" },
+  "scene": 0,
+  "scenes": [ { "nodes": [0] } ],
+  "nodes":  [ { "mesh": 0 } ],
+  "meshes": [ { "primitives": [
+      { "attributes": { "POSITION": 0, "TEXCOORD_0": 1 }, "indices": 2, "material": 0 },
+      { "attributes": { "POSITION": 0, "TEXCOORD_0": 1 }, "indices": 2, "material": 1 },
+      { "attributes": { "POSITION": 0, "TEXCOORD_0": 1 }, "indices": 2, "material": 0 },
+      { "attributes": { "POSITION": 0, "TEXCOORD_0": 1 }, "indices": 2 } ] } ],
+  "materials": [ { "name": "M_A" }, { "name": "M_B" } ],
+)" << kGeometryJson << "\n}\n";
+	f.close();
+
+	const fs::path contentRoot = dir / "Content";
+	std::error_code ec;
+	fs::create_directories(contentRoot, ec);
+
+	auto mesh = MeshImporter::import(dir / "abab.gltf", contentRoot, "Imported");
+	REQUIRE(mesh != nullptr);
+	REQUIRE(mesh->vertices.size() == 4 * 9);   // vertices untouched: four copies
+	REQUIRE(mesh->indices.size()  == 12);
+
+	REQUIRE(mesh->sections.size() == 2);        // A and B — the unassigned one folded into A
+	CHECK(mesh->sections[0].materialPath == "Imported/M_A.hasset");
+	CHECK(mesh->sections[0].indexOffset  == 0);
+	CHECK(mesh->sections[0].indexCount   == 9); // primitives 0, 2 and 3
+	CHECK(mesh->sections[1].materialPath == "Imported/M_B.hasset");
+	CHECK(mesh->sections[1].indexOffset  == 9);
+	CHECK(mesh->sections[1].indexCount   == 3); // primitive 1
+	CHECK(HE::meshSectionsCover(mesh->sections, mesh->indices.size()));
+	CHECK(mesh->materialPath == mesh->sections[0].materialPath);
+
+	// The buffer itself: A's run holds primitives 0, 2, 3 in bake order, then B's
+	// holds primitive 1 — each triangle still pointing at its own vertices.
+	const std::vector<uint32_t> expected = { 0,1,2,  6,7,8,  9,10,11,  3,4,5 };
+	CHECK(mesh->indices == expected);
+
+	he_test::removeAllQuiet(dir);
+}
+
+// The shapes every mesh had before sections existed keep producing exactly one
+// section — and, for a single material, an index buffer in its original order.
+TEST_CASE("a single-material or material-less glTF imports as one section")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_gltf_one_section";
+	he_test::removeAllQuiet(dir);
+	writeTriangleBin(dir);
+	const fs::path contentRoot = dir / "Content";
+	std::error_code ec;
+	fs::create_directories(contentRoot, ec);
+
+	// Two primitives, one material.
+	{
+		std::ofstream f(dir / "one.gltf");
+		f << R"({
+  "asset": { "version": "2.0" },
+  "scene": 0,
+  "scenes": [ { "nodes": [0] } ],
+  "nodes":  [ { "mesh": 0 } ],
+  "meshes": [ { "primitives": [
+      { "attributes": { "POSITION": 0, "TEXCOORD_0": 1 }, "indices": 2, "material": 0 },
+      { "attributes": { "POSITION": 0, "TEXCOORD_0": 1 }, "indices": 2, "material": 0 } ] } ],
+  "materials": [ { "name": "M_Only" } ],
+)" << kGeometryJson << "\n}\n";
+	}
+	auto one = MeshImporter::import(dir / "one.gltf", contentRoot, "Imported");
+	REQUIRE(one != nullptr);
+	REQUIRE(one->sections.size() == 1);
+	CHECK(one->sections[0].indexOffset  == 0);
+	CHECK(one->sections[0].indexCount   == 6);
+	CHECK(one->sections[0].materialPath == "Imported/M_Only.hasset");
+	CHECK(one->materialPath             == "Imported/M_Only.hasset");
+	CHECK(one->indices == std::vector<uint32_t>{ 0,1,2, 3,4,5 });
+
+	// No materials at all: one section, no material anywhere — the slot is there
+	// for the user to fill, and it inherits whatever the mesh or entity carries.
+	{
+		std::ofstream f(dir / "none.gltf");
+		f << R"({
+  "asset": { "version": "2.0" },
+  "scene": 0,
+  "scenes": [ { "nodes": [0] } ],
+  "nodes":  [ { "mesh": 0 } ],
+  "meshes": [ { "primitives": [
+      { "attributes": { "POSITION": 0, "TEXCOORD_0": 1 }, "indices": 2 } ] } ],
+)" << kGeometryJson << "\n}\n";
+	}
+	auto none = MeshImporter::import(dir / "none.gltf", contentRoot, "Imported");
+	REQUIRE(none != nullptr);
+	REQUIRE(none->sections.size() == 1);
+	CHECK(none->sections[0].indexCount == 3);
+	CHECK(none->sections[0].materialPath.empty());
+	CHECK(none->materialPath.empty());
 
 	he_test::removeAllQuiet(dir);
 }
@@ -921,10 +1056,10 @@ TEST_CASE("two images with the same basename import as two assets")
 }
 
 // The don't-clobber guard used to be gated on a re-import redirect, which is only
-// ever set for the BOUND material of a single-material glTF. Every other material
+// ever set for the MREF material of a single-material glTF. Every other material
 // was therefore regenerated on every import: a leaf material the artist had opened
 // and given a graph came back flat, and the loss first showed on the next load.
-TEST_CASE("re-importing a multi-material glTF leaves the unbound materials alone")
+TEST_CASE("re-importing a multi-material glTF leaves the other sections' materials alone")
 {
 	const fs::path dir = fs::temp_directory_path() / "he_test_gltf_unbound_authored";
 	he_test::removeAllQuiet(dir);
@@ -953,7 +1088,7 @@ TEST_CASE("re-importing a multi-material glTF leaves the unbound materials alone
 	CHECK(mesh->materialPath == "Imported/M_Bark.hasset");
 	REQUIRE(fs::exists(contentRoot / "Imported/M_Leaves.hasset"));
 
-	// The artist opens the unbound leaf material and gives it a graph of its own.
+	// The artist opens the leaf material (section 1's) and gives it a graph of its own.
 	{
 		MaterialAsset authored;
 		authored.type          = HE::AssetType::Material;

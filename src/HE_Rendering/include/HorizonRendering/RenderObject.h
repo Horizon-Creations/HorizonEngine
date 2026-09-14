@@ -6,6 +6,18 @@
 #include <cstdint>
 #include <vector>
 
+// One material slot of a multi-section mesh, resolved for drawing: the index
+// range straight from MeshSection (Assets.h) and the section's material already
+// turned into a UUID (the extractor resolves the loose materialPath; a packed
+// asset carries the UUID anyway). Null UUID = the mesh's own material, exactly
+// what a draw without any override resolves to.
+struct RenderSection {
+    uint32_t indexOffset = 0;
+    uint32_t indexCount  = 0;
+    HE::UUID materialAssetId;
+    bool operator==(const RenderSection&) const = default;
+};
+
 // One renderable entity extracted from the ECS world each frame.
 struct RenderObject {
     // Asset identity straight from MeshComponent. Until the
@@ -16,6 +28,17 @@ struct RenderObject {
     // backend resolves it instead of the mesh's embedded material. Null UUID =
     // fall back to the material baked into the mesh asset.
     HE::UUID     materialAssetId;
+    // Material slots of a MULTI-section mesh (glTF with several materials),
+    // filled by the extractor only when the mesh has more than one section AND
+    // the entity carries no MaterialComponent override — an override replaces
+    // every slot (the Godot material_override rule), so the mesh then draws
+    // whole with it, as it always did. EMPTY for everything else: a one-section
+    // asset, a primitive, terrain, a skinned mesh — the draw path then is the
+    // pre-section one, one draw over the whole index buffer. GeometryPass turns
+    // a non-empty list into one DrawCall per section; nothing that walks
+    // RenderWorld::objects directly (shadow depth, GI instances, picking) needs
+    // to know sections exist, the object stays one entity = one entry.
+    std::vector<RenderSection> sections;
     RenderHandle meshHandle     = RenderHandle::invalid();
     RenderHandle materialHandle = RenderHandle::invalid();
     glm::mat4    transform      = glm::mat4(1.0f);

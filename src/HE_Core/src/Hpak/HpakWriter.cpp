@@ -1,6 +1,7 @@
 #include <Hpak/HpakWriter.h>
 #include <cstdint>
 #include <Hpak/Aes256Gcm.h>
+#include <ContentManager/Assets.h>  // MeshSection + the MSEC (de)coder
 #include <ContentManager/HAsset.h>
 #include <MaterialGraph/MaterialGraph.h> // pack-time GI-hit approx re-fold
 #include <Types/Enums.h>
@@ -257,7 +258,9 @@ static bool mtrlGraphAndParent(const std::vector<uint8_t>& blob,
 // Pack-time reference rewrite: resolve an asset's path-based refs to UUIDs and
 // RE-serialize the asset with the path strings dropped — packed assets carry
 // UUID refs only (loose editor .hasset files keep paths for debugging):
-//   • StaticMesh/SkeletalMesh: MREF (material path) → replaced by MRFU (UUID).
+//   • StaticMesh/SkeletalMesh: MREF (material path) → replaced by MRFU (UUID);
+//     MSEC (material sections) keeps its index ranges and gets each entry's
+//     path swapped for its UUID in place.
 //   • Material: MTRL keeps its PBR scalar tail byte-identical, but shaderPath and
 //     texturePaths are written as empty strings; MTLU carries shaderId+textureIds.
 //   • Scene: SCNE (object paths) → replaced by SCNU (UUIDs). (objectPaths has no
@@ -301,6 +304,27 @@ static std::vector<uint8_t> rewriteRefsForPack(
             HAsset::Writer::appendPOD(d, mid.hi);
             HAsset::Writer::appendPOD(d, mid.lo);
             w.addChunk(HAsset::CHUNK_MRFU, d.data(), d.size());
+            continue;
+        }
+        if (isMesh && c.id == HAsset::CHUNK_MSEC)
+        {
+            // Section materials: same bake as MREF, entry by entry, in place —
+            // the path is dropped and its UUID written beside the index range.
+            // A table the runtime cannot decode is passed through untouched; the
+            // loader's coverage check turns it into the one-section fallback.
+            std::vector<MeshSection> sections;
+            if (!HE::decodeMeshSections(c.data, sections))
+            {
+                w.addChunk(c.id, c.data.data(), c.data.size());
+                continue;
+            }
+            for (MeshSection& s : sections)
+            {
+                s.materialId = s.materialPath.empty() ? HE::UUID{} : resolve(s.materialPath);
+                s.materialPath.clear();
+            }
+            const std::vector<uint8_t> d = HE::encodeMeshSections(sections);
+            w.addChunk(HAsset::CHUNK_MSEC, d.data(), d.size());
             continue;
         }
         if (isMat && c.id == HAsset::CHUNK_MTRL)

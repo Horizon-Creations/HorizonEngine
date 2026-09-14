@@ -5456,7 +5456,28 @@ struct UnlitUniforms
 // collected lists over via MetalDeferredFrame.
 struct TPDraw { UnlitUniforms u; void* vbuf; void* ibuf; NSUInteger indexCount; void* tex; float distSq;
                 void* pipeline = nullptr; std::vector<float> params; bool wpo = false;
-                void* gtex[HE::kMatMaxGraphTextures] = { nullptr }; int gtexCount = 0; };
+                void* gtex[HE::kMatMaxGraphTextures] = { nullptr }; int gtexCount = 0;
+                // Section draw: byte offset into the index buffer (0 = from the
+                // start, which is every whole-mesh draw). Trailing + defaulted so
+                // the positional initialisers stay as they are.
+                NSUInteger indexOffset = 0; };
+
+// The index range a DrawCall covers on the mesh it ends up drawing. A whole-mesh
+// draw (indexCount 0 — every one-section mesh, every draw before sections
+// existed) spans the buffer; a section draw takes its own [offset, count),
+// CLAMPED to the buffer: the draw loops substitute the default cube when the
+// real mesh is not resident yet, and a range taken from the real asset must not
+// read past the cube's index buffer. Offset is in BYTES, as
+// drawIndexedPrimitives wants it.
+struct MtlIndexRange { NSUInteger count; NSUInteger offset; };
+static inline MtlIndexRange DrawIndexRange(const DrawCall& dc, int meshIndexCount)
+{
+	const NSUInteger total = meshIndexCount > 0 ? (NSUInteger)meshIndexCount : 0;
+	if (dc.indexCount == 0) return { total, 0 };
+	const NSUInteger off = std::min<NSUInteger>(dc.indexOffset, total);
+	const NSUInteger cnt = std::min<NSUInteger>(dc.indexCount, total - off);
+	return { cnt, off * sizeof(uint32_t) };
+}
 
 // Per-frame hand-off from the deferred G-buffer pass to the lighting pass (see
 // MetalRenderer.h forward declaration). Stack-local to EncodeFrame.
@@ -12138,7 +12159,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				                    indexCount:t.indexCount
 				                     indexType:MTLIndexTypeUInt32
 				                   indexBuffer:(__bridge id<MTLBuffer>)t.ibuf
-				             indexBufferOffset:0];
+				             indexBufferOffset:t.indexOffset];
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 			}
@@ -12276,7 +12297,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			}
 			id<MTLBuffer> vertexBuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
 			id<MTLBuffer> indexBuf  = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
-			NSUInteger    indexCount = (NSUInteger)drawMesh->indexCount;
+			// Section draw → its own slice of the index buffer; whole mesh → all of it.
+			const MtlIndexRange range = DrawIndexRange(dc, drawMesh->indexCount);
+			const NSUInteger indexCount  = range.count;
+			const NSUInteger indexOffset = range.offset; // bytes
 			void*         meshTex = drawMesh->texture;
 
 			void* effectiveTex = cHasOverride ? cOverrideTex : meshTex;
@@ -12316,6 +12340,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
+					t.indexOffset = indexOffset;
 					// Translucent graph materials keep their own (blended) pipeline + state.
 					if (cMaterialPipelineBlend)
 					{
@@ -12398,7 +12423,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
 				                   indexBuffer:indexBuf
-				             indexBufferOffset:0];
+				             indexBufferOffset:indexOffset];
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			};
@@ -12452,7 +12477,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
 				                   indexBuffer:indexBuf
-				             indexBufferOffset:0
+				             indexBufferOffset:indexOffset
 				                 instanceCount:(NSUInteger)instCount];
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3)
@@ -12560,7 +12585,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			                    indexCount:t.indexCount
 			                     indexType:MTLIndexTypeUInt32
 			                   indexBuffer:(__bridge id<MTLBuffer>)t.ibuf
-			             indexBufferOffset:0];
+			             indexBufferOffset:t.indexOffset];
 			++m_counters.draws;
 			m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 		}
@@ -14137,7 +14162,10 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			}
 			id<MTLBuffer> vertexBuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
 			id<MTLBuffer> indexBuf  = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
-			NSUInteger    indexCount = (NSUInteger)drawMesh->indexCount;
+			// Section draw → its own slice of the index buffer; whole mesh → all of it.
+			const MtlIndexRange range = DrawIndexRange(dc, drawMesh->indexCount);
+			const NSUInteger indexCount  = range.count;
+			const NSUInteger indexOffset = range.offset; // bytes
 			void*         meshTex = drawMesh->texture;
 
 			void* effectiveTex = cHasOverride ? cOverrideTex : meshTex;
@@ -14166,6 +14194,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
+					t.indexOffset = indexOffset;
 					if (cMaterialPipelineBlend)
 					{
 						t.pipeline = cMaterialPipelineBlend;
@@ -14185,6 +14214,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, 0.0f };
+					t.indexOffset = indexOffset;
 					t.pipeline = cMaterialPipeline; // may be null → built-in forward PBR
 					t.wpo      = cMaterialWpo;
 					if (cMaterialParams) t.params = *cMaterialParams;
@@ -14249,7 +14279,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
 				                   indexBuffer:indexBuf
-				             indexBufferOffset:0];
+				             indexBufferOffset:indexOffset];
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			};
@@ -14294,7 +14324,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
 				                   indexBuffer:indexBuf
-				             indexBufferOffset:0
+				             indexBufferOffset:indexOffset
 				                 instanceCount:(NSUInteger)instCount];
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3)

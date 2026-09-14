@@ -18,7 +18,9 @@ void logError(const std::string& msg)
 	HE_LOG_ERROR(Tool, "%s", ("MeshImporter: " + msg).c_str());
 }
 
-// Appends one primitive's geometry to the merged mesh, transformed by `world`.
+// Appends one primitive's geometry to the merged mesh, transformed by `world`,
+// and records where its indices landed (`baked`) so the primitives can be
+// grouped into material sections once everything is in the buffer.
 // The per-vertex work itself is Importer::appendPrimitive — shared with
 // SkeletalMeshImporter, which reads the same streams (plus JOINTS_0/WEIGHTS_0).
 //
@@ -28,13 +30,20 @@ void logError(const std::string& msg)
 // range of it, so this is exact rather than a compromise.
 void appendPrimitive(StaticMeshAsset& mesh, const cgltf_primitive& prim,
                      const glm::mat4& world, float uniformScale,
-                     const std::filesystem::path& sourcePath)
+                     const std::filesystem::path& sourcePath,
+                     std::vector<Importer::BakedPrimitive>& baked)
 {
 	Importer::MeshVertexStreams streams{ mesh.vertices, mesh.normals, mesh.uvs };
 	const int wanted = Importer::gltfMaterialUvSet(prim.material);
+	const auto indexStart = static_cast<uint32_t>(mesh.indices.size());
 	const auto attrs = Importer::appendPrimitive(prim, world, uniformScale, streams,
 	                                             mesh.indices, wanted);
-	if (attrs.position && attrs.uvSet != wanted)
+	if (!attrs.position)
+		return;   // skipped (non-triangles / no POSITION): nothing was appended
+	baked.push_back({ indexStart,
+	                  static_cast<uint32_t>(mesh.indices.size()) - indexStart,
+	                  prim.material });
+	if (attrs.uvSet != wanted)
 		HE_LOG_WARN(Tool, "%s",
 			("MeshImporter: " + sourcePath.filename().string() + ": material '"
 			 + (prim.material && prim.material->name ? prim.material->name : "?")
@@ -117,6 +126,7 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 	mesh->path = out.path;
 
 	// Bake every mesh-bearing node with its world transform
+	std::vector<Importer::BakedPrimitive> baked;
 	for (cgltf_size n = 0; n < data->nodes_count; ++n)
 	{
 		const cgltf_node& node = data->nodes[n];
@@ -126,14 +136,14 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 		cgltf_node_transform_world(&node, m);
 		const glm::mat4 world = glm::make_mat4(m);
 		for (cgltf_size p = 0; p < node.mesh->primitives_count; ++p)
-			appendPrimitive(*mesh, node.mesh->primitives[p], world, settings.uniformScale, sourcePath);
+			appendPrimitive(*mesh, node.mesh->primitives[p], world, settings.uniformScale, sourcePath, baked);
 	}
 	// glTFs without a node hierarchy: take the meshes directly
 	if (mesh->vertices.empty())
 		for (cgltf_size mi = 0; mi < data->meshes_count; ++mi)
 			for (cgltf_size p = 0; p < data->meshes[mi].primitives_count; ++p)
 				appendPrimitive(*mesh, data->meshes[mi].primitives[p],
-				                glm::mat4(1.0f), settings.uniformScale, sourcePath);
+				                glm::mat4(1.0f), settings.uniformScale, sourcePath, baked);
 
 	if (mesh->vertices.empty())
 	{
@@ -145,15 +155,18 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 	if (settings.generateNormals && hasMissingNormals(*mesh))
 		generateNormals(*mesh);
 
-	// Materials + textures. EVERY glTF material becomes its own asset; the mesh binds
-	// the first primitive's, because a mesh asset carries exactly one material
-	// reference. The stem passed here is only a fallback for UNNAMED materials and
-	// embedded images — and it stays derived from the SOURCE, never from the mesh's
-	// (possibly re-imported and renamed) own name, so ordinary imports keep writing
-	// exactly the file names the asset compiler's up-to-date probe already expects.
+	// Materials + textures. EVERY glTF material becomes its own asset; each is bound
+	// to the section holding the primitives authored with it, and the mesh-level
+	// reference (MREF) is section 0's. The stem passed here is only a fallback for
+	// UNNAMED materials and embedded images — and it stays derived from the SOURCE,
+	// never from the mesh's (possibly re-imported and renamed) own name, so ordinary
+	// imports keep writing exactly the file names the asset compiler's up-to-date
+	// probe already expects.
+	Importer::GltfMaterialImport materials;
 	if (settings.importMaterials)
-		mesh->materialPath = Importer::importGltfMaterials(
-			data, sourcePath, contentRoot, relativeOutputDir, stem, outputs).primary;
+		materials = Importer::importGltfMaterials(
+			data, sourcePath, contentRoot, relativeOutputDir, stem, outputs);
+	mesh->materialPath = materials.primary;
 	// No material resolved — importMaterials is off, or the glTF declares none.
 	// saveAsset writes chunk MREF unconditionally
 	// from this freshly built asset, so leaving the field empty BLANKS the reference
@@ -164,6 +177,14 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 	if (mesh->materialPath.empty())
 		mesh->materialPath = outputs.material;
 
+	// Sections: one per material, the index buffer regrouped to match. Slot 0 is
+	// spelled out with the mesh-level material so the two never disagree — even
+	// when that one came from the re-import redirect above rather than the glTF.
+	mesh->sections = Importer::buildMeshSections(
+		data, baked, Importer::gltfPrimaryMaterial(data), materials.paths, mesh->indices);
+	if (!mesh->sections.empty() && mesh->sections[0].materialPath.empty())
+		mesh->sections[0].materialPath = mesh->materialPath;
+
 	cgltf_free(data);
 
 	if (!Importer::writeAsset(*mesh, contentRoot, sourcePath))
@@ -172,6 +193,8 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 	HE_LOG_INFO(Tool, "%s",
 		("MeshImporter: " + sourcePath.filename().string() + " -> " + mesh->path
 		 + " (" + std::to_string(mesh->vertices.size() / 3) + " verts, "
-		 + std::to_string(mesh->indices.size() / 3) + " tris)").c_str());
+		 + std::to_string(mesh->indices.size() / 3) + " tris, "
+		 + std::to_string(mesh->sections.size()) + " section"
+		 + (mesh->sections.size() == 1 ? "" : "s") + ")").c_str());
 	return mesh;
 }

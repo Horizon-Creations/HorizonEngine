@@ -361,6 +361,10 @@ add_executable(he_tests
     # this, may it be rewritten — be asserted here instead of clicked through.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcRename.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PanelSpotlight.cpp
+    # The mesh tabs' material-slot list. Takes a ContentManager and the widget
+    # that draws a slot, never AppContext — which is what lets the UI-shot test
+    # draw it over an in-memory mesh and assert what a slot edit writes back.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/MeshMaterialSlots.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen

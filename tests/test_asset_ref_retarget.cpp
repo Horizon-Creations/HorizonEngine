@@ -224,3 +224,43 @@ TEST_CASE("Retargeting leaves an unaffected project alone")
 	CHECK(cm.retargetAssetReferences("Tex/Other.hasset", "Moved/Other.hasset") == 0);
 	CHECK(fs::last_write_time(dir.path / "Mat.hasset") == before);
 }
+
+// A mesh's section table (chunk MSEC) stores each slot's material as a
+// length-prefixed string — the form the binary walk recognises — so moving a
+// material that only a second section names carries that reference too, and
+// leaves the raw index ranges beside it untouched.
+TEST_CASE("Moving a material rewrites the mesh sections that name it")
+{
+	TempContentDir dir;
+	ContentManager cm(dir.path.string());
+	fs::create_directories(dir.path / "Mats");
+	fs::create_directories(dir.path / "Mats" / "Sub");
+
+	MaterialAsset a = makeMaterial("Mats/A.hasset", "Tex/Rock.hasset");
+	MaterialAsset b = makeMaterial("Mats/B.hasset", "Tex/Rock.hasset");
+	REQUIRE(cm.saveAsset(a));
+	REQUIRE(cm.saveAsset(b));
+
+	StaticMeshAsset mesh;
+	mesh.type = HE::AssetType::StaticMesh;
+	mesh.name = "Quad"; mesh.path = "Quad.hasset";
+	mesh.vertices = { 0,0,0, 1,0,0, 0,1,0, 1,1,0 };
+	mesh.indices  = { 0,1,2, 2,3,0 };
+	mesh.materialPath = "Mats/A.hasset";
+	mesh.sections = { { 0, 3, "Mats/A.hasset", {} }, { 3, 3, "Mats/B.hasset", {} } };
+	REQUIRE(cm.saveAsset(mesh));
+
+	fs::rename(dir.path / "Mats" / "B.hasset", dir.path / "Mats" / "Sub" / "B.hasset");
+	CHECK(cm.retargetAssetReferences("Mats/B.hasset", "Mats/Sub/B.hasset") == 2); // mesh + B's own META
+
+	ContentManager fresh(dir.path.string());
+	const StaticMeshAsset* m = fresh.getStaticMesh(fresh.loadAsset("Quad.hasset"));
+	REQUIRE(m != nullptr);
+	CHECK(m->materialPath == "Mats/A.hasset");           // untouched
+	REQUIRE(m->sections.size() == 2);
+	CHECK(m->sections[0].materialPath == "Mats/A.hasset");
+	CHECK(m->sections[1].materialPath == "Mats/Sub/B.hasset");
+	CHECK(m->sections[1].indexOffset  == 3);              // the ranges beside it survived
+	CHECK(m->sections[1].indexCount   == 3);
+	CHECK(m->indices.size() == 6);
+}

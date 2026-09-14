@@ -10,12 +10,11 @@
 //     normal, occlusion and emissive into the Output node, with the glTF factors
 //     folded in as constants, plus the baked GLSL that graph generates.
 //
-// The mesh itself still binds exactly ONE material (StaticMeshAsset::materialPath →
-// chunk MREF): the engine has no submesh/section concept, so a multi-material glTF
-// gets its first primitive's material bound and the geometry of the others is shaded
-// with it. The other materials are still written — they are correct assets, they
-// simply have nowhere on THIS mesh to attach (see GltfMaterialImport::unbound) — and
-// the import says so rather than dropping them silently.
+// The mesh binds them through its section table (MeshSection, chunk MSEC): the
+// importers group the primitives by material and bind `paths[i]` to each section
+// (buildMeshSections), so a multi-material glTF arrives with every material on
+// the geometry it was authored on. The mesh-level MREF (`primary`) is section 0's
+// material — what the section-unaware draw paths still resolve for the whole mesh.
 #include "ImporterCommon.h"
 
 #include <algorithm>
@@ -886,28 +885,6 @@ std::string importMaterial(const cgltf_material&        m,
 	return mat.path;
 }
 
-// The material of the first primitive that carries geometry, in the SAME order the
-// mesh importers bake it (mesh-bearing nodes first, bare meshes only when the glTF
-// has no node hierarchy). That makes "the material the mesh got bound to" the one
-// belonging to the first triangles in the vertex buffer rather than an arbitrary
-// index into data->materials.
-const cgltf_material* firstPrimitiveMaterial(const cgltf_data* data)
-{
-	for (cgltf_size n = 0; n < data->nodes_count; ++n)
-	{
-		const cgltf_node& node = data->nodes[n];
-		if (!node.mesh) continue;
-		for (cgltf_size p = 0; p < node.mesh->primitives_count; ++p)
-			if (node.mesh->primitives[p].material)
-				return node.mesh->primitives[p].material;
-	}
-	for (cgltf_size mi = 0; mi < data->meshes_count; ++mi)
-		for (cgltf_size p = 0; p < data->meshes[mi].primitives_count; ++p)
-			if (data->meshes[mi].primitives[p].material)
-				return data->meshes[mi].primitives[p].material;
-	return nullptr;
-}
-
 } // namespace
 
 GltfMaterialImport importGltfMaterials(const cgltf_data*            data,
@@ -933,16 +910,13 @@ GltfMaterialImport importGltfMaterials(const cgltf_data*            data,
 
 	ImageCache images(data, sourcePath, contentRoot, relativeOutputDir, meshStem, names);
 
-	const cgltf_material* primary = firstPrimitiveMaterial(data);
-	// Primitives without a material still get the file's first material bound rather
-	// than nothing: a glTF that declares materials but leaves a primitive unassigned
-	// would otherwise import a mesh with no material reference at all, which blanks
-	// the MREF every scene resolves through.
-	if (!primary) primary = &data->materials[0];
+	// The same rule the importers bind section 0 with — never null here, since the
+	// glTF declares at least one material.
+	const cgltf_material* primary = gltfPrimaryMaterial(data);
 
 	// A re-import redirects the mesh's ONE recorded material sidecar (and its base
 	// colour texture) onto the files that already exist, so the asset every scene
-	// references is the one that gets refreshed. Only the bound material can be
+	// references is the one that gets refreshed. Only the MREF material can be
 	// redirected — the others are named after their glTF material, which is stable
 	// across re-imports and needs no redirect.
 	const bool singleMaterial = data->materials_count == 1;
@@ -1002,29 +976,6 @@ GltfMaterialImport importGltfMaterials(const cgltf_data*            data,
 
 		if (isPrimary)
 			result.primary = result.paths[i];
-		else if (!result.paths[i].empty())
-			result.unbound.push_back(result.paths[i]);
-	}
-
-	if (!result.unbound.empty())
-	{
-		// The assets are written and complete — but saying "assign them by hand" would
-		// be a lie. All primitives are baked into ONE vertex/index buffer with ONE
-		// material reference, and an entity carries ONE MaterialComponent, so there is
-		// no assignment anywhere in the editor that puts a second material on part of
-		// this mesh. Until meshes carry material SECTIONS, the only thing that
-		// actually works is re-exporting one mesh per material from the DCC.
-		// Naming the materials still matters: it is the difference between a user who
-		// knows what happened and one who thinks the import ate them.
-		std::string list;
-		for (const std::string& p : result.unbound)
-			list += (list.empty() ? "" : ", ") + p;
-		logWarn(sourcePath.filename().string() + ": glTF has "
-		        + std::to_string(data->materials_count)
-		        + " materials but a mesh holds only one — '" + result.primary
-		        + "' is bound and the geometry of the others is shaded with it. Written but"
-		        " UNUSABLE on this mesh: " + list
-		        + ". To get them, export one mesh per material from the DCC.");
 	}
 
 	return result;

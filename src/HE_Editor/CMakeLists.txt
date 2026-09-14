@@ -218,6 +218,7 @@ add_executable(HorizonEditor WIN32
 	BlendSpacePanel.cpp
 	SkeletalMeshEditorPanel.cpp
 	StaticMeshEditorPanel.cpp
+	MeshMaterialSlots.cpp
 	ParticleGraphEditorPanel.cpp
 	AnimatorStateMachineEditorPanel.cpp
 	AudioEditorPanel.cpp

@@ -1250,9 +1250,17 @@ TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
     mat.baseColor[0] = 0.25f; mat.baseColor[1] = 0.5f; mat.baseColor[2] = 0.75f;
     mat.metallic = 0.6f; mat.roughness = 0.35f; mat.opacity = 0.9f;
     REQUIRE(cmSrc.saveAsset(mat));
+    // A second material, bound only through the mesh's section table.
+    MaterialAsset mat2; mat2.type = HE::AssetType::Material; mat2.name = "mat2"; mat2.path = "mat2.hasset";
+    REQUIRE(cmSrc.saveAsset(mat2));
     StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "mesh"; mesh.path = "mesh.hasset";
-    mesh.materialPath = "mat.hasset"; mesh.vertices = {0,0,0, 1,0,0, 0,1,0}; mesh.indices = {0,1,2};
+    mesh.materialPath = "mat.hasset"; mesh.vertices = {0,0,0, 1,0,0, 0,1,0, 1,1,0}; mesh.indices = {0,1,2, 2,3,0};
+    mesh.sections = { { 0, 3, "mat.hasset", {} }, { 3, 3, "mat2.hasset", {} } };
     REQUIRE(cmSrc.saveAsset(mesh));
+    // …and a mesh from before sections existed: MREF only, no table.
+    StaticMeshAsset old; old.type = HE::AssetType::StaticMesh; old.name = "old"; old.path = "old.hasset";
+    old.materialPath = "mat.hasset"; old.vertices = {0,0,0, 1,0,0, 0,1,0}; old.indices = {0,1,2};
+    REQUIRE(cmSrc.saveAsset(old));
 
     // Loose parse (no pack) → UUID-ref fields stay empty, paths intact (editor mode).
     {
@@ -1264,11 +1272,14 @@ TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
         REQUIRE(lm != nullptr);
         CHECK(lm->materialId == HE::UUID{});      // no baking on loose assets
         CHECK(lm->materialPath == "mat.hasset");  // paths kept for debugging
+        REQUIRE(lm->sections.size() == 2);
+        CHECK(lm->sections[1].materialPath == "mat2.hasset");
+        CHECK(lm->sections[1].materialId   == HE::UUID{});
     }
 
     // Pack → paths are DROPPED and replaced by baked UUID refs.
     HpakWriter packer;
-    CHECK(packer.addDirectory(dir, {Hpak::Codec::Zstd}) == 3);
+    CHECK(packer.addDirectory(dir, {Hpak::Codec::Zstd}) == 5);
     auto pak = std::filesystem::temp_directory_path() / "he_refbake.hpak";
     REQUIRE(packer.write(pak.string()));
 
@@ -1278,6 +1289,25 @@ TEST_CASE("Pack-time UUID-ref baking: mesh->material and material->texture")
     REQUIRE(m != nullptr);
     CHECK(m->materialId == mat.id);            // mesh -> material baked
     CHECK(m->materialPath.empty());            // path dropped in the pack
+    // The section table survives the cook (MVBO replaces the SoA streams, INDX
+    // and MSEC stay) with every entry baked the same way.
+    REQUIRE(m->sections.size() == 2);
+    CHECK(m->sections[0].indexOffset == 0);
+    CHECK(m->sections[0].indexCount  == 3);
+    CHECK(m->sections[0].materialId  == mat.id);
+    CHECK(m->sections[0].materialPath.empty());
+    CHECK(m->sections[1].indexOffset == 3);
+    CHECK(m->sections[1].indexCount  == 3);
+    CHECK(m->sections[1].materialId  == mat2.id);
+    CHECK(m->sections[1].materialPath.empty());
+    CHECK(cm.resolveMaterialRef(m->sections[1].materialId, m->sections[1].materialPath) == cm.getMaterial(mat2.id));
+    // The table-less mesh comes out of the pack as one section carrying the
+    // baked MRFU material — identical to what it always drew as.
+    const StaticMeshAsset* om = cm.getStaticMesh(old.id);
+    REQUIRE(om != nullptr);
+    REQUIRE(om->sections.size() == 1);
+    CHECK(om->sections[0].indexCount == 3);
+    CHECK(om->sections[0].materialId == mat.id);
     const MaterialAsset* mt = cm.getMaterial(mat.id);
     REQUIRE(mt != nullptr);
     REQUIRE(mt->textureIds.size() == 1);
@@ -1318,15 +1348,20 @@ TEST_CASE("Reference-graph streaming: seeding a mesh streams its closure only")
     MaterialAsset mat; mat.type = HE::AssetType::Material; mat.name = "mat"; mat.path = "mat.hasset";
     mat.texturePaths = {"tex.hasset"};
     REQUIRE(cmSrc.saveAsset(mat));
+    // A material the mesh reaches ONLY through its second section — the frontier
+    // has to walk the section table, not just the MRFU material.
+    MaterialAsset sec; sec.type = HE::AssetType::Material; sec.name = "sec"; sec.path = "sec.hasset";
+    REQUIRE(cmSrc.saveAsset(sec));
     StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "mesh"; mesh.path = "mesh.hasset";
-    mesh.materialPath = "mat.hasset"; mesh.vertices = {0,0,0, 1,0,0, 0,1,0}; mesh.indices = {0,1,2};
+    mesh.materialPath = "mat.hasset"; mesh.vertices = {0,0,0, 1,0,0, 0,1,0, 1,1,0}; mesh.indices = {0,1,2, 2,3,0};
+    mesh.sections = { { 0, 3, "mat.hasset", {} }, { 3, 3, "sec.hasset", {} } };
     REQUIRE(cmSrc.saveAsset(mesh));
     // An unreferenced material — must NOT be pulled by the closure.
     MaterialAsset orphan; orphan.type = HE::AssetType::Material; orphan.name = "orphan"; orphan.path = "orphan.hasset";
     REQUIRE(cmSrc.saveAsset(orphan));
 
     HpakWriter packer;
-    CHECK(packer.addDirectory(dir, {Hpak::Codec::Zstd}) == 4);
+    CHECK(packer.addDirectory(dir, {Hpak::Codec::Zstd}) == 5);
     auto pak = std::filesystem::temp_directory_path() / "he_closure.hpak";
     REQUIRE(packer.write(pak.string()));
 
@@ -1338,10 +1373,11 @@ TEST_CASE("Reference-graph streaming: seeding a mesh streams its closure only")
     for (int i = 0; i < 500 && !done; ++i)
     {
         cm.pollAsyncResults();    // frontier expands as each asset registers
-        done = cm.isLoaded(mesh.id) && cm.isLoaded(mat.id) && cm.isLoaded(tex.id);
+        done = cm.isLoaded(mesh.id) && cm.isLoaded(mat.id) && cm.isLoaded(tex.id)
+            && cm.isLoaded(sec.id);
         if (!done) std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    REQUIRE(done);                        // mesh -> material -> texture all streamed in
+    REQUIRE(done);                        // mesh -> materials (both sections) -> texture all streamed in
     // Drain a few more times to be sure nothing else sneaks in.
     for (int i = 0; i < 5; ++i) { cm.pollAsyncResults(); std::this_thread::sleep_for(std::chrono::milliseconds(2)); }
     CHECK(!cm.isLoaded(orphan.id));       // unreferenced asset never loaded

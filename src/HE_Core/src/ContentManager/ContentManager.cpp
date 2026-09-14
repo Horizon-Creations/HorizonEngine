@@ -118,6 +118,34 @@ static bool readMetaChunk(const HAsset::Reader::Chunk& c, uint16_t fileVersion,
     return true;
 }
 
+// The material sections of a loaded static or skeletal mesh. A file without an
+// MSEC chunk is every mesh written before sections existed — it comes back as
+// exactly ONE section over the whole index buffer, with the MREF/MRFU material,
+// so it draws as it always did. A table that does not cover the index buffer
+// (truncated chunk, a hand-edited file, a future bug) gets the same treatment
+// with a warning instead of a per-section draw that reads past the buffer.
+template<typename Mesh>
+static void readMeshSections(const HAsset::Reader& reader, Mesh& a, const std::string& relativePath)
+{
+	const auto* c = reader.findChunk(HAsset::CHUNK_MSEC);
+	if (c)
+	{
+		if (HE::decodeMeshSections(c->data, a.sections)
+		    && HE::meshSectionsCover(a.sections, a.indices.size()))
+			return;
+		HE_LOG_WARN(Asset, "%s",
+			("ContentManager: '" + relativePath + "' carries a section table that does not cover its "
+			 + std::to_string(a.indices.size()) + " indices — drawing it as one section").c_str());
+	}
+	a.sections.clear();
+	MeshSection whole;
+	whole.indexOffset  = 0;
+	whole.indexCount   = static_cast<uint32_t>(a.indices.size());
+	whole.materialPath = a.materialPath;
+	whole.materialId   = a.materialId;
+	a.sections.push_back(std::move(whole));
+}
+
 // ─── sniffAssetTypeFromFile ───────────────────────────────────────────────────
 HE::AssetType ContentManager::sniffAssetTypeFromFile(const std::string& path) const
 {
@@ -205,6 +233,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			}
 			ensureMeshUVs(a); // loose meshes with no TEXC chunk get box-projected UVs
 		}
+		readMeshSections(reader, a, relativePath);
 		handle = m_staticMeshAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::SkeletalMesh:
@@ -231,6 +260,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 				for (float& f : j.inverseBindMatrix) HAsset::Reader::readPOD(c->data,o,f);
 			}
 		}
+		readMeshSections(reader, a, relativePath);
 		handle = m_skeletalMeshAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Texture:
@@ -1368,13 +1398,20 @@ void ContentManager::expandFrontier(HE::UUID id)
 		// and coalesces duplicates, so this is safe to call unconditionally.
 		if (dep != HE::UUID{} && !isLoaded(dep)) loadAssetAsync(dep);
 	};
+	// A mesh pulls its own material AND every section's — a two-material glTF
+	// streams both, not just the one MRFU names (which is section 0's anyway).
+	auto enqueueMeshRefs = [&](const auto* a) {
+		if (!a) return;
+		enqueue(a->materialId);
+		for (const MeshSection& s : a->sections) enqueue(s.materialId);
+	};
 	switch (assetType(id))
 	{
 	case HE::AssetType::StaticMesh:
-		if (const auto* a = getStaticMesh(id)) enqueue(a->materialId);
+		enqueueMeshRefs(getStaticMesh(id));
 		break;
 	case HE::AssetType::SkeletalMesh:
-		if (const auto* a = getSkeletalMesh(id)) enqueue(a->materialId);
+		enqueueMeshRefs(getSkeletalMesh(id));
 		break;
 	case HE::AssetType::Material:
 		if (const auto* a = getMaterial(id))
@@ -1423,6 +1460,11 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	{
 		auto& a = static_cast<StaticMeshAsset&>(asset);
 		{ std::vector<uint8_t> b; HAsset::Writer::appendString(b,a.materialPath); w.addChunk(HAsset::CHUNK_MREF,b.data(),b.size()); }
+		// MSEC only when the asset carries a table: an in-memory mesh without one
+		// saves byte-for-byte as before sections existed, and loads back as the
+		// one section it always was.
+		if (!a.sections.empty())
+		{ auto b = HE::encodeMeshSections(a.sections); w.addChunk(HAsset::CHUNK_MSEC,b.data(),b.size()); }
 		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.indices);    w.addChunk(HAsset::CHUNK_INDX,b.data(),b.size()); }
 		if (a.cooked)
 		{
@@ -1447,6 +1489,8 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	{
 		auto& a = static_cast<SkeletalMeshAsset&>(asset);
 		{ std::vector<uint8_t> b; HAsset::Writer::appendString(b,a.materialPath); w.addChunk(HAsset::CHUNK_MREF,b.data(),b.size()); }
+		if (!a.sections.empty()) // same rule as the static mesh above
+		{ auto b = HE::encodeMeshSections(a.sections); w.addChunk(HAsset::CHUNK_MSEC,b.data(),b.size()); }
 		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.vertices);    w.addChunk(HAsset::CHUNK_VERT,b.data(),b.size()); }
 		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.indices);     w.addChunk(HAsset::CHUNK_INDX,b.data(),b.size()); }
 		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.normals);     w.addChunk(HAsset::CHUNK_NORM,b.data(),b.size()); }
@@ -1810,6 +1854,57 @@ std::vector<uint8_t> encodeMaterialShaderVariants(const std::vector<MaterialShad
 { return encodeShaderVariants(vars); }
 std::vector<MaterialShaderVariant> decodeMaterialShaderVariants(const std::vector<uint8_t>& bytes)
 { return decodeShaderVariants<MaterialShaderVariant>(bytes); }
+
+// ─── Mesh sections (CHUNK_MSEC) ───────────────────────────────────────────────
+bool meshSectionsCover(const std::vector<MeshSection>& sections, size_t indexCount)
+{
+	if (sections.empty()) return false;
+	uint64_t next = 0;
+	for (const MeshSection& s : sections)
+	{
+		if (s.indexOffset != next) return false;        // gap or overlap
+		next += s.indexCount;
+	}
+	return next == indexCount;
+}
+
+std::vector<uint8_t> encodeMeshSections(const std::vector<MeshSection>& sections)
+{
+	std::vector<uint8_t> b;
+	HAsset::Writer::appendPOD(b, static_cast<uint32_t>(sections.size()));
+	for (const MeshSection& s : sections)
+	{
+		HAsset::Writer::appendPOD(b, s.indexOffset);
+		HAsset::Writer::appendPOD(b, s.indexCount);
+		HAsset::Writer::appendString(b, s.materialPath);
+		HAsset::Writer::appendPOD(b, s.materialId.hi);
+		HAsset::Writer::appendPOD(b, s.materialId.lo);
+	}
+	return b;
+}
+
+bool decodeMeshSections(const std::vector<uint8_t>& bytes, std::vector<MeshSection>& out)
+{
+	out.clear();
+	size_t   o     = 0;
+	uint32_t count = 0;
+	if (!HAsset::Reader::readPOD(bytes, o, count)) return false;
+	// Each entry is at least 4+4+4+8+8 bytes, so a count the chunk cannot hold
+	// is rejected before it reserves anything.
+	if (static_cast<uint64_t>(count) * 28 > bytes.size() - o) return false;
+	out.reserve(count);
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		MeshSection s;
+		if (!HAsset::Reader::readPOD(bytes, o, s.indexOffset))   return false;
+		if (!HAsset::Reader::readPOD(bytes, o, s.indexCount))    return false;
+		if (!HAsset::Reader::readString(bytes, o, s.materialPath)) return false;
+		if (!HAsset::Reader::readPOD(bytes, o, s.materialId.hi)) return false;
+		if (!HAsset::Reader::readPOD(bytes, o, s.materialId.lo)) return false;
+		out.push_back(std::move(s));
+	}
+	return true;
+}
 std::vector<uint8_t> encodeParticleShaderVariants(const std::vector<ParticleShaderVariant>& vars)
 { return encodeShaderVariants(vars); }
 std::vector<ParticleShaderVariant> decodeParticleShaderVariants(const std::vector<uint8_t>& bytes)
@@ -1843,6 +1938,8 @@ static T* lookupAssetMutable(const std::unordered_map<HE::UUID, SlotHandle>& ind
 
 const StaticMeshAsset*    ContentManager::getStaticMesh(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
 const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
+StaticMeshAsset*          ContentManager::getStaticMeshMutable(HE::UUID id)   { return lookupAssetMutable(m_handleToUUID, m_staticMeshAssets, id); }
+SkeletalMeshAsset*        ContentManager::getSkeletalMeshMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_skeletalMeshAssets, id); }
 const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
 const AudioAsset*         ContentManager::getAudio(HE::UUID id) const         { return lookupAsset(m_handleToUUID, m_audioAssets, id); }

@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 
 // extract() is split into one free function per phase (the banners this file used
 // to carry inline). The phases run in the order extract() calls them and each one
@@ -105,12 +106,60 @@ namespace
 		}
 	}
 
+	// ── Material slots ──────────────────────────────────────────────────────
+	// The material slots of a multi-section mesh, ready for the draw: each
+	// MeshSection's reference turned into a UUID. A baked UUID (packed build) is
+	// taken as is — made resident, the streaming closure usually already did
+	// that. A loose path is answered by the ContentManager itself while the
+	// material is resident (idForPath, a pure lookup); only an unknown path goes
+	// through loadAsset, and one that FAILED is remembered in `missing` (see
+	// RenderExtractor::m_sectionMaterialMissing) so it is not retried — and
+	// logged — every frame. An empty reference stays null = the mesh's own
+	// material, which is what the backends resolve for a null materialAssetId
+	// anyway.
+	//
+	// Takes the sections BY VALUE on purpose: resolveMaterialRef → loadAsset can
+	// grow the dense asset vectors, and with them every StaticMeshAsset pointer
+	// (and the materialPath strings it owns) dies mid-loop — the trap
+	// documented on ContentManager's getters.
+	std::vector<RenderSection> resolveSections(std::vector<MeshSection> sections,
+	                                           ContentManager& cm,
+	                                           std::unordered_set<std::string>& missing)
+	{
+		std::vector<RenderSection> out;
+		out.reserve(sections.size());
+		for (const MeshSection& sec : sections)
+		{
+			RenderSection rs;
+			rs.indexOffset = sec.indexOffset;
+			rs.indexCount  = sec.indexCount;
+			if (sec.materialId != HE::UUID{})
+			{
+				cm.ensureResident(sec.materialId);
+				rs.materialAssetId = sec.materialId;
+			}
+			else if (!sec.materialPath.empty())
+			{
+				rs.materialAssetId = cm.idForPath(sec.materialPath);
+				if (rs.materialAssetId == HE::UUID{} && !missing.contains(sec.materialPath))
+				{
+					const MaterialAsset* ma = cm.resolveMaterialRef({}, sec.materialPath);
+					if (ma) rs.materialAssetId = ma->id;
+					else    missing.insert(sec.materialPath);
+				}
+			}
+			out.push_back(rs);
+		}
+		return out;
+	}
+
 	// ── Renderables ─────────────────────────────────────────────────────────
 	// Two-phase build: sequential ECS read (no EnTT concurrency guarantees), then
 	// parallel AABB/transform computation (pure math, no registry access).
 	// KEEP THE PHASES APART: every registry / ContentManager read belongs in the
 	// gather loop, the parallel_for must stay pure maths over `items`.
-	void extractMeshes(entt::registry& reg, RenderWorld& out, ContentManager* contentManager)
+	void extractMeshes(entt::registry& reg, RenderWorld& out, ContentManager* contentManager,
+	                   std::unordered_set<std::string>& sectionMaterialMissing)
 	{
 		struct EntityData {
 			glm::mat4 world;
@@ -121,6 +170,7 @@ namespace
 			bool      castsShadow;
 			bool      receivesShadow;
 			HE::AABB  localBounds; // real mesh AABB; invalid → world bounds stay invalid (never culled)
+			std::vector<RenderSection> sections; // multi-section mesh only, else empty (see RenderObject)
 			std::vector<float> paramOverride; // merged HeParams block, or empty
 			HE::UUID  weightmapId;            // landscape layer weights (chunks only)
 			glm::vec4 avgLayerWeights{ 1.0f, 0.0f, 0.0f, 0.0f }; // their terrain-wide mean
@@ -223,6 +273,16 @@ namespace
 					// AABB leaves boundsMin==boundsMax=={0,0,0} — "valid" but a zero-volume point,
 					// and culling against it drops the object the moment its pivot exits the view.
 					if (b.isValid() && b.max != b.min) d.localBounds = b;
+					// Material slots — only when there is more than one AND no entity
+					// override. A MaterialComponent replaces every slot, so the mesh
+					// then draws whole with it, exactly as before sections existed;
+					// a one-section asset (every legacy mesh, every primitive) leaves
+					// the list empty and takes the unchanged single-draw path.
+					// `m` is dead after this call (resolveSections may load), which
+					// is why the bounds were read first and the table is copied in.
+					if (m->sections.size() > 1 && d.matId == HE::UUID{})
+						d.sections = resolveSections(m->sections, *contentManager,
+						                             sectionMaterialMissing);
 				}
 			items.push_back(d);
 		}
@@ -247,6 +307,7 @@ namespace
 			obj.castsShadow     = d.castsShadow;
 			obj.receivesShadow  = d.receivesShadow;
 			obj.paramOverride   = d.paramOverride; // per-entity HeParams block (empty = none)
+			obj.sections        = d.sections;      // material slots (multi-section mesh only)
 			obj.weightmapTextureId = d.weightmapId; // landscape layer weights (chunks only)
 			obj.landscapeLayerWeights = d.avgLayerWeights; // their terrain-wide mean
 			obj.landscapeIndex     = d.landscapeIndex;     // → RenderWorld::landscapes
@@ -814,7 +875,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	extractCamera(reg, out, aspectRatio, editorCam);
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
-	extractMeshes(reg, out, m_contentManager);
+	extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
 	extractFoliage(reg, out);

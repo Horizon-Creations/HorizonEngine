@@ -4627,6 +4627,89 @@ void EditorApplication::dumpFrameHeadless()
 		}
 	}
 
+	// ── Mesh-section witness (HE_DUMP_SECTIONTEST=1): ONE sphere mesh whose
+	// index buffer is split into three material slots (MeshSection table, as
+	// the glTF importer writes it), each slot pointing at its own flat-colour
+	// material by baked UUID, and NO MaterialComponent on the entity. The
+	// capture must show the sphere in three bands — red top, green middle,
+	// blue bottom — which is only possible if the extractor resolved the slots,
+	// GeometryPass expanded them and the backend drew each slot's index range
+	// with that slot's material. HE_DUMP_SECTIONTEST=override adds a yellow
+	// MaterialComponent on top: the whole sphere must then be yellow (an entity
+	// override replaces every slot). Sections carry the material by UUID here
+	// because registered runtime assets have no path — the loose-path form is
+	// covered by the extractor's unit test.
+	if (const char* st = std::getenv("HE_DUMP_SECTIONTEST"); st && *st && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto makeFlat = [&](const char* name, float r, float g, float b) {
+			MaterialAsset m;
+			m.type = HE::AssetType::Material;
+			m.name = name;
+			m.baseColor[0] = r; m.baseColor[1] = g; m.baseColor[2] = b;
+			m.roughness = 0.8f;
+			return contentManager().registerMaterial(std::move(m));
+		};
+		const HE::UUID matTop = makeFlat("SectionTop",    0.9f, 0.1f, 0.1f);
+		const HE::UUID matMid = makeFlat("SectionMiddle", 0.1f, 0.8f, 0.15f);
+		const HE::UUID matBot = makeFlat("SectionBottom", 0.1f, 0.25f, 0.9f);
+
+		// UV sphere, ring by ring from the pole down, so the index buffer is
+		// naturally ordered top → bottom and the three slots are contiguous
+		// latitude bands.
+		StaticMeshAsset sphere;
+		sphere.type = HE::AssetType::StaticMesh;
+		sphere.name = "SectionTestSphere";
+		const int segU = 48, segV = 24; const float radius = 2.5f;
+		const float kPi = glm::pi<float>();
+		for (int y = 0; y <= segV; ++y)
+		{
+			const float v = (float)y / segV, phi = v * kPi;
+			for (int x = 0; x <= segU; ++x)
+			{
+				const float uu = (float)x / segU, th = uu * 2.0f * kPi;
+				const glm::vec3 n(std::sin(phi) * std::cos(th), std::cos(phi), std::sin(phi) * std::sin(th));
+				const glm::vec3 p = n * radius;
+				sphere.vertices.insert(sphere.vertices.end(), { p.x, p.y, p.z });
+				sphere.normals.insert(sphere.normals.end(),   { n.x, n.y, n.z });
+				sphere.uvs.insert(sphere.uvs.end(),           { uu, v });
+			}
+		}
+		for (int y = 0; y < segV; ++y)
+			for (int x = 0; x < segU; ++x)
+			{
+				const uint32_t a = y * (segU + 1) + x, b = a + segU + 1;
+				sphere.indices.insert(sphere.indices.end(), { a, b, a + 1, a + 1, b, b + 1 });
+			}
+		const uint32_t perRing = static_cast<uint32_t>(segU * 6);
+		const uint32_t total   = static_cast<uint32_t>(sphere.indices.size());
+		MeshSection top, mid, bot;
+		top.indexOffset = 0;                 top.indexCount = perRing * 8;
+		mid.indexOffset = perRing * 8;       mid.indexCount = perRing * 8;
+		bot.indexOffset = perRing * 16;      bot.indexCount = total - perRing * 16;
+		top.materialId = matTop; mid.materialId = matMid; bot.materialId = matBot;
+		sphere.sections   = { top, mid, bot };
+		sphere.materialId = matTop; // the mesh's own material = slot 0, as the loader keeps it
+		const HE::UUID meshId = contentManager().registerStaticMesh(std::move(sphere));
+
+		auto e = m_editorWorld->createEntity("SectionTestSphere");
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		TransformComponent tc;
+		tc.position = m_editorCamera.position() + camFwd * 8.0f;
+		reg.emplace<TransformComponent>(e, tc);
+		reg.emplace<MeshComponent>(e, MeshComponent{ meshId });
+		if (std::string(st) == "override")
+		{
+			const HE::UUID matOv = makeFlat("SectionOverride", 0.95f, 0.85f, 0.1f);
+			reg.emplace<MaterialComponent>(e, MaterialComponent{ matOv });
+		}
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_SECTIONTEST three-slot sphere added ("
+			 + std::string(st) + ")").c_str());
+	}
+
 	// ── SSR witness (HE_DUMP_SSRTEST=1): a mirror floor (metallic 1, roughness
 	// 0.05) with a red cube standing on it. With SSR on (deferred tile path)
 	// the floor must show the cube's reflection; the SSR=0 control shows only
