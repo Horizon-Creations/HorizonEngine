@@ -2,7 +2,10 @@
 #include "EditorApplication.h"           // AppContext, HorizonWorld, EditorUndo
 #include "EditorWidgets.h"
 #include "EditorHelp.h"                  // scopes for the context and create menus
+#include "EditorTheme.h"                 // the accent the prefab badge is drawn in
 #include <HorizonScene/HorizonScene.h>
+#include <ContentManager/ContentManager.h> // the prefab badge names the asset
+#include <ContentManager/Assets.h>
 #include <UIWidget/WidgetManager.h>   // application projects list widgets, not entities
 #include <algorithm>                     // find/min/max/reverse for the Shift-click range
 #include <functional>
@@ -364,6 +367,38 @@ void render(AppContext& ctx)
                 flags, "%s", node.name.c_str());
 
             if (lock && !lockedByMe) ImGui::PopStyleColor();
+
+            // ── Placed prefabs ────────────────────────────────────────────
+            // The root of a placement wears the asset's name, and a mark when
+            // something on the placement was changed here — that is the row a
+            // reader looks at to know whether the thing under it is still
+            // what the prefab says. Read from the registry every frame rather
+            // than the hierarchy cache above: an override comes and goes
+            // without the hierarchy ever being dirty.
+            if (const auto* inst = ctx.world->registry().try_get<PrefabInstanceComponent>(node.entity))
+            {
+                const PrefabAsset* asset =
+                    ctx.contentManager ? ctx.contentManager->getPrefab(inst->asset) : nullptr;
+                const size_t changed = inst->overrides.size();
+                ImGui::SameLine();
+                ImGui::TextColored(changed ? HE::Ed::Theme::AccentBright
+                                           : HE::Ed::Theme::alpha(HE::Ed::Theme::Accent, 0.75f),
+                                   changed ? "[%s *]" : "[%s]",
+                                   asset && !asset->name.empty() ? asset->name.c_str() : "Prefab");
+                if (ImGui::IsItemHovered())
+                {
+                    if (!asset)
+                        ImGui::SetTooltip("Placed from a prefab that is not loaded.");
+                    else if (changed)
+                        ImGui::SetTooltip("Placed from %s\n%zu change(s) made here — the prefab's "
+                                          "values do not reach those. See Prefab Instance in the "
+                                          "Details panel.",
+                                          asset->path.c_str(), changed);
+                    else
+                        ImGui::SetTooltip("Placed from %s\nExactly what the prefab says.",
+                                          asset->path.c_str());
+                }
+            }
 
             if (lock)
             {

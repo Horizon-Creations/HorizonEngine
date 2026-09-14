@@ -236,6 +236,16 @@ struct AppContext
 	// Is there anything to paste? Drives the Paste item's enabled state.
 	bool entityClipboardFull = false;
 
+	// ── Placed prefabs ───────────────────────────────────────────────────────
+	// The Details panel's two verbs on a prefab instance: take one authored
+	// change back to what the asset says, and write the placement back into
+	// its asset. Bound by EditorApplication because both reach past the world
+	// — the content manager's resident copy, the file, the other placements'
+	// sync, the undo stack. `root` is the entity carrying the
+	// PrefabInstanceComponent. Both return whether it happened.
+	std::function<bool(Entity root, const PrefabInstanceComponent::Override&)> revertPrefabOverride;
+	std::function<bool(Entity root)> pushToPrefab;
+
 	// Editor/hub flags (mutable)
 	bool& projectLoaded;
 	bool& contentRefreshPending;
@@ -841,6 +851,24 @@ private:
 	// world directly rather than through EditorCommands, and nothing it changed
 	// would reach the other participants.
 	void syncPrefabInstances(const char* when);
+	// The other direction: what a human just changed on a placed prefab is
+	// marked as authored here (SceneSerializer::recordPrefabOverrides), or the
+	// save-time sync above would put the asset's value back over it. Runs once
+	// per frame in which the undo revision moved, over the SELECTION — a human
+	// edits what is selected (Details rows, the gizmo, a rename, a multi-edit),
+	// and undo/redo clear the selection, so a restore is never mistaken for an
+	// edit. Also called right before the save-time sync, for an edit committed
+	// in the very frame the save was asked for. Skipped in a collaboration
+	// session for the same reason the sync is.
+	void recordPrefabEdits();
+	uint64_t m_prefabEditRevision = 0;
+	// Take one authored change back to what the asset says (the entry leaves
+	// the list, the placement is synced), or write a placement back into its
+	// asset (file + resident copy, then every other placement synced). Both
+	// snapshot for undo. False when the asset is not resident or the write
+	// failed — the log says which.
+	bool revertPrefabOverride(Entity root, const PrefabInstanceComponent::Override& entry);
+	bool pushToPrefab(Entity root);
 	// Build the node-graph material pipelines referenced by the current world ahead
 	// of the first draw (no first-frame cross-compile hitch). Materials are resident
 	// by call time (preloadAssetRefs ran); a no-op for backends that build eagerly.
