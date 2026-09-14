@@ -52,19 +52,23 @@ bool paint(FoliageComponent& fol, const TerrainComponent& tc,
            float radius, float falloff, float strength, float target)
 {
     if (tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return false;
-    ensureMask(fol);
-    if (fol.densityMask.empty()) return false;
-
-    const uint32_t mr    = fol.maskRes;
-    const float    halfX = tc.sizeX * 0.5f;
-    const float    halfZ = tc.sizeZ * 0.5f;
 
     radius   = std::max(0.0f, radius);
     falloff  = std::max(0.0f, falloff);
     strength = std::clamp(strength, 0.0f, 1.0f);
     target   = std::clamp(target,   0.0f, 1.0f);
     const float outer = radius + falloff;
+    // Before the mask is allocated: a stroke that cannot change anything (a
+    // dt == 0 frame gives strength 0) must not leave the layer "painted" —
+    // that would lock the resolution slider for nothing.
     if (outer <= 0.0f || strength <= 0.0f) return false;
+
+    ensureMask(fol);
+    if (fol.densityMask.empty()) return false;
+
+    const uint32_t mr    = fol.maskRes;
+    const float    halfX = tc.sizeX * 0.5f;
+    const float    halfZ = tc.sizeZ * 0.5f;
 
     // World rect → texel rect. The mask spans the terrain's 0..1 UV range, so
     // one texel is sizeX/mr wide.
