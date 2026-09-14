@@ -15,9 +15,8 @@
 // components block is what the prefab machinery diffs and syncs, and a lock
 // on a placed prefab's child is not a change to the prefab — it is where the
 // user parked the mouse. Prefab assets and the clipboard therefore never
-// carry it, and a peer in a collaboration session does not see it either:
-// EditorCommands replicate components, and this is deliberately not one of
-// the keys they know.
+// carry it, and it is not replicated to the other people in a collaboration
+// session either — each machine keeps its own.
 struct EditorLockComponent
 {
 };
