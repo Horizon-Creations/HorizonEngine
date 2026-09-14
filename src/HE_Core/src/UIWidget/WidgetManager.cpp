@@ -1531,13 +1531,19 @@ const WidgetManager::ColumnInfo* WidgetManager::columnInfoFor(ContentManager& co
 		// one and the columns would be one width on a row that says "Bob" and
 		// another on the row that says "Bartholomew" — which reads as a drawing
 		// bug and is a layout disagreement. Auto Size is ON by default for a
-		// text element, so this is the one an author meets first.
+		// text element, so this is the one an author meets first. A slot
+		// margin on the row's axis and a sideways alignment other than Fill
+		// are the same kind of thing: both make the cell's slot something
+		// other than the column width the table wrote.
 		if (ep->slotFill > 0.0f ||
+		    ep->slotPadLeft > 0.0f || ep->slotPadRight > 0.0f ||
+		    ep->slotHAlign != HE::UISlotHAlign::Fill ||
 		    (ep->autoSizedAxes() & HE::UIElement::kAxisX) != 0)
 		{
 			HE_LOG_WARN(Widget, "Table row '%s': cell '%s' decides its own width "
-			                    "(Slot Fill or Auto Size), which fights the column "
-			                    "width the table writes — showing no columns",
+			                    "(Slot Fill, Slot Align H, a left/right Slot Padding "
+			                    "or Auto Size), which fights the column width the "
+			                    "table writes — showing no columns",
 			            path.c_str(), ep->name.c_str());
 			info.titles.clear();
 			return &(m_columnInfo[path] = info);
