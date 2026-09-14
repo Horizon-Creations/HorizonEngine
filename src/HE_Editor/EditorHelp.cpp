@@ -2043,11 +2043,11 @@ namespace
 	  "value you touched, so dragging Position X leaves each entity's Y and Z as "
 	  "they were. One undo puts all of them back.",
 	  "", "editor#details" },
-	{ "details.multi.held", "Held by someone else",
-	  "In a collaboration session, entities another participant is editing "
-	  "keep their values: your change would collide with theirs and would not "
-	  "reach the others anyway. Select them again once the other person has "
-	  "moved on.",
+	{ "details.multi.held", "Only the entity you hold",
+	  "In a collaboration session the editor holds a lock on the active entity "
+	  "alone, and only what you hold reaches the other participants. The other "
+	  "selected entities keep their values, so nothing moves on your screen "
+	  "that the others cannot see. Edit them one at a time in a session.",
 	  "", "editor#details" },
 	{ "details.multi.partial", "Not on every selected entity",
 	  "Components the active entity has but at least one other selected entity "

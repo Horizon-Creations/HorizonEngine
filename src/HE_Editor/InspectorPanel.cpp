@@ -96,23 +96,34 @@ bool inputMayEditThisFrame()
 	                              ImGuiHoveredFlags_AllowWhenBlockedByPopup);
 }
 
-// Members another participant holds while a collab session runs. Their edits
-// would be silently dropped on the wire (publishComponents sends only what we
-// own the lock for) and would fight the holder's own — so they are left out of
-// the propagation and said so above the rows.
-std::vector<Entity> membersHeldByOthers(AppContext& ctx, const std::vector<Entity>& members)
+// Members an edit must NOT reach, and why:
+//   - In a collab session, every member whose lock we do not hold. The editor
+//     locks the primary alone (followSelection takes one subject), and
+//     publishComponents sends nothing for an entity we do not own the lock
+//     for — so a member edited locally would move on our screen and on nobody
+//     else's, and one another participant holds would fight theirs on top.
+//     Until there is a multi-lock model, a session means primary-only, and
+//     the panel says so.
+//   - A terrain, in or out of a session: its state is a quarter of a million
+//     floats per capture, and a marquee around props near the origin picks
+//     it up by its pivot. Nothing of a terrain's is right to copy anyway.
+std::vector<Entity> membersToSkip(AppContext& ctx, const entt::registry& registry,
+                                  const std::vector<Entity>& members, Entity primary)
 {
-	std::vector<Entity> held;
-	if (!ctx.collab || !ctx.collab->inSession()) return held;
+	std::vector<Entity> skip;
+	const bool inSession = ctx.collab && ctx.collab->inSession();
 	for (Entity e : members)
 	{
+		if (e == primary || !registry.valid(e)) continue;
+		if (registry.all_of<TerrainComponent>(e)) { skip.push_back(e); continue; }
+		if (!inSession) continue;
 		const auto subject = ctx.collab->subjectFor(
 			static_cast<std::uint32_t>(entt::to_integral(e)));
-		if (const HE::Net::LockInfo* lock = ctx.collab->lockFor(subject);
-		    lock && lock->owner != ctx.collab->localParticipant())
-			held.push_back(e);
+		const HE::Net::LockInfo* lock = ctx.collab->lockFor(subject);
+		if (!lock || lock->owner != ctx.collab->localParticipant())
+			skip.push_back(e);
 	}
-	return held;
+	return skip;
 }
 
 void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
@@ -158,12 +169,13 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	hint("Edits below apply to every selected entity that has the component; "
 	     "the active entity's values are shown.");
 	EditorWidgets::helpForKey("details.multi.shared");
-	const std::vector<Entity> held = membersHeldByOthers(ctx, members);
-	if (!held.empty())
+	const std::vector<Entity> held = membersToSkip(ctx, registry, members, primary);
+	if (ctx.collab && ctx.collab->inSession())
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.70f, 0.25f, 1.0f));
-		ImGui::TextWrapped("%zu of the selected entities are being edited by someone "
-		                   "else and will not take your changes.", held.size());
+		ImGui::TextWrapped("In a collaboration session only the entity you hold takes "
+		                   "edits: %zu of the selected entities keep their values.",
+		                   held.size());
 		ImGui::PopStyleColor();
 		EditorWidgets::helpForKey("details.multi.held");
 	}
