@@ -1598,6 +1598,7 @@ void EditorApplication::OnInit()
 			if (ok)
 			{
 				m_currentScenePath = sceneAbsPath;
+				syncPrefabInstances("startup"); // same order as openScene: before the preload
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 				splashStatus("Compiling material pipelines", 0.95f);
 				warmupWorldMaterials(); // build custom-material pipelines before the first draw
@@ -8440,9 +8441,35 @@ void EditorApplication::enqueueRetargetOnDisk(const std::string& oldRel,
 	}));
 }
 
+void EditorApplication::syncPrefabInstances(const char* when)
+{
+	if (!m_editorWorld) return;
+	if (m_collab.inSession())
+	{
+		HE_LOG_INFO(Editor, "Prefab sync skipped (%s): a collaboration session is running and "
+		                    "the pass does not replicate", when);
+		return;
+	}
+	SceneSerializer serializer;
+	SceneSerializer::PrefabSyncReport rep;
+	const size_t synced = serializer.syncPrefabInstances(*m_editorWorld, contentManager(), &rep);
+	// The save-time pass rewrites what a human may have been looking at, so
+	// say when it did — one line, only when something moved.
+	if (synced && (rep.componentsApplied || rep.componentsRemoved || rep.entitiesCreated))
+		HE_LOG_INFO(Editor, "Prefab sync (%s): %zu instance(s), %zu component(s) applied, "
+		                    "%zu removed, %zu entity/-ies created, %zu override(s) kept",
+		            when, synced, rep.componentsApplied, rep.componentsRemoved,
+		            rep.entitiesCreated, rep.overridesKept);
+}
+
 bool EditorApplication::saveSceneToPath(const std::string& path)
 {
 	if (!m_editorWorld || path.empty()) return false;
+
+	// The file must not lag the assets it was built from — see the header.
+	// Before the write, so the sync's result IS what lands on disk; the world
+	// changes with it, which is what a human sees after the save anyway.
+	syncPrefabInstances("save");
 
 	SceneSerializer serializer;
 	if (serializer.save(*m_editorWorld, path, SerializeFormat::JSON))
@@ -8529,6 +8556,9 @@ bool EditorApplication::openScene(const std::string& path)
 	{
 		loaded = true;
 		m_currentScenePath = path;
+		// Before the asset preload: the sync may change which meshes and
+		// materials the placed prefabs reference.
+		syncPrefabInstances("open");
 		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 		warmupWorldMaterials(); // build custom-material pipelines before the first draw
 		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene opened from " + path).c_str());

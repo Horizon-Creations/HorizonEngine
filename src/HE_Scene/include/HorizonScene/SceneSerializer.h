@@ -8,6 +8,7 @@
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
 
 class HorizonWorld;
+class ContentManager;
 using SerializeFormat = HE::SerializeFormat;
 using Entity = entt::entity;
 
@@ -108,6 +109,63 @@ public:
                              Entity parent = entt::null,
                              bool preserveIds = false,
                              std::vector<PrefabInstanceComponent::Binding>* outBindings = nullptr);
+
+    // ── Prefab propagation ───────────────────────────────────────────────────
+    // Bring a placed instance up to date with its asset: every template record
+    // that is bound to a living entity of the placement has its components
+    // re-applied from the blob, EXCEPT what the instance's override list marks
+    // as authored here (a whole component, or single top-level properties of
+    // one — the instance's current values win for those and the rest of the
+    // block comes from the template). A component the template dropped is
+    // removed unless overridden; one it gained is added. A template record
+    // without a binding is new in the asset and is created, bound and parented
+    // under the placement's counterpart of its parent record. What is never
+    // touched: the root's transform (the placement itself), the "prefab" block
+    // of any record (the instance's own link, or a nested instance's), a bound
+    // entity that no longer exists (deleted here, which is an authored change),
+    // and a bound entity whose record the asset no longer has (left standing
+    // and counted as unbound — see the component header for why that is not a
+    // deletion).
+    //
+    // An instance without any bindings predates the table (every placement
+    // made before bindings existed). Its root is bound by structure — the
+    // parentless record is the root, unambiguously — and every root component
+    // that differs from the template is recorded as a whole-component override
+    // rather than overwritten, so the first sync after an upgrade changes
+    // nothing a human can see and the Inspector can revert those later, one by
+    // one. Its children stay unbound: there is nothing that says which is which.
+    //
+    // Entity references inside component blocks (a joint's target, a rig's
+    // follow entity) are copied verbatim, as instantiatePrefab copies them; the
+    // template's ids do not resolve in the instance and nothing here pretends
+    // they do.
+    struct PrefabSyncReport {
+        size_t instances          = 0; // placements visited
+        size_t componentsApplied  = 0; // component blocks written from the template
+        size_t componentsRemoved  = 0; // components the template no longer has
+        size_t entitiesCreated    = 0; // records new in the asset, created here
+        size_t overridesKept      = 0; // blocks/properties the override list protected
+        size_t overridesAdopted   = 0; // whole-component overrides seeded on a legacy instance
+        size_t unboundEntities    = 0; // bound entities whose record the asset lost
+        size_t unresolvedAssets   = 0; // instances whose asset could not be read
+    };
+    // One placement (`root` carries the PrefabInstanceComponent) against one
+    // asset blob. False when the blob does not parse or `root` is no instance.
+    bool syncPrefabInstance(HorizonWorld& world, Entity root,
+                            const std::vector<uint8_t>& assetBlob,
+                            PrefabSyncReport* report = nullptr);
+    // Every placement in the world against the content manager's copy of its
+    // asset (made resident on demand; a placement whose asset is missing is
+    // skipped and counted). Returns the number of placements synced. The
+    // editor runs this when a scene is opened and before it is saved.
+    size_t syncPrefabInstances(HorizonWorld& world, ContentManager& content,
+                               PrefabSyncReport* report = nullptr);
+
+    // Remove the component a scene-format key names ("light", "rigidbody"), the
+    // inverse of the one block applyComponents restores for it. False when the
+    // key is unknown or the entity does not carry the component. "__name" is
+    // not a component and is refused.
+    static bool removeComponentByKey(HorizonWorld& world, Entity entity, const std::string& key);
 
 private:
     bool saveJSON  (const HorizonWorld& world, const std::filesystem::path& path);

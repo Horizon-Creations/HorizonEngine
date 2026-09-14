@@ -30,9 +30,13 @@
 //
 // A binding whose instance entity no longer exists means the child was deleted
 // from the placement — that is an override in its own right, not a broken
-// table, and a reader must not repair it by dropping the entry. A binding
-// whose template record no longer exists in the asset means the asset changed
-// (or the instance is older than this table): "unbound", never "delete it".
+// table, and a reader must not repair it by dropping the entry. A binding to
+// the NULL uuid says the same thing outright: "no counterpart here" — written
+// when an instance older than this table is adopted and a record cannot be
+// matched to a child unambiguously, so that propagation neither creates it nor
+// keeps looking. A binding whose template record no longer exists in the asset
+// means the asset changed (or the instance is older than this table):
+// "unbound", never "delete it".
 //
 // ── Overrides: what a human authored on the placement ────────────────────────
 // An override is a MARKER, not a value: `{ template entity, component key,
@@ -55,11 +59,16 @@
 // block; an old scene without bindings/overrides loads with both empty).
 // applyPrefabJson re-points bindings at the freshly minted entities whenever a
 // blob carrying this component is instantiated, so a duplicate binds to ITS
-// children, not the original's. Nothing here applies anything: propagation,
-// the Inspector's revert and push-to-prefab are readers of this record, and
-// push-to-prefab in particular must translate instance ids back to template
-// ids through the bindings rather than re-serialise the instance verbatim —
-// or every binding in the project breaks on the first push.
+// children, not the original's. Propagation is `SceneSerializer::
+// syncPrefabInstance`: it re-applies the asset's records to the bound entities,
+// keeps whatever the override list names (the display name is addressed as
+// component "__name"), creates records that have no binding yet, and adopts
+// an instance without bindings by binding what it can and recording every
+// difference as an override — the editor runs it over the whole scene on open
+// and before save. The Inspector's revert and push-to-prefab are the remaining
+// readers, and push-to-prefab in particular must translate instance ids back
+// to template ids through the bindings rather than re-serialise the instance
+// verbatim — or every binding in the project breaks on the first push.
 //
 // ── Why a uuid and not a path ────────────────────────────────────────────────
 // The same reason every other asset reference in a scene is one: a path in a

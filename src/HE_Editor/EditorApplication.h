@@ -834,6 +834,13 @@ private:
 	bool openScene(const std::string& path);
 	void openSceneAdditive(const std::string& path);
 	void newScene();
+	// Bring every placed prefab in the editor world up to date with its asset
+	// (SceneSerializer::syncPrefabInstances). Run after a scene is read and
+	// before one is written, so the file on disk never lags the prefab it was
+	// placed from. Skipped in a collaboration session: the pass edits the
+	// world directly rather than through EditorCommands, and nothing it changed
+	// would reach the other participants.
+	void syncPrefabInstances(const char* when);
 	// Build the node-graph material pipelines referenced by the current world ahead
 	// of the first draw (no first-frame cross-compile hitch). Materials are resident
 	// by call time (preloadAssetRefs ran); a no-op for backends that build eagerly.
