@@ -35,6 +35,7 @@ add_executable(he_tests
     test_editor_selection.cpp
     test_editor_marquee.cpp
     test_editor_multi_edit.cpp
+    test_outliner_filter.cpp
     test_editorcamera.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
@@ -195,6 +196,10 @@ add_executable(he_tests
     # state changed, and how they land on the other members. JSON in, JSON
     # out, plus a real world for the write-back — no widgets involved.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorMultiEdit.cpp
+    # The Outliner's search and type dropdown: which rows of a depth-first
+    # hierarchy stay, and as what (hit or the dimmed path to one). Rows in,
+    # verdicts out, plus a real registry for the type table — no ImGui.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerFilter.cpp
     # The single door every scene change goes through — the UI's structural
     # commands, a peer's edit and, later, an external MCP client. It is
     # deliberately free of ImGui and of EditorApplication (which is NOT in this

@@ -2022,6 +2022,17 @@ namespace
 	  "Saves this entity and its children as a reusable asset, so the same thing "
 	  "can be dropped into any scene.",
 	  "", "scenes#prefabs" },
+	{ "outliner.search", "Search",
+	  "Narrows the tree to entities whose name contains this text, in any case. "
+	  "Every entity in the scene is searched, including those under folded "
+	  "rows. Hits are shown with the rows above them, dimmed, so you can see "
+	  "where each one lives; clearing the box puts the tree back as it was.",
+	  "", "editor#outliner" },
+	{ "outliner.type-filter", "Type filter",
+	  "Shows only entities that carry the chosen component, such as every Light "
+	  "or every Camera. An entity is the sum of its components, so this is what "
+	  "\"type\" means here. Combined with the search box, both have to match.",
+	  "", "editor#outliner" },
 
 	// ── Details panel ────────────────────────────────────────────────────────
 	{ "details.add-component", "Add Component",

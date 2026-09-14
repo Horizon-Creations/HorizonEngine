@@ -1,4 +1,5 @@
 #include "OutlinerPanel.h"
+#include "OutlinerFilter.h"              // the search/type rule behind the header row
 #include "EditorApplication.h"           // AppContext, HorizonWorld, EditorUndo
 #include "EditorWidgets.h"
 #include "EditorHelp.h"                  // scopes for the context and create menus
@@ -20,6 +21,7 @@
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
 #include <imgui_internal.h>   // ImRect + BeginDragDropTargetCustom for the root drop zone
+#include <misc/cpp/imgui_stdlib.h> // InputText over std::string for the search box
 #endif
 
 namespace OutlinerPanel
@@ -325,9 +327,93 @@ void render(AppContext& ctx)
         static char   s_entityRenameBuf[256] = {};
         static bool   s_openEntityRename = false;
 
+        // ── Search + type filter ──────────────────────────────────────────
+        // The same header the Content Browser has, for the same reason: a
+        // panel that can show a few hundred rows but not find one among them
+        // is a panel people scroll instead of use. Typing narrows by name,
+        // the dropdown by what the entity IS (see OutlinerFilter.h); both at
+        // once means both. State is per editor, not per world — a search
+        // survives a scene switch, which is what a search typed for "the
+        // torch in every level" needs.
+        static std::string s_searchText;
+        static int         s_typeFilter = OutlinerFilter::kAllKinds;
+        {
+            const float comboW = 130.0f;
+            const float clearW = ImGui::GetFrameHeight();
+            const float avail  = ImGui::GetContentRegionAvail().x;
+            ImGui::SetNextItemWidth(std::max(60.0f, avail - comboW - clearW -
+                                             ImGui::GetStyle().ItemSpacing.x * 2.0f));
+            ImGui::InputTextWithHint("##outliner_search", "Search entities", &s_searchText);
+            EditorWidgets::helpForKey("outliner.search");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(comboW);
+            if (ImGui::BeginCombo("##outliner_type", OutlinerFilter::kindAt(s_typeFilter).label))
+            {
+                for (int i = 0; i < OutlinerFilter::kindCount(); ++i)
+                    if (ImGui::Selectable(OutlinerFilter::kindAt(i).label, i == s_typeFilter))
+                        s_typeFilter = i;
+                ImGui::EndCombo();
+            }
+            EditorWidgets::helpForKey("outliner.type-filter");
+            ImGui::SameLine();
+            // One click back to the whole tree — undoing a search by clearing
+            // two controls is the friction that stops people searching.
+            const bool anyFilter = !s_searchText.empty() ||
+                                   s_typeFilter != OutlinerFilter::kAllKinds;
+            ImGui::BeginDisabled(!anyFilter);
+            if (ImGui::Button("\xC3\x97##outliner_clear_filter", ImVec2(clearW, 0.0f)))
+            {
+                s_searchText.clear();
+                s_typeFilter = OutlinerFilter::kAllKinds;
+            }
+            ImGui::EndDisabled();
+            if (anyFilter && ImGui::IsItemHovered())
+                ImGui::SetTooltip("Clear the search and the type filter");
+            ImGui::Separator();
+        }
+        const bool filterActive = !s_searchText.empty() ||
+                                  s_typeFilter != OutlinerFilter::kAllKinds;
+
+        // Which rows survive, and as what. Run every frame while a filter is
+        // on: the type test reads components straight from the registry, and
+        // a component added in Details does not dirty the hierarchy cache.
+        // The World root is never a hit of its own — it is the tree's
+        // built-in top, not something the user placed — so it only ever
+        // appears as the dimmed path to whatever was found under it.
+        std::vector<OutlinerFilter::Shown> shown;
+        size_t hitCount = 0;
+        if (filterActive)
+        {
+            std::vector<OutlinerFilter::Row> rows;
+            rows.reserve(s_outlinerCache.size());
+            const auto& reg = ctx.world->registry();
+            const OutlinerFilter::Kind& kind = OutlinerFilter::kindAt(s_typeFilter);
+            for (const auto& node : s_outlinerCache)
+            {
+                const bool match = node.entity != ctx.world->rootEntity() &&
+                                   reg.valid(node.entity) &&
+                                   OutlinerFilter::nameMatches(node.name, s_searchText) &&
+                                   kind.test(reg, node.entity);
+                rows.push_back({ node.depth, match });
+                if (match) ++hitCount;
+            }
+            shown = OutlinerFilter::apply(rows);
+            if (hitCount == 0)
+                ImGui::TextDisabled("Nothing matches. The search covers every entity "
+                                    "in the scene, open or folded.");
+        }
+
         // ── Render from cache ─────────────────────────────────────────────
         int prevDepth      = -1;
         int skipBelowDepth = INT_MAX; // skip children of closed nodes
+
+        // While a filter is on, the tree's open/closed state lives in its own
+        // ID namespace, and every branch on the way to a hit is forced open
+        // there: a hit under a folded parent is a hit nobody sees. Doing it in
+        // a separate namespace is what keeps the user's own folds — the state
+        // under the unfiltered IDs — untouched, so clearing the search puts
+        // the tree back exactly as it was.
+        if (filterActive) ImGui::PushID("##outliner_filtered");
 
         // The rows that were actually DRAWN this frame, top to bottom. A
         // Shift-click selects "everything between the anchor and this row", and
@@ -338,12 +424,27 @@ void render(AppContext& ctx)
         visibleRows.reserve(s_outlinerCache.size());
         Entity shiftRangeTarget = entt::null;
 
-        for (const auto& node : s_outlinerCache)
+        for (size_t nodeIndex = 0; nodeIndex < s_outlinerCache.size(); ++nodeIndex)
         {
+            const auto& node = s_outlinerCache[nodeIndex];
             // If a parent was closed, skip all its children
             if (node.depth > skipBelowDepth)
                 continue;
             skipBelowDepth = INT_MAX; // back at or above the closed level → reset
+
+            // Filtered out. Skipped BEFORE this row counts as visible, so a
+            // Shift-range never spans rows the user cannot see — and before
+            // the depth bookkeeping, which is safe because the filter result
+            // is closed under "parent of": everything under a hidden row is
+            // hidden too, so no open level is ever left dangling by it.
+            const OutlinerFilter::Show show =
+                filterActive ? shown[nodeIndex].show : OutlinerFilter::Show::Hit;
+            if (show == OutlinerFilter::Show::Hidden)
+                continue;
+            // Under a filter, "has children" means "has children on screen":
+            // a hit whose children all fell away is a leaf, arrow and all.
+            const bool hasChildren = filterActive ? shown[nodeIndex].childShown
+                                                  : node.hasChildren;
             visibleRows.push_back(node.entity);
 
             // Close tree levels we've left
@@ -356,7 +457,7 @@ void render(AppContext& ctx)
             ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow
                                      | ImGuiTreeNodeFlags_SpanAvailWidth
                                      | ImGuiTreeNodeFlags_DefaultOpen;
-            if (!node.hasChildren)
+            if (!hasChildren)
                 flags |= ImGuiTreeNodeFlags_Leaf;
             if (ctx.selection.contains(node.entity))
                 flags |= ImGuiTreeNodeFlags_Selected;
@@ -373,20 +474,38 @@ void render(AppContext& ctx)
                 lockedByMe = lock && lock->owner == ctx.collab->localParticipant();
             }
 
+            // One text colour push at most: a peer's lock outranks the
+            // filter's dimming, because "not yours" matters more than "only
+            // here for the path".
+            bool pushedText = false;
             if (lock && !lockedByMe)
             {
                 // Dim the row: it is not yours to edit right now.
                 float rgb[3];
                 ctx.collab->colorFor(lock->owner, rgb);
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
+                pushedText = true;
             }
+            else if (show == OutlinerFilter::Show::Context)
+            {
+                // Not a hit itself — the path to one. Dimmed so the eye lands
+                // on what was searched for, not on the folders around it.
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                pushedText = true;
+            }
+
+            // Every branch with something shown under it is open while the
+            // filter runs (in the filtered ID namespace, see above): the
+            // filter is what decides what is visible, not last week's folds.
+            if (filterActive && hasChildren)
+                ImGui::SetNextItemOpen(true, ImGuiCond_Always);
 
             bool open = ImGui::TreeNodeEx(
                 reinterpret_cast<void*>(static_cast<uintptr_t>(
                     static_cast<uint32_t>(node.entity))),
                 flags, "%s", node.name.c_str());
 
-            if (lock && !lockedByMe) ImGui::PopStyleColor();
+            if (pushedText) ImGui::PopStyleColor();
 
             // ── Placed prefabs ────────────────────────────────────────────
             // The root of a placement wears the asset's name, and a mark when
@@ -644,6 +763,7 @@ void render(AppContext& ctx)
             ImGui::TreePop();
             --prevDepth;
         }
+        if (filterActive) ImGui::PopID();
 
         // ── Shift-click range, now that the visible order is complete ─────
         // Anchor and target both have to be visible rows; if the anchor's
