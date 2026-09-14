@@ -4,6 +4,7 @@
 #include <Physics/CollisionLayers.h>     // the project's sixteen collision channels
 #include "EditorWidgets.h"               // shared Content-Browser asset drop slot
 #include "EditorHelp.h"                  // per-component scope for the property tooltips
+#include "EditorMultiEdit.h"             // one edit, every selected entity
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/NavigationSystem.h>
@@ -61,6 +62,59 @@ void inertEnvironmentNote(bool isActive, const char* kind)
 // class tab uses, so a component that gains a field shows it here too. A
 // component only SOME members carry is listed, greyed, rather than dropped
 // silently: "why is Light missing" has an answer on screen.
+//
+// An edit in those rows lands on EVERY member, not just the primary. The rows
+// themselves know nothing about that: the primary's component state is read
+// before and after they run, the leaves that changed are written into the
+// other members (EditorMultiEdit), all inside the one undo session the row
+// already opened — so a single Ctrl+Z puts the whole selection back.
+
+// Can a widget in this window change a value THIS frame? Serialising the
+// primary's components twice a frame is cheap for an ordinary entity and not
+// for a terrain, and neither is needed while the user merely looks at the
+// panel. An edit needs input: a mouse button on or over the panel (the drag
+// itself, a click on a combo, the release of an asset dropped from the Content
+// Browser — that last one arrives with the source item still active and the
+// panel not focused, hence the hover with AllowWhenBlockedByActiveItem), the
+// wheel, or a key while the panel or one of its popups has the focus.
+bool inputMayEditThisFrame()
+{
+	const ImGuiIO& io = ImGui::GetIO();
+	const bool mouse = ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
+	                   ImGui::IsMouseReleased(ImGuiMouseButton_Left) ||
+	                   ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
+	                   io.MouseWheel != 0.0f;
+	bool key = io.InputQueueCharacters.Size > 0;
+	for (int k = ImGuiKey_NamedKey_BEGIN; !key && k < ImGuiKey_NamedKey_END; ++k)
+		key = ImGui::IsKeyDown(static_cast<ImGuiKey>(k));
+	if (!mouse && !key) return false;
+	// RootAndChildWindows follows the popup hierarchy too, so a combo's list
+	// or the asset picker opened from here still count as this panel.
+	return ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) ||
+	       ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+	                              ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
+	                              ImGuiHoveredFlags_AllowWhenBlockedByPopup);
+}
+
+// Members another participant holds while a collab session runs. Their edits
+// would be silently dropped on the wire (publishComponents sends only what we
+// own the lock for) and would fight the holder's own — so they are left out of
+// the propagation and said so above the rows.
+std::vector<Entity> membersHeldByOthers(AppContext& ctx, const std::vector<Entity>& members)
+{
+	std::vector<Entity> held;
+	if (!ctx.collab || !ctx.collab->inSession()) return held;
+	for (Entity e : members)
+	{
+		const auto subject = ctx.collab->subjectFor(
+			static_cast<std::uint32_t>(entt::to_integral(e)));
+		if (const HE::Net::LockInfo* lock = ctx.collab->lockFor(subject);
+		    lock && lock->owner != ctx.collab->localParticipant())
+			held.push_back(e);
+	}
+	return held;
+}
+
 void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 {
 	auto& registry = world.registry();
@@ -101,18 +155,60 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 		}
 	}
 
-	hint("Edits below change the active entity only; the other selected "
-	     "entities keep their values.");
-	EditorWidgets::helpForKey("details.multi.active-only");
+	hint("Edits below apply to every selected entity that has the component; "
+	     "the active entity's values are shown.");
+	EditorWidgets::helpForKey("details.multi.shared");
+	const std::vector<Entity> held = membersHeldByOthers(ctx, members);
+	if (!held.empty())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.70f, 0.25f, 1.0f));
+		ImGui::TextWrapped("%zu of the selected entities are being edited by someone "
+		                   "else and will not take your changes.", held.size());
+		ImGui::PopStyleColor();
+		EditorWidgets::helpForKey("details.multi.held");
+	}
 	ImGui::Separator();
 
 	if (common.empty())
 		ImGui::TextDisabled("(no component shared by all selected entities)");
+
+	// The primary's state before the rows run, taken only on a frame an edit
+	// can happen in. A terrain never propagates: its state is a quarter of a
+	// million floats per capture, and there is no second entity it would be
+	// right to copy a terrain's settings onto.
+	const bool propagate = inputMayEditThisFrame() &&
+	                       !registry.all_of<TerrainComponent>(primary);
+	const EditorMultiEdit::json before =
+		propagate ? EditorMultiEdit::state(world, primary) : EditorMultiEdit::json();
+
 	// One renderFor per shared section. Each call capturePre()s on the mouse
 	// press inside the window — a handful of whole-world captures on one frame,
 	// which is the price of not duplicating the component editor.
 	for (const std::string& label : common)
-		InspectorPanel::renderFor(ctx, world, primary, ctx.undoSys, label.c_str());
+	{
+		const bool structural =
+			InspectorPanel::renderFor(ctx, world, primary, ctx.undoSys, label.c_str());
+		if (!structural) continue;
+		// The header's "Remove Component" took the section off the primary
+		// (with its own snapshotNow before the removal, which already holds
+		// every member's state). The same removal on each member, WITHOUT an
+		// undo of its own: one entry per member would turn the batch into N.
+		std::vector<std::string> left;
+		InspectorPanel::listComponents(ctx, world, primary, left);
+		if (std::find(left.begin(), left.end(), label) != left.end()) continue;
+		for (Entity e : members)
+		{
+			if (e == primary || !registry.valid(e)) continue;
+			if (std::find(held.begin(), held.end(), e) != held.end()) continue;
+			InspectorPanel::removeComponent(ctx, world, e, label.c_str(), nullptr);
+		}
+	}
+
+	if (propagate && registry.valid(primary))
+	{
+		const auto changes = EditorMultiEdit::diff(before, EditorMultiEdit::state(world, primary));
+		EditorMultiEdit::propagate(world, changes, members, primary, held);
+	}
 
 	if (!partial.empty())
 	{
@@ -146,10 +242,9 @@ void render(AppContext& ctx)
 
 	// ── More than one entity: the fields they have in common ─────────────────
 	// The header says how many and which; below it, every component section
-	// that EVERY member carries, in the primary's order. The rows are the
-	// primary's values and an edit lands on the primary alone — that is said
-	// on screen rather than left to be discovered, because "three selected,
-	// one changed" reads as a bug until the multi-edit step lands.
+	// that EVERY member carries, in the primary's order. The rows show the
+	// primary's values and an edit lands on all of them (see
+	// renderMultiSelection for how, without a second component editor).
 	if (ctx.selection.size() > 1)
 	{
 		renderMultiSelection(ctx, *ctx.world, primary);

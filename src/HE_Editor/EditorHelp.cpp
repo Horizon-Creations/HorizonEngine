@@ -1500,8 +1500,9 @@ namespace
 	  "tabs, which the scene's own saved state says nothing about.",
 	  "", "editor#menus" },
 	{ "Edit/Duplicate", "",
-	  "Copies the selected entity with all its components and children, next to "
-	  "the original.",
+	  "Copies every selected entity with all its components and children, next "
+	  "to the original. The copies become the selection; one undo removes them "
+	  "all.",
 	  "Ctrl+D", "editor#outliner" },
 	{ "Edit/Preferences", "",
 	  "Opens the settings as an editor tab: renderer, viewport, collaboration, "
@@ -1631,7 +1632,8 @@ namespace
 	  "transform, which is how a hierarchy is built.",
 	  "", "editor#outliner" },
 	{ "World Outliner/Duplicate", "",
-	  "Copies this entity, its components and its children, beside the original.",
+	  "Copies every selected entity, its components and its children, beside "
+	  "the original.",
 	  "Ctrl+D", "editor#outliner" },
 	{ "World Outliner/Save as Prefab", "",
 	  "Saves this entity and everything under it as a reusable asset, so the "
@@ -2003,7 +2005,8 @@ namespace
 
 	// ── World Outliner ───────────────────────────────────────────────────────
 	{ "outliner.duplicate", "Duplicate",
-	  "Copies the selected entity with all its components, alongside the original.",
+	  "Copies every selected entity with all its components, alongside the "
+	  "original. One undo removes all the copies.",
 	  "Ctrl+D", "editor#outliner" },
 	{ "outliner.delete", "Delete",
 	  "Removes every selected entity and everything parented under it. One "
@@ -2033,10 +2036,18 @@ namespace
 	  "How many entities the selection holds, and which. The one marked active "
 	  "is the last one clicked; its values are what the rows below show.",
 	  "", "editor#details" },
-	{ "details.multi.active-only", "Edits change the active entity only",
+	{ "details.multi.shared", "Edits apply to every selected entity",
 	  "With several entities selected the panel shows the components they all "
-	  "share, with the active entity's values. Changing a value here changes the "
-	  "active entity; the others keep theirs.",
+	  "share, with the active entity's values. Changing a value here sets that "
+	  "same value on every selected entity that has the component — only the "
+	  "value you touched, so dragging Position X leaves each entity's Y and Z as "
+	  "they were. One undo puts all of them back.",
+	  "", "editor#details" },
+	{ "details.multi.held", "Held by someone else",
+	  "In a collaboration session, entities another participant is editing "
+	  "keep their values: your change would collide with theirs and would not "
+	  "reach the others anyway. Select them again once the other person has "
+	  "moved on.",
 	  "", "editor#details" },
 	{ "details.multi.partial", "Not on every selected entity",
 	  "Components the active entity has but at least one other selected entity "

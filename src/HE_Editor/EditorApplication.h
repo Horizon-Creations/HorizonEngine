@@ -580,11 +580,19 @@ private:
 	// Exposed through AppContext (see the block there for what the clipboard
 	// holds and why). A copy taken from a scene that was since closed stays
 	// valid — it is self-contained data, not a reference into a world.
-	std::vector<std::uint8_t> m_entityClipboard;
+	//
+	// All of them act on the WHOLE selection, one subtree blob per selection
+	// root (a child whose parent is selected too travels inside the parent's
+	// blob and is not copied a second time), and each takes ONE undo snapshot
+	// before its loop, so a single Ctrl+Z reverts the whole gesture.
+	std::vector<std::vector<std::uint8_t>> m_entityClipboard;
 	void duplicateSelectedEntity();
 	void copySelectedEntity(bool cut);
 	void pasteEntityClipboard();
 	void deleteSelectedEntity();
+	// The selection roots that may be copied or removed: valid, not built-in
+	// (root, sun, moon), and not under another selected entity.
+	std::vector<Entity> editableSelectionRoots() const;
 	// Where a copy of `source` belongs: beside it, under the same parent. Shared
 	// by duplicate and paste so the two land in the same place.
 	Entity siblingParentFor(Entity source) const;

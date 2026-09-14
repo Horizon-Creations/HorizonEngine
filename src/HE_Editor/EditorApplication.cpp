@@ -7280,19 +7280,37 @@ Entity EditorApplication::siblingParentFor(Entity source) const
 	return hier->parent;
 }
 
+std::vector<Entity> EditorApplication::editableSelectionRoots() const
+{
+	std::vector<Entity> out;
+	if (!m_editorWorld) return out;
+	// roots() already drops handles the registry no longer knows and members
+	// under another member; a child of a selected parent travels inside the
+	// parent's subtree blob, so copying it on its own would double it.
+	for (Entity e : m_selection.roots(m_editorWorld->registry()))
+		if (!m_editorWorld->isBuiltin(e)) out.push_back(e);
+	return out;
+}
+
 void EditorApplication::duplicateSelectedEntity()
 {
 	if (!m_editorWorld) return;
-	const Entity src = m_selection.primary();
-	if (src == entt::null || !m_editorWorld->registry().valid(src) ||
-	    m_editorWorld->isBuiltin(src))
-		return;
+	const std::vector<Entity> sources = editableSelectionRoots();
+	if (sources.empty()) return;
 
+	// Capture everything first: the copies are minted beside their originals,
+	// and a copy of A landing before B is captured must not end up inside B's
+	// blob or, worse, be captured itself.
 	SceneSerializer serializer;
-	const std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, src);
-	if (blob.empty()) return;
+	std::vector<std::pair<std::vector<std::uint8_t>, Entity>> blobs; // subtree, parent
+	for (Entity src : sources)
+	{
+		std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, src);
+		if (blob.empty()) continue;
+		blobs.emplace_back(std::move(blob), siblingParentFor(src));
+	}
+	if (blobs.empty()) return;
 
-	const Entity parent = siblingParentFor(src);
 	// Not while playing. An entry pushed here could never be replayed — the whole
 	// session runs without an undo system (makeContext withholds it; see the
 	// block above `.undoSys`) and play-stop clears the history regardless. It was
@@ -7300,48 +7318,67 @@ void EditorApplication::duplicateSelectedEntity()
 	// clearHistory does NOT reset, so a Ctrl+D during play left the scene marked
 	// dirty — asterisk in the title bar — for a change the play-stop restore had
 	// already thrown away.
+	//
+	// ONE snapshot for the whole selection, before the first copy: a single
+	// Ctrl+Z takes all of them away again.
 	if (!m_isPlaying) m_undo.snapshotNow();
-	const Entity copy = serializer.instantiatePrefab(*m_editorWorld, blob, parent);
-	if (copy == entt::null)
+	std::vector<Entity> copies;
+	for (const auto& [blob, parent] : blobs)
 	{
-		HE_LOG_ERROR(Editor, "%s", "EditorApplication: duplicate failed — the captured subtree did not read back");
-		return;
+		const Entity copy = serializer.instantiatePrefab(*m_editorWorld, blob, parent);
+		if (copy == entt::null)
+		{
+			HE_LOG_ERROR(Editor, "%s", "EditorApplication: duplicate failed — a captured subtree did not read back");
+			continue;
+		}
+		// A copy made DURING play is a spawn like any other and needs the same
+		// physics representation, subtree included — otherwise Ctrl+D in PIE
+		// produces a crate that falls through the floor, which is the very bug
+		// this pass exists to remove, reintroduced by the editor's own tools.
+		if (m_isPlaying && m_physicsWorld)
+			m_physicsWorld->addEntityTree(*m_editorWorld, static_cast<uint32_t>(copy));
+		copies.push_back(copy);
 	}
-	// A copy made DURING play is a spawn like any other and needs the same
-	// physics representation, subtree included — otherwise Ctrl+D in PIE
-	// produces a crate that falls through the floor, which is the very bug this
-	// pass exists to remove, reintroduced by the editor's own tools.
-	if (m_isPlaying && m_physicsWorld)
-		m_physicsWorld->addEntityTree(*m_editorWorld, static_cast<uint32_t>(copy));
-	// Selecting the copy is what makes the gesture useful: the next drag moves
-	// the new object, not the one it came from.
-	m_selection.set(copy);
+	if (copies.empty()) return;
+	// Selecting the copies is what makes the gesture useful: the next drag
+	// moves the new objects, not the ones they came from.
+	m_selection.setMany(copies);
+	m_selection.setAnchor(copies.front());
 	m_editorWorld->markHierarchyDirty();
 }
 
 void EditorApplication::copySelectedEntity(bool cut)
 {
 	if (!m_editorWorld) return;
-	const Entity src = m_selection.primary();
-	if (src == entt::null || !m_editorWorld->registry().valid(src) ||
-	    m_editorWorld->isBuiltin(src))
-		return;
+	const std::vector<Entity> sources = editableSelectionRoots();
+	if (sources.empty()) return;
 
 	SceneSerializer serializer;
-	std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, src);
-	if (blob.empty()) return;
+	std::vector<std::vector<std::uint8_t>> blobs;
+	for (Entity src : sources)
+	{
+		std::vector<std::uint8_t> blob = serializer.serializeSubtree(*m_editorWorld, src);
+		if (!blob.empty()) blobs.push_back(std::move(blob));
+	}
+	if (blobs.empty()) return;
 	// Only overwrite the clipboard once the capture worked — a failed copy that
 	// silently emptied it would lose whatever the user had put there before.
-	m_entityClipboard = std::move(blob);
+	m_entityClipboard = std::move(blobs);
 
 	if (!cut) return;
-	m_selection.remove(src);
+	m_selection.clear();
 	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
-	// Same rule as the destroy service: the bodies go before the entities, while
-	// the hierarchy that names them still exists.
-	if (m_isPlaying && m_physicsWorld)
-		m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(src));
-	m_editorWorld->destroyEntity(src);
+	for (Entity src : sources)
+	{
+		// Re-checked rather than trusted: the roots are disjoint subtrees, but
+		// entt reuses handles and a stale one could name something else.
+		if (!m_editorWorld->registry().valid(src)) continue;
+		// Same rule as the destroy service: the bodies go before the entities,
+		// while the hierarchy that names them still exists.
+		if (m_isPlaying && m_physicsWorld)
+			m_physicsWorld->removeEntityTree(*m_editorWorld, static_cast<uint32_t>(src));
+		m_editorWorld->destroyEntity(src);
+	}
 }
 
 void EditorApplication::pasteEntityClipboard()
@@ -7353,16 +7390,23 @@ void EditorApplication::pasteEntityClipboard()
 	const Entity parent = siblingParentFor(m_selection.primary());
 	SceneSerializer serializer;
 	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
-	const Entity pasted = serializer.instantiatePrefab(*m_editorWorld, m_entityClipboard, parent);
-	if (pasted == entt::null)
+	std::vector<Entity> pasted;
+	for (const std::vector<std::uint8_t>& blob : m_entityClipboard)
 	{
-		HE_LOG_ERROR(Editor, "%s", "EditorApplication: paste failed — the clipboard is not a readable subtree");
-		return;
+		const Entity e = serializer.instantiatePrefab(*m_editorWorld, blob, parent);
+		if (e == entt::null)
+		{
+			HE_LOG_ERROR(Editor, "%s", "EditorApplication: paste failed — a clipboard entry is not a readable subtree");
+			continue;
+		}
+		// Pasting during play is a spawn — see duplicateSelectedEntity().
+		if (m_isPlaying && m_physicsWorld)
+			m_physicsWorld->addEntityTree(*m_editorWorld, static_cast<uint32_t>(e));
+		pasted.push_back(e);
 	}
-	// Pasting during play is a spawn — see duplicateSelectedEntity().
-	if (m_isPlaying && m_physicsWorld)
-		m_physicsWorld->addEntityTree(*m_editorWorld, static_cast<uint32_t>(pasted));
-	m_selection.set(pasted);
+	if (pasted.empty()) return;
+	m_selection.setMany(pasted);
+	m_selection.setAnchor(pasted.front());
 	m_editorWorld->markHierarchyDirty();
 }
 
