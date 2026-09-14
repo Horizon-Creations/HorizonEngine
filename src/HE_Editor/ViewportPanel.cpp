@@ -7,6 +7,7 @@
 #include "EditorViewportNav.h"           // shared orbit/pan/fly gesture grammar + look capture
 #include "EditorTransformGizmo.h"        // shared move/rotate/scale gizmo
 #include "EditorMarquee.h"               // which objects a drawn frame encloses
+#include "ViewportPick.h"                // which object a click lands on (mesh before terrain)
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
@@ -205,12 +206,10 @@ static const HE::AABB* meshBounds(ContentManager& cm, const HE::UUID& meshId)
 	return it->second.isValid() ? &it->second : nullptr;
 }
 
-// What an entity without a readable mesh asset is measured as: the built-in
-// fallback cube's own local box. Shared by picking and by the F-key framing, so
-// clicking a thing and focusing it never disagree about how big it is.
-static const HE::AABB s_fallbackBox = []{
-	HE::AABB b; b.expand({ -0.5f, -0.5f, -0.5f }); b.expand({ 0.5f, 0.5f, 0.5f }); return b;
-}();
+// What an entity without a readable mesh asset is measured as — the built-in
+// fallback cube's own local box — is ViewportPick::fallbackBox(): picking, the
+// marquee and the F-key framing all read it there, so clicking a thing and
+// focusing it never disagree about how big it is.
 
 // Mesh geometry for HE::ScenePick, served straight out of the content manager
 // (plus the bounds cache above, so the cheap box reject costs nothing here).
@@ -259,6 +258,9 @@ static void collectSubtree(entt::registry& reg, Entity e,
 // RenderObject::worldBounds, which this viewport's own extractor leaves invalid
 // because it runs without a ContentManager. Entities that draw nothing — a
 // light, a camera, an empty group — fall back to the spread of their transforms.
+// Their editor ICONS are not geometry for this purpose: the symbol is sized in
+// fractions of the screen and shrinks as the camera nears, so measuring it
+// would frame a light to a few centimetres and then closer with every press.
 static bool selectionFocusSphere(HorizonWorld& world, ContentManager* cm, Entity sel,
                                  const RenderWorld& snapshot,
                                  glm::vec3& centerOut, float& radiusOut)
@@ -275,9 +277,10 @@ static bool selectionFocusSphere(HorizonWorld& world, ContentManager* cm, Entity
 	auto expandFromObject = [&](const RenderObject& obj)
 	{
 		if (subtree.find(obj.entityId) == subtree.end()) return;
+		if (HE::isEditorIconMaterial(obj.materialAssetId)) return;
 		const HE::AABB* local = (cm && obj.meshAssetId != HE::UUID{})
 		                      ? meshBounds(*cm, obj.meshAssetId) : nullptr;
-		geometry.expand((local ? *local : s_fallbackBox).transformed(obj.transform));
+		geometry.expand((local ? *local : ViewportPick::fallbackBox()).transformed(obj.transform));
 	};
 	for (const RenderObject& obj : snapshot.objects)               expandFromObject(obj);
 	for (const SkinnedRenderObject& obj : snapshot.skinnedObjects) expandFromObject(obj);
@@ -710,70 +713,25 @@ void render(AppContext& ctx, float dt)
 					s_frameLive  = false;
 				}
 
-				// A click position → the entity under it, mesh before terrain.
+				// A click position → the entity under it, mesh before terrain
+				// (the rule lives in ViewportPick). Boxes come from the mesh
+				// assets through the cache above; an entity whose asset is not
+				// readable measures as the fallback cube. Lights, cameras and
+				// audio sources are in the snapshot as their icon quads, with the
+				// entity id on the quad, so a click on the symbol selects them
+				// like any mesh; ViewportPick asserts that headless.
 				auto pickAt = [&](const ImVec2& mouse) -> Entity
 				{
-					const float  u = (mouse.x - rectMin.x) / (rectMax.x - rectMin.x);
-					const float  v = (mouse.y - rectMin.y) / (rectMax.y - rectMin.y);
-
-					// Unproject the click to a world-space ray
-					const glm::mat4 invVP = glm::inverse(
-						s_sceneSnapshot.camera.projection * s_sceneSnapshot.camera.view);
-					const glm::vec4 ndcNear(2.0f * u - 1.0f, 1.0f - 2.0f * v, -1.0f, 1.0f);
-					const glm::vec4 ndcFar (ndcNear.x, ndcNear.y, 1.0f, 1.0f);
-					glm::vec4 pNear = invVP * ndcNear; pNear /= pNear.w;
-					glm::vec4 pFar  = invVP * ndcFar;  pFar  /= pFar.w;
-					const glm::vec3 rayOrigin(pNear);
-					const glm::vec3 rayDir(glm::vec3(pFar) - glm::vec3(pNear));
-
-					// Local-space AABBs per mesh asset, cached (file-scope).
-					// Entities without an asset use the built-in fallback cube's
-					// box — s_fallbackBox, the same one the F-key framing measures.
-
-					// Real mesh entities take priority over terrain: a terrain
-					// chunk's bounding box is huge and loose (its near face sits
-					// closer to the camera than a small mesh resting on the
-					// surface), so an AABB pick would otherwise select the ground
-					// under every object. Track the two categories separately and
-					// only fall back to terrain when nothing else is under the
-					// cursor — and then select the owning Landscape entity, never
-					// a raw auto-generated chunk.
-					auto& reg = ctx.world->registry();
-					Entity meshHit    = entt::null; float meshDist    = std::numeric_limits<float>::max();
-					Entity terrainHit = entt::null; float terrainDist = std::numeric_limits<float>::max();
-					for (const RenderObject& obj : s_sceneSnapshot.objects)
+					ContentManager* cm = ctx.contentManager;
+					const ViewportPick::BoxLookup boxes = [cm](const HE::UUID& meshId) -> const HE::AABB*
 					{
-						HE::AABB box = s_fallbackBox;
-						if (obj.meshAssetId != HE::UUID{} && ctx.contentManager)
-							if (const HE::AABB* b = meshBounds(*ctx.contentManager, obj.meshAssetId))
-								box = *b;
-
-						// Ray → object space (exact test for rotated objects)
-						const glm::mat4 invModel = glm::inverse(obj.transform);
-						const glm::vec3 o = glm::vec3(invModel * glm::vec4(rayOrigin, 1.0f));
-						const glm::vec3 d = glm::vec3(invModel * glm::vec4(rayDir,    0.0f));
-
-						float t = 0.0f;
-						if (!box.intersectRay(o, d, t)) continue;
-
-						const Entity e = static_cast<Entity>(obj.entityId);
-						Entity terrainOwner = entt::null;
-						if (reg.valid(e))
-						{
-							if (auto* cc = reg.try_get<TerrainChunkComponent>(e)) terrainOwner = cc->terrain;
-							else if (reg.all_of<TerrainComponent>(e))            terrainOwner = e;
-						}
-
-						if (terrainOwner != entt::null)
-						{
-							if (t < terrainDist) { terrainDist = t; terrainHit = terrainOwner; }
-						}
-						else if (t < meshDist)
-						{
-							meshDist = t; meshHit = e;
-						}
-					}
-					return (meshHit != entt::null) ? meshHit : terrainHit;
+						return cm ? meshBounds(*cm, meshId) : nullptr;
+					};
+					return ViewportPick::pickAtScreen(
+						s_sceneSnapshot, ctx.world->registry(), boxes,
+						s_sceneSnapshot.camera.projection * s_sceneSnapshot.camera.view,
+						{ rectMin.x, rectMin.y }, { rectMax.x - rectMin.x, rectMax.y - rectMin.y },
+						{ mouse.x, mouse.y });
 				};
 
 				// Everything the frame between `a` and `b` (screen positions)
@@ -803,7 +761,7 @@ void render(AppContext& ctx, float dt)
 						if (reg.any_of<TerrainChunkComponent, TerrainComponent>(e)) return;
 						const HE::AABB* box = (meshId != HE::UUID{} && ctx.contentManager)
 						                    ? meshBounds(*ctx.contentManager, meshId) : nullptr;
-						if (EditorMarquee::encloses(viewProj, frame, box ? *box : s_fallbackBox, model))
+						if (EditorMarquee::encloses(viewProj, frame, box ? *box : ViewportPick::fallbackBox(), model))
 							found.push_back(e);
 					};
 					for (const RenderObject& obj : s_sceneSnapshot.objects)

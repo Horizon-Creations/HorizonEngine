@@ -958,6 +958,15 @@ IRenderer::EnvironmentSettings makeWorldPreviewEnvironment(float timeOfDay, floa
 	return makeEnvironmentSettings(ec, 0.0f);
 }
 
+bool isEditorIconMaterial(const UUID& materialId)
+{
+	return materialId == kEditorIconPointLightMaterialId
+	    || materialId == kEditorIconSpotLightMaterialId
+	    || materialId == kEditorIconDirectionalLightMaterialId
+	    || materialId == kEditorIconCameraMaterialId
+	    || materialId == kEditorIconAudioSourceMaterialId;
+}
+
 } // namespace HE
 
 void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio,

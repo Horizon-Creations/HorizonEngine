@@ -69,6 +69,13 @@ HE_RENDERING_API IRenderer::EnvironmentSettings makeWorldPreviewEnvironment(floa
 // about what Unreal draws its sprites at.
 inline constexpr float kEditorIconScreenFraction = 0.05f;
 
+// True for the material of one of those icon billboards — the way to tell an
+// icon quad in RenderWorld::objects from a mesh the entity actually draws. The
+// picker wants the quads (a click on the lamp symbol selects the lamp); the
+// F-key framing must NOT measure them, or a light whose only "geometry" is a
+// symbol sized in screen fractions frames to a few centimetres.
+HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
+
 } // namespace HE
 
 // Reads the ECS world each frame and fills a RenderWorld snapshot.
