@@ -2,14 +2,22 @@
 
 #include "SequencerTimeline.h"
 #include "UITimelineMath.h"
+#include "AssetStubWriter.h"      // writeAssetStub — what the Content Browser makes
+#include "TestFsUtil.h"
 
 #include <ContentManager/Assets.h>
+#include <ContentManager/ContentManager.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+#include <HorizonScene/Components/PropertyAnimatorComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/PropertyAnimationSystem.h>
 
 #include <imgui.h>
 
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <set>
 #include <string>
 
@@ -616,4 +624,191 @@ TEST_CASE("sequencer: the curve view drags a key in value as well as time")
 	valueRange(clip.channels[1], lo, hi);
 	CHECK(r.valueLo == doctest::Approx(lo));
 	CHECK(r.valueHi == doctest::Approx(hi));
+}
+
+// ── The clip on disk, and the clip in the scene ──────────────────────────────
+// Everything above works on a clip on the stack. These are the two ends the
+// panel hangs between: the file the Content Browser makes and the Sequencer
+// saves, and the entity the preview writes into.
+
+namespace
+{
+	struct TempContentDir
+	{
+		std::filesystem::path path;
+		explicit TempContentDir(const char* name)
+		{
+			path = std::filesystem::temp_directory_path() / name;
+			he_test::removeAllQuiet(path);
+			std::filesystem::create_directories(path);
+		}
+		~TempContentDir() { he_test::removeAllQuiet(path); }
+	};
+}
+
+TEST_CASE("sequencer: a clip survives a save and a reload, and a stub reads as an empty clip")
+{
+	TempContentDir dir("he_test_sequencer_panm");
+
+	// What the Content Browser's "Property Animation Clip" writes: META and
+	// nothing else. The loader must hand back a clip for it — one of no
+	// length with no tracks — rather than nothing, or the tab would open on
+	// "could not be loaded" for every clip anybody ever creates.
+	{
+		const std::filesystem::path abs = dir.path / "NewPropertyAnimation.hasset";
+		REQUIRE(HE::Ed::isCreatableAssetType(HE::AssetType::PropertyAnimClip));
+		REQUIRE(HE::Ed::writeAssetStub(abs.string(), "NewPropertyAnimation.hasset",
+		                               "NewPropertyAnimation", HE::AssetType::PropertyAnimClip));
+		ContentManager cm(dir.path.string());
+		const HE::UUID id = cm.loadAsset("NewPropertyAnimation.hasset");
+		REQUIRE(id != HE::UUID{});
+		PropertyAnimClipAsset* clip = cm.getPropertyAnimClipMutable(id);
+		REQUIRE(clip != nullptr);
+		CHECK(clip->type == HE::AssetType::PropertyAnimClip);
+		CHECK(clip->duration == 0.0f);
+		CHECK(clip->channels.empty());
+
+		// The Sequencer's first edits, then the save button.
+		addTrack(*clip, PropTarget::PosX);
+		insertKey(clip->channels[0], 0.5f, 1.0f);
+		insertKey(clip->channels[0], 2.0f, 3.0f);
+		addTrack(*clip, PropTarget::MatRoughness);
+		insertKey(clip->channels[1], 1.0f, 0.8f);
+		setDuration(*clip, 2.5f);
+		REQUIRE(cm.saveAsset(*clip));
+	}
+
+	// A fresh manager reads back exactly what was authored: the length, both
+	// tracks in order, every key's time and value.
+	{
+		ContentManager cm(dir.path.string());
+		const HE::UUID id = cm.loadAsset("NewPropertyAnimation.hasset");
+		const PropertyAnimClipAsset* clip = cm.getPropertyAnimClip(id);
+		REQUIRE(clip != nullptr);
+		CHECK(clip->duration == doctest::Approx(2.5f));
+		REQUIRE(clip->channels.size() == 2);
+		CHECK(clip->channels[0].target == PropTarget::PosX);
+		CHECK(clip->channels[0].times  == std::vector<float>{ 0.0f, 0.5f, 2.0f });
+		CHECK(clip->channels[0].values == std::vector<float>{ 0.0f, 1.0f, 3.0f });
+		CHECK(clip->channels[1].target == PropTarget::MatRoughness);
+		CHECK(clip->channels[1].times  == std::vector<float>{ 0.0f, 1.0f });
+		CHECK(clip->channels[1].values == std::vector<float>{ 0.0f, 0.8f });
+	}
+
+	// A clip whose tracks were all removed is still a clip of its length, not
+	// a stub again: the length is written even with nothing under it.
+	{
+		ContentManager cm(dir.path.string());
+		PropertyAnimClipAsset* clip = cm.getPropertyAnimClipMutable(cm.loadAsset("NewPropertyAnimation.hasset"));
+		REQUIRE(clip != nullptr);
+		REQUIRE(removeTrack(*clip, 1));
+		REQUIRE(removeTrack(*clip, 0));
+		REQUIRE(cm.saveAsset(*clip));
+	}
+	{
+		ContentManager cm(dir.path.string());
+		const PropertyAnimClipAsset* clip = cm.getPropertyAnimClip(cm.loadAsset("NewPropertyAnimation.hasset"));
+		REQUIRE(clip != nullptr);
+		CHECK(clip->duration == doctest::Approx(2.5f));
+		CHECK(clip->channels.empty());
+	}
+}
+
+TEST_CASE("sequencer: the transport follows the runtime's playhead rule")
+{
+	View view;
+	// Not playing: nothing moves, whatever the dt.
+	view.playhead = 0.25f;
+	CHECK_FALSE(advancePlayhead(view, 2.0f, 0.5f));
+	CHECK(view.playhead == doctest::Approx(0.25f));
+
+	// Playing, looping: on by dt, and round the end into [0, duration).
+	view.playing = true;
+	view.loop    = true;
+	CHECK(advancePlayhead(view, 2.0f, 0.5f));
+	CHECK(view.playhead == doctest::Approx(0.75f));
+	CHECK(advancePlayhead(view, 2.0f, 1.5f));
+	CHECK(view.playhead == doctest::Approx(0.25f));
+	CHECK(view.playing);
+
+	// Not looping: the end is where it stops, and Play goes off by itself,
+	// exactly what a non-looping Property Animator does in the game.
+	view.loop = false;
+	CHECK(advancePlayhead(view, 2.0f, 5.0f));
+	CHECK(view.playhead == doctest::Approx(2.0f));
+	CHECK_FALSE(view.playing);
+	// Sitting at the end and not playing: no movement to report.
+	CHECK_FALSE(advancePlayhead(view, 2.0f, 0.1f));
+
+	// A clip of no length cannot play: Play on the empty clip switches
+	// itself off rather than sitting "playing" over nothing.
+	view.playing  = true;
+	view.playhead = 0.0f;
+	CHECK_FALSE(advancePlayhead(view, 0.0f, 0.1f));
+	CHECK_FALSE(view.playing);
+	CHECK(view.playhead == 0.0f);
+}
+
+TEST_CASE("sequencer: the preview writes an actor the way the runtime would, whatever its own clock says")
+{
+	ContentManager cm;
+	HorizonWorld   world;
+
+	MaterialAsset mat;
+	mat.name = "actorMat";
+	mat.roughness = 0.1f;
+	const HE::UUID matId = cm.registerMaterial(std::move(mat));
+
+	PropertyAnimClipAsset clip;
+	clip.duration = 2.0f;
+	PropertyAnimChannel pos;   pos.target = PropTarget::PosX;         pos.times = { 0.0f, 2.0f }; pos.values = { 0.0f, 4.0f };
+	PropertyAnimChannel rot;   rot.target = PropTarget::RotY;         rot.times = { 0.0f, 1.0f }; rot.values = { 0.0f, 90.0f };
+	PropertyAnimChannel rough; rough.target = PropTarget::MatRoughness; rough.times = { 0.0f, 2.0f }; rough.values = { 0.2f, 0.8f };
+	clip.channels = { pos, rot, rough };
+
+	const entt::entity e = world.createEntity();
+	TransformComponent tc; tc.position = {}; tc.rotation = {}; tc.scale = glm::vec3(1.0f); tc.dirty = false;
+	world.addComponent(e, tc);
+	MaterialComponent mc; mc.materialAssetId = matId; mc.dirty = false;
+	world.addComponent(e, mc);
+	// The actor is paused on its own clock and somewhere else in the clip:
+	// the preview is the Sequencer's playhead, not the component's, and it
+	// does not need the component to be playing.
+	PropertyAnimatorComponent pa;
+	pa.playing = false; pa.playbackTime = 1.7f;
+	world.addComponent(e, pa);
+
+	PropertyAnimationSystem::applyAt(world, cm, e, clip, 0.5f);
+	auto& reg = world.registry();
+	CHECK(reg.get<TransformComponent>(e).position.x == doctest::Approx(1.0f));
+	CHECK(reg.get<TransformComponent>(e).rotation.y == doctest::Approx(45.0f));
+	CHECK(reg.get<TransformComponent>(e).dirty);
+	CHECK(cm.getMaterial(matId)->roughness == doctest::Approx(0.35f));
+	CHECK(reg.get<MaterialComponent>(e).dirty);
+	// The component's own clock is not this function's business.
+	CHECK(reg.get<PropertyAnimatorComponent>(e).playbackTime == doctest::Approx(1.7f));
+
+	// Past the last key the track holds its last value, the same rule the
+	// strip's readout uses (sampleChannel), so what the tab prints beside the
+	// track name is what lands in the entity.
+	PropertyAnimationSystem::applyAt(world, cm, e, clip, 1.5f);
+	CHECK(reg.get<TransformComponent>(e).rotation.y == doctest::Approx(90.0f));
+	CHECK(reg.get<TransformComponent>(e).position.x ==
+	      doctest::Approx(PropertyAnimationSystem::sampleChannel(clip.channels[0], 1.5f)));
+
+	// An entity without the component the track writes into is left alone,
+	// not crashed into: a clip with material tracks on a bare transform.
+	const entt::entity bare = world.createEntity();
+	world.addComponent(bare, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+	PropertyAnimationSystem::applyAt(world, cm, bare, clip, 1.0f);
+	CHECK(reg.get<TransformComponent>(bare).position.x == doctest::Approx(2.0f));
+
+	// And update() is applyAt after the advance: a playing actor ticked by dt
+	// lands where applyAt would put it at its new time.
+	const HE::UUID clipId = cm.registerPropertyAnimClip(std::move(clip));
+	auto& live = reg.get<PropertyAnimatorComponent>(e);
+	live.clipId = clipId; live.playing = true; live.playbackTime = 0.0f; live.looping = false;
+	PropertyAnimationSystem::update(world, cm, 0.25f);
+	CHECK(live.playbackTime == doctest::Approx(0.25f));
+	CHECK(reg.get<TransformComponent>(e).position.x == doctest::Approx(0.5f));
 }

@@ -426,11 +426,16 @@ void drawActors(PanelState& st, AppContext& ctx, const std::vector<entt::entity>
 }
 
 // The preview: every actor driven to the playhead, the way the runtime would
-// write it there. Only on a frame the playhead MOVED — a tab that merely sits
-// open must not pin its actors, and an actor whose own Playing flag is on
-// keeps its own clock the rest of the time. Its playback time is set as well,
-// so a self-playing actor carries on from where the scrub left it instead of
-// overwriting the write on its next tick.
+// write it there. EVERY frame the tab is drawn, not only on the frames the
+// playhead moved: a Property Animator's own Playing flag is on by default and
+// the animation tick runs in the editor outside play mode too, so an actor
+// written once and then left alone would run off on its own clock the moment
+// a scrub ends, and the readout would say one thing while the viewport shows
+// another. While this tab is the one in front, its playhead is the actors'
+// clock — the tick runs before the panels (EditorApplication::OnRender), so
+// this write is the one the next frame's transform propagation sees. The
+// playback time is set as well, so an actor that plays itself carries on from
+// the playhead once the tab is closed, not from wherever it had got to.
 void previewActors(AppContext& ctx, const std::vector<entt::entity>& actors,
                    const PropertyAnimClipAsset& clip, float playhead)
 {
@@ -563,11 +568,11 @@ void SequencerPanel::render(AppContext& ctx, const std::string& assetPath,
 	}
 
 	// The transport's tick, before anything that prints or draws the playhead
-	// this frame. A scrub, a click on a key or the Stop button move it too;
-	// the comparison at the end catches all of them at once.
-	const float playheadBefore = st.view.playhead;
-	const bool  advanced = HE::Ed::Sequencer::advancePlayhead(st.view, clip->duration,
-	                                                          ImGui::GetIO().DeltaTime);
+	// this frame, so the time beside the buttons and the line in the strip are
+	// this frame's. A scrub, a click on a key or the Stop button move the
+	// playhead as well, further down; the actors are written after all of
+	// them (previewActors, below the readout).
+	HE::Ed::Sequencer::advancePlayhead(st.view, clip->duration, ImGui::GetIO().DeltaTime);
 
 	HE::Ed::Sequencer::Intent intent;
 	drawControls(st, *clip, intent);
@@ -590,10 +595,10 @@ void SequencerPanel::render(AppContext& ctx, const std::string& assetPath,
 
 	drawSelectionReadout(st, *clip);
 
-	// The actors follow the playhead whenever it moved this frame — by the
-	// transport, a scrub, a key click, Stop, or the key-time field above.
-	if (advanced || r.playheadMoved || st.view.playhead != playheadBefore)
-		previewActors(ctx, actors, *clip, st.view.playhead);
+	// The actors follow the playhead, wherever the transport, a scrub, a key
+	// click, Stop or the key-time field above has put it this frame. After
+	// the strip and the readout on purpose: both of them can still move it.
+	previewActors(ctx, actors, *clip, st.view.playhead);
 
 	// ── Keyboard shortcuts (skip while typing in a field) ────────────────────
 	// WantTextInput as well as IsAnyItemActive: a number field that has

@@ -2970,6 +2970,38 @@ namespace
 	  "rotation in degrees, colour channels and the material scalars from 0 "
 	  "to 1. Between keys the runtime blends in a straight line.",
 	  "", "systems#animation" },
+	// The transport and the actors: the clip played back in the viewport, on
+	// the entities that carry it.
+	{ "sequencer.play", "Play / Pause",
+	  "Runs the playhead along the clip at its own pace and moves every actor "
+	  "with it, so the viewport shows the clip the way the Property Animator "
+	  "will play it. Pause holds the playhead where it is; scrubbing the ruler "
+	  "while paused moves the actors too. A clip of no length has nothing to "
+	  "play and stays stopped.",
+	  "Space", "systems#animation" },
+	{ "Sequencer/Stop", "",
+	  "Stops playback and puts the playhead back to the start, the actors "
+	  "with it.",
+	  "", "systems#animation" },
+	{ "Sequencer/Loop", "",
+	  "Whether playback wraps round at the end of the clip or stops there. "
+	  "This is the transport's own setting for previewing; how an entity plays "
+	  "the clip in the game is the Looping switch on its Property Animator.",
+	  "", "systems#animation" },
+	{ "sequencer.actor", "Actor",
+	  "An entity in the open scene whose Property Animator plays this clip. "
+	  "While this tab is in front, every actor follows the playhead — scrub, "
+	  "play or click a key and it moves in the viewport — so a property the "
+	  "clip animates cannot be placed by hand meanwhile. Click to select the "
+	  "entity in the scene; the Details panel then shows its Property "
+	  "Animator.",
+	  "", "systems#animation" },
+	{ "Sequencer/Bind Selected", "",
+	  "Makes the selected entity an actor of this clip: it gets a Property "
+	  "Animator pointing here, or the one it has is pointed here. Greyed when "
+	  "nothing is selected or the selection already plays this clip. Undo in "
+	  "the scene takes it back.",
+	  "", "systems#animation" },
 	{ "Bone Mask Editor/Reference Skeleton", "",
 	  "A skeleton to pick joints from. It is this editor's own reference and is "
 	  "NOT saved into the mask: a mask holds joint names, so it works on every "
