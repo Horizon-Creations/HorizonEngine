@@ -350,16 +350,6 @@ void optionsPopup(AppContext& ctx, State& st)
 
 } // namespace
 
-const float* State::activeSnap() const
-{
-	if (!snapEnabled) return nullptr;
-	const float v = (op == ImGuizmo::ROTATE) ? snapRotate
-	              : (op == ImGuizmo::SCALE)  ? snapScale
-	                                         : snapTranslate;
-	m_snapBuf[0] = m_snapBuf[1] = m_snapBuf[2] = v;
-	return m_snapBuf;
-}
-
 float height() { return EditorToolbar::height(); }
 
 void render(AppContext& ctx, State& st)

@@ -63,6 +63,19 @@ HE_RENDERING_API glm::vec2 cascadeTexelSnapOffset(const glm::mat4& lightViewProj
 HE_RENDERING_API IRenderer::EnvironmentSettings makeWorldPreviewEnvironment(float timeOfDay,
                                                                            float cloudCoverage);
 
+// Editor icon billboards (lights, cameras, audio sources — the extractor's
+// extractEditorIcons phase): the icon's height as a fraction of the viewport
+// height, held constant over distance. 0.05 is ~36 px on a 720 px viewport,
+// about what Unreal draws its sprites at.
+inline constexpr float kEditorIconScreenFraction = 0.05f;
+
+// True for the material of one of those icon billboards — the way to tell an
+// icon quad in RenderWorld::objects from a mesh the entity actually draws. The
+// picker wants the quads (a click on the lamp symbol selects the lamp); the
+// F-key framing must NOT measure them, or a light whose only "geometry" is a
+// symbol sized in screen fractions frames to a few centimetres.
+HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
+
 } // namespace HE
 
 // Reads the ECS world each frame and fills a RenderWorld snapshot.
@@ -75,7 +88,11 @@ public:
     // from the backend's current swapchain size.
     // editorCam, when non-null and active, overrides the scene camera (used by
     // the editor scene view); its projection is built with aspectRatio so it
-    // always matches the viewport.
+    // always matches the viewport. An ACTIVE override also switches on the
+    // editor icons: one camera-facing quad per light / camera / audio source
+    // in outWorld.objects (kEditorIcon*MaterialId), so the scene view can draw
+    // and pick entities that have no mesh. Inactive/null = none, which is what
+    // play mode and the packaged game get.
     void extract(HorizonWorld& world, RenderWorld& outWorld, float aspectRatio,
                  const EditorCameraOverride* editorCam = nullptr);
 

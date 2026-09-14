@@ -14,6 +14,7 @@
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
+#include <HorizonScene/Components/AudioSourceComponent.h>  // editor icon billboards
 #include <HorizonScene/Components/DecalComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
@@ -583,6 +584,97 @@ namespace
 		}
 	}
 
+	// ── Editor icons ────────────────────────────────────────────────────────
+	// A light, a camera or an audio source draws nothing of its own, so in the
+	// scene view it could be neither seen nor clicked: the picker and the marquee
+	// only walk out.objects. Under an ACTIVE editor camera — and only then: play
+	// mode and the packaged game hand the backend a cleared override, while an
+	// asset preview passes its own active one, so a prefab's lamp shows its bulb
+	// there as well — every such entity gets one camera-facing quad in
+	// out.objects, carrying the entity id the picker already reads and textured
+	// with the icon material of its kind (ContentManager::initDefaultAssets).
+	//
+	// Constant SCREEN size, the way Unreal's sprites behave: the quad is scaled
+	// by its view depth and the projection's vertical extent, so a far light is
+	// as easy to hit as a near one and the icon never swells into a wall when
+	// the camera comes close. The quads face the view PLANE, not the eye point,
+	// so a row of lights stays a row instead of fanning out at the edges.
+	//
+	// castsShadow / contributesAO are off, the same opt-outs the precipitation
+	// billboards use: an icon casts no shadow, darkens no AO and never enters
+	// the GI acceleration structure or the shadow fit below.
+	HE::UUID editorIconMaterialFor(HE::LightType type)
+	{
+		switch (type)
+		{
+		case HE::LightType::Directional: return HE::kEditorIconDirectionalLightMaterialId;
+		case HE::LightType::Spot:        return HE::kEditorIconSpotLightMaterialId;
+		default:                         return HE::kEditorIconPointLightMaterialId;
+		}
+	}
+
+	void extractEditorIcons(entt::registry& reg, RenderWorld& out,
+	                        const EditorCameraOverride* editorCam)
+	{
+		if (!(editorCam && editorCam->active)) return;
+
+		// Half the viewport height: per unit of depth (perspective), or as is (ortho).
+		const glm::mat4& P = out.camera.projection;
+		const bool  ortho      = (P[3][3] == 1.0f);
+		const float halfExtent = (P[1][1] != 0.0f) ? 1.0f / P[1][1] : 1.0f;
+		const glm::vec3 camPos   = out.camera.position;
+		const glm::mat4 camWorld = glm::inverse(out.camera.view);
+		const glm::vec3 camRight = glm::normalize(glm::vec3(camWorld[0]));
+		const glm::vec3 camUp    = glm::normalize(glm::vec3(camWorld[1]));
+		const glm::vec3 camBack  = glm::normalize(glm::vec3(camWorld[2])); // toward the viewer
+
+		auto pushIcon = [&](entt::entity e, const glm::mat4& world, const HE::UUID& material)
+		{
+			const glm::vec3 pos = glm::vec3(world[3]);
+			// On-screen size follows the view DEPTH, not the straight-line distance:
+			// two icons on one depth plane must come out the same size.
+			const float depth = ortho ? 1.0f : std::max(glm::dot(pos - camPos, -camBack), 1e-3f);
+			const float size  = 2.0f * halfExtent * depth * HE::kEditorIconScreenFraction;
+			glm::mat4 m(1.0f);
+			m[0] = glm::vec4(camRight * size, 0.0f);
+			m[1] = glm::vec4(camUp    * size, 0.0f);
+			m[2] = glm::vec4(camBack  * size, 0.0f);
+			m[3] = glm::vec4(pos, 1.0f);
+
+			RenderObject obj;
+			obj.meshAssetId     = HE::kDefaultQuadMeshId;
+			obj.materialAssetId = material;
+			obj.transform       = m;
+			obj.worldBounds     = kUnitCube.transformed(m);
+			obj.entityId        = static_cast<uint32_t>(e);
+			obj.castsShadow     = false;
+			obj.contributesAO   = false;
+			out.objects.push_back(obj);
+		};
+
+		for (auto [e, t, light] : reg.view<TransformComponent, LightComponent>().each())
+		{
+			if (!light.visible) continue; // hidden (e.g. a preloaded zone), like its light
+			// The built-in environment Sun and Moon (HorizonWorld's ensure) sit on a
+			// default transform under the Sky entity: the environment drives their
+			// direction, the transform says nothing. Two sun icons stacked on the
+			// world origin of every scene would only invite a click that selects
+			// the wrong thing; those two are the Sky panel's, not the viewport's.
+			if (reg.all_of<EnvironmentLightComponent>(e)) continue;
+			pushIcon(e, t.worldMatrix, editorIconMaterialFor(light.type));
+		}
+		for (auto [e, t, cam] : reg.view<TransformComponent, CameraComponent>().each())
+		{
+			(void)cam;
+			pushIcon(e, t.worldMatrix, HE::kEditorIconCameraMaterialId);
+		}
+		for (auto [e, t, audio] : reg.view<TransformComponent, AudioSourceComponent>().each())
+		{
+			(void)audio;
+			pushIcon(e, t.worldMatrix, HE::kEditorIconAudioSourceMaterialId);
+		}
+	}
+
 	// ── Lights ──────────────────────────────────────────────────────────────
 	void extractLights(entt::registry& reg, RenderWorld& out)
 	{
@@ -631,9 +723,13 @@ namespace
 		}
 		if (!(shadowLight && shadowLight->intensity > 0.1f)) return;
 
+		// Billboards (precipitation, editor icons — the ones that opted out of
+		// BOTH shadow and AO) stay out of the fit: an icon hovering at a sun
+		// light's authored height would otherwise stretch the whole frustum.
+		// Authored non-casting meshes stay IN, as receivers the map must cover.
 		HE::AABB sceneBox;
 		for (const RenderObject& o : out.objects)
-			sceneBox.expand(o.worldBounds);
+			if (o.castsShadow || o.contributesAO) sceneBox.expand(o.worldBounds);
 		glm::vec3 center = sceneBox.isValid() ? sceneBox.center() : glm::vec3(0.0f);
 		float radius = sceneBox.isValid() ? glm::length(sceneBox.extents()) : 10.0f;
 		radius = std::max(radius, 1.0f);
@@ -862,6 +958,15 @@ IRenderer::EnvironmentSettings makeWorldPreviewEnvironment(float timeOfDay, floa
 	return makeEnvironmentSettings(ec, 0.0f);
 }
 
+bool isEditorIconMaterial(const UUID& materialId)
+{
+	return materialId == kEditorIconPointLightMaterialId
+	    || materialId == kEditorIconSpotLightMaterialId
+	    || materialId == kEditorIconDirectionalLightMaterialId
+	    || materialId == kEditorIconCameraMaterialId
+	    || materialId == kEditorIconAudioSourceMaterialId;
+}
+
 } // namespace HE
 
 void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio,
@@ -886,6 +991,9 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	// camera position extractCamera resolved above.
 	extractRopes(reg, out);
 	extractTrails(reg, out);
+	// Editor-only billboards for the entities that draw nothing themselves;
+	// they need the resolved camera and go into out.objects for the picker.
+	extractEditorIcons(reg, out, editorCam);
 	// Lights, then the day-night pass that overrides the sun/moon among them.
 	extractLights(reg, out);
 	applyDayNight(out);

@@ -40,6 +40,7 @@
 #include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/AudioSourceComponent.h>  // HE_DUMP_ICONTEST witness
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/TransformHierarchy.h>  // world pose composed from the parent chain
 #include <HorizonScene/Components/LightComponent.h>
@@ -4723,6 +4724,46 @@ void EditorApplication::dumpFrameHeadless()
 		HE_LOG_INFO(Editor, "%s",
 			("EditorApplication: HE_DUMP_SECTIONTEST three-slot sphere added ("
 			 + std::string(st) + ")").c_str());
+	}
+
+	// ── Editor-icon witness (HE_DUMP_ICONTEST=1): a row of mesh-less entities
+	// in front of the camera — point, spot and directional light, a camera and
+	// an audio source — over a grey floor. The capture must show five icon
+	// billboards (RenderExtractor::extractEditorIcons under the headless
+	// editor camera), each the same size on screen although the row is
+	// staggered in depth, and none of them casting a shadow onto the floor.
+	if (const char* it = std::getenv("HE_DUMP_ICONTEST"); it && *it && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0, 1, 0)));
+		const glm::vec3 base     = m_editorCamera.position() + camFwd * 8.0f;
+
+		auto floorE = m_editorWorld->createEntity("IconTestFloor");
+		TransformComponent ftc;
+		ftc.position = base - glm::vec3(0.0f, 1.5f, 0.0f);
+		ftc.scale    = glm::vec3(30.0f, 0.2f, 30.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto place = [&](const char* name, float side, float depth) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = base + camRight * side + camFwd * depth;
+			reg.emplace<TransformComponent>(e, tc);
+			return e;
+		};
+		LightComponent point; point.type = HE::LightType::Point;
+		reg.emplace<LightComponent>(place("IconTestPoint", -3.0f, 0.0f), point);
+		LightComponent spot; spot.type = HE::LightType::Spot;
+		reg.emplace<LightComponent>(place("IconTestSpot", -1.5f, 2.0f), spot);
+		LightComponent sun; sun.type = HE::LightType::Directional; sun.intensity = 0.0f;
+		reg.emplace<LightComponent>(place("IconTestSun", 0.0f, 4.0f), sun);
+		reg.emplace<CameraComponent>(place("IconTestCamera", 1.5f, 6.0f), CameraComponent{});
+		reg.emplace<AudioSourceComponent>(place("IconTestAudio", 3.0f, 8.0f), AudioSourceComponent{});
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_ICONTEST five icon entities added");
 	}
 
 	// ── SSR witness (HE_DUMP_SSRTEST=1): a mirror floor (metallic 1, roughness

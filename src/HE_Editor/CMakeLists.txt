@@ -263,6 +263,7 @@ add_executable(HorizonEditor WIN32
 	HcGraphShortcuts.cpp
 	GraphEditor.cpp
 	PreviewPick.cpp
+	ViewportPick.cpp
 	CollabActivityBar.cpp
 	CollabController.cpp
 	CollabDocSync.cpp
