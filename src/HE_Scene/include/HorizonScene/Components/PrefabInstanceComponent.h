@@ -35,8 +35,12 @@
 // when an instance older than this table is adopted and a record cannot be
 // matched to a child unambiguously, so that propagation neither creates it nor
 // keeps looking. A binding whose template record no longer exists in the asset
-// means the asset changed (or the instance is older than this table):
-// "unbound", never "delete it".
+// means the asset lost that child (its author deleted it, or another
+// placement pushed without it), and propagation makes the same of the
+// counterpart here — deletes it — unless something in it or under it was
+// authored on this placement, in which case the entity stays and the binding
+// goes: it is a child added here from then on. Either way the sync drops the
+// binding, so a table never keeps naming a record the asset does not have.
 //
 // ── Overrides: what a human authored on the placement ────────────────────────
 // An override is a MARKER, not a value: `{ template entity, component key,

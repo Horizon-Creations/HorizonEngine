@@ -119,13 +119,17 @@ public:
     // block comes from the template). A component the template dropped is
     // removed unless overridden; one it gained is added. A template record
     // without a binding is new in the asset and is created, bound and parented
-    // under the placement's counterpart of its parent record. What is never
-    // touched: the root's transform (the placement itself), the "prefab" block
-    // of any record (the instance's own link, or a nested instance's), a bound
-    // entity that no longer exists (deleted here, which is an authored change),
-    // and a bound entity whose record the asset no longer has (left standing
-    // and counted as unbound — see the component header for why that is not a
-    // deletion).
+    // under the placement's counterpart of its parent record. A record the
+    // asset LOST takes its bound entity with it — the asset's author deleted
+    // that child, or another placement pushed without it — unless something
+    // under that entity was authored here: an override on its record or any
+    // descendant's, a child added here, a nested instance with changes of its
+    // own. Then the entity stays, and it stops being the record's counterpart
+    // (binding and overrides dropped): it is a child added here from now on,
+    // which is what a push would make of it anyway. What is never touched: the
+    // root's transform (the placement itself), the "prefab" block of any record
+    // (the instance's own link, or a nested instance's), and a bound entity
+    // that no longer exists (deleted here, which is an authored change).
     //
     // An instance without any bindings predates the table (every placement
     // made before bindings existed). Its root is bound by structure — the
@@ -146,7 +150,8 @@ public:
         size_t entitiesCreated    = 0; // records new in the asset, created here
         size_t overridesKept      = 0; // blocks/properties the override list protected
         size_t overridesAdopted   = 0; // whole-component overrides seeded on a legacy instance
-        size_t unboundEntities    = 0; // bound entities whose record the asset lost
+        size_t entitiesRemoved    = 0; // entities whose record the asset lost, removed with it
+        size_t unboundEntities    = 0; // ... kept as added here, because something in them was authored
         size_t unresolvedAssets   = 0; // instances whose asset could not be read
     };
     // One placement (`root` carries the PrefabInstanceComponent) against one
@@ -198,6 +203,73 @@ public:
     bool revertPrefabOverride(HorizonWorld& world, Entity root,
                               const std::vector<uint8_t>& assetBlob,
                               const PrefabInstanceComponent::Override& entry);
+
+    // ── Structure: children removed here, children added here ────────────────
+    // The override list names values; the two structural changes a human can
+    // make to a placement are not in it, because the world already says them.
+    // A child DELETED here is a binding whose instance entity is gone (or the
+    // null uuid: "no counterpart", see the component header) — the sync leaves
+    // such a record alone, which is the protection. A child ADDED here is an
+    // entity under the root that no placement binds — the sync never touches
+    // it, and a push writes it into the asset as a new record. Both are read
+    // off the world, and both can be taken back: the deletion by re-creating
+    // the record from the asset, the addition by deleting the entity.
+    //
+    // The asset's records, parsed once: the Inspector asks about structure
+    // every frame, and the blob is not to be decoded every frame for it. Empty
+    // (valid == false) for a blob that is no subtree.
+    struct PrefabRecordIndex {
+        struct Record {
+            HE::UUID    uuid;
+            HE::UUID    parent;   // null for the root
+            std::string name;
+        };
+        std::vector<Record> records;   // blob order: parents before children
+        bool                valid = false;
+        const Record* find(const HE::UUID& uuid) const
+        {
+            for (const Record& r : records)
+                if (r.uuid == uuid) return &r;
+            return nullptr;
+        }
+    };
+    static PrefabRecordIndex indexPrefabRecords(const std::vector<uint8_t>& assetBlob);
+
+    // What a placement's structure differs in from its asset. Only the TOPMOST
+    // of each: a deleted subtree lists the record whose parent's counterpart is
+    // still there (reverting it brings the whole subtree back), an added
+    // subtree lists the entity whose parent is bound (reverting it deletes the
+    // whole subtree). A record the index does not know is not listed — the
+    // binding is stale, not a deletion — and the root is never in either.
+    struct PrefabStructure {
+        struct Removed { HE::UUID templateEntity; std::string name; };
+        std::vector<Removed> removedHere;
+        std::vector<Entity>  addedHere;
+        bool any() const { return !removedHere.empty() || !addedHere.empty(); }
+    };
+    static PrefabStructure prefabStructureOf(HorizonWorld& world, Entity root,
+                                             const PrefabRecordIndex& index);
+
+    // The two counts without the asset, for a marker drawn on every row of a
+    // list: bindings without a living counterpart, and entities under the root
+    // nobody binds. A binding whose record the asset lost is dropped by the
+    // sync, so after one every dead binding IS a deletion made here.
+    static size_t prefabRemovedHereCount(HorizonWorld& world, Entity root);
+    static size_t prefabAddedHereCount(HorizonWorld& world, Entity root);
+
+    // Bring a child deleted here back from the asset: the record's binding and
+    // those of its descendants without a living counterpart leave the table,
+    // and the sync creates them again the way it creates a record new in the
+    // asset. False when the record is not in the asset, has no binding, or its
+    // counterpart is alive (nothing to revert).
+    bool revertPrefabRemoval(HorizonWorld& world, Entity root,
+                             const std::vector<uint8_t>& assetBlob,
+                             const HE::UUID& templateEntity);
+    // Take a child added here back out: the entity and its subtree are
+    // destroyed. Refused (false) unless the entity sits under the root and no
+    // placement binds it — a bound child is the asset's, and the way to lose
+    // one of those is to delete it, which the sync then respects.
+    bool revertPrefabAddition(HorizonWorld& world, Entity root, Entity entity);
 
     // ── Push to prefab ───────────────────────────────────────────────────────
     // The placement as a new template: the subtree serialised the way "Save as

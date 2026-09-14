@@ -1051,7 +1051,7 @@ TEST_CASE("PrefabSync: adoption binds an ambiguous child to nothing rather than 
     CHECK(reopened.registry().get<HierarchyComponent>(again).children.size() == 2);
 }
 
-TEST_CASE("PrefabSync: a binding whose record the asset lost is counted, its entity left standing")
+TEST_CASE("PrefabSync: a record the asset lost takes its entity with it, and the binding goes too")
 {
     Template t;
     HorizonWorld scene;
@@ -1062,9 +1062,95 @@ TEST_CASE("PrefabSync: a binding whose record the asset lost is counted, its ent
     SceneSerializer ser;
     SceneSerializer::PrefabSyncReport rep;
     REQUIRE(ser.syncPrefabInstance(scene, p.root, t.capture(), &rep));
-    CHECK(rep.unboundEntities == 1);
-    CHECK(reg.valid(p.bulb));
-    CHECK(reg.get<PrefabInstanceComponent>(p.root).bindings.size() == 2);
+    CHECK(rep.entitiesRemoved == 1);
+    CHECK(rep.unboundEntities == 0);
+    CHECK_FALSE(reg.valid(p.bulb));
+    CHECK(reg.get<HierarchyComponent>(p.root).children.empty());
+    CHECK(reg.get<PrefabInstanceComponent>(p.root).bindings.size() == 1);
+    // Nothing is left that a second pass could act on.
+    SceneSerializer::PrefabSyncReport again;
+    REQUIRE(ser.syncPrefabInstance(scene, p.root, t.capture(), &again));
+    CHECK(again.entitiesRemoved == 0);
+}
+
+TEST_CASE("PrefabSync: a lost record whose entity was changed here stays, as a child added here")
+{
+    Template t;
+    SceneSerializer ser;
+
+    SUBCASE("an override on the record itself")
+    {
+        HorizonWorld scene;
+        const Placed p = place(scene, t.capture(), HE::UUID::generate());
+        auto& reg = scene.registry();
+        reg.get<LightComponent>(p.bulb).intensity = 7.0f;
+        REQUIRE(ser.recordPrefabOverrides(scene, p.root, p.bulb, t.capture()) == 1);
+
+        t.world.destroyEntity(t.bulb);
+        SceneSerializer::PrefabSyncReport rep;
+        REQUIRE(ser.syncPrefabInstance(scene, p.root, t.capture(), &rep));
+        CHECK(rep.entitiesRemoved == 0);
+        CHECK(rep.unboundEntities == 1);
+        REQUIRE(reg.valid(p.bulb));
+        CHECK(reg.get<LightComponent>(p.bulb).intensity == doctest::Approx(7.0f));
+        const auto& inst = reg.get<PrefabInstanceComponent>(p.root);
+        CHECK(inst.bindings.size() == 1);   // the bulb's binding is gone with its record
+        CHECK(inst.overrides.empty());      // and so is the override that named it
+        CHECK(SceneSerializer::prefabAddedHereCount(scene, p.root) == 1);
+    }
+    SUBCASE("a child added here under it")
+    {
+        HorizonWorld scene;
+        const Placed p = place(scene, t.capture(), HE::UUID::generate());
+        auto& reg = scene.registry();
+        const Entity mine = scene.createEntity("Mine");
+        scene.reparentEntity(mine, p.bulb);
+
+        t.world.destroyEntity(t.bulb);
+        SceneSerializer::PrefabSyncReport rep;
+        REQUIRE(ser.syncPrefabInstance(scene, p.root, t.capture(), &rep));
+        CHECK(rep.entitiesRemoved == 0);
+        CHECK(reg.valid(p.bulb));
+        CHECK(reg.valid(mine));
+    }
+    SUBCASE("nothing under it: the whole subtree goes, bindings included")
+    {
+        // The asset grows a Shade under the Bulb, is placed, then loses the Bulb.
+        const Entity shade = t.world.createEntity("Shade");
+        t.world.reparentEntity(shade, t.bulb);
+        HorizonWorld scene;
+        const Placed p = place(scene, t.capture(), HE::UUID::generate());
+        auto& reg = scene.registry();
+        REQUIRE(reg.get<PrefabInstanceComponent>(p.root).bindings.size() == 3);
+
+        t.world.destroyEntity(t.bulb);
+        SceneSerializer::PrefabSyncReport rep;
+        REQUIRE(ser.syncPrefabInstance(scene, p.root, t.capture(), &rep));
+        CHECK(rep.entitiesRemoved == 1);   // one subtree
+        CHECK_FALSE(reg.valid(p.bulb));
+        CHECK(reg.get<PrefabInstanceComponent>(p.root).bindings.size() == 1);
+    }
+}
+
+TEST_CASE("PrefabSync: an asset rebuilt under a new root id keeps the placement's root")
+{
+    Template t;
+    HorizonWorld scene;
+    const Placed p = place(scene, t.capture(), HE::UUID::generate());
+    auto& reg = scene.registry();
+
+    // A different template altogether — new ids for everything.
+    Template other;
+    SceneSerializer ser;
+    SceneSerializer::PrefabSyncReport rep;
+    REQUIRE(ser.syncPrefabInstance(scene, p.root, other.capture(), &rep));
+    REQUIRE(reg.valid(p.root));
+    CHECK(rep.entitiesRemoved == 1);   // the old bulb
+    CHECK(rep.entitiesCreated == 1);   // the new one
+    const auto& inst = reg.get<PrefabInstanceComponent>(p.root);
+    CHECK(inst.instanceOf(other.tLamp) == idOf(reg, p.root));
+    CHECK(inst.instanceOf(t.tLamp) == HE::UUID{});
+    CHECK(inst.bindings.size() == 2);
 }
 
 TEST_CASE("PrefabSync: a blob that is no subtree, or a root that is no instance, is refused")
@@ -1368,4 +1454,381 @@ TEST_CASE("PrefabPush: a root that is no instance is refused, and the content ma
     REQUIRE((r != entt::null));
     CHECK(probe.registry().get<LightComponent>(childNamed(probe, r, "Bulb")).intensity == doctest::Approx(5.0f));
     CHECK_FALSE(cm.replacePrefab(HE::UUID::generate(), PrefabAsset{}));
+}
+
+// ─── Structure: children removed here, children added here ───────────────────
+// Neither is in the override list — a dead binding is the deletion, an unbound
+// entity under the root is the addition — and both can be taken back.
+
+TEST_CASE("PrefabStructure: a child deleted here is listed by its record's name, one added here by entity")
+{
+    Template t;
+    const Entity shade = t.world.createEntity("Shade");
+    t.world.reparentEntity(shade, t.bulb);
+    HorizonWorld scene;
+    const auto blob = t.capture();
+    const Placed p = place(scene, blob, HE::UUID::generate());
+    auto& reg = scene.registry();
+
+    const SceneSerializer::PrefabRecordIndex index = SceneSerializer::indexPrefabRecords(blob);
+    REQUIRE(index.valid);
+    CHECK(index.records.size() == 3);
+    REQUIRE(index.find(t.tBulb) != nullptr);
+    CHECK(index.find(t.tBulb)->name == "Bulb");
+    CHECK(index.find(t.tBulb)->parent == t.tLamp);
+    CHECK(index.find(HE::UUID::generate()) == nullptr);
+    CHECK_FALSE(SceneSerializer::indexPrefabRecords({ 1, 2, 3 }).valid);
+
+    // Untouched: nothing.
+    auto st = SceneSerializer::prefabStructureOf(scene, p.root, index);
+    CHECK_FALSE(st.any());
+
+    // The whole Bulb subtree deleted here: ONE entry, the topmost record.
+    scene.destroyEntity(p.bulb);
+    st = SceneSerializer::prefabStructureOf(scene, p.root, index);
+    REQUIRE(st.removedHere.size() == 1);
+    CHECK(st.removedHere[0].templateEntity == t.tBulb);
+    CHECK(st.removedHere[0].name == "Bulb");
+    CHECK(st.addedHere.empty());
+    CHECK(SceneSerializer::prefabRemovedHereCount(scene, p.root) == 2);   // both bindings are dead
+
+    // Something added here, with a child of its own: ONE entry, the topmost.
+    const Entity mine = scene.createEntity("Mine");
+    scene.reparentEntity(mine, p.root);
+    const Entity mineChild = scene.createEntity("MineChild");
+    scene.reparentEntity(mineChild, mine);
+    st = SceneSerializer::prefabStructureOf(scene, p.root, index);
+    REQUIRE(st.addedHere.size() == 1);
+    CHECK(st.addedHere[0] == mine);
+    CHECK(SceneSerializer::prefabAddedHereCount(scene, p.root) == 1);
+
+    // A plain entity is no instance and has no structure.
+    CHECK_FALSE(SceneSerializer::prefabStructureOf(scene, mine, index).any());
+    CHECK(SceneSerializer::prefabRemovedHereCount(scene, mine) == 0);
+    CHECK(SceneSerializer::prefabAddedHereCount(scene, mine) == 0);
+    (void)reg;
+}
+
+TEST_CASE("PrefabStructure: reverting a deletion brings the subtree back from the asset, bound again")
+{
+    Template t;
+    const Entity shade = t.world.createEntity("Shade");
+    t.world.reparentEntity(shade, t.bulb);
+    const HE::UUID tShade = idOf(t.world.registry(), shade);
+    HorizonWorld scene;
+    const auto blob = t.capture();
+    const Placed p = place(scene, blob, HE::UUID::generate());
+    auto& reg = scene.registry();
+    SceneSerializer ser;
+
+    scene.destroyEntity(p.bulb);
+    REQUIRE(reg.get<HierarchyComponent>(p.root).children.empty());
+    REQUIRE(ser.revertPrefabRemoval(scene, p.root, blob, t.tBulb));
+
+    const Entity bulb = childNamed(scene, p.root, "Bulb");
+    REQUIRE((bulb != entt::null));
+    CHECK(reg.get<LightComponent>(bulb).range == doctest::Approx(10.0f));
+    const Entity back = childNamed(scene, bulb, "Shade");
+    CHECK((back != entt::null));
+    const auto& inst = reg.get<PrefabInstanceComponent>(p.root);
+    CHECK(inst.bindings.size() == 3);
+    CHECK(inst.instanceOf(t.tBulb)  == idOf(reg, bulb));
+    CHECK(inst.instanceOf(tShade)   == idOf(reg, back));
+    CHECK(SceneSerializer::prefabRemovedHereCount(scene, p.root) == 0);
+
+    // Nothing to revert: alive, unknown, or not bound.
+    CHECK_FALSE(ser.revertPrefabRemoval(scene, p.root, blob, t.tBulb));
+    CHECK_FALSE(ser.revertPrefabRemoval(scene, p.root, blob, HE::UUID::generate()));
+    CHECK(reg.get<PrefabInstanceComponent>(p.root).bindings.size() == 3);
+}
+
+TEST_CASE("PrefabStructure: reverting a deletion of a child alone leaves its living parent as it is")
+{
+    Template t;
+    const Entity shade = t.world.createEntity("Shade");
+    t.world.reparentEntity(shade, t.bulb);
+    const HE::UUID tShade = idOf(t.world.registry(), shade);
+    HorizonWorld scene;
+    const auto blob = t.capture();
+    const Placed p = place(scene, blob, HE::UUID::generate());
+    auto& reg = scene.registry();
+    SceneSerializer ser;
+
+    reg.get<LightComponent>(p.bulb).intensity = 3.0f;
+    REQUIRE(ser.recordPrefabOverrides(scene, p.root, p.bulb, blob) == 1);
+    scene.destroyEntity(childNamed(scene, p.bulb, "Shade"));
+    const SceneSerializer::PrefabRecordIndex index = SceneSerializer::indexPrefabRecords(blob);
+    auto st = SceneSerializer::prefabStructureOf(scene, p.root, index);
+    REQUIRE(st.removedHere.size() == 1);
+    CHECK(st.removedHere[0].templateEntity == tShade);
+
+    REQUIRE(ser.revertPrefabRemoval(scene, p.root, blob, tShade));
+    CHECK((childNamed(scene, p.bulb, "Shade") != entt::null));
+    CHECK(reg.get<LightComponent>(p.bulb).intensity == doctest::Approx(3.0f));   // still mine
+    CHECK(reg.get<PrefabInstanceComponent>(p.root).overrides.size() == 1);
+}
+
+TEST_CASE("PrefabStructure: reverting an addition deletes it, and only what was added here")
+{
+    Template t;
+    HorizonWorld scene;
+    const Placed p = place(scene, t.capture(), HE::UUID::generate());
+    auto& reg = scene.registry();
+    SceneSerializer ser;
+
+    const Entity mine = scene.createEntity("Mine");
+    scene.reparentEntity(mine, p.bulb);
+    const Entity elsewhere = scene.createEntity("Elsewhere");
+
+    CHECK_FALSE(ser.revertPrefabAddition(scene, p.root, p.bulb));      // the asset's child
+    CHECK_FALSE(ser.revertPrefabAddition(scene, p.root, p.root));      // the root itself
+    CHECK_FALSE(ser.revertPrefabAddition(scene, p.root, elsewhere));   // not under the root
+    CHECK_FALSE(ser.revertPrefabAddition(scene, elsewhere, mine));     // no instance
+    CHECK(reg.valid(p.bulb));
+    CHECK(reg.valid(mine));
+
+    REQUIRE(ser.revertPrefabAddition(scene, p.root, mine));
+    CHECK_FALSE(reg.valid(mine));
+    CHECK(reg.valid(p.bulb));
+    CHECK(SceneSerializer::prefabAddedHereCount(scene, p.root) == 0);
+}
+
+TEST_CASE("PrefabStructure: a child of a nested placement is the nested one's, not added to the outer")
+{
+    // Outer: Lamp → Bulb. Nested under Bulb: a second placement of the same asset.
+    Template t;
+    HorizonWorld scene;
+    const auto blob = t.capture();
+    const Placed outer = place(scene, blob, HE::UUID::generate());
+    SceneSerializer ser;
+    std::vector<PrefabInstanceComponent::Binding> bindings;
+    const Entity nestedRoot = ser.instantiatePrefab(scene, blob, outer.bulb, false, &bindings);
+    REQUIRE((nestedRoot != entt::null));
+    PrefabInstanceComponent inst;
+    inst.asset    = HE::UUID::generate();
+    inst.bindings = bindings;
+    scene.registry().emplace_or_replace<PrefabInstanceComponent>(nestedRoot, inst);
+
+    // The nested root sits under the outer's bulb, and the outer's table does
+    // not bind it — but a placement does (its own), so it is not "added here"
+    // for the outer one, and neither is its bulb.
+    CHECK(SceneSerializer::prefabAddedHereCount(scene, outer.root) == 0);
+    CHECK(SceneSerializer::prefabAddedHereCount(scene, nestedRoot) == 0);
+
+    // A stranger under the nested bulb is added here for BOTH — it is in both
+    // subtrees and nobody's counterpart.
+    const Entity stranger = scene.createEntity("Stranger");
+    scene.reparentEntity(stranger, childNamed(scene, nestedRoot, "Bulb"));
+    CHECK(SceneSerializer::prefabAddedHereCount(scene, outer.root) == 1);
+    CHECK(SceneSerializer::prefabAddedHereCount(scene, nestedRoot) == 1);
+}
+
+TEST_CASE("PrefabPush: a child deleted here and pushed leaves the OTHER placements too")
+{
+    Template t;
+    HorizonWorld scene;
+    auto& reg = scene.registry();
+    const HE::UUID asset = HE::UUID::generate();
+    const Placed a = place(scene, t.capture(), asset);
+    const Placed b = place(scene, t.capture(), asset);
+    const Placed c = place(scene, t.capture(), asset);
+    SceneSerializer ser;
+
+    // c changed its bulb for itself; a deletes its bulb and pushes.
+    reg.get<LightComponent>(c.bulb).intensity = 9.0f;
+    REQUIRE(ser.recordPrefabOverrides(scene, c.root, c.bulb, t.capture()) == 1);
+    scene.destroyEntity(a.bulb);
+    std::vector<uint8_t> pushed;
+    REQUIRE(ser.pushPrefabInstance(scene, a.root, t.capture(), pushed));
+
+    SceneSerializer::PrefabSyncReport rep;
+    REQUIRE(ser.syncPrefabInstance(scene, b.root, pushed, &rep));
+    CHECK(rep.entitiesRemoved == 1);
+    CHECK_FALSE(reg.valid(b.bulb));
+    CHECK(reg.get<PrefabInstanceComponent>(b.root).bindings.size() == 1);
+
+    SceneSerializer::PrefabSyncReport repC;
+    REQUIRE(ser.syncPrefabInstance(scene, c.root, pushed, &repC));
+    CHECK(repC.entitiesRemoved == 0);
+    CHECK(repC.unboundEntities == 1);
+    REQUIRE(reg.valid(c.bulb));
+    CHECK(reg.get<LightComponent>(c.bulb).intensity == doctest::Approx(9.0f));
+    CHECK(SceneSerializer::prefabAddedHereCount(scene, c.root) == 1);
+}
+
+// ─── Undo ────────────────────────────────────────────────────────────────────
+// The editor's undo is a world snapshot (EditorUndo), and the instance's table
+// and override list are part of the world: whatever an edit, a revert or a
+// sync did to them goes back with the rest. What these cases pin down is that
+// the bindings still resolve after a restore (uuids survive a memory
+// round-trip, handles do not) and that the sync draws the right conclusion
+// from a restored world.
+
+#include "EditorUndo.h"
+
+TEST_CASE("PrefabUndo: a deletion undone is no deletion — the binding resolves again and the sync creates nothing")
+{
+    Template t;
+    HorizonWorld scene;
+    const auto blob = t.capture();
+    const Placed p = place(scene, blob, HE::UUID::generate());
+    auto& reg = scene.registry();
+    EditorUndo undo;
+    undo.setWorld(&scene);
+    SceneSerializer ser;
+
+    undo.snapshotNow();
+    scene.destroyEntity(p.bulb);
+    CHECK(SceneSerializer::prefabRemovedHereCount(scene, p.root) == 1);
+
+    REQUIRE(undo.undo());
+    // Handles are re-minted; find the placement by its component.
+    Entity newRoot = entt::null;
+    for (auto e : reg.view<PrefabInstanceComponent>()) newRoot = e;
+    REQUIRE((newRoot != entt::null));
+    const Entity bulb = childNamed(scene, newRoot, "Bulb");
+    REQUIRE((bulb != entt::null));
+    CHECK(reg.get<PrefabInstanceComponent>(newRoot).instanceOf(t.tBulb) == idOf(reg, bulb));
+    CHECK(SceneSerializer::prefabRemovedHereCount(scene, newRoot) == 0);
+
+    SceneSerializer::PrefabSyncReport rep;
+    REQUIRE(ser.syncPrefabInstance(scene, newRoot, blob, &rep));
+    CHECK(rep.entitiesCreated == 0);
+    CHECK(reg.get<HierarchyComponent>(newRoot).children.size() == 1);
+
+    // And redo makes it a deletion again.
+    REQUIRE(undo.redo());
+    for (auto e : reg.view<PrefabInstanceComponent>()) newRoot = e;
+    CHECK(SceneSerializer::prefabRemovedHereCount(scene, newRoot) == 1);
+    CHECK((childNamed(scene, newRoot, "Bulb") == entt::null));
+}
+
+TEST_CASE("PrefabUndo: a reverted deletion undone is a deletion again")
+{
+    Template t;
+    HorizonWorld scene;
+    const auto blob = t.capture();
+    const Placed p = place(scene, blob, HE::UUID::generate());
+    auto& reg = scene.registry();
+    EditorUndo undo;
+    undo.setWorld(&scene);
+    SceneSerializer ser;
+
+    scene.destroyEntity(p.bulb);
+    undo.snapshotNow();   // what the editor does before a revert
+    REQUIRE(ser.revertPrefabRemoval(scene, p.root, blob, t.tBulb));
+    CHECK((childNamed(scene, p.root, "Bulb") != entt::null));
+
+    REQUIRE(undo.undo());
+    Entity root = entt::null;
+    for (auto e : reg.view<PrefabInstanceComponent>()) root = e;
+    REQUIRE((root != entt::null));
+    CHECK((childNamed(scene, root, "Bulb") == entt::null));
+    CHECK(SceneSerializer::prefabRemovedHereCount(scene, root) == 1);
+    // The sync still respects the (restored) dead binding.
+    SceneSerializer::PrefabSyncReport rep;
+    REQUIRE(ser.syncPrefabInstance(scene, root, blob, &rep));
+    CHECK(rep.entitiesCreated == 0);
+}
+
+TEST_CASE("PrefabUndo: a child the sync created is undone with its binding, and the next sync creates it once")
+{
+    Template t;
+    HorizonWorld scene;
+    const Placed p = place(scene, t.capture(), HE::UUID::generate());
+    auto& reg = scene.registry();
+    EditorUndo undo;
+    undo.setWorld(&scene);
+    SceneSerializer ser;
+
+    const Entity shade = t.world.createEntity("Shade");
+    t.world.reparentEntity(shade, t.bulb);
+    const auto blob = t.capture();
+
+    undo.snapshotNow();
+    SceneSerializer::PrefabSyncReport rep;
+    REQUIRE(ser.syncPrefabInstance(scene, p.root, blob, &rep));
+    CHECK(rep.entitiesCreated == 1);
+    CHECK(reg.get<PrefabInstanceComponent>(p.root).bindings.size() == 3);
+
+    REQUIRE(undo.undo());
+    Entity root = entt::null;
+    for (auto e : reg.view<PrefabInstanceComponent>()) root = e;
+    REQUIRE((root != entt::null));
+    CHECK(reg.get<PrefabInstanceComponent>(root).bindings.size() == 2);
+    const Entity bulb = childNamed(scene, root, "Bulb");
+    REQUIRE((bulb != entt::null));
+    CHECK((childNamed(scene, bulb, "Shade") == entt::null));
+
+    SceneSerializer::PrefabSyncReport again;
+    REQUIRE(ser.syncPrefabInstance(scene, root, blob, &again));
+    CHECK(again.entitiesCreated == 1);
+    CHECK(reg.get<HierarchyComponent>(bulb).children.size() == 1);
+}
+
+TEST_CASE("PrefabUndo: an edit's override entry goes with the undo and comes back with the redo")
+{
+    Template t;
+    HorizonWorld scene;
+    const auto blob = t.capture();
+    const Placed p = place(scene, blob, HE::UUID::generate());
+    auto& reg = scene.registry();
+    EditorUndo undo;
+    undo.setWorld(&scene);
+    SceneSerializer ser;
+
+    // The editor's order: snapshot, the edit, then the recorder (next frame).
+    undo.snapshotNow();
+    reg.get<LightComponent>(p.bulb).intensity = 7.0f;
+    REQUIRE(ser.recordPrefabOverrides(scene, p.root, p.bulb, blob) == 1);
+
+    REQUIRE(undo.undo());
+    Entity root = entt::null;
+    for (auto e : reg.view<PrefabInstanceComponent>()) root = e;
+    REQUIRE((root != entt::null));
+    CHECK(reg.get<PrefabInstanceComponent>(root).overrides.empty());
+    Entity bulb = childNamed(scene, root, "Bulb");
+    CHECK(reg.get<LightComponent>(bulb).intensity == doctest::Approx(1.0f));
+    // The recorder, run over the restored entity (the editor does, with last
+    // frame's selection), finds nothing to record: it equals the template.
+    CHECK(ser.recordPrefabOverrides(scene, root, bulb, blob) == 0);
+
+    REQUIRE(undo.redo());
+    for (auto e : reg.view<PrefabInstanceComponent>()) root = e;
+    bulb = childNamed(scene, root, "Bulb");
+    CHECK(reg.get<LightComponent>(bulb).intensity == doctest::Approx(7.0f));
+    CHECK(reg.get<PrefabInstanceComponent>(root).hasOverride(t.tBulb, "light", "intensity"));
+    // And the sync keeps it, as it did before the undo.
+    REQUIRE(ser.syncPrefabInstance(scene, root, blob));
+    CHECK(reg.get<LightComponent>(bulb).intensity == doctest::Approx(7.0f));
+}
+
+TEST_CASE("PrefabUndo: a lost-record removal undone comes back, and the next sync removes it again")
+{
+    Template t;
+    HorizonWorld scene;
+    const Placed p = place(scene, t.capture(), HE::UUID::generate());
+    auto& reg = scene.registry();
+    EditorUndo undo;
+    undo.setWorld(&scene);
+    SceneSerializer ser;
+
+    t.world.destroyEntity(t.bulb);
+    const auto blob = t.capture();
+    undo.snapshotNow();
+    SceneSerializer::PrefabSyncReport rep;
+    REQUIRE(ser.syncPrefabInstance(scene, p.root, blob, &rep));
+    CHECK(rep.entitiesRemoved == 1);
+
+    REQUIRE(undo.undo());
+    Entity root = entt::null;
+    for (auto e : reg.view<PrefabInstanceComponent>()) root = e;
+    REQUIRE((root != entt::null));
+    CHECK((childNamed(scene, root, "Bulb") != entt::null));
+    CHECK(reg.get<PrefabInstanceComponent>(root).bindings.size() == 2);
+
+    SceneSerializer::PrefabSyncReport again;
+    REQUIRE(ser.syncPrefabInstance(scene, root, blob, &again));
+    CHECK(again.entitiesRemoved == 1);
+    CHECK((childNamed(scene, root, "Bulb") == entt::null));
 }
