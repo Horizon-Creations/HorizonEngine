@@ -49,7 +49,7 @@ namespace
 
 	// One frame: the strip in a bare window at the origin. Returns what the
 	// strip reported — the lane's place on screen included.
-	Result frame(const PropertyAnimClipAsset& clip, View& view, const Intent& intent = {})
+	Result frame(PropertyAnimClipAsset& clip, View& view, const Intent& intent = {})
 	{
 		ImGui::NewFrame();
 		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
@@ -135,7 +135,7 @@ TEST_CASE("sequencer: the value beside a track is the runtime's own sample")
 TEST_CASE("sequencer: dragging the ruler scrubs, and keeps scrubbing below it")
 {
 	ImGuiCtx ctx;
-	const PropertyAnimClipAsset clip = twoTrackClip();
+	PropertyAnimClipAsset clip = twoTrackClip();
 	View view;
 
 	// A frame with the pointer nowhere, to learn where the lane is.
@@ -183,7 +183,7 @@ TEST_CASE("sequencer: dragging the ruler scrubs, and keeps scrubbing below it")
 TEST_CASE("sequencer: clicking a key selects it and puts the playhead on it")
 {
 	ImGuiCtx ctx;
-	const PropertyAnimClipAsset clip = twoTrackClip();
+	PropertyAnimClipAsset clip = twoTrackClip();
 	View view;
 
 	mouseAt(-100.0f, -100.0f);
@@ -237,7 +237,7 @@ TEST_CASE("sequencer: clicking a key selects it and puts the playhead on it")
 TEST_CASE("sequencer: the wheel zooms around the pointer and Fit brings it back")
 {
 	ImGuiCtx ctx;
-	const PropertyAnimClipAsset clip = twoTrackClip();
+	PropertyAnimClipAsset clip = twoTrackClip();
 	View view;
 
 	mouseAt(-100.0f, -100.0f);
@@ -305,4 +305,315 @@ TEST_CASE("sequencer: a selection outliving its track is dropped, not dereferenc
 	const Result r = frame(clip, view);
 	CHECK(r.laneW > 0.0f);
 	CHECK(std::isfinite(view.playhead));
+}
+
+// ── Authoring: the clip after the gesture ────────────────────────────────────
+// Step 2 of the sequencer. The edit functions keep what sampleChannel silently
+// relies on — times strictly ascending, one value per time — and the strip's
+// gestures go through them. Checked here in that order: the functions on their
+// own, then a drag, a double-click, a Delete, and the same in curve view.
+
+namespace
+{
+	bool sortedPairs(const PropertyAnimChannel& ch)
+	{
+		if (ch.times.size() != ch.values.size()) return false;
+		for (size_t i = 1; i < ch.times.size(); ++i)
+			if (!(ch.times[i] > ch.times[i - 1])) return false;
+		return true;
+	}
+
+	void keyEvent(ImGuiKey key, bool down) { ImGui::GetIO().AddKeyEvent(key, down); }
+}
+
+TEST_CASE("sequencer: editing keeps the channel sorted and paired")
+{
+	PropertyAnimChannel ch;
+	ch.target = PropTarget::PosY;
+
+	// Inserted out of order, stored in order; the index says where it went.
+	CHECK(insertKey(ch, 1.0f, 10.0f) == 0);
+	CHECK(insertKey(ch, 0.0f,  0.0f) == 0);
+	CHECK(insertKey(ch, 0.5f,  5.0f) == 1);
+	CHECK(sortedPairs(ch));
+	CHECK(ch.times.size() == 3);
+	// Onto an existing moment: the value is replaced, nothing is added.
+	CHECK(insertKey(ch, 0.5f + kKeyEpsilon * 0.5f, 7.0f) == 1);
+	CHECK(ch.times.size() == 3);
+	CHECK(ch.values[1] == doctest::Approx(7.0f));
+	// A negative time is not a time.
+	CHECK(insertKey(ch, -3.0f, 1.0f) == 0);
+	CHECK(ch.times[0] == 0.0f);
+	CHECK(ch.values[0] == doctest::Approx(1.0f));
+
+	// Moving past a neighbour: the key comes back under its new index, in
+	// order, and the value travelled with it.
+	CHECK(moveKey(ch, 1, 1.5f) == 2);
+	CHECK(sortedPairs(ch));
+	CHECK(ch.times[2] == doctest::Approx(1.5f));
+	CHECK(ch.values[2] == doctest::Approx(7.0f));
+	// Onto another key: nudged beside it, on the side it came from, never
+	// merged — dragging must not silently lose a key.
+	CHECK(moveKey(ch, 2, 1.0f) == 2);
+	CHECK(ch.times[2] > 1.0f);
+	CHECK(ch.times[2] - 1.0f < 3.0f * kKeyEpsilon);
+	CHECK(sortedPairs(ch));
+	CHECK(moveKey(ch, 0, 1.0f) == 0);   // from the left: lands just before
+	CHECK(ch.times[0] < 1.0f);
+	CHECK(sortedPairs(ch));
+	CHECK(moveKey(ch, 7, 0.0f) == -1);
+
+	CHECK(removeKey(ch, 1));
+	CHECK(ch.times.size() == 2);
+	CHECK(sortedPairs(ch));
+	CHECK_FALSE(removeKey(ch, 2));
+
+	// A file whose two vectors disagree is edited from the shorter one.
+	ch.values.push_back(99.0f);
+	insertKey(ch, 5.0f, 1.0f);
+	CHECK(sortedPairs(ch));
+}
+
+TEST_CASE("sequencer: tracks, defaults and the clip's length")
+{
+	PropertyAnimClipAsset clip;
+	CHECK(clip.duration == 0.0f);
+	// The first track gives a lengthless clip a lane to sit on.
+	CHECK(addTrack(clip, PropTarget::ScaleX) == 0);
+	CHECK(clip.duration == doctest::Approx(kDefaultDuration));
+	CHECK(clip.channels[0].times  == std::vector<float>{ 0.0f });
+	CHECK(clip.channels[0].values == std::vector<float>{ 1.0f });   // scale rests at 1
+	CHECK(addTrack(clip, PropTarget::MatRoughness) == 1);
+	CHECK(clip.channels[1].values == std::vector<float>{ 0.0f });   // roughness at 0
+	// The same property twice is the same track.
+	CHECK(addTrack(clip, PropTarget::ScaleX) == 0);
+	CHECK(clip.channels.size() == 2);
+	CHECK(findTrack(clip, PropTarget::PosZ) == -1);
+
+	// Every default is 0 or 1, and the ones that mean "unchanged" are 1.
+	for (int i = 0; i < kTargetCount; ++i)
+	{
+		const float d = defaultValue(static_cast<PropTarget>(i));
+		CHECK((d == 0.0f || d == 1.0f));
+	}
+	CHECK(defaultValue(PropTarget::MatOpacity) == 1.0f);
+	CHECK(defaultValue(PropTarget::MatColorG)  == 1.0f);
+	CHECK(defaultValue(PropTarget::PosX)       == 0.0f);
+	CHECK(defaultValue(PropTarget::RotZ)       == 0.0f);
+
+	// The length never drops under the last key: a key past the end could
+	// not be pointed at.
+	insertKey(clip.channels[1], 1.8f, 0.5f);
+	CHECK(lastKeyTime(clip) == doctest::Approx(1.8f));
+	CHECK(setDuration(clip, 0.5f) == doctest::Approx(1.8f));
+	CHECK(setDuration(clip, 3.0f) == doctest::Approx(3.0f));
+
+	CHECK(removeTrack(clip, 0));
+	CHECK(clip.channels.size() == 1);
+	CHECK(clip.channels[0].target == PropTarget::MatRoughness);
+	CHECK_FALSE(removeTrack(clip, 1));
+
+	// The curve view's axis: the range with a margin, and a flat track gets
+	// a span of one around itself rather than none.
+	float lo = 0.0f, hi = 0.0f;
+	valueRange(clip.channels[0], lo, hi);
+	CHECK(lo == doctest::Approx(0.0f - 0.05f));
+	CHECK(hi == doctest::Approx(0.5f + 0.05f));
+	PropertyAnimChannel flat;
+	flat.times = { 0.0f, 1.0f }; flat.values = { 2.0f, 2.0f };
+	valueRange(flat, lo, hi);
+	CHECK(lo < 2.0f);
+	CHECK(hi > 2.0f);
+	CHECK(hi - lo == doctest::Approx(1.2f));
+	ValueAxis axis{ 100.0f, 200.0f, lo, hi };
+	CHECK(axis.yOf(hi) == doctest::Approx(100.0f));
+	CHECK(axis.yOf(lo) == doctest::Approx(300.0f));
+	CHECK(axis.vOf(axis.yOf(2.0f)) == doctest::Approx(2.0f));
+}
+
+TEST_CASE("sequencer: dragging a key moves it in time, past its neighbour, as one edit")
+{
+	ImGuiCtx ctx;
+	PropertyAnimClipAsset clip = twoTrackClip();
+	// Keys at 0, 0.5, 1.0, 2.0 on the first track, so there is a neighbour
+	// to cross.
+	insertKey(clip.channels[0], 1.0f, 2.0f);
+	View view;
+
+	mouseAt(-100.0f, -100.0f);
+	Result r = frame(clip, view);
+	const HE::Ed::UITimelineView tv = viewOf(r, clip, view);
+	const Metrics& M = metrics();
+	const float rowsTop = r.top + M.rulerH + 2.0f;
+	const float cy = rowsTop + M.rowH * 0.5f;
+
+	// Press the 0.5 s key. A press is a look, not a move: nothing is edited.
+	mouseAt(tv.xOf(0.5f), cy);
+	mouseButton(true);
+	r = frame(clip, view);
+	CHECK(view.keySel == 1);
+	CHECK(view.keyArmed);
+	CHECK_FALSE(view.dragging);
+	CHECK_FALSE(r.edited);
+
+	// Drag to 1.5 s, across the key at 1.0 s. The key keeps being the
+	// selected one under its NEW index, the track stays sorted, the playhead
+	// rides along, and the value went with the key.
+	mouseAt(tv.xOf(1.5f), cy);
+	r = frame(clip, view);
+	CHECK(view.dragging);
+	CHECK(r.edited);
+	CHECK_FALSE(r.committed);
+	CHECK(view.keySel == 2);
+	CHECK(clip.channels[0].times[2]  == doctest::Approx(1.5f).epsilon(0.01));
+	CHECK(clip.channels[0].values[2] == doctest::Approx(1.0f));
+	CHECK(clip.channels[0].times[1]  == doctest::Approx(1.0f));
+	CHECK(sortedPairs(clip.channels[0]));
+	CHECK(view.playhead == doctest::Approx(1.5f).epsilon(0.01));
+	CHECK(r.playheadMoved);
+
+	// Further, onto the last key at 2 s: beside it, never merged.
+	mouseAt(tv.xOf(2.0f) + 40.0f, cy);
+	r = frame(clip, view);
+	CHECK(clip.channels[0].times.size() == 4);
+	CHECK(sortedPairs(clip.channels[0]));
+	CHECK(view.keySel == 2);
+	CHECK(clip.channels[0].times[2] < 2.0f);
+
+	// Release: the drag is over and it is ONE undo point.
+	mouseButton(false);
+	r = frame(clip, view);
+	CHECK(r.committed);
+	CHECK_FALSE(view.keyArmed);
+	CHECK_FALSE(view.dragging);
+	// Moving afterwards moves nothing.
+	mouseAt(tv.xOf(0.25f), cy);
+	r = frame(clip, view);
+	CHECK_FALSE(r.edited);
+	CHECK(clip.channels[0].times.size() == 4);
+}
+
+TEST_CASE("sequencer: double-clicking a lane adds a key holding the sampled value")
+{
+	ImGuiCtx ctx;
+	PropertyAnimClipAsset clip = twoTrackClip();
+	View view;
+
+	mouseAt(-100.0f, -100.0f);
+	Result r = frame(clip, view);
+	const HE::Ed::UITimelineView tv = viewOf(r, clip, view);
+	const Metrics& M = metrics();
+	const float rowsTop = r.top + M.rulerH + 2.0f;
+
+	// The second track (roughness 0.2 → 0.8 over 0..1 s) at 0.5 s: no key
+	// there, and the curve is 0.5 at that moment.
+	const float x = tv.xOf(0.5f), y = rowsTop + M.rowH * 1.5f;
+	mouseAt(x, y);
+	mouseButton(true);  frame(clip, view);
+	mouseButton(false); frame(clip, view);
+	mouseButton(true);  r = frame(clip, view);
+	mouseButton(false); frame(clip, view);
+	REQUIRE(clip.channels[1].times.size() == 3);
+	CHECK(r.edited);
+	CHECK(r.committed);
+	CHECK(view.trackSel == 1);
+	CHECK(view.keySel   == 1);
+	CHECK(clip.channels[1].times[1]  == doctest::Approx(0.5f).epsilon(0.01));
+	CHECK(clip.channels[1].values[1] == doctest::Approx(0.5f).epsilon(0.02));
+	CHECK(sortedPairs(clip.channels[1]));
+	CHECK(view.playhead == doctest::Approx(clip.channels[1].times[1]));
+	// The curve did not bend: the same sample before and after.
+	CHECK(PropertyAnimationSystem::sampleChannel(clip.channels[1], 0.75f) == doctest::Approx(0.65f).epsilon(0.02));
+
+	// Delete removes the selected key. The window is focused by the clicks
+	// above; the strip listens for Delete only, never Backspace.
+	keyEvent(ImGuiKey_Delete, true);
+	r = frame(clip, view);
+	keyEvent(ImGuiKey_Delete, false);
+	frame(clip, view);
+	CHECK(r.edited);
+	CHECK(r.committed);
+	CHECK(clip.channels[1].times.size() == 2);
+	CHECK(view.keySel == -1);
+	CHECK(view.trackSel == 1);
+	CHECK(sortedPairs(clip.channels[1]));
+
+	// Backspace, with a key selected, does nothing.
+	view.keySel = 0;
+	keyEvent(ImGuiKey_Backspace, true);
+	r = frame(clip, view);
+	keyEvent(ImGuiKey_Backspace, false);
+	frame(clip, view);
+	CHECK_FALSE(r.edited);
+	CHECK(clip.channels[1].times.size() == 2);
+}
+
+TEST_CASE("sequencer: the curve view drags a key in value as well as time")
+{
+	ImGuiCtx ctx;
+	PropertyAnimClipAsset clip = twoTrackClip();
+	View view;
+	view.curves   = true;
+	view.trackSel = 0;   // Position X: 0 → 1 → 3
+
+	mouseAt(-100.0f, -100.0f);
+	Result r = frame(clip, view);
+	const HE::Ed::UITimelineView tv = viewOf(r, clip, view);
+	const ValueAxis axis{ r.graphTop, r.graphH, r.valueLo, r.valueHi };
+	float lo = 0.0f, hi = 0.0f;
+	valueRange(clip.channels[0], lo, hi);
+	CHECK(r.valueLo == doctest::Approx(lo));
+	CHECK(r.valueHi == doctest::Approx(hi));
+	REQUIRE(r.graphH > 60.0f);
+
+	// Press the middle key — (0.5 s, 1) — and drag it to (1.0 s, 2.5).
+	mouseAt(tv.xOf(0.5f), axis.yOf(1.0f));
+	mouseButton(true);
+	r = frame(clip, view);
+	CHECK(view.keySel == 1);
+	CHECK(view.keyArmed);
+	mouseAt(tv.xOf(1.0f), axis.yOf(2.5f));
+	r = frame(clip, view);
+	CHECK(r.edited);
+	CHECK(view.dragging);
+	CHECK(clip.channels[0].times[1]  == doctest::Approx(1.0f).epsilon(0.01));
+	CHECK(clip.channels[0].values[1] == doctest::Approx(2.5f).epsilon(0.02));
+	// The axis held still while the key was held: the range under the
+	// pointer is the one it was pressed in, so the value did not run away.
+	CHECK(r.valueLo == doctest::Approx(lo));
+	CHECK(r.valueHi == doctest::Approx(hi));
+	mouseButton(false);
+	r = frame(clip, view);
+	CHECK(r.committed);
+	CHECK(sortedPairs(clip.channels[0]));
+
+	// A double-click on empty graph puts a key at the pointer's time AND
+	// value — here the pointer is a place on the graph, not a moment on a
+	// lane. Re-read the axis first: the range grew with the drag above.
+	r = frame(clip, view);
+	const ValueAxis axis2{ r.graphTop, r.graphH, r.valueLo, r.valueHi };
+	const float x = tv.xOf(1.5f), y = axis2.yOf(0.5f);
+	mouseAt(x, y);
+	mouseButton(true);  frame(clip, view);
+	mouseButton(false); frame(clip, view);
+	mouseButton(true);  r = frame(clip, view);
+	mouseButton(false); frame(clip, view);
+	REQUIRE(clip.channels[0].times.size() == 4);
+	CHECK(r.committed);
+	CHECK(view.keySel == 2);
+	CHECK(clip.channels[0].times[2]  == doctest::Approx(1.5f).epsilon(0.01));
+	CHECK(clip.channels[0].values[2] == doctest::Approx(0.5f).epsilon(0.05));
+	CHECK(sortedPairs(clip.channels[0]));
+
+	// The track list on the left still selects: click the second track's
+	// name and the graph is its.
+	mouseAt(r.laneX - metrics().gap - 100.0f, r.top + metrics().rulerH + 2.0f + metrics().rowH * 1.5f);
+	mouseButton(true);  frame(clip, view);
+	mouseButton(false); r = frame(clip, view);
+	CHECK(view.trackSel == 1);
+	CHECK(view.keySel == -1);
+	r = frame(clip, view);
+	valueRange(clip.channels[1], lo, hi);
+	CHECK(r.valueLo == doctest::Approx(lo));
+	CHECK(r.valueHi == doctest::Approx(hi));
 }

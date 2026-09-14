@@ -2903,13 +2903,65 @@ namespace
 	  "One animated property of the entity this clip plays on. Blue tracks "
 	  "write into the Transform — position, rotation, scale — and violet ones "
 	  "into the material: colour, metallic, roughness, opacity. The number on "
-	  "the right is its value at the playhead. Click to select the track.",
+	  "the right is its value at the playhead. Click to select the track; "
+	  "double-click its lane to add a key there; right-click the name to "
+	  "remove the whole track.",
 	  "", "systems#animation" },
 	{ "sequencer.key", "Key",
 	  "A value at a moment. Clicking a key selects it and puts the playhead on "
 	  "it, so the readout under the strip shows this key's own time and value, "
 	  "and every track's number beside its name is what it holds at that "
-	  "instant.",
+	  "instant. Drag it to move it in time — in the curve view, in value too. "
+	  "Keys can pass each other; the track stays in order. Right-click for "
+	  "the menu, or press Delete to remove the selected one.",
+	  "", "systems#animation" },
+	{ "sequencer.length", "Length",
+	  "How long the clip runs, in seconds. It cannot be made shorter than the "
+	  "last key on any track: a key past the end would be one nobody could "
+	  "reach to move or delete. Move or delete that key first, then shorten.",
+	  "", "systems#animation" },
+	{ "sequencer.view", "Curves / Dope Sheet",
+	  "Switches the lane between the dope sheet — every track a row, every key "
+	  "a diamond, time across — and the curve view, where the selected track "
+	  "is one graph of value over time and a key is a point you drag in both "
+	  "directions. The curve is straight between keys and flat beyond the first "
+	  "and last, because that is exactly what the Property Animator plays.",
+	  "", "systems#animation" },
+	{ "Sequencer/Add Track", "",
+	  "Another property of the entity to animate: one of the nine transform "
+	  "values or the six material ones. A property already in the clip is "
+	  "greyed out — a second track for it would only overwrite the first. The "
+	  "new track starts with one key at zero holding the property's rest value "
+	  "(1 for scale, colour and opacity, 0 for the rest).",
+	  "", "systems#animation" },
+	{ "sequencer.add-target", "Property",
+	  "The property the new track animates. Greyed if the clip already has a "
+	  "track for it.",
+	  "", "systems#animation" },
+	{ "Sequencer/Add Key", "",
+	  "A key on the selected track at the playhead, holding what the track "
+	  "already is at that moment — so adding a key pins the curve where it is "
+	  "and bends nothing. Change the value afterwards in the readout below, or "
+	  "drag the point in the curve view. Double-clicking a lane does the same "
+	  "at the pointer.",
+	  "", "systems#animation" },
+	{ "Sequencer/Remove Track", "",
+	  "Removes the selected track with all its keys. The property it animated "
+	  "is simply left alone from then on.",
+	  "", "systems#animation" },
+	{ "Sequencer/Delete Key", "",
+	  "Removes this key. The track keeps the others, and a track with one key "
+	  "left is simply a constant.",
+	  "", "systems#animation" },
+	{ "sequencer.key-time", "Key time",
+	  "When this key happens, in seconds from the clip's start. Dragging it "
+	  "past a neighbouring key is fine: the keys swap places and the track "
+	  "stays in order.",
+	  "", "systems#animation" },
+	{ "sequencer.key-value", "Key value",
+	  "What the property is at this key. Position and scale in scene units, "
+	  "rotation in degrees, colour channels and the material scalars from 0 "
+	  "to 1. Between keys the runtime blends in a straight line.",
 	  "", "systems#animation" },
 	{ "Bone Mask Editor/Reference Skeleton", "",
 	  "A skeleton to pick joints from. It is this editor's own reference and is "

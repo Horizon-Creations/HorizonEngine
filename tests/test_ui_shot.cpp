@@ -2199,3 +2199,74 @@ TEST_CASE("ui shot: sequencer strip with two tracks and a playhead")
 	img.pixel(px + 14, py + 8, r, g, b, a);
 	CHECK(int(r) < 90);
 }
+
+// The same clip in curve view: the track list stays on the left, the right is
+// one graph of the selected track. The one thing worth reading off the picture
+// is that the curve is where the arithmetic says — a straight line between the
+// keys, in the track's group colour — and that the value axis reported back is
+// the one it was drawn with.
+TEST_CASE("ui shot: sequencer curve view of one track")
+{
+	namespace Seq = HE::Ed::Sequencer;
+	constexpr int W = 640, H = 240;
+	Harness harness(W, H);
+
+	PropertyAnimClipAsset clip;
+	clip.duration = 2.0f;
+	PropertyAnimChannel pos;
+	pos.target = PropTarget::PosX;
+	pos.times  = { 0.0f, 0.5f, 2.0f };
+	pos.values = { 0.0f, 1.0f, 3.0f };
+	PropertyAnimChannel rough;
+	rough.target = PropTarget::MatRoughness;
+	rough.times  = { 0.0f, 1.0f };
+	rough.values = { 0.2f, 0.8f };
+	clip.channels = { pos, rough };
+
+	Seq::View view;
+	view.curves   = true;
+	view.playhead = 1.0f;
+	view.trackSel = 0;
+	view.keySel   = 1;
+	Seq::Result res;
+
+	const he_ui::Image img = shoot("sequencer_curves", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("Sequencer", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		res = Seq::draw(clip, view, ImVec2(0.0f, 0.0f));
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 20000);
+
+	// The axis the strip reports is the track's own range with its margin.
+	float lo = 0.0f, hi = 0.0f;
+	Seq::valueRange(pos, lo, hi);
+	CHECK(res.valueLo == doctest::Approx(lo));
+	CHECK(res.valueHi == doctest::Approx(hi));
+	CHECK(res.graphH > 40.0f);
+
+	// Halfway along the last segment — 1.25 s, value 2 — the curve passes in
+	// the transform group's blue. A pixel there is blue; one thirty pixels
+	// below it is graph floor.
+	const HE::Ed::UITimelineView tv{ res.laneX, res.laneW, clip.duration, view.zoom, view.scroll };
+	const Seq::ValueAxis axis{ res.graphTop, res.graphH, res.valueLo, res.valueHi };
+	const int px = int(std::lround(tv.xOf(1.25f)));
+	const int py = int(std::lround(axis.yOf(2.0f)));
+	std::uint8_t r, g, b, a;
+	// The line is two pixels wide and anti-aliased; the brightest of a short
+	// column is the line itself.
+	int bestB = 0, bestR = 255;
+	for (int dy = -2; dy <= 2; ++dy)
+	{
+		img.pixel(px, py + dy, r, g, b, a);
+		if (int(b) > bestB) { bestB = int(b); bestR = int(r); }
+	}
+	CHECK(bestB > 180);
+	CHECK(bestR < 170);
+	img.pixel(px, py + 30, r, g, b, a);
+	CHECK(int(b) < 90);
+}

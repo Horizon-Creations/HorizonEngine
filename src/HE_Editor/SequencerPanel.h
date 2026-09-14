@@ -10,10 +10,12 @@ struct AppContext;
 // component plays to move, turn, scale or recolour its entity over time. One
 // row per animated property, keys on a shared time axis, a playhead you drag.
 //
-// The strip itself — tracks, ruler, scrubbing — is SequencerTimeline, kept free
-// of AppContext so the headless test can drive it. This file is the tab around
-// it: which asset, the toolbar, the readout under the strip, and the same
-// dirty/save/reload contract every other asset tab honours.
+// The strip itself — tracks, ruler, scrubbing, the keys you drag and the curve
+// view — is SequencerTimeline, kept free of AppContext so the headless test can
+// drive it. This file is the tab around it: which asset, the toolbar (length,
+// zoom, the view toggle, adding tracks and keys), the readout under the strip
+// where the selected key's time and value are edited, the tab's own undo, and
+// the same dirty/save/reload contract every other asset tab honours.
 namespace SequencerPanel
 {
 	void render(AppContext& ctx, const std::string& assetPath,
