@@ -444,6 +444,73 @@ HE_API UISnapResult uiSnapDelta(const UIWidgetRect& rect,
                                 float threshold,
                                 int maskX = kUISnapAll, int maskY = kUISnapAll);
 
+// ── A selection of several elements (docs/he-apps-plan.md D4) ────────────────
+// What the designer does to MORE than one element at a time — move, delete,
+// duplicate, copy, line up — is decided here for the same reason the snapping
+// is: the panel only draws, and a test can pin what a group operation does.
+//
+// The roots of a selection: `ids` minus every id that has an ANCESTOR in `ids`.
+// A panel and the button inside it, both selected, are one thing to move (the
+// button follows its panel) and one thing to copy (it comes along inside);
+// treating both as separate would move the button twice and paste it twice.
+// Ids the tree does not hold are dropped. Order is the tree's vector order,
+// which is the paint order, so a copy keeps what lies over what.
+HE_API std::vector<int> uiSelectionRoots(const UIWidgetTree& tree,
+                                         const std::vector<int>& ids);
+
+// Every element whose resolved rect lies WHOLLY inside `box` (canvas units),
+// hidden ones left out, reduced to roots. The rubber band: what an author
+// draws a box around is what they mean, and an element half inside it is one
+// they were not aiming at. Roots only, because a box around a panel is a box
+// around its children too, and selecting both would say the children move on
+// their own.
+HE_API std::vector<int> uiElementsInside(const UIWidgetTree& tree, const UIWidgetRect& box,
+                                         const UIWidgetCanvas* canvas = nullptr);
+
+// ── Copy and paste ───────────────────────────────────────────────────────────
+// The roots of `ids` and everything under them, as one JSON document in the
+// item form uiElementToJson writes (so what the clipboard carries is what the
+// file carries, and a type added later needs no second serializer). Empty
+// string when nothing in `ids` exists.
+HE_API std::string uiElementsToClipboard(const UIWidgetTree& tree, const std::vector<int>& ids);
+
+// Put a clipboard document into `tree` under `parentId` (0 = the canvas), every
+// element with a fresh id and its parent link remapped, the roots shifted by
+// (offsetX, offsetY). Returns the new ROOT ids in the order they were copied,
+// and nothing at all — the tree untouched — when the document does not parse
+// or when `parentId` names an element that takes no children: the same guard
+// moveElement applies, because a paste is a move of something that was not
+// here yet.
+HE_API std::vector<int> uiElementsFromClipboard(UIWidgetTree& tree, const std::string& json,
+                                                int parentId,
+                                                float offsetX = 0.0f, float offsetY = 0.0f);
+
+// ── Lining a selection up ────────────────────────────────────────────────────
+// The guides help WHILE dragging; these do it in one go, to elements already
+// placed. Left/Right/Top/Bottom flush the edges, the two Centers the middles,
+// Distribute spaces the elements evenly between the outermost two.
+enum class UIAlignOp : int
+{
+    Left = 0, HCenter, Right,
+    Top, VCenter, Bottom,
+    DistributeH, DistributeV,
+};
+
+// Against what: with TWO or more elements, the bounds of the selection itself
+// — the leftmost left edge, the rightmost right edge, and so on — because that
+// is what "line these up" means among peers. With ONE element, its frame: the
+// parent's rect, or the canvas when it has none, which is what centering one
+// button on its panel means. Distribute needs three; with fewer it does
+// nothing.
+//
+// Works on the RESOLVED rects (uiElementRect) and writes the difference into
+// posX/posY, so it lines up what is on screen whatever the anchor or pivot.
+// An element placed by a layout box is skipped: its position is computed, and
+// writing a number nothing reads would claim a change that is not there.
+// Returns how many elements moved.
+HE_API int uiAlignElements(UIWidgetTree& tree, const std::vector<int>& ids, UIAlignOp op,
+                           const UIWidgetCanvas* canvas = nullptr);
+
 // ── Resolve theme roles into ordinary colours ────────────────────────────────
 // Every property an element bound to a role (see UIElement::themeRoles) is
 // ASSIGNED the role's colour for `mode`. Called when a widget is created, when

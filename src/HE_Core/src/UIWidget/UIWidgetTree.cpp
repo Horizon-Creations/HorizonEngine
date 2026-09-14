@@ -2554,4 +2554,231 @@ std::unique_ptr<UIElement> uiElementFromJson(const std::string& json)
     return uiElementFromJsonObj(j);
 }
 
+// ── A selection of several elements (docs/he-apps-plan.md D4) ────────────────
+
+std::vector<int> uiSelectionRoots(const UIWidgetTree& tree, const std::vector<int>& ids)
+{
+    const auto selected = [&ids](int id)
+    { return std::find(ids.begin(), ids.end(), id) != ids.end(); };
+    std::vector<int> out;
+    // Walking the tree rather than `ids` is what makes the answer come back in
+    // paint order whatever order the ids were clicked in.
+    for (const auto& ep : tree.elements)
+    {
+        if (!ep || !selected(ep->id)) continue;
+        bool covered = false;
+        int cur = ep->parentId;
+        for (std::size_t guard = 0; cur != 0 && guard <= tree.elements.size(); ++guard)
+        {
+            if (selected(cur)) { covered = true; break; }
+            const UIElement* p = tree.find(cur);
+            cur = p ? p->parentId : 0;
+        }
+        if (!covered) out.push_back(ep->id);
+    }
+    return out;
+}
+
+std::vector<int> uiElementsInside(const UIWidgetTree& tree, const UIWidgetRect& box,
+                                  const UIWidgetCanvas* canvas)
+{
+    const float bx1 = box.x + box.w, by1 = box.y + box.h;
+    std::vector<int> hit;
+    for (const auto& ep : tree.elements)
+    {
+        if (!ep || !uiElementEffectiveVisible(tree, *ep)) continue;
+        const UIWidgetRect r = uiElementRect(tree, *ep, canvas);
+        if (r.x >= box.x && r.y >= box.y && r.x + r.w <= bx1 && r.y + r.h <= by1)
+            hit.push_back(ep->id);
+    }
+    return uiSelectionRoots(tree, hit);
+}
+
+// ── Copy and paste ───────────────────────────────────────────────────────────
+
+std::string uiElementsToClipboard(const UIWidgetTree& tree, const std::vector<int>& ids)
+{
+    const std::vector<int> roots = uiSelectionRoots(tree, ids);
+    if (roots.empty()) return std::string();
+    // The roots and everything under them, gathered by id first…
+    std::vector<int> take = roots;
+    for (std::size_t i = 0; i < take.size(); ++i)
+        for (int c : tree.childrenOf(take[i]))
+            take.push_back(c);
+    // …then written in TREE order, so the document keeps what lies over what
+    // and a paste can add the elements front to back without a second pass.
+    nlohmann::json je = nlohmann::json::array();
+    for (const auto& ep : tree.elements)
+        if (ep && std::find(take.begin(), take.end(), ep->id) != take.end())
+            je.push_back(uiElementToJsonObj(*ep));
+    nlohmann::json doc;
+    doc["elements"] = std::move(je);
+    return doc.dump();
+}
+
+std::vector<int> uiElementsFromClipboard(UIWidgetTree& tree, const std::string& json,
+                                         int parentId, float offsetX, float offsetY)
+{
+    std::vector<int> out;
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return out;
+    if (parentId != 0)
+    {
+        const UIElement* p = tree.find(parentId);
+        if (!p || !p->acceptsChildren()) return out;
+    }
+    const nlohmann::json& arr = j.value("elements", nlohmann::json::array());
+    if (!arr.is_array() || arr.empty()) return out;
+
+    // Two passes, because the document is in PAINT order and a child may well
+    // be painted before its parent (moveElement moves the parent's entry, not
+    // the child's): first every element gets its fresh id, then the parent
+    // links are rewritten through the finished map. A parent link that names
+    // nothing in the document is what makes an element a root.
+    std::vector<std::pair<int, int>> remap;   // old id → new id
+    std::vector<int> added;
+    for (const auto& o : arr)
+    {
+        std::unique_ptr<UIElement> e = uiElementFromJsonObj(o);
+        if (!e) continue;
+        const int oldId = e->id;
+        const int fresh = tree.add(std::move(e));
+        remap.emplace_back(oldId, fresh);
+        added.push_back(fresh);
+    }
+    for (int fresh : added)
+    {
+        UIElement* e = tree.find(fresh);
+        if (!e) continue;
+        int newParent = 0;
+        bool root = true;
+        for (const auto& m : remap)
+            if (m.first == e->parentId) { newParent = m.second; root = false; break; }
+        if (root)
+        {
+            newParent = parentId;
+            e->posX += offsetX;
+            e->posY += offsetY;
+            out.push_back(fresh);
+        }
+        e->parentId = newParent;
+    }
+    return out;
+}
+
+// ── Lining a selection up ────────────────────────────────────────────────────
+
+int uiAlignElements(UIWidgetTree& tree, const std::vector<int>& ids, UIAlignOp op,
+                    const UIWidgetCanvas* canvas)
+{
+    struct Item { UIElement* e; UIWidgetRect r; };
+    std::vector<Item> items;
+    for (int id : uiSelectionRoots(tree, ids))
+    {
+        UIElement* e = tree.find(id);
+        if (!e) continue;
+        // Placed by its box: nothing here can move it.
+        if (e->parentId != 0)
+            if (const UIElement* p = tree.find(e->parentId); p && p->laysOutChildren())
+                continue;
+        items.push_back({ e, uiElementRect(tree, *e, canvas) });
+    }
+    if (items.empty()) return 0;
+
+    // The frame the edges are measured against.
+    UIWidgetRect frame{};
+    if (items.size() >= 2)
+    {
+        float x0 = items[0].r.x, y0 = items[0].r.y;
+        float x1 = x0 + items[0].r.w, y1 = y0 + items[0].r.h;
+        for (const Item& it : items)
+        {
+            x0 = std::min(x0, it.r.x);           y0 = std::min(y0, it.r.y);
+            x1 = std::max(x1, it.r.x + it.r.w);  y1 = std::max(y1, it.r.y + it.r.h);
+        }
+        frame = { x0, y0, x1 - x0, y1 - y0 };
+    }
+    else
+    {
+        const UIElement& e = *items[0].e;
+        if (e.parentId != 0)
+        {
+            const UIElement* p = tree.find(e.parentId);
+            if (!p) return 0;
+            frame = uiElementRect(tree, *p, canvas);
+        }
+        else
+        {
+            frame.w = canvas ? canvas->width  : tree.canvasWidth;
+            frame.h = canvas ? canvas->height : tree.canvasHeight;
+        }
+    }
+
+    // The distance each rect has to move, in canvas units. Written as a
+    // position delta divided by the element's unit scale, which is how
+    // uiElementRect turns posX into a rect edge.
+    const auto moveBy = [&](Item& it, float dx, float dy)
+    {
+        if (std::abs(dx) < 0.0001f && std::abs(dy) < 0.0001f) return false;
+        float us = 1.0f, vs = 1.0f;
+        uiElementUnitScale(tree, *it.e, us, vs, canvas);
+        if (us <= 0.0f) us = 1.0f;
+        if (vs <= 0.0f) vs = 1.0f;
+        it.e->posX += dx / us;
+        it.e->posY += dy / vs;
+        return true;
+    };
+
+    int moved = 0;
+    switch (op)
+    {
+    case UIAlignOp::Left:
+        for (Item& it : items) moved += moveBy(it, frame.x - it.r.x, 0.0f);
+        break;
+    case UIAlignOp::HCenter:
+        for (Item& it : items)
+            moved += moveBy(it, (frame.x + frame.w * 0.5f) - (it.r.x + it.r.w * 0.5f), 0.0f);
+        break;
+    case UIAlignOp::Right:
+        for (Item& it : items) moved += moveBy(it, (frame.x + frame.w) - (it.r.x + it.r.w), 0.0f);
+        break;
+    case UIAlignOp::Top:
+        for (Item& it : items) moved += moveBy(it, 0.0f, frame.y - it.r.y);
+        break;
+    case UIAlignOp::VCenter:
+        for (Item& it : items)
+            moved += moveBy(it, 0.0f, (frame.y + frame.h * 0.5f) - (it.r.y + it.r.h * 0.5f));
+        break;
+    case UIAlignOp::Bottom:
+        for (Item& it : items) moved += moveBy(it, 0.0f, (frame.y + frame.h) - (it.r.y + it.r.h));
+        break;
+    case UIAlignOp::DistributeH:
+    case UIAlignOp::DistributeV:
+    {
+        // Three or more: the outermost two stay, the rest are spaced so the
+        // GAPS between neighbours come out equal. Equal gaps rather than equal
+        // centres, because elements of different widths spaced by centre look
+        // uneven, and what an eye reads is the space between them.
+        if (items.size() < 3) return 0;
+        const bool h = op == UIAlignOp::DistributeH;
+        std::sort(items.begin(), items.end(), [h](const Item& a, const Item& b)
+                  { return h ? a.r.x < b.r.x : a.r.y < b.r.y; });
+        float extent = 0.0f;
+        for (const Item& it : items) extent += h ? it.r.w : it.r.h;
+        const Item& last = items.back();
+        const float span = h ? (last.r.x + last.r.w) - items[0].r.x
+                             : (last.r.y + last.r.h) - items[0].r.y;
+        const float gap = (span - extent) / static_cast<float>(items.size() - 1);
+        float at = h ? items[0].r.x : items[0].r.y;
+        for (Item& it : items)
+        {
+            moved += h ? moveBy(it, at - it.r.x, 0.0f) : moveBy(it, 0.0f, at - it.r.y);
+            at += (h ? it.r.w : it.r.h) + gap;
+        }
+        break;
+    }
+    }
+    return moved;
+}
+
 } // namespace HE

@@ -15610,6 +15610,253 @@ TEST_CASE("Snapping: the lines an element may line itself up with")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// D4: several elements at once — roots, the rubber band, copy/paste, lining up
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace
+{
+    // A top-left anchored, top-left pivoted element at a known rect, so the
+    // numbers in the cases below ARE the rects.
+    int placeTL(HE::UIWidgetTree& t, HE::UIWidgetType type, int parent,
+                float x, float y, float w, float h)
+    {
+        const int id = t.add(type);
+        HE::UIElement* e = t.find(id);
+        e->parentId = parent;
+        e->pivotX = e->pivotY = 0.0f;
+        HE::uiSetAnchorPreset(*e, 0);
+        e->posX = x; e->posY = y; e->sizeX = w; e->sizeY = h;
+        return id;
+    }
+    bool holds(const std::vector<int>& v, int id)
+    { return std::find(v.begin(), v.end(), id) != v.end(); }
+}
+
+TEST_CASE("Selection roots: a child of something selected is not a second thing")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int panel = placeTL(t, HE::UIWidgetType::Panel,  0,     100, 100, 300, 200);
+    const int inner = placeTL(t, HE::UIWidgetType::Button, panel,  10,  10,  80,  30);
+    const int deep  = placeTL(t, HE::UIWidgetType::Text,   inner,  0,   0,  40,  10);
+    const int other = placeTL(t, HE::UIWidgetType::Panel,  0,     500, 100, 100, 100);
+
+    // The panel covers everything under it, whichever order they were named.
+    const std::vector<int> r = HE::uiSelectionRoots(t, { deep, other, inner, panel });
+    REQUIRE(r.size() == 2);
+    // …and the answer comes back in TREE order, not click order.
+    CHECK(r[0] == panel);
+    CHECK(r[1] == other);
+
+    // A grandchild with only its GRANDPARENT selected is covered just the same.
+    const std::vector<int> r2 = HE::uiSelectionRoots(t, { deep, panel });
+    REQUIRE(r2.size() == 1);
+    CHECK(r2[0] == panel);
+
+    // Two siblings inside the panel, the panel itself not selected: both stay.
+    const std::vector<int> r3 = HE::uiSelectionRoots(t, { inner, other });
+    CHECK(r3.size() == 2);
+
+    // An id the tree never held is dropped, not returned as a root.
+    CHECK(HE::uiSelectionRoots(t, { 999 }).empty());
+}
+
+TEST_CASE("Rubber band: wholly inside, visible, and roots only")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int a     = placeTL(t, HE::UIWidgetType::Panel,  0, 100, 100, 100, 50);
+    const int aKid  = placeTL(t, HE::UIWidgetType::Button, a,  10,  10,  20, 20);
+    const int b     = placeTL(t, HE::UIWidgetType::Panel,  0, 300, 100, 100, 50);
+    const int half  = placeTL(t, HE::UIWidgetType::Panel,  0, 450, 100, 100, 50); // crosses 500
+    const int ghost = placeTL(t, HE::UIWidgetType::Panel,  0, 200, 200,  50, 50);
+    t.find(ghost)->visible = false;
+
+    const std::vector<int> hit = HE::uiElementsInside(t, { 50.0f, 50.0f, 450.0f, 300.0f });
+    CHECK(holds(hit, a));
+    CHECK(holds(hit, b));
+    // The panel's child lies inside the box too, but it follows its panel.
+    CHECK_FALSE(holds(hit, aKid));
+    // Half in is not in: the box has to contain the whole rect.
+    CHECK_FALSE(holds(hit, half));
+    // What is not drawn cannot be lassoed.
+    CHECK_FALSE(holds(hit, ghost));
+    CHECK(hit.size() == 2);
+
+    // A box around the child alone, inside the panel, picks the child.
+    const std::vector<int> kidOnly = HE::uiElementsInside(t, { 105.0f, 105.0f, 40.0f, 40.0f });
+    REQUIRE(kidOnly.size() == 1);
+    CHECK(kidOnly[0] == aKid);
+}
+
+TEST_CASE("Clipboard: a subtree comes back whole, with fresh ids and its order")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int panel = placeTL(t, HE::UIWidgetType::Panel,  0,     100, 100, 300, 200);
+    const int btn   = placeTL(t, HE::UIWidgetType::Button, panel,  10,  10,  80,  30);
+    const int lbl   = placeTL(t, HE::UIWidgetType::Text,   panel,  10,  50,  80,  30);
+    const int lone  = placeTL(t, HE::UIWidgetType::Image,  0,     500, 100,  50,  50);
+    t.find(panel)->name = "Card";
+    t.find(btn)->name   = "Ok";
+    t.find(lbl)->name   = "Title";
+    // The label is moved in FRONT of the button, so the document's paint order
+    // is Title, Ok — and a paste has to keep it that way round.
+    REQUIRE(t.moveElement(lbl, panel, btn));
+
+    // Selecting the panel and one of its children copies the panel ONCE.
+    const std::string doc = HE::uiElementsToClipboard(t, { btn, panel, lone });
+    REQUIRE_FALSE(doc.empty());
+
+    SUBCASE("onto the canvas, shifted")
+    {
+        const std::size_t before = t.elements.size();
+        const std::vector<int> fresh = HE::uiElementsFromClipboard(t, doc, 0, 20.0f, 20.0f);
+        REQUIRE(fresh.size() == 2);                        // the two roots
+        CHECK(t.elements.size() == before + 4);            // panel + 2 kids + image
+        const HE::UIElement* p2 = t.find(fresh[0]);
+        REQUIRE(p2);
+        CHECK(p2->id != panel);
+        CHECK(p2->name == "Card");
+        CHECK(p2->parentId == 0);
+        CHECK(p2->posX == doctest::Approx(120.0f));        // the root moved…
+        const std::vector<int> kids = t.childrenOf(p2->id);
+        REQUIRE(kids.size() == 2);
+        CHECK(t.find(kids[0])->name == "Title");            // …in the copied order…
+        CHECK(t.find(kids[1])->name == "Ok");
+        CHECK(t.find(kids[1])->posX == doctest::Approx(10.0f)); // …the children did not
+        // The originals are untouched, and the copy's ids are all new.
+        CHECK(t.childrenOf(panel).size() == 2);
+        for (int k : kids) { CHECK(k != btn); CHECK(k != lbl); }
+        const HE::UIElement* i2 = t.find(fresh[1]);
+        REQUIRE(i2);
+        CHECK(i2->type() == HE::UIWidgetType::Image);
+        CHECK(i2->posX == doctest::Approx(520.0f));
+    }
+
+    SUBCASE("into a container, which is where a paste with a selection lands")
+    {
+        const int target = placeTL(t, HE::UIWidgetType::Panel, 0, 0, 400, 200, 200);
+        const std::vector<int> fresh = HE::uiElementsFromClipboard(t, doc, target);
+        REQUIRE(fresh.size() == 2);
+        CHECK(t.find(fresh[0])->parentId == target);
+        CHECK(t.find(fresh[1])->parentId == target);
+        // Grandchildren hang off the COPIED panel, not off the target.
+        CHECK(t.childrenOf(fresh[0]).size() == 2);
+        CHECK(t.childrenOf(target).size() == 2);
+    }
+
+    SUBCASE("into something that takes no children: nothing, and the tree untouched")
+    {
+        const std::size_t before = t.elements.size();
+        CHECK(HE::uiElementsFromClipboard(t, doc, lone).empty());
+        CHECK(t.elements.size() == before);
+        // …and a document that is not one.
+        CHECK(HE::uiElementsFromClipboard(t, "not json", 0).empty());
+        CHECK(HE::uiElementsFromClipboard(t, "{}", 0).empty());
+        CHECK(t.elements.size() == before);
+    }
+
+    SUBCASE("nothing selected is an empty document")
+    {
+        CHECK(HE::uiElementsToClipboard(t, {}).empty());
+        CHECK(HE::uiElementsToClipboard(t, { 999 }).empty());
+    }
+}
+
+TEST_CASE("Lining up: the edges, the middles, and the spacing between")
+{
+    HE::UIWidgetCanvas canvas{};
+    canvas.width = 800.0f; canvas.height = 600.0f;
+    canvas.scaleX = canvas.scaleY = 1.0f;
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    // Three boxes of different widths at ragged positions.
+    const int a = placeTL(t, HE::UIWidgetType::Panel, 0, 100, 100, 100, 50);
+    const int b = placeTL(t, HE::UIWidgetType::Panel, 0, 250, 130,  50, 80);
+    const int c = placeTL(t, HE::UIWidgetType::Panel, 0, 500, 110, 200, 40);
+    const auto rect = [&](int id) { return HE::uiElementRect(t, *t.find(id), &canvas); };
+
+    SUBCASE("Left flushes every left edge to the leftmost")
+    {
+        CHECK(HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::Left, &canvas) == 2);
+        CHECK(rect(a).x == doctest::Approx(100.0f));   // was already there: not counted
+        CHECK(rect(b).x == doctest::Approx(100.0f));
+        CHECK(rect(c).x == doctest::Approx(100.0f));
+        // Only the axis asked for moves.
+        CHECK(rect(b).y == doctest::Approx(130.0f));
+    }
+    SUBCASE("Right flushes to the rightmost right edge")
+    {
+        HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::Right, &canvas);
+        CHECK(rect(a).x + rect(a).w == doctest::Approx(700.0f));
+        CHECK(rect(b).x + rect(b).w == doctest::Approx(700.0f));
+    }
+    SUBCASE("the middles meet on the selection's middle")
+    {
+        // Bounds: 100..700 across, 100..210 down.
+        HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::HCenter, &canvas);
+        for (int id : { a, b, c })
+            CHECK(rect(id).x + rect(id).w * 0.5f == doctest::Approx(400.0f));
+        HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::VCenter, &canvas);
+        for (int id : { a, b, c })
+            CHECK(rect(id).y + rect(id).h * 0.5f == doctest::Approx(155.0f));
+    }
+    SUBCASE("Top and Bottom")
+    {
+        HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::Top, &canvas);
+        for (int id : { a, b, c }) CHECK(rect(id).y == doctest::Approx(100.0f));
+        HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::Bottom, &canvas);
+        for (int id : { a, b, c }) CHECK(rect(id).y + rect(id).h == doctest::Approx(180.0f));
+    }
+    SUBCASE("Distribute keeps the outer two and spaces the gaps evenly")
+    {
+        // Span 100..700 = 600, widths 100+50+200 = 350, so two gaps of 125:
+        // a at 100..200, b at 325..375, c stays at 500..700.
+        CHECK(HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::DistributeH, &canvas) == 1);
+        CHECK(rect(a).x == doctest::Approx(100.0f));
+        CHECK(rect(b).x == doctest::Approx(325.0f));
+        CHECK(rect(c).x == doctest::Approx(500.0f));
+        // Two is not enough to have a "between".
+        CHECK(HE::uiAlignElements(t, { a, b }, HE::UIAlignOp::DistributeH, &canvas) == 0);
+    }
+    SUBCASE("one element lines up with its frame")
+    {
+        // Alone on the canvas: the canvas is the frame, so Center is the screen's middle.
+        HE::uiAlignElements(t, { a }, HE::UIAlignOp::HCenter, &canvas);
+        CHECK(rect(a).x + rect(a).w * 0.5f == doctest::Approx(400.0f));
+        HE::uiAlignElements(t, { a }, HE::UIAlignOp::Bottom, &canvas);
+        CHECK(rect(a).y + rect(a).h == doctest::Approx(600.0f));
+        // Inside a panel: the panel is the frame.
+        const int kid = placeTL(t, HE::UIWidgetType::Button, c, 5, 5, 20, 10);
+        HE::uiAlignElements(t, { kid }, HE::UIAlignOp::Right, &canvas);
+        CHECK(rect(kid).x + rect(kid).w == doctest::Approx(700.0f));
+    }
+    SUBCASE("a child of a layout box is not moved: its box places it")
+    {
+        const int box = t.add(HE::UIWidgetType::VerticalBox);
+        { HE::UIElement* e = t.find(box); e->pivotX = e->pivotY = 0.0f;
+          HE::uiSetAnchorPreset(*e, 0); e->posX = 0.0f; e->posY = 300.0f;
+          e->sizeX = 200.0f; e->sizeY = 200.0f; }
+        const int row = placeTL(t, HE::UIWidgetType::Button, box, 0, 0, 50, 20);
+        const float before = t.find(row)->posX;
+        CHECK(HE::uiAlignElements(t, { row, a }, HE::UIAlignOp::Right, &canvas) == 1);
+        CHECK(t.find(row)->posX == doctest::Approx(before));
+    }
+    SUBCASE("through a pivot and a centred anchor, it is still the RECT that lines up")
+    {
+        HE::UIElement* e = t.find(b);
+        e->pivotX = 0.5f; e->pivotY = 0.5f;
+        HE::uiSetAnchorPreset(*e, 5);          // the parent's middle
+        e->posX = 0.0f; e->posY = 0.0f;         // so b sits centred on the canvas
+        REQUIRE(rect(b).x == doctest::Approx(375.0f));
+        HE::uiAlignElements(t, { a, b }, HE::UIAlignOp::Left, &canvas);
+        CHECK(rect(b).x == doctest::Approx(100.0f));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // F3: the frame a borderless window does not have (docs/he-apps-plan.md)
 // ─────────────────────────────────────────────────────────────────────────────
 
