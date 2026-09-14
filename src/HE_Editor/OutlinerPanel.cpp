@@ -347,14 +347,19 @@ void render(AppContext& ctx)
             EditorWidgets::helpForKey("outliner.search");
             ImGui::SameLine();
             ImGui::SetNextItemWidth(comboW);
-            if (ImGui::BeginCombo("##outliner_type", OutlinerFilter::kindAt(s_typeFilter).label))
+            // Help only while the dropdown is closed: once it is open, the
+            // last item is the popup's, not the button's (same idiom as the
+            // Class picker in the Details panel).
+            const bool typeOpen =
+                ImGui::BeginCombo("##outliner_type", OutlinerFilter::kindAt(s_typeFilter).label);
+            if (!typeOpen) EditorWidgets::helpForKey("outliner.type-filter");
+            if (typeOpen)
             {
                 for (int i = 0; i < OutlinerFilter::kindCount(); ++i)
                     if (ImGui::Selectable(OutlinerFilter::kindAt(i).label, i == s_typeFilter))
                         s_typeFilter = i;
                 ImGui::EndCombo();
             }
-            EditorWidgets::helpForKey("outliner.type-filter");
             ImGui::SameLine();
             // One click back to the whole tree — undoing a search by clearing
             // two controls is the friction that stops people searching.
