@@ -6,6 +6,7 @@
 #include "EditorInput.h"                 // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include "EditorViewportNav.h"           // shared orbit/pan/fly gesture grammar + look capture
 #include "EditorTransformGizmo.h"        // shared move/rotate/scale gizmo
+#include "EditorMarquee.h"               // which objects a drawn frame encloses
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
@@ -483,13 +484,13 @@ void render(AppContext& ctx, float dt)
 					// everything parented under it (see selectionFocusSphere).
 					if (imageHovered && !io.WantTextInput && !navigating &&
 					    ImGui::IsKeyPressed(ImGuiKey_F) &&
-					    ctx.world && ctx.selectedEntity != entt::null &&
-					    ctx.world->registry().valid(ctx.selectedEntity))
+					    ctx.world && ctx.selection.primary() != entt::null &&
+					    ctx.world->registry().valid(ctx.selection.primary()))
 					{
 						glm::vec3 center(0.0f);
 						float     radius = 0.0f;
 						if (selectionFocusSphere(*ctx.world, ctx.contentManager,
-						                         ctx.selectedEntity, s_sceneSnapshot,
+						                         ctx.selection.primary(), s_sceneSnapshot,
 						                         center, radius))
 							cam.focusOn(center, radius);
 					}
@@ -599,7 +600,7 @@ void render(AppContext& ctx, float dt)
 											 + "', which did not load — spawned without it").c_str());
 								}
 								ctx.world->markHierarchyDirty();
-								ctx.selectedEntity = e; // select the freshly spawned mesh
+								ctx.selection.set(e); // select the freshly spawned mesh
 								HE_LOG_INFO(Editor, "%s",
 									("Editor: spawned '" + meshName + "' into the scene via drag-drop").c_str());
 							}
@@ -634,7 +635,7 @@ void render(AppContext& ctx, float dt)
 									ctx.world->registry().emplace_or_replace<PrefabLinkComponent>(
 										root, PrefabLinkComponent{ id });
 									ctx.world->markHierarchyDirty();
-									ctx.selectedEntity = root;
+									ctx.selection.set(root);
 									HE_LOG_INFO(Editor, "%s",
 										("Editor: instantiated prefab '" + prefab->name + "' into the scene via drag-drop").c_str());
 								}
@@ -651,7 +652,7 @@ void render(AppContext& ctx, float dt)
 				}
 
 
-				// ── Gizmo on the selected entity ────────────────────────────
+				// ── Gizmo on the selection ──────────────────────────────────
 				// Suppressed in Landscape mode: there LMB belongs to the sculpt
 				// brush, and a stray gizmo drag would silently move/scale the
 				// terrain — which then breaks the brush's world↔grid mapping.
@@ -667,20 +668,51 @@ void render(AppContext& ctx, float dt)
 					// see EditorTransformGizmo for why a second copy would be a bug.
 					// Suppressed while the camera is being driven so Alt+LMB orbit
 					// and RMB fly-look don't fight the manipulator for the button.
+					// The whole selection, roots only: a child whose parent is
+					// selected too moves through the parent (see
+					// EditorSelection::roots), and one entity is the plain
+					// single-object gizmo it always was.
 					gizmoActive = EditorTransformGizmo::manipulate(
-						*ctx.world, ctx.selectedEntity,
+						*ctx.world, ctx.selection.roots(ctx.world->registry()),
 						s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
 						rectMin, rectMax, s_tb,
 						/*enabled=*/!navigating && !io.KeyAlt, ctx.undoSys);
 				}
-				// ── Picking: click in the viewport selects the hit entity ──
+
+				// ── Picking and the rubber band ─────────────────────────────
+				// One left press on the picture arms both: on release it is a
+				// CLICK if the mouse never moved past ImGui's drag threshold,
+				// and selects what was under the press; otherwise it was a
+				// FRAME, and selects everything inside it. Deciding at release
+				// rather than at press is what keeps a Ctrl-drag from toggling
+				// the object under the cursor first and framing second.
+				//
 				// Disabled in Landscape mode so a brush stroke can't deselect /
-				// reselect entities and pop the gizmo back up mid-sculpt.
-				if (ctx.editorConfig.mode != EditorMode::Landscape &&
-				    ctx.world && !gizmoActive && !navigating && !io.KeyAlt &&
-				    ImGui::IsItemClicked(ImGuiMouseButton_Left))
+				// reselect entities and pop the gizmo back up mid-sculpt, and
+				// never while the gizmo, the camera or Alt (orbit) has the button.
+				static bool   s_pressArmed = false;  // LMB went down on the image with nothing else claiming it
+				static bool   s_frameLive  = false;  // …and has since moved far enough to be a frame
+				static ImVec2 s_pressPos{};
+				const bool pickable = ctx.editorConfig.mode != EditorMode::Landscape &&
+				                      ctx.world && !gizmoActive && !navigating && !io.KeyAlt;
+				if (pickable && ImGui::IsItemClicked(ImGuiMouseButton_Left))
 				{
-					const ImVec2 mouse = ImGui::GetMousePos();
+					s_pressArmed = true;
+					s_frameLive  = false;
+					s_pressPos   = ImGui::GetMousePos();
+				}
+				// Whatever took the button mid-gesture — RMB fly-look, Alt orbit, a
+				// mode switch — cancels the gesture rather than finishing it.
+				if (s_pressArmed && (ctx.editorConfig.mode == EditorMode::Landscape ||
+				                     !ctx.world || navigating || io.KeyAlt))
+				{
+					s_pressArmed = false;
+					s_frameLive  = false;
+				}
+
+				// A click position → the entity under it, mesh before terrain.
+				auto pickAt = [&](const ImVec2& mouse) -> Entity
+				{
 					const float  u = (mouse.x - rectMin.x) / (rectMax.x - rectMin.x);
 					const float  v = (mouse.y - rectMin.y) / (rectMax.y - rectMin.y);
 
@@ -741,9 +773,97 @@ void render(AppContext& ctx, float dt)
 							meshDist = t; meshHit = e;
 						}
 					}
-					// miss = deselect
-					ctx.selectedEntity = (meshHit != entt::null) ? meshHit : terrainHit;
+					return (meshHit != entt::null) ? meshHit : terrainHit;
+				};
+
+				// Everything the frame between `a` and `b` (screen positions)
+				// encloses — see EditorMarquee for the rule. Meshes only, never
+				// terrain: a landscape is hundreds of chunk entities, and "the
+				// ground" is not what anyone frames on purpose; a click still
+				// selects it. Entities that draw nothing (lights, cameras,
+				// empties) are not on screen to be framed, so they are left out
+				// until the viewport draws them.
+				auto entitiesInFrame = [&](const ImVec2& a, const ImVec2& b) -> std::vector<Entity>
+				{
+					const float w = std::max(rectMax.x - rectMin.x, 1.0f);
+					const float h = std::max(rectMax.y - rectMin.y, 1.0f);
+					const EditorMarquee::Rect frame = EditorMarquee::Rect::fromCorners(
+						{ (a.x - rectMin.x) / w, (a.y - rectMin.y) / h },
+						{ (b.x - rectMin.x) / w, (b.y - rectMin.y) / h });
+					const glm::mat4 viewProj =
+						s_sceneSnapshot.camera.projection * s_sceneSnapshot.camera.view;
+
+					auto& reg = ctx.world->registry();
+					std::vector<Entity> found;
+					std::unordered_set<uint32_t> seen; // an entity draws one object per material slot
+					auto consider = [&](uint32_t entityId, const HE::UUID& meshId, const glm::mat4& model)
+					{
+						const Entity e = static_cast<Entity>(entityId);
+						if (!reg.valid(e) || !seen.insert(entityId).second) return;
+						if (reg.any_of<TerrainChunkComponent, TerrainComponent>(e)) return;
+						const HE::AABB* box = (meshId != HE::UUID{} && ctx.contentManager)
+						                    ? meshBounds(*ctx.contentManager, meshId) : nullptr;
+						if (EditorMarquee::encloses(viewProj, frame, box ? *box : s_fallbackBox, model))
+							found.push_back(e);
+					};
+					for (const RenderObject& obj : s_sceneSnapshot.objects)
+						consider(obj.entityId, obj.meshAssetId, obj.transform);
+					for (const SkinnedRenderObject& obj : s_sceneSnapshot.skinnedObjects)
+						consider(obj.entityId, obj.meshAssetId, obj.transform);
+					return found;
+				};
+
+				if (s_pressArmed)
+				{
+					const ImVec2 mouse = ImGui::GetMousePos();
+					if (!s_frameLive && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+						s_frameLive = true;
+
+					if (ImGui::IsMouseDown(ImGuiMouseButton_Left))
+					{
+						if (s_frameLive)
+						{
+							// The frame itself, clipped to the picture: a drag that
+							// leaves the window keeps selecting, but the band must
+							// not be painted over the panels next door.
+							const ImVec2 a(std::clamp(std::min(s_pressPos.x, mouse.x), rectMin.x, rectMax.x),
+							               std::clamp(std::min(s_pressPos.y, mouse.y), rectMin.y, rectMax.y));
+							const ImVec2 b(std::clamp(std::max(s_pressPos.x, mouse.x), rectMin.x, rectMax.x),
+							               std::clamp(std::max(s_pressPos.y, mouse.y), rectMin.y, rectMax.y));
+							ImDrawList* dl = ImGui::GetWindowDrawList();
+							// The selection highlight's own colour, so the band and
+							// what it is about to select read as one thing.
+							const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
+							dl->AddRectFilled(a, b, ImGui::GetColorU32(ImVec4(accent.x, accent.y, accent.z, 0.18f)));
+							dl->AddRect(a, b, ImGui::GetColorU32(ImVec4(accent.x, accent.y, accent.z, 0.90f)), 0.0f, 0, 1.5f);
+						}
+					}
+					else
+					{
+						// Released: decide. Ctrl/Cmd (io.KeyCtrl is the platform's
+						// multi-select key, see OutlinerPanel) and Shift keep what
+						// is selected — a click toggles the hit in and out of the
+						// set, a frame adds its contents; a plain gesture replaces.
+						// A plain click on nothing deselects; with the modifier
+						// held it leaves the selection alone.
+						const bool keep = io.KeyCtrl || io.KeyShift;
+						if (s_frameLive)
+						{
+							const std::vector<Entity> inside = entitiesInFrame(s_pressPos, mouse);
+							if (keep) ctx.selection.addMany(inside);
+							else      ctx.selection.setMany(inside);
+						}
+						else
+						{
+							const Entity hit = pickAt(s_pressPos);
+							if (keep) { if (hit != entt::null) ctx.selection.toggle(hit); }
+							else      ctx.selection.set(hit);
+						}
+						s_pressArmed = false;
+						s_frameLive  = false;
+					}
 				}
+
 
 				// ── Landscape brush cursor + sculpt ────────────────────────
 				// Brush state and the whole sculpt/paint stroke live in TerrainTools.cpp,

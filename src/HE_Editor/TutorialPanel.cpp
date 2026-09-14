@@ -181,10 +181,10 @@ namespace
 			for (auto [e, mat] : reg.view<MaterialComponent>().each())
 				if (mat.materialAssetId != HE::UUID{}) ++s.materialsAssigned;
 
-			s.selectionSet = ctx.selectedEntity != entt::null &&
-			                 reg.valid(ctx.selectedEntity);
+			s.selectionSet = ctx.selection.primary() != entt::null &&
+			                 reg.valid(ctx.selection.primary());
 			if (s.selectionSet)
-				s.selectedEntity = static_cast<uint32_t>(entt::to_integral(ctx.selectedEntity));
+				s.selectedEntity = static_cast<uint32_t>(entt::to_integral(ctx.selection.primary()));
 
 			// Sky time of day. environmentEntity() is the one Sky in the scene; with
 			// no Sky the step cannot be satisfied at all (skyPresent gates it), which

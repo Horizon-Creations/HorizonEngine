@@ -4,6 +4,7 @@
 #include <Physics/CollisionLayers.h>     // the project's sixteen collision channels
 #include "EditorWidgets.h"               // shared Content-Browser asset drop slot
 #include "EditorHelp.h"                  // per-component scope for the property tooltips
+#include "EditorMultiEdit.h"             // one edit, every selected entity
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/NavigationSystem.h>
@@ -54,6 +55,184 @@ void inertEnvironmentNote(bool isActive, const char* kind)
 	ImGui::PopStyleColor();
 	ImGui::Separator();
 }
+
+// ─── Several entities selected ────────────────────────────────────────────────
+// Count and names first, then the component sections every member has — the
+// primary's rows, drawn through the very same renderFor(onlyComponent) the
+// class tab uses, so a component that gains a field shows it here too. A
+// component only SOME members carry is listed, greyed, rather than dropped
+// silently: "why is Light missing" has an answer on screen.
+//
+// An edit in those rows lands on EVERY member, not just the primary. The rows
+// themselves know nothing about that: the primary's component state is read
+// before and after they run, the leaves that changed are written into the
+// other members (EditorMultiEdit), all inside the one undo session the row
+// already opened — so a single Ctrl+Z puts the whole selection back.
+
+// Can a widget in this window change a value THIS frame? Serialising the
+// primary's components twice a frame is cheap for an ordinary entity and not
+// for a terrain, and neither is needed while the user merely looks at the
+// panel. An edit needs input: a mouse button on or over the panel (the drag
+// itself, a click on a combo, the release of an asset dropped from the Content
+// Browser — that last one arrives with the source item still active and the
+// panel not focused, hence the hover with AllowWhenBlockedByActiveItem), the
+// wheel, or a key while the panel or one of its popups has the focus.
+bool inputMayEditThisFrame()
+{
+	const ImGuiIO& io = ImGui::GetIO();
+	const bool mouse = ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
+	                   ImGui::IsMouseReleased(ImGuiMouseButton_Left) ||
+	                   ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
+	                   io.MouseWheel != 0.0f;
+	bool key = io.InputQueueCharacters.Size > 0;
+	for (int k = ImGuiKey_NamedKey_BEGIN; !key && k < ImGuiKey_NamedKey_END; ++k)
+		key = ImGui::IsKeyDown(static_cast<ImGuiKey>(k));
+	if (!mouse && !key) return false;
+	// RootAndChildWindows follows the popup hierarchy too, so a combo's list
+	// or the asset picker opened from here still count as this panel.
+	return ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) ||
+	       ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
+	                              ImGuiHoveredFlags_AllowWhenBlockedByActiveItem |
+	                              ImGuiHoveredFlags_AllowWhenBlockedByPopup);
+}
+
+// Members an edit must NOT reach, and why:
+//   - In a collab session, every member whose lock we do not hold. The editor
+//     locks the primary alone (followSelection takes one subject), and
+//     publishComponents sends nothing for an entity we do not own the lock
+//     for — so a member edited locally would move on our screen and on nobody
+//     else's, and one another participant holds would fight theirs on top.
+//     Until there is a multi-lock model, a session means primary-only, and
+//     the panel says so.
+//   - A terrain, in or out of a session: its state is a quarter of a million
+//     floats per capture, and a marquee around props near the origin picks
+//     it up by its pivot. Nothing of a terrain's is right to copy anyway.
+std::vector<Entity> membersToSkip(AppContext& ctx, const entt::registry& registry,
+                                  const std::vector<Entity>& members, Entity primary)
+{
+	std::vector<Entity> skip;
+	const bool inSession = ctx.collab && ctx.collab->inSession();
+	for (Entity e : members)
+	{
+		if (e == primary || !registry.valid(e)) continue;
+		if (registry.all_of<TerrainComponent>(e)) { skip.push_back(e); continue; }
+		if (!inSession) continue;
+		const auto subject = ctx.collab->subjectFor(
+			static_cast<std::uint32_t>(entt::to_integral(e)));
+		const HE::Net::LockInfo* lock = ctx.collab->lockFor(subject);
+		if (!lock || lock->owner != ctx.collab->localParticipant())
+			skip.push_back(e);
+	}
+	return skip;
+}
+
+void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
+{
+	auto& registry = world.registry();
+	const std::vector<Entity>& members = ctx.selection.entities();
+
+	ImGui::Text("%zu entities selected", members.size());
+	EditorWidgets::helpForKey("details.multi.count");
+	{
+		// The names, one line each; the primary is marked because it is the
+		// one the fields below belong to.
+		ImGui::Indent();
+		for (Entity e : members)
+		{
+			const auto* nc = registry.try_get<NameComponent>(e);
+			const char* name = (nc && !nc->name.empty()) ? nc->name.c_str() : "(unnamed)";
+			if (e == primary) ImGui::BulletText("%s  (active)", name);
+			else              ImGui::BulletText("%s", name);
+		}
+		ImGui::Unindent();
+	}
+	ImGui::Separator();
+
+	// Intersection of the component lists, in the primary's order.
+	std::vector<std::string> common;
+	InspectorPanel::listComponents(ctx, world, primary, common);
+	std::vector<std::string> partial; // on the primary but not on every member
+	for (Entity e : members)
+	{
+		if (e == primary) continue;
+		std::vector<std::string> theirs;
+		InspectorPanel::listComponents(ctx, world, e, theirs);
+		for (auto it = common.begin(); it != common.end();)
+		{
+			if (std::find(theirs.begin(), theirs.end(), *it) != theirs.end()) { ++it; continue; }
+			if (std::find(partial.begin(), partial.end(), *it) == partial.end())
+				partial.push_back(*it);
+			it = common.erase(it);
+		}
+	}
+
+	hint("Edits below apply to every selected entity that has the component; "
+	     "the active entity's values are shown.");
+	EditorWidgets::helpForKey("details.multi.shared");
+	const std::vector<Entity> held = membersToSkip(ctx, registry, members, primary);
+	if (ctx.collab && ctx.collab->inSession())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.70f, 0.25f, 1.0f));
+		ImGui::TextWrapped("In a collaboration session only the entity you hold takes "
+		                   "edits: %zu of the selected entities keep their values.",
+		                   held.size());
+		ImGui::PopStyleColor();
+		EditorWidgets::helpForKey("details.multi.held");
+	}
+	ImGui::Separator();
+
+	if (common.empty())
+		ImGui::TextDisabled("(no component shared by all selected entities)");
+
+	// The primary's state before the rows run, taken only on a frame an edit
+	// can happen in. A terrain never propagates: its state is a quarter of a
+	// million floats per capture, and there is no second entity it would be
+	// right to copy a terrain's settings onto.
+	const bool propagate = inputMayEditThisFrame() &&
+	                       !registry.all_of<TerrainComponent>(primary);
+	const EditorMultiEdit::json before =
+		propagate ? EditorMultiEdit::state(world, primary) : EditorMultiEdit::json();
+
+	// One renderFor per shared section. Each call capturePre()s on the mouse
+	// press inside the window — a handful of whole-world captures on one frame,
+	// which is the price of not duplicating the component editor.
+	for (const std::string& label : common)
+	{
+		const bool structural =
+			InspectorPanel::renderFor(ctx, world, primary, ctx.undoSys, label.c_str());
+		if (!structural) continue;
+		// The header's "Remove Component" took the section off the primary
+		// (with its own snapshotNow before the removal, which already holds
+		// every member's state). The same removal on each member, WITHOUT an
+		// undo of its own: one entry per member would turn the batch into N.
+		std::vector<std::string> left;
+		InspectorPanel::listComponents(ctx, world, primary, left);
+		if (std::find(left.begin(), left.end(), label) != left.end()) continue;
+		for (Entity e : members)
+		{
+			if (e == primary || !registry.valid(e)) continue;
+			if (std::find(held.begin(), held.end(), e) != held.end()) continue;
+			InspectorPanel::removeComponent(ctx, world, e, label.c_str(), nullptr);
+		}
+	}
+
+	if (propagate && registry.valid(primary))
+	{
+		const auto changes = EditorMultiEdit::diff(before, EditorMultiEdit::state(world, primary));
+		EditorMultiEdit::propagate(world, changes, members, primary, held);
+	}
+
+	if (!partial.empty())
+	{
+		ImGui::Separator();
+		ImGui::TextDisabled("Not on every selected entity:");
+		EditorWidgets::helpForKey("details.multi.partial");
+		ImGui::Indent();
+		for (const std::string& label : partial)
+			ImGui::TextDisabled("%s", label.c_str());
+		ImGui::Unindent();
+	}
+}
 #endif
 
 // ─── Inspector (Details panel) ────────────────────────────────────────────────
@@ -64,10 +243,23 @@ void render(AppContext& ctx)
 	ImGui::Begin("Details");
 	if (ctx.fontHeading) ImGui::PopFont();
 
-	if (!ctx.world || ctx.selectedEntity == entt::null ||
-	    !ctx.world->registry().valid(ctx.selectedEntity))
+	const Entity primary = ctx.selection.primary();
+	if (!ctx.world || primary == entt::null ||
+	    !ctx.world->registry().valid(primary))
 	{
 		ImGui::TextDisabled("(no entity selected)");
+		ImGui::End();
+		return;
+	}
+
+	// ── More than one entity: the fields they have in common ─────────────────
+	// The header says how many and which; below it, every component section
+	// that EVERY member carries, in the primary's order. The rows show the
+	// primary's values and an edit lands on all of them (see
+	// renderMultiSelection for how, without a second component editor).
+	if (ctx.selection.size() > 1)
+	{
+		renderMultiSelection(ctx, *ctx.world, primary);
 		ImGui::End();
 		return;
 	}
@@ -78,7 +270,7 @@ void render(AppContext& ctx)
 	if (ctx.collab && ctx.collab->inSession())
 	{
 		const auto subject = ctx.collab->subjectFor(
-			static_cast<std::uint32_t>(entt::to_integral(ctx.selectedEntity)));
+			static_cast<std::uint32_t>(entt::to_integral(primary)));
 		if (const HE::Net::LockInfo* lock = ctx.collab->lockFor(subject);
 		    lock && lock->owner != ctx.collab->localParticipant())
 		{
@@ -94,7 +286,7 @@ void render(AppContext& ctx)
 		}
 	}
 
-	InspectorPanel::renderFor(ctx, *ctx.world, ctx.selectedEntity, ctx.undoSys);
+	InspectorPanel::renderFor(ctx, *ctx.world, primary, ctx.undoSys);
 
 	ImGui::End();
 #else

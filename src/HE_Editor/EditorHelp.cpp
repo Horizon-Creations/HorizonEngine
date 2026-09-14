@@ -1500,8 +1500,9 @@ namespace
 	  "tabs, which the scene's own saved state says nothing about.",
 	  "", "editor#menus" },
 	{ "Edit/Duplicate", "",
-	  "Copies the selected entity with all its components and children, next to "
-	  "the original.",
+	  "Copies every selected entity with all its components and children, next "
+	  "to the original. The copies become the selection; one undo removes them "
+	  "all.",
 	  "Ctrl+D", "editor#outliner" },
 	{ "Edit/Preferences", "",
 	  "Opens the settings as an editor tab: renderer, viewport, collaboration, "
@@ -1631,7 +1632,8 @@ namespace
 	  "transform, which is how a hierarchy is built.",
 	  "", "editor#outliner" },
 	{ "World Outliner/Duplicate", "",
-	  "Copies this entity, its components and its children, beside the original.",
+	  "Copies every selected entity, its components and its children, beside "
+	  "the original.",
 	  "Ctrl+D", "editor#outliner" },
 	{ "World Outliner/Save as Prefab", "",
 	  "Saves this entity and everything under it as a reusable asset, so the "
@@ -1985,14 +1987,37 @@ namespace
 	  "Moves the editor camera so the selected entity fills the view — the fastest "
 	  "way back to something you have lost.",
 	  "F", "editor#viewport" },
+	{ "viewport.marquee", "Selecting with a frame",
+	  "Drag with the left button over the scene to draw a frame: on release, "
+	  "every mesh whose whole box or whose origin lies inside it is selected. "
+	  "Ctrl (Cmd on macOS) or Shift while dragging adds the frame's contents to "
+	  "what is already selected; a click still picks the one object under the "
+	  "cursor. The ground and anything not drawn in the viewport, such as lights "
+	  "and cameras, are never framed.",
+	  "Drag, Ctrl+Drag, Shift+Drag", "editor#viewport" },
+	{ "viewport.group-gizmo", "Moving several entities at once",
+	  "With more than one entity selected the gizmo sits at the centre of the "
+	  "group and moves, turns or scales all of them together, about that point. "
+	  "In Local space its handles follow the active entity; in World space the "
+	  "world axes. A child selected along with its parent moves through the "
+	  "parent. One drag is one undo step.",
+	  "", "editor#viewport" },
 
 	// ── World Outliner ───────────────────────────────────────────────────────
 	{ "outliner.duplicate", "Duplicate",
-	  "Copies the selected entity with all its components, alongside the original.",
+	  "Copies every selected entity with all its components, alongside the "
+	  "original. One undo removes all the copies.",
 	  "Ctrl+D", "editor#outliner" },
 	{ "outliner.delete", "Delete",
-	  "Removes the selected entity and everything parented under it.",
+	  "Removes every selected entity and everything parented under it. One "
+	  "undo step brings the whole selection back.",
 	  "Delete", "editor#outliner" },
+	{ "outliner.multiselect", "Selecting several entities",
+	  "Click selects one entity. Ctrl-click (Cmd on macOS) adds or removes a "
+	  "row, Shift-click selects everything between the last plain click and "
+	  "this row. The last one clicked is the active entity — the one the gizmo "
+	  "moves and the Details panel edits.",
+	  "Ctrl+Click, Shift+Click", "editor#outliner" },
 	{ "outliner.prefab", "Save as Prefab",
 	  "Saves this entity and its children as a reusable asset, so the same thing "
 	  "can be dropped into any scene.",
@@ -2006,6 +2031,27 @@ namespace
 	{ "details.name", "Name",
 	  "What this entity is called in the Outliner and to scripts that look it up "
 	  "by name.",
+	  "", "editor#details" },
+	{ "details.multi.count", "Entities selected",
+	  "How many entities the selection holds, and which. The one marked active "
+	  "is the last one clicked; its values are what the rows below show.",
+	  "", "editor#details" },
+	{ "details.multi.shared", "Edits apply to every selected entity",
+	  "With several entities selected the panel shows the components they all "
+	  "share, with the active entity's values. Changing a value here sets that "
+	  "same value on every selected entity that has the component — only the "
+	  "value you touched, so dragging Position X leaves each entity's Y and Z as "
+	  "they were. One undo puts all of them back.",
+	  "", "editor#details" },
+	{ "details.multi.held", "Only the entity you hold",
+	  "In a collaboration session the editor holds a lock on the active entity "
+	  "alone, and only what you hold reaches the other participants. The other "
+	  "selected entities keep their values, so nothing moves on your screen "
+	  "that the others cannot see. Edit them one at a time in a session.",
+	  "", "editor#details" },
+	{ "details.multi.partial", "Not on every selected entity",
+	  "Components the active entity has but at least one other selected entity "
+	  "does not. They are left out above because there is no shared value to show.",
 	  "", "editor#details" },
 
 	// ── Content Browser ──────────────────────────────────────────────────────

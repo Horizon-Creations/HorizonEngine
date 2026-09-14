@@ -5,6 +5,7 @@
 #include "Types/Enums.h"
 #include "ProjectManager.h"
 #include "EditorUndo.h"
+#include "EditorSelection.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
@@ -143,8 +144,13 @@ struct AppContext
 	// the UI drives it from viewport input and pushes it to the renderer.
 	EditorCamera*      editorCamera = nullptr;
 
-	// Entity selected in the outliner/viewport — drives the Details panel
-	Entity& selectedEntity;
+	// Entities selected in the outliner/viewport — drives the Details panel.
+	// A SET (see EditorSelection.h): `selection.primary()` is the one entity a
+	// single-entity consumer (gizmo, focus, collab lock) works with, and
+	// `selection.entities()` is what a whole-selection gesture (delete, the
+	// viewport markers) walks. Pruned every frame before the UI reads it, so
+	// every member is a valid handle.
+	EditorSelection& selection;
 
 	// Play-in-editor: snapshot on play, restore on stop
 	bool isPlaying = false;
@@ -209,9 +215,12 @@ struct AppContext
 	std::function<void()> redo;
 
 	// ── Entity editing gestures ──────────────────────────────────────────────
-	// Duplicate / cut / copy / paste / delete of the SELECTED entity, one
+	// Duplicate / cut / copy / paste / delete of the SELECTION, one
 	// implementation behind the Edit menu, the Outliner's context menu and the
 	// keyboard. Each one snapshots for undo itself, so callers just call.
+	// Delete takes the whole set; duplicate, copy and cut act on the PRIMARY
+	// entity only — the clipboard is one prefab blob, and a multi-entity
+	// clipboard is a later step.
 	//
 	// The clipboard behind them is a prefab BLOB, not an entity handle: the
 	// entity it came from is gone after a cut, and the whole world is replaced
@@ -562,18 +571,28 @@ private:
 	// Maps raw entity handle → Lua instance id (parallel lifecycle to m_scriptContext).
 	std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances;
 
-	// Outliner/inspector selection
-	Entity m_selectedEntity = entt::null;
+	// Outliner/inspector selection — a set; see EditorSelection.h. Cleared
+	// wherever the world is replaced (undo, scene open, play stop), pruned once
+	// per frame in makeContext() so a peer's delete never leaves a dead handle.
+	EditorSelection m_selection;
 
 	// ── Duplicate / cut / copy / paste / delete ──────────────────────────────
 	// Exposed through AppContext (see the block there for what the clipboard
 	// holds and why). A copy taken from a scene that was since closed stays
 	// valid — it is self-contained data, not a reference into a world.
-	std::vector<std::uint8_t> m_entityClipboard;
+	//
+	// All of them act on the WHOLE selection, one subtree blob per selection
+	// root (a child whose parent is selected too travels inside the parent's
+	// blob and is not copied a second time), and each takes ONE undo snapshot
+	// before its loop, so a single Ctrl+Z reverts the whole gesture.
+	std::vector<std::vector<std::uint8_t>> m_entityClipboard;
 	void duplicateSelectedEntity();
 	void copySelectedEntity(bool cut);
 	void pasteEntityClipboard();
 	void deleteSelectedEntity();
+	// The selection roots that may be copied or removed: valid, not built-in
+	// (root, sun, moon), and not under another selected entity.
+	std::vector<Entity> editableSelectionRoots() const;
 	// Where a copy of `source` belongs: beside it, under the same parent. Shared
 	// by duplicate and paste so the two land in the same place.
 	Entity siblingParentFor(Entity source) const;

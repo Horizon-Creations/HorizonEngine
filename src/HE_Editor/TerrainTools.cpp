@@ -548,7 +548,7 @@ void renderPanel(AppContext& ctx)
             ctx.world->addComponent(e, mc);
 
             ctx.world->markHierarchyDirty();
-            ctx.selectedEntity = e;
+            ctx.selection.set(e);
             HE_LOG_INFO(Editor, "%s", "Editor: created Terrain entity");
         }
     }

@@ -1286,10 +1286,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// disappear.
 	auto canEditEntity = [&]() -> bool
 	{
+		const Entity primary = ctx.selection.primary();
 		return ctx.projectLoaded && !ctx.isPlaying && ctx.world
-		    && ctx.selectedEntity != entt::null
-		    && ctx.world->registry().valid(ctx.selectedEntity)
-		    && !ctx.world->isBuiltin(ctx.selectedEntity);
+		    && primary != entt::null
+		    && ctx.world->registry().valid(primary)
+		    && !ctx.world->isBuiltin(primary);
 	};
 	// Paste needs no selection — it lands beside whatever is selected, or under
 	// the world root when nothing is.
