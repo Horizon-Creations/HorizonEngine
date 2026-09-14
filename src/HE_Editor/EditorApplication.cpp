@@ -8473,9 +8473,26 @@ void EditorApplication::syncPrefabInstances(const char* when)
 void EditorApplication::recordPrefabEdits()
 {
 	if (!m_editorWorld || m_isPlaying) return;
-	const uint64_t rev = m_undo.revision();
-	if (rev == m_prefabEditRevision) return;
+	auto& registry = m_editorWorld->registry();
+
+	// This frame's selection, by uuid — and, when the revision moved, last
+	// frame's on top of it (see the header for the click-away commit).
+	std::vector<HE::UUID> current;
+	for (Entity e : m_selection.entities())
+		if (const auto* idc = registry.valid(e) ? registry.try_get<EntityIdComponent>(e) : nullptr)
+			current.push_back(idc->id);
+	const uint64_t rev   = m_undo.revision();
+	const bool     moved = (rev != m_prefabEditRevision);
 	m_prefabEditRevision = rev;
+	std::vector<HE::UUID> targets;
+	if (moved)
+	{
+		targets = m_prefabEditLastSelection;
+		for (const HE::UUID& id : current)
+			if (std::find(targets.begin(), targets.end(), id) == targets.end()) targets.push_back(id);
+	}
+	m_prefabEditLastSelection = std::move(current);
+	if (!moved) return;
 	if (m_collab.inSession())
 	{
 		// Same reason the sync sits this out: a component written here is not
@@ -8494,10 +8511,10 @@ void EditorApplication::recordPrefabEdits()
 
 	SceneSerializer serializer;
 	ContentManager& content = contentManager();
-	auto& registry = m_editorWorld->registry();
-	for (Entity e : m_selection.entities())
+	for (const HE::UUID& target : targets)
 	{
-		if (!registry.valid(e)) continue;
+		const Entity e = m_editorWorld->findByEntityId(target);
+		if (e == entt::null) continue;
 		for (Entity root : SceneSerializer::prefabInstancesBinding(*m_editorWorld, e))
 		{
 			const HE::UUID id = registry.get<PrefabInstanceComponent>(root).asset;

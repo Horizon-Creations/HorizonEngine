@@ -860,8 +860,15 @@ private:
 	// edit. Also called right before the save-time sync, for an edit committed
 	// in the very frame the save was asked for. Skipped in a collaboration
 	// session for the same reason the sync is.
+	//
+	// Last frame's selection rides along: an edit committed by clicking
+	// ANOTHER entity deactivates the field and moves the selection in the
+	// same frame, so by the time the bump is seen the edited entity has left
+	// the set. Kept as uuids, not handles — undo re-mints handles, and a stale
+	// one can name a new entity.
 	void recordPrefabEdits();
-	uint64_t m_prefabEditRevision = 0;
+	uint64_t              m_prefabEditRevision = 0;
+	std::vector<HE::UUID> m_prefabEditLastSelection;
 	// Take one authored change back to what the asset says (the entry leaves
 	// the list, the placement is synced), or write a placement back into its
 	// asset (file + resident copy, then every other placement synced). Both

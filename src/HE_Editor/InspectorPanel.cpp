@@ -441,9 +441,14 @@ void prefabInstanceSection(AppContext& ctx, HorizonWorld& world, Entity entity,
 					ctx.selection.set(of.root);
 			}
 
+			// The list, COPIED before any button below rewrites it: a revert
+			// syncs the placement, and a sync may emplace components — the
+			// component pointer above is not to be read after that.
+			const std::vector<PrefabInstanceComponent::Override> all = inst->overrides;
+			inst = nullptr;
 			// The overrides on THIS entity's record.
 			std::vector<PrefabInstanceComponent::Override> mine;
-			for (const auto& o : inst->overrides)
+			for (const auto& o : all)
 				if (o.templateEntity == of.templateKey) mine.push_back(o);
 			if (mine.empty())
 				ImGui::TextDisabled(isRoot ? "Nothing on the root was changed here."
@@ -476,7 +481,7 @@ void prefabInstanceSection(AppContext& ctx, HorizonWorld& world, Entity entity,
 			// way back into the asset. On the root, because that is the
 			// instance; a child shows the count so the number is not a
 			// surprise on the way up.
-			const size_t total = inst->overrides.size();
+			const size_t total = all.size();
 			if (isRoot)
 			{
 				if (total > mine.size())
@@ -489,7 +494,6 @@ void prefabInstanceSection(AppContext& ctx, HorizonWorld& world, Entity entity,
 				{
 					// One at a time through the same path as the row buttons —
 					// each is its own undo step, which is also how they were made.
-					const std::vector<PrefabInstanceComponent::Override> all = inst->overrides;
 					for (const auto& o : all) ctx.revertPrefabOverride(of.root, o);
 				}
 				ImGui::EndDisabled();
