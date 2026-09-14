@@ -2710,7 +2710,35 @@ namespace
 	  "", "ui#designer" },
 	{ "UI Hierarchy/Duplicate", "Duplicate",
 	  "Copies this widget and everything under it, as a sibling. The copy keeps "
-	  "the properties and the layout, and gets its own name.",
+	  "the properties and the layout, and gets its own name. With several rows "
+	  "selected, every one of them is copied, and one undo removes all the "
+	  "copies.",
+	  "Ctrl+D", "ui#designer" },
+	{ "UI Hierarchy/Copy", "Copy",
+	  "Puts the selected widgets and everything under them on the clipboard. "
+	  "The clipboard is shared by every open widget, so a card built in one "
+	  "pastes into another. A widget whose parent is also selected comes along "
+	  "inside its parent, not as a second copy.",
+	  "Ctrl+C", "ui#designer" },
+	{ "UI Hierarchy/Cut", "Cut",
+	  "Copy, then delete: the selection goes to the clipboard and leaves the "
+	  "widget. One undo brings it back.",
+	  "Ctrl+X", "ui#designer" },
+	{ "UI Hierarchy/Paste", "Paste",
+	  "Puts the clipboard's widgets INTO the selected container, or beside the "
+	  "selected widget when it takes no children, or on the canvas when nothing "
+	  "is selected. A copy landing next to its original is shifted a little so "
+	  "the two do not sit on top of each other. Greyed out while the clipboard "
+	  "is empty.",
+	  "Ctrl+V", "ui#designer" },
+	{ "ui.multiselect", "Selecting several widgets",
+	  "Shift+click adds a widget to the selection or takes it out again, on the "
+	  "canvas and in the hierarchy alike. Dragging on empty canvas draws a band, "
+	  "and everything wholly inside it is selected when you let go (with Shift, "
+	  "added). Ctrl+A takes every top-level widget. The last one clicked is the "
+	  "one Details shows and the handles sit on; dragging any member moves the "
+	  "whole group, and Delete, Duplicate, Copy and Align all mean the whole "
+	  "group.",
 	  "", "ui#designer" },
 
 	{ "Canvas/Width", "Canvas Width",
@@ -3247,6 +3275,47 @@ namespace
 	  "one drag, which is quicker than turning it off and back on. A resize only "
 	  "snaps the edge you have hold of; the other side stands still. Nothing "
 	  "here is stored in the widget — it is a way of dragging, not a property.",
+	  "", "ui#designer" },
+
+	// ── Lining up what is already placed ─────────────────────────────────────
+	// The toolbar cell and the eight entries of its popup.
+	{ "ui.align", "Align",
+	  "Lines the selected widgets up in one go — the same help the snap lines "
+	  "give while dragging, applied to what is already placed. With several "
+	  "selected they line up among themselves: Left puts every left edge on the "
+	  "leftmost one, Center puts the middles on the selection's middle, and so "
+	  "on. With ONE selected it lines up with its frame, the parent or the "
+	  "canvas, which is how you centre a button on its panel. A widget inside "
+	  "a layout box is left alone: the box places it. One undo step.",
+	  "", "ui#designer" },
+	{ "UI Align/Left", "",
+	  "Every left edge onto the leftmost one — or, alone, onto the frame's left "
+	  "edge.",
+	  "", "ui#designer" },
+	{ "UI Align/Center", "",
+	  "Every widget's middle onto the middle of the selection, or of the frame "
+	  "when it is alone. Widths stay as they are.",
+	  "", "ui#designer" },
+	{ "UI Align/Right", "",
+	  "Every right edge onto the rightmost one, or the frame's right edge.",
+	  "", "ui#designer" },
+	{ "UI Align/Top", "",
+	  "Every top edge onto the topmost one, or the frame's top.",
+	  "", "ui#designer" },
+	{ "UI Align/Middle", "",
+	  "Every widget's vertical middle onto the selection's, or the frame's.",
+	  "", "ui#designer" },
+	{ "UI Align/Bottom", "",
+	  "Every bottom edge onto the lowest one, or the frame's bottom.",
+	  "", "ui#designer" },
+	{ "UI Align/Distribute Horizontally", "",
+	  "Keeps the leftmost and rightmost where they are and spaces the ones "
+	  "between so the GAPS come out equal — equal gaps rather than equal "
+	  "centres, because that is what the eye reads. Needs three or more.",
+	  "", "ui#designer" },
+	{ "UI Align/Distribute Vertically", "",
+	  "The same down the page: the top and bottom widgets stay, the rest are "
+	  "spaced with equal gaps between them. Needs three or more.",
 	  "", "ui#designer" },
 
 	// ── Looking at the widget under another theme ────────────────────────────
@@ -5376,6 +5445,7 @@ namespace
 		{ "UI Widget/",      "editor-ui", "UI Designer", "Widget properties" },
 		{ "UI Graph/",       "editor-ui", "UI Designer", "Widget logic" },
 		{ "UI Theme Preview/", "editor-ui", "UI Designer", "Previewing a theme" },
+		{ "UI Align/",       "editor-ui", "UI Designer", "Lining widgets up" },
 		{ "UI Timeline/",    "editor-ui", "UI Designer", "The timeline" },
 		{ "UI Graph Node/",  "editor-ui", "UI Designer", "Nodes in the graph" },
 		{ "UI Variable/",    "editor-ui", "UI Designer", "Graph variables" },
