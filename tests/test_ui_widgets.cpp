@@ -331,6 +331,37 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Body Color", UIPropType::Color },
             { "Bar Width", UIPropType::Float },
             { "Bar Color", UIPropType::Color } } },
+        // The CheckBox's rows plus Group, minus Switch: a radio button is a
+        // choice with the checkbox's picture, and the shared names are what
+        // let one theme style and one graph serve both.
+        { UIWidgetType::RadioButton, {
+            { "Checked", UIPropType::Bool },
+            { "Label", UIPropType::String },
+            { "Group", UIPropType::String },
+            { "FontSize", UIPropType::Float },
+            { "Box Color", UIPropType::Color },
+            { "Check Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color },
+            { "AutoSize", UIPropType::Bool } } },
+        // The nodes are ONE string (Items), so a graph can write the tree;
+        // Selected and Collapsed are the state a person leaves behind.
+        { UIWidgetType::TreeView, {
+            { "Items", UIPropType::String },
+            { "Row Height", UIPropType::Float },
+            { "Indent", UIPropType::Float },
+            { "Padding", UIPropType::Float },
+            { "FontSize", UIPropType::Float },
+            { "Back Color", UIPropType::Color },
+            { "Text Color", UIPropType::Color },
+            { "Row Hover Color", UIPropType::Color },
+            { "Row Selected Color", UIPropType::Color },
+            { "Arrow Color", UIPropType::Color },
+            { "Bar Width", UIPropType::Float },
+            { "Bar Color", UIPropType::Color },
+            { "Selected", UIPropType::Int },
+            { "Collapsed", UIPropType::String } } },
+        // A hole with a name on it — and the name is the base "Name" row.
+        { UIWidgetType::NamedSlot, {} },
     };
 
     // Every registered type is covered, in registry order — a new widget type
@@ -455,10 +486,18 @@ TEST_CASE("interactive types declare events; Button fires OnClicked")
         if (e.name == "OnFileDropped")
         { textCanTakeAFile = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::String); }
     CHECK(textCanTakeAFile);
-    // Five on the base — animation, file drop, and the three of the drag — plus
-    // whatever the type adds, which for a Text is its link.
-    CHECK(HE::UIText{}.allEvents().size() == HE::UIText{}.events().size() + 5);
-    CHECK(HE::UIButton{}.allEvents().size() == HE::UIButton{}.events().size() + 5);
+    // Eight on the base — animation, file drop, and the six of the drag (three
+    // for the source: started, moved, ended; three for the target: enter,
+    // leave, drop) — plus whatever the type adds, which for a Text is its link.
+    CHECK(HE::UIText{}.allEvents().size() == HE::UIText{}.events().size() + 8);
+    CHECK(HE::UIButton{}.allEvents().size() == HE::UIButton{}.events().size() + 8);
+    // The moved event carries a POINT, the one base event that does: the pin
+    // has to come out as Vec2 or a Set Position cannot take it.
+    bool textCanBeCarried = false;
+    for (const auto& e : HE::UIText{}.allEvents())
+        if (e.name == "OnDragMoved")
+        { textCanBeCarried = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::Vec2); }
+    CHECK(textCanBeCarried);
     CHECK(HE::UIButton{}.interactive());
     CHECK(!HE::UIText{}.interactive());
 }
@@ -1072,7 +1111,11 @@ TEST_CASE("Exactly the container types accept children")
         // Splitter because its two are its panes.
         // …and an Accordion because its children are its sections.
         HE::UIWidgetType::TabBox, HE::UIWidgetType::Splitter,
-        HE::UIWidgetType::Accordion };
+        HE::UIWidgetType::Accordion,
+        // A NamedSlot is a hole: what is in it is its default content. And a
+        // WidgetRef takes children because they are what the page puts INTO
+        // the component's slots — the graft moves them there.
+        HE::UIWidgetType::NamedSlot, HE::UIWidgetType::WidgetRef };
     for (HE::UIWidgetType ty : HE::uiWidgetTypeRegistry())
     {
         auto e = HE::makeUIElement(ty);
@@ -3394,6 +3437,179 @@ TEST_CASE("Layout box: filling slots share what is left over")
     CHECK(HE::uiElementRect(t, *t.find(kids[1])).h == doctest::Approx(0.0f));
 }
 
+// ── Slot alignment and slot margins ──────────────────────────────────────────
+// The container decides the slot; the child decides where it sits in it. Fill
+// is what every box child did before this existed, so the default has to leave
+// the rects above untouched — and it does, the test above is unchanged.
+
+TEST_CASE("Slot align: across a vertical box a child keeps its own width when asked")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 3, 50.0f,
+                                    /*padding=*/10.0f, /*spacing=*/0.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    // Inner width 180 at x 10; a 50-wide child.
+    auto rect = [&](int i){ return HE::uiElementRect(t, *t.find(kids[i])); };
+
+    t.find(kids[0])->slotHAlign = HE::UISlotHAlign::Left;
+    t.find(kids[1])->slotHAlign = HE::UISlotHAlign::Center;
+    t.find(kids[2])->slotHAlign = HE::UISlotHAlign::Right;
+    CHECK(rect(0).x == doctest::Approx(10.0f));   CHECK(rect(0).w == doctest::Approx(50.0f));
+    CHECK(rect(1).x == doctest::Approx(75.0f));   CHECK(rect(1).w == doctest::Approx(50.0f));
+    CHECK(rect(2).x == doctest::Approx(140.0f));  CHECK(rect(2).w == doctest::Approx(50.0f));
+    // Along the axis nothing changed: the box still stacks them.
+    CHECK(rect(1).y == doctest::Approx(60.0f));
+    CHECK(rect(2).h == doctest::Approx(50.0f));
+
+    // Fill is the old behaviour, byte for byte.
+    t.find(kids[0])->slotHAlign = HE::UISlotHAlign::Fill;
+    CHECK(rect(0).w == doctest::Approx(180.0f));
+}
+
+TEST_CASE("Slot align: along the axis it only matters for a filling child")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 2, 50.0f, 0.0f, 0.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    auto rect = [&](int i){ return HE::uiElementRect(t, *t.find(kids[i])); };
+
+    // A fixed child's slot IS its own height, so Bottom moves nothing.
+    t.find(kids[0])->slotVAlign = HE::UISlotVAlign::Bottom;
+    CHECK(rect(0).y == doctest::Approx(0.0f));
+    CHECK(rect(0).h == doctest::Approx(50.0f));
+
+    // A filling child's slot is the 350 left over; Bottom pins its own 50 to
+    // the end of that, Center to the middle, Fill takes all of it.
+    HE::UIElement& f = *t.find(kids[1]);
+    f.slotFill = 1.0f;
+    f.slotVAlign = HE::UISlotVAlign::Bottom;
+    CHECK(rect(1).y == doctest::Approx(350.0f));
+    CHECK(rect(1).h == doctest::Approx(50.0f));
+    f.slotVAlign = HE::UISlotVAlign::Center;
+    CHECK(rect(1).y == doctest::Approx(50.0f + 150.0f));
+    f.slotVAlign = HE::UISlotVAlign::Fill;
+    CHECK(rect(1).y == doctest::Approx(50.0f));
+    CHECK(rect(1).h == doctest::Approx(350.0f));
+}
+
+TEST_CASE("Slot padding: a margin costs the box along its axis and shrinks the child")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 3, 50.0f, 0.0f, 0.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    auto rect = [&](int i){ return HE::uiElementRect(t, *t.find(kids[i])); };
+
+    HE::UIElement& a = *t.find(kids[0]);
+    a.slotPadLeft = 5.0f; a.slotPadTop = 10.0f; a.slotPadRight = 15.0f; a.slotPadBottom = 20.0f;
+    // Inset on all four sides, its own height kept…
+    CHECK(rect(0).x == doctest::Approx(5.0f));
+    CHECK(rect(0).y == doctest::Approx(10.0f));
+    CHECK(rect(0).w == doctest::Approx(200.0f - 5.0f - 15.0f));
+    CHECK(rect(0).h == doctest::Approx(50.0f));
+    // …and the next child starts after the whole slot, margins included.
+    CHECK(rect(1).y == doctest::Approx(50.0f + 10.0f + 20.0f));
+    CHECK(rect(2).y == doctest::Approx(130.0f));
+
+    // A filling child's margins are inside its share, not charged to the
+    // siblings: two fillers still split the leftover evenly.
+    HE::UIElement& b = *t.find(kids[1]);
+    HE::UIElement& c = *t.find(kids[2]);
+    b.slotFill = c.slotFill = 1.0f;
+    c.slotPadTop = 30.0f;
+    // 400 - 80 = 320 left, 160 each; c's content is 160 - 30 at 30 down.
+    CHECK(rect(1).h == doctest::Approx(160.0f));
+    CHECK(rect(2).y == doctest::Approx(80.0f + 160.0f + 30.0f));
+    CHECK(rect(2).h == doctest::Approx(130.0f));
+
+    // Size To Content and the scroll box count the same margins the walk does.
+    auto* bb = dynamic_cast<HE::UIBoxBase*>(t.find(box));
+    REQUIRE(bb != nullptr);
+    b.slotFill = c.slotFill = 0.0f;
+    bb->sizeToContent = true;
+    HE::uiApplyAutoSize(t);
+    CHECK(bb->sizeY == doctest::Approx(80.0f + 50.0f + 80.0f));   // 10+50+20, 50, 30+50
+    CHECK(bb->sizeX == doctest::Approx(50.0f + 5.0f + 15.0f));     // widest slot across
+
+    HE::UIWidgetTree s;
+    const int sbox = boxWithChildren(s, HE::UIWidgetType::ScrollBox, 4, 100.0f, 0.0f, 0.0f);
+    s.find(s.childrenOf(sbox)[0])->slotPadBottom = 50.0f;
+    HE::uiUpdateScrollExtents(s);
+    CHECK(dynamic_cast<HE::UIScrollBox*>(s.find(sbox))->contentExtent == doctest::Approx(450.0f));
+}
+
+TEST_CASE("Slot align: a horizontal box mirrors it on the other axis")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::HorizontalBox, 2, 40.0f, 0.0f, 0.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    auto rect = [&](int i){ return HE::uiElementRect(t, *t.find(kids[i])); };
+
+    HE::UIElement& a = *t.find(kids[0]);
+    a.slotVAlign = HE::UISlotVAlign::Bottom;      // box is 400 tall, child 40
+    a.slotPadLeft = 8.0f; a.slotPadRight = 2.0f;
+    CHECK(rect(0).y == doctest::Approx(360.0f));
+    CHECK(rect(0).h == doctest::Approx(40.0f));
+    CHECK(rect(0).x == doctest::Approx(8.0f));
+    CHECK(rect(0).w == doctest::Approx(40.0f));
+    CHECK(rect(1).x == doctest::Approx(50.0f));   // 8 + 40 + 2
+    CHECK(rect(1).h == doctest::Approx(400.0f));  // its own slot still fills
+}
+
+TEST_CASE("Slot align: the properties, the clamp, the clone and the file")
+{
+    HE::UIPanel e;
+    // Offered under the shared names, with the enum as a number.
+    e.setPropAny("Slot Align H", HE::UIPropValue::ofInt((int)HE::UISlotHAlign::Right));
+    e.setPropAny("Slot Align V", HE::UIPropValue::ofInt((int)HE::UISlotVAlign::Center));
+    CHECK(e.slotHAlign == HE::UISlotHAlign::Right);
+    CHECK(e.getPropAny("Slot Align V").i == (int)HE::UISlotVAlign::Center);
+    // Out of range lands on Fill, the value that means "as before".
+    e.setPropAny("Slot Align H", HE::UIPropValue::ofInt(99));
+    CHECK(e.slotHAlign == HE::UISlotHAlign::Fill);
+    // "Slot Padding" writes all four sides, the named rows one each; negative
+    // is floored at 0 like every other margin here.
+    e.setPropAny("Slot Padding", HE::UIPropValue::ofFloat(7.0f));
+    CHECK(e.slotPadLeft == doctest::Approx(7.0f));
+    CHECK(e.slotPadBottom == doctest::Approx(7.0f));
+    e.setPropAny("Slot Padding Right", HE::UIPropValue::ofFloat(-3.0f));
+    CHECK(e.slotPadRight == doctest::Approx(0.0f));
+    CHECK(e.getPropAny("Slot Padding Top").f == doctest::Approx(7.0f));
+
+    // The names round-trip, and a name nobody knows reads as Fill.
+    for (int i = 0; i < (int)HE::UISlotHAlign::COUNT; ++i)
+        CHECK(HE::uiSlotHAlignFromName(HE::uiSlotHAlignName((HE::UISlotHAlign)i)) == (HE::UISlotHAlign)i);
+    for (int i = 0; i < (int)HE::UISlotVAlign::COUNT; ++i)
+        CHECK(HE::uiSlotVAlignFromName(HE::uiSlotVAlignName((HE::UISlotVAlign)i)) == (HE::UISlotVAlign)i);
+    CHECK(HE::uiSlotHAlignFromName("Sideways") == HE::UISlotHAlign::Fill);
+
+    // Through the file, and through a clone.
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& p = *t.find(id);
+    p.slotHAlign = HE::UISlotHAlign::Center; p.slotVAlign = HE::UISlotVAlign::Bottom;
+    p.slotPadLeft = 1.0f; p.slotPadTop = 2.0f; p.slotPadRight = 3.0f; p.slotPadBottom = 4.0f;
+    const std::string json = HE::uiWidgetTreeToJson(t);
+    CHECK(json.find("\"slotAlignH\": \"Center\"") != std::string::npos);
+    CHECK(json.find("\"slotAlignV\": \"Bottom\"") != std::string::npos);
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, r));
+    CHECK(r.find(id)->slotHAlign == HE::UISlotHAlign::Center);
+    CHECK(r.find(id)->slotVAlign == HE::UISlotVAlign::Bottom);
+    CHECK(r.find(id)->slotPadRight == doctest::Approx(3.0f));
+    CHECK(r.find(id)->slotPadBottom == doctest::Approx(4.0f));
+    auto cl = r.find(id)->clone();
+    CHECK(cl->slotVAlign == HE::UISlotVAlign::Bottom);
+    CHECK(cl->slotPadTop == doctest::Approx(2.0f));
+
+    // An element that never asked writes none of the keys: every widget
+    // authored before this saves byte-identically.
+    HE::UIWidgetTree plain;
+    plain.add(HE::UIWidgetType::Panel);
+    const std::string pj = HE::uiWidgetTreeToJson(plain);
+    CHECK(pj.find("slotAlign") == std::string::npos);
+    CHECK(pj.find("slotPadding") == std::string::npos);
+}
+
 TEST_CASE("Layout box: it follows its own anchors, and its children follow it")
 {
     HE::UIWidgetTree t;
@@ -4954,6 +5170,8 @@ TEST_CASE("Surface styling is offered exactly where it would land")
         // An accordion, for the list's reason: it emits its own rectangle first
         // so the heading bands have a card to sit on.
         UIWidgetType::Accordion,
+        // …and a tree, for the list's reason exactly: rows on a card.
+        UIWidgetType::TreeView,
     };
 
     for (int t = 0; t < static_cast<int>(UIWidgetType::COUNT); ++t)
@@ -11063,6 +11281,38 @@ TEST_CASE("WrapBox: a line is as tall as its own tallest child")
     CHECK(rect(3).y == doctest::Approx(60.0f));
 }
 
+TEST_CASE("WrapBox: a slot's margins run along the line, and VAlign pins within it")
+{
+    // 320 wide, children 100 wide: three fit. Give the first 10 on each side
+    // and the third no longer does — the slot is the child plus its margins.
+    WrapCase c = makeWrap(320.0f, 400.0f, 4, 100.0f, 40.0f);
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+    HE::UIElement& a = *c.t.find(c.kids[0]);
+    a.slotPadLeft = a.slotPadRight = 10.0f;
+    CHECK(rect(0).x == doctest::Approx(10.0f));
+    CHECK(rect(0).w == doctest::Approx(100.0f));
+    CHECK(rect(1).x == doctest::Approx(130.0f));
+    CHECK(rect(2).y  > 0.0f);                     // broke to the second line
+
+    // On a 90-tall line a 40-tall child keeps its height (Fill means "your
+    // own height, at the top" here — a tall neighbour must not stretch it) and
+    // Bottom/Center pin it within the line.
+    a.slotPadLeft = a.slotPadRight = 0.0f;
+    c.t.find(c.kids[1])->sizeY = 90.0f;
+    CHECK(rect(0).h == doctest::Approx(40.0f));
+    CHECK(rect(0).y == doctest::Approx(0.0f));
+    a.slotVAlign = HE::UISlotVAlign::Bottom;
+    CHECK(rect(0).y == doctest::Approx(50.0f));
+    CHECK(rect(0).h == doctest::Approx(40.0f));
+    a.slotVAlign = HE::UISlotVAlign::Center;
+    CHECK(rect(0).y == doctest::Approx(25.0f));
+    // Margins on the line's axis are part of the line's height too.
+    a.slotVAlign = HE::UISlotVAlign::Fill;
+    a.slotPadTop = 60.0f;                          // 40 + 60 = 100 > 90
+    CHECK(rect(0).y == doctest::Approx(60.0f));
+    CHECK(rect(3).y == doctest::Approx(100.0f + 20.0f));
+}
+
 TEST_CASE("WrapBox: a hidden child closes the gap, like everywhere else")
 {
     WrapCase c = makeWrap(320.0f, 400.0f, 4, 100.0f, 40.0f);
@@ -11218,6 +11468,40 @@ TEST_CASE("Grid: fixed, weighted and auto tracks, side by side")
     g->columns = { "*", "2*" }; g->reparse();
     CHECK(rect(0).w == doctest::Approx(400.0f / 3.0f));
     CHECK(rect(1).w == doctest::Approx(800.0f / 3.0f));
+}
+
+TEST_CASE("Grid: the cell is the slot — margins come off it and alignment sits in it")
+{
+    // Two 200-wide columns, one 300-tall row; children 50x20.
+    GridCase c = makeGrid({ "*", "*" }, { "*" }, 2);
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+    HE::UIElement& a = *c.t.find(c.kids[0]);
+    HE::UIElement& b = *c.t.find(c.kids[1]);
+
+    a.slotHAlign = HE::UISlotHAlign::Right; a.slotVAlign = HE::UISlotVAlign::Bottom;
+    CHECK(rect(0).x == doctest::Approx(150.0f));
+    CHECK(rect(0).y == doctest::Approx(280.0f));
+    CHECK(rect(0).w == doctest::Approx(50.0f));
+    CHECK(rect(0).h == doctest::Approx(20.0f));
+
+    b.slotPadLeft = 10.0f; b.slotPadTop = 20.0f; b.slotPadRight = 30.0f; b.slotPadBottom = 40.0f;
+    CHECK(rect(1).x == doctest::Approx(210.0f));
+    CHECK(rect(1).y == doctest::Approx(20.0f));
+    CHECK(rect(1).w == doctest::Approx(160.0f));
+    CHECK(rect(1).h == doctest::Approx(240.0f));
+    b.slotHAlign = HE::UISlotHAlign::Center;
+    CHECK(rect(1).x == doctest::Approx(210.0f + (160.0f - 50.0f) * 0.5f));
+
+    // An auto track is as wide as its occupant PLUS the occupant's margins:
+    // the same sum a box charges along its axis.
+    auto* g = dynamic_cast<HE::UIGrid*>(c.t.find(c.grid));
+    g->columns = { "auto", "*" }; g->reparse();
+    a.slotHAlign = HE::UISlotHAlign::Fill;
+    b.slotHAlign = HE::UISlotHAlign::Fill;
+    a.slotPadLeft = 5.0f; a.slotPadRight = 15.0f;
+    CHECK(rect(0).w == doctest::Approx(50.0f));   // its own 50 inside a 70 track
+    CHECK(rect(1).x == doctest::Approx(70.0f + 10.0f));
+    CHECK(rect(1).w == doctest::Approx(330.0f - 10.0f - 30.0f));
 }
 
 TEST_CASE("Grid: a span takes the cells it covers, and the gap between them")
@@ -11430,7 +11714,7 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     }
     // Not in either list, so it falls through to the TYPE's table and misses
     // there too — which is what the panel reports as "no longer exists".
-    CHECK(HE::uiBaseProperties().size() == 46);
+    CHECK(HE::uiBaseProperties().size() == 53);
 }
 
 TEST_CASE("Parameters: a declaration writes the property it names")
@@ -14191,6 +14475,42 @@ struct DragFixture
             REQUIRE(graph.connect(setId, 1, incId, 0));
             REQUIRE(graph.connect(addId, 2, incId, 2));
         }
+        // The movement, from both sides. The card writes down WHERE it last
+        // was and how often it was told; the bin writes down what arrived over
+        // it and how often something came and went.
+        auto valueAndCount = [&](const char* event, int elem, const char* valueName,
+                                 PinType valueType, const char* countName)
+        {
+            HorizonCode::Variable v; v.name = valueName; v.type = valueType;
+            graph.variables.push_back(v);
+            HorizonCode::Variable n; n.name = countName; n.type = PinType::Int;
+            graph.variables.push_back(n);
+            HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = event;
+            ev.elem = elem; ev.hasArg = true; ev.propType = valueType;
+            const int evId = graph.addNode(ev);
+            HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = valueName;
+            set.propType = valueType;
+            const int setId = graph.addNode(set);
+            REQUIRE(graph.connect(evId, 0, setId, 0));
+            REQUIRE(graph.connect(evId, 1, setId, 2));
+            HorizonCode::Node get; get.type = NodeType::GetVariable; get.s = countName;
+            get.propType = PinType::Int;
+            const int getId = graph.addNode(get);
+            HorizonCode::Node one; one.type = NodeType::ConstInt; one.f[0] = 1.0f;
+            const int oneId = graph.addNode(one);
+            HorizonCode::Node add; add.type = NodeType::Add;
+            const int addId = graph.addNode(add);
+            HorizonCode::Node inc; inc.type = NodeType::SetVariable; inc.s = countName;
+            inc.propType = PinType::Int;
+            const int incId = graph.addNode(inc);
+            REQUIRE(graph.connect(getId, 0, addId, 0));
+            REQUIRE(graph.connect(oneId, 0, addId, 1));
+            REQUIRE(graph.connect(setId, 1, incId, 0));
+            REQUIRE(graph.connect(addId, 2, incId, 2));
+        };
+        valueAndCount("OnDragMoved", card, "at",   PinType::Vec2,   "moves");
+        valueAndCount("OnDragEnter", bin,  "over", PinType::String, "enters");
+        counter("leaves", "OnDragLeave", bin);
     }
 };
 }
@@ -14303,6 +14623,196 @@ TEST_CASE("Drag: the payload is what the source says it is")
     wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
     wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
     CHECK(rt.getVariable(static_cast<HorizonCode::InstanceId>(id), "took").s == "row:7");
+}
+
+// The movement between the lift and the release, which is what an inventory
+// is made of: the source hears where the hand is, the slot hears that
+// something arrived over it and left again — all BEFORE the release.
+TEST_CASE("Drag: the source hears every move, the target hears enter and leave")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DragFixture f;
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const auto inst = static_cast<HorizonCode::InstanceId>(id);
+    auto var = [&](const char* n) { return rt.getVariable(inst, n).i; };
+    auto at  = [&]() { return rt.getVariable(inst, "at").v2; };
+
+    // A press, and a wobble under the threshold: nothing has moved, because
+    // nothing is being carried yet. "Moved" is about the carry, not the mouse.
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 92.0f, 151.0f, true, true);
+    CHECK(var("moves") == 0);
+
+    // The lift itself is the first report: the hand is already past the
+    // threshold, and a ghost that only caught up on the next movement would
+    // start at the press point rather than under the hand.
+    wm.processPointer(400.0f, 300.0f, 140.0f, 150.0f, true, true);
+    REQUIRE(wm.isDragging());
+    CHECK(var("started") == 1);
+    CHECK(var("moves") == 1);
+    CHECK(at().x == doctest::Approx(140.0f));
+    CHECK(at().y == doctest::Approx(150.0f));
+    CHECK(var("enters") == 0);          // over the card itself: no zone there
+
+    // The same position reported again is not a move. The pointer is reported
+    // every frame; a hand that is still must not run the graph sixty times a
+    // second.
+    wm.processPointer(400.0f, 300.0f, 140.0f, 150.0f, true, true);
+    CHECK(var("moves") == 1);
+
+    // Into the bin: a move, and the bin hears what arrived — the source's
+    // payload, which with none set is its name.
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    CHECK(var("moves") == 2);
+    CHECK(at().x == doctest::Approx(300.0f));
+    CHECK(var("enters") == 1);
+    CHECK(rt.getVariable(inst, "over").s == "Card");
+    CHECK(var("leaves") == 0);
+    // Moving around INSIDE the bin is more moves, but not more enters.
+    wm.processPointer(400.0f, 300.0f, 310.0f, 160.0f, true, true);
+    CHECK(var("moves") == 3);
+    CHECK(var("enters") == 1);
+    // Out over nothing: it left.
+    wm.processPointer(400.0f, 300.0f, 200.0f, 150.0f, true, true);
+    CHECK(var("moves") == 4);
+    CHECK(var("leaves") == 1);
+    // …and back in: a second arrival (and a fifth move).
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    CHECK(var("enters") == 2);
+    CHECK(var("moves") == 5);
+
+    // Let go over the bin, where the hand already was: the drop is the bin's
+    // answer, not a leave — a slot does not need "it left" and "it landed" for
+    // the same release — and a release is not a move.
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
+    CHECK_FALSE(wm.isDragging());
+    CHECK(rt.getVariable(inst, "took").s == "Card");
+    CHECK(var("leaves") == 1);
+    CHECK(var("moves") == 5);
+    // Silent after the release: the pointer still moves, the carry is over.
+    wm.processPointer(400.0f, 300.0f, 320.0f, 170.0f, false, true);
+    CHECK(var("moves") == 5);
+
+    // A cancel over the bin IS a leave: the slot lit up on Enter, and Escape
+    // is its only chance to hear that the thing is gone.
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    REQUIRE(wm.isDragging());
+    CHECK(var("enters") == 3);
+    CHECK(wm.closeTopLayer());
+    CHECK_FALSE(wm.isDragging());
+    CHECK(var("leaves") == 2);
+    CHECK(var("ends") == 2);
+    CHECK(rt.getVariable(inst, "accepted").b == false);
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
+    CHECK(var("moves") == 6);           // the lift of the second carry, nothing since
+}
+
+// The point is in CANVAS units, not render-target pixels: the space Position
+// lives in, so a ghost at the root follows the hand with a Set Position and no
+// arithmetic — and that has to hold when the canvas is scaled.
+TEST_CASE("Drag: the moved point is in the source widget's canvas units")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DragFixture f;
+    // Stretch: the 400×300 canvas fills whatever viewport it gets, so a
+    // 800×600 viewport is a scale of exactly 2 on both axes.
+    f.tree.scaleMode = HE::UICanvasScaleMode::Stretch;
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const auto inst = static_cast<HorizonCode::InstanceId>(id);
+
+    wm.processPointer(800.0f, 600.0f, 180.0f, 300.0f, true, true);
+    wm.processPointer(800.0f, 600.0f, 280.0f, 320.0f, true, true);
+    REQUIRE(wm.isDragging());
+    const glm::vec2 p = rt.getVariable(inst, "at").v2;
+    CHECK(p.x == doctest::Approx(140.0f));
+    CHECK(p.y == doctest::Approx(160.0f));
+    wm.processPointer(800.0f, 600.0f, 280.0f, 320.0f, false, true);
+}
+
+// The zone lives in ANOTHER widget, and the widget carrying the source dies
+// mid-carry. The source's script is on its way out and hears nothing; the zone
+// is alive, lit up on Enter, and this is its only chance to hear Leave.
+TEST_CASE("Drag: a source destroyed mid-carry still tells the zone it left")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DragFixture f;
+    registerWidget(cm, f.tree, &f.graph);
+
+    // A second widget: one zone over the right half, above the first widget,
+    // with the same enter/leave bookkeeping the fixture's bin has.
+    HE::UIWidgetTree zt;
+    HorizonCode::Graph zg;
+    zt.canvasWidth = 400.0f; zt.canvasHeight = 300.0f;
+    zt.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int zone = zt.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *zt.find(zone);
+        e.name = "Zone"; e.acceptsDrop = true;
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 220.0f; e.posY = 0.0f; e.sizeX = 180.0f; e.sizeY = 300.0f;
+    }
+    for (const char* ev : { "OnDragEnter", "OnDragLeave" })
+    {
+        const char* name = ev[6] == 'E' ? "enters" : "leaves";
+        HorizonCode::Variable v; v.name = name; v.type = PinType::Int;
+        zg.variables.push_back(v);
+        HorizonCode::Node evn; evn.type = NodeType::Event; evn.s = ev; evn.elem = zone;
+        const int evId = zg.addNode(evn);
+        HorizonCode::Node get; get.type = NodeType::GetVariable; get.s = name;
+        get.propType = PinType::Int;
+        const int getId = zg.addNode(get);
+        HorizonCode::Node one; one.type = NodeType::ConstInt; one.f[0] = 1.0f;
+        const int oneId = zg.addNode(one);
+        HorizonCode::Node add; add.type = NodeType::Add;
+        const int addId = zg.addNode(add);
+        HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = name;
+        set.propType = PinType::Int;
+        const int setId = zg.addNode(set);
+        REQUIRE(zg.connect(getId, 0, addId, 0));
+        REQUIRE(zg.connect(oneId, 0, addId, 1));
+        REQUIRE(zg.connect(evId, 0, setId, 0));
+        REQUIRE(zg.connect(addId, 2, setId, 2));
+    }
+    registerWidget(cm, zt, &zg, "mem://z.hasset");
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int src = createShown(wm, cm, "mem://w.hasset");
+    const int zw  = createShown(wm, cm, "mem://z.hasset");
+    REQUIRE(src != 0);
+    REQUIRE(zw != 0);
+    wm.setZOrder(zw, 10);
+    const auto zinst = static_cast<HorizonCode::InstanceId>(zw);
+
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    REQUIRE(wm.isDragging());
+    CHECK(rt.getVariable(zinst, "enters").i == 1);
+    CHECK(rt.getVariable(zinst, "leaves").i == 0);
+
+    wm.destroyWidget(src);
+    CHECK_FALSE(wm.isDragging());
+    CHECK(rt.getVariable(zinst, "leaves").i == 1);
+    // …and the release that follows is nothing: no drop, no second leave.
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
+    CHECK(rt.getVariable(zinst, "leaves").i == 1);
 }
 
 TEST_CASE("Drag: it cannot be dropped on itself, and Escape puts it back")
@@ -15096,6 +15606,253 @@ TEST_CASE("Snapping: the lines an element may line itself up with")
         CHECK(c[2].pos == doctest::Approx(400.0f));   // its right
         CHECK(c[1].center);
         CHECK(c[0].fromId == 0);                      // the frame, not a neighbour
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D4: several elements at once — roots, the rubber band, copy/paste, lining up
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace
+{
+    // A top-left anchored, top-left pivoted element at a known rect, so the
+    // numbers in the cases below ARE the rects.
+    int placeTL(HE::UIWidgetTree& t, HE::UIWidgetType type, int parent,
+                float x, float y, float w, float h)
+    {
+        const int id = t.add(type);
+        HE::UIElement* e = t.find(id);
+        e->parentId = parent;
+        e->pivotX = e->pivotY = 0.0f;
+        HE::uiSetAnchorPreset(*e, 0);
+        e->posX = x; e->posY = y; e->sizeX = w; e->sizeY = h;
+        return id;
+    }
+    bool holds(const std::vector<int>& v, int id)
+    { return std::find(v.begin(), v.end(), id) != v.end(); }
+}
+
+TEST_CASE("Selection roots: a child of something selected is not a second thing")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int panel = placeTL(t, HE::UIWidgetType::Panel,  0,     100, 100, 300, 200);
+    const int inner = placeTL(t, HE::UIWidgetType::Button, panel,  10,  10,  80,  30);
+    const int deep  = placeTL(t, HE::UIWidgetType::Text,   inner,  0,   0,  40,  10);
+    const int other = placeTL(t, HE::UIWidgetType::Panel,  0,     500, 100, 100, 100);
+
+    // The panel covers everything under it, whichever order they were named.
+    const std::vector<int> r = HE::uiSelectionRoots(t, { deep, other, inner, panel });
+    REQUIRE(r.size() == 2);
+    // …and the answer comes back in TREE order, not click order.
+    CHECK(r[0] == panel);
+    CHECK(r[1] == other);
+
+    // A grandchild with only its GRANDPARENT selected is covered just the same.
+    const std::vector<int> r2 = HE::uiSelectionRoots(t, { deep, panel });
+    REQUIRE(r2.size() == 1);
+    CHECK(r2[0] == panel);
+
+    // Two siblings inside the panel, the panel itself not selected: both stay.
+    const std::vector<int> r3 = HE::uiSelectionRoots(t, { inner, other });
+    CHECK(r3.size() == 2);
+
+    // An id the tree never held is dropped, not returned as a root.
+    CHECK(HE::uiSelectionRoots(t, { 999 }).empty());
+}
+
+TEST_CASE("Rubber band: wholly inside, visible, and roots only")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int a     = placeTL(t, HE::UIWidgetType::Panel,  0, 100, 100, 100, 50);
+    const int aKid  = placeTL(t, HE::UIWidgetType::Button, a,  10,  10,  20, 20);
+    const int b     = placeTL(t, HE::UIWidgetType::Panel,  0, 300, 100, 100, 50);
+    const int half  = placeTL(t, HE::UIWidgetType::Panel,  0, 450, 100, 100, 50); // crosses 500
+    const int ghost = placeTL(t, HE::UIWidgetType::Panel,  0, 200, 200,  50, 50);
+    t.find(ghost)->visible = false;
+
+    const std::vector<int> hit = HE::uiElementsInside(t, { 50.0f, 50.0f, 450.0f, 300.0f });
+    CHECK(holds(hit, a));
+    CHECK(holds(hit, b));
+    // The panel's child lies inside the box too, but it follows its panel.
+    CHECK_FALSE(holds(hit, aKid));
+    // Half in is not in: the box has to contain the whole rect.
+    CHECK_FALSE(holds(hit, half));
+    // What is not drawn cannot be lassoed.
+    CHECK_FALSE(holds(hit, ghost));
+    CHECK(hit.size() == 2);
+
+    // A box around the child alone, inside the panel, picks the child.
+    const std::vector<int> kidOnly = HE::uiElementsInside(t, { 105.0f, 105.0f, 40.0f, 40.0f });
+    REQUIRE(kidOnly.size() == 1);
+    CHECK(kidOnly[0] == aKid);
+}
+
+TEST_CASE("Clipboard: a subtree comes back whole, with fresh ids and its order")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int panel = placeTL(t, HE::UIWidgetType::Panel,  0,     100, 100, 300, 200);
+    const int btn   = placeTL(t, HE::UIWidgetType::Button, panel,  10,  10,  80,  30);
+    const int lbl   = placeTL(t, HE::UIWidgetType::Text,   panel,  10,  50,  80,  30);
+    const int lone  = placeTL(t, HE::UIWidgetType::Image,  0,     500, 100,  50,  50);
+    t.find(panel)->name = "Card";
+    t.find(btn)->name   = "Ok";
+    t.find(lbl)->name   = "Title";
+    // The label is moved in FRONT of the button, so the document's paint order
+    // is Title, Ok — and a paste has to keep it that way round.
+    REQUIRE(t.moveElement(lbl, panel, btn));
+
+    // Selecting the panel and one of its children copies the panel ONCE.
+    const std::string doc = HE::uiElementsToClipboard(t, { btn, panel, lone });
+    REQUIRE_FALSE(doc.empty());
+
+    SUBCASE("onto the canvas, shifted")
+    {
+        const std::size_t before = t.elements.size();
+        const std::vector<int> fresh = HE::uiElementsFromClipboard(t, doc, 0, 20.0f, 20.0f);
+        REQUIRE(fresh.size() == 2);                        // the two roots
+        CHECK(t.elements.size() == before + 4);            // panel + 2 kids + image
+        const HE::UIElement* p2 = t.find(fresh[0]);
+        REQUIRE(p2);
+        CHECK(p2->id != panel);
+        CHECK(p2->name == "Card");
+        CHECK(p2->parentId == 0);
+        CHECK(p2->posX == doctest::Approx(120.0f));        // the root moved…
+        const std::vector<int> kids = t.childrenOf(p2->id);
+        REQUIRE(kids.size() == 2);
+        CHECK(t.find(kids[0])->name == "Title");            // …in the copied order…
+        CHECK(t.find(kids[1])->name == "Ok");
+        CHECK(t.find(kids[1])->posX == doctest::Approx(10.0f)); // …the children did not
+        // The originals are untouched, and the copy's ids are all new.
+        CHECK(t.childrenOf(panel).size() == 2);
+        for (int k : kids) { CHECK(k != btn); CHECK(k != lbl); }
+        const HE::UIElement* i2 = t.find(fresh[1]);
+        REQUIRE(i2);
+        CHECK(i2->type() == HE::UIWidgetType::Image);
+        CHECK(i2->posX == doctest::Approx(520.0f));
+    }
+
+    SUBCASE("into a container, which is where a paste with a selection lands")
+    {
+        const int target = placeTL(t, HE::UIWidgetType::Panel, 0, 0, 400, 200, 200);
+        const std::vector<int> fresh = HE::uiElementsFromClipboard(t, doc, target);
+        REQUIRE(fresh.size() == 2);
+        CHECK(t.find(fresh[0])->parentId == target);
+        CHECK(t.find(fresh[1])->parentId == target);
+        // Grandchildren hang off the COPIED panel, not off the target.
+        CHECK(t.childrenOf(fresh[0]).size() == 2);
+        CHECK(t.childrenOf(target).size() == 2);
+    }
+
+    SUBCASE("into something that takes no children: nothing, and the tree untouched")
+    {
+        const std::size_t before = t.elements.size();
+        CHECK(HE::uiElementsFromClipboard(t, doc, lone).empty());
+        CHECK(t.elements.size() == before);
+        // …and a document that is not one.
+        CHECK(HE::uiElementsFromClipboard(t, "not json", 0).empty());
+        CHECK(HE::uiElementsFromClipboard(t, "{}", 0).empty());
+        CHECK(t.elements.size() == before);
+    }
+
+    SUBCASE("nothing selected is an empty document")
+    {
+        CHECK(HE::uiElementsToClipboard(t, {}).empty());
+        CHECK(HE::uiElementsToClipboard(t, { 999 }).empty());
+    }
+}
+
+TEST_CASE("Lining up: the edges, the middles, and the spacing between")
+{
+    HE::UIWidgetCanvas canvas{};
+    canvas.width = 800.0f; canvas.height = 600.0f;
+    canvas.scaleX = canvas.scaleY = 1.0f;
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    // Three boxes of different widths at ragged positions.
+    const int a = placeTL(t, HE::UIWidgetType::Panel, 0, 100, 100, 100, 50);
+    const int b = placeTL(t, HE::UIWidgetType::Panel, 0, 250, 130,  50, 80);
+    const int c = placeTL(t, HE::UIWidgetType::Panel, 0, 500, 110, 200, 40);
+    const auto rect = [&](int id) { return HE::uiElementRect(t, *t.find(id), &canvas); };
+
+    SUBCASE("Left flushes every left edge to the leftmost")
+    {
+        CHECK(HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::Left, &canvas) == 2);
+        CHECK(rect(a).x == doctest::Approx(100.0f));   // was already there: not counted
+        CHECK(rect(b).x == doctest::Approx(100.0f));
+        CHECK(rect(c).x == doctest::Approx(100.0f));
+        // Only the axis asked for moves.
+        CHECK(rect(b).y == doctest::Approx(130.0f));
+    }
+    SUBCASE("Right flushes to the rightmost right edge")
+    {
+        HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::Right, &canvas);
+        CHECK(rect(a).x + rect(a).w == doctest::Approx(700.0f));
+        CHECK(rect(b).x + rect(b).w == doctest::Approx(700.0f));
+    }
+    SUBCASE("the middles meet on the selection's middle")
+    {
+        // Bounds: 100..700 across, 100..210 down.
+        HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::HCenter, &canvas);
+        for (int id : { a, b, c })
+            CHECK(rect(id).x + rect(id).w * 0.5f == doctest::Approx(400.0f));
+        HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::VCenter, &canvas);
+        for (int id : { a, b, c })
+            CHECK(rect(id).y + rect(id).h * 0.5f == doctest::Approx(155.0f));
+    }
+    SUBCASE("Top and Bottom")
+    {
+        HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::Top, &canvas);
+        for (int id : { a, b, c }) CHECK(rect(id).y == doctest::Approx(100.0f));
+        HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::Bottom, &canvas);
+        for (int id : { a, b, c }) CHECK(rect(id).y + rect(id).h == doctest::Approx(180.0f));
+    }
+    SUBCASE("Distribute keeps the outer two and spaces the gaps evenly")
+    {
+        // Span 100..700 = 600, widths 100+50+200 = 350, so two gaps of 125:
+        // a at 100..200, b at 325..375, c stays at 500..700.
+        CHECK(HE::uiAlignElements(t, { a, b, c }, HE::UIAlignOp::DistributeH, &canvas) == 1);
+        CHECK(rect(a).x == doctest::Approx(100.0f));
+        CHECK(rect(b).x == doctest::Approx(325.0f));
+        CHECK(rect(c).x == doctest::Approx(500.0f));
+        // Two is not enough to have a "between".
+        CHECK(HE::uiAlignElements(t, { a, b }, HE::UIAlignOp::DistributeH, &canvas) == 0);
+    }
+    SUBCASE("one element lines up with its frame")
+    {
+        // Alone on the canvas: the canvas is the frame, so Center is the screen's middle.
+        HE::uiAlignElements(t, { a }, HE::UIAlignOp::HCenter, &canvas);
+        CHECK(rect(a).x + rect(a).w * 0.5f == doctest::Approx(400.0f));
+        HE::uiAlignElements(t, { a }, HE::UIAlignOp::Bottom, &canvas);
+        CHECK(rect(a).y + rect(a).h == doctest::Approx(600.0f));
+        // Inside a panel: the panel is the frame.
+        const int kid = placeTL(t, HE::UIWidgetType::Button, c, 5, 5, 20, 10);
+        HE::uiAlignElements(t, { kid }, HE::UIAlignOp::Right, &canvas);
+        CHECK(rect(kid).x + rect(kid).w == doctest::Approx(700.0f));
+    }
+    SUBCASE("a child of a layout box is not moved: its box places it")
+    {
+        const int box = t.add(HE::UIWidgetType::VerticalBox);
+        { HE::UIElement* e = t.find(box); e->pivotX = e->pivotY = 0.0f;
+          HE::uiSetAnchorPreset(*e, 0); e->posX = 0.0f; e->posY = 300.0f;
+          e->sizeX = 200.0f; e->sizeY = 200.0f; }
+        const int row = placeTL(t, HE::UIWidgetType::Button, box, 0, 0, 50, 20);
+        const float before = t.find(row)->posX;
+        CHECK(HE::uiAlignElements(t, { row, a }, HE::UIAlignOp::Right, &canvas) == 1);
+        CHECK(t.find(row)->posX == doctest::Approx(before));
+    }
+    SUBCASE("through a pivot and a centred anchor, it is still the RECT that lines up")
+    {
+        HE::UIElement* e = t.find(b);
+        e->pivotX = 0.5f; e->pivotY = 0.5f;
+        HE::uiSetAnchorPreset(*e, 5);          // the parent's middle
+        e->posX = 0.0f; e->posY = 0.0f;         // so b sits centred on the canvas
+        REQUIRE(rect(b).x == doctest::Approx(375.0f));
+        HE::uiAlignElements(t, { a, b }, HE::UIAlignOp::Left, &canvas);
+        CHECK(rect(b).x == doctest::Approx(100.0f));
     }
 }
 
@@ -16350,4 +17107,436 @@ TEST_CASE("moveElement: the order really moves the pixels")
     CHECK(HE::uiElementRect(t, *t.find(last)).y    == doctest::Approx(10.0f));
     CHECK(HE::uiElementRect(t, *t.find(kids[0])).y == doctest::Approx(65.0f));
     CHECK(HE::uiElementRect(t, *t.find(kids[1])).y == doctest::Approx(120.0f));
+}
+
+// ═══ The three types the gap audit still listed as missing ══════════════════
+// RadioButton, TreeView and NamedSlot. (Tooltip, Rich Text and Multiline were
+// on that list too and are properties — base "Tooltip", UIText "Rich Text",
+// UITextInput "Multiline" — not types; they have their own tests above.)
+
+TEST_CASE("RadioButton: pressing one turns the rest of its group off, and never itself")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    // Three siblings with no group name, and a fourth in a named group that
+    // must not be touched by them.
+    int ids[4] = { 0, 0, 0, 0 };
+    for (int i = 0; i < 4; ++i)
+    {
+        ids[i] = t.add(HE::UIWidgetType::RadioButton);
+        HE::UIElement& e = *t.find(ids[i]);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 40.0f * i; e.sizeX = 200.0f; e.sizeY = 28.0f;
+        e.setProp("Label", HE::UIPropValue::ofString(""));
+    }
+    t.find(ids[0])->setProp("Checked", HE::UIPropValue::ofBool(true));
+    t.find(ids[3])->setProp("Group", HE::UIPropValue::ofString("other"));
+    t.find(ids[3])->setProp("Checked", HE::UIPropValue::ofBool(true));
+
+    // A graph that counts OnCheckChanged(false) on the first button, so the
+    // "others hear it" half of the contract is observed and not assumed.
+    const int label = t.add(HE::UIWidgetType::Text);
+    t.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    t.find(label)->hitTestable = false;
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnCheckChanged"; ev.elem = ids[0];
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "OFF";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = label;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    g.connect(evId, 0, setId, 0);
+    g.connect(litId, 0, setId, 2);
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto checkedOf = [&](int e) { return wm.tree(id)->find(e)->getProp("Checked").b; };
+
+    // Press the second: first goes off (and says so), second on, the named
+    // group untouched.
+    clickAt(wm, 10.0f, 54.0f);
+    CHECK_FALSE(checkedOf(ids[0]));
+    CHECK(checkedOf(ids[1]));
+    CHECK_FALSE(checkedOf(ids[2]));
+    CHECK(checkedOf(ids[3]));
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s == "OFF");
+
+    // Press the second again: it stays on. A group with no answer is not a
+    // state radio buttons have.
+    clickAt(wm, 10.0f, 54.0f);
+    CHECK(checkedOf(ids[1]));
+    CHECK_FALSE(checkedOf(ids[0]));
+}
+
+TEST_CASE("RadioButton: a script writing Checked keeps the group exclusive, silently")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    int ids[2] = { 0, 0 };
+    for (int i = 0; i < 2; ++i)
+    {
+        ids[i] = t.add(HE::UIWidgetType::RadioButton);
+        t.find(ids[i])->setProp("Label", HE::UIPropValue::ofString(""));
+    }
+    t.find(ids[0])->setProp("Checked", HE::UIPropValue::ofBool(true));
+    // "Pick": Set Property Checked = true on the second button. And a label
+    // that OnCheckChanged on the first would write into — it must stay empty,
+    // because a property write fires no event, on this element or its group.
+    const int label = t.add(HE::UIWidgetType::Text);
+    t.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    HorizonCode::Graph g;
+    HorizonCode::Node fn; fn.type = NodeType::FunctionEntry; fn.s = "Pick"; fn.access = 0;
+    const int fnId = g.addNode(fn);
+    HorizonCode::Node on; on.type = NodeType::ConstBool; on.f[0] = 1.0f;
+    const int onId = g.addNode(on);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = ids[1];
+    set.s = "Checked"; set.propType = PinType::Bool;
+    const int setId = g.addNode(set);
+    REQUIRE(g.connect(fnId, 0, setId, 0));
+    REQUIRE(g.connect(onId, 0, setId, 2));
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnCheckChanged"; ev.elem = ids[0];
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "HEARD";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node say; say.type = NodeType::SetProperty; say.elem = label;
+    say.s = "Text"; say.propType = PinType::String;
+    const int sayId = g.addNode(say);
+    g.connect(evId, 0, sayId, 0);
+    g.connect(litId, 0, sayId, 2);
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    REQUIRE(wm.callFunction(id, "Pick"));
+    CHECK(wm.tree(id)->find(ids[1])->getProp("Checked").b);
+    CHECK_FALSE(wm.tree(id)->find(ids[0])->getProp("Checked").b);
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s.empty());
+}
+
+TEST_CASE("RadioButton: sharesGroupWith — names reach across parents, no name means siblings")
+{
+    HE::UIRadioButton a, b, c;
+    a.parentId = 1; b.parentId = 1; c.parentId = 2;
+    CHECK(a.sharesGroupWith(b));
+    CHECK_FALSE(a.sharesGroupWith(c));
+    c.group = "size"; a.group = "size";
+    CHECK(a.sharesGroupWith(c));
+    // A named one and an unnamed sibling are not one group: the name was given
+    // to reach across parents, not to be ignored inside one.
+    CHECK_FALSE(a.sharesGroupWith(b));
+    CHECK_FALSE(a.sharesGroupWith(a));
+}
+
+TEST_CASE("RadioButton: JSON round-trip, and Group is only written once set")
+{
+    HE::UIWidgetTree t;
+    const int r = t.add(HE::UIWidgetType::RadioButton);
+    const std::string plain = HE::uiWidgetTreeToJson(t);
+    CHECK(plain.find("\"group\"") == std::string::npos);
+    t.find(r)->setProp("Group", HE::UIPropValue::ofString("size"));
+    t.find(r)->setProp("Checked", HE::UIPropValue::ofBool(true));
+    t.find(r)->setProp("Label", HE::UIPropValue::ofString("Large"));
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
+    const HE::UIElement* e = back.find(r);
+    REQUIRE(e);
+    CHECK(e->type() == HE::UIWidgetType::RadioButton);
+    CHECK(e->getProp("Group").s == "size");
+    CHECK(e->getProp("Checked").b);
+    CHECK(e->getProp("Label").s == "Large");
+}
+
+TEST_CASE("TreeView: Items parse by indentation, folds hide descendants, indices stay put")
+{
+    HE::UITreeView tv;
+    tv.items = "Assets\n\tTextures\n\t\twood.png\n\tMeshes\n\nSettings\n    Deep\n";
+    const auto& ns = tv.nodes();
+    REQUIRE(ns.size() == 6);   // the blank line is nothing
+    CHECK(ns[0].label == "Assets");   CHECK(ns[0].depth == 0); CHECK(ns[0].hasChildren);
+    CHECK(ns[1].label == "Textures"); CHECK(ns[1].depth == 1); CHECK(ns[1].parent == 0);
+    CHECK(ns[2].label == "wood.png"); CHECK(ns[2].depth == 2); CHECK(ns[2].parent == 1);
+    CHECK(ns[3].label == "Meshes");   CHECK(ns[3].depth == 1); CHECK(ns[3].parent == 0);
+    CHECK_FALSE(ns[3].hasChildren);
+    CHECK(ns[4].label == "Settings"); CHECK(ns[4].depth == 0);
+    // Four spaces after a root is "two levels", which has no parent at depth
+    // 1 — clamped to one deeper than the line above, like YAML would.
+    CHECK(ns[5].label == "Deep");     CHECK(ns[5].depth == 1); CHECK(ns[5].parent == 4);
+
+    CHECK(tv.visibleRows() == std::vector<int>{ 0, 1, 2, 3, 4, 5 });
+    CHECK(tv.setCollapsed(1, true));
+    CHECK(tv.collapsed == "1");
+    CHECK(tv.visibleRows() == std::vector<int>{ 0, 1, 3, 4, 5 });
+    // Folding a leaf is a no-op, and folding twice is one fold.
+    CHECK_FALSE(tv.setCollapsed(3, true));
+    CHECK_FALSE(tv.setCollapsed(1, true));
+    CHECK(tv.setCollapsed(0, true));
+    CHECK(tv.collapsed == "0,1");
+    CHECK(tv.visibleRows() == std::vector<int>{ 0, 4, 5 });
+    // Unfolding the root shows Textures again but keeps it folded.
+    CHECK(tv.setCollapsed(0, false));
+    CHECK(tv.visibleRows() == std::vector<int>{ 0, 1, 3, 4, 5 });
+    CHECK(tv.isCollapsed(1));
+
+    // Rows are found from the top, in the visible order; the arrow column is
+    // the indent at the row's own depth.
+    tv.padding = 4.0f; tv.rowHeight = 20.0f; tv.indent = 18.0f;
+    CHECK(tv.rowAt(2.0f) == -1);
+    CHECK(tv.rowAt(5.0f) == 0);
+    CHECK(tv.rowAt(45.0f) == 2);          // the third visible row: Meshes
+    CHECK(tv.rowAt(4.0f + 5 * 20.0f + 1.0f) == -1);
+    CHECK(tv.onArrow(4.0f + 18.0f + 3.0f, 1));
+    CHECK_FALSE(tv.onArrow(4.0f + 3.0f, 1));
+
+    // Rewriting the text re-parses; the same text does not.
+    const std::vector<HE::UITreeView::Node>* before = &tv.nodes();
+    tv.items = tv.items;
+    CHECK(&tv.nodes() == before);
+    tv.items = "One";
+    CHECK(tv.nodeCount() == 1);
+}
+
+TEST_CASE("TreeView: a press picks a node, a press on the arrow folds, the keys walk")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int tree = t.add(HE::UIWidgetType::TreeView);
+    {
+        HE::UIElement& e = *t.find(tree);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 300.0f; e.sizeY = 300.0f;
+        e.setProp("Items", HE::UIPropValue::ofString("A\n\tA1\n\tA2\nB"));
+        e.setProp("Padding", HE::UIPropValue::ofFloat(0.0f));
+        e.setProp("Row Height", HE::UIPropValue::ofFloat(20.0f));
+        e.setProp("Indent", HE::UIPropValue::ofFloat(20.0f));
+    }
+    // OnNodeToggled writes into a label, so the fold event is observed.
+    const int label = t.add(HE::UIWidgetType::Text);
+    t.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    t.find(label)->hitTestable = false;
+    t.find(label)->posX = 350.0f; t.find(label)->posY = 350.0f;
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnNodeToggled"; ev.elem = tree;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "TOGGLED";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = label;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    g.connect(evId, 0, setId, 0);
+    g.connect(litId, 0, setId, 2);
+    registerWidget(cm, t, &g);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto live = [&]() { return dynamic_cast<const HE::UITreeView*>(wm.tree(id)->find(tree)); };
+    REQUIRE(live());
+
+    // Row 1 (A1) is at y 20..40; the label part is right of the arrow column.
+    clickAt(wm, 100.0f, 30.0f);
+    CHECK(live()->selected == 1);
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s.empty());
+
+    // The arrow of A (depth 0) sits in x 0..20 of row 0.
+    clickAt(wm, 10.0f, 10.0f);
+    CHECK(live()->isCollapsed(0));
+    CHECK(wm.tree(id)->find(label)->getProp("Text").s == "TOGGLED");
+    // Its picked child vanished with it, so the selection climbed onto A.
+    CHECK(live()->selected == 0);
+    CHECK(live()->visibleRows() == std::vector<int>{ 0, 3 });
+
+    // Keys: Right unfolds, Right again steps into the first child, Down steps,
+    // Left on a leaf climbs to the parent, Left on the open branch folds it.
+    using Nav = WidgetManager::NavDir;
+    CHECK(wm.navigate(Nav::Right, 400.0f, 400.0f));
+    CHECK_FALSE(live()->isCollapsed(0));
+    CHECK(wm.navigate(Nav::Right, 400.0f, 400.0f));
+    CHECK(live()->selected == 1);
+    CHECK(wm.navigate(Nav::Down, 400.0f, 400.0f));
+    CHECK(live()->selected == 2);
+    CHECK(wm.navigate(Nav::Left, 400.0f, 400.0f));
+    CHECK(live()->selected == 0);
+    CHECK(wm.navigate(Nav::Left, 400.0f, 400.0f));
+    CHECK(live()->isCollapsed(0));
+    CHECK(wm.navigate(Nav::Down, 400.0f, 400.0f));
+    CHECK(live()->selected == 3);
+    // Down on the last row falls off the end — the tree is not a trap.
+    CHECK_FALSE(wm.navigate(Nav::Down, 400.0f, 400.0f));
+
+    // Enter opens the picked node: OnRowActivated with the node index.
+    CHECK(wm.activateFocused());
+
+    // What a person picked and folded survives a preview reload.
+    const WidgetManager::StateSnapshot snap = wm.captureState();
+    bool sawSelected = false, sawCollapsed = false;
+    for (const auto& row : snap.elements)
+        for (const auto& [name, v] : row.props)
+        {
+            if (name == "Selected")  { sawSelected  = v.i == 3;   }
+            if (name == "Collapsed") { sawCollapsed = v.s == "0"; }
+        }
+    CHECK(sawSelected);
+    CHECK(sawCollapsed);
+}
+
+TEST_CASE("TreeView: JSON round-trip carries the items and the look, never the state")
+{
+    HE::UIWidgetTree t;
+    const int tv = t.add(HE::UIWidgetType::TreeView);
+    t.find(tv)->setProp("Items", HE::UIPropValue::ofString("A\n\tB"));
+    t.find(tv)->setProp("Indent", HE::UIPropValue::ofFloat(30.0f));
+    t.find(tv)->setProp("Selected", HE::UIPropValue::ofInt(1));
+    t.find(tv)->setProp("Collapsed", HE::UIPropValue::ofString("0"));
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
+    const HE::UIElement* e = back.find(tv);
+    REQUIRE(e);
+    CHECK(e->type() == HE::UIWidgetType::TreeView);
+    CHECK(e->getProp("Items").s == "A\n\tB");
+    CHECK(e->getProp("Indent").f == doctest::Approx(30.0f));
+    CHECK(e->getProp("Selected").i == -1);
+    CHECK(e->getProp("Collapsed").s.empty());
+    // The tree draws its rows itself: a row of quads and glyphs per node.
+    std::vector<UIRenderObject> out;
+    HE::UIElementRenderState st;
+    e->render({ 0.0f, 0.0f, 260.0f, 320.0f }, st, HE::UUID{}, 1.0f, out);
+    CHECK(countGlyphs(out) == 2);   // "A" and "B"
+    CHECK(countQuads(out) > 1);     // the surface plus the arrow
+}
+
+TEST_CASE("NamedSlot: what the page puts under the WidgetRef lands in the component's slot")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    // The component: a 200x100 frame with a slot in its lower half, holding a
+    // default label.
+    HE::UIWidgetTree card;
+    card.canvasWidth = 200.0f; card.canvasHeight = 100.0f;
+    const int slot = card.add(HE::UIWidgetType::NamedSlot);
+    {
+        HE::UIElement& e = *card.find(slot);
+        e.name = "Content";
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 50.0f; e.sizeX = 200.0f; e.sizeY = 50.0f;
+    }
+    const int fallback = card.add(HE::UIWidgetType::Text);
+    {
+        HE::UIElement& e = *card.find(fallback);
+        e.parentId = slot;
+        e.setProp("Text", HE::UIPropValue::ofString("empty"));
+    }
+    registerWidgetAs(cm, "mem://card.hasset", card);
+
+    // The page: the card at (50,100), and a Button authored UNDER the ref that
+    // fills its parent.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 400.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    {
+        HE::UIElement& e = *page.find(ref);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 50.0f; e.posY = 100.0f; e.sizeX = 200.0f; e.sizeY = 100.0f;
+        e.setProp("Widget", HE::UIPropValue::ofString("mem://card.hasset"));
+    }
+    const int given = page.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *page.find(given);
+        e.parentId = ref;
+        e.name = "Content";
+        HE::uiSetAnchorPreset(e, HE::kUIAnchorFill);
+        HE::uiSetAnchorInsetsX(e, 0.0f, 0.0f);
+        HE::uiSetAnchorInsetsY(e, 0.0f, 0.0f);
+    }
+    // The PAGE's graph listens on the button it gave away: a click on it, in
+    // the card's slot, must still be the page's OnClicked and not the card's.
+    const int label = page.add(HE::UIWidgetType::Text);
+    page.find(label)->setProp("Text", HE::UIPropValue::ofString(""));
+    page.find(label)->hitTestable = false;
+    page.find(label)->posX = 350.0f; page.find(label)->posY = 350.0f;
+    HorizonCode::Graph g;
+    HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = given;
+    const int evId = g.addNode(ev);
+    HorizonCode::Node lit; lit.type = NodeType::ConstString; lit.s = "PAGE";
+    const int litId = g.addNode(lit);
+    HorizonCode::Node set; set.type = NodeType::SetProperty; set.elem = label;
+    set.s = "Text"; set.propType = PinType::String;
+    const int setId = g.addNode(set);
+    g.connect(evId, 0, setId, 0);
+    g.connect(litId, 0, setId, 2);
+    registerWidget(cm, page, &g);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const HE::UIWidgetTree* live = wm.tree(id);
+    REQUIRE(live);
+
+    // The button is now a child of the slot, which is inside the graft…
+    const HE::UIElement* btn = live->find(given);
+    REQUIRE(btn);
+    const HE::UIElement* liveSlot = live->find(btn->parentId);
+    REQUIRE(liveSlot);
+    CHECK(liveSlot->type() == HE::UIWidgetType::NamedSlot);
+    CHECK(liveSlot->name == "Content");
+    // …and fills the slot's rect: the lower half of the card, on the page.
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(*live, 400.0f, 400.0f);
+    const HE::UIWidgetRect r = HE::uiElementRect(*live, *btn, &canvas);
+    CHECK(r.x == doctest::Approx(50.0f));
+    CHECK(r.y == doctest::Approx(150.0f));
+    CHECK(r.w == doctest::Approx(200.0f));
+    CHECK(r.h == doctest::Approx(50.0f));
+    // The default content stepped aside.
+    bool fallbackShown = false;
+    for (const auto& ep : live->elements)
+        if (ep && ep->type() == HE::UIWidgetType::Text && ep->getProp("Text").s == "empty")
+            fallbackShown = HE::uiElementEffectiveVisible(*live, *ep);
+    CHECK_FALSE(fallbackShown);
+    // It still belongs to the PAGE's script, not the card's: a click on it
+    // is the page's OnClicked. The press lands in the slot's half.
+    CHECK_FALSE(wm.processPointer(400.0f, 400.0f, 100.0f, 120.0f, true, true));
+    wm.processPointer(400.0f, 400.0f, 100.0f, 120.0f, false, true);
+    CHECK(live->find(label)->getProp("Text").s.empty());
+    clickAt(wm, 100.0f, 170.0f);
+    CHECK(live->find(label)->getProp("Text").s == "PAGE");
+}
+
+TEST_CASE("NamedSlot: a component with no slot keeps the default content and the page's children")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree card;
+    card.canvasWidth = 200.0f; card.canvasHeight = 100.0f;
+    const int slot = card.add(HE::UIWidgetType::NamedSlot);
+    const int fallback = card.add(HE::UIWidgetType::Text);
+    card.find(fallback)->parentId = slot;
+    card.find(fallback)->setProp("Text", HE::UIPropValue::ofString("empty"));
+    registerWidgetAs(cm, "mem://card.hasset", card);
+
+    HE::UIWidgetTree page;
+    const int ref = page.add(HE::UIWidgetType::WidgetRef);
+    page.find(ref)->setProp("Widget", HE::UIPropValue::ofString("mem://card.hasset"));
+    registerWidget(cm, page);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    // Nothing was put in, so the default content shows.
+    bool fallbackShown = false;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->type() == HE::UIWidgetType::Text && ep->getProp("Text").s == "empty")
+            fallbackShown = HE::uiElementEffectiveVisible(*wm.tree(id), *ep);
+    CHECK(fallbackShown);
 }

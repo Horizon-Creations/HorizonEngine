@@ -2710,7 +2710,35 @@ namespace
 	  "", "ui#designer" },
 	{ "UI Hierarchy/Duplicate", "Duplicate",
 	  "Copies this widget and everything under it, as a sibling. The copy keeps "
-	  "the properties and the layout, and gets its own name.",
+	  "the properties and the layout, and gets its own name. With several rows "
+	  "selected, every one of them is copied, and one undo removes all the "
+	  "copies.",
+	  "Ctrl+D", "ui#designer" },
+	{ "UI Hierarchy/Copy", "Copy",
+	  "Puts the selected widgets and everything under them on the clipboard. "
+	  "The clipboard is shared by every open widget, so a card built in one "
+	  "pastes into another. A widget whose parent is also selected comes along "
+	  "inside its parent, not as a second copy.",
+	  "Ctrl+C", "ui#designer" },
+	{ "UI Hierarchy/Cut", "Cut",
+	  "Copy, then delete: the selection goes to the clipboard and leaves the "
+	  "widget. One undo brings it back.",
+	  "Ctrl+X", "ui#designer" },
+	{ "UI Hierarchy/Paste", "Paste",
+	  "Puts the clipboard's widgets INTO the selected container, or beside the "
+	  "selected widget when it takes no children, or on the canvas when nothing "
+	  "is selected. A copy landing next to its original is shifted a little so "
+	  "the two do not sit on top of each other. Greyed out while the clipboard "
+	  "is empty.",
+	  "Ctrl+V", "ui#designer" },
+	{ "ui.multiselect", "Selecting several widgets",
+	  "Shift+click adds a widget to the selection or takes it out again, on the "
+	  "canvas and in the hierarchy alike. Dragging on empty canvas draws a band, "
+	  "and everything wholly inside it is selected when you let go (with Shift, "
+	  "added). Ctrl+A takes every top-level widget. The last one clicked is the "
+	  "one Details shows and the handles sit on; dragging any member moves the "
+	  "whole group, and Delete, Duplicate, Copy and Align all mean the whole "
+	  "group.",
 	  "", "ui#designer" },
 
 	{ "Canvas/Width", "Canvas Width",
@@ -3216,6 +3244,27 @@ namespace
 	  "bare type — you pick the widget itself from Components or User Defined, "
 	  "which is the same thing without an empty slot to point somewhere first.",
 	  "", "ui#elements" },
+	{ "UI Palette/RadioButton", "",
+	  "One of several, where exactly one is on. Pressing one turns the others in "
+	  "its Group off, each firing OnCheckChanged(false); pressing the one that is "
+	  "already on leaves it on. Buttons with the same Group name are one question, "
+	  "wherever they sit; with no name, the radio buttons under the same parent are.",
+	  "", "ui#elements" },
+	{ "UI Palette/TreeView", "",
+	  "Rows with an indent and a fold arrow: an outliner, a file browser, a table "
+	  "of contents. The nodes are the lines of Items, and a line's indentation "
+	  "(tabs, or two spaces a level) is its depth. Self-contained like a "
+	  "ComboBox, not a row template like a ListView — a graph writes the whole "
+	  "tree as one string. Events carry the NODE index, the line number, which "
+	  "does not change when something folds.",
+	  "", "ui#elements" },
+	{ "UI Palette/NamedSlot", "",
+	  "A hole in a component that the page using it fills. Put one inside a "
+	  "widget you mean to embed, name it; on the page, add children under the "
+	  "embedded widget and they land in the slot with the same name — or in the "
+	  "only slot, whatever they are called. Children you put in the slot here are "
+	  "its default content, shown when the page puts nothing in.",
+	  "", "ui#elements" },
 
 	// ── Lining elements up while dragging ────────────────────────────────────
 	{ "ui.snap", "Snap",
@@ -3226,6 +3275,47 @@ namespace
 	  "one drag, which is quicker than turning it off and back on. A resize only "
 	  "snaps the edge you have hold of; the other side stands still. Nothing "
 	  "here is stored in the widget — it is a way of dragging, not a property.",
+	  "", "ui#designer" },
+
+	// ── Lining up what is already placed ─────────────────────────────────────
+	// The toolbar cell and the eight entries of its popup.
+	{ "ui.align", "Align",
+	  "Lines the selected widgets up in one go — the same help the snap lines "
+	  "give while dragging, applied to what is already placed. With several "
+	  "selected they line up among themselves: Left puts every left edge on the "
+	  "leftmost one, Center puts the middles on the selection's middle, and so "
+	  "on. With ONE selected it lines up with its frame, the parent or the "
+	  "canvas, which is how you centre a button on its panel. A widget inside "
+	  "a layout box is left alone: the box places it. One undo step.",
+	  "", "ui#designer" },
+	{ "UI Align/Left", "",
+	  "Every left edge onto the leftmost one — or, alone, onto the frame's left "
+	  "edge.",
+	  "", "ui#designer" },
+	{ "UI Align/Center", "",
+	  "Every widget's middle onto the middle of the selection, or of the frame "
+	  "when it is alone. Widths stay as they are.",
+	  "", "ui#designer" },
+	{ "UI Align/Right", "",
+	  "Every right edge onto the rightmost one, or the frame's right edge.",
+	  "", "ui#designer" },
+	{ "UI Align/Top", "",
+	  "Every top edge onto the topmost one, or the frame's top.",
+	  "", "ui#designer" },
+	{ "UI Align/Middle", "",
+	  "Every widget's vertical middle onto the selection's, or the frame's.",
+	  "", "ui#designer" },
+	{ "UI Align/Bottom", "",
+	  "Every bottom edge onto the lowest one, or the frame's bottom.",
+	  "", "ui#designer" },
+	{ "UI Align/Distribute Horizontally", "",
+	  "Keeps the leftmost and rightmost where they are and spaces the ones "
+	  "between so the GAPS come out equal — equal gaps rather than equal "
+	  "centres, because that is what the eye reads. Needs three or more.",
+	  "", "ui#designer" },
+	{ "UI Align/Distribute Vertically", "",
+	  "The same down the page: the top and bottom widgets stay, the rest are "
+	  "spaced with equal gaps between them. Needs three or more.",
 	  "", "ui#designer" },
 
 	// ── Looking at the widget under another theme ────────────────────────────
@@ -3527,6 +3617,41 @@ namespace
 	  "set the number directly to open a set of sections at once. At most 32 "
 	  "sections, because that is how many bits there are.",
 	  "", "ui#elements" },
+	{ "UI Widget/Group", "",
+	  "Which radio buttons answer the same question. Buttons with the same name "
+	  "are one group wherever they sit on the page — three rows of a grid, say. "
+	  "Empty means the radio buttons under the same parent, which is the usual "
+	  "case and needs no typing. Inside an embedded component the group stays "
+	  "inside that copy, so two cards with a \"Size\" group are two questions.",
+	  "", "ui#elements" },
+	{ "UI Widget/Items", "",
+	  "The tree, as text: one node per line, and the line's indentation is its "
+	  "depth — a tab or two spaces per level. A line indented deeper than one "
+	  "level below the line above is pulled back to that, so a stray tab never "
+	  "loses a row. Events and Selected use the LINE NUMBER as the node index, "
+	  "counting from 0 and skipping blank lines.",
+	  "", "ui#elements" },
+	{ "UI Widget/Indent", "",
+	  "How far each level steps in, in canvas units. It is also the width of the "
+	  "fold arrow's column at the row's own level: a press there folds, a press "
+	  "anywhere else on the row picks.",
+	  "", "ui#elements" },
+	{ "UI Widget/Arrow Color", "",
+	  "The colour of the fold arrows, which point down on an open branch and "
+	  "right on a folded one. Leaves have no arrow.",
+	  "", "ui#elements" },
+	{ "UI Widget/Selected", "",
+	  "The picked node, as its index in Items (the line number from 0), or -1 "
+	  "for none. A node, not a row: folding a branch above it hides the "
+	  "highlight but does not change the number, and unfolding brings it back. "
+	  "Carried across a preview reload like anything a person picked.",
+	  "", "ui#elements" },
+	{ "UI Widget/Collapsed", "",
+	  "Which branches are folded shut, as node indices: \"2,5\". Empty is "
+	  "everything open, which is how a tree starts. Folding a branch that the "
+	  "selection sits under moves the selection up onto it. A graph can set this "
+	  "to fold a whole tree at once; OnNodeToggled fires when a person does.",
+	  "", "ui#elements" },
 	{ "UI Widget/Allow Multiple", "",
 	  "On, any number of sections can be open at the same time. Off, opening one "
 	  "folds the rest — which is a Tab Box that stacks, and sometimes exactly what "
@@ -3636,6 +3761,28 @@ namespace
 	  "0 keeps the widget's own size along the box's axis. Above 0 it takes a "
 	  "share of the space left over instead, split between the filling children "
 	  "in proportion — two at 1 each take half.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Slot Align H", "",
+	  "Where the widget sits sideways inside the slot its container gives it. "
+	  "Fill stretches it to the slot's full width, which is what every box child "
+	  "did before this existed; Left, Center and Right keep the widget's own "
+	  "Width and pin it to that side of the slot. In a Grid the slot is the cell; "
+	  "a Wrap Box has no such row because there the slot is the widget's width.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Slot Align V", "",
+	  "The same for the vertical direction: Fill takes the slot's full height, "
+	  "Top, Center and Bottom keep the widget's own Height and pin it. Along a "
+	  "box's own axis the slot is only taller than the widget when Slot Fill is "
+	  "above 0, so this row mostly matters for a filling child, for a cell in a "
+	  "Grid, and for a short widget on a tall line in a Wrap Box.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Slot Padding (L, T, R, B)", "",
+	  "Room the slot keeps free around the widget, one number per side: left, "
+	  "top, right, bottom, in canvas units. Unlike the container's own Padding, "
+	  "which is one distance around everything, this belongs to one child — a "
+	  "label that wants space on its right and nowhere else. It counts towards "
+	  "what the widget occupies, so the next child starts after it, Size To "
+	  "Content grows by it and a Scroll Box scrolls that much further.",
 	  "", "ui#widgets" },
 	{ "UI Widget/Width", "",
 	  "How wide the widget is, in canvas pixels. It is gone from this panel on an "
@@ -3759,7 +3906,12 @@ namespace
 	  "go over it fires On File Dropped, once per file, with the file's path. The "
 	  "drop travels UP from whatever the pointer met to the first element that "
 	  "accepts one, so set it on the panel and not on the label inside it. Where "
-	  "nothing accepts, the window took it and the Game Instance hears it instead.",
+	  "nothing accepts, the window took it and the Game Instance hears it instead. "
+	  "Something Draggable from inside the application lands here too, with On "
+	  "Drop — and before that On Drag Enter (with the carried payload) when it "
+	  "arrives over this zone and On Drag Leave when it moves off again or the "
+	  "drag is cancelled, so an inventory slot can light up or open a gap while "
+	  "the hand is still deciding.",
 	  "", "ui#widgets" },
 	{ "UI Widget/RichText", "",
 	  "Reads the Text as MARKUP instead of as plain words. What it understands: "
@@ -3779,10 +3931,14 @@ namespace
 	{ "UI Widget/Draggable", "",
 	  "Lets this element be picked up and carried onto a drop zone. The drag "
 	  "begins at a DISTANCE, not at the press, so a draggable element can still "
-	  "be clicked. It fires On Drag Started when it lifts and On Drag Ended when "
-	  "it lands, with a bool saying whether anything took it; the zone it was "
-	  "dropped on gets On Drop. Like Accepts drop, this bubbles: pressing the "
-	  "label of a draggable card carries the card.",
+	  "be clicked. It fires On Drag Started when it lifts, On Drag Moved for "
+	  "every movement while it is carried (with the pointer as a point in this "
+	  "widget's canvas units, the same space Position is in, so a ghost at the "
+	  "root follows the hand with nothing but a Set Position; inside a container "
+	  "subtract the parent's offset), and On Drag Ended when it lands, with a "
+	  "bool saying whether anything took it; the zone it was dropped on gets On "
+	  "Drop. Like Accepts drop, this bubbles: pressing the label of a draggable "
+	  "card carries the card.",
 	  "", "ui#widgets" },
 	{ "UI Widget/Drag payload", "",
 	  "What this element calls itself when it is dropped somewhere: the string "
@@ -5289,6 +5445,7 @@ namespace
 		{ "UI Widget/",      "editor-ui", "UI Designer", "Widget properties" },
 		{ "UI Graph/",       "editor-ui", "UI Designer", "Widget logic" },
 		{ "UI Theme Preview/", "editor-ui", "UI Designer", "Previewing a theme" },
+		{ "UI Align/",       "editor-ui", "UI Designer", "Lining widgets up" },
 		{ "UI Timeline/",    "editor-ui", "UI Designer", "The timeline" },
 		{ "UI Graph Node/",  "editor-ui", "UI Designer", "Nodes in the graph" },
 		{ "UI Variable/",    "editor-ui", "UI Designer", "Graph variables" },

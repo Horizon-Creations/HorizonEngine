@@ -655,6 +655,7 @@ HE_HC_POINTER_EVENT(fireOnFocused,    "OnFocused",    onFocused)
 HE_HC_POINTER_EVENT(fireOnUnfocused,  "OnUnfocused",  onUnfocused)
 HE_HC_POINTER_EVENT(fireOnRightClicked, "OnRightClicked", onRightClicked)
 HE_HC_POINTER_EVENT(fireOnDragStarted,  "OnDragStarted",  onDragStarted)
+HE_HC_POINTER_EVENT(fireOnDragLeave,    "OnDragLeave",    onDragLeave)
 #undef HE_HC_POINTER_EVENT
 
 // The no-payload lifecycle events — their hooks take nothing, so they cannot
@@ -721,6 +722,8 @@ HE_HC_VALUE_EVENT(fireOnRowActivated, "OnRowActivated", int,
                   onRowActivated(elem, v), Value::ofInt(v))
 HE_HC_VALUE_EVENT(fireOnHeaderClicked, "OnHeaderClicked", int,
                   onHeaderClicked(elem, v), Value::ofInt(v))
+HE_HC_VALUE_EVENT(fireOnNodeToggled, "OnNodeToggled", int,
+                  onNodeToggled(elem, v), Value::ofInt(v))
 HE_HC_VALUE_EVENT(fireOnFileDropped, "OnFileDropped", const std::string&,
                   onFileDropped(elem, v), Value::ofString(v))
 HE_HC_VALUE_EVENT(fireOnTrayItem, "OnTrayItem", const std::string&,
@@ -741,10 +744,14 @@ HE_HC_VALUE_EVENT(fireOnDateChanged, "OnDateChanged", const std::string&,
                   onDateChanged(elem, v), Value::ofString(v))
 HE_HC_VALUE_EVENT(fireOnColorChanged, "OnColorChanged", const glm::vec4&,
                   onColorChanged(elem, v), Value::ofColor(v))
-HE_HC_VALUE_EVENT(fireOnDrop, "OnDrop", const std::string&,
-                  onDrop(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnDragMoved, "OnDragMoved", const glm::vec2&,
+                  onDragMoved(elem, v), Value::ofVec2(v))
 HE_HC_VALUE_EVENT(fireOnDragEnded, "OnDragEnded", bool,
                   onDragEnded(elem, v), Value::ofBool(v))
+HE_HC_VALUE_EVENT(fireOnDragEnter, "OnDragEnter", const std::string&,
+                  onDragEnter(elem, v), Value::ofString(v))
+HE_HC_VALUE_EVENT(fireOnDrop, "OnDrop", const std::string&,
+                  onDrop(elem, v), Value::ofString(v))
 #undef HE_HC_VALUE_EVENT
 
 // The physics contacts: one Int argument (the other entity), no element. Same

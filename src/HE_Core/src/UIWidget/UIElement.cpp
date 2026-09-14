@@ -109,6 +109,9 @@ std::unique_ptr<UIElement> makeUIElement(UIWidgetType t)
         case UIWidgetType::DatePicker:    return std::make_unique<UIDatePicker>();
         case UIWidgetType::ColorPicker:   return std::make_unique<UIColorPicker>();
         case UIWidgetType::Accordion:     return std::make_unique<UIAccordion>();
+        case UIWidgetType::RadioButton:   return std::make_unique<UIRadioButton>();
+        case UIWidgetType::TreeView:      return std::make_unique<UITreeView>();
+        case UIWidgetType::NamedSlot:     return std::make_unique<UINamedSlot>();
         default:                        return std::make_unique<UIPanel>();
     }
 }
@@ -124,7 +127,8 @@ const std::vector<UIWidgetType>& uiWidgetTypeRegistry()
         UIWidgetType::ListView, UIWidgetType::WrapBox, UIWidgetType::Grid,
         UIWidgetType::TabBox, UIWidgetType::Splitter,
         UIWidgetType::DatePicker, UIWidgetType::ColorPicker,
-        UIWidgetType::Accordion };
+        UIWidgetType::Accordion, UIWidgetType::RadioButton, UIWidgetType::TreeView,
+        UIWidgetType::NamedSlot };
     return kAll;
 }
 
@@ -141,7 +145,8 @@ const char* uiWidgetTypeName(UIWidgetType t)
         "Slider", "ProgressBar", "TextInput", "ComboBox",
         "VerticalBox", "HorizontalBox", "ScrollBox", "WidgetRef", "Spacer",
         "ListView", "WrapBox", "Grid", "TabBox", "Splitter",
-        "DatePicker", "ColorPicker", "Accordion" };
+        "DatePicker", "ColorPicker", "Accordion", "RadioButton", "TreeView",
+        "NamedSlot" };
     static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UIWidgetType::COUNT,
                   "uiWidgetTypeName table out of step with UIWidgetType");
     const size_t i = (size_t)t;
@@ -154,6 +159,42 @@ UIWidgetType uiWidgetTypeFromName(const std::string& s)
     for (UIWidgetType t : uiWidgetTypeRegistry())
         if (s == uiWidgetTypeName(t)) return t;
     return UIWidgetType::Panel;
+}
+
+// ── Slot alignment names ─────────────────────────────────────────────────────
+// The on-disk spelling of UISlotHAlign/UISlotVAlign, and what the designer's
+// combos show. An unknown name reads as Fill: that is what an element that
+// never had the key did, and a misspelling must not move anything.
+const char* uiSlotHAlignName(UISlotHAlign a)
+{
+    static constexpr const char* kNames[] = { "Fill", "Left", "Center", "Right" };
+    static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UISlotHAlign::COUNT,
+                  "uiSlotHAlignName table out of step with UISlotHAlign");
+    const size_t i = (size_t)a;
+    return i < (size_t)UISlotHAlign::COUNT ? kNames[i] : "Fill";
+}
+
+const char* uiSlotVAlignName(UISlotVAlign a)
+{
+    static constexpr const char* kNames[] = { "Fill", "Top", "Center", "Bottom" };
+    static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UISlotVAlign::COUNT,
+                  "uiSlotVAlignName table out of step with UISlotVAlign");
+    const size_t i = (size_t)a;
+    return i < (size_t)UISlotVAlign::COUNT ? kNames[i] : "Fill";
+}
+
+UISlotHAlign uiSlotHAlignFromName(const std::string& s)
+{
+    for (int i = 0; i < (int)UISlotHAlign::COUNT; ++i)
+        if (s == uiSlotHAlignName((UISlotHAlign)i)) return (UISlotHAlign)i;
+    return UISlotHAlign::Fill;
+}
+
+UISlotVAlign uiSlotVAlignFromName(const std::string& s)
+{
+    for (int i = 0; i < (int)UISlotVAlign::COUNT; ++i)
+        if (s == uiSlotVAlignName((UISlotVAlign)i)) return (UISlotVAlign)i;
+    return UISlotVAlign::Fill;
 }
 
 // The UTF-8 walk moved to Renderer/UIFont.cpp, where the glyph loops use the
@@ -847,6 +888,17 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Transition")   { out = UIPropValue::ofFloat(e.transition);        return true; }
     if (n == "Tab Index")    { out = UIPropValue::ofInt(e.tabIndex);            return true; }
     if (n == "Slot Fill")    { out = UIPropValue::ofFloat(e.slotFill);          return true; }
+    if (n == "Slot Align H") { out = UIPropValue::ofInt((int)e.slotHAlign);     return true; }
+    if (n == "Slot Align V") { out = UIPropValue::ofInt((int)e.slotVAlign);     return true; }
+    // "Slot Padding" is all four sides as ONE number, the way "Corner Radius"
+    // is all four corners: reading it back gives the left side, so a graph
+    // that set it reads its own value. The four named rows are the per-side
+    // form the audit asked for.
+    if (n == "Slot Padding") { out = UIPropValue::ofFloat(e.slotPadLeft);       return true; }
+    if (n == "Slot Padding Left")   { out = UIPropValue::ofFloat(e.slotPadLeft);   return true; }
+    if (n == "Slot Padding Top")    { out = UIPropValue::ofFloat(e.slotPadTop);    return true; }
+    if (n == "Slot Padding Right")  { out = UIPropValue::ofFloat(e.slotPadRight);  return true; }
+    if (n == "Slot Padding Bottom") { out = UIPropValue::ofFloat(e.slotPadBottom); return true; }
     if (n == "Grid Column")  { out = UIPropValue::ofInt(e.gridColumn);          return true; }
     if (n == "Grid Row")     { out = UIPropValue::ofInt(e.gridRow);             return true; }
     if (n == "Column Span")  { out = UIPropValue::ofInt(e.gridColumnSpan);      return true; }
@@ -914,6 +966,13 @@ const std::vector<UIPropDesc>& uiBaseProperties()
         { "Transition",          UIPropType::Float, 0.0f, 2.0f },
         { "Tab Index",           UIPropType::Int },
         { "Slot Fill",           UIPropType::Float },
+        { "Slot Align H",        UIPropType::Int },
+        { "Slot Align V",        UIPropType::Int },
+        { "Slot Padding",        UIPropType::Float },
+        { "Slot Padding Left",   UIPropType::Float },
+        { "Slot Padding Top",    UIPropType::Float },
+        { "Slot Padding Right",  UIPropType::Float },
+        { "Slot Padding Bottom", UIPropType::Float },
         { "Grid Column",         UIPropType::Int },
         { "Grid Row",            UIPropType::Int },
         { "Column Span",         UIPropType::Int },
@@ -971,6 +1030,19 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     // No clamp: all three ranges mean something (see UIElement::tabIndex).
     if (n == "Tab Index")    { e.tabIndex = v.i; return true; }
     if (n == "Slot Fill")    { e.slotFill = v.f < 0.0f ? 0.0f : v.f; return true; }
+    // A number outside the enum lands on Fill, the value that means "as before".
+    if (n == "Slot Align H")
+    { e.slotHAlign = (v.i >= 0 && v.i < (int)UISlotHAlign::COUNT) ? (UISlotHAlign)v.i : UISlotHAlign::Fill; return true; }
+    if (n == "Slot Align V")
+    { e.slotVAlign = (v.i >= 0 && v.i < (int)UISlotVAlign::COUNT) ? (UISlotVAlign)v.i : UISlotVAlign::Fill; return true; }
+    // Floored at 0: a negative margin would be a slot that overlaps its
+    // neighbour, and the box walk assumes it never has to subtract.
+    if (n == "Slot Padding")
+    { e.slotPadLeft = e.slotPadTop = e.slotPadRight = e.slotPadBottom = std::max(0.0f, v.f); return true; }
+    if (n == "Slot Padding Left")   { e.slotPadLeft   = std::max(0.0f, v.f); return true; }
+    if (n == "Slot Padding Top")    { e.slotPadTop    = std::max(0.0f, v.f); return true; }
+    if (n == "Slot Padding Right")  { e.slotPadRight  = std::max(0.0f, v.f); return true; }
+    if (n == "Slot Padding Bottom") { e.slotPadBottom = std::max(0.0f, v.f); return true; }
     // -1 stays -1: it is not an out-of-range cell, it is "the next free one".
     if (n == "Grid Column")  { e.gridColumn = v.i < -1 ? -1 : v.i; return true; }
     if (n == "Grid Row")     { e.gridRow    = v.i < -1 ? -1 : v.i; return true; }
@@ -1041,6 +1113,13 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     out.push_back({ "Transition",   UIPropType::Float, 0.0f, 2.0f });
     out.push_back({ "Tab Index",    UIPropType::Int });
     out.push_back({ "Slot Fill",    UIPropType::Float });
+    out.push_back({ "Slot Align H", UIPropType::Int });
+    out.push_back({ "Slot Align V", UIPropType::Int });
+    out.push_back({ "Slot Padding", UIPropType::Float });
+    out.push_back({ "Slot Padding Left",   UIPropType::Float });
+    out.push_back({ "Slot Padding Top",    UIPropType::Float });
+    out.push_back({ "Slot Padding Right",  UIPropType::Float });
+    out.push_back({ "Slot Padding Bottom", UIPropType::Float });
     out.push_back({ "Grid Column",  UIPropType::Int });
     out.push_back({ "Grid Row",     UIPropType::Int });
     out.push_back({ "Column Span",  UIPropType::Int });
@@ -3810,6 +3889,411 @@ void UIColorPicker::readJson(const nlohmann::json& j)
     barWidth = j.value("barWidth", barWidth);
     gap = j.value("gap", gap);
     backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
+}
+
+// ── RadioButton ──────────────────────────────────────────────────────────────
+
+const UIPropTable& UIRadioButton::propTable() const
+{
+    // The CheckBox's names for the CheckBox's things, so a style, a theme role
+    // or a graph written against one carries over to the other; "Group" is the
+    // one row a checkbox does not have.
+    static const UIPropTable t = {
+        uiprop::slot<&UIRadioButton::checked>   ({ "Checked", UIPropType::Bool }),
+        uiprop::slot<&UIRadioButton::label>     ({ "Label", UIPropType::String }),
+        uiprop::slot<&UIRadioButton::group>     ({ "Group", UIPropType::String }),
+        uiprop::slot<&UIRadioButton::fontSize>  ({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UIRadioButton::boxColor>  ({ "Box Color", UIPropType::Color }),
+        uiprop::slot<&UIRadioButton::checkColor>({ "Check Color", UIPropType::Color }),
+        uiprop::slot<&UIRadioButton::textColor> ({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UIRadioButton::autoSize>  ({ "AutoSize", UIPropType::Bool }),
+    };
+    return t;
+}
+
+void UIRadioButton::applyAutoSize(float resolvedWidth, float fontScale)
+{
+    (void)resolvedWidth;
+    const int axes = autoSizedAxes();
+    if (axes == 0) return;
+    // Word for word the checkbox's sum, because the row IS the checkbox's row
+    // with a circle in it — see UICheckBox::applyAutoSize for why each term.
+    const float fs = fontSize * fontScale;
+    const UICheckBox::BoxMetrics m = metricsFor(fs, 0.0f);
+    HE::UITextLayout opts;
+    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+    const glm::vec2 lm = label.empty()
+        ? glm::vec2(0.0f)
+        : (f ? HE::measureUIText(*f, label, fs, 0.0f, opts)
+             : HE::measureUIText(label, fs, 0.0f, opts));
+    if (axes & kAxisX)
+        sizeX = m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fs * 0.25f);
+    if (axes & kAxisY)
+        sizeY = std::max(m.box, lm.y + fs * 0.35f);
+}
+
+void UIRadioButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
+                           const HE::UUID&, float pxScaleY, std::vector<UIRenderObject>& out) const
+{
+    // A ring with a dot in it: the box drawn fully round, and the mark drawn
+    // fully round inside it. Round is the whole picture — a square radio button
+    // is a checkbox, and a person reading a form tells the two apart by shape
+    // before they read a single label.
+    const UICheckBox::BoxMetrics m = metricsFor(st.fontPx(fontSize, pxScaleY), px.h);
+    const float box = m.box;
+    const float by  = px.y + (px.h - box) * 0.5f;
+    const glm::vec4 bcHover = glm::vec4(glm::vec3(boxColor) * 1.3f, boxColor.a);
+    const glm::vec4 bc = glm::mix(boxColor, bcHover, st.hoverAmount());
+    quad(out, px.x, by, box, box, bc, {}, box * 0.5f);
+    if (checked)
+    {
+        // A dot rather than a filled circle: the ring stays visible around it,
+        // which is what says "one of a set" rather than "a coloured circle".
+        const float inset = box * 0.28f;
+        const float dot   = box - 2.0f * inset;
+        quad(out, px.x + inset, by + inset, dot, dot, checkColor, {}, dot * 0.5f);
+    }
+    const float lx = px.x + m.ctrl + m.gap;
+    emitText(*this, label, { lx, px.y }, { px.w - m.ctrl - m.gap, px.h },
+             st.fontPx(fontSize, pxScaleY), textColor, /*centerH=*/false, out);
+}
+
+void UIRadioButton::writeJson(nlohmann::json& j) const
+{
+    j["checked"] = checked; j["label"] = label; j["fontSize"] = fontSize;
+    j["boxColor"] = colJson(boxColor); j["checkColor"] = colJson(checkColor);
+    j["textColor"] = colJson(textColor);
+    if (!group.empty()) j["group"] = group;
+    if (autoSize)       j["autoSize"] = true;
+}
+void UIRadioButton::readJson(const nlohmann::json& j)
+{
+    checked  = j.value("checked", checked); label = j.value("label", label);
+    group    = j.value("group", std::string());
+    autoSize = j.value("autoSize", false);
+    fontSize = j.value("fontSize", fontSize);
+    boxColor   = colFrom(j.value("boxColor", nlohmann::json()), boxColor);
+    checkColor = colFrom(j.value("checkColor", nlohmann::json()), checkColor);
+    textColor  = colFrom(j.value("textColor", nlohmann::json()), textColor);
+}
+
+// ── TreeView ─────────────────────────────────────────────────────────────────
+
+namespace
+{
+    // "2,5" ⇄ {2, 5}. The same shape Column Widths uses, for the same reason.
+    std::vector<int> parseIntList(const std::string& s)
+    {
+        std::vector<int> out;
+        std::size_t i = 0;
+        while (i < s.size())
+        {
+            while (i < s.size() && (s[i] == ',' || s[i] == ' ')) ++i;
+            if (i >= s.size()) break;
+            char* end = nullptr;
+            const long v = std::strtol(s.c_str() + i, &end, 10);
+            const std::size_t used = static_cast<std::size_t>(end - (s.c_str() + i));
+            if (used == 0) { ++i; continue; }   // not a number: skip the character
+            out.push_back(static_cast<int>(v));
+            i += used;
+        }
+        return out;
+    }
+    std::string formatIntList(const std::vector<int>& v)
+    {
+        std::string s;
+        for (std::size_t i = 0; i < v.size(); ++i)
+        {
+            if (i) s += ',';
+            s += std::to_string(v[i]);
+        }
+        return s;
+    }
+}
+
+const std::vector<UITreeView::Node>& UITreeView::nodes() const
+{
+    if (m_parsedValid && m_parsedFor == items) return m_nodes;
+    m_parsedFor   = items;
+    m_parsedValid = true;
+    m_nodes.clear();
+
+    // One node per line. A tab is one level, two spaces are one level, and a
+    // single stray space is swallowed rather than counted — "  x" and " x" are
+    // both what somebody meant by "indented once", and a reader that split
+    // hairs there would turn a typo into a missing row.
+    std::vector<int> lastAtDepth;   // node index of the most recent node at each depth
+    std::size_t pos = 0;
+    while (pos <= items.size())
+    {
+        const std::size_t nl = items.find('\n', pos);
+        std::string line = items.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+        pos = nl == std::string::npos ? items.size() + 1 : nl + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        int depth = 0;
+        std::size_t k = 0;
+        while (k < line.size())
+        {
+            if (line[k] == '\t') { ++depth; ++k; }
+            else if (line[k] == ' ' && k + 1 < line.size() && line[k + 1] == ' ') { ++depth; k += 2; }
+            else if (line[k] == ' ') { ++k; }
+            else break;
+        }
+        const std::string label = line.substr(k);
+        if (label.empty()) continue;   // a blank line is nothing, not a nameless node
+
+        // A child needs a parent: the depth can grow by one at most, from the
+        // line above. The first line is a root whatever it says.
+        const int maxDepth = m_nodes.empty() ? 0 : m_nodes.back().depth + 1;
+        if (depth > maxDepth) depth = maxDepth;
+
+        Node n;
+        n.label  = label;
+        n.depth  = depth;
+        n.parent = depth > 0 ? lastAtDepth[static_cast<std::size_t>(depth - 1)] : -1;
+        if (n.parent >= 0) m_nodes[static_cast<std::size_t>(n.parent)].hasChildren = true;
+        lastAtDepth.resize(static_cast<std::size_t>(depth) + 1);
+        lastAtDepth[static_cast<std::size_t>(depth)] = static_cast<int>(m_nodes.size());
+        m_nodes.push_back(std::move(n));
+    }
+    return m_nodes;
+}
+
+bool UITreeView::isCollapsed(int node) const
+{
+    if (node < 0) return false;
+    for (const int c : parseIntList(collapsed)) if (c == node) return true;
+    return false;
+}
+
+bool UITreeView::setCollapsed(int node, bool on)
+{
+    const std::vector<Node>& ns = nodes();
+    if (node < 0 || node >= static_cast<int>(ns.size())) return false;
+    if (on && !ns[static_cast<std::size_t>(node)].hasChildren) return false;
+    std::vector<int> list = parseIntList(collapsed);
+    const auto it = std::find(list.begin(), list.end(), node);
+    if (on == (it != list.end())) return false;
+    if (on) { list.push_back(node); std::sort(list.begin(), list.end()); }
+    else     list.erase(it);
+    collapsed = formatIntList(list);
+    return true;
+}
+
+std::vector<int> UITreeView::visibleRows() const
+{
+    const std::vector<Node>& ns = nodes();
+    const std::vector<int> folded = parseIntList(collapsed);
+    std::vector<int> rows;
+    rows.reserve(ns.size());
+    // A node shows when every ancestor is open. Walking in order, "is my parent
+    // hidden or folded" is one lookup per node, because the parent was decided
+    // before its children were reached.
+    std::vector<char> hidden(ns.size(), 0);
+    for (std::size_t i = 0; i < ns.size(); ++i)
+    {
+        const Node& n = ns[i];
+        if (n.parent >= 0)
+        {
+            const std::size_t p = static_cast<std::size_t>(n.parent);
+            hidden[i] = hidden[p] ||
+                std::find(folded.begin(), folded.end(), n.parent) != folded.end();
+        }
+        if (!hidden[i]) rows.push_back(static_cast<int>(i));
+    }
+    return rows;
+}
+
+bool UITreeView::scrollToRow(int row)
+{
+    if (row < 0 || row >= static_cast<int>(visibleRows().size())) return false;
+    const float top    = row * rowHeight;
+    const float bottom = top + rowHeight;
+    const float before = scrollOffset;
+    if (top < scrollOffset)                         scrollOffset = top;
+    else if (bottom > scrollOffset + innerHeight()) scrollOffset = bottom - innerHeight();
+    scrollOffset = std::clamp(scrollOffset, 0.0f, maxScroll());
+    return scrollOffset != before;
+}
+
+UITreeView::Arrow UITreeView::arrowIn(float rowX, float rowY, float rowH, float indentPx, int depth)
+{
+    Arrow a;
+    a.size = std::max(4.0f, std::min(indentPx, rowH) * 0.45f);
+    a.cx   = rowX + indentPx * depth + indentPx * 0.5f;
+    a.cy   = rowY + rowH * 0.5f;
+    return a;
+}
+
+const UIPropTable& UITreeView::propTable() const
+{
+    static const UIPropTable t = {
+        // Authored over several lines, which is the whole reading of the text.
+        uiprop::slot<&UITreeView::items>({ "Items", UIPropType::String, 0.0f, 0.0f, /*multiline=*/true }),
+        uiprop::slot<&UITreeView::rowHeight>({ "Row Height", UIPropType::Float, 1.0f, 2000.0f }),
+        uiprop::slot<&UITreeView::indent>({ "Indent", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UITreeView::padding>({ "Padding", UIPropType::Float, 0.0f, 200.0f }),
+        uiprop::slot<&UITreeView::fontSize>({ "FontSize", UIPropType::Float, 4.0f, 200.0f }),
+        uiprop::slot<&UITreeView::backColor>({ "Back Color", UIPropType::Color }),
+        uiprop::slot<&UITreeView::textColor>({ "Text Color", UIPropType::Color }),
+        uiprop::slot<&UITreeView::rowHoverColor>({ "Row Hover Color", UIPropType::Color }),
+        uiprop::slot<&UITreeView::rowSelectedColor>({ "Row Selected Color", UIPropType::Color }),
+        uiprop::slot<&UITreeView::arrowColor>({ "Arrow Color", UIPropType::Color }),
+        uiprop::slot<&UITreeView::barWidth>({ "Bar Width", UIPropType::Float, 0.0f, 40.0f }),
+        uiprop::slot<&UITreeView::barColor>({ "Bar Color", UIPropType::Color }),
+        // The two pieces of state a graph reads and writes by name. "Selected"
+        // is a NODE index, never a row: rows move when something folds, nodes
+        // do not. Both plain field slots, and deliberately: a selection past
+        // the end simply highlights nothing, and a folded leaf is ignored by
+        // visibleRows, so there is no housekeeping a setter would have to do.
+        uiprop::slot<&UITreeView::selected>({ "Selected", UIPropType::Int, -1.0f, 1.0e9f }),
+        uiprop::slot<&UITreeView::collapsed>({ "Collapsed", UIPropType::String }),
+    };
+    return t;
+}
+
+void UITreeView::render(const UIWidgetRect& px, const UIElementRenderState& st,
+                        const HE::UUID& mat, float pxScaleY,
+                        std::vector<UIRenderObject>& out) const
+{
+    // The surface first, always: it is the quad the border and rounding go on.
+    quad(out, px.x, px.y, px.w, px.h, backColor, mat, 0.0f, textureAssetId);
+
+    // ONE factor for both axes — the one the manager hands over, which turns
+    // this element's units into pixels with any embedded widget's scale folded
+    // in. Not px.w / sizeX: on a stretched anchor sizeX is a negative inset and
+    // says nothing about how wide the element is. The manager's hit test
+    // divides by the same factor (see treeLocalPoint), so the arrow is grabbed
+    // where it is drawn even under a non-uniform Stretch canvas.
+    const float scaleX = pxScaleY;
+    const float scaleY = pxScaleY;
+    const float innerY = px.y + padding * scaleY;
+    const float innerH = std::max(0.0f, px.h - 2.0f * padding * scaleY);
+    const float rowX   = px.x + padding * scaleX;
+    const float rowW   = std::max(0.0f, px.w - 2.0f * padding * scaleX - barWidth * scaleX);
+    const float rowH   = rowHeight * scaleY;
+    const float indPx  = indent * scaleX;
+    if (rowW <= 0.0f || rowH <= 0.0f || innerH <= 0.0f) return;
+
+    const std::vector<Node>& ns = nodes();
+    const std::vector<int> rows = visibleRows();
+    const std::vector<int> folded = parseIntList(collapsed);
+    const float sizePx = st.fontPx(fontSize, pxScaleY);
+
+    // Only the rows that touch the view, clipped BY HAND at the top and the
+    // bottom — the element's own quads are not covered by its clipChildren,
+    // exactly as the list's highlights are not.
+    const int first = std::max(0, static_cast<int>(scrollOffset / rowHeight));
+    for (int r = first; r < static_cast<int>(rows.size()); ++r)
+    {
+        const float top = innerY + (r * rowHeight - scrollOffset) * scaleY;
+        if (top >= innerY + innerH) break;
+        const float y0 = std::max(top, innerY);
+        const float y1 = std::min(top + rowH, innerY + innerH);
+        if (y1 <= y0) continue;
+        const int   ni = rows[static_cast<std::size_t>(r)];
+        const Node& n  = ns[static_cast<std::size_t>(ni)];
+
+        if (ni == selected && rowSelectedColor.a > 0.001f)
+            quad(out, rowX, y0, rowW, y1 - y0, rowSelectedColor, HE::UUID{}, roundedR(rowW, y1 - y0, 3.0f));
+        else if (r == hoveredRow && rowHoverColor.a > 0.001f)
+            quad(out, rowX, y0, rowW, y1 - y0, rowHoverColor, HE::UUID{}, roundedR(rowW, y1 - y0, 3.0f));
+
+        // A row cut off at the top or the bottom draws no text and no arrow:
+        // glyphs are not clipped by hand, and half a line hanging over the
+        // border is worse than a row that appears whole one scroll step later.
+        if (y0 != top || y1 != top + rowH) continue;
+
+        if (n.hasChildren)
+        {
+            const Arrow a = arrowIn(rowX, top, rowH, indPx, n.depth);
+            const bool open = std::find(folded.begin(), folded.end(), ni) == folded.end();
+            if (open)
+            {
+                // Open points DOWN: the combo's triangle, which already knows
+                // how to be a triangle out of quads.
+                HE::UIComboBox::Arrow ca;
+                ca.cx = a.cx; ca.cy = a.cy; ca.halfW = a.size * 0.5f; ca.height = a.size * 0.6f;
+                triangle(out, ca, arrowColor, /*pointUp=*/false);
+            }
+            else
+            {
+                // Closed points RIGHT. The same staircase, turned: columns of
+                // decreasing height from the left edge to the point.
+                const int cols = std::clamp(static_cast<int>(std::ceil(a.size * 0.6f)), 3, 32);
+                const float step = a.size * 0.6f / static_cast<float>(cols);
+                const float left = a.cx - a.size * 0.3f;
+                for (int i = 0; i < cols; ++i)
+                {
+                    const float t = 1.0f - static_cast<float>(i) / cols;
+                    const float h = a.size * t;
+                    const float cw = step + 0.5f;
+                    quad(out, left + step * static_cast<float>(i), a.cy - h * 0.5f,
+                         cw, h, arrowColor, HE::UUID{}, roundedR(cw, h, cw * 0.5f));
+                }
+            }
+        }
+        const float tx = rowX + indPx * (n.depth + 1);
+        emitText(*this, n.label, { tx, top }, { std::max(0.0f, rowX + rowW - tx), rowH },
+                 sizePx, textColor, /*centerH=*/false, out);
+    }
+
+    UIWidgetRect th;
+    if (uiScrollThumbRect(*this, px, th))
+        quad(out, th.x, th.y, th.w, th.h, barColor, HE::UUID{}, th.w * 0.5f);
+}
+
+// The selection, the folds and the offset are runtime state, like the list's:
+// what somebody had open is theirs, not the widget's.
+void UITreeView::writeJson(nlohmann::json& j) const
+{
+    j["items"] = items;
+    j["rowHeight"] = rowHeight;
+    j["indent"] = indent;
+    j["padding"] = padding;
+    j["fontSize"] = fontSize;
+    j["backColor"] = colJson(backColor);
+    j["textColor"] = colJson(textColor);
+    j["rowHoverColor"] = colJson(rowHoverColor);
+    j["rowSelectedColor"] = colJson(rowSelectedColor);
+    j["arrowColor"] = colJson(arrowColor);
+    j["barWidth"] = barWidth;
+    j["barColor"] = colJson(barColor);
+}
+void UITreeView::readJson(const nlohmann::json& j)
+{
+    items = j.value("items", items);
+    rowHeight = j.value("rowHeight", rowHeight);
+    indent = j.value("indent", indent);
+    padding = j.value("padding", padding);
+    fontSize = j.value("fontSize", fontSize);
+    backColor = colFrom(j.value("backColor", nlohmann::json()), backColor);
+    textColor = colFrom(j.value("textColor", nlohmann::json()), textColor);
+    rowHoverColor = colFrom(j.value("rowHoverColor", nlohmann::json()), rowHoverColor);
+    rowSelectedColor = colFrom(j.value("rowSelectedColor", nlohmann::json()), rowSelectedColor);
+    arrowColor = colFrom(j.value("arrowColor", nlohmann::json()), arrowColor);
+    barWidth = j.value("barWidth", barWidth);
+    barColor = colFrom(j.value("barColor", nlohmann::json()), barColor);
+}
+
+// ── NamedSlot ────────────────────────────────────────────────────────────────
+
+const UIPropTable& UINamedSlot::propTable() const
+{
+    // Nothing of its own: its NAME is its one property, and that is the base
+    // "Name" row every element already has.
+    static const UIPropTable t = {};
+    return t;
+}
+
+bool UINamedSlot::hidesChild(const UIWidgetTree&, const UIElement& child) const
+{
+    // Once the page has put something in, the component's own default content
+    // steps aside. The graft renumbers the component's elements ABOVE the
+    // host's, so "one of mine" is "an id at or past the floor"; the page's
+    // children keep their host ids, below it.
+    return filled && child.id >= ownIdFloor;
 }
 
 } // namespace HE

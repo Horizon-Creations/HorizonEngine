@@ -1106,6 +1106,24 @@ private:
     // Pick one row and fire what that means. Shared by the press and by the
     // keyboard, so the two cannot drift.
     void selectListRow(Instance& w, HE::UIListView& lv, int item);
+    // The tree's two: pick a NODE (-1 clears), and fold one open or shut. Both
+    // fire only when something changed, and both are shared by the press and
+    // the keyboard for the reason above.
+    void selectTreeNode(Instance& w, HE::UITreeView& tv, int node);
+    void toggleTreeNode(Instance& w, HE::UITreeView& tv, int node);
+    // Turn one radio button on and the rest of its group off, firing
+    // OnCheckChanged for each that flipped. The group is searched within the
+    // embed the button belongs to, not the whole host tree — two copies of a
+    // component each carrying a group "Size" are two questions, not one.
+    // `notify` false = the silent form a script write goes through: a Set
+    // Property never fires the element's own event, so it must not fire its
+    // neighbours' either.
+    void checkRadioButton(Instance& w, HE::UIRadioButton& rb, bool notify = true);
+    // What a property write from a SCRIPT has to keep consistent that the
+    // generic setter cannot know about: a radio button's group, today. The
+    // setter writes one field of one element; "exactly one of these is on" is
+    // a fact about several, and it lives here.
+    void afterScriptWrite(Instance& w, HE::UIElement& e, const std::string& prop);
 
     // ── One question, asked by every input entry point ───────────────────────
     // While a layer is up, everything under it is inert — and "everything" has
@@ -1297,6 +1315,26 @@ private:
     // drag instead. Read and cleared by the release in the same call.
     bool  m_dragAteClick = false;
     static constexpr float kDragThreshold = 4.0f;   // pixels
+    // Where the carry last REPORTED itself (render-target pixels), so that
+    // OnDragMoved fires on movement and not on every call: the pointer is
+    // reported every frame whether or not it moved, and a graph that hears
+    // "moved" sixty times a second while the hand is still would be right to
+    // call it a lie. `m_dragReported` is false until the lift, so the first
+    // report always goes out — the hand is already off the press point then.
+    float m_dragLastX = 0.0f, m_dragLastY = 0.0f;
+    bool  m_dragReported = false;
+    // …and the drop target the source was last SEEN over, so the target hears
+    // OnDragEnter/OnDragLeave once per crossing. Its own pair beside
+    // m_dropWidget/m_dropElem on purpose: those are the drawn mark, shared with
+    // the OS file drag, and a Finder drag must not fire the in-app events.
+    int   m_dragOverWidget = 0, m_dragOverElem = 0;
+    // Tell the target the carry arrived over it or left it; `w`/`elem` = 0
+    // means "nothing" on either side. Compares against the pair above, so
+    // calling it with the same answer twice is a no-op.
+    void  setDragOver(Instance* w, int elem);
+    // The carried element's payload, or its name when none was set ("" when
+    // nothing is carried). What OnDragEnter and OnDrop hand the target.
+    std::string dragPayloadText() const;
 
     // ── The one hit test ─────────────────────────────────────────────────────
     // Topmost hit-testable element under a point, across every visible widget

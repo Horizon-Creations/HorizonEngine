@@ -139,6 +139,10 @@ public:
     // owner and not a thing that happened to the data.
     virtual void onHeaderClicked(int elem, int column)
     { fireEvent("OnHeaderClicked", elem, Value::ofInt(column)); }
+    // A tree's node was folded open or shut. The argument is the NODE index;
+    // which way it went is the tree's "Collapsed" property, read afterwards.
+    virtual void onNodeToggled(int elem, int node)
+    { fireEvent("OnNodeToggled", elem, Value::ofInt(node)); }
     virtual void onRightClicked(int elem) { fireEvent("OnRightClicked", elem, Value{}); }
     // A file was dropped on this element from the desktop. One call per file,
     // the argument being its absolute path — a drop of three files is three
@@ -169,12 +173,19 @@ public:
     // A link in a rich-text label. The argument is the link's id.
     virtual void onLinkClicked(int elem, const std::string& id)
     { fireEvent("OnLinkClicked", elem, Value::ofString(id)); }
-    // Dragging inside the application: picked up, let go over me, and over.
+    // Dragging inside the application: picked up, carried (the pointer in the
+    // source widget's canvas units), and over — then, on the target, something
+    // arrived over me, left me, and was let go over me.
     virtual void onDragStarted(int elem) { fireEvent("OnDragStarted", elem, Value{}); }
-    virtual void onDrop(int elem, const std::string& payload)
-    { fireEvent("OnDrop", elem, Value::ofString(payload)); }
+    virtual void onDragMoved(int elem, const glm::vec2& canvasPos)
+    { fireEvent("OnDragMoved", elem, Value::ofVec2(canvasPos)); }
     virtual void onDragEnded(int elem, bool accepted)
     { fireEvent("OnDragEnded", elem, Value::ofBool(accepted)); }
+    virtual void onDragEnter(int elem, const std::string& payload)
+    { fireEvent("OnDragEnter", elem, Value::ofString(payload)); }
+    virtual void onDragLeave(int elem) { fireEvent("OnDragLeave", elem, Value{}); }
+    virtual void onDrop(int elem, const std::string& payload)
+    { fireEvent("OnDrop", elem, Value::ofString(payload)); }
     // An animation reached its target. The argument is the PROPERTY's name, not
     // the element's: two animations on one element (fade it and slide it) end
     // separately, and an event that could not say which one ended would be a

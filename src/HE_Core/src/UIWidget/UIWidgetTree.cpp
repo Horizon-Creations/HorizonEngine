@@ -235,7 +235,26 @@ namespace
                              canvas ? canvas->height : tree.canvasHeight };
         if (e.parentId != 0)
             if (const UIElement* p = tree.find(e.parentId))
+            {
                 parent = uiElementRect(tree, *p, canvas);
+                // A child of a WidgetRef in the DESIGNER: its parent is really
+                // the component's NamedSlot, which the designer has located
+                // (designSlots) but not grafted. The slot's rect is in the
+                // embedded widget's units; the ref's rect is that widget's
+                // screen, so the same scale-mode arithmetic the graft uses
+                // turns one into the other. At runtime designSlots is empty
+                // and the child's parent IS the slot, so this never runs.
+                if (const auto* ref = dynamic_cast<const UIWidgetRef*>(p))
+                    if (const UIWidgetRef::DesignSlot* s = ref->designSlotFor(e.name);
+                        s && ref->contentW > 0.0f && ref->contentH > 0.0f)
+                    {
+                        const UIWidgetCanvas sub = uiResolveCanvasFor(
+                            ref->contentW, ref->contentH, ref->contentMode, parent.w, parent.h);
+                        parent = { parent.x + s->rect.x * sub.scaleX,
+                                   parent.y + s->rect.y * sub.scaleY,
+                                   s->rect.w * sub.scaleX, s->rect.h * sub.scaleY };
+                    }
+            }
         return parent;
     }
 }
@@ -391,13 +410,57 @@ UIWidgetRect uiElementAnchorRect(const UIWidgetTree& tree, const UIElement& e,
 
 namespace
 {
+    // What a child COSTS its container on one axis beyond its own size: the two
+    // slot margins on that axis, in the child's units. The walk that places,
+    // the box that measures itself and the scroll box that counts its overflow
+    // all add this, so a margin is never in one and missing from another.
+    float slotPadX(const UIElement& c) { return std::max(0.0f, c.slotPadLeft) + std::max(0.0f, c.slotPadRight); }
+    float slotPadY(const UIElement& c) { return std::max(0.0f, c.slotPadTop)  + std::max(0.0f, c.slotPadBottom); }
+
+    // ── From the slot to the child's rect ────────────────────────────────────
+    // The container decides the SLOT; this decides where the child sits in it.
+    // First the slot's own margins come off, then on each axis the child either
+    // takes what is left (Fill, the only behaviour there used to be) or keeps
+    // its own size and is pinned to a side or the middle. Its own size is not
+    // clamped to the slot: a child wider than its slot shows over the edge,
+    // which is visible and fixable, where a silently shrunk one is not.
+    //
+    // `us`/`vs` convert the child's units to the host's (an element inside an
+    // embedded widget is padded and sized in that widget's terms).
+    UIWidgetRect alignInSlot(const UIElement& c, const UIWidgetRect& slot,
+                             float us, float vs)
+    {
+        UIWidgetRect r{ slot.x + std::max(0.0f, c.slotPadLeft) * us,
+                        slot.y + std::max(0.0f, c.slotPadTop)  * vs,
+                        std::max(0.0f, slot.w - slotPadX(c) * us),
+                        std::max(0.0f, slot.h - slotPadY(c) * vs) };
+        if (c.slotHAlign != UISlotHAlign::Fill)
+        {
+            const float w = c.sizeX * us;
+            if      (c.slotHAlign == UISlotHAlign::Center) r.x += (r.w - w) * 0.5f;
+            else if (c.slotHAlign == UISlotHAlign::Right)  r.x += r.w - w;
+            r.w = w;
+        }
+        if (c.slotVAlign != UISlotVAlign::Fill)
+        {
+            const float h = c.sizeY * vs;
+            if      (c.slotVAlign == UISlotVAlign::Center) r.y += (r.h - h) * 0.5f;
+            else if (c.slotVAlign == UISlotVAlign::Bottom) r.y += r.h - h;
+            r.h = h;
+        }
+        return r;
+    }
+
     // The slot a layout container hands one of its children.
     //
-    // Along the box's axis every visible child takes its own size, unless its
-    // slotFill is > 0: those share what is left after the fixed ones and the
-    // gaps, in proportion. Across the axis each child gets the full inner
-    // extent. An invisible child takes no space, so hiding one closes the gap
-    // instead of leaving a hole where it used to be.
+    // Along the box's axis every visible child takes its own size plus its two
+    // slot margins, unless its slotFill is > 0: those share what is left after
+    // the fixed ones and the gaps, in proportion, margins inside the share.
+    // Across the axis the slot is the full inner extent. An invisible child
+    // takes no space, so hiding one closes the gap instead of leaving a hole
+    // where it used to be. The slot then goes through alignInSlot, which is
+    // where the margins come off and a non-Fill alignment keeps the child's
+    // own size.
     UIWidgetRect boxSlotRect(const UIWidgetTree& tree, const UIElement& box,
                              const UIElement& child, const UIWidgetCanvas* canvas)
     {
@@ -432,7 +495,8 @@ namespace
             // A child's own size is in the same units as the box's (they are in
             // the same widget), so one axis factor converts both.
             if (sp->slotFill > 0.0f) fillSum += sp->slotFill;
-            else                     fixed += (vert ? sp->sizeY : sp->sizeX) * axisScale;
+            else                     fixed += (vert ? sp->sizeY + slotPadY(*sp)
+                                                    : sp->sizeX + slotPadX(*sp)) * axisScale;
         }
         const float gaps = count > 1 ? gap * static_cast<float>(count - 1) : 0.0f;
         const float leftover = std::max(0.0f, axisSpace - fixed - gaps);
@@ -449,12 +513,13 @@ namespace
             if (!sp || sp->parentId != box.id || !sp->visible) continue;
             const float extent = (sp->slotFill > 0.0f && fillSum > 0.0f)
                 ? leftover * (sp->slotFill / fillSum)
-                : (vert ? sp->sizeY : sp->sizeX) * axisScale;
+                : (vert ? sp->sizeY + slotPadY(*sp)
+                        : sp->sizeX + slotPadX(*sp)) * axisScale;
             if (sp->id == child.id)
             {
                 if (vert) { out.x = inner.x; out.w = inner.w; out.y = cursor; out.h = extent; }
                 else      { out.y = inner.y; out.h = inner.h; out.x = cursor; out.w = extent; }
-                break;
+                return alignInSlot(child, out, bus, bvs);
             }
             cursor += extent + gap;
         }
@@ -613,8 +678,10 @@ namespace
                     {
                         int c = 0, r = 0, cs = 1, rs = 1;
                         if (!g.cellOf(k->id, c, r, cs, rs)) continue;
-                        if (horizontal) { if (c != i || cs != 1) continue; m = std::max(m, k->sizeX * unit); }
-                        else            { if (r != i || rs != 1) continue; m = std::max(m, k->sizeY * unit); }
+                        // Its slot margins are part of what it needs from the
+                        // track — the same sum the box walk adds along its axis.
+                        if (horizontal) { if (c != i || cs != 1) continue; m = std::max(m, (k->sizeX + slotPadX(*k)) * unit); }
+                        else            { if (r != i || rs != 1) continue; m = std::max(m, (k->sizeY + slotPadY(*k)) * unit); }
                     }
                     size[i] = m; fixedSum += m;
                 }
@@ -745,8 +812,9 @@ namespace
         // between them is what "spans two" means.
         w += gapX * static_cast<float>(std::min(cs, g.cols - c) - 1);
         h += gapY * static_cast<float>(std::min(rs, g.rows - r) - 1);
-        return { inner.x + g.colPos[c], inner.y + g.rowPos[r],
-                 std::max(0.0f, w), std::max(0.0f, h) };
+        // The cell is the slot; margins and alignment happen inside it.
+        return alignInSlot(child, { inner.x + g.colPos[c], inner.y + g.rowPos[r],
+                                    std::max(0.0f, w), std::max(0.0f, h) }, us, vs);
     }
 
     // The slot a WrapBox hands one of its children.
@@ -776,35 +844,55 @@ namespace
                                   std::max(0.0f, b.w - 2.0f * padX),
                                   std::max(0.0f, b.h - 2.0f * padY) };
 
+        // Two passes over the children rather than one: a child's place on a
+        // line is known the moment it is reached, but the line's HEIGHT is not
+        // known until the line is full, and a slot aligned to the bottom or
+        // the middle of its line needs that height. The first pass breaks the
+        // lines and records each one's height; the second places.
+        struct Placed { const UIElement* e; float x, y, w, h; int line; };
+        std::vector<Placed> placed;
+        std::vector<float>  lineHeights;
         float x = inner.x, y = inner.y, lineH = 0.0f;
-        UIWidgetRect found{ inner.x, inner.y, 0.0f, 0.0f };
-        bool got = false;
         for (const auto& sp : tree.elements)
         {
             if (!sp || sp->parentId != box.id || !sp->visible) continue;
-            const float w = sp->sizeX * us;
-            const float h = sp->sizeY * vs;
+            // The slot is the child plus its margins: that is what runs along
+            // the line and what the line has to be tall enough for.
+            const float w = (sp->sizeX + slotPadX(*sp)) * us;
+            const float h = (sp->sizeY + slotPadY(*sp)) * vs;
             // A break only when something is already on this line: a child wider
             // than the whole box still gets its own line rather than an empty
             // one above it.
             if (x > inner.x + 0.001f && x + w > inner.x + inner.w + 0.001f)
             {
+                lineHeights.push_back(lineH);
                 x = inner.x;
                 y += lineH + gapY;
                 lineH = 0.0f;
             }
-            if (child && sp->id == child->id)
-            {
-                found = { x, y, w, h };
-                got = true;
-                if (!outContentHeight) break;   // nothing left to measure
-            }
+            placed.push_back({ sp.get(), x, y, w, h, static_cast<int>(lineHeights.size()) });
             x += w + gapX;
             lineH = std::max(lineH, h);
         }
+        lineHeights.push_back(lineH);
         if (outContentHeight) *outContentHeight = (y + lineH) - inner.y;
-        if (!got && child) found.h = 0.0f;      // not a child of this box
-        return found;
+
+        UIWidgetRect found{ inner.x, inner.y, 0.0f, 0.0f };
+        if (!child) return found;
+        for (const Placed& p : placed)
+        {
+            if (p.e->id != child->id) continue;
+            // Fill on the line's axis means what it always did here — the
+            // child's own height, at the top of the line — and not "as tall as
+            // the tallest thing on this line": a row of chips with one tall
+            // entry must not grow every chip beside it. Top/Center/Bottom pin
+            // the child's own height within the line.
+            UIWidgetRect slot{ p.x, p.y, p.w, p.h };
+            if (child->slotVAlign != UISlotVAlign::Fill)
+                slot.h = lineHeights[static_cast<std::size_t>(p.line)];
+            return alignInSlot(*child, slot, us, vs);
+        }
+        return found;                            // not a child of this box
     }
 
     // The slot a ListView hands one of its rows.
@@ -1265,9 +1353,13 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
             if (!cp || cp->parentId != box->id || !cp->visible) continue;
             ++count;
             // A filling child's size IS the leftover this is computing, so it
-            // contributes nothing along the axis — across it still counts.
-            if (cp->slotFill <= 0.0f) along += vert ? cp->sizeY : cp->sizeX;
-            across = std::max(across, vert ? cp->sizeX : cp->sizeY);
+            // contributes nothing along the axis — across it still counts. The
+            // slot margins are part of the child's cost on both axes, exactly
+            // as boxSlotRect charges them.
+            if (cp->slotFill <= 0.0f) along += vert ? cp->sizeY + slotPadY(*cp)
+                                                    : cp->sizeX + slotPadX(*cp);
+            across = std::max(across, vert ? cp->sizeX + slotPadX(*cp)
+                                           : cp->sizeY + slotPadY(*cp));
         }
         if (count > 1) along += gap * static_cast<float>(count - 1);
         const float w = (vert ? across : along) + 2.0f * pad;
@@ -1453,6 +1545,14 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
             lv->scrollOffset  = std::clamp(lv->scrollOffset, 0.0f, lv->maxScroll());
             continue;
         }
+        // A tree measures itself from the rows its folds leave visible — the
+        // same idea as the list's count, with the fold state in the sum.
+        if (auto* tv = dynamic_cast<UITreeView*>(bp.get()))
+        {
+            tv->contentExtent = tv->measuredExtent();
+            tv->scrollOffset  = std::clamp(tv->scrollOffset, 0.0f, tv->maxScroll());
+            continue;
+        }
         // An accordion measures the same walk twice over: what its headings say
         // and how tall its bodies are is exactly what its content extent is
         // made of, so the caches render() draws from are filled HERE — after
@@ -1497,7 +1597,7 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
         {
             if (!cp || cp->parentId != sb->id || !cp->visible) continue;
             ++count;
-            if (cp->slotFill <= 0.0f) total += cp->sizeY;
+            if (cp->slotFill <= 0.0f) total += cp->sizeY + slotPadY(*cp);
         }
         if (count > 1) total += std::max(0.0f, sb->spacing) * static_cast<float>(count - 1);
         sb->contentExtent = total;
@@ -1683,6 +1783,14 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (e.tabIndex != 0)     o["tabIndex"] = e.tabIndex;
     if (!e.enabled)          o["enabled"] = false;
     if (e.slotFill > 0.0f)   o["slotFill"] = e.slotFill;
+    // The slot's alignment and margins, only once set: Fill and 0 are what every
+    // element authored before them did, so those save byte-identically. The
+    // alignment goes out as its NAME, like every enum that is an on-disk format
+    // here, so a value inserted into the enum one day cannot re-read as another.
+    if (e.slotHAlign != UISlotHAlign::Fill) o["slotAlignH"] = uiSlotHAlignName(e.slotHAlign);
+    if (e.slotVAlign != UISlotVAlign::Fill) o["slotAlignV"] = uiSlotVAlignName(e.slotVAlign);
+    if (e.slotPadLeft > 0.0f || e.slotPadTop > 0.0f || e.slotPadRight > 0.0f || e.slotPadBottom > 0.0f)
+        o["slotPadding"] = { e.slotPadLeft, e.slotPadTop, e.slotPadRight, e.slotPadBottom };
     // The floor and the ceiling. "minSize" is the key the four container types
     // already wrote when it lived on them, written under the same condition and
     // into the same object, so a box that carries one saves byte-identically;
@@ -1820,6 +1928,17 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->tabIndex      = o.value("tabIndex", 0);
     e->enabled       = o.value("enabled", true);
     e->slotFill      = o.value("slotFill", 0.0f);
+    // A name nobody knows reads as Fill — the behaviour the file had before
+    // the key existed, not an arbitrary side.
+    e->slotHAlign    = uiSlotHAlignFromName(o.value("slotAlignH", std::string{}));
+    e->slotVAlign    = uiSlotVAlignFromName(o.value("slotAlignV", std::string{}));
+    if (const auto& m = o.value("slotPadding", nlohmann::json::array()); m.size() >= 4)
+    {
+        e->slotPadLeft   = std::max(0.0f, m[0].get<float>());
+        e->slotPadTop    = std::max(0.0f, m[1].get<float>());
+        e->slotPadRight  = std::max(0.0f, m[2].get<float>());
+        e->slotPadBottom = std::max(0.0f, m[3].get<float>());
+    }
     if (const auto& m = o.value("minSize", nlohmann::json::array()); m.size() >= 2)
     { e->minSizeX = std::max(0.0f, m[0].get<float>()); e->minSizeY = std::max(0.0f, m[1].get<float>()); }
     if (const auto& m = o.value("maxSize", nlohmann::json::array()); m.size() >= 2)
@@ -2314,6 +2433,7 @@ const char* surfacePropOf(const UIElement& e)
     // marker ring against them would report a number about a colour the author
     // did not choose.
     case UIWidgetType::ColorPicker: return "Back Color";
+    case UIWidgetType::TreeView:    return "Back Color";
     default:                        return nullptr;
     }
 }
@@ -2330,6 +2450,8 @@ const char* textPropOf(const UIElement& e)
     case UIWidgetType::TabBox:    return "Text Color";
     case UIWidgetType::Accordion: return "Text Color";
     case UIWidgetType::DatePicker: return "Text Color";
+    case UIWidgetType::RadioButton: return "Text Color";
+    case UIWidgetType::TreeView:   return "Text Color";
     default:                      return nullptr;
     }
 }
@@ -2430,6 +2552,233 @@ std::unique_ptr<UIElement> uiElementFromJson(const std::string& json)
     nlohmann::json j;
     if (!HE::graph::parseGraphObject(json, j)) return nullptr;
     return uiElementFromJsonObj(j);
+}
+
+// ── A selection of several elements (docs/he-apps-plan.md D4) ────────────────
+
+std::vector<int> uiSelectionRoots(const UIWidgetTree& tree, const std::vector<int>& ids)
+{
+    const auto selected = [&ids](int id)
+    { return std::find(ids.begin(), ids.end(), id) != ids.end(); };
+    std::vector<int> out;
+    // Walking the tree rather than `ids` is what makes the answer come back in
+    // paint order whatever order the ids were clicked in.
+    for (const auto& ep : tree.elements)
+    {
+        if (!ep || !selected(ep->id)) continue;
+        bool covered = false;
+        int cur = ep->parentId;
+        for (std::size_t guard = 0; cur != 0 && guard <= tree.elements.size(); ++guard)
+        {
+            if (selected(cur)) { covered = true; break; }
+            const UIElement* p = tree.find(cur);
+            cur = p ? p->parentId : 0;
+        }
+        if (!covered) out.push_back(ep->id);
+    }
+    return out;
+}
+
+std::vector<int> uiElementsInside(const UIWidgetTree& tree, const UIWidgetRect& box,
+                                  const UIWidgetCanvas* canvas)
+{
+    const float bx1 = box.x + box.w, by1 = box.y + box.h;
+    std::vector<int> hit;
+    for (const auto& ep : tree.elements)
+    {
+        if (!ep || !uiElementEffectiveVisible(tree, *ep)) continue;
+        const UIWidgetRect r = uiElementRect(tree, *ep, canvas);
+        if (r.x >= box.x && r.y >= box.y && r.x + r.w <= bx1 && r.y + r.h <= by1)
+            hit.push_back(ep->id);
+    }
+    return uiSelectionRoots(tree, hit);
+}
+
+// ── Copy and paste ───────────────────────────────────────────────────────────
+
+std::string uiElementsToClipboard(const UIWidgetTree& tree, const std::vector<int>& ids)
+{
+    const std::vector<int> roots = uiSelectionRoots(tree, ids);
+    if (roots.empty()) return std::string();
+    // The roots and everything under them, gathered by id first…
+    std::vector<int> take = roots;
+    for (std::size_t i = 0; i < take.size(); ++i)
+        for (int c : tree.childrenOf(take[i]))
+            take.push_back(c);
+    // …then written in TREE order, so the document keeps what lies over what
+    // and a paste can add the elements front to back without a second pass.
+    nlohmann::json je = nlohmann::json::array();
+    for (const auto& ep : tree.elements)
+        if (ep && std::find(take.begin(), take.end(), ep->id) != take.end())
+            je.push_back(uiElementToJsonObj(*ep));
+    nlohmann::json doc;
+    doc["elements"] = std::move(je);
+    return doc.dump();
+}
+
+std::vector<int> uiElementsFromClipboard(UIWidgetTree& tree, const std::string& json,
+                                         int parentId, float offsetX, float offsetY)
+{
+    std::vector<int> out;
+    nlohmann::json j;
+    if (!HE::graph::parseGraphObject(json, j)) return out;
+    if (parentId != 0)
+    {
+        const UIElement* p = tree.find(parentId);
+        if (!p || !p->acceptsChildren()) return out;
+    }
+    const nlohmann::json& arr = j.value("elements", nlohmann::json::array());
+    if (!arr.is_array() || arr.empty()) return out;
+
+    // Two passes, because the document is in PAINT order and a child may well
+    // be painted before its parent (moveElement moves the parent's entry, not
+    // the child's): first every element gets its fresh id, then the parent
+    // links are rewritten through the finished map. A parent link that names
+    // nothing in the document is what makes an element a root.
+    std::vector<std::pair<int, int>> remap;   // old id → new id
+    std::vector<int> added;
+    for (const auto& o : arr)
+    {
+        std::unique_ptr<UIElement> e = uiElementFromJsonObj(o);
+        if (!e) continue;
+        const int oldId = e->id;
+        const int fresh = tree.add(std::move(e));
+        remap.emplace_back(oldId, fresh);
+        added.push_back(fresh);
+    }
+    for (int fresh : added)
+    {
+        UIElement* e = tree.find(fresh);
+        if (!e) continue;
+        int newParent = 0;
+        bool root = true;
+        for (const auto& m : remap)
+            if (m.first == e->parentId) { newParent = m.second; root = false; break; }
+        if (root)
+        {
+            newParent = parentId;
+            e->posX += offsetX;
+            e->posY += offsetY;
+            out.push_back(fresh);
+        }
+        e->parentId = newParent;
+    }
+    return out;
+}
+
+// ── Lining a selection up ────────────────────────────────────────────────────
+
+int uiAlignElements(UIWidgetTree& tree, const std::vector<int>& ids, UIAlignOp op,
+                    const UIWidgetCanvas* canvas)
+{
+    struct Item { UIElement* e; UIWidgetRect r; };
+    std::vector<Item> items;
+    for (int id : uiSelectionRoots(tree, ids))
+    {
+        UIElement* e = tree.find(id);
+        if (!e) continue;
+        // Placed by its box: nothing here can move it.
+        if (e->parentId != 0)
+            if (const UIElement* p = tree.find(e->parentId); p && p->laysOutChildren())
+                continue;
+        items.push_back({ e, uiElementRect(tree, *e, canvas) });
+    }
+    if (items.empty()) return 0;
+
+    // The frame the edges are measured against.
+    UIWidgetRect frame{};
+    if (items.size() >= 2)
+    {
+        float x0 = items[0].r.x, y0 = items[0].r.y;
+        float x1 = x0 + items[0].r.w, y1 = y0 + items[0].r.h;
+        for (const Item& it : items)
+        {
+            x0 = std::min(x0, it.r.x);           y0 = std::min(y0, it.r.y);
+            x1 = std::max(x1, it.r.x + it.r.w);  y1 = std::max(y1, it.r.y + it.r.h);
+        }
+        frame = { x0, y0, x1 - x0, y1 - y0 };
+    }
+    else
+    {
+        const UIElement& e = *items[0].e;
+        if (e.parentId != 0)
+        {
+            const UIElement* p = tree.find(e.parentId);
+            if (!p) return 0;
+            frame = uiElementRect(tree, *p, canvas);
+        }
+        else
+        {
+            frame.w = canvas ? canvas->width  : tree.canvasWidth;
+            frame.h = canvas ? canvas->height : tree.canvasHeight;
+        }
+    }
+
+    // The distance each rect has to move, in canvas units. Written as a
+    // position delta divided by the element's unit scale, which is how
+    // uiElementRect turns posX into a rect edge.
+    const auto moveBy = [&](Item& it, float dx, float dy)
+    {
+        if (std::abs(dx) < 0.0001f && std::abs(dy) < 0.0001f) return false;
+        float us = 1.0f, vs = 1.0f;
+        uiElementUnitScale(tree, *it.e, us, vs, canvas);
+        if (us <= 0.0f) us = 1.0f;
+        if (vs <= 0.0f) vs = 1.0f;
+        it.e->posX += dx / us;
+        it.e->posY += dy / vs;
+        return true;
+    };
+
+    int moved = 0;
+    switch (op)
+    {
+    case UIAlignOp::Left:
+        for (Item& it : items) moved += moveBy(it, frame.x - it.r.x, 0.0f);
+        break;
+    case UIAlignOp::HCenter:
+        for (Item& it : items)
+            moved += moveBy(it, (frame.x + frame.w * 0.5f) - (it.r.x + it.r.w * 0.5f), 0.0f);
+        break;
+    case UIAlignOp::Right:
+        for (Item& it : items) moved += moveBy(it, (frame.x + frame.w) - (it.r.x + it.r.w), 0.0f);
+        break;
+    case UIAlignOp::Top:
+        for (Item& it : items) moved += moveBy(it, 0.0f, frame.y - it.r.y);
+        break;
+    case UIAlignOp::VCenter:
+        for (Item& it : items)
+            moved += moveBy(it, 0.0f, (frame.y + frame.h * 0.5f) - (it.r.y + it.r.h * 0.5f));
+        break;
+    case UIAlignOp::Bottom:
+        for (Item& it : items) moved += moveBy(it, 0.0f, (frame.y + frame.h) - (it.r.y + it.r.h));
+        break;
+    case UIAlignOp::DistributeH:
+    case UIAlignOp::DistributeV:
+    {
+        // Three or more: the outermost two stay, the rest are spaced so the
+        // GAPS between neighbours come out equal. Equal gaps rather than equal
+        // centres, because elements of different widths spaced by centre look
+        // uneven, and what an eye reads is the space between them.
+        if (items.size() < 3) return 0;
+        const bool h = op == UIAlignOp::DistributeH;
+        std::sort(items.begin(), items.end(), [h](const Item& a, const Item& b)
+                  { return h ? a.r.x < b.r.x : a.r.y < b.r.y; });
+        float extent = 0.0f;
+        for (const Item& it : items) extent += h ? it.r.w : it.r.h;
+        const Item& last = items.back();
+        const float span = h ? (last.r.x + last.r.w) - items[0].r.x
+                             : (last.r.y + last.r.h) - items[0].r.y;
+        const float gap = (span - extent) / static_cast<float>(items.size() - 1);
+        float at = h ? items[0].r.x : items[0].r.y;
+        for (Item& it : items)
+        {
+            moved += h ? moveBy(it, at - it.r.x, 0.0f) : moveBy(it, 0.0f, at - it.r.y);
+            at += (h ? it.r.w : it.r.h) + gap;
+        }
+        break;
+    }
+    }
+    return moved;
 }
 
 } // namespace HE

@@ -31,6 +31,7 @@
 #include <Diagnostics/Logger.h>
 #include <imgui.h>
 #include <misc/cpp/imgui_stdlib.h>
+#include <nlohmann/json.hpp>                    // pasteClipboard reads the roots' parent
 
 #include <algorithm>
 #include <cctype>
@@ -47,6 +48,8 @@ namespace
 using HE::UIElement;
 using HE::UIWidgetTree;
 using HE::UIWidgetType;
+using HE::UISlotHAlign;
+using HE::UISlotVAlign;
 using HE::UIPropDesc;
 using HE::UIPropType;
 using HE::UIPropValue;
@@ -70,6 +73,14 @@ struct State
 	bool         dirty  = false;     // unsaved-to-disk edits (tree OR graph)
 	int          viewMode = 0;       // 0 = Designer, 1 = Graph
 	int          selected = 0;       // Designer: selected element id (0 = none)
+	// The REST of a multi-selection (docs/he-apps-plan.md D4). `selected` stays
+	// the primary — the one Details shows and the handles sit on — and this
+	// holds every other member. Empty for the ordinary single selection, which
+	// is what keeps the seventy places that write `selected = x` correct
+	// without touching them: a single pick is a selection of one, and
+	// normalizeSelection() at the top of the designer frame clears this the
+	// moment the primary is no longer in it.
+	std::vector<int> selectedMore;
 
 	// Designer canvas view: fit-to-window base scale × user zoom, plus pan px.
 	float  zoom = 1.0f;
@@ -129,13 +140,22 @@ struct State
 	// the two questions.
 	int         themeModeOverride = 0;
 
-	// Designer drag. mode: 0 = none, 1 = move element, 2 = resize element.
+	// Designer drag. mode: 0 = none, 1 = move element, 2 = resize element,
+	// 3 = rubber band over the canvas (nothing under the press).
 	int    dragMode = 0;
 	int    resizeHandle = -1;        // 0..7: corners+edges (see handleOffsets)
 	ImVec2 dragStartMouse;
 	float  dragStartPos[2]  = {};
 	float  dragStartSize[2] = {};
 	bool   dragDidEdit = false;      // push one undo snapshot per completed drag
+	// The other members of a group move, with where each STARTED: the drag
+	// block runs twice a frame and writes from the start values both times
+	// (see applyDrag), so every member needs its own pair, not a delta.
+	struct GroupStart { int id; float x, y; };
+	std::vector<GroupStart> dragGroup;
+	// Whether the rubber band ADDS to the selection (Shift held at the press)
+	// or replaces it.
+	bool   marqueeAdd = false;
 	// A press inside the current selection keeps that selection so it can be
 	// DRAGGED — otherwise an element something else lies over could be selected
 	// and then never moved, because the press that starts the drag re-picks the
@@ -551,6 +571,163 @@ int duplicateSubtree(State& st, int srcId, int parentId)
 	return newId;
 }
 
+// ── The selection, as a set (docs/he-apps-plan.md D4) ───────────────────────
+// `selected` is the primary and `selectedMore` the rest; these are the only
+// places that write the second one. Everything that reads the selection as a
+// whole goes through selectionIds(), so the two cannot disagree for longer
+// than a frame.
+std::vector<int> selectionIds(const State& st)
+{
+	std::vector<int> ids;
+	if (st.selected != 0) ids.push_back(st.selected);
+	for (int id : st.selectedMore)
+		if (id != st.selected) ids.push_back(id);
+	return ids;
+}
+
+bool isSelected(const State& st, int id)
+{
+	if (id == 0) return false;
+	if (st.selected == id) return true;
+	return std::find(st.selectedMore.begin(), st.selectedMore.end(), id) != st.selectedMore.end();
+}
+
+// Once per designer frame: drop what the tree no longer holds, and collapse
+// the set when the primary has been REPLACED by a single pick somewhere (an
+// add, a drop, a hierarchy click) — that pick meant "this one", and the set
+// would otherwise drag the old members along behind the new selection.
+void normalizeSelection(State& st)
+{
+	if (st.selectedMore.empty()) return;
+	st.selectedMore.erase(std::remove_if(st.selectedMore.begin(), st.selectedMore.end(),
+		[&](int id) { return id == 0 || !st.tree.find(id); }), st.selectedMore.end());
+	if (st.selected == 0 || !isSelected(st, st.selected)) { st.selectedMore.clear(); return; }
+	// Each member once. The press that hands the primary's role to a selected
+	// ancestor pushes the old primary in beside an ancestor that is already
+	// there, and a set that holds an id twice would toggle it twice.
+	std::vector<int> once;
+	for (int id : st.selectedMore)
+		if (id != st.selected && std::find(once.begin(), once.end(), id) == once.end())
+			once.push_back(id);
+	st.selectedMore.swap(once);
+}
+
+void selectOnly(State& st, int id)
+{
+	st.selected = id;
+	st.selectedMore.clear();
+}
+
+// Shift+click: in or out of the set. The one just added becomes the primary,
+// so Details shows what was clicked last; removing the primary hands that
+// role to the last remaining member.
+void selectToggle(State& st, int id)
+{
+	if (id == 0) return;
+	if (isSelected(st, id))
+	{
+		std::vector<int> rest = selectionIds(st);
+		rest.erase(std::remove(rest.begin(), rest.end(), id), rest.end());
+		st.selectedMore.clear();
+		st.selected = rest.empty() ? 0 : rest.back();
+		for (int r : rest) if (r != st.selected) st.selectedMore.push_back(r);
+		return;
+	}
+	if (st.selected != 0) st.selectedMore.push_back(st.selected);
+	st.selected = id;
+}
+
+void selectSet(State& st, const std::vector<int>& ids)
+{
+	st.selectedMore.clear();
+	st.selected = ids.empty() ? 0 : ids.back();
+	for (int id : ids) if (id != st.selected) st.selectedMore.push_back(id);
+}
+
+// ── Group operations: every one works on the ROOTS of the selection ─────────
+// (uiSelectionRoots), so a panel and the button inside it are one thing to
+// delete, to duplicate and to copy. None of these commit: the caller does,
+// once, because that is one undo step.
+void deleteSelection(State& st)
+{
+	for (int id : HE::uiSelectionRoots(st.tree, selectionIds(st)))
+		st.tree.removeSubtree(id);
+	selectOnly(st, 0);
+}
+
+void duplicateSelection(State& st)
+{
+	std::vector<int> fresh;
+	for (int id : HE::uiSelectionRoots(st.tree, selectionIds(st)))
+		if (const UIElement* n = st.tree.find(id))
+			if (const int d = duplicateSubtree(st, id, n->parentId); d != 0)
+				fresh.push_back(d);
+	if (!fresh.empty()) selectSet(st, fresh);
+}
+
+// ── Clipboard ────────────────────────────────────────────────────────────────
+// One per process, shared by every widget tab, so a card copied in one widget
+// pastes into another — the same arrangement as HcClipboard for graph nodes.
+// The payload is the clipboard document uiElementsToClipboard writes, which is
+// the file's own element form, so a type added later needs nothing here.
+std::string& elementClipboard()
+{
+	static std::string s_clip;
+	return s_clip;
+}
+// How often the current clipboard has been pasted beside its original: the
+// n-th paste lands n steps further, or every Ctrl+V after the first would put
+// its copy exactly on top of the one before. Reset by the next copy.
+int& elementPasteRun()
+{
+	static int s_run = 0;
+	return s_run;
+}
+
+bool copySelection(const State& st)
+{
+	const std::string doc = HE::uiElementsToClipboard(st.tree, selectionIds(st));
+	if (doc.empty()) return false;
+	elementClipboard() = doc;
+	elementPasteRun() = 0;
+	return true;
+}
+
+// Where a paste lands: INTO the primary when it takes children, otherwise
+// beside it, and on the canvas when nothing is selected. That is what a
+// selection means to a paste — "here" — and it is the same answer the
+// hierarchy gives a palette drop. Shifted by the duplicate's twenty when the
+// copy lands where its original still is, so the two do not sit on top of
+// each other.
+bool pasteClipboard(State& st)
+{
+	const std::string& doc = elementClipboard();
+	if (doc.empty()) return false;
+	int parent = 0;
+	if (const UIElement* n = st.tree.find(st.selected))
+		parent = n->acceptsChildren() ? n->id : n->parentId;
+	// The originals' parent, read out of the document: if the first root came
+	// from this very parent, the copy is landing beside it.
+	bool sameParent = false;
+	{
+		const nlohmann::json j = nlohmann::json::parse(doc, nullptr, false);
+		if (j.is_object())
+			for (const auto& o : j.value("elements", nlohmann::json::array()))
+			{
+				const int p = o.value("parent", 0);
+				bool inDoc = false;
+				for (const auto& o2 : j["elements"]) if (o2.value("id", -1) == p) { inDoc = true; break; }
+				if (!inDoc) { sameParent = p == parent; break; }
+			}
+	}
+	const float off = sameParent ? 20.0f * static_cast<float>(elementPasteRun() + 1) : 0.0f;
+	const std::vector<int> fresh = HE::uiElementsFromClipboard(st.tree, doc, parent, off, off);
+	if (fresh.empty()) return false;
+	if (sameParent) ++elementPasteRun();
+	selectSet(st, fresh);
+	return true;
+}
+
 // ── Asset-slot widget: dropdown over the project's assets of a given type ─────
 // A combo listing every matching asset (picked by content-relative path), with
 // a "(none)" entry to clear the slot. The combo is also a drag-drop target for
@@ -639,7 +816,7 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	                           ImGuiTreeNodeFlags_SpanAvailWidth |
 	                           ImGuiTreeNodeFlags_DefaultOpen;
 	if (children.empty())      flags |= ImGuiTreeNodeFlags_Leaf;
-	if (st.selected == nodeId) flags |= ImGuiTreeNodeFlags_Selected;
+	if (isSelected(st, nodeId)) flags |= ImGuiTreeNodeFlags_Selected;
 
 	const std::string label = elementName(*n) + "##hn" + std::to_string(nodeId);
 	const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
@@ -648,8 +825,14 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 	// item of its own but the payload accept blocks do their own bookkeeping.
 	const ImVec2 rowMin = ImGui::GetItemRectMin();
 	const ImVec2 rowMax = ImGui::GetItemRectMax();
+	// Shift adds to or takes from the selection; a plain click is the
+	// selection. Shift and not Ctrl, because on the Mac ImGui's Ctrl is the
+	// command key and Ctrl+click is a right click there.
 	if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !ImGui::IsItemToggledOpen())
-		st.selected = nodeId;
+	{
+		if (ImGui::GetIO().KeyShift) selectToggle(st, nodeId);
+		else                         selectOnly(st, nodeId);
+	}
 
 	// Drag source: reparent by dropping onto another node (or the canvas root).
 	if (ImGui::BeginDragDropSource())
@@ -746,19 +929,32 @@ void drawHierarchyNode(State& st, AppContext& ctx, int nodeId, bool& structureEd
 		ImGui::EndDragDropTarget();
 	}
 
-	// Context menu: delete / duplicate.
+	// Context menu: copy / cut / paste / duplicate / delete. On a row that is
+	// part of the selection the menu means the WHOLE selection — that is what
+	// right-clicking one of several highlighted rows means everywhere else —
+	// and on any other row it means that row alone.
 	if (ImGui::BeginPopupContextItem((std::string("##hctx") + std::to_string(nodeId)).c_str()))
 	{
 		HE::Ed::Help::Scope helpScope("UI Hierarchy");
+		if (!isSelected(st, nodeId)) selectOnly(st, nodeId);
+		if (EditorWidgets::menuItem("Copy")) copySelection(st);
+		if (EditorWidgets::menuItem("Cut"))
+		{
+			if (copySelection(st)) { deleteSelection(st); structureEdit = true; }
+		}
+		if (EditorWidgets::menuItem("Paste", nullptr, false, !elementClipboard().empty()))
+		{
+			if (pasteClipboard(st)) structureEdit = true;
+		}
+		ImGui::Separator();
 		if (EditorWidgets::menuItem("Duplicate"))
 		{
-			st.selected = duplicateSubtree(st, nodeId, n->parentId);
+			duplicateSelection(st);
 			structureEdit = true;
 		}
 		if (EditorWidgets::dangerMenuItem("Delete"))
 		{
-			st.tree.removeSubtree(nodeId);
-			if (st.selected == nodeId) st.selected = 0;
+			deleteSelection(st);
 			structureEdit = true;
 		}
 		ImGui::EndPopup();
@@ -1618,6 +1814,41 @@ void drawDetails(State& st, AppContext& ctx)
 	{
 		const bool vert = layoutParent->stacksVertically();
 		ImGui::TextDisabled("Placed by the %s above it.", layoutParent->typeName());
+
+		// ── Where the child sits inside its slot ─────────────────────────
+		// Shared by the three containers that read it (box, grid, wrap box);
+		// the tab, splitter and accordion slots are full-size by construction
+		// and get no row, which is the same "no control that does nothing"
+		// rule the anchor grid follows above. `withH` is false in a wrap box:
+		// there the slot IS the child's width, so a horizontal alignment
+		// would be a combo whose four entries all look the same.
+		auto slotAlignRows = [&](bool withH)
+		{
+			static const char* kH[] = { "Fill", "Left", "Center", "Right" };
+			static const char* kV[] = { "Fill", "Top", "Center", "Bottom" };
+			if (withH)
+			{
+				int h = std::clamp((int)n->slotHAlign, 0, (int)UISlotHAlign::COUNT - 1);
+				if (ImGui::Combo("Slot Align H", &h, kH, (int)UISlotHAlign::COUNT))
+				{ n->slotHAlign = (UISlotHAlign)h; edit = committed = true; }
+				EditorWidgets::helpForLabel("Slot Align H");
+			}
+			int v = std::clamp((int)n->slotVAlign, 0, (int)UISlotVAlign::COUNT - 1);
+			if (ImGui::Combo("Slot Align V", &v, kV, (int)UISlotVAlign::COUNT))
+			{ n->slotVAlign = (UISlotVAlign)v; edit = committed = true; }
+			EditorWidgets::helpForLabel("Slot Align V");
+			// Four sides in one row, in the order CSS and UMG both use, so a
+			// number typed here means the same thing it means everywhere else.
+			float pad[4] = { n->slotPadLeft, n->slotPadTop, n->slotPadRight, n->slotPadBottom };
+			if (ImGui::DragFloat4("Slot Padding (L, T, R, B)", pad, 0.5f, 0.0f, 1000.0f))
+			{
+				n->slotPadLeft   = std::max(0.0f, pad[0]); n->slotPadTop    = std::max(0.0f, pad[1]);
+				n->slotPadRight  = std::max(0.0f, pad[2]); n->slotPadBottom = std::max(0.0f, pad[3]);
+				edit = true;
+			}
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Slot Padding (L, T, R, B)");
+		};
 		// A wrap box gives every child its OWN size on both axes and ignores
 		// Slot Fill — a child that ate the leftover space would take the whole
 		// first line and there would never be a second one. So it gets the two
@@ -1639,16 +1870,20 @@ void drawDetails(State& st, AppContext& ctx)
 			  n->gridRowSpan    = span[1] < 1 ? 1 : span[1]; edit = true; }
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			EditorWidgets::helpForLabel("Span (cols, rows)");
-			// Its own size is only read by an `auto` track — everywhere else the
-			// cell decides — so it stays editable but says so.
+			slotAlignRows(/*withH=*/true);
+			// Its own size is read by an `auto` track and by any axis whose
+			// alignment is not Fill — everywhere else the cell decides — so it
+			// stays editable and says when it is the cell that wins.
 			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::TextDisabled("Only an \"auto\" track reads this size.");
+			if (n->slotHAlign == UISlotHAlign::Fill && n->slotVAlign == UISlotVAlign::Fill)
+				ImGui::TextDisabled("Only an \"auto\" track reads this size.");
 			edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 		}
 		else if (layoutParent->type() == UIWidgetType::WrapBox)
 		{
+			slotAlignRows(/*withH=*/false);
 			edit |= ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			EditorWidgets::helpForLabel("Width");
@@ -1668,14 +1903,29 @@ void drawDetails(State& st, AppContext& ctx)
 		// the entry cannot, since it is one sentence for both. Worth the trade:
 		// the entry is also what F1 opens, and the axis is on screen anyway.
 		EditorWidgets::helpForLabel("Slot Fill");
-		// The size across the axis is the box's; the one along it is only used
-		// while this slot does not fill.
-		if (n->slotFill <= 0.0f)
+		slotAlignRows(/*withH=*/true);
+		// A size field is offered exactly where the layout reads it. Along the
+		// axis that is a slot that does not fill, or a filling one whose
+		// alignment keeps the child's own size; across it, any alignment but
+		// Fill. Offering the other one would be a number the next frame
+		// overwrites — the rule the stretched-anchor fields follow below.
+		const bool alongOwn  = n->slotFill <= 0.0f
+			|| (vert ? n->slotVAlign != UISlotVAlign::Fill : n->slotHAlign != UISlotHAlign::Fill);
+		const bool acrossOwn = vert ? n->slotHAlign != UISlotHAlign::Fill
+		                            : n->slotVAlign != UISlotVAlign::Fill;
+		const bool showW = vert ? acrossOwn : alongOwn;
+		const bool showH = vert ? alongOwn  : acrossOwn;
+		if (showW)
 		{
-			edit |= vert ? ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f)
-			             : ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			edit |= ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel(vert ? "Height" : "Width");
+			EditorWidgets::helpForLabel("Width");
+		}
+		if (showH)
+		{
+			edit |= ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Height");
 		}
 		edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -3598,6 +3848,90 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		}
 		break;
 	}
+	case UIWidgetType::RadioButton:
+	{
+		// The checkbox's row with a circle in it: same box size, same gap, so a
+		// form that mixes the two lines up here exactly as it does at runtime.
+		const float fs = propFloatOr(n, "FontSize", 18.0f) * s;
+		const float boxSz = std::min(mx.y - mn.y, fs * 1.15f);
+		const float cy = (mn.y + mx.y) * 0.5f;
+		const ImVec2 c(mn.x + boxSz * 0.5f, cy);
+		dl->AddCircleFilled(c, boxSz * 0.5f, C(propColorOr(n, "Box Color", { 0.20f,0.20f,0.20f,1 })));
+		dl->AddCircle(c, boxSz * 0.5f, IM_COL32(200,200,210,90));
+		if (propBoolOr(n, "Checked", false))
+			dl->AddCircleFilled(c, boxSz * 0.22f,
+				C(propColorOr(n, "Check Color", { 0.30f,0.80f,0.40f,1 })));
+		const std::string lbl = propStringOr(n, "Label", "");
+		if (!lbl.empty())
+			dl->AddText(nullptr, fs, ImVec2(mn.x + boxSz + 0.4f * boxSz, cy - fs * 0.5f),
+				C(propColorOr(n, "Text Color", { 1,1,1,1 })), lbl.c_str());
+		break;
+	}
+	case UIWidgetType::TreeView:
+	{
+		// Its surface is drawn above. The rows are AUTHORED here (unlike a
+		// list's), so the designer can show the tree itself: every node, at its
+		// indent, with the fold arrow it will have. All open — folds are runtime
+		// state and the designer has none.
+		const auto* tv = dynamic_cast<const HE::UITreeView*>(&n);
+		if (!tv) break;
+		const float pad  = propFloatOr(n, "Padding", 4.0f) * s;
+		const float rowH = std::max(2.0f, propFloatOr(n, "Row Height", 24.0f) * s);
+		const float ind  = propFloatOr(n, "Indent", 18.0f) * s;
+		const float fs   = std::max(6.0f, propFloatOr(n, "FontSize", 14.0f) * s);
+		const ImU32 tc = C(propColorOr(n, "Text Color", { 0.92f,0.92f,0.95f,1 }));
+		const ImU32 ac = C(propColorOr(n, "Arrow Color", { 0.75f,0.75f,0.80f,0.9f }));
+		const std::vector<HE::UITreeView::Node>& ns = tv->nodes();
+		dl->PushClipRect(ImVec2(mn.x + pad, mn.y + pad), ImVec2(mx.x - pad, mx.y - pad), true);
+		float y = mn.y + pad;
+		for (std::size_t i = 0; i < ns.size() && y < mx.y - pad; ++i, y += rowH)
+		{
+			const HE::UITreeView::Node& node = ns[i];
+			if (node.hasChildren)
+			{
+				// The same arithmetic render() draws with, so the arrow sits
+				// where a press will find it.
+				const HE::UITreeView::Arrow a =
+					HE::UITreeView::arrowIn(mn.x + pad, y, rowH, ind, node.depth);
+				const float hw = a.size * 0.5f, hh = a.size * 0.3f;
+				dl->AddTriangleFilled(ImVec2(a.cx - hw, a.cy - hh), ImVec2(a.cx + hw, a.cy - hh),
+				                      ImVec2(a.cx, a.cy + hh), ac);
+			}
+			dl->AddText(nullptr, fs, ImVec2(mn.x + pad + ind * (node.depth + 1), y + (rowH - fs) * 0.5f),
+			            tc, node.label.c_str());
+		}
+		dl->PopClipRect();
+		if (ns.empty())
+			dl->AddText(nullptr, 12.0f * std::max(0.6f, s),
+				ImVec2(mn.x + pad + 4, mn.y + pad + 2),
+				IM_COL32(210, 200, 160, 200), "no Items: one node per line, indent = depth");
+		break;
+	}
+	case UIWidgetType::NamedSlot:
+	{
+		// A hole with a name on it. Dashed so it reads as "something goes here"
+		// and not as a panel somebody forgot to colour; the name is what the
+		// page's child has to be called to land in it.
+		const ImU32 col = IM_COL32(230, 190, 120, 140);
+		const float dash = 6.0f, gap = 4.0f;
+		auto dashed = [&](ImVec2 a, ImVec2 b)
+		{
+			const float len = std::hypot(b.x - a.x, b.y - a.y);
+			if (len <= 0.0f) return;
+			const ImVec2 d((b.x - a.x) / len, (b.y - a.y) / len);
+			for (float t = 0.0f; t < len; t += dash + gap)
+			{
+				const float e = std::min(len, t + dash);
+				dl->AddLine(ImVec2(a.x + d.x * t, a.y + d.y * t),
+				            ImVec2(a.x + d.x * e, a.y + d.y * e), col);
+			}
+		};
+		dashed(mn, ImVec2(mx.x, mn.y)); dashed(ImVec2(mx.x, mn.y), mx);
+		dashed(mx, ImVec2(mn.x, mx.y)); dashed(ImVec2(mn.x, mx.y), mn);
+		const std::string cap = "[" + (n.name.empty() ? std::string("slot") : n.name) + "]";
+		dl->AddText(nullptr, 12.0f * std::max(0.6f, s), ImVec2(mn.x + 4, mn.y + 3), col, cap.c_str());
+		break;
+	}
 	default: break;
 	}
 
@@ -3650,12 +3984,75 @@ void drawElementIn(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree
 	drawElementPreview(dl, n, mn, mx, s, texHandle, alpha, dim, &tree);
 }
 
+// The embedded widget's canvas laid against `slotW` x `slotH` host units — the
+// one call both the drawing and the slot lookup go through, so the two cannot
+// place a component's roots differently. See drawEmbeddedTree for why the slot
+// is handed over in canvas units and not screen pixels.
+HE::UIWidgetCanvas embeddedCanvasFor(const HE::UIWidgetTree& tree, float slotW, float slotH)
+{
+	return HE::uiResolveCanvas(tree, std::max(1.0f, slotW), std::max(1.0f, slotH));
+}
+
+// The embedded copy as it will be measured: parameters applied, auto-size run.
+// A COPY, because auto-size mutates the tree it measures and the cached one
+// must stay as the asset wrote it.
+HE::UIWidgetTree laidEmbeddedCopy(const HE::UIWidgetTree& tree, const HE::UIWidgetRef* ref,
+                                  const HE::UIWidgetCanvas& canvas)
+{
+	HE::UIWidgetTree laid = tree;
+	if (ref && !ref->paramValues.empty())
+		HE::uiApplyWidgetParams(laid, ref->paramValues);
+	HE::uiApplyAutoSize(laid, &canvas);
+	HE::uiUpdateScrollExtents(laid);
+	return laid;
+}
+
+// ── Where a page's content lands inside a component (NamedSlot) ─────────────
+// Once per frame, before the page is laid out: every WidgetRef learns where the
+// NamedSlots of the widget it embeds are, so a child authored under the ref is
+// placed into the slot here exactly as the graft will place it at runtime. The
+// rects are in the EMBEDDED widget's units — UIWidgetTree's parentRectOf does
+// the scale-mode arithmetic — and the canvas size and mode go with them, since
+// that arithmetic needs both and only the graft used to fill them in.
+//
+// A ref with no children skips the layout: it costs a full pass over the
+// embedded tree, and a page of thirty form rows has thirty refs and no content
+// in any of them.
+void refreshDesignSlots(AppContext& ctx, HE::UIWidgetTree& page, const HE::UIWidgetCanvas* canvas)
+{
+	for (auto& ep : page.elements)
+	{
+		auto* ref = ep ? dynamic_cast<HE::UIWidgetRef*>(ep.get()) : nullptr;
+		if (!ref) continue;
+		ref->designSlots.clear();
+		const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, ref->widgetPath);
+		if (!sub) { ref->contentW = ref->contentH = 0.0f; continue; }
+		ref->contentW    = sub->canvasWidth;
+		ref->contentH    = sub->canvasHeight;
+		ref->contentMode = sub->scaleMode;
+		bool hasChild = false;
+		for (const auto& cp : page.elements)
+			if (cp && cp->parentId == ref->id) { hasChild = true; break; }
+		if (!hasChild) continue;
+
+		const HE::UIWidgetRect r = HE::uiElementRect(page, *ref, canvas);
+		const HE::UIWidgetCanvas subCanvas = embeddedCanvasFor(*sub, r.w, r.h);
+		const HE::UIWidgetTree laid = laidEmbeddedCopy(*sub, ref, subCanvas);
+		for (const auto& sp : laid.elements)
+			if (sp && sp->type() == UIWidgetType::NamedSlot)
+				ref->designSlots.push_back({ sp->name, HE::uiElementRect(laid, *sp, &subCanvas) });
+	}
+}
+
 // Draw `tree` into the rect [mn, mx] — the whole tree, in paint order, with the
 // same clipping rule the runtime uses. `depth` bounds the recursion so a circle
-// of widgets embedding each other cannot hang the editor.
+// of widgets embedding each other cannot hang the editor. `host` is the tree
+// the ref sits in, when the caller has it: with it, a slot the page has filled
+// hides its default content here as it will at runtime.
 void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree,
                       const HE::UIWidgetRef* ref,
-                      const ImVec2& mn, const ImVec2& mx, float s, int depth)
+                      const ImVec2& mn, const ImVec2& mx, float s, int depth,
+                      const HE::UIWidgetTree* host = nullptr)
 {
 	constexpr int kMaxDepth = 4;
 	if (depth > kMaxDepth) return;
@@ -3671,16 +4068,13 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	// meant one SCREEN pixel, and the embedded widget came out 1/zoom too big.
 	const float slotW = std::max(1.0f, (mx.x - mn.x) / std::max(0.0001f, s));
 	const float slotH = std::max(1.0f, (mx.y - mn.y) / std::max(0.0001f, s));
-	const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(tree, slotW, slotH);
+	const HE::UIWidgetCanvas canvas = embeddedCanvasFor(tree, slotW, slotH);
 	// canvas.scale converts one of ITS units into a host canvas unit; `s` then
 	// takes that to the screen.
 	const float subX = canvas.scaleX * s, subY = canvas.scaleY * s;
 	auto toScreen = [&](float x, float y)
 	{ return ImVec2(mn.x + x * subX, mn.y + y * subY); };
 
-	// A copy, because auto-size mutates the tree it measures and the cached one
-	// must stay as the asset wrote it.
-	HE::UIWidgetTree laid = tree;
 	// What this particular copy was told, applied BEFORE it is measured: a
 	// parameter that changes a label changes how wide that label wants to be.
 	//
@@ -3689,10 +4083,28 @@ void drawEmbeddedTree(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& t
 	// would leave a page of five form rows showing five identical labels here
 	// and five different ones at runtime — and the designer would be lying
 	// about the one thing it exists to show.
-	if (ref && !ref->paramValues.empty())
-		HE::uiApplyWidgetParams(laid, ref->paramValues);
-	HE::uiApplyAutoSize(laid, &canvas);
-	HE::uiUpdateScrollExtents(laid);
+	HE::UIWidgetTree laid = laidEmbeddedCopy(tree, ref, canvas);
+
+	// A slot the page has filled hides its default content, as the graft makes
+	// it. The rule is the graft's: a child named after a slot fills that one,
+	// any other child fills the first. ownIdFloor 0 = every child of the slot
+	// is "its own" here, since nothing of the page's is in this copy.
+	if (host && ref)
+	{
+		std::vector<HE::UINamedSlot*> slots;
+		for (auto& sp : laid.elements)
+			if (auto* ns = sp ? dynamic_cast<HE::UINamedSlot*>(sp.get()) : nullptr)
+				slots.push_back(ns);
+		if (!slots.empty())
+			for (const auto& cp : host->elements)
+			{
+				if (!cp || cp->parentId != ref->id) continue;
+				HE::UINamedSlot* target = slots.front();
+				for (HE::UINamedSlot* ns : slots) if (ns->name == cp->name) { target = ns; break; }
+				target->filled = true;
+				target->ownIdFloor = 0;
+			}
+	}
 
 	struct Item { const UIElement* n; int key; HE::UIWidgetRect r; };
 	std::vector<Item> items;
@@ -3887,6 +4299,9 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	// Auto-sizing elements fit themselves before the rects resolve, so the
 	// designer shows the same box the runtime will (see uiApplyAutoSize).
 	HE::uiApplyAutoSize(st.tree, layoutCanvas);
+	// …and every WidgetRef learns where its component's slots are, so a child
+	// authored under it resolves into the slot below, not over the whole ref.
+	refreshDesignSlots(ctx, st.tree, layoutCanvas);
 
 	// Paint order: (layer, depth) ascending — same rule as the runtime.
 	struct DrawItem { const UIElement* n; int layer; int depth; Rect r; };
@@ -3937,7 +4352,8 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			const std::string wp = it.n->getProp("Widget").s;
 			if (const HE::UIWidgetTree* sub = embeddedTreeFor(ctx, wp))
 				drawEmbeddedTree(dl, ctx, *sub,
-				                 dynamic_cast<const HE::UIWidgetRef*>(it.n), mn, mx, s, 0);
+				                 dynamic_cast<const HE::UIWidgetRef*>(it.n), mn, mx, s, 0,
+				                 &st.tree);
 			else
 			{
 				const std::string label = wp.empty()
@@ -3955,6 +4371,16 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	const float hs = 4.0f; // handle half-size in px
 	int hoveredHandle = -1;
 	UIElement* sel = st.tree.find(st.selected);
+	// The other members of the selection: an outline each, thinner than the
+	// primary's and without handles — the handles resize ONE element, and the
+	// primary is the one Details shows, so it is the one that gets them.
+	for (int id : st.selectedMore)
+	{
+		const UIElement* m = st.tree.find(id);
+		if (!m || id == st.selected) continue;
+		const Rect mr = elementCanvasRect(st.tree, *m, layoutCanvas);
+		dl->AddRect(toScreen(mr.mn), toScreen(mr.mx), IM_COL32(255, 170, 40, 200), 0, 0, 1.5f);
+	}
 	if (sel)
 	{
 		const Rect selRect = elementCanvasRect(st.tree, *sel, layoutCanvas);
@@ -4080,6 +4506,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			};
 			const ImVec2 cpt = toCanvas(mouse);
 			const int top = topmostAt(cpt);
+			const bool shift = ImGui::GetIO().KeyShift;
 
 			// A press inside the CURRENT selection grabs that selection, even
 			// when something else lies over it — otherwise an element under
@@ -4092,33 +4519,124 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			// selects what is on top. So the selection is sticky for DRAGGING
 			// and never sticky for LOOKING — which is what keeps a full-screen
 			// panel from becoming a selection one can no longer get out of.
+			//
+			// With several selected the same deferral is what lets the GROUP be
+			// dragged by any of its members: the press on a member keeps the
+			// set, and only a click (no travel) collapses it to that member.
 			bool grabSelection = false;
-			if (sel && sel->id != top && draggable(sel))
+			if (sel && !shift && draggable(sel))
 			{
-				const Rect sr = elementCanvasRect(st.tree, *sel, layoutCanvas);
-				grabSelection = cpt.x >= sr.mn.x && cpt.x <= sr.mx.x &&
-				                cpt.y >= sr.mn.y && cpt.y <= sr.mx.y;
+				if (isSelected(st, top) && top != sel->id)
+					grabSelection = true;
+				else if (sel->id != top)
+				{
+					const Rect sr = elementCanvasRect(st.tree, *sel, layoutCanvas);
+					grabSelection = cpt.x >= sr.mn.x && cpt.x <= sr.mx.x &&
+					                cpt.y >= sr.mn.y && cpt.y <= sr.mx.y;
+				}
 			}
-			if (grabSelection)
+			if (shift)
+			{
+				// Shift+click is only ever about the SET: in or out, no drag.
+				// On empty canvas it starts a band that ADDS to the selection.
+				if (top != 0) selectToggle(st, top);
+			}
+			else if (grabSelection)
 			{
 				st.pendingPick    = top;
 				st.hasPendingPick = true;
 			}
+			else if (top == 0 || !isSelected(st, top))
+			{
+				selectOnly(st, top);
+			}
 			else
 			{
-				st.selected = top;
+				// A press on the primary itself, or on a member with the primary
+				// not draggable: keep the set, and a click collapses it.
+				st.pendingPick    = top;
+				st.hasPendingPick = true;
 			}
-			if (UIElement* n2 = st.tree.find(st.selected); n2 && draggable(n2))
+			if (top == 0 && !grabSelection)
 			{
-				st.dragMode = 1;
+				// Nothing under the press: a drag from here is a rubber band.
+				// Shift on the press keeps what was selected and adds to it;
+				// the plain press already deselected above. (A press on a
+				// clipped-away part of the selection is a grab, not a band.)
+				st.dragMode = 3;
 				st.dragStartMouse = mouse;
-				st.dragStartPos[0] = n2->posX; st.dragStartPos[1] = n2->posY;
 				st.dragDidEdit = false;
+				st.marqueeAdd = shift;
+			}
+			else if (!shift)
+			{
+				// A group is dragged by its ROOTS (uiSelectionRoots): a child of
+				// a selected panel follows its panel and would be moved twice
+				// otherwise. So when the primary is such a child, the panel
+				// above it takes over as the primary for the drag — it is the
+				// thing that moves, and the snap has to be measured on it,
+				// because its frame is the child's and moves along.
+				const std::vector<int> roots = HE::uiSelectionRoots(st.tree, selectionIds(st));
+				if (!roots.empty() && std::find(roots.begin(), roots.end(), st.selected) == roots.end())
+				{
+					int cur = st.selected;
+					for (std::size_t guard = 0; cur != 0 && guard <= st.tree.elements.size(); ++guard)
+					{
+						const UIElement* p = st.tree.find(cur);
+						cur = p ? p->parentId : 0;
+						if (std::find(roots.begin(), roots.end(), cur) != roots.end()) break;
+					}
+					if (cur != 0)
+					{
+						st.selectedMore.push_back(st.selected);
+						st.selected = cur;
+					}
+				}
+				if (UIElement* n2 = st.tree.find(st.selected); n2 && draggable(n2))
+				{
+					st.dragMode = 1;
+					st.dragStartMouse = mouse;
+					st.dragStartPos[0] = n2->posX; st.dragStartPos[1] = n2->posY;
+					st.dragDidEdit = false;
+					st.dragGroup.clear();
+					for (int id : roots)
+					{
+						if (id == n2->id) continue;
+						if (const UIElement* m = st.tree.find(id); m && draggable(m))
+							st.dragGroup.push_back({ id, m->posX, m->posY });
+					}
+				}
 			}
 		}
 	}
 
-	if (st.dragMode != 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+	// ── The rubber band ──────────────────────────────────────────────────────
+	// Drawn from the press to the cursor once the mouse has travelled; what it
+	// holds is decided on release (uiElementsInside), and drawn as a preview
+	// meanwhile so the author sees what a release would take.
+	if (st.dragMode == 3 && ImGui::IsMouseDown(ImGuiMouseButton_Left))
+	{
+		const float travel = std::max(std::abs(mouse.x - st.dragStartMouse.x),
+		                              std::abs(mouse.y - st.dragStartMouse.y));
+		if (travel >= 4.0f) st.dragDidEdit = true;   // it became a band, not a click
+		if (st.dragDidEdit)
+		{
+			const ImVec2 a(std::min(mouse.x, st.dragStartMouse.x), std::min(mouse.y, st.dragStartMouse.y));
+			const ImVec2 b(std::max(mouse.x, st.dragStartMouse.x), std::max(mouse.y, st.dragStartMouse.y));
+			dl->AddRectFilled(a, b, IM_COL32(255, 170, 40, 30));
+			dl->AddRect(a, b, IM_COL32(255, 170, 40, 200), 0, 0, 1.0f);
+			const ImVec2 ca = toCanvas(a), cb = toCanvas(b);
+			const HE::UIWidgetRect box{ ca.x, ca.y, cb.x - ca.x, cb.y - ca.y };
+			for (int id : HE::uiElementsInside(st.tree, box, layoutCanvas))
+				if (const UIElement* m = st.tree.find(id))
+				{
+					const Rect mr = elementCanvasRect(st.tree, *m, layoutCanvas);
+					dl->AddRect(toScreen(mr.mn), toScreen(mr.mx), IM_COL32(255, 170, 40, 120), 0, 0, 1.0f);
+				}
+		}
+	}
+
+	if ((st.dragMode == 1 || st.dragMode == 2) && ImGui::IsMouseDown(ImGuiMouseButton_Left))
 	{
 		UIElement* n2 = st.tree.find(st.selected);
 		// Nothing moves until the mouse has actually travelled. A few pixels of
@@ -4143,6 +4661,15 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 				{
 					n2->posX = st.dragStartPos[0] + dd.x;
 					n2->posY = st.dragStartPos[1] + dd.y;
+					// The rest of the group, by the same delta from where each
+					// one started — the snap correction folded into `dd` moves
+					// them all, which is what keeps the group rigid.
+					for (const State::GroupStart& g : st.dragGroup)
+						if (UIElement* m = st.tree.find(g.id))
+						{
+							m->posX = g.x + dd.x;
+							m->posY = g.y + dd.y;
+						}
 				}
 				else if (st.dragMode == 2)
 				{
@@ -4188,8 +4715,20 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 					const int h = std::clamp(st.resizeHandle, 0, 7);
 					maskX = kMaskX[h]; maskY = kMaskY[h];
 				}
-				const std::vector<HE::UISnapLine> cands =
+				std::vector<HE::UISnapLine> cands =
 					HE::uiSnapCandidates(st.tree, *n2, layoutCanvas);
+				// A sibling that is moving WITH the group is no line to catch:
+				// it keeps its distance whatever the correction, so a catch on
+				// it would re-apply every frame and walk the whole group away
+				// from the mouse. The frame's lines carry fromId 0 and stay.
+				if (!st.dragGroup.empty())
+					cands.erase(std::remove_if(cands.begin(), cands.end(),
+						[&](const HE::UISnapLine& L)
+						{
+							for (const State::GroupStart& g : st.dragGroup)
+								if (g.id == L.fromId) return true;
+							return false;
+						}), cands.end());
 				const HE::UIWidgetRect r0 = HE::uiElementRect(st.tree, *n2, layoutCanvas);
 				const HE::UISnapResult sn =
 					HE::uiSnapDelta(r0, cands, 6.0f / s, maskX, maskY);
@@ -4248,13 +4787,31 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	}
 	if (st.dragMode != 0 && ImGui::IsMouseReleased(ImGuiMouseButton_Left))
 	{
-		if (st.dragDidEdit) commitEdit(st, ctx);
+		if (st.dragMode == 3)
+		{
+			// The band closes: what lies wholly inside it is the selection, or
+			// joins it when Shift started the band. Nothing to commit — a
+			// selection is not an edit.
+			if (st.dragDidEdit)
+			{
+				const ImVec2 a(std::min(mouse.x, st.dragStartMouse.x), std::min(mouse.y, st.dragStartMouse.y));
+				const ImVec2 b(std::max(mouse.x, st.dragStartMouse.x), std::max(mouse.y, st.dragStartMouse.y));
+				const ImVec2 ca = toCanvas(a), cb = toCanvas(b);
+				const HE::UIWidgetRect box{ ca.x, ca.y, cb.x - ca.x, cb.y - ca.y };
+				std::vector<int> ids = st.marqueeAdd ? selectionIds(st) : std::vector<int>{};
+				for (int id : HE::uiElementsInside(st.tree, box, layoutCanvas))
+					if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+				selectSet(st, ids);
+			}
+		}
+		else if (st.dragDidEdit) commitEdit(st, ctx);
 		// It never became a drag, so it was a click after all: the pick the
-		// press held back happens now.
-		else if (st.hasPendingPick) st.selected = st.pendingPick;
+		// press held back happens now — and a click is a selection of ONE.
+		else if (st.hasPendingPick) selectOnly(st, st.pendingPick);
 		st.hasPendingPick = false;
 		st.dragMode = 0;
 		st.resizeHandle = -1;
+		st.dragGroup.clear();
 		st.hasSnapGuide[0] = st.hasSnapGuide[1] = false;
 	}
 
@@ -4426,6 +4983,7 @@ void drawGraphVariables(State& st, AppContext& ctx)
 		UIWidgetType::Panel, UIWidgetType::Image, UIWidgetType::Text,
 		UIWidgetType::Button, UIWidgetType::CheckBox, UIWidgetType::Slider,
 		UIWidgetType::ProgressBar, UIWidgetType::TextInput, UIWidgetType::ComboBox,
+		UIWidgetType::RadioButton, UIWidgetType::TreeView,
 	};
 	for (UIWidgetType t : kTypeOrder)
 	{
@@ -5394,6 +5952,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 {
 	State& st = s_states[assetPath];
 	if (!st.loaded) loadState(st, ctx, assetPath);
+	normalizeSelection(st);
 
 	ImGui::SetNextWindowPos(pos);
 	ImGui::SetNextWindowSize(size);
@@ -5405,6 +5964,7 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	// ── Toolbar ───────────────────────────────────────────────────────────────
 	bool openThemePopup = false;
+	bool openAlignPopup = false;
 	{
 		namespace T = EditorToolbar;
 		T::Bar bar;
@@ -5445,6 +6005,14 @@ void render(AppContext& ctx, const std::string& assetPath,
 			{
 				st.snapOn = !st.snapOn;
 			}
+			// …and beside it the one-shot version of the same help: lining up
+			// what is ALREADY placed. Greyed out with nothing selected, because
+			// it has nothing to line up.
+			if (bar.item("##uialign", T::iconLayers, "Align", false, st.selected != 0,
+			             "Line the selected elements up", "ui.align"))
+			{
+				openAlignPopup = true;
+			}
 			bar.endGroup();
 		}
 
@@ -5472,6 +6040,39 @@ void render(AppContext& ctx, const std::string& assetPath,
 
 	// Outside the bar: a popup has to be opened after the strip's draw channels
 	// are merged, or it is drawn into a channel that no longer exists.
+	if (openAlignPopup) ImGui::OpenPopup("##uialignpick");
+	if (ImGui::BeginPopup("##uialignpick"))
+	{
+		// Against what: the selection's own bounds with several, the frame
+		// (parent or canvas) with one — uiAlignElements says which. Every entry
+		// is a literal, for the help audit.
+		HE::Ed::Help::Scope helpScope("UI Align");
+		const auto align = [&](HE::UIAlignOp op)
+		{
+			// Measured in the canvas the designer is SHOWING — the preview
+			// screen when one is picked — so what lines up is what is on screen.
+			const bool previewing = st.previewIndex != 0 && st.previewW > 0.0f && st.previewH > 0.0f;
+			const HE::UIWidgetCanvas canvas = previewing
+				? HE::uiResolveCanvas(st.tree, st.previewW, st.previewH) : HE::UIWidgetCanvas{};
+			if (HE::uiAlignElements(st.tree, selectionIds(st), op, previewing ? &canvas : nullptr) > 0)
+				commitEdit(st, ctx);
+		};
+		const int count = static_cast<int>(HE::uiSelectionRoots(st.tree, selectionIds(st)).size());
+		ImGui::TextDisabled(count >= 2 ? "Within the selection" : "Within the frame");
+		if (EditorWidgets::menuItem("Left"))   align(HE::UIAlignOp::Left);
+		if (EditorWidgets::menuItem("Center")) align(HE::UIAlignOp::HCenter);
+		if (EditorWidgets::menuItem("Right"))  align(HE::UIAlignOp::Right);
+		ImGui::Separator();
+		if (EditorWidgets::menuItem("Top"))    align(HE::UIAlignOp::Top);
+		if (EditorWidgets::menuItem("Middle")) align(HE::UIAlignOp::VCenter);
+		if (EditorWidgets::menuItem("Bottom")) align(HE::UIAlignOp::Bottom);
+		ImGui::Separator();
+		if (EditorWidgets::menuItem("Distribute Horizontally", nullptr, false, count >= 3))
+			align(HE::UIAlignOp::DistributeH);
+		if (EditorWidgets::menuItem("Distribute Vertically", nullptr, false, count >= 3))
+			align(HE::UIAlignOp::DistributeV);
+		ImGui::EndPopup();
+	}
 	if (openThemePopup) ImGui::OpenPopup("##uithemepick");
 	if (ImGui::BeginPopup("##uithemepick"))
 	{
@@ -5542,18 +6143,33 @@ void render(AppContext& ctx, const std::string& assetPath,
 		const bool del = ImGui::IsKeyPressed(ImGuiKey_Delete);
 		if (st.viewMode == 0)
 		{
+			// Every one of these means the WHOLE selection (its roots — see
+			// deleteSelection), and each is one undo step however many
+			// elements it touched.
 			if (del && st.selected != 0)
 			{
-				st.tree.removeSubtree(st.selected);
-				st.selected = 0;
+				deleteSelection(st);
 				commitEdit(st, ctx);
 			}
 			if (ctrl && ImGui::IsKeyPressed(ImGuiKey_D) && st.selected != 0)
-				if (const UIElement* n = st.tree.find(st.selected))
+			{
+				duplicateSelection(st);
+				commitEdit(st, ctx);
+			}
+			if (ctrl && ImGui::IsKeyPressed(ImGuiKey_C) && st.selected != 0)
+				copySelection(st);
+			if (ctrl && ImGui::IsKeyPressed(ImGuiKey_X) && st.selected != 0)
+				if (copySelection(st))
 				{
-					st.selected = duplicateSubtree(st, st.selected, n->parentId);
+					deleteSelection(st);
 					commitEdit(st, ctx);
 				}
+			if (ctrl && ImGui::IsKeyPressed(ImGuiKey_V))
+				if (pasteClipboard(st)) commitEdit(st, ctx);
+			// Everything on the canvas — its top-level elements, which is what
+			// a group operation on "all" acts on anyway.
+			if (ctrl && ImGui::IsKeyPressed(ImGuiKey_A))
+				selectSet(st, st.tree.childrenOf(0));
 		}
 		else
 		{
