@@ -1,6 +1,7 @@
 #pragma once
 #include <HorizonScene/HorizonWorld.h>   // Entity, HorizonWorld
 #include <glm/mat4x4.hpp>
+#include <vector>
 
 class EditorUndo;
 
@@ -38,6 +39,23 @@ namespace EditorTransformGizmo
 	// this frame. A caller tracking unsaved changes needs that and not the
 	// return value: merely hovering a handle changes nothing.
 	bool manipulate(HorizonWorld& world, Entity entity,
+	                const glm::mat4& view, const glm::mat4& proj,
+	                const ImVec2& rectMin, const ImVec2& rectMax,
+	                const ViewportToolbar::State& tb, bool enabled,
+	                EditorUndo* undo, bool* outChanged = nullptr);
+
+	// The same gizmo over a whole selection. One entity behaves exactly as the
+	// overload above; two or more get ONE gizmo at their common pivot — the
+	// centroid of their positions — and every drag applies to all of them:
+	// a move shifts each, a rotation turns them about the pivot (which moves
+	// them too), a scale grows the group about it. In Local space the handles
+	// follow the last entity's orientation, in World space the world axes.
+	//
+	// `entities` should be the selection's roots (EditorSelection::roots):
+	// a member whose parent is also a member moves through its parent and
+	// must not be handed in on its own. Members without a Transform, or the
+	// registry no longer knows, are skipped.
+	bool manipulate(HorizonWorld& world, const std::vector<Entity>& entities,
 	                const glm::mat4& view, const glm::mat4& proj,
 	                const ImVec2& rectMin, const ImVec2& rectMax,
 	                const ViewportToolbar::State& tb, bool enabled,

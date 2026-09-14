@@ -33,6 +33,7 @@ add_executable(he_tests
     test_gi_bvh.cpp
     test_undo.cpp
     test_editor_selection.cpp
+    test_editor_marquee.cpp
     test_editorcamera.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
@@ -176,6 +177,10 @@ add_executable(he_tests
     # The editor's selection set: handles in, handles out, no ImGui — so what
     # a Ctrl-click, a Shift-range and a peer's delete do to it is answerable here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSelection.cpp
+    # The rubber-band rule: which boxes a drawn frame encloses, given a camera.
+    # Matrices in, yes/no out — the part of "drag a frame around these" that a
+    # test can ask without a window.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorMarquee.cpp
     # The single door every scene change goes through — the UI's structural
     # commands, a peer's edit and, later, an external MCP client. It is
     # deliberately free of ImGui and of EditorApplication (which is NOT in this

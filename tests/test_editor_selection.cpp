@@ -141,3 +141,41 @@ TEST_CASE("EditorSelection: prune drops what the world no longer has")
 	sel.clear();
 	CHECK(sel.empty());
 }
+
+TEST_CASE("EditorSelection: roots leaves out a member whose ancestor is selected")
+{
+	// The group gizmo moves a parent's children through the parent, so a child
+	// that is selected alongside its parent (or grandparent) must not be moved
+	// a second time on its own.
+	HorizonWorld world;
+	const Entity parent     = world.createEntity("Parent");
+	const Entity child      = world.createEntity("Child");
+	const Entity grandchild = world.createEntity("Grandchild");
+	const Entity loner      = world.createEntity("Loner");
+	const Entity orphan     = world.createEntity("Orphan"); // a child whose parent is NOT selected
+	const Entity unselectedParent = world.createEntity("UnselectedParent");
+	world.reparentEntity(child, parent);
+	world.reparentEntity(grandchild, child);
+	world.reparentEntity(orphan, unselectedParent);
+
+	EditorSelection sel;
+	sel.add(grandchild);
+	sel.add(loner);
+	sel.add(parent);
+	sel.add(orphan);
+	sel.add(child);
+
+	const std::vector<Entity> roots = sel.roots(world.registry());
+	REQUIRE(roots.size() == 3);
+	// Selection order survives: the primary (last added) stays last.
+	CHECK(roots[0] == loner);
+	CHECK(roots[1] == parent);
+	CHECK(roots[2] == orphan);
+
+	// A destroyed member is skipped rather than reported.
+	world.destroyEntity(loner);
+	const std::vector<Entity> after = sel.roots(world.registry());
+	REQUIRE(after.size() == 2);
+	CHECK(after[0] == parent);
+	CHECK(after[1] == orphan);
+}

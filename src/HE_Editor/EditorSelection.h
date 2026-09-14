@@ -56,6 +56,14 @@ public:
 	// dead handle in the inspector's hands.
 	void prune(const entt::registry& registry);
 
+	// The members no OTHER member is an ancestor of, in selection order. This
+	// is what a gesture over "the whole selection" has to act on when the
+	// action propagates down the hierarchy anyway: the group gizmo moves a
+	// parent's children through the parent, so a child that is also selected
+	// must not be moved a second time on its own. Members the registry no
+	// longer knows are skipped, not reported.
+	std::vector<Entity> roots(const entt::registry& registry) const;
+
 	bool        contains(Entity e) const;
 	bool        empty() const { return m_entities.empty(); }
 	std::size_t size()  const { return m_entities.size(); }

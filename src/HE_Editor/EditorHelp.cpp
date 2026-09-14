@@ -1985,6 +1985,21 @@ namespace
 	  "Moves the editor camera so the selected entity fills the view — the fastest "
 	  "way back to something you have lost.",
 	  "F", "editor#viewport" },
+	{ "viewport.marquee", "Selecting with a frame",
+	  "Drag with the left button over the scene to draw a frame: on release, "
+	  "every mesh whose whole box or whose origin lies inside it is selected. "
+	  "Ctrl (Cmd on macOS) or Shift while dragging adds the frame's contents to "
+	  "what is already selected; a click still picks the one object under the "
+	  "cursor. The ground and anything not drawn in the viewport, such as lights "
+	  "and cameras, are never framed.",
+	  "Drag, Ctrl+Drag, Shift+Drag", "editor#viewport" },
+	{ "viewport.group-gizmo", "Moving several entities at once",
+	  "With more than one entity selected the gizmo sits at the centre of the "
+	  "group and moves, turns or scales all of them together, about that point. "
+	  "In Local space its handles follow the active entity; in World space the "
+	  "world axes. A child selected along with its parent moves through the "
+	  "parent. One drag is one undo step.",
+	  "", "editor#viewport" },
 
 	// ── World Outliner ───────────────────────────────────────────────────────
 	{ "outliner.duplicate", "Duplicate",

@@ -72,6 +72,30 @@ void EditorSelection::prune(const entt::registry& registry)
 	if (m_entities.size() != before) ++m_revision;
 }
 
+std::vector<Entity> EditorSelection::roots(const entt::registry& registry) const
+{
+	std::vector<Entity> out;
+	for (Entity e : m_entities)
+	{
+		if (!registry.valid(e)) continue;
+		// Walk up the parent chain; the first selected ancestor disqualifies
+		// this member. The step cap is the guard against a cycle in a
+		// hand-edited scene — reparentEntity never builds one, but a file can.
+		constexpr int kMaxDepth = 1024;
+		bool covered = false;
+		Entity p = e;
+		for (int steps = 0; steps < kMaxDepth; ++steps)
+		{
+			const auto* h = registry.try_get<HierarchyComponent>(p);
+			if (!h || h->parent == entt::null || !registry.valid(h->parent)) break;
+			p = h->parent;
+			if (contains(p)) { covered = true; break; }
+		}
+		if (!covered) out.push_back(e);
+	}
+	return out;
+}
+
 bool EditorSelection::contains(Entity e) const
 {
 	return std::find(m_entities.begin(), m_entities.end(), e) != m_entities.end();
