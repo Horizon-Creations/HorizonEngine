@@ -161,6 +161,65 @@ public:
     size_t syncPrefabInstances(HorizonWorld& world, ContentManager& content,
                                PrefabSyncReport* report = nullptr);
 
+    // ── Override recording ───────────────────────────────────────────────────
+    // The other half of the sync above: the sync keeps what the override list
+    // names, and this is what puts names on it. Every way the bound entity
+    // differs from its template record RIGHT NOW is written into the instance's
+    // list — a top-level property whose value differs (or that only one side
+    // has) as a property override, a component only one side has as a
+    // whole-component override, a different display name as "__name". Nothing
+    // is compared that the sync would not write (the root's transform, any
+    // "prefab" block), and an entry that is already there is not made twice.
+    // Returns how many entries were added.
+    //
+    // The editor calls it after a human edited something: the diff against the
+    // template is then, by definition, what was authored here — provided the
+    // instance was synced against the asset first, which is why the editor
+    // syncs on open and after every push. A property whose value merely equals
+    // the template's gets no entry, so touching a value and putting it back
+    // leaves nothing behind. An entity the table does not bind (a child added
+    // here) is not something the sync touches, so there is nothing to protect
+    // and nothing is recorded.
+    size_t recordPrefabOverrides(HorizonWorld& world, Entity root, Entity entity,
+                                 const std::vector<uint8_t>& assetBlob);
+
+    // The placements whose binding table names this entity — usually one, two
+    // for the root of a nested instance (it sits in its own table and in the
+    // outer one). By uuid, not by hierarchy: the sync resolves bindings the
+    // same way, so a child dragged out of the subtree is still the record's
+    // counterpart. Empty for an entity no instance binds.
+    static std::vector<Entity> prefabInstancesBinding(HorizonWorld& world, Entity entity);
+
+    // Take an override back: the entry is dropped from the list and the
+    // placement synced against the asset, so the property (or the whole
+    // component, for an entry without a property) is what the template says
+    // again — a component added here goes, one removed here comes back.
+    // False when the instance has no such entry or the blob does not parse.
+    bool revertPrefabOverride(HorizonWorld& world, Entity root,
+                              const std::vector<uint8_t>& assetBlob,
+                              const PrefabInstanceComponent::Override& entry);
+
+    // ── Push to prefab ───────────────────────────────────────────────────────
+    // The placement as a new template: the subtree serialised the way "Save as
+    // Prefab" does it, with every entity id translated back to the template id
+    // its binding names — the component header spells out why: the records
+    // must keep the uuids every other placement's bindings hang on, or the
+    // first push breaks every binding in the project. A child without a
+    // binding (added here) keeps its own uuid, which is what the record is
+    // called from now on. The root record's transform is the CURRENT asset's,
+    // not the placement's (a placement's position is where it stands, never
+    // what the prefab is), and the root's own "prefab" block is dropped. A
+    // nested instance's bindings are translated like the records.
+    //
+    // The instance is rewritten to match: bindings become the identity over
+    // the records just written (an entry for a deleted child goes, its record
+    // no longer exists), the override list is emptied — the asset now IS this
+    // placement. The caller writes `outBlob` to the asset and syncs the other
+    // placements. False when `root` is no instance.
+    bool pushPrefabInstance(HorizonWorld& world, Entity root,
+                            const std::vector<uint8_t>& currentAssetBlob,
+                            std::vector<uint8_t>& outBlob);
+
     // Remove the component a scene-format key names ("light", "rigidbody"), the
     // inverse of the one block applyComponents restores for it. False when the
     // key is unknown or the entity does not carry the component. "__name" is

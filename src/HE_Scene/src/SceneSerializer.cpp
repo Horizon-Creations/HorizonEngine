@@ -2967,3 +2967,203 @@ size_t SceneSerializer::syncPrefabInstances(HorizonWorld& world, ContentManager&
                     rep.overridesKept, rep.overridesAdopted, rep.unboundEntities, rep.unresolvedAssets);
     return synced;
 }
+
+// ── Override recording ───────────────────────────────────────────────────────
+namespace
+{
+    // The record of a parsed prefab blob a template key names, or null.
+    const json* recordFor(const json& scene, const HE::UUID& key)
+    {
+        auto entities = scene.is_object() ? scene.find("entities") : scene.end();
+        if (scene.is_discarded() || entities == scene.end() || !entities->is_array()) return nullptr;
+        for (const auto& r : *entities)
+            if (r.is_object() && r.contains("uuid") && entityKeyOf(r) == key) return &r;
+        return nullptr;
+    }
+}
+
+size_t SceneSerializer::recordPrefabOverrides(HorizonWorld& world, Entity root, Entity entity,
+                                              const std::vector<uint8_t>& assetBlob)
+{
+    auto& registry = world.registry();
+    if (!registry.valid(root) || !registry.valid(entity)) return 0;
+    auto* instPtr = registry.try_get<PrefabInstanceComponent>(root);
+    if (!instPtr) return 0;
+    const HE::UUID key = instPtr->templateOf(entityUuid(registry, entity));
+    if (key == HE::UUID{}) return 0;
+
+    const json  scene = json::from_cbor(assetBlob, /*strict=*/true, /*allow_exceptions=*/false);
+    const json* r     = recordFor(scene, key);
+    if (!r) return 0; // the asset lost the record: unbound, nothing the sync would write
+
+    // Copied and written back like the sync does — serializeComponents only
+    // reads, but the habit is cheaper than the bug it prevents.
+    PrefabInstanceComponent work = *instPtr;
+    const bool isRoot = (entity == root);
+    size_t added = 0;
+    auto mark = [&](const std::string& component, const std::string& property = {})
+    {
+        if (work.setOverride(key, component, property)) ++added;
+    };
+
+    const json& tComps = componentsOf(*r);
+    const json  iComps = serializeComponents(registry, entity);
+    for (const auto& [k, block] : tComps.items())
+    {
+        if (!isPropagatedKey(k, isRoot)) continue;
+        if (work.hasOverride(key, k)) continue;   // the whole component is already covered
+        auto cur = iComps.find(k);
+        if (cur == iComps.end()) { mark(k); continue; }  // removed here
+        if (!block.is_object() || !cur->is_object())
+        {
+            if (*cur != block) mark(k);
+            continue;
+        }
+        // Property by property, at the granularity the sync re-applies: a key
+        // only one side has counts as a difference too.
+        for (const auto& [p, v] : block.items())
+            if (!cur->contains(p) || (*cur)[p] != v) mark(k, p);
+        for (const auto& [p, v] : cur->items())
+        {
+            (void)v;
+            if (!block.contains(p)) mark(k, p);
+        }
+    }
+    for (const auto& [k, block] : iComps.items())
+    {
+        (void)block;
+        if (!isPropagatedKey(k, isRoot) || tComps.contains(k)) continue;
+        mark(k);   // added here
+    }
+    const auto* n = registry.try_get<NameComponent>(entity);
+    if (n && n->name != r->value("name", "Entity") && !work.hasOverride(key, kNameKey))
+        mark(kNameKey);
+
+    if (added)
+    {
+        const auto* rn = registry.try_get<NameComponent>(root);
+        HE_LOG_DEBUG(Serialize, "Prefab override: '%s' ← %s: %zu entry/-ies recorded",
+                     rn ? rn->name.c_str() : "Entity", n ? n->name.c_str() : "Entity", added);
+        registry.get<PrefabInstanceComponent>(root) = std::move(work);
+    }
+    return added;
+}
+
+std::vector<Entity> SceneSerializer::prefabInstancesBinding(HorizonWorld& world, Entity entity)
+{
+    std::vector<Entity> out;
+    auto& registry = world.registry();
+    if (!registry.valid(entity)) return out;
+    const auto* idc = registry.try_get<EntityIdComponent>(entity);
+    if (!idc) return out;
+    for (auto e : registry.view<PrefabInstanceComponent>())
+        if (registry.get<PrefabInstanceComponent>(e).templateOf(idc->id) != HE::UUID{})
+            out.push_back(e);
+    return out;
+}
+
+bool SceneSerializer::revertPrefabOverride(HorizonWorld& world, Entity root,
+                                           const std::vector<uint8_t>& assetBlob,
+                                           const PrefabInstanceComponent::Override& entry)
+{
+    auto& registry = world.registry();
+    if (!registry.valid(root)) return false;
+    auto* inst = registry.try_get<PrefabInstanceComponent>(root);
+    if (!inst) return false;
+    // Exactly the entry named — clearOverride with an empty property would take
+    // every entry of the component with it, and a whole-component entry IS the
+    // one with the empty property, so the erase is spelled out here.
+    auto it = std::find(inst->overrides.begin(), inst->overrides.end(), entry);
+    if (it == inst->overrides.end()) return false;
+    inst->overrides.erase(it);
+    return syncPrefabInstance(world, root, assetBlob);
+}
+
+// ── Push to prefab ───────────────────────────────────────────────────────────
+bool SceneSerializer::pushPrefabInstance(HorizonWorld& world, Entity root,
+                                         const std::vector<uint8_t>& currentAssetBlob,
+                                         std::vector<uint8_t>& outBlob)
+{
+    auto& registry = world.registry();
+    if (!registry.valid(root) || !registry.all_of<PrefabInstanceComponent>(root)) return false;
+    PrefabInstanceComponent work = registry.get<PrefabInstanceComponent>(root);
+    const HE::UUID rootId = entityUuid(registry, root);
+
+    // What the asset says about its root's placement, kept as it is.
+    json assetRootTransform;
+    if (!currentAssetBlob.empty())
+    {
+        const json asset = json::from_cbor(currentAssetBlob, /*strict=*/true, /*allow_exceptions=*/false);
+        auto entities = asset.is_object() ? asset.find("entities") : asset.end();
+        if (!asset.is_discarded() && entities != asset.end() && entities->is_array())
+            for (const auto& r : *entities)
+            {
+                HE::UUID parentKey;
+                auto pit = r.is_object() ? r.find("parent") : r.end();
+                if (pit != r.end() && entityRefOf(*pit, parentKey)) continue;
+                const json& comps = componentsOf(r);
+                if (auto t = comps.find("transform"); t != comps.end()) assetRootTransform = *t;
+                break;
+            }
+    }
+
+    // Instance id → template id where a binding says so, the id itself where
+    // none does (a child added here: its record is new, and its own uuid is
+    // as good a name as any). A null uuid never resolves — the table holds
+    // "no counterpart" entries whose instance side is null, and those must
+    // not answer for a real one.
+    auto translate = [&](const HE::UUID& inst) -> HE::UUID
+    {
+        if (inst == HE::UUID{}) return inst;
+        const HE::UUID t = work.templateOf(inst);
+        return t != HE::UUID{} ? t : inst;
+    };
+    auto translateRef = [&](json& ref)
+    {
+        HE::UUID id;
+        if (entityRefOf(ref, id)) ref = uuidToJson(translate(id));
+    };
+
+    json scene = buildSubtreeJson(world, root);
+    std::vector<PrefabInstanceComponent::Binding> bindings;
+    for (auto& r : scene["entities"])
+    {
+        const HE::UUID instId = entityKeyOf(r);
+        const HE::UUID tId    = translate(instId);
+        r["uuid"] = uuidToJson(tId);
+        if (auto pit = r.find("parent"); pit != r.end()) translateRef(*pit);
+        if (auto cit = r.find("children"); cit != r.end() && cit->is_array())
+            for (auto& c : *cit) translateRef(c);
+        bindings.push_back({ tId, instId });
+
+        auto cit = r.find("components");
+        if (cit == r.end() || !cit->is_object()) continue;
+        json& comps = *cit;
+        if (instId == rootId)
+        {
+            comps.erase("prefab");
+            if (!assetRootTransform.is_null()) comps["transform"] = assetRootTransform;
+        }
+        else if (auto pc = comps.find("prefab"); pc != comps.end())
+        {
+            // A nested instance: its bindings name entities of THIS placement,
+            // which the records above were just renamed from. Its overrides
+            // are keyed by ITS template and stay as they are.
+            if (auto bit = pc->find("bindings"); bit != pc->end() && bit->is_array())
+                for (auto& b : *bit)
+                    if (auto eit = b.find("entity"); eit != b.end()) translateRef(*eit);
+        }
+        // Entity references inside component blocks (a joint's target, a rig's
+        // follow entity) are left verbatim — the sync copies them the same way,
+        // and instantiatePrefab never resolved them either.
+    }
+    outBlob = json::to_cbor(scene);
+
+    work.bindings = std::move(bindings);
+    work.overrides.clear();
+    const auto* n = registry.try_get<NameComponent>(root);
+    HE_LOG_INFO(Serialize, "Prefab push: '%s' → asset, %zu record(s), %zu byte(s)",
+                n ? n->name.c_str() : "Entity", scene["entities"].size(), outBlob.size());
+    registry.get<PrefabInstanceComponent>(root) = std::move(work);
+    return true;
+}

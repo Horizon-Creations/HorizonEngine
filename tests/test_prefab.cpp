@@ -1109,3 +1109,263 @@ TEST_CASE("PrefabSync: the whole-world pass reads each asset from the content ma
     CHECK(reg.get<LightComponent>(b.bulb).intensity == doctest::Approx(5.0f));
     CHECK(reg.get<LightComponent>(orphan.bulb).intensity == doctest::Approx(1.0f));
 }
+
+// ─── Override recording, revert, push-to-prefab ──────────────────────────────
+// What puts entries on the override list the sync reads, what takes them off
+// again, and the way back into the asset.
+
+TEST_CASE("PrefabRecord: an untouched placement records nothing, an edited value records exactly itself")
+{
+    Template t;
+    HorizonWorld scene;
+    const Placed p = place(scene, t.capture(), HE::UUID::generate());
+    auto& reg = scene.registry();
+    reg.get<TransformComponent>(p.root).position = { 7.0f, 0.0f, 0.0f }; // the placement, never an override
+
+    SceneSerializer ser;
+    const auto blob = t.capture();
+    CHECK(ser.recordPrefabOverrides(scene, p.root, p.root, blob) == 0);
+    CHECK(ser.recordPrefabOverrides(scene, p.root, p.bulb, blob) == 0);
+    CHECK(reg.get<PrefabInstanceComponent>(p.root).overrides.empty());
+
+    reg.get<LightComponent>(p.bulb).intensity = 7.0f;
+    CHECK(ser.recordPrefabOverrides(scene, p.root, p.bulb, blob) == 1);
+    const auto& inst = reg.get<PrefabInstanceComponent>(p.root);
+    REQUIRE(inst.overrides.size() == 1);
+    CHECK(inst.overrides[0].templateEntity == t.tBulb);
+    CHECK(inst.overrides[0].component == "light");
+    CHECK(inst.overrides[0].property == "intensity");
+    // Recording again adds nothing — the entry is there.
+    CHECK(ser.recordPrefabOverrides(scene, p.root, p.bulb, blob) == 0);
+    CHECK(inst.overrides.size() == 1);
+
+    // And the entry does what it is for: the value survives a sync.
+    t.world.registry().get<LightComponent>(t.bulb).intensity = 5.0f;
+    REQUIRE(ser.syncPrefabInstance(scene, p.root, t.capture()));
+    CHECK(reg.get<LightComponent>(p.bulb).intensity == doctest::Approx(7.0f));
+
+    // A value put back to the template's leaves nothing behind.
+    HorizonWorld scene2;
+    const Placed q = place(scene2, t.capture(), HE::UUID::generate());
+    scene2.registry().get<LightComponent>(q.bulb).range = 99.0f;
+    scene2.registry().get<LightComponent>(q.bulb).range = 10.0f;
+    CHECK(ser.recordPrefabOverrides(scene2, q.root, q.bulb, t.capture()) == 0);
+}
+
+TEST_CASE("PrefabRecord: a component added or removed here, and a rename, become whole entries")
+{
+    Template t;
+    HorizonWorld scene;
+    const Placed p = place(scene, t.capture(), HE::UUID::generate());
+    auto& reg = scene.registry();
+    const auto blob = t.capture();
+    SceneSerializer ser;
+
+    SUBCASE("removed here")
+    {
+        reg.remove<LightComponent>(p.bulb);
+        CHECK(ser.recordPrefabOverrides(scene, p.root, p.bulb, blob) == 1);
+        const auto& inst = reg.get<PrefabInstanceComponent>(p.root);
+        CHECK(inst.hasOverride(t.tBulb, "light"));
+        CHECK(inst.overrides[0].property.empty());
+        // The sync respects it: the light does not come back.
+        REQUIRE(ser.syncPrefabInstance(scene, p.root, blob));
+        CHECK_FALSE(reg.all_of<LightComponent>(p.bulb));
+    }
+    SUBCASE("added here")
+    {
+        scene.addComponent(p.bulb, AudioSourceComponent{});
+        CHECK(ser.recordPrefabOverrides(scene, p.root, p.bulb, blob) == 1);
+        CHECK(reg.get<PrefabInstanceComponent>(p.root).hasOverride(t.tBulb, "audiosource"));
+        REQUIRE(ser.syncPrefabInstance(scene, p.root, blob));
+        CHECK(reg.all_of<AudioSourceComponent>(p.bulb));
+    }
+    SUBCASE("renamed here")
+    {
+        scene.renameEntity(p.bulb, "Filament");
+        CHECK(ser.recordPrefabOverrides(scene, p.root, p.bulb, blob) == 1);
+        CHECK(reg.get<PrefabInstanceComponent>(p.root).hasOverride(t.tBulb, "__name"));
+        REQUIRE(ser.syncPrefabInstance(scene, p.root, blob));
+        CHECK(reg.get<NameComponent>(p.bulb).name == "Filament");
+    }
+    SUBCASE("a child added here is nobody's counterpart and records nothing")
+    {
+        const Entity shade = scene.createEntity("Shade");
+        scene.reparentEntity(shade, p.root);
+        scene.addComponent(shade, TransformComponent{});
+        CHECK(ser.recordPrefabOverrides(scene, p.root, shade, blob) == 0);
+        CHECK(ser.prefabInstancesBinding(scene, shade).empty());
+    }
+}
+
+TEST_CASE("PrefabRecord: which placements bind an entity")
+{
+    Template t;
+    HorizonWorld scene;
+    const Placed a = place(scene, t.capture(), HE::UUID::generate());
+    const Placed b = place(scene, t.capture(), HE::UUID::generate());
+    const Entity loose = scene.createEntity("Loose");
+
+    SceneSerializer ser;
+    auto ofA = ser.prefabInstancesBinding(scene, a.bulb);
+    REQUIRE(ofA.size() == 1);
+    CHECK((ofA[0] == a.root));
+    auto ofRootB = ser.prefabInstancesBinding(scene, b.root);
+    REQUIRE(ofRootB.size() == 1);
+    CHECK((ofRootB[0] == b.root));
+    CHECK(ser.prefabInstancesBinding(scene, loose).empty());
+}
+
+TEST_CASE("PrefabRevert: dropping the entry brings the template's value back, one entry at a time")
+{
+    Template t;
+    HorizonWorld scene;
+    const Placed p = place(scene, t.capture(), HE::UUID::generate());
+    auto& reg = scene.registry();
+    SceneSerializer ser;
+
+    reg.get<LightComponent>(p.bulb).intensity = 7.0f;
+    reg.get<LightComponent>(p.bulb).range     = 70.0f;
+    REQUIRE(ser.recordPrefabOverrides(scene, p.root, p.bulb, t.capture()) == 2);
+
+    // Meanwhile the asset moved on; both overrides hold through a sync.
+    t.world.registry().get<LightComponent>(t.bulb).intensity = 5.0f;
+    const auto blob = t.capture();
+    REQUIRE(ser.syncPrefabInstance(scene, p.root, blob));
+    CHECK(reg.get<LightComponent>(p.bulb).intensity == doctest::Approx(7.0f));
+
+    const PrefabInstanceComponent::Override intensity{ t.tBulb, "light", "intensity" };
+    REQUIRE(ser.revertPrefabOverride(scene, p.root, blob, intensity));
+    CHECK(reg.get<LightComponent>(p.bulb).intensity == doctest::Approx(5.0f));   // the asset's
+    CHECK(reg.get<LightComponent>(p.bulb).range     == doctest::Approx(70.0f));  // still mine
+    CHECK(reg.get<PrefabInstanceComponent>(p.root).overrides.size() == 1);
+
+    // An entry that is not there is refused, and nothing else changes.
+    CHECK_FALSE(ser.revertPrefabOverride(scene, p.root, blob, intensity));
+    CHECK(reg.get<LightComponent>(p.bulb).range == doctest::Approx(70.0f));
+
+    // A whole-component entry reverts the component: added here, gone again.
+    scene.addComponent(p.bulb, AudioSourceComponent{});
+    REQUIRE(ser.recordPrefabOverrides(scene, p.root, p.bulb, blob) == 1);
+    REQUIRE(ser.revertPrefabOverride(scene, p.root, blob, { t.tBulb, "audiosource", "" }));
+    CHECK_FALSE(reg.all_of<AudioSourceComponent>(p.bulb));
+}
+
+TEST_CASE("PrefabPush: the placement becomes the asset under the template's ids, and the others follow")
+{
+    Template t;
+    t.world.registry().get<TransformComponent>(t.lamp).position = { 0.0f, 99.0f, 0.0f };
+    HorizonWorld scene;
+    auto& reg = scene.registry();
+    const HE::UUID asset = HE::UUID::generate();
+    const Placed a = place(scene, t.capture(), asset);
+    const Placed b = place(scene, t.capture(), asset);
+    reg.get<TransformComponent>(a.root).position = { 7.0f, 0.0f, 0.0f };
+    SceneSerializer ser;
+
+    // Authored on A: a brighter bulb (marked), and a new child.
+    reg.get<LightComponent>(a.bulb).intensity = 7.0f;
+    REQUIRE(ser.recordPrefabOverrides(scene, a.root, a.bulb, t.capture()) == 1);
+    const Entity shade = scene.createEntity("Shade");
+    scene.reparentEntity(shade, a.root);
+    scene.addComponent(shade, TransformComponent{});
+    const HE::UUID shadeId = idOf(reg, shade);
+
+    std::vector<uint8_t> pushed;
+    REQUIRE(ser.pushPrefabInstance(scene, a.root, t.capture(), pushed));
+    CHECK(!pushed.empty());
+
+    // A is now the asset: no overrides, bindings identity over the records.
+    const auto& instA = reg.get<PrefabInstanceComponent>(a.root);
+    CHECK(instA.overrides.empty());
+    CHECK(instA.bindings.size() == 3);
+    CHECK(instA.instanceOf(t.tLamp) == idOf(reg, a.root));
+    CHECK(instA.instanceOf(t.tBulb) == idOf(reg, a.bulb));
+    CHECK(instA.instanceOf(shadeId) == shadeId);   // a new record is called by the entity's own id
+
+    // The blob speaks the template's ids: a fresh placement of it binds under
+    // the same keys B's table already has, and B's sync reaches B's bulb.
+    HorizonWorld probe;
+    std::vector<PrefabInstanceComponent::Binding> bindings;
+    const Entity probeRoot = ser.instantiatePrefab(probe, pushed, entt::null, false, &bindings);
+    REQUIRE((probeRoot != entt::null));
+    bool sawLamp = false, sawBulb = false, sawShade = false;
+    for (const auto& bd : bindings)
+    {
+        sawLamp  |= bd.templateEntity == t.tLamp;
+        sawBulb  |= bd.templateEntity == t.tBulb;
+        sawShade |= bd.templateEntity == shadeId;
+    }
+    CHECK(sawLamp); CHECK(sawBulb); CHECK(sawShade);
+    // The asset's root stays where the asset had it, not where A stands, and
+    // carries no prefab block of its own.
+    CHECK(probe.registry().get<TransformComponent>(probeRoot).position.y == doctest::Approx(99.0f));
+    CHECK_FALSE(probe.registry().all_of<PrefabInstanceComponent>(probeRoot));
+
+    SceneSerializer::PrefabSyncReport rep;
+    REQUIRE(ser.syncPrefabInstance(scene, b.root, pushed, &rep));
+    CHECK(reg.get<LightComponent>(b.bulb).intensity == doctest::Approx(7.0f));
+    CHECK(rep.entitiesCreated == 1);
+    CHECK((childNamed(scene, b.root, "Shade") != entt::null));
+    // And syncing A against what it just pushed changes nothing.
+    SceneSerializer::PrefabSyncReport repA;
+    REQUIRE(ser.syncPrefabInstance(scene, a.root, pushed, &repA));
+    CHECK(repA.componentsApplied == 0);
+    CHECK(repA.entitiesCreated == 0);
+    CHECK(reg.get<TransformComponent>(a.root).position.x == doctest::Approx(7.0f));
+}
+
+TEST_CASE("PrefabPush: a child deleted here leaves the asset, its binding goes with it")
+{
+    Template t;
+    HorizonWorld scene;
+    auto& reg = scene.registry();
+    const Placed a = place(scene, t.capture(), HE::UUID::generate());
+    scene.destroyEntity(a.bulb);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> pushed;
+    REQUIRE(ser.pushPrefabInstance(scene, a.root, t.capture(), pushed));
+    const auto& inst = reg.get<PrefabInstanceComponent>(a.root);
+    CHECK(inst.bindings.size() == 1);
+    CHECK(inst.instanceOf(t.tBulb) == HE::UUID{});
+
+    HorizonWorld probe;
+    const Entity probeRoot = ser.instantiatePrefab(probe, pushed);
+    REQUIRE((probeRoot != entt::null));
+    auto* h = probe.registry().try_get<HierarchyComponent>(probeRoot);
+    CHECK((!h || h->children.empty()));
+}
+
+TEST_CASE("PrefabPush: a root that is no instance is refused, and the content manager swaps the payload in place")
+{
+    HorizonWorld scene;
+    const Entity plain = scene.createEntity("Plain");
+    SceneSerializer ser;
+    std::vector<uint8_t> out;
+    CHECK_FALSE(ser.pushPrefabInstance(scene, plain, {}, out));
+    CHECK(out.empty());
+
+    Template t;
+    ContentManager cm;
+    PrefabAsset pa;
+    pa.name = "Lamp";
+    pa.path = "Prefabs/Lamp.hasset";
+    pa.data = t.capture();
+    const HE::UUID id = cm.registerPrefab(std::move(pa));
+
+    t.world.registry().get<LightComponent>(t.bulb).intensity = 5.0f;
+    PrefabAsset next;
+    next.data = t.capture();
+    REQUIRE(cm.replacePrefab(id, std::move(next)));
+    const PrefabAsset* got = cm.getPrefab(id);
+    REQUIRE(got != nullptr);
+    CHECK(got->path == "Prefabs/Lamp.hasset");
+    CHECK(got->name == "Lamp");
+    CHECK(got->id == id);
+    HorizonWorld probe;
+    const Entity r = ser.instantiatePrefab(probe, got->data);
+    REQUIRE((r != entt::null));
+    CHECK(probe.registry().get<LightComponent>(childNamed(probe, r, "Bulb")).intensity == doctest::Approx(5.0f));
+    CHECK_FALSE(cm.replacePrefab(HE::UUID::generate(), PrefabAsset{}));
+}
