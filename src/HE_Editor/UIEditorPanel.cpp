@@ -601,7 +601,15 @@ void normalizeSelection(State& st)
 	if (st.selectedMore.empty()) return;
 	st.selectedMore.erase(std::remove_if(st.selectedMore.begin(), st.selectedMore.end(),
 		[&](int id) { return id == 0 || !st.tree.find(id); }), st.selectedMore.end());
-	if (st.selected == 0 || !isSelected(st, st.selected)) st.selectedMore.clear();
+	if (st.selected == 0 || !isSelected(st, st.selected)) { st.selectedMore.clear(); return; }
+	// Each member once. The press that hands the primary's role to a selected
+	// ancestor pushes the old primary in beside an ancestor that is already
+	// there, and a set that holds an id twice would toggle it twice.
+	std::vector<int> once;
+	for (int id : st.selectedMore)
+		if (id != st.selected && std::find(once.begin(), once.end(), id) == once.end())
+			once.push_back(id);
+	st.selectedMore.swap(once);
 }
 
 void selectOnly(State& st, int id)
@@ -667,12 +675,21 @@ std::string& elementClipboard()
 	static std::string s_clip;
 	return s_clip;
 }
+// How often the current clipboard has been pasted beside its original: the
+// n-th paste lands n steps further, or every Ctrl+V after the first would put
+// its copy exactly on top of the one before. Reset by the next copy.
+int& elementPasteRun()
+{
+	static int s_run = 0;
+	return s_run;
+}
 
 bool copySelection(const State& st)
 {
 	const std::string doc = HE::uiElementsToClipboard(st.tree, selectionIds(st));
 	if (doc.empty()) return false;
 	elementClipboard() = doc;
+	elementPasteRun() = 0;
 	return true;
 }
 
@@ -703,9 +720,10 @@ bool pasteClipboard(State& st)
 				if (!inDoc) { sameParent = p == parent; break; }
 			}
 	}
-	const float off = sameParent ? 20.0f : 0.0f;
+	const float off = sameParent ? 20.0f * static_cast<float>(elementPasteRun() + 1) : 0.0f;
 	const std::vector<int> fresh = HE::uiElementsFromClipboard(st.tree, doc, parent, off, off);
 	if (fresh.empty()) return false;
+	if (sameParent) ++elementPasteRun();
 	selectSet(st, fresh);
 	return true;
 }
