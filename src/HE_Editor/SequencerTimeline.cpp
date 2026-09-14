@@ -672,8 +672,10 @@ Result draw(PropertyAnimClipAsset& clip, View& view,
 			out.edited = out.committed = out.selectionChanged = out.playheadMoved = true;
 		}
 	}
-	else if (curves)
+	else if (curves && trackCount > 0)
 	{
+		// Only with tracks to pick from: an empty clip prints its own hint
+		// below, across the whole strip, and two hints on one row overlap.
 		ImGui::SetCursorScreenPos(ImVec2(laneL + 8.0f, rowsTop + 6.0f));
 		ImGui::TextDisabled("Select a track on the left to see its curve.");
 	}
