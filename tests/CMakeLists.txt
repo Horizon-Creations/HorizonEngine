@@ -47,6 +47,7 @@ add_executable(he_tests
     test_audio.cpp
     test_rendermanager.cpp
     test_prefab.cpp
+    test_inspector_prefab_keys.cpp
     test_inputmapping.cpp
     test_input_gamepad.cpp
     test_eventbus.cpp
@@ -421,6 +422,10 @@ add_executable(he_tests
     # The Scene window's own click rule (mesh before terrain, icon quads like
     # any mesh), against a RenderWorld snapshot. ImGui-free for the same reason.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportPick.cpp
+    # The Details panel's label→scene-key table behind the prefab "(changed
+    # here)" marker. Plain data in its own file so the test can hold every key
+    # against the serializer's list without dragging the panel in.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/InspectorPrefabKeys.cpp
     # Labelled rows + wrapped hints: ImGui-only by construction (see the file's
     # header), so the panel-width layout invariant can be asserted headless.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRowWidgets.cpp

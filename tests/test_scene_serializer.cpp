@@ -35,7 +35,7 @@
 #include <HorizonScene/Components/AudioListenerComponent.h>
 #include <HorizonScene/Components/ParticleSystemComponent.h>
 #include <HorizonScene/Components/LODComponent.h>
-#include <HorizonScene/Components/PrefabLinkComponent.h>
+#include <HorizonScene/Components/PrefabInstanceComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/UICanvasComponent.h>
 #include <HorizonScene/Components/UIElementComponent.h>
@@ -1497,7 +1497,7 @@ namespace
 		AudioListenerComponent         audioListener;
 		ParticleSystemComponent        particleSystem;
 		LODComponent                   lod;
-		PrefabLinkComponent            prefabLink;
+		PrefabInstanceComponent            prefabLink;
 		NavAgentComponent              navAgent;
 		TerrainComponent               terrain;
 		FoliageComponent               foliage;
@@ -1745,8 +1745,17 @@ namespace
 		// is the field whose loss would be invisible: everything renders and
 		// moves exactly the same, only nothing can tell any more that the lamp
 		// post came out of Prefabs/Lamp.hasset.
+		// Bindings and overrides go with it: which entity of the placement is
+		// which record of the template, and which properties were edited here.
+		// Losing either is as invisible as losing the link — until the asset
+		// changes and propagation either overwrites a human's edit or cannot
+		// find the entity it is meant for.
 		a.prefabLink.asset = HE::UUID::generate();
-		reg.emplace<PrefabLinkComponent>(actor, a.prefabLink);
+		a.prefabLink.bindings.push_back({ HE::UUID::generate(), HE::UUID::generate() });
+		a.prefabLink.bindings.push_back({ HE::UUID::generate(), HE::UUID::generate() });
+		a.prefabLink.overrides.push_back({ a.prefabLink.bindings[1].templateEntity, "light", "intensity" });
+		a.prefabLink.overrides.push_back({ a.prefabLink.bindings[0].templateEntity, "mesh", "" });
+		reg.emplace<PrefabInstanceComponent>(actor, a.prefabLink);
 
 		a.navAgent.targetPos    = { 4.0f, 1.0f, -2.0f };
 		a.navAgent.speed        = 6.0f;
@@ -2087,9 +2096,11 @@ namespace
 			}
 		}
 		{
-			const auto* pl = reg.try_get<PrefabLinkComponent>(actor);
+			const auto* pl = reg.try_get<PrefabInstanceComponent>(actor);
 			REQUIRE(pl != nullptr);
 			CHECK(pl->asset == a.prefabLink.asset);
+			CHECK(pl->bindings  == a.prefabLink.bindings);
+			CHECK(pl->overrides == a.prefabLink.overrides);
 		}
 		{
 			const auto* na = reg.try_get<NavAgentComponent>(actor);
@@ -2262,6 +2273,50 @@ TEST_CASE("Every component the save path writes is a key the loader admits to kn
 	// The single-entity (collaboration) blob carries the display name alongside
 	// the components, so that key has to be admitted too.
 	CHECK(SceneSerializer::isKnownComponentKey("__name"));
+}
+
+TEST_CASE("Every component the save path writes can be removed again by its key")
+{
+	// removeComponentByKey is the third hand-maintained table beside save and
+	// load (prefab propagation uses it to take away what an asset dropped). A
+	// key it does not know would leave a component standing that the asset no
+	// longer has — so, like the known-key list, it is checked against what the
+	// save path actually writes: after removal by key, the block is gone.
+	HorizonWorld world;
+	populateEveryComponent(world);
+	{
+		auto& reg = world.registry();
+		const Entity animated = world.createEntity("Animated");
+		reg.emplace<TransformComponent>(animated, TransformComponent{});
+		RootMotionComponent rm; rm.mode = RootMotionComponent::Mode::Transform;
+		reg.emplace<RootMotionComponent>(animated, rm);
+		AnimationLayerComponent lc;
+		lc.layers.push_back(AnimationLayerComponent::Layer{});
+		reg.emplace<AnimationLayerComponent>(animated, std::move(lc));
+	}
+
+	SceneSerializer ser;
+	size_t checked = 0;
+	for (Entity e : world.registry().view<NameComponent>())
+	{
+		if (e == world.rootEntity()) continue;
+		const auto before = nlohmann::json::from_cbor(ser.serializeEntityComponents(world, e));
+		for (const auto& [key, block] : before.items())
+		{
+			(void)block;
+			if (key == "__name") { CHECK_FALSE(SceneSerializer::removeComponentByKey(world, e, key)); continue; }
+			INFO("component key '", key, "' is written by the save path but "
+			     "removeComponentByKey does not know it");
+			CHECK(SceneSerializer::removeComponentByKey(world, e, key));
+			const auto after = nlohmann::json::from_cbor(ser.serializeEntityComponents(world, e));
+			CHECK_FALSE(after.contains(key));
+			// Gone means gone: a second removal has nothing to remove.
+			CHECK_FALSE(SceneSerializer::removeComponentByKey(world, e, key));
+			++checked;
+		}
+	}
+	CHECK(checked > 20);
+	CHECK_FALSE(SceneSerializer::removeComponentByKey(world, world.rootEntity(), "no-such-component"));
 }
 
 TEST_CASE("Every component survives a round-trip with non-default values in every persisted field")

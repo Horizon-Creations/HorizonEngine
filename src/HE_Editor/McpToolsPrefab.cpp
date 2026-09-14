@@ -14,7 +14,7 @@
 #include <HorizonScene/TransformHierarchy.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
-#include <HorizonScene/Components/PrefabLinkComponent.h>
+#include <HorizonScene/Components/PrefabInstanceComponent.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -426,8 +426,33 @@ void addInstantiate(McpToolRegistry& registry, ContentManager& content,
 		// its link. Only on the root: the children are part of this instance,
 		// not instances of their own. A prefab whose file carries no uuid at all
 		// gets no link rather than a link to nothing.
+		//
+		// The bindings go in the same way, as the IDENTITY: every record bound to
+		// itself, template side and instance side both the record's uuid.
+		// instantiatePrefab re-points the instance side at the entities it
+		// mints (see applyPrefabJson), so what lands in the world says "the
+		// Light here is the template's Light" — and the undo entry, which is
+		// captured from the world, carries the answer rather than the question.
 		if (!(p.id == HE::UUID{}))
+		{
+			json bindings = json::array();
+			for (const json& rec : p.tree["entities"])
+			{
+				const auto u = rec.find("uuid");
+				if (u == rec.end()) continue;   // legacy blob without ids: unbound
+				bindings.push_back({ { "template", *u }, { "entity", *u } });
+			}
 			comps["prefab"] = json{ { "asset", uuidJson(p.id) } };
+			if (!bindings.empty()) comps["prefab"]["bindings"] = std::move(bindings);
+			// A display name the client chose is authored here, not in the
+			// asset: marked as an override on the root's name, or the next
+			// propagation (scene open, save) would rename it back to the
+			// template's. Same key the sync reads for the name, "__name".
+			if (!newName.empty())
+				if (auto u = root->find("uuid"); u != root->end())
+					comps["prefab"]["overrides"] = json::array({
+						json{ { "entity", *u }, { "component", "__name" } } });
+		}
 
 		const Command cmd =
 			Command::create(parent, json::to_cbor(p.tree), /*preserveIds=*/false);
@@ -686,9 +711,9 @@ void addInstances(McpToolRegistry& registry, ContentManager& content, EditorComm
 
 		auto& reg = world->registry();
 		json list = json::array();
-		for (auto e : reg.view<PrefabLinkComponent>())
+		for (auto e : reg.view<PrefabInstanceComponent>())
 		{
-			const HE::UUID id = reg.get<PrefabLinkComponent>(e).asset;
+			const HE::UUID id = reg.get<PrefabInstanceComponent>(e).asset;
 			if (!wantRel.empty() && !(id == want)) continue;
 
 			const auto* n = reg.try_get<NameComponent>(e);

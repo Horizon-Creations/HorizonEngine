@@ -1598,6 +1598,7 @@ void EditorApplication::OnInit()
 			if (ok)
 			{
 				m_currentScenePath = sceneAbsPath;
+				syncPrefabInstances("startup"); // same order as openScene: before the preload
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 				splashStatus("Compiling material pipelines", 0.95f);
 				warmupWorldMaterials(); // build custom-material pipelines before the first draw
@@ -2392,6 +2393,10 @@ void EditorApplication::OnRender(float dt)
 	// without a second gate. What needs the explicit `simulating` below is only
 	// what runs per frame regardless of dt: script callbacks and the hosts.
 	const float gameDt = m_isPlaying ? HE::api::time::deltaTime() : dt;
+
+	// What last frame's edit did to a placed prefab, before anything else
+	// reads the override list this frame (the Details panel lists it).
+	recordPrefabEdits();
 
 	// ── Window title ─────────────────────────────────────────────────────
 	{
@@ -7646,6 +7651,12 @@ AppContext EditorApplication::makeContext()
 		.pasteEntity         = [this]{ pasteEntityClipboard();    },
 		.deleteEntity        = [this]{ deleteSelectedEntity();    },
 		.entityClipboardFull = !m_entityClipboard.empty(),
+		.revertPrefabOverride = [this](Entity root, const PrefabInstanceComponent::Override& o) {
+			return revertPrefabOverride(root, o);
+		},
+		.revertPrefabRemoval  = [this](Entity root, const HE::UUID& t) { return revertPrefabRemoval(root, t); },
+		.revertPrefabAddition = [this](Entity root, Entity e) { return revertPrefabAddition(root, e); },
+		.pushToPrefab        = [this](Entity root) { return pushToPrefab(root); },
 		.projectLoaded       = m_projectLoaded,
 		.contentRefreshPending = m_contentRefreshPending,
 		.contentRefreshDone  = m_contentRefreshDone,
@@ -8440,9 +8451,208 @@ void EditorApplication::enqueueRetargetOnDisk(const std::string& oldRel,
 	}));
 }
 
+void EditorApplication::syncPrefabInstances(const char* when)
+{
+	if (!m_editorWorld) return;
+	if (m_collab.inSession())
+	{
+		HE_LOG_INFO(Editor, "Prefab sync skipped (%s): a collaboration session is running and "
+		                    "the pass does not replicate", when);
+		return;
+	}
+	SceneSerializer serializer;
+	SceneSerializer::PrefabSyncReport rep;
+	const size_t synced = serializer.syncPrefabInstances(*m_editorWorld, contentManager(), &rep);
+	// The save-time pass rewrites what a human may have been looking at, so
+	// say when it did — one line, only when something moved.
+	if (synced && (rep.componentsApplied || rep.componentsRemoved || rep.entitiesCreated ||
+	               rep.entitiesRemoved))
+		HE_LOG_INFO(Editor, "Prefab sync (%s): %zu instance(s), %zu component(s) applied, "
+		                    "%zu removed, %zu entity/-ies created, %zu removed, %zu override(s) kept",
+		            when, synced, rep.componentsApplied, rep.componentsRemoved,
+		            rep.entitiesCreated, rep.entitiesRemoved, rep.overridesKept);
+}
+
+void EditorApplication::recordPrefabEdits()
+{
+	if (!m_editorWorld || m_isPlaying) return;
+	auto& registry = m_editorWorld->registry();
+
+	// This frame's selection, by uuid — and, when the revision moved, last
+	// frame's on top of it (see the header for the click-away commit).
+	std::vector<HE::UUID> current;
+	for (Entity e : m_selection.entities())
+		if (const auto* idc = registry.valid(e) ? registry.try_get<EntityIdComponent>(e) : nullptr)
+			current.push_back(idc->id);
+	const uint64_t rev   = m_undo.revision();
+	const bool     moved = (rev != m_prefabEditRevision);
+	m_prefabEditRevision = rev;
+	std::vector<HE::UUID> targets;
+	if (moved)
+	{
+		targets = m_prefabEditLastSelection;
+		for (const HE::UUID& id : current)
+			if (std::find(targets.begin(), targets.end(), id) == targets.end()) targets.push_back(id);
+	}
+	m_prefabEditLastSelection = std::move(current);
+	if (!moved) return;
+	if (m_collab.inSession())
+	{
+		// Same reason the sync sits this out: a component written here is not
+		// replicated, and a marker one machine has and the other lacks is a
+		// divergence waiting for the next sync. Said once, not once per edit.
+		static bool s_said = false;
+		if (!s_said)
+		{
+			HE_LOG_INFO(Editor, "Prefab overrides are not recorded during a collaboration "
+			                    "session; an edit on a placed prefab is not protected "
+			                    "from the next sync");
+			s_said = true;
+		}
+		return;
+	}
+
+	SceneSerializer serializer;
+	ContentManager& content = contentManager();
+	for (const HE::UUID& target : targets)
+	{
+		const Entity e = m_editorWorld->findByEntityId(target);
+		if (e == entt::null) continue;
+		for (Entity root : SceneSerializer::prefabInstancesBinding(*m_editorWorld, e))
+		{
+			const HE::UUID id = registry.get<PrefabInstanceComponent>(root).asset;
+			if (id == HE::UUID{}) continue;
+			content.ensureResident(id);
+			const PrefabAsset* asset = content.getPrefab(id);
+			if (!asset) continue;
+			// Copied out: the pointer dies with the next load (see getPrefab).
+			const std::vector<uint8_t> blob = asset->data;
+			serializer.recordPrefabOverrides(*m_editorWorld, root, e, blob);
+		}
+	}
+}
+
+bool EditorApplication::revertPrefabOverride(Entity root, const PrefabInstanceComponent::Override& entry)
+{
+	if (!m_editorWorld || m_isPlaying) return false;
+	auto& registry = m_editorWorld->registry();
+	if (!registry.valid(root) || !registry.all_of<PrefabInstanceComponent>(root)) return false;
+	const HE::UUID id = registry.get<PrefabInstanceComponent>(root).asset;
+	ContentManager& content = contentManager();
+	content.ensureResident(id);
+	const PrefabAsset* asset = content.getPrefab(id);
+	if (!asset)
+	{
+		HE_LOG_WARN(Editor, "Prefab revert: the asset is not in the content manager — nothing reverted");
+		return false;
+	}
+	const std::vector<uint8_t> blob = asset->data;
+	m_undo.snapshotNow();
+	SceneSerializer serializer;
+	const bool ok = serializer.revertPrefabOverride(*m_editorWorld, root, blob, entry);
+	// The sync's write is a world edit, so the recorder must not read it back
+	// as a human's: it runs on the next revision bump, which snapshotNow just
+	// made — mark this one as seen.
+	m_prefabEditRevision = m_undo.revision();
+	return ok;
+}
+
+bool EditorApplication::revertPrefabRemoval(Entity root, const HE::UUID& templateEntity)
+{
+	if (!m_editorWorld || m_isPlaying) return false;
+	auto& registry = m_editorWorld->registry();
+	if (!registry.valid(root) || !registry.all_of<PrefabInstanceComponent>(root)) return false;
+	const HE::UUID id = registry.get<PrefabInstanceComponent>(root).asset;
+	ContentManager& content = contentManager();
+	content.ensureResident(id);
+	const PrefabAsset* asset = content.getPrefab(id);
+	if (!asset)
+	{
+		HE_LOG_WARN(Editor, "Prefab revert: the asset is not in the content manager — nothing brought back");
+		return false;
+	}
+	const std::vector<uint8_t> blob = asset->data;
+	m_undo.snapshotNow();
+	SceneSerializer serializer;
+	const bool ok = serializer.revertPrefabRemoval(*m_editorWorld, root, blob, templateEntity);
+	// Same guard as revertPrefabOverride: the sync's write is not a human's.
+	m_prefabEditRevision = m_undo.revision();
+	return ok;
+}
+
+bool EditorApplication::revertPrefabAddition(Entity root, Entity entity)
+{
+	if (!m_editorWorld || m_isPlaying) return false;
+	auto& registry = m_editorWorld->registry();
+	if (!registry.valid(root) || !registry.valid(entity)) return false;
+	// The selection may be the thing about to go — the same care
+	// deleteSelectedEntity takes, or the Details panel draws a dead handle.
+	m_undo.snapshotNow();
+	SceneSerializer serializer;
+	const bool ok = serializer.revertPrefabAddition(*m_editorWorld, root, entity);
+	if (ok)
+	{
+		m_selection.remove(entity);
+		m_selection.add(root);
+	}
+	m_prefabEditRevision = m_undo.revision();
+	return ok;
+}
+
+bool EditorApplication::pushToPrefab(Entity root)
+{
+	if (!m_editorWorld || m_isPlaying) return false;
+	auto& registry = m_editorWorld->registry();
+	if (!registry.valid(root) || !registry.all_of<PrefabInstanceComponent>(root)) return false;
+	const HE::UUID id = registry.get<PrefabInstanceComponent>(root).asset;
+	ContentManager& content = contentManager();
+	content.ensureResident(id);
+	const PrefabAsset* resident = content.getPrefab(id);
+	if (!resident)
+	{
+		HE_LOG_WARN(Editor, "Prefab push: the asset is not in the content manager — nothing written");
+		return false;
+	}
+	// A COPY, before anything else touches the content manager: the pointer
+	// is into a dense vector the next load may move.
+	PrefabAsset asset = *resident;
+
+	m_undo.snapshotNow();
+	SceneSerializer serializer;
+	std::vector<uint8_t> blob;
+	if (!serializer.pushPrefabInstance(*m_editorWorld, root, asset.data, blob)) return false;
+	asset.data = std::move(blob);
+	// The file first (the save hook publishes it to a collaboration session as
+	// the asset update it is), then the resident copy, so the sync below and
+	// the next drop read what was just written rather than what was.
+	if (!content.saveAsset(asset))
+	{
+		HE_LOG_ERROR(Editor, "%s", ("Prefab push: failed to write " + asset.path).c_str());
+		return false;
+	}
+	const std::string path = asset.path;
+	content.replacePrefab(id, std::move(asset));
+	HE_LOG_INFO(Editor, "%s", ("Prefab push: wrote " + path).c_str());
+	// Every other placement of it follows now, not at the next save — and the
+	// pushing one is synced against what it just pushed, which changes nothing
+	// and keeps the recorder's "differs from the template" honest.
+	syncPrefabInstances("push");
+	m_prefabEditRevision = m_undo.revision();
+	m_contentRefreshPending = true;
+	return true;
+}
+
 bool EditorApplication::saveSceneToPath(const std::string& path)
 {
 	if (!m_editorWorld || path.empty()) return false;
+
+	// The file must not lag the assets it was built from — see the header.
+	// Before the write, so the sync's result IS what lands on disk; the world
+	// changes with it, which is what a human sees after the save anyway. An
+	// edit committed in this very frame is marked first, or the sync would be
+	// what undoes it.
+	recordPrefabEdits();
+	syncPrefabInstances("save");
 
 	SceneSerializer serializer;
 	if (serializer.save(*m_editorWorld, path, SerializeFormat::JSON))
@@ -8529,6 +8739,9 @@ bool EditorApplication::openScene(const std::string& path)
 	{
 		loaded = true;
 		m_currentScenePath = path;
+		// Before the asset preload: the sync may change which meshes and
+		// materials the placed prefabs reference.
+		syncPrefabInstances("open");
 		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 		warmupWorldMaterials(); // build custom-material pipelines before the first draw
 		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene opened from " + path).c_str());

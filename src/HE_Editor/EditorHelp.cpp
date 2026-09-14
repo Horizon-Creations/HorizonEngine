@@ -2032,6 +2032,49 @@ namespace
 	  "What this entity is called in the Outliner and to scripts that look it up "
 	  "by name.",
 	  "", "editor#details" },
+	// ── Placed prefabs ───────────────────────────────────────────────────────
+	{ "details.prefab", "Prefab Instance",
+	  "This entity is part of a placed prefab. The section names the asset it "
+	  "came from and lists what was changed on this placement — those values "
+	  "are kept when the prefab changes; everything else follows the asset.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Select Root", "Select Root",
+	  "Selects the entity the prefab was placed as. That is where the whole "
+	  "placement's changes are listed and where it can be pushed back into the "
+	  "asset.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Revert", "Revert",
+	  "Puts this value back to what the prefab says and stops protecting it, so "
+	  "later changes to the prefab reach it again. One undo step.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Revert All", "Revert All",
+	  "Puts every changed value on this placement, children included, back to "
+	  "what the prefab says, and undoes what was changed in its structure: a "
+	  "child added here goes, one deleted here comes back. The placement's own "
+	  "position stays where it is. One undo step per change.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Restore", "Restore",
+	  "Brings a child that was deleted from this placement back from the prefab, "
+	  "with everything the prefab has under it. One undo step.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Select", "Select",
+	  "Selects the entity that was added to this placement here.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Remove Addition", "Remove Addition",
+	  "Deletes an entity that was added to this placement here, with everything "
+	  "under it. It is not part of the prefab, so nothing else changes. One "
+	  "undo step.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Push to Prefab", "Push to Prefab",
+	  "Writes this placement into the prefab asset, so every placement of it in "
+	  "every scene takes these values. What another placement changed for itself "
+	  "is kept there. The asset's own position is not touched — a placement's "
+	  "position is where it stands, not what the prefab is.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Push", "Push",
+	  "Overwrites the prefab file with this placement. The other placements in "
+	  "this scene follow at once; scenes on disk follow when they are opened.",
+	  "", "scenes#prefabs" },
 	{ "details.multi.count", "Entities selected",
 	  "How many entities the selection holds, and which. The one marked active "
 	  "is the last one clicked; its values are what the rows below show.",
@@ -5037,6 +5080,7 @@ namespace
 		{ "outliner.", "editor-interface", "Editor Interface", "World Outliner" },
 		{ "content.",  "editor-interface", "Editor Interface", "Content Browser" },
 		{ "details.",  "editor-interface", "Editor Interface", "Details panel" },
+		{ "Prefab Instance/", "editor-interface", "Editor Interface", "Details panel" },
 		{ "panel.",    "editor-interface", "Editor Interface", "Panels and windows" },
 		{ "hub.",      "editor-interface", "Editor Interface", "Project Hub" },
 		// The menu bar, one rule per menu — the scope a menu pushes IS its name,

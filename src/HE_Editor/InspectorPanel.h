@@ -62,4 +62,13 @@ namespace InspectorPanel
 	// so a caller tracking unsaved changes cannot detect the edit from the
 	// outside, and an untracked add is a component lost when the tab closes.
 	bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo);
+
+	// Details-panel section label ("Rigid Body") → the scene-format key the
+	// prefab sync speaks ("rigidbody"), or null for a section without one. What
+	// ties the "(changed here)" marker on a component header to the override
+	// list of a placed prefab. The two walkers exist for the test that holds
+	// every key against SceneSerializer::isKnownComponentKey.
+	const char* componentKeyForLabel(const char* label);
+	size_t      componentKeyCount();
+	const char* componentLabelAt(size_t i);
 }

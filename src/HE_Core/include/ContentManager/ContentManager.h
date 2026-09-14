@@ -202,6 +202,10 @@ public:
 	bool replaceStaticMesh(HE::UUID id, StaticMeshAsset asset);
 	bool replaceTexture(HE::UUID id, TextureAsset asset);
 	bool replaceMaterial(HE::UUID id, MaterialAsset asset);
+	// The prefab's payload after a push-to-prefab from a placed instance: the
+	// file was rewritten and the in-memory copy has to say the same, or the next
+	// sync (and the next drop) would read the blob from before the push.
+	bool replacePrefab(HE::UUID id, PrefabAsset asset);
 
 	// ── Move / rename (editor) ─────────────────────────────────────────────
 	// An asset — or, with `folder = true`, a whole directory — has just been moved

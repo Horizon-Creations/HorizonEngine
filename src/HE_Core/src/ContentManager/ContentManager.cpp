@@ -2076,6 +2076,7 @@ HE::UUID ContentManager::registerEnumType(EnumTypeAsset asset)     { return regi
 bool ContentManager::replaceStaticMesh(HE::UUID id, StaticMeshAsset asset) { return replaceRuntimeAsset(m_staticMeshAssets, id, std::move(asset)); }
 bool ContentManager::replaceTexture(HE::UUID id, TextureAsset asset)       { return replaceRuntimeAsset(m_textureAssets,    id, std::move(asset)); }
 bool ContentManager::replaceMaterial(HE::UUID id, MaterialAsset asset)     { return replaceRuntimeAsset(m_materialAssets,   id, std::move(asset)); }
+bool ContentManager::replacePrefab(HE::UUID id, PrefabAsset asset)         { return replaceRuntimeAsset(m_prefabAssets,     id, std::move(asset)); }
 
 // ─── Pin bookkeeping ─────────────────────────────────────────────────────────
 void ContentManager::pinAsset(HE::UUID id)

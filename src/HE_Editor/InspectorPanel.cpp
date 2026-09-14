@@ -4,6 +4,7 @@
 #include <Physics/CollisionLayers.h>     // the project's sixteen collision channels
 #include "EditorWidgets.h"               // shared Content-Browser asset drop slot
 #include "EditorHelp.h"                  // per-component scope for the property tooltips
+#include "EditorTheme.h"                 // the accent for the "changed here" marker
 #include "EditorMultiEdit.h"             // one edit, every selected entity
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include <HorizonScene/HorizonScene.h>
@@ -348,6 +349,332 @@ bool collisionLayerRow(const char* label, uint8_t* value,
 		     "Pick any other layer to store a real value in the scene.", raw);
 	return changed;
 }
+
+// ── Placed prefabs ───────────────────────────────────────────────────────────
+// What the Details panel says about an entity that belongs to a placed prefab:
+// which asset, which overrides were authored here (and a way to take each one
+// back), and the way into the asset. The override list is the instance's own
+// (PrefabInstanceComponent), filled by EditorApplication::recordPrefabEdits
+// after every edit; this panel only shows and drains it.
+//
+// Overrides are named the way the scene format spells them ("light /
+// intensity"), not the way the rows above are labelled ("Light ▸ Brightness"):
+// the list is the serializer's diff, and the serializer knows nothing about
+// labels. The component headers below get a marker, which is where the two
+// meet — through the small table right here, the one place a label is tied to
+// a scene-format key.
+
+// The placements this entity belongs to, resolved once per draw: the roots
+// that bind it, and for each the template key it answers to there.
+struct PrefabMembership
+{
+	struct Of { Entity root; HE::UUID templateKey; };
+	std::vector<Of> instances;
+	// An entity no placement binds, sitting under one: added here. The nearest
+	// enclosing placement's root, so the section can say which one and offer
+	// to take the addition back. Null for a bound entity or a plain one.
+	Entity addedUnder = entt::null;
+	bool any() const { return !instances.empty() || addedUnder != entt::null; }
+
+	// Every override on this entity's record of a component, across the
+	// placements that bind it — what the header marker lists.
+	std::vector<std::string> overriddenProperties(entt::registry& registry, const char* key) const
+	{
+		std::vector<std::string> out;
+		for (const Of& of : instances)
+		{
+			const auto* inst = registry.try_get<PrefabInstanceComponent>(of.root);
+			if (!inst) continue;
+			for (const auto& o : inst->overrides)
+				if (o.templateEntity == of.templateKey && o.component == key)
+					out.push_back(o.property.empty() ? std::string("(whole component)") : o.property);
+		}
+		return out;
+	}
+};
+
+PrefabMembership prefabMembershipOf(HorizonWorld& world, Entity entity)
+{
+	PrefabMembership m;
+	auto& registry = world.registry();
+	const auto* idc = registry.try_get<EntityIdComponent>(entity);
+	if (!idc) return m;
+	for (Entity root : SceneSerializer::prefabInstancesBinding(world, entity))
+		m.instances.push_back({ root, registry.get<PrefabInstanceComponent>(root).templateOf(idc->id) });
+	if (m.instances.empty())
+	{
+		const auto* h = registry.try_get<HierarchyComponent>(entity);
+		for (Entity up = h ? h->parent : entt::null; up != entt::null && registry.valid(up);)
+		{
+			if (registry.all_of<PrefabInstanceComponent>(up)) { m.addedUnder = up; break; }
+			const auto* uh = registry.try_get<HierarchyComponent>(up);
+			up = uh ? uh->parent : entt::null;
+		}
+	}
+	return m;
+}
+
+// The asset's records, parsed once per asset payload rather than once per
+// frame: the structure rows below need record names, and the blob of a prefab
+// that holds a terrain is megabytes. Re-read when the payload moved (a push,
+// a reload) or the undo revision changed (anything else that could have
+// swapped the resident copy went through a snapshot).
+const SceneSerializer::PrefabRecordIndex& prefabRecordIndexFor(const PrefabAsset& asset, uint64_t revision)
+{
+	static HE::UUID                          s_asset;
+	static const uint8_t*                    s_data     = nullptr;
+	static size_t                            s_size     = 0;
+	static uint64_t                          s_revision = ~uint64_t(0);
+	static SceneSerializer::PrefabRecordIndex s_index;
+	if (s_asset != asset.id || s_data != asset.data.data() || s_size != asset.data.size() ||
+	    s_revision != revision)
+	{
+		s_asset    = asset.id;
+		s_data     = asset.data.data();
+		s_size     = asset.data.size();
+		s_revision = revision;
+		s_index    = SceneSerializer::indexPrefabRecords(asset.data);
+	}
+	return s_index;
+}
+
+// The "Prefab Instance" section, one block per placement that binds the
+// entity (two for the root of a nested instance).
+void prefabInstanceSection(AppContext& ctx, HorizonWorld& world, Entity entity,
+                           const PrefabMembership& membership, uint64_t revision)
+{
+	auto& registry = world.registry();
+	HE::Ed::Help::Scope scope("Prefab Instance");
+
+	// ── Added here ───────────────────────────────────────────────────────────
+	// Not part of the prefab: the placement's sync never touches it, a push
+	// writes it into the asset as a new record. The one thing to offer is the
+	// way back out, and the root, where the rest of the placement's changes are.
+	if (membership.addedUnder != entt::null)
+	{
+		const Entity root = membership.addedUnder;
+		ImGui::PushID(static_cast<int>(entt::to_integral(root)));
+		const bool open = ImGui::CollapsingHeader("Prefab Instance", ImGuiTreeNodeFlags_DefaultOpen);
+		EditorWidgets::helpForKey("details.prefab");
+		if (open)
+		{
+			EditorWidgets::WrapText wrap;
+			const auto* rn = registry.try_get<NameComponent>(root);
+			ImGui::Text("Added here, under %s", rn ? rn->name.c_str() : "(unnamed)");
+			ImGui::TextDisabled("Not part of the prefab: changes to the prefab do not reach it, and "
+			                    "Push to Prefab would write it into the asset.");
+			if (EditorWidgets::smallButton("Select Root")) ctx.selection.set(root);
+			ImGui::SameLine();
+			ImGui::BeginDisabled(ctx.isPlaying || !ctx.revertPrefabAddition);
+			if (EditorWidgets::smallButton("Remove Addition"))
+				ctx.revertPrefabAddition(root, entity);
+			ImGui::EndDisabled();
+		}
+		ImGui::PopID();
+		ImGui::Separator();
+		return;
+	}
+
+	for (const PrefabMembership::Of& of : membership.instances)
+	{
+		auto* inst = registry.try_get<PrefabInstanceComponent>(of.root);
+		if (!inst) continue;
+		ImGui::PushID(static_cast<int>(entt::to_integral(of.root)));
+		const bool open = ImGui::CollapsingHeader("Prefab Instance", ImGuiTreeNodeFlags_DefaultOpen);
+		EditorWidgets::helpForKey("details.prefab");
+		if (open)
+		{
+			EditorWidgets::WrapText wrap;
+
+			// Which asset. Resident or not — a placement whose asset is gone
+			// still says what it was placed from.
+			const PrefabAsset* asset = ctx.contentManager ? ctx.contentManager->getPrefab(inst->asset) : nullptr;
+			if (asset)
+			{
+				ImGui::Text("Instance of %s", asset->name.empty() ? "(unnamed prefab)" : asset->name.c_str());
+				if (!asset->path.empty()) ImGui::TextDisabled("%s", asset->path.c_str());
+			}
+			else
+				ImGui::TextDisabled("Instance of a prefab that is not loaded.");
+
+			// A child says which placement it is part of, and offers the root —
+			// that is where the whole instance's list and the push button are.
+			const bool isRoot = (of.root == entity);
+			if (!isRoot)
+			{
+				const auto* rn = registry.try_get<NameComponent>(of.root);
+				ImGui::Text("Part of %s", rn ? rn->name.c_str() : "(unnamed)");
+				ImGui::SameLine();
+				if (EditorWidgets::smallButton("Select Root"))
+					ctx.selection.set(of.root);
+			}
+
+			// The list, COPIED before any button below rewrites it: a revert
+			// syncs the placement, and a sync may emplace components — the
+			// component pointer above is not to be read after that.
+			const std::vector<PrefabInstanceComponent::Override> all = inst->overrides;
+			inst = nullptr;
+			// The overrides on THIS entity's record.
+			std::vector<PrefabInstanceComponent::Override> mine;
+			for (const auto& o : all)
+				if (o.templateEntity == of.templateKey) mine.push_back(o);
+			if (mine.empty())
+				ImGui::TextDisabled(isRoot ? "Nothing on the root was changed here."
+				                           : "Nothing on this entity was changed here.");
+			else
+			{
+				EditorWidgets::subHeading("Changed here");
+				int i = 0;
+				for (const auto& o : mine)
+				{
+					ImGui::PushID(i++);
+					if (o.component == "__name")
+						ImGui::BulletText("name");
+					else if (o.property.empty())
+						ImGui::BulletText("%s (whole component)", o.component.c_str());
+					else
+						ImGui::BulletText("%s / %s", o.component.c_str(), o.property.c_str());
+					ImGui::SameLine();
+					const bool revert = EditorWidgets::smallButton("Revert");
+					ImGui::PopID();
+					if (revert && ctx.revertPrefabOverride)
+					{
+						ctx.revertPrefabOverride(of.root, o);
+						break; // the list this loop walks was just rewritten
+					}
+				}
+			}
+
+			// ── Structure: children deleted here, children added here ────
+			// Not in the override list (the world says them — a dead binding,
+			// an unbound entity), listed on the root, where the placement is.
+			// The removed rows need the asset for the record names; the added
+			// rows do not.
+			SceneSerializer::PrefabStructure structure;
+			if (isRoot)
+			{
+				if (asset)
+					structure = SceneSerializer::prefabStructureOf(
+						world, of.root, prefabRecordIndexFor(*asset, revision));
+				else
+					structure = SceneSerializer::prefabStructureOf(
+						world, of.root, SceneSerializer::PrefabRecordIndex{});
+				if (structure.any()) EditorWidgets::subHeading("Structure changed here");
+				int i = 0;
+				bool acted = false;
+				for (const auto& r : structure.removedHere)
+				{
+					ImGui::PushID(1000 + i++);
+					ImGui::BulletText("%s (removed here)", r.name.c_str());
+					ImGui::SameLine();
+					ImGui::BeginDisabled(ctx.isPlaying || !ctx.revertPrefabRemoval);
+					const bool revert = EditorWidgets::smallButton("Restore");
+					ImGui::EndDisabled();
+					ImGui::PopID();
+					if (revert && ctx.revertPrefabRemoval && !acted)
+					{
+						ctx.revertPrefabRemoval(of.root, r.templateEntity);
+						acted = true;   // the sync just rewrote the table; keep drawing, act once
+					}
+				}
+				for (Entity added : structure.addedHere)
+				{
+					ImGui::PushID(1000 + i++);
+					const auto* an = registry.try_get<NameComponent>(added);
+					ImGui::BulletText("%s (added here)", an ? an->name.c_str() : "(unnamed)");
+					ImGui::SameLine();
+					if (EditorWidgets::smallButton("Select")) ctx.selection.set(added);
+					ImGui::SameLine();
+					ImGui::BeginDisabled(ctx.isPlaying || !ctx.revertPrefabAddition);
+					const bool revert = EditorWidgets::smallButton("Remove Addition");
+					ImGui::EndDisabled();
+					ImGui::PopID();
+					if (revert && ctx.revertPrefabAddition && !acted)
+					{
+						ctx.revertPrefabAddition(of.root, added);
+						acted = true;
+					}
+				}
+			}
+
+			// The whole placement: how much of it is authored here, and the
+			// way back into the asset. On the root, because that is the
+			// instance; a child shows the count so the number is not a
+			// surprise on the way up.
+			const size_t total = all.size() + structure.removedHere.size() + structure.addedHere.size();
+			if (isRoot)
+			{
+				if (total > mine.size())
+					ImGui::TextDisabled("%zu change(s) on this instance, %zu of them on children "
+					                    "or the structure.", total, total - mine.size());
+				const bool canRevert = asset && !ctx.isPlaying && ctx.revertPrefabOverride;
+				const bool canWrite  = asset && !ctx.isPlaying && ctx.pushToPrefab;
+				ImGui::BeginDisabled(!canRevert || total == 0);
+				if (EditorWidgets::button("Revert All"))
+				{
+					// One at a time through the same path as the row buttons —
+					// each is its own undo step, which is also how they were made.
+					// Structure first: an override on a child that is about to
+					// be removed would otherwise be reverted for nothing, and a
+					// restored child comes back as the asset has it.
+					if (ctx.revertPrefabAddition)
+						for (Entity added : structure.addedHere) ctx.revertPrefabAddition(of.root, added);
+					if (ctx.revertPrefabRemoval)
+						for (const auto& r : structure.removedHere) ctx.revertPrefabRemoval(of.root, r.templateEntity);
+					for (const auto& o : all) ctx.revertPrefabOverride(of.root, o);
+				}
+				ImGui::EndDisabled();
+				ImGui::SameLine();
+				ImGui::BeginDisabled(!canWrite);
+				if (EditorWidgets::button("Push to Prefab"))
+					ImGui::OpenPopup("Push to Prefab?");
+				ImGui::EndDisabled();
+				if (!canWrite && ctx.isPlaying)
+					hint("Not while playing — play runs on a copy of the world.");
+				else if (!asset)
+					hint("The prefab asset is not loaded, so there is nothing to write to.");
+
+				EditorWidgets::pinDialogToEditorWindow(ImVec2(380.0f, 0.0f));
+				if (ImGui::BeginPopupModal("Push to Prefab?", nullptr,
+				                           ImGuiWindowFlags_AlwaysAutoResize))
+				{
+					{
+						EditorWidgets::WrapText wrapDialog;
+						ImGui::TextUnformatted("Write this placement into the prefab asset?");
+						if (asset && !asset->path.empty()) ImGui::TextDisabled("%s", asset->path.c_str());
+						ImGui::Spacing();
+						ImGui::TextUnformatted("Every placement of it, in every scene, takes these "
+						                       "values the next time it is synced. What other "
+						                       "placements changed for themselves stays as it is. "
+						                       "A child deleted here leaves them too; one added "
+						                       "here reaches them.");
+						ImGui::Spacing();
+						ImGui::TextDisabled("Undo takes this scene back, not the prefab file: the "
+						                    "next save syncs the placements against what was pushed.");
+						ImGui::Spacing();
+					}
+					if (EditorWidgets::primaryButton("Push"))
+					{
+						if (ctx.pushToPrefab) ctx.pushToPrefab(of.root);
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::SameLine();
+					if (EditorWidgets::button("Cancel")) ImGui::CloseCurrentPopup();
+					ImGui::EndPopup();
+				}
+			}
+			else
+			{
+				// A child does not compute the structure (that is the root's
+				// row); it says how many value changes the placement holds.
+				if (total > mine.size())
+					ImGui::TextDisabled("%zu change(s) on the whole instance.", total);
+			}
+		}
+		ImGui::PopID();
+	}
+	ImGui::Separator();
+}
 #endif // HE_IMGUI_ENABLED
 
 // The body of the Details panel: every component's rows, drawn against an
@@ -387,6 +714,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	auto& registry = world.registry();
 	const bool quiet = (collect != nullptr) || removeMatching;
 	bool structuralChange = false;
+
+	// Which placed prefabs this entity belongs to — drawn as a section under
+	// the name and as a marker on every component header that has an override.
+	// Only for the real scene: a scratch world (null undo) has no placements.
+	const PrefabMembership membership =
+		(!quiet && !only && undo) ? prefabMembershipOf(world, entity) : PrefabMembership{};
 
 	// The slot componentHeader renames as it walks the components. It exists for
 	// the whole call, so an early return out of any section still unwinds it and
@@ -441,6 +774,29 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				removed = structuralChange = true;
 			ImGui::EndPopup();
 		}
+		// On a placed prefab: which components carry something authored here,
+		// right on the header, so the reader does not have to open the Prefab
+		// Instance section to know which values would survive a sync.
+		if (membership.any())
+			if (const char* key = componentKeyForLabel(label))
+			{
+				const std::vector<std::string> props = membership.overriddenProperties(registry, key);
+				if (!props.empty())
+				{
+					const char* badge = "(changed here)";
+					ImGui::SameLine(ImGui::GetContentRegionMax().x - ImGui::CalcTextSize(badge).x
+					                - ImGui::GetStyle().FramePadding.x);
+					ImGui::TextColored(HE::Ed::Theme::AccentBright, "%s", badge);
+					if (ImGui::IsItemHovered())
+					{
+						std::string list;
+						for (const std::string& p : props) list += (list.empty() ? "" : ", ") + p;
+						ImGui::SetTooltip("Changed on this placement: %s.\nThe prefab's value does "
+						                  "not reach these — revert them in the Prefab Instance "
+						                  "section above.", list.c_str());
+					}
+				}
+			}
 		return open && !removed;
 	};
 	bool removed = false;
@@ -464,6 +820,13 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 		}
 		ImGui::Separator();
+
+		// ── Prefab instance ──────────────────────────────────────────────────
+		// Under the name and above every component: where this entity came
+		// from and what was changed here — before the rows that might be
+		// about to change more.
+		if (membership.any())
+			prefabInstanceSection(ctx, world, entity, membership, undo ? undo->revision() : 0);
 	}
 
 	// ── Environment / Sky (the "Sky" scene entity's EnvironmentComponent) ────

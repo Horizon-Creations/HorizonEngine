@@ -233,6 +233,7 @@ add_executable(HorizonEditor WIN32
 	NotificationStore.cpp
 	NotificationBar.cpp
 	InspectorPanel.cpp
+	InspectorPrefabKeys.cpp
 	TerrainTools.cpp
 	ViewportPanel.cpp
 	ViewportToolbar.cpp
