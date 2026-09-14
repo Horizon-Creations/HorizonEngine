@@ -14744,6 +14744,77 @@ TEST_CASE("Drag: the moved point is in the source widget's canvas units")
     wm.processPointer(800.0f, 600.0f, 280.0f, 320.0f, false, true);
 }
 
+// The zone lives in ANOTHER widget, and the widget carrying the source dies
+// mid-carry. The source's script is on its way out and hears nothing; the zone
+// is alive, lit up on Enter, and this is its only chance to hear Leave.
+TEST_CASE("Drag: a source destroyed mid-carry still tells the zone it left")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DragFixture f;
+    registerWidget(cm, f.tree, &f.graph);
+
+    // A second widget: one zone over the right half, above the first widget,
+    // with the same enter/leave bookkeeping the fixture's bin has.
+    HE::UIWidgetTree zt;
+    HorizonCode::Graph zg;
+    zt.canvasWidth = 400.0f; zt.canvasHeight = 300.0f;
+    zt.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int zone = zt.add(HE::UIWidgetType::Panel);
+    {
+        HE::UIElement& e = *zt.find(zone);
+        e.name = "Zone"; e.acceptsDrop = true;
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 220.0f; e.posY = 0.0f; e.sizeX = 180.0f; e.sizeY = 300.0f;
+    }
+    for (const char* ev : { "OnDragEnter", "OnDragLeave" })
+    {
+        const char* name = ev[6] == 'E' ? "enters" : "leaves";
+        HorizonCode::Variable v; v.name = name; v.type = PinType::Int;
+        zg.variables.push_back(v);
+        HorizonCode::Node evn; evn.type = NodeType::Event; evn.s = ev; evn.elem = zone;
+        const int evId = zg.addNode(evn);
+        HorizonCode::Node get; get.type = NodeType::GetVariable; get.s = name;
+        get.propType = PinType::Int;
+        const int getId = zg.addNode(get);
+        HorizonCode::Node one; one.type = NodeType::ConstInt; one.f[0] = 1.0f;
+        const int oneId = zg.addNode(one);
+        HorizonCode::Node add; add.type = NodeType::Add;
+        const int addId = zg.addNode(add);
+        HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = name;
+        set.propType = PinType::Int;
+        const int setId = zg.addNode(set);
+        REQUIRE(zg.connect(getId, 0, addId, 0));
+        REQUIRE(zg.connect(oneId, 0, addId, 1));
+        REQUIRE(zg.connect(evId, 0, setId, 0));
+        REQUIRE(zg.connect(addId, 2, setId, 2));
+    }
+    registerWidget(cm, zt, &zg, "mem://z.hasset");
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int src = createShown(wm, cm, "mem://w.hasset");
+    const int zw  = createShown(wm, cm, "mem://z.hasset");
+    REQUIRE(src != 0);
+    REQUIRE(zw != 0);
+    wm.setZOrder(zw, 10);
+    const auto zinst = static_cast<HorizonCode::InstanceId>(zw);
+
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    REQUIRE(wm.isDragging());
+    CHECK(rt.getVariable(zinst, "enters").i == 1);
+    CHECK(rt.getVariable(zinst, "leaves").i == 0);
+
+    wm.destroyWidget(src);
+    CHECK_FALSE(wm.isDragging());
+    CHECK(rt.getVariable(zinst, "leaves").i == 1);
+    // …and the release that follows is nothing: no drop, no second leave.
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
+    CHECK(rt.getVariable(zinst, "leaves").i == 1);
+}
+
 TEST_CASE("Drag: it cannot be dropped on itself, and Escape puts it back")
 {
     TempWidgetDir dir;

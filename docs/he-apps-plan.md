@@ -4595,3 +4595,12 @@ Deklaration und Definition, damit die beiden nicht wieder auseinanderlaufen.
 **Was das nicht ist.** Kein Zeigerbewegungs-Ereignis ohne gedrückte Taste, kein Ereignis für
 Bewegung ohne Draggable. Beides wäre ein Ereignis pro Bild an jedem Element, und was ein
 Element ohne Zug über seinen Hover wissen muss, sagen `OnHovered`/`OnUnhovered` bereits.
+
+**Nachgereicht aus dem Review desselben Tages: die Quelle stirbt mitten im Zug.** Ein
+Graph darf im Tragen sein eigenes Widget zerstören, und `destroyWidget` ließ den Zug dabei
+bisher schlicht weiterlaufen, mit einer Quell-Id, die nichts mehr findet. Die Quelle selbst
+hört bei ihrem Tod nichts, wie bei `clear()`: ihr Skript ist auf dem Weg hinaus. Aber die
+Zone, über der sie gerade hing, ist ein anderes, lebendes Widget, hat bei Enter
+aufgeleuchtet, und bekommt jetzt ihr `OnDragLeave`. Ein Test mit zwei Widgets fährt genau
+das: Karte in Widget A über eine Zone in Widget B, A zerstören, B zählt ein Leave, und das
+Loslassen danach ist nichts mehr.

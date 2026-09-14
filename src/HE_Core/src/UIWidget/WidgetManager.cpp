@@ -1900,6 +1900,27 @@ void WidgetManager::destroyWidget(int id)
 		m_tooltipWidget = m_tooltipElem = 0;
 		m_tooltipHeld = 0.0f; m_tooltipUp = false;
 	}
+	// A carry whose SOURCE is being destroyed is over, and silently for the
+	// source (its script is on its way out, see clear()). Not silently for the
+	// zone it was hovering: that one is a different, living widget, it lit up
+	// on Enter, and this is its only chance to hear that the thing is gone.
+	if (m_dragWidget == id)
+	{
+		const bool wasActive = m_dragActive;
+		const int  overW = m_dragOverWidget, overE = m_dragOverElem;
+		m_dragWidget = m_dragElem = 0;
+		m_dragArmed = m_dragActive = m_dragAteClick = m_dragReported = false;
+		m_dragOverWidget = m_dragOverElem = 0;
+		setDropMark(0, 0);
+		if (wasActive && overE != 0 && overW != id)
+			if (const Instance* zone = find(overW))
+			{
+				const ScriptTarget t = scriptTargetFor(*zone, overE);
+				rt().fireOnDragLeave(t.scriptId, t.elem);
+			}
+	}
+	// …and a zone being destroyed under a carry simply stops being one.
+	if (m_dragOverWidget == id) m_dragOverWidget = m_dragOverElem = 0;
 	if (Instance* w = find(id))
 	{
 		HE_LOG_DEBUG(Widget, "Destroying widget id %d", id);
@@ -4174,21 +4195,23 @@ void WidgetManager::setDragOver(Instance* w, int elem)
 	// Leave the old one first, then enter the new: a slot that opens a gap on
 	// Enter and closes it on Leave must never see two gaps open at once.
 	if (m_dragOverElem != 0)
-		if (Instance* old = find(m_dragOverWidget))
-		{
-			const ScriptTarget t = scriptTargetFor(*old, m_dragOverElem);
-			m_dragOverWidget = m_dragOverElem = 0;
-			rt().fireOnDragLeave(t.scriptId, t.elem);
-		}
+	{
+		ScriptTarget t; bool have = false;
+		if (const Instance* old = find(m_dragOverWidget))
+		{ t = scriptTargetFor(*old, m_dragOverElem); have = true; }
+		m_dragOverWidget = m_dragOverElem = 0;
+		if (have) rt().fireOnDragLeave(t.scriptId, t.elem);
+	}
+	// The Leave handler may have ended the carry (cancelled it, destroyed the
+	// source); then nothing is over anything, and the pair stays cleared
+	// rather than pointing at a zone nobody will ever leave.
+	if (wid == 0 || !m_dragActive) return;
 	m_dragOverWidget = wid; m_dragOverElem = elem;
-	// The handler above may have ended the carry; then there is nothing to
-	// announce over the new one.
-	if (wid != 0 && m_dragActive)
-		if (Instance* nw = find(wid))
-		{
-			const ScriptTarget t = scriptTargetFor(*nw, elem);
-			rt().fireOnDragEnter(t.scriptId, t.elem, dragPayloadText());
-		}
+	if (const Instance* nw = find(wid))
+	{
+		const ScriptTarget t = scriptTargetFor(*nw, elem);
+		rt().fireOnDragEnter(t.scriptId, t.elem, dragPayloadText());
+	}
 }
 
 void WidgetManager::finishDrag(bool accepted, Instance* targetW, int targetElem)
