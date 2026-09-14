@@ -4533,3 +4533,65 @@ Wurzel bei `parentId == 0` hat für `drawElem` keine erste Zeile, egal wer sie z
 —, für die Abnahme aus Welle 1 schon. Das In-Engine-Handbuch bleibt hiervon unberührt: es
 beschreibt den Outliner als Entity-Baum und sagt über den App-Modus nichts, was durch den Fix
 falsch geworden wäre.
+
+---
+
+### B7, dritte Hälfte: die Bewegung dazwischen (14.09.2026)
+
+**Was fehlte, war nicht das Ziehen, sondern das Dazwischen.** Anheben, Loslassen und das
+Ende gab es seit dem 02.09. Was es nicht gab: ein Ereignis für die Zeigerbewegung mit
+gedrückter Taste. Die Quelle wurde beim Anheben halb durchsichtig und hörte danach nichts
+mehr, bis sie wieder lag. Ein Geist, der der Hand folgt, war damit nicht baubar, und ein
+Inventarfeld erfuhr erst beim Loslassen, dass etwas über ihm hing — zu spät, um eine Lücke
+zu öffnen oder aufzuleuchten. Das Gap-Audit vom 25.08. hatte das schon so benannt, nur stand
+es dort noch als „kein Drag-and-Drop", und diese Hälfte war inzwischen gebaut.
+
+**Drei Ereignisse mehr, eines an der Quelle und zwei am Ziel.** `OnDragMoved` an der Quelle,
+mit dem Zeiger als Punkt. `OnDragEnter` am Ziel, mit derselben Nutzlast, die `OnDrop` später
+bringt — ein Feld soll entscheiden können, ob es aufleuchtet, bevor die Hand entschieden
+hat. `OnDragLeave` am Ziel, ohne Argument. Alle drei auf der Basis, wie die anderen: getragen
+werden ist etwas, das einem Element passiert, nicht etwas, das ein Typ tut.
+
+**Der Punkt ist in Canvas-Einheiten des Quell-Widgets**, nicht in Pixeln des Render-Targets.
+Das ist der Raum, in dem `Position` steht, und der Grund dafür ist ein Graph mit zwei Knoten:
+Ereignis rein, Set Position raus, und ein Geist auf Wurzelebene folgt der Hand ohne
+Arithmetik. Wer den Geist in einen Container hängt, zieht den Versatz des Elternteils selbst
+ab; mehr verspricht das Ereignis nicht. Ein Test fährt die Canvas auf Skalierung 2 und
+prüft, dass der Punkt halbiert ankommt.
+
+**Bewegung heißt Bewegung.** Der Zeiger wird jedes Bild gemeldet, ob er sich bewegt hat oder
+nicht, und ein Graph, der an „bewegt" einen Geist hängt, liefe sonst sechzigmal pro Sekunde
+für eine Hand, die still liegt. Gefeuert wird nur, wenn die Position sich gegenüber der
+letzten Meldung geändert hat. Die erste Meldung geht **beim Anheben selbst** hinaus: die Hand
+ist dann schon über der Schwelle, und ein Geist, der erst bei der nächsten Bewegung
+nachzöge, stünde am Druckpunkt statt unter der Hand.
+
+**Enter und Leave hängen nicht am Rahmen.** Naheliegend wäre gewesen, sie in `setDropMark`
+zu feuern, wo der Ring gesetzt wird. Aber der Ring wird auch vom Datei-Drag aus dem Finder
+gesetzt, und eine Datei, die über einem Feld schwebt, darf dem Graphen nicht sagen, dass eine
+App-Nutzlast angekommen ist. Also ein eigenes Paar (`m_dragOverWidget/Elem`) neben dem
+gezeichneten, verglichen einmal pro Bild im selben Zweig, der schon den Ring nachführt. Leave
+zuerst, dann Enter: ein Feld, das bei Enter eine Lücke öffnet und bei Leave schließt, darf
+nie zwei Lücken zugleich sehen.
+
+**Ein Drop ist kein Leave, ein Abbruch schon.** Wer über dem Feld loslässt, bekommt `OnDrop`,
+und nicht zusätzlich „es ist weg": ein Feld braucht für dasselbe Loslassen nicht beide
+Antworten. Wer über dem Feld Escape drückt oder den Zeiger verliert, bekommt `OnDragLeave`,
+denn es hat bei Enter aufgeleuchtet, und das ist seine einzige Gelegenheit zu erfahren, dass
+das Ding fort ist. Ohne diese Zeile bliebe nach jedem Escape ein Feld für immer erleuchtet.
+
+**Alle Ziele werden aufgelöst, bevor das erste Ereignis feuert.** `finishDrag` hielt Zeiger
+in `m_instances` über das Feuern von `OnDrop` hinweg, und `m_instances` ist ein Vektor: ein
+Handler, der ein Widget zerstört, verschiebt den Rest. Mit drei Ereignissen statt zwei wäre
+das kein theoretischer Fall mehr gewesen. Jetzt sind Quelle, Ziel und Leave-Ziel vorher drei
+`ScriptTarget` (zwei Ints), und danach folgt niemand mehr einem Zeiger.
+
+**Nebenbefund im Codegen, mitgefixt.** `hookParams` kannte nur String, Float, Bool und Int;
+alles andere wurde zu `int`. Für ein Vec2-Ereignis hätte der gepackte Build damit ein
+`override` erzeugt, das nichts überschreibt, und das galt vorher schon für `OnColorChanged`
+(Color, `const glm::vec4&`), nur hatte es noch niemand kompiliert. Ein `hookArgType` für
+Deklaration und Definition, damit die beiden nicht wieder auseinanderlaufen.
+
+**Was das nicht ist.** Kein Zeigerbewegungs-Ereignis ohne gedrückte Taste, kein Ereignis für
+Bewegung ohne Draggable. Beides wäre ein Ereignis pro Bild an jedem Element, und was ein
+Element ohne Zug über seinen Hover wissen muss, sagen `OnHovered`/`OnUnhovered` bereits.

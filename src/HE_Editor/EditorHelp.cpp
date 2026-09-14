@@ -3837,7 +3837,12 @@ namespace
 	  "go over it fires On File Dropped, once per file, with the file's path. The "
 	  "drop travels UP from whatever the pointer met to the first element that "
 	  "accepts one, so set it on the panel and not on the label inside it. Where "
-	  "nothing accepts, the window took it and the Game Instance hears it instead.",
+	  "nothing accepts, the window took it and the Game Instance hears it instead. "
+	  "Something Draggable from inside the application lands here too, with On "
+	  "Drop — and before that On Drag Enter (with the carried payload) when it "
+	  "arrives over this zone and On Drag Leave when it moves off again or the "
+	  "drag is cancelled, so an inventory slot can light up or open a gap while "
+	  "the hand is still deciding.",
 	  "", "ui#widgets" },
 	{ "UI Widget/RichText", "",
 	  "Reads the Text as MARKUP instead of as plain words. What it understands: "
@@ -3857,10 +3862,14 @@ namespace
 	{ "UI Widget/Draggable", "",
 	  "Lets this element be picked up and carried onto a drop zone. The drag "
 	  "begins at a DISTANCE, not at the press, so a draggable element can still "
-	  "be clicked. It fires On Drag Started when it lifts and On Drag Ended when "
-	  "it lands, with a bool saying whether anything took it; the zone it was "
-	  "dropped on gets On Drop. Like Accepts drop, this bubbles: pressing the "
-	  "label of a draggable card carries the card.",
+	  "be clicked. It fires On Drag Started when it lifts, On Drag Moved for "
+	  "every movement while it is carried (with the pointer as a point in this "
+	  "widget's canvas units, the same space Position is in, so a ghost at the "
+	  "root follows the hand with nothing but a Set Position; inside a container "
+	  "subtract the parent's offset), and On Drag Ended when it lands, with a "
+	  "bool saying whether anything took it; the zone it was dropped on gets On "
+	  "Drop. Like Accepts drop, this bubbles: pressing the label of a draggable "
+	  "card carries the card.",
 	  "", "ui#widgets" },
 	{ "UI Widget/Drag payload", "",
 	  "What this element calls itself when it is dropped somewhere: the string "

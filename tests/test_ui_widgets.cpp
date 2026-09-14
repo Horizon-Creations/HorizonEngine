@@ -486,10 +486,18 @@ TEST_CASE("interactive types declare events; Button fires OnClicked")
         if (e.name == "OnFileDropped")
         { textCanTakeAFile = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::String); }
     CHECK(textCanTakeAFile);
-    // Five on the base — animation, file drop, and the three of the drag — plus
-    // whatever the type adds, which for a Text is its link.
-    CHECK(HE::UIText{}.allEvents().size() == HE::UIText{}.events().size() + 5);
-    CHECK(HE::UIButton{}.allEvents().size() == HE::UIButton{}.events().size() + 5);
+    // Eight on the base — animation, file drop, and the six of the drag (three
+    // for the source: started, moved, ended; three for the target: enter,
+    // leave, drop) — plus whatever the type adds, which for a Text is its link.
+    CHECK(HE::UIText{}.allEvents().size() == HE::UIText{}.events().size() + 8);
+    CHECK(HE::UIButton{}.allEvents().size() == HE::UIButton{}.events().size() + 8);
+    // The moved event carries a POINT, the one base event that does: the pin
+    // has to come out as Vec2 or a Set Position cannot take it.
+    bool textCanBeCarried = false;
+    for (const auto& e : HE::UIText{}.allEvents())
+        if (e.name == "OnDragMoved")
+        { textCanBeCarried = true; CHECK(e.hasArg); CHECK(e.argType == HE::UIPropType::Vec2); }
+    CHECK(textCanBeCarried);
     CHECK(HE::UIButton{}.interactive());
     CHECK(!HE::UIText{}.interactive());
 }
@@ -14467,6 +14475,42 @@ struct DragFixture
             REQUIRE(graph.connect(setId, 1, incId, 0));
             REQUIRE(graph.connect(addId, 2, incId, 2));
         }
+        // The movement, from both sides. The card writes down WHERE it last
+        // was and how often it was told; the bin writes down what arrived over
+        // it and how often something came and went.
+        auto valueAndCount = [&](const char* event, int elem, const char* valueName,
+                                 PinType valueType, const char* countName)
+        {
+            HorizonCode::Variable v; v.name = valueName; v.type = valueType;
+            graph.variables.push_back(v);
+            HorizonCode::Variable n; n.name = countName; n.type = PinType::Int;
+            graph.variables.push_back(n);
+            HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = event;
+            ev.elem = elem; ev.hasArg = true; ev.propType = valueType;
+            const int evId = graph.addNode(ev);
+            HorizonCode::Node set; set.type = NodeType::SetVariable; set.s = valueName;
+            set.propType = valueType;
+            const int setId = graph.addNode(set);
+            REQUIRE(graph.connect(evId, 0, setId, 0));
+            REQUIRE(graph.connect(evId, 1, setId, 2));
+            HorizonCode::Node get; get.type = NodeType::GetVariable; get.s = countName;
+            get.propType = PinType::Int;
+            const int getId = graph.addNode(get);
+            HorizonCode::Node one; one.type = NodeType::ConstInt; one.f[0] = 1.0f;
+            const int oneId = graph.addNode(one);
+            HorizonCode::Node add; add.type = NodeType::Add;
+            const int addId = graph.addNode(add);
+            HorizonCode::Node inc; inc.type = NodeType::SetVariable; inc.s = countName;
+            inc.propType = PinType::Int;
+            const int incId = graph.addNode(inc);
+            REQUIRE(graph.connect(getId, 0, addId, 0));
+            REQUIRE(graph.connect(oneId, 0, addId, 1));
+            REQUIRE(graph.connect(setId, 1, incId, 0));
+            REQUIRE(graph.connect(addId, 2, incId, 2));
+        };
+        valueAndCount("OnDragMoved", card, "at",   PinType::Vec2,   "moves");
+        valueAndCount("OnDragEnter", bin,  "over", PinType::String, "enters");
+        counter("leaves", "OnDragLeave", bin);
     }
 };
 }
@@ -14579,6 +14623,125 @@ TEST_CASE("Drag: the payload is what the source says it is")
     wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
     wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
     CHECK(rt.getVariable(static_cast<HorizonCode::InstanceId>(id), "took").s == "row:7");
+}
+
+// The movement between the lift and the release, which is what an inventory
+// is made of: the source hears where the hand is, the slot hears that
+// something arrived over it and left again — all BEFORE the release.
+TEST_CASE("Drag: the source hears every move, the target hears enter and leave")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DragFixture f;
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const auto inst = static_cast<HorizonCode::InstanceId>(id);
+    auto var = [&](const char* n) { return rt.getVariable(inst, n).i; };
+    auto at  = [&]() { return rt.getVariable(inst, "at").v2; };
+
+    // A press, and a wobble under the threshold: nothing has moved, because
+    // nothing is being carried yet. "Moved" is about the carry, not the mouse.
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 92.0f, 151.0f, true, true);
+    CHECK(var("moves") == 0);
+
+    // The lift itself is the first report: the hand is already past the
+    // threshold, and a ghost that only caught up on the next movement would
+    // start at the press point rather than under the hand.
+    wm.processPointer(400.0f, 300.0f, 140.0f, 150.0f, true, true);
+    REQUIRE(wm.isDragging());
+    CHECK(var("started") == 1);
+    CHECK(var("moves") == 1);
+    CHECK(at().x == doctest::Approx(140.0f));
+    CHECK(at().y == doctest::Approx(150.0f));
+    CHECK(var("enters") == 0);          // over the card itself: no zone there
+
+    // The same position reported again is not a move. The pointer is reported
+    // every frame; a hand that is still must not run the graph sixty times a
+    // second.
+    wm.processPointer(400.0f, 300.0f, 140.0f, 150.0f, true, true);
+    CHECK(var("moves") == 1);
+
+    // Into the bin: a move, and the bin hears what arrived — the source's
+    // payload, which with none set is its name.
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    CHECK(var("moves") == 2);
+    CHECK(at().x == doctest::Approx(300.0f));
+    CHECK(var("enters") == 1);
+    CHECK(rt.getVariable(inst, "over").s == "Card");
+    CHECK(var("leaves") == 0);
+    // Moving around INSIDE the bin is more moves, but not more enters.
+    wm.processPointer(400.0f, 300.0f, 310.0f, 160.0f, true, true);
+    CHECK(var("moves") == 3);
+    CHECK(var("enters") == 1);
+    // Out over nothing: it left.
+    wm.processPointer(400.0f, 300.0f, 200.0f, 150.0f, true, true);
+    CHECK(var("moves") == 4);
+    CHECK(var("leaves") == 1);
+    // …and back in: a second arrival (and a fifth move).
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    CHECK(var("enters") == 2);
+    CHECK(var("moves") == 5);
+
+    // Let go over the bin, where the hand already was: the drop is the bin's
+    // answer, not a leave — a slot does not need "it left" and "it landed" for
+    // the same release — and a release is not a move.
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
+    CHECK_FALSE(wm.isDragging());
+    CHECK(rt.getVariable(inst, "took").s == "Card");
+    CHECK(var("leaves") == 1);
+    CHECK(var("moves") == 5);
+    // Silent after the release: the pointer still moves, the carry is over.
+    wm.processPointer(400.0f, 300.0f, 320.0f, 170.0f, false, true);
+    CHECK(var("moves") == 5);
+
+    // A cancel over the bin IS a leave: the slot lit up on Enter, and Escape
+    // is its only chance to hear that the thing is gone.
+    wm.processPointer(400.0f, 300.0f, 90.0f, 150.0f, true, true);
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, true, true);
+    REQUIRE(wm.isDragging());
+    CHECK(var("enters") == 3);
+    CHECK(wm.closeTopLayer());
+    CHECK_FALSE(wm.isDragging());
+    CHECK(var("leaves") == 2);
+    CHECK(var("ends") == 2);
+    CHECK(rt.getVariable(inst, "accepted").b == false);
+    wm.processPointer(400.0f, 300.0f, 300.0f, 150.0f, false, true);
+    CHECK(var("moves") == 6);           // the lift of the second carry, nothing since
+}
+
+// The point is in CANVAS units, not render-target pixels: the space Position
+// lives in, so a ghost at the root follows the hand with a Set Position and no
+// arithmetic — and that has to hold when the canvas is scaled.
+TEST_CASE("Drag: the moved point is in the source widget's canvas units")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    DragFixture f;
+    // Stretch: the 400×300 canvas fills whatever viewport it gets, so a
+    // 800×600 viewport is a scale of exactly 2 on both axes.
+    f.tree.scaleMode = HE::UICanvasScaleMode::Stretch;
+    registerWidget(cm, f.tree, &f.graph);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    const auto inst = static_cast<HorizonCode::InstanceId>(id);
+
+    wm.processPointer(800.0f, 600.0f, 180.0f, 300.0f, true, true);
+    wm.processPointer(800.0f, 600.0f, 280.0f, 320.0f, true, true);
+    REQUIRE(wm.isDragging());
+    const glm::vec2 p = rt.getVariable(inst, "at").v2;
+    CHECK(p.x == doctest::Approx(140.0f));
+    CHECK(p.y == doctest::Approx(160.0f));
+    wm.processPointer(800.0f, 600.0f, 280.0f, 320.0f, false, true);
 }
 
 TEST_CASE("Drag: it cannot be dropped on itself, and Escape puts it back")

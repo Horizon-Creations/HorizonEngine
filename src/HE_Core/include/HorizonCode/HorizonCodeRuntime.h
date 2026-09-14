@@ -264,11 +264,16 @@ public:
     // A colour was picked. Its own event rather than OnValueChanged, because a
     // colour is four numbers and the pin type for it already exists.
     void fireOnColorChanged(InstanceId id, int elem, const glm::vec4& color);
-    // Dragging inside the application. OnDrop's payload is what the SOURCE said
-    // it was; OnDragEnded's bool is whether anything took it.
+    // Dragging inside the application. OnDragMoved's point is the pointer in
+    // the source widget's canvas units; OnDragEnter's and OnDrop's payload is
+    // what the SOURCE said it was; OnDragEnded's bool is whether anything took
+    // it.
     void fireOnDragStarted(InstanceId id, int elem);
-    void fireOnDrop(InstanceId id, int elem, const std::string& payload);
+    void fireOnDragMoved(InstanceId id, int elem, const glm::vec2& canvasPos);
     void fireOnDragEnded(InstanceId id, int elem, bool accepted);
+    void fireOnDragEnter(InstanceId id, int elem, const std::string& payload);
+    void fireOnDragLeave(InstanceId id, int elem);
+    void fireOnDrop(InstanceId id, int elem, const std::string& payload);
     // An animation reached its target — the payload is the property's name.
     void fireOnAnimationFinished(InstanceId id, int elem, const std::string& prop);
     // An authored CLIP reached its end — the payload is the clip's name. Its

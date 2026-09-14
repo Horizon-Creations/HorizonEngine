@@ -929,6 +929,20 @@ using EngineEvent = HorizonCode::EngineEventDesc;
 const EngineEvent* engineEventFor(const std::string& name)
 { return HorizonCode::findEngineEvent(name); }
 
+// The C++ type of a hook's argument. It has to match CompiledInstance's hook
+// signatures exactly, or the generated `override` overrides nothing and the
+// build stops there. Vec2 (OnDragMoved) and Color (OnColorChanged) take the
+// glm types by const reference, like the hooks do. One function for the
+// declaration and the definition, so the two cannot drift.
+const char* hookArgType(PT arg)
+{
+    return arg == PT::String ? "const std::string&"
+         : arg == PT::Float  ? "float"
+         : arg == PT::Bool   ? "bool"
+         : arg == PT::Vec2   ? "const glm::vec2&"
+         : arg == PT::Color  ? "const glm::vec4&" : "int";
+}
+
 // The hook's parameter list, and how the typed argument reaches rs.eventArg.
 std::string hookParams(const EngineEvent& e, bool argUsed)
 {
@@ -936,11 +950,8 @@ std::string hookParams(const EngineEvent& e, bool argUsed)
     if (e.elem) p = "int elem";
     if (e.arg != PT::Exec)
     {
-        const char* t = e.arg == PT::String ? "const std::string&"
-                      : e.arg == PT::Float  ? "float"
-                      : e.arg == PT::Bool   ? "bool" : "int";
         if (!p.empty()) p += ", ";
-        p += std::string(t) + (argUsed ? " arg" : "");
+        p += std::string(hookArgType(e.arg)) + (argUsed ? " arg" : "");
     }
     return p;
 }
@@ -3291,11 +3302,8 @@ private:
             if (e->elem) params = usesElem ? "int elem" : "int";
             if (e->arg != PT::Exec)
             {
-                const char* t = e->arg == PT::String ? "const std::string&"
-                              : e->arg == PT::Float  ? "float"
-                              : e->arg == PT::Bool   ? "bool" : "int";
                 if (!params.empty()) params += ", ";
-                params += std::string(t) + (usesArg ? " arg" : "");
+                params += std::string(hookArgType(e->arg)) + (usesArg ? " arg" : "");
             }
             c += "void " + m_cls + "::" + e->hook + "(" + params + ")\n{\n";
             if (rsOn) c += "    RunState rs;\n";

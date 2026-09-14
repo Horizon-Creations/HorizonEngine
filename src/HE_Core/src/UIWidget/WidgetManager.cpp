@@ -1939,8 +1939,9 @@ void WidgetManager::clear()
 	// this prevents is a reload mid-drag leaving the flag true against ids that
 	// have since been reissued to different elements.
 	m_dragWidget = m_dragElem = 0;
-	m_dragArmed = m_dragActive = m_dragAteClick = false;
+	m_dragArmed = m_dragActive = m_dragAteClick = m_dragReported = false;
 	m_dropWidget = m_dropElem = 0;
+	m_dragOverWidget = m_dragOverElem = 0;
 	// Fire each widget's "Destruct" and unregister it from the shared runtime
 	// (which may also host the level script / GameInstance — so tear down
 	// per-instance, don't wipe). Snapshot the ids first: a Destruct handler may
@@ -3263,6 +3264,8 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 			m_dragActive = true;
 			// Whatever this press was going to be, it is not a click any more.
 			m_dragAteClick = true;
+			m_dragReported = false;
+			m_dragOverWidget = m_dragOverElem = 0;
 			m_visualDirty = true;
 			if (Instance* src = find(m_dragWidget))
 			{
@@ -3274,13 +3277,37 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 	// The pointer went away under a carry (captured, off the viewport). Nothing
 	// can be let go over a place the pointer is not, so it goes back.
 	if (m_dragActive && !valid) cancelDrag();
-	// …and while it IS being carried, the mark follows: the same highlight the
-	// file drop uses, because it answers the same question.
+	// …and while it IS being carried, the source hears where the hand is. Only
+	// on a MOVE: the pointer is reported every frame, and a graph that binds
+	// "moved" to move a ghost would otherwise run sixty times a second for a
+	// hand that is still. The first report goes out on the lift itself — the
+	// hand is already past the threshold then, and a ghost that only caught up
+	// on the NEXT movement would start where the press was, not where it is.
+	// In the source widget's canvas units, the space Position lives in.
+	if (m_dragActive && (!m_dragReported || mouseX != m_dragLastX || mouseY != m_dragLastY))
+	{
+		m_dragReported = true;
+		m_dragLastX = mouseX; m_dragLastY = mouseY;
+		if (Instance* src = find(m_dragWidget))
+		{
+			const HE::UIWidgetCanvas canvas =
+				resolveCanvas(src->tree, src->windowId, vpWidth, vpHeight);
+			const glm::vec2 p(canvas.scaleX > 0.0f ? mouseX / canvas.scaleX : mouseX,
+			                  canvas.scaleY > 0.0f ? mouseY / canvas.scaleY : mouseY);
+			const ScriptTarget s = scriptTargetFor(*src, m_dragElem);
+			rt().fireOnDragMoved(s.scriptId, s.elem, p);
+			// A handler may have ended the drag (destroyed the widget, called
+			// cancel). The mark below is only for a carry that still exists.
+		}
+	}
+	// …and the mark follows: the same highlight the file drop uses, because it
+	// answers the same question. The target hears it too, once per crossing.
 	if (m_dragActive)
 	{
 		Instance* tw = nullptr;
 		const int te = dragTargetUnder(vpWidth, vpHeight, mouseX, mouseY, &tw);
 		setDropMark(te != 0 && tw ? tw->id : 0, te);
+		setDragOver(te != 0 ? tw : nullptr, te);
 	}
 
 	for (auto& w : m_instances)
@@ -4122,38 +4149,87 @@ int WidgetManager::dragTargetUnder(float vpWidth, float vpHeight, float x, float
 // One place for both endings. Letting go over a target and giving up are the
 // same event with a different answer, and writing them apart is how the two
 // drift until only one of them tells the source it is over.
+// ── What the carry says about itself ─────────────────────────────────────────
+// Its payload, or its name when nobody set one. The fallback is not a nicety —
+// it is what lets a drag between two named panels work without a line of
+// script. Empty when there is no carry.
+std::string WidgetManager::dragPayloadText() const
+{
+	if (!m_dragActive) return {};
+	if (const Instance* src = find(m_dragWidget))
+		if (const HE::UIElement* e = src->tree.find(m_dragElem))
+			return e->dragPayload.empty() ? e->name : e->dragPayload;
+	return {};
+}
+
+// ── The target's side of the movement ────────────────────────────────────────
+// Enter and Leave, once per crossing. Kept apart from setDropMark on purpose:
+// that one is the drawn ring and the OS file drag uses it too, and a Finder
+// drag hovering a zone must not tell its graph that an in-app payload arrived.
+void WidgetManager::setDragOver(Instance* w, int elem)
+{
+	const int wid = (w && elem != 0) ? w->id : 0;
+	if (wid == 0) elem = 0;
+	if (wid == m_dragOverWidget && elem == m_dragOverElem) return;
+	// Leave the old one first, then enter the new: a slot that opens a gap on
+	// Enter and closes it on Leave must never see two gaps open at once.
+	if (m_dragOverElem != 0)
+		if (Instance* old = find(m_dragOverWidget))
+		{
+			const ScriptTarget t = scriptTargetFor(*old, m_dragOverElem);
+			m_dragOverWidget = m_dragOverElem = 0;
+			rt().fireOnDragLeave(t.scriptId, t.elem);
+		}
+	m_dragOverWidget = wid; m_dragOverElem = elem;
+	// The handler above may have ended the carry; then there is nothing to
+	// announce over the new one.
+	if (wid != 0 && m_dragActive)
+		if (Instance* nw = find(wid))
+		{
+			const ScriptTarget t = scriptTargetFor(*nw, elem);
+			rt().fireOnDragEnter(t.scriptId, t.elem, dragPayloadText());
+		}
+}
+
 void WidgetManager::finishDrag(bool accepted, Instance* targetW, int targetElem)
 {
-	Instance* src = find(m_dragWidget);
-	const int srcElem = m_dragElem;
+	// Everything the three events need is resolved HERE, before the first of
+	// them runs: a handler may destroy a widget, and m_instances is a vector,
+	// so after the first event neither `src` nor `targetW` is a pointer anyone
+	// may follow. A ScriptTarget is two ints and survives anything.
+	const bool drops = accepted && targetW && targetElem != 0;
+	ScriptTarget srcT, dropT, leaveT;
+	bool haveSrc = false, haveLeave = false;
+	if (const Instance* src = find(m_dragWidget))
+	{ srcT = scriptTargetFor(*src, m_dragElem); haveSrc = true; }
+	if (drops) dropT = scriptTargetFor(*targetW, targetElem);
+	// What the source SAYS it is — read while the carry still exists.
+	const std::string payload = dragPayloadText();
+	// The zone the carry was last over, if the release is NOT a drop on it:
+	// it lit up on Enter, and a cancel (Escape, letting go over nothing) is
+	// its only chance to hear that the thing is gone. A drop on it is told by
+	// OnDrop instead, once — a slot does not need "it left" and "it landed"
+	// for the same release.
+	if (m_dragOverElem != 0 &&
+	    !(drops && targetW->id == m_dragOverWidget && targetElem == m_dragOverElem))
+		if (const Instance* old = find(m_dragOverWidget))
+		{ leaveT = scriptTargetFor(*old, m_dragOverElem); haveLeave = true; }
+
 	// Cleared BEFORE the events: a handler may destroy the widget it was told
 	// about, and leaving a live drag pointing at freed memory is the kind of
 	// crash that only happens to whoever ships it.
 	m_dragActive = false; m_dragArmed = false;
 	m_dragWidget = 0; m_dragElem = 0;
+	m_dragReported = false;
+	m_dragOverWidget = m_dragOverElem = 0;
 	setDropMark(0, 0);
 	m_visualDirty = true;
 
-	// What the source SAYS it is: its payload, or its name when nobody set one.
-	// The fallback is not a nicety — it is what lets a drag between two named
-	// panels work without a line of script.
-	std::string payload;
-	if (src)
-		if (const HE::UIElement* e = src->tree.find(srcElem))
-			payload = e->dragPayload.empty() ? e->name : e->dragPayload;
-
-	if (accepted && targetW && targetElem != 0)
-	{
-		const ScriptTarget t = scriptTargetFor(*targetW, targetElem);
-		rt().fireOnDrop(t.scriptId, t.elem, payload);
-	}
+	if (haveLeave) rt().fireOnDragLeave(leaveT.scriptId, leaveT.elem);
+	if (drops)     rt().fireOnDrop(dropT.scriptId, dropT.elem, payload);
 	// …and the source hears how it went either way, which is how it knows
 	// whether to put itself back.
-	if (src)
-	{
-		const ScriptTarget s = scriptTargetFor(*src, srcElem);
-		rt().fireOnDragEnded(s.scriptId, s.elem, accepted);
-	}
+	if (haveSrc)   rt().fireOnDragEnded(srcT.scriptId, srcT.elem, accepted);
 }
 
 void WidgetManager::cancelDrag()
@@ -6269,10 +6345,11 @@ void WidgetManager::setWidgetWindow(int widgetId, uint32_t windowId)
 		m_tooltipHeld = 0.0f; m_tooltipUp = false;
 	}
 	if (m_dropWidget == widgetId) m_dropWidget = m_dropElem = 0;
+	if (m_dragOverWidget == widgetId) m_dragOverWidget = m_dragOverElem = 0;
 	if (m_dragWidget == widgetId)
 	{
 		m_dragWidget = m_dragElem = 0;
-		m_dragArmed = m_dragActive = m_dragAteClick = false;
+		m_dragArmed = m_dragActive = m_dragAteClick = m_dragReported = false;
 	}
 	w->hoveredElem = w->pressedElem = 0;
 	w->windowId = windowId;

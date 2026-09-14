@@ -2292,19 +2292,27 @@ const std::vector<EngineEventDesc>& engineEvents()
         // for itself. A one-shot has already stopped existing by the time this
         // arrives; a repeating one is on its way round again.
         { "OnTimer",              "onTimer",              P::Int,    true  },
-        // The gesture inside the application: this element was picked up, a
-        // payload was let go over this one, and the carry is over. OnDrop's
-        // String is the SOURCE's payload (its Drag Payload, or its name) — the
-        // one thing the target has to know and the only thing an event argument
-        // can carry. OnDragEnded's Bool says whether anything took it, which is
-        // how a source knows to put itself back.
         // A link inside a rich-text label was clicked. String payload: the id the
         // markup gave it (`<link=terms>`), because a label may hold several and
         // "which one" is the only question the graph has.
         { "OnLinkClicked",        "onLinkClicked",        P::String, true  },
+        // The gesture inside the application, source side: this element was
+        // picked up, it is being carried, and the carry is over. OnDragMoved's
+        // Vec2 is the pointer in the source widget's CANVAS units — the space
+        // Position is in — so a ghost at the root follows the hand with a Set
+        // Position and no arithmetic. OnDragEnded's Bool says whether anything
+        // took it, which is how a source knows to put itself back.
         { "OnDragStarted",        "onDragStarted",        P::Exec,   true  },
-        { "OnDrop",               "onDrop",               P::String, true  },
+        { "OnDragMoved",          "onDragMoved",          P::Vec2,   true  },
         { "OnDragEnded",          "onDragEnded",          P::Bool,   true  },
+        // …and target side: a payload arrived over this one, left it again, was
+        // let go over it. The String is the SOURCE's payload (its Drag Payload,
+        // or its name) — the one thing the target has to know and the only
+        // thing an event argument can carry; OnDragEnter brings it too, so a
+        // slot can decide whether to light up before the release.
+        { "OnDragEnter",          "onDragEnter",          P::String, true  },
+        { "OnDragLeave",          "onDragLeave",          P::Exec,   true  },
+        { "OnDrop",               "onDrop",               P::String, true  },
         // A dialog, popup or menu closing. Fired on the widget's OWN graph and
         // not addressed to an element, because what closed is the whole thing.
         { "OnDismissed",          "onDismissed",          P::Exec,   false },

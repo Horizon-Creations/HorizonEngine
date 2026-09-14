@@ -1315,6 +1315,26 @@ private:
     // drag instead. Read and cleared by the release in the same call.
     bool  m_dragAteClick = false;
     static constexpr float kDragThreshold = 4.0f;   // pixels
+    // Where the carry last REPORTED itself (render-target pixels), so that
+    // OnDragMoved fires on movement and not on every call: the pointer is
+    // reported every frame whether or not it moved, and a graph that hears
+    // "moved" sixty times a second while the hand is still would be right to
+    // call it a lie. `m_dragReported` is false until the lift, so the first
+    // report always goes out — the hand is already off the press point then.
+    float m_dragLastX = 0.0f, m_dragLastY = 0.0f;
+    bool  m_dragReported = false;
+    // …and the drop target the source was last SEEN over, so the target hears
+    // OnDragEnter/OnDragLeave once per crossing. Its own pair beside
+    // m_dropWidget/m_dropElem on purpose: those are the drawn mark, shared with
+    // the OS file drag, and a Finder drag must not fire the in-app events.
+    int   m_dragOverWidget = 0, m_dragOverElem = 0;
+    // Tell the target the carry arrived over it or left it; `w`/`elem` = 0
+    // means "nothing" on either side. Compares against the pair above, so
+    // calling it with the same answer twice is a no-op.
+    void  setDragOver(Instance* w, int elem);
+    // The carried element's payload, or its name when none was set ("" when
+    // nothing is carried). What OnDragEnter and OnDrop hand the target.
+    std::string dragPayloadText() const;
 
     // ── The one hit test ─────────────────────────────────────────────────────
     // Topmost hit-testable element under a point, across every visible widget

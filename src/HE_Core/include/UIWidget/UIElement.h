@@ -816,13 +816,24 @@ public:
         // a particular type does. Whether it ever fires is Accepts Drop's
         // business, not this list's.
         out.push_back({ "OnFileDropped", UIPropType::String, /*hasArg=*/true });
-        // The three of the gesture that happens INSIDE the application: it was
-        // picked up, something was let go over me, and it is over. All three on
-        // the base for the same reason as the two above — being dragged is
-        // something that happens to an element, not something a type does.
+        // The gesture that happens INSIDE the application, from the source's
+        // side: it was picked up, it is being carried (the pointer, in this
+        // widget's canvas units — the same space Position lives in, so a ghost
+        // at the root follows the hand with nothing but a Set Position), and it
+        // is over. All on the base for the same reason as the two above — being
+        // dragged is something that happens to an element, not something a
+        // type does.
         out.push_back({ "OnDragStarted", UIPropType::Bool, /*hasArg=*/false });
-        out.push_back({ "OnDrop",        UIPropType::String, /*hasArg=*/true });
+        out.push_back({ "OnDragMoved",   UIPropType::Vec2, /*hasArg=*/true });
         out.push_back({ "OnDragEnded",   UIPropType::Bool, /*hasArg=*/true });
+        // …and from the target's: something arrived over me (with what it says
+        // it is, the same string OnDrop will bring), it left again, it was let
+        // go here. Enter/Leave are what a slot needs to open a gap or light up
+        // BEFORE the release — a reorderable inventory is not buildable on
+        // OnDrop alone, because by then the choice has been made.
+        out.push_back({ "OnDragEnter",   UIPropType::String, /*hasArg=*/true });
+        out.push_back({ "OnDragLeave",   UIPropType::Bool, /*hasArg=*/false });
+        out.push_back({ "OnDrop",        UIPropType::String, /*hasArg=*/true });
         return out;
     }
     virtual std::vector<UIEventDesc> events() const { return {}; }
