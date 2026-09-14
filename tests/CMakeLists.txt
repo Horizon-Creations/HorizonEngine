@@ -114,6 +114,12 @@ add_executable(he_tests
     test_lod.cpp
     test_rope_trail.cpp
     test_editor_icons.cpp
+    # A click on a light's icon selects the light: the Scene window's picking
+    # rule against a snapshot the real RenderExtractor produced.
+    test_viewport_pick.cpp
+    # …and the gizmo moves it: EditorTransformGizmo over a mesh-less entity,
+    # driven headless the way test_gizmo_pick.cpp drives ImGuizmo.
+    test_viewport_gizmo.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
     test_gamelogic_services.cpp
@@ -412,6 +418,9 @@ add_executable(he_tests
     # class Viewport's picking can be asserted — that pane is the one thing in
     # the editor that cannot be screenshotted headless.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PreviewPick.cpp
+    # The Scene window's own click rule (mesh before terrain, icon quads like
+    # any mesh), against a RenderWorld snapshot. ImGui-free for the same reason.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportPick.cpp
     # Labelled rows + wrapped hints: ImGui-only by construction (see the file's
     # header), so the panel-width layout invariant can be asserted headless.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRowWidgets.cpp
@@ -423,6 +432,12 @@ add_executable(he_tests
     # answerable headless — the one property of the viewport that no screenshot
     # dump can show.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imguizmo/ImGuizmo.cpp
+    # The editor's wrapper around it — the latch-during-drag and write-back
+    # rules — so "a drag on a light-only entity moves the light" is a test and
+    # not a hope. Its header is guarded by HE_IMGUI_ENABLED (the flag the editor
+    # target alone defines); the per-file definition below turns it on for this
+    # one source and its test, and for nothing else in the binary.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTransformGizmo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -430,6 +445,11 @@ add_executable(he_tests
     # InputText over a std::string — the editor panels compiled in here use it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/misc/cpp/imgui_stdlib.cpp
 )
+
+set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTransformGizmo.cpp
+    test_viewport_gizmo.cpp
+    PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE
     vendor

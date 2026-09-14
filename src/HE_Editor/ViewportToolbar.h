@@ -61,8 +61,18 @@ struct State
 
 	// Snap triple for ImGuizmo::Manipulate matching `op`, or nullptr while
 	// snapping is off. ImGuizmo reads three floats for TRANSLATE and one for
-	// ROTATE/SCALE, so a single buffer serves all three.
-	const float* activeSnap() const;
+	// ROTATE/SCALE, so a single buffer serves all three. Inline so the gizmo,
+	// which is the only reader, links wherever it is compiled — the test
+	// binary carries the gizmo but not this bar (it is EditorApplication's).
+	const float* activeSnap() const
+	{
+		if (!snapEnabled) return nullptr;
+		const float v = (op == ImGuizmo::ROTATE) ? snapRotate
+		              : (op == ImGuizmo::SCALE)  ? snapScale
+		                                         : snapTranslate;
+		m_snapBuf[0] = m_snapBuf[1] = m_snapBuf[2] = v;
+		return m_snapBuf;
+	}
 
 private:
 	mutable float m_snapBuf[3]{};
