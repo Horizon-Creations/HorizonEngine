@@ -391,13 +391,57 @@ UIWidgetRect uiElementAnchorRect(const UIWidgetTree& tree, const UIElement& e,
 
 namespace
 {
+    // What a child COSTS its container on one axis beyond its own size: the two
+    // slot margins on that axis, in the child's units. The walk that places,
+    // the box that measures itself and the scroll box that counts its overflow
+    // all add this, so a margin is never in one and missing from another.
+    float slotPadX(const UIElement& c) { return std::max(0.0f, c.slotPadLeft) + std::max(0.0f, c.slotPadRight); }
+    float slotPadY(const UIElement& c) { return std::max(0.0f, c.slotPadTop)  + std::max(0.0f, c.slotPadBottom); }
+
+    // ── From the slot to the child's rect ────────────────────────────────────
+    // The container decides the SLOT; this decides where the child sits in it.
+    // First the slot's own margins come off, then on each axis the child either
+    // takes what is left (Fill, the only behaviour there used to be) or keeps
+    // its own size and is pinned to a side or the middle. Its own size is not
+    // clamped to the slot: a child wider than its slot shows over the edge,
+    // which is visible and fixable, where a silently shrunk one is not.
+    //
+    // `us`/`vs` convert the child's units to the host's (an element inside an
+    // embedded widget is padded and sized in that widget's terms).
+    UIWidgetRect alignInSlot(const UIElement& c, const UIWidgetRect& slot,
+                             float us, float vs)
+    {
+        UIWidgetRect r{ slot.x + std::max(0.0f, c.slotPadLeft) * us,
+                        slot.y + std::max(0.0f, c.slotPadTop)  * vs,
+                        std::max(0.0f, slot.w - slotPadX(c) * us),
+                        std::max(0.0f, slot.h - slotPadY(c) * vs) };
+        if (c.slotHAlign != UISlotHAlign::Fill)
+        {
+            const float w = c.sizeX * us;
+            if      (c.slotHAlign == UISlotHAlign::Center) r.x += (r.w - w) * 0.5f;
+            else if (c.slotHAlign == UISlotHAlign::Right)  r.x += r.w - w;
+            r.w = w;
+        }
+        if (c.slotVAlign != UISlotVAlign::Fill)
+        {
+            const float h = c.sizeY * vs;
+            if      (c.slotVAlign == UISlotVAlign::Center) r.y += (r.h - h) * 0.5f;
+            else if (c.slotVAlign == UISlotVAlign::Bottom) r.y += r.h - h;
+            r.h = h;
+        }
+        return r;
+    }
+
     // The slot a layout container hands one of its children.
     //
-    // Along the box's axis every visible child takes its own size, unless its
-    // slotFill is > 0: those share what is left after the fixed ones and the
-    // gaps, in proportion. Across the axis each child gets the full inner
-    // extent. An invisible child takes no space, so hiding one closes the gap
-    // instead of leaving a hole where it used to be.
+    // Along the box's axis every visible child takes its own size plus its two
+    // slot margins, unless its slotFill is > 0: those share what is left after
+    // the fixed ones and the gaps, in proportion, margins inside the share.
+    // Across the axis the slot is the full inner extent. An invisible child
+    // takes no space, so hiding one closes the gap instead of leaving a hole
+    // where it used to be. The slot then goes through alignInSlot, which is
+    // where the margins come off and a non-Fill alignment keeps the child's
+    // own size.
     UIWidgetRect boxSlotRect(const UIWidgetTree& tree, const UIElement& box,
                              const UIElement& child, const UIWidgetCanvas* canvas)
     {
@@ -432,7 +476,8 @@ namespace
             // A child's own size is in the same units as the box's (they are in
             // the same widget), so one axis factor converts both.
             if (sp->slotFill > 0.0f) fillSum += sp->slotFill;
-            else                     fixed += (vert ? sp->sizeY : sp->sizeX) * axisScale;
+            else                     fixed += (vert ? sp->sizeY + slotPadY(*sp)
+                                                    : sp->sizeX + slotPadX(*sp)) * axisScale;
         }
         const float gaps = count > 1 ? gap * static_cast<float>(count - 1) : 0.0f;
         const float leftover = std::max(0.0f, axisSpace - fixed - gaps);
@@ -449,12 +494,13 @@ namespace
             if (!sp || sp->parentId != box.id || !sp->visible) continue;
             const float extent = (sp->slotFill > 0.0f && fillSum > 0.0f)
                 ? leftover * (sp->slotFill / fillSum)
-                : (vert ? sp->sizeY : sp->sizeX) * axisScale;
+                : (vert ? sp->sizeY + slotPadY(*sp)
+                        : sp->sizeX + slotPadX(*sp)) * axisScale;
             if (sp->id == child.id)
             {
                 if (vert) { out.x = inner.x; out.w = inner.w; out.y = cursor; out.h = extent; }
                 else      { out.y = inner.y; out.h = inner.h; out.x = cursor; out.w = extent; }
-                break;
+                return alignInSlot(child, out, bus, bvs);
             }
             cursor += extent + gap;
         }
@@ -613,8 +659,10 @@ namespace
                     {
                         int c = 0, r = 0, cs = 1, rs = 1;
                         if (!g.cellOf(k->id, c, r, cs, rs)) continue;
-                        if (horizontal) { if (c != i || cs != 1) continue; m = std::max(m, k->sizeX * unit); }
-                        else            { if (r != i || rs != 1) continue; m = std::max(m, k->sizeY * unit); }
+                        // Its slot margins are part of what it needs from the
+                        // track — the same sum the box walk adds along its axis.
+                        if (horizontal) { if (c != i || cs != 1) continue; m = std::max(m, (k->sizeX + slotPadX(*k)) * unit); }
+                        else            { if (r != i || rs != 1) continue; m = std::max(m, (k->sizeY + slotPadY(*k)) * unit); }
                     }
                     size[i] = m; fixedSum += m;
                 }
@@ -745,8 +793,9 @@ namespace
         // between them is what "spans two" means.
         w += gapX * static_cast<float>(std::min(cs, g.cols - c) - 1);
         h += gapY * static_cast<float>(std::min(rs, g.rows - r) - 1);
-        return { inner.x + g.colPos[c], inner.y + g.rowPos[r],
-                 std::max(0.0f, w), std::max(0.0f, h) };
+        // The cell is the slot; margins and alignment happen inside it.
+        return alignInSlot(child, { inner.x + g.colPos[c], inner.y + g.rowPos[r],
+                                    std::max(0.0f, w), std::max(0.0f, h) }, us, vs);
     }
 
     // The slot a WrapBox hands one of its children.
@@ -776,35 +825,55 @@ namespace
                                   std::max(0.0f, b.w - 2.0f * padX),
                                   std::max(0.0f, b.h - 2.0f * padY) };
 
+        // Two passes over the children rather than one: a child's place on a
+        // line is known the moment it is reached, but the line's HEIGHT is not
+        // known until the line is full, and a slot aligned to the bottom or
+        // the middle of its line needs that height. The first pass breaks the
+        // lines and records each one's height; the second places.
+        struct Placed { const UIElement* e; float x, y, w, h; int line; };
+        std::vector<Placed> placed;
+        std::vector<float>  lineHeights;
         float x = inner.x, y = inner.y, lineH = 0.0f;
-        UIWidgetRect found{ inner.x, inner.y, 0.0f, 0.0f };
-        bool got = false;
         for (const auto& sp : tree.elements)
         {
             if (!sp || sp->parentId != box.id || !sp->visible) continue;
-            const float w = sp->sizeX * us;
-            const float h = sp->sizeY * vs;
+            // The slot is the child plus its margins: that is what runs along
+            // the line and what the line has to be tall enough for.
+            const float w = (sp->sizeX + slotPadX(*sp)) * us;
+            const float h = (sp->sizeY + slotPadY(*sp)) * vs;
             // A break only when something is already on this line: a child wider
             // than the whole box still gets its own line rather than an empty
             // one above it.
             if (x > inner.x + 0.001f && x + w > inner.x + inner.w + 0.001f)
             {
+                lineHeights.push_back(lineH);
                 x = inner.x;
                 y += lineH + gapY;
                 lineH = 0.0f;
             }
-            if (child && sp->id == child->id)
-            {
-                found = { x, y, w, h };
-                got = true;
-                if (!outContentHeight) break;   // nothing left to measure
-            }
+            placed.push_back({ sp.get(), x, y, w, h, static_cast<int>(lineHeights.size()) });
             x += w + gapX;
             lineH = std::max(lineH, h);
         }
+        lineHeights.push_back(lineH);
         if (outContentHeight) *outContentHeight = (y + lineH) - inner.y;
-        if (!got && child) found.h = 0.0f;      // not a child of this box
-        return found;
+
+        UIWidgetRect found{ inner.x, inner.y, 0.0f, 0.0f };
+        if (!child) return found;
+        for (const Placed& p : placed)
+        {
+            if (p.e->id != child->id) continue;
+            // Fill on the line's axis means what it always did here — the
+            // child's own height, at the top of the line — and not "as tall as
+            // the tallest thing on this line": a row of chips with one tall
+            // entry must not grow every chip beside it. Top/Center/Bottom pin
+            // the child's own height within the line.
+            UIWidgetRect slot{ p.x, p.y, p.w, p.h };
+            if (child->slotVAlign != UISlotVAlign::Fill)
+                slot.h = lineHeights[static_cast<std::size_t>(p.line)];
+            return alignInSlot(*child, slot, us, vs);
+        }
+        return found;                            // not a child of this box
     }
 
     // The slot a ListView hands one of its rows.
@@ -1265,9 +1334,13 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
             if (!cp || cp->parentId != box->id || !cp->visible) continue;
             ++count;
             // A filling child's size IS the leftover this is computing, so it
-            // contributes nothing along the axis — across it still counts.
-            if (cp->slotFill <= 0.0f) along += vert ? cp->sizeY : cp->sizeX;
-            across = std::max(across, vert ? cp->sizeX : cp->sizeY);
+            // contributes nothing along the axis — across it still counts. The
+            // slot margins are part of the child's cost on both axes, exactly
+            // as boxSlotRect charges them.
+            if (cp->slotFill <= 0.0f) along += vert ? cp->sizeY + slotPadY(*cp)
+                                                    : cp->sizeX + slotPadX(*cp);
+            across = std::max(across, vert ? cp->sizeX + slotPadX(*cp)
+                                           : cp->sizeY + slotPadY(*cp));
         }
         if (count > 1) along += gap * static_cast<float>(count - 1);
         const float w = (vert ? across : along) + 2.0f * pad;
@@ -1497,7 +1570,7 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
         {
             if (!cp || cp->parentId != sb->id || !cp->visible) continue;
             ++count;
-            if (cp->slotFill <= 0.0f) total += cp->sizeY;
+            if (cp->slotFill <= 0.0f) total += cp->sizeY + slotPadY(*cp);
         }
         if (count > 1) total += std::max(0.0f, sb->spacing) * static_cast<float>(count - 1);
         sb->contentExtent = total;
@@ -1683,6 +1756,14 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     if (e.tabIndex != 0)     o["tabIndex"] = e.tabIndex;
     if (!e.enabled)          o["enabled"] = false;
     if (e.slotFill > 0.0f)   o["slotFill"] = e.slotFill;
+    // The slot's alignment and margins, only once set: Fill and 0 are what every
+    // element authored before them did, so those save byte-identically. The
+    // alignment goes out as its NAME, like every enum that is an on-disk format
+    // here, so a value inserted into the enum one day cannot re-read as another.
+    if (e.slotHAlign != UISlotHAlign::Fill) o["slotAlignH"] = uiSlotHAlignName(e.slotHAlign);
+    if (e.slotVAlign != UISlotVAlign::Fill) o["slotAlignV"] = uiSlotVAlignName(e.slotVAlign);
+    if (e.slotPadLeft > 0.0f || e.slotPadTop > 0.0f || e.slotPadRight > 0.0f || e.slotPadBottom > 0.0f)
+        o["slotPadding"] = { e.slotPadLeft, e.slotPadTop, e.slotPadRight, e.slotPadBottom };
     // The floor and the ceiling. "minSize" is the key the four container types
     // already wrote when it lived on them, written under the same condition and
     // into the same object, so a box that carries one saves byte-identically;
@@ -1820,6 +1901,17 @@ std::unique_ptr<UIElement> uiElementFromJsonObj(const nlohmann::json& o)
     e->tabIndex      = o.value("tabIndex", 0);
     e->enabled       = o.value("enabled", true);
     e->slotFill      = o.value("slotFill", 0.0f);
+    // A name nobody knows reads as Fill — the behaviour the file had before
+    // the key existed, not an arbitrary side.
+    e->slotHAlign    = uiSlotHAlignFromName(o.value("slotAlignH", std::string{}));
+    e->slotVAlign    = uiSlotVAlignFromName(o.value("slotAlignV", std::string{}));
+    if (const auto& m = o.value("slotPadding", nlohmann::json::array()); m.size() >= 4)
+    {
+        e->slotPadLeft   = std::max(0.0f, m[0].get<float>());
+        e->slotPadTop    = std::max(0.0f, m[1].get<float>());
+        e->slotPadRight  = std::max(0.0f, m[2].get<float>());
+        e->slotPadBottom = std::max(0.0f, m[3].get<float>());
+    }
     if (const auto& m = o.value("minSize", nlohmann::json::array()); m.size() >= 2)
     { e->minSizeX = std::max(0.0f, m[0].get<float>()); e->minSizeY = std::max(0.0f, m[1].get<float>()); }
     if (const auto& m = o.value("maxSize", nlohmann::json::array()); m.size() >= 2)

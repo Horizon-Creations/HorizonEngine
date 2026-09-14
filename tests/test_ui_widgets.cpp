@@ -3394,6 +3394,179 @@ TEST_CASE("Layout box: filling slots share what is left over")
     CHECK(HE::uiElementRect(t, *t.find(kids[1])).h == doctest::Approx(0.0f));
 }
 
+// ── Slot alignment and slot margins ──────────────────────────────────────────
+// The container decides the slot; the child decides where it sits in it. Fill
+// is what every box child did before this existed, so the default has to leave
+// the rects above untouched — and it does, the test above is unchanged.
+
+TEST_CASE("Slot align: across a vertical box a child keeps its own width when asked")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 3, 50.0f,
+                                    /*padding=*/10.0f, /*spacing=*/0.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    // Inner width 180 at x 10; a 50-wide child.
+    auto rect = [&](int i){ return HE::uiElementRect(t, *t.find(kids[i])); };
+
+    t.find(kids[0])->slotHAlign = HE::UISlotHAlign::Left;
+    t.find(kids[1])->slotHAlign = HE::UISlotHAlign::Center;
+    t.find(kids[2])->slotHAlign = HE::UISlotHAlign::Right;
+    CHECK(rect(0).x == doctest::Approx(10.0f));   CHECK(rect(0).w == doctest::Approx(50.0f));
+    CHECK(rect(1).x == doctest::Approx(75.0f));   CHECK(rect(1).w == doctest::Approx(50.0f));
+    CHECK(rect(2).x == doctest::Approx(140.0f));  CHECK(rect(2).w == doctest::Approx(50.0f));
+    // Along the axis nothing changed: the box still stacks them.
+    CHECK(rect(1).y == doctest::Approx(60.0f));
+    CHECK(rect(2).h == doctest::Approx(50.0f));
+
+    // Fill is the old behaviour, byte for byte.
+    t.find(kids[0])->slotHAlign = HE::UISlotHAlign::Fill;
+    CHECK(rect(0).w == doctest::Approx(180.0f));
+}
+
+TEST_CASE("Slot align: along the axis it only matters for a filling child")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 2, 50.0f, 0.0f, 0.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    auto rect = [&](int i){ return HE::uiElementRect(t, *t.find(kids[i])); };
+
+    // A fixed child's slot IS its own height, so Bottom moves nothing.
+    t.find(kids[0])->slotVAlign = HE::UISlotVAlign::Bottom;
+    CHECK(rect(0).y == doctest::Approx(0.0f));
+    CHECK(rect(0).h == doctest::Approx(50.0f));
+
+    // A filling child's slot is the 350 left over; Bottom pins its own 50 to
+    // the end of that, Center to the middle, Fill takes all of it.
+    HE::UIElement& f = *t.find(kids[1]);
+    f.slotFill = 1.0f;
+    f.slotVAlign = HE::UISlotVAlign::Bottom;
+    CHECK(rect(1).y == doctest::Approx(350.0f));
+    CHECK(rect(1).h == doctest::Approx(50.0f));
+    f.slotVAlign = HE::UISlotVAlign::Center;
+    CHECK(rect(1).y == doctest::Approx(50.0f + 150.0f));
+    f.slotVAlign = HE::UISlotVAlign::Fill;
+    CHECK(rect(1).y == doctest::Approx(50.0f));
+    CHECK(rect(1).h == doctest::Approx(350.0f));
+}
+
+TEST_CASE("Slot padding: a margin costs the box along its axis and shrinks the child")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::VerticalBox, 3, 50.0f, 0.0f, 0.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    auto rect = [&](int i){ return HE::uiElementRect(t, *t.find(kids[i])); };
+
+    HE::UIElement& a = *t.find(kids[0]);
+    a.slotPadLeft = 5.0f; a.slotPadTop = 10.0f; a.slotPadRight = 15.0f; a.slotPadBottom = 20.0f;
+    // Inset on all four sides, its own height kept…
+    CHECK(rect(0).x == doctest::Approx(5.0f));
+    CHECK(rect(0).y == doctest::Approx(10.0f));
+    CHECK(rect(0).w == doctest::Approx(200.0f - 5.0f - 15.0f));
+    CHECK(rect(0).h == doctest::Approx(50.0f));
+    // …and the next child starts after the whole slot, margins included.
+    CHECK(rect(1).y == doctest::Approx(50.0f + 10.0f + 20.0f));
+    CHECK(rect(2).y == doctest::Approx(130.0f));
+
+    // A filling child's margins are inside its share, not charged to the
+    // siblings: two fillers still split the leftover evenly.
+    HE::UIElement& b = *t.find(kids[1]);
+    HE::UIElement& c = *t.find(kids[2]);
+    b.slotFill = c.slotFill = 1.0f;
+    c.slotPadTop = 30.0f;
+    // 400 - 80 = 320 left, 160 each; c's content is 160 - 30 at 30 down.
+    CHECK(rect(1).h == doctest::Approx(160.0f));
+    CHECK(rect(2).y == doctest::Approx(80.0f + 160.0f + 30.0f));
+    CHECK(rect(2).h == doctest::Approx(130.0f));
+
+    // Size To Content and the scroll box count the same margins the walk does.
+    auto* bb = dynamic_cast<HE::UIBoxBase*>(t.find(box));
+    REQUIRE(bb != nullptr);
+    b.slotFill = c.slotFill = 0.0f;
+    bb->sizeToContent = true;
+    HE::uiApplyAutoSize(t);
+    CHECK(bb->sizeY == doctest::Approx(80.0f + 50.0f + 80.0f));   // 10+50+20, 50, 30+50
+    CHECK(bb->sizeX == doctest::Approx(50.0f + 5.0f + 15.0f));     // widest slot across
+
+    HE::UIWidgetTree s;
+    const int sbox = boxWithChildren(s, HE::UIWidgetType::ScrollBox, 4, 100.0f, 0.0f, 0.0f);
+    s.find(s.childrenOf(sbox)[0])->slotPadBottom = 50.0f;
+    HE::uiUpdateScrollExtents(s);
+    CHECK(dynamic_cast<HE::UIScrollBox*>(s.find(sbox))->contentExtent == doctest::Approx(450.0f));
+}
+
+TEST_CASE("Slot align: a horizontal box mirrors it on the other axis")
+{
+    HE::UIWidgetTree t;
+    const int box = boxWithChildren(t, HE::UIWidgetType::HorizontalBox, 2, 40.0f, 0.0f, 0.0f);
+    const std::vector<int> kids = t.childrenOf(box);
+    auto rect = [&](int i){ return HE::uiElementRect(t, *t.find(kids[i])); };
+
+    HE::UIElement& a = *t.find(kids[0]);
+    a.slotVAlign = HE::UISlotVAlign::Bottom;      // box is 400 tall, child 40
+    a.slotPadLeft = 8.0f; a.slotPadRight = 2.0f;
+    CHECK(rect(0).y == doctest::Approx(360.0f));
+    CHECK(rect(0).h == doctest::Approx(40.0f));
+    CHECK(rect(0).x == doctest::Approx(8.0f));
+    CHECK(rect(0).w == doctest::Approx(40.0f));
+    CHECK(rect(1).x == doctest::Approx(50.0f));   // 8 + 40 + 2
+    CHECK(rect(1).h == doctest::Approx(400.0f));  // its own slot still fills
+}
+
+TEST_CASE("Slot align: the properties, the clamp, the clone and the file")
+{
+    HE::UIPanel e;
+    // Offered under the shared names, with the enum as a number.
+    e.setPropAny("Slot Align H", HE::UIPropValue::ofInt((int)HE::UISlotHAlign::Right));
+    e.setPropAny("Slot Align V", HE::UIPropValue::ofInt((int)HE::UISlotVAlign::Center));
+    CHECK(e.slotHAlign == HE::UISlotHAlign::Right);
+    CHECK(e.getPropAny("Slot Align V").i == (int)HE::UISlotVAlign::Center);
+    // Out of range lands on Fill, the value that means "as before".
+    e.setPropAny("Slot Align H", HE::UIPropValue::ofInt(99));
+    CHECK(e.slotHAlign == HE::UISlotHAlign::Fill);
+    // "Slot Padding" writes all four sides, the named rows one each; negative
+    // is floored at 0 like every other margin here.
+    e.setPropAny("Slot Padding", HE::UIPropValue::ofFloat(7.0f));
+    CHECK(e.slotPadLeft == doctest::Approx(7.0f));
+    CHECK(e.slotPadBottom == doctest::Approx(7.0f));
+    e.setPropAny("Slot Padding Right", HE::UIPropValue::ofFloat(-3.0f));
+    CHECK(e.slotPadRight == doctest::Approx(0.0f));
+    CHECK(e.getPropAny("Slot Padding Top").f == doctest::Approx(7.0f));
+
+    // The names round-trip, and a name nobody knows reads as Fill.
+    for (int i = 0; i < (int)HE::UISlotHAlign::COUNT; ++i)
+        CHECK(HE::uiSlotHAlignFromName(HE::uiSlotHAlignName((HE::UISlotHAlign)i)) == (HE::UISlotHAlign)i);
+    for (int i = 0; i < (int)HE::UISlotVAlign::COUNT; ++i)
+        CHECK(HE::uiSlotVAlignFromName(HE::uiSlotVAlignName((HE::UISlotVAlign)i)) == (HE::UISlotVAlign)i);
+    CHECK(HE::uiSlotHAlignFromName("Sideways") == HE::UISlotHAlign::Fill);
+
+    // Through the file, and through a clone.
+    HE::UIWidgetTree t;
+    const int id = t.add(HE::UIWidgetType::Panel);
+    HE::UIElement& p = *t.find(id);
+    p.slotHAlign = HE::UISlotHAlign::Center; p.slotVAlign = HE::UISlotVAlign::Bottom;
+    p.slotPadLeft = 1.0f; p.slotPadTop = 2.0f; p.slotPadRight = 3.0f; p.slotPadBottom = 4.0f;
+    const std::string json = HE::uiWidgetTreeToJson(t);
+    CHECK(json.find("\"slotAlignH\": \"Center\"") != std::string::npos);
+    CHECK(json.find("\"slotAlignV\": \"Bottom\"") != std::string::npos);
+    HE::UIWidgetTree r;
+    REQUIRE(HE::uiWidgetTreeFromJson(json, r));
+    CHECK(r.find(id)->slotHAlign == HE::UISlotHAlign::Center);
+    CHECK(r.find(id)->slotVAlign == HE::UISlotVAlign::Bottom);
+    CHECK(r.find(id)->slotPadRight == doctest::Approx(3.0f));
+    CHECK(r.find(id)->slotPadBottom == doctest::Approx(4.0f));
+    auto cl = r.find(id)->clone();
+    CHECK(cl->slotVAlign == HE::UISlotVAlign::Bottom);
+    CHECK(cl->slotPadTop == doctest::Approx(2.0f));
+
+    // An element that never asked writes none of the keys: every widget
+    // authored before this saves byte-identically.
+    HE::UIWidgetTree plain;
+    plain.add(HE::UIWidgetType::Panel);
+    const std::string pj = HE::uiWidgetTreeToJson(plain);
+    CHECK(pj.find("slotAlign") == std::string::npos);
+    CHECK(pj.find("slotPadding") == std::string::npos);
+}
+
 TEST_CASE("Layout box: it follows its own anchors, and its children follow it")
 {
     HE::UIWidgetTree t;
@@ -11063,6 +11236,38 @@ TEST_CASE("WrapBox: a line is as tall as its own tallest child")
     CHECK(rect(3).y == doctest::Approx(60.0f));
 }
 
+TEST_CASE("WrapBox: a slot's margins run along the line, and VAlign pins within it")
+{
+    // 320 wide, children 100 wide: three fit. Give the first 10 on each side
+    // and the third no longer does — the slot is the child plus its margins.
+    WrapCase c = makeWrap(320.0f, 400.0f, 4, 100.0f, 40.0f);
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+    HE::UIElement& a = *c.t.find(c.kids[0]);
+    a.slotPadLeft = a.slotPadRight = 10.0f;
+    CHECK(rect(0).x == doctest::Approx(10.0f));
+    CHECK(rect(0).w == doctest::Approx(100.0f));
+    CHECK(rect(1).x == doctest::Approx(130.0f));
+    CHECK(rect(2).y  > 0.0f);                     // broke to the second line
+
+    // On a 90-tall line a 40-tall child keeps its height (Fill means "your
+    // own height, at the top" here — a tall neighbour must not stretch it) and
+    // Bottom/Center pin it within the line.
+    a.slotPadLeft = a.slotPadRight = 0.0f;
+    c.t.find(c.kids[1])->sizeY = 90.0f;
+    CHECK(rect(0).h == doctest::Approx(40.0f));
+    CHECK(rect(0).y == doctest::Approx(0.0f));
+    a.slotVAlign = HE::UISlotVAlign::Bottom;
+    CHECK(rect(0).y == doctest::Approx(50.0f));
+    CHECK(rect(0).h == doctest::Approx(40.0f));
+    a.slotVAlign = HE::UISlotVAlign::Center;
+    CHECK(rect(0).y == doctest::Approx(25.0f));
+    // Margins on the line's axis are part of the line's height too.
+    a.slotVAlign = HE::UISlotVAlign::Fill;
+    a.slotPadTop = 60.0f;                          // 40 + 60 = 100 > 90
+    CHECK(rect(0).y == doctest::Approx(60.0f));
+    CHECK(rect(3).y == doctest::Approx(100.0f + 20.0f));
+}
+
 TEST_CASE("WrapBox: a hidden child closes the gap, like everywhere else")
 {
     WrapCase c = makeWrap(320.0f, 400.0f, 4, 100.0f, 40.0f);
@@ -11218,6 +11423,40 @@ TEST_CASE("Grid: fixed, weighted and auto tracks, side by side")
     g->columns = { "*", "2*" }; g->reparse();
     CHECK(rect(0).w == doctest::Approx(400.0f / 3.0f));
     CHECK(rect(1).w == doctest::Approx(800.0f / 3.0f));
+}
+
+TEST_CASE("Grid: the cell is the slot — margins come off it and alignment sits in it")
+{
+    // Two 200-wide columns, one 300-tall row; children 50x20.
+    GridCase c = makeGrid({ "*", "*" }, { "*" }, 2);
+    auto rect = [&](int i){ return HE::uiElementRect(c.t, *c.t.find(c.kids[i])); };
+    HE::UIElement& a = *c.t.find(c.kids[0]);
+    HE::UIElement& b = *c.t.find(c.kids[1]);
+
+    a.slotHAlign = HE::UISlotHAlign::Right; a.slotVAlign = HE::UISlotVAlign::Bottom;
+    CHECK(rect(0).x == doctest::Approx(150.0f));
+    CHECK(rect(0).y == doctest::Approx(280.0f));
+    CHECK(rect(0).w == doctest::Approx(50.0f));
+    CHECK(rect(0).h == doctest::Approx(20.0f));
+
+    b.slotPadLeft = 10.0f; b.slotPadTop = 20.0f; b.slotPadRight = 30.0f; b.slotPadBottom = 40.0f;
+    CHECK(rect(1).x == doctest::Approx(210.0f));
+    CHECK(rect(1).y == doctest::Approx(20.0f));
+    CHECK(rect(1).w == doctest::Approx(160.0f));
+    CHECK(rect(1).h == doctest::Approx(240.0f));
+    b.slotHAlign = HE::UISlotHAlign::Center;
+    CHECK(rect(1).x == doctest::Approx(210.0f + (160.0f - 50.0f) * 0.5f));
+
+    // An auto track is as wide as its occupant PLUS the occupant's margins:
+    // the same sum a box charges along its axis.
+    auto* g = dynamic_cast<HE::UIGrid*>(c.t.find(c.grid));
+    g->columns = { "auto", "*" }; g->reparse();
+    a.slotHAlign = HE::UISlotHAlign::Fill;
+    b.slotHAlign = HE::UISlotHAlign::Fill;
+    a.slotPadLeft = 5.0f; a.slotPadRight = 15.0f;
+    CHECK(rect(0).w == doctest::Approx(50.0f));   // its own 50 inside a 70 track
+    CHECK(rect(1).x == doctest::Approx(70.0f + 10.0f));
+    CHECK(rect(1).w == doctest::Approx(330.0f - 10.0f - 30.0f));
 }
 
 TEST_CASE("Grid: a span takes the cells it covers, and the gap between them")
@@ -11430,7 +11669,7 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     }
     // Not in either list, so it falls through to the TYPE's table and misses
     // there too — which is what the panel reports as "no longer exists".
-    CHECK(HE::uiBaseProperties().size() == 46);
+    CHECK(HE::uiBaseProperties().size() == 53);
 }
 
 TEST_CASE("Parameters: a declaration writes the property it names")

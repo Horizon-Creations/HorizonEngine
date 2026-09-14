@@ -156,6 +156,42 @@ UIWidgetType uiWidgetTypeFromName(const std::string& s)
     return UIWidgetType::Panel;
 }
 
+// ── Slot alignment names ─────────────────────────────────────────────────────
+// The on-disk spelling of UISlotHAlign/UISlotVAlign, and what the designer's
+// combos show. An unknown name reads as Fill: that is what an element that
+// never had the key did, and a misspelling must not move anything.
+const char* uiSlotHAlignName(UISlotHAlign a)
+{
+    static constexpr const char* kNames[] = { "Fill", "Left", "Center", "Right" };
+    static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UISlotHAlign::COUNT,
+                  "uiSlotHAlignName table out of step with UISlotHAlign");
+    const size_t i = (size_t)a;
+    return i < (size_t)UISlotHAlign::COUNT ? kNames[i] : "Fill";
+}
+
+const char* uiSlotVAlignName(UISlotVAlign a)
+{
+    static constexpr const char* kNames[] = { "Fill", "Top", "Center", "Bottom" };
+    static_assert(sizeof(kNames) / sizeof(*kNames) == (size_t)UISlotVAlign::COUNT,
+                  "uiSlotVAlignName table out of step with UISlotVAlign");
+    const size_t i = (size_t)a;
+    return i < (size_t)UISlotVAlign::COUNT ? kNames[i] : "Fill";
+}
+
+UISlotHAlign uiSlotHAlignFromName(const std::string& s)
+{
+    for (int i = 0; i < (int)UISlotHAlign::COUNT; ++i)
+        if (s == uiSlotHAlignName((UISlotHAlign)i)) return (UISlotHAlign)i;
+    return UISlotHAlign::Fill;
+}
+
+UISlotVAlign uiSlotVAlignFromName(const std::string& s)
+{
+    for (int i = 0; i < (int)UISlotVAlign::COUNT; ++i)
+        if (s == uiSlotVAlignName((UISlotVAlign)i)) return (UISlotVAlign)i;
+    return UISlotVAlign::Fill;
+}
+
 // The UTF-8 walk moved to Renderer/UIFont.cpp, where the glyph loops use the
 // same one: the caret and the glyphs have to agree about where a character
 // begins, and two copies of that rule would eventually disagree.
@@ -847,6 +883,17 @@ bool getBaseProp(const UIElement& e, const std::string& n, UIPropValue& out)
     if (n == "Transition")   { out = UIPropValue::ofFloat(e.transition);        return true; }
     if (n == "Tab Index")    { out = UIPropValue::ofInt(e.tabIndex);            return true; }
     if (n == "Slot Fill")    { out = UIPropValue::ofFloat(e.slotFill);          return true; }
+    if (n == "Slot Align H") { out = UIPropValue::ofInt((int)e.slotHAlign);     return true; }
+    if (n == "Slot Align V") { out = UIPropValue::ofInt((int)e.slotVAlign);     return true; }
+    // "Slot Padding" is all four sides as ONE number, the way "Corner Radius"
+    // is all four corners: reading it back gives the left side, so a graph
+    // that set it reads its own value. The four named rows are the per-side
+    // form the audit asked for.
+    if (n == "Slot Padding") { out = UIPropValue::ofFloat(e.slotPadLeft);       return true; }
+    if (n == "Slot Padding Left")   { out = UIPropValue::ofFloat(e.slotPadLeft);   return true; }
+    if (n == "Slot Padding Top")    { out = UIPropValue::ofFloat(e.slotPadTop);    return true; }
+    if (n == "Slot Padding Right")  { out = UIPropValue::ofFloat(e.slotPadRight);  return true; }
+    if (n == "Slot Padding Bottom") { out = UIPropValue::ofFloat(e.slotPadBottom); return true; }
     if (n == "Grid Column")  { out = UIPropValue::ofInt(e.gridColumn);          return true; }
     if (n == "Grid Row")     { out = UIPropValue::ofInt(e.gridRow);             return true; }
     if (n == "Column Span")  { out = UIPropValue::ofInt(e.gridColumnSpan);      return true; }
@@ -914,6 +961,13 @@ const std::vector<UIPropDesc>& uiBaseProperties()
         { "Transition",          UIPropType::Float, 0.0f, 2.0f },
         { "Tab Index",           UIPropType::Int },
         { "Slot Fill",           UIPropType::Float },
+        { "Slot Align H",        UIPropType::Int },
+        { "Slot Align V",        UIPropType::Int },
+        { "Slot Padding",        UIPropType::Float },
+        { "Slot Padding Left",   UIPropType::Float },
+        { "Slot Padding Top",    UIPropType::Float },
+        { "Slot Padding Right",  UIPropType::Float },
+        { "Slot Padding Bottom", UIPropType::Float },
         { "Grid Column",         UIPropType::Int },
         { "Grid Row",            UIPropType::Int },
         { "Column Span",         UIPropType::Int },
@@ -971,6 +1025,19 @@ bool setBaseProp(UIElement& e, const std::string& n, const UIPropValue& v)
     // No clamp: all three ranges mean something (see UIElement::tabIndex).
     if (n == "Tab Index")    { e.tabIndex = v.i; return true; }
     if (n == "Slot Fill")    { e.slotFill = v.f < 0.0f ? 0.0f : v.f; return true; }
+    // A number outside the enum lands on Fill, the value that means "as before".
+    if (n == "Slot Align H")
+    { e.slotHAlign = (v.i >= 0 && v.i < (int)UISlotHAlign::COUNT) ? (UISlotHAlign)v.i : UISlotHAlign::Fill; return true; }
+    if (n == "Slot Align V")
+    { e.slotVAlign = (v.i >= 0 && v.i < (int)UISlotVAlign::COUNT) ? (UISlotVAlign)v.i : UISlotVAlign::Fill; return true; }
+    // Floored at 0: a negative margin would be a slot that overlaps its
+    // neighbour, and the box walk assumes it never has to subtract.
+    if (n == "Slot Padding")
+    { e.slotPadLeft = e.slotPadTop = e.slotPadRight = e.slotPadBottom = std::max(0.0f, v.f); return true; }
+    if (n == "Slot Padding Left")   { e.slotPadLeft   = std::max(0.0f, v.f); return true; }
+    if (n == "Slot Padding Top")    { e.slotPadTop    = std::max(0.0f, v.f); return true; }
+    if (n == "Slot Padding Right")  { e.slotPadRight  = std::max(0.0f, v.f); return true; }
+    if (n == "Slot Padding Bottom") { e.slotPadBottom = std::max(0.0f, v.f); return true; }
     // -1 stays -1: it is not an out-of-range cell, it is "the next free one".
     if (n == "Grid Column")  { e.gridColumn = v.i < -1 ? -1 : v.i; return true; }
     if (n == "Grid Row")     { e.gridRow    = v.i < -1 ? -1 : v.i; return true; }
@@ -1041,6 +1108,13 @@ std::vector<UIPropDesc> UIElement::allProperties() const
     out.push_back({ "Transition",   UIPropType::Float, 0.0f, 2.0f });
     out.push_back({ "Tab Index",    UIPropType::Int });
     out.push_back({ "Slot Fill",    UIPropType::Float });
+    out.push_back({ "Slot Align H", UIPropType::Int });
+    out.push_back({ "Slot Align V", UIPropType::Int });
+    out.push_back({ "Slot Padding", UIPropType::Float });
+    out.push_back({ "Slot Padding Left",   UIPropType::Float });
+    out.push_back({ "Slot Padding Top",    UIPropType::Float });
+    out.push_back({ "Slot Padding Right",  UIPropType::Float });
+    out.push_back({ "Slot Padding Bottom", UIPropType::Float });
     out.push_back({ "Grid Column",  UIPropType::Int });
     out.push_back({ "Grid Row",     UIPropType::Int });
     out.push_back({ "Column Span",  UIPropType::Int });

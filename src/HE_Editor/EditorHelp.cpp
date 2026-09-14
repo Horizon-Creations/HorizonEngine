@@ -3637,6 +3637,28 @@ namespace
 	  "share of the space left over instead, split between the filling children "
 	  "in proportion — two at 1 each take half.",
 	  "", "ui#widgets" },
+	{ "UI Widget/Slot Align H", "",
+	  "Where the widget sits sideways inside the slot its container gives it. "
+	  "Fill stretches it to the slot's full width, which is what every box child "
+	  "did before this existed; Left, Center and Right keep the widget's own "
+	  "Width and pin it to that side of the slot. In a Grid the slot is the cell; "
+	  "a Wrap Box has no such row because there the slot is the widget's width.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Slot Align V", "",
+	  "The same for the vertical direction: Fill takes the slot's full height, "
+	  "Top, Center and Bottom keep the widget's own Height and pin it. Along a "
+	  "box's own axis the slot is only taller than the widget when Slot Fill is "
+	  "above 0, so this row mostly matters for a filling child, for a cell in a "
+	  "Grid, and for a short widget on a tall line in a Wrap Box.",
+	  "", "ui#widgets" },
+	{ "UI Widget/Slot Padding (L, T, R, B)", "",
+	  "Room the slot keeps free around the widget, one number per side: left, "
+	  "top, right, bottom, in canvas units. Unlike the container's own Padding, "
+	  "which is one distance around everything, this belongs to one child — a "
+	  "label that wants space on its right and nowhere else. It counts towards "
+	  "what the widget occupies, so the next child starts after it, Size To "
+	  "Content grows by it and a Scroll Box scrolls that much further.",
+	  "", "ui#widgets" },
 	{ "UI Widget/Width", "",
 	  "How wide the widget is, in canvas pixels. It is gone from this panel on an "
 	  "axis the widget is stretched across: there it has margins, not a width.",

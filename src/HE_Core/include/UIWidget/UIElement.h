@@ -111,6 +111,14 @@ enum class UIWidgetType : uint8_t
     COUNT
 };
 
+// How a child sits inside the slot a layout container gives it (UMG's slot
+// HAlign/VAlign). Fill = 0 so that a zero-initialised or never-written element
+// behaves exactly as every box child did before this existed. The numbers are
+// the property's on-disk and HorizonCode value ("Slot Align H" is an Int), so
+// they are appended to, never reordered.
+enum class UISlotHAlign : uint8_t { Fill = 0, Left, Center, Right, COUNT };
+enum class UISlotVAlign : uint8_t { Fill = 0, Top, Center, Bottom, COUNT };
+
 // Typed property/event value used across the editor, HorizonCode and events.
 enum class UIPropType : uint8_t { Float, Int, Bool, String, Color, Vec2, StringList };
 
@@ -621,6 +629,28 @@ public:
     // that has to be kept in step with the element list.
     float   slotFill = 0.0f;
 
+    // ── Where the element sits INSIDE the slot the container hands it ────────
+    // Fill (the default, and everything authored before this) is what a box
+    // always did: the child takes the whole slot across the box's axis, and a
+    // filling child takes all of its share along it. Anything else keeps the
+    // element's OWN size on that axis and pins it to a side or the middle of
+    // the slot — a 24-wide icon in a 300-wide vertical box no longer has to be
+    // stretched to 300 or wrapped in a horizontal box with two spacers. Read
+    // by the stacked boxes, the grid and the wrap box; the tab, splitter,
+    // accordion and list slots are full-size by construction and ignore it.
+    UISlotHAlign slotHAlign = UISlotHAlign::Fill;
+    UISlotVAlign slotVAlign = UISlotVAlign::Fill;
+
+    // The slot's own margins, one per side, in the element's units. They are
+    // part of what the element COSTS the container — a 50-high child with 10
+    // top and bottom occupies 70 of a vertical box's axis — so the same number
+    // is read where the slot is placed, where a box measures itself and where
+    // a scroll box counts its overflow. Per side because the container's
+    // "Padding" is one scalar around everything and the audit rightly called
+    // that out: a form label wants room on its right and nowhere else.
+    float   slotPadLeft = 0.0f, slotPadTop = 0.0f;
+    float   slotPadRight = 0.0f, slotPadBottom = 0.0f;
+
     // ── Which cell of a Grid this element sits in (docs/he-apps-plan.md B3) ──
     // -1 on either axis means "the next free cell", which is what almost every
     // child wants: fill a form top to bottom and never type a coordinate.
@@ -936,6 +966,9 @@ protected:
         dst.tabIndex = tabIndex;
         dst.enabled = enabled;
         dst.slotFill = slotFill; dst.rotation = rotation;
+        dst.slotHAlign = slotHAlign; dst.slotVAlign = slotVAlign;
+        dst.slotPadLeft = slotPadLeft; dst.slotPadTop = slotPadTop;
+        dst.slotPadRight = slotPadRight; dst.slotPadBottom = slotPadBottom;
         dst.gridColumn = gridColumn; dst.gridRow = gridRow;
         dst.gridColumnSpan = gridColumnSpan; dst.gridRowSpan = gridRowSpan;
         dst.texture = texture; dst.textureAssetId = textureAssetId;
@@ -989,5 +1022,12 @@ HE_API std::unique_ptr<UIElement> makeUIElement(UIWidgetType type);
 HE_API const std::vector<UIWidgetType>& uiWidgetTypeRegistry();
 HE_API const char* uiWidgetTypeName(UIWidgetType t);
 HE_API UIWidgetType uiWidgetTypeFromName(const std::string& s);
+
+// Slot alignment ⇄ its on-disk name ("Fill", "Left", "Center", "Right" /
+// "Fill", "Top", "Center", "Bottom"). Unknown reads as Fill.
+HE_API const char*  uiSlotHAlignName(UISlotHAlign a);
+HE_API const char*  uiSlotVAlignName(UISlotVAlign a);
+HE_API UISlotHAlign uiSlotHAlignFromName(const std::string& s);
+HE_API UISlotVAlign uiSlotVAlignFromName(const std::string& s);
 
 } // namespace HE

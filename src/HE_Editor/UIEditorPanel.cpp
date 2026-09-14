@@ -47,6 +47,8 @@ namespace
 using HE::UIElement;
 using HE::UIWidgetTree;
 using HE::UIWidgetType;
+using HE::UISlotHAlign;
+using HE::UISlotVAlign;
 using HE::UIPropDesc;
 using HE::UIPropType;
 using HE::UIPropValue;
@@ -1618,6 +1620,41 @@ void drawDetails(State& st, AppContext& ctx)
 	{
 		const bool vert = layoutParent->stacksVertically();
 		ImGui::TextDisabled("Placed by the %s above it.", layoutParent->typeName());
+
+		// ── Where the child sits inside its slot ─────────────────────────
+		// Shared by the three containers that read it (box, grid, wrap box);
+		// the tab, splitter and accordion slots are full-size by construction
+		// and get no row, which is the same "no control that does nothing"
+		// rule the anchor grid follows above. `withH` is false in a wrap box:
+		// there the slot IS the child's width, so a horizontal alignment
+		// would be a combo whose four entries all look the same.
+		auto slotAlignRows = [&](bool withH)
+		{
+			static const char* kH[] = { "Fill", "Left", "Center", "Right" };
+			static const char* kV[] = { "Fill", "Top", "Center", "Bottom" };
+			if (withH)
+			{
+				int h = std::clamp((int)n->slotHAlign, 0, (int)UISlotHAlign::COUNT - 1);
+				if (ImGui::Combo("Slot Align H", &h, kH, (int)UISlotHAlign::COUNT))
+				{ n->slotHAlign = (UISlotHAlign)h; edit = committed = true; }
+				EditorWidgets::helpForLabel("Slot Align H");
+			}
+			int v = std::clamp((int)n->slotVAlign, 0, (int)UISlotVAlign::COUNT - 1);
+			if (ImGui::Combo("Slot Align V", &v, kV, (int)UISlotVAlign::COUNT))
+			{ n->slotVAlign = (UISlotVAlign)v; edit = committed = true; }
+			EditorWidgets::helpForLabel("Slot Align V");
+			// Four sides in one row, in the order CSS and UMG both use, so a
+			// number typed here means the same thing it means everywhere else.
+			float pad[4] = { n->slotPadLeft, n->slotPadTop, n->slotPadRight, n->slotPadBottom };
+			if (ImGui::DragFloat4("Slot Padding (L, T, R, B)", pad, 0.5f, 0.0f, 1000.0f))
+			{
+				n->slotPadLeft   = std::max(0.0f, pad[0]); n->slotPadTop    = std::max(0.0f, pad[1]);
+				n->slotPadRight  = std::max(0.0f, pad[2]); n->slotPadBottom = std::max(0.0f, pad[3]);
+				edit = true;
+			}
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Slot Padding (L, T, R, B)");
+		};
 		// A wrap box gives every child its OWN size on both axes and ignores
 		// Slot Fill — a child that ate the leftover space would take the whole
 		// first line and there would never be a second one. So it gets the two
@@ -1639,16 +1676,20 @@ void drawDetails(State& st, AppContext& ctx)
 			  n->gridRowSpan    = span[1] < 1 ? 1 : span[1]; edit = true; }
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			EditorWidgets::helpForLabel("Span (cols, rows)");
-			// Its own size is only read by an `auto` track — everywhere else the
-			// cell decides — so it stays editable but says so.
+			slotAlignRows(/*withH=*/true);
+			// Its own size is read by an `auto` track and by any axis whose
+			// alignment is not Fill — everywhere else the cell decides — so it
+			// stays editable and says when it is the cell that wins.
 			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::TextDisabled("Only an \"auto\" track reads this size.");
+			if (n->slotHAlign == UISlotHAlign::Fill && n->slotVAlign == UISlotVAlign::Fill)
+				ImGui::TextDisabled("Only an \"auto\" track reads this size.");
 			edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 		}
 		else if (layoutParent->type() == UIWidgetType::WrapBox)
 		{
+			slotAlignRows(/*withH=*/false);
 			edit |= ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			EditorWidgets::helpForLabel("Width");
@@ -1668,14 +1709,29 @@ void drawDetails(State& st, AppContext& ctx)
 		// the entry cannot, since it is one sentence for both. Worth the trade:
 		// the entry is also what F1 opens, and the axis is on screen anyway.
 		EditorWidgets::helpForLabel("Slot Fill");
-		// The size across the axis is the box's; the one along it is only used
-		// while this slot does not fill.
-		if (n->slotFill <= 0.0f)
+		slotAlignRows(/*withH=*/true);
+		// A size field is offered exactly where the layout reads it. Along the
+		// axis that is a slot that does not fill, or a filling one whose
+		// alignment keeps the child's own size; across it, any alignment but
+		// Fill. Offering the other one would be a number the next frame
+		// overwrites — the rule the stretched-anchor fields follow below.
+		const bool alongOwn  = n->slotFill <= 0.0f
+			|| (vert ? n->slotVAlign != UISlotVAlign::Fill : n->slotHAlign != UISlotHAlign::Fill);
+		const bool acrossOwn = vert ? n->slotHAlign != UISlotHAlign::Fill
+		                            : n->slotVAlign != UISlotVAlign::Fill;
+		const bool showW = vert ? acrossOwn : alongOwn;
+		const bool showH = vert ? alongOwn  : acrossOwn;
+		if (showW)
 		{
-			edit |= vert ? ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f)
-			             : ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			edit |= ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel(vert ? "Height" : "Width");
+			EditorWidgets::helpForLabel("Width");
+		}
+		if (showH)
+		{
+			edit |= ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Height");
 		}
 		edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
