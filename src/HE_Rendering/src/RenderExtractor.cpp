@@ -655,6 +655,12 @@ namespace
 		for (auto [e, t, light] : reg.view<TransformComponent, LightComponent>().each())
 		{
 			if (!light.visible) continue; // hidden (e.g. a preloaded zone), like its light
+			// The built-in environment Sun and Moon (HorizonWorld's ensure) sit on a
+			// default transform under the Sky entity: the environment drives their
+			// direction, the transform says nothing. Two sun icons stacked on the
+			// world origin of every scene would only invite a click that selects
+			// the wrong thing; those two are the Sky panel's, not the viewport's.
+			if (reg.all_of<EnvironmentLightComponent>(e)) continue;
 			pushIcon(e, t.worldMatrix, editorIconMaterialFor(light.type));
 		}
 		for (auto [e, t, cam] : reg.view<TransformComponent, CameraComponent>().each())

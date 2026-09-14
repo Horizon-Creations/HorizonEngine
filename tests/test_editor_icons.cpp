@@ -3,6 +3,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
+#include <HorizonScene/Components/EnvironmentLightComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/AudioSourceComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -178,6 +179,19 @@ TEST_CASE("Editor icons: one quad per light, camera and audio source, only under
 		ex.extract(world, rw, 16.0f / 9.0f, &cam0);
 		CHECK(iconOf(rw, point) == nullptr);
 		CHECK(rw.objects.size() == 5);
+	}
+
+	SUBCASE("the built-in environment Sun and Moon get no icon")
+	{
+		// Their transform is a placeholder (the environment drives the direction),
+		// so an icon on it would only sit on the world origin of every scene.
+		reg.emplace<EnvironmentLightComponent>(sun,
+			EnvironmentLightComponent{ EnvironmentLightComponent::Role::Sun });
+		const EditorCameraOverride cam0 = editorCamAt({ 0, 0, 0 });
+		ex.extract(world, rw, 16.0f / 9.0f, &cam0);
+		CHECK(iconOf(rw, sun) == nullptr);
+		CHECK(rw.objects.size() == 5);
+		CHECK(rw.lights.size() == 3);   // still a light, just no icon
 	}
 
 	SUBCASE("icons do not stretch the directional shadow fit")
