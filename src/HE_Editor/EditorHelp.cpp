@@ -2049,7 +2049,21 @@ namespace
 	  "", "scenes#prefabs" },
 	{ "Prefab Instance/Revert All", "Revert All",
 	  "Puts every changed value on this placement, children included, back to "
-	  "what the prefab says. The placement's own position stays where it is.",
+	  "what the prefab says, and undoes what was changed in its structure: a "
+	  "child added here goes, one deleted here comes back. The placement's own "
+	  "position stays where it is. One undo step per change.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Restore", "Restore",
+	  "Brings a child that was deleted from this placement back from the prefab, "
+	  "with everything the prefab has under it. One undo step.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Select", "Select",
+	  "Selects the entity that was added to this placement here.",
+	  "", "scenes#prefabs" },
+	{ "Prefab Instance/Remove Addition", "Remove Addition",
+	  "Deletes an entity that was added to this placement here, with everything "
+	  "under it. It is not part of the prefab, so nothing else changes. One "
+	  "undo step.",
 	  "", "scenes#prefabs" },
 	{ "Prefab Instance/Push to Prefab", "Push to Prefab",
 	  "Writes this placement into the prefab asset, so every placement of it in "

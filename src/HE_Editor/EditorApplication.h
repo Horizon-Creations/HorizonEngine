@@ -244,6 +244,11 @@ struct AppContext
 	// sync, the undo stack. `root` is the entity carrying the
 	// PrefabInstanceComponent. Both return whether it happened.
 	std::function<bool(Entity root, const PrefabInstanceComponent::Override&)> revertPrefabOverride;
+	// The two structural changes, taken back the same way: a child deleted
+	// here is re-created from the asset (by its template record), a child
+	// added here is deleted (by entity).
+	std::function<bool(Entity root, const HE::UUID& templateEntity)> revertPrefabRemoval;
+	std::function<bool(Entity root, Entity entity)>                  revertPrefabAddition;
 	std::function<bool(Entity root)> pushToPrefab;
 
 	// Editor/hub flags (mutable)
@@ -875,6 +880,10 @@ private:
 	// snapshot for undo. False when the asset is not resident or the write
 	// failed — the log says which.
 	bool revertPrefabOverride(Entity root, const PrefabInstanceComponent::Override& entry);
+	// The structural pair: a deleted child back from the asset, an added child
+	// out. Same snapshot, same recorder guard.
+	bool revertPrefabRemoval(Entity root, const HE::UUID& templateEntity);
+	bool revertPrefabAddition(Entity root, Entity entity);
 	bool pushToPrefab(Entity root);
 	// Build the node-graph material pipelines referenced by the current world ahead
 	// of the first draw (no first-frame cross-compile hitch). Materials are resident

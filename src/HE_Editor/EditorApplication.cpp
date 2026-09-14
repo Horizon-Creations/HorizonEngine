@@ -7654,6 +7654,8 @@ AppContext EditorApplication::makeContext()
 		.revertPrefabOverride = [this](Entity root, const PrefabInstanceComponent::Override& o) {
 			return revertPrefabOverride(root, o);
 		},
+		.revertPrefabRemoval  = [this](Entity root, const HE::UUID& t) { return revertPrefabRemoval(root, t); },
+		.revertPrefabAddition = [this](Entity root, Entity e) { return revertPrefabAddition(root, e); },
 		.pushToPrefab        = [this](Entity root) { return pushToPrefab(root); },
 		.projectLoaded       = m_projectLoaded,
 		.contentRefreshPending = m_contentRefreshPending,
@@ -8550,6 +8552,48 @@ bool EditorApplication::revertPrefabOverride(Entity root, const PrefabInstanceCo
 	// The sync's write is a world edit, so the recorder must not read it back
 	// as a human's: it runs on the next revision bump, which snapshotNow just
 	// made — mark this one as seen.
+	m_prefabEditRevision = m_undo.revision();
+	return ok;
+}
+
+bool EditorApplication::revertPrefabRemoval(Entity root, const HE::UUID& templateEntity)
+{
+	if (!m_editorWorld || m_isPlaying) return false;
+	auto& registry = m_editorWorld->registry();
+	if (!registry.valid(root) || !registry.all_of<PrefabInstanceComponent>(root)) return false;
+	const HE::UUID id = registry.get<PrefabInstanceComponent>(root).asset;
+	ContentManager& content = contentManager();
+	content.ensureResident(id);
+	const PrefabAsset* asset = content.getPrefab(id);
+	if (!asset)
+	{
+		HE_LOG_WARN(Editor, "Prefab revert: the asset is not in the content manager — nothing brought back");
+		return false;
+	}
+	const std::vector<uint8_t> blob = asset->data;
+	m_undo.snapshotNow();
+	SceneSerializer serializer;
+	const bool ok = serializer.revertPrefabRemoval(*m_editorWorld, root, blob, templateEntity);
+	// Same guard as revertPrefabOverride: the sync's write is not a human's.
+	m_prefabEditRevision = m_undo.revision();
+	return ok;
+}
+
+bool EditorApplication::revertPrefabAddition(Entity root, Entity entity)
+{
+	if (!m_editorWorld || m_isPlaying) return false;
+	auto& registry = m_editorWorld->registry();
+	if (!registry.valid(root) || !registry.valid(entity)) return false;
+	// The selection may be the thing about to go — the same care
+	// deleteSelectedEntity takes, or the Details panel draws a dead handle.
+	m_undo.snapshotNow();
+	SceneSerializer serializer;
+	const bool ok = serializer.revertPrefabAddition(*m_editorWorld, root, entity);
+	if (ok)
+	{
+		m_selection.remove(entity);
+		m_selection.add(root);
+	}
 	m_prefabEditRevision = m_undo.revision();
 	return ok;
 }

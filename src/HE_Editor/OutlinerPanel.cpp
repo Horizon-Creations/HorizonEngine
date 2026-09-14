@@ -256,6 +256,13 @@ void render(AppContext& ctx)
             std::string name;
             int         depth;
             bool        hasChildren;
+            // Placed prefabs, decided at rebuild time because both are
+            // questions of structure, and structure is what dirties the
+            // hierarchy: on an instance root, how many children were deleted
+            // or added here; on a row under one, whether it is the topmost
+            // entity of something added here (no placement binds it).
+            size_t      structuralChanges = 0;
+            bool        addedHere         = false;
         };
         static std::vector<OutlinerNode> s_outlinerCache;
         static HorizonWorld*             s_lastWorld = nullptr;
@@ -269,7 +276,11 @@ void render(AppContext& ctx)
             auto& registry = ctx.world->registry();
             Entity root    = ctx.world->rootEntity();
 
-            std::function<void(Entity, int)> collect = [&](Entity entity, int depth)
+            // `underInstance`: some ancestor is a placement root; `parentAdded`:
+            // the parent is itself added here, so this row is inside an added
+            // subtree rather than the top of one.
+            std::function<void(Entity, int, bool, bool)> collect =
+                [&](Entity entity, int depth, bool underInstance, bool parentAdded)
             {
                 if (!registry.valid(entity)) return;
                 // The built-in environment sun/moon lights belong to the World's
@@ -281,17 +292,26 @@ void render(AppContext& ctx)
                     return;
                 auto* name = registry.try_get<NameComponent>(entity);
                 auto* hier = registry.try_get<HierarchyComponent>(entity);
-                s_outlinerCache.push_back({
+                OutlinerNode node{
                     entity,
                     name ? name->name : "(unnamed)",
                     depth,
                     hier && !hier->children.empty()
-                });
+                };
+                const bool isInstance = registry.all_of<PrefabInstanceComponent>(entity);
+                if (isInstance)
+                    node.structuralChanges = SceneSerializer::prefabRemovedHereCount(*ctx.world, entity)
+                                           + SceneSerializer::prefabAddedHereCount(*ctx.world, entity);
+                bool added = false;
+                if (underInstance && !isInstance)
+                    added = SceneSerializer::prefabInstancesBinding(*ctx.world, entity).empty();
+                node.addedHere = added && !parentAdded;
+                s_outlinerCache.push_back(std::move(node));
                 if (hier)
                     for (Entity child : hier->children)
-                        collect(child, depth + 1);
+                        collect(child, depth + 1, underInstance || isInstance, added);
             };
-            collect(root, 0);
+            collect(root, 0, false, false);
 
             char buf[96];
             std::snprintf(buf, sizeof(buf), "[Outliner] rebuilt: %zu nodes", s_outlinerCache.size());
@@ -379,7 +399,7 @@ void render(AppContext& ctx)
             {
                 const PrefabAsset* asset =
                     ctx.contentManager ? ctx.contentManager->getPrefab(inst->asset) : nullptr;
-                const size_t changed = inst->overrides.size();
+                const size_t changed = inst->overrides.size() + node.structuralChanges;
                 ImGui::SameLine();
                 ImGui::TextColored(changed ? HE::Ed::Theme::AccentBright
                                            : HE::Ed::Theme::alpha(HE::Ed::Theme::Accent, 0.75f),
@@ -398,6 +418,16 @@ void render(AppContext& ctx)
                         ImGui::SetTooltip("Placed from %s\nExactly what the prefab says.",
                                           asset->path.c_str());
                 }
+            }
+            else if (node.addedHere)
+            {
+                // The top of something added to a placement here: the prefab
+                // knows nothing of it, and a push would write it in.
+                ImGui::SameLine();
+                ImGui::TextColored(HE::Ed::Theme::alpha(HE::Ed::Theme::Accent, 0.75f), "[+]");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Added to a placed prefab here — not part of the prefab. "
+                                      "See Prefab Instance in the Details panel.");
             }
 
             if (lock)
