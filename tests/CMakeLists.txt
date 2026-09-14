@@ -47,6 +47,9 @@ add_executable(he_tests
     test_rendergraph.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # Was on disk since the foliage layer landed but never in this list, so the
+    # scatter had no running test until the density mask needed one.
+    test_foliage.cpp
     test_debug_draw.cpp
     test_profiler.cpp
     test_profiler_stats.cpp
