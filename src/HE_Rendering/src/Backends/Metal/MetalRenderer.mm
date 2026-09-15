@@ -7593,8 +7593,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 	// rays go in arbitrary directions — but the G-buffer is a normal camera-facing
 	// raster pass, and covers ALL objects, not just casters, since every shaded
 	// pixel needs a shadow value, not just occluders).
-	m_culler.cull(m_renderWorld, m_visible);
-	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
 
 	const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
@@ -10709,8 +10708,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	for (RenderObject& obj : m_renderWorld.objects)
 		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
 			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
-	m_culler.cull(m_renderWorld, m_visible);
-	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
 	}
 
@@ -12184,8 +12182,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
-	m_culler.cull(m_renderWorld, m_visible);
-	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+	CullCameraObjects();
 	m_counters.visible = static_cast<uint32_t>(m_sortedIndices.size());
 	if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty())
 	{
@@ -14311,8 +14308,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		    mesh && mesh->localBounds.isValid())
 			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
 
-	m_culler.cull(m_renderWorld, m_visible);
-	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+	CullCameraObjects();
 	if (m_sortedIndices.empty()) return;
 
 	void* const defaultPipeline = m_gbufferPipeline;
@@ -14655,6 +14651,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// that bails out (e.g. minimized / zero-size window) honestly reports
 			// zeros instead of last frame's draws/tris/visible/total.
 			m_counters = FrameCounters{};
+			++m_frameStamp; // invalidates the per-frame occlusion-cull reuse
 
 			AgeRetiredTextures();
 			AgeRetiredGIObjects();
@@ -15523,8 +15520,9 @@ IRenderer::FrameGpuStats MetalRenderer::GetFrameGpuStats() const
 	// Current-frame CPU counters (filled by this frame's EncodeScene, main thread).
 	s.drawCalls      = m_counters.draws;
 	s.triangles      = m_counters.tris;
-	s.visibleObjects = m_counters.visible;
-	s.totalObjects   = m_counters.total;
+	s.visibleObjects  = m_counters.visible;
+	s.totalObjects    = m_counters.total;
+	s.occlusionCulled = m_counters.occlusionCulled;
 	return s;
 }
 
@@ -15853,6 +15851,47 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 void MetalRenderer::SetGpuParticleParams(const GpuParticleParams& p)
 {
 	m_gpuParticleParams = p;
+}
+
+void MetalRenderer::SetOcclusionCullingSettings(const OcclusionCullingSettings& s)
+{
+	OcclusionCuller::Settings oc = m_occlusionCuller.settings();
+	oc.enabled = s.enabled;
+	m_occlusionCuller.setSettings(oc);
+}
+
+void MetalRenderer::CullCameraObjects()
+{
+	m_culler.cull(m_renderWorld, m_visible);
+	if (m_occlusionCuller.settings().enabled)
+	{
+		const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+		const size_t    count    = m_renderWorld.objects.size();
+		const bool reuse = m_occlusionCacheStamp == m_frameStamp
+		                && m_occlusionCacheCount == count
+		                && m_occlusionCacheViewProj == viewProj
+		                && m_occlusionCacheVisible.size() == count;
+		if (reuse)
+		{
+			// Same frame, same camera, same objects: the earlier pass's answer
+			// holds. Bounds can only have become KNOWN since (a mesh resolved in
+			// between), which the fresh frustum result already reflects — so
+			// combine rather than overwrite.
+			for (size_t i = 0; i < count; ++i)
+				m_visible[i] &= m_occlusionCacheVisible[i];
+			m_counters.occlusionCulled = m_occlusionCacheCulled;
+		}
+		else
+		{
+			m_occlusionCacheCulled   = m_occlusionCuller.refine(m_renderWorld, m_contentManager, m_visible);
+			m_occlusionCacheVisible  = m_visible;
+			m_occlusionCacheStamp    = m_frameStamp;
+			m_occlusionCacheCount    = count;
+			m_occlusionCacheViewProj = viewProj;
+			m_counters.occlusionCulled = m_occlusionCacheCulled;
+		}
+	}
+	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 }
 
 void MetalRenderer::SetSSRSettings(const SSRSettings& s)

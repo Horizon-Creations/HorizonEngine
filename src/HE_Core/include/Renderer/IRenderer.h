@@ -221,6 +221,9 @@ public:
         double                   gpuFrameMs = -1.0;
         std::vector<GpuPassTime> passes;
         uint32_t drawCalls = 0, triangles = 0, visibleObjects = 0, totalObjects = 0;
+        // Objects the occlusion culler removed from the frustum-visible set this
+        // frame (0 when it is off). visibleObjects already excludes them.
+        uint32_t occlusionCulled = 0;
         double   vramUsedMB = 0.0, vramBudgetMB = 0.0;
         // Which GPU-timing path actually produced `passes` this frame (a static
         // literal): "detailed" (one cmdbuf/pass, serialized, exclusive+additive),
@@ -393,6 +396,21 @@ public:
         int   quality      = 1;      // 0 = 16 steps, 1 = 32, 2 = 64
     };
     virtual void SetSSRSettings(const SSRSettings& /*settings*/) {}
+
+    // ── Occlusion culling (CPU software depth buffer) ───────────────────────
+    // Pushed like SSR/GI. Objects whose whole bounding box sits behind opaque,
+    // nearer geometry are dropped after the frustum cull, before sorting and
+    // drawing — on the CPU, from the mesh data the ContentManager holds, for
+    // THIS frame's camera (no GPU-query latency, no pop-in). Conservative by
+    // construction: the image with it on is identical to the image with it
+    // off, only the draw/visible counts drop (FrameGpuStats::occlusionCulled).
+    // Implemented by the OpenGL and Metal backends (HorizonRendering::
+    // OcclusionCuller); the others ignore it for now. Off by default.
+    struct OcclusionCullingSettings
+    {
+        bool enabled = false;
+    };
+    virtual void SetOcclusionCullingSettings(const OcclusionCullingSettings& /*settings*/) {}
 
     // ── Ray-traced GI reflections (docs/gi-reflections-plan.md) ─────────────
     // Pushed like SSR/GI. One specular ray per (half-res) pixel against the GI

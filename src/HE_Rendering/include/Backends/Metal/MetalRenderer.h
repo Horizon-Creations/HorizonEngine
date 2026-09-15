@@ -6,6 +6,7 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
+#include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
@@ -126,6 +127,7 @@ public:
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetSSRSettings(const SSRSettings& settings) override;
+	void  SetOcclusionCullingSettings(const OcclusionCullingSettings& settings) override;
 	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
@@ -489,7 +491,7 @@ private:
 	// ── Profiler render counters (current frame, main thread) ───────────────
 	// Filled while encoding the scene; returned (merged with the 1-2-frame-late
 	// GPU times) by GetFrameGpuStats. Reset at the top of each primary EncodeFrame.
-	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0; };
+	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0, occlusionCulled = 0; };
 	FrameCounters m_counters;
 
 	// ── Per-frame GPU timing context ────────────────────────────────────────
@@ -527,6 +529,23 @@ private:
 	CommandBuffer   m_cmds;          // draw calls produced this frame
 	std::vector<uint8_t>  m_visible;       // per-frame culling results
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
+
+	// The camera cull every camera-facing pass runs — frustum, then (when on)
+	// occlusion, then the sort — in one place, because the Metal frame runs it
+	// up to four times (GI G-buffer, SSAO pre-pass, scene, deferred G-buffer),
+	// each after its own extraction. The occlusion refine is the expensive part
+	// (a CPU rasterization), so its result is kept for the frame and reused
+	// while the frame stamp, object count and view-projection match; a reuse is
+	// ANDed onto the fresh frustum result, never copied over it. The shadow
+	// pass culls into its own list against the light and stays out of this.
+	void  CullCameraObjects();
+	OcclusionCuller       m_occlusionCuller;
+	std::vector<uint8_t>  m_occlusionCacheVisible;
+	uint64_t              m_occlusionCacheStamp = ~0ull;
+	size_t                m_occlusionCacheCount = 0;
+	glm::mat4             m_occlusionCacheViewProj = glm::mat4(1.0f);
+	uint32_t              m_occlusionCacheCulled = 0;
+	uint64_t              m_frameStamp = 0;      // bumped once per primary EncodeFrame
 
 	// Unlit pipeline. All id<MTL…>, retained.
 	void* m_scenePipeline        = nullptr; // id<MTLRenderPipelineState>

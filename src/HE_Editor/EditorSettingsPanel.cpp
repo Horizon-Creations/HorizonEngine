@@ -284,6 +284,10 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		else if (supported)
 			hint("Deferred: G-buffer + one lighting resolve per visible pixel.");
 	});
+	row("occlusion", "Display", [&]{
+		EditorWidgets::checkbox("Occlusion Culling", &cfg.OcclusionCulling);
+		hint("Skip drawing objects hidden behind nearer opaque geometry (OpenGL, Metal).");
+	});
 	row("vsync", "Display", [&]{ if (EditorWidgets::checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
 	row("maxfps", "Display", [&]{
 		// VSync-off frame cap. 0 = unlimited (default — full FPS). A cap paces the loop so

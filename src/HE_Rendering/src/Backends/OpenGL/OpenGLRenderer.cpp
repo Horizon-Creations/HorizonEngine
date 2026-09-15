@@ -6504,6 +6504,13 @@ void OpenGLRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
 // m_giSupported gate: the trace is a fragment shader over a rasterized pre-pass,
 // so unlike the ray-traced reflections it needs neither compute nor a BVH — GL
 // 4.1 (macOS included) runs it.
+void OpenGLRenderer::SetOcclusionCullingSettings(const OcclusionCullingSettings& s)
+{
+	OcclusionCuller::Settings oc = m_occlusionCuller.settings();
+	oc.enabled = s.enabled;
+	m_occlusionCuller.setSettings(oc);
+}
+
 void OpenGLRenderer::SetSSRSettings(const SSRSettings& s)
 {
 	m_ssrEnabled      = s.enabled;
@@ -11147,6 +11154,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	m_culler.cull(m_renderWorld, m_visible);
+	// Occlusion (off by default): drops what the frustum kept but a nearer
+	// opaque surface hides — the same m_visible the sort and every camera pass
+	// consume, so the SSAO/GI pre-passes and the deferred G-buffer follow suit.
+	// The shadow pass below culls into its own m_shadowVisible and is untouched.
+	m_counters.occlusionCulled =
+		m_occlusionCuller.refine(m_renderWorld, m_contentManager, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 	// (no early-out on empty: the geometry pass still draws the skybox background
 	// and the post-process still tonemaps it, even with zero visible objects.)
@@ -13473,8 +13486,9 @@ IRenderer::FrameGpuStats OpenGLRenderer::GetFrameGpuStats() const
 	FrameGpuStats s = m_lastGpuStats;
 	s.drawCalls      = m_counters.draws;
 	s.triangles      = m_counters.tris;
-	s.visibleObjects = m_counters.visible;
-	s.totalObjects   = m_counters.total;
+	s.visibleObjects  = m_counters.visible;
+	s.totalObjects    = m_counters.total;
+	s.occlusionCulled = m_counters.occlusionCulled;
 	return s;
 }
 

@@ -5,6 +5,7 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
+#include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
@@ -78,6 +79,7 @@ public:
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
 	void  SetSSRSettings(const SSRSettings& settings) override;
+	void  SetOcclusionCullingSettings(const OcclusionCullingSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
@@ -92,7 +94,7 @@ private:
 	// and returned by GetFrameGpuStats. draws/tris count actual GL draws (instanced
 	// batches = 1 draw, tris scaled by instance count); visible/total = culled vs
 	// extracted static objects.
-	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0; };
+	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0, occlusionCulled = 0; };
 	FrameCounters m_counters;
 
 	// ── GPU timing (profiler per-pass trace) ────────────────────────────────
@@ -240,6 +242,9 @@ private:
 	RenderExtractor m_extractor;
 	RenderWorld     m_renderWorld;
 	FrustumCuller   m_culler;
+	// Refines m_visible after the camera frustum cull (never the shadow
+	// cull — a caster off-screen or behind a wall still shadows what is seen).
+	OcclusionCuller m_occlusionCuller;
 	RenderSorter    m_sorter;
 	RenderGraph     m_renderGraph;   // pass pipeline (GeometryPass today)
 	CommandBuffer   m_cmds;          // draw calls produced this frame

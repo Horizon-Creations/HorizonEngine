@@ -2250,6 +2250,11 @@ namespace
 	  "Forward shades each object as it is drawn. Deferred shades the whole screen "
 	  "at once, which is what lifts the light count and turns on SSAO and SSR.",
 	  "", "rendering#pipeline" },
+	{ "Preferences/Display/Occlusion Culling", "",
+	  "Skips drawing what a wall, a hill or a building is already hiding. The "
+	  "picture stays the same; the draw count drops. Off by default until it "
+	  "has proven itself on real scenes.",
+	  "", "rendering#performance" },
 	{ "Preferences/Display/VSync", "",
 	  "Waits for the display before showing a frame: no tearing, and the frame "
 	  "rate is capped to the monitor's. Off is for measuring performance.",

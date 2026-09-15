@@ -133,6 +133,13 @@ struct EditorConfig
 	// Metal + OpenGL). The backend's supportsDeferredRendering gates it.
 	int   RenderPath = 0;
 
+	// CPU occlusion culling (pushed each frame via SetOcclusionCullingSettings):
+	// objects hidden behind nearer opaque geometry are not drawn. OpenGL + Metal;
+	// the image is identical either way, only the draw count drops. Off by
+	// default until it has run on real scenes for a while (a culler bug makes
+	// things vanish, and that is the worse failure).
+	bool  OcclusionCulling = false;
+
 	// Screen-space reflections (pushed each frame via SetSSRSettings). v1 only
 	// effective on Metal in the deferred render path; supportsScreenSpaceReflections
 	// gates the toggle. Off by default (like GI).

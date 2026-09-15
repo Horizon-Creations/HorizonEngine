@@ -200,6 +200,12 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Deferred needs a backend that supports it (Metal, OpenGL); "
 	                    "an unsupported choice falls back at push time."));
 
+	t.push_back(boolRow("display.occlusionCulling", "Occlusion Culling", "Display",
+	                    "occlusion", &EditorConfig::OcclusionCulling,
+	                    "CPU software occlusion culling: objects entirely hidden "
+	                    "behind nearer opaque geometry are not drawn. OpenGL and "
+	                    "Metal; the image does not change, only the draw count."));
+
 	// ── Rendering ▸ Post-Processing ─────────────────────────────────────────
 	t.push_back(enumRow("postProcess.antiAliasing", "Anti-Aliasing",
 	                    "Post-Processing", "aa", &EditorConfig::AntiAliasing,

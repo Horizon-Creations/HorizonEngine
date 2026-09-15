@@ -2715,6 +2715,7 @@ void GameApplication::OnRender(float deltaTime)
 			// the "off" push.
 			r->SetGISettings(IRenderer::GISettings{});
 			r->SetSSRSettings(IRenderer::SSRSettings{});
+			r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{});
 			IRenderer::AntiAliasingSettings aaOff;
 			aaOff.method = static_cast<int>(HE::AAMethod::Off);
 			r->SetAntiAliasingSettings(aaOff);
@@ -2777,6 +2778,12 @@ void GameApplication::OnRender(float deltaTime)
 			ssr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRMaxRoughness", 0.6f));
 			ssr.quality      = GlobalState::getInstance().getCustomConfigInt("SSRQuality", 1);
 			r->SetSSRSettings(ssr);
+
+			// CPU occlusion culling — the editor's Preferences toggle, carried
+			// over by the export dialog. No capability gate: a backend without it
+			// ignores the call.
+			r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{
+				GlobalState::getInstance().getCustomConfigBool("OcclusionCulling", false) });
 
 			// Ray-traced GI reflections — same config.json keys the editor
 			// writes, capability-gated (Metal tile deferred + HW RT in v1).

@@ -1190,6 +1190,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflQuality               = globalstate.getCustomConfigInt("GIReflQuality",              m_editorConfig.GIReflQuality);
 	m_editorConfig.GIReflBounces               = globalstate.getCustomConfigInt("GIReflBounces",              m_editorConfig.GIReflBounces);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
+	m_editorConfig.OcclusionCulling            = globalstate.getCustomConfigBool("OcclusionCulling",    m_editorConfig.OcclusionCulling);
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
 	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
 	m_editorConfig.SSRQuality                  = globalstate.getCustomConfigInt("SSRQuality",           m_editorConfig.SSRQuality);
@@ -2691,6 +2692,8 @@ void EditorApplication::OnRender(float dt)
 			ssr.quality      = m_editorConfig.SSRQuality;
 			renderer()->SetSSRSettings(ssr);
 		}
+		renderer()->SetOcclusionCullingSettings(
+			IRenderer::OcclusionCullingSettings{ m_editorConfig.OcclusionCulling });
 		{
 			IRenderer::GIReflectionSettings gr;
 			gr.enabled      = m_editorConfig.GIReflectionsEnabled;
@@ -4209,6 +4212,17 @@ void EditorApplication::dumpFrameHeadless()
 			dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius});
 	}
 	{
+		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
+		// this capture only, so he_shot.py can A/B the culler: the two captures
+		// must be pixel-identical, only "dump counters" (visible=, occluded=)
+		// may differ.
+		const bool dumpOcc = [&]{
+			const char* v = std::getenv("HE_DUMP_OCCLUSION");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.OcclusionCulling;
+		}();
+		r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{ dumpOcc });
+	}
+	{
 		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
 		// HE_DUMP_SSRQUALITY: override the quality tier (0 = raw trace without
 		// the P4 blur, 1/2 = blurred) for headless A/B of the blur passes.
@@ -4830,6 +4844,40 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<CameraComponent>(place("IconTestCamera", 1.5f, 6.0f), CameraComponent{});
 		reg.emplace<AudioSourceComponent>(place("IconTestAudio", 3.0f, 8.0f), AudioSourceComponent{});
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_ICONTEST five icon entities added");
+	}
+
+	// ── Occlusion-culling witness (HE_DUMP_OCCLUSIONTEST=1): a wall across the
+	// view (default cube scaled 8×4×0.2, six units ahead) with two cubes fully
+	// behind it and one control cube beside it, in the open. The oracle is a
+	// pair of captures, HE_DUMP_OCCLUSION=0 and =1: the images must be
+	// pixel-identical (the hidden cubes never showed anyway) while the log's
+	// "dump counters" line drops by exactly the two hidden cubes — visible= down
+	// by 2, occluded=2, draws= down by 2. Everything is placed relative to the
+	// editor camera the sky-test block aimed above, so PITCH=0 frames it.
+	if (const char* ot = std::getenv("HE_DUMP_OCCLUSIONTEST"); ot && *ot && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0, 1, 0)));
+		const glm::vec3 eye      = m_editorCamera.position();
+
+		auto place = [&](const char* name, glm::vec3 pos, glm::vec3 scale) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.scale    = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			return e;
+		};
+		// The wall spans x/z ±0.67 of the view; the 60° / 16:9 frame reaches ±1.03.
+		place("OcclusionWall",     eye + camFwd * 6.0f,                      glm::vec3(8.0f, 4.0f, 0.2f));
+		place("OcclusionHiddenA",  eye + camFwd * 12.0f,                     glm::vec3(1.0f));
+		place("OcclusionHiddenB",  eye + camFwd * 14.0f + camRight * 1.5f,   glm::vec3(2.0f));
+		place("OcclusionControl",  eye + camFwd * 12.0f + camRight * 10.0f,  glm::vec3(1.0f)); // x/z 0.79..0.88: beside the wall
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_OCCLUSIONTEST wall + 2 hidden cubes + 1 control added");
 	}
 
 	// ── SSR witness (HE_DUMP_SSRTEST=1): a mirror floor (metallic 1, roughness
@@ -6148,7 +6196,8 @@ void EditorApplication::dumpFrameHeadless()
 			("EditorApplication: dump counters — draws=" + std::to_string(st.drawCalls) +
 			 " tris=" + std::to_string(st.triangles) +
 			 " visible=" + std::to_string(st.visibleObjects) +
-			 "/" + std::to_string(st.totalObjects)).c_str());
+			 "/" + std::to_string(st.totalObjects) +
+			 " occluded=" + std::to_string(st.occlusionCulled)).c_str());
 	}
 	else
 		HE_LOG_ERROR(Editor, "%s",
@@ -9453,6 +9502,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GIReflQuality",             m_editorConfig.GIReflQuality);
 	globalstate.setCustomConfigEntry("GIReflBounces",             m_editorConfig.GIReflBounces);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
+	globalstate.setCustomConfigEntry("OcclusionCulling",          m_editorConfig.OcclusionCulling);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
 	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);
 	globalstate.setCustomConfigEntry("SSRQuality",                m_editorConfig.SSRQuality);
