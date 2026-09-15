@@ -288,6 +288,7 @@ uniform mat4  uCascadeVP[CSM_CASCADES]; // per-cascade light view-proj (GL clip)
 uniform vec4  uCascadeSplits;           // xyz = cascade far distance (view space); w = count
 uniform vec3  uCameraFwd;               // world forward, for planar view-Z cascade select
 uniform int   uShadowDebug;             // 1 = tint fragments by cascade index
+uniform int   uUnlit;                   // 1 = base colour only (Unlit / Wireframe view mode)
 // Receiver depth bias (project ShadowSettings): x = slope-scaled factor,
 // y = minimum. Defaults (0.0008, 0.0002) are the literals this used to carry.
 uniform vec2  uShadowBias;
@@ -418,6 +419,13 @@ float localShadowFactor(int i, vec3 worldPos, vec3 N)
 void main()
 {
 	vec3 albedo = uHasTexture ? texture(uTexture, vUV).rgb * uColor : uColor;
+	// Unlit view mode: the material's base colour and nothing else — before
+	// the weather, which is lighting's business too. Twin of Metal's scene.unlit.
+	if (uUnlit != 0)
+	{
+		FragColor = vec4(albedo, uOpacity);
+		return;
+	}
 	vec3 N      = normalize(vNormal);
 
 	// ── Weather ground response ──────────────────────────────────────────────
@@ -5315,6 +5323,7 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uShadowMap     = glGetUniformLocation(m_unlitProgram, "uShadowMap");
 	m_uShadowEnabled = glGetUniformLocation(m_unlitProgram, "uShadowEnabled");
 	m_uShadowDebug   = glGetUniformLocation(m_unlitProgram, "uShadowDebug");
+	m_uUnlit         = glGetUniformLocation(m_unlitProgram, "uUnlit");
 	m_uLocalShadowVP  = glGetUniformLocation(m_unlitProgram, "uLocalShadowVP[0]");
 	m_uLocalShadowMap = glGetUniformLocation(m_unlitProgram, "uLocalShadowMap");
 	m_uShadowBias     = glGetUniformLocation(m_unlitProgram, "uShadowBias");
@@ -5813,6 +5822,7 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedCascadeSplits      = loc("uCascadeSplits");
 	m_uSkinnedCameraFwd          = loc("uCameraFwd");
 	m_uSkinnedShadowDebug        = loc("uShadowDebug");
+	m_uSkinnedUnlit              = loc("uUnlit");
 	m_uSkinnedShadowMap          = loc("uShadowMap");
 	m_uSkinnedLocalShadowVP      = loc("uLocalShadowVP[0]");
 	m_uSkinnedLocalShadowMap     = loc("uLocalShadowMap");
@@ -5875,6 +5885,7 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstCascadeSplits    = loc("uCascadeSplits");
 	m_uInstCameraFwd        = loc("uCameraFwd");
 	m_uInstShadowDebug      = loc("uShadowDebug");
+	m_uInstUnlit            = loc("uUnlit");
 	m_uInstShadowMap        = loc("uShadowMap");
 	m_uInstShadowEnabled    = loc("uShadowEnabled");
 	m_uInstLocalShadowVP    = loc("uLocalShadowVP[0]");
@@ -11446,6 +11457,7 @@ void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneSh
 	// matrices/splits/forward drive the cascade selection.
 	glUniform1i(L.shadowEnabled, F.shadows ? 1 : 0);
 	glUniform1i(L.shadowDebug,   m_debugShadowCascades ? 1 : 0);
+	glUniform1i(L.unlit,         UnlitViewActive() ? 1 : 0);
 	glUniformMatrix4fv(L.cascadeVP, kGLCsmCascades, GL_FALSE, F.cascadeVPData);
 	glUniform4fv(L.cascadeSplits, 1, glm::value_ptr(F.cascadeSplits));
 	glUniform3fv(L.cameraFwd, 1, glm::value_ptr(F.cameraFwd));
@@ -12206,7 +12218,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		BindSceneLighting({ m_uLightCount, m_uLightPos, m_uLightDir, m_uLightColor, m_uLightParams,
 		                    m_uCameraPos, m_uShadowEnabled, m_uShadowDebug, m_uCascadeVP,
 		                    m_uCascadeSplits, m_uCameraFwd, m_uShadowMap,
-		                    m_uLocalShadowMap, m_uLocalShadowVP, m_uShadowBias }, shadowFrame);
+		                    m_uLocalShadowMap, m_uLocalShadowVP, m_uShadowBias, m_uUnlit }, shadowFrame);
 
 		// CSM shadow-map array bound on texture unit 1. Always bound (the sampling
 		// is gated by uShadowEnabled) so the sampler2DArray never reads a mismatched
@@ -12250,7 +12262,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			                    m_uInstLightColor, m_uInstLightParams, m_uInstCameraPos,
 			                    m_uInstShadowEnabled, m_uInstShadowDebug, m_uInstCascadeVP,
 			                    m_uInstCascadeSplits, m_uInstCameraFwd, m_uInstShadowMap,
-			                    m_uInstLocalShadowMap, m_uInstLocalShadowVP, m_uInstShadowBias }, shadowFrame);
+			                    m_uInstLocalShadowMap, m_uInstLocalShadowVP, m_uInstShadowBias,
+			                    m_uInstUnlit }, shadowFrame);
 			glUseProgram(m_unlitProgram); // restore for the per-object loop
 		}
 
@@ -13185,7 +13198,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			                    m_uSkinnedLightColor, m_uSkinnedLightParams, m_uSkinnedCameraPos,
 			                    m_uSkinnedShadowEnabled, m_uSkinnedShadowDebug, m_uSkinnedCascadeVP,
 			                    m_uSkinnedCascadeSplits, m_uSkinnedCameraFwd, m_uSkinnedShadowMap,
-			                    m_uSkinnedLocalShadowMap, m_uSkinnedLocalShadowVP, m_uSkinnedShadowBias }, shadowFrame);
+			                    m_uSkinnedLocalShadowMap, m_uSkinnedLocalShadowVP, m_uSkinnedShadowBias,
+			                    m_uSkinnedUnlit }, shadowFrame);
 			// Re-assert the CSM array on unit 1 — opaque/instanced draws and the AO
 			// bind run between the unlit setup and here; this guarantees the skinned
 			// sampler2DArray reads the shadow array, not a stale 2D texture.

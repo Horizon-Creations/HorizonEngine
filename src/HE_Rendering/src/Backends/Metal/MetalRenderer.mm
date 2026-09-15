@@ -240,7 +240,8 @@ struct SceneUniforms {
 	float4   cascadeSplits;  // xyz = cascade far distance (view space); w = count
 	int      shadowEnabled;
 	int      debugCascades;  // 1 = tint fragments by cascade index
-	int      pad3, pad4;
+	int      unlit;          // 1 = base colour only (Unlit / Wireframe view mode)
+	int      pad4;
 	float4   sunDir;         // xyz = direction toward the sun (image-based ambient)
 	float4   ambient;        // xyz = flat ambient fill (floor + overcast); w unused
 	float4   fog;            // x = density (0 = off), y = height falloff
@@ -678,6 +679,10 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
 		: in.color;
+	// Unlit view mode: the material's base colour and nothing else — before
+	// the weather, which is lighting's business too. Twin of GL's uUnlit.
+	if (scene.unlit != 0)
+		return float4(albedo, in.opacity);
 	float3 N = normalize(in.normal);
 
 	// Weather ground response (matches the GL backend): snow on up-facing surfaces,
@@ -5754,7 +5759,10 @@ struct SceneUniforms
 	glm::vec4 cascadeSplits = glm::vec4(0.0f);
 	int32_t   shadowEnabled = 0;
 	int32_t   debugCascades = 0;   // 1 = tint fragments by cascade index (debug)
-	int32_t   pad3 = 0, pad4 = 0;
+	// 1 = base colour only (the Unlit / Wireframe view modes). Zero everywhere
+	// but the scene pass, so previews and thumbnails keep shading.
+	int32_t   unlit = 0;
+	int32_t   pad4 = 0;
 	glm::vec4 sunDir = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 	glm::vec4 ambient = glm::vec4(0.0f);
 	glm::vec4 fog = glm::vec4(0.0f); // x = density (0 = off), y = height falloff
@@ -12781,6 +12789,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	}
 	scene.shadowEnabled = shadows ? 1 : 0;
 	scene.debugCascades = m_debugShadowCascades ? 1 : 0;
+	scene.unlit         = UnlitViewActive() ? 1 : 0;
 	scene.shadowBias    = glm::vec4(m_shadowSettings.slopeBias, m_shadowSettings.minBias, 0.0f, 0.0f);
 	scene.sunDir        = glm::vec4(sunDir, 0.0f);
 	scene.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);

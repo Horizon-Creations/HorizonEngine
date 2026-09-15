@@ -86,6 +86,15 @@ public:
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
 
+	// View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+	// Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+	// and the flat one reads far better against the sky. Mirrors Metal.
+	bool  UnlitViewActive() const
+	{
+		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe;
+	}
+	bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
+
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
 	void DetachWindow(HE::Window* window) override;
@@ -199,6 +208,7 @@ private:
 		int shadowEnabled, shadowDebug, cascadeVP, cascadeSplits, cameraFwd, shadowMap;
 		int localShadowMap, localShadowVP;
 		int shadowBias;   // vec2 (slope, min) — the project's ShadowSettings bias pair
+		int unlit;        // 1 = base colour only (Unlit / Wireframe view mode)
 	};
 	// The per-frame shadow inputs the block needs (all DrawScene locals).
 	struct SceneShadowFrame
@@ -437,6 +447,7 @@ private:
 	int          m_uShadowMap     = -1;   // CSM shadow-map array sampler unit
 	int          m_uShadowEnabled = -1;
 	int          m_uShadowDebug   = -1;   // 1 = tint fragments by cascade index
+	int          m_uUnlit         = -1;   // 1 = base colour only (Unlit / Wireframe view mode)
 	int          m_uLocalShadowVP  = -1;  // mat4[16] local (point/spot) shadow view-projs
 	int          m_uLocalShadowMap = -1;  // local shadow atlas sampler unit
 	int          m_uShadowBias     = -1;  // vec2 (slope, min) CSM receiver bias
@@ -482,6 +493,7 @@ private:
 	int          m_uSkinnedCascadeSplits   = -1;
 	int          m_uSkinnedCameraFwd       = -1;
 	int          m_uSkinnedShadowDebug     = -1;
+	int          m_uSkinnedUnlit           = -1;
 	int          m_uSkinnedShadowMap       = -1;
 	int          m_uSkinnedLocalShadowVP   = -1;
 	int          m_uSkinnedLocalShadowMap  = -1;
@@ -521,6 +533,7 @@ private:
 	int          m_uInstCascadeSplits       = -1;
 	int          m_uInstCameraFwd           = -1;
 	int          m_uInstShadowDebug         = -1;
+	int          m_uInstUnlit               = -1;
 	int          m_uInstShadowMap           = -1;
 	int          m_uInstLocalShadowVP       = -1;
 	int          m_uInstLocalShadowMap      = -1;
