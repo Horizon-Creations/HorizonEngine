@@ -1777,6 +1777,9 @@ namespace
 		a.terrain.lacunarity       = 2.25f;
 		a.terrain.gain             = 0.65f;
 		a.terrain.uvTiling         = 12.0f;
+		// Was "declared, collected as a reference, never serialised" until the
+		// heightmap import gave the editor a way to set it.
+		a.terrain.heightmapTexture = HE::UUID::generate();
 		a.terrain.sculptHeights.resize(a.terrain.resolution * a.terrain.resolution);
 		for (size_t i = 0; i < a.terrain.sculptHeights.size(); ++i)
 			a.terrain.sculptHeights[i] = 0.5f * static_cast<float>(i);
@@ -2126,6 +2129,7 @@ namespace
 			CHECK(t->lacunarity       == doctest::Approx(a.terrain.lacunarity));
 			CHECK(t->gain             == doctest::Approx(a.terrain.gain));
 			CHECK(t->uvTiling         == doctest::Approx(a.terrain.uvTiling));
+			CHECK(t->heightmapTexture == a.terrain.heightmapTexture);
 			CHECK(t->weightRes        == a.terrain.weightRes);
 			// The blobs matter most: a wrong size makes the loader drop them silently.
 			REQUIRE(t->layerWeights.size() == a.terrain.layerWeights.size());

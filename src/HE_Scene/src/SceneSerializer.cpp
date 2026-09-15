@@ -525,6 +525,11 @@ namespace
 				// so it silently reverted to 1 on every reload.
 				{ "lodDistanceScale", t->lodDistanceScale },
 			};
+			// The heightmap source the landscape was imported from (Details /
+			// Landscape "Heightmap" slot). Only written when set, so a scene
+			// that never used one does not grow a null key.
+			if (t->heightmapTexture != HE::UUID{})
+				tc["heightmapTexture"] = uuidToJson(t->heightmapTexture);
 			// Painted layer weights (RGBA8). Same base64 treatment as the
 			// heights: a JSON array of N bytes dominates the undo snapshot.
 			if (!t->layerWeights.empty())
@@ -1309,6 +1314,8 @@ namespace
 			t.gain        = c.value("gain",         t.gain);
 			t.uvTiling    = c.value("uvTiling",     t.uvTiling);
 			t.lodDistanceScale = c.value("lodDistanceScale", t.lodDistanceScale);
+			if (c.contains("heightmapTexture"))
+				t.heightmapTexture = jsonToUuid(c["heightmapTexture"]);
 			t.weightRes   = c.value("weightRes",    t.weightRes);
 			if (c.contains("layerWeightsB64") && c["layerWeightsB64"].is_string())
 			{

@@ -7,6 +7,7 @@
 #include "EditorTheme.h"                 // the accent for the "changed here" marker
 #include "EditorMultiEdit.h"             // one edit, every selected entity
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
+#include "TerrainTools.h"                // the Terrain section's Heightmap block
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
 #include <HorizonScene/NavigationSystem.h>
@@ -2817,6 +2818,10 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			ImGui::EndDisabled();
 
 			if (changed) t->dirty = true;
+
+			// The other way to a height field: a greyscale picture. Shared with
+			// the Landscape panel, so the two say and do the same thing.
+			TerrainTools::drawHeightmapBlock(ctx, entity);
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<TerrainComponent>(entity); }
 	}

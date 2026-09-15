@@ -8,13 +8,16 @@
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/TerrainPaint.h>   // landscape layer brush
 #include <HorizonScene/FoliagePaint.h>   // foliage density-mask brush
+#include <HorizonScene/TerrainHeightmap.h> // greyscale heightmap → heights
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/Enums.h>
 #include <Diagnostics/Logger.h>
 #include <glm/gtc/type_ptr.hpp>
+#include <SDL3/SDL_dialog.h>             // "Import Heightmap File…"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -945,10 +948,182 @@ void renderPanel(AppContext& ctx)
             tc.sculptHeights.clear();
             tc.dirty = true;
         }
+
+        // A whole landscape at once, from a picture — the other way to arrive
+        // at a height field besides the brushes above.
+        drawHeightmapBlock(ctx, terrainView.front());
         } // end !s_landscapePaint && !s_landscapeFoliage (sculpt tools)
     }
 #else
 	(void)ctx;
+#endif // HE_IMGUI_ENABLED
+}
+
+// ── Heightmap import ─────────────────────────────────────────────────────────
+// Import options that are the user's choice per import, not the terrain's:
+// they stay at their last setting between imports, like the brush numbers.
+static bool s_hmFlipZ         = false;
+static bool s_hmAdoptRes      = false;
+// The status line under the buttons: the last import's outcome, in words.
+static std::string s_hmStatus;
+static bool        s_hmStatusError = false;
+// The file dialog's result slot. SDL calls back from the dialog, this frame or
+// a later one; the block picks the path up at its next draw. Its own slot, not
+// ctx.dialogBridge: that one belongs to the scene/project handler in EditorUI,
+// which would read a chosen heightmap as a scene to open.
+static std::string       s_hmPickPath;
+static std::atomic<bool> s_hmPickReady { false };
+
+namespace
+{
+	// What every import does around the numbers: the undo step before, the
+	// foliage layer after (its instances stand on ground that just moved — the
+	// help text on "Regenerate" says so, this saves the click).
+	void finishImport(AppContext& ctx, Entity terrain, const TerrainHeightmap::Result& res)
+	{
+		if (!res.ok) return;
+		if (auto* fol = ctx.world->registry().try_get<FoliageComponent>(terrain))
+			fol->dirty = true;
+	}
+
+	std::string describe(const TerrainHeightmap::Result& res)
+	{
+		char buf[160];
+		std::snprintf(buf, sizeof(buf), "Imported %u x %u px (%u-bit): %.1f m to %.1f m",
+		              res.sourceWidth, res.sourceHeight, res.sourceBits,
+		              res.minHeight, res.maxHeight);
+		return buf;
+	}
+}
+
+std::string applyHeightmapAsset(AppContext& ctx, Entity terrain, bool& error)
+{
+	error = true;
+	if (!ctx.world || !ctx.contentManager) return "No world.";
+	auto* tc = ctx.world->registry().try_get<TerrainComponent>(terrain);
+	if (!tc) return "Not a landscape.";
+	if (tc->heightmapTexture == HE::UUID{}) return "No heightmap texture is assigned.";
+	// acquire, not get: a texture the Content Browser only listed is not
+	// resident until something asks for its pixels.
+	const auto tex = ctx.contentManager->acquireTexture(tc->heightmapTexture);
+	if (!tex) return "The heightmap texture could not be loaded.";
+
+	if (ctx.undoSys) ctx.undoSys->snapshotNow();
+	TerrainHeightmap::Options opts;
+	opts.flipZ           = s_hmFlipZ;
+	opts.adoptResolution = s_hmAdoptRes;
+	const TerrainHeightmap::Result res = TerrainHeightmap::importTexture(*tc, *tex, opts);
+	finishImport(ctx, terrain, res);
+	if (!res.ok)
+	{
+		HE_LOG_WARN(Editor, "Heightmap import failed: %s", res.error.c_str());
+		return res.error;
+	}
+	error = false;
+	HE_LOG_INFO(Editor, "Heightmap applied from \"%s\": %u x %u", tex->name.c_str(),
+	            res.sourceWidth, res.sourceHeight);
+	return describe(res);
+}
+
+std::string importHeightmapFile(AppContext& ctx, Entity terrain,
+                                const std::string& path, bool& error)
+{
+	error = true;
+	if (!ctx.world) return "No world.";
+	auto* tc = ctx.world->registry().try_get<TerrainComponent>(terrain);
+	if (!tc) return "Not a landscape.";
+
+	if (ctx.undoSys) ctx.undoSys->snapshotNow();
+	TerrainHeightmap::Options opts;
+	opts.flipZ           = s_hmFlipZ;
+	opts.adoptResolution = s_hmAdoptRes;
+	const TerrainHeightmap::Result res = TerrainHeightmap::importFile(*tc, path, opts);
+	finishImport(ctx, terrain, res);
+	if (!res.ok)
+	{
+		HE_LOG_WARN(Editor, "Heightmap import failed: %s", res.error.c_str());
+		return res.error;
+	}
+	error = false;
+	HE_LOG_INFO(Editor, "Heightmap imported from \"%s\": %u x %u (%u-bit)", path.c_str(),
+	            res.sourceWidth, res.sourceHeight, res.sourceBits);
+	return describe(res);
+}
+
+void drawHeightmapBlock(AppContext& ctx, Entity terrain)
+{
+#ifdef HE_IMGUI_ENABLED
+	if (!ctx.world) return;
+	auto* tc = ctx.world->registry().try_get<TerrainComponent>(terrain);
+	if (!tc) return;
+
+	// A file chosen since the last draw — apply it to whichever landscape
+	// this block is drawn for now (there is one per scene).
+	if (s_hmPickReady.load(std::memory_order_acquire))
+	{
+		s_hmPickReady.store(false, std::memory_order_relaxed);
+		if (!s_hmPickPath.empty())
+			s_hmStatus = importHeightmapFile(ctx, terrain, s_hmPickPath, s_hmStatusError);
+	}
+
+	ImGui::SeparatorText("Heightmap");
+	ImGui::PushID("hmblock");
+	// One scope for both callers: the Details panel draws this under
+	// "Terrain", and the buttons look their help up by label, so without this
+	// push the same block would explain itself in one panel and not the other.
+	HE::Ed::Help::Scope helpScope("Landscape");
+	if (EditorWidgets::assetDropSlot(ctx, "Heightmap", tc->heightmapTexture,
+	        HE::AssetType::Texture, "hmtex",
+	        "(none — drop a greyscale texture here)", "texture",
+	        /*showClear=*/true) != EditorWidgets::SlotAction::None)
+		s_hmStatus.clear();
+	EditorWidgets::helpForKey("Landscape/Heightmap");
+
+	ImGui::BeginDisabled(tc->heightmapTexture == HE::UUID{});
+	if (EditorWidgets::primaryButton("Apply Heightmap"))
+		s_hmStatus = applyHeightmapAsset(ctx, terrain, s_hmStatusError);
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (EditorWidgets::button("Import Heightmap File..."))
+	{
+		s_hmStatus.clear();
+		static const SDL_DialogFileFilter kFilters[] = {
+			{ "Heightmaps", "png;pgm;r16;raw;jpg;jpeg;bmp;tga;psd" },
+			{ "All files",  "*" },
+		};
+		SDL_ShowOpenFileDialog(
+			[](void* /*userdata*/, const char* const* filelist, int /*filter*/)
+			{
+				// A cancelled dialog hands over an empty list; the block
+				// then finds an empty path and does nothing.
+				s_hmPickPath = (filelist && filelist[0]) ? filelist[0] : "";
+				s_hmPickReady.store(true, std::memory_order_release);
+			},
+			nullptr,
+			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+			kFilters, 2, nullptr, false);
+	}
+
+	EditorWidgets::checkbox("Flip Z", &s_hmFlipZ);
+	ImGui::SameLine();
+	EditorWidgets::checkbox("Use Image Resolution", &s_hmAdoptRes);
+
+	ImGui::TextDisabled("Black = 0 m, white = Height Scale (%.1f m).", tc->heightScale);
+	ImGui::TextDisabled("Replaces the sculpt; paint and foliage stay.");
+	if (!s_hmStatus.empty())
+	{
+		if (s_hmStatusError)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
+			ImGui::TextWrapped("%s", s_hmStatus.c_str());
+			ImGui::PopStyleColor();
+		}
+		else
+			ImGui::TextWrapped("%s", s_hmStatus.c_str());
+	}
+	ImGui::PopID();
+#else
+	(void)ctx; (void)terrain;
 #endif // HE_IMGUI_ENABLED
 }
 

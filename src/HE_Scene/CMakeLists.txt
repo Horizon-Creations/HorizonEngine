@@ -13,6 +13,7 @@ add_library(HorizonScene SHARED
     src/TerrainSystem.cpp
     src/TerrainPaint.cpp
     src/TerrainSculpt.cpp
+    src/TerrainHeightmap.cpp
     src/FoliagePaint.cpp
     src/AnimationEval.cpp
     src/AnimationPose.cpp

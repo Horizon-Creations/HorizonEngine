@@ -50,6 +50,9 @@ add_executable(he_tests
     test_rendergraph.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # Greyscale heightmap → heights: the pixel path, the texture and file
+    # wrappers (8/16-bit PGM, .r16), orientation and the down-sampling box.
+    test_terrain_heightmap.cpp
     # Was on disk since the foliage layer landed but never in this list, so the
     # scatter had no running test until the density mask needed one.
     test_foliage.cpp
