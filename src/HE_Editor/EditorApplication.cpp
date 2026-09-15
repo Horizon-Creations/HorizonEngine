@@ -7538,7 +7538,7 @@ AppContext EditorApplication::makeContext()
 
 	return AppContext{
 		.imguiReady          = m_imguiReady,
-		.quit                = [this]{ Quit(); },
+		.quit                = [this]{ m_quitConfirmed = true; Quit(); },
 		.toggleProfilerCapture = [this]{ toggleProfilerCapture(); },
 		.setVSync              = [this](bool v){ setVSync(v); m_vsync = v; },
 		.setMaxFps             = [this](float f){ setMaxFps(f); m_editorConfig.MaxFps = f; },
@@ -8840,8 +8840,10 @@ bool EditorApplication::openScene(const std::string& path)
 	m_editorWorld->markHierarchyDirty();
 	m_undo.clearHistory();
 	m_savedRevision = m_undo.revision();
-	// The way here is guarded (EditorUI's unsaved-changes prompt), so whatever
-	// the previous scene's snapshot held was saved or knowingly let go.
+	// Every way here asks first — EditorUI's unsaved-changes prompt, and the
+	// MCP scene_open/scene_create tools refuse a dirty scene unless told to
+	// discard — so whatever the previous scene's snapshot held was saved or
+	// knowingly let go.
 	m_autosave.clear();
 	return loaded;
 }
@@ -8997,10 +8999,15 @@ void EditorApplication::OnShutdown()
 	// item in this function that outlives the process if it is skipped.
 	m_collab.shutdown();
 
-	// A clean exit, and the quit prompt has already asked about the scene: either
-	// it was saved (which cleared this) or "Don't Save" was chosen. What a
-	// crash leaves behind is exactly this file NOT being removed.
-	m_autosave.clear();
+	// The recovery snapshot goes only when this is the exit the user asked for:
+	// the UI's quit (after the unsaved-changes prompt — saved, or "Don't Save"
+	// chosen knowingly) or an OS close of a clean scene, which OnEvent lets
+	// through without a prompt because there is nothing to lose. Application's
+	// loop also lands here after an exception in OnRender, and from the user's
+	// side that is a crash: the snapshot has to stay, exactly as it would after
+	// a signal (CrashHandler re-raises and never comes back this way).
+	if (m_quitConfirmed || m_undo.revision() == m_savedRevision)
+		m_autosave.clear();
 
 	// The MCP listener goes down here for the same reason, one step milder: the
 	// endpoint file it leaves behind names a port and a pid, and a shim that

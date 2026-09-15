@@ -751,6 +751,11 @@ private:
 	// callback; cleared by a real save, a scene switch and a clean exit.
 	HE::Ed::SceneAutosave m_autosave;
 	void updateAutosave(std::uint64_t nowMs);
+	// Set by the quit the UI hands us (AppContext::quit), which only fires once
+	// the unsaved-changes prompt is through. OnShutdown reads it: the base loop
+	// also reaches OnShutdown after an exception in OnRender, and THAT exit must
+	// leave the snapshot where a crash would.
+	bool m_quitConfirmed = false;
 	// Syncable asset tabs that were open last pass, so the ones that closed can
 	// drop what the host told them about their lock.
 	std::unordered_set<std::string> m_docMirrorPaths;
