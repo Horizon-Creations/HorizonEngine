@@ -2398,18 +2398,25 @@ struct D3D12RendererImpl
     // sizes the row-pitched staging copy for every subresource (COPY_DEST→PIXEL_SHADER_
     // RESOURCE). Returns the heap slot, or -1 on any miss / heap full / unsupported
     // format. The DEFAULT texture is handed back via outTex so the caller keeps it alive.
+    //
+    // TextureAsset::srgb (the importer's colour-vs-data decision) selects the
+    // _SRGB twin of each DXGI format for both the resource and its SRV: the sampler
+    // then decodes to linear, so colour textures shade in linear light and only the
+    // tonemap's gamma encode re-curves them. The twins share block/byte layout, so
+    // GetCopyableFootprints and the support check are unchanged.
     int allocAlbedoSlot(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
                         ComPtr<ID3D12Resource>& outTex)
     {
         if (!cl || !sceneSrvHeap || !tex) return -1;
         if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return -1;
 
+        const bool srgb = tex->srgb;
         DXGI_FORMAT fmt; bool isBlock;
         switch (tex->format)
         {
-        case TextureFormat::RGBA8: fmt = DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
-        case TextureFormat::BC7:   fmt = DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
-        case TextureFormat::BC3:   fmt = DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
+        case TextureFormat::RGBA8: fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
+        case TextureFormat::BC7:   fmt = srgb ? DXGI_FORMAT_BC7_UNORM_SRGB      : DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
+        case TextureFormat::BC3:   fmt = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB      : DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
         default: return -1; // ASTC / unknown → D3D can't sample it
         }
         if (isBlock) // BC is core on FL11, but stay defensive.
