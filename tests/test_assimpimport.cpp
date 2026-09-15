@@ -380,6 +380,12 @@ TEST_CASE("FBX import: centimetre and metre documents both land in metres")
 		CHECK(mesh->vertices.size() == 3 * 3);
 		CHECK(mesh->indices.size()  == 3);
 		REQUIRE(mesh->sections.size() == 1);
+		// No material in the file: Assimp binds its own "DefaultMaterial", which is
+		// written under the MESH's name — two such meshes in one folder must not
+		// share (and keep rewriting) one DefaultMaterial.hasset.
+		CHECK(mesh->materialPath == "Imported/" + fs::path(name).stem().string() + "_mat.hasset");
+		CHECK(mesh->sections[0].materialPath == mesh->materialPath);
+		CHECK_FALSE(fs::exists(contentRoot / "Imported/DefaultMaterial.hasset"));
 
 		float lo[3], hi[3];
 		boundsOf(*mesh, lo, hi);

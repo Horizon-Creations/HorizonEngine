@@ -403,6 +403,16 @@ void AssimpScene::describeMaterials(const std::filesystem::path&  sourcePath,
 		if (scene->mMeshes[i]->mMaterialIndex < scene->mNumMaterials)
 			referenced[scene->mMeshes[i]->mMaterialIndex] = true;
 
+	unsigned written = 0;
+	for (unsigned i = 0; i < scene->mNumMaterials; ++i)
+	{
+		aiString probe;
+		const bool loaderDefault = scene->mMaterials[i]->Get(AI_MATKEY_NAME, probe) == AI_SUCCESS
+		                        && std::strcmp(probe.C_Str(), AI_DEFAULT_MATERIAL_NAME) == 0;
+		if (!loaderDefault || referenced[i])
+			++written;
+	}
+
 	ImageTable table(*scene, sourcePath, images);
 	materials.reserve(scene->mNumMaterials);
 	for (unsigned i = 0; i < scene->mNumMaterials; ++i)
@@ -420,17 +430,24 @@ void AssimpScene::describeMaterials(const std::filesystem::path&  sourcePath,
 			continue;
 		}
 		// The warnings name the material the way its asset will be called; the
-		// core derives the same stem from the same name.
-		aiString    name;
+		// core derives the same stem from the same name. The "_mat<i>" suffix
+		// counts the materials that will be written, as the core does.
 		std::string label;
-		if (m.Get(AI_MATKEY_NAME, name) == AI_SUCCESS)
-			label = sanitizeStem(name.C_Str());
+		if (!loaderDefault)
+			label = sanitizeStem(probe.C_Str());
 		if (label.empty())
-			label = sourcePath.stem().string() + "_mat" + (scene->mNumMaterials == 1 ? "" : std::to_string(i));
-		materials.push_back(describeMaterial(m, table, label));
+			label = sourcePath.stem().string() + "_mat" + (written == 1 ? "" : std::to_string(i));
+		PbrMaterialDesc desc = describeMaterial(m, table, label);
+		// A default that IS used gets no name: named "DefaultMaterial", every
+		// material-less mesh in a folder would converge on ONE asset — rewritten by
+		// each plain import, taking the edits made for the previous mesh with it.
+		// glTF converges on purpose (same source material); this would be the
+		// loader's accident. Unnamed, the core names it after the mesh.
+		if (loaderDefault)
+			desc.name.clear();
+		materials.push_back(std::move(desc));
 	}
 }
-
 PbrMaterialImport importAssimpMaterials(const AssimpScene&           scene,
                                         int                          primaryIndex,
                                         const std::filesystem::path& sourcePath,
