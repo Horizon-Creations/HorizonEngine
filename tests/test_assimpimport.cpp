@@ -994,7 +994,7 @@ TEST_CASE("Reimport of a renamed OBJ asset keeps its uuid and redirects the mate
 	CHECK(hi[0] == doctest::Approx(2.0f));
 
 	// The Reimport of a source that has since gone is a clean refusal.
-	fs::remove(src / "crate.obj");
+	he_test::removeQuiet(src / "crate.obj");
 	CHECK_FALSE(Importer::reimport(renamedMesh, contentRoot));
 	CHECK(HE::AssetRefs::assetUuidOfFile(renamedMesh.string()) == meshId);
 	he_test::removeAllQuiet(dir);
