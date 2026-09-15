@@ -46,6 +46,7 @@
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
+#include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
 #include "DocsPanel.h"                   // Help > Documentation (the in-editor manual)
 #include "EditorHelp.h"                  // one scope per menu; the rows look themselves up
@@ -604,6 +605,11 @@ void EditorUI::render(AppContext& ctx, float dt)
     // Same placement, and for the same reason: it must overlay the Project Hub
     // as well as the editor, since a user can clone a project before opening one.
     GitMissingDialog::DrawGitMissingDialog(ctx);
+
+    // ── "The last session left unsaved work behind" ──────────────────────────
+    // After the two checks above on purpose: all three raise root-level modals
+    // at startup and only one can be open, so this one waits for theirs.
+    SceneRecoveryDialog::Draw(ctx);
 
     // ── Assets ▸ Publish Engine Content to Server… ───────────────────────────
     EngineContentPublishDialog::Draw(ctx);

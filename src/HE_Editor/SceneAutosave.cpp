@@ -229,6 +229,29 @@ namespace HE::Ed
 		removeQuiet(fs::path(m_dir) / kPendingScene);
 	}
 
+	bool SceneAutosave::adoptPending(std::uint64_t revision)
+	{
+		// Only a complete pair is worth adopting — the same test pending() makes
+		// before offering it, so an orphaned scene never displaces the live copy.
+		if (!pending()) return false;
+		const fs::path dir(m_dir);
+		// Whatever this run wrote so far describes a world the user just
+		// replaced; the temp too, in case a write is somehow mid-flight.
+		clear();
+		if (!moveOver(dir / kPendingScene, dir / kLiveScene)) return false;
+		if (!moveOver(dir / kPendingManifest, dir / kLiveManifest))
+		{
+			// A scene without its manifest is an interrupted write to the next
+			// start, so the pair is not left half-moved: the scene goes back to
+			// being nothing rather than an orphan.
+			removeQuiet(dir / kLiveScene);
+			return false;
+		}
+		m_lastRevision = revision;
+		m_haveRevision = true;
+		return true;
+	}
+
 	std::optional<RecoveryInfo> SceneAutosave::readManifest(const std::string& manifestPath)
 	{
 		std::ifstream in(manifestPath, std::ios::binary);

@@ -260,6 +260,65 @@ TEST_CASE("SceneAutosave: what a crash left behind is set aside at the next star
 	CHECK_FALSE(fs::exists(SceneAutosave::pendingPath(sb.dir)));
 }
 
+TEST_CASE("SceneAutosave: a restored snapshot becomes this run's live copy, at the revision it was restored as")
+{
+	Sandbox sb("adopt");
+	// Session 1 leaves a snapshot behind; session 2 writes one of its own
+	// before the user answers the offer (the timer does not wait for them).
+	{
+		SceneAutosave a;
+		a.configure(sb.dir);
+		a.setIntervalMs(10'000);
+		int calls = 0;
+		auto w = stubWriter(calls, "crashed-work");
+		a.update(0, true, 7, infoFor("A.hescene"), w);
+		REQUIRE(a.update(10'000, true, 7, infoFor("A.hescene"), w));
+	}
+	SceneAutosave b;
+	b.configure(sb.dir);
+	REQUIRE(b.promoteStale().has_value());
+	int calls = 0;
+	auto w = stubWriter(calls, "new-work");
+	b.setIntervalMs(10'000);
+	b.update(0, true, 1, infoFor("B.hescene"), w);
+	REQUIRE(b.update(10'000, true, 1, infoFor("B.hescene"), w));
+	calls = 0;
+
+	// Yes: the pending pair is the live pair now, this run's own copy is gone
+	// with it (it described a world the user just replaced), and the offer is
+	// answered.
+	REQUIRE(b.adoptPending(42));
+	CHECK_FALSE(b.pending().has_value());
+	CHECK_FALSE(fs::exists(SceneAutosave::pendingPath(sb.dir)));
+	CHECK_FALSE(fs::exists(SceneAutosave::pendingManifestPath(sb.dir)));
+	CHECK(b.hasLiveSnapshot());
+	CHECK(slurp(SceneAutosave::livePath(sb.dir)) == "crashed-work");
+	auto live = SceneAutosave::readManifest(SceneAutosave::liveManifestPath(sb.dir));
+	REQUIRE(live.has_value());
+	CHECK(live->scenePath == "A.hescene");
+	CHECK(b.lastSnapshotRevision() == 42);
+
+	// The world at revision 42 is what the live file holds, so an interval
+	// later there is nothing to write — until the user edits something.
+	CHECK_FALSE(b.update(20'000, true, 42, infoFor("A.hescene"), w));
+	CHECK(calls == 0);
+	CHECK(slurp(SceneAutosave::livePath(sb.dir)) == "crashed-work");
+	REQUIRE(b.update(30'000, true, 43, infoFor("A.hescene"), w));
+	CHECK(calls == 1);
+	CHECK(slurp(SceneAutosave::livePath(sb.dir)) == "new-work");
+
+	// Nothing pending: nothing adopted, and the live copy is left alone.
+	CHECK_FALSE(b.adoptPending(44));
+	CHECK(b.hasLiveSnapshot());
+
+	// A pending scene whose manifest is missing is no offer (see pending()),
+	// so it is not adopted either — and the live copy stays as it is.
+	std::ofstream(SceneAutosave::pendingPath(sb.dir)) << "orphan";
+	CHECK_FALSE(b.adoptPending(45));
+	CHECK(b.hasLiveSnapshot());
+	CHECK(slurp(SceneAutosave::livePath(sb.dir)) == "new-work");
+}
+
 TEST_CASE("SceneAutosave: a snapshot without its manifest is an interrupted write, not an offer")
 {
 	Sandbox sb("orphan");

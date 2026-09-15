@@ -100,8 +100,16 @@ namespace HE::Ed
 
 		// The pending snapshot, if any: what a recovery dialog would offer.
 		std::optional<RecoveryInfo> pending() const;
-		// Drops the pending snapshot — the user restored it or said no.
+		// Drops the pending snapshot — the user said no.
 		void discardPending();
+		// The user said yes and the snapshot is in the world now: it becomes
+		// THIS run's live snapshot (pending → live, scene first, manifest
+		// second), and `revision` is recorded as the one it holds. So a second
+		// crash before the first timer fires still has a copy to offer, and
+		// the next tick does not re-serialise a world that has not moved. The
+		// caller's real save clears it like any other live snapshot. Returns
+		// false when there was nothing pending.
+		bool adoptPending(std::uint64_t revision);
 
 		// The manifest at `manifestPath`, or nothing if it is missing or unreadable.
 		static std::optional<RecoveryInfo> readManifest(const std::string& manifestPath);
