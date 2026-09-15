@@ -22,10 +22,10 @@ namespace
 
 	// "15 Sep 2026, 04:31" in local time, or nothing when the manifest carried
 	// no stamp (a snapshot from before the field existed, or a clock at zero).
-	std::string savedAtText(std::int64_t unix)
+	std::string savedAtText(std::int64_t unixSecs)
 	{
-		if (unix <= 0) return {};
-		const std::time_t secs = static_cast<std::time_t>(unix);
+		if (unixSecs <= 0) return {};
+		const std::time_t secs = static_cast<std::time_t>(unixSecs);
 		std::tm tmBuf{};
 #ifdef _WIN32
 		if (localtime_s(&tmBuf, &secs) != 0) return {};
