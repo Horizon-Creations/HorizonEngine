@@ -47,6 +47,15 @@ target_include_directories(HorizonImporters
     # compiles its own copy to validate .ogg sources (see the note there).
     PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Scene/vendor
 )
+# FBX / OBJ / COLLADA come in through Assimp (root CMakeLists, HE_ENABLE_ASSIMP).
+# The library is PRIVATE — Assimp headers are included from .cpp files only, so
+# the editor and the tests never see them — but the feature flag is PUBLIC:
+# routing (Importer::isImportableSource) and the tests gate on HE_HAVE_ASSIMP.
+if(HE_HAVE_ASSIMP)
+    target_sources(HorizonImporters PRIVATE src/AssetImporter/AssimpMeshImport.cpp)
+    target_link_libraries(HorizonImporters PRIVATE assimp::assimp)
+    target_compile_definitions(HorizonImporters PUBLIC HE_HAVE_ASSIMP)
+endif()
 
 # ─── asset_compiler.exe ────────────────────────────────────────────────────────
 add_executable(asset_compiler

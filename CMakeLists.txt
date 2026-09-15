@@ -562,6 +562,57 @@ if(HE_ENABLE_ASTC)
     endif()
 endif()
 
+# ─── Assimp (optional: FBX / OBJ / COLLADA mesh import) ───────────────────────
+# The mesh importers read glTF natively (cgltf, vendored). Every other DCC
+# interchange format comes in through Assimp, restricted to the three importers
+# we actually route (FBX, OBJ, COLLADA) so the static library stays small and
+# nothing with a licence question (3DS, MD5, ...) is compiled in at all.
+# Linked ONLY into HorizonImporters (editor + asset_compiler + tests) — never
+# into the shipped game. Disable with -DHE_ENABLE_ASSIMP=OFF; the importer set
+# then falls back to glTF only (HE_HAVE_ASSIMP is not defined).
+option(HE_ENABLE_ASSIMP "Fetch Assimp for FBX/OBJ/COLLADA mesh import" ON)
+if(HE_ENABLE_ASSIMP)
+    message(STATUS "HorizonEngine: fetching Assimp (FBX/OBJ/COLLADA importers only)")
+    set(BUILD_SHARED_LIBS_SAVE ${BUILD_SHARED_LIBS})
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE) # static assimp, linked into HorizonImporters only
+    set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_FBX_IMPORTER             ON  CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_OBJ_IMPORTER             ON  CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_COLLADA_IMPORTER         ON  CACHE BOOL "" FORCE)
+    set(ASSIMP_NO_EXPORT                      ON  CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_TESTS                    OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_ASSIMP_TOOLS             OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_SAMPLES                  OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_DOCS                     OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_ASSIMP_VIEW              OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_INSTALL                        OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_INSTALL_PDB                    OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_WARNINGS_AS_ERRORS             OFF CACHE BOOL "" FORCE)
+    set(ASSIMP_INJECT_DEBUG_POSTFIX           OFF CACHE BOOL "" FORCE) # no "assimpd" — one name in every config
+    set(ASSIMP_BUILD_USE_CCACHE               OFF CACHE BOOL "" FORCE)
+    # Binary FBX files are zlib-deflated; Assimp's bundled zlib keeps this
+    # self-contained on every platform (no find_package(ZLIB) roulette on CI).
+    set(ASSIMP_BUILD_ZLIB                     ON  CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        assimp
+        GIT_REPOSITORY https://github.com/assimp/assimp.git
+        GIT_TAG        v6.0.5
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(assimp)
+    set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVE} CACHE BOOL "" FORCE)
+    if(TARGET assimp::assimp)
+        set(HE_HAVE_ASSIMP TRUE)
+        message(STATUS "HorizonEngine: Assimp fetched — FBX/OBJ/COLLADA mesh import enabled")
+    else()
+        message(WARNING "HorizonEngine: Assimp fetch did not produce a usable target — "
+                         "FBX/OBJ/COLLADA mesh import will be unavailable (glTF only).")
+    endif()
+else()
+    message(STATUS "HorizonEngine: Assimp disabled (pass -DHE_ENABLE_ASSIMP=ON to enable FBX/OBJ/COLLADA import)")
+endif()
+
 # ─── Runtime flavour (docs/he-apps-plan.md A3b) ────────────────────────────────
 # The exporter copies a runtime directory verbatim into a packaged build. There
 # are THREE of them per platform, and they differ in exactly two things: which

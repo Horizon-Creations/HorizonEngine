@@ -52,6 +52,15 @@ ResolvedOutput resolveOutput(const std::string&           explicitPath,
 
 bool gltfHasSkin(const std::filesystem::path& sourcePath)
 {
+	// Only glTF can carry a glTF skin; every other mesh source is answered here
+	// without touching the file (an FBX is not small, and cgltf would read all of
+	// it just to reject it).
+	std::string ext = sourcePath.extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(),
+	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	if (ext != ".gltf" && ext != ".glb")
+		return false;
+
 	cgltf_options options{};
 	cgltf_data*   data = nullptr;
 	// cgltf_parse_file reads the JSON only — skins_count is filled in without
@@ -353,19 +362,37 @@ std::vector<MeshSection> buildMeshSections(const cgltf_data*                  da
                                            const std::vector<std::string>&    materialPaths,
                                            std::vector<uint32_t>&             indices)
 {
+	// Material pointers become indices into data->materials; null stays "none".
+	const auto indexOf = [data](const cgltf_material* m) -> int {
+		if (!m || !data || !data->materials) return BakedRange::kNoMaterial;
+		return static_cast<int>(m - data->materials);
+	};
+	std::vector<BakedRange> ranges;
+	ranges.reserve(baked.size());
+	for (const BakedPrimitive& b : baked)
+		ranges.push_back({ b.indexStart, b.indexCount, indexOf(b.material) });
+	return buildMeshSections(ranges, indexOf(primary), materialPaths, indices);
+}
+
+std::vector<MeshSection> buildMeshSections(const std::vector<BakedRange>&  baked,
+                                           int                             primaryIndex,
+                                           const std::vector<std::string>& materialPaths,
+                                           std::vector<uint32_t>&          indices)
+{
 	// One group per distinct material, in order of first appearance; the
 	// primitives of a group keep their bake order inside it.
 	struct Group
 	{
-		const cgltf_material* material = nullptr;
-		std::vector<size_t>   prims;   // indices into `baked`
+		int                 material = BakedRange::kNoMaterial;
+		std::vector<size_t> prims;   // indices into `baked`
 	};
 	std::vector<Group> groups;
 	for (size_t i = 0; i < baked.size(); ++i)
 	{
 		if (static_cast<size_t>(baked[i].indexStart) + baked[i].indexCount > indices.size())
 			return {};   // a record that does not describe this buffer — see below
-		const cgltf_material* key = baked[i].material ? baked[i].material : primary;
+		const int key = baked[i].materialIndex != BakedRange::kNoMaterial
+			? baked[i].materialIndex : primaryIndex;
 		auto it = std::find_if(groups.begin(), groups.end(),
 		                       [key](const Group& g) { return g.material == key; });
 		if (it == groups.end()) { groups.push_back({ key, {} }); it = groups.end() - 1; }
@@ -385,17 +412,14 @@ std::vector<MeshSection> buildMeshSections(const cgltf_data*                  da
 		s.indexOffset = static_cast<uint32_t>(regrouped.size());
 		for (size_t pi : g.prims)
 		{
-			const BakedPrimitive& b = baked[pi];
+			const BakedRange& b = baked[pi];
 			regrouped.insert(regrouped.end(),
 			                 indices.begin() + b.indexStart,
 			                 indices.begin() + b.indexStart + b.indexCount);
 		}
 		s.indexCount = static_cast<uint32_t>(regrouped.size()) - s.indexOffset;
-		if (g.material && data && data->materials)
-		{
-			const size_t mi = static_cast<size_t>(g.material - data->materials);
-			if (mi < materialPaths.size()) s.materialPath = materialPaths[mi];
-		}
+		if (g.material >= 0 && static_cast<size_t>(g.material) < materialPaths.size())
+			s.materialPath = materialPaths[static_cast<size_t>(g.material)];
 		sections.push_back(std::move(s));
 	}
 	// Every index the bake produced is accounted for by exactly one primitive
@@ -421,6 +445,11 @@ SourceKind classifySource(const std::filesystem::path& sourcePath)
 	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
 	if (ext == ".gltf" || ext == ".glb")                      return SourceKind::Mesh;
+#ifdef HE_HAVE_ASSIMP
+	// The Assimp-backed formats (AssimpMeshImport). Without Assimp they are not
+	// importable at all — better the editor says so than an import that fails.
+	if (ext == ".fbx"  || ext == ".obj" || ext == ".dae")     return SourceKind::Mesh;
+#endif
 	if (ext == ".png"  || ext == ".jpg" || ext == ".jpeg" ||
 	    ext == ".tga"  || ext == ".bmp" || ext == ".hdr")     return SourceKind::Texture;
 	if (AudioImporter::isSupportedSource(sourcePath))         return SourceKind::Audio;

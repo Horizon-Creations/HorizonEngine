@@ -8,6 +8,9 @@
 // everything).
 
 #include "../AssetImporter/AnimationClipImporter.h"
+#ifdef HE_HAVE_ASSIMP
+#include "../AssetImporter/AssimpMeshImport.h"   // Importer::isAssimpSource
+#endif
 #include "../AssetImporter/AudioImporter.h"
 #include "../AssetImporter/FontImporter.h"
 #include "../AssetImporter/ImporterCommon.h"
@@ -44,6 +47,12 @@ namespace
 		// message and no way to ever pick it as a SkeletalMesh.
 		if (ext == ".gltf" || ext == ".glb")
 			return Importer::gltfHasSkin(file) ? SourceKind::SkeletalMesh : SourceKind::Mesh;
+#ifdef HE_HAVE_ASSIMP
+		// FBX / OBJ / COLLADA: always the static path (AssimpMeshImport imports a
+		// rigged file as its bind pose and says so).
+		if (Importer::isAssimpSource(file))
+			return SourceKind::Mesh;
+#endif
 		if (ext == ".hmat")
 			return SourceKind::Material;
 		if (AudioImporter::isSupportedSource(file))

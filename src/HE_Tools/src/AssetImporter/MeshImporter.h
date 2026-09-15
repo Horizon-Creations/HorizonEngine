@@ -4,14 +4,17 @@
 #include "ContentManager/Assets.h"
 #include "ImporterCommon.h"   // Importer::OutputTargets
 
-// Imports glTF 2.0 (.gltf / .glb) into a StaticMeshAsset. All primitives of
-// all scene nodes are baked into one vertex/index buffer with node world
-// transforms applied; primitives sharing a glTF material become one material
-// SECTION (MeshSection, chunk MSEC), so a multi-material file keeps every
-// material on the geometry it was authored on.
+// Imports glTF 2.0 (.gltf / .glb) — and, with HE_HAVE_ASSIMP, FBX / OBJ /
+// COLLADA (.fbx / .obj / .dae, see AssimpMeshImport) — into a StaticMeshAsset.
+// All primitives of all scene nodes are baked into one vertex/index buffer with
+// node world transforms applied; primitives sharing a source material become
+// one material SECTION (MeshSection, chunk MSEC), so a multi-material file
+// keeps every material on the geometry it was authored on.
 //
 // Every glTF material is imported as a MaterialAsset (with its textures) and
-// bound to its section; the mesh's MREF points at section 0's material.
+// bound to its section; the mesh's MREF points at section 0's material. The
+// Assimp formats get their sections with EMPTY material paths for now (the
+// mesh's own material) — their material import is a separate step.
 class MeshImporter {
 public:
     struct ImportSettings {

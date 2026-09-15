@@ -81,6 +81,9 @@ namespace Importer
 	// Only the JSON is parsed, no buffers are loaded; anything that fails to parse
 	// answers false so the caller falls back to the static path and reports that
 	// importer's error instead of a second, redundant one here.
+	// Anything that is not a .gltf/.glb answers false WITHOUT opening it: the
+	// other mesh sources (FBX/OBJ/DAE via Assimp) would otherwise be read whole
+	// by cgltf just to fail — twice per re-import.
 	bool gltfHasSkin(const std::filesystem::path& sourcePath);
 
 	// ─── Shared glTF geometry path (MeshImporter + SkeletalMeshImporter) ──────
@@ -174,6 +177,19 @@ namespace Importer
 	// gets its first declared material; null only for a glTF that declares none.
 	const cgltf_material* gltfPrimaryMaterial(const cgltf_data* data);
 
+	// The format-neutral form of BakedPrimitive: the same index range, with the
+	// material as an INDEX into whatever material table the source declares
+	// (cgltf_data::materials, aiScene::mMaterials). kNoMaterial = the range has
+	// none. This is what the section core below works on, so the Assimp path
+	// (AssimpMeshImport) and the glTF path share one grouping rule.
+	struct BakedRange
+	{
+		static constexpr int kNoMaterial = -1;
+		uint32_t indexStart    = 0;
+		uint32_t indexCount    = 0;
+		int      materialIndex = kNoMaterial;
+	};
+
 	// Turns the baked primitives into the mesh's section table (MeshSection, chunk
 	// MSEC) and regroups `indices` to match: primitives sharing a glTF material
 	// become ONE section, in the order their material first appears in the bake,
@@ -194,6 +210,17 @@ namespace Importer
 	                                           const cgltf_material*              primary,
 	                                           const std::vector<std::string>&    materialPaths,
 	                                           std::vector<uint32_t>&             indices);
+
+	// The core the glTF overload above wraps: identical rules, with materials as
+	// indices. `primaryIndex` is the material a range without one joins
+	// (BakedRange::kNoMaterial when the source declares none — such ranges then
+	// form one section with an empty path). `materialPaths` may be shorter than
+	// the material table, or empty altogether: a missing entry is an empty path.
+	// Returns {} when a range does not describe `indices` (see the .cpp).
+	std::vector<MeshSection> buildMeshSections(const std::vector<BakedRange>&  baked,
+	                                           int                             primaryIndex,
+	                                           const std::vector<std::string>& materialPaths,
+	                                           std::vector<uint32_t>&          indices);
 
 	// The result of importing every material a glTF declares.
 	struct GltfMaterialImport
