@@ -27,10 +27,14 @@ namespace
 // handed to it: for rotation, optionally drop ImGuizmo's outer screen-space
 // ring (rotate about the view axis) — it's the confusing white circle.
 ImGuizmo::OPERATION beginFrame(const ImVec2& rectMin, const ImVec2& rectMax,
+                               const glm::mat4& proj,
                                const ViewportToolbar::State& tb, bool enabled)
 {
 	ImGuizmo::Enable(enabled);
-	ImGuizmo::SetOrthographic(false);
+	// Read off the projection rather than asked: an orthographic editor view
+	// (Top/Front/Side) has no perspective w, and ImGuizmo sizes and hit-tests
+	// its handles differently for that.
+	ImGuizmo::SetOrthographic(proj[3][3] != 0.0f);
 	ImGuizmo::SetDrawlist();
 	ImGuizmo::SetRect(rectMin.x, rectMin.y, rectMax.x - rectMin.x, rectMax.y - rectMin.y);
 
@@ -78,7 +82,7 @@ bool manipulateOne(HorizonWorld& world, Entity entity,
 	auto* t = registry.try_get<TransformComponent>(entity);
 	if (!t) return false;
 
-	const ImGuizmo::OPERATION effectiveOp = beginFrame(rectMin, rectMax, tb, enabled);
+	const ImGuizmo::OPERATION effectiveOp = beginFrame(rectMin, rectMax, proj, tb, enabled);
 
 	// While a drag is in progress the gizmo works on the matrix IT produced last
 	// frame, NOT on the scene graph's freshly recomposed worldMatrix. The round
@@ -155,7 +159,7 @@ bool manipulateGroup(HorizonWorld& world, const std::vector<Entity>& members,
                      EditorUndo* undo, bool* outChanged)
 {
 	auto& registry = world.registry();
-	const ImGuizmo::OPERATION effectiveOp = beginFrame(rectMin, rectMax, tb, enabled);
+	const ImGuizmo::OPERATION effectiveOp = beginFrame(rectMin, rectMax, proj, tb, enabled);
 
 	static bool                     s_wasUsing = false;
 	static glm::mat4                s_gizmoStart(1.0f); // handed to ImGuizmo on the drag's first frame

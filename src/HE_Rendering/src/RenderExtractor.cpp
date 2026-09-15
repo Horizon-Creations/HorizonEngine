@@ -72,9 +72,18 @@ namespace
 		{
 			out.camera.position   = editorCam->position;
 			out.camera.view       = editorCam->view;
+			// An orthographic editor view has no natural near plane: where the
+			// camera SITS is only a convention (the orbit pivot distance), and a
+			// Top view must not lose the tower that happens to be taller than
+			// the camera is high. So the near plane goes a whole far-distance
+			// BEHIND the camera. That also puts everything in front of it at
+			// GL-ndc z ∈ [0,1] — the half Metal's scene raster keeps (it feeds
+			// the unfixed GL projection to a [0,w] clip; with 0.1..far the
+			// nearer 2500 m of an ortho view fell out of the picture entirely).
+			const float oh = editorCam->orthoHalfHeight;
 			out.camera.projection = editorCam->orthographic
-				? glm::ortho(-aspectRatio * 5.0f, aspectRatio * 5.0f, -5.0f, 5.0f,
-				             editorCam->nearPlane, editorCam->farPlane)
+				? glm::ortho(-aspectRatio * oh, aspectRatio * oh, -oh, oh,
+				             -editorCam->farPlane, editorCam->farPlane)
 				: glm::perspective(glm::radians(editorCam->fovDegrees), aspectRatio,
 				                   editorCam->nearPlane, editorCam->farPlane);
 		}
@@ -778,14 +787,23 @@ namespace
 		const float kLambda         = splitLambda;    // uniform↔logarithmic split blend
 		const float kCascadeRes     = static_cast<float>(mapRes);
 
-		// Camera near/far from the (glm, z∈[-1,1]) projection matrix.
+		// Camera near/far from the (glm, z∈[-1,1]) projection matrix. The
+		// perspective terms read garbage off an orthographic matrix (near ≈ 1,
+		// far < 0 → a 2 m shadow range), so an ortho view — the editor's
+		// Top/Front/Side, or an ortho CameraComponent — reads its own linear
+		// terms: z_ndc = P[2][2]·(−d) + P[3][2]. Its near plane sits behind the
+		// camera (see extractCamera); shadows start at the camera itself, the
+		// splits are uniform because a logarithmic series has no meaning
+		// without perspective, and every slice is the ortho box rather than a
+		// frustum wedge.
 		const glm::mat4& P = out.camera.projection;
-		const float camN = P[3][2] / (P[2][2] - 1.0f);
-		const float camF = P[3][2] / (P[2][2] + 1.0f);
+		const bool  ortho = (P[3][3] == 1.0f);
+		const float camN = ortho ? 0.05f : P[3][2] / (P[2][2] - 1.0f);   // > 0: the log series divides by it
+		const float camF = ortho ? (P[3][2] - 1.0f) / P[2][2] : P[3][2] / (P[2][2] + 1.0f);
 		const float shadowFar = std::min(std::max(camF, camN + 1.0f), kShadowDistance);
 
 		float splitD[ShadowData::kMaxCascades + 1];
-		HE::computeCascadeSplits(camN, shadowFar, kCascadeCount, kLambda, splitD);
+		HE::computeCascadeSplits(camN, shadowFar, kCascadeCount, ortho ? 0.0f : kLambda, splitD);
 
 		// Stable per-cascade sphere fit (jitter-free → no shadow swim): the bounding
 		// sphere of a frustum slice depends ONLY on fov/aspect/splits, not the camera
@@ -806,7 +824,14 @@ namespace
 		{
 			const float nC = splitD[c];
 			const float fC = splitD[c + 1];
-			const HE::CascadeSphere sphere = HE::fitCascadeSphere(nC, fC, thfX, thfY);
+			// Ortho: the slice is a box with the view's own half extents
+			// (1/P[0][0], 1/P[1][1] are those, not tangents), so its sphere is
+			// the box's half diagonal about its middle.
+			const HE::CascadeSphere sphere = ortho
+				? HE::CascadeSphere{ (nC + fC) * 0.5f,
+				                     std::ceil(std::sqrt(thfX * thfX + thfY * thfY
+				                                         + (fC - nC) * (fC - nC) * 0.25f) * 16.0f) / 16.0f }
+				: HE::fitCascadeSphere(nC, fC, thfX, thfY);
 			const float     crad    = sphere.radius;
 			const glm::vec3 ccenter = camPos + camFwd * sphere.centerDistance;
 

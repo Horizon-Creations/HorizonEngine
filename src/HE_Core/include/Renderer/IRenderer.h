@@ -32,6 +32,9 @@ struct EditorCameraOverride
     float     nearPlane    = 0.1f;
     float     farPlane     = 5000.0f;
     bool      orthographic = false;
+    // Half the visible height of an orthographic view, world units (the width
+    // follows the viewport's aspect). Only read when `orthographic` is set.
+    float     orthoHalfHeight = 5.0f;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────

@@ -1217,6 +1217,7 @@ void EditorApplication::OnInit()
 			globalstate.getCustomConfigFloat("EditorCamYaw",   m_editorCamera.yaw()),
 			globalstate.getCustomConfigFloat("EditorCamPitch", m_editorCamera.pitch()),
 			globalstate.getCustomConfigFloat("EditorCamPivot", m_editorCamera.pivotDistance()));
+		m_editorCamera.setOrthographic(globalstate.getCustomConfigBool("EditorCamOrtho", false));
 	}
 	setMaxFps(m_editorConfig.MaxFps);   // VSync-off frame cap (0 = unlimited)
 
@@ -4387,6 +4388,36 @@ void EditorApplication::dumpFrameHeadless()
 		                       static_cast<float>(envF("HE_DUMP_CAMY", 2.0f)),
 		                       static_cast<float>(envF("HE_DUMP_CAMZ", 0.0f)));
 		m_editorCamera.setOrientation(camPos, fwd);
+		// HE_DUMP_ORTHO=1: the same pose without a lens (the ortho height follows
+		// HE_DUMP_ORTHOPIVOT, the pivot distance the height is derived from);
+		// HE_DUMP_VIEW=top|bottom|front|back|left|right: one of the axis presets
+		// instead, swung around the pivot that distance ahead of camPos. Pairs
+		// with DOFTEST (cubes at 3..48 m) — in ortho they must all be the same size.
+		if (const char* v = std::getenv("HE_DUMP_VIEW"); v && *v)
+		{
+			const std::string_view name(v);
+			using VP = EditorCamera::ViewPreset;
+			const VP preset = name == "top"    ? VP::Top    : name == "bottom" ? VP::Bottom
+			                : name == "front"  ? VP::Front  : name == "back"   ? VP::Back
+			                : name == "left"   ? VP::Left   : name == "right"  ? VP::Right
+			                : VP::Perspective;
+			m_editorCamera.restoreView(camPos, m_editorCamera.yaw(), m_editorCamera.pitch(),
+			                           envF("HE_DUMP_ORTHOPIVOT", 12.0f));
+			m_editorCamera.applyPreset(preset);
+		}
+		else if (envF("HE_DUMP_ORTHO", 0.0f) > 0.5f)
+		{
+			m_editorCamera.restoreView(camPos, m_editorCamera.yaw(), m_editorCamera.pitch(),
+			                           envF("HE_DUMP_ORTHOPIVOT", 12.0f));
+			m_editorCamera.setOrthographic(true);
+		}
+		else
+		{
+			// Explicitly a lens: the projection is persisted with the camera view
+			// (EditorCamOrtho), so an ortho dump would otherwise leak into every
+			// later "perspective" shot from the same config.
+			m_editorCamera.setOrthographic(false);
+		}
 		r->SetEditorCamera(m_editorCamera.makeOverride());
 	}
 
@@ -9575,6 +9606,7 @@ void EditorApplication::writeEditorConfig()
 		globalstate.setCustomConfigEntry("EditorCamYaw",   m_editorCamera.yaw());
 		globalstate.setCustomConfigEntry("EditorCamPitch", m_editorCamera.pitch());
 		globalstate.setCustomConfigEntry("EditorCamPivot", m_editorCamera.pivotDistance());
+		globalstate.setCustomConfigEntry("EditorCamOrtho", m_editorCamera.orthographic());
 		globalstate.setCustomConfigEntry("EditorCamValid", true);
 	}
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);

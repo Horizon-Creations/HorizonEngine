@@ -497,6 +497,25 @@ void render(AppContext& ctx, float dt)
 						                         center, radius))
 							cam.focusOn(center, radius);
 					}
+					// View presets on the numeric keypad (Blender's layout, the
+					// one people arrive with): 7 Top, 1 Front, 3 Right, Ctrl
+					// flips each to its opposite, 5 toggles the lens. Keypad
+					// only — the plain digits are free for whatever a tool
+					// binds, and a laptop without a keypad has the toolbar's
+					// view cell for the same thing.
+					if (imageHovered && !io.WantTextInput && !navigating)
+					{
+						using VP = EditorCamera::ViewPreset;
+						const bool flip = io.KeyCtrl;
+						if (ImGui::IsKeyPressed(ImGuiKey_Keypad7, false))
+							cam.applyPreset(flip ? VP::Bottom : VP::Top);
+						else if (ImGui::IsKeyPressed(ImGuiKey_Keypad1, false))
+							cam.applyPreset(flip ? VP::Back : VP::Front);
+						else if (ImGui::IsKeyPressed(ImGuiKey_Keypad3, false))
+							cam.applyPreset(flip ? VP::Left : VP::Right);
+						else if (ImGui::IsKeyPressed(ImGuiKey_Keypad5, false))
+							cam.setOrthographic(!cam.orthographic());
+					}
 
 					cam.update(cin);
 					// Push to the backend so this frame's render uses it.

@@ -1665,6 +1665,43 @@ namespace
 	  "The reference grid under the scene. Off while playing either way.",
 	  "", "editor#viewport" },
 
+	// ── The viewport's view picker ───────────────────────────────────────────
+	// Each axis view is orthographic: parallel lines stay parallel, the far
+	// wall is as tall as the near one, which is what lining things up needs.
+	{ "Viewport View/Perspective", "",
+	  "Back to a lens: things further away look smaller. Keeps the current "
+	  "heading, so from a Top view this gives a perspective look from straight "
+	  "above.",
+	  "Num 5", "editor#viewport" },
+	{ "Viewport View/Top", "",
+	  "Straight down, without perspective: a map of the scene with -Z at the top "
+	  "and X to the right. The view for laying out a floor plan.",
+	  "Num 7", "editor#viewport" },
+	{ "Viewport View/Bottom", "",
+	  "Straight up from below, without perspective. Mirrors Top left-to-right, "
+	  "as it must to be looking the other way.",
+	  "Ctrl+Num 7", "editor#viewport" },
+	{ "Viewport View/Front", "",
+	  "Along -Z, without perspective: X to the right, Y up. The view for "
+	  "checking heights against each other.",
+	  "Num 1", "editor#viewport" },
+	{ "Viewport View/Back", "",
+	  "Along +Z, without perspective — Front seen from the other side.",
+	  "Ctrl+Num 1", "editor#viewport" },
+	{ "Viewport View/Right", "",
+	  "From +X looking toward -X, without perspective: -Z to the right, Y up.",
+	  "Num 3", "editor#viewport" },
+	{ "Viewport View/Left", "",
+	  "From -X looking toward +X, without perspective — Right seen from the "
+	  "other side.",
+	  "Ctrl+Num 3", "editor#viewport" },
+	{ "Viewport View/Orthographic", "",
+	  "Drop the lens at the current heading without snapping to an axis. The "
+	  "view keeps whatever sits at the orbit pivot the same size when it "
+	  "switches; the wheel zooms it the way it dollies the perspective camera. "
+	  "Orbiting or flying keeps the projection you chose.",
+	  "Num 5", "editor#viewport" },
+
 	// ── World Outliner ───────────────────────────────────────────────────────
 	{ "World Outliner/Create Child", "",
 	  "Creates an entity parented to this one. A child follows its parent's "
@@ -2069,6 +2106,14 @@ namespace
 	{ "viewport.camera-speed", "Camera Speed",
 	  "How fast the editor's fly camera moves, in metres per second. Hold Shift "
 	  "while flying for three times this.",
+	  "", "editor#viewport" },
+	{ "viewport.view", "View",
+	  "Which way the scene is looked at: Perspective, or an orthographic Top, "
+	  "Bottom, Front, Back, Left or Right view for lining things up without a "
+	  "lens. The label reads what the camera is actually doing — orbit out of "
+	  "Top and it says Ortho, since that is no longer Top. On the keypad, 7 / 1 "
+	  "/ 3 pick Top / Front / Right, Ctrl flips each to its opposite, 5 toggles "
+	  "the lens.",
 	  "", "editor#viewport" },
 	{ "viewport.mode", "Viewport Mode",
 	  "Scene is normal editing. Landscape turns the viewport into the terrain "
@@ -5801,6 +5846,7 @@ namespace
 		{ "Source Root/",      "editor-interface", "Editor Interface", "Source root" },
 		{ "New Entity/",       "editor-interface", "Editor Interface", "Creating entities" },
 		{ "Viewport Options/", "editor-interface", "Editor Interface", "Viewport options" },
+		{ "Viewport View/",    "editor-interface", "Editor Interface", "View presets" },
 		// ── The Details panel's components ───────────────────────────────────
 		{ "Component/", "editor-components", "Component Reference", "The components" },
 		// ── Settings ─────────────────────────────────────────────────────────

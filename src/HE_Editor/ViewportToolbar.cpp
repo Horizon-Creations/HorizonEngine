@@ -167,6 +167,18 @@ void iconCamera(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	dl->AddLine({ c.x + h * 0.05f, c.y - h },         { c.x + h * 0.22f, c.y - h * 0.62f }, col, t);
 }
 
+// Eye — the view preset (Perspective / Top / Front / …).
+void iconEye(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.5f, t = stroke(s);
+	// Two arcs meeting at the corners of the eye, then the pupil.
+	dl->PathArcTo({ c.x, c.y + h * 0.55f }, h * 1.15f, kPi * 1.22f, kPi * 1.78f, 14);
+	dl->PathStroke(col, 0, t);
+	dl->PathArcTo({ c.x, c.y - h * 0.55f }, h * 1.15f, kPi * 0.22f, kPi * 0.78f, 14);
+	dl->PathStroke(col, 0, t);
+	dl->AddCircleFilled(c, h * 0.30f, col, 12);
+}
+
 // Two sliders — viewport options.
 void iconSliders(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 {
@@ -348,6 +360,40 @@ void optionsPopup(AppContext& ctx, State& st)
 	ImGui::Text("Render target: %d \xc3\x97 %d px", pxW, pxH);
 }
 
+// The view picker: one axis view per row, then the projection on its own.
+// Picking an axis view goes orthographic with it (that is what a Top view is
+// for); "Perspective" only puts the lens back and keeps the heading, which is
+// also how you get a perspective look from straight above if you want one.
+void viewPopup(AppContext& ctx)
+{
+	if (!ctx.editorCamera) return;
+	EditorCamera& cam = *ctx.editorCamera;
+	HE::Ed::Help::Scope helpScope("Viewport View");
+	using VP = EditorCamera::ViewPreset;
+	const VP current = cam.currentPreset();
+	struct Row { VP preset; const char* label; const char* shortcut; };
+	const Row rows[] = {
+		{ VP::Perspective, "Perspective", "Num 5" },
+		{ VP::Top,         "Top",         "Num 7" },
+		{ VP::Bottom,      "Bottom",      "Ctrl+Num 7" },
+		{ VP::Front,       "Front",       "Num 1" },
+		{ VP::Back,        "Back",        "Ctrl+Num 1" },
+		{ VP::Right,       "Right",       "Num 3" },
+		{ VP::Left,        "Left",        "Ctrl+Num 3" },
+	};
+	for (const Row& r : rows)
+	{
+		const bool on = (r.preset == current) && (r.preset != VP::Perspective || !cam.orthographic());
+		if (EditorWidgets::menuItem(r.label, r.shortcut, on))
+			cam.applyPreset(r.preset);
+		if (r.preset == VP::Perspective) ImGui::Separator();
+	}
+	ImGui::Separator();
+	bool ortho = cam.orthographic();
+	if (EditorWidgets::checkbox("Orthographic", &ortho))
+		cam.setOrthographic(ortho);
+}
+
 } // namespace
 
 float height() { return EditorToolbar::height(); }
@@ -427,22 +473,27 @@ void render(AppContext& ctx, State& st)
 		if (snap) w += kGroupGap + kWellPad * 2.0f + m.cell + kSegGap + snapValW;
 		return w;
 	};
-	auto rightWidth = [&](bool camera)
+	// The view cell is measured with its widest wording so switching from Top
+	// to Perspective never reflows the row; icon-only once labels are gone.
+	const float viewW       = std::max({ cellWidth(m, "Perspective"), cellWidth(m, "Bottom"),
+	                                     cellWidth(m, "Ortho") });
+	auto rightWidth = [&](bool camera, bool viewLabel)
 	{
 		float w = kWellPad * 2.0f + m.cell;                       // options button
+		w += kWellPad * 2.0f + (viewLabel ? viewW : m.cell) + kGroupGap;   // view preset
 		if (camera) w += kWellPad * 2.0f + m.cell + kSegGap + camValW + kGroupGap;
 		return w;
 	};
 
 	const float slack   = edgeL + kEdgeGap + kGroupGap * 2.0f;     // breathing room around the transport
 	bool labels = true, showCamera = true, showSnap = true;
-	auto fits = [&] { return leftWidth(labels, showSnap) + centreW + rightWidth(showCamera) + slack <= barW; };
+	auto fits = [&] { return leftWidth(labels, showSnap) + centreW + rightWidth(showCamera, labels) + slack <= barW; };
 	if (!fits()) labels     = false;
 	if (!fits()) showCamera = false;
 	if (!fits()) showSnap   = false;
 
 	const float wLeft  = leftWidth(labels, showSnap);
-	const float wRight = rightWidth(showCamera);
+	const float wRight = rightWidth(showCamera, labels);
 
 	// ── Left zone: what the mouse does in the viewport ───────────────────────
 	float x = origin.x + edgeL;
@@ -656,6 +707,32 @@ void render(AppContext& ctx, State& st)
 			ImGui::PopStyleVar();
 			ImGui::PopStyleColor(3);
 			EditorWidgets::helpForKey("viewport.camera-speed");
+			rx += w + kGroupGap;
+		}
+
+		// View preset. The label is READ from the camera, not remembered here:
+		// an orbit out of Top is no longer Top, and a cell that kept saying so
+		// would be lying about the projection under the cursor. A free
+		// orthographic heading shows "Ortho" — still no lens, just no axis.
+		{
+			const float w = kWellPad * 2.0f + (labels ? viewW : m.cell);
+			well(m, rx, w);
+			const bool canView = ctx.editorCamera && !playing;
+			using VP = EditorCamera::ViewPreset;
+			const VP   preset = canView ? ctx.editorCamera->currentPreset() : VP::Perspective;
+			const bool ortho  = canView && ctx.editorCamera->orthographic();
+			const char* viewLabel = (ortho && preset == VP::Perspective)
+			                        ? "Ortho" : EditorCamera::presetName(preset);
+			if (cell(m, rx + kWellPad, w - kWellPad * 2.0f, "##vpView", iconEye,
+			         labels ? viewLabel : nullptr, ortho, canView,
+			         "View — Perspective, or an orthographic Top / Front / Side view",
+			         "viewport.view"))
+				ImGui::OpenPopup("##vpViewPopup");
+			if (ImGui::BeginPopup("##vpViewPopup"))
+			{
+				viewPopup(ctx);
+				ImGui::EndPopup();
+			}
 			rx += w + kGroupGap;
 		}
 

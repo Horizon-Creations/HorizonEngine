@@ -17,6 +17,14 @@
 class EditorCamera
 {
 public:
+	// The canned views. Perspective is "wherever you are, with a lens"; the six
+	// others aim the camera along a world axis AND switch to orthographic, which
+	// is what a Top/Front/Side view is for — lining things up without the lens
+	// making the far wall look shorter than the near one. Front looks along -Z
+	// (the same heading yaw=0 has), Right sits on +X looking toward -X.
+	enum class ViewPreset { Perspective = 0, Top, Bottom, Front, Back, Left, Right };
+	static const char* presetName(ViewPreset p);
+
 	struct Input
 	{
 		bool      orbit   = false;     // Alt + LMB drag
@@ -38,6 +46,26 @@ public:
 	// Place the camera at a world position looking along a forward direction
 	// (used by headless captures / scripted views to aim the camera deterministically).
 	void setOrientation(const glm::vec3& pos, const glm::vec3& forwardDir);
+
+	// Aim along a world axis (and go orthographic), keeping the pivot where it
+	// is: the thing in the middle of the view stays in the middle, seen from
+	// above / the front / the side instead. Perspective only drops the ortho
+	// flag and leaves the heading alone.
+	void applyPreset(ViewPreset p);
+	// Which preset the camera is currently sitting in, read back from its
+	// state (heading + projection) rather than remembered: an orbit out of Top
+	// is no longer Top, and the toolbar label must say so. Perspective for any
+	// free heading, and for an axis view that was switched back to a lens.
+	ViewPreset currentPreset() const;
+
+	// Orthographic projection: parallel rays, no lens. The visible height of
+	// the view volume is NOT extra state — it is the height the perspective
+	// view shows at the pivot distance, so toggling keeps whatever is at the
+	// pivot framed at the same size, and the wheel (which moves the pivot
+	// distance) zooms the ortho view exactly as it dollies the perspective one.
+	bool      orthographic()     const { return m_orthographic; }
+	void      setOrthographic(bool on) { m_orthographic = on; }
+	float     orthoHalfHeight()  const;   // world units, half the visible height
 
 	glm::mat4 viewMatrix()  const;
 	glm::vec3 position()    const { return m_position; }
@@ -79,6 +107,12 @@ private:
 	glm::vec3 forward() const;
 	glm::vec3 right()   const;
 	glm::vec3 up()      const;
+	// The reference "up" the basis is built against: world +Y, except at the
+	// poles (Top/Bottom look straight along Y, where +Y is parallel to forward
+	// and the cross product vanishes). There the heading's own horizontal
+	// direction takes over, so a Top view has -Z at the top of the screen at
+	// yaw 0, like a map with north up, and turns with the yaw.
+	glm::vec3 upReference() const;
 
 	// Looking at the origin from a pleasant 3/4 angle.
 	glm::vec3 m_position{ 6.0f, 4.5f, 6.0f };
@@ -86,6 +120,7 @@ private:
 	float     m_pitch         = 0.0f;   // radians
 	float     m_pivotDistance = 8.7f;   // |m_position - pivot|
 	bool      m_initialised   = false;
+	bool      m_orthographic  = false;
 
 	float     m_fov       = 60.0f;
 	float     m_near      = 0.1f;
