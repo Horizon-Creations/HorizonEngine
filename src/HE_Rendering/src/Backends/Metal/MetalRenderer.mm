@@ -379,6 +379,18 @@ vertex float4 vertexShadow(uint vid [[vertex_id]],
 	return u.mvp * float4(float3(verts[vid].position), 1.0);
 }
 
+// Instanced twin for a run of same-mesh casters (RenderSorter::batchDepthCasters):
+// one lightVP * model per instance at buffer 5, indexed by [[instance_id]]. Depth
+// needs nothing but the clip transform, so the stride is a single float4x4 (64
+// bytes) rather than the scene pass's {mvp, model} pair.
+vertex float4 vertexShadowInstanced(uint vid [[vertex_id]],
+                                    uint iid [[instance_id]],
+                                    const device VertexIn* verts [[buffer(0)]],
+                                    const device float4x4* mvps  [[buffer(5)]])
+{
+	return mvps[iid] * float4(float3(verts[vid].position), 1.0);
+}
+
 // Linear blend-skinning vertex shader. Bone matrices arrive in a dedicated buffer
 // (buffer 4) so they are not limited by the 4 KB setVertexBytes ceiling.
 // Outputs the same VSOut as vertexMain so fragmentMain is reused unchanged.
@@ -1468,6 +1480,23 @@ vertex SSAOPosOut ssaoPosVertex(uint vid [[vertex_id]],
 	o.viewPos  = (u.modelView * p).xyz;
 	return o;
 }
+// Instanced twin for a run of same-mesh objects (RenderSorter::batchDepthRuns):
+// {mvp, modelView} per instance at buffer 5, indexed by [[instance_id]]. The
+// pair is what the loop computed on the CPU per draw, so the instanced frame
+// is bit-identical to the loop's — the same two products, just from an array.
+// 128-byte stride like the scene pass (plan §3); buffer 1 goes unused here.
+struct SSAOPosInst { float4x4 mvp; float4x4 modelView; };
+vertex SSAOPosOut ssaoPosVertexInstanced(uint vid [[vertex_id]],
+                                         uint iid [[instance_id]],
+                                         const device VertexIn*    verts [[buffer(0)]],
+                                         const device SSAOPosInst* inst  [[buffer(5)]])
+{
+	SSAOPosOut o;
+	float4 p   = float4(float3(verts[vid].position), 1.0);
+	o.position = inst[iid].mvp * p;
+	o.viewPos  = (inst[iid].modelView * p).xyz;
+	return o;
+}
 fragment float4 ssaoPosFragment(SSAOPosOut in [[stage_in]])
 {
 	return float4(in.viewPos, 1.0); // a = 1 → valid geometry
@@ -1737,6 +1766,23 @@ vertex GIPosOut giGBufVertex(uint vid [[vertex_id]],
 	o.position = u.mvp * p;
 	o.worldPos = (u.model * p).xyz;
 	float3x3 m3 = float3x3(u.model[0].xyz, u.model[1].xyz, u.model[2].xyz);
+	o.normal   = m3 * float3(verts[vid].normal);
+	return o;
+}
+// Instanced twin for a run of same-mesh objects (RenderSorter::batchDepthRuns):
+// the loop's {mvp, model} pair per instance at buffer 5 — the same 128-byte
+// layout the scene pass uses, and the same CPU products the loop sent, so the
+// instanced G-buffer is bit-identical to the looped one.
+vertex GIPosOut giGBufVertexInstanced(uint vid [[vertex_id]],
+                                      uint iid [[instance_id]],
+                                      const device GIVertexIn*    verts [[buffer(0)]],
+                                      const device GIPosUniforms* inst  [[buffer(5)]])
+{
+	GIPosOut o;
+	float4 p = float4(float3(verts[vid].position), 1.0);
+	o.position = inst[iid].mvp * p;
+	o.worldPos = (inst[iid].model * p).xyz;
+	float3x3 m3 = float3x3(inst[iid].model[0].xyz, inst[iid].model[1].xyz, inst[iid].model[2].xyz);
 	o.normal   = m3 * float3(verts[vid].normal);
 	return o;
 }
@@ -5807,6 +5853,7 @@ void MetalRenderer::Shutdown()
 	if (m_giInstanceLandBuf) { CFBridgingRelease(m_giInstanceLandBuf); m_giInstanceLandBuf = nullptr; }
 	m_giUniqueBlas.clear();
 	if (m_giGBufPipeline)           { CFBridgingRelease(m_giGBufPipeline);           m_giGBufPipeline = nullptr; }
+	if (m_giGBufInstancedPipeline)  { CFBridgingRelease(m_giGBufInstancedPipeline);  m_giGBufInstancedPipeline = nullptr; }
 	if (m_giShadowRayPipeline)      { CFBridgingRelease(m_giShadowRayPipeline);      m_giShadowRayPipeline = nullptr; }
 	if (m_giShadowTemporalPipeline) { CFBridgingRelease(m_giShadowTemporalPipeline); m_giShadowTemporalPipeline = nullptr; }
 	if (m_giShadowBlurPipeline)     { CFBridgingRelease(m_giShadowBlurPipeline);     m_giShadowBlurPipeline = nullptr; }
@@ -5892,12 +5939,15 @@ void MetalRenderer::Shutdown()
 	if (m_particleBuffer)       { CFBridgingRelease(m_particleBuffer);       m_particleBuffer = nullptr; }
 	if (m_sceneDepthState) { CFBridgingRelease(m_sceneDepthState); m_sceneDepthState = nullptr; }
 	if (m_shadowPipeline)  { CFBridgingRelease(m_shadowPipeline);  m_shadowPipeline = nullptr; }
+	if (m_shadowInstancedPipeline) { CFBridgingRelease(m_shadowInstancedPipeline); m_shadowInstancedPipeline = nullptr; }
 	if (m_shadowDepthTex)  { CFBridgingRelease(m_shadowDepthTex);  m_shadowDepthTex = nullptr; }
 	if (m_localShadowTex)  { CFBridgingRelease(m_localShadowTex);  m_localShadowTex = nullptr; }
 	if (m_noDepthState)    { CFBridgingRelease(m_noDepthState);    m_noDepthState = nullptr; }
 	if (m_skyDepthState)   { CFBridgingRelease(m_skyDepthState);   m_skyDepthState = nullptr; }
 	if (m_ssaoPosPipeline)  { CFBridgingRelease(m_ssaoPosPipeline);  m_ssaoPosPipeline = nullptr; }
+	if (m_ssaoPosInstancedPipeline) { CFBridgingRelease(m_ssaoPosInstancedPipeline); m_ssaoPosInstancedPipeline = nullptr; }
 	if (m_reflPosPipeline)  { CFBridgingRelease(m_reflPosPipeline);  m_reflPosPipeline = nullptr; }
+	if (m_reflPosInstancedPipeline) { CFBridgingRelease(m_reflPosInstancedPipeline); m_reflPosInstancedPipeline = nullptr; }
 	if (m_ssaoDepthPosPipeline) { CFBridgingRelease(m_ssaoDepthPosPipeline); m_ssaoDepthPosPipeline = nullptr; }
 	if (m_ssaoPipeline)     { CFBridgingRelease(m_ssaoPipeline);     m_ssaoPipeline = nullptr; }
 	if (m_ssaoBlurPipeline) { CFBridgingRelease(m_ssaoBlurPipeline); m_ssaoBlurPipeline = nullptr; }
@@ -6495,6 +6545,22 @@ void MetalRenderer::CreateScenePipeline()
 				+ (ssError ? [[ssError localizedDescription] UTF8String] : "unknown"));
 		m_ssaoPosPipeline = (void*)CFBridgingRetain(posPso);
 
+		// Instanced twin (ssaoPosVertexInstanced, same attachments). Optional:
+		// without it every same-mesh run draws through the loop.
+		{
+			MTLRenderPipelineDescriptor* ipDesc = [[MTLRenderPipelineDescriptor alloc] init];
+			ipDesc.vertexFunction   = [ssLib newFunctionWithName:@"ssaoPosVertexInstanced"];
+			ipDesc.fragmentFunction = [ssLib newFunctionWithName:@"ssaoPosFragment"];
+			ipDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+			ipDesc.depthAttachmentPixelFormat      = kDepthFormat;
+			NSError* ipErr = nil;
+			id<MTLRenderPipelineState> ipPso = [device newRenderPipelineStateWithDescriptor:ipDesc error:&ipErr];
+			if (ipPso) m_ssaoPosInstancedPipeline = (void*)CFBridgingRetain(ipPso);
+			else       HE_LOG_ERROR(RHI, "%s",
+				(std::string("MetalRenderer: instanced SSAO pos pipeline failed: ")
+				 + (ipErr ? ipErr.localizedDescription.UTF8String : "unknown")).c_str());
+		}
+
 		// FORWARD-reflections MRT variant of the pre-pass (view-pos + oct
 		// normal/rough + NDC depth) — used instead of the plain pre-pass when
 		// the forward path runs SSR / GI reflections.
@@ -6540,6 +6606,33 @@ void MetalRenderer::CreateScenePipeline()
 					id<MTLRenderPipelineState> rpPso =
 						[device newRenderPipelineStateWithDescriptor:rpDesc error:&rpErr];
 					if (rpPso) m_reflPosPipeline = (void*)CFBridgingRetain(rpPso);
+
+					// Instanced twin: the library's instanced vertex (model array
+					// pinned to buffer 5, camera pair at buffer 1), same fragment
+					// and attachments. Optional — a failure only sends every
+					// same-mesh run of the MRT pre-pass through the loop.
+					const auto& rpvi = m_matShaderLib.reflPrepassVertexInstanced(LibBackend::Metal);
+					NSError* rpiErr = nil;
+					id<MTLLibrary> rpviLib = rpvi.ok ? [device newLibraryWithSource:
+						[NSString stringWithUTF8String:rpvi.source.c_str()] options:nil error:&rpiErr] : nil;
+					if (rpviLib)
+					{
+						MTLRenderPipelineDescriptor* rpiDesc = [[MTLRenderPipelineDescriptor alloc] init];
+						rpiDesc.vertexFunction   = [rpviLib newFunctionWithName:@"main0"];
+						rpiDesc.fragmentFunction = [rpfLib newFunctionWithName:@"main0"];
+						rpiDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+						rpiDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float;
+						rpiDesc.colorAttachments[2].pixelFormat = MTLPixelFormatR32Float;
+						rpiDesc.depthAttachmentPixelFormat      = kDepthFormat;
+						id<MTLRenderPipelineState> rpiPso =
+							[device newRenderPipelineStateWithDescriptor:rpiDesc error:&rpiErr];
+						if (rpiPso) m_reflPosInstancedPipeline = (void*)CFBridgingRetain(rpiPso);
+					}
+					if (!m_reflPosInstancedPipeline)
+						HE_LOG_ERROR(RHI, "%s",
+							(std::string("MetalRenderer: instanced refl pos pipeline failed: ")
+							 + (rpvi.ok ? "" : rpvi.log)
+							 + (rpiErr ? rpiErr.localizedDescription.UTF8String : "")).c_str());
 				}
 				if (!m_reflPosPipeline)
 					HE_LOG_ERROR(RHI, "%s",
@@ -6653,6 +6746,16 @@ void MetalRenderer::EnsureShadowResources()
 		id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
 		if (pso) m_shadowPipeline = (void*)CFBridgingRetain(pso);
 		else     HE_LOG_ERROR(RHI, "%s", "MetalRenderer: shadow pipeline creation failed");
+
+		// Instanced twin (vertexShadowInstanced, same depth-only descriptor).
+		// Optional: without it every same-mesh run draws through the loop.
+		MTLRenderPipelineDescriptor* idesc = [[MTLRenderPipelineDescriptor alloc] init];
+		idesc.vertexFunction             = [lib newFunctionWithName:@"vertexShadowInstanced"];
+		idesc.fragmentFunction           = nil;
+		idesc.depthAttachmentPixelFormat = kDepthFormat;
+		id<MTLRenderPipelineState> ipso = [device newRenderPipelineStateWithDescriptor:idesc error:&error];
+		if (ipso) m_shadowInstancedPipeline = (void*)CFBridgingRetain(ipso);
+		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: instanced shadow pipeline creation failed");
 	}
 }
 
@@ -6721,32 +6824,77 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 			[enc setViewport:(MTLViewport){ 0.0, 0.0, (double)size, (double)size, 0.0, 1.0 }];
 
-			HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
-			for (uint32_t idx : m_sortedIndices)
+			// Same-mesh runs → one instanced draw each; a run of one stays on the
+			// plain pipeline. HE_MTL_INSTANCING=0 is the same A/B switch as the
+			// scene pass: it sends every run back through the per-caster loop.
+			RenderSorter::batchDepthCasters(m_renderWorld, m_sortedIndices, skipEntity,
+			                                m_shadowBatches);
+			const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
+			void* boundPipeline = m_shadowPipeline;
+			id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+			std::vector<glm::mat4> mvps;
+			for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
 			{
-				const RenderObject& obj = m_renderWorld.objects[idx];
-				if (!obj.castsShadow) continue; // billboards (precip/particles) cast no shadow
-				if (obj.entityId == skipEntity) continue; // the light's own mesh
-				UnlitUniforms u;
-				u.mvp = lightClip * obj.transform;
-
-				if (!shMeshValid || obj.meshAssetId != shMeshId)
-				{
-					shMesh      = ResolveMesh(obj.meshAssetId);
-					shMeshId    = obj.meshAssetId; shMeshValid = true;
-				}
-				const GpuMesh* drawMesh = shMesh ? shMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+				const GpuMesh* drawMesh = ResolveMesh(b.meshAssetId);
+				if (!drawMesh) drawMesh = ResolveMesh(HE::kDefaultCubeMeshId);
 				if (!drawMesh) continue;
 				id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
 				id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
 				NSUInteger    ic   = (NSUInteger)drawMesh->indexCount;
+				const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
 				[enc setVertexBuffer:vbuf offset:0 atIndex:0];
-				[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
-				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-				                indexCount:ic
-				                 indexType:MTLIndexTypeUInt32
-				               indexBuffer:ibuf
-				         indexBufferOffset:0];
+
+				if (b.count > 1 && canInstance && b.count <= k_maxInstances)
+				{
+					if (boundPipeline != m_shadowInstancedPipeline)
+					{
+						[enc setRenderPipelineState:
+							(__bridge id<MTLRenderPipelineState>)m_shadowInstancedPipeline];
+						boundPipeline = m_shadowInstancedPipeline;
+					}
+					mvps.clear();
+					mvps.reserve(b.count);
+					for (uint32_t k = 0; k < b.count; ++k) mvps.push_back(lightClip * xf[k]);
+					// Once per session: the headless A/B (HE_MTL_INSTANCING=0 vs on)
+					// only proves something if this path actually ran.
+					static bool loggedOnce = false;
+					if (!loggedOnce)
+					{
+						loggedOnce = true;
+						HE_LOG_INFO(RHI, "MetalRenderer: shadow pass instanced (first run: %u casters)",
+						            static_cast<unsigned>(b.count));
+					}
+					// Fresh buffer per batch, the scene pass's convention: the encoder
+					// retains it until the command buffer completes, nothing to sync.
+					id<MTLBuffer> instBuf = [dev newBufferWithBytes:mvps.data()
+						length:mvps.size() * sizeof(glm::mat4)
+						options:MTLResourceStorageModeShared];
+					[enc setVertexBuffer:instBuf offset:0 atIndex:5];
+					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                indexCount:ic
+					                 indexType:MTLIndexTypeUInt32
+					               indexBuffer:ibuf
+					         indexBufferOffset:0
+					             instanceCount:(NSUInteger)b.count];
+					continue;
+				}
+
+				if (boundPipeline != m_shadowPipeline)
+				{
+					[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_shadowPipeline];
+					boundPipeline = m_shadowPipeline;
+				}
+				for (uint32_t k = 0; k < b.count; ++k)
+				{
+					UnlitUniforms u;
+					u.mvp = lightClip * xf[k];
+					[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                indexCount:ic
+					                 indexType:MTLIndexTypeUInt32
+					               indexBuffer:ibuf
+					         indexBufferOffset:0];
+				}
 			}
 			[enc endEncoding];
 		};
@@ -7294,6 +7442,13 @@ void MetalRenderer::EnsureGIShadowPipelines()
 		if (gPso) m_giGBufPipeline = (void*)CFBridgingRetain(gPso);
 		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: GI G-buffer pipeline creation failed");
 
+		// Instanced twin (giGBufVertexInstanced, same descriptor otherwise).
+		// Optional: without it every same-mesh run draws through the loop.
+		gDesc.vertexFunction = [lib newFunctionWithName:@"giGBufVertexInstanced"];
+		id<MTLRenderPipelineState> giPso = [device newRenderPipelineStateWithDescriptor:gDesc error:&error];
+		if (giPso) m_giGBufInstancedPipeline = (void*)CFBridgingRetain(giPso);
+		else       HE_LOG_ERROR(RHI, "%s", "MetalRenderer: instanced GI G-buffer pipeline creation failed");
+
 		// Ray dispatch kernel — HARDWARE (intersection_query, MSL 2.4 library) or
 		// SOFTWARE (base compute traversal of the CPU BVH, kGISWMSL).
 		if (m_giHwRt)
@@ -7470,24 +7625,76 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		id<MTLRenderCommandEncoder> genc = [cmdBuf renderCommandEncoderWithDescriptor:gp];
 		[genc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_giGBufPipeline];
 		[genc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
-		HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
-		for (uint32_t idx : m_sortedIndices)
+		// Same-mesh runs → one instanced draw each ({mvp, model} per instance at
+		// buffer 5, the loop's own products); a run of one stays on the plain
+		// pipeline. DepthFilter::All: this pass has always drawn every visible
+		// object, billboards included. HE_MTL_INSTANCING=0 is the A/B switch.
+		RenderSorter::batchDepthRuns(m_renderWorld, m_sortedIndices,
+		                             RenderSorter::DepthFilter::All,
+		                             kNoOwnerEntity, m_prepassBatches);
+		const bool canInstance = m_giGBufInstancedPipeline && metalInstancingEnabled();
+		void* boundPipeline = m_giGBufPipeline;
+		id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+		std::vector<glm::mat4> xf;
+		for (const RenderSorter::DepthBatch& b : m_prepassBatches.batches)
 		{
-			const RenderObject& obj = m_renderWorld.objects[idx];
-			GIPosUniformsCPU u;
-			u.mvp   = viewProjRaster * obj.transform;
-			u.model = obj.transform;
-			if (!valid || obj.meshAssetId != lastId)
-			{ cMesh = ResolveMesh(obj.meshAssetId); lastId = obj.meshAssetId; valid = true; }
-			const GpuMesh* drawMesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			const GpuMesh* drawMesh = ResolveMesh(b.meshAssetId);
+			if (!drawMesh) drawMesh = ResolveMesh(HE::kDefaultCubeMeshId);
 			if (!drawMesh) continue;
 			id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
 			id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
 			NSUInteger    ic   = (NSUInteger)drawMesh->indexCount;
+			const glm::mat4* models = m_prepassBatches.transforms.data() + b.first;
 			[genc setVertexBuffer:vbuf offset:0 atIndex:0];
-			[genc setVertexBytes:&u length:sizeof(u) atIndex:1];
-			[genc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
-			                  indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
+
+			if (b.count > 1 && canInstance && b.count <= k_maxInstances)
+			{
+				if (boundPipeline != m_giGBufInstancedPipeline)
+				{
+					[genc setRenderPipelineState:
+						(__bridge id<MTLRenderPipelineState>)m_giGBufInstancedPipeline];
+					boundPipeline = m_giGBufInstancedPipeline;
+				}
+				xf.clear();
+				xf.reserve(b.count * 2);
+				for (uint32_t k = 0; k < b.count; ++k)
+				{
+					xf.push_back(viewProjRaster * models[k]); // mvp (with the clip fix)
+					xf.push_back(models[k]);                  // model
+				}
+				static bool loggedOnce = false; // once per session, like the shadow pass
+				if (!loggedOnce)
+				{
+					loggedOnce = true;
+					HE_LOG_INFO(RHI, "MetalRenderer: GI pre-pass instanced (first run: %u objects)",
+					            static_cast<unsigned>(b.count));
+				}
+				// Fresh buffer per batch, the scene pass's convention: the encoder
+				// retains it until the command buffer completes, nothing to sync.
+				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
+					length:xf.size() * sizeof(glm::mat4)
+					options:MTLResourceStorageModeShared];
+				[genc setVertexBuffer:instBuf offset:0 atIndex:5];
+				[genc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
+				                  indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0
+				              instanceCount:(NSUInteger)b.count];
+				continue;
+			}
+
+			if (boundPipeline != m_giGBufPipeline)
+			{
+				[genc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_giGBufPipeline];
+				boundPipeline = m_giGBufPipeline;
+			}
+			for (uint32_t k = 0; k < b.count; ++k)
+			{
+				GIPosUniformsCPU u;
+				u.mvp   = viewProjRaster * models[k];
+				u.model = models[k];
+				[genc setVertexBytes:&u length:sizeof(u) atIndex:1];
+				[genc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
+				                  indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
+			}
 		}
 		[genc endEncoding];
 
@@ -10565,29 +10772,96 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		pp.depthAttachment.clearDepth  = 1.0;
 		ftAttachStart((__bridge void*)pp, ssaoBase);
 		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pp];
-		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)
-			(mrt ? m_reflPosPipeline : m_ssaoPosPipeline)];
+		void* const plainPipeline = mrt ? m_reflPosPipeline : m_ssaoPosPipeline;
+		// The instanced twin of whichever pre-pass runs. Plain: {mvp, modelView}
+		// per instance — the loop's own CPU products, so the frame is bit-
+		// identical. MRT (library variant): the model alone per instance, the
+		// camera pair as the uniform block, products in the shader.
+		void* const instPipeline  = mrt ? m_reflPosInstancedPipeline : m_ssaoPosInstancedPipeline;
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)plainPipeline];
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
-		HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
-		for (uint32_t idx : m_sortedIndices)
+		// Same-mesh runs → one instanced draw each; a run of one stays on the
+		// plain pipeline. HE_MTL_INSTANCING=0 is the A/B switch, as everywhere.
+		RenderSorter::batchDepthRuns(m_renderWorld, m_sortedIndices,
+		                             RenderSorter::DepthFilter::AoContributors,
+		                             kNoOwnerEntity, m_prepassBatches);
+		const bool canInstance = instPipeline && metalInstancingEnabled();
+		void* boundPipeline = plainPipeline;
+		id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+		std::vector<glm::mat4> xf;
+		for (const RenderSorter::DepthBatch& b : m_prepassBatches.batches)
 		{
-			const RenderObject& obj = m_renderWorld.objects[idx];
-			if (!obj.contributesAO) continue; // precip/particles: skip the SSAO prepass
-			SSAOPosUniforms u;
-			u.mvp       = viewProj * obj.transform;
-			u.modelView = view * obj.transform;
-			u.model     = obj.transform;
-			if (!valid || obj.meshAssetId != lastId)
-			{ cMesh = ResolveMesh(obj.meshAssetId); lastId = obj.meshAssetId; valid = true; }
-			const GpuMesh* drawMesh = cMesh ? cMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+			const GpuMesh* drawMesh = ResolveMesh(b.meshAssetId);
+			if (!drawMesh) drawMesh = ResolveMesh(HE::kDefaultCubeMeshId);
 			if (!drawMesh) continue;
 			id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
 			id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
 			NSUInteger    ic   = (NSUInteger)drawMesh->indexCount;
+			const glm::mat4* models = m_prepassBatches.transforms.data() + b.first;
 			[enc setVertexBuffer:vbuf offset:0 atIndex:0];
-			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
-			[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
-			                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
+
+			if (b.count > 1 && canInstance && b.count <= k_maxInstances)
+			{
+				if (boundPipeline != instPipeline)
+				{
+					[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)instPipeline];
+					boundPipeline = instPipeline;
+					if (mrt)
+					{
+						HE::MaterialShaderLibrary::ReflPrepassInstUniforms cu;
+						std::memcpy(cu.viewProj, glm::value_ptr(viewProj), sizeof(cu.viewProj));
+						std::memcpy(cu.view,     glm::value_ptr(view),     sizeof(cu.view));
+						[enc setVertexBytes:&cu length:sizeof(cu) atIndex:1];
+					}
+				}
+				xf.clear();
+				if (mrt)
+				{
+					xf.assign(models, models + b.count);
+				}
+				else
+				{
+					xf.reserve(b.count * 2);
+					for (uint32_t k = 0; k < b.count; ++k)
+					{
+						xf.push_back(viewProj * models[k]); // mvp
+						xf.push_back(view * models[k]);     // modelView
+					}
+				}
+				static bool loggedOnce = false; // once per session, like the shadow pass
+				if (!loggedOnce)
+				{
+					loggedOnce = true;
+					HE_LOG_INFO(RHI, "MetalRenderer: SSAO pre-pass instanced (first run: %u objects, %s)",
+					            static_cast<unsigned>(b.count), mrt ? "MRT" : "plain");
+				}
+				// Fresh buffer per batch, the scene pass's convention: the encoder
+				// retains it until the command buffer completes, nothing to sync.
+				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
+					length:xf.size() * sizeof(glm::mat4)
+					options:MTLResourceStorageModeShared];
+				[enc setVertexBuffer:instBuf offset:0 atIndex:5];
+				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
+				                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0
+				             instanceCount:(NSUInteger)b.count];
+				continue;
+			}
+
+			if (boundPipeline != plainPipeline)
+			{
+				[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)plainPipeline];
+				boundPipeline = plainPipeline;
+			}
+			for (uint32_t k = 0; k < b.count; ++k)
+			{
+				SSAOPosUniforms u;
+				u.mvp       = viewProj * models[k];
+				u.modelView = view * models[k];
+				u.model     = models[k];
+				[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
+				                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
+			}
 		}
 		[enc endEncoding];
 		}

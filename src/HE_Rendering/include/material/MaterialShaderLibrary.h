@@ -251,6 +251,21 @@ public:
         float model[16]     = {};
     };
 
+    // Instanced twin of reflPrepassVertex for a GeometryPass batch: the model
+    // matrix comes per instance (Metal: SSBO of mat4 at binding 2, pinned to
+    // vertex buffer 5, indexed by gl_InstanceIndex; GL: four vec4 attributes at
+    // locations 4–7, the scene pass's divisor-1 binding), and the uniform block
+    // (binding 1) shrinks to the batch-constant camera pair below. Same
+    // varyings, so reflPrepassFragment is shared with the plain variant.
+    const Compiled& reflPrepassVertexInstanced(Backend backend);
+
+    // std140 layout of the instanced variant's uniform block (binding 1).
+    struct ReflPrepassInstUniforms
+    {
+        float viewProj[16] = {};
+        float view[16]     = {};
+    };
+
     // std140 layout of the blur shader's HeSSRBlur UBO (binding 23).
     struct SSRBlurUniforms
     {
@@ -375,6 +390,6 @@ private:
     // Own map, not a fifth slot in m_ssrCache: that key space is backend*4 and
     // full, and a collision there hands a caller someone else's shader while
     // still reporting ok.
-    std::unordered_map<int, Compiled>      m_reflPrepassCache; // key = (int)backend*2 + (0 vertex / 1 fragment)
+    std::unordered_map<int, Compiled>      m_reflPrepassCache; // key = (int)backend*2 + (0 vertex / 1 fragment); 0x100 + backend = instanced vertex
 };
 } // namespace HE

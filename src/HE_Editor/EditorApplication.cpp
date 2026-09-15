@@ -4160,9 +4160,18 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetOverlayCallback(nullptr);
 	r->SetBloomSettings(IRenderer::BloomSettings{
 		m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity});
-	r->SetSSAOSettings(IRenderer::SSAOSettings{
-		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
-		m_editorConfig.SSAOMethod});
+	{
+		// HE_DUMP_SSAO: override the persisted SSAO toggle for this capture only
+		// (the GI / SSR twins below do the same), so an SSAO pre-pass A/B does
+		// not depend on the Preferences state of whoever ran the editor last.
+		const bool dumpSSAO = [&]{
+			const char* v = std::getenv("HE_DUMP_SSAO");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSAOEnabled;
+		}();
+		r->SetSSAOSettings(IRenderer::SSAOSettings{
+			dumpSSAO, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
+			m_editorConfig.SSAOMethod});
+	}
 	r->SetShadowSettings(projectShadowSettings());
 	{
 		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
@@ -4940,6 +4949,33 @@ void EditorApplication::dumpFrameHeadless()
 		makeCube("SrgbTestSrgb",   true,   2.5f);
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_SRGBTEST linear/sRGB cube pair added");
+	}
+
+	// ── Shadow-instancing witness (HE_DUMP_SHADOWINSTTEST=1): a flat floor slab
+	// and a row of cubes hovering above it, ALL the default cube mesh with no
+	// material — so the scene pass AND every shadow cascade see one same-mesh
+	// run and draw it instanced. The row's shadows on the floor are the pixels
+	// that prove the instanced depth path put the casters where the per-object
+	// loop did: dump once with HE_MTL_INSTANCING=0 and once with it on, and the
+	// two frames must match. Frame it with PITCH=-18 TOD=0.35 CAMY=5 (camera
+	// looking down -Z onto the floor, mid-morning sun for long shadows).
+	if (const char* st = std::getenv("HE_DUMP_SHADOWINSTTEST"); st && *st && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto makeCube = [&](const char* name, glm::vec3 pos, glm::vec3 scale) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.scale    = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+		};
+		makeCube("ShadowInstFloor", glm::vec3(0.0f, -0.1f, -12.0f), glm::vec3(30.0f, 0.2f, 30.0f));
+		for (int i = 0; i < 7; ++i)
+			makeCube("ShadowInstCube", glm::vec3(-9.0f + 3.0f * float(i), 2.0f, -12.0f),
+			         glm::vec3(1.0f, 1.0f + 0.4f * float(i % 3), 1.0f));
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
 	}
 
 	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a

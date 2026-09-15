@@ -3147,6 +3147,25 @@ static const char* kDepthFS = R"GLSL(
 void main() {}
 )GLSL";
 
+// Instanced twin of kDepthVS for a run of same-mesh casters: the per-instance
+// model matrix comes from the same attrib locs 4–7 / m_instanceVBO binding every
+// mesh VAO already carries for kInstancedVS, so the shadow pass reuses the scene
+// pass's instance buffer as is. uDepthVP is the light's view-proj alone.
+static const char* kDepthInstancedVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 4) in vec4 aInstCol0;
+layout(location = 5) in vec4 aInstCol1;
+layout(location = 6) in vec4 aInstCol2;
+layout(location = 7) in vec4 aInstCol3;
+uniform mat4 uDepthVP;
+void main()
+{
+    mat4 model  = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    gl_Position = uDepthVP * model * vec4(aPos, 1.0);
+}
+)GLSL";
+
 // ─── HDR tonemap (PostProcessPass) ──────────────────────────────────────────
 // Fullscreen triangle generated from gl_VertexID — no vertex buffer needed.
 static const char* kTonemapVS = R"GLSL(
@@ -3500,6 +3519,29 @@ void main()
 	vWorldPos   = (uModel * vec4(aPos, 1.0)).xyz;
 	vNormal     = mat3(uModel) * aNormal;
 	gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)GLSL";
+
+// Instanced twin of kGiGBufVS for a GeometryPass batch: model from attrib locs
+// 4–7 / m_instanceVBO (the kInstancedVS binding every mesh VAO carries), the
+// camera view-proj as the one uniform. Same fragment stage, same outputs.
+static const char* kGiGBufInstancedVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 4) in vec4 aInstCol0;
+layout(location = 5) in vec4 aInstCol1;
+layout(location = 6) in vec4 aInstCol2;
+layout(location = 7) in vec4 aInstCol3;
+uniform mat4 uViewProj;
+out vec3 vWorldPos;
+out vec3 vNormal;
+void main()
+{
+	mat4 model  = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+	vWorldPos   = (model * vec4(aPos, 1.0)).xyz;
+	vNormal     = mat3(model) * aNormal;
+	gl_Position = uViewProj * vec4(vWorldPos, 1.0);
 }
 )GLSL";
 
@@ -4429,6 +4471,30 @@ void main()
 {
 	vViewPos    = (uModelView * vec4(aPos, 1.0)).xyz;
 	gl_Position = uMVP * vec4(aPos, 1.0);
+}
+)GLSL";
+
+// Instanced twin of kSSAOPosVS for a GeometryPass batch (dc.instanceTransforms):
+// the per-instance model matrix comes from attrib locs 4–7 / m_instanceVBO, the
+// binding every mesh VAO already carries for kInstancedVS, so the pre-pass
+// reuses the scene pass's instance buffer as is. View and view-proj are the
+// batch-constant uniforms; the two products happen per vertex.
+static const char* kSSAOPosInstancedVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 4) in vec4 aInstCol0;
+layout(location = 5) in vec4 aInstCol1;
+layout(location = 6) in vec4 aInstCol2;
+layout(location = 7) in vec4 aInstCol3;
+uniform mat4 uViewProj;
+uniform mat4 uView;
+out vec3 vViewPos;
+void main()
+{
+	mat4 model  = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+	vec4 world  = model * vec4(aPos, 1.0);
+	vViewPos    = (uView * world).xyz;
+	gl_Position = uViewProj * world;
 }
 )GLSL";
 
@@ -5645,6 +5711,34 @@ void OpenGLRenderer::CreateShadowResources()
 	glDeleteShader(fs);
 	m_uDepthMVP = glGetUniformLocation(m_depthProgram, "uDepthMVP");
 
+	// Instanced depth-only program for same-mesh caster runs (see
+	// RenderSorter::batchDepthCasters). Optional: a link failure only sends
+	// every run back through the per-caster loop above.
+	{
+		GLuint ivs = CompileStage(GL_VERTEX_SHADER,   kDepthInstancedVS);
+		GLuint ifs = CompileStage(GL_FRAGMENT_SHADER, kDepthFS);
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, ivs);
+		glAttachShader(prog, ifs);
+		glLinkProgram(prog);
+		glDeleteShader(ivs);
+		glDeleteShader(ifs);
+		GLint ok = 0;
+		glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (ok)
+		{
+			m_depthInstancedProgram = prog;
+			m_uDepthInstVP = glGetUniformLocation(prog, "uDepthVP");
+		}
+		else
+		{
+			char log[1024] = {};
+			glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: instanced depth program link failed: %s", log);
+			glDeleteProgram(prog);
+		}
+	}
+
 	// Cascaded shadow map: a Depth24 texture ARRAY (one layer per cascade), sampled
 	// by the scene shader. Each cascade renders into its own layer (attached per
 	// cascade in the shadow pass via glFramebufferTextureLayer). Border color 1.0
@@ -6253,6 +6347,30 @@ void OpenGLRenderer::CreateSSAOPipeline()
 		m_uPosMVP       = glGetUniformLocation(m_ssaoPosProgram, "uMVP");
 		m_uPosModelView = glGetUniformLocation(m_ssaoPosProgram, "uModelView");
 	}
+	// Instanced pre-pass twin for GeometryPass batches. Optional: a link failure
+	// only sends every batch back through the per-instance loop.
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kSSAOPosInstancedVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kSSAOPosFS);
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs); glDeleteShader(fs);
+		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (ok)
+		{
+			m_ssaoPosInstancedProgram = prog;
+			m_uPosInstViewProj = glGetUniformLocation(prog, "uViewProj");
+			m_uPosInstView     = glGetUniformLocation(prog, "uView");
+		}
+		else
+		{
+			GLchar log[512]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: instanced SSAO pre-pass link failed: %s", log);
+			glDeleteProgram(prog);
+		}
+	}
 	// Deferred P5 pre-pass variant: view-pos from the G-buffer depth (fullscreen).
 	{
 		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
@@ -6679,6 +6797,32 @@ void OpenGLRenderer::CreateGIPipelines()
 		if (m_giReflMixProgram)      { glDeleteProgram(m_giReflMixProgram);      m_giReflMixProgram = 0; }
 		m_giSupported = false;
 	}
+
+	// Instanced G-buffer pre-pass twin for GeometryPass batches. Built OUTSIDE
+	// the try above on purpose: it is optional, and a link failure here must
+	// not take GI down with it — every batch then loops through m_giGBufProgram.
+	if (m_giGBufProgram && !m_giGBufInstancedProgram)
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kGiGBufInstancedVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kGiGBufFS);
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs); glDeleteShader(fs);
+		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (ok)
+		{
+			m_giGBufInstancedProgram = prog;
+			m_uGiGBufInstViewProj = glGetUniformLocation(prog, "uViewProj");
+		}
+		else
+		{
+			GLchar log[512]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: instanced GI pre-pass link failed: %s", log);
+			glDeleteProgram(prog);
+		}
+	}
 }
 
 void OpenGLRenderer::EnsureGIShadowTargets(int width, int height)
@@ -6915,7 +7059,12 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 	const GLint uMVP        = glGetUniformLocation(m_giGBufProgram, "uMVP");
 	const GLint uModel      = glGetUniformLocation(m_giGBufProgram, "uModel");
 	const GLint uRoughMetal = glGetUniformLocation(m_giGBufProgram, "uRoughMetal");
+	// The instanced twin shares kGiGBufFS, so it has its own uRoughMetal lane.
+	const GLint uInstRoughMetal = m_giGBufInstancedProgram
+		? glGetUniformLocation(m_giGBufInstancedProgram, "uRoughMetal") : -1;
+	const bool  canInstance = m_giGBufInstancedProgram && m_instanceVBO;
 	{
+		unsigned int boundProgram = m_giGBufProgram;
 		HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
@@ -6930,9 +7079,43 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 			glm::vec3 dcBase = dc.baseColor;
 			float     dcMetal = dc.metallic, dcRough = dc.roughness, dcOpacity = dc.opacity;
 			ResolveMaterialParams(dc.materialAssetId, dcBase, dcMetal, dcRough, dcOpacity);
-			if (uRoughMetal >= 0) glUniform2f(uRoughMetal, dcRough, dcMetal);
 			glBindVertexArray(mesh->vao);
 			const GlIndexRange range = DrawIndexRange(dc, mesh->indexCount); // section or whole
+
+			// A GeometryPass batch (instanceTransforms non-empty ⇔ run > 1) is one
+			// instanced draw: the transforms go through the scene pass's scratch
+			// VBO, which every mesh VAO reads at attribs 4–7 with divisor 1.
+			if (!dc.instanceTransforms.empty() && canInstance)
+			{
+				glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+				glBufferData(GL_ARRAY_BUFFER,
+				             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
+				             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+				glBindBuffer(GL_ARRAY_BUFFER, 0);
+				if (boundProgram != m_giGBufInstancedProgram)
+				{
+					glUseProgram(m_giGBufInstancedProgram);
+					boundProgram = m_giGBufInstancedProgram;
+					glUniformMatrix4fv(m_uGiGBufInstViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
+				}
+				if (uInstRoughMetal >= 0) glUniform2f(uInstRoughMetal, dcRough, dcMetal);
+				glDrawElementsInstanced(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset,
+				                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+				static bool loggedOnce = false; // once per session, like the shadow pass
+				if (!loggedOnce)
+				{
+					loggedOnce = true;
+					HE_LOG_INFO(RHI, "OpenGLRenderer: GI pre-pass instanced (first batch: %u instances)",
+					            static_cast<unsigned>(dc.instanceTransforms.size()));
+				}
+				continue;
+			}
+			if (boundProgram != m_giGBufProgram)
+			{
+				glUseProgram(m_giGBufProgram);
+				boundProgram = m_giGBufProgram;
+			}
+			if (uRoughMetal >= 0) glUniform2f(uRoughMetal, dcRough, dcMetal);
 			auto drawOne = [&](const glm::mat4& t)
 			{
 				glUniformMatrix4fv(uMVP,   1, GL_FALSE, glm::value_ptr(viewProj * t));
@@ -7358,6 +7541,50 @@ bool OpenGLRenderer::EnsureReflPrepassProgram()
 		static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::ReflPrepassUniforms)),
 		nullptr, GL_DYNAMIC_DRAW);
 	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+	// Instanced twin (library variant: model from attribs 4–7, camera pair in
+	// its own block). Optional — without it every batch loops through the plain
+	// program above, so a failure here is logged, not returned.
+	{
+		const auto& iv = m_matShaderLib.reflPrepassVertexInstanced(Backend::GLSL410);
+		GLuint ivs = iv.ok ? CompileStage(GL_VERTEX_SHADER,   iv.source.c_str()) : 0;
+		GLuint ifs = iv.ok ? CompileStage(GL_FRAGMENT_SHADER, f.source.c_str())  : 0;
+		GLuint iprog = 0;
+		if (ivs && ifs)
+		{
+			iprog = glCreateProgram();
+			glAttachShader(iprog, ivs);
+			glAttachShader(iprog, ifs);
+			glLinkProgram(iprog);
+			GLint linked = 0; glGetProgramiv(iprog, GL_LINK_STATUS, &linked);
+			if (!linked)
+			{
+				char log[2048]; glGetProgramInfoLog(iprog, sizeof(log), nullptr, log);
+				HE_LOG_ERROR(RHI, "%s",
+					(std::string("OpenGLRenderer: instanced reflection pre-pass link failed: ") + log).c_str());
+				glDeleteProgram(iprog);
+				iprog = 0;
+			}
+		}
+		else
+			HE_LOG_ERROR(RHI, "%s",
+				(std::string("OpenGLRenderer: instanced reflection pre-pass shader compile failed\n")
+				 + iv.log).c_str());
+		if (ivs) glDeleteShader(ivs);
+		if (ifs) glDeleteShader(ifs);
+		if (iprog)
+		{
+			m_reflPrepassInstProgram = iprog;
+			if (const GLuint idx = glGetUniformBlockIndex(iprog, "UI"); idx != GL_INVALID_INDEX)
+				glUniformBlockBinding(iprog, idx, 5);
+			glGenBuffers(1, &m_reflPrepassInstUBO);
+			glBindBuffer(GL_UNIFORM_BUFFER, m_reflPrepassInstUBO);
+			glBufferData(GL_UNIFORM_BUFFER,
+				static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::ReflPrepassInstUniforms)),
+				nullptr, GL_DYNAMIC_DRAW);
+			glBindBuffer(GL_UNIFORM_BUFFER, 0);
+		}
+	}
 	return true;
 #endif
 }
@@ -7563,6 +7790,14 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 			glUniformMatrix4fv(m_uPosModelView, 1, GL_FALSE, glm::value_ptr(view * model));
 		}
 	};
+	// The instanced twin of whichever program is active: the hand-written AO
+	// program has kSSAOPosInstancedVS, the shared reflection program has the
+	// library's instanced vertex variant. 0 = every batch loops (link failed, or
+	// the variant is not built).
+	const unsigned int plainProgram = reflMrt ? m_reflPrepassProgram : m_ssaoPosProgram;
+	const unsigned int instProgram  = m_instanceVBO
+		? (reflMrt ? m_reflPrepassInstProgram : m_ssaoPosInstancedProgram) : 0u;
+	unsigned int boundProgram = plainProgram;
 	HE::UUID lastId{}; const GpuMesh* cMesh = nullptr; bool valid = false;
 	for (const DrawCall& dc : cmds.drawCalls())
 	{
@@ -7577,8 +7812,57 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 		glBindVertexArray(mesh->vao);
 		const GlIndexRange range = DrawIndexRange(dc, mesh->indexCount); // section or whole
 
-		// Instanced batches: draw each instance separately with its own transform.
-		// The SSAO pre-pass uses per-draw uniforms, not the instance VBO.
+		// A GeometryPass batch (instanceTransforms non-empty ⇔ run > 1) is one
+		// instanced draw over the scene pass's scratch VBO — every mesh VAO
+		// reads it at attribs 4–7 with divisor 1. The batch-constant camera
+		// matrices are pushed once, on the first switch to the instanced program.
+		if (!dc.instanceTransforms.empty() && instProgram)
+		{
+			glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+			glBufferData(GL_ARRAY_BUFFER,
+			             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
+			             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+			glBindBuffer(GL_ARRAY_BUFFER, 0);
+			if (boundProgram != instProgram)
+			{
+				glUseProgram(instProgram);
+				boundProgram = instProgram;
+				if (reflMrt)
+				{
+					HE::MaterialShaderLibrary::ReflPrepassInstUniforms u;
+					std::memcpy(u.viewProj, glm::value_ptr(viewProj), 16 * sizeof(float));
+					std::memcpy(u.view,     glm::value_ptr(view),     16 * sizeof(float));
+					glBindBuffer(GL_UNIFORM_BUFFER, m_reflPrepassInstUBO);
+					glBufferSubData(GL_UNIFORM_BUFFER, 0, static_cast<GLsizeiptr>(sizeof(u)), &u);
+					glBindBuffer(GL_UNIFORM_BUFFER, 0);
+					glBindBufferBase(GL_UNIFORM_BUFFER, 5, m_reflPrepassInstUBO);
+				}
+				else
+				{
+					glUniformMatrix4fv(m_uPosInstViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
+					glUniformMatrix4fv(m_uPosInstView,     1, GL_FALSE, glm::value_ptr(view));
+				}
+			}
+			glDrawElementsInstanced(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset,
+			                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+			static bool loggedOnce = false; // once per session, like the shadow pass
+			if (!loggedOnce)
+			{
+				loggedOnce = true;
+				HE_LOG_INFO(RHI, "OpenGLRenderer: SSAO pre-pass instanced (first batch: %u instances, %s)",
+				            static_cast<unsigned>(dc.instanceTransforms.size()),
+				            reflMrt ? "MRT" : "plain");
+			}
+			continue;
+		}
+		if (boundProgram != plainProgram)
+		{
+			glUseProgram(plainProgram);
+			boundProgram = plainProgram;
+			// The two reflection programs share binding 5; hand it back to the
+			// per-draw block before the loop writes into it again.
+			if (reflMrt) glBindBufferBase(GL_UNIFORM_BUFFER, 5, m_reflPrepassUBO);
+		}
 		if (!dc.instanceTransforms.empty())
 		{
 			for (const glm::mat4& t : dc.instanceTransforms)
@@ -10356,7 +10640,9 @@ void OpenGLRenderer::Shutdown()
 	// gets a fresh build attempt instead of a permanently disabled feature).
 	if (m_reflPrepassProgram) { glDeleteProgram(m_reflPrepassProgram); m_reflPrepassProgram = 0; }
 	if (m_reflPrepassUBO)     { glDeleteBuffers(1, &m_reflPrepassUBO); m_reflPrepassUBO = 0; }
-	if (m_ssrTraceProgram)    { glDeleteProgram(m_ssrTraceProgram);    m_ssrTraceProgram = 0; }
+	if (m_reflPrepassInstProgram) { glDeleteProgram(m_reflPrepassInstProgram); m_reflPrepassInstProgram = 0; }
+	if (m_reflPrepassInstUBO)     { glDeleteBuffers(1, &m_reflPrepassInstUBO); m_reflPrepassInstUBO = 0; }
+	if (m_ssrTraceProgram)   { glDeleteProgram(m_ssrTraceProgram);    m_ssrTraceProgram = 0; }
 	if (m_ssrBlurProgram)     { glDeleteProgram(m_ssrBlurProgram);     m_ssrBlurProgram = 0; }
 	if (m_ssrTraceUBO)        { glDeleteBuffers(1, &m_ssrTraceUBO);    m_ssrTraceUBO = 0; }
 	if (m_ssrBlurUBO)         { glDeleteBuffers(1, &m_ssrBlurUBO);     m_ssrBlurUBO = 0; }
@@ -10378,6 +10664,7 @@ void OpenGLRenderer::Shutdown()
 	DestroyGIShadowTargets();
 	DestroyGIProbeAtlas();
 	if (m_giGBufProgram)     { glDeleteProgram(m_giGBufProgram);     m_giGBufProgram = 0; }
+	if (m_giGBufInstancedProgram) { glDeleteProgram(m_giGBufInstancedProgram); m_giGBufInstancedProgram = 0; }
 	if (m_giTemporalProgram) { glDeleteProgram(m_giTemporalProgram); m_giTemporalProgram = 0; }
 	if (m_giBlurProgram)     { glDeleteProgram(m_giBlurProgram);     m_giBlurProgram = 0; }
 	if (m_giShadowCSProgram) { glDeleteProgram(m_giShadowCSProgram); m_giShadowCSProgram = 0; }
@@ -10421,6 +10708,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_worldPreviewFBO)   { glDeleteFramebuffers(1, &m_worldPreviewFBO);    m_worldPreviewFBO = 0; }
 	if (m_worldPreviewLdrFBO){ glDeleteFramebuffers(1, &m_worldPreviewLdrFBO); m_worldPreviewLdrFBO = 0; }
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
+	if (m_depthInstancedProgram) { glDeleteProgram(m_depthInstancedProgram); m_depthInstancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
 	for (auto& [k, prog] : m_particlePrograms) if (prog) glDeleteProgram(prog);
 	m_particlePrograms.clear();
@@ -10448,6 +10736,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_whiteTex)       { glDeleteTextures(1, &m_whiteTex);        m_whiteTex = 0; }
 	if (m_blackTex)       { glDeleteTextures(1, &m_blackTex);        m_blackTex = 0; }
 	if (m_ssaoPosProgram)  { glDeleteProgram(m_ssaoPosProgram);  m_ssaoPosProgram = 0; }
+	if (m_ssaoPosInstancedProgram) { glDeleteProgram(m_ssaoPosInstancedProgram); m_ssaoPosInstancedProgram = 0; }
 	if (m_ssaoProgram)     { glDeleteProgram(m_ssaoProgram);     m_ssaoProgram = 0; }
 	if (m_ssaoBlurProgram) { glDeleteProgram(m_ssaoBlurProgram); m_ssaoBlurProgram = 0; }
 	if (m_debugLineProgram) { glDeleteProgram(m_debugLineProgram); m_debugLineProgram = 0; }
@@ -10958,25 +11247,59 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glClear(GL_DEPTH_BUFFER_BIT);
 				m_culler.cull(m_renderWorld, vp, m_shadowVisible);
 				m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
-
-				HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
-				for (uint32_t idx : m_shadowSorted)
+				// Same-mesh runs → one instanced draw each. A run of one keeps the
+				// plain depth program (no instance upload for a single caster).
+				RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, skipEntity,
+				                                m_shadowBatches);
+				const bool canInstance = m_depthInstancedProgram && m_instanceVBO;
+				unsigned int boundProgram = m_depthProgram; // glUseProgram'd by the caller
+				for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
 				{
-					const RenderObject& obj = m_renderWorld.objects[idx];
-					if (!obj.castsShadow) continue; // billboards (precip/particles) cast none
-					if (obj.entityId == skipEntity) continue; // the light's own mesh
-					glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE,
-					                   glm::value_ptr(vp * obj.transform));
-					if (!shMeshValid || obj.meshAssetId != shMeshId)
-					{
-						shMesh      = ResolveMesh(obj.meshAssetId);
-						shMeshId    = obj.meshAssetId; shMeshValid = true;
-					}
-					const GpuMesh* mesh = shMesh ? shMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+					const GpuMesh* mesh = ResolveMesh(b.meshAssetId);
+					if (!mesh) mesh = ResolveMesh(HE::kDefaultCubeMeshId);
 					if (!mesh) continue;
+					const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
 					glBindVertexArray(mesh->vao);
-					glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+					if (b.count > 1 && canInstance)
+					{
+						// Scene-pass convention: orphan the scratch VBO per batch.
+						// Every mesh VAO reads attribs 4–7 from it with divisor 1.
+						glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+						glBufferData(GL_ARRAY_BUFFER,
+						             static_cast<GLsizeiptr>(b.count * sizeof(glm::mat4)),
+						             xf, GL_STREAM_DRAW);
+						glBindBuffer(GL_ARRAY_BUFFER, 0);
+						if (boundProgram != m_depthInstancedProgram)
+						{
+							glUseProgram(m_depthInstancedProgram);
+							boundProgram = m_depthInstancedProgram;
+							glUniformMatrix4fv(m_uDepthInstVP, 1, GL_FALSE, glm::value_ptr(vp));
+						}
+						glDrawElementsInstanced(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT,
+						                        nullptr, static_cast<GLsizei>(b.count));
+						static bool loggedOnce = false; // once per session, like the Metal twin
+						if (!loggedOnce)
+						{
+							loggedOnce = true;
+							HE_LOG_INFO(RHI, "OpenGLRenderer: shadow pass instanced (first run: %u casters)",
+							            static_cast<unsigned>(b.count));
+						}
+						continue;
+					}
+					if (boundProgram != m_depthProgram)
+					{
+						glUseProgram(m_depthProgram);
+						boundProgram = m_depthProgram;
+					}
+					for (uint32_t k = 0; k < b.count; ++k)
+					{
+						glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE, glm::value_ptr(vp * xf[k]));
+						glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+					}
 				}
+				// Leave the plain depth program bound: the next layer's lambda
+				// entry assumes it, like the caller's glUseProgram above.
+				if (boundProgram != m_depthProgram) glUseProgram(m_depthProgram);
 			};
 
 			if (shadows)

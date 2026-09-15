@@ -262,6 +262,9 @@ private:
 	// are consumed by heLitP/fragmentMain via the heSSR/heGIRefl samplers
 	// (Metal slots 9/10) instead of a dedicated composite pass.
 	void* m_reflPosPipeline = nullptr; // id<MTLRenderPipelineState> MRT prepass
+	// Instanced twin (library reflPrepassVertexInstanced: model array at buffer
+	// 5, camera pair at buffer 1). Optional — null sends every run through the loop.
+	void* m_reflPosInstancedPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_reflNormTex  = nullptr;    // id<MTLTexture> RGBA16F: oct normal, rough 0
 	void* m_reflDepthTex = nullptr;    // id<MTLTexture> R32F: NDC depth (gbufferMain convention)
 	void* m_ssrColorHist = nullptr;    // id<MTLTexture> full-res RGBA16F, last frame's HDR
@@ -548,6 +551,10 @@ private:
 	// ── Shadow map (cascaded; directional light) ────────────────────────────
 	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float 2D ARRAY (one layer/cascade)
 	void* m_shadowPipeline = nullptr;  // id<MTLRenderPipelineState>, depth-only
+	// Instanced twin (vertexShadowInstanced: one lightVP*model per instance at
+	// buffer 5). Optional — null sends every same-mesh run through the loop.
+	void* m_shadowInstancedPipeline = nullptr; // id<MTLRenderPipelineState>
+	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh caster runs per depth layer
 	int   m_shadowSize     = HE::kShadowMapResolution;
 	// The project's directional-shadow settings (SetShadowSettings). Distance /
 	// count / lambda go to m_extractor as they arrive; a resolution change
@@ -905,6 +912,10 @@ private:
 	// darken the image-based ambient in crevices. Encoded before the HDR scene
 	// pass (it owns its own render encoders); skipped entirely when disabled.
 	void* m_ssaoPosPipeline  = nullptr; // id<MTLRenderPipelineState> (writes view pos)
+	// Instanced twin (ssaoPosVertexInstanced: {mvp, modelView} per instance at
+	// buffer 5). Optional — null sends every same-mesh run through the loop.
+	void* m_ssaoPosInstancedPipeline = nullptr; // id<MTLRenderPipelineState>
+	RenderSorter::DepthBatchList m_prepassBatches; // same-mesh runs of the SSAO / GI pre-passes
 	void* m_ssaoDepthPosPipeline = nullptr; // deferred P5: view pos from G-buffer depth (fullscreen)
 	void* m_ssaoPipeline     = nullptr; // fullscreen occlusion estimate
 	void* m_ssaoBlurPipeline = nullptr; // fullscreen box blur
@@ -1049,6 +1060,7 @@ private:
 	// pattern), then a small spatial blur. Result sampled by fragmentMain exactly
 	// like aoTex (screen-space UV, free bilinear upsample from half-res).
 	void* m_giGBufPipeline        = nullptr; // id<MTLRenderPipelineState> (MRT: world pos + normal)
+	void* m_giGBufInstancedPipeline = nullptr; // instanced twin (giGBufVertexInstanced); optional
 	void* m_giShadowRayPipeline   = nullptr; // id<MTLComputePipelineState>
 	void* m_giShadowTemporalPipeline = nullptr; // id<MTLRenderPipelineState>
 	void* m_giShadowBlurPipeline  = nullptr; // id<MTLRenderPipelineState>
