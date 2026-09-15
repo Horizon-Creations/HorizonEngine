@@ -5193,12 +5193,16 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 
 	// Deferred-path debug/headless knobs (mirrors the Metal backend):
 	// HE_RENDER_PATH=1/deferred forces the path without touching config,
-	// HE_DUMP_GBUFFER=1..4 makes the resolve output a raw G-buffer view.
+	// HE_DUMP_GBUFFER=1..4 makes the resolve output a raw G-buffer view — it
+	// seeds the view mode (the editor pushes its own every frame, the packaged
+	// game never does).
 	if (const char* rp = std::getenv("HE_RENDER_PATH"); rp && *rp)
 		m_renderPath = (std::string(rp) == "1" || std::string(rp) == "deferred")
 			? HE::RenderPath::Deferred : HE::RenderPath::Forward;
 	if (const char* dv = std::getenv("HE_DUMP_GBUFFER"); dv && *dv)
-		m_gbufferDebugView = std::clamp(std::atoi(dv), 0, 4);
+		if (const int n = std::clamp(std::atoi(dv), 0, 4); n > 0)
+			m_viewMode = static_cast<HE::ViewMode>(
+				static_cast<int>(HE::ViewMode::GBufferBaseColor) + n - 1);
 
 	glEnable(GL_DEPTH_TEST);
 	CreateUnlitPipeline();
@@ -13049,13 +13053,14 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
 
 				// HeResolve: world-pos reconstruction (GL: ndc.y sign +1, depth
-				// [0,1] → ndc z = d*2-1) + the HE_DUMP_GBUFFER debug view.
+				// [0,1] → ndc z = d*2-1) + the G-buffer view (SetViewMode /
+				// HE_DUMP_GBUFFER).
 				HE::MaterialShaderLibrary::ResolveUniforms ru;
 				std::memcpy(ru.invViewProj, glm::value_ptr(invViewProj), 16 * sizeof(float));
 				ru.depthParams[0] = 1.0f;
 				ru.depthParams[1] = 2.0f;
 				ru.depthParams[2] = -1.0f;
-				ru.depthParams[3] = static_cast<float>(m_gbufferDebugView);
+				ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_viewMode));
 				glBindBuffer(GL_UNIFORM_BUFFER, m_resolveUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(ru), &ru);
 				glBindBuffer(GL_UNIFORM_BUFFER, 0);

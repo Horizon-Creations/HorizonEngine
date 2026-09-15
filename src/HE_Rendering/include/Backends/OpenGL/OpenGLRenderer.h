@@ -728,7 +728,6 @@ private:
 	unsigned int m_resolveUBO      = 0;         // HeResolve block (binding 3)
 	unsigned int m_resolveLightUBO = 0;         // resolve-only HeLighting fill (incl. CSM matrices)
 	bool         m_deferredPipelinesTried = false;
-	int          m_gbufferDebugView       = 0;  // HE_DUMP_GBUFFER (1..4)
 	// Built-in G-buffer program uniform locations (same names as the unlit set).
 	int m_uGBMVP = -1, m_uGBModel = -1, m_uGBColor = -1, m_uGBMetallic = -1,
 	    m_uGBRoughness = -1, m_uGBHasTexture = -1, m_uGBTexture = -1, m_uGBSpecAA = -1;

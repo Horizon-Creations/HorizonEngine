@@ -38,6 +38,7 @@ struct AppContext;
 
 #include <imgui.h>     // ImGuizmo.h uses ImVec2/ImU32/ImDrawList without declaring them
 #include <ImGuizmo.h>
+#include "Renderer/IRenderer.h"   // HE::ViewMode
 
 namespace ViewportToolbar
 {
@@ -47,6 +48,12 @@ struct State
 {
 	ImGuizmo::OPERATION op   = ImGuizmo::TRANSLATE;  // Move / Rotate / Scale (W/E/R)
 	ImGuizmo::MODE      mode = ImGuizmo::LOCAL;      // gizmo axes: object or world
+
+	// How the scene is drawn (Lit / Unlit / Wireframe / a G-buffer view). The
+	// panel pushes it to the renderer every frame (IRenderer::SetViewMode);
+	// per session, not persisted — an editor that came up in wireframe would
+	// read as broken, and Lit is the one mode everyone wants first.
+	HE::ViewMode viewMode = HE::ViewMode::Lit;
 
 	// ImGuizmo's outer screen-space rotation ring (rotate about the view axis).
 	// Off by default — its viewport-relative behaviour is confusing.

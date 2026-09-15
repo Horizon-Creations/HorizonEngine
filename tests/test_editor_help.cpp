@@ -211,6 +211,11 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Viewport View",    "Top" },
 		{ "Viewport View",    "Left" },
 		{ "Viewport View",    "Orthographic" },
+		// Same for the view-mode picker: its labels are HE::viewModeName().
+		{ "Viewport View Mode", "Lit" },
+		{ "Viewport View Mode", "Wireframe" },
+		{ "Viewport View Mode", "Rough / Spec / Metal" },
+		{ "Viewport View Mode", "Emissive" },
 		{ "Tutorial",        "Start over" },
 		{ "Collaboration",   "Ask to edit" },
 		{ "Source Root",     "C++ Class" },

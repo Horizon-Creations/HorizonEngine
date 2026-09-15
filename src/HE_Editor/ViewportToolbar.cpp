@@ -179,6 +179,17 @@ void iconEye(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	dl->AddCircleFilled(c, h * 0.30f, col, 12);
 }
 
+// Half-shaded sphere — the view mode (Lit / Unlit / Wireframe / G-buffer).
+// A circle with its right half filled: the one glyph that says "shading"
+// without being a light bulb (which would say "lights").
+void iconShading(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.5f, t = stroke(s);
+	dl->AddCircle(c, h * 0.92f, col, 20, t);
+	dl->PathArcTo(c, h * 0.92f, -kPi * 0.5f, kPi * 0.5f, 14);
+	dl->PathFillConvex(col);
+}
+
 // Two sliders — viewport options.
 void iconSliders(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 {
@@ -394,6 +405,44 @@ void viewPopup(AppContext& ctx)
 		cam.setOrthographic(ortho);
 }
 
+// The view-mode picker: the three ways of drawing the whole scene, then the
+// G-buffer attachments. The latter exist only on the deferred path — the rows
+// stay visible but disabled on a forward frame (and on a backend without the
+// path at all), and their help sentence says why, rather than vanishing and
+// leaving the user to wonder where the option went. `deferred` = the renderer
+// actually resolves through a G-buffer this frame (its GetRenderPath after the
+// capability gate), not the preference alone.
+void viewModePopup(AppContext& ctx, State& st)
+{
+	HE::Ed::Help::Scope helpScope("Viewport View Mode");
+	using VM = HE::ViewMode;
+	const bool deferred = ctx.renderer
+	                   && ctx.renderer->GetCapabilities().supportsDeferredRendering
+	                   && ctx.renderer->GetRenderPath() == HE::RenderPath::Deferred;
+	struct Row { VM mode; const char* shortcut; };
+	const Row rows[] = {
+		{ VM::Lit,                   "Alt+4" },
+		{ VM::Unlit,                 "Alt+3" },
+		{ VM::Wireframe,             "Alt+2" },
+		{ VM::GBufferBaseColor,      nullptr },
+		{ VM::GBufferNormal,         nullptr },
+		{ VM::GBufferRoughSpecMetal, nullptr },
+		{ VM::GBufferEmissive,       nullptr },
+	};
+	for (const Row& r : rows)
+	{
+		if (r.mode == VM::GBufferBaseColor)
+		{
+			ImGui::Separator();
+			ImGui::TextDisabled("G-Buffer");
+		}
+		const bool gb = HE::viewModeIsGBuffer(r.mode);
+		if (EditorWidgets::menuItem(HE::viewModeName(r.mode), r.shortcut,
+		                            st.viewMode == r.mode, !gb || deferred))
+			st.viewMode = r.mode;
+	}
+}
+
 } // namespace
 
 float height() { return EditorToolbar::height(); }
@@ -477,10 +526,17 @@ void render(AppContext& ctx, State& st)
 	// to Perspective never reflows the row; icon-only once labels are gone.
 	const float viewW       = std::max({ cellWidth(m, "Perspective"), cellWidth(m, "Bottom"),
 	                                     cellWidth(m, "Ortho") });
+	// Same rule for the view mode: measured at its widest label. The G-buffer
+	// rows are shortened on the cell ("Normals" rather than the popup's full
+	// wording is already short; "Rough / Spec / Metal" is not, so the cell
+	// shows "G-Buffer" for any of those).
+	const float modeW       = std::max({ cellWidth(m, "Wireframe"), cellWidth(m, "G-Buffer"),
+	                                     cellWidth(m, "Unlit") });
 	auto rightWidth = [&](bool camera, bool viewLabel)
 	{
 		float w = kWellPad * 2.0f + m.cell;                       // options button
 		w += kWellPad * 2.0f + (viewLabel ? viewW : m.cell) + kGroupGap;   // view preset
+		w += kWellPad * 2.0f + (viewLabel ? modeW : m.cell) + kGroupGap;   // view mode
 		if (camera) w += kWellPad * 2.0f + m.cell + kSegGap + camValW + kGroupGap;
 		return w;
 	};
@@ -731,6 +787,29 @@ void render(AppContext& ctx, State& st)
 			if (ImGui::BeginPopup("##vpViewPopup"))
 			{
 				viewPopup(ctx);
+				ImGui::EndPopup();
+			}
+			rx += w + kGroupGap;
+		}
+
+		// View mode. Lit is the resting state, so the cell only lights up when
+		// the scene is drawn some other way — the one case where "why does my
+		// scene look like that" needs answering from across the room. Stays
+		// live in play mode: it is a renderer flag, not a camera one, and a
+		// wireframe view of the running scene is a legitimate thing to want.
+		{
+			const float w = kWellPad * 2.0f + (labels ? modeW : m.cell);
+			well(m, rx, w);
+			const bool  gb        = HE::viewModeIsGBuffer(st.viewMode);
+			const char* modeLabel = gb ? "G-Buffer" : HE::viewModeName(st.viewMode);
+			if (cell(m, rx + kWellPad, w - kWellPad * 2.0f, "##vpViewMode", iconShading,
+			         labels ? modeLabel : nullptr, st.viewMode != HE::ViewMode::Lit, true,
+			         "View mode — Lit, Unlit, Wireframe, or one G-buffer attachment",
+			         "viewport.viewmode"))
+				ImGui::OpenPopup("##vpViewModePopup");
+			if (ImGui::BeginPopup("##vpViewModePopup"))
+			{
+				viewModePopup(ctx, st);
 				ImGui::EndPopup();
 			}
 			rx += w + kGroupGap;

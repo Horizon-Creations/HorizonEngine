@@ -1702,6 +1702,42 @@ namespace
 	  "Orbiting or flying keeps the projection you chose.",
 	  "Num 5", "editor#viewport" },
 
+	// ── The viewport's view-mode picker ──────────────────────────────────────
+	// Lit / Unlit / Wireframe redraw the whole scene; the G-buffer rows show one
+	// attachment of the deferred renderer and are greyed out on the forward
+	// path, where there is no G-buffer to show.
+	{ "Viewport View Mode/Lit", "",
+	  "The scene as the game draws it: lights, shadows, sky, fog, post effects.",
+	  "Alt+4", "editor#viewport" },
+	{ "Viewport View Mode/Unlit", "",
+	  "Base colour only — no lights, no shadows, no ambient, no fog. The way to "
+	  "see what a texture or a material actually holds, without the lighting "
+	  "arguing with it.",
+	  "Alt+3", "editor#viewport" },
+	{ "Viewport View Mode/Wireframe", "",
+	  "The triangle edges of every mesh, unlit. Shows how dense a model is and "
+	  "where the LOD switches; the sky and particles stay as they are.",
+	  "Alt+2", "editor#viewport" },
+	{ "Viewport View Mode/Base Color", "",
+	  "The G-buffer's base colour, straight from the material. Needs the "
+	  "Deferred render path (Preferences > Rendering) — the forward path has "
+	  "no G-buffer, which is why this is greyed out there.",
+	  "", "editor#viewport" },
+	{ "Viewport View Mode/Normals", "",
+	  "The G-buffer's world-space normals as colour: +X red, +Y green, +Z blue. "
+	  "A normal map that was imported the wrong way round shows up here as a "
+	  "surface that lights from the wrong side. Deferred render path only.",
+	  "", "editor#viewport" },
+	{ "Viewport View Mode/Rough / Spec / Metal", "",
+	  "The G-buffer's roughness in red, specular in green and metallic in blue. "
+	  "A rough matte wall is red, a chrome sphere blue. Deferred render path "
+	  "only.",
+	  "", "editor#viewport" },
+	{ "Viewport View Mode/Emissive", "",
+	  "The G-buffer's emissive colour on its own — what glows, and how much, "
+	  "before bloom gets to it. Deferred render path only.",
+	  "", "editor#viewport" },
+
 	// ── World Outliner ───────────────────────────────────────────────────────
 	{ "World Outliner/Create Child", "",
 	  "Creates an entity parented to this one. A child follows its parent's "
@@ -2114,6 +2150,14 @@ namespace
 	  "Top and it says Ortho, since that is no longer Top. On the keypad, 7 / 1 "
 	  "/ 3 pick Top / Front / Right, Ctrl flips each to its opposite, 5 toggles "
 	  "the lens.",
+	  "", "editor#viewport" },
+	{ "viewport.viewmode", "View Mode",
+	  "How the scene is drawn, as opposed to where it is looked at from. Lit is "
+	  "the game's image. Unlit shows base colour only, Wireframe the triangle "
+	  "edges, and the G-buffer rows show one attachment of the deferred "
+	  "renderer straight to the screen. The cell lights up whenever the scene "
+	  "is drawn some way other than Lit, so an odd-looking viewport is never a "
+	  "mystery. Alt+4 / Alt+3 / Alt+2 for Lit / Unlit / Wireframe.",
 	  "", "editor#viewport" },
 	{ "viewport.mode", "Viewport Mode",
 	  "Scene is normal editing. Landscape turns the viewport into the terrain "
@@ -5847,6 +5891,7 @@ namespace
 		{ "New Entity/",       "editor-interface", "Editor Interface", "Creating entities" },
 		{ "Viewport Options/", "editor-interface", "Editor Interface", "Viewport options" },
 		{ "Viewport View/",    "editor-interface", "Editor Interface", "View presets" },
+		{ "Viewport View Mode/", "editor-interface", "Editor Interface", "View modes" },
 		// ── The Details panel's components ───────────────────────────────────
 		{ "Component/", "editor-components", "Component Reference", "The components" },
 		// ── Settings ─────────────────────────────────────────────────────────

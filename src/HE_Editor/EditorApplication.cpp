@@ -21,6 +21,7 @@
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
+#include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "ExportDialogPanel.h"     // the packing worker the MCP build tools start
@@ -4312,6 +4313,13 @@ void EditorApplication::dumpFrameHeadless()
 			path = (std::string(v) == "1" || std::string(v) == "deferred") ? 1 : 0;
 		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
 			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+	}
+	{
+		// HE_DUMP_VIEWMODE=unlit|wireframe|basecolor|… (or HE_DUMP_GBUFFER=1..4):
+		// the viewport's view mode for this capture. Explicitly Lit otherwise —
+		// the backend seeded its own from HE_DUMP_GBUFFER at Initialize, which
+		// is the same answer, but a capture should not depend on that.
+		r->SetViewMode(HE::Ed::viewModeOverrideFromEnv(HE::ViewMode::Lit));
 	}
 
 	// ── Sky-test capture (HE_DUMP_SKYTEST): aim the camera up at the sky and override

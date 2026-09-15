@@ -11,6 +11,7 @@
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
+#include "ViewportViewMode.h"            // the headless HE_DUMP_VIEWMODE override on the mode push
 #include "EditorWidgets.h"               // WrapText — text wraps at the pane edge, never runs off it
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -360,6 +361,17 @@ void render(AppContext& ctx, float dt)
 		if (!ctx.appLivePreview)
 			ViewportToolbar::render(ctx, s_tb);
 
+		// The view mode goes to the renderer every frame, like the camera: it is
+		// this panel's state, and the backend keeps whatever it was last told.
+		// An application preview has no scene to shade and shows Lit. The
+		// headless HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER overrides win here too,
+		// for the same reason HE_DUMP_RENDERPATH does in EditorApplication's
+		// per-frame push: a push that ran every frame would otherwise flip a
+		// capture back to the toolbar's value between setup and the frame.
+		if (ctx.renderer)
+			ctx.renderer->SetViewMode(HE::Ed::viewModeOverrideFromEnv(
+				ctx.appLivePreview ? HE::ViewMode::Lit : s_tb.viewMode));
+
 		ImVec2 avail = ImGui::GetContentRegionAvail();
 
 		// HE_VIEWPORT_RESIZE_STRESS=1 oscillates the viewport size every frame
@@ -520,6 +532,18 @@ void render(AppContext& ctx, float dt)
 					cam.update(cin);
 					// Push to the backend so this frame's render uses it.
 					ctx.renderer->SetEditorCamera(cam.makeOverride());
+				}
+
+				// View mode on Alt+2 / 3 / 4 (Unreal's layout: Wireframe, Unlit,
+				// Lit). Outside the camera branch on purpose — it is a renderer
+				// flag, so it works while the scene plays too. Alt alone is the
+				// orbit modifier, which a digit press does not disturb.
+				if (viewportHovered && !io.WantTextInput && io.KeyAlt && !navigating
+				    && !ctx.appLivePreview)
+				{
+					if (ImGui::IsKeyPressed(ImGuiKey_2, false))      s_tb.viewMode = HE::ViewMode::Wireframe;
+					else if (ImGui::IsKeyPressed(ImGuiKey_3, false)) s_tb.viewMode = HE::ViewMode::Unlit;
+					else if (ImGui::IsKeyPressed(ImGuiKey_4, false)) s_tb.viewMode = HE::ViewMode::Lit;
 				}
 
 				const EditorCameraOverride camOverride =

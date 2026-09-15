@@ -241,3 +241,42 @@ TEST_CASE("EditorCamera orbit out of a preset keeps ortho but is no longer that 
 	CHECK(finite(cam.viewMatrix()));
 	CHECK(finite(cam.makeOverride().view));
 }
+
+// ── Viewport view mode (ViewportViewMode.h + HE::ViewMode helpers) ──────────
+#include "ViewportViewMode.h"
+
+TEST_CASE("ViewMode: a G-buffer view without a deferred frame resolves to Lit")
+{
+	using HE::ViewMode;
+	CHECK(HE::resolveViewMode(ViewMode::GBufferNormal, /*deferred=*/true)  == ViewMode::GBufferNormal);
+	CHECK(HE::resolveViewMode(ViewMode::GBufferNormal, /*deferred=*/false) == ViewMode::Lit);
+	CHECK(HE::resolveViewMode(ViewMode::Wireframe,     /*deferred=*/false) == ViewMode::Wireframe);
+	CHECK(HE::resolveViewMode(static_cast<ViewMode>(99), true)             == ViewMode::Lit);
+	// The resolve shader's debug index: 1..4 for the four attachments, 0 otherwise.
+	CHECK(HE::viewModeGBufferIndex(ViewMode::GBufferBaseColor)      == 1);
+	CHECK(HE::viewModeGBufferIndex(ViewMode::GBufferEmissive)       == 4);
+	CHECK(HE::viewModeGBufferIndex(ViewMode::Unlit)                 == 0);
+	CHECK(HE::viewModeIsGBuffer(ViewMode::GBufferRoughSpecMetal));
+	CHECK_FALSE(HE::viewModeIsGBuffer(ViewMode::Lit));
+}
+
+TEST_CASE("ViewMode: the headless override reads VIEWMODE first, then the old GBUFFER knob")
+{
+	using HE::ViewMode;
+	using HE::Ed::viewModeOverride;
+	// Nothing set → the UI's value.
+	CHECK(viewModeOverride(ViewMode::Wireframe, nullptr, nullptr) == ViewMode::Wireframe);
+	CHECK(viewModeOverride(ViewMode::Wireframe, "",      "")      == ViewMode::Wireframe);
+	// HE_DUMP_GBUFFER=1..4 is the pre-UI spelling of the four G-buffer views.
+	CHECK(viewModeOverride(ViewMode::Lit, nullptr, "2") == ViewMode::GBufferNormal);
+	CHECK(viewModeOverride(ViewMode::Lit, nullptr, "4") == ViewMode::GBufferEmissive);
+	CHECK(viewModeOverride(ViewMode::Lit, nullptr, "0") == ViewMode::Lit);   // "off" = no override
+	// HE_DUMP_VIEWMODE by name or number, and it wins over GBUFFER.
+	CHECK(viewModeOverride(ViewMode::Lit, "unlit",     nullptr) == ViewMode::Unlit);
+	CHECK(viewModeOverride(ViewMode::Lit, "wireframe", "2")     == ViewMode::Wireframe);
+	CHECK(viewModeOverride(ViewMode::Lit, "normals",   nullptr) == ViewMode::GBufferNormal);
+	CHECK(viewModeOverride(ViewMode::Lit, "5",         nullptr) == ViewMode::GBufferRoughSpecMetal);
+	// Garbage keeps the UI's value rather than inventing a mode.
+	CHECK(viewModeOverride(ViewMode::Unlit, "bogus", nullptr) == ViewMode::Unlit);
+	CHECK(viewModeOverride(ViewMode::Unlit, "42",    nullptr) == ViewMode::Unlit);
+}

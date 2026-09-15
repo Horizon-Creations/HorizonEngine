@@ -404,7 +404,6 @@ private:
 	void  EncodeClusterData(void* renderEncoder,
 	                        HE::MaterialShaderLibrary::Lighting& matLight,
 	                        HE::MaterialShaderLibrary::ResolveUniforms& ru);
-	int   m_gbufferDebugView        = 0;       // HE_DUMP_GBUFFER (1..4), read once at Initialize
 	bool  m_deferredFrameActive     = false;   // this frame renders deferred (set before SSAO — P5 reads it)
 	void  EnsureGBufferTargets(int width, int height);
 	void  DestroyGBufferTargets();

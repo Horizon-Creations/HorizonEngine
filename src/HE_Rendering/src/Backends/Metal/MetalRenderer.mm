@@ -5940,11 +5940,16 @@ void MetalRenderer::Initialize(HE::Window* window)
 	// Deferred-path debug/headless knobs: HE_RENDER_PATH=1/deferred forces the
 	// path without touching config (he_shot A/B), HE_DUMP_GBUFFER=1..4 makes the
 	// resolve output a raw G-buffer view (BaseColor/Normal/RoughSpecMetal/Emissive).
+	// The latter seeds the view mode: the editor pushes its own every frame (and
+	// lets the env var win there too), the packaged game never does, so this
+	// read is what a headless game capture runs on.
 	if (const char* rp = std::getenv("HE_RENDER_PATH"); rp && *rp)
 		m_renderPath = (std::string(rp) == "1" || std::string(rp) == "deferred")
 			? HE::RenderPath::Deferred : HE::RenderPath::Forward;
 	if (const char* dv = std::getenv("HE_DUMP_GBUFFER"); dv && *dv)
-		m_gbufferDebugView = std::clamp(std::atoi(dv), 0, 4);
+		if (const int n = std::clamp(std::atoi(dv), 0, 4); n > 0)
+			m_viewMode = static_cast<HE::ViewMode>(
+				static_cast<int>(HE::ViewMode::GBufferBaseColor) + n - 1);
 	// P6 tile mode: single-pass memoryless G-buffer via framebuffer fetch —
 	// Apple-GPU family only ([[color(n)]] fragment inputs). HE_DEFERRED_TILE=0/1
 	// overrides (0 forces the two-pass stored path for A/B and debugging).
@@ -12855,7 +12860,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		ru.depthParams[0] = -1.0f;
 		ru.depthParams[1] = 1.0f;
 		ru.depthParams[2] = 0.0f;
-		ru.depthParams[3] = static_cast<float>(m_gbufferDebugView); // HE_DUMP_GBUFFER
+		ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_viewMode)); // G-buffer view
 		// P7: point/spot lights come from the cluster lists; the resolve's
 		// heLight window shrinks to directional-only (a COPY — the full fill in
 		// `matLight` keeps serving the forward-routed and transparent draws).
@@ -13691,7 +13696,7 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	ru.depthParams[0] = -1.0f; // same conventions as the two-pass resolve
 	ru.depthParams[1] = 1.0f;
 	ru.depthParams[2] = 0.0f;
-	ru.depthParams[3] = static_cast<float>(m_gbufferDebugView);
+	ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_viewMode));
 #if defined(HE_HAVE_SHADERC)
 	HE::MaterialShaderLibrary::Lighting matLight;
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
