@@ -30,7 +30,9 @@
 #include <cstdint>
 
 #include "HorizonScene/AudioEngine.h"
+#include <Audio/AudioBusConfig.h>
 #include <Diagnostics/Log.h>
+#include <algorithm>
 #include <unordered_map>
 #include <cstring>
 #include <string>
@@ -59,6 +61,13 @@ struct ActiveSound
     // Set by pauseSound(), cleared by resumeSound(). miniaudio itself has no
     // paused state: a paused voice and a finished one both answer "not playing".
     bool                 paused    = false;
+    // The bus the voice was routed through ("" = master, also when the named
+    // bus did not exist and the voice fell back). removeBus() stops the voices
+    // on a bus before tearing the group down, and this is how it finds them.
+    std::string          busName;
+    // What the voice attenuates with; only meaningful for a spatial voice.
+    AudioAttenuation     attenuation = AudioAttenuation::Linear;
+    bool                 spatial     = false;
 
     // Order matters: the sound reads from the data source, so it goes first.
     void release()
@@ -77,6 +86,10 @@ struct BusData
 {
     ma_sound_group group;
     bool           groupOk = false;
+    // The volume the bus is meant to have. The group carries 0 while muted,
+    // so the fader's value has to live here or a mute would forget it.
+    float          volume  = 1.0f;
+    bool           muted   = false;
 };
 
 struct AudioEngine::Impl
@@ -153,7 +166,8 @@ bool AudioEngine::createBus(const std::string& name, float volume)
         return false;
     }
     bus->groupOk = true;
-    ma_sound_group_set_volume(&bus->group, volume);
+    bus->volume  = volume < 0.0f ? 0.0f : volume;
+    ma_sound_group_set_volume(&bus->group, bus->volume);
     m_impl->buses.emplace(name, std::move(bus));
     HE_LOG_DEBUG(Audio, "Created audio bus '%s' at volume %.2f", name.c_str(), volume);
     return true;
@@ -163,8 +177,11 @@ void AudioEngine::setBusVolume(const std::string& name, float volume)
 {
     if (!m_initialized) return;
     auto it = m_impl->buses.find(name);
-    if (it != m_impl->buses.end() && it->second->groupOk)
-        ma_sound_group_set_volume(&it->second->group, volume);
+    if (it == m_impl->buses.end() || !it->second->groupOk) return;
+    BusData& bus = *it->second;
+    bus.volume = volume < 0.0f ? 0.0f : volume;
+    // A muted bus stays silent; the new value is what unmute restores.
+    if (!bus.muted) ma_sound_group_set_volume(&bus.group, bus.volume);
 }
 
 float AudioEngine::getBusVolume(const std::string& name) const
@@ -172,12 +189,119 @@ float AudioEngine::getBusVolume(const std::string& name) const
     if (!m_initialized) return 1.0f;
     auto it = m_impl->buses.find(name);
     if (it == m_impl->buses.end() || !it->second->groupOk) return 1.0f;
-    return ma_sound_group_get_volume(&it->second->group);
+    return it->second->volume;
 }
 
 bool AudioEngine::hasBus(const std::string& name) const
 {
     return m_impl->buses.count(name) > 0;
+}
+
+bool AudioEngine::removeBus(const std::string& name)
+{
+    if (!m_initialized) return false;
+    auto it = m_impl->buses.find(name);
+    if (it == m_impl->buses.end()) return false;
+
+    // The voices first: a sound whose group is gone reads freed memory on the
+    // next mix. release() detaches it from the graph before the group goes.
+    size_t stopped = 0;
+    for (auto s = m_impl->sounds.begin(); s != m_impl->sounds.end(); )
+    {
+        if (s->second->busName == name)
+        {
+            s->second->release();
+            s = m_impl->sounds.erase(s);
+            ++stopped;
+        }
+        else ++s;
+    }
+    if (it->second->groupOk) { ma_sound_group_uninit(&it->second->group); it->second->groupOk = false; }
+    m_impl->buses.erase(it);
+    HE_LOG_DEBUG(Audio, "Removed audio bus '%s' (%zu voice(s) stopped)", name.c_str(), stopped);
+    return true;
+}
+
+std::vector<std::string> AudioEngine::busNames() const
+{
+    std::vector<std::string> names;
+    names.reserve(m_impl->buses.size());
+    for (const auto& [name, bus] : m_impl->buses) names.push_back(name);
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+void AudioEngine::setBusMuted(const std::string& name, bool muted)
+{
+    if (!m_initialized) return;
+    auto it = m_impl->buses.find(name);
+    if (it == m_impl->buses.end() || !it->second->groupOk) return;
+    BusData& bus = *it->second;
+    if (bus.muted == muted) return;
+    bus.muted = muted;
+    ma_sound_group_set_volume(&bus.group, muted ? 0.0f : bus.volume);
+}
+
+bool AudioEngine::isBusMuted(const std::string& name) const
+{
+    auto it = m_impl->buses.find(name);
+    return it != m_impl->buses.end() && it->second->muted;
+}
+
+void AudioEngine::setMasterVolume(float volume)
+{
+    if (!m_initialized) return;
+    ma_engine_set_volume(&m_impl->engine, volume < 0.0f ? 0.0f : volume);
+}
+
+float AudioEngine::getMasterVolume() const
+{
+    if (!m_initialized) return 1.0f;
+    return ma_engine_get_volume(&m_impl->engine);
+}
+
+int AudioEngine::busVoiceCount(const std::string& name) const
+{
+    int n = 0;
+    for (const auto& [handle, snd] : m_impl->sounds)
+        if (snd->busName == name) ++n;
+    return n;
+}
+
+void AudioEngine::applyBusConfig(const HE::AudioBusConfig& config)
+{
+    if (!m_initialized) return;
+    setMasterVolume(config.masterVolume);
+    for (const HE::AudioBusDef& def : config.buses)
+    {
+        if (!createBus(def.name, def.volume)) continue;   // createBus logged it
+        setBusVolume(def.name, def.volume);               // an existing bus: only the volume
+    }
+}
+
+// The falloff of a spatial voice, from startSound() and setSoundAttenuation()
+// alike so the two cannot clamp differently. minDist is kept above zero (the
+// inverse and exponential curves divide by it) and maxDist above minDist (a
+// degenerate pair makes miniaudio attenuate nothing, which is not what a range
+// of 0 means to anybody).
+static void applyAttenuation(ActiveSound& snd, AudioAttenuation model,
+                             float minDist, float maxDist, float rolloff)
+{
+    ma_attenuation_model m = ma_attenuation_model_linear;
+    switch (model)
+    {
+    case AudioAttenuation::Linear:      m = ma_attenuation_model_linear;      break;
+    case AudioAttenuation::Inverse:     m = ma_attenuation_model_inverse;     break;
+    case AudioAttenuation::Exponential: m = ma_attenuation_model_exponential; break;
+    case AudioAttenuation::None:        m = ma_attenuation_model_none;        break;
+    }
+    const float lo = minDist > 0.0f ? minDist : 0.01f;
+    const float hi = maxDist > lo   ? maxDist : lo + 1.0f;
+    snd.attenuation = model;
+    ma_sound_set_attenuation_model(&snd.sound, m);
+    ma_sound_set_min_distance(&snd.sound, lo);
+    ma_sound_set_max_distance(&snd.sound, hi);
+    ma_sound_set_rolloff(&snd.sound, rolloff > 0.0f ? rolloff : 0.0f);
 }
 
 // Everything the play variants have in common — the byte copy, the data source
@@ -274,7 +398,10 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
     if (!busName.empty()) {
         auto it = m_impl->buses.find(busName);
         if (it != m_impl->buses.end() && it->second->groupOk)
-            busGroup = &it->second->group;
+        {
+            busGroup     = &it->second->group;
+            snd->busName = busName;   // recorded only when the routing took
+        }
         else
             HE_LOG_WARN(Audio, "Sound routed to unknown bus '%s' — playing on the master bus "
                                "(bus volume/mute will not apply)", busName.c_str());
@@ -299,10 +426,9 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
     if (spatial)
     {
         ma_sound_set_position(&snd->sound, spatial->x, spatial->y, spatial->z);
-        ma_sound_set_attenuation_model(&snd->sound, ma_attenuation_model_linear);
-        ma_sound_set_min_distance(&snd->sound, spatial->minDist > 0.0f ? spatial->minDist : 0.01f);
-        ma_sound_set_max_distance(&snd->sound, spatial->maxDist > spatial->minDist
-                                                   ? spatial->maxDist : spatial->minDist + 1.0f);
+        snd->spatial = true;
+        applyAttenuation(*snd, spatial->attenuation,
+                         spatial->minDist, spatial->maxDist, spatial->rolloff);
     }
 
     if (ma_sound_start(&snd->sound) != MA_SUCCESS)
@@ -368,9 +494,10 @@ uint64_t AudioEngine::playSpatial(const std::vector<uint8_t>& pcmData,
                                    float volume, float pitch, bool loop,
                                    float x, float y, float z,
                                    float minDist, float maxDist,
-                                   const std::string& busName)
+                                   const std::string& busName,
+                                   AudioAttenuation attenuation, float rolloff)
 {
-    const SpatialParams sp{ x, y, z, minDist, maxDist };
+    const SpatialParams sp{ x, y, z, minDist, maxDist, attenuation, rolloff };
     return startSound(pcmData, AudioEncoding::PCM16, sampleRate, channels,
                       volume, pitch, loop, busName, &sp);
 }
@@ -379,9 +506,10 @@ uint64_t AudioEngine::playSpatial(const AudioAsset& clip,
                                    float volume, float pitch, bool loop,
                                    float x, float y, float z,
                                    float minDist, float maxDist,
-                                   const std::string& busName)
+                                   const std::string& busName,
+                                   AudioAttenuation attenuation, float rolloff)
 {
-    const SpatialParams sp{ x, y, z, minDist, maxDist };
+    const SpatialParams sp{ x, y, z, minDist, maxDist, attenuation, rolloff };
     return startSound(clip.audioData, clip.encoding, clip.sampleRate, clip.channels,
                       volume, pitch, loop, busName, &sp);
 }
@@ -392,6 +520,21 @@ void AudioEngine::setSoundPosition(uint64_t handle, float x, float y, float z)
     if (it == m_impl->sounds.end()) return;
     if (it->second->soundOk)
         ma_sound_set_position(&it->second->sound, x, y, z);
+}
+
+void AudioEngine::setSoundAttenuation(uint64_t handle, AudioAttenuation model,
+                                      float minDist, float maxDist, float rolloff)
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk || !it->second->spatial) return;
+    applyAttenuation(*it->second, model, minDist, maxDist, rolloff);
+}
+
+AudioAttenuation AudioEngine::getSoundAttenuation(uint64_t handle) const
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end()) return AudioAttenuation::Linear;
+    return it->second->attenuation;
 }
 
 void AudioEngine::setListenerTransform(float px, float py, float pz,

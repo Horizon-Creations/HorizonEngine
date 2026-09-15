@@ -1353,6 +1353,9 @@ void startExport(AppContext& ctx)
                     // The collision matrix, so the shipped build's physics
                     // separates the same channels the preview did.
                     es.collisionLayers = ctx.projectManager->currentProject().collisionLayers;
+                    // And the mixer buses, so a source's Bus field finds its
+                    // bus in the shipped game as it does in the editor.
+                    es.audioBuses      = ctx.projectManager->currentProject().audioBuses;
                     // What the application is to the system it lands on: the
                     // icon is generated at export time from these three.
                     es.appIconName  = ctx.projectManager->currentProject().appIconName;

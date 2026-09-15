@@ -558,6 +558,7 @@ namespace
 				{ "range",        a->range },
 				{ "innerRange",   a->innerRange },
 				{ "rolloffFactor",a->rolloffFactor },
+				{ "attenuation",  audioAttenuationName(a->attenuation) },
 				{ "loop",         a->loop },
 				{ "playOnStart",  a->playOnStart },
 				{ "spatial",      a->spatial },
@@ -1351,6 +1352,9 @@ namespace
 			a.range         = c.value("range",         a.range);
 			a.innerRange    = c.value("innerRange",    a.innerRange);
 			a.rolloffFactor = c.value("rolloffFactor", a.rolloffFactor);
+			// Absent (every scene written before the key) reads as linear.
+			a.attenuation   = audioAttenuationFromName(
+			                      c.value("attenuation", std::string("linear")).c_str());
 			a.loop          = c.value("loop",          a.loop);
 			a.playOnStart   = c.value("playOnStart",   a.playOnStart);
 			a.spatial       = c.value("spatial",       a.spatial);

@@ -1070,6 +1070,7 @@ static std::optional<ExportResult> writeProjectConfig(const std::string&        
     cfg.fontScripts           = settings.fontScripts;
     cfg.fontWeightBold        = settings.fontWeightBold;
     cfg.collisionLayers       = settings.collisionLayers;
+    cfg.audioBuses            = settings.audioBuses;
     // RESOLVED here, so the runtime never derives it a second time and reaches a
     // different answer than the bundle around it — but only when the answer
     // could not be derived anyway. A filled bundle id makes the writer choose

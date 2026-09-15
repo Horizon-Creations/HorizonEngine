@@ -6,9 +6,15 @@
 #include <HorizonScene/AudioSystem.h>
 #include <ContentManager/ContentManager.h>
 #include <Types/UUID.h>
+#include <Audio/AudioBusConfig.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <vector>
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -551,6 +557,271 @@ TEST_CASE("AudioSourceComponent: busName field defaults to empty")
 {
     AudioSourceComponent a;
     CHECK(a.busName.empty());
+    CHECK(a.attenuation == AudioAttenuation::Linear);
+}
+
+// ─── The mixer's view of the engine ──────────────────────────────────────────
+
+TEST_CASE("AudioEngine: busNames lists every bus, sorted, and removeBus takes its voices with it")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    CHECK(engine.busNames().empty());
+
+    REQUIRE(engine.createBus("Voice"));
+    REQUIRE(engine.createBus("Music"));
+    REQUIRE(engine.createBus("SFX"));
+    const std::vector<std::string> names = engine.busNames();
+    REQUIRE(names.size() == 3);
+    CHECK(names[0] == "Music");
+    CHECK(names[1] == "SFX");
+    CHECK(names[2] == "Voice");
+
+    auto pcm = makeSilence(48000, 1);   // a second: still playing when counted
+    const uint64_t onSfx1  = engine.play(pcm, 48000, 1, 1.0f, 1.0f, true, "SFX");
+    const uint64_t onSfx2  = engine.play(pcm, 48000, 1, 1.0f, 1.0f, true, "SFX");
+    const uint64_t onMaster = engine.play(pcm, 48000, 1, 1.0f, 1.0f, true);
+    // A bus that does not exist counts as master — that is where the voice went.
+    const uint64_t onGhost = engine.play(pcm, 48000, 1, 1.0f, 1.0f, true, "Ghost");
+    REQUIRE(onSfx1 != 0); REQUIRE(onSfx2 != 0); REQUIRE(onMaster != 0); REQUIRE(onGhost != 0);
+    CHECK(engine.busVoiceCount("SFX")   == 2);
+    CHECK(engine.busVoiceCount("")      == 2);
+    CHECK(engine.busVoiceCount("Music") == 0);
+    CHECK(engine.busVoiceCount("Ghost") == 0);
+
+    CHECK(engine.removeBus("SFX"));
+    CHECK_FALSE(engine.removeBus("SFX"));
+    CHECK_FALSE(engine.hasBus("SFX"));
+    CHECK(engine.busNames().size() == 2);
+    // The voices on it are gone; the others are untouched.
+    CHECK_FALSE(engine.isPlaying(onSfx1));
+    CHECK_FALSE(engine.isPlaying(onSfx2));
+    CHECK(engine.isPlaying(onMaster));
+    CHECK(engine.busVoiceCount("") == 2);
+
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: mute keeps the fader's volume, master volume is its own gain")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    REQUIRE(engine.createBus("Music", 0.7f));
+
+    CHECK_FALSE(engine.isBusMuted("Music"));
+    engine.setBusMuted("Music", true);
+    CHECK(engine.isBusMuted("Music"));
+    // The remembered volume, not the 0 the group carries — a fader must not
+    // jump to silence when M lights up.
+    CHECK(engine.getBusVolume("Music") == doctest::Approx(0.7f));
+    // A volume set while muted is what unmute restores.
+    engine.setBusVolume("Music", 0.4f);
+    CHECK(engine.getBusVolume("Music") == doctest::Approx(0.4f));
+    engine.setBusMuted("Music", false);
+    CHECK_FALSE(engine.isBusMuted("Music"));
+    CHECK(engine.getBusVolume("Music") == doctest::Approx(0.4f));
+    // Unknown bus: no-op, not muted.
+    engine.setBusMuted("Nope", true);
+    CHECK_FALSE(engine.isBusMuted("Nope"));
+
+    CHECK(engine.getMasterVolume() == doctest::Approx(1.0f));
+    engine.setMasterVolume(0.25f);
+    CHECK(engine.getMasterVolume() == doctest::Approx(0.25f));
+    engine.setMasterVolume(-3.0f);
+    CHECK(engine.getMasterVolume() == doctest::Approx(0.0f));
+
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: applyBusConfig creates what is missing and leaves the rest alone")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    // A bus a script made before the project's list arrived.
+    REQUIRE(engine.createBus("Scripted", 0.3f));
+    REQUIRE(engine.createBus("Music", 1.0f));
+    engine.setBusMuted("Music", true);
+
+    HE::AudioBusConfig cfg;
+    cfg.masterVolume = 0.5f;
+    REQUIRE(cfg.add("Music", 0.6f));
+    REQUIRE(cfg.add("SFX", 0.8f));
+    engine.applyBusConfig(cfg);
+
+    CHECK(engine.getMasterVolume() == doctest::Approx(0.5f));
+    CHECK(engine.hasBus("SFX"));
+    CHECK(engine.getBusVolume("SFX")   == doctest::Approx(0.8f));
+    CHECK(engine.getBusVolume("Music") == doctest::Approx(0.6f));   // existing: volume follows
+    CHECK(engine.isBusMuted("Music"));                                // …but mute is the session's
+    CHECK(engine.hasBus("Scripted"));                                 // not in the config, kept
+    CHECK(engine.getBusVolume("Scripted") == doctest::Approx(0.3f));
+    CHECK(engine.busNames().size() == 3);
+
+    engine.shutdown();
+}
+
+// ─── Attenuation curves ──────────────────────────────────────────────────────
+
+TEST_CASE("attenuationGain: the three curves and the degenerate cases")
+{
+    using A = AudioAttenuation;
+    // Full volume inside the inner range, whatever the model.
+    for (A m : { A::Linear, A::Inverse, A::Exponential, A::None })
+    {
+        CHECK(attenuationGain(m, 0.0f, 1.0f, 20.0f, 1.0f) == doctest::Approx(1.0f));
+        CHECK(attenuationGain(m, 1.0f, 1.0f, 20.0f, 1.0f) == doctest::Approx(1.0f));
+    }
+    // Linear: straight to silence at the range, half way at half the distance.
+    CHECK(attenuationGain(A::Linear, 20.0f, 1.0f, 20.0f, 1.0f) == doctest::Approx(0.0f));
+    CHECK(attenuationGain(A::Linear, 10.5f, 1.0f, 20.0f, 1.0f) == doctest::Approx(0.5f));
+    // Rolloff 2 reaches silence half way and is clamped there, not negative.
+    CHECK(attenuationGain(A::Linear, 10.5f, 1.0f, 20.0f, 2.0f) == doctest::Approx(0.0f));
+    CHECK(attenuationGain(A::Linear, 19.0f, 1.0f, 20.0f, 2.0f) == doctest::Approx(0.0f));
+    // Beyond the range the distance is clamped: no quieter than at the range.
+    CHECK(attenuationGain(A::Inverse, 500.0f, 1.0f, 20.0f, 1.0f) ==
+          doctest::Approx(attenuationGain(A::Inverse, 20.0f, 1.0f, 20.0f, 1.0f)));
+    // Inverse: 1/d with the inner range as unity — at 2 m it is half.
+    CHECK(attenuationGain(A::Inverse, 2.0f, 1.0f, 20.0f, 1.0f) == doctest::Approx(0.5f));
+    // Exponential with rolloff 1 is the same 1/d; rolloff 2 is 1/d².
+    CHECK(attenuationGain(A::Exponential, 2.0f, 1.0f, 20.0f, 1.0f) == doctest::Approx(0.5f));
+    CHECK(attenuationGain(A::Exponential, 2.0f, 1.0f, 20.0f, 2.0f) == doctest::Approx(0.25f));
+    // Every curve is monotone falling between the two ranges.
+    for (A m : { A::Linear, A::Inverse, A::Exponential })
+    {
+        float last = 1.0f;
+        for (float d = 1.0f; d <= 20.0f; d += 0.5f)
+        {
+            const float g = attenuationGain(m, d, 1.0f, 20.0f, 1.0f);
+            CHECK(g <= last + 1e-6f);
+            last = g;
+        }
+    }
+    // None never attenuates; a degenerate range attenuates nothing either.
+    CHECK(attenuationGain(A::None,   20.0f, 1.0f, 20.0f, 1.0f) == doctest::Approx(1.0f));
+    CHECK(attenuationGain(A::Linear, 20.0f, 5.0f,  5.0f, 1.0f) == doctest::Approx(1.0f));
+
+    // The scene-file spelling survives a round trip and an unknown word is linear.
+    for (A m : { A::Linear, A::Inverse, A::Exponential, A::None })
+        CHECK(audioAttenuationFromName(audioAttenuationName(m)) == m);
+    CHECK(audioAttenuationFromName("banana") == A::Linear);
+    CHECK(audioAttenuationFromName(nullptr)  == A::Linear);
+}
+
+TEST_CASE("AudioEngine: a spatial voice carries the attenuation it was started with")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    auto pcm = makeSilence(48000, 1);
+
+    const uint64_t h = engine.playSpatial(pcm, 48000, 1, 1.0f, 1.0f, true,
+                                          0.0f, 0.0f, 0.0f, 1.0f, 20.0f, "",
+                                          AudioAttenuation::Inverse, 1.5f);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundAttenuation(h) == AudioAttenuation::Inverse);
+
+    // Live edit from the Details panel while playing.
+    engine.setSoundAttenuation(h, AudioAttenuation::Exponential, 2.0f, 30.0f, 2.0f);
+    CHECK(engine.getSoundAttenuation(h) == AudioAttenuation::Exponential);
+
+    // A 2D voice ignores it, and an unknown handle answers the default.
+    const uint64_t flat = engine.play(pcm, 48000, 1);
+    engine.setSoundAttenuation(flat, AudioAttenuation::None, 1.0f, 2.0f, 1.0f);
+    CHECK(engine.getSoundAttenuation(flat) == AudioAttenuation::Linear);
+    CHECK(engine.getSoundAttenuation(12345) == AudioAttenuation::Linear);
+
+    // The old callers, with the trailing defaults, still start a linear voice.
+    const uint64_t legacy = engine.playSpatial(pcm, 48000, 1, 1.0f, 1.0f, false,
+                                               1.0f, 2.0f, 3.0f);
+    REQUIRE(legacy != 0);
+    CHECK(engine.getSoundAttenuation(legacy) == AudioAttenuation::Linear);
+
+    engine.stopAll();
+    engine.shutdown();
+}
+
+TEST_CASE("AudioSystem: playOnStart hands the component's curve to the voice")
+{
+    HorizonWorld   world;
+    ContentManager content;
+    AudioAsset clip;
+    clip.sampleRate = 48000;
+    clip.channels   = 1;
+    clip.audioData  = makeSilence(48000, 1);
+    const HE::UUID assetId = content.registerAudio(clip);
+
+    auto e = world.createEntity("Speaker");
+    AudioSourceComponent src;
+    src.assetId       = assetId;
+    src.playOnStart   = true;
+    src.loop          = true;
+    src.spatial       = true;
+    src.attenuation   = AudioAttenuation::Exponential;
+    src.rolloffFactor = 2.0f;
+    world.registry().emplace<AudioSourceComponent>(e, src);
+    world.registry().emplace<TransformComponent>(e);
+
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+    AudioSystem::playOnStart(world, engine, &content);
+    const uint64_t h = world.registry().get<AudioSourceComponent>(e).handle;
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundAttenuation(h) == AudioAttenuation::Exponential);
+    engine.stopAll();
+    engine.shutdown();
+}
+
+TEST_CASE("SceneSerializer: the attenuation model round-trips and an old scene reads linear")
+{
+    HorizonWorld world;
+    auto e = world.createEntity("Speaker");
+    AudioSourceComponent src;
+    src.spatial     = true;
+    src.attenuation = AudioAttenuation::Inverse;
+    world.registry().emplace<AudioSourceComponent>(e, src);
+
+    const auto path = std::filesystem::temp_directory_path() / "he_audio_attenuation_test.hescene";
+    SceneSerializer serializer;
+    REQUIRE(serializer.save(world, path, SerializeFormat::JSON));
+    std::string text;
+    {
+        std::ifstream in(path);
+        text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    CHECK(text.find("\"attenuation\"") != std::string::npos);
+    CHECK(text.find("\"inverse\"")     != std::string::npos);
+
+    HorizonWorld back;
+    REQUIRE(serializer.load(back, path, SerializeFormat::JSON));
+    bool found = false;
+    for (auto [ent, a] : back.registry().view<AudioSourceComponent>().each())
+    {
+        found = true;
+        CHECK(a.attenuation == AudioAttenuation::Inverse);
+    }
+    CHECK(found);
+
+    // A scene written before the key existed: no "attenuation" at all. The
+    // key is a JSON object member, so cutting from its name through the comma
+    // that follows its value leaves a valid object behind.
+    const size_t at = text.find("\"attenuation\"");
+    REQUIRE(at != std::string::npos);
+    const size_t comma = text.find(',', at);
+    REQUIRE(comma != std::string::npos);
+    text.erase(at, comma - at + 1);
+    {
+        std::ofstream out(path);
+        out << text;
+    }
+    HorizonWorld legacy;
+    REQUIRE(serializer.load(legacy, path, SerializeFormat::JSON));
+    found = false;
+    for (auto [ent, a] : legacy.registry().view<AudioSourceComponent>().each())
+    {
+        found = true;
+        CHECK(a.attenuation == AudioAttenuation::Linear);
+    }
+    CHECK(found);
+    std::filesystem::remove(path);
 }
 
 // ─── Sample-rate handling ────────────────────────────────────────────────────

@@ -33,7 +33,8 @@ struct AudioSystem
                 float z = t ? t->position.z : 0.0f;
                 src.handle = engine.playSpatial(
                     *asset, src.volume, src.pitch, src.loop,
-                    x, y, z, src.innerRange, src.range, src.busName);
+                    x, y, z, src.innerRange, src.range, src.busName,
+                    src.attenuation, src.rolloffFactor);
             }
             else
             {

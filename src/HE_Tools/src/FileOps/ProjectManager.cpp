@@ -1531,6 +1531,11 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	m_currentProject.collisionLayers = HE::CollisionLayerConfig{};
 	if (j.contains("collisionLayers") && j["collisionLayers"].is_object())
 		m_currentProject.collisionLayers.fromJson(j["collisionLayers"]);
+	// Same for the mixer: absent means no buses, which is what every project
+	// written before the mixer existed had.
+	m_currentProject.audioBuses = HE::AudioBusConfig{};
+	if (j.contains("audioBuses") && j["audioBuses"].is_object())
+		m_currentProject.audioBuses.fromJson(j["audioBuses"]);
 	// The application's identity. Absent icon name means NO icon, not a default
 	// one: a project written before this field existed shipped without an icon,
 	// and filling the gap here would put a generated "widgets" plate on the next
@@ -1639,6 +1644,12 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 		json layers = json::object();
 		m_currentProject.collisionLayers.toJson(layers);
 		j["collisionLayers"] = std::move(layers);
+	}
+	if (!m_currentProject.audioBuses.isDefault())
+	{
+		json buses = json::object();
+		m_currentProject.audioBuses.toJson(buses);
+		j["audioBuses"] = std::move(buses);
 	}
 	j["appIconName"]           = m_currentProject.appIconName;
 	j["appIconColor"]          = m_currentProject.appIconColor;

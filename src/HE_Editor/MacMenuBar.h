@@ -35,7 +35,7 @@ namespace MacMenuBar
 		// already carries the NATIVE one (toggleFullScreen: on the responder
 		// chain, ⌃⌘F), and a second item on SDL's own fullscreen would be a
 		// different behaviour under the same name.
-		ToggleConsole, ToggleGroundGrid,
+		ToggleConsole, ToggleAudioMixer, ToggleGroundGrid,
 		OpenLevelScript, OpenGameInstance,
 		ImportAsset, RefreshAssets, ExportProject,
 		// Build ▸ Build and Reload Game Logic. Project-scoped like the export,

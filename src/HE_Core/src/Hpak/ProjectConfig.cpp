@@ -15,7 +15,11 @@ static constexpr char     k_magic[4] = {'H','C','F','G'};
 //     rather than 136 packed bits because the block is sparse by construction
 //     (CollisionLayerConfig writes only the blocked pairs and the renamed
 //     channels), and because a bitfield would freeze kCount into the format.
-static constexpr uint16_t k_version  = 6;
+// v7: appends the mixer buses as one JSON string, the same shape the .heproj
+//     "audioBuses" block has, for the same reasons as v6. Written only when
+//     the project authored a bus, so a project without any keeps its v6-or-
+//     lower file and an older runtime bundle still reads it.
+static constexpr uint16_t k_version  = 7;
 
 bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectConfig& cfg)
 {
@@ -37,7 +41,9 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
     // such project a version an older runtime bundle refuses, in exchange for
     // saying nothing.
     const bool hasLayers = !cfg.collisionLayers.isDefault();
-    const uint16_t version = hasLayers ? 6
+    const bool hasBuses  = !cfg.audioBuses.isDefault();
+    const uint16_t version = hasBuses  ? 7
+                           : hasLayers ? 6
                            : !cfg.bundleId.empty() ? 5
                            : hasTheme ? 4
                            : cfg.defaultSaveTemplate.empty() ? 2 : 3;
@@ -92,6 +98,12 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
         cfg.collisionLayers.toJson(layers);
         HAsset::Writer::appendString(buf, layers.dump());
     }
+    if (version >= 7)
+    {
+        nlohmann::json buses = nlohmann::json::object();
+        cfg.audioBuses.toJson(buses);
+        HAsset::Writer::appendString(buf, buses.dump());
+    }
 
     f.write(reinterpret_cast<const char*>(buf.data()),
             static_cast<std::streamsize>(buf.size()));
@@ -115,7 +127,7 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     if (!HAsset::Reader::readPOD(buf, off, reserved)) return false;
     // Every version this build knows. Each adds a tail; an older one simply has
     // fewer, and the reader stops where that version stopped.
-    if (version < 2 || version > 6) return false;
+    if (version < 2 || version > 7) return false;
 
     if (!HAsset::Reader::readString(buf, off, out.projectName))   return false;
     if (!HAsset::Reader::readString(buf, off, out.hpakFilename))  return false;
@@ -166,6 +178,17 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
         const nlohmann::json j = nlohmann::json::parse(layers, nullptr, /*allow_exceptions=*/false);
         if (!j.is_discarded())
             out.collisionLayers.fromJson(j);
+    }
+    out.audioBuses = HE::AudioBusConfig{};
+    if (version >= 7)
+    {
+        std::string buses;
+        if (!HAsset::Reader::readString(buf, off, buses)) return false;
+        // Same bargain as the matrix: a bus list that cannot be parsed leaves
+        // "no buses", and every source falls back to master as it always did.
+        const nlohmann::json j = nlohmann::json::parse(buses, nullptr, /*allow_exceptions=*/false);
+        if (!j.is_discarded())
+            out.audioBuses.fromJson(j);
     }
     return true;
 }

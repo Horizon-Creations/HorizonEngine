@@ -199,9 +199,71 @@ TEST_CASE("ProjectConfigLoader collision layers ride a tail nobody else pays for
         // Both cells, not just the one that was written.
         CHECK_FALSE(loaded.collisionLayers.collides(3, 6));
         CHECK(loaded.collisionLayers.collides(6, 4));
+        // The mixer tail is not paid for by a project that never opened it.
+        CHECK(loaded.audioBuses.isDefault());
+    }
+
+    SUBCASE("the mixer's buses ride the v7 tail and come back in order")
+    {
+        ProjectConfig cfg;
+        cfg.projectName  = "Mixed";
+        cfg.hpakFilename = "Mixed.hpak";
+        cfg.audioBuses.masterVolume = 0.75f;
+        REQUIRE(cfg.audioBuses.add("Music", 0.5f));
+        REQUIRE(cfg.audioBuses.add("SFX"));
+        REQUIRE(ProjectConfigLoader::save(tmpDir, cfg));
+        CHECK(versionOf() == 7);
+
+        ProjectConfig loaded;
+        REQUIRE(ProjectConfigLoader::load(tmpDir, loaded));
+        CHECK(loaded.audioBuses.masterVolume == doctest::Approx(0.75f));
+        REQUIRE(loaded.audioBuses.buses.size() == 2);
+        CHECK(loaded.audioBuses.buses[0].name == "Music");
+        CHECK(loaded.audioBuses.buses[0].volume == doctest::Approx(0.5f));
+        CHECK(loaded.audioBuses.buses[1].name == "SFX");
+        CHECK(loaded.audioBuses.buses[1].volume == doctest::Approx(1.0f));
+        // An untouched matrix stays default even though the file is v7.
+        CHECK(loaded.collisionLayers.isDefault());
     }
 
     he_test::removeAllQuiet(tmpDir);
+}
+
+TEST_CASE("AudioBusConfig: names are unique, JSON round-trips, garbage is dropped")
+{
+    HE::AudioBusConfig cfg;
+    CHECK(cfg.isDefault());
+    CHECK(cfg.add("Music", 0.8f));
+    CHECK_FALSE(cfg.add("Music"));      // a second Music would be two groups the mixer shows as one
+    CHECK_FALSE(cfg.add(""));
+    CHECK(cfg.add("SFX", -1.0f));       // clamped at silence, not negative gain
+    CHECK(cfg.find("SFX")->volume == doctest::Approx(0.0f));
+    CHECK_FALSE(cfg.isDefault());
+
+    nlohmann::json j = nlohmann::json::object();
+    cfg.toJson(j);
+    HE::AudioBusConfig back;
+    back.fromJson(j);
+    REQUIRE(back.buses.size() == 2);
+    CHECK(back.buses[0].name == "Music");
+    CHECK(back.buses[0].volume == doctest::Approx(0.8f));
+    CHECK(back.masterVolume == doctest::Approx(1.0f));
+
+    CHECK(cfg.remove("Music"));
+    CHECK_FALSE(cfg.remove("Music"));
+    CHECK(cfg.buses.size() == 1);
+
+    // A hand-edited file: a repeated name, an entry without one, a bad type.
+    const nlohmann::json junk = nlohmann::json::parse(
+        R"({"master": 0.5, "buses": [{"name":"A"}, {"name":"A","volume":0.1}, {"volume":1}, 7, {"name":"B","volume":"x"}]})");
+    HE::AudioBusConfig fromJunk;
+    fromJunk.fromJson(junk);
+    CHECK(fromJunk.masterVolume == doctest::Approx(0.5f));
+    REQUIRE(fromJunk.buses.size() == 2);
+    CHECK(fromJunk.buses[0].name == "A");
+    CHECK(fromJunk.buses[0].volume == doctest::Approx(1.0f));   // the first A wins
+    CHECK(fromJunk.buses[1].name == "B");
+    CHECK(fromJunk.buses[1].volume == doctest::Approx(1.0f));   // a string volume reads as unity
 }
 
 TEST_CASE("ProjectConfigLoader returns false for missing file")

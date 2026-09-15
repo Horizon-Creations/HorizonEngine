@@ -4,6 +4,9 @@
 #include <vector>
 #include <string>
 #include <ContentManager/Assets.h>   // AudioAsset, AudioEncoding
+#include <HorizonScene/AudioAttenuation.h>
+
+namespace HE { struct AudioBusConfig; }
 
 // Wraps miniaudio's ma_engine to play AudioAsset clips: int16 PCM straight from
 // a buffer, Ogg Vorbis decoded on the fly by the mixer (a voice holds the
@@ -32,6 +35,39 @@ public:
     float getBusVolume(const std::string& name) const; // returns 1.0 if bus not found
     bool  hasBus(const std::string& name) const;
 
+    // Tear a bus down. Every voice still routed through it is stopped first —
+    // miniaudio would otherwise leave those sounds attached to a group that no
+    // longer exists. Returns false for an unknown name.
+    bool  removeBus(const std::string& name);
+
+    // The buses that exist, sorted by name so a caller drawing them gets a
+    // stable order across frames (the table behind it is unordered).
+    std::vector<std::string> busNames() const;
+
+    // Mute keeps the bus's volume and silences its group; unmute puts the
+    // volume back. getBusVolume() keeps answering the REMEMBERED volume while
+    // muted, so a fader does not jump to zero when its M lights up. No-op for
+    // an unknown bus; isBusMuted() is false for one.
+    void  setBusMuted(const std::string& name, bool muted);
+    bool  isBusMuted(const std::string& name) const;
+
+    // Gain in front of every bus and every voice — the mixer's master fader.
+    // 1 when nothing was set; get returns 1 when not initialised.
+    void  setMasterVolume(float volume);
+    float getMasterVolume() const;
+
+    // Voices alive on a bus right now ("" = the ones on master). Finished
+    // voices are still counted until something stops or reaps them; it is what
+    // the mixer shows as activity, not an exact "audible now".
+    int   busVoiceCount(const std::string& name) const;
+
+    // Bring the engine in line with a project's bus list: create what is
+    // missing, set every listed volume and the master. Buses that exist here
+    // but not in the config are LEFT ALONE — a script may have made them, and
+    // this is called on project load and before play, not as a reset. Muting
+    // is untouched too; it belongs to the editor session, not the project.
+    void  applyBusConfig(const HE::AudioBusConfig& config);
+
     // ─── Playback ────────────────────────────────────────────────────────────
 
     // Play a clip asset, whatever its encoding. PCM16 copies the samples into
@@ -45,11 +81,16 @@ public:
     uint64_t play(const AudioAsset& clip,
                   float volume = 1.0f, float pitch = 1.0f, bool loop = false,
                   const std::string& busName = {});
+    // attenuation/rolloff: the curve between minDist and maxDist — see
+    // AudioAttenuation.h. Trailing with defaults so every caller that only
+    // knew the linear model keeps compiling and keeps sounding the same.
     uint64_t playSpatial(const AudioAsset& clip,
                          float volume, float pitch, bool loop,
                          float x, float y, float z,
                          float minDist = 1.0f, float maxDist = 20.0f,
-                         const std::string& busName = {});
+                         const std::string& busName = {},
+                         AudioAttenuation attenuation = AudioAttenuation::Linear,
+                         float rolloff = 1.0f);
 
     // Play non-spatial int16 interleaved PCM. Returns 0 on failure.
     // busName: route through a named bus ("" = master).
@@ -64,10 +105,22 @@ public:
                          float volume, float pitch, bool loop,
                          float x, float y, float z,
                          float minDist = 1.0f, float maxDist = 20.0f,
-                         const std::string& busName = {});
+                         const std::string& busName = {},
+                         AudioAttenuation attenuation = AudioAttenuation::Linear,
+                         float rolloff = 1.0f);
 
     // Update the world-space position of a playing spatial sound.
     void setSoundPosition(uint64_t handle, float x, float y, float z);
+
+    // Re-shape the falloff of a spatial sound that is already running — the
+    // Details panel edits a range during play and expects to hear it. No-op
+    // for an unknown handle or a 2D voice; the same clamps startSound applies
+    // (minDist > 0, maxDist > minDist) apply here.
+    void setSoundAttenuation(uint64_t handle, AudioAttenuation model,
+                             float minDist, float maxDist, float rolloff);
+    // What the voice is currently attenuating with; Linear for an unknown
+    // handle. Lets a test see the model landed without reaching into miniaudio.
+    AudioAttenuation getSoundAttenuation(uint64_t handle) const;
 
     // Update the listener transform (call once per frame from AudioListener entity).
     // forward and up should be unit vectors.
@@ -139,7 +192,12 @@ public:
 
 private:
     // Positional setup for a spatial sound — see playSpatial().
-    struct SpatialParams { float x, y, z, minDist, maxDist; };
+    struct SpatialParams
+    {
+        float x, y, z, minDist, maxDist;
+        AudioAttenuation attenuation;
+        float rolloff;
+    };
 
     // Shared body of every play variant: they only differ in the spatialization
     // flag and in the positional setup applied before the sound starts.

@@ -3,6 +3,7 @@
 #include <Types/UUID.h>
 #include <Application/DocumentTypes.h>   // AppDocumentType (what the export declares)
 #include <Physics/CollisionLayers.h>     // the collision matrix the shipped build simulates with
+#include <Audio/AudioBusConfig.h>        // the mixer buses the shipped build plays through
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -99,6 +100,11 @@ struct HE_API ExportSettings {
     // bullets hit the things the author had switched off — a difference that
     // shows up as gameplay, not as an error.
     HE::CollisionLayerConfig collisionLayers;
+    // The project's mixer buses (.heproj "audioBuses"). Without them a source
+    // whose Bus field names "Music" plays on master in the shipped game with
+    // a warning in a log nobody reads — the bus volume the author set in the
+    // mixer simply would not apply.
+    HE::AudioBusConfig audioBuses;
     // ── What the shipped application IS to the system (plan A7) ─────────────
     // The icon is generated from a built-in icon name on a coloured plate, so
     // the export writes the .icns / .ico / .png itself. Empty name = no icon
