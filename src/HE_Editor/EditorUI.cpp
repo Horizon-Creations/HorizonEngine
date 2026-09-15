@@ -44,6 +44,7 @@
 #include "EngineContentPublishDialog.h" // Assets > Publish Engine Content to Server...
 #include "HcRenameDialog.h"            // "that rename reaches other files" — from both graph editors
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
+#include "ProjectSettingsPanel.h"        // the Project Settings tab (what travels with the project)
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
@@ -1050,7 +1051,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (path.empty()
 		    || path == LevelScriptPanel::kTabPath
 		    || path == GameInstancePanel::kTabPath
-		    || path == EditorSettingsPanel::kTabPath)
+		    || path == EditorSettingsPanel::kTabPath
+		    || path == ProjectSettingsPanel::kTabPath)
 		{
 			doSaveScene();
 			return;
@@ -1291,6 +1293,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// list lives.
 	if (EditorSettingsPanel::takeOpenRequest())
 		openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
+	if (ProjectSettingsPanel::takeOpenRequest())
+		openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
+	// The Audio ▸ Buses page's "Open Audio Mixer" — the flag is this file's.
+	if (ProjectSettingsPanel::takeAudioMixerRequest() && !s_showAudioMixer)
+		togglePanelWindow(s_showAudioMixer, "Audio Mixer");
 	auto openExportDialog = [&]() { ExportDialogPanel::open(ctx); };
 	// ── Entity editing ───────────────────────────────────────────────────────
 	// One predicate behind the Edit menu AND the keyboard, so a greyed-out menu
@@ -1377,6 +1384,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::SaveSceneAs:     triggerSaveSceneAs();                                  break;
 			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
 			case MC::Preferences:     openVirtualTab("Preferences", EditorSettingsPanel::kTabPath); break;
+			case MC::ProjectSettings:
+				if (ctx.projectLoaded) openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
+				break;
 			// Same guards the footer buttons use — the native items carry no
 			// enabled-state of their own, so an empty stack has to be checked here.
 			case MC::Undo:
@@ -1515,6 +1525,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ctx.deleteEntity();
         }
         ImGui::Separator();
+		if (EditorWidgets::menuItem("Project Settings", nullptr, false, ctx.projectLoaded))
+			openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
 		if (EditorWidgets::menuItem("Preferences", "Ctrl+,"))
 			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         ImGui::EndMenu();
@@ -2877,6 +2889,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // The Level Script + Game Instance are virtual tabs (no backing .hasset).
         if (tabPath == EditorSettingsPanel::kTabPath)
             EditorSettingsPanel::render(ctx, tabPos, tabSize);
+        else if (tabPath == ProjectSettingsPanel::kTabPath)
+            ProjectSettingsPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == LevelScriptPanel::kTabPath)
             LevelScriptPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == GameInstancePanel::kTabPath)

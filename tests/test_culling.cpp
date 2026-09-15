@@ -19,6 +19,7 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
+#include <HorizonScene/Components/LightComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -1172,6 +1173,76 @@ TEST_CASE("cascadeTexelSnapOffset: anchors the shadow texel grid to the world")
 	const glm::vec2 off2 = HE::cascadeTexelSnapOffset(proj * view, kRes);
 	CHECK(std::abs(off2.x) < 1e-5f);
 	CHECK(std::abs(off2.y) < 1e-5f);
+}
+
+// The project's Shadows page reaches the cascade fit through
+// RenderExtractor::setShadowSettings (IRenderer::SetShadowSettings on the
+// GL/Metal backends). A backend that never calls it must fit exactly the
+// historical 3 × 250 m; one that does gets the count and the distance it asked
+// for, and an out-of-range count is clamped rather than overrunning ShadowData.
+TEST_CASE("RenderExtractor: setShadowSettings drives the cascade count and distance")
+{
+	HorizonWorld world;
+	// A sun and one caster: the fit needs a directional light above the
+	// 0.1 intensity floor and at least one object to bound.
+	{
+		auto sun = world.createEntity("sun");
+		world.registry().emplace<TransformComponent>(sun, TransformComponent{});
+		LightComponent l; l.type = HE::LightType::Directional; l.intensity = 2.0f;
+		world.registry().emplace<LightComponent>(sun, l);
+		auto e = world.createEntity("obj");
+		world.registry().emplace<TransformComponent>(e, TransformComponent{});
+		world.registry().emplace<MeshComponent>(e, MeshComponent{});
+	}
+
+	// Untouched: the constants the extractor always used.
+	{
+		RenderExtractor ex;
+		RenderWorld rw;
+		ex.extract(world, rw, 16.0f / 9.0f);
+		REQUIRE(rw.shadow.enabled);
+		CHECK(rw.shadow.cascadeCount == 3);
+		CHECK(rw.shadow.cascadeSplit[2] == doctest::Approx(250.0f).epsilon(0.01));
+		CHECK(rw.shadow.cascadeSplit[0] < rw.shadow.cascadeSplit[1]);
+		CHECK(rw.shadow.cascadeSplit[1] < rw.shadow.cascadeSplit[2]);
+	}
+	// The project's word: two cascades over 50 metres.
+	{
+		RenderExtractor ex;
+		ex.setShadowSettings(50.0f, 2, 0.5f, 1024);
+		RenderWorld rw;
+		ex.extract(world, rw, 16.0f / 9.0f);
+		REQUIRE(rw.shadow.enabled);
+		CHECK(rw.shadow.cascadeCount == 2);
+		CHECK(rw.shadow.cascadeSplit[1] == doctest::Approx(50.0f).epsilon(0.01));
+		CHECK(rw.shadow.cascadeSplit[2] == 0.0f);   // never written
+		CHECK(rw.shadow.cascadeSplit[0] < rw.shadow.cascadeSplit[1]);
+	}
+	// Uniform vs. logarithmic splits move the FIRST boundary, not the last.
+	{
+		RenderExtractor uni, log;
+		uni.setShadowSettings(250.0f, 3, 0.0f, 2048);
+		log.setShadowSettings(250.0f, 3, 1.0f, 2048);
+		RenderWorld ru, rl;
+		uni.extract(world, ru, 16.0f / 9.0f);
+		log.extract(world, rl, 16.0f / 9.0f);
+		CHECK(rl.shadow.cascadeSplit[0] < ru.shadow.cascadeSplit[0]);
+		CHECK(ru.shadow.cascadeSplit[2] == doctest::Approx(rl.shadow.cascadeSplit[2]));
+	}
+	// Out of range is clamped, never trusted: 0 → 1, 9 → 3 (what every
+	// cascade consumer is built for), a negative distance → 1 m.
+	{
+		RenderExtractor ex;
+		ex.setShadowSettings(250.0f, 9, 0.5f, 2048);
+		RenderWorld rw;
+		ex.extract(world, rw, 16.0f / 9.0f);
+		CHECK(rw.shadow.cascadeCount == 3);
+		ex.setShadowSettings(-5.0f, 0, 0.5f, 2048);
+		ex.extract(world, rw, 16.0f / 9.0f);
+		CHECK(rw.shadow.cascadeCount == 1);
+		CHECK(rw.shadow.cascadeSplit[0] > 0.0f);
+		CHECK(rw.shadow.cascadeSplit[0] <= 1.0f + 1e-3f);
+	}
 }
 
 // ─── GI shader-kernel drift guard ────────────────────────────────────────────

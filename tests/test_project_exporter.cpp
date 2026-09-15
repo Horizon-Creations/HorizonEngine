@@ -13,6 +13,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -781,6 +782,91 @@ TEST_CASE("ProjectExporter copies startup scene file")
     ProjectConfig cfg;
     REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
     CHECK(cfg.mainSceneName == "Main.hescene");
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
+// The project's settings file rides VERBATIM next to project.hcfg — byte for
+// byte, so the exporter never has to understand it and the game reads exactly
+// what the panel wrote. And it rides BOTH ways: a project that lost its file
+// (back to the defaults) takes a stale copy out of the output again, because
+// "no file" is the answer "default" and a leftover would quietly overrule it.
+TEST_CASE("ProjectExporter ships Config/ProjectSettings.json verbatim and removes a stale one")
+{
+    auto root       = std::filesystem::temp_directory_path() / "he_test_export_settings_root";
+    auto contentDir = root / "Content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_settings_out";
+    he_test::removeAllQuiet(root);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+    std::filesystem::create_directories(root / "Config");
+
+    // Not a valid settings document on purpose: the copy must be verbatim, and
+    // a parse-and-rewrite would either choke on this or normalise it.
+    const std::string bytes = "{ \"version\": 1, \"shadows\": { \"distance\": 123 }, \"odd\":  [1,2 ] }\n";
+    { std::ofstream f(root / "Config" / "ProjectSettings.json", std::ios::binary); f << bytes; }
+
+    ExportSettings settings;
+    settings.compress            = false;
+    settings.projectSettingsFile = root / "Config" / "ProjectSettings.json";
+    auto result = ProjectExporter::exportProject(contentDir, "Cfg", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+
+    const auto shipped = outputDir / "Config" / "ProjectSettings.json";
+    REQUIRE(std::filesystem::exists(shipped));
+    {
+        std::ifstream in(shipped, std::ios::binary);
+        std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == bytes);
+    }
+
+    // The project reverts to the defaults: the file is gone. The next export of
+    // the same output must not leave the old numbers lying there.
+    std::filesystem::remove(root / "Config" / "ProjectSettings.json");
+    result = ProjectExporter::exportProject(contentDir, "Cfg", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+    CHECK_FALSE(std::filesystem::exists(shipped));
+
+    // And an exporter told nothing about a settings file touches nothing: the
+    // pre-existing behaviour for tools that pack a bare directory.
+    { std::ofstream f(shipped, std::ios::binary); f << bytes; }
+    ExportSettings mute;
+    mute.compress = false;
+    result = ProjectExporter::exportProject(contentDir, "Cfg", "", outputDir, mute);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+    CHECK(std::filesystem::exists(shipped));
+
+    he_test::removeAllQuiet(root);
+    he_test::removeAllQuiet(outputDir);
+}
+
+// The title is what a launcher SHOWS; the project name is what the files are
+// CALLED. The .desktop entry's Name= takes the title, its file name and the
+// identifier inside it stay derived from the project name — retitling a game
+// must not move its identity.
+TEST_CASE("ProjectExporter labels the .desktop entry with the display name, files keep the project name")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_title_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_title_out";
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    ExportSettings settings;
+    settings.compress     = false;
+    settings.iconPlatform = ExportPlatform::Linux;
+    settings.displayName  = "Shiny Title";
+    settings.documentTypes.push_back({ "shiny", "Shiny Document", "" });
+    const auto result = ProjectExporter::exportProject(contentDir, "ShinyProj", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+
+    CHECK(std::filesystem::exists(outputDir / "ShinyProj.hpak"));
+    const auto desktop = outputDir / "com.horizonengine.shinyproj.desktop";
+    REQUIRE(std::filesystem::exists(desktop));
+    std::ifstream in(desktop);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(text.find("Name=Shiny Title\n") != std::string::npos);
+    CHECK(text.find("Name=ShinyProj") == std::string::npos);
 
     he_test::removeAllQuiet(contentDir);
     he_test::removeAllQuiet(outputDir);

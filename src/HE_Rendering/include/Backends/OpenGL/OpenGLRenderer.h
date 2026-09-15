@@ -73,6 +73,7 @@ public:
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetShadowSettings(const ShadowSettings& settings) override;
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
@@ -193,6 +194,7 @@ private:
 		int lightCount, lightPos, lightDir, lightColor, lightParams, cameraPos;
 		int shadowEnabled, shadowDebug, cascadeVP, cascadeSplits, cameraFwd, shadowMap;
 		int localShadowMap, localShadowVP;
+		int shadowBias;   // vec2 (slope, min) — the project's ShadowSettings bias pair
 	};
 	// The per-frame shadow inputs the block needs (all DrawScene locals).
 	struct SceneShadowFrame
@@ -430,6 +432,7 @@ private:
 	int          m_uShadowDebug   = -1;   // 1 = tint fragments by cascade index
 	int          m_uLocalShadowVP  = -1;  // mat4[16] local (point/spot) shadow view-projs
 	int          m_uLocalShadowMap = -1;  // local shadow atlas sampler unit
+	int          m_uShadowBias     = -1;  // vec2 (slope, min) CSM receiver bias
 	int          m_uAO            = -1;   // SSAO occlusion sampler unit
 	int          m_uViewport      = -1;   // viewport size (screen-space AO lookup)
 	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
@@ -475,6 +478,7 @@ private:
 	int          m_uSkinnedShadowMap       = -1;
 	int          m_uSkinnedLocalShadowVP   = -1;
 	int          m_uSkinnedLocalShadowMap  = -1;
+	int          m_uSkinnedShadowBias      = -1;
 	int          m_uSkinnedAO              = -1;
 	int          m_uSkinnedViewport        = -1;
 	int          m_uSkinnedSSAOEnabled     = -1;
@@ -513,6 +517,7 @@ private:
 	int          m_uInstShadowMap           = -1;
 	int          m_uInstLocalShadowVP       = -1;
 	int          m_uInstLocalShadowMap      = -1;
+	int          m_uInstShadowBias          = -1;
 	int          m_uInstShadowEnabled       = -1;
 	int          m_uInstAO                  = -1;
 	int          m_uInstViewport            = -1;
@@ -574,6 +579,13 @@ private:
 	unsigned int m_shadowFBO      = 0;
 	unsigned int m_shadowDepthTex = 0;   // GL_TEXTURE_2D_ARRAY, Depth24, one layer/cascade
 	int          m_shadowSize     = HE::kShadowMapResolution;
+	// The project's directional-shadow settings (SetShadowSettings). The fit
+	// values go to m_extractor each frame right before extract(); a resolution
+	// change re-specifies m_shadowDepthTex's storage at the start of the next
+	// frame (never mid-pass); the bias pair goes to the shaders as uShadowBias /
+	// Lighting::shadowBias.
+	ShadowSettings m_shadowSettings;
+	bool           m_shadowSizeDirty = false;
 	// Local (point/spot) shadow atlas: 2D depth ARRAY, one layer per spot view /
 	// point cube face (16 layers, see ShadowData::kMaxLocalShadowLayers).
 	unsigned int m_localShadowDepthTex = 0; // GL_TEXTURE_2D_ARRAY, Depth24

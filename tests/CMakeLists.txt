@@ -49,6 +49,7 @@ add_executable(he_tests
     # The Audio Mixer, driven the same way: strips from a real ProjectData, a
     # click on M reaching the device-less AudioEngine as a mute, S as a solo.
     test_audio_mixer_ui.cpp
+    test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
     test_scene_recovery_ui.cpp
@@ -126,6 +127,7 @@ add_executable(he_tests
     test_logging.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
+    test_project_settings.cpp
     test_export_backend.cpp
     test_cpp_scaffold.cpp
     test_tutorial.cpp
@@ -497,6 +499,10 @@ add_executable(he_tests
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
+    # The Project Settings tab, for test_project_settings_ui.cpp: same
+    # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
+    # writes Config/ProjectSettings.json through the ProjectManager.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -516,6 +522,8 @@ set_source_files_properties(
     test_audio_mixer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
+    test_project_settings_ui.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE

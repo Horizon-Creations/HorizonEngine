@@ -711,7 +711,11 @@ namespace
 	// follows the sun by day and the moon by night). The ortho frustum is fitted
 	// around the union of the (seeded) object bounds — backends refine bounds
 	// elsewhere, but this rough fit is enough for a single full-scene shadow map.
-	void fitDirectionalShadow(RenderWorld& out)
+	// The fit parameters (shadowDistance, cascadeCount, splitLambda, mapRes)
+	// are the extractor's setShadowSettings() state: the project's word, or
+	// the historical constants for a backend that never pushed any.
+	void fitDirectionalShadow(RenderWorld& out, float shadowDistance, int cascadeCount,
+	                          float splitLambda, int mapRes)
 	{
 		out.shadow.enabled = false;
 		const LightData* shadowLight = nullptr;
@@ -740,9 +744,9 @@ namespace
 		// Texel-snap the frustum centre so the shadow-map samples stay on stable
 		// world positions as the day-night light rotates — without this the shadow
 		// edges crawl/flicker frame to frame. Snap the centre along the light's
-		// right/up axes in whole-texel steps (kShadowMapResolution must match the
-		// backends' shadow map resolution).
-		constexpr float kShadowMapRes = static_cast<float>(HE::kShadowMapResolution);
+		// right/up axes in whole-texel steps (mapRes must match the backend's
+		// shadow map resolution).
+		const float kShadowMapRes = static_cast<float>(mapRes);
 		const float worldPerTexel = (2.0f * radius) / kShadowMapRes;
 		const glm::vec3 right = glm::normalize(glm::cross(dir, up)); // glm::lookAt side axis
 		const glm::vec3 upL   = glm::cross(right, dir);              // glm::lookAt up axis
@@ -759,17 +763,20 @@ namespace
 		out.shadow.enabled   = true;
 
 		// ── Cascaded Shadow Maps (Metal) ───────────────────────────────────
-		// Fit `kCascadeCount` tight light frusta to successive slices of the camera
+		// Fit `cascadeCount` tight light frusta to successive slices of the camera
 		// frustum, but only out to a BOUNDED shadowDistance (not the 5000-unit far
 		// plane) — that bound is what makes the near cascade hug the camera and give
 		// sharp shadows. Each cascade is fit to the bounding SPHERE of its sub-frustum
 		// (rotation-invariant → stable texel size) and texel-snapped in its own light
 		// space (no crawl). The light-direction (Z) range is kept generous so casters
 		// between the light and the slice are not clipped.
-		constexpr int   kCascadeCount  = 3;
-		constexpr float kShadowDistance = 250.0f; // metres of shadow coverage (tunable)
-		constexpr float kLambda        = 0.5f;    // uniform↔logarithmic split blend
-		constexpr float kCascadeRes    = static_cast<float>(HE::kShadowMapResolution);
+		// Count / distance / lambda are the project's (ProjectShadowSettings via
+		// IRenderer::SetShadowSettings); their defaults are what used to be the
+		// constants here (3 / 250 m / 0.5).
+		const int   kCascadeCount   = std::clamp(cascadeCount, 1, ShadowData::kMaxCascades);
+		const float kShadowDistance = shadowDistance; // metres of shadow coverage
+		const float kLambda         = splitLambda;    // uniform↔logarithmic split blend
+		const float kCascadeRes     = static_cast<float>(mapRes);
 
 		// Camera near/far from the (glm, z∈[-1,1]) projection matrix.
 		const glm::mat4& P = out.camera.projection;
@@ -998,7 +1005,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	extractLights(reg, out);
 	applyDayNight(out);
 	// Shadows last: both phases read the finished object + light sets.
-	fitDirectionalShadow(out);
+	fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes);
 	assignLocalShadowLayers(out);
 }
 

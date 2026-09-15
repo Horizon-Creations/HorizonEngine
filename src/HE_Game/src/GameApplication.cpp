@@ -444,6 +444,19 @@ void GameApplication::applyShippedConfig()
 			m_appMode    = true;
 			m_windowMode = HE::WindowMode::Windowed;
 		}
+
+		// Config/ProjectSettings.json, the project's own word on its title,
+		// shadows and physics — read HERE and not in OnInit because the title
+		// is the window's, and GetConfig() is asked for the window before OnInit
+		// runs. A missing file is the default (every build made before it
+		// existed); a damaged one is logged and ALSO the default, because a
+		// game must start either way.
+		if (!HE::loadProjectSettings(fs::path(baseRaw), m_projectSettings))
+		{
+			HE_LOG_WARN(Core, "GameApplication: %s is unreadable — using default project settings",
+			            HE::projectSettingsPath(fs::path(baseRaw)).string().c_str());
+			m_projectSettings = HE::ProjectSettings{};
+		}
 	}
 
 	// An absent key keeps what the member already holds, which is what a game
@@ -503,7 +516,13 @@ void GameApplication::applyShippedConfig()
 HE::ApplicationConfig GameApplication::GetConfig() const
 {
 	HE::ApplicationConfig cfg;
-	cfg.windowprops.title  = m_config.projectName.empty() ? "HorizonGame" : m_config.projectName;
+	// The title the project gave itself (Project Settings ▸ Game), else the
+	// project name, else the bare runtime's. Only the WINDOW takes the title:
+	// the save directory (SDL_GetPrefPath in OnInit) stays on the project name,
+	// or retitling a game would strand every player's saves.
+	cfg.windowprops.title  = !m_projectSettings.game.title.empty() ? m_projectSettings.game.title
+	                       : m_config.projectName.empty()          ? std::string("HorizonGame")
+	                                                               : m_config.projectName;
 	cfg.windowprops.width  = m_windowWidth;
 	cfg.windowprops.height = m_windowHeight;
 	cfg.windowprops.vsync  = m_vsyncOn;
@@ -571,6 +590,9 @@ void GameApplication::OnInit()
 		HE_LOG_INFO(Core, "%s", "GameApplication: no project.hcfg — running without pak");
 		return;
 	}
+	// Config/ProjectSettings.json beside it is already in m_projectSettings: the
+	// constructor read it with the hcfg peek, because the window title in it is
+	// needed before OnInit (applyShippedConfig).
 	// Application build (docs/he-apps-plan.md A1): everything below that belongs
 	// to a GAME is skipped. Latched into a member because half a dozen places
 	// downstream ask, and reaching into m_config at each of them invites one of
@@ -1550,6 +1572,11 @@ void GameApplication::startPhysics()
 	// when the build predates the field — everything collides, which is how this
 	// engine behaved before channels existed.
 	m_physicsWorld->setCollisionLayers(m_config.collisionLayers);
+	// The project's gravity (Config/ProjectSettings.json). Before initialize()
+	// too — setGravity wakes every body, and there is nothing to wake yet.
+	// The rate half of that page is m_projectSettings.physics.fixedDt(), read
+	// where the accumulator steps.
+	m_physicsWorld->setGravity(m_projectSettings.physics.gravity);
 	m_physicsWorld->initialize(*m_world);
 	// Every runtime spawn goes through the entity host, so it is the host that
 	// has to know where bodies are built. Set HERE rather than at the two call
@@ -2527,9 +2554,10 @@ void GameApplication::OnRender(float deltaTime)
 	// script-driven transforms/params are reflected the same frame.
 	updateScripts(gameDt);
 
-	// Physics at a FIXED rate, the same one the editor previews at
-	// (PhysicsWorld::kFixedDt) — a game that simulates at a different rate
-	// than it was authored against is not the same game.
+	// Physics at a FIXED rate, the same one the editor previews at — the
+	// project's (ProjectPhysicsSettings::fixedDt, default PhysicsWorld::kFixedDt).
+	// A game that simulates at a different rate than it was authored against is
+	// not the same game.
 	if (m_world && m_physicsWorld)
 	{
 		HE_PROFILE_SCOPE_N("PhysicsStep");
@@ -2537,7 +2565,7 @@ void GameApplication::OnRender(float deltaTime)
 		// into ever more catch-up steps, with the bound riding the time scale —
 		// the rule lives in HE::advanceFixedSteps so the editor's preview cannot
 		// pace differently from the game it is previewing.
-		HE::advanceFixedSteps(m_physicsAccum, gameDt, PhysicsWorld::kFixedDt,
+		HE::advanceFixedSteps(m_physicsAccum, gameDt, m_projectSettings.physics.fixedDt(),
 		                      HE::api::time::timeScale(),
 		                      [&](float step){ m_physicsWorld->step(*m_world, step); });
 
@@ -2714,6 +2742,20 @@ void GameApplication::OnRender(float deltaTime)
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAORadius", 0.5f)),
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAOIntensity", 1.0f)),
 				GlobalState::getInstance().getCustomConfigInt("SSAOMethod", 0)});
+			// Directional shadows are the PROJECT's (Config/ProjectSettings.json
+			// next to project.hcfg), not config.json's: the same cascades the
+			// editor's viewport showed. Defaults = the historical constants.
+			{
+				const HE::ProjectShadowSettings& sh = m_projectSettings.shadows;
+				IRenderer::ShadowSettings s;
+				s.distance     = sh.distance;
+				s.cascadeCount = sh.cascadeCount;
+				s.resolution   = sh.resolution;
+				s.splitLambda  = sh.splitLambda;
+				s.slopeBias    = sh.slopeBias;
+				s.minBias      = sh.minBias;
+				r->SetShadowSettings(s);
+			}
 
 			// Global Illumination — GlobalIlluminationEnabled/GIIndirectIntensity/
 			// GILightRadius, capability-gated so non-Metal/non-raytracing builds no-op.

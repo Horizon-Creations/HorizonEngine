@@ -1543,7 +1543,7 @@ void EditorApplication::OnInit()
 		// known: the font atlas is baked ONCE and every backend uploads it once,
 		// so a mask that arrives after the first label was drawn cannot be
 		// applied. uiSetFontScripts says so rather than half-applying it, and
-		// Preferences ▸ Project ▸ Fonts turns that "no" into a sentence about
+		// Project Settings ▸ Game ▸ Fonts turns that "no" into a sentence about
 		// restarting. Opening a second project with a different answer in one
 		// session is exactly that case.
 		HE::uiSetFontScripts(m_projectManager.currentProject().fontScripts);
@@ -2649,6 +2649,13 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.SSAORadius,
 			m_editorConfig.SSAOIntensity,
 			m_editorConfig.SSAOMethod});
+		// Directional shadows come from the PROJECT (Project Settings ▸ Shadows),
+		// not from the editor's preferences: the cascades a scene is lit with
+		// are part of the scene's look and must not differ between machines.
+		// Every frame, like the rest, so an edit on that page lands in the
+		// viewport as it is made; no project = the renderer's own defaults,
+		// which are the historical constants.
+		renderer()->SetShadowSettings(projectShadowSettings());
 		{
 			// Anti-aliasing. Same env-override treatment as GI/SSR below and for the
 			// same reason: this push runs every frame, so an override applied once
@@ -3022,7 +3029,8 @@ void EditorApplication::OnRender(float dt)
 			// Same bounded accumulator as the shipped game, from the same helper:
 			// this loop used to have no cap at all, so a stall that the game
 			// shrugged off turned a preview into catch-up steps forever.
-			HE::advanceFixedSteps(m_physicsAccum, gameDt, kPhysicsFixedDt,
+			HE::advanceFixedSteps(m_physicsAccum, gameDt,
+			                      m_projectManager.currentProject().settings.physics.fixedDt(),
 			                      HE::api::time::timeScale(),
 			                      [&](float step){ m_physicsWorld->step(*m_editorWorld, step); });
 		}
@@ -4155,6 +4163,7 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetSSAOSettings(IRenderer::SSAOSettings{
 		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
 		m_editorConfig.SSAOMethod});
+	r->SetShadowSettings(projectShadowSettings());
 	{
 		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
 		// the render scale and the specular-AA toggle for this capture only, so
@@ -7620,6 +7629,13 @@ AppContext EditorApplication::makeContext()
 			if (m_physicsWorld)
 				m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
 		},
+		.applyPhysicsSettings = [this]{
+			// Gravity only: the fixed rate is read from the project on every
+			// step already. Outside play mode there is no world, and the next
+			// play start reads both from the project itself.
+			if (m_physicsWorld)
+				m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
+		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selection           = m_selection,
@@ -8136,6 +8152,11 @@ void EditorApplication::setPlayMode(bool play)
 		// its channel, and a matrix handed over afterwards would leave the
 		// opening scene simulating on the default one until something rebuilt.
 		m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
+		// The project's gravity (Config/ProjectSettings.json), before initialize()
+		// as well: setGravity wakes every body, and there is none to wake yet.
+		// Same order as GameApplication::startPhysics, because a preview that
+		// falls differently from the build is not a preview.
+		m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is
@@ -8417,6 +8438,49 @@ std::string EditorApplication::gameInstancePath()
 	if (p.empty()) return {};
 	if (std::filesystem::is_regular_file(p)) p = p.parent_path();
 	return (p / "GameInstance.hcode").string();
+}
+
+IRenderer::ShadowSettings EditorApplication::projectShadowSettings()
+{
+	IRenderer::ShadowSettings out;
+	if (m_projectLoaded)
+	{
+		const HE::ProjectShadowSettings& s = m_projectManager.currentProject().settings.shadows;
+		out.distance     = s.distance;
+		out.cascadeCount = s.cascadeCount;
+		out.resolution   = s.resolution;
+		out.splitLambda  = s.splitLambda;
+		out.slopeBias    = s.slopeBias;
+		out.minBias      = s.minBias;
+	}
+	// HE_DUMP_SHADOW: the A/B knob for he_shot.py — "distance,cascades,
+	// resolution,lambda,slopeBias,minBias" (trailing fields optional), so a
+	// capture can prove the values reach the renderer without touching the
+	// project's file. Static: this runs every frame.
+	static const char* s_ov = std::getenv("HE_DUMP_SHADOW");
+	if (s_ov && *s_ov)
+	{
+		float v[6] = { out.distance, static_cast<float>(out.cascadeCount),
+		               static_cast<float>(out.resolution), out.splitLambda,
+		               out.slopeBias, out.minBias };
+		const char* p = s_ov;
+		for (int i = 0; i < 6 && *p; ++i)
+		{
+			char* end = nullptr;
+			const float f = std::strtof(p, &end);
+			if (end == p) break;
+			v[i] = f;
+			p = end;
+			if (*p == ',') ++p;
+		}
+		out.distance     = v[0];
+		out.cascadeCount = static_cast<int>(v[1]);
+		out.resolution   = static_cast<int>(v[2]);
+		out.splitLambda  = v[3];
+		out.slopeBias    = v[4];
+		out.minBias      = v[5];
+	}
+	return out;
 }
 
 void EditorApplication::loadGameInstanceGraph()

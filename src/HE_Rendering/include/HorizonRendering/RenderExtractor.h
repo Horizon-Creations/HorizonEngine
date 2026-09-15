@@ -1,6 +1,8 @@
 #pragma once
 #include "../HE_RENDERING_API.h"
 #include <Renderer/IRenderer.h>   // EditorCameraOverride, EnvironmentSettings
+#include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
+#include <algorithm>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/mat4x4.hpp>
@@ -143,6 +145,22 @@ public:
         m_cloudCoverage  = cloudCoverage;
     }
 
+    // Directional-light shadow fit (IRenderer::ShadowSettings, pushed by the
+    // backends that render cascades): how far from the camera shadows reach,
+    // how many cascades slice that range, how the splits are blended between
+    // uniform and logarithmic, and the map resolution the texel snap is done
+    // against. `resolution` MUST be the size the backend actually allocated,
+    // or the snap lands between texels and the shadow edges crawl again. The
+    // defaults are the constants this extractor always used, so a backend that
+    // never calls this fits its cascades exactly as before.
+    void setShadowSettings(float distance, int cascadeCount, float splitLambda, int resolution)
+    {
+        m_shadowDistance = std::max(distance, 1.0f);
+        m_cascadeCount   = std::clamp(cascadeCount, 1, 3);
+        m_splitLambda    = std::clamp(splitLambda, 0.0f, 1.0f);
+        m_shadowMapRes   = std::max(resolution, 1);
+    }
+
 private:
     // Overwrites the extracted sun/moon directional lights (and out.ambient /
     // out.sunDirection) from the day-night state pushed via setDayNight.
@@ -161,6 +179,11 @@ private:
     // first sight is picked up on the next editor start (or the next
     // ContentManager, see setContentManager). Baked UUIDs never come through.
     std::unordered_set<std::string> m_sectionMaterialMissing;
+    // setShadowSettings() state; defaults = the historical fit constants.
+    float     m_shadowDistance = 250.0f;
+    int       m_cascadeCount   = 3;
+    float     m_splitLambda    = 0.5f;
+    int       m_shadowMapRes   = HE::kShadowMapResolution;
     bool      m_dayNight       = false;
     float     m_timeOfDay      = 0.5f;
     glm::vec3 m_sunColor       = glm::vec3(1.0f, 0.97f, 0.90f);

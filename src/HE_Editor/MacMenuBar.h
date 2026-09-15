@@ -30,6 +30,9 @@ namespace MacMenuBar
 		// per-panel undo stacks (material graph, UI editor, text fields) all live
 		// on that key.
 		Undo, Redo,
+		// Edit ▸ Project Settings…: the tab that edits the PROJECT (Preferences
+		// stays in the app menu and edits the editor).
+		ProjectSettings,
 		ResetLayout, ToggleProfiler, ToggleEnvironment, ToggleCollab, ToggleSourceControl,
 		// View, continued. No Toggle Full Screen here on purpose: the View menu
 		// already carries the NATIVE one (toggleFullScreen: on the responder

@@ -288,6 +288,9 @@ uniform mat4  uCascadeVP[CSM_CASCADES]; // per-cascade light view-proj (GL clip)
 uniform vec4  uCascadeSplits;           // xyz = cascade far distance (view space); w = count
 uniform vec3  uCameraFwd;               // world forward, for planar view-Z cascade select
 uniform int   uShadowDebug;             // 1 = tint fragments by cascade index
+// Receiver depth bias (project ShadowSettings): x = slope-scaled factor,
+// y = minimum. Defaults (0.0008, 0.0002) are the literals this used to carry.
+uniform vec2  uShadowBias;
 
 out vec4 FragColor;
 
@@ -321,7 +324,7 @@ float computeShadow(vec3 worldPos, vec3 N, vec3 L, out int outCascade)
 		return 1.0;                          // outside this cascade → lit
 	// Slope-scaled residual depth bias for sub-texel precision, scaled by cascade.
 	float ndl  = clamp(dot(N, L), 0.0, 1.0);
-	float bias = clamp(0.0008 * tan(acos(ndl)), 0.0002, 0.02) * float(c + 1);
+	float bias = clamp(uShadowBias.x * tan(acos(ndl)), uShadowBias.y, 0.02) * float(c + 1);
 	// 3×3 PCF over the chosen cascade's array layer. textureSize on a sampler2DArray
 	// returns ivec3 (w,h,layers); .xy is the per-layer 2D size.
 	vec2 texel = 1.0 / vec2(textureSize(uShadowMap, 0).xy);
@@ -4964,8 +4967,8 @@ static constexpr int kSkyEnvFace = 128; // image-based-ambient cubemap face size
 
 // Cascaded shadow maps: number of depth-array layers / cascades. MUST match the
 // shader's CSM_CASCADES (kUnlitFS) and stay ≤ ShadowData::kMaxCascades. The
-// extractor fits ShadowData::cascadeCount (3) cascades; this caps the GL side to
-// the same number it renders + samples.
+// extractor fits the project's cascade count (setShadowSettings, 1..3); this
+// caps the GL side to the same number it renders + samples.
 static constexpr int kGLCsmCascades = 3;
 
 void OpenGLRenderer::CreateUnlitPipeline()
@@ -5037,6 +5040,7 @@ void OpenGLRenderer::CreateUnlitPipeline()
 	m_uShadowDebug   = glGetUniformLocation(m_unlitProgram, "uShadowDebug");
 	m_uLocalShadowVP  = glGetUniformLocation(m_unlitProgram, "uLocalShadowVP[0]");
 	m_uLocalShadowMap = glGetUniformLocation(m_unlitProgram, "uLocalShadowMap");
+	m_uShadowBias     = glGetUniformLocation(m_unlitProgram, "uShadowBias");
 	m_uAO            = glGetUniformLocation(m_unlitProgram, "uAO");
 	m_uViewport      = glGetUniformLocation(m_unlitProgram, "uViewport");
 	m_uSSAOEnabled   = glGetUniformLocation(m_unlitProgram, "uSSAOEnabled");
@@ -5535,6 +5539,7 @@ void OpenGLRenderer::CreateSkinnedPipeline()
 	m_uSkinnedShadowMap          = loc("uShadowMap");
 	m_uSkinnedLocalShadowVP      = loc("uLocalShadowVP[0]");
 	m_uSkinnedLocalShadowMap     = loc("uLocalShadowMap");
+	m_uSkinnedShadowBias         = loc("uShadowBias");
 	m_uSkinnedAO                 = loc("uAO");
 	m_uSkinnedViewport           = loc("uViewport");
 	m_uSkinnedSSAOEnabled        = loc("uSSAOEnabled");
@@ -5597,6 +5602,7 @@ void OpenGLRenderer::CreateInstancedPipeline()
 	m_uInstShadowEnabled    = loc("uShadowEnabled");
 	m_uInstLocalShadowVP    = loc("uLocalShadowVP[0]");
 	m_uInstLocalShadowMap   = loc("uLocalShadowMap");
+	m_uInstShadowBias       = loc("uShadowBias");
 	m_uInstAO               = loc("uAO");
 	m_uInstViewport         = loc("uViewport");
 	m_uInstSSAOEnabled      = loc("uSSAOEnabled");
@@ -6346,6 +6352,15 @@ void OpenGLRenderer::SetSSAOSettings(const SSAOSettings& s)
 	m_ssaoRadius    = s.radius;
 	m_ssaoIntensity = s.intensity;
 	m_ssaoMethod    = s.method;
+}
+
+void OpenGLRenderer::SetShadowSettings(const ShadowSettings& s)
+{
+	// The texture is not touched here: this is called from the editor's frame
+	// push, which may land between passes. RenderScene re-specifies the array
+	// at its top when the size no longer matches.
+	m_shadowSizeDirty |= (s.resolution != m_shadowSettings.resolution);
+	m_shadowSettings   = s;
 }
 
 void OpenGLRenderer::SetGISettings(const GISettings& s)
@@ -10598,6 +10613,7 @@ void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneSh
 	glUniformMatrix4fv(L.cascadeVP, kGLCsmCascades, GL_FALSE, F.cascadeVPData);
 	glUniform4fv(L.cascadeSplits, 1, glm::value_ptr(F.cascadeSplits));
 	glUniform3fv(L.cameraFwd, 1, glm::value_ptr(F.cameraFwd));
+	glUniform2f(L.shadowBias, m_shadowSettings.slopeBias, m_shadowSettings.minBias);
 	glUniform1i(L.shadowMap, 1);
 	// Local (point/spot) shadow atlas on unit 11 — the sampler is always assigned
 	// (sampling is gated per light by uLightParams[i].y), the matrices only when
@@ -10795,6 +10811,22 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	                        env.sunColor, env.sunIntensity,
 	                        env.moonColor, env.moonIntensity,
 	                        env.cloudCoverage);
+	// Project shadow settings (SetShadowSettings): a changed resolution
+	// re-specifies the cascade array's storage — mutable glTexImage3D storage,
+	// the per-cascade layer attach happens in the shadow pass anyway — and the
+	// extractor fits its cascades against the size that is actually allocated.
+	if (m_shadowSizeDirty && m_shadowDepthTex)
+	{
+		m_shadowSize = std::clamp(m_shadowSettings.resolution, 256, 8192);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT24,
+		             m_shadowSize, m_shadowSize, kGLCsmCascades,
+		             0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+		m_shadowSizeDirty = false;
+	}
+	m_extractor.setShadowSettings(m_shadowSettings.distance, m_shadowSettings.cascadeCount,
+	                              m_shadowSettings.splitLambda, m_shadowSize);
 	m_extractor.setContentManager(m_contentManager);
 	m_extractor.extract(*m_world, m_renderWorld,
 	                    static_cast<float>(pw) / static_cast<float>(ph),
@@ -11273,7 +11305,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		BindSceneLighting({ m_uLightCount, m_uLightPos, m_uLightDir, m_uLightColor, m_uLightParams,
 		                    m_uCameraPos, m_uShadowEnabled, m_uShadowDebug, m_uCascadeVP,
 		                    m_uCascadeSplits, m_uCameraFwd, m_uShadowMap,
-		                    m_uLocalShadowMap, m_uLocalShadowVP }, shadowFrame);
+		                    m_uLocalShadowMap, m_uLocalShadowVP, m_uShadowBias }, shadowFrame);
 
 		// CSM shadow-map array bound on texture unit 1. Always bound (the sampling
 		// is gated by uShadowEnabled) so the sampler2DArray never reads a mismatched
@@ -11317,7 +11349,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			                    m_uInstLightColor, m_uInstLightParams, m_uInstCameraPos,
 			                    m_uInstShadowEnabled, m_uInstShadowDebug, m_uInstCascadeVP,
 			                    m_uInstCascadeSplits, m_uInstCameraFwd, m_uInstShadowMap,
-			                    m_uInstLocalShadowMap, m_uInstLocalShadowVP }, shadowFrame);
+			                    m_uInstLocalShadowMap, m_uInstLocalShadowVP, m_uInstShadowBias }, shadowFrame);
 			glUseProgram(m_unlitProgram); // restore for the per-object loop
 		}
 
@@ -12113,6 +12145,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					lit.csmSplits[2] = cascadeSplits.z;
 					lit.csmSplits[3] = static_cast<float>(nc);
 					lit.camFwd[0] = camFwd.x; lit.camFwd[1] = camFwd.y; lit.camFwd[2] = camFwd.z;
+					lit.shadowBias[0] = m_shadowSettings.slopeBias;
+					lit.shadowBias[1] = m_shadowSettings.minBias;
 				}
 				glBindBuffer(GL_UNIFORM_BUFFER, m_resolveLightUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
@@ -12249,7 +12283,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			                    m_uSkinnedLightColor, m_uSkinnedLightParams, m_uSkinnedCameraPos,
 			                    m_uSkinnedShadowEnabled, m_uSkinnedShadowDebug, m_uSkinnedCascadeVP,
 			                    m_uSkinnedCascadeSplits, m_uSkinnedCameraFwd, m_uSkinnedShadowMap,
-			                    m_uSkinnedLocalShadowMap, m_uSkinnedLocalShadowVP }, shadowFrame);
+			                    m_uSkinnedLocalShadowMap, m_uSkinnedLocalShadowVP, m_uSkinnedShadowBias }, shadowFrame);
 			// Re-assert the CSM array on unit 1 — opaque/instanced draws and the AO
 			// bind run between the unlit setup and here; this guarantees the skinned
 			// sampler2DArray reads the shadow array, not a stale 2D texture.

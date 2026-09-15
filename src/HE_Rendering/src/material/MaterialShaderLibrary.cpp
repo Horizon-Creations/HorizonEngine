@@ -220,6 +220,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 cloudShadowA;   // cloud shadows: xy = region origin (world XZ), z = 1/region size, w = slab mid-plane Y
     vec4 cloudShadowB;   // x = strength (0 = off / not bound)
     vec4 specAA;         // x = specular-AA strength (0 = off), y = 1 in geometry passes (own normal + valid derivatives)
+    vec4 shadowBias;     // CSM receiver bias: x = slope-scaled factor, y = minimum (project ShadowSettings; filled with csmVP)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -383,7 +384,9 @@ float heCsmShadow(vec3 worldPos, vec3 n, vec3 L) {
     if (p.z > 1.0 || any(lessThan(uv, texel)) || any(greaterThan(uv, vec2(1.0) - texel)))
         return 1.0;
     float ndl  = clamp(dot(n, L), 0.0, 1.0);
-    float bias = clamp(0.0008 * tan(acos(ndl)), 0.0002, 0.02) * float(c + 1);
+    // Bias pair from the project's shadow settings; the fill sites that hand
+    // over csmVP hand over this too (0.0008 / 0.0002 by default).
+    float bias = clamp(heLight.shadowBias.x * tan(acos(ndl)), heLight.shadowBias.y, 0.02) * float(c + 1);
     float vis = 0.0;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {

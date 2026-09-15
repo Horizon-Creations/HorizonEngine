@@ -139,6 +139,10 @@ struct AppContext
 	// be right for as long as nobody looked at it. Doing nothing outside play
 	// mode is correct — the next play start reads the matrix from the project.
 	std::function<void()> applyCollisionLayers;
+	// Same contract for the project's physics settings (gravity; the fixed rate
+	// is read per step, so it needs no push): the Simulation page calls it after
+	// saving, and a crate resting in the preview falls the new way at once.
+	std::function<void()> applyPhysicsSettings;
 	ScriptEngine*      propScriptEngine = nullptr; // read-only, for inspector property reading
 
 	// Editor scene-view camera (orbit/fly/focus). Owned by EditorApplication;
@@ -537,6 +541,11 @@ private:
 	void loadGameInstanceGraph();  // read the project's GameInstance.hcode → host
 	void saveGameInstanceGraph();  // write m_gameInstanceGraph → project file
 	std::string gameInstancePath(); // <projectDir>/GameInstance.hcode
+	// The open project's Shadows page as the renderer takes it (no project =
+	// defaults = the historical constants). HE_DUMP_SHADOW overrides it for a
+	// headless capture: "distance,cascades,resolution,lambda,slopeBias,minBias",
+	// any trailing field may be left off.
+	IRenderer::ShadowSettings projectShadowSettings();
 
 	// Per-project open-tab persistence (stored in the global config keyed by
 	// project path). restoreOpenTabs runs on project load; saveOpenTabs runs when
@@ -595,9 +604,9 @@ private:
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
 	float m_physicsAccum = 0.0f;
-	// One definition for both apps (PhysicsWorld.h): the packaged game has to
-	// simulate at the rate the editor previewed it at.
-	static constexpr float kPhysicsFixedDt = PhysicsWorld::kFixedDt;
+	// The step is the PROJECT's (ProjectPhysicsSettings::fixedDt, read from
+	// currentProject().settings where the accumulator steps): the packaged game
+	// reads the same file, so it simulates at the rate the editor previewed at.
 
 	// Audio engine — initialised at startup, active always (spatial update only in play mode).
 	AudioEngine m_audioEngine;

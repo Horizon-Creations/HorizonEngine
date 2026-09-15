@@ -300,7 +300,7 @@ void render(AppContext& ctx)
 #ifdef HE_IMGUI_ENABLED
 // The project's sixteen collision-channel names, as a combo's item list.
 //
-// The names come from the PROJECT (Preferences ▸ Project ▸ Collision Layers) and
+// The names come from the PROJECT (Project Settings ▸ Physics ▸ Collision Layers) and
 // are data, not literals — which is why the combo below asks for its help by key
 // rather than by label. Without a project open the default names stand, so the
 // row still reads "Default"/"Player"/… instead of sixteen blanks.

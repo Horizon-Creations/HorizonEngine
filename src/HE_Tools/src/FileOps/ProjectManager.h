@@ -7,6 +7,7 @@
 #include <Application/DocumentTypes.h>   // HE::AppDocumentType (the .heproj list)
 #include <Physics/CollisionLayers.h>     // HE::CollisionLayerConfig (the .heproj matrix)
 #include <Audio/AudioBusConfig.h>        // HE::AudioBusConfig (the .heproj mixer buses)
+#include <Project/ProjectSettings.h>     // HE::ProjectSettings (Config/ProjectSettings.json)
 
 // Persisted as an int in the .heproj manifest ("preset") — only ever append.
 enum class ProjectPreset
@@ -348,6 +349,16 @@ struct ProjectData
 	// of {extension, name, icon}). Empty is the normal case — an application that
 	// owns no file type is not a lesser one.
 	std::vector<HE::AppDocumentType> documentTypes;
+
+	// ── The project's settings file (Config/ProjectSettings.json) ────────────
+	// Shadows, physics rate and gravity, the render defaults of the packaged
+	// build, the game's title — see HE::ProjectSettings for why they are a
+	// file of their own and not more keys in the manifest. Loaded beside the
+	// .heproj; written ONLY by ProjectManager::saveProjectSettings (the Project
+	// Settings tab), never by saveProject, so the manifest's many writers
+	// cannot touch it. Default-constructed = no file = how every project made
+	// before this behaved.
+	HE::ProjectSettings settings;
 };
 
 class HE_TOOLS_API ProjectManager
@@ -373,6 +384,15 @@ public:
 	bool loadProject(const std::string& projectPath);
 	bool saveProject(const std::string& projectPath);
 	void closeProject();
+
+	// Writes currentProject().settings to <root>/Config/ProjectSettings.json —
+	// the ONE writer of that file (see ProjectData::settings). False when no
+	// project is open or the file could not be written; a default-constructed
+	// settings block with no file yet writes nothing and answers true.
+	bool saveProjectSettings();
+
+	// The folder the .heproj sits in; empty when no project is open.
+	std::string projectRoot() const;
 
 	ProjectData& currentProject() { return m_currentProject; }
 

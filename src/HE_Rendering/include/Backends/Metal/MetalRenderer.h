@@ -122,6 +122,7 @@ public:
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetShadowSettings(const ShadowSettings& settings) override;
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetSSRSettings(const SSRSettings& settings) override;
@@ -548,6 +549,13 @@ private:
 	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float 2D ARRAY (one layer/cascade)
 	void* m_shadowPipeline = nullptr;  // id<MTLRenderPipelineState>, depth-only
 	int   m_shadowSize     = HE::kShadowMapResolution;
+	// The project's directional-shadow settings (SetShadowSettings). Distance /
+	// count / lambda go to m_extractor as they arrive; a resolution change
+	// retires the cascade array and allocates a new one at the top of the next
+	// primary frame (never between passes of one); the bias pair rides in
+	// SceneUniforms::shadowBias / Lighting::shadowBias.
+	ShadowSettings m_shadowSettings;
+	bool           m_shadowSizeDirty = false;
 	// Local (point/spot) shadow atlas: 2D depth ARRAY, one layer per spot view /
 	// point cube face (16 layers total, see ShadowData::kMaxLocalShadowLayers).
 	void* m_localShadowTex  = nullptr; // id<MTLTexture>, Depth32Float 2D ARRAY

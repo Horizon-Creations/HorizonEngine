@@ -334,6 +334,29 @@ public:
     };
     virtual void SetSSAOSettings(const SSAOSettings& /*settings*/) {}
 
+    // ── Directional-light shadows (cascaded shadow maps) ─────────────────────
+    // Pushed every frame from the PROJECT's settings (ProjectShadowSettings —
+    // the editor reads them off the open project, the packaged game off the
+    // ProjectSettings.json shipped next to project.hcfg). Defaults are the
+    // constants the extractor and the CSM shaders have always used, so a
+    // backend that is never pushed draws exactly what it drew.
+    // Honoured by the backends that render cascades (OpenGL, Metal): distance /
+    // cascadeCount / splitLambda / resolution go to their RenderExtractor, a
+    // resolution change reallocates the cascade depth array, and the bias pair
+    // reaches the shaders as a uniform:
+    //   bias = clamp(slopeBias * tan(acos(N·L)), minBias, 0.02) * (cascade + 1)
+    // The single-map backends (D3D11/D3D12/Vulkan) ignore it.
+    struct ShadowSettings
+    {
+        float distance     = 250.0f;  // metres of shadow coverage from the camera
+        int   cascadeCount = 3;       // 1..3 (what every cascade consumer is built for)
+        int   resolution   = 2048;    // texels per cascade edge
+        float splitLambda  = 0.5f;    // 0 = uniform cascade splits, 1 = logarithmic
+        float slopeBias    = 0.0008f;
+        float minBias      = 0.0002f;
+    };
+    virtual void SetShadowSettings(const ShadowSettings& /*settings*/) {}
+
     // ── Global Illumination (ray-traced DDGI) ───────────────────────────────
     // Pushed every frame by the editor's preferences and by the packaged game
     // (see GameApplication's GlobalState config read, mirroring GpuParticles).
