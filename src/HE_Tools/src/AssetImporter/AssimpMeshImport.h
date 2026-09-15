@@ -4,7 +4,8 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "ImporterCommon.h"   // Importer::BakedRange
+#include "ImporterCommon.h"     // Importer::BakedRange
+#include "PbrMaterialImport.h"  // Importer::PbrMaterialDesc / PbrImage / PbrMaterialImport
 
 // Assimp lives in the build tree's _deps and is a PRIVATE dependency of
 // HorizonImporters — nothing that includes this header (MeshImporter, the
@@ -83,9 +84,32 @@ namespace Importer
 		// the scene declares none.
 		int primaryMaterialIndex(const AssimpBakedGeometry& baked) const;
 
+		// Every aiScene::mMaterials entry as the shared material core's description
+		// (index-parallel, so BakedRange::materialIndex addresses `materials`), over
+		// an image table with one entry per DISTINCT texture reference — embedded
+		// textures ("*N" or by file name) carry their bytes, external ones the file
+		// found next to the source. AssimpMaterialImport.cpp explains the mapping
+		// from Assimp's Phong-plus-PBR-keys model onto the engine's.
+		void describeMaterials(const std::filesystem::path&  sourcePath,
+		                       std::vector<PbrMaterialDesc>& materials,
+		                       std::vector<PbrImage>&        images) const;
+
 	private:
 		struct Impl;
 		std::unique_ptr<Impl> impl_;
 		bool                  fbx_ = false;   // source was FBX: bake() applies the cm → m factor
 	};
+
+	// Imports every material of a loaded scene — describeMaterials() handed to
+	// importPbrMaterials() — the way importGltfMaterials does for glTF: one
+	// MaterialAsset per aiMaterial, one TextureAsset per image, `primary` for the
+	// mesh's MREF and `paths` for its section table. `primaryIndex` is
+	// primaryMaterialIndex() of the baked geometry.
+	PbrMaterialImport importAssimpMaterials(const AssimpScene&           scene,
+	                                        int                          primaryIndex,
+	                                        const std::filesystem::path& sourcePath,
+	                                        const std::filesystem::path& contentRoot,
+	                                        const std::filesystem::path& relativeOutputDir,
+	                                        const std::string&           meshStem,
+	                                        const OutputTargets&         outputs);
 }

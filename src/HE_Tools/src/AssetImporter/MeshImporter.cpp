@@ -119,10 +119,10 @@ std::unique_ptr<StaticMeshAsset> finishImport(std::unique_ptr<StaticMeshAsset> m
 #ifdef HE_HAVE_ASSIMP
 // FBX / OBJ / COLLADA through Assimp. The geometry arrives in the same streams
 // the glTF bake fills, so normals, sections and the write are the shared code
-// above; only the reading differs. Materials are NOT imported on this path yet —
-// every section keeps an empty path ("the mesh's own material"), and the mesh
-// binds the re-import redirect if there is one, so the slots exist for the
-// user to fill in the inspector and a later material pass to bind.
+// above; only the reading differs. Materials go through the same core as
+// glTF's (PbrMaterialImport) — AssimpMaterialImport translates aiMaterial into
+// its description — so every aiMaterial becomes a MaterialAsset with its
+// textures, bound section by section exactly as on the glTF path.
 std::unique_ptr<StaticMeshAsset> importViaAssimp(
 	const std::filesystem::path&        sourcePath,
 	const std::filesystem::path&        contentRoot,
@@ -165,10 +165,20 @@ std::unique_ptr<StaticMeshAsset> importViaAssimp(
 	if (settings.generateNormals && baked.missingNormals)
 		generateNormals(*mesh);
 
+	// Materials + textures, the glTF rule throughout: every source material its
+	// own asset, section 0's is the mesh-level MREF, the stem only names UNNAMED
+	// materials and embedded images.
+	const int primary = scene.primaryMaterialIndex(baked);
+	Importer::PbrMaterialImport materials;
+	if (settings.importMaterials)
+		materials = Importer::importAssimpMaterials(
+			scene, primary, sourcePath, contentRoot, relativeOutputDir, stem, outputs);
+	mesh->materialPath = materials.primary;
 	// See the glTF path for why an empty MREF must be avoided.
-	mesh->materialPath = outputs.material;
+	if (mesh->materialPath.empty())
+		mesh->materialPath = outputs.material;
 	mesh->sections = Importer::buildMeshSections(
-		baked.ranges, scene.primaryMaterialIndex(baked), /*materialPaths=*/{}, mesh->indices);
+		baked.ranges, primary, materials.paths, mesh->indices);
 
 	return finishImport(std::move(mesh), sourcePath, contentRoot);
 }

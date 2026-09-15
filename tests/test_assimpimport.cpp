@@ -8,6 +8,8 @@
 #include "MeshImporter.h"
 #include "ImporterCommon.h"
 #include <ContentManager/Assets.h>
+#include <ContentManager/ContentManager.h>
+#include <MaterialGraph/MaterialGraph.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -28,6 +30,67 @@ bool writeText(const fs::path& file, const std::string& text)
 	if (!f) return false;
 	f << text;
 	return true;
+}
+
+// A 1x1 red PNG (truecolor, 8 bit) — the smallest real image stb_image decodes.
+// The PIXELS are irrelevant here: every material assertion below is about
+// paths, pins and slots, so the same bytes stand in for every channel.
+const uint8_t kPng1x1[] = {
+	0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+	0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+	0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, 0x00, 0x00, 0x00,
+	0x0C, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+	0x00, 0x03, 0x01, 0x01, 0x00, 0xF7, 0x03, 0x41, 0x43, 0x00, 0x00, 0x00,
+	0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
+};
+
+bool writePng(const fs::path& file)
+{
+	std::error_code ec;
+	fs::create_directories(file.parent_path(), ec);
+	std::ofstream png(file, std::ios::binary);
+	if (!png) return false;
+	png.write(reinterpret_cast<const char*>(kPng1x1), static_cast<std::streamsize>(sizeof(kPng1x1)));
+	return true;
+}
+
+// Loads a written material back the way the engine does, so the assertions run
+// against the DESERIALIZED asset rather than the in-memory struct the importer
+// happened to build.
+struct LoadedMaterial
+{
+	ContentManager       cm;
+	const MaterialAsset* mat = nullptr;
+	explicit LoadedMaterial(const fs::path& contentRoot, const std::string& rel)
+		: cm(contentRoot.string())
+	{
+		mat = cm.getMaterial(cm.loadAsset(rel));
+	}
+};
+
+// The node the Output pin `pin` is driven by, or nullptr when unconnected.
+const HE::MatGraphNode* pinSource(const HE::MaterialGraph& g, int outputNode, int pin)
+{
+	for (const HE::MatGraphLink& l : g.links)
+		if (l.dstNode == outputNode && l.dstPin == pin)
+			return g.findNode(l.srcNode);
+	return nullptr;
+}
+
+int outputNodeId(const HE::MaterialGraph& g)
+{
+	for (const HE::MatGraphNode& n : g.nodes)
+		if (n.type == HE::MatNodeType::Output) return n.id;
+	return 0;
+}
+
+// The graph of a loaded material, or an empty one (with a failed REQUIRE).
+HE::MaterialGraph graphOf(const LoadedMaterial& loaded)
+{
+	HE::MaterialGraph g;
+	REQUIRE(loaded.mat != nullptr);
+	REQUIRE(HE::materialGraphFromJson(loaded.mat->nodeGraphJson, g));
+	return g;
 }
 
 // Index of the vertex sitting at `p` (±eps), or -1. Assimp's identical-vertex
@@ -218,17 +281,47 @@ TEST_CASE("OBJ import: one section per usemtl, UVs taken verbatim (no V flip)")
 	CHECK(mesh->normals.size()  == 6 * 3);   // generated: the OBJ has none
 	CHECK(mesh->uvs.size()      == 6 * 2);
 
-	// Two materials → two sections, contiguous and covering the buffer; no
-	// material was imported on this path, so both paths are empty ("the mesh's
-	// own material") and the mesh binds none either.
+	// Two materials → two sections, contiguous and covering the buffer, each
+	// bound to the MaterialAsset written for its usemtl — named after the OBJ
+	// material — and the mesh binds section 0's, exactly the glTF rule.
 	REQUIRE(mesh->sections.size() == 2);
 	CHECK(mesh->sections[0].indexOffset == 0);
 	CHECK(mesh->sections[0].indexCount  == 3);
 	CHECK(mesh->sections[1].indexOffset == 3);
 	CHECK(mesh->sections[1].indexCount  == 3);
-	CHECK(mesh->sections[0].materialPath.empty());
-	CHECK(mesh->sections[1].materialPath.empty());
-	CHECK(mesh->materialPath.empty());
+	CHECK(mesh->sections[0].materialPath == "Imported/MatA.hasset");
+	CHECK(mesh->sections[1].materialPath == "Imported/MatB.hasset");
+	CHECK(mesh->materialPath == "Imported/MatA.hasset");
+	CHECK(fs::exists(contentRoot / "Imported/MatA.hasset"));
+	CHECK(fs::exists(contentRoot / "Imported/MatB.hasset"));
+
+	// A Phong material's Kd is the base colour, and the absence of any PBR key
+	// makes it a DIELECTRIC — Assimp's model has no metallic default, and glTF's
+	// (metallic 1) would turn every OBJ into chrome.
+	{
+		LoadedMaterial a(contentRoot, "Imported/MatA.hasset");
+		REQUIRE(a.mat != nullptr);
+		CHECK(a.mat->baseColor[0] == doctest::Approx(1.0f));
+		CHECK(a.mat->baseColor[1] == doctest::Approx(0.0f));
+		CHECK(a.mat->baseColor[2] == doctest::Approx(0.0f));
+		CHECK(a.mat->metallic  == doctest::Approx(0.0f));
+		CHECK(a.mat->roughness == doctest::Approx(0.5f));   // no Ns → the middle of the range
+		CHECK(a.mat->texturePaths.empty());
+		const HE::MaterialGraph g = graphOf(a);
+		const int out = outputNodeId(g);
+		REQUIRE(out != 0);
+		// Metallic and roughness are wired even without a texture: the Output
+		// node's pin defaults are not the material's values.
+		const HE::MatGraphNode* metal = pinSource(g, out, HE::kMatOutputMetallicPin);
+		REQUIRE(metal != nullptr);
+		CHECK(metal->type == HE::MatNodeType::ConstFloat);
+		CHECK(metal->p[0] == doctest::Approx(0.0f));
+		CHECK(pinSource(g, out, HE::kMatOutputRoughnessPin) != nullptr);
+		const HE::MatGraphNode* base = pinSource(g, out, HE::kMatOutputBaseColorPin);
+		REQUIRE(base != nullptr);
+		CHECK(base->type == HE::MatNodeType::ConstColor);
+		CHECK(base->p[0] == doctest::Approx(1.0f));
+	}
 
 	// The OBJ's vt (0.25, 0.75) on the origin vertex arrives unchanged: Assimp's
 	// UV origin is bottom-left like the engine's, unlike glTF's.
@@ -323,6 +416,279 @@ TEST_CASE("Assimp import: an unreadable file fails without an asset")
 	CHECK(MeshImporter::import(dir / "garbage.fbx", contentRoot, "Imported") == nullptr);
 	CHECK_FALSE(fs::exists(contentRoot / "Imported" / "garbage.hasset"));
 	CHECK(MeshImporter::import(dir / "missing.obj", contentRoot, "Imported") == nullptr);
+	he_test::removeAllQuiet(dir);
+}
+
+// OBJ's PBR extension: separate metallic and roughness maps (map_Pm / map_Pr,
+// each a grey image read from R), `norm` for the normal map, Ke as a constant
+// emissive. Four distinct images fill the graph's four texture slots exactly.
+TEST_CASE("OBJ PBR material: separate metallic/roughness maps, normal map, Kd not applied as tint")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_assimp_objpbr";
+	he_test::removeAllQuiet(dir);
+	for (const char* t : { "crate_base", "crate_normal", "crate_rough", "crate_metal" })
+		REQUIRE(writePng(dir / (std::string(t) + ".png")));
+	REQUIRE(writeText(dir / "crate.obj",
+		"mtllib crate.mtl\n"
+		"v 0 0 0\nv 1 0 0\nv 0 1 0\n"
+		"vt 0 0\nvt 1 0\nvt 0 1\n"
+		"usemtl M_Crate\n"
+		"f 1/1 2/2 3/3\n"));
+	REQUIRE(writeText(dir / "crate.mtl",
+		"newmtl M_Crate\n"
+		"Kd 0.8 0.8 0.8\n"          // Blender's lighting coefficient next to a map: NOT a tint
+		"Ke 1 0 0\n"
+		"Ns 250\n"
+		"Pm 0.5\n"                  // explicit PBR factor: multiplies the metallic map
+		"map_Kd crate_base.png\n"
+		"norm crate_normal.png\n"
+		"map_Pr crate_rough.png\n"
+		"map_Pm crate_metal.png\n"));
+	const fs::path contentRoot = dir / "Content";
+
+	auto mesh = MeshImporter::import(dir / "crate.obj", contentRoot, "Imported");
+	REQUIRE(mesh != nullptr);
+	CHECK(mesh->materialPath == "Imported/M_Crate.hasset");
+	REQUIRE(mesh->sections.size() == 1);
+	CHECK(mesh->sections[0].materialPath == "Imported/M_Crate.hasset");
+
+	// Every image became its own texture asset, named after the image FILE.
+	for (const char* t : { "crate_base", "crate_normal", "crate_rough", "crate_metal" })
+		CHECK(fs::exists(contentRoot / ("Imported/" + std::string(t) + ".hasset")));
+
+	LoadedMaterial loaded(contentRoot, "Imported/M_Crate.hasset");
+	REQUIRE(loaded.mat != nullptr);
+	// The legacy heTex0 slot points at the base colour.
+	REQUIRE(loaded.mat->texturePaths.size() == 1);
+	CHECK(loaded.mat->texturePaths[0] == "Imported/crate_base.hasset");
+	// Kd is dropped under a base-colour map (a Phong coefficient, not a tint);
+	// the explicit Pm survives as the metallic factor.
+	CHECK(loaded.mat->baseColor[0] == doctest::Approx(1.0f));
+	CHECK(loaded.mat->metallic     == doctest::Approx(0.5f));
+	// With a roughness MAP and no Pr, the factor is 1 so the map is not darkened
+	// by the Ns-derived fallback.
+	CHECK(loaded.mat->roughness    == doctest::Approx(1.0f));
+
+	const HE::MaterialGraph g = graphOf(loaded);
+	const int out = outputNodeId(g);
+	REQUIRE(out != 0);
+
+	// Base colour straight from the sampler — no Multiply by a 0.8 tint in between.
+	const HE::MatGraphNode* base = pinSource(g, out, HE::kMatOutputBaseColorPin);
+	REQUIRE(base != nullptr);
+	CHECK(base->type == HE::MatNodeType::TextureSample);
+	CHECK(base->s    == "Imported/crate_base.hasset");
+
+	// Metallic: map × 0.5 (Multiply fed by the map's SplitRGBA); roughness: the
+	// map's split directly (factor 1).
+	const HE::MatGraphNode* metal = pinSource(g, out, HE::kMatOutputMetallicPin);
+	REQUIRE(metal != nullptr);
+	CHECK(metal->type == HE::MatNodeType::Multiply);
+	const HE::MatGraphNode* rough = pinSource(g, out, HE::kMatOutputRoughnessPin);
+	REQUIRE(rough != nullptr);
+	CHECK(rough->type == HE::MatNodeType::SplitRGBA);
+
+	const HE::MatGraphNode* normal = pinSource(g, out, HE::kMatOutputNormalPin);
+	REQUIRE(normal != nullptr);
+	CHECK(normal->type == HE::MatNodeType::NormalMapSample);
+	CHECK(normal->s    == "Imported/crate_normal.hasset");
+
+	const HE::MatGraphNode* emissive = pinSource(g, out, HE::kMatOutputEmissivePin);
+	REQUIRE(emissive != nullptr);
+	CHECK(emissive->type == HE::MatNodeType::ConstColor);
+	CHECK(emissive->p[0] == doctest::Approx(1.0f));
+	CHECK(emissive->p[1] == doctest::Approx(0.0f));
+
+	// Four distinct images, four slots — separate metallic and roughness maps
+	// each cost one, unlike glTF's packed ORM.
+	CHECK(loaded.mat->graphTexturePaths.size() == 4);
+	CHECK(loaded.mat->blendMode == static_cast<uint8_t>(HE::MatBlendMode::Opaque));
+	// Every sampler reads the mesh UV (an unwired UV pin samples one texel).
+	for (const HE::MatGraphNode& n : g.nodes)
+	{
+		if (n.type != HE::MatNodeType::TextureSample && n.type != HE::MatNodeType::NormalMapSample)
+			continue;
+		bool wired = false;
+		for (const HE::MatGraphLink& l : g.links)
+			if (l.dstNode == n.id && l.dstPin == 0) { wired = true; break; }
+		CHECK(wired);
+	}
+	he_test::removeAllQuiet(dir);
+}
+
+// A constant opacity below 1 (OBJ `d`) is a translucent surface with the
+// Opacity pin wired; a missing texture file loses the channel with a warning
+// but never the material.
+TEST_CASE("OBJ material: d < 1 imports translucent, a missing map drops only its channel")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_assimp_objalpha";
+	he_test::removeAllQuiet(dir);
+	REQUIRE(writeText(dir / "glass.obj",
+		"mtllib glass.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl Glass\nf 1 2 3\n"));
+	REQUIRE(writeText(dir / "glass.mtl",
+		"newmtl Glass\nKd 0.2 0.4 0.6\nd 0.25\nmap_Kd not_there.png\n"));
+	const fs::path contentRoot = dir / "Content";
+
+	auto mesh = MeshImporter::import(dir / "glass.obj", contentRoot, "Imported");
+	REQUIRE(mesh != nullptr);
+	// "Glass" vs the mesh's "glass": one file on macOS and Windows, so the
+	// material must step aside — on every platform, so the outputs match.
+	CHECK(mesh->materialPath == "Imported/Glass_2.hasset");
+	// Assimp's OBJ reader prepends a "DefaultMaterial" nothing here uses; it is
+	// not written out as a stray asset.
+	CHECK_FALSE(fs::exists(contentRoot / "Imported/DefaultMaterial.hasset"));
+
+	LoadedMaterial loaded(contentRoot, "Imported/Glass_2.hasset");
+	REQUIRE(loaded.mat != nullptr);
+	CHECK(loaded.mat->blendMode == static_cast<uint8_t>(HE::MatBlendMode::Translucent));
+	CHECK(loaded.mat->opacity == doctest::Approx(0.25f));
+	CHECK(loaded.mat->texturePaths.empty());   // the map was not found: no channel, no crash
+	// Kd IS the colour here — there is no map to defer to.
+	CHECK(loaded.mat->baseColor[0] == doctest::Approx(0.2f));
+	CHECK(loaded.mat->baseColor[2] == doctest::Approx(0.6f));
+
+	const HE::MaterialGraph g = graphOf(loaded);
+	const int out = outputNodeId(g);
+	REQUIRE(out != 0);
+	const HE::MatGraphNode* opacity = pinSource(g, out, HE::kMatOutputOpacityPin);
+	REQUIRE(opacity != nullptr);
+	CHECK(opacity->type == HE::MatNodeType::ConstFloat);
+	CHECK(opacity->p[0] == doctest::Approx(0.25f));
+	he_test::removeAllQuiet(dir);
+}
+
+// An ASCII FBX with a Phong material and a texture connected to DiffuseColor:
+// the material asset is named after the FBX material, the texture is found by
+// its RelativeFilename next to the source, and the Phong ShininessExponent
+// becomes a roughness (Assimp's own FBX rule, 1 - sqrt(exp) / 10).
+TEST_CASE("FBX Phong material: texture resolved next to the source, shininess becomes roughness")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_assimp_fbxmat";
+	he_test::removeAllQuiet(dir);
+	REQUIRE(writePng(dir / "tri_diffuse.png"));
+	const std::string fbx =
+"; FBX 7.4.0 project file\n"
+"FBXHeaderExtension:  {\n"
+"\tFBXHeaderVersion: 1003\n"
+"\tFBXVersion: 7400\n"
+"\tCreator: \"HorizonEngine test fixture\"\n"
+"}\n"
+"GlobalSettings:  {\n"
+"\tVersion: 1000\n"
+"\tProperties70:  {\n"
+"\t\tP: \"UpAxis\", \"int\", \"Integer\", \"\",1\n"
+"\t\tP: \"UpAxisSign\", \"int\", \"Integer\", \"\",1\n"
+"\t\tP: \"FrontAxis\", \"int\", \"Integer\", \"\",2\n"
+"\t\tP: \"FrontAxisSign\", \"int\", \"Integer\", \"\",1\n"
+"\t\tP: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n"
+"\t\tP: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n"
+"\t\tP: \"UnitScaleFactor\", \"double\", \"Number\", \"\",100\n"
+"\t}\n"
+"}\n"
+"Objects:  {\n"
+"\tGeometry: 1000, \"Geometry::Tri\", \"Mesh\" {\n"
+"\t\tVertices: *9 {\n"
+"\t\t\ta: 0,0,0,1,0,0,0,1,0\n"
+"\t\t}\n"
+"\t\tPolygonVertexIndex: *3 {\n"
+"\t\t\ta: 0,1,-3\n"
+"\t\t}\n"
+"\t\tGeometryVersion: 124\n"
+"\t\tLayerElementUV: 0 {\n"
+"\t\t\tVersion: 101\n"
+"\t\t\tName: \"UVMap\"\n"
+"\t\t\tMappingInformationType: \"ByPolygonVertex\"\n"
+"\t\t\tReferenceInformationType: \"Direct\"\n"
+"\t\t\tUV: *6 {\n"
+"\t\t\t\ta: 0,0,1,0,0,1\n"
+"\t\t\t}\n"
+"\t\t}\n"
+"\t\tLayerElementMaterial: 0 {\n"
+"\t\t\tVersion: 101\n"
+"\t\t\tName: \"\"\n"
+"\t\t\tMappingInformationType: \"AllSame\"\n"
+"\t\t\tReferenceInformationType: \"IndexToDirect\"\n"
+"\t\t\tMaterials: *1 {\n"
+"\t\t\t\ta: 0\n"
+"\t\t\t}\n"
+"\t\t}\n"
+"\t\tLayer: 0 {\n"
+"\t\t\tVersion: 100\n"
+"\t\t\tLayerElement:  {\n"
+"\t\t\t\tType: \"LayerElementUV\"\n"
+"\t\t\t\tTypedIndex: 0\n"
+"\t\t\t}\n"
+"\t\t\tLayerElement:  {\n"
+"\t\t\t\tType: \"LayerElementMaterial\"\n"
+"\t\t\t\tTypedIndex: 0\n"
+"\t\t\t}\n"
+"\t\t}\n"
+"\t}\n"
+"\tModel: 2000, \"Model::Tri\", \"Mesh\" {\n"
+"\t\tVersion: 232\n"
+"\t\tShading: T\n"
+"\t\tCulling: \"CullingOff\"\n"
+"\t}\n"
+"\tMaterial: 3000, \"Material::M_Tri\", \"\" {\n"
+"\t\tVersion: 102\n"
+"\t\tShadingModel: \"phong\"\n"
+"\t\tMultiLayer: 0\n"
+"\t\tProperties70:  {\n"
+"\t\t\tP: \"DiffuseColor\", \"Color\", \"\", \"A\",0.2,0.4,0.6\n"
+"\t\t\tP: \"ShininessExponent\", \"double\", \"Number\", \"\",16\n"
+"\t\t}\n"
+"\t}\n"
+"\tTexture: 4000, \"Texture::T_Diffuse\", \"\" {\n"
+"\t\tType: \"TextureVideoClip\"\n"
+"\t\tVersion: 202\n"
+"\t\tTextureName: \"Texture::T_Diffuse\"\n"
+"\t\tFileName: \"C:\\\\somewhere\\\\else\\\\tri_diffuse.png\"\n"
+"\t\tRelativeFilename: \"tri_diffuse.png\"\n"
+"\t\tModelUVTranslation: 0,0\n"
+"\t\tModelUVScaling: 1,1\n"
+"\t\tTexture_Alpha_Source: \"None\"\n"
+"\t\tCropping: 0,0,0,0\n"
+"\t}\n"
+"}\n"
+"Connections:  {\n"
+"\tC: \"OO\",2000,0\n"
+"\tC: \"OO\",1000,2000\n"
+"\tC: \"OO\",3000,2000\n"
+"\tC: \"OP\",4000,3000, \"DiffuseColor\"\n"
+"}\n";
+	REQUIRE(writeText(dir / "tri.fbx", fbx));
+	const fs::path contentRoot = dir / "Content";
+
+	auto mesh = MeshImporter::import(dir / "tri.fbx", contentRoot, "Imported");
+	REQUIRE(mesh != nullptr);
+	CHECK(mesh->materialPath == "Imported/M_Tri.hasset");
+	REQUIRE(mesh->sections.size() == 1);
+	CHECK(mesh->sections[0].materialPath == "Imported/M_Tri.hasset");
+	CHECK(fs::exists(contentRoot / "Imported/tri_diffuse.hasset"));
+
+	LoadedMaterial loaded(contentRoot, "Imported/M_Tri.hasset");
+	REQUIRE(loaded.mat != nullptr);
+	REQUIRE(loaded.mat->texturePaths.size() == 1);
+	CHECK(loaded.mat->texturePaths[0] == "Imported/tri_diffuse.hasset");
+	CHECK(loaded.mat->metallic  == doctest::Approx(0.0f));
+	CHECK(loaded.mat->roughness == doctest::Approx(1.0f - 4.0f / 10.0f));   // 1 - sqrt(16)/10
+	// DiffuseColor under a diffuse map is a coefficient, not a tint.
+	CHECK(loaded.mat->baseColor[0] == doctest::Approx(1.0f));
+
+	const HE::MaterialGraph g = graphOf(loaded);
+	const int out = outputNodeId(g);
+	REQUIRE(out != 0);
+	const HE::MatGraphNode* base = pinSource(g, out, HE::kMatOutputBaseColorPin);
+	REQUIRE(base != nullptr);
+	CHECK(base->type == HE::MatNodeType::TextureSample);
+	CHECK(base->s    == "Imported/tri_diffuse.hasset");
+
+	// The sidecar bookkeeping reads the material and its textures back off the
+	// mesh, so a Reimport and the asset compiler's up-to-date probe see them.
+	const auto sidecars = Importer::meshSidecarAssets(contentRoot / "Imported/tri.hasset", contentRoot);
+	REQUIRE(sidecars.size() >= 2);
+	CHECK(sidecars[0] == "Imported/M_Tri.hasset");
+	CHECK(std::find(sidecars.begin(), sidecars.end(), "Imported/tri_diffuse.hasset") != sidecars.end());
 	he_test::removeAllQuiet(dir);
 }
 

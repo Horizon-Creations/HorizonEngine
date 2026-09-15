@@ -108,6 +108,12 @@ HE::AssetType assetTypeOf(const std::filesystem::path& file)
 // does not exist or holds an asset of the SAME type. That second clause is what
 // keeps re-imports idempotent: a texture landing on its own previous .hasset is
 // exactly right, while a texture landing on a material is not.
+//
+// Claimed names compare CASE-INSENSITIVELY. macOS and Windows file systems do,
+// so "glass.obj" with a material called "Glass" is the same collision as above —
+// Glass.hasset written, then the mesh glass.hasset written over it, and the
+// material gone. Treating the two as one name on every platform keeps the
+// outputs identical wherever the project is opened.
 class NameReserver
 {
 public:
@@ -116,28 +122,35 @@ public:
 		: m_root(std::move(contentRoot)), m_dir(std::move(relativeOutputDir)), m_log(log) {}
 
 	// Reserve a name up front for an output written by someone else (the mesh).
-	void reserve(const std::string& stem) { if (!stem.empty()) m_taken.push_back(stem); }
+	void reserve(const std::string& stem) { if (!stem.empty()) m_taken.push_back(lower(stem)); }
 
 	std::string claim(const std::string& wanted, HE::AssetType type)
 	{
-		if (isFree(wanted, type)) { m_taken.push_back(wanted); return wanted; }
+		if (isFree(wanted, type)) { m_taken.push_back(lower(wanted)); return wanted; }
 		for (int n = 2; n < 1000; ++n)
 		{
 			const std::string candidate = wanted + "_" + std::to_string(n);
 			if (!isFree(candidate, type)) continue;
 			m_log.warn("output name '" + wanted + "' is already taken by another asset — '"
 			           + candidate + "' used instead");
-			m_taken.push_back(candidate);
+			m_taken.push_back(lower(candidate));
 			return candidate;
 		}
 		return wanted;   // 1000 collisions: let the caller write and be overwritten
 	}
 
 private:
+	static std::string lower(std::string s)
+	{
+		std::transform(s.begin(), s.end(), s.begin(),
+		               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return s;
+	}
+
 	bool isFree(const std::string& stem, HE::AssetType type) const
 	{
 		if (stem.empty()) return false;
-		if (std::find(m_taken.begin(), m_taken.end(), stem) != m_taken.end()) return false;
+		if (std::find(m_taken.begin(), m_taken.end(), lower(stem)) != m_taken.end()) return false;
 		const std::filesystem::path file = m_root / m_dir / (stem + ".hasset");
 		std::error_code ec;
 		if (!std::filesystem::is_regular_file(file, ec)) return true;
@@ -802,13 +815,17 @@ PbrMaterialImport importPbrMaterials(const std::vector<PbrMaterialDesc>& materia
 	// references is the one that gets refreshed. Only the MREF material can be
 	// redirected — the others are named after their source material, which is
 	// stable across re-imports and needs no redirect.
-	const bool singleMaterial = materials.size() == 1;
+	const bool singleMaterial =
+		std::count_if(materials.begin(), materials.end(),
+		              [](const PbrMaterialDesc& d) { return !d.omit; }) == 1;
 
 	result.paths.resize(materials.size());
 	std::vector<std::string> usedStems;
 	for (size_t i = 0; i < materials.size(); ++i)
 	{
 		const PbrMaterialDesc& m = materials[i];
+		if (m.omit)
+			continue;   // a loader artefact nothing uses: no asset, an empty path
 		const bool isPrimary = static_cast<int>(i) == primaryIndex;
 
 		// Named after the source material so it survives a mesh rename and so two

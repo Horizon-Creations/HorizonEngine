@@ -53,7 +53,9 @@ target_include_directories(HorizonImporters
 # the editor and the tests never see them — but the feature flag is PUBLIC:
 # routing (Importer::isImportableSource) and the tests gate on HE_HAVE_ASSIMP.
 if(HE_HAVE_ASSIMP)
-    target_sources(HorizonImporters PRIVATE src/AssetImporter/AssimpMeshImport.cpp)
+    target_sources(HorizonImporters PRIVATE
+        src/AssetImporter/AssimpMeshImport.cpp
+        src/AssetImporter/AssimpMaterialImport.cpp)
     target_link_libraries(HorizonImporters PRIVATE assimp::assimp)
     target_compile_definitions(HorizonImporters PUBLIC HE_HAVE_ASSIMP)
 endif()

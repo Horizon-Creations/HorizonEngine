@@ -75,6 +75,11 @@ namespace Importer
 		enum class AlphaMode { Opaque, Mask, Blend };
 
 		std::string   name;                            // the source's material name; may be empty
+		// The loader made this material up rather than read it (Assimp's OBJ
+		// reader always prepends a "DefaultMaterial" for faces without usemtl)
+		// and no geometry uses it: written as nothing, its path stays empty.
+		// Keeps the table index-parallel to the source's material table.
+		bool          omit              = false;
 		float         baseColor[4]      = { 1.0f, 1.0f, 1.0f, 1.0f };   // rgb tint + alpha
 		float         metallic          = 0.0f;
 		float         roughness         = 0.5f;
