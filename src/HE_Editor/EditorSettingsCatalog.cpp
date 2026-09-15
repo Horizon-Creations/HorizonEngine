@@ -254,6 +254,15 @@ std::vector<SettingDesc> buildCatalog()
 	t.push_back(floatRow("postProcess.dofAperture", "Aperture",
 	                     "Post-Processing", "dof", &EditorConfig::DoFAperture,
 	                     1.0, 22.0, "f-number: f/1.4 blurs most, f/22 next to nothing."));
+	t.push_back(boolRow("postProcess.motionBlurEnabled", "Motion Blur", "Post-Processing",
+	                    "motionblur", &EditorConfig::MotionBlurEnabled,
+	                    "Camera motion blur (OpenGL, Metal)."));
+	t.push_back(floatRow("postProcess.motionBlurIntensity", "Shutter",
+	                     "Post-Processing", "motionblur", &EditorConfig::MotionBlurIntensity,
+	                     0.0, 2.0, "Fraction of a frame's motion in the streak; 0.5 = 180° shutter."));
+	t.push_back(floatRow("postProcess.motionBlurMax", "Max Blur",
+	                     "Post-Processing", "motionblur", &EditorConfig::MotionBlurMax,
+	                     0.0, 128.0, "Longest streak in pixels at 720p."));
 	t.push_back(boolRow("postProcess.ssrEnabled", "Screen-Space Reflections",
 	                    "Post-Processing", "ssr", &EditorConfig::SSREnabled,
 	                    "Metal + the deferred render path; the backend gates it."));

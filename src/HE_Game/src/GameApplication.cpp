@@ -2712,6 +2712,7 @@ void GameApplication::OnRender(float deltaTime)
 			r->SetBloomSettings(IRenderer::BloomSettings{ false, 1.0f, 0.6f });
 			r->SetSSAOSettings(IRenderer::SSAOSettings{ false, 0.5f, 1.0f, 0 });
 			r->SetDepthOfFieldSettings(IRenderer::DepthOfFieldSettings{});
+			r->SetMotionBlurSettings(IRenderer::MotionBlurSettings{});
 			// GI and SSR default to disabled, so their default-constructed form IS
 			// the "off" push.
 			r->SetGISettings(IRenderer::GISettings{});
@@ -2751,6 +2752,12 @@ void GameApplication::OnRender(float deltaTime)
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFFocusDistance", 10.0f)),
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFFocusRange", 4.0f)),
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFAperture", 2.8f))});
+			// Motion blur — likewise the editor's Preferences values via the export
+			// dialog. Camera motion only; off by default.
+			r->SetMotionBlurSettings(IRenderer::MotionBlurSettings{
+				GlobalState::getInstance().getCustomConfigBool("MotionBlurEnabled", false),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("MotionBlurIntensity", 0.5f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("MotionBlurMax", 24.0f))});
 			// Directional shadows are the PROJECT's (Config/ProjectSettings.json
 			// next to project.hcfg), not config.json's: the same cascades the
 			// editor's viewport showed. Defaults = the historical constants.

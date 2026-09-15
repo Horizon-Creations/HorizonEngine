@@ -3611,6 +3611,84 @@ void main()
 }
 )GLSL";
 
+// ─── Motion blur ─────────────────────────────────────────────────────────────
+// Two fragment programs on the fullscreen triangle, mirrored 1:1 by kMotionBlurMSL
+// in the Metal backend:
+//
+//   Velocity   full-res: the pixel's ndc position (uv + scene depth) is carried
+//              into the PREVIOUS frame's clip space by one matrix
+//              (prevViewProj · inverse(viewProj)); the difference of the two
+//              screen positions, times the shutter fraction, is the velocity in
+//              PIXELS (RG16F — pixels, not uv, so a 0.3-px motion at 4K is not
+//              lost to half-float rounding). Capped at the max blur length.
+//              Camera motion only: the depth says where the pixel IS, the two
+//              camera matrices say how the CAMERA moved; an object moving under
+//              a still camera has zero velocity here.
+//   Blur       full-res: kTaps taps spread over the centre pixel's velocity,
+//              half behind and half ahead. A tap is weighted by how fast IT is
+//              moving relative to the centre: a still foreground object next to
+//              a streaking background keeps its edge instead of being dragged
+//              along. Pixels with under half a pixel of motion pass through
+//              untouched — a still camera gives the exact input image.
+//
+// The depth convention differs per backend and the shaders own it: GL holds
+// window z (0..1 → ndc via ·2-1), Metal already holds GL ndc z (see kDofMSL).
+static const char* kMbVelocityFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uDepth;      // full-res scene depth (window z, 0..1)
+uniform mat4 uReproject;       // prevViewProj * inverse(viewProj), GL-style clip both sides
+uniform vec4 uMbParams;        // x shutter fraction, y max blur (px), zw target size (px)
+out vec2 FragColor;            // RG16F: velocity in pixels (+x right, +y up in GL's uv)
+void main()
+{
+	float d    = texture(uDepth, vUV).r;
+	vec4  ndc  = vec4(vUV * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+	vec4  prev = uReproject * ndc;
+	if (prev.w <= 1e-5) { FragColor = vec2(0.0); return; }   // behind the previous camera
+	vec2  prevUV = (prev.xy / prev.w) * 0.5 + 0.5;
+	vec2  vPx    = (vUV - prevUV) * uMbParams.zw * uMbParams.x;
+	float len    = length(vPx);
+	if (len > uMbParams.y) vPx *= uMbParams.y / len;
+	FragColor = vPx;
+}
+)GLSL";
+
+static const char* kMbBlurFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uImage;      // full-res HDR (the DoF result when that ran)
+uniform sampler2D uVelocity;   // full-res velocity in pixels
+uniform vec2      uTexel;      // 1 / target size
+out vec4 FragColor;
+const int kTaps = 6;           // per side; 12 taps + centre over the velocity's length
+void main()
+{
+	vec2  vC = texture(uVelocity, vUV).rg;
+	float lC = length(vC);
+	vec4  c0 = texture(uImage, vUV);
+	if (lC < 0.5) { FragColor = vec4(c0.rgb, 1.0); return; }   // still: pass through, bit-exact
+	vec3  sum  = c0.rgb;
+	float wsum = 1.0;
+	for (int i = 1; i <= kTaps; ++i)
+	{
+		float t = float(i) / float(kTaps + 1);   // (0,1): fraction of the half-length
+		for (int s = -1; s <= 1; s += 2)
+		{
+			vec2  uv = vUV + vC * (0.5 * t * float(s)) * uTexel;
+			vec2  vT = texture(uVelocity, uv).rg;
+			// A tap moving at least half as fast as the centre counts fully; a
+			// (near) still tap barely — it belongs to something that is not
+			// streaking, and must not be smeared into what is.
+			float w  = clamp(length(vT) * 2.0 / lC, 0.0, 1.0);
+			sum  += texture(uImage, uv).rgb * w;
+			wsum += w;
+		}
+	}
+	FragColor = vec4(sum / wsum, 1.0);
+}
+)GLSL";
+
 // ─── SSAO (screen-space ambient occlusion) ──────────────────────────────────
 // The hemisphere kernel sample count is HE::kSsaoKernelSize (SsaoKernel.h) —
 // the uKernel[32] declaration below must stay in step with it.
@@ -5141,6 +5219,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateTonemapPipeline();
 	CreateBloomPipeline();
 	CreateDepthOfFieldPipeline();
+	CreateMotionBlurPipeline();
 	CreateSSAOPipeline();
 	CreateDebugLinePipeline();
 	CreateParticlePipeline();
@@ -6632,6 +6711,141 @@ unsigned int OpenGLRenderer::RenderDepthOfField(int fullW, int fullH, const glm:
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glActiveTexture(GL_TEXTURE0);
 	return m_dofColor;
+}
+
+// ─── Motion blur ─────────────────────────────────────────────────────────────
+void OpenGLRenderer::CreateMotionBlurPipeline()
+{
+	auto link = [&](const char* fsSrc, const char* what) -> GLuint
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fsSrc);
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		GLint ok = GL_FALSE;
+		glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: motion blur %s program failed to link", what);
+			glDeleteProgram(prog);
+			return 0;
+		}
+		return prog;
+	};
+	m_mbVelocityProgram = link(kMbVelocityFS, "velocity");
+	if (m_mbVelocityProgram)
+	{
+		m_uMbVelDepth     = glGetUniformLocation(m_mbVelocityProgram, "uDepth");
+		m_uMbVelReproject = glGetUniformLocation(m_mbVelocityProgram, "uReproject");
+		m_uMbVelParams    = glGetUniformLocation(m_mbVelocityProgram, "uMbParams");
+	}
+	m_mbBlurProgram = link(kMbBlurFS, "blur");
+	if (m_mbBlurProgram)
+	{
+		m_uMbBlurImage    = glGetUniformLocation(m_mbBlurProgram, "uImage");
+		m_uMbBlurVelocity = glGetUniformLocation(m_mbBlurProgram, "uVelocity");
+		m_uMbBlurTexel    = glGetUniformLocation(m_mbBlurProgram, "uTexel");
+	}
+}
+
+void OpenGLRenderer::SetMotionBlurSettings(const MotionBlurSettings& s)
+{
+	m_mbEnabled   = s.enabled;
+	m_mbIntensity = s.intensity;
+	m_mbMaxBlur   = s.maxBlur;
+}
+
+void OpenGLRenderer::EnsureMotionBlurTargets(int fullW, int fullH)
+{
+	fullW = std::max(2, fullW);
+	fullH = std::max(2, fullH);
+	if (m_mbFBO && fullW == m_mbW && fullH == m_mbH) return;
+	DestroyMotionBlurTargets();
+
+	auto makeTarget = [&](unsigned int& fbo, unsigned int& tex, GLenum internalFmt,
+	                      GLenum fmt, const char* what)
+	{
+		glGenFramebuffers(1, &fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, internalFmt, fullW, fullH, 0, fmt, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: motion blur %s FBO incomplete", what);
+	};
+	makeTarget(m_mbVelocityFBO, m_mbVelocityTex, GL_RG16F,   GL_RG,   "velocity");
+	makeTarget(m_mbFBO,         m_mbColor,       GL_RGBA16F, GL_RGBA, "blur");
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_mbW = fullW;
+	m_mbH = fullH;
+}
+
+void OpenGLRenderer::DestroyMotionBlurTargets()
+{
+	if (m_mbVelocityFBO) { glDeleteFramebuffers(1, &m_mbVelocityFBO); m_mbVelocityFBO = 0; }
+	if (m_mbVelocityTex) { glDeleteTextures(1, &m_mbVelocityTex);     m_mbVelocityTex = 0; }
+	if (m_mbFBO)         { glDeleteFramebuffers(1, &m_mbFBO);         m_mbFBO = 0; }
+	if (m_mbColor)       { glDeleteTextures(1, &m_mbColor);           m_mbColor = 0; }
+	m_mbW = m_mbH = 0;
+}
+
+// Velocity → smear. Assumes m_fsVAO is bound and the depth test is off (the
+// post-process pass's state); restores nothing, the tonemap rebinds its own
+// output. The first frame (no previous matrix yet) reprojects with the current
+// one → zero velocity → the pass is an exact copy.
+unsigned int OpenGLRenderer::RenderMotionBlur(unsigned int sourceHdr, int fullW, int fullH,
+                                              const glm::mat4& view, const glm::mat4& proj)
+{
+	if (!m_mbVelocityProgram || !m_mbBlurProgram || !sourceHdr || !m_hdrDepth) return 0;
+	EnsureMotionBlurTargets(fullW, fullH);
+	if (!m_mbFBO) return 0;
+
+	const glm::mat4 viewProj  = proj * view;
+	const glm::mat4 reproject = (m_mbHasPrev ? m_mbPrevViewProj : viewProj) * glm::inverse(viewProj);
+	const float maxBlurPx = std::max(m_mbMaxBlur, 0.0f) * (static_cast<float>(m_mbH) / 720.0f);
+	const float params[4] = { std::max(m_mbIntensity, 0.0f), maxBlurPx,
+	                          static_cast<float>(m_mbW), static_cast<float>(m_mbH) };
+
+	// 1. Velocity from the depth + the two camera matrices.
+	glViewport(0, 0, m_mbW, m_mbH);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_mbVelocityFBO);
+	glUseProgram(m_mbVelocityProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_hdrDepth);
+	glUniform1i(m_uMbVelDepth, 0);
+	glUniformMatrix4fv(m_uMbVelReproject, 1, GL_FALSE, glm::value_ptr(reproject));
+	glUniform4fv(m_uMbVelParams, 1, params);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// 2. Smear along it.
+	glBindFramebuffer(GL_FRAMEBUFFER, m_mbFBO);
+	glUseProgram(m_mbBlurProgram);
+	glUniform1i(m_uMbBlurImage, 0);
+	glUniform1i(m_uMbBlurVelocity, 1);
+	glUniform2f(m_uMbBlurTexel, 1.0f / static_cast<float>(m_mbW), 1.0f / static_cast<float>(m_mbH));
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_mbVelocityTex);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, sourceHdr);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// Unit 1 clean for the tonemap's bloom binding; unit 0 held the depth
+	// texture a moment ago, which the next scene pass renders into.
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	return m_mbColor;
 }
 
 // ─── SSAO ────────────────────────────────────────────────────────────────────
@@ -10978,6 +11192,7 @@ void OpenGLRenderer::Shutdown()
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
 	DestroyDepthOfFieldTargets();
+	DestroyMotionBlurTargets();
 	DestroyCloudTarget();
 	DestroyCloudShadowTarget();
 	DestroyLdrTarget();
@@ -11050,6 +11265,9 @@ void OpenGLRenderer::Shutdown()
 	if (m_dofCocProgram)       { glDeleteProgram(m_dofCocProgram);       m_dofCocProgram = 0; }
 	if (m_dofBlurProgram)      { glDeleteProgram(m_dofBlurProgram);      m_dofBlurProgram = 0; }
 	if (m_dofCompositeProgram) { glDeleteProgram(m_dofCompositeProgram); m_dofCompositeProgram = 0; }
+	if (m_mbVelocityProgram)   { glDeleteProgram(m_mbVelocityProgram);   m_mbVelocityProgram = 0; }
+	if (m_mbBlurProgram)       { glDeleteProgram(m_mbBlurProgram);       m_mbBlurProgram = 0; }
+	m_mbHasPrev = false;
 	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }
 	if (m_shadowFBO)      { glDeleteFramebuffers(1, &m_shadowFBO);   m_shadowFBO = 0; }
 	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
@@ -11669,6 +11887,19 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				GpuPassScope _dofTimer(this, "DoF");
 				if (const unsigned int dofTex = RenderDepthOfField(pw, ph, m_renderWorld.camera.projection))
 					sceneHdr = dofTex;
+			}
+
+			// Motion blur next, on whatever DoF left: the camera's frame-to-frame
+			// motion smears the image (velocity from depth + previous view-
+			// projection), and bloom + tonemap read the smeared result. The
+			// previous matrix is refreshed at the end of DrawScene, on or off.
+			if (m_mbEnabled)
+			{
+				GpuPassScope _mbTimer(this, "MotionBlur");
+				if (const unsigned int mbTex = RenderMotionBlur(sceneHdr, pw, ph,
+				                                                m_renderWorld.camera.view,
+				                                                m_renderWorld.camera.projection))
+					sceneHdr = mbTex;
 			}
 
 			// Bright-pass + blur the HDR target into the half-res bloom buffer
@@ -13206,6 +13437,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	glBindVertexArray(0);
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glUseProgram(0);
+
+	// This frame's camera becomes the motion-blur pass's "previous" one —
+	// unconditionally, so the first frame after the pass is switched on
+	// measures against last frame's camera, not against whatever was stored
+	// when it was last on.
+	m_mbPrevViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	m_mbHasPrev      = true;
 
 	// One-time sanity check — GL errors are silent otherwise and a broken
 	// draw path would just render nothing.

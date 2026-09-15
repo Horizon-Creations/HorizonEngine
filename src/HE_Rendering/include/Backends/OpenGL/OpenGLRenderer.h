@@ -74,6 +74,7 @@ public:
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetDepthOfFieldSettings(const DepthOfFieldSettings& settings) override;
+	void  SetMotionBlurSettings(const MotionBlurSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetShadowSettings(const ShadowSettings& settings) override;
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
@@ -899,6 +900,42 @@ private:
 	// Runs the four DoF passes; returns m_dofColor, or 0 when unavailable (the
 	// caller then keeps reading m_hdrColor).
 	unsigned int RenderDepthOfField(int fullW, int fullH, const glm::mat4& proj);
+
+	// ── Motion blur (camera reprojection → directional smear) ───────────────
+	// Runs on the HDR image after DoF and before bloom/tonemap. Two passes:
+	// velocity (RG16F full-res, screen-space delta in UV between this frame and
+	// the previous view-projection, rebuilt from the scene depth) and the smear
+	// (RGBA16F full-res, taps along the centre velocity weighted by whether the
+	// tap's own motion reaches the pixel). Camera motion only — objects moving
+	// through a still camera stay sharp. m_mbPrevViewProj is refreshed at the
+	// end of EVERY DrawScene, enabled or not, so switching the pass on never
+	// smears a frame against a stale matrix. Off = zero cost, no target made.
+	bool         m_mbEnabled    = false;
+	float        m_mbIntensity  = 0.5f;
+	float        m_mbMaxBlur    = 24.0f;
+	glm::mat4    m_mbPrevViewProj = glm::mat4(1.0f);
+	bool         m_mbHasPrev    = false;
+	unsigned int m_mbVelocityProgram = 0;
+	int          m_uMbVelDepth       = -1;
+	int          m_uMbVelReproject   = -1;   // prevViewProj * inverse(viewProj)
+	int          m_uMbVelParams      = -1;   // intensity, maxBlur (uv units), 0, 0
+	unsigned int m_mbBlurProgram     = 0;
+	int          m_uMbBlurImage      = -1;
+	int          m_uMbBlurVelocity   = -1;
+	int          m_uMbBlurTexel      = -1;
+	unsigned int m_mbVelocityFBO = 0;
+	unsigned int m_mbVelocityTex = 0;        // RG16F, full-res
+	unsigned int m_mbFBO         = 0;
+	unsigned int m_mbColor       = 0;        // RGBA16F, full-res smear result
+	int          m_mbW           = 0;
+	int          m_mbH           = 0;
+	void CreateMotionBlurPipeline();
+	void EnsureMotionBlurTargets(int fullW, int fullH);
+	void DestroyMotionBlurTargets();
+	// Runs the two motion-blur passes on `sourceHdr`; returns m_mbColor, or 0
+	// when unavailable (the caller then keeps reading `sourceHdr`).
+	unsigned int RenderMotionBlur(unsigned int sourceHdr, int fullW, int fullH,
+	                              const glm::mat4& view, const glm::mat4& proj);
 
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// A view-space position pre-pass (camera POV) feeds a hemisphere-kernel

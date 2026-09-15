@@ -123,6 +123,7 @@ public:
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
 	void  SetDepthOfFieldSettings(const DepthOfFieldSettings& settings) override;
+	void  SetMotionBlurSettings(const MotionBlurSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetShadowSettings(const ShadowSettings& settings) override;
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
@@ -917,6 +918,29 @@ private:
 	// Runs the four DoF passes into m_dofColor; returns it, or null when the
 	// pass could not run (the caller then keeps m_hdrColor).
 	void* EncodeDepthOfField(void* cmdBuf, int fullW, int fullH);
+
+	// ── Motion blur (camera reprojection → directional smear) ───────────────
+	// Mirrors the GL backend (kMotionBlurMSL = the two GLSL programs, 1:1).
+	// Runs after DoF on whatever it left, before bloom/MetalFX/tonemap. Full-res
+	// RG16F velocity (pixels) from the scene depth + the previous frame's
+	// view-projection, full-res RGBA16F smear. Camera motion only.
+	// m_mbPrevViewProj is refreshed at the end of EVERY frame, on or off.
+	void*     m_mbVelocityPipeline = nullptr; // id<MTLRenderPipelineState>
+	void*     m_mbBlurPipeline     = nullptr; // id<MTLRenderPipelineState>
+	void*     m_mbVelocityTex      = nullptr; // id<MTLTexture> RG16F full-res
+	void*     m_mbColor            = nullptr; // id<MTLTexture> RGBA16F full-res smear
+	int       m_mbW                = 0;
+	int       m_mbH                = 0;
+	bool      m_mbEnabled          = false;
+	float     m_mbIntensity        = 0.5f;
+	float     m_mbMaxBlur          = 24.0f;
+	glm::mat4 m_mbPrevViewProj     = glm::mat4(1.0f);
+	bool      m_mbHasPrev          = false;
+	void  EnsureMotionBlurTargets(int fullW, int fullH);
+	void  DestroyMotionBlurTargets();
+	// Runs velocity + smear on `sourceHdr` into m_mbColor; returns it, or null
+	// when the pass could not run (the caller then keeps `sourceHdr`).
+	void* EncodeMotionBlur(void* cmdBuf, void* sourceHdr, int fullW, int fullH);
 
 	// ── Low-res clouds (quarter-res cloud pre-pass; EnvironmentSettings.lowResClouds) ──
 	// Raymarch the clouds into m_cloudColor (rgb = L, a = T) at quarter resolution; the

@@ -2325,6 +2325,19 @@ namespace
 	  "The lens's f-number. f/1.4 blurs everything outside the band heavily, "
 	  "f/22 leaves almost everything sharp.",
 	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Motion Blur", "",
+	  "Streaks the picture along the camera's movement between two frames, the "
+	  "way a real shutter does. Only the camera counts: an object crossing a "
+	  "still camera stays sharp. OpenGL and Metal.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Shutter", "",
+	  "How much of one frame's motion goes into the streak. 0.5 is the classic "
+	  "film shutter; 1 smears the full frame's worth.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Max Blur", "",
+	  "The longest streak allowed, in pixels at 720p. Keeps a camera cut from "
+	  "wiping the whole screen for a frame.",
+	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/Screen-Space Reflections", "",
 	  "Reflects what is already on screen in wet and polished surfaces. What is "
 	  "off screen cannot be reflected — that is the method's limit, not a bug.",

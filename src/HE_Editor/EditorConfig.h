@@ -120,6 +120,12 @@ struct EditorConfig
 	float DoFFocusRange    = 4.0f;   // metres of fully sharp band around it
 	float DoFAperture      = 2.8f;   // f-number: smaller = stronger blur
 
+	// Post-process: motion blur (pushed each frame via SetMotionBlurSettings).
+	// OpenGL + Metal, camera motion only. Off by default for the same reason.
+	bool  MotionBlurEnabled   = false;
+	float MotionBlurIntensity = 0.5f;   // shutter as a fraction of the frame (0.5 = 180°)
+	float MotionBlurMax       = 24.0f;  // longest smear in pixels at 720p
+
 	// Anti-aliasing (pushed each frame via SetAntiAliasingSettings, see
 	// docs/anti-aliasing-plan.md). `AntiAliasing` holds an HE AAMethod int —
 	// 0 Off, 1 FXAA, 2 SMAA, 3 TAA, 4 MetalFX — and defaults to FXAA because

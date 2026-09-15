@@ -1572,6 +1572,84 @@ fragment float4 dofCompositeFragment(FSOut in [[stage_in]],
 }
 )MSL";
 
+// ─── Motion blur ─────────────────────────────────────────────────────────────
+// Mirrors the GL kMbVelocityFS / kMbBlurFS 1:1 — see the GL backend for the
+// write-up (camera reprojection from depth → velocity in pixels → taps along
+// it, still taps weighted down). Two conventions differ and live here: the
+// depth is already GL ndc z (no ·2-1, same as kDofMSL), and Metal's uv origin
+// is top-left, so ndc.y = 1 - 2·uv.y going in and the velocity's y flips sign
+// coming out — a yaw must streak horizontally on both backends, a pitch
+// vertically.
+static const char* kMotionBlurMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct FSOut { float4 position [[position]]; float2 uv; };
+
+vertex FSOut fsVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;
+	float y = float((vid & 2) << 1) - 1.0;
+	FSOut o;
+	o.position = float4(x, y, 0.0, 1.0);
+	o.uv       = float2(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+	return o;
+}
+
+struct MbParams
+{
+	float4x4 reproject;   // prevViewProj * inverse(viewProj), GL-style clip both sides
+	float4   params;      // x shutter fraction, y max blur (px), zw target size (px)
+	float2   texel;       // 1 / target size
+	float2   pad;
+};
+
+fragment float2 mbVelocityFragment(FSOut in [[stage_in]],
+                                   depth2d<float> depth [[texture(0)]],
+                                   constant MbParams& u [[buffer(0)]])
+{
+	constexpr sampler s(filter::nearest, address::clamp_to_edge);
+	float  d    = depth.sample(s, in.uv);
+	float4 ndc  = float4(in.uv.x * 2.0 - 1.0, 1.0 - 2.0 * in.uv.y, d, 1.0);
+	float4 prev = u.reproject * ndc;
+	if (prev.w <= 1e-5) return float2(0.0);   // behind the previous camera
+	float2 prevNdc = prev.xy / prev.w;
+	float2 prevUV  = float2(prevNdc.x * 0.5 + 0.5, 1.0 - (prevNdc.y * 0.5 + 0.5));
+	float2 vPx     = (in.uv - prevUV) * u.params.zw * u.params.x;
+	float  len     = length(vPx);
+	if (len > u.params.y) vPx *= u.params.y / len;
+	return vPx;
+}
+
+fragment float4 mbBlurFragment(FSOut in [[stage_in]],
+                               texture2d<float> img [[texture(0)]],
+                               texture2d<float> vel [[texture(1)]],
+                               constant MbParams& u [[buffer(0)]])
+{
+	constexpr sampler s(filter::linear, address::clamp_to_edge);
+	const int kTaps = 6;
+	float2 vC = vel.sample(s, in.uv).rg;
+	float  lC = length(vC);
+	float4 c0 = img.sample(s, in.uv);
+	if (lC < 0.5) return float4(c0.rgb, 1.0);   // still: pass through, bit-exact
+	float3 sum  = c0.rgb;
+	float  wsum = 1.0;
+	for (int i = 1; i <= kTaps; ++i)
+	{
+		float t = float(i) / float(kTaps + 1);
+		for (int sgn = -1; sgn <= 1; sgn += 2)
+		{
+			float2 uv = in.uv + vC * (0.5 * t * float(sgn)) * u.texel;
+			float2 vT = vel.sample(s, uv).rg;
+			float  w  = clamp(length(vT) * 2.0 / lC, 0.0, 1.0);
+			sum  += img.sample(s, uv).rgb * w;
+			wsum += w;
+		}
+	}
+	return float4(sum / wsum, 1.0);
+}
+)MSL";
+
 // ─── SSAO (screen-space ambient occlusion) ──────────────────────────────────
 // Mirrors the GL backend. Working in view space makes the maths identical across
 // backends; the only difference is the NDC→UV y-flip (Metal textures are top-left
@@ -5956,6 +6034,7 @@ void MetalRenderer::Shutdown()
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
 	DestroyDepthOfFieldTargets();
+	DestroyMotionBlurTargets();
 	DestroyCloudTarget();
 	DestroyLdrTarget();
 	DestroySSAOTargets();
@@ -6040,6 +6119,9 @@ void MetalRenderer::Shutdown()
 	if (m_dofCocPipeline)       { CFBridgingRelease(m_dofCocPipeline);       m_dofCocPipeline = nullptr; }
 	if (m_dofBlurPipeline)      { CFBridgingRelease(m_dofBlurPipeline);      m_dofBlurPipeline = nullptr; }
 	if (m_dofCompositePipeline) { CFBridgingRelease(m_dofCompositePipeline); m_dofCompositePipeline = nullptr; }
+	if (m_mbVelocityPipeline)   { CFBridgingRelease(m_mbVelocityPipeline);   m_mbVelocityPipeline = nullptr; }
+	if (m_mbBlurPipeline)       { CFBridgingRelease(m_mbBlurPipeline);       m_mbBlurPipeline = nullptr; }
+	m_mbHasPrev = false;
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
@@ -6536,6 +6618,30 @@ void MetalRenderer::CreateScenePipeline()
 			m_dofCocPipeline       = makeDof(@"dofCocFragment",       MTLPixelFormatRG16Float, "CoC");
 			m_dofBlurPipeline      = makeDof(@"dofBlurFragment",      kSceneColorFormat,       "blur");
 			m_dofCompositePipeline = makeDof(@"dofCompositeFragment", kSceneColorFormat,       "composite");
+		}
+
+		// ── Motion-blur pipelines (velocity RG16F, smear RGBA16F, no depth) ──
+		{
+			NSError* mbError = nil;
+			id<MTLLibrary> mbLib = [device newLibraryWithSource:
+				[NSString stringWithUTF8String:kMotionBlurMSL] options:nil error:&mbError];
+			if (!mbLib)
+				throw std::runtime_error(std::string("MetalRenderer: motion blur shader compile failed: ")
+					+ (mbError ? [[mbError localizedDescription] UTF8String] : "unknown"));
+			auto makeMb = [&](NSString* fragName, MTLPixelFormat fmt, const char* what) -> void*
+			{
+				MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+				d.vertexFunction   = [mbLib newFunctionWithName:@"fsVertex"];
+				d.fragmentFunction = [mbLib newFunctionWithName:fragName];
+				d.colorAttachments[0].pixelFormat = fmt;
+				id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:d error:&mbError];
+				if (!pso)
+					throw std::runtime_error(std::string("MetalRenderer: motion blur ") + what + " pipeline creation failed: "
+						+ (mbError ? [[mbError localizedDescription] UTF8String] : "unknown"));
+				return (void*)CFBridgingRetain(pso);
+			};
+			m_mbVelocityPipeline = makeMb(@"mbVelocityFragment", MTLPixelFormatRG16Float, "velocity");
+			m_mbBlurPipeline     = makeMb(@"mbBlurFragment",     kSceneColorFormat,       "blur");
 		}
 
 		// ── Skybox pipeline (into the HDR target; carries the scene depth fmt) ──
@@ -10867,6 +10973,103 @@ void* MetalRenderer::EncodeDepthOfField(void* cmdBufPtr, int fullW, int fullH)
 	pass((__bridge id<MTLTexture>)m_dofColor, m_dofCompositePipeline,
 	     { m_hdrColor, m_dofBlurTex[1], m_hdrDepth }, kInvalidSlot, dofBase);
 	return m_dofColor;
+}
+
+// ─── Motion blur ─────────────────────────────────────────────────────────────
+void MetalRenderer::SetMotionBlurSettings(const MotionBlurSettings& s)
+{
+	m_mbEnabled   = s.enabled;
+	m_mbIntensity = s.intensity;
+	m_mbMaxBlur   = s.maxBlur;
+}
+
+void MetalRenderer::EnsureMotionBlurTargets(int fullW, int fullH)
+{
+	fullW = std::max(2, fullW);
+	fullH = std::max(2, fullH);
+	if (m_mbColor && fullW == m_mbW && fullH == m_mbH) return;
+	DestroyMotionBlurTargets();
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	auto make = [&](MTLPixelFormat fmt) -> void*
+	{
+		MTLTextureDescriptor* desc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:fmt width:fullW height:fullH mipmapped:NO];
+		desc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		desc.storageMode = MTLStorageModePrivate;
+		return (void*)CFBridgingRetain([device newTextureWithDescriptor:desc]);
+	};
+	m_mbVelocityTex = make(MTLPixelFormatRG16Float);
+	m_mbColor       = make(kSceneColorFormat);
+	m_mbW = fullW;
+	m_mbH = fullH;
+}
+
+void MetalRenderer::DestroyMotionBlurTargets()
+{
+	if (m_mbVelocityTex) { CFBridgingRelease(m_mbVelocityTex); m_mbVelocityTex = nullptr; }
+	if (m_mbColor)       { CFBridgingRelease(m_mbColor);       m_mbColor = nullptr; }
+	m_mbW = m_mbH = 0;
+}
+
+// Velocity → smear, two encoders in the caller's command buffer. Same rules as
+// the GL backend: the max blur is in pixels at 720p and scales with the target
+// height; the first frame (no previous matrix yet) reprojects with the current
+// one → zero velocity → an exact copy of the input.
+void* MetalRenderer::EncodeMotionBlur(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
+{
+	if (!m_mbVelocityPipeline || !m_mbBlurPipeline || !sourceHdr || !m_hdrDepth) return nullptr;
+	EnsureMotionBlurTargets(fullW, fullH);
+	if (!m_mbColor) return nullptr;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+
+	const glm::mat4 viewProj  = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::mat4 reproject = (m_mbHasPrev ? m_mbPrevViewProj : viewProj) * glm::inverse(viewProj);
+	const float maxBlurPx = std::max(m_mbMaxBlur, 0.0f) * (static_cast<float>(m_mbH) / 720.0f);
+	// Layout mirrors the MSL MbParams struct (96 bytes).
+	struct MbParams
+	{
+		float reproject[16];
+		float params[4];
+		float texel[2];
+		float pad[2];
+	} u{};
+	std::memcpy(u.reproject, glm::value_ptr(reproject), sizeof(u.reproject));
+	u.params[0] = std::max(m_mbIntensity, 0.0f);
+	u.params[1] = maxBlurPx;
+	u.params[2] = static_cast<float>(m_mbW);
+	u.params[3] = static_cast<float>(m_mbH);
+	u.texel[0]  = 1.0f / static_cast<float>(m_mbW);
+	u.texel[1]  = 1.0f / static_cast<float>(m_mbH);
+
+	// One multi-encoder timer pair for the whole feature (capture only).
+	const uint32_t mbBase = ftBeginMulti("MotionBlur");
+
+	auto pass = [&](id<MTLTexture> dst, void* pso, std::initializer_list<void*> textures,
+	                uint32_t startSlot, uint32_t endSlot)
+	{
+		MTLRenderPassDescriptor* p = [MTLRenderPassDescriptor renderPassDescriptor];
+		p.colorAttachments[0].texture     = dst;
+		p.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+		p.colorAttachments[0].storeAction = MTLStoreActionStore;
+		if (startSlot != kInvalidSlot) ftAttachStart((__bridge void*)p, startSlot);
+		if (endSlot   != kInvalidSlot) ftAttachEnd  ((__bridge void*)p, endSlot);
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:p];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pso];
+		NSUInteger slot = 0;
+		for (void* t : textures)
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:slot++];
+		[enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+		[enc endEncoding];
+	};
+
+	// 1. Velocity from the depth + the two camera matrices.
+	pass((__bridge id<MTLTexture>)m_mbVelocityTex, m_mbVelocityPipeline, { m_hdrDepth }, mbBase, kInvalidSlot);
+	// 2. Smear along it.
+	pass((__bridge id<MTLTexture>)m_mbColor, m_mbBlurPipeline, { sourceHdr, m_mbVelocityTex },
+	     kInvalidSlot, mbBase);
+	return m_mbColor;
 }
 
 void MetalRenderer::SetSSAOSettings(const SSAOSettings& s)
@@ -15395,12 +15598,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			hdrPass.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
 			hdrPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
 			hdrPass.depthAttachment.loadAction  = deferredActive ? MTLLoadActionLoad : MTLLoadActionClear;
-			// The depth-of-field pass SAMPLES this depth after the scene pass, so
-			// it has to reach memory when DoF is on. On a tile GPU DontCare
-			// means it never does (the first DoF frame read a flat texture and
-			// blurred everything alike). Off keeps the free discard.
-			hdrPass.depthAttachment.storeAction = m_dofEnabled ? MTLStoreActionStore
-			                                                   : MTLStoreActionDontCare;
+			// The depth-of-field and motion-blur passes SAMPLE this depth after
+			// the scene pass, so it has to reach memory when either is on. On a
+			// tile GPU DontCare means it never does (the first DoF frame read a
+			// flat texture and blurred everything alike). Off keeps the free
+			// discard.
+			hdrPass.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled) ? MTLStoreActionStore
+			                                                                    : MTLStoreActionDontCare;
 			hdrPass.depthAttachment.clearDepth  = 1.0;
 
 			// "Scene" pass = sky + clouds + opaque + skinned + particles + debug.
@@ -15501,7 +15705,20 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// row comes from ftBeginMulti("DoF").
 			m_dofResult = m_dofEnabled ? EncodeDepthOfField((__bridge void*)cmdBuf, sceneW, sceneH)
 			                           : nullptr;
-			void* const sceneHdr = m_dofResult ? m_dofResult : m_hdrColor;
+			void* sceneHdr = m_dofResult ? m_dofResult : m_hdrColor;
+
+			// Motion blur next, on whatever DoF left: the camera's frame-to-frame
+			// motion smears the image (velocity from depth + previous view-
+			// projection) and bloom, MetalFX and the tonemap read the smeared
+			// result. Same command buffer, own timer row ("MotionBlur").
+			if (m_mbEnabled)
+				if (void* const mbTex = EncodeMotionBlur((__bridge void*)cmdBuf, sceneHdr, sceneW, sceneH))
+					sceneHdr = mbTex;
+			// This frame's camera becomes next frame's "previous" — on or off,
+			// so switching the pass on never measures against a stale matrix.
+			// The encoder above already copied the matrix into its byte buffer.
+			m_mbPrevViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+			m_mbHasPrev      = true;
 
 			// Bright-pass + blur the HDR target into the half-res bloom buffer;
 			// the tonemap below composites it back in. Skipped when bloom is

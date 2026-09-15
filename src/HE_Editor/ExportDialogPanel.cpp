@@ -158,6 +158,9 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("DoFFocusDistance",          cfg.DoFFocusDistance);
     put("DoFFocusRange",             cfg.DoFFocusRange);
     put("DoFAperture",               cfg.DoFAperture);
+    put("MotionBlurEnabled",         cfg.MotionBlurEnabled);
+    put("MotionBlurIntensity",       cfg.MotionBlurIntensity);
+    put("MotionBlurMax",             cfg.MotionBlurMax);
     put("AntiAliasing",              cfg.AntiAliasing);
     put("AASharpness",               cfg.AASharpness);
     put("RenderScale",               cfg.RenderScale);

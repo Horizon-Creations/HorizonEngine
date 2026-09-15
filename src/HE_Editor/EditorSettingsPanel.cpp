@@ -393,6 +393,24 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		else if (dofOK)
 			hint("Lens blur outside the focus band; a smaller f-number blurs more.");
 	});
+	row("motionblur", "Post-Processing", [&]{
+		// Same backend pair as DoF; the other backends ignore the push.
+		const bool mbOK = (ctx.backend == HE::RendererBackend::Metal ||
+		                   ctx.backend == HE::RendererBackend::OpenGL);
+		ImGui::BeginDisabled(!mbOK);
+		EditorWidgets::checkbox("Motion Blur", &cfg.MotionBlurEnabled);
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.MotionBlurEnabled);
+			Row::sliderFloat("Shutter", &cfg.MotionBlurIntensity, 0.0f, 2.0f, "%.2f");
+			Row::sliderFloat("Max Blur", &cfg.MotionBlurMax, 0.0f, 128.0f, "%.0f px");
+		}
+		ImGui::EndDisabled();
+		if (!mbOK && hovered)
+			ImGui::SetTooltip("Metal and OpenGL only — Vulkan and DirectX ignore it.");
+		else if (mbOK)
+			hint("Streaks along the camera's motion; objects moving past a still camera stay sharp.");
+	});
 	row("ssr", "Post-Processing", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsScreenSpaceReflections;
 		ImGui::BeginDisabled(!supported);

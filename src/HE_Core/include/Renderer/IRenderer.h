@@ -437,6 +437,29 @@ public:
     };
     virtual void SetDepthOfFieldSettings(const DepthOfFieldSettings& /*settings*/) {}
 
+    // ── Motion blur (post-process) ───────────────────────────────────────────
+    // Pushed like DoF. CAMERA motion blur on the HDR image after DoF and before
+    // bloom/tonemap: every pixel's world position is rebuilt from the scene
+    // depth, reprojected with the previous frame's view-projection, and the
+    // image is smeared along that screen-space delta. Objects moving through a
+    // still camera do NOT blur — per-object velocity is a follow-up, not this
+    // pass. Parameters:
+    //   intensity — shutter as a fraction of the frame interval: 0.5 = the
+    //               classic 180° shutter, 1 = the full frame's motion, 0 = off
+    //   maxBlur   — cap on the smear length in pixels at 720p (scales with the
+    //               target height), so a camera cut is one bad-ish frame and
+    //               not a full-screen wipe
+    // Implemented by the OpenGL and Metal backends; the others ignore it. Off by
+    // default, and off (or a camera that did not move) = the image is
+    // byte-identical to the pass not existing.
+    struct MotionBlurSettings
+    {
+        bool  enabled   = false;
+        float intensity = 0.5f;
+        float maxBlur   = 24.0f;
+    };
+    virtual void SetMotionBlurSettings(const MotionBlurSettings& /*settings*/) {}
+
     // ── Ray-traced GI reflections (docs/gi-reflections-plan.md) ─────────────
     // Pushed like SSR/GI. One specular ray per (half-res) pixel against the GI
     // acceleration structure; hits are shaded from the sun + the DDGI probe

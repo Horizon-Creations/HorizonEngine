@@ -1178,6 +1178,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.DoFFocusDistance            = globalstate.getCustomConfigFloat("DoFFocusDistance",   m_editorConfig.DoFFocusDistance);
 	m_editorConfig.DoFFocusRange               = globalstate.getCustomConfigFloat("DoFFocusRange",      m_editorConfig.DoFFocusRange);
 	m_editorConfig.DoFAperture                 = globalstate.getCustomConfigFloat("DoFAperture",        m_editorConfig.DoFAperture);
+	m_editorConfig.MotionBlurEnabled           = globalstate.getCustomConfigBool("MotionBlurEnabled",   m_editorConfig.MotionBlurEnabled);
+	m_editorConfig.MotionBlurIntensity         = globalstate.getCustomConfigFloat("MotionBlurIntensity", m_editorConfig.MotionBlurIntensity);
+	m_editorConfig.MotionBlurMax               = globalstate.getCustomConfigFloat("MotionBlurMax",      m_editorConfig.MotionBlurMax);
 	m_editorConfig.AntiAliasing                = globalstate.getCustomConfigInt("AntiAliasing",         m_editorConfig.AntiAliasing);
 	m_editorConfig.AASharpness                 = globalstate.getCustomConfigFloat("AASharpness",        m_editorConfig.AASharpness);
 	m_editorConfig.RenderScale                 = globalstate.getCustomConfigFloat("RenderScale",        m_editorConfig.RenderScale);
@@ -2659,6 +2662,10 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.DoFFocusDistance,
 			m_editorConfig.DoFFocusRange,
 			m_editorConfig.DoFAperture});
+		renderer()->SetMotionBlurSettings(IRenderer::MotionBlurSettings{
+			m_editorConfig.MotionBlurEnabled,
+			m_editorConfig.MotionBlurIntensity,
+			m_editorConfig.MotionBlurMax});
 		// Directional shadows come from the PROJECT (Project Settings ▸ Shadows),
 		// not from the editor's preferences: the cascades a scene is lit with
 		// are part of the scene's look and must not differ between machines.
@@ -4196,6 +4203,18 @@ void EditorApplication::dumpFrameHeadless()
 		if (const char* v = std::getenv("HE_DUMP_DOFRANGE"); v && *v)    dof.focusRange    = static_cast<float>(std::atof(v));
 		if (const char* v = std::getenv("HE_DUMP_DOFAPERTURE"); v && *v) dof.aperture      = static_cast<float>(std::atof(v));
 		r->SetDepthOfFieldSettings(dof);
+	}
+	{
+		// HE_DUMP_MOTIONBLUR (+ MBINTENSITY / MBMAX): override the motion-blur
+		// settings for this capture only. The camera motion itself comes from
+		// HE_DUMP_MBYAWSTEP / MBPITCHSTEP at the capture loop below.
+		IRenderer::MotionBlurSettings mb{
+			m_editorConfig.MotionBlurEnabled, m_editorConfig.MotionBlurIntensity,
+			m_editorConfig.MotionBlurMax};
+		if (const char* v = std::getenv("HE_DUMP_MOTIONBLUR"); v && *v)  mb.enabled   = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_MBINTENSITY"); v && *v) mb.intensity = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_MBMAX"); v && *v)       mb.maxBlur   = static_cast<float>(std::atof(v));
+		r->SetMotionBlurSettings(mb);
 	}
 	r->SetShadowSettings(projectShadowSettings());
 	{
@@ -6232,6 +6251,43 @@ void EditorApplication::dumpFrameHeadless()
 	int settleFrames = 3;
 	if (const char* sf = std::getenv("HE_DUMP_FRAMES"); sf && *sf)
 		settleFrames = std::clamp(std::atoi(sf), 1, 240);
+
+	// HE_DUMP_MBYAWSTEP / HE_DUMP_MBPITCHSTEP (degrees): the motion-blur
+	// witness. A headless dump has no camera history — every settle frame
+	// sees the same pose, so the pass measures zero motion and copies the
+	// image through. With a step set, the settle frames are rendered from a
+	// pose turned back by that much and only the CAPTURED frame stands at the
+	// real one: exactly one frame of camera motion, the way a turning camera
+	// produces it. The oracle: MOTIONBLUR=0 and MOTIONBLUR=1 without a step
+	// are md5-identical to the baseline; a yaw step streaks horizontally, a
+	// pitch step vertically, on Metal and GL alike.
+	auto mbEnvF = [](const char* k){ const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : 0.0f; };
+	const float mbYawStep   = mbEnvF("HE_DUMP_MBYAWSTEP");
+	const float mbPitchStep = mbEnvF("HE_DUMP_MBPITCHSTEP");
+	const bool  mbSweep     = (mbYawStep != 0.0f || mbPitchStep != 0.0f);
+	if (mbSweep)
+	{
+		auto poseFwd = [](float yaw, float pitch)
+		{
+			return glm::vec3(std::sin(yaw) * std::cos(pitch), std::sin(pitch),
+			                 -std::cos(yaw) * std::cos(pitch));
+		};
+		const glm::vec3 eye   = m_editorCamera.position();
+		const float     yaw   = m_editorCamera.yaw();
+		const float     pitch = m_editorCamera.pitch();
+		m_editorCamera.setOrientation(eye, poseFwd(yaw - glm::radians(mbYawStep),
+		                                           pitch - glm::radians(mbPitchStep)));
+		r->SetEditorCamera(m_editorCamera.makeOverride());
+		for (int i = 0; i < settleFrames; ++i)
+			r->Render();
+		m_editorCamera.setOrientation(eye, poseFwd(yaw, pitch));
+		r->SetEditorCamera(m_editorCamera.makeOverride());
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_MBYAWSTEP/MBPITCHSTEP turned the camera by "
+			 + std::to_string(mbYawStep) + "/" + std::to_string(mbPitchStep)
+			 + " deg for the captured frame").c_str());
+		settleFrames = 1;
+	}
 	for (int i = 0; i < settleFrames; ++i)
 		r->Render();
 
@@ -9544,6 +9600,9 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("DoFFocusDistance",           m_editorConfig.DoFFocusDistance);
 	globalstate.setCustomConfigEntry("DoFFocusRange",              m_editorConfig.DoFFocusRange);
 	globalstate.setCustomConfigEntry("DoFAperture",                m_editorConfig.DoFAperture);
+	globalstate.setCustomConfigEntry("MotionBlurEnabled",          m_editorConfig.MotionBlurEnabled);
+	globalstate.setCustomConfigEntry("MotionBlurIntensity",        m_editorConfig.MotionBlurIntensity);
+	globalstate.setCustomConfigEntry("MotionBlurMax",              m_editorConfig.MotionBlurMax);
 	globalstate.setCustomConfigEntry("AntiAliasing",              m_editorConfig.AntiAliasing);
 	globalstate.setCustomConfigEntry("AASharpness",               m_editorConfig.AASharpness);
 	globalstate.setCustomConfigEntry("RenderScale",               m_editorConfig.RenderScale);
