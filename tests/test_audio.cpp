@@ -767,6 +767,19 @@ TEST_CASE("AudioEngine: isPaused tells a paused voice from a finished or unknown
     engine.stop(h);                        // stopped voice is gone: not paused, not playing
     CHECK(!engine.isPaused(h));
     CHECK(!engine.isPaused(99999));        // unknown handle
+
+    // A voice that has already run out is finished, not paused — pausing it
+    // must not turn "finished" into "waiting" for whoever reaps on isPaused.
+    auto tiny = makeSilence(480, 2);       // 10 ms
+    uint64_t f = engine.play(tiny, 48000, 2);
+    REQUIRE(f != 0);
+    std::vector<float> mix(4800 * 2);
+    engine.readMixedFrames(mix.data(), 4800);   // pull well past the end …
+    engine.readMixedFrames(mix.data(), 4800);   // … miniaudio stops the node one period later
+    REQUIRE(!engine.isPlaying(f));
+    engine.pauseSound(f);
+    CHECK(!engine.isPaused(f));
+    engine.stop(f);
     engine.shutdown();
 }
 

@@ -444,6 +444,12 @@ void AudioEngine::pauseSound(uint64_t handle)
 {
     auto it = m_impl->sounds.find(handle);
     if (it == m_impl->sounds.end() || !it->second->soundOk) return;
+    // A voice that is not running — finished, or already paused — has nothing
+    // to hold; marking it paused would make isPaused() claim a finished sound
+    // is merely waiting. at_end covers the one mixer period between the last
+    // frame and miniaudio actually flipping the node to stopped.
+    if (ma_sound_is_playing(&it->second->sound) == MA_FALSE ||
+        ma_sound_at_end(&it->second->sound) == MA_TRUE) return;
     // ma_sound_stop only halts playback — the voice, its buffer and its cursor
     // all stay put, which is what makes resumeSound() free.
     ma_sound_stop(&it->second->sound);
