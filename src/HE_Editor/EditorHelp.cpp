@@ -2413,6 +2413,18 @@ namespace
 	  "How often the Content Browser re-checks the project folder for files "
 	  "changed outside the editor.",
 	  "", "editor#content-browser" },
+	{ "Preferences/Autosave/Autosave", "",
+	  "Writes a recovery copy of the edited scene into the project's "
+	  "Saved/Autosave folder at a fixed interval. The scene file itself is never "
+	  "written by the timer: saving stays your decision. A real save or a clean "
+	  "exit removes the copy; after a crash it is what the next start can "
+	  "restore from.",
+	  "", "editor#preferences" },
+	{ "Preferences/Autosave/Autosave Interval (s)", "",
+	  "Seconds between two recovery copies. A copy is only written when the "
+	  "scene has changed since the last one. Ten seconds is the floor: below "
+	  "that, writing the scene is itself the pause it was meant to spare you.",
+	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
 	  "How a variable is drawn in a HorizonCode graph's list: name and type on "
 	  "two lines, with the type written out and coloured. The default.",
@@ -2658,6 +2670,26 @@ namespace
 	  "Probes for cmake and a compiler again. A clean result closes this dialog "
 	  "on its own, so this is what to press after an install finishes elsewhere.",
 	  "", "horizoncode#compiler" },
+
+	// ── The recovery dialog (SceneRecoveryDialog) ────────────────────────────
+	// Raised at startup when the autosave (Preferences » Autosave) left a copy
+	// behind. Three answers that are not symmetric, so each says what it costs.
+	{ "Scene Recovery/Restore", "Restore",
+	  "Loads the autosaved copy over the scene it came from, as a single undo "
+	  "step: Undo takes you back to what the file on disk holds. The scene is "
+	  "then unsaved until you save it yourself; nothing is written to the file "
+	  "here.",
+	  "", "editor#preferences" },
+	{ "Scene Recovery/Delete Snapshot", "Delete Snapshot",
+	  "Removes the autosaved copy for good. The scene file is not touched. "
+	  "Choose this when the copy holds nothing you want to keep, for example "
+	  "an experiment you had already decided against.",
+	  "", "editor#preferences" },
+	{ "Scene Recovery/Keep for Later", "Keep for Later",
+	  "Closes the dialog and leaves the copy where it is, so it is offered "
+	  "again the next time this project opens. The one answer that cannot lose "
+	  "anything, which is why Escape does the same.",
+	  "Esc", "editor#preferences" },
 
 	// ── The material editor ──────────────────────────────────────────────────
 	// The graph's nodes are drawn small, so their fields carry the shortest
@@ -5618,6 +5650,7 @@ namespace
 		{ "Preferences/Input/",               "editor-settings", "Settings Reference", "Input" },
 		{ "Preferences/Appearance/",          "editor-settings", "Settings Reference", "Appearance" },
 		{ "Preferences/Content Browser/",     "editor-settings", "Settings Reference", "Content Browser" },
+		{ "Preferences/Autosave/",            "editor-settings", "Settings Reference", "Autosave" },
 		{ "Preferences/",    "editor-settings", "Settings Reference", "Preferences" },
 		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
 		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },
@@ -5635,6 +5668,9 @@ namespace
 		{ "Application/",    "editor-settings", "Settings Reference", "The application" },
 		{ "Collision Layers/", "editor-settings", "Settings Reference", "Collision layers" },
 		{ "Build Tools/",     "editor-settings", "Settings Reference", "Build tools" },
+		// The recovery dialog is the autosave's other half, so its three
+		// buttons are listed under the setting that produces the copy.
+		{ "Scene Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
 		// ── The asset editors ────────────────────────────────────────────────
 		{ "material.",           "editor-materials", "Material Editor", "Material graph" },

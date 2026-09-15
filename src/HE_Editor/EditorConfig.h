@@ -79,6 +79,15 @@ struct EditorConfig
 	// the file.
 	int  McpPort = 0;
 
+	// Solo autosave: a periodic snapshot of the open scene into the project's
+	// Saved/Autosave folder (SceneAutosave.h). NOT a save of the scene file —
+	// the user's file is only ever written when they say so — but the copy a
+	// crash leaves behind for the next start. On by default, because the case
+	// it exists for is the one nobody plans for. The interval has a floor of
+	// 10 s in the autosave itself: below that the serialisation IS the hitch.
+	bool AutosaveEnabled     = true;
+	int  AutosaveIntervalSec = 60;
+
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
 	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second

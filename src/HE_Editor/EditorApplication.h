@@ -10,6 +10,7 @@
 #include "CollabController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
+#include "SceneAutosave.h"   // the solo recovery snapshot, independent of a session
 #include "NotificationStore.h"
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
@@ -207,6 +208,18 @@ struct AppContext
 	std::function<void(const std::string&)> openScene;          // load .hescene, replacing the world
 	std::function<void(const std::string&)> openSceneAdditive; // merge .hescene into the existing world
 	std::function<void()>                    newScene;        // clear to an empty scene
+
+	// ── Crash recovery ─────────────────────────────────────────────────────
+	// A recovery snapshot an earlier session of this project left behind
+	// (SceneAutosave: the scene it came from, when, at which revision). Null
+	// when there is none or it has been answered; the recovery dialog raises
+	// itself on it. Restore loads it into the world as one undoable step and
+	// leaves the scene dirty; delete removes the file; defer keeps it on disk
+	// for the next start and stops asking this session.
+	const HE::Ed::RecoveryInfo* recoveryOffer = nullptr;
+	std::function<bool()> restoreRecovery;
+	std::function<void()> discardRecovery;
+	std::function<void()> deferRecovery;
 
 	// Undo/redo. UI calls undoSys capture/stash/commit around mutations;
 	// undo()/redo() also reset the selection (entity handles are remapped).
@@ -744,6 +757,27 @@ private:
 	CollabDocSync::DocMirror m_levelScriptMirror;
 	CollabDocSync::DocMirror m_gameInstanceMirror;
 	std::unordered_map<std::string, std::uint64_t> m_assetLastAutosaveMs;
+	// The recovery snapshot of the open scene, written on a timer whether or
+	// not a collaboration session is running (the whole-file autosave above
+	// only exists inside one). Configured per project in the project-loaded
+	// callback; cleared by a real save, a scene switch and a clean exit.
+	HE::Ed::SceneAutosave m_autosave;
+	void updateAutosave(std::uint64_t nowMs);
+	// What an earlier session left behind, found at project load and offered
+	// by the recovery dialog until it is answered (SceneRecoveryDialog). Empty
+	// once the user restored, deleted or deferred it — the file itself only
+	// goes on the first two.
+	std::optional<HE::Ed::RecoveryInfo> m_recoveryOffer;
+	// Loads the pending snapshot into the world as ONE undoable step on top of
+	// the scene it came from, so Undo is the way back to the file on disk and
+	// the scene is dirty until the user saves it. Returns false if there was
+	// nothing to restore or the snapshot would not load.
+	bool restoreRecoveredScene();
+	// Set by the quit the UI hands us (AppContext::quit), which only fires once
+	// the unsaved-changes prompt is through. OnShutdown reads it: the base loop
+	// also reaches OnShutdown after an exception in OnRender, and THAT exit must
+	// leave the snapshot where a crash would.
+	bool m_quitConfirmed = false;
 	// Syncable asset tabs that were open last pass, so the ones that closed can
 	// drop what the host told them about their lock.
 	std::unordered_set<std::string> m_docMirrorPaths;

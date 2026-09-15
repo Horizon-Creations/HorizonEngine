@@ -27,6 +27,7 @@ add_executable(he_tests
     test_report_issue.cpp
     test_notification_store.cpp
     test_editor_dock_state.cpp
+    test_scene_autosave.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
@@ -48,6 +49,9 @@ add_executable(he_tests
     # The Audio Mixer, driven the same way: strips from a real ProjectData, a
     # click on M reaching the device-less AudioEngine as a mute, S as a solo.
     test_audio_mixer_ui.cpp
+    # The recovery dialog, driven the same way: three answers, three callbacks,
+    # and no dialog at all without an offer.
+    test_scene_recovery_ui.cpp
     test_editorcamera.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
@@ -417,6 +421,11 @@ add_executable(he_tests
     # question about arithmetic and hit tests, not about a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SequencerTimeline.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
+    # The solo autosave's timing and file rules: when a recovery snapshot is
+    # written, that the write is temp+rename with the manifest last, and what
+    # a previous run's leftover becomes at the next start. Clock, dirty flag
+    # and revision are handed in, so it runs on a fake clock, not a stopwatch.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneAutosave.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
     # profile picture; both call into it, so the tests need it linked too.
@@ -485,6 +494,9 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. It reads ProjectData (HorizonTools, linked
     # below) and AudioEngine (HorizonScene), both already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
+    # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -502,6 +514,8 @@ set_source_files_properties(
     test_terrain_tools_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
     test_audio_mixer_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
+    test_scene_recovery_ui.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE

@@ -240,9 +240,12 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Preferences/Input",               "Stick Deadzone" },
 		{ "Preferences/Appearance",          "UI Font Scale" },
 		{ "Preferences/Content Browser",     "Refresh Interval (s)" },
+		{ "Preferences/Autosave",            "Autosave Interval (s)" },
 		{ "Build Tools",     "Install Automatically" },
 		{ "Build Tools",     "Recheck" },
 		{ "Build Tools",     "Don't show this again" },
+		{ "Scene Recovery",  "Restore" },
+		{ "Scene Recovery",  "Keep for Later" },
 		// The material editor's five. Its nodes are drawn small enough that a
 		// label is three letters, so a scope that stopped resolving here would
 		// leave the shortest labels in the editor with nothing behind them.

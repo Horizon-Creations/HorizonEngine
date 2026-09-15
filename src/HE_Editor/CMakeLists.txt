@@ -280,6 +280,8 @@ add_executable(HorizonEditor WIN32
 	EngineContentPublishDialog.cpp
 	EditorAssetTypeCache.cpp
 	AssetThumbnailCache.cpp
+	SceneAutosave.cpp
+	SceneRecoveryDialog.cpp
 	EditorPanelState.cpp
 	EditorWidgets.cpp
 	EditorRowWidgets.cpp
