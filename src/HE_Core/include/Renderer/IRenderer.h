@@ -412,6 +412,31 @@ public:
     };
     virtual void SetOcclusionCullingSettings(const OcclusionCullingSettings& /*settings*/) {}
 
+    // ── Depth of field (post-process) ────────────────────────────────────────
+    // Pushed like bloom/SSAO. A camera-lens blur on the HDR image BEFORE bloom
+    // and tonemapping: the scene depth becomes a per-pixel circle of confusion
+    // (CoC), the image is blurred at half resolution by a separable, CoC-weighted
+    // gather (near objects spill over the sharp background, the blurred
+    // background never bleeds over a sharp foreground), and the composite lerps
+    // sharp ↔ blurred by that CoC. The parameters are artist-facing, not
+    // millimetres of sensor:
+    //   focusDistance — metres from the camera to the plane in focus
+    //   focusRange    — width (metres) of the fully sharp band around that
+    //                   plane; the blur ramps to full over the same distance
+    //                   again on either side
+    //   aperture      — f-number: f/1.4 is the widest blur, f/22 next to none
+    //                   (max blur radius scales with 1/aperture)
+    // Implemented by the OpenGL and Metal backends; the others ignore it. Off by
+    // default, and off = the image is byte-identical to the pass not existing.
+    struct DepthOfFieldSettings
+    {
+        bool  enabled       = false;
+        float focusDistance = 10.0f;
+        float focusRange    = 4.0f;
+        float aperture      = 2.8f;
+    };
+    virtual void SetDepthOfFieldSettings(const DepthOfFieldSettings& /*settings*/) {}
+
     // ── Ray-traced GI reflections (docs/gi-reflections-plan.md) ─────────────
     // Pushed like SSR/GI. One specular ray per (half-res) pixel against the GI
     // acceleration structure; hits are shaded from the sun + the DDGI probe

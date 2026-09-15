@@ -242,6 +242,18 @@ std::vector<SettingDesc> buildCatalog()
 	t.push_back(enumRow("postProcess.ssaoMethod", "AO Method", "Post-Processing",
 	                    "ssao", &EditorConfig::SSAOMethod,
 	                    { "SSAO", "HBAO", "GTAO" }, ""));
+	t.push_back(boolRow("postProcess.dofEnabled", "Depth of Field", "Post-Processing",
+	                    "dof", &EditorConfig::DoFEnabled,
+	                    "Lens blur outside the focus band (OpenGL, Metal)."));
+	t.push_back(floatRow("postProcess.dofFocusDistance", "Focus Distance",
+	                     "Post-Processing", "dof", &EditorConfig::DoFFocusDistance,
+	                     0.1, 1000.0, "Metres from the camera to the plane in focus."));
+	t.push_back(floatRow("postProcess.dofFocusRange", "Focus Range",
+	                     "Post-Processing", "dof", &EditorConfig::DoFFocusRange,
+	                     0.0, 1000.0, "Metres of fully sharp band around the focus plane."));
+	t.push_back(floatRow("postProcess.dofAperture", "Aperture",
+	                     "Post-Processing", "dof", &EditorConfig::DoFAperture,
+	                     1.0, 22.0, "f-number: f/1.4 blurs most, f/22 next to nothing."));
 	t.push_back(boolRow("postProcess.ssrEnabled", "Screen-Space Reflections",
 	                    "Post-Processing", "ssr", &EditorConfig::SSREnabled,
 	                    "Metal + the deferred render path; the backend gates it."));

@@ -122,6 +122,7 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
+	void  SetDepthOfFieldSettings(const DepthOfFieldSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetShadowSettings(const ShadowSettings& settings) override;
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
@@ -828,9 +829,10 @@ private:
 	bool  MetalFxActive() const;
 	void  EnsureMetalFX(int inW, int inH, int outW, int outH);
 	void  DestroyMetalFX();
-	// Runs the scaler; returns the upscaled HDR texture, or null when it could
-	// not run (the caller then tonemaps the un-upscaled image as before).
-	void* EncodeMetalFX(void* cmdBuf, int inW, int inH, int outW, int outH);
+	// Runs the scaler on `sourceHdr` (the scene HDR, or the DoF result when that
+	// ran); returns the upscaled HDR texture, or null when it could not run (the
+	// caller then tonemaps the un-upscaled image as before).
+	void* EncodeMetalFX(void* cmdBuf, void* sourceHdr, int inW, int inH, int outW, int outH);
 
 	void* m_smaaPipeline   = nullptr; // id<MTLRenderPipelineState> — AA = SMAA
 	void* m_aaBlitPipeline = nullptr; // id<MTLRenderPipelineState> — AA = Off
@@ -887,8 +889,34 @@ private:
 	glm::mat4 m_prepassViewProj = glm::mat4(1.0f); // camera the low-res cloud pre-pass used → sky pass reprojects it
 	void  EnsureBloomTargets(int width, int height);
 	void  DestroyBloomTargets();
-	// Bright-pass + blur m_hdrColor into m_bloomColor[0]; returns its texture ptr.
-	void* EncodeBloom(void* cmdBuf, int fullW, int fullH);
+	// Bright-pass + blur `sourceHdr` (the scene HDR, or the DoF result when that
+	// ran) into m_bloomColor[0]; returns its texture ptr.
+	void* EncodeBloom(void* cmdBuf, void* sourceHdr, int fullW, int fullH);
+
+	// ── Depth of field (CoC from depth → separable CoC-weighted blur → composite)
+	// Mirrors the GL backend (kDofMSL = the three GLSL programs, 1:1). Runs on
+	// the HDR image before bloom/tonemap; m_dofResult is what they then read
+	// (null = off, they read m_hdrColor as before). Half-res CoC (RG16F), two
+	// half-res RGBA16F blur targets, one full-res RGBA16F composite. None of the
+	// pipelines carries a depth attachment: the composite SAMPLES m_hdrDepth.
+	void* m_dofCocPipeline       = nullptr; // id<MTLRenderPipelineState>
+	void* m_dofBlurPipeline      = nullptr; // id<MTLRenderPipelineState>
+	void* m_dofCompositePipeline = nullptr; // id<MTLRenderPipelineState>
+	void* m_dofCocTex            = nullptr; // id<MTLTexture> RG16F half-res
+	void* m_dofBlurTex[2]        = { nullptr, nullptr }; // id<MTLTexture> RGBA16F half-res
+	void* m_dofColor             = nullptr; // id<MTLTexture> RGBA16F full-res composite
+	void* m_dofResult            = nullptr; // this frame's composite (or null = off)
+	int   m_dofW                 = 0;       // full-res size the targets were made for
+	int   m_dofH                 = 0;
+	bool  m_dofEnabled           = false;
+	float m_dofFocusDistance     = 10.0f;
+	float m_dofFocusRange        = 4.0f;
+	float m_dofAperture          = 2.8f;
+	void  EnsureDepthOfFieldTargets(int fullW, int fullH);
+	void  DestroyDepthOfFieldTargets();
+	// Runs the four DoF passes into m_dofColor; returns it, or null when the
+	// pass could not run (the caller then keeps m_hdrColor).
+	void* EncodeDepthOfField(void* cmdBuf, int fullW, int fullH);
 
 	// ── Low-res clouds (quarter-res cloud pre-pass; EnvironmentSettings.lowResClouds) ──
 	// Raymarch the clouds into m_cloudColor (rgb = L, a = T) at quarter resolution; the

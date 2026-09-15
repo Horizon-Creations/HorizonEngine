@@ -154,6 +154,10 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("SSAORadius",                cfg.SSAORadius);
     put("SSAOIntensity",             cfg.SSAOIntensity);
     put("SSAOMethod",                cfg.SSAOMethod);
+    put("DoFEnabled",                cfg.DoFEnabled);
+    put("DoFFocusDistance",          cfg.DoFFocusDistance);
+    put("DoFFocusRange",             cfg.DoFFocusRange);
+    put("DoFAperture",               cfg.DoFAperture);
     put("AntiAliasing",              cfg.AntiAliasing);
     put("AASharpness",               cfg.AASharpness);
     put("RenderScale",               cfg.RenderScale);

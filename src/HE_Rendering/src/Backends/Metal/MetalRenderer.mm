@@ -1456,6 +1456,122 @@ fragment float4 blurFragment(FSOut in [[stage_in]],
 }
 )MSL";
 
+// ─── Depth of field ──────────────────────────────────────────────────────────
+// Mirrors the GL kDofCocFS / kDofBlurFS / kDofCompositeFS 1:1 — see the GL
+// backend for the algorithm write-up (CoC-weighted scatter-as-gather, near
+// spills over far, far never over near, alpha = gathered blurriness). Depth is
+// the Depth32Float scene target, bound as depth2d. The scene raster uses the
+// UNFIXED GL projection (see ssaoDepthPosFragment), so the stored value already
+// IS the GL-convention ndc z — no 0..1 → -1..1 remap here, unlike the GL
+// backend, whose depth texture holds window z. (The first build remapped and
+// read every distance at half its true value.)
+static const char* kDofMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct FSOut { float4 position [[position]]; float2 uv; };
+
+vertex FSOut fsVertex(uint vid [[vertex_id]])
+{
+	float x = float((vid & 1) << 2) - 1.0;
+	float y = float((vid & 2) << 1) - 1.0;
+	FSOut o;
+	o.position = float4(x, y, 0.0, 1.0);
+	o.uv       = float2(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+	return o;
+}
+
+struct DofParams
+{
+	float4 params;   // x focus distance, y focus range, z max radius (half-res texels), w unused
+	float2 proj;     // x proj[2][2], y proj[3][2]
+	float2 texel;    // 1 / half-res size
+	float  horizontal;
+	float  pad0, pad1, pad2;
+};
+
+static float dofLinearDepth(float d, float2 proj)
+{
+	return proj.y / (d + proj.x);   // d is already GL ndc z (see above)
+}
+static float dofSignedRadius(float linearDepth, float4 params)
+{
+	float band  = max(params.y * 0.5, 1e-3);
+	float delta = linearDepth - params.x;
+	float t     = clamp((abs(delta) - band) / band, 0.0, 1.0);
+	return sign(delta) * t * params.z;
+}
+
+fragment float2 dofCocFragment(FSOut in [[stage_in]],
+                               depth2d<float> depth [[texture(0)]],
+                               constant DofParams& u [[buffer(0)]])
+{
+	constexpr sampler s(filter::nearest, address::clamp_to_edge);
+	float4 d4   = depth.gather(s, in.uv);
+	float  best = 0.0, bestD = 0.0;
+	for (int i = 0; i < 4; ++i)
+	{
+		float D = dofLinearDepth(d4[i], u.proj);
+		float r = dofSignedRadius(D, u.params);
+		if (i == 0 || abs(r) > abs(best)) { best = r; bestD = D; }
+	}
+	return float2(best, bestD);
+}
+
+fragment float4 dofBlurFragment(FSOut in [[stage_in]],
+                                texture2d<float> img [[texture(0)]],
+                                texture2d<float> coc [[texture(1)]],
+                                constant DofParams& u [[buffer(0)]])
+{
+	constexpr sampler s(filter::linear, address::clamp_to_edge);
+	const int kTaps = 8;
+	const bool horizontal = u.horizontal > 0.5;
+	float2 cc     = coc.sample(s, in.uv).rg;
+	float  rC     = abs(cc.x);
+	float  dC     = cc.y;
+	float  stepPx = max(u.params.z, 1e-3) / float(kTaps);
+	float2 dir    = horizontal ? float2(u.texel.x, 0.0) : float2(0.0, u.texel.y);
+	float4 c0     = img.sample(s, in.uv);
+	float  a0     = horizontal ? clamp(rC, 0.0, 1.0) : c0.a;
+	float4 sum    = float4(c0.rgb, a0);
+	float  wsum   = 1.0;
+	for (int i = 1; i <= kTaps; ++i)
+	{
+		float dist = float(i) * stepPx;
+		for (int sgn = -1; sgn <= 1; sgn += 2)
+		{
+			float2 uv    = in.uv + dir * (dist * float(sgn));
+			float2 ct    = coc.sample(s, uv).rg;
+			float  rT    = abs(ct.x);
+			float  dT    = ct.y;
+			bool   front = dT < dC - max(0.05, 0.02 * dC);
+			float  rEff  = front ? rT : min(rT, rC);
+			float  w     = clamp((rEff - dist) / stepPx + 1.0, 0.0, 1.0);
+			float4 c     = img.sample(s, uv);
+			float  a     = horizontal ? clamp(rT, 0.0, 1.0) : c.a;
+			sum  += float4(c.rgb, a) * w;
+			wsum += w;
+		}
+	}
+	return sum / wsum;
+}
+
+fragment float4 dofCompositeFragment(FSOut in [[stage_in]],
+                                     texture2d<float> sharp   [[texture(0)]],
+                                     texture2d<float> blurred [[texture(1)]],
+                                     depth2d<float>   depth   [[texture(2)]],
+                                     constant DofParams& u [[buffer(0)]])
+{
+	constexpr sampler s(filter::linear, address::clamp_to_edge);
+	constexpr sampler sp(filter::nearest, address::clamp_to_edge);
+	float  r    = abs(dofSignedRadius(dofLinearDepth(depth.sample(sp, in.uv), u.proj), u.params));
+	float4 blur = blurred.sample(s, in.uv);
+	float3 shrp = sharp.sample(s, in.uv).rgb;
+	float  t    = clamp(max(r, blur.a), 0.0, 1.0);
+	return float4(mix(shrp, blur.rgb, t), 1.0);
+}
+)MSL";
+
 // ─── SSAO (screen-space ambient occlusion) ──────────────────────────────────
 // Mirrors the GL backend. Working in view space makes the maths identical across
 // backends; the only difference is the NDC→UV y-flip (Metal textures are top-left
@@ -5839,6 +5955,7 @@ void MetalRenderer::Shutdown()
 	DestroyGIReflTarget();
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
+	DestroyDepthOfFieldTargets();
 	DestroyCloudTarget();
 	DestroyLdrTarget();
 	DestroySSAOTargets();
@@ -5920,6 +6037,9 @@ void MetalRenderer::Shutdown()
 	m_uiBackdropW = m_uiBackdropH = 0;
 	if (m_bloomBrightPipeline)  { CFBridgingRelease(m_bloomBrightPipeline);  m_bloomBrightPipeline = nullptr; }
 	if (m_blurPipeline)         { CFBridgingRelease(m_blurPipeline);         m_blurPipeline = nullptr; }
+	if (m_dofCocPipeline)       { CFBridgingRelease(m_dofCocPipeline);       m_dofCocPipeline = nullptr; }
+	if (m_dofBlurPipeline)      { CFBridgingRelease(m_dofBlurPipeline);      m_dofBlurPipeline = nullptr; }
+	if (m_dofCompositePipeline) { CFBridgingRelease(m_dofCompositePipeline); m_dofCompositePipeline = nullptr; }
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
@@ -6392,6 +6512,31 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: bloom blur pipeline creation failed: ")
 				+ (blError ? [[blError localizedDescription] UTF8String] : "unknown"));
 		m_blurPipeline = (void*)CFBridgingRetain(bdPso);
+
+		// ── Depth-of-field pipelines (CoC RG16F, blur/composite RGBA16F, no depth)
+		{
+			NSError* dofError = nil;
+			id<MTLLibrary> dofLib = [device newLibraryWithSource:
+				[NSString stringWithUTF8String:kDofMSL] options:nil error:&dofError];
+			if (!dofLib)
+				throw std::runtime_error(std::string("MetalRenderer: DoF shader compile failed: ")
+					+ (dofError ? [[dofError localizedDescription] UTF8String] : "unknown"));
+			auto makeDof = [&](NSString* fragName, MTLPixelFormat fmt, const char* what) -> void*
+			{
+				MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
+				d.vertexFunction   = [dofLib newFunctionWithName:@"fsVertex"];
+				d.fragmentFunction = [dofLib newFunctionWithName:fragName];
+				d.colorAttachments[0].pixelFormat = fmt;
+				id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:d error:&dofError];
+				if (!pso)
+					throw std::runtime_error(std::string("MetalRenderer: DoF ") + what + " pipeline creation failed: "
+						+ (dofError ? [[dofError localizedDescription] UTF8String] : "unknown"));
+				return (void*)CFBridgingRetain(pso);
+			};
+			m_dofCocPipeline       = makeDof(@"dofCocFragment",       MTLPixelFormatRG16Float, "CoC");
+			m_dofBlurPipeline      = makeDof(@"dofBlurFragment",      kSceneColorFormat,       "blur");
+			m_dofCompositePipeline = makeDof(@"dofCompositeFragment", kSceneColorFormat,       "composite");
+		}
 
 		// ── Skybox pipeline (into the HDR target; carries the scene depth fmt) ──
 		NSError* skyError = nil;
@@ -10126,7 +10271,8 @@ void MetalRenderer::EnsureHDRTarget(int width, int height)
 
 	MTLTextureDescriptor* depthDesc = [MTLTextureDescriptor
 		texture2DDescriptorWithPixelFormat:kDepthFormat width:width height:height mipmapped:NO];
-	depthDesc.usage       = MTLTextureUsageRenderTarget;
+	// ShaderRead: the depth-of-field pass samples the scene depth for its CoC.
+	depthDesc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 	depthDesc.storageMode = MTLStorageModePrivate;
 	m_hdrDepth = (void*)CFBridgingRetain([device newTextureWithDescriptor:depthDesc]);
 
@@ -10553,9 +10699,9 @@ void MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 // Bright-pass the HDR color then ping-pong blur (even pass count ends in
 // m_bloomColor[0]). Each fullscreen pass is its own encoder. Returns the result
 // texture, or nullptr if bloom is unavailable.
-void* MetalRenderer::EncodeBloom(void* cmdBufPtr, int fullW, int fullH)
+void* MetalRenderer::EncodeBloom(void* cmdBufPtr, void* sourceHdr, int fullW, int fullH)
 {
-	if (!m_bloomBrightPipeline || !m_blurPipeline || !m_hdrColor) return nullptr;
+	if (!m_bloomBrightPipeline || !m_blurPipeline || !sourceHdr) return nullptr;
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
 	EnsureBloomTargets(fullW / 2, fullH / 2);
 	if (!m_bloomColor[0]) return nullptr;
@@ -10588,7 +10734,7 @@ void* MetalRenderer::EncodeBloom(void* cmdBufPtr, int fullW, int fullH)
 	// Bright pass: HDR scene color → m_bloomColor[0]. Carries the start timer slot.
 	const simd::float2 brightParams = { m_bloomThreshold, m_bloomKnee };
 	fullscreenPass(tex0, (__bridge id<MTLRenderPipelineState>)m_bloomBrightPipeline,
-	               (__bridge id<MTLTexture>)m_hdrColor, &brightParams, sizeof(brightParams),
+	               (__bridge id<MTLTexture>)sourceHdr, &brightParams, sizeof(brightParams),
 	               bloomBase, kInvalidSlot);
 
 	// Ping-pong Gaussian blur. The last pass carries the end timer slot.
@@ -10606,6 +10752,121 @@ void* MetalRenderer::EncodeBloom(void* cmdBufPtr, int fullW, int fullH)
 		horizontal = !horizontal;
 	}
 	return m_bloomColor[0];
+}
+
+// ─── Depth of field ──────────────────────────────────────────────────────────
+void MetalRenderer::SetDepthOfFieldSettings(const DepthOfFieldSettings& s)
+{
+	m_dofEnabled       = s.enabled;
+	m_dofFocusDistance = s.focusDistance;
+	m_dofFocusRange    = s.focusRange;
+	m_dofAperture      = s.aperture;
+}
+
+void MetalRenderer::EnsureDepthOfFieldTargets(int fullW, int fullH)
+{
+	fullW = std::max(2, fullW);
+	fullH = std::max(2, fullH);
+	if (m_dofColor && fullW == m_dofW && fullH == m_dofH) return;
+	DestroyDepthOfFieldTargets();
+
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	auto make = [&](MTLPixelFormat fmt, int w, int h) -> void*
+	{
+		MTLTextureDescriptor* desc = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:fmt width:w height:h mipmapped:NO];
+		desc.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		desc.storageMode = MTLStorageModePrivate;
+		return (void*)CFBridgingRetain([device newTextureWithDescriptor:desc]);
+	};
+	const int halfW = fullW / 2, halfH = fullH / 2;
+	m_dofCocTex     = make(MTLPixelFormatRG16Float, halfW, halfH);
+	m_dofBlurTex[0] = make(kSceneColorFormat,       halfW, halfH);
+	m_dofBlurTex[1] = make(kSceneColorFormat,       halfW, halfH);
+	m_dofColor      = make(kSceneColorFormat,       fullW, fullH);
+	m_dofW = fullW;
+	m_dofH = fullH;
+}
+
+void MetalRenderer::DestroyDepthOfFieldTargets()
+{
+	if (m_dofCocTex)     { CFBridgingRelease(m_dofCocTex);     m_dofCocTex = nullptr; }
+	if (m_dofBlurTex[0]) { CFBridgingRelease(m_dofBlurTex[0]); m_dofBlurTex[0] = nullptr; }
+	if (m_dofBlurTex[1]) { CFBridgingRelease(m_dofBlurTex[1]); m_dofBlurTex[1] = nullptr; }
+	if (m_dofColor)      { CFBridgingRelease(m_dofColor);      m_dofColor = nullptr; }
+	m_dofResult = nullptr;
+	m_dofW = m_dofH = 0;
+}
+
+// CoC → blur H → blur V → composite, four encoders in the caller's command
+// buffer. Same radius rule as the GL backend: the max blur follows the f-number
+// (f/2.8 ≈ 10 half-res texels at 720p) and scales with the target height.
+void* MetalRenderer::EncodeDepthOfField(void* cmdBufPtr, int fullW, int fullH)
+{
+	if (!m_dofCocPipeline || !m_dofBlurPipeline || !m_dofCompositePipeline
+	    || !m_hdrColor || !m_hdrDepth)
+		return nullptr;
+	const glm::mat4& proj = m_renderWorld.camera.projection;
+	if (proj[3][3] != 0.0f) return nullptr;   // orthographic: no lens, no depth of field
+	EnsureDepthOfFieldTargets(fullW, fullH);
+	if (!m_dofColor) return nullptr;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+
+	const int   halfW = m_dofW / 2, halfH = m_dofH / 2;
+	const float maxRadius = std::clamp((28.0f / std::max(m_dofAperture, 0.5f))
+	                                   * (static_cast<float>(halfH) / 360.0f), 0.0f, 32.0f);
+	// Layout mirrors the MSL DofParams struct (48 bytes).
+	struct DofParams
+	{
+		float params[4];
+		float proj[2];
+		float texel[2];
+		float horizontal;
+		float pad[3];
+	} u{};
+	u.params[0] = m_dofFocusDistance;
+	u.params[1] = std::max(m_dofFocusRange, 0.0f);
+	u.params[2] = maxRadius;
+	u.proj[0]   = proj[2][2];
+	u.proj[1]   = proj[3][2];
+	u.texel[0]  = 1.0f / static_cast<float>(halfW);
+	u.texel[1]  = 1.0f / static_cast<float>(halfH);
+
+	// One multi-encoder timer pair for the whole feature (capture only).
+	const uint32_t dofBase = ftBeginMulti("DoF");
+
+	auto pass = [&](id<MTLTexture> dst, void* pso, std::initializer_list<void*> textures,
+	                uint32_t startSlot, uint32_t endSlot)
+	{
+		MTLRenderPassDescriptor* p = [MTLRenderPassDescriptor renderPassDescriptor];
+		p.colorAttachments[0].texture     = dst;
+		p.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+		p.colorAttachments[0].storeAction = MTLStoreActionStore;
+		if (startSlot != kInvalidSlot) ftAttachStart((__bridge void*)p, startSlot);
+		if (endSlot   != kInvalidSlot) ftAttachEnd  ((__bridge void*)p, endSlot);
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:p];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pso];
+		NSUInteger slot = 0;
+		for (void* t : textures)
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:slot++];
+		[enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+		[enc endEncoding];
+	};
+
+	// 1. CoC at half res from the full-res depth.
+	pass((__bridge id<MTLTexture>)m_dofCocTex, m_dofCocPipeline, { m_hdrDepth }, dofBase, kInvalidSlot);
+	// 2./3. Separable CoC-weighted blur: HDR → blur[0] (H) → blur[1] (V).
+	u.horizontal = 1.0f;
+	pass((__bridge id<MTLTexture>)m_dofBlurTex[0], m_dofBlurPipeline, { m_hdrColor, m_dofCocTex },
+	     kInvalidSlot, kInvalidSlot);
+	u.horizontal = 0.0f;
+	pass((__bridge id<MTLTexture>)m_dofBlurTex[1], m_dofBlurPipeline, { m_dofBlurTex[0], m_dofCocTex },
+	     kInvalidSlot, kInvalidSlot);
+	// 4. Composite at full res.
+	pass((__bridge id<MTLTexture>)m_dofColor, m_dofCompositePipeline,
+	     { m_hdrColor, m_dofBlurTex[1], m_hdrDepth }, kInvalidSlot, dofBase);
+	return m_dofColor;
 }
 
 void MetalRenderer::SetSSAOSettings(const SSAOSettings& s)
@@ -11387,16 +11648,16 @@ void MetalRenderer::DestroyMetalFX()
 	m_mfxReset = true;
 }
 
-void* MetalRenderer::EncodeMetalFX(void* cmdBufPtr, int inW, int inH, int outW, int outH)
+void* MetalRenderer::EncodeMetalFX(void* cmdBufPtr, void* sourceHdr, int inW, int inH, int outW, int outH)
 {
 #if HE_HAS_METALFX
-	if (!MetalFxActive() || !m_hdrColor || !m_hdrDepth || !m_velocityTex) return nullptr;
+	if (!MetalFxActive() || !sourceHdr || !m_hdrDepth || !m_velocityTex) return nullptr;
 	EnsureMetalFX(inW, inH, outW, outH);
 	if (!m_mfxScaler || !m_mfxOutput) return nullptr;
 	if (@available(macOS 13.0, *))
 	{
 		id<MTLFXTemporalScaler> scaler = (__bridge id<MTLFXTemporalScaler>)m_mfxScaler;
-		scaler.colorTexture  = (__bridge id<MTLTexture>)m_hdrColor;
+		scaler.colorTexture  = (__bridge id<MTLTexture>)sourceHdr;
 		scaler.depthTexture  = (__bridge id<MTLTexture>)m_hdrDepth;
 		scaler.motionTexture = (__bridge id<MTLTexture>)m_velocityTex;
 		scaler.outputTexture = (__bridge id<MTLTexture>)m_mfxOutput;
@@ -11424,7 +11685,7 @@ void* MetalRenderer::EncodeMetalFX(void* cmdBufPtr, int inW, int inH, int outW, 
 	}
 	return nullptr;
 #else
-	(void)cmdBufPtr; (void)inW; (void)inH; (void)outW; (void)outH;
+	(void)cmdBufPtr; (void)sourceHdr; (void)inW; (void)inH; (void)outW; (void)outH;
 	return nullptr;
 #endif
 }
@@ -15134,7 +15395,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			hdrPass.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
 			hdrPass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
 			hdrPass.depthAttachment.loadAction  = deferredActive ? MTLLoadActionLoad : MTLLoadActionClear;
-			hdrPass.depthAttachment.storeAction = MTLStoreActionDontCare;
+			// The depth-of-field pass SAMPLES this depth after the scene pass, so
+			// it has to reach memory when DoF is on. On a tile GPU DontCare
+			// means it never does (the first DoF frame read a flat texture and
+			// blurred everything alike). Off keeps the free discard.
+			hdrPass.depthAttachment.storeAction = m_dofEnabled ? MTLStoreActionStore
+			                                                   : MTLStoreActionDontCare;
 			hdrPass.depthAttachment.clearDepth  = 1.0;
 
 			// "Scene" pass = sky + clouds + opaque + skinned + particles + debug.
@@ -15227,10 +15493,20 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			}
 			flushPass("Bloom");   // detailed: commit the Scene command buffer
 
+			// Depth of field first: it rewrites the HDR image (CoC from the scene
+			// depth → half-res blur → composite) and bloom, MetalFX and the
+			// tonemap then read THAT. Off → sceneHdr stays m_hdrColor and the
+			// frame is what it always was. Lives in the Bloom command buffer of
+			// a detailed capture (kDetailedPassCount is fixed); its own timer
+			// row comes from ftBeginMulti("DoF").
+			m_dofResult = m_dofEnabled ? EncodeDepthOfField((__bridge void*)cmdBuf, sceneW, sceneH)
+			                           : nullptr;
+			void* const sceneHdr = m_dofResult ? m_dofResult : m_hdrColor;
+
 			// Bright-pass + blur the HDR target into the half-res bloom buffer;
 			// the tonemap below composites it back in. Skipped when bloom is
 			// disabled (m_bloomResult stays null → no glow).
-			m_bloomResult = m_bloomEnabled ? EncodeBloom((__bridge void*)cmdBuf, sceneW, sceneH)
+			m_bloomResult = m_bloomEnabled ? EncodeBloom((__bridge void*)cmdBuf, sceneHdr, sceneW, sceneH)
 			                               : nullptr;
 			flushPass("Tonemap");   // detailed: commit the Bloom command buffer (empty if bloom off)
 
@@ -15260,7 +15536,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// stage Apple's model expects, and it means the tonemap (and every
 			// filter after it) then works at output resolution. Returns null
 			// unless MetalFX is the active mode and the device has it.
-			void* const mfxHdr = EncodeMetalFX((__bridge void*)cmdBuf, sceneW, sceneH, outW, outH);
+			void* const mfxHdr = EncodeMetalFX((__bridge void*)cmdBuf, sceneHdr, sceneW, sceneH, outW, outH);
 			// Everything downstream of the tonemap works at THIS size: the scene
 			// resolution normally, the output resolution when MetalFX ran.
 			const int postW = mfxHdr ? outW : sceneW;
@@ -15281,7 +15557,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				ftAttachPass((__bridge void*)tmPass, "Tonemap");
 				id<MTLRenderCommandEncoder> tmEncoder =
 					[cmdBuf renderCommandEncoderWithDescriptor:tmPass];
-				EncodeTonemap((__bridge void*)tmEncoder, mfxHdr);
+				// The upscaled image when MetalFX ran, else the DoF result or the
+				// plain scene HDR — never the raw m_hdrColor once DoF rewrote it.
+				EncodeTonemap((__bridge void*)tmEncoder, mfxHdr ? mfxHdr : sceneHdr);
 				[tmEncoder endEncoding];
 			}
 

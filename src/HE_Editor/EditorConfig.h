@@ -112,6 +112,14 @@ struct EditorConfig
 	float SSAOIntensity = 1.0f;   // 0 = off … 1 = full ambient occlusion
 	int   SSAOMethod    = 0;      // AO method: 0 = SSAO, 1 = HBAO, 2 = GTAO (planned)
 
+	// Post-process: depth of field (pushed each frame via SetDepthOfFieldSettings).
+	// OpenGL + Metal. Off by default — a lens blur over the editor viewport is
+	// something to opt into, not to discover.
+	bool  DoFEnabled       = false;
+	float DoFFocusDistance = 10.0f;  // metres to the plane in focus
+	float DoFFocusRange    = 4.0f;   // metres of fully sharp band around it
+	float DoFAperture      = 2.8f;   // f-number: smaller = stronger blur
+
 	// Anti-aliasing (pushed each frame via SetAntiAliasingSettings, see
 	// docs/anti-aliasing-plan.md). `AntiAliasing` holds an HE AAMethod int —
 	// 0 Off, 1 FXAA, 2 SMAA, 3 TAA, 4 MetalFX — and defaults to FXAA because

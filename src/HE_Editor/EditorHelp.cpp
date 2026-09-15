@@ -2309,6 +2309,22 @@ namespace
 	  "How dark the occlusion gets. Past 1 it stops reading as shadow and starts "
 	  "reading as dirt.",
 	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Depth of Field", "",
+	  "Blurs what is nearer or farther than the focus distance, the way a camera "
+	  "lens does. Near things spill over the background; the background never "
+	  "bleeds over a sharp foreground. OpenGL and Metal.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Focus Distance", "",
+	  "How far from the camera, in metres, the picture is sharpest.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Focus Range", "",
+	  "How deep the fully sharp band around that distance is, in metres. The "
+	  "blur then ramps up over the same distance again on either side.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Aperture", "",
+	  "The lens's f-number. f/1.4 blurs everything outside the band heavily, "
+	  "f/22 leaves almost everything sharp.",
+	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/Screen-Space Reflections", "",
 	  "Reflects what is already on screen in wet and polished surfaces. What is "
 	  "off screen cannot be reflected — that is the method's limit, not a bug.",

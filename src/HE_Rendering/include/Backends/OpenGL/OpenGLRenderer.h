@@ -73,6 +73,7 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
+	void  SetDepthOfFieldSettings(const DepthOfFieldSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetShadowSettings(const ShadowSettings& settings) override;
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
@@ -695,7 +696,7 @@ private:
 	// to the backbuffer/viewport. Sized to the current output, recreated on resize.
 	unsigned int m_hdrFBO        = 0;
 	unsigned int m_hdrColor      = 0;   // RGBA16F
-	unsigned int m_hdrDepth      = 0;   // renderbuffer
+	unsigned int m_hdrDepth      = 0;   // DEPTH_COMPONENT24 texture (the DoF pass samples it)
 	int          m_hdrW          = 0;
 	int          m_hdrH          = 0;
 	unsigned int m_tonemapProgram = 0;
@@ -855,8 +856,49 @@ private:
 	void CreateBloomPipeline();
 	void EnsureBloomTargets(int width, int height);
 	void DestroyBloomTargets();
-	// Runs bright-pass + blur into m_bloomColor[0]; returns its texture id (or 0).
-	unsigned int RenderBloom(int fullW, int fullH);
+	// Runs bright-pass + blur of `sourceHdr` (the scene HDR, or the DoF result
+	// when that ran) into m_bloomColor[0]; returns its texture id (or 0).
+	unsigned int RenderBloom(unsigned int sourceHdr, int fullW, int fullH);
+
+	// ── Depth of field (CoC from depth → separable CoC-weighted blur → composite)
+	// Runs on the HDR image before bloom/tonemap. Half-res CoC (RG16F: signed
+	// blur radius in half-res texels, linear depth), two half-res RGBA16F blur
+	// targets (ping-pong), full-res RGBA16F composite. Off = zero cost: no
+	// target is even allocated and the tonemap reads m_hdrColor as before.
+	bool         m_dofEnabled       = false;
+	float        m_dofFocusDistance = 10.0f;
+	float        m_dofFocusRange    = 4.0f;
+	float        m_dofAperture      = 2.8f;
+	unsigned int m_dofCocProgram       = 0;
+	int          m_uDofCocDepth        = -1;
+	int          m_uDofCocParams       = -1;   // focus, range, maxRadius, 0
+	int          m_uDofCocProj         = -1;   // proj[2][2], proj[3][2]
+	unsigned int m_dofBlurProgram      = 0;
+	int          m_uDofBlurImage       = -1;
+	int          m_uDofBlurCoc         = -1;
+	int          m_uDofBlurTexel       = -1;
+	int          m_uDofBlurHorizontal  = -1;
+	int          m_uDofBlurParams      = -1;
+	unsigned int m_dofCompositeProgram = 0;
+	int          m_uDofCompSharp       = -1;
+	int          m_uDofCompBlurred     = -1;
+	int          m_uDofCompDepth       = -1;
+	int          m_uDofCompParams      = -1;
+	int          m_uDofCompProj        = -1;
+	unsigned int m_dofCocFBO     = 0;
+	unsigned int m_dofCocTex     = 0;          // RG16F, half-res
+	unsigned int m_dofBlurFBO[2] = { 0, 0 };
+	unsigned int m_dofBlurTex[2] = { 0, 0 };   // RGBA16F, half-res
+	unsigned int m_dofFBO        = 0;
+	unsigned int m_dofColor      = 0;          // RGBA16F, full-res composite
+	int          m_dofW          = 0;          // full-res size the targets were made for
+	int          m_dofH          = 0;
+	void CreateDepthOfFieldPipeline();
+	void EnsureDepthOfFieldTargets(int fullW, int fullH);
+	void DestroyDepthOfFieldTargets();
+	// Runs the four DoF passes; returns m_dofColor, or 0 when unavailable (the
+	// caller then keeps reading m_hdrColor).
+	unsigned int RenderDepthOfField(int fullW, int fullH, const glm::mat4& proj);
 
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// A view-space position pre-pass (camera POV) feeds a hemisphere-kernel
