@@ -501,7 +501,13 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		a.sourcePath = assetSource;
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_AUMI))
 		{ size_t o=0; HAsset::Reader::readPOD(c->data,o,a.sampleRate); HAsset::Reader::readPOD(c->data,o,a.channels); }
-		if (const auto* c = reader.findChunk(HAsset::CHUNK_PCMD)) a.audioData = c->data;
+		// The data chunk decides the encoding, not AUMI: a file written before
+		// Vorbis existed has an 8-byte AUMI and a PCMD chunk, and either chunk
+		// alone says unambiguously what the bytes are.
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_OGGD))
+		{ a.audioData = c->data; a.encoding = AudioEncoding::Vorbis; }
+		else if (const auto* c = reader.findChunk(HAsset::CHUNK_PCMD))
+		{ a.audioData = c->data; a.encoding = AudioEncoding::PCM16; }
 		handle = m_audioAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Font:
@@ -1718,8 +1724,15 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	case HE::AssetType::Audio:
 	{
 		auto& a = static_cast<AudioAsset&>(asset);
-		{ std::vector<uint8_t> b; HAsset::Writer::appendPOD(b,a.sampleRate); HAsset::Writer::appendPOD(b,a.channels); w.addChunk(HAsset::CHUNK_AUMI,b.data(),b.size()); }
-		w.addChunk(HAsset::CHUNK_PCMD, a.audioData.data(), a.audioData.size());
+		{
+			std::vector<uint8_t> b;
+			HAsset::Writer::appendPOD(b,a.sampleRate); HAsset::Writer::appendPOD(b,a.channels);
+			// Third field is new; old readers stop after channels (readPOD is bounds-checked).
+			HAsset::Writer::appendPOD(b, static_cast<int32_t>(a.encoding));
+			w.addChunk(HAsset::CHUNK_AUMI,b.data(),b.size());
+		}
+		w.addChunk(a.encoding == AudioEncoding::Vorbis ? HAsset::CHUNK_OGGD : HAsset::CHUNK_PCMD,
+		           a.audioData.data(), a.audioData.size());
 		break;
 	}
 	case HE::AssetType::Font:

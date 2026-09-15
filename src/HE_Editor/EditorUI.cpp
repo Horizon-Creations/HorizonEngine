@@ -1115,10 +1115,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// be sitting here when the NEXT dialog returns.
 		s_pendingImportPaths.clear();
 		SDL_DialogFileFilter filters[] = {
-			{ "All Supported Assets", "gltf;glb;png;jpg;jpeg;tga;bmp;hdr;wav;hmat;ttf;otf" },
+			{ "All Supported Assets", "gltf;glb;png;jpg;jpeg;tga;bmp;hdr;wav;ogg;hmat;ttf;otf" },
 			{ "3D Models",            "gltf;glb" },
 			{ "Textures",             "png;jpg;jpeg;tga;bmp;hdr" },
-			{ "Audio",                "wav" },
+			{ "Audio",                "wav;ogg" },
 			{ "Materials",            "hmat" },
 			{ "Fonts",                "ttf;otf" },
 		};
@@ -2918,7 +2918,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(tabPath))
             AnimatorStateMachineEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        // Audio .hasset AND raw .wav. Like the C++ viewer below it, the raw-file half
+        // Audio .hasset AND raw .wav/.ogg. Like the C++ viewer below it, the raw-file half
         // is an extension check, so it has to beat the ScriptEditorPanel fallthrough —
         // which would render megabytes of PCM as text.
         else if (AudioEditorPanel::isAudioAsset(tabPath))

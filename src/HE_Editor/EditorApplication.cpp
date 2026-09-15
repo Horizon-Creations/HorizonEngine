@@ -3009,7 +3009,7 @@ void EditorApplication::OnRender(float dt)
 			{
 				if (wx.flashTriggered && wx.thunderSound != HE::UUID{})
 					if (const auto* a = contentManager().getAudio(wx.thunderSound))
-						m_audioEngine.play(a->audioData, a->sampleRate, a->channels);
+						m_audioEngine.play(*a);
 				break;
 			}
 		}

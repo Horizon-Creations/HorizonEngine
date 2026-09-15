@@ -6,7 +6,7 @@
 #include "EditorInput.h"          // pointer-device grammar (trackpad swipe vs mouse wheel)
 #include "EditorHelp.h"           // "Audio Editor/<label>" scope for the tooltips
 #include "EditorWidgets.h"        // WrapText
-#include "AudioImporter.h"        // raw .wav decode + the Import button
+#include "AudioImporter.h"        // raw .wav/.ogg decode + the Import button
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Diagnostics/Logger.h>
@@ -81,11 +81,19 @@ struct State
 	std::string name;
 
 	// Exactly one of these two holds the clip: an imported .hasset lives in the
-	// ContentManager (`clipId`), a raw .wav is decoded into the panel (`raw`).
+	// ContentManager (`clipId`), a raw .wav/.ogg is loaded into the panel (`raw`).
 	HE::UUID    clipId;
 	AudioAsset  raw;
-	bool        isRawWav     = false;
+	bool        isRawFile    = false;
 	bool        decodeFailed = false;
+
+	// A Vorbis clip (either source) decoded to int16 PCM, once, on first use —
+	// everything below reads samples. `pcmTried` stops a clip the decoder rejects
+	// from being retried every frame; `compressedBytes` is what the asset really
+	// costs, for the Format readout (the PCM size would be the wrong number).
+	AudioAsset  pcm;
+	bool        pcmTried        = false;
+	size_t      compressedBytes = 0;
 
 	Peaks    peaks;     bool peaksDone    = false;
 	Analysis analysis;  bool analysisDone = false;
@@ -112,10 +120,33 @@ AssetPanelState<State> s_states;
 
 // ── Clip access ──────────────────────────────────────────────────────────────
 
+// The clip as int16 PCM: the asset itself when it is PCM, the tab's decoded
+// copy when it is Vorbis (decoded on first call, kept for the tab's lifetime —
+// peaks and analysis are computed once from it and never invalidated either).
 const AudioAsset* clipOf(AppContext& ctx, State& st)
 {
-	if (st.isRawWav) return st.raw.audioData.empty() ? nullptr : &st.raw;
-	return ctx.contentManager ? ctx.contentManager->getAudio(st.clipId) : nullptr;
+	const AudioAsset* src = nullptr;
+	if (st.isRawFile)              src = st.raw.audioData.empty() ? nullptr : &st.raw;
+	else if (ctx.contentManager)   src = ctx.contentManager->getAudio(st.clipId);
+	if (!src) return nullptr;
+	if (src->encoding == AudioEncoding::PCM16) return src;
+
+	if (!st.pcmTried)
+	{
+		st.pcmTried        = true;
+		st.compressedBytes = src->audioData.size();
+		st.pcm.type        = src->type;
+		st.pcm.name        = src->name;
+		st.pcm.sampleRate  = src->sampleRate;
+		st.pcm.channels    = src->channels;
+		st.pcm.encoding    = AudioEncoding::PCM16;
+		if (!AudioEngine::decodeToPcm16(*src, st.pcm.audioData))
+		{
+			st.pcm.audioData.clear();
+			st.decodeFailed = true;
+		}
+	}
+	return st.pcm.audioData.empty() ? nullptr : &st.pcm;
 }
 
 const int16_t* samplesOf(const AudioAsset& a)
@@ -541,9 +572,7 @@ void startPreview(AppContext& ctx, const AudioAsset& clip, State& st)
 
 bool isAudioAsset(const std::string& path)
 {
-	std::string ext = std::filesystem::path(path).extension().string();
-	for (auto& c : ext) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-	if (ext == ".wav") return true;
+	if (AudioImporter::isSupportedSource(path)) return true;
 	return EditorAssetTypeCache::is(path, HE::AssetType::Audio);
 }
 
@@ -561,13 +590,11 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 
 	if (!st.loaded)
 	{
-		std::string ext = std::filesystem::path(assetPath).extension().string();
-		for (auto& c : ext) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-		st.isRawWav = (ext == ".wav");
+		st.isRawFile = AudioImporter::isSupportedSource(assetPath);
 
-		if (st.isRawWav)
+		if (st.isRawFile)
 		{
-			// Decoded into the panel, never registered: a source .wav is not an
+			// Loaded into the panel, never registered: a source file is not an
 			// asset, and the ContentManager addresses assets by UUID.
 			st.name    = std::filesystem::path(assetPath).filename().string();
 			st.relPath = ctx.contentManager
@@ -613,8 +640,8 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		{
 			EditorWidgets::WrapText wrap;
 			ImGui::TextDisabled(st.decodeFailed
-				? "Could not decode '%s'. Only uncompressed WAV is supported "
-				  "(mp3/ogg/flac have no decoder linked in)."
+				? "Could not decode '%s'. WAV and Ogg Vorbis are supported "
+				  "(mp3/flac have no decoder linked in)."
 				: "Could not load '%s' as an audio clip.", st.name.c_str());
 		}
 		ImGui::End();
@@ -658,10 +685,10 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 
 		bar.group();
 		bar.readout(nullptr, st.relPath.c_str(), T::kFgDim);
-		if (st.isRawWav)
+		if (st.isRawFile)
 		{
 			bar.divider();
-			bar.readout(nullptr, "source .wav — not imported", T::kFgDim);
+			bar.readout(nullptr, "source file — not imported", T::kFgDim);
 		}
 		bar.endGroup();
 
@@ -719,8 +746,20 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		ImGui::Text("Channels    %d%s", clip->channels,
 		            clip->channels == 1 ? " (mono)" : clip->channels == 2 ? " (stereo)" : "");
 		ImGui::Text("Frames      %zu", frames);
-		formatBytes(clip->audioData.size(), buf, sizeof(buf));
-		ImGui::Text("PCM in RAM  %s (int16)", buf);
+		if (st.compressedBytes > 0)
+		{
+			// The clip is Vorbis: what it costs is the compressed size, which is
+			// also what a playing voice holds — the PCM only exists in this tab.
+			formatBytes(st.compressedBytes, buf, sizeof(buf));
+			ImGui::Text("Ogg Vorbis  %s (streamed)", buf);
+			formatBytes(clip->audioData.size(), buf, sizeof(buf));
+			ImGui::Text("Decoded     %s (editor only)", buf);
+		}
+		else
+		{
+			formatBytes(clip->audioData.size(), buf, sizeof(buf));
+			ImGui::Text("PCM in RAM  %s (int16)", buf);
+		}
 
 		ImGui::SeparatorText("Levels");
 		ImGui::Text("Peak        %.1f dBFS", an.peakDb);
@@ -774,8 +813,8 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		EditorWidgets::helpForLabel("Pitch");
 		ImGui::TextDisabled("Preview only — an Audio Source component\ncarries its own volume and pitch.");
 
-		// ── Import, for a raw .wav ───────────────────────────────────────────
-		if (st.isRawWav && ctx.contentManager)
+		// ── Import, for a raw .wav/.ogg ──────────────────────────────────────
+		if (st.isRawFile && ctx.contentManager)
 		{
 			ImGui::SeparatorText("Import");
 			const std::filesystem::path src(assetPath);
@@ -783,7 +822,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			                          !ContentManager::isEngineContentDevMode();
 
 			// Where the .hasset lands. Normally next to the source; for a locked engine
-			// .wav there is no writable spot beside it, so it goes to the project's own
+			// file there is no writable spot beside it, so it goes to the project's own
 			// Content/Audio — which is somewhere the project can actually reference.
 			std::filesystem::path root, relDir;
 			if (engineLocked)
@@ -820,9 +859,18 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 					ImGui::TextWrapped("Engine content is read-only, so this goes to the project "
 					                   "instead. Set HE_ENGINE_CONTENT_EDITABLE=1 to import into "
 					                   "the engine library itself.");
-				formatBytes(clip->audioData.size(), buf, sizeof(buf));
-				ImGui::TextDisabled("The asset stores decoded int16 PCM (%s) and ships with every "
-				                    "packaged build.", buf);
+				if (st.compressedBytes > 0)
+				{
+					formatBytes(st.compressedBytes, buf, sizeof(buf));
+					ImGui::TextDisabled("The asset keeps the Ogg Vorbis stream (%s), decoded "
+					                    "while it plays, and ships with every packaged build.", buf);
+				}
+				else
+				{
+					formatBytes(clip->audioData.size(), buf, sizeof(buf));
+					ImGui::TextDisabled("The asset stores decoded int16 PCM (%s) and ships with every "
+					                    "packaged build.", buf);
+				}
 			}
 		}
 	}

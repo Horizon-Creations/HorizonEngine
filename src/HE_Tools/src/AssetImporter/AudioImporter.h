@@ -5,8 +5,11 @@
 #include "ContentManager/Assets.h"
 #include "ImporterCommon.h"   // Importer::OutputTargets
 
-// Imports WAV into an AudioAsset (PCM data is stored as interleaved int16).
-// OGG/MP3 support can be added later via stb_vorbis / dr_mp3.
+// Imports WAV and Ogg Vorbis into an AudioAsset. A .wav is decoded to
+// interleaved int16 PCM (AudioEncoding::PCM16); an .ogg is validated by a full
+// decode pass but stored AS IS (AudioEncoding::Vorbis) — the AudioEngine decodes
+// it on the fly at playback, so the asset costs its compressed size in the pak
+// and in RAM. MP3 could follow the same shape via dr_mp3.
 class AudioImporter {
 public:
 	// Note: sample rate / channel conversion is not implemented yet — the
@@ -17,12 +20,20 @@ public:
 		bool     mono             = false;
 	};
 
-	// Decode a WAV into `out` (interleaved int16 PCM + rate/channels/name) WITHOUT
-	// writing anything to disk. Split out of import() so the editor can audition a
-	// raw .wav before — or without ever — importing it: engine-content .wav files
-	// cannot be imported at all unless HE_ENGINE_CONTENT_EDITABLE is set, and a
-	// preview should not depend on that. `out.path` is left alone (the caller owns
-	// where, or whether, the asset lands). Returns false and logs on a decode error.
+	// True for the source extensions this importer accepts (.wav, .ogg; case-
+	// insensitive). The one place the list lives — classifySource and the
+	// asset_compiler ask here.
+	static bool isSupportedSource(const std::filesystem::path& sourcePath);
+
+	// Load a source file into `out` (bytes by encoding + rate/channels/name)
+	// WITHOUT writing anything to disk. A .wav lands as int16 PCM, an .ogg keeps
+	// its Ogg bytes with encoding = Vorbis (AudioEngine::decodeToPcm16 turns
+	// those into samples when something needs them). Split out of import() so the
+	// editor can audition a raw file before — or without ever — importing it:
+	// engine-content sources cannot be imported at all unless
+	// HE_ENGINE_CONTENT_EDITABLE is set, and a preview should not depend on that.
+	// `out.path` is left alone (the caller owns where, or whether, the asset
+	// lands). Returns false and logs on a decode error or an unknown extension.
 	static bool decode(const std::filesystem::path& sourcePath, AudioAsset& out);
 
 	// Returns the imported asset (already written to disk) or nullptr.

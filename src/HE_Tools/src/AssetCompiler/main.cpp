@@ -46,7 +46,7 @@ namespace
 			return Importer::gltfHasSkin(file) ? SourceKind::SkeletalMesh : SourceKind::Mesh;
 		if (ext == ".hmat")
 			return SourceKind::Material;
-		if (ext == ".wav")
+		if (AudioImporter::isSupportedSource(file))
 			return SourceKind::Audio;
 		if (ext == ".ttf" || ext == ".otf")
 			return SourceKind::Font;

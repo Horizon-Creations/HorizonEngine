@@ -555,6 +555,7 @@ static TypeIds authorAllTypes(const std::filesystem::path& dir)
     AudioAsset audio; audio.type = HE::AssetType::Audio; audio.name = "audio"; audio.path = "audio.hasset";
     audio.sampleRate = 44100; audio.channels = 2;
     audio.audioData = {1,2,3,4,5,6,7,8};
+    audio.encoding  = AudioEncoding::Vorbis; // exercise the OGGD chunk + encoding through pack/mount
     REQUIRE(cm.saveAsset(audio)); ids.audio = audio.id;
 
     FontAsset font; font.type = HE::AssetType::Font; font.name = "font"; font.path = "font.hasset";
@@ -630,6 +631,7 @@ static void verifyAllTypes(Hpak::Codec codec)
     REQUIRE(au != nullptr);
     CHECK(au->sampleRate == 44100); CHECK(au->channels == 2);
     CHECK(au->audioData.size() == 8);
+    CHECK(au->encoding == AudioEncoding::Vorbis);
 
     const AnimationClipAsset* an = cm.getAnimationClip(ids.anim);
     REQUIRE(an != nullptr);

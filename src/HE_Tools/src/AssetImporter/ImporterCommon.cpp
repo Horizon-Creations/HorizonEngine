@@ -423,7 +423,7 @@ SourceKind classifySource(const std::filesystem::path& sourcePath)
 	if (ext == ".gltf" || ext == ".glb")                      return SourceKind::Mesh;
 	if (ext == ".png"  || ext == ".jpg" || ext == ".jpeg" ||
 	    ext == ".tga"  || ext == ".bmp" || ext == ".hdr")     return SourceKind::Texture;
-	if (ext == ".wav")                                        return SourceKind::Audio;
+	if (AudioImporter::isSupportedSource(sourcePath))         return SourceKind::Audio;
 	if (ext == ".hmat")                                       return SourceKind::Material;
 	if (ext == ".ttf"  || ext == ".otf")                      return SourceKind::Font;
 	return SourceKind::None;

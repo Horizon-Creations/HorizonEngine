@@ -2141,15 +2141,15 @@ int play(Ctx& c, const std::string& path, float volume, float pitch, bool loop)
 {
     const AudioAsset* a = audioAsset(c, path);
     if (!c.audio || !c.audio->isInitialized() || !a) return 0;
-    return (int)c.audio->play(a->audioData, a->sampleRate, a->channels, volume, pitch, loop);
+    return (int)c.audio->play(*a, volume, pitch, loop);
 }
 int playAt(Ctx& c, const std::string& path, const glm::vec3& pos,
            float volume, float pitch, bool loop, float minDist, float maxDist)
 {
     const AudioAsset* a = audioAsset(c, path);
     if (!c.audio || !c.audio->isInitialized() || !a) return 0;
-    return (int)c.audio->playSpatial(a->audioData, a->sampleRate, a->channels,
-                                     volume, pitch, loop, pos.x, pos.y, pos.z, minDist, maxDist);
+    return (int)c.audio->playSpatial(*a, volume, pitch, loop,
+                                     pos.x, pos.y, pos.z, minDist, maxDist);
 }
 void stop(Ctx& c, int handle)      { if (c.audio) c.audio->stop((uint64_t)(uint32_t)handle); }
 void stopAll(Ctx& c)               { if (c.audio) c.audio->stopAll(); }

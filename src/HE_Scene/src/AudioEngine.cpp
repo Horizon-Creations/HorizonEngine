@@ -1,8 +1,32 @@
+// Ogg Vorbis comes from the vendored stb_vorbis.c (public domain). miniaudio
+// only compiles its Vorbis backend when the stb_vorbis declarations are visible
+// BEFORE its implementation (it keys on STB_VORBIS_INCLUDE_STB_VORBIS_H); the
+// function bodies follow after it, once, in this translation unit. This must
+// not define STB_VORBIS_NO_STDIO: miniaudio's file-path init names
+// stb_vorbis_open_filename and would not compile without it.
+#define STB_VORBIS_HEADER_ONLY
+#include <stb_vorbis.c>
+
 #define MA_IMPLEMENTATION
 #define MA_NO_FLAC
 #define MA_NO_MP3
 #define MA_NO_ENCODING
 #include <miniaudio.h>
+
+#undef STB_VORBIS_HEADER_ONLY
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wshadow"
+#pragma GCC diagnostic ignored "-Wtautological-compare"
+#endif
+#include <stb_vorbis.c>
+#if defined(__clang__) || defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 #include <cstdint>
 
 #include "HorizonScene/AudioEngine.h"
@@ -20,11 +44,30 @@ static constexpr size_t kVoiceWarnThreshold = 128;
 
 struct ActiveSound
 {
-    std::vector<uint8_t> pcmCopy;   // owns the PCM bytes
+    // Owns the voice's bytes: int16 PCM for a PCM16 clip, the Ogg stream for a
+    // Vorbis one. Exactly one of buffer/decoder is live, and `source` points at
+    // it — everything after startSound() goes through the data-source interface
+    // and never needs to know which.
+    std::vector<uint8_t> bytes;
     ma_audio_buffer      buffer;
+    ma_decoder           decoder;
+    ma_data_source*      source   = nullptr;
     ma_sound             sound;
-    bool                 bufferOk = false;
-    bool                 soundOk  = false;
+    bool                 bufferOk  = false;
+    bool                 decoderOk = false;
+    bool                 soundOk   = false;
+
+    // Order matters: the sound reads from the data source, so it goes first.
+    void release()
+    {
+        if (soundOk)   { ma_sound_stop(&sound); ma_sound_uninit(&sound); soundOk = false; }
+        if (bufferOk)  { ma_audio_buffer_uninit(&buffer); bufferOk = false; }
+        if (decoderOk) { ma_decoder_uninit(&decoder);     decoderOk = false; }
+        source = nullptr;
+    }
+    // A voice that startSound() gives up on half-built still hands its miniaudio
+    // objects back; stop()/stopAll() release before erasing, so this is a no-op there.
+    ~ActiveSound() { release(); }
 };
 
 struct BusData
@@ -134,10 +177,11 @@ bool AudioEngine::hasBus(const std::string& name) const
     return m_impl->buses.count(name) > 0;
 }
 
-// Everything play() and playSpatial() have in common — the PCM copy, the audio
-// buffer, the bus routing and the start. Only the spatialization flag and the
-// positional setup below differ, so this is written once.
-uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
+// Everything the play variants have in common — the byte copy, the data source
+// (PCM buffer or Vorbis decoder), the bus routing and the start. Only the
+// spatialization flag and the positional setup below differ, so this is
+// written once.
+uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncoding encoding,
                                   int sampleRate, int channels,
                                   float volume, float pitch, bool loop,
                                   const std::string& busName,
@@ -149,44 +193,78 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
                         "Sound requested but the audio engine is not initialised — ignored");
         return 0;
     }
-    if (pcmData.empty())
+    if (bytes.empty())
     {
-        HE_LOG_WARN(Audio, "%s", "Sound requested with empty PCM data — ignored "
+        HE_LOG_WARN(Audio, "%s", "Sound requested with empty clip data — ignored "
                                  "(the clip asset probably failed to decode)");
-        return 0;
-    }
-    if (sampleRate <= 0 || channels <= 0)
-    {
-        HE_LOG_WARN(Audio, "Sound requested with invalid format (%d Hz, %d channel(s)) — ignored",
-                    sampleRate, channels);
         return 0;
     }
 
     auto snd = std::make_unique<ActiveSound>();
-    snd->pcmCopy = pcmData;
+    snd->bytes = bytes;
+    ma_uint64 frameCount = 0;   // for the trace line only; 0 = unknown (streamed)
 
-    const ma_uint64 frameCount =
-        snd->pcmCopy.size() / (sizeof(int16_t) * static_cast<size_t>(channels));
-
-    ma_audio_buffer_config bcfg = ma_audio_buffer_config_init(
-        ma_format_s16,
-        static_cast<ma_uint32>(channels),
-        frameCount,
-        snd->pcmCopy.data(),
-        nullptr);
-    // ma_audio_buffer_config_init() hardcodes sampleRate = 0 (a documented
-    // miniaudio TODO for 0.12), and a zero rate makes ma_sound_init_from_data_source()
-    // fall back to the engine's rate and skip the resampler entirely — a 44.1 kHz
-    // clip would then play back ~9% too fast on the 48 kHz engine. Set it explicitly.
-    bcfg.sampleRate = static_cast<ma_uint32>(sampleRate);
-
-    if (ma_audio_buffer_init(&bcfg, &snd->buffer) != MA_SUCCESS)
+    if (encoding == AudioEncoding::Vorbis)
     {
-        HE_LOG_ERROR(Audio, "Audio buffer init failed (%llu frames, %d Hz, %d channel(s))",
-                     static_cast<unsigned long long>(frameCount), sampleRate, channels);
-        return 0;
+        // The Ogg pages stay compressed in `bytes`; ma_decoder pulls and decodes
+        // just the frames the mixer asks for, on the mixer thread. Output format
+        // f32 (all stb_vorbis can produce, and what the engine mixes in), rate and
+        // channels left at 0 = the stream's own: a resampler INSIDE the decoder
+        // would make cursor/length count engine frames and break the source-frame
+        // contract in the header — the sound's own resampler handles the rate.
+        ma_decoder_config dcfg = ma_decoder_config_init(ma_format_f32, 0, 0);
+        dcfg.encodingFormat = ma_encoding_format_vorbis;
+        const ma_result rc = ma_decoder_init_memory(snd->bytes.data(), snd->bytes.size(),
+                                                    &dcfg, &snd->decoder);
+        if (rc != MA_SUCCESS)
+        {
+            HE_LOG_ERROR(Audio, "Vorbis decoder init failed (%zu bytes, result %d) — "
+                                "the clip is not a playable Ogg Vorbis stream",
+                         snd->bytes.size(), static_cast<int>(rc));
+            return 0;
+        }
+        snd->decoderOk = true;
+        snd->source    = &snd->decoder;
+        // Report what the stream says, not what the asset claims, so a stale
+        // AUMI chunk cannot hide behind the numbers in the log.
+        ma_uint32 rate = 0, ch = 0;
+        ma_decoder_get_data_format(&snd->decoder, nullptr, &ch, &rate, nullptr, 0);
+        sampleRate = static_cast<int>(rate);
+        channels   = static_cast<int>(ch);
+        ma_decoder_get_length_in_pcm_frames(&snd->decoder, &frameCount);
     }
-    snd->bufferOk = true;
+    else
+    {
+        if (sampleRate <= 0 || channels <= 0)
+        {
+            HE_LOG_WARN(Audio, "Sound requested with invalid format (%d Hz, %d channel(s)) — ignored",
+                        sampleRate, channels);
+            return 0;
+        }
+
+        frameCount = snd->bytes.size() / (sizeof(int16_t) * static_cast<size_t>(channels));
+
+        ma_audio_buffer_config bcfg = ma_audio_buffer_config_init(
+            ma_format_s16,
+            static_cast<ma_uint32>(channels),
+            frameCount,
+            snd->bytes.data(),
+            nullptr);
+        // ma_audio_buffer_config_init() hardcodes sampleRate = 0 (a documented
+        // miniaudio TODO for 0.12), and a zero rate makes ma_sound_init_from_data_source()
+        // fall back to the engine's rate and skip the resampler entirely — a 44.1 kHz
+        // clip would then play back ~9% too fast on the 48 kHz engine. Set it explicitly.
+        bcfg.sampleRate = static_cast<ma_uint32>(sampleRate);
+
+        if (ma_audio_buffer_init(&bcfg, &snd->buffer) != MA_SUCCESS)
+        {
+            HE_LOG_ERROR(Audio, "Audio buffer init failed (%llu frames, %d Hz, %d channel(s))",
+                         static_cast<unsigned long long>(frameCount), sampleRate, channels);
+            return 0;
+        }
+        snd->bufferOk = true;
+        snd->source   = &snd->buffer;
+    }
 
     // Route through bus if found, otherwise null (master)
     ma_sound_group* busGroup = nullptr;
@@ -202,12 +280,12 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
     // Spatial sounds pass no flag — positioning enabled.
     ma_uint32 flags = spatial ? 0u : MA_SOUND_FLAG_NO_SPATIALIZATION;
     if (ma_sound_init_from_data_source(&m_impl->engine,
-                                        &snd->buffer,
+                                        snd->source,
                                         flags, busGroup,
                                         &snd->sound) != MA_SUCCESS)
     {
         HE_LOG_ERROR(Audio, "%s", "Sound init from data source failed");
-        ma_audio_buffer_uninit(&snd->buffer);
+        snd->release();
         return 0;
     }
     snd->soundOk = true;
@@ -227,17 +305,17 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& pcmData,
     if (ma_sound_start(&snd->sound) != MA_SUCCESS)
     {
         HE_LOG_ERROR(Audio, "%s", "ma_sound_start failed — sound will not be audible");
-        ma_sound_uninit(&snd->sound);
-        ma_audio_buffer_uninit(&snd->buffer);
+        snd->release();
         return 0;
     }
 
     uint64_t handle = m_nextHandle++;
     m_impl->sounds.emplace(handle, std::move(snd));
 
-    HE_LOG_TRACE(Audio, "Started %s sound #%llu: %llu frames, %d Hz, %d ch, vol %.2f, "
+    HE_LOG_TRACE(Audio, "Started %s %s sound #%llu: %llu frames, %d Hz, %d ch, vol %.2f, "
                         "pitch %.2f%s, bus '%s'",
                  spatial ? "spatial" : "2D",
+                 encoding == AudioEncoding::Vorbis ? "Vorbis (streamed)" : "PCM",
                  static_cast<unsigned long long>(handle),
                  static_cast<unsigned long long>(frameCount), sampleRate, channels,
                  volume, pitch, loop ? ", looping" : "",
@@ -255,26 +333,30 @@ uint64_t AudioEngine::play(const std::vector<uint8_t>& pcmData,
                             float volume, float pitch, bool loop,
                             const std::string& busName)
 {
-    return startSound(pcmData, sampleRate, channels, volume, pitch, loop, busName, nullptr);
+    return startSound(pcmData, AudioEncoding::PCM16, sampleRate, channels,
+                      volume, pitch, loop, busName, nullptr);
+}
+
+uint64_t AudioEngine::play(const AudioAsset& clip,
+                            float volume, float pitch, bool loop,
+                            const std::string& busName)
+{
+    return startSound(clip.audioData, clip.encoding, clip.sampleRate, clip.channels,
+                      volume, pitch, loop, busName, nullptr);
 }
 
 void AudioEngine::stop(uint64_t handle)
 {
     auto it = m_impl->sounds.find(handle);
     if (it == m_impl->sounds.end()) return;
-    auto& snd = *it->second;
-    if (snd.soundOk)  { ma_sound_stop(&snd.sound);  ma_sound_uninit(&snd.sound);  }
-    if (snd.bufferOk) { ma_audio_buffer_uninit(&snd.buffer); }
+    it->second->release();
     m_impl->sounds.erase(it);
 }
 
 void AudioEngine::stopAll()
 {
     for (auto& [handle, snd] : m_impl->sounds)
-    {
-        if (snd->soundOk)  { ma_sound_stop(&snd->sound);  ma_sound_uninit(&snd->sound);  }
-        if (snd->bufferOk) { ma_audio_buffer_uninit(&snd->buffer); }
-    }
+        snd->release();
     m_impl->sounds.clear();
 }
 
@@ -286,7 +368,19 @@ uint64_t AudioEngine::playSpatial(const std::vector<uint8_t>& pcmData,
                                    const std::string& busName)
 {
     const SpatialParams sp{ x, y, z, minDist, maxDist };
-    return startSound(pcmData, sampleRate, channels, volume, pitch, loop, busName, &sp);
+    return startSound(pcmData, AudioEncoding::PCM16, sampleRate, channels,
+                      volume, pitch, loop, busName, &sp);
+}
+
+uint64_t AudioEngine::playSpatial(const AudioAsset& clip,
+                                   float volume, float pitch, bool loop,
+                                   float x, float y, float z,
+                                   float minDist, float maxDist,
+                                   const std::string& busName)
+{
+    const SpatialParams sp{ x, y, z, minDist, maxDist };
+    return startSound(clip.audioData, clip.encoding, clip.sampleRate, clip.channels,
+                      volume, pitch, loop, busName, &sp);
 }
 
 void AudioEngine::setSoundPosition(uint64_t handle, float x, float y, float z)
@@ -383,13 +477,64 @@ void AudioEngine::setSoundPitch(uint64_t handle, float pitch)
 int AudioEngine::getSoundSampleRate(uint64_t handle) const
 {
     auto it = m_impl->sounds.find(handle);
-    if (it == m_impl->sounds.end() || !it->second->bufferOk) return 0;
+    if (it == m_impl->sounds.end() || !it->second->source) return 0;
 
     // Query through the data-source interface — the exact same call miniaudio makes
     // internally in ma_sound_init_from_data_source() to pick the resampler ratio.
     ma_uint32 rate = 0;
-    if (ma_data_source_get_data_format(&it->second->buffer, nullptr, nullptr,
+    if (ma_data_source_get_data_format(it->second->source, nullptr, nullptr,
                                         &rate, nullptr, 0) != MA_SUCCESS)
         return 0;
     return static_cast<int>(rate);
+}
+
+// ─── Headless mix pull ─────────────────────────────────────────────────────────
+
+uint64_t AudioEngine::readMixedFrames(float* out, uint64_t frameCount)
+{
+    if (!m_initialized || !out || frameCount == 0) return 0;
+    ma_uint64 read = 0;
+    if (ma_engine_read_pcm_frames(&m_impl->engine, out, frameCount, &read) != MA_SUCCESS)
+        return 0;
+    return static_cast<uint64_t>(read);
+}
+
+int AudioEngine::outputChannels() const
+{
+    return m_initialized ? static_cast<int>(ma_engine_get_channels(&m_impl->engine)) : 0;
+}
+
+// ─── Offline decode ────────────────────────────────────────────────────────────
+
+bool AudioEngine::decodeToPcm16(const AudioAsset& clip, std::vector<uint8_t>& outPcm)
+{
+    outPcm.clear();
+    if (clip.audioData.empty()) return false;
+
+    if (clip.encoding == AudioEncoding::PCM16)
+    {
+        outPcm = clip.audioData;
+        return true;
+    }
+
+    // Native rate/channels (0 = keep), s16 out: one allocation of the whole clip.
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_s16, 0, 0);
+    cfg.encodingFormat = ma_encoding_format_vorbis;
+    ma_uint64 frames = 0;
+    void*     pcm    = nullptr;
+    const ma_result rc = ma_decode_memory(clip.audioData.data(), clip.audioData.size(),
+                                          &cfg, &frames, &pcm);
+    if (rc != MA_SUCCESS || !pcm)
+    {
+        HE_LOG_ERROR(Audio, "Vorbis decode of '%s' failed (%zu bytes, result %d)",
+                     clip.name.c_str(), clip.audioData.size(), static_cast<int>(rc));
+        if (pcm) ma_free(pcm, nullptr);
+        return false;
+    }
+    // ma_decode_memory writes the stream's channel count back into cfg.
+    const size_t bytes = static_cast<size_t>(frames) * cfg.channels * sizeof(int16_t);
+    const auto* p = static_cast<const uint8_t*>(pcm);
+    outPcm.assign(p, p + bytes);
+    ma_free(pcm, nullptr);
+    return true;
 }

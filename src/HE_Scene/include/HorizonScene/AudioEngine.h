@@ -3,8 +3,11 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <ContentManager/Assets.h>   // AudioAsset, AudioEncoding
 
-// Wraps miniaudio's ma_engine to play decoded int16 PCM audio from AudioAsset.
+// Wraps miniaudio's ma_engine to play AudioAsset clips: int16 PCM straight from
+// a buffer, Ogg Vorbis decoded on the fly by the mixer (a voice holds the
+// compressed bytes and never the whole PCM — see play(const AudioAsset&)).
 // Supports headless/no-device mode for tests (init(true)).
 // Sounds are identified by opaque uint64_t handles.
 class AudioEngine
@@ -30,6 +33,23 @@ public:
     bool  hasBus(const std::string& name) const;
 
     // ─── Playback ────────────────────────────────────────────────────────────
+
+    // Play a clip asset, whatever its encoding. PCM16 copies the samples into
+    // the voice (as the raw overload below); Vorbis copies only the Ogg bytes
+    // and decodes them as the mixer pulls frames, so a five-minute track costs
+    // its compressed size per voice, not its PCM size. Both copy because the
+    // asset lives in ContentManager's dense storage, which the next loadAsset()
+    // may relocate under a playing voice. Returns 0 on failure (empty data,
+    // bad format, or an Ogg stream the decoder rejects).
+    // busName: route through a named bus ("" = master).
+    uint64_t play(const AudioAsset& clip,
+                  float volume = 1.0f, float pitch = 1.0f, bool loop = false,
+                  const std::string& busName = {});
+    uint64_t playSpatial(const AudioAsset& clip,
+                         float volume, float pitch, bool loop,
+                         float x, float y, float z,
+                         float minDist = 1.0f, float maxDist = 20.0f,
+                         const std::string& busName = {});
 
     // Play non-spatial int16 interleaved PCM. Returns 0 on failure.
     // busName: route through a named bus ("" = master).
@@ -89,14 +109,36 @@ public:
     // Should equal the rate passed to play()/playSpatial(); 0 = unknown handle.
     int  getSoundSampleRate(uint64_t handle) const;
 
+    // ─── Headless mix pull ───────────────────────────────────────────────────
+
+    // Pull `frameCount` mixed frames (f32, interleaved, the engine's channel
+    // count and rate) out of the mixer into `out`, as the output device would.
+    // Only meaningful in noDevice mode — with a device its thread is the one
+    // pulling — and there it is what makes the streamed decode observable at
+    // all: a Vorbis voice decodes exactly when frames are asked for. Returns the
+    // frames written (0 when not initialised).
+    uint64_t readMixedFrames(float* out, uint64_t frameCount);
+    int      outputChannels() const;   // 0 when not initialised
+
+    // ─── Offline decode ──────────────────────────────────────────────────────
+
+    // Decode a whole clip to interleaved int16 PCM at its own rate/channels —
+    // for the editor's waveform and analysis, and for tests; NOT for playback,
+    // which streams. A PCM16 clip is simply copied. Works without init(): it is
+    // a pure function of the bytes. Returns false (and leaves outPcm empty) on
+    // an empty clip or a stream the decoder rejects.
+    static bool decodeToPcm16(const AudioAsset& clip, std::vector<uint8_t>& outPcm);
+
 private:
     // Positional setup for a spatial sound — see playSpatial().
     struct SpatialParams { float x, y, z, minDist, maxDist; };
 
-    // Shared body of play() and playSpatial(): they only differ in the
-    // spatialization flag and in the positional setup applied before the sound
-    // starts. spatial == nullptr ⇒ non-spatial (play()).
-    uint64_t startSound(const std::vector<uint8_t>& pcmData, int sampleRate, int channels,
+    // Shared body of every play variant: they only differ in the spatialization
+    // flag and in the positional setup applied before the sound starts.
+    // spatial == nullptr ⇒ non-spatial (play()). `bytes` are interpreted by
+    // `encoding` (PCM16 needs sampleRate/channels, Vorbis carries its own).
+    uint64_t startSound(const std::vector<uint8_t>& bytes, AudioEncoding encoding,
+                        int sampleRate, int channels,
                         float volume, float pitch, bool loop, const std::string& busName,
                         const SpatialParams* spatial);
 

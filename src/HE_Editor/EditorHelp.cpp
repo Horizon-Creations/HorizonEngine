@@ -4724,11 +4724,13 @@ namespace
 	  "Preview only, like the volume above it.",
 	  "", "systems#audio" },
 	{ "Audio Editor/Import as Audio Asset", "",
-	  "Turns the source .wav open in this tab into an asset the project can "
-	  "reference, at the path printed under the button. It only appears for a raw "
-	  ".wav, not for a clip that is already an asset. Engine content is read-only "
-	  "unless the editor is in engine-content dev mode, so a .wav from the engine "
-	  "library normally lands in the project's own content instead.",
+	  "Turns the source .wav or .ogg open in this tab into an asset the project "
+	  "can reference, at the path printed under the button. It only appears for a "
+	  "raw source file, not for a clip that is already an asset. A .wav is stored "
+	  "as PCM, an .ogg keeps its Ogg Vorbis stream and is decoded while it plays. "
+	  "Engine content is read-only unless the editor is in engine-content dev "
+	  "mode, so a file from the engine library normally lands in the project's "
+	  "own content instead.",
 	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Sky", "Sky lighting",
 	  "Lights the preview with the sky at a chosen hour, so the mesh can be "
