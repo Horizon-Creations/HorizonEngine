@@ -892,6 +892,49 @@ TEST_CASE("Cook: a legacy (size_t) TXMI texture still cooks and mounts")
     he_test::removeAllQuiet(dir);
 }
 
+TEST_CASE("Cook: the importer's sRGB flag survives the texture cook")
+{
+    // The cook rewrites the whole TXMI chunk (mip count + format land in its
+    // tail). It used to write srgb=0 unconditionally, so a packed game sampled
+    // every base-colour texture linear no matter what the glTF importer decided.
+    // One colour (sRGB) and one data (linear) texture through the same pack: the
+    // flag must come out exactly as it went in, on the cooked (mipped) asset.
+    auto dir = std::filesystem::temp_directory_path() / "he_cook_srgb";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+    ContentManager cmw(dir.string());
+    auto makeTex = [&](const char* name, bool srgb) {
+        TextureAsset tex; tex.type = HE::AssetType::Texture; tex.name = name;
+        tex.path = std::string(name) + ".hasset";
+        tex.width = 8; tex.height = 8; tex.channels = 4; tex.srgb = srgb;
+        tex.data.assign(8 * 8 * 4, 0x80);
+        REQUIRE(cmw.saveAsset(tex));
+        return tex.id;
+    };
+    const HE::UUID colourId = makeTex("albedo", true);
+    const HE::UUID dataId   = makeTex("normal", false);
+
+    Hpak::PackSettings s; s.codec = Hpak::Codec::Store; s.cook = true;
+    HpakWriter packer;
+    CHECK(packer.addDirectory(dir, s) == 2);
+    auto pak = std::filesystem::temp_directory_path() / "he_cook_srgb.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.loadPak(pak.string()));
+    const TextureAsset* colour = cm.getTexture(colourId);
+    REQUIRE(colour != nullptr);
+    CHECK(colour->mipLevels == 4);   // proves the cook actually ran (8,4,2,1)…
+    CHECK(colour->srgb);             // …and kept the flag
+    const TextureAsset* data = cm.getTexture(dataId);
+    REQUIRE(data != nullptr);
+    CHECK(data->mipLevels == 4);
+    CHECK_FALSE(data->srgb);         // and did not invent one for data textures
+
+    removeQuiet(pak);
+    he_test::removeAllQuiet(dir);
+}
+
 TEST_CASE("All asset types round-trip through a Store pak")  { verifyAllTypes(Hpak::Codec::Store); }
 TEST_CASE("All asset types round-trip through an LZ4 pak")   { verifyAllTypes(Hpak::Codec::LZ4);   }
 TEST_CASE("All asset types round-trip through a zstd pak")   { verifyAllTypes(Hpak::Codec::Zstd);  }

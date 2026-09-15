@@ -7970,22 +7970,31 @@ MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 // (Apple Silicon); BC7/BC3 need BC support (Intel/AMD Macs, macOS 11+). These are
 // mutually exclusive on a given GPU — which is why one pak can't serve both Metal
 // and OpenGL on Apple Silicon (see EditorUI texture-compression selection).
-static bool metalTexPixelFormat(id<MTLDevice> device, TextureFormat fmt,
+// `srgb` (TextureAsset::srgb, the importer's colour-vs-data decision) selects the
+// _sRGB twin of each format: the sampler then decodes to linear, so colour
+// textures shade in linear light and only the tonemap's gamma encode re-curves
+// them. Every format here has an sRGB variant with identical block/byte layout,
+// so the upload math and the device-support checks are the same for both.
+static bool metalTexPixelFormat(id<MTLDevice> device, TextureFormat fmt, bool srgb,
                                 MTLPixelFormat& outFmt, bool& outIsBlock, bool& outSupported)
 {
 	outIsBlock = textureFormatIsBlock4x4(fmt);
 	switch (fmt)
 	{
 	case TextureFormat::RGBA8:
-		outFmt = MTLPixelFormatRGBA8Unorm;  outSupported = true; return true;
+		outFmt = srgb ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm;
+		outSupported = true; return true;
 	case TextureFormat::ASTC_4x4:
-		outFmt = MTLPixelFormatASTC_4x4_LDR; outSupported = [device supportsFamily:MTLGPUFamilyApple2]; return true;
+		outFmt = srgb ? MTLPixelFormatASTC_4x4_sRGB : MTLPixelFormatASTC_4x4_LDR;
+		outSupported = [device supportsFamily:MTLGPUFamilyApple2]; return true;
 	case TextureFormat::BC7:
-		outFmt = MTLPixelFormatBC7_RGBAUnorm; outSupported = false;
+		outFmt = srgb ? MTLPixelFormatBC7_RGBAUnorm_sRGB : MTLPixelFormatBC7_RGBAUnorm;
+		outSupported = false;
 		if (@available(macOS 11.0, *)) outSupported = device.supportsBCTextureCompression;
 		return true;
 	case TextureFormat::BC3:
-		outFmt = MTLPixelFormatBC3_RGBA;      outSupported = false;
+		outFmt = srgb ? MTLPixelFormatBC3_RGBA_sRGB : MTLPixelFormatBC3_RGBA;
+		outSupported = false;
 		if (@available(macOS 11.0, *)) outSupported = device.supportsBCTextureCompression;
 		return true;
 	}
@@ -8002,7 +8011,7 @@ static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex)
 	const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
 
 	MTLPixelFormat pf = MTLPixelFormatRGBA8Unorm; bool isBlock = false, supported = false;
-	if (!metalTexPixelFormat(device, tex->format, pf, isBlock, supported) || !supported)
+	if (!metalTexPixelFormat(device, tex->format, tex->srgb, pf, isBlock, supported) || !supported)
 		return nullptr; // unknown format, or this GPU can't sample it → flat
 
 	MTLTextureDescriptor* desc = [MTLTextureDescriptor
