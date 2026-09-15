@@ -4892,6 +4892,47 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
 	}
 
+	// ── sRGB-texture witness (HE_DUMP_SRGBTEST=1): two cubes side by side, both
+	// textured with the same solid mid-grey (128/255) on a white material. The
+	// LEFT texture is flagged linear, the RIGHT one sRGB. A backend that honours
+	// TextureAsset::srgb decodes the right one to ~0.22 linear before shading,
+	// so it renders visibly DARKER than the left cube (which shades at 0.5);
+	// a backend that ignores the flag draws two identical cubes. Frame it with
+	// PITCH=0 TOD=0.5 (camera (0,2,0) looking down -Z, noon sun).
+	if (const char* st = std::getenv("HE_DUMP_SRGBTEST"); st && *st && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto makeCube = [&](const char* name, bool srgb, float x) {
+			TextureAsset tex;
+			tex.type = HE::AssetType::Texture;
+			tex.name = name;
+			tex.width = 8; tex.height = 8; tex.channels = 4;
+			tex.srgb  = srgb;
+			tex.data.assign(8 * 8 * 4, 0x80);
+			for (size_t p = 3; p < tex.data.size(); p += 4) tex.data[p] = 0xFF; // opaque
+			const HE::UUID texId = contentManager().registerTexture(std::move(tex));
+			MaterialAsset m;
+			m.type = HE::AssetType::Material;
+			m.name = name;
+			m.baseColor[0] = m.baseColor[1] = m.baseColor[2] = 1.0f; // texture shows as is
+			m.roughness = 0.9f;
+			m.texturePaths = { std::string(name) + ".tex" };
+			m.textureIds   = { texId };
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = glm::vec3(x, 2.0f, -8.0f);
+			tc.scale    = glm::vec3(3.0f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			reg.emplace<MaterialComponent>(e,
+				MaterialComponent{ contentManager().registerMaterial(std::move(m)) });
+		};
+		makeCube("SrgbTestLinear", false, -2.5f);
+		makeCube("SrgbTestSrgb",   true,   2.5f);
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_SRGBTEST linear/sRGB cube pair added");
+	}
+
 	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a
 	// GRAPH-material cube (ConstColor → BaseColor) and an emissive graph cube
 	// (ConstColor → Emissive) standing on it. The ray-traced reflection must

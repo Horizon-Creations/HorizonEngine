@@ -8574,9 +8574,13 @@ bool OpenGLRenderer::EnsureDecalProgram()
 }
 
 // ─── Block-compressed texture support ─────────────────────────────────────────
-// glad only exposes the BPTC enum; S3TC comes from an EXT so define it locally.
+// glad only exposes the BPTC enum; S3TC comes from an EXT so define it locally
+// (the sRGB twin is from EXT_texture_sRGB, same extension family).
 #ifndef GL_COMPRESSED_RGBA_S3TC_DXT5_EXT
 #  define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
+#endif
+#ifndef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT
+#  define GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT 0x8C4F
 #endif
 
 namespace {
@@ -8622,11 +8626,19 @@ bool glSupportsS3tc()
 // textures ship a pre-baked mip chain — for block formats there is no runtime mip
 // generation (impossible on compressed data); the cook baked every level. Shared by
 // every base-color upload site (static/skeletal mesh, material override, graph tex).
+//
+// TextureAsset::srgb picks the sRGB internalformat: the importer marks colour
+// textures (base colour, emissive) sRGB and data textures (normal, ORM, masks)
+// linear, and the hardware decodes the former to linear on sample — so the
+// shading works in linear light and the tonemap's gamma encode at the end is
+// the only transfer curve applied. Linear-flagged textures upload unchanged,
+// which is also what every pre-flag asset does (the loader defaults srgb=false).
 unsigned int uploadTextureAssetGL(const TextureAsset* tex)
 {
 	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
 		return 0;
 	const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
+	const bool srgb = tex->srgb;
 
 	// Resolve the block format's GL internalformat, or bail (→ flat) when this GL
 	// context can't sample it. ASTC is Metal-only and never shipped to GL.
@@ -8636,12 +8648,13 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex)
 	case TextureFormat::RGBA8: break;
 	case TextureFormat::BC7:
 		if (!glSupportsBptc()) return 0;
-		blockFmt = GL_COMPRESSED_RGBA_BPTC_UNORM; break;
+		blockFmt = srgb ? GL_COMPRESSED_SRGB_ALPHA_BPTC_UNORM : GL_COMPRESSED_RGBA_BPTC_UNORM; break;
 	case TextureFormat::BC3:
 		if (!glSupportsS3tc()) return 0;
-		blockFmt = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
+		blockFmt = srgb ? GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT; break;
 	default: return 0; // ASTC_4x4 / unknown → GL can't sample it
 	}
+	const GLenum rgbaFmt = srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8;
 
 	unsigned int id = 0;
 	glGenTextures(1, &id);
@@ -8668,7 +8681,7 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex)
 		size_t off = 0; uint32_t lw = static_cast<uint32_t>(tex->width), lh = static_cast<uint32_t>(tex->height);
 		for (uint32_t l = 0; l < mips; ++l)
 		{
-			glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), GL_RGBA8,
+			glTexImage2D(GL_TEXTURE_2D, static_cast<GLint>(l), static_cast<GLint>(rgbaFmt),
 			             static_cast<GLsizei>(lw), static_cast<GLsizei>(lh),
 			             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data() + off);
 			off += static_cast<size_t>(lw) * lh * 4; lw = std::max<uint32_t>(1, lw >> 1); lh = std::max<uint32_t>(1, lh >> 1);
@@ -8677,8 +8690,9 @@ unsigned int uploadTextureAssetGL(const TextureAsset* tex)
 	}
 	else
 	{
-		// Loose/editor RGBA8: single level + GPU-generated mips.
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8,
+		// Loose/editor RGBA8: single level + GPU-generated mips (for an sRGB
+		// internalformat GL filters the chain in linear space, per spec).
+		glTexImage2D(GL_TEXTURE_2D, 0, static_cast<GLint>(rgbaFmt),
 		             static_cast<GLsizei>(tex->width), static_cast<GLsizei>(tex->height),
 		             0, GL_RGBA, GL_UNSIGNED_BYTE, tex->data.data());
 		glGenerateMipmap(GL_TEXTURE_2D);

@@ -689,6 +689,14 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat)
     if (!HAsset::readTextureHeader(tm->data, o, width, height, channels)) return {};
     uint32_t existingMips = 1;
     if (o + sizeof(uint32_t) <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, existingMips);
+    // The loose asset's cook tail continues with format + srgb. The format byte is
+    // irrelevant here (only single-level RGBA8 sources get cooked, see below), but
+    // the sRGB flag is the importer's colour-vs-data decision and MUST survive the
+    // cook: the runtime picks the sampler's pixel format from it. Absent tail
+    // (pre-cook TXMI) → linear, as the loader defaults it.
+    uint8_t srgb = 0;
+    if (o + 1 <= tm->data.size()) { uint8_t f = 0; HAsset::Reader::readPOD(tm->data, o, f); }
+    if (o + 1 <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, srgb);
 
     // Only cook plain single-level RGBA8 base textures (skip already-cooked,
     // sub-2px, or non-RGBA8/odd-sized payloads — nothing to gain / can't halve).
@@ -758,7 +766,7 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat)
             HAsset::appendTextureHeader(b, width, height, channels);
             HAsset::Writer::appendPOD(b, count);
             HAsset::Writer::appendPOD(b, format);
-            HAsset::Writer::appendPOD(b, static_cast<uint8_t>(0)); // srgb false
+            HAsset::Writer::appendPOD(b, static_cast<uint8_t>(srgb ? 1 : 0)); // as imported
             w.addChunk(HAsset::CHUNK_TXMI, b.data(), b.size());
         }
         else if (c.id == HAsset::CHUNK_PIXL)
