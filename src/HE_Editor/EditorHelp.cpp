@@ -2413,6 +2413,18 @@ namespace
 	  "How often the Content Browser re-checks the project folder for files "
 	  "changed outside the editor.",
 	  "", "editor#content-browser" },
+	{ "Preferences/Autosave/Autosave", "",
+	  "Writes a recovery copy of the edited scene into the project's "
+	  "Saved/Autosave folder at a fixed interval. The scene file itself is never "
+	  "written by the timer: saving stays your decision. A real save or a clean "
+	  "exit removes the copy; after a crash it is what the next start can "
+	  "restore from.",
+	  "", "editor#preferences" },
+	{ "Preferences/Autosave/Autosave Interval (s)", "",
+	  "Seconds between two recovery copies. A copy is only written when the "
+	  "scene has changed since the last one. Ten seconds is the floor: below "
+	  "that, writing the scene is itself the pause it was meant to spare you.",
+	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
 	  "How a variable is drawn in a HorizonCode graph's list: name and type on "
 	  "two lines, with the type written out and coloured. The default.",
@@ -5618,6 +5630,7 @@ namespace
 		{ "Preferences/Input/",               "editor-settings", "Settings Reference", "Input" },
 		{ "Preferences/Appearance/",          "editor-settings", "Settings Reference", "Appearance" },
 		{ "Preferences/Content Browser/",     "editor-settings", "Settings Reference", "Content Browser" },
+		{ "Preferences/Autosave/",            "editor-settings", "Settings Reference", "Autosave" },
 		{ "Preferences/",    "editor-settings", "Settings Reference", "Preferences" },
 		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
 		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },

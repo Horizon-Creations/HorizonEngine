@@ -23,7 +23,7 @@ namespace EditorSettingsPanel
 	enum class Page
 	{
 		// General
-		Appearance, Viewport, ContentBrowser,
+		Appearance, Viewport, ContentBrowser, Autosave,
 		// Editor — everything the editor itself does that is not the renderer:
 		// the graph editor's look, the collaboration session, the repository
 		// (git install status and the repository share one page), and the status

@@ -10,6 +10,7 @@
 #include "CollabController.h"
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
+#include "SceneAutosave.h"   // the solo recovery snapshot, independent of a session
 #include "NotificationStore.h"
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
@@ -744,6 +745,12 @@ private:
 	CollabDocSync::DocMirror m_levelScriptMirror;
 	CollabDocSync::DocMirror m_gameInstanceMirror;
 	std::unordered_map<std::string, std::uint64_t> m_assetLastAutosaveMs;
+	// The recovery snapshot of the open scene, written on a timer whether or
+	// not a collaboration session is running (the whole-file autosave above
+	// only exists inside one). Configured per project in the project-loaded
+	// callback; cleared by a real save, a scene switch and a clean exit.
+	HE::Ed::SceneAutosave m_autosave;
+	void updateAutosave(std::uint64_t nowMs);
 	// Syncable asset tabs that were open last pass, so the ones that closed can
 	// drop what the host told them about their lock.
 	std::unordered_set<std::string> m_docMirrorPaths;

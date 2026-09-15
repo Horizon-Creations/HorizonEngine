@@ -829,6 +829,22 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;
 	});
 
+	row("autosave", "Autosave", [&]{
+		// The recovery snapshot, not the scene file — see SceneAutosave.h. Both
+		// controls are read by the frame loop every frame, so a change here is
+		// live without a restart; the floor mirrors the one the autosave itself
+		// enforces, so what the field shows is what will happen.
+		EditorWidgets::checkbox("Autosave", &cfg.AutosaveEnabled);
+		{
+			SubGroup sub(cfg.AutosaveEnabled);
+			Row::inputInt("Autosave Interval (s)", &cfg.AutosaveIntervalSec);
+			cfg.AutosaveIntervalSec = std::clamp(cfg.AutosaveIntervalSec, 10, 3600);
+		}
+		hint("Writes a copy of the edited scene to the project's Saved/Autosave "
+		     "folder. A clean exit or a real save removes it; after a crash the "
+		     "copy is what the next start can restore from.");
+	});
+
 	if (mode == SettingsMode::QuickSettings && shown == 0)
 		hint("Nothing pinned yet. Open Edit \xe2\x96\xb8 Preferences and press \xe2\x98\x86 Pin "
 		     "on the settings you want here.");
@@ -2325,6 +2341,7 @@ constexpr NavItem kGeneralItems[] = {
 	{ Page::Appearance,     "Appearance" },
 	{ Page::Viewport,       "Viewport" },
 	{ Page::ContentBrowser, "Content Browser" },
+	{ Page::Autosave,       "Autosave" },
 };
 // Everything the EDITOR does that is not the renderer, under one heading. The
 // three groups that used to stand alone here (Collaboration, Source Control,
@@ -2371,6 +2388,7 @@ const char* catalogCategory(Page p)
 	case Page::Appearance:         return "Appearance";
 	case Page::Viewport:           return "Viewport";
 	case Page::ContentBrowser:     return "Content Browser";
+	case Page::Autosave:           return "Autosave";
 	case Page::Display:            return "Display";
 	case Page::PostProcessing:     return "Post-Processing";
 	case Page::GlobalIllumination: return "Global Illumination";
@@ -2487,6 +2505,8 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.EditorCameraSpeed = 6.0f;
 			cfg.KeepCPUAssets     = false;
 			cfg.ContentBrowserRefreshRate = 60;
+			cfg.AutosaveEnabled     = true;
+			cfg.AutosaveIntervalSec = 60;
 			cfg.BloomEnabled      = true;
 			cfg.BloomThreshold    = 1.0f;
 			cfg.BloomIntensity    = 0.6f;

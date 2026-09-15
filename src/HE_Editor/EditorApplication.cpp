@@ -1135,6 +1135,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.CollabMaxAssetMB             = globalstate.getCustomConfigInt("CollabMaxAssetMB", m_editorConfig.CollabMaxAssetMB);
 	m_editorConfig.McpServerEnabled             = globalstate.getCustomConfigBool("McpServerEnabled", m_editorConfig.McpServerEnabled);
 	m_editorConfig.McpPort                      = globalstate.getCustomConfigInt("McpPort", m_editorConfig.McpPort);
+	m_editorConfig.AutosaveEnabled              = globalstate.getCustomConfigBool("AutosaveEnabled", m_editorConfig.AutosaveEnabled);
+	m_editorConfig.AutosaveIntervalSec          = globalstate.getCustomConfigInt("AutosaveIntervalSec", m_editorConfig.AutosaveIntervalSec);
 	// The environment overrides the stored config in one direction only: it can
 	// turn the bridge ON for a single run (a headless test, a scripted session),
 	// never off. Same shape as HE_COLLAB_OFFLINE and the HE_DUMP_* family.
@@ -1510,6 +1512,24 @@ void EditorApplication::OnInit()
 	m_projectManager.setOnProjectLoaded([this](const std::string& sceneAbsPath)
 	{
 		setWorld(m_editorWorld.get());
+
+		// The recovery snapshot changes hands with the project. The previous
+		// project's LIVE copy goes if its scene was clean — nothing was lost, so
+		// there is nothing to offer — and STAYS if it was dirty: switching
+		// projects asks about unsaved asset tabs but not about the scene
+		// (EditorUI::endProjectSession), so the snapshot is the only copy of
+		// those edits and the next opening of that project may offer it. Then
+		// the new project's leftover from an earlier run is set aside before
+		// this run's first timer can overwrite it.
+		if (!m_autosave.dir().empty() && m_undo.revision() == m_savedRevision)
+			m_autosave.clear();
+		m_autosave.configure(HE::Ed::SceneAutosave::recoveryDirForProject(
+			m_projectManager.currentProject().path));
+		if (const auto stale = m_autosave.promoteStale())
+			HE_LOG_WARN(Editor, "%s",
+				("EditorApplication: a recovery snapshot from an earlier session is waiting at " +
+				 stale->snapshotPath + " (scene: " +
+				 (stale->scenePath.empty() ? std::string("<unsaved>") : stale->scenePath) + ")").c_str());
 
 		// Which scripts this project's text needs, as early as the project is
 		// known: the font atlas is baked ONCE and every backend uploads it once,
@@ -4047,6 +4067,10 @@ void EditorApplication::OnRender(float dt)
 	AppContext ctx = makeContext();
 	EditorUI::render(ctx, dt);
 	saveOpenTabs(); // persists only when the tab set/active index actually changed
+	// After the UI, so an edit committed this frame is in the world it reads.
+	updateAutosave(static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count()));
 
 	// ── FPS counter ───────────────────────────────────────────────────────
 	if (dt > 0.0f)
@@ -8686,12 +8710,45 @@ bool EditorApplication::saveSceneToPath(const std::string& path)
 	{
 		m_currentScenePath = path;
 		m_savedRevision    = m_undo.revision(); // scene is now clean
+		// The file now holds everything the snapshot held — and a leftover copy
+		// would be offered as "unsaved work" at the next start.
+		m_autosave.clear();
 		captureSceneThumbnail(path);
 		HE_LOG_INFO(Editor, "%s", ("EditorApplication: scene saved to " + path).c_str());
 		return true;
 	}
 	HE_LOG_ERROR(Editor, "%s", ("EditorApplication: failed to save scene to " + path).c_str());
 	return false;
+}
+
+// The solo autosave's tick. What it writes is a recovery copy in Saved/Autosave,
+// never the scene file — see SceneAutosave.h for the whole argument. It goes
+// through SceneSerializer directly and NOT through saveSceneToPath, because that
+// one moves m_currentScenePath and m_savedRevision (the title bar's "*" and the
+// quit prompt would both start lying), captures a thumbnail, and runs the prefab
+// sync, which mutates the world; a snapshot may do none of that.
+void EditorApplication::updateAutosave(std::uint64_t nowMs)
+{
+	if (!m_projectLoaded || !m_editorWorld) return;
+	// In Play the editor world is not what is on screen and is not being edited;
+	// the headless dump path quits after one frame and must leave no files behind.
+	if (m_isPlaying || !m_dumpPath.empty()) return;
+
+	m_autosave.setEnabled(m_editorConfig.AutosaveEnabled);
+	m_autosave.setIntervalMs(static_cast<std::uint64_t>(
+		std::max(m_editorConfig.AutosaveIntervalSec, 0)) * 1000ull);
+
+	HE::Ed::RecoveryInfo info;
+	info.scenePath   = m_currentScenePath;
+	info.projectPath = m_projectManager.currentProject().path;
+
+	const bool dirty = m_undo.revision() != m_savedRevision;
+	m_autosave.update(nowMs, dirty, m_undo.revision(), info,
+		[this](const std::string& path)
+		{
+			SceneSerializer serializer;
+			return serializer.save(*m_editorWorld, path, SerializeFormat::JSON);
+		});
 }
 
 // The scene's Content-Browser tile: the viewport as it looked when the scene was
@@ -8783,6 +8840,9 @@ bool EditorApplication::openScene(const std::string& path)
 	m_editorWorld->markHierarchyDirty();
 	m_undo.clearHistory();
 	m_savedRevision = m_undo.revision();
+	// The way here is guarded (EditorUI's unsaved-changes prompt), so whatever
+	// the previous scene's snapshot held was saved or knowingly let go.
+	m_autosave.clear();
 	return loaded;
 }
 
@@ -8833,6 +8893,7 @@ void EditorApplication::newScene()
 	m_editorWorld->markHierarchyDirty();
 	m_undo.clearHistory();
 	m_savedRevision = m_undo.revision();
+	m_autosave.clear();   // guarded the same way as openScene
 	HE_LOG_INFO(Editor, "%s", "EditorApplication: new empty scene");
 }
 
@@ -8935,6 +8996,11 @@ void EditorApplication::OnShutdown()
 	// deletes it by hand. Ahead of everything else here because it is the only
 	// item in this function that outlives the process if it is skipped.
 	m_collab.shutdown();
+
+	// A clean exit, and the quit prompt has already asked about the scene: either
+	// it was saved (which cleared this) or "Don't Save" was chosen. What a
+	// crash leaves behind is exactly this file NOT being removed.
+	m_autosave.clear();
 
 	// The MCP listener goes down here for the same reason, one step milder: the
 	// endpoint file it leaves behind names a port and a pid, and a shim that
@@ -9140,6 +9206,8 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("CollabMaxAssetMB",           m_editorConfig.CollabMaxAssetMB);
 	globalstate.setCustomConfigEntry("McpServerEnabled",           m_editorConfig.McpServerEnabled);
 	globalstate.setCustomConfigEntry("McpPort",                    m_editorConfig.McpPort);
+	globalstate.setCustomConfigEntry("AutosaveEnabled",            m_editorConfig.AutosaveEnabled);
+	globalstate.setCustomConfigEntry("AutosaveIntervalSec",        m_editorConfig.AutosaveIntervalSec);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);

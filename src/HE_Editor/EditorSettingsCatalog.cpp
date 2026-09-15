@@ -110,6 +110,16 @@ std::vector<SettingDesc> buildCatalog()
 	                   &EditorConfig::ContentBrowserRefreshRate, 1, 600,
 	                   "Seconds between content directory rescans."));
 
+	// ── General ▸ Autosave ──────────────────────────────────────────────────
+	t.push_back(boolRow("autosave.enabled", "Autosave", "Autosave", "autosave",
+	                    &EditorConfig::AutosaveEnabled,
+	                    "Periodically write a recovery copy of the open scene into "
+	                    "the project's Saved/Autosave folder. The scene file itself "
+	                    "is never written by the timer."));
+	t.push_back(intRow("autosave.intervalSec", "Autosave Interval (s)", "Autosave",
+	                   "autosave", &EditorConfig::AutosaveIntervalSec, 10, 3600,
+	                   "Seconds between recovery snapshots of an edited scene."));
+
 	// ── Editor ▸ Collaboration ──────────────────────────────────────────────
 	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Collaboration",
 	                    "landiscovery", &EditorConfig::CollabLanDiscovery,

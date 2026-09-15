@@ -28,7 +28,7 @@
 // ── The category strings are the panel's own ─────────────────────────────────
 // "Display", "Post-Processing", "Global Illumination", "Effects",
 // "Collaboration", "Remote Control", "Viewport", "Input", "Appearance",
-// "Content Browser" — copied from the `row(...)` calls so a caller that reads
+// "Content Browser", "Autosave" — copied from the `row(...)` calls so a caller that reads
 // this table and a human reading Preferences are talking about the same page.
 // `row` is the panel's own group key, which is also what
 // EditorConfig::QuickSettingsFavorites pins by.
