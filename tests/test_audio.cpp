@@ -630,6 +630,23 @@ TEST_CASE("AudioEngine: mute keeps the fader's volume, master volume is its own 
     engine.setMasterVolume(-3.0f);
     CHECK(engine.getMasterVolume() == doctest::Approx(0.0f));
 
+    // Master mutes like a bus: the fader value survives, a volume set while
+    // muted is what unmute restores — and a config applied meanwhile (which
+    // is every frame in the mixer, and play start) cannot un-mute it.
+    engine.setMasterVolume(0.8f);
+    CHECK_FALSE(engine.isMasterMuted());
+    engine.setMasterMuted(true);
+    CHECK(engine.isMasterMuted());
+    CHECK(engine.getMasterVolume() == doctest::Approx(0.8f));
+    HE::AudioBusConfig cfg;
+    cfg.masterVolume = 0.6f;
+    engine.applyBusConfig(cfg);
+    CHECK(engine.isMasterMuted());
+    CHECK(engine.getMasterVolume() == doctest::Approx(0.6f));
+    engine.setMasterMuted(false);
+    CHECK_FALSE(engine.isMasterMuted());
+    CHECK(engine.getMasterVolume() == doctest::Approx(0.6f));
+
     engine.shutdown();
 }
 

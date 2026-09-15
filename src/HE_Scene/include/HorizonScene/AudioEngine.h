@@ -52,9 +52,13 @@ public:
     bool  isBusMuted(const std::string& name) const;
 
     // Gain in front of every bus and every voice — the mixer's master fader.
-    // 1 when nothing was set; get returns 1 when not initialised.
+    // 1 when nothing was set; get returns 1 when not initialised. Same mute
+    // contract as a bus: while muted the engine runs at 0 and get() keeps
+    // answering the remembered fader value, which is what unmute restores.
     void  setMasterVolume(float volume);
     float getMasterVolume() const;
+    void  setMasterMuted(bool muted);
+    bool  isMasterMuted() const;
 
     // Voices alive on a bus right now ("" = the ones on master). Finished
     // voices are still counted until something stops or reaps them; it is what

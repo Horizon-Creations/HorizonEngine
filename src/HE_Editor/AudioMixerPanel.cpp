@@ -38,7 +38,12 @@ struct BusListen
 	bool        solo  = false;
 };
 std::vector<BusListen> s_listen;
-bool                   s_masterMuted = false;
+// Master's mute lives in the engine (setMasterMuted): it is the one thing
+// applyBusConfig, which runs every frame and at play start, must not undo.
+// Which project the list above belongs to. A static keyed by bus name would
+// otherwise hand project B's "Music" the mute somebody set in project A —
+// the editor outlives the project, the list must not.
+std::string            s_listenProject;
 
 // The name being typed for a new bus. A scratch buffer rather than a field on
 // the project: the project only learns about the bus once Add is pressed.
@@ -77,7 +82,6 @@ void applyListenState(AudioEngine& audio, const HE::AudioBusConfig& cfg)
 		const BusListen& l = listenFor(b.name);
 		audio.setBusMuted(b.name, l.muted || (anySolo && !l.solo));
 	}
-	audio.setMasterVolume(s_masterMuted ? 0.0f : cfg.masterVolume);
 }
 
 // One vertical strip. Returns true when the fader was RELEASED after a drag —
@@ -214,6 +218,19 @@ void DrawAudioMixerWindow(AppContext& ctx, bool& open)
 	// strips read voice counts from it. Cheap: createBus is idempotent.
 	audio.applyBusConfig(cfg);
 
+	// A different project: its buses start unmuted, whatever the last one's
+	// were called. Master's mute is the engine's and is cleared with it.
+	if (s_listenProject != p.path)
+	{
+		s_listenProject = p.path;
+		s_listen.clear();
+		audio.setMasterMuted(false);
+	}
+	// Every strip's entry exists BEFORE the strips are drawn: a click callback
+	// runs applyListenState, and an insert from inside it would move the
+	// vector under the pointers the strip being drawn still holds.
+	for (const HE::AudioBusDef& b : cfg.buses) listenFor(b.name);
+
 	bool        commit    = false;
 	std::string removeBus;
 
@@ -228,11 +245,13 @@ void DrawAudioMixerWindow(AppContext& ctx, bool& open)
 	{
 		// Master first, set apart by a divider.
 		{
-			float master = cfg.masterVolume;
-			const StripResult r = drawStrip("master", "Master", &master, &s_masterMuted, nullptr,
+			// The mute is read from and written to the engine, through a local
+			// the strip toggles; the callback carries the toggle across.
+			bool masterMuted = audio.isMasterMuted();
+			const StripResult r = drawStrip("master", "Master", &cfg.masterVolume, &masterMuted, nullptr,
 				audio.busVoiceCount(""), false,
-				[&](float v) { cfg.masterVolume = v; if (!s_masterMuted) audio.setMasterVolume(v); },
-				listen);
+				[&](float v) { audio.setMasterVolume(v); },
+				[&]{ audio.setMasterMuted(masterMuted); });
 			commit |= r.commit;
 		}
 		// The divider, drawn by hand: ImGui::Separator in a horizontal layout

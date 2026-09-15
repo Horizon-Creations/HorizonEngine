@@ -98,6 +98,10 @@ struct AudioEngine::Impl
     bool                                             engineOk = false;
     std::unordered_map<uint64_t, std::unique_ptr<ActiveSound>> sounds;
     std::unordered_map<std::string, std::unique_ptr<BusData>>  buses;
+    // The master fader, remembered for the same reason a bus's is: the engine
+    // carries 0 while muted.
+    float masterVolume = 1.0f;
+    bool  masterMuted  = false;
 };
 
 // ─── AudioEngine ─────────────────────────────────────────────────────────────
@@ -128,8 +132,10 @@ bool AudioEngine::init(bool noDevice)
         return false;
     }
 
-    m_impl->engineOk = true;
-    m_initialized    = true;
+    m_impl->engineOk     = true;
+    m_impl->masterVolume = 1.0f;   // a fresh engine, whatever the last one was left at
+    m_impl->masterMuted  = false;
+    m_initialized        = true;
     HE_LOG_INFO(Audio, "Audio engine ready: %u Hz, %u channel(s)%s",
                 ma_engine_get_sample_rate(&m_impl->engine),
                 ma_engine_get_channels(&m_impl->engine),
@@ -251,13 +257,26 @@ bool AudioEngine::isBusMuted(const std::string& name) const
 void AudioEngine::setMasterVolume(float volume)
 {
     if (!m_initialized) return;
-    ma_engine_set_volume(&m_impl->engine, volume < 0.0f ? 0.0f : volume);
+    m_impl->masterVolume = volume < 0.0f ? 0.0f : volume;
+    if (!m_impl->masterMuted) ma_engine_set_volume(&m_impl->engine, m_impl->masterVolume);
 }
 
 float AudioEngine::getMasterVolume() const
 {
     if (!m_initialized) return 1.0f;
-    return ma_engine_get_volume(&m_impl->engine);
+    return m_impl->masterVolume;
+}
+
+void AudioEngine::setMasterMuted(bool muted)
+{
+    if (!m_initialized || m_impl->masterMuted == muted) return;
+    m_impl->masterMuted = muted;
+    ma_engine_set_volume(&m_impl->engine, muted ? 0.0f : m_impl->masterVolume);
+}
+
+bool AudioEngine::isMasterMuted() const
+{
+    return m_initialized && m_impl->masterMuted;
 }
 
 int AudioEngine::busVoiceCount(const std::string& name) const

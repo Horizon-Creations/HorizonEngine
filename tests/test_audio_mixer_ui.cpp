@@ -260,9 +260,23 @@ TEST_CASE("audio mixer ui: the project's buses become strips, M mutes and S solo
 	// item too, crossed once.
 	const std::vector<Item> mRow = itemsAcross(ctx, mRowY, 24.0f, float(W) - 24.0f);
 	REQUIRE_MESSAGE(mRow.size() >= 5, "found " << mRow.size() << " items across the M row");
-	const Item musicM = mRow[1];
-	const Item musicS = mRow[2];
-	const Item sfxM   = mRow[3];
+	const Item masterM = mRow[0];
+	const Item musicM  = mRow[1];
+	const Item musicS  = mRow[2];
+	const Item sfxM    = mRow[3];
+
+	// M on Master: the engine is muted and STAYS muted across the frames that
+	// follow — the window re-applies the project's bus list every frame, and
+	// that must not undo a mute. The fader value survives, in the engine and
+	// in the project alike.
+	clickAt(ctx, masterM.mid, mRowY);
+	CHECK(audio.isMasterMuted());
+	for (int i = 0; i < 3; ++i) frame(ctx, false);
+	CHECK(audio.isMasterMuted());
+	CHECK(audio.getMasterVolume() == doctest::Approx(1.0f));
+	CHECK(cfg.masterVolume == doctest::Approx(1.0f));
+	clickAt(ctx, masterM.mid, mRowY);
+	CHECK_FALSE(audio.isMasterMuted());
 
 	// M on Music: the engine's Music bus is muted, the fader value is kept.
 	clickAt(ctx, musicM.mid, mRowY);
