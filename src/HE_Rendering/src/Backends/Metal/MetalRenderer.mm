@@ -12635,6 +12635,15 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, skyClock,
 		          GetEnvironment(), m_renderWorld.camera.position, /*lowResClouds=*/true);
 	};
+	// Wireframe view (SetViewMode): rasterise ONE mesh loop as lines. Bracketed
+	// per loop, never "set once and restore before X" — the resolve, sky and
+	// composite draws in between are fullscreen triangles that must stay filled.
+	// Fill mode is encoder state, so the shadow/SSAO/GI encoders are untouched.
+	const bool wireView = WireframeViewActive();
+	auto wire = [&](bool on) {
+		if (wireView)
+			[encoder setTriangleFillMode:(on ? MTLTriangleFillModeLines : MTLTriangleFillModeFill)];
+	};
 
 	// Intra-Scene element timing (draw-boundary): anchor before the first element,
 	// then a sample after each element so element[i] = sample[i] - sample[i-1].
@@ -12903,6 +12912,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		{
 			[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 			void* fwdBound = nullptr;
+			wire(true);
 			for (const TPDraw& t : deferred->forwardOpaque)
 			{
 				void* want = t.pipeline ? t.pipeline : m_scenePipeline;
@@ -12942,6 +12952,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 			}
+			wire(false);
 			// Restore the shared-slot state the material draws may have replaced.
 			[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 		}
@@ -12959,6 +12970,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// only pass renders to the backbuffer (the active scene encoder); offscreen
 	// targets (id != backbuffer) arrive with shadows/HDR. Skipped in deferred
 	// mode — the resolve above replaced the opaque loop.
+	if (!deferred) wire(true);
 	if (!deferred)
 	m_renderGraph.execute(m_renderWorld, m_sortedIndices,
 		[&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
@@ -13269,10 +13281,13 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					drawInstance(t);
 		}
 	});
+	if (!deferred) wire(false);
 	SamplePoint(renderEncoder, "Opaque");
 
 	// ── Skinned geometry: drawn after opaque, before sky so they occlude the background.
+	wire(true);
 	EncodeSkinnedObjects(renderEncoder, viewProj, shadows, &scene);
+	wire(false);
 	SamplePoint(renderEncoder, "Skinned");
 
 	// Sky LAST — fills the background pixels the geometry didn't cover.
@@ -13327,6 +13342,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
 		void* tpBound = (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
+		wire(true);
 		for (const TPDraw& t : transparent)
 		{
 			// Custom translucent materials bind their own blended pipeline + state; the
@@ -13368,6 +13384,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			++m_counters.draws;
 			m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 		}
+		wire(false);
 	}
 	SamplePoint(renderEncoder, "Transparent");
 
@@ -14843,6 +14860,12 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	if (m_renderGraph.empty())
 		m_renderGraph.addPass(std::make_unique<GeometryPass>());
 
+	// Wireframe view: the G-buffer geometry rasterises as lines; the resolve
+	// (tile mode runs on THIS encoder right after us) discards the untouched
+	// depth == far texels, so the sky fills in between the edges. Back to Fill
+	// at the end — decals and the tile resolve are fullscreen/box draws.
+	const bool wire = WireframeViewActive();
+	if (wire) [encoder setTriangleFillMode:MTLTriangleFillModeLines];
 	m_renderGraph.execute(m_renderWorld, m_sortedIndices,
 		[&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
 	{
@@ -15121,6 +15144,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 					drawInstance(t);
 		}
 	});
+	if (wire) [encoder setTriangleFillMode:MTLTriangleFillModeFill];
 }
 
 void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary)

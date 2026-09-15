@@ -5256,6 +5256,24 @@ static constexpr int kSkyEnvFace = 128; // image-based-ambient cubemap face size
 // caps the GL side to the same number it renders + samples.
 static constexpr int kGLCsmCascades = 3;
 
+// Wireframe view (IRenderer::SetViewMode): rasterise ONE mesh loop as lines.
+// Scoped per loop, never "set once and restore before X" — the fullscreen
+// draws between the loops (G-buffer resolve, sky, decal boxes, composites)
+// must stay filled, and each of them would otherwise need its own reset.
+// GL_FRONT_AND_BACK is the only mode a core profile (4.1 on macOS) accepts.
+struct GLWireScope
+{
+	const bool on;
+	explicit GLWireScope(bool wire) : on(wire)
+	{
+		if (on) glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+	}
+	~GLWireScope()
+	{
+		if (on) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+	}
+};
+
 void OpenGLRenderer::CreateUnlitPipeline()
 {
 	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kUnlitVS);
@@ -12428,6 +12446,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			}
 #endif
 			glUseProgram(m_gbufferProgram);
+			GLWireScope _gbWire(WireframeViewActive());
 			for (const DrawCall& dc : cmds.drawCalls())
 			{
 				if (!matValid || dc.materialAssetId != lastMatId)
@@ -12636,6 +12655,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUseProgram(m_unlitProgram);
 		}
 		else
+		{
+		GLWireScope _fwdWire(WireframeViewActive());
 		for (const DrawCall& dc : cmds.drawCalls())
 		{
 			// An explicit MaterialComponent override wins over the mesh's own
@@ -12895,6 +12916,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 			}
 		}
+		} // forward loop (wireframe scope)
 
 #if defined(HE_HAVE_SHADERC)
 		// ── Deferred decals ─────────────────────────────────────────────────
@@ -13125,6 +13147,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// Forward-routed opaque draws (custom materials without a G-buffer
 			// variant): full depth test + write against the blitted depth, no
 			// blending — the same custom-material draw the forward loop performs.
+			GLWireScope _replayWire(WireframeViewActive());
 			for (const TPDraw& t : deferredForward)
 			{
 				if (t.matProg)
@@ -13231,6 +13254,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// Filled with the draw's matrices, rest is identity (safe default).
 			std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
 
+			GLWireScope _skinWire(WireframeViewActive());
 			for (const SkinnedDrawCall& dc : cmds.skinnedDrawCalls())
 			{
 				const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(dc.meshAssetId);
@@ -13371,6 +13395,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			glDepthMask(GL_FALSE);
 			glActiveTexture(GL_TEXTURE0);
+			GLWireScope _tpWire(WireframeViewActive());
 			for (const TPDraw& t : transparent)
 			{
 				if (t.matProg)
