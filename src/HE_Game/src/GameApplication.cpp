@@ -571,6 +571,16 @@ void GameApplication::OnInit()
 		HE_LOG_INFO(Core, "%s", "GameApplication: no project.hcfg — running without pak");
 		return;
 	}
+	// Config/ProjectSettings.json beside it: the project's own word on shadows
+	// (and, in later steps, physics rate and window). A missing file is the
+	// default — every build made before it existed — and a damaged one is
+	// logged and ALSO the default; a game must start either way.
+	if (!HE::loadProjectSettings(exeDir, m_projectSettings))
+	{
+		HE_LOG_WARN(Core, "GameApplication: %s is unreadable — using default project settings",
+		            HE::projectSettingsPath(exeDir).string().c_str());
+		m_projectSettings = HE::ProjectSettings{};
+	}
 	// Application build (docs/he-apps-plan.md A1): everything below that belongs
 	// to a GAME is skipped. Latched into a member because half a dozen places
 	// downstream ask, and reaching into m_config at each of them invites one of
@@ -2714,6 +2724,20 @@ void GameApplication::OnRender(float deltaTime)
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAORadius", 0.5f)),
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAOIntensity", 1.0f)),
 				GlobalState::getInstance().getCustomConfigInt("SSAOMethod", 0)});
+			// Directional shadows are the PROJECT's (Config/ProjectSettings.json
+			// next to project.hcfg), not config.json's: the same cascades the
+			// editor's viewport showed. Defaults = the historical constants.
+			{
+				const HE::ProjectShadowSettings& sh = m_projectSettings.shadows;
+				IRenderer::ShadowSettings s;
+				s.distance     = sh.distance;
+				s.cascadeCount = sh.cascadeCount;
+				s.resolution   = sh.resolution;
+				s.splitLambda  = sh.splitLambda;
+				s.slopeBias    = sh.slopeBias;
+				s.minBias      = sh.minBias;
+				r->SetShadowSettings(s);
+			}
 
 			// Global Illumination — GlobalIlluminationEnabled/GIIndirectIntensity/
 			// GILightRadius, capability-gated so non-Metal/non-raytracing builds no-op.

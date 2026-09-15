@@ -71,7 +71,7 @@ TEST_CASE("ProjectSettings: toJson/fromJson round-trips every field")
 	HE::ProjectSettings a;
 	a.game.title                       = "Sky Harbour";
 	a.shadows.distance                 = 400.0f;
-	a.shadows.cascadeCount             = 4;
+	a.shadows.cascadeCount             = 2;
 	a.shadows.resolution               = 4096;
 	a.shadows.splitLambda              = 0.7f;
 	a.shadows.slopeBias                = 0.002f;
@@ -88,7 +88,7 @@ TEST_CASE("ProjectSettings: toJson/fromJson round-trips every field")
 	json j;
 	a.toJson(j);
 	CHECK(j["version"] == HE::ProjectSettings::kVersion);
-	CHECK(j["shadows"]["cascadeCount"] == 4);
+	CHECK(j["shadows"]["cascadeCount"] == 2);
 	CHECK(j["physics"]["gravity"].size() == 3);
 
 	HE::ProjectSettings b;
@@ -163,7 +163,7 @@ TEST_CASE("ProjectSettings file: written once changed, rewritten even when back 
 {
 	TempRoot t("roundtrip");
 	HE::ProjectSettings s;
-	s.shadows.cascadeCount = 4;
+	s.shadows.cascadeCount = 2;
 	s.game.title           = "Title";
 	REQUIRE(HE::saveProjectSettings(t.root, s));
 	const fs::path file = HE::projectSettingsPath(t.root);

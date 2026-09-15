@@ -537,6 +537,11 @@ private:
 	void loadGameInstanceGraph();  // read the project's GameInstance.hcode → host
 	void saveGameInstanceGraph();  // write m_gameInstanceGraph → project file
 	std::string gameInstancePath(); // <projectDir>/GameInstance.hcode
+	// The open project's Shadows page as the renderer takes it (no project =
+	// defaults = the historical constants). HE_DUMP_SHADOW overrides it for a
+	// headless capture: "distance,cascades,resolution,lambda,slopeBias,minBias",
+	// any trailing field may be left off.
+	IRenderer::ShadowSettings projectShadowSettings();
 
 	// Per-project open-tab persistence (stored in the global config keyed by
 	// project path). restoreOpenTabs runs on project load; saveOpenTabs runs when

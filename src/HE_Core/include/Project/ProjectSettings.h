@@ -42,9 +42,10 @@ namespace HE {
 // `version` is written for the day the meaning of a key has to change (not its
 // presence — that is handled by the defaults). Until then it is 1.
 //
-// NOTE (Schritt 1): this is the FORMAT and the panel over it. The renderer,
-// the physics world and the exporter do not read these values yet — that is
-// the following steps' work, and each page of the panel says so in its hint.
+// NOTE: Schritt 1 was the FORMAT and the panel over it; Schritt 2 connected
+// `shadows` to the renderer (see ProjectShadowSettings). The physics world and
+// the exporter do not read their sections yet — that is the following steps'
+// work, and each such page of the panel says so in its hint.
 
 struct HE_API ProjectGameSettings
 {
@@ -57,16 +58,28 @@ struct HE_API ProjectShadowSettings
 {
     // Directional-light cascaded shadow maps (Metal + OpenGL). Defaults are the
     // constants RenderExtractor::extract has always fit its cascades with.
+    // The road to the renderer: the editor (and the packaged game) push these
+    // as IRenderer::ShadowSettings every frame; the backend hands distance /
+    // count / lambda / resolution to its RenderExtractor and the bias pair to
+    // its shaders. Backends without cascades (D3D11/D3D12/Vulkan, still on one
+    // whole-scene map) ignore the push and draw as they always have.
     float distance     = 250.0f;   // metres of shadow coverage from the camera
-    int   cascadeCount = 3;        // 1..kMaxCascades (ShadowData::kMaxCascades)
+    int   cascadeCount = 3;        // 1..kMaxCascades
     int   resolution   = 2048;     // texels per cascade edge, a power of two
     float splitLambda  = 0.5f;     // 0 = uniform splits, 1 = logarithmic
-    // The receiver-side depth bias, as scene.frag spells it:
-    //   bias = max(slopeBias * (1 - N·L), minBias)
-    float slopeBias    = 0.0015f;
-    float minBias      = 0.0004f;
+    // The receiver-side depth bias, as the CSM shaders (GL kUnlitFS, Metal
+    // shadowFactor, the material library's heCsmShadow) spell it:
+    //   bias = clamp(slopeBias * tan(acos(N·L)), minBias, 0.02) * (cascade + 1)
+    // Defaults are the literals those shaders carried before this existed.
+    float slopeBias    = 0.0008f;
+    float minBias      = 0.0002f;
 
-    static constexpr int   kMaxCascades   = 4;
+    // 3, not ShadowData::kMaxCascades (4): every cascade consumer — the GL
+    // shader's CSM_CASCADES, Metal's SceneUniforms::cascadeVP[3], the
+    // material library's append-only Lighting::csmVP[3] — is built for three,
+    // and the panel must not offer a fourth the renderer would silently drop.
+    // A fourth cascade is a renderer change, and this ceiling moves with it.
+    static constexpr int   kMaxCascades   = 3;
     static constexpr int   kMinResolution = 256;
     static constexpr int   kMaxResolution = 8192;
     static constexpr float kMaxDistance   = 5000.0f;

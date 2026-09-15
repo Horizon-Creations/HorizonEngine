@@ -55,7 +55,8 @@ constexpr uint32_t   kInvalidSlot   = 0xFFFFFFFFu;   // ftPair/ftPoint when over
 // (some may be empty → 0 ms).
 constexpr int        kDetailedPassCount = 9;
 // Cascaded shadow maps: layer count of the shadow depth-texture array. Must match
-// the extractor's kCascadeCount and the shader's cascade arrays (3).
+// the shader's cascade arrays (3) and is the ceiling the extractor's
+// setShadowSettings() clamps the project's cascade count to.
 constexpr int        kCsmCascades = 3;
 
 // Make a render pass descriptor sample the GPU timestamp at start-of-vertex and
@@ -261,6 +262,9 @@ struct SceneUniforms {
 	float4   cloudShadowB;
 	// Specular AA (docs/anti-aliasing-plan.md A6): x = strength (0 = off).
 	float4   aaParams;
+	// CSM receiver depth bias (project ShadowSettings): x = slope-scaled
+	// factor, y = minimum. Defaults (0.0008, 0.0002) are the old literals.
+	float4   shadowBias;
 };
 
 // Widen the roughness by how much the normal turns inside this pixel, so a
@@ -438,7 +442,7 @@ float shadowFactor(constant SceneUniforms& scene, float3 worldPos, float3 N, flo
 	// this cascade (clamped/neighbour texels → edge fringes).
 	if (p.z > 1.0 || any(uv < texel) || any(uv > 1.0 - texel)) return 1.0;
 	float ndl  = clamp(dot(N, L), 0.0, 1.0);
-	float bias = clamp(0.0008 * tan(acos(ndl)), 0.0002, 0.02) * float(c + 1);
+	float bias = clamp(scene.shadowBias.x * tan(acos(ndl)), scene.shadowBias.y, 0.02) * float(c + 1);
 	// 3×3 PCF over the chosen cascade's array layer.
 	float vis = 0.0;
 	for (int y = -1; y <= 1; ++y)
@@ -5529,9 +5533,13 @@ struct SceneUniforms
 	// Specular AA (docs/anti-aliasing-plan.md A6): x = strength (0 = off). Every
 	// fill site that leaves this zero keeps its image byte-identical.
 	glm::vec4 aaParams = glm::vec4(0.0f);
+	// CSM receiver depth bias (x = slope factor, y = minimum), from the
+	// project's ShadowSettings. Defaulted to the old shader literals so a fill
+	// site that never sets it (previews) shadows exactly as before.
+	glm::vec4 shadowBias = glm::vec4(0.0008f, 0.0002f, 0.0f, 0.0f);
 };
 static_assert(sizeof(SceneUniforms) ==
-              2 * 16 + 16 + 8 * 64 + 3 * 64 + 16 + 16 + 7 * 16 + 16 * 64 + 3 * 16,
+              2 * 16 + 16 + 8 * 64 + 3 * 64 + 16 + 16 + 7 * 16 + 16 * 64 + 4 * 16,
               "SceneUniforms must stay byte-identical to its MSL twin");
 
 // Matches the MSL SSAOPosUniforms / SSAOParams structs.
@@ -10402,6 +10410,18 @@ void MetalRenderer::SetSSAOSettings(const SSAOSettings& s)
 	m_ssaoMethod    = s.method;
 }
 
+void MetalRenderer::SetShadowSettings(const ShadowSettings& s)
+{
+	// The fit parameters go straight to the extractor — every extract() this
+	// frame (shadow pass, GI build, scene) then agrees on the cascade layout.
+	// The resolution is handed over with the size that is ALLOCATED, not the
+	// one asked for: the texel snap must match the texture, and the texture is
+	// only swapped at the top of a primary frame (EncodeFrame).
+	m_shadowSizeDirty |= (s.resolution != m_shadowSettings.resolution);
+	m_shadowSettings   = s;
+	m_extractor.setShadowSettings(s.distance, s.cascadeCount, s.splitLambda, m_shadowSize);
+}
+
 void MetalRenderer::EnsureSSAOTargets(int width, int height)
 {
 	width  = std::max(1, width);
@@ -12021,6 +12041,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	}
 	scene.shadowEnabled = shadows ? 1 : 0;
 	scene.debugCascades = m_debugShadowCascades ? 1 : 0;
+	scene.shadowBias    = glm::vec4(m_shadowSettings.slopeBias, m_shadowSettings.minBias, 0.0f, 0.0f);
 	scene.sunDir        = glm::vec4(sunDir, 0.0f);
 	scene.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);
 	scene.fog           = glm::vec4(GetEnvironment().fogDensity,
@@ -12691,6 +12712,8 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 		matLight.camFwd[0] = camFwd.x;
 		matLight.camFwd[1] = camFwd.y;
 		matLight.camFwd[2] = camFwd.z;
+		matLight.shadowBias[0] = m_shadowSettings.slopeBias;
+		matLight.shadowBias[1] = m_shadowSettings.minBias;
 	}
 	// Aerial perspective + the "is it bound" gates for the shared ambient
 	// inputs (MSL 14/15); heLitP falls back to the flat ambient and skips fog
@@ -14361,6 +14384,29 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			AgeRetiredTextures();
 			AgeRetiredGIObjects();
+
+			// Project shadow resolution changed (SetShadowSettings): swap the
+			// cascade depth array here, before any pass of this frame touches
+			// it. The old texture is retired, not released — last frame's
+			// command buffer may still be sampling it.
+			if (m_shadowSizeDirty && m_shadowDepthTex)
+			{
+				m_shadowSize = std::clamp(m_shadowSettings.resolution, 256, 8192);
+				id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+				MTLTextureDescriptor* td = [[MTLTextureDescriptor alloc] init];
+				td.textureType = MTLTextureType2DArray;
+				td.pixelFormat = kDepthFormat;
+				td.width       = (NSUInteger)m_shadowSize;
+				td.height      = (NSUInteger)m_shadowSize;
+				td.arrayLength = (NSUInteger)kCsmCascades;
+				td.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+				td.storageMode = MTLStorageModePrivate;
+				RetireTexture(m_shadowDepthTex);
+				m_shadowDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:td]);
+				m_extractor.setShadowSettings(m_shadowSettings.distance, m_shadowSettings.cascadeCount,
+				                              m_shadowSettings.splitLambda, m_shadowSize);
+				m_shadowSizeDirty = false;
+			}
 
 			// Release cached GPU buffers for any mesh invalidated since last frame
 			// (e.g. sculpted terrain). In-flight GPU work may reference them, so

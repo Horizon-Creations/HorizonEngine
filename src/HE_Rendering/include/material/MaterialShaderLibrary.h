@@ -128,6 +128,13 @@ public:
         //       from a G-buffer texel, and its derivative jumps at every object
         //       edge and quantisation step, which would halo instead of smooth.
         float specAA[4]       = {};
+        // CSM receiver depth bias (append-only, v3.1, the project's
+        // ProjectShadowSettings): x = slope-scaled factor, y = minimum —
+        //   bias = clamp(x * tan(acos(N·L)), y, 0.02) * (cascade + 1)
+        // Only meaningful where csmSplits.w > 0, and every fill site that sets
+        // csmVP sets this alongside it; the zero every other site leaves is
+        // never read because heCsmShadow is not reached there.
+        float shadowBias[4]   = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 

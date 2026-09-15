@@ -800,8 +800,11 @@ void drawShadowsPage(AppContext& ctx)
 	ProjectData& p = *pp;
 	HE::ProjectShadowSettings& s = p.settings.shadows;
 
-	settingsFileHint("Saved, but the renderer still draws with its built-in values — "
-	                 "connecting these is the next step of this panel.");
+	settingsFileHint(nullptr);
+	hint("Read by the renderer as you edit: the viewport follows every change here. "
+	     "Metal and OpenGL draw cascades; the other backends still use one whole-scene "
+	     "map and ignore this page. The exported build picks these up once the "
+	     "export ships this file (next step).");
 
 	bool commit = false;
 	ImGui::SeparatorText("Cascades");

@@ -2573,13 +2573,15 @@ namespace
 	  "nothing casts a shadow. The cascades share this range, so a longer "
 	  "distance spreads the same texels thinner — 250 is what the engine has "
 	  "always used.\n\n"
-	  "Saved to Config/ProjectSettings.json. The renderer does not read it yet — "
-	  "that is the next step of this panel.",
+	  "Saved to Config/ProjectSettings.json and read by the renderer as you "
+	  "edit (Metal and OpenGL draw cascades; the other backends still use one "
+	  "whole-scene map and ignore this page).",
 	  "", "rendering#shadows" },
 	{ "Shadows/Cascades", "Cascades",
 	  "How many shadow maps the distance is cut into: a sharp one near the "
 	  "camera, coarser ones further out. More cascades means sharper shadows up "
-	  "close and more depth passes per frame. Three is the engine's default.",
+	  "close and more depth passes per frame. Three is the engine's default and "
+	  "its ceiling: every cascade consumer is built for three.",
 	  "", "rendering#shadows" },
 	{ "Shadows/Resolution", "Resolution",
 	  "Texels along one edge of each cascade's shadow map. 2048 is the default; "

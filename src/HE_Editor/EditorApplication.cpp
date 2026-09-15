@@ -2649,6 +2649,13 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.SSAORadius,
 			m_editorConfig.SSAOIntensity,
 			m_editorConfig.SSAOMethod});
+		// Directional shadows come from the PROJECT (Project Settings ▸ Shadows),
+		// not from the editor's preferences: the cascades a scene is lit with
+		// are part of the scene's look and must not differ between machines.
+		// Every frame, like the rest, so an edit on that page lands in the
+		// viewport as it is made; no project = the renderer's own defaults,
+		// which are the historical constants.
+		renderer()->SetShadowSettings(projectShadowSettings());
 		{
 			// Anti-aliasing. Same env-override treatment as GI/SSR below and for the
 			// same reason: this push runs every frame, so an override applied once
@@ -4155,6 +4162,7 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetSSAOSettings(IRenderer::SSAOSettings{
 		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
 		m_editorConfig.SSAOMethod});
+	r->SetShadowSettings(projectShadowSettings());
 	{
 		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
 		// the render scale and the specular-AA toggle for this capture only, so
@@ -8417,6 +8425,49 @@ std::string EditorApplication::gameInstancePath()
 	if (p.empty()) return {};
 	if (std::filesystem::is_regular_file(p)) p = p.parent_path();
 	return (p / "GameInstance.hcode").string();
+}
+
+IRenderer::ShadowSettings EditorApplication::projectShadowSettings()
+{
+	IRenderer::ShadowSettings out;
+	if (m_projectLoaded)
+	{
+		const HE::ProjectShadowSettings& s = m_projectManager.currentProject().settings.shadows;
+		out.distance     = s.distance;
+		out.cascadeCount = s.cascadeCount;
+		out.resolution   = s.resolution;
+		out.splitLambda  = s.splitLambda;
+		out.slopeBias    = s.slopeBias;
+		out.minBias      = s.minBias;
+	}
+	// HE_DUMP_SHADOW: the A/B knob for he_shot.py — "distance,cascades,
+	// resolution,lambda,slopeBias,minBias" (trailing fields optional), so a
+	// capture can prove the values reach the renderer without touching the
+	// project's file. Static: this runs every frame.
+	static const char* s_ov = std::getenv("HE_DUMP_SHADOW");
+	if (s_ov && *s_ov)
+	{
+		float v[6] = { out.distance, static_cast<float>(out.cascadeCount),
+		               static_cast<float>(out.resolution), out.splitLambda,
+		               out.slopeBias, out.minBias };
+		const char* p = s_ov;
+		for (int i = 0; i < 6 && *p; ++i)
+		{
+			char* end = nullptr;
+			const float f = std::strtof(p, &end);
+			if (end == p) break;
+			v[i] = f;
+			p = end;
+			if (*p == ',') ++p;
+		}
+		out.distance     = v[0];
+		out.cascadeCount = static_cast<int>(v[1]);
+		out.resolution   = static_cast<int>(v[2]);
+		out.splitLambda  = v[3];
+		out.slopeBias    = v[4];
+		out.minBias      = v[5];
+	}
+	return out;
 }
 
 void EditorApplication::loadGameInstanceGraph()
