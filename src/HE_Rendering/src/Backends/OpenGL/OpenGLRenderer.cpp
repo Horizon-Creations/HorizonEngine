@@ -12395,6 +12395,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// clears y again right after calling it.
 			lit.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
 			lit.specAA[1] = 1.0f;
+			// Viewport view mode (v3.2): Unlit/Wireframe hand heLitP's base
+			// colour back untouched — graph materials and the deferred resolve
+			// both read this. Scene-pass fill only; previews keep the zero.
+			lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
 		};
 #endif
 

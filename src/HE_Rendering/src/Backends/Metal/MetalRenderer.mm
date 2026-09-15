@@ -13505,6 +13505,10 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// calling this.
 	matLight.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
 	matLight.specAA[1] = 1.0f;
+	// Viewport view mode (v3.2): Unlit/Wireframe hand heLitP's base colour back
+	// untouched — graph materials, the deferred resolve and the SSR composite
+	// all read this. Scene-pass fill only; previews keep the zero.
+	matLight.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
 }
 
 // ─── Clustered lighting build (plan P7) ──────────────────────────────────────

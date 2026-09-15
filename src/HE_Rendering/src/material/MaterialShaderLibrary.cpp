@@ -221,6 +221,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 cloudShadowB;   // x = strength (0 = off / not bound)
     vec4 specAA;         // x = specular-AA strength (0 = off), y = 1 in geometry passes (own normal + valid derivatives)
     vec4 shadowBias;     // CSM receiver bias: x = slope-scaled factor, y = minimum (project ShadowSettings; filled with csmVP)
+    vec4 viewMode;       // x = 1 → Unlit/Wireframe view: heLitP hands the base colour back, heApplyFog is a no-op (scene-pass fill sites only)
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -349,6 +350,7 @@ vec3 heGIIrradianceAt(vec3 P, vec3 N) {
 // material. Without this, distant custom-material geometry stayed fully
 // saturated while everything around it melted into the horizon.
 vec3 heApplyFog(vec3 color, vec3 worldPos) {
+    if (heLight.viewMode.x > 0.5) return color; // Unlit view: fog is lighting's business
     if (heLight.fog.x <= 0.0 || heLight.fog.z <= 0.5) return color;
     vec3  ray  = worldPos - heLight.camPos.xyz;
     float dist = length(ray);
@@ -455,6 +457,7 @@ float heCloudShadowFactor(vec3 worldPos, vec3 L) {
 // worldPos, so it can't project into the CSM — but the GI sun mask is pure
 // screen-space, so ray-traced occlusion applies here too.
 vec3 heLit(vec3 baseColor, vec3 N, float metallic, float roughness) {
+    if (heLight.viewMode.x > 0.5) return baseColor; // Unlit view (see heLitP)
     vec3  L    = normalize(heLight.sunDir.xyz);
     vec3  n    = normalize(N);
     float ndl  = max(dot(n, L), 0.0);
@@ -505,6 +508,11 @@ float heSpecAARoughness(vec3 N, float perceptualRough) {
 
 vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos,
             float specular, float ambientOcclusion) {
+    // Unlit view mode (heLight.viewMode.x, IRenderer::SetViewMode): the base
+    // colour untouched — no lights, ambient, weather, AO. Twin of the built-in
+    // shaders' scene.unlit / uUnlit early return; covers graph materials AND
+    // the deferred resolve (which shades through this very function).
+    if (heLight.viewMode.x > 0.5) return baseColor;
     vec3 n = normalize(N);
     vec3 V = normalize(heLight.camPos.xyz - worldPos);
     // Metallic/roughness split — IDENTICAL to the built-in PBR shaders (see the
@@ -1494,6 +1502,9 @@ void main() {
     vec2 uv = gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0));
     float d = texture(heGBDepth, uv).r;
     if (d >= 1.0) discard;
+    // Unlit view: the resolve returned the bare base colour, so the specular
+    // term it "skipped" must not come back through this additive pass either.
+    if (heLight.viewMode.x > 0.5) discard;
     vec4 g0 = texture(heGB0, uv);
     vec4 g1 = texture(heGB1, uv);
     vec4 g2 = texture(heGB2, uv);
