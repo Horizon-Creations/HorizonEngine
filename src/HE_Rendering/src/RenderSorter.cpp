@@ -72,10 +72,11 @@ void RenderSorter::sortBackToFront(std::vector<const DrawCall*>& transparent,
 		});
 }
 
-void RenderSorter::batchDepthCasters(const RenderWorld&           world,
-                                     const std::vector<uint32_t>& sortedIndices,
-                                     uint32_t                     skipEntity,
-                                     DepthBatchList&              out)
+void RenderSorter::batchDepthRuns(const RenderWorld&           world,
+                                  const std::vector<uint32_t>& sortedIndices,
+                                  DepthFilter                  filter,
+                                  uint32_t                     skipEntity,
+                                  DepthBatchList&              out)
 {
 	out.clear();
 	out.transforms.reserve(sortedIndices.size());
@@ -83,7 +84,9 @@ void RenderSorter::batchDepthCasters(const RenderWorld&           world,
 	{
 		if (idx >= world.objects.size()) continue;
 		const RenderObject& obj = world.objects[idx];
-		if (!obj.castsShadow) continue;          // billboards (precip/particles) cast none
+		// Billboards (precip/particles) opt out of both depth maps and AO.
+		if (filter == DepthFilter::ShadowCasters  && !obj.castsShadow)   continue;
+		if (filter == DepthFilter::AoContributors && !obj.contributesAO) continue;
 		if (obj.entityId == skipEntity) continue; // the light's own mesh
 		// Extend the current run when the mesh matches; the sorter grouped by
 		// mesh id, so a change here means a genuinely new mesh.

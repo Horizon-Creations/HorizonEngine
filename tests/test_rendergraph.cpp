@@ -635,6 +635,41 @@ TEST_CASE("batchDepthCasters drops non-casters and the skipped entity without sp
 	CHECK(out.batches[0].count == 4);
 }
 
+TEST_CASE("batchDepthRuns honours the pass's own opt-out flag and nothing else")
+{
+	// The SSAO / GI pre-passes on Metal feed the same batcher as the shadow
+	// pass, but each pass has its own per-object opt-out: a billboard that
+	// casts no shadow may still contribute AO and vice versa, and the GI
+	// G-buffer pre-pass draws everything.
+	const HE::UUID mesh = meshId(21);
+	RenderWorld world;
+	world.objects.push_back(depthObj(mesh, 1, 0.0f));
+	{ RenderObject o = depthObj(mesh, 2, 1.0f, /*casts=*/false); o.contributesAO = true;  world.objects.push_back(o); }
+	{ RenderObject o = depthObj(mesh, 3, 2.0f, /*casts=*/true);  o.contributesAO = false; world.objects.push_back(o); }
+	{ RenderObject o = depthObj(mesh, 4, 3.0f, /*casts=*/false); o.contributesAO = false; world.objects.push_back(o); }
+	const std::vector<uint32_t> sorted = { 0, 1, 2, 3 };
+	RenderSorter::DepthBatchList out;
+
+	RenderSorter::batchDepthRuns(world, sorted, RenderSorter::DepthFilter::ShadowCasters, kNoOwnerEntity, out);
+	REQUIRE(out.batches.size() == 1);
+	CHECK(out.batches[0].count == 2); // 0 and 2
+	CHECK(out.transforms[1][3].x == doctest::Approx(2.0f));
+
+	RenderSorter::batchDepthRuns(world, sorted, RenderSorter::DepthFilter::AoContributors, kNoOwnerEntity, out);
+	REQUIRE(out.batches.size() == 1);
+	CHECK(out.batches[0].count == 2); // 0 and 1
+	CHECK(out.transforms[1][3].x == doctest::Approx(1.0f));
+
+	RenderSorter::batchDepthRuns(world, sorted, RenderSorter::DepthFilter::All, kNoOwnerEntity, out);
+	REQUIRE(out.batches.size() == 1);
+	CHECK(out.batches[0].count == 4);
+
+	// skipEntity still applies under every filter.
+	RenderSorter::batchDepthRuns(world, sorted, RenderSorter::DepthFilter::All, /*skipEntity=*/1, out);
+	REQUIRE(out.batches.size() == 1);
+	CHECK(out.batches[0].count == 3);
+}
+
 TEST_CASE("batchDepthCasters ignores out-of-range indices and clears stale output")
 {
 	const HE::UUID mesh = meshId(9);

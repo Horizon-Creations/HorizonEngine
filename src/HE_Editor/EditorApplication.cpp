@@ -4152,9 +4152,18 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetOverlayCallback(nullptr);
 	r->SetBloomSettings(IRenderer::BloomSettings{
 		m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity});
-	r->SetSSAOSettings(IRenderer::SSAOSettings{
-		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
-		m_editorConfig.SSAOMethod});
+	{
+		// HE_DUMP_SSAO: override the persisted SSAO toggle for this capture only
+		// (the GI / SSR twins below do the same), so an SSAO pre-pass A/B does
+		// not depend on the Preferences state of whoever ran the editor last.
+		const bool dumpSSAO = [&]{
+			const char* v = std::getenv("HE_DUMP_SSAO");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSAOEnabled;
+		}();
+		r->SetSSAOSettings(IRenderer::SSAOSettings{
+			dumpSSAO, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
+			m_editorConfig.SSAOMethod});
+	}
 	{
 		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
 		// the render scale and the specular-AA toggle for this capture only, so

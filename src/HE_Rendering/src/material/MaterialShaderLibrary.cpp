@@ -1813,6 +1813,55 @@ constexpr const char* kReflPrepassVSEnd = R"(    vec4 p       = vec4(pos, 1.0);
 }
 )";
 
+// ─── Instanced twin of the reflection pre-pass vertex ────────────────────────
+// One draw for a GeometryPass batch (docs/gpu-instancing-cross-backend-plan.md
+// §6.2): the per-instance MODEL matrix replaces the three per-draw products,
+// and the camera pair {viewProj, view} is the batch-constant block instead.
+// Where the model comes from follows the same split as the mesh data above:
+//   * Metal pulls it from an SSBO of mat4 at binding 2 (pinned to vertex
+//     buffer 5, the instance slot every instanced Metal pipeline of this
+//     engine uses) indexed by gl_InstanceIndex;
+//   * GL reads it as four vec4 attributes at locations 4–7 — the divisor-1
+//     binding every mesh VAO already carries for the scene pass's instanced
+//     program, so the pre-pass reuses the scene's instance VBO unchanged.
+// The varyings are the plain variant's, so reflPrepassFragment is shared.
+constexpr const char* kReflPrepassInstVSSsbo = R"(#version 450
+layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Inst { mat4 m[]; } inst;
+)";
+constexpr const char* kReflPrepassInstVSAttr = R"(#version 450
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 4) in vec4 aInstCol0;
+layout(location = 5) in vec4 aInstCol1;
+layout(location = 6) in vec4 aInstCol2;
+layout(location = 7) in vec4 aInstCol3;
+)";
+// Two mat4 = 128 bytes std140 — ReflPrepassInstUniforms in the header.
+constexpr const char* kReflPrepassInstVSTail = R"(layout(std140, set = 0, binding = 1) uniform UI {
+    mat4 viewProj;
+    mat4 view;
+} u;
+layout(location = 0) out vec3 vViewPos;
+layout(location = 1) out vec3 vWorldNormal;
+void main() {
+)";
+constexpr const char* kReflPrepassInstVSBodySsbo = R"(    int b = gl_VertexIndex * 8;
+    vec3 pos = vec3(d[b + 0], d[b + 1], d[b + 2]);
+    vec3 nrm = vec3(d[b + 3], d[b + 4], d[b + 5]);
+    mat4 model = inst.m[gl_InstanceIndex];
+)";
+constexpr const char* kReflPrepassInstVSBodyAttr = R"(    vec3 pos = aPos;
+    vec3 nrm = aNormal;
+    mat4 model = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+)";
+constexpr const char* kReflPrepassInstVSEnd = R"(    vec4 world   = model * vec4(pos, 1.0);
+    gl_Position  = u.viewProj * world;
+    vViewPos     = (u.view * world).xyz;
+    vWorldNormal = (model * vec4(nrm, 0.0)).xyz;
+}
+)";
+
 // The fragment's three outputs are the pre-pass's whole contract:
 //   0  view-space position, w = 1 → valid geometry (the SSAO kernel's input)
 //   1  rg = oct world normal *0.5+0.5, b = roughness, a = unused — the GB1
@@ -1854,7 +1903,33 @@ std::string reflPrepassVS(bool ssbo)
          + (ssbo ? kReflPrepassVSBodySsbo : kReflPrepassVSBodyAttr)
          + kReflPrepassVSEnd;
 }
+std::string reflPrepassInstVS(bool ssbo)
+{
+    return std::string(ssbo ? kReflPrepassInstVSSsbo : kReflPrepassInstVSAttr)
+         + kReflPrepassInstVSTail
+         + (ssbo ? kReflPrepassInstVSBodySsbo : kReflPrepassInstVSBodyAttr)
+         + kReflPrepassInstVSEnd;
+}
 } // namespace
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassVertexInstanced(Backend backend)
+{
+    // Own key range: the plain vertex/fragment pair occupies backend*2 + 0/1.
+    const int key = 0x100 + static_cast<int>(backend);
+    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        // Same pins as the plain variant plus the instance array at vertex
+        // buffer 5 — the slot MetalRenderer binds for every instanced draw.
+        out = toCompiled(compileMslPinned(reflPrepassInstVS(/*ssbo=*/true), Stage::Vertex,
+            { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
+              { Stage::Vertex, 0, 1, 1 },      // UI camera pair → vertex buffer 1
+              { Stage::Vertex, 0, 2, 5 } }));  // Inst model array → vertex buffer 5
+    else
+        out = toCompiled(compile(reflPrepassInstVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
+    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
+}
 
 const std::string& MaterialShaderLibrary::reflPrepassFragmentGlsl()
 {

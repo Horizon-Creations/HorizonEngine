@@ -344,6 +344,33 @@ Geschwindigkeit.
    sind tiefen-/positions-only, brauchen also nur `model` — ein 64-Byte-Stride
    statt 128 würde reichen. Kleinerer Gewinn als der Schattenpass, aber
    dieselbe Mechanik.
+
+   **Stand 15.09.2026 — GL + Metal erledigt, D3D11/D3D12 offen.** Zwei
+   Datenquellen, zwei Mechaniken: GL zeichnet beide Vorpässe aus den fertigen
+   `GeometryPass`-DrawCalls und zieht deren `instanceTransforms` jetzt per
+   `glDrawElementsInstanced` durch den Scene-Scratch-VBO (Attribs 4–7), mit
+   `kSSAOPosInstancedVS` / `kGiGBufInstancedVS` als Zwillingen. Metal läuft
+   über den kamerasortierten `RenderObject`-Index und batcht ihn mit
+   `RenderSorter::batchDepthRuns` (Verallgemeinerung von `batchDepthCasters`
+   mit `DepthFilter::AoContributors` für SSAO, `::All` für GI — der Metal-
+   GI-Vorpass filterte nie nach `contributesAO`, GL schon; die Asymmetrie ist
+   absichtlich nicht angeglichen). Der 64-Byte-Stride ist hier NICHT gewählt:
+   `ssaoPosVertexInstanced` trägt `{mvp, modelView}`, `giGBufVertexInstanced`
+   `{mvp, model}` — dieselben CPU-Produkte wie die Schleife, dadurch ist der
+   instanzierte Frame bit-identisch zur Schleife (der Nachweis, den ein
+   64-Byte-`model`-Stride mit Shader-Produkten nicht liefert). Der
+   MRT-Reflection-Vorpass (Forward + SSR) bekommt seinen Vertex aus der
+   Library: `MaterialShaderLibrary::reflPrepassVertexInstanced` (GL: Attribs
+   4–7 + Block `UI {viewProj, view}`; Metal: SSBO Binding 2 → Buffer 5 +
+   `gl_InstanceIndex`), dort rechnet der Shader `viewProj * (model * p)`.
+   Nachweis (Zeugenszene `HE_DUMP_SHADOWINSTTEST=1`, `RENDERPATH=0`,
+   neuer Override `HE_DUMP_SSAO`, `HE_MTL_INSTANCING=0` gegen an): SSAO plain
+   md5-identisch (Dump-Draws 8 → 1), SSAO-MRT 136 von 921 600 Pixeln um
+   1/255 (Rundung der anderen Multiplikationsreihenfolge), GI max 3/255 im
+   selben Höhenlinien-Muster wie das Lauf-zu-Lauf-Rauschen der Probe-
+   Irradianz (Kontrolle: max 2/255), keine verschobene Schattenkante. GL ist
+   glslang-/ctest-validiert, nicht auf Hardware gelaufen. D3D11/D3D12 bleiben
+   Schleifen — deren Vorpässe hängen an denselben Replays wie ihr Schattenpass.
 3. **Graph-Materialien werden nirgends instanziert.** GL verliert sie dabei
    still (§2), der vorgeschlagene Metal-Pfad schließt sie sauber aus (§M4).
    Ein instanzierter Codegen-Pfad (`MaterialShaderLibrary` müsste eine

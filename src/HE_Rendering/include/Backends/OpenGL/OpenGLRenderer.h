@@ -853,6 +853,12 @@ private:
 	int          m_uDepthPosInvProj = -1;
 	int          m_uPosMVP        = -1;   // clip = viewProj * model
 	int          m_uPosModelView  = -1;   // view * model (view-space position out)
+	// Instanced twin for GeometryPass batches (kSSAOPosInstancedVS): model from
+	// attrib locs 4–7 / m_instanceVBO, view + view-proj as the uniforms. 0 when
+	// the link failed → every batch loops through m_ssaoPosProgram.
+	unsigned int m_ssaoPosInstancedProgram = 0;
+	int          m_uPosInstViewProj = -1;
+	int          m_uPosInstView     = -1;
 	unsigned int m_ssaoProgram    = 0;   // fullscreen occlusion estimate
 	int          m_uSsaoViewPos   = -1;
 	int          m_uSsaoNoise     = -1;
@@ -892,6 +898,11 @@ private:
 	unsigned int m_reflPrepassProgram = 0;
 	bool         m_reflPrepassTried   = false;
 	unsigned int m_reflPrepassUBO = 0;   // ReflPrepassUniforms (3 × mat4), per draw
+	// Instanced twin (library reflPrepassVertexInstanced): model from attribs
+	// 4–7, camera pair in its own block. 0 = every batch loops. Shares
+	// binding 5 with the per-draw block above; the pre-pass rebinds on switch.
+	unsigned int m_reflPrepassInstProgram = 0;
+	unsigned int m_reflPrepassInstUBO     = 0; // ReflPrepassInstUniforms (2 × mat4), per batch run
 	bool EnsureReflPrepassProgram();
 	void CreateSSAOPipeline();           // programs + kernel + noise texture
 	void EnsureSSAOTargets(int width, int height, bool withRefl);
@@ -986,6 +997,9 @@ private:
 
 	bool         m_giPipelinesBuilt   = false;
 	unsigned int m_giGBufProgram      = 0;
+	// Instanced twin (kGiGBufInstancedVS) for GeometryPass batches; optional.
+	unsigned int m_giGBufInstancedProgram = 0;
+	int          m_uGiGBufInstViewProj    = -1;
 	unsigned int m_giShadowCSProgram  = 0;
 	unsigned int m_giTemporalProgram  = 0;
 	unsigned int m_giBlurProgram      = 0;

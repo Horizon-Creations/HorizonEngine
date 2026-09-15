@@ -54,15 +54,17 @@ public:
     static void sortBackToFront(std::vector<const DrawCall*>& transparent,
                                 const glm::vec3&              camPos);
 
-    // ── Depth-only batching (shadow cascades / local shadow layers) ─────────
-    // The shadow passes on GL and Metal cull + sort per light view themselves
-    // and used to draw one depth-only call per caster. A depth pass has no
-    // material, section, tint or texture input — the only thing that decides
-    // whether two casters can share a draw is the mesh. So a run of consecutive
-    // same-mesh casters in the sorted list (the sorter already groups by mesh
-    // id) collapses into ONE instanced draw over a flat transform array.
+    // ── Depth-only batching (shadow layers, SSAO / GI pre-passes) ───────────
+    // The shadow passes on GL and Metal cull + sort per light view themselves,
+    // and Metal's SSAO position pre-pass and GI G-buffer pre-pass walk the
+    // camera-sorted list the same way; all of them used to draw one call per
+    // object. A depth-only pass has no material, section, tint or texture
+    // input — the only thing that decides whether two objects can share a
+    // draw is the mesh. So a run of consecutive same-mesh objects in the
+    // sorted list (the sorter already groups by mesh id) collapses into ONE
+    // instanced draw over a flat transform array.
     //
-    // One run of same-mesh casters: `count` transforms starting at
+    // One run of same-mesh objects: `count` transforms starting at
     // DepthBatchList::transforms[first]. count == 1 is the plain single draw
     // (the backends keep their non-instanced program for it).
     struct DepthBatch {
@@ -76,17 +78,39 @@ public:
         void clear() { batches.clear(); transforms.clear(); }
     };
 
-    // Walk `sortedIndices` (a light-view cull + sort of world.objects), drop
-    // what the depth pass never draws — non-casters (billboards, precipitation)
-    // and `skipEntity` (the local light's own mesh, kNoOwnerEntity skips
-    // nothing) — and form runs of consecutive equal meshAssetId. Filtering
-    // happens BEFORE run-forming, so a skipped object in the middle of a run
-    // does not split it. Only adjacency counts: A,B,A stays three runs; merging
-    // non-adjacent objects is the sorter's job, not this one's.
+    // Which per-object opt-out a depth-only pass honours. The flags live on
+    // RenderObject (castsShadow / contributesAO); precipitation and particle
+    // billboards clear both so thousands of them never reach a depth map or
+    // the AO pre-pass. `All` is the GI G-buffer pre-pass on Metal, which has
+    // always drawn every visible object (every shaded pixel needs a shadow
+    // value, occluder or not).
+    enum class DepthFilter : uint8_t {
+        ShadowCasters,  // obj.castsShadow
+        AoContributors, // obj.contributesAO
+        All,
+    };
+
+    // Walk `sortedIndices` (a cull + sort of world.objects), drop what the pass
+    // never draws — objects the filter rejects and `skipEntity` (the local
+    // light's own mesh; kNoOwnerEntity skips nothing) — and form runs of
+    // consecutive equal meshAssetId. Filtering happens BEFORE run-forming, so a
+    // skipped object in the middle of a run does not split it. Only adjacency
+    // counts: A,B,A stays three runs; merging non-adjacent objects is the
+    // sorter's job, not this one's.
+    static void batchDepthRuns(const RenderWorld&           world,
+                               const std::vector<uint32_t>& sortedIndices,
+                               DepthFilter                  filter,
+                               uint32_t                     skipEntity,
+                               DepthBatchList&              out);
+
+    // The shadow-pass spelling: batchDepthRuns with DepthFilter::ShadowCasters.
     static void batchDepthCasters(const RenderWorld&           world,
                                   const std::vector<uint32_t>& sortedIndices,
                                   uint32_t                     skipEntity,
-                                  DepthBatchList&              out);
+                                  DepthBatchList&              out)
+    {
+        batchDepthRuns(world, sortedIndices, DepthFilter::ShadowCasters, skipEntity, out);
+    }
 
 private:
     // Precomputed per-object sort key so the O(n log n) comparator never has to
