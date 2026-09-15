@@ -3320,18 +3320,25 @@ struct D3D11RendererImpl
     // device can't sample the shipped format (→ flat). Shared by every base-color
     // upload site (static/skeletal mesh, override material). Block formats need no
     // runtime mip generation; the cook baked every level.
+    //
+    // TextureAsset::srgb (the importer's colour-vs-data decision) selects the
+    // _SRGB twin of each DXGI format: the sampler then decodes to linear, so colour
+    // textures shade in linear light and only the tonemap's gamma encode re-curves
+    // them. The twins share block/byte layout, so pitch math and the support check
+    // are unchanged; the null SRV desc below inherits the resource format.
     ComPtr<ID3D11ShaderResourceView> createAlbedoSRV(const TextureAsset* tex)
     {
         ComPtr<ID3D11ShaderResourceView> srv;
         if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
             return srv;
 
+        const bool srgb = tex->srgb;
         DXGI_FORMAT fmt; bool isBlock; UINT blockBytes = 16;
         switch (tex->format)
         {
-        case TextureFormat::RGBA8: fmt = DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
-        case TextureFormat::BC7:   fmt = DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
-        case TextureFormat::BC3:   fmt = DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
+        case TextureFormat::RGBA8: fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
+        case TextureFormat::BC7:   fmt = srgb ? DXGI_FORMAT_BC7_UNORM_SRGB      : DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
+        case TextureFormat::BC3:   fmt = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB      : DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
         default: return srv; // ASTC / unknown → D3D can't sample it
         }
         // BC is core on FL11, but stay defensive: skip if the driver can't sample it.
