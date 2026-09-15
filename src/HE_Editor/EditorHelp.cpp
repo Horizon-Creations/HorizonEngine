@@ -1584,8 +1584,9 @@ namespace
 	  "must not reset.",
 	  "", "horizoncode#hosts" },
 	{ "Assets/Import Asset...", "",
-	  "Brings a file from outside into the project — meshes, textures, audio, "
-	  "fonts — converting it to the engine's own format on the way in.",
+	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
+	  "COLLADA), textures, audio, fonts — converting it to the engine's own format "
+	  "on the way in.",
 	  "", "editor#content-browser" },
 	{ "Assets/Refresh Assets", "",
 	  "Re-walks the content tree. What makes a file dropped in from the Finder "
@@ -1705,7 +1706,8 @@ namespace
 	  "", "editor#content-browser" },
 	{ "Content Browser/Import", "",
 	  "Brings this file into the project as an engine asset. The original is not "
-	  "moved; a .hasset beside it records where it came from.",
+	  "moved; a .hasset beside it records where it came from. Greyed out for an "
+	  "FBX/OBJ/COLLADA file when this build of the editor has no Assimp to read it.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Reimport", "",
 	  "Reads the source file again and rebuilds the asset from it — after the "
@@ -2217,8 +2219,9 @@ namespace
 
 	// ── Content Browser ──────────────────────────────────────────────────────
 	{ "content.import", "Import Asset",
-	  "Brings a file from outside into the project — meshes, textures, audio, "
-	  "fonts. It is converted to the engine's own format on the way in.",
+	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
+	  "COLLADA), textures, audio, fonts. It is converted to the engine's own format "
+	  "on the way in.",
 	  "", "editor#content-browser" },
 	{ "content.create", "Create Asset",
 	  "Makes a new asset in this folder: a material, a particle system, a widget, "

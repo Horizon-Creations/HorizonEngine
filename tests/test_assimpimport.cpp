@@ -1,24 +1,117 @@
 // FBX / OBJ / COLLADA import through Assimp (AssimpMeshImport, routed by
-// MeshImporter). Compiled out without Assimp: the whole feature is.
-#ifdef HE_HAVE_ASSIMP
-
+// MeshImporter). Compiled out without Assimp — the whole feature is — except
+// for the first case, which pins the Import Asset dialog to the routing in
+// EITHER build: with Assimp the dialog must offer the three formats, without
+// it it must not, and must say why.
 #include "doctest.h"
 #include "TestFsUtil.h"
-#include "AssimpMeshImport.h"
-#include "MeshImporter.h"
+#include "AudioImporter.h"
 #include "ImporterCommon.h"
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
-#include <MaterialGraph/MaterialGraph.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace fs = std::filesystem;
+
+namespace
+{
+// The ';'-separated entries of an SDL dialog pattern.
+std::vector<std::string> patternTokens(const char* pattern)
+{
+	std::vector<std::string> out;
+	std::string_view rest(pattern);
+	while (!rest.empty())
+	{
+		const size_t semi = rest.find(';');
+		out.emplace_back(rest.substr(0, semi));
+		if (semi == std::string_view::npos) break;
+		rest.remove_prefix(semi + 1);
+	}
+	return out;
+}
+} // namespace
+
+TEST_CASE("Import dialog: every offered extension imports, and the routing offers nothing more")
+{
+	using Importer::SourceFamily;
+	const int count = static_cast<int>(SourceFamily::Count);
+	std::vector<std::string> offered;
+	for (int i = 0; i < count; ++i)
+	{
+		const auto family = static_cast<SourceFamily>(i);
+		CAPTURE(i);
+		CHECK(std::strlen(Importer::sourceFamilyLabel(family)) > 0);
+		const std::vector<std::string> tokens = patternTokens(Importer::sourceFamilyPattern(family));
+		CHECK_FALSE(tokens.empty());
+		for (const std::string& ext : tokens)
+		{
+			CAPTURE(ext);
+			// No dot, no upper case, no empty token — the form SDL filters take.
+			CHECK(ext.find('.') == std::string::npos);
+			CHECK(std::none_of(ext.begin(), ext.end(), [](unsigned char c) { return std::isupper(c); }));
+			// Offered means importable — in this exact build.
+			CHECK(Importer::isImportableSource("Some/File." + ext));
+			CHECK(std::string(Importer::importBlockedReason("Some/File." + ext)).empty());
+			// The audio row is a copy of AudioImporter's own list; keep them equal.
+			if (family == SourceFamily::Audio)
+				CHECK(AudioImporter::isSupportedSource("Some/File." + ext));
+			offered.push_back(ext);
+		}
+	}
+	// "All Supported Assets" is the union, nothing more and nothing less.
+	std::vector<std::string> all = patternTokens(Importer::allSourcesPattern());
+	std::sort(all.begin(), all.end());
+	std::sort(offered.begin(), offered.end());
+	CHECK(all == offered);
+
+	// Every mesh extension the routing takes is offered under 3D Models — the
+	// drift this test exists for: the dialog said "gltf;glb" long after
+	// .fbx/.obj/.dae had become importable.
+	const std::vector<std::string> meshes = patternTokens(Importer::sourceFamilyPattern(SourceFamily::Mesh));
+	auto offers = [&](const char* ext) { return std::find(meshes.begin(), meshes.end(), ext) != meshes.end(); };
+	CHECK(offers("gltf"));
+	CHECK(offers("glb"));
+#ifdef HE_HAVE_ASSIMP
+	CHECK(offers("fbx"));
+	CHECK(offers("obj"));
+	CHECK(offers("dae"));
+#else
+	CHECK_FALSE(offers("fbx"));
+	CHECK_FALSE(offers("obj"));
+	CHECK_FALSE(offers("dae"));
+	// Not importable, but not silently so either: the Content Browser greys the
+	// Import item out with this sentence.
+	for (const char* ext : { ".fbx", ".OBJ", ".dae" })
+	{
+		CAPTURE(ext);
+		CHECK_FALSE(Importer::isImportableSource(fs::path("Some/Model") += ext));
+		CHECK_FALSE(std::string(Importer::importBlockedReason(fs::path("Some/Model") += ext)).empty());
+	}
+#endif
+	// A format the engine has never heard of is neither offered nor explained.
+	CHECK_FALSE(Importer::isImportableSource("Some/Model.blend"));
+	CHECK(std::string(Importer::importBlockedReason("Some/Model.blend")).empty());
+	// "tga" must not be found inside "gltf": the pattern lookup is per token.
+	CHECK_FALSE(Importer::isImportableSource("Some/File.lt"));
+	CHECK_FALSE(Importer::isImportableSource("Some/File.gl"));
+}
+
+#ifdef HE_HAVE_ASSIMP
+
+#include "AssimpMeshImport.h"
+#include "MeshImporter.h"
+#include <ContentManager/AssetRefRetarget.h>   // the rename half the editor does after fs::rename
+#include <ContentManager/AssetRefScan.h>       // assetUuidOfFile — identity across a reimport
+#include <MaterialGraph/MaterialGraph.h>
 
 namespace
 {
@@ -739,6 +832,172 @@ TEST_CASE("buildMeshSections (index core): groups ranges by material, primary ab
 	std::vector<uint32_t> small = { 0,1,2 };
 	std::vector<Importer::BakedRange> bogus = { { 0, 6, 0 } };
 	CHECK(Importer::buildMeshSections(bogus, 0, paths, small).empty());
+}
+
+// ─── The editor's entry points ───────────────────────────────────────────────
+// The Content Browser's Import and the Import Asset dialog both go through
+// Importer::importSource; Reimport goes through Importer::reimport. Everything
+// above drives MeshImporter directly — these drive the two doors the editor
+// actually opens.
+
+TEST_CASE("importSource routes an OBJ to a StaticMesh asset; empty and face-less sources fail without one")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_assimp_importsource";
+	he_test::removeAllQuiet(dir);
+	const fs::path contentRoot = dir / "Content";
+	REQUIRE(writeText(dir / "two.obj", kTwoMaterialObj));
+	REQUIRE(writeText(dir / "two.mtl", kTwoMaterialMtl));
+
+	REQUIRE(Importer::importSource(dir / "two.obj", contentRoot, "Imported"));
+	REQUIRE(fs::exists(contentRoot / "Imported/two.hasset"));
+	{
+		ContentManager cm(contentRoot.string());
+		const StaticMeshAsset* m = cm.getStaticMesh(cm.loadAsset("Imported/two.hasset"));
+		REQUIRE(m != nullptr);
+		CHECK(m->name == "two");
+		CHECK(m->sections.size() == 2);
+		CHECK(m->materialPath == "Imported/MatA.hasset");
+		// The provenance Reimport needs was recorded, absolute.
+		const std::string recorded = Importer::sourceFileOf(contentRoot / "Imported/two.hasset");
+		CHECK_FALSE(recorded.empty());
+		CHECK(fs::path(recorded).is_absolute());
+		CHECK(fs::path(recorded).filename() == "two.obj");
+	}
+
+	// The failure shapes an artist actually produces: an export that wrote
+	// nothing, a point cloud, a curve. Each fails as an import (false, logged)
+	// and leaves no half-written .hasset behind — the Content Browser would list
+	// one, and the mesh would load as nothing.
+	REQUIRE(writeText(dir / "empty.obj", ""));
+	REQUIRE(writeText(dir / "empty.fbx", ""));
+	REQUIRE(writeText(dir / "empty.dae", ""));
+	REQUIRE(writeText(dir / "points.obj", "v 0 0 0\nv 1 0 0\nv 0 1 0\n"));
+	REQUIRE(writeText(dir / "lines.obj",  "v 0 0 0\nv 1 0 0\nv 0 1 0\nl 1 2\nl 2 3\n"));
+	REQUIRE(writeText(dir / "notxml.dae", "<COLLADA><asset></COLLADA>\n"));
+	for (const char* name : { "empty.obj", "empty.fbx", "empty.dae", "points.obj", "lines.obj", "notxml.dae" })
+	{
+		CAPTURE(name);
+		CHECK_FALSE(Importer::importSource(dir / name, contentRoot, "Imported"));
+		CHECK_FALSE(fs::exists(contentRoot / "Imported" / (fs::path(name).stem().string() + ".hasset")));
+	}
+
+	// A material library that is not there is a warning, not a failure: the
+	// geometry still comes in, under a material of the declared name, so the
+	// artist can fix the .mtl later instead of getting nothing.
+	REQUIRE(writeText(dir / "nolib.obj",
+		"mtllib nowhere.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl Missing\nf 1 2 3\n"));
+	REQUIRE(Importer::importSource(dir / "nolib.obj", contentRoot, "Imported"));
+	{
+		ContentManager cm(contentRoot.string());
+		const StaticMeshAsset* m = cm.getStaticMesh(cm.loadAsset("Imported/nolib.hasset"));
+		REQUIRE(m != nullptr);
+		CHECK(m->indices.size() == 3);
+		CHECK_FALSE(m->materialPath.empty());
+		CHECK(fs::exists(contentRoot / m->materialPath));
+	}
+	he_test::removeAllQuiet(dir);
+}
+
+namespace
+{
+std::vector<std::string> fileNamesIn(const fs::path& dir)
+{
+	std::vector<std::string> names;
+	for (const auto& e : fs::directory_iterator(dir))
+		names.push_back(e.path().filename().string());
+	std::sort(names.begin(), names.end());
+	return names;
+}
+
+// fs::rename plus the reference retarget the editor runs after it — a rename
+// in the Content Browser is both, and a re-import has to survive both.
+void renameAssetLikeTheEditor(const fs::path& contentRoot,
+                              const std::string& oldRel, const std::string& newRel)
+{
+	std::error_code ec;
+	fs::rename(contentRoot / oldRel, contentRoot / newRel, ec);
+	REQUIRE_FALSE(ec);
+	HE::AssetRefs::retargetTree(
+		contentRoot.string(),
+		HE::AssetRefs::moveRules(oldRel, newRel, /*folder=*/false, "Content"));
+}
+} // namespace
+
+TEST_CASE("Reimport of a renamed OBJ asset keeps its uuid and redirects the material and texture sidecars")
+{
+	// The glTF twin lives in test_contentmanager; this one walks the Assimp path
+	// through the same OutputTargets plumbing, which steps 3/4 never exercised end
+	// to end: importViaAssimp → importAssimpMaterials → the shared PBR core.
+	const fs::path dir = fs::temp_directory_path() / "he_test_assimp_reimport";
+	he_test::removeAllQuiet(dir);
+	const fs::path contentRoot = dir / "Content";
+	const fs::path src = dir / "src";
+	REQUIRE(writePng(src / "crate_base.png"));
+	REQUIRE(writeText(src / "crate.mtl", "newmtl M_Crate\nmap_Kd crate_base.png\n"));
+	auto writeObj = [&](float v1x)
+	{
+		return writeText(src / "crate.obj",
+			"mtllib crate.mtl\n"
+			"v 0 0 0\nv " + std::to_string(v1x) + " 0 0\nv 0 1 0\n"
+			"vt 0 0\nvt 1 0\nvt 0 1\n"
+			"usemtl M_Crate\n"
+			"f 1/1 2/2 3/3\n");
+	};
+	REQUIRE(writeObj(1.0f));
+
+	REQUIRE(Importer::importSource(src / "crate.obj", contentRoot, "Meshes"));
+	const fs::path meshFile = contentRoot / "Meshes" / "crate.hasset";
+	REQUIRE(fs::exists(meshFile));
+	const auto sidecars = Importer::meshSidecarAssets(meshFile, contentRoot);
+	REQUIRE(sidecars.size() == 2);
+	CHECK(sidecars[0] == "Meshes/M_Crate.hasset");
+	CHECK(sidecars[1] == "Meshes/crate_base.hasset");
+
+	const HE::UUID meshId = HE::AssetRefs::assetUuidOfFile(meshFile.string());
+	const HE::UUID matId  = HE::AssetRefs::assetUuidOfFile((contentRoot / sidecars[0]).string());
+	const HE::UUID texId  = HE::AssetRefs::assetUuidOfFile((contentRoot / sidecars[1]).string());
+	REQUIRE(meshId != HE::UUID{});
+	REQUIRE(matId  != HE::UUID{});
+	REQUIRE(texId  != HE::UUID{});
+
+	renameAssetLikeTheEditor(contentRoot, "Meshes/crate.hasset",      "Meshes/Rock.hasset");
+	renameAssetLikeTheEditor(contentRoot, "Meshes/M_Crate.hasset",    "Meshes/RockMat.hasset");
+	renameAssetLikeTheEditor(contentRoot, "Meshes/crate_base.hasset", "Meshes/RockTex.hasset");
+	const fs::path renamedMesh = contentRoot / "Meshes" / "Rock.hasset";
+	const std::vector<std::string> before = fileNamesIn(contentRoot / "Meshes");
+
+	// The artist moves a vertex and hits Reimport.
+	REQUIRE(writeObj(2.0f));
+	REQUIRE(Importer::reimport(renamedMesh, contentRoot));
+
+	// All three kept their identity; no crate/M_Crate/crate_base reappeared.
+	CHECK(HE::AssetRefs::assetUuidOfFile(renamedMesh.string()) == meshId);
+	CHECK(HE::AssetRefs::assetUuidOfFile((contentRoot / "Meshes" / "RockMat.hasset").string()) == matId);
+	CHECK(HE::AssetRefs::assetUuidOfFile((contentRoot / "Meshes" / "RockTex.hasset").string()) == texId);
+	CHECK(fileNamesIn(contentRoot / "Meshes") == before);
+
+	const auto after = Importer::meshSidecarAssets(renamedMesh, contentRoot);
+	REQUIRE(after.size() == 2);
+	CHECK(after[0] == "Meshes/RockMat.hasset");
+	CHECK(after[1] == "Meshes/RockTex.hasset");
+
+	ContentManager cm(contentRoot.string());
+	const StaticMeshAsset* m = cm.getStaticMesh(cm.loadAsset("Meshes/Rock.hasset"));
+	REQUIRE(m != nullptr);
+	CHECK(m->name == "Rock");
+	CHECK(m->materialPath == "Meshes/RockMat.hasset");
+	REQUIRE(m->sections.size() == 1);
+	CHECK(m->sections[0].materialPath == "Meshes/RockMat.hasset");
+	// …and it is the NEW geometry.
+	float lo[3], hi[3];
+	boundsOf(*m, lo, hi);
+	CHECK(hi[0] == doctest::Approx(2.0f));
+
+	// The Reimport of a source that has since gone is a clean refusal.
+	fs::remove(src / "crate.obj");
+	CHECK_FALSE(Importer::reimport(renamedMesh, contentRoot));
+	CHECK(HE::AssetRefs::assetUuidOfFile(renamedMesh.string()) == meshId);
+	he_test::removeAllQuiet(dir);
 }
 
 #endif // HE_HAVE_ASSIMP

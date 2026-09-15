@@ -271,6 +271,32 @@ namespace Importer
 	// next to the routing below cannot drift from it at all.
 	bool isImportableSource(const std::filesystem::path& sourcePath);
 
+	// The extension families the routing knows, in the order an OS file dialog
+	// lists them. Count is the array bound, not a family.
+	enum class SourceFamily { Mesh, Texture, Audio, Material, Font, Count };
+
+	// A family's dialog label ("3D Models") and its extensions as the "a;b;c"
+	// pattern an SDL_DialogFileFilter takes. These ARE the lists isImportableSource
+	// routes by — the Import Asset dialog used to carry its own copy, which is how
+	// it kept offering glTF only after FBX/OBJ/COLLADA had become importable. The
+	// mesh pattern names the Assimp formats only in a build that has Assimp: a
+	// dialog must not offer what the importer would then reject.
+	// String literals with static lifetime: SDL's file dialog is asynchronous and
+	// reads the filter pointers when its callback fires, long after the caller
+	// has returned.
+	const char* sourceFamilyLabel(SourceFamily family);
+	const char* sourceFamilyPattern(SourceFamily family);
+	// Every family's pattern joined ("gltf;glb;…;otf") — the dialog's "All
+	// Supported Assets" entry. Static lifetime as above.
+	const char* allSourcesPattern();
+
+	// Why `sourcePath` is NOT importable although its extension is a mesh format
+	// the engine knows: "" when it imports (or is no source at all), otherwise a
+	// sentence for the tooltip of a disabled Import item. Today one case: FBX /
+	// OBJ / COLLADA in a build made without Assimp, where a missing menu item
+	// would leave the user guessing whether the format or the file is the problem.
+	const char* importBlockedReason(const std::filesystem::path& sourcePath);
+
 	// Imports one source file into <contentRoot>/<relativeOutputDir>, picking the
 	// importer from the extension — including the skinned-glTF split, which is
 	// not a detail a caller may re-derive: a rigged mesh sent to MeshImporter

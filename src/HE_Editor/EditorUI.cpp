@@ -1127,14 +1127,19 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// Cancelling never fires the callback, so last run's selection would still
 		// be sitting here when the NEXT dialog returns.
 		s_pendingImportPaths.clear();
-		SDL_DialogFileFilter filters[] = {
-			{ "All Supported Assets", "gltf;glb;png;jpg;jpeg;tga;bmp;hdr;wav;ogg;hmat;ttf;otf" },
-			{ "3D Models",            "gltf;glb" },
-			{ "Textures",             "png;jpg;jpeg;tga;bmp;hdr" },
-			{ "Audio",                "wav;ogg" },
-			{ "Materials",            "hmat" },
-			{ "Fonts",                "ttf;otf" },
-		};
+		// The filters come from the importer's own extension tables, not from a
+		// list kept here: this one used to say "gltf;glb" for models, so the dialog
+		// went on hiding .fbx/.obj/.dae after they had become importable (and a
+		// build without Assimp would have offered them and then failed). Static,
+		// because the dialog is asynchronous and reads the entries when its
+		// callback fires — the strings behind them are static too (ImporterCommon).
+		using Importer::SourceFamily;
+		constexpr int kFamilyCount = static_cast<int>(SourceFamily::Count);
+		static SDL_DialogFileFilter filters[1 + kFamilyCount];
+		filters[0] = { "All Supported Assets", Importer::allSourcesPattern() };
+		for (int i = 0; i < kFamilyCount; ++i)
+			filters[1 + i] = { Importer::sourceFamilyLabel(static_cast<SourceFamily>(i)),
+			                   Importer::sourceFamilyPattern(static_cast<SourceFamily>(i)) };
 		// Open where the browser is standing, so the dialog's own "recent folder"
 		// is not the only thing that decides what the user is looking at.
 		const std::filesystem::path root(ctx.contentManager->contentRoot());
@@ -1142,7 +1147,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		                                     : (root / importTargetDir()).string();
 		SDL_ShowOpenFileDialog(importDialogCb, ctx.dialogBridge,
 			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
-			filters, 6,
+			filters, 1 + kFamilyCount,
 			dir.empty() ? nullptr : dir.c_str(),
 			/*allow_many=*/true);
 	};
