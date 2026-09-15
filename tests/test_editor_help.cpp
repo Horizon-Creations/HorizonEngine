@@ -204,6 +204,13 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Play Report",     "Show warnings" },
 		{ "Project Hub",     "Remove from list" },
 		{ "Viewport Options", "Snap to grid" },
+		// The view picker's rows come out of a table (label + keypad shortcut),
+		// so the static audit never sees a literal; the checkbox under them is
+		// the only one it counts.
+		{ "Viewport View",    "Perspective" },
+		{ "Viewport View",    "Top" },
+		{ "Viewport View",    "Left" },
+		{ "Viewport View",    "Orthographic" },
 		{ "Tutorial",        "Start over" },
 		{ "Collaboration",   "Ask to edit" },
 		{ "Source Root",     "C++ Class" },
