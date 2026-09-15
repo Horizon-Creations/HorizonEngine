@@ -151,15 +151,10 @@ uint32_t OcclusionCuller::refine(const RenderWorld& world, const ContentManager*
 		const RenderObject& obj = world.objects[i];
 		if (!obj.worldBounds.isValid() || !obj.contributesAO) continue;
 		if (obj.instanceTint.a < RenderSorter::kOpaqueOpacityThreshold) continue;
-		const StaticMeshAsset* mesh = cm->getStaticMesh(obj.meshAssetId);
-		if (!mesh || mesh->indices.empty()) continue;
-		size_t stride = 0, vcount = 0;
-		if (!positions(*mesh, stride, vcount)) continue;
-		opaqueRanges(obj, *mesh, *cm, ranges);
-		uint32_t tris = 0;
-		for (const Range& r : ranges) tris += r.count / 3;
-		if (tris == 0 || tris > static_cast<uint32_t>(maxTris)) continue;
 
+		// Screen-area gate FIRST — pure math on the bounds — so the thousands
+		// of small things a scene has (foliage, props, far chunks) never reach
+		// the ContentManager lookups below.
 		glm::vec4 corners[8];
 		boxCorners(obj.worldBounds, viewProj, corners);
 		ScreenRect rect; float invWmax;
@@ -173,6 +168,15 @@ uint32_t OcclusionCuller::refine(const RenderWorld& world, const ContentManager*
 		else
 			area = 1.0f; // straddles the near plane: right in front of the camera, as big as it gets
 		if (area < m_settings.minOccluderScreenArea) continue;
+
+		const StaticMeshAsset* mesh = cm->getStaticMesh(obj.meshAssetId);
+		if (!mesh || mesh->indices.empty()) continue;
+		size_t stride = 0, vcount = 0;
+		if (!positions(*mesh, stride, vcount)) continue;
+		opaqueRanges(obj, *mesh, *cm, ranges);
+		uint32_t tris = 0;
+		for (const Range& r : ranges) tris += r.count / 3;
+		if (tris == 0 || tris > static_cast<uint32_t>(maxTris)) continue;
 		candidates.push_back({ static_cast<uint32_t>(i), area, tris });
 	}
 	if (candidates.empty()) return 0;
