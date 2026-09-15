@@ -387,14 +387,17 @@ static std::string bundleIdentifier(const std::string& projectName)
 
 static bool writeInfoPlist(const std::filesystem::path& contentsDir,
                            const std::string& projectName,
+                           const std::string& displayName,
                            const std::string& bundleId,
                            const std::string& version,
                            bool hasIcon,
                            const std::vector<HE::AppDocumentType>& docTypes)
 {
-    // XML-escape the display name (project names can contain & < > " ').
+    // XML-escape the display name (titles can contain & < > " '). The title
+    // is what the Dock and Finder show; the identifier below still derives
+    // from the PROJECT name, so retitling a game does not change its identity.
     std::string name;
-    for (char c : projectName)
+    for (char c : displayName.empty() ? projectName : displayName)
         switch (c)
         {
         case '&': name += "&amp;"; break;
@@ -1167,6 +1170,42 @@ static std::optional<ExportResult> writeGameConfig(const ExportSettings& setting
     return std::nullopt;
 }
 
+// Phase 7c: Config/ProjectSettings.json — the project's own word on shadows,
+// physics rate and title, copied VERBATIM next to project.hcfg (ProjectSettings.h
+// explains why it ships as the file and not as hcfg fields). Same directory and
+// same "before the bundle is sealed" rule as config.json above.
+//
+// A project WITHOUT the file ships without it, and that is an answer, not an
+// omission: the game reads "no file" as the defaults. So a copy left in this
+// output by an earlier export is removed — otherwise a project that went back
+// to the defaults (the saver deletes nothing, but a versioned project can be
+// checked out at a revision without the file) would ship the old numbers.
+static std::optional<ExportResult> copyProjectSettingsFile(const ExportSettings& settings,
+                                                           const ExportContext&  ctx)
+{
+    if (settings.projectSettingsFile.empty()) return std::nullopt;
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dstDir = ctx.dataDir / "Config";
+    const fs::path dst    = dstDir / "ProjectSettings.json";
+
+    if (!fs::is_regular_file(settings.projectSettingsFile, ec))
+    {
+        fs::remove(dst, ec);
+        return std::nullopt;
+    }
+    fs::create_directories(dstDir, ec);
+    if (ec)
+        return ExportResult{false, "Failed to create " + dstDir.string(), ctx.assetsPacked};
+    fs::copy_file(settings.projectSettingsFile, dst, fs::copy_options::overwrite_existing, ec);
+    if (ec)
+        return ExportResult{false, "Failed to copy " + settings.projectSettingsFile.string()
+                                       + " to " + dst.string() + ": " + ec.message(),
+                            ctx.assetsPacked};
+    return std::nullopt;
+}
+
 // Phase 7b: the application's icon, generated rather than demanded. One name
 // from the built-in icon face on a coloured plate becomes the three files three
 // systems each insist on — nobody draws the same picture three times, and a
@@ -1246,6 +1285,9 @@ static void writeDocumentTypeFiles(const std::string& projectName,
 
     const std::string ident = settings.bundleId.empty()
                                   ? bundleIdentifier(projectName) : settings.bundleId;
+    // The name a launcher shows — the title if the project set one. Only ever
+    // a label in these files; the identifier above is what keys them.
+    const std::string& shown = settings.displayName.empty() ? projectName : settings.displayName;
     ExportPlatform target = settings.iconPlatform;
     if (target == ExportPlatform::Host)
     {
@@ -1266,13 +1308,13 @@ static void writeDocumentTypeFiles(const std::string& projectName,
     if (target == ExportPlatform::Windows)
     {
         write(ctx.binDir / "RegisterFileTypes.reg",
-              HE::heWindowsRegistration(projectName, "HorizonGame.exe", ident,
+              HE::heWindowsRegistration(shown, "HorizonGame.exe", ident,
                                         settings.documentTypes));
     }
     else if (target == ExportPlatform::Linux)
     {
         write(ctx.binDir / (ident + ".desktop"),
-              HE::heDesktopEntry(projectName, "HorizonGame", ident, settings.documentTypes));
+              HE::heDesktopEntry(shown, "HorizonGame", ident, settings.documentTypes));
         write(ctx.binDir / (ident + ".xml"),
               HE::heSharedMimeInfo(ident, settings.documentTypes));
     }
@@ -1289,7 +1331,7 @@ static std::optional<ExportResult> finalizeAppBundle(const std::string&    proje
 {
     if (ctx.app)
     {
-        if (!writeInfoPlist(ctx.appPath / "Contents", projectName,
+        if (!writeInfoPlist(ctx.appPath / "Contents", projectName, settings.displayName,
                             settings.bundleId, settings.appVersion, hasIcon,
                             settings.documentTypes))
             return ExportResult{false, "Failed to write Info.plist", ctx.assetsPacked};
@@ -1334,6 +1376,7 @@ ExportResult ProjectExporter::exportProject(
     if (auto fail = writeProjectConfig(projectName, settings, startupSceneBinary, ctx))
         return *fail;
     if (auto fail = writeGameConfig(settings, ctx))                             return *fail;
+    if (auto fail = copyProjectSettingsFile(settings, ctx))                     return *fail;
     stage("icon");
     const bool hasIcon = writeAppIcons(settings, ctx);
     writeDocumentTypeFiles(projectName, settings, ctx);

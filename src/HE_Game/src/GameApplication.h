@@ -131,9 +131,11 @@ private:
     // The project's settings file, read from <exeDir>/Config/ProjectSettings.json
     // — the exporter copies it there VERBATIM (ProjectSettings.h explains why
     // it is not folded into project.hcfg). Missing = default-constructed =
-    // the behaviour every build had before the file existed. Read once at
-    // start next to project.hcfg; the renderer is pushed its `shadows` every
-    // frame like the other settings.
+    // the behaviour every build had before the file existed. Read ONCE, in the
+    // constructor next to the hcfg peek (applyShippedConfig): the window title
+    // comes out of it, and GetConfig() is asked for that before OnInit runs.
+    // The renderer is pushed its `shadows` every frame like the other settings;
+    // `physics` is applied when the simulation is built (startPhysics).
     HE::ProjectSettings           m_projectSettings;
     // App-wide HorizonCode host: owns the runtime the world runs on and the
     // GameInstance (OnInit fires before the scene loads; OnShutdown at exit).

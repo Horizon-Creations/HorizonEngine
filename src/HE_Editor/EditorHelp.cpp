@@ -2521,8 +2521,11 @@ namespace
 	  "What the game calls itself to a player: the window title, the name a "
 	  "launcher shows. Leave it empty and the project name is used, which is "
 	  "what every build has done so far.\n\n"
-	  "Saved to Config/ProjectSettings.json. Not yet read by the window or the "
-	  "export — that is a later step of this panel.",
+	  "Saved to Config/ProjectSettings.json, which the export ships next to the "
+	  "game data: the packaged game titles its window with it, and the export "
+	  "writes it as the display name of the .app, the .desktop entry and the "
+	  "Windows registration. The folder, the .hpak and the save directory keep "
+	  "the project name, so retitling a game strands nobody's saves.",
 	  "", "editor#preferences" },
 	{ "Project General/Scene", "Startup scene",
 	  "The scene the game opens with — and the one the editor opens when the "
@@ -2541,8 +2544,10 @@ namespace
 	  "what a project that never opened this page keeps doing. Off, the window "
 	  "and backend below are the project's answer, on every machine it is "
 	  "exported from.\n\n"
-	  "Saved to Config/ProjectSettings.json. The export does not read it yet — "
-	  "that is a later step of this panel.",
+	  "Saved to Config/ProjectSettings.json. With this off, the Export dialog "
+	  "shows the project's window and backend instead of its own rows and writes "
+	  "them into the build's config.json. Bloom, ambient occlusion and the other "
+	  "graphics settings still come from this editor's Preferences either way.",
 	  "", "export#overview" },
 	{ "Render Defaults/Width", "Width",
 	  "The window's width in pixels when the game starts windowed. Ignored in "
@@ -2609,8 +2614,9 @@ namespace
 	  "the frame rate. Higher is more accurate and more expensive; 60 is what "
 	  "every project has run at. A rate rather than a step length because 60 is "
 	  "exact and 0.01667 is not.\n\n"
-	  "Saved to Config/ProjectSettings.json. The simulation does not read it "
-	  "yet — that is the next step of this panel.",
+	  "Saved to Config/ProjectSettings.json and read on every step, in the "
+	  "editor's Play and in the exported build alike — the two cannot simulate "
+	  "at different rates.",
 	  "", "systems#physics" },
 	{ "Physics/Gravity", "Gravity",
 	  "The acceleration every rigid body is under, in metres per second squared "

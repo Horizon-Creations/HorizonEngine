@@ -129,6 +129,25 @@ struct HE_API ExportSettings {
     // config.json is settings a player may edit, this is what the project IS.
     std::string theme;
     std::string themeMode;
+    // What the game calls itself to a PLAYER (Project Settings ▸ Game ▸ Title):
+    // the bundle's display name in Info.plist, the Name= of the .desktop entry,
+    // the label in the Windows registration. Empty = projectName, which is what
+    // every export wrote before this existed. Deliberately NOT a replacement
+    // for projectName: the .app folder, the .hpak, the derived bundle
+    // identifier and the game's save directory all key off the project name
+    // and must not move because somebody retitled their game.
+    std::string displayName;
+    // The project's Config/ProjectSettings.json (HE::projectSettingsPath). When
+    // non-empty and the file exists it is copied VERBATIM to
+    // <data>/Config/ProjectSettings.json, next to project.hcfg, where the game
+    // reads its shadows, physics rate and title from (ProjectSettings.h says why
+    // it ships as the file itself and not as more hcfg fields). A project that
+    // never touched its settings has no file, and then none ships — and a
+    // stale copy left by an earlier export of this output is REMOVED, because
+    // "no file" is the project's answer ("default") and a leftover would
+    // quietly overrule it. Empty = nothing copied and nothing removed (a tool
+    // packing a bare directory).
+    std::filesystem::path projectSettingsFile;
     // Glob patterns (relative to contentDir, forward slashes) for assets to skip
     // when packing — e.g. "Debug/*", "*_test.hasset". Engine defaults are matched
     // with their "Engine/" prefix. See Hpak::PackSettings.

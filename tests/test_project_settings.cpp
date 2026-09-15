@@ -64,6 +64,21 @@ TEST_CASE("ProjectSettings: default construction is today's behaviour, and says 
 	CHECK_FALSE(s.isDefault());
 }
 
+// The step both applications hand to advanceFixedSteps: the default IS the old
+// constant, a tuned rate is its reciprocal, and a hand-edited nonsense value is
+// clamped rather than becoming a zero or infinite step.
+TEST_CASE("ProjectPhysicsSettings::fixedDt is the rate's reciprocal, clamped")
+{
+	HE::ProjectPhysicsSettings ph;
+	CHECK(ph.fixedDt() == doctest::Approx(1.0f / 60.0f));
+	ph.fixedHz = 120;
+	CHECK(ph.fixedDt() == doctest::Approx(1.0f / 120.0f));
+	ph.fixedHz = 0;
+	CHECK(ph.fixedDt() == doctest::Approx(1.0f / HE::ProjectPhysicsSettings::kMinHz));
+	ph.fixedHz = 100000;
+	CHECK(ph.fixedDt() == doctest::Approx(1.0f / HE::ProjectPhysicsSettings::kMaxHz));
+}
+
 // ─── JSON ────────────────────────────────────────────────────────────────────
 
 TEST_CASE("ProjectSettings: toJson/fromJson round-trips every field")

@@ -601,10 +601,12 @@ public:
     std::vector<CollisionEvent> pollOverlapEnter();
     std::vector<CollisionEvent> pollOverlapExit();
 
-    // The fixed step both apps drive the simulation at. It lives here rather
-    // than once per application because a game that simulates at a different
-    // rate than the editor previewed it is not the same game — and two copies
-    // of a number like this drift the moment one of them is tuned.
+    // The DEFAULT fixed step. Both apps actually drive the simulation at the
+    // project's rate (ProjectPhysicsSettings::fixedDt, Config/ProjectSettings
+    // .json, default 60 Hz = this), read from the same file by the editor's
+    // preview and the packaged game — a game that simulates at a different rate
+    // than the editor previewed it is not the same game. Kept as the number a
+    // test or a tool without a project steps at.
     static constexpr float kFixedDt = 1.0f / 60.0f;
 
     // How many broken joints wait for a pollJointBroken() that may never come.

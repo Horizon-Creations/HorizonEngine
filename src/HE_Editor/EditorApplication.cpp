@@ -3029,7 +3029,8 @@ void EditorApplication::OnRender(float dt)
 			// Same bounded accumulator as the shipped game, from the same helper:
 			// this loop used to have no cap at all, so a stall that the game
 			// shrugged off turned a preview into catch-up steps forever.
-			HE::advanceFixedSteps(m_physicsAccum, gameDt, kPhysicsFixedDt,
+			HE::advanceFixedSteps(m_physicsAccum, gameDt,
+			                      m_projectManager.currentProject().settings.physics.fixedDt(),
 			                      HE::api::time::timeScale(),
 			                      [&](float step){ m_physicsWorld->step(*m_editorWorld, step); });
 		}
@@ -7628,6 +7629,13 @@ AppContext EditorApplication::makeContext()
 			if (m_physicsWorld)
 				m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
 		},
+		.applyPhysicsSettings = [this]{
+			// Gravity only: the fixed rate is read from the project on every
+			// step already. Outside play mode there is no world, and the next
+			// play start reads both from the project itself.
+			if (m_physicsWorld)
+				m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
+		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selection           = m_selection,
@@ -8144,6 +8152,11 @@ void EditorApplication::setPlayMode(bool play)
 		// its channel, and a matrix handed over afterwards would leave the
 		// opening scene simulating on the default one until something rebuilt.
 		m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
+		// The project's gravity (Config/ProjectSettings.json), before initialize()
+		// as well: setGravity wakes every body, and there is none to wake yet.
+		// Same order as GameApplication::startPhysics, because a preview that
+		// falls differently from the build is not a preview.
+		m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is

@@ -20,6 +20,7 @@
 #include <HorizonCode/HorizonCode.h>
 #include <Types/Enums.h>
 #include <Application/GameBackendRules.h>  // shared with the game runtime that reads config.json
+#include <Project/ProjectSettings.h>       // the project's Render Defaults, title, settings file path
 #include <HorizonRendering/ParticleShaderTemplates.h>
 
 #ifdef _WIN32
@@ -95,13 +96,35 @@ static std::vector<const char*> exportBackendChoices(const std::string& platform
 // that static is the GAME's choice, remembered across projects in the editor's
 // own settings under the key "GameBackend" and reloaded whenever the dialog
 // opens. The rule itself, and why writing to it was the bug, is in the header.
+// The project's Render Defaults page (Config/ProjectSettings.json) when it has
+// switched "Use the editor's settings" OFF — then the window and backend rows
+// are the PROJECT's answer, on every machine, and the dialog's remembered rows
+// are not consulted. nullptr while the project defers to the editor (the
+// default, and every project made before the page existed).
+//
+// The project's values are READ here, never copied into the s_export* statics:
+// those are the editor's memory across projects, and a project that wrote its
+// own numbers into them would have every later export of some other project
+// start from those (see dialog-static-leaks in the Software-backend story).
+static const HE::ProjectRenderDefaults* projectRenderDefaults(const AppContext& ctx)
+{
+    if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty()) return nullptr;
+    const HE::ProjectRenderDefaults& r = ctx.projectManager->currentProject().settings.renderDefaults;
+    return r.useEditorSettings ? nullptr : &r;
+}
+
 static std::string effectiveExportBackend(const AppContext& ctx)
 {
     const bool appProject = ctx.projectManager
                          && ctx.projectManager->currentProject().appProject;
     const bool advanced   = ctx.projectManager
                          && ctx.projectManager->currentProject().advancedShaderEffects;
-    return HE::BackendRules::forExport(appProject, advanced, s_exportBackend);
+    // The project's backend goes through the same app rule as the dialog's: an
+    // application still takes the platform default or the software renderer,
+    // whatever the page says.
+    const HE::ProjectRenderDefaults* project = projectRenderDefaults(ctx);
+    return HE::BackendRules::forExport(appProject, advanced,
+                                       project ? project->backend : s_exportBackend);
 }
 
 // The settings the shipped game boots with, written in config.json's own shape
@@ -151,10 +174,23 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("GIReflBounces",             cfg.GIReflBounces);
     put("GIReflBlur",                cfg.GIReflBlur);
 
-    put("GameWindowWidth",  s_exportWindowWidth);
-    put("GameWindowHeight", s_exportWindowHeight);
-    put("GameWindowMode",   s_exportWindowMode);
-    put("GameVSync",        s_exportGameVSync);
+    // The window half: the project's Render Defaults when it claims them, else
+    // this dialog's rows. The graphics half above is the editor's either way —
+    // the page has no say on bloom or AA, and says so.
+    if (const HE::ProjectRenderDefaults* project = projectRenderDefaults(ctx))
+    {
+        put("GameWindowWidth",  project->windowWidth);
+        put("GameWindowHeight", project->windowHeight);
+        put("GameWindowMode",   project->windowMode);
+        put("GameVSync",        project->vsync);
+    }
+    else
+    {
+        put("GameWindowWidth",  s_exportWindowWidth);
+        put("GameWindowHeight", s_exportWindowHeight);
+        put("GameWindowMode",   s_exportWindowMode);
+        put("GameVSync",        s_exportGameVSync);
+    }
     // Left out entirely when no backend was picked: an absent key is what tells
     // the game to keep its own platform default, and that is a different answer
     // from naming a backend the target might not have.
@@ -749,8 +785,28 @@ void render(AppContext& ctx)
             // size baked into the build is a game's idea. The values are still
             // WRITTEN (config.json carries defaults either way) — they are just
             // not asked about, and app mode pins them to a sane window.
+            //
+            // A project whose Render Defaults page switched "Use the editor's
+            // settings" off has answered these rows itself: they are shown as
+            // it answered them and cannot be edited here, because an edit here
+            // would be overruled at export time and the person would not know
+            // why. The statics are left alone — they are the editor's memory,
+            // and the next project must not inherit this one's numbers.
+            const HE::ProjectRenderDefaults* projectDefaults = projectRenderDefaults(ctx);
             if (exportingApp)
                 s_exportWindowMode = "Windowed";
+            else if (projectDefaults)
+            {
+                ImGui::TextDisabled("Game Window: %d x %d %s, VSync %s",
+                                    projectDefaults->windowWidth, projectDefaults->windowHeight,
+                                    projectDefaults->windowMode.c_str(),
+                                    projectDefaults->vsync ? "on" : "off");
+                ImGui::TextDisabled("Graphics Backend: %s",
+                                    projectDefaults->backend.empty() ? "(platform default)"
+                                                                     : projectDefaults->backend.c_str());
+                ImGui::TextDisabled("Set by the project: Project Settings > Rendering > Defaults. "
+                                    "Switch \"Use the editor's settings\" on there to choose here.");
+            }
             else
             {
                 ImGui::Text("Game Window:");
@@ -784,7 +840,7 @@ void render(AppContext& ctx)
             // the line that makes the checkbox at project creation mean
             // something in the shipped build: no GPU, no driver, no shader
             // translation, just the CPU drawing rectangles.
-            if (!exportingApp)
+            if (!exportingApp && !projectDefaults)
             {
                 ImGui::Text("Graphics Backend:");
                 ImGui::SameLine();
@@ -803,7 +859,7 @@ void render(AppContext& ctx)
                 ImGui::TextDisabled("The editor's current graphics settings ship along; a backend "
                                     "the target runtime lacks falls back to its default.");
             }
-            else
+            else if (exportingApp)
             {
                 // Told, not stored: effectiveExportBackend() answers the same
                 // question at export time. Writing the answer into
@@ -1363,6 +1419,16 @@ void startExport(AppContext& ctx)
                     es.bundleId     = ctx.projectManager->currentProject().bundleId;
                     es.appVersion   = ctx.projectManager->currentProject().appVersion;
                     es.documentTypes = ctx.projectManager->currentProject().documentTypes;
+                    // What the game calls itself to a player (Project Settings ▸
+                    // Game ▸ Title): the bundle's display name. Empty = the
+                    // project name, as every export before it.
+                    es.displayName  = ctx.projectManager->currentProject().settings.game.title;
+                    // And the settings file itself, verbatim, next to
+                    // project.hcfg — the shadows, physics rate and title the
+                    // packaged game reads. The exporter copies what is on disk,
+                    // which is what the panel wrote: it saves on every edit.
+                    es.projectSettingsFile =
+                        HE::projectSettingsPath(ctx.projectManager->projectRoot());
                 }
                 es.appBundle        = s_exportAppBundle && exportAppBundleApplicable(s_exportPlatform);
                 // Which icon container the output gets. Host resolves to what

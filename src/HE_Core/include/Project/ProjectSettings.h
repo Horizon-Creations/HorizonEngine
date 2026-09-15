@@ -42,10 +42,15 @@ namespace HE {
 // `version` is written for the day the meaning of a key has to change (not its
 // presence — that is handled by the defaults). Until then it is 1.
 //
-// NOTE: Schritt 1 was the FORMAT and the panel over it; Schritt 2 connected
-// `shadows` to the renderer (see ProjectShadowSettings). The physics world and
-// the exporter do not read their sections yet — that is the following steps'
-// work, and each such page of the panel says so in its hint.
+// ── Who reads what ────────────────────────────────────────────────────────────
+//   game.title      the game's window title (GameApplication::GetConfig) and
+//                   the export's display name (Info.plist, .desktop, .reg).
+//   shadows         IRenderer::ShadowSettings, pushed per frame by editor + game.
+//   physics         PhysicsWorld gravity + the fixed step both apps drive it at.
+//   renderDefaults  the export dialog's config.json when useEditorSettings is off.
+// The exporter copies the file verbatim to <data>/Config/ProjectSettings.json
+// (ExportSettings::projectSettingsFile); the packaged game loads it from there
+// before its window opens.
 
 struct HE_API ProjectGameSettings
 {
@@ -95,6 +100,15 @@ struct HE_API ProjectPhysicsSettings
 
     static constexpr int kMinHz = 10;
     static constexpr int kMaxHz = 480;
+
+    // The step length both applications hand to HE::advanceFixedSteps. ONE
+    // function so the editor's preview and the packaged game cannot round the
+    // same rate two ways; clamped so a hand-edited "0" cannot become infinity.
+    float fixedDt() const
+    {
+        const int hz = fixedHz < kMinHz ? kMinHz : (fixedHz > kMaxHz ? kMaxHz : fixedHz);
+        return 1.0f / static_cast<float>(hz);
+    }
 };
 
 struct HE_API ProjectRenderDefaults

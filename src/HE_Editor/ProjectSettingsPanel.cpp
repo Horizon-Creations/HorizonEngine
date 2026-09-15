@@ -78,9 +78,9 @@ void commitSettings(AppContext& ctx, ProjectData& p, const char* what)
 		               HE::projectSettingsPath(ctx.projectManager->projectRoot()).string());
 }
 
-// Said once per settings-file page, in the same words: where the value goes,
-// and — honestly — that nothing reads it yet (Schritt 1 of the panel). The
-// pages that DO reach something say so in their own hint instead.
+// Said once per settings-file page, in the same words: where the value goes.
+// `reads` is an optional amber line for a page whose values are read somewhere
+// less obvious than "the export" — each page says where its numbers arrive.
 void settingsFileHint(const char* reads)
 {
 	hint("Belongs to the PROJECT: saved in Config/ProjectSettings.json beside the "
@@ -656,8 +656,7 @@ void drawGeneralPage(AppContext& ctx)
 	const std::string root = ctx.projectManager->projectRoot();
 	if (s_sceneListRoot != root) rescanScenes(root);
 
-	settingsFileHint("The title is saved, but the window title and the export still use the "
-	                 "project name — connecting it is a later step of this panel.");
+	settingsFileHint(nullptr);
 
 	ImGui::SeparatorText("Name");
 	Row::labelText("Project", "%s", p.name.c_str());
@@ -667,8 +666,10 @@ void drawGeneralPage(AppContext& ctx)
 	bool commit = false;
 	Row::inputText("Title##gametitle", &p.settings.game.title);
 	commit |= ImGui::IsItemDeactivatedAfterEdit();
-	hint("What the game calls itself to a player: the window title, the name "
-	                    "a launcher shows. Empty means the project name.");
+	hint("What the game calls itself to a player: the packaged game's window title "
+	     "and the name a launcher shows (the .app's display name, the .desktop "
+	     "entry). Empty means the project name. The folder, the .hpak and the "
+	     "save directory keep the project name whatever this says.");
 	ImGui::Spacing();
 
 	// ── Startup scene ────────────────────────────────────────────────────────
@@ -730,15 +731,16 @@ void drawRenderDefaultsPage(AppContext& ctx)
 	ProjectData& p = *pp;
 	HE::ProjectRenderDefaults& r = p.settings.renderDefaults;
 
-	settingsFileHint("Saved, but the export still takes its window and backend from the "
-	                 "Export dialog — connecting it is a later step of this panel.");
+	settingsFileHint(nullptr);
 
 	bool commit = false;
 	if (EditorWidgets::checkbox("Use the editor's settings", &r.useEditorSettings))
 		commit = true;
 	hint("On, the packaged build boots with whatever this editor's Preferences "
 	                    "and Export dialog say — the way every export has worked so far.\n"
-	                    "Off, the rows below are the project's answer on every machine.");
+	                    "Off, the rows below are the project's answer on every machine: the "
+	                    "Export dialog shows them and writes them into the build's config.json. "
+	                    "Bloom, AO and the other graphics settings stay the editor's either way.");
 	ImGui::Spacing();
 
 	ImGui::BeginDisabled(r.useEditorSettings);
@@ -801,10 +803,9 @@ void drawShadowsPage(AppContext& ctx)
 	HE::ProjectShadowSettings& s = p.settings.shadows;
 
 	settingsFileHint(nullptr);
-	hint("Read by the renderer as you edit: the viewport follows every change here. "
-	     "Metal and OpenGL draw cascades; the other backends still use one whole-scene "
-	     "map and ignore this page. The exported build picks these up once the "
-	     "export ships this file (next step).");
+	hint("Read by the renderer as you edit: the viewport follows every change here, "
+	     "and the exported build reads the same file. Metal and OpenGL draw cascades; "
+	     "the other backends still use one whole-scene map and ignore this page.");
 
 	bool commit = false;
 	ImGui::SeparatorText("Cascades");
@@ -850,8 +851,9 @@ void drawSimulationPage(AppContext& ctx)
 	ProjectData& p = *pp;
 	HE::ProjectPhysicsSettings& ph = p.settings.physics;
 
-	settingsFileHint("Saved, but the simulation still steps at its built-in rate and "
-	                 "gravity — connecting these is the next step of this panel.");
+	settingsFileHint(nullptr);
+	hint("Read when a simulation starts, in the editor's Play as in the exported "
+	     "build. Gravity also reaches a simulation that is already running.");
 
 	bool commit = false;
 	ImGui::SeparatorText("Step");
@@ -876,7 +878,14 @@ void drawSimulationPage(AppContext& ctx)
 	}
 	EditorWidgets::helpForLabel("Earth");
 
-	if (commit) commitSettings(ctx, p, "physics settings");
+	if (commit)
+	{
+		commitSettings(ctx, p, "physics settings");
+		// And into the running preview, the way the collision matrix goes: a
+		// gravity edited during Play should show where it can be seen. The rate
+		// needs no push — the step reads it from the project every frame.
+		if (ctx.applyPhysicsSettings) ctx.applyPhysicsSettings();
+	}
 }
 
 // ─── Audio ▸ Buses ───────────────────────────────────────────────────────────
