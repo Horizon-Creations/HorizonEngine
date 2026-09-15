@@ -1427,6 +1427,11 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// from THIS copy, so a new application would draw bold for its first session.
 	m_currentProject.fontWeightBold        = !isApp;
 	m_currentProject.appIconName           = isApp ? "widgets" : "sports_esports";
+	// A new project has no settings file, so it starts on the defaults — said
+	// explicitly, because the fields above are set one by one and a manager
+	// that made a project after editing another one's settings would otherwise
+	// carry them across.
+	m_currentProject.settings              = HE::ProjectSettings{};
 	HE_LOG_INFO(Config, "Created project '%s' at '%s': language %s, preset %d, "
 	                    "%zu export profile(s), startup scene '%s', kind %s, "
 	                    "advanced shader effects %s",
