@@ -4,6 +4,7 @@
 #include <HorizonRendering/RenderPass.h>
 #include <HorizonRendering/RenderTarget.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/RenderSorter.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <memory>
 #include <string>
@@ -543,4 +544,107 @@ TEST_CASE("GeometryPass does not batch a sectioned object with a plain one of th
 	CHECK(cmds.drawCalls()[1].sectionIndex == 1);
 	CHECK(cmds.drawCalls()[2].sectionIndex == -1);
 	CHECK(cmds.drawCalls()[2].indexCount == 0);
+}
+
+// ─── Depth-only (shadow) batching ───────────────────────────────────────────
+// RenderSorter::batchDepthCasters is what the GL and Metal shadow passes feed
+// their per-layer sorted list through: consecutive same-mesh casters become
+// one instanced draw. CPU-only, like the GeometryPass tests above.
+
+namespace {
+	RenderObject depthObj(HE::UUID mesh, uint32_t entityId, float x, bool casts = true)
+	{
+		RenderObject o;
+		o.meshAssetId = mesh;
+		o.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(x, 0.0f, 0.0f));
+		o.entityId    = entityId;
+		o.castsShadow = casts;
+		return o;
+	}
+	HE::UUID meshId(uint64_t hi) { HE::UUID u; u.hi = hi; u.lo = 1; return u; }
+}
+
+TEST_CASE("batchDepthCasters collapses a same-mesh run into one batch in list order")
+{
+	const HE::UUID mesh = meshId(42);
+	RenderWorld world;
+	for (int i = 0; i < 4; ++i)
+		world.objects.push_back(depthObj(mesh, 100 + i, float(i)));
+	const std::vector<uint32_t> sorted = { 3, 1, 0, 2 }; // the sorter's order, not index order
+
+	RenderSorter::DepthBatchList out;
+	RenderSorter::batchDepthCasters(world, sorted, kNoOwnerEntity, out);
+
+	REQUIRE(out.batches.size() == 1);
+	CHECK(out.batches[0].meshAssetId == mesh);
+	CHECK(out.batches[0].first == 0);
+	CHECK(out.batches[0].count == 4);
+	REQUIRE(out.transforms.size() == 4);
+	// Transforms follow the sorted order (3,1,0,2 → x = 3,1,0,2).
+	CHECK(out.transforms[0][3].x == doctest::Approx(3.0f));
+	CHECK(out.transforms[1][3].x == doctest::Approx(1.0f));
+	CHECK(out.transforms[2][3].x == doctest::Approx(0.0f));
+	CHECK(out.transforms[3][3].x == doctest::Approx(2.0f));
+}
+
+TEST_CASE("batchDepthCasters splits on a mesh change and never merges non-adjacent runs")
+{
+	const HE::UUID a = meshId(1), b = meshId(2);
+	RenderWorld world;
+	world.objects.push_back(depthObj(a, 1, 0.0f));
+	world.objects.push_back(depthObj(a, 2, 1.0f));
+	world.objects.push_back(depthObj(b, 3, 2.0f));
+	world.objects.push_back(depthObj(a, 4, 3.0f)); // A again, but not adjacent to the first run
+	const std::vector<uint32_t> sorted = { 0, 1, 2, 3 };
+
+	RenderSorter::DepthBatchList out;
+	RenderSorter::batchDepthCasters(world, sorted, kNoOwnerEntity, out);
+
+	REQUIRE(out.batches.size() == 3);
+	CHECK(out.batches[0].meshAssetId == a); CHECK(out.batches[0].first == 0); CHECK(out.batches[0].count == 2);
+	CHECK(out.batches[1].meshAssetId == b); CHECK(out.batches[1].first == 2); CHECK(out.batches[1].count == 1);
+	CHECK(out.batches[2].meshAssetId == a); CHECK(out.batches[2].first == 3); CHECK(out.batches[2].count == 1);
+	CHECK(out.transforms.size() == 4);
+}
+
+TEST_CASE("batchDepthCasters drops non-casters and the skipped entity without splitting the run")
+{
+	const HE::UUID mesh = meshId(7);
+	RenderWorld world;
+	world.objects.push_back(depthObj(mesh, 10, 0.0f));
+	world.objects.push_back(depthObj(mesh, 11, 1.0f, /*casts=*/false)); // billboard: never in a depth map
+	world.objects.push_back(depthObj(mesh, 12, 2.0f));
+	world.objects.push_back(depthObj(mesh, 13, 3.0f));                  // the light's own mesh (skipped)
+	world.objects.push_back(depthObj(mesh, 14, 4.0f));
+	const std::vector<uint32_t> sorted = { 0, 1, 2, 3, 4 };
+
+	RenderSorter::DepthBatchList out;
+	RenderSorter::batchDepthCasters(world, sorted, /*skipEntity=*/13, out);
+
+	// Filtering happens before run-forming: one run of the three survivors.
+	REQUIRE(out.batches.size() == 1);
+	CHECK(out.batches[0].count == 3);
+	REQUIRE(out.transforms.size() == 3);
+	CHECK(out.transforms[0][3].x == doctest::Approx(0.0f));
+	CHECK(out.transforms[1][3].x == doctest::Approx(2.0f));
+	CHECK(out.transforms[2][3].x == doctest::Approx(4.0f));
+
+	// Every cascade passes kNoOwnerEntity → nothing is skipped on that account.
+	RenderSorter::batchDepthCasters(world, sorted, kNoOwnerEntity, out);
+	REQUIRE(out.batches.size() == 1);
+	CHECK(out.batches[0].count == 4);
+}
+
+TEST_CASE("batchDepthCasters ignores out-of-range indices and clears stale output")
+{
+	const HE::UUID mesh = meshId(9);
+	RenderWorld world;
+	world.objects.push_back(depthObj(mesh, 1, 0.0f));
+	RenderSorter::DepthBatchList out;
+	out.batches.resize(5); out.transforms.resize(5); // stale from a previous layer
+	const std::vector<uint32_t> sorted = { 99, 0 };
+	RenderSorter::batchDepthCasters(world, sorted, kNoOwnerEntity, out);
+	REQUIRE(out.batches.size() == 1);
+	CHECK(out.batches[0].count == 1);
+	CHECK(out.transforms.size() == 1);
 }

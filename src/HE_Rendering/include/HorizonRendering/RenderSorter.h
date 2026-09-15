@@ -54,6 +54,40 @@ public:
     static void sortBackToFront(std::vector<const DrawCall*>& transparent,
                                 const glm::vec3&              camPos);
 
+    // ── Depth-only batching (shadow cascades / local shadow layers) ─────────
+    // The shadow passes on GL and Metal cull + sort per light view themselves
+    // and used to draw one depth-only call per caster. A depth pass has no
+    // material, section, tint or texture input — the only thing that decides
+    // whether two casters can share a draw is the mesh. So a run of consecutive
+    // same-mesh casters in the sorted list (the sorter already groups by mesh
+    // id) collapses into ONE instanced draw over a flat transform array.
+    //
+    // One run of same-mesh casters: `count` transforms starting at
+    // DepthBatchList::transforms[first]. count == 1 is the plain single draw
+    // (the backends keep their non-instanced program for it).
+    struct DepthBatch {
+        HE::UUID meshAssetId;
+        uint32_t first = 0;
+        uint32_t count = 0;
+    };
+    struct DepthBatchList {
+        std::vector<DepthBatch> batches;
+        std::vector<glm::mat4>  transforms; // world transforms, batch-contiguous
+        void clear() { batches.clear(); transforms.clear(); }
+    };
+
+    // Walk `sortedIndices` (a light-view cull + sort of world.objects), drop
+    // what the depth pass never draws — non-casters (billboards, precipitation)
+    // and `skipEntity` (the local light's own mesh, kNoOwnerEntity skips
+    // nothing) — and form runs of consecutive equal meshAssetId. Filtering
+    // happens BEFORE run-forming, so a skipped object in the middle of a run
+    // does not split it. Only adjacency counts: A,B,A stays three runs; merging
+    // non-adjacent objects is the sorter's job, not this one's.
+    static void batchDepthCasters(const RenderWorld&           world,
+                                  const std::vector<uint32_t>& sortedIndices,
+                                  uint32_t                     skipEntity,
+                                  DepthBatchList&              out);
+
 private:
     // Precomputed per-object sort key so the O(n log n) comparator never has to
     // recompute camera distance or extract a matrix column. Reused across frames

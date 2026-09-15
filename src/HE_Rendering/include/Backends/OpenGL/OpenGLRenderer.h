@@ -580,11 +580,17 @@ private:
 	int          m_localShadowSize     = 1024;
 	unsigned int m_depthProgram   = 0;   // depth-only pass (cascadeVP * model * pos)
 	int          m_uDepthMVP      = -1;
+	// Instanced twin for same-mesh caster runs (kDepthInstancedVS): model from
+	// attrib locs 4–7 / m_instanceVBO, light view-proj as the one uniform.
+	// 0 when the link failed → every run draws through m_depthProgram.
+	unsigned int m_depthInstancedProgram = 0;
+	int          m_uDepthInstVP          = -1;
 	bool         m_debugShadowCascades = false; // tint fragments by cascade index (debug)
 	// Per-cascade caster culling scratch (kept off m_visible/m_sortedIndices so the
 	// shadow pass never clobbers the camera cull the geometry pass relies on).
 	std::vector<uint8_t>  m_shadowVisible;
 	std::vector<uint32_t> m_shadowSorted;
+	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh runs per depth layer
 	void CreateShadowResources();
 
 	// ── Procedural skybox (drawn into the HDR target behind the scene) ───────

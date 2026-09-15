@@ -4933,6 +4933,33 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_SRGBTEST linear/sRGB cube pair added");
 	}
 
+	// ── Shadow-instancing witness (HE_DUMP_SHADOWINSTTEST=1): a flat floor slab
+	// and a row of cubes hovering above it, ALL the default cube mesh with no
+	// material — so the scene pass AND every shadow cascade see one same-mesh
+	// run and draw it instanced. The row's shadows on the floor are the pixels
+	// that prove the instanced depth path put the casters where the per-object
+	// loop did: dump once with HE_MTL_INSTANCING=0 and once with it on, and the
+	// two frames must match. Frame it with PITCH=-18 TOD=0.35 CAMY=5 (camera
+	// looking down -Z onto the floor, mid-morning sun for long shadows).
+	if (const char* st = std::getenv("HE_DUMP_SHADOWINSTTEST"); st && *st && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto makeCube = [&](const char* name, glm::vec3 pos, glm::vec3 scale) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.scale    = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+		};
+		makeCube("ShadowInstFloor", glm::vec3(0.0f, -0.1f, -12.0f), glm::vec3(30.0f, 0.2f, 30.0f));
+		for (int i = 0; i < 7; ++i)
+			makeCube("ShadowInstCube", glm::vec3(-9.0f + 3.0f * float(i), 2.0f, -12.0f),
+			         glm::vec3(1.0f, 1.0f + 0.4f * float(i % 3), 1.0f));
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
+	}
+
 	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a
 	// GRAPH-material cube (ConstColor → BaseColor) and an emissive graph cube
 	// (ConstColor → Emissive) standing on it. The ray-traced reflection must

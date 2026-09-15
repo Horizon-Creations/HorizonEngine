@@ -547,6 +547,10 @@ private:
 	// ── Shadow map (cascaded; directional light) ────────────────────────────
 	void* m_shadowDepthTex = nullptr;  // id<MTLTexture>, Depth32Float 2D ARRAY (one layer/cascade)
 	void* m_shadowPipeline = nullptr;  // id<MTLRenderPipelineState>, depth-only
+	// Instanced twin (vertexShadowInstanced: one lightVP*model per instance at
+	// buffer 5). Optional — null sends every same-mesh run through the loop.
+	void* m_shadowInstancedPipeline = nullptr; // id<MTLRenderPipelineState>
+	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh caster runs per depth layer
 	int   m_shadowSize     = HE::kShadowMapResolution;
 	// Local (point/spot) shadow atlas: 2D depth ARRAY, one layer per spot view /
 	// point cube face (16 layers total, see ShadowData::kMaxLocalShadowLayers).

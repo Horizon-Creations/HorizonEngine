@@ -375,6 +375,18 @@ vertex float4 vertexShadow(uint vid [[vertex_id]],
 	return u.mvp * float4(float3(verts[vid].position), 1.0);
 }
 
+// Instanced twin for a run of same-mesh casters (RenderSorter::batchDepthCasters):
+// one lightVP * model per instance at buffer 5, indexed by [[instance_id]]. Depth
+// needs nothing but the clip transform, so the stride is a single float4x4 (64
+// bytes) rather than the scene pass's {mvp, model} pair.
+vertex float4 vertexShadowInstanced(uint vid [[vertex_id]],
+                                    uint iid [[instance_id]],
+                                    const device VertexIn* verts [[buffer(0)]],
+                                    const device float4x4* mvps  [[buffer(5)]])
+{
+	return mvps[iid] * float4(float3(verts[vid].position), 1.0);
+}
+
 // Linear blend-skinning vertex shader. Bone matrices arrive in a dedicated buffer
 // (buffer 4) so they are not limited by the 4 KB setVertexBytes ceiling.
 // Outputs the same VSOut as vertexMain so fragmentMain is reused unchanged.
@@ -5884,6 +5896,7 @@ void MetalRenderer::Shutdown()
 	if (m_particleBuffer)       { CFBridgingRelease(m_particleBuffer);       m_particleBuffer = nullptr; }
 	if (m_sceneDepthState) { CFBridgingRelease(m_sceneDepthState); m_sceneDepthState = nullptr; }
 	if (m_shadowPipeline)  { CFBridgingRelease(m_shadowPipeline);  m_shadowPipeline = nullptr; }
+	if (m_shadowInstancedPipeline) { CFBridgingRelease(m_shadowInstancedPipeline); m_shadowInstancedPipeline = nullptr; }
 	if (m_shadowDepthTex)  { CFBridgingRelease(m_shadowDepthTex);  m_shadowDepthTex = nullptr; }
 	if (m_localShadowTex)  { CFBridgingRelease(m_localShadowTex);  m_localShadowTex = nullptr; }
 	if (m_noDepthState)    { CFBridgingRelease(m_noDepthState);    m_noDepthState = nullptr; }
@@ -6645,6 +6658,16 @@ void MetalRenderer::EnsureShadowResources()
 		id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
 		if (pso) m_shadowPipeline = (void*)CFBridgingRetain(pso);
 		else     HE_LOG_ERROR(RHI, "%s", "MetalRenderer: shadow pipeline creation failed");
+
+		// Instanced twin (vertexShadowInstanced, same depth-only descriptor).
+		// Optional: without it every same-mesh run draws through the loop.
+		MTLRenderPipelineDescriptor* idesc = [[MTLRenderPipelineDescriptor alloc] init];
+		idesc.vertexFunction             = [lib newFunctionWithName:@"vertexShadowInstanced"];
+		idesc.fragmentFunction           = nil;
+		idesc.depthAttachmentPixelFormat = kDepthFormat;
+		id<MTLRenderPipelineState> ipso = [device newRenderPipelineStateWithDescriptor:idesc error:&error];
+		if (ipso) m_shadowInstancedPipeline = (void*)CFBridgingRetain(ipso);
+		else      HE_LOG_ERROR(RHI, "%s", "MetalRenderer: instanced shadow pipeline creation failed");
 	}
 }
 
@@ -6713,32 +6736,77 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 			[enc setViewport:(MTLViewport){ 0.0, 0.0, (double)size, (double)size, 0.0, 1.0 }];
 
-			HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
-			for (uint32_t idx : m_sortedIndices)
+			// Same-mesh runs → one instanced draw each; a run of one stays on the
+			// plain pipeline. HE_MTL_INSTANCING=0 is the same A/B switch as the
+			// scene pass: it sends every run back through the per-caster loop.
+			RenderSorter::batchDepthCasters(m_renderWorld, m_sortedIndices, skipEntity,
+			                                m_shadowBatches);
+			const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
+			void* boundPipeline = m_shadowPipeline;
+			id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+			std::vector<glm::mat4> mvps;
+			for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
 			{
-				const RenderObject& obj = m_renderWorld.objects[idx];
-				if (!obj.castsShadow) continue; // billboards (precip/particles) cast no shadow
-				if (obj.entityId == skipEntity) continue; // the light's own mesh
-				UnlitUniforms u;
-				u.mvp = lightClip * obj.transform;
-
-				if (!shMeshValid || obj.meshAssetId != shMeshId)
-				{
-					shMesh      = ResolveMesh(obj.meshAssetId);
-					shMeshId    = obj.meshAssetId; shMeshValid = true;
-				}
-				const GpuMesh* drawMesh = shMesh ? shMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+				const GpuMesh* drawMesh = ResolveMesh(b.meshAssetId);
+				if (!drawMesh) drawMesh = ResolveMesh(HE::kDefaultCubeMeshId);
 				if (!drawMesh) continue;
 				id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
 				id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
 				NSUInteger    ic   = (NSUInteger)drawMesh->indexCount;
+				const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
 				[enc setVertexBuffer:vbuf offset:0 atIndex:0];
-				[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
-				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-				                indexCount:ic
-				                 indexType:MTLIndexTypeUInt32
-				               indexBuffer:ibuf
-				         indexBufferOffset:0];
+
+				if (b.count > 1 && canInstance && b.count <= k_maxInstances)
+				{
+					if (boundPipeline != m_shadowInstancedPipeline)
+					{
+						[enc setRenderPipelineState:
+							(__bridge id<MTLRenderPipelineState>)m_shadowInstancedPipeline];
+						boundPipeline = m_shadowInstancedPipeline;
+					}
+					mvps.clear();
+					mvps.reserve(b.count);
+					for (uint32_t k = 0; k < b.count; ++k) mvps.push_back(lightClip * xf[k]);
+					// Once per session: the headless A/B (HE_MTL_INSTANCING=0 vs on)
+					// only proves something if this path actually ran.
+					static bool loggedOnce = false;
+					if (!loggedOnce)
+					{
+						loggedOnce = true;
+						HE_LOG_INFO(RHI, "MetalRenderer: shadow pass instanced (first run: %u casters)",
+						            static_cast<unsigned>(b.count));
+					}
+					// Fresh buffer per batch, the scene pass's convention: the encoder
+					// retains it until the command buffer completes, nothing to sync.
+					id<MTLBuffer> instBuf = [dev newBufferWithBytes:mvps.data()
+						length:mvps.size() * sizeof(glm::mat4)
+						options:MTLResourceStorageModeShared];
+					[enc setVertexBuffer:instBuf offset:0 atIndex:5];
+					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                indexCount:ic
+					                 indexType:MTLIndexTypeUInt32
+					               indexBuffer:ibuf
+					         indexBufferOffset:0
+					             instanceCount:(NSUInteger)b.count];
+					continue;
+				}
+
+				if (boundPipeline != m_shadowPipeline)
+				{
+					[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_shadowPipeline];
+					boundPipeline = m_shadowPipeline;
+				}
+				for (uint32_t k = 0; k < b.count; ++k)
+				{
+					UnlitUniforms u;
+					u.mvp = lightClip * xf[k];
+					[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                indexCount:ic
+					                 indexType:MTLIndexTypeUInt32
+					               indexBuffer:ibuf
+					         indexBufferOffset:0];
+				}
 			}
 			[enc endEncoding];
 		};

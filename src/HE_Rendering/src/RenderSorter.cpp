@@ -71,3 +71,27 @@ void RenderSorter::sortBackToFront(std::vector<const DrawCall*>& transparent,
 			     > backToFrontKey(b->transform, camPos);
 		});
 }
+
+void RenderSorter::batchDepthCasters(const RenderWorld&           world,
+                                     const std::vector<uint32_t>& sortedIndices,
+                                     uint32_t                     skipEntity,
+                                     DepthBatchList&              out)
+{
+	out.clear();
+	out.transforms.reserve(sortedIndices.size());
+	for (uint32_t idx : sortedIndices)
+	{
+		if (idx >= world.objects.size()) continue;
+		const RenderObject& obj = world.objects[idx];
+		if (!obj.castsShadow) continue;          // billboards (precip/particles) cast none
+		if (obj.entityId == skipEntity) continue; // the light's own mesh
+		// Extend the current run when the mesh matches; the sorter grouped by
+		// mesh id, so a change here means a genuinely new mesh.
+		if (!out.batches.empty() && out.batches.back().meshAssetId == obj.meshAssetId)
+			++out.batches.back().count;
+		else
+			out.batches.push_back(DepthBatch{ obj.meshAssetId,
+			                                  static_cast<uint32_t>(out.transforms.size()), 1u });
+		out.transforms.push_back(obj.transform);
+	}
+}

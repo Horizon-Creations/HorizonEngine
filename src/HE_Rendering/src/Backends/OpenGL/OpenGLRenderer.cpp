@@ -3144,6 +3144,25 @@ static const char* kDepthFS = R"GLSL(
 void main() {}
 )GLSL";
 
+// Instanced twin of kDepthVS for a run of same-mesh casters: the per-instance
+// model matrix comes from the same attrib locs 4–7 / m_instanceVBO binding every
+// mesh VAO already carries for kInstancedVS, so the shadow pass reuses the scene
+// pass's instance buffer as is. uDepthVP is the light's view-proj alone.
+static const char* kDepthInstancedVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+layout(location = 4) in vec4 aInstCol0;
+layout(location = 5) in vec4 aInstCol1;
+layout(location = 6) in vec4 aInstCol2;
+layout(location = 7) in vec4 aInstCol3;
+uniform mat4 uDepthVP;
+void main()
+{
+    mat4 model  = mat4(aInstCol0, aInstCol1, aInstCol2, aInstCol3);
+    gl_Position = uDepthVP * model * vec4(aPos, 1.0);
+}
+)GLSL";
+
 // ─── HDR tonemap (PostProcessPass) ──────────────────────────────────────────
 // Fullscreen triangle generated from gl_VertexID — no vertex buffer needed.
 static const char* kTonemapVS = R"GLSL(
@@ -5638,6 +5657,34 @@ void OpenGLRenderer::CreateShadowResources()
 	glDeleteShader(vs);
 	glDeleteShader(fs);
 	m_uDepthMVP = glGetUniformLocation(m_depthProgram, "uDepthMVP");
+
+	// Instanced depth-only program for same-mesh caster runs (see
+	// RenderSorter::batchDepthCasters). Optional: a link failure only sends
+	// every run back through the per-caster loop above.
+	{
+		GLuint ivs = CompileStage(GL_VERTEX_SHADER,   kDepthInstancedVS);
+		GLuint ifs = CompileStage(GL_FRAGMENT_SHADER, kDepthFS);
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, ivs);
+		glAttachShader(prog, ifs);
+		glLinkProgram(prog);
+		glDeleteShader(ivs);
+		glDeleteShader(ifs);
+		GLint ok = 0;
+		glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (ok)
+		{
+			m_depthInstancedProgram = prog;
+			m_uDepthInstVP = glGetUniformLocation(prog, "uDepthVP");
+		}
+		else
+		{
+			char log[1024] = {};
+			glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: instanced depth program link failed: %s", log);
+			glDeleteProgram(prog);
+		}
+	}
 
 	// Cascaded shadow map: a Depth24 texture ARRAY (one layer per cascade), sampled
 	// by the scene shader. Each cascade renders into its own layer (attached per
@@ -10406,6 +10453,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_worldPreviewFBO)   { glDeleteFramebuffers(1, &m_worldPreviewFBO);    m_worldPreviewFBO = 0; }
 	if (m_worldPreviewLdrFBO){ glDeleteFramebuffers(1, &m_worldPreviewLdrFBO); m_worldPreviewLdrFBO = 0; }
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
+	if (m_depthInstancedProgram) { glDeleteProgram(m_depthInstancedProgram); m_depthInstancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }
 	for (auto& [k, prog] : m_particlePrograms) if (prog) glDeleteProgram(prog);
 	m_particlePrograms.clear();
@@ -10926,25 +10974,59 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glClear(GL_DEPTH_BUFFER_BIT);
 				m_culler.cull(m_renderWorld, vp, m_shadowVisible);
 				m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
-
-				HE::UUID shMeshId{}; const GpuMesh* shMesh = nullptr; bool shMeshValid = false;
-				for (uint32_t idx : m_shadowSorted)
+				// Same-mesh runs → one instanced draw each. A run of one keeps the
+				// plain depth program (no instance upload for a single caster).
+				RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, skipEntity,
+				                                m_shadowBatches);
+				const bool canInstance = m_depthInstancedProgram && m_instanceVBO;
+				unsigned int boundProgram = m_depthProgram; // glUseProgram'd by the caller
+				for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
 				{
-					const RenderObject& obj = m_renderWorld.objects[idx];
-					if (!obj.castsShadow) continue; // billboards (precip/particles) cast none
-					if (obj.entityId == skipEntity) continue; // the light's own mesh
-					glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE,
-					                   glm::value_ptr(vp * obj.transform));
-					if (!shMeshValid || obj.meshAssetId != shMeshId)
-					{
-						shMesh      = ResolveMesh(obj.meshAssetId);
-						shMeshId    = obj.meshAssetId; shMeshValid = true;
-					}
-					const GpuMesh* mesh = shMesh ? shMesh : ResolveMesh(HE::kDefaultCubeMeshId);
+					const GpuMesh* mesh = ResolveMesh(b.meshAssetId);
+					if (!mesh) mesh = ResolveMesh(HE::kDefaultCubeMeshId);
 					if (!mesh) continue;
+					const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
 					glBindVertexArray(mesh->vao);
-					glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+					if (b.count > 1 && canInstance)
+					{
+						// Scene-pass convention: orphan the scratch VBO per batch.
+						// Every mesh VAO reads attribs 4–7 from it with divisor 1.
+						glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
+						glBufferData(GL_ARRAY_BUFFER,
+						             static_cast<GLsizeiptr>(b.count * sizeof(glm::mat4)),
+						             xf, GL_STREAM_DRAW);
+						glBindBuffer(GL_ARRAY_BUFFER, 0);
+						if (boundProgram != m_depthInstancedProgram)
+						{
+							glUseProgram(m_depthInstancedProgram);
+							boundProgram = m_depthInstancedProgram;
+							glUniformMatrix4fv(m_uDepthInstVP, 1, GL_FALSE, glm::value_ptr(vp));
+						}
+						glDrawElementsInstanced(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT,
+						                        nullptr, static_cast<GLsizei>(b.count));
+						static bool loggedOnce = false; // once per session, like the Metal twin
+						if (!loggedOnce)
+						{
+							loggedOnce = true;
+							HE_LOG_INFO(RHI, "OpenGLRenderer: shadow pass instanced (first run: %u casters)",
+							            static_cast<unsigned>(b.count));
+						}
+						continue;
+					}
+					if (boundProgram != m_depthProgram)
+					{
+						glUseProgram(m_depthProgram);
+						boundProgram = m_depthProgram;
+					}
+					for (uint32_t k = 0; k < b.count; ++k)
+					{
+						glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE, glm::value_ptr(vp * xf[k]));
+						glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+					}
 				}
+				// Leave the plain depth program bound: the next layer's lambda
+				// entry assumes it, like the caller's glUseProgram above.
+				if (boundProgram != m_depthProgram) glUseProgram(m_depthProgram);
 			};
 
 			if (shadows)

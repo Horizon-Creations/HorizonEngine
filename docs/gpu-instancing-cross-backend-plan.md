@@ -319,6 +319,26 @@ Geschwindigkeit.
    dieselbe Lauf-Logik wie `GeometryPass`, aber ohne die Material-Kriterien
    (der Schattenpass zeichnet nur Tiefe, es zählt nur `meshAssetId` und LOD).
    Das ist der größte verbliebene Gewinn und ein eigenes Thema wert.
+
+   **Stand 15.09.2026 — GL + Metal erledigt, D3D11/D3D12 offen.** Die Annahme
+   „Fix in `RenderPass.cpp`" stimmte nur für D3D11/D3D12: GL und Metal
+   benutzen die `ShadowPass`-Draws gar nicht, sie cullen + sortieren pro
+   Cascade/Local-Layer selbst (`renderDepthLayer` / `encodeDepthLayer`). Dort
+   sitzt jetzt `RenderSorter::batchDepthCasters` (`RenderSorter.h`): der
+   per-Layer sortierte Index wird nach `castsShadow`/`skipEntity` gefiltert
+   und in Läufe gleicher `meshAssetId` zerlegt; ein Lauf > 1 zeichnet
+   instanziert (GL: `kDepthInstancedVS` über die schon an jedem Mesh-VAO
+   hängenden Attrib-Locs 4–7 + `m_instanceVBO`; Metal: `vertexShadowInstanced`
+   mit einem `float4x4`-Array aus `lightVP*model` an Buffer 5, 64-Byte-Stride,
+   frischer `MTLBuffer` pro Batch wie im Scene-Pass). `HE_MTL_INSTANCING=0`
+   schaltet auch diesen Pfad auf die Schleife zurück. Nachweis: Zeugenszene
+   `HE_DUMP_SHADOWINSTTEST=1` (Boden + sieben Würfel, ein Mesh) ergibt mit
+   Schleife und instanziert pixelidentische Frames auf Metal-Hardware, der
+   Log bestätigt „shadow pass instanced (first run: 8 casters)". GL ist
+   compile- und glslang-validiert, aber nicht auf Hardware gelaufen (Sandbox
+   ohne Display). `ShadowPass::execute` bleibt absichtlich unverändert: die
+   D3D11/D3D12-Replays lesen nur `dc.transform` und würden Instanzen still
+   verlieren — deren Batching gehört in denselben Schritt wie ihr Replay.
 2. **SSAO-Vorpass und GI-G-Buffer-Vorpass schleifen in allen fünf Backends.**
    `GL:6743`/`:7215`, `D3D11:1536`/`:2097`, `D3D12:3746`/`:4822`. Diese Pässe
    sind tiefen-/positions-only, brauchen also nur `model` — ein 64-Byte-Stride
