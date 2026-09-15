@@ -216,6 +216,41 @@ TEST_CASE("ProjectManager: the collision matrix round-trips, and only once touch
     he_test::removeAllQuiet(dir);
 }
 
+TEST_CASE("ProjectManager: the mixer's buses round-trip, and only once touched")
+{
+    const auto dir = fs::temp_directory_path() / "he_buses_rt";
+    he_test::removeAllQuiet(dir);
+
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "Buses", ProjectPreset::Empty));
+    const std::string heproj = pm.currentProject().path;
+    REQUIRE(pm.saveProject(heproj));
+
+    // A project that never opened the mixer has no key — absence is "no buses".
+    {
+        std::ifstream in(heproj);
+        const nlohmann::json j = nlohmann::json::parse(in);
+        CHECK_FALSE(j.contains("audioBuses"));
+    }
+
+    auto& cfg = pm.currentProject().audioBuses;
+    REQUIRE(cfg.add("Music", 0.6f));
+    REQUIRE(cfg.add("SFX"));
+    cfg.masterVolume = 0.9f;
+    REQUIRE(pm.saveProject(heproj));
+
+    ProjectManager pm2;
+    REQUIRE(pm2.loadProject(heproj));
+    const auto& back = pm2.currentProject().audioBuses;
+    REQUIRE(back.buses.size() == 2);
+    CHECK(back.buses[0].name == "Music");
+    CHECK(back.buses[0].volume == doctest::Approx(0.6f));
+    CHECK(back.buses[1].name == "SFX");
+    CHECK(back.masterVolume == doctest::Approx(0.9f));
+
+    he_test::removeAllQuiet(dir);
+}
+
 TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive save")
 {
     const auto dir = fs::temp_directory_path() / "he_prof_rt";

@@ -45,6 +45,9 @@ add_executable(he_tests
     # The Landscape panel's Foliage brush, driven the same way: mode well,
     # Grow/Erase well, and a drag over a top-down viewport into the mask.
     test_terrain_tools_ui.cpp
+    # The Audio Mixer, driven the same way: strips from a real ProjectData, a
+    # click on M reaching the device-less AudioEngine as a mute, S as a solo.
+    test_audio_mixer_ui.cpp
     test_editorcamera.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
@@ -478,6 +481,10 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. Everything they call (TerrainPaint/FoliagePaint
     # in HorizonScene, RenderWorld, the toolbar, the widgets) is already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
+    # The Audio Mixer window, for test_audio_mixer_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED. It reads ProjectData (HorizonTools, linked
+    # below) and AudioEngine (HorizonScene), both already here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -493,6 +500,8 @@ set_source_files_properties(
     test_outliner_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
     test_terrain_tools_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
+    test_audio_mixer_ui.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE

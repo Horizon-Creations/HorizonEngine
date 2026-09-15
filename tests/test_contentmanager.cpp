@@ -2328,16 +2328,157 @@ TEST_CASE("Importer::isImportableSource covers every extension the editor offers
 	// had drifted: fonts were importable from the browser but absent from the
 	// dialog. This is the list they now share.
 	for (const char* ext : { ".gltf", ".glb", ".png", ".jpg", ".jpeg", ".tga",
-	                         ".bmp", ".hdr", ".wav", ".hmat", ".ttf", ".otf" })
+	                         ".bmp", ".hdr", ".wav", ".ogg", ".hmat", ".ttf", ".otf" })
 		CHECK(Importer::isImportableSource(fs::path("Some/File") += ext));
 
 	// Case is not part of the answer — Windows hands back "TEXTURE.PNG".
 	CHECK(Importer::isImportableSource("Art/TEXTURE.PNG"));
 	CHECK(Importer::isImportableSource("Art/Hero.GLB"));
+	CHECK(Importer::isImportableSource("Audio/Theme.OGG"));
 
 	CHECK_FALSE(Importer::isImportableSource("Art/notes.txt"));
 	CHECK_FALSE(Importer::isImportableSource("Art/Rock.hasset")); // already an asset
 	CHECK_FALSE(Importer::isImportableSource("Art/Rock"));        // no extension at all
+}
+
+// ─── Ogg Vorbis import: the stream is the asset ──────────────────────────────
+
+#include "AudioImporter.h"
+#include "fixtures/tone_vorbis.h"
+
+namespace
+{
+	bool writeToneOgg(const fs::path& file)
+	{
+		std::error_code ec;
+		fs::create_directories(file.parent_path(), ec);
+		std::ofstream f(file, std::ios::binary | std::ios::trunc);
+		if (!f) return false;
+		f.write(reinterpret_cast<const char*>(he_test::kToneVorbisOgg),
+		        static_cast<std::streamsize>(he_test::kToneVorbisOggSize));
+		return static_cast<bool>(f);
+	}
+}
+
+TEST_CASE("AudioImporter keeps an .ogg compressed and the asset round-trips through the .hasset")
+{
+	// The point of Vorbis support: the asset costs its compressed size, in the
+	// file and in RAM. So the import must store the Ogg bytes verbatim, mark the
+	// encoding, and a fresh ContentManager must read exactly that back — with the
+	// stream's own rate and channels, which the importer took from the headers.
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_ogg_src");
+	const fs::path srcFile = srcDir.path / "tone.ogg";
+	REQUIRE(writeToneOgg(srcFile));
+
+	REQUIRE(Importer::importSource(srcFile, dir.path, "Audio"));
+	const fs::path imported = dir.path / "Audio" / "tone.hasset";
+	REQUIRE(fs::exists(imported));
+
+	ContentManager cm(dir.path.string());
+	const AudioAsset* a = cm.getAudio(cm.loadAsset("Audio/tone.hasset"));
+	REQUIRE(a != nullptr);
+	CHECK(a->encoding   == AudioEncoding::Vorbis);
+	CHECK(a->sampleRate == he_test::kToneVorbisSampleRate);
+	CHECK(a->channels   == he_test::kToneVorbisChannels);
+	REQUIRE(a->audioData.size() == he_test::kToneVorbisOggSize);
+	CHECK(std::memcmp(a->audioData.data(), he_test::kToneVorbisOgg, he_test::kToneVorbisOggSize) == 0);
+	CHECK(audioPcmFrameCount(*a) == 0);   // not PCM — the frame count is the decoder's
+
+	// The bytes live in their own chunk, not in PCMD: an engine from before
+	// Vorbis finds no PCM chunk and skips the clip instead of playing Ogg pages.
+	HAsset::Reader reader;
+	REQUIRE(reader.open(imported.string()));
+	CHECK(reader.findChunk(HAsset::CHUNK_OGGD) != nullptr);
+	CHECK(reader.findChunk(HAsset::CHUNK_PCMD) == nullptr);
+}
+
+TEST_CASE("AudioImporter::decode loads an .ogg for auditioning without touching the disk")
+{
+	TempContentDir srcDir("he_test_ogg_decode");
+	const fs::path srcFile = srcDir.path / "tone.ogg";
+	REQUIRE(writeToneOgg(srcFile));
+
+	AudioAsset raw;
+	REQUIRE(AudioImporter::decode(srcFile, raw));
+	CHECK(raw.encoding   == AudioEncoding::Vorbis);
+	CHECK(raw.name       == "tone");
+	CHECK(raw.sampleRate == he_test::kToneVorbisSampleRate);
+	CHECK(raw.channels   == he_test::kToneVorbisChannels);
+	CHECK(raw.audioData.size() == he_test::kToneVorbisOggSize);
+	CHECK(raw.path.empty());
+
+	// A .wav still comes out as PCM, and the encoding says so.
+	const fs::path wav = srcDir.path / "click.wav";
+	REQUIRE(writeWav(wav, /*frames=*/6));
+	AudioAsset pcm;
+	REQUIRE(AudioImporter::decode(wav, pcm));
+	CHECK(pcm.encoding == AudioEncoding::PCM16);
+	CHECK(audioPcmFrameCount(pcm) == 6);
+}
+
+TEST_CASE("AudioImporter refuses an .ogg that is not a Vorbis stream")
+{
+	// A corrupt or mislabelled file must fail at import, where the user can see
+	// it, not become an asset that is silent in every packaged build.
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_ogg_bad");
+	const fs::path bad = srcDir.path / "broken.ogg";
+	{
+		fs::create_directories(bad.parent_path());
+		std::ofstream f(bad, std::ios::binary);
+		REQUIRE(f);
+		const std::string junk(600, 'x');
+		f.write(junk.data(), static_cast<std::streamsize>(junk.size()));
+	}
+	AudioAsset out;
+	CHECK_FALSE(AudioImporter::decode(bad, out));
+	CHECK_FALSE(Importer::importSource(bad, dir.path, "Audio"));
+	CHECK_FALSE(fs::exists(dir.path / "Audio" / "broken.hasset"));
+
+	// The identification header alone is not enough either: a stream cut off
+	// before any audio page decodes to nothing and is refused the same way.
+	const fs::path cut = srcDir.path / "cut.ogg";
+	{
+		std::ofstream f(cut, std::ios::binary);
+		REQUIRE(f);
+		f.write(reinterpret_cast<const char*>(he_test::kToneVorbisOgg), 58);   // first page only
+	}
+	CHECK_FALSE(AudioImporter::decode(cut, out));
+}
+
+TEST_CASE("An audio .hasset written before Vorbis existed still loads as PCM")
+{
+	// The old layout: an 8-byte AUMI (rate, channels) and a PCMD chunk. The
+	// encoding field is new and absent here — that has to read as PCM16, which
+	// is what every existing project's clips are.
+	const HE::UUID id{0x0A, 0x1D};
+	std::vector<uint8_t> meta;
+	HAsset::Writer::appendPOD(meta, static_cast<uint16_t>(HE::AssetType::Audio));
+	HAsset::Writer::appendPOD(meta, id.hi);
+	HAsset::Writer::appendPOD(meta, id.lo);
+	HAsset::Writer::appendString(meta, "old");
+	HAsset::Writer::appendString(meta, "mem://old");
+
+	std::vector<uint8_t> aumi;
+	HAsset::Writer::appendPOD(aumi, static_cast<int32_t>(8000));
+	HAsset::Writer::appendPOD(aumi, static_cast<int32_t>(1));
+	CHECK(aumi.size() == 8u);
+	const uint8_t pcm[8] = { 1, 0, 2, 0, 3, 0, 4, 0 };
+
+	HAsset::Writer w;
+	w.addChunk(HAsset::CHUNK_META, meta.data(), meta.size());
+	w.addChunk(HAsset::CHUNK_AUMI, aumi.data(), aumi.size());
+	w.addChunk(HAsset::CHUNK_PCMD, pcm, sizeof(pcm));
+
+	ContentManager cm;
+	REQUIRE(cm.loadAssetFromMemory(w.toBytes(static_cast<uint16_t>(HE::AssetType::Audio))) == id);
+	const AudioAsset* a = cm.getAudio(id);
+	REQUIRE(a != nullptr);
+	CHECK(a->encoding == AudioEncoding::PCM16);
+	CHECK(a->sampleRate == 8000);
+	CHECK(a->channels == 1);
+	CHECK(audioPcmFrameCount(*a) == 4);
 }
 
 // ─── Reimport keeps what the import cannot rebuild ───────────────────────────

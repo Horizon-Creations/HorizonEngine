@@ -192,6 +192,14 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Content Browser", "Find References" },
 		{ "New Asset",       "Input Action" },
 		{ "Console",         "Auto-scroll" },
+		{ "View",            "Audio Mixer" },
+		// The mixer's strips are data-labelled (a bus name over each fader), so
+		// every control in it asks by key; these are those keys under the
+		// scope the window pushes.
+		{ "Audio Mixer",     "Fader" },
+		{ "Audio Mixer",     "M" },
+		{ "Audio Mixer",     "S" },
+		{ "Audio Mixer",     "Add Bus" },
 		{ "Notifications",   "Mark all as seen" },
 		{ "Play Report",     "Show warnings" },
 		{ "Project Hub",     "Remove from list" },

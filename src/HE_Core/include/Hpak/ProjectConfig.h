@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/Defines.h>
 #include <Physics/CollisionLayers.h>
+#include <Audio/AudioBusConfig.h>
 #include <string>
 #include <filesystem>
 #include <cstdint>
@@ -105,6 +106,12 @@ struct HE_API ProjectConfig {
     // layers keeps emitting the file version it emitted before, and an older
     // runtime bundle beside it still boots.
     HE::CollisionLayerConfig collisionLayers;
+
+    // The project's mixer buses — handed to AudioEngine::applyBusConfig once
+    // at start (GameApplication), before the playOnStart sources go, so a
+    // source that names a bus finds it. Same versioning bargain as the matrix
+    // above: default-constructed (no buses) leaves the tail out of the file.
+    HE::AudioBusConfig audioBuses;
 };
 
 class HE_API ProjectConfigLoader {

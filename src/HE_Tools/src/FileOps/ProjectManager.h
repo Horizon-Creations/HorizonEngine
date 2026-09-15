@@ -6,6 +6,7 @@
 #include <functional>
 #include <Application/DocumentTypes.h>   // HE::AppDocumentType (the .heproj list)
 #include <Physics/CollisionLayers.h>     // HE::CollisionLayerConfig (the .heproj matrix)
+#include <Audio/AudioBusConfig.h>        // HE::AudioBusConfig (the .heproj mixer buses)
 
 // Persisted as an int in the .heproj manifest ("preset") — only ever append.
 enum class ProjectPreset
@@ -319,6 +320,16 @@ struct ProjectData
 	// is not a thing anybody wants to debug. Default-constructed is "everything
 	// collides", which is what every project written before this behaved like.
 	HE::CollisionLayerConfig collisionLayers;
+
+	// ── The mixer's buses ────────────────────────────────────────────────────
+	// ".heproj \"audioBuses\"", carried into the packaged build's project.hcfg
+	// and handed to AudioEngine both here and there, so a source whose Bus
+	// field says "Music" finds that bus in the shipped game exactly as in the
+	// editor. Same road as collisionLayers, for the same reason: a bus name
+	// stored in a scene means nothing unless the project says the bus exists.
+	// Default-constructed is "no buses, master at 1" — what every project
+	// written before the mixer behaved like.
+	HE::AudioBusConfig audioBuses;
 
 	// ── What the application IS, to the system around it (plan A7) ───────────
 	// The icon is GENERATED from one of the engine's built-in icons on a plate

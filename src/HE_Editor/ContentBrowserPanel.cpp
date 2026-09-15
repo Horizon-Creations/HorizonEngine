@@ -1221,7 +1221,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// Script assets open the code editor tab, material assets the node-graph
 			// editor tab. Other asset types have no dedicated editor yet → no-op.
 			// C++ source/header (Source root) opens the h/cpp class viewer; a raw
-			// .wav opens the audio tab (auditioning a source file must not require
+			// .wav/.ogg opens the audio tab (auditioning a source file must not require
 			// importing it first). Both predicates are raw extension checks, not
 			// HAsset sniffs, so they must be tested explicitly here.
 			if (!(CppClassEditorPanel::isCppSourceAsset(fullPath) ||

@@ -724,7 +724,18 @@ namespace
 	  "", "systems#audio" },
 	{ "Audio Source/Rolloff Factor", "",
 	  "How quickly the sound fades with distance between the inner range and the "
-	  "range.",
+	  "range. 1 is the plain curve; higher fades sooner, lower keeps it audible "
+	  "further out.",
+	  "", "systems#audio" },
+	{ "Audio Source/Attenuation", "",
+	  "The shape of the fade between the inner range and the range. Linear is a "
+	  "straight line to silence at the range. Inverse is the physical one, fast "
+	  "near the source with a long quiet tail. Exponential bends with the "
+	  "rolloff factor. None keeps full volume everywhere and only pans.",
+	  "", "systems#audio" },
+	{ "Audio Source/Falloff", "",
+	  "The curve the settings above produce: volume from the source outwards to "
+	  "the range, drawn from the same formula the mixer plays with.",
 	  "", "systems#audio" },
 	{ "Audio Source/Spatial", "",
 	  "Hear the sound from where the entity stands, quieter with distance. Off "
@@ -1548,6 +1559,10 @@ namespace
 	  "Everything the engine logged this session. The first place to look when "
 	  "something did not happen.",
 	  "Ctrl+`", "advanced#diagnostics" },
+	{ "View/Audio Mixer", "",
+	  "The project's audio buses as fader strips: master, music, sfx and "
+	  "whatever else you add, with mute and solo for listening.",
+	  "", "systems#audio" },
 	{ "View/Ground Grid", "",
 	  "The reference grid on the ground plane. Hidden while the scene plays "
 	  "either way.",
@@ -1831,6 +1846,41 @@ namespace
 	{ "Console/Copy All Shown", "",
 	  "Copies everything the current filter leaves visible, not the whole log.",
 	  "", "advanced#diagnostics" },
+	// ── Audio Mixer ──────────────────────────────────────────────────────────
+	{ "Audio Mixer/Master", "",
+	  "The volume of everything at once, in front of every bus. Drag it, or "
+	  "double-click to put it back to 0 dB. Saved with the project and used by "
+	  "the exported game.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Fader", "",
+	  "The volume of this bus. Every source whose Bus field names it, and every "
+	  "sound a script routes to it, passes through here. Double-click resets to "
+	  "0 dB. Saved with the project and used by the exported game.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/M", "",
+	  "Mute: silence this bus while you listen to the others. Not saved, so a "
+	  "bus muted today cannot ship muted.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/S", "",
+	  "Solo: hear only this bus, and any other soloed one. Not saved, like mute.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Remove", "",
+	  "Deletes the bus. Sources that still name it play on the master bus "
+	  "from now on, with a warning in the log.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Name", "",
+	  "The name of the bus to add. It is what a source's Bus field and a "
+	  "script's Set Bus Volume refer to, so keep it short and spell it the same "
+	  "way everywhere.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Add Bus", "",
+	  "Creates the bus named on the left, at 0 dB, and saves it with the "
+	  "project.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Add Music, SFX and Voice", "",
+	  "Creates the three buses most games end up with, in one click, spelled "
+	  "the way a source's Bus field most likely already is.",
+	  "", "systems#audio" },
 	{ "Notifications/Mark all as seen", "",
 	  "Clears the bell without discarding the entries — they stay readable in "
 	  "the list.",
@@ -4724,11 +4774,13 @@ namespace
 	  "Preview only, like the volume above it.",
 	  "", "systems#audio" },
 	{ "Audio Editor/Import as Audio Asset", "",
-	  "Turns the source .wav open in this tab into an asset the project can "
-	  "reference, at the path printed under the button. It only appears for a raw "
-	  ".wav, not for a clip that is already an asset. Engine content is read-only "
-	  "unless the editor is in engine-content dev mode, so a .wav from the engine "
-	  "library normally lands in the project's own content instead.",
+	  "Turns the source .wav or .ogg open in this tab into an asset the project "
+	  "can reference, at the path printed under the button. It only appears for a "
+	  "raw source file, not for a clip that is already an asset. A .wav is stored "
+	  "as PCM, an .ogg keeps its Ogg Vorbis stream and is decoded while it plays. "
+	  "Engine content is read-only unless the editor is in engine-content dev "
+	  "mode, so a file from the engine library normally lands in the project's "
+	  "own content instead.",
 	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Sky", "Sky lighting",
 	  "Lights the preview with the sky at a chosen hour, so the mesh can be "
@@ -5430,6 +5482,11 @@ namespace
 	  "Everything the engine logged this session — warnings, errors, script "
 	  "output. The first place to look when something did not happen.",
 	  "Ctrl+`", "advanced#diagnostics" },
+	{ "panel.audio-mixer", "Audio Mixer",
+	  "The project's audio buses as fader strips, with mute and solo. The "
+	  "buses and their levels are saved with the project; a source's Bus field "
+	  "names one of them.",
+	  "", "systems#audio" },
 	{ "panel.profiler", "Performance Profiler",
 	  "Where the frame time goes: a live CPU and GPU readout, and captures that "
 	  "break a single frame down pass by pass.",
@@ -5528,6 +5585,7 @@ namespace
 		{ "Content Browser/",  "editor-interface", "Editor Interface", "Content Browser" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
+		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },

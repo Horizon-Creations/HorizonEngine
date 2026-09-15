@@ -494,12 +494,31 @@ struct ScriptAsset : public RuntimeAsset
 	HE::ScriptLanguage language = HE::ScriptLanguage::Lua;
 };
 
+// What `AudioAsset::audioData` holds. PCM16 is the decoded form (.wav imports);
+// Vorbis keeps the source .ogg bytes verbatim, and the AudioEngine decodes them
+// on the fly while the voice plays — ten music tracks are ~40 MB as Vorbis where
+// they were ~400 MB as PCM, in the pak and in RAM alike. Persisted as an int32
+// in CHUNK_AUMI (absent in old files → PCM16), the bytes in CHUNK_PCMD or
+// CHUNK_OGGD by encoding, so an engine that predates Vorbis sees no PCM chunk
+// and skips the clip instead of playing Ogg pages as samples.
+enum class AudioEncoding : uint8_t { PCM16 = 0, Vorbis = 1 };
+
 struct AudioAsset : public RuntimeAsset
 {
+	// PCM16: interleaved int16 frames. Vorbis: a complete Ogg Vorbis stream.
 	std::vector<uint8_t> audioData;
 	int                  sampleRate = 0;
 	int                  channels   = 0;
+	AudioEncoding        encoding   = AudioEncoding::PCM16;
 };
+
+// Frame count of a PCM16 clip (0 for a compressed one — its length is only
+// known to the decoder, see AudioEngine::getSoundLengthFrames / decodeToPcm16).
+inline size_t audioPcmFrameCount(const AudioAsset& a)
+{
+	if (a.encoding != AudioEncoding::PCM16 || a.channels <= 0) return 0;
+	return a.audioData.size() / (sizeof(int16_t) * static_cast<size_t>(a.channels));
+}
 
 struct FontAsset : public RuntimeAsset
 {

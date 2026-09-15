@@ -109,7 +109,8 @@ inline constexpr uint32_t CHUNK_PIXL = makeChunkId('P','I','X','L'); // pixel da
 
 // Audio
 inline constexpr uint32_t CHUNK_AUMI = makeChunkId('A','U','M','I'); // audio meta
-inline constexpr uint32_t CHUNK_PCMD = makeChunkId('P','C','M','D'); // PCM data
+inline constexpr uint32_t CHUNK_PCMD = makeChunkId('P','C','M','D'); // PCM data (AudioEncoding::PCM16)
+inline constexpr uint32_t CHUNK_OGGD = makeChunkId('O','G','G','D'); // Ogg Vorbis stream (AudioEncoding::Vorbis)
 
 // Material
 inline constexpr uint32_t CHUNK_MTRL = makeChunkId('M','T','R','L'); // shader path + tex refs

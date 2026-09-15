@@ -1521,6 +1521,17 @@ void EditorApplication::OnInit()
 		HE::uiSetFontScripts(m_projectManager.currentProject().fontScripts);
 		HE::uiSetFontWeightBold(m_projectManager.currentProject().fontWeightBold);
 
+		// The project's mixer buses into the editor's own audio device, so an
+		// auditioned clip and the Audio Mixer window see them before play. The
+		// buses of a previously opened project are torn down first — a bus
+		// list is per project, and the engine outlives the project.
+		if (m_audioEngine.isInitialized())
+		{
+			for (const std::string& bus : m_audioEngine.busNames())
+				m_audioEngine.removeBus(bus);
+			m_audioEngine.applyBusConfig(m_projectManager.currentProject().audioBuses);
+		}
+
 		// Point the ContentManager at this project's content folder so the
 		// renderer and the content browser can resolve asset references.
 		{
@@ -3009,7 +3020,7 @@ void EditorApplication::OnRender(float dt)
 			{
 				if (wx.flashTriggered && wx.thunderSound != HE::UUID{})
 					if (const auto* a = contentManager().getAudio(wx.thunderSound))
-						m_audioEngine.play(a->audioData, a->sampleRate, a->channels);
+						m_audioEngine.play(*a);
 				break;
 			}
 		}
@@ -8053,7 +8064,11 @@ void EditorApplication::setPlayMode(bool play)
 		m_entityHost.setPhysicsWorld(m_physicsWorld.get());
 		m_physicsAccum = 0.0f;
 
-		// Start audio for sources marked playOnStart
+		// Start audio for sources marked playOnStart — after the project's
+		// buses are in place (a script may have made more since the project
+		// loaded; those are left alone, see applyBusConfig), the same order
+		// GameApplication keeps.
+		m_audioEngine.applyBusConfig(m_projectManager.currentProject().audioBuses);
 		AudioSystem::playOnStart(*m_editorWorld, m_audioEngine, &contentManager());
 
 		// Initialise script context and start all enabled scripts

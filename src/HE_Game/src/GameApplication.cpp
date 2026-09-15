@@ -1169,7 +1169,12 @@ void GameApplication::OnInit()
 	// Audio: init the engine and start playOnStart sources, mirroring the editor's
 	// play mode — packaged games get sound too (HC/script audio.* routes here).
 	if (m_audioEngine.init())
+	{
+		// The project's buses BEFORE the first source starts: a source names
+		// its bus at play time, and one that does not exist yet means master.
+		m_audioEngine.applyBusConfig(m_config.audioBuses);
 		AudioSystem::playOnStart(*m_world, m_audioEngine, &contentManager());
+	}
 	else
 		HE_LOG_WARN(Core, "%s",
 			"GameApplication: audio device init failed — running silent");

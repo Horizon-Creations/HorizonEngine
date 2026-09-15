@@ -2849,7 +2849,42 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			{
 				Row::dragFloat("Inner Range##as",   &a->innerRange,    0.1f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
 				Row::dragFloat("Range##as",         &a->range,         0.5f, 0.0f, 1000.0f, "%.1f m"); trackEdit();
-				Row::dragFloat("Rolloff Factor##as", &a->rolloffFactor, 0.1f, 0.0f, 10.0f,  "%.2f");   trackEdit();
+				static const char* const kAttenuation[] = { "Linear", "Inverse", "Exponential", "None" };
+				int model = static_cast<int>(a->attenuation);
+				if (Row::combo("Attenuation##as", &model, kAttenuation, 4))
+					a->attenuation = static_cast<AudioAttenuation>(model);
+				trackEdit();
+				if (a->attenuation != AudioAttenuation::None)
+				{
+					Row::dragFloat("Rolloff Factor##as", &a->rolloffFactor, 0.1f, 0.0f, 10.0f, "%.2f");
+					trackEdit();
+				}
+
+				// The curve the numbers above describe, gain over distance from
+				// the source out to the range. Drawn from the same function the
+				// engine's model was transcribed into, so the picture is what
+				// will be heard rather than an illustration of the idea.
+				{
+					float curve[64];
+					const float far = std::max(a->range, a->innerRange + 0.01f);
+					for (int i = 0; i < 64; ++i)
+						curve[i] = attenuationGain(a->attenuation, far * float(i) / 63.0f,
+						                           a->innerRange, a->range, a->rolloffFactor);
+					char overlay[48];
+					std::snprintf(overlay, sizeof(overlay), "0 m .. %.0f m", far);
+					ImGui::TextUnformatted("Falloff");
+					EditorWidgets::helpForKey("Audio Source/Falloff");
+					ImGui::PlotLines("##asfalloff", curve, 64, 0, overlay, 0.0f, 1.0f,
+					                 ImVec2(-FLT_MIN, 48.0f));
+					EditorWidgets::helpForKey("Audio Source/Falloff");
+				}
+
+				// A source that is playing follows the edit: the engine holds
+				// the falloff on the voice, and a change here would otherwise be
+				// heard only on the next play.
+				if (a->handle != 0 && ctx.audioEngine)
+					ctx.audioEngine->setSoundAttenuation(a->handle, a->attenuation,
+					                                     a->innerRange, a->range, a->rolloffFactor);
 			}
 		}
 		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AudioSourceComponent>(entity); }

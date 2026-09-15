@@ -356,7 +356,7 @@ there with no script changes at all.
 | **Input** | 12 | `keyDown`, `mouseButton`, `mousePosition`, `mouseDelta`, `scrollDelta`, `gamepadConnected`, `gamepadButton`, `gamepadAxis`, `setModeGameOnly`, `setModeGameAndUI`, `setModeUIOnly`, `mode` |
 | **Camera** | 6 | `getPosition`/`setPosition`, `getRotation`/`setRotation`, `getFov`/`setFov` |
 | **Environment** | 10 | `get/setTimeOfDay`, `get/setCloudCoverage`, `get/setFogDensity`, `get/setWindDirection`, `get/setWindSpeed` |
-| **Audio** | 7 | `play`, `playAt`, `stop`, `stopAll`, `isPlaying`, `setBusVolume`, `setSoundPosition` |
+| **Audio** | 18 | `play`, `playAt`, `stop`, `stopAll`, `isPlaying`, `setBusVolume`, `setSoundPosition`, per instance: `pause`, `resume`, `isPaused`, `setVolume`, `getVolume`, `setPitch`, `getPitch`, `setLooping`, `seek`, `getTime`, `getLength` |
 | **String** | 11 | `length`, `substring`, `contains`, `find`, `replace`, `toUpper`, `toLower`, `trim`, `startsWith`, `endsWith`, `toNumber` |
 | **File** (`fs`) | 5 | `writeText`, `readText`, `exists`, `remove`, `makeDir` — jailed to a per-user sandbox |
 | **Save** | 17 | `create`, `load`, `write`, `close`, `activeId`, `list`, `exists`, `delete`, `fields`, `set/getNumber`, `set/getString`, `set/getBool`, `set/getStruct` |

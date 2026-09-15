@@ -43,6 +43,9 @@ target_link_libraries(HorizonImporters
 target_include_directories(HorizonImporters
     PUBLIC  src/AssetImporter
     PRIVATE vendor   # stb_image.h, cgltf.h, dr_wav.h
+    # stb_vorbis.c is vendored once, beside miniaudio, and AudioImporter.cpp
+    # compiles its own copy to validate .ogg sources (see the note there).
+    PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Scene/vendor
 )
 
 # ─── asset_compiler.exe ────────────────────────────────────────────────────────

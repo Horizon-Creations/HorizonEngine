@@ -1913,6 +1913,74 @@ TEST_CASE("Audio: null-tolerant without an engine; headless engine answers queri
     engine.shutdown();
 }
 
+TEST_CASE("Audio: per-instance transport rows drive a voice the engine started")
+{
+    // The rows take the handle play()/playAt() return; here the voice comes
+    // straight from the engine (no ContentManager needed) and the rows are
+    // exercised on it through the registry — the path Lua, Python and
+    // HorizonCode all share.
+    AudioEngine engine;
+    REQUIRE(engine.init(/*noDevice=*/true));
+    Ctx c{}; c.audio = &engine;
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // 2 s of stereo silence at 48 kHz, volume 0.8, pitch 1.0.
+    const std::vector<uint8_t> pcm(48000 * 2 * 2 * 2, 0);
+    const int h = (int)engine.play(pcm, 48000, 2, 0.8f, 1.0f);
+    REQUIRE(h != 0);
+
+    // Length and playhead are seconds of the clip.
+    CHECK(call("audio.getLength", { Value::ofInt(h) })[0].f == doctest::Approx(2.0f));
+    CHECK(call("audio.getTime",   { Value::ofInt(h) })[0].f == doctest::Approx(0.0f));
+    call("audio.seek", { Value::ofInt(h), Value::ofFloat(0.5f) });
+    CHECK(call("audio.getTime",   { Value::ofInt(h) })[0].f == doctest::Approx(0.5f));
+    // Seek is clamped, not rejected: past the end lands at the end, negative at 0.
+    call("audio.seek", { Value::ofInt(h), Value::ofFloat(99.0f) });
+    CHECK(call("audio.getTime",   { Value::ofInt(h) })[0].f == doctest::Approx(2.0f));
+    call("audio.seek", { Value::ofInt(h), Value::ofFloat(-3.0f) });
+    CHECK(call("audio.getTime",   { Value::ofInt(h) })[0].f == doctest::Approx(0.0f));
+
+    // Pause keeps the voice: isPlaying false, isPaused true, cursor intact.
+    call("audio.seek", { Value::ofInt(h), Value::ofFloat(1.0f) });
+    call("audio.pause", { Value::ofInt(h) });
+    CHECK(call("audio.isPlaying", { Value::ofInt(h) })[0].b == false);
+    CHECK(call("audio.isPaused",  { Value::ofInt(h) })[0].b == true);
+    CHECK(call("audio.getTime",   { Value::ofInt(h) })[0].f == doctest::Approx(1.0f));
+    call("audio.resume", { Value::ofInt(h) });
+    CHECK(call("audio.isPlaying", { Value::ofInt(h) })[0].b == true);
+    CHECK(call("audio.isPaused",  { Value::ofInt(h) })[0].b == false);
+
+    // Live parameters read back through their getters.
+    CHECK(call("audio.getVolume", { Value::ofInt(h) })[0].f == doctest::Approx(0.8f));
+    call("audio.setVolume", { Value::ofInt(h), Value::ofFloat(0.25f) });
+    CHECK(call("audio.getVolume", { Value::ofInt(h) })[0].f == doctest::Approx(0.25f));
+    CHECK(call("audio.getPitch",  { Value::ofInt(h) })[0].f == doctest::Approx(1.0f));
+    call("audio.setPitch", { Value::ofInt(h), Value::ofFloat(1.5f) });
+    CHECK(call("audio.getPitch",  { Value::ofInt(h) })[0].f == doctest::Approx(1.5f));
+    CHECK_NOTHROW(call("audio.setLooping", { Value::ofInt(h), Value::ofBool(true) }));
+
+    // After stop the handle is gone: every row answers its neutral value.
+    call("audio.stop", { Value::ofInt(h) });
+    CHECK(call("audio.isPaused",  { Value::ofInt(h) })[0].b == false);
+    CHECK(call("audio.getVolume", { Value::ofInt(h) })[0].f == doctest::Approx(0.0f));
+    CHECK(call("audio.getPitch",  { Value::ofInt(h) })[0].f == doctest::Approx(1.0f));
+    CHECK(call("audio.getTime",   { Value::ofInt(h) })[0].f == doctest::Approx(0.0f));
+    CHECK(call("audio.getLength", { Value::ofInt(h) })[0].f == doctest::Approx(0.0f));
+    CHECK_NOTHROW(call("audio.pause",  { Value::ofInt(h) }));
+    CHECK_NOTHROW(call("audio.resume", { Value::ofInt(h) }));
+    CHECK_NOTHROW(call("audio.seek",   { Value::ofInt(h), Value::ofFloat(1.0f) }));
+    engine.shutdown();
+
+    // And with no engine at all, the same neutral answers, no crash.
+    Ctx none{};
+    auto calln = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(none, a); };
+    CHECK(calln("audio.isPaused",  { Value::ofInt(1) })[0].b == false);
+    CHECK(calln("audio.getPitch",  { Value::ofInt(1) })[0].f == doctest::Approx(1.0f));
+    CHECK(calln("audio.getLength", { Value::ofInt(1) })[0].f == doctest::Approx(0.0f));
+    CHECK_NOTHROW(calln("audio.pause",     { Value::ofInt(1) }));
+    CHECK_NOTHROW(calln("audio.setVolume", { Value::ofInt(1), Value::ofFloat(0.5f) }));
+}
+
 // ═══ Debug draw queue ═════════════════════════════════════════════════════════
 
 TEST_CASE("Debug draw: timed primitives live for their duration, then expire")

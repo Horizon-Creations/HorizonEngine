@@ -50,6 +50,7 @@ add_library(HorizonCore SHARED
 	src/HorizonCode/HcCompiledLoader.cpp
 	src/Renderer/UIFont.cpp
 	src/Physics/CollisionLayers.cpp
+	src/Audio/AudioBusConfig.cpp
 	src/Types/TypeRegistry.cpp
 	src/ContentManager/AssetRefRetarget.cpp
 	src/ContentManager/AssetRefScan.cpp

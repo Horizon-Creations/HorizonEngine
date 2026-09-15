@@ -51,6 +51,7 @@
 #include "EditorHelp.h"                  // one scope per menu; the rows look themselves up
 #include "EditorDockState.h"             // "is this panel docked into the layout?"
 #include "PlayReportPanel.h"             // post-PIE warning/error report
+#include "AudioMixerPanel.h"             // View > Audio Mixer window
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
 #include "HorizonVersion.h"              // HE_VERSION_FULL — Help ▸ About
@@ -186,6 +187,8 @@ static bool s_showCollab = false;
 static bool s_showSourceControl = false;
 // Toggled by View > Console (and Ctrl/Cmd+`); drives the log window.
 static bool s_showConsole = false;
+// Toggled by View > Audio Mixer; drives the bus fader window.
+static bool s_showAudioMixer = false;
 
 // Help ▸ Documentation Online. The published manual on the website; the OFFLINE
 // copy the reader panel shows ships next to the editor (EditorDeps/Docs), which
@@ -215,6 +218,7 @@ static bool docsPanelOpener(const char* window)
 		{ "Collaboration",        &s_showCollab        },
 		{ "Source Control",       &s_showSourceControl },
 		{ "Console",              &s_showConsole       },
+		{ "Audio Mixer",          &s_showAudioMixer    },
 	};
 	for (const Toggle& t : toggles)
 		if (std::strcmp(window, t.name) == 0) { revealFloatingWindow(*t.flag, window); return true; }
@@ -261,6 +265,7 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Collaboration",        "PanelOpenCollaboration", &s_showCollab        },
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
+	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
 };
 static bool s_panelPrefsLoaded = false;
 
@@ -1115,10 +1120,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// be sitting here when the NEXT dialog returns.
 		s_pendingImportPaths.clear();
 		SDL_DialogFileFilter filters[] = {
-			{ "All Supported Assets", "gltf;glb;png;jpg;jpeg;tga;bmp;hdr;wav;hmat;ttf;otf" },
+			{ "All Supported Assets", "gltf;glb;png;jpg;jpeg;tga;bmp;hdr;wav;ogg;hmat;ttf;otf" },
 			{ "3D Models",            "gltf;glb" },
 			{ "Textures",             "png;jpg;jpeg;tga;bmp;hdr" },
-			{ "Audio",                "wav" },
+			{ "Audio",                "wav;ogg" },
 			{ "Materials",            "hmat" },
 			{ "Fonts",                "ttf;otf" },
 		};
@@ -1348,6 +1353,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleCollab,        s_showCollab);
 		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
+		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
 		MacMenuBar::setToggleState(MC::ToggleGroundGrid,    ViewportPanel::groundGridEnabled());
 		MacMenuBar::setToggleState(MC::OpenTutorial,        TutorialPanel::isOpen());
 		for (MC c; (c = MacMenuBar::take()) != MC::None; )
@@ -1380,6 +1386,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleSourceControl:
 				togglePanelWindow(s_showSourceControl, "Source Control"); break;
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
+			case MC::ToggleAudioMixer: togglePanelWindow(s_showAudioMixer, "Audio Mixer");     break;
 			case MC::ToggleGroundGrid:
 				ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());     break;
 			case MC::OpenLevelScript:
@@ -1523,6 +1530,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showSourceControl, "Source Control");
         if (EditorWidgets::menuItem("Console", "Ctrl+`", s_showConsole))
             togglePanelWindow(s_showConsole, "Console");
+        if (EditorWidgets::menuItem("Audio Mixer", nullptr, s_showAudioMixer))
+            togglePanelWindow(s_showAudioMixer, "Audio Mixer");
         // Also in the viewport toolbar's options popup. It belongs in both: the
         // toolbar is where you reach for it while working, this menu is where you
         // look for it the first time. Both are gone in an application: there is
@@ -2918,7 +2927,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             ParticleGraphEditorPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(tabPath))
             AnimatorStateMachineEditorPanel::render(ctx, tabPath, tabPos, tabSize);
-        // Audio .hasset AND raw .wav. Like the C++ viewer below it, the raw-file half
+        // Audio .hasset AND raw .wav/.ogg. Like the C++ viewer below it, the raw-file half
         // is an extension check, so it has to beat the ScriptEditorPanel fallthrough —
         // which would render megabytes of PCM as text.
         else if (AudioEditorPanel::isAudioAsset(tabPath))
@@ -3087,6 +3096,9 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	// FLOATING the console keeps working there — which is where renderEditor has
 	// already returned.
 	ConsolePanel::DrawConsoleWindow(ctx, s_showConsole);
+	// The mixer too: a fader is moved while a script tab is in front and the
+	// scene plays behind it.
+	AudioMixerPanel::DrawAudioMixerWindow(ctx, s_showAudioMixer);
 
 	// The second half of revealFloatingWindow: the window a footer widget asked
 	// for exists by now, so the focus request that was a no-op at click time

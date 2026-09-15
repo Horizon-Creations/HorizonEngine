@@ -32,14 +32,13 @@ struct AudioSystem
                 float y = t ? t->position.y : 0.0f;
                 float z = t ? t->position.z : 0.0f;
                 src.handle = engine.playSpatial(
-                    asset->audioData, asset->sampleRate, asset->channels,
-                    src.volume, src.pitch, src.loop,
-                    x, y, z, src.innerRange, src.range, src.busName);
+                    *asset, src.volume, src.pitch, src.loop,
+                    x, y, z, src.innerRange, src.range, src.busName,
+                    src.attenuation, src.rolloffFactor);
             }
             else
             {
-                src.handle = engine.play(asset->audioData, asset->sampleRate,
-                                          asset->channels, src.volume, src.pitch, src.loop,
+                src.handle = engine.play(*asset, src.volume, src.pitch, src.loop,
                                           src.busName);
             }
         }
