@@ -268,11 +268,12 @@ constexpr Step kContent[] = {
 
 	{ "import",
 	  "Import your own assets",
-	  "Assets - Import Asset (or dragging files in) brings in glTF/GLB models, "
-	  "PNG/JPG/TGA/HDR textures, WAV audio and fonts. Importing converts them to "
-	  ".hasset once; the editor never re-reads the original at runtime.\n"
+	  "Assets - Import Asset (or dragging files in) brings in glTF/GLB, FBX, OBJ "
+	  "and COLLADA models, PNG/JPG/TGA/HDR textures, WAV audio and fonts. "
+	  "Importing converts them to .hasset once; the editor never re-reads the "
+	  "original at runtime.\n"
 	  "A glTF with a skin is imported as a skeletal mesh plus its animation clips, "
-	  "everything else as a static mesh.",
+	  "everything else - a rigged FBX included - as a static mesh.",
 	  "Open Assets - Import Asset. Cancelling the file dialog is fine.",
 	  "Content Browser", Check::ImportOpened, "" },
 
@@ -337,7 +338,8 @@ constexpr Step kAssetTypes[] = {
 	  "instances rather than one draw call each.\n"
 	  "A Skeletal Mesh is the same thing plus a rig, and carries its Animation "
 	  "Clips. Both usually arrive through Import from a glTF/GLB — whether the file "
-	  "has a skin decides which one you get.",
+	  "has a skin decides which one you get. FBX, OBJ and COLLADA always give a "
+	  "Static Mesh.",
 	  "Create a Static Mesh asset and double-click it to open its editor.",
 	  "Content Browser", Check::TabOfTypeOpened, "staticmesh" },
 

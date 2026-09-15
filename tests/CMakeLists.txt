@@ -97,6 +97,7 @@ add_executable(he_tests
     test_camera_rig.cpp
     test_skeletalmeshimporter.cpp
     test_meshimporter.cpp
+    test_assimpimport.cpp
     test_gltf_material_import.cpp
     test_skeletalmeshcomponent.cpp
     test_animationsystem.cpp

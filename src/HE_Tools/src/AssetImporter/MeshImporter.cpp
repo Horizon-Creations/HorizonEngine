@@ -3,6 +3,9 @@
 #include <cstdint>
 #include "ImporterCommon.h"
 #include "Diagnostics/Logger.h"
+#ifdef HE_HAVE_ASSIMP
+#include "AssimpMeshImport.h"   // FBX / OBJ / COLLADA (no Assimp headers leak through it)
+#endif
 
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
@@ -90,6 +93,97 @@ void generateNormals(StaticMeshAsset& mesh)
 	}
 }
 
+// The last stretch every format shares: pin section 0 to the mesh-level
+// material, write the asset, report. Slot 0 is spelled out with the mesh-level
+// material so the two never disagree — even when that one came from a
+// re-import redirect rather than the source file.
+std::unique_ptr<StaticMeshAsset> finishImport(std::unique_ptr<StaticMeshAsset> mesh,
+                                              const std::filesystem::path&     sourcePath,
+                                              const std::filesystem::path&     contentRoot)
+{
+	if (!mesh->sections.empty() && mesh->sections[0].materialPath.empty())
+		mesh->sections[0].materialPath = mesh->materialPath;
+
+	if (!Importer::writeAsset(*mesh, contentRoot, sourcePath))
+		return nullptr;
+
+	HE_LOG_INFO(Tool, "%s",
+		("MeshImporter: " + sourcePath.filename().string() + " -> " + mesh->path
+		 + " (" + std::to_string(mesh->vertices.size() / 3) + " verts, "
+		 + std::to_string(mesh->indices.size() / 3) + " tris, "
+		 + std::to_string(mesh->sections.size()) + " section"
+		 + (mesh->sections.size() == 1 ? "" : "s") + ")").c_str());
+	return mesh;
+}
+
+#ifdef HE_HAVE_ASSIMP
+// FBX / OBJ / COLLADA through Assimp. The geometry arrives in the same streams
+// the glTF bake fills, so normals, sections and the write are the shared code
+// above; only the reading differs. Materials go through the same core as
+// glTF's (PbrMaterialImport) — AssimpMaterialImport translates aiMaterial into
+// its description — so every aiMaterial becomes a MaterialAsset with its
+// textures, bound section by section exactly as on the glTF path.
+std::unique_ptr<StaticMeshAsset> importViaAssimp(
+	const std::filesystem::path&        sourcePath,
+	const std::filesystem::path&        contentRoot,
+	const std::filesystem::path&        relativeOutputDir,
+	const MeshImporter::ImportSettings& settings,
+	const Importer::OutputTargets&      outputs)
+{
+	Importer::AssimpScene scene;
+	std::string           error;
+	if (!scene.load(sourcePath, error))
+	{
+		logError(sourcePath.string() + ": " + error);
+		return nullptr;
+	}
+
+	Importer::AssimpBakedGeometry baked;
+	if (!scene.bake(settings.uniformScale, baked))
+	{
+		logError(sourcePath.string() + ": no triangle geometry found");
+		return nullptr;
+	}
+	if (baked.skinned)
+		HE_LOG_WARN(Tool, "%s",
+			("MeshImporter: " + sourcePath.filename().string()
+			 + " carries a skeleton — imported as a StaticMesh in its bind pose "
+			   "(skinned import is glTF-only)").c_str());
+
+	const std::string stem = sourcePath.stem().string();
+	const auto        out  = Importer::resolveOutput(outputs.asset, relativeOutputDir, stem);
+
+	auto mesh = std::make_unique<StaticMeshAsset>();
+	mesh->type     = HE::AssetType::StaticMesh;
+	mesh->name     = out.name;
+	mesh->path     = out.path;
+	mesh->vertices = std::move(baked.positions);
+	mesh->normals  = std::move(baked.normals);
+	mesh->uvs      = std::move(baked.uvs);
+	mesh->indices  = std::move(baked.indices);
+
+	if (settings.generateNormals && baked.missingNormals)
+		generateNormals(*mesh);
+
+	// Materials + textures, the glTF rule throughout: every source material its
+	// own asset, section 0's is the mesh-level MREF, the stem only names UNNAMED
+	// materials and embedded images.
+	const int primary = scene.primaryMaterialIndex(baked);
+	Importer::PbrMaterialImport materials;
+	if (settings.importMaterials)
+		materials = Importer::importAssimpMaterials(
+			scene, primary, sourcePath, contentRoot, relativeOutputDir, stem, outputs);
+	mesh->materialPath = materials.primary;
+	// See the glTF path for why an empty MREF must be avoided.
+	if (mesh->materialPath.empty())
+		mesh->materialPath = outputs.material;
+	mesh->sections = Importer::buildMeshSections(
+		baked.ranges, primary, materials.paths, mesh->indices);
+
+	return finishImport(std::move(mesh), sourcePath, contentRoot);
+}
+#endif
+
 } // namespace
 
 std::unique_ptr<StaticMeshAsset> MeshImporter::import(
@@ -99,6 +193,11 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 	const ImportSettings&          settings,
 	const Importer::OutputTargets& outputs)
 {
+#ifdef HE_HAVE_ASSIMP
+	if (Importer::isAssimpSource(sourcePath))
+		return importViaAssimp(sourcePath, contentRoot, relativeOutputDir, settings, outputs);
+#endif
+
 	cgltf_options options{};
 	cgltf_data*   data = nullptr;
 
@@ -177,24 +276,11 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 	if (mesh->materialPath.empty())
 		mesh->materialPath = outputs.material;
 
-	// Sections: one per material, the index buffer regrouped to match. Slot 0 is
-	// spelled out with the mesh-level material so the two never disagree — even
-	// when that one came from the re-import redirect above rather than the glTF.
+	// Sections: one per material, the index buffer regrouped to match.
 	mesh->sections = Importer::buildMeshSections(
 		data, baked, Importer::gltfPrimaryMaterial(data), materials.paths, mesh->indices);
-	if (!mesh->sections.empty() && mesh->sections[0].materialPath.empty())
-		mesh->sections[0].materialPath = mesh->materialPath;
 
 	cgltf_free(data);
 
-	if (!Importer::writeAsset(*mesh, contentRoot, sourcePath))
-		return nullptr;
-
-	HE_LOG_INFO(Tool, "%s",
-		("MeshImporter: " + sourcePath.filename().string() + " -> " + mesh->path
-		 + " (" + std::to_string(mesh->vertices.size() / 3) + " verts, "
-		 + std::to_string(mesh->indices.size() / 3) + " tris, "
-		 + std::to_string(mesh->sections.size()) + " section"
-		 + (mesh->sections.size() == 1 ? "" : "s") + ")").c_str());
-	return mesh;
+	return finishImport(std::move(mesh), sourcePath, contentRoot);
 }
