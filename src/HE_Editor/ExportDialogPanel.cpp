@@ -154,6 +154,13 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("SSAORadius",                cfg.SSAORadius);
     put("SSAOIntensity",             cfg.SSAOIntensity);
     put("SSAOMethod",                cfg.SSAOMethod);
+    put("DoFEnabled",                cfg.DoFEnabled);
+    put("DoFFocusDistance",          cfg.DoFFocusDistance);
+    put("DoFFocusRange",             cfg.DoFFocusRange);
+    put("DoFAperture",               cfg.DoFAperture);
+    put("MotionBlurEnabled",         cfg.MotionBlurEnabled);
+    put("MotionBlurIntensity",       cfg.MotionBlurIntensity);
+    put("MotionBlurMax",             cfg.MotionBlurMax);
     put("AntiAliasing",              cfg.AntiAliasing);
     put("AASharpness",               cfg.AASharpness);
     put("RenderScale",               cfg.RenderScale);
@@ -163,6 +170,7 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("GlobalIlluminationEnabled", cfg.GlobalIlluminationEnabled);
     put("GIIndirectIntensity",       cfg.GIIndirectIntensity);
     put("GILightRadius",             cfg.GILightRadius);
+    put("OcclusionCulling",          cfg.OcclusionCulling);
     put("SSREnabled",                cfg.SSREnabled);
     put("SSRIntensity",              cfg.SSRIntensity);
     put("SSRMaxRoughness",           cfg.SSRMaxRoughness);

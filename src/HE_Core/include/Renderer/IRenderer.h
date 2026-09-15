@@ -221,6 +221,9 @@ public:
         double                   gpuFrameMs = -1.0;
         std::vector<GpuPassTime> passes;
         uint32_t drawCalls = 0, triangles = 0, visibleObjects = 0, totalObjects = 0;
+        // Objects the occlusion culler removed from the frustum-visible set this
+        // frame (0 when it is off). visibleObjects already excludes them.
+        uint32_t occlusionCulled = 0;
         double   vramUsedMB = 0.0, vramBudgetMB = 0.0;
         // Which GPU-timing path actually produced `passes` this frame (a static
         // literal): "detailed" (one cmdbuf/pass, serialized, exclusive+additive),
@@ -393,6 +396,69 @@ public:
         int   quality      = 1;      // 0 = 16 steps, 1 = 32, 2 = 64
     };
     virtual void SetSSRSettings(const SSRSettings& /*settings*/) {}
+
+    // ── Occlusion culling (CPU software depth buffer) ───────────────────────
+    // Pushed like SSR/GI. Objects whose whole bounding box sits behind opaque,
+    // nearer geometry are dropped after the frustum cull, before sorting and
+    // drawing — on the CPU, from the mesh data the ContentManager holds, for
+    // THIS frame's camera (no GPU-query latency, no pop-in). Conservative by
+    // construction: the image with it on is identical to the image with it
+    // off, only the draw/visible counts drop (FrameGpuStats::occlusionCulled).
+    // Implemented by the OpenGL and Metal backends (HorizonRendering::
+    // OcclusionCuller); the others ignore it for now. Off by default.
+    struct OcclusionCullingSettings
+    {
+        bool enabled = false;
+    };
+    virtual void SetOcclusionCullingSettings(const OcclusionCullingSettings& /*settings*/) {}
+
+    // ── Depth of field (post-process) ────────────────────────────────────────
+    // Pushed like bloom/SSAO. A camera-lens blur on the HDR image BEFORE bloom
+    // and tonemapping: the scene depth becomes a per-pixel circle of confusion
+    // (CoC), the image is blurred at half resolution by a separable, CoC-weighted
+    // gather (near objects spill over the sharp background, the blurred
+    // background never bleeds over a sharp foreground), and the composite lerps
+    // sharp ↔ blurred by that CoC. The parameters are artist-facing, not
+    // millimetres of sensor:
+    //   focusDistance — metres from the camera to the plane in focus
+    //   focusRange    — width (metres) of the fully sharp band around that
+    //                   plane; the blur ramps to full over the same distance
+    //                   again on either side
+    //   aperture      — f-number: f/1.4 is the widest blur, f/22 next to none
+    //                   (max blur radius scales with 1/aperture)
+    // Implemented by the OpenGL and Metal backends; the others ignore it. Off by
+    // default, and off = the image is byte-identical to the pass not existing.
+    struct DepthOfFieldSettings
+    {
+        bool  enabled       = false;
+        float focusDistance = 10.0f;
+        float focusRange    = 4.0f;
+        float aperture      = 2.8f;
+    };
+    virtual void SetDepthOfFieldSettings(const DepthOfFieldSettings& /*settings*/) {}
+
+    // ── Motion blur (post-process) ───────────────────────────────────────────
+    // Pushed like DoF. CAMERA motion blur on the HDR image after DoF and before
+    // bloom/tonemap: every pixel's world position is rebuilt from the scene
+    // depth, reprojected with the previous frame's view-projection, and the
+    // image is smeared along that screen-space delta. Objects moving through a
+    // still camera do NOT blur — per-object velocity is a follow-up, not this
+    // pass. Parameters:
+    //   intensity — shutter as a fraction of the frame interval: 0.5 = the
+    //               classic 180° shutter, 1 = the full frame's motion, 0 = off
+    //   maxBlur   — cap on the smear length in pixels at 720p (scales with the
+    //               target height), so a camera cut is one bad-ish frame and
+    //               not a full-screen wipe
+    // Implemented by the OpenGL and Metal backends; the others ignore it. Off by
+    // default, and off (or a camera that did not move) = the image is
+    // byte-identical to the pass not existing.
+    struct MotionBlurSettings
+    {
+        bool  enabled   = false;
+        float intensity = 0.5f;
+        float maxBlur   = 24.0f;
+    };
+    virtual void SetMotionBlurSettings(const MotionBlurSettings& /*settings*/) {}
 
     // ── Ray-traced GI reflections (docs/gi-reflections-plan.md) ─────────────
     // Pushed like SSR/GI. One specular ray per (half-res) pixel against the GI

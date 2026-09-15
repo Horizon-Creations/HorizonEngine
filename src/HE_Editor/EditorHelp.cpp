@@ -2250,6 +2250,11 @@ namespace
 	  "Forward shades each object as it is drawn. Deferred shades the whole screen "
 	  "at once, which is what lifts the light count and turns on SSAO and SSR.",
 	  "", "rendering#pipeline" },
+	{ "Preferences/Display/Occlusion Culling", "",
+	  "Skips drawing what a wall, a hill or a building is already hiding. The "
+	  "picture stays the same; the draw count drops. Off by default until it "
+	  "has proven itself on real scenes.",
+	  "", "rendering#performance" },
 	{ "Preferences/Display/VSync", "",
 	  "Waits for the display before showing a frame: no tearing, and the frame "
 	  "rate is capped to the monitor's. Off is for measuring performance.",
@@ -2303,6 +2308,35 @@ namespace
 	{ "Preferences/Post-Processing/AO Intensity", "",
 	  "How dark the occlusion gets. Past 1 it stops reading as shadow and starts "
 	  "reading as dirt.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Depth of Field", "",
+	  "Blurs what is nearer or farther than the focus distance, the way a camera "
+	  "lens does. Near things spill over the background; the background never "
+	  "bleeds over a sharp foreground. OpenGL and Metal.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Focus Distance", "",
+	  "How far from the camera, in metres, the picture is sharpest.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Focus Range", "",
+	  "How deep the fully sharp band around that distance is, in metres. The "
+	  "blur then ramps up over the same distance again on either side.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Aperture", "",
+	  "The lens's f-number. f/1.4 blurs everything outside the band heavily, "
+	  "f/22 leaves almost everything sharp.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Motion Blur", "",
+	  "Streaks the picture along the camera's movement between two frames, the "
+	  "way a real shutter does. Only the camera counts: an object crossing a "
+	  "still camera stays sharp. OpenGL and Metal.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Shutter", "",
+	  "How much of one frame's motion goes into the streak. 0.5 is the classic "
+	  "film shutter; 1 smears the full frame's worth.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Max Blur", "",
+	  "The longest streak allowed, in pixels at 720p. Keeps a camera cut from "
+	  "wiping the whole screen for a frame.",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/Screen-Space Reflections", "",
 	  "Reflects what is already on screen in wet and polished surfaces. What is "

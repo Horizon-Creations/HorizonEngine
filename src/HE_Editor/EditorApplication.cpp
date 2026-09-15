@@ -1174,6 +1174,13 @@ void EditorApplication::OnInit()
 	m_editorConfig.SSAORadius                  = globalstate.getCustomConfigFloat("SSAORadius",         m_editorConfig.SSAORadius);
 	m_editorConfig.SSAOIntensity               = globalstate.getCustomConfigFloat("SSAOIntensity",      m_editorConfig.SSAOIntensity);
 	m_editorConfig.SSAOMethod                  = globalstate.getCustomConfigInt("SSAOMethod",           m_editorConfig.SSAOMethod);
+	m_editorConfig.DoFEnabled                  = globalstate.getCustomConfigBool("DoFEnabled",          m_editorConfig.DoFEnabled);
+	m_editorConfig.DoFFocusDistance            = globalstate.getCustomConfigFloat("DoFFocusDistance",   m_editorConfig.DoFFocusDistance);
+	m_editorConfig.DoFFocusRange               = globalstate.getCustomConfigFloat("DoFFocusRange",      m_editorConfig.DoFFocusRange);
+	m_editorConfig.DoFAperture                 = globalstate.getCustomConfigFloat("DoFAperture",        m_editorConfig.DoFAperture);
+	m_editorConfig.MotionBlurEnabled           = globalstate.getCustomConfigBool("MotionBlurEnabled",   m_editorConfig.MotionBlurEnabled);
+	m_editorConfig.MotionBlurIntensity         = globalstate.getCustomConfigFloat("MotionBlurIntensity", m_editorConfig.MotionBlurIntensity);
+	m_editorConfig.MotionBlurMax               = globalstate.getCustomConfigFloat("MotionBlurMax",      m_editorConfig.MotionBlurMax);
 	m_editorConfig.AntiAliasing                = globalstate.getCustomConfigInt("AntiAliasing",         m_editorConfig.AntiAliasing);
 	m_editorConfig.AASharpness                 = globalstate.getCustomConfigFloat("AASharpness",        m_editorConfig.AASharpness);
 	m_editorConfig.RenderScale                 = globalstate.getCustomConfigFloat("RenderScale",        m_editorConfig.RenderScale);
@@ -1190,6 +1197,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflQuality               = globalstate.getCustomConfigInt("GIReflQuality",              m_editorConfig.GIReflQuality);
 	m_editorConfig.GIReflBounces               = globalstate.getCustomConfigInt("GIReflBounces",              m_editorConfig.GIReflBounces);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
+	m_editorConfig.OcclusionCulling            = globalstate.getCustomConfigBool("OcclusionCulling",    m_editorConfig.OcclusionCulling);
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
 	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
 	m_editorConfig.SSRQuality                  = globalstate.getCustomConfigInt("SSRQuality",           m_editorConfig.SSRQuality);
@@ -2649,6 +2657,15 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.SSAORadius,
 			m_editorConfig.SSAOIntensity,
 			m_editorConfig.SSAOMethod});
+		renderer()->SetDepthOfFieldSettings(IRenderer::DepthOfFieldSettings{
+			m_editorConfig.DoFEnabled,
+			m_editorConfig.DoFFocusDistance,
+			m_editorConfig.DoFFocusRange,
+			m_editorConfig.DoFAperture});
+		renderer()->SetMotionBlurSettings(IRenderer::MotionBlurSettings{
+			m_editorConfig.MotionBlurEnabled,
+			m_editorConfig.MotionBlurIntensity,
+			m_editorConfig.MotionBlurMax});
 		// Directional shadows come from the PROJECT (Project Settings ▸ Shadows),
 		// not from the editor's preferences: the cascades a scene is lit with
 		// are part of the scene's look and must not differ between machines.
@@ -2691,6 +2708,8 @@ void EditorApplication::OnRender(float dt)
 			ssr.quality      = m_editorConfig.SSRQuality;
 			renderer()->SetSSRSettings(ssr);
 		}
+		renderer()->SetOcclusionCullingSettings(
+			IRenderer::OcclusionCullingSettings{ m_editorConfig.OcclusionCulling });
 		{
 			IRenderer::GIReflectionSettings gr;
 			gr.enabled      = m_editorConfig.GIReflectionsEnabled;
@@ -4172,6 +4191,31 @@ void EditorApplication::dumpFrameHeadless()
 			dumpSSAO, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
 			m_editorConfig.SSAOMethod});
 	}
+	{
+		// HE_DUMP_DOF (+ DOFFOCUS / DOFRANGE / DOFAPERTURE): override the
+		// depth-of-field settings for this capture only, so he_shot.py can A/B
+		// the pass and move the focus plane without touching config.json.
+		IRenderer::DepthOfFieldSettings dof{
+			m_editorConfig.DoFEnabled, m_editorConfig.DoFFocusDistance,
+			m_editorConfig.DoFFocusRange, m_editorConfig.DoFAperture};
+		if (const char* v = std::getenv("HE_DUMP_DOF"); v && *v)         dof.enabled       = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_DOFFOCUS"); v && *v)    dof.focusDistance = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_DOFRANGE"); v && *v)    dof.focusRange    = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_DOFAPERTURE"); v && *v) dof.aperture      = static_cast<float>(std::atof(v));
+		r->SetDepthOfFieldSettings(dof);
+	}
+	{
+		// HE_DUMP_MOTIONBLUR (+ MBINTENSITY / MBMAX): override the motion-blur
+		// settings for this capture only. The camera motion itself comes from
+		// HE_DUMP_MBYAWSTEP / MBPITCHSTEP at the capture loop below.
+		IRenderer::MotionBlurSettings mb{
+			m_editorConfig.MotionBlurEnabled, m_editorConfig.MotionBlurIntensity,
+			m_editorConfig.MotionBlurMax};
+		if (const char* v = std::getenv("HE_DUMP_MOTIONBLUR"); v && *v)  mb.enabled   = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_MBINTENSITY"); v && *v) mb.intensity = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_MBMAX"); v && *v)       mb.maxBlur   = static_cast<float>(std::atof(v));
+		r->SetMotionBlurSettings(mb);
+	}
 	r->SetShadowSettings(projectShadowSettings());
 	{
 		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
@@ -4207,6 +4251,17 @@ void EditorApplication::dumpFrameHeadless()
 		}();
 		r->SetGISettings(IRenderer::GISettings{
 			dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius});
+	}
+	{
+		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
+		// this capture only, so he_shot.py can A/B the culler: the two captures
+		// must be pixel-identical, only "dump counters" (visible=, occluded=)
+		// may differ.
+		const bool dumpOcc = [&]{
+			const char* v = std::getenv("HE_DUMP_OCCLUSION");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.OcclusionCulling;
+		}();
+		r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{ dumpOcc });
 	}
 	{
 		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
@@ -4830,6 +4885,72 @@ void EditorApplication::dumpFrameHeadless()
 		reg.emplace<CameraComponent>(place("IconTestCamera", 1.5f, 6.0f), CameraComponent{});
 		reg.emplace<AudioSourceComponent>(place("IconTestAudio", 3.0f, 8.0f), AudioSourceComponent{});
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_ICONTEST five icon entities added");
+	}
+
+	// ── Occlusion-culling witness (HE_DUMP_OCCLUSIONTEST=1): a wall across the
+	// view (default cube scaled 8×4×0.2, six units ahead) with two cubes fully
+	// behind it and one control cube beside it, in the open. The oracle is a
+	// pair of captures, HE_DUMP_OCCLUSION=0 and =1: the images must be
+	// pixel-identical (the hidden cubes never showed anyway) while the log's
+	// "dump counters" line drops by exactly the two hidden cubes — visible= down
+	// by 2, occluded=2, draws= down by 2. Everything is placed relative to the
+	// editor camera the sky-test block aimed above, so PITCH=0 frames it.
+	if (const char* ot = std::getenv("HE_DUMP_OCCLUSIONTEST"); ot && *ot && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0, 1, 0)));
+		const glm::vec3 eye      = m_editorCamera.position();
+
+		auto place = [&](const char* name, glm::vec3 pos, glm::vec3 scale) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.scale    = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			return e;
+		};
+		// The wall spans x/z ±0.67 of the view; the 60° / 16:9 frame reaches ±1.03.
+		place("OcclusionWall",     eye + camFwd * 6.0f,                      glm::vec3(8.0f, 4.0f, 0.2f));
+		place("OcclusionHiddenA",  eye + camFwd * 12.0f,                     glm::vec3(1.0f));
+		place("OcclusionHiddenB",  eye + camFwd * 14.0f + camRight * 1.5f,   glm::vec3(2.0f));
+		place("OcclusionControl",  eye + camFwd * 12.0f + camRight * 10.0f,  glm::vec3(1.0f)); // x/z 0.79..0.88: beside the wall
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_OCCLUSIONTEST wall + 2 hidden cubes + 1 control added");
+	}
+
+	// ── Depth-of-field witness (HE_DUMP_DOFTEST=1): five default cubes at 3, 6,
+	// 12, 24 and 48 metres ahead of the editor camera, fanned out sideways and
+	// scaled with their distance so each covers about the same patch of screen
+	// (screen x ≈ -0.44, -0.2, 0, +0.2, +0.44 in NDC). The oracle is a trio of
+	// captures: HE_DUMP_DOF=0, and =1 with HE_DUMP_DOFFOCUS=6 and =24. Against
+	// the off frame the cube AT the focus distance must stay (near) pixel-
+	// identical while the others go soft — and the two focus frames must differ
+	// from each other in exactly those regions, or the CoC is not reading depth.
+	if (const char* dt = std::getenv("HE_DUMP_DOFTEST"); dt && *dt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0, 1, 0)));
+		const glm::vec3 eye      = m_editorCamera.position();
+
+		const float dist[5] = { 3.0f, 6.0f, 12.0f, 24.0f, 48.0f };
+		const float side[5] = { -0.45f, -0.2f, 0.0f, 0.2f, 0.45f };
+		const char* names[5] = { "DofCube3m", "DofCube6m", "DofCube12m", "DofCube24m", "DofCube48m" };
+		for (int i = 0; i < 5; ++i)
+		{
+			auto e = m_editorWorld->createEntity(names[i]);
+			TransformComponent tc;
+			tc.position = eye + camFwd * dist[i] + camRight * (side[i] * dist[i]);
+			tc.scale    = glm::vec3(dist[i] * 0.15f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_DOFTEST five cubes at 3/6/12/24/48 m added");
 	}
 
 	// ── SSR witness (HE_DUMP_SSRTEST=1): a mirror floor (metallic 1, roughness
@@ -6130,6 +6251,43 @@ void EditorApplication::dumpFrameHeadless()
 	int settleFrames = 3;
 	if (const char* sf = std::getenv("HE_DUMP_FRAMES"); sf && *sf)
 		settleFrames = std::clamp(std::atoi(sf), 1, 240);
+
+	// HE_DUMP_MBYAWSTEP / HE_DUMP_MBPITCHSTEP (degrees): the motion-blur
+	// witness. A headless dump has no camera history — every settle frame
+	// sees the same pose, so the pass measures zero motion and copies the
+	// image through. With a step set, the settle frames are rendered from a
+	// pose turned back by that much and only the CAPTURED frame stands at the
+	// real one: exactly one frame of camera motion, the way a turning camera
+	// produces it. The oracle: MOTIONBLUR=0 and MOTIONBLUR=1 without a step
+	// are md5-identical to the baseline; a yaw step streaks horizontally, a
+	// pitch step vertically, on Metal and GL alike.
+	auto mbEnvF = [](const char* k){ const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : 0.0f; };
+	const float mbYawStep   = mbEnvF("HE_DUMP_MBYAWSTEP");
+	const float mbPitchStep = mbEnvF("HE_DUMP_MBPITCHSTEP");
+	const bool  mbSweep     = (mbYawStep != 0.0f || mbPitchStep != 0.0f);
+	if (mbSweep)
+	{
+		auto poseFwd = [](float yaw, float pitch)
+		{
+			return glm::vec3(std::sin(yaw) * std::cos(pitch), std::sin(pitch),
+			                 -std::cos(yaw) * std::cos(pitch));
+		};
+		const glm::vec3 eye   = m_editorCamera.position();
+		const float     yaw   = m_editorCamera.yaw();
+		const float     pitch = m_editorCamera.pitch();
+		m_editorCamera.setOrientation(eye, poseFwd(yaw - glm::radians(mbYawStep),
+		                                           pitch - glm::radians(mbPitchStep)));
+		r->SetEditorCamera(m_editorCamera.makeOverride());
+		for (int i = 0; i < settleFrames; ++i)
+			r->Render();
+		m_editorCamera.setOrientation(eye, poseFwd(yaw, pitch));
+		r->SetEditorCamera(m_editorCamera.makeOverride());
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_MBYAWSTEP/MBPITCHSTEP turned the camera by "
+			 + std::to_string(mbYawStep) + "/" + std::to_string(mbPitchStep)
+			 + " deg for the captured frame").c_str());
+		settleFrames = 1;
+	}
 	for (int i = 0; i < settleFrames; ++i)
 		r->Render();
 
@@ -6148,7 +6306,8 @@ void EditorApplication::dumpFrameHeadless()
 			("EditorApplication: dump counters — draws=" + std::to_string(st.drawCalls) +
 			 " tris=" + std::to_string(st.triangles) +
 			 " visible=" + std::to_string(st.visibleObjects) +
-			 "/" + std::to_string(st.totalObjects)).c_str());
+			 "/" + std::to_string(st.totalObjects) +
+			 " occluded=" + std::to_string(st.occlusionCulled)).c_str());
 	}
 	else
 		HE_LOG_ERROR(Editor, "%s",
@@ -9437,6 +9596,13 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("SSAORadius",                 m_editorConfig.SSAORadius);
 	globalstate.setCustomConfigEntry("SSAOIntensity",              m_editorConfig.SSAOIntensity);
 	globalstate.setCustomConfigEntry("SSAOMethod",                 m_editorConfig.SSAOMethod);
+	globalstate.setCustomConfigEntry("DoFEnabled",                 m_editorConfig.DoFEnabled);
+	globalstate.setCustomConfigEntry("DoFFocusDistance",           m_editorConfig.DoFFocusDistance);
+	globalstate.setCustomConfigEntry("DoFFocusRange",              m_editorConfig.DoFFocusRange);
+	globalstate.setCustomConfigEntry("DoFAperture",                m_editorConfig.DoFAperture);
+	globalstate.setCustomConfigEntry("MotionBlurEnabled",          m_editorConfig.MotionBlurEnabled);
+	globalstate.setCustomConfigEntry("MotionBlurIntensity",        m_editorConfig.MotionBlurIntensity);
+	globalstate.setCustomConfigEntry("MotionBlurMax",              m_editorConfig.MotionBlurMax);
 	globalstate.setCustomConfigEntry("AntiAliasing",              m_editorConfig.AntiAliasing);
 	globalstate.setCustomConfigEntry("AASharpness",               m_editorConfig.AASharpness);
 	globalstate.setCustomConfigEntry("RenderScale",               m_editorConfig.RenderScale);
@@ -9453,6 +9619,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GIReflQuality",             m_editorConfig.GIReflQuality);
 	globalstate.setCustomConfigEntry("GIReflBounces",             m_editorConfig.GIReflBounces);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
+	globalstate.setCustomConfigEntry("OcclusionCulling",          m_editorConfig.OcclusionCulling);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
 	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);
 	globalstate.setCustomConfigEntry("SSRQuality",                m_editorConfig.SSRQuality);

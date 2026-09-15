@@ -2711,10 +2711,13 @@ void GameApplication::OnRender(float deltaTime)
 		{
 			r->SetBloomSettings(IRenderer::BloomSettings{ false, 1.0f, 0.6f });
 			r->SetSSAOSettings(IRenderer::SSAOSettings{ false, 0.5f, 1.0f, 0 });
+			r->SetDepthOfFieldSettings(IRenderer::DepthOfFieldSettings{});
+			r->SetMotionBlurSettings(IRenderer::MotionBlurSettings{});
 			// GI and SSR default to disabled, so their default-constructed form IS
 			// the "off" push.
 			r->SetGISettings(IRenderer::GISettings{});
 			r->SetSSRSettings(IRenderer::SSRSettings{});
+			r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{});
 			IRenderer::AntiAliasingSettings aaOff;
 			aaOff.method = static_cast<int>(HE::AAMethod::Off);
 			r->SetAntiAliasingSettings(aaOff);
@@ -2742,6 +2745,19 @@ void GameApplication::OnRender(float deltaTime)
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAORadius", 0.5f)),
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAOIntensity", 1.0f)),
 				GlobalState::getInstance().getCustomConfigInt("SSAOMethod", 0)});
+			// Depth of field — the editor's Preferences values, carried over by the
+			// export dialog. Off by default; a backend without the pass ignores it.
+			r->SetDepthOfFieldSettings(IRenderer::DepthOfFieldSettings{
+				GlobalState::getInstance().getCustomConfigBool("DoFEnabled", false),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFFocusDistance", 10.0f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFFocusRange", 4.0f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFAperture", 2.8f))});
+			// Motion blur — likewise the editor's Preferences values via the export
+			// dialog. Camera motion only; off by default.
+			r->SetMotionBlurSettings(IRenderer::MotionBlurSettings{
+				GlobalState::getInstance().getCustomConfigBool("MotionBlurEnabled", false),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("MotionBlurIntensity", 0.5f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("MotionBlurMax", 24.0f))});
 			// Directional shadows are the PROJECT's (Config/ProjectSettings.json
 			// next to project.hcfg), not config.json's: the same cascades the
 			// editor's viewport showed. Defaults = the historical constants.
@@ -2777,6 +2793,12 @@ void GameApplication::OnRender(float deltaTime)
 			ssr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRMaxRoughness", 0.6f));
 			ssr.quality      = GlobalState::getInstance().getCustomConfigInt("SSRQuality", 1);
 			r->SetSSRSettings(ssr);
+
+			// CPU occlusion culling — the editor's Preferences toggle, carried
+			// over by the export dialog. No capability gate: a backend without it
+			// ignores the call.
+			r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{
+				GlobalState::getInstance().getCustomConfigBool("OcclusionCulling", false) });
 
 			// Ray-traced GI reflections — same config.json keys the editor
 			// writes, capability-gated (Metal tile deferred + HW RT in v1).

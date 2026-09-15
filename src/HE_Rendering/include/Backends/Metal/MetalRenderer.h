@@ -6,6 +6,7 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
+#include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
@@ -121,11 +122,14 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
+	void  SetDepthOfFieldSettings(const DepthOfFieldSettings& settings) override;
+	void  SetMotionBlurSettings(const MotionBlurSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
 	void  SetShadowSettings(const ShadowSettings& settings) override;
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetSSRSettings(const SSRSettings& settings) override;
+	void  SetOcclusionCullingSettings(const OcclusionCullingSettings& settings) override;
 	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
@@ -489,7 +493,7 @@ private:
 	// ── Profiler render counters (current frame, main thread) ───────────────
 	// Filled while encoding the scene; returned (merged with the 1-2-frame-late
 	// GPU times) by GetFrameGpuStats. Reset at the top of each primary EncodeFrame.
-	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0; };
+	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0, occlusionCulled = 0; };
 	FrameCounters m_counters;
 
 	// ── Per-frame GPU timing context ────────────────────────────────────────
@@ -527,6 +531,23 @@ private:
 	CommandBuffer   m_cmds;          // draw calls produced this frame
 	std::vector<uint8_t>  m_visible;       // per-frame culling results
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
+
+	// The camera cull every camera-facing pass runs — frustum, then (when on)
+	// occlusion, then the sort — in one place, because the Metal frame runs it
+	// up to four times (GI G-buffer, SSAO pre-pass, scene, deferred G-buffer),
+	// each after its own extraction. The occlusion refine is the expensive part
+	// (a CPU rasterization), so its result is kept for the frame and reused
+	// while the frame stamp, object count and view-projection match; a reuse is
+	// ANDed onto the fresh frustum result, never copied over it. The shadow
+	// pass culls into its own list against the light and stays out of this.
+	void  CullCameraObjects();
+	OcclusionCuller       m_occlusionCuller;
+	std::vector<uint8_t>  m_occlusionCacheVisible;
+	uint64_t              m_occlusionCacheStamp = ~0ull;
+	size_t                m_occlusionCacheCount = 0;
+	glm::mat4             m_occlusionCacheViewProj = glm::mat4(1.0f);
+	uint32_t              m_occlusionCacheCulled = 0;
+	uint64_t              m_frameStamp = 0;      // bumped once per primary EncodeFrame
 
 	// Unlit pipeline. All id<MTL…>, retained.
 	void* m_scenePipeline        = nullptr; // id<MTLRenderPipelineState>
@@ -809,9 +830,10 @@ private:
 	bool  MetalFxActive() const;
 	void  EnsureMetalFX(int inW, int inH, int outW, int outH);
 	void  DestroyMetalFX();
-	// Runs the scaler; returns the upscaled HDR texture, or null when it could
-	// not run (the caller then tonemaps the un-upscaled image as before).
-	void* EncodeMetalFX(void* cmdBuf, int inW, int inH, int outW, int outH);
+	// Runs the scaler on `sourceHdr` (the scene HDR, or the DoF result when that
+	// ran); returns the upscaled HDR texture, or null when it could not run (the
+	// caller then tonemaps the un-upscaled image as before).
+	void* EncodeMetalFX(void* cmdBuf, void* sourceHdr, int inW, int inH, int outW, int outH);
 
 	void* m_smaaPipeline   = nullptr; // id<MTLRenderPipelineState> — AA = SMAA
 	void* m_aaBlitPipeline = nullptr; // id<MTLRenderPipelineState> — AA = Off
@@ -868,8 +890,57 @@ private:
 	glm::mat4 m_prepassViewProj = glm::mat4(1.0f); // camera the low-res cloud pre-pass used → sky pass reprojects it
 	void  EnsureBloomTargets(int width, int height);
 	void  DestroyBloomTargets();
-	// Bright-pass + blur m_hdrColor into m_bloomColor[0]; returns its texture ptr.
-	void* EncodeBloom(void* cmdBuf, int fullW, int fullH);
+	// Bright-pass + blur `sourceHdr` (the scene HDR, or the DoF result when that
+	// ran) into m_bloomColor[0]; returns its texture ptr.
+	void* EncodeBloom(void* cmdBuf, void* sourceHdr, int fullW, int fullH);
+
+	// ── Depth of field (CoC from depth → separable CoC-weighted blur → composite)
+	// Mirrors the GL backend (kDofMSL = the three GLSL programs, 1:1). Runs on
+	// the HDR image before bloom/tonemap; m_dofResult is what they then read
+	// (null = off, they read m_hdrColor as before). Half-res CoC (RG16F), two
+	// half-res RGBA16F blur targets, one full-res RGBA16F composite. None of the
+	// pipelines carries a depth attachment: the composite SAMPLES m_hdrDepth.
+	void* m_dofCocPipeline       = nullptr; // id<MTLRenderPipelineState>
+	void* m_dofBlurPipeline      = nullptr; // id<MTLRenderPipelineState>
+	void* m_dofCompositePipeline = nullptr; // id<MTLRenderPipelineState>
+	void* m_dofCocTex            = nullptr; // id<MTLTexture> RG16F half-res
+	void* m_dofBlurTex[2]        = { nullptr, nullptr }; // id<MTLTexture> RGBA16F half-res
+	void* m_dofColor             = nullptr; // id<MTLTexture> RGBA16F full-res composite
+	void* m_dofResult            = nullptr; // this frame's composite (or null = off)
+	int   m_dofW                 = 0;       // full-res size the targets were made for
+	int   m_dofH                 = 0;
+	bool  m_dofEnabled           = false;
+	float m_dofFocusDistance     = 10.0f;
+	float m_dofFocusRange        = 4.0f;
+	float m_dofAperture          = 2.8f;
+	void  EnsureDepthOfFieldTargets(int fullW, int fullH);
+	void  DestroyDepthOfFieldTargets();
+	// Runs the four DoF passes into m_dofColor; returns it, or null when the
+	// pass could not run (the caller then keeps m_hdrColor).
+	void* EncodeDepthOfField(void* cmdBuf, int fullW, int fullH);
+
+	// ── Motion blur (camera reprojection → directional smear) ───────────────
+	// Mirrors the GL backend (kMotionBlurMSL = the two GLSL programs, 1:1).
+	// Runs after DoF on whatever it left, before bloom/MetalFX/tonemap. Full-res
+	// RG16F velocity (pixels) from the scene depth + the previous frame's
+	// view-projection, full-res RGBA16F smear. Camera motion only.
+	// m_mbPrevViewProj is refreshed at the end of EVERY frame, on or off.
+	void*     m_mbVelocityPipeline = nullptr; // id<MTLRenderPipelineState>
+	void*     m_mbBlurPipeline     = nullptr; // id<MTLRenderPipelineState>
+	void*     m_mbVelocityTex      = nullptr; // id<MTLTexture> RG16F full-res
+	void*     m_mbColor            = nullptr; // id<MTLTexture> RGBA16F full-res smear
+	int       m_mbW                = 0;
+	int       m_mbH                = 0;
+	bool      m_mbEnabled          = false;
+	float     m_mbIntensity        = 0.5f;
+	float     m_mbMaxBlur          = 24.0f;
+	glm::mat4 m_mbPrevViewProj     = glm::mat4(1.0f);
+	bool      m_mbHasPrev          = false;
+	void  EnsureMotionBlurTargets(int fullW, int fullH);
+	void  DestroyMotionBlurTargets();
+	// Runs velocity + smear on `sourceHdr` into m_mbColor; returns it, or null
+	// when the pass could not run (the caller then keeps `sourceHdr`).
+	void* EncodeMotionBlur(void* cmdBuf, void* sourceHdr, int fullW, int fullH);
 
 	// ── Low-res clouds (quarter-res cloud pre-pass; EnvironmentSettings.lowResClouds) ──
 	// Raymarch the clouds into m_cloudColor (rgb = L, a = T) at quarter resolution; the

@@ -3484,6 +3484,211 @@ void main()
 }
 )GLSL";
 
+// ─── Depth of field ──────────────────────────────────────────────────────────
+// Three fragment programs on the fullscreen triangle, mirrored 1:1 by kDofMSL in
+// the Metal backend (same maths, same tap count, same weights):
+//
+//   CoC        half-res: scene depth → (signed blur radius in half-res texels,
+//              linear depth). Of the 2×2 full-res texels under a half-res texel
+//              the one with the LARGEST radius wins, so a thin blurry sliver is
+//              never lost to the downsample.
+//   Blur       half-res, run twice (horizontal, then vertical). A "scatter as
+//              gather": every tap is weighted by whether ITS OWN circle of
+//              confusion reaches the pixel being shaded. A tap in front of the
+//              centre may spill with its full radius (near objects bleed over the
+//              sharp background, as a lens does); a tap behind it only with the
+//              centre's radius (the blurred background never bleeds over a sharp
+//              foreground). Alpha carries the gathered blurriness so the
+//              composite can show that near-object spill on top of pixels whose
+//              own CoC says "sharp".
+//   Composite  full-res: lerp sharp ↔ blurred by max(own CoC, gathered
+//              blurriness). Writes the new HDR image bloom/tonemap then read.
+//
+// Depth is linearised from the projection's own terms (proj[2][2], proj[3][2]):
+// both backends rasterise with the extractor's GL-style matrix (Metal remaps
+// -1..1 → 0..1 with kMetalClipFix, which the shader undoes), so the linear depth
+// is the same number on both. Orthographic cameras have no depth of field
+// (proj[3][3] == 1 makes the formula meaningless) — the pass is skipped for them.
+static const char* kDofCocFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uDepth;     // full-res scene depth (window z, 0..1)
+uniform vec4 uDofParams;
+uniform vec2 uDofProj;
+out vec2 FragColor;           // RG16F: signed radius, linear depth
+float dofLinearDepth(float d) { float ndc = d * 2.0 - 1.0; return uDofProj.y / (ndc + uDofProj.x); }
+float dofSignedRadius(float linearDepth)
+{
+	float band  = max(uDofParams.y * 0.5, 1e-3);
+	float delta = linearDepth - uDofParams.x;
+	float t     = clamp((abs(delta) - band) / band, 0.0, 1.0);
+	return sign(delta) * t * uDofParams.z;
+}
+void main()
+{
+	// The 2×2 full-res block under this half-res texel; keep the blurriest.
+	vec4  d4   = textureGather(uDepth, vUV, 0);
+	float best = 0.0, bestD = 0.0;
+	for (int i = 0; i < 4; ++i)
+	{
+		float D = dofLinearDepth(d4[i]);
+		float r = dofSignedRadius(D);
+		if (i == 0 || abs(r) > abs(best)) { best = r; bestD = D; }
+	}
+	FragColor = vec2(best, bestD);
+}
+)GLSL";
+
+static const char* kDofBlurFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uImage;      // H pass: full-res HDR (bilinear = 2×2 box); V pass: the H result
+uniform sampler2D uCoc;        // half-res (signed radius, linear depth)
+uniform vec2      uTexel;      // 1 / half-res size
+uniform int       uHorizontal; // 1 = first (horizontal) pass, alpha is built from the CoC
+uniform vec4      uDofParams;
+out vec4 FragColor;
+const int kTaps = 8;           // per side; the kernel always spans the max radius
+void main()
+{
+	vec2  cc   = texture(uCoc, vUV).rg;
+	float rC   = abs(cc.x);
+	float dC   = cc.y;
+	float stepPx = max(uDofParams.z, 1e-3) / float(kTaps);
+	vec2  dir  = (uHorizontal == 1) ? vec2(uTexel.x, 0.0) : vec2(0.0, uTexel.y);
+	vec4  c0   = texture(uImage, vUV);
+	float a0   = (uHorizontal == 1) ? clamp(rC, 0.0, 1.0) : c0.a;
+	vec4  sum  = vec4(c0.rgb, a0);
+	float wsum = 1.0;
+	for (int i = 1; i <= kTaps; ++i)
+	{
+		float dist = float(i) * stepPx;
+		for (int s = -1; s <= 1; s += 2)
+		{
+			vec2  uv  = vUV + dir * (dist * float(s));
+			vec2  ct  = texture(uCoc, uv).rg;
+			float rT  = abs(ct.x);
+			float dT  = ct.y;
+			// In front of the centre: spill with its own radius. Behind it:
+			// only as far as the centre itself is blurred.
+			bool  front = dT < dC - max(0.05, 0.02 * dC);
+			float rEff  = front ? rT : min(rT, rC);
+			float w     = clamp((rEff - dist) / stepPx + 1.0, 0.0, 1.0);
+			vec4  c     = texture(uImage, uv);
+			float a     = (uHorizontal == 1) ? clamp(rT, 0.0, 1.0) : c.a;
+			sum  += vec4(c.rgb, a) * w;
+			wsum += w;
+		}
+	}
+	FragColor = sum / wsum;
+}
+)GLSL";
+
+static const char* kDofCompositeFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uSharp;     // full-res HDR
+uniform sampler2D uBlurred;   // half-res blur result (rgb colour, a gathered blurriness)
+uniform sampler2D uDepth;     // full-res scene depth
+uniform vec4 uDofParams;
+uniform vec2 uDofProj;
+out vec4 FragColor;
+float dofLinearDepth(float d) { float ndc = d * 2.0 - 1.0; return uDofProj.y / (ndc + uDofProj.x); }
+float dofSignedRadius(float linearDepth)
+{
+	float band  = max(uDofParams.y * 0.5, 1e-3);
+	float delta = linearDepth - uDofParams.x;
+	float t     = clamp((abs(delta) - band) / band, 0.0, 1.0);
+	return sign(delta) * t * uDofParams.z;
+}
+void main()
+{
+	float r     = abs(dofSignedRadius(dofLinearDepth(texture(uDepth, vUV).r)));
+	vec4  blur  = texture(uBlurred, vUV);
+	vec3  sharp = texture(uSharp, vUV).rgb;
+	float t     = clamp(max(r, blur.a), 0.0, 1.0);
+	FragColor   = vec4(mix(sharp, blur.rgb, t), 1.0);
+}
+)GLSL";
+
+// ─── Motion blur ─────────────────────────────────────────────────────────────
+// Two fragment programs on the fullscreen triangle, mirrored 1:1 by kMotionBlurMSL
+// in the Metal backend:
+//
+//   Velocity   full-res: the pixel's ndc position (uv + scene depth) is carried
+//              into the PREVIOUS frame's clip space by one matrix
+//              (prevViewProj · inverse(viewProj)); the difference of the two
+//              screen positions, times the shutter fraction, is the velocity in
+//              PIXELS (RG16F — pixels, not uv, so a 0.3-px motion at 4K is not
+//              lost to half-float rounding). Capped at the max blur length.
+//              Camera motion only: the depth says where the pixel IS, the two
+//              camera matrices say how the CAMERA moved; an object moving under
+//              a still camera has zero velocity here.
+//   Blur       full-res: kTaps taps spread over the centre pixel's velocity,
+//              half behind and half ahead. A tap is weighted by how fast IT is
+//              moving relative to the centre: a still foreground object next to
+//              a streaking background keeps its edge instead of being dragged
+//              along. Pixels with under half a pixel of motion pass through
+//              untouched — a still camera gives the exact input image.
+//
+// The depth convention differs per backend and the shaders own it: GL holds
+// window z (0..1 → ndc via ·2-1), Metal already holds GL ndc z (see kDofMSL).
+static const char* kMbVelocityFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uDepth;      // full-res scene depth (window z, 0..1)
+uniform mat4 uReproject;       // prevViewProj * inverse(viewProj), GL-style clip both sides
+uniform vec4 uMbParams;        // x shutter fraction, y max blur (px), zw target size (px)
+out vec2 FragColor;            // RG16F: velocity in pixels (+x right, +y up in GL's uv)
+void main()
+{
+	float d    = texture(uDepth, vUV).r;
+	vec4  ndc  = vec4(vUV * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+	vec4  prev = uReproject * ndc;
+	if (prev.w <= 1e-5) { FragColor = vec2(0.0); return; }   // behind the previous camera
+	vec2  prevUV = (prev.xy / prev.w) * 0.5 + 0.5;
+	vec2  vPx    = (vUV - prevUV) * uMbParams.zw * uMbParams.x;
+	float len    = length(vPx);
+	if (len > uMbParams.y) vPx *= uMbParams.y / len;
+	FragColor = vPx;
+}
+)GLSL";
+
+static const char* kMbBlurFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uImage;      // full-res HDR (the DoF result when that ran)
+uniform sampler2D uVelocity;   // full-res velocity in pixels
+uniform vec2      uTexel;      // 1 / target size
+out vec4 FragColor;
+const int kTaps = 6;           // per side; 12 taps + centre over the velocity's length
+void main()
+{
+	vec2  vC = texture(uVelocity, vUV).rg;
+	float lC = length(vC);
+	vec4  c0 = texture(uImage, vUV);
+	if (lC < 0.5) { FragColor = vec4(c0.rgb, 1.0); return; }   // still: pass through, bit-exact
+	vec3  sum  = c0.rgb;
+	float wsum = 1.0;
+	for (int i = 1; i <= kTaps; ++i)
+	{
+		float t = float(i) / float(kTaps + 1);   // (0,1): fraction of the half-length
+		for (int s = -1; s <= 1; s += 2)
+		{
+			vec2  uv = vUV + vC * (0.5 * t * float(s)) * uTexel;
+			vec2  vT = texture(uVelocity, uv).rg;
+			// A tap moving at least half as fast as the centre counts fully; a
+			// (near) still tap barely — it belongs to something that is not
+			// streaking, and must not be smeared into what is.
+			float w  = clamp(length(vT) * 2.0 / lC, 0.0, 1.0);
+			sum  += texture(uImage, uv).rgb * w;
+			wsum += w;
+		}
+	}
+	FragColor = vec4(sum / wsum, 1.0);
+}
+)GLSL";
+
 // ─── SSAO (screen-space ambient occlusion) ──────────────────────────────────
 // The hemisphere kernel sample count is HE::kSsaoKernelSize (SsaoKernel.h) —
 // the uKernel[32] declaration below must stay in step with it.
@@ -5013,6 +5218,8 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateSkyPipeline();
 	CreateTonemapPipeline();
 	CreateBloomPipeline();
+	CreateDepthOfFieldPipeline();
+	CreateMotionBlurPipeline();
 	CreateSSAOPipeline();
 	CreateDebugLinePipeline();
 	CreateParticlePipeline();
@@ -6291,7 +6498,7 @@ void OpenGLRenderer::RenderCloudShadowMap()
 // Bright-pass the HDR color, then ping-pong blur. Leaves the result in
 // m_bloomColor[0] and returns its id. Assumes m_fsVAO is the active VAO and
 // depth test is already disabled. Restores nothing (caller rebinds output).
-unsigned int OpenGLRenderer::RenderBloom(int fullW, int fullH)
+unsigned int OpenGLRenderer::RenderBloom(unsigned int sourceHdr, int fullW, int fullH)
 {
 	EnsureBloomTargets(fullW / 2, fullH / 2);
 	if (!m_bloomFBO[0]) return 0;
@@ -6302,7 +6509,7 @@ unsigned int OpenGLRenderer::RenderBloom(int fullW, int fullH)
 	glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]);
 	glUseProgram(m_bloomBrightProgram);
 	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, m_hdrColor);
+	glBindTexture(GL_TEXTURE_2D, sourceHdr);
 	glUniform1i(m_uBrightHDR, 0);
 	glUniform1f(m_uBrightThreshold, m_bloomThreshold);
 	glUniform1f(m_uBrightKnee, m_bloomKnee);
@@ -6326,6 +6533,319 @@ unsigned int OpenGLRenderer::RenderBloom(int fullW, int fullH)
 		horizontal = !horizontal;
 	}
 	return m_bloomColor[0];
+}
+
+// ─── Depth of field ──────────────────────────────────────────────────────────
+void OpenGLRenderer::CreateDepthOfFieldPipeline()
+{
+	auto link = [&](const char* fsSrc, const char* what) -> GLuint
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fsSrc);
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		GLint ok = GL_FALSE;
+		glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: DoF %s program failed to link", what);
+			glDeleteProgram(prog);
+			return 0;
+		}
+		return prog;
+	};
+	m_dofCocProgram = link(kDofCocFS, "CoC");
+	if (m_dofCocProgram)
+	{
+		m_uDofCocDepth  = glGetUniformLocation(m_dofCocProgram, "uDepth");
+		m_uDofCocParams = glGetUniformLocation(m_dofCocProgram, "uDofParams");
+		m_uDofCocProj   = glGetUniformLocation(m_dofCocProgram, "uDofProj");
+	}
+	m_dofBlurProgram = link(kDofBlurFS, "blur");
+	if (m_dofBlurProgram)
+	{
+		m_uDofBlurImage      = glGetUniformLocation(m_dofBlurProgram, "uImage");
+		m_uDofBlurCoc        = glGetUniformLocation(m_dofBlurProgram, "uCoc");
+		m_uDofBlurTexel      = glGetUniformLocation(m_dofBlurProgram, "uTexel");
+		m_uDofBlurHorizontal = glGetUniformLocation(m_dofBlurProgram, "uHorizontal");
+		m_uDofBlurParams     = glGetUniformLocation(m_dofBlurProgram, "uDofParams");
+	}
+	m_dofCompositeProgram = link(kDofCompositeFS, "composite");
+	if (m_dofCompositeProgram)
+	{
+		m_uDofCompSharp   = glGetUniformLocation(m_dofCompositeProgram, "uSharp");
+		m_uDofCompBlurred = glGetUniformLocation(m_dofCompositeProgram, "uBlurred");
+		m_uDofCompDepth   = glGetUniformLocation(m_dofCompositeProgram, "uDepth");
+		m_uDofCompParams  = glGetUniformLocation(m_dofCompositeProgram, "uDofParams");
+		m_uDofCompProj    = glGetUniformLocation(m_dofCompositeProgram, "uDofProj");
+	}
+}
+
+void OpenGLRenderer::SetDepthOfFieldSettings(const DepthOfFieldSettings& s)
+{
+	m_dofEnabled       = s.enabled;
+	m_dofFocusDistance = s.focusDistance;
+	m_dofFocusRange    = s.focusRange;
+	m_dofAperture      = s.aperture;
+}
+
+void OpenGLRenderer::EnsureDepthOfFieldTargets(int fullW, int fullH)
+{
+	fullW = std::max(2, fullW);
+	fullH = std::max(2, fullH);
+	if (m_dofFBO && fullW == m_dofW && fullH == m_dofH) return;
+	DestroyDepthOfFieldTargets();
+
+	const int halfW = fullW / 2, halfH = fullH / 2;
+	auto makeTarget = [&](unsigned int& fbo, unsigned int& tex, GLenum internalFmt,
+	                      GLenum fmt, int w, int h, const char* what)
+	{
+		glGenFramebuffers(1, &fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, internalFmt, w, h, 0, fmt, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: DoF %s FBO incomplete", what);
+	};
+	makeTarget(m_dofCocFBO,     m_dofCocTex,     GL_RG16F,   GL_RG,   halfW, halfH, "CoC");
+	makeTarget(m_dofBlurFBO[0], m_dofBlurTex[0], GL_RGBA16F, GL_RGBA, halfW, halfH, "blur A");
+	makeTarget(m_dofBlurFBO[1], m_dofBlurTex[1], GL_RGBA16F, GL_RGBA, halfW, halfH, "blur B");
+	makeTarget(m_dofFBO,        m_dofColor,      GL_RGBA16F, GL_RGBA, fullW, fullH, "composite");
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_dofW = fullW;
+	m_dofH = fullH;
+}
+
+void OpenGLRenderer::DestroyDepthOfFieldTargets()
+{
+	if (m_dofCocFBO)     { glDeleteFramebuffers(1, &m_dofCocFBO);   m_dofCocFBO = 0; }
+	if (m_dofCocTex)     { glDeleteTextures(1, &m_dofCocTex);       m_dofCocTex = 0; }
+	if (m_dofBlurFBO[0]) { glDeleteFramebuffers(2, m_dofBlurFBO);   m_dofBlurFBO[0] = m_dofBlurFBO[1] = 0; }
+	if (m_dofBlurTex[0]) { glDeleteTextures(2, m_dofBlurTex);       m_dofBlurTex[0] = m_dofBlurTex[1] = 0; }
+	if (m_dofFBO)        { glDeleteFramebuffers(1, &m_dofFBO);      m_dofFBO = 0; }
+	if (m_dofColor)      { glDeleteTextures(1, &m_dofColor);        m_dofColor = 0; }
+	m_dofW = m_dofH = 0;
+}
+
+// CoC → blur H → blur V → composite. Assumes m_fsVAO is bound and the depth
+// test is off (the post-process pass's state); restores nothing, the tonemap
+// rebinds its own output. The max blur radius follows the f-number (f/2.8 ≈ 10
+// half-res texels at 720p, f/1.4 twice that, f/22 next to nothing) and scales
+// with the target height so a 4K frame is not sharper than a 720p one.
+unsigned int OpenGLRenderer::RenderDepthOfField(int fullW, int fullH, const glm::mat4& proj)
+{
+	if (!m_dofCocProgram || !m_dofBlurProgram || !m_dofCompositeProgram || !m_hdrColor) return 0;
+	if (proj[3][3] != 0.0f) return 0;   // orthographic: no lens, no depth of field
+	EnsureDepthOfFieldTargets(fullW, fullH);
+	if (!m_dofFBO) return 0;
+
+	const int   halfW = m_dofW / 2, halfH = m_dofH / 2;
+	const float maxRadius = std::clamp((28.0f / std::max(m_dofAperture, 0.5f))
+	                                   * (static_cast<float>(halfH) / 360.0f), 0.0f, 32.0f);
+	const float params[4] = { m_dofFocusDistance, std::max(m_dofFocusRange, 0.0f), maxRadius, 0.0f };
+	const float projTerms[2] = { proj[2][2], proj[3][2] };
+
+	// 1. CoC at half res from the full-res depth.
+	glViewport(0, 0, halfW, halfH);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_dofCocFBO);
+	glUseProgram(m_dofCocProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_hdrDepth);
+	glUniform1i(m_uDofCocDepth, 0);
+	glUniform4fv(m_uDofCocParams, 1, params);
+	glUniform2fv(m_uDofCocProj, 1, projTerms);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// 2./3. Separable CoC-weighted blur: HDR → blur[0] (H) → blur[1] (V).
+	glUseProgram(m_dofBlurProgram);
+	glUniform1i(m_uDofBlurImage, 0);
+	glUniform1i(m_uDofBlurCoc, 1);
+	glUniform2f(m_uDofBlurTexel, 1.0f / static_cast<float>(halfW), 1.0f / static_cast<float>(halfH));
+	glUniform4fv(m_uDofBlurParams, 1, params);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_dofCocTex);
+	glActiveTexture(GL_TEXTURE0);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_dofBlurFBO[0]);
+	glUniform1i(m_uDofBlurHorizontal, 1);
+	glBindTexture(GL_TEXTURE_2D, m_hdrColor);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_dofBlurFBO[1]);
+	glUniform1i(m_uDofBlurHorizontal, 0);
+	glBindTexture(GL_TEXTURE_2D, m_dofBlurTex[0]);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// 4. Composite at full res.
+	glViewport(0, 0, m_dofW, m_dofH);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_dofFBO);
+	glUseProgram(m_dofCompositeProgram);
+	glUniform1i(m_uDofCompSharp, 0);
+	glUniform1i(m_uDofCompBlurred, 1);
+	glUniform1i(m_uDofCompDepth, 2);
+	glUniform4fv(m_uDofCompParams, 1, params);
+	glUniform2fv(m_uDofCompProj, 1, projTerms);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, m_hdrDepth);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_dofBlurTex[1]);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_hdrColor);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// Leave units 1/2 clean: the tonemap binds its own unit 1 (bloom), and a
+	// stale depth texture on unit 2 would be a feedback hazard for the next
+	// scene pass that renders into m_hdrFBO.
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+	return m_dofColor;
+}
+
+// ─── Motion blur ─────────────────────────────────────────────────────────────
+void OpenGLRenderer::CreateMotionBlurPipeline()
+{
+	auto link = [&](const char* fsSrc, const char* what) -> GLuint
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fsSrc);
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		GLint ok = GL_FALSE;
+		glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: motion blur %s program failed to link", what);
+			glDeleteProgram(prog);
+			return 0;
+		}
+		return prog;
+	};
+	m_mbVelocityProgram = link(kMbVelocityFS, "velocity");
+	if (m_mbVelocityProgram)
+	{
+		m_uMbVelDepth     = glGetUniformLocation(m_mbVelocityProgram, "uDepth");
+		m_uMbVelReproject = glGetUniformLocation(m_mbVelocityProgram, "uReproject");
+		m_uMbVelParams    = glGetUniformLocation(m_mbVelocityProgram, "uMbParams");
+	}
+	m_mbBlurProgram = link(kMbBlurFS, "blur");
+	if (m_mbBlurProgram)
+	{
+		m_uMbBlurImage    = glGetUniformLocation(m_mbBlurProgram, "uImage");
+		m_uMbBlurVelocity = glGetUniformLocation(m_mbBlurProgram, "uVelocity");
+		m_uMbBlurTexel    = glGetUniformLocation(m_mbBlurProgram, "uTexel");
+	}
+}
+
+void OpenGLRenderer::SetMotionBlurSettings(const MotionBlurSettings& s)
+{
+	m_mbEnabled   = s.enabled;
+	m_mbIntensity = s.intensity;
+	m_mbMaxBlur   = s.maxBlur;
+}
+
+void OpenGLRenderer::EnsureMotionBlurTargets(int fullW, int fullH)
+{
+	fullW = std::max(2, fullW);
+	fullH = std::max(2, fullH);
+	if (m_mbFBO && fullW == m_mbW && fullH == m_mbH) return;
+	DestroyMotionBlurTargets();
+
+	auto makeTarget = [&](unsigned int& fbo, unsigned int& tex, GLenum internalFmt,
+	                      GLenum fmt, const char* what)
+	{
+		glGenFramebuffers(1, &fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, internalFmt, fullW, fullH, 0, fmt, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: motion blur %s FBO incomplete", what);
+	};
+	makeTarget(m_mbVelocityFBO, m_mbVelocityTex, GL_RG16F,   GL_RG,   "velocity");
+	makeTarget(m_mbFBO,         m_mbColor,       GL_RGBA16F, GL_RGBA, "blur");
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_mbW = fullW;
+	m_mbH = fullH;
+}
+
+void OpenGLRenderer::DestroyMotionBlurTargets()
+{
+	if (m_mbVelocityFBO) { glDeleteFramebuffers(1, &m_mbVelocityFBO); m_mbVelocityFBO = 0; }
+	if (m_mbVelocityTex) { glDeleteTextures(1, &m_mbVelocityTex);     m_mbVelocityTex = 0; }
+	if (m_mbFBO)         { glDeleteFramebuffers(1, &m_mbFBO);         m_mbFBO = 0; }
+	if (m_mbColor)       { glDeleteTextures(1, &m_mbColor);           m_mbColor = 0; }
+	m_mbW = m_mbH = 0;
+}
+
+// Velocity → smear. Assumes m_fsVAO is bound and the depth test is off (the
+// post-process pass's state); restores nothing, the tonemap rebinds its own
+// output. The first frame (no previous matrix yet) reprojects with the current
+// one → zero velocity → the pass is an exact copy.
+unsigned int OpenGLRenderer::RenderMotionBlur(unsigned int sourceHdr, int fullW, int fullH,
+                                              const glm::mat4& view, const glm::mat4& proj)
+{
+	if (!m_mbVelocityProgram || !m_mbBlurProgram || !sourceHdr || !m_hdrDepth) return 0;
+	EnsureMotionBlurTargets(fullW, fullH);
+	if (!m_mbFBO) return 0;
+
+	const glm::mat4 viewProj  = proj * view;
+	const glm::mat4 reproject = (m_mbHasPrev ? m_mbPrevViewProj : viewProj) * glm::inverse(viewProj);
+	const float maxBlurPx = std::max(m_mbMaxBlur, 0.0f) * (static_cast<float>(m_mbH) / 720.0f);
+	const float params[4] = { std::max(m_mbIntensity, 0.0f), maxBlurPx,
+	                          static_cast<float>(m_mbW), static_cast<float>(m_mbH) };
+
+	// 1. Velocity from the depth + the two camera matrices.
+	glViewport(0, 0, m_mbW, m_mbH);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_mbVelocityFBO);
+	glUseProgram(m_mbVelocityProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_hdrDepth);
+	glUniform1i(m_uMbVelDepth, 0);
+	glUniformMatrix4fv(m_uMbVelReproject, 1, GL_FALSE, glm::value_ptr(reproject));
+	glUniform4fv(m_uMbVelParams, 1, params);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// 2. Smear along it.
+	glBindFramebuffer(GL_FRAMEBUFFER, m_mbFBO);
+	glUseProgram(m_mbBlurProgram);
+	glUniform1i(m_uMbBlurImage, 0);
+	glUniform1i(m_uMbBlurVelocity, 1);
+	glUniform2f(m_uMbBlurTexel, 1.0f / static_cast<float>(m_mbW), 1.0f / static_cast<float>(m_mbH));
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_mbVelocityTex);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, sourceHdr);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// Unit 1 clean for the tonemap's bloom binding; unit 0 held the depth
+	// texture a moment ago, which the next scene pass renders into.
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	return m_mbColor;
 }
 
 // ─── SSAO ────────────────────────────────────────────────────────────────────
@@ -6504,6 +7024,13 @@ void OpenGLRenderer::SetGIReflectionSettings(const GIReflectionSettings& s)
 // m_giSupported gate: the trace is a fragment shader over a rasterized pre-pass,
 // so unlike the ray-traced reflections it needs neither compute nor a BVH — GL
 // 4.1 (macOS included) runs it.
+void OpenGLRenderer::SetOcclusionCullingSettings(const OcclusionCullingSettings& s)
+{
+	OcclusionCuller::Settings oc = m_occlusionCuller.settings();
+	oc.enabled = s.enabled;
+	m_occlusionCuller.setSettings(oc);
+}
+
 void OpenGLRenderer::SetSSRSettings(const SSRSettings& s)
 {
 	m_ssrEnabled      = s.enabled;
@@ -8552,10 +9079,18 @@ void OpenGLRenderer::EnsureHDRTarget(int width, int height)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_hdrColor, 0);
 
-	glGenRenderbuffers(1, &m_hdrDepth);
-	glBindRenderbuffer(GL_RENDERBUFFER, m_hdrDepth);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_hdrDepth);
+	// Depth as a TEXTURE (was a renderbuffer): the depth-of-field pass samples
+	// it for its circle of confusion. Same internal format as m_gbDepthTex so
+	// the deferred path's depth blit into it stays legal.
+	glGenTextures(1, &m_hdrDepth);
+	glBindTexture(GL_TEXTURE_2D, m_hdrDepth);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0,
+	             GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_hdrDepth, 0);
 
 	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
 		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: HDR FBO incomplete");
@@ -8570,7 +9105,7 @@ void OpenGLRenderer::DestroyHDRTarget()
 {
 	if (m_hdrFBO)   { glDeleteFramebuffers(1, &m_hdrFBO);   m_hdrFBO = 0; }
 	if (m_hdrColor) { glDeleteTextures(1, &m_hdrColor);     m_hdrColor = 0; }
-	if (m_hdrDepth) { glDeleteRenderbuffers(1, &m_hdrDepth);m_hdrDepth = 0; }
+	if (m_hdrDepth) { glDeleteTextures(1, &m_hdrDepth);     m_hdrDepth = 0; }
 	m_hdrW = m_hdrH = 0;
 }
 
@@ -10656,6 +11191,8 @@ void OpenGLRenderer::Shutdown()
 	m_decalProgramTried      = false;
 	m_deferredPipelinesTried = false; // re-Initialize() rebuilds instead of staying forward
 	DestroyBloomTargets();
+	DestroyDepthOfFieldTargets();
+	DestroyMotionBlurTargets();
 	DestroyCloudTarget();
 	DestroyCloudShadowTarget();
 	DestroyLdrTarget();
@@ -10725,6 +11262,12 @@ void OpenGLRenderer::Shutdown()
 	if (m_uiFontTexture)  { glDeleteTextures(1, &m_uiFontTexture); m_uiFontTexture = 0; }
 	if (m_bloomBrightProgram) { glDeleteProgram(m_bloomBrightProgram); m_bloomBrightProgram = 0; }
 	if (m_blurProgram)    { glDeleteProgram(m_blurProgram);    m_blurProgram = 0; }
+	if (m_dofCocProgram)       { glDeleteProgram(m_dofCocProgram);       m_dofCocProgram = 0; }
+	if (m_dofBlurProgram)      { glDeleteProgram(m_dofBlurProgram);      m_dofBlurProgram = 0; }
+	if (m_dofCompositeProgram) { glDeleteProgram(m_dofCompositeProgram); m_dofCompositeProgram = 0; }
+	if (m_mbVelocityProgram)   { glDeleteProgram(m_mbVelocityProgram);   m_mbVelocityProgram = 0; }
+	if (m_mbBlurProgram)       { glDeleteProgram(m_mbBlurProgram);       m_mbBlurProgram = 0; }
+	m_mbHasPrev = false;
 	if (m_fsVAO)          { glDeleteVertexArrays(1, &m_fsVAO);  m_fsVAO = 0; }
 	if (m_shadowFBO)      { glDeleteFramebuffers(1, &m_shadowFBO);   m_shadowFBO = 0; }
 	if (m_shadowDepthTex) { glDeleteTextures(1, &m_shadowDepthTex);  m_shadowDepthTex = 0; }
@@ -11147,6 +11690,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	m_culler.cull(m_renderWorld, m_visible);
+	// Occlusion (off by default): drops what the frustum kept but a nearer
+	// opaque surface hides — the same m_visible the sort and every camera pass
+	// consume, so the SSAO/GI pre-passes and the deferred G-buffer follow suit.
+	// The shadow pass below culls into its own m_shadowVisible and is untouched.
+	m_counters.occlusionCulled =
+		m_occlusionCuller.refine(m_renderWorld, m_contentManager, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
 	// (no early-out on empty: the geometry pass still draws the skybox background
 	// and the post-process still tonemaps it, even with zero visible objects.)
@@ -11328,13 +11877,38 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glDisable(GL_DEPTH_TEST);
 			glBindVertexArray(m_fsVAO);
 
+			// Depth of field first: it rewrites the HDR image (CoC from the scene
+			// depth → half-res blur → composite), and bloom + tonemap then read
+			// THAT. Off → sceneHdr stays m_hdrColor and nothing here changes.
+			// Sibling scope, not nested in Bloom's: GL_TIME_ELAPSED cannot nest.
+			unsigned int sceneHdr = m_hdrColor;
+			if (m_dofEnabled)
+			{
+				GpuPassScope _dofTimer(this, "DoF");
+				if (const unsigned int dofTex = RenderDepthOfField(pw, ph, m_renderWorld.camera.projection))
+					sceneHdr = dofTex;
+			}
+
+			// Motion blur next, on whatever DoF left: the camera's frame-to-frame
+			// motion smears the image (velocity from depth + previous view-
+			// projection), and bloom + tonemap read the smeared result. The
+			// previous matrix is refreshed at the end of DrawScene, on or off.
+			if (m_mbEnabled)
+			{
+				GpuPassScope _mbTimer(this, "MotionBlur");
+				if (const unsigned int mbTex = RenderMotionBlur(sceneHdr, pw, ph,
+				                                                m_renderWorld.camera.view,
+				                                                m_renderWorld.camera.projection))
+					sceneHdr = mbTex;
+			}
+
 			// Bright-pass + blur the HDR target into the half-res bloom buffer
 			// (skipped when bloom is disabled → strength 0 below).
 			unsigned int bloomTex = 0u;
 			if (m_bloomEnabled)
 			{
 				GpuPassScope _bloomTimer(this, "Bloom");
-				bloomTex = RenderBloom(pw, ph);
+				bloomTex = RenderBloom(sceneHdr, pw, ph);
 			}
 
 			// Tonemap HDR scene color + bloom into the LDR intermediate (FXAA reads it).
@@ -11345,7 +11919,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glViewport(0, 0, pw, ph);
 				glUseProgram(m_tonemapProgram);
 				glActiveTexture(GL_TEXTURE0);
-				glBindTexture(GL_TEXTURE_2D, m_hdrColor);
+				glBindTexture(GL_TEXTURE_2D, sceneHdr);
 				glUniform1i(m_uHDRTex, 0);
 				glActiveTexture(GL_TEXTURE1);
 				glBindTexture(GL_TEXTURE_2D, bloomTex);
@@ -12864,6 +13438,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	glBindTexture(GL_TEXTURE_2D, 0);
 	glUseProgram(0);
 
+	// This frame's camera becomes the motion-blur pass's "previous" one —
+	// unconditionally, so the first frame after the pass is switched on
+	// measures against last frame's camera, not against whatever was stored
+	// when it was last on.
+	m_mbPrevViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	m_mbHasPrev      = true;
+
 	// One-time sanity check — GL errors are silent otherwise and a broken
 	// draw path would just render nothing.
 	static bool s_checkedFirstFrame = false;
@@ -13473,8 +14054,9 @@ IRenderer::FrameGpuStats OpenGLRenderer::GetFrameGpuStats() const
 	FrameGpuStats s = m_lastGpuStats;
 	s.drawCalls      = m_counters.draws;
 	s.triangles      = m_counters.tris;
-	s.visibleObjects = m_counters.visible;
-	s.totalObjects   = m_counters.total;
+	s.visibleObjects  = m_counters.visible;
+	s.totalObjects    = m_counters.total;
+	s.occlusionCulled = m_counters.occlusionCulled;
 	return s;
 }
 

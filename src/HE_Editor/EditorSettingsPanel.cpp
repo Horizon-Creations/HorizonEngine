@@ -284,6 +284,10 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		else if (supported)
 			hint("Deferred: G-buffer + one lighting resolve per visible pixel.");
 	});
+	row("occlusion", "Display", [&]{
+		EditorWidgets::checkbox("Occlusion Culling", &cfg.OcclusionCulling);
+		hint("Skip drawing objects hidden behind nearer opaque geometry (OpenGL, Metal).");
+	});
 	row("vsync", "Display", [&]{ if (EditorWidgets::checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
 	row("maxfps", "Display", [&]{
 		// VSync-off frame cap. 0 = unlimited (default — full FPS). A cap paces the loop so
@@ -366,6 +370,46 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		Row::combo("AO Method", &cfg.SSAOMethod, kAOMethods, IM_ARRAYSIZE(kAOMethods));
 		Row::sliderFloat("AO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
 		Row::sliderFloat("AO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
+	});
+	row("dof", "Post-Processing", [&]{
+		// OpenGL + Metal run the pass; the other backends ignore the push. No
+		// capability gate for one checkbox (same call as occlusion culling).
+		const bool dofOK = (ctx.backend == HE::RendererBackend::Metal ||
+		                    ctx.backend == HE::RendererBackend::OpenGL);
+		ImGui::BeginDisabled(!dofOK);
+		EditorWidgets::checkbox("Depth of Field", &cfg.DoFEnabled);
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.DoFEnabled);
+			Row::sliderFloat("Focus Distance", &cfg.DoFFocusDistance, 0.1f, 200.0f, "%.1f m",
+			                 ImGuiSliderFlags_Logarithmic);
+			Row::sliderFloat("Focus Range", &cfg.DoFFocusRange, 0.0f, 100.0f, "%.1f m",
+			                 ImGuiSliderFlags_Logarithmic);
+			Row::sliderFloat("Aperture", &cfg.DoFAperture, 1.0f, 22.0f, "f/%.1f");
+		}
+		ImGui::EndDisabled();
+		if (!dofOK && hovered)
+			ImGui::SetTooltip("Metal and OpenGL only — Vulkan and DirectX ignore it.");
+		else if (dofOK)
+			hint("Lens blur outside the focus band; a smaller f-number blurs more.");
+	});
+	row("motionblur", "Post-Processing", [&]{
+		// Same backend pair as DoF; the other backends ignore the push.
+		const bool mbOK = (ctx.backend == HE::RendererBackend::Metal ||
+		                   ctx.backend == HE::RendererBackend::OpenGL);
+		ImGui::BeginDisabled(!mbOK);
+		EditorWidgets::checkbox("Motion Blur", &cfg.MotionBlurEnabled);
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.MotionBlurEnabled);
+			Row::sliderFloat("Shutter", &cfg.MotionBlurIntensity, 0.0f, 2.0f, "%.2f");
+			Row::sliderFloat("Max Blur", &cfg.MotionBlurMax, 0.0f, 128.0f, "%.0f px");
+		}
+		ImGui::EndDisabled();
+		if (!mbOK && hovered)
+			ImGui::SetTooltip("Metal and OpenGL only — Vulkan and DirectX ignore it.");
+		else if (mbOK)
+			hint("Streaks along the camera's motion; objects moving past a still camera stay sharp.");
 	});
 	row("ssr", "Post-Processing", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsScreenSpaceReflections;
