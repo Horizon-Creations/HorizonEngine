@@ -183,6 +183,11 @@ void install()
 		NSMenu* edit = heAddSubmenu(main, @"Edit");
 		heAddItem(edit, @"Undo", C::Undo, nil, 0, true);
 		heAddItem(edit, @"Redo", C::Redo, nil, 0, true);
+		[edit addItem:[NSMenuItem separatorItem]];
+		// The project's own settings, an editor tab like Preferences (which sits
+		// in the app menu, where macOS keeps an application's preferences). No
+		// key equivalent, for the reason the whole block has none.
+		heAddItem(edit, @"Project Settings…", C::ProjectSettings, nil, 0, true);
 	}
 
 	// ── View ───────────────────────────────────────────────────────────────

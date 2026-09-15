@@ -296,14 +296,14 @@ namespace
 	// a character's is what BLOCKS it.
 	{ "Rigid Body/Collision Layer", "",
 	  "Which of the project's sixteen collision channels this body sits in. The "
-	  "matrix in Preferences (Project, Collision Layers) decides which pairs of "
+	  "matrix in Project Settings (Physics, Collision Layers) decides which pairs of "
 	  "channels may touch, so this is how a bullet passes through a ragdoll or a "
 	  "pickup volume only sees the player. A layer keeps its number, so renaming "
 	  "one relabels it and moves nothing.",
 	  "", "systems#physics" },
 	{ "Character Controller/Collision Layer", "",
 	  "Which collision channel the character walks in — it decides what BLOCKS "
-	  "the character, through the same matrix in Preferences (Project, Collision "
+	  "the character, through the same matrix in Project Settings (Physics, Collision "
 	  "Layers). Separate from the Rigid Body row because a character need not "
 	  "have a rigid body at all.",
 	  "", "systems#physics" },
@@ -1530,9 +1530,17 @@ namespace
 	  "to the original. The copies become the selection; one undo removes them "
 	  "all.",
 	  "Ctrl+D", "editor#outliner" },
+	{ "Edit/Project Settings", "",
+	  "Opens the project's own settings as an editor tab: its title and startup "
+	  "scene, shadows, physics rate and gravity, what the packaged build boots "
+	  "with, permissions, fonts, collision layers. Everything on it travels with "
+	  "the project and into the build you export — the opposite of Preferences, "
+	  "which follow the editor on this machine.",
+	  "", "editor#preferences" },
 	{ "Edit/Preferences", "",
 	  "Opens the settings as an editor tab: renderer, viewport, collaboration, "
-	  "tools. They belong to the editor, not to the project.",
+	  "tools. They belong to the editor, not to the project — that one has its "
+	  "own tab, Project Settings.",
 	  "Ctrl+,", "editor#preferences" },
 	{ "View/Toggle Fullscreen", "",
 	  "Fills the screen with the editor window. On a Mac the View menu's own "
@@ -2493,11 +2501,132 @@ namespace
 	  "repository rather than about the last time you looked.",
 	  "", "editor#preferences" },
 
-	// ── Preferences » Project ────────────────────────────────────────────────
-	// The pages on this tab that edit the PROJECT. Everything else here follows
-	// the editor from project to project; these travel with the project and into
-	// the application it exports.
-	// ── Project ▸ Collision Layers ───────────────────────────────────────────
+	// ── Project Settings ─────────────────────────────────────────────────────
+	// The tab that edits the PROJECT (Edit ▸ Project Settings). Everything on
+	// Preferences follows the editor from project to project; these travel with
+	// the project and into the build it exports. Each page pushes its own scope
+	// ("Shadows", "Physics", …), so a key here is "<page>/<label>".
+	//
+	// The five pages below write Config/ProjectSettings.json; the four after
+	// them (Collision Layers, Permissions, Application, Fonts) write the .heproj
+	// and moved here from Preferences with their keys unchanged.
+	// ── Game ▸ General ───────────────────────────────────────────────────────
+	{ "Project General/Project", "Project",
+	  "The project's name — the .heproj's file name, and what the export derives "
+	  "the bundle name from. Shown here so the page says whose settings these "
+	  "are; it is changed by renaming the project in the Project Hub, not typed "
+	  "over.",
+	  "", "editor#preferences" },
+	{ "Project General/Title", "Title",
+	  "What the game calls itself to a player: the window title, the name a "
+	  "launcher shows. Leave it empty and the project name is used, which is "
+	  "what every build has done so far.\n\n"
+	  "Saved to Config/ProjectSettings.json. Not yet read by the window or the "
+	  "export — that is a later step of this panel.",
+	  "", "editor#preferences" },
+	{ "Project General/Scene", "Startup scene",
+	  "The scene the game opens with — and the one the editor opens when the "
+	  "project loads. Listed are the .hescene files under Content. An export "
+	  "profile may name a different scene for its own build; this is the "
+	  "project's default.",
+	  "", "export#profiles" },
+	{ "Project General/Rescan", "Rescan",
+	  "Reads the Content folder again for scenes. The list is made once when the "
+	  "page opens, so a scene saved since then is not in it until you press this.",
+	  "", "editor#preferences" },
+	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
+	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
+	  "On, the packaged build boots with whatever this editor's Preferences and "
+	  "Export dialog hold at export time — the way every export has worked, and "
+	  "what a project that never opened this page keeps doing. Off, the window "
+	  "and backend below are the project's answer, on every machine it is "
+	  "exported from.\n\n"
+	  "Saved to Config/ProjectSettings.json. The export does not read it yet — "
+	  "that is a later step of this panel.",
+	  "", "export#overview" },
+	{ "Render Defaults/Width", "Width",
+	  "The window's width in pixels when the game starts windowed. Ignored in "
+	  "fullscreen, where the display decides.",
+	  "", "export#overview" },
+	{ "Render Defaults/Height", "Height",
+	  "The window's height in pixels when the game starts windowed.",
+	  "", "export#overview" },
+	{ "Render Defaults/Window mode", "Window mode",
+	  "Windowed opens a frame of the size above. Fullscreen takes the display. "
+	  "Borderless is a frameless window covering the display — the choice for "
+	  "fast alt-tabbing, and for an application that draws its own title bar.",
+	  "", "export#overview" },
+	{ "Render Defaults/VSync", "VSync",
+	  "Whether the game waits for the display's refresh before presenting a "
+	  "frame. On removes tearing and caps the rate at the refresh rate; off "
+	  "runs as fast as it can.",
+	  "", "rendering#performance" },
+	{ "Render Defaults/Graphics backend", "Graphics backend",
+	  "Which graphics API the packaged build renders through. The platform "
+	  "default is the right answer almost always; a backend the target machine "
+	  "cannot create falls back to that default at start with a line in the "
+	  "log. The names are the same ones Preferences ▸ Display offers.",
+	  "", "rendering#backends" },
+	// ── Rendering ▸ Shadows ──────────────────────────────────────────────────
+	{ "Shadows/Shadow distance", "Shadow distance",
+	  "How far from the camera the sun's shadows reach, in metres. Beyond it "
+	  "nothing casts a shadow. The cascades share this range, so a longer "
+	  "distance spreads the same texels thinner — 250 is what the engine has "
+	  "always used.\n\n"
+	  "Saved to Config/ProjectSettings.json. The renderer does not read it yet — "
+	  "that is the next step of this panel.",
+	  "", "rendering#shadows" },
+	{ "Shadows/Cascades", "Cascades",
+	  "How many shadow maps the distance is cut into: a sharp one near the "
+	  "camera, coarser ones further out. More cascades means sharper shadows up "
+	  "close and more depth passes per frame. Three is the engine's default.",
+	  "", "rendering#shadows" },
+	{ "Shadows/Resolution", "Resolution",
+	  "Texels along one edge of each cascade's shadow map. 2048 is the default; "
+	  "4096 sharpens the far cascades at four times the memory and the fill.",
+	  "", "rendering#shadows" },
+	{ "Shadows/Split blend", "Split blend",
+	  "Where the cascade boundaries fall. 0 spaces them evenly over the shadow "
+	  "distance, 1 places them logarithmically — most of the maps close to the "
+	  "camera, where one texel covers the least ground. 0.5 is the usual "
+	  "compromise.",
+	  "", "rendering#shadows" },
+	{ "Shadows/Slope bias", "Slope bias",
+	  "The depth offset that grows with the angle between a surface and the "
+	  "light, so a surface lit at a grazing angle does not stripe with its own "
+	  "shadow. Raise it for acne, lower it if shadows detach from their casters.",
+	  "", "rendering#shadows" },
+	{ "Shadows/Minimum bias", "Minimum bias",
+	  "The depth offset a surface facing the light straight on still gets. The "
+	  "floor under the slope bias — the number that matters on flat ground under "
+	  "a high sun.",
+	  "", "rendering#shadows" },
+	// ── Physics ▸ Simulation ─────────────────────────────────────────────────
+	{ "Physics/Fixed rate", "Fixed rate",
+	  "How many simulation steps a second of game time is cut into, whatever "
+	  "the frame rate. Higher is more accurate and more expensive; 60 is what "
+	  "every project has run at. A rate rather than a step length because 60 is "
+	  "exact and 0.01667 is not.\n\n"
+	  "Saved to Config/ProjectSettings.json. The simulation does not read it "
+	  "yet — that is the next step of this panel.",
+	  "", "systems#physics" },
+	{ "Physics/Gravity", "Gravity",
+	  "The acceleration every rigid body is under, in metres per second squared "
+	  "along X, Y and Z. Earth is 0, −9.81, 0. A character controller falls by "
+	  "its own component's gravity value on purpose — a floaty player in "
+	  "ordinary gravity is a design choice.",
+	  "", "systems#physics" },
+	{ "Physics/Earth", "Earth",
+	  "Puts gravity back to 0, −9.81, 0.",
+	  "", "systems#physics" },
+	// ── Audio ▸ Buses ────────────────────────────────────────────────────────
+	{ "Audio Buses/Open Audio Mixer", "Open Audio Mixer",
+	  "Opens the mixer window, where the project's buses are made and their "
+	  "faders sit. Buses are a project setting like the rest of this tab — saved "
+	  "in the .heproj and shipped with the build — but a fader is something you "
+	  "move while a scene plays, which is why they have a window and not a page.",
+	  "", "systems#audio" },
+	// ── Physics ▸ Collision Layers ───────────────────────────────────────────
 	{ "Collision Layers/Name", "Layer name",
 	  "What this channel is called, everywhere it is offered. The NUMBER is what "
 	  "a scene stores, so renaming a layer relabels it and moves nothing. Leave "
@@ -4061,7 +4190,7 @@ namespace
 	  "<icon=home> for one of the built-in icons and << for a literal '<'. An "
 	  "icon inserts a single character and inherits the colour, size and link it "
 	  "stands in. <b> needs the project's text weight to be Regular, since "
-	  "nothing is bolder than bold (Preferences > Project > Fonts). A link makes "
+	  "nothing is bolder than bold (Project Settings > Game > Fonts). A link makes "
 	  "that stretch of words "
 	  "clickable — the pointer turns into a hand over it and On Link Clicked "
 	  "fires with the id — while the rest of the label stays as inert as any "
@@ -5660,9 +5789,14 @@ namespace
 		// deserves a list rather than being scattered through the designer's
 		// controls.
 		{ "UI Palette/",     "editor-ui", "UI Designer", "The elements" },
-		// The pages on the Preferences tab that edit the PROJECT rather than the
-		// editor, which is why they get their own sections rather than sitting
-		// under "Preferences".
+		// The Project Settings tab — the pages that edit the PROJECT rather than
+		// the editor, one section per page so the reference is split the way
+		// the tab's rail is.
+		{ "Project General/",  "editor-settings", "Settings Reference", "Project: general" },
+		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
+		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
+		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
+		{ "Audio Buses/",      "editor-settings", "Settings Reference", "Project: audio buses" },
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
 		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
 		{ "Application/",    "editor-settings", "Settings Reference", "The application" },

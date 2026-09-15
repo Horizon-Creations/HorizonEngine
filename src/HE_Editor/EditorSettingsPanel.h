@@ -5,9 +5,11 @@ struct AppContext;
 
 // ── Preferences tab + engine-settings catalog ────────────────────────────────
 // The Preferences UI is a full editor tab (Edit ▸ Preferences, Ctrl+,): a
-// category navigation on the left (General / Editor / Rendering / Project, each
-// with sub-pages) and the selected page's settings on the right. It replaced the
-// old modal popup.
+// category navigation on the left (General / Editor / Rendering, each with
+// sub-pages) and the selected page's settings on the right. It replaced the
+// old modal popup. Everything here follows the EDITOR from project to project;
+// what belongs to the project is on the Project Settings tab
+// (ProjectSettingsPanel).
 //
 // The engine-settings catalog is shared with the Quick Settings dock panel:
 // every setting row carries a "pin" toggle in the Preferences tab, and Quick
@@ -36,11 +38,9 @@ namespace EditorSettingsPanel
 		HorizonCode, CollabGeneral, RemoteControl, Repository, Status,
 		// Rendering
 		Display, PostProcessing, GlobalIllumination, Effects,
-		// Project — the pages that edit the PROJECT rather than the editor. They
-		// live in Preferences because there is no project settings surface yet
-		// and a permission nobody can find is a permission nobody grants; each
-		// page says whose settings they are in its first line.
-		Permissions, Fonts, Application, CollisionLayers,
+		// (The pages that edit the PROJECT — Application, Permissions, Fonts,
+		// Collision Layers — used to sit here for want of a project settings
+		// surface. They are on the Project Settings tab now: ProjectSettingsPanel.)
 	};
 
 	// Sentinel "asset path" identifying the Preferences tab (no backing .hasset).
