@@ -294,6 +294,7 @@ add_library(HorizonRendering SHARED
     src/RenderExtractor.cpp
     src/RenderWorld.cpp
     src/FrustumCuller.cpp
+    src/OcclusionCuller.cpp
     src/RenderSorter.cpp
     src/ScenePick.cpp
     # Cross-backend shared renderer helpers (audit 1a). The backend static libs

@@ -4,6 +4,7 @@
 
 #include <Math/AABB.h>
 #include <HorizonRendering/FrustumCuller.h>
+#include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -1726,4 +1727,283 @@ TEST_CASE("specular AA widening: the numbers the shader copies implement")
 	// It never sharpens, and never runs past fully rough.
 	CHECK(widen(0.95f, 1.0f, 10.0f) <= 1.0f);
 	CHECK(widen(0.95f, 1.0f, 10.0f) >= 0.95f);
+}
+
+// ─── OcclusionCuller ──────────────────────────────────────────────────────────
+// The rules the culler must honour, each as a scene: a wall in front of the
+// camera and something behind it. "Kept" is the conservative answer, so every
+// case where the occluder is not trustworthy expects nothing culled.
+namespace
+{
+	struct OcclusionScene
+	{
+		ContentManager cm;
+		RenderWorld    rw;
+
+		OcclusionScene()
+		{
+			// Eye at the origin looking down -Z, 60° vertical fov, 16:9.
+			rw.camera.position   = glm::vec3(0.0f);
+			rw.camera.view       = glm::lookAt(glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+			rw.camera.projection = glm::perspective(glm::radians(60.0f), 16.0f / 9.0f, 0.1f, 200.0f);
+		}
+
+		// Axis-aligned box mesh, 12 triangles, loose (stride-3) layout unless
+		// `cooked` asks for the packed interleaved (stride-8) one.
+		HE::UUID box(const char* name, glm::vec3 half, bool cooked = false,
+		             std::vector<MeshSection> sections = {})
+		{
+			StaticMeshAsset m; m.type = HE::AssetType::StaticMesh; m.name = name;
+			const glm::vec3 c[8] = {
+				{ -half.x, -half.y, -half.z }, {  half.x, -half.y, -half.z },
+				{  half.x,  half.y, -half.z }, { -half.x,  half.y, -half.z },
+				{ -half.x, -half.y,  half.z }, {  half.x, -half.y,  half.z },
+				{  half.x,  half.y,  half.z }, { -half.x,  half.y,  half.z } };
+			for (const glm::vec3& p : c)
+			{
+				if (cooked)
+					m.interleaved.insert(m.interleaved.end(), { p.x, p.y, p.z, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f });
+				else
+					m.vertices.insert(m.vertices.end(), { p.x, p.y, p.z });
+			}
+			m.indices = { 0,1,2, 0,2,3,  4,6,5, 4,7,6,  0,4,5, 0,5,1,
+			              3,2,6, 3,6,7,  1,5,6, 1,6,2,  0,3,7, 0,7,4 };
+			if (cooked) { m.cooked = true; m.vertexCount = 8; }
+			m.boundsMin[0] = -half.x; m.boundsMin[1] = -half.y; m.boundsMin[2] = -half.z;
+			m.boundsMax[0] =  half.x; m.boundsMax[1] =  half.y; m.boundsMax[2] =  half.z;
+			m.sections = std::move(sections);
+			return cm.registerStaticMesh(std::move(m));
+		}
+
+		HE::UUID material(float opacity = 1.0f, uint8_t blendMode = 0, const char* wpo = "")
+		{
+			MaterialAsset ma; ma.type = HE::AssetType::Material; ma.name = "m";
+			ma.opacity = opacity; ma.blendMode = blendMode; ma.customShaderVertGlsl = wpo;
+			return cm.registerMaterial(std::move(ma));
+		}
+
+		// Adds an object at `pos` with the box's real world bounds; returns its index.
+		size_t add(HE::UUID mesh, glm::vec3 pos, glm::vec3 half, HE::UUID material = {})
+		{
+			RenderObject o;
+			o.meshAssetId     = mesh;
+			o.materialAssetId = material;
+			o.transform       = glm::translate(glm::mat4(1.0f), pos);
+			o.worldBounds.min = pos - half;
+			o.worldBounds.max = pos + half;
+			rw.objects.push_back(o);
+			return rw.objects.size() - 1;
+		}
+
+		std::vector<uint8_t> run(OcclusionCuller& oc, const ContentManager* which)
+		{
+			std::vector<uint8_t> vis;
+			FrustumCuller().cull(rw, vis);
+			oc.refine(rw, which, vis);
+			return vis;
+		}
+		std::vector<uint8_t> run(OcclusionCuller& oc) { return run(oc, &cm); }
+	};
+
+	OcclusionCuller enabledCuller()
+	{
+		OcclusionCuller oc;
+		OcclusionCuller::Settings s; s.enabled = true;
+		oc.setSettings(s);
+		return oc;
+	}
+}
+
+TEST_CASE("OcclusionCuller: a cube behind a wall is hidden, the wall and a cube beside it stay")
+{
+	OcclusionScene sc;
+	// The wall (8 wide, 4 high, 5 ahead) covers x/z up to 0.8 and y/z up to
+	// 0.4 of a 60° / 16:9 view (edges at 1.03 and 0.58): room beside and
+	// above it for the witnesses that must stay.
+	const glm::vec3 wallHalf(4.0f, 2.0f, 0.1f), cubeHalf(0.5f);
+	const HE::UUID wallMesh = sc.box("wall", wallHalf), cubeMesh = sc.box("cube", cubeHalf);
+	const size_t wall   = sc.add(wallMesh, { 0.0f, 0.0f, -5.0f }, wallHalf);
+	const size_t hidden = sc.add(cubeMesh, { 0.0f, 0.0f, -10.0f }, cubeHalf);
+	const size_t beside = sc.add(cubeMesh, { 9.5f, 0.0f, -10.0f }, cubeHalf); // x/z 0.9..1.0
+	const size_t before = sc.add(cubeMesh, { 0.0f, 0.0f, -3.0f },  cubeHalf);
+	// Straddles the wall's top edge (y/z 0.35..0.45): partially visible = visible.
+	const size_t peek   = sc.add(cubeMesh, { 0.0f, 4.0f, -10.0f }, cubeHalf);
+
+	OcclusionCuller oc = enabledCuller();
+	const auto vis = sc.run(oc);
+	CHECK(vis[wall]   == 1);
+	CHECK(vis[hidden] == 0);
+	CHECK(vis[beside] == 1);
+	CHECK(vis[before] == 1);
+	CHECK(vis[peek]   == 1);
+	// The wall and the near cube (4.7 % of the frame) qualify as occluders; the
+	// far cubes (0.4 %) do not.
+	CHECK(oc.stats().occluders == 2);
+	CHECK(oc.stats().occluderTriangles == 24);
+	CHECK(oc.stats().tested == 5);
+	CHECK(oc.stats().culled == 1);
+	CHECK(oc.width() == 256);
+	CHECK(oc.height() == 144);               // 256 / (16/9)
+}
+
+TEST_CASE("OcclusionCuller: disabled, or without a ContentManager, changes nothing")
+{
+	OcclusionScene sc;
+	const glm::vec3 wallHalf(4.0f, 4.0f, 0.1f), cubeHalf(0.5f);
+	sc.add(sc.box("wall", wallHalf), { 0.0f, 0.0f, -5.0f }, wallHalf);
+	const size_t hidden = sc.add(sc.box("cube", cubeHalf), { 0.0f, 0.0f, -10.0f }, cubeHalf);
+
+	OcclusionCuller off; // default settings: enabled = false
+	CHECK(sc.run(off)[hidden] == 1);
+	CHECK(off.stats().culled == 0);
+
+	OcclusionCuller on = enabledCuller();
+	CHECK(sc.run(on, nullptr)[hidden] == 1);
+	CHECK(on.stats().occluders == 0);
+}
+
+TEST_CASE("OcclusionCuller: only a trustworthy occluder hides anything")
+{
+	const glm::vec3 wallHalf(4.0f, 4.0f, 0.1f), cubeHalf(0.5f);
+
+	auto hiddenBehind = [&](auto&& configure) -> bool
+	{
+		OcclusionScene sc;
+		const HE::UUID wallMesh = sc.box("wall", wallHalf);
+		const size_t wall   = sc.add(wallMesh, { 0.0f, 0.0f, -5.0f }, wallHalf);
+		const size_t hidden = sc.add(sc.box("cube", cubeHalf), { 0.0f, 0.0f, -10.0f }, cubeHalf);
+		configure(sc, sc.rw.objects[wall]);
+		OcclusionCuller oc = enabledCuller();
+		return sc.run(oc)[hidden] == 0;
+	};
+
+	// Control: the plain wall does hide the cube.
+	CHECK(hiddenBehind([](OcclusionScene&, RenderObject&) {}));
+	// An opaque material (explicit) is as good as the built-in draw.
+	CHECK(hiddenBehind([](OcclusionScene& sc, RenderObject& w) { w.materialAssetId = sc.material(); }));
+	// Translucent by opacity, by blend mode, masked, or moved by WPO: not an occluder.
+	CHECK_FALSE(hiddenBehind([](OcclusionScene& sc, RenderObject& w) { w.materialAssetId = sc.material(0.5f); }));
+	CHECK_FALSE(hiddenBehind([](OcclusionScene& sc, RenderObject& w) { w.materialAssetId = sc.material(1.0f, 2); }));
+	CHECK_FALSE(hiddenBehind([](OcclusionScene& sc, RenderObject& w) { w.materialAssetId = sc.material(1.0f, 1); }));
+	CHECK_FALSE(hiddenBehind([](OcclusionScene& sc, RenderObject& w) { w.materialAssetId = sc.material(1.0f, 0, "vec3 heWpo = vec3(0.0);"); }));
+	// A material the ContentManager does not know: could be anything.
+	CHECK_FALSE(hiddenBehind([](OcclusionScene&, RenderObject& w) { w.materialAssetId = HE::UUID{ 1, 2 }; }));
+	// Per-instance fade, and the particle/icon opt-out.
+	CHECK_FALSE(hiddenBehind([](OcclusionScene&, RenderObject& w) { w.instanceTint.a = 0.5f; }));
+	CHECK_FALSE(hiddenBehind([](OcclusionScene&, RenderObject& w) { w.contributesAO = false; }));
+	// A wall whose mesh is not resident is no occluder either.
+	CHECK_FALSE(hiddenBehind([](OcclusionScene&, RenderObject& w) { w.meshAssetId = HE::UUID{ 3, 4 }; }));
+}
+
+TEST_CASE("OcclusionCuller: unknown bounds and near-plane contact are always kept")
+{
+	OcclusionScene sc;
+	const glm::vec3 wallHalf(4.0f, 4.0f, 0.1f), cubeHalf(0.5f);
+	const HE::UUID wallMesh = sc.box("wall", wallHalf), cubeMesh = sc.box("cube", cubeHalf);
+	sc.add(wallMesh, { 0.0f, 0.0f, -5.0f }, wallHalf);
+	const size_t unknown = sc.add(cubeMesh, { 0.0f, 0.0f, -10.0f }, cubeHalf);
+	sc.rw.objects[unknown].worldBounds = HE::AABB{}; // the extractor's "not resident yet"
+	OcclusionCuller oc = enabledCuller();
+	CHECK(sc.run(oc)[unknown] == 1);
+
+	// A wall that passes THROUGH the camera (its box straddles the near plane)
+	// still rasterizes — clipped — and still hides what is behind it …
+	OcclusionScene sc2;
+	const glm::vec3 bigHalf(20.0f, 20.0f, 3.0f);
+	sc2.add(sc2.box("big", bigHalf), { 0.0f, 0.0f, -1.0f }, bigHalf);
+	const size_t behind = sc2.add(sc2.box("cube", cubeHalf), { 0.0f, 0.0f, -10.0f }, cubeHalf);
+	OcclusionCuller oc2 = enabledCuller();
+	CHECK(sc2.run(oc2)[behind] == 0);
+	CHECK(oc2.stats().occluders == 1);
+
+	// … while an OCCLUDEE touching the near plane is never tested away.
+	OcclusionScene sc3;
+	sc3.add(sc3.box("big", bigHalf), { 0.0f, 0.0f, -1.0f }, bigHalf);
+	const size_t touching = sc3.add(sc3.box("cube", cubeHalf), { 0.0f, 0.0f, 0.2f }, cubeHalf);
+	OcclusionCuller oc3 = enabledCuller();
+	CHECK(sc3.run(oc3)[touching] == 1);
+}
+
+TEST_CASE("OcclusionCuller: an occluder never culls itself, and a nearer wall hides a farther one")
+{
+	OcclusionScene sc;
+	const glm::vec3 wallHalf(4.0f, 4.0f, 0.1f);
+	const HE::UUID wallMesh = sc.box("wall", wallHalf);
+	const size_t front = sc.add(wallMesh, { 0.0f, 0.0f, -5.0f }, wallHalf);
+	const size_t back  = sc.add(wallMesh, { 0.0f, 0.0f, -6.0f }, wallHalf);
+	OcclusionCuller oc = enabledCuller();
+	const auto vis = sc.run(oc);
+	CHECK(vis[front] == 1);
+	CHECK(vis[back]  == 0);
+	CHECK(oc.stats().occluders == 2); // both qualified; the back one lost
+}
+
+TEST_CASE("OcclusionCuller: a cooked (interleaved) occluder works like a loose one")
+{
+	OcclusionScene sc;
+	const glm::vec3 wallHalf(4.0f, 4.0f, 0.1f), cubeHalf(0.5f);
+	sc.add(sc.box("wall", wallHalf, /*cooked*/ true), { 0.0f, 0.0f, -5.0f }, wallHalf);
+	const size_t hidden = sc.add(sc.box("cube", cubeHalf), { 0.0f, 0.0f, -10.0f }, cubeHalf);
+	OcclusionCuller oc = enabledCuller();
+	CHECK(sc.run(oc)[hidden] == 0);
+	CHECK(oc.stats().occluderTriangles == 12);
+}
+
+TEST_CASE("OcclusionCuller: a multi-section occluder rasterizes its opaque slots only")
+{
+	// The wall's index buffer split in two slots: the first four triangles (front
+	// face + back face — the two faces that matter head-on) and the eight side
+	// triangles. When the FRONT/BACK slot is translucent the wall is see-through
+	// for the culler even though its rim is opaque.
+	OcclusionScene sc;
+	const glm::vec3 wallHalf(4.0f, 4.0f, 0.1f), cubeHalf(0.5f);
+	MeshSection faces; faces.indexOffset = 0;  faces.indexCount = 12;
+	MeshSection rim;   rim.indexOffset   = 12; rim.indexCount   = 24;
+	const HE::UUID wallMesh = sc.box("wall", wallHalf, false, { faces, rim });
+	const HE::UUID cubeMesh = sc.box("cube", cubeHalf);
+	const HE::UUID opaque = sc.material(), glass = sc.material(0.3f);
+
+	auto scene = [&](HE::UUID facesMat, HE::UUID rimMat) {
+		sc.rw.objects.clear();
+		const size_t wall = sc.add(wallMesh, { 0.0f, 0.0f, -5.0f }, wallHalf);
+		sc.rw.objects[wall].sections = { RenderSection{ 0, 12, facesMat }, RenderSection{ 12, 24, rimMat } };
+		return sc.add(cubeMesh, { 0.0f, 0.0f, -10.0f }, cubeHalf);
+	};
+	OcclusionCuller oc = enabledCuller();
+	{
+		const size_t hidden = scene(opaque, opaque);
+		CHECK(sc.run(oc)[hidden] == 0);
+		CHECK(oc.stats().occluderTriangles == 12);
+	}
+	{
+		const size_t hidden = scene(opaque, glass);
+		CHECK(sc.run(oc)[hidden] == 0);           // the rim is not needed head-on
+		CHECK(oc.stats().occluderTriangles == 4);  // …and was not rasterized
+	}
+	{
+		const size_t hidden = scene(glass, opaque);
+		CHECK(sc.run(oc)[hidden] == 1);           // see-through faces: keep
+	}
+}
+
+TEST_CASE("OcclusionCuller: occluder budget — small things and heavy meshes are not occluders")
+{
+	OcclusionScene sc;
+	const glm::vec3 wallHalf(4.0f, 4.0f, 0.1f), cubeHalf(0.5f);
+	const size_t wall   = sc.add(sc.box("wall", wallHalf), { 0.0f, 0.0f, -5.0f }, wallHalf);
+	const size_t hidden = sc.add(sc.box("cube", cubeHalf), { 0.0f, 0.0f, -10.0f }, cubeHalf);
+	(void)wall;
+
+	OcclusionCuller oc;
+	OcclusionCuller::Settings s; s.enabled = true;
+	s.maxOccluderTriangles = 6; // the box has 12
+	oc.setSettings(s);
+	CHECK(sc.run(oc)[hidden] == 1);
+	CHECK(oc.stats().occluders == 0);
+
+	s.maxOccluderTriangles = 16384;
+	s.minOccluderScreenArea = 0.9f; // the wall covers well under 90 % of the frame
+	oc.setSettings(s);
+	CHECK(sc.run(oc)[hidden] == 1);
+	CHECK(oc.stats().occluders == 0);
 }
