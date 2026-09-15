@@ -622,9 +622,24 @@ namespace
 	  "", "scenes#terrain" },
 
 	// ── Foliage ──────────────────────────────────────────────────────────────
+	{ "Foliage/Mesh", "Foliage Mesh",
+	  "The static mesh scattered across the landscape — a grass tuft, a bush, a "
+	  "rock. Without one the layer scatters nothing; drop a mesh from the "
+	  "Content Browser or click to pick one.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Material", "Foliage Material",
+	  "A material for every instance, overriding what the mesh brings along. "
+	  "Leave it empty to use the mesh's own.",
+	  "", "scenes#foliage" },
 	{ "Foliage/Density", "",
 	  "Instances per square metre. Small changes matter — this multiplies across "
-	  "the whole landscape.",
+	  "the whole landscape. A painted mask thins it per spot; this is the "
+	  "ceiling the mask works down from.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Reset Mask", "",
+	  "Throws the painted density mask away, so the layer scatters evenly over "
+	  "the whole landscape again — erased areas grow back. One undo step, but "
+	  "the entire mask, not the last stroke.",
 	  "", "scenes#foliage" },
 	{ "Foliage/Draw Distance", "",
 	  "Beyond this distance instances are not drawn at all, in metres.",
@@ -4275,6 +4290,93 @@ namespace
 	  "its Seed and noise settings generate — flat ground if the seed is 0. It "
 	  "is one undo step, but it drops the whole sculpt, not the last stroke. "
 	  "Painted layers are left alone.",
+	  "", "editor#landscape-mode" },
+
+	// ── Landscape: heightmap import ──────────────────────────────────────────
+	// Drawn under this scope from both the Landscape panel and the Terrain
+	// section in Details (TerrainTools::drawHeightmapBlock pushes it).
+	{ "Landscape/Heightmap", "Heightmap",
+	  "A greyscale texture from the project to shape the landscape from: black "
+	  "is the ground at 0 m, white is Height Scale up, and everything between "
+	  "is a slope. The picture is laid over the whole landscape, top edge at "
+	  "-Z, and resampled onto its vertex grid when you press Apply. Project "
+	  "textures are 8-bit, so there are 256 height steps; for finer relief "
+	  "import a 16-bit file instead.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Apply Heightmap", "",
+	  "Reads the assigned heightmap texture into the landscape's heights. It "
+	  "replaces the whole sculpt — every stroke made so far — but leaves the "
+	  "painted layers and the foliage mask alone. One undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Import Heightmap File...", "",
+	  "Shapes the landscape from an image file on disk, without adding it to "
+	  "the project. PNG and PGM are read at 8 or 16 bits, .r16/.raw as square "
+	  "16-bit heightmaps the way World Machine and Unreal exchange them, and "
+	  "JPEG, BMP, TGA at 8 bits. Same rules as Apply: black is 0 m, white is "
+	  "Height Scale, the sculpt is replaced, paint and foliage stay.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Flip Z", "",
+	  "Mirrors the picture top-to-bottom before laying it over the ground. "
+	  "Normally the top row of the image is the landscape's -Z edge, which "
+	  "matches the terrain's own texture direction; some tools export their "
+	  "heightmaps the other way up, and this is the fix.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Use Image Resolution", "",
+	  "Sets the landscape's vertex resolution to the picture's own size "
+	  "(rounded to the 2^n+1 the chunks use, at most 513) instead of "
+	  "resampling the picture onto the current grid. Right for a map made for "
+	  "this landscape; off by default so an import never multiplies the vertex "
+	  "count without asking.",
+	  "", "editor#landscape-mode" },
+
+	// ── Landscape: the foliage brush ─────────────────────────────────────────
+	{ "Landscape/Foliage", "Foliage",
+	  "Paints where the landscape's foliage layer grows and where it must not. "
+	  "The brush writes a density mask over the ground: Grow lets the layer "
+	  "come up under the cursor, Erase clears it — a yard, a road, a lake. The "
+	  "instances follow the stroke while you drag.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Add Foliage Layer", "",
+	  "Puts a Foliage component on the landscape, the same one Details' Add "
+	  "Component would. Give it a mesh next, or the brush paints a mask nobody "
+	  "can see.",
+	  "", "scenes#foliage" },
+	{ "Landscape/Density", "Foliage Density",
+	  "Instances per square metre for the layer, the same number as Density on "
+	  "the Foliage component in Details. The mask thins it per spot; this is "
+	  "the ceiling.",
+	  "", "scenes#foliage" },
+	{ "Landscape/Grow", "Grow",
+	  "Raises the mask under the brush toward the target density, so the layer "
+	  "scatters there. Painting over an erased spot brings the foliage back; the "
+	  "instances that return are the ones the uniform layer would have put "
+	  "there, so nothing shuffles.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Erase", "Erase",
+	  "Pulls the mask under the brush to nothing, and nothing is scattered "
+	  "there at all — not thinned, empty. This is how an exclusion area is "
+	  "made: a path, a building's footprint, a clearing. The cursor turns red.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Target Density", "Target Density",
+	  "How thick the layer grows where Grow paints, as a share of the layer's "
+	  "Density: 100 % is the full scatter, 30 % a sparse one. Painting at less "
+	  "than full is what makes a meadow thin out toward its edge.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Mask", "Mask Resolution",
+	  "How many texels per side the density mask has, from 32 to 2048, "
+	  "stretched over the whole landscape — the finer it is, the sharper an "
+	  "erased edge can be. Locked as soon as anything is painted, because "
+	  "changing it would throw the mask away; Reset Mask unlocks it again.",
+	  "", "scenes#foliage" },
+	{ "Landscape/Erase Everywhere", "",
+	  "Clears the whole mask, so the layer scatters nothing anywhere until you "
+	  "Grow it back in. The way to start from bare ground and paint the meadows "
+	  "in, rather than erase the paths out. One undo step.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Reset Mask", "",
+	  "Throws the painted mask away entirely: the layer goes back to an even "
+	  "scatter over the whole landscape, as if nothing had been painted, and "
+	  "the mask resolution unlocks. One undo step, the whole mask.",
 	  "", "editor#landscape-mode" },
 
 	// ── The Environment window ───────────────────────────────────────────────

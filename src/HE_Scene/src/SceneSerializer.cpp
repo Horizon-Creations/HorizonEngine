@@ -525,6 +525,11 @@ namespace
 				// so it silently reverted to 1 on every reload.
 				{ "lodDistanceScale", t->lodDistanceScale },
 			};
+			// The heightmap source the landscape was imported from (Details /
+			// Landscape "Heightmap" slot). Only written when set, so a scene
+			// that never used one does not grow a null key.
+			if (t->heightmapTexture != HE::UUID{})
+				tc["heightmapTexture"] = uuidToJson(t->heightmapTexture);
 			// Painted layer weights (RGBA8). Same base64 treatment as the
 			// heights: a JSON array of N bytes dominates the undo snapshot.
 			if (!t->layerWeights.empty())
@@ -763,7 +768,7 @@ namespace
 		}
 		if (auto* fol = registry.try_get<FoliageComponent>(entity))
 		{
-			comps["foliage"] = {
+			json fj = {
 				{ "visible",      fol->visible },
 				{ "mesh",         uuidToJson(fol->meshAssetId) },
 				{ "material",     uuidToJson(fol->materialAssetId) },
@@ -772,7 +777,14 @@ namespace
 				{ "minScale",     fol->minScale },
 				{ "maxScale",     fol->maxScale },
 				{ "drawDistance", fol->drawDistance },
+				{ "maskRes",      fol->maskRes },
 			};
+			// Painted density mask, the same base64 treatment as the terrain's
+			// layer weights: one byte per texel, absent when the layer is uniform.
+			if (!fol->densityMask.empty())
+				fj["densityMaskB64"] = base64Encode(fol->densityMask.data(),
+				                                    fol->densityMask.size());
+			comps["foliage"] = std::move(fj);
 		}
 		if (auto* c = registry.try_get<UICanvasComponent>(entity))
 		{
@@ -1302,6 +1314,8 @@ namespace
 			t.gain        = c.value("gain",         t.gain);
 			t.uvTiling    = c.value("uvTiling",     t.uvTiling);
 			t.lodDistanceScale = c.value("lodDistanceScale", t.lodDistanceScale);
+			if (c.contains("heightmapTexture"))
+				t.heightmapTexture = jsonToUuid(c["heightmapTexture"]);
 			t.weightRes   = c.value("weightRes",    t.weightRes);
 			if (c.contains("layerWeightsB64") && c["layerWeightsB64"].is_string())
 			{
@@ -1587,6 +1601,16 @@ namespace
 			fol.minScale        = c.value("minScale",     fol.minScale);
 			fol.maxScale        = c.value("maxScale",     fol.maxScale);
 			fol.drawDistance    = c.value("drawDistance", fol.drawDistance);
+			fol.maskRes         = c.value("maskRes",      fol.maskRes);
+			if (c.contains("densityMaskB64") && c["densityMaskB64"].is_string())
+			{
+				fol.densityMask = base64Decode(c["densityMaskB64"].get<std::string>());
+				// A truncated/mismatched blob would index out of bounds when
+				// sampled or painted — drop it (uniform scatter) rather than
+				// carry a half-sized mask.
+				if (fol.densityMask.size() != static_cast<size_t>(fol.maskRes) * fol.maskRes)
+					fol.densityMask.clear();
+			}
 			fol.dirty           = true; // regenerate instances after load
 			registry.emplace_or_replace<FoliageComponent>(entity, std::move(fol));
 		}

@@ -42,11 +42,20 @@ add_executable(he_tests
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.
     test_outliner_ui.cpp
+    # The Landscape panel's Foliage brush, driven the same way: mode well,
+    # Grow/Erase well, and a drag over a top-down viewport into the mask.
+    test_terrain_tools_ui.cpp
     test_editorcamera.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # Greyscale heightmap → heights: the pixel path, the texture and file
+    # wrappers (8/16-bit PGM, .r16), orientation and the down-sampling box.
+    test_terrain_heightmap.cpp
+    # Was on disk since the foliage layer landed but never in this list, so the
+    # scatter had no running test until the density mask needed one.
+    test_foliage.cpp
     test_debug_draw.cpp
     test_profiler.cpp
     test_profiler_stats.cpp
@@ -465,6 +474,10 @@ add_executable(he_tests
     # HE_IMGUI_ENABLED as the gizmo — AppContext's layout depends on it, so the
     # panel and its test are the only two sources here that see that layout.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
+    # The Landscape tools, for test_terrain_tools_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED. Everything they call (TerrainPaint/FoliagePaint
+    # in HorizonScene, RenderWorld, the toolbar, the widgets) is already here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -478,6 +491,8 @@ set_source_files_properties(
     test_viewport_gizmo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
     test_outliner_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
+    test_terrain_tools_ui.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE

@@ -104,11 +104,12 @@ non-default values in every persisted field"*, covering all 28 blocks above in b
 JSON and the CBOR/undo path.
 
 **What that test does not catch:** a field that is in *neither* half — never serialised at
-all. One known instance: `TerrainComponent::heightmapTexture`
-(`src/HE_Scene/include/HorizonScene/Components/TerrainComponent.h:25`) is declared and is
-collected as an asset reference (`src/HE_Scene/src/SceneSystems.cpp:127`), but is neither
-written nor read by `SceneSerializer`. Harmless today because nothing assigns it; it
-becomes data loss on the day the editor does.
+all. One known instance was `TerrainComponent::heightmapTexture`
+(`src/HE_Scene/include/HorizonScene/Components/TerrainComponent.h:25`): declared and
+collected as an asset reference (`src/HE_Scene/src/SceneSystems.cpp`), but neither written
+nor read by `SceneSerializer`. Harmless while nothing assigned it; the day the editor did
+(the Landscape/Details "Heightmap" slot, 2026-09) it was added to both halves and to the
+round-trip test in the same commit.
 
 ---
 

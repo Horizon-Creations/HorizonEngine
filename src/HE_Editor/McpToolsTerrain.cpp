@@ -177,10 +177,9 @@ json vec3Json(const glm::vec3& v) { return json::array({ v.x, v.y, v.z }); }
 // `componentsOf` and modified, so nothing here re-describes the component.
 //
 // The runtime carry-over afterwards is the one write outside the gateway, and
-// the header says why. Note what is NOT carried: `heightmapTexture`, which the
-// scene writer has never emitted (nothing sets it either — it is a Phase 2
-// placeholder). Carrying it here would be inventing persistence for a field the
-// editor loses on every save, which is a fix that belongs with the serializer.
+// the header says why. `heightmapTexture` is deliberately not in it: since the
+// heightmap import gave the editor a way to set it, the scene writer emits it,
+// so it rides through the serializer round-trip with the other authored fields.
 struct CarryOver
 {
 	HE::UUID      weightmapTextureId{};

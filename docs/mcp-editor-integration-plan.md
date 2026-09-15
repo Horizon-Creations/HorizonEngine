@@ -1605,9 +1605,11 @@ anderer. `TerrainSculpt::ensureHeights` nimmt den Schnapp deshalb vorweg, und
   Zahlen-Array zu setzen ist die naheliegende Ergänzung, aber ein eigener
   Schritt: die Frage, was mit einem Array passiert, das nicht auf das Gitter
   passt, ist die ganze Arbeit daran.
-* **`heightmapTexture`** wird vom Szenen-Schreiber nie ausgegeben und von
-  nichts gesetzt (Phase-2-Platzhalter). Die Werkzeuge tragen es deshalb auch
-  nicht mit — das gehört zum Serialisierer, nicht hierher.
+* **`heightmapTexture`** war lange ein Phase-2-Platzhalter, den der
+  Szenen-Schreiber nie ausgab. Seit dem Heightmap-Import (Landscape-Panel /
+  Details „Heightmap", `TerrainHeightmap`) schreibt und liest der Serialisierer
+  das Feld, damit läuft es durch `componentsOf` automatisch mit. Ein eigenes
+  `terrain_import_heightmap`-Werkzeug gibt es noch nicht.
 
 ## 11. Nachtrag: die Widget-Werkzeuge (Folgethema 29, Schritt 4)
 

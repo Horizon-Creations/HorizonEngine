@@ -7,13 +7,17 @@
 #include "EditorWidgets.h"               // asset drop slot + WrapText (text wraps, never runs off)
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/TerrainPaint.h>   // landscape layer brush
+#include <HorizonScene/FoliagePaint.h>   // foliage density-mask brush
+#include <HorizonScene/TerrainHeightmap.h> // greyscale heightmap → heights
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/Enums.h>
 #include <Diagnostics/Logger.h>
 #include <glm/gtc/type_ptr.hpp>
+#include <SDL3/SDL_dialog.h>             // "Import Heightmap File…"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -34,6 +38,15 @@ static TerrainTool s_terrainTool     = TerrainTool::Raise;
 // node (MaterialAsset::graphLayerNames) — the material defines what a layer is.
 static bool        s_landscapePaint  = false;
 static int         s_paintLayer      = 0;
+// Landscape FOLIAGE mode: the same brush paints the foliage layer's density
+// mask (FoliageComponent::densityMask) — Grow raises it toward the target
+// density, Erase pulls it to 0, which is how an exclusion area (a yard, a
+// road, a lake) is made. The terrain entity's own FoliageComponent is the
+// layer; FoliageSystem re-scatters it on the next tick, so a stroke shows up
+// under the cursor straight away.
+static bool        s_landscapeFoliage = false;
+static bool        s_foliageErase     = false;
+static float       s_foliageTarget    = 1.0f;   // Grow paints toward this fraction of Density
 static float       s_brushRadius     = 10.0f;  // inner full-strength radius (m)
 static float       s_falloffRadius   = 5.0f;   // transition width — strength falls linearly to 0
 static float       s_brushStrength   = 5.0f;
@@ -186,11 +199,19 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 				constexpr float kPi2 = 6.28318530f;
 				const float totalR   = s_brushRadius + s_falloffRadius;
 
+				// The foliage brush says what it will do by colour: green
+				// grows, red erases. Sculpt and layer paint keep the white.
+				const bool folCursor = s_landscapeFoliage;
+				const ImU32 innerCol = !folCursor       ? IM_COL32(255,255,255,210)
+				                     : s_foliageErase   ? IM_COL32(255,110, 90,220)
+				                                        : IM_COL32(120,230,110,220);
+				const ImU32 outerCol = !folCursor       ? IM_COL32(180,180,180,120)
+				                     : s_foliageErase   ? IM_COL32(255,110, 90,110)
+				                                        : IM_COL32(120,230,110,110);
 				for (int ci = 0; ci < 2; ++ci)
 				{
 					const float r     = (ci == 0) ? s_brushRadius : totalR;
-					const ImU32 col   = (ci == 0) ? IM_COL32(255,255,255,210)
-					                              : IM_COL32(180,180,180,120);
+					const ImU32 col   = (ci == 0) ? innerCol : outerCol;
 					const float thick = (ci == 0) ? 1.5f : 1.0f;
 					if (r < 0.01f) continue;
 
@@ -247,8 +268,33 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 					                    s_brushRadius, s_falloffRadius, amount);
 				}
 			}
-			// Sculpting is suppressed while painting.
-			const bool sculptDown = lmbDown && !s_landscapePaint;
+			// ── Foliage mode: the layer's density mask ────────────
+			// Same brush, same hit, a third target: the mask of the
+			// terrain entity's FoliageComponent. FoliagePaint dirties
+			// the layer, and FoliageSystem re-scatters it on the next
+			// tick — the instances under the brush appear or vanish
+			// while dragging. Without a layer there is nothing to
+			// paint; the panel offers to add one.
+			else if (s_landscapeFoliage)
+			{
+				if (auto* fol = terrainReg.try_get<FoliageComponent>(terrainEnt))
+				{
+					if (lmbDown && !s_brushWasDown && ctx.undoSys)
+						ctx.undoSys->snapshotNow();   // one undo entry per stroke
+					if (lmbDown && hasHit)
+					{
+						const float lx = hitWS.x - terrainWorldPos.x;
+						const float lz = hitWS.z - terrainWorldPos.z;
+						const float amount = std::clamp(
+							s_brushStrength * static_cast<float>(dt) * 0.16f, 0.0f, 1.0f);
+						FoliagePaint::paint(*fol, tc, lx, lz,
+						                    s_brushRadius, s_falloffRadius, amount,
+						                    s_foliageErase ? 0.0f : s_foliageTarget);
+					}
+				}
+			}
+			// Sculpting is suppressed while painting layers or foliage.
+			const bool sculptDown = lmbDown && !s_landscapePaint && !s_landscapeFoliage;
 
 			if (sculptDown && !s_brushWasDown)
 			{
@@ -620,19 +666,21 @@ void renderPanel(AppContext& ctx)
                 lmat2 ? lmat2->graphLayerNames : std::vector<std::string>{};
             if (layers.empty()) s_landscapePaint = false;
 
-            // Sculpt | Paint is one choice between two tools, so it is one well
-            // of two cells — the same shape the Scene bar uses for View |
-            // Landscape, and the reason a row of radio buttons never reads as
-            // "pick one of these".
+            // Sculpt | Paint | Foliage is one choice between three tools, so
+            // it is one well of three cells — the same shape the Scene bar
+            // uses for View | Landscape, and the reason a row of radio
+            // buttons never reads as "pick one of these".
             {
                 namespace T = EditorToolbar;
                 T::Bar bar;
                 bar.group();
-                if (bar.item("##lsSculpt", T::iconBrush, "Sculpt", !s_landscapePaint, true,
+                if (bar.item("##lsSculpt", T::iconBrush, "Sculpt",
+                             !s_landscapePaint && !s_landscapeFoliage, true,
                              "Raise, lower and smooth the ground",
                              "Landscape/Sculpt"))
                 {
-                    s_landscapePaint = false;
+                    s_landscapePaint   = false;
+                    s_landscapeFoliage = false;
                 }
                 // The help entry matters most here: the one-liner explaining WHY
                 // Paint is greyed out is suppressed on a dimmed cell, so until
@@ -645,9 +693,131 @@ void renderPanel(AppContext& ctx)
                                  : "Paint the material layers onto the ground",
                              "Landscape/Paint"))
                 {
-                    s_landscapePaint = true;
+                    s_landscapePaint   = true;
+                    s_landscapeFoliage = false;
+                }
+                if (bar.item("##lsFoliage", T::iconTree, "Foliage", s_landscapeFoliage, true,
+                             "Paint where the foliage layer grows and where it must not",
+                             "Landscape/Foliage"))
+                {
+                    s_landscapePaint   = false;
+                    s_landscapeFoliage = true;
                 }
                 bar.endGroup();
+            }
+
+            // ── Foliage brush: the layer's density mask ──────────────────
+            if (s_landscapeFoliage)
+            {
+                auto* fol = reg.try_get<FoliageComponent>(terrainEnt2);
+                if (!fol)
+                {
+                    // The layer is the terrain entity's own FoliageComponent —
+                    // the same one "Add Component" in Details would put there.
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("This landscape has no foliage layer yet.");
+                    if (EditorWidgets::primaryButton("Add Foliage Layer", ImVec2(-1.0f, 0.0f)))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        reg.emplace<FoliageComponent>(terrainEnt2, FoliageComponent{});
+                        ctx.world->markHierarchyDirty();
+                    }
+                    EditorWidgets::helpForLabel("Add Foliage Layer");
+                }
+                else
+                {
+                    // What grows: the mesh and material live on the layer, and
+                    // without a mesh the brush paints a mask nobody can see.
+                    ImGui::SeparatorText("Layer");
+                    if (EditorWidgets::assetDropSlot(ctx, "Mesh", fol->meshAssetId,
+                            HE::AssetType::StaticMesh, "folmesh",
+                            "(none — drop a mesh here)", "static mesh",
+                            /*showClear=*/true) != EditorWidgets::SlotAction::None)
+                        fol->dirty = true;
+                    EditorWidgets::helpForKey("Foliage/Mesh");
+                    if (EditorWidgets::assetDropSlot(ctx, "Material", fol->materialAssetId,
+                            HE::AssetType::Material, "folmat",
+                            "(none — the mesh's own)", "material",
+                            /*showClear=*/true) != EditorWidgets::SlotAction::None)
+                    {
+                        fol->dirty = true;
+                        if (ctx.renderer && fol->materialAssetId != HE::UUID{})
+                            ctx.renderer->InvalidateMaterial(fol->materialAssetId);
+                    }
+                    EditorWidgets::helpForKey("Foliage/Material");
+                    ImGui::DragFloat("Density##foliage", &fol->density, 0.01f, 0.001f, 10.0f, "%.3f /m²");
+                    EditorWidgets::helpForLabel("Density##foliage");
+                    if (ImGui::IsItemDeactivatedAfterEdit()) fol->dirty = true;
+
+                    // Grow | Erase: one well, like Sculpt's six brushes.
+                    ImGui::SeparatorText("Brush");
+                    {
+                        namespace T = EditorToolbar;
+                        T::Bar bar;
+                        bar.group();
+                        if (bar.item("##folGrow", T::iconPlus, "Grow", !s_foliageErase, true,
+                                     "Let the layer grow here, up to the target density",
+                                     "Landscape/Grow"))
+                            s_foliageErase = false;
+                        if (bar.item("##folErase", T::iconTrash, "Erase", s_foliageErase, true,
+                                     "Clear the layer here — nothing will be scattered",
+                                     "Landscape/Erase"))
+                            s_foliageErase = true;
+                        bar.endGroup();
+                    }
+                    if (!s_foliageErase)
+                    {
+                        float pct = s_foliageTarget * 100.0f;
+                        if (ImGui::SliderFloat("Target Density##foliage", &pct, 0.0f, 100.0f, "%.0f %%"))
+                            s_foliageTarget = std::clamp(pct / 100.0f, 0.0f, 1.0f);
+                        EditorWidgets::helpForLabel("Target Density##foliage");
+                    }
+                    ImGui::Spacing();
+                    ImGui::DragFloat("Radius##foliage",   &s_brushRadius,   0.5f, 0.5f, 500.0f, "%.1f m");
+                    EditorWidgets::helpForLabel("Radius##foliage");
+                    ImGui::DragFloat("Falloff##foliage",  &s_falloffRadius, 0.5f, 0.0f, 500.0f, "%.1f m");
+                    EditorWidgets::helpForLabel("Falloff##foliage");
+                    ImGui::DragFloat("Strength##foliage", &s_brushStrength, 0.1f, 0.1f,  50.0f, "%.2f");
+                    EditorWidgets::helpForLabel("Strength##foliage");
+                    s_brushRadius   = std::max(0.5f, s_brushRadius);
+                    s_falloffRadius = std::max(0.0f, s_falloffRadius);
+
+                    // Like the weightmap: changing the resolution would throw
+                    // the paint away, so it is locked once anything is painted.
+                    int mres = static_cast<int>(fol->maskRes);
+                    ImGui::Spacing();
+                    ImGui::BeginDisabled(!fol->densityMask.empty());
+                    if (ImGui::SliderInt("Mask##foliage", &mres, 32, 2048))
+                        fol->maskRes = static_cast<uint32_t>(std::clamp(mres, 32, 2048));
+                    EditorWidgets::helpForLabel("Mask##foliage");
+                    ImGui::EndDisabled();
+                    if (!fol->densityMask.empty())
+                        ImGui::TextDisabled("Resolution is fixed once painted.");
+                    ImGui::TextDisabled("LMB drag in viewport to paint");
+                    if (fol->densityMask.empty())
+                        ImGui::Text("Instances: %zu (uniform)", fol->cachedInstances.size());
+                    else
+                        ImGui::Text("Instances: %zu (%.0f %% of the landscape)",
+                                    fol->cachedInstances.size(),
+                                    FoliagePaint::coverage(*fol) * 100.0f);
+
+                    ImGui::Spacing();
+                    // Two ways back: bare ground to paint the meadows INTO, or
+                    // the uniform layer as if nothing had been painted.
+                    if (EditorWidgets::dangerButton("Erase Everywhere"))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        FoliagePaint::fillMask(*fol, 0.0f);
+                    }
+                    EditorWidgets::helpForLabel("Erase Everywhere");
+                    ImGui::SameLine();
+                    if (EditorWidgets::dangerButton("Reset Mask") && !fol->densityMask.empty())
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        FoliagePaint::clearMask(*fol);   // back to a uniform scatter
+                    }
+                    EditorWidgets::helpForLabel("Reset Mask");
+                }
             }
 
             if (s_landscapePaint)
@@ -696,8 +866,8 @@ void renderPanel(AppContext& ctx)
             }
         }
 
-        // ── Sculpt tools (hidden while painting) ─────────────────────────
-        if (!s_landscapePaint)
+        // ── Sculpt tools (hidden while painting layers or foliage) ───────
+        if (!s_landscapePaint && !s_landscapeFoliage)
         {
         // Six brushes, one armed. A well per row rather than radio buttons: the
         // armed tool is what the mouse will do in the viewport, and that deserves
@@ -778,10 +948,182 @@ void renderPanel(AppContext& ctx)
             tc.sculptHeights.clear();
             tc.dirty = true;
         }
-        } // end !s_landscapePaint (sculpt tools)
+
+        // A whole landscape at once, from a picture — the other way to arrive
+        // at a height field besides the brushes above.
+        drawHeightmapBlock(ctx, terrainView.front());
+        } // end !s_landscapePaint && !s_landscapeFoliage (sculpt tools)
     }
 #else
 	(void)ctx;
+#endif // HE_IMGUI_ENABLED
+}
+
+// ── Heightmap import ─────────────────────────────────────────────────────────
+// Import options that are the user's choice per import, not the terrain's:
+// they stay at their last setting between imports, like the brush numbers.
+static bool s_hmFlipZ         = false;
+static bool s_hmAdoptRes      = false;
+// The status line under the buttons: the last import's outcome, in words.
+static std::string s_hmStatus;
+static bool        s_hmStatusError = false;
+// The file dialog's result slot. SDL calls back from the dialog, this frame or
+// a later one; the block picks the path up at its next draw. Its own slot, not
+// ctx.dialogBridge: that one belongs to the scene/project handler in EditorUI,
+// which would read a chosen heightmap as a scene to open.
+static std::string       s_hmPickPath;
+static std::atomic<bool> s_hmPickReady { false };
+
+namespace
+{
+	// What every import does around the numbers: the undo step before, the
+	// foliage layer after (its instances stand on ground that just moved — the
+	// help text on "Regenerate" says so, this saves the click).
+	void finishImport(AppContext& ctx, Entity terrain, const TerrainHeightmap::Result& res)
+	{
+		if (!res.ok) return;
+		if (auto* fol = ctx.world->registry().try_get<FoliageComponent>(terrain))
+			fol->dirty = true;
+	}
+
+	std::string describe(const TerrainHeightmap::Result& res)
+	{
+		char buf[160];
+		std::snprintf(buf, sizeof(buf), "Imported %u x %u px (%u-bit): %.1f m to %.1f m",
+		              res.sourceWidth, res.sourceHeight, res.sourceBits,
+		              res.minHeight, res.maxHeight);
+		return buf;
+	}
+}
+
+std::string applyHeightmapAsset(AppContext& ctx, Entity terrain, bool& error)
+{
+	error = true;
+	if (!ctx.world || !ctx.contentManager) return "No world.";
+	auto* tc = ctx.world->registry().try_get<TerrainComponent>(terrain);
+	if (!tc) return "Not a landscape.";
+	if (tc->heightmapTexture == HE::UUID{}) return "No heightmap texture is assigned.";
+	// acquire, not get: a texture the Content Browser only listed is not
+	// resident until something asks for its pixels.
+	const auto tex = ctx.contentManager->acquireTexture(tc->heightmapTexture);
+	if (!tex) return "The heightmap texture could not be loaded.";
+
+	if (ctx.undoSys) ctx.undoSys->snapshotNow();
+	TerrainHeightmap::Options opts;
+	opts.flipZ           = s_hmFlipZ;
+	opts.adoptResolution = s_hmAdoptRes;
+	const TerrainHeightmap::Result res = TerrainHeightmap::importTexture(*tc, *tex, opts);
+	finishImport(ctx, terrain, res);
+	if (!res.ok)
+	{
+		HE_LOG_WARN(Editor, "Heightmap import failed: %s", res.error.c_str());
+		return res.error;
+	}
+	error = false;
+	HE_LOG_INFO(Editor, "Heightmap applied from \"%s\": %u x %u", tex->name.c_str(),
+	            res.sourceWidth, res.sourceHeight);
+	return describe(res);
+}
+
+std::string importHeightmapFile(AppContext& ctx, Entity terrain,
+                                const std::string& path, bool& error)
+{
+	error = true;
+	if (!ctx.world) return "No world.";
+	auto* tc = ctx.world->registry().try_get<TerrainComponent>(terrain);
+	if (!tc) return "Not a landscape.";
+
+	if (ctx.undoSys) ctx.undoSys->snapshotNow();
+	TerrainHeightmap::Options opts;
+	opts.flipZ           = s_hmFlipZ;
+	opts.adoptResolution = s_hmAdoptRes;
+	const TerrainHeightmap::Result res = TerrainHeightmap::importFile(*tc, path, opts);
+	finishImport(ctx, terrain, res);
+	if (!res.ok)
+	{
+		HE_LOG_WARN(Editor, "Heightmap import failed: %s", res.error.c_str());
+		return res.error;
+	}
+	error = false;
+	HE_LOG_INFO(Editor, "Heightmap imported from \"%s\": %u x %u (%u-bit)", path.c_str(),
+	            res.sourceWidth, res.sourceHeight, res.sourceBits);
+	return describe(res);
+}
+
+void drawHeightmapBlock(AppContext& ctx, Entity terrain)
+{
+#ifdef HE_IMGUI_ENABLED
+	if (!ctx.world) return;
+	auto* tc = ctx.world->registry().try_get<TerrainComponent>(terrain);
+	if (!tc) return;
+
+	// A file chosen since the last draw — apply it to whichever landscape
+	// this block is drawn for now (there is one per scene).
+	if (s_hmPickReady.load(std::memory_order_acquire))
+	{
+		s_hmPickReady.store(false, std::memory_order_relaxed);
+		if (!s_hmPickPath.empty())
+			s_hmStatus = importHeightmapFile(ctx, terrain, s_hmPickPath, s_hmStatusError);
+	}
+
+	ImGui::SeparatorText("Heightmap");
+	ImGui::PushID("hmblock");
+	// One scope for both callers: the Details panel draws this under
+	// "Terrain", and the buttons look their help up by label, so without this
+	// push the same block would explain itself in one panel and not the other.
+	HE::Ed::Help::Scope helpScope("Landscape");
+	if (EditorWidgets::assetDropSlot(ctx, "Heightmap", tc->heightmapTexture,
+	        HE::AssetType::Texture, "hmtex",
+	        "(none — drop a greyscale texture here)", "texture",
+	        /*showClear=*/true) != EditorWidgets::SlotAction::None)
+		s_hmStatus.clear();
+	EditorWidgets::helpForKey("Landscape/Heightmap");
+
+	ImGui::BeginDisabled(tc->heightmapTexture == HE::UUID{});
+	if (EditorWidgets::primaryButton("Apply Heightmap"))
+		s_hmStatus = applyHeightmapAsset(ctx, terrain, s_hmStatusError);
+	ImGui::EndDisabled();
+	ImGui::SameLine();
+	if (EditorWidgets::button("Import Heightmap File..."))
+	{
+		s_hmStatus.clear();
+		static const SDL_DialogFileFilter kFilters[] = {
+			{ "Heightmaps", "png;pgm;r16;raw;jpg;jpeg;bmp;tga;psd" },
+			{ "All files",  "*" },
+		};
+		SDL_ShowOpenFileDialog(
+			[](void* /*userdata*/, const char* const* filelist, int /*filter*/)
+			{
+				// A cancelled dialog hands over an empty list; the block
+				// then finds an empty path and does nothing.
+				s_hmPickPath = (filelist && filelist[0]) ? filelist[0] : "";
+				s_hmPickReady.store(true, std::memory_order_release);
+			},
+			nullptr,
+			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
+			kFilters, 2, nullptr, false);
+	}
+
+	EditorWidgets::checkbox("Flip Z", &s_hmFlipZ);
+	ImGui::SameLine();
+	EditorWidgets::checkbox("Use Image Resolution", &s_hmAdoptRes);
+
+	ImGui::TextDisabled("Black = 0 m, white = Height Scale (%.1f m).", tc->heightScale);
+	ImGui::TextDisabled("Replaces the sculpt; paint and foliage stay.");
+	if (!s_hmStatus.empty())
+	{
+		if (s_hmStatusError)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
+			ImGui::TextWrapped("%s", s_hmStatus.c_str());
+			ImGui::PopStyleColor();
+		}
+		else
+			ImGui::TextWrapped("%s", s_hmStatus.c_str());
+	}
+	ImGui::PopID();
+#else
+	(void)ctx; (void)terrain;
 #endif // HE_IMGUI_ENABLED
 }
 
