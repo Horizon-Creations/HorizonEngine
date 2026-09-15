@@ -707,6 +707,49 @@ TEST_CASE("ScriptContext: an audio call from Lua reaches the host's engine")
     audio.shutdown();
 }
 
+TEST_CASE("ScriptContext: Lua drives one sound's transport through its handle")
+{
+    // The per-instance rows (pause/resume/volume/pitch/seek) are what a Lua
+    // script uses to fade or pause a sound it started. The voice comes from the
+    // engine directly — the test is about the handle crossing the boundary as
+    // an int and the rows reaching this engine, not about asset loading.
+    HorizonWorld world;
+    AudioEngine  audio;
+    REQUIRE(audio.init(/*noDevice=*/true));
+    const std::vector<uint8_t> pcm(48000 * 2 * 2, 0);          // 1 s stereo silence
+    const uint64_t h = audio.play(pcm, 48000, 2, 1.0f, 1.0f);
+    REQUIRE(h != 0);
+
+    {
+        ScriptContext ctx(world);
+        ScriptContext::HostServices hs;
+        hs.audio = &audio;
+        ctx.setHostServices(std::move(hs));
+
+        const std::string script =
+            "local h = " + std::to_string(h) + "\n"
+            "horizon.audio.setVolume(h, 0.25)\n"
+            "horizon.audio.setPitch(h, 2.0)\n"
+            "horizon.audio.seek(h, 0.5)\n"
+            "horizon.audio.pause(h)\n"
+            "assert(horizon.audio.isPaused(h))\n"
+            "assert(not horizon.audio.isPlaying(h))\n"
+            "assert(math.abs(horizon.audio.getTime(h) - 0.5) < 0.001)\n"
+            "assert(math.abs(horizon.audio.getLength(h) - 1.0) < 0.001)\n"
+            "assert(math.abs(horizon.audio.getVolume(h) - 0.25) < 0.001)\n"
+            "assert(math.abs(horizon.audio.getPitch(h) - 2.0) < 0.001)\n"
+            "horizon.audio.resume(h)\n"
+            "assert(not horizon.audio.isPaused(h))\n";
+        REQUIRE(ctx.engine().exec(script));
+        CHECK(audio.isPlaying(h));
+        CHECK(audio.getSoundVolume(h) == doctest::Approx(0.25f));
+        CHECK(audio.getSoundPitch(h)  == doctest::Approx(2.0f));
+        CHECK(audio.getSoundCursorFrames(h) == 24000);
+    }
+    audio.stop(h);
+    audio.shutdown();
+}
+
 TEST_CASE("ScriptContext: horizon.entity.spawnClass spawns a furnished entity (Lua)")
 {
     // B3 itself, from the language it was missing in. horizon.entity.spawn is

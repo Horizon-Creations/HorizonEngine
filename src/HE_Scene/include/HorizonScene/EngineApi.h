@@ -1334,6 +1334,33 @@ namespace audio {
     bool isPlaying(Ctx&, int handle);
     void setBusVolume(Ctx&, const std::string& bus, float volume);
     void setSoundPosition(Ctx&, int handle, const glm::vec3& pos); // move a spatial sound
+
+    // ── Per-instance transport, on the handle play()/playAt() returned ────────
+    // Everything here is a no-op (or the neutral value) for a handle that is
+    // unknown, finished or stopped — a script may keep a handle past the end of
+    // its sound and never has to check first.
+    //
+    // Pause keeps the voice and its cursor; resume continues from there. That
+    // is what stop() does NOT do — a stopped handle is gone, and "play it again"
+    // means a new play() from the top. isPlaying() answers false while paused,
+    // so isPaused() is the way to tell "paused" from "finished".
+    void  pause(Ctx&, int handle);
+    void  resume(Ctx&, int handle);
+    bool  isPaused(Ctx&, int handle);
+    // Live parameters: the same knobs play() took, changed on a running sound.
+    // getVolume/getPitch read back what is on the voice now (0 / 1 when unknown).
+    void  setVolume(Ctx&, int handle, float volume);
+    float getVolume(Ctx&, int handle);
+    void  setPitch(Ctx&, int handle, float pitch);
+    float getPitch(Ctx&, int handle);
+    void  setLooping(Ctx&, int handle, bool loop);
+    // Playhead and length in SECONDS of the clip (its own sample rate, so pitch
+    // does not distort them — see AudioEngine::getSoundCursorFrames). seek()
+    // clamps to the clip; a negative time goes to the start. "Time", not
+    // "position": setSoundPosition above is where the sound IS in the world.
+    void  seek(Ctx&, int handle, float seconds);
+    float getTime(Ctx&, int handle);
+    float getLength(Ctx&, int handle);
 }
 
 // ── Debug draw (process-global timed queue; the app drains it each frame) ─────

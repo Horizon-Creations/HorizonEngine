@@ -2164,6 +2164,49 @@ void setSoundPosition(Ctx& c, int handle, const glm::vec3& pos)
 {
     if (c.audio) c.audio->setSoundPosition((uint64_t)(uint32_t)handle, pos.x, pos.y, pos.z);
 }
+
+// Per-instance transport. The engine already treats an unknown handle as a
+// no-op, so the rows only have to survive a missing engine.
+namespace {
+uint64_t hnd(int handle) { return (uint64_t)(uint32_t)handle; }
+} // namespace
+void  pause(Ctx& c, int handle)    { if (c.audio) c.audio->pauseSound(hnd(handle)); }
+void  resume(Ctx& c, int handle)   { if (c.audio) c.audio->resumeSound(hnd(handle)); }
+bool  isPaused(Ctx& c, int handle) { return c.audio && c.audio->isPaused(hnd(handle)); }
+void  setVolume(Ctx& c, int handle, float volume) { if (c.audio) c.audio->setSoundVolume(hnd(handle), volume); }
+float getVolume(Ctx& c, int handle) { return c.audio ? c.audio->getSoundVolume(hnd(handle)) : 0.0f; }
+void  setPitch(Ctx& c, int handle, float pitch)   { if (c.audio) c.audio->setSoundPitch(hnd(handle), pitch); }
+float getPitch(Ctx& c, int handle)  { return c.audio ? c.audio->getSoundPitch(hnd(handle)) : 1.0f; }
+void  setLooping(Ctx& c, int handle, bool loop)   { if (c.audio) c.audio->setSoundLooping(hnd(handle), loop); }
+void seek(Ctx& c, int handle, float seconds)
+{
+    if (!c.audio) return;
+    // Frames are the clip's own, so its rate is the conversion — 0 means the
+    // handle is unknown, and there is nothing to seek.
+    const int rate = c.audio->getSoundSampleRate(hnd(handle));
+    if (rate <= 0) return;
+    uint64_t frame = (uint64_t)(std::max(0.0, (double)seconds) * (double)rate);
+    // Clamp here, not in miniaudio: a sound's seek is deferred to the mixer
+    // thread, which rejects a target past the end instead of clamping it, and
+    // until then the cursor would read back the impossible target.
+    const uint64_t len = c.audio->getSoundLengthFrames(hnd(handle));
+    if (len > 0 && frame > len) frame = len;
+    c.audio->seekSound(hnd(handle), frame);
+}
+float getTime(Ctx& c, int handle)
+{
+    if (!c.audio) return 0.0f;
+    const int rate = c.audio->getSoundSampleRate(hnd(handle));
+    if (rate <= 0) return 0.0f;
+    return (float)((double)c.audio->getSoundCursorFrames(hnd(handle)) / (double)rate);
+}
+float getLength(Ctx& c, int handle)
+{
+    if (!c.audio) return 0.0f;
+    const int rate = c.audio->getSoundSampleRate(hnd(handle));
+    if (rate <= 0) return 0.0f;
+    return (float)((double)c.audio->getSoundLengthFrames(hnd(handle)) / (double)rate);
+}
 } // namespace audio
 
 // ── Debug draw ───────────────────────────────────────────────────────────────
@@ -5869,6 +5912,29 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ audio::setBusVolume(c, aS(a, 0), aF(a, 1)); return VV{}; } });
         t.push_back({ "audio.setSoundPosition", "Audio", true, {{"handle", P::Int}, {"position", P::Vec3}}, {}, "HE::api::audio::setSoundPosition",
             [](Ctx& c, const VV& a){ audio::setSoundPosition(c, aI(a, 0), aV3(a, 1)); return VV{}; } });
+        // Per-instance transport on a play()/playAt() handle.
+        t.push_back({ "audio.pause", "Audio", true, {{"handle", P::Int}}, {}, "HE::api::audio::pause",
+            [](Ctx& c, const VV& a){ audio::pause(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "audio.resume", "Audio", true, {{"handle", P::Int}}, {}, "HE::api::audio::resume",
+            [](Ctx& c, const VV& a){ audio::resume(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "audio.isPaused", "Audio", false, {{"handle", P::Int}}, {{"paused", P::Bool}}, "HE::api::audio::isPaused",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(audio::isPaused(c, aI(a, 0))) }; } });
+        t.push_back({ "audio.setVolume", "Audio", true, {{"handle", P::Int}, {"volume", P::Float}}, {}, "HE::api::audio::setVolume",
+            [](Ctx& c, const VV& a){ audio::setVolume(c, aI(a, 0), a.size() > 1 ? aF(a, 1) : 1.0f); return VV{}; } });
+        t.push_back({ "audio.getVolume", "Audio", false, {{"handle", P::Int}}, {{"volume", P::Float}}, "HE::api::audio::getVolume",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(audio::getVolume(c, aI(a, 0))) }; } });
+        t.push_back({ "audio.setPitch", "Audio", true, {{"handle", P::Int}, {"pitch", P::Float}}, {}, "HE::api::audio::setPitch",
+            [](Ctx& c, const VV& a){ audio::setPitch(c, aI(a, 0), a.size() > 1 ? aF(a, 1) : 1.0f); return VV{}; } });
+        t.push_back({ "audio.getPitch", "Audio", false, {{"handle", P::Int}}, {{"pitch", P::Float}}, "HE::api::audio::getPitch",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(audio::getPitch(c, aI(a, 0))) }; } });
+        t.push_back({ "audio.setLooping", "Audio", true, {{"handle", P::Int}, {"loop", P::Bool}}, {}, "HE::api::audio::setLooping",
+            [](Ctx& c, const VV& a){ audio::setLooping(c, aI(a, 0), aB(a, 1)); return VV{}; } });
+        t.push_back({ "audio.seek", "Audio", true, {{"handle", P::Int}, {"seconds", P::Float}}, {}, "HE::api::audio::seek",
+            [](Ctx& c, const VV& a){ audio::seek(c, aI(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "audio.getTime", "Audio", false, {{"handle", P::Int}}, {{"seconds", P::Float}}, "HE::api::audio::getTime",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(audio::getTime(c, aI(a, 0))) }; } });
+        t.push_back({ "audio.getLength", "Audio", false, {{"handle", P::Int}}, {{"seconds", P::Float}}, "HE::api::audio::getLength",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(audio::getLength(c, aI(a, 0))) }; } });
 
         // Debug draw (timed world-space primitives; drained by the app per frame)
         t.push_back({ "debug.line", "Debug", true,
@@ -6431,6 +6497,13 @@ const std::vector<ApiFn>& registry()
             { "string.startsWith", "Starts With" },   { "string.endsWith", "Ends With" },
             { "string.toNumber", "To Number" },
             { "audio.setSoundPosition", "Set Sound Position" },
+            { "audio.pause", "Pause Sound" },      { "audio.resume", "Resume Sound" },
+            { "audio.isPaused", "Is Sound Paused" },
+            { "audio.setVolume", "Set Sound Volume" }, { "audio.getVolume", "Get Sound Volume" },
+            { "audio.setPitch", "Set Sound Pitch" },   { "audio.getPitch", "Get Sound Pitch" },
+            { "audio.setLooping", "Set Sound Looping" },
+            { "audio.seek", "Seek Sound" },        { "audio.getTime", "Get Sound Time" },
+            { "audio.getLength", "Get Sound Length" },
             { "debug.line", "Draw Debug Line" },   { "debug.sphere", "Draw Debug Sphere" },
             { "debug.box", "Draw Debug Box" },     { "debug.clear", "Clear Debug Draw" },
             { "fs.writeText", "Write Text File" }, { "fs.readText", "Read Text File" },

@@ -56,6 +56,9 @@ struct ActiveSound
     bool                 bufferOk  = false;
     bool                 decoderOk = false;
     bool                 soundOk   = false;
+    // Set by pauseSound(), cleared by resumeSound(). miniaudio itself has no
+    // paused state: a paused voice and a finished one both answer "not playing".
+    bool                 paused    = false;
 
     // Order matters: the sound reads from the data source, so it goes first.
     void release()
@@ -444,6 +447,7 @@ void AudioEngine::pauseSound(uint64_t handle)
     // ma_sound_stop only halts playback — the voice, its buffer and its cursor
     // all stay put, which is what makes resumeSound() free.
     ma_sound_stop(&it->second->sound);
+    it->second->paused = true;
 }
 
 void AudioEngine::resumeSound(uint64_t handle)
@@ -451,6 +455,13 @@ void AudioEngine::resumeSound(uint64_t handle)
     auto it = m_impl->sounds.find(handle);
     if (it == m_impl->sounds.end() || !it->second->soundOk) return;
     ma_sound_start(&it->second->sound);
+    it->second->paused = false;
+}
+
+bool AudioEngine::isPaused(uint64_t handle) const
+{
+    auto it = m_impl->sounds.find(handle);
+    return it != m_impl->sounds.end() && it->second->paused;
 }
 
 void AudioEngine::setSoundLooping(uint64_t handle, bool loop)
@@ -472,6 +483,20 @@ void AudioEngine::setSoundPitch(uint64_t handle, float pitch)
     auto it = m_impl->sounds.find(handle);
     if (it == m_impl->sounds.end() || !it->second->soundOk) return;
     ma_sound_set_pitch(&it->second->sound, pitch);
+}
+
+float AudioEngine::getSoundVolume(uint64_t handle) const
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk) return 0.0f;
+    return ma_sound_get_volume(&it->second->sound);
+}
+
+float AudioEngine::getSoundPitch(uint64_t handle) const
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->soundOk) return 1.0f;
+    return ma_sound_get_pitch(&it->second->sound);
 }
 
 int AudioEngine::getSoundSampleRate(uint64_t handle) const

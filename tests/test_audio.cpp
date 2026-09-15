@@ -745,6 +745,56 @@ TEST_CASE("AudioEngine: pause keeps the voice and the cursor, resume restarts it
     engine.shutdown();
 }
 
+TEST_CASE("AudioEngine: isPaused tells a paused voice from a finished or unknown one")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(48000, 2);
+    uint64_t h = engine.play(pcm, 48000, 2);
+    REQUIRE(h != 0);
+    CHECK(!engine.isPaused(h));            // playing
+
+    engine.pauseSound(h);
+    CHECK(engine.isPaused(h));
+    CHECK(!engine.isPlaying(h));           // both false is the ambiguity isPaused resolves
+
+    engine.resumeSound(h);
+    CHECK(!engine.isPaused(h));
+    CHECK(engine.isPlaying(h));
+
+    engine.pauseSound(h);
+    engine.stop(h);                        // stopped voice is gone: not paused, not playing
+    CHECK(!engine.isPaused(h));
+    CHECK(!engine.isPaused(99999));        // unknown handle
+    engine.shutdown();
+}
+
+TEST_CASE("AudioEngine: getSoundVolume/getSoundPitch read back what play and the setters left")
+{
+    AudioEngine engine;
+    REQUIRE(engine.init(true));
+
+    auto pcm = makeSilence(4800, 2);
+    uint64_t h = engine.play(pcm, 48000, 2, 0.6f, 1.25f);
+    REQUIRE(h != 0);
+    CHECK(engine.getSoundVolume(h) == doctest::Approx(0.6f));
+    CHECK(engine.getSoundPitch(h)  == doctest::Approx(1.25f));
+
+    engine.setSoundVolume(h, 0.3f);
+    engine.setSoundPitch(h, 0.5f);
+    CHECK(engine.getSoundVolume(h) == doctest::Approx(0.3f));
+    CHECK(engine.getSoundPitch(h)  == doctest::Approx(0.5f));
+
+    // Unknown handle: the neutral value of each, so a UI bound to a dead
+    // handle shows "silent" and "unchanged" rather than garbage.
+    CHECK(engine.getSoundVolume(99999) == doctest::Approx(0.0f));
+    CHECK(engine.getSoundPitch(99999)  == doctest::Approx(1.0f));
+
+    engine.stop(h);
+    engine.shutdown();
+}
+
 TEST_CASE("AudioEngine: live looping/volume/pitch changes are safe on a playing voice")
 {
     AudioEngine engine;

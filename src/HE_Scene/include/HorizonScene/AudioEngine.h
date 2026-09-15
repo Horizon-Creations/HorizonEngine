@@ -99,11 +99,19 @@ public:
     // it paused this one.
     void pauseSound(uint64_t handle);
     void resumeSound(uint64_t handle);
+    // True between pauseSound() and resumeSound()/stop(). A script needs this to
+    // tell a paused voice from one that has finished — isPlaying() says false
+    // for both, and only one of them should be reaped.
+    bool isPaused(uint64_t handle) const;
 
     // Change what play() set up, on a sound that is already running.
     void setSoundLooping(uint64_t handle, bool loop);
     void setSoundVolume(uint64_t handle, float volume);
     void setSoundPitch(uint64_t handle, float pitch);
+    // Read back what play()/the setters above left on the voice. Unknown handle:
+    // 0 for volume (silent), 1 for pitch (unchanged) — the neutral value of each.
+    float getSoundVolume(uint64_t handle) const;
+    float getSoundPitch(uint64_t handle) const;
 
     // Sample rate the playing sound is actually being fed to the mixer with, in Hz.
     // Should equal the rate passed to play()/playSpatial(); 0 = unknown handle.

@@ -1204,6 +1204,41 @@ namespace
 	{ "audio.setSoundPosition",
 	  "Moves a playing spatial sound to a new world position. For a sound that "
 	  "has to follow something that moves while it plays." },
+	{ "audio.pause",
+	  "Pauses one sound by handle, keeping its place. Resume Sound picks up "
+	  "exactly there. Unlike Stop, the sound is still alive afterwards — a "
+	  "pause menu wants this, a scene change wants Stop." },
+	{ "audio.resume",
+	  "Continues a paused sound from where Pause Sound left it. Harmless on a "
+	  "sound that is not paused." },
+	{ "audio.isPaused",
+	  "Is this handle paused? Is Playing says false for a paused sound AND for "
+	  "one that has finished; this is how to tell them apart." },
+	{ "audio.setVolume",
+	  "Changes the volume of one playing sound. 1 is as played, 0 is silent; a "
+	  "fade is this called every tick with a shrinking value." },
+	{ "audio.getVolume",
+	  "The current volume of one playing sound — what Play or Set Sound Volume "
+	  "last gave it. 0 for a handle that is gone." },
+	{ "audio.setPitch",
+	  "Changes the pitch of one playing sound. 1 is as recorded, 2 is an octave "
+	  "up and twice as fast, 0.5 an octave down. An engine note or a slow-motion "
+	  "moment is this." },
+	{ "audio.getPitch",
+	  "The current pitch of one playing sound. 1 for a handle that is gone." },
+	{ "audio.setLooping",
+	  "Turns looping on or off for a sound that is already playing — a loop "
+	  "that should end after its current pass gets looping switched off, not "
+	  "Stop." },
+	{ "audio.seek",
+	  "Jumps a playing sound to a time in seconds from its start. Past the end "
+	  "goes to the end, below zero to the start. Works on a paused sound too." },
+	{ "audio.getTime",
+	  "How far into the sound the playhead is, in seconds — of the clip itself, "
+	  "so pitch does not stretch it. 0 for a handle that is gone." },
+	{ "audio.getLength",
+	  "How long the sound is, in seconds. Together with Get Sound Time this is "
+	  "a progress bar. 0 for a handle that is gone." },
 
 	// ── File ─────────────────────────────────────────────────────────────────
 	{ "fs.writeText",

@@ -425,6 +425,16 @@ import horizon
 class BusUser(horizon.Behavior):
     def on_start(self):
         horizon.audio.setBusVolume("SFX", 0.25)
+        # The per-instance transport rows are bound from the same registry; a
+        # missing one is an AttributeError here, which fails on_start. Handle 0
+        # is nobody, so the answers are the neutral ones and nothing is touched.
+        assert horizon.audio.isPaused(0) is False
+        assert horizon.audio.getPitch(0) == 1.0
+        assert horizon.audio.getLength(0) == 0.0
+        horizon.audio.pause(0)
+        horizon.audio.resume(0)
+        horizon.audio.setVolume(0, 0.5)
+        horizon.audio.seek(0, 1.0)
 )py";
 
 TEST_CASE("PyScriptBackend: an audio call from Python reaches the host's engine")
