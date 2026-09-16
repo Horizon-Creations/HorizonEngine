@@ -625,7 +625,7 @@ namespace
 	void extractEditorIcons(entt::registry& reg, RenderWorld& out,
 	                        const EditorCameraOverride* editorCam)
 	{
-		if (!(editorCam && editorCam->active)) return;
+		if (!(editorCam && editorCam->active && editorCam->editorIcons)) return;
 
 		// Half the viewport height: per unit of depth (perspective), or as is (ortho).
 		const glm::mat4& P = out.camera.projection;

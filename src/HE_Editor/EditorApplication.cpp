@@ -1156,11 +1156,18 @@ void EditorApplication::OnInit()
 	}
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
-	// The ground grid's switch. It lives in ViewportPanel next to the only code
-	// that reads it, so the config talks to that state directly rather than
-	// keeping a second copy in EditorConfig for the two of them to disagree over.
-	ViewportPanel::setGroundGridEnabled(
-		globalstate.getCustomConfigBool("ViewportGroundGrid", ViewportPanel::groundGridEnabled()));
+	// The viewport's show flags (ground grid, colliders, icons…). They live in
+	// ViewportPanel next to the code that reads them, so the config talks to
+	// that state directly rather than keeping a second copy in EditorConfig for
+	// the two of them to disagree over; the table keeps this a loop.
+	{
+		int n = 0;
+		const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+		ViewportPanel::ShowFlags& flags = ViewportPanel::showFlags();
+		for (int i = 0; i < n; ++i)
+			flags.*(fields[i].member) =
+				globalstate.getCustomConfigBool(fields[i].configKey, flags.*(fields[i].member));
+	}
 	m_editorConfig.MaxFps                      = globalstate.getCustomConfigFloat("MaxFps",            m_editorConfig.MaxFps);
 	m_editorConfig.PointerInput                = globalstate.getCustomConfigInt("PointerInput",        m_editorConfig.PointerInput);
 	m_editorConfig.GamepadStickDeadzone        = globalstate.getCustomConfigFloat("GamepadStickDeadzone",   m_editorConfig.GamepadStickDeadzone);
@@ -3407,12 +3414,17 @@ void EditorApplication::OnRender(float dt)
 		if (m_projectLoaded && m_editorWorld)
 		{
 			DebugDrawBuffer dbg;
+			// One switch per overlay (the toolbar's Show popup). Each block
+			// below is skipped at its head rather than filtered afterwards, so
+			// an overlay that is off costs nothing — the collider walk and the
+			// grid are the expensive ones.
+			const ViewportPanel::ShowFlags& show = ViewportPanel::showFlags();
 
 			// Selected-entity markers: unit AABB centered on each member's
 			// transform position. The primary is the bright one; the rest of a
 			// multi-selection get the same amber a shade dimmer, so which one
 			// the gizmo will move is visible without reading the outliner.
-			for (Entity sel : m_selection.entities())
+			if (show.selection) for (Entity sel : m_selection.entities())
 			{
 				if (!m_editorWorld->registry().valid(sel)) continue;
 				auto* tc = m_editorWorld->registry().try_get<TransformComponent>(sel);
@@ -3425,6 +3437,7 @@ void EditorApplication::OnRender(float dt)
 			}
 
 			// Collider wireframes: cyan for solid, magenta for triggers
+			if (show.colliders)
 			{
 				auto& reg = m_editorWorld->registry();
 				// Local-space box of a mesh asset, measured once and kept. The
@@ -3525,6 +3538,7 @@ void EditorApplication::OnRender(float dt)
 			// needs JPH_DEBUG_RENDERER and a renderer this engine does not have,
 			// and it would only exist in play mode — the half of the time an
 			// author is not authoring.
+			if (show.joints)
 			{
 				auto& reg = m_editorWorld->registry();
 				for (auto [entity, joint] : reg.view<JointComponent>().each())
@@ -3629,7 +3643,7 @@ void EditorApplication::OnRender(float dt)
 			// tickWorld, which propagates nothing, so the stored matrix is a
 			// frame old and plain identity for anything created this frame.
 			const Entity selected = m_selection.primary();
-			if (selected != entt::null &&
+			if (show.guides && selected != entt::null &&
 			    m_editorWorld->registry().valid(selected))
 			{
 				// Not gated on `visible`. A hidden rope is the one that most needs
@@ -3649,7 +3663,9 @@ void EditorApplication::OnRender(float dt)
 					RopeTrailSystem::appendTrailGuides(*trail, dbg);
 			}
 
-			// NavMesh wireframe(s): baked polygons, per-component toggle
+			// NavMesh wireframe(s): baked polygons, per-component toggle — and
+			// the viewport's switch over all of them, for a scene with twenty.
+			if (show.navMesh)
 			{
 				auto& reg = m_editorWorld->registry();
 				for (auto [entity, nmc] : reg.view<NavMeshComponent>().each())
@@ -3723,7 +3739,7 @@ void EditorApplication::OnRender(float dt)
 			// view plane keep the same apparent shape from every angle, and three
 			// of them nested give a line renderer something that reads as a solid
 			// stroke rather than a scratch.
-			if (m_collab.inSession())
+			if (show.collaborators && m_collab.inSession())
 			{
 				const glm::vec3 viewer = m_editorCamera.position();
 				const auto localId = m_collab.localParticipant();
@@ -3827,7 +3843,7 @@ void EditorApplication::OnRender(float dt)
 			// lines, and the question ("does this clip go where I meant it to")
 			// is asked about one figure at a time.
 			if (const Entity selected = m_selection.primary();
-			    selected != entt::null && m_editorWorld->registry().valid(selected))
+			    show.guides && selected != entt::null && m_editorWorld->registry().valid(selected))
 				{
 					appendRootMotionPreview(*m_editorWorld, contentManager(), selected, dbg);
 					// And where its head is aimed, for the same one-figure-at-a-time
@@ -3846,8 +3862,19 @@ void EditorApplication::OnRender(float dt)
 			// the editor's own gizmo lines (they age with real dt in play mode,
 			// and stay frozen while paused/editing) — which is what makes a paused
 			// frame inspectable: the line drawn by the last live tick is still there.
+			//
+			// Collected even while the switch is off: collect() is also what
+			// AGES the timed primitives, and skipping it would freeze their
+			// clocks so that switching the overlay back on shows every line
+			// drawn in the meantime at once. They are simply not merged.
 			std::vector<DebugLine> merged = dbg.lines();
-			HE::api::debug::collect(simulating ? dt : 0.0f, merged);
+			if (show.scriptDebug)
+				HE::api::debug::collect(simulating ? dt : 0.0f, merged);
+			else
+			{
+				std::vector<DebugLine> discard;
+				HE::api::debug::collect(simulating ? dt : 0.0f, discard);
+			}
 			renderer()->SetDebugLines(merged);
 		}
 		else
@@ -9618,7 +9645,13 @@ void EditorApplication::writeEditorConfig()
 		globalstate.setCustomConfigEntry("EditorCamValid", true);
 	}
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
-	globalstate.setCustomConfigEntry("ViewportGroundGrid",         ViewportPanel::groundGridEnabled());
+	{
+		int n = 0;
+		const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+		const ViewportPanel::ShowFlags& flags = ViewportPanel::showFlags();
+		for (int i = 0; i < n; ++i)
+			globalstate.setCustomConfigEntry(fields[i].configKey, flags.*(fields[i].member));
+	}
 	globalstate.setCustomConfigEntry("PointerInput",               m_editorConfig.PointerInput);
 	globalstate.setCustomConfigEntry("GamepadStickDeadzone",       m_editorConfig.GamepadStickDeadzone);
 	globalstate.setCustomConfigEntry("GamepadTriggerDeadzone",     m_editorConfig.GamepadTriggerDeadzone);

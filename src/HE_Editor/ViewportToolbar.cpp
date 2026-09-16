@@ -190,6 +190,33 @@ void iconShading(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	dl->PathFillConvex(col);
 }
 
+// Three stacked layers — the Show flags (what is drawn over the scene). The
+// eye was the obvious glyph and is already the View cell's.
+void iconLayers(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.5f, t = stroke(s);
+	// One flat diamond, seen from above; the two below are its outline shifted
+	// down, clipped to the lower half so they read as stacked, not overlaid.
+	auto diamond = [&](float dy, bool fill)
+	{
+		const ImVec2 p[4] = {
+			{ c.x,           c.y + dy - h * 0.42f },
+			{ c.x + h,       c.y + dy },
+			{ c.x,           c.y + dy + h * 0.42f },
+			{ c.x - h,       c.y + dy },
+		};
+		if (fill) dl->AddConvexPolyFilled(p, 4, col);
+		else      dl->AddPolyline(p, 4, col, ImDrawFlags_Closed, t);
+	};
+	diamond(-h * 0.40f, true);
+	// Lower halves of the two outlines below: a V under the top sheet.
+	for (float dy : { 0.0f, h * 0.40f })
+	{
+		dl->AddLine({ c.x - h, c.y + dy }, { c.x, c.y + dy + h * 0.42f }, col, t);
+		dl->AddLine({ c.x,     c.y + dy + h * 0.42f }, { c.x + h, c.y + dy }, col, t);
+	}
+}
+
 // Two sliders — viewport options.
 void iconSliders(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 {
@@ -359,16 +386,46 @@ void optionsPopup(AppContext& ctx, State& st)
 	ImGui::Spacing();
 	ImGui::TextDisabled("Viewport");
 	ImGui::Separator();
-	// Read back through the getter every frame instead of caching it in State:
-	// the grid's switch belongs to ViewportPanel (the only code that draws it),
-	// and the config restores it there at startup without this bar being told.
-	bool grid = ViewportPanel::groundGridEnabled();
-	if (EditorWidgets::checkbox("Ground grid", &grid))
-		ViewportPanel::setGroundGridEnabled(grid);
-	EditorWidgets::helpForKey("viewport.grid");
 	int pxW = 0, pxH = 0;
 	ViewportPanel::renderSizePx(pxW, pxH);
 	ImGui::Text("Render target: %d \xc3\x97 %d px", pxW, pxH);
+}
+
+// The Show flags: one checkbox per overlay the editor draws over the scene.
+// Edited in place on ViewportPanel's state rather than cached in State: the
+// flags belong to the code that draws the overlays, and the config restores
+// them there at startup without this bar being told. "All" / "None" at the
+// bottom because the common case is "just the scene for a moment" and eight
+// clicks is not a moment.
+void showPopup(AppContext&)
+{
+	HE::Ed::Help::Scope helpScope("Viewport Show");
+	ViewportPanel::ShowFlags& f = ViewportPanel::showFlags();
+	ImGui::TextDisabled("Scene");
+	ImGui::Separator();
+	EditorWidgets::checkbox("Ground Grid",    &f.groundGrid);
+	EditorWidgets::checkbox("Editor Icons",   &f.editorIcons);
+	EditorWidgets::checkbox("Selection",      &f.selection);
+	ImGui::Spacing();
+	ImGui::TextDisabled("Physics & AI");
+	ImGui::Separator();
+	EditorWidgets::checkbox("Colliders",      &f.colliders);
+	EditorWidgets::checkbox("Joints",         &f.joints);
+	EditorWidgets::checkbox("NavMesh",        &f.navMesh);
+	ImGui::Spacing();
+	ImGui::TextDisabled("Authoring");
+	ImGui::Separator();
+	EditorWidgets::checkbox("Guides",         &f.guides);
+	EditorWidgets::checkbox("Script Debug",   &f.scriptDebug);
+	EditorWidgets::checkbox("Collaborators",  &f.collaborators);
+	ImGui::Separator();
+	if (EditorWidgets::menuItem("Show All Overlays"))  f = ViewportPanel::ShowFlags{};
+	if (EditorWidgets::menuItem("Hide All Overlays"))
+	{
+		int n = 0;
+		const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+		for (int i = 0; i < n; ++i) f.*(fields[i].member) = false;
+	}
 }
 
 // The view picker: one axis view per row, then the projection on its own.
@@ -535,6 +592,7 @@ void render(AppContext& ctx, State& st)
 	auto rightWidth = [&](bool camera, bool viewLabel)
 	{
 		float w = kWellPad * 2.0f + m.cell;                       // options button
+		w += kWellPad * 2.0f + m.cell + kGroupGap;                // show flags (icon only)
 		w += kWellPad * 2.0f + (viewLabel ? viewW : m.cell) + kGroupGap;   // view preset
 		w += kWellPad * 2.0f + (viewLabel ? modeW : m.cell) + kGroupGap;   // view mode
 		if (camera) w += kWellPad * 2.0f + m.cell + kSegGap + camValW + kGroupGap;
@@ -815,10 +873,36 @@ void render(AppContext& ctx, State& st)
 			rx += w + kGroupGap;
 		}
 
+		// Show flags. Lit up whenever any overlay is switched off, for the same
+		// reason the view-mode cell is: "where did my colliders go" has to be
+		// answerable from the bar. Icon-only at every width — the popup's
+		// headings say what it is, the cell only has to be findable.
+		{
+			const float w = kWellPad * 2.0f + m.cell;
+			well(m, rx, w);
+			bool anyOff = false;
+			{
+				int n = 0;
+				const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+				const ViewportPanel::ShowFlags& f = ViewportPanel::showFlags();
+				for (int i = 0; i < n && !anyOff; ++i) anyOff = !(f.*(fields[i].member));
+			}
+			if (cell(m, rx + kWellPad, m.cell, "##vpShow", iconLayers, nullptr, anyOff, true,
+			         "Show — which overlays are drawn over the scene: grid, icons, colliders…",
+			         "viewport.show"))
+				ImGui::OpenPopup("##vpShowPopup");
+			if (ImGui::BeginPopup("##vpShowPopup"))
+			{
+				showPopup(ctx);
+				ImGui::EndPopup();
+			}
+			rx += w + kGroupGap;
+		}
+
 		// Options. The overflow target, so it is the one thing never dropped.
 		well(m, rx, kWellPad * 2.0f + m.cell);
 		if (cell(m, rx + kWellPad, m.cell, "##vpOptions", iconSliders, nullptr, false, true,
-		         "Viewport options — snapping, gizmo, camera, ground grid"))
+		         "Viewport options — snapping, gizmo, camera"))
 			ImGui::OpenPopup("##vpOptionsPopup");
 		if (ImGui::BeginPopup("##vpOptionsPopup"))
 		{

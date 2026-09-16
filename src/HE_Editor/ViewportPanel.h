@@ -51,6 +51,40 @@ namespace ViewportPanel
 
 	// Grid visibility. On by default; the pair exists so the viewport toolbar's
 	// show-flag toggles ONE piece of state instead of keeping a second copy.
+	// Today a view onto ShowFlags::groundGrid below — kept because the config
+	// key and the callers predate the other flags.
 	bool groundGridEnabled();
 	void setGroundGridEnabled(bool on);
+
+	// ── Show flags ───────────────────────────────────────────────────────────
+	// What the editor draws OVER the scene, one switch per overlay — the strip
+	// of checkboxes behind the toolbar's Show cell. Every one of them is editor
+	// furniture: the game never draws any of it, so none of this is scene data
+	// and none of it goes into the file. Persisted with the editor config
+	// (EditorApplication, through `showFlagFields`), because "I switched the
+	// colliders off" is a preference and not a per-scene decision.
+	//
+	// Read where the overlay is BUILT, not where it is drawn: the debug-line
+	// block in EditorApplication appends nothing for a switched-off overlay,
+	// the extractor emits no icon quads, the name tags are not projected. What
+	// is off costs nothing, and the picker cannot hit an icon that is not there.
+	struct ShowFlags
+	{
+		bool groundGrid    = true;  // the reference grid on the ground plane
+		bool selection     = true;  // the amber box on each selected entity
+		bool colliders     = true;  // collider wireframes (cyan / magenta)
+		bool joints        = true;  // joint lines, anchors and hinge arcs
+		bool navMesh       = true;  // baked NavMesh polygons (per component too)
+		bool editorIcons   = true;  // light / camera / audio-source billboards
+		bool guides        = true;  // rope + trail handles, root-motion and look-at previews
+		bool collaborators = true;  // peers' rings, selections and name tags
+		bool scriptDebug   = true;  // debug.* lines from scripts and HorizonCode
+	};
+	ShowFlags& showFlags();
+
+	// The flags as a table: config key + member, so the editor config
+	// round-trip is a loop rather than one hand-written pair per flag that a
+	// new flag can forget. The ground grid keeps its historical key.
+	struct ShowFlagField { const char* configKey; bool ShowFlags::* member; };
+	const ShowFlagField* showFlagFields(int& outCount);
 }

@@ -211,6 +211,20 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Viewport View",    "Top" },
 		{ "Viewport View",    "Left" },
 		{ "Viewport View",    "Orthographic" },
+		// The Show popup's rows are literals the scan sees; the right-click
+		// menu's lock verb is a ternary again ("Lock" / "Unlock"), and the
+		// menu itself is drawn by a helper ABOVE the scope it is looked up
+		// under — so both are checked here, where the lookup is the real one.
+		{ "Viewport Show",    "Ground Grid" },
+		{ "Viewport Show",    "Editor Icons" },
+		{ "Viewport Show",    "Hide All Overlays" },
+		{ "Viewport Menu",    "Hide Selected" },
+		{ "Viewport Menu",    "Isolate Selected" },
+		{ "Viewport Menu",    "Show All" },
+		{ "Viewport Menu",    "Group" },
+		{ "Viewport Menu",    "Ungroup" },
+		{ "Viewport Menu",    "Lock" },
+		{ "Viewport Menu",    "Unlock" },
 		// Same for the view-mode picker: its labels are HE::viewModeName().
 		{ "Viewport View Mode", "Lit" },
 		{ "Viewport View Mode", "Wireframe" },

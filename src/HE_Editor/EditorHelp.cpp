@@ -1661,9 +1661,102 @@ namespace
 	  "The editor fly camera's speed in units per second. Hold Shift while "
 	  "flying for three times this.",
 	  "", "editor#viewport" },
-	{ "Viewport Options/Ground grid", "",
+
+	// ── The viewport's Show popup ────────────────────────────────────────────
+	// One switch per overlay the editor draws over the scene. All of it is
+	// editor furniture: the game never draws any of it, and none of it is
+	// saved with the scene — the switches are remembered with the editor.
+	{ "Viewport Show/Ground Grid", "",
 	  "The reference grid under the scene. Off while playing either way.",
 	  "", "editor#viewport" },
+	{ "Viewport Show/Editor Icons", "",
+	  "The symbols standing in for lights, cameras and audio sources, which "
+	  "have no mesh of their own. With them off those entities are still there "
+	  "and still selectable in the Outliner — but not by clicking in the scene, "
+	  "since there is nothing to click.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Selection", "",
+	  "The amber box on each selected entity. Off is for judging a scene "
+	  "without the marker over the thing you are looking at; the gizmo stays.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Colliders", "",
+	  "Collider wireframes for every entity that has one: cyan for solid, "
+	  "magenta for triggers. The way to see a box that is bigger than its mesh.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Joints", "",
+	  "Joint lines between the two bodies of every joint, with their anchors "
+	  "and hinge arcs — a line that does not go where you thought is the usual "
+	  "joint bug.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/NavMesh", "",
+	  "The baked NavMesh polygons. Each NavMesh component has its own Show "
+	  "Debug Mesh switch as well; this one is over all of them at once.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Guides", "",
+	  "The authoring handles of the SELECTED entity: a rope's or trail's control "
+	  "points, an animated figure's root-motion path and its look-at aim.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Script Debug", "",
+	  "The lines, boxes and spheres a script or HorizonCode graph draws through "
+	  "debug.line / debug.box / debug.sphere. They keep ageing while hidden, so "
+	  "switching them back on shows only what is still alive.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Collaborators", "",
+	  "Where the other people in a collaboration session are and what they have "
+	  "selected: their rings and boxes in the scene, and their name tags over it.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Show All Overlays", "",
+	  "Switches every overlay back on.", "", "editor#viewport" },
+	{ "Viewport Show/Hide All Overlays", "",
+	  "Switches every overlay off — the scene and nothing else, for a moment.",
+	  "", "editor#viewport" },
+
+	// ── The viewport's right-click menu ──────────────────────────────────────
+	// Opens on a right-click that did not become a fly-look (press and release
+	// without moving), or on the Menu key / Shift+F10 over the scene. What it
+	// acts on is the selection, settled the way the Outliner's menu settles it:
+	// a click on something outside the selection selects it first.
+	{ "Viewport Menu/Focus Selected", "",
+	  "Moves the camera so the selected entity and everything under it fills "
+	  "the view.",
+	  "F", "editor#viewport" },
+	{ "Viewport Menu/Hide Selected", "",
+	  "Hides every selected entity with everything under it — the same switch "
+	  "as the eye in the Outliner, which is also where a hidden entity can be "
+	  "found again. Saved with the scene, like the eye; undo puts it back.",
+	  "H", "editor#viewport" },
+	{ "Viewport Menu/Isolate Selected", "",
+	  "Hides everything EXCEPT the selection, for looking at one thing without "
+	  "the rest of the level in the way. The sun and moon stay. Show All brings "
+	  "the rest back.",
+	  "Shift+H", "editor#viewport" },
+	{ "Viewport Menu/Show All", "",
+	  "Shows every hidden entity in the scene again — after Hide, Isolate or "
+	  "the Outliner's eye.",
+	  "Alt+H", "editor#viewport" },
+	{ "Viewport Menu/Group", "",
+	  "Puts the selected entities under one new, empty Group entity placed at "
+	  "their centre, so they move, rotate and scale as one. Nothing moves on "
+	  "screen. The group is an ordinary entity: rename it, add to it, drag "
+	  "things out of it in the Outliner.",
+	  "Ctrl+G", "editor#viewport" },
+	{ "Viewport Menu/Ungroup", "",
+	  "Takes the children of the selected entity out from under it, keeps them "
+	  "where they stand, and deletes the emptied parent. The reverse of Group; "
+	  "it also flattens any other parent you ask it to.",
+	  "Shift+G", "editor#viewport" },
+	{ "Viewport Menu/Lock", "",
+	  "Locks every selected entity: the viewport's click, selection frame and "
+	  "gizmo leave them alone, so the floor stops catching clicks meant for the "
+	  "prop on it. The Outliner still selects them.",
+	  "", "editor#viewport" },
+	{ "Viewport Menu/Unlock", "",
+	  "Unlocks every selected entity, so the viewport can pick and move them "
+	  "again.",
+	  "", "editor#viewport" },
+	{ "Viewport Menu/Duplicate", "",
+	  "A copy of the selection beside the original, selected and ready to move.",
+	  "Ctrl+D", "editor#viewport" },
 
 	// ── The viewport's view picker ───────────────────────────────────────────
 	// Each axis view is orthographic: parallel lines stay parallel, the far
@@ -2163,9 +2256,21 @@ namespace
 	  "Scene is normal editing. Landscape turns the viewport into the terrain "
 	  "sculpting and painting tool, with its brushes in Quick Settings.",
 	  "", "editor#landscape-mode" },
-	{ "viewport.grid", "Ground Grid",
-	  "The reference grid on the ground plane. It is hidden while the scene plays "
-	  "either way.",
+	{ "viewport.show", "Show",
+	  "Which overlays the editor draws over the scene: the ground grid, the "
+	  "light / camera / audio icons, the selection box, colliders, joints, the "
+	  "NavMesh, the selected entity's authoring guides, script debug lines and "
+	  "the other collaborators. All of it is editor furniture — the game draws "
+	  "none of it — and the switches are remembered with the editor, not the "
+	  "scene. The cell lights up while anything is switched off, so a missing "
+	  "collider outline is never a mystery.",
+	  "", "editor#viewport" },
+	{ "viewport.context-menu", "Right-click menu",
+	  "A right-click on the scene that does not turn into a fly-look (press and "
+	  "release without moving) opens a menu for what is under the cursor: focus, "
+	  "hide, isolate, show all, group, lock, the clipboard, delete. On a "
+	  "trackpad, where the tap toggles fly mode, use the Menu key or Shift+F10 "
+	  "over the scene instead.",
 	  "", "editor#viewport" },
 	{ "viewport.frame", "Frame Selected",
 	  "Moves the editor camera so the selected entity fills the view — the fastest "
@@ -5892,6 +5997,8 @@ namespace
 		{ "Viewport Options/", "editor-interface", "Editor Interface", "Viewport options" },
 		{ "Viewport View/",    "editor-interface", "Editor Interface", "View presets" },
 		{ "Viewport View Mode/", "editor-interface", "Editor Interface", "View modes" },
+		{ "Viewport Show/",      "editor-interface", "Editor Interface", "Show flags" },
+		{ "Viewport Menu/",      "editor-interface", "Editor Interface", "The viewport's right-click menu" },
 		// ── The Details panel's components ───────────────────────────────────
 		{ "Component/", "editor-components", "Component Reference", "The components" },
 		// ── Settings ─────────────────────────────────────────────────────────

@@ -35,6 +35,13 @@ struct EditorCameraOverride
     // Half the visible height of an orthographic view, world units (the width
     // follows the viewport's aspect). Only read when `orthographic` is set.
     float     orthoHalfHeight = 5.0f;
+    // Whether the extractor adds the editor's icon billboards (one camera-facing
+    // quad per light / camera / audio source) to the scene. Only read while
+    // `active`; the editor's Show flags switch it off, a headless dump and the
+    // asset viewports leave it on. Travels here rather than as renderer state
+    // because the same override feeds the panel's own pick extract, and the
+    // picker must see exactly the quads the frame drew.
+    bool      editorIcons  = true;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────

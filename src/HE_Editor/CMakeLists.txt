@@ -239,6 +239,7 @@ add_executable(HorizonEditor WIN32
 	InspectorPrefabKeys.cpp
 	TerrainTools.cpp
 	ViewportPanel.cpp
+	ViewportActions.cpp
 	ViewportToolbar.cpp
 	EditorToolbar.cpp
 	OutlinerPanel.cpp
