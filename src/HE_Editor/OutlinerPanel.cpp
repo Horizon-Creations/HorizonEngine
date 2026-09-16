@@ -2,6 +2,7 @@
 #include "OutlinerFilter.h"              // the search/type rule behind the header row
 #include "EditorApplication.h"           // AppContext, HorizonWorld, EditorUndo
 #include "EditorWidgets.h"
+#include "EditorShortcuts.h"   // the clipboard rows print the live chords
 #include "EditorHelp.h"                  // scopes for the context and create menus
 #include "EditorTheme.h"                 // the accent the prefab badge is drawn in
 #include <HorizonScene/HorizonScene.h>
@@ -813,17 +814,17 @@ void render(AppContext& ctx)
                     const bool editable = !isRoot && !ctx.isPlaying;
                     ImGui::Separator();
                     const bool doDuplicate =
-                        EditorWidgets::menuItem("Duplicate", "Ctrl+D", false, editable);
+                        EditorWidgets::menuItem("Duplicate", EditorShortcuts::label("entity.duplicate").c_str(), false, editable);
                     EditorWidgets::helpForKey("outliner.duplicate");
                     if (doDuplicate && ctx.duplicateEntity)
                         ctx.duplicateEntity();
-                    if (EditorWidgets::menuItem("Copy", "Ctrl+C", false, editable) && ctx.copyEntity)
+                    if (EditorWidgets::menuItem("Copy", EditorShortcuts::label("entity.copy").c_str(), false, editable) && ctx.copyEntity)
                         ctx.copyEntity();
-                    if (EditorWidgets::menuItem("Cut", "Ctrl+X", false, editable) && ctx.cutEntity)
+                    if (EditorWidgets::menuItem("Cut", EditorShortcuts::label("entity.cut").c_str(), false, editable) && ctx.cutEntity)
                         ctx.cutEntity();
                     // Paste needs no row of its own to be meaningful — it lands
                     // beside this one, under the same parent.
-                    if (EditorWidgets::menuItem("Paste", "Ctrl+V", false,
+                    if (EditorWidgets::menuItem("Paste", EditorShortcuts::label("entity.paste").c_str(), false,
                                         ctx.entityClipboardFull && !ctx.isPlaying) &&
                         ctx.pasteEntity)
                         ctx.pasteEntity();

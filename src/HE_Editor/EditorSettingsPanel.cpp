@@ -7,6 +7,7 @@
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
 #include "EditorHelp.h"                // "Preferences/<label>" scope for the tooltips
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
+#include "ShortcutsPage.h"             // the Shortcuts page (its own module: headless-testable)
 #include "McpClientSetup.h"            // Remote Control > "Add to Claude" (claude mcp add)
 #include "NotificationStore.h"         // a settings write that fails has to say so
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
@@ -1871,6 +1872,7 @@ constexpr NavItem kGeneralItems[] = {
 // headings carried — "Sessions" under no heading is not a topic.
 constexpr NavItem kEditorItems[] = {
 	{ Page::HorizonCode,   "HorizonCode" },
+	{ Page::Shortcuts,     "Shortcuts" },
 	{ Page::CollabGeneral, "Collaboration" },
 	{ Page::RemoteControl, "Remote Control" },
 	{ Page::Repository,    "Source Control" },
@@ -2002,6 +2004,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	else if (s_page == Page::Repository)  drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
 	else if (s_page == Page::HorizonCode) drawHorizonCodePage();
+	else if (s_page == Page::Shortcuts)   ShortcutsPage::draw();
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

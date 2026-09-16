@@ -21,6 +21,7 @@
 #include "EditorTheme.h"                 // the stats overlay's accent line
 #include "ViewportActions.h"             // hide / isolate / show all / group — headless, tested
 #include "CameraBookmarks.h"             // the digit keys
+#include "EditorShortcuts.h"             // the viewport's chords, rebindable in Preferences
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -646,17 +647,17 @@ static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
 	const bool canFocus  = ctx.editorCamera && ctx.selection.primary() != entt::null
 	                    && reg.valid(ctx.selection.primary());
 
-	if (EditorWidgets::menuItem("Focus Selected", "F", false, canFocus))
+	if (EditorWidgets::menuItem("Focus Selected", EditorShortcuts::label("viewport.focus").c_str(), false, canFocus))
 		focusSelected(ctx, snapshotWorld);
-	if (EditorWidgets::menuItem("Snap to Ground", "End", false, editable && hasSel))
+	if (EditorWidgets::menuItem("Snap to Ground", EditorShortcuts::label("viewport.snapToGround").c_str(), false, editable && hasSel))
 		snapSelectionToGround(ctx, snapshotWorld);
 
 	ImGui::Separator();
-	if (EditorWidgets::menuItem("Hide Selected", "H", false, editable && hasSel))
+	if (EditorWidgets::menuItem("Hide Selected", EditorShortcuts::label("viewport.hide").c_str(), false, editable && hasSel))
 		hideSelected(ctx);
-	if (EditorWidgets::menuItem("Isolate Selected", "Shift+H", false, editable && hasSel))
+	if (EditorWidgets::menuItem("Isolate Selected", EditorShortcuts::label("viewport.isolate").c_str(), false, editable && hasSel))
 		isolateSelected(ctx);
-	if (EditorWidgets::menuItem("Show All", "Alt+H", false,
+	if (EditorWidgets::menuItem("Show All", EditorShortcuts::label("viewport.showAll").c_str(), false,
 	                            editable && ViewportActions::anyHidden(*ctx.world)))
 		showAll(ctx);
 
@@ -665,9 +666,9 @@ static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
 	bool groupable = false;
 	for (const Entity e : ctx.selection.entities())
 		if (reg.valid(e) && !ctx.world->isBuiltin(e)) { groupable = true; break; }
-	if (EditorWidgets::menuItem("Group", "Ctrl+G", false, editable && groupable))
+	if (EditorWidgets::menuItem("Group", EditorShortcuts::label("viewport.group").c_str(), false, editable && groupable))
 		groupSelected(ctx);
-	if (EditorWidgets::menuItem("Ungroup", "Shift+G", false,
+	if (EditorWidgets::menuItem("Ungroup", EditorShortcuts::label("viewport.ungroup").c_str(), false,
 	                            editable && ViewportActions::canUngroup(*ctx.world, ctx.selection)))
 		ungroupSelected(ctx);
 
@@ -693,13 +694,13 @@ static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
 	// The SAME hooks the Edit menu, the keyboard and the Outliner use; they
 	// act on the selection, which opening this menu just settled.
 	ImGui::Separator();
-	if (EditorWidgets::menuItem("Duplicate", "Ctrl+D", false, editable && hasSel) && ctx.duplicateEntity)
+	if (EditorWidgets::menuItem("Duplicate", EditorShortcuts::label("entity.duplicate").c_str(), false, editable && hasSel) && ctx.duplicateEntity)
 		ctx.duplicateEntity();
-	if (EditorWidgets::menuItem("Copy", "Ctrl+C", false, editable && hasSel) && ctx.copyEntity)
+	if (EditorWidgets::menuItem("Copy", EditorShortcuts::label("entity.copy").c_str(), false, editable && hasSel) && ctx.copyEntity)
 		ctx.copyEntity();
-	if (EditorWidgets::menuItem("Cut", "Ctrl+X", false, editable && hasSel) && ctx.cutEntity)
+	if (EditorWidgets::menuItem("Cut", EditorShortcuts::label("entity.cut").c_str(), false, editable && hasSel) && ctx.cutEntity)
 		ctx.cutEntity();
-	if (EditorWidgets::menuItem("Paste", "Ctrl+V", false, editable && ctx.entityClipboardFull)
+	if (EditorWidgets::menuItem("Paste", EditorShortcuts::label("entity.paste").c_str(), false, editable && ctx.entityClipboardFull)
 	    && ctx.pasteEntity)
 		ctx.pasteEntity();
 
@@ -946,28 +947,24 @@ void render(AppContext& ctx, float dt)
 					}
 					// The menu's verbs on keys, the ones its rows print. Alt+H
 					// is safe beside Alt+LMB orbit — a key press is not a drag.
-					if (imageHovered && !io.WantTextInput && !navigating && !ctx.isPlaying)
+					// The chords come from EditorShortcuts (Preferences ▸
+					// Shortcuts), which also holds the not-while-typing guard.
+					if (imageHovered && !navigating && !ctx.isPlaying)
 					{
-						if (ImGui::IsKeyPressed(ImGuiKey_H, false))
-						{
-							if (io.KeyAlt)        showAll(ctx);
-							else if (io.KeyShift) isolateSelected(ctx);
-							else if (!io.KeyCtrl) hideSelected(ctx);
-						}
-						if (ImGui::IsKeyPressed(ImGuiKey_G, false))
-						{
-							if (io.KeyCtrl)       groupSelected(ctx);
-							else if (io.KeyShift) ungroupSelected(ctx);
-						}
+						if (EditorShortcuts::pressed("viewport.showAll"))  showAll(ctx);
+						if (EditorShortcuts::pressed("viewport.isolate"))  isolateSelected(ctx);
+						if (EditorShortcuts::pressed("viewport.hide"))     hideSelected(ctx);
+						if (EditorShortcuts::pressed("viewport.group"))    groupSelected(ctx);
+						if (EditorShortcuts::pressed("viewport.ungroup"))  ungroupSelected(ctx);
 						// End drops the selection onto the ground — Unreal's key
 						// for it, and one nothing else in the viewport uses.
-						if (ImGui::IsKeyPressed(ImGuiKey_End, false))
+						if (EditorShortcuts::pressed("viewport.snapToGround"))
 							snapSelectionToGround(ctx, s_sceneSnapshot);
 					}
 					// Focus on selection (F) — frame the selected entity and
 					// everything parented under it (see selectionFocusSphere).
-					if (imageHovered && !io.WantTextInput && !navigating &&
-					    ImGui::IsKeyPressed(ImGuiKey_F) &&
+					if (imageHovered && !navigating &&
+					    EditorShortcuts::pressed("viewport.focus") &&
 					    ctx.world && ctx.selection.primary() != entt::null &&
 					    ctx.world->registry().valid(ctx.selection.primary()))
 					{

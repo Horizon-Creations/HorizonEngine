@@ -157,6 +157,12 @@ add_executable(he_tests
     # …and the gizmo moves it: EditorTransformGizmo over a mesh-less entity,
     # driven headless the way test_gizmo_pick.cpp drives ImGuizmo.
     test_viewport_gizmo.cpp
+    # The shortcut table: overrides round-trip through the config string,
+    # conflicts are per scope, a chord fires only with its exact modifiers.
+    test_editor_shortcuts.cpp
+    # …and the Preferences page over it, driven headless: click a chord,
+    # press keys, read the binding back out of the pinned config.json.
+    test_shortcuts_ui.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
     test_gamelogic_services.cpp
@@ -498,6 +504,10 @@ add_executable(he_tests
     # target alone defines); the per-file definition below turns it on for this
     # one source and its test, and for nothing else in the binary.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTransformGizmo.cpp
+    # The shortcut table, for test_editor_shortcuts.cpp: same per-file
+    # HE_IMGUI_ENABLED (ImGuiKeyChord is its currency).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorShortcuts.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ShortcutsPage.cpp
     # The World Outliner, for test_outliner_ui.cpp: it needs a real AppContext
     # (built there) and ImGui, and nothing else in this binary. Same per-file
     # HE_IMGUI_ENABLED as the gizmo — AppContext's layout depends on it, so the
@@ -537,6 +547,10 @@ add_executable(he_tests
 set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTransformGizmo.cpp
     test_viewport_gizmo.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorShortcuts.cpp
+    test_editor_shortcuts.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ShortcutsPage.cpp
+    test_shortcuts_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
     test_outliner_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/InspectorPanel.cpp

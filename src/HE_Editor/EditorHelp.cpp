@@ -2822,6 +2822,25 @@ namespace
 	  "Name and type on one line instead. Half the height per variable, so a long "
 	  "list stays readable without scrolling.",
 	  "", "horizoncode#graphs" },
+	// ── Preferences » Editor » Shortcuts ─────────────────────────────────────
+	{ "Shortcuts/Search", "",
+	  "Narrows the list to the actions whose name, group or key contains this. "
+	  "\"ctrl\" finds every shortcut that uses the modifier.",
+	  "", "editor#preferences" },
+	{ "Shortcuts/Reset All", "",
+	  "Puts every shortcut back to the key it shipped with, in one go. Each row "
+	  "has its own Reset for one at a time.",
+	  "", "editor#preferences" },
+	{ "Shortcuts/Reset", "",
+	  "Puts this one shortcut back to its default. Only shown on a row you have "
+	  "changed.",
+	  "", "editor#preferences" },
+	{ "shortcuts.binding", "Shortcut",
+	  "The keys that trigger this action. Click, then press the new combination: "
+	  "Esc keeps the old one, Backspace removes the shortcut altogether. Gold "
+	  "means changed from the default; red means another action in the same "
+	  "place answers to the same keys, and hovering says which.",
+	  "", "editor#preferences" },
 	{ "Preferences/Restore Defaults", "Restore Defaults",
 	  "Puts the settings in the category you are looking at back the way they "
 	  "shipped. Only this category, and only the ones the engine owns — your "
@@ -6229,6 +6248,8 @@ namespace
 		// buttons are listed under the setting that produces the copy.
 		{ "Scene Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
+		{ "Shortcuts/",        "editor-settings", "Settings Reference", "Shortcuts" },
+		{ "shortcuts.",        "editor-settings", "Settings Reference", "Shortcuts" },
 		// ── The asset editors ────────────────────────────────────────────────
 		{ "material.",           "editor-materials", "Material Editor", "Material graph" },
 		{ "Material Node/",      "editor-materials", "Material Editor", "Values on a node" },

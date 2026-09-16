@@ -45,6 +45,7 @@
 #include "EngineContentPublishDialog.h" // Assets > Publish Engine Content to Server...
 #include "HcRenameDialog.h"            // "that rename reaches other files" — from both graph editors
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
+#include "EditorShortcuts.h"           // the chords the menus print and the keys fire
 #include "ProjectSettingsPanel.h"        // the Project Settings tab (what travels with the project)
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
@@ -1477,7 +1478,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			beginNewProject();
 			openNewProjectPopup = true;
 		}
-        if (EditorWidgets::menuItem("Open Project", "Ctrl+O"))
+        if (EditorWidgets::menuItem("Open Project", EditorShortcuts::label("file.openProject").c_str()))
             requestGuarded(GuardedAction::OpenProjectDialog);
 		if (EditorWidgets::menuItem("Close Project", "Ctrl+W"))
 			requestGuarded(GuardedAction::CloseProject);
@@ -1495,10 +1496,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         }
         // Keep these three in step with MacMenuBar.mm's File block — a Mac user
         // never sees this row (see MacMenuBar.h).
-        if (EditorWidgets::menuItem("Save", "Ctrl+S"))                    doSaveActiveTab();
-        if (EditorWidgets::menuItem("Save All", "Ctrl+Shift+S"))          doSaveAll();
+        if (EditorWidgets::menuItem("Save", EditorShortcuts::label("file.save").c_str()))                    doSaveActiveTab();
+        if (EditorWidgets::menuItem("Save All", EditorShortcuts::label("file.saveAll").c_str()))          doSaveAll();
         if (!appProj)
-            if (EditorWidgets::menuItem("Save Scene As...", "Ctrl+Alt+S")) triggerSaveSceneAs();
+            if (EditorWidgets::menuItem("Save Scene As...", EditorShortcuts::label("file.saveSceneAs").c_str())) triggerSaveSceneAs();
         ImGui::Separator();
         if (EditorWidgets::menuItem("Exit", "Alt+F4"))
             requestGuarded(GuardedAction::Quit);
@@ -1520,10 +1521,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             const std::string rLabel = ctx.collabUndo->canRedo()
                 ? ctx.collabUndo->redoLabel() : std::string("Redo");
 
-            if (EditorWidgets::menuItem(uLabel.c_str(), "Ctrl+Z", false,
+            if (EditorWidgets::menuItem(uLabel.c_str(), EditorShortcuts::label("edit.undo").c_str(), false,
                                 ctx.collabUndo->canUndo()))
                 ctx.collabUndo->undo();
-            if (EditorWidgets::menuItem(rLabel.c_str(), "Ctrl+Y", false,
+            if (EditorWidgets::menuItem(rLabel.c_str(), EditorShortcuts::label("edit.redo").c_str(), false,
                                 ctx.collabUndo->canRedo()))
                 ctx.collabUndo->redo();
 
@@ -1536,8 +1537,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             // one undo history in the editor, and this is a second door onto it.
             const bool canUndo = ctx.undoSys && ctx.undoSys->canUndo();
             const bool canRedo = ctx.undoSys && ctx.undoSys->canRedo();
-            if (EditorWidgets::menuItem("Undo", "Ctrl+Z", false, canUndo) && ctx.undo) ctx.undo();
-            if (EditorWidgets::menuItem("Redo", "Ctrl+Y", false, canRedo) && ctx.redo) ctx.redo();
+            if (EditorWidgets::menuItem("Undo", EditorShortcuts::label("edit.undo").c_str(), false, canUndo) && ctx.undo) ctx.undo();
+            if (EditorWidgets::menuItem("Redo", EditorShortcuts::label("edit.redo").c_str(), false, canRedo) && ctx.redo) ctx.redo();
         }
         ImGui::Separator();
         // Cut/Copy/Paste act on the SELECTED ENTITY, not on text: an editor's Edit
@@ -1546,18 +1547,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         {
             const bool canEdit  = canEditEntity();
             const bool canPaste = canPasteEntity();
-            if (EditorWidgets::menuItem("Cut",   "Ctrl+X", false, canEdit)  && ctx.cutEntity)  ctx.cutEntity();
-            if (EditorWidgets::menuItem("Copy",  "Ctrl+C", false, canEdit)  && ctx.copyEntity) ctx.copyEntity();
-            if (EditorWidgets::menuItem("Paste", "Ctrl+V", false, canPaste) && ctx.pasteEntity) ctx.pasteEntity();
-            if (EditorWidgets::menuItem("Duplicate", "Ctrl+D", false, canEdit) && ctx.duplicateEntity)
+            if (EditorWidgets::menuItem("Cut",   EditorShortcuts::label("entity.cut").c_str(), false, canEdit)  && ctx.cutEntity)  ctx.cutEntity();
+            if (EditorWidgets::menuItem("Copy",  EditorShortcuts::label("entity.copy").c_str(), false, canEdit)  && ctx.copyEntity) ctx.copyEntity();
+            if (EditorWidgets::menuItem("Paste", EditorShortcuts::label("entity.paste").c_str(), false, canPaste) && ctx.pasteEntity) ctx.pasteEntity();
+            if (EditorWidgets::menuItem("Duplicate", EditorShortcuts::label("entity.duplicate").c_str(), false, canEdit) && ctx.duplicateEntity)
                 ctx.duplicateEntity();
-            if (EditorWidgets::menuItem("Delete", "Del", false, canEdit) && ctx.deleteEntity)
+            if (EditorWidgets::menuItem("Delete", EditorShortcuts::label("entity.delete").c_str(), false, canEdit) && ctx.deleteEntity)
                 ctx.deleteEntity();
         }
         ImGui::Separator();
 		if (EditorWidgets::menuItem("Project Settings", nullptr, false, ctx.projectLoaded))
 			openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
-		if (EditorWidgets::menuItem("Preferences", "Ctrl+,"))
+		if (EditorWidgets::menuItem("Preferences", EditorShortcuts::label("edit.preferences").c_str()))
 			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         ImGui::EndMenu();
     }
@@ -1566,7 +1567,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // Every row below is looked up as "View/<its label>" — one scope, and
         // the menu explains itself (see EditorWidgets::menuItem).
         HE::Ed::Help::Scope helpScope("View");
-        if (EditorWidgets::menuItem("Toggle Fullscreen", "F11")) toggleFullscreen();
+        if (EditorWidgets::menuItem("Toggle Fullscreen", EditorShortcuts::label("view.fullscreen").c_str())) toggleFullscreen();
         if (EditorWidgets::menuItem("Reset Layout")) { s_resetLayoutRequested = true; }
         if (EditorWidgets::menuItem("Performance Profiler", nullptr, s_showProfiler))
             togglePanelWindow(s_showProfiler, "Performance Profiler");
@@ -1576,7 +1577,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showCollab, "Collaboration");
         if (EditorWidgets::menuItem("Source Control", nullptr, s_showSourceControl))
             togglePanelWindow(s_showSourceControl, "Source Control");
-        if (EditorWidgets::menuItem("Console", "Ctrl+`", s_showConsole))
+        if (EditorWidgets::menuItem("Console", EditorShortcuts::label("view.console").c_str(), s_showConsole))
             togglePanelWindow(s_showConsole, "Console");
         if (EditorWidgets::menuItem("Audio Mixer", nullptr, s_showAudioMixer))
             togglePanelWindow(s_showAudioMixer, "Audio Mixer");
@@ -2070,17 +2071,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     // (macOS never gets here for these two: the native menu's key equivalents
     // swallow the keystroke before SDL sees it — the MacMenuBar dispatch above
     // runs the SAME two lambdas.)
+    // Every chord here is read from EditorShortcuts (Preferences ▸ Shortcuts
+    // rebinds it, and the menu rows print the same table), which also
+    // carries the "not while typing" guard and the exact-modifier rule.
     {
-        const ImGuiIO& kio = ImGui::GetIO();
-        const bool mod = kio.KeyCtrl || kio.KeySuper;
-        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_S, false))
-        {
-            if (kio.KeyAlt)        triggerSaveSceneAs();   // Save Scene As…
-            else if (kio.KeyShift) doSaveAll();
-            else                   doSaveActiveTab();
-        }
+        if (EditorShortcuts::pressed("file.saveSceneAs")) triggerSaveSceneAs();
+        else if (EditorShortcuts::pressed("file.saveAll")) doSaveAll();
+        else if (EditorShortcuts::pressed("file.save"))    doSaveActiveTab();
         // Ctrl/Cmd+, opens the Preferences tab (matches the Edit menu shortcut label).
-        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Comma, false))
+        if (EditorShortcuts::pressed("edit.preferences"))
             openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         // Ctrl/Cmd+` toggles the Console — the console key every engine uses, but
         // NOT the bare one. This block runs before the asset tabs are dispatched,
@@ -2094,7 +2093,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // the ImGui menu row above does not exist (the native bar replaces it, and
         // an item there needs MacMenuBar), so until the Console has an entry in
         // that bar this is the only way a Mac user reaches the panel.
-        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_GraveAccent, false))
+        if (EditorShortcuts::pressed("view.console"))
             togglePanelWindow(s_showConsole, "Console");
         // The two shortcuts the menu has always advertised and never had. F11
         // carries no modifier, so WantTextInput is the whole guard — a function
@@ -2104,9 +2103,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // it first and dispatches the same action. F11 stays wired everywhere,
         // though a Mac usually claims that key for the system before we see it;
         // the native View menu's ⌃⌘F is the reliable route there.)
-        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_O, false))
+        if (EditorShortcuts::pressed("file.openProject"))
             requestGuarded(GuardedAction::OpenProjectDialog);
-        if (!kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F11, false))
+        if (EditorShortcuts::pressed("view.fullscreen"))
             toggleFullscreen();
     }
 
@@ -2436,16 +2435,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				doRedo = ImGui::Button("Redo");
 			ImGui::EndDisabled();
 
-			// Keyboard shortcuts: Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Ctrl+Y)
-			const ImGuiIO& kio = ImGui::GetIO();
-			const bool mod = kio.KeyCtrl || kio.KeySuper;
-			if (!kio.WantTextInput && mod)
-			{
-				if (ImGui::IsKeyPressed(ImGuiKey_Z, false))
-					(kio.KeyShift ? doRedo : doUndo) = true;
-				if (ImGui::IsKeyPressed(ImGuiKey_Y, false))
-					doRedo = true;
-			}
+			// Keyboard shortcuts: Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Ctrl+Y) by
+			// default — whatever Preferences ▸ Shortcuts says now.
+			if (EditorShortcuts::pressed("edit.undo"))    doUndo = true;
+			if (EditorShortcuts::pressed("edit.redo") ||
+			    EditorShortcuts::pressed("edit.redoAlt")) doRedo = true;
 
 			if (doUndo && canUndo && ctx.undo) ctx.undo();
 			if (doRedo && canRedo && ctx.redo) ctx.redo();
@@ -2748,19 +2742,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         };
         if (sceneTabActive && !typing && !panelOwnsKeys("Content Browser"))
         {
-            const bool mod = kio.KeyCtrl || kio.KeySuper;
             if (canEditEntity())
             {
-                if (mod && ImGui::IsKeyPressed(ImGuiKey_D, false) && ctx.duplicateEntity)
+                if (EditorShortcuts::pressed("entity.duplicate") && ctx.duplicateEntity)
                     ctx.duplicateEntity();
-                if (mod && ImGui::IsKeyPressed(ImGuiKey_C, false) && ctx.copyEntity)
+                if (EditorShortcuts::pressed("entity.copy") && ctx.copyEntity)
                     ctx.copyEntity();
-                if (mod && ImGui::IsKeyPressed(ImGuiKey_X, false) && ctx.cutEntity)
+                if (EditorShortcuts::pressed("entity.cut") && ctx.cutEntity)
                     ctx.cutEntity();
-                if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && ctx.deleteEntity)
+                if (EditorShortcuts::pressed("entity.delete") && ctx.deleteEntity)
                     ctx.deleteEntity();
             }
-            if (mod && ImGui::IsKeyPressed(ImGuiKey_V, false) && canPasteEntity() && ctx.pasteEntity)
+            if (EditorShortcuts::pressed("entity.paste") && canPasteEntity() && ctx.pasteEntity)
                 ctx.pasteEntity();
         }
     }

@@ -2,6 +2,7 @@
 
 #ifdef HE_IMGUI_ENABLED
 #include "EditorUndo.h"
+#include "EditorShortcuts.h"   // W/E/R, or whatever they were rebound to
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <ImGuizmo.h>
@@ -26,10 +27,11 @@ void handleOperationKeys(ViewportToolbar::State& tb, bool hovered, bool navigati
 {
 	// Not while flying — W/A/S/D drive the camera then — and not while a text
 	// field has the keyboard.
-	if (!hovered || navigating || ImGui::GetIO().WantTextInput) return;
-	if (ImGui::IsKeyPressed(ImGuiKey_W)) tb.op = ImGuizmo::TRANSLATE;
-	if (ImGui::IsKeyPressed(ImGuiKey_E)) tb.op = ImGuizmo::ROTATE;
-	if (ImGui::IsKeyPressed(ImGuiKey_R)) tb.op = ImGuizmo::SCALE;
+	if (!hovered || navigating) return;
+	// W/E/R by default; EditorShortcuts holds the typing guard and any rebind.
+	if (EditorShortcuts::pressed("viewport.move"))   tb.op = ImGuizmo::TRANSLATE;
+	if (EditorShortcuts::pressed("viewport.rotate")) tb.op = ImGuizmo::ROTATE;
+	if (EditorShortcuts::pressed("viewport.scale"))  tb.op = ImGuizmo::SCALE;
 }
 
 namespace

@@ -22,6 +22,8 @@
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
+#include "EditorShortcuts.h"       // the rebound keys, persisted the same way
+#include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
 #include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
@@ -1231,6 +1233,11 @@ void EditorApplication::OnInit()
 	// The camera bookmarks (digit keys) ride next to the view, one string.
 	CameraBookmarks::editorSet() = CameraBookmarks::Set::decode(
 		globalstate.getCustomConfigString("EditorCamBookmarks", ""));
+#ifdef HE_IMGUI_ENABLED
+	// The user's rebound shortcuts, one string (only what differs from the
+	// defaults — see EditorShortcuts::encode).
+	EditorShortcuts::decode(globalstate.getCustomConfigString(ShortcutsPage::kConfigKey, ""));
+#endif
 	setMaxFps(m_editorConfig.MaxFps);   // VSync-off frame cap (0 = unlimited)
 
 #ifdef HE_IMGUI_ENABLED
@@ -9670,6 +9677,9 @@ void EditorApplication::writeEditorConfig()
 		globalstate.setCustomConfigEntry("EditorCamValid", true);
 	}
 	globalstate.setCustomConfigEntry("EditorCamBookmarks", CameraBookmarks::editorSet().encode());
+#ifdef HE_IMGUI_ENABLED
+	globalstate.setCustomConfigEntry(ShortcutsPage::kConfigKey, EditorShortcuts::encode());
+#endif
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	{
 		int n = 0;
