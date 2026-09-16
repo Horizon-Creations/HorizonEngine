@@ -37,6 +37,24 @@ namespace
     // Push constants: per-object transforms (128 bytes — the guaranteed minimum).
     struct PushConstants { glm::mat4 mvp; glm::mat4 model; };
 
+    // The index range a DrawCall covers on the mesh it ends up drawing — the
+    // Vulkan twin of GL's/Metal's/D3D11's/D3D12's DrawIndexRange. A whole-mesh
+    // draw (indexCount 0 — every one-section mesh, every ribbon, every draw
+    // before sections existed) spans the buffer; a section draw takes its own
+    // [offset, count), CLAMPED to the buffer: drawDCVk substitutes the default
+    // cube when the real mesh is not resident yet, and a range taken from the
+    // real asset must not read past the cube's index buffer. `start` is in
+    // INDICES, which is what vkCmdDrawIndexed's firstIndex takes (same as
+    // D3D's StartIndexLocation; GL wants a byte pointer, Metal a byte offset).
+    struct VulkanIndexRange { uint32_t count; uint32_t start; };
+    inline VulkanIndexRange DrawIndexRange(const DrawCall& dc, uint32_t meshIndexCount)
+    {
+        if (dc.indexCount == 0) return { meshIndexCount, 0u };
+        const uint32_t off = std::min<uint32_t>(dc.indexOffset, meshIndexCount);
+        const uint32_t cnt = std::min<uint32_t>(dc.indexCount, meshIndexCount - off);
+        return { cnt, off };
+    }
+
     // Per-frame UBO, std140 layout (matches the GLSL `Frame` block).
     struct FrameUBOData
     {
@@ -4380,8 +4398,15 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // Shared opaque/blended split + back-to-front order. The split now weighs
         // the per-instance tint alpha too (this backend used to test dc.opacity
         // alone, so a particle fading out via its tint was drawn opaque).
+        // sectionAware: every draw in drawDCVk applies DrawCall::indexOffset/
+        // indexCount (DrawIndexRange), so a multi-section mesh's per-slot DCs
+        // all come through — one draw per material slot, as on GL, Metal, D3D11
+        // and D3D12. Each slot now takes a k_matMaxDraws graph-material slot
+        // and (instanced) a k_maxInstances run of its own, so both per-frame
+        // caps are reached at fewer MESHES than before.
         std::vector<const DrawCall*> opaqueDCs, transparentDCs;
-        RenderSorter::partitionByOpacity(cmds.drawCalls(), opaqueDCs, transparentDCs);
+        RenderSorter::partitionByOpacity(cmds.drawCalls(), opaqueDCs, transparentDCs,
+                                         /*sectionAware=*/true);
 
         // ── Motion trails join the blended list ──────────────────────────────
         // A RibbonBatch is per-frame CPU geometry in the cooked vertex layout, so
@@ -4469,6 +4494,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             if (!mesh) mesh = resolveMesh(dc.meshAssetId);
             const GpuMesh& m    = mesh ? *mesh : m_cube;
             if (!m.indexCount) return;
+            // Section draw → its own slice of the index buffer; whole-mesh draw
+            // (every one-section mesh, every ribbon) → all of it. Both the
+            // graph-material path and the built-in one below draw this range.
+            const VulkanIndexRange range = DrawIndexRange(dc, m.indexCount);
+            if (range.count == 0) return; // a slot clamped away on the fallback cube
 
 #if defined(HE_HAVE_SHADERC)
             // A4: node-graph material? Render through a per-material pipeline built from the
@@ -4614,9 +4644,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipe);
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                     m_matPipelineLayout, 0, 1, &set, 0, nullptr);
-                            vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+                            vkCmdDrawIndexed(cmd, range.count, 1, range.start, 0, 0);
                             ++m_statDraws;
-                            m_statTris += m.indexCount / 3;
+                            m_statTris += range.count / 3;
                         };
                         // Instanced graph materials: draw each instance via the material path
                         // (this increment does NOT combine graph materials with A3 instancing).
@@ -4685,9 +4715,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 PushConstants pc2{ viewProj * model, model };
                 vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
                                    0, sizeof(pc2), &pc2);
-                vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+                vkCmdDrawIndexed(cmd, range.count, 1, range.start, 0, 0);
                 ++m_statDraws;
-                m_statTris += m.indexCount / 3;
+                m_statTris += range.count / 3;
             };
             if (!dc.instanceTransforms.empty())
             {
@@ -4716,12 +4746,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     const VkDeviceSize instOff = static_cast<VkDeviceSize>(instCursor) * k_instStride;
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, instPipe);
                     vkCmdBindVertexBuffers(cmd, 1, 1, &ib.buf, &instOff);
-                    vkCmdDrawIndexed(cmd, m.indexCount, count, 0, 0, 0);
+                    vkCmdDrawIndexed(cmd, range.count, count, range.start, 0, 0);
                     // Restore the non-instanced pipeline for subsequent (non-instanced) draws.
                     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
                     ++m_statDraws;
-                    m_statTris += (m.indexCount / 3) * count;
+                    m_statTris += (range.count / 3) * count;
                     instCursor += count;
                 }
                 else

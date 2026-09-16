@@ -961,12 +961,12 @@ TEST_CASE("RenderSorter: transparency partition uses the tinted opacity")
 
 TEST_CASE("RenderSorter: the section-unaware partition keeps slot 0 and drops the other slots")
 {
-	// D3D12/Vulkan collect through partitionByOpacity and draw the whole index
-	// buffer per DrawCall — so of a multi-section mesh's per-slot draws only
-	// slot 0 may reach them (the mesh's own material, one draw, as before
-	// sections existed). Whole-mesh draws (sectionIndex -1) pass untouched.
-	// That is the DEFAULT mode: a caller that says nothing must never get a
-	// later slot handed to it.
+	// A backend that draws the whole index buffer per DrawCall (none since the
+	// section port — D3D11, D3D12 and Vulkan all pass sectionAware now) must of
+	// a multi-section mesh's per-slot draws only ever see slot 0 (the mesh's
+	// own material, one draw, as before sections existed). Whole-mesh draws
+	// (sectionIndex -1) pass untouched. That is the DEFAULT mode: a caller that
+	// says nothing must never get a later slot handed to it.
 	std::vector<DrawCall> calls(4);
 	calls[0].sectionIndex = -1;                                   // plain one-section mesh
 	calls[1].sectionIndex = 0;  calls[1].indexCount = 36;         // slot 0 of a sectioned mesh
@@ -980,8 +980,9 @@ TEST_CASE("RenderSorter: the section-unaware partition keeps slot 0 and drops th
 	CHECK(opaque[1] == &calls[1]);
 	CHECK(transparent.empty());
 
-	// The section-AWARE mode (D3D11, which applies indexOffset/indexCount per
-	// draw) gets every slot, still in record order and still split by opacity.
+	// The section-AWARE mode (D3D11, D3D12, Vulkan — each applies indexOffset/
+	// indexCount per draw) gets every slot, still in record order and still
+	// split by opacity.
 	RenderSorter::partitionByOpacity(calls, opaque, transparent, /*sectionAware=*/true);
 	REQUIRE(opaque.size() == 3);
 	CHECK(opaque[0] == &calls[0]);
