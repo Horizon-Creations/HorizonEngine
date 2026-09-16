@@ -4,6 +4,7 @@
 
 #include "EditorApplication.h"   // AppContext, EditorConfig, EditorMode
 #include "EditorCamera.h"
+#include "CameraBookmarks.h"     // the view popup's bookmark rows
 #include "ViewportPanel.h"       // renderSizePx() for the options popup readout
 #include "EditorToolbar.h"        // palette, metrics, cell/well — shared with the SC bar
 #include "EditorWidgets.h"        // helpForKey — the bar's controls explain themselves
@@ -165,6 +166,56 @@ void iconCamera(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	dl->AddLine({ c.x - h * 0.55f, c.y - h * 0.62f }, { c.x - h * 0.30f, c.y - h },  col, t);
 	dl->AddLine({ c.x - h * 0.30f, c.y - h },         { c.x + h * 0.05f, c.y - h },  col, t);
 	dl->AddLine({ c.x + h * 0.05f, c.y - h },         { c.x + h * 0.22f, c.y - h * 0.62f }, col, t);
+}
+
+// Eye — the view preset (Perspective / Top / Front / …).
+void iconEye(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.5f, t = stroke(s);
+	// Two arcs meeting at the corners of the eye, then the pupil.
+	dl->PathArcTo({ c.x, c.y + h * 0.55f }, h * 1.15f, kPi * 1.22f, kPi * 1.78f, 14);
+	dl->PathStroke(col, 0, t);
+	dl->PathArcTo({ c.x, c.y - h * 0.55f }, h * 1.15f, kPi * 0.22f, kPi * 0.78f, 14);
+	dl->PathStroke(col, 0, t);
+	dl->AddCircleFilled(c, h * 0.30f, col, 12);
+}
+
+// Half-shaded sphere — the view mode (Lit / Unlit / Wireframe / G-buffer).
+// A circle with its right half filled: the one glyph that says "shading"
+// without being a light bulb (which would say "lights").
+void iconShading(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.5f, t = stroke(s);
+	dl->AddCircle(c, h * 0.92f, col, 20, t);
+	dl->PathArcTo(c, h * 0.92f, -kPi * 0.5f, kPi * 0.5f, 14);
+	dl->PathFillConvex(col);
+}
+
+// Three stacked layers — the Show flags (what is drawn over the scene). The
+// eye was the obvious glyph and is already the View cell's.
+void iconLayers(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.5f, t = stroke(s);
+	// One flat diamond, seen from above; the two below are its outline shifted
+	// down, clipped to the lower half so they read as stacked, not overlaid.
+	auto diamond = [&](float dy, bool fill)
+	{
+		const ImVec2 p[4] = {
+			{ c.x,           c.y + dy - h * 0.42f },
+			{ c.x + h,       c.y + dy },
+			{ c.x,           c.y + dy + h * 0.42f },
+			{ c.x - h,       c.y + dy },
+		};
+		if (fill) dl->AddConvexPolyFilled(p, 4, col);
+		else      dl->AddPolyline(p, 4, col, ImDrawFlags_Closed, t);
+	};
+	diamond(-h * 0.40f, true);
+	// Lower halves of the two outlines below: a V under the top sheet.
+	for (float dy : { 0.0f, h * 0.40f })
+	{
+		dl->AddLine({ c.x - h, c.y + dy }, { c.x, c.y + dy + h * 0.42f }, col, t);
+		dl->AddLine({ c.x,     c.y + dy + h * 0.42f }, { c.x + h, c.y + dy }, col, t);
+	}
 }
 
 // Two sliders — viewport options.
@@ -336,16 +387,162 @@ void optionsPopup(AppContext& ctx, State& st)
 	ImGui::Spacing();
 	ImGui::TextDisabled("Viewport");
 	ImGui::Separator();
-	// Read back through the getter every frame instead of caching it in State:
-	// the grid's switch belongs to ViewportPanel (the only code that draws it),
-	// and the config restores it there at startup without this bar being told.
-	bool grid = ViewportPanel::groundGridEnabled();
-	if (EditorWidgets::checkbox("Ground grid", &grid))
-		ViewportPanel::setGroundGridEnabled(grid);
-	EditorWidgets::helpForKey("viewport.grid");
 	int pxW = 0, pxH = 0;
 	ViewportPanel::renderSizePx(pxW, pxH);
 	ImGui::Text("Render target: %d \xc3\x97 %d px", pxW, pxH);
+}
+
+// The Show flags: one checkbox per overlay the editor draws over the scene.
+// Edited in place on ViewportPanel's state rather than cached in State: the
+// flags belong to the code that draws the overlays, and the config restores
+// them there at startup without this bar being told. "All" / "None" at the
+// bottom because the common case is "just the scene for a moment" and eight
+// clicks is not a moment.
+void showPopup(AppContext&)
+{
+	HE::Ed::Help::Scope helpScope("Viewport Show");
+	ViewportPanel::ShowFlags& f = ViewportPanel::showFlags();
+	ImGui::TextDisabled("Scene");
+	ImGui::Separator();
+	EditorWidgets::checkbox("Ground Grid",    &f.groundGrid);
+	EditorWidgets::checkbox("Editor Icons",   &f.editorIcons);
+	EditorWidgets::checkbox("Selection",      &f.selection);
+	ImGui::Spacing();
+	ImGui::TextDisabled("Physics & AI");
+	ImGui::Separator();
+	EditorWidgets::checkbox("Colliders",      &f.colliders);
+	EditorWidgets::checkbox("Joints",         &f.joints);
+	EditorWidgets::checkbox("NavMesh",        &f.navMesh);
+	ImGui::Spacing();
+	ImGui::TextDisabled("Authoring");
+	ImGui::Separator();
+	EditorWidgets::checkbox("Guides",         &f.guides);
+	EditorWidgets::checkbox("Script Debug",   &f.scriptDebug);
+	EditorWidgets::checkbox("Collaborators",  &f.collaborators);
+	ImGui::Separator();
+	if (EditorWidgets::menuItem("Show All Overlays"))  f = ViewportPanel::ShowFlags{};
+	if (EditorWidgets::menuItem("Hide All Overlays"))
+	{
+		int n = 0;
+		const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+		for (int i = 0; i < n; ++i) f.*(fields[i].member) = false;
+	}
+}
+
+} // namespace
+
+// The view picker: one axis view per row, then the projection on its own.
+// Picking an axis view goes orthographic with it (that is what a Top view is
+// for); "Perspective" only puts the lens back and keeps the heading, which is
+// also how you get a perspective look from straight above if you want one.
+//
+// Takes the CAMERA rather than the context, because the secondary viewports
+// open the same picker over their own cameras — and a second copy of the rows
+// is how the two would come to disagree about what "Right" means.
+void viewPopup(EditorCamera& cam)
+{
+	HE::Ed::Help::Scope helpScope("Viewport View");
+	using VP = EditorCamera::ViewPreset;
+	const VP current = cam.currentPreset();
+	struct Row { VP preset; const char* label; const char* shortcut; };
+	const Row rows[] = {
+		{ VP::Perspective, "Perspective", "Num 5" },
+		{ VP::Top,         "Top",         "Num 7" },
+		{ VP::Bottom,      "Bottom",      "Ctrl+Num 7" },
+		{ VP::Front,       "Front",       "Num 1" },
+		{ VP::Back,        "Back",        "Ctrl+Num 1" },
+		{ VP::Right,       "Right",       "Num 3" },
+		{ VP::Left,        "Left",        "Ctrl+Num 3" },
+	};
+	for (const Row& r : rows)
+	{
+		const bool on = (r.preset == current) && (r.preset != VP::Perspective || !cam.orthographic());
+		if (EditorWidgets::menuItem(r.label, r.shortcut, on))
+			cam.applyPreset(r.preset);
+		if (r.preset == VP::Perspective) ImGui::Separator();
+	}
+	ImGui::Separator();
+	bool ortho = cam.orthographic();
+	if (EditorWidgets::checkbox("Orthographic", &ortho))
+		cam.setOrthographic(ortho);
+
+	// Bookmarks: the digit keys as rows, for the hand that is on the mouse.
+	// Jumping is the frequent verb and sits at the top level of the submenu;
+	// setting and clearing are one level further in, so a slip cannot
+	// overwrite a view it took a minute to find.
+	ImGui::Separator();
+	CameraBookmarks::Set& marks = CameraBookmarks::editorSet();
+	if (ImGui::BeginMenu("Bookmarks"))
+	{
+		char label[32], shortcut[16];
+		for (int i = 0; i < CameraBookmarks::kSlots; ++i)
+		{
+			std::snprintf(label, sizeof(label), "Bookmark %d", i);
+			std::snprintf(shortcut, sizeof(shortcut), "%d", i);
+			if (ImGui::MenuItem(label, shortcut, false, marks.isSet(i)))
+				marks.recall(i, cam);
+			EditorWidgets::helpForKey("viewport.bookmark-go");
+		}
+		ImGui::Separator();
+		if (ImGui::BeginMenu("Set Bookmark"))
+		{
+			for (int i = 0; i < CameraBookmarks::kSlots; ++i)
+			{
+				std::snprintf(label, sizeof(label), "Set Bookmark %d", i);
+				std::snprintf(shortcut, sizeof(shortcut), "Ctrl+%d", i);
+				if (ImGui::MenuItem(label, shortcut, marks.isSet(i)))
+					marks.store(i, cam);
+				EditorWidgets::helpForKey("viewport.bookmark-set");
+			}
+			ImGui::EndMenu();
+		}
+		EditorWidgets::helpForLabel("Set Bookmark");
+		if (EditorWidgets::menuItem("Clear Bookmarks", nullptr, false, marks.any()))
+			marks.clearAll();
+		ImGui::EndMenu();
+	}
+	EditorWidgets::helpForLabel("Bookmarks");
+}
+
+namespace
+{
+
+// The view-mode picker: the three ways of drawing the whole scene, then the
+// G-buffer attachments. The latter exist only on the deferred path — the rows
+// stay visible but disabled on a forward frame (and on a backend without the
+// path at all), and their help sentence says why, rather than vanishing and
+// leaving the user to wonder where the option went. `deferred` = the renderer
+// actually resolves through a G-buffer this frame (its GetRenderPath after the
+// capability gate), not the preference alone.
+void viewModePopup(AppContext& ctx, State& st)
+{
+	HE::Ed::Help::Scope helpScope("Viewport View Mode");
+	using VM = HE::ViewMode;
+	const bool deferred = ctx.renderer
+	                   && ctx.renderer->GetCapabilities().supportsDeferredRendering
+	                   && ctx.renderer->GetRenderPath() == HE::RenderPath::Deferred;
+	struct Row { VM mode; const char* shortcut; };
+	const Row rows[] = {
+		{ VM::Lit,                   "Alt+4" },
+		{ VM::Unlit,                 "Alt+3" },
+		{ VM::Wireframe,             "Alt+2" },
+		{ VM::GBufferBaseColor,      nullptr },
+		{ VM::GBufferNormal,         nullptr },
+		{ VM::GBufferRoughSpecMetal, nullptr },
+		{ VM::GBufferEmissive,       nullptr },
+	};
+	for (const Row& r : rows)
+	{
+		if (r.mode == VM::GBufferBaseColor)
+		{
+			ImGui::Separator();
+			ImGui::TextDisabled("G-Buffer");
+		}
+		const bool gb = HE::viewModeIsGBuffer(r.mode);
+		if (EditorWidgets::menuItem(HE::viewModeName(r.mode), r.shortcut,
+		                            st.viewMode == r.mode, !gb || deferred))
+			st.viewMode = r.mode;
+	}
 }
 
 } // namespace
@@ -427,22 +624,35 @@ void render(AppContext& ctx, State& st)
 		if (snap) w += kGroupGap + kWellPad * 2.0f + m.cell + kSegGap + snapValW;
 		return w;
 	};
-	auto rightWidth = [&](bool camera)
+	// The view cell is measured with its widest wording so switching from Top
+	// to Perspective never reflows the row; icon-only once labels are gone.
+	const float viewW       = std::max({ cellWidth(m, "Perspective"), cellWidth(m, "Bottom"),
+	                                     cellWidth(m, "Ortho") });
+	// Same rule for the view mode: measured at its widest label. The G-buffer
+	// rows are shortened on the cell ("Normals" rather than the popup's full
+	// wording is already short; "Rough / Spec / Metal" is not, so the cell
+	// shows "G-Buffer" for any of those).
+	const float modeW       = std::max({ cellWidth(m, "Wireframe"), cellWidth(m, "G-Buffer"),
+	                                     cellWidth(m, "Unlit") });
+	auto rightWidth = [&](bool camera, bool viewLabel)
 	{
 		float w = kWellPad * 2.0f + m.cell;                       // options button
+		w += kWellPad * 2.0f + m.cell + kGroupGap;                // show flags (icon only)
+		w += kWellPad * 2.0f + (viewLabel ? viewW : m.cell) + kGroupGap;   // view preset
+		w += kWellPad * 2.0f + (viewLabel ? modeW : m.cell) + kGroupGap;   // view mode
 		if (camera) w += kWellPad * 2.0f + m.cell + kSegGap + camValW + kGroupGap;
 		return w;
 	};
 
 	const float slack   = edgeL + kEdgeGap + kGroupGap * 2.0f;     // breathing room around the transport
 	bool labels = true, showCamera = true, showSnap = true;
-	auto fits = [&] { return leftWidth(labels, showSnap) + centreW + rightWidth(showCamera) + slack <= barW; };
+	auto fits = [&] { return leftWidth(labels, showSnap) + centreW + rightWidth(showCamera, labels) + slack <= barW; };
 	if (!fits()) labels     = false;
 	if (!fits()) showCamera = false;
 	if (!fits()) showSnap   = false;
 
 	const float wLeft  = leftWidth(labels, showSnap);
-	const float wRight = rightWidth(showCamera);
+	const float wRight = rightWidth(showCamera, labels);
 
 	// ── Left zone: what the mouse does in the viewport ───────────────────────
 	float x = origin.x + edgeL;
@@ -659,10 +869,85 @@ void render(AppContext& ctx, State& st)
 			rx += w + kGroupGap;
 		}
 
+		// View preset. The label is READ from the camera, not remembered here:
+		// an orbit out of Top is no longer Top, and a cell that kept saying so
+		// would be lying about the projection under the cursor. A free
+		// orthographic heading shows "Ortho" — still no lens, just no axis.
+		{
+			const float w = kWellPad * 2.0f + (labels ? viewW : m.cell);
+			well(m, rx, w);
+			const bool canView = ctx.editorCamera && !playing;
+			using VP = EditorCamera::ViewPreset;
+			const VP   preset = canView ? ctx.editorCamera->currentPreset() : VP::Perspective;
+			const bool ortho  = canView && ctx.editorCamera->orthographic();
+			const char* viewLabel = (ortho && preset == VP::Perspective)
+			                        ? "Ortho" : EditorCamera::presetName(preset);
+			if (cell(m, rx + kWellPad, w - kWellPad * 2.0f, "##vpView", iconEye,
+			         labels ? viewLabel : nullptr, ortho, canView,
+			         "View — Perspective, or an orthographic Top / Front / Side view",
+			         "viewport.view"))
+				ImGui::OpenPopup("##vpViewPopup");
+			if (ImGui::BeginPopup("##vpViewPopup"))
+			{
+				if (ctx.editorCamera) viewPopup(*ctx.editorCamera);
+				ImGui::EndPopup();
+			}
+			rx += w + kGroupGap;
+		}
+
+		// View mode. Lit is the resting state, so the cell only lights up when
+		// the scene is drawn some other way — the one case where "why does my
+		// scene look like that" needs answering from across the room. Stays
+		// live in play mode: it is a renderer flag, not a camera one, and a
+		// wireframe view of the running scene is a legitimate thing to want.
+		{
+			const float w = kWellPad * 2.0f + (labels ? modeW : m.cell);
+			well(m, rx, w);
+			const bool  gb        = HE::viewModeIsGBuffer(st.viewMode);
+			const char* modeLabel = gb ? "G-Buffer" : HE::viewModeName(st.viewMode);
+			if (cell(m, rx + kWellPad, w - kWellPad * 2.0f, "##vpViewMode", iconShading,
+			         labels ? modeLabel : nullptr, st.viewMode != HE::ViewMode::Lit, true,
+			         "View mode — Lit, Unlit, Wireframe, or one G-buffer attachment",
+			         "viewport.viewmode"))
+				ImGui::OpenPopup("##vpViewModePopup");
+			if (ImGui::BeginPopup("##vpViewModePopup"))
+			{
+				viewModePopup(ctx, st);
+				ImGui::EndPopup();
+			}
+			rx += w + kGroupGap;
+		}
+
+		// Show flags. Lit up whenever any overlay is switched off, for the same
+		// reason the view-mode cell is: "where did my colliders go" has to be
+		// answerable from the bar. Icon-only at every width — the popup's
+		// headings say what it is, the cell only has to be findable.
+		{
+			const float w = kWellPad * 2.0f + m.cell;
+			well(m, rx, w);
+			bool anyOff = false;
+			{
+				int n = 0;
+				const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+				const ViewportPanel::ShowFlags& f = ViewportPanel::showFlags();
+				for (int i = 0; i < n && !anyOff; ++i) anyOff = !(f.*(fields[i].member));
+			}
+			if (cell(m, rx + kWellPad, m.cell, "##vpShow", iconLayers, nullptr, anyOff, true,
+			         "Show — which overlays are drawn over the scene: grid, icons, colliders…",
+			         "viewport.show"))
+				ImGui::OpenPopup("##vpShowPopup");
+			if (ImGui::BeginPopup("##vpShowPopup"))
+			{
+				showPopup(ctx);
+				ImGui::EndPopup();
+			}
+			rx += w + kGroupGap;
+		}
+
 		// Options. The overflow target, so it is the one thing never dropped.
 		well(m, rx, kWellPad * 2.0f + m.cell);
 		if (cell(m, rx + kWellPad, m.cell, "##vpOptions", iconSliders, nullptr, false, true,
-		         "Viewport options — snapping, gizmo, camera, ground grid"))
+		         "Viewport options — snapping, gizmo, camera"))
 			ImGui::OpenPopup("##vpOptionsPopup");
 		if (ImGui::BeginPopup("##vpOptionsPopup"))
 		{

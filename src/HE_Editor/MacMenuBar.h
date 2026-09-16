@@ -39,6 +39,9 @@ namespace MacMenuBar
 		// chain, ⌃⌘F), and a second item on SDL's own fullscreen would be a
 		// different behaviour under the same name.
 		ToggleConsole, ToggleAudioMixer, ToggleGroundGrid,
+		// View ▸ Scene 2 / 3 / 4, the secondary scene viewports. Game-only
+		// like the grid: an application has no level to look at from above.
+		ToggleScene2, ToggleScene3, ToggleScene4,
 		OpenLevelScript, OpenGameInstance,
 		ImportAsset, RefreshAssets, ExportProject,
 		// Build ▸ Build and Reload Game Logic. Project-scoped like the export,

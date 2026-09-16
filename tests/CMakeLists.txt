@@ -39,6 +39,9 @@ add_executable(he_tests
     test_outliner_filter.cpp
     # The eye, the padlock and the sibling order behind each Outliner row.
     test_outliner_row_actions.cpp
+    # Hide / Isolate / Show All / Group / Ungroup behind the viewport's
+    # right-click menu: the sun stays, the group's members do not jump.
+    test_viewport_actions.cpp
     # …and the row itself, driven headless: the two buttons sit ON the tree
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.
@@ -54,6 +57,7 @@ add_executable(he_tests
     # and no dialog at all without an offer.
     test_scene_recovery_ui.cpp
     test_editorcamera.cpp
+    test_camera_bookmarks.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
     test_jobsystem.cpp
@@ -218,6 +222,9 @@ add_executable(he_tests
     # Matrices in, yes/no out — the part of "drag a frame around these" that a
     # test can ask without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorMarquee.cpp
+    # The viewport's right-click verbs (hide / isolate / show all / group /
+    # ungroup): a registry and a selection in, touched entities out — no ImGui.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportActions.cpp
     # Multi-selection editing: which leaves of the active entity's component
     # state changed, and how they land on the other members. JSON in, JSON
     # out, plus a real world for the write-back — no widgets involved.
@@ -347,6 +354,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CameraBookmarks.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabController.cpp

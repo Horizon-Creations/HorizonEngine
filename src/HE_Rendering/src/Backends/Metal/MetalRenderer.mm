@@ -240,7 +240,8 @@ struct SceneUniforms {
 	float4   cascadeSplits;  // xyz = cascade far distance (view space); w = count
 	int      shadowEnabled;
 	int      debugCascades;  // 1 = tint fragments by cascade index
-	int      pad3, pad4;
+	int      unlit;          // 1 = base colour only (Unlit / Wireframe view mode)
+	int      pad4;
 	float4   sunDir;         // xyz = direction toward the sun (image-based ambient)
 	float4   ambient;        // xyz = flat ambient fill (floor + overcast); w unused
 	float4   fog;            // x = density (0 = off), y = height falloff
@@ -678,6 +679,10 @@ fragment float4 fragmentMain(VSOut in [[stage_in]],
 	float3 albedo = (in.hasTexture > 0.5)
 		? baseColor.sample(smp, float2(in.uv.x, 1.0 - in.uv.y)).rgb * in.color
 		: in.color;
+	// Unlit view mode: the material's base colour and nothing else — before
+	// the weather, which is lighting's business too. Twin of GL's uUnlit.
+	if (scene.unlit != 0)
+		return float4(albedo, in.opacity);
 	float3 N = normalize(in.normal);
 
 	// Weather ground response (matches the GL backend): snow on up-facing surfaces,
@@ -5754,7 +5759,10 @@ struct SceneUniforms
 	glm::vec4 cascadeSplits = glm::vec4(0.0f);
 	int32_t   shadowEnabled = 0;
 	int32_t   debugCascades = 0;   // 1 = tint fragments by cascade index (debug)
-	int32_t   pad3 = 0, pad4 = 0;
+	// 1 = base colour only (the Unlit / Wireframe view modes). Zero everywhere
+	// but the scene pass, so previews and thumbnails keep shading.
+	int32_t   unlit = 0;
+	int32_t   pad4 = 0;
 	glm::vec4 sunDir = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
 	glm::vec4 ambient = glm::vec4(0.0f);
 	glm::vec4 fog = glm::vec4(0.0f); // x = density (0 = off), y = height falloff
@@ -5940,11 +5948,16 @@ void MetalRenderer::Initialize(HE::Window* window)
 	// Deferred-path debug/headless knobs: HE_RENDER_PATH=1/deferred forces the
 	// path without touching config (he_shot A/B), HE_DUMP_GBUFFER=1..4 makes the
 	// resolve output a raw G-buffer view (BaseColor/Normal/RoughSpecMetal/Emissive).
+	// The latter seeds the view mode: the editor pushes its own every frame (and
+	// lets the env var win there too), the packaged game never does, so this
+	// read is what a headless game capture runs on.
 	if (const char* rp = std::getenv("HE_RENDER_PATH"); rp && *rp)
 		m_renderPath = (std::string(rp) == "1" || std::string(rp) == "deferred")
 			? HE::RenderPath::Deferred : HE::RenderPath::Forward;
 	if (const char* dv = std::getenv("HE_DUMP_GBUFFER"); dv && *dv)
-		m_gbufferDebugView = std::clamp(std::atoi(dv), 0, 4);
+		if (const int n = std::clamp(std::atoi(dv), 0, 4); n > 0)
+			m_viewMode = static_cast<HE::ViewMode>(
+				static_cast<int>(HE::ViewMode::GBufferBaseColor) + n - 1);
 	// P6 tile mode: single-pass memoryless G-buffer via framebuffer fetch —
 	// Apple-GPU family only ([[color(n)]] fragment inputs). HE_DEFERRED_TILE=0/1
 	// overrides (0 forces the two-pass stored path for A/B and debugging).
@@ -6092,13 +6105,16 @@ void MetalRenderer::Shutdown()
 	if (m_thumbUIDepthTex)     { CFBridgingRelease(m_thumbUIDepthTex);     m_thumbUIDepthTex = nullptr; }
 	m_thumbSize = 0;
 	m_thumbUISize = 0;
-	// World-preview target (RenderWorldPreview); its pipelines are the skeletal /
-	// mesh preview's, released with those.
-	if (m_worldPreviewColorTex) { CFBridgingRelease(m_worldPreviewColorTex); m_worldPreviewColorTex = nullptr; }
-	if (m_worldPreviewHdrTex)   { CFBridgingRelease(m_worldPreviewHdrTex);   m_worldPreviewHdrTex = nullptr; }
-	if (m_worldPreviewDepthTex) { CFBridgingRelease(m_worldPreviewDepthTex); m_worldPreviewDepthTex = nullptr; }
-	m_worldPreviewW = 0;
-	m_worldPreviewH = 0;
+	// World-preview targets (RenderWorldPreview), every slot; their pipelines
+	// are the skeletal / mesh preview's, released with those.
+	for (WorldPreviewTarget& wp : m_worldPreview)
+	{
+		if (wp.colorTex) { CFBridgingRelease(wp.colorTex); wp.colorTex = nullptr; }
+		if (wp.hdrTex)   { CFBridgingRelease(wp.hdrTex);   wp.hdrTex = nullptr; }
+		if (wp.depthTex) { CFBridgingRelease(wp.depthTex); wp.depthTex = nullptr; }
+		wp.w = 0;
+		wp.h = 0;
+	}
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_aaBlitPipeline)       { CFBridgingRelease(m_aaBlitPipeline);       m_aaBlitPipeline = nullptr; }
 	if (m_smaaPipeline)         { CFBridgingRelease(m_smaaPipeline);         m_smaaPipeline = nullptr; }
@@ -9602,10 +9618,12 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
                                         const EditorCameraOverride& camera,
                                         const glm::vec3& origin,
                                         const WorldPreviewEnv& env,
-                                        glm::mat4* outViewProj)
+                                        glm::mat4* outViewProj,
+                                        uint32_t slot)
 {
 	const int W = std::clamp(static_cast<int>(width),  32, 4096);
 	const int H = std::clamp(static_cast<int>(height), 32, 4096);
+	WorldPreviewTarget& wp = m_worldPreview[std::min(slot, kWorldPreviewSlots - 1)];
 	if (!m_contentManager) m_contentManager = &cm;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
@@ -9681,34 +9699,34 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	// past 1.0), then a tonemap resolves that into the LDR texture ImGui shows.
 	// Handing ImGui the raw HDR texture is what made the first sky-lit preview a
 	// uniformly white mesh under a blown-out sky.
-	if (!m_worldPreviewColorTex || m_worldPreviewW != W || m_worldPreviewH != H)
+	if (!wp.colorTex || wp.w != W || wp.h != H)
 	{
-		if (m_worldPreviewColorTex) { CFBridgingRelease(m_worldPreviewColorTex); m_worldPreviewColorTex = nullptr; }
-		if (m_worldPreviewHdrTex)   { CFBridgingRelease(m_worldPreviewHdrTex);   m_worldPreviewHdrTex = nullptr; }
-		if (m_worldPreviewDepthTex) { CFBridgingRelease(m_worldPreviewDepthTex); m_worldPreviewDepthTex = nullptr; }
+		if (wp.colorTex) { CFBridgingRelease(wp.colorTex); wp.colorTex = nullptr; }
+		if (wp.hdrTex)   { CFBridgingRelease(wp.hdrTex);   wp.hdrTex = nullptr; }
+		if (wp.depthTex) { CFBridgingRelease(wp.depthTex); wp.depthTex = nullptr; }
 		MTLTextureDescriptor* hd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
 			width:W height:H mipmapped:NO];
 		hd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 		hd.storageMode = MTLStorageModePrivate;
-		m_worldPreviewHdrTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:hd]);
+		wp.hdrTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:hd]);
 		// LDR in the SWAPCHAIN format, because that is what the tonemap pipeline
 		// targets — a pipeline's colour format must match its pass's attachment.
 		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
 			width:W height:H mipmapped:NO];
 		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 		cd.storageMode = MTLStorageModePrivate;
-		m_worldPreviewColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		wp.colorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
 		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
 			width:W height:H mipmapped:NO];
 		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
-		m_worldPreviewDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
-		m_worldPreviewW = W;
-		m_worldPreviewH = H;
+		wp.depthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		wp.w = W;
+		wp.h = H;
 	}
-	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_worldPreviewColorTex;
+	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)wp.colorTex;
 
 	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-	rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_worldPreviewHdrTex;
+	rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)wp.hdrTex;
 	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
 	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
 	// Studio gray — covered by the sky when there is one. LINEAR: this is resolved
@@ -9716,7 +9734,7 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	rp.colorAttachments[0].clearColor  = MTLClearColorMake(HE::kPreviewBackground[0],
 	                                                       HE::kPreviewBackground[1],
 	                                                       HE::kPreviewBackground[2], 1.0);
-	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_worldPreviewDepthTex;
+	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)wp.depthTex;
 	rp.depthAttachment.loadAction  = MTLLoadActionClear;
 	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
 	rp.depthAttachment.clearDepth  = 1.0;
@@ -9842,11 +9860,11 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 		tp.colorAttachments[0].texture     = colorTex;
 		tp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
 		tp.colorAttachments[0].storeAction = MTLStoreActionStore;
-		tp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_worldPreviewDepthTex;
+		tp.depthAttachment.texture     = (__bridge id<MTLTexture>)wp.depthTex;
 		tp.depthAttachment.loadAction  = MTLLoadActionDontCare;
 		tp.depthAttachment.storeAction = MTLStoreActionDontCare;
 		id<MTLRenderCommandEncoder> tenc = [cb renderCommandEncoderWithDescriptor:tp];
-		EncodeTonemap((__bridge void*)tenc, m_worldPreviewHdrTex, /*withBloom=*/false);
+		EncodeTonemap((__bridge void*)tenc, wp.hdrTex, /*withBloom=*/false);
 		[tenc endEncoding];
 	}
 
@@ -9887,7 +9905,7 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 				}
 		}
 	}
-	return m_worldPreviewColorTex; // id<MTLTexture> for ImGui::Image
+	return wp.colorTex; // id<MTLTexture> for ImGui::Image
 }
 
 // Encode the particle cloud into an already-open encoder. Shared by the
@@ -12622,6 +12640,15 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, skyClock,
 		          GetEnvironment(), m_renderWorld.camera.position, /*lowResClouds=*/true);
 	};
+	// Wireframe view (SetViewMode): rasterise ONE mesh loop as lines. Bracketed
+	// per loop, never "set once and restore before X" — the resolve, sky and
+	// composite draws in between are fullscreen triangles that must stay filled.
+	// Fill mode is encoder state, so the shadow/SSAO/GI encoders are untouched.
+	const bool wireView = WireframeViewActive();
+	auto wire = [&](bool on) {
+		if (wireView)
+			[encoder setTriangleFillMode:(on ? MTLTriangleFillModeLines : MTLTriangleFillModeFill)];
+	};
 
 	// Intra-Scene element timing (draw-boundary): anchor before the first element,
 	// then a sample after each element so element[i] = sample[i] - sample[i-1].
@@ -12776,6 +12803,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	}
 	scene.shadowEnabled = shadows ? 1 : 0;
 	scene.debugCascades = m_debugShadowCascades ? 1 : 0;
+	scene.unlit         = UnlitViewActive() ? 1 : 0;
 	scene.shadowBias    = glm::vec4(m_shadowSettings.slopeBias, m_shadowSettings.minBias, 0.0f, 0.0f);
 	scene.sunDir        = glm::vec4(sunDir, 0.0f);
 	scene.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);
@@ -12855,7 +12883,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		ru.depthParams[0] = -1.0f;
 		ru.depthParams[1] = 1.0f;
 		ru.depthParams[2] = 0.0f;
-		ru.depthParams[3] = static_cast<float>(m_gbufferDebugView); // HE_DUMP_GBUFFER
+		ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_viewMode)); // G-buffer view
 		// P7: point/spot lights come from the cluster lists; the resolve's
 		// heLight window shrinks to directional-only (a COPY — the full fill in
 		// `matLight` keeps serving the forward-routed and transparent draws).
@@ -12889,6 +12917,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		{
 			[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 			void* fwdBound = nullptr;
+			wire(true);
 			for (const TPDraw& t : deferred->forwardOpaque)
 			{
 				void* want = t.pipeline ? t.pipeline : m_scenePipeline;
@@ -12928,6 +12957,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 			}
+			wire(false);
 			// Restore the shared-slot state the material draws may have replaced.
 			[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 		}
@@ -12945,6 +12975,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// only pass renders to the backbuffer (the active scene encoder); offscreen
 	// targets (id != backbuffer) arrive with shadows/HDR. Skipped in deferred
 	// mode — the resolve above replaced the opaque loop.
+	if (!deferred) wire(true);
 	if (!deferred)
 	m_renderGraph.execute(m_renderWorld, m_sortedIndices,
 		[&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
@@ -13255,10 +13286,13 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					drawInstance(t);
 		}
 	});
+	if (!deferred) wire(false);
 	SamplePoint(renderEncoder, "Opaque");
 
 	// ── Skinned geometry: drawn after opaque, before sky so they occlude the background.
+	wire(true);
 	EncodeSkinnedObjects(renderEncoder, viewProj, shadows, &scene);
+	wire(false);
 	SamplePoint(renderEncoder, "Skinned");
 
 	// Sky LAST — fills the background pixels the geometry didn't cover.
@@ -13313,6 +13347,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:12];
 		void* tpBound = (__bridge void*)(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline;
+		wire(true);
 		for (const TPDraw& t : transparent)
 		{
 			// Custom translucent materials bind their own blended pipeline + state; the
@@ -13354,6 +13389,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			++m_counters.draws;
 			m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 		}
+		wire(false);
 	}
 	SamplePoint(renderEncoder, "Transparent");
 
@@ -13491,6 +13527,10 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// calling this.
 	matLight.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
 	matLight.specAA[1] = 1.0f;
+	// Viewport view mode (v3.2): Unlit/Wireframe hand heLitP's base colour back
+	// untouched — graph materials, the deferred resolve and the SSR composite
+	// all read this. Scene-pass fill only; previews keep the zero.
+	matLight.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
 }
 
 // ─── Clustered lighting build (plan P7) ──────────────────────────────────────
@@ -13691,7 +13731,7 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	ru.depthParams[0] = -1.0f; // same conventions as the two-pass resolve
 	ru.depthParams[1] = 1.0f;
 	ru.depthParams[2] = 0.0f;
-	ru.depthParams[3] = static_cast<float>(m_gbufferDebugView);
+	ru.depthParams[3] = static_cast<float>(HE::viewModeGBufferIndex(m_viewMode));
 #if defined(HE_HAVE_SHADERC)
 	HE::MaterialShaderLibrary::Lighting matLight;
 	FillMaterialLighting(matLight, width, height, giActive, ssaoActive, shadows, skyClock);
@@ -14825,6 +14865,12 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	if (m_renderGraph.empty())
 		m_renderGraph.addPass(std::make_unique<GeometryPass>());
 
+	// Wireframe view: the G-buffer geometry rasterises as lines; the resolve
+	// (tile mode runs on THIS encoder right after us) discards the untouched
+	// depth == far texels, so the sky fills in between the edges. Back to Fill
+	// at the end — decals and the tile resolve are fullscreen/box draws.
+	const bool wire = WireframeViewActive();
+	if (wire) [encoder setTriangleFillMode:MTLTriangleFillModeLines];
 	m_renderGraph.execute(m_renderWorld, m_sortedIndices,
 		[&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
 	{
@@ -15103,6 +15149,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 					drawInstance(t);
 		}
 	});
+	if (wire) [encoder setTriangleFillMode:MTLTriangleFillModeFill];
 }
 
 void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool isPrimary)

@@ -135,6 +135,13 @@ public:
         // csmVP sets this alongside it; the zero every other site leaves is
         // never read because heCsmShadow is not reached there.
         float shadowBias[4]   = {};
+        // Viewport view mode (append-only, v3.2, IRenderer::SetViewMode):
+        //   x = 1 → heLitP returns the base colour untouched (Unlit and
+        //       Wireframe views) — no lights, no ambient, no weather, no fog
+        //       (heApplyFog checks it too). Only the scene-pass fill sites set
+        //       it (Metal FillMaterialLighting, GL fillMatLight); the zero every
+        //       preview/thumbnail/UI site leaves keeps them shaded.
+        float viewMode[4]     = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 

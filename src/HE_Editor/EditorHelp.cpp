@@ -1575,6 +1575,39 @@ namespace
 	  "The reference grid on the ground plane. Hidden while the scene plays "
 	  "either way.",
 	  "", "editor#viewport" },
+	// ── Secondary scene viewports ────────────────────────────────────────────
+	// Three more panes onto the same level, each with a camera of its own.
+	// The picture is the preview pass (base colour, sun or headlight, grid),
+	// not the Scene window's renderer — hence the sentence about shadows.
+	{ "View/Scene 2", "",
+	  "A second window onto the same level, with its own camera — it opens as a "
+	  "Top view, so the floor plan can be lined up while the Scene window stays "
+	  "where it is. Navigates like the Scene window (orbit, pan, fly, F, the "
+	  "keypad views, the bookmarks). Drawn with the preview renderer: base "
+	  "colour and a sun, no shadows or post, and nothing can be picked or moved "
+	  "in it. Dock it beside the Scene window and it comes back with the layout.",
+	  "", "editor#viewport" },
+	{ "View/Scene 3", "",
+	  "A third window onto the level, opening as a Front view. Otherwise the "
+	  "same as Scene 2.",
+	  "", "editor#viewport" },
+	{ "View/Scene 4", "",
+	  "A fourth window onto the level, opening as a Right view. Otherwise the "
+	  "same as Scene 2.",
+	  "", "editor#viewport" },
+	{ "Secondary Viewport/Grid", "",
+	  "The ground grid in this pane. Also follows the Scene window's Ground "
+	  "Grid show flag — both have to be on.",
+	  "", "editor#viewport" },
+	{ "Secondary Viewport/Match Scene", "",
+	  "Puts this pane's camera exactly where the Scene window's camera is, lens "
+	  "included. From there, pick an axis view to swing around the same pivot.",
+	  "", "editor#viewport" },
+	{ "secondary-viewport.view", "View",
+	  "Which way this pane looks — the same picker as the Scene window's, over "
+	  "this pane's own camera: Perspective, Top, Bottom, Front, Back, Left, "
+	  "Right, the Orthographic switch and the bookmarks.",
+	  "", "editor#viewport" },
 	{ "View/Level Script", "",
 	  "The HorizonCode graph belonging to THIS scene — where its own events and "
 	  "logic live. Opens as a tab.",
@@ -1661,8 +1694,199 @@ namespace
 	  "The editor fly camera's speed in units per second. Hold Shift while "
 	  "flying for three times this.",
 	  "", "editor#viewport" },
-	{ "Viewport Options/Ground grid", "",
+
+	// ── The viewport's Show popup ────────────────────────────────────────────
+	// One switch per overlay the editor draws over the scene. All of it is
+	// editor furniture: the game never draws any of it, and none of it is
+	// saved with the scene — the switches are remembered with the editor.
+	{ "Viewport Show/Ground Grid", "",
 	  "The reference grid under the scene. Off while playing either way.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Editor Icons", "",
+	  "The symbols standing in for lights, cameras and audio sources, which "
+	  "have no mesh of their own. With them off those entities are still there "
+	  "and still selectable in the Outliner — but not by clicking in the scene, "
+	  "since there is nothing to click.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Selection", "",
+	  "The amber box on each selected entity. Off is for judging a scene "
+	  "without the marker over the thing you are looking at; the gizmo stays.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Colliders", "",
+	  "Collider wireframes for every entity that has one: cyan for solid, "
+	  "magenta for triggers. The way to see a box that is bigger than its mesh.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Joints", "",
+	  "Joint lines between the two bodies of every joint, with their anchors "
+	  "and hinge arcs — a line that does not go where you thought is the usual "
+	  "joint bug.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/NavMesh", "",
+	  "The baked NavMesh polygons. Each NavMesh component has its own Show "
+	  "Debug Mesh switch as well; this one is over all of them at once.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Guides", "",
+	  "The authoring handles of the SELECTED entity: a rope's or trail's control "
+	  "points, an animated figure's root-motion path and its look-at aim.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Script Debug", "",
+	  "The lines, boxes and spheres a script or HorizonCode graph draws through "
+	  "debug.line / debug.box / debug.sphere. They keep ageing while hidden, so "
+	  "switching them back on shows only what is still alive.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Collaborators", "",
+	  "Where the other people in a collaboration session are and what they have "
+	  "selected: their rings and boxes in the scene, and their name tags over it.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Show All Overlays", "",
+	  "Switches every overlay back on.", "", "editor#viewport" },
+	{ "Viewport Show/Hide All Overlays", "",
+	  "Switches every overlay off — the scene and nothing else, for a moment.",
+	  "", "editor#viewport" },
+
+	// ── The viewport's right-click menu ──────────────────────────────────────
+	// Opens on a right-click that did not become a fly-look (press and release
+	// without moving), or on the Menu key / Shift+F10 over the scene. What it
+	// acts on is the selection, settled the way the Outliner's menu settles it:
+	// a click on something outside the selection selects it first.
+	{ "Viewport Menu/Focus Selected", "",
+	  "Moves the camera so the selected entity and everything under it fills "
+	  "the view.",
+	  "F", "editor#viewport" },
+	{ "Viewport Menu/Hide Selected", "",
+	  "Hides every selected entity with everything under it — the same switch "
+	  "as the eye in the Outliner, which is also where a hidden entity can be "
+	  "found again. Saved with the scene, like the eye; undo puts it back.",
+	  "H", "editor#viewport" },
+	{ "Viewport Menu/Isolate Selected", "",
+	  "Hides everything EXCEPT the selection, for looking at one thing without "
+	  "the rest of the level in the way. The sun and moon stay. Show All brings "
+	  "the rest back.",
+	  "Shift+H", "editor#viewport" },
+	{ "Viewport Menu/Show All", "",
+	  "Shows every hidden entity in the scene again — after Hide, Isolate or "
+	  "the Outliner's eye.",
+	  "Alt+H", "editor#viewport" },
+	{ "Viewport Menu/Group", "",
+	  "Puts the selected entities under one new, empty Group entity placed at "
+	  "their centre, so they move, rotate and scale as one. Nothing moves on "
+	  "screen. The group is an ordinary entity: rename it, add to it, drag "
+	  "things out of it in the Outliner.",
+	  "Ctrl+G", "editor#viewport" },
+	{ "Viewport Menu/Ungroup", "",
+	  "Takes the children of the selected entity out from under it, keeps them "
+	  "where they stand, and deletes the emptied parent. The reverse of Group; "
+	  "it also flattens any other parent you ask it to.",
+	  "Shift+G", "editor#viewport" },
+	{ "Viewport Menu/Lock", "",
+	  "Locks every selected entity: the viewport's click, selection frame and "
+	  "gizmo leave them alone, so the floor stops catching clicks meant for the "
+	  "prop on it. The Outliner still selects them.",
+	  "", "editor#viewport" },
+	{ "Viewport Menu/Unlock", "",
+	  "Unlocks every selected entity, so the viewport can pick and move them "
+	  "again.",
+	  "", "editor#viewport" },
+	{ "Viewport Menu/Duplicate", "",
+	  "A copy of the selection beside the original, selected and ready to move.",
+	  "Ctrl+D", "editor#viewport" },
+
+	// ── The viewport's view picker ───────────────────────────────────────────
+	// Each axis view is orthographic: parallel lines stay parallel, the far
+	// wall is as tall as the near one, which is what lining things up needs.
+	{ "Viewport View/Perspective", "",
+	  "Back to a lens: things further away look smaller. Keeps the current "
+	  "heading, so from a Top view this gives a perspective look from straight "
+	  "above.",
+	  "Num 5", "editor#viewport" },
+	{ "Viewport View/Top", "",
+	  "Straight down, without perspective: a map of the scene with -Z at the top "
+	  "and X to the right. The view for laying out a floor plan.",
+	  "Num 7", "editor#viewport" },
+	{ "Viewport View/Bottom", "",
+	  "Straight up from below, without perspective. Mirrors Top left-to-right, "
+	  "as it must to be looking the other way.",
+	  "Ctrl+Num 7", "editor#viewport" },
+	{ "Viewport View/Front", "",
+	  "Along -Z, without perspective: X to the right, Y up. The view for "
+	  "checking heights against each other.",
+	  "Num 1", "editor#viewport" },
+	{ "Viewport View/Back", "",
+	  "Along +Z, without perspective — Front seen from the other side.",
+	  "Ctrl+Num 1", "editor#viewport" },
+	{ "Viewport View/Right", "",
+	  "From +X looking toward -X, without perspective: -Z to the right, Y up.",
+	  "Num 3", "editor#viewport" },
+	{ "Viewport View/Left", "",
+	  "From -X looking toward +X, without perspective — Right seen from the "
+	  "other side.",
+	  "Ctrl+Num 3", "editor#viewport" },
+	{ "Viewport View/Orthographic", "",
+	  "Drop the lens at the current heading without snapping to an axis. The "
+	  "view keeps whatever sits at the orbit pivot the same size when it "
+	  "switches; the wheel zooms it the way it dollies the perspective camera. "
+	  "Orbiting or flying keeps the projection you chose.",
+	  "Num 5", "editor#viewport" },
+	// ── Camera bookmarks ─────────────────────────────────────────────────────
+	// Ten remembered views on the digit keys; the rows are built at run time
+	// ("Bookmark 3"), so they ask by key, and the submenu heads are literals.
+	{ "Viewport View/Bookmarks", "",
+	  "Ten remembered camera views on the digit keys: Ctrl+<digit> remembers "
+	  "where the camera is, <digit> jumps back there. A bookmark is the whole "
+	  "pose — place, heading, orbit distance and whether the view is "
+	  "orthographic — and is shared by every scene pane. Remembered with the "
+	  "editor, across projects.",
+	  "", "editor#viewport" },
+	{ "viewport.bookmark-go", "Go to bookmark",
+	  "Jumps the camera to this remembered view. Greyed out until something is "
+	  "stored there.",
+	  "0-9", "editor#viewport" },
+	{ "Viewport View/Set Bookmark", "",
+	  "Remembers the current view in one of the ten slots; a slot already in "
+	  "use is overwritten.",
+	  "", "editor#viewport" },
+	{ "viewport.bookmark-set", "Set bookmark",
+	  "Stores the camera's current pose here. A tick marks a slot that already "
+	  "holds a view.",
+	  "Ctrl+0-9", "editor#viewport" },
+	{ "Viewport View/Clear Bookmarks", "",
+	  "Forgets all ten bookmarks.",
+	  "", "editor#viewport" },
+
+	// ── The viewport's view-mode picker ──────────────────────────────────────
+	// Lit / Unlit / Wireframe redraw the whole scene; the G-buffer rows show one
+	// attachment of the deferred renderer and are greyed out on the forward
+	// path, where there is no G-buffer to show.
+	{ "Viewport View Mode/Lit", "",
+	  "The scene as the game draws it: lights, shadows, sky, fog, post effects.",
+	  "Alt+4", "editor#viewport" },
+	{ "Viewport View Mode/Unlit", "",
+	  "Base colour only — no lights, no shadows, no ambient, no fog. The way to "
+	  "see what a texture or a material actually holds, without the lighting "
+	  "arguing with it.",
+	  "Alt+3", "editor#viewport" },
+	{ "Viewport View Mode/Wireframe", "",
+	  "The triangle edges of every mesh, unlit. Shows how dense a model is and "
+	  "where the LOD switches; the sky and particles stay as they are.",
+	  "Alt+2", "editor#viewport" },
+	{ "Viewport View Mode/Base Color", "",
+	  "The G-buffer's base colour, straight from the material. Needs the "
+	  "Deferred render path (Preferences > Rendering) — the forward path has "
+	  "no G-buffer, which is why this is greyed out there.",
+	  "", "editor#viewport" },
+	{ "Viewport View Mode/Normals", "",
+	  "The G-buffer's world-space normals as colour: +X red, +Y green, +Z blue. "
+	  "A normal map that was imported the wrong way round shows up here as a "
+	  "surface that lights from the wrong side. Deferred render path only.",
+	  "", "editor#viewport" },
+	{ "Viewport View Mode/Rough / Spec / Metal", "",
+	  "The G-buffer's roughness in red, specular in green and metallic in blue. "
+	  "A rough matte wall is red, a chrome sphere blue. Deferred render path "
+	  "only.",
+	  "", "editor#viewport" },
+	{ "Viewport View Mode/Emissive", "",
+	  "The G-buffer's emissive colour on its own — what glows, and how much, "
+	  "before bloom gets to it. Deferred render path only.",
 	  "", "editor#viewport" },
 
 	// ── World Outliner ───────────────────────────────────────────────────────
@@ -2070,13 +2294,41 @@ namespace
 	  "How fast the editor's fly camera moves, in metres per second. Hold Shift "
 	  "while flying for three times this.",
 	  "", "editor#viewport" },
+	{ "viewport.view", "View",
+	  "Which way the scene is looked at: Perspective, or an orthographic Top, "
+	  "Bottom, Front, Back, Left or Right view for lining things up without a "
+	  "lens. The label reads what the camera is actually doing — orbit out of "
+	  "Top and it says Ortho, since that is no longer Top. On the keypad, 7 / 1 "
+	  "/ 3 pick Top / Front / Right, Ctrl flips each to its opposite, 5 toggles "
+	  "the lens.",
+	  "", "editor#viewport" },
+	{ "viewport.viewmode", "View Mode",
+	  "How the scene is drawn, as opposed to where it is looked at from. Lit is "
+	  "the game's image. Unlit shows base colour only, Wireframe the triangle "
+	  "edges, and the G-buffer rows show one attachment of the deferred "
+	  "renderer straight to the screen. The cell lights up whenever the scene "
+	  "is drawn some way other than Lit, so an odd-looking viewport is never a "
+	  "mystery. Alt+4 / Alt+3 / Alt+2 for Lit / Unlit / Wireframe.",
+	  "", "editor#viewport" },
 	{ "viewport.mode", "Viewport Mode",
 	  "Scene is normal editing. Landscape turns the viewport into the terrain "
 	  "sculpting and painting tool, with its brushes in Quick Settings.",
 	  "", "editor#landscape-mode" },
-	{ "viewport.grid", "Ground Grid",
-	  "The reference grid on the ground plane. It is hidden while the scene plays "
-	  "either way.",
+	{ "viewport.show", "Show",
+	  "Which overlays the editor draws over the scene: the ground grid, the "
+	  "light / camera / audio icons, the selection box, colliders, joints, the "
+	  "NavMesh, the selected entity's authoring guides, script debug lines and "
+	  "the other collaborators. All of it is editor furniture — the game draws "
+	  "none of it — and the switches are remembered with the editor, not the "
+	  "scene. The cell lights up while anything is switched off, so a missing "
+	  "collider outline is never a mystery.",
+	  "", "editor#viewport" },
+	{ "viewport.context-menu", "Right-click menu",
+	  "A right-click on the scene that does not turn into a fly-look (press and "
+	  "release without moving) opens a menu for what is under the cursor: focus, "
+	  "hide, isolate, show all, group, lock, the clipboard, delete. On a "
+	  "trackpad, where the tap toggles fly mode, use the Menu key or Shift+F10 "
+	  "over the scene instead.",
 	  "", "editor#viewport" },
 	{ "viewport.frame", "Frame Selected",
 	  "Moves the editor camera so the selected entity fills the view — the fastest "
@@ -5801,6 +6053,12 @@ namespace
 		{ "Source Root/",      "editor-interface", "Editor Interface", "Source root" },
 		{ "New Entity/",       "editor-interface", "Editor Interface", "Creating entities" },
 		{ "Viewport Options/", "editor-interface", "Editor Interface", "Viewport options" },
+		{ "Viewport View/",    "editor-interface", "Editor Interface", "View presets" },
+		{ "Viewport View Mode/", "editor-interface", "Editor Interface", "View modes" },
+		{ "Viewport Show/",      "editor-interface", "Editor Interface", "Show flags" },
+		{ "Viewport Menu/",      "editor-interface", "Editor Interface", "The viewport's right-click menu" },
+		{ "Secondary Viewport/", "editor-interface", "Editor Interface", "Secondary scene viewports" },
+		{ "secondary-viewport.", "editor-interface", "Editor Interface", "Secondary scene viewports" },
 		// ── The Details panel's components ───────────────────────────────────
 		{ "Component/", "editor-components", "Component Reference", "The components" },
 		// ── Settings ─────────────────────────────────────────────────────────

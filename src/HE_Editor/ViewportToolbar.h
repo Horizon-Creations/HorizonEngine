@@ -33,11 +33,13 @@
 // it — the bar only edits it.
 
 struct AppContext;
+class  EditorCamera;
 
 #ifdef HE_IMGUI_ENABLED
 
 #include <imgui.h>     // ImGuizmo.h uses ImVec2/ImU32/ImDrawList without declaring them
 #include <ImGuizmo.h>
+#include "Renderer/IRenderer.h"   // HE::ViewMode
 
 namespace ViewportToolbar
 {
@@ -47,6 +49,12 @@ struct State
 {
 	ImGuizmo::OPERATION op   = ImGuizmo::TRANSLATE;  // Move / Rotate / Scale (W/E/R)
 	ImGuizmo::MODE      mode = ImGuizmo::LOCAL;      // gizmo axes: object or world
+
+	// How the scene is drawn (Lit / Unlit / Wireframe / a G-buffer view). The
+	// panel pushes it to the renderer every frame (IRenderer::SetViewMode);
+	// per session, not persisted — an editor that came up in wireframe would
+	// read as broken, and Lit is the one mode everyone wants first.
+	HE::ViewMode viewMode = HE::ViewMode::Lit;
 
 	// ImGuizmo's outer screen-space rotation ring (rotate about the view axis).
 	// Off by default — its viewport-relative behaviour is confusing.
@@ -86,6 +94,12 @@ float height();
 // zero-padding content origin) and leaves the cursor on the first row below it,
 // ready for the viewport image.
 void render(AppContext& ctx, State& st);
+
+// The rows of the View cell's popup — the axis presets, the Orthographic
+// switch and the camera bookmarks — over any editor camera. Public because
+// the secondary viewports open the same picker over their own cameras; call
+// it inside an open popup or menu.
+void viewPopup(EditorCamera& cam);
 
 } // namespace ViewportToolbar
 

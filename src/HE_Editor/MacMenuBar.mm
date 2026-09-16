@@ -220,6 +220,21 @@ void install()
 			s_toggleItems.emplace_back(C::ToggleGroundGrid, grid);
 			s_gameOnlyItems.push_back(grid);
 		}
+		// The secondary scene viewports, ticked while open like the panels above.
+		{
+			[view addItem:[NSMenuItem separatorItem]];
+			const struct { C cmd; NSString* title; } panes[] = {
+				{ C::ToggleScene2, @"Scene 2" },
+				{ C::ToggleScene3, @"Scene 3" },
+				{ C::ToggleScene4, @"Scene 4" },
+			};
+			for (const auto& p : panes)
+			{
+				NSMenuItem* item = heAddItem(view, p.title, p.cmd, nil, 0, true);
+				s_toggleItems.emplace_back(p.cmd, item);
+				s_gameOnlyItems.push_back(item);
+			}
+		}
 		[view addItem:[NSMenuItem separatorItem]];
 		s_gameOnlyItems.push_back(
 			heAddItem(view, @"Level Script",   C::OpenLevelScript,  nil, 0, true));

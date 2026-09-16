@@ -21,6 +21,8 @@
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
+#include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
+#include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "ExportDialogPanel.h"     // the packing worker the MCP build tools start
@@ -1155,11 +1157,18 @@ void EditorApplication::OnInit()
 	}
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
-	// The ground grid's switch. It lives in ViewportPanel next to the only code
-	// that reads it, so the config talks to that state directly rather than
-	// keeping a second copy in EditorConfig for the two of them to disagree over.
-	ViewportPanel::setGroundGridEnabled(
-		globalstate.getCustomConfigBool("ViewportGroundGrid", ViewportPanel::groundGridEnabled()));
+	// The viewport's show flags (ground grid, colliders, icons…). They live in
+	// ViewportPanel next to the code that reads them, so the config talks to
+	// that state directly rather than keeping a second copy in EditorConfig for
+	// the two of them to disagree over; the table keeps this a loop.
+	{
+		int n = 0;
+		const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+		ViewportPanel::ShowFlags& flags = ViewportPanel::showFlags();
+		for (int i = 0; i < n; ++i)
+			flags.*(fields[i].member) =
+				globalstate.getCustomConfigBool(fields[i].configKey, flags.*(fields[i].member));
+	}
 	m_editorConfig.MaxFps                      = globalstate.getCustomConfigFloat("MaxFps",            m_editorConfig.MaxFps);
 	m_editorConfig.PointerInput                = globalstate.getCustomConfigInt("PointerInput",        m_editorConfig.PointerInput);
 	m_editorConfig.GamepadStickDeadzone        = globalstate.getCustomConfigFloat("GamepadStickDeadzone",   m_editorConfig.GamepadStickDeadzone);
@@ -1217,7 +1226,11 @@ void EditorApplication::OnInit()
 			globalstate.getCustomConfigFloat("EditorCamYaw",   m_editorCamera.yaw()),
 			globalstate.getCustomConfigFloat("EditorCamPitch", m_editorCamera.pitch()),
 			globalstate.getCustomConfigFloat("EditorCamPivot", m_editorCamera.pivotDistance()));
+		m_editorCamera.setOrthographic(globalstate.getCustomConfigBool("EditorCamOrtho", false));
 	}
+	// The camera bookmarks (digit keys) ride next to the view, one string.
+	CameraBookmarks::editorSet() = CameraBookmarks::Set::decode(
+		globalstate.getCustomConfigString("EditorCamBookmarks", ""));
 	setMaxFps(m_editorConfig.MaxFps);   // VSync-off frame cap (0 = unlimited)
 
 #ifdef HE_IMGUI_ENABLED
@@ -3405,12 +3418,17 @@ void EditorApplication::OnRender(float dt)
 		if (m_projectLoaded && m_editorWorld)
 		{
 			DebugDrawBuffer dbg;
+			// One switch per overlay (the toolbar's Show popup). Each block
+			// below is skipped at its head rather than filtered afterwards, so
+			// an overlay that is off costs nothing — the collider walk and the
+			// grid are the expensive ones.
+			const ViewportPanel::ShowFlags& show = ViewportPanel::showFlags();
 
 			// Selected-entity markers: unit AABB centered on each member's
 			// transform position. The primary is the bright one; the rest of a
 			// multi-selection get the same amber a shade dimmer, so which one
 			// the gizmo will move is visible without reading the outliner.
-			for (Entity sel : m_selection.entities())
+			if (show.selection) for (Entity sel : m_selection.entities())
 			{
 				if (!m_editorWorld->registry().valid(sel)) continue;
 				auto* tc = m_editorWorld->registry().try_get<TransformComponent>(sel);
@@ -3423,6 +3441,7 @@ void EditorApplication::OnRender(float dt)
 			}
 
 			// Collider wireframes: cyan for solid, magenta for triggers
+			if (show.colliders)
 			{
 				auto& reg = m_editorWorld->registry();
 				// Local-space box of a mesh asset, measured once and kept. The
@@ -3523,6 +3542,7 @@ void EditorApplication::OnRender(float dt)
 			// needs JPH_DEBUG_RENDERER and a renderer this engine does not have,
 			// and it would only exist in play mode — the half of the time an
 			// author is not authoring.
+			if (show.joints)
 			{
 				auto& reg = m_editorWorld->registry();
 				for (auto [entity, joint] : reg.view<JointComponent>().each())
@@ -3627,7 +3647,7 @@ void EditorApplication::OnRender(float dt)
 			// tickWorld, which propagates nothing, so the stored matrix is a
 			// frame old and plain identity for anything created this frame.
 			const Entity selected = m_selection.primary();
-			if (selected != entt::null &&
+			if (show.guides && selected != entt::null &&
 			    m_editorWorld->registry().valid(selected))
 			{
 				// Not gated on `visible`. A hidden rope is the one that most needs
@@ -3647,7 +3667,9 @@ void EditorApplication::OnRender(float dt)
 					RopeTrailSystem::appendTrailGuides(*trail, dbg);
 			}
 
-			// NavMesh wireframe(s): baked polygons, per-component toggle
+			// NavMesh wireframe(s): baked polygons, per-component toggle — and
+			// the viewport's switch over all of them, for a scene with twenty.
+			if (show.navMesh)
 			{
 				auto& reg = m_editorWorld->registry();
 				for (auto [entity, nmc] : reg.view<NavMeshComponent>().each())
@@ -3721,7 +3743,7 @@ void EditorApplication::OnRender(float dt)
 			// view plane keep the same apparent shape from every angle, and three
 			// of them nested give a line renderer something that reads as a solid
 			// stroke rather than a scratch.
-			if (m_collab.inSession())
+			if (show.collaborators && m_collab.inSession())
 			{
 				const glm::vec3 viewer = m_editorCamera.position();
 				const auto localId = m_collab.localParticipant();
@@ -3825,7 +3847,7 @@ void EditorApplication::OnRender(float dt)
 			// lines, and the question ("does this clip go where I meant it to")
 			// is asked about one figure at a time.
 			if (const Entity selected = m_selection.primary();
-			    selected != entt::null && m_editorWorld->registry().valid(selected))
+			    show.guides && selected != entt::null && m_editorWorld->registry().valid(selected))
 				{
 					appendRootMotionPreview(*m_editorWorld, contentManager(), selected, dbg);
 					// And where its head is aimed, for the same one-figure-at-a-time
@@ -3844,8 +3866,19 @@ void EditorApplication::OnRender(float dt)
 			// the editor's own gizmo lines (they age with real dt in play mode,
 			// and stay frozen while paused/editing) — which is what makes a paused
 			// frame inspectable: the line drawn by the last live tick is still there.
+			//
+			// Collected even while the switch is off: collect() is also what
+			// AGES the timed primitives, and skipping it would freeze their
+			// clocks so that switching the overlay back on shows every line
+			// drawn in the meantime at once. They are simply not merged.
 			std::vector<DebugLine> merged = dbg.lines();
-			HE::api::debug::collect(simulating ? dt : 0.0f, merged);
+			if (show.scriptDebug)
+				HE::api::debug::collect(simulating ? dt : 0.0f, merged);
+			else
+			{
+				std::vector<DebugLine> discard;
+				HE::api::debug::collect(simulating ? dt : 0.0f, discard);
+			}
 			renderer()->SetDebugLines(merged);
 		}
 		else
@@ -4312,6 +4345,13 @@ void EditorApplication::dumpFrameHeadless()
 		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
 			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
 	}
+	{
+		// HE_DUMP_VIEWMODE=unlit|wireframe|basecolor|… (or HE_DUMP_GBUFFER=1..4):
+		// the viewport's view mode for this capture. Explicitly Lit otherwise —
+		// the backend seeded its own from HE_DUMP_GBUFFER at Initialize, which
+		// is the same answer, but a capture should not depend on that.
+		r->SetViewMode(HE::Ed::viewModeOverrideFromEnv(HE::ViewMode::Lit));
+	}
 
 	// ── Sky-test capture (HE_DUMP_SKYTEST): aim the camera up at the sky and override
 	// the scene environment so a headless dump exercises the sky features (stars /
@@ -4387,6 +4427,36 @@ void EditorApplication::dumpFrameHeadless()
 		                       static_cast<float>(envF("HE_DUMP_CAMY", 2.0f)),
 		                       static_cast<float>(envF("HE_DUMP_CAMZ", 0.0f)));
 		m_editorCamera.setOrientation(camPos, fwd);
+		// HE_DUMP_ORTHO=1: the same pose without a lens (the ortho height follows
+		// HE_DUMP_ORTHOPIVOT, the pivot distance the height is derived from);
+		// HE_DUMP_VIEW=top|bottom|front|back|left|right: one of the axis presets
+		// instead, swung around the pivot that distance ahead of camPos. Pairs
+		// with DOFTEST (cubes at 3..48 m) — in ortho they must all be the same size.
+		if (const char* v = std::getenv("HE_DUMP_VIEW"); v && *v)
+		{
+			const std::string_view name(v);
+			using VP = EditorCamera::ViewPreset;
+			const VP preset = name == "top"    ? VP::Top    : name == "bottom" ? VP::Bottom
+			                : name == "front"  ? VP::Front  : name == "back"   ? VP::Back
+			                : name == "left"   ? VP::Left   : name == "right"  ? VP::Right
+			                : VP::Perspective;
+			m_editorCamera.restoreView(camPos, m_editorCamera.yaw(), m_editorCamera.pitch(),
+			                           envF("HE_DUMP_ORTHOPIVOT", 12.0f));
+			m_editorCamera.applyPreset(preset);
+		}
+		else if (envF("HE_DUMP_ORTHO", 0.0f) > 0.5f)
+		{
+			m_editorCamera.restoreView(camPos, m_editorCamera.yaw(), m_editorCamera.pitch(),
+			                           envF("HE_DUMP_ORTHOPIVOT", 12.0f));
+			m_editorCamera.setOrthographic(true);
+		}
+		else
+		{
+			// Explicitly a lens: the projection is persisted with the camera view
+			// (EditorCamOrtho), so an ortho dump would otherwise leak into every
+			// later "perspective" shot from the same config.
+			m_editorCamera.setOrthographic(false);
+		}
 		r->SetEditorCamera(m_editorCamera.makeOverride());
 	}
 
@@ -5732,6 +5802,27 @@ void EditorApplication::dumpFrameHeadless()
 			}
 			HE_LOG_INFO(Editor, "%s", "EditorApplication: preview stress loop done");
 		}
+	}
+	// Witness a secondary scene viewport (HE_DUMP_SECONDARY=1 + HE_WORLD_PREVIEW_DUMP
+	// =<file.ppm>): the same RenderWorldPreview call SecondaryViewportPanel makes,
+	// over the editor world from the dump camera — which HE_DUMP_VIEW / HE_DUMP_ORTHO
+	// above already put into an axis view — into slot 1, with the sky at the scene's
+	// hour. The backend writes the LDR result. Pairs with DOFTEST: from Top in ortho
+	// the five cubes must come out the same size, and the box-projection rule the
+	// panel shares with the extractor is what puts them in the frame at all.
+	if (const char* sv = std::getenv("HE_DUMP_SECONDARY"); sv && *sv && m_editorWorld)
+	{
+		WorldPreviewEnv env;
+		env.sky           = r->GetEnvironment().skyEnabled && !m_editorCamera.orthographic();
+		env.timeOfDay     = r->GetEnvironment().timeOfDay;
+		env.cloudCoverage = r->GetEnvironment().cloudCoverage;
+		env.grid          = true;
+		glm::mat4 vp(1.0f);
+		void* tex = r->RenderWorldPreview(contentManager(), *m_editorWorld, 640, 360,
+		                                  m_editorCamera.makeOverride(), glm::vec3(0.0f), env, &vp,
+		                                  /*slot=*/1);
+		HE_LOG_INFO(Editor, "%s", tex ? "EditorApplication: secondary-viewport witness rendered (slot 1)"
+		                              : "EditorApplication: secondary-viewport witness: backend has no world preview");
 	}
 	// Witness the Content-Browser thumbnail path (HE_DUMP_THUMB=<dir>): render the
 	// material and static-mesh thumbnails through IRenderer::RenderAssetThumbnail —
@@ -9575,10 +9666,18 @@ void EditorApplication::writeEditorConfig()
 		globalstate.setCustomConfigEntry("EditorCamYaw",   m_editorCamera.yaw());
 		globalstate.setCustomConfigEntry("EditorCamPitch", m_editorCamera.pitch());
 		globalstate.setCustomConfigEntry("EditorCamPivot", m_editorCamera.pivotDistance());
+		globalstate.setCustomConfigEntry("EditorCamOrtho", m_editorCamera.orthographic());
 		globalstate.setCustomConfigEntry("EditorCamValid", true);
 	}
+	globalstate.setCustomConfigEntry("EditorCamBookmarks", CameraBookmarks::editorSet().encode());
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
-	globalstate.setCustomConfigEntry("ViewportGroundGrid",         ViewportPanel::groundGridEnabled());
+	{
+		int n = 0;
+		const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+		const ViewportPanel::ShowFlags& flags = ViewportPanel::showFlags();
+		for (int i = 0; i < n; ++i)
+			globalstate.setCustomConfigEntry(fields[i].configKey, flags.*(fields[i].member));
+	}
 	globalstate.setCustomConfigEntry("PointerInput",               m_editorConfig.PointerInput);
 	globalstate.setCustomConfigEntry("GamepadStickDeadzone",       m_editorConfig.GamepadStickDeadzone);
 	globalstate.setCustomConfigEntry("GamepadTriggerDeadzone",     m_editorConfig.GamepadTriggerDeadzone);

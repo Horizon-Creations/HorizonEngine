@@ -91,8 +91,9 @@ public:
     // editorCam, when non-null and active, overrides the scene camera (used by
     // the editor scene view); its projection is built with aspectRatio so it
     // always matches the viewport. An ACTIVE override also switches on the
-    // editor icons: one camera-facing quad per light / camera / audio source
-    // in outWorld.objects (kEditorIcon*MaterialId), so the scene view can draw
+    // editor icons (unless its `editorIcons` is off — the viewport's Show
+    // flag): one camera-facing quad per light / camera / audio source in
+    // outWorld.objects (kEditorIcon*MaterialId), so the scene view can draw
     // and pick entities that have no mesh. Inactive/null = none, which is what
     // play mode and the packaged game get.
     void extract(HorizonWorld& world, RenderWorld& outWorld, float aspectRatio,

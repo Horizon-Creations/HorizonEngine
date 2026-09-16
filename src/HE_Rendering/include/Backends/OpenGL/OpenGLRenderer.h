@@ -59,7 +59,8 @@ public:
 	                         const EditorCameraOverride& camera,
 	                         const glm::vec3& origin = glm::vec3(0.0f),
 	                         const WorldPreviewEnv& env = {},
-	                         glm::mat4* outViewProj = nullptr) override;
+	                         glm::mat4* outViewProj = nullptr,
+	                         uint32_t slot = 0) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
@@ -85,6 +86,15 @@ public:
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
+
+	// View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+	// Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+	// and the flat one reads far better against the sky. Mirrors Metal.
+	bool  UnlitViewActive() const
+	{
+		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe;
+	}
+	bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -199,6 +209,7 @@ private:
 		int shadowEnabled, shadowDebug, cascadeVP, cascadeSplits, cameraFwd, shadowMap;
 		int localShadowMap, localShadowVP;
 		int shadowBias;   // vec2 (slope, min) — the project's ShadowSettings bias pair
+		int unlit;        // 1 = base colour only (Unlit / Wireframe view mode)
 	};
 	// The per-frame shadow inputs the block needs (all DrawScene locals).
 	struct SceneShadowFrame
@@ -310,17 +321,24 @@ private:
 
 	// World-preview target (RenderWorldPreview) — its own FBO again, for the same
 	// reason as all the others: the Class Editor's viewport is live at the same
-	// time as thumbnails are being rendered. ONE target, because only one asset
-	// tab is ever active. Unlike the per-asset previews this one clears to an
-	// opaque gray and draws a ground plane + grid, so it reads as a scene view.
+	// time as thumbnails are being rendered. ONE target PER SLOT: slot 0 serves
+	// the asset tabs (only one of those is ever active), the others the editor's
+	// secondary Scene viewports, which are all live in the same frame and would
+	// otherwise overwrite one another before ImGui shows any of them. Unlike
+	// the per-asset previews this one clears to an opaque gray and draws a
+	// ground plane + grid, so it reads as a scene view.
 	// Two targets, mirroring the scene: the pass renders HDR (sky radiance and a
 	// sun at intensity 2.2 both run past 1.0), then the tonemap resolves into the
 	// 8-bit texture ImGui shows. Writing HDR straight into 8 bits is what made
 	// the first sky-lit preview a uniformly white mesh under a blown-out sky.
-	unsigned int m_worldPreviewFBO = 0, m_worldPreviewHdr = 0, m_worldPreviewDepth = 0;
-	unsigned int m_worldPreviewLdrFBO = 0, m_worldPreviewColor = 0;
-	int          m_worldPreviewW = 0;
-	int          m_worldPreviewH = 0;
+	struct WorldPreviewTarget
+	{
+		unsigned int fbo = 0, hdr = 0, depth = 0;
+		unsigned int ldrFBO = 0, color = 0;
+		int          w = 0;
+		int          h = 0;
+	};
+	WorldPreviewTarget m_worldPreview[kWorldPreviewSlots];
 
 	// Particle-preview target (RenderParticlePreview) — own dedicated FBO; camera-
 	// facing billboard quads via gl_VertexID (no per-vertex buffer, matching the
@@ -437,6 +455,7 @@ private:
 	int          m_uShadowMap     = -1;   // CSM shadow-map array sampler unit
 	int          m_uShadowEnabled = -1;
 	int          m_uShadowDebug   = -1;   // 1 = tint fragments by cascade index
+	int          m_uUnlit         = -1;   // 1 = base colour only (Unlit / Wireframe view mode)
 	int          m_uLocalShadowVP  = -1;  // mat4[16] local (point/spot) shadow view-projs
 	int          m_uLocalShadowMap = -1;  // local shadow atlas sampler unit
 	int          m_uShadowBias     = -1;  // vec2 (slope, min) CSM receiver bias
@@ -482,6 +501,7 @@ private:
 	int          m_uSkinnedCascadeSplits   = -1;
 	int          m_uSkinnedCameraFwd       = -1;
 	int          m_uSkinnedShadowDebug     = -1;
+	int          m_uSkinnedUnlit           = -1;
 	int          m_uSkinnedShadowMap       = -1;
 	int          m_uSkinnedLocalShadowVP   = -1;
 	int          m_uSkinnedLocalShadowMap  = -1;
@@ -521,6 +541,7 @@ private:
 	int          m_uInstCascadeSplits       = -1;
 	int          m_uInstCameraFwd           = -1;
 	int          m_uInstShadowDebug         = -1;
+	int          m_uInstUnlit               = -1;
 	int          m_uInstShadowMap           = -1;
 	int          m_uInstLocalShadowVP       = -1;
 	int          m_uInstLocalShadowMap      = -1;
@@ -728,7 +749,6 @@ private:
 	unsigned int m_resolveUBO      = 0;         // HeResolve block (binding 3)
 	unsigned int m_resolveLightUBO = 0;         // resolve-only HeLighting fill (incl. CSM matrices)
 	bool         m_deferredPipelinesTried = false;
-	int          m_gbufferDebugView       = 0;  // HE_DUMP_GBUFFER (1..4)
 	// Built-in G-buffer program uniform locations (same names as the unlit set).
 	int m_uGBMVP = -1, m_uGBModel = -1, m_uGBColor = -1, m_uGBMetallic = -1,
 	    m_uGBRoughness = -1, m_uGBHasTexture = -1, m_uGBTexture = -1, m_uGBSpecAA = -1;

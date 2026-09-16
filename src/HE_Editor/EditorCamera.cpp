@@ -19,14 +19,105 @@ glm::vec3 EditorCamera::forward() const
 	return glm::normalize(glm::vec3(cp * sy, sp, -cp * cy));
 }
 
+glm::vec3 EditorCamera::upReference() const
+{
+	// Only the presets put the camera EXACTLY on a pole (update() clamps the
+	// interactive pitch at ~89°). The threshold is on cos(pitch), i.e. on how
+	// much of forward is left in the horizontal plane; below it the cross with
+	// world-up is too short to normalise safely.
+	if (std::abs(std::cos(m_pitch)) < 1e-4f)
+		return glm::vec3(std::sin(m_yaw), 0.0f, -std::cos(m_yaw));
+	return glm::vec3(0.0f, 1.0f, 0.0f);
+}
+
 glm::vec3 EditorCamera::right() const
 {
-	return glm::normalize(glm::cross(forward(), glm::vec3(0.0f, 1.0f, 0.0f)));
+	return glm::normalize(glm::cross(forward(), upReference()));
 }
 
 glm::vec3 EditorCamera::up() const
 {
 	return glm::normalize(glm::cross(right(), forward()));
+}
+
+const char* EditorCamera::presetName(ViewPreset p)
+{
+	switch (p)
+	{
+		case ViewPreset::Top:    return "Top";
+		case ViewPreset::Bottom: return "Bottom";
+		case ViewPreset::Front:  return "Front";
+		case ViewPreset::Back:   return "Back";
+		case ViewPreset::Left:   return "Left";
+		case ViewPreset::Right:  return "Right";
+		default:                 return "Perspective";
+	}
+}
+
+namespace
+{
+	constexpr float kHalfPi = 1.57079632679f;
+
+	// Heading of each axis view. Front looks along -Z (yaw 0, the direction the
+	// camera faces before anyone touches it), Right sits on +X looking toward
+	// -X, so forward = (sin yaw, 0, -cos yaw) gives yaw = -90° there.
+	bool presetHeading(EditorCamera::ViewPreset p, float& yaw, float& pitch)
+	{
+		using VP = EditorCamera::ViewPreset;
+		switch (p)
+		{
+			case VP::Top:    yaw = 0.0f;     pitch = -kHalfPi; return true;
+			case VP::Bottom: yaw = 0.0f;     pitch =  kHalfPi; return true;
+			case VP::Front:  yaw = 0.0f;     pitch = 0.0f;     return true;
+			case VP::Back:   yaw = kHalfPi * 2.0f; pitch = 0.0f; return true;
+			case VP::Right:  yaw = -kHalfPi; pitch = 0.0f;     return true;
+			case VP::Left:   yaw =  kHalfPi; pitch = 0.0f;     return true;
+			default: return false;
+		}
+	}
+}
+
+void EditorCamera::applyPreset(ViewPreset p)
+{
+	ensureInit();
+	if (p == ViewPreset::Perspective)
+	{
+		m_orthographic = false;
+		return;
+	}
+	float yaw = 0.0f, pitch = 0.0f;
+	presetHeading(p, yaw, pitch);
+	// Same rule as an orbit: the pivot stays put, the camera swings around it.
+	const glm::vec3 pivot = m_position + forward() * m_pivotDistance;
+	m_yaw   = yaw;
+	m_pitch = pitch;
+	m_position     = pivot - forward() * m_pivotDistance;
+	m_orthographic = true;
+}
+
+EditorCamera::ViewPreset EditorCamera::currentPreset() const
+{
+	if (!m_orthographic) return ViewPreset::Perspective;
+	// A preset lands EXACTLY on its heading; anything an orbit has moved off it
+	// is a free ortho view — no preset, so Perspective is returned and the
+	// caller tells the two apart through orthographic().
+	constexpr float kTol = 1e-4f;
+	const glm::vec3 f = forward();
+	for (ViewPreset p : { ViewPreset::Top, ViewPreset::Bottom, ViewPreset::Front,
+	                      ViewPreset::Back, ViewPreset::Left, ViewPreset::Right })
+	{
+		float yaw = 0.0f, pitch = 0.0f;
+		presetHeading(p, yaw, pitch);
+		const float cp = std::cos(pitch), sp = std::sin(pitch);
+		const glm::vec3 pf(cp * std::sin(yaw), sp, -cp * std::cos(yaw));
+		if (glm::length(pf - f) < kTol) return p;
+	}
+	return ViewPreset::Perspective;
+}
+
+float EditorCamera::orthoHalfHeight() const
+{
+	return std::max(kMinPivot, m_pivotDistance) * std::tan(glm::radians(m_fov * 0.5f));
 }
 
 void EditorCamera::ensureInit()
@@ -121,18 +212,21 @@ void EditorCamera::focusOn(const glm::vec3& center, float radius)
 
 glm::mat4 EditorCamera::viewMatrix() const
 {
-	return glm::lookAt(m_position, m_position + forward(), glm::vec3(0.0f, 1.0f, 0.0f));
+	// up() rather than world +Y: at the Top/Bottom poles lookAt's own cross
+	// product would collapse to NaN, and up() already knows the way out.
+	return glm::lookAt(m_position, m_position + forward(), up());
 }
 
 EditorCameraOverride EditorCamera::makeOverride() const
 {
 	EditorCameraOverride o;
-	o.active       = true;
-	o.view         = viewMatrix();
-	o.position     = m_position;
-	o.fovDegrees   = m_fov;
-	o.nearPlane    = m_near;
-	o.farPlane     = m_far;
-	o.orthographic = false;
+	o.active          = true;
+	o.view            = viewMatrix();
+	o.position        = m_position;
+	o.fovDegrees      = m_fov;
+	o.nearPlane       = m_near;
+	o.farPlane        = m_far;
+	o.orthographic    = m_orthographic;
+	o.orthoHalfHeight = orthoHalfHeight();
 	return o;
 }

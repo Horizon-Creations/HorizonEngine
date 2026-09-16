@@ -108,7 +108,8 @@ public:
 	                         const EditorCameraOverride& camera,
 	                         const glm::vec3& origin = glm::vec3(0.0f),
 	                         const WorldPreviewEnv& env = {},
-	                         glm::mat4* outViewProj = nullptr) override;
+	                         glm::mat4* outViewProj = nullptr,
+	                         uint32_t slot = 0) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
@@ -134,6 +135,15 @@ public:
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
+
+	// View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+	// Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+	// and the flat one reads far better against the sky.
+	bool  UnlitViewActive() const
+	{
+		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe;
+	}
+	bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -404,7 +414,6 @@ private:
 	void  EncodeClusterData(void* renderEncoder,
 	                        HE::MaterialShaderLibrary::Lighting& matLight,
 	                        HE::MaterialShaderLibrary::ResolveUniforms& ru);
-	int   m_gbufferDebugView        = 0;       // HE_DUMP_GBUFFER (1..4), read once at Initialize
 	bool  m_deferredFrameActive     = false;   // this frame renders deferred (set before SSAO — P5 reads it)
 	void  EnsureGBufferTargets(int width, int height);
 	void  DestroyGBufferTargets();
@@ -640,17 +649,24 @@ private:
 
 	// World-preview target (RenderWorldPreview) — same RGBA16F color + depth as
 	// its siblings, so the debug-line pipeline can draw the ground/grid into it
-	// verbatim. ONE target, because only one asset tab is ever active. Unlike the
-	// per-asset previews this one clears to an opaque gray and draws a ground
-	// plane + grid, so it reads as a scene view rather than a cut-out asset.
+	// verbatim. ONE target PER SLOT: slot 0 serves the asset tabs (only one of
+	// those is ever active), the others the editor's secondary Scene viewports,
+	// which are all live in the same frame and would otherwise overwrite one
+	// another before ImGui shows any of them. Unlike the per-asset previews
+	// this one clears to an opaque gray and draws a ground plane + grid, so it
+	// reads as a scene view rather than a cut-out asset.
 	// Two colour targets, mirroring the scene: the pass renders HDR, the tonemap
 	// resolves into the LDR one ImGui shows. Handing ImGui raw HDR is what made
 	// the first sky-lit preview a white mesh under a blown-out sky.
-	void* m_worldPreviewHdrTex   = nullptr; // id<MTLTexture> (retained), kSceneColorFormat
-	void* m_worldPreviewColorTex = nullptr; // id<MTLTexture> (retained), kSwapchainFormat
-	void* m_worldPreviewDepthTex = nullptr; // id<MTLTexture> (retained)
-	int   m_worldPreviewW        = 0;
-	int   m_worldPreviewH        = 0;
+	struct WorldPreviewTarget
+	{
+		void* hdrTex   = nullptr; // id<MTLTexture> (retained), kSceneColorFormat
+		void* colorTex = nullptr; // id<MTLTexture> (retained), kSwapchainFormat
+		void* depthTex = nullptr; // id<MTLTexture> (retained)
+		int   w        = 0;
+		int   h        = 0;
+	};
+	WorldPreviewTarget m_worldPreview[kWorldPreviewSlots];
 
 	// Particle-preview target (RenderParticlePreview) — own dedicated RGBA16F
 	// color + depth texture; camera-facing billboards via vertex_id (no vertex

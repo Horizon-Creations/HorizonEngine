@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include "EditorCamera.h"
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 
 // The editor scene-view camera is pure math (no ImGui), so it is unit-testable.
@@ -84,4 +85,198 @@ TEST_CASE("EditorCamera focusOn frames a point")
 	CHECK(std::abs(targetVS.x) < 1e-3f);
 	CHECK(std::abs(targetVS.y) < 1e-3f);
 	CHECK(targetVS.z < 0.0f);
+}
+
+// ── Orthographic views and presets ───────────────────────────────────────────
+namespace
+{
+	// The projection the RenderExtractor builds from an override, so a test
+	// can check what lands on screen rather than only the flag.
+	glm::mat4 projectionOf(const EditorCameraOverride& o, float aspect)
+	{
+		if (o.orthographic)   // near a whole far-distance behind the camera, as the extractor does
+			return glm::ortho(-aspect * o.orthoHalfHeight, aspect * o.orthoHalfHeight,
+			                  -o.orthoHalfHeight, o.orthoHalfHeight, -o.farPlane, o.farPlane);
+		return glm::perspective(glm::radians(o.fovDegrees), aspect, o.nearPlane, o.farPlane);
+	}
+
+	glm::vec2 toNdc(const EditorCamera& cam, const glm::vec3& worldPos, float aspect = 16.0f / 9.0f)
+	{
+		const EditorCameraOverride o = cam.makeOverride();
+		const glm::vec4 clip = projectionOf(o, aspect) * o.view * glm::vec4(worldPos, 1.0f);
+		return glm::vec2(clip) / clip.w;
+	}
+
+	bool finite(const glm::mat4& m)
+	{
+		for (int c = 0; c < 4; ++c)
+			for (int r = 0; r < 4; ++r)
+				if (!std::isfinite(m[c][r])) return false;
+		return true;
+	}
+}
+
+TEST_CASE("EditorCamera axis presets aim along the axis, orthographic, pivot kept")
+{
+	EditorCamera cam;
+	EditorCamera::Input in; in.dt = 0.016f;
+	cam.update(in);   // pivot = the origin
+
+	struct Case { EditorCamera::ViewPreset preset; glm::vec3 forward; };
+	const Case cases[] = {
+		{ EditorCamera::ViewPreset::Top,    {  0.0f, -1.0f,  0.0f } },
+		{ EditorCamera::ViewPreset::Bottom, {  0.0f,  1.0f,  0.0f } },
+		{ EditorCamera::ViewPreset::Front,  {  0.0f,  0.0f, -1.0f } },
+		{ EditorCamera::ViewPreset::Back,   {  0.0f,  0.0f,  1.0f } },
+		{ EditorCamera::ViewPreset::Right,  { -1.0f,  0.0f,  0.0f } },
+		{ EditorCamera::ViewPreset::Left,   {  1.0f,  0.0f,  0.0f } },
+	};
+	for (const Case& c : cases)
+	{
+		CAPTURE(EditorCamera::presetName(c.preset));
+		cam.applyPreset(c.preset);
+		CHECK(cam.orthographic());
+		CHECK(cam.currentPreset() == c.preset);
+		CHECK(finite(cam.viewMatrix()));
+		// The camera sits on the opposite side of the pivot, looking back at it.
+		const glm::vec3 expectPos = -c.forward * cam.pivotDistance();
+		CHECK(glm::length(cam.position() - expectPos) < 1e-3f);
+		const glm::vec3 originVS = toViewSpace(cam, glm::vec3(0.0f));
+		CHECK(std::abs(originVS.x) < 1e-3f);
+		CHECK(std::abs(originVS.y) < 1e-3f);
+		CHECK(originVS.z == doctest::Approx(-cam.pivotDistance()));
+	}
+
+	// Perspective puts the lens back and keeps the heading.
+	cam.applyPreset(EditorCamera::ViewPreset::Left);
+	cam.applyPreset(EditorCamera::ViewPreset::Perspective);
+	CHECK_FALSE(cam.orthographic());
+	CHECK(cam.currentPreset() == EditorCamera::ViewPreset::Perspective);
+	CHECK(glm::length(cam.position() - glm::vec3(-cam.pivotDistance(), 0.0f, 0.0f)) < 1e-3f);
+}
+
+TEST_CASE("EditorCamera Top view is a map: X right, -Z up; Bottom mirrors it")
+{
+	EditorCamera cam;
+	EditorCamera::Input in; in.dt = 0.016f;
+	cam.update(in);
+	cam.applyPreset(EditorCamera::ViewPreset::Top);
+
+	const glm::vec2 px = toNdc(cam, glm::vec3(1.0f, 0.0f, 0.0f));
+	const glm::vec2 pz = toNdc(cam, glm::vec3(0.0f, 0.0f, -1.0f));
+	CHECK(px.x > 0.0f);  CHECK(std::abs(px.y) < 1e-4f);
+	CHECK(pz.y > 0.0f);  CHECK(std::abs(pz.x) < 1e-4f);
+
+	cam.applyPreset(EditorCamera::ViewPreset::Bottom);
+	const glm::vec2 bx = toNdc(cam, glm::vec3(1.0f, 0.0f, 0.0f));
+	const glm::vec2 bz = toNdc(cam, glm::vec3(0.0f, 0.0f, -1.0f));
+	CHECK(bx.x < 0.0f);
+	CHECK(bz.y > 0.0f);
+
+	// Front: X right, Y up.
+	cam.applyPreset(EditorCamera::ViewPreset::Front);
+	CHECK(toNdc(cam, glm::vec3(1.0f, 0.0f, 0.0f)).x > 0.0f);
+	CHECK(toNdc(cam, glm::vec3(0.0f, 1.0f, 0.0f)).y > 0.0f);
+	// Right (on +X looking toward -X): -Z to the right.
+	cam.applyPreset(EditorCamera::ViewPreset::Right);
+	CHECK(toNdc(cam, glm::vec3(0.0f, 0.0f, -1.0f)).x > 0.0f);
+}
+
+TEST_CASE("EditorCamera ortho toggle keeps the pivot plane framed at the same size")
+{
+	EditorCamera cam;
+	EditorCamera::Input in; in.dt = 0.016f;
+	cam.update(in);
+	// A point on the pivot plane (perpendicular to the view through the pivot),
+	// one unit up in view space.
+	const glm::mat4 camWorld = glm::inverse(cam.viewMatrix());
+	const glm::vec3 pivot    = cam.position() + glm::vec3(-camWorld[2]) * cam.pivotDistance();
+	const glm::vec3 p        = pivot + glm::vec3(camWorld[1]) * 1.0f;
+
+	const glm::vec2 persp = toNdc(cam, p);
+	cam.setOrthographic(true);
+	const glm::vec2 ortho = toNdc(cam, p);
+	CHECK(persp.x == doctest::Approx(ortho.x).epsilon(1e-3));
+	CHECK(persp.y == doctest::Approx(ortho.y).epsilon(1e-3));
+
+	const EditorCameraOverride o = cam.makeOverride();
+	CHECK(o.orthographic);
+	CHECK(o.orthoHalfHeight == doctest::Approx(cam.orthoHalfHeight()));
+	CHECK(projectionOf(o, 1.5f)[3][3] == 1.0f);
+}
+
+TEST_CASE("EditorCamera wheel zooms an ortho view (smaller visible height)")
+{
+	EditorCamera cam;
+	EditorCamera::Input in; in.dt = 0.016f;
+	cam.update(in);
+	cam.applyPreset(EditorCamera::ViewPreset::Top);
+	const float before = cam.orthoHalfHeight();
+
+	EditorCamera::Input wheelIn; wheelIn.dt = 0.016f; wheelIn.wheel = 1.0f;
+	cam.update(wheelIn);
+	CHECK(cam.orthoHalfHeight() < before);
+	CHECK(cam.orthographic());                       // zooming never drops the lens choice
+	// Still exactly Top: the wheel dollies along the axis, not off it.
+	CHECK(cam.currentPreset() == EditorCamera::ViewPreset::Top);
+}
+
+TEST_CASE("EditorCamera orbit out of a preset keeps ortho but is no longer that preset")
+{
+	EditorCamera cam;
+	EditorCamera::Input in; in.dt = 0.016f;
+	cam.update(in);
+	cam.applyPreset(EditorCamera::ViewPreset::Front);
+
+	EditorCamera::Input orbit; orbit.dt = 0.016f;
+	orbit.orbit = true;
+	orbit.mouseDelta = glm::vec2(80.0f, 30.0f);
+	cam.update(orbit);
+	CHECK(cam.orthographic());
+	CHECK(cam.currentPreset() == EditorCamera::ViewPreset::Perspective);
+	CHECK(finite(cam.viewMatrix()));
+	// Orbiting off the Top pole must not leave a NaN behind either.
+	cam.applyPreset(EditorCamera::ViewPreset::Top);
+	cam.update(orbit);
+	CHECK(finite(cam.viewMatrix()));
+	CHECK(finite(cam.makeOverride().view));
+}
+
+// ── Viewport view mode (ViewportViewMode.h + HE::ViewMode helpers) ──────────
+#include "ViewportViewMode.h"
+
+TEST_CASE("ViewMode: a G-buffer view without a deferred frame resolves to Lit")
+{
+	using HE::ViewMode;
+	CHECK(HE::resolveViewMode(ViewMode::GBufferNormal, /*deferred=*/true)  == ViewMode::GBufferNormal);
+	CHECK(HE::resolveViewMode(ViewMode::GBufferNormal, /*deferred=*/false) == ViewMode::Lit);
+	CHECK(HE::resolveViewMode(ViewMode::Wireframe,     /*deferred=*/false) == ViewMode::Wireframe);
+	CHECK(HE::resolveViewMode(static_cast<ViewMode>(99), true)             == ViewMode::Lit);
+	// The resolve shader's debug index: 1..4 for the four attachments, 0 otherwise.
+	CHECK(HE::viewModeGBufferIndex(ViewMode::GBufferBaseColor)      == 1);
+	CHECK(HE::viewModeGBufferIndex(ViewMode::GBufferEmissive)       == 4);
+	CHECK(HE::viewModeGBufferIndex(ViewMode::Unlit)                 == 0);
+	CHECK(HE::viewModeIsGBuffer(ViewMode::GBufferRoughSpecMetal));
+	CHECK_FALSE(HE::viewModeIsGBuffer(ViewMode::Lit));
+}
+
+TEST_CASE("ViewMode: the headless override reads VIEWMODE first, then the old GBUFFER knob")
+{
+	using HE::ViewMode;
+	using HE::Ed::viewModeOverride;
+	// Nothing set → the UI's value.
+	CHECK(viewModeOverride(ViewMode::Wireframe, nullptr, nullptr) == ViewMode::Wireframe);
+	CHECK(viewModeOverride(ViewMode::Wireframe, "",      "")      == ViewMode::Wireframe);
+	// HE_DUMP_GBUFFER=1..4 is the pre-UI spelling of the four G-buffer views.
+	CHECK(viewModeOverride(ViewMode::Lit, nullptr, "2") == ViewMode::GBufferNormal);
+	CHECK(viewModeOverride(ViewMode::Lit, nullptr, "4") == ViewMode::GBufferEmissive);
+	CHECK(viewModeOverride(ViewMode::Lit, nullptr, "0") == ViewMode::Lit);   // "off" = no override
+	// HE_DUMP_VIEWMODE by name or number, and it wins over GBUFFER.
+	CHECK(viewModeOverride(ViewMode::Lit, "unlit",     nullptr) == ViewMode::Unlit);
+	CHECK(viewModeOverride(ViewMode::Lit, "wireframe", "2")     == ViewMode::Wireframe);
+	CHECK(viewModeOverride(ViewMode::Lit, "normals",   nullptr) == ViewMode::GBufferNormal);
+	CHECK(viewModeOverride(ViewMode::Lit, "5",         nullptr) == ViewMode::GBufferRoughSpecMetal);
+	// Garbage keeps the UI's value rather than inventing a mode.
+	CHECK(viewModeOverride(ViewMode::Unlit, "bogus", nullptr) == ViewMode::Unlit);
+	CHECK(viewModeOverride(ViewMode::Unlit, "42",    nullptr) == ViewMode::Unlit);
 }
