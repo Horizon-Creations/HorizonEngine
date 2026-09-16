@@ -121,6 +121,20 @@ public:
     // snake_case in Python). No-op if not defined.
     bool callOnUIEvent(ScriptEngine::InstanceId id, UIScriptEvent ev);
 
+    // Input actions — onInputPressed / onInputReleased(self, action),
+    // onInputAxis(self, action, value), onInputAxis2D(self, action, x, y)
+    // (snake_case in Python, on_input_axis2d for the last). The same events a
+    // PlayerController graph gets as Input.<Action>.*, pumped by PlayerHost to
+    // every text-script instance of the session. No-op if not defined.
+    bool callOnInputPressed(ScriptEngine::InstanceId id, const std::string& action);
+    bool callOnInputReleased(ScriptEngine::InstanceId id, const std::string& action);
+    bool callOnInputAxis(ScriptEngine::InstanceId id, const std::string& action, float value);
+    bool callOnInputAxis2D(ScriptEngine::InstanceId id, const std::string& action, float x, float y);
+
+    // onTimer(self, handle) / on_timer — a horizon.timer.after or .every came
+    // due. Every instance hears every timer; the handle tells them apart.
+    bool callOnTimer(ScriptEngine::InstanceId id, int handle);
+
     // Hot-reload: recompile script and patch function fields in live instances.
     // Data fields (non-function keys in instance tables) are preserved. The
     // 2-arg form routes by which backend owns the name (ambiguous across

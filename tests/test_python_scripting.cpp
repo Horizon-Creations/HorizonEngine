@@ -889,4 +889,69 @@ TEST_CASE("ScriptContext: the application groups reach Python")
     CHECK(t.position.y == doctest::Approx(42.0f));   // …and one of them dispatches
 }
 
+// ─── Input actions and timers ───────────────────────────────────────────────
+// The events a PlayerController graph gets as Input.<Action>.*, and the timer
+// callback, delivered through the SAME ScriptContext door the apps use. Each
+// handler writes what it heard into the transform, which the test can read
+// without a second channel into the interpreter.
+static const char* kPyInputEcho = R"py(
+import horizon
+
+class Ears(horizon.Behavior):
+    def on_start(self):
+        self.log = ""
+        self.axis = 0.0
+        self.ax = 0.0
+        self.ay = 0.0
+        self.timer = 0
+    def on_input_pressed(self, action):
+        self.log += "+" + action
+    def on_input_released(self, action):
+        self.log += "-" + action
+    def on_input_axis(self, action, value):
+        self.axis = value
+    def on_input_axis2d(self, action, x, y):
+        self.ax = x
+        self.ay = y
+    def on_timer(self, handle):
+        self.timer = handle
+    def on_update(self, dt):
+        # x = how many edges were heard, y = the axis, z = the timer handle
+        horizon.setPosition(self.entity_id, float(len(self.log)),
+                            self.axis + self.ax * 10.0 + self.ay * 100.0,
+                            float(self.timer))
+)py";
+
+TEST_CASE("ScriptContext: input actions and timers reach a Python instance")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("ears", kPyInputEcho, HE::ScriptLanguage::Python));
+
+    auto e  = makeEntity(world, "Ears");
+    auto id = ctx.createInstance("ears", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    CHECK(ctx.callOnInputPressed(id, "Jump"));
+    CHECK(ctx.callOnInputReleased(id, "Jump"));
+    CHECK(ctx.callOnInputAxis(id, "Move", 0.5f));
+    CHECK(ctx.callOnInputAxis2D(id, "Look", 0.25f, 0.75f));
+    CHECK(ctx.callOnTimer(id, 17));
+    REQUIRE(ctx.callOnUpdate(id, 0.0f));
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(10.0f));     // "+Jump-Jump"
+    CHECK(t.position.y == doctest::Approx(0.5f + 2.5f + 75.0f));
+    CHECK(t.position.z == doctest::Approx(17.0f));
+
+    // A script without the handlers is a no-op success, like every other
+    // optional callback — this is what lets the pump fire at EVERY instance.
+    REQUIRE(ctx.loadScript("deaf", kSpeedEcho, HE::ScriptLanguage::Python));
+    auto d = ctx.createInstance("deaf", makeEntity(world, "Deaf"));
+    CHECK(ctx.callOnInputPressed(d, "Jump"));
+    CHECK(ctx.callOnInputAxis2D(d, "Look", 1.0f, 1.0f));
+    CHECK(ctx.callOnTimer(d, 1));
+}
+
 #endif // HE_HAVE_PYTHON

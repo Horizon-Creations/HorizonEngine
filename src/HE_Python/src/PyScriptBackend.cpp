@@ -1191,6 +1191,41 @@ bool PyScriptBackend::callOnAnimationNotifyBegin(InstanceId id, const std::strin
 bool PyScriptBackend::callOnAnimationNotifyEnd(InstanceId id, const std::string& name)
 { return callNotifyMethod(id, "on_animation_notify_end", name); }
 
+// The input handlers share the notify body where a string is the whole
+// payload; the axis forms marshal their numbers behind it ("sf" / "sff").
+bool PyScriptBackend::callOnInputPressed(InstanceId id, const std::string& action)
+{ return callNotifyMethod(id, "on_input_pressed", action); }
+
+bool PyScriptBackend::callOnInputReleased(InstanceId id, const std::string& action)
+{ return callNotifyMethod(id, "on_input_released", action); }
+
+bool PyScriptBackend::callOnInputAxis(InstanceId id, const std::string& action, float value)
+{
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, "on_input_axis")) return true;
+	PyObject* r = PyObject_CallMethod(obj, "on_input_axis", "sf", action.c_str(), value);
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
+bool PyScriptBackend::callOnInputAxis2D(InstanceId id, const std::string& action, float x, float y)
+{
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, "on_input_axis2d")) return true;
+	PyObject* r = PyObject_CallMethod(obj, "on_input_axis2d", "sff", action.c_str(), x, y);
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
+bool PyScriptBackend::callOnTimer(InstanceId id, int handle)
+{
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, "on_timer")) return true;
+	PyObject* r = PyObject_CallMethod(obj, "on_timer", "i", handle);
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
 bool PyScriptBackend::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
 	const char* fn = ev == UIScriptEvent::Click      ? "on_click" :

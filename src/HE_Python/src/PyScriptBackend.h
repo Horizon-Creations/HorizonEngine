@@ -57,6 +57,14 @@ public:
 	bool callOnAnimationNotifyBegin(InstanceId id, const std::string& name) override;
 	bool callOnAnimationNotifyEnd(InstanceId id, const std::string& name) override;
 	bool callOnUIEvent(InstanceId id, UIScriptEvent ev) override;
+	// on_input_pressed / on_input_released(self, action),
+	// on_input_axis(self, action, value), on_input_axis2d(self, action, x, y)
+	// and on_timer(self, handle) — see IScriptBackend.
+	bool callOnInputPressed(InstanceId id, const std::string& action) override;
+	bool callOnInputReleased(InstanceId id, const std::string& action) override;
+	bool callOnInputAxis(InstanceId id, const std::string& action, float value) override;
+	bool callOnInputAxis2D(InstanceId id, const std::string& action, float x, float y) override;
+	bool callOnTimer(InstanceId id, int handle) override;
 
 	std::vector<ScriptPropDef> getScriptProperties(const std::string& name) const override;
 	void injectProperties(InstanceId id,

@@ -1535,6 +1535,37 @@ bool ScriptContext::callOnUIEvent(ScriptEngine::InstanceId id, UIScriptEvent ev)
     HE_SCRIPT_CALL("onUIEvent", b->callOnUIEvent(rawId(id), ev));
 }
 
+bool ScriptContext::callOnInputPressed(ScriptEngine::InstanceId id, const std::string& action)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onInputPressed", b->callOnInputPressed(rawId(id), action));
+}
+
+bool ScriptContext::callOnInputReleased(ScriptEngine::InstanceId id, const std::string& action)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onInputReleased", b->callOnInputReleased(rawId(id), action));
+}
+
+bool ScriptContext::callOnInputAxis(ScriptEngine::InstanceId id, const std::string& action, float value)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onInputAxis", b->callOnInputAxis(rawId(id), action, value));
+}
+
+bool ScriptContext::callOnInputAxis2D(ScriptEngine::InstanceId id, const std::string& action,
+                                      float x, float y)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onInputAxis2D", b->callOnInputAxis2D(rawId(id), action, x, y));
+}
+
+bool ScriptContext::callOnTimer(ScriptEngine::InstanceId id, int handle)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onTimer", b->callOnTimer(rawId(id), handle));
+}
+
 #undef HE_SCRIPT_CALL
 
 bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source)

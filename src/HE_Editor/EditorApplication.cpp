@@ -83,6 +83,7 @@
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
+#include <HorizonScene/TimerSystem.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
@@ -3163,6 +3164,18 @@ void EditorApplication::OnRender(float dt)
 				// Entity classes: Tick, plus reaping the ones whose entity is gone.
 				m_entityHost.tick(gameDt);
 			}
+			// Script timers (horizon.timer.after / .every), the same drain the
+			// packaged game runs. Raw dt: a timer is a clock, and a game that
+			// scaled its own time to zero still wants its autosave. On uiLive
+			// and not on simulating for the same reason the widget tick is: an
+			// application's GameInstance is RUNNING here without anyone
+			// pressing Play, and a timer.after in its OnInit has to come due in
+			// the preview as it does in the shipped app. For a game, uiLive IS
+			// simulating, so the editor's pause holds this clock with the rest.
+			// PIE never polled these before, so a timer that worked in the
+			// shipped build did nothing in the preview.
+			TimerSystem::dispatch(dt, &m_gameInstance.runtime(),
+			                      m_scriptContext.get(), &m_scriptInstances);
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
@@ -8510,6 +8523,10 @@ void EditorApplication::setPlayMode(bool play)
 		// Handed the entity host so it can find the characters the LEVEL already
 		// placed; it never spawns through it.
 		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+		// The Lua/Python instances hear the same action events — the packaged
+		// game binds them at the same point. The map fills below
+		// (startWorldScripts) and is read per tick.
+		m_playerHost.setTextScripts(m_scriptContext.get(), &m_scriptInstances);
 		// Last: a player character spawned just above may be the very entity
 		// whose state machine needs a sync graph.
 		m_animatorHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
@@ -8700,6 +8717,10 @@ void EditorApplication::restartAppPreview(bool keepState)
 	// so a graph's OnShutdown still finds the things it is about to let go of.
 	m_gameInstance.fireShutdown();
 	m_editorWorld->widgets().clear();
+	// The timers the old OnInit started die with it: now that the preview
+	// dispatches them (TimerSystem in the frame), a timer.every left standing
+	// would fire into the restarted graph as a handle it never issued.
+	HE::api::timer::cancelAll();
 
 	// Re-register the graph rather than assuming the host still holds the right
 	// one: the edit that triggered this restart may BE a GameInstance edit, and

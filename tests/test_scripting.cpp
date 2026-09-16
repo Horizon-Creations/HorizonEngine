@@ -500,3 +500,48 @@ TEST_CASE("ScriptEngine: collision callbacks receive correct otherEntityId")
     // We can't read from instance directly, but we can verify no error
     CHECK(engine.lastError().empty());
 }
+
+// ─── Input actions and timers ────────────────────────────────────────────────
+// The handlers the PlayerHost pump and TimerSystem reach; the two-dimensional
+// axis is the one shape the host-level test does not exercise.
+static const char* kEarsScript = R"lua(
+local M = {}
+function M.onStart(self) self.log = "" self.x = 0 self.y = 0 self.timer = 0 end
+function M.onInputPressed(self, action)  self.log = self.log .. "+" .. action end
+function M.onInputReleased(self, action) self.log = self.log .. "-" .. action end
+function M.onInputAxis2D(self, action, x, y) self.x = x self.y = y end
+function M.onTimer(self, handle) self.timer = handle end
+function M.onUpdate(self, dt)
+    _log = self.log; _x = self.x; _y = self.y; _timer = self.timer
+end
+return M
+)lua";
+
+TEST_CASE("ScriptEngine: input action and timer handlers receive their arguments")
+{
+    ScriptEngine engine;
+    REQUIRE(engine.loadScript("ears", kEarsScript));
+    const auto id = engine.createInstance("ears", 1);
+    REQUIRE(engine.callOnStart(id));
+
+    CHECK(engine.callOnInputPressed(id, "Jump"));
+    CHECK(engine.callOnInputReleased(id, "Jump"));
+    CHECK(engine.callOnInputAxis2D(id, "Look", 0.25f, -1.0f));
+    CHECK(engine.callOnTimer(id, 42));
+    REQUIRE(engine.callOnUpdate(id, 0.0f));
+
+    CHECK(engine.getGlobalString("_log") == "+Jump-Jump");
+    CHECK(engine.getGlobalNumber("_x") == doctest::Approx(0.25));
+    CHECK(engine.getGlobalNumber("_y") == doctest::Approx(-1.0));
+    CHECK(engine.getGlobalNumber("_timer") == doctest::Approx(42.0));
+
+    // Missing handlers are a no-op success: the pump fires at every instance.
+    REQUIRE(engine.loadScript("counter", kCounterScript));
+    const auto deaf = engine.createInstance("counter", 2);
+    CHECK(engine.callOnInputAxis(deaf, "Move", 1.0f));
+    CHECK(engine.callOnTimer(deaf, 1));
+    CHECK(engine.lastError().empty());
+
+    // An unknown instance is the usual error, not a crash.
+    CHECK_FALSE(engine.callOnInputPressed(9999, "Jump"));
+}

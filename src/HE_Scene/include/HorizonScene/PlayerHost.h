@@ -1,12 +1,15 @@
 #pragma once
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Application/InputMapping.h>
+#include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class ContentManager;
 class EntityHost;
 class Input;
+class ScriptContext;
 
 // ── PlayerHost ───────────────────────────────────────────────────────────────
 // Spawns the project's PlayerController HorizonCode classes (HorizonCodeClass
@@ -38,6 +41,17 @@ class Input;
 // input goes straight to the characters registered via addCharacter(). Without
 // that fallback every existing PlayerCharacter graph that handles its own input
 // would go silent.
+//
+// ── Text scripts hear it too ─────────────────────────────────────────────────
+// A Lua or Python script on an entity has no controller and possesses nothing,
+// so the routing above says nothing about it — and until setTextScripts existed
+// it simply never heard an action: the pump ran in a Lua project like in any
+// other, with nobody listening. Now every text-script instance of the session
+// receives every action event (onInputPressed/… in Lua, on_input_pressed/… in
+// Python), under the same pause and UI-only silence the graphs get. Which of
+// them cares is the script's business: a handler that is not defined costs a
+// table lookup and nothing else. The same tick also publishes the frame's
+// action states to HE::api::input::setActions, the polling twin of the events.
 //
 // Bindings are the union of every InputMappingContext asset in the project;
 // action value types come from the InputAction assets. Discovery walks the
@@ -82,6 +96,17 @@ public:
 	// Idempotent; begin() may be called again for the next session.
 	void end();
 
+	// The session's Lua/Python instances, so tick() can deliver the action
+	// events to them as well (see the note above). `instances` is the host
+	// application's entity → instance map, the same one CollisionSystem and
+	// AnimationNotifySystem are handed; it is READ every tick, never copied, so
+	// a script that starts or dies mid-session is seen the next frame. Either
+	// null = no text scripts (tests, a context-less session). Cleared by end().
+	// The map type is spelled out rather than taken from ScriptContext so this
+	// header does not pull ScriptContext.h (and entt with it) into both apps.
+	using TextScriptInstances = std::unordered_map<uint32_t, uint64_t>;
+	void setTextScripts(ScriptContext* scripts, const TextScriptInstances* instances);
+
 	// Register a character the GAME spawned mid-session (Create Object on a
 	// PlayerCharacter class). The host does not create characters, so without
 	// this it would not know any exist — and the no-controller input fallback
@@ -125,6 +150,8 @@ private:
 	void fireInputEvent(const std::string& event, const HorizonCode::Value& arg);
 
 	HorizonCode::Runtime*                m_runtime = nullptr;
+	ScriptContext*                       m_scripts = nullptr;
+	const TextScriptInstances*           m_scriptInstances = nullptr;
 	InputMapping                         m_mapping;
 	std::vector<ActionInfo>              m_actions;
 	// The instances this host CREATED, and therefore the only ones it ticks and

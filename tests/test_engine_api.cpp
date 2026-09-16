@@ -1338,6 +1338,50 @@ TEST_CASE("Input: the pushed gamepad state reflects through the registry")
     CHECK(call("input.gamepadAxis", { Value::ofString("leftx") })[0].f == doctest::Approx(0.0f));
 }
 
+TEST_CASE("Input: the pushed action states reflect through the registry")
+{
+    Ctx c{};
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // Every row exists and is a pure getter — a data node in HorizonCode, a
+    // function in horizon.input for Lua and Python.
+    for (const char* id : { "input.actionDown", "input.actionPressed", "input.actionReleased",
+                            "input.actionAxis", "input.actionAxis2D" })
+    {
+        const HE::api::ApiFn* fn = HE::api::find(id);
+        REQUIRE_MESSAGE(fn != nullptr, id);
+        CHECK_FALSE(fn->isExec);
+    }
+
+    HE::api::input::clearActions();
+    CHECK(call("input.actionDown", { Value::ofString("Jump") })[0].b == false);
+    CHECK(call("input.actionAxis", { Value::ofString("Move") })[0].f == doctest::Approx(0.0f));
+
+    std::vector<HE::api::input::ActionState> states(3);
+    states[0].name = "Jump"; states[0].down = true; states[0].pressed = true;
+    states[1].name = "Move"; states[1].x = -0.5f;
+    states[2].name = "Look"; states[2].x = 0.25f; states[2].y = 1.0f;
+    HE::api::input::setActions(states);
+
+    CHECK(call("input.actionDown",     { Value::ofString("Jump") })[0].b == true);
+    CHECK(call("input.actionPressed",  { Value::ofString("Jump") })[0].b == true);
+    CHECK(call("input.actionReleased", { Value::ofString("Jump") })[0].b == false);
+    CHECK(call("input.actionAxis",     { Value::ofString("Move") })[0].f == doctest::Approx(-0.5f));
+    const glm::vec2 look = call("input.actionAxis2D", { Value::ofString("Look") })[0].v2;
+    CHECK(look.x == doctest::Approx(0.25f));
+    CHECK(look.y == doctest::Approx(1.0f));
+    // An action the project does not have: false and zero, never an error.
+    CHECK(call("input.actionDown", { Value::ofString("Nope") })[0].b == false);
+    CHECK(call("input.actionAxis2D", { Value::ofString("Nope") })[0].v2.x == doctest::Approx(0.0f));
+
+    // The per-frame snapshot clear must NOT wipe the actions (two writers, two
+    // tables — see the implementation note), the session end does.
+    HE::api::input::clear();
+    CHECK(call("input.actionDown", { Value::ofString("Jump") })[0].b == true);
+    HE::api::input::clearActions();
+    CHECK(call("input.actionDown", { Value::ofString("Jump") })[0].b == false);
+}
+
 // ═══ Transform value type ═════════════════════════════════════════════════════
 
 TEST_CASE("Transform: ConstTransform flows through Set as a Transform value")
