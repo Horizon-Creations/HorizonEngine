@@ -793,10 +793,11 @@ private:
 	float m_specularAAStrength = 1.0f;
 	void* m_fxaaPipeline   = nullptr; // id<MTLRenderPipelineState>
 	// ── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ───────────────────────
-	// Deferred path only: the velocity pass depth-tests against the G-buffer's
-	// depth, so it needs geometry that pass already drew. m_aaMethod == TAA is
-	// resolved against supportsTemporalAA, which is false while the render path
-	// is Forward — so these stay untouched there.
+	// Both render paths. The velocity pass is material-agnostic (positions only)
+	// and depth-tests against whatever depth the opaque geometry left behind:
+	// the G-buffer's on the deferred path (encoded right after that pass), the
+	// HDR scene pass's on the forward path (encoded right after THAT pass, which
+	// therefore has to STORE its depth while a temporal mode is on).
 	//
 	// The jitter lives ONLY in the rasterisation matrices (JitteredViewProj).
 	// Velocity, TAA reprojection and the GI/SSR history all use the CLEAN ones:
@@ -820,9 +821,9 @@ private:
 	void* m_taaSharpenPipeline = nullptr; // id<MTLRenderPipelineState> — TAA output → final target
 	void  EnsureTaaTargets(int width, int height);
 	void  DestroyTaaTargets();
-	// True when TAA should run this frame (mode picked AND the deferred path that
-	// feeds it is actually active). One place, so pass setup and shader binding
-	// cannot disagree about whether there is a velocity buffer.
+	// True when TAA should run this frame (mode picked AND the pipelines that
+	// feed it exist). One place, so pass setup and shader binding cannot
+	// disagree about whether there is a velocity buffer.
 	bool  TaaActive() const;
 	// True when this frame needs jitter + velocity at all — our TAA or MetalFX.
 	bool  TemporalActive() const;
@@ -834,8 +835,8 @@ private:
 
 	// ── MetalFX temporal scaling (A5) ────────────────────────────────────────
 	// The same inputs our own TAA needs (colour, depth, motion, jitter), handed
-	// to the OS scaler instead — which is why it sits behind the SAME deferred
-	// gate. Unlike our TAA it runs on the HDR image BEFORE the tonemap: that is
+	// to the OS scaler instead — which is why it sits behind the SAME gate
+	// (TemporalActive). Unlike our TAA it runs on the HDR image BEFORE the tonemap: that is
 	// what Apple's model expects, and it means the tonemap then runs at output
 	// resolution. Falls back to our TAA when the device or OS lacks it.
 	bool  m_mfxSupported = false;  // queried once, at Initialize

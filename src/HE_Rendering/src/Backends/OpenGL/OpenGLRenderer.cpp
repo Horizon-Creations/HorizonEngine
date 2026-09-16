@@ -3449,6 +3449,141 @@ out vec4 FragColor;
 void main() { FragColor = vec4(texture(uScene, vUV).rgb, 1.0); }
 )GLSL";
 
+// ─── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ─────────────────────────
+// The GL twin of kTaaMSL in the Metal backend, same rule: the geometry is
+// RASTERIZED with the jittered matrix (so the subpixel offset lands in the
+// image, which is the whole point), but the MOTION is measured with unjittered
+// ones. Mixing those up makes every static pixel report the jitter as movement,
+// and TAA then chases its own offset.
+//
+// Velocity is its own pass over the opaque draw list (positions only, depth-
+// tested LEQUAL against the scene depth so only the visible surface reports),
+// not a G-buffer attachment — material-agnostic by construction, so a custom
+// material that never heard of velocity cannot leave undefined motion behind.
+static const char* kTaaVelocityVS = R"GLSL(
+#version 410 core
+layout(location = 0) in vec3 aPos;
+uniform mat4 uMvpJitter;   // rasterizes
+uniform mat4 uMvpNow;      // measures (unjittered)
+uniform mat4 uMvpPrev;     // measures (unjittered, last frame's camera + model)
+out vec4 vClipNow;
+out vec4 vClipPrev;
+void main()
+{
+	vec4 p = vec4(aPos, 1.0);
+	gl_Position = uMvpJitter * p;
+	vClipNow    = uMvpNow  * p;
+	vClipPrev   = uMvpPrev * p;
+}
+)GLSL";
+
+// Screen-space motion in TEXTURE-UV units, so the resolve can subtract it from
+// its own uv. GL textures are bottom-up like its NDC, so unlike the Metal twin
+// there is no y flip here — the same convention kMbVelocityFS and vUV use.
+static const char* kTaaVelocityFS = R"GLSL(
+#version 410 core
+in vec4 vClipNow;
+in vec4 vClipPrev;
+out vec2 FragColor;          // RG16F: uvNow - uvPrev
+void main()
+{
+	vec2 ndcNow  = vClipNow.xy  / max(vClipNow.w,  1e-6);
+	vec2 ndcPrev = vClipPrev.xy / max(vClipPrev.w, 1e-6);
+	FragColor = (ndcNow - ndcPrev) * 0.5;
+}
+)GLSL";
+
+// Blend this frame's tonemapped image with the reprojected history. Current
+// and velocity are read with texelFetch (point, clamped by hand) — the LDR
+// texture is LINEAR-filtered for FXAA/SMAA and must stay so; the history
+// textures are linear on purpose (subpixel reprojection).
+// uParams: x/y = 1/resolution, z = history blend weight (0 = history unusable
+// this frame — resize, first frame), w unused.
+static const char* kTaaResolveFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uCurrent;
+uniform sampler2D uHistory;
+uniform sampler2D uVelocity;
+uniform vec4      uParams;
+out vec4 FragColor;
+void main()
+{
+	ivec2 size = textureSize(uCurrent, 0);
+	ivec2 px   = ivec2(gl_FragCoord.xy);
+	vec3  cur  = texelFetch(uCurrent, px, 0).rgb;
+	if (uParams.z <= 0.0) { FragColor = vec4(cur, 1.0); return; }
+
+	// Motion of the CLOSEST fragment in the neighbourhood, not this pixel's own:
+	// on a silhouette the pixel itself may carry the background's motion while
+	// the eye follows the object, and picking the nearest keeps the edge with
+	// the object instead of smearing it against the background.
+	vec2  vel  = texelFetch(uVelocity, px, 0).rg;
+	float best = length(vel);
+	for (int y = -1; y <= 1; ++y)
+		for (int x = -1; x <= 1; ++x)
+		{
+			ivec2 q = clamp(px + ivec2(x, y), ivec2(0), size - 1);
+			vec2  v = texelFetch(uVelocity, q, 0).rg;
+			float l = length(v);
+			if (l > best) { best = l; vel = v; }
+		}
+
+	vec2 histUV = vUV - vel;
+	// Off-screen history is no history: nothing was ever accumulated there.
+	if (any(lessThan(histUV, vec2(0.0))) || any(greaterThan(histUV, vec2(1.0))))
+	{
+		FragColor = vec4(cur, 1.0);
+		return;
+	}
+	vec3 hist = texture(uHistory, histUV).rgb;
+
+	// Neighbourhood clamp — the whole defence against ghosting. Whatever the
+	// history says, the result has to stay inside the colours this frame
+	// actually produced around this pixel; a disoccluded surface therefore
+	// cannot keep showing what used to be in front of it.
+	vec3 lo = cur, hi = cur;
+	for (int y = -1; y <= 1; ++y)
+		for (int x = -1; x <= 1; ++x)
+		{
+			ivec2 q = clamp(px + ivec2(x, y), ivec2(0), size - 1);
+			vec3  c = texelFetch(uCurrent, q, 0).rgb;
+			lo = min(lo, c);
+			hi = max(hi, c);
+		}
+	hist = clamp(hist, lo, hi);
+
+	// Fast motion means less history: the further the reprojection reached, the
+	// less it can be trusted (and the less a stale sample is worth).
+	float motion = clamp(length(vel / uParams.xy) / 32.0, 0.0, 1.0);
+	float blend  = mix(uParams.z, 0.0, motion);
+	FragColor = vec4(mix(cur, hist, blend), 1.0);
+}
+)GLSL";
+
+// The temporal average is softer than a single frame by construction — this is
+// the sharpen that buys that back, and the only reason the AA-resolve slot still
+// runs a shader for TAA instead of the plain blit. uParams.z = amount, 0 = exact
+// passthrough.
+static const char* kTaaSharpenFS = R"GLSL(
+#version 410 core
+in vec2 vUV;
+uniform sampler2D uScene;
+uniform vec4      uParams;   // xy = 1/resolution, z = sharpen amount
+out vec4 FragColor;
+void main()
+{
+	vec2 rcp = uParams.xy;
+	vec3 c   = texture(uScene, vUV).rgb;
+	if (uParams.z <= 0.0) { FragColor = vec4(c, 1.0); return; }
+	vec3 blur = 0.25 * (texture(uScene, vUV + vec2( rcp.x, 0.0)).rgb
+	                  + texture(uScene, vUV + vec2(-rcp.x, 0.0)).rgb
+	                  + texture(uScene, vUV + vec2(0.0,  rcp.y)).rgb
+	                  + texture(uScene, vUV + vec2(0.0, -rcp.y)).rgb);
+	FragColor = vec4(clamp(c + (c - blur) * uParams.z, 0.0, 1.0), 1.0);
+}
+)GLSL";
+
 // Bloom bright-pass: keep only the part of each pixel above a soft-knee
 // threshold (Call-of-Duty-style curve), preserving hue. Feeds the blur chain.
 static const char* kBloomBrightFS = R"GLSL(
@@ -5229,6 +5364,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateShadowResources();
 	CreateSkyPipeline();
 	CreateTonemapPipeline();
+	CreateTaaPipeline();
 	CreateBloomPipeline();
 	CreateDepthOfFieldPipeline();
 	CreateMotionBlurPipeline();
@@ -6277,6 +6413,246 @@ void OpenGLRenderer::DestroyLdrTarget()
 	m_ldrW = m_ldrH = 0;
 }
 
+// ─── Temporal AA (A2/A3) ─────────────────────────────────────────────────────
+// Three programs, all optional: a link failure logs and leaves the program 0,
+// and GetCapabilities then reports no temporal AA, so ResolveAAMethod falls
+// back to SMAA exactly as on a backend that never had it.
+void OpenGLRenderer::CreateTaaPipeline()
+{
+	auto link = [&](const char* vsSrc, const char* fsSrc, const char* what) -> GLuint
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER,   vsSrc);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fsSrc);
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		GLint ok = GL_FALSE;
+		glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			GLchar log[512];
+			glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: TAA %s program failed to link: %s", what, log);
+			glDeleteProgram(prog);
+			return 0;
+		}
+		return prog;
+	};
+	m_taaVelocityProgram = link(kTaaVelocityVS, kTaaVelocityFS, "velocity");
+	if (m_taaVelocityProgram)
+	{
+		m_uTaaVelMvpJitter = glGetUniformLocation(m_taaVelocityProgram, "uMvpJitter");
+		m_uTaaVelMvpNow    = glGetUniformLocation(m_taaVelocityProgram, "uMvpNow");
+		m_uTaaVelMvpPrev   = glGetUniformLocation(m_taaVelocityProgram, "uMvpPrev");
+	}
+	m_taaProgram = link(kTonemapVS, kTaaResolveFS, "resolve");
+	if (m_taaProgram)
+	{
+		m_uTaaCurrent  = glGetUniformLocation(m_taaProgram, "uCurrent");
+		m_uTaaHistory  = glGetUniformLocation(m_taaProgram, "uHistory");
+		m_uTaaVelocity = glGetUniformLocation(m_taaProgram, "uVelocity");
+		m_uTaaParams   = glGetUniformLocation(m_taaProgram, "uParams");
+	}
+	m_taaSharpenProgram = link(kTonemapVS, kTaaSharpenFS, "sharpen");
+	if (m_taaSharpenProgram)
+	{
+		m_uTaaSharpScene  = glGetUniformLocation(m_taaSharpenProgram, "uScene");
+		m_uTaaSharpParams = glGetUniformLocation(m_taaSharpenProgram, "uParams");
+	}
+}
+
+// m_aaMethod is already resolved against GetCapabilities(), so TAA here means
+// the programs exist; the target check is what the per-frame passes need.
+bool OpenGLRenderer::TaaActive() const
+{
+	return m_aaMethod == HE::AAMethod::TAA && m_taaVelocityProgram && m_taaProgram
+	    && m_taaSharpenProgram;
+}
+
+// The rasterisation matrix. The offset is applied in CLIP space (a translation
+// of the projected x/y by a fraction of a pixel), which is the same thing as
+// shifting the sample grid — and it leaves the caller's matrix untouched, so the
+// unjittered one stays available for motion and reprojection.
+glm::mat4 OpenGLRenderer::JitteredViewProj(const glm::mat4& viewProj, int width, int height) const
+{
+	if (!TaaActive() || width <= 0 || height <= 0) return viewProj;
+	glm::mat4 j(1.0f);
+	j[3][0] = m_taaJitter.x * 2.0f / static_cast<float>(width);
+	j[3][1] = m_taaJitter.y * 2.0f / static_cast<float>(height);
+	return j * viewProj;
+}
+
+void OpenGLRenderer::EnsureTaaTargets(int width, int height)
+{
+	width  = std::max(1, width);
+	height = std::max(1, height);
+	if (m_taaHistoryTex[0] && width == m_taaW && height == m_taaH) return;
+	DestroyTaaTargets();
+
+	auto makeTarget = [&](unsigned int& fbo, unsigned int& tex, GLenum internalFmt,
+	                      GLenum fmt, GLenum type, GLint filter, const char* what)
+	{
+		glGenFramebuffers(1, &fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, internalFmt, width, height, 0, fmt, type, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+			HE_LOG_ERROR(RHI, "OpenGLRenderer: TAA %s FBO incomplete", what);
+	};
+	// The velocity FBO gets m_hdrDepth attached at draw time (RenderVelocity):
+	// EnsureHDRTarget recreates that texture on resize, and re-attaching per
+	// pass is cheaper than tracking it. Completeness is checked there.
+	makeTarget(m_velocityFBO, m_velocityTex, GL_RG16F, GL_RG, GL_FLOAT, GL_NEAREST, "velocity");
+	makeTarget(m_taaHistoryFBO[0], m_taaHistoryTex[0], GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE,
+	           GL_LINEAR, "history 0");
+	makeTarget(m_taaHistoryFBO[1], m_taaHistoryTex[1], GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE,
+	           GL_LINEAR, "history 1");
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_taaW = width;
+	m_taaH = height;
+	m_taaHistoryCur = 0;
+	// A fresh history is garbage, not history: the first frame after a resize
+	// must show the current frame only, or it blends against uninitialised
+	// memory.
+	m_taaHistoryValid = false;
+}
+
+void OpenGLRenderer::DestroyTaaTargets()
+{
+	if (m_velocityFBO) { glDeleteFramebuffers(1, &m_velocityFBO); m_velocityFBO = 0; }
+	if (m_velocityTex) { glDeleteTextures(1, &m_velocityTex);     m_velocityTex = 0; }
+	for (int i = 0; i < 2; ++i)
+	{
+		if (m_taaHistoryFBO[i]) { glDeleteFramebuffers(1, &m_taaHistoryFBO[i]); m_taaHistoryFBO[i] = 0; }
+		if (m_taaHistoryTex[i]) { glDeleteTextures(1, &m_taaHistoryTex[i]);     m_taaHistoryTex[i] = 0; }
+	}
+	m_taaW = m_taaH = 0;
+	m_taaHistoryValid = false;
+	m_taaPrevTransforms.clear();
+	m_taaCurTransforms.clear();
+}
+
+// Screen-space motion of the opaque geometry: for every visible object, where
+// its vertices are now vs. where they were last frame (camera AND object
+// motion). Depth-tested LEQUAL, no write, against the depth the opaque pass
+// left in m_hdrDepth — on the forward path directly, on the deferred path via
+// the G-buffer → HDR blit — so only the surfaces that are actually visible
+// report. Runs between the "Opaque" and "Sky+Clouds" passes; the sky and the
+// blended tail stay at zero velocity (the clear), which is what they should
+// report. Restores the opaque pass's FBO/state for the sky that follows.
+void OpenGLRenderer::RenderVelocity(int pw, int ph, const glm::mat4& viewProjClean,
+                                    const glm::mat4& viewProjJit)
+{
+	if (!TaaActive() || !m_velocityFBO || !m_hdrDepth) return;
+
+	glBindFramebuffer(GL_FRAMEBUFFER, m_velocityFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_hdrDepth, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+	{
+		HE_LOG_ERROR(RHI, "%s", "OpenGLRenderer: TAA velocity FBO incomplete");
+		glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
+		return;
+	}
+	glViewport(0, 0, pw, ph);
+	// Colour only — the depth attachment IS the scene depth the sky and the
+	// transparent tail still test against. Zero = "did not move".
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LEQUAL);
+	glDepthMask(GL_FALSE);
+	glDisable(GL_BLEND);
+	glUseProgram(m_taaVelocityProgram);
+
+	m_taaCurTransforms.clear();
+	for (const uint32_t idx : m_sortedIndices)
+	{
+		const RenderObject& obj = m_renderWorld.objects[idx];
+		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		if (!mesh || !mesh->vao || mesh->indexCount <= 0) continue;
+
+		// An object seen for the first time reports no motion — its "previous"
+		// position is where it is now. Anything else invents a streak out of
+		// nowhere on the frame something spawns.
+		const auto it = m_taaPrevTransforms.find(obj.entityId);
+		const glm::mat4 prevModel = (it != m_taaPrevTransforms.end()) ? it->second : obj.transform;
+		m_taaCurTransforms[obj.entityId] = obj.transform;
+
+		glUniformMatrix4fv(m_uTaaVelMvpJitter, 1, GL_FALSE, glm::value_ptr(viewProjJit * obj.transform));
+		glUniformMatrix4fv(m_uTaaVelMvpNow,    1, GL_FALSE, glm::value_ptr(viewProjClean * obj.transform));
+		glUniformMatrix4fv(m_uTaaVelMvpPrev,   1, GL_FALSE, glm::value_ptr(m_taaPrevViewProj * prevModel));
+		glBindVertexArray(mesh->vao);
+		glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+	}
+
+	// Advance the history HERE, at the end of the one pass that consumed it —
+	// not at some "frame end" further out, so a frame is never compared
+	// against itself.
+	m_taaPrevViewProj = viewProjClean;
+	m_taaPrevTransforms.swap(m_taaCurTransforms);
+
+	// Back to what the opaque pass had set, for the sky + transparent tail.
+	glBindVertexArray(0);
+	glDepthFunc(GL_LESS);
+	glDepthMask(GL_TRUE);
+	glUseProgram(m_unlitProgram);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_hdrFBO);
+	glViewport(0, 0, pw, ph);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+// Blend this frame's tonemapped image with the reprojected history. Runs AFTER
+// the tonemap and BEFORE the AA-resolve slot, so the history lives in the same
+// LDR space the user sees — which also keeps a single bright HDR sample from
+// poisoning the accumulation for the next dozen frames. Assumes m_fsVAO is
+// bound and the depth test is off (the post-process pass's state).
+unsigned int OpenGLRenderer::RenderTaa(int pw, int ph)
+{
+	if (!TaaActive() || !m_taaHistoryTex[0] || !m_velocityTex || !m_ldrColor) return 0;
+	if (pw != m_taaW || ph != m_taaH) return 0; // targets follow the scene size (DrawScene)
+
+	const int cur  = m_taaHistoryCur;
+	const int prev = 1 - cur;
+	glBindFramebuffer(GL_FRAMEBUFFER, m_taaHistoryFBO[cur]);
+	glViewport(0, 0, pw, ph);
+	glUseProgram(m_taaProgram);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_ldrColor);
+	glUniform1i(m_uTaaCurrent, 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, m_taaHistoryTex[prev]);
+	glUniform1i(m_uTaaHistory, 1);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, m_velocityTex);
+	glUniform1i(m_uTaaVelocity, 2);
+	// 0.9 keeps ~10 frames of samples: enough to converge on an edge, short
+	// enough that a mis-reprojected pixel does not linger.
+	glUniform4f(m_uTaaParams, 1.0f / static_cast<float>(pw), 1.0f / static_cast<float>(ph),
+	            m_taaHistoryValid ? 0.9f : 0.0f, 0.0f);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+
+	// This frame's result IS next frame's history: flip the ping-pong.
+	m_taaHistoryCur   = prev;
+	m_taaHistoryValid = true;
+	return m_taaHistoryTex[cur];
+}
+
 void OpenGLRenderer::CreateBloomPipeline()
 {
 	// Bright pass (reuses the fullscreen-triangle VS).
@@ -6321,6 +6697,7 @@ void OpenGLRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 	// Resolve against our own capabilities once, here, so the render path only
 	// ever sees a method this backend can actually run.
 	m_aaMethod           = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+	m_aaSharpness        = s.sharpness;
 	m_specularAA         = s.specularAA;
 	m_specularAAStrength = s.specularAAStrength;
 }
@@ -11228,6 +11605,7 @@ void OpenGLRenderer::Shutdown()
 	DestroyBloomTargets();
 	DestroyDepthOfFieldTargets();
 	DestroyMotionBlurTargets();
+	DestroyTaaTargets();
 	DestroyCloudTarget();
 	DestroyCloudShadowTarget();
 	DestroyLdrTarget();
@@ -11298,6 +11676,9 @@ void OpenGLRenderer::Shutdown()
 	if (m_fxaaProgram)    { glDeleteProgram(m_fxaaProgram);    m_fxaaProgram = 0; }
 	if (m_smaaProgram)    { glDeleteProgram(m_smaaProgram);    m_smaaProgram = 0; }
 	if (m_blitProgram)    { glDeleteProgram(m_blitProgram);    m_blitProgram = 0; }
+	if (m_taaVelocityProgram) { glDeleteProgram(m_taaVelocityProgram); m_taaVelocityProgram = 0; }
+	if (m_taaProgram)         { glDeleteProgram(m_taaProgram);         m_taaProgram = 0; }
+	if (m_taaSharpenProgram)  { glDeleteProgram(m_taaSharpenProgram);  m_taaSharpenProgram = 0; }
 	if (m_uiProgram)      { glDeleteProgram(m_uiProgram);      m_uiProgram = 0; }
 	if (m_uiFontTexture)  { glDeleteTextures(1, &m_uiFontTexture); m_uiFontTexture = 0; }
 	if (m_bloomBrightProgram) { glDeleteProgram(m_bloomBrightProgram); m_bloomBrightProgram = 0; }
@@ -11716,8 +12097,41 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// background and must still be drawn, or the viewport falls back to a stale
 	// gray clear when the camera looks away from the scene.
 
-	const glm::mat4 viewProj    = m_renderWorld.camera.projection * m_renderWorld.camera.view;
-	const glm::mat4 invViewProj = glm::inverse(viewProj);
+	// ── TAA: this frame's jitter (A2) ───────────────────────────────────────
+	// Halton(2,3), 8 positions: a low-discrepancy sequence covers the pixel
+	// evenly in few frames, where a random offset clumps and a regular grid
+	// re-aliases. Chosen BEFORE anything builds a matrix, because every
+	// rasterising pass this frame must share one offset.
+	if (TaaActive())
+	{
+		EnsureTaaTargets(pw, ph);
+		auto halton = [](uint32_t i, uint32_t base) {
+			float f = 1.0f, r = 0.0f;
+			while (i > 0) { f /= static_cast<float>(base); r += f * (i % base); i /= base; }
+			return r;
+		};
+		const uint32_t n = (m_taaFrameIndex % 8u) + 1u;
+		m_taaJitter = glm::vec2(halton(n, 2) - 0.5f, halton(n, 3) - 0.5f);
+		++m_taaFrameIndex;
+	}
+	else if (m_taaHistoryTex[0])
+	{
+		// Freed as soon as the mode is off, and the history is dropped with
+		// it — a stale one would blend against a different world the moment
+		// TAA comes back on.
+		DestroyTaaTargets();
+		m_taaJitter = glm::vec2(0.0f);
+	}
+
+	// Two view-projections, one rule (docs/anti-aliasing-plan.md): the CLEAN
+	// one measures — velocity, the motion-blur/SSR/GI reprojections, the SSAO
+	// sample projection — and the JITTERED one rasterises everything that
+	// lands in the image: geometry, G-buffer, decals, the deferred resolve's
+	// reconstruction, sky, transparency, particles, debug lines. With TAA off
+	// the two are the same matrix.
+	const glm::mat4 viewProjClean = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const glm::mat4 viewProj      = JitteredViewProj(viewProjClean, pw, ph);
+	const glm::mat4 invViewProj   = glm::inverse(viewProj);
 
 	// Direction toward the sun for the sky + image-based ambient — resolved by the
 	// extractor (scene directional light, or the day-night cycle when enabled).
@@ -11990,18 +12404,39 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glDrawArrays(GL_TRIANGLES, 0, 3);
 			}
 
+			// Temporal accumulation on the tonemapped image (A3). 0 unless TAA
+			// is the active mode; the AA-resolve slot below then reads the
+			// resolved history target instead of m_ldrColor. Sibling scope.
+			unsigned int taaTex = 0u;
+			if (TaaActive())
+			{
+				GpuPassScope _taaTimer(this, "TAA");
+				taaTex = RenderTaa(pw, ph);
+			}
+
 			// AA resolve: move the tonemapped LDR image into the actual output.
 			// The pass ALWAYS runs — it is what fills the output target; the AA
-			// method only decides which program does it.
+			// method only decides which program does it. TAA already produced
+			// the finished image in its own pass; its slot only moves it to the
+			// target, with the sharpen the temporal blur asks for.
 			{
+				const bool aaTaa  = taaTex != 0;
 				const bool aaOff  = (m_aaMethod == HE::AAMethod::Off);
 				const bool aaSmaa = (m_aaMethod == HE::AAMethod::SMAA);
-				GpuPassScope _fxaaTimer(this, aaOff ? "AA Resolve" : (aaSmaa ? "SMAA" : "FXAA"));
+				GpuPassScope _fxaaTimer(this, aaTaa ? "TAA Sharpen"
+				                            : aaOff ? "AA Resolve" : (aaSmaa ? "SMAA" : "FXAA"));
 				glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
 				glViewport(0, 0, pw, ph);
-				glUseProgram(aaOff ? m_blitProgram : (aaSmaa ? m_smaaProgram : m_fxaaProgram));
-				glBindTexture(GL_TEXTURE_2D, m_ldrColor);
-				if (aaOff)
+				glUseProgram(aaTaa ? m_taaSharpenProgram
+				           : aaOff ? m_blitProgram : (aaSmaa ? m_smaaProgram : m_fxaaProgram));
+				glBindTexture(GL_TEXTURE_2D, aaTaa ? taaTex : m_ldrColor);
+				if (aaTaa)
+				{
+					glUniform1i(m_uTaaSharpScene, 0);
+					glUniform4f(m_uTaaSharpParams, 1.0f / float(pw), 1.0f / float(ph),
+					            m_aaSharpness, 0.0f);
+				}
+				else if (aaOff)
 				{
 					glUniform1i(m_uBlitScene, 0);
 				}
@@ -12054,22 +12489,25 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// Sibling (not nested) profiler scopes — GL_TIME_ELAPSED cannot nest, see
 		// GpuTimerBeginPass. The pre-pass is its own row because it is the shared
 		// cost: it runs for the shadow mask, the reflections, or both.
+		// Clean matrices throughout the GI chain: the temporal passes reproject
+		// with last frame's view-proj, and a jittered "previous" would read
+		// the jitter as motion (same rule as the SSAO/SSR pre-pass below).
 		if (giAnyActive)
 		{
 			GpuPassScope _giPrepassTimer(this, "GIPrepass");
-			giPrepassOk = RenderGIPrepass(cmds, giW, giH, viewProj);
+			giPrepassOk = RenderGIPrepass(cmds, giW, giH, viewProjClean);
 		}
 		if (giPrepassOk && m_giEnabled)
 		{
 			GpuPassScope _giTimer(this, "GIShadow");
-			giShadowTex = RenderGIShadow(giW, giH, viewProj);
+			giShadowTex = RenderGIShadow(giW, giH, viewProjClean);
 			DispatchGIProbeUpdate();
 		}
 		const bool giShadingActive = giShadowTex != 0 && m_giIrrAtlas != 0 && m_giVisAtlas != 0;
 		if (giPrepassOk && m_giReflEnabled)
 		{
 			GpuPassScope _giReflTimer(this, "GIRefl");
-			giReflTex = RenderGIReflections(giW, giH, viewProj, giShadingActive);
+			giReflTex = RenderGIReflections(giW, giH, viewProjClean, giShadingActive);
 		}
 		// Gate for both shading paths: a valid trace result AND a non-zero
 		// intensity. Off → a 1×1 transparent-black dummy is bound and the gate
@@ -12098,10 +12536,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// skip entirely (Metal's m_fwdReflPrepassWanted / …Only pair).
 		const bool aoWanted = m_ssaoEnabled && !giShadingActive && !deferredActive;
 		unsigned int aoTex = 0u;
+		// Deliberately UNjittered while TAA is on (same call as Metal's
+		// EncodeSSAO): the occlusion pass projects its sample positions with
+		// the clean projection and reads them back from this pre-pass, so both
+		// sides must agree, and the SSR trace downstream reprojects the same
+		// MRT with clean matrices. The cost is a <= half-pixel offset between
+		// the AO/reflection lookups and the jittered scene raster — invisible
+		// under the AO blur, and the temporal filter averages the wobble away.
 		if (aoWanted || ssrFrameActive)
 		{
 			GpuPassScope _ssaoTimer(this, "SSAO");
-			aoTex = RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
+			aoTex = RenderSSAO(cmds, pw, ph, viewProjClean, m_renderWorld.camera.view,
 			                   m_renderWorld.camera.projection, /*fromGBufferDepth=*/false,
 			                   /*reflMrt=*/ssrFrameActive, aoWanted);
 		}
@@ -12109,7 +12554,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		if (ssrFrameActive)
 		{
 			GpuPassScope _ssrTimer(this, "SSR");
-			ssrTex = RenderForwardSSR(pw, ph, viewProj);
+			ssrTex = RenderForwardSSR(pw, ph, viewProjClean);
 		}
 		// Same gate shape as giReflActive: a real trace result AND a non-zero
 		// intensity. Off → the black dummy is bound and the cascade folds away.
@@ -13024,7 +13469,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			if (m_ssaoEnabled && !giShadingActive)
 			{
 				GpuPassScope _ssaoTimer(this, "SSAO");
-				aoTex = RenderSSAO(cmds, pw, ph, viewProj, m_renderWorld.camera.view,
+				// Clean projection against the jittered G-buffer depth: <= half
+				// a pixel off, as on Metal's deferred path (see forward above).
+				aoTex = RenderSSAO(cmds, pw, ph, viewProjClean, m_renderWorld.camera.view,
 				                   m_renderWorld.camera.projection, /*fromGBufferDepth=*/true);
 				aoActive = m_ssaoEnabled && aoTex != 0;
 				// Refresh the AO binds the per-frame setup made while aoTex was
@@ -13305,6 +13752,18 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUseProgram(m_unlitProgram); // restore for the sky + transparent passes
 		}
 		GpuTimerEndPass();                 // end "Opaque"
+
+		// ── TAA velocity (A2): screen-space motion of the opaque geometry, right
+		// after the pass whose depth it tests against. One spot serves both
+		// paths: m_hdrDepth holds the opaque depth here on the forward path
+		// directly and on the deferred path via the G-buffer blit above (plus
+		// the forward-routed replay). Sibling timer scope — GL cannot nest.
+		if (TaaActive())
+		{
+			GpuPassScope _velocityTimer(this, "Velocity");
+			RenderVelocity(pw, ph, viewProjClean, viewProj);
+		}
+
 		GpuTimerBeginPass("Sky+Clouds");   // sibling (matches Metal)
 
 		// ── Skybox (drawn LAST): fill the remaining background with the procedural
@@ -13957,6 +14416,11 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// from the shared cross-compiler, hence the #if.
 	c.supportsScreenSpaceReflections = true;
 #endif
+	// TAA (A2/A3): velocity pass + temporal resolve + sharpen, all #version 410
+	// fullscreen/positions-only programs — both render paths, every GL context
+	// this backend creates. False only if one of the three failed to link.
+	c.supportsTemporalAA = m_taaVelocityProgram != 0 && m_taaProgram != 0
+	                    && m_taaSharpenProgram != 0;
 	return c;
 }
 
