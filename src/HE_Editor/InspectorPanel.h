@@ -69,6 +69,14 @@ namespace InspectorPanel
 	// list of a placed prefab. The two walkers exist for the test that holds
 	// every key against SceneSerializer::isKnownComponentKey.
 	const char* componentKeyForLabel(const char* label);
+	// And back: the label for a scene key, or null — what the Add Component
+	// menu needs to say "Paste Component (Light)" for the key on the clipboard.
+	const char* componentLabelForKey(const char* key);
 	size_t      componentKeyCount();
 	const char* componentLabelAt(size_t i);
+
+	// The component key the system clipboard holds, or "" — an envelope
+	// written by "Copy Component" (SceneSerializer::exportComponentText). Asked
+	// by the two paste menus; cheap enough for every frame one is open.
+	std::string clipboardComponentKey();
 }

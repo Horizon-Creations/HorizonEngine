@@ -9,6 +9,7 @@
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
@@ -770,10 +771,48 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			std::snprintf(key, sizeof(key), "Component/%s", label);
 			EditorWidgets::helpForKey(key);
 		}
-		if (removable && ImGui::BeginPopupContextItem())
+		// Right-click: the component as a whole. Copy needs nothing but the
+		// scene key; Paste and Reset WRITE the component, so each takes an undo
+		// snapshot of its own — a popup is its own ImGui window, and the panel's
+		// press-to-capture above never saw the click that landed here. Both also
+		// report as a change the caller can see, for the same reason a removal
+		// does. Remove stays last, and only where the section allows it (the
+		// environment and weather sections are the entity's reason to exist).
+		// Sections without a scene key (none today) would get the copy/paste
+		// pair greyed out rather than a menu that silently does nothing.
+		const char* sceneKey = componentKeyForLabel(label);
+		if (ImGui::BeginPopupContextItem())
 		{
-			if (ImGui::MenuItem("Remove Component"))
-				removed = structuralChange = true;
+			const std::string clip     = sceneKey ? clipboardComponentKey() : std::string();
+			const bool        canPaste = sceneKey && clip == sceneKey;
+			if (ImGui::MenuItem("Copy Component", nullptr, false, sceneKey != nullptr) && sceneKey)
+			{
+				const std::string text = SceneSerializer{}.exportComponentText(world, entity, sceneKey);
+				if (!text.empty()) ImGui::SetClipboardText(text.c_str());
+			}
+			EditorWidgets::helpForKey("Component/Copy Component");
+			if (ImGui::MenuItem("Paste Component Values", nullptr, false, canPaste) && canPaste)
+			{
+				if (undo) undo->snapshotNow();
+				if (const char* text = ImGui::GetClipboardText())
+					SceneSerializer{}.importComponentText(world, entity, text);
+				structuralChange = true;
+			}
+			EditorWidgets::helpForKey("Component/Paste Component Values");
+			if (ImGui::MenuItem("Reset to Default", nullptr, false, sceneKey != nullptr) && sceneKey)
+			{
+				if (undo) undo->snapshotNow();
+				SceneSerializer::resetComponentByKey(world, entity, sceneKey);
+				structuralChange = true;
+			}
+			EditorWidgets::helpForKey("Component/Reset to Default");
+			if (removable)
+			{
+				ImGui::Separator();
+				if (ImGui::MenuItem("Remove Component"))
+					removed = structuralChange = true;
+				EditorWidgets::helpForKey("Component/Remove Component");
+			}
 			ImGui::EndPopup();
 		}
 		// On a placed prefab: which components carry something authored here,
@@ -810,6 +849,22 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	{
 		if (auto* name = registry.try_get<NameComponent>(entity))
 		{
+			// The one switch for the whole entity, in front of its name: off
+			// means not drawn, no script, no body, no sound — for this entity
+			// and everything under it (InactiveComponent.h). Not for the
+			// built-ins: the world root and the environment lights are the
+			// scene's fixtures, not props. A click here is a click in this
+			// window, so the press-to-capture above has the pre-state and
+			// trackEdit commits it like any checkbox in the sections below.
+			if (!world.isBuiltin(entity))
+			{
+				bool active = HE::isEntityActiveSelf(registry, entity);
+				if (ImGui::Checkbox("##entity_active", &active))
+					HE::setEntityActive(registry, entity, active);
+				trackEdit();
+				EditorWidgets::helpForKey("details.active");
+				ImGui::SameLine();
+			}
 			char buf[256];
 			std::strncpy(buf, name->name.c_str(), sizeof(buf) - 1);
 			buf[sizeof(buf) - 1] = '\0';
@@ -819,6 +874,13 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			{
 				if (undo) undo->snapshotNow();
 				world.renameEntity(entity, buf);
+			}
+			// Off because of something above it: the box here is ticked, and
+			// the entity is still not in the game — say which is the case.
+			if (HE::isEntityActiveSelf(registry, entity) && !HE::isEntityActive(registry, entity))
+			{
+				ImGui::TextDisabled("(switched off through a parent)");
+				EditorWidgets::helpForKey("details.active-through-parent");
 			}
 		}
 		ImGui::Separator();
@@ -3165,6 +3227,27 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 	if (world.isBuiltin(entity)) return false;
 	auto& registry = world.registry();
 	bool added = false;
+	// What the clipboard holds comes first, named: "Paste Component (Light)".
+	// A component the entity already has is overwritten rather than doubled —
+	// the scene format allows one of each — which the tooltip says. The label
+	// is built at run time, so the help is asked for by key.
+	{
+		const std::string clip = clipboardComponentKey();
+		if (const char* label = clip.empty() ? nullptr : componentLabelForKey(clip.c_str()))
+		{
+			char item[128];
+			std::snprintf(item, sizeof(item), "Paste Component (%s)", label);
+			if (ImGui::MenuItem(item))
+			{
+				if (undo) undo->snapshotNow();
+				if (const char* text = ImGui::GetClipboardText())
+					added = SceneSerializer{}.importComponentText(world, entity, text);
+				ImGui::CloseCurrentPopup();
+			}
+			EditorWidgets::helpForKey("details.paste-component");
+			ImGui::Separator();
+		}
+	}
 	{
 		{
 			auto addItem = [&]<typename T>(const char* label, T)
@@ -3265,6 +3348,16 @@ bool renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
                const char* onlyComponent)
 {
 	return renderForImpl(ctx, world, entity, undo, onlyComponent, nullptr);
+}
+
+std::string clipboardComponentKey()
+{
+#ifdef HE_IMGUI_ENABLED
+	const char* text = ImGui::GetClipboardText();
+	return text ? SceneSerializer::componentKeyOfText(text) : std::string();
+#else
+	return {};
+#endif
 }
 
 void listComponents(AppContext& ctx, HorizonWorld& world, Entity entity,

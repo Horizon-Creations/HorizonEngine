@@ -1438,6 +1438,23 @@ namespace
 	  "Takes this component off the entity. What it drove stops: a Mesh removed "
 	  "leaves the entity in the scene with nothing to draw.",
 	  "", "editor#details" },
+	{ "Component/Copy Component", "Copy Component",
+	  "Puts this component, with every one of its values, on the clipboard as "
+	  "text. Paste it onto another entity through its Add Component menu, or "
+	  "onto the same component there with Paste Component Values. It is plain "
+	  "text, so it also travels between two editors and into a chat message.",
+	  "", "editor#details" },
+	{ "Component/Paste Component Values", "Paste Component Values",
+	  "Overwrites every value of this component with the copy on the clipboard. "
+	  "Only offered while the clipboard holds a component of this same kind. "
+	  "Undo brings the old values back.",
+	  "", "editor#details" },
+	{ "Component/Reset to Default", "Reset to Default",
+	  "Puts every value of this component back to what a freshly added one has. "
+	  "Authored data goes with the values: a terrain loses its sculpting and "
+	  "painting, a nav mesh its bake, a foliage layer its placements. One undo "
+	  "step brings all of it back.",
+	  "", "editor#details" },
 	{ "Nav Mesh/Bake", "",
 	  "Walks the scene's static geometry and builds the walkable surface from "
 	  "it. Nothing can path until this has run, and it has to run again after "
@@ -2403,6 +2420,25 @@ namespace
 	{ "details.name", "Name",
 	  "What this entity is called in the Outliner and to scripts that look it up "
 	  "by name.",
+	  "", "editor#details" },
+	{ "details.active", "Active",
+	  "The one switch for the whole entity. Off means it is not in the game: "
+	  "nothing of it is drawn, its script does not start, no physics body is "
+	  "built for it and its audio source stays silent. It takes everything "
+	  "under it along. Unlike the Outliner's eye, which only hides what is "
+	  "drawn, this is saved as part of the entity and is off in the packaged "
+	  "game too. Flipping it while the game runs takes effect at the next "
+	  "start, not immediately.",
+	  "", "editor#details" },
+	{ "details.active-through-parent", "Switched off through a parent",
+	  "This entity's own switch is on, but an entity above it in the Outliner "
+	  "is off, and off is inherited. Select that parent to switch the whole "
+	  "group back on.",
+	  "", "editor#details" },
+	{ "details.paste-component", "Paste Component",
+	  "Adds the component on the clipboard to this entity, with the values it "
+	  "was copied with. An entity can carry one of each kind, so a component it "
+	  "already has takes the copied values instead of being doubled.",
 	  "", "editor#details" },
 	// ── Placed prefabs ───────────────────────────────────────────────────────
 	{ "details.prefab", "Prefab Instance",

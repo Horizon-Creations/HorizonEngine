@@ -46,6 +46,7 @@ add_executable(he_tests
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.
     test_outliner_ui.cpp
+    test_inspector_ui.cpp
     # The Landscape panel's Foliage brush, driven the same way: mode well,
     # Grow/Erase well, and a drag over a top-down viewport into the mask.
     test_terrain_tools_ui.cpp
@@ -498,6 +499,11 @@ add_executable(he_tests
     # HE_IMGUI_ENABLED as the gizmo — AppContext's layout depends on it, so the
     # panel and its test are the only two sources here that see that layout.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
+    # The Details panel, for test_inspector_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED. Everything it reaches for (the widgets, the
+    # help table, the multi-edit diff, the HorizonCode class listing, the
+    # Landscape tools) is already in this binary for the other panels.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/InspectorPanel.cpp
     # The Landscape tools, for test_terrain_tools_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. Everything they call (TerrainPaint/FoliagePaint
     # in HorizonScene, RenderWorld, the toolbar, the widgets) is already here.
@@ -526,6 +532,8 @@ set_source_files_properties(
     test_viewport_gizmo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
     test_outliner_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/InspectorPanel.cpp
+    test_inspector_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
     test_terrain_tools_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp

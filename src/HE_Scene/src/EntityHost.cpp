@@ -1,4 +1,5 @@
 #include "HorizonScene/EntityHost.h"
+#include <HorizonScene/EntityActive.h>   // the "Active" switch: no class instance for what is off
 #include <cstdint>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HcCompiledLoader.h>   // HorizonCode::compiledClasses()
@@ -47,8 +48,10 @@ void EntityHost::begin(HorizonCode::Runtime& runtime, HorizonWorld& world, Conte
 	// the two split on the referenced asset's TYPE, so an entity belongs to
 	// exactly one of them and neither needs to know about the other.
 	size_t bound = 0;
+	const HE::ActiveFilter active(world.registry());
 	for (auto [entity, sc] : world.registry().view<ScriptComponent>().each())
 	{
+		if (active.off(entity)) continue;   // switched off: no instance, like a Lua script
 		const HorizonCodeClassAsset* a = classAssetOf(cm, sc);
 		if (!a) continue;
 		if (bind(entity, a->path) != 0) ++bound;
@@ -61,9 +64,11 @@ int EntityHost::bindFor(const std::vector<Entity>& entities)
 {
 	if (!m_runtime || !m_world || !m_content) return 0;
 	int bound = 0;
+	const HE::ActiveFilter active(m_world->registry());
 	for (const Entity e : entities)
 	{
 		if (!m_world->registry().valid(e)) continue;
+		if (active.off(e)) continue;
 		const auto* sc = m_world->registry().try_get<ScriptComponent>(e);
 		if (!sc) continue;
 		const HorizonCodeClassAsset* a = classAssetOf(*m_content, *sc);

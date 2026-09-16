@@ -6,6 +6,7 @@
 #include "EditorTheme.h"                 // the accent the prefab badge is drawn in
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/EntityVisibility.h> // what the eye on a row flips, and reads
+#include <HorizonScene/EntityActive.h>     // the Details panel's Active switch dims a row
 #include <ContentManager/ContentManager.h> // the prefab badge names the asset
 #include <ContentManager/Assets.h>
 #include <UIWidget/WidgetManager.h>   // application projects list widgets, not entities
@@ -631,10 +632,15 @@ void render(AppContext& ctx)
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
                 pushedText = true;
             }
-            else if (show == OutlinerFilter::Show::Context)
+            else if (show == OutlinerFilter::Show::Context ||
+                     !HE::isEntityActive(ctx.world->registry(), node.entity))
             {
                 // Not a hit itself — the path to one. Dimmed so the eye lands
-                // on what was searched for, not on the folders around it.
+                // on what was searched for, not on the folders around it. The
+                // same dimming for an entity that is switched off (its own
+                // Active box in the Details panel, or a parent's): it is in
+                // the scene file but not in the game, and the row should look
+                // like that.
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
                 pushedText = true;
             }

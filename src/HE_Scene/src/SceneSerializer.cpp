@@ -20,6 +20,7 @@
 #include "HorizonScene/Components/ScriptComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
 #include "HorizonScene/Components/EditorLockComponent.h"   // the Outliner's lock, an entity-level field
+#include "HorizonScene/Components/InactiveComponent.h"     // the "Active" switch, a component like any other
 #include "HorizonScene/Components/PrefabInstanceComponent.h"
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
@@ -832,6 +833,13 @@ namespace
 				{ "onClickFunction", btn->onClickFunction },
 			};
 		}
+		// The "Active" switch, off. An empty object rather than a flag on the
+		// entity record (where the Outliner's lock sits): being switched off is
+		// gameplay state — off in the editor is off in the packaged game — so it
+		// belongs to what prefabs diff and the clipboard carries. Written only
+		// when set; see InactiveComponent.h.
+		if (registry.all_of<InactiveComponent>(entity))
+			comps["inactive"] = json::object();
 		return comps;
 	}
 
@@ -1760,6 +1768,8 @@ namespace
 			btn.onClickFunction  = c.value("onClickFunction", btn.onClickFunction);
 			registry.emplace_or_replace<UIButtonComponent>(entity, std::move(btn));
 		}
+		if (comps.contains("inactive"))
+			registry.emplace_or_replace<InactiveComponent>(entity);
 	}
 #undef HE_NAVCFG_FIELDS
 
@@ -2218,60 +2228,93 @@ namespace
 		return prefabRoot;
 	}
 
-	// ── Scene key → component, the inverse of one applyComponents block ──────
+	// ── Scene key → component type, ONE list for the two inverses of an
+	// applyComponents block ─────────────────────────────────────────────────
 	// Hand-maintained like isKnownComponentKey, and for the same reason there is
 	// no compiler tying it to the load path. tests/test_scene_serializer walks a
 	// world carrying every component and asserts that removing each key the save
-	// path writes really takes the component away — a key missing here fails
-	// that test, not a user's propagation silently.
+	// path writes really takes the component away, and that resetting it puts
+	// the defaults back — a key missing here fails those tests, not a user's
+	// propagation silently. An X-macro rather than two tables so that the remove
+	// path and the reset path can never know different keys. The last entry is
+	// the "Active" switch: in the list so a prefab sync can take it away (the
+	// template switched the entity back on); resetComponentForKey skips it,
+	// because a tag has no values to put back.
+#define HE_SCENE_COMPONENT_KEYS(X) \
+	X("transform",           TransformComponent) \
+	X("transform2d",         Transform2DComponent) \
+	X("mesh",                MeshComponent) \
+	X("material",            MaterialComponent) \
+	X("camera",              CameraComponent) \
+	X("movement",            MovementComponent) \
+	X("cameraRig",           CameraRigComponent) \
+	X("light",               LightComponent) \
+	X("decal",               DecalComponent) \
+	X("rope",                RopeComponent) \
+	X("trail",               TrailComponent) \
+	X("rigidbody",           RigidBodyComponent) \
+	X("collider",            ColliderComponent) \
+	X("joint",               JointComponent) \
+	X("characterController", CharacterControllerComponent) \
+	X("saveState",           SaveStateComponent) \
+	X("prefab",              PrefabInstanceComponent) \
+	X("script",              ScriptComponent) \
+	X("environment",         EnvironmentComponent) \
+	X("weather",             WeatherComponent) \
+	X("terrain",             TerrainComponent) \
+	X("audiosource",         AudioSourceComponent) \
+	X("audiolistener",       AudioListenerComponent) \
+	X("particlesystem",      ParticleSystemComponent) \
+	X("skeletalmesh",        SkeletalMeshComponent) \
+	X("animator",            AnimatorComponent) \
+	X("animatorblend",       AnimatorBlendComponent) \
+	X("animationlayers",     AnimationLayerComponent) \
+	X("rootmotion",          RootMotionComponent) \
+	X("ik",                  IkComponent) \
+	X("propertyanimator",    PropertyAnimatorComponent) \
+	X("navmesh",             NavMeshComponent) \
+	X("navagent",            NavAgentComponent) \
+	X("foliage",             FoliageComponent) \
+	X("animstatemachine",    AnimatorStateMachineComponent) \
+	X("lod",                 LODComponent) \
+	X("uicanvas",            UICanvasComponent) \
+	X("uielement",           UIElementComponent) \
+	X("uitext",              UITextComponent) \
+	X("uiimage",             UIImageComponent) \
+	X("uibutton",            UIButtonComponent) \
+	X("inactive",            InactiveComponent)
+
 	bool removeComponentForKey(entt::registry& registry, Entity entity, const std::string& key)
 	{
 #define HE_REMOVE_FOR_KEY(k, T) \
 		if (key == k) return registry.remove<T>(entity) > 0;
-		HE_REMOVE_FOR_KEY("transform",           TransformComponent)
-		HE_REMOVE_FOR_KEY("transform2d",         Transform2DComponent)
-		HE_REMOVE_FOR_KEY("mesh",                MeshComponent)
-		HE_REMOVE_FOR_KEY("material",            MaterialComponent)
-		HE_REMOVE_FOR_KEY("camera",              CameraComponent)
-		HE_REMOVE_FOR_KEY("movement",            MovementComponent)
-		HE_REMOVE_FOR_KEY("cameraRig",           CameraRigComponent)
-		HE_REMOVE_FOR_KEY("light",               LightComponent)
-		HE_REMOVE_FOR_KEY("decal",               DecalComponent)
-		HE_REMOVE_FOR_KEY("rope",                RopeComponent)
-		HE_REMOVE_FOR_KEY("trail",               TrailComponent)
-		HE_REMOVE_FOR_KEY("rigidbody",           RigidBodyComponent)
-		HE_REMOVE_FOR_KEY("collider",            ColliderComponent)
-		HE_REMOVE_FOR_KEY("joint",               JointComponent)
-		HE_REMOVE_FOR_KEY("characterController", CharacterControllerComponent)
-		HE_REMOVE_FOR_KEY("saveState",           SaveStateComponent)
-		HE_REMOVE_FOR_KEY("prefab",              PrefabInstanceComponent)
-		HE_REMOVE_FOR_KEY("script",              ScriptComponent)
-		HE_REMOVE_FOR_KEY("environment",         EnvironmentComponent)
-		HE_REMOVE_FOR_KEY("weather",             WeatherComponent)
-		HE_REMOVE_FOR_KEY("terrain",             TerrainComponent)
-		HE_REMOVE_FOR_KEY("audiosource",         AudioSourceComponent)
-		HE_REMOVE_FOR_KEY("audiolistener",       AudioListenerComponent)
-		HE_REMOVE_FOR_KEY("particlesystem",      ParticleSystemComponent)
-		HE_REMOVE_FOR_KEY("skeletalmesh",        SkeletalMeshComponent)
-		HE_REMOVE_FOR_KEY("animator",            AnimatorComponent)
-		HE_REMOVE_FOR_KEY("animatorblend",       AnimatorBlendComponent)
-		HE_REMOVE_FOR_KEY("animationlayers",     AnimationLayerComponent)
-		HE_REMOVE_FOR_KEY("rootmotion",          RootMotionComponent)
-		HE_REMOVE_FOR_KEY("ik",                  IkComponent)
-		HE_REMOVE_FOR_KEY("propertyanimator",    PropertyAnimatorComponent)
-		HE_REMOVE_FOR_KEY("navmesh",             NavMeshComponent)
-		HE_REMOVE_FOR_KEY("navagent",            NavAgentComponent)
-		HE_REMOVE_FOR_KEY("foliage",             FoliageComponent)
-		HE_REMOVE_FOR_KEY("animstatemachine",    AnimatorStateMachineComponent)
-		HE_REMOVE_FOR_KEY("lod",                 LODComponent)
-		HE_REMOVE_FOR_KEY("uicanvas",            UICanvasComponent)
-		HE_REMOVE_FOR_KEY("uielement",           UIElementComponent)
-		HE_REMOVE_FOR_KEY("uitext",              UITextComponent)
-		HE_REMOVE_FOR_KEY("uiimage",             UIImageComponent)
-		HE_REMOVE_FOR_KEY("uibutton",            UIButtonComponent)
+		HE_SCENE_COMPONENT_KEYS(HE_REMOVE_FOR_KEY)
 #undef HE_REMOVE_FOR_KEY
 		return false;
 	}
+
+	// Put a component the entity ALREADY carries back to a freshly constructed
+	// one — the Details panel's "Reset to Default". Not an add: an entity
+	// without the component is left alone (false), so a reset can never turn
+	// into an unasked-for Add Component. "prefab" is refused: the instance link
+	// and its bindings are identity, not values, and a default-constructed one
+	// would cut the placement off from its asset. A tag ("inactive") has no
+	// values and reports false as well.
+	bool resetComponentForKey(entt::registry& registry, Entity entity, const std::string& key)
+	{
+		if (key == "prefab" || key == "inactive") return false;
+#define HE_RESET_FOR_KEY(k, T) \
+		if (key == k) \
+		{ \
+			if (!registry.all_of<T>(entity)) return false; \
+			registry.replace<T>(entity, T{}); \
+			return true; \
+		}
+		HE_SCENE_COMPONENT_KEYS(HE_RESET_FOR_KEY)
+#undef HE_RESET_FOR_KEY
+		return false;
+	}
+#undef HE_SCENE_COMPONENT_KEYS
 
 	// ── Prefab propagation ───────────────────────────────────────────────────
 	// The keys propagation never writes. "prefab" is the instance's own link
@@ -2469,6 +2512,8 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"trail",
 		"transform", "transform2d", "uibutton", "uicanvas", "uielement",
 		"uiimage", "uitext", "weather",
+		// The "Active" switch, off (InactiveComponent) — an empty object.
+		"inactive",
 		// Not a component: serializeEntityComponents carries the display name
 		// in the same object, because a rename would otherwise be the one edit
 		// the component-sync path drops.
@@ -2740,6 +2785,69 @@ bool SceneSerializer::removeComponentByKey(HorizonWorld& world, Entity entity, c
     auto& registry = world.registry();
     if (!registry.valid(entity)) return false;
     return removeComponentForKey(registry, entity, key);
+}
+
+bool SceneSerializer::resetComponentByKey(HorizonWorld& world, Entity entity, const std::string& key)
+{
+    auto& registry = world.registry();
+    if (!registry.valid(entity)) return false;
+    return resetComponentForKey(registry, entity, key);
+}
+
+// ── One component as clipboard text ──────────────────────────────────────────
+namespace
+{
+    constexpr const char* kComponentEnvelopeKey    = "horizonComponent";
+    constexpr const char* kComponentEnvelopeValues = "values";
+
+    bool isClipboardComponentKey(const std::string& key)
+    {
+        return key != "__name" && key != "prefab" && SceneSerializer::isKnownComponentKey(key);
+    }
+}
+
+std::string SceneSerializer::exportComponentText(const HorizonWorld& world, Entity entity,
+                                                 const std::string& key)
+{
+    if (!isClipboardComponentKey(key)) return {};
+    auto& registry = const_cast<HorizonWorld&>(world).registry();
+    if (!registry.valid(entity)) return {};
+    const json comps = serializeComponents(registry, entity);
+    const auto it = comps.find(key);
+    if (it == comps.end()) return {};
+    const json envelope = {
+        { kComponentEnvelopeKey,    key },
+        { kComponentEnvelopeValues, *it },
+    };
+    return envelope.dump(2);
+}
+
+std::string SceneSerializer::componentKeyOfText(const std::string& text)
+{
+    // Cheap rejection first: the clipboard usually holds prose or a path, and
+    // parsing every frame a menu is open should not start with an exception.
+    if (text.size() < 2 || text.find(kComponentEnvelopeKey) == std::string::npos) return {};
+    const json envelope = json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (envelope.is_discarded() || !envelope.is_object()) return {};
+    const auto keyIt = envelope.find(kComponentEnvelopeKey);
+    const auto valIt = envelope.find(kComponentEnvelopeValues);
+    if (keyIt == envelope.end() || !keyIt->is_string()) return {};
+    if (valIt == envelope.end() || !valIt->is_object()) return {};
+    const std::string key = keyIt->get<std::string>();
+    return isClipboardComponentKey(key) ? key : std::string{};
+}
+
+bool SceneSerializer::importComponentText(HorizonWorld& world, Entity entity, const std::string& text)
+{
+    const std::string key = componentKeyOfText(text);
+    if (key.empty()) return false;
+    auto& registry = world.registry();
+    if (!registry.valid(entity)) return false;
+    const json envelope = json::parse(text, nullptr, /*allow_exceptions=*/false);
+    // One block, restored the way a scene load restores it — so a pasted
+    // component is exactly what a saved-and-reloaded one would be.
+    applyComponents(registry, entity, json{ { key, envelope[kComponentEnvelopeValues] } });
+    return true;
 }
 
 bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,

@@ -46,6 +46,7 @@ JPH_SUPPRESS_WARNINGS
 
 #include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/EntityActive.h"   // the "Active" switch: no body for what is off
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/Components/TransformComponent.h"
@@ -1876,10 +1877,18 @@ void PhysicsWorld::initialize(HorizonWorld& world)
     // Every view is collected BEFORE anything is built. The builders reach for
     // components a scene may not have any storage for yet, and creating a pool
     // is exactly what invalidates a view that is being iterated.
-    const auto collect = [](auto view) {
+    //
+    // An entity that is switched off (the Details panel's Active box, its own
+    // or an ancestor's) gets no body: off means it is not in the game, and a
+    // collider standing where nothing is drawn is the invisible wall nobody
+    // meant. Only here, at the start — addEntity is a runtime request and does
+    // what it is asked.
+    const HE::ActiveFilter active(reg);
+    const auto collect = [&active](auto view) {
         std::vector<uint32_t> ids;
         for (auto entity : view)
-            ids.push_back(static_cast<uint32_t>(entity));
+            if (!active.off(entity))
+                ids.push_back(static_cast<uint32_t>(entity));
         return ids;
     };
 
