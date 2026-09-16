@@ -575,6 +575,10 @@ GraphEditor::Model buildModel(const Host& h)
 	{
 		if (h.errorNode != 0 && id == h.errorNode) return IM_COL32(230, 70, 70, 255);
 		if (h.traceKey.empty()) return 0;
+		// The node a run is STOPPED at: a solid marker that stays until the
+		// run moves on — a program counter does not fade. Yellow, not the
+		// halo's amber, so "about to run" and "just ran" read differently.
+		if (HcExecTrace::pausedNodeOf(h.traceKey) == id) return IM_COL32(255, 236, 120, 255);
 		const float glow = HcExecTrace::glowOf(h.traceKey, id);
 		if (glow <= 0.0f) return 0;
 		// Alpha fades, the hue does not: a halo that changed colour as it aged
@@ -668,6 +672,23 @@ GraphEditor::Model buildModel(const Host& h)
 			const char* title = cb.text.empty() ? "(double-click to name)" : cb.text.c_str();
 			dl->AddText(font, fsz, ImVec2(cp.x + 6.0f * zoom, cp.y + 4.0f * zoom),
 			            cb.text.empty() ? IM_COL32(230, 210, 160, 130) : IM_COL32(240, 225, 190, 255), title);
+		}
+	};
+	// Breakpoint dots: a red disc on the left edge of a node's header, the
+	// gutter mark every text debugger uses. In front of the nodes, because the
+	// disc sits half outside the box and the box would otherwise cover it.
+	m.drawFront = [&h, &graph](ImDrawList* dl, ImVec2 origin, ImVec2 pan, float zoom)
+	{
+		if (h.traceKey.empty() || HcExecTrace::breakpointCount() == 0) return;
+		for (const int id : HcExecTrace::breakpointsOf(h.traceKey))
+		{
+			const HC::Node* n = graph.findNode(id);
+			if (!n || n->subgraph != h.currentGraph) continue;
+			const ImVec2 c(origin.x + pan.x + n->x * zoom,
+			               origin.y + pan.y + (n->y + GraphEditor::kTitleH * 0.5f) * zoom);
+			const float r = 5.0f * zoom;
+			dl->AddCircleFilled(c, r + 1.5f * zoom, IM_COL32(20, 12, 12, 255));
+			dl->AddCircleFilled(c, r, IM_COL32(225, 60, 60, 255));
 		}
 	};
 	m.interactBehind = [&h, &graph](ImVec2 origin, ImVec2 pan, float zoom, bool) -> bool
@@ -831,10 +852,33 @@ GraphEditor::Model buildModel(const Host& h)
 				h.onEdit(true);
 			}
 		}
+		HE::Ed::Help::Scope helpScope("HorizonCode Graph");
+		// Breakpoints: only on nodes the interpreter can stop AT — exec nodes
+		// and the entries (Event, Input Action, Function). A pure node is read,
+		// not run, so it can never be stopped on; offering the item there
+		// would promise a stop that never comes. Graphs nothing executes (no
+		// trace key) have nowhere to stop either.
+		if (const HC::Node* bn = graph.findNode(nodeId); bn && !h.traceKey.empty())
+		{
+			const HC::NodeSigCounts sc = HC::signatureCountsOf(*bn);
+			if (sc.execIns > 0 || sc.execOuts > 0)
+			{
+				if (HcExecTrace::hasBreakpoint(h.traceKey, nodeId))
+				{
+					if (EditorWidgets::menuItem("Remove Breakpoint"))
+						HcExecTrace::setBreakpoint(h.traceKey, nodeId, false);
+				}
+				else if (EditorWidgets::menuItem("Add Breakpoint"))
+					HcExecTrace::setBreakpoint(h.traceKey, nodeId, true);
+				if (HcExecTrace::breakpointCount() > 0 &&
+				    EditorWidgets::menuItem("Remove All Breakpoints"))
+					HcExecTrace::clearAllBreakpoints();
+				ImGui::Separator();
+			}
+		}
 		// A comment box sized to the selection: the bounds of every selected
 		// node's box (heights are not known here, so a row-and-a-half estimate
 		// per pin row — the grip fixes what the estimate got wrong).
-		HE::Ed::Help::Scope helpScope("HorizonCode Graph");
 		if (EditorWidgets::menuItem(multi ? "Wrap Selection in Comment" : "Wrap in Comment"))
 		{
 			const std::vector<int> ids = multi ? ge.selection : std::vector<int>{ nodeId };

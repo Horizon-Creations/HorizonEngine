@@ -2338,8 +2338,22 @@ namespace
 	  "", "editor#play-mode" },
 	{ "viewport.step", "Step",
 	  "Advances a paused session by exactly one frame — the way to watch a bug "
-	  "happen instead of catching it afterwards.",
+	  "happen instead of catching it afterwards. With a script stopped at a "
+	  "breakpoint, that run finishes first: one frame is one whole frame.",
 	  "", "editor#play-mode" },
+	{ "viewport.continue", "Continue",
+	  "A HorizonCode graph is stopped at a breakpoint (the yellow-framed node). "
+	  "This runs it on from there — the node itself, the rest of its chain, the "
+	  "remaining iterations of a loop it stopped inside — and then lets the world "
+	  "tick again. The next breakpoint stops it again. Breakpoints are set on a "
+	  "node's right-click menu in the graph.",
+	  "", "horizoncode#graphs" },
+	{ "viewport.step-node", "Step Node",
+	  "Runs exactly the node the graph is stopped at and stops at the next one — "
+	  "into a called function, out to the caller, wherever the next node is. "
+	  "When the chain simply ends, the run is over and the world goes on until "
+	  "the next breakpoint.",
+	  "", "horizoncode#graphs" },
 	{ "viewport.time-scale", "Game time",
 	  "What the RUNNING GAME is doing to its own clock, which is not the same as "
 	  "the Pause button next to it: this reads the scale a script set with Set "
@@ -5599,6 +5613,22 @@ namespace
 	{ "HorizonCode Graph/Wrap Selection in Comment", "Wrap Selection in Comment",
 	  "Puts one comment frame around every selected node, sized to the group. "
 	  "From then on dragging the frame's header moves them all.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Add Breakpoint", "Add Breakpoint",
+	  "Marks this node with a red dot: the next time a running graph reaches it, "
+	  "execution stops BEFORE the node runs, the world freezes, and the graph "
+	  "opens on the node with a yellow frame. Continue and Step Node in the "
+	  "viewport's transport carry on from there. Only nodes with an exec pin can "
+	  "be stopped at — a pure node is read, never run. Breakpoints live for the "
+	  "editor session and are not saved with the asset; compiled (packaged) "
+	  "classes never stop.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Remove Breakpoint", "Remove Breakpoint",
+	  "Takes the breakpoint off this node. A run already stopped there stays "
+	  "stopped until Continue.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Remove All Breakpoints", "Remove All Breakpoints",
+	  "Clears every breakpoint in every graph of the project at once.",
 	  "", "horizoncode#graphs" },
 	{ "HorizonCode Graph/Rename Comment", "Rename Comment",
 	  "Opens the frame's title for editing — the same as double-clicking its "

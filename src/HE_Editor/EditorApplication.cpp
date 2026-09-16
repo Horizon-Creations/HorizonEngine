@@ -2258,6 +2258,13 @@ void EditorApplication::OnRender(float dt)
 	// it), and an editor button sharing that variable would fight it. A step lets
 	// exactly one tick through; the request is consumed here, so the pause re-arms
 	// without anyone having to press it again.
+	// A HorizonCode breakpoint hit during the last frame's tick freezes this
+	// one (HcExecTrace::takeBreakHit — the listener runs from inside the tick,
+	// so the frame it hit in finished as it was). Only a play session can be
+	// frozen; in an application project the stopped run waits while the UI
+	// stays live, and Continue is the same button.
+	HcExecTrace::refreshPaused();
+	if (HcExecTrace::takeBreakHit() && m_isPlaying) { m_isPaused = true; m_stepFrame = false; }
 	const bool stepping   = m_isPaused && m_stepFrame;
 	m_stepFrame           = false;
 	const bool simulating = m_isPlaying && (!m_isPaused || stepping);
@@ -7970,12 +7977,35 @@ AppContext EditorApplication::makeContext()
 		// Both refuse to freeze an edit-mode session: there is no world tick to
 		// gate there, and a pause that outlived play mode would silently swallow
 		// the first frames of the NEXT one.
-		.setPaused           = [this](bool paused){ m_isPaused = m_isPlaying && paused; },
+		.setPaused           = [this](bool paused)
+		{
+			// Resume while a script is stopped at a breakpoint = Continue: the
+			// stopped run goes on first, then the world. Otherwise the tick
+			// would resume around a chain frozen forever.
+			if (!paused && m_gameInstance.runtime().isSuspended())
+				m_gameInstance.runtime().debugContinue();
+			m_isPaused = m_isPlaying && paused;
+		},
 		.stepFrame           = [this]
 		{
 			if (!m_isPlaying) return;
+			// A frame step with a stopped script lets that run finish first —
+			// one frame means one whole frame, scripts included.
+			if (m_gameInstance.runtime().isSuspended())
+				m_gameInstance.runtime().debugContinue();
 			m_isPaused  = true;   // stepping a running scene pauses it first
 			m_stepFrame = true;
+		},
+		.hcSuspended         = HcExecTrace::isPaused(),
+		.stepNode            = [this]
+		{
+			auto& rt = m_gameInstance.runtime();
+			if (!rt.isSuspended()) return;
+			rt.debugStep();
+			// The run reached its end without another node to stop at: it is
+			// over, and the world goes on until the next breakpoint — the way
+			// a text debugger stepping out of the last line resumes.
+			if (!rt.isSuspended()) m_isPaused = false;
 		},
 		.reportPlayUIPointer = [this](float mx, float my, float vpW, float vpH,
 		                              bool down, bool valid, float wheel,
@@ -8620,6 +8650,13 @@ void EditorApplication::setPlayMode(bool play)
 		if (logicLoader().isLoaded())
 			logicLoader().unload(*m_editorWorld);
 
+		// Runs stopped at a breakpoint die with the session: the GameInstance's
+		// runtime outlives it, and a stopped run of the GameInstance would
+		// otherwise wake up in the NEXT session, on Continue, in a world it
+		// never saw. The marker and the halos go with them.
+		m_gameInstance.runtime().debugAbort();
+		HcExecTrace::clearPaused();
+		HcExecTrace::clearHits();
 		// Player instances go down first (their Destruct may still reference the
 		// GameInstance), then the GameInstance fires OnShutdown while the app
 		// runtime is still intact (it lives outside the world, so clear() below
@@ -8724,6 +8761,9 @@ void EditorApplication::restartAppPreview(bool keepState)
 	WidgetManager::StateSnapshot snapshot;
 	if (keepState) snapshot = m_editorWorld->widgets().captureState();
 
+	// A run stopped at a breakpoint belongs to the preview that is going down.
+	m_gameInstance.runtime().debugAbort();
+	HcExecTrace::clearPaused();
 	// Down in the reverse order it came up. fireShutdown before the widgets go,
 	// so a graph's OnShutdown still finds the things it is about to let go of.
 	m_gameInstance.fireShutdown();

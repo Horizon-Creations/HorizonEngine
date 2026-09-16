@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace HorizonCode { class Runtime; }
 
@@ -15,6 +16,13 @@ namespace HorizonCode { class Runtime; }
 //     play mode is on. Nothing here is ever "current" in the sense of a paused
 //     program counter — that is what breakpoints are for, and they come later.
 //     A hit is a moment in the past with a timestamp.
+//
+//   • BREAKPOINTS — which nodes of which graph the interpreter must stop at,
+//     keyed the same way as the hits. The runtime keeps none of its own; it
+//     asks (Runtime::setBreakPredicate) and this answers. And the STOP: the
+//     node a run is currently stopped at, drawn as a persistent marker (not
+//     a fading halo — a program counter does not fade), plus the one-shot the
+//     editor shell consumes to freeze the world tick when a stop happens.
 //
 //   • REVEAL — a request to show one node: from a console line that carries a
 //     site ("take me to the Print that wrote this"), or from anything else that
@@ -54,6 +62,10 @@ namespace HcExecTrace
 	// editor start on the app-wide runtime, which also runs widget previews —
 	// so a previewed widget's graph lights up the same way a played level's does.
 	void attach(HorizonCode::Runtime& rt);
+	// Forget the attached runtime (refreshPaused becomes a no-op). The editor
+	// never needs this — its runtime outlives the module — the tests do, whose
+	// runtimes are locals.
+	void detach();
 
 	// Record that `nodeId` of the graph `runtimeKey` ran, now (steady clock) or
 	// at an explicit time in seconds — the explicit form is for the tests, which
@@ -76,6 +88,48 @@ namespace HcExecTrace
 	// a click on a console line from the last session still names a node that
 	// exists.
 	void clearHits();
+
+	// ── Breakpoints ──────────────────────────────────────────────────────────
+	// Set, clear, flip and read a breakpoint on `nodeId` of the graph `tabKey`
+	// names (a runtime key is accepted too — it is normalised). In memory for
+	// the editor's lifetime; not saved with the asset.
+	void setBreakpoint(const std::string& tabKey, int nodeId, bool on);
+	void toggleBreakpoint(const std::string& tabKey, int nodeId);
+	bool hasBreakpoint(const std::string& tabKey, int nodeId);
+	// Every breakpoint of one graph (sorted), and the count over all graphs.
+	std::vector<int> breakpointsOf(const std::string& tabKey);
+	size_t           breakpointCount();
+	// Drop every breakpoint of one graph / of all graphs.
+	void clearBreakpoints(const std::string& tabKey);
+	void clearAllBreakpoints();
+	// The runtime's question, answered from the set above: stop at this node?
+	// What attach() installs as the break predicate; public for the test.
+	bool shouldBreakAt(const std::string& runtimeKey, int nodeId);
+
+	// ── The stop ─────────────────────────────────────────────────────────────
+	// A run stopped at `nodeId` of `runtimeKey` (the runtime's suspend listener
+	// lands here): remembered as the paused site, revealed like a console
+	// click would, and flagged for the shell (takeBreakHit). Public so a test
+	// can stop without a runtime.
+	void recordStop(const std::string& runtimeKey, int nodeId, uint32_t instance);
+	// The node a run is stopped at in `tabKey`'s graph, 0 = none. The canvas
+	// asks per node per frame, like glowOf.
+	int      pausedNodeOf(const std::string& tabKey);
+	// Is any run stopped? And on which instance (0 = none) — the watch window's
+	// "the object this stop belongs to".
+	bool     isPaused();
+	uint32_t pausedInstance();
+	// Bring the paused site in line with the attached runtime: after a
+	// Continue or a Step the stopped run has moved on (or ended), and the
+	// marker must follow. Called once per frame by the shell; a no-op when
+	// nothing was attached (tests drive recordStop/clearPaused directly).
+	void refreshPaused();
+	// Forget the paused site (play stopped, runs aborted).
+	void clearPaused();
+	// One-shot: a stop happened since the last call. The shell freezes the
+	// world tick on it — the listener runs from INSIDE the tick, and the
+	// frame that is running finishes as it is; the pause lands on the next.
+	bool takeBreakHit();
 
 	// ── Reveal ───────────────────────────────────────────────────────────────
 	// Ask the editor to show `nodeId` of the graph `runtimeKey` (or a tab key —

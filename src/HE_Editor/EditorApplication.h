@@ -181,6 +181,14 @@ struct AppContext
 	// any transport state.
 	std::function<void(bool)> setPaused;
 	std::function<void()>     stepFrame;
+	// A HorizonCode run is stopped at a breakpoint (HcExecTrace::isPaused). The
+	// transport's Pause cell then reads as Continue — a resume lets the stopped
+	// run go on before the world ticks again — and Step Node lights up: run the
+	// stopped node, stop at the next. A step whose run simply ends unpauses
+	// the world; the next breakpoint stops it again. True outside play mode
+	// too, in an application project, whose UI runs without a play session.
+	bool                      hcSuspended = false;
+	std::function<void()>     stepNode;
 	// PIE UI pointer feed: viewport-relative mouse in render-target pixels +
 	// viewport size + LMB state + this frame's wheel; valid=false while
 	// outside/captured. The wheel rides along because a scroll box under the

@@ -7,6 +7,7 @@
 #include <HorizonCode/HorizonCodeRuntime.h>
 
 #include <string>
+#include <vector>
 
 using namespace HorizonCode;
 
@@ -18,8 +19,17 @@ namespace
 {
 	struct Reset
 	{
-		Reset()  { HcExecTrace::clearHits(); HcExecTrace::cancelReveal(); }
-		~Reset() { HcExecTrace::clearHits(); HcExecTrace::cancelReveal(); }
+		Reset()  { wipe(); }
+		~Reset() { wipe(); }
+		static void wipe()
+		{
+			HcExecTrace::detach();
+			HcExecTrace::clearHits();
+			HcExecTrace::cancelReveal();
+			HcExecTrace::clearAllBreakpoints();
+			HcExecTrace::clearPaused();
+			HcExecTrace::takeBreakHit();
+		}
 	};
 }
 
@@ -159,4 +169,134 @@ TEST_CASE("HcExecTrace: attached to a runtime, a fired event lights its chain un
 	// The pure ConstString is read, not executed — no glow.
 	CHECK(HcExecTrace::glowOf("Content/Lit.hasset", c) == 0.0f);
 	CHECK(HcExecTrace::lastInstanceOf("Content/Lit.hasset") == id);
+}
+
+// ── Breakpoints and the stop ─────────────────────────────────────────────────
+
+TEST_CASE("HcExecTrace: breakpoints are filed under the tab key and answer the runtime's question")
+{
+	Reset reset;
+	CHECK(HcExecTrace::breakpointCount() == 0);
+	CHECK_FALSE(HcExecTrace::hasBreakpoint("Content/A.hasset", 3));
+
+	HcExecTrace::setBreakpoint("Content/A.hasset", 3, true);
+	HcExecTrace::toggleBreakpoint("Content/A.hasset", 5);
+	// The level script's breakpoints are set on its TAB and asked for under
+	// the runtime's "level:<uuid>" spelling — whichever scene is playing.
+	HcExecTrace::setBreakpoint(LevelScriptPanel::kTabPath, 9, true);
+	CHECK(HcExecTrace::breakpointCount() == 3);
+	CHECK(HcExecTrace::hasBreakpoint("Content/A.hasset", 3));
+	CHECK(HcExecTrace::hasBreakpoint("Content/A.hasset", 5));
+	CHECK_FALSE(HcExecTrace::hasBreakpoint("Content/A.hasset", 4));
+	CHECK_FALSE(HcExecTrace::hasBreakpoint("Content/B.hasset", 3));
+	CHECK(HcExecTrace::breakpointsOf("Content/A.hasset") == std::vector<int>{ 3, 5 });
+	CHECK(HcExecTrace::shouldBreakAt("Content/A.hasset", 3));
+	CHECK(HcExecTrace::shouldBreakAt("level:0123456789abcdef0123456789abcdef", 9));
+	CHECK_FALSE(HcExecTrace::shouldBreakAt("level:0123456789abcdef0123456789abcdef", 3));
+
+	// Toggle off, clear one graph, clear all. Junk is ignored.
+	HcExecTrace::toggleBreakpoint("Content/A.hasset", 5);
+	CHECK_FALSE(HcExecTrace::hasBreakpoint("Content/A.hasset", 5));
+	HcExecTrace::clearBreakpoints("Content/A.hasset");
+	CHECK(HcExecTrace::breakpointsOf("Content/A.hasset").empty());
+	CHECK(HcExecTrace::breakpointCount() == 1);
+	HcExecTrace::setBreakpoint("", 3, true);
+	HcExecTrace::setBreakpoint("Content/A.hasset", 0, true);
+	CHECK(HcExecTrace::breakpointCount() == 1);
+	HcExecTrace::clearAllBreakpoints();
+	CHECK(HcExecTrace::breakpointCount() == 0);
+}
+
+TEST_CASE("HcExecTrace: a stop marks the node, reveals it, and flags the shell once")
+{
+	Reset reset;
+	CHECK_FALSE(HcExecTrace::isPaused());
+	CHECK_FALSE(HcExecTrace::takeBreakHit());
+
+	HcExecTrace::recordStop("level:abc", 7, 42);
+	CHECK(HcExecTrace::isPaused());
+	CHECK(HcExecTrace::pausedNodeOf(LevelScriptPanel::kTabPath) == 7);
+	CHECK(HcExecTrace::pausedNodeOf("Content/A.hasset") == 0);
+	CHECK(HcExecTrace::pausedInstance() == 42);
+	CHECK(HcExecTrace::takeBreakHit());
+	CHECK_FALSE(HcExecTrace::takeBreakHit());      // one-shot
+	// Revealed like a console click: the shell's tab half, then the panel's node.
+	std::string tab;
+	REQUIRE(HcExecTrace::takeRevealTab(tab));
+	CHECK(tab == LevelScriptPanel::kTabPath);
+	int node = 0;
+	REQUIRE(HcExecTrace::takeRevealNode(LevelScriptPanel::kTabPath, node));
+	CHECK(node == 7);
+
+	// A second stop while one is shown queues (the runtime keeps the order);
+	// the marker stays on the first, the shell is flagged again.
+	HcExecTrace::recordStop("Content/A.hasset", 3, 43);
+	CHECK(HcExecTrace::pausedNodeOf(LevelScriptPanel::kTabPath) == 7);
+	CHECK(HcExecTrace::pausedNodeOf("Content/A.hasset") == 0);
+	CHECK(HcExecTrace::takeBreakHit());
+
+	HcExecTrace::clearPaused();
+	CHECK_FALSE(HcExecTrace::isPaused());
+	CHECK(HcExecTrace::pausedNodeOf(LevelScriptPanel::kTabPath) == 0);
+}
+
+TEST_CASE("HcExecTrace: attached to a runtime, a breakpoint stops the run and refresh follows it")
+{
+	Reset reset;
+	// Ping → P1 → P2. Print: execIn 0 / execOut 1 / Text dataIn 2.
+	Graph g;
+	Node ev; ev.type = NodeType::Event; ev.s = "Ping";
+	const int e = g.addNode(ev);
+	int prints[2];
+	for (int& p : prints)
+	{
+		Node cs; cs.type = NodeType::ConstString; cs.s = "x";
+		const int c = g.addNode(cs);
+		Node pr; pr.type = NodeType::Print;
+		p = g.addNode(pr);
+		REQUIRE(g.connect(c, 0, p, 2));
+	}
+	REQUIRE(g.connect(e, 0, prints[0], 0));
+	REQUIRE(g.connect(prints[0], 1, prints[1], 0));
+
+	Runtime rt;
+	HcExecTrace::attach(rt);
+	ClassIdentity cls; cls.key = "Content/Stop.hasset";
+	const InstanceId id = rt.add(g, {}, cls);
+
+	HcExecTrace::setBreakpoint("Content/Stop.hasset", prints[0], true);
+	rt.fireEvent(id, "Ping");
+	// Stopped before P1: the entry lit up, P1 did not, and the marker is on P1.
+	REQUIRE(rt.isSuspended());
+	CHECK(HcExecTrace::glowOf("Content/Stop.hasset", e) > 0.5f);
+	CHECK(HcExecTrace::glowOf("Content/Stop.hasset", prints[0]) == 0.0f);
+	CHECK(HcExecTrace::pausedNodeOf("Content/Stop.hasset") == prints[0]);
+	CHECK(HcExecTrace::pausedInstance() == id);
+	CHECK(HcExecTrace::takeBreakHit());
+
+	// Step: the run moves to P2; the marker follows on refresh (the shell's
+	// once-per-frame call), and the new site is revealed.
+	HcExecTrace::cancelReveal();
+	rt.debugStep();
+	CHECK(HcExecTrace::pausedNodeOf("Content/Stop.hasset") == prints[0]);   // not yet refreshed
+	HcExecTrace::refreshPaused();
+	CHECK(HcExecTrace::pausedNodeOf("Content/Stop.hasset") == prints[1]);
+	std::string tab;
+	REQUIRE(HcExecTrace::takeRevealTab(tab));
+	CHECK(tab == "Content/Stop.hasset");
+	CHECK(HcExecTrace::takeBreakHit());            // the step's stop told the shell too
+
+	// Continue: the run ends, and refresh clears the marker.
+	rt.debugContinue();
+	CHECK_FALSE(rt.isSuspended());
+	CHECK(HcExecTrace::glowOf("Content/Stop.hasset", prints[1]) > 0.5f);
+	HcExecTrace::refreshPaused();
+	CHECK_FALSE(HcExecTrace::isPaused());
+	CHECK(HcExecTrace::pausedNodeOf("Content/Stop.hasset") == 0);
+
+	// Without the breakpoint the next fire runs straight through.
+	HcExecTrace::clearAllBreakpoints();
+	rt.fireEvent(id, "Ping");
+	CHECK_FALSE(rt.isSuspended());
+	CHECK_FALSE(HcExecTrace::takeBreakHit());
 }

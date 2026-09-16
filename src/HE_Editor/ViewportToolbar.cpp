@@ -255,6 +255,17 @@ void iconStep(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	dl->AddRectFilled({ c.x + r - bar, c.y - h }, { c.x + r, c.y + h }, col, 1.0f);
 }
 
+// Step Node: the play-into-a-wall glyph with a node in it — a small hollow
+// box where the bar is, because the step stops at a NODE, not at a frame.
+void iconStepNode(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.44f, r = s * 0.44f, box = s * 0.30f;
+	dl->AddTriangleFilled({ c.x - r, c.y - h },
+	                      { c.x - r, c.y + h },
+	                      { c.x + r - box * 2.4f, c.y }, col);
+	dl->AddRect({ c.x + r - box * 2.0f, c.y - box }, { c.x + r, c.y + box }, col, 1.0f, 0, 1.5f);
+}
+
 // Snap increment for the armed operation, formatted for the value cell.
 void snapText(const State& st, ImGuizmo::OPERATION op, char* buf, size_t n)
 {
@@ -643,11 +654,11 @@ void render(AppContext& ctx, State& st)
 	                                                ImGui::CalcTextSize("Paused").x,
 	                                                ImGui::CalcTextSize("Freeze").x })
 	                                     + kCellPadX * 2.0f);
-	// Play/Stop, Pause, Step and the clock readout in one well. All three of the
-	// trailing cells are measured in even while the scene is stopped — they dim
-	// rather than vanish, so the button the eye looks for first does not move on
-	// the press that happens most.
-	const float centreW     = kWellPad * 2.0f + playW + (kSegGap + m.cell) * 2.0f
+	// Play/Stop, Pause, Step, Step Node and the clock readout in one well. All
+	// four of the trailing cells are measured in even while the scene is
+	// stopped — they dim rather than vanish, so the button the eye looks for
+	// first does not move on the press that happens most.
+	const float centreW     = kWellPad * 2.0f + playW + (kSegGap + m.cell) * 3.0f
 	                                          + kSegGap + clockW;
 
 	auto leftWidth = [&](bool labels, bool snap)
@@ -846,20 +857,35 @@ void render(AppContext& ctx, State& st)
 		// worth looking at. It does NOT touch the game's time scale: that knob
 		// belongs to the game's own pause menu, and two owners of one variable
 		// fight each other.
+		//
+		// With a HorizonCode run stopped at a breakpoint the same cell is
+		// Continue: the stopped run goes on, then the world. That is also why
+		// it is enabled outside play mode when something is stopped — an
+		// application project's UI runs without a session, and its stopped
+		// run needs a way on.
+		const bool  hcStopped = ctx.hcSuspended;
 		float tx = p0.x + playW + kSegGap;
 		if (cell(m, tx, m.cell, "##vpPause", EditorToolbar::iconPause, nullptr,
-		         paused, playing,
-		         paused ? "Resume — let the world tick again"
-		                : "Pause — freeze the world, keep drawing it",
-		         "viewport.pause") &&
+		         paused || hcStopped, playing || hcStopped,
+		         hcStopped ? "Continue — run the stopped script on, then let the world tick"
+		         : paused  ? "Resume — let the world tick again"
+		                   : "Pause — freeze the world, keep drawing it",
+		         hcStopped ? "viewport.continue" : "viewport.pause") &&
 		    ctx.setPaused)
-			ctx.setPaused(!paused);
+			ctx.setPaused(!(paused || hcStopped));
 
 		tx += m.cell + kSegGap;
 		if (cell(m, tx, m.cell, "##vpStep", iconStep, nullptr, false, playing,
 		         "Step — advance one frame, then pause", "viewport.step") &&
 		    ctx.stepFrame)
 			ctx.stepFrame();
+
+		// Step Node: only means something while a script is stopped.
+		tx += m.cell + kSegGap;
+		if (cell(m, tx, m.cell, "##vpStepNode", iconStepNode, nullptr, false, hcStopped,
+		         "Step Node — run the stopped node, stop at the next", "viewport.step-node") &&
+		    ctx.stepNode)
+			ctx.stepNode();
 
 		// The game's own clock, read only. It sits in the transport well because
 		// that is where somebody looks when the preview stops moving — and the
