@@ -46,8 +46,16 @@ namespace
         glm::vec4  lightDir[8];
         glm::vec4  lightColor[8];
         glm::vec4  lightParams[8];
-        glm::mat4  lightVP;
-        glm::ivec4 shadowEnabled;
+        // Cascaded shadow maps — must match scene.frag's Frame block exactly:
+        // per-cascade light view-proj (kVulkanClipFix pre-applied), the planar
+        // view-space far distance of each cascade (w = count), the camera
+        // forward the pick measures along (w = 1 / shadow map size) and the
+        // project receiver bias (x = slope-scaled factor, y = minimum).
+        glm::mat4  cascadeVP[3];
+        glm::vec4  cascadeSplits;
+        glm::vec4  cameraFwd;
+        glm::vec4  shadowBias;
+        glm::ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug)
         // sky/fog additions — must match scene.frag Frame block exactly
         glm::vec4  sunDir;    // xyz = sun direction, w = 0
         glm::vec4  fog;       // x = fogDensity, y = fogHeightFalloff, zw = 0
@@ -321,6 +329,21 @@ void VulkanRenderer::Render()
         createViewportResources(m_viewportReqW, m_viewportReqH);
     }
 
+    // Project shadow resolution changed (SetShadowSettings): rebuild the
+    // cascade images here, before any command of this frame names them and
+    // after the GPU is idle — the frames still in flight sample the old
+    // array — then repoint every scene set at the new view. Same shape as
+    // the viewport resize above; the render pass and sampler stay.
+    if (m_shadowSizeDirty && m_shadowPass)
+    {
+        vkDeviceWaitIdle(m_device);
+        destroyShadowImages();
+        m_shadowSize = static_cast<uint32_t>(std::clamp(m_shadowSettings.resolution, 256, 8192));
+        createShadowImages();
+        writeShadowDescriptors();
+        m_shadowSizeDirty = false;
+    }
+
     const bool useViewport = m_viewportImage != VK_NULL_HANDLE
                           && m_viewportW > 0 && m_viewportH > 0;
 
@@ -356,8 +379,14 @@ void VulkanRenderer::Render()
     // Frame-begin timestamp (also reaps the slot's previous results — no stall).
     gpuTimerBegin(cmd);
 
-    // Shadow map first, in its own render pass (before the scene/swapchain pass).
-    EncodeShadowMap(cmd);
+    // Cascade shadow maps first, in their own render passes (before the
+    // scene/swapchain pass), fit against the aspect of the target the scene
+    // will be drawn into.
+    {
+        const float aspectW = useViewport ? float(m_viewportW) : float(std::max(m_swapExtent.width,  1u));
+        const float aspectH = useViewport ? float(m_viewportH) : float(std::max(m_swapExtent.height, 1u));
+        EncodeShadowMap(cmd, aspectW / aspectH);
+    }
 
     // Camera-depth pre-pass for screen-space decals. It must run before the scene
     // pass opens, because the decal draw sits INSIDE that pass and samples this
@@ -1872,10 +1901,25 @@ void VulkanRenderer::createScenePipeline()
             sstage.module = svs;
             sstage.pName  = "main";
 
-            VkGraphicsPipelineCreateInfo spci = pci; // reuse vertex input / depth / dynamic state
+            // Caster-side depth bias, the same the other CSM backends apply
+            // (GL: glPolygonOffset(2, 4); Metal: setDepthBias; D3D11/D3D12:
+            // their depth rasterizer state). DYNAMIC, because EncodeDecalDepth
+            // binds this very pipeline for the camera depth pre-pass and must
+            // run it with zero bias (a biased depth shifts every decal).
+            VkPipelineRasterizationStateCreateInfo srs = rs;
+            srs.depthBiasEnable = VK_TRUE;
+            VkDynamicState sdynStates[3] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+                                             VK_DYNAMIC_STATE_DEPTH_BIAS };
+            VkPipelineDynamicStateCreateInfo sdyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+            sdyn.dynamicStateCount = 3;
+            sdyn.pDynamicStates    = sdynStates;
+
+            VkGraphicsPipelineCreateInfo spci = pci; // reuse vertex input / depth state
             spci.stageCount      = 1;            // vertex only — depth-only pass
             spci.pStages         = &sstage;
             spci.pColorBlendState = nullptr;     // no color attachment
+            spci.pRasterizationState = &srs;
+            spci.pDynamicState   = &sdyn;
             spci.renderPass      = m_shadowPass;
             if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &spci, nullptr, &m_shadowPipeline) != VK_SUCCESS)
                 HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: shadow pipeline creation failed");
@@ -2225,35 +2269,11 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
 
 void VulkanRenderer::createShadowResources()
 {
-    // Depth image, sampled by the scene pass.
-    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-    ici.imageType   = VK_IMAGE_TYPE_2D;
-    ici.format      = m_depthFormat;
-    ici.extent      = { m_shadowSize, m_shadowSize, 1 };
-    ici.mipLevels   = 1;
-    ici.arrayLayers = 1;
-    ici.samples     = VK_SAMPLE_COUNT_1_BIT;
-    ici.tiling      = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    vkCheck(vkCreateImage(m_device, &ici, nullptr, &m_shadowImage), "shadow image");
-
-    VkMemoryRequirements req{};
-    vkGetImageMemoryRequirements(m_device, m_shadowImage, &req);
-    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize  = req.size;
-    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_shadowMemory), "shadow memory");
-    vkBindImageMemory(m_device, m_shadowImage, m_shadowMemory, 0);
-
-    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-    vci.image    = m_shadowImage;
-    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vci.format   = m_depthFormat;
-    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    vci.subresourceRange.levelCount = 1;
-    vci.subresourceRange.layerCount = 1;
-    vkCheck(vkCreateImageView(m_device, &vci, nullptr, &m_shadowView), "shadow view");
-
+    // Nearest + clamp-to-border(white): each PCF tap must read ONE texel's
+    // depth (linear would compare against an interpolated depth), and a tap
+    // that leaves the map reads "lit". Sampler and render pass are size-
+    // independent and live for the renderer; only the images are rebuilt on a
+    // resolution change (createShadowImages).
     VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     sci.magFilter    = VK_FILTER_NEAREST;
     sci.minFilter    = VK_FILTER_NEAREST;
@@ -2264,6 +2284,8 @@ void VulkanRenderer::createShadowResources()
     vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_shadowSampler), "shadow sampler");
 
     // Depth-only render pass; final layout is shader-readable for sampling.
+    // Layer-agnostic: the per-cascade framebuffers below each attach ONE layer
+    // of the array, and EncodeDecalDepth reuses this pass for its own 2D image.
     VkAttachmentDescription depth{};
     depth.format         = m_depthFormat;
     depth.samples        = VK_SAMPLE_COUNT_1_BIT;
@@ -2299,24 +2321,100 @@ void VulkanRenderer::createShadowResources()
     rpci.pDependencies   = deps;
     vkCheck(vkCreateRenderPass(m_device, &rpci, nullptr, &m_shadowPass), "shadow render pass");
 
-    VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-    fci.renderPass      = m_shadowPass;
-    fci.attachmentCount = 1;
-    fci.pAttachments    = &m_shadowView;
-    fci.width           = m_shadowSize;
-    fci.height          = m_shadowSize;
-    fci.layers          = 1;
-    vkCheck(vkCreateFramebuffer(m_device, &fci, nullptr, &m_shadowFB), "shadow framebuffer");
+    createShadowImages();
+}
+
+void VulkanRenderer::createShadowImages()
+{
+    // Depth image with one array layer per cascade, sampled by the scene pass
+    // as a 2D array; rendered one layer at a time through the per-layer views.
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType   = VK_IMAGE_TYPE_2D;
+    ici.format      = m_depthFormat;
+    ici.extent      = { m_shadowSize, m_shadowSize, 1 };
+    ici.mipLevels   = 1;
+    ici.arrayLayers = static_cast<uint32_t>(kCsmCascades);
+    ici.samples     = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling      = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    vkCheck(vkCreateImage(m_device, &ici, nullptr, &m_shadowImage), "shadow image");
+
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(m_device, m_shadowImage, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_shadowMemory), "shadow memory");
+    vkBindImageMemory(m_device, m_shadowImage, m_shadowMemory, 0);
+
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image    = m_shadowImage;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    vci.format   = m_depthFormat;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.layerCount = static_cast<uint32_t>(kCsmCascades);
+    vkCheck(vkCreateImageView(m_device, &vci, nullptr, &m_shadowView), "shadow array view");
+
+    for (int c = 0; c < kCsmCascades; ++c)
+    {
+        VkImageViewCreateInfo lci = vci;
+        lci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        lci.subresourceRange.baseArrayLayer = static_cast<uint32_t>(c);
+        lci.subresourceRange.layerCount     = 1;
+        vkCheck(vkCreateImageView(m_device, &lci, nullptr, &m_shadowLayerView[c]), "shadow layer view");
+
+        VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fci.renderPass      = m_shadowPass;
+        fci.attachmentCount = 1;
+        fci.pAttachments    = &m_shadowLayerView[c];
+        fci.width           = m_shadowSize;
+        fci.height          = m_shadowSize;
+        fci.layers          = 1;
+        vkCheck(vkCreateFramebuffer(m_device, &fci, nullptr, &m_shadowFB[c]), "shadow framebuffer");
+    }
+}
+
+void VulkanRenderer::destroyShadowImages()
+{
+    m_shadowLayoutValid = false;
+    for (int c = 0; c < kCsmCascades; ++c)
+    {
+        if (m_shadowFB[c])        { vkDestroyFramebuffer(m_device, m_shadowFB[c], nullptr);        m_shadowFB[c] = VK_NULL_HANDLE; }
+        if (m_shadowLayerView[c]) { vkDestroyImageView  (m_device, m_shadowLayerView[c], nullptr); m_shadowLayerView[c] = VK_NULL_HANDLE; }
+    }
+    if (m_shadowView)    { vkDestroyImageView  (m_device, m_shadowView, nullptr); m_shadowView = VK_NULL_HANDLE; }
+    if (m_shadowImage)   { vkDestroyImage      (m_device, m_shadowImage, nullptr); m_shadowImage = VK_NULL_HANDLE; }
+    if (m_shadowMemory)  { vkFreeMemory        (m_device, m_shadowMemory, nullptr); m_shadowMemory = VK_NULL_HANDLE; }
 }
 
 void VulkanRenderer::destroyShadowResources()
 {
-    if (m_shadowFB)      { vkDestroyFramebuffer(m_device, m_shadowFB, nullptr);   m_shadowFB = VK_NULL_HANDLE; }
+    destroyShadowImages();
     if (m_shadowPass)    { vkDestroyRenderPass (m_device, m_shadowPass, nullptr); m_shadowPass = VK_NULL_HANDLE; }
     if (m_shadowSampler) { vkDestroySampler    (m_device, m_shadowSampler, nullptr); m_shadowSampler = VK_NULL_HANDLE; }
-    if (m_shadowView)    { vkDestroyImageView  (m_device, m_shadowView, nullptr); m_shadowView = VK_NULL_HANDLE; }
-    if (m_shadowImage)   { vkDestroyImage      (m_device, m_shadowImage, nullptr); m_shadowImage = VK_NULL_HANDLE; }
-    if (m_shadowMemory)  { vkFreeMemory        (m_device, m_shadowMemory, nullptr); m_shadowMemory = VK_NULL_HANDLE; }
+}
+
+// Points binding 1 of every frame slot's scene set at the cascade array. Called
+// once the sets exist (createScenePipeline) and again after a resolution swap
+// rebuilt the image — the GPU is idle then, so rewriting a set that a queued
+// frame could still reference is safe.
+void VulkanRenderer::writeShadowDescriptors()
+{
+    if (!m_shadowView) return;
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        if (m_frameUBO[i].set == VK_NULL_HANDLE) continue;
+        VkDescriptorImageInfo dii{ m_shadowSampler, m_shadowView,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        w.dstSet          = m_frameUBO[i].set;
+        w.dstBinding      = 1;
+        w.descriptorCount = 1;
+        w.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo      = &dii;
+        vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
+    }
 }
 
 // ─── Screen-space decals (docs/decals-cross-backend-plan.md checkpoint E) ─────
@@ -2680,6 +2778,9 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     VkRect2D   sc{ { 0, 0 }, { d.w, d.h } };
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
+    // The shadow pipeline's depth bias is dynamic: the cascade pass sets it,
+    // this camera depth must be exact (decals reconstruct positions from it).
+    vkCmdSetDepthBias(cmd, 0.0f, 0.0f, 0.0f);
 
     for (uint32_t idx : m_sortedIndices)
     {
@@ -3532,56 +3633,128 @@ void* VulkanRenderer::GetViewportVkSampler()   const { return static_cast<void*>
 bool  VulkanRenderer::HasViewportResourceChanged() const { return m_viewportResChanged; }
 void  VulkanRenderer::ClearViewportResourceChanged()     { m_viewportResChanged = false; }
 
-void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd)
+void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
 {
-    if (!m_world || m_shadowPipeline == VK_NULL_HANDLE) return;
+    m_shadowRenderedThisFrame = false;
+    if (m_shadowPipeline == VK_NULL_HANDLE || m_shadowImage == VK_NULL_HANDLE) return;
+    // A fresh array (first frame, or right after a resolution swap) sits in
+    // UNDEFINED until the depth pass ran once — but the scene set already
+    // samples it. On a frame that does not render the cascades (no world, no
+    // sun, empty scene) put every layer into the sampled layout explicitly so
+    // no frame ever samples an undefined image (the single map used to).
+    auto ensureSampledLayout = [&]()
+    {
+        if (m_shadowLayoutValid) return;
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image               = m_shadowImage;
+        b.subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, static_cast<uint32_t>(kCsmCascades) };
+        b.srcAccessMask       = 0;
+        b.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+        m_shadowLayoutValid = true;
+    };
+    if (!m_world) { ensureSampledLayout(); return; }
 
+    // The cascades are fit against the camera frustum, so this extract needs
+    // the real aspect (the old whole-scene single map never cared) and the
+    // project shadow settings — the extractor hands back the size that is
+    // actually ALLOCATED, the texel snap must match the texture.
+    m_extractor.setShadowSettings(m_shadowSettings.distance, m_shadowSettings.cascadeCount,
+                                  m_shadowSettings.splitLambda, static_cast<int>(m_shadowSize));
     m_extractor.setContentManager(m_contentManager);
-    m_extractor.extract(*m_world, m_renderWorld, 1.0f, &m_editorCamera);
-    if (!m_renderWorld.shadow.enabled || m_renderWorld.objects.empty()) return;
+    m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+    if (!m_renderWorld.shadow.enabled || m_renderWorld.objects.empty()) { ensureSampledLayout(); return; }
     for (RenderObject& obj : m_renderWorld.objects)
         if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
             obj.worldBounds = mesh->localBounds.transformed(obj.transform);
-    // Cull casters against the LIGHT frustum, not the camera — an off-screen
-    // object still casts a shadow into the visible scene while it lies within the
-    // shadow map's coverage. (Camera-culling the casters made shadows pop out as
-    // their caster left the screen.)
-    m_culler.cull(m_renderWorld, m_renderWorld.shadow.viewProj, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
-    if (m_sortedIndices.empty()) return;
 
-    const glm::mat4 lightClip = HE::kVulkanClipFix * m_renderWorld.shadow.viewProj;
-
-    VkClearValue clear{};
-    clear.depthStencil = { 1.0f, 0 };
-    VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-    rpbi.renderPass        = m_shadowPass;
-    rpbi.framebuffer       = m_shadowFB;
-    rpbi.renderArea.extent = { m_shadowSize, m_shadowSize };
-    rpbi.clearValueCount   = 1;
-    rpbi.pClearValues      = &clear;
-    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    // ── Cascade frame constants (mirrors GL's shadowFrame / D3D11) ─────────
+    // The extractor's cascade matrices are GL clip (y up, z∈[-1,1]);
+    // kVulkanClipFix flips y and remaps depth to [0,1] — the SAME fix the old
+    // single map got, and scene.frag samples with uv = p.xy*0.5+0.5 under the
+    // same matrix, so no separate UV flip exists anywhere. The planar camera
+    // forward (−Z of camera-to-world) MUST match the planar splits the
+    // cascades were fit with; unused tail cascades get identity (never
+    // sampled — the shader clamps the pick to the count) and a far split of
+    // 1e9 so the pick never lands on them.
+    const ShadowData& csm = m_renderWorld.shadow;
+    const int nCascades  = std::clamp(csm.cascadeCount, 0, kCsmCascades);
+    for (int c = 0; c < kCsmCascades; ++c)
+        m_cascadeClip[c] = c < nCascades ? HE::kVulkanClipFix * csm.cascadeViewProj[c] : glm::mat4(1.0f);
+    m_cascadeSplits = glm::vec4(nCascades > 0 ? csm.cascadeSplit[0] : 1e9f,
+                                nCascades > 1 ? csm.cascadeSplit[1] : 1e9f,
+                                nCascades > 2 ? csm.cascadeSplit[2] : 1e9f,
+                                static_cast<float>(nCascades));
+    m_cascadeCamFwd = -glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
     VkViewport vp{ 0.0f, 0.0f, (float)m_shadowSize, (float)m_shadowSize, 0.0f, 1.0f };
     VkRect2D   sc{ { 0, 0 }, { m_shadowSize, m_shadowSize } };
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    vkCmdSetScissor(cmd, 0, 1, &sc);
+    // GL's glPolygonOffset(2, 4) in Vulkan terms: slope factor 2, constant 4.
+    const float kShadowBiasConstant = 4.0f, kShadowBiasSlope = 2.0f;
 
-    for (uint32_t idx : m_sortedIndices)
+    // One depth render per cascade into its own array layer. Each cascade
+    // re-culls the casters against ITS light frustum (not the camera): an
+    // off-screen object still casts into the visible scene while it sits
+    // inside the cascade coverage. Mirrors GL's renderDepthLayer / Metal's
+    // encodeDepthLayer / the D3D11+D3D12 passes.
+    //
+    // EVERY layer runs through the pass, also the ones above the project's
+    // cascade count (cleared, no draws): the pass takes the attachment from
+    // UNDEFINED to SHADER_READ_ONLY, and the scene set samples the WHOLE array
+    // in that layout — a layer the pass never touched would be sampled in an
+    // undefined layout (validation error, GPU fault on some drivers). A clear
+    // of an unused 2048² layer is cheap.
+    for (int c = 0; c < kCsmCascades; ++c)
     {
-        const RenderObject& obj = m_renderWorld.objects[idx];
-        const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
-        const GpuMesh& m    = mesh ? *mesh : m_cube;
-        if (!m.indexCount) continue;
-        PushConstants pc{ lightClip * obj.transform, obj.transform };
-        vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-        VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
-        vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+        VkClearValue clear{};
+        clear.depthStencil = { 1.0f, 0 };
+        VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        rpbi.renderPass        = m_shadowPass;
+        rpbi.framebuffer       = m_shadowFB[c];
+        rpbi.renderArea.extent = { m_shadowSize, m_shadowSize };
+        rpbi.clearValueCount   = 1;
+        rpbi.pClearValues      = &clear;
+        vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        if (c < nCascades)
+        {
+            vkCmdSetViewport(cmd, 0, 1, &vp);
+            vkCmdSetScissor(cmd, 0, 1, &sc);
+            vkCmdSetDepthBias(cmd, kShadowBiasConstant, 0.0f, kShadowBiasSlope);
+            // Cull + sort against the cascade's light frustum into scratch
+            // buffers; the sort groups draws by mesh so the resolve stays
+            // memoised. batchDepthCasters keeps castsShadow objects only
+            // (kNoOwnerEntity: every cascade skips nothing). Runs of one mesh
+            // are drawn one call per transform through the push constants.
+            m_culler.cull(m_renderWorld, csm.cascadeViewProj[c], m_shadowVisible);
+            m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
+            RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, kNoOwnerEntity, m_shadowBatches);
+            for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
+            {
+                const GpuMesh* mesh = resolveMesh(b.meshAssetId);
+                const GpuMesh& m    = mesh ? *mesh : m_cube;
+                if (!m.indexCount) continue;
+                VkDeviceSize offset = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
+                vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
+                const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
+                for (uint32_t k = 0; k < b.count; ++k)
+                {
+                    PushConstants pc{ m_cascadeClip[c] * xf[k], xf[k] };
+                    vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+                    vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+                }
+            }
+        }
+        vkCmdEndRenderPass(cmd);
     }
-    vkCmdEndRenderPass(cmd);
+    m_shadowLayoutValid       = true; // every layer went through the pass → SHADER_READ_ONLY
+    m_shadowRenderedThisFrame = true;
 }
 
 bool VulkanRenderer::createMeshBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
@@ -4254,8 +4427,15 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
             f.lightParams[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
         }
-        f.lightVP       = HE::kVulkanClipFix * m_renderWorld.shadow.viewProj;
-        f.shadowEnabled = glm::ivec4(m_renderWorld.shadow.enabled ? 1 : 0, 0, 0, 0);
+        // Cascade constants from EncodeShadowMap's extract (the one the slices
+        // were rendered with). Shadows are on only when that pass actually
+        // ran this frame — the array holds nothing usable otherwise.
+        for (int c = 0; c < kCsmCascades; ++c) f.cascadeVP[c] = m_cascadeClip[c];
+        f.cascadeSplits = m_cascadeSplits;
+        f.cameraFwd     = glm::vec4(m_cascadeCamFwd, 1.0f / float(std::max(m_shadowSize, 1u)));
+        f.shadowBias    = glm::vec4(m_shadowSettings.slopeBias, m_shadowSettings.minBias, 0.0f, 0.0f);
+        f.shadowEnabled = glm::ivec4(m_shadowRenderedThisFrame ? 1 : 0,
+                                     m_debugShadowCascades ? 1 : 0, 0, 0);
         f.sunDir        = glm::vec4(m_renderWorld.sunDirection, 0.0f);
         f.fog           = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0.0f, 0.0f);
         // viewport.z == 1 iff runSSAO() completed this frame (blurRT holds valid data).
@@ -4332,6 +4512,29 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = m_giRanThisFrame ? 1.0f : 0.0f;
+        // CSM fallback for graph materials (Lighting v2.2): only meaningful
+        // when the GI masks are absent this frame — heLitP's directional
+        // lights then sample the SAME cascade array as the built-in shader
+        // (heCsm, binding 12, bound per draw below). kVulkanClipFix is already
+        // in m_cascadeClip and is the whole convention here: scene.frag samples
+        // uv = p.xy*0.5+0.5 with z in [0,1] under it, which is exactly what the
+        // shared preamble's heCsmShadow() expects — no extra UV flip (unlike
+        // the D3D/Metal fills, whose texture origin is top-left).
+        if (!m_giRanThisFrame && m_shadowRenderedThisFrame)
+        {
+            const int nCascades = static_cast<int>(m_cascadeSplits.w);
+            for (int c = 0; c < nCascades && c < kCsmCascades; ++c)
+                std::memcpy(lit.csmVP[c], &m_cascadeClip[c][0][0], 16 * sizeof(float));
+            lit.csmSplits[0] = m_cascadeSplits.x;
+            lit.csmSplits[1] = m_cascadeSplits.y;
+            lit.csmSplits[2] = m_cascadeSplits.z;
+            lit.csmSplits[3] = m_cascadeSplits.w;
+            lit.camFwd[0] = m_cascadeCamFwd.x;
+            lit.camFwd[1] = m_cascadeCamFwd.y;
+            lit.camFwd[2] = m_cascadeCamFwd.z;
+            lit.shadowBias[0] = m_shadowSettings.slopeBias;
+            lit.shadowBias[1] = m_shadowSettings.minBias;
+        }
         // Forward SSR for heLitP's reflection cascade (heSSRFwd, set 0 binding
         // 31). x = the gate, y = intensity, z = max roughness; w is the DEFERRED
         // marker and stays zero — the forward path never zeroes ambSpec, and
@@ -4590,13 +4793,16 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 (m_giRanThisFrame && m_giLocalMask.view) ? VK_IMAGE_LAYOUT_GENERAL
                                                                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giLocalII);
-                            // heCsm (binding 12, sampler2DArray): Vulkan's shadow map is a
-                            // single 2D map, so the CSM fallback stays off (csmSplits.w = 0)
-                            // and the 1-layer white ARRAY view keeps the descriptor valid —
-                            // a 2D view here would fail validation against the arrayed image
-                            // type in the SPIR-V.
-                            VkDescriptorImageInfo csmII{ m_albedoSampler, m_whiteArrayView,
-                                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            // heCsm (binding 12, sampler2DArray): the cascade shadow array
+                            // the built-in scene shader samples at binding 1, through the
+                            // same nearest/clamp sampler (PCF taps compare single texels).
+                            // The 1-layer white ARRAY view stands in while the array does
+                            // not exist — csmSplits.w is 0 then, and the view DIMENSION
+                            // must still match the arrayed sampler in the SPIR-V.
+                            VkDescriptorImageInfo csmII{
+                                (m_shadowView && m_shadowLayoutValid) ? m_shadowSampler : m_albedoSampler,
+                                (m_shadowView && m_shadowLayoutValid) ? m_shadowView    : m_whiteArrayView,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &csmII);
                             // heSSRFwd (binding 31): the SAME image the built-in
                             // shaders read at scene binding 8, so a graph
@@ -5854,6 +6060,21 @@ void VulkanRenderer::SetGISettings(const GISettings& s)
 // no extension — so unlike the ray-traced GI it has no device gate here. What
 // it does need is the shader cross-compiler and the editor viewport's HDR
 // target; both are checked in ssrWantedThisFrame().
+void VulkanRenderer::SetShadowSettings(const ShadowSettings& s)
+{
+    // The images are not touched here: this is called from the editor's frame
+    // push, which may land between passes. Render() re-creates them at its top
+    // (after vkDeviceWaitIdle) when the size no longer matches, and hands the
+    // extractor the size that is actually allocated. Mirrors GL/Metal/D3D.
+    m_shadowSizeDirty |= (s.resolution != m_shadowSettings.resolution);
+    m_shadowSettings   = s;
+}
+
+void VulkanRenderer::SetShadowDebug(bool on)
+{
+    m_debugShadowCascades = on;
+}
+
 void VulkanRenderer::SetSSRSettings(const SSRSettings& s)
 {
     m_ssrEnabled      = s.enabled;

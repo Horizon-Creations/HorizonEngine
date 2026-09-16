@@ -45,6 +45,10 @@ public:
     // Editor-viewport only: the trace reads the previous frame's HDR colour, and
     // the swapchain path has no HDR target (the C6 hole, inherited from D3D11).
     void SetSSRSettings(const SSRSettings& settings) override;
+    // Cascaded shadow maps (project ShadowSettings) + the per-cascade debug
+    // tint — the same contract GL, Metal and D3D11 honour.
+    void SetShadowSettings(const ShadowSettings& settings) override;
+    void SetShadowDebug(bool on) override;
 
     // Editor material/mesh hot-reload: drop the cached override-material texture / mesh
     // GPU state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).

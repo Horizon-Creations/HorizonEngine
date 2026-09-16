@@ -18,10 +18,13 @@
 //     `skyColor()` below is the OLD hand-tuned gradient (the same reduced copy
 //     as in sky.frag), and it feeds BOTH the ambient IBL and the fog colour, so
 //     ambient light and fog tint differ from GL/Metal, not just the background.
-//   * Cascaded shadow maps — GL has uCascadeVP / uCascadeSplits / uCameraFwd and
-//     `computeShadow()` with planar view-Z cascade selection, plus the
-//     uShadowDebug cascade tint. This file has a single `lightVP` +
-//     `shadowFactor()` (the known D3D11/D3D12/Vulkan single-map limitation).
+//   * (CLOSED, Thema 35 / Schritt 5) Cascaded shadow maps — `cascadeVP` /
+//     `cascadeSplits` / `cameraFwd` / `shadowBias` in the Frame block and the
+//     `shadowFactor()` below are the GLSL twin of GL's computeShadow(): planar
+//     view-Z cascade pick, normal-offset + slope-scaled bias, 3×3 PCF over a
+//     sampler2DArray, and the shadowEnabled.y cascade tint. Still MISSING from
+//     GL's version: nothing — but the two are hand-kept copies, so a change to
+//     GL's computeShadow() is NOT automatically visible here.
 //   * Point/spot shadow maps — GL's uLocalShadowMap atlas + uLocalShadowVP +
 //     `localShadowFactor()`. Local lights are unshadowed here unless ray-traced
 //     GI is active and writes the uGILocal mask.
@@ -66,8 +69,16 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  lightDir[8];
     vec4  lightColor[8];
     vec4  lightParams[8];
-    mat4  lightVP;
-    ivec4 shadowEnabled;
+    // Cascaded shadow maps — must match FrameUBOData exactly: per-cascade
+    // light view-proj (kVulkanClipFix pre-applied on the CPU), the planar
+    // view-space far distance of each cascade (w = cascade count), the
+    // camera forward the pick measures along (w = 1 / shadow map size) and
+    // the project ShadowSettings receiver bias (x = slope factor, y = minimum).
+    mat4  cascadeVP[3];
+    vec4  cascadeSplits;
+    vec4  cameraFwd;
+    vec4  shadowBias;
+    ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug)
     vec4  sunDir;   // xyz = sun direction
     vec4  fog;      // x=fogDensity, y=fogHeightFalloff
     vec4  viewport; // x=W, y=H, z=ssaoEnabled(1.0), w=unused — must match FrameUBOData exactly
@@ -80,7 +91,10 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  ssrParams;
 } uf;
 
-layout(set = 0, binding = 1) uniform sampler2D uShadowMap;
+// Directional CSM depth array — one layer per cascade, nearest + clamp-to-
+// border(white) sampler: a PCF tap must read ONE texel's depth, and a tap
+// that leaves the map reads "lit".
+layout(set = 0, binding = 1) uniform sampler2DArray uShadowMap;
 
 // Per-draw PBR material scalars uploaded via vkCmdUpdateBuffer before each draw.
 layout(set = 0, binding = 2) uniform MatUBO {
@@ -258,17 +272,51 @@ vec3 BRDF(vec3 L, vec3 V, vec3 N, vec3 base, float met, float rough)
     return (kd*base/PI + spec)*NdL;
 }
 
-float shadowFactor(vec3 worldPos, vec3 N, vec3 L)
+// Cascaded shadows — the GLSL twin of GL's computeShadow() and of the Metal /
+// D3D11 / D3D12 shadowFactor(): pick the first cascade whose far distance
+// covers the fragment (by PLANAR camera-forward distance, the same measure the
+// extractor split the cascades with — euclidean distance would push screen-edge
+// pixels into a too-coarse cascade), project into that cascade's light clip,
+// normal-offset + slope-scaled bias scaled by cascade, 3×3 PCF over its layer
+// of the depth array. outCascade returns the chosen index for the debug tint.
+// UV convention: kVulkanClipFix (y flip + [0,1] depth) is baked into cascadeVP
+// and the slices were rendered under the same matrix, so uv = p.xy*0.5+0.5
+// with no further flip — exactly the old single-map lookup.
+float shadowFactor(vec3 worldPos, vec3 N, vec3 L, out int outCascade)
 {
+    outCascade = 0;
     if (uf.shadowEnabled.x == 0) return 1.0;
-    vec4 lp = uf.lightVP * vec4(worldPos, 1.0);
-    vec3 p  = lp.xyz / lp.w;
+    float viewDist = dot(worldPos - uf.cameraPos.xyz, uf.cameraFwd.xyz);
+    int count = int(uf.cascadeSplits.w);
+    int c = (count > 0) ? count - 1 : 0;
+    if      (count > 0 && viewDist < uf.cascadeSplits.x) c = 0;
+    else if (count > 1 && viewDist < uf.cascadeSplits.y) c = 1;
+    else if (count > 2 && viewDist < uf.cascadeSplits.z) c = 2;
+    c = clamp(c, 0, 2);
+    outCascade = c;
+
+    // Normal-offset bias scaled by cascade — coarser (farther) cascades have
+    // larger texels and need a bigger offset to avoid acne.
+    vec4 lp = uf.cascadeVP[c] * vec4(worldPos + N * (0.06 * float(c + 1)), 1.0);
+    vec3 p  = lp.xyz / lp.w;               // z already [0,1] (kVulkanClipFix)
     vec2 uv = p.xy * 0.5 + 0.5;
-    if (p.z > 1.0 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
+    float texel = uf.cameraFwd.w;          // 1 / shadow map size
+    // Reject one texel inside the border so the 3×3 kernel never reads outside
+    // this cascade (border texels → edge fringes).
+    if (p.z > 1.0 || any(lessThan(uv, vec2(texel))) || any(greaterThan(uv, vec2(1.0 - texel))))
         return 1.0;
-    float bias    = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
-    float closest = texture(uShadowMap, uv).r;
-    return (p.z - bias > closest) ? 0.35 : 1.0;
+    float ndl  = clamp(dot(N, L), 0.0, 1.0);
+    float bias = clamp(uf.shadowBias.x * tan(acos(ndl)), uf.shadowBias.y, 0.02) * float(c + 1);
+    float vis = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x)
+        {
+            float cd = texture(uShadowMap, vec3(uv + vec2(x, y) * texel, float(c))).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    // No direct-light floor in shadow (GL/Metal/D3D agree): ambient + IBL
+    // already provide the indirect minimum; a floor bleeds sun colour into shadow.
+    return vis / 9.0;
 }
 
 void main()
@@ -331,6 +379,7 @@ void main()
         : ao * (ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough));
 
     int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
+    int dbgCascade = 0; // cascade chosen by the directional shadow (debug tint)
     for (int i = 0; i < uf.lightCount.x; ++i)
     {
         int   type  = int(uf.lightPos[i].w);
@@ -361,7 +410,7 @@ void main()
             // GI replaces the shadow map entirely when active: ray-traced mask
             // sampled at the same screen-space UV convention as uAO.
             if (uf.giParams.y > 0.5) sh = texture(uGIShadow, gl_FragCoord.xy / uf.viewport.xy).r;
-            else                     sh = shadowFactor(vWorldPos, N, L);
+            else                     sh = shadowFactor(vWorldPos, N, L, dbgCascade);
         }
         else
         {
@@ -388,6 +437,15 @@ void main()
         float f    = 1.0 - exp(-opt);
         vec3  fogCol = skyColor(ray/dist, uf.sunDir.xyz);
         result = mix(result, fogCol, clamp(f, 0.0, 1.0));
+    }
+    // Debug: tint each fragment by its shadow cascade (red / green / blue /
+    // yellow) so the cascade split placement is verifiable at a glance.
+    // Mirrors GL, Metal and D3D (IRenderer::SetShadowDebug).
+    if (uf.shadowEnabled.y != 0 && uf.shadowEnabled.x != 0)
+    {
+        const vec3 tint[4] = vec3[4](vec3(1.0, 0.4, 0.4), vec3(0.4, 1.0, 0.4),
+                                     vec3(0.4, 0.6, 1.0), vec3(1.0, 1.0, 0.4));
+        result *= tint[min(dbgCascade, 3)];
     }
     FragColor = vec4(result, mat_ubo.roughPad.y);
 }

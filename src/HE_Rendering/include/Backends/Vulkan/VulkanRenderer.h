@@ -53,6 +53,10 @@ public:
 	void SetAntiAliasingSettings(const AntiAliasingSettings& s) override;
 	void SetGISettings(const GISettings& s) override;
 	void SetSSRSettings(const SSRSettings& s) override;
+	// Cascaded shadow maps (project ShadowSettings) + the per-cascade debug
+	// tint — the same contract GL, Metal, D3D11 and D3D12 honour.
+	void SetShadowSettings(const ShadowSettings& s) override;
+	void SetShadowDebug(bool on) override;
 
 	// Editor material/mesh hot-reload: drop the cached override-material texture / mesh GPU
 	// state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
@@ -115,18 +119,57 @@ private:
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
 
-	// ── Shadow map ──────────────────────────────────────────────────────────
-	void createShadowResources();
+	// ── Cascaded shadow maps ────────────────────────────────────────────────
+	// One depth image with kCsmCascades array layers (one per cascade): a
+	// 2D_ARRAY view (m_shadowView) the scene pass samples through binding 1
+	// (graph materials: heCsm, binding 12), plus one 2D per-layer view and its
+	// own framebuffer per cascade for the depth pass — a Vulkan framebuffer
+	// renders into a single layer view, the render pass itself is layer-
+	// agnostic and stays shared with EncodeDecalDepth. Mirrors GL's
+	// GL_TEXTURE_2D_ARRAY / Metal's texture2d_array / the D3D11+D3D12 arrays.
+	// The cascade count MUST match scene.frag's cascadeVP[3] and stay ≤
+	// ShadowData::kMaxCascades; the extractor fits the project's count (1..3).
+	static constexpr int kCsmCascades = 3;
+	void createShadowResources();       // pass + sampler (once) + the images
 	void destroyShadowResources();
-	void EncodeShadowMap(VkCommandBuffer cmd); // own render pass, before the scene
+	void createShadowImages();          // the size-dependent part: image, views, framebuffers
+	void destroyShadowImages();
+	void writeShadowDescriptors();      // scene set binding 1 → the array view, every frame slot
+	// Own render pass, before the scene. `aspect` is the camera aspect the
+	// cascades are fit against — the single map never cared, a cascade fit to
+	// a square frustum drops the screen edges of a wide viewport.
+	void EncodeShadowMap(VkCommandBuffer cmd, float aspect);
 	VkImage        m_shadowImage    = VK_NULL_HANDLE;
 	VkDeviceMemory m_shadowMemory   = VK_NULL_HANDLE;
-	VkImageView    m_shadowView     = VK_NULL_HANDLE;
+	VkImageView    m_shadowView     = VK_NULL_HANDLE;              // 2D_ARRAY, all cascades (sampled)
+	VkImageView    m_shadowLayerView[kCsmCascades] = {};           // 2D, one layer (depth target)
+	VkFramebuffer  m_shadowFB[kCsmCascades]        = {};           // one per cascade layer
 	VkSampler      m_shadowSampler  = VK_NULL_HANDLE;
 	VkRenderPass   m_shadowPass     = VK_NULL_HANDLE;
-	VkFramebuffer  m_shadowFB       = VK_NULL_HANDLE;
 	VkPipeline     m_shadowPipeline = VK_NULL_HANDLE;
 	uint32_t       m_shadowSize     = HE::kShadowMapResolution;
+	// Project ShadowSettings (IRenderer::SetShadowSettings): distance /
+	// cascade count / split lambda go to the extractor, the bias pair to the
+	// scene shader, a resolution change re-creates the images at the top of
+	// the next Render() (after vkDeviceWaitIdle, like the viewport resize) —
+	// never from the setter, which may land between passes.
+	ShadowSettings m_shadowSettings;
+	bool           m_shadowSizeDirty = false;
+	bool           m_debugShadowCascades = false;
+	// Per-cascade caster cull/sort scratch (NOT m_visible/m_sortedIndices —
+	// those hold the camera cull DrawScene consumes).
+	std::vector<uint8_t>         m_shadowVisible;
+	std::vector<uint32_t>        m_shadowSorted;
+	RenderSorter::DepthBatchList m_shadowBatches;
+	// The cascade constants DrawScene uploads into the Frame UBO; filled by
+	// EncodeShadowMap from the SAME extract the cascades were rendered with
+	// (DrawScene re-extracts, and a mid-frame world edit would otherwise let
+	// the sampled matrices drift from the rendered slices).
+	glm::mat4 m_cascadeClip[kCsmCascades] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
+	glm::vec4 m_cascadeSplits = glm::vec4(1e9f, 1e9f, 1e9f, 0.0f);
+	glm::vec3 m_cascadeCamFwd = glm::vec3(0.0f, 0.0f, -1.0f);
+	bool      m_shadowRenderedThisFrame = false;
+	bool      m_shadowLayoutValid = false; // all layers left UNDEFINED at least once (see EncodeShadowMap)
 
 	// ── Screen-space decals (docs/decals-cross-backend-plan.md §2.1 "Weg 2") ─
 	// Vulkan has no G-buffer, so decals are NOT composited into a base-colour
