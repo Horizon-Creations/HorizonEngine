@@ -215,7 +215,7 @@ std::vector<ProjSetting> buildProjectCatalog()
 			if (p.startupScene.empty()) return json("");
 			const fs::path root = projectRootOf(p);
 			const fs::path rel = fs::path(p.startupScene).lexically_relative(root);
-			if (rel.empty() || rel.native().rfind("..", 0) == 0)
+			if (rel.empty() || rel.generic_string().rfind("..", 0) == 0)
 				return json(p.startupScene);   // outside the project: say so plainly
 			return json(rel.generic_string());
 		};

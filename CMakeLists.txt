@@ -593,7 +593,15 @@ if(HE_ENABLE_ASSIMP)
     set(ASSIMP_BUILD_USE_CCACHE               OFF CACHE BOOL "" FORCE)
     # Binary FBX files are zlib-deflated; Assimp's bundled zlib keeps this
     # self-contained on every platform (no find_package(ZLIB) roulette on CI).
-    set(ASSIMP_BUILD_ZLIB                     ON  CACHE BOOL "" FORCE)
+    # Apple is the exception: that vendored zlib's classic-Mac-OS fdopen()
+    # shim (zutil.h, guarded by TARGET_OS_MAC) collides with newer Xcode SDKs'
+    # stricter fdopen() declaration, so use the system zlib there instead —
+    # Apple ships and maintains it, no roulette involved.
+    if(APPLE)
+        set(ASSIMP_BUILD_ZLIB                 OFF CACHE BOOL "" FORCE)
+    else()
+        set(ASSIMP_BUILD_ZLIB                 ON  CACHE BOOL "" FORCE)
+    endif()
     FetchContent_Declare(
         assimp
         GIT_REPOSITORY https://github.com/assimp/assimp.git
