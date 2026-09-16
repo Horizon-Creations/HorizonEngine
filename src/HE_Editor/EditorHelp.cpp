@@ -5396,6 +5396,33 @@ namespace
 	  "another function cannot be reached from here.",
 	  "", "horizoncode#graphs" },
 
+	// ── HorizonCode: comment boxes and reroutes ──────────────────────────────
+	// Canvas furniture shared by every HorizonCode editor (HcGraphHost): the
+	// frames that group a region of nodes, and the knots a wire is bent through.
+	// Neither changes what the graph does.
+	{ "HorizonCode Graph/Comment Box", "Comment Box",
+	  "Drops a titled frame on the canvas. Drag its header to move it together "
+	  "with every node inside it, double-click the header to name it, pull the "
+	  "corner grip to resize. Purely a note to the reader: the graph runs the "
+	  "same with or without it.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Wrap in Comment", "Wrap in Comment",
+	  "Puts a comment frame around this node, sized to fit. Name it afterwards "
+	  "by double-clicking the header.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Wrap Selection in Comment", "Wrap Selection in Comment",
+	  "Puts one comment frame around every selected node, sized to the group. "
+	  "From then on dragging the frame's header moves them all.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Rename Comment", "Rename Comment",
+	  "Opens the frame's title for editing — the same as double-clicking its "
+	  "header.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Delete Comment", "Delete Comment",
+	  "Removes the frame. The nodes inside it stay where they are; a comment "
+	  "groups them visually and owns none of them.",
+	  "", "horizoncode#graphs" },
+
 	{ "HorizonCode Event/Name", "",
 	  "What this declared event is called. Renaming it rewrites every Event, Emit "
 	  "Event and Bind Event node that used the old name, so the two halves of a "
@@ -6168,6 +6195,7 @@ namespace
 		{ "Input Action/",  "editor-input", "Input Reference", "Actions and bindings" },
 		{ "hc.",                         "editor-horizoncode", "HorizonCode Editor", "Graph editing" },
 		{ "Script Graph/",               "editor-horizoncode", "HorizonCode Editor", "Script graphs" },
+		{ "HorizonCode Graph/",          "editor-horizoncode", "HorizonCode Editor", "Comments and reroutes" },
 		{ "Script Variable/",            "editor-horizoncode", "HorizonCode Editor", "Graph variables" },
 		{ "Script Node/",                "editor-horizoncode", "HorizonCode Editor", "Nodes in a script graph" },
 		{ "HorizonCode Event/",          "editor-horizoncode", "HorizonCode Editor", "Declared events" },

@@ -88,6 +88,7 @@ add_executable(he_tests
     test_horizoncode_types.cpp
     test_hc_fallback_report.cpp
     test_horizoncode_containers.cpp
+    test_horizoncode_reroute.cpp
     test_python_scripting.cpp
     test_physics.cpp
     test_collision_system.cpp
@@ -644,7 +645,7 @@ set(HCGEN_CLASSES
     ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived
-    inherit_novars_base inherit_novars input_actions containers
+    inherit_novars_base inherit_novars input_actions containers reroutes
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

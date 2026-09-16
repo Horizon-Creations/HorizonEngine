@@ -1684,6 +1684,12 @@ private:
             Value v = Value::ofTransform(n.tpos, n.trot, n.tscl);
             return valueLit(v, m_tt, { PT::Transform, false });
         }
+        // A knot in the wire: the input expression, verbatim. input() already
+        // converts to the reroute's own pin type, which is the type the wire
+        // into it carries (adoptRerouteType), so nothing is spelled twice and
+        // the interpreter's evalInput pass-through is matched exactly.
+        case NT::Reroute:
+            return input(n, 0, fnCtx);
         case NT::GetVariable:
         {
             const Variable* v = m_g.findVariable(n.s);
