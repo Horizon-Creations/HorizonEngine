@@ -1025,6 +1025,10 @@ bool isEditorIconMaterial(const UUID& materialId)
 
 } // namespace HE
 
+// Out-of-line on purpose (see the header): the one definition the DLL exports.
+RenderExtractor::RenderExtractor()  = default;
+RenderExtractor::~RenderExtractor() = default;
+
 void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio,
                               const EditorCameraOverride* editorCam)
 {

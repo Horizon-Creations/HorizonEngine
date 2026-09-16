@@ -5,6 +5,10 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+  # A feature branch can ask for the full matrix before it is merged
+  # (`gh workflow run CI --ref <branch>`), the way a Windows-only link error
+  # is otherwise only ever seen on main.
+  workflow_dispatch:
 
 jobs:
   build-and-test:
