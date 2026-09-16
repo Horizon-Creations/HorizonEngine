@@ -1,0 +1,352 @@
+#include "doctest.h"
+#include "ImGuiSoftwareRaster.h"
+
+#include "InspectorPanel.h"
+#include "EditorApplication.h"   // AppContext
+#include "EditorSelection.h"
+#include "EditorUndo.h"
+#include "EditorTheme.h"
+#include "EditorWidgets.h"
+
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/EntityActive.h>
+#include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/InactiveComponent.h>
+#include <HorizonScene/Components/LightComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
+
+#include <imgui.h>
+#include <imgui_internal.h>   // GetHoveredID, the open-popup stack
+
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+// ── The Details panel, driven headless ───────────────────────────────────────
+// Two things on the panel that a unit test of the serializer cannot vouch for:
+// that the Active box at the top really is a click away and lands in the undo
+// history, and that a component header's right-click menu really offers Copy /
+// Paste Component Values / Reset to Default / Remove Component and that those
+// items do what they say to the world. So this drives the real panel
+// (InspectorPanel::renderFor with a real AppContext) in a headless ImGui
+// context, finds the items by asking ImGui what is under the pointer, clicks
+// them, and reads the world and the clipboard afterwards. Same harness shape
+// as tests/test_outliner_ui.cpp.
+
+using namespace HE::Ed;
+
+namespace
+{
+	constexpr int W = 420, H = 520;
+
+	struct Harness
+	{
+		Harness()
+		{
+			ImGui::CreateContext();
+			ImGuiIO& io = ImGui::GetIO();
+			io.DisplaySize = ImVec2(float(W), float(H));
+			io.DeltaTime   = 1.0f / 60.0f;
+			io.IniFilename = nullptr;
+			io.LogFilename = nullptr;
+			io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
+			io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
+#ifdef HE_EDITOR_DEPS_DIR
+			const std::string font = std::string(HE_EDITOR_DEPS_DIR) + "/Fonts/Roboto_Condensed-Bold.ttf";
+			if (std::FILE* f = std::fopen(font.c_str(), "rb"))
+			{
+				std::fclose(f);
+				ImFontConfig cfg;
+				cfg.OversampleH = 2;
+				cfg.OversampleV = 2;
+				io.FontDefault = io.Fonts->AddFontFromFileTTF(font.c_str(), 15.0f, &cfg);
+			}
+#endif
+			applyHorizonDarkTheme();
+		}
+		~Harness() { ImGui::DestroyContext(); }
+	};
+
+	// Everything AppContext insists on being given, in one place.
+	struct ContextBits
+	{
+		EditorConfig    config;
+		bool            vsync = false;
+		std::string     backendName = "Software";
+		EditorSelection selection;
+		std::string     scenePath;
+		bool            exitRequested = false, projectLoaded = true;
+		bool            refreshPending = false, refreshDone = false;
+		int   fpsOffset = 0, fpsCount = 0;
+		float fpsAccum = 0.0f, smoothFps = 0.0f;
+		std::vector<AppContext::EditorTab> tabs;
+		int   activeTab = 0;
+		float cbTreeWidth = 200.0f;
+		int   hubPreset = 0, hubLang = 0;
+		bool  hubFx = false;
+		std::string hubCreateError, hubOpenError;
+		int   hubRemoveIndex = -1;
+		bool  hubRemoveRequested = false;
+		std::string dirResult, fileResult;
+		bool  dirReady = false, fileReady = false;
+
+		AppContext make(HorizonWorld& world, EditorUndo& undo)
+		{
+			AppContext ctx{
+				.editorConfig          = config,
+				.vsync                 = vsync,
+				.backendName           = backendName,
+				.selection             = selection,
+				.currentScenePath      = scenePath,
+				.exitRequested         = exitRequested,
+				.projectLoaded         = projectLoaded,
+				.contentRefreshPending = refreshPending,
+				.contentRefreshDone    = refreshDone,
+				.fpsHistoryOffset      = fpsOffset,
+				.fpsAccum              = fpsAccum,
+				.fpsAccumCount         = fpsCount,
+				.smoothFps             = smoothFps,
+				.tabs                  = tabs,
+				.activeTab             = activeTab,
+				.cbTreeWidth           = cbTreeWidth,
+				.hubSelectedPreset     = hubPreset,
+				.hubSelectedLang       = hubLang,
+				.hubAdvancedShaderFx   = hubFx,
+				.hubCreateError        = hubCreateError,
+				.hubOpenError          = hubOpenError,
+				.hubRemoveIndex        = hubRemoveIndex,
+				.hubRemoveRequested    = hubRemoveRequested,
+				.pendingDirResult      = dirResult,
+				.pendingDirReady       = dirReady,
+				.pendingFileResult     = fileResult,
+				.pendingFileReady      = fileReady,
+			};
+			ctx.world   = &world;
+			ctx.undoSys = &undo;
+			return ctx;
+		}
+	};
+
+	struct Panel
+	{
+		AppContext&  ctx;
+		HorizonWorld& world;
+		Entity        entity;
+		ImGuiID       lightHeader = 0;   // the "Light" CollapsingHeader's id, read inside the window
+		ImGuiID       activeBox   = 0;   // the Active checkbox's id, likewise
+	};
+
+	// One frame of the panel at a fixed place, with the pointer where the
+	// caller put it and the two mouse buttons as given. Returns the id ImGui
+	// says the pointer is on.
+	ImGuiID frame(Panel& p, bool left, bool right = false, he_ui::Image* shot = nullptr)
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMouseButtonEvent(ImGuiMouseButton_Left, left);
+		io.AddMouseButtonEvent(ImGuiMouseButton_Right, right);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(H) - 20.0f));
+		ImGui::Begin("Details");
+		p.lightHeader = ImGui::GetID("Light");
+		p.activeBox   = ImGui::GetID("##entity_active");
+		InspectorPanel::renderFor(p.ctx, p.world, p.entity, p.ctx.undoSys);
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+		const ImGuiID hovered = ImGui::GetHoveredID();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, H);
+		return hovered;
+	}
+
+	// What is under the pointer at (x, y), settled: ImGui resolves hover from
+	// the previous frame, so the answer is the second frame's.
+	ImGuiID idAt(Panel& p, float x, float y)
+	{
+		ImGui::GetIO().AddMousePosEvent(x, y);
+		frame(p, false);
+		return frame(p, false);
+	}
+
+	void clickAt(Panel& p, float x, float y, bool rightButton = false)
+	{
+		ImGui::GetIO().AddMousePosEvent(x, y);
+		frame(p, false);
+		frame(p, false);
+		frame(p, !rightButton, rightButton);
+		frame(p, false);
+		frame(p, false);
+	}
+
+	// Where the pointer first lands on `wanted`, walking down at x. -1 if
+	// never.
+	float yOf(Panel& p, ImGuiID wanted, float x)
+	{
+		for (float y = 12.0f; y < float(H) - 12.0f; y += 2.0f)
+			if (idAt(p, x, y) == wanted) return y + 4.0f;
+		return -1.0f;
+	}
+
+	// The items below (x, yFrom), top to bottom, as the pointer sees them:
+	// every new non-zero id is a new item. What a just-opened context menu's
+	// entries look like from the outside.
+	struct Row { ImGuiID id; float yMid; };
+	std::vector<Row> itemsBelow(Panel& p, float x, float yFrom, float yTo)
+	{
+		std::vector<Row> rows;
+		ImGuiID last = 0; float yStart = 0.0f;
+		for (float y = yFrom; y < yTo; y += 2.0f)
+		{
+			const ImGuiID id = idAt(p, x, y);
+			if (id == last) continue;
+			if (last != 0) rows.push_back({ last, (yStart + y - 2.0f) * 0.5f });
+			last = id; yStart = y;
+		}
+		if (last != 0) rows.push_back({ last, (yStart + yTo) * 0.5f });
+		return rows;
+	}
+
+	bool popupOpen() { return GImGui->OpenPopupStack.Size > 0; }
+}
+
+TEST_CASE("inspector ui: the Active box is the first thing on the panel and one click flips it, undoably")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity lamp = world.createEntity("Lamp");
+	reg.emplace<TransformComponent>(lamp);
+	LightComponent light; light.intensity = 7.5f;
+	reg.emplace<LightComponent>(lamp, light);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	Panel p{ ctx, world, lamp };
+
+	// Pointer away, a few frames to settle the layout; one shot to look at.
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	he_ui::Image img;
+	for (int i = 0; i < 4; ++i) frame(p, false, false, i == 3 ? &img : nullptr);
+	REQUIRE(img.valid());
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+		he_ui::writeBmp(img, std::string(dir) + "/inspector-lamp.bmp");
+
+	// Down the LEFT edge, by id: the Active box is the first item of the panel
+	// proper, in front of the name field, under the window's title bar. Found
+	// by its id rather than by counting — the border grip and the title bar's
+	// arrow are items too, and how many of them the pointer meets on the way
+	// down is the window's business, not this test's.
+	const float leftX = 10.0f + ImGui::GetStyle().WindowPadding.x + 6.0f;
+	REQUIRE(p.activeBox != 0);
+	const float boxY = yOf(p, p.activeBox, leftX);
+	REQUIRE_MESSAGE(boxY > 0.0f, "the Active box is not under the pointer anywhere down the left edge");
+	// It sits ABOVE the first component header — it is the entity's, not a
+	// component's.
+	CHECK(boxY < yOf(p, p.lightHeader, 10.0f + (float(W) - 20.0f) * 0.5f));
+
+	REQUIRE(HE::isEntityActiveSelf(reg, lamp));
+	REQUIRE_FALSE(undo.canUndo());
+	clickAt(p, leftX, boxY);
+	CHECK_FALSE(HE::isEntityActiveSelf(reg, lamp));
+	CHECK_FALSE(HE::isEntityActive(reg, lamp));
+	// It was an undo step ...
+	CHECK(undo.canUndo());
+	// ... and the click did not touch the light beside it.
+	CHECK(reg.get<LightComponent>(lamp).intensity == doctest::Approx(7.5f));
+	// Again: on.
+	clickAt(p, leftX, boxY);
+	CHECK(HE::isEntityActiveSelf(reg, lamp));
+
+	// Undo takes the LAST flip back — the entity is off again — and no second
+	// tag appeared anywhere along the way.
+	REQUIRE(undo.undo());
+	CHECK(reg.view<InactiveComponent>().size() == 1);
+	REQUIRE(undo.undo());
+	CHECK(reg.view<InactiveComponent>().size() == 0);
+}
+
+TEST_CASE("inspector ui: a component header's right-click menu copies, resets and pastes the component")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity lamp = world.createEntity("Lamp");
+	reg.emplace<TransformComponent>(lamp);
+	LightComponent light; light.intensity = 7.5f; light.range = 42.0f;
+	reg.emplace<LightComponent>(lamp, light);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	Panel p{ ctx, world, lamp };
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) frame(p, false);
+
+	// The clipboard starts out holding no component.
+	ImGui::SetClipboardText("");
+	CHECK(InspectorPanel::clipboardComponentKey().empty());
+
+	// Find the "Light" header by its id, walking down the middle.
+	const float midX = 10.0f + (float(W) - 20.0f) * 0.5f;
+	REQUIRE(p.lightHeader != 0);
+	const float headerY = yOf(p, p.lightHeader, midX);
+	REQUIRE_MESSAGE(headerY > 0.0f, "the Light header is not under the pointer anywhere");
+
+	// ── Right-click: the menu opens, with four entries ──
+	clickAt(p, midX, headerY, /*rightButton=*/true);
+	REQUIRE(popupOpen());
+	// The popup hangs off the pointer; its entries are below and to the right.
+	const std::vector<Row> items = itemsBelow(p, midX + 40.0f, headerY + 2.0f, headerY + 140.0f);
+	REQUIRE_MESSAGE(items.size() >= 4, "found " << items.size() << " items in the header menu");
+	const Row copyItem  = items[0];   // Copy Component
+	const Row pasteItem = items[1];   // Paste Component Values (greyed: nothing to paste yet)
+	const Row resetItem = items[2];   // Reset to Default
+	// items[3] is Remove Component, left alone here.
+
+	// ── Copy: the clipboard now names the light, the world is untouched ──
+	clickAt(p, midX + 40.0f, copyItem.yMid);
+	CHECK_FALSE(popupOpen());
+	CHECK(InspectorPanel::clipboardComponentKey() == "light");
+	CHECK(reg.get<LightComponent>(lamp).intensity == doctest::Approx(7.5f));
+	CHECK_FALSE(undo.canUndo());   // a copy changes nothing, so it is no step
+
+	// ── Reset: the values are the defaults, in one undo step ──
+	clickAt(p, midX, headerY, /*rightButton=*/true);
+	REQUIRE(popupOpen());
+	clickAt(p, midX + 40.0f, resetItem.yMid);
+	CHECK_FALSE(popupOpen());
+	CHECK(reg.get<LightComponent>(lamp).intensity == doctest::Approx(LightComponent{}.intensity));
+	CHECK(reg.get<LightComponent>(lamp).range     == doctest::Approx(LightComponent{}.range));
+	CHECK(reg.all_of<TransformComponent>(lamp));   // only the one component
+	CHECK(undo.canUndo());
+
+	// ── Paste Component Values: the copied 7.5 / 42 are back ──
+	clickAt(p, midX, headerY, /*rightButton=*/true);
+	REQUIRE(popupOpen());
+	clickAt(p, midX + 40.0f, pasteItem.yMid);
+	CHECK_FALSE(popupOpen());
+	CHECK(reg.get<LightComponent>(lamp).intensity == doctest::Approx(7.5f));
+	CHECK(reg.get<LightComponent>(lamp).range     == doctest::Approx(42.0f));
+
+	// The clipboard text is the serializer's envelope, so it also reads back
+	// through the serializer alone — what a second editor would do with it.
+	const char* text = ImGui::GetClipboardText();
+	REQUIRE(text != nullptr);
+	CHECK(SceneSerializer::componentKeyOfText(text) == "light");
+	HorizonWorld other;
+	const Entity twin = other.createEntity("Twin");
+	CHECK(SceneSerializer{}.importComponentText(other, twin, text));
+	CHECK(other.registry().get<LightComponent>(twin).intensity == doctest::Approx(7.5f));
+
+	he_ui::Image img;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) frame(p, false, false, i == 2 ? &img : nullptr);
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+		he_ui::writeBmp(img, std::string(dir) + "/inspector-lamp-after.bmp");
+}

@@ -64,10 +64,16 @@ glm::mat4 parentWorldOf(entt::registry& registry, Entity entity)
 // went onto the stack with no pre-state at all. capturePre() serializes the
 // WHOLE world (expensive with terrain), so it must stay on this one edge and
 // never run per frame.
-void undoEdges(EditorUndo* undo, bool wasUsing)
+void undoEdges(EditorUndo* undo, bool wasUsing, ImGuizmo::OPERATION op)
 {
 	if (!undo) return;
-	if (ImGuizmo::IsUsing() && !wasUsing) { undo->capturePre(); undo->stashPre(); }
+	// The row the history window shows for this drag: which handle it was.
+	const unsigned bits = static_cast<unsigned>(op);
+	const char* label = (bits & static_cast<unsigned>(ImGuizmo::TRANSLATE)) ? "Move"
+	                  : (bits & static_cast<unsigned>(ImGuizmo::ROTATE))    ? "Rotate"
+	                  : (bits & (static_cast<unsigned>(ImGuizmo::SCALE) |
+	                             static_cast<unsigned>(ImGuizmo::SCALEU)))  ? "Scale" : "Transform";
+	if (ImGuizmo::IsUsing() && !wasUsing) { undo->capturePre(); undo->stashPre(label); }
 	if (!ImGuizmo::IsUsing() && wasUsing) undo->commitPending();
 }
 
@@ -101,7 +107,7 @@ bool manipulateOne(HorizonWorld& world, Entity entity,
 	s_world = gizmoWorld;
 
 	// One undo entry per drag (see undoEdges).
-	undoEdges(undo, s_wasUsing);
+	undoEdges(undo, s_wasUsing, effectiveOp);
 	s_wasUsing = ImGuizmo::IsUsing();
 
 	if (ImGuizmo::IsUsing())
@@ -220,7 +226,7 @@ bool manipulateGroup(HorizonWorld& world, const std::vector<Entity>& members,
 			if (const auto* t = registry.try_get<TransformComponent>(e))
 				s_members.push_back({ e, t->worldMatrix, t->scale });
 	}
-	undoEdges(undo, s_wasUsing);
+	undoEdges(undo, s_wasUsing, effectiveOp);
 	s_wasUsing = ImGuizmo::IsUsing();
 
 	if (ImGuizmo::IsUsing())

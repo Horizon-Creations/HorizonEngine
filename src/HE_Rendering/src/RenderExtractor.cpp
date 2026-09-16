@@ -8,6 +8,7 @@
 #include <HorizonScene/EnvironmentPush.h>   // the ONE EnvironmentComponent → settings map
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/EntityActive.h>            // the "Active" switch, inherited down the tree
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
@@ -90,8 +91,10 @@ namespace
 		else
 		{
 			bool cameraFound = false;
+			const HE::ActiveFilter active(reg);
 			for (auto [e, t, cam] : reg.view<TransformComponent, CameraComponent>().each())
 			{
+				if (active.off(e)) continue;   // a switched-off camera is not the picture
 				if (cameraFound && !cam.isMain) continue;
 
 				out.camera.position   = glm::vec3(t.worldMatrix[3]);
@@ -222,9 +225,14 @@ namespace
 		auto meshView = reg.view<TransformComponent, MeshComponent>();
 		std::vector<EntityData> items;
 		items.reserve(meshView.size_hint());
+		// Switched off (the Details panel's Active box, or an ancestor's) is a
+		// second reason not to draw, beside the per-component visible flag;
+		// the filter decides once per extract whether anything is off at all.
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, mesh] : meshView.each())
 		{
 			if (!mesh.visible) continue; // hidden (e.g. a preloaded zone)
+			if (active.off(e)) continue;
 			EntityData d;
 			d.world  = t.worldMatrix;
 			d.meshId = mesh.meshAssetId;
@@ -332,9 +340,11 @@ namespace
 	// scalar; moving it to the GPU buys nothing — see ParticleShaderGen's comment).
 	void extractParticleBatches(entt::registry& reg, RenderWorld& out)
 	{
+		const HE::ActiveFilter active(reg);
 		for (auto [e, tc, ps] : reg.view<TransformComponent, ParticleSystemComponent>().each())
 		{
 			if (!ps.visible) continue; // hidden (e.g. a preloaded zone)
+			if (active.off(e)) continue;
 			if (ps.particles.empty()) continue;
 			const HE::ParticleEmitterConfig& config = ps.resolvedConfig; // (re)resolved by ParticleSystem::update
 
@@ -468,9 +478,11 @@ namespace
 	// one DrawCall with instanceTransforms automatically.
 	void extractFoliage(entt::registry& reg, RenderWorld& out)
 	{
+		const HE::ActiveFilter active(reg);
 		for (auto [e, fol] : reg.view<FoliageComponent>().each())
 		{
 			if (!fol.visible) continue; // hidden (e.g. a preloaded zone)
+			if (active.off(e)) continue;
 			if (fol.meshAssetId == HE::UUID{}) continue;
 			const float dd2 = fol.drawDistance * fol.drawDistance;
 			const glm::vec3 camPos = out.camera.position;
@@ -500,9 +512,11 @@ namespace
 	void extractSkinnedMeshes(entt::registry& reg, RenderWorld& out)
 	{
 		out.skinnedObjects.clear();
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, smc] : reg.view<TransformComponent, SkeletalMeshComponent>().each())
 		{
 			if (!smc.visible) continue; // hidden (e.g. a preloaded zone)
+			if (active.off(e)) continue;
 			SkinnedRenderObject obj;
 			obj.meshAssetId     = smc.meshAssetId;
 			obj.transform       = t.worldMatrix;
@@ -523,8 +537,10 @@ namespace
 	// transform); the deferred path blends the colour into the G-buffer.
 	void extractDecals(entt::registry& reg, RenderWorld& out)
 	{
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, d] : reg.view<TransformComponent, DecalComponent>().each())
 		{
+			if (active.off(e)) continue;
 			DecalData dd;
 			dd.transform = t.worldMatrix;
 			dd.color     = d.color;
@@ -545,9 +561,11 @@ namespace
 	// mesh slot in a fight over one entity's geometry.
 	void extractRopes(entt::registry& reg, RenderWorld& out)
 	{
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, rope] : reg.view<TransformComponent, RopeComponent>().each())
 		{
 			if (!rope.visible) continue;
+			if (active.off(e)) continue;
 			// Empty until the first RopeTrailSystem::update — and permanently so
 			// for a rope with fewer than two control points, which has no geometry.
 			if (rope.runtimeMeshId == HE::UUID{}) continue;
@@ -576,9 +594,11 @@ namespace
 	// the entity needs no TransformComponent for this to work.
 	void extractTrails(entt::registry& reg, RenderWorld& out)
 	{
+		const HE::ActiveFilter active(reg);
 		for (auto [e, trail] : reg.view<TrailComponent>().each())
 		{
 			if (!trail.visible) continue;
+			if (active.off(e)) continue;
 			const HE::spline::MeshData band =
 				RopeTrailSystem::buildTrailGeometry(trail, out.camera.position);
 			if (band.empty()) continue;   // fewer than two live points
@@ -661,9 +681,11 @@ namespace
 			out.objects.push_back(obj);
 		};
 
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, light] : reg.view<TransformComponent, LightComponent>().each())
 		{
 			if (!light.visible) continue; // hidden (e.g. a preloaded zone), like its light
+			if (active.off(e)) continue;
 			// The built-in environment Sun and Moon (HorizonWorld's ensure) sit on a
 			// default transform under the Sky entity: the environment drives their
 			// direction, the transform says nothing. Two sun icons stacked on the
@@ -688,9 +710,11 @@ namespace
 	void extractLights(entt::registry& reg, RenderWorld& out)
 	{
 		out.lights.reserve(reg.view<LightComponent>().size() + 1); // +1 for the day-night moon
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, light] : reg.view<TransformComponent, LightComponent>().each())
 		{
 			if (!light.visible) continue; // hidden (e.g. a preloaded zone)
+			if (active.off(e)) continue;
 			// Per-light distance culling (point/spot only): beyond cullDistance from
 			// the camera the light is dropped from the extracted set entirely, so
 			// direct shading AND the GI probe bounce ignore it consistently on every

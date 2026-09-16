@@ -14,6 +14,7 @@
 #include "ViewportViewMode.h"            // the headless HE_DUMP_VIEWMODE override on the mode push
 #include "EditorWidgets.h"               // WrapText — text wraps at the pane edge, never runs off it
 #include "EditorHelp.h"                  // the context menu's scope
+#include "EditorTheme.h"                 // the stats overlay's accent line
 #include "ViewportActions.h"             // hide / isolate / show all / group — headless, tested
 #include "CameraBookmarks.h"             // the digit keys
 #include <HorizonScene/HorizonScene.h>
@@ -30,6 +31,7 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <string>
@@ -70,6 +72,7 @@ const ShowFlagField* showFlagFields(int& outCount)
 		{ "ViewportShowGuides",         &ShowFlags::guides        },
 		{ "ViewportShowCollaborators",  &ShowFlags::collaborators },
 		{ "ViewportShowScriptDebug",    &ShowFlags::scriptDebug   },
+		{ "ViewportShowStats",          &ShowFlags::stats         },
 	};
 	outCount = static_cast<int>(sizeof(kFields) / sizeof(kFields[0]));
 	return kFields;
@@ -385,9 +388,76 @@ namespace
 		if (!ctx.noteEntityEdited) return;
 		for (const Entity e : touched) ctx.noteEntityEdited(e);
 	}
-	void snapshot(AppContext& ctx)
+	void snapshot(AppContext& ctx, const char* label)
 	{
-		if (ctx.undoSys) ctx.undoSys->snapshotNow();
+		if (ctx.undoSys) ctx.undoSys->snapshotNow(label);
+	}
+
+	// ── The stats overlay (Show ▸ Stats) ─────────────────────────────────────
+	// The frame's counters in the viewport's top-right corner, painted into the
+	// draw list like the name tags: frame rate and time, draw calls, triangles,
+	// visible/total objects, and — only where the backend measures them — the
+	// occlusion culler's take, the GPU time and the VRAM in use. A line that
+	// the backend cannot fill is left out rather than shown as 0 or -1, which
+	// would read as a measurement.
+	//
+	// Every number is the LAST rendered frame's, straight from the renderer
+	// (IRenderer::GetFrameGpuStats — the same struct the profiler and the
+	// headless dump read), so this and the profiler can never disagree.
+	std::string thousands(uint32_t v)
+	{
+		std::string s = std::to_string(v);
+		for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) s.insert(static_cast<size_t>(i), ",");
+		return s;
+	}
+	void drawStatsOverlay(AppContext& ctx, const ImVec2& rectMin, const ImVec2& rectMax)
+	{
+		if (!ctx.renderer) return;
+		const IRenderer::FrameGpuStats st = ctx.renderer->GetFrameGpuStats();
+		const ImGuiIO& io = ImGui::GetIO();
+
+		std::vector<std::string> lines;
+		char buf[96];
+		std::snprintf(buf, sizeof(buf), "%.0f FPS   %.2f ms", io.Framerate,
+		              io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
+		lines.emplace_back(buf);
+		lines.push_back("Draws      " + thousands(st.drawCalls));
+		lines.push_back("Triangles  " + thousands(st.triangles));
+		lines.push_back("Objects    " + thousands(st.visibleObjects) + " / " + thousands(st.totalObjects));
+		if (st.occlusionCulled > 0)
+			lines.push_back("Occluded   " + thousands(st.occlusionCulled));
+		if (st.gpuFrameMs >= 0.0)
+		{
+			std::snprintf(buf, sizeof(buf), "GPU        %.2f ms", st.gpuFrameMs);
+			lines.emplace_back(buf);
+		}
+		if (st.vramBudgetMB > 0.0)
+		{
+			std::snprintf(buf, sizeof(buf), "VRAM       %.0f / %.0f MB", st.vramUsedMB, st.vramBudgetMB);
+			lines.emplace_back(buf);
+		}
+
+		// Sized to the widest line; a translucent card so it stays readable
+		// over a bright sky without hiding much of the scene.
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const float pad = 6.0f, lineH = ImGui::GetTextLineHeight();
+		float w = 0.0f;
+		for (const std::string& l : lines) w = std::max(w, ImGui::CalcTextSize(l.c_str()).x);
+		const ImVec2 size(w + pad * 2.0f, lineH * static_cast<float>(lines.size()) + pad * 2.0f);
+		const ImVec2 p0(rectMax.x - size.x - 8.0f, rectMin.y + 8.0f);
+		const ImVec2 p1(p0.x + size.x, p0.y + size.y);
+		if (p0.x < rectMin.x || p1.y > rectMax.y) return;   // too small a pane to hold it
+		dl->AddRectFilled(p0, p1, IM_COL32(12, 11, 10, 190), 4.0f);
+		dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 30), 4.0f);
+		float y = p0.y + pad;
+		for (size_t i = 0; i < lines.size(); ++i)
+		{
+			// The first line is the one people glance at; it gets the accent.
+			const ImU32 col = i == 0 ? ImGui::GetColorU32(HE::Ed::Theme::AccentBright)
+			                         : IM_COL32(225, 222, 215, 255);
+			dl->AddText(ImVec2(p0.x + pad, y), col, lines[i].c_str());
+			y += lineH;
+		}
 	}
 }
 
@@ -396,19 +466,19 @@ namespace
 static void hideSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
-	snapshot(ctx);
+	snapshot(ctx, "Hide Selected");
 	noteEdited(ctx, ViewportActions::hideSelected(*ctx.world, ctx.selection));
 }
 static void isolateSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
-	snapshot(ctx);
+	snapshot(ctx, "Isolate Selected");
 	noteEdited(ctx, ViewportActions::isolateSelected(*ctx.world, ctx.selection));
 }
 static void showAll(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying) return;
-	snapshot(ctx);
+	snapshot(ctx, "Show All");
 	noteEdited(ctx, ViewportActions::showAll(*ctx.world));
 }
 // Group and Ungroup rewrite the local transform of what they move (the world
@@ -418,14 +488,14 @@ static void groupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
 	const std::vector<Entity> roots = ctx.selection.roots(ctx.world->registry());
-	snapshot(ctx);
+	snapshot(ctx, "Group Selected");
 	if (ViewportActions::groupSelected(*ctx.world, ctx.selection) != entt::null)
 		noteEdited(ctx, roots);
 }
 static void ungroupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying) return;
-	snapshot(ctx);
+	snapshot(ctx, "Ungroup Selected");
 	noteEdited(ctx, ViewportActions::ungroupSelected(*ctx.world, ctx.selection));
 }
 static void focusSelected(AppContext& ctx, const RenderWorld& snapshotWorld)
@@ -557,7 +627,7 @@ static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
 		if (EditorWidgets::menuItem(primaryLocked ? "Unlock" : "Lock", nullptr, false,
 		                            editable && hasSel))
 		{
-			snapshot(ctx);
+			snapshot(ctx, primaryLocked ? "Unlock Entity" : "Lock Entity");
 			for (const Entity e : ctx.selection.entities())
 			{
 				if (!reg.valid(e) || e == ctx.world->rootEntity()) continue;
@@ -956,7 +1026,7 @@ void render(AppContext& ctx, float dt)
 								spawnPos = ctx.editorCamera->position() + glm::vec3(cp*sy, sp, -cp*cy) * 8.0f;
 							}
 
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							if (ctx.undoSys) ctx.undoSys->snapshotNow("Place Asset");
 							if (mesh)
 							{
 								// Copied out BEFORE the material load below: the asset stores
@@ -1276,6 +1346,10 @@ void render(AppContext& ctx, float dt)
 					CollabPresenceBar::DrawViewportMarkers(
 						ctx, s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
 						rectMin.x, rectMin.y, rectMax.x, rectMax.y);
+				// The counters, over everything: a diagnostic has to stay
+				// readable whatever the scene is doing underneath it.
+				if (s_showFlags.stats)
+					drawStatsOverlay(ctx, rectMin, rectMax);
 			}
 			else
 			{

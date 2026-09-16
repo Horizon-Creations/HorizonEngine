@@ -253,7 +253,7 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			if (s_landscapePaint)
 			{
 				if (lmbDown && !s_brushWasDown && ctx.undoSys)
-					ctx.undoSys->snapshotNow();   // one undo entry per stroke
+					ctx.undoSys->snapshotNow("Paint Landscape");   // one undo entry per stroke
 				if (lmbDown && hasHit)
 				{
 					// World → terrain-local (the brush works in world XZ).
@@ -280,7 +280,7 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 				if (auto* fol = terrainReg.try_get<FoliageComponent>(terrainEnt))
 				{
 					if (lmbDown && !s_brushWasDown && ctx.undoSys)
-						ctx.undoSys->snapshotNow();   // one undo entry per stroke
+						ctx.undoSys->snapshotNow("Paint Foliage");   // one undo entry per stroke
 					if (lmbDown && hasHit)
 					{
 						const float lx = hitWS.x - terrainWorldPos.x;
@@ -298,7 +298,7 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 
 			if (sculptDown && !s_brushWasDown)
 			{
-				if (ctx.undoSys) ctx.undoSys->snapshotNow();
+				if (ctx.undoSys) ctx.undoSys->snapshotNow("Sculpt Landscape");
 				// Lazy-init sculptHeights from current terrain geometry
 				if (tc.sculptHeights.empty())
 				{
@@ -498,6 +498,9 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 void renderPanel(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+    // The panel's own buttons (layer add/remove, foliage rows, resample…)
+    // read as "Landscape" in the undo history; the strokes label themselves.
+    EditorUndo::Context undoScope(ctx.undoSys, "Landscape");
     // This panel is docked into a narrow column and it explains itself in full
     // sentences — "Green grid in the viewport previews the result", "Flattens
     // toward the height where the drag began", "Ctrl+click a field to type a
@@ -1008,7 +1011,7 @@ std::string applyHeightmapAsset(AppContext& ctx, Entity terrain, bool& error)
 	const auto tex = ctx.contentManager->acquireTexture(tc->heightmapTexture);
 	if (!tex) return "The heightmap texture could not be loaded.";
 
-	if (ctx.undoSys) ctx.undoSys->snapshotNow();
+	if (ctx.undoSys) ctx.undoSys->snapshotNow("Apply Heightmap");
 	TerrainHeightmap::Options opts;
 	opts.flipZ           = s_hmFlipZ;
 	opts.adoptResolution = s_hmAdoptRes;
@@ -1033,7 +1036,7 @@ std::string importHeightmapFile(AppContext& ctx, Entity terrain,
 	auto* tc = ctx.world->registry().try_get<TerrainComponent>(terrain);
 	if (!tc) return "Not a landscape.";
 
-	if (ctx.undoSys) ctx.undoSys->snapshotNow();
+	if (ctx.undoSys) ctx.undoSys->snapshotNow("Import Heightmap");
 	TerrainHeightmap::Options opts;
 	opts.flipZ           = s_hmFlipZ;
 	opts.adoptResolution = s_hmAdoptRes;

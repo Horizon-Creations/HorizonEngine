@@ -525,6 +525,22 @@ TEST_CASE("codegen parity: variables")
 	CHECK(p.var("arrF").items.size() == 5);
 }
 
+TEST_CASE("codegen parity: reroutes are transparent in both backends")
+{
+	// A knot in an exec wire runs what follows; a knot (and a chain of two) in
+	// a data wire carries the value, fans out, and carries an array. The
+	// generator has to inline through it — ParityPair REQUIREs the compiled
+	// class exists, so an emitter fallback here would fail before any CHECK.
+	ParityPair p("fix/reroutes");
+	p.fire("Go");
+	CHECK(p.var("f").f == 3.5f);      // 2.5 through two knots, + 1
+	CHECK(p.var("g").f == 2.5f);      // the same knot, fanned out
+	CHECK(p.var("n").i == 3);         // Array<Float> through a knot → length
+	CHECK(p.var("hits").i == 1);      // two exec knots in a row reach the end
+	p.fire("Go");
+	CHECK(p.var("hits").i == 2);
+}
+
 TEST_CASE("codegen parity: functions_basic")
 {
 	ParityPair p("fix/functions_basic");

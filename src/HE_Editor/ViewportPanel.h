@@ -99,6 +99,12 @@ namespace ViewportPanel
 		bool guides        = true;  // rope + trail handles, root-motion and look-at previews
 		bool collaborators = true;  // peers' rings, selections and name tags
 		bool scriptDebug   = true;  // debug.* lines from scripts and HorizonCode
+		// The frame counters in the viewport's corner: FPS and frame time,
+		// draw calls, triangles, visible/total objects, GPU time where the
+		// backend measures it. OFF by default — it is a diagnostic, not part
+		// of looking at a scene, and "Show All Overlays" (= the defaults)
+		// leaves it where it is for the same reason.
+		bool stats         = false;
 	};
 	ShowFlags& showFlags();
 

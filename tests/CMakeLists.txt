@@ -46,12 +46,16 @@ add_executable(he_tests
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.
     test_outliner_ui.cpp
+    test_inspector_ui.cpp
     # The Landscape panel's Foliage brush, driven the same way: mode well,
     # Grow/Erase well, and a drag over a top-down viewport into the mask.
     test_terrain_tools_ui.cpp
     # The Audio Mixer, driven the same way: strips from a real ProjectData, a
     # click on M reaching the device-less AudioEngine as a mute, S as a solo.
     test_audio_mixer_ui.cpp
+    # The Undo History window, driven the same way: rows from a real EditorUndo
+    # over a real world, a click on a row rewinding the world in one restore.
+    test_undo_history_ui.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
@@ -87,6 +91,7 @@ add_executable(he_tests
     test_horizoncode_types.cpp
     test_hc_fallback_report.cpp
     test_horizoncode_containers.cpp
+    test_horizoncode_reroute.cpp
     test_python_scripting.cpp
     test_physics.cpp
     test_collision_system.cpp
@@ -498,6 +503,11 @@ add_executable(he_tests
     # HE_IMGUI_ENABLED as the gizmo — AppContext's layout depends on it, so the
     # panel and its test are the only two sources here that see that layout.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
+    # The Details panel, for test_inspector_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED. Everything it reaches for (the widgets, the
+    # help table, the multi-edit diff, the HorizonCode class listing, the
+    # Landscape tools) is already in this binary for the other panels.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/InspectorPanel.cpp
     # The Landscape tools, for test_terrain_tools_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. Everything they call (TerrainPaint/FoliagePaint
     # in HorizonScene, RenderWorld, the toolbar, the widgets) is already here.
@@ -506,6 +516,9 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. It reads ProjectData (HorizonTools, linked
     # below) and AudioEngine (HorizonScene), both already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
+    # The Undo History window, for test_undo_history_ui.cpp: same AppContext,
+    # same per-file HE_IMGUI_ENABLED. It reads EditorUndo (already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/UndoHistoryPanel.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
@@ -526,10 +539,14 @@ set_source_files_properties(
     test_viewport_gizmo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
     test_outliner_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/InspectorPanel.cpp
+    test_inspector_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
     test_terrain_tools_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
     test_audio_mixer_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/UndoHistoryPanel.cpp
+    test_undo_history_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
@@ -636,7 +653,7 @@ set(HCGEN_CLASSES
     ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived
-    inherit_novars_base inherit_novars input_actions containers
+    inherit_novars_base inherit_novars input_actions containers reroutes
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

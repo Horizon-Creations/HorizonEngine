@@ -6,6 +6,7 @@
 #include "EditorTheme.h"                 // the accent the prefab badge is drawn in
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/EntityVisibility.h> // what the eye on a row flips, and reads
+#include <HorizonScene/EntityActive.h>     // the Details panel's Active switch dims a row
 #include <ContentManager/ContentManager.h> // the prefab badge names the asset
 #include <ContentManager/Assets.h>
 #include <UIWidget/WidgetManager.h>   // application projects list widgets, not entities
@@ -246,7 +247,7 @@ namespace
             EditorWidgets::helpForKey("outliner.visibility");
             if (editable && ImGui::IsItemClicked(ImGuiMouseButton_Left))
             {
-                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                if (ctx.undoSys) ctx.undoSys->snapshotNow(shown ? "Hide Entity" : "Show Entity");
                 HE::setSubtreeVisible(reg, entity, !shown);
                 // Every entity touched, named for the prefab-override
                 // recording: none of them need be selected (see
@@ -281,7 +282,7 @@ namespace
             EditorWidgets::helpForKey("outliner.lock");
             if (editable && ImGui::IsItemClicked(ImGuiMouseButton_Left))
             {
-                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                if (ctx.undoSys) ctx.undoSys->snapshotNow(locked ? "Unlock Entity" : "Lock Entity");
                 if (locked) reg.remove<EditorLockComponent>(entity);
                 else        reg.emplace_or_replace<EditorLockComponent>(entity);
             }
@@ -294,6 +295,10 @@ namespace
 void render(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+    // Whatever this panel pushes onto the undo stack without a label of its
+    // own (Move Up, Sort Children, the row menu's Lock) reads as "Outliner" in
+    // the history window rather than as a bare "Edit".
+    EditorUndo::Context undoScope(ctx.undoSys, "Outliner");
     // World Outliner
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("World Outliner");
@@ -631,10 +636,15 @@ void render(AppContext& ctx)
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(rgb[0], rgb[1], rgb[2], 1.0f));
                 pushedText = true;
             }
-            else if (show == OutlinerFilter::Show::Context)
+            else if (show == OutlinerFilter::Show::Context ||
+                     !HE::isEntityActive(ctx.world->registry(), node.entity))
             {
                 // Not a hit itself — the path to one. Dimmed so the eye lands
-                // on what was searched for, not on the folders around it.
+                // on what was searched for, not on the folders around it. The
+                // same dimming for an entity that is switched off (its own
+                // Active box in the Details panel, or a parent's): it is in
+                // the scene file but not in the game, and the row should look
+                // like that.
                 ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
                 pushedText = true;
             }
@@ -696,7 +706,7 @@ void render(AppContext& ctx)
                 {
                     Entity dragged{};
                     std::memcpy(&dragged, payload->Data, sizeof(Entity));
-                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow("Reparent Entity");
                     ctx.world->reparentEntity(dragged, node.entity);
                 }
                 ImGui::EndDragDropTarget();
@@ -718,7 +728,7 @@ void render(AppContext& ctx)
                     Preset preset{};
                     if (drawCreateMenu(preset))
                     {
-                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow("Create Entity");
                         const Entity child = createPreset(*ctx.world, preset);
                         ctx.world->reparentEntity(child, node.entity);
                         ctx.selection.set(child);
@@ -1043,7 +1053,7 @@ void render(AppContext& ctx)
                 {
                     Entity dragged{};
                     std::memcpy(&dragged, payload->Data, sizeof(Entity));
-                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow("Reparent Entity");
                     ctx.world->reparentEntity(dragged, ctx.world->rootEntity());
                 }
                 ImGui::EndDragDropTarget();
@@ -1057,7 +1067,7 @@ void render(AppContext& ctx)
             Preset preset{};
             if (drawCreateMenu(preset))
             {
-                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                if (ctx.undoSys) ctx.undoSys->snapshotNow("Create Entity");
                 ctx.selection.set(createPreset(*ctx.world, preset));
                 ctx.world->markHierarchyDirty();
             }
@@ -1086,7 +1096,7 @@ void render(AppContext& ctx)
                 if (s_entityRenameBuf[0] != '\0' &&
                     ctx.world->registry().valid(s_renameEntity))
                 {
-                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow("Rename Entity");
                     ctx.world->renameEntity(s_renameEntity, s_entityRenameBuf);
                 }
                 s_renameEntity = entt::null;

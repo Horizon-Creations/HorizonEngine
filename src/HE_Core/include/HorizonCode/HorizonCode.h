@@ -355,6 +355,20 @@ enum class NodeType : uint8_t
     // that takes a widget and fades whatever is called "Panel" inside it.
     GetPropertyOn, SetPropertyOn,
 
+    // ── Reroute: a bend in a wire ────────────────────────────────────────────
+    // One pin in, the same pin out, nothing in between. Purely for layout — a
+    // long wire gets a knot it can be routed through, and a fan-out gets one
+    // place to branch from. Two shapes from one field: `hasArg` = an EXEC
+    // reroute (exec in → exec out); otherwise a DATA reroute whose single pin
+    // is typed by propType/isArray/container/typeName/keyType exactly the way
+    // Get Variable's is. It adopts that type from whatever gets wired into it
+    // (adoptRerouteType), so the palette never has to ask.
+    //
+    // The interpreter reads straight through it and the C++ emitter inlines
+    // its input expression — a reroute never costs a slot, a statement or a
+    // cache entry, which is what makes it safe to sprinkle.
+    Reroute,
+
     COUNT
 };
 
@@ -565,6 +579,23 @@ struct EventDecl
     std::string typeName;   // Enum/Struct argument: the definition asset
 };
 
+// Editor-only comment box drawn BEHIND the nodes it frames — a titled
+// rectangle that groups a region of the canvas and drags its nodes with it.
+// Never read by the interpreter or the C++ emitter; serialized with the graph
+// so a layout survives a reload. Ids share the graph's `nextId` counter with
+// nodes (uniqueness only — a comment id never means a node). `subgraph`
+// follows Node::subgraph: a box lives in one function body or in the event
+// graph, like the nodes it frames. The material graph's MatGraphComment is
+// the same idea for a graph with no sub-graphs.
+struct GraphComment
+{
+    int         id = 0;
+    std::string text;                       // header label
+    float       x = 0.0f, y = 0.0f;         // graph-space top-left
+    float       w = 280.0f, h = 180.0f;     // graph-space size
+    int         subgraph = 0;
+};
+
 struct HE_API Graph
 {
     std::vector<Node>      nodes;
@@ -573,6 +604,9 @@ struct HE_API Graph
     // Events this class declares (custom ones only — the engine's own are a
     // fixed list, see engineEvents()).
     std::vector<EventDecl> events;
+    // Editor chrome, see GraphComment. Absent from every graph written before
+    // it existed, which fromJson reads as "none".
+    std::vector<GraphComment> comments;
     int nextId = 1;
 
     // ── What this graph INHERITS, for the editor only ────────────────────────
@@ -873,6 +907,25 @@ HE_API std::vector<int> duplicateNodes(Graph& g, const std::vector<int>& ids,
 // menus on the Element pin). Call BEFORE Graph::connect. No-op otherwise.
 HE_API void adoptForEachElementType(Graph& g, int srcNode, int srcPin,
                                     int dstNode, int dstPin);
+
+// The same for a Reroute, which is generic until wired on EITHER side. Wiring
+// a data output INTO a reroute makes the reroute that output's type (and
+// drops its own outgoing links that no longer typecheck); wiring a reroute
+// whose input is still unwired into a typed INPUT makes it that input's type.
+// Exec pins never retype anything: an exec reroute is one from birth
+// (Node::hasArg). Call BEFORE Graph::connect. No-op when neither end is a
+// reroute.
+HE_API void adoptRerouteType(Graph& g, int srcNode, int srcPin, int dstNode, int dstPin);
+// Re-derive every reroute's type from what feeds it, following chains (a
+// reroute fed by a reroute), until nothing changes. What fromJson runs after
+// a load — the node upstream may have been retyped since the file was saved
+// — and what an editor runs after a retype. Returns whether anything moved.
+HE_API bool propagateRerouteTypes(Graph& g);
+// The data pin a reroute chain ultimately carries: walks (node, pin) upstream
+// through every reroute and returns the first non-reroute source, or the
+// input itself when the chain is fed by nothing. `pin` is unified. Lets a
+// menu asking "which class is this reference" see through the knots.
+HE_API const Node* rerouteOrigin(const Graph& g, const Node& n, int pin, int& originPin);
 
 // ── Interpreter ──────────────────────────────────────────────────────────────
 // The host binds these so HorizonCode can read/write target state without

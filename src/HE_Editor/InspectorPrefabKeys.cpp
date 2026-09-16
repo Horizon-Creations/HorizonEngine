@@ -70,6 +70,14 @@ const char* componentKeyForLabel(const char* label)
 	return nullptr;
 }
 
+const char* componentLabelForKey(const char* key)
+{
+	if (!key) return nullptr;
+	for (const auto& e : kComponentKeys)
+		if (std::strcmp(e.key, key) == 0) return e.label;
+	return nullptr;
+}
+
 size_t componentKeyCount() { return sizeof(kComponentKeys) / sizeof(kComponentKeys[0]); }
 
 const char* componentLabelAt(size_t i)

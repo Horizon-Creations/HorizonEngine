@@ -5,6 +5,7 @@
 #include <HorizonScene/UISystem.h>
 #include <Renderer/UIFont.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/EntityActive.h>   // the "Active" switch: a switched-off canvas or element draws nowhere
 #include <HorizonScene/Components/UICanvasComponent.h>
 #include <HorizonScene/Components/UIElementComponent.h>
 #include <HorizonScene/Components/UITextComponent.h>
@@ -138,17 +139,21 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
     // claim them for exactly one canvas: iterating every element for every
     // canvas emitted each element once PER active canvas, i.e. doubled geometry
     // with the wrong canvas' scale on one copy as soon as a scene had two.
+    // Two switches, both honoured: the canvas' own Active flag, and the
+    // entity-level one (the Details panel's box, inherited from a parent) on
+    // the canvas as on every element under it.
+    const HE::ActiveFilter active(reg);
     entt::entity fallbackCanvas = entt::null;
     for (auto [canvasEnt, canvas] : reg.view<UICanvasComponent>().each())
     {
-        if (!canvas.active) continue;
+        if (!canvas.active || active.off(canvasEnt)) continue;
         fallbackCanvas = canvasEnt;
         break;
     }
 
     for (auto [canvasEnt, canvas] : reg.view<UICanvasComponent>().each())
     {
-        if (!canvas.active) continue;
+        if (!canvas.active || active.off(canvasEnt)) continue;
 
         const float scaleX = vpWidth  / canvas.width;
         const float scaleY = vpHeight / canvas.height;
@@ -162,6 +167,7 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
             if (owner != canvasEnt &&
                 !(owner == entt::null && canvasEnt == fallbackCanvas))
                 continue;
+            if (active.off(elemEnt)) continue;   // switched off in the Details panel
 
             glm::vec2 screenPos, screenSize;
             if (!computeScreenRect(reg, elemEnt, vpWidth, vpHeight,

@@ -212,6 +212,8 @@ void install()
 			heAddItem(view, @"Console",               C::ToggleConsole,     nil, 0, false));
 		s_toggleItems.emplace_back(C::ToggleAudioMixer,
 			heAddItem(view, @"Audio Mixer",           C::ToggleAudioMixer,  nil, 0, false));
+		s_toggleItems.emplace_back(C::ToggleUndoHistory,
+			heAddItem(view, @"Undo History",          C::ToggleUndoHistory, nil, 0, false));
 		// The world grid is not a panel, but it is a View toggle the user looks
 		// for in this menu — on macOS the viewport toolbar's options popup is
 		// otherwise its only route.

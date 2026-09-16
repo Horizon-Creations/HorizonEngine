@@ -105,6 +105,21 @@ void signatureInto(const Node& n, NodeSig& s)
                p.container, p.keyType, defOf(p.keyTypeName) }; };
     switch (n.type)
     {
+    case T::Reroute:
+        // Unlabelled on both sides: the knot is drawn as a dot, and a label
+        // would be a word on a wire. The data shape mirrors Get Variable's pin
+        // field for field so a reroute can carry anything a variable can.
+        if (n.hasArg)
+        {
+            s.execIns  = { { "", P::Exec } };
+            s.execOuts = { { "", P::Exec } };
+        }
+        else
+        {
+            s.dataIns  = { { "", n.propType, n.isArray, tn, n.container, n.keyType, ktn } };
+            s.dataOuts = { { "", n.propType, n.isArray, tn, n.container, n.keyType, ktn } };
+        }
+        break;
     case T::Event:
         s.execOuts = { { "", P::Exec } };
         // "Value" is right for an event whose payload is whatever it carries,
@@ -653,6 +668,7 @@ const char* nodeDisplayName(NodeType t)
         // widget. The name is the on-disk key, so it is also a promise.
         case T::GetPropertyOn: return "Get Property (Ref)";
         case T::SetPropertyOn: return "Set Property (Ref)";
+        case T::Reroute:       return "Reroute";
         case T::GetVariable:  return "Get Variable";
         case T::SetVariable:  return "Set Variable";
         case T::ShowSelf:   return "Show Self";
@@ -792,6 +808,7 @@ const char* nodeSearchAliases(NodeType t)
         case T::SetToArray:   return "set to array convert list";
         case T::MapKeys:      return "keys to array";
         case T::MapValues:    return "values to array";
+        case T::Reroute:      return "knot bend wire route pass through pin";
         default: return "";
     }
 }
@@ -841,6 +858,11 @@ const char* nodeTooltip(NodeType t)
             return "Writes a property of an element of the REFERENCED widget, by the\n"
                    "element's name, when executed. Target left unwired means this\n"
                    "widget; wired, it reaches one this graph did not have to author.";
+        case T::Reroute:
+            return "A knot in a wire: one pin in, the same pin out, nothing in between.\n"
+                   "Routes a long wire around other nodes or fans one value out from\n"
+                   "one place. Takes the type of whatever is wired into it; an exec\n"
+                   "reroute passes execution straight through. Costs nothing at run time.";
         case T::GetVariable:
             return "Reads a graph variable (persistent per running instance).\n"
                    "Pure — evaluated whenever the output is used.";
@@ -1091,6 +1113,7 @@ const char* nodeCategory(NodeType t)
         case T::Delay:
         case T::DoOnce:
         case T::FlipFlop:      return "Flow";
+        case T::Reroute:       return "Flow";
         case T::IsValid:
         case T::Cast:          return "Reference";
         case T::GetProperty:
@@ -1424,6 +1447,198 @@ void adoptForEachElementType(Graph& g, int srcNode, int srcPin, int dstNode, int
     }
 }
 
+// ── Reroute typing ───────────────────────────────────────────────────────────
+namespace
+{
+// Unified pin indices of a reroute: it has exactly one pin per side, and no
+// exec pins on a data one (nor data pins on an exec one), so both shapes put
+// the input at 0 and the output at 1.
+constexpr int kRerouteIn  = 0;
+constexpr int kRerouteOut = 1;
+
+bool isDataReroute(const Node& n) { return n.type == NodeType::Reroute && !n.hasArg; }
+
+// Make the reroute's single pin `d`. Returns whether anything changed.
+bool applyPinDesc(Node& r, const PinDesc& d)
+{
+    const ContainerKind kind = d.isArray ? d.kind() : ContainerKind::None;
+    const std::string   tn   = d.typeName    ? d.typeName    : "";
+    const std::string   ktn  = d.keyTypeName ? d.keyTypeName : "";
+    const bool changed = r.propType != d.type || r.isArray != d.isArray ||
+                         r.container != kind || r.typeName != tn ||
+                         r.keyType != d.keyType || r.keyTypeName != ktn;
+    r.propType = d.type; r.isArray = d.isArray; r.container = kind;
+    r.typeName = tn; r.keyType = d.keyType; r.keyTypeName = ktn;
+    return changed;
+}
+
+bool dataWireAllowed(const Node& s, int si, const Node& d, int di);
+
+// After a reroute retyped: every wire leaving it that the new type refuses is
+// dropped, exactly as a ForEach drops its Element wires. The one arriving
+// (its input) is what caused the retype and stays — and so does a wire into
+// ANOTHER reroute's input, because that one is about to adopt the new type
+// itself (propagateRerouteTypes) rather than refuse it.
+void dropStaleRerouteOutputs(Graph& g, const Node& r)
+{
+    g.links.erase(std::remove_if(g.links.begin(), g.links.end(), [&](const Link& l)
+    {
+        if (l.srcNode != r.id || l.srcPin != kRerouteOut) return false;
+        const Node* d = g.findNode(l.dstNode);
+        if (!d) return true;
+        if (isDataReroute(*d) && l.dstPin == kRerouteIn) return false;
+        return !dataWireAllowed(r, 0, *d, l.dstPin - pinRanges(*d).dataIn0);
+    }), g.links.end());
+}
+} // namespace
+
+void adoptRerouteType(Graph& g, int srcNode, int srcPin, int dstNode, int dstPin)
+{
+    Node* dst = g.findNode(dstNode);
+    Node* src = g.findNode(srcNode);
+    if (!dst || !src || srcNode == dstNode) return;
+
+    // A data output wired INTO a reroute: the reroute becomes that output.
+    if (isDataReroute(*dst) && dstPin == kRerouteIn)
+    {
+        PinDesc sd{};
+        if (!dataPinDescOf(*src, /*input=*/false, srcPin - pinRanges(*src).dataOut0, sd)) return;
+        if (applyPinDesc(*dst, sd))
+        {
+            // The wire being made replaces whatever fed the knot before (an
+            // input holds one link, and connect() would drop it anyway).
+            // Dropped HERE so the propagation below reads the new feed and not
+            // the old one back onto the knot.
+            HE::graph::disconnectInput(g.links, dstNode, dstPin);
+            dropStaleRerouteOutputs(g, *dst);
+            propagateRerouteTypes(g);   // a chain hanging off this one follows
+        }
+        return;
+    }
+    // A reroute nobody feeds yet, wired into a typed input: it becomes that
+    // input's type — the shape a reroute dragged BACKWARDS off a pin lands in.
+    // Once something feeds it, what feeds it is the authority (above).
+    if (isDataReroute(*src) && srcPin == kRerouteOut)
+    {
+        for (const Link& l : g.links)
+            if (l.dstNode == src->id && l.dstPin == kRerouteIn) return;
+        PinDesc dd{};
+        if (!dataPinDescOf(*dst, /*input=*/true, dstPin - pinRanges(*dst).dataIn0, dd)) return;
+        if (applyPinDesc(*src, dd))
+        {
+            dropStaleRerouteOutputs(g, *src);
+            propagateRerouteTypes(g);
+        }
+    }
+}
+
+bool propagateRerouteTypes(Graph& g)
+{
+    bool any = false;
+    // Bounded by the longest possible chain: every pass settles at least one
+    // more reroute, so the node count is a ceiling and not a guess.
+    for (size_t pass = 0; pass <= g.nodes.size(); ++pass)
+    {
+        bool moved = false;
+        for (size_t i = 0; i < g.links.size(); ++i)
+        {
+            const Link l = g.links[i];   // by value: the drop below may reorder
+            Node* r = g.findNode(l.dstNode);
+            if (!r || !isDataReroute(*r) || l.dstPin != kRerouteIn) continue;
+            const Node* s = g.findNode(l.srcNode);
+            PinDesc sd{};
+            if (!s || !dataPinDescOf(*s, false, l.srcPin - pinRanges(*s).dataOut0, sd)) continue;
+            if (!applyPinDesc(*r, sd)) continue;
+            dropStaleRerouteOutputs(g, *r);
+            moved = any = true;
+        }
+        if (!moved) break;
+    }
+    return any;
+}
+
+const Node* rerouteOrigin(const Graph& g, const Node& n, int pin, int& originPin)
+{
+    const Node* cur = &n;
+    originPin = pin;
+    // A cycle of reroutes feeding each other is not a valid graph, but a walk
+    // that never returns would be a worse answer to it than a wrong node.
+    for (size_t guard = 0; guard <= g.nodes.size() && cur->type == NodeType::Reroute; ++guard)
+    {
+        const Link* in = nullptr;
+        for (const Link& l : g.links)
+            if (l.dstNode == cur->id && l.dstPin == kRerouteIn) { in = &l; break; }
+        if (!in) { originPin = kRerouteIn; return cur; }   // fed by nothing: the knot itself
+        const Node* s = g.findNode(in->srcNode);
+        if (!s) { originPin = kRerouteIn; return cur; }
+        cur = s;
+        originPin = in->srcPin;
+    }
+    return cur;
+}
+
+namespace
+{
+// May a wire run from `s`'s data-out `si` to `d`'s data-in `di`? The whole
+// type rule, in one place: Graph::connect asks it, and so does a reroute that
+// just changed type and has to know which of its wires still hold.
+bool dataWireAllowed(const Node& s, int si, const Node& d, int di)
+{
+    // Elementary types convert on the wire: the reader coerces to ITS pin
+    // type (Runner::evalInput), and generated C++ emits the cast — so a
+    // Float output feeding an Int input needs no node in between.
+    if (!canConvertPinType(dataPinType(s, false, si), dataPinType(d, true, di)) ||
+        dataPinIsArray(s, false, si) != dataPinIsArray(d, true, di)) // container ≠ scalar
+        return false;
+    // Containers of different KINDS never join: an array is ordered and
+    // indexable, a set deduplicates, a map is keyed — and coerce passes a
+    // container through untouched, so an accepted wire would be a
+    // reinterpretation rather than a conversion. A map additionally has to
+    // agree on the KEY (and, for enum keys, on its definition).
+    {
+        PinDesc sd{}, dd{};
+        dataPinDescOf(s, false, si, sd);
+        dataPinDescOf(d, true,  di, dd);
+        if (sd.kind() != dd.kind()) return false;
+        // …and neither do containers of different ELEMENT types, for exactly
+        // the same reason one line up: the convertibility test above is about
+        // a value coerce() will convert on arrival, and coerce leaves a
+        // container alone. An accepted Array<Float> → Array<Int> wire would
+        // hand the reader elements still tagged Float while every comparison
+        // it makes runs on its own pin type — scalarValueEquals(Int) reads
+        // a.i, a Float value's i is 0, so every element looks equal to every
+        // other and a five-element array dedupes to one. A refused wire is a
+        // question the author can answer; that one is a silent wrong answer.
+        if (sd.kind() != ContainerKind::None && sd.type != dd.type) return false;
+        if (sd.kind() == ContainerKind::Map)
+        {
+            if (sd.keyType != dd.keyType) return false;
+            const std::string_view ka = sd.keyTypeName ? sd.keyTypeName : "";
+            const std::string_view kb = dd.keyTypeName ? dd.keyTypeName : "";
+            if (!ka.empty() && !kb.empty() && ka != kb) return false;
+        }
+    }
+    // User-defined types connect only to the SAME definition: a Struct pin
+    // for PlayerStats must not accept an Inventory, and enums likewise. An
+    // EMPTY typeName is the generic boundary (e.g. the save.setStruct
+    // engine call, whose registry params carry no definition) — it accepts
+    // anything, like an untyped Object reference; the callee validates.
+    {
+        const PinType pt = dataPinType(s, false, si);
+        if (pt == P::Enum || pt == P::Struct)
+        {
+            PinDesc sd{}, dd{};
+            dataPinDescOf(s, false, si, sd);
+            dataPinDescOf(d, true,  di, dd);
+            const std::string_view a = sd.typeName ? sd.typeName : "";
+            const std::string_view b = dd.typeName ? dd.typeName : "";
+            if (!a.empty() && !b.empty() && a != b) return false;
+        }
+    }
+    return true;
+}
+} // namespace
+
 bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
 {
     const Node* s = findNode(srcNode);
@@ -1449,58 +1664,7 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
     }
     if (srcIsDataOut && dstIsDataIn)
     {
-        const int si = srcPin - sr.dataOut0, di = dstPin - dr.dataIn0;
-        // Elementary types convert on the wire: the reader coerces to ITS pin
-        // type (Runner::evalInput), and generated C++ emits the cast — so a
-        // Float output feeding an Int input needs no node in between.
-        if (!canConvertPinType(dataPinType(*s, false, si), dataPinType(*d, true, di)) ||
-            dataPinIsArray(*s, false, si) != dataPinIsArray(*d, true, di)) // container ≠ scalar
-            return false;
-        // Containers of different KINDS never join: an array is ordered and
-        // indexable, a set deduplicates, a map is keyed — and coerce passes a
-        // container through untouched, so an accepted wire would be a
-        // reinterpretation rather than a conversion. A map additionally has to
-        // agree on the KEY (and, for enum keys, on its definition).
-        {
-            PinDesc sd{}, dd{};
-            dataPinDescOf(*s, false, si, sd);
-            dataPinDescOf(*d, true,  di, dd);
-            if (sd.kind() != dd.kind()) return false;
-            // …and neither do containers of different ELEMENT types, for exactly
-            // the same reason one line up: the convertibility test above is about
-            // a value coerce() will convert on arrival, and coerce leaves a
-            // container alone. An accepted Array<Float> → Array<Int> wire would
-            // hand the reader elements still tagged Float while every comparison
-            // it makes runs on its own pin type — scalarValueEquals(Int) reads
-            // a.i, a Float value's i is 0, so every element looks equal to every
-            // other and a five-element array dedupes to one. A refused wire is a
-            // question the author can answer; that one is a silent wrong answer.
-            if (sd.kind() != ContainerKind::None && sd.type != dd.type) return false;
-            if (sd.kind() == ContainerKind::Map)
-            {
-                if (sd.keyType != dd.keyType) return false;
-                const std::string_view ka = sd.keyTypeName ? sd.keyTypeName : "";
-                const std::string_view kb = dd.keyTypeName ? dd.keyTypeName : "";
-                if (!ka.empty() && !kb.empty() && ka != kb) return false;
-            }
-        }
-        // User-defined types connect only to the SAME definition: a Struct pin
-        // for PlayerStats must not accept an Inventory, and enums likewise. An
-        // EMPTY typeName is the generic boundary (e.g. the save.setStruct
-        // engine call, whose registry params carry no definition) — it accepts
-        // anything, like an untyped Object reference; the callee validates.
-        {
-            const PinType pt = dataPinType(*s, false, si);
-            if (pt == P::Enum || pt == P::Struct)
-            {
-                PinDesc sd{}, dd{};
-                dataPinDescOf(*s, false, si, sd);
-                dataPinDescOf(*d, true,  di, dd);
-                const std::string_view a = sd.typeName ? sd.typeName : "";
-                const std::string_view b = dd.typeName ? dd.typeName : "";
-                if (!a.empty() && !b.empty() && a != b) return false;
-            }
-        }
+        if (!dataWireAllowed(*s, srcPin - sr.dataOut0, *d, dstPin - dr.dataIn0)) return false;
         HE::graph::disconnectInput(links, dstNode, dstPin); // an input holds one link
         links.push_back({ srcNode, srcPin, dstNode, dstPin });
         return true;
@@ -1871,6 +2035,20 @@ std::string toJson(const Graph& g)
         }
         j["events"] = std::move(je);
     }
+    // Comment boxes: written only when there are any, so a graph without them
+    // keeps the bytes it had before they existed.
+    if (!g.comments.empty())
+    {
+        nlohmann::json jc = nlohmann::json::array();
+        for (const GraphComment& c : g.comments)
+        {
+            nlohmann::json o = { { "id", c.id }, { "text", c.text },
+                                 { "pos", { c.x, c.y } }, { "size", { c.w, c.h } } };
+            if (c.subgraph) o["subgraph"] = c.subgraph;
+            jc.push_back(std::move(o));
+        }
+        j["comments"] = std::move(jc);
+    }
     return j.dump(2);
 }
 
@@ -1930,6 +2108,24 @@ bool fromJson(const std::string& json, Graph& out)
         d.typeName = e.value("typeName", std::string());
         if (!g.findEvent(d.name)) g.events.push_back(std::move(d));
     }
+    for (const auto& e : j.value("comments", nlohmann::json::array()))
+    {
+        if (!e.is_object()) continue;
+        GraphComment c;
+        c.id   = e.value("id", 0);
+        c.text = e.value("text", std::string());
+        if (const auto p = e.find("pos"); p != e.end() && p->is_array() && p->size() >= 2)
+        { c.x = (*p)[0].get<float>(); c.y = (*p)[1].get<float>(); }
+        if (const auto sz = e.find("size"); sz != e.end() && sz->is_array() && sz->size() >= 2)
+        { c.w = (*sz)[0].get<float>(); c.h = (*sz)[1].get<float>(); }
+        c.subgraph = e.value("subgraph", 0);
+        // A box needs an id the editor can address it by; one written without
+        // (a hand-edited file) gets a fresh one rather than 0, which nodes
+        // never carry either.
+        if (c.id <= 0) c.id = g.nextId++;
+        HE::graph::bumpNextId(g.nextId, c.id);
+        g.comments.push_back(std::move(c));
+    }
     inferEventDecls(g);        // graphs older than declared events arrive with one
     // Both syncs below rebuild pin layouts from definitions that may have changed
     // shape since this graph was saved (a function edited elsewhere, a struct
@@ -1959,6 +2155,7 @@ bool fromJson(const std::string& json, Graph& out)
     inferUserTypeNames(g);     // recover Enum/Struct definitions from the wiring
     syncTypeSignatures(g);     // re-mirror struct/enum pins from the TypeRegistry
     remapLinksFromSnapshot(g, preSync); // wires follow their pins (or drop, visibly)
+    propagateRerouteTypes(g);  // knots follow what feeds them (upstream may have retyped)
     assignSubgraphs(g);        // migrate flat graphs → per-function sub-graphs
     out = std::move(g);
     return true;
@@ -3767,6 +3964,11 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::SetVariable:
     case T::SetProperty:
         return coerce(evalInput(n, 0, depth + 1), n.propType);
+    // A reroute IS its input. No coerce: both pins are the same descriptor, and
+    // a container has to pass through untouched anyway (coerce leaves those
+    // alone, but this makes the "nothing in between" literal).
+    case T::Reroute:
+        return evalInput(n, 0, depth + 1);
     case T::SetExternal:
         return coerce(evalInput(n, 1, depth + 1), n.propType); // dataIn 1 = Value (0 = Target)
     case T::GetGameInstance: return m_ctx.getGameInstance ? m_ctx.getGameInstance() : Value::ofRef(0);

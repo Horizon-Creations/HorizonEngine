@@ -1438,6 +1438,23 @@ namespace
 	  "Takes this component off the entity. What it drove stops: a Mesh removed "
 	  "leaves the entity in the scene with nothing to draw.",
 	  "", "editor#details" },
+	{ "Component/Copy Component", "Copy Component",
+	  "Puts this component, with every one of its values, on the clipboard as "
+	  "text. Paste it onto another entity through its Add Component menu, or "
+	  "onto the same component there with Paste Component Values. It is plain "
+	  "text, so it also travels between two editors and into a chat message.",
+	  "", "editor#details" },
+	{ "Component/Paste Component Values", "Paste Component Values",
+	  "Overwrites every value of this component with the copy on the clipboard. "
+	  "Only offered while the clipboard holds a component of this same kind. "
+	  "Undo brings the old values back.",
+	  "", "editor#details" },
+	{ "Component/Reset to Default", "Reset to Default",
+	  "Puts every value of this component back to what a freshly added one has. "
+	  "Authored data goes with the values: a terrain loses its sculpting and "
+	  "painting, a nav mesh its bake, a foliage layer its placements. One undo "
+	  "step brings all of it back.",
+	  "", "editor#details" },
 	{ "Nav Mesh/Bake", "",
 	  "Walks the scene's static geometry and builds the walkable surface from "
 	  "it. Nothing can path until this has run, and it has to run again after "
@@ -1571,6 +1588,11 @@ namespace
 	  "The project's audio buses as fader strips: master, music, sfx and "
 	  "whatever else you add, with mute and solo for listening.",
 	  "", "systems#audio" },
+	{ "View/Undo History", "",
+	  "Every step Undo can still take back, as a list with the current state "
+	  "marked. Click a row to jump straight there — several steps in one go, "
+	  "forwards or backwards.",
+	  "", "editor#menus" },
 	{ "View/Ground Grid", "",
 	  "The reference grid on the ground plane. Hidden while the scene plays "
 	  "either way.",
@@ -1738,8 +1760,16 @@ namespace
 	  "Where the other people in a collaboration session are and what they have "
 	  "selected: their rings and boxes in the scene, and their name tags over it.",
 	  "", "editor#viewport" },
+	{ "Viewport Show/Stats", "",
+	  "The frame's counters in the corner of the viewport: frame rate and frame "
+	  "time, draw calls, triangles, visible objects out of all of them, and GPU "
+	  "time and video memory where the backend can measure them. The same "
+	  "numbers the profiler shows, read off the last frame. Off by default.",
+	  "", "editor#viewport" },
 	{ "Viewport Show/Show All Overlays", "",
-	  "Switches every overlay back on.", "", "editor#viewport" },
+	  "Switches every overlay back to its default — on for all of them except "
+	  "Stats, which is a diagnostic rather than part of the scene.",
+	  "", "editor#viewport" },
 	{ "Viewport Show/Hide All Overlays", "",
 	  "Switches every overlay off — the scene and nothing else, for a moment.",
 	  "", "editor#viewport" },
@@ -2080,6 +2110,16 @@ namespace
 	{ "Console/Copy All Shown", "",
 	  "Copies everything the current filter leaves visible, not the whole log.",
 	  "", "advanced#diagnostics" },
+	// ── Undo History ─────────────────────────────────────────────────────────
+	// The scene undo stack as a list. Its rows are the operations' own labels
+	// (built at run time, so the scan never sees them); the one fixed control
+	// is the button that empties it.
+	{ "Undo History/Clear", "Clear",
+	  "Forgets every step, backwards and forwards. The scene stays as it is; "
+	  "only the way back is gone. For a history that has grown past the point "
+	  "of being useful, or before a long session you want to start clean.",
+	  "", "editor#menus" },
+
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
 	{ "Audio Mixer/Master", "",
 	  "The volume of everything at once, in front of every bus. Drag it, or "
@@ -2403,6 +2443,26 @@ namespace
 	{ "details.name", "Name",
 	  "What this entity is called in the Outliner and to scripts that look it up "
 	  "by name.",
+	  "", "editor#details" },
+	{ "details.active", "Active",
+	  "The one switch for the whole entity. Off means it is not in the game: "
+	  "its meshes, lights, particles, decals, ropes, trails, foliage and UI are "
+	  "not drawn, its script does not start, no physics body is built for it "
+	  "and its audio source does not play on start. It takes everything under "
+	  "it along. Unlike the Outliner's eye, which only hides what is drawn, "
+	  "this is saved as part of the entity and is off in the packaged game too. "
+	  "Flipping it while the game runs takes effect at the next start, not "
+	  "immediately.",
+	  "", "editor#details" },
+	{ "details.active-through-parent", "Switched off through a parent",
+	  "This entity's own switch is on, but an entity above it in the Outliner "
+	  "is off, and off is inherited. Select that parent to switch the whole "
+	  "group back on.",
+	  "", "editor#details" },
+	{ "details.paste-component", "Paste Component",
+	  "Adds the component on the clipboard to this entity, with the values it "
+	  "was copied with. An entity can carry one of each kind, so a component it "
+	  "already has takes the copied values instead of being doubled.",
 	  "", "editor#details" },
 	// ── Placed prefabs ───────────────────────────────────────────────────────
 	{ "details.prefab", "Prefab Instance",
@@ -5359,6 +5419,33 @@ namespace
 	  "another function cannot be reached from here.",
 	  "", "horizoncode#graphs" },
 
+	// ── HorizonCode: comment boxes and reroutes ──────────────────────────────
+	// Canvas furniture shared by every HorizonCode editor (HcGraphHost): the
+	// frames that group a region of nodes, and the knots a wire is bent through.
+	// Neither changes what the graph does.
+	{ "HorizonCode Graph/Comment Box", "Comment Box",
+	  "Drops a titled frame on the canvas. Drag its header to move it together "
+	  "with every node inside it, double-click the header to name it, pull the "
+	  "corner grip to resize. Purely a note to the reader: the graph runs the "
+	  "same with or without it.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Wrap in Comment", "Wrap in Comment",
+	  "Puts a comment frame around this node, sized to fit. Name it afterwards "
+	  "by double-clicking the header.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Wrap Selection in Comment", "Wrap Selection in Comment",
+	  "Puts one comment frame around every selected node, sized to the group. "
+	  "From then on dragging the frame's header moves them all.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Rename Comment", "Rename Comment",
+	  "Opens the frame's title for editing — the same as double-clicking its "
+	  "header.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Delete Comment", "Delete Comment",
+	  "Removes the frame. The nodes inside it stay where they are; a comment "
+	  "groups them visually and owns none of them.",
+	  "", "horizoncode#graphs" },
+
 	{ "HorizonCode Event/Name", "",
 	  "What this declared event is called. Renaming it rewrites every Event, Emit "
 	  "Event and Bind Event node that used the old name, so the two halves of a "
@@ -6044,6 +6131,7 @@ namespace
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
+		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },
@@ -6131,6 +6219,7 @@ namespace
 		{ "Input Action/",  "editor-input", "Input Reference", "Actions and bindings" },
 		{ "hc.",                         "editor-horizoncode", "HorizonCode Editor", "Graph editing" },
 		{ "Script Graph/",               "editor-horizoncode", "HorizonCode Editor", "Script graphs" },
+		{ "HorizonCode Graph/",          "editor-horizoncode", "HorizonCode Editor", "Comments and reroutes" },
 		{ "Script Variable/",            "editor-horizoncode", "HorizonCode Editor", "Graph variables" },
 		{ "Script Node/",                "editor-horizoncode", "HorizonCode Editor", "Nodes in a script graph" },
 		{ "HorizonCode Event/",          "editor-horizoncode", "HorizonCode Editor", "Declared events" },

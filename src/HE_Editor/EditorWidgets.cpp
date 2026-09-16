@@ -131,7 +131,7 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 
 	if (const AssetDrop drop = acceptAssetDrop(ctx, want, rejectNoun))
 	{
-		if (undo && ctx.undoSys) ctx.undoSys->snapshotNow();
+		if (undo && ctx.undoSys) ctx.undoSys->snapshotNow("Assign Asset");
 		target = drop.id;
 		action = SlotAction::Assigned;
 	}
@@ -146,7 +146,7 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 		if (target != HE::UUID{} &&
 		    ImGui::Selectable("(none)", false))
 		{
-			if (undo && ctx.undoSys) ctx.undoSys->snapshotNow();
+			if (undo && ctx.undoSys) ctx.undoSys->snapshotNow("Clear Asset");
 			target = HE::UUID{};
 			action = SlotAction::Cleared;
 			ImGui::CloseCurrentPopup();
@@ -165,7 +165,7 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 					// UUID into the slot.
 					if (id != HE::UUID{} && resolveAsset(*ctx.contentManager, id, want, nullptr))
 					{
-						if (undo && ctx.undoSys) ctx.undoSys->snapshotNow();
+						if (undo && ctx.undoSys) ctx.undoSys->snapshotNow("Assign Asset");
 						target = id;
 						action = SlotAction::Assigned;
 					}
@@ -189,7 +189,7 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 		ImGui::SameLine();
 		if (ImGui::SmallButton((std::string("Clear##") + idSuffix).c_str()))
 		{
-			if (undo && ctx.undoSys) ctx.undoSys->snapshotNow();
+			if (undo && ctx.undoSys) ctx.undoSys->snapshotNow("Clear Asset");
 			target = HE::UUID{};
 			action = SlotAction::Cleared;
 		}

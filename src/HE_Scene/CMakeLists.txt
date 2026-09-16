@@ -8,6 +8,7 @@ add_library(HorizonScene SHARED
     src/MovementSystem.cpp
     src/SceneSerializer.cpp
     src/EntityVisibility.cpp
+    src/EntityActive.cpp
     src/Components/TransformComponent.cpp
     src/TerrainMeshGenerator.cpp
     src/TerrainSystem.cpp
