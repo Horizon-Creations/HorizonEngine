@@ -387,8 +387,17 @@ cbuffer PerFrame : register(b1)
     float4   uLightDir[8];      // xyz dir,  w cos(spot half angle)
     float4   uLightColor[8];    // rgb,      w intensity
     float4   uLightParams[8];   // x range
-    float4x4 uLightVP;          // directional-light view-proj (D3D clip)
-    int4     uShadowEnabled;    // x = 0/1
+    // Cascaded shadow maps (mirrors GL's uCascadeVP/uCascadeSplits and Metal's
+    // SceneUniforms): per-cascade light view-proj in D3D clip (kD3DClipFix
+    // pre-applied on the CPU), the planar view-space far distance of each
+    // cascade (w = cascade count) and the camera forward the cascade pick
+    // measures that distance along. uShadowBias = project ShadowSettings
+    // receiver bias (x = slope-scaled factor, y = minimum).
+    float4x4 uCascadeVP[3];
+    float4   uCascadeSplits;
+    float4   uCameraFwd;        // xyz = world forward, w = 1 / shadow map size
+    float4   uShadowBias;
+    int4     uShadowEnabled;    // x = 0/1, y = 1 → tint fragments by cascade (debug)
     float4   uSunDir;           // xyz = sun direction toward sky, w unused
     float4   uFog;              // x = fogDensity, y = fogHeightFalloff
     float4   uViewport;        // x=width, y=height, z=ssaoEnabled (0/1)
@@ -403,7 +412,10 @@ cbuffer PerFrame : register(b1)
 };
 
 Texture2D    uTexture   : register(t0);
-Texture2D    uShadowMap : register(t1);
+// Directional CSM depth array — one slice per cascade, sampled through the
+// dedicated point/clamp shadow sampler on s3 (a PCF tap must read ONE texel's
+// depth, and the wrap sampler on s0 would pull the opposite edge in).
+Texture2DArray uShadowMap : register(t1);
 Texture2D    uAO        : register(t2);
 Texture2D    uGIShadow  : register(t4); // half-res ray-traced sun-shadow mask
 Texture2D    uGIIrr     : register(t5); // DDGI irradiance atlas (RGBA16F)
@@ -418,6 +430,7 @@ Texture2D    uSSRFwd    : register(t16);
 SamplerState uSampler   : register(s0);
 SamplerState uAOSampler : register(s1);
 SamplerState uGISampler : register(s2); // linear clamp (mask upsample + atlases)
+SamplerState uShadowSampler : register(s3); // point clamp (CSM depth array)
 
 // Signed-octahedral mapping (direction → texel UV) — must match the probe
 // kernel's octDecode and the GL/Metal implementations byte-for-byte.
@@ -525,16 +538,49 @@ float4 VSDepth(VSIn i) : SV_POSITION
     return mul(uMVP, float4(i.pos, 1.0));
 }
 
-float shadowFactor(float3 worldPos, float3 N, float3 L)
+// Cascaded shadows — the HLSL twin of Metal's shadowFactor() (same top-left
+// texture origin and [0,1] clip depth) and GL's computeShadow(): pick the first
+// cascade whose far distance covers the fragment (by PLANAR camera-forward
+// distance, the same measure the extractor split the cascades with — euclidean
+// distance would push screen-edge pixels into a too-coarse cascade), project
+// into that cascade's light clip, normal-offset + slope-scaled bias scaled by
+// cascade, 3×3 PCF over its slice of the depth array. outCascade returns the
+// chosen index for the debug tint.
+float shadowFactor(float3 worldPos, float3 N, float3 L, out int outCascade)
 {
+    outCascade = 0;
     if (uShadowEnabled.x == 0) return 1.0;
-    float4 lp = mul(uLightVP, float4(worldPos, 1.0));
-    float3 p  = lp.xyz / lp.w;                       // z already [0,1] (D3D clip)
+    float viewDist = dot(worldPos - uCameraPos.xyz, uCameraFwd.xyz);
+    int count = int(uCascadeSplits.w);
+    int c = (count > 0) ? count - 1 : 0;
+    if      (count > 0 && viewDist < uCascadeSplits.x) c = 0;
+    else if (count > 1 && viewDist < uCascadeSplits.y) c = 1;
+    else if (count > 2 && viewDist < uCascadeSplits.z) c = 2;
+    c = clamp(c, 0, 2);
+    outCascade = c;
+
+    // Normal-offset bias scaled by cascade — coarser (farther) cascades have
+    // larger texels and need a bigger offset to avoid acne.
+    float4 lp = mul(uCascadeVP[c], float4(worldPos + N * (0.06 * float(c + 1)), 1.0));
+    float3 p  = lp.xyz / lp.w;                            // z already [0,1] (D3D clip)
     float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); // top-left origin
-    if (p.z > 1.0 || any(uv < 0.0) || any(uv > 1.0)) return 1.0;
-    float bias    = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
-    float closest = uShadowMap.Sample(uSampler, uv).r;
-    return (p.z - bias > closest) ? 0.35 : 1.0;
+    float  texel = uCameraFwd.w;                          // 1 / shadow map size
+    // Reject one texel inside the border so the 3×3 kernel never reads outside
+    // this cascade (clamped neighbour texels → edge fringes).
+    if (p.z > 1.0 || any(uv < texel) || any(uv > 1.0 - texel)) return 1.0;
+    float ndl  = saturate(dot(N, L));
+    float bias = clamp(uShadowBias.x * tan(acos(ndl)), uShadowBias.y, 0.02) * float(c + 1);
+    float vis = 0.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+        {
+            float cd = uShadowMap.Sample(uShadowSampler,
+                                         float3(uv + float2(x, y) * texel, float(c))).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    // No direct-light floor in shadow (GL/Metal agree): ambient + IBL already
+    // provide the indirect minimum; a floor bleeds sun colour into shadow.
+    return vis / 9.0;
 }
 
 // Cook-Torrance PBR helpers.
@@ -614,6 +660,7 @@ float4 PSMain(VSOut i) : SV_TARGET
         result = ao * (ambDiff * 0.35f + ambSpec * (1.0f - 0.6f * rough));
 
     int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
+    int dbgCascade = 0; // cascade chosen by the directional shadow (debug tint)
     for (int li = 0; li < uLightCount.x; ++li)
     {
         int   type  = (int)uLightPos[li].w;
@@ -639,13 +686,14 @@ float4 PSMain(VSOut i) : SV_TARGET
             }
         }
         // Directional lights: ray-traced screen-space mask when GI is on
-        // (replaces the single shadow map entirely), else the classic lookup.
+        // (replaces the cascade array entirely), else the CSM lookup. An
+        // if/else rather than a ternary so the `out` cascade index is written
+        // only on the shadow-map branch (mirrors GL).
         float sh = 1.0;
         if (type == 0)
         {
-            sh = (uGIParams.x > 0.5f)
-               ? uGIShadow.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0).r
-               : shadowFactor(i.worldPos, N, L);
+            if (uGIParams.x > 0.5f) sh = uGIShadow.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0).r;
+            else                    sh = shadowFactor(i.worldPos, N, L, dbgCascade);
         }
         else
         {
@@ -672,6 +720,15 @@ float4 PSMain(VSOut i) : SV_TARGET
         float f = 1.0f - exp(-opt);
         float3 fogCol = skyColor(ray/dist, uSunDir.xyz);
         result = lerp(result, fogCol, clamp(f, 0.0f, 1.0f));
+    }
+    // Debug: tint each fragment by its shadow cascade (red / green / blue /
+    // yellow) so the cascade split placement is verifiable at a glance.
+    // Mirrors GL and Metal (IRenderer::SetShadowDebug).
+    if (uShadowEnabled.y != 0 && uShadowEnabled.x != 0)
+    {
+        const float3 tint[4] = { float3(1.0, 0.4, 0.4), float3(0.4, 1.0, 0.4),
+                                 float3(0.4, 0.6, 1.0), float3(1.0, 1.0, 0.4) };
+        result *= tint[min(dbgCascade, 3)];
     }
     return float4(result, uPBR.z);
 }
@@ -942,8 +999,11 @@ namespace
         glm::vec4  lightDir[8];
         glm::vec4  lightColor[8];
         glm::vec4  lightParams[8];
-        glm::mat4  lightVP;
-        glm::ivec4 shadowEnabled;
+        glm::mat4  cascadeVP[3];    // per-cascade light view-proj (D3D clip pre-applied)
+        glm::vec4  cascadeSplits;   // xyz = planar view-space far distances, w = count
+        glm::vec4  cameraFwd;       // xyz = world forward, w = 1 / shadow map size
+        glm::vec4  shadowBias;      // x = slope-scaled factor, y = minimum
+        glm::ivec4 shadowEnabled;   // x = 0/1, y = cascade debug tint
         glm::vec4  sunDir;   // xyz = sun direction
         glm::vec4  fog;      // x=fogDensity, y=fogHeightFalloff
         glm::vec4  viewport; // x=W, y=H, z=ssaoEnabled
@@ -1041,12 +1101,75 @@ struct D3D11RendererImpl
     bool decalReady  = false; // resources built
     bool decalFailed = false; // build failed once — never retried per frame
 
-    // ── Shadow map ──────────────────────────────────────────────────────────
+    // ── Cascaded shadow maps ────────────────────────────────────────────────
+    // One R32 depth ARRAY, kCsmCascades slices (one per cascade), a DSV per
+    // slice for the depth pass and one array SRV the scene shader picks a slice
+    // from. Mirrors GL's GL_TEXTURE_2D_ARRAY / Metal's texture2d_array. The
+    // cascade count MUST match the scene shader's uCascadeVP[3] and stay ≤
+    // ShadowData::kMaxCascades; the extractor fits the project's count (1..3).
+    static constexpr int kCsmCascades = 3;
     ComPtr<ID3D11VertexShader>       depthVS;    // depth-only pass
     ComPtr<ID3D11Texture2D>          shadowTex;
-    ComPtr<ID3D11DepthStencilView>   shadowDSV;
+    ComPtr<ID3D11DepthStencilView>   shadowDSV[kCsmCascades];
     ComPtr<ID3D11ShaderResourceView> shadowSRV;
+    ComPtr<ID3D11SamplerState>       shadowSampler;     // point clamp, s3 (PCF taps)
+    ComPtr<ID3D11RasterizerState>    shadowRasterState; // depth bias for the caster pass
     int shadowSize = HE::kShadowMapResolution;
+    // Project ShadowSettings (IRenderer::SetShadowSettings): distance /
+    // cascade count / split lambda go to the extractor, the bias pair to the
+    // scene shader, a resolution change re-creates the array at the top of
+    // the next frame (shadowSizeDirty) — never from the setter, which may
+    // land between passes.
+    IRenderer::ShadowSettings shadowSettings;
+    bool shadowSizeDirty = false;
+    bool debugShadowCascades = false;
+    // Per-cascade caster cull/sort scratch (NOT m_visible/m_sortedIndices —
+    // those hold the camera cull the geometry pass consumes).
+    std::vector<uint8_t>         shadowVisible;
+    std::vector<uint32_t>        shadowSorted;
+    RenderSorter::DepthBatchList shadowBatches;
+
+    // (Re)creates the cascade depth array at `shadowSize` (initial build and
+    // the resolution swap). R32_TYPELESS so the same texture is both a depth
+    // target (D32_FLOAT DSV per slice) and an SRV (R32_FLOAT array view).
+    // Returns false when the device refused it; the old views are dropped
+    // first, so a failure leaves the shadows off (`shadows` gates on the SRV).
+    bool createShadowArray()
+    {
+        shadowSRV.Reset();
+        for (auto& dsv : shadowDSV) dsv.Reset();
+        shadowTex.Reset();
+        D3D11_TEXTURE2D_DESC sd{};
+        sd.Width = sd.Height = static_cast<UINT>(shadowSize);
+        sd.MipLevels = 1; sd.ArraySize = kCsmCascades;
+        sd.Format = DXGI_FORMAT_R32_TYPELESS;
+        sd.SampleDesc.Count = 1;
+        sd.Usage = D3D11_USAGE_DEFAULT;
+        sd.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&sd, nullptr, &shadowTex)))
+        {
+            HE_LOG_ERROR(RHI, "D3D11Renderer: cascade shadow array %dx%dx%d creation failed",
+                         shadowSize, shadowSize, kCsmCascades);
+            return false;
+        }
+        for (int c = 0; c < kCsmCascades; ++c)
+        {
+            D3D11_DEPTH_STENCIL_VIEW_DESC dvd{};
+            dvd.Format                         = DXGI_FORMAT_D32_FLOAT;
+            dvd.ViewDimension                  = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+            dvd.Texture2DArray.FirstArraySlice = static_cast<UINT>(c);
+            dvd.Texture2DArray.ArraySize       = 1;
+            device->CreateDepthStencilView(shadowTex.Get(), &dvd, &shadowDSV[c]);
+        }
+        D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+        svd.Format                         = DXGI_FORMAT_R32_FLOAT;
+        svd.ViewDimension                  = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        svd.Texture2DArray.MipLevels       = 1;
+        svd.Texture2DArray.FirstArraySlice = 0;
+        svd.Texture2DArray.ArraySize       = kCsmCascades;
+        device->CreateShaderResourceView(shadowTex.Get(), &svd, &shadowSRV);
+        return shadowSRV != nullptr;
+    }
 
     // ── Viewport offscreen render target ────────────────────────────────────
     ComPtr<ID3D11Texture2D>          viewportTex;
@@ -3173,28 +3296,28 @@ struct D3D11RendererImpl
                 "failed: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
         }
 
-        // Shadow map: R32_TYPELESS so it can be both a depth target and an SRV.
+        // Cascade shadow-map array (kCsmCascades slices) + the state the two
+        // shadow stages need: a point/clamp sampler for the PCF taps and a
+        // rasterizer with depth bias for the caster pass (GL: glPolygonOffset
+        // (2, 4); Metal: setDepthBias — D3D11 had none, so single-map acne
+        // was masked only by the old, much larger receiver bias).
+        createShadowArray();
         {
-            D3D11_TEXTURE2D_DESC sd{};
-            sd.Width = sd.Height = static_cast<UINT>(shadowSize);
-            sd.MipLevels = 1; sd.ArraySize = 1;
-            sd.Format = DXGI_FORMAT_R32_TYPELESS;
-            sd.SampleDesc.Count = 1;
-            sd.Usage = D3D11_USAGE_DEFAULT;
-            sd.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
-            if (SUCCEEDED(device->CreateTexture2D(&sd, nullptr, &shadowTex)))
-            {
-                D3D11_DEPTH_STENCIL_VIEW_DESC dvd{};
-                dvd.Format        = DXGI_FORMAT_D32_FLOAT;
-                dvd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-                device->CreateDepthStencilView(shadowTex.Get(), &dvd, &shadowDSV);
+            D3D11_SAMPLER_DESC ssd{};
+            ssd.Filter         = D3D11_FILTER_MIN_MAG_MIP_POINT;
+            ssd.AddressU = ssd.AddressV = ssd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            ssd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+            ssd.MaxLOD         = D3D11_FLOAT32_MAX;
+            device->CreateSamplerState(&ssd, &shadowSampler);
 
-                D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
-                svd.Format              = DXGI_FORMAT_R32_FLOAT;
-                svd.ViewDimension       = D3D11_SRV_DIMENSION_TEXTURE2D;
-                svd.Texture2D.MipLevels = 1;
-                device->CreateShaderResourceView(shadowTex.Get(), &svd, &shadowSRV);
-            }
+            D3D11_RASTERIZER_DESC srd{};
+            srd.FillMode             = D3D11_FILL_SOLID;
+            srd.CullMode             = D3D11_CULL_NONE; // as the scene state: winding is not guaranteed
+            srd.DepthClipEnable      = TRUE;
+            srd.DepthBias            = 4;
+            srd.SlopeScaledDepthBias = 2.0f;
+            srd.DepthBiasClamp       = 0.0f;
+            device->CreateRasterizerState(&srd, &shadowRasterState);
         }
 
         auto makeCB = [&](UINT bytes, ComPtr<ID3D11Buffer>& out)
@@ -4477,6 +4600,19 @@ void D3D11Renderer::DrawScene(int width, int height)
                               m_environment.sunColor, m_environment.sunIntensity,
                               m_environment.moonColor, m_environment.moonIntensity,
                               m_environment.cloudCoverage);
+    // Project shadow settings (SetShadowSettings): a changed resolution
+    // re-creates the cascade array here, before any pass of this frame touches
+    // it, and the extractor fits its cascades against the size that is
+    // actually ALLOCATED — the texel snap must match the texture, or the
+    // shadow edges crawl. Mirrors GL/Metal.
+    if (p.shadowSizeDirty && p.device)
+    {
+        p.shadowSize = std::clamp(p.shadowSettings.resolution, 256, 8192);
+        p.createShadowArray();
+        p.shadowSizeDirty = false;
+    }
+    p.m_extractor.setShadowSettings(p.shadowSettings.distance, p.shadowSettings.cascadeCount,
+                                    p.shadowSettings.splitLambda, p.shadowSize);
     p.m_extractor.setContentManager(m_contentManager);
     p.m_extractor.extract(*m_world, p.m_renderWorld,
                           static_cast<float>(width) / static_cast<float>(height),
@@ -4533,8 +4669,27 @@ void D3D11Renderer::DrawScene(int width, int height)
     const glm::mat4 viewProj  = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
     const glm::mat4 camView   = p.m_renderWorld.camera.view;
     const glm::mat4 camProj   = p.m_renderWorld.camera.projection;
-    const bool      shadows   = p.m_renderWorld.shadow.enabled && p.shadowDSV && p.depthVS;
-    const glm::mat4 lightClip = HE::kD3DClipFix * p.m_renderWorld.shadow.viewProj;
+    const bool      shadows   = p.m_renderWorld.shadow.enabled && p.shadowSRV && p.depthVS;
+
+    // ── Cascaded shadow-map frame constants (mirrors GL's shadowFrame) ─────
+    // The extractor's cascade matrices are GL clip (z∈[-1,1]); kD3DClipFix
+    // remaps them to D3D's [0,1] depth — the SAME fix the old single map got.
+    // The planar camera forward (−Z of camera-to-world) MUST match the planar
+    // splits the cascades were fit with; unused tail cascades get identity
+    // (never sampled — the shader clamps the pick to the count) and a far
+    // split of 1e9 so the pick never lands on them.
+    const ShadowData& csm = p.m_renderWorld.shadow;
+    const int nCascades  = std::clamp(csm.cascadeCount, 0, D3D11RendererImpl::kCsmCascades);
+    glm::mat4 cascadeClip[D3D11RendererImpl::kCsmCascades];
+    for (int c = 0; c < D3D11RendererImpl::kCsmCascades; ++c)
+        cascadeClip[c] = c < nCascades ? HE::kD3DClipFix * csm.cascadeViewProj[c] : glm::mat4(1.0f);
+    const glm::vec4 cascadeSplits(
+        nCascades > 0 ? csm.cascadeSplit[0] : 1e9f,
+        nCascades > 1 ? csm.cascadeSplit[1] : 1e9f,
+        nCascades > 2 ? csm.cascadeSplit[2] : 1e9f,
+        static_cast<float>(nCascades));
+    const glm::vec3 camFwd =
+        -glm::normalize(glm::vec3(glm::inverse(p.m_renderWorld.camera.view)[2]));
 
     ID3D11DeviceContext* ctx = p.context.Get();
     ctx->IASetInputLayout(p.inputLayout.Get());
@@ -4562,8 +4717,11 @@ void D3D11Renderer::DrawScene(int width, int height)
             f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
             f.lightParams[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
         }
-        f.lightVP       = lightClip;
-        f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, 0, 0, 0);
+        for (int c = 0; c < D3D11RendererImpl::kCsmCascades; ++c) f.cascadeVP[c] = cascadeClip[c];
+        f.cascadeSplits = cascadeSplits;
+        f.cameraFwd     = glm::vec4(camFwd, 1.0f / static_cast<float>(std::max(p.shadowSize, 1)));
+        f.shadowBias    = glm::vec4(p.shadowSettings.slopeBias, p.shadowSettings.minBias, 0.0f, 0.0f);
+        f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, p.debugShadowCascades ? 1 : 0, 0, 0);
         f.sunDir = glm::vec4(p.m_renderWorld.sunDirection, 0.0f);
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
@@ -4623,9 +4781,34 @@ void D3D11Renderer::DrawScene(int width, int height)
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
-        // csmSplits stays 0 — D3D11 has a single shadow map, no cascade array,
-        // so the preamble's heCsmShadow() fallback is inert here.
-        // lit.ssr stays 0 as well, and that is NOT an oversight: the built-in
+        // CSM fallback for graph materials (Lighting v2.2): only meaningful
+        // when the GI masks are absent this frame — heLitP's directional
+        // lights then sample the SAME cascade array as the built-in shader
+        // (heCsm, preamble binding 12 → t12/s12, bound in the scene pass).
+        // D3D's [0,1] depth remap AND the shadow map's top-left UV origin are
+        // pre-baked into the matrices (uvFlipY * kD3DClipFix — exactly Metal's
+        // fill, which shares both conventions), so the shared preamble's
+        // heCsmShadow() stays convention-free (uv = p.xy*0.5+0.5, z in [0,1]).
+        if (!giActive && shadows)
+        {
+            glm::mat4 uvFlipY(1.0f);
+            uvFlipY[1][1] = -1.0f;
+            for (int c = 0; c < nCascades; ++c)
+            {
+                const glm::mat4 m = uvFlipY * cascadeClip[c];
+                std::memcpy(lit.csmVP[c], &m[0][0], 16 * sizeof(float));
+            }
+            lit.csmSplits[0] = cascadeSplits.x;
+            lit.csmSplits[1] = cascadeSplits.y;
+            lit.csmSplits[2] = cascadeSplits.z;
+            lit.csmSplits[3] = cascadeSplits.w;
+            lit.camFwd[0] = camFwd.x;
+            lit.camFwd[1] = camFwd.y;
+            lit.camFwd[2] = camFwd.z;
+            lit.shadowBias[0] = p.shadowSettings.slopeBias;
+            lit.shadowBias[1] = p.shadowSettings.minBias;
+        }
+        // lit.ssr stays 0, and that is NOT an oversight: the built-in
         // scene shader gets the forward reflection cascade (uSSRParams above),
         // graph materials do not. Their consumer is heSSRFwd on binding 31, and
         // the shared lighting preamble is emitted UNPINNED — SPIRV-Cross spells
@@ -4672,7 +4855,13 @@ void D3D11Renderer::DrawScene(int width, int height)
     p.m_renderGraph.execute(p.m_renderWorld, p.m_sortedIndices,
         [&](const RenderPass&, const RenderPassIO& io, const CommandBuffer& cmds)
     {
-        // ── Shadow pass: depth from the light's POV into the shadow map ──────
+        // ── Shadow pass: cascaded depth maps from the light's POV ────────────
+        // One depth render per cascade into its own array slice. Each cascade
+        // re-culls the casters against ITS light frustum (not the camera and
+        // not the graph's whole-scene ShadowPass set, which is culled against
+        // the legacy single-map frustum): an off-screen object still casts
+        // into the visible scene while it sits inside the cascade coverage.
+        // Mirrors GL's renderDepthLayer / Metal's encodeDepthLayer.
         if (io.output.id == kShadowMapTarget)
         {
             if (!shadows) return;
@@ -4681,32 +4870,55 @@ void D3D11Renderer::DrawScene(int width, int height)
             ComPtr<ID3D11DepthStencilView> savedDSV;
             ctx->OMGetRenderTargets(1, savedRTV.GetAddressOf(), savedDSV.GetAddressOf());
 
-            // Unbind the shadow SRV (t1) so it can be bound as a depth target.
+            // Unbind the shadow SRV wherever last frame left it (t1 built-in
+            // scene shader, t12 graph-material heCsm) so the array can be
+            // bound as a depth target without the runtime's implicit unbind.
             ID3D11ShaderResourceView* nullSrv = nullptr;
             ctx->PSSetShaderResources(1, 1, &nullSrv);
+            ctx->PSSetShaderResources(12, 1, &nullSrv);
             ID3D11RenderTargetView* noRTV = nullptr;
-            ctx->OMSetRenderTargets(1, &noRTV, p.shadowDSV.Get());
-            ctx->ClearDepthStencilView(p.shadowDSV.Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
             ctx->VSSetShader(p.depthVS.Get(), nullptr, 0);
             ctx->PSSetShader(nullptr, nullptr, 0);
+            if (p.shadowRasterState) ctx->RSSetState(p.shadowRasterState.Get());
             D3D11_VIEWPORT svp{}; svp.Width = svp.Height = static_cast<float>(p.shadowSize); svp.MaxDepth = 1.0f;
             ctx->RSSetViewports(1, &svp);
-            for (const DrawCall& dc : cmds.drawCalls())
+            const int cascades = std::clamp(csm.cascadeCount, 1, D3D11RendererImpl::kCsmCascades);
+            for (int c = 0; c < cascades; ++c)
             {
-                const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
-                const GpuMesh& m    = mesh ? *mesh : p.cube;
-                if (!m.vbuf || !m.ibuf) continue;
-                uploadObject(lightClip * dc.transform, dc.transform,
-                             dc.baseColor, 0.0f, dc.metallic, dc.roughness);
-                ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
-                ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
-                ctx->DrawIndexed(m.indexCount, 0, 0);
+                ctx->OMSetRenderTargets(1, &noRTV, p.shadowDSV[c].Get());
+                ctx->ClearDepthStencilView(p.shadowDSV[c].Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
+                // Cull + sort against the cascade's light frustum into scratch
+                // buffers; the sort groups draws by mesh so the resolve stays
+                // memoised. batchDepthCasters keeps castsShadow objects only
+                // (kNoOwnerEntity: every cascade skips nothing). Runs of one
+                // mesh are drawn one call per transform — the D3D11 instanced
+                // scene VS reads its own structured buffer, the depth VS does
+                // not, and a depth instancing port is not this change's job.
+                p.m_culler.cull(p.m_renderWorld, csm.cascadeViewProj[c], p.shadowVisible);
+                p.m_sorter.sort(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
+                RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, kNoOwnerEntity,
+                                                p.shadowBatches);
+                for (const RenderSorter::DepthBatch& b : p.shadowBatches.batches)
+                {
+                    const GpuMesh* mesh = p.resolveMesh(b.meshAssetId, m_contentManager);
+                    const GpuMesh& m    = mesh ? *mesh : p.cube;
+                    if (!m.vbuf || !m.ibuf) continue;
+                    ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
+                    ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+                    const glm::mat4* xf = p.shadowBatches.transforms.data() + b.first;
+                    for (uint32_t k = 0; k < b.count; ++k)
+                    {
+                        uploadObject(cascadeClip[c] * xf[k], xf[k], glm::vec3(1.0f), 0.0f, 0.0f, 1.0f);
+                        ctx->DrawIndexed(m.indexCount, 0, 0);
+                    }
+                }
             }
-            // Restore saved target + viewport + scene shaders.
+            // Restore saved target + viewport + raster state + scene shaders.
             ID3D11RenderTargetView* restoreRTV = savedRTV.Get();
             ctx->OMSetRenderTargets(1, &restoreRTV, savedDSV.Get());
             D3D11_VIEWPORT vp{}; vp.Width = static_cast<float>(width); vp.Height = static_cast<float>(height); vp.MaxDepth = 1.0f;
             ctx->RSSetViewports(1, &vp);
+            ctx->RSSetState(p.rasterState.Get());
             ctx->VSSetShader(p.vs.Get(), nullptr, 0);
             ctx->PSSetShader(p.ps.Get(), nullptr, 0);
             return;
@@ -4807,9 +5019,12 @@ void D3D11Renderer::DrawScene(int width, int height)
         ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
         ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
         ctx->PSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
-        // Shadow SRV on t1
+        // CSM depth array on t1, its point/clamp sampler on s3. Always bound
+        // while shadows are on: the sampling is gated by uShadowEnabled, the
+        // per-cascade matrices/splits/forward drive the slice pick.
         ID3D11ShaderResourceView* shadowSrv_ = shadows ? p.shadowSRV.Get() : nullptr;
         ctx->PSSetShaderResources(1, 1, &shadowSrv_);
+        if (p.shadowSampler) ctx->PSSetSamplers(3, 1, p.shadowSampler.GetAddressOf());
         // AO SRV on t2, point sampler on s1
         ctx->PSSetSamplers(1, 1, p.pointSampler.GetAddressOf());
         ctx->PSSetShaderResources(2, 1, &aoSRV);
@@ -4847,6 +5062,12 @@ void D3D11Renderer::DrawScene(int width, int height)
                 ID3D11SamplerState* matSamps[2] = { p.giLinearClamp.Get(), p.giLinearClamp.Get() };
                 ctx->PSSetSamplers(10, 2, matSamps);
             }
+            // heCsm (preamble binding 12 → t12/s12): the cascade array for the
+            // GI-off fallback, same point/clamp sampler as the built-in s3.
+            // The SSR pre-pass block (t8..t13) is unbound again by the time
+            // the scene pass runs, so the slot is free here.
+            ctx->PSSetShaderResources(12, 1, &shadowSrv_);
+            if (p.shadowSampler) ctx->PSSetSamplers(12, 1, p.shadowSampler.GetAddressOf());
 #endif
         }
 
@@ -5401,6 +5622,22 @@ void D3D11Renderer::SetSSRSettings(const SSRSettings& s)
     p.ssrMaxDistance  = std::max(1.0f, s.maxDistance);
     p.ssrThickness    = std::max(1e-3f, s.thickness);
     p.ssrQuality      = std::clamp(s.quality, 0, 2);
+}
+
+void D3D11Renderer::SetShadowSettings(const ShadowSettings& s)
+{
+    // The array is not touched here: this is called from the editor's frame
+    // push, which may land between passes. DrawScene re-creates it at its top
+    // when the size no longer matches (and hands the extractor the size that
+    // is actually allocated). Mirrors GL/Metal.
+    auto& p = *m_impl;
+    p.shadowSizeDirty |= (s.resolution != p.shadowSettings.resolution);
+    p.shadowSettings   = s;
+}
+
+void D3D11Renderer::SetShadowDebug(bool on)
+{
+    m_impl->debugShadowCascades = on;
 }
 
 void D3D11Renderer::SetGISettings(const GISettings& s)

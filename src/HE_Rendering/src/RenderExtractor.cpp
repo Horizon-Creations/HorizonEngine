@@ -795,7 +795,7 @@ namespace
 		out.shadow.direction = dir;
 		out.shadow.enabled   = true;
 
-		// ── Cascaded Shadow Maps (Metal) ───────────────────────────────────
+		// ── Cascaded Shadow Maps (Metal / OpenGL / D3D11) ──────────────────
 		// Fit `cascadeCount` tight light frusta to successive slices of the camera
 		// frustum, but only out to a BOUNDED shadowDistance (not the 5000-unit far
 		// plane) — that bound is what makes the near cascade hug the camera and give

@@ -431,7 +431,7 @@ public:
     // ProjectSettings.json shipped next to project.hcfg). Defaults are the
     // constants the extractor and the CSM shaders have always used, so a
     // backend that is never pushed draws exactly what it drew.
-    // Honoured by the backends that render cascades (OpenGL, Metal): distance /
+    // Honoured by the backends that render cascades (OpenGL, Metal, D3D11): distance /
     // cascadeCount / splitLambda / resolution go to their RenderExtractor, a
     // resolution change reallocates the cascade depth array, and the bias pair
     // reaches the shaders as a uniform:
@@ -597,8 +597,9 @@ public:
     virtual void SetRenderPath(HE::RenderPath path) { m_renderPath = path; }
     HE::RenderPath GetRenderPath() const { return m_renderPath; }
 
-    // Debug: tint each lit fragment by its shadow cascade index (Metal CSM) so the
-    // cascade split placement can be verified visually. No-op on other backends.
+    // Debug: tint each lit fragment by its shadow cascade index (CSM backends:
+    // Metal, OpenGL, D3D11) so the cascade split placement can be verified
+    // visually. No-op on the single-map backends.
     virtual void SetShadowDebug(bool /*on*/) {}
 
     // ── View mode (Lit | Unlit | Wireframe | G-buffer views) ─────────────────
