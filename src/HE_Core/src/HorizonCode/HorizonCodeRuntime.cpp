@@ -187,6 +187,9 @@ void Runtime::remove(InstanceId id)
     // Its scheduled Delay continuations die with it (never resume a ghost).
     m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(),
         [&](const PendingResume& p){ return p.id == id; }), m_pending.end());
+    // So does a run of its that is stopped at a breakpoint.
+    m_suspended.erase(std::remove_if(m_suspended.begin(), m_suspended.end(),
+        [&](const SuspendedRun& r){ return r.instance == id; }), m_suspended.end());
     if (id == m_gameInstance) { m_gameInstance = 0; m_gameInstanceCompiled = nullptr; }
 }
 void Runtime::destroy(InstanceId id)
@@ -208,6 +211,8 @@ void Runtime::clear()
     m_doomed.clear();
     m_listeners.clear();
     m_pending.clear();
+    m_suspended.clear();
+    m_breakNext = false;
     m_gameInstance = 0;
     m_gameInstanceCompiled = nullptr;
 }
@@ -415,6 +420,12 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     ctx.traceKey      = classKeyAtLevel(id, level);
     ctx.traceLevel    = level;
     ctx.onExecNode    = &m_execListener;
+    // Breakpoints: the wrapped predicate and the landing spot, both members
+    // (pointers, like the listener). Bound on first use rather than in the
+    // constructor so a Runtime that never builds a Context never pays for it.
+    if (!m_breakAt) bindDebugHooks();
+    ctx.breakAt   = &m_breakAt;
+    ctx.onSuspend = &m_onSuspend;
     ctx.getVariable = [this, id](const std::string& var) -> Value
     { return getVariable(id, var); };
     ctx.setVariable = [this, id](const std::string& var, const Value& v)
@@ -609,6 +620,80 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         if (Inst* i = find(id)) i->stateAt(level)[nodeId] = v;
     };
     return ctx;
+}
+
+// ── Breakpoints ──────────────────────────────────────────────────────────────
+void Runtime::bindDebugHooks()
+{
+    m_breakAt = [this](uint32_t instance, const std::string& classKey, size_t level, int nodeId)
+    {
+        // Step and break-next stop at the next node no matter whose; the
+        // predicate stops where the host put a breakpoint. Step is NOT
+        // consumed here — it stays armed for the whole of debugStep, and a
+        // run whose chain ends without another node simply finishes.
+        if (m_stepping) return true;
+        if (m_breakNext) { m_breakNext = false; return true; }
+        return m_breakPredicate && m_breakPredicate(instance, classKey, level, nodeId);
+    };
+    m_onSuspend = [this](SuspendedRun&& run)
+    {
+        // A step's re-stop goes to the FRONT: it is the run the person is
+        // walking, and Step acts on the first one. Everything else queues.
+        const SuspendedSite site{ run.instance, run.classKey, run.level, run.nodeId };
+        if (m_stepping) m_suspended.insert(m_suspended.begin(), std::move(run));
+        else            m_suspended.push_back(std::move(run));
+        if (m_suspendListener) m_suspendListener(site);
+    };
+}
+
+std::vector<Runtime::SuspendedSite> Runtime::suspendedSites() const
+{
+    std::vector<SuspendedSite> out;
+    out.reserve(m_suspended.size());
+    for (const SuspendedRun& r : m_suspended)
+        out.push_back({ r.instance, r.classKey, r.level, r.nodeId });
+    return out;
+}
+
+const SuspendedRun* Runtime::suspendedRun(size_t index) const
+{
+    return index < m_suspended.size() ? &m_suspended[index] : nullptr;
+}
+
+void Runtime::resumeRun(SuspendedRun run)
+{
+    Inst* i = find(run.instance);
+    if (!i || i->compiled) return;              // gone, or never ours to stop
+    if (run.level >= i->levels.size()) return;  // that level is gone
+    // Same shape as an expired Delay: a fresh Runner on the graph the run
+    // stopped in, with a fresh Context — the captured state is the run's own.
+    Runner runner(i->levels[run.level], makeContext(run.instance, run.level));
+    runner.resumeSuspended(std::move(run));
+}
+
+void Runtime::debugContinue()
+{
+    // Snapshot first: a resumed run may stop again (appending), destroy
+    // instances (remove() prunes), or re-enter through a listener.
+    std::vector<SuspendedRun> runs;
+    runs.swap(m_suspended);
+    for (SuspendedRun& r : runs) resumeRun(std::move(r));
+}
+
+void Runtime::debugStep()
+{
+    if (m_suspended.empty()) return;
+    SuspendedRun run = std::move(m_suspended.front());
+    m_suspended.erase(m_suspended.begin());
+    m_stepping = true;
+    resumeRun(std::move(run));
+    m_stepping = false;
+}
+
+void Runtime::debugAbort()
+{
+    m_suspended.clear();
+    m_breakNext = false;
 }
 
 void Runtime::update(float dt, float unscaledDt)
