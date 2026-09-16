@@ -216,6 +216,14 @@ struct ExportProfile
 	// the export instead, for a build in which every class really is native —
 	// which is also what makes the direct cross-class call paths always hit.
 	bool hcStopOnFailure = false;
+	// Texture compression. "Auto" picks the block format from the target's GPU
+	// family (the only behaviour there was); "None" ships RGBA8 with baked mips
+	// — the largest pak and the exact pixels, for a pixel-art game or a diff
+	// against a compressed build. Anything else reads as Auto.
+	std::string textureFormat = "Auto";
+	// 0 Fast (what every export did), 1 Balanced, 2 High — how hard the encoder
+	// works, whichever format Auto chose. See Hpak::PackSettings::textureQuality.
+	int textureQuality = 0;
 };
 
 // The two seeded defaults for projects that have no profiles yet (also used by

@@ -71,6 +71,8 @@ static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
 static bool   s_exportHcStop      = false;         // a graph that will not compile fails the export
+static std::string s_exportTextureFormat = "Auto"; // Auto (per target GPU) | None (RGBA8)
+static int    s_exportTextureQuality = 0;          // 0 Fast, 1 Balanced, 2 High
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
 // The window + backend the exported game starts in. They are NOT part of the
@@ -445,6 +447,8 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportAppBundle    = p.appBundle;
 	s_exportCompileHC    = p.compileHorizonCode;
 	s_exportHcStop       = p.hcStopOnFailure;
+	s_exportTextureFormat  = p.textureFormat;
+	s_exportTextureQuality = p.textureQuality;
 	// Canonicalize via the enum round-trip: a hand-edited value like "windows"
 	// falls back to Host — showing "Host" in the combo makes that fallback
 	// visible BEFORE exporting host binaries somewhere unexpected.
@@ -491,6 +495,8 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.shaderBackends   = s_exportShaderBackends;
 	p.compileHorizonCode = s_exportCompileHC;
 	p.hcStopOnFailure    = s_exportHcStop;
+	p.textureFormat      = s_exportTextureFormat;
+	p.textureQuality     = s_exportTextureQuality;
 }
 
 void open(AppContext& ctx)
@@ -930,6 +936,52 @@ void render(AppContext& ctx)
                                            HE::projectSettingsPath(ctx.projectManager->projectRoot()).string());
                     }
                 }
+            }
+
+            // ── Textures ────────────────────────────────────────────────────
+            // Which block format the pak's textures are cooked to was always
+            // decided from the target's GPU family and never asked about; the
+            // quality of that encode was a constant. Both are profile fields
+            // now. "Auto" and "Fast" are the defaults, so an untouched profile
+            // exports exactly what it did.
+            ImGui::Spacing();
+            {
+                ImGui::Text("Texture compression:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(170.0f);
+                const char* fmtPreview = s_exportTextureFormat == "None"
+                                             ? "None (RGBA8)" : "Auto (per target)";
+                if (ImGui::BeginCombo("##textureFormat", fmtPreview))
+                {
+                    if (EditorWidgets::selectable("Auto (per target)", s_exportTextureFormat != "None"))
+                        s_exportTextureFormat = "Auto";
+                    if (EditorWidgets::selectable("None (RGBA8)", s_exportTextureFormat == "None"))
+                        s_exportTextureFormat = "None";
+                    ImGui::EndCombo();
+                }
+                EditorWidgets::helpForKey("Export/Texture compression");
+                ImGui::SameLine();
+                ImGui::TextUnformatted("Quality:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(110.0f);
+                static const char* const kQualityNames[] = { "Fast", "Balanced", "High" };
+                const int q = std::clamp(s_exportTextureQuality, 0, 2);
+                ImGui::BeginDisabled(s_exportTextureFormat == "None");
+                if (ImGui::BeginCombo("##textureQuality", kQualityNames[q]))
+                {
+                    for (int i = 0; i < 3; ++i)
+                        if (ImGui::Selectable(kQualityNames[i], q == i))
+                            s_exportTextureQuality = i;
+                    ImGui::EndCombo();
+                }
+                ImGui::EndDisabled();
+                EditorWidgets::helpForKey("Export/Texture quality");
+                if (s_exportTextureFormat == "None")
+                    ImGui::TextDisabled("Uncompressed RGBA8 with baked mips: the exact pixels, "
+                                        "and the largest pak.");
+                else
+                    ImGui::TextDisabled("Auto: ASTC on Metal, BC3 on macOS OpenGL, BC7 on desktop. "
+                                        "High encodes several times slower than Fast.");
             }
 
             ImGui::Spacing();
@@ -1516,14 +1568,19 @@ void startExport(AppContext& ctx)
                 //     all sample it; best RGBA quality).
                 // A format the target can't encode/sample degrades to RGBA8 in the
                 // cook, and the runtime skips a format its GPU can't sample.
+                // "None" is the one override the profile offers: RGBA8 with
+                // baked mips, whatever the target. Everything else is Auto.
                 uint8_t texComp;
-                if (exportAppBundleApplicable(s_exportPlatform))
+                if (s_exportTextureFormat == "None")
+                    texComp = static_cast<uint8_t>(0);       // RGBA8 — no block compression
+                else if (exportAppBundleApplicable(s_exportPlatform))
                     texComp = (ctx.backend == HE::RendererBackend::OpenGL)
                                   ? static_cast<uint8_t>(3)  // BC3 — macOS GL
                                   : static_cast<uint8_t>(1); // ASTC_4x4 — Metal
                 else
                     texComp = static_cast<uint8_t>(2);       // BC7 — desktop D3D/Vulkan/GL
                 es.textureCompression = texComp;
+                es.textureQuality     = static_cast<uint8_t>(std::clamp(s_exportTextureQuality, 0, 2));
                 // The settings the game boots with, shipped as a config.json next
                 // to its data. Built HERE, on the UI thread — it reads the editor's
                 // live configuration, which the export worker must not touch — and

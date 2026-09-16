@@ -279,6 +279,8 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     proj.exportProfiles[1].incremental     = false;
     proj.exportProfiles[1].targetPlatform  = "Windows";
     proj.exportProfiles[1].appBundle       = true;
+    proj.exportProfiles[1].textureFormat   = "None";
+    proj.exportProfiles[1].textureQuality  = 2;
     ExportProfile extra;
     extra.name = "DemoDisk";
     extra.compress = true;
@@ -299,10 +301,14 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     CHECK_FALSE(p2.exportProfiles[1].incremental);
     CHECK(p2.exportProfiles[1].targetPlatform == "Windows");
     CHECK(p2.exportProfiles[1].appBundle);
+    CHECK(p2.exportProfiles[1].textureFormat == "None");
+    CHECK(p2.exportProfiles[1].textureQuality == 2);
     CHECK_FALSE(p2.exportProfiles[2].appBundle); // default
     CHECK(p2.exportProfiles[2].name == "DemoDisk");
     CHECK(p2.exportProfiles[2].incremental);              // default true
     CHECK(p2.exportProfiles[2].targetPlatform == "Host"); // default
+    CHECK(p2.exportProfiles[2].textureFormat == "Auto");  // default: what every export did
+    CHECK(p2.exportProfiles[2].textureQuality == 0);
     // startupScene survives the read-modify-write save (old saveProject lost it).
     CHECK_FALSE(p2.startupScene.empty());
 
@@ -313,6 +319,34 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
         CHECK(j.value("futureField", 0) == 42);
         CHECK(j.contains("preset"));
     }
+    he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("Export profile: an unknown texture format reads as Auto, the quality is clamped")
+{
+    const auto dir = fs::temp_directory_path() / "he_prof_texq";
+    he_test::removeAllQuiet(dir);
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "TexQ", ProjectPreset::Empty));
+    const std::string heproj = pm.currentProject().path;
+    {
+        std::ifstream in(heproj);
+        nlohmann::json j = nlohmann::json::parse(in);
+        in.close();
+        // A hand-edited profile: a format this engine does not offer and a
+        // quality past the top. Neither may reach the exporter as written — a
+        // guessed format would ship a pak the target cannot sample.
+        j["exportProfiles"][0]["textureFormat"]  = "BC9";
+        j["exportProfiles"][0]["textureQuality"] = 7;
+        j["exportProfiles"][1]["textureQuality"] = -3;
+        std::ofstream out(heproj, std::ios::trunc);
+        out << j.dump(4);
+    }
+    ProjectManager pm2;
+    REQUIRE(pm2.loadProject(heproj));
+    CHECK(pm2.currentProject().exportProfiles[0].textureFormat == "Auto");
+    CHECK(pm2.currentProject().exportProfiles[0].textureQuality == 2);
+    CHECK(pm2.currentProject().exportProfiles[1].textureQuality == 0);
     he_test::removeAllQuiet(dir);
 }
 
@@ -377,6 +411,26 @@ TEST_CASE("Incremental export: unchanged assets are reused, changes repack")
     auto r6 = runExport(dir, out, /*compress*/false, false, true);
     REQUIRE(r6.success);
     CHECK(r6.assetsReused == 0);
+
+    // A texture-quality change is a settings change too: the previous pak's
+    // blocks were encoded at the old one, and carrying them over would make
+    // the knob a no-op for every texture already in the pak.
+    {
+        ExportSettings q;
+        q.compress = false; q.incremental = true;
+        auto rq0 = ProjectExporter::exportProject(dir, "Inc", "", out, q);
+        REQUIRE(rq0.success);
+        CHECK(rq0.assetsReused == 3);           // store, quality 0: matches r6/r7 state
+        q.textureQuality = 2;
+        auto rq1 = ProjectExporter::exportProject(dir, "Inc", "", out, q);
+        REQUIRE(rq1.success);
+        CHECK(rq1.assetsReused == 0);
+        auto rq2 = ProjectExporter::exportProject(dir, "Inc", "", out, q);
+        CHECK(rq2.assetsReused == 3);
+        q.textureQuality = 0;                   // …and back, so the lines below see what they expect
+        auto rq3 = ProjectExporter::exportProject(dir, "Inc", "", out, q);
+        CHECK(rq3.assetsReused == 0);
+    }
 
     // incremental=false ignores the cache entirely.
     auto r7 = runExport(dir, out, false, false, true);  // manifest now matches store

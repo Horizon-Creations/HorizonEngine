@@ -5163,6 +5163,31 @@ namespace
 	{ "Export/D3D12", "Precompile for Direct3D 12",
 	  "The same for Direct3D 12, the newer of the two Windows backends.",
 	  "", "materials#pipeline" },
+	{ "Export/Texture compression", "Texture compression",
+	  "Which block format the pak's textures are cooked to at export. Auto picks "
+	  "it from the target's GPU family, the way every export always has: ASTC "
+	  "for Metal, BC3 for OpenGL on macOS, BC7 on desktop. None ships the "
+	  "textures as plain RGBA8 with their mip chain baked in — the exact pixels "
+	  "and the largest pak; for a pixel-art game, or to see what compression "
+	  "costs a particular texture. Saved in the export profile.",
+	  "", "export#overview" },
+	{ "Export/Auto (per target)", "Auto (per target)",
+	  "The block format the target's GPUs sample: ASTC for Metal, BC3 for "
+	  "OpenGL on macOS, BC7 on desktop. What every export chose before the "
+	  "row existed.",
+	  "", "export#overview" },
+	{ "Export/None (RGBA8)", "None (RGBA8)",
+	  "No block compression: RGBA8 with the mip chain baked in. The exact "
+	  "pixels, at roughly four to eight times the size of a compressed texture.",
+	  "", "export#overview" },
+	{ "Export/Texture quality", "Texture quality",
+	  "How hard the encoder works on each texture. Fast is what every export "
+	  "did before this existed; Balanced tries every block partition; High adds "
+	  "another refinement pass. Each step costs several times the encode time "
+	  "of the one before and shows on smooth gradients and fine text, rarely "
+	  "elsewhere. Changing it re-encodes every texture on the next export, so "
+	  "an incremental pack is not incremental that once. Saved in the profile.",
+	  "", "export#overview" },
 	// ── Application: icon, version, splash (the same rows Project Settings has)
 	{ "Export/Icon", "Icon",
 	  "The name of one of the engine's built-in icons the export generates the "

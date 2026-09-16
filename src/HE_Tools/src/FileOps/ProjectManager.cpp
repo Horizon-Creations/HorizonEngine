@@ -670,6 +670,8 @@ static json profileToJson(const ExportProfile& p)
 	j["shaderBackends"]   = p.shaderBackends;
 	j["compileHorizonCode"] = p.compileHorizonCode;
 	j["hcStopOnFailure"]    = p.hcStopOnFailure;
+	j["textureFormat"]      = p.textureFormat;
+	j["textureQuality"]     = p.textureQuality;
 	return j;
 }
 
@@ -690,6 +692,10 @@ static ExportProfile profileFromJson(const json& j)
 	                     ? j["shaderBackends"].get<uint32_t>() : ((1u << 4) | (1u << 0));
 	p.compileHorizonCode = jsonBool(j, "compileHorizonCode", false);
 	p.hcStopOnFailure    = jsonBool(j, "hcStopOnFailure", false);
+	p.textureFormat      = jsonString(j, "textureFormat", "Auto");
+	if (p.textureFormat != "None") p.textureFormat = "Auto";   // one spelling, not a guess
+	p.textureQuality     = j.contains("textureQuality") && j["textureQuality"].is_number_integer()
+	                     ? std::clamp(j["textureQuality"].get<int>(), 0, 2) : 0;
 	if (auto it = j.find("excludePatterns"); it != j.end() && it->is_array())
 		for (const auto& e : *it)
 			if (e.is_string()) p.excludePatterns.push_back(e.get<std::string>());

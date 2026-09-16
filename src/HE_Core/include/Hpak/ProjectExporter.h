@@ -179,6 +179,10 @@ struct HE_API ExportSettings {
     // the export target's GPU family (Apple-Metal→ASTC, Apple-GL→BC3, desktop→BC7);
     // a format the target can't encode or sample degrades to RGBA8 (see cookTexture).
     uint8_t textureCompression = 0;
+    // How hard the encoder works: 0 Fast, 1 Balanced, 2 High (see
+    // Hpak::PackSettings::textureQuality). Fast is what every export did before
+    // the knob existed.
+    uint8_t textureQuality = 0;
     // macOS only: emit a <projectName>.app bundle instead of a flat folder —
     // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
     // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a
