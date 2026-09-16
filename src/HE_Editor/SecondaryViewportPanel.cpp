@@ -207,10 +207,19 @@ namespace
 		// it would leave the picture a frame behind the mouse. Hover is last
 		// frame's answer — the only kind ImGui has for an item not yet
 		// submitted, and the same one IsItemHovered resolves against anyway.
+		//
+		// Not while the scene plays: the game owns the mouse then (the Scene
+		// window skips its gather for the same reason), and a right-click here
+		// would engage the relative-mouse capture against a running game. The
+		// pane keeps showing the level from where it was.
 		const ImGuiIO& io = ImGui::GetIO();
 		EditorCamera::Input cin;
-		const bool navigating = EditorViewportNav::gather(ctx, &p, p.hovered, dt, av.y, cin);
-		const bool keys = p.hovered && !io.WantTextInput && !navigating;
+		bool navigating = false;
+		if (ctx.isPlaying)
+			EditorViewportNav::releaseLookCaptureFor(&p, sdlWin);
+		else
+			navigating = EditorViewportNav::gather(ctx, &p, p.hovered, dt, av.y, cin);
+		const bool keys = p.hovered && !io.WantTextInput && !navigating && !ctx.isPlaying;
 		if (keys)
 		{
 			if (ImGui::IsKeyPressed(ImGuiKey_F, false))
@@ -235,7 +244,12 @@ namespace
 		env.cloudCoverage = sceneEnv.cloudCoverage;
 		env.grid          = p.grid && show.groundGrid;
 		EditorCameraOverride ov = p.cam.makeOverride();
-		ov.editorIcons = show.editorIcons;
+		// No icon billboards, whatever the show flag says: the preview pass
+		// draws every extracted object through its mesh pipeline with the
+		// object's base colour, and an icon quad has no mesh texture to speak
+		// of — every light in view would become a flat coloured square, in
+		// exactly the Top view this pane exists for.
+		ov.editorIcons = false;
 
 		glm::mat4 viewProj(1.0f);
 		void* tex = ctx.renderer->RenderWorldPreview(*ctx.contentManager, *ctx.world,
