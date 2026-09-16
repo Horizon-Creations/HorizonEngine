@@ -34,6 +34,7 @@
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
 #include "ProfilerPanel.h"               // View > Performance Profiler window
 #include "ConsolePanel.h"                // View > Console — every HE_LOG record, all levels
+#include "HcExecTrace.h"                 // the console's "go to node": which tab to open
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
@@ -2625,6 +2626,43 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             else
                 s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
             s_tabSelectRequest = s_activeTab;
+        }
+
+        // A "go to node" from the console (HcExecTrace::requestReveal): the tab
+        // half. The two editor-owned graphs are their reserved tab paths; a
+        // class or widget is a content-relative path that has to become the
+        // full path the tab bar keys on. The node half stays pending for the
+        // panel, which selects it once the tab draws (LevelScriptPanel /
+        // UIEditorPanel). Compared as paths, not strings: the browser's tab
+        // paths come from a directory walk and this one from a join, and on
+        // Windows those spell the separators differently.
+        if (std::string revealTab; HcExecTrace::takeRevealTab(revealTab))
+        {
+            const bool reserved = revealTab == LevelScriptPanel::kTabPath ||
+                                  revealTab == GameInstancePanel::kTabPath;
+            const std::string full = reserved ? revealTab
+                : ctx.contentManager ? ctx.contentManager->resolveAbsolutePath(revealTab)
+                : std::string();
+            if (full.empty() || (!reserved && !std::filesystem::exists(full)))
+                HcExecTrace::cancelReveal();   // nothing to open; drop the node half too
+            else
+            {
+                auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
+                    [&](const AppContext::EditorTab& t)
+                    { return t.assetPath == full ||
+                             (!reserved && std::filesystem::path(t.assetPath) == std::filesystem::path(full)); });
+                if (it == s_tabs.end())
+                {
+                    const std::string label = reserved
+                        ? (revealTab == LevelScriptPanel::kTabPath ? "Level Script" : "Game Instance")
+                        : std::filesystem::path(full).stem().string();
+                    s_tabs.push_back({ label, full, true, true });
+                    s_activeTab = static_cast<int>(s_tabs.size()) - 1;
+                }
+                else
+                    s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
+                s_tabSelectRequest = s_activeTab;
+            }
         }
 
         if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);

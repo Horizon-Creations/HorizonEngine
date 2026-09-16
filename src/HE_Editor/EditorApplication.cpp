@@ -14,6 +14,7 @@
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 #include "ConsolePanel.h"          // the log sink behind View ▸ Console
+#include "HcExecTrace.h"           // the runtime's exec listener behind the node highlighting
 #include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
 #include "TypeAssetPanel.h"        // the MCP type tools ask this tab whether it is dirty
 #include "ParticleGraphEditorPanel.h"        // …and the MCP particle tools ask this one
@@ -1366,6 +1367,11 @@ void EditorApplication::OnInit()
 	// level script and the GameInstance share one interpreter (and the
 	// GameInstance survives scene switches).
 	m_editorWorld->setScriptRuntime(&m_gameInstance.runtime());
+	// …and that one runtime reports every node it executes to the editor, which
+	// is what lights nodes up on the canvas while a level plays or a widget is
+	// previewed (HcExecTrace.h). Installed once, here, for the same reason the
+	// console sink is: whatever runs, runs through this runtime.
+	HcExecTrace::attach(m_gameInstance.runtime());
 	// Widget + object nodes route to the editor world's WidgetManager and the
 	// app runtime (+ ContentManager to load assets).
 	{

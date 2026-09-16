@@ -13,6 +13,7 @@
 #include "EditorWidgets.h"                      // shared Content-Browser asset drop target
 #include "GraphEditor.h"                        // shared node-graph canvas
 #include "HcGraphHost.h"                        // shared HorizonCode canvas host (pins, menus, clipboard)
+#include "HcExecTrace.h"                        // run-time node hits + "go to node" reveals
 #include "HcEditorUtil.h"                       // Create Object class picker
 #include "HcRenameDialog.h"                     // "that rename reaches other files"
 #include "UITimelineMath.h"                     // seconds ⇄ pixels for the animation strip
@@ -5550,6 +5551,10 @@ void drawGraphCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 	host.selfKey      = st.relPath;
 	// The last compile check's error node gets a red halo.
 	host.errorNode    = (st.compileHas && !st.compileOk) ? st.compileNode : 0;
+	// …and a node the interpreter just ran a fading amber one. The runtime
+	// keys a widget's instances by the asset path it was created from, which
+	// is this content-relative path.
+	host.traceKey     = st.relPath;
 	host.title        = [&st](const HC::Node& n){ return graphNodeTitle(st, n); };
 	// A value still being dragged only marks the tab dirty; a finished edit also
 	// pushes an undo snapshot and re-applies the graph to the live asset.
@@ -5953,6 +5958,19 @@ void render(AppContext& ctx, const std::string& assetPath,
 	State& st = s_states[assetPath];
 	if (!st.loaded) loadState(st, ctx, assetPath);
 	normalizeSelection(st);
+	// A reveal aimed at this widget's graph — a console line's "go to node":
+	// the graph side of the split, the node's sub-graph, the node selected and
+	// framed. Same moves as "Show the node that failed" below, minus the button.
+	if (int revealNode = 0; HcExecTrace::takeRevealNode(st.relPath, revealNode))
+	{
+		if (const HC::Node* n = st.graph.findNode(revealNode))
+		{
+			st.viewMode          = 1;
+			st.currentGraph      = n->subgraph;
+			st.selectedGraphNode = n->id;
+			st.gFocusSelected    = true;
+		}
+	}
 
 	ImGui::SetNextWindowPos(pos);
 	ImGui::SetNextWindowSize(size);

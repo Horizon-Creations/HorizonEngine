@@ -268,6 +268,7 @@ add_executable(HorizonEditor WIN32
 	UndoHistoryPanel.cpp
 	HcEditorUtil.cpp
 	HcFallbackReport.cpp
+	HcExecTrace.cpp
 	HcRename.cpp
 	HcRenameSweep.cpp
 	HcRenameDialog.cpp

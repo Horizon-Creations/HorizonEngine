@@ -2141,6 +2141,12 @@ namespace
 	{ "Console/Copy All Shown", "",
 	  "Copies everything the current filter leaves visible, not the whole log.",
 	  "", "advanced#diagnostics" },
+	{ "Console/Go to Node", "",
+	  "Opens the HorizonCode graph this line came from and selects the node "
+	  "that wrote it — a Print, or the node whose call raised the warning. "
+	  "Only on lines with a [node N] marker; double-clicking the line does the "
+	  "same.",
+	  "", "advanced#diagnostics" },
 	// ── Undo History ─────────────────────────────────────────────────────────
 	// The scene undo stack as a list. Its rows are the operations' own labels
 	// (built at run time, so the scan never sees them); the one fixed control

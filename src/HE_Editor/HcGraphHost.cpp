@@ -9,6 +9,7 @@
 #include "EditorSettingsPanel.h" // which of the two variable-list looks the user picked
 #include "DocsPanel.h"           // F1 over a node opens its entry in the manual
 #include "HcGraphShortcuts.h"    // the "hold a key, click" node bindings
+#include "HcExecTrace.h"         // which node just ran — the fading amber halo
 #include <HorizonScene/EngineApi.h>
 #include <HorizonCode/HcClassResolve.h>   // member menus read the FLATTENED class
 #include <ContentManager/ContentManager.h>
@@ -567,10 +568,18 @@ GraphEditor::Model buildModel(const Host& h)
 	GraphEditor::Model m;
 	m.multiSelect = true;      // shift-click / box-select; drag + Delete act on all
 	m.compactPureNodes = true; // getters/literals draw as compact chips
-	// The last compile check's error node gets a red halo.
+	// The last compile check's error node gets a red halo; a node the
+	// interpreter just ran an amber one that fades over HcExecTrace::kFadeSeconds.
+	// The error wins where both apply — a broken node running is still broken.
 	m.nodeOutline = [&h](int id) -> ImU32
 	{
-		return (h.errorNode != 0 && id == h.errorNode) ? IM_COL32(230, 70, 70, 255) : 0;
+		if (h.errorNode != 0 && id == h.errorNode) return IM_COL32(230, 70, 70, 255);
+		if (h.traceKey.empty()) return 0;
+		const float glow = HcExecTrace::glowOf(h.traceKey, id);
+		if (glow <= 0.0f) return 0;
+		// Alpha fades, the hue does not: a halo that changed colour as it aged
+		// would read as three different states instead of one thing ending.
+		return IM_COL32(255, 190, 60, (int)(255.0f * glow));
 	};
 	m.nodeIds = [&h, &graph]{ std::vector<int> ids; ids.reserve(graph.nodes.size());
 		for (const auto& n : graph.nodes) if (n.subgraph == h.currentGraph) ids.push_back(n.id); return ids; };

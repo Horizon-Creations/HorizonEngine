@@ -26,6 +26,8 @@ add_executable(he_tests
     test_editor_theme.cpp
     test_report_issue.cpp
     test_notification_store.cpp
+    # Node highlighting + console→node: hits fade, reveals are two one-shots.
+    test_hc_exec_trace.cpp
     test_editor_dock_state.cpp
     test_scene_autosave.cpp
     test_game_instance.cpp
@@ -373,6 +375,8 @@ add_executable(he_tests
     # apply a delete), so the tests cannot link without it — and asserting what
     # lands in it is how those posts are covered at all.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
+    # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcExecTrace.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitController.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabDocSync.cpp
