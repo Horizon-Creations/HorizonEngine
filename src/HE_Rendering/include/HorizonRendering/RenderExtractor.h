@@ -86,6 +86,22 @@ HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
 // resulting RenderWorld.
 class HE_RENDERING_API RenderExtractor {
 public:
+    // User-declared and DEFINED IN THE .CPP, never `= default` here. Every
+    // backend static lib is compiled with HE_RENDERING_BUILD_DLL (it is linked
+    // into the DLL), and MSVC emits the implicit special members of a dllexport
+    // class as an exported definition in every such TU. The moment the
+    // destructor went non-trivial (m_sectionMaterialMissing) D3D11Renderer.obj
+    // and D3D12Renderer.obj each carried their own ctor/dtor, and the editor,
+    // which links those libs next to the DLL's import lib, failed with LNK2005.
+    // Out-of-line there is exactly one definition, inside HorizonRendering.
+    RenderExtractor();
+    ~RenderExtractor();
+    // The set member makes the implicit copies non-trivial too, so they would
+    // hit the same trap the first time a backend copied an extractor. Nobody
+    // does; a deleted function emits nothing.
+    RenderExtractor(const RenderExtractor&)            = delete;
+    RenderExtractor& operator=(const RenderExtractor&) = delete;
+
     // aspectRatio is needed to build the camera projection matrix and comes
     // from the backend's current swapchain size.
     // editorCam, when non-null and active, overrides the scene camera (used by
