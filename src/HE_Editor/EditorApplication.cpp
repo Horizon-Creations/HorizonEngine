@@ -2258,11 +2258,23 @@ void EditorApplication::OnRender(float dt)
 	// it), and an editor button sharing that variable would fight it. A step lets
 	// exactly one tick through; the request is consumed here, so the pause re-arms
 	// without anyone having to press it again.
-	// A HorizonCode breakpoint hit during the last frame's tick freezes this
-	// one (HcExecTrace::takeBreakHit — the listener runs from inside the tick,
-	// so the frame it hit in finished as it was). Only a play session can be
-	// frozen; in an application project the stopped run waits while the UI
-	// stays live, and Continue is the same button.
+	// ── HorizonCode breakpoints ──────────────────────────────────────────────
+	// The parked Continue / Step Node from the last frame's UI pass runs HERE,
+	// where a Delay's continuation would: between frames, before the tick. A
+	// step whose run reaches its end without another node to stop at is over,
+	// and the world goes on until the next breakpoint — the way a text
+	// debugger stepping out of the last line resumes.
+	{
+		auto& rt = m_gameInstance.runtime();
+		if (m_hcResume == HcResume::Continue)   rt.debugContinue();
+		else if (m_hcResume == HcResume::Step)  { rt.debugStep(); if (!rt.isSuspended()) m_isPaused = false; }
+		m_hcResume = HcResume::None;
+	}
+	// A hit — during the last frame's tick, or in the resume just above —
+	// freezes this frame (HcExecTrace::takeBreakHit; the listener runs from
+	// inside execution, so the frame it hit in finished as it was). Only a play
+	// session can be frozen; in an application project the stopped run waits
+	// while the UI stays live, and Continue is the same button.
 	HcExecTrace::refreshPaused();
 	if (HcExecTrace::takeBreakHit() && m_isPlaying) { m_isPaused = true; m_stepFrame = false; }
 	const bool stepping   = m_isPaused && m_stepFrame;
@@ -7981,9 +7993,10 @@ AppContext EditorApplication::makeContext()
 		{
 			// Resume while a script is stopped at a breakpoint = Continue: the
 			// stopped run goes on first, then the world. Otherwise the tick
-			// would resume around a chain frozen forever.
+			// would resume around a chain frozen forever. Parked (m_hcResume),
+			// not run here — this is the UI pass.
 			if (!paused && m_gameInstance.runtime().isSuspended())
-				m_gameInstance.runtime().debugContinue();
+				m_hcResume = HcResume::Continue;
 			m_isPaused = m_isPlaying && paused;
 		},
 		.stepFrame           = [this]
@@ -7992,20 +8005,14 @@ AppContext EditorApplication::makeContext()
 			// A frame step with a stopped script lets that run finish first —
 			// one frame means one whole frame, scripts included.
 			if (m_gameInstance.runtime().isSuspended())
-				m_gameInstance.runtime().debugContinue();
+				m_hcResume = HcResume::Continue;
 			m_isPaused  = true;   // stepping a running scene pauses it first
 			m_stepFrame = true;
 		},
 		.hcSuspended         = HcExecTrace::isPaused(),
 		.stepNode            = [this]
 		{
-			auto& rt = m_gameInstance.runtime();
-			if (!rt.isSuspended()) return;
-			rt.debugStep();
-			// The run reached its end without another node to stop at: it is
-			// over, and the world goes on until the next breakpoint — the way
-			// a text debugger stepping out of the last line resumes.
-			if (!rt.isSuspended()) m_isPaused = false;
+			if (m_gameInstance.runtime().isSuspended()) m_hcResume = HcResume::Step;
 		},
 		.reportPlayUIPointer = [this](float mx, float my, float vpW, float vpH,
 		                              bool down, bool valid, float wheel,
@@ -8425,6 +8432,7 @@ void EditorApplication::setPlayMode(bool play)
 	// session that started frozen would look exactly like an editor that hung.
 	m_isPaused  = false;
 	m_stepFrame = false;
+	m_hcResume  = HcResume::None;   // a parked Continue is session state too
 	// Same reasoning for the input routing: it is session state. A game that
 	// stopped while its pause menu was up left the mode on UI-only, and without
 	// this the NEXT session would start with gameplay deaf for no visible reason.

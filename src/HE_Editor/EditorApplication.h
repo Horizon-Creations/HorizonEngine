@@ -883,6 +883,14 @@ private:
 	// running graph, and setPlayMode tears the runtime that graph is executing in
 	// down. Consumed at the top of OnRender.
 	bool m_playStopRequested = false;
+	// Continue / Step Node for a HorizonCode run stopped at a breakpoint —
+	// parked for the same reason: the buttons are pressed during the UI pass,
+	// and resuming the run executes arbitrary graph code (Destroy Object,
+	// Create Widget, a level load) which belongs in the tick, not in the middle
+	// of a frame whose panels are still holding handles. Consumed at the top
+	// of the frame, before the world-tick gate is decided.
+	enum class HcResume { None, Continue, Step };
+	HcResume m_hcResume = HcResume::None;
 
 	// Mouse-captured free-fly camera while playing in the editor — mirrors the
 	// packaged game so PIE is navigable. Captured on play-enter, released on exit,
