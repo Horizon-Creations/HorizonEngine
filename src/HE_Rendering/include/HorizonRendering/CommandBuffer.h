@@ -23,8 +23,8 @@ struct DrawCall {
     // per section (GeometryPass expands RenderObject::sections), each with the
     // section's [indexOffset, indexCount) and its own materialAssetId, and
     // sectionIndex says which slot it is (-1 = whole mesh). A backend that draws
-    // per section (GL, Metal, D3D11) applies the range; a backend that does not
-    // (D3D12/Vulkan today) skips sectionIndex > 0 and draws slot 0 whole — see
+    // per section (GL, Metal, D3D11, D3D12) applies the range; a backend that
+    // does not (Vulkan today) skips sectionIndex > 0 and draws slot 0 whole — see
     // RenderSorter::partitionByOpacity.
     uint32_t     indexOffset   = 0;
     uint32_t     indexCount    = 0;
