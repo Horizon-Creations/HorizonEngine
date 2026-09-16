@@ -167,6 +167,11 @@ namespace
 	// until an entry node turns up. A chain reachable from two events is
 	// ambiguous; the first entry found wins, and a wrong name on a rare graph
 	// costs a mislabelled row, not a wrong value.
+	//
+	// The walk does NOT pass a Delay: the chain after it is resumed as a
+	// FRESH run (Runner::resumeFrom — the event argument is gone), so a stop
+	// behind a Delay has no argument to show, and finding the Event beyond it
+	// would put the zero Value under the event's name. No entry, no row.
 	const Node* findEntry(const Graph& g, int fromNode)
 	{
 		std::vector<int> stack{ fromNode };
@@ -181,6 +186,7 @@ namespace
 			if (n->type == NodeType::Event || n->type == NodeType::InputAction ||
 			    n->type == NodeType::FunctionEntry)
 				return n;
+			if (n->type == NodeType::Delay) continue;
 			const NodeSigCounts counts = signatureCountsOf(*n);
 			for (const Link& l : g.links)
 				if (l.dstNode == cur && l.dstPin < counts.execIns)   // an exec link into `cur`

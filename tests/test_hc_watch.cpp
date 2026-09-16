@@ -228,6 +228,36 @@ TEST_CASE("HcWatch: two stopped runs — the index picks, runCount counts")
 	rig.rt.debugAbort();
 }
 
+TEST_CASE("HcWatch: behind a Delay the event argument is gone, and the window does not pretend otherwise")
+{
+	// Go(Int) → Delay(0.5 s) → Print (breakpoint). The chain after the Delay
+	// is resumed as a fresh run without the argument; walking back to the
+	// Event would show "0" under its name.
+	Graph g;
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; ev.hasArg = true; ev.propType = PinType::Int;
+	const int e = g.addNode(ev);
+	Node d; d.type = NodeType::Delay; d.pinDefaults[0] = Value::ofFloat(0.5f);
+	const int dl = g.addNode(d);
+	const int p = printNode(g, "late");
+	chain(g, e, 0, dl);
+	REQUIRE(g.connect(dl, 1, p, 0));   // Delay "Completed" → Print
+
+	Rig rig;
+	rig.bps = { p };
+	const InstanceId id = rig.rt.add(g);
+	rig.rt.fireEvent(id, "Go", 0, Value::ofInt(7));
+	CHECK_FALSE(rig.rt.isSuspended());          // the Delay is pending, nothing stopped yet
+	rig.rt.update(1.0f);
+	REQUIRE(rig.rt.isSuspended());
+
+	const HcWatch::Snapshot s = HcWatch::build(rig.rt);
+	REQUIRE(s.valid);
+	CHECK(s.nodeId == p);
+	CHECK(sectionOf(s, HcWatch::Section::Kind::EventArg) == nullptr);
+	CHECK(sectionOf(s, HcWatch::Section::Kind::Variables) != nullptr);
+	rig.rt.debugAbort();
+}
+
 TEST_CASE("HcWatch: one spelling per Value")
 {
 	CHECK(HcWatch::formatValue(Value::ofFloat(1.5f))    == "1.5");
