@@ -181,6 +181,29 @@ TEST_CASE("shortcuts page: every action has a row, a click arms a capture, a key
 	CHECK(chord("file.save") == (ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_K));
 	CHECK(h.persisted() == "file.save=Ctrl+Shift+K");
 
+	// Choosing Ctrl+O as the binding must not open the project dialog on the
+	// way: the editor's global block runs before the page draws, and asks
+	// pressed() on the frame the key lands.
+	clickAt(colX, saveY);
+	REQUIRE(std::string(ShortcutsPage::capturing()) == "file.save");
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddKeyEvent(ImGuiMod_Ctrl, true); io.AddKeyEvent(ImGuiKey_O, true);
+		io.AddMouseButtonEvent(ImGuiMouseButton_Left, false);
+		ImGui::NewFrame();
+		CHECK_FALSE(pressed("file.openProject"));   // what EditorUI would ask here
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("Shortcuts", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize);
+		ShortcutsPage::draw();
+		ImGui::End();
+		ImGui::EndFrame();
+		io.AddKeyEvent(ImGuiMod_Ctrl, false); io.AddKeyEvent(ImGuiKey_O, false);
+		frame(false);
+	}
+	CHECK(chord("file.save") == (ImGuiMod_Ctrl | ImGuiKey_O));
+	CHECK(std::string(ShortcutsPage::capturing()).empty());
+
 	// A rebind onto another action's chord shows as a clash (the page paints
 	// it, the table reports it) — and Backspace unbinds.
 	clickAt(colX, saveY);

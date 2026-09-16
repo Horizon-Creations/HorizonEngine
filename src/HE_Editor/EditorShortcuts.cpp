@@ -102,7 +102,13 @@ namespace
 	}
 
 	bool sameId(const Action& a, std::string_view id) { return id == a.id; }
+
+	// The frame the Shortcuts page last said it was capturing on; -2 = never.
+	int g_captureFrame = -2;
 }
+
+void noteCapturing() { g_captureFrame = ImGui::GetFrameCount(); }
+bool capturingNow()  { return ImGui::GetFrameCount() - g_captureFrame <= 1; }
 
 const std::vector<Action>& actions() { return table(); }
 
@@ -141,6 +147,9 @@ bool pressed(std::string_view id)
 	if (c == ImGuiKey_None) return false;
 	const ImGuiIO& io = ImGui::GetIO();
 	if (io.WantTextInput && !a->whileTyping) return false;
+	// The keystroke is being taken as a new binding — Ctrl+O chosen for Save
+	// must not open the project dialog on the way.
+	if (capturingNow()) return false;
 
 	// Modifiers, exactly — with Ctrl standing for "Ctrl or Cmd", the editor's
 	// long-standing rule (io.KeyCtrl || io.KeySuper). Super on its own in a

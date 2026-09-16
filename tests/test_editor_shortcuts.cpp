@@ -210,6 +210,39 @@ TEST_CASE("shortcuts: a chord fires with exactly its modifiers, and not while ty
 	ctx.endFrame({ ImGuiKey_F9 });
 }
 
+TEST_CASE("shortcuts: nothing fires while the page is capturing, and the hold expires on its own")
+{
+	Ctx ctx;
+	ImGuiIO& io = ImGui::GetIO();
+	// Frame 1: the page says it is capturing (it draws AFTER the editor's
+	// global shortcut block, so the block always sees last frame's stamp).
+	ImGui::NewFrame();
+	noteCapturing();
+	CHECK(capturingNow());
+	ImGui::EndFrame();
+
+	// Frame 2: Ctrl+S is the binding being chosen, not a Save.
+	io.AddKeyEvent(ImGuiMod_Ctrl, true); io.AddKeyEvent(ImGuiKey_S, true);
+	ImGui::NewFrame();
+	CHECK(capturingNow());
+	CHECK_FALSE(pressed("file.save"));
+	ImGui::EndFrame();
+	io.AddKeyEvent(ImGuiMod_Ctrl, false); io.AddKeyEvent(ImGuiKey_S, false);
+
+	// Frame 3: the page is no longer drawn (tab switched) — the hold expires
+	// on its own rather than leaving the keyboard dead.
+	ImGui::NewFrame();
+	CHECK_FALSE(capturingNow());
+	ImGui::EndFrame();
+
+	// Frame 4: Save works again.
+	io.AddKeyEvent(ImGuiMod_Ctrl, true); io.AddKeyEvent(ImGuiKey_S, true);
+	ImGui::NewFrame();
+	CHECK(pressed("file.save"));
+	ImGui::EndFrame();
+	io.AddKeyEvent(ImGuiMod_Ctrl, false); io.AddKeyEvent(ImGuiKey_S, false);
+}
+
 TEST_CASE("shortcuts: the capture reads the key that went down with the held modifiers")
 {
 	Ctx ctx;

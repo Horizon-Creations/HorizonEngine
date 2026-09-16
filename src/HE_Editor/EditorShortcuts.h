@@ -103,6 +103,15 @@ namespace EditorShortcuts
 	std::string   chordToText(ImGuiKeyChord chord);
 	ImGuiKeyChord chordFromText(std::string_view text);
 
+	// The Shortcuts page is taking the next keystroke as a binding: nothing
+	// may fire on it. Called by the page on every frame a capture is armed;
+	// pressed() answers false while the last call is at most one frame old.
+	// A frame stamp rather than a flag on purpose — a capture the page never
+	// gets to close (the user switches tabs mid-capture, the page is no
+	// longer drawn) would otherwise leave every shortcut in the editor dead.
+	void noteCapturing();
+	bool capturingNow();
+
 	// The chord the keyboard is pressing right now, for the Shortcuts page's
 	// capture: the first non-modifier key that went down this frame, with the
 	// modifiers held alongside it; ImGuiKey_None while only modifiers (or

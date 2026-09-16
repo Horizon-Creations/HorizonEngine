@@ -59,22 +59,38 @@ void draw()
 	EditorWidgets::helpForLabel("Reset All");
 	ImGui::Spacing();
 
+	// A capture the page did not get to see through — the tab was switched
+	// while it was armed — is dropped, not resumed on the way back: the key
+	// the user presses next is meant for wherever they went.
+	static int s_lastDrawFrame = -2;
+	const int frame = ImGui::GetFrameCount();
+	if (frame - s_lastDrawFrame > 1) s_captureId.clear();
+	s_lastDrawFrame = frame;
+
 	// The capture, before the rows: a key that lands on this frame must not
 	// also reach the row's own widgets, and the arming click was last frame.
+	// noteCapturing() is what keeps the editor's own shortcuts quiet for it.
+	bool resolvedThisFrame = false;
 	if (!s_captureId.empty())
 	{
+		noteCapturing();
 		if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+		{
 			s_captureId.clear();
+			resolvedThisFrame = true;
+		}
 		else if (ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
 		{
 			setChord(s_captureId, ImGuiKey_None);
 			s_captureId.clear();
+			resolvedThisFrame = true;
 			persistShortcuts();
 		}
 		else if (const ImGuiKeyChord c = captureChord(); c != ImGuiKey_None)
 		{
 			setChord(s_captureId, c);
 			s_captureId.clear();
+			resolvedThisFrame = true;
 			persistShortcuts();
 		}
 	}
@@ -135,7 +151,10 @@ void draw()
 		else if (!clash.empty()) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.35f, 0.30f, 1.0f));
 		else if (!isDefault(a.id)) ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::AccentHi);
 		else              ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Text);
-		if (ImGui::Button(text.c_str(), ImVec2(-FLT_MIN, 0.0f)))
+		// Not re-armed on the frame a capture just resolved: with keyboard
+		// navigation on, the Space or Enter that was taken as the binding
+		// would activate the still-focused button in the same frame.
+		if (ImGui::Button(text.c_str(), ImVec2(-FLT_MIN, 0.0f)) && !resolvedThisFrame)
 			s_captureId = capturing ? std::string() : std::string(a.id);
 		ImGui::PopStyleColor();
 		if (!clash.empty() && ImGui::IsItemHovered())
