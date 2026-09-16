@@ -203,7 +203,13 @@ namespace
 			{
 				line.scriptName = scriptAt.script;
 				line.scriptLine = scriptAt.line;
-				line.python     = record.category == HE::Log::Cat::Python;
+				// Compile errors log under the backend's own category; a handler
+				// that failed at run time logs under Script with the language as
+				// the first word ("Python script instance 3 failed in …",
+				// ScriptContext's HE_SCRIPT_CALL), so that word is read too.
+				line.python     = record.category == HE::Log::Cat::Python ||
+				                  (record.category == HE::Log::Cat::Script &&
+				                   std::strncmp(message, "Python", 6) == 0);
 			}
 			line.text  = prefix;
 			line.text.append(at, static_cast<std::size_t>(end - at));
