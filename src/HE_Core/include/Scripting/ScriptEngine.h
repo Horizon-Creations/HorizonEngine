@@ -85,6 +85,19 @@ public:
     // Call script.onClick/onHoverEnter/onHoverExit(self). No-op if not defined.
     bool callOnUIEvent(InstanceId id, UIScriptEvent ev) override;
 
+    // Call script.onInputPressed/onInputReleased(self, action),
+    // script.onInputAxis(self, action, value) and
+    // script.onInputAxis2D(self, action, x, y) — the input actions the
+    // project's mapping contexts bind. No-op if not defined.
+    bool callOnInputPressed(InstanceId id, const std::string& action) override;
+    bool callOnInputReleased(InstanceId id, const std::string& action) override;
+    bool callOnInputAxis(InstanceId id, const std::string& action, float value) override;
+    bool callOnInputAxis2D(InstanceId id, const std::string& action, float x, float y) override;
+
+    // Call script.onTimer(self, handle) — a horizon.timer.after/every came due.
+    // No-op if not defined.
+    bool callOnTimer(InstanceId id, int handle) override;
+
     // Last error string from any failed compile or call.
     const std::string& lastError() const override { return m_lastError; }
 

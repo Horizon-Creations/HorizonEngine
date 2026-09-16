@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <HorizonRendering/ScenePick.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <cmath>
 
 // The collision probe behind dropping an asset into the viewport: a ray from the
 // camera through the cursor has to come back with the nearest SURFACE, not the
@@ -176,4 +177,91 @@ TEST_CASE("ScenePick tolerates objects it cannot resolve")
 	// No lookup at all is a miss, not a crash.
 	CHECK_FALSE(HE::ScenePick::raycast(w, {}, glm::vec3(0.0f, 8.0f, 0.0f),
 		glm::vec3(0.0f, -1.0f, 0.0f)).hit);
+}
+
+// ── Snapping: the filter and the vertex probe ────────────────────────────────
+// Surface snapping drags an object over the scene and asks what is under it;
+// without a filter the answer is the object itself, every frame. Vertex
+// snapping asks which corner of another mesh is nearest on screen.
+
+TEST_CASE("ScenePick: a filtered-out object is looked through")
+{
+	RenderWorld w;
+	w.objects.push_back(quadAt({ 0.0f, 2.0f, 0.0f }, 5));   // the one being dragged
+	w.objects.push_back(quadAt({ 0.0f, 0.0f, 0.0f }, 7));   // the floor under it
+
+	const glm::vec3 o(0.0f, 5.0f, 0.0f), d(0.0f, -1.0f, 0.0f);
+	// No filter: the upper quad is nearer and wins.
+	CHECK(HE::ScenePick::raycast(w, quadLookup(), o, d).entityId == 5);
+	// Filtering 5 out: the ray goes through to the floor.
+	const auto hit = HE::ScenePick::raycast(w, quadLookup(), o, d,
+		[](const RenderObject& obj) { return obj.entityId != 5; });
+	REQUIRE(hit.hit);
+	CHECK(hit.entityId == 7);
+	CHECK(hit.point.y == doctest::Approx(0.0f));
+	// Filtering everything out is a clean miss.
+	CHECK_FALSE(HE::ScenePick::raycast(w, quadLookup(), o, d,
+		[](const RenderObject&) { return false; }).hit);
+}
+
+namespace
+{
+	// A camera looking straight down the -Z axis from z = 5 at a 200×100 picture.
+	struct TopCamera
+	{
+		glm::mat4 view = glm::lookAt(glm::vec3(0.0f, 0.0f, 5.0f), glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+		glm::mat4 proj = glm::perspective(glm::radians(60.0f), 2.0f, 0.1f, 100.0f);
+		glm::mat4 viewProj() const { return proj * view; }
+		glm::vec2 rectMin{ 10.0f, 20.0f };
+		glm::vec2 rectSize{ 200.0f, 100.0f };
+
+		glm::vec2 screenOf(const glm::vec3& world) const
+		{
+			const glm::vec4 c = viewProj() * glm::vec4(world, 1.0f);
+			return { rectMin.x + (c.x / c.w * 0.5f + 0.5f) * rectSize.x,
+			         rectMin.y + (0.5f - c.y / c.w * 0.5f) * rectSize.y };
+		}
+	};
+}
+
+TEST_CASE("ScenePick: the nearest vertex on screen, within the radius, not the object itself")
+{
+	TopCamera cam;
+	RenderWorld w;
+	// The quad's corners are at (±1, 0, ±1); seen from +Z they project to four
+	// points, two of which (z = +1) sit nearer the camera than the other two.
+	w.objects.push_back(quadAt({ 0.0f, 0.0f, 0.0f }, 7));
+	w.objects.push_back(quadAt({ 0.3f, 0.0f, 0.0f }, 5));   // the dragged one, filtered out
+
+	const glm::vec3 corner(1.0f, 0.0f, 1.0f);
+	const glm::vec2 at = cam.screenOf(corner) + glm::vec2(3.0f, -2.0f);   // a few px off
+
+	const auto hit = HE::ScenePick::nearestVertex(w, quadLookup(), cam.viewProj(),
+		cam.rectMin, cam.rectSize, at, 24.0f,
+		[](const RenderObject& obj) { return obj.entityId != 5; });
+	REQUIRE(hit.hit);
+	CHECK(hit.entityId == 7);
+	CHECK(hit.point.x == doctest::Approx(1.0f));
+	CHECK(hit.point.z == doctest::Approx(1.0f));
+	CHECK(hit.distancePx == doctest::Approx(std::sqrt(13.0f)).epsilon(0.01));
+
+	// Outside the radius there is nothing to snap to — a free move.
+	CHECK_FALSE(HE::ScenePick::nearestVertex(w, quadLookup(), cam.viewProj(),
+		cam.rectMin, cam.rectSize, at + glm::vec2(60.0f, 0.0f), 24.0f).hit);
+
+	// Without the filter the dragged object's own corner, 0.3 m nearer the
+	// cursor's world line, would be picked — the filter is what stops that.
+	const auto self = HE::ScenePick::nearestVertex(w, quadLookup(), cam.viewProj(),
+		cam.rectMin, cam.rectSize, cam.screenOf({ 1.3f, 0.0f, 1.0f }), 24.0f);
+	REQUIRE(self.hit);
+	CHECK(self.entityId == 5);
+}
+
+TEST_CASE("ScenePick: vertices behind the camera are never candidates")
+{
+	TopCamera cam;
+	RenderWorld w;
+	w.objects.push_back(quadAt({ 0.0f, 0.0f, 12.0f }, 9));   // wholly behind z = 5
+	CHECK_FALSE(HE::ScenePick::nearestVertex(w, quadLookup(), cam.viewProj(),
+		cam.rectMin, cam.rectSize, cam.rectMin + cam.rectSize * 0.5f, 1e6f).hit);
 }

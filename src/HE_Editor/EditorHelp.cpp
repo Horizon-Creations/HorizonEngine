@@ -1694,10 +1694,35 @@ namespace
 	  "", "editor#menus" },
 
 	// ── The viewport's options popup ─────────────────────────────────────────
+	{ "Viewport Options/Snapping", "",
+	  "Constrain dragging, so pieces line up exactly instead of nearly. A move "
+	  "snaps to whichever of the three targets below is chosen; a rotate or "
+	  "scale always goes in the fixed steps, because a metre, a degree and a "
+	  "factor are not the same number.",
+	  "", "editor#viewport" },
 	{ "Viewport Options/Snap to grid", "",
-	  "Constrain dragging to fixed steps, so pieces line up exactly instead of "
-	  "nearly. The three steps below are separate because a metre, a degree and "
-	  "a factor are not the same number.",
+	  "A move goes in fixed steps of the Move increment. The one to use for "
+	  "modular pieces that are built to a size.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Snap to surface", "",
+	  "A move lands the object on whatever scene surface lies under it as you "
+	  "drag: the floor, a table, the terrain. The object itself is looked "
+	  "through, so it can never rest on its own back.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Snap to vertex", "",
+	  "A move puts the object's pivot on the nearest corner of another mesh, "
+	  "when one is within the vertex radius on screen; otherwise it moves "
+	  "freely. For butting pieces up against each other exactly. The landscape "
+	  "is left out, it has a vertex every metre and no corner anyone means.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Rest on surface", "",
+	  "With surface snapping, lift the object so the bottom of what it draws "
+	  "sits on the surface, instead of sinking its pivot into it. Off puts the "
+	  "pivot itself on the surface, which is what a pivot at the base wants.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Vertex radius (px)", "",
+	  "How close, in pixels on screen, a corner has to be before vertex "
+	  "snapping takes hold.",
 	  "", "editor#viewport" },
 	{ "Viewport Options/Move (m)", "",
 	  "How far one snapped step moves, in metres.", "", "editor#viewport" },
@@ -1783,6 +1808,12 @@ namespace
 	  "Moves the camera so the selected entity and everything under it fills "
 	  "the view.",
 	  "F", "editor#viewport" },
+	{ "Viewport Menu/Snap to Ground", "",
+	  "Drops each selected object straight down onto whatever is beneath it, "
+	  "the floor, a table, the terrain, so the bottom of what it draws rests "
+	  "there. An object hovering above the ground lands; one sunk into it is "
+	  "raised. Nothing beneath it, nothing happens.",
+	  "End", "editor#viewport" },
 	{ "Viewport Menu/Hide Selected", "",
 	  "Hides every selected entity with everything under it — the same switch "
 	  "as the eye in the Outliner, which is also where a hidden entity can be "
@@ -2327,8 +2358,9 @@ namespace
 	  "World is what you want to line things up with the ground.",
 	  "", "editor#viewport" },
 	{ "viewport.snap", "Snap",
-	  "Constrain dragging to fixed increments — a metre, fifteen degrees — so "
-	  "pieces line up exactly instead of nearly.",
+	  "Constrain dragging so pieces line up exactly instead of nearly: to fixed "
+	  "increments — a metre, fifteen degrees — or, for a move, to the surface "
+	  "or the nearest vertex under it. The value cell beside it picks which.",
 	  "", "editor#viewport" },
 	{ "viewport.camera-speed", "Camera Speed",
 	  "How fast the editor's fly camera moves, in metres per second. Hold Shift "
@@ -2790,6 +2822,25 @@ namespace
 	  "Name and type on one line instead. Half the height per variable, so a long "
 	  "list stays readable without scrolling.",
 	  "", "horizoncode#graphs" },
+	// ── Preferences » Editor » Shortcuts ─────────────────────────────────────
+	{ "Shortcuts/Search", "",
+	  "Narrows the list to the actions whose name, group or key contains this. "
+	  "\"ctrl\" finds every shortcut that uses the modifier.",
+	  "", "editor#preferences" },
+	{ "Shortcuts/Reset All", "",
+	  "Puts every shortcut back to the key it shipped with, in one go. Each row "
+	  "has its own Reset for one at a time.",
+	  "", "editor#preferences" },
+	{ "Shortcuts/Reset", "",
+	  "Puts this one shortcut back to its default. Only shown on a row you have "
+	  "changed.",
+	  "", "editor#preferences" },
+	{ "shortcuts.binding", "Shortcut",
+	  "The keys that trigger this action. Click, then press the new combination: "
+	  "Esc keeps the old one, Backspace removes the shortcut altogether. Gold "
+	  "means changed from the default; red means another action in the same "
+	  "place answers to the same keys, and hovering says which.",
+	  "", "editor#preferences" },
 	{ "Preferences/Restore Defaults", "Restore Defaults",
 	  "Puts the settings in the category you are looking at back the way they "
 	  "shipped. Only this category, and only the ones the engine owns — your "
@@ -2875,6 +2926,30 @@ namespace
 	  "writes it as the display name of the .app, the .desktop entry and the "
 	  "Windows registration. The folder, the .hpak and the save directory keep "
 	  "the project name, so retitling a game strands nobody's saves.",
+	  "", "editor#preferences" },
+	{ "Project General/Show a splash while starting", "Show a splash while starting",
+	  "A small always-on-top window with your picture and the game's title, "
+	  "shown while the game loads — the same splash the editor opens on its own "
+	  "start. Without it a shipped game shows a black rectangle for as long as "
+	  "the renderer takes to come up.\n\n"
+	  "It only opens when a picture is set: with no logo the splash would draw "
+	  "the engine's own wordmark, and the engine does not advertise itself "
+	  "inside your game. Saved to Config/ProjectSettings.json.",
+	  "", "export#overview" },
+	{ "Project General/Splash image", "Splash image",
+	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
+	  "copies it beside project.hcfg as Splash.png; the game reads it from "
+	  "there. A file outside the project is stored with its absolute path and "
+	  "does not travel with the project — copy it into Content/ instead.",
+	  "", "export#overview" },
+	{ "Project General/Subtitle", "Subtitle",
+	  "The small line under the title on the splash — a version, a studio "
+	  "name, a tagline. Free text; it is not the bundle version, which never "
+	  "reaches the running game.",
+	  "", "export#overview" },
+	{ "Project General/Browse...", "Browse",
+	  "Pick the PNG in a file dialog. Choosing one inside the project stores "
+	  "the path relative to it.",
 	  "", "editor#preferences" },
 	{ "Project General/Scene", "Startup scene",
 	  "The scene the game opens with — and the one the editor opens when the "
@@ -3042,6 +3117,18 @@ namespace
 	{ "Application/Version", "Version",
 	  "CFBundleShortVersionString and CFBundleVersion in the exported bundle. "
 	  "Free-form text; \"1.4\" and \"1.4.2\" are both fine.",
+	  "", "editor#preferences" },
+	{ "Application/Icon file", "Icon file",
+	  "A PNG of your own instead of the generated icon: every size (16 to 512) "
+	  "and every container — .icns, .ico, the window's .png — is resampled from "
+	  "it, so one picture is enough. A non-square picture is centred on a "
+	  "transparent square. Project-relative paths travel with the project; a "
+	  "file that went missing falls back to the generated icon rather than to "
+	  "no icon at all.",
+	  "", "editor#preferences" },
+	{ "Application/Browse...", "Browse",
+	  "Pick the PNG in a file dialog. Choosing one inside the project stores "
+	  "the path relative to it.",
 	  "", "editor#preferences" },
 	{ "Application/Extension", "Extension",
 	  "The file ending this type owns, without the dot: \"hnote\". Letters and "
@@ -5076,6 +5163,76 @@ namespace
 	{ "Export/D3D12", "Precompile for Direct3D 12",
 	  "The same for Direct3D 12, the newer of the two Windows backends.",
 	  "", "materials#pipeline" },
+	{ "Export/Texture compression", "Texture compression",
+	  "Which block format the pak's textures are cooked to at export. Auto picks "
+	  "it from the target's GPU family, the way every export always has: ASTC "
+	  "for Metal, BC3 for OpenGL on macOS, BC7 on desktop. None ships the "
+	  "textures as plain RGBA8 with their mip chain baked in — the exact pixels "
+	  "and the largest pak; for a pixel-art game, or to see what compression "
+	  "costs a particular texture. Saved in the export profile.",
+	  "", "export#overview" },
+	{ "Export/Auto (per target)", "Auto (per target)",
+	  "The block format the target's GPUs sample: ASTC for Metal, BC3 for "
+	  "OpenGL on macOS, BC7 on desktop. What every export chose before the "
+	  "row existed.",
+	  "", "export#overview" },
+	{ "Export/None (RGBA8)", "None (RGBA8)",
+	  "No block compression: RGBA8 with the mip chain baked in. The exact "
+	  "pixels, at roughly four to eight times the size of a compressed texture.",
+	  "", "export#overview" },
+	{ "Export/Texture quality", "Texture quality",
+	  "How hard the encoder works on each texture. Fast is what every export "
+	  "did before this existed; Balanced tries every block partition; High adds "
+	  "another refinement pass. Each step costs several times the encode time "
+	  "of the one before and shows on smooth gradients and fine text, rarely "
+	  "elsewhere. Changing it re-encodes every texture on the next export, so "
+	  "an incremental pack is not incremental that once. Saved in the profile.",
+	  "", "export#overview" },
+	// ── Application: icon, version, splash (the same rows Project Settings has)
+	{ "Export/Icon", "Icon",
+	  "The name of one of the engine's built-in icons the export generates the "
+	  "application icon from — the same field as Project Settings > "
+	  "Application, shown here so a build does not ship with the icon nobody "
+	  "chose. The plate colour and the bundle identifier stay on that page.",
+	  "", "editor#preferences" },
+	{ "Export/Icon file", "Icon file",
+	  "A PNG of your own instead of the generated icon: every size (16 to 512) "
+	  "and every container — .icns, .ico, the window's .png — is resampled from "
+	  "it, so one picture is enough. A non-square picture is centred on a "
+	  "transparent square. Project-relative paths travel with the project; a "
+	  "file that went missing falls back to the generated icon rather than to "
+	  "no icon at all.",
+	  "", "editor#preferences" },
+	{ "Export/Browse...", "Browse",
+	  "Pick the PNG in a file dialog. Choosing one inside the project stores "
+	  "the path relative to it.",
+	  "", "editor#preferences" },
+	{ "Export/Version", "Version",
+	  "CFBundleShortVersionString and CFBundleVersion in the exported bundle — "
+	  "the same field as Project Settings > Application. Free-form text; "
+	  "\"1.4\" and \"1.4.2\" are both fine. Saved to the .heproj when you "
+	  "leave the field.",
+	  "", "editor#preferences" },
+	{ "Export/Show a splash while starting", "Show a splash while starting",
+	  "A small always-on-top window with your picture and the game's title, "
+	  "shown while the game loads — the same splash the editor opens on its own "
+	  "start. Without it a shipped game shows a black rectangle for as long as "
+	  "the renderer takes to come up.\n\n"
+	  "It only opens when a picture is set: with no logo the splash would draw "
+	  "the engine's own wordmark, and the engine does not advertise itself "
+	  "inside your game. Saved to Config/ProjectSettings.json.",
+	  "", "export#overview" },
+	{ "Export/Splash image", "Splash image",
+	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
+	  "copies it beside project.hcfg as Splash.png; the game reads it from "
+	  "there. A file outside the project is stored with its absolute path and "
+	  "does not travel with the project — copy it into Content/ instead.",
+	  "", "export#overview" },
+	{ "Export/Subtitle", "Subtitle",
+	  "The small line under the title on the splash — a version, a studio "
+	  "name, a tagline. Free text; it is not the bundle version, which never "
+	  "reaches the running game.",
+	  "", "export#overview" },
 	{ "Export/Export", "",
 	  "Starts the export with the settings above and hands over to the Build "
 	  "window, which shows each step, its own progress and its log. The packing "
@@ -6197,6 +6354,8 @@ namespace
 		// buttons are listed under the setting that produces the copy.
 		{ "Scene Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
+		{ "Shortcuts/",        "editor-settings", "Settings Reference", "Shortcuts" },
+		{ "shortcuts.",        "editor-settings", "Settings Reference", "Shortcuts" },
 		// ── The asset editors ────────────────────────────────────────────────
 		{ "material.",           "editor-materials", "Material Editor", "Material graph" },
 		{ "Material Node/",      "editor-materials", "Material Editor", "Values on a node" },

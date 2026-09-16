@@ -147,6 +147,13 @@ struct PackSettings {
     // an encode failure the cook silently keeps RGBA8 + baked mipmaps. The chosen format
     // must match what the target's GPU can sample — the editor picks it per target/backend.
     uint8_t textureCompression = 0;
+    // How hard the encoder above works: 0 Fast (what every export did until this
+    // existed), 1 Balanced, 2 High. Maps onto each encoder's own knobs — ASTC's
+    // preset, BC7's partition count and uber level, stb_dxt's quality flag — so
+    // one number says the same thing whichever format the target takes. Part of
+    // the incremental-pack fingerprint: changing it re-encodes every texture,
+    // which is the whole point of changing it.
+    uint8_t textureQuality = 0;
 
     // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`
     // is a bitmask of (1u << HE::RendererBackend). The callback — supplied by the editor,

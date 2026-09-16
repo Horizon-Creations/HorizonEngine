@@ -263,6 +263,47 @@ bool ScriptEngine::callOnAnimationNotifyBegin(InstanceId id, const std::string& 
 bool ScriptEngine::callOnAnimationNotifyEnd(InstanceId id, const std::string& name)
 { return callNotifyMethod(id, "onAnimationNotifyEnd", name); }
 
+// The input handlers share the notify body: a string is the whole payload of
+// the button pair, and the axis forms only append their numbers.
+bool ScriptEngine::callOnInputPressed(InstanceId id, const std::string& action)
+{ return callNotifyMethod(id, "onInputPressed", action); }
+
+bool ScriptEngine::callOnInputReleased(InstanceId id, const std::string& action)
+{ return callNotifyMethod(id, "onInputReleased", action); }
+
+bool ScriptEngine::callOnInputAxis(InstanceId id, const std::string& action, float value)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onInputAxis")) return true;
+    lua_pushlstring(m_L, action.c_str(), action.size());
+    lua_pushnumber(m_L, static_cast<lua_Number>(value));
+    return pcall(3, 0);
+}
+
+bool ScriptEngine::callOnInputAxis2D(InstanceId id, const std::string& action, float x, float y)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onInputAxis2D")) return true;
+    lua_pushlstring(m_L, action.c_str(), action.size());
+    lua_pushnumber(m_L, static_cast<lua_Number>(x));
+    lua_pushnumber(m_L, static_cast<lua_Number>(y));
+    return pcall(4, 0);
+}
+
+bool ScriptEngine::callOnTimer(InstanceId id, int handle)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onTimer")) return true;
+    lua_pushinteger(m_L, static_cast<lua_Integer>(handle));
+    return pcall(2, 0);
+}
+
 bool ScriptEngine::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
     auto it = m_instances.find(id);

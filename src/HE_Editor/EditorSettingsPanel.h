@@ -35,7 +35,8 @@ namespace EditorSettingsPanel
 		// question — who else may change this scene — and apart from it because
 		// the answer is a different one: a collaborator is a person who was
 		// invited, a remote client is a program on this machine.
-		HorizonCode, CollabGeneral, RemoteControl, Repository, Status,
+		// Shortcuts is the keyboard: every editor-wide chord, rebindable.
+		HorizonCode, Shortcuts, CollabGeneral, RemoteControl, Repository, Status,
 		// Rendering
 		Display, PostProcessing, GlobalIllumination, Effects,
 		// (The pages that edit the PROJECT — Application, Permissions, Fonts,

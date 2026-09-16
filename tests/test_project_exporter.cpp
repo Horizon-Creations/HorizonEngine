@@ -1188,3 +1188,77 @@ TEST_CASE("ProjectExporter encrypts and the hcfg key decrypts the pak")
     he_test::removeAllQuiet(outputDir);
 }
 #endif // HE_HAVE_CRYPTO
+
+// ─── The project's own icon, and the splash picture ──────────────────────────
+#include <Application/AppIcon.h>
+
+TEST_CASE("ProjectExporter builds the icon from the project's PNG when there is one, and copies the splash")
+{
+    auto root       = std::filesystem::temp_directory_path() / "he_test_export_iconfile_root";
+    auto contentDir = root / "Content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_iconfile_out";
+    he_test::removeAllQuiet(root);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    // A solid green 8x8 — nothing the generated glyph on its blue plate could
+    // produce, so the shipped AppIcon.png says which of the two made it.
+    const int side = 8;
+    std::vector<std::uint8_t> green((std::size_t)side * side * 4);
+    for (std::size_t i = 0; i < green.size(); i += 4) { green[i] = 0; green[i+1] = 200; green[i+2] = 0; green[i+3] = 255; }
+    REQUIRE(HE::hePngWrite(contentDir / "Icon.png", green.data(), side, side));
+    // The splash is any bytes: it is copied, never decoded, by the export.
+    const std::string splashBytes = "not really a png, and that is fine here";
+    { std::ofstream f(contentDir / "Splash.png", std::ios::binary); f << splashBytes; }
+
+    ExportSettings settings;
+    settings.compress        = false;
+    settings.iconPlatform    = ExportPlatform::Linux;
+    settings.appIconName     = "home";              // the fallback, which must NOT win
+    settings.appIconFile     = contentDir / "Icon.png";
+    settings.splashImageFile = contentDir / "Splash.png";
+    auto result = ProjectExporter::exportProject(contentDir, "IconProj", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+
+    const auto shippedIcon = outputDir / "AppIcon.png";
+    REQUIRE(std::filesystem::exists(shippedIcon));
+    {
+        std::vector<std::uint8_t> rgba;
+        int w = 0, h = 0;
+        REQUIRE(HE::heLoadPngRGBA(shippedIcon, rgba, w, h));
+        CHECK(w == 256);
+        CHECK(h == 256);
+        // The middle texel is the picture's green, not the plate's blue.
+        const std::uint8_t* mid = rgba.data() + ((std::size_t)128 * 256 + 128) * 4;
+        CHECK(mid[1] == 200);
+        CHECK(mid[2] == 0);
+        CHECK(mid[3] == 255);
+    }
+    const auto shippedSplash = outputDir / "Splash.png";
+    REQUIRE(std::filesystem::exists(shippedSplash));
+    {
+        std::ifstream in(shippedSplash, std::ios::binary);
+        std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == splashBytes);
+    }
+
+    // The PNG went missing: the generated glyph stands in rather than no icon,
+    // and the splash switched off removes the stale copy — a leftover would
+    // overrule "off" on the next run.
+    std::filesystem::remove(contentDir / "Icon.png");
+    settings.splashImageFile.clear();
+    result = ProjectExporter::exportProject(contentDir, "IconProj", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+    REQUIRE(std::filesystem::exists(shippedIcon));
+    {
+        std::vector<std::uint8_t> rgba;
+        int w = 0, h = 0;
+        REQUIRE(HE::heLoadPngRGBA(shippedIcon, rgba, w, h));
+        const std::uint8_t* corner = rgba.data();   // the plate's rounded corner: transparent
+        CHECK(corner[3] == 0);
+    }
+    CHECK_FALSE(std::filesystem::exists(shippedSplash));
+
+    he_test::removeAllQuiet(root);
+    he_test::removeAllQuiet(outputDir);
+}

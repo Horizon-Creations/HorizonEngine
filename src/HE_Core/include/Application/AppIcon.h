@@ -41,6 +41,15 @@ HE_API std::vector<AppIconImage> heRenderAppIconSet(const std::string& iconName,
                                                     const glm::vec4& bg, const glm::vec4& fg,
                                                     const std::vector<int>& sizes);
 
+// The same set from a picture of the project's own: an RGBA8 image (any size,
+// any aspect — a non-square one is centred on a transparent square first) is
+// resampled to each size by area averaging. This is what lets a project ship
+// the icon its artist drew rather than one of the built-in glyphs, and the
+// containers below do not care which of the two made the set. Empty result for
+// an empty image.
+HE_API std::vector<AppIconImage> heAppIconSetFromImage(const std::uint8_t* rgba, int w, int h,
+                                                       const std::vector<int>& sizes);
+
 // A colour to read the icon over: white on a dark plate, near-black on a light
 // one. So the settings ask for ONE colour and the other follows, instead of
 // letting somebody pick white on yellow.

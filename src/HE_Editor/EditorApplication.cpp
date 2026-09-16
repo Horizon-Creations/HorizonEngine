@@ -22,6 +22,8 @@
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
+#include "EditorShortcuts.h"       // the rebound keys, persisted the same way
+#include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
 #include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
@@ -81,6 +83,7 @@
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
+#include <HorizonScene/TimerSystem.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
@@ -1231,6 +1234,11 @@ void EditorApplication::OnInit()
 	// The camera bookmarks (digit keys) ride next to the view, one string.
 	CameraBookmarks::editorSet() = CameraBookmarks::Set::decode(
 		globalstate.getCustomConfigString("EditorCamBookmarks", ""));
+#ifdef HE_IMGUI_ENABLED
+	// The user's rebound shortcuts, one string (only what differs from the
+	// defaults — see EditorShortcuts::encode).
+	EditorShortcuts::decode(globalstate.getCustomConfigString(ShortcutsPage::kConfigKey, ""));
+#endif
 	setMaxFps(m_editorConfig.MaxFps);   // VSync-off frame cap (0 = unlimited)
 
 #ifdef HE_IMGUI_ENABLED
@@ -2270,6 +2278,11 @@ void EditorApplication::OnRender(float dt)
 		m_appUiStartedFor = m_projectManager.currentProject().path;
 		HE_LOG_INFO(Editor, "%s", "Application project: starting the live preview "
 		                          "(GameInstance OnInit)");
+		// The previous project's timers die here: the preview dispatches them
+		// now (TimerSystem in the frame), and a timer.every started by project
+		// A would otherwise fire into project B's GameInstance as a handle it
+		// never issued. Same reason restartAppPreview cancels.
+		HE::api::timer::cancelAll();
 		m_gameInstance.fireInit();
 		m_appPreviewRestartPending = false;   // it just started; nothing to redo
 		// Say what came of it. "Nothing is previewed" has three possible causes —
@@ -3156,6 +3169,18 @@ void EditorApplication::OnRender(float dt)
 				// Entity classes: Tick, plus reaping the ones whose entity is gone.
 				m_entityHost.tick(gameDt);
 			}
+			// Script timers (horizon.timer.after / .every), the same drain the
+			// packaged game runs. Raw dt: a timer is a clock, and a game that
+			// scaled its own time to zero still wants its autosave. On uiLive
+			// and not on simulating for the same reason the widget tick is: an
+			// application's GameInstance is RUNNING here without anyone
+			// pressing Play, and a timer.after in its OnInit has to come due in
+			// the preview as it does in the shipped app. For a game, uiLive IS
+			// simulating, so the editor's pause holds this clock with the rest.
+			// PIE never polled these before, so a timer that worked in the
+			// shipped build did nothing in the preview.
+			TimerSystem::dispatch(dt, &m_gameInstance.runtime(),
+			                      m_scriptContext.get(), &m_scriptInstances);
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
@@ -8503,6 +8528,10 @@ void EditorApplication::setPlayMode(bool play)
 		// Handed the entity host so it can find the characters the LEVEL already
 		// placed; it never spawns through it.
 		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+		// The Lua/Python instances hear the same action events — the packaged
+		// game binds them at the same point. The map fills below
+		// (startWorldScripts) and is read per tick.
+		m_playerHost.setTextScripts(m_scriptContext.get(), &m_scriptInstances);
 		// Last: a player character spawned just above may be the very entity
 		// whose state machine needs a sync graph.
 		m_animatorHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
@@ -8693,6 +8722,10 @@ void EditorApplication::restartAppPreview(bool keepState)
 	// so a graph's OnShutdown still finds the things it is about to let go of.
 	m_gameInstance.fireShutdown();
 	m_editorWorld->widgets().clear();
+	// The timers the old OnInit started die with it: now that the preview
+	// dispatches them (TimerSystem in the frame), a timer.every left standing
+	// would fire into the restarted graph as a handle it never issued.
+	HE::api::timer::cancelAll();
 
 	// Re-register the graph rather than assuming the host still holds the right
 	// one: the edit that triggered this restart may BE a GameInstance edit, and
@@ -9670,6 +9703,9 @@ void EditorApplication::writeEditorConfig()
 		globalstate.setCustomConfigEntry("EditorCamValid", true);
 	}
 	globalstate.setCustomConfigEntry("EditorCamBookmarks", CameraBookmarks::editorSet().encode());
+#ifdef HE_IMGUI_ENABLED
+	globalstate.setCustomConfigEntry(ShortcutsPage::kConfigKey, EditorShortcuts::encode());
+#endif
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	{
 		int n = 0;

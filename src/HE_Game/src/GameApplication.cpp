@@ -24,6 +24,7 @@
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
+#include <HorizonScene/TimerSystem.h>
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
@@ -528,6 +529,31 @@ HE::ApplicationConfig GameApplication::GetConfig() const
 	cfg.windowprops.vsync  = m_vsyncOn;
 	cfg.windowprops.mode   = m_windowMode;
 	cfg.backend            = m_backend;
+
+	// ── Splash ───────────────────────────────────────────────────────────────
+	// The project asked for one (Project Settings ▸ Game ▸ Splash) AND the
+	// export put the picture beside project.hcfg. Both, deliberately: the
+	// SplashScreen draws its built-in branding when it has no logo, and a
+	// shipped game opening a window that says "Horizon Engine" is the engine
+	// advertising itself inside somebody else's product. No picture, no splash.
+	if (m_projectSettings.game.splashEnabled)
+	{
+		if (const char* baseRaw = SDL_GetBasePath())
+		{
+			const fs::path logo = fs::path(baseRaw) / "Splash.png";
+			std::error_code ec;
+			if (fs::is_regular_file(logo, ec))
+			{
+				cfg.splash.enabled  = true;
+				cfg.splash.logoPath = logo.string();
+				cfg.splash.title    = cfg.windowprops.title;
+				cfg.splash.subtitle = m_projectSettings.game.splashSubtitle;
+			}
+			else
+				HE_LOG_WARN(Core, "GameApplication: splash is on but %s is missing — no splash",
+				            logo.string().c_str());
+		}
+	}
 	return cfg;
 }
 
@@ -1168,6 +1194,10 @@ void GameApplication::OnInit()
 		// The entity host is handed over so the player host can find the characters
 		// the LEVEL already placed; it never spawns through it.
 		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+		// The Lua/Python instances hear the same action events. The map is
+		// still empty here (startScripts runs after the hosts) and is read per
+		// tick, so a script that starts later is simply there the next frame.
+		m_playerHost.setTextScripts(m_scriptContext.get(), &m_scriptInstances);
 		// Last of the hosts: a player character spawned just above may be the very
 		// entity whose state machine needs a sync graph.
 		m_animatorHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
@@ -2430,16 +2460,14 @@ void GameApplication::OnRender(float deltaTime)
 	// is handed to the loop as a shorter wait — asked again every frame,
 	// because askWakeWithinMs is a one-shot.
 	{
-		HE::api::timer::poll(deltaTime);
-		int fired = 0;
-		while (HE::api::timer::takeFired(fired))
-		{
-			if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
-				m_gameInstance.runtime().fireOnTimer(gi, 0, fired);
-			// A timer coming due is not an OS event for this window, so the
-			// frame that draws the reaction has to be asked for.
-			requestRedraw();
-		}
+		// ONE dispatch for both frontends (the GameInstance's OnTimer and the
+		// Lua/Python onTimer), shared with the editor's play mode — see
+		// TimerSystem for why the two used to disagree.
+		const int fired = TimerSystem::dispatch(deltaTime, &m_gameInstance.runtime(),
+		                                        m_scriptContext.get(), &m_scriptInstances);
+		// A timer coming due is not an OS event for this window, so the frame
+		// that draws the reaction has to be asked for.
+		if (fired > 0) requestRedraw();
 		const double due = HE::api::timer::nextDueSeconds();
 		if (due >= 0.0)
 		{

@@ -57,6 +57,24 @@ struct HE_API ProjectGameSettings
     // What the game calls itself: the window title, the name a launcher shows.
     // Empty = the project's name, which is what every build has used so far.
     std::string title;
+
+    // ── Splash ───────────────────────────────────────────────────────────────
+    // A small always-on-top window that stands in for the game while it starts
+    // — the same SplashScreen the editor opens, which until now only the editor
+    // used: an exported game showed a black rectangle for as long as its
+    // renderer took to come up. Off by default, because a splash that says
+    // "Horizon Engine" inside somebody else's product is the engine advertising
+    // itself, and a splash without a logo would draw exactly that. So the game
+    // opens one only when `splashImage` names a picture.
+    bool        splashEnabled = false;
+    // PROJECT-relative path of a PNG ("Content/Splash.png", forward slashes).
+    // The export copies it beside project.hcfg as Splash.png; the packaged game
+    // reads it from there (GameApplication::GetConfig).
+    std::string splashImage;
+    // The small line under the title — a version, a studio, a tagline. Free
+    // text and deliberately NOT the bundle version: that lives in the .heproj
+    // and never reaches the runtime, and a subtitle somebody typed is honest.
+    std::string splashSubtitle;
 };
 
 struct HE_API ProjectShadowSettings

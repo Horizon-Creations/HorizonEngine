@@ -803,3 +803,28 @@ TEST_CASE("guides: every link out of a recipe lands somewhere")
 	INFO("guide links checked: " << checked);
 	CHECK(checked > 0);
 }
+
+// The icon/splash rows live in AppMetadataRows.cpp and are drawn under the
+// CALLER's scope — Project Settings (Application, Project General) and the
+// Export dialog. The static audit cannot see a scope that is not in the file,
+// so this is what keeps every scope that draws them covered: a new caller has
+// to add its entries here or the test names the gap.
+TEST_CASE("editor help: the shared application-metadata rows are covered in every scope")
+{
+	const char* iconScopes[]   = { "Application", "Export" };
+	const char* splashScopes[] = { "Project General", "Export" };
+	for (const char* scope : iconScopes)
+	{
+		Help::Scope s(scope);
+		INFO("scope: " << scope);
+		CHECK(Help::find("Icon file##appiconfile") != nullptr);
+	}
+	for (const char* scope : splashScopes)
+	{
+		Help::Scope s(scope);
+		INFO("scope: " << scope);
+		CHECK(Help::find("Show a splash while starting") != nullptr);
+		CHECK(Help::find("Splash image##splashimage") != nullptr);
+		CHECK(Help::find("Subtitle##splashsubtitle") != nullptr);
+	}
+}

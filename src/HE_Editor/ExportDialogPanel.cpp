@@ -7,6 +7,8 @@
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "HcEditorUtil.h"                // asset enumeration for the codegen source set
 #include "HcFallbackReport.h"            // which classes ship interpreted, and why
+#include "AppMetadataRows.h"             // icon, version, splash — the same rows Project Settings draws
+#include "NotificationStore.h"           // a project write that fails has to say so
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HcCodegen.h>      // HorizonCode → C++ codegen (compile-on-export)
@@ -69,6 +71,8 @@ static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
 static bool   s_exportHcStop      = false;         // a graph that will not compile fails the export
+static std::string s_exportTextureFormat = "Auto"; // Auto (per target GPU) | None (RGBA8)
+static int    s_exportTextureQuality = 0;          // 0 Fast, 1 Balanced, 2 High
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
 // The window + backend the exported game starts in. They are NOT part of the
@@ -443,6 +447,8 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportAppBundle    = p.appBundle;
 	s_exportCompileHC    = p.compileHorizonCode;
 	s_exportHcStop       = p.hcStopOnFailure;
+	s_exportTextureFormat  = p.textureFormat;
+	s_exportTextureQuality = p.textureQuality;
 	// Canonicalize via the enum round-trip: a hand-edited value like "windows"
 	// falls back to Host — showing "Host" in the combo makes that fallback
 	// visible BEFORE exporting host binaries somewhere unexpected.
@@ -489,6 +495,8 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.shaderBackends   = s_exportShaderBackends;
 	p.compileHorizonCode = s_exportCompileHC;
 	p.hcStopOnFailure    = s_exportHcStop;
+	p.textureFormat      = s_exportTextureFormat;
+	p.textureQuality     = s_exportTextureQuality;
 }
 
 void open(AppContext& ctx)
@@ -878,6 +886,102 @@ void render(AppContext& ctx)
                 if (!advanced)
                     ImGui::TextDisabled("Advanced Shader Effects are off: this application "
                                         "ships the software renderer and needs no GPU.");
+            }
+
+            // ── What the build IS to the person who installs it ────────────
+            // Icon, version and splash live in the project (Project Settings ▸
+            // Application / General); they are shown HERE because this is the
+            // screen somebody is on when they notice the build still says 1.0.
+            // Bound straight to the ProjectData and saved when an edit ends,
+            // never copied into a dialog static (see the note at the top).
+            if (ctx.projectManager && !ctx.projectManager->currentProject().path.empty())
+            {
+                ImGui::Spacing();
+                ProjectData& proj = ctx.projectManager->currentProject();
+                if (ImGui::CollapsingHeader("Application: icon, version, splash"))
+                {
+                    bool heproj = false, settings = false;
+                    // The icon as the export will write it, beside its rows.
+                    const int kPx = 48;
+                    if (const ImTextureID tex = static_cast<ImTextureID>(
+                            AppMetadataRows::iconPreviewTexture(ctx, proj, kPx)))
+                    {
+                        ImGui::Image(tex, ImVec2((float)kPx, (float)kPx));
+                        ImGui::SameLine();
+                    }
+                    ImGui::BeginGroup();
+                    EditorWidgets::Row::inputText("Icon##exporticonname", &proj.appIconName);
+                    heproj |= ImGui::IsItemDeactivatedAfterEdit();
+                    EditorWidgets::helpForLabel("Icon");
+                    heproj |= AppMetadataRows::drawIconFileRow(ctx, proj);
+                    ImGui::EndGroup();
+                    EditorWidgets::Row::inputText("Version##exportversion", &proj.appVersion);
+                    heproj |= ImGui::IsItemDeactivatedAfterEdit();
+                    EditorWidgets::helpForLabel("Version");
+                    ImGui::TextDisabled("Bundle identifier, plate colour and file types: "
+                                        "Project Settings > Application.");
+                    ImGui::Spacing();
+                    settings |= AppMetadataRows::drawSplashRows(ctx, proj, /*compact=*/true);
+
+                    if (heproj && !ctx.projectManager->saveProject(proj.path))
+                        HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                                       "Could not save the project's application settings",
+                                       proj.path);
+                    if (settings)
+                    {
+                        proj.settings.clamp();
+                        if (!ctx.projectManager->saveProjectSettings())
+                            HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                                           "Could not save the project's splash settings",
+                                           HE::projectSettingsPath(ctx.projectManager->projectRoot()).string());
+                    }
+                }
+            }
+
+            // ── Textures ────────────────────────────────────────────────────
+            // Which block format the pak's textures are cooked to was always
+            // decided from the target's GPU family and never asked about; the
+            // quality of that encode was a constant. Both are profile fields
+            // now. "Auto" and "Fast" are the defaults, so an untouched profile
+            // exports exactly what it did.
+            ImGui::Spacing();
+            {
+                ImGui::Text("Texture compression:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(170.0f);
+                const char* fmtPreview = s_exportTextureFormat == "None"
+                                             ? "None (RGBA8)" : "Auto (per target)";
+                if (ImGui::BeginCombo("##textureFormat", fmtPreview))
+                {
+                    if (EditorWidgets::selectable("Auto (per target)", s_exportTextureFormat != "None"))
+                        s_exportTextureFormat = "Auto";
+                    if (EditorWidgets::selectable("None (RGBA8)", s_exportTextureFormat == "None"))
+                        s_exportTextureFormat = "None";
+                    ImGui::EndCombo();
+                }
+                EditorWidgets::helpForKey("Export/Texture compression");
+                ImGui::SameLine();
+                ImGui::TextUnformatted("Quality:");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(110.0f);
+                static const char* const kQualityNames[] = { "Fast", "Balanced", "High" };
+                const int q = std::clamp(s_exportTextureQuality, 0, 2);
+                ImGui::BeginDisabled(s_exportTextureFormat == "None");
+                if (ImGui::BeginCombo("##textureQuality", kQualityNames[q]))
+                {
+                    for (int i = 0; i < 3; ++i)
+                        if (ImGui::Selectable(kQualityNames[i], q == i))
+                            s_exportTextureQuality = i;
+                    ImGui::EndCombo();
+                }
+                ImGui::EndDisabled();
+                EditorWidgets::helpForKey("Export/Texture quality");
+                if (s_exportTextureFormat == "None")
+                    ImGui::TextDisabled("Uncompressed RGBA8 with baked mips: the exact pixels, "
+                                        "and the largest pak.");
+                else
+                    ImGui::TextDisabled("Auto: ASTC on Metal, BC3 on macOS OpenGL, BC7 on desktop. "
+                                        "High encodes several times slower than Fast.");
             }
 
             ImGui::Spacing();
@@ -1424,6 +1528,15 @@ void startExport(AppContext& ctx)
                     // icon is generated at export time from these three.
                     es.appIconName  = ctx.projectManager->currentProject().appIconName;
                     es.appIconColor = ctx.projectManager->currentProject().appIconColor;
+                    // The project's own picture, resolved to an absolute path
+                    // here — the exporter knows no project root. Same for the
+                    // splash: the picture travels, the switch and subtitle ride
+                    // in the settings file copied below.
+                    es.appIconFile  = AppMetadataRows::resolveProjectFile(
+                        ctx, ctx.projectManager->currentProject().appIconFile);
+                    if (ctx.projectManager->currentProject().settings.game.splashEnabled)
+                        es.splashImageFile = AppMetadataRows::resolveProjectFile(
+                            ctx, ctx.projectManager->currentProject().settings.game.splashImage);
                     es.bundleId     = ctx.projectManager->currentProject().bundleId;
                     es.appVersion   = ctx.projectManager->currentProject().appVersion;
                     es.documentTypes = ctx.projectManager->currentProject().documentTypes;
@@ -1455,14 +1568,19 @@ void startExport(AppContext& ctx)
                 //     all sample it; best RGBA quality).
                 // A format the target can't encode/sample degrades to RGBA8 in the
                 // cook, and the runtime skips a format its GPU can't sample.
+                // "None" is the one override the profile offers: RGBA8 with
+                // baked mips, whatever the target. Everything else is Auto.
                 uint8_t texComp;
-                if (exportAppBundleApplicable(s_exportPlatform))
+                if (s_exportTextureFormat == "None")
+                    texComp = static_cast<uint8_t>(0);       // RGBA8 — no block compression
+                else if (exportAppBundleApplicable(s_exportPlatform))
                     texComp = (ctx.backend == HE::RendererBackend::OpenGL)
                                   ? static_cast<uint8_t>(3)  // BC3 — macOS GL
                                   : static_cast<uint8_t>(1); // ASTC_4x4 — Metal
                 else
                     texComp = static_cast<uint8_t>(2);       // BC7 — desktop D3D/Vulkan/GL
                 es.textureCompression = texComp;
+                es.textureQuality     = static_cast<uint8_t>(std::clamp(s_exportTextureQuality, 0, 2));
                 // The settings the game boots with, shipped as a config.json next
                 // to its data. Built HERE, on the UI thread — it reads the editor's
                 // live configuration, which the export worker must not touch — and

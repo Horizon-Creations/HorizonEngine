@@ -168,6 +168,14 @@ void addPackage(McpToolRegistry& registry, const McpBuildHooks& h)
 			  "What a graph that cannot be compiled means: false ships it "
 			  "interpreted (compiling is then an optimisation and never a gate), "
 			  "true fails the export instead." } } },
+		{ "textureFormat", json{ { "type", "string" }, { "enum", json::array({ "Auto", "None" }) },
+			{ "description",
+			  "Block format the textures are cooked to: Auto picks it from the "
+			  "target's GPU family (ASTC/BC3/BC7), None ships RGBA8 with baked mips." } } },
+		{ "textureQuality", json{ { "type", "integer" }, { "minimum", 0 }, { "maximum", 2 },
+			{ "description",
+			  "How hard the texture encoder works: 0 Fast, 1 Balanced, 2 High. "
+			  "Changing it re-encodes every texture on the next export." } } },
 		{ "excludePatterns", json{
 			{ "type", "array" },
 			{ "items", json{ { "type", "string" } } },
@@ -257,6 +265,10 @@ void addPackage(McpToolRegistry& registry, const McpBuildHooks& h)
 		if (hasArg(args, "appBundle"))          p.appBundle          = boolArg(args, "appBundle", p.appBundle);
 		if (hasArg(args, "compileHorizonCode")) p.compileHorizonCode = boolArg(args, "compileHorizonCode", p.compileHorizonCode);
 		if (hasArg(args, "hcStopOnFailure"))    p.hcStopOnFailure    = boolArg(args, "hcStopOnFailure", p.hcStopOnFailure);
+		if (hasArg(args, "textureFormat"))
+			p.textureFormat = strArg(args, "textureFormat") == "None" ? "None" : "Auto";
+		if (hasArg(args, "textureQuality"))
+			p.textureQuality = std::clamp(intArg(args, "textureQuality", p.textureQuality), 0, 2);
 		if (args.contains("excludePatterns") && args["excludePatterns"].is_array())
 		{
 			p.excludePatterns.clear();

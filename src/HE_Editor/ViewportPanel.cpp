@@ -8,6 +8,10 @@
 #include "EditorTransformGizmo.h"        // shared move/rotate/scale gizmo
 #include "EditorMarquee.h"               // which objects a drawn frame encloses
 #include "ViewportPick.h"                // which object a click lands on (mesh before terrain)
+#include "PreviewPick.h"                 // screenRay — the surface-snap probe's ray
+#include <HorizonScene/TransformHierarchy.h>          // worldPositionOf — fresh, not a frame old
+#include <HorizonScene/Components/TerrainComponent.h>      // vertex snap skips the landscape
+#include <HorizonScene/Components/TerrainChunkComponent.h>
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
@@ -17,6 +21,7 @@
 #include "EditorTheme.h"                 // the stats overlay's accent line
 #include "ViewportActions.h"             // hide / isolate / show all / group — headless, tested
 #include "CameraBookmarks.h"             // the digit keys
+#include "EditorShortcuts.h"             // the viewport's chords, rebindable in Preferences
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -498,6 +503,53 @@ static void ungroupSelected(AppContext& ctx)
 	snapshot(ctx, "Ungroup Selected");
 	noteEdited(ctx, ViewportActions::ungroupSelected(*ctx.world, ctx.selection));
 }
+// The scene as something to land on: a triangle-exact ray probe over this
+// frame's extract, minus every entity in `exclude` (the selection's own
+// subtrees — a thing cannot rest on itself) and minus the editor's icon
+// billboards, which are in the extract so a click can select a lamp but are
+// not surfaces anyone means when they say "the ground".
+static HE::ScenePick::ObjectFilter surfaceFilter(const std::unordered_set<uint32_t>& exclude)
+{
+	return [&exclude](const RenderObject& obj)
+	{
+		return exclude.find(obj.entityId) == exclude.end()
+		    && !HE::isEditorIconMaterial(obj.materialAssetId);
+	};
+}
+static bool probeSurface(AppContext& ctx, const RenderWorld& snapshotWorld,
+                         const glm::vec3& origin, const glm::vec3& dir,
+                         const std::unordered_set<uint32_t>& exclude,
+                         glm::vec3& outPoint, glm::vec3* outNormal = nullptr)
+{
+	if (!ctx.contentManager) return false;
+	const HE::ScenePick::SurfaceHit hit = HE::ScenePick::raycast(
+		snapshotWorld, meshLookup(*ctx.contentManager), origin, dir, surfaceFilter(exclude));
+	if (!hit.hit) return false;
+	outPoint = hit.point;
+	if (outNormal) *outNormal = hit.normal;
+	return true;
+}
+// Snap to Ground (End): every selection root dropped onto what is beneath it.
+// The geometry question is ViewportActions' (headless, tested); this only
+// hands it the scene probe and the selection's boxes, and takes the snapshot.
+static void snapSelectionToGround(AppContext& ctx, const RenderWorld& snapshotWorld)
+{
+	if (!ctx.world || ctx.isPlaying || ctx.selection.empty() || !ctx.contentManager) return;
+	const ViewportActions::SurfaceProbe probe =
+		[&](const glm::vec3& origin, const glm::vec3& dir,
+		    const std::unordered_set<uint32_t>& exclude, glm::vec3& out)
+		{ return probeSurface(ctx, snapshotWorld, origin, dir, exclude, out); };
+	const ViewportActions::SubtreeBounds bounds =
+		[&](Entity root, HE::AABB& box)
+		{
+			HE::AABB pivots;
+			selectionBoxes(*ctx.world, ctx.contentManager, root, snapshotWorld, box, pivots);
+			return box.isValid();
+		};
+	snapshot(ctx, "Snap to Ground");
+	noteEdited(ctx, ViewportActions::snapToGround(*ctx.world, ctx.selection, probe, bounds));
+}
+
 static void focusSelected(AppContext& ctx, const RenderWorld& snapshotWorld)
 {
 	if (!ctx.world || !ctx.editorCamera) return;
@@ -595,15 +647,17 @@ static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
 	const bool canFocus  = ctx.editorCamera && ctx.selection.primary() != entt::null
 	                    && reg.valid(ctx.selection.primary());
 
-	if (EditorWidgets::menuItem("Focus Selected", "F", false, canFocus))
+	if (EditorWidgets::menuItem("Focus Selected", EditorShortcuts::label("viewport.focus").c_str(), false, canFocus))
 		focusSelected(ctx, snapshotWorld);
+	if (EditorWidgets::menuItem("Snap to Ground", EditorShortcuts::label("viewport.snapToGround").c_str(), false, editable && hasSel))
+		snapSelectionToGround(ctx, snapshotWorld);
 
 	ImGui::Separator();
-	if (EditorWidgets::menuItem("Hide Selected", "H", false, editable && hasSel))
+	if (EditorWidgets::menuItem("Hide Selected", EditorShortcuts::label("viewport.hide").c_str(), false, editable && hasSel))
 		hideSelected(ctx);
-	if (EditorWidgets::menuItem("Isolate Selected", "Shift+H", false, editable && hasSel))
+	if (EditorWidgets::menuItem("Isolate Selected", EditorShortcuts::label("viewport.isolate").c_str(), false, editable && hasSel))
 		isolateSelected(ctx);
-	if (EditorWidgets::menuItem("Show All", "Alt+H", false,
+	if (EditorWidgets::menuItem("Show All", EditorShortcuts::label("viewport.showAll").c_str(), false,
 	                            editable && ViewportActions::anyHidden(*ctx.world)))
 		showAll(ctx);
 
@@ -612,9 +666,9 @@ static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
 	bool groupable = false;
 	for (const Entity e : ctx.selection.entities())
 		if (reg.valid(e) && !ctx.world->isBuiltin(e)) { groupable = true; break; }
-	if (EditorWidgets::menuItem("Group", "Ctrl+G", false, editable && groupable))
+	if (EditorWidgets::menuItem("Group", EditorShortcuts::label("viewport.group").c_str(), false, editable && groupable))
 		groupSelected(ctx);
-	if (EditorWidgets::menuItem("Ungroup", "Shift+G", false,
+	if (EditorWidgets::menuItem("Ungroup", EditorShortcuts::label("viewport.ungroup").c_str(), false,
 	                            editable && ViewportActions::canUngroup(*ctx.world, ctx.selection)))
 		ungroupSelected(ctx);
 
@@ -640,13 +694,13 @@ static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
 	// The SAME hooks the Edit menu, the keyboard and the Outliner use; they
 	// act on the selection, which opening this menu just settled.
 	ImGui::Separator();
-	if (EditorWidgets::menuItem("Duplicate", "Ctrl+D", false, editable && hasSel) && ctx.duplicateEntity)
+	if (EditorWidgets::menuItem("Duplicate", EditorShortcuts::label("entity.duplicate").c_str(), false, editable && hasSel) && ctx.duplicateEntity)
 		ctx.duplicateEntity();
-	if (EditorWidgets::menuItem("Copy", "Ctrl+C", false, editable && hasSel) && ctx.copyEntity)
+	if (EditorWidgets::menuItem("Copy", EditorShortcuts::label("entity.copy").c_str(), false, editable && hasSel) && ctx.copyEntity)
 		ctx.copyEntity();
-	if (EditorWidgets::menuItem("Cut", "Ctrl+X", false, editable && hasSel) && ctx.cutEntity)
+	if (EditorWidgets::menuItem("Cut", EditorShortcuts::label("entity.cut").c_str(), false, editable && hasSel) && ctx.cutEntity)
 		ctx.cutEntity();
-	if (EditorWidgets::menuItem("Paste", "Ctrl+V", false, editable && ctx.entityClipboardFull)
+	if (EditorWidgets::menuItem("Paste", EditorShortcuts::label("entity.paste").c_str(), false, editable && ctx.entityClipboardFull)
 	    && ctx.pasteEntity)
 		ctx.pasteEntity();
 
@@ -893,24 +947,24 @@ void render(AppContext& ctx, float dt)
 					}
 					// The menu's verbs on keys, the ones its rows print. Alt+H
 					// is safe beside Alt+LMB orbit — a key press is not a drag.
-					if (imageHovered && !io.WantTextInput && !navigating && !ctx.isPlaying)
+					// The chords come from EditorShortcuts (Preferences ▸
+					// Shortcuts), which also holds the not-while-typing guard.
+					if (imageHovered && !navigating && !ctx.isPlaying)
 					{
-						if (ImGui::IsKeyPressed(ImGuiKey_H, false))
-						{
-							if (io.KeyAlt)        showAll(ctx);
-							else if (io.KeyShift) isolateSelected(ctx);
-							else if (!io.KeyCtrl) hideSelected(ctx);
-						}
-						if (ImGui::IsKeyPressed(ImGuiKey_G, false))
-						{
-							if (io.KeyCtrl)       groupSelected(ctx);
-							else if (io.KeyShift) ungroupSelected(ctx);
-						}
+						if (EditorShortcuts::pressed("viewport.showAll"))  showAll(ctx);
+						if (EditorShortcuts::pressed("viewport.isolate"))  isolateSelected(ctx);
+						if (EditorShortcuts::pressed("viewport.hide"))     hideSelected(ctx);
+						if (EditorShortcuts::pressed("viewport.group"))    groupSelected(ctx);
+						if (EditorShortcuts::pressed("viewport.ungroup"))  ungroupSelected(ctx);
+						// End drops the selection onto the ground — Unreal's key
+						// for it, and one nothing else in the viewport uses.
+						if (EditorShortcuts::pressed("viewport.snapToGround"))
+							snapSelectionToGround(ctx, s_sceneSnapshot);
 					}
 					// Focus on selection (F) — frame the selected entity and
 					// everything parented under it (see selectionFocusSphere).
-					if (imageHovered && !io.WantTextInput && !navigating &&
-					    ImGui::IsKeyPressed(ImGuiKey_F) &&
+					if (imageHovered && !navigating &&
+					    EditorShortcuts::pressed("viewport.focus") &&
 					    ctx.world && ctx.selection.primary() != entt::null &&
 					    ctx.world->registry().valid(ctx.selection.primary()))
 					{
@@ -1148,11 +1202,67 @@ void render(AppContext& ctx, float dt)
 						                             [&reg](Entity e) { return reg.all_of<EditorLockComponent>(e); }),
 						              movable.end());
 					}
+					// Surface / vertex snapping: what a move drag lands on, asked
+					// of this frame's extract. Only built when the mode calls for
+					// it — the probe walks the scene, and the grid needs nothing.
+					EditorTransformGizmo::SnapProbe probe;
+					if (s_tb.probeSnapActive() && ctx.contentManager)
+					{
+						probe = [&](ViewportToolbar::State::SnapMode mode,
+						            const ImVec2& screen, glm::vec3& out) -> bool
+						{
+							auto& reg = ctx.world->registry();
+							std::unordered_set<uint32_t> exclude;
+							for (const Entity r : movable) collectSubtree(reg, r, exclude);
+							const glm::mat4 viewProj = s_sceneSnapshot.camera.projection
+							                         * s_sceneSnapshot.camera.view;
+							const glm::vec2 rmin(rectMin.x, rectMin.y);
+							const glm::vec2 rsize(rectMax.x - rectMin.x, rectMax.y - rectMin.y);
+							const glm::vec2 at(screen.x, screen.y);
+							if (mode == ViewportToolbar::State::SnapMode::Vertex)
+							{
+								// Terrain is left out: a landscape has vertices
+								// every metre and no corner anyone means to hit.
+								const HE::ScenePick::ObjectFilter base = surfaceFilter(exclude);
+								const HE::ScenePick::VertexHit hit = HE::ScenePick::nearestVertex(
+									s_sceneSnapshot, meshLookup(*ctx.contentManager), viewProj,
+									rmin, rsize, at, s_tb.snapVertexRadiusPx,
+									[&](const RenderObject& obj)
+									{
+										if (!base(obj)) return false;
+										const Entity e = static_cast<Entity>(obj.entityId);
+										return !reg.valid(e) ||
+										       !reg.any_of<TerrainComponent, TerrainChunkComponent>(e);
+									});
+								if (!hit.hit) return false;
+								out = hit.point;
+								return true;
+							}
+							glm::vec3 ro, rd;
+							if (!PreviewPick::screenRay(viewProj, rmin, rsize, at, ro, rd)) return false;
+							glm::vec3 normal;
+							if (!probeSurface(ctx, s_sceneSnapshot, ro, rd, exclude, out, &normal)) return false;
+							// Rest the object ON the surface: lift the pivot by its
+							// height above the bottom of what it draws, along the
+							// surface's normal. One object only — a group's pivot is
+							// a centroid, and its members have no shared bottom.
+							if (s_tb.snapSurfaceRest && movable.size() == 1)
+							{
+								HE::AABB geometry, pivots;
+								selectionBoxes(*ctx.world, ctx.contentManager, movable.front(),
+								               s_sceneSnapshot, geometry, pivots);
+								const float lift = HE::worldPositionOf(*ctx.world, movable.front()).y
+								                 - geometry.min.y;
+								if (geometry.isValid() && lift > 0.0f) out += normal * lift;
+							}
+							return true;
+						};
+					}
 					gizmoActive = EditorTransformGizmo::manipulate(
 						*ctx.world, movable,
 						s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
 						rectMin, rectMax, s_tb,
-						/*enabled=*/!navigating && !io.KeyAlt, ctx.undoSys);
+						/*enabled=*/!navigating && !io.KeyAlt, ctx.undoSys, nullptr, probe);
 				}
 
 				// ── Picking and the rubber band ─────────────────────────────

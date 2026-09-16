@@ -111,6 +111,18 @@ struct HE_API ExportSettings {
     // files, which is what every export did before this existed.
     std::string appIconName;
     std::string appIconColor = "#1e70c8";
+    // A picture of the project's own instead of the generated glyph: absolute
+    // path of a PNG. When set and readable it is what every icon container is
+    // built from (resampled to each size, see heAppIconSetFromImage) and the
+    // two fields above are not consulted; unreadable falls back to them, so a
+    // moved file costs the custom icon and not the icon. Empty = generated.
+    std::filesystem::path appIconFile;
+    // The splash picture (Project Settings ▸ Game ▸ Splash), absolute path of
+    // a PNG. Copied beside project.hcfg as Splash.png, where the packaged game
+    // reads it from when ProjectSettings.json says the splash is on. Empty =
+    // none copied, and a Splash.png left by an earlier export is REMOVED, for
+    // the same reason the settings file is: a leftover would overrule "off".
+    std::filesystem::path splashImageFile;
     // Empty = derived from the project name (com.horizonengine.<name>), the
     // behaviour every earlier export had.
     std::string bundleId;
@@ -167,6 +179,10 @@ struct HE_API ExportSettings {
     // the export target's GPU family (Apple-Metal→ASTC, Apple-GL→BC3, desktop→BC7);
     // a format the target can't encode or sample degrades to RGBA8 (see cookTexture).
     uint8_t textureCompression = 0;
+    // How hard the encoder works: 0 Fast, 1 Balanced, 2 High (see
+    // Hpak::PackSettings::textureQuality). Fast is what every export did before
+    // the knob existed.
+    uint8_t textureQuality = 0;
     // macOS only: emit a <projectName>.app bundle instead of a flat folder —
     // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
     // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a

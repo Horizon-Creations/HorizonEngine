@@ -8,10 +8,12 @@
 #include <HorizonCode/HcClassResolve.h>
 #include <HorizonScene/EngineApi.h>         // HE::api::player (the possession table)
 #include <HorizonScene/EntityHost.h>        // the already-bound level characters
+#include <HorizonScene/ScriptContext.h>     // the Lua/Python instances the events also reach
 #include <Application/InputAssets.h>
 #include <Diagnostics/Logger.h>
 #include <algorithm>
 #include <filesystem>
+#include <type_traits>
 #include <unordered_set>
 
 namespace
@@ -138,12 +140,27 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm,
 	// A menu or cutscene scene legitimately has no player, which is why this
 	// says what is missing rather than claiming something is broken. It fires
 	// once per play session.
+	// A Lua or Python project has neither and is not broken: its entity
+	// scripts receive the same actions through onInputPressed and friends. So
+	// this says what is missing for a HorizonCode player, and what the other
+	// languages have instead, rather than declaring the session deaf.
 	if (m_controllers.empty() && characterClasses == 0)
 		HE_LOG_WARN(Input, "%s",
 			"PlayerHost: no PlayerController and no PlayerCharacter class in this project - "
-			"nothing will respond to input. Create them in the Content Browser under "
-			"Gameplay (a HorizonCode project only), then spawn the character from the "
-			"controller's Begin Play with Create Object and take it over with Possess");
+			"no HorizonCode player will respond to input (Lua/Python entity scripts still "
+			"receive onInputPressed/onInputReleased/onInputAxis). For a HorizonCode player "
+			"create them in the Content Browser under Gameplay, then spawn the character "
+			"from the controller's Begin Play with Create Object and take it over with Possess");
+}
+
+void PlayerHost::setTextScripts(ScriptContext* scripts, const TextScriptInstances* instances)
+{
+	// The alias in the header has to BE ScriptContext::InstanceMap, or the
+	// pointer the apps hand over would point at a map of some other shape.
+	static_assert(std::is_same_v<TextScriptInstances, ScriptContext::InstanceMap>,
+	              "PlayerHost::TextScriptInstances must match ScriptContext::InstanceMap");
+	m_scripts         = scripts;
+	m_scriptInstances = instances;
 }
 
 void PlayerHost::addCharacter(HorizonCode::InstanceId instance)
@@ -224,35 +241,71 @@ void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse)
 	const bool uiOnly = HE::api::input::mode() == HE::api::input::Mode::UIOnly;
 	const bool silenced = paused || uiOnly;
 
+	// The text-script side of every event below: the same event, to every
+	// Lua/Python instance of the session (see the header). Written once as a
+	// lambda so the three shapes cannot drift apart in who they reach.
+	const bool textScripts = m_scripts && m_scriptInstances && !m_scriptInstances->empty();
+	auto eachScript = [&](auto&& fn)
+	{
+		if (!textScripts) return;
+		for (const auto& [entityId, inst] : *m_scriptInstances) fn(inst);
+	};
+
+	// The frame's action states, published for the polling rows
+	// (HE::api::input::actionDown/…) once the loop has decided what fired.
+	// A silenced action is published as released with a zero axis — the same
+	// answer the events give, so a poll and a handler never disagree.
+	std::vector<HE::api::input::ActionState> states;
+	states.reserve(m_actions.size());
+
 	for (const ActionInfo& a : m_actions)
 	{
-		if (silenced && !a.runWhilePaused) continue;
+		HE::api::input::ActionState st;
+		st.name = a.name;
+		if (silenced && !a.runWhilePaused) { states.push_back(std::move(st)); continue; }
 		switch (a.kind)
 		{
 		case ActionKind::Axis:
+		{
 			// Per-frame, like the Tick event — graphs use it as their movement
 			// pump. The value is NOT scaled by dt here: a key axis is a held
 			// state the graph integrates itself, and a mouse-sourced one is
 			// already a displacement. Doing it here would be wrong for both.
-			fireInputEvent(HE::inputEventAxis(a.name),
-			               HorizonCode::Value::ofFloat(m_mapping.axisValue(a.name)));
+			const float v = m_mapping.axisValue(a.name);
+			fireInputEvent(HE::inputEventAxis(a.name), HorizonCode::Value::ofFloat(v));
+			eachScript([&](uint64_t inst){ m_scripts->callOnInputAxis(inst, a.name, v); });
+			st.x = v;
 			break;
+		}
 		case ActionKind::Axis2D:
 		{
 			float x = 0.0f, y = 0.0f;
 			m_mapping.axis2DValue(a.name, x, y);
 			fireInputEvent(HE::inputEventAxis2D(a.name),
 			               HorizonCode::Value::ofVec2(glm::vec2(x, y)));
+			eachScript([&](uint64_t inst){ m_scripts->callOnInputAxis2D(inst, a.name, x, y); });
+			st.x = x; st.y = y;
 			break;
 		}
 		case ActionKind::Button:
-			if (m_mapping.justPressed(a.name))
+			st.down     = m_mapping.isPressed(a.name);
+			st.pressed  = m_mapping.justPressed(a.name);
+			st.released = m_mapping.justReleased(a.name);
+			if (st.pressed)
+			{
 				fireInputEvent(HE::inputEventPressed(a.name), {});
-			if (m_mapping.justReleased(a.name))
+				eachScript([&](uint64_t inst){ m_scripts->callOnInputPressed(inst, a.name); });
+			}
+			if (st.released)
+			{
 				fireInputEvent(HE::inputEventReleased(a.name), {});
+				eachScript([&](uint64_t inst){ m_scripts->callOnInputReleased(inst, a.name); });
+			}
 			break;
 		}
+		states.push_back(std::move(st));
 	}
+	HE::api::input::setActions(std::move(states));
 }
 
 void PlayerHost::end()
@@ -266,4 +319,9 @@ void PlayerHost::end()
 	m_actions.clear();
 	m_mapping.clear();
 	m_runtime = nullptr;
+	m_scripts         = nullptr;
+	m_scriptInstances = nullptr;
+	// The polling rows answer "nothing" outside a session, not "whatever the
+	// last frame of the previous one held".
+	HE::api::input::clearActions();
 }
