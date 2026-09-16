@@ -50,10 +50,38 @@ struct SurfaceHit
 	uint32_t  entityId = 0;       // RenderObject::entityId of what was hit
 };
 
+// Which objects a probe may hit; an empty function means all of them. The
+// editor's snapping passes the selection in here as the exclusion — a dragged
+// object must not land on its own surface, and "snap to ground" must look
+// through the thing it is lowering — and keeps the editor's icon billboards
+// out, which are in the extract for picking but are not surfaces.
+using ObjectFilter = std::function<bool(const RenderObject& obj)>;
+
 // Nearest surface along the ray. `direction` need not be normalised — `distance`
 // is measured in units of it, and `point` is origin + distance * direction.
 HE_RENDERING_API SurfaceHit raycast(const RenderWorld& snapshot, const MeshLookup& lookup,
-                                    const glm::vec3& origin, const glm::vec3& direction);
+                                    const glm::vec3& origin, const glm::vec3& direction,
+                                    const ObjectFilter& filter = {});
+
+// The vertex nearest to a screen point — the answer behind vertex snapping.
+// Every vertex of every (filtered-in) object is projected through `viewProj`
+// onto the picture (`rectMin`/`rectSize` in the same units as `screen`, ImGui
+// screen space, y down) and the closest one within `radiusPx` wins, ties going
+// to the nearer one in depth. Objects whose projected bounds miss the radius
+// are rejected before any vertex is looked at, so the walk is over the few
+// meshes under the cursor, not the scene.
+struct VertexHit
+{
+	bool      hit        = false;
+	glm::vec3 point      = {};     // world-space position of the vertex
+	float     distancePx = 0.0f;   // how far off the screen point it was
+	uint32_t  entityId   = 0;
+};
+HE_RENDERING_API VertexHit nearestVertex(const RenderWorld& snapshot, const MeshLookup& lookup,
+                                         const glm::mat4& viewProj,
+                                         const glm::vec2& rectMin, const glm::vec2& rectSize,
+                                         const glm::vec2& screen, float radiusPx,
+                                         const ObjectFilter& filter = {});
 
 // Möller–Trumbore, exposed because the ray and the triangle may live in any
 // shared space. `d` is not normalised, so `t` comes back in units of |d|.

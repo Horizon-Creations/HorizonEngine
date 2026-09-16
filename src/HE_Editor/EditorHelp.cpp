@@ -1694,10 +1694,35 @@ namespace
 	  "", "editor#menus" },
 
 	// ── The viewport's options popup ─────────────────────────────────────────
+	{ "Viewport Options/Snapping", "",
+	  "Constrain dragging, so pieces line up exactly instead of nearly. A move "
+	  "snaps to whichever of the three targets below is chosen; a rotate or "
+	  "scale always goes in the fixed steps, because a metre, a degree and a "
+	  "factor are not the same number.",
+	  "", "editor#viewport" },
 	{ "Viewport Options/Snap to grid", "",
-	  "Constrain dragging to fixed steps, so pieces line up exactly instead of "
-	  "nearly. The three steps below are separate because a metre, a degree and "
-	  "a factor are not the same number.",
+	  "A move goes in fixed steps of the Move increment. The one to use for "
+	  "modular pieces that are built to a size.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Snap to surface", "",
+	  "A move lands the object on whatever scene surface lies under it as you "
+	  "drag: the floor, a table, the terrain. The object itself is looked "
+	  "through, so it can never rest on its own back.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Snap to vertex", "",
+	  "A move puts the object's pivot on the nearest corner of another mesh, "
+	  "when one is within the vertex radius on screen; otherwise it moves "
+	  "freely. For butting pieces up against each other exactly. The landscape "
+	  "is left out, it has a vertex every metre and no corner anyone means.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Rest on surface", "",
+	  "With surface snapping, lift the object so the bottom of what it draws "
+	  "sits on the surface, instead of sinking its pivot into it. Off puts the "
+	  "pivot itself on the surface, which is what a pivot at the base wants.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Vertex radius (px)", "",
+	  "How close, in pixels on screen, a corner has to be before vertex "
+	  "snapping takes hold.",
 	  "", "editor#viewport" },
 	{ "Viewport Options/Move (m)", "",
 	  "How far one snapped step moves, in metres.", "", "editor#viewport" },
@@ -1783,6 +1808,12 @@ namespace
 	  "Moves the camera so the selected entity and everything under it fills "
 	  "the view.",
 	  "F", "editor#viewport" },
+	{ "Viewport Menu/Snap to Ground", "",
+	  "Drops each selected object straight down onto whatever is beneath it, "
+	  "the floor, a table, the terrain, so the bottom of what it draws rests "
+	  "there. An object hovering above the ground lands; one sunk into it is "
+	  "raised. Nothing beneath it, nothing happens.",
+	  "End", "editor#viewport" },
 	{ "Viewport Menu/Hide Selected", "",
 	  "Hides every selected entity with everything under it — the same switch "
 	  "as the eye in the Outliner, which is also where a hidden entity can be "
@@ -2327,8 +2358,9 @@ namespace
 	  "World is what you want to line things up with the ground.",
 	  "", "editor#viewport" },
 	{ "viewport.snap", "Snap",
-	  "Constrain dragging to fixed increments — a metre, fifteen degrees — so "
-	  "pieces line up exactly instead of nearly.",
+	  "Constrain dragging so pieces line up exactly instead of nearly: to fixed "
+	  "increments — a metre, fifteen degrees — or, for a move, to the surface "
+	  "or the nearest vertex under it. The value cell beside it picks which.",
 	  "", "editor#viewport" },
 	{ "viewport.camera-speed", "Camera Speed",
 	  "How fast the editor's fly camera moves, in metres per second. Hold Shift "

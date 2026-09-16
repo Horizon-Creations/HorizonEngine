@@ -260,7 +260,29 @@ void snapText(const State& st, ImGuizmo::OPERATION op, char* buf, size_t n)
 {
 	if (op == ImGuizmo::ROTATE)     std::snprintf(buf, n, "%g\xc2\xb0", st.snapRotate);
 	else if (op == ImGuizmo::SCALE) std::snprintf(buf, n, "%g\xc3\x97", st.snapScale);
+	// A move snapping to the scene has no increment to print; the cell says
+	// what it snaps to instead.
+	else if (st.snapMode == State::SnapMode::Surface) std::snprintf(buf, n, "Surf");
+	else if (st.snapMode == State::SnapMode::Vertex)  std::snprintf(buf, n, "Vert");
 	else                            std::snprintf(buf, n, "%g m",       st.snapTranslate);
+}
+
+// The three things a move can snap to, as rows. Shared by the snap cell's
+// popup and the options popup so the two never disagree on the wording.
+void snapModeRows(State& st)
+{
+	struct Mode { State::SnapMode mode; const char* label; };
+	static const Mode kModes[] = {
+		{ State::SnapMode::Grid,    "Snap to grid" },
+		{ State::SnapMode::Surface, "Snap to surface" },
+		{ State::SnapMode::Vertex,  "Snap to vertex" },
+	};
+	for (const Mode& mo : kModes)
+		if (EditorWidgets::menuItem(mo.label, nullptr, st.snapMode == mo.mode))
+		{
+			st.snapMode    = mo.mode;
+			st.snapEnabled = true;
+		}
 }
 
 // ── What the GAME's clock is doing ───────────────────────────────────────────
@@ -358,7 +380,9 @@ void optionsPopup(AppContext& ctx, State& st)
 	HE::Ed::Help::Scope helpScope("Viewport Options");
 	ImGui::TextDisabled("Snapping");
 	ImGui::Separator();
-	EditorWidgets::checkbox("Snap to grid", &st.snapEnabled);
+	EditorWidgets::checkbox("Snapping", &st.snapEnabled);
+	// What a MOVE snaps to; rotate and scale always use their increments.
+	snapModeRows(st);
 	ImGui::SetNextItemWidth(90.0f);
 	ImGui::InputFloat("Move (m)",    &st.snapTranslate, 0.1f, 1.0f, "%g");
 	ImGui::SetNextItemWidth(90.0f);
@@ -368,6 +392,10 @@ void optionsPopup(AppContext& ctx, State& st)
 	st.snapTranslate = std::max(1e-4f, st.snapTranslate);
 	st.snapRotate    = std::max(1e-4f, st.snapRotate);
 	st.snapScale     = std::max(1e-4f, st.snapScale);
+	EditorWidgets::checkbox("Rest on surface", &st.snapSurfaceRest);
+	ImGui::SetNextItemWidth(90.0f);
+	ImGui::InputFloat("Vertex radius (px)", &st.snapVertexRadiusPx, 4.0f, 8.0f, "%g");
+	st.snapVertexRadiusPx = std::clamp(st.snapVertexRadiusPx, 4.0f, 200.0f);
 
 	ImGui::Spacing();
 	ImGui::TextDisabled("Gizmo");
@@ -730,7 +758,7 @@ void render(AppContext& ctx, State& st)
 	{
 		well(m, x, kWellPad * 2.0f + m.cell + kSegGap + snapValW);
 		if (cell(m, x + kWellPad, m.cell, "##vpSnap", iconGrid, nullptr,
-		         st.snapEnabled, gizmoUsable, "Snap to grid while dragging the gizmo",
+		         st.snapEnabled, gizmoUsable, "Snap while dragging the gizmo",
 		         "viewport.snap"))
 			st.snapEnabled = !st.snapEnabled;
 
@@ -753,6 +781,14 @@ void render(AppContext& ctx, State& st)
 		if (pressed && gizmoUsable) ImGui::OpenPopup("##vpSnapPopup");
 		if (ImGui::BeginPopup("##vpSnapPopup"))
 		{
+			// The mode rows share the options popup's help scope — same
+			// labels, same explanations, whichever popup they were read in.
+			HE::Ed::Help::Scope helpScope("Viewport Options");
+			if (st.op == ImGuizmo::TRANSLATE)
+			{
+				snapModeRows(st);
+				ImGui::Separator();
+			}
 			snapPresets(st, st.op);
 			ImGui::EndPopup();
 		}

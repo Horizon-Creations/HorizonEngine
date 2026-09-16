@@ -207,3 +207,129 @@ TEST_CASE("ViewportActions: Ungroup frees the children where they stand and drop
 	CHECK(sel.contains(b));
 	CHECK_FALSE(ViewportActions::canUngroup(world, sel));   // leaves have no children
 }
+
+// ── Snap to Ground ───────────────────────────────────────────────────────────
+// The floor is a callback here (a flat plane at y = 0 that answers any
+// downward ray), so what is under test is the geometry rule: where the ray
+// starts, what it ignores, and where the object ends up.
+
+namespace
+{
+	// Records every probe so a test can check what was asked.
+	struct FlatFloor
+	{
+		float                          y = 0.0f;
+		std::vector<glm::vec3>         origins;
+		std::unordered_set<uint32_t>   lastExclude;
+		bool                           answer = true;
+
+		ViewportActions::SurfaceProbe probe()
+		{
+			return [this](const glm::vec3& origin, const glm::vec3& dir,
+			              const std::unordered_set<uint32_t>& exclude, glm::vec3& out)
+			{
+				origins.push_back(origin);
+				lastExclude = exclude;
+				if (!answer || dir.y >= 0.0f || origin.y < y) return false;
+				out = { origin.x, y, origin.z };
+				return true;
+			};
+		}
+	};
+
+	// A box of the given half-height centred on the pivot.
+	ViewportActions::SubtreeBounds centredBox(HorizonWorld& world, float halfHeight)
+	{
+		return [&world, halfHeight](Entity root, HE::AABB& box)
+		{
+			const glm::vec3 p = HE::worldPositionOf(world, root);
+			box = HE::AABB{};
+			box.expand(p - glm::vec3(0.5f, halfHeight, 0.5f));
+			box.expand(p + glm::vec3(0.5f, halfHeight, 0.5f));
+			return true;
+		};
+	}
+}
+
+TEST_CASE("ViewportActions: Snap to Ground rests the bottom of the box on the floor")
+{
+	HorizonWorld world;
+	const Entity crate = meshAt(world, "Crate", { 2, 5, 3 });   // hovering, pivot at its centre
+	EditorSelection sel;
+	sel.set(crate);
+	FlatFloor floor;
+
+	const auto moved = ViewportActions::snapToGround(world, sel, floor.probe(), centredBox(world, 0.5f));
+	REQUIRE(moved.size() == 1);
+	CHECK(moved[0] == crate);
+	// Bottom (pivot − 0.5) on y = 0 → pivot at 0.5; x and z untouched.
+	CHECK(close3(HE::worldPositionOf(world, crate), { 2, 0.5f, 3 }));
+	// The ray started above the top of the box, not at the pivot.
+	REQUIRE(floor.origins.size() == 1);
+	CHECK(floor.origins[0].y > 5.5f);
+	CHECK(floor.lastExclude.count(static_cast<uint32_t>(crate)) == 1);
+}
+
+TEST_CASE("ViewportActions: Snap to Ground raises what is sunk in and leaves what stands")
+{
+	HorizonWorld world;
+	const Entity sunk = meshAt(world, "Sunk", { 0, -0.3f, 0 });
+	EditorSelection sel;
+	sel.set(sunk);
+	FlatFloor floor;
+
+	REQUIRE(ViewportActions::snapToGround(world, sel, floor.probe(), centredBox(world, 0.5f)).size() == 1);
+	CHECK(close3(HE::worldPositionOf(world, sunk), { 0, 0.5f, 0 }));
+
+	// Already standing: a second press is not an edit.
+	CHECK(ViewportActions::snapToGround(world, sel, floor.probe(), centredBox(world, 0.5f)).empty());
+}
+
+TEST_CASE("ViewportActions: Snap to Ground without geometry measures the pivot, and moves a child in its parent's space")
+{
+	HorizonWorld world;
+	const Entity parent = meshAt(world, "Parent", { 0, 10, 0 });
+	const Entity child  = meshAt(world, "Child",  { 1, 2, 0 }, parent);   // world y = 12
+	EditorSelection sel;
+	sel.set(child);
+	FlatFloor floor;
+
+	// No bounds callback: the pivot IS the bottom.
+	const auto moved = ViewportActions::snapToGround(world, sel, floor.probe(), {});
+	REQUIRE(moved.size() == 1);
+	CHECK(close3(HE::worldPositionOf(world, child), { 1, 0, 0 }));
+	// Written as a LOCAL position under the parent, which did not move.
+	CHECK(close3(world.registry().get<TransformComponent>(child).position, { 1, -10, 0 }));
+	CHECK(close3(HE::worldPositionOf(world, parent), { 0, 10, 0 }));
+}
+
+TEST_CASE("ViewportActions: Snap to Ground drops roots only, excludes each subtree, and skips a miss")
+{
+	HorizonWorld world;
+	const Entity a    = meshAt(world, "A", { 0, 3, 0 });
+	const Entity aKid = meshAt(world, "A.kid", { 0, 1, 0 }, a);
+	const Entity b    = meshAt(world, "B", { 5, 7, 0 });
+	EditorSelection sel;
+	sel.setMany({ a, aKid, b });
+	FlatFloor floor;
+
+	const auto moved = ViewportActions::snapToGround(world, sel, floor.probe(), {});
+	CHECK(moved.size() == 2);   // A and B; A.kid rides along with A
+	CHECK(close3(HE::worldPositionOf(world, a),    { 0, 0, 0 }));
+	CHECK(close3(HE::worldPositionOf(world, aKid), { 0, 1, 0 }));
+	CHECK(close3(HE::worldPositionOf(world, b),    { 5, 0, 0 }));
+	// Each root's probe excluded its whole subtree (the last probe was B's,
+	// with only B in it; A's carried A and A.kid).
+	CHECK(floor.origins.size() == 2);
+
+	// Nothing beneath: nothing happens, and nothing is reported as moved.
+	floor.answer = false;
+	const Entity c = meshAt(world, "C", { 9, 4, 0 });
+	sel.set(c);
+	CHECK(ViewportActions::snapToGround(world, sel, floor.probe(), {}).empty());
+	CHECK(close3(HE::worldPositionOf(world, c), { 9, 4, 0 }));
+
+	// The world root and built-ins are never dropped.
+	sel.set(world.rootEntity());
+	CHECK(ViewportActions::snapToGround(world, sel, floor.probe(), {}).empty());
+}

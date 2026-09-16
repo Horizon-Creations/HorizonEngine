@@ -67,6 +67,27 @@ struct State
 	float snapRotate    = 15.0f;   // degrees
 	float snapScale     = 0.25f;   // factor
 
+	// What a MOVE snaps to. Grid is the increment above; Surface puts the
+	// pivot on whatever scene surface lies under it as it is dragged (the
+	// selection itself excluded), Vertex on the nearest vertex of another
+	// mesh within `snapVertexRadiusPx` of it on screen — and falls back to a
+	// free move when none is that close. Rotate and Scale keep their grid
+	// increments in every mode: a surface has no angle to snap to.
+	enum class SnapMode { Grid = 0, Surface = 1, Vertex = 2 };
+	SnapMode snapMode = SnapMode::Grid;
+	// Surface mode: lift the object so its bottom rests on the surface (the
+	// pivot's height above its own bounds), rather than sinking the pivot
+	// into it. On by default — a pivot at the centre is the common export.
+	bool  snapSurfaceRest    = true;
+	float snapVertexRadiusPx = 24.0f;
+
+	// True while a translate drag is taken over by a surface/vertex probe
+	// rather than ImGuizmo's own increment.
+	bool probeSnapActive() const
+	{
+		return snapEnabled && snapMode != SnapMode::Grid && op == ImGuizmo::TRANSLATE;
+	}
+
 	// Snap triple for ImGuizmo::Manipulate matching `op`, or nullptr while
 	// snapping is off. ImGuizmo reads three floats for TRANSLATE and one for
 	// ROTATE/SCALE, so a single buffer serves all three. Inline so the gizmo,
@@ -74,7 +95,7 @@ struct State
 	// binary carries the gizmo but not this bar (it is EditorApplication's).
 	const float* activeSnap() const
 	{
-		if (!snapEnabled) return nullptr;
+		if (!snapEnabled || probeSnapActive()) return nullptr;
 		const float v = (op == ImGuizmo::ROTATE) ? snapRotate
 		              : (op == ImGuizmo::SCALE)  ? snapScale
 		                                         : snapTranslate;

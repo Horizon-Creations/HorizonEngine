@@ -1,6 +1,7 @@
 #pragma once
 #include <HorizonScene/HorizonWorld.h>   // Entity, HorizonWorld
 #include <glm/mat4x4.hpp>
+#include <functional>
 #include <vector>
 
 class EditorUndo;
@@ -26,6 +27,19 @@ class EditorUndo;
 // time — which is why the drag state here is file-static rather than per caller.
 namespace EditorTransformGizmo
 {
+	// Surface / vertex snapping (ViewportToolbar::State::snapMode): where the
+	// pivot of a translate drag should land instead of where ImGuizmo put it.
+	// Called once per frame of a drag with the PICTURE position ImGuizmo's
+	// proposed pivot projects to — the pivot, not the mouse, so a handle
+	// grabbed at arm's length from the pivot does not make the object jump to
+	// the cursor on the first frame. Returns false to keep ImGuizmo's result
+	// (nothing under the pivot, no vertex within reach).
+	//
+	// Supplied by the viewport that owns a scene extract to probe; the class
+	// editor's viewport passes nothing and snaps to the grid as before.
+	using SnapProbe = std::function<bool(ViewportToolbar::State::SnapMode mode,
+	                                     const ImVec2& screen, glm::vec3& outWorld)>;
+
 	// Manipulate `entity` in `world`. `view`/`proj` must be the matrices the
 	// picture was drawn with; `rectMin`/`rectMax` its screen rectangle.
 	// `enabled` is false while the camera is being navigated, so a fly drag
@@ -42,7 +56,8 @@ namespace EditorTransformGizmo
 	                const glm::mat4& view, const glm::mat4& proj,
 	                const ImVec2& rectMin, const ImVec2& rectMax,
 	                const ViewportToolbar::State& tb, bool enabled,
-	                EditorUndo* undo, bool* outChanged = nullptr);
+	                EditorUndo* undo, bool* outChanged = nullptr,
+	                const SnapProbe& probe = {});
 
 	// The same gizmo over a whole selection. One entity behaves exactly as the
 	// overload above; two or more get ONE gizmo at their common pivot — the
@@ -59,7 +74,15 @@ namespace EditorTransformGizmo
 	                const glm::mat4& view, const glm::mat4& proj,
 	                const ImVec2& rectMin, const ImVec2& rectMax,
 	                const ViewportToolbar::State& tb, bool enabled,
-	                EditorUndo* undo, bool* outChanged = nullptr);
+	                EditorUndo* undo, bool* outChanged = nullptr,
+	                const SnapProbe& probe = {});
+
+	// Where a world point lands on the picture drawn with `view`/`proj` into
+	// `rectMin`..`rectMax`. False behind the camera. Public so the viewport's
+	// probe and this file agree on the projection to the pixel.
+	bool projectToScreen(const glm::mat4& view, const glm::mat4& proj,
+	                     const ImVec2& rectMin, const ImVec2& rectMax,
+	                     const glm::vec3& world, ImVec2& outScreen);
 
 	// W/E/R switch the operation while `hovered` and not navigating — the same
 	// keys the toolbar's Move/Rotate/Scale cells set. Split out so every viewport

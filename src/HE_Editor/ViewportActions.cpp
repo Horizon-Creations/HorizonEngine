@@ -11,6 +11,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <unordered_set>
 
@@ -229,6 +230,58 @@ std::vector<Entity> ungroupSelected(HorizonWorld& world, EditorSelection& select
 	selection.prune(reg);
 	if (!freed.empty()) selection.setMany(freed);
 	return freed;
+}
+
+std::vector<Entity> snapToGround(HorizonWorld& world, const EditorSelection& selection,
+                                 const SurfaceProbe& probe, const SubtreeBounds& bounds)
+{
+	std::vector<Entity> moved;
+	if (!probe) return moved;
+	auto& reg = world.registry();
+	// Roots only: a child whose parent is selected too moves through the
+	// parent, and dropping both would land the child on the floor twice.
+	for (const Entity root : selection.roots(reg))
+	{
+		if (!reg.valid(root) || root == world.rootEntity() || world.isBuiltin(root)) continue;
+		auto* t = reg.try_get<TransformComponent>(root);
+		if (!t) continue;
+
+		// Composed on the spot, not read off worldMatrix: a root the user just
+		// dragged has not been propagated yet this frame.
+		const glm::vec3 pivot = HE::worldPositionOf(world, root);
+
+		HE::AABB box;
+		if (!bounds || !bounds(root, box) || !box.isValid())
+		{
+			box = HE::AABB{};
+			box.expand(pivot);
+		}
+		// The box may not include the pivot (a mesh offset from its origin);
+		// the object's "bottom" is the lower of the two either way.
+		const float bottom = std::min(box.min.y, pivot.y);
+		const float top    = std::max(box.max.y, pivot.y);
+
+		std::vector<Entity> subtree;
+		collectSubtree(reg, root, subtree);
+		std::unordered_set<uint32_t> exclude;
+		exclude.reserve(subtree.size());
+		for (const Entity e : subtree) exclude.insert(static_cast<uint32_t>(e));
+
+		// From just above the top, straight down, through the object itself.
+		const glm::vec3 origin(pivot.x, top + 0.01f, pivot.z);
+		glm::vec3 hitPoint;
+		if (!probe(origin, glm::vec3(0.0f, -1.0f, 0.0f), exclude, hitPoint)) continue;
+
+		const float newY = hitPoint.y + (pivot.y - bottom);
+		if (std::abs(newY - pivot.y) < 1e-5f) continue;   // already standing on it
+
+		const glm::vec3 target(pivot.x, newY, pivot.z);
+		t->position = HE::localPositionForWorld(world, root, target);
+		t->dirty    = true;
+		moved.push_back(root);
+	}
+	if (!moved.empty()) world.markHierarchyDirty();
+	return moved;
 }
 
 } // namespace ViewportActions

@@ -1,5 +1,9 @@
 #pragma once
 #include <HorizonScene/HorizonWorld.h>   // Entity
+#include <Math/AABB.h>
+#include <glm/vec3.hpp>
+#include <functional>
+#include <unordered_set>
 #include <vector>
 
 class EditorSelection;
@@ -63,4 +67,34 @@ namespace ViewportActions
 
 	// Whether Ungroup has anything to do for this selection.
 	bool canUngroup(HorizonWorld& world, const EditorSelection& selection);
+
+	// ── Snap to ground ──────────────────────────────────────────────────────
+	// Drop every selection root straight down onto whatever lies beneath it.
+	// The scene geometry is the caller's to probe (the viewport has the
+	// extract and the mesh data; this file has neither), so it comes in as
+	// two callbacks:
+	//
+	//   * `probe(origin, dir, exclude, outPoint)` — nearest surface along the
+	//     ray, ignoring every entity whose id is in `exclude`. The root's own
+	//     subtree is always excluded: a thing cannot land on itself.
+	//   * `bounds(root, outWorldBox)` — the world-space box of everything the
+	//     root's subtree DRAWS; false (or an invalid box) for something with
+	//     no geometry, which then measures as its pivot alone.
+	//
+	// The ray starts just above the top of the box, not at the pivot: an
+	// object already resting on the floor has its pivot ON the floor triangle,
+	// and a ray from there either misses it (the hit is behind the origin) or
+	// falls through to whatever is underneath. Starting above and looking
+	// through the object itself finds the floor every time. The object is then
+	// lowered (or raised) so the BOTTOM of its box sits on the hit — a mesh
+	// exported with its pivot in the middle does not sink in halfway. Only Y
+	// moves; a hit that leaves the root where it stands is not an edit.
+	//
+	// Returns the roots that moved. Built-ins and the world root are skipped.
+	using SurfaceProbe = std::function<bool(const glm::vec3& origin, const glm::vec3& dir,
+	                                        const std::unordered_set<uint32_t>& exclude,
+	                                        glm::vec3& outPoint)>;
+	using SubtreeBounds = std::function<bool(Entity root, HE::AABB& outWorldBox)>;
+	std::vector<Entity> snapToGround(HorizonWorld& world, const EditorSelection& selection,
+	                                 const SurfaceProbe& probe, const SubtreeBounds& bounds);
 }
