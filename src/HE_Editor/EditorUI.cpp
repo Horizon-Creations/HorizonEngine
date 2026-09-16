@@ -2675,6 +2675,33 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             }
         }
 
+        // A "go to line" from the console (ScriptEditorPanel::requestReveal):
+        // the tab half, for a Lua/Python script. The path is already the full
+        // one (the console resolved it), so this is the same find-or-push as
+        // above; the line half stays pending for the panel, which selects it
+        // once the tab draws. Same path comparison as the node reveal.
+        if (std::string revealScript; ScriptEditorPanel::takeRevealPath(revealScript))
+        {
+            if (!std::filesystem::exists(revealScript))
+                ScriptEditorPanel::cancelReveal();   // gone since the error was logged
+            else
+            {
+                auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
+                    [&](const AppContext::EditorTab& t)
+                    { return t.assetPath == revealScript ||
+                             std::filesystem::path(t.assetPath) == std::filesystem::path(revealScript); });
+                if (it == s_tabs.end())
+                {
+                    s_tabs.push_back({ std::filesystem::path(revealScript).stem().string(),
+                                       revealScript, true, true });
+                    s_activeTab = static_cast<int>(s_tabs.size()) - 1;
+                }
+                else
+                    s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
+                s_tabSelectRequest = s_activeTab;
+            }
+        }
+
         if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
 
         if (ImGui::BeginTabBar("##MainTabBar",

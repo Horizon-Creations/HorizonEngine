@@ -2154,6 +2154,12 @@ namespace
 	  "Only on lines with a [node N] marker; double-clicking the line does the "
 	  "same.",
 	  "", "advanced#diagnostics" },
+	{ "Console/Go to Line", "",
+	  "Opens the Lua or Python script this error names and selects the line — "
+	  "the `script:7:` in front of the message. Only on script errors that "
+	  "carry a line, and only while an entity in the scene runs the script "
+	  "under that name; double-clicking the line does the same.",
+	  "", "advanced#diagnostics" },
 	// ── Undo History ─────────────────────────────────────────────────────────
 	// The scene undo stack as a list. Its rows are the operations' own labels
 	// (built at run time, so the scan never sees them); the one fixed control
