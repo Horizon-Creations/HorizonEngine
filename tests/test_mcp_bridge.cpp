@@ -569,18 +569,25 @@ TEST_CASE("McpBridge: the endpoint file appears with the listener and dies with 
 		REQUIRE(bridge.start());
 		REQUIRE(fs::exists(file));
 
-		std::ifstream in(file);
-		json          doc;
-		in >> doc;
-		// Everything the shim needs to reach this editor, and nothing it has to
-		// be told by hand.
-		CHECK(doc["port"].get<int>() == static_cast<int>(bridge.port()));
-		CHECK(doc["pid"].get<int>() != 0);
-		CHECK(doc["token"].get<std::string>() == bridge.token());
-		CHECK(doc["token"].get<std::string>().size() == 64);   // 32 bytes, hex
-		// Spelled out rather than left to the reader: "localhost" resolves to ::1
-		// first on macOS, and this listener is IPv4 loopback only.
-		CHECK(doc["host"] == "127.0.0.1");
+		// The stream lives in its own block so it is closed before stop() below:
+		// POSIX unlinks an open file without complaint, but on Windows an
+		// ifstream is opened without FILE_SHARE_DELETE and fs::remove fails with
+		// a sharing violation while it is open — which would fail the check for
+		// the wrong reason. (fs::status further down holds no handle.)
+		{
+			std::ifstream in(file);
+			json          doc;
+			in >> doc;
+			// Everything the shim needs to reach this editor, and nothing it has
+			// to be told by hand.
+			CHECK(doc["port"].get<int>() == static_cast<int>(bridge.port()));
+			CHECK(doc["pid"].get<int>() != 0);
+			CHECK(doc["token"].get<std::string>() == bridge.token());
+			CHECK(doc["token"].get<std::string>().size() == 64);   // 32 bytes, hex
+			// Spelled out rather than left to the reader: "localhost" resolves to
+			// ::1 first on macOS, and this listener is IPv4 loopback only.
+			CHECK(doc["host"] == "127.0.0.1");
+		}
 
 #ifndef _WIN32
 		// The token in this file is the only thing between another local account
