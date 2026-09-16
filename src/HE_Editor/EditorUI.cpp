@@ -34,6 +34,7 @@
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
 #include "ProfilerPanel.h"               // View > Performance Profiler window
 #include "ConsolePanel.h"                // View > Console — every HE_LOG record, all levels
+#include "HcExecTrace.h"                 // the console's "go to node": which tab to open
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
@@ -57,6 +58,7 @@
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "AudioMixerPanel.h"             // View > Audio Mixer window
 #include "UndoHistoryPanel.h"            // View > Undo History window
+#include "HcWatchPanel.h"                // View > Watch window (a stopped HorizonCode run's values)
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
 #include "HorizonVersion.h"              // HE_VERSION_FULL — Help ▸ About
@@ -196,6 +198,9 @@ static bool s_showConsole = false;
 static bool s_showAudioMixer = false;
 // Toggled by View > Undo History; drives the scene undo stack as a list.
 static bool s_showUndoHistory = false;
+// Toggled by View > Watch; drives the window that shows what a HorizonCode run
+// stopped at a breakpoint is holding. Also raised by a stop itself (below).
+static bool s_showWatch = false;
 
 // Help ▸ Documentation Online. The published manual on the website; the OFFLINE
 // copy the reader panel shows ships next to the editor (EditorDeps/Docs), which
@@ -227,6 +232,7 @@ static bool docsPanelOpener(const char* window)
 		{ "Console",              &s_showConsole       },
 		{ "Audio Mixer",          &s_showAudioMixer    },
 		{ "Undo History",         &s_showUndoHistory   },
+		{ "Watch",                &s_showWatch         },
 		{ "Scene 2",              &SecondaryViewportPanel::open(0) },
 		{ "Scene 3",              &SecondaryViewportPanel::open(1) },
 		{ "Scene 4",              &SecondaryViewportPanel::open(2) },
@@ -278,6 +284,7 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
 	{ "Undo History",         "PanelOpenUndoHistory",   &s_showUndoHistory   },
+	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },
 	// The secondary scene viewports: a Top view docked beside the Scene window
 	// is a layout decision like any other panel's.
 	{ "Scene 2",              "PanelOpenScene2",        &SecondaryViewportPanel::open(0) },
@@ -1388,6 +1395,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
 		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
 		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
+		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);
 		MacMenuBar::setToggleState(MC::ToggleGroundGrid,    ViewportPanel::groundGridEnabled());
 		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
 		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
@@ -1428,6 +1436,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
 			case MC::ToggleAudioMixer: togglePanelWindow(s_showAudioMixer, "Audio Mixer");     break;
 			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
+			case MC::ToggleWatch:     togglePanelWindow(s_showWatch, "Watch");                break;
 			case MC::ToggleGroundGrid:
 				ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());     break;
 			case MC::ToggleScene2:
@@ -1583,6 +1592,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showAudioMixer, "Audio Mixer");
         if (EditorWidgets::menuItem("Undo History", nullptr, s_showUndoHistory))
             togglePanelWindow(s_showUndoHistory, "Undo History");
+        if (EditorWidgets::menuItem("Watch", nullptr, s_showWatch))
+            togglePanelWindow(s_showWatch, "Watch");
         // Also in the viewport toolbar's options popup. It belongs in both: the
         // toolbar is where you reach for it while working, this menu is where you
         // look for it the first time. Both are gone in an application: there is
@@ -2627,6 +2638,70 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             s_tabSelectRequest = s_activeTab;
         }
 
+        // A "go to node" from the console (HcExecTrace::requestReveal): the tab
+        // half. The two editor-owned graphs are their reserved tab paths; a
+        // class or widget is a content-relative path that has to become the
+        // full path the tab bar keys on. The node half stays pending for the
+        // panel, which selects it once the tab draws (LevelScriptPanel /
+        // UIEditorPanel). Compared as paths, not strings: the browser's tab
+        // paths come from a directory walk and this one from a join, and on
+        // Windows those spell the separators differently.
+        if (std::string revealTab; HcExecTrace::takeRevealTab(revealTab))
+        {
+            const bool reserved = revealTab == LevelScriptPanel::kTabPath ||
+                                  revealTab == GameInstancePanel::kTabPath;
+            const std::string full = reserved ? revealTab
+                : ctx.contentManager ? ctx.contentManager->resolveAbsolutePath(revealTab)
+                : std::string();
+            if (full.empty() || (!reserved && !std::filesystem::exists(full)))
+                HcExecTrace::cancelReveal();   // nothing to open; drop the node half too
+            else
+            {
+                auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
+                    [&](const AppContext::EditorTab& t)
+                    { return t.assetPath == full ||
+                             (!reserved && std::filesystem::path(t.assetPath) == std::filesystem::path(full)); });
+                if (it == s_tabs.end())
+                {
+                    const std::string label = reserved
+                        ? (revealTab == LevelScriptPanel::kTabPath ? "Level Script" : "Game Instance")
+                        : std::filesystem::path(full).stem().string();
+                    s_tabs.push_back({ label, full, true, true });
+                    s_activeTab = static_cast<int>(s_tabs.size()) - 1;
+                }
+                else
+                    s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
+                s_tabSelectRequest = s_activeTab;
+            }
+        }
+
+        // A "go to line" from the console (ScriptEditorPanel::requestReveal):
+        // the tab half, for a Lua/Python script. The path is already the full
+        // one (the console resolved it), so this is the same find-or-push as
+        // above; the line half stays pending for the panel, which selects it
+        // once the tab draws. Same path comparison as the node reveal.
+        if (std::string revealScript; ScriptEditorPanel::takeRevealPath(revealScript))
+        {
+            if (!std::filesystem::exists(revealScript))
+                ScriptEditorPanel::cancelReveal();   // gone since the error was logged
+            else
+            {
+                auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
+                    [&](const AppContext::EditorTab& t)
+                    { return t.assetPath == revealScript ||
+                             std::filesystem::path(t.assetPath) == std::filesystem::path(revealScript); });
+                if (it == s_tabs.end())
+                {
+                    s_tabs.push_back({ std::filesystem::path(revealScript).stem().string(),
+                                       revealScript, true, true });
+                    s_activeTab = static_cast<int>(s_tabs.size()) - 1;
+                }
+                else
+                    s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
+                s_tabSelectRequest = s_activeTab;
+            }
+        }
+
         if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
 
         if (ImGui::BeginTabBar("##MainTabBar",
@@ -3162,6 +3237,18 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	// The undo history too: a row is clicked while a script tab is in front and
 	// the scene it rewinds is behind it.
 	UndoHistoryPanel::DrawUndoHistoryWindow(ctx, s_showUndoHistory);
+	// The watch window, for the same reason: the stop is looked at from the
+	// graph tab that shows the node. A NEW stop raises it, the way a debugger
+	// shows its locals when it breaks — once per stop, on the edge, so a
+	// window closed while stopped stays closed until the next break (a Step
+	// keeps the pause, so it does not count as new).
+	{
+		static bool s_wasHcPaused = false;
+		const bool paused = HcExecTrace::isPaused();
+		if (paused && !s_wasHcPaused && !s_showWatch) revealFloatingWindow(s_showWatch, "Watch");
+		s_wasHcPaused = paused;
+	}
+	HcWatchPanel::DrawWatchWindow(ctx, s_showWatch);
 
 	// The second half of revealFloatingWindow: the window a footer widget asked
 	// for exists by now, so the focus request that was a no-op at click time

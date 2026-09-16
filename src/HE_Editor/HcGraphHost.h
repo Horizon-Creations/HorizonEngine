@@ -151,6 +151,12 @@ struct Host
 	std::string         selfKey;
 	// Node whose compile error gets a red halo (0 = none).
 	int                 errorNode    = 0;
+	// The key HcExecTrace files this graph's run-time hits under — the class
+	// panel's content-relative path, the widget editor's relPath, the reserved
+	// tab path for the level script / GameInstance. A node that just ran gets
+	// an amber halo that fades out (the error halo wins). Empty = this canvas
+	// never lights up, which is what a graph nothing executes wants.
+	std::string         traceKey;
 	// Header text for a node.
 	std::function<std::string(const HC::Node&)> title;
 	// An edit happened. committed = this is an undo/snapshot point (a finished

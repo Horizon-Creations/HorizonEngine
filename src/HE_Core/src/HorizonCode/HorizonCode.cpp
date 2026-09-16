@@ -3092,12 +3092,50 @@ Value coerce(Value v, PinType want)
 
 Runner::Runner(const Graph& graph, Context ctx) : m_graph(graph), m_ctx(std::move(ctx)) {}
 
-Runner::CallFrame* Runner::frameFor(int fnEntryId)
+CallFrame* Runner::frameFor(int fnEntryId)
 {
     for (auto it = m_callStack.rbegin(); it != m_callStack.rend(); ++it)
         if (it->fnEntryId == fnEntryId) return &*it;
     return nullptr;
 }
+
+// ── Execution trace ──────────────────────────────────────────────────────────
+namespace
+{
+thread_local ExecSite t_execSite;
+
+// Stamps the Context's identity + this node into the thread's current site for
+// the scope of one node, and puts back whatever was there before. The restore
+// is what makes nesting right: Call Function (Ref) runs the callee in a FRESH
+// Runner from inside the caller's node, and when it returns the caller's node
+// is current again — the same way a native stack unwinds.
+struct SiteScope
+{
+    ExecSite saved;
+    SiteScope(const Context& ctx, int nodeId) : saved(t_execSite)
+    {
+        t_execSite.instance = ctx.traceInstance;
+        t_execSite.classKey = ctx.traceKey.c_str();
+        t_execSite.level    = ctx.traceLevel;
+        t_execSite.nodeId   = nodeId;
+    }
+    ~SiteScope() { t_execSite = saved; }
+    SiteScope(const SiteScope&)            = delete;
+    SiteScope& operator=(const SiteScope&) = delete;
+};
+
+// The exec-node listener, guarded. Also called for the ENTRY node of a run (the
+// Event / Input Action / Function Entry that runExecChain starts from and
+// never executes itself) — an event whose chain is empty would otherwise fire
+// without a trace of it, and the entry is the node a reader looks at first.
+inline void traceExec(const Context& ctx, int nodeId)
+{
+    if (ctx.onExecNode && *ctx.onExecNode)
+        (*ctx.onExecNode)(ctx.traceInstance, ctx.traceKey, ctx.traceLevel, nodeId);
+}
+} // namespace
+
+const ExecSite& currentExecSite() { return t_execSite; }
 
 namespace
 {
@@ -3132,12 +3170,23 @@ void Runner::fireEvent(const std::string& eventName, int elem, const Value& arg)
         if (n.type == T::InputAction)
         {
             const int chain = inputActionChainFor(n, eventName);
-            if (chain >= 0) runExecChain(n, pinRanges(n).execOut0 + chain, 0);
+            if (chain >= 0)
+            {
+                const int pin = pinRanges(n).execOut0 + chain;
+                // A breakpoint ON the entry stops before its chain starts; the
+                // entry is the node a reader puts one on first.
+                if (!breakHere(n, pin)) { traceExec(m_ctx, n.id); runExecChain(n, pin, 0); }
+                deliverSuspension();
+            }
             continue;
         }
         if (n.type != T::Event || n.s != eventName) continue;
         if (n.elem != 0 && n.elem != elem) continue;
-        runExecChain(n, pinRanges(n).execOut0, 0);
+        const int pin = pinRanges(n).execOut0;
+        if (!breakHere(n, pin)) { traceExec(m_ctx, n.id); runExecChain(n, pin, 0); }
+        // Per entry, not per fire: two Event nodes of the same name are two
+        // handlers, and each stops (or not) on its own.
+        deliverSuspension();
     }
 }
 
@@ -3152,6 +3201,7 @@ void Runner::resumeFrom(int nodeId)
     m_execOutputs.clear();
     m_callStack.clear();
     runExecChain(*n, pinRanges(*n).execOut0, 0);
+    deliverSuspension();
 }
 
 bool Runner::callFunction(const std::string& name, bool requirePublic,
@@ -3178,10 +3228,18 @@ bool Runner::callFunction(const std::string& name, bool requirePublic,
         }
         frame.results.resize(n.results.size());
         for (size_t i = 0; i < n.results.size(); ++i) frame.results[i].type = n.results[i].type;
+        // By index, not back(): a stop inside a nested Call Function leaves
+        // that call's frame on top (the resume pops it), and ours is below.
+        const size_t mine = m_callStack.size();
         m_callStack.push_back(std::move(frame));
-        runExecChain(n, pinRanges(n).execOut0, 0);
-        if (results) *results = m_callStack.back().results;
-        m_callStack.pop_back();
+        const int pin = pinRanges(n).execOut0;
+        if (!breakHere(n, pin)) { traceExec(m_ctx, n.id); runExecChain(n, pin, 0); }
+        // A stop inside the function hands the caller the results as they
+        // stand — typed defaults, or whatever a Return before the stop wrote.
+        // The caller's own chain goes on; the rest of THIS one on Continue.
+        if (results) *results = m_callStack[mine].results;
+        m_callStack.resize(mine);
+        deliverSuspension();
         return true;
     }
     return false;
@@ -3202,18 +3260,162 @@ void Runner::runExecChain(const Node& from, int execOutPin, int depth)
         const Node* n = m_graph.findNode(l->dstNode);
         if (!n) return;
         execNode(*n, depth);
-        if (n->type == T::Branch || n->type == T::Sequence || n->type == T::ForEach ||
-            n->type == T::ForEachSet || n->type == T::ForEachMap ||
-            n->type == T::Delay || n->type == T::DoOnce || n->type == T::FlipFlop ||
-            n->type == T::SwitchOnEnum || n->type == T::Cast)
+        // Stopped at a breakpoint (at this node, or somewhere below it): the
+        // rest of this chain is the resume's business, not ours.
+        if (m_suspended) return;
+        if (steersOwnExec(*n))
             return; // they steer their own exec-outs internally (Delay: later)
         l = execLinkFrom(n->id, pinRanges(*n).execOut0);
     }
 }
 
+bool Runner::steersOwnExec(const Node& n)
+{
+    return n.type == T::Branch || n.type == T::Sequence || n.type == T::ForEach ||
+           n.type == T::ForEachSet || n.type == T::ForEachMap ||
+           n.type == T::Delay || n.type == T::DoOnce || n.type == T::FlipFlop ||
+           n.type == T::SwitchOnEnum || n.type == T::Cast;
+}
+
+// ── Breakpoints ──────────────────────────────────────────────────────────────
+bool Runner::breakHere(const Node& n, int resumePin)
+{
+    if (!m_ctx.breakAt || !*m_ctx.breakAt) return false;
+    // The node a resume started at was the one we stopped ON; asking again
+    // would stop a Continue before it moved. Once — a loop that comes back
+    // round to it is asked like any other node.
+    if (m_resumedNode == n.id) { m_resumedNode = 0; return false; }
+    if (!(*m_ctx.breakAt)(m_ctx.traceInstance, m_ctx.traceKey, m_ctx.traceLevel, n.id))
+        return false;
+    m_suspended = true;
+    m_suspension             = SuspendedRun{};
+    m_suspension.nodeId      = n.id;
+    m_suspension.resumePin   = resumePin;
+    m_suspension.instance    = m_ctx.traceInstance;
+    m_suspension.classKey    = m_ctx.traceKey;
+    m_suspension.level       = m_ctx.traceLevel;
+    m_suspension.eventArg    = m_eventArg;
+    m_suspension.execOutputs = m_execOutputs;
+    m_suspension.callStack   = m_callStack;
+    return true;
+}
+
+void Runner::pushFrame(SuspendedRun::Frame::Kind kind, int nodeId, int next, const Value* collection)
+{
+    SuspendedRun::Frame f;
+    f.kind   = kind;
+    f.nodeId = nodeId;
+    f.next   = next;
+    if (collection) f.collection = *collection;
+    m_suspension.outer.push_back(std::move(f));
+}
+
+void Runner::deliverSuspension()
+{
+    if (!m_suspended) return;
+    m_suspended = false;
+    SuspendedRun run = std::move(m_suspension);
+    m_suspension = SuspendedRun{};
+    // The frames of calls the stop cut short travel with the run; the live
+    // stack must not keep them for the next entry this Runner fires.
+    m_callStack.clear();
+    if (m_ctx.onSuspend && *m_ctx.onSuspend) (*m_ctx.onSuspend)(std::move(run));
+    // No host to hand it to: the run simply ends here, like a Delay with no
+    // scheduler — a stop with nobody to continue from is a stop.
+}
+
+void Runner::runNodeAndChain(const Node& n, int depth)
+{
+    execNode(n, depth);
+    if (m_suspended || steersOwnExec(n)) return;
+    runExecChain(n, pinRanges(n).execOut0, depth);
+}
+
+void Runner::unwindFrame(const SuspendedRun::Frame& f, int depth)
+{
+    const Node* n = m_graph.findNode(f.nodeId);
+    if (!n) return;   // edited away while stopped: nothing left to finish
+    const PinRanges r = pinRanges(*n);
+    switch (f.kind)
+    {
+    case SuspendedRun::Frame::Kind::Sequence:
+        for (int k = f.next; k < 2; ++k)
+        {
+            runExecChain(*n, r.execOut0 + k, depth);
+            if (m_suspended) { if (k + 1 < 2) pushFrame(f.kind, n->id, k + 1); return; }
+        }
+        break;
+    case SuspendedRun::Frame::Kind::Loop:
+    {
+        // Same three shapes as the loops in execNode, over the collection the
+        // loop captured when it started.
+        const Value& c = f.collection;
+        const size_t count = n->type == T::ForEachMap ? std::min(c.keys.size(), c.items.size())
+                                                      : c.items.size();
+        for (size_t i = (size_t)f.next; i < count; ++i)
+        {
+            if (n->type == T::ForEachMap) m_execOutputs[n->id] = { c.keys[i], c.items[i], Value::ofInt((int)i) };
+            else                          m_execOutputs[n->id] = { c.items[i], Value::ofInt((int)i) };
+            runExecChain(*n, r.execOut0 + 0, depth);   // Body
+            if (m_suspended) { pushFrame(f.kind, n->id, (int)i + 1, &c); return; }
+        }
+        runExecChain(*n, r.execOut0 + 1, depth);       // Done
+        break;
+    }
+    case SuspendedRun::Frame::Kind::Call:
+        // The callee's chain has finished: its results become the call's
+        // data-outs, its frame goes, and the caller's chain carries on after
+        // the call node — the tail of the FunctionCall case in execNode.
+        if (!m_callStack.empty())
+        {
+            m_execOutputs[n->id] = std::move(m_callStack.back().results);
+            m_callStack.pop_back();
+        }
+        runExecChain(*n, r.execOut0, depth);
+        break;
+    }
+}
+
+void Runner::resumeSuspended(SuspendedRun run)
+{
+    const Node* n = m_graph.findNode(run.nodeId);
+    if (!n) return;   // the stopped node was edited away: the run is over
+    m_steps       = 0;
+    m_eventArg    = std::move(run.eventArg);
+    m_execOutputs = std::move(run.execOutputs);
+    m_callStack   = std::move(run.callStack);
+    m_suspended   = false;
+    m_suspension  = SuspendedRun{};
+    // The stopped node runs now (it was answered once), or the entry's chain
+    // starts. Then the frames above it, innermost first.
+    if (run.resumePin < 0) { m_resumedNode = n->id; runNodeAndChain(*n, 0); }
+    else                   { m_resumedNode = 0; traceExec(m_ctx, n->id); runExecChain(*n, run.resumePin, 0); }
+    m_resumedNode = 0;
+    // Unwind what the stop had interrupted. A NEW stop on the way keeps the
+    // frames it has not reached yet: they are still owed, and they come after
+    // whatever the new stop recorded on its own way out.
+    for (size_t i = 0; i < run.outer.size(); ++i)
+    {
+        if (m_suspended)
+        {
+            m_suspension.outer.insert(m_suspension.outer.end(),
+                                      run.outer.begin() + (std::ptrdiff_t)i, run.outer.end());
+            break;
+        }
+        unwindFrame(run.outer[i], 0);
+    }
+    deliverSuspension();
+}
+
 void Runner::execNode(const Node& n, int depth)
 {
     if (depth > kMaxDepth) return;
+    // Before the site and the listener: a node that stops here has not RUN,
+    // and must not light up as if it had.
+    if (breakHere(n, -1)) return;
+    // Current site for anything this node logs; listener for the highlight.
+    SiteScope site(m_ctx, n.id);
+    traceExec(m_ctx, n.id);
     switch (n.type)
     {
     case T::Branch:
@@ -3226,8 +3428,12 @@ void Runner::execNode(const Node& n, int depth)
     case T::Sequence:
     {
         const PinRanges r = pinRanges(n);
-        runExecChain(n, r.execOut0 + 0, depth + 1);
-        runExecChain(n, r.execOut0 + 1, depth + 1);
+        for (int k = 0; k < 2; ++k)
+        {
+            runExecChain(n, r.execOut0 + k, depth + 1);
+            // Stopped below: the outputs not fired yet are owed to the resume.
+            if (m_suspended) { if (k + 1 < 2) pushFrame(SuspendedRun::Frame::Kind::Sequence, n.id, k + 1); break; }
+        }
         break;
     }
     case T::Cast:
@@ -3361,7 +3567,18 @@ void Runner::execNode(const Node& n, int depth)
         frame.results.resize(n.results.size());
         for (size_t i = 0; i < n.results.size(); ++i) frame.results[i].type = n.results[i].type;
         m_callStack.push_back(std::move(frame));
-        runExecChain(*entry, pinRanges(*entry).execOut0, depth + 1);
+        // The entry is traced (and can be stopped on) like the one a
+        // Runtime::callFunction starts from — a call is a call.
+        const int entryPin = pinRanges(*entry).execOut0;
+        if (!breakHere(*entry, entryPin))
+        {
+            traceExec(m_ctx, entry->id);
+            runExecChain(*entry, entryPin, depth + 1);
+        }
+        // Stopped inside the callee: its frame stays on the (captured) stack,
+        // and finishing the call — results out, frame off, the chain after
+        // this node — is the resume's job (unwindFrame, Kind::Call).
+        if (m_suspended) { pushFrame(SuspendedRun::Frame::Kind::Call, n.id, 0); break; }
         // Cache the returned values as this call's data outputs, then pop.
         m_execOutputs[n.id] = std::move(m_callStack.back().results);
         m_callStack.pop_back();
@@ -3399,7 +3616,11 @@ void Runner::execNode(const Node& n, int depth)
         {
             m_execOutputs[n.id] = { arr.items[i], Value::ofInt((int)i) };
             runExecChain(n, r.execOut0 + 0, depth + 1);   // Body
+            // Stopped in the body: the iterations after this one, and Done,
+            // are owed to the resume — over THIS array, as evaluated.
+            if (m_suspended) { pushFrame(SuspendedRun::Frame::Kind::Loop, n.id, (int)i + 1, &arr); break; }
         }
+        if (m_suspended) break;
         runExecChain(n, r.execOut0 + 1, depth + 1);        // Done
         break;
     }
@@ -3414,7 +3635,9 @@ void Runner::execNode(const Node& n, int depth)
         {
             m_execOutputs[n.id] = { set.items[i], Value::ofInt((int)i) };
             runExecChain(n, r.execOut0 + 0, depth + 1);   // Body
+            if (m_suspended) { pushFrame(SuspendedRun::Frame::Kind::Loop, n.id, (int)i + 1, &set); break; }
         }
+        if (m_suspended) break;
         runExecChain(n, r.execOut0 + 1, depth + 1);        // Done
         break;
     }
@@ -3427,7 +3650,9 @@ void Runner::execNode(const Node& n, int depth)
         {
             m_execOutputs[n.id] = { map.keys[i], map.items[i], Value::ofInt((int)i) };
             runExecChain(n, r.execOut0 + 0, depth + 1);   // Body
+            if (m_suspended) { pushFrame(SuspendedRun::Frame::Kind::Loop, n.id, (int)i + 1, &map); break; }
         }
+        if (m_suspended) break;
         runExecChain(n, r.execOut0 + 1, depth + 1);        // Done
         break;
     }
@@ -3533,6 +3758,10 @@ bool Runner::inputLinked(const Node& n, int dataInIndex) const
 Value Runner::evalData(const Node& n, int dataOutPin, int depth)
 {
     if (depth > kMaxDepth || ++m_steps > kMaxSteps) return {};
+    // Site only, no listener: a pure node is read as often as its output is
+    // wired, and a warning it logs should still name IT and not the exec node
+    // that pulled on it.
+    SiteScope site(m_ctx, n.id);
     switch (n.type)
     {
     case T::Event:       return coerce(m_eventArg, n.propType);

@@ -52,6 +52,94 @@ TEST_CASE("ScriptEngine: script must return a table")
     CHECK(!engine.lastError().empty());
 }
 
+// ─── Error → line ─────────────────────────────────────────────────────────────
+// The chunk is named after the script, so an error reads `name:line: …` and
+// not `[string "local M = {}..."]:line: …` — the console turns the former into
+// a jump to the line (HE::parseScriptErrorLocation).
+
+TEST_CASE("ScriptEngine: a compile error names the script and its line")
+{
+    ScriptEngine engine;
+    CHECK_FALSE(engine.loadScript("broken", "local M = {}\n\nlocal x = ??? end\nreturn M\n"));
+    const std::string& err = engine.lastError();
+    CHECK(err.rfind("broken:3:", 0) == 0);
+    CHECK(err.find("[string") == std::string::npos);
+    HE::ScriptErrorLocation loc;
+    REQUIRE(HE::parseScriptErrorLocation(err, loc));
+    CHECK(loc.script == "broken");
+    CHECK(loc.line == 3);
+}
+
+TEST_CASE("ScriptEngine: a runtime error in a handler names the script and its line")
+{
+    ScriptEngine engine;
+    REQUIRE(engine.loadScript("faulty",
+        "local M = {}\n"
+        "function M.onStart(self)\n"
+        "    self.count = 0\n"
+        "end\n"
+        "function M.onUpdate(self, dt)\n"
+        "    local t = nil\n"
+        "    return t.field\n"          // line 7: index a nil value
+        "end\n"
+        "return M\n"));
+    auto id = engine.createInstance("faulty");
+    REQUIRE(engine.callOnStart(id));
+    CHECK_FALSE(engine.callOnUpdate(id, 0.016f));
+    const std::string& err = engine.lastError();
+    CHECK(err.rfind("faulty:7:", 0) == 0);
+    HE::ScriptErrorLocation loc;
+    REQUIRE(HE::parseScriptErrorLocation(err, loc));
+    CHECK(loc.script == "faulty");
+    CHECK(loc.line == 7);
+}
+
+TEST_CASE("ScriptEngine: a hot-reloaded chunk keeps the script's name")
+{
+    ScriptEngine engine;
+    REQUIRE(engine.loadScript("live", kCounterScript));
+    CHECK_FALSE(engine.hotReloadScript("live", "local M = {}\nfunction M.onUpdate(self, dt)\n  error('boom')\nend\nreturn M\n"
+                                               "syntax error here"));
+    CHECK(engine.lastError().rfind("live:", 0) == 0);
+}
+
+TEST_CASE("parseScriptErrorLocation: reads the position out of the logged wrapper")
+{
+    HE::ScriptErrorLocation loc;
+    // What ScriptContext logs around the backend's own text.
+    REQUIRE(HE::parseScriptErrorLocation(
+        "Compile error in script 'mover': mover:3: unexpected symbol near '?'", loc));
+    CHECK(loc.script == "mover");
+    CHECK(loc.line == 3);
+    REQUIRE(HE::parseScriptErrorLocation(
+        "Lua script instance 3 failed in onUpdate(): mover:12: attempt to index a nil value (local 't')", loc));
+    CHECK(loc.script == "mover");
+    CHECK(loc.line == 12);
+    // Python's spelling has the exception type after the site.
+    REQUIRE(HE::parseScriptErrorLocation(
+        "Python script instance 2 failed in on_start(): boom:5: ValueError: kaboom", loc));
+    CHECK(loc.script == "boom");
+    CHECK(loc.line == 5);
+    // A dotted or slashed name survives whole.
+    REQUIRE(HE::parseScriptErrorLocation("Scripts/player.move:9: x", loc));
+    CHECK(loc.script == "Scripts/player.move");
+    CHECK(loc.line == 9);
+}
+
+TEST_CASE("parseScriptErrorLocation: a clock, a bare colon and no digits are not positions")
+{
+    HE::ScriptErrorLocation loc;
+    CHECK_FALSE(HE::parseScriptErrorLocation("12:34:56.123  ERROR  Lua  something", loc));
+    CHECK_FALSE(HE::parseScriptErrorLocation("Compile error in script 'x': no line here", loc));
+    CHECK_FALSE(HE::parseScriptErrorLocation("Script 'x' must return a table", loc));
+    CHECK_FALSE(HE::parseScriptErrorLocation("", loc));
+    CHECK_FALSE(HE::parseScriptErrorLocation("x:0: zero is not a line", loc));
+    // The quote in front of the name is not part of it.
+    REQUIRE(HE::parseScriptErrorLocation("in 'x:4: y'", loc));
+    CHECK(loc.script == "x");
+    CHECK(loc.line == 4);
+}
+
 TEST_CASE("ScriptEngine: loading script twice replaces it")
 {
     ScriptEngine engine;

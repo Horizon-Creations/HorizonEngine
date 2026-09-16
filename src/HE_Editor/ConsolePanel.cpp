@@ -5,7 +5,18 @@
 #include "EditorTheme.h"         // body / dimmed text
 #include "EditorToolbar.h"       // the shared "needs attention" / "went wrong" colours
 
+#include "HcExecTrace.h"         // a line's node → "go to node"
+#include "LevelScriptPanel.h"    // kTabPath — naming the tab a line leads to
+#include "GameInstancePanel.h"   // kTabPath
+#include "ScriptEditorPanel.h"   // a line's `script:line:` → "go to line"
+
 #include <Diagnostics/Log.h>
+#include <HorizonCode/HorizonCode.h>   // currentExecSite — which node wrote a record
+#include <Scripting/ScriptTypes.h>     // parseScriptErrorLocation — which line a Lua/Python error names
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/ScriptComponent.h>   // moduleName → the script asset
 
 #include <algorithm>
 #include <cctype>
@@ -43,6 +54,21 @@ namespace
 		HE::LogLevel level  = HE::LogLevel::Info;
 		int          repeat = 1;     // consecutive identical lines collapse into one row
 		std::string  text;
+		// The HorizonCode node that was executing when the record was written —
+		// a Print's own line, a warning from inside a node, an engine row's
+		// error — so the row can lead back to it (HcExecTrace::requestReveal).
+		// Empty key / node 0 = written by nothing that was a node.
+		std::string  hcKey;
+		int          hcNode     = 0;
+		uint32_t     hcInstance = 0;
+		// The Lua/Python script and line a script error names (`mover:7: …`,
+		// HE::parseScriptErrorLocation), so the row can lead to the line
+		// (ScriptEditorPanel::requestReveal). Line 0 = names none. The name is
+		// the module name the script runs under; the asset behind it is looked
+		// up on the click, not here — the sink must stay short and lock-free.
+		std::string  scriptName;
+		int          scriptLine = 0;
+		bool         python     = false;   // which backend said it (Cat::Python)
 	};
 
 	// The hand-off between "any thread logs" and "the frame draws". Kept small
@@ -137,6 +163,26 @@ namespace
 		// scrollbar stops agreeing with the content.
 		const char* const msgEnd = message + msgLen;
 
+		// Which node this came out of, if any. The site is thread-local and the
+		// sink runs on the thread that logged, so this is the node that is
+		// executing right now on the thread that wrote the record — for every
+		// category, not just HorizonCode's: an engine row an Engine Call node
+		// invoked logs under Physics or Audio, and that line wants its node
+		// just as much. The key pointer is only good for the duration of the
+		// node (HorizonCode.h), hence the copy.
+		const HorizonCode::ExecSite& site = HorizonCode::currentExecSite();
+
+		// Which script line this names, if any. Parsed from the RAW message,
+		// never from the composed row: the row starts with a clock, and
+		// "12:34:56" has the shape of a position. Only the script categories
+		// are asked — a shader compiler's "file.glsl:12:" is not a script.
+		HE::ScriptErrorLocation scriptAt;
+		const bool scriptCat = record.category == HE::Log::Cat::Lua ||
+		                       record.category == HE::Log::Cat::Python ||
+		                       record.category == HE::Log::Cat::Script;
+		const bool hasScriptAt = scriptCat && record.level >= HE::LogLevel::Warning &&
+		                         HE::parseScriptErrorLocation(std::string(message, msgLen), scriptAt);
+
 		std::lock_guard<std::mutex> lock(s_pendingMutex);
 		for (const char* at = message; at < msgEnd; )
 		{
@@ -145,6 +191,26 @@ namespace
 
 			Line line;
 			line.level = record.level;
+			if (site.nodeId != 0)
+			{
+				line.hcKey      = site.classKey;
+				line.hcNode     = site.nodeId;
+				line.hcInstance = site.instance;
+			}
+			// The position belongs to the record's first row, like the suffix
+			// belongs to its last: a multi-line message names one place.
+			if (hasScriptAt && at == message)
+			{
+				line.scriptName = scriptAt.script;
+				line.scriptLine = scriptAt.line;
+				// Compile errors log under the backend's own category; a handler
+				// that failed at run time logs under Script with the language as
+				// the first word ("Python script instance 3 failed in …",
+				// ScriptContext's HE_SCRIPT_CALL), so that word is read too.
+				line.python     = record.category == HE::Log::Cat::Python ||
+				                  (record.category == HE::Log::Cat::Script &&
+				                   std::strncmp(message, "Python", 6) == 0);
+			}
 			line.text  = prefix;
 			line.text.append(at, static_cast<std::size_t>(end - at));
 			if (end == msgEnd) line.text += suffix;   // the location belongs to the record, once
@@ -237,8 +303,11 @@ namespace
 			// what the program did. Counting bounds the same case — one error
 			// logged every frame would otherwise flush the whole ring in a minute
 			// and leave nothing but itself.
+			// Same text from another NODE is not a repeat: two Prints saying
+			// "here" are two places, and collapsing them would lose one.
 			if (!s_lines.empty() && s_lines.back().level == line.level &&
-			    s_lines.back().text == line.text)
+			    s_lines.back().text == line.text &&
+			    s_lines.back().hcNode == line.hcNode && s_lines.back().hcKey == line.hcKey)
 			{
 				++s_lines.back().repeat;
 				continue;
@@ -340,6 +409,37 @@ namespace
 		}
 		ImGui::EndPopup();
 	}
+
+	// The asset behind a script's module name, as the FULL path the tab bar
+	// keys on; empty when nothing in the world runs under that name. A Lua or
+	// Python script has no name of its own in the log — it runs under the
+	// moduleName of the ScriptComponent that started it
+	// (ScriptContext::startEntityScript), so that component is the way back:
+	// its scriptAssetId, the ContentManager's script for it, that script's
+	// content-relative path, resolved. Two components may share a module name
+	// across languages (ScriptContext.h), so the one whose asset is in the
+	// language that logged wins; anything else with the name is the fallback.
+	// A component holding a HorizonCode class under the same id has no
+	// ScriptAsset and is skipped.
+	//
+	// The getter's pointer is only good until the next loadAsset, so the path
+	// is copied out at once.
+	std::string scriptAssetPathFor(AppContext& ctx, const std::string& moduleName, bool python)
+	{
+		if (!ctx.world || !ctx.contentManager || moduleName.empty()) return {};
+		const HE::ScriptLanguage want = python ? HE::ScriptLanguage::Python : HE::ScriptLanguage::Lua;
+		std::string fallback;
+		for (auto [entity, sc] : ctx.world->registry().view<ScriptComponent>().each())
+		{
+			if (sc.moduleName != moduleName) continue;
+			const ScriptAsset* asset = ctx.contentManager->getScript(sc.scriptAssetId);
+			if (!asset || asset->path.empty()) continue;
+			const std::string rel = asset->path;
+			if (asset->language == want) return ctx.contentManager->resolveAbsolutePath(rel);
+			if (fallback.empty()) fallback = ctx.contentManager->resolveAbsolutePath(rel);
+		}
+		return fallback;
+	}
 }
 #endif // HE_IMGUI_ENABLED
 
@@ -421,8 +521,58 @@ void DrawConsoleWindow(AppContext& ctx, bool& open)
 					ImGui::PushStyleColor(ImGuiCol_Text, colourFor(line.level));
 					ImGui::TextUnformatted(row.c_str());
 					ImGui::PopStyleColor();
+					// A line a HorizonCode node wrote leads back to that node: a
+					// double-click on the row, or the context entry below. The
+					// marker after the text says which node without becoming
+					// part of the copied line (appendRow never sees it).
+					const bool fromNode = line.hcNode != 0;
+					if (fromNode && ImGui::IsItemHovered())
+					{
+						// The tab's name rather than the runtime's key: "level:<uuid>"
+						// tells nobody anything, "Level Script" does.
+						const std::string where = HcExecTrace::tabKeyFor(line.hcKey);
+						const char* shown = where == LevelScriptPanel::kTabPath  ? "the Level Script"
+						                  : where == GameInstancePanel::kTabPath ? "the Game Instance"
+						                  : where.c_str();
+						ImGui::SetTooltip("Written by node %d of %s\nDouble-click to show it.",
+						                  line.hcNode, shown);
+						if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+							HcExecTrace::requestReveal(line.hcKey, line.hcNode);
+					}
+					// A Lua/Python error that names its line leads to that line of
+					// the script: same double-click, same menu, the script tab
+					// instead of a graph. The node wins when a row has both (an
+					// Engine Call node that ran a script) — the node is where the
+					// user was. The asset is looked up on the click: the world can
+					// have changed since the line was written, and a script nobody
+					// runs any more simply has nowhere to go.
+					const bool toLine = !fromNode && line.scriptLine > 0;
+					auto goToLine = [&]()
+					{
+						const std::string path = scriptAssetPathFor(ctx, line.scriptName, line.python);
+						if (!path.empty()) ScriptEditorPanel::requestReveal(path, line.scriptLine);
+					};
+					if (toLine && ImGui::IsItemHovered())
+					{
+						ImGui::SetTooltip("Line %d of script '%s'\nDouble-click to show it.",
+						                  line.scriptLine, line.scriptName.c_str());
+						if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) goToLine();
+					}
+					// The context menu hangs off the row text, so it is opened here,
+					// before the marker becomes the last item.
 					if (ImGui::BeginPopupContextItem("##consoleLine"))
 					{
+						if (fromNode)
+						{
+							if (EditorWidgets::menuItem("Go to Node"))
+								HcExecTrace::requestReveal(line.hcKey, line.hcNode);
+							ImGui::Separator();
+						}
+						if (toLine)
+						{
+							if (EditorWidgets::menuItem("Go to Line")) goToLine();
+							ImGui::Separator();
+						}
 						if (EditorWidgets::menuItem("Copy Line")) ImGui::SetClipboardText(row.c_str());
 						if (EditorWidgets::menuItem("Copy All Shown")) copyVisible();
 						ImGui::Separator();
@@ -430,6 +580,11 @@ void DrawConsoleWindow(AppContext& ctx, bool& open)
 						// is walking.
 						if (EditorWidgets::menuItem("Clear")) clearRequested = true;
 						ImGui::EndPopup();
+					}
+					if (fromNode)
+					{
+						ImGui::SameLine();
+						ImGui::TextDisabled("[node %d]", line.hcNode);
 					}
 					ImGui::PopID();
 				}

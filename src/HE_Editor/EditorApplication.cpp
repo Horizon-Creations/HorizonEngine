@@ -14,6 +14,7 @@
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 #include "ConsolePanel.h"          // the log sink behind View ▸ Console
+#include "HcExecTrace.h"           // the runtime's exec listener behind the node highlighting
 #include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
 #include "TypeAssetPanel.h"        // the MCP type tools ask this tab whether it is dirty
 #include "ParticleGraphEditorPanel.h"        // …and the MCP particle tools ask this one
@@ -1366,6 +1367,11 @@ void EditorApplication::OnInit()
 	// level script and the GameInstance share one interpreter (and the
 	// GameInstance survives scene switches).
 	m_editorWorld->setScriptRuntime(&m_gameInstance.runtime());
+	// …and that one runtime reports every node it executes to the editor, which
+	// is what lights nodes up on the canvas while a level plays or a widget is
+	// previewed (HcExecTrace.h). Installed once, here, for the same reason the
+	// console sink is: whatever runs, runs through this runtime.
+	HcExecTrace::attach(m_gameInstance.runtime());
 	// Widget + object nodes route to the editor world's WidgetManager and the
 	// app runtime (+ ContentManager to load assets).
 	{
@@ -2252,6 +2258,25 @@ void EditorApplication::OnRender(float dt)
 	// it), and an editor button sharing that variable would fight it. A step lets
 	// exactly one tick through; the request is consumed here, so the pause re-arms
 	// without anyone having to press it again.
+	// ── HorizonCode breakpoints ──────────────────────────────────────────────
+	// The parked Continue / Step Node from the last frame's UI pass runs HERE,
+	// where a Delay's continuation would: between frames, before the tick. A
+	// step whose run reaches its end without another node to stop at is over,
+	// and the world goes on until the next breakpoint — the way a text
+	// debugger stepping out of the last line resumes.
+	{
+		auto& rt = m_gameInstance.runtime();
+		if (m_hcResume == HcResume::Continue)   rt.debugContinue();
+		else if (m_hcResume == HcResume::Step)  { rt.debugStep(); if (!rt.isSuspended()) m_isPaused = false; }
+		m_hcResume = HcResume::None;
+	}
+	// A hit — during the last frame's tick, or in the resume just above —
+	// freezes this frame (HcExecTrace::takeBreakHit; the listener runs from
+	// inside execution, so the frame it hit in finished as it was). Only a play
+	// session can be frozen; in an application project the stopped run waits
+	// while the UI stays live, and Continue is the same button.
+	HcExecTrace::refreshPaused();
+	if (HcExecTrace::takeBreakHit() && m_isPlaying) { m_isPaused = true; m_stepFrame = false; }
 	const bool stepping   = m_isPaused && m_stepFrame;
 	m_stepFrame           = false;
 	const bool simulating = m_isPlaying && (!m_isPaused || stepping);
@@ -7964,12 +7989,30 @@ AppContext EditorApplication::makeContext()
 		// Both refuse to freeze an edit-mode session: there is no world tick to
 		// gate there, and a pause that outlived play mode would silently swallow
 		// the first frames of the NEXT one.
-		.setPaused           = [this](bool paused){ m_isPaused = m_isPlaying && paused; },
+		.setPaused           = [this](bool paused)
+		{
+			// Resume while a script is stopped at a breakpoint = Continue: the
+			// stopped run goes on first, then the world. Otherwise the tick
+			// would resume around a chain frozen forever. Parked (m_hcResume),
+			// not run here — this is the UI pass.
+			if (!paused && m_gameInstance.runtime().isSuspended())
+				m_hcResume = HcResume::Continue;
+			m_isPaused = m_isPlaying && paused;
+		},
 		.stepFrame           = [this]
 		{
 			if (!m_isPlaying) return;
+			// A frame step with a stopped script lets that run finish first —
+			// one frame means one whole frame, scripts included.
+			if (m_gameInstance.runtime().isSuspended())
+				m_hcResume = HcResume::Continue;
 			m_isPaused  = true;   // stepping a running scene pauses it first
 			m_stepFrame = true;
+		},
+		.hcSuspended         = HcExecTrace::isPaused(),
+		.stepNode            = [this]
+		{
+			if (m_gameInstance.runtime().isSuspended()) m_hcResume = HcResume::Step;
 		},
 		.reportPlayUIPointer = [this](float mx, float my, float vpW, float vpH,
 		                              bool down, bool valid, float wheel,
@@ -8389,6 +8432,7 @@ void EditorApplication::setPlayMode(bool play)
 	// session that started frozen would look exactly like an editor that hung.
 	m_isPaused  = false;
 	m_stepFrame = false;
+	m_hcResume  = HcResume::None;   // a parked Continue is session state too
 	// Same reasoning for the input routing: it is session state. A game that
 	// stopped while its pause menu was up left the mode on UI-only, and without
 	// this the NEXT session would start with gameplay deaf for no visible reason.
@@ -8614,6 +8658,13 @@ void EditorApplication::setPlayMode(bool play)
 		if (logicLoader().isLoaded())
 			logicLoader().unload(*m_editorWorld);
 
+		// Runs stopped at a breakpoint die with the session: the GameInstance's
+		// runtime outlives it, and a stopped run of the GameInstance would
+		// otherwise wake up in the NEXT session, on Continue, in a world it
+		// never saw. The marker and the halos go with them.
+		m_gameInstance.runtime().debugAbort();
+		HcExecTrace::clearPaused();
+		HcExecTrace::clearHits();
 		// Player instances go down first (their Destruct may still reference the
 		// GameInstance), then the GameInstance fires OnShutdown while the app
 		// runtime is still intact (it lives outside the world, so clear() below
@@ -8718,6 +8769,9 @@ void EditorApplication::restartAppPreview(bool keepState)
 	WidgetManager::StateSnapshot snapshot;
 	if (keepState) snapshot = m_editorWorld->widgets().captureState();
 
+	// A run stopped at a breakpoint belongs to the preview that is going down.
+	m_gameInstance.runtime().debugAbort();
+	HcExecTrace::clearPaused();
 	// Down in the reverse order it came up. fireShutdown before the widgets go,
 	// so a graph's OnShutdown still finds the things it is about to let go of.
 	m_gameInstance.fireShutdown();

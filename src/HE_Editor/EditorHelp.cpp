@@ -1593,6 +1593,13 @@ namespace
 	  "marked. Click a row to jump straight there — several steps in one go, "
 	  "forwards or backwards.",
 	  "", "editor#menus" },
+	{ "View/Watch", "",
+	  "What a HorizonCode graph stopped at a breakpoint is holding: the event's "
+	  "argument, the function it is inside of with its inputs and locals, the "
+	  "object's variables, and what the nodes before the stop produced. Opens "
+	  "by itself when a run stops; while nothing is stopped it shows the Game "
+	  "Instance's variables live.",
+	  "", "horizoncode#graphs" },
 	{ "View/Ground Grid", "",
 	  "The reference grid on the ground plane. Hidden while the scene plays "
 	  "either way.",
@@ -2141,6 +2148,18 @@ namespace
 	{ "Console/Copy All Shown", "",
 	  "Copies everything the current filter leaves visible, not the whole log.",
 	  "", "advanced#diagnostics" },
+	{ "Console/Go to Node", "",
+	  "Opens the HorizonCode graph this line came from and selects the node "
+	  "that wrote it — a Print, or the node whose call raised the warning. "
+	  "Only on lines with a [node N] marker; double-clicking the line does the "
+	  "same.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Go to Line", "",
+	  "Opens the Lua or Python script this error names and selects the line — "
+	  "the `script:7:` in front of the message. Only on script errors that "
+	  "carry a line, and only while an entity in the scene runs the script "
+	  "under that name; double-clicking the line does the same.",
+	  "", "advanced#diagnostics" },
 	// ── Undo History ─────────────────────────────────────────────────────────
 	// The scene undo stack as a list. Its rows are the operations' own labels
 	// (built at run time, so the scan never sees them); the one fixed control
@@ -2150,6 +2169,25 @@ namespace
 	  "only the way back is gone. For a history that has grown past the point "
 	  "of being useful, or before a long session you want to start clean.",
 	  "", "editor#menus" },
+
+	// ── Watch ────────────────────────────────────────────────────────────────
+	// A stopped HorizonCode run's values. The rows are the run's own names
+	// (variables, function inputs, locals — built at run time, so the scan
+	// never sees them); the fixed controls are the way to the node, the run
+	// picker and the row menu.
+	{ "Watch/Go to Node", "Go to Node",
+	  "Opens the graph the run is stopped in and selects the node — the one "
+	  "with the yellow frame. The same jump the stop itself made; for when you "
+	  "have since gone elsewhere.",
+	  "", "horizoncode#graphs" },
+	{ "Watch/Copy Value", "Copy Value",
+	  "Puts this row's value on the clipboard as it is shown here — the whole "
+	  "string, the whole array, not the part that fits the column.",
+	  "", "horizoncode#graphs" },
+	{ "Watch/Copy Row", "Copy Row",
+	  "Puts name, type and value on the clipboard as one line, for a bug "
+	  "report or a note.",
+	  "", "horizoncode#graphs" },
 
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
 	{ "Audio Mixer/Master", "",
@@ -2332,8 +2370,22 @@ namespace
 	  "", "editor#play-mode" },
 	{ "viewport.step", "Step",
 	  "Advances a paused session by exactly one frame — the way to watch a bug "
-	  "happen instead of catching it afterwards.",
+	  "happen instead of catching it afterwards. With a script stopped at a "
+	  "breakpoint, that run finishes first: one frame is one whole frame.",
 	  "", "editor#play-mode" },
+	{ "viewport.continue", "Continue",
+	  "A HorizonCode graph is stopped at a breakpoint (the yellow-framed node). "
+	  "This runs it on from there — the node itself, the rest of its chain, the "
+	  "remaining iterations of a loop it stopped inside — and then lets the world "
+	  "tick again. The next breakpoint stops it again. Breakpoints are set on a "
+	  "node's right-click menu in the graph.",
+	  "", "horizoncode#graphs" },
+	{ "viewport.step-node", "Step Node",
+	  "Runs exactly the node the graph is stopped at and stops at the next one — "
+	  "into a called function, out to the caller, wherever the next node is. "
+	  "When the chain simply ends, the run is over and the world goes on until "
+	  "the next breakpoint.",
+	  "", "horizoncode#graphs" },
 	{ "viewport.time-scale", "Game time",
 	  "What the RUNNING GAME is doing to its own clock, which is not the same as "
 	  "the Pause button next to it: this reads the scale a script set with Set "
@@ -5594,6 +5646,22 @@ namespace
 	  "Puts one comment frame around every selected node, sized to the group. "
 	  "From then on dragging the frame's header moves them all.",
 	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Add Breakpoint", "Add Breakpoint",
+	  "Marks this node with a red dot: the next time a running graph reaches it, "
+	  "execution stops BEFORE the node runs, the world freezes, and the graph "
+	  "opens on the node with a yellow frame. Continue and Step Node in the "
+	  "viewport's transport carry on from there. Only nodes with an exec pin can "
+	  "be stopped at — a pure node is read, never run. Breakpoints live for the "
+	  "editor session and are not saved with the asset; compiled (packaged) "
+	  "classes never stop.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Remove Breakpoint", "Remove Breakpoint",
+	  "Takes the breakpoint off this node. A run already stopped there stays "
+	  "stopped until Continue.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Remove All Breakpoints", "Remove All Breakpoints",
+	  "Clears every breakpoint in every graph of the project at once.",
+	  "", "horizoncode#graphs" },
 	{ "HorizonCode Graph/Rename Comment", "Rename Comment",
 	  "Opens the frame's title for editing — the same as double-clicking its "
 	  "header.",
@@ -6289,6 +6357,7 @@ namespace
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
 		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
+		{ "Watch/",            "editor-interface", "Editor Interface", "Watch" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },

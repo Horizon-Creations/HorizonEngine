@@ -899,35 +899,121 @@ void bootstrapUserTypes()
 
 bool g_pyInited = false;
 
-// Fetch the current Python error into a string and clear it.
+// str(obj), or "" when it has none. Borrows `obj`.
+std::string pyStr(PyObject* obj)
+{
+	std::string out;
+	if (!obj) return out;
+	if (PyObject* s = PyObject_Str(obj))
+	{
+		if (const char* c = PyUnicode_AsUTF8(s)) out = c;
+		Py_DECREF(s);
+	}
+	return out;
+}
+
+// The line a raised exception points at, as `<script>:<line>` — the spelling
+// HE::parseScriptErrorLocation reads and the console turns into a jump.
+//
+// A script is compiled under its own name (extractBehaviorClass), so the
+// traceback's frames carry it as co_filename. The innermost frame whose file is
+// NOT a "<...>" pseudo-name wins: the horizon glue that PyRun_SimpleString
+// compiles lives in "<string>", and an error raised inside one of its wrappers
+// still belongs to the script line that called it. A SyntaxError has no
+// traceback into the script at all (it never ran); it carries filename/lineno
+// as attributes instead. Empty when nothing points at a script.
+std::string pyErrorSite(PyObject* exc, PyObject* tb)
+{
+	auto attrStr = [](PyObject* o, const char* name) -> std::string
+	{
+		PyObject* v = PyObject_GetAttrString(o, name);
+		if (!v) { PyErr_Clear(); return {}; }
+		std::string s = (v == Py_None) ? std::string() : pyStr(v);
+		Py_DECREF(v);
+		return s;
+	};
+	auto attrLong = [](PyObject* o, const char* name) -> long
+	{
+		PyObject* v = PyObject_GetAttrString(o, name);
+		if (!v) { PyErr_Clear(); return 0; }
+		const long l = PyLong_Check(v) ? PyLong_AsLong(v) : 0;
+		Py_DECREF(v);
+		PyErr_Clear();
+		return l;
+	};
+	auto isPseudo = [](const std::string& file) { return file.empty() || file.front() == '<'; };
+
+	if (exc && PyObject_IsInstance(exc, PyExc_SyntaxError) == 1)
+	{
+		const std::string file = attrStr(exc, "filename");
+		const long        line = attrLong(exc, "lineno");
+		if (!isPseudo(file) && line > 0) return file + ":" + std::to_string(line);
+		return {};
+	}
+
+	std::string site;
+	for (PyObject* t = tb; t && t != Py_None; )
+	{
+		std::string file;
+		if (PyObject* frame = PyObject_GetAttrString(t, "tb_frame"))
+		{
+			if (PyObject* code = PyObject_GetAttrString(frame, "f_code"))
+			{
+				file = attrStr(code, "co_filename");
+				Py_DECREF(code);
+			}
+			Py_DECREF(frame);
+		}
+		PyErr_Clear();
+		if (!isPseudo(file))
+		{
+			const long line = attrLong(t, "tb_lineno");
+			if (line > 0) site = file + ":" + std::to_string(line);   // deeper frames overwrite
+		}
+		PyObject* next = PyObject_GetAttrString(t, "tb_next");
+		if (t != tb) Py_DECREF(t);
+		if (!next) { PyErr_Clear(); break; }
+		t = next;
+		if (t == Py_None) { Py_DECREF(t); break; }
+	}
+	return site;
+}
+
+// Fetch the current Python error into a string and clear it. Shaped
+// `<script>:<line>: <Type>: <message>` when the traceback reaches into a
+// script, `<Type>: <message>` otherwise — the type because "kaboom" alone does
+// not say whether it was raised or an attribute that was missing.
 std::string takePyError()
 {
 	if (!PyErr_Occurred()) return {};
-	std::string out;
+	PyObject* exc = nullptr;
+	PyObject* tb  = nullptr;
 #if PY_VERSION_HEX >= 0x030C0000
-	if (PyObject* exc = PyErr_GetRaisedException())   // 3.12+: single exception object
-	{
-		if (PyObject* s = PyObject_Str(exc))
-		{
-			if (const char* c = PyUnicode_AsUTF8(s)) out = c;
-			Py_DECREF(s);
-		}
-		Py_DECREF(exc);
-	}
+	exc = PyErr_GetRaisedException();   // 3.12+: single exception object
+	if (exc) tb = PyException_GetTraceback(exc);   // new ref or nullptr
 #else
-	PyObject *type = nullptr, *value = nullptr, *tb = nullptr;
-	PyErr_Fetch(&type, &value, &tb);
-	PyErr_NormalizeException(&type, &value, &tb);
-	if (value)
-	{
-		if (PyObject* s = PyObject_Str(value))
-		{
-			if (const char* c = PyUnicode_AsUTF8(s)) out = c;
-			Py_DECREF(s);
-		}
-	}
-	Py_XDECREF(type); Py_XDECREF(value); Py_XDECREF(tb);
+	PyObject* type = nullptr;
+	PyErr_Fetch(&type, &exc, &tb);
+	PyErr_NormalizeException(&type, &exc, &tb);
+	Py_XDECREF(type);
 #endif
+	std::string out;
+	if (exc)
+	{
+		const std::string site = pyErrorSite(exc, tb);
+		const char*       type = Py_TYPE(exc)->tp_name;
+		std::string       msg  = pyStr(exc);
+		// A SyntaxError's own text repeats the position ("invalid syntax (bad,
+		// line 3)"); with the site in front that is said twice.
+		if (!site.empty() && !msg.empty() && msg.back() == ')')
+			if (const std::size_t paren = msg.rfind(" ("); paren != std::string::npos)
+				if (msg.find(", line ", paren) != std::string::npos) msg.erase(paren);
+		if (!site.empty()) out = site + ": ";
+		if (type && *type) out += std::string(type) + ": ";
+		out += msg;
+	}
+	Py_XDECREF(tb);
+	Py_XDECREF(exc);
 	if (out.empty()) out = "python error";
 	return out;
 }
@@ -1031,12 +1117,19 @@ void PyScriptBackend::setContentManager(ContentManager* cm)
 }
 
 // Exec `source`, find the single horizon.Behavior subclass, return it (new ref).
-static PyObject* extractBehaviorClass(PyObject* base, const std::string& source,
-                                      std::string& err)
+// Compiled under `name` rather than PyRun_String's "<string>": the name is what
+// every traceback frame of the script then carries as its file, and what a
+// SyntaxError reports as filename — so takePyError can say `name:line:` and the
+// console can lead back to the script (HE::parseScriptErrorLocation).
+static PyObject* extractBehaviorClass(PyObject* base, const std::string& name,
+                                      const std::string& source, std::string& err)
 {
 	PyObject* globals = PyDict_New();
 	PyDict_SetItemString(globals, "__builtins__", PyEval_GetBuiltins());
-	PyObject* result = PyRun_String(source.c_str(), Py_file_input, globals, globals);
+	PyObject* code = Py_CompileString(source.c_str(), name.c_str(), Py_file_input);
+	if (!code) { err = takePyError(); Py_DECREF(globals); return nullptr; }
+	PyObject* result = PyEval_EvalCode(code, globals, globals);
+	Py_DECREF(code);
 	if (!result) { err = takePyError(); Py_DECREF(globals); return nullptr; }
 	Py_DECREF(result);
 
@@ -1065,7 +1158,7 @@ bool PyScriptBackend::loadScript(const std::string& name, const std::string& sou
 {
 	if (!m_impl->behaviorBase) { m_lastError = "python backend not initialized"; return false; }
 	std::string err;
-	PyObject* cls = extractBehaviorClass(m_impl->behaviorBase, source, err);
+	PyObject* cls = extractBehaviorClass(m_impl->behaviorBase, name, source, err);
 	if (!cls) { m_lastError = err; return false; }
 
 	if (auto it = m_impl->classes.find(name); it != m_impl->classes.end())
@@ -1313,7 +1406,7 @@ bool PyScriptBackend::hotReloadScript(const std::string& name, const std::string
 {
 	if (!m_impl->behaviorBase) return false;
 	std::string err;
-	PyObject* newCls = extractBehaviorClass(m_impl->behaviorBase, source, err);
+	PyObject* newCls = extractBehaviorClass(m_impl->behaviorBase, name, source, err);
 	if (!newCls) { m_lastError = err; return false; }   // keep old state on failure
 
 	if (auto it = m_impl->classes.find(name); it != m_impl->classes.end())

@@ -226,6 +226,63 @@ TEST_CASE("PyScriptBackend: a raising handler reports the error")
     CHECK(py->lastError().find("kaboom") != std::string::npos);
 }
 
+// ─── Error → line ───────────────────────────────────────────────────────────
+// The source is compiled under the script's name, and the error text leads
+// with the innermost script frame as `name:line:` — the same spelling Lua
+// uses, so one parser (HE::parseScriptErrorLocation) serves the console.
+
+TEST_CASE("PyScriptBackend: a raising handler names the script and its line")
+{
+    HorizonWorld world;
+    PyBackend py(world);
+    REQUIRE(py->loadScript("boom", kRaises));
+    auto e  = makeEntity(world, "E");
+    auto id = py->createInstance("boom", static_cast<uint32_t>(e));
+    CHECK_FALSE(py->callOnStart(id));
+    // kRaises starts with a newline, so `raise` is on line 5.
+    const std::string& err = py->lastError();
+    CHECK(err.rfind("boom:5: ValueError: kaboom", 0) == 0);
+    HE::ScriptErrorLocation loc;
+    REQUIRE(HE::parseScriptErrorLocation(err, loc));
+    CHECK(loc.script == "boom");
+    CHECK(loc.line == 5);
+}
+
+TEST_CASE("PyScriptBackend: a syntax error names the script and its line, once")
+{
+    HorizonWorld world;
+    PyBackend py(world);
+    CHECK_FALSE(py->loadScript("bad", kBadSyntax));
+    const std::string& err = py->lastError();
+    CHECK(err.rfind("bad:1: SyntaxError:", 0) == 0);
+    // Python's own text repeats the position as "(bad, line 1)"; that is
+    // dropped so the line is said once.
+    CHECK(err.find(", line 1)") == std::string::npos);
+    HE::ScriptErrorLocation loc;
+    REQUIRE(HE::parseScriptErrorLocation(err, loc));
+    CHECK(loc.script == "bad");
+    CHECK(loc.line == 1);
+}
+
+TEST_CASE("PyScriptBackend: an error raised below a helper still points at the script's line")
+{
+    HorizonWorld world;
+    PyBackend py(world);
+    // The frame that raises is the helper's (line 4); the innermost frame is
+    // what the site names, and it is still a script line.
+    REQUIRE(py->loadScript("deep",
+        "import horizon\n"
+        "class Deep(horizon.Behavior):\n"
+        "    def helper(self):\n"
+        "        return {}['missing']\n"
+        "    def on_start(self):\n"
+        "        self.helper()\n"));
+    auto e  = makeEntity(world, "E");
+    auto id = py->createInstance("deep", static_cast<uint32_t>(e));
+    CHECK_FALSE(py->callOnStart(id));
+    CHECK(py->lastError().rfind("deep:4: KeyError:", 0) == 0);
+}
+
 // ─── Properties ─────────────────────────────────────────────────────────────
 
 TEST_CASE("PyScriptBackend: getScriptProperties reads typed class attributes")

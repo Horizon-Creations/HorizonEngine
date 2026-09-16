@@ -39,4 +39,17 @@ namespace ScriptEditorPanel
 	// Drop cached editor state for `path` (optional; state otherwise persists for the
 	// session so unsaved edits survive a tab close+reopen).
 	void forget(const std::string& assetPath);
+
+	// ── Reveal a line ────────────────────────────────────────────────────────
+	// A console error line (`name:7: …`, see HE::parseScriptErrorLocation) leads
+	// to the line. Two halves, the same split as HcExecTrace's reveal: the shell
+	// opens or focuses the tab for `assetPath` (takeRevealPath, one-shot), and
+	// render() puts the caret on `line` and selects it the first time that tab
+	// draws. `line` is 1-based, as the languages count; the request replaces a
+	// pending one.
+	void requestReveal(const std::string& assetPath, int line);
+	// The shell's half. Empty = nothing pending.
+	bool takeRevealPath(std::string& assetPath);
+	// Drop a pending reveal (the tab could not be opened).
+	void cancelReveal();
 }

@@ -132,6 +132,9 @@ public:
     lua_State* state() { return m_L; }
 
 private:
+    // Compile `source` as a chunk named `name` and leave it on the stack.
+    // Returns false and sets m_lastError on a compile error.
+    bool loadChunk(const std::string& name, const std::string& source);
     // Returns false and sets m_lastError on Lua error.
     bool pcall(int nargs, int nresults);
 
