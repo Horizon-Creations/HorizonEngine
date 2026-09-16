@@ -4893,11 +4893,20 @@ void EditorApplication::dumpFrameHeadless()
 	// GeometryPass expanded them and the backend drew each slot's index range
 	// with that slot's material. HE_DUMP_SECTIONTEST=override adds a yellow
 	// MaterialComponent on top: the whole sphere must then be yellow (an entity
-	// override replaces every slot). Sections carry the material by UUID here
-	// because registered runtime assets have no path — the loose-path form is
-	// covered by the extractor's unit test.
+	// override replaces every slot). HE_DUMP_SECTIONTEST=slot overrides only the
+	// middle slot with yellow (MaterialComponent::slotOverrides): red top,
+	// YELLOW middle, blue bottom. HE_DUMP_SECTIONTEST=skinned registers the
+	// very same sphere as a SkeletalMeshAsset under a SkeletalMeshComponent
+	// (bind pose, one joint) — the three bands must then come out of the
+	// skinned draw path; =skinnedslot is that plus the middle-slot override.
+	// Sections carry the material by UUID here because registered runtime
+	// assets have no path — the loose-path form is covered by the extractor's
+	// unit test.
 	if (const char* st = std::getenv("HE_DUMP_SECTIONTEST"); st && *st && m_editorWorld)
 	{
+		const std::string mode(st);
+		const bool skinned  = mode.rfind("skinned", 0) == 0;
+		const bool slotOnly = mode == "slot" || mode == "skinnedslot";
 		auto& reg = m_editorWorld->registry();
 		auto makeFlat = [&](const char* name, float r, float g, float b) {
 			MaterialAsset m;
@@ -4947,7 +4956,6 @@ void EditorApplication::dumpFrameHeadless()
 		top.materialId = matTop; mid.materialId = matMid; bot.materialId = matBot;
 		sphere.sections   = { top, mid, bot };
 		sphere.materialId = matTop; // the mesh's own material = slot 0, as the loader keeps it
-		const HE::UUID meshId = contentManager().registerStaticMesh(std::move(sphere));
 
 		auto e = m_editorWorld->createEntity("SectionTestSphere");
 		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
@@ -4956,11 +4964,42 @@ void EditorApplication::dumpFrameHeadless()
 		TransformComponent tc;
 		tc.position = m_editorCamera.position() + camFwd * 8.0f;
 		reg.emplace<TransformComponent>(e, tc);
-		reg.emplace<MeshComponent>(e, MeshComponent{ meshId });
-		if (std::string(st) == "override")
+		if (skinned)
+		{
+			// The same geometry and slot table as a skeletal asset: one root
+			// joint, every vertex bound to it (the uploads default the bone
+			// ids/weights to exactly that), identity pose = the sphere as is.
+			SkeletalMeshAsset sk;
+			sk.type       = HE::AssetType::SkeletalMesh;
+			sk.name       = "SectionTestSkinnedSphere";
+			sk.materialId = sphere.materialId;
+			sk.sections   = sphere.sections;
+			sk.vertices   = sphere.vertices;
+			sk.normals    = sphere.normals;
+			sk.uvs        = sphere.uvs;
+			sk.indices    = sphere.indices;
+			SkeletonJoint root; root.name = "root";
+			sk.skeleton = { root };
+			const HE::UUID skId = contentManager().registerSkeletalMesh(std::move(sk));
+			SkeletalMeshComponent smc; smc.meshAssetId = skId;
+			reg.emplace<SkeletalMeshComponent>(e, smc);
+		}
+		else
+		{
+			const HE::UUID meshId = contentManager().registerStaticMesh(std::move(sphere));
+			reg.emplace<MeshComponent>(e, MeshComponent{ meshId });
+		}
+		if (mode == "override")
 		{
 			const HE::UUID matOv = makeFlat("SectionOverride", 0.95f, 0.85f, 0.1f);
 			reg.emplace<MaterialComponent>(e, MaterialComponent{ matOv });
+		}
+		else if (slotOnly)
+		{
+			const HE::UUID matOv = makeFlat("SectionSlotOverride", 0.95f, 0.85f, 0.1f);
+			MaterialComponent mc;
+			mc.slotOverrides = { HE::UUID{}, matOv, HE::UUID{} }; // the middle band only
+			reg.emplace<MaterialComponent>(e, mc);
 		}
 		HE_LOG_INFO(Editor, "%s",
 			("EditorApplication: HE_DUMP_SECTIONTEST three-slot sphere added ("

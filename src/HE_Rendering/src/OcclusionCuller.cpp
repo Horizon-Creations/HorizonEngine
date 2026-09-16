@@ -46,8 +46,10 @@ namespace
 	}
 
 	// The opaque index ranges of an object's mesh, honouring the section split
-	// the extractor produced (a MaterialComponent override replaces every slot,
-	// so the object then has no sections and draws whole with the override).
+	// the extractor produced (a whole-mesh MaterialComponent override with no
+	// slot override on top replaces every slot, so the object then has no
+	// sections and draws whole with the override; the slot materials already
+	// carry the entity's per-slot overrides).
 	void opaqueRanges(const RenderObject& obj, const StaticMeshAsset& mesh,
 	                  const ContentManager& cm, std::vector<Range>& out)
 	{

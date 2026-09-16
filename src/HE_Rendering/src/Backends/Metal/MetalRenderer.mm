@@ -12693,8 +12693,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	m_counters.total = static_cast<uint32_t>(m_renderWorld.objects.size());
 
 	// Trails are not in `objects` (they are their own per-frame band list), so an
-	// otherwise empty scene that has one still has something to draw.
-	if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty())
+	// otherwise empty scene that has one still has something to draw. Neither
+	// are skinned meshes (RenderWorld::skinnedObjects, drawn by
+	// EncodeSkinnedObjects below): a scene of nothing but a character used to
+	// take this sky-only exit and never draw it.
+	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty();
+	if (m_renderWorld.objects.empty() && onlySky)
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
 		drawSky();
@@ -12711,7 +12715,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	CullCameraObjects();
 	m_counters.visible = static_cast<uint32_t>(m_sortedIndices.size());
-	if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty())
+	if (m_sortedIndices.empty() && onlySky)
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
 		drawSky(); // nothing visible — fill the whole background with sky

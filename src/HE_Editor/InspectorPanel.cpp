@@ -1800,6 +1800,66 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					ctx.renderer->InvalidateMaterial(m->materialAssetId);
 			}
 
+			// ── Per-slot overrides ───────────────────────────────────────────
+			// One picker per material slot of the entity's mesh — LOD 0's table
+			// when there are LOD levels, since that is what slotOverrides index
+			// (HE::lodSlotMap routes the other levels onto it). Only shown for a
+			// mesh that HAS more than one slot: a one-slot mesh is the Asset
+			// slot above. The table is a copy: the picker may load, and a load
+			// moves every mesh pointer (ContentManager.h).
+			{
+				std::vector<MeshSection> slots;
+				if (ctx.contentManager)
+				{
+					HE::UUID meshId;
+					if (const auto* lod = registry.try_get<LODComponent>(entity);
+					    lod && !lod->levels.empty())
+						meshId = lod->levels[0].meshId;
+					if (meshId == HE::UUID{})
+						if (const auto* mesh = registry.try_get<MeshComponent>(entity))
+							meshId = mesh->meshAssetId;
+					if (const StaticMeshAsset* sm = ctx.contentManager->getStaticMesh(meshId))
+						slots = HE::meshSectionsOf(*sm);
+					else if (const auto* sk = registry.try_get<SkeletalMeshComponent>(entity))
+						if (const SkeletalMeshAsset* sa = ctx.contentManager->getSkeletalMesh(sk->meshAssetId))
+							slots = HE::meshSectionsOf(*sa);
+				}
+				if (slots.size() > 1)
+				{
+					ImGui::SeparatorText("Slot Overrides");
+					for (size_t i = 0; i < slots.size(); ++i)
+					{
+						// What the slot draws when left empty: its own material,
+						// or the Asset above once one is set.
+						std::string emptyText = "(mesh's own)";
+						if (m->materialAssetId != HE::UUID{})
+							emptyText = "(the Asset above)";
+						else if (!slots[i].materialPath.empty())
+						{
+							const std::string& p = slots[i].materialPath;
+							const size_t slash = p.find_last_of('/');
+							emptyText = "(mesh: " + p.substr(slash == std::string::npos ? 0 : slash + 1) + ")";
+						}
+						char label[24], idSuffix[24];
+						std::snprintf(label, sizeof(label), "Slot %zu", i);
+						std::snprintf(idSuffix, sizeof(idSuffix), "slotov%zu", i);
+						HE::UUID target = m->slotOverride(static_cast<int32_t>(i));
+						const EditorWidgets::SlotAction act = EditorWidgets::assetDropSlot(
+							ctx, label, target, HE::AssetType::Material, idSuffix,
+							emptyText.c_str(), "material", /*showClear=*/true);
+						EditorWidgets::helpForKey("Material/Slot Overrides");
+						if (act == EditorWidgets::SlotAction::None) continue;
+						// Assigned → the picked id; Cleared → null. The list only
+						// grows to the slot touched; the serializer trims nulls.
+						if (m->slotOverrides.size() <= i) m->slotOverrides.resize(i + 1);
+						m->slotOverrides[i] = act == EditorWidgets::SlotAction::Cleared ? HE::UUID{} : target;
+						m->dirty = true;
+						if (act == EditorWidgets::SlotAction::Assigned && ctx.renderer)
+							ctx.renderer->InvalidateMaterial(target);
+					}
+				}
+			}
+
 			// ── Editable slots of the assigned material ──────────────────────
 			MaterialAsset* mat = (m->materialAssetId == HE::UUID{} || !ctx.contentManager)
 				? nullptr : ctx.contentManager->getMaterialMutable(m->materialAssetId);

@@ -108,10 +108,11 @@ struct MeshSection
 struct StaticMeshAsset : public RuntimeAsset
 {
 	// The mesh's own material: what every renderer resolved before sections
-	// existed and what the section-unaware draw paths (D3D11/D3D12/Vulkan, the
-	// skeletal path) still resolve for the whole mesh. Kept equal to
-	// `sections[0]`'s material by the importer and the loader; whoever edits slot
-	// 0 (the inspector) mirrors it back here so those paths do not drift.
+	// existed and what a whole-mesh draw (a one-section asset, an entity under a
+	// whole-mesh override, a section with an empty reference) still resolves.
+	// Kept equal to `sections[0]`'s material by the importer and the loader;
+	// whoever edits slot 0 (the inspector) mirrors it back here so those paths
+	// do not drift.
 	std::string            materialPath;
 	HE::UUID               materialId;   // pack-time baked from materialPath; {} for loose/editor assets
 	// The material slots (chunk MSEC), in index-buffer order, contiguous and
@@ -153,9 +154,9 @@ struct SkeletalMeshAsset : public RuntimeAsset
 	std::string                 materialPath;
 	HE::UUID                    materialId;   // pack-time baked; {} for loose/editor assets
 	// The same MSEC table the static asset carries — the importer writes one per
-	// glTF material here too. The skeletal DRAW path does not read it yet and
-	// still draws the whole mesh with `materialPath`; the table is what a later
-	// per-section skinned draw finds already in place.
+	// glTF material here too, and the skinned draw path reads it exactly like
+	// the static one (one draw per slot on every backend, the entity's
+	// per-slot overrides applied — RenderExtractor::resolveEntitySlots).
 	std::vector<MeshSection>    sections;
 	std::vector<float>          vertices;
 	std::vector<uint32_t>       indices;
