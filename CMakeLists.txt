@@ -1,6 +1,14 @@
 cmake_minimum_required(VERSION 3.20)
 project(HorizonEngine VERSION 0.4.0 LANGUAGES CXX)
 
+# CMP0135 (CMake >= 3.24): archives fetched via FetchContent URL get the
+# extraction time as file timestamp instead of the archive's own, so a changed
+# URL actually triggers a rebuild. Only the SQLite amalgamation is fetched as an
+# archive; without this every configure prints a dev warning about it.
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+
 # ─── Architecture guard ──────────────────────────────────────────────────────
 # This engine is built and shipped as x64. If CMake is configured from an x86
 # toolchain environment (e.g. the "x86 Native Tools" prompt / vcvars32), the
