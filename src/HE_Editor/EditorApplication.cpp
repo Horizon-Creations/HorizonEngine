@@ -2278,6 +2278,11 @@ void EditorApplication::OnRender(float dt)
 		m_appUiStartedFor = m_projectManager.currentProject().path;
 		HE_LOG_INFO(Editor, "%s", "Application project: starting the live preview "
 		                          "(GameInstance OnInit)");
+		// The previous project's timers die here: the preview dispatches them
+		// now (TimerSystem in the frame), and a timer.every started by project
+		// A would otherwise fire into project B's GameInstance as a handle it
+		// never issued. Same reason restartAppPreview cancels.
+		HE::api::timer::cancelAll();
 		m_gameInstance.fireInit();
 		m_appPreviewRestartPending = false;   // it just started; nothing to redo
 		// Say what came of it. "Nothing is previewed" has three possible causes —

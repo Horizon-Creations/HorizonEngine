@@ -75,7 +75,9 @@ namespace
 			std::error_code ec;
 			const fs::path root = fs::path(ctx.projectManager->projectRoot());
 			const fs::path rel  = fs::relative(picked, root, ec);
-			if (!ec && !rel.empty() && rel.native().rfind("..", 0) != 0)
+			// generic_string, not native(): on Windows native() is a wstring
+			// and has no rfind(const char*).
+			if (!ec && !rel.empty() && rel.generic_string().rfind("..", 0) != 0)
 				picked = rel;
 		}
 		out = picked.generic_string();
@@ -87,12 +89,24 @@ namespace
 		return !stored.empty() && fs::path(stored).is_absolute();
 	}
 
-	// One cached preview texture, keyed on everything that changes the picture.
-	// One is enough: the two callers never draw in the same frame at different
-	// sizes for long, and a rebuild is a 128 px resample.
-	std::string s_previewKey;
-	void*       s_previewHandle = nullptr;
-	ImTextureID s_previewTex    = 0;
+	// One cached preview texture PER SIZE, keyed on everything that changes the
+	// picture. Per size because the two callers can be on screen at once —
+	// Settings > Application at 128 px and the Export dialog's section at 48 —
+	// and one shared slot would then rebuild the texture every frame.
+	struct Preview
+	{
+		int         px     = 0;
+		std::string key;
+		void*       handle = nullptr;
+		ImTextureID tex    = 0;
+	};
+	Preview s_previews[2];
+	Preview& previewSlot(int px)
+	{
+		for (Preview& p : s_previews) if (p.px == px) return p;
+		for (Preview& p : s_previews) if (p.px == 0)  return p;
+		return s_previews[0];   // a third size evicts the first — never happens today
+	}
 }
 
 bool drawIconFileRow(AppContext& ctx, ProjectData& p)
@@ -127,11 +141,13 @@ unsigned long long iconPreviewTexture(AppContext& ctx, const ProjectData& p, int
 	const std::string key = p.appIconName + "|" + p.appIconColor + "|" + file.string() + "|"
 	                      + std::to_string(static_cast<long long>(mtime.time_since_epoch().count())) + "|"
 	                      + std::to_string(px);
-	if (key == s_previewKey) return static_cast<unsigned long long>(s_previewTex);
+	Preview& slot = previewSlot(px);
+	if (slot.px == px && key == slot.key) return static_cast<unsigned long long>(slot.tex);
 
-	s_previewKey = key;
-	if (s_previewHandle) { ctx.renderer->DestroyImGuiTexture(s_previewHandle); s_previewHandle = nullptr; }
-	s_previewTex = 0;
+	slot.px  = px;
+	slot.key = key;
+	if (slot.handle) { ctx.renderer->DestroyImGuiTexture(slot.handle); slot.handle = nullptr; }
+	slot.tex = 0;
 
 	// The same order the export uses: the file first, the glyph as fallback.
 	std::vector<std::uint8_t> rgba;
@@ -154,10 +170,10 @@ unsigned long long iconPreviewTexture(AppContext& ctx, const ProjectData& p, int
 	if (!rgba.empty())
 		if (void* h = ctx.renderer->CreateImGuiTexture(rgba.data(), px, px))
 		{
-			s_previewHandle = h;
-			s_previewTex    = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(h));
+			slot.handle = h;
+			slot.tex    = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(h));
 		}
-	return static_cast<unsigned long long>(s_previewTex);
+	return static_cast<unsigned long long>(slot.tex);
 }
 
 bool drawSplashRows(AppContext& ctx, ProjectData& p, bool compact)
