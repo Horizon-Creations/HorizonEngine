@@ -3,6 +3,7 @@
 #include <HorizonScene/UISystem.h>
 #include <Renderer/UIFont.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/EntityActive.h>
 #include <HorizonScene/Components/UICanvasComponent.h>
 #include <HorizonScene/Components/UIElementComponent.h>
 #include <HorizonScene/Components/UITextComponent.h>
@@ -139,6 +140,39 @@ TEST_CASE("UISystem::extract skips inactive element")
     std::vector<UIRenderObject> out;
     UISystem::extract(world, 1920.0f, 1080.0f, out);
     CHECK(out.empty());
+}
+
+TEST_CASE("UISystem::extract skips what the Details panel's Active switch turned off")
+{
+    // The entity-level switch, beside the canvas' and the element's own
+    // flags: a canvas switched off draws nothing under it, an element
+    // switched off draws nowhere, and both are inherited from a parent.
+    HorizonWorld world;
+    auto& reg = world.registry();
+
+    auto ce = world.createEntity("canvas");
+    reg.emplace<UICanvasComponent>(ce);
+    auto ee = world.createEntity("elem");
+    reg.emplace<UIElementComponent>(ee);
+    reg.emplace<UITextComponent>(ee);
+    world.reparentEntity(ee, ce);
+
+    std::vector<UIRenderObject> out;
+    UISystem::extract(world, 1920.0f, 1080.0f, out);
+    REQUIRE_FALSE(out.empty());
+
+    SUBCASE("element off") { HE::setEntityActive(reg, ee, false); }
+    SUBCASE("canvas off")  { HE::setEntityActive(reg, ce, false); }
+    out.clear();
+    UISystem::extract(world, 1920.0f, 1080.0f, out);
+    CHECK(out.empty());
+
+    // Back on: drawn again — the switch left nothing behind.
+    HE::setEntityActive(reg, ee, true);
+    HE::setEntityActive(reg, ce, true);
+    out.clear();
+    UISystem::extract(world, 1920.0f, 1080.0f, out);
+    CHECK_FALSE(out.empty());
 }
 
 TEST_CASE("UISystem::extract text element at TopLeft anchor, zero offset")

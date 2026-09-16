@@ -2423,12 +2423,13 @@ namespace
 	  "", "editor#details" },
 	{ "details.active", "Active",
 	  "The one switch for the whole entity. Off means it is not in the game: "
-	  "nothing of it is drawn, its script does not start, no physics body is "
-	  "built for it and its audio source stays silent. It takes everything "
-	  "under it along. Unlike the Outliner's eye, which only hides what is "
-	  "drawn, this is saved as part of the entity and is off in the packaged "
-	  "game too. Flipping it while the game runs takes effect at the next "
-	  "start, not immediately.",
+	  "its meshes, lights, particles, decals, ropes, trails, foliage and UI are "
+	  "not drawn, its script does not start, no physics body is built for it "
+	  "and its audio source does not play on start. It takes everything under "
+	  "it along. Unlike the Outliner's eye, which only hides what is drawn, "
+	  "this is saved as part of the entity and is off in the packaged game too. "
+	  "Flipping it while the game runs takes effect at the next start, not "
+	  "immediately.",
 	  "", "editor#details" },
 	{ "details.active-through-parent", "Switched off through a parent",
 	  "This entity's own switch is on, but an entity above it in the Outliner "
