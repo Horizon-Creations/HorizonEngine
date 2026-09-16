@@ -3827,12 +3827,18 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
 
     // Resolve the shipped format to a VkFormat + block flag. ASTC is Metal-only and
     // never packed for Vulkan; treat it (and anything unknown) as unsupported.
+    // TextureAsset::srgb (the importer's colour-vs-data decision) selects the _SRGB
+    // twin, used for image and view alike: the sampler then decodes to linear, so
+    // colour textures shade in linear light and only the tonemap's gamma encode
+    // re-curves them. Twins share block/byte layout, so the level math is unchanged
+    // and the format-properties check below validates whichever twin we picked.
+    const bool srgb = tex->srgb;
     VkFormat vkFmt; bool isBlock;
     switch (tex->format)
     {
-    case TextureFormat::RGBA8: vkFmt = VK_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
-    case TextureFormat::BC7:   vkFmt = VK_FORMAT_BC7_UNORM_BLOCK; isBlock = true;  break;
-    case TextureFormat::BC3:   vkFmt = VK_FORMAT_BC3_UNORM_BLOCK; isBlock = true;  break;
+    case TextureFormat::RGBA8: vkFmt = srgb ? VK_FORMAT_R8G8B8A8_SRGB   : VK_FORMAT_R8G8B8A8_UNORM;  isBlock = false; break;
+    case TextureFormat::BC7:   vkFmt = srgb ? VK_FORMAT_BC7_SRGB_BLOCK  : VK_FORMAT_BC7_UNORM_BLOCK; isBlock = true;  break;
+    case TextureFormat::BC3:   vkFmt = srgb ? VK_FORMAT_BC3_SRGB_BLOCK  : VK_FORMAT_BC3_UNORM_BLOCK; isBlock = true;  break;
     default: return false;
     }
     // Device must actually sample this format (BC support is optional in Vulkan).
