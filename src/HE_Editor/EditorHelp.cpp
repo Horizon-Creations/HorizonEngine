@@ -1575,6 +1575,39 @@ namespace
 	  "The reference grid on the ground plane. Hidden while the scene plays "
 	  "either way.",
 	  "", "editor#viewport" },
+	// ── Secondary scene viewports ────────────────────────────────────────────
+	// Three more panes onto the same level, each with a camera of its own.
+	// The picture is the preview pass (base colour, sun or headlight, grid),
+	// not the Scene window's renderer — hence the sentence about shadows.
+	{ "View/Scene 2", "",
+	  "A second window onto the same level, with its own camera — it opens as a "
+	  "Top view, so the floor plan can be lined up while the Scene window stays "
+	  "where it is. Navigates like the Scene window (orbit, pan, fly, F, the "
+	  "keypad views, the bookmarks). Drawn with the preview renderer: base "
+	  "colour and a sun, no shadows or post, and nothing can be picked or moved "
+	  "in it. Dock it beside the Scene window and it comes back with the layout.",
+	  "", "editor#viewport" },
+	{ "View/Scene 3", "",
+	  "A third window onto the level, opening as a Front view. Otherwise the "
+	  "same as Scene 2.",
+	  "", "editor#viewport" },
+	{ "View/Scene 4", "",
+	  "A fourth window onto the level, opening as a Right view. Otherwise the "
+	  "same as Scene 2.",
+	  "", "editor#viewport" },
+	{ "Secondary Viewport/Grid", "",
+	  "The ground grid in this pane. Also follows the Scene window's Ground "
+	  "Grid show flag — both have to be on.",
+	  "", "editor#viewport" },
+	{ "Secondary Viewport/Match Scene", "",
+	  "Puts this pane's camera exactly where the Scene window's camera is, lens "
+	  "included. From there, pick an axis view to swing around the same pivot.",
+	  "", "editor#viewport" },
+	{ "secondary-viewport.view", "View",
+	  "Which way this pane looks — the same picker as the Scene window's, over "
+	  "this pane's own camera: Perspective, Top, Bottom, Front, Back, Left, "
+	  "Right, the Orthographic switch and the bookmarks.",
+	  "", "editor#viewport" },
 	{ "View/Level Script", "",
 	  "The HorizonCode graph belonging to THIS scene — where its own events and "
 	  "logic live. Opens as a tab.",
@@ -1794,6 +1827,31 @@ namespace
 	  "switches; the wheel zooms it the way it dollies the perspective camera. "
 	  "Orbiting or flying keeps the projection you chose.",
 	  "Num 5", "editor#viewport" },
+	// ── Camera bookmarks ─────────────────────────────────────────────────────
+	// Ten remembered views on the digit keys; the rows are built at run time
+	// ("Bookmark 3"), so they ask by key, and the submenu heads are literals.
+	{ "Viewport View/Bookmarks", "",
+	  "Ten remembered camera views on the digit keys: Ctrl+<digit> remembers "
+	  "where the camera is, <digit> jumps back there. A bookmark is the whole "
+	  "pose — place, heading, orbit distance and whether the view is "
+	  "orthographic — and is shared by every scene pane. Remembered with the "
+	  "editor, across projects.",
+	  "", "editor#viewport" },
+	{ "viewport.bookmark-go", "Go to bookmark",
+	  "Jumps the camera to this remembered view. Greyed out until something is "
+	  "stored there.",
+	  "0-9", "editor#viewport" },
+	{ "Viewport View/Set Bookmark", "",
+	  "Remembers the current view in one of the ten slots; a slot already in "
+	  "use is overwritten.",
+	  "", "editor#viewport" },
+	{ "viewport.bookmark-set", "Set bookmark",
+	  "Stores the camera's current pose here. A tick marks a slot that already "
+	  "holds a view.",
+	  "Ctrl+0-9", "editor#viewport" },
+	{ "Viewport View/Clear Bookmarks", "",
+	  "Forgets all ten bookmarks.",
+	  "", "editor#viewport" },
 
 	// ── The viewport's view-mode picker ──────────────────────────────────────
 	// Lit / Unlit / Wireframe redraw the whole scene; the G-buffer rows show one
@@ -5999,6 +6057,8 @@ namespace
 		{ "Viewport View Mode/", "editor-interface", "Editor Interface", "View modes" },
 		{ "Viewport Show/",      "editor-interface", "Editor Interface", "Show flags" },
 		{ "Viewport Menu/",      "editor-interface", "Editor Interface", "The viewport's right-click menu" },
+		{ "Secondary Viewport/", "editor-interface", "Editor Interface", "Secondary scene viewports" },
+		{ "secondary-viewport.", "editor-interface", "Editor Interface", "Secondary scene viewports" },
 		// ── The Details panel's components ───────────────────────────────────
 		{ "Component/", "editor-components", "Component Reference", "The components" },
 		// ── Settings ─────────────────────────────────────────────────────────

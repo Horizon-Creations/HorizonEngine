@@ -90,6 +90,18 @@ inline float worldPreviewVerticalFov(float fovDegrees, float aspect)
 
 inline glm::mat4 worldPreviewProjection(const EditorCameraOverride& camera, float aspect)
 {
+    // An orthographic camera (a secondary Top / Front / Side viewport) uses the
+    // SAME rule the scene extractor culls with — the near plane a whole far
+    // distance behind the camera, see RenderExtractor::extractCamera — because
+    // the preview's own extract runs with this override and drops what the
+    // drawn matrix would not show. The Hor+ cap is a lens thing and does not
+    // apply: parallel rays do not stretch at the border.
+    if (camera.orthographic)
+    {
+        const float oh = camera.orthoHalfHeight;
+        return glm::ortho(-aspect * oh, aspect * oh, -oh, oh,
+                          -camera.farPlane, camera.farPlane);
+    }
     return glm::perspective(
         glm::radians(worldPreviewVerticalFov(camera.fovDegrees, aspect)),
         aspect, camera.nearPlane, camera.farPlane);
@@ -753,21 +765,26 @@ public:
     //    headlight for a sky dome and a sun at `env.timeOfDay`, which is what a
     //    MESH viewer wants: you look at a mesh to judge how it catches light.
     //
-    // ONE shared target per backend, so exactly one world preview is live at a
-    // time. That matches the call site: asset tabs are exclusive, and ImGui
-    // never executes an inactive tab's content, so only the active tab calls
-    // in a given frame.
+    // ONE target per SLOT and backend. Slot 0 is the asset tabs' — those are
+    // exclusive (ImGui never executes an inactive tab's content), so one target
+    // serves all of them. The editor's secondary Scene viewports are NOT
+    // exclusive: three of them can be docked side by side and all draw in the
+    // same frame, and with a single target every ImGui::Image would show
+    // whichever one rendered last. They take slots 1..kWorldPreviewSlots-1.
+    // A slot out of range is clamped to the last one.
     //
     // `outViewProj` reports the view-projection used, so the caller can put its
     // own overlay (origin marker, collider outlines, camera boom) on top in the
     // same space — same contract as RenderSkeletalPreview. Returns nullptr on
     // backends without a world-preview path (currently D3D11/D3D12/Vulkan).
+    static constexpr uint32_t kWorldPreviewSlots = 4;
     virtual void* RenderWorldPreview(class ContentManager& /*cm*/, HorizonWorld& /*world*/,
                                      uint32_t /*width*/, uint32_t /*height*/,
                                      const EditorCameraOverride& /*camera*/,
                                      const glm::vec3& /*origin*/ = glm::vec3(0.0f),
                                      const WorldPreviewEnv& /*env*/ = {},
-                                     glm::mat4* /*outViewProj*/ = nullptr)
+                                     glm::mat4* /*outViewProj*/ = nullptr,
+                                     uint32_t /*slot*/ = 0)
     { return nullptr; }
 
     // ── Particle system preview ────────────────────────────────────────────

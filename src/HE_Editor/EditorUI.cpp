@@ -28,6 +28,7 @@
 #include "InspectorPanel.h"              // right dock: per-entity Details panel
 #include "TerrainTools.h"                // Landscape brush state, viewport sculpt + tool panel
 #include "ViewportPanel.h"               // centre dock: Scene viewport, camera, gizmo, picking
+#include "SecondaryViewportPanel.h"      // Scene 2 / 3 / 4: the level from other sides
 #include "OutlinerPanel.h"               // right dock: World Outliner hierarchy tree
 #include "ProjectHubPanel.h"             // start screen while no project is open
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
@@ -221,6 +222,9 @@ static bool docsPanelOpener(const char* window)
 		{ "Source Control",       &s_showSourceControl },
 		{ "Console",              &s_showConsole       },
 		{ "Audio Mixer",          &s_showAudioMixer    },
+		{ "Scene 2",              &SecondaryViewportPanel::open(0) },
+		{ "Scene 3",              &SecondaryViewportPanel::open(1) },
+		{ "Scene 4",              &SecondaryViewportPanel::open(2) },
 	};
 	for (const Toggle& t : toggles)
 		if (std::strcmp(window, t.name) == 0) { revealFloatingWindow(*t.flag, window); return true; }
@@ -268,6 +272,11 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
+	// The secondary scene viewports: a Top view docked beside the Scene window
+	// is a layout decision like any other panel's.
+	{ "Scene 2",              "PanelOpenScene2",        &SecondaryViewportPanel::open(0) },
+	{ "Scene 3",              "PanelOpenScene3",        &SecondaryViewportPanel::open(1) },
+	{ "Scene 4",              "PanelOpenScene4",        &SecondaryViewportPanel::open(2) },
 };
 static bool s_panelPrefsLoaded = false;
 
@@ -1373,6 +1382,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
 		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
 		MacMenuBar::setToggleState(MC::ToggleGroundGrid,    ViewportPanel::groundGridEnabled());
+		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
+		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
+		MacMenuBar::setToggleState(MC::ToggleScene4,        SecondaryViewportPanel::open(2));
 		MacMenuBar::setToggleState(MC::OpenTutorial,        TutorialPanel::isOpen());
 		for (MC c; (c = MacMenuBar::take()) != MC::None; )
 		{
@@ -1410,6 +1422,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleAudioMixer: togglePanelWindow(s_showAudioMixer, "Audio Mixer");     break;
 			case MC::ToggleGroundGrid:
 				ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());     break;
+			case MC::ToggleScene2:
+				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2"); break;
+			case MC::ToggleScene3:
+				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(1), "Scene 3"); break;
+			case MC::ToggleScene4:
+				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(2), "Scene 4"); break;
 			case MC::OpenLevelScript:
 				if (ctx.projectLoaded) openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
 				break;
@@ -1567,6 +1585,16 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             if (EditorWidgets::menuItem("Ground Grid", nullptr, ViewportPanel::groundGridEnabled(),
                                 ctx.projectLoaded))
                 ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());
+            // The extra scene panes. A game thing like the grid: an application
+            // has no level to look at from above.
+            ImGui::Separator();
+            if (EditorWidgets::menuItem("Scene 2", nullptr, SecondaryViewportPanel::open(0), ctx.projectLoaded))
+                togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2");
+            if (EditorWidgets::menuItem("Scene 3", nullptr, SecondaryViewportPanel::open(1), ctx.projectLoaded))
+                togglePanelWindow(SecondaryViewportPanel::open(1), "Scene 3");
+            if (EditorWidgets::menuItem("Scene 4", nullptr, SecondaryViewportPanel::open(2), ctx.projectLoaded))
+                togglePanelWindow(SecondaryViewportPanel::open(2), "Scene 4");
+            ImGui::Separator();
             if (EditorWidgets::menuItem("Level Script", nullptr, false, ctx.projectLoaded))
                 openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         }
@@ -2745,6 +2773,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // user switched here mid-look via a keyboard shortcut, force-release the capture so
         // the cursor isn't left hidden/pinned with ImGui mouse input disabled.
         ViewportPanel::releaseViewportLookCapture(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
+        SecondaryViewportPanel::releaseLookCaptures(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
 
         const ImGuiViewport* vpTab = ImGui::GetMainViewport();
         const std::string& tabPath = ctx.tabs[ctx.activeTab].assetPath;
@@ -3034,6 +3063,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// After the window exists this frame: its dock node is only reachable once
 	// "Scene" has been submitted at least once.
 	HideSceneTabBarOnce();
+	// The extra panes (View ▸ Scene 2 / 3 / 4), right after the Scene window:
+	// they frame the selection against ITS extract, and they belong to the
+	// scene layout like it does.
+	SecondaryViewportPanel::render(ctx, dt);
 
 
     // ── Landscape / Quick Settings panel ────────────────────────────────────

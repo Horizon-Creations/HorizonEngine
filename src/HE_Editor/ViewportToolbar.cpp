@@ -4,6 +4,7 @@
 
 #include "EditorApplication.h"   // AppContext, EditorConfig, EditorMode
 #include "EditorCamera.h"
+#include "CameraBookmarks.h"     // the view popup's bookmark rows
 #include "ViewportPanel.h"       // renderSizePx() for the options popup readout
 #include "EditorToolbar.h"        // palette, metrics, cell/well — shared with the SC bar
 #include "EditorWidgets.h"        // helpForKey — the bar's controls explain themselves
@@ -428,14 +429,18 @@ void showPopup(AppContext&)
 	}
 }
 
+} // namespace
+
 // The view picker: one axis view per row, then the projection on its own.
 // Picking an axis view goes orthographic with it (that is what a Top view is
 // for); "Perspective" only puts the lens back and keeps the heading, which is
 // also how you get a perspective look from straight above if you want one.
-void viewPopup(AppContext& ctx)
+//
+// Takes the CAMERA rather than the context, because the secondary viewports
+// open the same picker over their own cameras — and a second copy of the rows
+// is how the two would come to disagree about what "Right" means.
+void viewPopup(EditorCamera& cam)
 {
-	if (!ctx.editorCamera) return;
-	EditorCamera& cam = *ctx.editorCamera;
 	HE::Ed::Help::Scope helpScope("Viewport View");
 	using VP = EditorCamera::ViewPreset;
 	const VP current = cam.currentPreset();
@@ -460,7 +465,47 @@ void viewPopup(AppContext& ctx)
 	bool ortho = cam.orthographic();
 	if (EditorWidgets::checkbox("Orthographic", &ortho))
 		cam.setOrthographic(ortho);
+
+	// Bookmarks: the digit keys as rows, for the hand that is on the mouse.
+	// Jumping is the frequent verb and sits at the top level of the submenu;
+	// setting and clearing are one level further in, so a slip cannot
+	// overwrite a view it took a minute to find.
+	ImGui::Separator();
+	CameraBookmarks::Set& marks = CameraBookmarks::editorSet();
+	if (ImGui::BeginMenu("Bookmarks"))
+	{
+		char label[32], shortcut[16];
+		for (int i = 0; i < CameraBookmarks::kSlots; ++i)
+		{
+			std::snprintf(label, sizeof(label), "Bookmark %d", i);
+			std::snprintf(shortcut, sizeof(shortcut), "%d", i);
+			if (ImGui::MenuItem(label, shortcut, false, marks.isSet(i)))
+				marks.recall(i, cam);
+			EditorWidgets::helpForKey("viewport.bookmark-go");
+		}
+		ImGui::Separator();
+		if (ImGui::BeginMenu("Set Bookmark"))
+		{
+			for (int i = 0; i < CameraBookmarks::kSlots; ++i)
+			{
+				std::snprintf(label, sizeof(label), "Set Bookmark %d", i);
+				std::snprintf(shortcut, sizeof(shortcut), "Ctrl+%d", i);
+				if (ImGui::MenuItem(label, shortcut, marks.isSet(i)))
+					marks.store(i, cam);
+				EditorWidgets::helpForKey("viewport.bookmark-set");
+			}
+			ImGui::EndMenu();
+		}
+		EditorWidgets::helpForLabel("Set Bookmark");
+		if (EditorWidgets::menuItem("Clear Bookmarks", nullptr, false, marks.any()))
+			marks.clearAll();
+		ImGui::EndMenu();
+	}
+	EditorWidgets::helpForLabel("Bookmarks");
 }
+
+namespace
+{
 
 // The view-mode picker: the three ways of drawing the whole scene, then the
 // G-buffer attachments. The latter exist only on the deferred path — the rows
@@ -844,7 +889,7 @@ void render(AppContext& ctx, State& st)
 				ImGui::OpenPopup("##vpViewPopup");
 			if (ImGui::BeginPopup("##vpViewPopup"))
 			{
-				viewPopup(ctx);
+				if (ctx.editorCamera) viewPopup(*ctx.editorCamera);
 				ImGui::EndPopup();
 			}
 			rx += w + kGroupGap;

@@ -57,6 +57,7 @@ add_executable(he_tests
     # and no dialog at all without an offer.
     test_scene_recovery_ui.cpp
     test_editorcamera.cpp
+    test_camera_bookmarks.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
     test_jobsystem.cpp
@@ -353,6 +354,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CameraBookmarks.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabController.cpp

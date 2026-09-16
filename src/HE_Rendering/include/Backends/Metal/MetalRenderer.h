@@ -108,7 +108,8 @@ public:
 	                         const EditorCameraOverride& camera,
 	                         const glm::vec3& origin = glm::vec3(0.0f),
 	                         const WorldPreviewEnv& env = {},
-	                         glm::mat4* outViewProj = nullptr) override;
+	                         glm::mat4* outViewProj = nullptr,
+	                         uint32_t slot = 0) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
@@ -648,17 +649,24 @@ private:
 
 	// World-preview target (RenderWorldPreview) — same RGBA16F color + depth as
 	// its siblings, so the debug-line pipeline can draw the ground/grid into it
-	// verbatim. ONE target, because only one asset tab is ever active. Unlike the
-	// per-asset previews this one clears to an opaque gray and draws a ground
-	// plane + grid, so it reads as a scene view rather than a cut-out asset.
+	// verbatim. ONE target PER SLOT: slot 0 serves the asset tabs (only one of
+	// those is ever active), the others the editor's secondary Scene viewports,
+	// which are all live in the same frame and would otherwise overwrite one
+	// another before ImGui shows any of them. Unlike the per-asset previews
+	// this one clears to an opaque gray and draws a ground plane + grid, so it
+	// reads as a scene view rather than a cut-out asset.
 	// Two colour targets, mirroring the scene: the pass renders HDR, the tonemap
 	// resolves into the LDR one ImGui shows. Handing ImGui raw HDR is what made
 	// the first sky-lit preview a white mesh under a blown-out sky.
-	void* m_worldPreviewHdrTex   = nullptr; // id<MTLTexture> (retained), kSceneColorFormat
-	void* m_worldPreviewColorTex = nullptr; // id<MTLTexture> (retained), kSwapchainFormat
-	void* m_worldPreviewDepthTex = nullptr; // id<MTLTexture> (retained)
-	int   m_worldPreviewW        = 0;
-	int   m_worldPreviewH        = 0;
+	struct WorldPreviewTarget
+	{
+		void* hdrTex   = nullptr; // id<MTLTexture> (retained), kSceneColorFormat
+		void* colorTex = nullptr; // id<MTLTexture> (retained), kSwapchainFormat
+		void* depthTex = nullptr; // id<MTLTexture> (retained)
+		int   w        = 0;
+		int   h        = 0;
+	};
+	WorldPreviewTarget m_worldPreview[kWorldPreviewSlots];
 
 	// Particle-preview target (RenderParticlePreview) — own dedicated RGBA16F
 	// color + depth texture; camera-facing billboards via vertex_id (no vertex

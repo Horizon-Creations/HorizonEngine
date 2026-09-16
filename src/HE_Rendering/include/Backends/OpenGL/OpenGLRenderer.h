@@ -59,7 +59,8 @@ public:
 	                         const EditorCameraOverride& camera,
 	                         const glm::vec3& origin = glm::vec3(0.0f),
 	                         const WorldPreviewEnv& env = {},
-	                         glm::mat4* outViewProj = nullptr) override;
+	                         glm::mat4* outViewProj = nullptr,
+	                         uint32_t slot = 0) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
@@ -320,17 +321,24 @@ private:
 
 	// World-preview target (RenderWorldPreview) — its own FBO again, for the same
 	// reason as all the others: the Class Editor's viewport is live at the same
-	// time as thumbnails are being rendered. ONE target, because only one asset
-	// tab is ever active. Unlike the per-asset previews this one clears to an
-	// opaque gray and draws a ground plane + grid, so it reads as a scene view.
+	// time as thumbnails are being rendered. ONE target PER SLOT: slot 0 serves
+	// the asset tabs (only one of those is ever active), the others the editor's
+	// secondary Scene viewports, which are all live in the same frame and would
+	// otherwise overwrite one another before ImGui shows any of them. Unlike
+	// the per-asset previews this one clears to an opaque gray and draws a
+	// ground plane + grid, so it reads as a scene view.
 	// Two targets, mirroring the scene: the pass renders HDR (sky radiance and a
 	// sun at intensity 2.2 both run past 1.0), then the tonemap resolves into the
 	// 8-bit texture ImGui shows. Writing HDR straight into 8 bits is what made
 	// the first sky-lit preview a uniformly white mesh under a blown-out sky.
-	unsigned int m_worldPreviewFBO = 0, m_worldPreviewHdr = 0, m_worldPreviewDepth = 0;
-	unsigned int m_worldPreviewLdrFBO = 0, m_worldPreviewColor = 0;
-	int          m_worldPreviewW = 0;
-	int          m_worldPreviewH = 0;
+	struct WorldPreviewTarget
+	{
+		unsigned int fbo = 0, hdr = 0, depth = 0;
+		unsigned int ldrFBO = 0, color = 0;
+		int          w = 0;
+		int          h = 0;
+	};
+	WorldPreviewTarget m_worldPreview[kWorldPreviewSlots];
 
 	// Particle-preview target (RenderParticlePreview) — own dedicated FBO; camera-
 	// facing billboard quads via gl_VertexID (no per-vertex buffer, matching the

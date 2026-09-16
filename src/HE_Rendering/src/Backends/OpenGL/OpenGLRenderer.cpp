@@ -10554,8 +10554,10 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
                                          const EditorCameraOverride& camera,
                                          const glm::vec3& origin,
                                          const WorldPreviewEnv& env,
-                                         glm::mat4* outViewProj)
+                                         glm::mat4* outViewProj,
+                                         uint32_t slot)
 {
+	WorldPreviewTarget& wp = m_worldPreview[std::min(slot, kWorldPreviewSlots - 1)];
 	const int W = std::clamp(static_cast<int>(width),  32, 4096);
 	const int H = std::clamp(static_cast<int>(height), 32, 4096);
 	if (!m_contentManager) m_contentManager = &cm;
@@ -10633,45 +10635,45 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	// at intensity 2.2), then a tonemap resolves that into the LDR texture ImGui
 	// shows. Writing the HDR values straight into an 8-bit target is what made
 	// the first sky-lit preview a uniformly white mesh under a blown-out sky.
-	if (!m_worldPreviewFBO || m_worldPreviewW != W || m_worldPreviewH != H)
+	if (!wp.fbo || wp.w != W || wp.h != H)
 	{
-		if (m_worldPreviewColor) glDeleteTextures(1, &m_worldPreviewColor);
-		if (m_worldPreviewHdr)   glDeleteTextures(1, &m_worldPreviewHdr);
-		if (m_worldPreviewDepth) glDeleteRenderbuffers(1, &m_worldPreviewDepth);
-		if (!m_worldPreviewFBO)    glGenFramebuffers(1, &m_worldPreviewFBO);
-		if (!m_worldPreviewLdrFBO) glGenFramebuffers(1, &m_worldPreviewLdrFBO);
+		if (wp.color) glDeleteTextures(1, &wp.color);
+		if (wp.hdr)   glDeleteTextures(1, &wp.hdr);
+		if (wp.depth) glDeleteRenderbuffers(1, &wp.depth);
+		if (!wp.fbo)    glGenFramebuffers(1, &wp.fbo);
+		if (!wp.ldrFBO) glGenFramebuffers(1, &wp.ldrFBO);
 
-		glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewFBO);
-		glGenTextures(1, &m_worldPreviewHdr);
-		glBindTexture(GL_TEXTURE_2D, m_worldPreviewHdr);
+		glBindFramebuffer(GL_FRAMEBUFFER, wp.fbo);
+		glGenTextures(1, &wp.hdr);
+		glBindTexture(GL_TEXTURE_2D, wp.hdr);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, W, H, 0, GL_RGBA, GL_FLOAT, nullptr);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_worldPreviewHdr, 0);
-		glGenRenderbuffers(1, &m_worldPreviewDepth);
-		glBindRenderbuffer(GL_RENDERBUFFER, m_worldPreviewDepth);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, wp.hdr, 0);
+		glGenRenderbuffers(1, &wp.depth);
+		glBindRenderbuffer(GL_RENDERBUFFER, wp.depth);
 		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, W, H);
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_worldPreviewDepth);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, wp.depth);
 
-		glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewLdrFBO);
-		glGenTextures(1, &m_worldPreviewColor);
-		glBindTexture(GL_TEXTURE_2D, m_worldPreviewColor);
+		glBindFramebuffer(GL_FRAMEBUFFER, wp.ldrFBO);
+		glGenTextures(1, &wp.color);
+		glBindTexture(GL_TEXTURE_2D, wp.color);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_worldPreviewColor, 0);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, wp.color, 0);
 
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glBindTexture(GL_TEXTURE_2D, 0);
-		m_worldPreviewW = W;
-		m_worldPreviewH = H;
+		wp.w = W;
+		wp.h = H;
 	}
 
 	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
 	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
-	glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, wp.fbo);
 	glViewport(0, 0, W, H);
 	// Studio gray — covered by the sky when there is one. LINEAR: this is resolved
 	// through ACES + gamma below, which lifts it a long way (see kPreviewBackground).
@@ -10773,18 +10775,18 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	// Bloom is bound at strength 0 (a preview is not a film camera) and the lens
 	// flare zeroed; the sampler still needs a valid binding, so the HDR texture
 	// stands in for the bloom buffer.
-	if (m_tonemapProgram && m_worldPreviewLdrFBO)
+	if (m_tonemapProgram && wp.ldrFBO)
 	{
-		glBindFramebuffer(GL_FRAMEBUFFER, m_worldPreviewLdrFBO);
+		glBindFramebuffer(GL_FRAMEBUFFER, wp.ldrFBO);
 		glViewport(0, 0, W, H);
 		glDisable(GL_DEPTH_TEST);
 		glUseProgram(m_tonemapProgram);
 		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, m_worldPreviewHdr);
+		glBindTexture(GL_TEXTURE_2D, wp.hdr);
 		glUniform1i(m_uHDRTex, 0);
 		glUniform1f(m_uExposure, 1.0f);
 		glActiveTexture(GL_TEXTURE1);
-		glBindTexture(GL_TEXTURE_2D, m_worldPreviewHdr);
+		glBindTexture(GL_TEXTURE_2D, wp.hdr);
 		glUniform1i(m_uBloomTex, 1);
 		glUniform1f(m_uBloomStrength, 0.0f);
 		if (m_uLensFlare >= 0)
@@ -10817,7 +10819,7 @@ void* OpenGLRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world
 	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFBO);
 	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
 	glUseProgram(0);
-	return reinterpret_cast<void*>(static_cast<intptr_t>(m_worldPreviewColor));
+	return reinterpret_cast<void*>(static_cast<intptr_t>(wp.color));
 }
 
 // Compile the billboard program + its instance VAO once. Split out so both the
@@ -11270,13 +11272,18 @@ void OpenGLRenderer::Shutdown()
 	if (m_thumbDepth)         { glDeleteRenderbuffers(1, &m_thumbDepth);  m_thumbDepth = 0; }
 	if (m_thumbFBO)           { glDeleteFramebuffers(1, &m_thumbFBO);     m_thumbFBO = 0; }
 	if (m_meshPreviewProgram) { glDeleteProgram(m_meshPreviewProgram);    m_meshPreviewProgram = 0; }
-	// World-preview target (RenderWorldPreview); its programs are the skeletal
-	// preview's, freed with those.
-	if (m_worldPreviewColor) { glDeleteTextures(1, &m_worldPreviewColor);      m_worldPreviewColor = 0; }
-	if (m_worldPreviewHdr)   { glDeleteTextures(1, &m_worldPreviewHdr);        m_worldPreviewHdr = 0; }
-	if (m_worldPreviewDepth) { glDeleteRenderbuffers(1, &m_worldPreviewDepth); m_worldPreviewDepth = 0; }
-	if (m_worldPreviewFBO)   { glDeleteFramebuffers(1, &m_worldPreviewFBO);    m_worldPreviewFBO = 0; }
-	if (m_worldPreviewLdrFBO){ glDeleteFramebuffers(1, &m_worldPreviewLdrFBO); m_worldPreviewLdrFBO = 0; }
+	// World-preview targets (RenderWorldPreview), every slot; their programs
+	// are the skeletal preview's, freed with those.
+	for (WorldPreviewTarget& wp : m_worldPreview)
+	{
+		if (wp.color) { glDeleteTextures(1, &wp.color);      wp.color = 0; }
+		if (wp.hdr)   { glDeleteTextures(1, &wp.hdr);        wp.hdr = 0; }
+		if (wp.depth) { glDeleteRenderbuffers(1, &wp.depth); wp.depth = 0; }
+		if (wp.fbo)   { glDeleteFramebuffers(1, &wp.fbo);    wp.fbo = 0; }
+		if (wp.ldrFBO){ glDeleteFramebuffers(1, &wp.ldrFBO); wp.ldrFBO = 0; }
+		wp.w = 0;
+		wp.h = 0;
+	}
 	if (m_instancedProgram) { glDeleteProgram(m_instancedProgram); m_instancedProgram = 0; }
 	if (m_depthInstancedProgram) { glDeleteProgram(m_depthInstancedProgram); m_depthInstancedProgram = 0; }
 	if (m_instanceVBO)      { glDeleteBuffers(1, &m_instanceVBO);  m_instanceVBO = 0; }

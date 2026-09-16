@@ -207,6 +207,7 @@ add_executable(HorizonEditor WIN32
 	# Browser's create menu so the panel and the MCP tools write the same file.
 	AssetStubWriter.cpp
 	EditorCamera.cpp
+	CameraBookmarks.cpp
 	EditorViewportNav.cpp
 	EditorTransformGizmo.cpp
 	ScriptEditorPanel.cpp
@@ -241,6 +242,7 @@ add_executable(HorizonEditor WIN32
 	ViewportPanel.cpp
 	ViewportActions.cpp
 	ViewportToolbar.cpp
+	SecondaryViewportPanel.cpp
 	EditorToolbar.cpp
 	OutlinerPanel.cpp
 	ProjectHubPanel.cpp

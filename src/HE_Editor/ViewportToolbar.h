@@ -33,6 +33,7 @@
 // it — the bar only edits it.
 
 struct AppContext;
+class  EditorCamera;
 
 #ifdef HE_IMGUI_ENABLED
 
@@ -93,6 +94,12 @@ float height();
 // zero-padding content origin) and leaves the cursor on the first row below it,
 // ready for the viewport image.
 void render(AppContext& ctx, State& st);
+
+// The rows of the View cell's popup — the axis presets, the Orthographic
+// switch and the camera bookmarks — over any editor camera. Public because
+// the secondary viewports open the same picker over their own cameras; call
+// it inside an open popup or menu.
+void viewPopup(EditorCamera& cam);
 
 } // namespace ViewportToolbar
 

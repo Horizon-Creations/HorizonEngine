@@ -15,6 +15,7 @@
 #include "EditorWidgets.h"               // WrapText — text wraps at the pane edge, never runs off it
 #include "EditorHelp.h"                  // the context menu's scope
 #include "ViewportActions.h"             // hide / isolate / show all / group — headless, tested
+#include "CameraBookmarks.h"             // the digit keys
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -291,18 +292,20 @@ static void collectSubtree(entt::registry& reg, Entity e,
 // Their editor ICONS are not geometry for this purpose: the symbol is sized in
 // fractions of the screen and shrinks as the camera nears, so measuring it
 // would frame a light to a few centimetres and then closer with every press.
-static bool selectionFocusSphere(HorizonWorld& world, ContentManager* cm, Entity sel,
-                                 const RenderWorld& snapshot,
-                                 glm::vec3& centerOut, float& radiusOut)
+// The two boxes the framing (and the secondary viewports' selection outline)
+// are built from: `geometry` is what the selection actually draws, `pivots`
+// where its entities sit, drawn or not. Either may come back invalid.
+static void selectionBoxes(HorizonWorld& world, ContentManager* cm, Entity sel,
+                           const RenderWorld& snapshot,
+                           HE::AABB& geometry, HE::AABB& pivots)
 {
 	auto& reg = world.registry();
-	if (!reg.valid(sel)) return false;
+	geometry = HE::AABB{};
+	pivots   = HE::AABB{};
+	if (!reg.valid(sel)) return;
 
 	std::unordered_set<uint32_t> subtree;
 	collectSubtree(reg, sel, subtree);
-
-	HE::AABB geometry;   // what the selection actually draws
-	HE::AABB pivots;     // where its entities sit, drawn or not
 
 	auto expandFromObject = [&](const RenderObject& obj)
 	{
@@ -318,6 +321,15 @@ static bool selectionFocusSphere(HorizonWorld& world, ContentManager* cm, Entity
 	for (const uint32_t raw : subtree)
 		if (const auto* t = reg.try_get<TransformComponent>(static_cast<Entity>(raw)))
 			pivots.expand(glm::vec3(t->worldMatrix[3]));
+}
+
+static bool selectionFocusSphere(HorizonWorld& world, ContentManager* cm, Entity sel,
+                                 const RenderWorld& snapshot,
+                                 glm::vec3& centerOut, float& radiusOut)
+{
+	HE::AABB geometry;   // what the selection actually draws
+	HE::AABB pivots;     // where its entities sit, drawn or not
+	selectionBoxes(world, cm, sel, snapshot, geometry, pivots);
 
 	if (!geometry.isValid() && !pivots.isValid()) return false;
 
@@ -425,6 +437,82 @@ static void focusSelected(AppContext& ctx, const RenderWorld& snapshotWorld)
 	float     radius = 0.0f;
 	if (selectionFocusSphere(*ctx.world, ctx.contentManager, primary, snapshotWorld, center, radius))
 		ctx.editorCamera->focusOn(center, radius);
+}
+
+// The scene extract this panel drew its last frame from — declared at file
+// scope (rather than as the static inside render() it used to be) because the
+// secondary viewports frame the selection against it too: they have no extract
+// of their own to measure (their picture is drawn inside RenderWorldPreview),
+// and the selection's boxes are the same boxes from any direction.
+static RenderExtractor s_extractor;
+static RenderWorld     s_sceneSnapshot;
+
+bool focusSelection(AppContext& ctx, EditorCamera& cam)
+{
+	if (!ctx.world) return false;
+	const Entity primary = ctx.selection.primary();
+	if (primary == entt::null || !ctx.world->registry().valid(primary)) return false;
+	glm::vec3 center(0.0f);
+	float     radius = 0.0f;
+	if (!selectionFocusSphere(*ctx.world, ctx.contentManager, primary, s_sceneSnapshot, center, radius))
+		return false;
+	cam.focusOn(center, radius);
+	return true;
+}
+
+bool selectionBox(AppContext& ctx, HE::AABB& out)
+{
+	if (!ctx.world) return false;
+	const Entity primary = ctx.selection.primary();
+	if (primary == entt::null || !ctx.world->registry().valid(primary)) return false;
+	HE::AABB geometry, pivots;
+	selectionBoxes(*ctx.world, ctx.contentManager, primary, s_sceneSnapshot, geometry, pivots);
+	if (geometry.isValid()) { out = geometry; return true; }
+	if (!pivots.isValid()) return false;
+	// Nothing here draws (a light, an empty group): a small box around where
+	// it sits, so the outline still says "there".
+	out = pivots;
+	out.expand(pivots.min - glm::vec3(0.5f));
+	out.expand(pivots.max + glm::vec3(0.5f));
+	return true;
+}
+
+// View presets on the numeric keypad (Blender's layout, the one people arrive
+// with): 7 Top, 1 Front, 3 Right, Ctrl flips each to its opposite, 5 toggles
+// the lens. Keypad only — the plain digits are the bookmarks, and a laptop
+// without a keypad has the toolbar's view cell for the same thing.
+void presetKeys(EditorCamera& cam)
+{
+	using VP = EditorCamera::ViewPreset;
+	const bool flip = ImGui::GetIO().KeyCtrl;
+	if (ImGui::IsKeyPressed(ImGuiKey_Keypad7, false))
+		cam.applyPreset(flip ? VP::Bottom : VP::Top);
+	else if (ImGui::IsKeyPressed(ImGuiKey_Keypad1, false))
+		cam.applyPreset(flip ? VP::Back : VP::Front);
+	else if (ImGui::IsKeyPressed(ImGuiKey_Keypad3, false))
+		cam.applyPreset(flip ? VP::Left : VP::Right);
+	else if (ImGui::IsKeyPressed(ImGuiKey_Keypad5, false))
+		cam.setOrthographic(!cam.orthographic());
+}
+
+// Camera bookmarks on the digit row: Ctrl+<digit> remembers the camera's
+// pose, <digit> puts it back. The caller has already checked that the
+// viewport is hovered, no text field wants the keys and Alt is up.
+void bookmarkKeys(EditorCamera& cam)
+{
+	static const ImGuiKey kDigits[CameraBookmarks::kSlots] = {
+		ImGuiKey_0, ImGuiKey_1, ImGuiKey_2, ImGuiKey_3, ImGuiKey_4,
+		ImGuiKey_5, ImGuiKey_6, ImGuiKey_7, ImGuiKey_8, ImGuiKey_9,
+	};
+	CameraBookmarks::Set& marks = CameraBookmarks::editorSet();
+	const bool store = ImGui::GetIO().KeyCtrl;
+	for (int i = 0; i < CameraBookmarks::kSlots; ++i)
+	{
+		if (!ImGui::IsKeyPressed(kDigits[i], false)) continue;
+		if (store) marks.store(i, cam);
+		else       marks.recall(i, cam);
+		break;
+	}
 }
 
 static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
@@ -612,8 +700,7 @@ void render(AppContext& ctx, float dt)
 				// picking ray and the drop probe all read this frame). F therefore
 				// frames against last frame's boxes, which is exactly as accurate:
 				// nothing resizes between two frames of holding a key down.
-				static RenderExtractor s_extractor;
-				static RenderWorld     s_sceneSnapshot;
+				// (s_extractor / s_sceneSnapshot, file scope above.)
 
 				// ── Editor camera: drive from viewport input ────────────────
 				// In play mode the game's scene camera takes over, so the
@@ -771,18 +858,12 @@ void render(AppContext& ctx, float dt)
 					// binds, and a laptop without a keypad has the toolbar's
 					// view cell for the same thing.
 					if (imageHovered && !io.WantTextInput && !navigating)
-					{
-						using VP = EditorCamera::ViewPreset;
-						const bool flip = io.KeyCtrl;
-						if (ImGui::IsKeyPressed(ImGuiKey_Keypad7, false))
-							cam.applyPreset(flip ? VP::Bottom : VP::Top);
-						else if (ImGui::IsKeyPressed(ImGuiKey_Keypad1, false))
-							cam.applyPreset(flip ? VP::Back : VP::Front);
-						else if (ImGui::IsKeyPressed(ImGuiKey_Keypad3, false))
-							cam.applyPreset(flip ? VP::Left : VP::Right);
-						else if (ImGui::IsKeyPressed(ImGuiKey_Keypad5, false))
-							cam.setOrthographic(!cam.orthographic());
-					}
+						presetKeys(cam);
+					// Camera bookmarks on the digit row (Unreal's layout): Ctrl
+					// stores this view, the bare digit jumps back. Not with Alt
+					// held — Alt+2/3/4 are the view modes below.
+					if (imageHovered && !io.WantTextInput && !navigating && !io.KeyAlt)
+						bookmarkKeys(cam);
 
 					cam.update(cin);
 					// Push to the backend so this frame's render uses it. The

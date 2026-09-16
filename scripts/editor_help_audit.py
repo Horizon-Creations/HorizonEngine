@@ -98,7 +98,8 @@ HELP_SCOPE = re.compile(r'Help::Scope\s+\w+\("([^"]*)"\)')
 SETTINGS_ROW = re.compile(r'row\("[^"]*",\s*"([^"]+)"')
 
 AREAS: dict[str, list[str]] = {
-    "interface": ["EditorUI.cpp", "ViewportToolbar.cpp", "OutlinerPanel.cpp",
+    "interface": ["EditorUI.cpp", "ViewportToolbar.cpp", "SecondaryViewportPanel.cpp",
+                  "OutlinerPanel.cpp",
                   "ContentBrowserPanel.cpp", "ProjectHubPanel.cpp", "ConsolePanel.cpp",
                   "NotificationBar.cpp", "PlayReportPanel.cpp", "DocsPanel.cpp",
                   "TutorialPanel.cpp", "McpStatusBar.cpp", "AudioMixerPanel.cpp"],

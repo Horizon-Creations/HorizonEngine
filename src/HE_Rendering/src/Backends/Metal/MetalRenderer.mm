@@ -6105,13 +6105,16 @@ void MetalRenderer::Shutdown()
 	if (m_thumbUIDepthTex)     { CFBridgingRelease(m_thumbUIDepthTex);     m_thumbUIDepthTex = nullptr; }
 	m_thumbSize = 0;
 	m_thumbUISize = 0;
-	// World-preview target (RenderWorldPreview); its pipelines are the skeletal /
-	// mesh preview's, released with those.
-	if (m_worldPreviewColorTex) { CFBridgingRelease(m_worldPreviewColorTex); m_worldPreviewColorTex = nullptr; }
-	if (m_worldPreviewHdrTex)   { CFBridgingRelease(m_worldPreviewHdrTex);   m_worldPreviewHdrTex = nullptr; }
-	if (m_worldPreviewDepthTex) { CFBridgingRelease(m_worldPreviewDepthTex); m_worldPreviewDepthTex = nullptr; }
-	m_worldPreviewW = 0;
-	m_worldPreviewH = 0;
+	// World-preview targets (RenderWorldPreview), every slot; their pipelines
+	// are the skeletal / mesh preview's, released with those.
+	for (WorldPreviewTarget& wp : m_worldPreview)
+	{
+		if (wp.colorTex) { CFBridgingRelease(wp.colorTex); wp.colorTex = nullptr; }
+		if (wp.hdrTex)   { CFBridgingRelease(wp.hdrTex);   wp.hdrTex = nullptr; }
+		if (wp.depthTex) { CFBridgingRelease(wp.depthTex); wp.depthTex = nullptr; }
+		wp.w = 0;
+		wp.h = 0;
+	}
 	if (m_fxaaPipeline)         { CFBridgingRelease(m_fxaaPipeline);         m_fxaaPipeline = nullptr; }
 	if (m_aaBlitPipeline)       { CFBridgingRelease(m_aaBlitPipeline);       m_aaBlitPipeline = nullptr; }
 	if (m_smaaPipeline)         { CFBridgingRelease(m_smaaPipeline);         m_smaaPipeline = nullptr; }
@@ -9615,10 +9618,12 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
                                         const EditorCameraOverride& camera,
                                         const glm::vec3& origin,
                                         const WorldPreviewEnv& env,
-                                        glm::mat4* outViewProj)
+                                        glm::mat4* outViewProj,
+                                        uint32_t slot)
 {
 	const int W = std::clamp(static_cast<int>(width),  32, 4096);
 	const int H = std::clamp(static_cast<int>(height), 32, 4096);
+	WorldPreviewTarget& wp = m_worldPreview[std::min(slot, kWorldPreviewSlots - 1)];
 	if (!m_contentManager) m_contentManager = &cm;
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	id<MTLCommandQueue> queue = (__bridge id<MTLCommandQueue>)m_commandQueue;
@@ -9694,34 +9699,34 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	// past 1.0), then a tonemap resolves that into the LDR texture ImGui shows.
 	// Handing ImGui the raw HDR texture is what made the first sky-lit preview a
 	// uniformly white mesh under a blown-out sky.
-	if (!m_worldPreviewColorTex || m_worldPreviewW != W || m_worldPreviewH != H)
+	if (!wp.colorTex || wp.w != W || wp.h != H)
 	{
-		if (m_worldPreviewColorTex) { CFBridgingRelease(m_worldPreviewColorTex); m_worldPreviewColorTex = nullptr; }
-		if (m_worldPreviewHdrTex)   { CFBridgingRelease(m_worldPreviewHdrTex);   m_worldPreviewHdrTex = nullptr; }
-		if (m_worldPreviewDepthTex) { CFBridgingRelease(m_worldPreviewDepthTex); m_worldPreviewDepthTex = nullptr; }
+		if (wp.colorTex) { CFBridgingRelease(wp.colorTex); wp.colorTex = nullptr; }
+		if (wp.hdrTex)   { CFBridgingRelease(wp.hdrTex);   wp.hdrTex = nullptr; }
+		if (wp.depthTex) { CFBridgingRelease(wp.depthTex); wp.depthTex = nullptr; }
 		MTLTextureDescriptor* hd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSceneColorFormat
 			width:W height:H mipmapped:NO];
 		hd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 		hd.storageMode = MTLStorageModePrivate;
-		m_worldPreviewHdrTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:hd]);
+		wp.hdrTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:hd]);
 		// LDR in the SWAPCHAIN format, because that is what the tonemap pipeline
 		// targets — a pipeline's colour format must match its pass's attachment.
 		MTLTextureDescriptor* cd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
 			width:W height:H mipmapped:NO];
 		cd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
 		cd.storageMode = MTLStorageModePrivate;
-		m_worldPreviewColorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
+		wp.colorTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:cd]);
 		MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kDepthFormat
 			width:W height:H mipmapped:NO];
 		dd.usage = MTLTextureUsageRenderTarget; dd.storageMode = MTLStorageModePrivate;
-		m_worldPreviewDepthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
-		m_worldPreviewW = W;
-		m_worldPreviewH = H;
+		wp.depthTex = (void*)CFBridgingRetain([device newTextureWithDescriptor:dd]);
+		wp.w = W;
+		wp.h = H;
 	}
-	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)m_worldPreviewColorTex;
+	id<MTLTexture> colorTex = (__bridge id<MTLTexture>)wp.colorTex;
 
 	MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
-	rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_worldPreviewHdrTex;
+	rp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)wp.hdrTex;
 	rp.colorAttachments[0].loadAction  = MTLLoadActionClear;
 	rp.colorAttachments[0].storeAction = MTLStoreActionStore;
 	// Studio gray — covered by the sky when there is one. LINEAR: this is resolved
@@ -9729,7 +9734,7 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 	rp.colorAttachments[0].clearColor  = MTLClearColorMake(HE::kPreviewBackground[0],
 	                                                       HE::kPreviewBackground[1],
 	                                                       HE::kPreviewBackground[2], 1.0);
-	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_worldPreviewDepthTex;
+	rp.depthAttachment.texture     = (__bridge id<MTLTexture>)wp.depthTex;
 	rp.depthAttachment.loadAction  = MTLLoadActionClear;
 	rp.depthAttachment.storeAction = MTLStoreActionDontCare;
 	rp.depthAttachment.clearDepth  = 1.0;
@@ -9855,11 +9860,11 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 		tp.colorAttachments[0].texture     = colorTex;
 		tp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
 		tp.colorAttachments[0].storeAction = MTLStoreActionStore;
-		tp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_worldPreviewDepthTex;
+		tp.depthAttachment.texture     = (__bridge id<MTLTexture>)wp.depthTex;
 		tp.depthAttachment.loadAction  = MTLLoadActionDontCare;
 		tp.depthAttachment.storeAction = MTLStoreActionDontCare;
 		id<MTLRenderCommandEncoder> tenc = [cb renderCommandEncoderWithDescriptor:tp];
-		EncodeTonemap((__bridge void*)tenc, m_worldPreviewHdrTex, /*withBloom=*/false);
+		EncodeTonemap((__bridge void*)tenc, wp.hdrTex, /*withBloom=*/false);
 		[tenc endEncoding];
 	}
 
@@ -9900,7 +9905,7 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 				}
 		}
 	}
-	return m_worldPreviewColorTex; // id<MTLTexture> for ImGui::Image
+	return wp.colorTex; // id<MTLTexture> for ImGui::Image
 }
 
 // Encode the particle cloud into an already-open encoder. Shared by the

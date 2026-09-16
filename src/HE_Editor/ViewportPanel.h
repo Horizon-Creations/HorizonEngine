@@ -4,6 +4,7 @@ struct AppContext;
 struct SDL_Window;
 class  DebugDrawBuffer;
 class  EditorCamera;
+namespace HE { struct AABB; }
 
 // ── Scene viewport ───────────────────────────────────────────────────────────
 // The centre dock window: the renderer's offscreen target as an ImGui image,
@@ -33,6 +34,25 @@ namespace ViewportPanel
 	// Belt-and-suspenders invariant, run once per frame BEFORE any early-out: fly-look
 	// capture must never outlive a physically-held right mouse button.
 	void enforceViewportLookCaptureInvariant(SDL_Window* win);
+
+	// ── Shared with the secondary viewports (SecondaryViewportPanel) ─────────
+	// The same keys mean the same thing in every pane that shows the scene,
+	// so the three key blocks below take the CAMERA rather than assuming the
+	// Scene window's. Only compiled with ImGui — they read its key state.
+#ifdef HE_IMGUI_ENABLED
+	// Frame the selection (the F key) in `cam`, measured against the Scene
+	// window's last extract. False when nothing is selected or measurable.
+	bool focusSelection(AppContext& ctx, EditorCamera& cam);
+	// The world-space box of the primary selection's subtree (its drawn
+	// geometry, or a small box around its pivots when nothing draws), from the
+	// same extract. What a secondary viewport outlines, since it has no
+	// debug-line channel of its own.
+	bool selectionBox(AppContext& ctx, HE::AABB& out);
+	// Keypad 7 / 1 / 3 (Ctrl = the opposite side), keypad 5 = lens on / off.
+	void presetKeys(EditorCamera& cam);
+	// Ctrl+<digit> stores the camera's pose as a bookmark, <digit> recalls it.
+	void bookmarkKeys(EditorCamera& cam);
+#endif
 
 	// ── Ground grid ──────────────────────────────────────────────────────────
 	// The scene view's scale reference: an empty scene otherwise has no origin,

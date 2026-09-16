@@ -21,6 +21,7 @@
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
+#include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
@@ -1227,6 +1228,9 @@ void EditorApplication::OnInit()
 			globalstate.getCustomConfigFloat("EditorCamPivot", m_editorCamera.pivotDistance()));
 		m_editorCamera.setOrthographic(globalstate.getCustomConfigBool("EditorCamOrtho", false));
 	}
+	// The camera bookmarks (digit keys) ride next to the view, one string.
+	CameraBookmarks::editorSet() = CameraBookmarks::Set::decode(
+		globalstate.getCustomConfigString("EditorCamBookmarks", ""));
 	setMaxFps(m_editorConfig.MaxFps);   // VSync-off frame cap (0 = unlimited)
 
 #ifdef HE_IMGUI_ENABLED
@@ -5799,6 +5803,27 @@ void EditorApplication::dumpFrameHeadless()
 			HE_LOG_INFO(Editor, "%s", "EditorApplication: preview stress loop done");
 		}
 	}
+	// Witness a secondary scene viewport (HE_DUMP_SECONDARY=1 + HE_WORLD_PREVIEW_DUMP
+	// =<file.ppm>): the same RenderWorldPreview call SecondaryViewportPanel makes,
+	// over the editor world from the dump camera — which HE_DUMP_VIEW / HE_DUMP_ORTHO
+	// above already put into an axis view — into slot 1, with the sky at the scene's
+	// hour. The backend writes the LDR result. Pairs with DOFTEST: from Top in ortho
+	// the five cubes must come out the same size, and the box-projection rule the
+	// panel shares with the extractor is what puts them in the frame at all.
+	if (const char* sv = std::getenv("HE_DUMP_SECONDARY"); sv && *sv && m_editorWorld)
+	{
+		WorldPreviewEnv env;
+		env.sky           = r->GetEnvironment().skyEnabled && !m_editorCamera.orthographic();
+		env.timeOfDay     = r->GetEnvironment().timeOfDay;
+		env.cloudCoverage = r->GetEnvironment().cloudCoverage;
+		env.grid          = true;
+		glm::mat4 vp(1.0f);
+		void* tex = r->RenderWorldPreview(contentManager(), *m_editorWorld, 640, 360,
+		                                  m_editorCamera.makeOverride(), glm::vec3(0.0f), env, &vp,
+		                                  /*slot=*/1);
+		HE_LOG_INFO(Editor, "%s", tex ? "EditorApplication: secondary-viewport witness rendered (slot 1)"
+		                              : "EditorApplication: secondary-viewport witness: backend has no world preview");
+	}
 	// Witness the Content-Browser thumbnail path (HE_DUMP_THUMB=<dir>): render the
 	// material and static-mesh thumbnails through IRenderer::RenderAssetThumbnail —
 	// the same call the asset grid makes — and write each as a PPM. Written from the
@@ -9644,6 +9669,7 @@ void EditorApplication::writeEditorConfig()
 		globalstate.setCustomConfigEntry("EditorCamOrtho", m_editorCamera.orthographic());
 		globalstate.setCustomConfigEntry("EditorCamValid", true);
 	}
+	globalstate.setCustomConfigEntry("EditorCamBookmarks", CameraBookmarks::editorSet().encode());
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
 	{
 		int n = 0;
