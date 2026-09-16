@@ -214,6 +214,21 @@ SSR-/GI-Reprojektionsschwäche geplant werden, damit der Velocity-Buffer nur ein
 > also bei SMAA. `supportsTemporalAA` bleibt dort false → der Combo-Eintrag ist ausgegraut und
 > `ResolveAAMethod` fällt auf SMAA zurück, mit genau dem Hinweistext, den A0 schon zeigt.
 >
+> **Revidiert (16.09.2026): Metal-TAA läuft auf beiden Render-Pfaden.** Möglich wurde das
+> durch die Umsetzungsentscheidung darunter — Velocity ist **kein** G-Buffer-Attachment
+> geworden, sondern ein eigener, material-agnostischer Pass, der nur Positionen liest und
+> gegen die vorhandene Tiefe testet. Damit braucht er im Forward-Pfad nichts, was es nicht
+> schon gibt: er läuft direkt nach dem HDR-Scene-Pass gegen dessen Tiefe (der Pass muss die
+> Tiefe dafür `Store`n statt `DontCare`, dieselbe Tile-GPU-Falle wie bei DoF). Die
+> Argumente von oben (fünf Pipelines × fünf Backends) galten für die Attachment-Variante und
+> sind mit dem separaten Pass hinfällig. `TemporalActive()`/`MetalFxActive()` und
+> `supportsTemporalAA` hängen auf Metal nicht mehr am Render-Pfad. **Bewusste Näherung:**
+> der Forward-MRT-Prepass (SSAO-Positionen, Reflexions-Quelle) rastert weiter **ungejittert**,
+> weil die Occlusion-Pass-Projektion und die Reflexions-Reprojektion mit den sauberen
+> Matrizen rechnen; AO/Reflexionen liegen damit bis zu einem halben Pixel neben dem
+> gejitterten Scene-Raster — unter dem AO-Blur unsichtbar, und der temporale Filter mittelt
+> das Wackeln weg. GL/D3D/Vulkan: weiterhin offen (dort gibt es noch keinen Velocity-Pass).
+>
 > Zwei Architektur-Festlegungen dazu, damit sie nicht später teuer werden:
 > * **Jitter lebt NUR in der Rasterisierungs-Projektion.** Velocity, TAA-Reprojektion und die
 >   vorhandene GI/SSR-`prevViewProj`-Reprojektion rechnen mit den *ungejitterten* Matrizen —
@@ -233,7 +248,7 @@ SSR-/GI-Reprojektionsschwäche geplant werden, damit der Velocity-Buffer nur ein
 | Stufe | Stand | Anmerkung |
 |---|---|---|
 | **A0** | ✅ auf dem Branch | `HE::AAMethod` + `IRenderer::AntiAliasingSettings` + `ResolveAAMethod`, Editor-Preferences-Zeile, Projekt-Config, Push aus Editor **und** gepacktem Spiel, `HE_DUMP_AA` / `HE_DUMP_RENDERSCALE` / `HE_DUMP_SPECAA`. „Off" tauscht den Shader gegen einen Passthrough — der Pass läuft weiter, weil er das Ausgabetarget füllt. Metal headless verifiziert |
-| **A2+A3** | ✅ Metal (deferred) auf dem Branch | Halton(2,3)-Jitter nur in der Rasterisierungsmatrix, **eigener Velocity-Pass** statt fünftem G-Buffer-Attachment (siehe unten), TAA auf dem getonemappten Bild mit Neighbourhood-Clamp + Sharpen im vorhandenen Resolve-Slot. `supportsTemporalAA` = „Render Path ist Deferred". GL/D3D/Vulkan: offen |
+| **A2+A3** | ✅ Metal, deferred **und forward** (forward seit 16.09.2026) | Halton(2,3)-Jitter nur in der Rasterisierungsmatrix, **eigener Velocity-Pass** statt fünftem G-Buffer-Attachment (siehe unten), TAA auf dem getonemappten Bild mit Neighbourhood-Clamp + Sharpen im vorhandenen Resolve-Slot. Der Velocity-Pass läuft deferred nach dem G-Buffer-Pass, forward nach dem HDR-Scene-Pass (der dafür seine Tiefe speichert); `supportsTemporalAA` ist auf Metal jetzt bedingungslos wahr. GL/D3D/Vulkan: offen |
 | **A4** | ✅ Metal auf dem Branch | Output-Größe und Render-Größe getrennt: der AA-Resolve ist ein Fullscreen-Dreieck mit normalisierten UVs und skaliert deshalb gratis. Gemessen: Scale 0.5 → 832, Scale 2.0 → 506 geglättete Silhouetten-Spalten (ohne AA: 135). Offen: Mip-Bias `log2(scale)` — dafür müsste jeder Material-Sampler ein `bias()` mitbekommen |
 | **A5** | ⚠️ verdrahtet, per Opt-in aus | `MTLFXTemporalScaler` hängt an denselben Eingaben wie unser TAA (Farbe, Tiefe, Velocity, Jitter) und läuft **vor** dem Tonemap auf dem HDR-Bild; der Tonemap arbeitet dann in Ausgabeauflösung. Gerät meldet Unterstützung, der Scaler schreibt das Ergebnis aber 1:1 in die Ecke statt hochzuskalieren — bei im Log verifizierten Größen (858x482 → 1280x720). Deshalb `supportsMetalFX` nur mit `HE_METALFX=1`; ohne das fällt der Modus auf TAA zurück, **bit-identisch verifiziert** (0 Pixel Unterschied zur TAA-Aufnahme). Offene Verdächtige: `inputContentPropertiesEnabled` + min/max-Scale im Deskriptor, oder ein 27-Beta-Verhalten (dieselbe Klasse Falle wie `MTLBinaryArchive`) |
 | **A7 (MSAA)** | ❌ bewusst nicht gebaut | Kostenrechnung in §5c: ~40 Pipeline-Deskriptoren plus drei Caches, deren Schlüssel die Sample-Anzahl aufnehmen müsste. Render Scale 2.0 (A4) löst dieselben Kanten und supersampled zusätzlich das Shading |

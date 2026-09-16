@@ -11195,6 +11195,13 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 	}
 
 	EnsureSSAOTargets(width, height);
+	// Deliberately UNjittered while TAA is on (forward path): the occlusion
+	// pass projects its sample positions with params.proj and reads them back
+	// from this pre-pass, so both sides must agree, and the reflection passes
+	// downstream reproject the same MRT with clean matrices. The cost is a
+	// <= half-pixel offset between the AO/reflection lookups and the jittered
+	// scene raster — invisible under the AO blur, and the temporal filter
+	// averages the per-frame wobble away.
 	const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
 	const glm::mat4 view     = m_renderWorld.camera.view;
 	// SSAO is three encoders (pos pre-pass → occlusion → blur); time the whole
@@ -11722,8 +11729,10 @@ void MetalRenderer::EncodeVelocity(void* cmdBufPtr, int width, int height)
 	// Cleared to zero = "did not move", which is also what the sky and every
 	// pixel this pass does not reach should report.
 	pass.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
-	// Depth-test against what the G-buffer pass already wrote, without touching
-	// it: only the surfaces that are actually visible get to report motion.
+	// Depth-test against what the opaque geometry already wrote (the G-buffer
+	// pass on the deferred path, the HDR scene pass on the forward one — both
+	// end up in m_hdrDepth by the time this runs), without touching it: only
+	// the surfaces that are actually visible get to report motion.
 	pass.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
 	pass.depthAttachment.loadAction  = MTLLoadActionLoad;
 	pass.depthAttachment.storeAction = MTLStoreActionStore;
@@ -11816,8 +11825,7 @@ void MetalRenderer::EncodeTaa(void* cmdBufPtr, int width, int height)
 // ─── MetalFX temporal scaling (A5) ──────────────────────────────────────────
 bool MetalRenderer::MetalFxActive() const
 {
-	return m_mfxSupported && ActiveAAMethod() == HE::AAMethod::MetalFX &&
-	       m_renderPath == HE::RenderPath::Deferred && m_velocityPipeline;
+	return m_mfxSupported && ActiveAAMethod() == HE::AAMethod::MetalFX && m_velocityPipeline;
 }
 
 void MetalRenderer::EnsureMetalFX(int inW, int inH, int outW, int outH)
@@ -11914,12 +11922,14 @@ void* MetalRenderer::EncodeMetalFX(void* cmdBufPtr, void* sourceHdr, int inW, in
 // Everything temporal needs the same two things — a jittered raster and a
 // velocity buffer — whether the accumulation is ours or the OS scaler's. Asking
 // it once here is what keeps pass setup, jitter and shader binding from
-// disagreeing about whether this frame has motion data.
+// disagreeing about whether this frame has motion data. Not gated on the
+// render path any more: the velocity pass only needs a depth buffer with the
+// opaque geometry in it, and both paths produce one (EncodeFrame picks the
+// spot — after the G-buffer pass or after the HDR scene pass).
 bool MetalRenderer::TemporalActive() const
 {
 	const HE::AAMethod m = ActiveAAMethod();
-	return (m == HE::AAMethod::TAA || m == HE::AAMethod::MetalFX) &&
-	       m_renderPath == HE::RenderPath::Deferred && m_velocityPipeline;
+	return (m == HE::AAMethod::TAA || m == HE::AAMethod::MetalFX) && m_velocityPipeline;
 }
 
 bool MetalRenderer::TaaActive() const
@@ -15649,9 +15659,12 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// the scene pass, so it has to reach memory when either is on. On a
 			// tile GPU DontCare means it never does (the first DoF frame read a
 			// flat texture and blurred everything alike). Off keeps the free
-			// discard.
-			hdrPass.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled) ? MTLStoreActionStore
-			                                                                    : MTLStoreActionDontCare;
+			// discard. The forward velocity pass (TAA/MetalFX) depth-TESTS
+			// against it too — same rule, or it would test against garbage and
+			// silently emit no motion at all.
+			hdrPass.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled || TemporalActive())
+			                                          ? MTLStoreActionStore
+			                                          : MTLStoreActionDontCare;
 			hdrPass.depthAttachment.clearDepth  = 1.0;
 
 			// "Scene" pass = sky + clouds + opaque + skinned + particles + debug.
@@ -15710,6 +15723,14 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				SamplePoint((__bridge void*)sceneEncoder, "Debug");   // closes the Debug interval
 			}
 			[sceneEncoder endEncoding];
+
+			// Forward path: screen-space motion straight after the pass whose
+			// depth it tests against (A2) — the HDR scene pass here, where the
+			// deferred path ran it after the G-buffer pass. Keyed on
+			// deferredActive, not the requested render path: a deferred request
+			// whose pipelines failed to build renders forward and lands here.
+			if (!deferredActive)
+				EncodeVelocity((__bridge void*)cmdBuf, sceneW, sceneH);
 
 			// Forward SSR: keep a full-res copy of this frame's HDR (incl. sky
 			// and transparency) — next frame's trace reprojects into it.
@@ -16378,11 +16399,13 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// Ray-traced GI reflections: tile-deferred AND forward (same kernels, fed
 	// from the pre-pass); the SW-BVH kernel covers devices without HW RT.
 	c.supportsGIReflections = true;
-	// TAA needs a velocity buffer, and the velocity pass depth-tests against the
-	// G-buffer's depth — so it exists in the DEFERRED path only (same shape as
-	// the SSR gate above). Reported as a capability rather than silently falling
-	// back, so the editor can grey the entry out and say why.
-	c.supportsTemporalAA = (m_renderPath == HE::RenderPath::Deferred);
+	// TAA needs a velocity buffer. The velocity pass is material-agnostic and
+	// depth-tests against whichever depth the opaque geometry left — G-buffer
+	// or HDR scene pass — so it runs on BOTH render paths (since 16.09.2026;
+	// it was deferred-only before). The pipelines are built unconditionally at
+	// Initialize, so the only way this is false is a failed shader compile,
+	// which throws there.
+	c.supportsTemporalAA = (m_velocityPipeline != nullptr && m_taaPipeline != nullptr);
 	// MetalFX rides on the same velocity buffer, so it inherits the same gate on
 	// top of the device/OS check made at Initialize.
 	c.supportsMetalFX    = m_mfxSupported && c.supportsTemporalAA;
