@@ -3,6 +3,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <string_view>
 #include "ContentManager/ContentManager.h"
 #include "ContentManager/HAsset.h"
 #include "Diagnostics/Logger.h"
@@ -52,6 +53,15 @@ ResolvedOutput resolveOutput(const std::string&           explicitPath,
 
 bool gltfHasSkin(const std::filesystem::path& sourcePath)
 {
+	// Only glTF can carry a glTF skin; every other mesh source is answered here
+	// without touching the file (an FBX is not small, and cgltf would read all of
+	// it just to reject it).
+	std::string ext = sourcePath.extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(),
+	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	if (ext != ".gltf" && ext != ".glb")
+		return false;
+
 	cgltf_options options{};
 	cgltf_data*   data = nullptr;
 	// cgltf_parse_file reads the JSON only — skins_count is filled in without
@@ -353,19 +363,37 @@ std::vector<MeshSection> buildMeshSections(const cgltf_data*                  da
                                            const std::vector<std::string>&    materialPaths,
                                            std::vector<uint32_t>&             indices)
 {
+	// Material pointers become indices into data->materials; null stays "none".
+	const auto indexOf = [data](const cgltf_material* m) -> int {
+		if (!m || !data || !data->materials) return BakedRange::kNoMaterial;
+		return static_cast<int>(m - data->materials);
+	};
+	std::vector<BakedRange> ranges;
+	ranges.reserve(baked.size());
+	for (const BakedPrimitive& b : baked)
+		ranges.push_back({ b.indexStart, b.indexCount, indexOf(b.material) });
+	return buildMeshSections(ranges, indexOf(primary), materialPaths, indices);
+}
+
+std::vector<MeshSection> buildMeshSections(const std::vector<BakedRange>&  baked,
+                                           int                             primaryIndex,
+                                           const std::vector<std::string>& materialPaths,
+                                           std::vector<uint32_t>&          indices)
+{
 	// One group per distinct material, in order of first appearance; the
 	// primitives of a group keep their bake order inside it.
 	struct Group
 	{
-		const cgltf_material* material = nullptr;
-		std::vector<size_t>   prims;   // indices into `baked`
+		int                 material = BakedRange::kNoMaterial;
+		std::vector<size_t> prims;   // indices into `baked`
 	};
 	std::vector<Group> groups;
 	for (size_t i = 0; i < baked.size(); ++i)
 	{
 		if (static_cast<size_t>(baked[i].indexStart) + baked[i].indexCount > indices.size())
 			return {};   // a record that does not describe this buffer — see below
-		const cgltf_material* key = baked[i].material ? baked[i].material : primary;
+		const int key = baked[i].materialIndex != BakedRange::kNoMaterial
+			? baked[i].materialIndex : primaryIndex;
 		auto it = std::find_if(groups.begin(), groups.end(),
 		                       [key](const Group& g) { return g.material == key; });
 		if (it == groups.end()) { groups.push_back({ key, {} }); it = groups.end() - 1; }
@@ -385,17 +413,14 @@ std::vector<MeshSection> buildMeshSections(const cgltf_data*                  da
 		s.indexOffset = static_cast<uint32_t>(regrouped.size());
 		for (size_t pi : g.prims)
 		{
-			const BakedPrimitive& b = baked[pi];
+			const BakedRange& b = baked[pi];
 			regrouped.insert(regrouped.end(),
 			                 indices.begin() + b.indexStart,
 			                 indices.begin() + b.indexStart + b.indexCount);
 		}
 		s.indexCount = static_cast<uint32_t>(regrouped.size()) - s.indexOffset;
-		if (g.material && data && data->materials)
-		{
-			const size_t mi = static_cast<size_t>(g.material - data->materials);
-			if (mi < materialPaths.size()) s.materialPath = materialPaths[mi];
-		}
+		if (g.material >= 0 && static_cast<size_t>(g.material) < materialPaths.size())
+			s.materialPath = materialPaths[static_cast<size_t>(g.material)];
 		sections.push_back(std::move(s));
 	}
 	// Every index the bake produced is accounted for by exactly one primitive
@@ -414,25 +439,118 @@ namespace
 {
 enum class SourceKind { None, Mesh, Texture, Audio, Material, Font };
 
-SourceKind classifySource(const std::filesystem::path& sourcePath)
+// The mesh formats Assimp reads. Listed only when Assimp is compiled in — the
+// pattern is what the Import Asset dialog offers, and offering .fbx in a build
+// that then fails every .fbx is worse than not offering it. The same three
+// extensions are spelled out once more in importBlockedReason(), which has to
+// know them precisely in the build that does NOT have them.
+#ifdef HE_HAVE_ASSIMP
+constexpr const char* kMeshPattern = "gltf;glb;fbx;obj;dae";
+#else
+constexpr const char* kMeshPattern = "gltf;glb";
+#endif
+
+// One row per SourceFamily, in enum order: the dialog label, the extensions,
+// and the importer they route to. The audio row mirrors
+// AudioImporter::isSupportedSource (test_assimpimport pins the two together);
+// texture and font rows are the lists their importers read.
+struct SourceFamilyRow
+{
+	const char* label;
+	const char* pattern;
+	SourceKind  kind;
+};
+constexpr SourceFamilyRow kSourceFamilies[] = {
+	{ "3D Models", kMeshPattern,               SourceKind::Mesh     },
+	{ "Textures",  "png;jpg;jpeg;tga;bmp;hdr", SourceKind::Texture  },
+	{ "Audio",     "wav;ogg",                  SourceKind::Audio    },
+	{ "Materials", "hmat",                     SourceKind::Material },
+	{ "Fonts",     "ttf;otf",                  SourceKind::Font     },
+};
+static_assert(sizeof(kSourceFamilies) / sizeof(kSourceFamilies[0])
+              == static_cast<size_t>(SourceFamily::Count),
+              "one row per SourceFamily, in enum order");
+
+// `sourcePath`'s extension lower-cased and without its dot — the form the
+// patterns use. "" for a path without one.
+std::string patternExtensionOf(const std::filesystem::path& sourcePath)
 {
 	std::string ext = sourcePath.extension().string();
+	if (!ext.empty() && ext[0] == '.') ext.erase(0, 1);
 	std::transform(ext.begin(), ext.end(), ext.begin(),
 	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return ext;
+}
 
-	if (ext == ".gltf" || ext == ".glb")                      return SourceKind::Mesh;
-	if (ext == ".png"  || ext == ".jpg" || ext == ".jpeg" ||
-	    ext == ".tga"  || ext == ".bmp" || ext == ".hdr")     return SourceKind::Texture;
-	if (AudioImporter::isSupportedSource(sourcePath))         return SourceKind::Audio;
-	if (ext == ".hmat")                                       return SourceKind::Material;
-	if (ext == ".ttf"  || ext == ".otf")                      return SourceKind::Font;
+// Whether `ext` (dotless, lower-case) is one of the ';'-separated entries of
+// `pattern`. A whole-token compare: "tga" must not match inside "gltf".
+bool patternHasExtension(const char* pattern, const std::string& ext)
+{
+	if (ext.empty()) return false;
+	std::string_view rest(pattern);
+	while (!rest.empty())
+	{
+		const size_t           semi  = rest.find(';');
+		const std::string_view token = rest.substr(0, semi);
+		if (token == ext) return true;
+		if (semi == std::string_view::npos) break;
+		rest.remove_prefix(semi + 1);
+	}
+	return false;
+}
+
+SourceKind classifySource(const std::filesystem::path& sourcePath)
+{
+	const std::string ext = patternExtensionOf(sourcePath);
+	for (const SourceFamilyRow& row : kSourceFamilies)
+		if (patternHasExtension(row.pattern, ext))
+			return row.kind;
 	return SourceKind::None;
+}
+
+const SourceFamilyRow& familyRow(SourceFamily family)
+{
+	const size_t i = static_cast<size_t>(family);
+	return kSourceFamilies[i < static_cast<size_t>(SourceFamily::Count) ? i : 0];
 }
 } // namespace
 
 bool isImportableSource(const std::filesystem::path& sourcePath)
 {
 	return classifySource(sourcePath) != SourceKind::None;
+}
+
+const char* sourceFamilyLabel(SourceFamily family)   { return familyRow(family).label; }
+const char* sourceFamilyPattern(SourceFamily family) { return familyRow(family).pattern; }
+
+const char* allSourcesPattern()
+{
+	// Joined once and kept: the dialog holds the pointer across its own lifetime.
+	static const std::string joined = []
+	{
+		std::string all;
+		for (const SourceFamilyRow& row : kSourceFamilies)
+		{
+			if (!all.empty()) all += ';';
+			all += row.pattern;
+		}
+		return all;
+	}();
+	return joined.c_str();
+}
+
+const char* importBlockedReason(const std::filesystem::path& sourcePath)
+{
+	const std::string ext = patternExtensionOf(sourcePath);
+#ifndef HE_HAVE_ASSIMP
+	if (ext == "fbx" || ext == "obj" || ext == "dae")
+		return "FBX, OBJ and COLLADA need Assimp, which this build of the editor was "
+		       "made without (HE_ENABLE_ASSIMP=OFF). Export the model as glTF/GLB, "
+		       "or rebuild with Assimp.";
+#else
+	(void)ext;
+#endif
+	return "";
 }
 
 bool importSource(const std::filesystem::path& sourcePath,

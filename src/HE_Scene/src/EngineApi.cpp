@@ -4687,6 +4687,29 @@ float gamepadAxis(const std::string& name)
     return a != SDL_GAMEPAD_AXIS_INVALID ? snap().padAxes[a] : 0.0f;
 }
 
+// The action states live beside the Snapshot rather than in it for the same
+// reason the mode below does: the snapshot is overwritten by pushSdlSnapshot
+// every frame, and that call comes from a different place (the app's frame)
+// than the one that knows the actions (PlayerHost::tick). Two writers into one
+// struct would have each wiping the other's half.
+namespace {
+std::vector<ActionState>& actions() { static std::vector<ActionState> a; return a; }
+const ActionState* findAction(const std::string& name)
+{
+    for (const ActionState& a : actions())
+        if (a.name == name) return &a;
+    return nullptr;
+}
+}
+void setActions(std::vector<ActionState> states) { actions() = std::move(states); }
+void clearActions()                              { actions().clear(); }
+bool actionDown(const std::string& n)     { const ActionState* a = findAction(n); return a && a->down; }
+bool actionPressed(const std::string& n)  { const ActionState* a = findAction(n); return a && a->pressed; }
+bool actionReleased(const std::string& n) { const ActionState* a = findAction(n); return a && a->released; }
+float actionAxis(const std::string& n)    { const ActionState* a = findAction(n); return a ? a->x : 0.0f; }
+glm::vec2 actionAxis2D(const std::string& n)
+{ const ActionState* a = findAction(n); return a ? glm::vec2(a->x, a->y) : glm::vec2(0.0f); }
+
 // Deliberately NOT part of Snapshot: the snapshot is this frame's readings and
 // is overwritten wholesale every frame, while the mode is a decision that has to
 // outlive the frame that made it. A mode inside Snapshot would be reset by the
@@ -5756,6 +5779,19 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "input.gamepadAxis", "Input", false, {{"axis", P::String}}, {{"value", P::Float}}, "HE::api::input::gamepadAxis",
             [](Ctx&, const VV& a){ return VV{ Value::ofFloat(input::gamepadAxis(aS(a, 0))) }; } });
 
+        // Input actions by name — the polling twin of the Input.<Action>.*
+        // events, pushed by PlayerHost each frame (see input::ActionState).
+        t.push_back({ "input.actionDown", "Input", false, {{"action", P::String}}, {{"down", P::Bool}}, "HE::api::input::actionDown",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::actionDown(aS(a, 0))) }; } });
+        t.push_back({ "input.actionPressed", "Input", false, {{"action", P::String}}, {{"pressed", P::Bool}}, "HE::api::input::actionPressed",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::actionPressed(aS(a, 0))) }; } });
+        t.push_back({ "input.actionReleased", "Input", false, {{"action", P::String}}, {{"released", P::Bool}}, "HE::api::input::actionReleased",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::actionReleased(aS(a, 0))) }; } });
+        t.push_back({ "input.actionAxis", "Input", false, {{"action", P::String}}, {{"value", P::Float}}, "HE::api::input::actionAxis",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(input::actionAxis(aS(a, 0))) }; } });
+        t.push_back({ "input.actionAxis2D", "Input", false, {{"action", P::String}}, {{"value", P::Vec2}}, "HE::api::input::actionAxis2D",
+            [](Ctx&, const VV& a){ return VV{ Value::ofVec2(input::actionAxis2D(aS(a, 0))) }; } });
+
         // Input routing — see input::Mode in the header for what each one gates.
         // Three rows rather than one taking a number: the palette entry has to
         // say which mode it sets, and the registry's one-callee-per-row rule
@@ -6450,6 +6486,11 @@ const std::vector<ApiFn>& registry()
             { "input.gamepadConnected", "Gamepad Connected" },
             { "input.gamepadButton", "Gamepad Button" },
             { "input.gamepadAxis", "Gamepad Axis" },
+            { "input.actionDown", "Input Action Down" },
+            { "input.actionPressed", "Input Action Pressed" },
+            { "input.actionReleased", "Input Action Released" },
+            { "input.actionAxis", "Input Action Axis" },
+            { "input.actionAxis2D", "Input Action Axis 2D" },
             { "input.setModeGameOnly", "Set Input Mode: Game Only" },
             { "input.setModeGameAndUI", "Set Input Mode: Game and UI" },
             { "input.setModeUIOnly", "Set Input Mode: UI Only" },

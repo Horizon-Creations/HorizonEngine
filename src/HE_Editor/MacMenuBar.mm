@@ -183,6 +183,11 @@ void install()
 		NSMenu* edit = heAddSubmenu(main, @"Edit");
 		heAddItem(edit, @"Undo", C::Undo, nil, 0, true);
 		heAddItem(edit, @"Redo", C::Redo, nil, 0, true);
+		[edit addItem:[NSMenuItem separatorItem]];
+		// The project's own settings, an editor tab like Preferences (which sits
+		// in the app menu, where macOS keeps an application's preferences). No
+		// key equivalent, for the reason the whole block has none.
+		heAddItem(edit, @"Project Settings…", C::ProjectSettings, nil, 0, true);
 	}
 
 	// ── View ───────────────────────────────────────────────────────────────
@@ -207,6 +212,10 @@ void install()
 			heAddItem(view, @"Console",               C::ToggleConsole,     nil, 0, false));
 		s_toggleItems.emplace_back(C::ToggleAudioMixer,
 			heAddItem(view, @"Audio Mixer",           C::ToggleAudioMixer,  nil, 0, false));
+		s_toggleItems.emplace_back(C::ToggleUndoHistory,
+			heAddItem(view, @"Undo History",          C::ToggleUndoHistory, nil, 0, false));
+		s_toggleItems.emplace_back(C::ToggleWatch,
+			heAddItem(view, @"Watch",                 C::ToggleWatch,       nil, 0, false));
 		// The world grid is not a panel, but it is a View toggle the user looks
 		// for in this menu — on macOS the viewport toolbar's options popup is
 		// otherwise its only route.
@@ -214,6 +223,21 @@ void install()
 			NSMenuItem* grid = heAddItem(view, @"Ground Grid", C::ToggleGroundGrid, nil, 0, true);
 			s_toggleItems.emplace_back(C::ToggleGroundGrid, grid);
 			s_gameOnlyItems.push_back(grid);
+		}
+		// The secondary scene viewports, ticked while open like the panels above.
+		{
+			[view addItem:[NSMenuItem separatorItem]];
+			const struct { C cmd; NSString* title; } panes[] = {
+				{ C::ToggleScene2, @"Scene 2" },
+				{ C::ToggleScene3, @"Scene 3" },
+				{ C::ToggleScene4, @"Scene 4" },
+			};
+			for (const auto& p : panes)
+			{
+				NSMenuItem* item = heAddItem(view, p.title, p.cmd, nil, 0, true);
+				s_toggleItems.emplace_back(p.cmd, item);
+				s_gameOnlyItems.push_back(item);
+			}
 		}
 		[view addItem:[NSMenuItem separatorItem]];
 		s_gameOnlyItems.push_back(

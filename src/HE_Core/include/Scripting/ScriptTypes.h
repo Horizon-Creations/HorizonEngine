@@ -62,6 +62,26 @@ namespace HE
 	// they cannot drift apart again: the interpreter's Print, the same Print in
 	// generated C++, and ScriptApi::log once printed three different prefixes.
 	HE_API std::string scriptLogLine(const std::string& message);
+
+	// Where a script error happened, if its message says. Both backends spell
+	// the position the same way, `<script>:<line>: <message>` — Lua because the
+	// chunk is named after the script (ScriptEngine::loadChunk), Python because
+	// the backend compiles the source under that name and prefixes the innermost
+	// traceback frame (PyScriptBackend's takePyError). The wrapper the
+	// ScriptContext logs around it ("Compile error in script 'x': …", "Lua
+	// script instance 3 failed in onUpdate(): …") is skipped over, so the
+	// console can hand a logged line straight in.
+	//
+	// `script` is the name the script was loaded under (the ScriptComponent's
+	// moduleName), not a file: who wants the file resolves it from there.
+	struct ScriptErrorLocation
+	{
+		std::string script;
+		int         line = 0;   // 1-based, as the language counts
+	};
+	// True if `message` names a position. The first `<name>:<digits>:` wins; a
+	// name that is only digits ("12:34:56") is not one.
+	HE_API bool parseScriptErrorLocation(const std::string& message, ScriptErrorLocation& out);
 }
 
 // UI pointer events dispatched to a UI element's behavior script. Handler

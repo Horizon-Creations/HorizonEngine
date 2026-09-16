@@ -8,10 +8,20 @@
 #include "EditorTransformGizmo.h"        // shared move/rotate/scale gizmo
 #include "EditorMarquee.h"               // which objects a drawn frame encloses
 #include "ViewportPick.h"                // which object a click lands on (mesh before terrain)
+#include "PreviewPick.h"                 // screenRay — the surface-snap probe's ray
+#include <HorizonScene/TransformHierarchy.h>          // worldPositionOf — fresh, not a frame old
+#include <HorizonScene/Components/TerrainComponent.h>      // vertex snap skips the landscape
+#include <HorizonScene/Components/TerrainChunkComponent.h>
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
+#include "ViewportViewMode.h"            // the headless HE_DUMP_VIEWMODE override on the mode push
 #include "EditorWidgets.h"               // WrapText — text wraps at the pane edge, never runs off it
+#include "EditorHelp.h"                  // the context menu's scope
+#include "EditorTheme.h"                 // the stats overlay's accent line
+#include "ViewportActions.h"             // hide / isolate / show all / group — headless, tested
+#include "CameraBookmarks.h"             // the digit keys
+#include "EditorShortcuts.h"             // the viewport's chords, rebindable in Preferences
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
@@ -26,6 +36,7 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <string>
@@ -41,18 +52,40 @@
 namespace ViewportPanel
 {
 
-// ── Ground grid ─────────────────────────────────────────────────────────────
-// Outside the ImGui guard on purpose: this is pure geometry pushed into a debug
-// line buffer, and keeping the toggle next to the only code that reads it is
-// what stops a second copy of "is the grid on" from appearing.
-static bool s_groundGrid = true;
+// ── Show flags ──────────────────────────────────────────────────────────────
+// Outside the ImGui guard on purpose: the ground grid below is pure geometry
+// pushed into a debug line buffer, and the other flags are read by the debug
+// block in EditorApplication and by the extractor, none of which is UI.
+// Keeping the switches next to the only code that reads the grid's is what
+// stops a second copy of "is the grid on" from appearing.
+static ShowFlags s_showFlags;
 
-bool groundGridEnabled()        { return s_groundGrid; }
-void setGroundGridEnabled(bool on) { s_groundGrid = on; }
+ShowFlags& showFlags() { return s_showFlags; }
+
+bool groundGridEnabled()           { return s_showFlags.groundGrid; }
+void setGroundGridEnabled(bool on) { s_showFlags.groundGrid = on; }
+
+const ShowFlagField* showFlagFields(int& outCount)
+{
+	static const ShowFlagField kFields[] = {
+		{ "ViewportGroundGrid",         &ShowFlags::groundGrid    },   // the key the grid always had
+		{ "ViewportShowSelection",      &ShowFlags::selection     },
+		{ "ViewportShowColliders",      &ShowFlags::colliders     },
+		{ "ViewportShowJoints",         &ShowFlags::joints        },
+		{ "ViewportShowNavMesh",        &ShowFlags::navMesh       },
+		{ "ViewportShowEditorIcons",    &ShowFlags::editorIcons   },
+		{ "ViewportShowGuides",         &ShowFlags::guides        },
+		{ "ViewportShowCollaborators",  &ShowFlags::collaborators },
+		{ "ViewportShowScriptDebug",    &ShowFlags::scriptDebug   },
+		{ "ViewportShowStats",          &ShowFlags::stats         },
+	};
+	outCount = static_cast<int>(sizeof(kFields) / sizeof(kFields[0]));
+	return kFields;
+}
 
 void appendGroundGrid(const EditorCamera& cam, bool playing, DebugDrawBuffer& out)
 {
-	if (playing || !s_groundGrid) return;
+	if (playing || !s_showFlags.groundGrid) return;
 
 	const glm::vec3 eye  = cam.position();
 	const float     camX = eye.x;
@@ -178,6 +211,12 @@ static ImVec2      s_viewportDropMouse{};// screen pos of the drop
 // consumed by the gizmo — one owner for all three.
 static ViewportToolbar::State s_tb;
 
+// A context menu asked for this frame (right-click without a look, Menu key)
+// and where to put it. Raised in the camera block, consumed after the pick
+// section — the pick lambda that decides what the click landed on lives there.
+static bool   s_contextMenuRequest = false;
+static ImVec2 s_contextMenuAt{};
+
 // Picking + sculpt AABB cache (keyed by mesh asset UUID)
 static std::unordered_map<HE::UUID, HE::AABB> s_aabbCache;
 
@@ -261,18 +300,20 @@ static void collectSubtree(entt::registry& reg, Entity e,
 // Their editor ICONS are not geometry for this purpose: the symbol is sized in
 // fractions of the screen and shrinks as the camera nears, so measuring it
 // would frame a light to a few centimetres and then closer with every press.
-static bool selectionFocusSphere(HorizonWorld& world, ContentManager* cm, Entity sel,
-                                 const RenderWorld& snapshot,
-                                 glm::vec3& centerOut, float& radiusOut)
+// The two boxes the framing (and the secondary viewports' selection outline)
+// are built from: `geometry` is what the selection actually draws, `pivots`
+// where its entities sit, drawn or not. Either may come back invalid.
+static void selectionBoxes(HorizonWorld& world, ContentManager* cm, Entity sel,
+                           const RenderWorld& snapshot,
+                           HE::AABB& geometry, HE::AABB& pivots)
 {
 	auto& reg = world.registry();
-	if (!reg.valid(sel)) return false;
+	geometry = HE::AABB{};
+	pivots   = HE::AABB{};
+	if (!reg.valid(sel)) return;
 
 	std::unordered_set<uint32_t> subtree;
 	collectSubtree(reg, sel, subtree);
-
-	HE::AABB geometry;   // what the selection actually draws
-	HE::AABB pivots;     // where its entities sit, drawn or not
 
 	auto expandFromObject = [&](const RenderObject& obj)
 	{
@@ -288,6 +329,15 @@ static bool selectionFocusSphere(HorizonWorld& world, ContentManager* cm, Entity
 	for (const uint32_t raw : subtree)
 		if (const auto* t = reg.try_get<TransformComponent>(static_cast<Entity>(raw)))
 			pivots.expand(glm::vec3(t->worldMatrix[3]));
+}
+
+static bool selectionFocusSphere(HorizonWorld& world, ContentManager* cm, Entity sel,
+                                 const RenderWorld& snapshot,
+                                 glm::vec3& centerOut, float& radiusOut)
+{
+	HE::AABB geometry;   // what the selection actually draws
+	HE::AABB pivots;     // where its entities sit, drawn or not
+	selectionBoxes(world, cm, sel, snapshot, geometry, pivots);
 
 	if (!geometry.isValid() && !pivots.isValid()) return false;
 
@@ -319,6 +369,345 @@ static bool selectionFocusSphere(HorizonWorld& world, ContentManager* cm, Entity
 // so the release has to name whose capture it means.
 static const char kSceneNavOwner = 0;
 const void* navOwner() { return &kSceneNavOwner; }
+
+// ── Right-click context menu ────────────────────────────────────────────────
+// The verbs that belong to "this thing under the cursor": frame it, hide it,
+// hide everything else, put it in a group, lock it, the clipboard, delete.
+// Every scene edit goes through ViewportActions (headless, tested) or the same
+// AppContext hooks the Edit menu and the Outliner use; this function only
+// draws rows and takes the undo snapshot — ONE per operation, before it, the
+// way the Outliner's context menu does.
+//
+// Opened by a right-click that did not turn into a fly-look (see the gesture
+// in render()) or by the Menu key / Shift+F10 over the picture. As in the
+// Outliner: a click on something outside the selection selects it first, a
+// click on a selected thing keeps the set (the menu then acts on all of it),
+// and a click on nothing leaves the selection alone — Show All and Paste are
+// still worth a menu there.
+namespace
+{
+	// The one-operation undo + prefab-override bookkeeping shared by every
+	// row below: snapshot before, note every touched entity after.
+	void noteEdited(AppContext& ctx, const std::vector<Entity>& touched)
+	{
+		if (!ctx.noteEntityEdited) return;
+		for (const Entity e : touched) ctx.noteEntityEdited(e);
+	}
+	void snapshot(AppContext& ctx, const char* label)
+	{
+		if (ctx.undoSys) ctx.undoSys->snapshotNow(label);
+	}
+
+	// ── The stats overlay (Show ▸ Stats) ─────────────────────────────────────
+	// The frame's counters in the viewport's top-right corner, painted into the
+	// draw list like the name tags: frame rate and time, draw calls, triangles,
+	// visible/total objects, and — only where the backend measures them — the
+	// occlusion culler's take, the GPU time and the VRAM in use. A line that
+	// the backend cannot fill is left out rather than shown as 0 or -1, which
+	// would read as a measurement.
+	//
+	// Every number is the LAST rendered frame's, straight from the renderer
+	// (IRenderer::GetFrameGpuStats — the same struct the profiler and the
+	// headless dump read), so this and the profiler can never disagree.
+	std::string thousands(uint32_t v)
+	{
+		std::string s = std::to_string(v);
+		for (int i = static_cast<int>(s.size()) - 3; i > 0; i -= 3) s.insert(static_cast<size_t>(i), ",");
+		return s;
+	}
+	void drawStatsOverlay(AppContext& ctx, const ImVec2& rectMin, const ImVec2& rectMax)
+	{
+		if (!ctx.renderer) return;
+		const IRenderer::FrameGpuStats st = ctx.renderer->GetFrameGpuStats();
+		const ImGuiIO& io = ImGui::GetIO();
+
+		std::vector<std::string> lines;
+		char buf[96];
+		std::snprintf(buf, sizeof(buf), "%.0f FPS   %.2f ms", io.Framerate,
+		              io.Framerate > 0.0f ? 1000.0f / io.Framerate : 0.0f);
+		lines.emplace_back(buf);
+		lines.push_back("Draws      " + thousands(st.drawCalls));
+		lines.push_back("Triangles  " + thousands(st.triangles));
+		lines.push_back("Objects    " + thousands(st.visibleObjects) + " / " + thousands(st.totalObjects));
+		if (st.occlusionCulled > 0)
+			lines.push_back("Occluded   " + thousands(st.occlusionCulled));
+		if (st.gpuFrameMs >= 0.0)
+		{
+			std::snprintf(buf, sizeof(buf), "GPU        %.2f ms", st.gpuFrameMs);
+			lines.emplace_back(buf);
+		}
+		if (st.vramBudgetMB > 0.0)
+		{
+			std::snprintf(buf, sizeof(buf), "VRAM       %.0f / %.0f MB", st.vramUsedMB, st.vramBudgetMB);
+			lines.emplace_back(buf);
+		}
+
+		// Sized to the widest line; a translucent card so it stays readable
+		// over a bright sky without hiding much of the scene.
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const float pad = 6.0f, lineH = ImGui::GetTextLineHeight();
+		float w = 0.0f;
+		for (const std::string& l : lines) w = std::max(w, ImGui::CalcTextSize(l.c_str()).x);
+		const ImVec2 size(w + pad * 2.0f, lineH * static_cast<float>(lines.size()) + pad * 2.0f);
+		const ImVec2 p0(rectMax.x - size.x - 8.0f, rectMin.y + 8.0f);
+		const ImVec2 p1(p0.x + size.x, p0.y + size.y);
+		if (p0.x < rectMin.x || p1.y > rectMax.y) return;   // too small a pane to hold it
+		dl->AddRectFilled(p0, p1, IM_COL32(12, 11, 10, 190), 4.0f);
+		dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 30), 4.0f);
+		float y = p0.y + pad;
+		for (size_t i = 0; i < lines.size(); ++i)
+		{
+			// The first line is the one people glance at; it gets the accent.
+			const ImU32 col = i == 0 ? ImGui::GetColorU32(HE::Ed::Theme::AccentBright)
+			                         : IM_COL32(225, 222, 215, 255);
+			dl->AddText(ImVec2(p0.x + pad, y), col, lines[i].c_str());
+			y += lineH;
+		}
+	}
+}
+
+// The actions behind the menu, also bound to keys in render(): one place for
+// "what does Hide do", whichever way it was asked for.
+static void hideSelected(AppContext& ctx)
+{
+	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
+	snapshot(ctx, "Hide Selected");
+	noteEdited(ctx, ViewportActions::hideSelected(*ctx.world, ctx.selection));
+}
+static void isolateSelected(AppContext& ctx)
+{
+	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
+	snapshot(ctx, "Isolate Selected");
+	noteEdited(ctx, ViewportActions::isolateSelected(*ctx.world, ctx.selection));
+}
+static void showAll(AppContext& ctx)
+{
+	if (!ctx.world || ctx.isPlaying) return;
+	snapshot(ctx, "Show All");
+	noteEdited(ctx, ViewportActions::showAll(*ctx.world));
+}
+// Group and Ungroup rewrite the local transform of what they move (the world
+// pose is kept, the local is what changes), so those are the edited entities
+// — the roots going in, the children coming out.
+static void groupSelected(AppContext& ctx)
+{
+	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
+	const std::vector<Entity> roots = ctx.selection.roots(ctx.world->registry());
+	snapshot(ctx, "Group Selected");
+	if (ViewportActions::groupSelected(*ctx.world, ctx.selection) != entt::null)
+		noteEdited(ctx, roots);
+}
+static void ungroupSelected(AppContext& ctx)
+{
+	if (!ctx.world || ctx.isPlaying) return;
+	snapshot(ctx, "Ungroup Selected");
+	noteEdited(ctx, ViewportActions::ungroupSelected(*ctx.world, ctx.selection));
+}
+// The scene as something to land on: a triangle-exact ray probe over this
+// frame's extract, minus every entity in `exclude` (the selection's own
+// subtrees — a thing cannot rest on itself) and minus the editor's icon
+// billboards, which are in the extract so a click can select a lamp but are
+// not surfaces anyone means when they say "the ground".
+static HE::ScenePick::ObjectFilter surfaceFilter(const std::unordered_set<uint32_t>& exclude)
+{
+	return [&exclude](const RenderObject& obj)
+	{
+		return exclude.find(obj.entityId) == exclude.end()
+		    && !HE::isEditorIconMaterial(obj.materialAssetId);
+	};
+}
+static bool probeSurface(AppContext& ctx, const RenderWorld& snapshotWorld,
+                         const glm::vec3& origin, const glm::vec3& dir,
+                         const std::unordered_set<uint32_t>& exclude,
+                         glm::vec3& outPoint, glm::vec3* outNormal = nullptr)
+{
+	if (!ctx.contentManager) return false;
+	const HE::ScenePick::SurfaceHit hit = HE::ScenePick::raycast(
+		snapshotWorld, meshLookup(*ctx.contentManager), origin, dir, surfaceFilter(exclude));
+	if (!hit.hit) return false;
+	outPoint = hit.point;
+	if (outNormal) *outNormal = hit.normal;
+	return true;
+}
+// Snap to Ground (End): every selection root dropped onto what is beneath it.
+// The geometry question is ViewportActions' (headless, tested); this only
+// hands it the scene probe and the selection's boxes, and takes the snapshot.
+static void snapSelectionToGround(AppContext& ctx, const RenderWorld& snapshotWorld)
+{
+	if (!ctx.world || ctx.isPlaying || ctx.selection.empty() || !ctx.contentManager) return;
+	const ViewportActions::SurfaceProbe probe =
+		[&](const glm::vec3& origin, const glm::vec3& dir,
+		    const std::unordered_set<uint32_t>& exclude, glm::vec3& out)
+		{ return probeSurface(ctx, snapshotWorld, origin, dir, exclude, out); };
+	const ViewportActions::SubtreeBounds bounds =
+		[&](Entity root, HE::AABB& box)
+		{
+			HE::AABB pivots;
+			selectionBoxes(*ctx.world, ctx.contentManager, root, snapshotWorld, box, pivots);
+			return box.isValid();
+		};
+	snapshot(ctx, "Snap to Ground");
+	noteEdited(ctx, ViewportActions::snapToGround(*ctx.world, ctx.selection, probe, bounds));
+}
+
+static void focusSelected(AppContext& ctx, const RenderWorld& snapshotWorld)
+{
+	if (!ctx.world || !ctx.editorCamera) return;
+	const Entity primary = ctx.selection.primary();
+	if (primary == entt::null || !ctx.world->registry().valid(primary)) return;
+	glm::vec3 center(0.0f);
+	float     radius = 0.0f;
+	if (selectionFocusSphere(*ctx.world, ctx.contentManager, primary, snapshotWorld, center, radius))
+		ctx.editorCamera->focusOn(center, radius);
+}
+
+// The scene extract this panel drew its last frame from — declared at file
+// scope (rather than as the static inside render() it used to be) because the
+// secondary viewports frame the selection against it too: they have no extract
+// of their own to measure (their picture is drawn inside RenderWorldPreview),
+// and the selection's boxes are the same boxes from any direction.
+static RenderExtractor s_extractor;
+static RenderWorld     s_sceneSnapshot;
+
+bool focusSelection(AppContext& ctx, EditorCamera& cam)
+{
+	if (!ctx.world) return false;
+	const Entity primary = ctx.selection.primary();
+	if (primary == entt::null || !ctx.world->registry().valid(primary)) return false;
+	glm::vec3 center(0.0f);
+	float     radius = 0.0f;
+	if (!selectionFocusSphere(*ctx.world, ctx.contentManager, primary, s_sceneSnapshot, center, radius))
+		return false;
+	cam.focusOn(center, radius);
+	return true;
+}
+
+bool selectionBox(AppContext& ctx, HE::AABB& out)
+{
+	if (!ctx.world) return false;
+	const Entity primary = ctx.selection.primary();
+	if (primary == entt::null || !ctx.world->registry().valid(primary)) return false;
+	HE::AABB geometry, pivots;
+	selectionBoxes(*ctx.world, ctx.contentManager, primary, s_sceneSnapshot, geometry, pivots);
+	if (geometry.isValid()) { out = geometry; return true; }
+	if (!pivots.isValid()) return false;
+	// Nothing here draws (a light, an empty group): a small box around where
+	// it sits, so the outline still says "there".
+	out = pivots;
+	out.expand(pivots.min - glm::vec3(0.5f));
+	out.expand(pivots.max + glm::vec3(0.5f));
+	return true;
+}
+
+// View presets on the numeric keypad (Blender's layout, the one people arrive
+// with): 7 Top, 1 Front, 3 Right, Ctrl flips each to its opposite, 5 toggles
+// the lens. Keypad only — the plain digits are the bookmarks, and a laptop
+// without a keypad has the toolbar's view cell for the same thing.
+void presetKeys(EditorCamera& cam)
+{
+	using VP = EditorCamera::ViewPreset;
+	const bool flip = ImGui::GetIO().KeyCtrl;
+	if (ImGui::IsKeyPressed(ImGuiKey_Keypad7, false))
+		cam.applyPreset(flip ? VP::Bottom : VP::Top);
+	else if (ImGui::IsKeyPressed(ImGuiKey_Keypad1, false))
+		cam.applyPreset(flip ? VP::Back : VP::Front);
+	else if (ImGui::IsKeyPressed(ImGuiKey_Keypad3, false))
+		cam.applyPreset(flip ? VP::Left : VP::Right);
+	else if (ImGui::IsKeyPressed(ImGuiKey_Keypad5, false))
+		cam.setOrthographic(!cam.orthographic());
+}
+
+// Camera bookmarks on the digit row: Ctrl+<digit> remembers the camera's
+// pose, <digit> puts it back. The caller has already checked that the
+// viewport is hovered, no text field wants the keys and Alt is up.
+void bookmarkKeys(EditorCamera& cam)
+{
+	static const ImGuiKey kDigits[CameraBookmarks::kSlots] = {
+		ImGuiKey_0, ImGuiKey_1, ImGuiKey_2, ImGuiKey_3, ImGuiKey_4,
+		ImGuiKey_5, ImGuiKey_6, ImGuiKey_7, ImGuiKey_8, ImGuiKey_9,
+	};
+	CameraBookmarks::Set& marks = CameraBookmarks::editorSet();
+	const bool store = ImGui::GetIO().KeyCtrl;
+	for (int i = 0; i < CameraBookmarks::kSlots; ++i)
+	{
+		if (!ImGui::IsKeyPressed(kDigits[i], false)) continue;
+		if (store) marks.store(i, cam);
+		else       marks.recall(i, cam);
+		break;
+	}
+}
+
+static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
+{
+	// Every row is looked up as "Viewport Menu/<its label>".
+	HE::Ed::Help::Scope helpScope("Viewport Menu");
+	auto& reg = ctx.world->registry();
+	const bool editable  = !ctx.isPlaying;
+	const bool hasSel    = !ctx.selection.empty();
+	const bool canFocus  = ctx.editorCamera && ctx.selection.primary() != entt::null
+	                    && reg.valid(ctx.selection.primary());
+
+	if (EditorWidgets::menuItem("Focus Selected", EditorShortcuts::label("viewport.focus").c_str(), false, canFocus))
+		focusSelected(ctx, snapshotWorld);
+	if (EditorWidgets::menuItem("Snap to Ground", EditorShortcuts::label("viewport.snapToGround").c_str(), false, editable && hasSel))
+		snapSelectionToGround(ctx, snapshotWorld);
+
+	ImGui::Separator();
+	if (EditorWidgets::menuItem("Hide Selected", EditorShortcuts::label("viewport.hide").c_str(), false, editable && hasSel))
+		hideSelected(ctx);
+	if (EditorWidgets::menuItem("Isolate Selected", EditorShortcuts::label("viewport.isolate").c_str(), false, editable && hasSel))
+		isolateSelected(ctx);
+	if (EditorWidgets::menuItem("Show All", EditorShortcuts::label("viewport.showAll").c_str(), false,
+	                            editable && ViewportActions::anyHidden(*ctx.world)))
+		showAll(ctx);
+
+	ImGui::Separator();
+	// Group needs something that is not a built-in; the sun cannot be grouped.
+	bool groupable = false;
+	for (const Entity e : ctx.selection.entities())
+		if (reg.valid(e) && !ctx.world->isBuiltin(e)) { groupable = true; break; }
+	if (EditorWidgets::menuItem("Group", EditorShortcuts::label("viewport.group").c_str(), false, editable && groupable))
+		groupSelected(ctx);
+	if (EditorWidgets::menuItem("Ungroup", EditorShortcuts::label("viewport.ungroup").c_str(), false,
+	                            editable && ViewportActions::canUngroup(*ctx.world, ctx.selection)))
+		ungroupSelected(ctx);
+
+	// Lock / unlock, verb decided by the primary the way the Outliner's row
+	// decides it: a locked primary offers Unlock, the rest of the set follows.
+	{
+		const Entity primary = ctx.selection.primary();
+		const bool primaryLocked = primary != entt::null && reg.valid(primary)
+		                        && reg.all_of<EditorLockComponent>(primary);
+		if (EditorWidgets::menuItem(primaryLocked ? "Unlock" : "Lock", nullptr, false,
+		                            editable && hasSel))
+		{
+			snapshot(ctx, primaryLocked ? "Unlock Entity" : "Lock Entity");
+			for (const Entity e : ctx.selection.entities())
+			{
+				if (!reg.valid(e) || e == ctx.world->rootEntity()) continue;
+				if (primaryLocked) reg.remove<EditorLockComponent>(e);
+				else               reg.emplace_or_replace<EditorLockComponent>(e);
+			}
+		}
+	}
+
+	// The SAME hooks the Edit menu, the keyboard and the Outliner use; they
+	// act on the selection, which opening this menu just settled.
+	ImGui::Separator();
+	if (EditorWidgets::menuItem("Duplicate", EditorShortcuts::label("entity.duplicate").c_str(), false, editable && hasSel) && ctx.duplicateEntity)
+		ctx.duplicateEntity();
+	if (EditorWidgets::menuItem("Copy", EditorShortcuts::label("entity.copy").c_str(), false, editable && hasSel) && ctx.copyEntity)
+		ctx.copyEntity();
+	if (EditorWidgets::menuItem("Cut", EditorShortcuts::label("entity.cut").c_str(), false, editable && hasSel) && ctx.cutEntity)
+		ctx.cutEntity();
+	if (EditorWidgets::menuItem("Paste", EditorShortcuts::label("entity.paste").c_str(), false, editable && ctx.entityClipboardFull)
+	    && ctx.pasteEntity)
+		ctx.pasteEntity();
+
+	ImGui::Separator();
+	if (EditorWidgets::dangerMenuItem("Delete", editable && hasSel) && ctx.deleteEntity)
+		ctx.deleteEntity();
+}
 
 void releaseViewportLookCapture(SDL_Window* win)
 {
@@ -359,6 +748,17 @@ void render(AppContext& ctx, float dt)
 		// controls is a promise that they mean something here.
 		if (!ctx.appLivePreview)
 			ViewportToolbar::render(ctx, s_tb);
+
+		// The view mode goes to the renderer every frame, like the camera: it is
+		// this panel's state, and the backend keeps whatever it was last told.
+		// An application preview has no scene to shade and shows Lit. The
+		// headless HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER overrides win here too,
+		// for the same reason HE_DUMP_RENDERPATH does in EditorApplication's
+		// per-frame push: a push that ran every frame would otherwise flip a
+		// capture back to the toolbar's value between setup and the frame.
+		if (ctx.renderer)
+			ctx.renderer->SetViewMode(HE::Ed::viewModeOverrideFromEnv(
+				ctx.appLivePreview ? HE::ViewMode::Lit : s_tb.viewMode));
 
 		ImVec2 avail = ImGui::GetContentRegionAvail();
 
@@ -424,8 +824,7 @@ void render(AppContext& ctx, float dt)
 				// picking ray and the drop probe all read this frame). F therefore
 				// frames against last frame's boxes, which is exactly as accurate:
 				// nothing resizes between two frames of holding a key down.
-				static RenderExtractor s_extractor;
-				static RenderWorld     s_sceneSnapshot;
+				// (s_extractor / s_sceneSnapshot, file scope above.)
 
 				// ── Editor camera: drive from viewport input ────────────────
 				// In play mode the game's scene camera takes over, so the
@@ -483,10 +882,89 @@ void render(AppContext& ctx, float dt)
 					EditorCamera::Input cin;
 					navigating = EditorViewportNav::gather(ctx, navOwner(), imageHovered,
 					                                      dt, avail.y, cin);
+
+					// ── Right-click → context menu ──────────────────────────
+					// The right button is the fly-look, and gather() takes the
+					// cursor on the press edge — so a CLICK is a press that was
+					// released before the look moved: the same button, decided
+					// at release by how far it travelled, the way the left
+					// button decides click-vs-frame above. The press is ImGui's
+					// click edge — the same one gather() engages on, and one
+					// ImGui's event queue never drops however short the click.
+					// The release is the PHYSICAL SDL button going up, as
+					// gather() reads it: mid-look ImGui's mouse state is zeroed
+					// by the NoMouse flag, so the release edge never reaches
+					// IsMouseReleased. The travel is the look's own relative-
+					// motion delta (in relative mode the absolute position does
+					// not move at all). The press position is remembered from
+					// the press frame, where ImGui's is still good; by the
+					// release the capture has warped the cursor back there and
+					// io.MousePos is a frame stale.
+					//
+					// Not on a trackpad: there the tap IS the fly toggle, and
+					// the menu is on the Menu key / Shift+F10 instead (below).
+					{
+						static bool   s_rmbArmed  = false;
+						static float  s_rmbTravel = 0.0f;
+						static ImVec2 s_rmbPressAt{};
+						constexpr float kClickTravel = 4.0f;   // px of look before it is a drag
+						if (ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+						{
+							s_rmbArmed   = imageHovered && !io.KeyAlt && !io.WantTextInput
+							            && !EditorInput::trackpadPointer(ctx);
+							s_rmbTravel  = 0.0f;
+							s_rmbPressAt = ImGui::GetMousePos();
+						}
+						if (s_rmbArmed)
+						{
+							if (cin.look)
+								s_rmbTravel += std::abs(cin.mouseDelta.x) + std::abs(cin.mouseDelta.y);
+							// A flight with a still mouse — RMB held, W pressed,
+							// or the wheel dollying — is a look too, not a click.
+							if (cin.moveAxis != glm::vec3(0.0f) || cin.wheel != 0.0f)
+								s_rmbArmed = false;
+							const bool physRmb =
+								(SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) != 0;
+							if (!physRmb)
+							{
+								if (s_rmbTravel < kClickTravel)
+								{
+									s_contextMenuRequest = true;
+									s_contextMenuAt      = s_rmbPressAt;
+								}
+								s_rmbArmed = false;
+							}
+						}
+					}
+					// The keyboard way in, for a trackpad or for a hand that is
+					// already on the keys: at the cursor, over the picture.
+					if (imageHovered && !io.WantTextInput && !navigating &&
+					    (ImGui::IsKeyPressed(ImGuiKey_Menu, false) ||
+					     (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F10, false))))
+					{
+						s_contextMenuRequest = true;
+						s_contextMenuAt      = ImGui::GetMousePos();
+					}
+					// The menu's verbs on keys, the ones its rows print. Alt+H
+					// is safe beside Alt+LMB orbit — a key press is not a drag.
+					// The chords come from EditorShortcuts (Preferences ▸
+					// Shortcuts), which also holds the not-while-typing guard.
+					if (imageHovered && !navigating && !ctx.isPlaying)
+					{
+						if (EditorShortcuts::pressed("viewport.showAll"))  showAll(ctx);
+						if (EditorShortcuts::pressed("viewport.isolate"))  isolateSelected(ctx);
+						if (EditorShortcuts::pressed("viewport.hide"))     hideSelected(ctx);
+						if (EditorShortcuts::pressed("viewport.group"))    groupSelected(ctx);
+						if (EditorShortcuts::pressed("viewport.ungroup"))  ungroupSelected(ctx);
+						// End drops the selection onto the ground — Unreal's key
+						// for it, and one nothing else in the viewport uses.
+						if (EditorShortcuts::pressed("viewport.snapToGround"))
+							snapSelectionToGround(ctx, s_sceneSnapshot);
+					}
 					// Focus on selection (F) — frame the selected entity and
 					// everything parented under it (see selectionFocusSphere).
-					if (imageHovered && !io.WantTextInput && !navigating &&
-					    ImGui::IsKeyPressed(ImGuiKey_F) &&
+					if (imageHovered && !navigating &&
+					    EditorShortcuts::pressed("viewport.focus") &&
 					    ctx.world && ctx.selection.primary() != entt::null &&
 					    ctx.world->registry().valid(ctx.selection.primary()))
 					{
@@ -497,15 +975,46 @@ void render(AppContext& ctx, float dt)
 						                         center, radius))
 							cam.focusOn(center, radius);
 					}
+					// View presets on the numeric keypad (Blender's layout, the
+					// one people arrive with): 7 Top, 1 Front, 3 Right, Ctrl
+					// flips each to its opposite, 5 toggles the lens. Keypad
+					// only — the plain digits are free for whatever a tool
+					// binds, and a laptop without a keypad has the toolbar's
+					// view cell for the same thing.
+					if (imageHovered && !io.WantTextInput && !navigating)
+						presetKeys(cam);
+					// Camera bookmarks on the digit row (Unreal's layout): Ctrl
+					// stores this view, the bare digit jumps back. Not with Alt
+					// held — Alt+2/3/4 are the view modes below.
+					if (imageHovered && !io.WantTextInput && !navigating && !io.KeyAlt)
+						bookmarkKeys(cam);
 
 					cam.update(cin);
-					// Push to the backend so this frame's render uses it.
-					ctx.renderer->SetEditorCamera(cam.makeOverride());
+					// Push to the backend so this frame's render uses it. The
+					// icon switch rides on the override (see EditorCameraOverride)
+					// — set here AND on the pick extract below, or the picker and
+					// the picture disagree about whether the lamp symbol exists.
+					EditorCameraOverride ov = cam.makeOverride();
+					ov.editorIcons = s_showFlags.editorIcons;
+					ctx.renderer->SetEditorCamera(ov);
 				}
 
-				const EditorCameraOverride camOverride =
+				// View mode on Alt+2 / 3 / 4 (Unreal's layout: Wireframe, Unlit,
+				// Lit). Outside the camera branch on purpose — it is a renderer
+				// flag, so it works while the scene plays too. Alt alone is the
+				// orbit modifier, which a digit press does not disturb.
+				if (viewportHovered && !io.WantTextInput && io.KeyAlt && !navigating
+				    && !ctx.appLivePreview)
+				{
+					if (ImGui::IsKeyPressed(ImGuiKey_2, false))      s_tb.viewMode = HE::ViewMode::Wireframe;
+					else if (ImGui::IsKeyPressed(ImGuiKey_3, false)) s_tb.viewMode = HE::ViewMode::Unlit;
+					else if (ImGui::IsKeyPressed(ImGuiKey_4, false)) s_tb.viewMode = HE::ViewMode::Lit;
+				}
+
+				EditorCameraOverride camOverride =
 					(ctx.editorCamera && !ctx.isPlaying) ? ctx.editorCamera->makeOverride()
 					                                     : EditorCameraOverride{};
+				camOverride.editorIcons = s_showFlags.editorIcons;
 				if (ctx.world)
 					s_extractor.extract(*ctx.world, s_sceneSnapshot, avail.x / avail.y,
 					                    camOverride.active ? &camOverride : nullptr);
@@ -571,7 +1080,7 @@ void render(AppContext& ctx, float dt)
 								spawnPos = ctx.editorCamera->position() + glm::vec3(cp*sy, sp, -cp*cy) * 8.0f;
 							}
 
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							if (ctx.undoSys) ctx.undoSys->snapshotNow("Place Asset");
 							if (mesh)
 							{
 								// Copied out BEFORE the material load below: the asset stores
@@ -693,11 +1202,67 @@ void render(AppContext& ctx, float dt)
 						                             [&reg](Entity e) { return reg.all_of<EditorLockComponent>(e); }),
 						              movable.end());
 					}
+					// Surface / vertex snapping: what a move drag lands on, asked
+					// of this frame's extract. Only built when the mode calls for
+					// it — the probe walks the scene, and the grid needs nothing.
+					EditorTransformGizmo::SnapProbe probe;
+					if (s_tb.probeSnapActive() && ctx.contentManager)
+					{
+						probe = [&](ViewportToolbar::State::SnapMode mode,
+						            const ImVec2& screen, glm::vec3& out) -> bool
+						{
+							auto& reg = ctx.world->registry();
+							std::unordered_set<uint32_t> exclude;
+							for (const Entity r : movable) collectSubtree(reg, r, exclude);
+							const glm::mat4 viewProj = s_sceneSnapshot.camera.projection
+							                         * s_sceneSnapshot.camera.view;
+							const glm::vec2 rmin(rectMin.x, rectMin.y);
+							const glm::vec2 rsize(rectMax.x - rectMin.x, rectMax.y - rectMin.y);
+							const glm::vec2 at(screen.x, screen.y);
+							if (mode == ViewportToolbar::State::SnapMode::Vertex)
+							{
+								// Terrain is left out: a landscape has vertices
+								// every metre and no corner anyone means to hit.
+								const HE::ScenePick::ObjectFilter base = surfaceFilter(exclude);
+								const HE::ScenePick::VertexHit hit = HE::ScenePick::nearestVertex(
+									s_sceneSnapshot, meshLookup(*ctx.contentManager), viewProj,
+									rmin, rsize, at, s_tb.snapVertexRadiusPx,
+									[&](const RenderObject& obj)
+									{
+										if (!base(obj)) return false;
+										const Entity e = static_cast<Entity>(obj.entityId);
+										return !reg.valid(e) ||
+										       !reg.any_of<TerrainComponent, TerrainChunkComponent>(e);
+									});
+								if (!hit.hit) return false;
+								out = hit.point;
+								return true;
+							}
+							glm::vec3 ro, rd;
+							if (!PreviewPick::screenRay(viewProj, rmin, rsize, at, ro, rd)) return false;
+							glm::vec3 normal;
+							if (!probeSurface(ctx, s_sceneSnapshot, ro, rd, exclude, out, &normal)) return false;
+							// Rest the object ON the surface: lift the pivot by its
+							// height above the bottom of what it draws, along the
+							// surface's normal. One object only — a group's pivot is
+							// a centroid, and its members have no shared bottom.
+							if (s_tb.snapSurfaceRest && movable.size() == 1)
+							{
+								HE::AABB geometry, pivots;
+								selectionBoxes(*ctx.world, ctx.contentManager, movable.front(),
+								               s_sceneSnapshot, geometry, pivots);
+								const float lift = HE::worldPositionOf(*ctx.world, movable.front()).y
+								                 - geometry.min.y;
+								if (geometry.isValid() && lift > 0.0f) out += normal * lift;
+							}
+							return true;
+						};
+					}
 					gizmoActive = EditorTransformGizmo::manipulate(
 						*ctx.world, movable,
 						s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
 						rectMin, rectMax, s_tb,
-						/*enabled=*/!navigating && !io.KeyAlt, ctx.undoSys);
+						/*enabled=*/!navigating && !io.KeyAlt, ctx.undoSys, nullptr, probe);
 				}
 
 				// ── Picking and the rubber band ─────────────────────────────
@@ -842,6 +1407,38 @@ void render(AppContext& ctx, float dt)
 					}
 				}
 
+				// ── Context menu ────────────────────────────────────────────
+				// Raised in the camera block; settled here because this is
+				// where pickAt lives. The Outliner's rule for what the menu is
+				// about: a hit outside the selection becomes the selection, a
+				// hit inside keeps it, a miss leaves it alone. Not in Landscape
+				// mode (a right-click there is a brush gesture waiting to
+				// happen) and never over a gizmo drag. A request raised while
+				// the nav latch is still set (a click so short that ImGui
+				// reports the press and the release on consecutive frames)
+				// waits one frame rather than being thrown away.
+				if (s_contextMenuRequest && !navigating)
+				{
+					s_contextMenuRequest = false;
+					if (pickable)
+					{
+						const Entity hit = pickAt(s_contextMenuAt);
+						if (hit != entt::null && !ctx.selection.contains(hit))
+							ctx.selection.set(hit);
+						ImGui::OpenPopup("##vpContextMenu");
+					}
+				}
+				// Placed by hand: on the frame the look capture let go the
+				// cursor was just warped and ImGui's mouse position is stale,
+				// so the popup would otherwise open wherever the cursor was
+				// before the press. (ImGui clears the pending position itself
+				// when the popup is not open.)
+				ImGui::SetNextWindowPos(s_contextMenuAt, ImGuiCond_Appearing);
+				if (ImGui::BeginPopup("##vpContextMenu"))
+				{
+					if (ctx.world) drawContextMenu(ctx, s_sceneSnapshot);
+					ImGui::EndPopup();
+				}
 
 				// ── Landscape brush cursor + sculpt ────────────────────────
 				// Brush state and the whole sculpt/paint stroke live in TerrainTools.cpp,
@@ -854,9 +1451,15 @@ void render(AppContext& ctx, float dt)
 				// Last, so they sit over the gizmo and the brush cursor: this is
 				// the layer that has to stay findable, and the camera matrices it
 				// projects with are the ones the frame was just rendered from.
-				CollabPresenceBar::DrawViewportMarkers(
-					ctx, s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
-					rectMin.x, rectMin.y, rectMax.x, rectMax.y);
+				// Same switch as their depth-tested rings in the debug block.
+				if (s_showFlags.collaborators)
+					CollabPresenceBar::DrawViewportMarkers(
+						ctx, s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
+						rectMin.x, rectMin.y, rectMax.x, rectMax.y);
+				// The counters, over everything: a diagnostic has to stay
+				// readable whatever the scene is doing underneath it.
+				if (s_showFlags.stats)
+					drawStatsOverlay(ctx, rectMin, rectMax);
 			}
 			else
 			{

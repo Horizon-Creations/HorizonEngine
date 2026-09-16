@@ -105,6 +105,21 @@ void signatureInto(const Node& n, NodeSig& s)
                p.container, p.keyType, defOf(p.keyTypeName) }; };
     switch (n.type)
     {
+    case T::Reroute:
+        // Unlabelled on both sides: the knot is drawn as a dot, and a label
+        // would be a word on a wire. The data shape mirrors Get Variable's pin
+        // field for field so a reroute can carry anything a variable can.
+        if (n.hasArg)
+        {
+            s.execIns  = { { "", P::Exec } };
+            s.execOuts = { { "", P::Exec } };
+        }
+        else
+        {
+            s.dataIns  = { { "", n.propType, n.isArray, tn, n.container, n.keyType, ktn } };
+            s.dataOuts = { { "", n.propType, n.isArray, tn, n.container, n.keyType, ktn } };
+        }
+        break;
     case T::Event:
         s.execOuts = { { "", P::Exec } };
         // "Value" is right for an event whose payload is whatever it carries,
@@ -653,6 +668,7 @@ const char* nodeDisplayName(NodeType t)
         // widget. The name is the on-disk key, so it is also a promise.
         case T::GetPropertyOn: return "Get Property (Ref)";
         case T::SetPropertyOn: return "Set Property (Ref)";
+        case T::Reroute:       return "Reroute";
         case T::GetVariable:  return "Get Variable";
         case T::SetVariable:  return "Set Variable";
         case T::ShowSelf:   return "Show Self";
@@ -792,6 +808,7 @@ const char* nodeSearchAliases(NodeType t)
         case T::SetToArray:   return "set to array convert list";
         case T::MapKeys:      return "keys to array";
         case T::MapValues:    return "values to array";
+        case T::Reroute:      return "knot bend wire route pass through pin";
         default: return "";
     }
 }
@@ -841,6 +858,11 @@ const char* nodeTooltip(NodeType t)
             return "Writes a property of an element of the REFERENCED widget, by the\n"
                    "element's name, when executed. Target left unwired means this\n"
                    "widget; wired, it reaches one this graph did not have to author.";
+        case T::Reroute:
+            return "A knot in a wire: one pin in, the same pin out, nothing in between.\n"
+                   "Routes a long wire around other nodes or fans one value out from\n"
+                   "one place. Takes the type of whatever is wired into it; an exec\n"
+                   "reroute passes execution straight through. Costs nothing at run time.";
         case T::GetVariable:
             return "Reads a graph variable (persistent per running instance).\n"
                    "Pure — evaluated whenever the output is used.";
@@ -1091,6 +1113,7 @@ const char* nodeCategory(NodeType t)
         case T::Delay:
         case T::DoOnce:
         case T::FlipFlop:      return "Flow";
+        case T::Reroute:       return "Flow";
         case T::IsValid:
         case T::Cast:          return "Reference";
         case T::GetProperty:
@@ -1424,6 +1447,198 @@ void adoptForEachElementType(Graph& g, int srcNode, int srcPin, int dstNode, int
     }
 }
 
+// ── Reroute typing ───────────────────────────────────────────────────────────
+namespace
+{
+// Unified pin indices of a reroute: it has exactly one pin per side, and no
+// exec pins on a data one (nor data pins on an exec one), so both shapes put
+// the input at 0 and the output at 1.
+constexpr int kRerouteIn  = 0;
+constexpr int kRerouteOut = 1;
+
+bool isDataReroute(const Node& n) { return n.type == NodeType::Reroute && !n.hasArg; }
+
+// Make the reroute's single pin `d`. Returns whether anything changed.
+bool applyPinDesc(Node& r, const PinDesc& d)
+{
+    const ContainerKind kind = d.isArray ? d.kind() : ContainerKind::None;
+    const std::string   tn   = d.typeName    ? d.typeName    : "";
+    const std::string   ktn  = d.keyTypeName ? d.keyTypeName : "";
+    const bool changed = r.propType != d.type || r.isArray != d.isArray ||
+                         r.container != kind || r.typeName != tn ||
+                         r.keyType != d.keyType || r.keyTypeName != ktn;
+    r.propType = d.type; r.isArray = d.isArray; r.container = kind;
+    r.typeName = tn; r.keyType = d.keyType; r.keyTypeName = ktn;
+    return changed;
+}
+
+bool dataWireAllowed(const Node& s, int si, const Node& d, int di);
+
+// After a reroute retyped: every wire leaving it that the new type refuses is
+// dropped, exactly as a ForEach drops its Element wires. The one arriving
+// (its input) is what caused the retype and stays — and so does a wire into
+// ANOTHER reroute's input, because that one is about to adopt the new type
+// itself (propagateRerouteTypes) rather than refuse it.
+void dropStaleRerouteOutputs(Graph& g, const Node& r)
+{
+    g.links.erase(std::remove_if(g.links.begin(), g.links.end(), [&](const Link& l)
+    {
+        if (l.srcNode != r.id || l.srcPin != kRerouteOut) return false;
+        const Node* d = g.findNode(l.dstNode);
+        if (!d) return true;
+        if (isDataReroute(*d) && l.dstPin == kRerouteIn) return false;
+        return !dataWireAllowed(r, 0, *d, l.dstPin - pinRanges(*d).dataIn0);
+    }), g.links.end());
+}
+} // namespace
+
+void adoptRerouteType(Graph& g, int srcNode, int srcPin, int dstNode, int dstPin)
+{
+    Node* dst = g.findNode(dstNode);
+    Node* src = g.findNode(srcNode);
+    if (!dst || !src || srcNode == dstNode) return;
+
+    // A data output wired INTO a reroute: the reroute becomes that output.
+    if (isDataReroute(*dst) && dstPin == kRerouteIn)
+    {
+        PinDesc sd{};
+        if (!dataPinDescOf(*src, /*input=*/false, srcPin - pinRanges(*src).dataOut0, sd)) return;
+        if (applyPinDesc(*dst, sd))
+        {
+            // The wire being made replaces whatever fed the knot before (an
+            // input holds one link, and connect() would drop it anyway).
+            // Dropped HERE so the propagation below reads the new feed and not
+            // the old one back onto the knot.
+            HE::graph::disconnectInput(g.links, dstNode, dstPin);
+            dropStaleRerouteOutputs(g, *dst);
+            propagateRerouteTypes(g);   // a chain hanging off this one follows
+        }
+        return;
+    }
+    // A reroute nobody feeds yet, wired into a typed input: it becomes that
+    // input's type — the shape a reroute dragged BACKWARDS off a pin lands in.
+    // Once something feeds it, what feeds it is the authority (above).
+    if (isDataReroute(*src) && srcPin == kRerouteOut)
+    {
+        for (const Link& l : g.links)
+            if (l.dstNode == src->id && l.dstPin == kRerouteIn) return;
+        PinDesc dd{};
+        if (!dataPinDescOf(*dst, /*input=*/true, dstPin - pinRanges(*dst).dataIn0, dd)) return;
+        if (applyPinDesc(*src, dd))
+        {
+            dropStaleRerouteOutputs(g, *src);
+            propagateRerouteTypes(g);
+        }
+    }
+}
+
+bool propagateRerouteTypes(Graph& g)
+{
+    bool any = false;
+    // Bounded by the longest possible chain: every pass settles at least one
+    // more reroute, so the node count is a ceiling and not a guess.
+    for (size_t pass = 0; pass <= g.nodes.size(); ++pass)
+    {
+        bool moved = false;
+        for (size_t i = 0; i < g.links.size(); ++i)
+        {
+            const Link l = g.links[i];   // by value: the drop below may reorder
+            Node* r = g.findNode(l.dstNode);
+            if (!r || !isDataReroute(*r) || l.dstPin != kRerouteIn) continue;
+            const Node* s = g.findNode(l.srcNode);
+            PinDesc sd{};
+            if (!s || !dataPinDescOf(*s, false, l.srcPin - pinRanges(*s).dataOut0, sd)) continue;
+            if (!applyPinDesc(*r, sd)) continue;
+            dropStaleRerouteOutputs(g, *r);
+            moved = any = true;
+        }
+        if (!moved) break;
+    }
+    return any;
+}
+
+const Node* rerouteOrigin(const Graph& g, const Node& n, int pin, int& originPin)
+{
+    const Node* cur = &n;
+    originPin = pin;
+    // A cycle of reroutes feeding each other is not a valid graph, but a walk
+    // that never returns would be a worse answer to it than a wrong node.
+    for (size_t guard = 0; guard <= g.nodes.size() && cur->type == NodeType::Reroute; ++guard)
+    {
+        const Link* in = nullptr;
+        for (const Link& l : g.links)
+            if (l.dstNode == cur->id && l.dstPin == kRerouteIn) { in = &l; break; }
+        if (!in) { originPin = kRerouteIn; return cur; }   // fed by nothing: the knot itself
+        const Node* s = g.findNode(in->srcNode);
+        if (!s) { originPin = kRerouteIn; return cur; }
+        cur = s;
+        originPin = in->srcPin;
+    }
+    return cur;
+}
+
+namespace
+{
+// May a wire run from `s`'s data-out `si` to `d`'s data-in `di`? The whole
+// type rule, in one place: Graph::connect asks it, and so does a reroute that
+// just changed type and has to know which of its wires still hold.
+bool dataWireAllowed(const Node& s, int si, const Node& d, int di)
+{
+    // Elementary types convert on the wire: the reader coerces to ITS pin
+    // type (Runner::evalInput), and generated C++ emits the cast — so a
+    // Float output feeding an Int input needs no node in between.
+    if (!canConvertPinType(dataPinType(s, false, si), dataPinType(d, true, di)) ||
+        dataPinIsArray(s, false, si) != dataPinIsArray(d, true, di)) // container ≠ scalar
+        return false;
+    // Containers of different KINDS never join: an array is ordered and
+    // indexable, a set deduplicates, a map is keyed — and coerce passes a
+    // container through untouched, so an accepted wire would be a
+    // reinterpretation rather than a conversion. A map additionally has to
+    // agree on the KEY (and, for enum keys, on its definition).
+    {
+        PinDesc sd{}, dd{};
+        dataPinDescOf(s, false, si, sd);
+        dataPinDescOf(d, true,  di, dd);
+        if (sd.kind() != dd.kind()) return false;
+        // …and neither do containers of different ELEMENT types, for exactly
+        // the same reason one line up: the convertibility test above is about
+        // a value coerce() will convert on arrival, and coerce leaves a
+        // container alone. An accepted Array<Float> → Array<Int> wire would
+        // hand the reader elements still tagged Float while every comparison
+        // it makes runs on its own pin type — scalarValueEquals(Int) reads
+        // a.i, a Float value's i is 0, so every element looks equal to every
+        // other and a five-element array dedupes to one. A refused wire is a
+        // question the author can answer; that one is a silent wrong answer.
+        if (sd.kind() != ContainerKind::None && sd.type != dd.type) return false;
+        if (sd.kind() == ContainerKind::Map)
+        {
+            if (sd.keyType != dd.keyType) return false;
+            const std::string_view ka = sd.keyTypeName ? sd.keyTypeName : "";
+            const std::string_view kb = dd.keyTypeName ? dd.keyTypeName : "";
+            if (!ka.empty() && !kb.empty() && ka != kb) return false;
+        }
+    }
+    // User-defined types connect only to the SAME definition: a Struct pin
+    // for PlayerStats must not accept an Inventory, and enums likewise. An
+    // EMPTY typeName is the generic boundary (e.g. the save.setStruct
+    // engine call, whose registry params carry no definition) — it accepts
+    // anything, like an untyped Object reference; the callee validates.
+    {
+        const PinType pt = dataPinType(s, false, si);
+        if (pt == P::Enum || pt == P::Struct)
+        {
+            PinDesc sd{}, dd{};
+            dataPinDescOf(s, false, si, sd);
+            dataPinDescOf(d, true,  di, dd);
+            const std::string_view a = sd.typeName ? sd.typeName : "";
+            const std::string_view b = dd.typeName ? dd.typeName : "";
+            if (!a.empty() && !b.empty() && a != b) return false;
+        }
+    }
+    return true;
+}
+} // namespace
+
 bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
 {
     const Node* s = findNode(srcNode);
@@ -1449,58 +1664,7 @@ bool Graph::connect(int srcNode, int srcPin, int dstNode, int dstPin)
     }
     if (srcIsDataOut && dstIsDataIn)
     {
-        const int si = srcPin - sr.dataOut0, di = dstPin - dr.dataIn0;
-        // Elementary types convert on the wire: the reader coerces to ITS pin
-        // type (Runner::evalInput), and generated C++ emits the cast — so a
-        // Float output feeding an Int input needs no node in between.
-        if (!canConvertPinType(dataPinType(*s, false, si), dataPinType(*d, true, di)) ||
-            dataPinIsArray(*s, false, si) != dataPinIsArray(*d, true, di)) // container ≠ scalar
-            return false;
-        // Containers of different KINDS never join: an array is ordered and
-        // indexable, a set deduplicates, a map is keyed — and coerce passes a
-        // container through untouched, so an accepted wire would be a
-        // reinterpretation rather than a conversion. A map additionally has to
-        // agree on the KEY (and, for enum keys, on its definition).
-        {
-            PinDesc sd{}, dd{};
-            dataPinDescOf(*s, false, si, sd);
-            dataPinDescOf(*d, true,  di, dd);
-            if (sd.kind() != dd.kind()) return false;
-            // …and neither do containers of different ELEMENT types, for exactly
-            // the same reason one line up: the convertibility test above is about
-            // a value coerce() will convert on arrival, and coerce leaves a
-            // container alone. An accepted Array<Float> → Array<Int> wire would
-            // hand the reader elements still tagged Float while every comparison
-            // it makes runs on its own pin type — scalarValueEquals(Int) reads
-            // a.i, a Float value's i is 0, so every element looks equal to every
-            // other and a five-element array dedupes to one. A refused wire is a
-            // question the author can answer; that one is a silent wrong answer.
-            if (sd.kind() != ContainerKind::None && sd.type != dd.type) return false;
-            if (sd.kind() == ContainerKind::Map)
-            {
-                if (sd.keyType != dd.keyType) return false;
-                const std::string_view ka = sd.keyTypeName ? sd.keyTypeName : "";
-                const std::string_view kb = dd.keyTypeName ? dd.keyTypeName : "";
-                if (!ka.empty() && !kb.empty() && ka != kb) return false;
-            }
-        }
-        // User-defined types connect only to the SAME definition: a Struct pin
-        // for PlayerStats must not accept an Inventory, and enums likewise. An
-        // EMPTY typeName is the generic boundary (e.g. the save.setStruct
-        // engine call, whose registry params carry no definition) — it accepts
-        // anything, like an untyped Object reference; the callee validates.
-        {
-            const PinType pt = dataPinType(*s, false, si);
-            if (pt == P::Enum || pt == P::Struct)
-            {
-                PinDesc sd{}, dd{};
-                dataPinDescOf(*s, false, si, sd);
-                dataPinDescOf(*d, true,  di, dd);
-                const std::string_view a = sd.typeName ? sd.typeName : "";
-                const std::string_view b = dd.typeName ? dd.typeName : "";
-                if (!a.empty() && !b.empty() && a != b) return false;
-            }
-        }
+        if (!dataWireAllowed(*s, srcPin - sr.dataOut0, *d, dstPin - dr.dataIn0)) return false;
         HE::graph::disconnectInput(links, dstNode, dstPin); // an input holds one link
         links.push_back({ srcNode, srcPin, dstNode, dstPin });
         return true;
@@ -1871,6 +2035,20 @@ std::string toJson(const Graph& g)
         }
         j["events"] = std::move(je);
     }
+    // Comment boxes: written only when there are any, so a graph without them
+    // keeps the bytes it had before they existed.
+    if (!g.comments.empty())
+    {
+        nlohmann::json jc = nlohmann::json::array();
+        for (const GraphComment& c : g.comments)
+        {
+            nlohmann::json o = { { "id", c.id }, { "text", c.text },
+                                 { "pos", { c.x, c.y } }, { "size", { c.w, c.h } } };
+            if (c.subgraph) o["subgraph"] = c.subgraph;
+            jc.push_back(std::move(o));
+        }
+        j["comments"] = std::move(jc);
+    }
     return j.dump(2);
 }
 
@@ -1930,6 +2108,24 @@ bool fromJson(const std::string& json, Graph& out)
         d.typeName = e.value("typeName", std::string());
         if (!g.findEvent(d.name)) g.events.push_back(std::move(d));
     }
+    for (const auto& e : j.value("comments", nlohmann::json::array()))
+    {
+        if (!e.is_object()) continue;
+        GraphComment c;
+        c.id   = e.value("id", 0);
+        c.text = e.value("text", std::string());
+        if (const auto p = e.find("pos"); p != e.end() && p->is_array() && p->size() >= 2)
+        { c.x = (*p)[0].get<float>(); c.y = (*p)[1].get<float>(); }
+        if (const auto sz = e.find("size"); sz != e.end() && sz->is_array() && sz->size() >= 2)
+        { c.w = (*sz)[0].get<float>(); c.h = (*sz)[1].get<float>(); }
+        c.subgraph = e.value("subgraph", 0);
+        // A box needs an id the editor can address it by; one written without
+        // (a hand-edited file) gets a fresh one rather than 0, which nodes
+        // never carry either.
+        if (c.id <= 0) c.id = g.nextId++;
+        HE::graph::bumpNextId(g.nextId, c.id);
+        g.comments.push_back(std::move(c));
+    }
     inferEventDecls(g);        // graphs older than declared events arrive with one
     // Both syncs below rebuild pin layouts from definitions that may have changed
     // shape since this graph was saved (a function edited elsewhere, a struct
@@ -1959,6 +2155,7 @@ bool fromJson(const std::string& json, Graph& out)
     inferUserTypeNames(g);     // recover Enum/Struct definitions from the wiring
     syncTypeSignatures(g);     // re-mirror struct/enum pins from the TypeRegistry
     remapLinksFromSnapshot(g, preSync); // wires follow their pins (or drop, visibly)
+    propagateRerouteTypes(g);  // knots follow what feeds them (upstream may have retyped)
     assignSubgraphs(g);        // migrate flat graphs → per-function sub-graphs
     out = std::move(g);
     return true;
@@ -2895,12 +3092,50 @@ Value coerce(Value v, PinType want)
 
 Runner::Runner(const Graph& graph, Context ctx) : m_graph(graph), m_ctx(std::move(ctx)) {}
 
-Runner::CallFrame* Runner::frameFor(int fnEntryId)
+CallFrame* Runner::frameFor(int fnEntryId)
 {
     for (auto it = m_callStack.rbegin(); it != m_callStack.rend(); ++it)
         if (it->fnEntryId == fnEntryId) return &*it;
     return nullptr;
 }
+
+// ── Execution trace ──────────────────────────────────────────────────────────
+namespace
+{
+thread_local ExecSite t_execSite;
+
+// Stamps the Context's identity + this node into the thread's current site for
+// the scope of one node, and puts back whatever was there before. The restore
+// is what makes nesting right: Call Function (Ref) runs the callee in a FRESH
+// Runner from inside the caller's node, and when it returns the caller's node
+// is current again — the same way a native stack unwinds.
+struct SiteScope
+{
+    ExecSite saved;
+    SiteScope(const Context& ctx, int nodeId) : saved(t_execSite)
+    {
+        t_execSite.instance = ctx.traceInstance;
+        t_execSite.classKey = ctx.traceKey.c_str();
+        t_execSite.level    = ctx.traceLevel;
+        t_execSite.nodeId   = nodeId;
+    }
+    ~SiteScope() { t_execSite = saved; }
+    SiteScope(const SiteScope&)            = delete;
+    SiteScope& operator=(const SiteScope&) = delete;
+};
+
+// The exec-node listener, guarded. Also called for the ENTRY node of a run (the
+// Event / Input Action / Function Entry that runExecChain starts from and
+// never executes itself) — an event whose chain is empty would otherwise fire
+// without a trace of it, and the entry is the node a reader looks at first.
+inline void traceExec(const Context& ctx, int nodeId)
+{
+    if (ctx.onExecNode && *ctx.onExecNode)
+        (*ctx.onExecNode)(ctx.traceInstance, ctx.traceKey, ctx.traceLevel, nodeId);
+}
+} // namespace
+
+const ExecSite& currentExecSite() { return t_execSite; }
 
 namespace
 {
@@ -2935,12 +3170,23 @@ void Runner::fireEvent(const std::string& eventName, int elem, const Value& arg)
         if (n.type == T::InputAction)
         {
             const int chain = inputActionChainFor(n, eventName);
-            if (chain >= 0) runExecChain(n, pinRanges(n).execOut0 + chain, 0);
+            if (chain >= 0)
+            {
+                const int pin = pinRanges(n).execOut0 + chain;
+                // A breakpoint ON the entry stops before its chain starts; the
+                // entry is the node a reader puts one on first.
+                if (!breakHere(n, pin)) { traceExec(m_ctx, n.id); runExecChain(n, pin, 0); }
+                deliverSuspension();
+            }
             continue;
         }
         if (n.type != T::Event || n.s != eventName) continue;
         if (n.elem != 0 && n.elem != elem) continue;
-        runExecChain(n, pinRanges(n).execOut0, 0);
+        const int pin = pinRanges(n).execOut0;
+        if (!breakHere(n, pin)) { traceExec(m_ctx, n.id); runExecChain(n, pin, 0); }
+        // Per entry, not per fire: two Event nodes of the same name are two
+        // handlers, and each stops (or not) on its own.
+        deliverSuspension();
     }
 }
 
@@ -2955,6 +3201,7 @@ void Runner::resumeFrom(int nodeId)
     m_execOutputs.clear();
     m_callStack.clear();
     runExecChain(*n, pinRanges(*n).execOut0, 0);
+    deliverSuspension();
 }
 
 bool Runner::callFunction(const std::string& name, bool requirePublic,
@@ -2981,10 +3228,18 @@ bool Runner::callFunction(const std::string& name, bool requirePublic,
         }
         frame.results.resize(n.results.size());
         for (size_t i = 0; i < n.results.size(); ++i) frame.results[i].type = n.results[i].type;
+        // By index, not back(): a stop inside a nested Call Function leaves
+        // that call's frame on top (the resume pops it), and ours is below.
+        const size_t mine = m_callStack.size();
         m_callStack.push_back(std::move(frame));
-        runExecChain(n, pinRanges(n).execOut0, 0);
-        if (results) *results = m_callStack.back().results;
-        m_callStack.pop_back();
+        const int pin = pinRanges(n).execOut0;
+        if (!breakHere(n, pin)) { traceExec(m_ctx, n.id); runExecChain(n, pin, 0); }
+        // A stop inside the function hands the caller the results as they
+        // stand — typed defaults, or whatever a Return before the stop wrote.
+        // The caller's own chain goes on; the rest of THIS one on Continue.
+        if (results) *results = m_callStack[mine].results;
+        m_callStack.resize(mine);
+        deliverSuspension();
         return true;
     }
     return false;
@@ -3005,18 +3260,162 @@ void Runner::runExecChain(const Node& from, int execOutPin, int depth)
         const Node* n = m_graph.findNode(l->dstNode);
         if (!n) return;
         execNode(*n, depth);
-        if (n->type == T::Branch || n->type == T::Sequence || n->type == T::ForEach ||
-            n->type == T::ForEachSet || n->type == T::ForEachMap ||
-            n->type == T::Delay || n->type == T::DoOnce || n->type == T::FlipFlop ||
-            n->type == T::SwitchOnEnum || n->type == T::Cast)
+        // Stopped at a breakpoint (at this node, or somewhere below it): the
+        // rest of this chain is the resume's business, not ours.
+        if (m_suspended) return;
+        if (steersOwnExec(*n))
             return; // they steer their own exec-outs internally (Delay: later)
         l = execLinkFrom(n->id, pinRanges(*n).execOut0);
     }
 }
 
+bool Runner::steersOwnExec(const Node& n)
+{
+    return n.type == T::Branch || n.type == T::Sequence || n.type == T::ForEach ||
+           n.type == T::ForEachSet || n.type == T::ForEachMap ||
+           n.type == T::Delay || n.type == T::DoOnce || n.type == T::FlipFlop ||
+           n.type == T::SwitchOnEnum || n.type == T::Cast;
+}
+
+// ── Breakpoints ──────────────────────────────────────────────────────────────
+bool Runner::breakHere(const Node& n, int resumePin)
+{
+    if (!m_ctx.breakAt || !*m_ctx.breakAt) return false;
+    // The node a resume started at was the one we stopped ON; asking again
+    // would stop a Continue before it moved. Once — a loop that comes back
+    // round to it is asked like any other node.
+    if (m_resumedNode == n.id) { m_resumedNode = 0; return false; }
+    if (!(*m_ctx.breakAt)(m_ctx.traceInstance, m_ctx.traceKey, m_ctx.traceLevel, n.id))
+        return false;
+    m_suspended = true;
+    m_suspension             = SuspendedRun{};
+    m_suspension.nodeId      = n.id;
+    m_suspension.resumePin   = resumePin;
+    m_suspension.instance    = m_ctx.traceInstance;
+    m_suspension.classKey    = m_ctx.traceKey;
+    m_suspension.level       = m_ctx.traceLevel;
+    m_suspension.eventArg    = m_eventArg;
+    m_suspension.execOutputs = m_execOutputs;
+    m_suspension.callStack   = m_callStack;
+    return true;
+}
+
+void Runner::pushFrame(SuspendedRun::Frame::Kind kind, int nodeId, int next, const Value* collection)
+{
+    SuspendedRun::Frame f;
+    f.kind   = kind;
+    f.nodeId = nodeId;
+    f.next   = next;
+    if (collection) f.collection = *collection;
+    m_suspension.outer.push_back(std::move(f));
+}
+
+void Runner::deliverSuspension()
+{
+    if (!m_suspended) return;
+    m_suspended = false;
+    SuspendedRun run = std::move(m_suspension);
+    m_suspension = SuspendedRun{};
+    // The frames of calls the stop cut short travel with the run; the live
+    // stack must not keep them for the next entry this Runner fires.
+    m_callStack.clear();
+    if (m_ctx.onSuspend && *m_ctx.onSuspend) (*m_ctx.onSuspend)(std::move(run));
+    // No host to hand it to: the run simply ends here, like a Delay with no
+    // scheduler — a stop with nobody to continue from is a stop.
+}
+
+void Runner::runNodeAndChain(const Node& n, int depth)
+{
+    execNode(n, depth);
+    if (m_suspended || steersOwnExec(n)) return;
+    runExecChain(n, pinRanges(n).execOut0, depth);
+}
+
+void Runner::unwindFrame(const SuspendedRun::Frame& f, int depth)
+{
+    const Node* n = m_graph.findNode(f.nodeId);
+    if (!n) return;   // edited away while stopped: nothing left to finish
+    const PinRanges r = pinRanges(*n);
+    switch (f.kind)
+    {
+    case SuspendedRun::Frame::Kind::Sequence:
+        for (int k = f.next; k < 2; ++k)
+        {
+            runExecChain(*n, r.execOut0 + k, depth);
+            if (m_suspended) { if (k + 1 < 2) pushFrame(f.kind, n->id, k + 1); return; }
+        }
+        break;
+    case SuspendedRun::Frame::Kind::Loop:
+    {
+        // Same three shapes as the loops in execNode, over the collection the
+        // loop captured when it started.
+        const Value& c = f.collection;
+        const size_t count = n->type == T::ForEachMap ? std::min(c.keys.size(), c.items.size())
+                                                      : c.items.size();
+        for (size_t i = (size_t)f.next; i < count; ++i)
+        {
+            if (n->type == T::ForEachMap) m_execOutputs[n->id] = { c.keys[i], c.items[i], Value::ofInt((int)i) };
+            else                          m_execOutputs[n->id] = { c.items[i], Value::ofInt((int)i) };
+            runExecChain(*n, r.execOut0 + 0, depth);   // Body
+            if (m_suspended) { pushFrame(f.kind, n->id, (int)i + 1, &c); return; }
+        }
+        runExecChain(*n, r.execOut0 + 1, depth);       // Done
+        break;
+    }
+    case SuspendedRun::Frame::Kind::Call:
+        // The callee's chain has finished: its results become the call's
+        // data-outs, its frame goes, and the caller's chain carries on after
+        // the call node — the tail of the FunctionCall case in execNode.
+        if (!m_callStack.empty())
+        {
+            m_execOutputs[n->id] = std::move(m_callStack.back().results);
+            m_callStack.pop_back();
+        }
+        runExecChain(*n, r.execOut0, depth);
+        break;
+    }
+}
+
+void Runner::resumeSuspended(SuspendedRun run)
+{
+    const Node* n = m_graph.findNode(run.nodeId);
+    if (!n) return;   // the stopped node was edited away: the run is over
+    m_steps       = 0;
+    m_eventArg    = std::move(run.eventArg);
+    m_execOutputs = std::move(run.execOutputs);
+    m_callStack   = std::move(run.callStack);
+    m_suspended   = false;
+    m_suspension  = SuspendedRun{};
+    // The stopped node runs now (it was answered once), or the entry's chain
+    // starts. Then the frames above it, innermost first.
+    if (run.resumePin < 0) { m_resumedNode = n->id; runNodeAndChain(*n, 0); }
+    else                   { m_resumedNode = 0; traceExec(m_ctx, n->id); runExecChain(*n, run.resumePin, 0); }
+    m_resumedNode = 0;
+    // Unwind what the stop had interrupted. A NEW stop on the way keeps the
+    // frames it has not reached yet: they are still owed, and they come after
+    // whatever the new stop recorded on its own way out.
+    for (size_t i = 0; i < run.outer.size(); ++i)
+    {
+        if (m_suspended)
+        {
+            m_suspension.outer.insert(m_suspension.outer.end(),
+                                      run.outer.begin() + (std::ptrdiff_t)i, run.outer.end());
+            break;
+        }
+        unwindFrame(run.outer[i], 0);
+    }
+    deliverSuspension();
+}
+
 void Runner::execNode(const Node& n, int depth)
 {
     if (depth > kMaxDepth) return;
+    // Before the site and the listener: a node that stops here has not RUN,
+    // and must not light up as if it had.
+    if (breakHere(n, -1)) return;
+    // Current site for anything this node logs; listener for the highlight.
+    SiteScope site(m_ctx, n.id);
+    traceExec(m_ctx, n.id);
     switch (n.type)
     {
     case T::Branch:
@@ -3029,8 +3428,12 @@ void Runner::execNode(const Node& n, int depth)
     case T::Sequence:
     {
         const PinRanges r = pinRanges(n);
-        runExecChain(n, r.execOut0 + 0, depth + 1);
-        runExecChain(n, r.execOut0 + 1, depth + 1);
+        for (int k = 0; k < 2; ++k)
+        {
+            runExecChain(n, r.execOut0 + k, depth + 1);
+            // Stopped below: the outputs not fired yet are owed to the resume.
+            if (m_suspended) { if (k + 1 < 2) pushFrame(SuspendedRun::Frame::Kind::Sequence, n.id, k + 1); break; }
+        }
         break;
     }
     case T::Cast:
@@ -3164,7 +3567,18 @@ void Runner::execNode(const Node& n, int depth)
         frame.results.resize(n.results.size());
         for (size_t i = 0; i < n.results.size(); ++i) frame.results[i].type = n.results[i].type;
         m_callStack.push_back(std::move(frame));
-        runExecChain(*entry, pinRanges(*entry).execOut0, depth + 1);
+        // The entry is traced (and can be stopped on) like the one a
+        // Runtime::callFunction starts from — a call is a call.
+        const int entryPin = pinRanges(*entry).execOut0;
+        if (!breakHere(*entry, entryPin))
+        {
+            traceExec(m_ctx, entry->id);
+            runExecChain(*entry, entryPin, depth + 1);
+        }
+        // Stopped inside the callee: its frame stays on the (captured) stack,
+        // and finishing the call — results out, frame off, the chain after
+        // this node — is the resume's job (unwindFrame, Kind::Call).
+        if (m_suspended) { pushFrame(SuspendedRun::Frame::Kind::Call, n.id, 0); break; }
         // Cache the returned values as this call's data outputs, then pop.
         m_execOutputs[n.id] = std::move(m_callStack.back().results);
         m_callStack.pop_back();
@@ -3202,7 +3616,11 @@ void Runner::execNode(const Node& n, int depth)
         {
             m_execOutputs[n.id] = { arr.items[i], Value::ofInt((int)i) };
             runExecChain(n, r.execOut0 + 0, depth + 1);   // Body
+            // Stopped in the body: the iterations after this one, and Done,
+            // are owed to the resume — over THIS array, as evaluated.
+            if (m_suspended) { pushFrame(SuspendedRun::Frame::Kind::Loop, n.id, (int)i + 1, &arr); break; }
         }
+        if (m_suspended) break;
         runExecChain(n, r.execOut0 + 1, depth + 1);        // Done
         break;
     }
@@ -3217,7 +3635,9 @@ void Runner::execNode(const Node& n, int depth)
         {
             m_execOutputs[n.id] = { set.items[i], Value::ofInt((int)i) };
             runExecChain(n, r.execOut0 + 0, depth + 1);   // Body
+            if (m_suspended) { pushFrame(SuspendedRun::Frame::Kind::Loop, n.id, (int)i + 1, &set); break; }
         }
+        if (m_suspended) break;
         runExecChain(n, r.execOut0 + 1, depth + 1);        // Done
         break;
     }
@@ -3230,7 +3650,9 @@ void Runner::execNode(const Node& n, int depth)
         {
             m_execOutputs[n.id] = { map.keys[i], map.items[i], Value::ofInt((int)i) };
             runExecChain(n, r.execOut0 + 0, depth + 1);   // Body
+            if (m_suspended) { pushFrame(SuspendedRun::Frame::Kind::Loop, n.id, (int)i + 1, &map); break; }
         }
+        if (m_suspended) break;
         runExecChain(n, r.execOut0 + 1, depth + 1);        // Done
         break;
     }
@@ -3336,6 +3758,10 @@ bool Runner::inputLinked(const Node& n, int dataInIndex) const
 Value Runner::evalData(const Node& n, int dataOutPin, int depth)
 {
     if (depth > kMaxDepth || ++m_steps > kMaxSteps) return {};
+    // Site only, no listener: a pure node is read as often as its output is
+    // wired, and a warning it logs should still name IT and not the exec node
+    // that pulled on it.
+    SiteScope site(m_ctx, n.id);
     switch (n.type)
     {
     case T::Event:       return coerce(m_eventArg, n.propType);
@@ -3767,6 +4193,11 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::SetVariable:
     case T::SetProperty:
         return coerce(evalInput(n, 0, depth + 1), n.propType);
+    // A reroute IS its input. No coerce: both pins are the same descriptor, and
+    // a container has to pass through untouched anyway (coerce leaves those
+    // alone, but this makes the "nothing in between" literal).
+    case T::Reroute:
+        return evalInput(n, 0, depth + 1);
     case T::SetExternal:
         return coerce(evalInput(n, 1, depth + 1), n.propType); // dataIn 1 = Value (0 = Target)
     case T::GetGameInstance: return m_ctx.getGameInstance ? m_ctx.getGameInstance() : Value::ofRef(0);

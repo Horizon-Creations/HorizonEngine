@@ -5,6 +5,7 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
+#include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
@@ -58,7 +59,8 @@ public:
 	                         const EditorCameraOverride& camera,
 	                         const glm::vec3& origin = glm::vec3(0.0f),
 	                         const WorldPreviewEnv& env = {},
-	                         glm::mat4* outViewProj = nullptr) override;
+	                         glm::mat4* outViewProj = nullptr,
+	                         uint32_t slot = 0) override;
 	void* RenderParticlePreview(ContentManager& cm, const HE::UUID& meshId, const HE::UUID& materialId,
 	                            const std::vector<ParticlePreviewInstance>& particles,
 	                            uint32_t size, float yaw, float pitch, float dist) override;
@@ -72,14 +74,27 @@ public:
 	void  InvalidateMesh    (const HE::UUID& meshId)     override;
 	void  InvalidateTexture (const HE::UUID& textureId)  override;
 	void  SetBloomSettings(const BloomSettings& settings) override;
+	void  SetDepthOfFieldSettings(const DepthOfFieldSettings& settings) override;
+	void  SetMotionBlurSettings(const MotionBlurSettings& settings) override;
 	void  SetSSAOSettings(const SSAOSettings& settings) override;
+	void  SetShadowSettings(const ShadowSettings& settings) override;
 	void  SetAntiAliasingSettings(const AntiAliasingSettings& settings) override;
 	void  SetGISettings(const GISettings& settings) override;
 	void  SetGIReflectionSettings(const GIReflectionSettings& settings) override;
 	void  SetSSRSettings(const SSRSettings& settings) override;
+	void  SetOcclusionCullingSettings(const OcclusionCullingSettings& settings) override;
 	void  SetShadowDebug(bool on) override { m_debugShadowCascades = on; }
 	void  SetGpuParticleParams(const GpuParticleParams& p) override;
 	void  SetDebugLines(const std::vector<DebugLine>& lines) override;
+
+	// View mode (IRenderer::SetViewMode) as the two questions the passes ask.
+	// Wireframe is drawn unlit — shaded edges say nothing a flat edge does not,
+	// and the flat one reads far better against the sky. Mirrors Metal.
+	bool  UnlitViewActive() const
+	{
+		return m_viewMode == HE::ViewMode::Unlit || m_viewMode == HE::ViewMode::Wireframe;
+	}
+	bool  WireframeViewActive() const { return m_viewMode == HE::ViewMode::Wireframe; }
 
 	// Multi-window support
 	void AttachWindow(HE::Window* window) override;
@@ -91,7 +106,7 @@ private:
 	// and returned by GetFrameGpuStats. draws/tris count actual GL draws (instanced
 	// batches = 1 draw, tris scaled by instance count); visible/total = culled vs
 	// extracted static objects.
-	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0; };
+	struct FrameCounters { uint32_t draws = 0, tris = 0, visible = 0, total = 0, occlusionCulled = 0; };
 	FrameCounters m_counters;
 
 	// ── GPU timing (profiler per-pass trace) ────────────────────────────────
@@ -193,6 +208,8 @@ private:
 		int lightCount, lightPos, lightDir, lightColor, lightParams, cameraPos;
 		int shadowEnabled, shadowDebug, cascadeVP, cascadeSplits, cameraFwd, shadowMap;
 		int localShadowMap, localShadowVP;
+		int shadowBias;   // vec2 (slope, min) — the project's ShadowSettings bias pair
+		int unlit;        // 1 = base colour only (Unlit / Wireframe view mode)
 	};
 	// The per-frame shadow inputs the block needs (all DrawScene locals).
 	struct SceneShadowFrame
@@ -238,6 +255,9 @@ private:
 	RenderExtractor m_extractor;
 	RenderWorld     m_renderWorld;
 	FrustumCuller   m_culler;
+	// Refines m_visible after the camera frustum cull (never the shadow
+	// cull — a caster off-screen or behind a wall still shadows what is seen).
+	OcclusionCuller m_occlusionCuller;
 	RenderSorter    m_sorter;
 	RenderGraph     m_renderGraph;   // pass pipeline (GeometryPass today)
 	CommandBuffer   m_cmds;          // draw calls produced this frame
@@ -301,17 +321,24 @@ private:
 
 	// World-preview target (RenderWorldPreview) — its own FBO again, for the same
 	// reason as all the others: the Class Editor's viewport is live at the same
-	// time as thumbnails are being rendered. ONE target, because only one asset
-	// tab is ever active. Unlike the per-asset previews this one clears to an
-	// opaque gray and draws a ground plane + grid, so it reads as a scene view.
+	// time as thumbnails are being rendered. ONE target PER SLOT: slot 0 serves
+	// the asset tabs (only one of those is ever active), the others the editor's
+	// secondary Scene viewports, which are all live in the same frame and would
+	// otherwise overwrite one another before ImGui shows any of them. Unlike
+	// the per-asset previews this one clears to an opaque gray and draws a
+	// ground plane + grid, so it reads as a scene view.
 	// Two targets, mirroring the scene: the pass renders HDR (sky radiance and a
 	// sun at intensity 2.2 both run past 1.0), then the tonemap resolves into the
 	// 8-bit texture ImGui shows. Writing HDR straight into 8 bits is what made
 	// the first sky-lit preview a uniformly white mesh under a blown-out sky.
-	unsigned int m_worldPreviewFBO = 0, m_worldPreviewHdr = 0, m_worldPreviewDepth = 0;
-	unsigned int m_worldPreviewLdrFBO = 0, m_worldPreviewColor = 0;
-	int          m_worldPreviewW = 0;
-	int          m_worldPreviewH = 0;
+	struct WorldPreviewTarget
+	{
+		unsigned int fbo = 0, hdr = 0, depth = 0;
+		unsigned int ldrFBO = 0, color = 0;
+		int          w = 0;
+		int          h = 0;
+	};
+	WorldPreviewTarget m_worldPreview[kWorldPreviewSlots];
 
 	// Particle-preview target (RenderParticlePreview) — own dedicated FBO; camera-
 	// facing billboard quads via gl_VertexID (no per-vertex buffer, matching the
@@ -428,8 +455,10 @@ private:
 	int          m_uShadowMap     = -1;   // CSM shadow-map array sampler unit
 	int          m_uShadowEnabled = -1;
 	int          m_uShadowDebug   = -1;   // 1 = tint fragments by cascade index
+	int          m_uUnlit         = -1;   // 1 = base colour only (Unlit / Wireframe view mode)
 	int          m_uLocalShadowVP  = -1;  // mat4[16] local (point/spot) shadow view-projs
 	int          m_uLocalShadowMap = -1;  // local shadow atlas sampler unit
+	int          m_uShadowBias     = -1;  // vec2 (slope, min) CSM receiver bias
 	int          m_uAO            = -1;   // SSAO occlusion sampler unit
 	int          m_uViewport      = -1;   // viewport size (screen-space AO lookup)
 	int          m_uSSAOEnabled   = -1;   // 1 = modulate ambient by SSAO
@@ -472,9 +501,11 @@ private:
 	int          m_uSkinnedCascadeSplits   = -1;
 	int          m_uSkinnedCameraFwd       = -1;
 	int          m_uSkinnedShadowDebug     = -1;
+	int          m_uSkinnedUnlit           = -1;
 	int          m_uSkinnedShadowMap       = -1;
 	int          m_uSkinnedLocalShadowVP   = -1;
 	int          m_uSkinnedLocalShadowMap  = -1;
+	int          m_uSkinnedShadowBias      = -1;
 	int          m_uSkinnedAO              = -1;
 	int          m_uSkinnedViewport        = -1;
 	int          m_uSkinnedSSAOEnabled     = -1;
@@ -510,9 +541,11 @@ private:
 	int          m_uInstCascadeSplits       = -1;
 	int          m_uInstCameraFwd           = -1;
 	int          m_uInstShadowDebug         = -1;
+	int          m_uInstUnlit               = -1;
 	int          m_uInstShadowMap           = -1;
 	int          m_uInstLocalShadowVP       = -1;
 	int          m_uInstLocalShadowMap      = -1;
+	int          m_uInstShadowBias          = -1;
 	int          m_uInstShadowEnabled       = -1;
 	int          m_uInstAO                  = -1;
 	int          m_uInstViewport            = -1;
@@ -574,17 +607,30 @@ private:
 	unsigned int m_shadowFBO      = 0;
 	unsigned int m_shadowDepthTex = 0;   // GL_TEXTURE_2D_ARRAY, Depth24, one layer/cascade
 	int          m_shadowSize     = HE::kShadowMapResolution;
+	// The project's directional-shadow settings (SetShadowSettings). The fit
+	// values go to m_extractor each frame right before extract(); a resolution
+	// change re-specifies m_shadowDepthTex's storage at the start of the next
+	// frame (never mid-pass); the bias pair goes to the shaders as uShadowBias /
+	// Lighting::shadowBias.
+	ShadowSettings m_shadowSettings;
+	bool           m_shadowSizeDirty = false;
 	// Local (point/spot) shadow atlas: 2D depth ARRAY, one layer per spot view /
 	// point cube face (16 layers, see ShadowData::kMaxLocalShadowLayers).
 	unsigned int m_localShadowDepthTex = 0; // GL_TEXTURE_2D_ARRAY, Depth24
 	int          m_localShadowSize     = 1024;
 	unsigned int m_depthProgram   = 0;   // depth-only pass (cascadeVP * model * pos)
 	int          m_uDepthMVP      = -1;
+	// Instanced twin for same-mesh caster runs (kDepthInstancedVS): model from
+	// attrib locs 4–7 / m_instanceVBO, light view-proj as the one uniform.
+	// 0 when the link failed → every run draws through m_depthProgram.
+	unsigned int m_depthInstancedProgram = 0;
+	int          m_uDepthInstVP          = -1;
 	bool         m_debugShadowCascades = false; // tint fragments by cascade index (debug)
 	// Per-cascade caster culling scratch (kept off m_visible/m_sortedIndices so the
 	// shadow pass never clobbers the camera cull the geometry pass relies on).
 	std::vector<uint8_t>  m_shadowVisible;
 	std::vector<uint32_t> m_shadowSorted;
+	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh runs per depth layer
 	void CreateShadowResources();
 
 	// ── Procedural skybox (drawn into the HDR target behind the scene) ───────
@@ -672,7 +718,7 @@ private:
 	// to the backbuffer/viewport. Sized to the current output, recreated on resize.
 	unsigned int m_hdrFBO        = 0;
 	unsigned int m_hdrColor      = 0;   // RGBA16F
-	unsigned int m_hdrDepth      = 0;   // renderbuffer
+	unsigned int m_hdrDepth      = 0;   // DEPTH_COMPONENT24 texture (the DoF pass samples it)
 	int          m_hdrW          = 0;
 	int          m_hdrH          = 0;
 	unsigned int m_tonemapProgram = 0;
@@ -703,7 +749,6 @@ private:
 	unsigned int m_resolveUBO      = 0;         // HeResolve block (binding 3)
 	unsigned int m_resolveLightUBO = 0;         // resolve-only HeLighting fill (incl. CSM matrices)
 	bool         m_deferredPipelinesTried = false;
-	int          m_gbufferDebugView       = 0;  // HE_DUMP_GBUFFER (1..4)
 	// Built-in G-buffer program uniform locations (same names as the unlit set).
 	int m_uGBMVP = -1, m_uGBModel = -1, m_uGBColor = -1, m_uGBMetallic = -1,
 	    m_uGBRoughness = -1, m_uGBHasTexture = -1, m_uGBTexture = -1, m_uGBSpecAA = -1;
@@ -746,6 +791,55 @@ private:
 	int          m_ldrH          = 0;
 	void EnsureLdrTarget(int width, int height);
 	void DestroyLdrTarget();
+
+	// ── Temporal AA (docs/anti-aliasing-plan.md A2/A3), the GL port of the
+	// Metal implementation. The jitter lives ONLY in the rasterisation matrix
+	// (JitteredViewProj); velocity and reprojection use the clean ones.
+	// Velocity is a separate positions-only pass over the opaque draw list
+	// (RG16F, depth-tested against m_hdrDepth — both render paths leave the
+	// opaque depth there), run between the "Opaque" and "Sky+Clouds" passes.
+	// The resolve blends the tonemapped LDR image with the reprojected history
+	// (neighbourhood-clamped) into one of two ping-pong history targets — GL
+	// 4.1 has no glCopyImageSubData, so this frame's result is simply next
+	// frame's read target — and the AA-resolve slot then sharpens that instead
+	// of filtering m_ldrColor.
+	unsigned int m_taaVelocityProgram = 0;
+	int          m_uTaaVelMvpJitter   = -1;
+	int          m_uTaaVelMvpNow      = -1;
+	int          m_uTaaVelMvpPrev     = -1;
+	unsigned int m_taaProgram         = 0;   // resolve + history blend
+	int          m_uTaaCurrent        = -1;
+	int          m_uTaaHistory        = -1;
+	int          m_uTaaVelocity       = -1;
+	int          m_uTaaParams         = -1;
+	unsigned int m_taaSharpenProgram  = 0;   // TAA output → final target
+	int          m_uTaaSharpScene     = -1;
+	int          m_uTaaSharpParams    = -1;
+	unsigned int m_velocityFBO        = 0;   // colour = m_velocityTex, depth = m_hdrDepth (re-attached per pass)
+	unsigned int m_velocityTex        = 0;   // RG16F — this frame's screen-space motion (uv units)
+	unsigned int m_taaHistoryFBO[2]   = { 0, 0 };
+	unsigned int m_taaHistoryTex[2]   = { 0, 0 }; // RGBA8, linear — [cur] is written this frame, [1-cur] read
+	int          m_taaHistoryCur      = 0;
+	int          m_taaW = 0, m_taaH = 0;
+	bool         m_taaHistoryValid    = false;  // false after resize / (re)enable → first frame takes current only
+	uint32_t     m_taaFrameIndex      = 0;      // drives the Halton sequence
+	glm::vec2    m_taaJitter{0.0f};             // this frame's offset, pixel units (-0.5 … 0.5)
+	glm::mat4    m_taaPrevViewProj{1.0f};       // LAST frame's UNJITTERED view-proj (velocity)
+	// Per-entity model matrices of the previous frame, so a moving OBJECT under
+	// a still camera reports motion too. Keyed by entity id; swapped per frame.
+	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms;
+	std::unordered_map<uint32_t, glm::mat4> m_taaCurTransforms;
+	float        m_aaSharpness        = 0.35f;  // temporal modes (A3+)
+	void      CreateTaaPipeline();
+	bool      TaaActive() const;
+	glm::mat4 JitteredViewProj(const glm::mat4& viewProj, int width, int height) const;
+	void      EnsureTaaTargets(int width, int height);
+	void      DestroyTaaTargets();
+	void      RenderVelocity(int pw, int ph, const glm::mat4& viewProjClean,
+	                         const glm::mat4& viewProjJit);
+	// Runs the temporal resolve on m_ldrColor; returns this frame's resolved
+	// texture (the AA-resolve slot sharpens it), or 0 when TAA is not active.
+	unsigned int RenderTaa(int pw, int ph);
 
 	// ── In-Game UI (2D canvas elements, drawn after FXAA) ───────────────────
 	unsigned int m_uiProgram     = 0;
@@ -832,8 +926,85 @@ private:
 	void CreateBloomPipeline();
 	void EnsureBloomTargets(int width, int height);
 	void DestroyBloomTargets();
-	// Runs bright-pass + blur into m_bloomColor[0]; returns its texture id (or 0).
-	unsigned int RenderBloom(int fullW, int fullH);
+	// Runs bright-pass + blur of `sourceHdr` (the scene HDR, or the DoF result
+	// when that ran) into m_bloomColor[0]; returns its texture id (or 0).
+	unsigned int RenderBloom(unsigned int sourceHdr, int fullW, int fullH);
+
+	// ── Depth of field (CoC from depth → separable CoC-weighted blur → composite)
+	// Runs on the HDR image before bloom/tonemap. Half-res CoC (RG16F: signed
+	// blur radius in half-res texels, linear depth), two half-res RGBA16F blur
+	// targets (ping-pong), full-res RGBA16F composite. Off = zero cost: no
+	// target is even allocated and the tonemap reads m_hdrColor as before.
+	bool         m_dofEnabled       = false;
+	float        m_dofFocusDistance = 10.0f;
+	float        m_dofFocusRange    = 4.0f;
+	float        m_dofAperture      = 2.8f;
+	unsigned int m_dofCocProgram       = 0;
+	int          m_uDofCocDepth        = -1;
+	int          m_uDofCocParams       = -1;   // focus, range, maxRadius, 0
+	int          m_uDofCocProj         = -1;   // proj[2][2], proj[3][2]
+	unsigned int m_dofBlurProgram      = 0;
+	int          m_uDofBlurImage       = -1;
+	int          m_uDofBlurCoc         = -1;
+	int          m_uDofBlurTexel       = -1;
+	int          m_uDofBlurHorizontal  = -1;
+	int          m_uDofBlurParams      = -1;
+	unsigned int m_dofCompositeProgram = 0;
+	int          m_uDofCompSharp       = -1;
+	int          m_uDofCompBlurred     = -1;
+	int          m_uDofCompDepth       = -1;
+	int          m_uDofCompParams      = -1;
+	int          m_uDofCompProj        = -1;
+	unsigned int m_dofCocFBO     = 0;
+	unsigned int m_dofCocTex     = 0;          // RG16F, half-res
+	unsigned int m_dofBlurFBO[2] = { 0, 0 };
+	unsigned int m_dofBlurTex[2] = { 0, 0 };   // RGBA16F, half-res
+	unsigned int m_dofFBO        = 0;
+	unsigned int m_dofColor      = 0;          // RGBA16F, full-res composite
+	int          m_dofW          = 0;          // full-res size the targets were made for
+	int          m_dofH          = 0;
+	void CreateDepthOfFieldPipeline();
+	void EnsureDepthOfFieldTargets(int fullW, int fullH);
+	void DestroyDepthOfFieldTargets();
+	// Runs the four DoF passes; returns m_dofColor, or 0 when unavailable (the
+	// caller then keeps reading m_hdrColor).
+	unsigned int RenderDepthOfField(int fullW, int fullH, const glm::mat4& proj);
+
+	// ── Motion blur (camera reprojection → directional smear) ───────────────
+	// Runs on the HDR image after DoF and before bloom/tonemap. Two passes:
+	// velocity (RG16F full-res, screen-space delta in UV between this frame and
+	// the previous view-projection, rebuilt from the scene depth) and the smear
+	// (RGBA16F full-res, taps along the centre velocity weighted by whether the
+	// tap's own motion reaches the pixel). Camera motion only — objects moving
+	// through a still camera stay sharp. m_mbPrevViewProj is refreshed at the
+	// end of EVERY DrawScene, enabled or not, so switching the pass on never
+	// smears a frame against a stale matrix. Off = zero cost, no target made.
+	bool         m_mbEnabled    = false;
+	float        m_mbIntensity  = 0.5f;
+	float        m_mbMaxBlur    = 24.0f;
+	glm::mat4    m_mbPrevViewProj = glm::mat4(1.0f);
+	bool         m_mbHasPrev    = false;
+	unsigned int m_mbVelocityProgram = 0;
+	int          m_uMbVelDepth       = -1;
+	int          m_uMbVelReproject   = -1;   // prevViewProj * inverse(viewProj)
+	int          m_uMbVelParams      = -1;   // intensity, maxBlur (uv units), 0, 0
+	unsigned int m_mbBlurProgram     = 0;
+	int          m_uMbBlurImage      = -1;
+	int          m_uMbBlurVelocity   = -1;
+	int          m_uMbBlurTexel      = -1;
+	unsigned int m_mbVelocityFBO = 0;
+	unsigned int m_mbVelocityTex = 0;        // RG16F, full-res
+	unsigned int m_mbFBO         = 0;
+	unsigned int m_mbColor       = 0;        // RGBA16F, full-res smear result
+	int          m_mbW           = 0;
+	int          m_mbH           = 0;
+	void CreateMotionBlurPipeline();
+	void EnsureMotionBlurTargets(int fullW, int fullH);
+	void DestroyMotionBlurTargets();
+	// Runs the two motion-blur passes on `sourceHdr`; returns m_mbColor, or 0
+	// when unavailable (the caller then keeps reading `sourceHdr`).
+	unsigned int RenderMotionBlur(unsigned int sourceHdr, int fullW, int fullH,
+	                              const glm::mat4& view, const glm::mat4& proj);
 
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// A view-space position pre-pass (camera POV) feeds a hemisphere-kernel
@@ -847,6 +1018,12 @@ private:
 	int          m_uDepthPosInvProj = -1;
 	int          m_uPosMVP        = -1;   // clip = viewProj * model
 	int          m_uPosModelView  = -1;   // view * model (view-space position out)
+	// Instanced twin for GeometryPass batches (kSSAOPosInstancedVS): model from
+	// attrib locs 4–7 / m_instanceVBO, view + view-proj as the uniforms. 0 when
+	// the link failed → every batch loops through m_ssaoPosProgram.
+	unsigned int m_ssaoPosInstancedProgram = 0;
+	int          m_uPosInstViewProj = -1;
+	int          m_uPosInstView     = -1;
 	unsigned int m_ssaoProgram    = 0;   // fullscreen occlusion estimate
 	int          m_uSsaoViewPos   = -1;
 	int          m_uSsaoNoise     = -1;
@@ -886,6 +1063,11 @@ private:
 	unsigned int m_reflPrepassProgram = 0;
 	bool         m_reflPrepassTried   = false;
 	unsigned int m_reflPrepassUBO = 0;   // ReflPrepassUniforms (3 × mat4), per draw
+	// Instanced twin (library reflPrepassVertexInstanced): model from attribs
+	// 4–7, camera pair in its own block. 0 = every batch loops. Shares
+	// binding 5 with the per-draw block above; the pre-pass rebinds on switch.
+	unsigned int m_reflPrepassInstProgram = 0;
+	unsigned int m_reflPrepassInstUBO     = 0; // ReflPrepassInstUniforms (2 × mat4), per batch run
 	bool EnsureReflPrepassProgram();
 	void CreateSSAOPipeline();           // programs + kernel + noise texture
 	void EnsureSSAOTargets(int width, int height, bool withRefl);
@@ -980,6 +1162,9 @@ private:
 
 	bool         m_giPipelinesBuilt   = false;
 	unsigned int m_giGBufProgram      = 0;
+	// Instanced twin (kGiGBufInstancedVS) for GeometryPass batches; optional.
+	unsigned int m_giGBufInstancedProgram = 0;
+	int          m_uGiGBufInstViewProj    = -1;
 	unsigned int m_giShadowCSProgram  = 0;
 	unsigned int m_giTemporalProgram  = 0;
 	unsigned int m_giBlurProgram      = 0;

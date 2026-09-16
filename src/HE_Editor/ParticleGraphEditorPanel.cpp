@@ -540,7 +540,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 	if (structuralEdit)
 	{
 		st.dirty = true;
-		if (ctx.undoSys) ctx.undoSys->snapshotNow();
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Particle Graph");
 	}
 	// A node still under the mouse has already moved: unsaved from this instant,
 	// and for a collaborated graph it is what a peer should be seeing. NOT

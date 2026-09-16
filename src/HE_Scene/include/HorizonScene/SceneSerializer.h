@@ -298,6 +298,42 @@ public:
     // not a component and is refused.
     static bool removeComponentByKey(HorizonWorld& world, Entity entity, const std::string& key);
 
+    // Put the component a key names back to a freshly constructed one, values
+    // and all — the Details panel's "Reset to Default". Only for a component
+    // the entity already carries: false otherwise, so a reset never turns into
+    // an add. Refused for "prefab" (the instance link is identity, not values)
+    // and for "inactive" (a tag has nothing to put back). Authored data goes
+    // with the values — a terrain's sculpting, a nav mesh's bake — which is
+    // why the caller takes an undo snapshot first.
+    static bool resetComponentByKey(HorizonWorld& world, Entity entity, const std::string& key);
+
+    // ── One component as text: the Details panel's clipboard ─────────────────
+    // "Copy Component" puts ONE component's block on the system clipboard as
+    // JSON text, and "Paste" reads it back — onto an entity that has the
+    // component (values overwritten) or one that lacks it (component added),
+    // because applyComponents does emplace_or_replace either way. Text rather
+    // than an in-process slot so that it works between two editors and can be
+    // read by a human; wrapped in an envelope that names the key, so a paste
+    // knows what it is holding before it touches the entity:
+    //
+    //     { "horizonComponent": "light", "values": { ...the scene block... } }
+    //
+    // Nothing that is not a component goes through here: "__name" is refused,
+    // and so is "prefab" — a placement's link and bindings pasted onto another
+    // entity would make that entity claim a template it is not bound to.
+    //
+    // exportComponentText: the envelope, or "" when the entity does not carry
+    // the component (or the key is refused).
+    std::string exportComponentText(const HorizonWorld& world, Entity entity,
+                                    const std::string& key);
+    // componentKeyOfText: the key an envelope names, or "" for text that is not
+    // one — the paste menu asks this to know whether to offer itself and for
+    // which component. Cheap enough to ask every frame a menu is open.
+    static std::string componentKeyOfText(const std::string& text);
+    // importComponentText: apply the envelope's block to the entity. False when
+    // the text is no envelope or the entity is invalid.
+    bool importComponentText(HorizonWorld& world, Entity entity, const std::string& text);
+
 private:
     bool saveJSON  (const HorizonWorld& world, const std::filesystem::path& path);
     bool saveBinary(const HorizonWorld& world, const std::filesystem::path& path);

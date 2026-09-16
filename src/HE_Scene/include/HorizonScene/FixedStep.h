@@ -11,8 +11,9 @@
 // from the thing it previews is worse than no preview, so the rule lives here
 // once and both callers spend it.
 //
-// The step RATE is not in here on purpose — that is PhysicsWorld::kFixedDt, and
-// it belongs to the simulation rather than to the pacing.
+// The step RATE is not in here on purpose — that is the project's
+// (ProjectPhysicsSettings::fixedDt, default PhysicsWorld::kFixedDt), and it
+// belongs to the simulation rather than to the pacing.
 namespace HE {
 
 struct FixedStepResult

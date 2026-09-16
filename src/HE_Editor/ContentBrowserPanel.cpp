@@ -2724,6 +2724,17 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					ctx.contentRefreshPending = true;
 					ImGui::CloseCurrentPopup();
 				}
+				// A mesh format the engine knows but THIS build cannot read (FBX /
+				// OBJ / COLLADA without Assimp): the item stays, greyed, and says
+				// why. Leaving it out entirely made the user wonder whether the
+				// file was broken or the format simply unsupported.
+				else if (const char* blocked = Importer::importBlockedReason(srcPath);
+				         !engineLocked && *blocked)
+				{
+					EditorWidgets::menuItem("Import", nullptr, false, /*enabled=*/false);
+					if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+						ImGui::SetTooltip("%s", blocked);
+				}
 
 				// ── Reimport ─────────────────────────────────────────────
 				// An asset now records the file it was imported FROM, which is what
@@ -2840,7 +2851,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 							const std::string meshName = mesh->name;
 							const std::string matRel   = mesh->materialPath;
 
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							if (ctx.undoSys) ctx.undoSys->snapshotNow("Place Asset");
 							Entity e = ctx.world->createEntity(meshName);
 							ctx.world->addComponent(e, TransformComponent{});
 							ctx.world->addComponent(e, MeshComponent{ .meshAssetId = id });

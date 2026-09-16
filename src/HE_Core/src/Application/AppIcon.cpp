@@ -207,6 +207,71 @@ bool heIcoWrite(const std::filesystem::path& path, const std::vector<AppIconImag
     return writeFile(path, out);
 }
 
+std::vector<AppIconImage> heAppIconSetFromImage(const std::uint8_t* rgba, int w, int h,
+                                                const std::vector<int>& sizes)
+{
+    std::vector<AppIconImage> out;
+    if (!rgba || w <= 0 || h <= 0) return out;
+
+    // Square it first: a wide picture becomes a wide picture in the middle of a
+    // transparent square, which is what every icon container expects, rather
+    // than a squashed one. Nothing to do for a square source.
+    const int side = std::max(w, h);
+    std::vector<std::uint8_t> square;
+    const std::uint8_t* src = rgba;
+    if (w != h)
+    {
+        square.assign((std::size_t)side * side * 4, 0);
+        const int ox = (side - w) / 2, oy = (side - h) / 2;
+        for (int y = 0; y < h; ++y)
+            std::memcpy(square.data() + ((std::size_t)(y + oy) * side + ox) * 4,
+                        rgba + (std::size_t)y * w * 4, (std::size_t)w * 4);
+        src = square.data();
+    }
+
+    for (const int px : sizes)
+    {
+        if (px <= 0) continue;
+        AppIconImage img;
+        img.px = px;
+        img.rgba.resize((std::size_t)px * px * 4);
+        // Area average over the source box each destination texel covers. For
+        // an upscale the box is a single texel or two, which degrades to a
+        // nearest/bilinear-ish sample — an icon drawn smaller than 512 is the
+        // artist's choice and a blur would not improve it.
+        for (int dy = 0; dy < px; ++dy)
+        {
+            const int sy0 = dy * side / px;
+            const int sy1 = std::max(sy0 + 1, (dy + 1) * side / px);
+            for (int dx = 0; dx < px; ++dx)
+            {
+                const int sx0 = dx * side / px;
+                const int sx1 = std::max(sx0 + 1, (dx + 1) * side / px);
+                // Premultiplied accumulation: a transparent neighbour must not
+                // bleed its (meaningless) colour into an opaque edge.
+                double r = 0, g = 0, b = 0, a = 0;
+                int n = 0;
+                for (int sy = sy0; sy < sy1 && sy < side; ++sy)
+                    for (int sx = sx0; sx < sx1 && sx < side; ++sx)
+                    {
+                        const std::uint8_t* p = src + ((std::size_t)sy * side + sx) * 4;
+                        const double pa = p[3] / 255.0;
+                        r += p[0] * pa; g += p[1] * pa; b += p[2] * pa; a += pa;
+                        ++n;
+                    }
+                std::uint8_t* d = img.rgba.data() + ((std::size_t)dy * px + dx) * 4;
+                if (n == 0 || a <= 0.0) { d[0] = d[1] = d[2] = d[3] = 0; continue; }
+                d[0] = (std::uint8_t)std::lround(std::clamp(r / a, 0.0, 255.0));
+                d[1] = (std::uint8_t)std::lround(std::clamp(g / a, 0.0, 255.0));
+                d[2] = (std::uint8_t)std::lround(std::clamp(b / a, 0.0, 255.0));
+                d[3] = (std::uint8_t)std::lround(std::clamp(a / n * 255.0, 0.0, 255.0));
+            }
+        }
+        out.push_back(std::move(img));
+    }
+    return out;
+}
+
 bool heLoadPngRGBA(const std::filesystem::path& png,
                    std::vector<std::uint8_t>& rgba, int& width, int& height)
 {

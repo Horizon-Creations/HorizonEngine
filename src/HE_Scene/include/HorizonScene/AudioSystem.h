@@ -4,6 +4,7 @@
 #include <HorizonScene/Components/AudioSourceComponent.h>
 #include <HorizonScene/Components/AudioListenerComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/EntityActive.h>   // the "Active" switch: no sound from what is off
 #include <ContentManager/ContentManager.h>
 #include <glm/gtc/quaternion.hpp>
 
@@ -18,9 +19,11 @@ struct AudioSystem
         if (!engine.isInitialized()) return;
         auto& reg = world.registry();
         auto view = reg.view<AudioSourceComponent>();
+        const HE::ActiveFilter active(reg);
         for (auto [entity, src] : view.each())
         {
             if (!src.playOnStart) continue;
+            if (active.off(entity)) continue;   // switched off: silent, like it is unseen
             if (!content)         continue;
             const auto* asset = content->getAudio(src.assetId);
             if (!asset || asset->audioData.empty()) continue;

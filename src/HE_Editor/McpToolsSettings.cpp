@@ -215,7 +215,7 @@ std::vector<ProjSetting> buildProjectCatalog()
 			if (p.startupScene.empty()) return json("");
 			const fs::path root = projectRootOf(p);
 			const fs::path rel = fs::path(p.startupScene).lexically_relative(root);
-			if (rel.empty() || rel.native().rfind("..", 0) == 0)
+			if (rel.empty() || rel.generic_string().rfind("..", 0) == 0)
 				return json(p.startupScene);   // outside the project: say so plainly
 			return json(rel.generic_string());
 		};
@@ -302,6 +302,10 @@ std::vector<ProjSetting> buildProjectCatalog()
 	                    "stands."));
 	t.push_back(strProj("project.appIconColor", "Icon Colour", "Application",
 	                    &ProjectData::appIconColor, "\"#RRGGBB\"."));
+	t.push_back(strProj("project.appIconFile", "Icon File", "Application",
+	                    &ProjectData::appIconFile,
+	                    "Project-relative PNG the icon is built from instead of the "
+	                    "generated one. Empty = generated."));
 	t.push_back(strProj("project.bundleId", "Bundle Id", "Application",
 	                    &ProjectData::bundleId,
 	                    "Empty = derived from the project name."));

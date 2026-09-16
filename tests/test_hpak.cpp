@@ -712,7 +712,7 @@ TEST_CASE("Cook: ASTC texture round-trips and decodes close to the original")
 // baked mip count, and that exact size for the two desktop block formats. (No decode
 // check: unlike astcenc no decoder is vendored, but the encoders are upstream-tested
 // and the structural math is what the cook + runtime block-size code depends on.)
-static void verifyBlockCook(uint8_t compression, TextureFormat expect)
+static void verifyBlockCook(uint8_t compression, TextureFormat expect, uint8_t quality = 0)
 {
     auto dir = std::filesystem::temp_directory_path() / "he_bcn_src";
     he_test::removeAllQuiet(dir);
@@ -734,6 +734,7 @@ static void verifyBlockCook(uint8_t compression, TextureFormat expect)
 
     Hpak::PackSettings s; s.codec = Hpak::Codec::Store; s.cook = true;
     s.textureCompression = compression;
+    s.textureQuality     = quality;
     HpakWriter packer; packer.addDirectory(dir, s);
     auto pak = std::filesystem::temp_directory_path() / "he_bcn.hpak";
     REQUIRE(packer.write(pak.string()));
@@ -756,11 +757,21 @@ TEST_CASE("Cook: BC7 texture round-trips with the baked mip chain")
 {
     verifyBlockCook(static_cast<uint8_t>(TextureFormat::BC7), TextureFormat::BC7);
 }
+// The quality knob changes the encoder's parameters, not the format or the
+// block layout: every level has to produce the same structure. (Whether it
+// produces a BETTER picture is the upstream encoders' promise; what is pinned
+// here is that asking for it does not break the cook.)
+TEST_CASE("Cook: every texture quality level produces the same BC7 layout")
+{
+    for (uint8_t q = 0; q <= 2; ++q)
+        verifyBlockCook(static_cast<uint8_t>(TextureFormat::BC7), TextureFormat::BC7, q);
+}
 #endif
 #ifdef HE_HAVE_STB_DXT
 TEST_CASE("Cook: BC3 texture round-trips with the baked mip chain")
 {
     verifyBlockCook(static_cast<uint8_t>(TextureFormat::BC3), TextureFormat::BC3);
+    verifyBlockCook(static_cast<uint8_t>(TextureFormat::BC3), TextureFormat::BC3, 2);
 }
 
 // Decode texel (0,0) of one BC3/DXT5 block (16 B): color from the DXT1 sub-block,

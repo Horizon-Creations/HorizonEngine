@@ -14,6 +14,7 @@
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
 #include "ConsolePanel.h"          // the log sink behind View ▸ Console
+#include "HcExecTrace.h"           // the runtime's exec listener behind the node highlighting
 #include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
 #include "TypeAssetPanel.h"        // the MCP type tools ask this tab whether it is dirty
 #include "ParticleGraphEditorPanel.h"        // …and the MCP particle tools ask this one
@@ -21,6 +22,10 @@
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
+#include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
+#include "EditorShortcuts.h"       // the rebound keys, persisted the same way
+#include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
+#include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "ExportDialogPanel.h"     // the packing worker the MCP build tools start
@@ -79,6 +84,7 @@
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
+#include <HorizonScene/TimerSystem.h>
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
@@ -1155,11 +1161,18 @@ void EditorApplication::OnInit()
 	}
 	m_editorConfig.UiFontScale                 = globalstate.getCustomConfigFloat("UiFontScale",       m_editorConfig.UiFontScale);
 	m_editorConfig.EditorCameraSpeed           = globalstate.getCustomConfigFloat("EditorCameraSpeed", m_editorConfig.EditorCameraSpeed);
-	// The ground grid's switch. It lives in ViewportPanel next to the only code
-	// that reads it, so the config talks to that state directly rather than
-	// keeping a second copy in EditorConfig for the two of them to disagree over.
-	ViewportPanel::setGroundGridEnabled(
-		globalstate.getCustomConfigBool("ViewportGroundGrid", ViewportPanel::groundGridEnabled()));
+	// The viewport's show flags (ground grid, colliders, icons…). They live in
+	// ViewportPanel next to the code that reads them, so the config talks to
+	// that state directly rather than keeping a second copy in EditorConfig for
+	// the two of them to disagree over; the table keeps this a loop.
+	{
+		int n = 0;
+		const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+		ViewportPanel::ShowFlags& flags = ViewportPanel::showFlags();
+		for (int i = 0; i < n; ++i)
+			flags.*(fields[i].member) =
+				globalstate.getCustomConfigBool(fields[i].configKey, flags.*(fields[i].member));
+	}
 	m_editorConfig.MaxFps                      = globalstate.getCustomConfigFloat("MaxFps",            m_editorConfig.MaxFps);
 	m_editorConfig.PointerInput                = globalstate.getCustomConfigInt("PointerInput",        m_editorConfig.PointerInput);
 	m_editorConfig.GamepadStickDeadzone        = globalstate.getCustomConfigFloat("GamepadStickDeadzone",   m_editorConfig.GamepadStickDeadzone);
@@ -1174,6 +1187,13 @@ void EditorApplication::OnInit()
 	m_editorConfig.SSAORadius                  = globalstate.getCustomConfigFloat("SSAORadius",         m_editorConfig.SSAORadius);
 	m_editorConfig.SSAOIntensity               = globalstate.getCustomConfigFloat("SSAOIntensity",      m_editorConfig.SSAOIntensity);
 	m_editorConfig.SSAOMethod                  = globalstate.getCustomConfigInt("SSAOMethod",           m_editorConfig.SSAOMethod);
+	m_editorConfig.DoFEnabled                  = globalstate.getCustomConfigBool("DoFEnabled",          m_editorConfig.DoFEnabled);
+	m_editorConfig.DoFFocusDistance            = globalstate.getCustomConfigFloat("DoFFocusDistance",   m_editorConfig.DoFFocusDistance);
+	m_editorConfig.DoFFocusRange               = globalstate.getCustomConfigFloat("DoFFocusRange",      m_editorConfig.DoFFocusRange);
+	m_editorConfig.DoFAperture                 = globalstate.getCustomConfigFloat("DoFAperture",        m_editorConfig.DoFAperture);
+	m_editorConfig.MotionBlurEnabled           = globalstate.getCustomConfigBool("MotionBlurEnabled",   m_editorConfig.MotionBlurEnabled);
+	m_editorConfig.MotionBlurIntensity         = globalstate.getCustomConfigFloat("MotionBlurIntensity", m_editorConfig.MotionBlurIntensity);
+	m_editorConfig.MotionBlurMax               = globalstate.getCustomConfigFloat("MotionBlurMax",      m_editorConfig.MotionBlurMax);
 	m_editorConfig.AntiAliasing                = globalstate.getCustomConfigInt("AntiAliasing",         m_editorConfig.AntiAliasing);
 	m_editorConfig.AASharpness                 = globalstate.getCustomConfigFloat("AASharpness",        m_editorConfig.AASharpness);
 	m_editorConfig.RenderScale                 = globalstate.getCustomConfigFloat("RenderScale",        m_editorConfig.RenderScale);
@@ -1190,6 +1210,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflQuality               = globalstate.getCustomConfigInt("GIReflQuality",              m_editorConfig.GIReflQuality);
 	m_editorConfig.GIReflBounces               = globalstate.getCustomConfigInt("GIReflBounces",              m_editorConfig.GIReflBounces);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
+	m_editorConfig.OcclusionCulling            = globalstate.getCustomConfigBool("OcclusionCulling",    m_editorConfig.OcclusionCulling);
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
 	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
 	m_editorConfig.SSRQuality                  = globalstate.getCustomConfigInt("SSRQuality",           m_editorConfig.SSRQuality);
@@ -1209,7 +1230,16 @@ void EditorApplication::OnInit()
 			globalstate.getCustomConfigFloat("EditorCamYaw",   m_editorCamera.yaw()),
 			globalstate.getCustomConfigFloat("EditorCamPitch", m_editorCamera.pitch()),
 			globalstate.getCustomConfigFloat("EditorCamPivot", m_editorCamera.pivotDistance()));
+		m_editorCamera.setOrthographic(globalstate.getCustomConfigBool("EditorCamOrtho", false));
 	}
+	// The camera bookmarks (digit keys) ride next to the view, one string.
+	CameraBookmarks::editorSet() = CameraBookmarks::Set::decode(
+		globalstate.getCustomConfigString("EditorCamBookmarks", ""));
+#ifdef HE_IMGUI_ENABLED
+	// The user's rebound shortcuts, one string (only what differs from the
+	// defaults — see EditorShortcuts::encode).
+	EditorShortcuts::decode(globalstate.getCustomConfigString(ShortcutsPage::kConfigKey, ""));
+#endif
 	setMaxFps(m_editorConfig.MaxFps);   // VSync-off frame cap (0 = unlimited)
 
 #ifdef HE_IMGUI_ENABLED
@@ -1337,6 +1367,11 @@ void EditorApplication::OnInit()
 	// level script and the GameInstance share one interpreter (and the
 	// GameInstance survives scene switches).
 	m_editorWorld->setScriptRuntime(&m_gameInstance.runtime());
+	// …and that one runtime reports every node it executes to the editor, which
+	// is what lights nodes up on the canvas while a level plays or a widget is
+	// previewed (HcExecTrace.h). Installed once, here, for the same reason the
+	// console sink is: whatever runs, runs through this runtime.
+	HcExecTrace::attach(m_gameInstance.runtime());
 	// Widget + object nodes route to the editor world's WidgetManager and the
 	// app runtime (+ ContentManager to load assets).
 	{
@@ -1543,7 +1578,7 @@ void EditorApplication::OnInit()
 		// known: the font atlas is baked ONCE and every backend uploads it once,
 		// so a mask that arrives after the first label was drawn cannot be
 		// applied. uiSetFontScripts says so rather than half-applying it, and
-		// Preferences ▸ Project ▸ Fonts turns that "no" into a sentence about
+		// Project Settings ▸ Game ▸ Fonts turns that "no" into a sentence about
 		// restarting. Opening a second project with a different answer in one
 		// session is exactly that case.
 		HE::uiSetFontScripts(m_projectManager.currentProject().fontScripts);
@@ -2223,6 +2258,25 @@ void EditorApplication::OnRender(float dt)
 	// it), and an editor button sharing that variable would fight it. A step lets
 	// exactly one tick through; the request is consumed here, so the pause re-arms
 	// without anyone having to press it again.
+	// ── HorizonCode breakpoints ──────────────────────────────────────────────
+	// The parked Continue / Step Node from the last frame's UI pass runs HERE,
+	// where a Delay's continuation would: between frames, before the tick. A
+	// step whose run reaches its end without another node to stop at is over,
+	// and the world goes on until the next breakpoint — the way a text
+	// debugger stepping out of the last line resumes.
+	{
+		auto& rt = m_gameInstance.runtime();
+		if (m_hcResume == HcResume::Continue)   rt.debugContinue();
+		else if (m_hcResume == HcResume::Step)  { rt.debugStep(); if (!rt.isSuspended()) m_isPaused = false; }
+		m_hcResume = HcResume::None;
+	}
+	// A hit — during the last frame's tick, or in the resume just above —
+	// freezes this frame (HcExecTrace::takeBreakHit; the listener runs from
+	// inside execution, so the frame it hit in finished as it was). Only a play
+	// session can be frozen; in an application project the stopped run waits
+	// while the UI stays live, and Continue is the same button.
+	HcExecTrace::refreshPaused();
+	if (HcExecTrace::takeBreakHit() && m_isPlaying) { m_isPaused = true; m_stepFrame = false; }
 	const bool stepping   = m_isPaused && m_stepFrame;
 	m_stepFrame           = false;
 	const bool simulating = m_isPlaying && (!m_isPaused || stepping);
@@ -2249,6 +2303,11 @@ void EditorApplication::OnRender(float dt)
 		m_appUiStartedFor = m_projectManager.currentProject().path;
 		HE_LOG_INFO(Editor, "%s", "Application project: starting the live preview "
 		                          "(GameInstance OnInit)");
+		// The previous project's timers die here: the preview dispatches them
+		// now (TimerSystem in the frame), and a timer.every started by project
+		// A would otherwise fire into project B's GameInstance as a handle it
+		// never issued. Same reason restartAppPreview cancels.
+		HE::api::timer::cancelAll();
 		m_gameInstance.fireInit();
 		m_appPreviewRestartPending = false;   // it just started; nothing to redo
 		// Say what came of it. "Nothing is previewed" has three possible causes —
@@ -2649,6 +2708,22 @@ void EditorApplication::OnRender(float dt)
 			m_editorConfig.SSAORadius,
 			m_editorConfig.SSAOIntensity,
 			m_editorConfig.SSAOMethod});
+		renderer()->SetDepthOfFieldSettings(IRenderer::DepthOfFieldSettings{
+			m_editorConfig.DoFEnabled,
+			m_editorConfig.DoFFocusDistance,
+			m_editorConfig.DoFFocusRange,
+			m_editorConfig.DoFAperture});
+		renderer()->SetMotionBlurSettings(IRenderer::MotionBlurSettings{
+			m_editorConfig.MotionBlurEnabled,
+			m_editorConfig.MotionBlurIntensity,
+			m_editorConfig.MotionBlurMax});
+		// Directional shadows come from the PROJECT (Project Settings ▸ Shadows),
+		// not from the editor's preferences: the cascades a scene is lit with
+		// are part of the scene's look and must not differ between machines.
+		// Every frame, like the rest, so an edit on that page lands in the
+		// viewport as it is made; no project = the renderer's own defaults,
+		// which are the historical constants.
+		renderer()->SetShadowSettings(projectShadowSettings());
 		{
 			// Anti-aliasing. Same env-override treatment as GI/SSR below and for the
 			// same reason: this push runs every frame, so an override applied once
@@ -2684,6 +2759,8 @@ void EditorApplication::OnRender(float dt)
 			ssr.quality      = m_editorConfig.SSRQuality;
 			renderer()->SetSSRSettings(ssr);
 		}
+		renderer()->SetOcclusionCullingSettings(
+			IRenderer::OcclusionCullingSettings{ m_editorConfig.OcclusionCulling });
 		{
 			IRenderer::GIReflectionSettings gr;
 			gr.enabled      = m_editorConfig.GIReflectionsEnabled;
@@ -3022,7 +3099,8 @@ void EditorApplication::OnRender(float dt)
 			// Same bounded accumulator as the shipped game, from the same helper:
 			// this loop used to have no cap at all, so a stall that the game
 			// shrugged off turned a preview into catch-up steps forever.
-			HE::advanceFixedSteps(m_physicsAccum, gameDt, kPhysicsFixedDt,
+			HE::advanceFixedSteps(m_physicsAccum, gameDt,
+			                      m_projectManager.currentProject().settings.physics.fixedDt(),
 			                      HE::api::time::timeScale(),
 			                      [&](float step){ m_physicsWorld->step(*m_editorWorld, step); });
 		}
@@ -3116,6 +3194,18 @@ void EditorApplication::OnRender(float dt)
 				// Entity classes: Tick, plus reaping the ones whose entity is gone.
 				m_entityHost.tick(gameDt);
 			}
+			// Script timers (horizon.timer.after / .every), the same drain the
+			// packaged game runs. Raw dt: a timer is a clock, and a game that
+			// scaled its own time to zero still wants its autosave. On uiLive
+			// and not on simulating for the same reason the widget tick is: an
+			// application's GameInstance is RUNNING here without anyone
+			// pressing Play, and a timer.after in its OnInit has to come due in
+			// the preview as it does in the shipped app. For a game, uiLive IS
+			// simulating, so the editor's pause holds this clock with the rest.
+			// PIE never polled these before, so a timer that worked in the
+			// shipped build did nothing in the preview.
+			TimerSystem::dispatch(dt, &m_gameInstance.runtime(),
+			                      m_scriptContext.get(), &m_scriptInstances);
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
@@ -3378,12 +3468,17 @@ void EditorApplication::OnRender(float dt)
 		if (m_projectLoaded && m_editorWorld)
 		{
 			DebugDrawBuffer dbg;
+			// One switch per overlay (the toolbar's Show popup). Each block
+			// below is skipped at its head rather than filtered afterwards, so
+			// an overlay that is off costs nothing — the collider walk and the
+			// grid are the expensive ones.
+			const ViewportPanel::ShowFlags& show = ViewportPanel::showFlags();
 
 			// Selected-entity markers: unit AABB centered on each member's
 			// transform position. The primary is the bright one; the rest of a
 			// multi-selection get the same amber a shade dimmer, so which one
 			// the gizmo will move is visible without reading the outliner.
-			for (Entity sel : m_selection.entities())
+			if (show.selection) for (Entity sel : m_selection.entities())
 			{
 				if (!m_editorWorld->registry().valid(sel)) continue;
 				auto* tc = m_editorWorld->registry().try_get<TransformComponent>(sel);
@@ -3396,6 +3491,7 @@ void EditorApplication::OnRender(float dt)
 			}
 
 			// Collider wireframes: cyan for solid, magenta for triggers
+			if (show.colliders)
 			{
 				auto& reg = m_editorWorld->registry();
 				// Local-space box of a mesh asset, measured once and kept. The
@@ -3496,6 +3592,7 @@ void EditorApplication::OnRender(float dt)
 			// needs JPH_DEBUG_RENDERER and a renderer this engine does not have,
 			// and it would only exist in play mode — the half of the time an
 			// author is not authoring.
+			if (show.joints)
 			{
 				auto& reg = m_editorWorld->registry();
 				for (auto [entity, joint] : reg.view<JointComponent>().each())
@@ -3600,7 +3697,7 @@ void EditorApplication::OnRender(float dt)
 			// tickWorld, which propagates nothing, so the stored matrix is a
 			// frame old and plain identity for anything created this frame.
 			const Entity selected = m_selection.primary();
-			if (selected != entt::null &&
+			if (show.guides && selected != entt::null &&
 			    m_editorWorld->registry().valid(selected))
 			{
 				// Not gated on `visible`. A hidden rope is the one that most needs
@@ -3620,7 +3717,9 @@ void EditorApplication::OnRender(float dt)
 					RopeTrailSystem::appendTrailGuides(*trail, dbg);
 			}
 
-			// NavMesh wireframe(s): baked polygons, per-component toggle
+			// NavMesh wireframe(s): baked polygons, per-component toggle — and
+			// the viewport's switch over all of them, for a scene with twenty.
+			if (show.navMesh)
 			{
 				auto& reg = m_editorWorld->registry();
 				for (auto [entity, nmc] : reg.view<NavMeshComponent>().each())
@@ -3694,7 +3793,7 @@ void EditorApplication::OnRender(float dt)
 			// view plane keep the same apparent shape from every angle, and three
 			// of them nested give a line renderer something that reads as a solid
 			// stroke rather than a scratch.
-			if (m_collab.inSession())
+			if (show.collaborators && m_collab.inSession())
 			{
 				const glm::vec3 viewer = m_editorCamera.position();
 				const auto localId = m_collab.localParticipant();
@@ -3798,7 +3897,7 @@ void EditorApplication::OnRender(float dt)
 			// lines, and the question ("does this clip go where I meant it to")
 			// is asked about one figure at a time.
 			if (const Entity selected = m_selection.primary();
-			    selected != entt::null && m_editorWorld->registry().valid(selected))
+			    show.guides && selected != entt::null && m_editorWorld->registry().valid(selected))
 				{
 					appendRootMotionPreview(*m_editorWorld, contentManager(), selected, dbg);
 					// And where its head is aimed, for the same one-figure-at-a-time
@@ -3817,8 +3916,19 @@ void EditorApplication::OnRender(float dt)
 			// the editor's own gizmo lines (they age with real dt in play mode,
 			// and stay frozen while paused/editing) — which is what makes a paused
 			// frame inspectable: the line drawn by the last live tick is still there.
+			//
+			// Collected even while the switch is off: collect() is also what
+			// AGES the timed primitives, and skipping it would freeze their
+			// clocks so that switching the overlay back on shows every line
+			// drawn in the meantime at once. They are simply not merged.
 			std::vector<DebugLine> merged = dbg.lines();
-			HE::api::debug::collect(simulating ? dt : 0.0f, merged);
+			if (show.scriptDebug)
+				HE::api::debug::collect(simulating ? dt : 0.0f, merged);
+			else
+			{
+				std::vector<DebugLine> discard;
+				HE::api::debug::collect(simulating ? dt : 0.0f, discard);
+			}
 			renderer()->SetDebugLines(merged);
 		}
 		else
@@ -4152,9 +4262,44 @@ void EditorApplication::dumpFrameHeadless()
 	r->SetOverlayCallback(nullptr);
 	r->SetBloomSettings(IRenderer::BloomSettings{
 		m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity});
-	r->SetSSAOSettings(IRenderer::SSAOSettings{
-		m_editorConfig.SSAOEnabled, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
-		m_editorConfig.SSAOMethod});
+	{
+		// HE_DUMP_SSAO: override the persisted SSAO toggle for this capture only
+		// (the GI / SSR twins below do the same), so an SSAO pre-pass A/B does
+		// not depend on the Preferences state of whoever ran the editor last.
+		const bool dumpSSAO = [&]{
+			const char* v = std::getenv("HE_DUMP_SSAO");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.SSAOEnabled;
+		}();
+		r->SetSSAOSettings(IRenderer::SSAOSettings{
+			dumpSSAO, m_editorConfig.SSAORadius, m_editorConfig.SSAOIntensity,
+			m_editorConfig.SSAOMethod});
+	}
+	{
+		// HE_DUMP_DOF (+ DOFFOCUS / DOFRANGE / DOFAPERTURE): override the
+		// depth-of-field settings for this capture only, so he_shot.py can A/B
+		// the pass and move the focus plane without touching config.json.
+		IRenderer::DepthOfFieldSettings dof{
+			m_editorConfig.DoFEnabled, m_editorConfig.DoFFocusDistance,
+			m_editorConfig.DoFFocusRange, m_editorConfig.DoFAperture};
+		if (const char* v = std::getenv("HE_DUMP_DOF"); v && *v)         dof.enabled       = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_DOFFOCUS"); v && *v)    dof.focusDistance = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_DOFRANGE"); v && *v)    dof.focusRange    = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_DOFAPERTURE"); v && *v) dof.aperture      = static_cast<float>(std::atof(v));
+		r->SetDepthOfFieldSettings(dof);
+	}
+	{
+		// HE_DUMP_MOTIONBLUR (+ MBINTENSITY / MBMAX): override the motion-blur
+		// settings for this capture only. The camera motion itself comes from
+		// HE_DUMP_MBYAWSTEP / MBPITCHSTEP at the capture loop below.
+		IRenderer::MotionBlurSettings mb{
+			m_editorConfig.MotionBlurEnabled, m_editorConfig.MotionBlurIntensity,
+			m_editorConfig.MotionBlurMax};
+		if (const char* v = std::getenv("HE_DUMP_MOTIONBLUR"); v && *v)  mb.enabled   = std::atof(v) > 0.5;
+		if (const char* v = std::getenv("HE_DUMP_MBINTENSITY"); v && *v) mb.intensity = static_cast<float>(std::atof(v));
+		if (const char* v = std::getenv("HE_DUMP_MBMAX"); v && *v)       mb.maxBlur   = static_cast<float>(std::atof(v));
+		r->SetMotionBlurSettings(mb);
+	}
+	r->SetShadowSettings(projectShadowSettings());
 	{
 		// HE_DUMP_AA / HE_DUMP_RENDERSCALE / HE_DUMP_SPECAA: override the AA mode,
 		// the render scale and the specular-AA toggle for this capture only, so
@@ -4189,6 +4334,17 @@ void EditorApplication::dumpFrameHeadless()
 		}();
 		r->SetGISettings(IRenderer::GISettings{
 			dumpGI, m_editorConfig.GIIndirectIntensity, m_editorConfig.GILightRadius});
+	}
+	{
+		// HE_DUMP_OCCLUSION: override the persisted occlusion-culling toggle for
+		// this capture only, so he_shot.py can A/B the culler: the two captures
+		// must be pixel-identical, only "dump counters" (visible=, occluded=)
+		// may differ.
+		const bool dumpOcc = [&]{
+			const char* v = std::getenv("HE_DUMP_OCCLUSION");
+			return v && *v ? std::atof(v) > 0.5 : m_editorConfig.OcclusionCulling;
+		}();
+		r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{ dumpOcc });
 	}
 	{
 		// HE_DUMP_SSR: override the persisted SSR toggle for this capture only.
@@ -4238,6 +4394,13 @@ void EditorApplication::dumpFrameHeadless()
 			path = (std::string(v) == "1" || std::string(v) == "deferred") ? 1 : 0;
 		r->SetRenderPath((path == 1 && r->GetCapabilities().supportsDeferredRendering)
 			? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+	}
+	{
+		// HE_DUMP_VIEWMODE=unlit|wireframe|basecolor|… (or HE_DUMP_GBUFFER=1..4):
+		// the viewport's view mode for this capture. Explicitly Lit otherwise —
+		// the backend seeded its own from HE_DUMP_GBUFFER at Initialize, which
+		// is the same answer, but a capture should not depend on that.
+		r->SetViewMode(HE::Ed::viewModeOverrideFromEnv(HE::ViewMode::Lit));
 	}
 
 	// ── Sky-test capture (HE_DUMP_SKYTEST): aim the camera up at the sky and override
@@ -4314,6 +4477,36 @@ void EditorApplication::dumpFrameHeadless()
 		                       static_cast<float>(envF("HE_DUMP_CAMY", 2.0f)),
 		                       static_cast<float>(envF("HE_DUMP_CAMZ", 0.0f)));
 		m_editorCamera.setOrientation(camPos, fwd);
+		// HE_DUMP_ORTHO=1: the same pose without a lens (the ortho height follows
+		// HE_DUMP_ORTHOPIVOT, the pivot distance the height is derived from);
+		// HE_DUMP_VIEW=top|bottom|front|back|left|right: one of the axis presets
+		// instead, swung around the pivot that distance ahead of camPos. Pairs
+		// with DOFTEST (cubes at 3..48 m) — in ortho they must all be the same size.
+		if (const char* v = std::getenv("HE_DUMP_VIEW"); v && *v)
+		{
+			const std::string_view name(v);
+			using VP = EditorCamera::ViewPreset;
+			const VP preset = name == "top"    ? VP::Top    : name == "bottom" ? VP::Bottom
+			                : name == "front"  ? VP::Front  : name == "back"   ? VP::Back
+			                : name == "left"   ? VP::Left   : name == "right"  ? VP::Right
+			                : VP::Perspective;
+			m_editorCamera.restoreView(camPos, m_editorCamera.yaw(), m_editorCamera.pitch(),
+			                           envF("HE_DUMP_ORTHOPIVOT", 12.0f));
+			m_editorCamera.applyPreset(preset);
+		}
+		else if (envF("HE_DUMP_ORTHO", 0.0f) > 0.5f)
+		{
+			m_editorCamera.restoreView(camPos, m_editorCamera.yaw(), m_editorCamera.pitch(),
+			                           envF("HE_DUMP_ORTHOPIVOT", 12.0f));
+			m_editorCamera.setOrthographic(true);
+		}
+		else
+		{
+			// Explicitly a lens: the projection is persisted with the camera view
+			// (EditorCamOrtho), so an ortho dump would otherwise leak into every
+			// later "perspective" shot from the same config.
+			m_editorCamera.setOrthographic(false);
+		}
 		r->SetEditorCamera(m_editorCamera.makeOverride());
 	}
 
@@ -4814,6 +5007,72 @@ void EditorApplication::dumpFrameHeadless()
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_ICONTEST five icon entities added");
 	}
 
+	// ── Occlusion-culling witness (HE_DUMP_OCCLUSIONTEST=1): a wall across the
+	// view (default cube scaled 8×4×0.2, six units ahead) with two cubes fully
+	// behind it and one control cube beside it, in the open. The oracle is a
+	// pair of captures, HE_DUMP_OCCLUSION=0 and =1: the images must be
+	// pixel-identical (the hidden cubes never showed anyway) while the log's
+	// "dump counters" line drops by exactly the two hidden cubes — visible= down
+	// by 2, occluded=2, draws= down by 2. Everything is placed relative to the
+	// editor camera the sky-test block aimed above, so PITCH=0 frames it.
+	if (const char* ot = std::getenv("HE_DUMP_OCCLUSIONTEST"); ot && *ot && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0, 1, 0)));
+		const glm::vec3 eye      = m_editorCamera.position();
+
+		auto place = [&](const char* name, glm::vec3 pos, glm::vec3 scale) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.scale    = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			return e;
+		};
+		// The wall spans x/z ±0.67 of the view; the 60° / 16:9 frame reaches ±1.03.
+		place("OcclusionWall",     eye + camFwd * 6.0f,                      glm::vec3(8.0f, 4.0f, 0.2f));
+		place("OcclusionHiddenA",  eye + camFwd * 12.0f,                     glm::vec3(1.0f));
+		place("OcclusionHiddenB",  eye + camFwd * 14.0f + camRight * 1.5f,   glm::vec3(2.0f));
+		place("OcclusionControl",  eye + camFwd * 12.0f + camRight * 10.0f,  glm::vec3(1.0f)); // x/z 0.79..0.88: beside the wall
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_OCCLUSIONTEST wall + 2 hidden cubes + 1 control added");
+	}
+
+	// ── Depth-of-field witness (HE_DUMP_DOFTEST=1): five default cubes at 3, 6,
+	// 12, 24 and 48 metres ahead of the editor camera, fanned out sideways and
+	// scaled with their distance so each covers about the same patch of screen
+	// (screen x ≈ -0.44, -0.2, 0, +0.2, +0.44 in NDC). The oracle is a trio of
+	// captures: HE_DUMP_DOF=0, and =1 with HE_DUMP_DOFFOCUS=6 and =24. Against
+	// the off frame the cube AT the focus distance must stay (near) pixel-
+	// identical while the others go soft — and the two focus frames must differ
+	// from each other in exactly those regions, or the CoC is not reading depth.
+	if (const char* dt = std::getenv("HE_DUMP_DOFTEST"); dt && *dt && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0, 1, 0)));
+		const glm::vec3 eye      = m_editorCamera.position();
+
+		const float dist[5] = { 3.0f, 6.0f, 12.0f, 24.0f, 48.0f };
+		const float side[5] = { -0.45f, -0.2f, 0.0f, 0.2f, 0.45f };
+		const char* names[5] = { "DofCube3m", "DofCube6m", "DofCube12m", "DofCube24m", "DofCube48m" };
+		for (int i = 0; i < 5; ++i)
+		{
+			auto e = m_editorWorld->createEntity(names[i]);
+			TransformComponent tc;
+			tc.position = eye + camFwd * dist[i] + camRight * (side[i] * dist[i]);
+			tc.scale    = glm::vec3(dist[i] * 0.15f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_DOFTEST five cubes at 3/6/12/24/48 m added");
+	}
+
 	// ── SSR witness (HE_DUMP_SSRTEST=1): a mirror floor (metallic 1, roughness
 	// 0.05) with a red cube standing on it. With SSR on (deferred tile path)
 	// the floor must show the cube's reflection; the SSR=0 control shows only
@@ -4931,6 +5190,33 @@ void EditorApplication::dumpFrameHeadless()
 		makeCube("SrgbTestSrgb",   true,   2.5f);
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_SRGBTEST linear/sRGB cube pair added");
+	}
+
+	// ── Shadow-instancing witness (HE_DUMP_SHADOWINSTTEST=1): a flat floor slab
+	// and a row of cubes hovering above it, ALL the default cube mesh with no
+	// material — so the scene pass AND every shadow cascade see one same-mesh
+	// run and draw it instanced. The row's shadows on the floor are the pixels
+	// that prove the instanced depth path put the casters where the per-object
+	// loop did: dump once with HE_MTL_INSTANCING=0 and once with it on, and the
+	// two frames must match. Frame it with PITCH=-18 TOD=0.35 CAMY=5 (camera
+	// looking down -Z onto the floor, mid-morning sun for long shadows).
+	if (const char* st = std::getenv("HE_DUMP_SHADOWINSTTEST"); st && *st && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto makeCube = [&](const char* name, glm::vec3 pos, glm::vec3 scale) {
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.scale    = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+		};
+		makeCube("ShadowInstFloor", glm::vec3(0.0f, -0.1f, -12.0f), glm::vec3(30.0f, 0.2f, 30.0f));
+		for (int i = 0; i < 7; ++i)
+			makeCube("ShadowInstCube", glm::vec3(-9.0f + 3.0f * float(i), 2.0f, -12.0f),
+			         glm::vec3(1.0f, 1.0f + 0.4f * float(i % 3), 1.0f));
+		HE_LOG_INFO(Editor, "%s",
+			"EditorApplication: HE_DUMP_SHADOWINSTTEST floor + seven-cube row added");
 	}
 
 	// ── GI-reflections witness (HE_DUMP_GIREFLTEST=1): a mirror floor with a
@@ -5567,6 +5853,27 @@ void EditorApplication::dumpFrameHeadless()
 			HE_LOG_INFO(Editor, "%s", "EditorApplication: preview stress loop done");
 		}
 	}
+	// Witness a secondary scene viewport (HE_DUMP_SECONDARY=1 + HE_WORLD_PREVIEW_DUMP
+	// =<file.ppm>): the same RenderWorldPreview call SecondaryViewportPanel makes,
+	// over the editor world from the dump camera — which HE_DUMP_VIEW / HE_DUMP_ORTHO
+	// above already put into an axis view — into slot 1, with the sky at the scene's
+	// hour. The backend writes the LDR result. Pairs with DOFTEST: from Top in ortho
+	// the five cubes must come out the same size, and the box-projection rule the
+	// panel shares with the extractor is what puts them in the frame at all.
+	if (const char* sv = std::getenv("HE_DUMP_SECONDARY"); sv && *sv && m_editorWorld)
+	{
+		WorldPreviewEnv env;
+		env.sky           = r->GetEnvironment().skyEnabled && !m_editorCamera.orthographic();
+		env.timeOfDay     = r->GetEnvironment().timeOfDay;
+		env.cloudCoverage = r->GetEnvironment().cloudCoverage;
+		env.grid          = true;
+		glm::mat4 vp(1.0f);
+		void* tex = r->RenderWorldPreview(contentManager(), *m_editorWorld, 640, 360,
+		                                  m_editorCamera.makeOverride(), glm::vec3(0.0f), env, &vp,
+		                                  /*slot=*/1);
+		HE_LOG_INFO(Editor, "%s", tex ? "EditorApplication: secondary-viewport witness rendered (slot 1)"
+		                              : "EditorApplication: secondary-viewport witness: backend has no world preview");
+	}
 	// Witness the Content-Browser thumbnail path (HE_DUMP_THUMB=<dir>): render the
 	// material and static-mesh thumbnails through IRenderer::RenderAssetThumbnail —
 	// the same call the asset grid makes — and write each as a PPM. Written from the
@@ -6085,6 +6392,43 @@ void EditorApplication::dumpFrameHeadless()
 	int settleFrames = 3;
 	if (const char* sf = std::getenv("HE_DUMP_FRAMES"); sf && *sf)
 		settleFrames = std::clamp(std::atoi(sf), 1, 240);
+
+	// HE_DUMP_MBYAWSTEP / HE_DUMP_MBPITCHSTEP (degrees): the motion-blur
+	// witness. A headless dump has no camera history — every settle frame
+	// sees the same pose, so the pass measures zero motion and copies the
+	// image through. With a step set, the settle frames are rendered from a
+	// pose turned back by that much and only the CAPTURED frame stands at the
+	// real one: exactly one frame of camera motion, the way a turning camera
+	// produces it. The oracle: MOTIONBLUR=0 and MOTIONBLUR=1 without a step
+	// are md5-identical to the baseline; a yaw step streaks horizontally, a
+	// pitch step vertically, on Metal and GL alike.
+	auto mbEnvF = [](const char* k){ const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : 0.0f; };
+	const float mbYawStep   = mbEnvF("HE_DUMP_MBYAWSTEP");
+	const float mbPitchStep = mbEnvF("HE_DUMP_MBPITCHSTEP");
+	const bool  mbSweep     = (mbYawStep != 0.0f || mbPitchStep != 0.0f);
+	if (mbSweep)
+	{
+		auto poseFwd = [](float yaw, float pitch)
+		{
+			return glm::vec3(std::sin(yaw) * std::cos(pitch), std::sin(pitch),
+			                 -std::cos(yaw) * std::cos(pitch));
+		};
+		const glm::vec3 eye   = m_editorCamera.position();
+		const float     yaw   = m_editorCamera.yaw();
+		const float     pitch = m_editorCamera.pitch();
+		m_editorCamera.setOrientation(eye, poseFwd(yaw - glm::radians(mbYawStep),
+		                                           pitch - glm::radians(mbPitchStep)));
+		r->SetEditorCamera(m_editorCamera.makeOverride());
+		for (int i = 0; i < settleFrames; ++i)
+			r->Render();
+		m_editorCamera.setOrientation(eye, poseFwd(yaw, pitch));
+		r->SetEditorCamera(m_editorCamera.makeOverride());
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: HE_DUMP_MBYAWSTEP/MBPITCHSTEP turned the camera by "
+			 + std::to_string(mbYawStep) + "/" + std::to_string(mbPitchStep)
+			 + " deg for the captured frame").c_str());
+		settleFrames = 1;
+	}
 	for (int i = 0; i < settleFrames; ++i)
 		r->Render();
 
@@ -6103,7 +6447,8 @@ void EditorApplication::dumpFrameHeadless()
 			("EditorApplication: dump counters — draws=" + std::to_string(st.drawCalls) +
 			 " tris=" + std::to_string(st.triangles) +
 			 " visible=" + std::to_string(st.visibleObjects) +
-			 "/" + std::to_string(st.totalObjects)).c_str());
+			 "/" + std::to_string(st.totalObjects) +
+			 " occluded=" + std::to_string(st.occlusionCulled)).c_str());
 	}
 	else
 		HE_LOG_ERROR(Editor, "%s",
@@ -6514,7 +6859,7 @@ void EditorApplication::setupMcpTools()
 		// The other two have no undo stack of their own today (see the table in
 		// docs/mcp-editor-integration-plan.md §1.5); giving them one is the
 		// DocEdit command that step's plan describes and this step does not build.
-		if (key == HE::Ed::kMcpDocLevelScript) m_undo.snapshotNow();
+		if (key == HE::Ed::kMcpDocLevelScript) m_undo.snapshotNow("MCP: Level Script");
 	};
 
 	hc.endEdit = [this](const std::string& key) {
@@ -7452,7 +7797,7 @@ void EditorApplication::duplicateSelectedEntity()
 	//
 	// ONE snapshot for the whole selection, before the first copy: a single
 	// Ctrl+Z takes all of them away again.
-	if (!m_isPlaying) m_undo.snapshotNow();
+	if (!m_isPlaying) m_undo.snapshotNow("Duplicate Entity");
 	std::vector<Entity> copies;
 	for (const auto& [blob, parent] : blobs)
 	{
@@ -7498,7 +7843,7 @@ void EditorApplication::copySelectedEntity(bool cut)
 
 	if (!cut) return;
 	m_selection.clear();
-	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
+	if (!m_isPlaying) m_undo.snapshotNow("Cut Entity"); // see duplicateSelectedEntity()
 	for (Entity src : sources)
 	{
 		// Re-checked rather than trusted: the roots are disjoint subtrees, but
@@ -7520,7 +7865,7 @@ void EditorApplication::pasteEntityClipboard()
 	// selected should give two cubes side by side, not one parented to the other.
 	const Entity parent = siblingParentFor(m_selection.primary());
 	SceneSerializer serializer;
-	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
+	if (!m_isPlaying) m_undo.snapshotNow("Paste Entity"); // see duplicateSelectedEntity()
 	std::vector<Entity> pasted;
 	for (const std::vector<std::uint8_t>& blob : m_entityClipboard)
 	{
@@ -7555,7 +7900,7 @@ void EditorApplication::deleteSelectedEntity()
 
 	m_selection.clear();
 	// ONE snapshot for the lot, so one Ctrl+Z brings all of them back.
-	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
+	if (!m_isPlaying) m_undo.snapshotNow("Delete Entity"); // see duplicateSelectedEntity()
 	for (Entity target : targets)
 	{
 		// A parent and its child both selected: the child went with the
@@ -7620,6 +7965,13 @@ AppContext EditorApplication::makeContext()
 			if (m_physicsWorld)
 				m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
 		},
+		.applyPhysicsSettings = [this]{
+			// Gravity only: the fixed rate is read from the project on every
+			// step already. Outside play mode there is no world, and the next
+			// play start reads both from the project itself.
+			if (m_physicsWorld)
+				m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
+		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,
 		.selection           = m_selection,
@@ -7637,12 +7989,30 @@ AppContext EditorApplication::makeContext()
 		// Both refuse to freeze an edit-mode session: there is no world tick to
 		// gate there, and a pause that outlived play mode would silently swallow
 		// the first frames of the NEXT one.
-		.setPaused           = [this](bool paused){ m_isPaused = m_isPlaying && paused; },
+		.setPaused           = [this](bool paused)
+		{
+			// Resume while a script is stopped at a breakpoint = Continue: the
+			// stopped run goes on first, then the world. Otherwise the tick
+			// would resume around a chain frozen forever. Parked (m_hcResume),
+			// not run here — this is the UI pass.
+			if (!paused && m_gameInstance.runtime().isSuspended())
+				m_hcResume = HcResume::Continue;
+			m_isPaused = m_isPlaying && paused;
+		},
 		.stepFrame           = [this]
 		{
 			if (!m_isPlaying) return;
+			// A frame step with a stopped script lets that run finish first —
+			// one frame means one whole frame, scripts included.
+			if (m_gameInstance.runtime().isSuspended())
+				m_hcResume = HcResume::Continue;
 			m_isPaused  = true;   // stepping a running scene pauses it first
 			m_stepFrame = true;
+		},
+		.hcSuspended         = HcExecTrace::isPaused(),
+		.stepNode            = [this]
+		{
+			if (m_gameInstance.runtime().isSuspended()) m_hcResume = HcResume::Step;
 		},
 		.reportPlayUIPointer = [this](float mx, float my, float vpW, float vpH,
 		                              bool down, bool valid, float wheel,
@@ -8062,6 +8432,7 @@ void EditorApplication::setPlayMode(bool play)
 	// session that started frozen would look exactly like an editor that hung.
 	m_isPaused  = false;
 	m_stepFrame = false;
+	m_hcResume  = HcResume::None;   // a parked Continue is session state too
 	// Same reasoning for the input routing: it is session state. A game that
 	// stopped while its pause menu was up left the mode on UI-only, and without
 	// this the NEXT session would start with gameplay deaf for no visible reason.
@@ -8136,6 +8507,11 @@ void EditorApplication::setPlayMode(bool play)
 		// its channel, and a matrix handed over afterwards would leave the
 		// opening scene simulating on the default one until something rebuilt.
 		m_physicsWorld->setCollisionLayers(m_projectManager.currentProject().collisionLayers);
+		// The project's gravity (Config/ProjectSettings.json), before initialize()
+		// as well: setGravity wakes every body, and there is none to wake yet.
+		// Same order as GameApplication::startPhysics, because a preview that
+		// falls differently from the build is not a preview.
+		m_physicsWorld->setGravity(m_projectManager.currentProject().settings.physics.gravity);
 		m_physicsWorld->initialize(*m_editorWorld);
 		// Every runtime spawn goes through the entity host, and the host is what
 		// gives the new subtree a body — before Construct and BeginPlay, which is
@@ -8196,6 +8572,10 @@ void EditorApplication::setPlayMode(bool play)
 		// Handed the entity host so it can find the characters the LEVEL already
 		// placed; it never spawns through it.
 		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+		// The Lua/Python instances hear the same action events — the packaged
+		// game binds them at the same point. The map fills below
+		// (startWorldScripts) and is read per tick.
+		m_playerHost.setTextScripts(m_scriptContext.get(), &m_scriptInstances);
 		// Last: a player character spawned just above may be the very entity
 		// whose state machine needs a sync graph.
 		m_animatorHost.begin(m_gameInstance.runtime(), *m_editorWorld, contentManager());
@@ -8278,6 +8658,13 @@ void EditorApplication::setPlayMode(bool play)
 		if (logicLoader().isLoaded())
 			logicLoader().unload(*m_editorWorld);
 
+		// Runs stopped at a breakpoint die with the session: the GameInstance's
+		// runtime outlives it, and a stopped run of the GameInstance would
+		// otherwise wake up in the NEXT session, on Continue, in a world it
+		// never saw. The marker and the halos go with them.
+		m_gameInstance.runtime().debugAbort();
+		HcExecTrace::clearPaused();
+		HcExecTrace::clearHits();
 		// Player instances go down first (their Destruct may still reference the
 		// GameInstance), then the GameInstance fires OnShutdown while the app
 		// runtime is still intact (it lives outside the world, so clear() below
@@ -8382,10 +8769,17 @@ void EditorApplication::restartAppPreview(bool keepState)
 	WidgetManager::StateSnapshot snapshot;
 	if (keepState) snapshot = m_editorWorld->widgets().captureState();
 
+	// A run stopped at a breakpoint belongs to the preview that is going down.
+	m_gameInstance.runtime().debugAbort();
+	HcExecTrace::clearPaused();
 	// Down in the reverse order it came up. fireShutdown before the widgets go,
 	// so a graph's OnShutdown still finds the things it is about to let go of.
 	m_gameInstance.fireShutdown();
 	m_editorWorld->widgets().clear();
+	// The timers the old OnInit started die with it: now that the preview
+	// dispatches them (TimerSystem in the frame), a timer.every left standing
+	// would fire into the restarted graph as a handle it never issued.
+	HE::api::timer::cancelAll();
 
 	// Re-register the graph rather than assuming the host still holds the right
 	// one: the edit that triggered this restart may BE a GameInstance edit, and
@@ -8417,6 +8811,49 @@ std::string EditorApplication::gameInstancePath()
 	if (p.empty()) return {};
 	if (std::filesystem::is_regular_file(p)) p = p.parent_path();
 	return (p / "GameInstance.hcode").string();
+}
+
+IRenderer::ShadowSettings EditorApplication::projectShadowSettings()
+{
+	IRenderer::ShadowSettings out;
+	if (m_projectLoaded)
+	{
+		const HE::ProjectShadowSettings& s = m_projectManager.currentProject().settings.shadows;
+		out.distance     = s.distance;
+		out.cascadeCount = s.cascadeCount;
+		out.resolution   = s.resolution;
+		out.splitLambda  = s.splitLambda;
+		out.slopeBias    = s.slopeBias;
+		out.minBias      = s.minBias;
+	}
+	// HE_DUMP_SHADOW: the A/B knob for he_shot.py — "distance,cascades,
+	// resolution,lambda,slopeBias,minBias" (trailing fields optional), so a
+	// capture can prove the values reach the renderer without touching the
+	// project's file. Static: this runs every frame.
+	static const char* s_ov = std::getenv("HE_DUMP_SHADOW");
+	if (s_ov && *s_ov)
+	{
+		float v[6] = { out.distance, static_cast<float>(out.cascadeCount),
+		               static_cast<float>(out.resolution), out.splitLambda,
+		               out.slopeBias, out.minBias };
+		const char* p = s_ov;
+		for (int i = 0; i < 6 && *p; ++i)
+		{
+			char* end = nullptr;
+			const float f = std::strtof(p, &end);
+			if (end == p) break;
+			v[i] = f;
+			p = end;
+			if (*p == ',') ++p;
+		}
+		out.distance     = v[0];
+		out.cascadeCount = static_cast<int>(v[1]);
+		out.resolution   = static_cast<int>(v[2]);
+		out.splitLambda  = v[3];
+		out.slopeBias    = v[4];
+		out.minBias      = v[5];
+	}
+	return out;
 }
 
 void EditorApplication::loadGameInstanceGraph()
@@ -8658,7 +9095,7 @@ bool EditorApplication::revertPrefabOverride(Entity root, const PrefabInstanceCo
 		return false;
 	}
 	const std::vector<uint8_t> blob = asset->data;
-	m_undo.snapshotNow();
+	m_undo.snapshotNow("Revert Prefab Override");
 	SceneSerializer serializer;
 	const bool ok = serializer.revertPrefabOverride(*m_editorWorld, root, blob, entry);
 	// The sync's write is a world edit, so the recorder must not read it back
@@ -8683,7 +9120,7 @@ bool EditorApplication::revertPrefabRemoval(Entity root, const HE::UUID& templat
 		return false;
 	}
 	const std::vector<uint8_t> blob = asset->data;
-	m_undo.snapshotNow();
+	m_undo.snapshotNow("Revert Prefab Removal");
 	SceneSerializer serializer;
 	const bool ok = serializer.revertPrefabRemoval(*m_editorWorld, root, blob, templateEntity);
 	// Same guard as revertPrefabOverride: the sync's write is not a human's.
@@ -8698,7 +9135,7 @@ bool EditorApplication::revertPrefabAddition(Entity root, Entity entity)
 	if (!registry.valid(root) || !registry.valid(entity)) return false;
 	// The selection may be the thing about to go — the same care
 	// deleteSelectedEntity takes, or the Details panel draws a dead handle.
-	m_undo.snapshotNow();
+	m_undo.snapshotNow("Revert Prefab Addition");
 	SceneSerializer serializer;
 	const bool ok = serializer.revertPrefabAddition(*m_editorWorld, root, entity);
 	if (ok)
@@ -8728,7 +9165,7 @@ bool EditorApplication::pushToPrefab(Entity root)
 	// is into a dense vector the next load may move.
 	PrefabAsset asset = *resident;
 
-	m_undo.snapshotNow();
+	m_undo.snapshotNow("Push to Prefab");
 	SceneSerializer serializer;
 	std::vector<uint8_t> blob;
 	if (!serializer.pushPrefabInstance(*m_editorWorld, root, asset.data, blob)) return false;
@@ -8828,7 +9265,7 @@ bool EditorApplication::restoreRecoveredScene()
 	// to come after them and not before.
 	if (pending->scenePath.empty() || !openScene(pending->scenePath))
 		newScene();
-	m_undo.snapshotNow();   // the file's state; Undo brings it back
+	m_undo.snapshotNow("Restore Recovered Scene");   // the file's state; Undo brings it back
 
 	SceneSerializer serializer;
 	m_editorWorld->clear();
@@ -8975,7 +9412,7 @@ void EditorApplication::openSceneAdditive(const std::string& path)
 		// the current scene, not a switch to another one, so it does NOT leave
 		// play mode the way openScene() and newScene() do; it belongs with the
 		// entity gestures, and it was the only one of them without this gate.
-		if (!m_isPlaying) m_undo.snapshotNow();
+		if (!m_isPlaying) m_undo.snapshotNow("Open Scene Additive");
 		// A scene merged DURING play is a spawn like any other and needs the same
 		// physics representation, or the level just added is scenery: the player
 		// walks through its walls and falls through its floor. This is what the
@@ -9316,10 +9753,21 @@ void EditorApplication::writeEditorConfig()
 		globalstate.setCustomConfigEntry("EditorCamYaw",   m_editorCamera.yaw());
 		globalstate.setCustomConfigEntry("EditorCamPitch", m_editorCamera.pitch());
 		globalstate.setCustomConfigEntry("EditorCamPivot", m_editorCamera.pivotDistance());
+		globalstate.setCustomConfigEntry("EditorCamOrtho", m_editorCamera.orthographic());
 		globalstate.setCustomConfigEntry("EditorCamValid", true);
 	}
+	globalstate.setCustomConfigEntry("EditorCamBookmarks", CameraBookmarks::editorSet().encode());
+#ifdef HE_IMGUI_ENABLED
+	globalstate.setCustomConfigEntry(ShortcutsPage::kConfigKey, EditorShortcuts::encode());
+#endif
 	globalstate.setCustomConfigEntry("MaxFps",                     m_editorConfig.MaxFps);
-	globalstate.setCustomConfigEntry("ViewportGroundGrid",         ViewportPanel::groundGridEnabled());
+	{
+		int n = 0;
+		const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+		const ViewportPanel::ShowFlags& flags = ViewportPanel::showFlags();
+		for (int i = 0; i < n; ++i)
+			globalstate.setCustomConfigEntry(fields[i].configKey, flags.*(fields[i].member));
+	}
 	globalstate.setCustomConfigEntry("PointerInput",               m_editorConfig.PointerInput);
 	globalstate.setCustomConfigEntry("GamepadStickDeadzone",       m_editorConfig.GamepadStickDeadzone);
 	globalstate.setCustomConfigEntry("GamepadTriggerDeadzone",     m_editorConfig.GamepadTriggerDeadzone);
@@ -9337,6 +9785,13 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("SSAORadius",                 m_editorConfig.SSAORadius);
 	globalstate.setCustomConfigEntry("SSAOIntensity",              m_editorConfig.SSAOIntensity);
 	globalstate.setCustomConfigEntry("SSAOMethod",                 m_editorConfig.SSAOMethod);
+	globalstate.setCustomConfigEntry("DoFEnabled",                 m_editorConfig.DoFEnabled);
+	globalstate.setCustomConfigEntry("DoFFocusDistance",           m_editorConfig.DoFFocusDistance);
+	globalstate.setCustomConfigEntry("DoFFocusRange",              m_editorConfig.DoFFocusRange);
+	globalstate.setCustomConfigEntry("DoFAperture",                m_editorConfig.DoFAperture);
+	globalstate.setCustomConfigEntry("MotionBlurEnabled",          m_editorConfig.MotionBlurEnabled);
+	globalstate.setCustomConfigEntry("MotionBlurIntensity",        m_editorConfig.MotionBlurIntensity);
+	globalstate.setCustomConfigEntry("MotionBlurMax",              m_editorConfig.MotionBlurMax);
 	globalstate.setCustomConfigEntry("AntiAliasing",              m_editorConfig.AntiAliasing);
 	globalstate.setCustomConfigEntry("AASharpness",               m_editorConfig.AASharpness);
 	globalstate.setCustomConfigEntry("RenderScale",               m_editorConfig.RenderScale);
@@ -9353,6 +9808,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GIReflQuality",             m_editorConfig.GIReflQuality);
 	globalstate.setCustomConfigEntry("GIReflBounces",             m_editorConfig.GIReflBounces);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
+	globalstate.setCustomConfigEntry("OcclusionCulling",          m_editorConfig.OcclusionCulling);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
 	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);
 	globalstate.setCustomConfigEntry("SSRQuality",                m_editorConfig.SSRQuality);

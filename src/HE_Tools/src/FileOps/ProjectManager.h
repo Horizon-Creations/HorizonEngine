@@ -7,6 +7,7 @@
 #include <Application/DocumentTypes.h>   // HE::AppDocumentType (the .heproj list)
 #include <Physics/CollisionLayers.h>     // HE::CollisionLayerConfig (the .heproj matrix)
 #include <Audio/AudioBusConfig.h>        // HE::AudioBusConfig (the .heproj mixer buses)
+#include <Project/ProjectSettings.h>     // HE::ProjectSettings (Config/ProjectSettings.json)
 
 // Persisted as an int in the .heproj manifest ("preset") — only ever append.
 enum class ProjectPreset
@@ -215,6 +216,14 @@ struct ExportProfile
 	// the export instead, for a build in which every class really is native —
 	// which is also what makes the direct cross-class call paths always hit.
 	bool hcStopOnFailure = false;
+	// Texture compression. "Auto" picks the block format from the target's GPU
+	// family (the only behaviour there was); "None" ships RGBA8 with baked mips
+	// — the largest pak and the exact pixels, for a pixel-art game or a diff
+	// against a compressed build. Anything else reads as Auto.
+	std::string textureFormat = "Auto";
+	// 0 Fast (what every export did), 1 Balanced, 2 High — how hard the encoder
+	// works, whichever format Auto chose. See Hpak::PackSettings::textureQuality.
+	int textureQuality = 0;
 };
 
 // The two seeded defaults for projects that have no profiles yet (also used by
@@ -340,6 +349,11 @@ struct ProjectData
 	// does not acquire a picture nobody chose.
 	std::string appIconName;
 	std::string appIconColor = "#1e70c8";   // "#RRGGBB", as everywhere else
+	// A picture of the project's own instead: PROJECT-relative path of a PNG
+	// ("Content/Icon.png", forward slashes). When set and readable the export
+	// builds every container from it and the two fields above are not used;
+	// a file that went missing falls back to them. Empty = generated icon.
+	std::string appIconFile;
 	// Empty = derived from the project name, which is what every export did
 	// before this field existed. Set it and the export says exactly this.
 	std::string bundleId;
@@ -348,6 +362,16 @@ struct ProjectData
 	// of {extension, name, icon}). Empty is the normal case — an application that
 	// owns no file type is not a lesser one.
 	std::vector<HE::AppDocumentType> documentTypes;
+
+	// ── The project's settings file (Config/ProjectSettings.json) ────────────
+	// Shadows, physics rate and gravity, the render defaults of the packaged
+	// build, the game's title — see HE::ProjectSettings for why they are a
+	// file of their own and not more keys in the manifest. Loaded beside the
+	// .heproj; written ONLY by ProjectManager::saveProjectSettings (the Project
+	// Settings tab), never by saveProject, so the manifest's many writers
+	// cannot touch it. Default-constructed = no file = how every project made
+	// before this behaved.
+	HE::ProjectSettings settings;
 };
 
 class HE_TOOLS_API ProjectManager
@@ -373,6 +397,15 @@ public:
 	bool loadProject(const std::string& projectPath);
 	bool saveProject(const std::string& projectPath);
 	void closeProject();
+
+	// Writes currentProject().settings to <root>/Config/ProjectSettings.json —
+	// the ONE writer of that file (see ProjectData::settings). False when no
+	// project is open or the file could not be written; a default-constructed
+	// settings block with no file yet writes nothing and answers true.
+	bool saveProjectSettings();
+
+	// The folder the .heproj sits in; empty when no project is open.
+	std::string projectRoot() const;
 
 	ProjectData& currentProject() { return m_currentProject; }
 

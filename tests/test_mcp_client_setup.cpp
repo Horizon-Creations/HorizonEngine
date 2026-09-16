@@ -172,7 +172,16 @@ TEST_CASE("mcp client setup: reading what the CLI did")
 
 TEST_CASE("mcp client setup: where the CLI is looked for")
 {
-	const std::vector<fs::path> c = Setup::claudeCandidates("/Users/someone", "C:/Users/someone/AppData/Roaming");
+	// A home with a drive letter on Windows: "/Users/someone" has a root
+	// directory but no root name there, so every candidate built from it would
+	// be root-relative and fail the absoluteness check below on the test's
+	// account, not the code's.
+#ifdef _WIN32
+	const fs::path home = "C:/Users/someone";
+#else
+	const fs::path home = "/Users/someone";
+#endif
+	const std::vector<fs::path> c = Setup::claudeCandidates(home, "C:/Users/someone/AppData/Roaming");
 	REQUIRE_FALSE(c.empty());
 
 	// Every candidate is absolute and named after the home it was built from —

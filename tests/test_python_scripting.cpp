@@ -226,6 +226,63 @@ TEST_CASE("PyScriptBackend: a raising handler reports the error")
     CHECK(py->lastError().find("kaboom") != std::string::npos);
 }
 
+// ─── Error → line ───────────────────────────────────────────────────────────
+// The source is compiled under the script's name, and the error text leads
+// with the innermost script frame as `name:line:` — the same spelling Lua
+// uses, so one parser (HE::parseScriptErrorLocation) serves the console.
+
+TEST_CASE("PyScriptBackend: a raising handler names the script and its line")
+{
+    HorizonWorld world;
+    PyBackend py(world);
+    REQUIRE(py->loadScript("boom", kRaises));
+    auto e  = makeEntity(world, "E");
+    auto id = py->createInstance("boom", static_cast<uint32_t>(e));
+    CHECK_FALSE(py->callOnStart(id));
+    // kRaises starts with a newline, so `raise` is on line 5.
+    const std::string& err = py->lastError();
+    CHECK(err.rfind("boom:5: ValueError: kaboom", 0) == 0);
+    HE::ScriptErrorLocation loc;
+    REQUIRE(HE::parseScriptErrorLocation(err, loc));
+    CHECK(loc.script == "boom");
+    CHECK(loc.line == 5);
+}
+
+TEST_CASE("PyScriptBackend: a syntax error names the script and its line, once")
+{
+    HorizonWorld world;
+    PyBackend py(world);
+    CHECK_FALSE(py->loadScript("bad", kBadSyntax));
+    const std::string& err = py->lastError();
+    CHECK(err.rfind("bad:1: SyntaxError:", 0) == 0);
+    // Python's own text repeats the position as "(bad, line 1)"; that is
+    // dropped so the line is said once.
+    CHECK(err.find(", line 1)") == std::string::npos);
+    HE::ScriptErrorLocation loc;
+    REQUIRE(HE::parseScriptErrorLocation(err, loc));
+    CHECK(loc.script == "bad");
+    CHECK(loc.line == 1);
+}
+
+TEST_CASE("PyScriptBackend: an error raised below a helper still points at the script's line")
+{
+    HorizonWorld world;
+    PyBackend py(world);
+    // The frame that raises is the helper's (line 4); the innermost frame is
+    // what the site names, and it is still a script line.
+    REQUIRE(py->loadScript("deep",
+        "import horizon\n"
+        "class Deep(horizon.Behavior):\n"
+        "    def helper(self):\n"
+        "        return {}['missing']\n"
+        "    def on_start(self):\n"
+        "        self.helper()\n"));
+    auto e  = makeEntity(world, "E");
+    auto id = py->createInstance("deep", static_cast<uint32_t>(e));
+    CHECK_FALSE(py->callOnStart(id));
+    CHECK(py->lastError().rfind("deep:4: KeyError:", 0) == 0);
+}
+
 // ─── Properties ─────────────────────────────────────────────────────────────
 
 TEST_CASE("PyScriptBackend: getScriptProperties reads typed class attributes")
@@ -887,6 +944,71 @@ TEST_CASE("ScriptContext: the application groups reach Python")
     // their rows, exactly as the Lua side did.
     CHECK(t.position.x == doctest::Approx(12.0f));
     CHECK(t.position.y == doctest::Approx(42.0f));   // …and one of them dispatches
+}
+
+// ─── Input actions and timers ───────────────────────────────────────────────
+// The events a PlayerController graph gets as Input.<Action>.*, and the timer
+// callback, delivered through the SAME ScriptContext door the apps use. Each
+// handler writes what it heard into the transform, which the test can read
+// without a second channel into the interpreter.
+static const char* kPyInputEcho = R"py(
+import horizon
+
+class Ears(horizon.Behavior):
+    def on_start(self):
+        self.log = ""
+        self.axis = 0.0
+        self.ax = 0.0
+        self.ay = 0.0
+        self.timer = 0
+    def on_input_pressed(self, action):
+        self.log += "+" + action
+    def on_input_released(self, action):
+        self.log += "-" + action
+    def on_input_axis(self, action, value):
+        self.axis = value
+    def on_input_axis2d(self, action, x, y):
+        self.ax = x
+        self.ay = y
+    def on_timer(self, handle):
+        self.timer = handle
+    def on_update(self, dt):
+        # x = how many edges were heard, y = the axis, z = the timer handle
+        horizon.setPosition(self.entity_id, float(len(self.log)),
+                            self.axis + self.ax * 10.0 + self.ay * 100.0,
+                            float(self.timer))
+)py";
+
+TEST_CASE("ScriptContext: input actions and timers reach a Python instance")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("ears", kPyInputEcho, HE::ScriptLanguage::Python));
+
+    auto e  = makeEntity(world, "Ears");
+    auto id = ctx.createInstance("ears", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    CHECK(ctx.callOnInputPressed(id, "Jump"));
+    CHECK(ctx.callOnInputReleased(id, "Jump"));
+    CHECK(ctx.callOnInputAxis(id, "Move", 0.5f));
+    CHECK(ctx.callOnInputAxis2D(id, "Look", 0.25f, 0.75f));
+    CHECK(ctx.callOnTimer(id, 17));
+    REQUIRE(ctx.callOnUpdate(id, 0.0f));
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(10.0f));     // "+Jump-Jump"
+    CHECK(t.position.y == doctest::Approx(0.5f + 2.5f + 75.0f));
+    CHECK(t.position.z == doctest::Approx(17.0f));
+
+    // A script without the handlers is a no-op success, like every other
+    // optional callback — this is what lets the pump fire at EVERY instance.
+    REQUIRE(ctx.loadScript("deaf", kSpeedEcho, HE::ScriptLanguage::Python));
+    auto d = ctx.createInstance("deaf", makeEntity(world, "Deaf"));
+    CHECK(ctx.callOnInputPressed(d, "Jump"));
+    CHECK(ctx.callOnInputAxis2D(d, "Look", 1.0f, 1.0f));
+    CHECK(ctx.callOnTimer(d, 1));
 }
 
 #endif // HE_HAVE_PYTHON

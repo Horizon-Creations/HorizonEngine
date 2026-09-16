@@ -28,11 +28,13 @@
 #include "InspectorPanel.h"              // right dock: per-entity Details panel
 #include "TerrainTools.h"                // Landscape brush state, viewport sculpt + tool panel
 #include "ViewportPanel.h"               // centre dock: Scene viewport, camera, gizmo, picking
+#include "SecondaryViewportPanel.h"      // Scene 2 / 3 / 4: the level from other sides
 #include "OutlinerPanel.h"               // right dock: World Outliner hierarchy tree
 #include "ProjectHubPanel.h"             // start screen while no project is open
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
 #include "ProfilerPanel.h"               // View > Performance Profiler window
 #include "ConsolePanel.h"                // View > Console — every HE_LOG record, all levels
+#include "HcExecTrace.h"                 // the console's "go to node": which tab to open
 #include "EnvironmentPanel.h"
 #include "CollabPanel.h"            // View > Collaboration (host / join a live session)
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
@@ -44,6 +46,8 @@
 #include "EngineContentPublishDialog.h" // Assets > Publish Engine Content to Server...
 #include "HcRenameDialog.h"            // "that rename reaches other files" — from both graph editors
 #include "EditorSettingsPanel.h"         // engine-settings catalog + Preferences tab
+#include "EditorShortcuts.h"           // the chords the menus print and the keys fire
+#include "ProjectSettingsPanel.h"        // the Project Settings tab (what travels with the project)
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
@@ -53,6 +57,8 @@
 #include "EditorDockState.h"             // "is this panel docked into the layout?"
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "AudioMixerPanel.h"             // View > Audio Mixer window
+#include "UndoHistoryPanel.h"            // View > Undo History window
+#include "HcWatchPanel.h"                // View > Watch window (a stopped HorizonCode run's values)
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
 #include "HorizonVersion.h"              // HE_VERSION_FULL — Help ▸ About
@@ -190,6 +196,11 @@ static bool s_showSourceControl = false;
 static bool s_showConsole = false;
 // Toggled by View > Audio Mixer; drives the bus fader window.
 static bool s_showAudioMixer = false;
+// Toggled by View > Undo History; drives the scene undo stack as a list.
+static bool s_showUndoHistory = false;
+// Toggled by View > Watch; drives the window that shows what a HorizonCode run
+// stopped at a breakpoint is holding. Also raised by a stop itself (below).
+static bool s_showWatch = false;
 
 // Help ▸ Documentation Online. The published manual on the website; the OFFLINE
 // copy the reader panel shows ships next to the editor (EditorDeps/Docs), which
@@ -220,6 +231,11 @@ static bool docsPanelOpener(const char* window)
 		{ "Source Control",       &s_showSourceControl },
 		{ "Console",              &s_showConsole       },
 		{ "Audio Mixer",          &s_showAudioMixer    },
+		{ "Undo History",         &s_showUndoHistory   },
+		{ "Watch",                &s_showWatch         },
+		{ "Scene 2",              &SecondaryViewportPanel::open(0) },
+		{ "Scene 3",              &SecondaryViewportPanel::open(1) },
+		{ "Scene 4",              &SecondaryViewportPanel::open(2) },
 	};
 	for (const Toggle& t : toggles)
 		if (std::strcmp(window, t.name) == 0) { revealFloatingWindow(*t.flag, window); return true; }
@@ -267,6 +283,13 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
+	{ "Undo History",         "PanelOpenUndoHistory",   &s_showUndoHistory   },
+	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },
+	// The secondary scene viewports: a Top view docked beside the Scene window
+	// is a layout decision like any other panel's.
+	{ "Scene 2",              "PanelOpenScene2",        &SecondaryViewportPanel::open(0) },
+	{ "Scene 3",              "PanelOpenScene3",        &SecondaryViewportPanel::open(1) },
+	{ "Scene 4",              "PanelOpenScene4",        &SecondaryViewportPanel::open(2) },
 };
 static bool s_panelPrefsLoaded = false;
 
@@ -1050,7 +1073,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (path.empty()
 		    || path == LevelScriptPanel::kTabPath
 		    || path == GameInstancePanel::kTabPath
-		    || path == EditorSettingsPanel::kTabPath)
+		    || path == EditorSettingsPanel::kTabPath
+		    || path == ProjectSettingsPanel::kTabPath)
 		{
 			doSaveScene();
 			return;
@@ -1125,14 +1149,19 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// Cancelling never fires the callback, so last run's selection would still
 		// be sitting here when the NEXT dialog returns.
 		s_pendingImportPaths.clear();
-		SDL_DialogFileFilter filters[] = {
-			{ "All Supported Assets", "gltf;glb;png;jpg;jpeg;tga;bmp;hdr;wav;ogg;hmat;ttf;otf" },
-			{ "3D Models",            "gltf;glb" },
-			{ "Textures",             "png;jpg;jpeg;tga;bmp;hdr" },
-			{ "Audio",                "wav;ogg" },
-			{ "Materials",            "hmat" },
-			{ "Fonts",                "ttf;otf" },
-		};
+		// The filters come from the importer's own extension tables, not from a
+		// list kept here: this one used to say "gltf;glb" for models, so the dialog
+		// went on hiding .fbx/.obj/.dae after they had become importable (and a
+		// build without Assimp would have offered them and then failed). Static,
+		// because the dialog is asynchronous and reads the entries when its
+		// callback fires — the strings behind them are static too (ImporterCommon).
+		using Importer::SourceFamily;
+		constexpr int kFamilyCount = static_cast<int>(SourceFamily::Count);
+		static SDL_DialogFileFilter filters[1 + kFamilyCount];
+		filters[0] = { "All Supported Assets", Importer::allSourcesPattern() };
+		for (int i = 0; i < kFamilyCount; ++i)
+			filters[1 + i] = { Importer::sourceFamilyLabel(static_cast<SourceFamily>(i)),
+			                   Importer::sourceFamilyPattern(static_cast<SourceFamily>(i)) };
 		// Open where the browser is standing, so the dialog's own "recent folder"
 		// is not the only thing that decides what the user is looking at.
 		const std::filesystem::path root(ctx.contentManager->contentRoot());
@@ -1140,7 +1169,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		                                     : (root / importTargetDir()).string();
 		SDL_ShowOpenFileDialog(importDialogCb, ctx.dialogBridge,
 			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
-			filters, 6,
+			filters, 1 + kFamilyCount,
 			dir.empty() ? nullptr : dir.c_str(),
 			/*allow_many=*/true);
 	};
@@ -1291,6 +1320,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// list lives.
 	if (EditorSettingsPanel::takeOpenRequest())
 		openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
+	if (ProjectSettingsPanel::takeOpenRequest())
+		openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
+	// The Audio ▸ Buses page's "Open Audio Mixer" — the flag is this file's.
+	if (ProjectSettingsPanel::takeAudioMixerRequest() && !s_showAudioMixer)
+		togglePanelWindow(s_showAudioMixer, "Audio Mixer");
 	auto openExportDialog = [&]() { ExportDialogPanel::open(ctx); };
 	// ── Entity editing ───────────────────────────────────────────────────────
 	// One predicate behind the Edit menu AND the keyboard, so a greyed-out menu
@@ -1360,7 +1394,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
 		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
+		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
+		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);
 		MacMenuBar::setToggleState(MC::ToggleGroundGrid,    ViewportPanel::groundGridEnabled());
+		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
+		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
+		MacMenuBar::setToggleState(MC::ToggleScene4,        SecondaryViewportPanel::open(2));
 		MacMenuBar::setToggleState(MC::OpenTutorial,        TutorialPanel::isOpen());
 		for (MC c; (c = MacMenuBar::take()) != MC::None; )
 		{
@@ -1377,6 +1416,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::SaveSceneAs:     triggerSaveSceneAs();                                  break;
 			case MC::Quit:            requestGuarded(GuardedAction::Quit);                   break;
 			case MC::Preferences:     openVirtualTab("Preferences", EditorSettingsPanel::kTabPath); break;
+			case MC::ProjectSettings:
+				if (ctx.projectLoaded) openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
+				break;
 			// Same guards the footer buttons use — the native items carry no
 			// enabled-state of their own, so an empty stack has to be checked here.
 			case MC::Undo:
@@ -1393,8 +1435,16 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				togglePanelWindow(s_showSourceControl, "Source Control"); break;
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
 			case MC::ToggleAudioMixer: togglePanelWindow(s_showAudioMixer, "Audio Mixer");     break;
+			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
+			case MC::ToggleWatch:     togglePanelWindow(s_showWatch, "Watch");                break;
 			case MC::ToggleGroundGrid:
 				ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());     break;
+			case MC::ToggleScene2:
+				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2"); break;
+			case MC::ToggleScene3:
+				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(1), "Scene 3"); break;
+			case MC::ToggleScene4:
+				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(2), "Scene 4"); break;
 			case MC::OpenLevelScript:
 				if (ctx.projectLoaded) openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
 				break;
@@ -1437,7 +1487,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			beginNewProject();
 			openNewProjectPopup = true;
 		}
-        if (EditorWidgets::menuItem("Open Project", "Ctrl+O"))
+        if (EditorWidgets::menuItem("Open Project", EditorShortcuts::label("file.openProject").c_str()))
             requestGuarded(GuardedAction::OpenProjectDialog);
 		if (EditorWidgets::menuItem("Close Project", "Ctrl+W"))
 			requestGuarded(GuardedAction::CloseProject);
@@ -1455,10 +1505,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         }
         // Keep these three in step with MacMenuBar.mm's File block — a Mac user
         // never sees this row (see MacMenuBar.h).
-        if (EditorWidgets::menuItem("Save", "Ctrl+S"))                    doSaveActiveTab();
-        if (EditorWidgets::menuItem("Save All", "Ctrl+Shift+S"))          doSaveAll();
+        if (EditorWidgets::menuItem("Save", EditorShortcuts::label("file.save").c_str()))                    doSaveActiveTab();
+        if (EditorWidgets::menuItem("Save All", EditorShortcuts::label("file.saveAll").c_str()))          doSaveAll();
         if (!appProj)
-            if (EditorWidgets::menuItem("Save Scene As...", "Ctrl+Alt+S")) triggerSaveSceneAs();
+            if (EditorWidgets::menuItem("Save Scene As...", EditorShortcuts::label("file.saveSceneAs").c_str())) triggerSaveSceneAs();
         ImGui::Separator();
         if (EditorWidgets::menuItem("Exit", "Alt+F4"))
             requestGuarded(GuardedAction::Quit);
@@ -1480,10 +1530,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             const std::string rLabel = ctx.collabUndo->canRedo()
                 ? ctx.collabUndo->redoLabel() : std::string("Redo");
 
-            if (EditorWidgets::menuItem(uLabel.c_str(), "Ctrl+Z", false,
+            if (EditorWidgets::menuItem(uLabel.c_str(), EditorShortcuts::label("edit.undo").c_str(), false,
                                 ctx.collabUndo->canUndo()))
                 ctx.collabUndo->undo();
-            if (EditorWidgets::menuItem(rLabel.c_str(), "Ctrl+Y", false,
+            if (EditorWidgets::menuItem(rLabel.c_str(), EditorShortcuts::label("edit.redo").c_str(), false,
                                 ctx.collabUndo->canRedo()))
                 ctx.collabUndo->redo();
 
@@ -1496,8 +1546,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             // one undo history in the editor, and this is a second door onto it.
             const bool canUndo = ctx.undoSys && ctx.undoSys->canUndo();
             const bool canRedo = ctx.undoSys && ctx.undoSys->canRedo();
-            if (EditorWidgets::menuItem("Undo", "Ctrl+Z", false, canUndo) && ctx.undo) ctx.undo();
-            if (EditorWidgets::menuItem("Redo", "Ctrl+Y", false, canRedo) && ctx.redo) ctx.redo();
+            if (EditorWidgets::menuItem("Undo", EditorShortcuts::label("edit.undo").c_str(), false, canUndo) && ctx.undo) ctx.undo();
+            if (EditorWidgets::menuItem("Redo", EditorShortcuts::label("edit.redo").c_str(), false, canRedo) && ctx.redo) ctx.redo();
         }
         ImGui::Separator();
         // Cut/Copy/Paste act on the SELECTED ENTITY, not on text: an editor's Edit
@@ -1506,16 +1556,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         {
             const bool canEdit  = canEditEntity();
             const bool canPaste = canPasteEntity();
-            if (EditorWidgets::menuItem("Cut",   "Ctrl+X", false, canEdit)  && ctx.cutEntity)  ctx.cutEntity();
-            if (EditorWidgets::menuItem("Copy",  "Ctrl+C", false, canEdit)  && ctx.copyEntity) ctx.copyEntity();
-            if (EditorWidgets::menuItem("Paste", "Ctrl+V", false, canPaste) && ctx.pasteEntity) ctx.pasteEntity();
-            if (EditorWidgets::menuItem("Duplicate", "Ctrl+D", false, canEdit) && ctx.duplicateEntity)
+            if (EditorWidgets::menuItem("Cut",   EditorShortcuts::label("entity.cut").c_str(), false, canEdit)  && ctx.cutEntity)  ctx.cutEntity();
+            if (EditorWidgets::menuItem("Copy",  EditorShortcuts::label("entity.copy").c_str(), false, canEdit)  && ctx.copyEntity) ctx.copyEntity();
+            if (EditorWidgets::menuItem("Paste", EditorShortcuts::label("entity.paste").c_str(), false, canPaste) && ctx.pasteEntity) ctx.pasteEntity();
+            if (EditorWidgets::menuItem("Duplicate", EditorShortcuts::label("entity.duplicate").c_str(), false, canEdit) && ctx.duplicateEntity)
                 ctx.duplicateEntity();
-            if (EditorWidgets::menuItem("Delete", "Del", false, canEdit) && ctx.deleteEntity)
+            if (EditorWidgets::menuItem("Delete", EditorShortcuts::label("entity.delete").c_str(), false, canEdit) && ctx.deleteEntity)
                 ctx.deleteEntity();
         }
         ImGui::Separator();
-		if (EditorWidgets::menuItem("Preferences", "Ctrl+,"))
+		if (EditorWidgets::menuItem("Project Settings", nullptr, false, ctx.projectLoaded))
+			openVirtualTab("Project Settings", ProjectSettingsPanel::kTabPath);
+		if (EditorWidgets::menuItem("Preferences", EditorShortcuts::label("edit.preferences").c_str()))
 			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         ImGui::EndMenu();
     }
@@ -1524,7 +1576,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // Every row below is looked up as "View/<its label>" — one scope, and
         // the menu explains itself (see EditorWidgets::menuItem).
         HE::Ed::Help::Scope helpScope("View");
-        if (EditorWidgets::menuItem("Toggle Fullscreen", "F11")) toggleFullscreen();
+        if (EditorWidgets::menuItem("Toggle Fullscreen", EditorShortcuts::label("view.fullscreen").c_str())) toggleFullscreen();
         if (EditorWidgets::menuItem("Reset Layout")) { s_resetLayoutRequested = true; }
         if (EditorWidgets::menuItem("Performance Profiler", nullptr, s_showProfiler))
             togglePanelWindow(s_showProfiler, "Performance Profiler");
@@ -1534,10 +1586,14 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showCollab, "Collaboration");
         if (EditorWidgets::menuItem("Source Control", nullptr, s_showSourceControl))
             togglePanelWindow(s_showSourceControl, "Source Control");
-        if (EditorWidgets::menuItem("Console", "Ctrl+`", s_showConsole))
+        if (EditorWidgets::menuItem("Console", EditorShortcuts::label("view.console").c_str(), s_showConsole))
             togglePanelWindow(s_showConsole, "Console");
         if (EditorWidgets::menuItem("Audio Mixer", nullptr, s_showAudioMixer))
             togglePanelWindow(s_showAudioMixer, "Audio Mixer");
+        if (EditorWidgets::menuItem("Undo History", nullptr, s_showUndoHistory))
+            togglePanelWindow(s_showUndoHistory, "Undo History");
+        if (EditorWidgets::menuItem("Watch", nullptr, s_showWatch))
+            togglePanelWindow(s_showWatch, "Watch");
         // Also in the viewport toolbar's options popup. It belongs in both: the
         // toolbar is where you reach for it while working, this menu is where you
         // look for it the first time. Both are gone in an application: there is
@@ -1550,6 +1606,16 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             if (EditorWidgets::menuItem("Ground Grid", nullptr, ViewportPanel::groundGridEnabled(),
                                 ctx.projectLoaded))
                 ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());
+            // The extra scene panes. A game thing like the grid: an application
+            // has no level to look at from above.
+            ImGui::Separator();
+            if (EditorWidgets::menuItem("Scene 2", nullptr, SecondaryViewportPanel::open(0), ctx.projectLoaded))
+                togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2");
+            if (EditorWidgets::menuItem("Scene 3", nullptr, SecondaryViewportPanel::open(1), ctx.projectLoaded))
+                togglePanelWindow(SecondaryViewportPanel::open(1), "Scene 3");
+            if (EditorWidgets::menuItem("Scene 4", nullptr, SecondaryViewportPanel::open(2), ctx.projectLoaded))
+                togglePanelWindow(SecondaryViewportPanel::open(2), "Scene 4");
+            ImGui::Separator();
             if (EditorWidgets::menuItem("Level Script", nullptr, false, ctx.projectLoaded))
                 openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
         }
@@ -2016,17 +2082,15 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     // (macOS never gets here for these two: the native menu's key equivalents
     // swallow the keystroke before SDL sees it — the MacMenuBar dispatch above
     // runs the SAME two lambdas.)
+    // Every chord here is read from EditorShortcuts (Preferences ▸ Shortcuts
+    // rebinds it, and the menu rows print the same table), which also
+    // carries the "not while typing" guard and the exact-modifier rule.
     {
-        const ImGuiIO& kio = ImGui::GetIO();
-        const bool mod = kio.KeyCtrl || kio.KeySuper;
-        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_S, false))
-        {
-            if (kio.KeyAlt)        triggerSaveSceneAs();   // Save Scene As…
-            else if (kio.KeyShift) doSaveAll();
-            else                   doSaveActiveTab();
-        }
+        if (EditorShortcuts::pressed("file.saveSceneAs")) triggerSaveSceneAs();
+        else if (EditorShortcuts::pressed("file.saveAll")) doSaveAll();
+        else if (EditorShortcuts::pressed("file.save"))    doSaveActiveTab();
         // Ctrl/Cmd+, opens the Preferences tab (matches the Edit menu shortcut label).
-        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Comma, false))
+        if (EditorShortcuts::pressed("edit.preferences"))
             openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         // Ctrl/Cmd+` toggles the Console — the console key every engine uses, but
         // NOT the bare one. This block runs before the asset tabs are dispatched,
@@ -2040,7 +2104,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // the ImGui menu row above does not exist (the native bar replaces it, and
         // an item there needs MacMenuBar), so until the Console has an entry in
         // that bar this is the only way a Mac user reaches the panel.
-        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_GraveAccent, false))
+        if (EditorShortcuts::pressed("view.console"))
             togglePanelWindow(s_showConsole, "Console");
         // The two shortcuts the menu has always advertised and never had. F11
         // carries no modifier, so WantTextInput is the whole guard — a function
@@ -2050,9 +2114,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // it first and dispatches the same action. F11 stays wired everywhere,
         // though a Mac usually claims that key for the system before we see it;
         // the native View menu's ⌃⌘F is the reliable route there.)
-        if (mod && !kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_O, false))
+        if (EditorShortcuts::pressed("file.openProject"))
             requestGuarded(GuardedAction::OpenProjectDialog);
-        if (!kio.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F11, false))
+        if (EditorShortcuts::pressed("view.fullscreen"))
             toggleFullscreen();
     }
 
@@ -2382,16 +2446,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				doRedo = ImGui::Button("Redo");
 			ImGui::EndDisabled();
 
-			// Keyboard shortcuts: Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Ctrl+Y)
-			const ImGuiIO& kio = ImGui::GetIO();
-			const bool mod = kio.KeyCtrl || kio.KeySuper;
-			if (!kio.WantTextInput && mod)
-			{
-				if (ImGui::IsKeyPressed(ImGuiKey_Z, false))
-					(kio.KeyShift ? doRedo : doUndo) = true;
-				if (ImGui::IsKeyPressed(ImGuiKey_Y, false))
-					doRedo = true;
-			}
+			// Keyboard shortcuts: Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z (or Ctrl+Y) by
+			// default — whatever Preferences ▸ Shortcuts says now.
+			if (EditorShortcuts::pressed("edit.undo"))    doUndo = true;
+			if (EditorShortcuts::pressed("edit.redo") ||
+			    EditorShortcuts::pressed("edit.redoAlt")) doRedo = true;
 
 			if (doUndo && canUndo && ctx.undo) ctx.undo();
 			if (doRedo && canRedo && ctx.redo) ctx.redo();
@@ -2579,6 +2638,70 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             s_tabSelectRequest = s_activeTab;
         }
 
+        // A "go to node" from the console (HcExecTrace::requestReveal): the tab
+        // half. The two editor-owned graphs are their reserved tab paths; a
+        // class or widget is a content-relative path that has to become the
+        // full path the tab bar keys on. The node half stays pending for the
+        // panel, which selects it once the tab draws (LevelScriptPanel /
+        // UIEditorPanel). Compared as paths, not strings: the browser's tab
+        // paths come from a directory walk and this one from a join, and on
+        // Windows those spell the separators differently.
+        if (std::string revealTab; HcExecTrace::takeRevealTab(revealTab))
+        {
+            const bool reserved = revealTab == LevelScriptPanel::kTabPath ||
+                                  revealTab == GameInstancePanel::kTabPath;
+            const std::string full = reserved ? revealTab
+                : ctx.contentManager ? ctx.contentManager->resolveAbsolutePath(revealTab)
+                : std::string();
+            if (full.empty() || (!reserved && !std::filesystem::exists(full)))
+                HcExecTrace::cancelReveal();   // nothing to open; drop the node half too
+            else
+            {
+                auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
+                    [&](const AppContext::EditorTab& t)
+                    { return t.assetPath == full ||
+                             (!reserved && std::filesystem::path(t.assetPath) == std::filesystem::path(full)); });
+                if (it == s_tabs.end())
+                {
+                    const std::string label = reserved
+                        ? (revealTab == LevelScriptPanel::kTabPath ? "Level Script" : "Game Instance")
+                        : std::filesystem::path(full).stem().string();
+                    s_tabs.push_back({ label, full, true, true });
+                    s_activeTab = static_cast<int>(s_tabs.size()) - 1;
+                }
+                else
+                    s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
+                s_tabSelectRequest = s_activeTab;
+            }
+        }
+
+        // A "go to line" from the console (ScriptEditorPanel::requestReveal):
+        // the tab half, for a Lua/Python script. The path is already the full
+        // one (the console resolved it), so this is the same find-or-push as
+        // above; the line half stays pending for the panel, which selects it
+        // once the tab draws. Same path comparison as the node reveal.
+        if (std::string revealScript; ScriptEditorPanel::takeRevealPath(revealScript))
+        {
+            if (!std::filesystem::exists(revealScript))
+                ScriptEditorPanel::cancelReveal();   // gone since the error was logged
+            else
+            {
+                auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
+                    [&](const AppContext::EditorTab& t)
+                    { return t.assetPath == revealScript ||
+                             std::filesystem::path(t.assetPath) == std::filesystem::path(revealScript); });
+                if (it == s_tabs.end())
+                {
+                    s_tabs.push_back({ std::filesystem::path(revealScript).stem().string(),
+                                       revealScript, true, true });
+                    s_activeTab = static_cast<int>(s_tabs.size()) - 1;
+                }
+                else
+                    s_activeTab = static_cast<int>(std::distance(s_tabs.begin(), it));
+                s_tabSelectRequest = s_activeTab;
+            }
+        }
+
         if (ctx.fontBody) ImGui::PushFont(ctx.fontBody);
 
         if (ImGui::BeginTabBar("##MainTabBar",
@@ -2694,19 +2817,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         };
         if (sceneTabActive && !typing && !panelOwnsKeys("Content Browser"))
         {
-            const bool mod = kio.KeyCtrl || kio.KeySuper;
             if (canEditEntity())
             {
-                if (mod && ImGui::IsKeyPressed(ImGuiKey_D, false) && ctx.duplicateEntity)
+                if (EditorShortcuts::pressed("entity.duplicate") && ctx.duplicateEntity)
                     ctx.duplicateEntity();
-                if (mod && ImGui::IsKeyPressed(ImGuiKey_C, false) && ctx.copyEntity)
+                if (EditorShortcuts::pressed("entity.copy") && ctx.copyEntity)
                     ctx.copyEntity();
-                if (mod && ImGui::IsKeyPressed(ImGuiKey_X, false) && ctx.cutEntity)
+                if (EditorShortcuts::pressed("entity.cut") && ctx.cutEntity)
                     ctx.cutEntity();
-                if (ImGui::IsKeyPressed(ImGuiKey_Delete, false) && ctx.deleteEntity)
+                if (EditorShortcuts::pressed("entity.delete") && ctx.deleteEntity)
                     ctx.deleteEntity();
             }
-            if (mod && ImGui::IsKeyPressed(ImGuiKey_V, false) && canPasteEntity() && ctx.pasteEntity)
+            if (EditorShortcuts::pressed("entity.paste") && canPasteEntity() && ctx.pasteEntity)
                 ctx.pasteEntity();
         }
     }
@@ -2728,6 +2850,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // user switched here mid-look via a keyboard shortcut, force-release the capture so
         // the cursor isn't left hidden/pinned with ImGui mouse input disabled.
         ViewportPanel::releaseViewportLookCapture(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
+        SecondaryViewportPanel::releaseLookCaptures(ctx.window ? ctx.window->GetNativeWindow() : nullptr);
 
         const ImGuiViewport* vpTab = ImGui::GetMainViewport();
         const std::string& tabPath = ctx.tabs[ctx.activeTab].assetPath;
@@ -2877,6 +3000,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // The Level Script + Game Instance are virtual tabs (no backing .hasset).
         if (tabPath == EditorSettingsPanel::kTabPath)
             EditorSettingsPanel::render(ctx, tabPos, tabSize);
+        else if (tabPath == ProjectSettingsPanel::kTabPath)
+            ProjectSettingsPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == LevelScriptPanel::kTabPath)
             LevelScriptPanel::render(ctx, tabPos, tabSize);
         else if (tabPath == GameInstancePanel::kTabPath)
@@ -3015,6 +3140,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// After the window exists this frame: its dock node is only reachable once
 	// "Scene" has been submitted at least once.
 	HideSceneTabBarOnce();
+	// The extra panes (View ▸ Scene 2 / 3 / 4), right after the Scene window:
+	// they frame the selection against ITS extract, and they belong to the
+	// scene layout like it does.
+	SecondaryViewportPanel::render(ctx, dt);
 
 
     // ── Landscape / Quick Settings panel ────────────────────────────────────
@@ -3105,6 +3234,21 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	// The mixer too: a fader is moved while a script tab is in front and the
 	// scene plays behind it.
 	AudioMixerPanel::DrawAudioMixerWindow(ctx, s_showAudioMixer);
+	// The undo history too: a row is clicked while a script tab is in front and
+	// the scene it rewinds is behind it.
+	UndoHistoryPanel::DrawUndoHistoryWindow(ctx, s_showUndoHistory);
+	// The watch window, for the same reason: the stop is looked at from the
+	// graph tab that shows the node. A NEW stop raises it, the way a debugger
+	// shows its locals when it breaks — once per stop, on the edge, so a
+	// window closed while stopped stays closed until the next break (a Step
+	// keeps the pause, so it does not count as new).
+	{
+		static bool s_wasHcPaused = false;
+		const bool paused = HcExecTrace::isPaused();
+		if (paused && !s_wasHcPaused && !s_showWatch) revealFloatingWindow(s_showWatch, "Watch");
+		s_wasHcPaused = paused;
+	}
+	HcWatchPanel::DrawWatchWindow(ctx, s_showWatch);
 
 	// The second half of revealFloatingWindow: the window a footer widget asked
 	// for exists by now, so the focus request that was a no-op at click time

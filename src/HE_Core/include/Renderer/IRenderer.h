@@ -32,6 +32,16 @@ struct EditorCameraOverride
     float     nearPlane    = 0.1f;
     float     farPlane     = 5000.0f;
     bool      orthographic = false;
+    // Half the visible height of an orthographic view, world units (the width
+    // follows the viewport's aspect). Only read when `orthographic` is set.
+    float     orthoHalfHeight = 5.0f;
+    // Whether the extractor adds the editor's icon billboards (one camera-facing
+    // quad per light / camera / audio source) to the scene. Only read while
+    // `active`; the editor's Show flags switch it off, a headless dump and the
+    // asset viewports leave it on. Travels here rather than as renderer state
+    // because the same override feeds the panel's own pick extract, and the
+    // picker must see exactly the quads the frame drew.
+    bool      editorIcons  = true;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────
@@ -80,6 +90,18 @@ inline float worldPreviewVerticalFov(float fovDegrees, float aspect)
 
 inline glm::mat4 worldPreviewProjection(const EditorCameraOverride& camera, float aspect)
 {
+    // An orthographic camera (a secondary Top / Front / Side viewport) uses the
+    // SAME rule the scene extractor culls with — the near plane a whole far
+    // distance behind the camera, see RenderExtractor::extractCamera — because
+    // the preview's own extract runs with this override and drops what the
+    // drawn matrix would not show. The Hor+ cap is a lens thing and does not
+    // apply: parallel rays do not stretch at the border.
+    if (camera.orthographic)
+    {
+        const float oh = camera.orthoHalfHeight;
+        return glm::ortho(-aspect * oh, aspect * oh, -oh, oh,
+                          -camera.farPlane, camera.farPlane);
+    }
     return glm::perspective(
         glm::radians(worldPreviewVerticalFov(camera.fovDegrees, aspect)),
         aspect, camera.nearPlane, camera.farPlane);
@@ -122,6 +144,72 @@ enum class AAMethod : int
     TAA     = 3, // jittered projection + velocity reprojection + history
     MetalFX = 4, // MTLFXTemporalScaler (Apple Silicon) — TAA quality from the OS
 };
+
+// ─── Viewport view mode ──────────────────────────────────────────────────────
+// How the scene is DRAWN, as opposed to where it is looked at from (that is the
+// camera). Lit is the game's image; everything else is a way of seeing one
+// aspect of it on its own. A renderer-wide flag rather than a camera property:
+// it is about the pass setup (fill mode, shading, which target the resolve
+// shows), and it applies to whatever camera drives the frame, so a wireframe
+// view stays a wireframe view while the scene plays.
+//   Unlit      — base colour only: no lights, no shadow, no ambient, no fog.
+//                The way to see what a texture actually holds.
+//   Wireframe  — triangle edges, unlit. Sky and particles stay as they are.
+//   GBuffer*   — one G-buffer attachment straight to the screen. Deferred path
+//                only: the forward path has no G-buffer, so a backend that is
+//                forward this frame draws Lit instead (see resolveViewMode).
+// Append-only: the values travel through the headless dump knobs.
+enum class ViewMode : int
+{
+    Lit                   = 0,
+    Unlit                 = 1,
+    Wireframe             = 2,
+    GBufferBaseColor      = 3,
+    GBufferNormal         = 4,
+    GBufferRoughSpecMetal = 5, // r = roughness, g = specular, b = metallic
+    GBufferEmissive       = 6,
+};
+constexpr int kViewModeCount = 7;
+
+inline bool viewModeIsGBuffer(ViewMode m)
+{
+    return m >= ViewMode::GBufferBaseColor && m <= ViewMode::GBufferEmissive;
+}
+
+// Which G-buffer attachment a mode shows, as the resolve shader's debug index
+// (HeResolve.depthParams.w): 1 BaseColor, 2 Normal, 3 Rough/Spec/Metal,
+// 4 Emissive — 0 for every mode that is not a G-buffer view.
+inline int viewModeGBufferIndex(ViewMode m)
+{
+    return viewModeIsGBuffer(m)
+        ? static_cast<int>(m) - static_cast<int>(ViewMode::GBufferBaseColor) + 1 : 0;
+}
+
+// The one place the fallback lives: a G-buffer view without a G-buffer is Lit.
+// `deferred` = the backend is actually rendering the deferred path this frame
+// (its own decision, after the capability gate — not what was requested).
+inline ViewMode resolveViewMode(ViewMode requested, bool deferred)
+{
+    const int v = static_cast<int>(requested);
+    if (v < 0 || v >= kViewModeCount) return ViewMode::Lit;
+    if (viewModeIsGBuffer(requested) && !deferred) return ViewMode::Lit;
+    return requested;
+}
+
+inline const char* viewModeName(ViewMode m)
+{
+    switch (m)
+    {
+    case ViewMode::Lit:                   return "Lit";
+    case ViewMode::Unlit:                 return "Unlit";
+    case ViewMode::Wireframe:             return "Wireframe";
+    case ViewMode::GBufferBaseColor:      return "Base Color";
+    case ViewMode::GBufferNormal:         return "Normals";
+    case ViewMode::GBufferRoughSpecMetal: return "Rough / Spec / Metal";
+    case ViewMode::GBufferEmissive:       return "Emissive";
+    }
+    return "Lit";
+}
 } // namespace HE
 
 // ─── IRenderer ────────────────────────────────────────────────────────────────
@@ -221,6 +309,9 @@ public:
         double                   gpuFrameMs = -1.0;
         std::vector<GpuPassTime> passes;
         uint32_t drawCalls = 0, triangles = 0, visibleObjects = 0, totalObjects = 0;
+        // Objects the occlusion culler removed from the frustum-visible set this
+        // frame (0 when it is off). visibleObjects already excludes them.
+        uint32_t occlusionCulled = 0;
         double   vramUsedMB = 0.0, vramBudgetMB = 0.0;
         // Which GPU-timing path actually produced `passes` this frame (a static
         // literal): "detailed" (one cmdbuf/pass, serialized, exclusive+additive),
@@ -334,6 +425,29 @@ public:
     };
     virtual void SetSSAOSettings(const SSAOSettings& /*settings*/) {}
 
+    // ── Directional-light shadows (cascaded shadow maps) ─────────────────────
+    // Pushed every frame from the PROJECT's settings (ProjectShadowSettings —
+    // the editor reads them off the open project, the packaged game off the
+    // ProjectSettings.json shipped next to project.hcfg). Defaults are the
+    // constants the extractor and the CSM shaders have always used, so a
+    // backend that is never pushed draws exactly what it drew.
+    // Honoured by the backends that render cascades (OpenGL, Metal): distance /
+    // cascadeCount / splitLambda / resolution go to their RenderExtractor, a
+    // resolution change reallocates the cascade depth array, and the bias pair
+    // reaches the shaders as a uniform:
+    //   bias = clamp(slopeBias * tan(acos(N·L)), minBias, 0.02) * (cascade + 1)
+    // The single-map backends (D3D11/D3D12/Vulkan) ignore it.
+    struct ShadowSettings
+    {
+        float distance     = 250.0f;  // metres of shadow coverage from the camera
+        int   cascadeCount = 3;       // 1..3 (what every cascade consumer is built for)
+        int   resolution   = 2048;    // texels per cascade edge
+        float splitLambda  = 0.5f;    // 0 = uniform cascade splits, 1 = logarithmic
+        float slopeBias    = 0.0008f;
+        float minBias      = 0.0002f;
+    };
+    virtual void SetShadowSettings(const ShadowSettings& /*settings*/) {}
+
     // ── Global Illumination (ray-traced DDGI) ───────────────────────────────
     // Pushed every frame by the editor's preferences and by the packaged game
     // (see GameApplication's GlobalState config read, mirroring GpuParticles).
@@ -370,6 +484,69 @@ public:
         int   quality      = 1;      // 0 = 16 steps, 1 = 32, 2 = 64
     };
     virtual void SetSSRSettings(const SSRSettings& /*settings*/) {}
+
+    // ── Occlusion culling (CPU software depth buffer) ───────────────────────
+    // Pushed like SSR/GI. Objects whose whole bounding box sits behind opaque,
+    // nearer geometry are dropped after the frustum cull, before sorting and
+    // drawing — on the CPU, from the mesh data the ContentManager holds, for
+    // THIS frame's camera (no GPU-query latency, no pop-in). Conservative by
+    // construction: the image with it on is identical to the image with it
+    // off, only the draw/visible counts drop (FrameGpuStats::occlusionCulled).
+    // Implemented by the OpenGL and Metal backends (HorizonRendering::
+    // OcclusionCuller); the others ignore it for now. Off by default.
+    struct OcclusionCullingSettings
+    {
+        bool enabled = false;
+    };
+    virtual void SetOcclusionCullingSettings(const OcclusionCullingSettings& /*settings*/) {}
+
+    // ── Depth of field (post-process) ────────────────────────────────────────
+    // Pushed like bloom/SSAO. A camera-lens blur on the HDR image BEFORE bloom
+    // and tonemapping: the scene depth becomes a per-pixel circle of confusion
+    // (CoC), the image is blurred at half resolution by a separable, CoC-weighted
+    // gather (near objects spill over the sharp background, the blurred
+    // background never bleeds over a sharp foreground), and the composite lerps
+    // sharp ↔ blurred by that CoC. The parameters are artist-facing, not
+    // millimetres of sensor:
+    //   focusDistance — metres from the camera to the plane in focus
+    //   focusRange    — width (metres) of the fully sharp band around that
+    //                   plane; the blur ramps to full over the same distance
+    //                   again on either side
+    //   aperture      — f-number: f/1.4 is the widest blur, f/22 next to none
+    //                   (max blur radius scales with 1/aperture)
+    // Implemented by the OpenGL and Metal backends; the others ignore it. Off by
+    // default, and off = the image is byte-identical to the pass not existing.
+    struct DepthOfFieldSettings
+    {
+        bool  enabled       = false;
+        float focusDistance = 10.0f;
+        float focusRange    = 4.0f;
+        float aperture      = 2.8f;
+    };
+    virtual void SetDepthOfFieldSettings(const DepthOfFieldSettings& /*settings*/) {}
+
+    // ── Motion blur (post-process) ───────────────────────────────────────────
+    // Pushed like DoF. CAMERA motion blur on the HDR image after DoF and before
+    // bloom/tonemap: every pixel's world position is rebuilt from the scene
+    // depth, reprojected with the previous frame's view-projection, and the
+    // image is smeared along that screen-space delta. Objects moving through a
+    // still camera do NOT blur — per-object velocity is a follow-up, not this
+    // pass. Parameters:
+    //   intensity — shutter as a fraction of the frame interval: 0.5 = the
+    //               classic 180° shutter, 1 = the full frame's motion, 0 = off
+    //   maxBlur   — cap on the smear length in pixels at 720p (scales with the
+    //               target height), so a camera cut is one bad-ish frame and
+    //               not a full-screen wipe
+    // Implemented by the OpenGL and Metal backends; the others ignore it. Off by
+    // default, and off (or a camera that did not move) = the image is
+    // byte-identical to the pass not existing.
+    struct MotionBlurSettings
+    {
+        bool  enabled   = false;
+        float intensity = 0.5f;
+        float maxBlur   = 24.0f;
+    };
+    virtual void SetMotionBlurSettings(const MotionBlurSettings& /*settings*/) {}
 
     // ── Ray-traced GI reflections (docs/gi-reflections-plan.md) ─────────────
     // Pushed like SSR/GI. One specular ray per (half-res) pixel against the GI
@@ -423,6 +600,17 @@ public:
     // Debug: tint each lit fragment by its shadow cascade index (Metal CSM) so the
     // cascade split placement can be verified visually. No-op on other backends.
     virtual void SetShadowDebug(bool /*on*/) {}
+
+    // ── View mode (Lit | Unlit | Wireframe | G-buffer views) ─────────────────
+    // Pushed by the editor's viewport every frame, like the render path. The
+    // packaged game never calls it and stays Lit. Honoured by the backends
+    // that draw the scene's shading (OpenGL, Metal); D3D11/D3D12/Vulkan ignore
+    // it for now, as they do the render path. The G-buffer views depend on the
+    // deferred path being active THIS frame — a backend resolves the request
+    // through HE::resolveViewMode with its own path decision, so a G-buffer
+    // view asked of a forward frame is drawn Lit rather than black.
+    virtual void SetViewMode(HE::ViewMode mode) { m_viewMode = mode; }
+    HE::ViewMode GetViewMode() const { return m_viewMode; }
 
     // ── Environment / day-night cycle ───────────────────────────────────────
     // The ~60-field sky / day-night / weather-appearance block. It lives in its
@@ -577,21 +765,26 @@ public:
     //    headlight for a sky dome and a sun at `env.timeOfDay`, which is what a
     //    MESH viewer wants: you look at a mesh to judge how it catches light.
     //
-    // ONE shared target per backend, so exactly one world preview is live at a
-    // time. That matches the call site: asset tabs are exclusive, and ImGui
-    // never executes an inactive tab's content, so only the active tab calls
-    // in a given frame.
+    // ONE target per SLOT and backend. Slot 0 is the asset tabs' — those are
+    // exclusive (ImGui never executes an inactive tab's content), so one target
+    // serves all of them. The editor's secondary Scene viewports are NOT
+    // exclusive: three of them can be docked side by side and all draw in the
+    // same frame, and with a single target every ImGui::Image would show
+    // whichever one rendered last. They take slots 1..kWorldPreviewSlots-1.
+    // A slot out of range is clamped to the last one.
     //
     // `outViewProj` reports the view-projection used, so the caller can put its
     // own overlay (origin marker, collider outlines, camera boom) on top in the
     // same space — same contract as RenderSkeletalPreview. Returns nullptr on
     // backends without a world-preview path (currently D3D11/D3D12/Vulkan).
+    static constexpr uint32_t kWorldPreviewSlots = 4;
     virtual void* RenderWorldPreview(class ContentManager& /*cm*/, HorizonWorld& /*world*/,
                                      uint32_t /*width*/, uint32_t /*height*/,
                                      const EditorCameraOverride& /*camera*/,
                                      const glm::vec3& /*origin*/ = glm::vec3(0.0f),
                                      const WorldPreviewEnv& /*env*/ = {},
-                                     glm::mat4* /*outViewProj*/ = nullptr)
+                                     glm::mat4* /*outViewProj*/ = nullptr,
+                                     uint32_t /*slot*/ = 0)
     { return nullptr; }
 
     // ── Particle system preview ────────────────────────────────────────────
@@ -696,6 +889,7 @@ public:
 protected:
     OverlayCallback      m_overlayCallback;
     HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
+    HE::ViewMode         m_viewMode             = HE::ViewMode::Lit;
     HorizonWorld*        m_world                = nullptr;
     ContentManager*      m_contentManager       = nullptr;
     EditorCameraOverride m_editorCamera;

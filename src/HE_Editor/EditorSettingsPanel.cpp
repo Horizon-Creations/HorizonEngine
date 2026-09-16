@@ -7,6 +7,7 @@
 #include "EditorWidgets.h"             // Row:: label-above widgets + wrapped hint()
 #include "EditorHelp.h"                // "Preferences/<label>" scope for the tooltips
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
+#include "ShortcutsPage.h"             // the Shortcuts page (its own module: headless-testable)
 #include "McpClientSetup.h"            // Remote Control > "Add to Claude" (claude mcp add)
 #include "NotificationStore.h"         // a settings write that fails has to say so
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
@@ -14,10 +15,7 @@
 #include <SourceControl/RepoStatus.h>
 #include <Net/RouterProbe.h>
 #include <Diagnostics/GlobalState.h>
-#include <Application/AppIcon.h>       // the generated app icon + its preview
-#include <Renderer/UIFont.h>           // icon names, and the plate colour parser
 #include <Types/Enums.h>
-#include <Physics/CollisionLayers.h>   // the project collision matrix, Project ▸ Collision Layers
 #include <SDL3/SDL_filesystem.h>       // SDL_GetBasePath — where he_mcp.py sits at run time
 #include <algorithm>
 #include <atomic>
@@ -287,6 +285,10 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		else if (supported)
 			hint("Deferred: G-buffer + one lighting resolve per visible pixel.");
 	});
+	row("occlusion", "Display", [&]{
+		EditorWidgets::checkbox("Occlusion Culling", &cfg.OcclusionCulling);
+		hint("Skip drawing objects hidden behind nearer opaque geometry (OpenGL, Metal).");
+	});
 	row("vsync", "Display", [&]{ if (EditorWidgets::checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
 	row("maxfps", "Display", [&]{
 		// VSync-off frame cap. 0 = unlimited (default — full FPS). A cap paces the loop so
@@ -347,7 +349,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		if (aaMode == 4 && !mfxOK)
 			hint("MetalFX needs Apple Silicon — falls back to TAA.");
 		else if (aaMode >= 3 && !taaOK)
-			hint("TAA needs Render Path = Deferred (velocity buffer) — falls back to SMAA.");
+			hint("TAA needs a velocity buffer — Metal and OpenGL so far (both render paths); "
+			     "this backend falls back to SMAA.");
 		else if (aaMode == 0)
 			hint("No edge smoothing at all; the post chain still runs.");
 		else if (aaMode == 2)
@@ -369,6 +372,46 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		Row::combo("AO Method", &cfg.SSAOMethod, kAOMethods, IM_ARRAYSIZE(kAOMethods));
 		Row::sliderFloat("AO Radius", &cfg.SSAORadius, 0.05f, 2.0f, "%.2f");
 		Row::sliderFloat("AO Intensity", &cfg.SSAOIntensity, 0.0f, 2.0f, "%.2f");
+	});
+	row("dof", "Post-Processing", [&]{
+		// OpenGL + Metal run the pass; the other backends ignore the push. No
+		// capability gate for one checkbox (same call as occlusion culling).
+		const bool dofOK = (ctx.backend == HE::RendererBackend::Metal ||
+		                    ctx.backend == HE::RendererBackend::OpenGL);
+		ImGui::BeginDisabled(!dofOK);
+		EditorWidgets::checkbox("Depth of Field", &cfg.DoFEnabled);
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.DoFEnabled);
+			Row::sliderFloat("Focus Distance", &cfg.DoFFocusDistance, 0.1f, 200.0f, "%.1f m",
+			                 ImGuiSliderFlags_Logarithmic);
+			Row::sliderFloat("Focus Range", &cfg.DoFFocusRange, 0.0f, 100.0f, "%.1f m",
+			                 ImGuiSliderFlags_Logarithmic);
+			Row::sliderFloat("Aperture", &cfg.DoFAperture, 1.0f, 22.0f, "f/%.1f");
+		}
+		ImGui::EndDisabled();
+		if (!dofOK && hovered)
+			ImGui::SetTooltip("Metal and OpenGL only — Vulkan and DirectX ignore it.");
+		else if (dofOK)
+			hint("Lens blur outside the focus band; a smaller f-number blurs more.");
+	});
+	row("motionblur", "Post-Processing", [&]{
+		// Same backend pair as DoF; the other backends ignore the push.
+		const bool mbOK = (ctx.backend == HE::RendererBackend::Metal ||
+		                   ctx.backend == HE::RendererBackend::OpenGL);
+		ImGui::BeginDisabled(!mbOK);
+		EditorWidgets::checkbox("Motion Blur", &cfg.MotionBlurEnabled);
+		const bool hovered = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+		{
+			SubGroup sub(cfg.MotionBlurEnabled);
+			Row::sliderFloat("Shutter", &cfg.MotionBlurIntensity, 0.0f, 2.0f, "%.2f");
+			Row::sliderFloat("Max Blur", &cfg.MotionBlurMax, 0.0f, 128.0f, "%.0f px");
+		}
+		ImGui::EndDisabled();
+		if (!mbOK && hovered)
+			ImGui::SetTooltip("Metal and OpenGL only — Vulkan and DirectX ignore it.");
+		else if (mbOK)
+			hint("Streaks along the camera's motion; objects moving past a still camera stay sharp.");
 	});
 	row("ssr", "Post-Processing", [&]{
 		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsScreenSpaceReflections;
@@ -1425,528 +1468,8 @@ void statusRow(const char* name, StatusLevel level, const std::string& detail,
 	}
 }
 
-// ─── Project ▸ Permissions ───────────────────────────────────────────────────
-// What this project's scripts may reach outside the project (plan, Block C).
-// Three checkboxes, all off until somebody says otherwise, saved into the
-// .heproj and carried into the exported build.
-//
-// They bind the EDITOR too, not just the export. A preview that may delete a
-// stranger's directory while the shipped app may not is the worse of the two
-// failures: it happens on the author's machine, before anything shipped.
-void drawPermissionsPage(AppContext& ctx)
-{
-	HE::Ed::Help::Scope helpScope("Permissions");
-
-	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
-	{
-		ImGui::TextDisabled("No project is open.");
-		return;
-	}
-	ProjectData& p = ctx.projectManager->currentProject();
-
-	EditorWidgets::hint("These belong to the PROJECT, not to the editor: they are saved in "
-	                    "its .heproj and travel into the application you export. They also "
-	                    "bind scripts you run here, so the preview can never do more than "
-	                    "the shipped app.");
-	ImGui::Spacing();
-
-	bool changed = false;
-	changed |= ImGui::Checkbox("Files outside the project", &p.allowFiles);
-	EditorWidgets::helpForLabel("Files outside the project");
-	ImGui::TextDisabled("Off, a script reads and writes only inside the project's Saved folder.\n"
-	                    "A file the person using the app picks in a dialog is always allowed,\n"
-	                    "whatever this says — choosing it is the permission.");
-	ImGui::Spacing();
-
-	changed |= ImGui::Checkbox("Run other programs", &p.allowProcesses);
-	EditorWidgets::helpForLabel("Run other programs");
-	ImGui::TextDisabled("Covers Run Program and Open URL. Finding out whether a program is\n"
-	                    "installed needs no permission — that is how a script can tell\n"
-	                    "somebody what it would need.");
-	ImGui::Spacing();
-
-	changed |= ImGui::Checkbox("Network access", &p.allowNetwork);
-	EditorWidgets::helpForLabel("Network access");
-	ImGui::TextDisabled("Reserved: nothing reads this yet. It is here so a project that\n"
-	                    "already answered the question does not have to answer it again.");
-
-	if (changed)
-	{
-		// Written through immediately rather than on some later Save: a
-		// permission that is on in the panel and off on disk is the state that
-		// makes somebody spend an hour on why their script still cannot read a
-		// file. The runtime picks it up on the next call by itself (the api
-		// dispatch refreshes perm::set from here).
-		if (!ctx.projectManager->saveProject(p.path))
-			// Problem, not Warning: the panel now says one thing and the file
-			// another, and it stays that way until somebody acts.
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
-			               "Could not save the project's permissions", p.path);
-	}
-}
-
-// ─── Project ▸ Collision Layers ──────────────────────────────────────────────
-// The sixteen named collision channels and the matrix that says which pairs may
-// touch. A PROJECT setting, saved in the .heproj and carried into the exported
-// build, exactly like Permissions above.
-//
-// The matrix is drawn as a TRIANGLE, not a square. The two halves of a symmetric
-// matrix are the same answer written twice, and a square grid invites somebody
-// to tick one and not the other and then wonder why nothing changed —
-// CollisionLayerConfig writes both cells from either one, so the second half
-// would be a mirror that cannot be edited independently anyway.
-void drawCollisionLayersPage(AppContext& ctx)
-{
-	HE::Ed::Help::Scope helpScope("Collision Layers");
-
-	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
-	{
-		ImGui::TextDisabled("No project is open.");
-		return;
-	}
-	ProjectData&              p   = ctx.projectManager->currentProject();
-	HE::CollisionLayerConfig& cfg = p.collisionLayers;
-	constexpr int kCount = HE::CollisionLayerConfig::kCount;
-
-	EditorWidgets::hint("A collision layer is a named channel. Every rigid body and every "
-	                    "character sits in one (Details ▸ Collision Layer), and the matrix "
-	                    "below decides which pairs of channels the simulation lets touch. "
-	                    "Belongs to the PROJECT: saved in its .heproj and carried into the "
-	                    "build you export.");
-	ImGui::Spacing();
-
-	// Written per keystroke into the model so the matrix labels follow the
-	// typing, and to the FILE when an edit ends — the same split the Application
-	// page makes, for the same reason: a .heproj rewritten per character is a lot
-	// of temp-file churn on a versioned file that has a watcher on it.
-	bool commit = false;
-
-	ImGui::SeparatorText("Names");
-	EditorWidgets::hint("A layer keeps its NUMBER for good — that is what a scene stores — so "
-	                    "renaming one relabels it everywhere and remaps nothing. Leave a name "
-	                    "empty and it reads as \"Layer <n>\".");
-
-	if (ImGui::BeginTable("##collisionlayernames", 2,
-	                      ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
-	{
-		ImGui::TableSetupColumn("##idx", ImGuiTableColumnFlags_WidthFixed,
-		                        ImGui::CalcTextSize("00").x + ImGui::GetStyle().CellPadding.x * 2.0f);
-		ImGui::TableSetupColumn("##name", ImGuiTableColumnFlags_WidthStretch);
-		for (int i = 0; i < kCount; ++i)
-		{
-			ImGui::PushID(i);
-			ImGui::TableNextRow();
-			ImGui::TableSetColumnIndex(0);
-			ImGui::AlignTextToFramePadding();
-			ImGui::TextDisabled("%d", i);
-			ImGui::TableSetColumnIndex(1);
-			ImGui::SetNextItemWidth(-FLT_MIN);
-			// The placeholder shows what an empty name READS BACK AS, which is
-			// not "Layer <n>" for all sixteen: the five presets answer with
-			// their built-in names. Asking a default-constructed config is the
-			// only spelling of that which cannot drift from layerName() itself.
-			static const HE::CollisionLayerConfig kDefaults;
-			const std::string placeholder = kDefaults.layerName(i);
-			std::string       name        = cfg.names[i];
-			if (ImGui::InputTextWithHint("##layername", placeholder.c_str(), &name))
-				cfg.setLayerName(i, name);
-			// By key, not by label: the control has no literal label of its own —
-			// sixteen rows share one row shape and the visible text is data.
-			EditorWidgets::helpForKey("Collision Layers/Name");
-			commit |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::PopID();
-		}
-		ImGui::EndTable();
-	}
-
-	ImGui::Spacing();
-	ImGui::SeparatorText("Matrix");
-	EditorWidgets::hint("Ticked means the pair collides, which is how every project starts. "
-	                    "Clearing a box is what makes a channel pass through another one. "
-	                    "The diagonal is a layer against ITSELF.");
-
-	// 17 columns: the row's name plus one per channel. Numbers in the header
-	// rather than names — a sixteen-column grid has no room for words, and the
-	// list above is the key from number to name.
-	// The height is given EXPLICITLY because of ScrollX: a scrolling table with
-	// an outer size of zero becomes a child that eats all the height left in the
-	// page, which would put the button below it out of reach. Seventeen rows —
-	// the header and the sixteen channels.
-	const ImVec2 matrixSize(0.0f,
-		ImGui::GetFrameHeightWithSpacing() * (kCount + 1) + ImGui::GetStyle().CellPadding.y * 2.0f);
-	if (ImGui::BeginTable("##collisionmatrix", kCount + 1,
-	                      ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg |
-	                      ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollX,
-	                      matrixSize))
-	{
-		ImGui::TableSetupColumn("##rowname", ImGuiTableColumnFlags_WidthFixed);
-		for (int b = 0; b < kCount; ++b)
-		{
-			char head[8];
-			std::snprintf(head, sizeof(head), "%d", b);
-			ImGui::TableSetupColumn(head, ImGuiTableColumnFlags_WidthFixed);
-		}
-		// Scrolled sideways, the names column and the numbers have to stay: a
-		// grid of unlabelled boxes is not something anyone can aim at.
-		ImGui::TableSetupScrollFreeze(1, 1);
-		ImGui::TableHeadersRow();
-
-		for (int a = 0; a < kCount; ++a)
-		{
-			ImGui::PushID(a);
-			ImGui::TableNextRow();
-			ImGui::TableSetColumnIndex(0);
-			ImGui::AlignTextToFramePadding();
-			ImGui::TextUnformatted(cfg.layerName(a).c_str());
-			// Only the lower triangle carries a box. The upper half is the same
-			// answer read the other way round; drawing it would be two controls
-			// for one value.
-			for (int b = 0; b <= a; ++b)
-			{
-				ImGui::TableSetColumnIndex(b + 1);
-				ImGui::PushID(b);
-				bool on = cfg.collides(a, b);
-				if (ImGui::Checkbox("##cell", &on))
-				{
-					// setCollides, never matrix[][] by hand: it writes BOTH
-					// cells, and Jolt does not promise which way round it asks.
-					cfg.setCollides(a, b, on);
-					commit = true;
-				}
-				if (ImGui::IsItemHovered())
-					ImGui::SetTooltip("%s \xc3\x97 %s", cfg.layerName(a).c_str(),
-					                  cfg.layerName(b).c_str());
-				ImGui::PopID();
-			}
-			ImGui::PopID();
-		}
-		ImGui::EndTable();
-	}
-
-	ImGui::Spacing();
-	// The way back. A matrix somebody has switched most of off is otherwise
-	// 136 boxes to undo by hand, and "nothing collides any more" is exactly the
-	// state somebody reaches while finding out what these do.
-	if (EditorWidgets::button("Everything Collides"))
-	{
-		for (int a = 0; a < kCount; ++a)
-			for (int b = 0; b <= a; ++b)
-				cfg.setCollides(a, b, true);
-		commit = true;
-	}
-	EditorWidgets::helpForLabel("Everything Collides");
-	ImGui::TextDisabled("Ticks every box again. The names stay as they are.");
-
-	if (commit)
-	{
-		if (!ctx.projectManager->saveProject(p.path))
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
-			               "Could not save the project's collision layers", p.path);
-		// And into the running simulation, so a matrix edited during play takes
-		// effect where it can be seen. PhysicsWorld copies the matrix into the
-		// filter Jolt holds and wakes every body, so a box already lying on a
-		// floor that just stopped colliding does fall.
-		else if (ctx.applyCollisionLayers)
-			ctx.applyCollisionLayers();
-	}
-}
-
-// ─── Project ▸ Application ───────────────────────────────────────────────────
-// What the application IS to the system it lands on (plan A7): its icon, its
-// identifier, its version. The icon is GENERATED from one of the built-in icons
-// on a coloured plate — the export writes the .icns, the .ico and the .png from
-// it — so a project has an icon on the day it is made and nobody produces the
-// same picture three times.
-//
-// The preview is a real texture of the real bytes, rebuilt only when the answer
-// changes: a picture of the icon rendered by some other code would be the one
-// thing on this page that can lie.
-void drawApplicationPage(AppContext& ctx)
-{
-	HE::Ed::Help::Scope helpScope("Application");
-
-	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
-	{
-		ImGui::TextDisabled("No project is open.");
-		return;
-	}
-	ProjectData& p = ctx.projectManager->currentProject();
-
-	EditorWidgets::hint("These belong to the PROJECT: saved in its .heproj and written into "
-	                    "the application you export.");
-	ImGui::Spacing();
-
-	// ── The icon ─────────────────────────────────────────────────────────────
-	ImGui::SeparatorText("Icon");
-
-	static std::string   s_previewKey;      // name + colour the texture was built from
-	static ImTextureID   s_previewTex = 0;
-	static void*         s_previewHandle = nullptr;
-	static const int     kPreviewPx = 128;
-
-	// The model is written per keystroke (so the preview follows the typing), but
-	// the FILE is written when an edit ends. A .heproj rewritten per character is
-	// a lot of temp-file churn for one word, and it is a versioned file with a
-	// watcher on it.
-	bool commit = false;
-
-	EditorWidgets::Row::inputText("Icon##appiconname", &p.appIconName);
-	commit |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Icon");
-	const bool nameOk = !p.appIconName.empty() && HE::uiIconCodepoint(p.appIconName) != 0;
-	if (!p.appIconName.empty() && !nameOk)
-		ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
-		                   "No built-in icon is called that — the export writes none.");
-	else
-		ImGui::TextDisabled("One of the %zu built-in icons, by name. The same names "
-		                    "<icon=…> uses in a label.", HE::uiIconCount());
-
-	// A few names that contain what was typed, so somebody who half-remembers one
-	// can find it without leaving the page. Ten is enough to recognise the
-	// pattern; a full list of two thousand is a different panel.
-	if (!p.appIconName.empty() && !nameOk)
-	{
-		std::string matches;
-		int found = 0;
-		for (std::size_t i = 0; i < HE::uiIconCount() && found < 10; ++i)
-		{
-			const char* n = HE::uiIconNameAt(i);
-			if (std::strstr(n, p.appIconName.c_str()))
-			{
-				matches += (found++ ? ", " : "");
-				matches += n;
-			}
-		}
-		if (found) ImGui::TextDisabled("Did you mean: %s", matches.c_str());
-	}
-	ImGui::Spacing();
-
-	{
-		glm::vec4 col(0.12f, 0.44f, 0.78f, 1.0f);
-		HE::uiParseRichColor(p.appIconColor, col);
-		float rgb[3] = { col.r, col.g, col.b };
-		if (EditorWidgets::Row::colorEdit3("Plate colour##appiconcolor", rgb))
-		{
-			char hex[8];
-			std::snprintf(hex, sizeof(hex), "#%02x%02x%02x",
-			              (int)std::lround(std::clamp(rgb[0], 0.0f, 1.0f) * 255.0f),
-			              (int)std::lround(std::clamp(rgb[1], 0.0f, 1.0f) * 255.0f),
-			              (int)std::lround(std::clamp(rgb[2], 0.0f, 1.0f) * 255.0f));
-			p.appIconColor = hex;
-		}
-		commit |= ImGui::IsItemDeactivatedAfterEdit();
-	}
-	EditorWidgets::helpForLabel("Plate colour");
-	ImGui::TextDisabled("The icon itself is white on a dark plate and near-black on a light "
-	                    "one, so there is one colour to choose and not two.");
-	ImGui::Spacing();
-
-	// ── The preview ──────────────────────────────────────────────────────────
-	const std::string key = p.appIconName + "|" + p.appIconColor;
-	if (key != s_previewKey && ctx.renderer)
-	{
-		s_previewKey = key;
-		if (s_previewHandle) { ctx.renderer->DestroyImGuiTexture(s_previewHandle); s_previewHandle = nullptr; }
-		s_previewTex = 0;
-		glm::vec4 bg(0.12f, 0.44f, 0.78f, 1.0f);
-		HE::uiParseRichColor(p.appIconColor, bg);
-		const std::vector<std::uint8_t> rgba =
-			HE::heRenderAppIcon(p.appIconName, kPreviewPx, bg, HE::heAppIconForeground(bg));
-		if (!rgba.empty())
-			if (void* h = ctx.renderer->CreateImGuiTexture(rgba.data(), kPreviewPx, kPreviewPx))
-			{
-				s_previewHandle = h;
-				s_previewTex    = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(h));
-			}
-	}
-	if (s_previewTex)
-		ImGui::Image(s_previewTex, ImVec2((float)kPreviewPx, (float)kPreviewPx));
-	else
-		ImGui::TextDisabled("(no icon to show)");
-	ImGui::Spacing();
-
-	// ── Identity ─────────────────────────────────────────────────────────────
-	ImGui::SeparatorText("Identity");
-	EditorWidgets::Row::inputText("Bundle identifier##bundleid", &p.bundleId);
-	commit |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Bundle identifier");
-	ImGui::TextDisabled("Empty derives com.horizonengine.<project>, which is what every\n"
-	                    "export did before this field existed. Set it once you own a domain.");
-	ImGui::Spacing();
-	EditorWidgets::Row::inputText("Version##appversion", &p.appVersion);
-	commit |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Version");
-	ImGui::Spacing();
-
-	// ── The file types this application owns ─────────────────────────────────
-	ImGui::SeparatorText("File types");
-	ImGui::TextWrapped("Which files belong to this application. The export declares them the "
-	                   "way each system wants it: inside the bundle on macOS, as a .desktop "
-	                   "and a MIME file on Linux, as a .reg on Windows. Installing the last "
-	                   "two is an installer's job — the export writes what would be installed.");
-	ImGui::Spacing();
-
-	int removeAt = -1;
-	for (std::size_t i = 0; i < p.documentTypes.size(); ++i)
-	{
-		HE::AppDocumentType& t = p.documentTypes[i];
-		ImGui::PushID(static_cast<int>(i));
-		EditorWidgets::Row::inputText("Extension##docext", &t.extension);
-		commit |= ImGui::IsItemDeactivatedAfterEdit();
-		if (i == 0) EditorWidgets::helpForLabel("Extension");
-		if (!t.extension.empty() && !HE::heValidDocumentExtension(t.extension))
-			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
-			                   "Letters and digits only, no dot, not starting with a digit — "
-			                   "this one is skipped.");
-		EditorWidgets::Row::inputText("Name##docname", &t.displayName);
-		commit |= ImGui::IsItemDeactivatedAfterEdit();
-		if (i == 0) EditorWidgets::helpForLabel("Name");
-		EditorWidgets::Row::inputText("Icon##docicon", &t.iconName);
-		commit |= ImGui::IsItemDeactivatedAfterEdit();
-		if (i == 0) EditorWidgets::helpForLabel("Icon##doc");
-		if (!t.iconName.empty() && HE::uiIconCodepoint(t.iconName) == 0)
-			ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f),
-			                   "No built-in icon is called that — the files wear the "
-			                   "application's icon.");
-		if (EditorWidgets::button("Remove")) removeAt = static_cast<int>(i);
-		EditorWidgets::helpForLabel("Remove");
-		ImGui::Separator();
-		ImGui::PopID();
-	}
-	if (removeAt >= 0)
-	{
-		p.documentTypes.erase(p.documentTypes.begin() + removeAt);
-		commit = true;
-	}
-	if (EditorWidgets::button("Add file type"))
-	{
-		p.documentTypes.push_back({ "", "Document", "" });
-		commit = true;
-	}
-	EditorWidgets::helpForLabel("Add file type");
-
-	if (commit)
-	{
-		// Straight to disk, as on the other project pages: a value that is in the
-		// panel and not in the file is the state somebody loses an evening to.
-		if (!ctx.projectManager->saveProject(p.path))
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
-			               "Could not save the project's application settings", p.path);
-	}
-}
-
-// ─── Project ▸ Fonts ─────────────────────────────────────────────────────────
-// Which scripts this project's text is written in. The atlas always carries
-// Latin as it is actually written — umlauts, accents, the punctuation a text
-// field produces on its own — so most projects never open this page. The two
-// boxes here cost atlas area, which is the whole reason they are a question.
-//
-// The awkward part is honest and stays visible: the atlas is baked once per
-// process and every renderer backend uploads it once, so a change reaches THIS
-// editor session only after a restart. The page says which answer is live.
-void drawFontsPage(AppContext& ctx)
-{
-	HE::Ed::Help::Scope helpScope("Fonts");
-
-	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
-	{
-		ImGui::TextDisabled("No project is open.");
-		return;
-	}
-	ProjectData& p = ctx.projectManager->currentProject();
-
-	EditorWidgets::hint("These belong to the PROJECT: they are saved in its .heproj and "
-	                    "travel into the application you export, which has to bake its own "
-	                    "atlas on a machine that never saw this editor.");
-	ImGui::Spacing();
-
-	// ── Weight ───────────────────────────────────────────────────────────────
-	ImGui::SeparatorText("Text weight");
-	ImGui::TextWrapped("Which weight ordinary text is drawn in. Regular is what body text "
-	                   "usually is, and it is what gives <b> in rich text something to be "
-	                   "bolder than.");
-	ImGui::Spacing();
-
-	const bool wasBold = p.fontWeightBold;
-	if (ImGui::RadioButton("Regular", !p.fontWeightBold)) p.fontWeightBold = false;
-	EditorWidgets::helpForLabel("Regular");
-	ImGui::Spacing();
-	if (ImGui::RadioButton("Bold", p.fontWeightBold)) p.fontWeightBold = true;
-	EditorWidgets::helpForLabel("Bold");
-	ImGui::Indent();
-	EditorWidgets::hint("What the engine has always drawn, so an older project keeps it "
-	                    "until somebody says otherwise. With Bold as the base, <b> has "
-	                    "nothing bolder to reach for and draws the same letters.");
-	ImGui::Unindent();
-	ImGui::Spacing();
-
-	// No control, because there is nothing to decide: the icon face is baked the
-	// first time a label asks for one, and a project that shows no icon never
-	// pays for it. Said out loud anyway, because "how do I get an icon" is a
-	// question this page is where somebody looks for.
-	ImGui::SeparatorText("Icons");
-	ImGui::TextWrapped("%zu icons are built in, written as <icon=name> in a rich text "
-	                   "label (<icon=home>, <icon=settings>, <icon=save>). They are baked "
-	                   "only once a label actually asks for one, so a project without "
-	                   "icons carries none of it.",
-	                   HE::uiIconCount());
-	ImGui::Spacing();
-
-	ImGui::SeparatorText("Scripts");
-	ImGui::TextWrapped("Every project gets Latin: A to Z, the umlauts and accents of "
-	                   "Latin-1, the Central European letters of Latin Extended-A, the "
-	                   "typographic quotes and dashes, and the Euro sign. The two below "
-	                   "are added on top and cost room in the atlas.");
-	ImGui::Spacing();
-
-	const std::uint32_t before = p.fontScripts;
-	bool greek    = (p.fontScripts & HE::UIFontScriptGreek)    != 0;
-	bool cyrillic = (p.fontScripts & HE::UIFontScriptCyrillic) != 0;
-
-	if (ImGui::Checkbox("Greek", &greek))
-		p.fontScripts = greek ? (p.fontScripts | HE::UIFontScriptGreek)
-		                      : (p.fontScripts & ~HE::UIFontScriptGreek);
-	EditorWidgets::helpForLabel("Greek");
-	ImGui::Spacing();
-
-	if (ImGui::Checkbox("Cyrillic", &cyrillic))
-		p.fontScripts = cyrillic ? (p.fontScripts | HE::UIFontScriptCyrillic)
-		                         : (p.fontScripts & ~HE::UIFontScriptCyrillic);
-	EditorWidgets::helpForLabel("Cyrillic");
-	ImGui::Spacing();
-
-	if (p.fontScripts != before || p.fontWeightBold != wasBold)
-	{
-		// Straight to disk, like the permissions page: a setting that is on in
-		// the panel and off in the file is the state somebody spends an evening on.
-		if (!ctx.projectManager->saveProject(p.path))
-			HE::Ed::notify(HE::Ed::NoteLevel::Problem,
-			               "Could not save the project's font settings", p.path);
-	}
-
-	// What this session actually baked, said plainly. Asking for what is already
-	// live answers yes, and then there is nothing to report.
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::Spacing();
-	const bool weightLive = HE::uiSetFontWeightBold(p.fontWeightBold);
-	if (!HE::uiSetFontScripts(p.fontScripts) || !weightLive)
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.35f, 1.0f));
-		ImGui::TextWrapped("Saved, but not drawn yet: this editor session already baked its "
-		                   "font atlas, and every renderer holds that one texture. Restart "
-		                   "the editor to see the change. An exported application bakes on "
-		                   "its own start and needs no restart.");
-		ImGui::PopStyleColor();
-	}
-	else
-	{
-		const HE::BakedUIFont& f = HE::sharedUIFont();
-		ImGui::TextDisabled("Live: %zu characters in a %d x %d atlas, %s.",
-		                    f.glyphs.size(), f.atlasW, f.atlasH,
-		                    HE::uiFontWeightBold() ? "bold" : "regular");
-	}
-}
+// (The pages that edit the PROJECT — Application, Permissions, Fonts, Collision
+// Layers — moved to ProjectSettingsPanel.cpp, the Project Settings tab.)
 
 void drawStatusPage(AppContext& ctx)
 {
@@ -2350,6 +1873,7 @@ constexpr NavItem kGeneralItems[] = {
 // headings carried — "Sessions" under no heading is not a topic.
 constexpr NavItem kEditorItems[] = {
 	{ Page::HorizonCode,   "HorizonCode" },
+	{ Page::Shortcuts,     "Shortcuts" },
 	{ Page::CollabGeneral, "Collaboration" },
 	{ Page::RemoteControl, "Remote Control" },
 	{ Page::Repository,    "Source Control" },
@@ -2361,22 +1885,17 @@ constexpr NavItem kRenderingItems[] = {
 	{ Page::GlobalIllumination, "Global Illumination" },
 	{ Page::Effects,            "Effects" },
 };
-constexpr NavItem kProjectItems[] = {
-	{ Page::Application,     "Application" },
-	{ Page::Permissions,     "Permissions" },
-	{ Page::Fonts,           "Fonts" },
-	{ Page::CollisionLayers, "Collision Layers" },
-};
 constexpr NavGroup kNavGroups[] = {
 	{ "General",   kGeneralItems,   IM_ARRAYSIZE(kGeneralItems) },
 	// Right behind General: these are the editor's own tools, so they belong
 	// next to the rest of "how the editor behaves" and ahead of the renderer.
 	{ "Editor",    kEditorItems,    IM_ARRAYSIZE(kEditorItems) },
 	{ "Rendering", kRenderingItems, IM_ARRAYSIZE(kRenderingItems) },
-	// Last, and named "Project" rather than folded into one of the groups above:
-	// everything else on this tab follows the EDITOR from project to project,
-	// and this one travels with the project and into its exported build.
-	{ "Project",   kProjectItems,   IM_ARRAYSIZE(kProjectItems) },
+	// No "Project" group any more: everything on this tab follows the EDITOR
+	// from project to project. What travels with the project and into its
+	// exported build has a tab of its own now — Edit ▸ Project Settings
+	// (ProjectSettingsPanel), which is where the four pages that used to sit
+	// here went.
 };
 
 // Engine-settings pages map onto one catalog category each; the rest have
@@ -2486,10 +2005,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	else if (s_page == Page::Repository)  drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
 	else if (s_page == Page::HorizonCode) drawHorizonCodePage();
-	else if (s_page == Page::Permissions) drawPermissionsPage(ctx);
-	else if (s_page == Page::Fonts)       drawFontsPage(ctx);
-	else if (s_page == Page::Application) drawApplicationPage(ctx);
-	else if (s_page == Page::CollisionLayers) drawCollisionLayersPage(ctx);
+	else if (s_page == Page::Shortcuts)   ShortcutsPage::draw();
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

@@ -843,6 +843,48 @@ TEST_CASE("The reflection pre-pass is one shader for all backends")
 		"vec2 p = n.xy * (1.0 / (abs(n.x) + abs(n.y) + abs(n.z)));") != std::string::npos);
 }
 
+TEST_CASE("The instanced reflection pre-pass vertex compiles and keeps the backend split")
+{
+	// docs/gpu-instancing-cross-backend-plan.md §6.2: one instanced draw for a
+	// GeometryPass batch of the MRT pre-pass. Same fragment, same varyings; the
+	// model matrix comes per instance and the uniform block shrinks to the
+	// camera pair. There is no GPU under ctest, so this is the net under both
+	// renderers' pipeline builds.
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (B b : { B::Metal, B::GLSL410, B::HLSL, B::SpirV })
+	{
+		const auto& v = lib.reflPrepassVertexInstanced(b);
+		CHECK_MESSAGE(v.ok, "instanced refl pre-pass vertex failed for backend ", (int)b, ": ", v.log);
+	}
+	// Distinct cache slot: asking for the instanced variant must not hand back
+	// the plain one (or the next backend's plain one).
+	CHECK(lib.reflPrepassVertexInstanced(B::GLSL410).source != lib.reflPrepassVertex(B::GLSL410).source);
+	CHECK(lib.reflPrepassVertexInstanced(B::Metal).source   != lib.reflPrepassVertex(B::Metal).source);
+
+	// GL: the model rides in as four vec4 attributes at locations 4–7 — the
+	// divisor-1 binding every mesh VAO carries for the scene pass's instanced
+	// program — and the block the renderer looks up is "UI". No SSBO, no
+	// gl_InstanceIndex: GL 4.1 has neither, the divisor does the indexing.
+	const std::string gl = lib.reflPrepassVertexInstanced(B::GLSL410).source;
+	CHECK(gl.find("#version 410") != std::string::npos);
+	for (int loc = 4; loc <= 7; ++loc)
+		CHECK_MESSAGE(gl.find("layout(location = " + std::to_string(loc) + ") in") != std::string::npos,
+		              "GL instanced pre-pass lost attribute location ", loc);
+	CHECK(gl.find("uniform UI") != std::string::npos);
+	CHECK(gl.find("gl_InstanceIndex") == std::string::npos);
+	CHECK(gl.find("binding =") == std::string::npos);
+
+	// Metal: SSBO pull for the mesh (buffer 0), camera pair at buffer 1 and the
+	// instance array pinned to buffer 5 — the slot every instanced Metal
+	// pipeline of this engine binds — indexed by the instance id.
+	const std::string msl = lib.reflPrepassVertexInstanced(B::Metal).source;
+	CHECK(msl.find("[[buffer(0)]]") != std::string::npos);
+	CHECK(msl.find("[[buffer(1)]]") != std::string::npos);
+	CHECK(msl.find("[[buffer(5)]]") != std::string::npos);
+	CHECK(msl.find("[[instance_id]]") != std::string::npos);
+}
+
 TEST_CASE("GL binds the SSR shaders by name, so the names must survive emission")
 {
 	// docs/ssr-cross-backend-plan.md checkpoint A. The cross-compiler runs with

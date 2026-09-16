@@ -139,6 +139,10 @@ struct AppContext
 	// be right for as long as nobody looked at it. Doing nothing outside play
 	// mode is correct — the next play start reads the matrix from the project.
 	std::function<void()> applyCollisionLayers;
+	// Same contract for the project's physics settings (gravity; the fixed rate
+	// is read per step, so it needs no push): the Simulation page calls it after
+	// saving, and a crate resting in the preview falls the new way at once.
+	std::function<void()> applyPhysicsSettings;
 	ScriptEngine*      propScriptEngine = nullptr; // read-only, for inspector property reading
 
 	// Editor scene-view camera (orbit/fly/focus). Owned by EditorApplication;
@@ -177,6 +181,14 @@ struct AppContext
 	// any transport state.
 	std::function<void(bool)> setPaused;
 	std::function<void()>     stepFrame;
+	// A HorizonCode run is stopped at a breakpoint (HcExecTrace::isPaused). The
+	// transport's Pause cell then reads as Continue — a resume lets the stopped
+	// run go on before the world ticks again — and Step Node lights up: run the
+	// stopped node, stop at the next. A step whose run simply ends unpauses
+	// the world; the next breakpoint stops it again. True outside play mode
+	// too, in an application project, whose UI runs without a play session.
+	bool                      hcSuspended = false;
+	std::function<void()>     stepNode;
 	// PIE UI pointer feed: viewport-relative mouse in render-target pixels +
 	// viewport size + LMB state + this frame's wheel; valid=false while
 	// outside/captured. The wheel rides along because a scroll box under the
@@ -537,6 +549,11 @@ private:
 	void loadGameInstanceGraph();  // read the project's GameInstance.hcode → host
 	void saveGameInstanceGraph();  // write m_gameInstanceGraph → project file
 	std::string gameInstancePath(); // <projectDir>/GameInstance.hcode
+	// The open project's Shadows page as the renderer takes it (no project =
+	// defaults = the historical constants). HE_DUMP_SHADOW overrides it for a
+	// headless capture: "distance,cascades,resolution,lambda,slopeBias,minBias",
+	// any trailing field may be left off.
+	IRenderer::ShadowSettings projectShadowSettings();
 
 	// Per-project open-tab persistence (stored in the global config keyed by
 	// project path). restoreOpenTabs runs on project load; saveOpenTabs runs when
@@ -595,9 +612,9 @@ private:
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
 	float m_physicsAccum = 0.0f;
-	// One definition for both apps (PhysicsWorld.h): the packaged game has to
-	// simulate at the rate the editor previewed it at.
-	static constexpr float kPhysicsFixedDt = PhysicsWorld::kFixedDt;
+	// The step is the PROJECT's (ProjectPhysicsSettings::fixedDt, read from
+	// currentProject().settings where the accumulator steps): the packaged game
+	// reads the same file, so it simulates at the rate the editor previewed at.
 
 	// Audio engine — initialised at startup, active always (spatial update only in play mode).
 	AudioEngine m_audioEngine;
@@ -866,6 +883,14 @@ private:
 	// running graph, and setPlayMode tears the runtime that graph is executing in
 	// down. Consumed at the top of OnRender.
 	bool m_playStopRequested = false;
+	// Continue / Step Node for a HorizonCode run stopped at a breakpoint —
+	// parked for the same reason: the buttons are pressed during the UI pass,
+	// and resuming the run executes arbitrary graph code (Destroy Object,
+	// Create Widget, a level load) which belongs in the tick, not in the middle
+	// of a frame whose panels are still holding handles. Consumed at the top
+	// of the frame, before the world-tick gate is decided.
+	enum class HcResume { None, Continue, Step };
+	HcResume m_hcResume = HcResume::None;
 
 	// Mouse-captured free-fly camera while playing in the editor — mirrors the
 	// packaged game so PIE is navigable. Captured on play-enter, released on exit,

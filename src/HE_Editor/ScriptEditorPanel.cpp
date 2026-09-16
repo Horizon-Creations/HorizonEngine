@@ -7,6 +7,7 @@
 #include <imgui_internal.h>                    // ImGuiContext::PlatformImeData (text-input activation)
 #include <ContentManager/HAsset.h>
 #include <Types/Enums.h>                       // HE::AssetType
+#include <algorithm>                           // std::clamp for the reveal line
 #include <filesystem>
 #include <cstdint>
 
@@ -55,6 +56,22 @@ namespace
 		State& st = s_states[path];
 		if (!st.loaded) loadFromDisk(st, path);
 		return st;
+	}
+
+	// The pending reveal (ScriptEditorPanel::requestReveal). `path` empty =
+	// none. `pathTaken` is the shell having opened the tab; the line half stays
+	// until that tab renders. Paths are compared as paths, not strings: the
+	// console's path comes from ContentManager::resolveAbsolutePath and the
+	// tab's from the browser's directory walk, and on Windows those can spell
+	// the separators differently.
+	std::string s_revealPath;
+	int         s_revealLine      = 0;
+	bool        s_revealPathTaken = false;
+
+	bool revealPendingFor(const std::string& path)
+	{
+		return !s_revealPath.empty() &&
+		       (path == s_revealPath || std::filesystem::path(path) == std::filesystem::path(s_revealPath));
 	}
 
 	// Rewrite the .hasset preserving every chunk (META keeps the UUID, SLNG the
@@ -148,6 +165,23 @@ namespace ScriptEditorPanel
 
 		if (doSave || saveKey) saveToDisk(st, path);
 
+		// A pending "go to line" for this tab: caret first, then the selection
+		// over the whole line. The order matters — SetCursorPosition is what
+		// scrolls the line into view, and only when the caret actually moves,
+		// so it goes before SelectLine rather than being implied by it. Lines
+		// are 1-based in the message, 0-based in the editor; a line past the end
+		// (the file changed since the error) lands on the last one.
+		if (revealPendingFor(path))
+		{
+			const int last = std::max(0, st.editor.GetLineCount() - 1);
+			const int line = std::clamp(s_revealLine - 1, 0, last);
+			st.editor.SetCursorPosition(line, 0);
+			st.editor.SelectLine(line);
+			s_revealPath.clear();
+			s_revealLine      = 0;
+			s_revealPathTaken = false;
+		}
+
 		// ── Code editor fills the remaining area (monospace font for alignment) ──
 		// This window gets no text-wrap scope, and that is a decision rather than an
 		// oversight: the two things it draws are the toolbar strip, whose cells are
@@ -178,6 +212,29 @@ namespace ScriptEditorPanel
 		}
 
 		ImGui::End();
+	}
+
+	void requestReveal(const std::string& assetPath, int line)
+	{
+		if (assetPath.empty() || line <= 0) return;
+		s_revealPath      = assetPath;
+		s_revealLine      = line;
+		s_revealPathTaken = false;
+	}
+
+	bool takeRevealPath(std::string& assetPath)
+	{
+		if (s_revealPath.empty() || s_revealPathTaken) return false;
+		assetPath         = s_revealPath;
+		s_revealPathTaken = true;
+		return true;
+	}
+
+	void cancelReveal()
+	{
+		s_revealPath.clear();
+		s_revealLine      = 0;
+		s_revealPathTaken = false;
 	}
 
 	bool reloadFromDisk(const std::string& assetPath)

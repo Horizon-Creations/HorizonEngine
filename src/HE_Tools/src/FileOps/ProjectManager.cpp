@@ -670,6 +670,8 @@ static json profileToJson(const ExportProfile& p)
 	j["shaderBackends"]   = p.shaderBackends;
 	j["compileHorizonCode"] = p.compileHorizonCode;
 	j["hcStopOnFailure"]    = p.hcStopOnFailure;
+	j["textureFormat"]      = p.textureFormat;
+	j["textureQuality"]     = p.textureQuality;
 	return j;
 }
 
@@ -690,6 +692,10 @@ static ExportProfile profileFromJson(const json& j)
 	                     ? j["shaderBackends"].get<uint32_t>() : ((1u << 4) | (1u << 0));
 	p.compileHorizonCode = jsonBool(j, "compileHorizonCode", false);
 	p.hcStopOnFailure    = jsonBool(j, "hcStopOnFailure", false);
+	p.textureFormat      = jsonString(j, "textureFormat", "Auto");
+	if (p.textureFormat != "None") p.textureFormat = "Auto";   // one spelling, not a guess
+	p.textureQuality     = j.contains("textureQuality") && j["textureQuality"].is_number_integer()
+	                     ? std::clamp(j["textureQuality"].get<int>(), 0, 2) : 0;
 	if (auto it = j.find("excludePatterns"); it != j.end() && it->is_array())
 		for (const auto& e : *it)
 			if (e.is_string()) p.excludePatterns.push_back(e.get<std::string>());
@@ -1427,6 +1433,12 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// from THIS copy, so a new application would draw bold for its first session.
 	m_currentProject.fontWeightBold        = !isApp;
 	m_currentProject.appIconName           = isApp ? "widgets" : "sports_esports";
+	m_currentProject.appIconFile.clear();   // a new project draws no picture of another's
+	// A new project has no settings file, so it starts on the defaults — said
+	// explicitly, because the fields above are set one by one and a manager
+	// that made a project after editing another one's settings would otherwise
+	// carry them across.
+	m_currentProject.settings              = HE::ProjectSettings{};
 	HE_LOG_INFO(Config, "Created project '%s' at '%s': language %s, preset %d, "
 	                    "%zu export profile(s), startup scene '%s', kind %s, "
 	                    "advanced shader effects %s",
@@ -1536,6 +1548,15 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	m_currentProject.audioBuses = HE::AudioBusConfig{};
 	if (j.contains("audioBuses") && j["audioBuses"].is_object())
 		m_currentProject.audioBuses.fromJson(j["audioBuses"]);
+	// The settings file beside the manifest. A missing file is the common case
+	// and reads as the defaults; a DAMAGED one is reported and the defaults
+	// stand for this session — but loadProjectSettings leaves `out` alone then,
+	// so it is reset here first rather than inheriting the previous project's.
+	m_currentProject.settings = HE::ProjectSettings{};
+	if (!HE::loadProjectSettings(projectRoot, m_currentProject.settings))
+		HE_LOG_WARN(Config, "Project '%s': Config/ProjectSettings.json could not be read — "
+		                    "running on the default settings, the file is left as it is",
+		            m_currentProject.name.c_str());
 	// The application's identity. Absent icon name means NO icon, not a default
 	// one: a project written before this field existed shipped without an icon,
 	// and filling the gap here would put a generated "widgets" plate on the next
@@ -1544,6 +1565,7 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	// absent key stays absent all the way to the build.
 	m_currentProject.appIconName  = jsonString(j, "appIconName");
 	m_currentProject.appIconColor = jsonString(j, "appIconColor", "#1e70c8");
+	m_currentProject.appIconFile  = jsonString(j, "appIconFile");
 	m_currentProject.bundleId     = jsonString(j, "bundleId");
 	m_currentProject.appVersion   = jsonString(j, "appVersion", "1.0");
 	m_currentProject.documentTypes.clear();
@@ -1653,6 +1675,7 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	}
 	j["appIconName"]           = m_currentProject.appIconName;
 	j["appIconColor"]          = m_currentProject.appIconColor;
+	j["appIconFile"]           = m_currentProject.appIconFile;
 	j["appVersion"]            = m_currentProject.appVersion;
 	// Only when it was chosen: an empty key would freeze today's derived value
 	// into the file and make a later rename of the project stop moving it.
@@ -1715,4 +1738,25 @@ void ProjectManager::closeProject()
 		HE_LOG_INFO(Config, "Project '%s' closed", m_currentProject.name.c_str());
 	m_currentProject = {};
 
+}
+
+std::string ProjectManager::projectRoot() const
+{
+	if (m_currentProject.path.empty()) return {};
+	return fs::path(m_currentProject.path).parent_path().string();
+}
+
+bool ProjectManager::saveProjectSettings()
+{
+	const std::string root = projectRoot();
+	if (root.empty())
+	{
+		HE_LOG_ERROR(Config, "%s", "Project settings: no project is open, nothing to save");
+		return false;
+	}
+	if (!HE::saveProjectSettings(root, m_currentProject.settings))
+		return false;
+	HE_LOG_INFO(Config, "Project settings saved to '%s'",
+	            HE::projectSettingsPath(root).string().c_str());
+	return true;
 }

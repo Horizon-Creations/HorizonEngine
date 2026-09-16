@@ -2,6 +2,7 @@
 
 #ifdef HE_IMGUI_ENABLED
 #include "EditorUndo.h"
+#include "EditorShortcuts.h"   // W/E/R, or whatever they were rebound to
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <ImGuizmo.h>
@@ -10,14 +11,27 @@
 namespace EditorTransformGizmo
 {
 
+bool projectToScreen(const glm::mat4& view, const glm::mat4& proj,
+                     const ImVec2& rectMin, const ImVec2& rectMax,
+                     const glm::vec3& world, ImVec2& outScreen)
+{
+	const glm::vec4 clip = proj * view * glm::vec4(world, 1.0f);
+	if (clip.w <= 1e-6f) return false;
+	const float nx = clip.x / clip.w, ny = clip.y / clip.w;
+	outScreen = ImVec2(rectMin.x + (nx * 0.5f + 0.5f) * (rectMax.x - rectMin.x),
+	                   rectMin.y + (0.5f - ny * 0.5f) * (rectMax.y - rectMin.y));
+	return true;
+}
+
 void handleOperationKeys(ViewportToolbar::State& tb, bool hovered, bool navigating)
 {
 	// Not while flying — W/A/S/D drive the camera then — and not while a text
 	// field has the keyboard.
-	if (!hovered || navigating || ImGui::GetIO().WantTextInput) return;
-	if (ImGui::IsKeyPressed(ImGuiKey_W)) tb.op = ImGuizmo::TRANSLATE;
-	if (ImGui::IsKeyPressed(ImGuiKey_E)) tb.op = ImGuizmo::ROTATE;
-	if (ImGui::IsKeyPressed(ImGuiKey_R)) tb.op = ImGuizmo::SCALE;
+	if (!hovered || navigating) return;
+	// W/E/R by default; EditorShortcuts holds the typing guard and any rebind.
+	if (EditorShortcuts::pressed("viewport.move"))   tb.op = ImGuizmo::TRANSLATE;
+	if (EditorShortcuts::pressed("viewport.rotate")) tb.op = ImGuizmo::ROTATE;
+	if (EditorShortcuts::pressed("viewport.scale"))  tb.op = ImGuizmo::SCALE;
 }
 
 namespace
@@ -27,10 +41,14 @@ namespace
 // handed to it: for rotation, optionally drop ImGuizmo's outer screen-space
 // ring (rotate about the view axis) — it's the confusing white circle.
 ImGuizmo::OPERATION beginFrame(const ImVec2& rectMin, const ImVec2& rectMax,
+                               const glm::mat4& proj,
                                const ViewportToolbar::State& tb, bool enabled)
 {
 	ImGuizmo::Enable(enabled);
-	ImGuizmo::SetOrthographic(false);
+	// Read off the projection rather than asked: an orthographic editor view
+	// (Top/Front/Side) has no perspective w, and ImGuizmo sizes and hit-tests
+	// its handles differently for that.
+	ImGuizmo::SetOrthographic(proj[3][3] != 0.0f);
 	ImGuizmo::SetDrawlist();
 	ImGuizmo::SetRect(rectMin.x, rectMin.y, rectMax.x - rectMin.x, rectMax.y - rectMin.y);
 
@@ -60,11 +78,39 @@ glm::mat4 parentWorldOf(entt::registry& registry, Entity entity)
 // went onto the stack with no pre-state at all. capturePre() serializes the
 // WHOLE world (expensive with terrain), so it must stay on this one edge and
 // never run per frame.
-void undoEdges(EditorUndo* undo, bool wasUsing)
+void undoEdges(EditorUndo* undo, bool wasUsing, ImGuizmo::OPERATION op)
 {
 	if (!undo) return;
-	if (ImGuizmo::IsUsing() && !wasUsing) { undo->capturePre(); undo->stashPre(); }
+	// The row the history window shows for this drag: which handle it was.
+	const unsigned bits = static_cast<unsigned>(op);
+	const char* label = (bits & static_cast<unsigned>(ImGuizmo::TRANSLATE)) ? "Move"
+	                  : (bits & static_cast<unsigned>(ImGuizmo::ROTATE))    ? "Rotate"
+	                  : (bits & (static_cast<unsigned>(ImGuizmo::SCALE) |
+	                             static_cast<unsigned>(ImGuizmo::SCALEU)))  ? "Scale" : "Transform";
+	if (ImGuizmo::IsUsing() && !wasUsing) { undo->capturePre(); undo->stashPre(label); }
 	if (!ImGuizmo::IsUsing() && wasUsing) undo->commitPending();
+}
+
+// Surface / vertex snapping over ImGuizmo's translate result: the matrix's
+// pivot is projected to the picture and the probe asked what is there; a hit
+// replaces the translation. Safe to do on the OUTPUT and latch it: ImGuizmo
+// computes a translate absolutely from the pivot it latched at mouse-down and
+// the plane the cursor is on now, so a moved-then-snapped matrix handed back
+// next frame does not accumulate — every frame the drag proposes, the probe
+// disposes. Only the translation is touched; a rotate or scale drag never
+// gets here (probeSnapActive checks the operation).
+void applySnapProbe(const ViewportToolbar::State& tb, const SnapProbe& probe,
+                    const glm::mat4& view, const glm::mat4& proj,
+                    const ImVec2& rectMin, const ImVec2& rectMax,
+                    ImGuizmo::OPERATION effectiveOp, glm::mat4& gizmoWorld)
+{
+	if (!probe || !ImGuizmo::IsUsing() || !tb.probeSnapActive()) return;
+	if (!(static_cast<unsigned>(effectiveOp) & static_cast<unsigned>(ImGuizmo::TRANSLATE))) return;
+	ImVec2 screen;
+	if (!projectToScreen(view, proj, rectMin, rectMax, glm::vec3(gizmoWorld[3]), screen)) return;
+	glm::vec3 landed;
+	if (probe(tb.snapMode, screen, landed))
+		gizmoWorld[3] = glm::vec4(landed, 1.0f);
 }
 
 // ── One entity ──────────────────────────────────────────────────────────────
@@ -72,13 +118,13 @@ bool manipulateOne(HorizonWorld& world, Entity entity,
                    const glm::mat4& view, const glm::mat4& proj,
                    const ImVec2& rectMin, const ImVec2& rectMax,
                    const ViewportToolbar::State& tb, bool enabled,
-                   EditorUndo* undo, bool* outChanged)
+                   EditorUndo* undo, bool* outChanged, const SnapProbe& probe)
 {
 	auto& registry = world.registry();
 	auto* t = registry.try_get<TransformComponent>(entity);
 	if (!t) return false;
 
-	const ImGuizmo::OPERATION effectiveOp = beginFrame(rectMin, rectMax, tb, enabled);
+	const ImGuizmo::OPERATION effectiveOp = beginFrame(rectMin, rectMax, proj, tb, enabled);
 
 	// While a drag is in progress the gizmo works on the matrix IT produced last
 	// frame, NOT on the scene graph's freshly recomposed worldMatrix. The round
@@ -94,10 +140,11 @@ bool manipulateOne(HorizonWorld& world, Entity entity,
 	ImGuizmo::Manipulate(&view[0][0], &proj[0][0],
 	                     effectiveOp, tb.mode, &gizmoWorld[0][0],
 	                     nullptr, tb.activeSnap());
+	applySnapProbe(tb, probe, view, proj, rectMin, rectMax, effectiveOp, gizmoWorld);
 	s_world = gizmoWorld;
 
 	// One undo entry per drag (see undoEdges).
-	undoEdges(undo, s_wasUsing);
+	undoEdges(undo, s_wasUsing, effectiveOp);
 	s_wasUsing = ImGuizmo::IsUsing();
 
 	if (ImGuizmo::IsUsing())
@@ -152,10 +199,10 @@ bool manipulateGroup(HorizonWorld& world, const std::vector<Entity>& members,
                      const glm::mat4& view, const glm::mat4& proj,
                      const ImVec2& rectMin, const ImVec2& rectMax,
                      const ViewportToolbar::State& tb, bool enabled,
-                     EditorUndo* undo, bool* outChanged)
+                     EditorUndo* undo, bool* outChanged, const SnapProbe& probe)
 {
 	auto& registry = world.registry();
-	const ImGuizmo::OPERATION effectiveOp = beginFrame(rectMin, rectMax, tb, enabled);
+	const ImGuizmo::OPERATION effectiveOp = beginFrame(rectMin, rectMax, proj, tb, enabled);
 
 	static bool                     s_wasUsing = false;
 	static glm::mat4                s_gizmoStart(1.0f); // handed to ImGuizmo on the drag's first frame
@@ -206,6 +253,9 @@ bool manipulateGroup(HorizonWorld& world, const std::vector<Entity>& members,
 	ImGuizmo::Manipulate(&view[0][0], &proj[0][0],
 	                     effectiveOp, tb.mode, &s_gizmo[0][0],
 	                     nullptr, tb.activeSnap());
+	// The group's pivot is what snaps; the members follow through the delta
+	// below, so the whole group lands with its centroid on the surface.
+	applySnapProbe(tb, probe, view, proj, rectMin, rectMax, effectiveOp, s_gizmo);
 
 	// The drag's first frame: latch where everything is. ImGuizmo has not moved
 	// the matrix yet on this frame (see undoEdges), so the world is the start.
@@ -216,7 +266,7 @@ bool manipulateGroup(HorizonWorld& world, const std::vector<Entity>& members,
 			if (const auto* t = registry.try_get<TransformComponent>(e))
 				s_members.push_back({ e, t->worldMatrix, t->scale });
 	}
-	undoEdges(undo, s_wasUsing);
+	undoEdges(undo, s_wasUsing, effectiveOp);
 	s_wasUsing = ImGuizmo::IsUsing();
 
 	if (ImGuizmo::IsUsing())
@@ -268,19 +318,19 @@ bool manipulate(HorizonWorld& world, Entity entity,
                 const glm::mat4& view, const glm::mat4& proj,
                 const ImVec2& rectMin, const ImVec2& rectMax,
                 const ViewportToolbar::State& tb, bool enabled,
-                EditorUndo* undo, bool* outChanged)
+                EditorUndo* undo, bool* outChanged, const SnapProbe& probe)
 {
 	if (outChanged) *outChanged = false;
 	if (entity == entt::null || !world.registry().valid(entity)) return false;
 	return manipulateOne(world, entity, view, proj, rectMin, rectMax, tb, enabled,
-	                     undo, outChanged);
+	                     undo, outChanged, probe);
 }
 
 bool manipulate(HorizonWorld& world, const std::vector<Entity>& entities,
                 const glm::mat4& view, const glm::mat4& proj,
                 const ImVec2& rectMin, const ImVec2& rectMax,
                 const ViewportToolbar::State& tb, bool enabled,
-                EditorUndo* undo, bool* outChanged)
+                EditorUndo* undo, bool* outChanged, const SnapProbe& probe)
 {
 	if (outChanged) *outChanged = false;
 	auto& registry = world.registry();
@@ -295,9 +345,9 @@ bool manipulate(HorizonWorld& world, const std::vector<Entity>& entities,
 	if (movable.empty()) return false;
 	if (movable.size() == 1)
 		return manipulateOne(world, movable.front(), view, proj, rectMin, rectMax, tb,
-		                     enabled, undo, outChanged);
+		                     enabled, undo, outChanged, probe);
 	return manipulateGroup(world, movable, view, proj, rectMin, rectMax, tb, enabled,
-	                       undo, outChanged);
+	                       undo, outChanged, probe);
 }
 
 } // namespace EditorTransformGizmo

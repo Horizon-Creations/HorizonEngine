@@ -2213,6 +2213,35 @@ namespace input {
     bool  gamepadButton(const std::string& name);
     float gamepadAxis(const std::string& name);
 
+    // ── Input ACTIONS: the project's InputAction assets, by name ─────────────
+    // What the mapping contexts resolved this frame, keyed by the logical
+    // action name (the asset's stem, "Jump"). The events (Input.<Action>.* in
+    // HorizonCode, onInputPressed/… in Lua and Python) are the primary way to
+    // hear an action; these are the POLLING twin, for the script that would
+    // rather ask "is Sprint held?" inside its update than keep a flag itself.
+    //
+    // Pushed by PlayerHost::tick, which is where the mapping is ticked, so the
+    // snapshot is exactly what the events of the same frame were fired from —
+    // including the pause/UI-only silence: an action that is silenced reads as
+    // released, not as whatever the keyboard says. NOTE the frame order: both
+    // apps run the text scripts' onUpdate BEFORE the player host ticks, so a
+    // poll from onUpdate sees the PREVIOUS frame's actions; the events are
+    // always current. Empty (every query false/zero) outside a play session.
+    struct ActionState
+    {
+        std::string name;
+        bool  down = false, pressed = false, released = false;
+        float x = 0.0f, y = 0.0f;   // Axis: x; Axis2D: x and y; Button: 0
+    };
+    void setActions(std::vector<ActionState> states);
+    void clearActions();
+    // Script queries. Unknown name → false / 0.
+    bool      actionDown(const std::string& name);      // held this frame
+    bool      actionPressed(const std::string& name);   // went down this frame
+    bool      actionReleased(const std::string& name);  // went up this frame
+    float     actionAxis(const std::string& name);
+    glm::vec2 actionAxis2D(const std::string& name);
+
     // ── Input routing: whose input this frame is ─────────────────────────────
     // The switch a PlayerController flips between "the game is being played"
     // and "a menu is up". Three states, the same three Unreal names:

@@ -2331,6 +2331,15 @@ TEST_CASE("Importer::isImportableSource covers every extension the editor offers
 	                         ".bmp", ".hdr", ".wav", ".ogg", ".hmat", ".ttf", ".otf" })
 		CHECK(Importer::isImportableSource(fs::path("Some/File") += ext));
 
+#ifdef HE_HAVE_ASSIMP
+	// The Assimp-backed mesh formats join the list only when Assimp is built in
+	// — offering them without it would be an import that can only fail.
+	for (const char* ext : { ".fbx", ".obj", ".dae" })
+		CHECK(Importer::isImportableSource(fs::path("Some/Model") += ext));
+#else
+	CHECK_FALSE(Importer::isImportableSource("Some/Model.fbx"));
+#endif
+
 	// Case is not part of the answer — Windows hands back "TEXTURE.PNG".
 	CHECK(Importer::isImportableSource("Art/TEXTURE.PNG"));
 	CHECK(Importer::isImportableSource("Art/Hero.GLB"));

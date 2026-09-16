@@ -1067,6 +1067,24 @@ namespace
 	{ "input.gamepadAxis",
 	  "A gamepad axis from -1 to 1, deadzone already applied. Names are SDL's: "
 	  "\"leftx\", \"lefty\", \"righttrigger\"." },
+	{ "input.actionDown",
+	  "Whether an input action (by the name of its InputAction asset, \"Jump\") "
+	  "is held this frame. The polling twin of the Input.<Action>.Pressed event: "
+	  "ask this inside Tick rather than keeping a flag yourself. Reads as "
+	  "released while the game is paused or the UI has the input." },
+	{ "input.actionPressed",
+	  "Whether an input action went down THIS frame — true for one frame per "
+	  "press, the same moment Input.<Action>.Pressed fires." },
+	{ "input.actionReleased",
+	  "Whether an input action went up THIS frame — true for one frame per "
+	  "release, the same moment Input.<Action>.Released fires." },
+	{ "input.actionAxis",
+	  "The value of a one-dimensional axis action this frame, as the mapping "
+	  "context resolved it (-1 to 1 for keys and sticks, a displacement for the "
+	  "mouse). Zero while silenced by a pause or the UI." },
+	{ "input.actionAxis2D",
+	  "The value of a two-dimensional axis action this frame, as a Vec2 — a "
+	  "stick, WASD, the mouse. Zero while silenced by a pause or the UI." },
 	{ "input.setModeGameOnly",
 	  "The game receives input and the UI does not: the cursor is captured and "
 	  "hidden, mouse look works, buttons cannot be clicked. First-person play." },

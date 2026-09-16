@@ -98,16 +98,17 @@ HELP_SCOPE = re.compile(r'Help::Scope\s+\w+\("([^"]*)"\)')
 SETTINGS_ROW = re.compile(r'row\("[^"]*",\s*"([^"]+)"')
 
 AREAS: dict[str, list[str]] = {
-    "interface": ["EditorUI.cpp", "ViewportToolbar.cpp", "OutlinerPanel.cpp",
+    "interface": ["EditorUI.cpp", "ViewportToolbar.cpp", "SecondaryViewportPanel.cpp",
+                  "OutlinerPanel.cpp",
                   "ContentBrowserPanel.cpp", "ProjectHubPanel.cpp", "ConsolePanel.cpp",
                   "NotificationBar.cpp", "PlayReportPanel.cpp", "DocsPanel.cpp",
                   "TutorialPanel.cpp", "McpStatusBar.cpp", "AudioMixerPanel.cpp"],
     "components": ["InspectorPanel.cpp"],
-    "settings": ["EditorSettingsPanel.cpp", "ToolchainDialog.cpp"],
+    "settings": ["EditorSettingsPanel.cpp", "ProjectSettingsPanel.cpp", "ToolchainDialog.cpp"],
     "materials": ["MaterialEditorPanel.cpp"],
     "ui": ["UIEditorPanel.cpp", "ThemeAssetPanel.cpp"],
     "horizoncode": ["LevelScriptPanel.cpp", "HcGraphHost.cpp", "HcEditorUtil.cpp",
-                    "TypeAssetPanel.cpp"],
+                    "TypeAssetPanel.cpp", "HcWatchPanel.cpp"],
     "input": ["InputAssetPanel.cpp"],
     "animation": ["AnimatorStateMachineEditorPanel.cpp", "AudioEditorPanel.cpp",
                   "StaticMeshEditorPanel.cpp", "SkeletalMeshEditorPanel.cpp",

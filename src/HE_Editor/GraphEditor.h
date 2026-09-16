@@ -108,6 +108,11 @@ struct State
     // Host sets this before draw() to skip canvas mouse interaction for one
     // frame (e.g. while it is dragging a comment box). Drawing still happens.
     bool suppressInteraction = false;
+    // Host-owned chrome state that has to live as long as the canvas does: the
+    // comment box whose title is being typed (0 = none). Here rather than on
+    // the host's model because the model is rebuilt every frame and the host
+    // side that draws the boxes (HcGraphHost) has no state of its own.
+    int  editingComment = 0;
 
     // ── Internal interaction state (component-owned) ──
     int    dragNode = 0;             // node being moved (0 = none)
@@ -229,6 +234,16 @@ struct Model
     std::function<void(int nodeId)> drawNodeContextMenu;
     // Double-click on a node (e.g. open a referenced function).
     std::function<void(int nodeId)> onNodeDoubleClick;
+    // Double-click on a WIRE over empty canvas: the host gets the link's four
+    // endpoints and the graph-space point, and typically splices a reroute in
+    // there. Unset = a double-click on a wire is a double-click on the canvas.
+    std::function<void(int srcNode, int srcPin, int dstNode, int dstPin, ImVec2 graphPos)>
+        onLinkDoubleClick;
+    // Which nodes are REROUTES — a knot in a wire with one pin per side. Drawn
+    // as a dot of the pin's colour instead of a box (kRerouteW square, no title,
+    // pins on its left and right edge), with a tighter pin hit circle so the
+    // middle of the dot still moves it. Unset = no node is one.
+    std::function<bool(int nodeId)> nodeIsReroute;
     // A link dragged off (srcNode, srcPin) and released on EMPTY canvas: the host
     // shows a menu filtered to nodes compatible with that pin, creates one, and
     // connects it. srcInput = the source pin is an input (so the new node feeds
@@ -267,6 +282,10 @@ constexpr float kNodeW  = 176.0f;
 constexpr float kTitleH = 24.0f;
 constexpr float kRowH   = 20.0f;
 constexpr float kPinR   = 5.0f;
+// A reroute's box: square, with the dot in the middle and its two pins on the
+// left and right edge. Wide enough that the middle third is a grab handle
+// between the two pin hit circles (see pinAt), small enough to read as a knot.
+constexpr float kRerouteW = 22.0f;
 // The slot an inline pin editor gets when the host asks for nothing else. Wide
 // enough for a number or a checkbox, which is what it was invented for.
 constexpr float kPinEditorW = 58.0f;

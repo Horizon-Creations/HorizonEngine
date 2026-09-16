@@ -128,6 +128,20 @@ public:
         //       from a G-buffer texel, and its derivative jumps at every object
         //       edge and quantisation step, which would halo instead of smooth.
         float specAA[4]       = {};
+        // CSM receiver depth bias (append-only, v3.1, the project's
+        // ProjectShadowSettings): x = slope-scaled factor, y = minimum —
+        //   bias = clamp(x * tan(acos(N·L)), y, 0.02) * (cascade + 1)
+        // Only meaningful where csmSplits.w > 0, and every fill site that sets
+        // csmVP sets this alongside it; the zero every other site leaves is
+        // never read because heCsmShadow is not reached there.
+        float shadowBias[4]   = {};
+        // Viewport view mode (append-only, v3.2, IRenderer::SetViewMode):
+        //   x = 1 → heLitP returns the base colour untouched (Unlit and
+        //       Wireframe views) — no lights, no ambient, no weather, no fog
+        //       (heApplyFog checks it too). Only the scene-pass fill sites set
+        //       it (Metal FillMaterialLighting, GL fillMatLight); the zero every
+        //       preview/thumbnail/UI site leaves keeps them shaded.
+        float viewMode[4]     = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
 
@@ -242,6 +256,21 @@ public:
         float mvp[16]       = {};
         float modelView[16] = {};
         float model[16]     = {};
+    };
+
+    // Instanced twin of reflPrepassVertex for a GeometryPass batch: the model
+    // matrix comes per instance (Metal: SSBO of mat4 at binding 2, pinned to
+    // vertex buffer 5, indexed by gl_InstanceIndex; GL: four vec4 attributes at
+    // locations 4–7, the scene pass's divisor-1 binding), and the uniform block
+    // (binding 1) shrinks to the batch-constant camera pair below. Same
+    // varyings, so reflPrepassFragment is shared with the plain variant.
+    const Compiled& reflPrepassVertexInstanced(Backend backend);
+
+    // std140 layout of the instanced variant's uniform block (binding 1).
+    struct ReflPrepassInstUniforms
+    {
+        float viewProj[16] = {};
+        float view[16]     = {};
     };
 
     // std140 layout of the blur shader's HeSSRBlur UBO (binding 23).
@@ -368,6 +397,6 @@ private:
     // Own map, not a fifth slot in m_ssrCache: that key space is backend*4 and
     // full, and a collision there hands a caller someone else's shader while
     // still reporting ok.
-    std::unordered_map<int, Compiled>      m_reflPrepassCache; // key = (int)backend*2 + (0 vertex / 1 fragment)
+    std::unordered_map<int, Compiled>      m_reflPrepassCache; // key = (int)backend*2 + (0 vertex / 1 fragment); 0x100 + backend = instanced vertex
 };
 } // namespace HE

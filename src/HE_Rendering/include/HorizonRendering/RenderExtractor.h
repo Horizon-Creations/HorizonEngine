@@ -1,6 +1,8 @@
 #pragma once
 #include "../HE_RENDERING_API.h"
 #include <Renderer/IRenderer.h>   // EditorCameraOverride, EnvironmentSettings
+#include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
+#include <algorithm>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/mat4x4.hpp>
@@ -84,13 +86,30 @@ HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
 // resulting RenderWorld.
 class HE_RENDERING_API RenderExtractor {
 public:
+    // User-declared and DEFINED IN THE .CPP, never `= default` here. Every
+    // backend static lib is compiled with HE_RENDERING_BUILD_DLL (it is linked
+    // into the DLL), and MSVC emits the implicit special members of a dllexport
+    // class as an exported definition in every such TU. The moment the
+    // destructor went non-trivial (m_sectionMaterialMissing) D3D11Renderer.obj
+    // and D3D12Renderer.obj each carried their own ctor/dtor, and the editor,
+    // which links those libs next to the DLL's import lib, failed with LNK2005.
+    // Out-of-line there is exactly one definition, inside HorizonRendering.
+    RenderExtractor();
+    ~RenderExtractor();
+    // The set member makes the implicit copies non-trivial too, so they would
+    // hit the same trap the first time a backend copied an extractor. Nobody
+    // does; a deleted function emits nothing.
+    RenderExtractor(const RenderExtractor&)            = delete;
+    RenderExtractor& operator=(const RenderExtractor&) = delete;
+
     // aspectRatio is needed to build the camera projection matrix and comes
     // from the backend's current swapchain size.
     // editorCam, when non-null and active, overrides the scene camera (used by
     // the editor scene view); its projection is built with aspectRatio so it
     // always matches the viewport. An ACTIVE override also switches on the
-    // editor icons: one camera-facing quad per light / camera / audio source
-    // in outWorld.objects (kEditorIcon*MaterialId), so the scene view can draw
+    // editor icons (unless its `editorIcons` is off — the viewport's Show
+    // flag): one camera-facing quad per light / camera / audio source in
+    // outWorld.objects (kEditorIcon*MaterialId), so the scene view can draw
     // and pick entities that have no mesh. Inactive/null = none, which is what
     // play mode and the packaged game get.
     void extract(HorizonWorld& world, RenderWorld& outWorld, float aspectRatio,
@@ -143,6 +162,22 @@ public:
         m_cloudCoverage  = cloudCoverage;
     }
 
+    // Directional-light shadow fit (IRenderer::ShadowSettings, pushed by the
+    // backends that render cascades): how far from the camera shadows reach,
+    // how many cascades slice that range, how the splits are blended between
+    // uniform and logarithmic, and the map resolution the texel snap is done
+    // against. `resolution` MUST be the size the backend actually allocated,
+    // or the snap lands between texels and the shadow edges crawl again. The
+    // defaults are the constants this extractor always used, so a backend that
+    // never calls this fits its cascades exactly as before.
+    void setShadowSettings(float distance, int cascadeCount, float splitLambda, int resolution)
+    {
+        m_shadowDistance = std::max(distance, 1.0f);
+        m_cascadeCount   = std::clamp(cascadeCount, 1, 3);
+        m_splitLambda    = std::clamp(splitLambda, 0.0f, 1.0f);
+        m_shadowMapRes   = std::max(resolution, 1);
+    }
+
 private:
     // Overwrites the extracted sun/moon directional lights (and out.ambient /
     // out.sunDirection) from the day-night state pushed via setDayNight.
@@ -161,6 +196,11 @@ private:
     // first sight is picked up on the next editor start (or the next
     // ContentManager, see setContentManager). Baked UUIDs never come through.
     std::unordered_set<std::string> m_sectionMaterialMissing;
+    // setShadowSettings() state; defaults = the historical fit constants.
+    float     m_shadowDistance = 250.0f;
+    int       m_cascadeCount   = 3;
+    float     m_splitLambda    = 0.5f;
+    int       m_shadowMapRes   = HE::kShadowMapResolution;
     bool      m_dayNight       = false;
     float     m_timeOfDay      = 0.5f;
     glm::vec3 m_sunColor       = glm::vec3(1.0f, 0.97f, 0.90f);

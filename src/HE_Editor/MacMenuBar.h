@@ -30,12 +30,18 @@ namespace MacMenuBar
 		// per-panel undo stacks (material graph, UI editor, text fields) all live
 		// on that key.
 		Undo, Redo,
+		// Edit ▸ Project Settings…: the tab that edits the PROJECT (Preferences
+		// stays in the app menu and edits the editor).
+		ProjectSettings,
 		ResetLayout, ToggleProfiler, ToggleEnvironment, ToggleCollab, ToggleSourceControl,
 		// View, continued. No Toggle Full Screen here on purpose: the View menu
 		// already carries the NATIVE one (toggleFullScreen: on the responder
 		// chain, ⌃⌘F), and a second item on SDL's own fullscreen would be a
 		// different behaviour under the same name.
-		ToggleConsole, ToggleAudioMixer, ToggleGroundGrid,
+		ToggleConsole, ToggleAudioMixer, ToggleUndoHistory, ToggleWatch, ToggleGroundGrid,
+		// View ▸ Scene 2 / 3 / 4, the secondary scene viewports. Game-only
+		// like the grid: an application has no level to look at from above.
+		ToggleScene2, ToggleScene3, ToggleScene4,
 		OpenLevelScript, OpenGameInstance,
 		ImportAsset, RefreshAssets, ExportProject,
 		// Build ▸ Build and Reload Game Logic. Project-scoped like the export,

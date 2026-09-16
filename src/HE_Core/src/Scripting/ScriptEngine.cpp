@@ -1,5 +1,6 @@
 #include "Scripting/ScriptEngine.h"
 #include <cstdint>
+#include <cstdlib>
 
 extern "C" {
 #include <lua.h>
@@ -37,6 +38,41 @@ std::string scriptLogLine(const std::string& message)
 	const std::string& tag = scriptLogTagStorage();
 	return tag.empty() ? message : tag + message;
 }
+
+bool parseScriptErrorLocation(const std::string& message, ScriptErrorLocation& out)
+{
+	// Looking for `<script>:<line>:` — the first one. The wrapper text around it
+	// ("Compile error in script 'x': ", "... failed in onUpdate(): ") has colons
+	// of its own, but none of them is followed by digits and another colon, so
+	// the scan can simply walk every ':' and test what follows.
+	const std::size_t n = message.size();
+	for (std::size_t colon = message.find(':'); colon != std::string::npos;
+	     colon = message.find(':', colon + 1))
+	{
+		// digits, then the closing colon
+		std::size_t p = colon + 1;
+		while (p < n && message[p] >= '0' && message[p] <= '9') ++p;
+		if (p == colon + 1 || p >= n || message[p] != ':') continue;
+
+		// the name: the run of non-blank characters in front of the colon
+		std::size_t start = colon;
+		while (start > 0 && message[start - 1] != ' ' && message[start - 1] != '\t' &&
+		       message[start - 1] != '\n' && message[start - 1] != '\'' &&
+		       message[start - 1] != '"' && message[start - 1] != '(')
+			--start;
+		if (start == colon) continue;
+		// A name that is all digits is not a script: "12:34:56" is a clock.
+		bool allDigits = true;
+		for (std::size_t i = start; i < colon && allDigits; ++i)
+			allDigits = message[i] >= '0' && message[i] <= '9';
+		if (allDigits) continue;
+
+		out.script = message.substr(start, colon - start);
+		out.line   = std::atoi(message.c_str() + colon + 1);
+		return out.line > 0;
+	}
+	return false;
+}
 } // namespace HE
 
 ScriptEngine::ScriptEngine()
@@ -62,12 +98,8 @@ bool ScriptEngine::loadScript(const std::string& name, const std::string& source
         unloadScript(name);
 
     // Compile the chunk
-    if (luaL_loadstring(m_L, source.c_str()) != LUA_OK)
-    {
-        m_lastError = lua_tostring(m_L, -1);
-        lua_pop(m_L, 1);
+    if (!loadChunk(name, source))
         return false;
-    }
 
     // Execute the chunk; it should return a table
     if (!pcall(0, 1))
@@ -263,6 +295,47 @@ bool ScriptEngine::callOnAnimationNotifyBegin(InstanceId id, const std::string& 
 bool ScriptEngine::callOnAnimationNotifyEnd(InstanceId id, const std::string& name)
 { return callNotifyMethod(id, "onAnimationNotifyEnd", name); }
 
+// The input handlers share the notify body: a string is the whole payload of
+// the button pair, and the axis forms only append their numbers.
+bool ScriptEngine::callOnInputPressed(InstanceId id, const std::string& action)
+{ return callNotifyMethod(id, "onInputPressed", action); }
+
+bool ScriptEngine::callOnInputReleased(InstanceId id, const std::string& action)
+{ return callNotifyMethod(id, "onInputReleased", action); }
+
+bool ScriptEngine::callOnInputAxis(InstanceId id, const std::string& action, float value)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onInputAxis")) return true;
+    lua_pushlstring(m_L, action.c_str(), action.size());
+    lua_pushnumber(m_L, static_cast<lua_Number>(value));
+    return pcall(3, 0);
+}
+
+bool ScriptEngine::callOnInputAxis2D(InstanceId id, const std::string& action, float x, float y)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onInputAxis2D")) return true;
+    lua_pushlstring(m_L, action.c_str(), action.size());
+    lua_pushnumber(m_L, static_cast<lua_Number>(x));
+    lua_pushnumber(m_L, static_cast<lua_Number>(y));
+    return pcall(4, 0);
+}
+
+bool ScriptEngine::callOnTimer(InstanceId id, int handle)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onTimer")) return true;
+    lua_pushinteger(m_L, static_cast<lua_Integer>(handle));
+    return pcall(2, 0);
+}
+
 bool ScriptEngine::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
     auto it = m_instances.find(id);
@@ -299,6 +372,24 @@ std::string ScriptEngine::getGlobalString(const std::string& name) const
     std::string v = lua_isstring(m_L, -1) ? lua_tostring(m_L, -1) : "";
     lua_pop(m_L, 1);
     return v;
+}
+
+bool ScriptEngine::loadChunk(const std::string& name, const std::string& source)
+{
+    // The chunk is named after the script, not after its own text. luaL_loadstring
+    // names a chunk by its source, so every error read `[string "local M = {}..."]:7:`
+    // — the line was there, the script was not, and nothing could lead back to
+    // the file. With `=name` Lua prints the name verbatim, so a compile error
+    // and every runtime error inside the chunk come out as `name:7: message`,
+    // which is the spelling HE::parseScriptErrorLocation reads.
+    const std::string chunkName = "=" + name;
+    if (luaL_loadbuffer(m_L, source.data(), source.size(), chunkName.c_str()) != LUA_OK)
+    {
+        m_lastError = lua_tostring(m_L, -1);
+        lua_pop(m_L, 1);
+        return false;
+    }
+    return true;
 }
 
 bool ScriptEngine::pcall(int nargs, int nresults)
@@ -422,12 +513,7 @@ bool ScriptEngine::hotReloadScript(const std::string& name, const std::string& s
     if (it == m_scripts.end()) return false;
 
     // Compile the new source into a module table
-    if (luaL_loadstring(m_L, source.c_str()) != LUA_OK)
-    {
-        m_lastError = lua_tostring(m_L, -1);
-        lua_pop(m_L, 1);
-        return false;
-    }
+    if (!loadChunk(name, source)) return false;
     if (!pcall(0, 1)) return false;          // execute chunk → module table on stack
     if (!lua_istable(m_L, -1)) { lua_pop(m_L, 1); return false; }
 

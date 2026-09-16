@@ -139,6 +139,11 @@ struct Fx
     int constS(const std::string& v) { Node n; n.type = NT::ConstString; n.s = v; return add(n); }
     int op(NT t)             { Node n; n.type = t; return add(n); }
     int arrayOp(NT t, PT elem) { Node n; n.type = t; n.propType = elem; return add(n); }
+    // A knot in a wire. The editor types one by wiring (adoptRerouteType);
+    // here the type is authored so the fixture reads as what it exercises.
+    int rerouteExec()        { Node n; n.type = NT::Reroute; n.hasArg = true; return add(n); }
+    int reroute(PT t, bool isArray = false)
+    { Node n; n.type = NT::Reroute; n.propType = t; n.isArray = isArray; return add(n); }
     int forEach(PT elem)     { Node n; n.type = NT::ForEach; n.propType = elem; return add(n); }
     int branch()             { return op(NT::Branch); }
     int sequence()           { return op(NT::Sequence); }
@@ -642,6 +647,55 @@ inline HE::hccg::ClassSource fxVariables()
       f.data(add, 0, sArr, 0); }
     f.exec(sRead, sArr);
     return f.done("variables");
+}
+
+// reroutes: knots in exec and data wires change nothing. An exec chain that
+// runs through a reroute still runs; a data wire through one (and through a
+// chain of two) still carries its value, scalar and array alike; and the
+// reroute's output can fan out to two readers. The generator must inline the
+// input expression rather than fall back — the parity harness asserts the
+// class compiled (see the codegen test).
+inline HE::hccg::ClassSource fxReroutes()
+{
+    Fx f;
+    f.var("f", PT::Float);
+    f.var("g", PT::Float);
+    f.var("n", PT::Int);
+    f.var("hits", PT::Int);
+    f.arrVar("arrF", PT::Float, { Value::ofFloat(1), Value::ofFloat(2), Value::ofFloat(3) });
+
+    const int ev = f.event("Go");
+    // Event → exec knot → Set f. f = (2.5 → knot → knot) + 1.
+    const int k0 = f.rerouteExec();
+    f.exec(ev, k0);
+    const int sf = f.setVar("f", PT::Float);
+    f.exec(k0, sf);
+    const int r1 = f.reroute(PT::Float);
+    const int r2 = f.reroute(PT::Float);
+    f.data(f.constF(2.5f), 0, r1, 0);
+    f.data(r1, 0, r2, 0);
+    { const int a = f.op(NT::Add); f.data(r2, 0, a, 0); f.data(f.constF(1.0f), 0, a, 1);
+      f.data(a, 0, sf, 0); }
+    // Fan-out: the same knot feeds g as well (g = 2.5, no +1).
+    const int sg = f.setVar("g", PT::Float);
+    f.data(r2, 0, sg, 0);
+    f.exec(sf, sg);
+    // An array through a knot: n = length(arrF).
+    const int ra = f.reroute(PT::Float, /*isArray=*/true);
+    f.data(f.getVar("arrF", PT::Float, true), 0, ra, 0);
+    const int sn = f.setVar("n", PT::Int);
+    { const int len = f.arrayOp(NT::ArrayLength, PT::Float); f.data(ra, 0, len, 0);
+      f.data(len, 0, sn, 0); }
+    f.exec(sg, sn);
+    // Two exec knots in a row still reach the end of the chain.
+    const int k1 = f.rerouteExec();
+    const int k2 = f.rerouteExec();
+    f.exec(sn, k1); f.exec(k1, k2);
+    const int sh = f.setVar("hits", PT::Int);
+    { const int a = f.op(NT::Add); f.data(f.getVar("hits", PT::Int), 0, a, 0);
+      f.data(f.constI(1), 0, a, 1); f.data(a, 0, sh, 0); }
+    f.exec(k2, sh);
+    return f.done("reroutes");
 }
 
 // 5 — functions_basic: params/results, returns in both branch arms, missing
@@ -2565,7 +2619,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxCastTarget(), fxCasts(),
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
-        fxInputActions(), fxContainers(),
+        fxInputActions(), fxContainers(), fxReroutes(),
     };
 }
 

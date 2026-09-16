@@ -1890,6 +1890,10 @@ int dragMatchPin(HorizonCode::NodeType t, HorizonCode::PinType dragType,
 	tpl.type = t; tpl.propType = dragType;
 	tpl.isArray = dragCtr != HorizonCode::ContainerKind::None;
 	tpl.container = dragCtr;
+	// A reroute fits EVERY pin: exec pins get the exec shape (hasArg), data
+	// pins the data one, already typed like the drag. Only for this type —
+	// hasArg means something else on Event / InputAction / EngineCall.
+	if (t == HorizonCode::NodeType::Reroute) tpl.hasArg = srcIsExec;
 	// A Map node's KEY is not derivable from the drag (its value type is what
 	// the wire carries), so a bare probe keeps the default String key and a map
 	// pin only matches a String-keyed drag. The spawned node re-matches through

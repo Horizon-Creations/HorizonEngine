@@ -1,4 +1,5 @@
 #include "HorizonScene/ScriptContext.h"
+#include "HorizonScene/EntityActive.h"   // the "Active" switch: no script for what is off
 #include <Types/TypeRegistry.h>
 #include <algorithm>   // sort — the deterministic key order of an unordered Lua map
 #include <functional>
@@ -1418,12 +1419,16 @@ int ScriptContext::startWorldScripts(ContentManager& cm, InstanceMap& out)
 {
     if (!m_world) return 0;
     int started = 0, attempted = 0;
+    // Switched off (its own Active box or an ancestor's) means the script does
+    // not start — not "starts and fails", so it is not counted as attempted.
+    const HE::ActiveFilter active(m_world->registry());
     for (auto [entity, sc] : m_world->registry().view<ScriptComponent>().each())
     {
         // HorizonCode classes share this component but belong to EntityHost —
         // counting them here would report every one of them as a script that
         // "failed to start".
         if (cm.assetType(sc.scriptAssetId) == HE::AssetType::HorizonCodeClass) continue;
+        if (active.off(entity)) continue;
         ++attempted;
         const auto instId = startEntityScript(entity, cm);
         if (instId == ScriptEngine::kInvalidInstance) continue;
@@ -1443,8 +1448,10 @@ int ScriptContext::startScriptsFor(const std::vector<entt::entity>& entities,
 {
     if (!m_world) return 0;
     int started = 0;
+    const HE::ActiveFilter active(m_world->registry());
     for (entt::entity entity : entities)
     {
+        if (active.off(entity)) continue;   // switched off: not started, like at play start
         const auto instId = startEntityScript(entity, cm);
         if (instId == ScriptEngine::kInvalidInstance) continue;
         out[static_cast<uint32_t>(entity)] = instId;
@@ -1526,6 +1533,37 @@ bool ScriptContext::callOnUIEvent(ScriptEngine::InstanceId id, UIScriptEvent ev)
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;
     HE_SCRIPT_CALL("onUIEvent", b->callOnUIEvent(rawId(id), ev));
+}
+
+bool ScriptContext::callOnInputPressed(ScriptEngine::InstanceId id, const std::string& action)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onInputPressed", b->callOnInputPressed(rawId(id), action));
+}
+
+bool ScriptContext::callOnInputReleased(ScriptEngine::InstanceId id, const std::string& action)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onInputReleased", b->callOnInputReleased(rawId(id), action));
+}
+
+bool ScriptContext::callOnInputAxis(ScriptEngine::InstanceId id, const std::string& action, float value)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onInputAxis", b->callOnInputAxis(rawId(id), action, value));
+}
+
+bool ScriptContext::callOnInputAxis2D(ScriptEngine::InstanceId id, const std::string& action,
+                                      float x, float y)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onInputAxis2D", b->callOnInputAxis2D(rawId(id), action, x, y));
+}
+
+bool ScriptContext::callOnTimer(ScriptEngine::InstanceId id, int handle)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onTimer", b->callOnTimer(rawId(id), handle));
 }
 
 #undef HE_SCRIPT_CALL

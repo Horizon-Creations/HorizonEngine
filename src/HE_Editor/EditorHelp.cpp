@@ -296,14 +296,14 @@ namespace
 	// a character's is what BLOCKS it.
 	{ "Rigid Body/Collision Layer", "",
 	  "Which of the project's sixteen collision channels this body sits in. The "
-	  "matrix in Preferences (Project, Collision Layers) decides which pairs of "
+	  "matrix in Project Settings (Physics, Collision Layers) decides which pairs of "
 	  "channels may touch, so this is how a bullet passes through a ragdoll or a "
 	  "pickup volume only sees the player. A layer keeps its number, so renaming "
 	  "one relabels it and moves nothing.",
 	  "", "systems#physics" },
 	{ "Character Controller/Collision Layer", "",
 	  "Which collision channel the character walks in — it decides what BLOCKS "
-	  "the character, through the same matrix in Preferences (Project, Collision "
+	  "the character, through the same matrix in Project Settings (Physics, Collision "
 	  "Layers). Separate from the Rigid Body row because a character need not "
 	  "have a rigid body at all.",
 	  "", "systems#physics" },
@@ -1438,6 +1438,23 @@ namespace
 	  "Takes this component off the entity. What it drove stops: a Mesh removed "
 	  "leaves the entity in the scene with nothing to draw.",
 	  "", "editor#details" },
+	{ "Component/Copy Component", "Copy Component",
+	  "Puts this component, with every one of its values, on the clipboard as "
+	  "text. Paste it onto another entity through its Add Component menu, or "
+	  "onto the same component there with Paste Component Values. It is plain "
+	  "text, so it also travels between two editors and into a chat message.",
+	  "", "editor#details" },
+	{ "Component/Paste Component Values", "Paste Component Values",
+	  "Overwrites every value of this component with the copy on the clipboard. "
+	  "Only offered while the clipboard holds a component of this same kind. "
+	  "Undo brings the old values back.",
+	  "", "editor#details" },
+	{ "Component/Reset to Default", "Reset to Default",
+	  "Puts every value of this component back to what a freshly added one has. "
+	  "Authored data goes with the values: a terrain loses its sculpting and "
+	  "painting, a nav mesh its bake, a foliage layer its placements. One undo "
+	  "step brings all of it back.",
+	  "", "editor#details" },
 	{ "Nav Mesh/Bake", "",
 	  "Walks the scene's static geometry and builds the walkable surface from "
 	  "it. Nothing can path until this has run, and it has to run again after "
@@ -1530,9 +1547,17 @@ namespace
 	  "to the original. The copies become the selection; one undo removes them "
 	  "all.",
 	  "Ctrl+D", "editor#outliner" },
+	{ "Edit/Project Settings", "",
+	  "Opens the project's own settings as an editor tab: its title and startup "
+	  "scene, shadows, physics rate and gravity, what the packaged build boots "
+	  "with, permissions, fonts, collision layers. Everything on it travels with "
+	  "the project and into the build you export — the opposite of Preferences, "
+	  "which follow the editor on this machine.",
+	  "", "editor#preferences" },
 	{ "Edit/Preferences", "",
 	  "Opens the settings as an editor tab: renderer, viewport, collaboration, "
-	  "tools. They belong to the editor, not to the project.",
+	  "tools. They belong to the editor, not to the project — that one has its "
+	  "own tab, Project Settings.",
 	  "Ctrl+,", "editor#preferences" },
 	{ "View/Toggle Fullscreen", "",
 	  "Fills the screen with the editor window. On a Mac the View menu's own "
@@ -1563,9 +1588,54 @@ namespace
 	  "The project's audio buses as fader strips: master, music, sfx and "
 	  "whatever else you add, with mute and solo for listening.",
 	  "", "systems#audio" },
+	{ "View/Undo History", "",
+	  "Every step Undo can still take back, as a list with the current state "
+	  "marked. Click a row to jump straight there — several steps in one go, "
+	  "forwards or backwards.",
+	  "", "editor#menus" },
+	{ "View/Watch", "",
+	  "What a HorizonCode graph stopped at a breakpoint is holding: the event's "
+	  "argument, the function it is inside of with its inputs and locals, the "
+	  "object's variables, and what the nodes before the stop produced. Opens "
+	  "by itself when a run stops; while nothing is stopped it shows the Game "
+	  "Instance's variables live.",
+	  "", "horizoncode#graphs" },
 	{ "View/Ground Grid", "",
 	  "The reference grid on the ground plane. Hidden while the scene plays "
 	  "either way.",
+	  "", "editor#viewport" },
+	// ── Secondary scene viewports ────────────────────────────────────────────
+	// Three more panes onto the same level, each with a camera of its own.
+	// The picture is the preview pass (base colour, sun or headlight, grid),
+	// not the Scene window's renderer — hence the sentence about shadows.
+	{ "View/Scene 2", "",
+	  "A second window onto the same level, with its own camera — it opens as a "
+	  "Top view, so the floor plan can be lined up while the Scene window stays "
+	  "where it is. Navigates like the Scene window (orbit, pan, fly, F, the "
+	  "keypad views, the bookmarks). Drawn with the preview renderer: base "
+	  "colour and a sun, no shadows or post, and nothing can be picked or moved "
+	  "in it. Dock it beside the Scene window and it comes back with the layout.",
+	  "", "editor#viewport" },
+	{ "View/Scene 3", "",
+	  "A third window onto the level, opening as a Front view. Otherwise the "
+	  "same as Scene 2.",
+	  "", "editor#viewport" },
+	{ "View/Scene 4", "",
+	  "A fourth window onto the level, opening as a Right view. Otherwise the "
+	  "same as Scene 2.",
+	  "", "editor#viewport" },
+	{ "Secondary Viewport/Grid", "",
+	  "The ground grid in this pane. Also follows the Scene window's Ground "
+	  "Grid show flag — both have to be on.",
+	  "", "editor#viewport" },
+	{ "Secondary Viewport/Match Scene", "",
+	  "Puts this pane's camera exactly where the Scene window's camera is, lens "
+	  "included. From there, pick an axis view to swing around the same pivot.",
+	  "", "editor#viewport" },
+	{ "secondary-viewport.view", "View",
+	  "Which way this pane looks — the same picker as the Scene window's, over "
+	  "this pane's own camera: Perspective, Top, Bottom, Front, Back, Left, "
+	  "Right, the Orthographic switch and the bookmarks.",
 	  "", "editor#viewport" },
 	{ "View/Level Script", "",
 	  "The HorizonCode graph belonging to THIS scene — where its own events and "
@@ -1576,8 +1646,9 @@ namespace
 	  "must not reset.",
 	  "", "horizoncode#hosts" },
 	{ "Assets/Import Asset...", "",
-	  "Brings a file from outside into the project — meshes, textures, audio, "
-	  "fonts — converting it to the engine's own format on the way in.",
+	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
+	  "COLLADA), textures, audio, fonts — converting it to the engine's own format "
+	  "on the way in.",
 	  "", "editor#content-browser" },
 	{ "Assets/Refresh Assets", "",
 	  "Re-walks the content tree. What makes a file dropped in from the Finder "
@@ -1630,10 +1701,35 @@ namespace
 	  "", "editor#menus" },
 
 	// ── The viewport's options popup ─────────────────────────────────────────
+	{ "Viewport Options/Snapping", "",
+	  "Constrain dragging, so pieces line up exactly instead of nearly. A move "
+	  "snaps to whichever of the three targets below is chosen; a rotate or "
+	  "scale always goes in the fixed steps, because a metre, a degree and a "
+	  "factor are not the same number.",
+	  "", "editor#viewport" },
 	{ "Viewport Options/Snap to grid", "",
-	  "Constrain dragging to fixed steps, so pieces line up exactly instead of "
-	  "nearly. The three steps below are separate because a metre, a degree and "
-	  "a factor are not the same number.",
+	  "A move goes in fixed steps of the Move increment. The one to use for "
+	  "modular pieces that are built to a size.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Snap to surface", "",
+	  "A move lands the object on whatever scene surface lies under it as you "
+	  "drag: the floor, a table, the terrain. The object itself is looked "
+	  "through, so it can never rest on its own back.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Snap to vertex", "",
+	  "A move puts the object's pivot on the nearest corner of another mesh, "
+	  "when one is within the vertex radius on screen; otherwise it moves "
+	  "freely. For butting pieces up against each other exactly. The landscape "
+	  "is left out, it has a vertex every metre and no corner anyone means.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Rest on surface", "",
+	  "With surface snapping, lift the object so the bottom of what it draws "
+	  "sits on the surface, instead of sinking its pivot into it. Off puts the "
+	  "pivot itself on the surface, which is what a pivot at the base wants.",
+	  "", "editor#viewport" },
+	{ "Viewport Options/Vertex radius (px)", "",
+	  "How close, in pixels on screen, a corner has to be before vertex "
+	  "snapping takes hold.",
 	  "", "editor#viewport" },
 	{ "Viewport Options/Move (m)", "",
 	  "How far one snapped step moves, in metres.", "", "editor#viewport" },
@@ -1652,8 +1748,213 @@ namespace
 	  "The editor fly camera's speed in units per second. Hold Shift while "
 	  "flying for three times this.",
 	  "", "editor#viewport" },
-	{ "Viewport Options/Ground grid", "",
+
+	// ── The viewport's Show popup ────────────────────────────────────────────
+	// One switch per overlay the editor draws over the scene. All of it is
+	// editor furniture: the game never draws any of it, and none of it is
+	// saved with the scene — the switches are remembered with the editor.
+	{ "Viewport Show/Ground Grid", "",
 	  "The reference grid under the scene. Off while playing either way.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Editor Icons", "",
+	  "The symbols standing in for lights, cameras and audio sources, which "
+	  "have no mesh of their own. With them off those entities are still there "
+	  "and still selectable in the Outliner — but not by clicking in the scene, "
+	  "since there is nothing to click.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Selection", "",
+	  "The amber box on each selected entity. Off is for judging a scene "
+	  "without the marker over the thing you are looking at; the gizmo stays.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Colliders", "",
+	  "Collider wireframes for every entity that has one: cyan for solid, "
+	  "magenta for triggers. The way to see a box that is bigger than its mesh.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Joints", "",
+	  "Joint lines between the two bodies of every joint, with their anchors "
+	  "and hinge arcs — a line that does not go where you thought is the usual "
+	  "joint bug.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/NavMesh", "",
+	  "The baked NavMesh polygons. Each NavMesh component has its own Show "
+	  "Debug Mesh switch as well; this one is over all of them at once.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Guides", "",
+	  "The authoring handles of the SELECTED entity: a rope's or trail's control "
+	  "points, an animated figure's root-motion path and its look-at aim.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Script Debug", "",
+	  "The lines, boxes and spheres a script or HorizonCode graph draws through "
+	  "debug.line / debug.box / debug.sphere. They keep ageing while hidden, so "
+	  "switching them back on shows only what is still alive.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Collaborators", "",
+	  "Where the other people in a collaboration session are and what they have "
+	  "selected: their rings and boxes in the scene, and their name tags over it.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Stats", "",
+	  "The frame's counters in the corner of the viewport: frame rate and frame "
+	  "time, draw calls, triangles, visible objects out of all of them, and GPU "
+	  "time and video memory where the backend can measure them. The same "
+	  "numbers the profiler shows, read off the last frame. Off by default.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Show All Overlays", "",
+	  "Switches every overlay back to its default — on for all of them except "
+	  "Stats, which is a diagnostic rather than part of the scene.",
+	  "", "editor#viewport" },
+	{ "Viewport Show/Hide All Overlays", "",
+	  "Switches every overlay off — the scene and nothing else, for a moment.",
+	  "", "editor#viewport" },
+
+	// ── The viewport's right-click menu ──────────────────────────────────────
+	// Opens on a right-click that did not become a fly-look (press and release
+	// without moving), or on the Menu key / Shift+F10 over the scene. What it
+	// acts on is the selection, settled the way the Outliner's menu settles it:
+	// a click on something outside the selection selects it first.
+	{ "Viewport Menu/Focus Selected", "",
+	  "Moves the camera so the selected entity and everything under it fills "
+	  "the view.",
+	  "F", "editor#viewport" },
+	{ "Viewport Menu/Snap to Ground", "",
+	  "Drops each selected object straight down onto whatever is beneath it, "
+	  "the floor, a table, the terrain, so the bottom of what it draws rests "
+	  "there. An object hovering above the ground lands; one sunk into it is "
+	  "raised. Nothing beneath it, nothing happens.",
+	  "End", "editor#viewport" },
+	{ "Viewport Menu/Hide Selected", "",
+	  "Hides every selected entity with everything under it — the same switch "
+	  "as the eye in the Outliner, which is also where a hidden entity can be "
+	  "found again. Saved with the scene, like the eye; undo puts it back.",
+	  "H", "editor#viewport" },
+	{ "Viewport Menu/Isolate Selected", "",
+	  "Hides everything EXCEPT the selection, for looking at one thing without "
+	  "the rest of the level in the way. The sun and moon stay. Show All brings "
+	  "the rest back.",
+	  "Shift+H", "editor#viewport" },
+	{ "Viewport Menu/Show All", "",
+	  "Shows every hidden entity in the scene again — after Hide, Isolate or "
+	  "the Outliner's eye.",
+	  "Alt+H", "editor#viewport" },
+	{ "Viewport Menu/Group", "",
+	  "Puts the selected entities under one new, empty Group entity placed at "
+	  "their centre, so they move, rotate and scale as one. Nothing moves on "
+	  "screen. The group is an ordinary entity: rename it, add to it, drag "
+	  "things out of it in the Outliner.",
+	  "Ctrl+G", "editor#viewport" },
+	{ "Viewport Menu/Ungroup", "",
+	  "Takes the children of the selected entity out from under it, keeps them "
+	  "where they stand, and deletes the emptied parent. The reverse of Group; "
+	  "it also flattens any other parent you ask it to.",
+	  "Shift+G", "editor#viewport" },
+	{ "Viewport Menu/Lock", "",
+	  "Locks every selected entity: the viewport's click, selection frame and "
+	  "gizmo leave them alone, so the floor stops catching clicks meant for the "
+	  "prop on it. The Outliner still selects them.",
+	  "", "editor#viewport" },
+	{ "Viewport Menu/Unlock", "",
+	  "Unlocks every selected entity, so the viewport can pick and move them "
+	  "again.",
+	  "", "editor#viewport" },
+	{ "Viewport Menu/Duplicate", "",
+	  "A copy of the selection beside the original, selected and ready to move.",
+	  "Ctrl+D", "editor#viewport" },
+
+	// ── The viewport's view picker ───────────────────────────────────────────
+	// Each axis view is orthographic: parallel lines stay parallel, the far
+	// wall is as tall as the near one, which is what lining things up needs.
+	{ "Viewport View/Perspective", "",
+	  "Back to a lens: things further away look smaller. Keeps the current "
+	  "heading, so from a Top view this gives a perspective look from straight "
+	  "above.",
+	  "Num 5", "editor#viewport" },
+	{ "Viewport View/Top", "",
+	  "Straight down, without perspective: a map of the scene with -Z at the top "
+	  "and X to the right. The view for laying out a floor plan.",
+	  "Num 7", "editor#viewport" },
+	{ "Viewport View/Bottom", "",
+	  "Straight up from below, without perspective. Mirrors Top left-to-right, "
+	  "as it must to be looking the other way.",
+	  "Ctrl+Num 7", "editor#viewport" },
+	{ "Viewport View/Front", "",
+	  "Along -Z, without perspective: X to the right, Y up. The view for "
+	  "checking heights against each other.",
+	  "Num 1", "editor#viewport" },
+	{ "Viewport View/Back", "",
+	  "Along +Z, without perspective — Front seen from the other side.",
+	  "Ctrl+Num 1", "editor#viewport" },
+	{ "Viewport View/Right", "",
+	  "From +X looking toward -X, without perspective: -Z to the right, Y up.",
+	  "Num 3", "editor#viewport" },
+	{ "Viewport View/Left", "",
+	  "From -X looking toward +X, without perspective — Right seen from the "
+	  "other side.",
+	  "Ctrl+Num 3", "editor#viewport" },
+	{ "Viewport View/Orthographic", "",
+	  "Drop the lens at the current heading without snapping to an axis. The "
+	  "view keeps whatever sits at the orbit pivot the same size when it "
+	  "switches; the wheel zooms it the way it dollies the perspective camera. "
+	  "Orbiting or flying keeps the projection you chose.",
+	  "Num 5", "editor#viewport" },
+	// ── Camera bookmarks ─────────────────────────────────────────────────────
+	// Ten remembered views on the digit keys; the rows are built at run time
+	// ("Bookmark 3"), so they ask by key, and the submenu heads are literals.
+	{ "Viewport View/Bookmarks", "",
+	  "Ten remembered camera views on the digit keys: Ctrl+<digit> remembers "
+	  "where the camera is, <digit> jumps back there. A bookmark is the whole "
+	  "pose — place, heading, orbit distance and whether the view is "
+	  "orthographic — and is shared by every scene pane. Remembered with the "
+	  "editor, across projects.",
+	  "", "editor#viewport" },
+	{ "viewport.bookmark-go", "Go to bookmark",
+	  "Jumps the camera to this remembered view. Greyed out until something is "
+	  "stored there.",
+	  "0-9", "editor#viewport" },
+	{ "Viewport View/Set Bookmark", "",
+	  "Remembers the current view in one of the ten slots; a slot already in "
+	  "use is overwritten.",
+	  "", "editor#viewport" },
+	{ "viewport.bookmark-set", "Set bookmark",
+	  "Stores the camera's current pose here. A tick marks a slot that already "
+	  "holds a view.",
+	  "Ctrl+0-9", "editor#viewport" },
+	{ "Viewport View/Clear Bookmarks", "",
+	  "Forgets all ten bookmarks.",
+	  "", "editor#viewport" },
+
+	// ── The viewport's view-mode picker ──────────────────────────────────────
+	// Lit / Unlit / Wireframe redraw the whole scene; the G-buffer rows show one
+	// attachment of the deferred renderer and are greyed out on the forward
+	// path, where there is no G-buffer to show.
+	{ "Viewport View Mode/Lit", "",
+	  "The scene as the game draws it: lights, shadows, sky, fog, post effects.",
+	  "Alt+4", "editor#viewport" },
+	{ "Viewport View Mode/Unlit", "",
+	  "Base colour only — no lights, no shadows, no ambient, no fog. The way to "
+	  "see what a texture or a material actually holds, without the lighting "
+	  "arguing with it.",
+	  "Alt+3", "editor#viewport" },
+	{ "Viewport View Mode/Wireframe", "",
+	  "The triangle edges of every mesh, unlit. Shows how dense a model is and "
+	  "where the LOD switches; the sky and particles stay as they are.",
+	  "Alt+2", "editor#viewport" },
+	{ "Viewport View Mode/Base Color", "",
+	  "The G-buffer's base colour, straight from the material. Needs the "
+	  "Deferred render path (Preferences > Rendering) — the forward path has "
+	  "no G-buffer, which is why this is greyed out there.",
+	  "", "editor#viewport" },
+	{ "Viewport View Mode/Normals", "",
+	  "The G-buffer's world-space normals as colour: +X red, +Y green, +Z blue. "
+	  "A normal map that was imported the wrong way round shows up here as a "
+	  "surface that lights from the wrong side. Deferred render path only.",
+	  "", "editor#viewport" },
+	{ "Viewport View Mode/Rough / Spec / Metal", "",
+	  "The G-buffer's roughness in red, specular in green and metallic in blue. "
+	  "A rough matte wall is red, a chrome sphere blue. Deferred render path "
+	  "only.",
+	  "", "editor#viewport" },
+	{ "Viewport View Mode/Emissive", "",
+	  "The G-buffer's emissive colour on its own — what glows, and how much, "
+	  "before bloom gets to it. Deferred render path only.",
 	  "", "editor#viewport" },
 
 	// ── World Outliner ───────────────────────────────────────────────────────
@@ -1697,7 +1998,8 @@ namespace
 	  "", "editor#content-browser" },
 	{ "Content Browser/Import", "",
 	  "Brings this file into the project as an engine asset. The original is not "
-	  "moved; a .hasset beside it records where it came from.",
+	  "moved; a .hasset beside it records where it came from. Greyed out for an "
+	  "FBX/OBJ/COLLADA file when this build of the editor has no Assimp to read it.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Reimport", "",
 	  "Reads the source file again and rebuilds the asset from it — after the "
@@ -1846,6 +2148,47 @@ namespace
 	{ "Console/Copy All Shown", "",
 	  "Copies everything the current filter leaves visible, not the whole log.",
 	  "", "advanced#diagnostics" },
+	{ "Console/Go to Node", "",
+	  "Opens the HorizonCode graph this line came from and selects the node "
+	  "that wrote it — a Print, or the node whose call raised the warning. "
+	  "Only on lines with a [node N] marker; double-clicking the line does the "
+	  "same.",
+	  "", "advanced#diagnostics" },
+	{ "Console/Go to Line", "",
+	  "Opens the Lua or Python script this error names and selects the line — "
+	  "the `script:7:` in front of the message. Only on script errors that "
+	  "carry a line, and only while an entity in the scene runs the script "
+	  "under that name; double-clicking the line does the same.",
+	  "", "advanced#diagnostics" },
+	// ── Undo History ─────────────────────────────────────────────────────────
+	// The scene undo stack as a list. Its rows are the operations' own labels
+	// (built at run time, so the scan never sees them); the one fixed control
+	// is the button that empties it.
+	{ "Undo History/Clear", "Clear",
+	  "Forgets every step, backwards and forwards. The scene stays as it is; "
+	  "only the way back is gone. For a history that has grown past the point "
+	  "of being useful, or before a long session you want to start clean.",
+	  "", "editor#menus" },
+
+	// ── Watch ────────────────────────────────────────────────────────────────
+	// A stopped HorizonCode run's values. The rows are the run's own names
+	// (variables, function inputs, locals — built at run time, so the scan
+	// never sees them); the fixed controls are the way to the node, the run
+	// picker and the row menu.
+	{ "Watch/Go to Node", "Go to Node",
+	  "Opens the graph the run is stopped in and selects the node — the one "
+	  "with the yellow frame. The same jump the stop itself made; for when you "
+	  "have since gone elsewhere.",
+	  "", "horizoncode#graphs" },
+	{ "Watch/Copy Value", "Copy Value",
+	  "Puts this row's value on the clipboard as it is shown here — the whole "
+	  "string, the whole array, not the part that fits the column.",
+	  "", "horizoncode#graphs" },
+	{ "Watch/Copy Row", "Copy Row",
+	  "Puts name, type and value on the clipboard as one line, for a bug "
+	  "report or a note.",
+	  "", "horizoncode#graphs" },
+
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
 	{ "Audio Mixer/Master", "",
 	  "The volume of everything at once, in front of every bus. Drag it, or "
@@ -2027,8 +2370,22 @@ namespace
 	  "", "editor#play-mode" },
 	{ "viewport.step", "Step",
 	  "Advances a paused session by exactly one frame — the way to watch a bug "
-	  "happen instead of catching it afterwards.",
+	  "happen instead of catching it afterwards. With a script stopped at a "
+	  "breakpoint, that run finishes first: one frame is one whole frame.",
 	  "", "editor#play-mode" },
+	{ "viewport.continue", "Continue",
+	  "A HorizonCode graph is stopped at a breakpoint (the yellow-framed node). "
+	  "This runs it on from there — the node itself, the rest of its chain, the "
+	  "remaining iterations of a loop it stopped inside — and then lets the world "
+	  "tick again. The next breakpoint stops it again. Breakpoints are set on a "
+	  "node's right-click menu in the graph.",
+	  "", "horizoncode#graphs" },
+	{ "viewport.step-node", "Step Node",
+	  "Runs exactly the node the graph is stopped at and stops at the next one — "
+	  "into a called function, out to the caller, wherever the next node is. "
+	  "When the chain simply ends, the run is over and the world goes on until "
+	  "the next breakpoint.",
+	  "", "horizoncode#graphs" },
 	{ "viewport.time-scale", "Game time",
 	  "What the RUNNING GAME is doing to its own clock, which is not the same as "
 	  "the Pause button next to it: this reads the scale a script set with Set "
@@ -2053,20 +2410,49 @@ namespace
 	  "World is what you want to line things up with the ground.",
 	  "", "editor#viewport" },
 	{ "viewport.snap", "Snap",
-	  "Constrain dragging to fixed increments — a metre, fifteen degrees — so "
-	  "pieces line up exactly instead of nearly.",
+	  "Constrain dragging so pieces line up exactly instead of nearly: to fixed "
+	  "increments — a metre, fifteen degrees — or, for a move, to the surface "
+	  "or the nearest vertex under it. The value cell beside it picks which.",
 	  "", "editor#viewport" },
 	{ "viewport.camera-speed", "Camera Speed",
 	  "How fast the editor's fly camera moves, in metres per second. Hold Shift "
 	  "while flying for three times this.",
 	  "", "editor#viewport" },
+	{ "viewport.view", "View",
+	  "Which way the scene is looked at: Perspective, or an orthographic Top, "
+	  "Bottom, Front, Back, Left or Right view for lining things up without a "
+	  "lens. The label reads what the camera is actually doing — orbit out of "
+	  "Top and it says Ortho, since that is no longer Top. On the keypad, 7 / 1 "
+	  "/ 3 pick Top / Front / Right, Ctrl flips each to its opposite, 5 toggles "
+	  "the lens.",
+	  "", "editor#viewport" },
+	{ "viewport.viewmode", "View Mode",
+	  "How the scene is drawn, as opposed to where it is looked at from. Lit is "
+	  "the game's image. Unlit shows base colour only, Wireframe the triangle "
+	  "edges, and the G-buffer rows show one attachment of the deferred "
+	  "renderer straight to the screen. The cell lights up whenever the scene "
+	  "is drawn some way other than Lit, so an odd-looking viewport is never a "
+	  "mystery. Alt+4 / Alt+3 / Alt+2 for Lit / Unlit / Wireframe.",
+	  "", "editor#viewport" },
 	{ "viewport.mode", "Viewport Mode",
 	  "Scene is normal editing. Landscape turns the viewport into the terrain "
 	  "sculpting and painting tool, with its brushes in Quick Settings.",
 	  "", "editor#landscape-mode" },
-	{ "viewport.grid", "Ground Grid",
-	  "The reference grid on the ground plane. It is hidden while the scene plays "
-	  "either way.",
+	{ "viewport.show", "Show",
+	  "Which overlays the editor draws over the scene: the ground grid, the "
+	  "light / camera / audio icons, the selection box, colliders, joints, the "
+	  "NavMesh, the selected entity's authoring guides, script debug lines and "
+	  "the other collaborators. All of it is editor furniture — the game draws "
+	  "none of it — and the switches are remembered with the editor, not the "
+	  "scene. The cell lights up while anything is switched off, so a missing "
+	  "collider outline is never a mystery.",
+	  "", "editor#viewport" },
+	{ "viewport.context-menu", "Right-click menu",
+	  "A right-click on the scene that does not turn into a fly-look (press and "
+	  "release without moving) opens a menu for what is under the cursor: focus, "
+	  "hide, isolate, show all, group, lock, the clipboard, delete. On a "
+	  "trackpad, where the tap toggles fly mode, use the Menu key or Shift+F10 "
+	  "over the scene instead.",
 	  "", "editor#viewport" },
 	{ "viewport.frame", "Frame Selected",
 	  "Moves the editor camera so the selected entity fills the view — the fastest "
@@ -2142,6 +2528,26 @@ namespace
 	  "What this entity is called in the Outliner and to scripts that look it up "
 	  "by name.",
 	  "", "editor#details" },
+	{ "details.active", "Active",
+	  "The one switch for the whole entity. Off means it is not in the game: "
+	  "its meshes, lights, particles, decals, ropes, trails, foliage and UI are "
+	  "not drawn, its script does not start, no physics body is built for it "
+	  "and its audio source does not play on start. It takes everything under "
+	  "it along. Unlike the Outliner's eye, which only hides what is drawn, "
+	  "this is saved as part of the entity and is off in the packaged game too. "
+	  "Flipping it while the game runs takes effect at the next start, not "
+	  "immediately.",
+	  "", "editor#details" },
+	{ "details.active-through-parent", "Switched off through a parent",
+	  "This entity's own switch is on, but an entity above it in the Outliner "
+	  "is off, and off is inherited. Select that parent to switch the whole "
+	  "group back on.",
+	  "", "editor#details" },
+	{ "details.paste-component", "Paste Component",
+	  "Adds the component on the clipboard to this entity, with the values it "
+	  "was copied with. An entity can carry one of each kind, so a component it "
+	  "already has takes the copied values instead of being doubled.",
+	  "", "editor#details" },
 	// ── Placed prefabs ───────────────────────────────────────────────────────
 	{ "details.prefab", "Prefab Instance",
 	  "This entity is part of a placed prefab. The section names the asset it "
@@ -2209,8 +2615,9 @@ namespace
 
 	// ── Content Browser ──────────────────────────────────────────────────────
 	{ "content.import", "Import Asset",
-	  "Brings a file from outside into the project — meshes, textures, audio, "
-	  "fonts. It is converted to the engine's own format on the way in.",
+	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
+	  "COLLADA), textures, audio, fonts. It is converted to the engine's own format "
+	  "on the way in.",
 	  "", "editor#content-browser" },
 	{ "content.create", "Create Asset",
 	  "Makes a new asset in this folder: a material, a particle system, a widget, "
@@ -2242,6 +2649,11 @@ namespace
 	  "Forward shades each object as it is drawn. Deferred shades the whole screen "
 	  "at once, which is what lifts the light count and turns on SSAO and SSR.",
 	  "", "rendering#pipeline" },
+	{ "Preferences/Display/Occlusion Culling", "",
+	  "Skips drawing what a wall, a hill or a building is already hiding. The "
+	  "picture stays the same; the draw count drops. Off by default until it "
+	  "has proven itself on real scenes.",
+	  "", "rendering#performance" },
 	{ "Preferences/Display/VSync", "",
 	  "Waits for the display before showing a frame: no tearing, and the frame "
 	  "rate is capped to the monitor's. Off is for measuring performance.",
@@ -2252,7 +2664,7 @@ namespace
 	  "", "rendering#performance" },
 	{ "Preferences/Post-Processing/Anti-Aliasing", "",
 	  "How jagged edges are smoothed. SMAA is one cheap pass; TAA is steadier in "
-	  "motion but needs the deferred path.",
+	  "motion but needs a velocity buffer, which only the Metal and OpenGL backends write so far.",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/AA Sharpness", "",
 	  "How much detail is pulled back after the anti-aliasing pass softened it. "
@@ -2295,6 +2707,35 @@ namespace
 	{ "Preferences/Post-Processing/AO Intensity", "",
 	  "How dark the occlusion gets. Past 1 it stops reading as shadow and starts "
 	  "reading as dirt.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Depth of Field", "",
+	  "Blurs what is nearer or farther than the focus distance, the way a camera "
+	  "lens does. Near things spill over the background; the background never "
+	  "bleeds over a sharp foreground. OpenGL and Metal.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Focus Distance", "",
+	  "How far from the camera, in metres, the picture is sharpest.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Focus Range", "",
+	  "How deep the fully sharp band around that distance is, in metres. The "
+	  "blur then ramps up over the same distance again on either side.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Aperture", "",
+	  "The lens's f-number. f/1.4 blurs everything outside the band heavily, "
+	  "f/22 leaves almost everything sharp.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Motion Blur", "",
+	  "Streaks the picture along the camera's movement between two frames, the "
+	  "way a real shutter does. Only the camera counts: an object crossing a "
+	  "still camera stays sharp. OpenGL and Metal.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Shutter", "",
+	  "How much of one frame's motion goes into the streak. 0.5 is the classic "
+	  "film shutter; 1 smears the full frame's worth.",
+	  "", "rendering#postfx" },
+	{ "Preferences/Post-Processing/Max Blur", "",
+	  "The longest streak allowed, in pixels at 720p. Keeps a camera cut from "
+	  "wiping the whole screen for a frame.",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/Screen-Space Reflections", "",
 	  "Reflects what is already on screen in wet and polished surfaces. What is "
@@ -2433,6 +2874,25 @@ namespace
 	  "Name and type on one line instead. Half the height per variable, so a long "
 	  "list stays readable without scrolling.",
 	  "", "horizoncode#graphs" },
+	// ── Preferences » Editor » Shortcuts ─────────────────────────────────────
+	{ "Shortcuts/Search", "",
+	  "Narrows the list to the actions whose name, group or key contains this. "
+	  "\"ctrl\" finds every shortcut that uses the modifier.",
+	  "", "editor#preferences" },
+	{ "Shortcuts/Reset All", "",
+	  "Puts every shortcut back to the key it shipped with, in one go. Each row "
+	  "has its own Reset for one at a time.",
+	  "", "editor#preferences" },
+	{ "Shortcuts/Reset", "",
+	  "Puts this one shortcut back to its default. Only shown on a row you have "
+	  "changed.",
+	  "", "editor#preferences" },
+	{ "shortcuts.binding", "Shortcut",
+	  "The keys that trigger this action. Click, then press the new combination: "
+	  "Esc keeps the old one, Backspace removes the shortcut altogether. Gold "
+	  "means changed from the default; red means another action in the same "
+	  "place answers to the same keys, and hovering says which.",
+	  "", "editor#preferences" },
 	{ "Preferences/Restore Defaults", "Restore Defaults",
 	  "Puts the settings in the category you are looking at back the way they "
 	  "shipped. Only this category, and only the ones the engine owns — your "
@@ -2493,11 +2953,164 @@ namespace
 	  "repository rather than about the last time you looked.",
 	  "", "editor#preferences" },
 
-	// ── Preferences » Project ────────────────────────────────────────────────
-	// The pages on this tab that edit the PROJECT. Everything else here follows
-	// the editor from project to project; these travel with the project and into
-	// the application it exports.
-	// ── Project ▸ Collision Layers ───────────────────────────────────────────
+	// ── Project Settings ─────────────────────────────────────────────────────
+	// The tab that edits the PROJECT (Edit ▸ Project Settings). Everything on
+	// Preferences follows the editor from project to project; these travel with
+	// the project and into the build it exports. Each page pushes its own scope
+	// ("Shadows", "Physics", …), so a key here is "<page>/<label>".
+	//
+	// The five pages below write Config/ProjectSettings.json; the four after
+	// them (Collision Layers, Permissions, Application, Fonts) write the .heproj
+	// and moved here from Preferences with their keys unchanged.
+	// ── Game ▸ General ───────────────────────────────────────────────────────
+	{ "Project General/Project", "Project",
+	  "The project's name — the .heproj's file name, and what the export derives "
+	  "the bundle name from. Shown here so the page says whose settings these "
+	  "are; it is changed by renaming the project in the Project Hub, not typed "
+	  "over.",
+	  "", "editor#preferences" },
+	{ "Project General/Title", "Title",
+	  "What the game calls itself to a player: the window title, the name a "
+	  "launcher shows. Leave it empty and the project name is used, which is "
+	  "what every build has done so far.\n\n"
+	  "Saved to Config/ProjectSettings.json, which the export ships next to the "
+	  "game data: the packaged game titles its window with it, and the export "
+	  "writes it as the display name of the .app, the .desktop entry and the "
+	  "Windows registration. The folder, the .hpak and the save directory keep "
+	  "the project name, so retitling a game strands nobody's saves.",
+	  "", "editor#preferences" },
+	{ "Project General/Show a splash while starting", "Show a splash while starting",
+	  "A small always-on-top window with your picture and the game's title, "
+	  "shown while the game loads — the same splash the editor opens on its own "
+	  "start. Without it a shipped game shows a black rectangle for as long as "
+	  "the renderer takes to come up.\n\n"
+	  "It only opens when a picture is set: with no logo the splash would draw "
+	  "the engine's own wordmark, and the engine does not advertise itself "
+	  "inside your game. Saved to Config/ProjectSettings.json.",
+	  "", "export#overview" },
+	{ "Project General/Splash image", "Splash image",
+	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
+	  "copies it beside project.hcfg as Splash.png; the game reads it from "
+	  "there. A file outside the project is stored with its absolute path and "
+	  "does not travel with the project — copy it into Content/ instead.",
+	  "", "export#overview" },
+	{ "Project General/Subtitle", "Subtitle",
+	  "The small line under the title on the splash — a version, a studio "
+	  "name, a tagline. Free text; it is not the bundle version, which never "
+	  "reaches the running game.",
+	  "", "export#overview" },
+	{ "Project General/Browse...", "Browse",
+	  "Pick the PNG in a file dialog. Choosing one inside the project stores "
+	  "the path relative to it.",
+	  "", "editor#preferences" },
+	{ "Project General/Scene", "Startup scene",
+	  "The scene the game opens with — and the one the editor opens when the "
+	  "project loads. Listed are the .hescene files under Content. An export "
+	  "profile may name a different scene for its own build; this is the "
+	  "project's default.",
+	  "", "export#profiles" },
+	{ "Project General/Rescan", "Rescan",
+	  "Reads the Content folder again for scenes. The list is made once when the "
+	  "page opens, so a scene saved since then is not in it until you press this.",
+	  "", "editor#preferences" },
+	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
+	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
+	  "On, the packaged build boots with whatever this editor's Preferences and "
+	  "Export dialog hold at export time — the way every export has worked, and "
+	  "what a project that never opened this page keeps doing. Off, the window "
+	  "and backend below are the project's answer, on every machine it is "
+	  "exported from.\n\n"
+	  "Saved to Config/ProjectSettings.json. With this off, the Export dialog "
+	  "shows the project's window and backend instead of its own rows and writes "
+	  "them into the build's config.json. Bloom, ambient occlusion and the other "
+	  "graphics settings still come from this editor's Preferences either way.",
+	  "", "export#overview" },
+	{ "Render Defaults/Width", "Width",
+	  "The window's width in pixels when the game starts windowed. Ignored in "
+	  "fullscreen, where the display decides.",
+	  "", "export#overview" },
+	{ "Render Defaults/Height", "Height",
+	  "The window's height in pixels when the game starts windowed.",
+	  "", "export#overview" },
+	{ "Render Defaults/Window mode", "Window mode",
+	  "Windowed opens a frame of the size above. Fullscreen takes the display. "
+	  "Borderless is a frameless window covering the display — the choice for "
+	  "fast alt-tabbing, and for an application that draws its own title bar.",
+	  "", "export#overview" },
+	{ "Render Defaults/VSync", "VSync",
+	  "Whether the game waits for the display's refresh before presenting a "
+	  "frame. On removes tearing and caps the rate at the refresh rate; off "
+	  "runs as fast as it can.",
+	  "", "rendering#performance" },
+	{ "Render Defaults/Graphics backend", "Graphics backend",
+	  "Which graphics API the packaged build renders through. The platform "
+	  "default is the right answer almost always; a backend the target machine "
+	  "cannot create falls back to that default at start with a line in the "
+	  "log. The names are the same ones Preferences ▸ Display offers.",
+	  "", "rendering#backends" },
+	// ── Rendering ▸ Shadows ──────────────────────────────────────────────────
+	{ "Shadows/Shadow distance", "Shadow distance",
+	  "How far from the camera the sun's shadows reach, in metres. Beyond it "
+	  "nothing casts a shadow. The cascades share this range, so a longer "
+	  "distance spreads the same texels thinner — 250 is what the engine has "
+	  "always used.\n\n"
+	  "Saved to Config/ProjectSettings.json and read by the renderer as you "
+	  "edit (Metal and OpenGL draw cascades; the other backends still use one "
+	  "whole-scene map and ignore this page).",
+	  "", "rendering#shadows" },
+	{ "Shadows/Cascades", "Cascades",
+	  "How many shadow maps the distance is cut into: a sharp one near the "
+	  "camera, coarser ones further out. More cascades means sharper shadows up "
+	  "close and more depth passes per frame. Three is the engine's default and "
+	  "its ceiling: every cascade consumer is built for three.",
+	  "", "rendering#shadows" },
+	{ "Shadows/Resolution", "Resolution",
+	  "Texels along one edge of each cascade's shadow map. 2048 is the default; "
+	  "4096 sharpens the far cascades at four times the memory and the fill.",
+	  "", "rendering#shadows" },
+	{ "Shadows/Split blend", "Split blend",
+	  "Where the cascade boundaries fall. 0 spaces them evenly over the shadow "
+	  "distance, 1 places them logarithmically — most of the maps close to the "
+	  "camera, where one texel covers the least ground. 0.5 is the usual "
+	  "compromise.",
+	  "", "rendering#shadows" },
+	{ "Shadows/Slope bias", "Slope bias",
+	  "The depth offset that grows with the angle between a surface and the "
+	  "light, so a surface lit at a grazing angle does not stripe with its own "
+	  "shadow. Raise it for acne, lower it if shadows detach from their casters.",
+	  "", "rendering#shadows" },
+	{ "Shadows/Minimum bias", "Minimum bias",
+	  "The depth offset a surface facing the light straight on still gets. The "
+	  "floor under the slope bias — the number that matters on flat ground under "
+	  "a high sun.",
+	  "", "rendering#shadows" },
+	// ── Physics ▸ Simulation ─────────────────────────────────────────────────
+	{ "Physics/Fixed rate", "Fixed rate",
+	  "How many simulation steps a second of game time is cut into, whatever "
+	  "the frame rate. Higher is more accurate and more expensive; 60 is what "
+	  "every project has run at. A rate rather than a step length because 60 is "
+	  "exact and 0.01667 is not.\n\n"
+	  "Saved to Config/ProjectSettings.json and read on every step, in the "
+	  "editor's Play and in the exported build alike — the two cannot simulate "
+	  "at different rates.",
+	  "", "systems#physics" },
+	{ "Physics/Gravity", "Gravity",
+	  "The acceleration every rigid body is under, in metres per second squared "
+	  "along X, Y and Z. Earth is 0, −9.81, 0. A character controller falls by "
+	  "its own component's gravity value on purpose — a floaty player in "
+	  "ordinary gravity is a design choice.",
+	  "", "systems#physics" },
+	{ "Physics/Earth", "Earth",
+	  "Puts gravity back to 0, −9.81, 0.",
+	  "", "systems#physics" },
+	// ── Audio ▸ Buses ────────────────────────────────────────────────────────
+	{ "Audio Buses/Open Audio Mixer", "Open Audio Mixer",
+	  "Opens the mixer window, where the project's buses are made and their "
+	  "faders sit. Buses are a project setting like the rest of this tab — saved "
+	  "in the .heproj and shipped with the build — but a fader is something you "
+	  "move while a scene plays, which is why they have a window and not a page.",
+	  "", "systems#audio" },
+	// ── Physics ▸ Collision Layers ───────────────────────────────────────────
 	{ "Collision Layers/Name", "Layer name",
 	  "What this channel is called, everywhere it is offered. The NUMBER is what "
 	  "a scene stores, so renaming a layer relabels it and moves nothing. Leave "
@@ -2556,6 +3169,18 @@ namespace
 	{ "Application/Version", "Version",
 	  "CFBundleShortVersionString and CFBundleVersion in the exported bundle. "
 	  "Free-form text; \"1.4\" and \"1.4.2\" are both fine.",
+	  "", "editor#preferences" },
+	{ "Application/Icon file", "Icon file",
+	  "A PNG of your own instead of the generated icon: every size (16 to 512) "
+	  "and every container — .icns, .ico, the window's .png — is resampled from "
+	  "it, so one picture is enough. A non-square picture is centred on a "
+	  "transparent square. Project-relative paths travel with the project; a "
+	  "file that went missing falls back to the generated icon rather than to "
+	  "no icon at all.",
+	  "", "editor#preferences" },
+	{ "Application/Browse...", "Browse",
+	  "Pick the PNG in a file dialog. Choosing one inside the project stores "
+	  "the path relative to it.",
 	  "", "editor#preferences" },
 	{ "Application/Extension", "Extension",
 	  "The file ending this type owns, without the dot: \"hnote\". Letters and "
@@ -4061,7 +4686,7 @@ namespace
 	  "<icon=home> for one of the built-in icons and << for a literal '<'. An "
 	  "icon inserts a single character and inherits the colour, size and link it "
 	  "stands in. <b> needs the project's text weight to be Regular, since "
-	  "nothing is bolder than bold (Preferences > Project > Fonts). A link makes "
+	  "nothing is bolder than bold (Project Settings > Game > Fonts). A link makes "
 	  "that stretch of words "
 	  "clickable — the pointer turns into a hand over it and On Link Clicked "
 	  "fires with the id — while the rest of the label stays as inert as any "
@@ -4590,6 +5215,76 @@ namespace
 	{ "Export/D3D12", "Precompile for Direct3D 12",
 	  "The same for Direct3D 12, the newer of the two Windows backends.",
 	  "", "materials#pipeline" },
+	{ "Export/Texture compression", "Texture compression",
+	  "Which block format the pak's textures are cooked to at export. Auto picks "
+	  "it from the target's GPU family, the way every export always has: ASTC "
+	  "for Metal, BC3 for OpenGL on macOS, BC7 on desktop. None ships the "
+	  "textures as plain RGBA8 with their mip chain baked in — the exact pixels "
+	  "and the largest pak; for a pixel-art game, or to see what compression "
+	  "costs a particular texture. Saved in the export profile.",
+	  "", "export#overview" },
+	{ "Export/Auto (per target)", "Auto (per target)",
+	  "The block format the target's GPUs sample: ASTC for Metal, BC3 for "
+	  "OpenGL on macOS, BC7 on desktop. What every export chose before the "
+	  "row existed.",
+	  "", "export#overview" },
+	{ "Export/None (RGBA8)", "None (RGBA8)",
+	  "No block compression: RGBA8 with the mip chain baked in. The exact "
+	  "pixels, at roughly four to eight times the size of a compressed texture.",
+	  "", "export#overview" },
+	{ "Export/Texture quality", "Texture quality",
+	  "How hard the encoder works on each texture. Fast is what every export "
+	  "did before this existed; Balanced tries every block partition; High adds "
+	  "another refinement pass. Each step costs several times the encode time "
+	  "of the one before and shows on smooth gradients and fine text, rarely "
+	  "elsewhere. Changing it re-encodes every texture on the next export, so "
+	  "an incremental pack is not incremental that once. Saved in the profile.",
+	  "", "export#overview" },
+	// ── Application: icon, version, splash (the same rows Project Settings has)
+	{ "Export/Icon", "Icon",
+	  "The name of one of the engine's built-in icons the export generates the "
+	  "application icon from — the same field as Project Settings > "
+	  "Application, shown here so a build does not ship with the icon nobody "
+	  "chose. The plate colour and the bundle identifier stay on that page.",
+	  "", "editor#preferences" },
+	{ "Export/Icon file", "Icon file",
+	  "A PNG of your own instead of the generated icon: every size (16 to 512) "
+	  "and every container — .icns, .ico, the window's .png — is resampled from "
+	  "it, so one picture is enough. A non-square picture is centred on a "
+	  "transparent square. Project-relative paths travel with the project; a "
+	  "file that went missing falls back to the generated icon rather than to "
+	  "no icon at all.",
+	  "", "editor#preferences" },
+	{ "Export/Browse...", "Browse",
+	  "Pick the PNG in a file dialog. Choosing one inside the project stores "
+	  "the path relative to it.",
+	  "", "editor#preferences" },
+	{ "Export/Version", "Version",
+	  "CFBundleShortVersionString and CFBundleVersion in the exported bundle — "
+	  "the same field as Project Settings > Application. Free-form text; "
+	  "\"1.4\" and \"1.4.2\" are both fine. Saved to the .heproj when you "
+	  "leave the field.",
+	  "", "editor#preferences" },
+	{ "Export/Show a splash while starting", "Show a splash while starting",
+	  "A small always-on-top window with your picture and the game's title, "
+	  "shown while the game loads — the same splash the editor opens on its own "
+	  "start. Without it a shipped game shows a black rectangle for as long as "
+	  "the renderer takes to come up.\n\n"
+	  "It only opens when a picture is set: with no logo the splash would draw "
+	  "the engine's own wordmark, and the engine does not advertise itself "
+	  "inside your game. Saved to Config/ProjectSettings.json.",
+	  "", "export#overview" },
+	{ "Export/Splash image", "Splash image",
+	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
+	  "copies it beside project.hcfg as Splash.png; the game reads it from "
+	  "there. A file outside the project is stored with its absolute path and "
+	  "does not travel with the project — copy it into Content/ instead.",
+	  "", "export#overview" },
+	{ "Export/Subtitle", "Subtitle",
+	  "The small line under the title on the splash — a version, a studio "
+	  "name, a tagline. Free text; it is not the bundle version, which never "
+	  "reaches the running game.",
+	  "", "export#overview" },
 	{ "Export/Export", "",
 	  "Starts the export with the settings above and hands over to the Build "
 	  "window, which shows each step, its own progress and its log. The packing "
@@ -4931,6 +5626,49 @@ namespace
 	{ "Script Graph/Set", "Set",
 	  "Adds a node that WRITES it. Same rule as Get: a variable belonging to "
 	  "another function cannot be reached from here.",
+	  "", "horizoncode#graphs" },
+
+	// ── HorizonCode: comment boxes and reroutes ──────────────────────────────
+	// Canvas furniture shared by every HorizonCode editor (HcGraphHost): the
+	// frames that group a region of nodes, and the knots a wire is bent through.
+	// Neither changes what the graph does.
+	{ "HorizonCode Graph/Comment Box", "Comment Box",
+	  "Drops a titled frame on the canvas. Drag its header to move it together "
+	  "with every node inside it, double-click the header to name it, pull the "
+	  "corner grip to resize. Purely a note to the reader: the graph runs the "
+	  "same with or without it.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Wrap in Comment", "Wrap in Comment",
+	  "Puts a comment frame around this node, sized to fit. Name it afterwards "
+	  "by double-clicking the header.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Wrap Selection in Comment", "Wrap Selection in Comment",
+	  "Puts one comment frame around every selected node, sized to the group. "
+	  "From then on dragging the frame's header moves them all.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Add Breakpoint", "Add Breakpoint",
+	  "Marks this node with a red dot: the next time a running graph reaches it, "
+	  "execution stops BEFORE the node runs, the world freezes, and the graph "
+	  "opens on the node with a yellow frame. Continue and Step Node in the "
+	  "viewport's transport carry on from there. Only nodes with an exec pin can "
+	  "be stopped at — a pure node is read, never run. Breakpoints live for the "
+	  "editor session and are not saved with the asset; compiled (packaged) "
+	  "classes never stop.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Remove Breakpoint", "Remove Breakpoint",
+	  "Takes the breakpoint off this node. A run already stopped there stays "
+	  "stopped until Continue.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Remove All Breakpoints", "Remove All Breakpoints",
+	  "Clears every breakpoint in every graph of the project at once.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Rename Comment", "Rename Comment",
+	  "Opens the frame's title for editing — the same as double-clicking its "
+	  "header.",
+	  "", "horizoncode#graphs" },
+	{ "HorizonCode Graph/Delete Comment", "Delete Comment",
+	  "Removes the frame. The nodes inside it stay where they are; a comment "
+	  "groups them visually and owns none of them.",
 	  "", "horizoncode#graphs" },
 
 	{ "HorizonCode Event/Name", "",
@@ -5618,6 +6356,8 @@ namespace
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
+		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
+		{ "Watch/",            "editor-interface", "Editor Interface", "Watch" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },
@@ -5627,6 +6367,12 @@ namespace
 		{ "Source Root/",      "editor-interface", "Editor Interface", "Source root" },
 		{ "New Entity/",       "editor-interface", "Editor Interface", "Creating entities" },
 		{ "Viewport Options/", "editor-interface", "Editor Interface", "Viewport options" },
+		{ "Viewport View/",    "editor-interface", "Editor Interface", "View presets" },
+		{ "Viewport View Mode/", "editor-interface", "Editor Interface", "View modes" },
+		{ "Viewport Show/",      "editor-interface", "Editor Interface", "Show flags" },
+		{ "Viewport Menu/",      "editor-interface", "Editor Interface", "The viewport's right-click menu" },
+		{ "Secondary Viewport/", "editor-interface", "Editor Interface", "Secondary scene viewports" },
+		{ "secondary-viewport.", "editor-interface", "Editor Interface", "Secondary scene viewports" },
 		// ── The Details panel's components ───────────────────────────────────
 		{ "Component/", "editor-components", "Component Reference", "The components" },
 		// ── Settings ─────────────────────────────────────────────────────────
@@ -5660,9 +6406,14 @@ namespace
 		// deserves a list rather than being scattered through the designer's
 		// controls.
 		{ "UI Palette/",     "editor-ui", "UI Designer", "The elements" },
-		// The pages on the Preferences tab that edit the PROJECT rather than the
-		// editor, which is why they get their own sections rather than sitting
-		// under "Preferences".
+		// The Project Settings tab — the pages that edit the PROJECT rather than
+		// the editor, one section per page so the reference is split the way
+		// the tab's rail is.
+		{ "Project General/",  "editor-settings", "Settings Reference", "Project: general" },
+		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
+		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
+		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
+		{ "Audio Buses/",      "editor-settings", "Settings Reference", "Project: audio buses" },
 		{ "Permissions/",    "editor-settings", "Settings Reference", "Project permissions" },
 		{ "Fonts/",          "editor-settings", "Settings Reference", "Project fonts" },
 		{ "Application/",    "editor-settings", "Settings Reference", "The application" },
@@ -5672,6 +6423,8 @@ namespace
 		// buttons are listed under the setting that produces the copy.
 		{ "Scene Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
+		{ "Shortcuts/",        "editor-settings", "Settings Reference", "Shortcuts" },
+		{ "shortcuts.",        "editor-settings", "Settings Reference", "Shortcuts" },
 		// ── The asset editors ────────────────────────────────────────────────
 		{ "material.",           "editor-materials", "Material Editor", "Material graph" },
 		{ "Material Node/",      "editor-materials", "Material Editor", "Values on a node" },
@@ -5694,6 +6447,7 @@ namespace
 		{ "Input Action/",  "editor-input", "Input Reference", "Actions and bindings" },
 		{ "hc.",                         "editor-horizoncode", "HorizonCode Editor", "Graph editing" },
 		{ "Script Graph/",               "editor-horizoncode", "HorizonCode Editor", "Script graphs" },
+		{ "HorizonCode Graph/",          "editor-horizoncode", "HorizonCode Editor", "Comments and reroutes" },
 		{ "Script Variable/",            "editor-horizoncode", "HorizonCode Editor", "Graph variables" },
 		{ "Script Node/",                "editor-horizoncode", "HorizonCode Editor", "Nodes in a script graph" },
 		{ "HorizonCode Event/",          "editor-horizoncode", "HorizonCode Editor", "Declared events" },

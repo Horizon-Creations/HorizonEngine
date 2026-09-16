@@ -10,7 +10,9 @@ using NT = HC::NodeType;
 // Blueprints keeps their muscle memory. P/V/N are the HorizonCode additions:
 // Print is the debug node you place all day, Is Valid guards every object
 // reference before it is touched, and Not is the one logic node you constantly
-// splice into an existing wire.
+// splice into an existing wire. R is the reroute: mid-drag it drops a knot
+// already wired to the pin you came from, which is the one moment you want
+// one.
 //
 // NOT bound on purpose: literals (Const Float/Int/…) — an unwired simple data
 // input edits its value right on the pin (Node::pinDefaults), so a literal node
@@ -24,6 +26,7 @@ const std::vector<Binding> kBindings = {
 	{ 'P', NT::Print,    "P" },
 	{ 'V', NT::IsValid,  "V" },
 	{ 'N', NT::Not,      "N" },
+	{ 'R', NT::Reroute,  "R" },
 };
 
 const std::vector<char> kReserved = { 'G', 'E', 'Q' };

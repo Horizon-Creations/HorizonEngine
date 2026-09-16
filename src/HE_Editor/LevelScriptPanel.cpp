@@ -15,6 +15,7 @@
 #include <Diagnostics/Logger.h>
 #include "GraphEditor.h"         // shared node-graph canvas
 #include "HcGraphHost.h"         // shared HorizonCode canvas host (pins, menus, clipboard)
+#include "HcExecTrace.h"         // run-time node hits + "go to node" reveals
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/HcCodegen.h>   // in-editor compile check (Compile button)
@@ -128,6 +129,10 @@ struct LSState
 	// Script / Game Instance title). One panel state serves all of those tabs,
 	// and a switch has to wipe what only made sense in the previous one.
 	std::string graphFor;
+	// The key HcExecTrace files this graph's run-time hits and reveals under:
+	// the class's content-relative path, or the reserved tab path of the Level
+	// Script / Game Instance. Derived from graphFor at the swap, once.
+	std::string traceKey;
 	std::string varNameEdit;        // scratch rename buffer (see the widget editor bug)
 	std::string varNameEditFor;
 	// The last rejected rename, so the snap-back can say why. `varNameErrorName`
@@ -1014,6 +1019,8 @@ void drawCanvas(HC::Graph& graph, const std::vector<std::string>& events, bool a
 	host.selfKey      = g.graphFor;
 	// The last compile check's error node gets a red halo.
 	host.errorNode    = (g.compileHas && !g.compileOk) ? g.compileNode : 0;
+	// …and a node the interpreter just ran a fading amber one.
+	host.traceKey     = g.traceKey;
 	host.title        = [](const HC::Node& n){ return nodeTitle(n); };
 	// Every edit bumps the scene-undo revision (the caller snapshots), so a
 	// value still being dragged needs no separate dirty flag.
@@ -1218,6 +1225,28 @@ void drawGraphBody(HC::Graph& graph, const std::vector<std::string>& events,
 			else
 				g = LSState{};
 			g.graphFor = key;
+			// The two editor-owned graphs are keyed by their titles here but by
+			// their reserved tab paths everywhere the trace is concerned; a class
+			// is its content path in both worlds.
+			g.traceKey = !classKey.empty()                    ? classKey
+			           : std::string(title) == "Level Script"  ? std::string(LevelScriptPanel::kTabPath)
+			           : std::string(title) == "Game Instance" ? std::string(GameInstancePanel::kTabPath)
+			           : std::string();
+		}
+	}
+	// A reveal aimed at this graph — a console line's "go to node": switch to
+	// the node's sub-graph (a function body is its own canvas), select it and
+	// frame it. A node that is gone since the line was written drops the
+	// request; there is nothing to show and nothing to keep waiting for.
+	if (int revealNode = 0; HcExecTrace::takeRevealNode(g.traceKey, revealNode))
+	{
+		if (const HC::Node* n = graph.findNode(revealNode))
+		{
+			g.currentGraph  = n->subgraph;
+			g.selectedNode  = n->id;
+			g.selectedVar.clear();
+			g.selectedEvent.clear();
+			g.focusSelected = true;
 		}
 	}
 	// A sub-graph id that no longer names a function (it was deleted) must fall
@@ -1417,7 +1446,7 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 		              "Reacts to world events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
 		// snapshotNow() bumps the undo revision so the level script saves with the
 		// scene; self-contained so it doesn't disturb the entity undo.
-		if (edited && ctx.undoSys) ctx.undoSys->snapshotNow();
+		if (edited && ctx.undoSys) ctx.undoSys->snapshotNow("Level Script");
 	}
 	ImGui::End();
 	raisePendingRename(ctx);
@@ -2784,6 +2813,10 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		st.eventsScanTime = now;
 	}
 	bool edited = false;
+	// A "go to node" aimed at this class needs the graph side of the tab:
+	// drawGraphBody is where the reveal is consumed, and a tab left in
+	// Components mode would sit on the request forever.
+	if (st.showViewport && HcExecTrace::revealPendingFor(st.path)) st.showViewport = false;
 	if (st.showViewport)
 		drawComponentsBody(ctx, st);
 	else

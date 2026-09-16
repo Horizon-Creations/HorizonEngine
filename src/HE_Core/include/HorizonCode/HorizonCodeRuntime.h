@@ -139,6 +139,13 @@ public:
     // graph. Hosts that only need the Event bindings use eventBindingsOf, which
     // serves both backends.
     const Graph& graphOf(InstanceId id) const;
+    // The graph of ONE level of the instance's inheritance chain (root first,
+    // the class itself last — see classKeyAtLevel). A stopped run names its
+    // level (SuspendedRun::level), and an inherited call stops in an
+    // ancestor's graph, whose node ids mean nothing in the leaf's. Same shared
+    // empty graph for an unknown id, a compiled instance or a level past the
+    // chain.
+    const Graph& graphAt(InstanceId id, size_t level) const;
 
     // The instance's host-firable events — one entry per Event node (interpreted)
     // or per CompiledEventInfo (compiled). Backend-agnostic replacement for
@@ -339,6 +346,77 @@ public:
     };
     void setServices(Services s) { m_services = std::move(s); }
 
+    // ── Execution trace (debugging) ──────────────────────────────────────────
+    // Called for every EXEC node an interpreted instance runs, with the
+    // instance, the class key of the level the node lives in (asset path,
+    // "level:<uuid>", "__game_instance__") and the node id. This is what the
+    // editor's node highlighting listens to. Compiled instances run generated
+    // C++ and never pass through here — they are not traced.
+    //
+    // The runtime calls this synchronously from inside execution, so the
+    // listener must be cheap and must not call back into the runtime. Empty
+    // (the default) costs one null check per node.
+    using ExecListener = std::function<void(InstanceId instance, const std::string& classKey,
+                                            size_t level, int nodeId)>;
+    void setExecListener(ExecListener fn) { m_execListener = std::move(fn); }
+    // The class key a LEVEL of an instance belongs to: the instance's own key
+    // for the leaf, an ancestor's for the levels above it. "" for an unknown
+    // id or a level outside the chain.
+    std::string classKeyAtLevel(InstanceId id, size_t level) const;
+
+    // ── Breakpoints (debugging) ──────────────────────────────────────────────
+    // The interpreter asks this before every exec node it is about to run, and
+    // for the entry node of a run: true = stop there. The editor answers it
+    // from its breakpoint set; the runtime keeps no breakpoints of its own.
+    // Called synchronously from inside execution, so the same rules as the
+    // exec listener: cheap, and no calling back into the runtime. Empty (the
+    // default) = nothing ever stops, at the cost of one null check per node.
+    using BreakPredicate = std::function<bool(InstanceId instance, const std::string& classKey,
+                                              size_t level, int nodeId)>;
+    void setBreakPredicate(BreakPredicate fn) { m_breakPredicate = std::move(fn); }
+
+    // A run that stopped: where, and whose. The run's captured state itself
+    // (call frames with a function's locals, the exec-output cache) is behind
+    // suspendedRun(), for a watch window.
+    struct SuspendedSite
+    {
+        InstanceId  instance = 0;
+        std::string classKey;
+        size_t      level    = 0;
+        int         nodeId   = 0;
+    };
+    // Told every time a run stops — from inside execution, same rules as the
+    // predicate. This is how the editor learns to pause the world and show the
+    // node; polling isSuspended() would tell it THAT, not WHICH.
+    using SuspendListener = std::function<void(const SuspendedSite&)>;
+    void setSuspendListener(SuspendListener fn) { m_suspendListener = std::move(fn); }
+
+    // Is at least one run stopped at a breakpoint?
+    bool isSuspended() const { return !m_suspended.empty(); }
+    // Every stopped run, oldest first. The first one is what Step acts on.
+    std::vector<SuspendedSite> suspendedSites() const;
+    // The captured state of the index-th stopped run (null when out of range).
+    // Valid until the next debugContinue/debugStep/debugAbort or instance
+    // removal — read it, do not keep it.
+    const SuspendedRun* suspendedRun(size_t index = 0) const;
+
+    // Stop at the NEXT exec node any interpreted instance runs, once — a
+    // "pause" that lands on a node instead of between frames. Disarms on the
+    // hit (or with debugAbort).
+    void debugBreakNext() { m_breakNext = true; }
+    bool debugBreakNextArmed() const { return m_breakNext; }
+    // Let every stopped run carry on where it stopped (oldest first). A run
+    // that reaches another breakpoint stops again; the world around it is the
+    // caller's to unpause.
+    void debugContinue();
+    // Carry on the FIRST stopped run only as far as its next exec node, and
+    // stop there — into a called function, out to the caller's chain, wherever
+    // the next node is. A run whose chain simply ends is over, like any other.
+    void debugStep();
+    // Drop every stopped run without running it (play stopped, project
+    // switched). The instances stay; only the runs' remainders are lost.
+    void debugAbort();
+
 private:
     struct Inst
     {
@@ -483,6 +561,26 @@ private:
     static constexpr int kMaxCallDepth = 64;
     int m_callDepth = 0;
     Services   m_services;
+    // Contexts hold a POINTER to this (Context::onExecNode), so it lives here
+    // for the runtime's lifetime and never moves — which also means every
+    // Context built before setExecListener sees the listener afterwards, the
+    // compiled instances' long-lived ones included (were they traced).
+    ExecListener m_execListener;
+    // Breakpoints: the host's predicate, wrapped once into the function the
+    // Contexts point at (Context::breakAt) so the step/break-next arming is
+    // folded in without every Context having to know about it; the landing
+    // spot for a run the Runner suspends (Context::onSuspend); and the runs.
+    BreakPredicate  m_breakPredicate;
+    SuspendListener m_suspendListener;
+    std::function<bool(uint32_t, const std::string&, size_t, int)> m_breakAt;
+    std::function<void(SuspendedRun&&)>                            m_onSuspend;
+    std::vector<SuspendedRun> m_suspended;
+    bool m_breakNext = false;    // debugBreakNext: stop at the next node anywhere
+    bool m_stepping  = false;    // inside debugStep: stop at the next node of THAT run
+    void bindDebugHooks();
+    // Rebuild a Runner for a stopped run and let it carry on. False when the
+    // instance, its level or the node is gone — the run is then simply over.
+    void resumeRun(SuspendedRun run);
 };
 
 } // namespace HorizonCode

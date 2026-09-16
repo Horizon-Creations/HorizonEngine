@@ -355,6 +355,20 @@ enum class NodeType : uint8_t
     // that takes a widget and fades whatever is called "Panel" inside it.
     GetPropertyOn, SetPropertyOn,
 
+    // ── Reroute: a bend in a wire ────────────────────────────────────────────
+    // One pin in, the same pin out, nothing in between. Purely for layout — a
+    // long wire gets a knot it can be routed through, and a fan-out gets one
+    // place to branch from. Two shapes from one field: `hasArg` = an EXEC
+    // reroute (exec in → exec out); otherwise a DATA reroute whose single pin
+    // is typed by propType/isArray/container/typeName/keyType exactly the way
+    // Get Variable's is. It adopts that type from whatever gets wired into it
+    // (adoptRerouteType), so the palette never has to ask.
+    //
+    // The interpreter reads straight through it and the C++ emitter inlines
+    // its input expression — a reroute never costs a slot, a statement or a
+    // cache entry, which is what makes it safe to sprinkle.
+    Reroute,
+
     COUNT
 };
 
@@ -565,6 +579,23 @@ struct EventDecl
     std::string typeName;   // Enum/Struct argument: the definition asset
 };
 
+// Editor-only comment box drawn BEHIND the nodes it frames — a titled
+// rectangle that groups a region of the canvas and drags its nodes with it.
+// Never read by the interpreter or the C++ emitter; serialized with the graph
+// so a layout survives a reload. Ids share the graph's `nextId` counter with
+// nodes (uniqueness only — a comment id never means a node). `subgraph`
+// follows Node::subgraph: a box lives in one function body or in the event
+// graph, like the nodes it frames. The material graph's MatGraphComment is
+// the same idea for a graph with no sub-graphs.
+struct GraphComment
+{
+    int         id = 0;
+    std::string text;                       // header label
+    float       x = 0.0f, y = 0.0f;         // graph-space top-left
+    float       w = 280.0f, h = 180.0f;     // graph-space size
+    int         subgraph = 0;
+};
+
 struct HE_API Graph
 {
     std::vector<Node>      nodes;
@@ -573,6 +604,9 @@ struct HE_API Graph
     // Events this class declares (custom ones only — the engine's own are a
     // fixed list, see engineEvents()).
     std::vector<EventDecl> events;
+    // Editor chrome, see GraphComment. Absent from every graph written before
+    // it existed, which fromJson reads as "none".
+    std::vector<GraphComment> comments;
     int nextId = 1;
 
     // ── What this graph INHERITS, for the editor only ────────────────────────
@@ -874,9 +908,29 @@ HE_API std::vector<int> duplicateNodes(Graph& g, const std::vector<int>& ids,
 HE_API void adoptForEachElementType(Graph& g, int srcNode, int srcPin,
                                     int dstNode, int dstPin);
 
+// The same for a Reroute, which is generic until wired on EITHER side. Wiring
+// a data output INTO a reroute makes the reroute that output's type (and
+// drops its own outgoing links that no longer typecheck); wiring a reroute
+// whose input is still unwired into a typed INPUT makes it that input's type.
+// Exec pins never retype anything: an exec reroute is one from birth
+// (Node::hasArg). Call BEFORE Graph::connect. No-op when neither end is a
+// reroute.
+HE_API void adoptRerouteType(Graph& g, int srcNode, int srcPin, int dstNode, int dstPin);
+// Re-derive every reroute's type from what feeds it, following chains (a
+// reroute fed by a reroute), until nothing changes. What fromJson runs after
+// a load — the node upstream may have been retyped since the file was saved
+// — and what an editor runs after a retype. Returns whether anything moved.
+HE_API bool propagateRerouteTypes(Graph& g);
+// The data pin a reroute chain ultimately carries: walks (node, pin) upstream
+// through every reroute and returns the first non-reroute source, or the
+// input itself when the chain is fed by nothing. `pin` is unified. Lets a
+// menu asking "which class is this reference" see through the knots.
+HE_API const Node* rerouteOrigin(const Graph& g, const Node& n, int pin, int& originPin);
+
 // ── Interpreter ──────────────────────────────────────────────────────────────
 // The host binds these so HorizonCode can read/write target state without
 // knowing what the target is.
+struct SuspendedRun;   // below — a run stopped at a breakpoint
 struct Context
 {
     std::function<Value(int elem, const std::string& prop)>              getProperty;
@@ -984,7 +1038,126 @@ struct Context
     // Reset together with the variables (reseedVariables).
     std::function<Value(int nodeId)>              getNodeState;
     std::function<void(int nodeId, const Value&)> setNodeState;
+
+    // ── Execution trace (debugging) ──────────────────────────────────────────
+    // Who the running graph IS, so a node the Runner executes can be named to
+    // the outside: the instance, the class key of the level being run (the
+    // Runtime's canonical spelling — asset path, "level:<uuid>",
+    // "__game_instance__") and that level's index. The Runner stamps these,
+    // plus the node id, into currentExecSite() around every node it runs, and
+    // calls `onExecNode` for each EXEC node (never for a pure data node — those
+    // re-evaluate on every read and would strobe a highlight).
+    //
+    // All optional and empty by default: a bare Context still runs a graph as
+    // before, it just runs it anonymously. The Runtime fills them in makeContext.
+    uint32_t    traceInstance = 0;
+    std::string traceKey;
+    size_t      traceLevel = 0;
+    // A POINTER to the host's listener rather than a copy, because a Context is
+    // built per fire and copying a std::function per fire is exactly the kind
+    // of cost a tracing hook must not add. Null = nobody listening.
+    const std::function<void(uint32_t instance, const std::string& classKey,
+                             size_t level, int nodeId)>* onExecNode = nullptr;
+
+    // ── Breakpoints (debugging) ──────────────────────────────────────────────
+    // Asked BEFORE every exec node runs, and for the entry node of a run (the
+    // Event / Input Action / Function Entry): true = do not run it, stop the
+    // run here. The Runner then packs what it was holding into a SuspendedRun
+    // and hands it to `onSuspend` when the entry it was fired from returns —
+    // the same latent shape a Delay has (the chain stops, a continuation goes
+    // to the host), only the continuation carries the run's whole state, and
+    // it is resumed by a person instead of a timer (Runtime::debugContinue).
+    // Same pointer-not-copy rule as onExecNode, for the same reason. Null =
+    // no breakpoints, which costs one null check per node.
+    const std::function<bool(uint32_t instance, const std::string& classKey,
+                             size_t level, int nodeId)>* breakAt  = nullptr;
+    const std::function<void(SuspendedRun&&)>*          onSuspend = nullptr;
 };
+
+// ── One active function invocation ───────────────────────────────────────────
+// The argument values the call passed in (read by the FunctionEntry's
+// data-outs), the return values a FunctionReturn writes (read by the
+// FunctionCall's data-outs), and the function's LOCAL variables
+// (Variable::scope == fnEntryId), seeded from their declared defaults when the
+// frame is pushed. Outside the Runner because a suspended run carries its
+// frames along (see SuspendedRun) and a watch window will want to read them —
+// a function's locals live HERE and nowhere else.
+struct CallFrame
+{
+    int                                    fnEntryId = 0;
+    std::vector<Value>                     args;
+    std::vector<Value>                     results;
+    std::unordered_map<std::string, Value> locals;
+};
+
+// ── A run stopped at a breakpoint ────────────────────────────────────────────
+// Everything the Runner needs to carry on exactly where it stopped, by value:
+// the run's event argument, the exec-output cache (a Create Widget's id, a
+// call's results — a downstream read after the resume must still find them),
+// the call stack, and the steering nodes ABOVE the stop that still had work to
+// do. That last part is what makes this more than a Delay: a breakpoint in a
+// For Each body stops the FIRST iteration, and when the run continues the
+// remaining iterations — and the Done chain, and the Sequence's second output
+// above it — still run. Innermost first, unwound in that order.
+//
+// What is NOT carried, and stays with the Delay semantics: the native stack
+// of a CALLER in another Runner. Call Function (Ref) and an inherited call
+// build a fresh Runner; when that one stops here, the call returns to its
+// caller with default results and the caller's chain goes on. The rest of
+// the callee runs on Continue.
+struct SuspendedRun
+{
+    // The node the run stopped AT. resumePin < 0: an exec node that has NOT
+    // run yet (Continue runs it, then follows its exec-out). resumePin >= 0:
+    // an ENTRY node — never executed itself — whose chain from that exec-out
+    // has not started (an Input Action has one chain per pin).
+    int   nodeId    = 0;
+    int   resumePin = -1;
+    // Whose run this is (the Context's trace identity, see Context::traceInstance).
+    uint32_t    instance = 0;
+    std::string classKey;
+    size_t      level    = 0;
+    Value eventArg;
+    std::unordered_map<int, std::vector<Value>> execOutputs;
+    std::vector<CallFrame>                      callStack;
+    struct Frame
+    {
+        enum class Kind { Sequence, Loop, Call };
+        Kind  kind   = Kind::Sequence;
+        int   nodeId = 0;
+        // Sequence: the next exec-out to fire. Loop: the next iteration.
+        int   next   = 0;
+        // Loop: the collection as it was evaluated when the loop began — the
+        // array / set / map is read ONCE per For Each, and a resumed loop must
+        // see the same elements the first iteration did.
+        Value collection;
+    };
+    std::vector<Frame> outer;
+};
+
+// ── Where execution is right now ─────────────────────────────────────────────
+// The node the interpreter is inside of on THIS thread, or nodeId 0 when it is
+// not inside any. Set by the Runner around every node (exec and pure alike)
+// and restored on the way out, so a nested Runner — Call Function (Ref) builds
+// a fresh one — leaves the outer site intact when it returns.
+//
+// This exists for one consumer: a log sink. HE_LOG calls its sinks
+// synchronously on the logging thread, so a Print node's line, an "Array Get
+// out of range" warning and an engine row's error all arrive at the sink while
+// the node that caused them is still the current site — which is how the
+// editor's console learns which node a line belongs to without the message
+// ever having to say so. `classKey` points at the running Context's string and
+// is only valid for the duration of the node; copy it, do not keep it.
+struct ExecSite
+{
+    uint32_t    instance = 0;
+    const char* classKey = "";
+    size_t      level    = 0;
+    int         nodeId   = 0;
+};
+// Thread-local behind an exported accessor (a thread_local itself must never be
+// exported across a DLL boundary).
+HE_API const ExecSite& currentExecSite();
 
 class HE_API Runner
 {
@@ -1007,6 +1180,15 @@ public:
     // arg and exec-output caches start empty.
     void resumeFrom(int nodeId);
 
+    // Carry on a run that stopped at a breakpoint (Runtime::debugContinue /
+    // debugStep): the stopped node runs (or the entry's chain starts), its
+    // chain follows, then the outer frames unwind innermost first. The
+    // stopped node itself is not asked `breakAt` again — it was already
+    // answered — but every node after it is, which is how a step lands on
+    // the very next one. Stops again, with a fresh SuspendedRun, wherever
+    // `breakAt` next says so.
+    void resumeSuspended(SuspendedRun run);
+
 private:
     void runExecChain(const Node& from, int execOutPin, int depth);
     void execNode(const Node& n, int depth);
@@ -1018,18 +1200,26 @@ private:
     bool inputLinked(const Node& n, int dataInIndex) const;
     const Link* execLinkFrom(int nodeId, int pin) const;
 
-    // One active function invocation: the argument values the call passed in
-    // (read by the FunctionEntry's data-outs), the return values a
-    // FunctionReturn writes (read by the FunctionCall's data-outs), and the
-    // function's LOCAL variables (Variable::scope == fnEntryId), seeded from
-    // their declared defaults when the frame is pushed.
-    struct CallFrame
-    {
-        int                                    fnEntryId = 0;
-        std::vector<Value>                     args;
-        std::vector<Value>                     results;
-        std::unordered_map<std::string, Value> locals;
-    };
+    // ── Breakpoints ──
+    // Ask the host whether to stop at `n` (pin: see SuspendedRun::resumePin).
+    // True = the run is now suspended; the caller returns without running it.
+    bool breakHere(const Node& n, int resumePin);
+    // A steering node whose chain below it just suspended records the work it
+    // still had (see SuspendedRun::Frame) and returns, so the native stack
+    // unwinds with the record growing outward.
+    void pushFrame(SuspendedRun::Frame::Kind kind, int nodeId, int next,
+                   const Value* collection = nullptr);
+    // The run's entry has returned: hand the suspension to the host (if one
+    // is suspended) and forget it, so the next entry starts clean.
+    void deliverSuspension();
+    // Run one exec node and, unless it steers its own exec-outs, the chain
+    // hanging off its exec-out — what runExecChain does per link, for the
+    // node a resume starts at.
+    void runNodeAndChain(const Node& n, int depth);
+    // Finish the work one captured frame still had.
+    void unwindFrame(const SuspendedRun::Frame& f, int depth);
+    static bool steersOwnExec(const Node& n);
+
     // The innermost frame of the function that declares a given local (by its
     // FunctionEntry id), or null when that function isn't on the call stack
     // (a local's Get/Set node executing outside its function).
@@ -1045,6 +1235,13 @@ private:
     std::unordered_map<int, std::vector<Value>> m_execOutputs;
     // Active function-call frames (innermost on top) — params in, results out.
     std::vector<CallFrame> m_callStack;
+    // The run is stopped at a breakpoint: every runExecChain above the stop
+    // returns as soon as it sees this, and the steering nodes on the way out
+    // append their remaining work to m_suspension.outer.
+    bool         m_suspended = false;
+    SuspendedRun m_suspension;
+    // The node a resume started at — not asked `breakAt` again (once).
+    int          m_resumedNode = 0;
 };
 
 } // namespace HorizonCode

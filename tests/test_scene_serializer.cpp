@@ -42,6 +42,8 @@
 #include <HorizonScene/Components/UITextComponent.h>
 #include <HorizonScene/Components/UIImageComponent.h>
 #include <HorizonScene/Components/UIButtonComponent.h>
+#include <HorizonScene/Components/InactiveComponent.h>
+#include <HorizonScene/EntityActive.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <filesystem>
@@ -1847,6 +1849,10 @@ namespace
 		a.uiButton.onClickFunction = "OnStartClicked";
 		reg.emplace<UIButtonComponent>(panel, a.uiButton);
 
+		// The panel is switched off: the one component that is a tag rather
+		// than values, so the round trip has to bring back its presence.
+		HE::setEntityActive(reg, panel, false);
+
 		return a;
 	}
 
@@ -2213,6 +2219,10 @@ namespace
 			checkVec4(b->pressedColor, a.uiButton.pressedColor);
 			CHECK(b->onClickFunction == a.uiButton.onClickFunction);
 		}
+		// The "Active" switch: the panel was off, the actor never touched.
+		CHECK(reg.all_of<InactiveComponent>(panel));
+		CHECK_FALSE(HE::isEntityActiveSelf(reg, panel));
+		CHECK(HE::isEntityActiveSelf(reg, actor));
 	}
 }
 
@@ -2321,6 +2331,186 @@ TEST_CASE("Every component the save path writes can be removed again by its key"
 	}
 	CHECK(checked > 20);
 	CHECK_FALSE(SceneSerializer::removeComponentByKey(world, world.rootEntity(), "no-such-component"));
+}
+
+TEST_CASE("Every component the save path writes can be reset to its defaults by its key")
+{
+	// The mirror of the removal test for the Details panel's "Reset to
+	// Default". The two share one X-macro list in the serializer, so this
+	// mostly proves the list is complete against the save path; what it checks
+	// beyond that is the contract: a reset component is what a freshly
+	// constructed one serialises to, a missing one is refused rather than
+	// added, and the two keys that are not values (the prefab link, the
+	// inactive tag) are refused.
+	HorizonWorld world;
+	populateEveryComponent(world);
+	{
+		auto& reg = world.registry();
+		const Entity animated = world.createEntity("Animated");
+		reg.emplace<TransformComponent>(animated, TransformComponent{});
+		RootMotionComponent rm; rm.mode = RootMotionComponent::Mode::Transform;
+		reg.emplace<RootMotionComponent>(animated, rm);
+		AnimationLayerComponent lc;
+		lc.layers.push_back(AnimationLayerComponent::Layer{});
+		reg.emplace<AnimationLayerComponent>(animated, std::move(lc));
+	}
+
+	SceneSerializer ser;
+	size_t checked = 0, changed = 0;
+	for (Entity e : world.registry().view<NameComponent>())
+	{
+		if (e == world.rootEntity()) continue;
+		const auto before = nlohmann::json::from_cbor(ser.serializeEntityComponents(world, e));
+		for (const auto& [key, block] : before.items())
+		{
+			if (key == "__name" || key == "prefab" || key == "inactive")
+			{
+				CHECK_FALSE(SceneSerializer::resetComponentByKey(world, e, key));
+				// Refused means untouched.
+				const auto still = nlohmann::json::from_cbor(ser.serializeEntityComponents(world, e));
+				CHECK(still[key] == block);
+				continue;
+			}
+			INFO("component key '", key, "' is written by the save path but "
+			     "resetComponentByKey does not know it");
+			CHECK(SceneSerializer::resetComponentByKey(world, e, key));
+			const auto after = nlohmann::json::from_cbor(ser.serializeEntityComponents(world, e));
+			// Still there — a reset is not a removal ...
+			REQUIRE(after.contains(key));
+			// ... and the populate helper authored non-default values into
+			// (nearly) every component, so most blocks have to differ now.
+			if (after[key] != block) ++changed;
+			// Idempotent: resetting a default component changes nothing.
+			CHECK(SceneSerializer::resetComponentByKey(world, e, key));
+			const auto again = nlohmann::json::from_cbor(ser.serializeEntityComponents(world, e));
+			CHECK(again[key] == after[key]);
+			++checked;
+		}
+	}
+	CHECK(checked > 20);
+	CHECK(changed > 15);
+	// Never an add: an entity without the component is left without it.
+	const Entity bare = world.createEntity("Bare");
+	CHECK_FALSE(SceneSerializer::resetComponentByKey(world, bare, "light"));
+	CHECK_FALSE(world.registry().all_of<LightComponent>(bare));
+	CHECK_FALSE(SceneSerializer::resetComponentByKey(world, bare, "no-such-component"));
+}
+
+TEST_CASE("A component travels through the clipboard as text and lands as a scene load would")
+{
+	// The Details panel's Copy/Paste. The envelope names its key so the paste
+	// menu can say what it holds; the block inside is the scene format's, so a
+	// pasted component is exactly what a saved-and-reloaded one would be.
+	HorizonWorld world;
+	auto& reg = world.registry();
+	SceneSerializer ser;
+
+	const Entity src = world.createEntity("Lamp");
+	LightComponent authored;
+	authored.color       = { 0.2f, 0.4f, 0.9f };
+	authored.intensity   = 7.5f;
+	authored.range       = 42.0f;
+	authored.castsShadow = true;
+	reg.emplace<LightComponent>(src, authored);
+
+	const std::string text = ser.exportComponentText(world, src, "light");
+	REQUIRE_FALSE(text.empty());
+	CHECK(SceneSerializer::componentKeyOfText(text) == "light");
+
+	SUBCASE("onto an entity that lacks the component: added")
+	{
+		const Entity dst = world.createEntity("Other");
+		REQUIRE_FALSE(reg.all_of<LightComponent>(dst));
+		CHECK(ser.importComponentText(world, dst, text));
+		const auto* l = reg.try_get<LightComponent>(dst);
+		REQUIRE(l != nullptr);
+		checkVec3(l->color, authored.color);
+		CHECK(l->intensity   == doctest::Approx(authored.intensity));
+		CHECK(l->range       == doctest::Approx(authored.range));
+		CHECK(l->castsShadow == authored.castsShadow);
+		// The source is untouched by its own copy.
+		CHECK(reg.get<LightComponent>(src).intensity == doctest::Approx(authored.intensity));
+	}
+	SUBCASE("onto an entity that has it: values overwritten, nothing else touched")
+	{
+		const Entity dst = world.createEntity("Other");
+		LightComponent theirs; theirs.intensity = 1.0f;
+		reg.emplace<LightComponent>(dst, theirs);
+		reg.emplace<TransformComponent>(dst, TransformComponent{});
+		CHECK(ser.importComponentText(world, dst, text));
+		CHECK(reg.get<LightComponent>(dst).intensity == doctest::Approx(authored.intensity));
+		CHECK(reg.all_of<TransformComponent>(dst));
+		// One component per envelope: the paste did not smuggle a name along.
+		CHECK(reg.get<NameComponent>(dst).name == "Other");
+	}
+	SUBCASE("what is not a component clip is refused, quietly")
+	{
+		const Entity dst = world.createEntity("Other");
+		CHECK(SceneSerializer::componentKeyOfText("").empty());
+		CHECK(SceneSerializer::componentKeyOfText("some/path/to/asset.hasset").empty());
+		CHECK(SceneSerializer::componentKeyOfText("{\"horizonComponent\": 3}").empty());
+		CHECK(SceneSerializer::componentKeyOfText(
+			"{\"horizonComponent\": \"no-such-component\", \"values\": {}}").empty());
+		CHECK(SceneSerializer::componentKeyOfText(
+			"{\"horizonComponent\": \"light\", \"values\": 5}").empty());
+		CHECK_FALSE(ser.importComponentText(world, dst, "not json at all"));
+		CHECK_FALSE(reg.all_of<LightComponent>(dst));
+		// A component the entity does not carry cannot be copied ...
+		CHECK(ser.exportComponentText(world, dst, "light").empty());
+		// ... and the two non-values never can: the name is not a component,
+		// the prefab link is identity.
+		CHECK(ser.exportComponentText(world, src, "__name").empty());
+		reg.emplace<PrefabInstanceComponent>(src);
+		CHECK(ser.exportComponentText(world, src, "prefab").empty());
+		CHECK(SceneSerializer::componentKeyOfText(
+			"{\"horizonComponent\": \"prefab\", \"values\": {}}").empty());
+	}
+	SUBCASE("the inactive tag travels too")
+	{
+		HE::setEntityActive(reg, src, false);
+		const std::string off = ser.exportComponentText(world, src, "inactive");
+		REQUIRE_FALSE(off.empty());
+		CHECK(SceneSerializer::componentKeyOfText(off) == "inactive");
+		const Entity dst = world.createEntity("Other");
+		CHECK(HE::isEntityActiveSelf(reg, dst));
+		CHECK(ser.importComponentText(world, dst, off));
+		CHECK_FALSE(HE::isEntityActiveSelf(reg, dst));
+	}
+}
+
+TEST_CASE("Switched off is inherited down the hierarchy and cheap to ask when nothing is off")
+{
+	HorizonWorld world;
+	auto& reg = world.registry();
+	const Entity room  = world.createEntity("Room");
+	const Entity chair = world.createEntity("Chair");
+	const Entity leg   = world.createEntity("Leg");
+	world.reparentEntity(chair, room);
+	world.reparentEntity(leg, chair);
+
+	// A fresh world has the pool (reserved up front) and nothing in it.
+	CHECK_FALSE(HE::anyEntityInactive(reg));
+	CHECK(HE::isEntityActive(reg, leg));
+
+	HE::setEntityActive(reg, room, false);
+	CHECK(HE::anyEntityInactive(reg));
+	CHECK_FALSE(HE::isEntityActiveSelf(reg, room));
+	// The chair's own box is still ticked — it is the room that is off.
+	CHECK(HE::isEntityActiveSelf(reg, chair));
+	CHECK_FALSE(HE::isEntityActive(reg, chair));
+	CHECK_FALSE(HE::isEntityActive(reg, leg));
+
+	HE::setEntityActive(reg, room, true);
+	CHECK_FALSE(HE::anyEntityInactive(reg));
+	CHECK(HE::isEntityActive(reg, leg));
+	// Toggling twice is not an error and leaves one tag at most.
+	HE::setEntityActive(reg, leg, false);
+	HE::setEntityActive(reg, leg, false);
+	CHECK(reg.view<InactiveComponent>().size() == 1);
+	CHECK(HE::isEntityActive(reg, chair));
+	CHECK_FALSE(HE::isEntityActive(reg, leg));
+	// An invalid entity is not active, and asking does not blow up.
+	CHECK_FALSE(HE::isEntityActive(reg, entt::null));
 }
 
 TEST_CASE("Every component survives a round-trip with non-default values in every persisted field")

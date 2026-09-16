@@ -26,6 +26,11 @@ add_executable(he_tests
     test_editor_theme.cpp
     test_report_issue.cpp
     test_notification_store.cpp
+    # Node highlighting + console→node: hits fade, reveals are two one-shots.
+    test_hc_exec_trace.cpp
+    # The watch window's rows: a stopped run's event argument, frames, locals,
+    # variables and outputs, spelled as the window shows them.
+    test_hc_watch.cpp
     test_editor_dock_state.cpp
     test_scene_autosave.cpp
     test_game_instance.cpp
@@ -39,20 +44,32 @@ add_executable(he_tests
     test_outliner_filter.cpp
     # The eye, the padlock and the sibling order behind each Outliner row.
     test_outliner_row_actions.cpp
+    # Hide / Isolate / Show All / Group / Ungroup behind the viewport's
+    # right-click menu: the sun stays, the group's members do not jump.
+    test_viewport_actions.cpp
     # …and the row itself, driven headless: the two buttons sit ON the tree
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.
     test_outliner_ui.cpp
+    test_inspector_ui.cpp
     # The Landscape panel's Foliage brush, driven the same way: mode well,
     # Grow/Erase well, and a drag over a top-down viewport into the mask.
     test_terrain_tools_ui.cpp
     # The Audio Mixer, driven the same way: strips from a real ProjectData, a
     # click on M reaching the device-less AudioEngine as a mute, S as a solo.
     test_audio_mixer_ui.cpp
+    # The Undo History window, driven the same way: rows from a real EditorUndo
+    # over a real world, a click on a row rewinding the world in one restore.
+    test_undo_history_ui.cpp
+    # The Watch window, driven the same way: sections and rows from a real
+    # runtime stopped at a breakpoint, Go to Node raising the reveal.
+    test_hc_watch_ui.cpp
+    test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
     test_scene_recovery_ui.cpp
     test_editorcamera.cpp
+    test_camera_bookmarks.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
     test_jobsystem.cpp
@@ -82,6 +99,7 @@ add_executable(he_tests
     test_horizoncode_types.cpp
     test_hc_fallback_report.cpp
     test_horizoncode_containers.cpp
+    test_horizoncode_reroute.cpp
     test_python_scripting.cpp
     test_physics.cpp
     test_collision_system.cpp
@@ -96,6 +114,7 @@ add_executable(he_tests
     test_camera_rig.cpp
     test_skeletalmeshimporter.cpp
     test_meshimporter.cpp
+    test_assimpimport.cpp
     test_gltf_material_import.cpp
     test_skeletalmeshcomponent.cpp
     test_animationsystem.cpp
@@ -126,6 +145,7 @@ add_executable(he_tests
     test_logging.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
+    test_project_settings.cpp
     test_export_backend.cpp
     test_cpp_scaffold.cpp
     test_tutorial.cpp
@@ -145,6 +165,12 @@ add_executable(he_tests
     # …and the gizmo moves it: EditorTransformGizmo over a mesh-less entity,
     # driven headless the way test_gizmo_pick.cpp drives ImGuizmo.
     test_viewport_gizmo.cpp
+    # The shortcut table: overrides round-trip through the config string,
+    # conflicts are per scope, a chord fires only with its exact modifiers.
+    test_editor_shortcuts.cpp
+    # …and the Preferences page over it, driven headless: click a chord,
+    # press keys, read the binding back out of the pinned config.json.
+    test_shortcuts_ui.cpp
     test_weather.cpp
     test_gamelogic_loader.cpp
     test_gamelogic_services.cpp
@@ -189,6 +215,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/OcclusionCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/ScenePick.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/SsaoKernel.cpp
@@ -214,6 +241,9 @@ add_executable(he_tests
     # Matrices in, yes/no out — the part of "drag a frame around these" that a
     # test can ask without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorMarquee.cpp
+    # The viewport's right-click verbs (hide / isolate / show all / group /
+    # ungroup): a registry and a selection in, touched entities out — no ImGui.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportActions.cpp
     # Multi-selection editing: which leaves of the active entity's component
     # state changed, and how they land on the other members. JSON in, JSON
     # out, plus a real world for the write-back — no widgets involved.
@@ -343,6 +373,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorCamera.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CameraBookmarks.cpp
     # Compiled in so the editor's real network↔scene bridge is covered
     # end-to-end; it pulls in no ImGui or GPU code.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabController.cpp
@@ -350,6 +381,10 @@ add_executable(he_tests
     # apply a delete), so the tests cannot link without it — and asserting what
     # lands in it is how those posts are covered at all.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
+    # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcExecTrace.cpp
+    # The stopped run as watch rows (test_hc_watch.cpp) — ImGui-free like the trace.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatch.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitController.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabDocSync.cpp
@@ -481,11 +516,20 @@ add_executable(he_tests
     # target alone defines); the per-file definition below turns it on for this
     # one source and its test, and for nothing else in the binary.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTransformGizmo.cpp
+    # The shortcut table, for test_editor_shortcuts.cpp: same per-file
+    # HE_IMGUI_ENABLED (ImGuiKeyChord is its currency).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorShortcuts.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ShortcutsPage.cpp
     # The World Outliner, for test_outliner_ui.cpp: it needs a real AppContext
     # (built there) and ImGui, and nothing else in this binary. Same per-file
     # HE_IMGUI_ENABLED as the gizmo — AppContext's layout depends on it, so the
     # panel and its test are the only two sources here that see that layout.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
+    # The Details panel, for test_inspector_ui.cpp: same AppContext, same
+    # per-file HE_IMGUI_ENABLED. Everything it reaches for (the widgets, the
+    # help table, the multi-edit diff, the HorizonCode class listing, the
+    # Landscape tools) is already in this binary for the other panels.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/InspectorPanel.cpp
     # The Landscape tools, for test_terrain_tools_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. Everything they call (TerrainPaint/FoliagePaint
     # in HorizonScene, RenderWorld, the toolbar, the widgets) is already here.
@@ -494,9 +538,21 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. It reads ProjectData (HorizonTools, linked
     # below) and AudioEngine (HorizonScene), both already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
+    # The Undo History window, for test_undo_history_ui.cpp: same AppContext,
+    # same per-file HE_IMGUI_ENABLED. It reads EditorUndo (already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/UndoHistoryPanel.cpp
+    # The Watch window, for test_hc_watch_ui.cpp: same AppContext, same per-file
+    # HE_IMGUI_ENABLED. It reads HcExecTrace and HcWatch (both already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
+    # The Project Settings tab, for test_project_settings_ui.cpp: same
+    # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
+    # writes Config/ProjectSettings.json through the ProjectManager.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
+    # The icon/splash rows the settings tab draws (shared with the Export dialog).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -508,14 +564,27 @@ add_executable(he_tests
 set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTransformGizmo.cpp
     test_viewport_gizmo.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorShortcuts.cpp
+    test_editor_shortcuts.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ShortcutsPage.cpp
+    test_shortcuts_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
     test_outliner_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/InspectorPanel.cpp
+    test_inspector_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
     test_terrain_tools_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
     test_audio_mixer_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/UndoHistoryPanel.cpp
+    test_undo_history_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
+    test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
+    test_project_settings_ui.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE
@@ -618,7 +687,7 @@ set(HCGEN_CLASSES
     ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived
-    inherit_novars_base inherit_novars input_actions containers
+    inherit_novars_base inherit_novars input_actions containers reroutes
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

@@ -13,6 +13,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -786,6 +787,91 @@ TEST_CASE("ProjectExporter copies startup scene file")
     he_test::removeAllQuiet(outputDir);
 }
 
+// The project's settings file rides VERBATIM next to project.hcfg — byte for
+// byte, so the exporter never has to understand it and the game reads exactly
+// what the panel wrote. And it rides BOTH ways: a project that lost its file
+// (back to the defaults) takes a stale copy out of the output again, because
+// "no file" is the answer "default" and a leftover would quietly overrule it.
+TEST_CASE("ProjectExporter ships Config/ProjectSettings.json verbatim and removes a stale one")
+{
+    auto root       = std::filesystem::temp_directory_path() / "he_test_export_settings_root";
+    auto contentDir = root / "Content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_settings_out";
+    he_test::removeAllQuiet(root);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+    std::filesystem::create_directories(root / "Config");
+
+    // Not a valid settings document on purpose: the copy must be verbatim, and
+    // a parse-and-rewrite would either choke on this or normalise it.
+    const std::string bytes = "{ \"version\": 1, \"shadows\": { \"distance\": 123 }, \"odd\":  [1,2 ] }\n";
+    { std::ofstream f(root / "Config" / "ProjectSettings.json", std::ios::binary); f << bytes; }
+
+    ExportSettings settings;
+    settings.compress            = false;
+    settings.projectSettingsFile = root / "Config" / "ProjectSettings.json";
+    auto result = ProjectExporter::exportProject(contentDir, "Cfg", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+
+    const auto shipped = outputDir / "Config" / "ProjectSettings.json";
+    REQUIRE(std::filesystem::exists(shipped));
+    {
+        std::ifstream in(shipped, std::ios::binary);
+        std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == bytes);
+    }
+
+    // The project reverts to the defaults: the file is gone. The next export of
+    // the same output must not leave the old numbers lying there.
+    std::filesystem::remove(root / "Config" / "ProjectSettings.json");
+    result = ProjectExporter::exportProject(contentDir, "Cfg", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+    CHECK_FALSE(std::filesystem::exists(shipped));
+
+    // And an exporter told nothing about a settings file touches nothing: the
+    // pre-existing behaviour for tools that pack a bare directory.
+    { std::ofstream f(shipped, std::ios::binary); f << bytes; }
+    ExportSettings mute;
+    mute.compress = false;
+    result = ProjectExporter::exportProject(contentDir, "Cfg", "", outputDir, mute);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+    CHECK(std::filesystem::exists(shipped));
+
+    he_test::removeAllQuiet(root);
+    he_test::removeAllQuiet(outputDir);
+}
+
+// The title is what a launcher SHOWS; the project name is what the files are
+// CALLED. The .desktop entry's Name= takes the title, its file name and the
+// identifier inside it stay derived from the project name — retitling a game
+// must not move its identity.
+TEST_CASE("ProjectExporter labels the .desktop entry with the display name, files keep the project name")
+{
+    auto contentDir = std::filesystem::temp_directory_path() / "he_test_export_title_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_title_out";
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    ExportSettings settings;
+    settings.compress     = false;
+    settings.iconPlatform = ExportPlatform::Linux;
+    settings.displayName  = "Shiny Title";
+    settings.documentTypes.push_back({ "shiny", "Shiny Document", "" });
+    const auto result = ProjectExporter::exportProject(contentDir, "ShinyProj", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+
+    CHECK(std::filesystem::exists(outputDir / "ShinyProj.hpak"));
+    const auto desktop = outputDir / "com.horizonengine.shinyproj.desktop";
+    REQUIRE(std::filesystem::exists(desktop));
+    std::ifstream in(desktop);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(text.find("Name=Shiny Title\n") != std::string::npos);
+    CHECK(text.find("Name=ShinyProj") == std::string::npos);
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
 TEST_CASE("ProjectExporter copies game runtime binaries when gameRuntimeDir is set")
 {
     auto runtimeDir = std::filesystem::temp_directory_path() / "he_test_export_runtime";
@@ -1102,3 +1188,77 @@ TEST_CASE("ProjectExporter encrypts and the hcfg key decrypts the pak")
     he_test::removeAllQuiet(outputDir);
 }
 #endif // HE_HAVE_CRYPTO
+
+// ─── The project's own icon, and the splash picture ──────────────────────────
+#include <Application/AppIcon.h>
+
+TEST_CASE("ProjectExporter builds the icon from the project's PNG when there is one, and copies the splash")
+{
+    auto root       = std::filesystem::temp_directory_path() / "he_test_export_iconfile_root";
+    auto contentDir = root / "Content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_test_export_iconfile_out";
+    he_test::removeAllQuiet(root);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    // A solid green 8x8 — nothing the generated glyph on its blue plate could
+    // produce, so the shipped AppIcon.png says which of the two made it.
+    const int side = 8;
+    std::vector<std::uint8_t> green((std::size_t)side * side * 4);
+    for (std::size_t i = 0; i < green.size(); i += 4) { green[i] = 0; green[i+1] = 200; green[i+2] = 0; green[i+3] = 255; }
+    REQUIRE(HE::hePngWrite(contentDir / "Icon.png", green.data(), side, side));
+    // The splash is any bytes: it is copied, never decoded, by the export.
+    const std::string splashBytes = "not really a png, and that is fine here";
+    { std::ofstream f(contentDir / "Splash.png", std::ios::binary); f << splashBytes; }
+
+    ExportSettings settings;
+    settings.compress        = false;
+    settings.iconPlatform    = ExportPlatform::Linux;
+    settings.appIconName     = "home";              // the fallback, which must NOT win
+    settings.appIconFile     = contentDir / "Icon.png";
+    settings.splashImageFile = contentDir / "Splash.png";
+    auto result = ProjectExporter::exportProject(contentDir, "IconProj", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+
+    const auto shippedIcon = outputDir / "AppIcon.png";
+    REQUIRE(std::filesystem::exists(shippedIcon));
+    {
+        std::vector<std::uint8_t> rgba;
+        int w = 0, h = 0;
+        REQUIRE(HE::heLoadPngRGBA(shippedIcon, rgba, w, h));
+        CHECK(w == 256);
+        CHECK(h == 256);
+        // The middle texel is the picture's green, not the plate's blue.
+        const std::uint8_t* mid = rgba.data() + ((std::size_t)128 * 256 + 128) * 4;
+        CHECK(mid[1] == 200);
+        CHECK(mid[2] == 0);
+        CHECK(mid[3] == 255);
+    }
+    const auto shippedSplash = outputDir / "Splash.png";
+    REQUIRE(std::filesystem::exists(shippedSplash));
+    {
+        std::ifstream in(shippedSplash, std::ios::binary);
+        std::string got((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(got == splashBytes);
+    }
+
+    // The PNG went missing: the generated glyph stands in rather than no icon,
+    // and the splash switched off removes the stale copy — a leftover would
+    // overrule "off" on the next run.
+    std::filesystem::remove(contentDir / "Icon.png");
+    settings.splashImageFile.clear();
+    result = ProjectExporter::exportProject(contentDir, "IconProj", "", outputDir, settings);
+    REQUIRE_MESSAGE(result.success, result.errorMessage);
+    REQUIRE(std::filesystem::exists(shippedIcon));
+    {
+        std::vector<std::uint8_t> rgba;
+        int w = 0, h = 0;
+        REQUIRE(HE::heLoadPngRGBA(shippedIcon, rgba, w, h));
+        const std::uint8_t* corner = rgba.data();   // the plate's rounded corner: transparent
+        CHECK(corner[3] == 0);
+    }
+    CHECK_FALSE(std::filesystem::exists(shippedSplash));
+
+    he_test::removeAllQuiet(root);
+    he_test::removeAllQuiet(outputDir);
+}

@@ -79,6 +79,27 @@ public:
     { (void)id; (void)name; return true; }
     // UI pointer event on the instance's own entity (click / hover enter/exit).
     virtual bool callOnUIEvent(InstanceId id, UIScriptEvent ev) = 0;
+    // Input actions: the events a PlayerController graph receives as
+    // Input.<Action>.Pressed / .Released / .Axis / .Axis2D, delivered to every
+    // text-script instance as well (PlayerHost pumps both). `action` is the
+    // logical action name (the InputAction asset's stem). The two axis forms
+    // fire once per frame while the session runs, the button pair on the edge.
+    //
+    // Defaulted like the pairs above, for the same reason: a backend built
+    // before these existed keeps compiling and simply delivers none of them.
+    virtual bool callOnInputPressed(InstanceId id, const std::string& action)
+    { (void)id; (void)action; return true; }
+    virtual bool callOnInputReleased(InstanceId id, const std::string& action)
+    { (void)id; (void)action; return true; }
+    virtual bool callOnInputAxis(InstanceId id, const std::string& action, float value)
+    { (void)id; (void)action; (void)value; return true; }
+    virtual bool callOnInputAxis2D(InstanceId id, const std::string& action, float x, float y)
+    { (void)id; (void)action; (void)x; (void)y; return true; }
+    // A timer started with horizon.timer.after / .every came due. Every
+    // instance hears every timer — the handle is how a script tells its own
+    // from the rest, exactly as a HorizonCode graph does with OnTimer.
+    virtual bool callOnTimer(InstanceId id, int handle)
+    { (void)id; (void)handle; return true; }
 
     // Declared properties of a loaded script (editor inspector surface) and
     // per-instance override injection (before callOnStart).

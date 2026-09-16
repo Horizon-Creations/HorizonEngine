@@ -204,6 +204,44 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Play Report",     "Show warnings" },
 		{ "Project Hub",     "Remove from list" },
 		{ "Viewport Options", "Snap to grid" },
+		// The view picker's rows come out of a table (label + keypad shortcut),
+		// so the static audit never sees a literal; the checkbox under them is
+		// the only one it counts.
+		{ "Viewport View",    "Perspective" },
+		{ "Viewport View",    "Top" },
+		{ "Viewport View",    "Left" },
+		{ "Viewport View",    "Orthographic" },
+		// The bookmark submenu: its heads are literals, its rows are built at
+		// run time ("Bookmark 3") and ask by key — both halves checked here.
+		{ "Viewport View",    "Bookmarks" },
+		{ "Viewport View",    "Set Bookmark" },
+		{ "Viewport View",    "Clear Bookmarks" },
+		// The secondary panes: three View rows, and the strip above each
+		// picture, whose view button is labelled by the camera's preset and
+		// therefore asks by key (checked below with the other keys).
+		{ "View",             "Scene 2" },
+		{ "View",             "Scene 4" },
+		{ "Secondary Viewport", "Grid" },
+		{ "Secondary Viewport", "Match Scene" },
+		// The Show popup's rows are literals the scan sees; the right-click
+		// menu's lock verb is a ternary again ("Lock" / "Unlock"), and the
+		// menu itself is drawn by a helper ABOVE the scope it is looked up
+		// under — so both are checked here, where the lookup is the real one.
+		{ "Viewport Show",    "Ground Grid" },
+		{ "Viewport Show",    "Editor Icons" },
+		{ "Viewport Show",    "Hide All Overlays" },
+		{ "Viewport Menu",    "Hide Selected" },
+		{ "Viewport Menu",    "Isolate Selected" },
+		{ "Viewport Menu",    "Show All" },
+		{ "Viewport Menu",    "Group" },
+		{ "Viewport Menu",    "Ungroup" },
+		{ "Viewport Menu",    "Lock" },
+		{ "Viewport Menu",    "Unlock" },
+		// Same for the view-mode picker: its labels are HE::viewModeName().
+		{ "Viewport View Mode", "Lit" },
+		{ "Viewport View Mode", "Wireframe" },
+		{ "Viewport View Mode", "Rough / Spec / Metal" },
+		{ "Viewport View Mode", "Emissive" },
 		{ "Tutorial",        "Start over" },
 		{ "Collaboration",   "Ask to edit" },
 		{ "Source Root",     "C++ Class" },
@@ -403,6 +441,11 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		// The Outliner's eye and padlock are drawn from primitives over an
 		// invisible button — no label at all, so they are keyed by hand.
 		"outliner.visibility", "outliner.lock",
+		// The bookmark rows are numbered at run time ("Bookmark 3"), and a
+		// secondary pane's view button is labelled by whatever preset its
+		// camera sits in.
+		"viewport.bookmark-go", "viewport.bookmark-set",
+		"secondary-viewport.view",
 	};
 	for (const char* k : byKey)
 	{
@@ -759,4 +802,29 @@ TEST_CASE("guides: every link out of a recipe lands somewhere")
 	}
 	INFO("guide links checked: " << checked);
 	CHECK(checked > 0);
+}
+
+// The icon/splash rows live in AppMetadataRows.cpp and are drawn under the
+// CALLER's scope — Project Settings (Application, Project General) and the
+// Export dialog. The static audit cannot see a scope that is not in the file,
+// so this is what keeps every scope that draws them covered: a new caller has
+// to add its entries here or the test names the gap.
+TEST_CASE("editor help: the shared application-metadata rows are covered in every scope")
+{
+	const char* iconScopes[]   = { "Application", "Export" };
+	const char* splashScopes[] = { "Project General", "Export" };
+	for (const char* scope : iconScopes)
+	{
+		Help::Scope s(scope);
+		INFO("scope: " << scope);
+		CHECK(Help::find("Icon file##appiconfile") != nullptr);
+	}
+	for (const char* scope : splashScopes)
+	{
+		Help::Scope s(scope);
+		INFO("scope: " << scope);
+		CHECK(Help::find("Show a splash while starting") != nullptr);
+		CHECK(Help::find("Splash image##splashimage") != nullptr);
+		CHECK(Help::find("Subtitle##splashsubtitle") != nullptr);
+	}
 }

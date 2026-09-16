@@ -112,6 +112,20 @@ struct EditorConfig
 	float SSAOIntensity = 1.0f;   // 0 = off … 1 = full ambient occlusion
 	int   SSAOMethod    = 0;      // AO method: 0 = SSAO, 1 = HBAO, 2 = GTAO (planned)
 
+	// Post-process: depth of field (pushed each frame via SetDepthOfFieldSettings).
+	// OpenGL + Metal. Off by default — a lens blur over the editor viewport is
+	// something to opt into, not to discover.
+	bool  DoFEnabled       = false;
+	float DoFFocusDistance = 10.0f;  // metres to the plane in focus
+	float DoFFocusRange    = 4.0f;   // metres of fully sharp band around it
+	float DoFAperture      = 2.8f;   // f-number: smaller = stronger blur
+
+	// Post-process: motion blur (pushed each frame via SetMotionBlurSettings).
+	// OpenGL + Metal, camera motion only. Off by default for the same reason.
+	bool  MotionBlurEnabled   = false;
+	float MotionBlurIntensity = 0.5f;   // shutter as a fraction of the frame (0.5 = 180°)
+	float MotionBlurMax       = 24.0f;  // longest smear in pixels at 720p
+
 	// Anti-aliasing (pushed each frame via SetAntiAliasingSettings, see
 	// docs/anti-aliasing-plan.md). `AntiAliasing` holds an HE AAMethod int —
 	// 0 Off, 1 FXAA, 2 SMAA, 3 TAA, 4 MetalFX — and defaults to FXAA because
@@ -132,6 +146,13 @@ struct EditorConfig
 	// Forward (default), 1 = Deferred (G-buffer + fullscreen lighting resolve,
 	// Metal + OpenGL). The backend's supportsDeferredRendering gates it.
 	int   RenderPath = 0;
+
+	// CPU occlusion culling (pushed each frame via SetOcclusionCullingSettings):
+	// objects hidden behind nearer opaque geometry are not drawn. OpenGL + Metal;
+	// the image is identical either way, only the draw count drops. Off by
+	// default until it has run on real scenes for a while (a culler bug makes
+	// things vanish, and that is the worse failure).
+	bool  OcclusionCulling = false;
 
 	// Screen-space reflections (pushed each frame via SetSSRSettings). v1 only
 	// effective on Metal in the deferred render path; supportsScreenSpaceReflections

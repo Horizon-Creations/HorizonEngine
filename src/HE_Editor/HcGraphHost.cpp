@@ -9,6 +9,7 @@
 #include "EditorSettingsPanel.h" // which of the two variable-list looks the user picked
 #include "DocsPanel.h"           // F1 over a node opens its entry in the manual
 #include "HcGraphShortcuts.h"    // the "hold a key, click" node bindings
+#include "HcExecTrace.h"         // which node just ran — the fading amber halo
 #include <HorizonScene/EngineApi.h>
 #include <HorizonCode/HcClassResolve.h>   // member menus read the FLATTENED class
 #include <ContentManager/ContentManager.h>
@@ -73,7 +74,11 @@ struct DragPin { bool isExec = true; PT type = PT::Float; bool array = false;
                  // matches on the kind because Graph::connect does (an array
                  // does not join a set).
                  HC::ContainerKind ctr = HC::ContainerKind::None;
-                 std::string typeName; };
+                 std::string typeName;
+                 // A Map pin's key half, for the one spawn that carries a pin
+                 // whole (the reroute); everything else re-derives its keys.
+                 PT keyType = PT::String;
+                 std::string keyTypeName; };
 
 DragPin classifyDragPin(const HC::Node& sn, int srcPin)
 {
@@ -84,7 +89,9 @@ DragPin classifyDragPin(const HC::Node& sn, int srcPin)
 	if (d.isExec) return d;
 	auto take = [&d](const HC::PinDesc& pd)
 	{ d.type = pd.type; d.array = pd.isArray; d.ctr = pd.kind();
-	  if (pd.typeName) d.typeName = pd.typeName; };
+	  if (pd.typeName) d.typeName = pd.typeName;
+	  d.keyType = pd.keyType;
+	  if (pd.keyTypeName) d.keyTypeName = pd.keyTypeName; };
 	if (srcPin >= rr.dataOut0 && srcPin - rr.dataOut0 < (int)sig.dataOuts.size())
 		take(sig.dataOuts[srcPin - rr.dataOut0]);
 	else if (srcPin - rr.dataIn0 < (int)sig.dataIns.size())
@@ -100,7 +107,21 @@ int seedSpawnedNode(HC::Graph& graph, int id, const DragPin& dp, bool srcInput)
 {
 	HC::Node* nn = graph.findNode(id);
 	if (!nn) return -1;
-	if (!dp.isExec)
+	// A reroute is born in the dragged pin's shape: an exec knot off an exec
+	// pin, else a data knot carrying exactly that pin's type (container and key
+	// included — adoptRerouteType would redo this on connect, but the pin
+	// match below has to see the right signature first).
+	if (nn->type == NT::Reroute)
+	{
+		nn->hasArg = dp.isExec;
+		if (!dp.isExec)
+		{
+			nn->propType = dp.type; nn->typeName = dp.typeName;
+			nn->isArray = dp.ctr != HC::ContainerKind::None; nn->container = dp.ctr;
+			nn->keyType = dp.keyType; nn->keyTypeName = dp.keyTypeName;
+		}
+	}
+	else if (!dp.isExec)
 	{
 		nn->propType = dp.type;      // keep the matched signature
 		if (nn->typeName.empty() && (dp.type == PT::Enum || dp.type == PT::Struct))
@@ -526,11 +547,13 @@ int quickSpawnNode(const Host& h, NT type, const GraphEditor::QuickSpawnCtx& c)
 	if (c.linkInput)
 	{
 		HC::adoptForEachElementType(graph, id, pin, c.linkNode, c.linkPin);
+		HC::adoptRerouteType(graph, id, pin, c.linkNode, c.linkPin);
 		graph.connect(id, pin, c.linkNode, c.linkPin);
 	}
 	else
 	{
 		HC::adoptForEachElementType(graph, c.linkNode, c.linkPin, id, pin);
+		HC::adoptRerouteType(graph, c.linkNode, c.linkPin, id, pin);
 		graph.connect(c.linkNode, c.linkPin, id, pin);
 	}
 	HC::inferUserTypeNames(graph);   // the new node learns its definition from the wire
@@ -545,10 +568,22 @@ GraphEditor::Model buildModel(const Host& h)
 	GraphEditor::Model m;
 	m.multiSelect = true;      // shift-click / box-select; drag + Delete act on all
 	m.compactPureNodes = true; // getters/literals draw as compact chips
-	// The last compile check's error node gets a red halo.
+	// The last compile check's error node gets a red halo; a node the
+	// interpreter just ran an amber one that fades over HcExecTrace::kFadeSeconds.
+	// The error wins where both apply — a broken node running is still broken.
 	m.nodeOutline = [&h](int id) -> ImU32
 	{
-		return (h.errorNode != 0 && id == h.errorNode) ? IM_COL32(230, 70, 70, 255) : 0;
+		if (h.errorNode != 0 && id == h.errorNode) return IM_COL32(230, 70, 70, 255);
+		if (h.traceKey.empty()) return 0;
+		// The node a run is STOPPED at: a solid marker that stays until the
+		// run moves on — a program counter does not fade. Yellow, not the
+		// halo's amber, so "about to run" and "just ran" read differently.
+		if (HcExecTrace::pausedNodeOf(h.traceKey) == id) return IM_COL32(255, 236, 120, 255);
+		const float glow = HcExecTrace::glowOf(h.traceKey, id);
+		if (glow <= 0.0f) return 0;
+		// Alpha fades, the hue does not: a halo that changed colour as it aged
+		// would read as three different states instead of one thing ending.
+		return IM_COL32(255, 190, 60, (int)(255.0f * glow));
 	};
 	m.nodeIds = [&h, &graph]{ std::vector<int> ids; ids.reserve(graph.nodes.size());
 		for (const auto& n : graph.nodes) if (n.subgraph == h.currentGraph) ids.push_back(n.id); return ids; };
@@ -566,8 +601,10 @@ GraphEditor::Model buildModel(const Host& h)
 		return ls; };
 	m.connect = [&h, &graph](int oN, int oP, int iN, int iP){
 		// ForEach is generic until wired: adopt the source array's element type
-		// (Array/Element pins retype + recolor) before the typed connect.
+		// (Array/Element pins retype + recolor) before the typed connect. A
+		// reroute likewise takes the shape of whatever it is wired to.
 		HC::adoptForEachElementType(graph, oN, oP, iN, iP);
+		HC::adoptRerouteType(graph, oN, oP, iN, iP);
 		// A wire the types refused is not always a dead end: when ONE node would
 		// carry it (Float into a String pin → To String) that node is built and
 		// wired here, half-way down the wire. It also re-infers user types, so
@@ -584,6 +621,169 @@ GraphEditor::Model buildModel(const Host& h)
 		return true; };
 	m.clearPinLinks = [&graph](int node, int pin, bool){ removePinLinks(graph, node, pin); };
 	m.removeNode = [&graph](int id){ graph.removeNode(id); };
+	// Reroutes draw as a dot in the wire; a double-click on a wire splices one
+	// in — the wire's own type, exec or data, taken from its source pin.
+	m.nodeIsReroute = [&graph](int id){
+		const HC::Node* n = graph.findNode(id);
+		return n && n->type == NT::Reroute; };
+	m.onLinkDoubleClick = [&h, &graph](int sN, int sP, int dN, int dP, ImVec2 pos)
+	{
+		const HC::Node* s = graph.findNode(sN);
+		if (!s || !graph.findNode(dN)) return;
+		const bool exec = sP < pinRanges(*s).dataIn0;
+		const int id = addNode(graph, NT::Reroute,
+			ImVec2(pos.x - GraphEditor::kRerouteW * 0.5f, pos.y - GraphEditor::kRerouteW * 0.5f),
+			h.currentGraph);
+		graph.findNode(id)->hasArg = exec;
+		graph.links.erase(std::remove_if(graph.links.begin(), graph.links.end(),
+			[&](const HC::Link& l){ return l.srcNode == sN && l.srcPin == sP &&
+			                               l.dstNode == dN && l.dstPin == dP; }), graph.links.end());
+		// Pins 0 (in) and 1 (out) on both shapes. Type first, then the two
+		// halves of the wire — the second connect is what the reroute was typed
+		// for, so it cannot be refused.
+		HC::adoptRerouteType(graph, sN, sP, id, 0);
+		graph.connect(sN, sP, id, 0);
+		graph.connect(id, 1, dN, dP);
+		h.ge->selected = id; h.ge->selection = { id };
+		*h.selectedNode = id;
+		h.onEdit(true);
+	};
+	// ── Comment boxes ───────────────────────────────────────────────────────
+	// Drawn behind the nodes, handled in front of them: the header drags the box
+	// AND every node of this sub-graph whose top-left lies inside it (a comment
+	// groups what it frames), double-click renames, right-click deletes, the
+	// corner grip resizes. Only the boxes of the visible sub-graph exist here —
+	// a function body's comments are not the event graph's.
+	m.drawBehind = [&h, &graph](ImDrawList* dl, ImVec2 origin, ImVec2 pan, float zoom)
+	{
+		ImFont* const font = ImGui::GetFont();
+		const float fsz = ImGui::GetFontSize() * zoom;
+		for (const HC::GraphComment& cb : graph.comments)
+		{
+			if (cb.subgraph != h.currentGraph) continue;
+			const ImVec2 cp(origin.x + pan.x + cb.x * zoom, origin.y + pan.y + cb.y * zoom);
+			const ImVec2 cs(cb.w * zoom, cb.h * zoom);
+			const float  headH = 24.0f * zoom;
+			dl->AddRectFilled(cp, ImVec2(cp.x + cs.x, cp.y + cs.y), IM_COL32(255, 210, 110, 16), 6.0f);
+			dl->AddRectFilled(cp, ImVec2(cp.x + cs.x, cp.y + headH), IM_COL32(255, 210, 110, 48), 6.0f,
+			                  ImDrawFlags_RoundCornersTop);
+			dl->AddRect(cp, ImVec2(cp.x + cs.x, cp.y + cs.y), IM_COL32(255, 210, 110, 130), 6.0f);
+			if (h.ge->editingComment == cb.id) continue; // the InputText below draws the title
+			const char* title = cb.text.empty() ? "(double-click to name)" : cb.text.c_str();
+			dl->AddText(font, fsz, ImVec2(cp.x + 6.0f * zoom, cp.y + 4.0f * zoom),
+			            cb.text.empty() ? IM_COL32(230, 210, 160, 130) : IM_COL32(240, 225, 190, 255), title);
+		}
+	};
+	// Breakpoint dots: a red disc on the left edge of a node's header, the
+	// gutter mark every text debugger uses. In front of the nodes, because the
+	// disc sits half outside the box and the box would otherwise cover it.
+	m.drawFront = [&h, &graph](ImDrawList* dl, ImVec2 origin, ImVec2 pan, float zoom)
+	{
+		if (h.traceKey.empty() || HcExecTrace::breakpointCount() == 0) return;
+		for (const int id : HcExecTrace::breakpointsOf(h.traceKey))
+		{
+			const HC::Node* n = graph.findNode(id);
+			if (!n || n->subgraph != h.currentGraph) continue;
+			const ImVec2 c(origin.x + pan.x + n->x * zoom,
+			               origin.y + pan.y + (n->y + GraphEditor::kTitleH * 0.5f) * zoom);
+			const float r = 5.0f * zoom;
+			dl->AddCircleFilled(c, r + 1.5f * zoom, IM_COL32(20, 12, 12, 255));
+			dl->AddCircleFilled(c, r, IM_COL32(225, 60, 60, 255));
+		}
+	};
+	m.interactBehind = [&h, &graph](ImVec2 origin, ImVec2 pan, float zoom, bool) -> bool
+	{
+		bool grabbed = false;
+		int  deleteComment = 0;
+		for (HC::GraphComment& cb : graph.comments)
+		{
+			if (cb.subgraph != h.currentGraph) continue;
+			const ImVec2 cp(origin.x + pan.x + cb.x * zoom, origin.y + pan.y + cb.y * zoom);
+			const ImVec2 cs(cb.w * zoom, cb.h * zoom);
+			const float  headH = 24.0f * zoom;
+			ImGui::PushID(cb.id);
+			if (h.ge->editingComment != cb.id)
+			{
+				ImGui::SetCursorScreenPos(cp);
+				ImGui::InvisibleButton("##cmove", ImVec2(std::max(cs.x, 1.0f), headH),
+				                       ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+				// Hovering the header hands ALL its interaction to the comment and
+				// keeps the canvas from box-selecting / opening its menu under it.
+				if (ImGui::IsItemHovered()) grabbed = true;
+				if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					h.ge->editingComment = cb.id;
+				else if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+				{
+					const float dxg = ImGui::GetIO().MouseDelta.x / zoom;
+					const float dyg = ImGui::GetIO().MouseDelta.y / zoom;
+					for (HC::Node& nn : graph.nodes)
+					{
+						if (nn.subgraph != h.currentGraph) continue;
+						// The node's top-left corner plus a bit: a node whose header
+						// starts inside the frame is "in" it, whatever its height.
+						const float cxn = nn.x + 24.0f, cyn = nn.y + 12.0f;
+						if (cxn >= cb.x && cxn <= cb.x + cb.w && cyn >= cb.y && cyn <= cb.y + cb.h)
+						{ nn.x += dxg; nn.y += dyg; }
+					}
+					cb.x += dxg; cb.y += dyg;
+					h.onEdit(false);   // moving: dirty, but one undo point per gesture
+				}
+				if (ImGui::IsItemActive() || ImGui::IsItemActivated()) grabbed = true;
+				if (ImGui::IsItemDeactivated()) h.onEdit(true);
+				if (ImGui::BeginPopupContextItem("##cmtCtx"))
+				{
+					HE::Ed::Help::Scope helpScope("HorizonCode Graph");
+					if (EditorWidgets::menuItem("Rename Comment")) h.ge->editingComment = cb.id;
+					if (EditorWidgets::dangerMenuItem("Delete Comment")) deleteComment = cb.id;
+					ImGui::EndPopup();
+				}
+			}
+			else
+			{
+				ImGui::SetCursorScreenPos(ImVec2(cp.x + 6.0f * zoom, cp.y + 2.0f * zoom));
+				ImGui::SetNextItemWidth(std::max(cs.x - 12.0f * zoom, 40.0f));
+				ImGui::PushStyleColor(ImGuiCol_FrameBg,        ImVec4(0, 0, 0, 0.25f));
+				ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0, 0, 0, 0.30f));
+				ImGui::PushStyleColor(ImGuiCol_FrameBgActive,  ImVec4(0, 0, 0, 0.35f));
+				GraphEditor::pushWidgetScale(zoom);
+				if (ImGui::IsWindowAppearing() || !ImGui::IsAnyItemActive())
+					ImGui::SetKeyboardFocusHere();
+				ImGui::InputTextWithHint("##ctitle", "comment", &cb.text);
+				if (ImGui::IsItemDeactivated()) { h.ge->editingComment = 0; h.onEdit(true); }
+				GraphEditor::popWidgetScale();
+				ImGui::PopStyleColor(3);
+				grabbed = true;   // typing the title owns the mouse too
+			}
+			// Resize grip (bottom-right corner).
+			const float grip = 14.0f * zoom;
+			ImGui::SetCursorScreenPos(ImVec2(cp.x + cs.x - grip, cp.y + cs.y - grip));
+			ImGui::InvisibleButton("##cresize", ImVec2(grip, grip));
+			if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+				ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+			{
+				cb.w = std::max(80.0f, cb.w + ImGui::GetIO().MouseDelta.x / zoom);
+				cb.h = std::max(60.0f, cb.h + ImGui::GetIO().MouseDelta.y / zoom);
+				h.onEdit(false);
+			}
+			if (ImGui::IsItemHovered() || ImGui::IsItemActive()) grabbed = true;
+			if (ImGui::IsItemDeactivated()) h.onEdit(true);
+			ImDrawList* dl = ImGui::GetWindowDrawList();
+			dl->AddTriangleFilled(ImVec2(cp.x + cs.x - 2, cp.y + cs.y - grip + 2),
+			                      ImVec2(cp.x + cs.x - 2, cp.y + cs.y - 2),
+			                      ImVec2(cp.x + cs.x - grip + 2, cp.y + cs.y - 2),
+			                      IM_COL32(255, 210, 110, 150));
+			ImGui::PopID();
+		}
+		if (deleteComment != 0)
+		{
+			graph.comments.erase(std::remove_if(graph.comments.begin(), graph.comments.end(),
+				[&](const HC::GraphComment& c){ return c.id == deleteComment; }), graph.comments.end());
+			if (h.ge->editingComment == deleteComment) h.ge->editingComment = 0;
+			h.onEdit(true);
+		}
+		return grabbed;
+	};
 	// Literal nodes edit their value inline on the node body.
 	m.nodeBodyHeight = [&graph](int id){ const HC::Node* n = graph.findNode(id);
 		return n ? HcEditorUtil::literalNodeBodyHeight(*n) : 0.0f; };
@@ -649,6 +849,59 @@ GraphEditor::Model buildModel(const Host& h)
 			{
 				ge.selection = fresh;          // select the clones (ready to drag)
 				*h.selectedNode = fresh.front();
+				h.onEdit(true);
+			}
+		}
+		HE::Ed::Help::Scope helpScope("HorizonCode Graph");
+		// Breakpoints: only on nodes the interpreter can stop AT — exec nodes
+		// and the entries (Event, Input Action, Function). A pure node is read,
+		// not run, so it can never be stopped on; offering the item there
+		// would promise a stop that never comes. Graphs nothing executes (no
+		// trace key) have nowhere to stop either.
+		if (const HC::Node* bn = graph.findNode(nodeId); bn && !h.traceKey.empty())
+		{
+			const HC::NodeSigCounts sc = HC::signatureCountsOf(*bn);
+			if (sc.execIns > 0 || sc.execOuts > 0)
+			{
+				if (HcExecTrace::hasBreakpoint(h.traceKey, nodeId))
+				{
+					if (EditorWidgets::menuItem("Remove Breakpoint"))
+						HcExecTrace::setBreakpoint(h.traceKey, nodeId, false);
+				}
+				else if (EditorWidgets::menuItem("Add Breakpoint"))
+					HcExecTrace::setBreakpoint(h.traceKey, nodeId, true);
+				if (HcExecTrace::breakpointCount() > 0 &&
+				    EditorWidgets::menuItem("Remove All Breakpoints"))
+					HcExecTrace::clearAllBreakpoints();
+				ImGui::Separator();
+			}
+		}
+		// A comment box sized to the selection: the bounds of every selected
+		// node's box (heights are not known here, so a row-and-a-half estimate
+		// per pin row — the grip fixes what the estimate got wrong).
+		if (EditorWidgets::menuItem(multi ? "Wrap Selection in Comment" : "Wrap in Comment"))
+		{
+			const std::vector<int> ids = multi ? ge.selection : std::vector<int>{ nodeId };
+			float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+			for (int id : ids)
+			{
+				const HC::Node* n = graph.findNode(id);
+				if (!n) continue;
+				const HC::NodeSigCounts c = HC::signatureCountsOf(*n);
+				const int rows = std::max(c.execIns + c.dataIns, c.execOuts + c.dataOuts);
+				const float hEst = GraphEditor::kTitleH + rows * GraphEditor::kRowH + 6.0f;
+				x0 = std::min(x0, n->x); y0 = std::min(y0, n->y);
+				x1 = std::max(x1, n->x + GraphEditor::kNodeW); y1 = std::max(y1, n->y + hEst);
+			}
+			if (x1 > x0)
+			{
+				HC::GraphComment cb;
+				cb.id = graph.nextId++;
+				cb.text = "Comment";
+				cb.x = x0 - 16.0f; cb.y = y0 - 40.0f;
+				cb.w = (x1 - x0) + 32.0f; cb.h = (y1 - y0) + 56.0f;
+				cb.subgraph = h.currentGraph;
+				graph.comments.push_back(std::move(cb));
 				h.onEdit(true);
 			}
 		}
@@ -739,6 +992,27 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 		for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray });
 		created = nid;
 	};
+
+	// Comment boxes are editor chrome, not nodes: they live beside the graph's
+	// nodes and never reach the interpreter, so they get their own section
+	// rather than a place in a node category. Returns no node id — there is
+	// nothing to select on the canvas' terms.
+	if (matches("Comment Box", "Editor"))
+	{
+		ImGui::TextDisabled("Editor");
+		if (HcEditorUtil::searchMenuItem("Comment Box"))
+		{
+			HC::GraphComment cb;
+			cb.id   = graph.nextId++;
+			cb.text = "Comment";
+			cb.x = drop.x; cb.y = drop.y;
+			cb.subgraph = h.currentGraph;
+			graph.comments.push_back(std::move(cb));
+			h.onEdit(true);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::Spacing();
+	}
 
 	// Generic node categories. Which ones a frontend lists is host data: the
 	// widget editor has Property/Widget (self) nodes, a level script does not —
@@ -988,6 +1262,13 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	// a vector realloc would leave `sn` dangling for everything drawn after the
 	// pick in this same frame (the menu keeps rendering past a pick).
 	const HC::Node src = *sn;
+	// A drag off a reroute's output is a drag off the wire the knot carries:
+	// the class menus below resolve on what FEEDS the chain, not on the knot.
+	// (Unfed, the origin is the knot itself, and that reads as untyped.)
+	const HC::Node refSrc = [&]{
+		int originPin = srcPin;
+		const HC::Node* o = HC::rerouteOrigin(graph, src, srcPin, originPin);
+		return (o && o->type != NT::Reroute) ? *o : src; }();
 
 	// Classify the dragged pin (exec vs data; data type + which container).
 	const DragPin dp = classifyDragPin(src, srcPin);
@@ -1012,8 +1293,10 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	// element type (and class) before the typed connect.
 	auto wireAt = [&](int newId, int pin){
 		if (srcInput) { HC::adoptForEachElementType(graph, newId, pin, srcNode, srcPin);
+		                HC::adoptRerouteType(graph, newId, pin, srcNode, srcPin);
 		                graph.connect(newId, pin, srcNode, srcPin); }
 		else          { HC::adoptForEachElementType(graph, srcNode, srcPin, newId, pin);
+		                HC::adoptRerouteType(graph, srcNode, srcPin, newId, pin);
 		                graph.connect(srcNode, srcPin, newId, pin); }
 		HC::inferUserTypeNames(graph); };   // learns its definition from the wire
 
@@ -1025,12 +1308,12 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 			if (nn) graph.connect(srcNode, srcPin, newId, pinRanges(*nn).dataIn0); // → Target
 		};
 		HC::Graph scratch;
-		const HC::Graph* cls = resolveClassGraph(src, graph, h.giGraph, h.content, scratch);
+		const HC::Graph* cls = resolveClassGraph(refSrc, graph, h.giGraph, h.content, scratch);
 		// The key behind that graph, recorded on whatever this menu creates: the
 		// menu already knows which class it is offering members of, and writing it
 		// down here is what lets a rename find these nodes later without re-walking
 		// a wire that may since have been re-routed.
-		const std::string clsKey = HcRename::classOfRefSource(graph, src, h.selfKey, "Game Instance");
+		const std::string clsKey = HcRename::classOfRefSource(graph, refSrc, h.selfKey, "Game Instance");
 		if (cls)
 		{
 			// SNAPSHOT the offered signatures first: with a "Get Self" source,
@@ -1076,7 +1359,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 		// which is why the base class needs no dispatch machinery of its own.
 		{
 			const std::string base =
-				resolveClassBase(src, graph, h.selfBaseClass, h.content);
+				resolveClassBase(refSrc, graph, h.selfBaseClass, h.content);
 			bool eh = false;
 			for (const auto& m : HC::engineClassMembers(base))
 			{

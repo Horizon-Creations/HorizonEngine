@@ -24,6 +24,7 @@
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
+#include <HorizonScene/TimerSystem.h>
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
@@ -444,6 +445,19 @@ void GameApplication::applyShippedConfig()
 			m_appMode    = true;
 			m_windowMode = HE::WindowMode::Windowed;
 		}
+
+		// Config/ProjectSettings.json, the project's own word on its title,
+		// shadows and physics — read HERE and not in OnInit because the title
+		// is the window's, and GetConfig() is asked for the window before OnInit
+		// runs. A missing file is the default (every build made before it
+		// existed); a damaged one is logged and ALSO the default, because a
+		// game must start either way.
+		if (!HE::loadProjectSettings(fs::path(baseRaw), m_projectSettings))
+		{
+			HE_LOG_WARN(Core, "GameApplication: %s is unreadable — using default project settings",
+			            HE::projectSettingsPath(fs::path(baseRaw)).string().c_str());
+			m_projectSettings = HE::ProjectSettings{};
+		}
 	}
 
 	// An absent key keeps what the member already holds, which is what a game
@@ -503,12 +517,43 @@ void GameApplication::applyShippedConfig()
 HE::ApplicationConfig GameApplication::GetConfig() const
 {
 	HE::ApplicationConfig cfg;
-	cfg.windowprops.title  = m_config.projectName.empty() ? "HorizonGame" : m_config.projectName;
+	// The title the project gave itself (Project Settings ▸ Game), else the
+	// project name, else the bare runtime's. Only the WINDOW takes the title:
+	// the save directory (SDL_GetPrefPath in OnInit) stays on the project name,
+	// or retitling a game would strand every player's saves.
+	cfg.windowprops.title  = !m_projectSettings.game.title.empty() ? m_projectSettings.game.title
+	                       : m_config.projectName.empty()          ? std::string("HorizonGame")
+	                                                               : m_config.projectName;
 	cfg.windowprops.width  = m_windowWidth;
 	cfg.windowprops.height = m_windowHeight;
 	cfg.windowprops.vsync  = m_vsyncOn;
 	cfg.windowprops.mode   = m_windowMode;
 	cfg.backend            = m_backend;
+
+	// ── Splash ───────────────────────────────────────────────────────────────
+	// The project asked for one (Project Settings ▸ Game ▸ Splash) AND the
+	// export put the picture beside project.hcfg. Both, deliberately: the
+	// SplashScreen draws its built-in branding when it has no logo, and a
+	// shipped game opening a window that says "Horizon Engine" is the engine
+	// advertising itself inside somebody else's product. No picture, no splash.
+	if (m_projectSettings.game.splashEnabled)
+	{
+		if (const char* baseRaw = SDL_GetBasePath())
+		{
+			const fs::path logo = fs::path(baseRaw) / "Splash.png";
+			std::error_code ec;
+			if (fs::is_regular_file(logo, ec))
+			{
+				cfg.splash.enabled  = true;
+				cfg.splash.logoPath = logo.string();
+				cfg.splash.title    = cfg.windowprops.title;
+				cfg.splash.subtitle = m_projectSettings.game.splashSubtitle;
+			}
+			else
+				HE_LOG_WARN(Core, "GameApplication: splash is on but %s is missing — no splash",
+				            logo.string().c_str());
+		}
+	}
 	return cfg;
 }
 
@@ -571,6 +616,9 @@ void GameApplication::OnInit()
 		HE_LOG_INFO(Core, "%s", "GameApplication: no project.hcfg — running without pak");
 		return;
 	}
+	// Config/ProjectSettings.json beside it is already in m_projectSettings: the
+	// constructor read it with the hcfg peek, because the window title in it is
+	// needed before OnInit (applyShippedConfig).
 	// Application build (docs/he-apps-plan.md A1): everything below that belongs
 	// to a GAME is skipped. Latched into a member because half a dozen places
 	// downstream ask, and reaching into m_config at each of them invites one of
@@ -1146,6 +1194,10 @@ void GameApplication::OnInit()
 		// The entity host is handed over so the player host can find the characters
 		// the LEVEL already placed; it never spawns through it.
 		m_playerHost.begin(m_gameInstance.runtime(), contentManager(), &m_entityHost);
+		// The Lua/Python instances hear the same action events. The map is
+		// still empty here (startScripts runs after the hosts) and is read per
+		// tick, so a script that starts later is simply there the next frame.
+		m_playerHost.setTextScripts(m_scriptContext.get(), &m_scriptInstances);
 		// Last of the hosts: a player character spawned just above may be the very
 		// entity whose state machine needs a sync graph.
 		m_animatorHost.begin(m_gameInstance.runtime(), *m_world, contentManager());
@@ -1550,6 +1602,11 @@ void GameApplication::startPhysics()
 	// when the build predates the field — everything collides, which is how this
 	// engine behaved before channels existed.
 	m_physicsWorld->setCollisionLayers(m_config.collisionLayers);
+	// The project's gravity (Config/ProjectSettings.json). Before initialize()
+	// too — setGravity wakes every body, and there is nothing to wake yet.
+	// The rate half of that page is m_projectSettings.physics.fixedDt(), read
+	// where the accumulator steps.
+	m_physicsWorld->setGravity(m_projectSettings.physics.gravity);
 	m_physicsWorld->initialize(*m_world);
 	// Every runtime spawn goes through the entity host, so it is the host that
 	// has to know where bodies are built. Set HERE rather than at the two call
@@ -2403,16 +2460,14 @@ void GameApplication::OnRender(float deltaTime)
 	// is handed to the loop as a shorter wait — asked again every frame,
 	// because askWakeWithinMs is a one-shot.
 	{
-		HE::api::timer::poll(deltaTime);
-		int fired = 0;
-		while (HE::api::timer::takeFired(fired))
-		{
-			if (const HorizonCode::InstanceId gi = m_gameInstance.runtime().gameInstance())
-				m_gameInstance.runtime().fireOnTimer(gi, 0, fired);
-			// A timer coming due is not an OS event for this window, so the
-			// frame that draws the reaction has to be asked for.
-			requestRedraw();
-		}
+		// ONE dispatch for both frontends (the GameInstance's OnTimer and the
+		// Lua/Python onTimer), shared with the editor's play mode — see
+		// TimerSystem for why the two used to disagree.
+		const int fired = TimerSystem::dispatch(deltaTime, &m_gameInstance.runtime(),
+		                                        m_scriptContext.get(), &m_scriptInstances);
+		// A timer coming due is not an OS event for this window, so the frame
+		// that draws the reaction has to be asked for.
+		if (fired > 0) requestRedraw();
 		const double due = HE::api::timer::nextDueSeconds();
 		if (due >= 0.0)
 		{
@@ -2527,9 +2582,10 @@ void GameApplication::OnRender(float deltaTime)
 	// script-driven transforms/params are reflected the same frame.
 	updateScripts(gameDt);
 
-	// Physics at a FIXED rate, the same one the editor previews at
-	// (PhysicsWorld::kFixedDt) — a game that simulates at a different rate
-	// than it was authored against is not the same game.
+	// Physics at a FIXED rate, the same one the editor previews at — the
+	// project's (ProjectPhysicsSettings::fixedDt, default PhysicsWorld::kFixedDt).
+	// A game that simulates at a different rate than it was authored against is
+	// not the same game.
 	if (m_world && m_physicsWorld)
 	{
 		HE_PROFILE_SCOPE_N("PhysicsStep");
@@ -2537,7 +2593,7 @@ void GameApplication::OnRender(float deltaTime)
 		// into ever more catch-up steps, with the bound riding the time scale —
 		// the rule lives in HE::advanceFixedSteps so the editor's preview cannot
 		// pace differently from the game it is previewing.
-		HE::advanceFixedSteps(m_physicsAccum, gameDt, PhysicsWorld::kFixedDt,
+		HE::advanceFixedSteps(m_physicsAccum, gameDt, m_projectSettings.physics.fixedDt(),
 		                      HE::api::time::timeScale(),
 		                      [&](float step){ m_physicsWorld->step(*m_world, step); });
 
@@ -2683,10 +2739,13 @@ void GameApplication::OnRender(float deltaTime)
 		{
 			r->SetBloomSettings(IRenderer::BloomSettings{ false, 1.0f, 0.6f });
 			r->SetSSAOSettings(IRenderer::SSAOSettings{ false, 0.5f, 1.0f, 0 });
+			r->SetDepthOfFieldSettings(IRenderer::DepthOfFieldSettings{});
+			r->SetMotionBlurSettings(IRenderer::MotionBlurSettings{});
 			// GI and SSR default to disabled, so their default-constructed form IS
 			// the "off" push.
 			r->SetGISettings(IRenderer::GISettings{});
 			r->SetSSRSettings(IRenderer::SSRSettings{});
+			r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{});
 			IRenderer::AntiAliasingSettings aaOff;
 			aaOff.method = static_cast<int>(HE::AAMethod::Off);
 			r->SetAntiAliasingSettings(aaOff);
@@ -2714,6 +2773,33 @@ void GameApplication::OnRender(float deltaTime)
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAORadius", 0.5f)),
 				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAOIntensity", 1.0f)),
 				GlobalState::getInstance().getCustomConfigInt("SSAOMethod", 0)});
+			// Depth of field — the editor's Preferences values, carried over by the
+			// export dialog. Off by default; a backend without the pass ignores it.
+			r->SetDepthOfFieldSettings(IRenderer::DepthOfFieldSettings{
+				GlobalState::getInstance().getCustomConfigBool("DoFEnabled", false),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFFocusDistance", 10.0f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFFocusRange", 4.0f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFAperture", 2.8f))});
+			// Motion blur — likewise the editor's Preferences values via the export
+			// dialog. Camera motion only; off by default.
+			r->SetMotionBlurSettings(IRenderer::MotionBlurSettings{
+				GlobalState::getInstance().getCustomConfigBool("MotionBlurEnabled", false),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("MotionBlurIntensity", 0.5f)),
+				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("MotionBlurMax", 24.0f))});
+			// Directional shadows are the PROJECT's (Config/ProjectSettings.json
+			// next to project.hcfg), not config.json's: the same cascades the
+			// editor's viewport showed. Defaults = the historical constants.
+			{
+				const HE::ProjectShadowSettings& sh = m_projectSettings.shadows;
+				IRenderer::ShadowSettings s;
+				s.distance     = sh.distance;
+				s.cascadeCount = sh.cascadeCount;
+				s.resolution   = sh.resolution;
+				s.splitLambda  = sh.splitLambda;
+				s.slopeBias    = sh.slopeBias;
+				s.minBias      = sh.minBias;
+				r->SetShadowSettings(s);
+			}
 
 			// Global Illumination — GlobalIlluminationEnabled/GIIndirectIntensity/
 			// GILightRadius, capability-gated so non-Metal/non-raytracing builds no-op.
@@ -2735,6 +2821,12 @@ void GameApplication::OnRender(float deltaTime)
 			ssr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRMaxRoughness", 0.6f));
 			ssr.quality      = GlobalState::getInstance().getCustomConfigInt("SSRQuality", 1);
 			r->SetSSRSettings(ssr);
+
+			// CPU occlusion culling — the editor's Preferences toggle, carried
+			// over by the export dialog. No capability gate: a backend without it
+			// ignores the call.
+			r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{
+				GlobalState::getInstance().getCustomConfigBool("OcclusionCulling", false) });
 
 			// Ray-traced GI reflections — same config.json keys the editor
 			// writes, capability-gated (Metal tile deferred + HW RT in v1).

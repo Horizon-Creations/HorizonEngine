@@ -13,6 +13,7 @@
 #include "HorizonScene/Components/JointComponent.h"
 #include "HorizonScene/Components/AnimationLayerComponent.h"
 #include "HorizonScene/Components/IkComponent.h"
+#include "HorizonScene/Components/InactiveComponent.h"
 #include <Diagnostics/Log.h>
 #include <algorithm>
 
@@ -79,6 +80,11 @@ void HorizonWorld::reserveComponentStorage()
     // game logic switches on when a figure walks onto terrain, so the game dylib
     // is a plausible first toucher here too.
     (void)m_registry.storage<IkComponent>();
+    // The "Active" switch. Two reasons: a script's entity.setActive(false) is a
+    // realistic first toucher from a game dylib, and HE::anyEntityInactive()
+    // reads this pool through a const registry, which only ever finds a pool
+    // that already exists — so it exists from the first frame.
+    (void)m_registry.storage<InactiveComponent>();
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const

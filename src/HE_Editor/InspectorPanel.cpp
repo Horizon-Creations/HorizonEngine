@@ -9,6 +9,7 @@
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
@@ -300,7 +301,7 @@ void render(AppContext& ctx)
 #ifdef HE_IMGUI_ENABLED
 // The project's sixteen collision-channel names, as a combo's item list.
 //
-// The names come from the PROJECT (Preferences ▸ Project ▸ Collision Layers) and
+// The names come from the PROJECT (Project Settings ▸ Physics ▸ Collision Layers) and
 // are data, not literals — which is why the combo below asks for its help by key
 // rather than by label. Without a project open the default names stand, so the
 // row still reads "Default"/"Player"/… instead of sixteen blanks.
@@ -727,6 +728,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	// the whole call, so an early return out of any section still unwinds it and
 	// no later panel inherits "Rigid Body" as its tooltip scope.
 	HE::Ed::Help::Scope helpScope("");
+	// The same slot for the undo history: every entry a component section
+	// pushes is labelled with that component ("Light", "Rigid Body") — set by
+	// componentHeader alongside the help scope — and unwound here so no later
+	// panel inherits the last component drawn.
+	EditorUndo::Context undoScope(undo, "Details");
 
 	// Pre-frame world state for undo. capturePre() serializes the WHOLE world, so it
 	// must NOT run every frame — doing so dropped the editor to ~15 ms the instant any
@@ -743,6 +749,10 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (ImGui::IsItemActivated())            undo->stashPre();
 		if (ImGui::IsItemDeactivatedAfterEdit()) undo->commitPending();
 	};
+	// What the undo history calls the removal a section is about to do
+	// ("Remove Light"): set by componentHeader, which knows the label, and read
+	// by the section's own `if (removed) …` line, which does not.
+	std::string removeLabel;
 
 	// Header with a right-click "Remove Component" menu. Returns true when
 	// the section is open; sets `removed` when the user removed the component.
@@ -757,10 +767,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		// rather than a bare "Range" that four components would answer to). Set
 		// before the early returns so the silent modes leave it alone.
 		HE::Ed::Help::setScope(label);
+		if (undo) undo->setContext(label);
 		if (collect) { collect->push_back(label); return false; }
 		if (only && std::strcmp(only, label) != 0) return false;
 		// Removal mode: report it as removed and draw nothing — the section's
 		// own `if (removed) registry.remove<T>(entity)` does the rest.
+		removeLabel = std::string("Remove ") + label;
 		if (removeMatching) { removed = removable; structuralChange = removable; return false; }
 		const bool open = ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen);
 		// What the component IS, on the header itself — the question that comes
@@ -770,10 +782,48 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			std::snprintf(key, sizeof(key), "Component/%s", label);
 			EditorWidgets::helpForKey(key);
 		}
-		if (removable && ImGui::BeginPopupContextItem())
+		// Right-click: the component as a whole. Copy needs nothing but the
+		// scene key; Paste and Reset WRITE the component, so each takes an undo
+		// snapshot of its own — a popup is its own ImGui window, and the panel's
+		// press-to-capture above never saw the click that landed here. Both also
+		// report as a change the caller can see, for the same reason a removal
+		// does. Remove stays last, and only where the section allows it (the
+		// environment and weather sections are the entity's reason to exist).
+		// Sections without a scene key (none today) would get the copy/paste
+		// pair greyed out rather than a menu that silently does nothing.
+		const char* sceneKey = componentKeyForLabel(label);
+		if (ImGui::BeginPopupContextItem())
 		{
-			if (ImGui::MenuItem("Remove Component"))
-				removed = structuralChange = true;
+			const std::string clip     = sceneKey ? clipboardComponentKey() : std::string();
+			const bool        canPaste = sceneKey && clip == sceneKey;
+			if (ImGui::MenuItem("Copy Component", nullptr, false, sceneKey != nullptr) && sceneKey)
+			{
+				const std::string text = SceneSerializer{}.exportComponentText(world, entity, sceneKey);
+				if (!text.empty()) ImGui::SetClipboardText(text.c_str());
+			}
+			EditorWidgets::helpForKey("Component/Copy Component");
+			if (ImGui::MenuItem("Paste Component Values", nullptr, false, canPaste) && canPaste)
+			{
+				if (undo) undo->snapshotNow((std::string("Paste ") + label).c_str());
+				if (const char* text = ImGui::GetClipboardText())
+					SceneSerializer{}.importComponentText(world, entity, text);
+				structuralChange = true;
+			}
+			EditorWidgets::helpForKey("Component/Paste Component Values");
+			if (ImGui::MenuItem("Reset to Default", nullptr, false, sceneKey != nullptr) && sceneKey)
+			{
+				if (undo) undo->snapshotNow((std::string("Reset ") + label).c_str());
+				SceneSerializer::resetComponentByKey(world, entity, sceneKey);
+				structuralChange = true;
+			}
+			EditorWidgets::helpForKey("Component/Reset to Default");
+			if (removable)
+			{
+				ImGui::Separator();
+				if (ImGui::MenuItem("Remove Component"))
+					removed = structuralChange = true;
+				EditorWidgets::helpForKey("Component/Remove Component");
+			}
 			ImGui::EndPopup();
 		}
 		// On a placed prefab: which components carry something authored here,
@@ -810,6 +860,22 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	{
 		if (auto* name = registry.try_get<NameComponent>(entity))
 		{
+			// The one switch for the whole entity, in front of its name: off
+			// means not drawn, no script, no body, no sound — for this entity
+			// and everything under it (InactiveComponent.h). Not for the
+			// built-ins: the world root and the environment lights are the
+			// scene's fixtures, not props. A click here is a click in this
+			// window, so the press-to-capture above has the pre-state and
+			// trackEdit commits it like any checkbox in the sections below.
+			if (!world.isBuiltin(entity))
+			{
+				bool active = HE::isEntityActiveSelf(registry, entity);
+				if (ImGui::Checkbox("##entity_active", &active))
+					HE::setEntityActive(registry, entity, active);
+				trackEdit();
+				EditorWidgets::helpForKey("details.active");
+				ImGui::SameLine();
+			}
 			char buf[256];
 			std::strncpy(buf, name->name.c_str(), sizeof(buf) - 1);
 			buf[sizeof(buf) - 1] = '\0';
@@ -817,8 +883,15 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::InputText("##entity_name", buf, sizeof(buf),
 			                     ImGuiInputTextFlags_EnterReturnsTrue))
 			{
-				if (undo) undo->snapshotNow();
+				if (undo) undo->snapshotNow("Rename Entity");
 				world.renameEntity(entity, buf);
+			}
+			// Off because of something above it: the box here is ticked, and
+			// the entity is still not in the game — say which is the case.
+			if (HE::isEntityActiveSelf(registry, entity) && !HE::isEntityActive(registry, entity))
+			{
+				ImGui::TextDisabled("(switched off through a parent)");
+				EditorWidgets::helpForKey("details.active-through-parent");
 			}
 		}
 		ImGui::Separator();
@@ -1143,7 +1216,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			changed |= Row::dragFloat3("Scale",    &t->scale.x,    0.05f); trackEdit();
 			if (changed) t->dirty = true;
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<TransformComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TransformComponent>(entity); }
 	}
 
 	// ── Transform 2D ────────────────────────────────────────────────────────
@@ -1157,7 +1230,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			changed |= Row::dragFloat2("Scale##2d",    &t->scale.x,    0.05f); trackEdit();
 			if (changed) t->dirty = true;
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<Transform2DComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<Transform2DComponent>(entity); }
 	}
 
 	// ── Mesh ────────────────────────────────────────────────────────────────
@@ -1196,7 +1269,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				                  "are all skipped for it. Forward path only — the deferred "
 				                  "resolve has no free G-buffer channel for the flag.");
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<MeshComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<MeshComponent>(entity); }
 	}
 
 	// ── Skeletal Mesh ────────────────────────────────────────────────────────
@@ -1229,7 +1302,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				== EditorWidgets::SlotAction::Assigned)
 				sm->dirty = true;
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<SkeletalMeshComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SkeletalMeshComponent>(entity); }
 	}
 
 	// ── Animator ────────────────────────────────────────────────────────────
@@ -1255,7 +1328,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ImGui::Text("Duration: %.3f s  |  Channels: %d",
 					cur->duration, (int)cur->channels.size());
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimatorComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<AnimatorComponent>(entity); }
 	}
 
 	// ── Animator Blend ───────────────────────────────────────────────────────
@@ -1278,7 +1351,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			ImGui::SameLine();
 			EditorWidgets::checkbox("Playing##ab",   &ab->playing); trackEdit();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimatorBlendComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<AnimatorBlendComponent>(entity); }
 	}
 
 	// ── Animator State Machine ──────────────────────────────────────────────
@@ -1313,7 +1386,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ImGui::ProgressBar(std::min(pct, 1.0f), ImVec2(-1, 0), "crossfade");
 			}
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimatorStateMachineComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<AnimatorStateMachineComponent>(entity); }
 	}
 
 	// ── Root Motion ─────────────────────────────────────────────────────────
@@ -1348,7 +1421,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::labelText("Last Delta##rm", "%.3f, %.3f, %.3f  |  %.2f°",
 				rmc->lastDelta.x, rmc->lastDelta.y, rmc->lastDelta.z, rmc->lastYawDelta);
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RootMotionComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RootMotionComponent>(entity); }
 	}
 
 	// ── Animation Layers ────────────────────────────────────────────────────
@@ -1450,7 +1523,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				trackEdit();
 			}
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AnimationLayerComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<AnimationLayerComponent>(entity); }
 	}
 
 	// ── Inverse Kinematics ──────────────────────────────────────────────────
@@ -1610,7 +1683,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				Row::dragFloat("Look Interp Speed", &la.interpSpeed, 0.1f, 0.0f, 60.0f, "%.1f"); trackEdit();
 			}
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<IkComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<IkComponent>(entity); }
 	}
 
 	// ── Property Animator ───────────────────────────────────────────────────
@@ -1637,7 +1710,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ImGui::Text("Duration: %.2f s | Channels: %zu", cur->duration, cur->channels.size());
 			}
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<PropertyAnimatorComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<PropertyAnimatorComponent>(entity); }
 	}
 
 	// ── NavMesh ─────────────────────────────────────────────────────────────
@@ -1677,7 +1750,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			ImGui::SameLine();
 			EditorWidgets::checkbox("Show NavMesh##nm", &nmc->showDebugMesh);
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<NavMeshComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<NavMeshComponent>(entity); }
 	}
 
 	// ── NavAgent ────────────────────────────────────────────────────────────
@@ -1702,7 +1775,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::Button("Stop##na"))
 			{ na->moving = false; na->hasPath = false; }
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<NavAgentComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<NavAgentComponent>(entity); }
 	}
 
 	// ── Material ────────────────────────────────────────────────────────────
@@ -1925,7 +1998,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					: "Edits apply live; Save writes them to disk.");
 			}
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<MaterialComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<MaterialComponent>(entity); }
 	}
 
 	// ── Camera ──────────────────────────────────────────────────────────────
@@ -1939,7 +2012,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			EditorWidgets::checkbox("Main Camera", &c->isMain); trackEdit();
 			EditorWidgets::checkbox("Orthographic", &c->orthographic); trackEdit();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CameraComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<CameraComponent>(entity); }
 	}
 
 	// ── Movement ────────────────────────────────────────────────────────────
@@ -1970,7 +2043,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (!registry.all_of<CharacterControllerComponent>(entity))
 				ImGui::TextDisabled("%s", "No Character Controller — nothing to move.");
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<MovementComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<MovementComponent>(entity); }
 	}
 
 	// ── Camera Rig ──────────────────────────────────────────────────────────
@@ -2109,7 +2182,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				trackEdit();
 			}
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CameraRigComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<CameraRigComponent>(entity); }
 	}
 
 	// ── Light ───────────────────────────────────────────────────────────────
@@ -2138,7 +2211,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			EditorWidgets::checkbox("Visible##light",      &l->visible);     trackEdit();
 			EditorWidgets::checkbox("Casts Shadow##light", &l->castsShadow); trackEdit();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<LightComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<LightComponent>(entity); }
 	}
 
 	// ── Decal ───────────────────────────────────────────────────────────────
@@ -2152,7 +2225,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				hint("Projects along the entity's local Y through its scaled box. "
 				     "Renders in the Deferred path (Metal).");
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<DecalComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<DecalComponent>(entity); }
 	}
 
 	// ── Rope ────────────────────────────────────────────────────────────────
@@ -2265,7 +2338,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				rope->controlPoints.push_back(tail + step);
 			}
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RopeComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RopeComponent>(entity); }
 	}
 
 	// ── Trail ───────────────────────────────────────────────────────────────
@@ -2312,7 +2385,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// difference between "not emitting" and "the entity has not moved".
 			Row::labelText("Points", "%zu / %d", trail->points.size(), trail->maxPoints);
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<TrailComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TrailComponent>(entity); }
 	}
 
 	// ── Rigid Body ──────────────────────────────────────────────────────────
@@ -2336,7 +2409,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			collisionLayerRow("Collision Layer##rigidbody", &r->collisionLayer,
 			                  CollisionLayerNames(ctx), undo);
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<RigidBodyComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RigidBodyComponent>(entity); }
 	}
 
 	// ── Collider ──────────────────────────────────────────────────────────────
@@ -2435,7 +2508,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 			EditorWidgets::checkbox("Is Trigger", &col->isTrigger); trackEdit();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ColliderComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<ColliderComponent>(entity); }
 	}
 
 	// ── Joint ─────────────────────────────────────────────────────────────────
@@ -2603,7 +2676,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			EditorWidgets::checkbox("Collide Connected", &joint->collideConnected);
 			trackEdit();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<JointComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<JointComponent>(entity); }
 	}
 
 	// ── Character Controller ──────────────────────────────────────────────────
@@ -2636,7 +2709,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat3("Velocity", v, 0.0f);
 			ImGui::EndDisabled();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<CharacterControllerComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<CharacterControllerComponent>(entity); }
 	}
 
 	// ── Save State (savegames) ──────────────────────────────────────────────
@@ -2657,7 +2730,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			EditorWidgets::checkbox("Visibility##savestate", &ss->saveVisibility); trackEdit();
 			ImGui::EndDisabled();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<SaveStateComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SaveStateComponent>(entity); }
 	}
 
 	// ── Script (Lua / Python / HorizonCode class) ───────────────────────────
@@ -2776,7 +2849,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				}
 			}
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ScriptComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<ScriptComponent>(entity); }
 	}
 
 	// ── Terrain ─────────────────────────────────────────────────────────────
@@ -2823,7 +2896,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// the Landscape panel, so the two say and do the same thing.
 			TerrainTools::drawHeightmapBlock(ctx, entity);
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<TerrainComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TerrainComponent>(entity); }
 	}
 
 	// ── Audio Source ────────────────────────────────────────────────────────
@@ -2887,7 +2960,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					                                     a->innerRange, a->range, a->rolloffFactor);
 			}
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AudioSourceComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<AudioSourceComponent>(entity); }
 	}
 
 	// ── Audio Listener ──────────────────────────────────────────────────────
@@ -2897,7 +2970,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		{
 			Row::dragFloat("Master Volume##al", &l->masterVolume, 0.01f, 0.0f, 2.0f); trackEdit();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<AudioListenerComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<AudioListenerComponent>(entity); }
 	}
 
 	// ── Particle System ─────────────────────────────────────────────────────
@@ -2920,7 +2993,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			EditorWidgets::checkbox("Destroy When Finished##ps", &ps->destroyWhenFinished); trackEdit();
 			ImGui::Text("Live: %zu", ps->particles.size());
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<ParticleSystemComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<ParticleSystemComponent>(entity); }
 	}
 
 	// ── Foliage ──────────────────────────────────────────────────────────────
@@ -2973,7 +3046,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				EditorWidgets::helpForLabel("Reset Mask##fol");
 			}
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<FoliageComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<FoliageComponent>(entity); }
 	}
 
 	// ── LOD ──────────────────────────────────────────────────────────────────
@@ -3014,7 +3087,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 			if (ImGui::Button("+ Level")) { lod->levels.push_back({}); trackEdit(); }
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<LODComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<LODComponent>(entity); }
 	}
 
 	// ── UI Canvas ───────────────────────────────────────────────────────────
@@ -3050,7 +3123,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 			EditorWidgets::checkbox("Active##cv", &cv->active); trackEdit();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UICanvasComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<UICanvasComponent>(entity); }
 	}
 
 	// ── UI Element ──────────────────────────────────────────────────────────
@@ -3072,7 +3145,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragInt("Layer##el",  &el->layer, 1); trackEdit();
 			EditorWidgets::checkbox("Active##el", &el->active); trackEdit();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UIElementComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<UIElementComponent>(entity); }
 	}
 
 	// ── UI Text ─────────────────────────────────────────────────────────────
@@ -3086,7 +3159,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Font Size##txt", &txt->fontSize, 0.5f, 4.0f, 256.0f); trackEdit();
 			Row::colorEdit4("Color##txt",    glm::value_ptr(txt->color)); trackEdit();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UITextComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<UITextComponent>(entity); }
 	}
 
 	// ── UI Image ─────────────────────────────────────────────────────────────
@@ -3096,7 +3169,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		{
 			Row::colorEdit4("Tint##img", glm::value_ptr(img->tint)); trackEdit();
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UIImageComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<UIImageComponent>(entity); }
 	}
 
 	// ── UI Button ───────────────────────────────────────────────────────────
@@ -3111,7 +3184,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			strncpy(buf, btn->onClickFunction.c_str(), sizeof(buf)-1); buf[sizeof(buf)-1] = '\0';
 			if (Row::inputText("OnClick##btn", buf, sizeof(buf))) { btn->onClickFunction = buf; trackEdit(); }
 		}
-		if (removed) { if (undo) undo->snapshotNow(); registry.remove<UIButtonComponent>(entity); }
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<UIButtonComponent>(entity); }
 	}
 
 	// ── Add Component ───────────────────────────────────────────────────────
@@ -3165,6 +3238,27 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 	if (world.isBuiltin(entity)) return false;
 	auto& registry = world.registry();
 	bool added = false;
+	// What the clipboard holds comes first, named: "Paste Component (Light)".
+	// A component the entity already has is overwritten rather than doubled —
+	// the scene format allows one of each — which the tooltip says. The label
+	// is built at run time, so the help is asked for by key.
+	{
+		const std::string clip = clipboardComponentKey();
+		if (const char* label = clip.empty() ? nullptr : componentLabelForKey(clip.c_str()))
+		{
+			char item[128];
+			std::snprintf(item, sizeof(item), "Paste Component (%s)", label);
+			if (ImGui::MenuItem(item))
+			{
+				if (undo) undo->snapshotNow();
+				if (const char* text = ImGui::GetClipboardText())
+					added = SceneSerializer{}.importComponentText(world, entity, text);
+				ImGui::CloseCurrentPopup();
+			}
+			EditorWidgets::helpForKey("details.paste-component");
+			ImGui::Separator();
+		}
+	}
 	{
 		{
 			auto addItem = [&]<typename T>(const char* label, T)
@@ -3265,6 +3359,16 @@ bool renderFor(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUndo* 
                const char* onlyComponent)
 {
 	return renderForImpl(ctx, world, entity, undo, onlyComponent, nullptr);
+}
+
+std::string clipboardComponentKey()
+{
+#ifdef HE_IMGUI_ENABLED
+	const char* text = ImGui::GetClipboardText();
+	return text ? SceneSerializer::componentKeyOfText(text) : std::string();
+#else
+	return {};
+#endif
 }
 
 void listComponents(AppContext& ctx, HorizonWorld& world, Entity entity,

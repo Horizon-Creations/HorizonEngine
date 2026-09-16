@@ -35,10 +35,18 @@
 #ifdef HE_HAVE_ASTCENC
 // Encode one RGBA8 image to ASTC 4x4 (LDR). Returns empty on failure. Each 4x4
 // block is 16 bytes; the output is ceil(w/4)*ceil(h/4)*16 bytes.
-static std::vector<uint8_t> encodeAstc4x4(const uint8_t* rgba, uint32_t w, uint32_t h)
+// `quality` is PackSettings::textureQuality: 0 the FAST preset (the historic
+// setting), 1 MEDIUM, 2 THOROUGH. EXHAUSTIVE is deliberately not offered — it is
+// an order of magnitude slower than THOROUGH for a difference no game texture
+// shows.
+static std::vector<uint8_t> encodeAstc4x4(const uint8_t* rgba, uint32_t w, uint32_t h,
+                                          uint8_t quality)
 {
+    const float preset = quality >= 2 ? ASTCENC_PRE_THOROUGH
+                       : quality == 1 ? ASTCENC_PRE_MEDIUM
+                                      : ASTCENC_PRE_FAST;
     astcenc_config cfg{};
-    if (astcenc_config_init(ASTCENC_PRF_LDR, 4, 4, 1, ASTCENC_PRE_FAST, 0, &cfg) != ASTCENC_SUCCESS)
+    if (astcenc_config_init(ASTCENC_PRF_LDR, 4, 4, 1, preset, 0, &cfg) != ASTCENC_SUCCESS)
         return {};
     astcenc_context* ctx = nullptr;
     if (astcenc_context_alloc(&cfg, 1, &ctx) != ASTCENC_SUCCESS) return {};
@@ -86,7 +94,12 @@ static void gatherRGBA8Block(const uint8_t* rgba, uint32_t w, uint32_t h,
 // Encode one RGBA8 image to BC7 (16 B / 4x4 block). Empty on bad input. Output size
 // is ceil(w/4)*ceil(h/4)*16 — the exact block layout the ASTC path uses, so the
 // TextureAsset mip byte-math is identical (see TextureFormat).
-static std::vector<uint8_t> encodeBc7(const uint8_t* rgba, uint32_t w, uint32_t h)
+// `quality` 0: 16 partitions, no uber (~3x faster than the encoder's default,
+// negligible loss — the historic setting). 1: all 64 partitions. 2: 64 and uber
+// level 1. Higher uber levels exist and are not offered: level 2+ is minutes per
+// texture atlas for a change nobody can see.
+static std::vector<uint8_t> encodeBc7(const uint8_t* rgba, uint32_t w, uint32_t h,
+                                      uint8_t quality)
 {
     if (!rgba || w == 0 || h == 0) return {};
     // bc7enc_compress_block_init() fills global tables once; guard the first call so
@@ -96,7 +109,8 @@ static std::vector<uint8_t> encodeBc7(const uint8_t* rgba, uint32_t w, uint32_t 
 
     bc7enc_compress_block_params params;
     bc7enc_compress_block_params_init(&params); // perceptual weights, all BC7 modes
-    params.m_max_partitions = 16;               // ~3x faster than the 64 default, negligible quality loss
+    params.m_max_partitions = quality >= 1 ? BC7ENC_MAX_PARTITIONS : 16;
+    params.m_uber_level     = quality >= 2 ? 1 : 0;
 
     const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
     std::vector<uint8_t> out(static_cast<size_t>(bw) * bh * 16);
@@ -117,9 +131,14 @@ static std::vector<uint8_t> encodeBc7(const uint8_t* rgba, uint32_t w, uint32_t 
 // Encode one RGBA8 image to BC3 (DXT5, 16 B / 4x4 block). Empty on bad input. BC3
 // carries full alpha (unlike BC1) and is sampled by every desktop GPU incl. macOS
 // OpenGL 4.1 (S3TC), the universal fallback where ASTC/BC7 aren't available.
-static std::vector<uint8_t> encodeBc3(const uint8_t* rgba, uint32_t w, uint32_t h)
+// `quality` 0 takes stb_dxt's normal mode; 1 and 2 its high-quality one (the
+// encoder has only the two, and the historic call already asked for the high
+// one — so Fast is where this format gets faster, not where it gets worse).
+static std::vector<uint8_t> encodeBc3(const uint8_t* rgba, uint32_t w, uint32_t h,
+                                      uint8_t quality)
 {
     if (!rgba || w == 0 || h == 0) return {};
+    const int mode = quality >= 1 ? STB_DXT_HIGHQUAL : STB_DXT_NORMAL;
     const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
     std::vector<uint8_t> out(static_cast<size_t>(bw) * bh * 16);
     uint8_t block[64];
@@ -128,7 +147,7 @@ static std::vector<uint8_t> encodeBc3(const uint8_t* rgba, uint32_t w, uint32_t 
         {
             gatherRGBA8Block(rgba, w, h, bx, by, block);
             stb_compress_dxt_block(out.data() + (static_cast<size_t>(by) * bw + bx) * 16,
-                                   block, /*alpha=*/1, STB_DXT_HIGHQUAL); // alpha → DXT5
+                                   block, /*alpha=*/1, mode); // alpha → DXT5
         }
     return out;
 }
@@ -671,7 +690,8 @@ static std::vector<uint8_t> halveRGBA8(const uint8_t* src, uint32_t w, uint32_t 
 // `targetFormat` is a HE::TextureFormat value: 0 keeps RGBA8, 1 ASTC_4x4, 2 BC7,
 // 3 BC3 — each mip is block-compressed to it (all encoding done here at pack time),
 // degrading to RGBA8 whenever that encoder isn't built or a level fails to encode.
-static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat)
+static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
+                                        uint8_t quality)
 {
     const HAsset::Reader::Chunk* tm = nullptr;
     const HAsset::Reader::Chunk* px = nullptr;
@@ -722,19 +742,20 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat)
     // block, so the source stride is width*4 and the encoded blocks concatenate the
     // same way). Any missing encoder or failed level falls the whole texture back to
     // RGBA8 — the runtime then samples it uncompressed instead of a broken format.
-    auto encodeLevel = [targetFormat](const uint8_t* src, uint32_t lw, uint32_t lh)
+    auto encodeLevel = [targetFormat, quality](const uint8_t* src, uint32_t lw, uint32_t lh)
         -> std::vector<uint8_t>
     {
+        (void)quality;   // unused when no encoder is built
         switch (targetFormat)
         {
 #ifdef HE_HAVE_ASTCENC
-        case 1: return encodeAstc4x4(src, lw, lh);
+        case 1: return encodeAstc4x4(src, lw, lh, quality);
 #endif
 #ifdef HE_HAVE_BC7ENC
-        case 2: return encodeBc7(src, lw, lh);
+        case 2: return encodeBc7(src, lw, lh, quality);
 #endif
 #ifdef HE_HAVE_STB_DXT
-        case 3: return encodeBc3(src, lw, lh);
+        case 3: return encodeBc3(src, lw, lh, quality);
 #endif
         default: return {}; // unknown / unbuilt encoder → RGBA8 fallback
         }
@@ -783,14 +804,15 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat)
 // baked AABB (CHUNK_MVBO replacing VERT/NORM/TEXC; INDX kept); RGBA8 textures get
 // their full mip chain baked into PIXL. Unknown/uncookable assets pass through
 // unchanged. Must be lossless w.r.t. what the runtime uploads.
-static std::vector<uint8_t> cookForPack(const std::vector<uint8_t>& blob, uint8_t textureCompression)
+static std::vector<uint8_t> cookForPack(const std::vector<uint8_t>& blob, uint8_t textureCompression,
+                                        uint8_t textureQuality)
 {
     HAsset::Reader r;
     if (!r.openData(blob)) return blob;
     const HE::AssetType type = static_cast<HE::AssetType>(r.assetType());
     if (type == HE::AssetType::Texture)
     {
-        std::vector<uint8_t> cooked = cookTexture(r, textureCompression);
+        std::vector<uint8_t> cooked = cookTexture(r, textureCompression, textureQuality);
         return cooked.empty() ? blob : cooked;
     }
     if (type != HE::AssetType::StaticMesh) return blob;
@@ -1000,7 +1022,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     {
         if (progress) progress(count, total, pe.relPath);
         std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath);
-        if (settings.cook) blob = cookForPack(blob, settings.textureCompression);
+        if (settings.cook) blob = cookForPack(blob, settings.textureCompression, settings.textureQuality);
         // After every rewrite above (each of which copies META through verbatim)
         // and BEFORE the hash below: the incremental cache keys on these bytes, so
         // stripping later would leave entries packed by an older build matching

@@ -8,6 +8,7 @@
 #include <HorizonScene/EnvironmentPush.h>   // the ONE EnvironmentComponent → settings map
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/EntityActive.h>            // the "Active" switch, inherited down the tree
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
@@ -72,17 +73,28 @@ namespace
 		{
 			out.camera.position   = editorCam->position;
 			out.camera.view       = editorCam->view;
+			// An orthographic editor view has no natural near plane: where the
+			// camera SITS is only a convention (the orbit pivot distance), and a
+			// Top view must not lose the tower that happens to be taller than
+			// the camera is high. So the near plane goes a whole far-distance
+			// BEHIND the camera. That also puts everything in front of it at
+			// GL-ndc z ∈ [0,1] — the half Metal's scene raster keeps (it feeds
+			// the unfixed GL projection to a [0,w] clip; with 0.1..far the
+			// nearer 2500 m of an ortho view fell out of the picture entirely).
+			const float oh = editorCam->orthoHalfHeight;
 			out.camera.projection = editorCam->orthographic
-				? glm::ortho(-aspectRatio * 5.0f, aspectRatio * 5.0f, -5.0f, 5.0f,
-				             editorCam->nearPlane, editorCam->farPlane)
+				? glm::ortho(-aspectRatio * oh, aspectRatio * oh, -oh, oh,
+				             -editorCam->farPlane, editorCam->farPlane)
 				: glm::perspective(glm::radians(editorCam->fovDegrees), aspectRatio,
 				                   editorCam->nearPlane, editorCam->farPlane);
 		}
 		else
 		{
 			bool cameraFound = false;
+			const HE::ActiveFilter active(reg);
 			for (auto [e, t, cam] : reg.view<TransformComponent, CameraComponent>().each())
 			{
+				if (active.off(e)) continue;   // a switched-off camera is not the picture
 				if (cameraFound && !cam.isMain) continue;
 
 				out.camera.position   = glm::vec3(t.worldMatrix[3]);
@@ -213,9 +225,14 @@ namespace
 		auto meshView = reg.view<TransformComponent, MeshComponent>();
 		std::vector<EntityData> items;
 		items.reserve(meshView.size_hint());
+		// Switched off (the Details panel's Active box, or an ancestor's) is a
+		// second reason not to draw, beside the per-component visible flag;
+		// the filter decides once per extract whether anything is off at all.
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, mesh] : meshView.each())
 		{
 			if (!mesh.visible) continue; // hidden (e.g. a preloaded zone)
+			if (active.off(e)) continue;
 			EntityData d;
 			d.world  = t.worldMatrix;
 			d.meshId = mesh.meshAssetId;
@@ -323,9 +340,11 @@ namespace
 	// scalar; moving it to the GPU buys nothing — see ParticleShaderGen's comment).
 	void extractParticleBatches(entt::registry& reg, RenderWorld& out)
 	{
+		const HE::ActiveFilter active(reg);
 		for (auto [e, tc, ps] : reg.view<TransformComponent, ParticleSystemComponent>().each())
 		{
 			if (!ps.visible) continue; // hidden (e.g. a preloaded zone)
+			if (active.off(e)) continue;
 			if (ps.particles.empty()) continue;
 			const HE::ParticleEmitterConfig& config = ps.resolvedConfig; // (re)resolved by ParticleSystem::update
 
@@ -459,9 +478,11 @@ namespace
 	// one DrawCall with instanceTransforms automatically.
 	void extractFoliage(entt::registry& reg, RenderWorld& out)
 	{
+		const HE::ActiveFilter active(reg);
 		for (auto [e, fol] : reg.view<FoliageComponent>().each())
 		{
 			if (!fol.visible) continue; // hidden (e.g. a preloaded zone)
+			if (active.off(e)) continue;
 			if (fol.meshAssetId == HE::UUID{}) continue;
 			const float dd2 = fol.drawDistance * fol.drawDistance;
 			const glm::vec3 camPos = out.camera.position;
@@ -491,9 +512,11 @@ namespace
 	void extractSkinnedMeshes(entt::registry& reg, RenderWorld& out)
 	{
 		out.skinnedObjects.clear();
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, smc] : reg.view<TransformComponent, SkeletalMeshComponent>().each())
 		{
 			if (!smc.visible) continue; // hidden (e.g. a preloaded zone)
+			if (active.off(e)) continue;
 			SkinnedRenderObject obj;
 			obj.meshAssetId     = smc.meshAssetId;
 			obj.transform       = t.worldMatrix;
@@ -514,8 +537,10 @@ namespace
 	// transform); the deferred path blends the colour into the G-buffer.
 	void extractDecals(entt::registry& reg, RenderWorld& out)
 	{
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, d] : reg.view<TransformComponent, DecalComponent>().each())
 		{
+			if (active.off(e)) continue;
 			DecalData dd;
 			dd.transform = t.worldMatrix;
 			dd.color     = d.color;
@@ -536,9 +561,11 @@ namespace
 	// mesh slot in a fight over one entity's geometry.
 	void extractRopes(entt::registry& reg, RenderWorld& out)
 	{
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, rope] : reg.view<TransformComponent, RopeComponent>().each())
 		{
 			if (!rope.visible) continue;
+			if (active.off(e)) continue;
 			// Empty until the first RopeTrailSystem::update — and permanently so
 			// for a rope with fewer than two control points, which has no geometry.
 			if (rope.runtimeMeshId == HE::UUID{}) continue;
@@ -567,9 +594,11 @@ namespace
 	// the entity needs no TransformComponent for this to work.
 	void extractTrails(entt::registry& reg, RenderWorld& out)
 	{
+		const HE::ActiveFilter active(reg);
 		for (auto [e, trail] : reg.view<TrailComponent>().each())
 		{
 			if (!trail.visible) continue;
+			if (active.off(e)) continue;
 			const HE::spline::MeshData band =
 				RopeTrailSystem::buildTrailGeometry(trail, out.camera.position);
 			if (band.empty()) continue;   // fewer than two live points
@@ -616,7 +645,7 @@ namespace
 	void extractEditorIcons(entt::registry& reg, RenderWorld& out,
 	                        const EditorCameraOverride* editorCam)
 	{
-		if (!(editorCam && editorCam->active)) return;
+		if (!(editorCam && editorCam->active && editorCam->editorIcons)) return;
 
 		// Half the viewport height: per unit of depth (perspective), or as is (ortho).
 		const glm::mat4& P = out.camera.projection;
@@ -652,9 +681,11 @@ namespace
 			out.objects.push_back(obj);
 		};
 
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, light] : reg.view<TransformComponent, LightComponent>().each())
 		{
 			if (!light.visible) continue; // hidden (e.g. a preloaded zone), like its light
+			if (active.off(e)) continue;
 			// The built-in environment Sun and Moon (HorizonWorld's ensure) sit on a
 			// default transform under the Sky entity: the environment drives their
 			// direction, the transform says nothing. Two sun icons stacked on the
@@ -679,9 +710,11 @@ namespace
 	void extractLights(entt::registry& reg, RenderWorld& out)
 	{
 		out.lights.reserve(reg.view<LightComponent>().size() + 1); // +1 for the day-night moon
+		const HE::ActiveFilter active(reg);
 		for (auto [e, t, light] : reg.view<TransformComponent, LightComponent>().each())
 		{
 			if (!light.visible) continue; // hidden (e.g. a preloaded zone)
+			if (active.off(e)) continue;
 			// Per-light distance culling (point/spot only): beyond cullDistance from
 			// the camera the light is dropped from the extracted set entirely, so
 			// direct shading AND the GI probe bounce ignore it consistently on every
@@ -711,7 +744,11 @@ namespace
 	// follows the sun by day and the moon by night). The ortho frustum is fitted
 	// around the union of the (seeded) object bounds — backends refine bounds
 	// elsewhere, but this rough fit is enough for a single full-scene shadow map.
-	void fitDirectionalShadow(RenderWorld& out)
+	// The fit parameters (shadowDistance, cascadeCount, splitLambda, mapRes)
+	// are the extractor's setShadowSettings() state: the project's word, or
+	// the historical constants for a backend that never pushed any.
+	void fitDirectionalShadow(RenderWorld& out, float shadowDistance, int cascadeCount,
+	                          float splitLambda, int mapRes)
 	{
 		out.shadow.enabled = false;
 		const LightData* shadowLight = nullptr;
@@ -740,9 +777,9 @@ namespace
 		// Texel-snap the frustum centre so the shadow-map samples stay on stable
 		// world positions as the day-night light rotates — without this the shadow
 		// edges crawl/flicker frame to frame. Snap the centre along the light's
-		// right/up axes in whole-texel steps (kShadowMapResolution must match the
-		// backends' shadow map resolution).
-		constexpr float kShadowMapRes = static_cast<float>(HE::kShadowMapResolution);
+		// right/up axes in whole-texel steps (mapRes must match the backend's
+		// shadow map resolution).
+		const float kShadowMapRes = static_cast<float>(mapRes);
 		const float worldPerTexel = (2.0f * radius) / kShadowMapRes;
 		const glm::vec3 right = glm::normalize(glm::cross(dir, up)); // glm::lookAt side axis
 		const glm::vec3 upL   = glm::cross(right, dir);              // glm::lookAt up axis
@@ -759,26 +796,38 @@ namespace
 		out.shadow.enabled   = true;
 
 		// ── Cascaded Shadow Maps (Metal) ───────────────────────────────────
-		// Fit `kCascadeCount` tight light frusta to successive slices of the camera
+		// Fit `cascadeCount` tight light frusta to successive slices of the camera
 		// frustum, but only out to a BOUNDED shadowDistance (not the 5000-unit far
 		// plane) — that bound is what makes the near cascade hug the camera and give
 		// sharp shadows. Each cascade is fit to the bounding SPHERE of its sub-frustum
 		// (rotation-invariant → stable texel size) and texel-snapped in its own light
 		// space (no crawl). The light-direction (Z) range is kept generous so casters
 		// between the light and the slice are not clipped.
-		constexpr int   kCascadeCount  = 3;
-		constexpr float kShadowDistance = 250.0f; // metres of shadow coverage (tunable)
-		constexpr float kLambda        = 0.5f;    // uniform↔logarithmic split blend
-		constexpr float kCascadeRes    = static_cast<float>(HE::kShadowMapResolution);
+		// Count / distance / lambda are the project's (ProjectShadowSettings via
+		// IRenderer::SetShadowSettings); their defaults are what used to be the
+		// constants here (3 / 250 m / 0.5).
+		const int   kCascadeCount   = std::clamp(cascadeCount, 1, ShadowData::kMaxCascades);
+		const float kShadowDistance = shadowDistance; // metres of shadow coverage
+		const float kLambda         = splitLambda;    // uniform↔logarithmic split blend
+		const float kCascadeRes     = static_cast<float>(mapRes);
 
-		// Camera near/far from the (glm, z∈[-1,1]) projection matrix.
+		// Camera near/far from the (glm, z∈[-1,1]) projection matrix. The
+		// perspective terms read garbage off an orthographic matrix (near ≈ 1,
+		// far < 0 → a 2 m shadow range), so an ortho view — the editor's
+		// Top/Front/Side, or an ortho CameraComponent — reads its own linear
+		// terms: z_ndc = P[2][2]·(−d) + P[3][2]. Its near plane sits behind the
+		// camera (see extractCamera); shadows start at the camera itself, the
+		// splits are uniform because a logarithmic series has no meaning
+		// without perspective, and every slice is the ortho box rather than a
+		// frustum wedge.
 		const glm::mat4& P = out.camera.projection;
-		const float camN = P[3][2] / (P[2][2] - 1.0f);
-		const float camF = P[3][2] / (P[2][2] + 1.0f);
+		const bool  ortho = (P[3][3] == 1.0f);
+		const float camN = ortho ? 0.05f : P[3][2] / (P[2][2] - 1.0f);   // > 0: the log series divides by it
+		const float camF = ortho ? (P[3][2] - 1.0f) / P[2][2] : P[3][2] / (P[2][2] + 1.0f);
 		const float shadowFar = std::min(std::max(camF, camN + 1.0f), kShadowDistance);
 
 		float splitD[ShadowData::kMaxCascades + 1];
-		HE::computeCascadeSplits(camN, shadowFar, kCascadeCount, kLambda, splitD);
+		HE::computeCascadeSplits(camN, shadowFar, kCascadeCount, ortho ? 0.0f : kLambda, splitD);
 
 		// Stable per-cascade sphere fit (jitter-free → no shadow swim): the bounding
 		// sphere of a frustum slice depends ONLY on fov/aspect/splits, not the camera
@@ -799,7 +848,14 @@ namespace
 		{
 			const float nC = splitD[c];
 			const float fC = splitD[c + 1];
-			const HE::CascadeSphere sphere = HE::fitCascadeSphere(nC, fC, thfX, thfY);
+			// Ortho: the slice is a box with the view's own half extents
+			// (1/P[0][0], 1/P[1][1] are those, not tangents), so its sphere is
+			// the box's half diagonal about its middle.
+			const HE::CascadeSphere sphere = ortho
+				? HE::CascadeSphere{ (nC + fC) * 0.5f,
+				                     std::ceil(std::sqrt(thfX * thfX + thfY * thfY
+				                                         + (fC - nC) * (fC - nC) * 0.25f) * 16.0f) / 16.0f }
+				: HE::fitCascadeSphere(nC, fC, thfX, thfY);
 			const float     crad    = sphere.radius;
 			const glm::vec3 ccenter = camPos + camFwd * sphere.centerDistance;
 
@@ -969,6 +1025,10 @@ bool isEditorIconMaterial(const UUID& materialId)
 
 } // namespace HE
 
+// Out-of-line on purpose (see the header): the one definition the DLL exports.
+RenderExtractor::RenderExtractor()  = default;
+RenderExtractor::~RenderExtractor() = default;
+
 void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio,
                               const EditorCameraOverride* editorCam)
 {
@@ -998,7 +1058,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	extractLights(reg, out);
 	applyDayNight(out);
 	// Shadows last: both phases read the finished object + light sets.
-	fitDirectionalShadow(out);
+	fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes);
 	assignLocalShadowLayers(out);
 }
 

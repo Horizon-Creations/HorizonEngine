@@ -25,7 +25,8 @@ bool rayTriangle(const glm::vec3& o, const glm::vec3& d,
 }
 
 SurfaceHit raycast(const RenderWorld& snapshot, const MeshLookup& lookup,
-                   const glm::vec3& origin, const glm::vec3& direction)
+                   const glm::vec3& origin, const glm::vec3& direction,
+                   const ObjectFilter& filter)
 {
 	SurfaceHit best;
 	float      bestT = std::numeric_limits<float>::max();
@@ -34,6 +35,7 @@ SurfaceHit raycast(const RenderWorld& snapshot, const MeshLookup& lookup,
 	for (const RenderObject& obj : snapshot.objects)
 	{
 		if (obj.meshAssetId == HE::UUID{}) continue;
+		if (filter && !filter(obj)) continue;
 		MeshGeometry geo;
 		if (!lookup(obj.meshAssetId, geo)) continue;
 		if (!geo.positions || !geo.indices || geo.indexCount < 3 || geo.vertexCount == 0) continue;
@@ -81,6 +83,92 @@ SurfaceHit raycast(const RenderWorld& snapshot, const MeshLookup& lookup,
 		best.distance = bestT;
 		best.point    = origin + bestT * direction;
 		if (glm::dot(best.normal, direction) > 0.0f) best.normal = -best.normal; // face the ray
+	}
+	return best;
+}
+
+namespace
+{
+	// World point → picture coordinates. False when the point is behind the
+	// camera (w <= 0): such a vertex has no place on the screen and must not be
+	// compared as if it had one.
+	bool project(const glm::mat4& viewProj, const glm::vec2& rectMin, const glm::vec2& rectSize,
+	             const glm::vec3& world, glm::vec2& outScreen, float& outDepth)
+	{
+		const glm::vec4 clip = viewProj * glm::vec4(world, 1.0f);
+		if (clip.w <= 1e-6f) return false;
+		const float nx = clip.x / clip.w, ny = clip.y / clip.w;
+		outScreen = { rectMin.x + (nx * 0.5f + 0.5f) * rectSize.x,
+		              rectMin.y + (0.5f - ny * 0.5f) * rectSize.y };
+		outDepth  = clip.w;
+		return true;
+	}
+}
+
+VertexHit nearestVertex(const RenderWorld& snapshot, const MeshLookup& lookup,
+                        const glm::mat4& viewProj,
+                        const glm::vec2& rectMin, const glm::vec2& rectSize,
+                        const glm::vec2& screen, float radiusPx,
+                        const ObjectFilter& filter)
+{
+	VertexHit best;
+	if (!lookup || radiusPx <= 0.0f) return best;
+	float bestD2    = radiusPx * radiusPx;
+	float bestDepth = std::numeric_limits<float>::max();
+
+	for (const RenderObject& obj : snapshot.objects)
+	{
+		if (obj.meshAssetId == HE::UUID{}) continue;
+		if (filter && !filter(obj)) continue;
+		MeshGeometry geo;
+		if (!lookup(obj.meshAssetId, geo)) continue;
+		if (!geo.positions || geo.vertexCount == 0) continue;
+
+		// Cheap reject: the object's box, projected. If every corner is in
+		// front of the camera and the 2D rectangle they span stays clear of the
+		// cursor's radius, no vertex inside can be closer. A corner behind the
+		// camera makes the rectangle meaningless, and the object is then simply
+		// walked.
+		if (geo.bounds && geo.bounds->isValid())
+		{
+			glm::vec2 lo( std::numeric_limits<float>::max());
+			glm::vec2 hi(-std::numeric_limits<float>::max());
+			bool allInFront = true;
+			for (int i = 0; i < 8 && allInFront; ++i)
+			{
+				const glm::vec3 corner((i & 1) ? geo.bounds->max.x : geo.bounds->min.x,
+				                       (i & 2) ? geo.bounds->max.y : geo.bounds->min.y,
+				                       (i & 4) ? geo.bounds->max.z : geo.bounds->min.z);
+				glm::vec2 s; float depth;
+				if (!project(viewProj, rectMin, rectSize,
+				             glm::vec3(obj.transform * glm::vec4(corner, 1.0f)), s, depth))
+					allInFront = false;
+				else { lo = glm::min(lo, s); hi = glm::max(hi, s); }
+			}
+			if (allInFront && (screen.x < lo.x - radiusPx || screen.x > hi.x + radiusPx ||
+			                   screen.y < lo.y - radiusPx || screen.y > hi.y + radiusPx))
+				continue;
+		}
+
+		const glm::mat4 toClip = viewProj * obj.transform;
+		for (size_t i = 0; i < geo.vertexCount; ++i)
+		{
+			const float* p = geo.positions + i * geo.stride;
+			const glm::vec3 local(p[0], p[1], p[2]);
+			glm::vec2 s; float depth;
+			if (!project(toClip, rectMin, rectSize, local, s, depth)) continue;
+			const glm::vec2 d  = s - screen;
+			const float     d2 = d.x * d.x + d.y * d.y;
+			// Strictly closer on screen wins; the same pixel goes to the nearer
+			// vertex, so a shared edge seen edge-on snaps to its front.
+			if (d2 > bestD2 || (d2 == bestD2 && depth >= bestDepth)) continue;
+			bestD2          = d2;
+			bestDepth       = depth;
+			best.hit        = true;
+			best.point      = glm::vec3(obj.transform * glm::vec4(local, 1.0f));
+			best.distancePx = std::sqrt(d2);
+			best.entityId   = obj.entityId;
+		}
 	}
 	return best;
 }

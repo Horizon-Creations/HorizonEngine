@@ -1,6 +1,7 @@
 #include "GraphEditor.h"
 #include "EditorInput.h" // pointer-device grammar (trackpad swipe pans, modifier-scroll zooms)
 #include "EditorWidgets.h" // WrapText — header-only, so the test binary needs no extra link
+#include <imgui_internal.h> // ImBezierCubicCalc: the wire double-click samples the drawn curve
 #include <cstdint>
 #include <algorithm>
 #include <unordered_set>
@@ -59,6 +60,7 @@ struct Drawn
     float  gw = kNodeW;      // graph-space width
     float  gTitleH = kTitleH;// graph-space title-bar height
     bool   compact = false;  // no exec pins → compact style
+    bool   reroute = false;  // a knot: dot instead of a box (Model::nodeIsReroute)
     // Where an inline pin editor starts, in graph units from the node's left
     // edge. ONE column for the whole node, past its longest input label: three
     // controls each starting wherever its own label happened to end is a node
@@ -279,6 +281,21 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
         model.getPos(nid, gx, gy);
         d.pos  = toScreen(gx, gy);
         d.pins = model.pins(nid);
+        d.reroute = model.nodeIsReroute && model.nodeIsReroute(nid);
+        if (d.reroute)
+        {
+            // A square the size of the dot, pins on its left and right edge at
+            // mid-height. No title, no rows, no body — nothing below applies.
+            d.gw = kRerouteW;
+            d.gTitleH = 0.0f;
+            d.size = ImVec2(kRerouteW * st.zoom, kRerouteW * st.zoom);
+            d.pinPos.resize(d.pins.size());
+            for (size_t i = 0; i < d.pins.size(); ++i)
+                d.pinPos[i] = ImVec2(d.pins[i].input ? d.pos.x : d.pos.x + d.size.x,
+                                     d.pos.y + d.size.y * 0.5f);
+            nodes.push_back(std::move(d));
+            continue;
+        }
         const bool hasBody = model.nodeBodyHeight && model.nodeBodyHeight(nid) > 0.0f;
         d.compact = model.compactPureNodes && !hasBody && isCompactNode(d.pins);
         d.gTitleH = d.compact ? kCompactTitleH : kTitleH;
@@ -483,6 +500,11 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
     auto pinAt = [&](const ImVec2& m, int& outNode, int& outPin, bool& outInput) -> bool
     {
         const float r = pinHitRadius(st.zoom);
+        // A reroute's two pins sit kRerouteW apart with the grab handle in
+        // between: the generous radius above would cover the whole knot and
+        // leave nothing to move it by, so its pins get a circle no wider than
+        // the pin itself (floored so it stays hittable at low zoom).
+        const float rr = std::max(kPinR * st.zoom, 4.0f);
         float best = std::numeric_limits<float>::max();
         bool  found = false;
         for (auto it = nodes.rbegin(); it != nodes.rend(); ++it)
@@ -491,7 +513,8 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 const ImVec2 pp = it->pinPos[i];
                 const float dx = m.x - pp.x, dy = m.y - pp.y;
                 const float d2 = dx*dx + dy*dy;
-                if (d2 > r*r || d2 >= best) continue;
+                const float hit = it->reroute ? rr : r;
+                if (d2 > hit*hit || d2 >= best) continue;
                 best = d2;
                 outNode = it->id; outPin = it->pins[i].id; outInput = it->pins[i].input;
                 found = true;
@@ -549,6 +572,27 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
             std::find(st.selection.begin(), st.selection.end(), n.id) != st.selection.end();
 
         const std::string title = model.title(n.id);
+        if (n.reroute)
+        {
+            // The knot: a dot in the wire's colour (the output pin's, which is
+            // the input's too), ringed amber when selected. The pins themselves
+            // draw nothing — they are the dot's edges — and the box is the hit
+            // rect only. Falls through to the hover bookkeeping below.
+            const ImVec2 c(n.pos.x + n.size.x * 0.5f, n.pos.y + n.size.y * 0.5f);
+            ImU32 col = IM_COL32(200, 200, 200, 255);
+            for (const auto& p : n.pins) if (!p.input) { col = p.color; break; }
+            const float rad = kPinR * 1.3f * st.zoom;
+            dl->AddCircleFilled(c, rad, col);
+            dl->AddCircle(c, rad, sel ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 24, 255),
+                          0, sel ? 2.0f : 1.0f);
+            if (model.nodeOutline)
+                if (const ImU32 oc = model.nodeOutline(n.id))
+                    dl->AddCircle(c, rad + 3.0f, oc, 0, 3.0f);
+            const bool overKnot = mouse.x >= n.pos.x - kNodeHitPad && mouse.x <= br.x + kNodeHitPad &&
+                                  mouse.y >= n.pos.y - kNodeHitPad && mouse.y <= br.y + kNodeHitPad;
+            if (overKnot) hoverNodeNow = n.id;
+            continue;
+        }
         if (n.compact)
         {
             // No colored header bar: a subtly accent-tinted rounded body + a small
@@ -1018,6 +1062,53 @@ bool draw(const char* id, const Model& model, State& st, const ImVec2& size)
                 if (st.dragOffInput) drawLink(dl, drop, *a, IM_COL32(255, 210, 120, 220), 2.0f);
                 else                 drawLink(dl, *a, drop, IM_COL32(255, 210, 120, 220), 2.0f);
             }
+    }
+
+    // ── Double-click a wire ──────────────────────────────────────────────────
+    // Over EMPTY canvas only (a wire running under a node belongs to the node
+    // there), and against the same cubic drawLink drew — sampled, because the
+    // nearest point on a bezier has no closed form and 24 segments are within
+    // a pixel of it at any zoom this canvas allows. Nearest wire wins; nothing
+    // within a few pixels means the double-click was just a double-click.
+    if (interact && !consumed && hoverNodeNow == 0 && model.onLinkDoubleClick &&
+        st.linkSrcNode == 0 && st.dragNode == 0 &&
+        ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+    {
+        constexpr int   kSamples = 24;
+        constexpr float kSnap    = 6.0f;   // screen px
+        float bestD2 = kSnap * kSnap;
+        const std::array<int, 4>* hit = nullptr;
+        for (const auto& l : links)
+        {
+            const Drawn* sn = findNode(l[0]);
+            const Drawn* dn = findNode(l[2]);
+            if (!sn || !dn) continue;
+            const ImVec2* a = findPin(*sn, l[1], false);
+            const ImVec2* b = findPin(*dn, l[3], true);
+            if (!a || !b) continue;
+            const float dx = std::max(30.0f, std::fabs(b->x - a->x) * 0.5f);
+            const ImVec2 c1(a->x + dx, a->y), c2(b->x - dx, b->y);
+            ImVec2 prev = *a;
+            for (int i = 1; i <= kSamples; ++i)
+            {
+                const ImVec2 cur = ImBezierCubicCalc(*a, c1, c2, *b, (float)i / kSamples);
+                // Distance from the mouse to the segment prev→cur.
+                const float sx = cur.x - prev.x, sy = cur.y - prev.y;
+                const float len2 = sx * sx + sy * sy;
+                float t = len2 > 0.0f ? ((mouse.x - prev.x) * sx + (mouse.y - prev.y) * sy) / len2 : 0.0f;
+                t = std::clamp(t, 0.0f, 1.0f);
+                const float px = prev.x + sx * t - mouse.x, py = prev.y + sy * t - mouse.y;
+                const float d2 = px * px + py * py;
+                if (d2 < bestD2) { bestD2 = d2; hit = &l; }
+                prev = cur;
+            }
+        }
+        if (hit)
+        {
+            model.onLinkDoubleClick((*hit)[0], (*hit)[1], (*hit)[2], (*hit)[3], toGraph(mouse));
+            changed = true;
+            consumed = true;   // not also the start of a box-select
+        }
     }
 
     // ── Box-select ───────────────────────────────────────────────────────────
