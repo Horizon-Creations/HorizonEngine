@@ -341,6 +341,11 @@ struct ProjectData
 	// does not acquire a picture nobody chose.
 	std::string appIconName;
 	std::string appIconColor = "#1e70c8";   // "#RRGGBB", as everywhere else
+	// A picture of the project's own instead: PROJECT-relative path of a PNG
+	// ("Content/Icon.png", forward slashes). When set and readable the export
+	// builds every container from it and the two fields above are not used;
+	// a file that went missing falls back to them. Empty = generated icon.
+	std::string appIconFile;
 	// Empty = derived from the project name, which is what every export did
 	// before this field existed. Set it and the export says exactly this.
 	std::string bundleId;

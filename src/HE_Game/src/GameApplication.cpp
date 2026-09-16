@@ -529,6 +529,31 @@ HE::ApplicationConfig GameApplication::GetConfig() const
 	cfg.windowprops.vsync  = m_vsyncOn;
 	cfg.windowprops.mode   = m_windowMode;
 	cfg.backend            = m_backend;
+
+	// ── Splash ───────────────────────────────────────────────────────────────
+	// The project asked for one (Project Settings ▸ Game ▸ Splash) AND the
+	// export put the picture beside project.hcfg. Both, deliberately: the
+	// SplashScreen draws its built-in branding when it has no logo, and a
+	// shipped game opening a window that says "Horizon Engine" is the engine
+	// advertising itself inside somebody else's product. No picture, no splash.
+	if (m_projectSettings.game.splashEnabled)
+	{
+		if (const char* baseRaw = SDL_GetBasePath())
+		{
+			const fs::path logo = fs::path(baseRaw) / "Splash.png";
+			std::error_code ec;
+			if (fs::is_regular_file(logo, ec))
+			{
+				cfg.splash.enabled  = true;
+				cfg.splash.logoPath = logo.string();
+				cfg.splash.title    = cfg.windowprops.title;
+				cfg.splash.subtitle = m_projectSettings.game.splashSubtitle;
+			}
+			else
+				HE_LOG_WARN(Core, "GameApplication: splash is on but %s is missing — no splash",
+				            logo.string().c_str());
+		}
+	}
 	return cfg;
 }
 

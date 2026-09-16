@@ -1780,6 +1780,33 @@ TEST_CASE("A project written before appIconName loads with no icon, not with one
     he_test::removeAllQuiet(dir);
 }
 
+TEST_CASE("The project's own icon file rides in the .heproj and a new project has none")
+{
+    const auto dir = std::filesystem::temp_directory_path() / "he_test_iconfileproj";
+    he_test::removeAllQuiet(dir);
+
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "PicGame", ProjectPreset::Empty));
+    CHECK(pm.currentProject().appIconFile.empty());
+    pm.currentProject().appIconFile = "Content/Icon.png";
+    REQUIRE(pm.saveProject(pm.currentProject().path));
+    {
+        ProjectManager reopened;
+        REQUIRE(reopened.loadProject(pm.currentProject().path));
+        CHECK(reopened.currentProject().appIconFile == "Content/Icon.png");
+    }
+
+    // A second project made by the SAME manager starts without it: the field is
+    // reset with the icon name, not carried over from whatever was open.
+    const auto dir2 = std::filesystem::temp_directory_path() / "he_test_iconfileproj2";
+    he_test::removeAllQuiet(dir2);
+    REQUIRE(pm.createNewProject(dir2.string(), "NextGame", ProjectPreset::Empty));
+    CHECK(pm.currentProject().appIconFile.empty());
+
+    he_test::removeAllQuiet(dir);
+    he_test::removeAllQuiet(dir2);
+}
+
 // ─── Application template ────────────────────────────────────────────────────
 // An app project that opens with an empty preview is indistinguishable from a
 // broken one, so the template has to lay down BOTH halves: the root widget, and

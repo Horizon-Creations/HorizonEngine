@@ -156,3 +156,47 @@ TEST_CASE("The containers say what they contain")
     std::filesystem::remove(icns);
     std::filesystem::remove(ico);
 }
+
+// ─── A picture of the project's own ──────────────────────────────────────────
+// The set the export builds from a PNG the artist drew. Two things the code does
+// not say out loud: a non-square source is centred on a transparent square, and
+// the resample averages AREA — a solid half stays solid and the split stays in
+// the middle, whatever the size.
+TEST_CASE("An icon set from an image keeps its picture at every size")
+{
+    // 40 x 20: left half opaque red, right half opaque blue.
+    const int w = 40, h = 20;
+    std::vector<std::uint8_t> src((std::size_t)w * h * 4);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+        {
+            std::uint8_t* p = src.data() + ((std::size_t)y * w + x) * 4;
+            p[0] = x < w / 2 ? 255 : 0; p[1] = 0; p[2] = x < w / 2 ? 0 : 255; p[3] = 255;
+        }
+
+    const std::vector<HE::AppIconImage> set = HE::heAppIconSetFromImage(src.data(), w, h, { 16, 64 });
+    REQUIRE(set.size() == 2);
+    CHECK(set[0].px == 16);
+    CHECK(set[1].px == 64);
+    for (const HE::AppIconImage& img : set)
+    {
+        REQUIRE(img.rgba.size() == (std::size_t)img.px * img.px * 4);
+        auto at = [&](int x, int y) { return img.rgba.data() + ((std::size_t)y * img.px + x) * 4; };
+        const int mid = img.px / 2;
+        // The picture occupies the middle half in y (20 of 40 → centred), so
+        // the top and bottom rows are the transparent padding.
+        CHECK(at(mid, 0)[3] == 0);
+        CHECK(at(mid, img.px - 1)[3] == 0);
+        // Inside it: red on the left, blue on the right, both opaque.
+        CHECK(at(2, mid)[0] == 255);
+        CHECK(at(2, mid)[2] == 0);
+        CHECK(at(2, mid)[3] == 255);
+        CHECK(at(img.px - 3, mid)[2] == 255);
+        CHECK(at(img.px - 3, mid)[0] == 0);
+        CHECK(at(img.px - 3, mid)[3] == 255);
+    }
+
+    // Nothing in, nothing out — not a 0x0 image, not a crash.
+    CHECK(HE::heAppIconSetFromImage(nullptr, 0, 0, { 16 }).empty());
+    CHECK(HE::heAppIconSetFromImage(src.data(), w, h, {}).empty());
+}

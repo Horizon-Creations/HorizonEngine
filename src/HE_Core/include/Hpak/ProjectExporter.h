@@ -111,6 +111,18 @@ struct HE_API ExportSettings {
     // files, which is what every export did before this existed.
     std::string appIconName;
     std::string appIconColor = "#1e70c8";
+    // A picture of the project's own instead of the generated glyph: absolute
+    // path of a PNG. When set and readable it is what every icon container is
+    // built from (resampled to each size, see heAppIconSetFromImage) and the
+    // two fields above are not consulted; unreadable falls back to them, so a
+    // moved file costs the custom icon and not the icon. Empty = generated.
+    std::filesystem::path appIconFile;
+    // The splash picture (Project Settings ▸ Game ▸ Splash), absolute path of
+    // a PNG. Copied beside project.hcfg as Splash.png, where the packaged game
+    // reads it from when ProjectSettings.json says the splash is on. Empty =
+    // none copied, and a Splash.png left by an earlier export is REMOVED, for
+    // the same reason the settings file is: a leftover would overrule "off".
+    std::filesystem::path splashImageFile;
     // Empty = derived from the project name (com.horizonengine.<name>), the
     // behaviour every earlier export had.
     std::string bundleId;

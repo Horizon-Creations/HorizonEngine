@@ -7,6 +7,8 @@
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "HcEditorUtil.h"                // asset enumeration for the codegen source set
 #include "HcFallbackReport.h"            // which classes ship interpreted, and why
+#include "AppMetadataRows.h"             // icon, version, splash — the same rows Project Settings draws
+#include "NotificationStore.h"           // a project write that fails has to say so
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HcCodegen.h>      // HorizonCode → C++ codegen (compile-on-export)
@@ -880,6 +882,56 @@ void render(AppContext& ctx)
                                         "ships the software renderer and needs no GPU.");
             }
 
+            // ── What the build IS to the person who installs it ────────────
+            // Icon, version and splash live in the project (Project Settings ▸
+            // Application / General); they are shown HERE because this is the
+            // screen somebody is on when they notice the build still says 1.0.
+            // Bound straight to the ProjectData and saved when an edit ends,
+            // never copied into a dialog static (see the note at the top).
+            if (ctx.projectManager && !ctx.projectManager->currentProject().path.empty())
+            {
+                ImGui::Spacing();
+                ProjectData& proj = ctx.projectManager->currentProject();
+                if (ImGui::CollapsingHeader("Application: icon, version, splash"))
+                {
+                    bool heproj = false, settings = false;
+                    // The icon as the export will write it, beside its rows.
+                    const int kPx = 48;
+                    if (const ImTextureID tex = static_cast<ImTextureID>(
+                            AppMetadataRows::iconPreviewTexture(ctx, proj, kPx)))
+                    {
+                        ImGui::Image(tex, ImVec2((float)kPx, (float)kPx));
+                        ImGui::SameLine();
+                    }
+                    ImGui::BeginGroup();
+                    EditorWidgets::Row::inputText("Icon##exporticonname", &proj.appIconName);
+                    heproj |= ImGui::IsItemDeactivatedAfterEdit();
+                    EditorWidgets::helpForLabel("Icon");
+                    heproj |= AppMetadataRows::drawIconFileRow(ctx, proj);
+                    ImGui::EndGroup();
+                    EditorWidgets::Row::inputText("Version##exportversion", &proj.appVersion);
+                    heproj |= ImGui::IsItemDeactivatedAfterEdit();
+                    EditorWidgets::helpForLabel("Version");
+                    ImGui::TextDisabled("Bundle identifier, plate colour and file types: "
+                                        "Project Settings > Application.");
+                    ImGui::Spacing();
+                    settings |= AppMetadataRows::drawSplashRows(ctx, proj, /*compact=*/true);
+
+                    if (heproj && !ctx.projectManager->saveProject(proj.path))
+                        HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                                       "Could not save the project's application settings",
+                                       proj.path);
+                    if (settings)
+                    {
+                        proj.settings.clamp();
+                        if (!ctx.projectManager->saveProjectSettings())
+                            HE::Ed::notify(HE::Ed::NoteLevel::Problem,
+                                           "Could not save the project's splash settings",
+                                           HE::projectSettingsPath(ctx.projectManager->projectRoot()).string());
+                    }
+                }
+            }
+
             ImGui::Spacing();
             EditorWidgets::checkbox("Compress assets",       &s_exportCompress);
             EditorWidgets::checkbox("Encrypt assets",        &s_exportEncrypt);
@@ -1424,6 +1476,15 @@ void startExport(AppContext& ctx)
                     // icon is generated at export time from these three.
                     es.appIconName  = ctx.projectManager->currentProject().appIconName;
                     es.appIconColor = ctx.projectManager->currentProject().appIconColor;
+                    // The project's own picture, resolved to an absolute path
+                    // here — the exporter knows no project root. Same for the
+                    // splash: the picture travels, the switch and subtitle ride
+                    // in the settings file copied below.
+                    es.appIconFile  = AppMetadataRows::resolveProjectFile(
+                        ctx, ctx.projectManager->currentProject().appIconFile);
+                    if (ctx.projectManager->currentProject().settings.game.splashEnabled)
+                        es.splashImageFile = AppMetadataRows::resolveProjectFile(
+                            ctx, ctx.projectManager->currentProject().settings.game.splashImage);
                     es.bundleId     = ctx.projectManager->currentProject().bundleId;
                     es.appVersion   = ctx.projectManager->currentProject().appVersion;
                     es.documentTypes = ctx.projectManager->currentProject().documentTypes;

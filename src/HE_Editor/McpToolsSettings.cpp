@@ -302,6 +302,10 @@ std::vector<ProjSetting> buildProjectCatalog()
 	                    "stands."));
 	t.push_back(strProj("project.appIconColor", "Icon Colour", "Application",
 	                    &ProjectData::appIconColor, "\"#RRGGBB\"."));
+	t.push_back(strProj("project.appIconFile", "Icon File", "Application",
+	                    &ProjectData::appIconFile,
+	                    "Project-relative PNG the icon is built from instead of the "
+	                    "generated one. Empty = generated."));
 	t.push_back(strProj("project.bundleId", "Bundle Id", "Application",
 	                    &ProjectData::bundleId,
 	                    "Empty = derived from the project name."));

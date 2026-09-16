@@ -1427,6 +1427,7 @@ bool ProjectManager::createNewProject(const std::string& projectDir,
 	// from THIS copy, so a new application would draw bold for its first session.
 	m_currentProject.fontWeightBold        = !isApp;
 	m_currentProject.appIconName           = isApp ? "widgets" : "sports_esports";
+	m_currentProject.appIconFile.clear();   // a new project draws no picture of another's
 	// A new project has no settings file, so it starts on the defaults — said
 	// explicitly, because the fields above are set one by one and a manager
 	// that made a project after editing another one's settings would otherwise
@@ -1558,6 +1559,7 @@ bool ProjectManager::loadProject(const std::string& projectPath)
 	// absent key stays absent all the way to the build.
 	m_currentProject.appIconName  = jsonString(j, "appIconName");
 	m_currentProject.appIconColor = jsonString(j, "appIconColor", "#1e70c8");
+	m_currentProject.appIconFile  = jsonString(j, "appIconFile");
 	m_currentProject.bundleId     = jsonString(j, "bundleId");
 	m_currentProject.appVersion   = jsonString(j, "appVersion", "1.0");
 	m_currentProject.documentTypes.clear();
@@ -1667,6 +1669,7 @@ bool ProjectManager::saveProject(const std::string& projectPath)
 	}
 	j["appIconName"]           = m_currentProject.appIconName;
 	j["appIconColor"]          = m_currentProject.appIconColor;
+	j["appIconFile"]           = m_currentProject.appIconFile;
 	j["appVersion"]            = m_currentProject.appVersion;
 	// Only when it was chosen: an empty key would freeze today's derived value
 	// into the file and make a later rename of the project stop moving it.

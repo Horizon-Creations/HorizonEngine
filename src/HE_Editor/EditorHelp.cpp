@@ -2927,6 +2927,30 @@ namespace
 	  "Windows registration. The folder, the .hpak and the save directory keep "
 	  "the project name, so retitling a game strands nobody's saves.",
 	  "", "editor#preferences" },
+	{ "Project General/Show a splash while starting", "Show a splash while starting",
+	  "A small always-on-top window with your picture and the game's title, "
+	  "shown while the game loads — the same splash the editor opens on its own "
+	  "start. Without it a shipped game shows a black rectangle for as long as "
+	  "the renderer takes to come up.\n\n"
+	  "It only opens when a picture is set: with no logo the splash would draw "
+	  "the engine's own wordmark, and the engine does not advertise itself "
+	  "inside your game. Saved to Config/ProjectSettings.json.",
+	  "", "export#overview" },
+	{ "Project General/Splash image", "Splash image",
+	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
+	  "copies it beside project.hcfg as Splash.png; the game reads it from "
+	  "there. A file outside the project is stored with its absolute path and "
+	  "does not travel with the project — copy it into Content/ instead.",
+	  "", "export#overview" },
+	{ "Project General/Subtitle", "Subtitle",
+	  "The small line under the title on the splash — a version, a studio "
+	  "name, a tagline. Free text; it is not the bundle version, which never "
+	  "reaches the running game.",
+	  "", "export#overview" },
+	{ "Project General/Browse...", "Browse",
+	  "Pick the PNG in a file dialog. Choosing one inside the project stores "
+	  "the path relative to it.",
+	  "", "editor#preferences" },
 	{ "Project General/Scene", "Startup scene",
 	  "The scene the game opens with — and the one the editor opens when the "
 	  "project loads. Listed are the .hescene files under Content. An export "
@@ -3093,6 +3117,18 @@ namespace
 	{ "Application/Version", "Version",
 	  "CFBundleShortVersionString and CFBundleVersion in the exported bundle. "
 	  "Free-form text; \"1.4\" and \"1.4.2\" are both fine.",
+	  "", "editor#preferences" },
+	{ "Application/Icon file", "Icon file",
+	  "A PNG of your own instead of the generated icon: every size (16 to 512) "
+	  "and every container — .icns, .ico, the window's .png — is resampled from "
+	  "it, so one picture is enough. A non-square picture is centred on a "
+	  "transparent square. Project-relative paths travel with the project; a "
+	  "file that went missing falls back to the generated icon rather than to "
+	  "no icon at all.",
+	  "", "editor#preferences" },
+	{ "Application/Browse...", "Browse",
+	  "Pick the PNG in a file dialog. Choosing one inside the project stores "
+	  "the path relative to it.",
 	  "", "editor#preferences" },
 	{ "Application/Extension", "Extension",
 	  "The file ending this type owns, without the dot: \"hnote\". Letters and "
@@ -5127,6 +5163,51 @@ namespace
 	{ "Export/D3D12", "Precompile for Direct3D 12",
 	  "The same for Direct3D 12, the newer of the two Windows backends.",
 	  "", "materials#pipeline" },
+	// ── Application: icon, version, splash (the same rows Project Settings has)
+	{ "Export/Icon", "Icon",
+	  "The name of one of the engine's built-in icons the export generates the "
+	  "application icon from — the same field as Project Settings > "
+	  "Application, shown here so a build does not ship with the icon nobody "
+	  "chose. The plate colour and the bundle identifier stay on that page.",
+	  "", "editor#preferences" },
+	{ "Export/Icon file", "Icon file",
+	  "A PNG of your own instead of the generated icon: every size (16 to 512) "
+	  "and every container — .icns, .ico, the window's .png — is resampled from "
+	  "it, so one picture is enough. A non-square picture is centred on a "
+	  "transparent square. Project-relative paths travel with the project; a "
+	  "file that went missing falls back to the generated icon rather than to "
+	  "no icon at all.",
+	  "", "editor#preferences" },
+	{ "Export/Browse...", "Browse",
+	  "Pick the PNG in a file dialog. Choosing one inside the project stores "
+	  "the path relative to it.",
+	  "", "editor#preferences" },
+	{ "Export/Version", "Version",
+	  "CFBundleShortVersionString and CFBundleVersion in the exported bundle — "
+	  "the same field as Project Settings > Application. Free-form text; "
+	  "\"1.4\" and \"1.4.2\" are both fine. Saved to the .heproj when you "
+	  "leave the field.",
+	  "", "editor#preferences" },
+	{ "Export/Show a splash while starting", "Show a splash while starting",
+	  "A small always-on-top window with your picture and the game's title, "
+	  "shown while the game loads — the same splash the editor opens on its own "
+	  "start. Without it a shipped game shows a black rectangle for as long as "
+	  "the renderer takes to come up.\n\n"
+	  "It only opens when a picture is set: with no logo the splash would draw "
+	  "the engine's own wordmark, and the engine does not advertise itself "
+	  "inside your game. Saved to Config/ProjectSettings.json.",
+	  "", "export#overview" },
+	{ "Export/Splash image", "Splash image",
+	  "A PNG the splash shows, project-relative (Content/Splash.png). The export "
+	  "copies it beside project.hcfg as Splash.png; the game reads it from "
+	  "there. A file outside the project is stored with its absolute path and "
+	  "does not travel with the project — copy it into Content/ instead.",
+	  "", "export#overview" },
+	{ "Export/Subtitle", "Subtitle",
+	  "The small line under the title on the splash — a version, a studio "
+	  "name, a tagline. Free text; it is not the bundle version, which never "
+	  "reaches the running game.",
+	  "", "export#overview" },
 	{ "Export/Export", "",
 	  "Starts the export with the settings above and hands over to the Build "
 	  "window, which shows each step, its own progress and its log. The packing "

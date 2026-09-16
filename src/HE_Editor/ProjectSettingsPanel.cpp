@@ -4,6 +4,7 @@
 #include "EditorWidgets.h"               // Row:: label-above widgets + wrapped hint()
 #include "EditorHelp.h"                  // "<page>/<label>" scopes for the tooltips
 #include "NotificationStore.h"           // a settings write that fails has to say so
+#include "AppMetadataRows.h"             // icon file, icon preview, splash — shared with Export
 #include <Application/AppIcon.h>         // the generated app icon + its preview
 #include <Application/GameBackendRules.h> // the backend names a shipped build can name
 #include <Renderer/UIFont.h>             // icon names, the plate colour parser, font scripts
@@ -349,9 +350,6 @@ void drawApplicationPage(AppContext& ctx)
 	// ── The icon ─────────────────────────────────────────────────────────────
 	ImGui::SeparatorText("Icon");
 
-	static std::string   s_previewKey;      // name + colour the texture was built from
-	static ImTextureID   s_previewTex = 0;
-	static void*         s_previewHandle = nullptr;
 	static const int     kPreviewPx = 128;
 
 	// The model is written per keystroke (so the preview follows the typing), but
@@ -411,26 +409,19 @@ void drawApplicationPage(AppContext& ctx)
 	                    "one, so there is one colour to choose and not two.");
 	ImGui::Spacing();
 
+	// ── …or a picture of the project's own ───────────────────────────────────
+	// Drawn by the shared rows so the Export dialog shows the same thing.
+	commit |= AppMetadataRows::drawIconFileRow(ctx, p);
+	ImGui::TextDisabled("A PNG of yours instead of the generated icon: every size and every\n"
+	                    "container is made from it. Leave it empty to keep the generated one.");
+	ImGui::Spacing();
+
 	// ── The preview ──────────────────────────────────────────────────────────
-	const std::string key = p.appIconName + "|" + p.appIconColor;
-	if (key != s_previewKey && ctx.renderer)
-	{
-		s_previewKey = key;
-		if (s_previewHandle) { ctx.renderer->DestroyImGuiTexture(s_previewHandle); s_previewHandle = nullptr; }
-		s_previewTex = 0;
-		glm::vec4 bg(0.12f, 0.44f, 0.78f, 1.0f);
-		HE::uiParseRichColor(p.appIconColor, bg);
-		const std::vector<std::uint8_t> rgba =
-			HE::heRenderAppIcon(p.appIconName, kPreviewPx, bg, HE::heAppIconForeground(bg));
-		if (!rgba.empty())
-			if (void* h = ctx.renderer->CreateImGuiTexture(rgba.data(), kPreviewPx, kPreviewPx))
-			{
-				s_previewHandle = h;
-				s_previewTex    = static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(h));
-			}
-	}
-	if (s_previewTex)
-		ImGui::Image(s_previewTex, ImVec2((float)kPreviewPx, (float)kPreviewPx));
+	// The real bytes the export would write — file or glyph — so the one thing
+	// on this page that could lie does not.
+	if (const ImTextureID tex =
+	        static_cast<ImTextureID>(AppMetadataRows::iconPreviewTexture(ctx, p, kPreviewPx)))
+		ImGui::Image(tex, ImVec2((float)kPreviewPx, (float)kPreviewPx));
 	else
 		ImGui::TextDisabled("(no icon to show)");
 	ImGui::Spacing();
@@ -670,6 +661,13 @@ void drawGeneralPage(AppContext& ctx)
 	     "and the name a launcher shows (the .app's display name, the .desktop "
 	     "entry). Empty means the project name. The folder, the .hpak and the "
 	     "save directory keep the project name whatever this says.");
+	ImGui::Spacing();
+
+	// ── Splash ───────────────────────────────────────────────────────────────
+	// The rows are shared with the Export dialog (AppMetadataRows), which is
+	// also why they write into p.settings and commit through the same path.
+	ImGui::SeparatorText("Splash");
+	commit |= AppMetadataRows::drawSplashRows(ctx, p, /*compact=*/false);
 	ImGui::Spacing();
 
 	// ── Startup scene ────────────────────────────────────────────────────────

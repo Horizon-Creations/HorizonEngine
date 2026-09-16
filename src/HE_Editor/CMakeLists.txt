@@ -256,6 +256,7 @@ add_executable(HorizonEditor WIN32
 	EnvironmentPanel.cpp
 	EditorSettingsPanel.cpp
 	ProjectSettingsPanel.cpp
+	AppMetadataRows.cpp
 	ToolchainDialog.cpp
 	GitMissingDialog.cpp
 	ReportIssueDialog.cpp

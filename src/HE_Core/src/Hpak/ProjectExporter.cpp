@@ -1206,6 +1206,29 @@ static std::optional<ExportResult> copyProjectSettingsFile(const ExportSettings&
     return std::nullopt;
 }
 
+// The splash picture, copied under the fixed name the packaged game looks for.
+// Same shape as the settings file above it: an absent source REMOVES a stale
+// copy, because "no picture" is the project's answer and a leftover from an
+// earlier export of this output would quietly overrule it.
+static std::optional<ExportResult> copySplashImage(const ExportSettings& settings,
+                                                   const ExportContext&  ctx)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dst = ctx.dataDir / "Splash.png";
+    if (settings.splashImageFile.empty() || !fs::is_regular_file(settings.splashImageFile, ec))
+    {
+        fs::remove(dst, ec);
+        return std::nullopt;
+    }
+    fs::copy_file(settings.splashImageFile, dst, fs::copy_options::overwrite_existing, ec);
+    if (ec)
+        return ExportResult{false, "Failed to copy " + settings.splashImageFile.string()
+                                       + " to " + dst.string() + ": " + ec.message(),
+                            ctx.assetsPacked};
+    return std::nullopt;
+}
+
 // Phase 7b: the application's icon, generated rather than demanded. One name
 // from the built-in icon face on a coloured plate becomes the three files three
 // systems each insist on — nobody draws the same picture three times, and a
@@ -1216,14 +1239,24 @@ static std::optional<ExportResult> copyProjectSettingsFile(const ExportSettings&
 // one and gets that cached.
 static bool writeAppIcons(const ExportSettings& settings, const ExportContext& ctx)
 {
-    if (settings.appIconName.empty()) return false;
-
     glm::vec4 bg(0.12f, 0.44f, 0.78f, 1.0f);
     HE::uiParseRichColor(settings.appIconColor, bg);   // unparsable → the default plate
     const glm::vec4 fg = HE::heAppIconForeground(bg);
-    const std::vector<HE::AppIconImage> set =
-        HE::heRenderAppIconSet(settings.appIconName, bg, fg, { 16, 32, 64, 128, 256, 512 });
-    if (set.empty()) return false;   // a name the face does not have is no icon
+    const std::vector<int> sizes = { 16, 32, 64, 128, 256, 512 };
+
+    // The project's own picture first; the generated glyph is what it falls
+    // back to, so a PNG that went missing still leaves the project an icon.
+    std::vector<HE::AppIconImage> set;
+    if (!settings.appIconFile.empty())
+    {
+        std::vector<std::uint8_t> rgba;
+        int w = 0, h = 0;
+        if (HE::heLoadPngRGBA(settings.appIconFile, rgba, w, h))
+            set = HE::heAppIconSetFromImage(rgba.data(), w, h, sizes);
+    }
+    if (set.empty() && !settings.appIconName.empty())
+        set = HE::heRenderAppIconSet(settings.appIconName, bg, fg, sizes);
+    if (set.empty()) return false;   // no picture, or a name the face does not have
 
     // The PNG goes everywhere: it is what the runtime loads to set its window
     // icon, which is the taskbar entry on Windows and Linux both.
@@ -1377,6 +1410,7 @@ ExportResult ProjectExporter::exportProject(
         return *fail;
     if (auto fail = writeGameConfig(settings, ctx))                             return *fail;
     if (auto fail = copyProjectSettingsFile(settings, ctx))                     return *fail;
+    if (auto fail = copySplashImage(settings, ctx))                             return *fail;
     stage("icon");
     const bool hasIcon = writeAppIcons(settings, ctx);
     writeDocumentTypeFiles(projectName, settings, ctx);

@@ -249,3 +249,31 @@ TEST_CASE("ProjectManager: settings load beside the .heproj and are saved by sav
 	CHECK(again.currentProject().settings.isDefault());
 	CHECK_FALSE(again.saveProjectSettings());   // no project open
 }
+
+TEST_CASE("ProjectSettings: the splash rides in the game section and reads back")
+{
+	HE::ProjectSettings a;
+	CHECK_FALSE(a.game.splashEnabled);          // off, so no shipped game grows one unasked
+	a.game.splashEnabled  = true;
+	a.game.splashImage    = "Content/Splash.png";
+	a.game.splashSubtitle = "Version 0.4";
+	CHECK_FALSE(a.isDefault());
+
+	json j;
+	a.toJson(j);
+	CHECK(j["game"]["splashEnabled"] == true);
+	CHECK(j["game"]["splashImage"] == "Content/Splash.png");
+
+	HE::ProjectSettings b;
+	b.fromJson(j);
+	CHECK(a == b);
+	CHECK(b.game.splashEnabled);
+	CHECK(b.game.splashSubtitle == "Version 0.4");
+
+	// A file written before the splash existed: absent keys are the defaults.
+	HE::ProjectSettings c;
+	c.fromJson(json::parse(R"({"version":1,"game":{"title":"Old"}})"));
+	CHECK(c.game.title == "Old");
+	CHECK_FALSE(c.game.splashEnabled);
+	CHECK(c.game.splashImage.empty());
+}

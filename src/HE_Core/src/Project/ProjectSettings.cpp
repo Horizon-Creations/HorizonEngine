@@ -82,6 +82,9 @@ bool ProjectSettings::isDefault() const
 bool ProjectSettings::operator==(const ProjectSettings& o) const
 {
     return game.title == o.game.title
+        && game.splashEnabled == o.game.splashEnabled
+        && game.splashImage == o.game.splashImage
+        && game.splashSubtitle == o.game.splashSubtitle
         && nearlyEqual(shadows.distance, o.shadows.distance)
         && shadows.cascadeCount == o.shadows.cascadeCount
         && shadows.resolution == o.shadows.resolution
@@ -135,7 +138,10 @@ void ProjectSettings::toJson(json& out) const
     out = json::object();
     out["version"] = kVersion;
 
-    out["game"] = { { "title", game.title } };
+    out["game"] = { { "title",          game.title },
+                    { "splashEnabled",  game.splashEnabled },
+                    { "splashImage",    game.splashImage },
+                    { "splashSubtitle", game.splashSubtitle } };
 
     out["shadows"] = {
         { "distance",     shadows.distance },
@@ -168,7 +174,10 @@ void ProjectSettings::fromJson(const json& in)
 
     {
         const json& g = section(in, "game");
-        readString(g, "title", game.title);
+        readString(g, "title",          game.title);
+        readBool  (g, "splashEnabled",  game.splashEnabled);
+        readString(g, "splashImage",    game.splashImage);
+        readString(g, "splashSubtitle", game.splashSubtitle);
     }
     {
         const json& s = section(in, "shadows");
