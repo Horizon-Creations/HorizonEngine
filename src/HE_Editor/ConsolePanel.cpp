@@ -6,6 +6,8 @@
 #include "EditorToolbar.h"       // the shared "needs attention" / "went wrong" colours
 
 #include "HcExecTrace.h"         // a line's node → "go to node"
+#include "LevelScriptPanel.h"    // kTabPath — naming the tab a line leads to
+#include "GameInstancePanel.h"   // kTabPath
 
 #include <Diagnostics/Log.h>
 #include <HorizonCode/HorizonCode.h>   // currentExecSite — which node wrote a record
@@ -456,8 +458,14 @@ void DrawConsoleWindow(AppContext& ctx, bool& open)
 					const bool fromNode = line.hcNode != 0;
 					if (fromNode && ImGui::IsItemHovered())
 					{
+						// The tab's name rather than the runtime's key: "level:<uuid>"
+						// tells nobody anything, "Level Script" does.
+						const std::string where = HcExecTrace::tabKeyFor(line.hcKey);
+						const char* shown = where == LevelScriptPanel::kTabPath  ? "the Level Script"
+						                  : where == GameInstancePanel::kTabPath ? "the Game Instance"
+						                  : where.c_str();
 						ImGui::SetTooltip("Written by node %d of %s\nDouble-click to show it.",
-						                  line.hcNode, line.hcKey.c_str());
+						                  line.hcNode, shown);
 						if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 							HcExecTrace::requestReveal(line.hcKey, line.hcNode);
 					}

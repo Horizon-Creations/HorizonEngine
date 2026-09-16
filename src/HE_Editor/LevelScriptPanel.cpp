@@ -2813,6 +2813,10 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		st.eventsScanTime = now;
 	}
 	bool edited = false;
+	// A "go to node" aimed at this class needs the graph side of the tab:
+	// drawGraphBody is where the reveal is consumed, and a tab left in
+	// Components mode would sit on the request forever.
+	if (st.showViewport && HcExecTrace::revealPendingFor(st.path)) st.showViewport = false;
 	if (st.showViewport)
 		drawComponentsBody(ctx, st);
 	else
