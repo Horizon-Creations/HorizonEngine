@@ -2612,7 +2612,7 @@ namespace
 	  "", "rendering#performance" },
 	{ "Preferences/Post-Processing/Anti-Aliasing", "",
 	  "How jagged edges are smoothed. SMAA is one cheap pass; TAA is steadier in "
-	  "motion but needs a velocity buffer, which only the Metal backend writes so far.",
+	  "motion but needs a velocity buffer, which only the Metal and OpenGL backends write so far.",
 	  "", "rendering#postfx" },
 	{ "Preferences/Post-Processing/AA Sharpness", "",
 	  "How much detail is pulled back after the anti-aliasing pass softened it. "

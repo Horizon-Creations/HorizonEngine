@@ -792,6 +792,55 @@ private:
 	void EnsureLdrTarget(int width, int height);
 	void DestroyLdrTarget();
 
+	// ── Temporal AA (docs/anti-aliasing-plan.md A2/A3), the GL port of the
+	// Metal implementation. The jitter lives ONLY in the rasterisation matrix
+	// (JitteredViewProj); velocity and reprojection use the clean ones.
+	// Velocity is a separate positions-only pass over the opaque draw list
+	// (RG16F, depth-tested against m_hdrDepth — both render paths leave the
+	// opaque depth there), run between the "Opaque" and "Sky+Clouds" passes.
+	// The resolve blends the tonemapped LDR image with the reprojected history
+	// (neighbourhood-clamped) into one of two ping-pong history targets — GL
+	// 4.1 has no glCopyImageSubData, so this frame's result is simply next
+	// frame's read target — and the AA-resolve slot then sharpens that instead
+	// of filtering m_ldrColor.
+	unsigned int m_taaVelocityProgram = 0;
+	int          m_uTaaVelMvpJitter   = -1;
+	int          m_uTaaVelMvpNow      = -1;
+	int          m_uTaaVelMvpPrev     = -1;
+	unsigned int m_taaProgram         = 0;   // resolve + history blend
+	int          m_uTaaCurrent        = -1;
+	int          m_uTaaHistory        = -1;
+	int          m_uTaaVelocity       = -1;
+	int          m_uTaaParams         = -1;
+	unsigned int m_taaSharpenProgram  = 0;   // TAA output → final target
+	int          m_uTaaSharpScene     = -1;
+	int          m_uTaaSharpParams    = -1;
+	unsigned int m_velocityFBO        = 0;   // colour = m_velocityTex, depth = m_hdrDepth (re-attached per pass)
+	unsigned int m_velocityTex        = 0;   // RG16F — this frame's screen-space motion (uv units)
+	unsigned int m_taaHistoryFBO[2]   = { 0, 0 };
+	unsigned int m_taaHistoryTex[2]   = { 0, 0 }; // RGBA8, linear — [cur] is written this frame, [1-cur] read
+	int          m_taaHistoryCur      = 0;
+	int          m_taaW = 0, m_taaH = 0;
+	bool         m_taaHistoryValid    = false;  // false after resize / (re)enable → first frame takes current only
+	uint32_t     m_taaFrameIndex      = 0;      // drives the Halton sequence
+	glm::vec2    m_taaJitter{0.0f};             // this frame's offset, pixel units (-0.5 … 0.5)
+	glm::mat4    m_taaPrevViewProj{1.0f};       // LAST frame's UNJITTERED view-proj (velocity)
+	// Per-entity model matrices of the previous frame, so a moving OBJECT under
+	// a still camera reports motion too. Keyed by entity id; swapped per frame.
+	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms;
+	std::unordered_map<uint32_t, glm::mat4> m_taaCurTransforms;
+	float        m_aaSharpness        = 0.35f;  // temporal modes (A3+)
+	void      CreateTaaPipeline();
+	bool      TaaActive() const;
+	glm::mat4 JitteredViewProj(const glm::mat4& viewProj, int width, int height) const;
+	void      EnsureTaaTargets(int width, int height);
+	void      DestroyTaaTargets();
+	void      RenderVelocity(int pw, int ph, const glm::mat4& viewProjClean,
+	                         const glm::mat4& viewProjJit);
+	// Runs the temporal resolve on m_ldrColor; returns this frame's resolved
+	// texture (the AA-resolve slot sharpens it), or 0 when TAA is not active.
+	unsigned int RenderTaa(int pw, int ph);
+
 	// ── In-Game UI (2D canvas elements, drawn after FXAA) ───────────────────
 	unsigned int m_uiProgram     = 0;
 	int          m_uUIRect       = -1;
