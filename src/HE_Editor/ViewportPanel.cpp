@@ -385,9 +385,9 @@ namespace
 		if (!ctx.noteEntityEdited) return;
 		for (const Entity e : touched) ctx.noteEntityEdited(e);
 	}
-	void snapshot(AppContext& ctx)
+	void snapshot(AppContext& ctx, const char* label)
 	{
-		if (ctx.undoSys) ctx.undoSys->snapshotNow();
+		if (ctx.undoSys) ctx.undoSys->snapshotNow(label);
 	}
 }
 
@@ -396,19 +396,19 @@ namespace
 static void hideSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
-	snapshot(ctx);
+	snapshot(ctx, "Hide Selected");
 	noteEdited(ctx, ViewportActions::hideSelected(*ctx.world, ctx.selection));
 }
 static void isolateSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
-	snapshot(ctx);
+	snapshot(ctx, "Isolate Selected");
 	noteEdited(ctx, ViewportActions::isolateSelected(*ctx.world, ctx.selection));
 }
 static void showAll(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying) return;
-	snapshot(ctx);
+	snapshot(ctx, "Show All");
 	noteEdited(ctx, ViewportActions::showAll(*ctx.world));
 }
 // Group and Ungroup rewrite the local transform of what they move (the world
@@ -418,14 +418,14 @@ static void groupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
 	const std::vector<Entity> roots = ctx.selection.roots(ctx.world->registry());
-	snapshot(ctx);
+	snapshot(ctx, "Group Selected");
 	if (ViewportActions::groupSelected(*ctx.world, ctx.selection) != entt::null)
 		noteEdited(ctx, roots);
 }
 static void ungroupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying) return;
-	snapshot(ctx);
+	snapshot(ctx, "Ungroup Selected");
 	noteEdited(ctx, ViewportActions::ungroupSelected(*ctx.world, ctx.selection));
 }
 static void focusSelected(AppContext& ctx, const RenderWorld& snapshotWorld)
@@ -557,7 +557,7 @@ static void drawContextMenu(AppContext& ctx, const RenderWorld& snapshotWorld)
 		if (EditorWidgets::menuItem(primaryLocked ? "Unlock" : "Lock", nullptr, false,
 		                            editable && hasSel))
 		{
-			snapshot(ctx);
+			snapshot(ctx, primaryLocked ? "Unlock Entity" : "Lock Entity");
 			for (const Entity e : ctx.selection.entities())
 			{
 				if (!reg.valid(e) || e == ctx.world->rootEntity()) continue;
@@ -956,7 +956,7 @@ void render(AppContext& ctx, float dt)
 								spawnPos = ctx.editorCamera->position() + glm::vec3(cp*sy, sp, -cp*cy) * 8.0f;
 							}
 
-							if (ctx.undoSys) ctx.undoSys->snapshotNow();
+							if (ctx.undoSys) ctx.undoSys->snapshotNow("Place Asset");
 							if (mesh)
 							{
 								// Copied out BEFORE the material load below: the asset stores

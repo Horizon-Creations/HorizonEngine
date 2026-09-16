@@ -55,6 +55,7 @@
 #include "EditorDockState.h"             // "is this panel docked into the layout?"
 #include "PlayReportPanel.h"             // post-PIE warning/error report
 #include "AudioMixerPanel.h"             // View > Audio Mixer window
+#include "UndoHistoryPanel.h"            // View > Undo History window
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
 #include "HorizonVersion.h"              // HE_VERSION_FULL — Help ▸ About
@@ -192,6 +193,8 @@ static bool s_showSourceControl = false;
 static bool s_showConsole = false;
 // Toggled by View > Audio Mixer; drives the bus fader window.
 static bool s_showAudioMixer = false;
+// Toggled by View > Undo History; drives the scene undo stack as a list.
+static bool s_showUndoHistory = false;
 
 // Help ▸ Documentation Online. The published manual on the website; the OFFLINE
 // copy the reader panel shows ships next to the editor (EditorDeps/Docs), which
@@ -222,6 +225,7 @@ static bool docsPanelOpener(const char* window)
 		{ "Source Control",       &s_showSourceControl },
 		{ "Console",              &s_showConsole       },
 		{ "Audio Mixer",          &s_showAudioMixer    },
+		{ "Undo History",         &s_showUndoHistory   },
 		{ "Scene 2",              &SecondaryViewportPanel::open(0) },
 		{ "Scene 3",              &SecondaryViewportPanel::open(1) },
 		{ "Scene 4",              &SecondaryViewportPanel::open(2) },
@@ -272,6 +276,7 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
 	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
+	{ "Undo History",         "PanelOpenUndoHistory",   &s_showUndoHistory   },
 	// The secondary scene viewports: a Top view docked beside the Scene window
 	// is a layout decision like any other panel's.
 	{ "Scene 2",              "PanelOpenScene2",        &SecondaryViewportPanel::open(0) },
@@ -1381,6 +1386,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
 		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
+		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
 		MacMenuBar::setToggleState(MC::ToggleGroundGrid,    ViewportPanel::groundGridEnabled());
 		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
 		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
@@ -1420,6 +1426,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				togglePanelWindow(s_showSourceControl, "Source Control"); break;
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
 			case MC::ToggleAudioMixer: togglePanelWindow(s_showAudioMixer, "Audio Mixer");     break;
+			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
 			case MC::ToggleGroundGrid:
 				ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());     break;
 			case MC::ToggleScene2:
@@ -1573,6 +1580,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showConsole, "Console");
         if (EditorWidgets::menuItem("Audio Mixer", nullptr, s_showAudioMixer))
             togglePanelWindow(s_showAudioMixer, "Audio Mixer");
+        if (EditorWidgets::menuItem("Undo History", nullptr, s_showUndoHistory))
+            togglePanelWindow(s_showUndoHistory, "Undo History");
         // Also in the viewport toolbar's options popup. It belongs in both: the
         // toolbar is where you reach for it while working, this menu is where you
         // look for it the first time. Both are gone in an application: there is
@@ -3157,6 +3166,9 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	// The mixer too: a fader is moved while a script tab is in front and the
 	// scene plays behind it.
 	AudioMixerPanel::DrawAudioMixerWindow(ctx, s_showAudioMixer);
+	// The undo history too: a row is clicked while a script tab is in front and
+	// the scene it rewinds is behind it.
+	UndoHistoryPanel::DrawUndoHistoryWindow(ctx, s_showUndoHistory);
 
 	// The second half of revealFloatingWindow: the window a footer widget asked
 	// for exists by now, so the focus request that was a no-op at click time

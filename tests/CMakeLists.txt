@@ -53,6 +53,9 @@ add_executable(he_tests
     # The Audio Mixer, driven the same way: strips from a real ProjectData, a
     # click on M reaching the device-less AudioEngine as a mute, S as a solo.
     test_audio_mixer_ui.cpp
+    # The Undo History window, driven the same way: rows from a real EditorUndo
+    # over a real world, a click on a row rewinding the world in one restore.
+    test_undo_history_ui.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
@@ -513,6 +516,9 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. It reads ProjectData (HorizonTools, linked
     # below) and AudioEngine (HorizonScene), both already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
+    # The Undo History window, for test_undo_history_ui.cpp: same AppContext,
+    # same per-file HE_IMGUI_ENABLED. It reads EditorUndo (already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/UndoHistoryPanel.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
@@ -539,6 +545,8 @@ set_source_files_properties(
     test_terrain_tools_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AudioMixerPanel.cpp
     test_audio_mixer_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/UndoHistoryPanel.cpp
+    test_undo_history_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp

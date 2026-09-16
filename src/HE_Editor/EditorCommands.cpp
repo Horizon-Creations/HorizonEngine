@@ -80,11 +80,22 @@ Command Command::setComponents(Entity target, std::vector<std::uint8_t> blob)
 
 // ── The two sinks ────────────────────────────────────────────────────────────
 
-void SnapshotUndoSink::beginCommand(const Command&, Origin)
+void SnapshotUndoSink::beginCommand(const Command& c, Origin)
 {
 	if (!m_undo) return;
 	if (m_isPlaying && m_isPlaying()) return;
-	m_undo->snapshotNow();
+	// The kind IS the sentence for the history window: these are the five
+	// entity gestures, and each says what it does.
+	const char* label = "Edit Entity";
+	switch (c.kind)
+	{
+	case CommandKind::CreateSubtree:  label = "Create Entity";  break;
+	case CommandKind::DestroySubtree: label = "Delete Entity";  break;
+	case CommandKind::Reparent:       label = "Reparent Entity"; break;
+	case CommandKind::SetTransform:   label = "Set Transform";  break;
+	case CommandKind::SetComponents:  label = "Edit Components"; break;
+	}
+	m_undo->snapshotNow(label);
 }
 
 void CollabUndoSink::recordCommand(const Recorded& r, Origin)

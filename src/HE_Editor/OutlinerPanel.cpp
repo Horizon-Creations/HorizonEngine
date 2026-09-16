@@ -247,7 +247,7 @@ namespace
             EditorWidgets::helpForKey("outliner.visibility");
             if (editable && ImGui::IsItemClicked(ImGuiMouseButton_Left))
             {
-                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                if (ctx.undoSys) ctx.undoSys->snapshotNow(shown ? "Hide Entity" : "Show Entity");
                 HE::setSubtreeVisible(reg, entity, !shown);
                 // Every entity touched, named for the prefab-override
                 // recording: none of them need be selected (see
@@ -282,7 +282,7 @@ namespace
             EditorWidgets::helpForKey("outliner.lock");
             if (editable && ImGui::IsItemClicked(ImGuiMouseButton_Left))
             {
-                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                if (ctx.undoSys) ctx.undoSys->snapshotNow(locked ? "Unlock Entity" : "Lock Entity");
                 if (locked) reg.remove<EditorLockComponent>(entity);
                 else        reg.emplace_or_replace<EditorLockComponent>(entity);
             }
@@ -295,6 +295,10 @@ namespace
 void render(AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+    // Whatever this panel pushes onto the undo stack without a label of its
+    // own (Move Up, Sort Children, the row menu's Lock) reads as "Outliner" in
+    // the history window rather than as a bare "Edit".
+    EditorUndo::Context undoScope(ctx.undoSys, "Outliner");
     // World Outliner
     if (ctx.fontHeading) ImGui::PushFont(ctx.fontHeading);
     ImGui::Begin("World Outliner");
@@ -702,7 +706,7 @@ void render(AppContext& ctx)
                 {
                     Entity dragged{};
                     std::memcpy(&dragged, payload->Data, sizeof(Entity));
-                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow("Reparent Entity");
                     ctx.world->reparentEntity(dragged, node.entity);
                 }
                 ImGui::EndDragDropTarget();
@@ -724,7 +728,7 @@ void render(AppContext& ctx)
                     Preset preset{};
                     if (drawCreateMenu(preset))
                     {
-                        if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow("Create Entity");
                         const Entity child = createPreset(*ctx.world, preset);
                         ctx.world->reparentEntity(child, node.entity);
                         ctx.selection.set(child);
@@ -1049,7 +1053,7 @@ void render(AppContext& ctx)
                 {
                     Entity dragged{};
                     std::memcpy(&dragged, payload->Data, sizeof(Entity));
-                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow("Reparent Entity");
                     ctx.world->reparentEntity(dragged, ctx.world->rootEntity());
                 }
                 ImGui::EndDragDropTarget();
@@ -1063,7 +1067,7 @@ void render(AppContext& ctx)
             Preset preset{};
             if (drawCreateMenu(preset))
             {
-                if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                if (ctx.undoSys) ctx.undoSys->snapshotNow("Create Entity");
                 ctx.selection.set(createPreset(*ctx.world, preset));
                 ctx.world->markHierarchyDirty();
             }
@@ -1092,7 +1096,7 @@ void render(AppContext& ctx)
                 if (s_entityRenameBuf[0] != '\0' &&
                     ctx.world->registry().valid(s_renameEntity))
                 {
-                    if (ctx.undoSys) ctx.undoSys->snapshotNow();
+                    if (ctx.undoSys) ctx.undoSys->snapshotNow("Rename Entity");
                     ctx.world->renameEntity(s_renameEntity, s_entityRenameBuf);
                 }
                 s_renameEntity = entt::null;

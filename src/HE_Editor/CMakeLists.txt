@@ -262,6 +262,7 @@ add_executable(HorizonEditor WIN32
 	SourceControlPanel.cpp
 	PlayReportPanel.cpp
 	AudioMixerPanel.cpp
+	UndoHistoryPanel.cpp
 	HcEditorUtil.cpp
 	HcFallbackReport.cpp
 	HcRename.cpp

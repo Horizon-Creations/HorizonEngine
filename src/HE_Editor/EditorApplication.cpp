@@ -6809,7 +6809,7 @@ void EditorApplication::setupMcpTools()
 		// The other two have no undo stack of their own today (see the table in
 		// docs/mcp-editor-integration-plan.md §1.5); giving them one is the
 		// DocEdit command that step's plan describes and this step does not build.
-		if (key == HE::Ed::kMcpDocLevelScript) m_undo.snapshotNow();
+		if (key == HE::Ed::kMcpDocLevelScript) m_undo.snapshotNow("MCP: Level Script");
 	};
 
 	hc.endEdit = [this](const std::string& key) {
@@ -7747,7 +7747,7 @@ void EditorApplication::duplicateSelectedEntity()
 	//
 	// ONE snapshot for the whole selection, before the first copy: a single
 	// Ctrl+Z takes all of them away again.
-	if (!m_isPlaying) m_undo.snapshotNow();
+	if (!m_isPlaying) m_undo.snapshotNow("Duplicate Entity");
 	std::vector<Entity> copies;
 	for (const auto& [blob, parent] : blobs)
 	{
@@ -7793,7 +7793,7 @@ void EditorApplication::copySelectedEntity(bool cut)
 
 	if (!cut) return;
 	m_selection.clear();
-	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
+	if (!m_isPlaying) m_undo.snapshotNow("Cut Entity"); // see duplicateSelectedEntity()
 	for (Entity src : sources)
 	{
 		// Re-checked rather than trusted: the roots are disjoint subtrees, but
@@ -7815,7 +7815,7 @@ void EditorApplication::pasteEntityClipboard()
 	// selected should give two cubes side by side, not one parented to the other.
 	const Entity parent = siblingParentFor(m_selection.primary());
 	SceneSerializer serializer;
-	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
+	if (!m_isPlaying) m_undo.snapshotNow("Paste Entity"); // see duplicateSelectedEntity()
 	std::vector<Entity> pasted;
 	for (const std::vector<std::uint8_t>& blob : m_entityClipboard)
 	{
@@ -7850,7 +7850,7 @@ void EditorApplication::deleteSelectedEntity()
 
 	m_selection.clear();
 	// ONE snapshot for the lot, so one Ctrl+Z brings all of them back.
-	if (!m_isPlaying) m_undo.snapshotNow(); // see duplicateSelectedEntity()
+	if (!m_isPlaying) m_undo.snapshotNow("Delete Entity"); // see duplicateSelectedEntity()
 	for (Entity target : targets)
 	{
 		// A parent and its child both selected: the child went with the
@@ -9008,7 +9008,7 @@ bool EditorApplication::revertPrefabOverride(Entity root, const PrefabInstanceCo
 		return false;
 	}
 	const std::vector<uint8_t> blob = asset->data;
-	m_undo.snapshotNow();
+	m_undo.snapshotNow("Revert Prefab Override");
 	SceneSerializer serializer;
 	const bool ok = serializer.revertPrefabOverride(*m_editorWorld, root, blob, entry);
 	// The sync's write is a world edit, so the recorder must not read it back
@@ -9033,7 +9033,7 @@ bool EditorApplication::revertPrefabRemoval(Entity root, const HE::UUID& templat
 		return false;
 	}
 	const std::vector<uint8_t> blob = asset->data;
-	m_undo.snapshotNow();
+	m_undo.snapshotNow("Revert Prefab Removal");
 	SceneSerializer serializer;
 	const bool ok = serializer.revertPrefabRemoval(*m_editorWorld, root, blob, templateEntity);
 	// Same guard as revertPrefabOverride: the sync's write is not a human's.
@@ -9048,7 +9048,7 @@ bool EditorApplication::revertPrefabAddition(Entity root, Entity entity)
 	if (!registry.valid(root) || !registry.valid(entity)) return false;
 	// The selection may be the thing about to go — the same care
 	// deleteSelectedEntity takes, or the Details panel draws a dead handle.
-	m_undo.snapshotNow();
+	m_undo.snapshotNow("Revert Prefab Addition");
 	SceneSerializer serializer;
 	const bool ok = serializer.revertPrefabAddition(*m_editorWorld, root, entity);
 	if (ok)
@@ -9078,7 +9078,7 @@ bool EditorApplication::pushToPrefab(Entity root)
 	// is into a dense vector the next load may move.
 	PrefabAsset asset = *resident;
 
-	m_undo.snapshotNow();
+	m_undo.snapshotNow("Push to Prefab");
 	SceneSerializer serializer;
 	std::vector<uint8_t> blob;
 	if (!serializer.pushPrefabInstance(*m_editorWorld, root, asset.data, blob)) return false;
@@ -9178,7 +9178,7 @@ bool EditorApplication::restoreRecoveredScene()
 	// to come after them and not before.
 	if (pending->scenePath.empty() || !openScene(pending->scenePath))
 		newScene();
-	m_undo.snapshotNow();   // the file's state; Undo brings it back
+	m_undo.snapshotNow("Restore Recovered Scene");   // the file's state; Undo brings it back
 
 	SceneSerializer serializer;
 	m_editorWorld->clear();
@@ -9325,7 +9325,7 @@ void EditorApplication::openSceneAdditive(const std::string& path)
 		// the current scene, not a switch to another one, so it does NOT leave
 		// play mode the way openScene() and newScene() do; it belongs with the
 		// entity gestures, and it was the only one of them without this gate.
-		if (!m_isPlaying) m_undo.snapshotNow();
+		if (!m_isPlaying) m_undo.snapshotNow("Open Scene Additive");
 		// A scene merged DURING play is a spawn like any other and needs the same
 		// physics representation, or the level just added is scenery: the player
 		// walks through its walls and falls through its floor. This is what the

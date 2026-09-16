@@ -1588,6 +1588,11 @@ namespace
 	  "The project's audio buses as fader strips: master, music, sfx and "
 	  "whatever else you add, with mute and solo for listening.",
 	  "", "systems#audio" },
+	{ "View/Undo History", "",
+	  "Every step Undo can still take back, as a list with the current state "
+	  "marked. Click a row to jump straight there — several steps in one go, "
+	  "forwards or backwards.",
+	  "", "editor#menus" },
 	{ "View/Ground Grid", "",
 	  "The reference grid on the ground plane. Hidden while the scene plays "
 	  "either way.",
@@ -2097,6 +2102,16 @@ namespace
 	{ "Console/Copy All Shown", "",
 	  "Copies everything the current filter leaves visible, not the whole log.",
 	  "", "advanced#diagnostics" },
+	// ── Undo History ─────────────────────────────────────────────────────────
+	// The scene undo stack as a list. Its rows are the operations' own labels
+	// (built at run time, so the scan never sees them); the one fixed control
+	// is the button that empties it.
+	{ "Undo History/Clear", "Clear",
+	  "Forgets every step, backwards and forwards. The scene stays as it is; "
+	  "only the way back is gone. For a history that has grown past the point "
+	  "of being useful, or before a long session you want to start clean.",
+	  "", "editor#menus" },
+
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
 	{ "Audio Mixer/Master", "",
 	  "The volume of everything at once, in front of every bus. Drag it, or "
@@ -6108,6 +6123,7 @@ namespace
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
+		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },

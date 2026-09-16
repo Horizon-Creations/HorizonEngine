@@ -417,7 +417,7 @@ void drawActors(PanelState& st, AppContext& ctx, const std::vector<entt::entity>
 	ImGui::BeginDisabled(!haveSel || bound);
 	if (EditorWidgets::smallButton("Bind Selected"))
 	{
-		if (ctx.undoSys) ctx.undoSys->snapshotNow();
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Bind Clip");
 		PropertyAnimatorComponent& pa = reg.get_or_emplace<PropertyAnimatorComponent>(primary);
 		pa.clipId       = st.assetId;
 		pa.playbackTime = 0.0f;

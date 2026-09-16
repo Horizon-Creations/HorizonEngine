@@ -1417,7 +1417,7 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 		              "Reacts to world events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
 		// snapshotNow() bumps the undo revision so the level script saves with the
 		// scene; self-contained so it doesn't disturb the entity undo.
-		if (edited && ctx.undoSys) ctx.undoSys->snapshotNow();
+		if (edited && ctx.undoSys) ctx.undoSys->snapshotNow("Level Script");
 	}
 	ImGui::End();
 	raisePendingRename(ctx);

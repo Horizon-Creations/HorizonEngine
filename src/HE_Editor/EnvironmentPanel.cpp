@@ -31,7 +31,7 @@ void DrawEnvironmentWindow(AppContext& ctx, bool& open)
         return;
     }
     HorizonWorld& world = *ctx.world;
-    auto snapshot = [&]{ if (ctx.undoSys) ctx.undoSys->snapshotNow(); };
+    auto snapshot = [&]{ if (ctx.undoSys) ctx.undoSys->snapshotNow("Environment"); };
 
     // This window is 320 px wide by default and the user is free to make it
     // narrower; every line in it is a sentence, not a label — "No sky — the
