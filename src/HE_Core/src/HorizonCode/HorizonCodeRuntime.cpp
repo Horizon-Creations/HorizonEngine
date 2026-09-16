@@ -388,9 +388,33 @@ std::vector<Runtime::EventBinding> Runtime::eventBindingsOf(InstanceId id) const
 // The Context binds variable access to the instance's private store and
 // property/show/hide to its host. Captures (this, id) and looks the instance up
 // on each call, so it tolerates concurrent add()/remove() of other instances.
+std::string Runtime::classKeyAtLevel(InstanceId id, size_t level) const
+{
+    const Inst* i = find(id);
+    if (!i) return {};
+    // Compiled instances have no levels; their one class is the whole answer.
+    if (!i->hasGraph()) return level == 0 ? i->cls.key : std::string{};
+    const size_t n = i->levels.size();
+    if (level >= n) return {};
+    if (level == n - 1) return i->cls.key;
+    // Levels are ROOT FIRST, the chain NEAREST FIRST and without the class
+    // itself: level n-2 is chain[0], level 0 is chain[n-2]. The chain can be
+    // shorter than that when resolveClass stopped on a cycle, hence the check.
+    const size_t fromLeaf = n - 2 - level;
+    return fromLeaf < i->cls.chain.size() ? i->cls.chain[fromLeaf] : std::string{};
+}
+
 Context Runtime::makeContext(InstanceId id, size_t level)
 {
     Context ctx;
+    // Who this graph is, for the trace (see Context::traceInstance). The
+    // listener pointer is handed out even while no listener is set: a Context
+    // outlives setExecListener for compiled instances, and the Runner checks
+    // the function for emptiness at call time anyway.
+    ctx.traceInstance = id;
+    ctx.traceKey      = classKeyAtLevel(id, level);
+    ctx.traceLevel    = level;
+    ctx.onExecNode    = &m_execListener;
     ctx.getVariable = [this, id](const std::string& var) -> Value
     { return getVariable(id, var); };
     ctx.setVariable = [this, id](const std::string& var, const Value& v)

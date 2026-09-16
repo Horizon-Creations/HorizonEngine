@@ -2,9 +2,11 @@
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Diagnostics/Logger.h>
+#include <Diagnostics/Log.h>   // addSink — the exec-trace tests read the site from a sink
 #include <algorithm>   // sort — libc++ pulls it in transitively, MSVC does not
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace HorizonCode;
@@ -2157,4 +2159,206 @@ TEST_CASE("A graph that shows its widget registers without a word")
 
 	Logger::setSink(nullptr, nullptr);
 	CHECK(unshownWidgetWarnings() == 0);
+}
+
+// ═══ Execution trace (node highlighting / console → node) ═══════════════════
+
+namespace
+{
+	struct TraceHit { InstanceId inst; std::string key; size_t level; int node; };
+
+	// Event(event) exec → Print(ConstString). Returns {event id, print id}.
+	// Print: execIn 0 / execOut 1 / Text dataIn 2; ConstString dataOut 0.
+	std::pair<int, int> eventPrints(Graph& g, const std::string& event, const std::string& text)
+	{
+		Node ev; ev.type = NodeType::Event; ev.s = event; ev.elem = 0;
+		const int e = g.addNode(ev);
+		Node cs; cs.type = NodeType::ConstString; cs.s = text;
+		const int c = g.addNode(cs);
+		Node pr; pr.type = NodeType::Print;
+		const int p = g.addNode(pr);
+		REQUIRE(g.connect(e, 0, p, 0));
+		REQUIRE(g.connect(c, 0, p, 2));
+		return { e, p };
+	}
+}
+
+TEST_CASE("exec trace: the listener hears the entry node and every exec node, with the class key")
+{
+	Graph g;
+	const auto [e, p] = eventPrints(g, "Ping", "hello");
+
+	Runtime rt;
+	std::vector<TraceHit> hits;
+	rt.setExecListener([&](InstanceId inst, const std::string& key, size_t level, int node)
+	{ hits.push_back({ inst, key, level, node }); });
+	ClassIdentity cls; cls.key = "Content/Traced.hasset";
+	const InstanceId id = rt.add(g, {}, cls);
+
+	// Nothing runs at registration.
+	CHECK(hits.empty());
+	CHECK(currentExecSite().nodeId == 0);
+
+	rt.fireEvent(id, "Ping");
+	REQUIRE(hits.size() == 2);
+	CHECK(hits[0].node == e);          // the Event node itself, first
+	CHECK(hits[1].node == p);          // then the Print it drives
+	for (const TraceHit& h : hits)
+	{
+		CHECK(h.inst  == id);
+		CHECK(h.key   == "Content/Traced.hasset");
+		CHECK(h.level == 0);
+	}
+	// Between runs the thread is inside no node.
+	CHECK(currentExecSite().nodeId == 0);
+
+	// An event nobody handles leaves no trace — and neither does a pure read.
+	hits.clear();
+	rt.fireEvent(id, "Nothing");
+	CHECK(hits.empty());
+}
+
+TEST_CASE("exec trace: a log line written by a node arrives at the sink while that node is current")
+{
+	Graph g;
+	const auto [e, p] = eventPrints(g, "Ping", "from the print node");
+
+	// The console's mechanism, without the console: a sink reads the site.
+	// The site's classKey points into the running Context and is only good
+	// for the duration of the node (HorizonCode.h) — so the sink copies it,
+	// which is exactly what the console's sink has to do too.
+	struct Seen { ExecSite site; std::string key; std::string msg; };
+	static std::vector<Seen> s_seen;
+	s_seen.clear();
+	const int sink = HE::Log::addSink([](const HE::Log::Record& r, void*)
+	{
+		if (r.category != HE::Log::Cat::HorizonCode) return;
+		s_seen.push_back({ currentExecSite(), currentExecSite().classKey,
+		                   r.message ? r.message : "" });
+	}, nullptr);
+
+	Runtime rt;
+	ClassIdentity cls; cls.key = "Content/Traced.hasset";
+	const InstanceId id = rt.add(g, {}, cls);
+	rt.fireEvent(id, "Ping");
+	HE::Log::removeSink(sink);
+
+	REQUIRE(s_seen.size() >= 1);
+	const Seen* mine = nullptr;
+	for (const Seen& s : s_seen) if (s.msg.find("from the print node") != std::string::npos) mine = &s;
+	REQUIRE(mine != nullptr);
+	CHECK(mine->site.nodeId   == p);
+	CHECK(mine->site.instance == id);
+	CHECK(mine->key == "Content/Traced.hasset");
+	(void)e;
+}
+
+TEST_CASE("exec trace: a nested call restores the caller's site and names the callee's class")
+{
+	// Caller: Event(Go) → CallExternal(Target = GetSelf... no: a SECOND instance)
+	// is cumbersome to wire; the Runtime's callFunction from inside a node is
+	// what matters, so use Call Function (Ref) on a Ref variable.
+	Graph callee;
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "Work"; fe.access = 0;
+	const int f = callee.addNode(fe);
+	Node cs; cs.type = NodeType::ConstString; cs.s = "inner";
+	const int c = callee.addNode(cs);
+	Node pr; pr.type = NodeType::Print;
+	const int p = callee.addNode(pr);
+	REQUIRE(callee.connect(f, 0, p, 0));
+	REQUIRE(callee.connect(c, 0, p, 2));
+
+	Graph caller;
+	Variable rv; rv.name = "other"; rv.type = PinType::Ref;
+	caller.variables.push_back(rv);
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; ev.elem = 0;
+	const int e = caller.addNode(ev);
+	Node gv; gv.type = NodeType::GetVariable; gv.s = "other"; gv.propType = PinType::Ref;
+	const int gvId = caller.addNode(gv);
+	Node ce; ce.type = NodeType::CallExternal; ce.s = "Work";
+	const int ceId = caller.addNode(ce);
+	Node cs2; cs2.type = NodeType::ConstString; cs2.s = "after";
+	const int c2 = caller.addNode(cs2);
+	Node pr2; pr2.type = NodeType::Print;
+	const int p2 = caller.addNode(pr2);
+	REQUIRE(caller.connect(e, 0, ceId, 0));      // exec
+	REQUIRE(caller.connect(gvId, 0, ceId, 2));   // Ref → Target
+	REQUIRE(caller.connect(ceId, 1, p2, 0));     // exec on
+	REQUIRE(caller.connect(c2, 0, p2, 2));
+
+	Runtime rt;
+	std::vector<TraceHit> hits;
+	rt.setExecListener([&](InstanceId inst, const std::string& key, size_t level, int node)
+	{ hits.push_back({ inst, key, level, node }); });
+	ClassIdentity ccls; ccls.key = "Content/Callee.hasset";
+	const InstanceId calleeId = rt.add(callee, {}, ccls);
+	ClassIdentity rcls; rcls.key = "Content/Caller.hasset";
+	const InstanceId callerId = rt.add(caller, {}, rcls);
+	rt.setVariable(callerId, "other", Value::ofRef(calleeId));
+
+	// The site the sink sees for each Print, in order.
+	// The site's classKey points into the running Context and is only good
+	// for the duration of the node (HorizonCode.h) — so the sink copies it,
+	// which is exactly what the console's sink has to do too.
+	struct Seen { ExecSite site; std::string key; std::string msg; };
+	static std::vector<Seen> s_seen;
+	s_seen.clear();
+	const int sink = HE::Log::addSink([](const HE::Log::Record& r, void*)
+	{
+		if (r.category != HE::Log::Cat::HorizonCode) return;
+		s_seen.push_back({ currentExecSite(), currentExecSite().classKey,
+		                   r.message ? r.message : "" });
+	}, nullptr);
+	rt.fireEvent(callerId, "Go");
+	HE::Log::removeSink(sink);
+
+	// Listener order: Event, CallExternal, (callee) FunctionEntry, Print, (caller) Print.
+	REQUIRE(hits.size() == 5);
+	CHECK(hits[0].node == e);    CHECK(hits[0].inst == callerId); CHECK(hits[0].key == "Content/Caller.hasset");
+	CHECK(hits[1].node == ceId); CHECK(hits[1].inst == callerId);
+	CHECK(hits[2].node == f);    CHECK(hits[2].inst == calleeId); CHECK(hits[2].key == "Content/Callee.hasset");
+	CHECK(hits[3].node == p);    CHECK(hits[3].inst == calleeId);
+	CHECK(hits[4].node == p2);   CHECK(hits[4].inst == callerId);
+
+	// The inner Print logged under the callee's site, the outer under the
+	// caller's — i.e. the site was restored when the nested Runner returned.
+	REQUIRE(s_seen.size() == 2);
+	CHECK(s_seen[0].msg.find("inner") != std::string::npos);
+	CHECK(s_seen[0].site.instance == calleeId);
+	CHECK(s_seen[0].site.nodeId   == p);
+	CHECK(s_seen[1].msg.find("after") != std::string::npos);
+	CHECK(s_seen[1].site.instance == callerId);
+	CHECK(s_seen[1].site.nodeId   == p2);
+	CHECK(currentExecSite().nodeId == 0);
+}
+
+TEST_CASE("exec trace: a handler on a base level is reported under the base's key")
+{
+	Graph base;
+	const auto [be, bp] = eventPrints(base, "Ping", "base");
+	Graph derived;
+	const auto [de, dp] = eventPrints(derived, "Other", "derived");
+
+	Runtime rt;
+	std::vector<TraceHit> hits;
+	rt.setExecListener([&](InstanceId inst, const std::string& key, size_t level, int node)
+	{ hits.push_back({ inst, key, level, node }); });
+	ClassIdentity cls; cls.key = "Content/Child.hasset"; cls.chain = { "Content/Base.hasset" };
+	const InstanceId id = rt.addLevels({ base, derived }, {}, cls);
+
+	CHECK(rt.classKeyAtLevel(id, 0) == "Content/Base.hasset");
+	CHECK(rt.classKeyAtLevel(id, 1) == "Content/Child.hasset");
+	CHECK(rt.classKeyAtLevel(id, 2).empty());
+	CHECK(rt.classKeyAtLevel(999, 0).empty());
+
+	rt.fireEvent(id, "Ping");
+	REQUIRE(hits.size() == 2);
+	CHECK(hits[0].node == be); CHECK(hits[0].key == "Content/Base.hasset");  CHECK(hits[0].level == 0);
+	CHECK(hits[1].node == bp); CHECK(hits[1].key == "Content/Base.hasset");
+
+	hits.clear();
+	rt.fireEvent(id, "Other");
+	REQUIRE(hits.size() == 2);
+	CHECK(hits[0].node == de); CHECK(hits[0].key == "Content/Child.hasset"); CHECK(hits[0].level == 1);
+	CHECK(hits[1].node == dp);
 }

@@ -339,6 +339,24 @@ public:
     };
     void setServices(Services s) { m_services = std::move(s); }
 
+    // ── Execution trace (debugging) ──────────────────────────────────────────
+    // Called for every EXEC node an interpreted instance runs, with the
+    // instance, the class key of the level the node lives in (asset path,
+    // "level:<uuid>", "__game_instance__") and the node id. This is what the
+    // editor's node highlighting listens to. Compiled instances run generated
+    // C++ and never pass through here — they are not traced.
+    //
+    // The runtime calls this synchronously from inside execution, so the
+    // listener must be cheap and must not call back into the runtime. Empty
+    // (the default) costs one null check per node.
+    using ExecListener = std::function<void(InstanceId instance, const std::string& classKey,
+                                            size_t level, int nodeId)>;
+    void setExecListener(ExecListener fn) { m_execListener = std::move(fn); }
+    // The class key a LEVEL of an instance belongs to: the instance's own key
+    // for the leaf, an ancestor's for the levels above it. "" for an unknown
+    // id or a level outside the chain.
+    std::string classKeyAtLevel(InstanceId id, size_t level) const;
+
 private:
     struct Inst
     {
@@ -483,6 +501,11 @@ private:
     static constexpr int kMaxCallDepth = 64;
     int m_callDepth = 0;
     Services   m_services;
+    // Contexts hold a POINTER to this (Context::onExecNode), so it lives here
+    // for the runtime's lifetime and never moves — which also means every
+    // Context built before setExecListener sees the listener afterwards, the
+    // compiled instances' long-lived ones included (were they traced).
+    ExecListener m_execListener;
 };
 
 } // namespace HorizonCode

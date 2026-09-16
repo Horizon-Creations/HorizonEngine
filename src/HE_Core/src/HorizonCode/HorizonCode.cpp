@@ -3099,6 +3099,44 @@ Runner::CallFrame* Runner::frameFor(int fnEntryId)
     return nullptr;
 }
 
+// ── Execution trace ──────────────────────────────────────────────────────────
+namespace
+{
+thread_local ExecSite t_execSite;
+
+// Stamps the Context's identity + this node into the thread's current site for
+// the scope of one node, and puts back whatever was there before. The restore
+// is what makes nesting right: Call Function (Ref) runs the callee in a FRESH
+// Runner from inside the caller's node, and when it returns the caller's node
+// is current again — the same way a native stack unwinds.
+struct SiteScope
+{
+    ExecSite saved;
+    SiteScope(const Context& ctx, int nodeId) : saved(t_execSite)
+    {
+        t_execSite.instance = ctx.traceInstance;
+        t_execSite.classKey = ctx.traceKey.c_str();
+        t_execSite.level    = ctx.traceLevel;
+        t_execSite.nodeId   = nodeId;
+    }
+    ~SiteScope() { t_execSite = saved; }
+    SiteScope(const SiteScope&)            = delete;
+    SiteScope& operator=(const SiteScope&) = delete;
+};
+
+// The exec-node listener, guarded. Also called for the ENTRY node of a run (the
+// Event / Input Action / Function Entry that runExecChain starts from and
+// never executes itself) — an event whose chain is empty would otherwise fire
+// without a trace of it, and the entry is the node a reader looks at first.
+inline void traceExec(const Context& ctx, int nodeId)
+{
+    if (ctx.onExecNode && *ctx.onExecNode)
+        (*ctx.onExecNode)(ctx.traceInstance, ctx.traceKey, ctx.traceLevel, nodeId);
+}
+} // namespace
+
+const ExecSite& currentExecSite() { return t_execSite; }
+
 namespace
 {
 // Seed a fresh frame's local-variable store from the function's declared
@@ -3132,11 +3170,12 @@ void Runner::fireEvent(const std::string& eventName, int elem, const Value& arg)
         if (n.type == T::InputAction)
         {
             const int chain = inputActionChainFor(n, eventName);
-            if (chain >= 0) runExecChain(n, pinRanges(n).execOut0 + chain, 0);
+            if (chain >= 0) { traceExec(m_ctx, n.id); runExecChain(n, pinRanges(n).execOut0 + chain, 0); }
             continue;
         }
         if (n.type != T::Event || n.s != eventName) continue;
         if (n.elem != 0 && n.elem != elem) continue;
+        traceExec(m_ctx, n.id);
         runExecChain(n, pinRanges(n).execOut0, 0);
     }
 }
@@ -3179,6 +3218,7 @@ bool Runner::callFunction(const std::string& name, bool requirePublic,
         frame.results.resize(n.results.size());
         for (size_t i = 0; i < n.results.size(); ++i) frame.results[i].type = n.results[i].type;
         m_callStack.push_back(std::move(frame));
+        traceExec(m_ctx, n.id);
         runExecChain(n, pinRanges(n).execOut0, 0);
         if (results) *results = m_callStack.back().results;
         m_callStack.pop_back();
@@ -3214,6 +3254,9 @@ void Runner::runExecChain(const Node& from, int execOutPin, int depth)
 void Runner::execNode(const Node& n, int depth)
 {
     if (depth > kMaxDepth) return;
+    // Current site for anything this node logs; listener for the highlight.
+    SiteScope site(m_ctx, n.id);
+    traceExec(m_ctx, n.id);
     switch (n.type)
     {
     case T::Branch:
@@ -3533,6 +3576,10 @@ bool Runner::inputLinked(const Node& n, int dataInIndex) const
 Value Runner::evalData(const Node& n, int dataOutPin, int depth)
 {
     if (depth > kMaxDepth || ++m_steps > kMaxSteps) return {};
+    // Site only, no listener: a pure node is read as often as its output is
+    // wired, and a warning it logs should still name IT and not the exec node
+    // that pulled on it.
+    SiteScope site(m_ctx, n.id);
     switch (n.type)
     {
     case T::Event:       return coerce(m_eventArg, n.propType);

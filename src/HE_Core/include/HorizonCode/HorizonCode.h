@@ -1037,7 +1037,51 @@ struct Context
     // Reset together with the variables (reseedVariables).
     std::function<Value(int nodeId)>              getNodeState;
     std::function<void(int nodeId, const Value&)> setNodeState;
+
+    // ── Execution trace (debugging) ──────────────────────────────────────────
+    // Who the running graph IS, so a node the Runner executes can be named to
+    // the outside: the instance, the class key of the level being run (the
+    // Runtime's canonical spelling — asset path, "level:<uuid>",
+    // "__game_instance__") and that level's index. The Runner stamps these,
+    // plus the node id, into currentExecSite() around every node it runs, and
+    // calls `onExecNode` for each EXEC node (never for a pure data node — those
+    // re-evaluate on every read and would strobe a highlight).
+    //
+    // All optional and empty by default: a bare Context still runs a graph as
+    // before, it just runs it anonymously. The Runtime fills them in makeContext.
+    uint32_t    traceInstance = 0;
+    std::string traceKey;
+    size_t      traceLevel = 0;
+    // A POINTER to the host's listener rather than a copy, because a Context is
+    // built per fire and copying a std::function per fire is exactly the kind
+    // of cost a tracing hook must not add. Null = nobody listening.
+    const std::function<void(uint32_t instance, const std::string& classKey,
+                             size_t level, int nodeId)>* onExecNode = nullptr;
 };
+
+// ── Where execution is right now ─────────────────────────────────────────────
+// The node the interpreter is inside of on THIS thread, or nodeId 0 when it is
+// not inside any. Set by the Runner around every node (exec and pure alike)
+// and restored on the way out, so a nested Runner — Call Function (Ref) builds
+// a fresh one — leaves the outer site intact when it returns.
+//
+// This exists for one consumer: a log sink. HE_LOG calls its sinks
+// synchronously on the logging thread, so a Print node's line, an "Array Get
+// out of range" warning and an engine row's error all arrive at the sink while
+// the node that caused them is still the current site — which is how the
+// editor's console learns which node a line belongs to without the message
+// ever having to say so. `classKey` points at the running Context's string and
+// is only valid for the duration of the node; copy it, do not keep it.
+struct ExecSite
+{
+    uint32_t    instance = 0;
+    const char* classKey = "";
+    size_t      level    = 0;
+    int         nodeId   = 0;
+};
+// Thread-local behind an exported accessor (a thread_local itself must never be
+// exported across a DLL boundary).
+HE_API const ExecSite& currentExecSite();
 
 class HE_API Runner
 {
