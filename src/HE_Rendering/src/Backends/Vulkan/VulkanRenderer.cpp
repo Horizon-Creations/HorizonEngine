@@ -4883,9 +4883,17 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 vkCmdPushConstants(cmd, m_skinnedPipeLayout, VK_SHADER_STAGE_VERTEX_BIT,
                                    0, sizeof(pc2), &pc2);
 
-                vkCmdDrawIndexed(cmd, static_cast<uint32_t>(smesh->indexCount), 1, 0, 0, 0);
-                ++m_statDraws;
-                m_statTris += static_cast<uint32_t>(smesh->indexCount) / 3;
+                // Section or whole — a multi-section skinned mesh arrives as one
+                // SkinnedDrawCall per slot (GeometryPass), each with its range;
+                // every slot spends one bone-ring slot (skinnedIdx) of its own.
+                const VulkanIndexRange range =
+                    DrawIndexRange(dc, static_cast<uint32_t>(smesh->indexCount));
+                if (range.count > 0)
+                {
+                    vkCmdDrawIndexed(cmd, range.count, 1, range.start, 0, 0);
+                    ++m_statDraws;
+                    m_statTris += range.count / 3;
+                }
                 ++skinnedIdx;
             }
 

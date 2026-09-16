@@ -8291,8 +8291,15 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 D3D12_VERTEX_BUFFER_VIEW vbvs[3] = { skm->vbv, skm->boneIdVbv, skm->boneWgtVbv };
                 cl->IASetVertexBuffers(0, 3, vbvs);
                 cl->IASetIndexBuffer(&skm->ibv);
-                cl->DrawIndexedInstanced(skm->indexCount, 1, 0, 0, 0);
-                ++p.statDraws; p.statTris += skm->indexCount / 3;
+                // Section or whole — a multi-section skinned mesh arrives as one
+                // SkinnedDrawCall per slot (GeometryPass), each with its range;
+                // every slot spends one ring slot (drawIdx/skinnedIdx) of its own.
+                const D3D12IndexRange range = DrawIndexRange(sdc, skm->indexCount);
+                if (range.count > 0)
+                {
+                    cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
+                    ++p.statDraws; p.statTris += range.count / 3;
+                }
 
                 ++drawIdx;
                 ++skinnedIdx;

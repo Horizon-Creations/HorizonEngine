@@ -5240,9 +5240,13 @@ void D3D11Renderer::DrawScene(int width, int height)
                 ID3D11ShaderResourceView* albedoSrv = albedo ? albedo : p.dummyTexture.Get();
                 ctx->PSSetShaderResources(0, 1, &albedoSrv);
 
-                ctx->DrawIndexed(static_cast<UINT>(sm->indexCount), 0, 0);
+                // Section or whole — a multi-section skinned mesh arrives as one
+                // SkinnedDrawCall per slot (GeometryPass), each with its range.
+                const D3D11IndexRange range = DrawIndexRange(dc, static_cast<UINT>(sm->indexCount));
+                if (range.count == 0) continue;
+                ctx->DrawIndexed(range.count, range.start, 0);
                 ++p.counters.draws;
-                p.counters.tris += static_cast<uint32_t>(sm->indexCount / 3);
+                p.counters.tris += static_cast<uint32_t>(range.count / 3);
             }
 
             // Restore scene VS + layout for the transparent pass

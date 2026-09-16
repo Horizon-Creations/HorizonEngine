@@ -11,6 +11,7 @@
 #include <HorizonScene/EntityActive.h>            // the "Active" switch, inherited down the tree
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
+#include <HorizonScene/Components/LODComponent.h>            // LOD0 → the entity's slot table
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
@@ -135,6 +136,25 @@ namespace
 	// grow the dense asset vectors, and with them every StaticMeshAsset pointer
 	// (and the materialPath strings it owns) dies mid-loop — the trap
 	// documented on ContentManager's getters.
+	HE::UUID resolveSectionMaterial(const MeshSection& sec, ContentManager& cm,
+	                                std::unordered_set<std::string>& missing)
+	{
+		if (sec.materialId != HE::UUID{})
+		{
+			cm.ensureResident(sec.materialId);
+			return sec.materialId;
+		}
+		if (sec.materialPath.empty()) return {};
+		HE::UUID id = cm.idForPath(sec.materialPath);
+		if (id == HE::UUID{} && !missing.contains(sec.materialPath))
+		{
+			const MaterialAsset* ma = cm.resolveMaterialRef({}, sec.materialPath);
+			if (ma) id = ma->id;
+			else    missing.insert(sec.materialPath);
+		}
+		return id;
+	}
+
 	std::vector<RenderSection> resolveSections(std::vector<MeshSection> sections,
 	                                           ContentManager& cm,
 	                                           std::unordered_set<std::string>& missing)
@@ -144,26 +164,100 @@ namespace
 		for (const MeshSection& sec : sections)
 		{
 			RenderSection rs;
-			rs.indexOffset = sec.indexOffset;
-			rs.indexCount  = sec.indexCount;
-			if (sec.materialId != HE::UUID{})
-			{
-				cm.ensureResident(sec.materialId);
-				rs.materialAssetId = sec.materialId;
-			}
-			else if (!sec.materialPath.empty())
-			{
-				rs.materialAssetId = cm.idForPath(sec.materialPath);
-				if (rs.materialAssetId == HE::UUID{} && !missing.contains(sec.materialPath))
-				{
-					const MaterialAsset* ma = cm.resolveMaterialRef({}, sec.materialPath);
-					if (ma) rs.materialAssetId = ma->id;
-					else    missing.insert(sec.materialPath);
-				}
-			}
+			rs.indexOffset     = sec.indexOffset;
+			rs.indexCount      = sec.indexCount;
+			rs.materialAssetId = resolveSectionMaterial(sec, cm, missing);
 			out.push_back(rs);
 		}
 		return out;
+	}
+
+	// ── The slots an ENTITY draws with ──────────────────────────────────────
+	// One place for the precedence, shared by the static and the skinned path:
+	// per slot, MaterialComponent::slotOverrides wins, then the whole-mesh
+	// materialAssetId, then the slot's own material from the asset. `sections`
+	// is the DRAWN mesh's table (a LOD level's, when one is active) and
+	// `lod0Sections` the LOD0 mesh's when that is a different asset — empty
+	// otherwise — so that slot overrides, which index LOD0's slots, reach the
+	// level through HE::lodSlotMap.
+	//
+	// Answers the per-slot list for the draw, or EMPTY when the mesh draws
+	// whole: a one-section mesh (every legacy asset, every primitive), and a
+	// multi-section one under a whole-mesh override with no slot override on
+	// top — exactly the pre-section single draw, batching included. `whole`
+	// then receives the material that whole draw uses (null = the mesh's own).
+	//
+	// Both tables BY VALUE on purpose: resolving can loadAsset, which moves the
+	// dense asset vectors and with them every mesh pointer (ContentManager.h).
+	std::vector<RenderSection> resolveEntitySlots(std::vector<MeshSection> sections,
+	                                              std::vector<MeshSection> lod0Sections,
+	                                              const MaterialComponent* mc,
+	                                              ContentManager& cm,
+	                                              std::unordered_set<std::string>& missing,
+	                                              HE::UUID& whole)
+	{
+		const HE::UUID matId       = mc ? mc->materialAssetId : HE::UUID{};
+		const bool     slotOverrid = mc && mc->hasSlotOverride();
+		whole = matId;
+
+		// Section i of the drawn mesh → the entity's (LOD0's) slot. Identity
+		// when the drawn mesh IS LOD0 (or there is no LOD at all).
+		std::vector<int32_t> slotOf;
+		if (!lod0Sections.empty()) slotOf = HE::lodSlotMap(sections, lod0Sections);
+		auto slotFor = [&](size_t i) -> int32_t {
+			if (slotOf.empty()) return static_cast<int32_t>(i);
+			return slotOf[i];
+		};
+		// The LOD0 slot's material, for a section that resolves to none at all.
+		auto lod0Material = [&](int32_t slot) -> HE::UUID {
+			if (slot < 0 || static_cast<size_t>(slot) >= lod0Sections.size()) return {};
+			return resolveSectionMaterial(lod0Sections[static_cast<size_t>(slot)], cm, missing);
+		};
+
+		if (sections.size() <= 1)
+		{
+			// Whole-mesh draw. The one slot may still be overridden by name —
+			// through LOD0's table for a level — and the whole draw is then
+			// that material instead of the mesh's own.
+			const int32_t  slot = sections.empty() ? 0 : slotFor(0);
+			const HE::UUID ov   = mc ? mc->slotOverride(slot) : HE::UUID{};
+			if (ov != HE::UUID{}) whole = ov;
+			else if (whole == HE::UUID{} && !sections.empty() &&
+			         sections[0].materialId == HE::UUID{} && sections[0].materialPath.empty())
+				whole = lod0Material(slot);
+			return {};
+		}
+		// A whole-mesh override with nothing more specific on top replaces every
+		// slot — the mesh draws whole with it, as it did before slots existed.
+		if (matId != HE::UUID{} && !slotOverrid) return {};
+
+		std::vector<RenderSection> out = resolveSections(std::move(sections), cm, missing);
+		for (size_t i = 0; i < out.size(); ++i)
+		{
+			const int32_t  slot = slotFor(i);
+			const HE::UUID ov   = mc ? mc->slotOverride(slot) : HE::UUID{};
+			if (ov != HE::UUID{})            out[i].materialAssetId = ov;
+			else if (matId != HE::UUID{})    out[i].materialAssetId = matId;
+			else if (out[i].materialAssetId == HE::UUID{} && !lod0Sections.empty())
+				out[i].materialAssetId = lod0Material(slot);
+		}
+		return out;
+	}
+
+	// The LOD0 mesh's section table when the entity's LOD picked ANOTHER asset
+	// to draw this frame — empty when the drawn mesh is LOD0 itself, there is
+	// no LODComponent, or LOD0 is not resident. A copy, for the pointer reason
+	// resolveEntitySlots gives.
+	std::vector<MeshSection> lod0SectionsOf(entt::registry& reg, entt::entity e,
+	                                        HE::UUID drawnMeshId, ContentManager& cm)
+	{
+		const auto* lod = reg.try_get<LODComponent>(e);
+		if (!lod || lod->levels.empty()) return {};
+		const HE::UUID lod0 = lod->levels[0].meshId;
+		if (lod0 == HE::UUID{} || lod0 == drawnMeshId) return {};
+		const StaticMeshAsset* m0 = cm.getStaticMesh(lod0);
+		if (!m0) return {};
+		return HE::meshSectionsOf(*m0);
 	}
 
 	// ── Renderables ─────────────────────────────────────────────────────────
@@ -237,7 +331,8 @@ namespace
 			d.world  = t.worldMatrix;
 			d.meshId = mesh.meshAssetId;
 			d.matId  = {};
-			if (const auto* matComp = reg.try_get<MaterialComponent>(e))
+			const auto* matComp = reg.try_get<MaterialComponent>(e);
+			if (matComp)
 			{
 				d.matId = matComp->materialAssetId;
 				// Per-entity param overrides → merge into a full HeParams block now (serial,
@@ -291,16 +386,20 @@ namespace
 					// AABB leaves boundsMin==boundsMax=={0,0,0} — "valid" but a zero-volume point,
 					// and culling against it drops the object the moment its pivot exits the view.
 					if (b.isValid() && b.max != b.min) d.localBounds = b;
-					// Material slots — only when there is more than one AND no entity
-					// override. A MaterialComponent replaces every slot, so the mesh
-					// then draws whole with it, exactly as before sections existed;
-					// a one-section asset (every legacy mesh, every primitive) leaves
-					// the list empty and takes the unchanged single-draw path.
-					// `m` is dead after this call (resolveSections may load), which
-					// is why the bounds were read first and the table is copied in.
-					if (m->sections.size() > 1 && d.matId == HE::UUID{})
-						d.sections = resolveSections(m->sections, *contentManager,
-						                             sectionMaterialMissing);
+					// Material slots, after the entity's overrides (see
+					// resolveEntitySlots for the precedence and for when the list
+					// stays empty = the unchanged whole-mesh draw). `m` is dead
+					// after this (resolving may load), which is why the bounds were
+					// read first and the table is copied out.
+					std::vector<MeshSection> table = m->sections;
+					d.sections = resolveEntitySlots(std::move(table),
+					                                lod0SectionsOf(reg, e, d.meshId, *contentManager),
+					                                matComp, *contentManager,
+					                                sectionMaterialMissing, d.matId);
+					// The param block was merged for the whole-mesh material; a
+					// whole draw that a slot override redirected elsewhere draws
+					// that material plain.
+					if (matComp && d.matId != matComp->materialAssetId) d.paramOverride.clear();
 				}
 			items.push_back(d);
 		}
@@ -509,7 +608,12 @@ namespace
 	}
 
 	// ── Skinned renderables ─────────────────────────────────────────────────
-	void extractSkinnedMeshes(entt::registry& reg, RenderWorld& out)
+	// Same slot rules as the static path (resolveEntitySlots): a skinned glTF
+	// with several materials draws one section per slot, the entity's
+	// overrides apply per slot. A skeletal mesh has no LOD levels, so its own
+	// table is the entity's.
+	void extractSkinnedMeshes(entt::registry& reg, RenderWorld& out, ContentManager* contentManager,
+	                          std::unordered_set<std::string>& sectionMaterialMissing)
 	{
 		out.skinnedObjects.clear();
 		const HE::ActiveFilter active(reg);
@@ -526,8 +630,15 @@ namespace
 			obj.boneMatrices    = smc.boneMatrices.empty()
 			                    ? std::vector<glm::mat4>{ glm::mat4(1.0f) }
 			                    : smc.boneMatrices;
-			if (const auto* matComp = reg.try_get<MaterialComponent>(e))
-				obj.materialAssetId = matComp->materialAssetId;
+			const auto* matComp = reg.try_get<MaterialComponent>(e);
+			if (matComp) obj.materialAssetId = matComp->materialAssetId;
+			if (contentManager)
+				if (const SkeletalMeshAsset* m = contentManager->getSkeletalMesh(smc.meshAssetId))
+				{
+					std::vector<MeshSection> table = m->sections; // `m` dies in the call
+					obj.sections = resolveEntitySlots(std::move(table), {}, matComp, *contentManager,
+					                                  sectionMaterialMissing, obj.materialAssetId);
+				}
 			out.skinnedObjects.push_back(std::move(obj));
 		}
 	}
@@ -1044,7 +1155,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
 	extractFoliage(reg, out);
-	extractSkinnedMeshes(reg, out);
+	extractSkinnedMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
 	extractDecals(reg, out);
 	// Ropes are ordinary mesh objects and must land in out.objects before the
 	// shadow fit below; trails are their own per-frame band list and need the
