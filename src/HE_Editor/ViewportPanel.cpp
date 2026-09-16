@@ -399,17 +399,22 @@ static void showAll(AppContext& ctx)
 	snapshot(ctx);
 	noteEdited(ctx, ViewportActions::showAll(*ctx.world));
 }
+// Group and Ungroup rewrite the local transform of what they move (the world
+// pose is kept, the local is what changes), so those are the edited entities
+// — the roots going in, the children coming out.
 static void groupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
+	const std::vector<Entity> roots = ctx.selection.roots(ctx.world->registry());
 	snapshot(ctx);
-	ViewportActions::groupSelected(*ctx.world, ctx.selection);
+	if (ViewportActions::groupSelected(*ctx.world, ctx.selection) != entt::null)
+		noteEdited(ctx, roots);
 }
 static void ungroupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying) return;
 	snapshot(ctx);
-	ViewportActions::ungroupSelected(*ctx.world, ctx.selection);
+	noteEdited(ctx, ViewportActions::ungroupSelected(*ctx.world, ctx.selection));
 }
 static void focusSelected(AppContext& ctx, const RenderWorld& snapshotWorld)
 {
@@ -703,6 +708,10 @@ void render(AppContext& ctx, float dt)
 						{
 							if (cin.look)
 								s_rmbTravel += std::abs(cin.mouseDelta.x) + std::abs(cin.mouseDelta.y);
+							// A flight with a still mouse — RMB held, W pressed,
+							// or the wheel dollying — is a look too, not a click.
+							if (cin.moveAxis != glm::vec3(0.0f) || cin.wheel != 0.0f)
+								s_rmbArmed = false;
 							const bool physRmb =
 								(SDL_GetMouseState(nullptr, nullptr) & SDL_BUTTON_MASK(SDL_BUTTON_RIGHT)) != 0;
 							if (!physRmb)
