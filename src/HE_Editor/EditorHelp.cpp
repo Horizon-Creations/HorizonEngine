@@ -1760,8 +1760,16 @@ namespace
 	  "Where the other people in a collaboration session are and what they have "
 	  "selected: their rings and boxes in the scene, and their name tags over it.",
 	  "", "editor#viewport" },
+	{ "Viewport Show/Stats", "",
+	  "The frame's counters in the corner of the viewport: frame rate and frame "
+	  "time, draw calls, triangles, visible objects out of all of them, and GPU "
+	  "time and video memory where the backend can measure them. The same "
+	  "numbers the profiler shows, read off the last frame. Off by default.",
+	  "", "editor#viewport" },
 	{ "Viewport Show/Show All Overlays", "",
-	  "Switches every overlay back on.", "", "editor#viewport" },
+	  "Switches every overlay back to its default — on for all of them except "
+	  "Stats, which is a diagnostic rather than part of the scene.",
+	  "", "editor#viewport" },
 	{ "Viewport Show/Hide All Overlays", "",
 	  "Switches every overlay off — the scene and nothing else, for a moment.",
 	  "", "editor#viewport" },

@@ -419,7 +419,14 @@ void showPopup(AppContext&)
 	EditorWidgets::checkbox("Guides",         &f.guides);
 	EditorWidgets::checkbox("Script Debug",   &f.scriptDebug);
 	EditorWidgets::checkbox("Collaborators",  &f.collaborators);
+	ImGui::Spacing();
+	ImGui::TextDisabled("Diagnostics");
 	ImGui::Separator();
+	EditorWidgets::checkbox("Stats",          &f.stats);
+	ImGui::Separator();
+	// "All" is the DEFAULTS, not "every switch on": the stats readout is off by
+	// default on purpose (a diagnostic, not part of looking at the scene), and
+	// asking for all the overlays back must not also switch that on.
 	if (EditorWidgets::menuItem("Show All Overlays"))  f = ViewportPanel::ShowFlags{};
 	if (EditorWidgets::menuItem("Hide All Overlays"))
 	{
@@ -918,10 +925,13 @@ void render(AppContext& ctx, State& st)
 			rx += w + kGroupGap;
 		}
 
-		// Show flags. Lit up whenever any overlay is switched off, for the same
-		// reason the view-mode cell is: "where did my colliders go" has to be
-		// answerable from the bar. Icon-only at every width — the popup's
-		// headings say what it is, the cell only has to be findable.
+		// Show flags. Lit up whenever any switch is away from its DEFAULT, for
+		// the same reason the view-mode cell is: "where did my colliders go"
+		// has to be answerable from the bar. Against the defaults and not
+		// against "on": the stats readout defaults to off, and a cell that lit
+		// up permanently over that would say nothing. Icon-only at every width
+		// — the popup's headings say what it is, the cell only has to be
+		// findable.
 		{
 			const float w = kWellPad * 2.0f + m.cell;
 			well(m, rx, w);
@@ -930,7 +940,9 @@ void render(AppContext& ctx, State& st)
 				int n = 0;
 				const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
 				const ViewportPanel::ShowFlags& f = ViewportPanel::showFlags();
-				for (int i = 0; i < n && !anyOff; ++i) anyOff = !(f.*(fields[i].member));
+				const ViewportPanel::ShowFlags  defaults{};
+				for (int i = 0; i < n && !anyOff; ++i)
+					anyOff = (f.*(fields[i].member)) != (defaults.*(fields[i].member));
 			}
 			if (cell(m, rx + kWellPad, m.cell, "##vpShow", iconLayers, nullptr, anyOff, true,
 			         "Show — which overlays are drawn over the scene: grid, icons, colliders…",
