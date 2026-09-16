@@ -1593,6 +1593,13 @@ namespace
 	  "marked. Click a row to jump straight there — several steps in one go, "
 	  "forwards or backwards.",
 	  "", "editor#menus" },
+	{ "View/Watch", "",
+	  "What a HorizonCode graph stopped at a breakpoint is holding: the event's "
+	  "argument, the function it is inside of with its inputs and locals, the "
+	  "object's variables, and what the nodes before the stop produced. Opens "
+	  "by itself when a run stops; while nothing is stopped it shows the Game "
+	  "Instance's variables live.",
+	  "", "horizoncode#graphs" },
 	{ "View/Ground Grid", "",
 	  "The reference grid on the ground plane. Hidden while the scene plays "
 	  "either way.",
@@ -2156,6 +2163,25 @@ namespace
 	  "only the way back is gone. For a history that has grown past the point "
 	  "of being useful, or before a long session you want to start clean.",
 	  "", "editor#menus" },
+
+	// ── Watch ────────────────────────────────────────────────────────────────
+	// A stopped HorizonCode run's values. The rows are the run's own names
+	// (variables, function inputs, locals — built at run time, so the scan
+	// never sees them); the fixed controls are the way to the node, the run
+	// picker and the row menu.
+	{ "Watch/Go to Node", "Go to Node",
+	  "Opens the graph the run is stopped in and selects the node — the one "
+	  "with the yellow frame. The same jump the stop itself made; for when you "
+	  "have since gone elsewhere.",
+	  "", "horizoncode#graphs" },
+	{ "Watch/Copy Value", "Copy Value",
+	  "Puts this row's value on the clipboard as it is shown here — the whole "
+	  "string, the whole array, not the part that fits the column.",
+	  "", "horizoncode#graphs" },
+	{ "Watch/Copy Row", "Copy Row",
+	  "Puts name, type and value on the clipboard as one line, for a bug "
+	  "report or a note.",
+	  "", "horizoncode#graphs" },
 
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
 	{ "Audio Mixer/Master", "",
@@ -6325,6 +6351,7 @@ namespace
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
 		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
+		{ "Watch/",            "editor-interface", "Editor Interface", "Watch" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },

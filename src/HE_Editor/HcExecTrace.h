@@ -66,6 +66,12 @@ namespace HcExecTrace
 	// never needs this — its runtime outlives the module — the tests do, whose
 	// runtimes are locals.
 	void detach();
+	// The runtime attach() was given (null after detach / before attach). The
+	// watch window reads the stopped run's state through it — the runtime is
+	// the one thing that has it, and this module is the one place that holds
+	// the runtime for the editor's UI. Read within a frame only: Continue and
+	// Step run between frames and replace what suspendedRun() points at.
+	HorizonCode::Runtime* attachedRuntime();
 
 	// Record that `nodeId` of the graph `runtimeKey` ran, now (steady clock) or
 	// at an explicit time in seconds — the explicit form is for the tests, which

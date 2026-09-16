@@ -76,6 +76,8 @@ void attach(HorizonCode::Runtime& rt)
 
 void detach() { s_runtime = nullptr; }
 
+HorizonCode::Runtime* attachedRuntime() { return s_runtime; }
+
 void recordHit(const std::string& runtimeKey, int nodeId, uint32_t instance)
 {
 	recordHitAt(runtimeKey, nodeId, instance, nowSeconds());

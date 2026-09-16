@@ -139,6 +139,13 @@ public:
     // graph. Hosts that only need the Event bindings use eventBindingsOf, which
     // serves both backends.
     const Graph& graphOf(InstanceId id) const;
+    // The graph of ONE level of the instance's inheritance chain (root first,
+    // the class itself last — see classKeyAtLevel). A stopped run names its
+    // level (SuspendedRun::level), and an inherited call stops in an
+    // ancestor's graph, whose node ids mean nothing in the leaf's. Same shared
+    // empty graph for an unknown id, a compiled instance or a level past the
+    // chain.
+    const Graph& graphAt(InstanceId id, size_t level) const;
 
     // The instance's host-firable events — one entry per Event node (interpreted)
     // or per CompiledEventInfo (compiled). Backend-agnostic replacement for

@@ -300,6 +300,13 @@ const Graph& Runtime::graphOf(InstanceId id) const
     return (i && i->hasGraph()) ? i->leaf() : kEmpty;
 }
 
+const Graph& Runtime::graphAt(InstanceId id, size_t level) const
+{
+    static const Graph kEmpty;
+    const Inst* i = find(id);
+    return (i && level < i->levels.size()) ? i->levels[level] : kEmpty;
+}
+
 Value Runtime::getVariable(InstanceId id, const std::string& name) const
 {
     const Inst* i = find(id);

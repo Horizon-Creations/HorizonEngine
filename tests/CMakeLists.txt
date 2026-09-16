@@ -28,6 +28,9 @@ add_executable(he_tests
     test_notification_store.cpp
     # Node highlighting + console→node: hits fade, reveals are two one-shots.
     test_hc_exec_trace.cpp
+    # The watch window's rows: a stopped run's event argument, frames, locals,
+    # variables and outputs, spelled as the window shows them.
+    test_hc_watch.cpp
     test_editor_dock_state.cpp
     test_scene_autosave.cpp
     test_game_instance.cpp
@@ -58,6 +61,9 @@ add_executable(he_tests
     # The Undo History window, driven the same way: rows from a real EditorUndo
     # over a real world, a click on a row rewinding the world in one restore.
     test_undo_history_ui.cpp
+    # The Watch window, driven the same way: sections and rows from a real
+    # runtime stopped at a breakpoint, Go to Node raising the reveal.
+    test_hc_watch_ui.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
@@ -377,6 +383,8 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
     # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcExecTrace.cpp
+    # The stopped run as watch rows (test_hc_watch.cpp) — ImGui-free like the trace.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatch.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitController.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabUndo.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabDocSync.cpp
@@ -533,6 +541,9 @@ add_executable(he_tests
     # The Undo History window, for test_undo_history_ui.cpp: same AppContext,
     # same per-file HE_IMGUI_ENABLED. It reads EditorUndo (already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/UndoHistoryPanel.cpp
+    # The Watch window, for test_hc_watch_ui.cpp: same AppContext, same per-file
+    # HE_IMGUI_ENABLED. It reads HcExecTrace and HcWatch (both already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
@@ -567,6 +578,8 @@ set_source_files_properties(
     test_audio_mixer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/UndoHistoryPanel.cpp
     test_undo_history_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
+    test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
