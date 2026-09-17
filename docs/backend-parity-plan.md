@@ -311,7 +311,7 @@ Der Roadmap-Punkt ist damit nicht mehr „nur Metal".
 | Asset-Thumbnails | JA | -- | -- | -- |
 | Partikel-Thumbnails | JA | -- | -- | -- |
 | Widget-Thumbnails | JA | -- | -- | -- |
-| `WarmupMaterials` | JA | -- | -- | -- |
+| `WarmupMaterials` | JA | JA | JA | JA |
 | `InvalidateMaterial/Mesh/Texture` | JA | ~ | ~ | ~ |
 | Multi-Window | JA | -- | -- | JA |
 | Per-Pass-GPU-Timing | JA | -- | -- | -- |
@@ -532,7 +532,16 @@ Der geschlossenste Block der Matrix: elf Features, auf allen drei Zielbackends f
 Nutzerwirkung ist unmittelbar: heute bleiben Content-Browser-Thumbnails und Vorschaufenster
 leer, sobald jemand das Backend umstellt.
 
-- P1a — `InvalidateTexture` vervollständigen (`~` in allen dreien), `WarmupMaterials`.
+- P1a — `InvalidateTexture` vervollständigen (`~` in allen dreien). `WarmupMaterials` ist seit
+  Thema 51 Schritt 2 (September 2026) auf allen dreien da: gequeut, am Anfang von `DrawScene`
+  gedraint (Render-Thread, Material-Ressourcen stehen, HDR/LDR-Ziel des Frames bekannt).
+  Anders als GL/Metal baut es also nicht im Aufruf selbst, sondern im nächsten Frame vor dem
+  ersten Draw. Aus demselben Schritt: D3D11 cacht die Material-Shader nur noch per Hash
+  (Blend/Depth sind dort Pass-State, opaque+blended teilen sich VS/PS), D3D12 lässt FXC einmal
+  pro Hash laufen (`m_matBytecode`), die PSO-Varianten HDR/LDR × opaque/blended teilen sich den
+  Bytecode. D3D12 und Vulkan warnen einmal pro Sitzung, wenn ein Frame mehr Graph-Material-Draws
+  als `k_matMaxDraws` (1024) anfordert; Metal hat kein solches Cap, dort wäre das ein
+  Paritätsunterschied ohne Log gewesen.
 - P1b — Thumbnails: Asset, Partikel, Widget (Offscreen-Target + Readback existiert überall
   schon, siehe `CaptureViewport` = `JA`).
 - P1c — Vorschauen: Material, Skeletal (Bone-Overlay), Partikel.

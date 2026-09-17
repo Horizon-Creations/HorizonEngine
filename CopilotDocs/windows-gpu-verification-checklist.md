@@ -86,6 +86,19 @@ aussehen; Material-Parameter live ändern → sofortiges Update; Graph-Texturen 
 im Editor neu importieren → das Material zeigt die neue (InvalidateTexture). Zusätzlich ein gepackter Build mit
 D3D12-Variante auf D3D11 starten (und umgekehrt) → gleiches Bild, kein „cross-compile failed" im Log.
 
+**Material-Instanzen + Parameter (Thema 51 Schritt 2, nie auf Hardware gesehen):** ein Master-Material
+mit Parametern und zwei Instanzen davon (eine mit Param-Override, eine mit Static-Switch-Override) an drei
+Meshes hängen. Erwartet: im Log genau EINE Zeile `warmed up N material shader set(s)/PSO(s)/pipeline(s)`
+nach dem Szenenladen (D3D11 / D3D12 / Vulkan), und beim Ändern eines Parameterwerts an Master oder
+Param-Instanz sofortiges Update ohne Ruckler. Ein erfolgreicher Compile wird NICHT geloggt (nur der
+einmalige HLSL-Dump), der Beleg für „keine Neukompilierung" ist deshalb ein Breakpoint auf `D3DCompile`
+(D3D11/D3D12) bzw. `vkCreateGraphicsPipelines` (Vulkan): er darf nach dem Warmup bei Param-Edits nicht
+mehr anschlagen, nur die Switch-Instanz löst eine zweite Kompilierung aus. Dazu im Details-Panel einen
+Per-Entity-Override setzen → nur dieses Mesh ändert sich. D3D12-Sonderfall: ein Objekt mit Tint-Alpha
+< 1 zusätzlich zur opaken Instanz → `D3DCompile` schlägt NICHT erneut an (der Bytecode hängt am Hash),
+nur `CreateGraphicsPipelineState` einmal. Ab 1025 Graph-Material-Draws in einem Frame (Foliage) muss
+auf D3D12/Vulkan einmalig `more than 1024 graph-material draws` erscheinen, Metal kennt dieses Cap nicht.
+
 Bekannte Grenze (nicht Teil der Abnahme): ein **Landscape-Material** auf D3D scheitert weiter an der
 SM-5.0-Sampler-Grenze (`heLandscapeWeights` wäre das 17. Sampler-Binding, siehe `5e52d64e`).
 
