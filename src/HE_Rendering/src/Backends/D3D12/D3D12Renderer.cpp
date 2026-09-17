@@ -2043,6 +2043,11 @@ struct D3D12RendererImpl
     //   t2 heTex0, t4..t7 heTexP0..3 (+ SamplerState s2, s4..s7).
     HE::MaterialShaderLibrary m_matShaderLib;
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_materialPSOs; // key = hash^hdr^transparent
+    // FXC output per SHADER hash, shared by the up to four PSO variants (LDR/HDR ×
+    // opaque/blended) of one material family. A null `vs` is a cached compile miss, so
+    // a shader that fails FXC fails once, not once per variant. Cleared with the PSOs.
+    struct MatBytecode { ComPtr<ID3DBlob> vs, ps; };
+    std::unordered_map<uint64_t, MatBytecode> m_matBytecode;
     ComPtr<ID3D12RootSignature>  m_matRootSig;
     // Shader-visible ring of per-DrawCall SRV blocks — k_matSrvPerDraw consecutive slots
     // in the root table's order: [0] heTex0 (t2), [1..4] heTexP0..3 (t4..t7), [5..6] the
@@ -6900,73 +6905,93 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
                               ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
     if (auto it = m_materialPSOs.find(key); it != m_materialPSOs.end()) return it->second.Get();
 
-    using Backend = HE::MaterialShaderLibrary::Backend;
-    UINT cflags = 0;
-#ifdef _DEBUG
-    cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-    // SPIRV-Cross emits the GLSL-sourced entry point as `main` (not VSMain/PSMain).
+    // FXC runs ONCE per shader hash; every further variant of the same material family
+    // (the HDR twin, the blended twin, a material instance that shares the source) only
+    // pays CreateGraphicsPipelineState. A cached null = the compile already failed and
+    // was logged for this hash — cache the variant miss and stop.
     ComPtr<ID3DBlob> vs, ps;
-    auto compilePair = [&](const std::string& vsSrc, const std::string& psSrc, const char* origin) -> bool {
-        ComPtr<ID3DBlob> cerr;
-        vs.Reset(); ps.Reset();
-        if (FAILED(D3DCompile(vsSrc.c_str(), vsSrc.size(), "matVS", nullptr, nullptr,
-                              "main", "vs_5_0", cflags, 0, &vs, &cerr)))
-        {
-            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material VS compile failed (") + origin + "): "
-                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
-            return false;
-        }
-        if (FAILED(D3DCompile(psSrc.c_str(), psSrc.size(), "matPS", nullptr, nullptr,
-                              "main", "ps_5_0", cflags, 0, &ps, &cerr)))
-        {
-            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material PS compile failed (") + origin + "): "
-                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
-            return false;
-        }
-        // One-time: dump the HLSL so a Windows-GPU run can confirm the register /
-        // vertex-semantic mapping the material root signature + input layout assume.
-        if (!m_matHlslLogged)
-        {
-            m_matHlslLogged = true;
-            HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vsSrc).c_str());
-            HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + psSrc).c_str());
-        }
-        return true;
-    };
-
-    // The baked variant first. A variant that FXC rejects (a pak exported before the
-    // HLSL sampler pins of 5e52d64e, say) is not the end: fall through to the runtime
-    // cross-compile, which is what rendered that pak before variants were consumed
-    // here at all. Only when both roads are closed is the miss cached.
-    bool built = false;
-    if (precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
+    if (auto bc = m_matBytecode.find(hash); bc != m_matBytecode.end())
     {
-        built = compilePair(precompiled->vertex, precompiled->fragment, "baked variant");
-        if (!built)
-            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: A4 baked material variant rejected — cross-compiling instead");
-    }
-    if (!built)
-    {
-        // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to HLSL.
-        const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
-            ? m_matShaderLib.standardVertex(Backend::HLSL)
-            : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
-        const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
-        if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+        if (!bc->second.vs)
         {
-            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material shader cross-compile failed: ")
-                + vc.log + " " + fc.log).c_str());
-            m_materialPSOs.emplace(key, nullptr); // cache the miss — don't retry every draw
+            m_materialPSOs.emplace(key, nullptr);
             return nullptr;
         }
-        built = compilePair(vc.source, fc.source, "cross-compiled");
+        vs = bc->second.vs;
+        ps = bc->second.ps;
     }
-    if (!built)
+    else
     {
-        m_materialPSOs.emplace(key, nullptr);
-        return nullptr;
-    }
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        UINT cflags = 0;
+#ifdef _DEBUG
+        cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        // SPIRV-Cross emits the GLSL-sourced entry point as `main` (not VSMain/PSMain).
+        auto compilePair = [&](const std::string& vsSrc, const std::string& psSrc, const char* origin) -> bool {
+            ComPtr<ID3DBlob> cerr;
+            vs.Reset(); ps.Reset();
+            if (FAILED(D3DCompile(vsSrc.c_str(), vsSrc.size(), "matVS", nullptr, nullptr,
+                                  "main", "vs_5_0", cflags, 0, &vs, &cerr)))
+            {
+                HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material VS compile failed (") + origin + "): "
+                    + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+                return false;
+            }
+            if (FAILED(D3DCompile(psSrc.c_str(), psSrc.size(), "matPS", nullptr, nullptr,
+                                  "main", "ps_5_0", cflags, 0, &ps, &cerr)))
+            {
+                HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material PS compile failed (") + origin + "): "
+                    + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+                return false;
+            }
+            // One-time: dump the HLSL so a Windows-GPU run can confirm the register /
+            // vertex-semantic mapping the material root signature + input layout assume.
+            if (!m_matHlslLogged)
+            {
+                m_matHlslLogged = true;
+                HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vsSrc).c_str());
+                HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + psSrc).c_str());
+            }
+            return true;
+        };
+
+        // The baked variant first. A variant that FXC rejects (a pak exported before the
+        // HLSL sampler pins of 5e52d64e, say) is not the end: fall through to the runtime
+        // cross-compile, which is what rendered that pak before variants were consumed
+        // here at all. Only when both roads are closed is the miss cached.
+        bool built = false;
+        if (precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
+        {
+            built = compilePair(precompiled->vertex, precompiled->fragment, "baked variant");
+            if (!built)
+                HE_LOG_WARN(RHI, "%s", "D3D12Renderer: A4 baked material variant rejected — cross-compiling instead");
+        }
+        if (!built)
+        {
+            // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to HLSL.
+            const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
+                ? m_matShaderLib.standardVertex(Backend::HLSL)
+                : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
+            const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
+            if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+            {
+                HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material shader cross-compile failed: ")
+                    + vc.log + " " + fc.log).c_str());
+                m_matBytecode.emplace(hash, MatBytecode{});
+                m_materialPSOs.emplace(key, nullptr); // cache the miss — don't retry every draw
+                return nullptr;
+            }
+            built = compilePair(vc.source, fc.source, "cross-compiled");
+        }
+        if (!built)
+        {
+            m_matBytecode.emplace(hash, MatBytecode{});
+            m_materialPSOs.emplace(key, nullptr);
+            return nullptr;
+        }
+        m_matBytecode.emplace(hash, MatBytecode{ vs, ps });
+    } // FXC once per hash
 
     // IMPORTANT: SPIRV-Cross names GLSL vertex inputs by location as TEXCOORD{location}
     // (no remap_vertex_attributes is registered in ShaderCompiler.cpp), so the material
@@ -7610,6 +7635,7 @@ void D3D12Renderer::Shutdown()
     m_impl->m_matReady = false;
     m_impl->m_matHlslLogged = false;
     m_impl->m_materialPSOs.clear();
+    m_impl->m_matBytecode.clear();
     m_impl->m_matSrvHeap.Reset();
     m_impl->m_matSrvStaging.Reset();
     m_impl->m_graphTexCache.clear(); // device is idle here (ComPtr release)
