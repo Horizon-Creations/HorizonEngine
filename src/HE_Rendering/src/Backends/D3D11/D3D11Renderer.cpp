@@ -1030,7 +1030,7 @@ struct D3D11RendererImpl
         ComPtr<ID3D11PixelShader>  ps;
         ComPtr<ID3D11InputLayout>  il;
     };
-    std::unordered_map<uint64_t, MatShaders> m_materialShaders; // key = hash ^ transparentbit
+    std::unordered_map<uint64_t, MatShaders> m_materialShaders; // key = shader hash (opaque + blended share one entry)
     ComPtr<ID3D11Buffer>       m_matLightCB;  // HeLighting (full Lighting struct) — b0 PS / b8 WPO VS, filled once/frame
     ComPtr<ID3D11Buffer>       m_matObjCB;    // U (176 B)         — b1 VS,          filled per draw
     ComPtr<ID3D11Buffer>       m_matParamCB;  // HeParams (256 B)  — b3 PS / b9 WPO VS, filled per draw
@@ -3476,9 +3476,12 @@ struct D3D11RendererImpl
     }
 
     // Build (or fetch from cache) the per-material VS + PS + input layout from the
-    // MaterialShaderLibrary HLSL. Cached by hash^transparentbit for signature parity with
-    // the D3D12/Vulkan GetOrBuild* (the transparent bit is redundant on D3D11 — the shader
-    // objects don't bake blend/depth — but kept so the cache key matches the other backends).
+    // MaterialShaderLibrary HLSL. Cached by the shader hash ALONE: D3D11 shader objects
+    // bake neither blend nor depth state (the enclosing pass binds those), so the opaque
+    // and the blended draw of one material are the same VS/PS. `transparent` stays in
+    // the signature for parity with the D3D12/Vulkan GetOrBuild* (whose PSOs DO bake it),
+    // but mixing it into the key here compiled every material a second time through FXC
+    // the moment one entity carried a tint alpha or a material instance went translucent.
     // Returns nullptr (and caches the miss so it never retries per-draw) on any failure.
     // `precompiled` (the pak's baked HLSL for this backend, MaterialShaderLibrary::
     // precompiledFor) wins over the runtime cross-compile — same split as GL's
@@ -3489,7 +3492,8 @@ struct D3D11RendererImpl
                                           const MaterialShaderVariant* precompiled,
                                           bool transparent)
     {
-        const uint64_t key = hash ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
+        (void)transparent; // blend/depth are pass state on D3D11, not shader state
+        const uint64_t key = hash;
         if (auto it = m_materialShaders.find(key); it != m_materialShaders.end())
             return it->second.vs ? &it->second : nullptr; // null vs == cached miss
 
