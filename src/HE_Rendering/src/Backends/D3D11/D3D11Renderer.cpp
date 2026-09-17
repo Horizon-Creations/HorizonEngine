@@ -409,6 +409,13 @@ cbuffer PerFrame : register(b1)
     // same four lanes heLitP reads out of Lighting::ssr — must stay in step with
     // PerFrameCB, which is memcpy'd into this cbuffer whole.
     float4   uSSRParams;
+    // Local (point/spot) shadow atlas (mirrors Metal's SceneUniforms::
+    // localShadowVP / GL's uLocalShadowVP): one light view-proj per atlas layer
+    // in D3D clip (kD3DClipFix pre-applied), 16 layers = spot 1 / point 6
+    // cube faces. uLightParams[i].y is the light's base layer (-1 = casts no
+    // local shadow). uLocalShadowParams.x = 1 / atlas size.
+    float4x4 uLocalShadowVP[16];
+    float4   uLocalShadowParams;
 };
 
 Texture2D    uTexture   : register(t0);
@@ -427,6 +434,10 @@ Texture2D    uGILocal   : register(t7); // half-res local-light visibility mask 
 // t14/t15 the decals) and D3D11 has 128 SRV slots — only samplers (16) and
 // constant buffers (14) are scarce, which is why this one shares uGISampler.
 Texture2D    uSSRFwd    : register(t16);
+// Local (point/spot) shadow atlas — 16-layer depth array, sampled through the
+// same point/clamp sampler (s3) as the cascades. t17: next free register after
+// the SSR result; the D3D12 scene shader uses the same one (shared contract).
+Texture2DArray uLocalShadowMap : register(t17);
 SamplerState uSampler   : register(s0);
 SamplerState uAOSampler : register(s1);
 SamplerState uGISampler : register(s2); // linear clamp (mask upsample + atlases)
@@ -583,6 +594,53 @@ float shadowFactor(float3 worldPos, float3 N, float3 L, out int outCascade)
     return vis / 9.0;
 }
 
+// Point/spot shadow lookup in the local shadow atlas — the HLSL twin of Metal's
+// localShadowFactor(). Spot lights project into their single perspective
+// layer; point lights first pick the cube face from the fragment→light
+// vector's major axis (faces stored as 6 consecutive array layers, +X −X +Y
+// −Y +Z −Z), then project into that face's layer. Same 3×3 PCF and
+// normal-offset bias family as the directional CSM above; the receiver bias
+// is fixed (the project ShadowSettings pair tunes the cascades only, as on
+// Metal/GL).
+float localShadowFactor(int li, float3 worldPos, float3 N)
+{
+    // uLocalShadowParams.y = atlas rendered + bound this frame. First gate on
+    // purpose: a zero-initialised PerFrame fill has lightParams.y = 0, which
+    // would otherwise read as "layer 0" and sample an unbound atlas as black.
+    if (uLocalShadowParams.y < 0.5) return 1.0;
+    int base = int(uLightParams[li].y);
+    if (base < 0) return 1.0;
+    int layer = base;
+    if (int(uLightPos[li].w) == 1) // point: major-axis cube-face pick
+    {
+        float3 d = worldPos - uLightPos[li].xyz;
+        float3 a = abs(d);
+        int face;
+        if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
+        else if (a.y >= a.z)               face = (d.y > 0.0) ? 2 : 3;
+        else                               face = (d.z > 0.0) ? 4 : 5;
+        layer = base + face;
+    }
+    float3 toL = normalize(uLightPos[li].xyz - worldPos);
+    float  ndl = saturate(dot(N, toL));
+    float4 lp = mul(uLocalShadowVP[layer], float4(worldPos + N * 0.02, 1.0));
+    if (lp.w <= 0.0) return 1.0;                          // behind the light's near plane
+    float3 p  = lp.xyz / lp.w;                            // z in [0,1] (D3D clip)
+    float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); // top-left origin
+    float  texel = uLocalShadowParams.x;                  // 1 / atlas size
+    if (p.z > 1.0 || p.z < 0.0 || any(uv < texel) || any(uv > 1.0 - texel)) return 1.0;
+    float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
+    float vis = 0.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+        {
+            float cd = uLocalShadowMap.Sample(uShadowSampler,
+                                              float3(uv + float2(x, y) * texel, float(layer))).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    return vis / 9.0;
+}
+
 // Cook-Torrance PBR helpers.
 static const float PI11 = 3.14159265;
 float D_GGX(float NdH, float a2) { float d = NdH*NdH*(a2-1.0)+1.0; return a2/(PI11*d*d+1e-6); }
@@ -697,12 +755,14 @@ float4 PSMain(VSOut i) : SV_TARGET
         }
         else
         {
-            // Local (point/spot) lights: ray-traced hard shadows when GI is
-            // active — one visibility channel per light (first 4), written by
-            // the shadow kernel from unjittered secondary rays (previously
-            // local lights had no shadowing at all).
+            // Local (point/spot) lights: shadow-mapped when the light casts
+            // shadows (uLightParams.y = atlas base layer, set by the extractor).
+            // When GI is active the ray-traced hard mask (first 4 local lights)
+            // is combined in via min() — the map covers lights the mask can't.
+            // Mirrors Metal/GL.
+            sh = localShadowFactor(li, i.worldPos, N);
             if (uGIParams.x > 0.5f && giLocalIdx < 4)
-                sh = uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[giLocalIdx];
+                sh = min(sh, uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[giLocalIdx]);
             giLocalIdx++;
         }
         // "Receives Shadow" off: the object is lit as if nothing occluded it.
@@ -1011,6 +1071,11 @@ namespace
         glm::vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
         glm::vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
         glm::vec4  ssrParams;    // x = SSR gate, y = intensity, z = max roughness
+        // Local (point/spot) shadow atlas: per-layer light view-proj (D3D clip
+        // pre-applied), x = 1 / atlas size. Appended last — the cbuffer is
+        // memcpy'd whole and the HLSL PerFrame block mirrors this order.
+        glm::mat4  localShadowVP[16];
+        glm::vec4  localShadowParams;
     };
 
     struct SkyCB {
@@ -1128,6 +1193,54 @@ struct D3D11RendererImpl
     std::vector<uint8_t>         shadowVisible;
     std::vector<uint32_t>        shadowSorted;
     RenderSorter::DepthBatchList shadowBatches;
+
+    // ── Local (point/spot) shadow atlas ─────────────────────────────────────
+    // Same depth-array pattern as the cascades, independent of the directional
+    // light: ShadowData::kMaxLocalShadowLayers layers (spot = 1, point = 6
+    // cube faces), a DSV per layer, one array SRV on t17. Fixed 1024² per
+    // view like Metal/GL — not part of the project ShadowSettings.
+    static constexpr int kLocalShadowLayers = ShadowData::kMaxLocalShadowLayers;
+    static constexpr int kLocalShadowSize   = 1024;
+    ComPtr<ID3D11Texture2D>          localShadowTex;
+    ComPtr<ID3D11DepthStencilView>   localShadowDSV[kLocalShadowLayers];
+    ComPtr<ID3D11ShaderResourceView> localShadowSRV;
+
+    bool createLocalShadowArray()
+    {
+        localShadowSRV.Reset();
+        for (auto& dsv : localShadowDSV) dsv.Reset();
+        localShadowTex.Reset();
+        D3D11_TEXTURE2D_DESC sd{};
+        sd.Width = sd.Height = static_cast<UINT>(kLocalShadowSize);
+        sd.MipLevels = 1; sd.ArraySize = kLocalShadowLayers;
+        sd.Format = DXGI_FORMAT_R32_TYPELESS;
+        sd.SampleDesc.Count = 1;
+        sd.Usage = D3D11_USAGE_DEFAULT;
+        sd.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&sd, nullptr, &localShadowTex)))
+        {
+            HE_LOG_ERROR(RHI, "D3D11Renderer: local shadow atlas %dx%dx%d creation failed",
+                         kLocalShadowSize, kLocalShadowSize, kLocalShadowLayers);
+            return false;
+        }
+        for (int v = 0; v < kLocalShadowLayers; ++v)
+        {
+            D3D11_DEPTH_STENCIL_VIEW_DESC dvd{};
+            dvd.Format                         = DXGI_FORMAT_D32_FLOAT;
+            dvd.ViewDimension                  = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+            dvd.Texture2DArray.FirstArraySlice = static_cast<UINT>(v);
+            dvd.Texture2DArray.ArraySize       = 1;
+            device->CreateDepthStencilView(localShadowTex.Get(), &dvd, &localShadowDSV[v]);
+        }
+        D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+        svd.Format                         = DXGI_FORMAT_R32_FLOAT;
+        svd.ViewDimension                  = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        svd.Texture2DArray.MipLevels       = 1;
+        svd.Texture2DArray.FirstArraySlice = 0;
+        svd.Texture2DArray.ArraySize       = kLocalShadowLayers;
+        device->CreateShaderResourceView(localShadowTex.Get(), &svd, &localShadowSRV);
+        return localShadowSRV != nullptr;
+    }
 
     // (Re)creates the cascade depth array at `shadowSize` (initial build and
     // the resolution swap). R32_TYPELESS so the same texture is both a depth
@@ -3302,6 +3415,9 @@ struct D3D11RendererImpl
         // (2, 4); Metal: setDepthBias — D3D11 had none, so single-map acne
         // was masked only by the old, much larger receiver bias).
         createShadowArray();
+        // Local (point/spot) shadow atlas — fixed size, built once. Rendering
+        // gates on the SRV, so a failure just leaves local shadows off.
+        createLocalShadowArray();
         {
             D3D11_SAMPLER_DESC ssd{};
             ssd.Filter         = D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -4691,6 +4807,18 @@ void D3D11Renderer::DrawScene(int width, int height)
     const glm::vec3 camFwd =
         -glm::normalize(glm::vec3(glm::inverse(p.m_renderWorld.camera.view)[2]));
 
+    // ── Local (point/spot) shadow atlas frame constants ─────────────────────
+    // Independent of the CSM: night scenes with only shadow-casting point
+    // lights still get their atlas. Per-layer light view-projs get the same
+    // clip fix as the cascades; unused layers stay identity (never sampled —
+    // lightParams.y gates on the extractor's layer assignment).
+    const int nLocalLayers =
+        std::clamp(csm.localLayerCount, 0, D3D11RendererImpl::kLocalShadowLayers);
+    const bool localShadows = nLocalLayers > 0 && p.localShadowSRV && p.depthVS;
+    glm::mat4 localClip[D3D11RendererImpl::kLocalShadowLayers];
+    for (int v = 0; v < D3D11RendererImpl::kLocalShadowLayers; ++v)
+        localClip[v] = v < nLocalLayers ? HE::kD3DClipFix * csm.localViewProj[v] : glm::mat4(1.0f);
+
     ID3D11DeviceContext* ctx = p.context.Get();
     ctx->IASetInputLayout(p.inputLayout.Get());
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -4715,9 +4843,16 @@ void D3D11Renderer::DrawScene(int width, int height)
             f.lightPos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
             f.lightDir[i]    = glm::vec4(l.direction, l.spotAngleCos);
             f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
-            f.lightParams[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+            // y = the light's base layer in the local shadow atlas, -1 = no
+            // local shadow (built-in convention, same as Metal/GL).
+            f.lightParams[i] = glm::vec4(l.range,
+                                         localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
+                                         0.0f, 0.0f);
         }
         for (int c = 0; c < D3D11RendererImpl::kCsmCascades; ++c) f.cascadeVP[c] = cascadeClip[c];
+        for (int v = 0; v < D3D11RendererImpl::kLocalShadowLayers; ++v) f.localShadowVP[v] = localClip[v];
+        f.localShadowParams = glm::vec4(1.0f / static_cast<float>(D3D11RendererImpl::kLocalShadowSize),
+                                        localShadows ? 1.0f : 0.0f, 0.0f, 0.0f);
         f.cascadeSplits = cascadeSplits;
         f.cameraFwd     = glm::vec4(camFwd, 1.0f / static_cast<float>(std::max(p.shadowSize, 1)));
         f.shadowBias    = glm::vec4(p.shadowSettings.slopeBias, p.shadowSettings.minBias, 0.0f, 0.0f);
@@ -4774,10 +4909,24 @@ void D3D11Renderer::DrawScene(int width, int height)
         lit.camPos[1] = p.m_renderWorld.camera.position.y;
         lit.camPos[2] = p.m_renderWorld.camera.position.z;
         // Full light window for heLitP() — same first-8 order as the built-in
-        // shaders. Shared fill (HE::FillMaterialLightWindow); D3D11 has no local
-        // (point/spot) shadow atlas yet, so it passes false and lightParams[i].y
-        // stays 0 = "casts no local shadow".
-        HE::FillMaterialLightWindow(p.m_renderWorld, lit, /*localShadowsActive=*/false);
+        // shaders. Shared fill (HE::FillMaterialLightWindow); with the local
+        // (point/spot) atlas rendered this frame, lightParams[i].y carries the
+        // light's base layer + 1 (0 = "casts no local shadow").
+        HE::FillMaterialLightWindow(p.m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        // Local atlas view-projs for heLocalShadowFactor (heLocalShadow,
+        // preamble binding 13 → t13/s13, bound in the scene pass). Same
+        // pre-baked conventions as csmVP below (uvFlipY * kD3DClipFix), so the
+        // shared preamble stays convention-free.
+        if (localShadows)
+        {
+            glm::mat4 lsFlipY(1.0f);
+            lsFlipY[1][1] = -1.0f;
+            for (int v = 0; v < nLocalLayers; ++v)
+            {
+                const glm::mat4 m = lsFlipY * localClip[v];
+                std::memcpy(lit.localShadowVP[v], &m[0][0], 16 * sizeof(float));
+            }
+        }
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
@@ -4864,39 +5013,52 @@ void D3D11Renderer::DrawScene(int width, int height)
         // Mirrors GL's renderDepthLayer / Metal's encodeDepthLayer.
         if (io.output.id == kShadowMapTarget)
         {
-            if (!shadows) return;
+            // CSM needs a directional light; the local (point/spot) atlas is
+            // independent of it — night scenes with only shadow-casting point
+            // lights still render their atlas (mirrors Metal/GL).
+            if (!shadows && !localShadows) return;
             // Save the active render target so we can restore it after the shadow pass.
             ComPtr<ID3D11RenderTargetView> savedRTV;
             ComPtr<ID3D11DepthStencilView> savedDSV;
             ctx->OMGetRenderTargets(1, savedRTV.GetAddressOf(), savedDSV.GetAddressOf());
 
-            // Unbind the shadow SRV wherever last frame left it (t1 built-in
-            // scene shader, t12 graph-material heCsm) so the array can be
-            // bound as a depth target without the runtime's implicit unbind.
+            // Unbind the shadow SRVs wherever last frame left them (t1 built-in
+            // cascades, t17 built-in local atlas, t12/t13 graph-material heCsm/
+            // heLocalShadow) so the arrays can be bound as depth targets
+            // without the runtime's implicit unbind.
             ID3D11ShaderResourceView* nullSrv = nullptr;
             ctx->PSSetShaderResources(1, 1, &nullSrv);
             ctx->PSSetShaderResources(12, 1, &nullSrv);
+            ctx->PSSetShaderResources(13, 1, &nullSrv);
+            ctx->PSSetShaderResources(17, 1, &nullSrv);
             ID3D11RenderTargetView* noRTV = nullptr;
             ctx->VSSetShader(p.depthVS.Get(), nullptr, 0);
             ctx->PSSetShader(nullptr, nullptr, 0);
             if (p.shadowRasterState) ctx->RSSetState(p.shadowRasterState.Get());
-            D3D11_VIEWPORT svp{}; svp.Width = svp.Height = static_cast<float>(p.shadowSize); svp.MaxDepth = 1.0f;
-            ctx->RSSetViewports(1, &svp);
-            const int cascades = std::clamp(csm.cascadeCount, 1, D3D11RendererImpl::kCsmCascades);
-            for (int c = 0; c < cascades; ++c)
+
+            // Depth-only render of every shadow caster into one array slice,
+            // shared by the CSM cascades and the local (point/spot) views.
+            // Cull + sort against the view's light frustum into scratch
+            // buffers; the sort groups draws by mesh so the resolve stays
+            // memoised. batchDepthCasters keeps castsShadow objects only and
+            // drops `skipEntity`'s geometry: the entity the local light itself
+            // sits on (a light authored onto a mesh entity would otherwise
+            // render that mesh at z≈0 into its own map and shadow itself out);
+            // kNoOwnerEntity (every cascade) skips nothing. Runs of one mesh
+            // are drawn one call per transform — the D3D11 instanced scene VS
+            // reads its own structured buffer, the depth VS does not, and a
+            // depth instancing port is not this change's job.
+            auto renderDepthLayer = [&](ID3D11DepthStencilView* dsv, int size,
+                                        const glm::mat4& viewProj, const glm::mat4& clip,
+                                        uint32_t skipEntity)
             {
-                ctx->OMSetRenderTargets(1, &noRTV, p.shadowDSV[c].Get());
-                ctx->ClearDepthStencilView(p.shadowDSV[c].Get(), D3D11_CLEAR_DEPTH, 1.0f, 0);
-                // Cull + sort against the cascade's light frustum into scratch
-                // buffers; the sort groups draws by mesh so the resolve stays
-                // memoised. batchDepthCasters keeps castsShadow objects only
-                // (kNoOwnerEntity: every cascade skips nothing). Runs of one
-                // mesh are drawn one call per transform — the D3D11 instanced
-                // scene VS reads its own structured buffer, the depth VS does
-                // not, and a depth instancing port is not this change's job.
-                p.m_culler.cull(p.m_renderWorld, csm.cascadeViewProj[c], p.shadowVisible);
+                D3D11_VIEWPORT svp{}; svp.Width = svp.Height = static_cast<float>(size); svp.MaxDepth = 1.0f;
+                ctx->RSSetViewports(1, &svp);
+                ctx->OMSetRenderTargets(1, &noRTV, dsv);
+                ctx->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
+                p.m_culler.cull(p.m_renderWorld, viewProj, p.shadowVisible);
                 p.m_sorter.sort(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
-                RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, kNoOwnerEntity,
+                RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, skipEntity,
                                                 p.shadowBatches);
                 for (const RenderSorter::DepthBatch& b : p.shadowBatches.batches)
                 {
@@ -4908,11 +5070,22 @@ void D3D11Renderer::DrawScene(int width, int height)
                     const glm::mat4* xf = p.shadowBatches.transforms.data() + b.first;
                     for (uint32_t k = 0; k < b.count; ++k)
                     {
-                        uploadObject(cascadeClip[c] * xf[k], xf[k], glm::vec3(1.0f), 0.0f, 0.0f, 1.0f);
+                        uploadObject(clip * xf[k], xf[k], glm::vec3(1.0f), 0.0f, 0.0f, 1.0f);
                         ctx->DrawIndexed(m.indexCount, 0, 0);
                     }
                 }
+            };
+            if (shadows)
+            {
+                const int cascades = std::clamp(csm.cascadeCount, 1, D3D11RendererImpl::kCsmCascades);
+                for (int c = 0; c < cascades; ++c)
+                    renderDepthLayer(p.shadowDSV[c].Get(), p.shadowSize,
+                                     csm.cascadeViewProj[c], cascadeClip[c], kNoOwnerEntity);
             }
+            if (localShadows)
+                for (int v = 0; v < nLocalLayers; ++v)
+                    renderDepthLayer(p.localShadowDSV[v].Get(), D3D11RendererImpl::kLocalShadowSize,
+                                     csm.localViewProj[v], localClip[v], csm.localOwnerEntity[v]);
             // Restore saved target + viewport + raster state + scene shaders.
             ID3D11RenderTargetView* restoreRTV = savedRTV.Get();
             ctx->OMSetRenderTargets(1, &restoreRTV, savedDSV.Get());
@@ -5025,6 +5198,11 @@ void D3D11Renderer::DrawScene(int width, int height)
         ID3D11ShaderResourceView* shadowSrv_ = shadows ? p.shadowSRV.Get() : nullptr;
         ctx->PSSetShaderResources(1, 1, &shadowSrv_);
         if (p.shadowSampler) ctx->PSSetSamplers(3, 1, p.shadowSampler.GetAddressOf());
+        // Local (point/spot) shadow atlas on t17, same point/clamp sampler.
+        // Bound only when the atlas was rendered this frame; the shader gates
+        // on uLightParams.y (-1 when it wasn't), so a null SRV is never read.
+        ID3D11ShaderResourceView* localShadowSrv_ = localShadows ? p.localShadowSRV.Get() : nullptr;
+        ctx->PSSetShaderResources(17, 1, &localShadowSrv_);
         // AO SRV on t2, point sampler on s1
         ctx->PSSetSamplers(1, 1, p.pointSampler.GetAddressOf());
         ctx->PSSetShaderResources(2, 1, &aoSRV);
@@ -5068,6 +5246,11 @@ void D3D11Renderer::DrawScene(int width, int height)
             // the scene pass runs, so the slot is free here.
             ctx->PSSetShaderResources(12, 1, &shadowSrv_);
             if (p.shadowSampler) ctx->PSSetSamplers(12, 1, p.shadowSampler.GetAddressOf());
+            // heLocalShadow (preamble binding 13 → t13/s13): the local atlas.
+            // Gated in the preamble by lightParams[i].y (0 = none, which is
+            // what FillMaterialLightWindow writes when the atlas is off).
+            ctx->PSSetShaderResources(13, 1, &localShadowSrv_);
+            if (p.shadowSampler) ctx->PSSetSamplers(13, 1, p.shadowSampler.GetAddressOf());
 #endif
         }
 

@@ -69,10 +69,11 @@ using Microsoft::WRL::ComPtr;
 // in flight (allocators/fences/per-frame CBs) — both benefit.
 static constexpr UINT k_frameCount = 3;
 // Per-object CB ring capacity. Shared by the shadow pass and the geometry pass
-// of one frame, and the shadow pass now draws each cascade's caster set (up to
-// three culls of the scene), so the budget doubled with the CSM port — a
+// of one frame, and the shadow pass draws each cascade's caster set (up to
+// three culls of the scene) plus up to 16 local (point/spot) atlas layers, so
+// the budget doubled with the CSM port and again with the local atlas — a
 // scene that used to fit exactly would otherwise drop its last geometry draws.
-static constexpr UINT k_maxDraws   = 8192;
+static constexpr UINT k_maxDraws   = 16384;
 static constexpr UINT k_cbSlot     = 256;           // CBV alignment
 static constexpr UINT k_maxInstances = 65536;       // instance-transform ring capacity (A3)
 static constexpr UINT k_instStride   = 128;         // bytes per instance = 2 × float4x4 (mvp, model)
@@ -440,6 +441,13 @@ cbuffer PerFrame : register(b1)
     // same four lanes heLitP reads out of Lighting::ssr — must stay in step with
     // PerFrameCB, which is memcpy'd into this cbuffer whole.
     float4   uSSRParams;
+    // Local (point/spot) shadow atlas (mirrors Metal's SceneUniforms::
+    // localShadowVP / GL's uLocalShadowVP / D3D11's PerFrame): one light
+    // view-proj per atlas layer in D3D clip (kD3DClipFix pre-applied), 16
+    // layers = spot 1 / point 6 cube faces. uLightParams[i].y is the light's
+    // base layer (-1 = casts no local shadow). uLocalShadowParams.x = 1 / size.
+    float4x4 uLocalShadowVP[16];
+    float4   uLocalShadowParams;
 };
 // Directional CSM depth array — one slice per cascade, sampled through the
 // point/clamp static sampler on s0 (a PCF tap must read ONE texel's depth; a
@@ -458,6 +466,10 @@ Texture2D    uGILocal   : register(t7); // half-res local-light visibility mask 
 // share ONE register contract. Its descriptor is its own root table, so the
 // table can be pointed at whichever half-res texture the chain ended on.
 Texture2D    uSSRFwd    : register(t16);
+// Local (point/spot) shadow atlas — 16-layer depth array, sampled through the
+// same point/clamp static sampler (s0) as the cascades. t17: the register
+// D3D11 uses too (shared contract); sceneSrvHeap slot k_localShadowSlot.
+Texture2DArray uLocalShadowMap : register(t17);
 SamplerState uShadowSamp : register(s0); // point + clamp (CSM depth array)
 SamplerState uAOSampler  : register(s1);
 SamplerState uAlbedoSamp : register(s2); // linear + wrap, for tiling base-color textures
@@ -610,6 +622,52 @@ float shadowFactor(float3 worldPos, float3 N, float3 L, out int outCascade)
     return vis / 9.0;
 }
 
+// Point/spot shadow lookup in the local shadow atlas — the same function D3D11
+// runs (the HLSL twin of Metal's localShadowFactor()). Spot lights project into
+// their single perspective layer; point lights first pick the cube face from
+// the fragment→light vector's major axis (faces stored as 6 consecutive array
+// layers, +X −X +Y −Y +Z −Z), then project into that face's layer. Same 3×3
+// PCF and normal-offset bias family as the directional CSM above; the receiver
+// bias is fixed (the project ShadowSettings pair tunes the cascades only).
+float localShadowFactor(int li, float3 worldPos, float3 N)
+{
+    // uLocalShadowParams.y = atlas rendered + bound this frame. First gate on
+    // purpose: a zero-initialised PerFrame fill has lightParams.y = 0, which
+    // would otherwise read as "layer 0" and sample an unbound atlas as black.
+    if (uLocalShadowParams.y < 0.5) return 1.0;
+    int base = int(uLightParams[li].y);
+    if (base < 0) return 1.0;
+    int layer = base;
+    if (int(uLightPos[li].w) == 1) // point: major-axis cube-face pick
+    {
+        float3 d = worldPos - uLightPos[li].xyz;
+        float3 a = abs(d);
+        int face;
+        if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
+        else if (a.y >= a.z)               face = (d.y > 0.0) ? 2 : 3;
+        else                               face = (d.z > 0.0) ? 4 : 5;
+        layer = base + face;
+    }
+    float3 toL = normalize(uLightPos[li].xyz - worldPos);
+    float  ndl = saturate(dot(N, toL));
+    float4 lp = mul(uLocalShadowVP[layer], float4(worldPos + N * 0.02, 1.0));
+    if (lp.w <= 0.0) return 1.0;                          // behind the light's near plane
+    float3 p  = lp.xyz / lp.w;                            // z in [0,1] (D3D clip)
+    float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); // top-left origin
+    float  texel = uLocalShadowParams.x;                  // 1 / atlas size
+    if (p.z > 1.0 || p.z < 0.0 || any(uv < texel) || any(uv > 1.0 - texel)) return 1.0;
+    float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
+    float vis = 0.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+        {
+            float cd = uLocalShadowMap.Sample(uShadowSamp,
+                                              float3(uv + float2(x, y) * texel, float(layer))).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    return vis / 9.0;
+}
+
 static const float PI12 = 3.14159265;
 float D_GGX12(float NdH, float a2) { float d = NdH*NdH*(a2-1.0)+1.0; return a2/(PI12*d*d+1e-6); }
 float G_Schlick12(float NdX, float k) { return NdX/(NdX*(1.0-k)+k); }
@@ -713,12 +771,14 @@ float4 PSMain(VSOut i) : SV_TARGET
         }
         else
         {
-            // Local (point/spot) lights: ray-traced hard shadows when GI is
-            // active — one visibility channel per light (first 4), written by
-            // the shadow kernel from unjittered secondary rays (previously
-            // local lights had no shadowing at all).
+            // Local (point/spot) lights: shadow-mapped when the light casts
+            // shadows (uLightParams.y = atlas base layer, set by the extractor).
+            // When GI is active the ray-traced hard mask (first 4 local lights)
+            // is combined in via min() — the map covers lights the mask can't.
+            // Mirrors Metal/GL/D3D11.
+            sh = localShadowFactor(li, i.worldPos, N);
             if (uGIParams.x > 0.5f && giLocalIdx < 4)
-                sh = uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[giLocalIdx];
+                sh = min(sh, uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[giLocalIdx]);
             giLocalIdx++;
         }
         // "Receives Shadow" off: the object is lit as if nothing occluded it.
@@ -977,6 +1037,11 @@ namespace
         glm::vec4  giGridOrigin; // xyz = probe grid origin, w = spacing
         glm::vec4  giGridCounts; // xyz = probe counts, w = probesPerRow
         glm::vec4  ssrParams;    // x = SSR gate, y = intensity, z = max roughness
+        // Local (point/spot) shadow atlas: per-layer light view-proj (D3D clip
+        // pre-applied), x = 1 / atlas size. Appended last — the cbuffer is
+        // memcpy'd whole and the HLSL PerFrame block mirrors this order.
+        glm::mat4  localShadowVP[16];
+        glm::vec4  localShadowParams;
     };
 
     struct SkyCB {
@@ -1201,7 +1266,8 @@ struct D3D12RendererImpl
     }
 
     // ── Depth ───────────────────────────────────────────────────────────────
-    ComPtr<ID3D12DescriptorHeap> dsvHeap; // [0] = scene depth, [1..kCsmCascades] = shadow cascade slices
+    ComPtr<ID3D12DescriptorHeap> dsvHeap; // [0] = scene depth, [1..kCsmCascades] = shadow cascade slices,
+                                          // [1+kCsmCascades ..] = local shadow atlas layers
     ComPtr<ID3D12Resource>       depthBuffer;
     UINT                         dsvDescSize = 0;
 
@@ -1238,7 +1304,8 @@ struct D3D12RendererImpl
     // material t12): R32_FLOAT over the R32_TYPELESS resource, all slices.
     // `res == nullptr` writes a null view of the same DIMENSION — the root
     // tables cover the slot unconditionally and the shader declares an array.
-    void writeShadowArraySrv(ID3D12Resource* res, D3D12_CPU_DESCRIPTOR_HANDLE h) const
+    void writeShadowArraySrv(ID3D12Resource* res, D3D12_CPU_DESCRIPTOR_HANDLE h,
+                             int slices = kCsmCascades) const
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC svd{};
         svd.Format                         = DXGI_FORMAT_R32_FLOAT;
@@ -1246,8 +1313,59 @@ struct D3D12RendererImpl
         svd.Shader4ComponentMapping        = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         svd.Texture2DArray.MipLevels       = 1;
         svd.Texture2DArray.FirstArraySlice = 0;
-        svd.Texture2DArray.ArraySize       = kCsmCascades;
+        svd.Texture2DArray.ArraySize       = static_cast<UINT>(slices);
         device->CreateShaderResourceView(res, &svd, h);
+    }
+
+    // ── Local (point/spot) shadow atlas ─────────────────────────────────────
+    // Same depth-array pattern as the cascades, independent of the directional
+    // light: ShadowData::kMaxLocalShadowLayers layers (spot = 1, point = 6
+    // cube faces), a DSV per layer (dsvHeap[1 + kCsmCascades + v]), one array
+    // SRV in sceneSrvHeap slot k_localShadowSlot (t17) and the material heap's
+    // k_matLocalShadowSlot (heLocalShadow, t13). Fixed 1024² per view like
+    // Metal/GL/D3D11 — not part of the project ShadowSettings, built once.
+    static constexpr int         kLocalShadowLayers = ShadowData::kMaxLocalShadowLayers;
+    static constexpr int         kLocalShadowSize   = 1024;
+    ComPtr<ID3D12Resource>       localShadowDepth;
+    D3D12_RESOURCE_STATES        localShadowState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    D3D12_CPU_DESCRIPTOR_HANDLE localShadowDsv(int layer) const
+    {
+        return dsvHandle(1 + static_cast<UINT>(kCsmCascades) + static_cast<UINT>(layer));
+    }
+
+    bool createLocalShadowArray()
+    {
+        localShadowDepth.Reset();
+        localShadowState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC sr{};
+        sr.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        sr.Width            = static_cast<UINT64>(kLocalShadowSize);
+        sr.Height           = static_cast<UINT>(kLocalShadowSize);
+        sr.DepthOrArraySize = static_cast<UINT16>(kLocalShadowLayers);
+        sr.MipLevels        = 1;
+        sr.Format           = DXGI_FORMAT_R32_TYPELESS;
+        sr.SampleDesc.Count = 1;
+        sr.Flags            = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        D3D12_CLEAR_VALUE cv{}; cv.Format = DXGI_FORMAT_D32_FLOAT; cv.DepthStencil.Depth = 1.0f;
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &sr,
+                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&localShadowDepth))))
+        {
+            HE_LOG_ERROR(RHI, "D3D12Renderer: local shadow atlas %dx%dx%d creation failed",
+                         kLocalShadowSize, kLocalShadowSize, kLocalShadowLayers);
+            return false;
+        }
+        for (int v = 0; v < kLocalShadowLayers; ++v)
+        {
+            D3D12_DEPTH_STENCIL_VIEW_DESC dvd{};
+            dvd.Format                         = DXGI_FORMAT_D32_FLOAT;
+            dvd.ViewDimension                  = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+            dvd.Texture2DArray.FirstArraySlice = static_cast<UINT>(v);
+            dvd.Texture2DArray.ArraySize       = 1;
+            device->CreateDepthStencilView(localShadowDepth.Get(), &dvd, localShadowDsv(v));
+        }
+        return true;
     }
 
     // (Re)creates the cascade depth array at `shadowSize` (initial build from
@@ -2177,8 +2295,9 @@ struct D3D12RendererImpl
     HE::MaterialShaderLibrary m_matShaderLib;
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_materialPSOs; // key = hash^hdr^transparent
     ComPtr<ID3D12RootSignature>  m_matRootSig;
-    ComPtr<ID3D12DescriptorHeap> m_matSrvHeap;   // [0..4] null RGBA8 (heTex0 + heTexP0..3), [5..6] GI masks, [7] heCsm
+    ComPtr<ID3D12DescriptorHeap> m_matSrvHeap;   // [0..4] null RGBA8 (heTex0 + heTexP0..3), [5..6] GI masks, [7] heCsm, [8] heLocalShadow
     static constexpr UINT        k_matCsmSlot = 7; // heCsm (t12): the cascade shadow array
+    static constexpr UINT        k_matLocalShadowSlot = 8; // heLocalShadow (t13): the local (point/spot) atlas
     ComPtr<ID3D12Resource>       m_matLightCB[k_frameCount];   uint8_t* m_matLightPtr[k_frameCount]{}; // HeLighting (sizeof(Lighting), 256-aligned)
     ComPtr<ID3D12Resource>       m_matObjRing[k_frameCount];   uint8_t* m_matObjPtr[k_frameCount]{};   // U ring (176 B/slot)
     ComPtr<ID3D12Resource>       m_matParamRing[k_frameCount]; uint8_t* m_matParamPtr[k_frameCount]{}; // HeParams ring (256 B/slot)
@@ -2454,7 +2573,10 @@ struct D3D12RendererImpl
     // [k_sceneStaticSrvs ..] hold one base-color SRV per uploaded mesh, bound
     // per draw as the t1 table (base slot follows the static region — nothing
     // outside this constant hardcodes the region size).
-    static constexpr UINT k_sceneStaticSrvs = 8;   // slots [0..7] above (7 = per-pixel local-light mask, t7)
+    // Slot 8 = the local (point/spot) shadow atlas array (t17), appended so
+    // the slot numbers above stay where they were.
+    static constexpr UINT k_localShadowSlot = 8;
+    static constexpr UINT k_sceneStaticSrvs = 9;   // slots [0..8] above (7 = per-pixel local-light mask, t7)
     static constexpr UINT k_albedoNullSlot  = 3;   // t1 fallback for untextured draws
     static constexpr UINT k_maxMeshTextures = 1024;
     // Decal region, APPENDED after the mesh textures so the static region's slot
@@ -2967,7 +3089,7 @@ struct D3D12RendererImpl
     void createDepth(int w, int h)
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
-        hd.NumDescriptors = 1 + kCsmCascades; // [0] scene depth, [1..] shadow cascade slices
+        hd.NumDescriptors = 1 + kCsmCascades + kLocalShadowLayers; // [0] scene depth, [1..] cascades, then atlas layers
         hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
         device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&dsvHeap));
         dsvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
@@ -2999,6 +3121,10 @@ struct D3D12RendererImpl
 
         // ── Cascade shadow-map array (R32_TYPELESS: DSV per slice + array SRV) ─
         createShadowArray();
+        // ── Local (point/spot) shadow atlas (same pattern, 16 layers) ──────────
+        // Its SRVs are written by the heap builders (createPipeline /
+        // createMaterialPipeline), which run after this.
+        createLocalShadowArray();
     }
 
     bool createUIPipeline()
@@ -3229,7 +3355,7 @@ struct D3D12RendererImpl
         // Both ranges point into the same descriptor table (sceneSrvHeap).
         // Layout of sceneSrvHeap: [0]=shadow(t0), [1]=AO-blur(t2), [2]=white(t2 fallback).
         // Since t2 is at heap slot 1, we set OffsetInDescriptorsFromTableStart=1 for range1.
-        D3D12_DESCRIPTOR_RANGE srvRanges[3]{};
+        D3D12_DESCRIPTOR_RANGE srvRanges[4]{};
         srvRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         srvRanges[0].NumDescriptors                    = 1;
         srvRanges[0].BaseShaderRegister                = 0; // t0
@@ -3248,6 +3374,15 @@ struct D3D12RendererImpl
         srvRanges[2].BaseShaderRegister                = 4; // t4..t7
         srvRanges[2].RegisterSpace                     = 0;
         srvRanges[2].OffsetInDescriptorsFromTableStart = 4; // heap slots 4..7
+        // Local (point/spot) shadow atlas (t17) — static heap slot 8, part of
+        // the same table so no root-argument site needs a new SetGraphicsRoot-
+        // DescriptorTable. Null array view until the atlas exists; the shader
+        // gates on uLightParams.y = -1 when it wasn't rendered.
+        srvRanges[3].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRanges[3].NumDescriptors                    = 1;
+        srvRanges[3].BaseShaderRegister                = 17; // t17
+        srvRanges[3].RegisterSpace                     = 0;
+        srvRanges[3].OffsetInDescriptorsFromTableStart = k_localShadowSlot;
 
         // Per-draw base-color table (t1): its own single-descriptor table so the base can be
         // pointed at each mesh's slot (or the null fallback) independently of the shadow/AO table.
@@ -3277,7 +3412,7 @@ struct D3D12RendererImpl
         params[1].Descriptor       = { 1, 0 }; // b1
         params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[2].DescriptorTable.NumDescriptorRanges = 3; // t0 + t2 + t4..t6 (GI)
+        params[2].DescriptorTable.NumDescriptorRanges = 4; // t0 + t2 + t4..t7 (GI) + t17 (local atlas)
         params[2].DescriptorTable.pDescriptorRanges   = srvRanges;
         params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
         params[3].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -3388,6 +3523,10 @@ struct D3D12RendererImpl
             giNull(5, DXGI_FORMAT_R16G16B16A16_FLOAT); // DDGI irradiance
             giNull(6, DXGI_FORMAT_R16G16_FLOAT);       // DDGI visibility
             giNull(7, DXGI_FORMAT_R16G16B16A16_FLOAT); // per-pixel local-light mask
+            // Slot 8: the local shadow atlas array (t17) — createDepth() built
+            // it before this heap existed (null ARRAY view if it failed).
+            writeShadowArraySrv(localShadowDepth.Get(), sceneSrvCpu(k_localShadowSlot),
+                                kLocalShadowLayers);
             // Decal region: the two scene-depth SRVs (t15 of the decal pass).
             // createDepth() already ran and could not fill its slot (no heap yet);
             // createViewportRT() may run later and fills its own then.
@@ -6471,7 +6610,7 @@ struct D3D12RendererImpl
         // Root signature = scene root sig + an extra root CBV at param[3] for b2 (bones).
         // Params [0..2] and [4] (the t1 base-color table) match the scene root sig so the
         // shared PS works; param[3] (bones) is the skinned-only addition.
-        D3D12_DESCRIPTOR_RANGE srvRanges[3]{};
+        D3D12_DESCRIPTOR_RANGE srvRanges[4]{};
         srvRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         srvRanges[0].NumDescriptors                    = 1;
         srvRanges[0].BaseShaderRegister                = 0; // t0
@@ -6490,6 +6629,13 @@ struct D3D12RendererImpl
         srvRanges[2].BaseShaderRegister                = 4; // t4..t7
         srvRanges[2].RegisterSpace                     = 0;
         srvRanges[2].OffsetInDescriptorsFromTableStart = 4;
+        // Local shadow atlas (t17) — same reason as t4..t7 and t16: the shared
+        // PS names it, so this root sig must cover it (heap slot 8).
+        srvRanges[3].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        srvRanges[3].NumDescriptors                    = 1;
+        srvRanges[3].BaseShaderRegister                = 17; // t17
+        srvRanges[3].RegisterSpace                     = 0;
+        srvRanges[3].OffsetInDescriptorsFromTableStart = k_localShadowSlot;
 
         // Per-draw base-color table (t1) — matches the scene root sig's param[3].
         D3D12_DESCRIPTOR_RANGE albedoRange{};
@@ -6519,7 +6665,7 @@ struct D3D12RendererImpl
         params[1].Descriptor       = { 1, 0 }; // b1 per-frame
         params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         params[2].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[2].DescriptorTable.NumDescriptorRanges = 3;
+        params[2].DescriptorTable.NumDescriptorRanges = 4; // t0 + t2 + t4..t7 + t17
         params[2].DescriptorTable.pDescriptorRanges   = srvRanges;
         params[2].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
         params[3].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -6536,10 +6682,13 @@ struct D3D12RendererImpl
         params[5].DescriptorTable.pDescriptorRanges   = &ssrRange;
         params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
-        // Same static samplers as the scene root sig: s0 shadow linear-clamp, s1 AO point-clamp,
-        // s2 base-color linear-wrap, s3 GI linear-clamp. The shared PS references all four.
+        // Same static samplers as the scene root sig: s0 shadow POINT-clamp (the
+        // PCF taps of both depth arrays must read single texels — this was
+        // linear until the local atlas port, so skinned meshes compared against
+        // interpolated cascade depth), s1 AO point-clamp, s2 base-color
+        // linear-wrap, s3 GI linear-clamp. The shared PS references all four.
         D3D12_STATIC_SAMPLER_DESC samplers[4]{};
-        samplers[0].Filter         = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samplers[0].Filter         = D3D12_FILTER_MIN_MAG_MIP_POINT;
         samplers[0].AddressU = samplers[0].AddressV = samplers[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
         samplers[0].ShaderRegister = 0;
         samplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
@@ -6754,8 +6903,11 @@ void D3D12RendererImpl::createMaterialResources()
     // custom-vertex UBOs. heCsmShadow() samples t12 behind csmSplits.w > 0: the
     // slot (k_matCsmSlot) holds the cascade shadow array — the SAME array the
     // built-in scene shader reads at t0 — so graph materials fall back to CSM
-    // when the GI masks are absent, exactly like GL/Metal/D3D11.
-    D3D12_DESCRIPTOR_RANGE texRanges[4]{};
+    // when the GI masks are absent, exactly like GL/Metal/D3D11. t13 (heLocalShadow,
+    // slot k_matLocalShadowSlot) is the local (point/spot) shadow atlas the
+    // built-in shader reads at t17; heLocalShadowFactor() samples it behind
+    // lightParams[i].y > 0.
+    D3D12_DESCRIPTOR_RANGE texRanges[5]{};
     texRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     texRanges[0].NumDescriptors                    = 1;
     texRanges[0].BaseShaderRegister                = 2; // t2
@@ -6776,20 +6928,26 @@ void D3D12RendererImpl::createMaterialResources()
     texRanges[3].BaseShaderRegister                = 12; // t12 (heCsm cascade array)
     texRanges[3].RegisterSpace                     = 0;
     texRanges[3].OffsetInDescriptorsFromTableStart = 7; // heap slot 7
+    texRanges[4].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    texRanges[4].NumDescriptors                    = 1;
+    texRanges[4].BaseShaderRegister                = 13; // t13 (heLocalShadow atlas)
+    texRanges[4].RegisterSpace                     = 0;
+    texRanges[4].OffsetInDescriptorsFromTableStart = k_matLocalShadowSlot; // heap slot 8
     params[5].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[5].DescriptorTable.NumDescriptorRanges = 4;
+    params[5].DescriptorTable.NumDescriptorRanges = 5;
     params[5].DescriptorTable.pDescriptorRanges   = texRanges;
     params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
 
     // s2 + s4..s7 linear-wrap (tiling material textures); s10..s11 linear-clamp
-    // (screen-space GI masks must not wrap at the viewport edge); s12 POINT-clamp
-    // (heCsmShadow's PCF taps compare against single texels of the cascade
-    // array, the same sampler the built-in scene shader has on s0).
-    D3D12_STATIC_SAMPLER_DESC samp[8]{};
-    const UINT sregs[8] = { 2, 4, 5, 6, 7, 10, 11, 12 };
-    for (int i = 0; i < 8; ++i)
+    // (screen-space GI masks must not wrap at the viewport edge); s12 + s13
+    // POINT-clamp (heCsmShadow's / heLocalShadowFactor's PCF taps compare
+    // against single texels of the depth arrays, the same sampler the
+    // built-in scene shader has on s0).
+    D3D12_STATIC_SAMPLER_DESC samp[9]{};
+    const UINT sregs[9] = { 2, 4, 5, 6, 7, 10, 11, 12, 13 };
+    for (int i = 0; i < 9; ++i)
     {
-        samp[i].Filter         = (sregs[i] == 12) ? D3D12_FILTER_MIN_MAG_MIP_POINT
+        samp[i].Filter         = (sregs[i] >= 12) ? D3D12_FILTER_MIN_MAG_MIP_POINT
                                                   : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
         samp[i].AddressU = samp[i].AddressV = samp[i].AddressW =
             (i < 5) ? D3D12_TEXTURE_ADDRESS_MODE_WRAP : D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -6801,7 +6959,7 @@ void D3D12RendererImpl::createMaterialResources()
     D3D12_ROOT_SIGNATURE_DESC rsd{};
     rsd.NumParameters     = 6;
     rsd.pParameters       = params;
-    rsd.NumStaticSamplers = 8;
+    rsd.NumStaticSamplers = 9;
     rsd.pStaticSamplers   = samp;
     rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
     ComPtr<ID3DBlob> sig, err;
@@ -6821,7 +6979,7 @@ void D3D12RendererImpl::createMaterialResources()
     // the bound descriptor heap to this one and restores sceneSrvHeap afterwards.
     {
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
-        hd.NumDescriptors = 8; // [0..4] heTex0 + heTexP0..3, [5..6] GI masks (t10/t11), [7] heCsm (t12)
+        hd.NumDescriptors = 9; // [0..4] heTex0 + heTexP0..3, [5..6] GI masks (t10/t11), [7] heCsm (t12), [8] heLocalShadow (t13)
         hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_matSrvHeap))))
@@ -6853,7 +7011,11 @@ void D3D12RendererImpl::createMaterialResources()
         // swap rewrites the slot from createShadowArray(). A null view of the
         // same DIMENSION when the array failed — the preamble declares a
         // sampler2DArray, and csmSplits.w stays 0 then (never sampled).
-        writeShadowArraySrv(shadowDepth.Get(), h);
+        writeShadowArraySrv(shadowDepth.Get(), h); h.ptr += inc;
+        // Slot 8 (k_matLocalShadowSlot): the local (point/spot) shadow atlas for
+        // heLocalShadow (t13) — built once in createDepth(), never resized.
+        // Same null-array fallback; lightParams[i].y stays 0 then.
+        writeShadowArraySrv(localShadowDepth.Get(), h, kLocalShadowLayers);
     }
 
     // Per-frame rings: HeLighting (once/frame) + U ring + HeParams ring (per draw, 256-B slots).
@@ -7577,6 +7739,7 @@ void D3D12Renderer::Shutdown()
     m_impl->transparentPSO.Reset();
     m_impl->depthPSO.Reset();
     m_impl->shadowDepth.Reset();
+    m_impl->localShadowDepth.Reset();
     m_impl->rootSig.Reset();
     // A4: node-graph material resources.
     m_impl->m_matReady = false;
@@ -7725,6 +7888,18 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     const glm::vec3 camFwd =
         -glm::normalize(glm::vec3(glm::inverse(p.m_renderWorld.camera.view)[2]));
 
+    // ── Local (point/spot) shadow atlas frame constants ─────────────────────
+    // Independent of the CSM: night scenes with only shadow-casting point
+    // lights still get their atlas. Per-layer light view-projs get the same
+    // clip fix as the cascades; unused layers stay identity (never sampled —
+    // lightParams.y gates on the extractor's layer assignment).
+    const int nLocalLayers =
+        std::clamp(csm.localLayerCount, 0, D3D12RendererImpl::kLocalShadowLayers);
+    const bool localShadows = nLocalLayers > 0 && p.localShadowDepth && p.depthPSO;
+    glm::mat4 localClip[D3D12RendererImpl::kLocalShadowLayers];
+    for (int v = 0; v < D3D12RendererImpl::kLocalShadowLayers; ++v)
+        localClip[v] = v < nLocalLayers ? HE::kD3DClipFix * csm.localViewProj[v] : glm::mat4(1.0f);
+
     // Per-frame constants for this frame slot. A lambda because the GI/SSAO
     // decision is only known inside the backbuffer pass — the mapped CB is
     // REWRITTEN there with the final giActive/aoActive flags. The GPU reads it
@@ -7742,9 +7917,16 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             f.lightPos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
             f.lightDir[i]    = glm::vec4(l.direction, l.spotAngleCos);
             f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
-            f.lightParams[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+            // y = the light's base layer in the local shadow atlas, -1 = no
+            // local shadow (built-in convention, same as Metal/GL/D3D11).
+            f.lightParams[i] = glm::vec4(l.range,
+                                         localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
+                                         0.0f, 0.0f);
         }
         for (int c = 0; c < D3D12RendererImpl::kCsmCascades; ++c) f.cascadeVP[c] = cascadeClip[c];
+        for (int v = 0; v < D3D12RendererImpl::kLocalShadowLayers; ++v) f.localShadowVP[v] = localClip[v];
+        f.localShadowParams = glm::vec4(1.0f / static_cast<float>(D3D12RendererImpl::kLocalShadowSize),
+                                        localShadows ? 1.0f : 0.0f, 0.0f, 0.0f);
         f.cascadeSplits = cascadeSplits;
         f.cameraFwd     = glm::vec4(camFwd, 1.0f / static_cast<float>(std::max(p.shadowSize, 1)));
         f.shadowBias    = glm::vec4(p.shadowSettings.slopeBias, p.shadowSettings.minBias, 0.0f, 0.0f);
@@ -7799,10 +7981,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         lit.camPos[1] = p.m_renderWorld.camera.position.y;
         lit.camPos[2] = p.m_renderWorld.camera.position.z;
         // Full light window for heLitP() — same first-8 order as the built-in
-        // shaders. Shared fill (HE::FillMaterialLightWindow); D3D12 has no local
-        // (point/spot) shadow atlas yet, so it passes false and lightParams[i].y
-        // stays 0 = "casts no local shadow".
-        HE::FillMaterialLightWindow(p.m_renderWorld, lit, /*localShadowsActive=*/false);
+        // shaders. Shared fill (HE::FillMaterialLightWindow); with the local
+        // (point/spot) atlas rendered this frame, lightParams[i].y carries the
+        // light's base layer + 1 (0 = "casts no local shadow").
+        HE::FillMaterialLightWindow(p.m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        // Local atlas view-projs for heLocalShadowFactor (heLocalShadow,
+        // preamble binding 13 → t13 = m_matSrvHeap slot k_matLocalShadowSlot,
+        // point sampler s13). Same pre-baked conventions as csmVP below
+        // (uvFlipY * kD3DClipFix), so the shared preamble stays convention-free.
+        if (localShadows)
+        {
+            glm::mat4 lsFlipY(1.0f);
+            lsFlipY[1][1] = -1.0f;
+            for (int v = 0; v < nLocalLayers; ++v)
+            {
+                const glm::mat4 m = lsFlipY * localClip[v];
+                std::memcpy(lit.localShadowVP[v], &m[0][0], 16 * sizeof(float));
+            }
+        }
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
@@ -7890,29 +8086,36 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // are written back to back.
         if (io.output.id == kShadowMapTarget)
         {
-            if (!shadows) return;
-            transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                       D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            // CSM needs a directional light; the local (point/spot) atlas is
+            // independent of it — night scenes with only shadow-casting point
+            // lights still render their atlas (mirrors Metal/GL/D3D11).
+            if (!shadows && !localShadows) return;
             cl->SetPipelineState(p.depthPSO.Get());
-            D3D12_VIEWPORT svp{ 0, 0, (float)p.shadowSize, (float)p.shadowSize, 0.0f, 1.0f };
-            D3D12_RECT     ssc{ 0, 0, p.shadowSize, p.shadowSize };
-            cl->RSSetViewports(1, &svp);
-            cl->RSSetScissorRects(1, &ssc);
-            const int cascades = std::clamp(csm.cascadeCount, 1, D3D12RendererImpl::kCsmCascades);
-            for (int c = 0; c < cascades; ++c)
+
+            // Depth-only render of every shadow caster into one array slice,
+            // shared by the CSM cascades and the local (point/spot) views.
+            // Cull + sort against the view's light frustum into scratch
+            // buffers; the sort groups draws by mesh so the resolve stays
+            // memoised. batchDepthCasters keeps castsShadow objects only and
+            // drops `skipEntity`'s geometry: the entity the local light itself
+            // sits on (a light authored onto a mesh entity would otherwise
+            // render that mesh at z≈0 into its own map and shadow itself out);
+            // kNoOwnerEntity (every cascade) skips nothing. Runs of one mesh
+            // are drawn one call per transform, one ring slot each — the depth
+            // VS reads b0, not the instance ring.
+            auto renderDepthLayer = [&](D3D12_CPU_DESCRIPTOR_HANDLE sdsv, int size,
+                                        const glm::mat4& viewProj, const glm::mat4& clip,
+                                        uint32_t skipEntity)
             {
-                D3D12_CPU_DESCRIPTOR_HANDLE sdsv = p.dsvHandle(1 + static_cast<UINT>(c));
+                D3D12_VIEWPORT svp{ 0, 0, (float)size, (float)size, 0.0f, 1.0f };
+                D3D12_RECT     ssc{ 0, 0, size, size };
+                cl->RSSetViewports(1, &svp);
+                cl->RSSetScissorRects(1, &ssc);
                 cl->OMSetRenderTargets(0, nullptr, FALSE, &sdsv);
                 cl->ClearDepthStencilView(sdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-                // Cull + sort against the cascade's light frustum into scratch
-                // buffers; the sort groups draws by mesh so the resolve stays
-                // memoised. batchDepthCasters keeps castsShadow objects only
-                // (kNoOwnerEntity: every cascade skips nothing). Runs of one
-                // mesh are drawn one call per transform, one ring slot each —
-                // the depth VS reads b0, not the instance ring.
-                p.m_culler.cull(p.m_renderWorld, csm.cascadeViewProj[c], p.shadowVisible);
+                p.m_culler.cull(p.m_renderWorld, viewProj, p.shadowVisible);
                 p.m_sorter.sort(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
-                RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, kNoOwnerEntity,
+                RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, skipEntity,
                                                 p.shadowBatches);
                 for (const RenderSorter::DepthBatch& b : p.shadowBatches.batches)
                 {
@@ -7926,7 +8129,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     {
                         if (drawIdx >= k_maxDraws) break;
                         PerObjectCB o{};
-                        o.mvp = cascadeClip[c] * xf[k]; o.model = xf[k];
+                        o.mvp = clip * xf[k]; o.model = xf[k];
                         if (ringPtr)
                             std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
                         cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
@@ -7935,9 +8138,30 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         ++drawIdx;
                     }
                 }
+            };
+            // One barrier over ALL subresources before each array's loop and
+            // one after — the slices are written back to back.
+            if (shadows)
+            {
+                transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                           D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                const int cascades = std::clamp(csm.cascadeCount, 1, D3D12RendererImpl::kCsmCascades);
+                for (int c = 0; c < cascades; ++c)
+                    renderDepthLayer(p.dsvHandle(1 + static_cast<UINT>(c)), p.shadowSize,
+                                     csm.cascadeViewProj[c], cascadeClip[c], kNoOwnerEntity);
+                transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
-            transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
-                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            if (localShadows)
+            {
+                transition(p.localShadowDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                           D3D12_RESOURCE_STATE_DEPTH_WRITE);
+                for (int v = 0; v < nLocalLayers; ++v)
+                    renderDepthLayer(p.localShadowDsv(v), D3D12RendererImpl::kLocalShadowSize,
+                                     csm.localViewProj[v], localClip[v], csm.localOwnerEntity[v]);
+                transition(p.localShadowDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                           D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            }
             // Restore the backbuffer RTV + scene DSV + viewport.
             auto rtv  = p.rtvHandle(p.frameIndex);
             auto dsv0 = p.dsvHandle(0);

@@ -25,9 +25,11 @@
 //     sampler2DArray, and the shadowEnabled.y cascade tint. Still MISSING from
 //     GL's version: nothing — but the two are hand-kept copies, so a change to
 //     GL's computeShadow() is NOT automatically visible here.
-//   * Point/spot shadow maps — GL's uLocalShadowMap atlas + uLocalShadowVP +
-//     `localShadowFactor()`. Local lights are unshadowed here unless ray-traced
-//     GI is active and writes the uGILocal mask.
+//   * (CLOSED, Thema 35 / Schritt 7) Point/spot shadow maps — GL's
+//     uLocalShadowMap atlas + uLocalShadowVP + `localShadowFactor()` are here
+//     as `uLocalShadowMap` (binding 9) / `localShadowVP` / `localShadowFactor()`,
+//     min-combined with the uGILocal mask when GI is active. Hand-kept copy
+//     like the cascades above.
 //   * uSkyEnv — the baked skyColor cubemap GL samples for ambient diffuse and
 //     specular. This file evaluates skyColor() analytically per fragment.
 //   * uAmbient — the flat ambient fill (never-black floor / overcast term).
@@ -89,12 +91,22 @@ layout(set = 0, binding = 0) uniform Frame {
     // uSSRFwd holds it, y = intensity, z = max roughness, w = 0. Same four lanes
     // heLitP reads out of Lighting::ssr — must match FrameUBOData exactly.
     vec4  ssrParams;
+    // Local (point/spot) shadow atlas — must match FrameUBOData exactly: one
+    // light view-proj per atlas layer (kVulkanClipFix pre-applied), 16 layers
+    // = spot 1 / point 6 cube faces. lightParams[i].y is the light's base
+    // layer (-1 = casts no local shadow). localShadowParams.x = 1 / atlas size.
+    mat4  localShadowVP[16];
+    vec4  localShadowParams;
 } uf;
 
 // Directional CSM depth array — one layer per cascade, nearest + clamp-to-
 // border(white) sampler: a PCF tap must read ONE texel's depth, and a tap
 // that leaves the map reads "lit".
 layout(set = 0, binding = 1) uniform sampler2DArray uShadowMap;
+// Local (point/spot) shadow atlas — 16-layer depth array, same nearest +
+// clamp-to-border(white) sampler as the cascades. Binding 9: next free slot
+// after the forward-SSR result on 8.
+layout(set = 0, binding = 9) uniform sampler2DArray uLocalShadowMap;
 
 // Per-draw PBR material scalars uploaded via vkCmdUpdateBuffer before each draw.
 layout(set = 0, binding = 2) uniform MatUBO {
@@ -319,6 +331,55 @@ float shadowFactor(vec3 worldPos, vec3 N, vec3 L, out int outCascade)
     return vis / 9.0;
 }
 
+// Point/spot shadow lookup in the local shadow atlas — the GLSL twin of Metal's
+// localShadowFactor() and the D3D11/D3D12 function of the same name. Spot
+// lights project into their single perspective layer; point lights first pick
+// the cube face from the fragment→light vector's major axis (faces stored as 6
+// consecutive array layers, +X −X +Y −Y +Z −Z), then project into that face's
+// layer. Same 3×3 PCF and normal-offset bias family as the directional CSM
+// above; the receiver bias is fixed (the project ShadowSettings pair tunes the
+// cascades only). Same UV convention as shadowFactor(): kVulkanClipFix is
+// baked into localShadowVP, so uv = p.xy*0.5+0.5 with no further flip.
+float localShadowFactor(int i, vec3 worldPos, vec3 N)
+{
+    // localShadowParams.y = atlas rendered this frame. First gate on purpose:
+    // a zero-initialised Frame fill has lightParams.y = 0, which would
+    // otherwise read as "layer 0" and sample a never-rendered layer.
+    if (uf.localShadowParams.y < 0.5) return 1.0;
+    int base = int(uf.lightParams[i].y);
+    if (base < 0) return 1.0;
+    int layer = base;
+    if (int(uf.lightPos[i].w) == 1) // point: major-axis cube-face pick
+    {
+        vec3 d = worldPos - uf.lightPos[i].xyz;
+        vec3 a = abs(d);
+        int face;
+        if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
+        else if (a.y >= a.z)               face = (d.y > 0.0) ? 2 : 3;
+        else                               face = (d.z > 0.0) ? 4 : 5;
+        layer = base + face;
+    }
+    vec3  toL = normalize(uf.lightPos[i].xyz - worldPos);
+    float ndl = clamp(dot(N, toL), 0.0, 1.0);
+    vec4 lp = uf.localShadowVP[layer] * vec4(worldPos + N * 0.02, 1.0);
+    if (lp.w <= 0.0) return 1.0;           // behind the light's near plane
+    vec3 p  = lp.xyz / lp.w;               // z in [0,1] (kVulkanClipFix)
+    vec2 uv = p.xy * 0.5 + 0.5;
+    float texel = uf.localShadowParams.x;  // 1 / atlas size
+    if (p.z > 1.0 || p.z < 0.0
+        || any(lessThan(uv, vec2(texel))) || any(greaterThan(uv, vec2(1.0 - texel))))
+        return 1.0;
+    float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
+    float vis = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x)
+        {
+            float cd = texture(uLocalShadowMap, vec3(uv + vec2(x, y) * texel, float(layer))).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    return vis / 9.0;
+}
+
 void main()
 {
     // A base-color texture (flagged by roughPad.z) replaces the flat colour, mirroring
@@ -414,12 +475,14 @@ void main()
         }
         else
         {
-            // Local (point/spot) lights: ray-traced hard shadows when GI is
-            // active — one visibility channel per light (first 4), written by
-            // the shadow kernel from unjittered secondary rays (they had no
-            // shadowing at all before — shone straight through geometry).
+            // Local (point/spot) lights: shadow-mapped when the light casts
+            // shadows (lightParams.y = atlas base layer, set by the extractor).
+            // When GI is active the ray-traced hard mask (first 4 local lights)
+            // is combined in via min() — the map covers lights the mask can't.
+            // Mirrors Metal/GL/D3D11/D3D12.
+            sh = localShadowFactor(i, vWorldPos, N);
             if (uf.giParams.y > 0.5 && giLocalIdx < 4)
-                sh = texture(uGILocal, gl_FragCoord.xy / uf.viewport.xy)[giLocalIdx];
+                sh = min(sh, texture(uGILocal, gl_FragCoord.xy / uf.viewport.xy)[giLocalIdx]);
             giLocalIdx++;
         }
         // "Receives Shadow" off: the object is lit as if nothing occluded it.

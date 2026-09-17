@@ -171,6 +171,30 @@ private:
 	bool      m_shadowRenderedThisFrame = false;
 	bool      m_shadowLayoutValid = false; // all layers left UNDEFINED at least once (see EncodeShadowMap)
 
+	// ── Local (point/spot) shadow atlas ─────────────────────────────────────
+	// Same depth-array pattern as the cascades, independent of the directional
+	// light: ShadowData::kMaxLocalShadowLayers layers (spot = 1, point = 6
+	// cube faces), a per-layer view + framebuffer for the depth pass (through
+	// the shared m_shadowPass / m_shadowPipeline / m_shadowSampler) and one
+	// 2D_ARRAY view the scene pass samples through binding 9 (graph materials:
+	// heLocalShadow, binding 13). Fixed 1024² per view like Metal/GL/D3D —
+	// not part of the project ShadowSettings, built once with the cascades.
+	static constexpr int      kLocalShadowLayers = 16; // == ShadowData::kMaxLocalShadowLayers
+	static constexpr uint32_t kLocalShadowSize   = 1024;
+	void createLocalShadowImages();
+	void destroyLocalShadowImages();
+	VkImage        m_localShadowImage  = VK_NULL_HANDLE;
+	VkDeviceMemory m_localShadowMemory = VK_NULL_HANDLE;
+	VkImageView    m_localShadowView   = VK_NULL_HANDLE;           // 2D_ARRAY, all layers (sampled)
+	VkImageView    m_localShadowLayerView[kLocalShadowLayers] = {}; // 2D, one layer (depth target)
+	VkFramebuffer  m_localShadowFB[kLocalShadowLayers]        = {}; // one per layer
+	// Per-layer light clip transforms DrawScene uploads into the Frame UBO —
+	// filled by EncodeShadowMap from the same extract the layers were rendered
+	// with (same reason as m_cascadeClip). Count = layers rendered this frame.
+	glm::mat4 m_localShadowClip[kLocalShadowLayers] = {};
+	int       m_localShadowLayerCount = 0;   // 0 = the atlas was not rendered this frame
+	bool      m_localShadowLayoutValid = false; // all layers left UNDEFINED at least once
+
 	// ── Screen-space decals (docs/decals-cross-backend-plan.md §2.1 "Weg 2") ─
 	// Vulkan has no G-buffer, so decals are NOT composited into a base-colour
 	// attachment like on Metal/GL — they are blended into the lit forward colour
