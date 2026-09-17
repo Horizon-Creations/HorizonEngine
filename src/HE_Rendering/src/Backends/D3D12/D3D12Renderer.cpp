@@ -13,6 +13,7 @@
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/D3D11/Vulkan/Metal-SW)
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/GL)
+#include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
 // ── Cross-backend renderer helpers (audit 1a) ────────────────────────────────
 // Each of these replaced a private copy that every backend carried; the copies
 // were byte-identical by contract (the GPU reads the packed bytes positionally),
@@ -2032,7 +2033,7 @@ struct D3D12RendererImpl
     // ── A4: node-graph material PSOs ─────────────────────────────────────────
     // Graph materials (Material-Node editor) render through per-material PSOs the engine
     // builds at draw time from MaterialShaderLibrary HLSL (SPIRV-Cross). They share ONE
-    // root signature + a dedicated 5-slot white SRV heap, and per frame in flight a
+    // root signature + a ring of per-draw SRV blocks, and per frame in flight a
     // HeLighting CB (filled once/frame) + U ring + HeParams ring (one 256-B slot per draw).
     // Compiled in regardless of HE_HAVE_SHADERC: without the cross-compiler the shaders
     // come from the pak's precompiled variants (MaterialShaderVariant), and a material
@@ -2043,7 +2044,79 @@ struct D3D12RendererImpl
     HE::MaterialShaderLibrary m_matShaderLib;
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_materialPSOs; // key = hash^hdr^transparent
     ComPtr<ID3D12RootSignature>  m_matRootSig;
-    ComPtr<ID3D12DescriptorHeap> m_matSrvHeap;   // 5 slots, all null RGBA8 (heTex0 + heTexP0..3)
+    // Shader-visible ring of per-DrawCall SRV blocks — k_matSrvPerDraw consecutive slots
+    // in the root table's order: [0] heTex0 (t2), [1..4] heTexP0..3 (t4..t7), [5..6] the
+    // GI masks (t10/t11), [7] heCsm (t12, null Texture2DArray). k_frameCount × k_matMaxDraws
+    // blocks: a shader-visible heap must never be rewritten under a frame in flight, so
+    // each frame slot owns its own region and the frame fence in Render() is what makes
+    // reuse safe — the same argument as the U/HeParams rings.
+    ComPtr<ID3D12DescriptorHeap> m_matSrvHeap;
+    // CPU-only template block (never bound; a shader-visible heap cannot be a copy SOURCE):
+    // the defaults every draw block starts from — null RGBA8 in [0..4], the GI masks in
+    // [5..6] (rewritten at GI-target creation), the null array view in [7]. One
+    // CopyDescriptorsSimple per draw, then the draw's real textures overwrite [0..4].
+    ComPtr<ID3D12DescriptorHeap> m_matSrvStaging;
+    UINT                         m_matSrvInc = 0;
+    UINT                         m_matSrvCursor[k_frameCount] = {}; // per-frame block cursor (one block per DrawCall)
+    static constexpr UINT        k_matSrvPerDraw = 8;
+    D3D12_CPU_DESCRIPTOR_HANDLE matSrvCpu(UINT slot) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(slot) * m_matSrvInc;
+        return h;
+    }
+    D3D12_GPU_DESCRIPTOR_HANDLE matSrvGpu(UINT slot) const
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetGPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<UINT64>(slot) * m_matSrvInc;
+        return h;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE matSrvStagingCpu(UINT slot) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvStaging->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(slot) * m_matSrvInc;
+        return h;
+    }
+    // A Texture2D view over a texture uploaded by uploadTexture2D: its own format
+    // (the _SRGB twin included) and its whole mip chain.
+    void srvForTexture(ID3D12Resource* res, D3D12_CPU_DESCRIPTOR_HANDLE h)
+    {
+        const D3D12_RESOURCE_DESC rd = res->GetDesc();
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format                  = rd.Format;
+        sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels     = rd.MipLevels;
+        device->CreateShaderResourceView(res, &sv, h);
+    }
+    // Node-graph project textures (MaterialAsset::graphTextureIds/Paths → heTexP0..3, the
+    // Texture Sample nodes), keyed exactly like GL's ResolveGraphTexture: "hi:lo" for a
+    // packed UUID, the path for a loose editor asset. The ComPtr keeps the DEFAULT
+    // resource alive; a miss is cached as null (unloadable → the null view, no per-frame
+    // retry). InvalidateTexture retires the UUID key past frames in flight; a path-keyed
+    // loose asset is not hot-reloaded (same as GL).
+    std::unordered_map<std::string, ComPtr<ID3D12Resource>> m_graphTexCache;
+    std::vector<HE::UUID> m_pendingTexInval;
+    static std::string graphTexKey(const HE::UUID& id, const std::string& path)
+    {
+        return id != HE::UUID{} ? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
+    }
+    // resolveTextureRef LOADS a loose asset synchronously, which can move every
+    // ContentManager pointer the caller holds — callers snapshot the slot list first and
+    // re-fetch the material afterwards.
+    ID3D12Resource* resolveGraphTexture(ID3D12GraphicsCommandList* cl, const HE::UUID& id,
+                                        const std::string& path, ContentManager* cm)
+    {
+        const std::string key = graphTexKey(id, path);
+        if (key.empty() || !cm || !cl) return nullptr;
+        if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+            return it->second.Get();
+        ComPtr<ID3D12Resource> res;
+        uploadTexture2D(cl, cm->resolveTextureRef(id, path), res); // null stays null
+        ID3D12Resource* raw = res.Get();
+        m_graphTexCache.emplace(key, std::move(res));
+        return raw;
+    }
     ComPtr<ID3D12Resource>       m_matLightCB[k_frameCount];   uint8_t* m_matLightPtr[k_frameCount]{}; // HeLighting (sizeof(Lighting), 256-aligned)
     ComPtr<ID3D12Resource>       m_matObjRing[k_frameCount];   uint8_t* m_matObjPtr[k_frameCount]{};   // U ring (176 B/slot)
     ComPtr<ID3D12Resource>       m_matParamRing[k_frameCount]; uint8_t* m_matParamPtr[k_frameCount]{}; // HeParams ring (256 B/slot)
@@ -2429,7 +2502,27 @@ struct D3D12RendererImpl
                         ComPtr<ID3D12Resource>& outTex)
     {
         if (!cl || !sceneSrvHeap || !tex) return -1;
-        if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return -1;
+        // A recycled slot (freed by invalidation, past frames in flight) or the next fresh one.
+        if (m_freeSlots.empty() && meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures)
+            return -1; // heap full → flat
+        if (!uploadTexture2D(cl, tex, outTex)) return -1;
+
+        UINT slot;
+        if (!m_freeSlots.empty()) { slot = m_freeSlots.back(); m_freeSlots.pop_back(); }
+        else                      { slot = meshTexNextSlot++; }
+        srvForTexture(outTex.Get(), sceneSrvCpu(slot));
+        return static_cast<int>(slot);
+    }
+
+    // The upload half of allocAlbedoSlot, without a scene-heap slot: creates the DEFAULT
+    // texture (format + full mip chain from the asset), records the copies on `cl` and
+    // parks the upload buffer in meshTexUploads until the GPU is past them. Also serves
+    // the graph project textures, whose views live in the material ring instead.
+    bool uploadTexture2D(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
+                         ComPtr<ID3D12Resource>& outTex)
+    {
+        if (!cl || !tex) return false;
+        if (tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0) return false;
 
         const bool srgb = tex->srgb;
         DXGI_FORMAT fmt; bool isBlock;
@@ -2438,18 +2531,15 @@ struct D3D12RendererImpl
         case TextureFormat::RGBA8: fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
         case TextureFormat::BC7:   fmt = srgb ? DXGI_FORMAT_BC7_UNORM_SRGB      : DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
         case TextureFormat::BC3:   fmt = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB      : DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
-        default: return -1; // ASTC / unknown → D3D can't sample it
+        default: return false; // ASTC / unknown → D3D can't sample it
         }
         if (isBlock) // BC is core on FL11, but stay defensive.
         {
             D3D12_FEATURE_DATA_FORMAT_SUPPORT fs{ fmt };
             if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof(fs))) ||
                 !(fs.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D))
-                return -1;
+                return false;
         }
-        // A recycled slot (freed by invalidation, past frames in flight) or the next fresh one.
-        if (m_freeSlots.empty() && meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures)
-            return -1; // heap full → flat
 
         const UINT mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -2464,7 +2554,7 @@ struct D3D12RendererImpl
         ComPtr<ID3D12Resource> gpuTex;
         if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&gpuTex))))
-            return -1;
+            return false;
 
         // Per-subresource footprints (D3D-aligned dest row pitch) + total upload size.
         std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(mips);
@@ -2477,11 +2567,11 @@ struct D3D12RendererImpl
         // Guard the source payload holds every mip tightly (numRows × rowSize each).
         size_t need = 0;
         for (UINT s = 0; s < mips; ++s) need += static_cast<size_t>(numRows[s]) * rowSizes[s];
-        if (tex->data.size() < need) return -1; // truncated
+        if (tex->data.size() < need) return false; // truncated
 
         void* mapped = nullptr;
         ComPtr<ID3D12Resource> uploadBuf = createUploadBuffer(uploadSize, &mapped);
-        if (!uploadBuf || !mapped) return -1;
+        if (!uploadBuf || !mapped) return false;
         // Copy each mip's tightly-packed source rows into the aligned upload layout.
         size_t srcOff = 0;
         for (UINT s = 0; s < mips; ++s)
@@ -2511,19 +2601,9 @@ struct D3D12RendererImpl
         barrier12(cl, gpuTex.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
-        UINT slot;
-        if (!m_freeSlots.empty()) { slot = m_freeSlots.back(); m_freeSlots.pop_back(); }
-        else                      { slot = meshTexNextSlot++; }
-        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-        sv.Format                  = fmt;
-        sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
-        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sv.Texture2D.MipLevels     = mips;
-        device->CreateShaderResourceView(gpuTex.Get(), &sv, sceneSrvCpu(slot));
-
         meshTexUploads.emplace_back(std::move(uploadBuf), static_cast<int>(k_frameCount) + 2);
         outTex = std::move(gpuTex);
-        return static_cast<int>(slot);
+        return true;
     }
 
     // Resolve + upload a static mesh's base-color texture the first time it is drawn (needs a
@@ -2595,6 +2675,15 @@ struct D3D12RendererImpl
                 m_materialTexCache.erase(it);
             }
         m_pendingMatInval.clear();
+        // Graph project textures own no scene-heap slot (their views live in the
+        // per-frame material ring), so only the resource is retired.
+        for (const HE::UUID& id : m_pendingTexInval)
+            if (auto it = m_graphTexCache.find(graphTexKey(id, {})); it != m_graphTexCache.end())
+            {
+                retire(std::move(it->second));
+                m_graphTexCache.erase(it);
+            }
+        m_pendingTexInval.clear();
 
         for (const HE::UUID& id : m_pendingMeshInval)
         {
@@ -5531,7 +5620,7 @@ struct D3D12RendererImpl
         for (UINT s = 17; s <= 19; ++s) srvInto(giHistTex[1].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, s);
 
         // Publish the blurred mask to the shader-visible slots the scene pass
-        // (sceneSrvHeap[4], t4) and graph materials (m_matSrvHeap[5], t10)
+        // (sceneSrvHeap[4], t4) and graph materials (m_matSrvStaging[5], t10)
         // sample. giResultTex is stable between resizes, so these writes only
         // happen here — behind the waitForAllFrames above.
         if (sceneSrvHeap)
@@ -5540,16 +5629,16 @@ struct D3D12RendererImpl
             // Slot 7 = t7 (uGILocal): the per-pixel local-light visibility mask.
             srvIntoHeapSlot(giLocalMaskTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, sceneSrvCpu(7));
         }
-        if (m_matSrvHeap)
+        // Into the material TEMPLATE block (CPU-only): every graph-material draw
+        // copies it into its ring block, so the masks reach t10/t11 from the next
+        // draw on without touching a shader-visible descriptor under a frame.
+        if (m_matSrvStaging)
         {
-            const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-            D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetCPUDescriptorHandleForHeapStart();
-            h.ptr += static_cast<SIZE_T>(5) * inc; // slot 5 = t10 (heGIShadow)
-            srvIntoHeapSlot(giResultTex.Get(), DXGI_FORMAT_R16_FLOAT, h);
+            // Slot 5 = t10 (heGIShadow)
+            srvIntoHeapSlot(giResultTex.Get(), DXGI_FORMAT_R16_FLOAT, matSrvStagingCpu(5));
             // Slot 6 = t11 (heGILocal): the REAL per-pixel local-light mask
             // (giParams.z still gates sampling when GI is off this frame).
-            h.ptr += inc;
-            srvIntoHeapSlot(giLocalMaskTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, h);
+            srvIntoHeapSlot(giLocalMaskTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, matSrvStagingCpu(6));
         }
     }
 
@@ -6710,19 +6799,33 @@ void D3D12RendererImpl::createMaterialResources()
         return;
     }
 
-    // Dedicated 5-slot shader-visible SRV heap, all null RGBA8 → heTex0 + heTexP0..3 sample
-    // as (0,0,0,0) this increment. TODO A4-followup: real heTex0 (material/mesh texture) +
-    // heTexP0..3 (graph project textures). Kept separate from sceneSrvHeap so the material
-    // draw doesn't disturb the A1/A2/A3 mesh-texture slot allocator; the draw path switches
-    // the bound descriptor heap to this one and restores sceneSrvHeap afterwards.
+    // Two heaps, kept separate from sceneSrvHeap so the material draw doesn't disturb the
+    // A1/A2/A3 mesh-texture slot allocator (the draw path switches the bound heap and
+    // restores sceneSrvHeap afterwards):
+    //   m_matSrvStaging — the CPU-only 8-slot TEMPLATE: null RGBA8 in [0..4] (an empty
+    //                     heTex0/heTexP slot samples (0,0,0,0); the shader's hasTex flag
+    //                     and the graph's own defaults decide what that means), the GI
+    //                     masks in [5..6] and the null array view for heCsm in [7].
+    //   m_matSrvHeap     — the shader-visible ring of per-draw blocks the template is
+    //                     copied into, k_frameCount × k_matMaxDraws × k_matSrvPerDraw.
     {
+        m_matSrvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
-        hd.NumDescriptors = 8; // [0..4] heTex0 + heTexP0..3, [5..6] GI masks (t10/t11), [7] heCsm dummy (t12)
+        hd.NumDescriptors = k_matSrvPerDraw;
         hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; // copy source → CPU-only
+        if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_matSrvStaging))))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: A4 material SRV template heap failed");
+            m_matRootSig.Reset();
+            return;
+        }
+        hd.NumDescriptors = k_frameCount * k_matMaxDraws * k_matSrvPerDraw;
         hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_matSrvHeap))))
         {
-            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: A4 material SRV heap failed");
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: A4 material SRV ring heap failed");
+            m_matSrvStaging.Reset();
             m_matRootSig.Reset();
             return;
         }
@@ -6731,8 +6834,8 @@ void D3D12RendererImpl::createMaterialResources()
         nullSrv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
         nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         nullSrv.Texture2D.MipLevels     = 1;
-        const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        const UINT inc = m_matSrvInc;
+        D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvStaging->GetCPUDescriptorHandleForHeapStart();
         for (int i = 0; i < 5; ++i) { device->CreateShaderResourceView(nullptr, &nullSrv, h); h.ptr += inc; }
         // Slots 5..6: null GI-mask views (rewritten to the ray-traced mask + a
         // white local mask when the GI targets are created; heLitP additionally
@@ -7495,6 +7598,9 @@ void D3D12Renderer::Shutdown()
     m_impl->m_matHlslLogged = false;
     m_impl->m_materialPSOs.clear();
     m_impl->m_matSrvHeap.Reset();
+    m_impl->m_matSrvStaging.Reset();
+    m_impl->m_graphTexCache.clear(); // device is idle here (ComPtr release)
+    m_impl->m_pendingTexInval.clear();
     m_impl->m_matRootSig.Reset();
     m_impl->m_matShaderLib.clear();
     for (UINT i = 0; i < k_frameCount; ++i)
@@ -7640,9 +7746,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     };
     fillPerFrame(false, p.ssaoEnabled && p.ssaoReady);
 
-    // A4: reset this frame slot's material ring/descriptor cursor once per frame.
+    // A4: reset this frame slot's material ring/descriptor cursors once per frame.
     if (p.m_matReady)
+    {
         p.m_matDrawCursor[p.frameIndex] = 0;
+        p.m_matSrvCursor[p.frameIndex]  = 0;
+    }
     // Fill the shared HeLighting CB (identical for every graph-material draw
     // this frame). A lambda because giParams.z is only known after the GI
     // passes ran (rewritten in the backbuffer branch — the GPU reads the mapped
@@ -8061,21 +8170,74 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D12);
                     ID3D12PipelineState* matPso = p.GetOrBuildMaterialPSO(matHash, matFrag, matVertBody,
                                                                           matPre, p.usingHDR, matTransp);
-                    if (matPso && p.m_matDrawCursor[p.frameIndex] < D3D12RendererImpl::k_matMaxDraws)
+                    if (matPso && p.m_matDrawCursor[p.frameIndex] < D3D12RendererImpl::k_matMaxDraws
+                        && p.m_matSrvCursor[p.frameIndex] < D3D12RendererImpl::k_matMaxDraws)
                     {
+                        // heTex0 = the material's base texture, matching the built-in
+                        // selection + hasTex flag: an override material's texture wins
+                        // (A2), else the mesh's baked texture (A1), else none. Both
+                        // resolvers upload on first use, which is why they run here and
+                        // not only in the built-in path below.
+                        if (mesh) p.ensureMeshAlbedo(cl, m, dc.meshAssetId, m_contentManager);
+                        ID3D12Resource* heTex0 = (mesh && m.albedoTex) ? m.albedoTex.Get() : nullptr;
+                        int ovrSlot = -1;
+                        if (p.resolveMaterialAlbedo(cl, dc.materialAssetId, m_contentManager, ovrSlot))
+                        {
+                            auto ovr = p.m_materialTexCache.find(dc.materialAssetId);
+                            heTex0 = (ovr != p.m_materialTexCache.end()) ? ovr->second.tex.Get() : nullptr;
+                        }
+                        const bool matTextured = heTex0 != nullptr;
+
+                        // heTexP0..3 = the graph's project textures (Texture Sample nodes),
+                        // the template's null view where a slot is empty or unloadable.
+                        // The slot list is snapshotted BEFORE any resolve: a resolve may
+                        // load, and a load can move the material asset out from under a
+                        // held pointer — which is also why `ma` below is fetched only
+                        // AFTER this block.
+                        ID3D12Resource* heTexP[HE::kMatMaxGraphTextures] = {};
+                        {
+                            HE::UUID    gIds[HE::kMatMaxGraphTextures]{};
+                            std::string gPaths[HE::kMatMaxGraphTextures];
+                            size_t nTex = 0;
+                            if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
+                            {
+                                nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
+                                    std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
+                                for (size_t i = 0; i < nTex; ++i)
+                                {
+                                    if (i < ma0->graphTextureIds.size())   gIds[i]   = ma0->graphTextureIds[i];
+                                    if (i < ma0->graphTexturePaths.size()) gPaths[i] = ma0->graphTexturePaths[i];
+                                }
+                            }
+                            for (size_t i = 0; i < nTex; ++i)
+                                heTexP[i] = p.resolveGraphTexture(cl, gIds[i], gPaths[i], m_contentManager);
+                        }
+
                         // Per-entity HeParams override wins over the material's shared params.
                         const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
                         const std::vector<float>* params =
                             !dc.paramOverride.empty() ? &dc.paramOverride
                             : (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
 
-                        // Switch to the material root sig + white SRV heap + material PSO.
+                        // This DrawCall's SRV block: the template (nulls + GI masks + heCsm
+                        // dummy), then the real heTex0 / heTexP views on top. One block per
+                        // DrawCall — every instance of it samples the same textures.
+                        const UINT blk = (p.frameIndex * D3D12RendererImpl::k_matMaxDraws
+                                          + p.m_matSrvCursor[p.frameIndex]++) * D3D12RendererImpl::k_matSrvPerDraw;
+                        p.device->CopyDescriptorsSimple(D3D12RendererImpl::k_matSrvPerDraw, p.matSrvCpu(blk),
+                                                        p.matSrvStagingCpu(0), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                        if (heTex0) p.srvForTexture(heTex0, p.matSrvCpu(blk));
+                        static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy block slots 1..4 (t4..t7)");
+                        for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
+                            if (heTexP[k]) p.srvForTexture(heTexP[k], p.matSrvCpu(blk + 1 + static_cast<UINT>(k)));
+
+                        // Switch to the material root sig + ring SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };
                         cl->SetDescriptorHeaps(1, mheaps);
                         cl->SetGraphicsRootSignature(p.m_matRootSig.Get());
                         cl->SetPipelineState(matPso);
                         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-                        cl->SetGraphicsRootDescriptorTable(5, p.m_matSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                        cl->SetGraphicsRootDescriptorTable(5, p.matSrvGpu(blk));
                         cl->IASetVertexBuffers(0, 1, &m.vbv);
                         cl->IASetIndexBuffer(&m.ibv);
 
@@ -8097,9 +8259,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             u.mvp   = viewProj * model;
                             u.model = model;
                             u.color = glm::vec4(dc.baseColor, 1.0f);
-                            // heTex0 is a null/white placeholder this increment → tell the shader
-                            // "no texture" (flags is unused by the standard vertex/fragment anyway).
-                            u.flags = glm::vec4(0.0f);
+                            u.flags = glm::vec4(matTextured ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
                             u.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
                             if (p.m_matObjPtr[p.frameIndex])
                                 std::memcpy(p.m_matObjPtr[p.frameIndex] + static_cast<size_t>(i) * D3D12RendererImpl::k_matSlot,
@@ -8980,6 +9140,14 @@ void D3D12Renderer::InvalidateMesh(const HE::UUID& meshId)
 {
     if (m_impl && meshId != HE::UUID{})
         m_impl->m_pendingMeshInval.push_back(meshId);
+}
+
+void D3D12Renderer::InvalidateTexture(const HE::UUID& textureId)
+{
+    // Same deferral — the graph-texture cache is keyed by "hi:lo" for UUIDs; the
+    // resource is retired past frames in flight like an override texture.
+    if (m_impl && textureId != HE::UUID{})
+        m_impl->m_pendingTexInval.push_back(textureId);
 }
 
 IRenderer::FrameGpuStats D3D12Renderer::GetFrameGpuStats() const
