@@ -6901,12 +6901,52 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     if (auto it = m_materialPSOs.find(key); it != m_materialPSOs.end()) return it->second.Get();
 
     using Backend = HE::MaterialShaderLibrary::Backend;
-    std::string vsSrc, psSrc;
+    UINT cflags = 0;
+#ifdef _DEBUG
+    cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    // SPIRV-Cross emits the GLSL-sourced entry point as `main` (not VSMain/PSMain).
+    ComPtr<ID3DBlob> vs, ps;
+    auto compilePair = [&](const std::string& vsSrc, const std::string& psSrc, const char* origin) -> bool {
+        ComPtr<ID3DBlob> cerr;
+        vs.Reset(); ps.Reset();
+        if (FAILED(D3DCompile(vsSrc.c_str(), vsSrc.size(), "matVS", nullptr, nullptr,
+                              "main", "vs_5_0", cflags, 0, &vs, &cerr)))
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material VS compile failed (") + origin + "): "
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        if (FAILED(D3DCompile(psSrc.c_str(), psSrc.size(), "matPS", nullptr, nullptr,
+                              "main", "ps_5_0", cflags, 0, &ps, &cerr)))
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material PS compile failed (") + origin + "): "
+                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+            return false;
+        }
+        // One-time: dump the HLSL so a Windows-GPU run can confirm the register /
+        // vertex-semantic mapping the material root signature + input layout assume.
+        if (!m_matHlslLogged)
+        {
+            m_matHlslLogged = true;
+            HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vsSrc).c_str());
+            HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + psSrc).c_str());
+        }
+        return true;
+    };
+
+    // The baked variant first. A variant that FXC rejects (a pak exported before the
+    // HLSL sampler pins of 5e52d64e, say) is not the end: fall through to the runtime
+    // cross-compile, which is what rendered that pak before variants were consumed
+    // here at all. Only when both roads are closed is the miss cached.
+    bool built = false;
     if (precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
     {
-        vsSrc = precompiled->vertex; psSrc = precompiled->fragment; // baked at export
+        built = compilePair(precompiled->vertex, precompiled->fragment, "baked variant");
+        if (!built)
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: A4 baked material variant rejected — cross-compiling instead");
     }
-    else
+    if (!built)
     {
         // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to HLSL.
         const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
@@ -6920,37 +6960,10 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
             m_materialPSOs.emplace(key, nullptr); // cache the miss — don't retry every draw
             return nullptr;
         }
-        vsSrc = vc.source; psSrc = fc.source;
+        built = compilePair(vc.source, fc.source, "cross-compiled");
     }
-
-    // One-time: dump the generated HLSL so a Windows-GPU run can confirm the register /
-    // vertex-semantic mapping the material root signature + input layout assume.
-    if (!m_matHlslLogged)
+    if (!built)
     {
-        m_matHlslLogged = true;
-        HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vsSrc).c_str());
-        HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + psSrc).c_str());
-    }
-
-    UINT cflags = 0;
-#ifdef _DEBUG
-    cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-    // SPIRV-Cross emits the GLSL-sourced entry point as `main` (not VSMain/PSMain).
-    ComPtr<ID3DBlob> vs, ps, cerr;
-    if (FAILED(D3DCompile(vsSrc.c_str(), vsSrc.size(), "matVS", nullptr, nullptr,
-                          "main", "vs_5_0", cflags, 0, &vs, &cerr)))
-    {
-        HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material VS compile failed: ")
-            + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
-        m_materialPSOs.emplace(key, nullptr);
-        return nullptr;
-    }
-    if (FAILED(D3DCompile(psSrc.c_str(), psSrc.size(), "matPS", nullptr, nullptr,
-                          "main", "ps_5_0", cflags, 0, &ps, &cerr)))
-    {
-        HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material PS compile failed: ")
-            + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
         m_materialPSOs.emplace(key, nullptr);
         return nullptr;
     }

@@ -2125,15 +2125,44 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
         return VK_NULL_HANDLE; // target pass not ready yet — retry next frame (not cached)
 
     using Backend = HE::MaterialShaderLibrary::Backend;
-    // The variant stores the SPIR-V words as raw bytes; a malformed blob (odd byte
-    // count) is treated as absent so the cross-compile can still save the material.
-    std::vector<uint32_t> preVs, preFs;
-    const bool havePre = precompiled
-        && HE::MaterialShaderLibrary::spirvFromBytes(precompiled->vertex, preVs)
-        && HE::MaterialShaderLibrary::spirvFromBytes(precompiled->fragment, preFs);
-    const std::vector<uint32_t>* vsWords = &preVs;
-    const std::vector<uint32_t>* fsWords = &preFs;
-    if (!havePre)
+    auto makeModule = [&](const std::vector<uint32_t>& spv) -> VkShaderModule {
+        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = spv.size() * sizeof(uint32_t);
+        ci.pCode    = spv.data();
+        VkShaderModule mod = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(m_device, &ci, nullptr, &mod) != VK_SUCCESS) return VK_NULL_HANDLE;
+        return mod;
+    };
+    VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
+    auto makePair = [&](const std::vector<uint32_t>& vsWords, const std::vector<uint32_t>& fsWords,
+                        const char* origin) -> bool {
+        vs = makeModule(vsWords);
+        fs = makeModule(fsWords);
+        if (vs && fs) return true;
+        if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+        if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+        vs = fs = VK_NULL_HANDLE;
+        HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: A4 material shader module creation failed (")
+            + origin + ")").c_str());
+        return false;
+    };
+
+    // The baked variant first: its string fields are the SPIR-V words as raw bytes. A
+    // torn blob (odd byte count) or a module the driver rejects is not the end: fall
+    // through to the runtime cross-compile, which is what rendered that pak before
+    // variants were consumed here at all. Only when both roads are closed is the miss
+    // cached.
+    bool built = false;
+    if (precompiled)
+    {
+        std::vector<uint32_t> preVs, preFs;
+        if (HE::MaterialShaderLibrary::spirvFromBytes(precompiled->vertex, preVs)
+            && HE::MaterialShaderLibrary::spirvFromBytes(precompiled->fragment, preFs))
+            built = makePair(preVs, preFs, "baked variant");
+        if (!built)
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: A4 baked material variant rejected — cross-compiling instead");
+    }
+    if (!built)
     {
         // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to SPIR-V.
         const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
@@ -2147,24 +2176,10 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
             m_materialPipelines.emplace(key, VK_NULL_HANDLE); // cache the miss — don't retry every draw
             return VK_NULL_HANDLE;
         }
-        vsWords = &vc.spirv; fsWords = &fc.spirv;
+        built = makePair(vc.spirv, fc.spirv, "cross-compiled");
     }
-
-    auto makeModule = [&](const std::vector<uint32_t>& spv) -> VkShaderModule {
-        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
-        ci.codeSize = spv.size() * sizeof(uint32_t);
-        ci.pCode    = spv.data();
-        VkShaderModule mod = VK_NULL_HANDLE;
-        if (vkCreateShaderModule(m_device, &ci, nullptr, &mod) != VK_SUCCESS) return VK_NULL_HANDLE;
-        return mod;
-    };
-    VkShaderModule vs = makeModule(*vsWords);
-    VkShaderModule fs = makeModule(*fsWords);
-    if (!vs || !fs)
+    if (!built)
     {
-        if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
-        if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
-        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: A4 material shader module creation failed");
         m_materialPipelines.emplace(key, VK_NULL_HANDLE);
         return VK_NULL_HANDLE;
     }
