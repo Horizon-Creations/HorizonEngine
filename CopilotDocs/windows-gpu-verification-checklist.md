@@ -76,11 +76,17 @@ importiertes texturiertes Modell; kein Node-Graph-Material nötig).
 
 ## A4 — Material-Node-Graph-Shader auf D3D/Vulkan — ✅ implementiert, GPU-Abnahme offen
 
-Implementiert seit August 2026 (D3D11 `72e4ce3a`, D3D12 `daaec34b`, Vulkan `aa553117`, HLSL-Sampler-Pins
-`5e52d64e`) und im September auf dem Zweig `claude/material-node-graph-d3d11-d3d12-vulkan-wiring` vervollständigt:
-die drei Backends nehmen die im Pak gebackenen Shader-Varianten (`MaterialAsset::precompiledShaders`) und
-brauchen glslang nur noch für den Editor-Live-Compile; die Graph-Projekt-Texturen `heTexP0..3` sind auf allen
-dreien real gebunden (D3D12 zusätzlich `heTex0`, vorher Null-View). **Hier prüfen:** ein Graph-Material (z. B.
+Implementiert seit August 2026 (D3D11 `72e4ce3a`, D3D12 `daaec34b`, Vulkan `aa553117`) und im September auf
+dem Zweig `claude/material-node-graph-d3d11-d3d12-vulkan-wiring` vervollständigt: die drei Backends nehmen die
+im Pak gebackenen Shader-Varianten (`MaterialAsset::precompiledShaders`) und brauchen glslang nur noch für den
+Editor-Live-Compile; die Graph-Projekt-Texturen `heTexP0..3` sind auf allen dreien real gebunden (D3D12
+zusätzlich `heTex0`, vorher Null-View). Die HLSL-Sampler-Pins des Material-Fragments (Präambel-Bindings
+16/17/18/31/32/33 → s0/s1/s3/s8/s9/s14, Texturen bleiben auf ihrer t-Nummer) sind seit Thema 51 Schritt 3
+(`25d0af25`) auf DIESEM Zweig; der ältere Commit `5e52d64e` mit denselben Nummern liegt nur auf
+`claude/backend-parity-p1`. Ohne die Pins lehnte FXC jedes Graph-Material mit X4509 ab, und die Windows-CI
+beweist das jetzt: `test_material_graph` jagt alle 72 Node-Fälle durch den echten `D3DCompile`
+(vs_5_0/ps_5_0, Negativkontrolle inklusive) und meldet `FXC accepted 72/72 node pixel shaders` im Log.
+**Hier prüfen:** ein Graph-Material (z. B.
 mit Emissive/Fresnel/Textur-Nodes) an ein Mesh hängen → muss auf D3D11/D3D12/Vulkan **identisch zu GL/Metal**
 aussehen; Material-Parameter live ändern → sofortiges Update; Graph-Texturen (heTexP0..3) korrekt; eine Textur
 im Editor neu importieren → das Material zeigt die neue (InvalidateTexture). Zusätzlich ein gepackter Build mit
@@ -99,8 +105,17 @@ Per-Entity-Override setzen → nur dieses Mesh ändert sich. D3D12-Sonderfall: e
 nur `CreateGraphicsPipelineState` einmal. Ab 1025 Graph-Material-Draws in einem Frame (Foliage) muss
 auf D3D12/Vulkan einmalig `more than 1024 graph-material draws` erscheinen, Metal kennt dieses Cap nicht.
 
-Bekannte Grenze (nicht Teil der Abnahme): ein **Landscape-Material** auf D3D scheitert weiter an der
-SM-5.0-Sampler-Grenze (`heLandscapeWeights` wäre das 17. Sampler-Binding, siehe `5e52d64e`).
+Bekannte Grenze (Hardware-Punkt, kein Compile-Fehler): ein **Landscape-Material** ist auf D3D das 17.
+Sampler-Binding, `heLandscapeWeights` teilt sich s14 mit dem verschobenen `heCloudShadow`; ebenso ein
+**Backdrop-Material der UI-Domäne** (`heBackdrop` mit `heGIReflFwd` auf s9). FXC akzeptiert zwei
+SamplerState auf einem Register (auf CI gemessen, die X4500-Behauptung aus `5e52d64e` reproduziert
+`D3DCompile` nicht), beide Ressourcen lesen dann aber denselben Sampler-State. Beide stehen als Zeugen in
+`sharesSamplerRegister` (test_material_graph.cpp) und werden dort rot, sobald die Präambel Texturen und
+Sampler trennt (parity-p1 `9c72cbe7`). **Auf Hardware:** ein bemaltes Landscape-Material auf D3D11 gegen GL
+vergleichen, die Gewichte müssen ohne Wrap-Artefakte sampeln. Ebenfalls offen: die sechs verschobenen
+Sampler (AO, DDGI-Atlanten, Forward-SSR/GI-Refl, Wolkenschatten) bindet D3D11/D3D12 pro Material-Draw noch
+nicht, der Shader liest dort den D3D-Default-Sampler; **auf Hardware** deshalb ein lit Graph-Material bei
+aktivem AO/GI gegen GL vergleichen, bevor die Abnahme als bestanden gilt.
 
 ## A5 — Sky/Nebula v2–v3.4 + physikalische Atmosphäre auf D3D/Vulkan — ⏳ NOCH NICHT IMPLEMENTIERT
 

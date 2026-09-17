@@ -2537,11 +2537,15 @@ bool hasDuplicateRegister(const std::string& hlsl, char kind)
 
 // The SM 5.0 sampler budget is exactly full (MaterialShaderLibrary::fragment,
 // HLSL branch): a material that declares a SEVENTEENTH combined sampler has no
-// register left, and the two that can are pinned onto a slot a moved preamble
-// sampler already took — X4500 in FXC. Named here, not hidden: these two cases
-// are asserted to FAIL, so the day the preamble separates textures from
-// samplers (parity-p1 9c72cbe7) this list goes red and gets deleted.
-bool isKnownSm50SamplerLimit(const std::string& name)
+// register left, and the two that can land on a slot a moved preamble sampler
+// already took. FXC ACCEPTS that — measured on Windows CI (run 35177900601,
+// 17.09.2026), against the claim in parity-p1's 5e52d64e that it is X4500 —
+// so both compile; the two SamplerState then read whatever sampler state the
+// renderer bound at that one slot, which is a hardware-verification item, not
+// a compile failure. Named here, not hidden: the sharing is asserted, so the
+// day the preamble separates textures from samplers (parity-p1 9c72cbe7) this
+// list goes red and gets deleted.
+bool sharesSamplerRegister(const std::string& name)
 {
 	return name == "Landscape Layer Blend"     // heLandscapeWeights (14) vs heCloudShadow → s14
 	    || name == "Backdrop (UI domain)";     // heBackdrop (9) vs heGIReflFwd → s9
@@ -2613,11 +2617,11 @@ TEST_CASE("Every node's HLSL stays inside SM 5.0's register range (D3D11/D3D12 b
 		// keeps SRVs at their binding numbers, so t/b never collide; samplers can.
 		CHECK_MESSAGE(!hasDuplicateRegister(ps, 't'), "'", c.name, "': two SRVs share a t register");
 		CHECK_MESSAGE(!hasDuplicateRegister(ps, 'b'), "'", c.name, "': two cbuffers share a b register");
-		if (isKnownSm50SamplerLimit(c.name))
+		if (sharesSamplerRegister(c.name))
 			CHECK_MESSAGE(hasDuplicateRegister(ps, 's'), "'", c.name,
-			              "' no longer collides — the SM 5.0 sampler limit is gone, drop it from isKnownSm50SamplerLimit");
+			              "' no longer shares a sampler register — the SM 5.0 budget has room now, drop it from sharesSamplerRegister");
 		else
-			CHECK_MESSAGE(!hasDuplicateRegister(ps, 's'), "'", c.name, "': two samplers share an s register (X4500)");
+			CHECK_MESSAGE(!hasDuplicateRegister(ps, 's'), "'", c.name, "': two samplers share an s register");
 	}
 	const std::string& vs = lib.standardVertex(B::HLSL).source;
 	CHECK(maxRegister(vs, 'b') <= 13);
@@ -2653,21 +2657,14 @@ TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile i
 		std::string err;
 		CHECK_MESSAGE(fxc(lib.standardVertex(B::HLSL).source, "matVS", "vs_5_0", err), "standard vertex: ", err);
 	}
-	int okPs = 0, total = 0, knownLimits = 0;
+	// No exclusions: the two shared-register cases (sharesSamplerRegister) are
+	// accepted by FXC too, which is exactly what this loop measured first.
+	int okPs = 0, total = 0;
 	for (const NodeShaderCase& c : allNodeShaderCases())
 	{
 		++total;
 		std::string err;
 		const bool ok = fxc(lib.fragment(caseHash(c), c.glsl, B::HLSL).source, "matPS", "ps_5_0", err);
-		if (isKnownSm50SamplerLimit(c.name))
-		{
-			// The seventeenth sampler: asserted to fail so the exclusion cannot
-			// outlive the limit. The error text goes to the log by name.
-			CHECK_MESSAGE(!ok, "'", c.name, "' now compiles under FXC — drop it from isKnownSm50SamplerLimit");
-			MESSAGE("known SM 5.0 sampler limit '", c.name, "': ", err);
-			++knownLimits;
-			continue;
-		}
 		CHECK_MESSAGE(ok, "FXC rejected the pixel shader for '", c.name, "': ", err);
 		okPs += ok ? 1 : 0;
 		if (!c.vertBody.empty())
@@ -2677,8 +2674,7 @@ TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile i
 			CHECK_MESSAGE(fxc(cv.source, "matVS", "vs_5_0", verr), "FXC rejected the custom vertex for '", c.name, "': ", verr);
 		}
 	}
-	MESSAGE("FXC accepted ", okPs, "/", total - knownLimits, " node pixel shaders (ps_5_0), ",
-	        knownLimits, " at the known SM 5.0 sampler limit");
+	MESSAGE("FXC accepted ", okPs, "/", total, " node pixel shaders (ps_5_0)");
 }
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC

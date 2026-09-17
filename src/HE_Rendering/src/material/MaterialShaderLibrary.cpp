@@ -2394,13 +2394,14 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
         //
         // WHAT DOES NOT FIT: heLandscapeWeights (binding 14) and, in the UI
         // domain, heBackdrop (binding 9) share a register with a moved sampler
-        // whenever both are declared. FXC rejects two SamplerState on one
-        // register (X4500), and SPIRV-Cross emits one per binding even when
-        // pinned to the same slot. A landscape graph material therefore still
-        // fails on D3D — at a nameable limit now instead of every material
-        // failing. Closing it means declaring textures and samplers separately
-        // in the shared preamble so one SamplerState serves many textures
-        // (parity-p1 9c72cbe7 does exactly that), a change to every backend.
+        // whenever both are declared (two SamplerState on s14 / s9). FXC
+        // accepts that — measured on Windows CI, 17.09.2026, against what
+        // parity-p1's 5e52d64e reports — so the shader builds, but both
+        // resources then sample through whatever state the renderer bound at
+        // that one slot. Making room means declaring textures and samplers
+        // separately in the shared preamble so one SamplerState serves many
+        // textures (parity-p1 9c72cbe7 does exactly that), a change to every
+        // backend.
         static const std::vector<he::shaderc::HlslPin> kHlslMaterialPins = {
             //          stage             set  bind  reg  sampler
             { Stage::Fragment, 0,  2,  2 },     // heTex0

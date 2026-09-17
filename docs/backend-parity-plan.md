@@ -709,7 +709,11 @@ hier festgehalten statt einfach umgeschrieben, weil das Absicht sein könnte:
    Library alle auf, und CMake linkt `he_materialshader` in jedes Backend. A4 ist
    implementiert und wartet nur noch auf die Hardware-Abnahme. *(Checkliste im September
    2026 korrigiert, Thema 51; seitdem nehmen die drei Backends auch die gebackenen
-   Pak-Varianten und binden die Graph-Texturen.)*
+   Pak-Varianten und binden die Graph-Texturen. Schritt 3 hat dann gezeigt, dass „implementiert"
+   ohne FXC nichts bewies: `fragment(HLSL)` war ungepinnt, jedes Graph-Material scheiterte in
+   `D3DCompile` an X4509 — der Pin-Commit `5e52d64e` lag nur auf `claude/backend-parity-p1`.
+   Seit `25d0af25` sind die Sampler-Pins auf dem Zweig, und `test_material_graph` lässt auf
+   Windows-CI alle Node-Typen durch den echten `D3DCompile` laufen.)*
 
 2. **`CopilotDocs/ROADMAP.md:20`** — „Backends (GL 4.1/4.6, Metal, Vulkan*, D3D11/12*)
    🟡 Clear + ImGui-Overlay, keine Draw-Calls". Stand Juni 2026 und lange überholt; alle
