@@ -64,8 +64,16 @@ namespace
         glm::vec4  lightDir[8];
         glm::vec4  lightColor[8];
         glm::vec4  lightParams[8];
-        glm::mat4  lightVP;
-        glm::ivec4 shadowEnabled;
+        // Cascaded shadow maps — must match scene.frag's Frame block exactly:
+        // per-cascade light view-proj (kVulkanClipFix pre-applied), the planar
+        // view-space far distance of each cascade (w = count), the camera
+        // forward the pick measures along (w = 1 / shadow map size) and the
+        // project receiver bias (x = slope-scaled factor, y = minimum).
+        glm::mat4  cascadeVP[3];
+        glm::vec4  cascadeSplits;
+        glm::vec4  cameraFwd;
+        glm::vec4  shadowBias;
+        glm::ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug)
         // sky/fog additions — must match scene.frag Frame block exactly
         glm::vec4  sunDir;    // xyz = sun direction, w = 0
         glm::vec4  fog;       // x = fogDensity, y = fogHeightFalloff, zw = 0
@@ -78,6 +86,16 @@ namespace
         // out of Lighting::ssr, so a graph material and a built-in one next to
         // each other mix the same reflection the same way.
         glm::vec4  ssrParams;
+        // Local (point/spot) shadow atlas — must match scene.frag's Frame block
+        // exactly: per-layer light view-proj (kVulkanClipFix pre-applied),
+        // x = 1 / atlas size. Appended last.
+        glm::mat4  localShadowVP[16];
+        glm::vec4  localShadowParams;
+        // Clustered lighting — must match scene.frag's Frame block exactly:
+        // x/y/z = grid dims (0 = off), w = slice scale; camFwd.xyz = depth
+        // axis, w = near (HE::ClusterLightBuild). Appended last.
+        glm::vec4  clusterParams;
+        glm::vec4  clusterCamFwd;
     };
 
     // Sky pass UBO (set=0 binding=0 in sky.frag) — must match std140 exactly.
@@ -339,6 +357,21 @@ void VulkanRenderer::Render()
         createViewportResources(m_viewportReqW, m_viewportReqH);
     }
 
+    // Project shadow resolution changed (SetShadowSettings): rebuild the
+    // cascade images here, before any command of this frame names them and
+    // after the GPU is idle — the frames still in flight sample the old
+    // array — then repoint every scene set at the new view. Same shape as
+    // the viewport resize above; the render pass and sampler stay.
+    if (m_shadowSizeDirty && m_shadowPass)
+    {
+        vkDeviceWaitIdle(m_device);
+        destroyShadowImages();
+        m_shadowSize = static_cast<uint32_t>(std::clamp(m_shadowSettings.resolution, 256, 8192));
+        createShadowImages();
+        writeShadowDescriptors();
+        m_shadowSizeDirty = false;
+    }
+
     const bool useViewport = m_viewportImage != VK_NULL_HANDLE
                           && m_viewportW > 0 && m_viewportH > 0;
 
@@ -374,8 +407,14 @@ void VulkanRenderer::Render()
     // Frame-begin timestamp (also reaps the slot's previous results — no stall).
     gpuTimerBegin(cmd);
 
-    // Shadow map first, in its own render pass (before the scene/swapchain pass).
-    EncodeShadowMap(cmd);
+    // Cascade shadow maps first, in their own render passes (before the
+    // scene/swapchain pass), fit against the aspect of the target the scene
+    // will be drawn into.
+    {
+        const float aspectW = useViewport ? float(m_viewportW) : float(std::max(m_swapExtent.width,  1u));
+        const float aspectH = useViewport ? float(m_viewportH) : float(std::max(m_swapExtent.height, 1u));
+        EncodeShadowMap(cmd, aspectW / aspectH);
+    }
 
     // Camera-depth pre-pass for screen-space decals. It must run before the scene
     // pass opens, because the decal draw sits INSIDE that pass and samples this
@@ -1525,7 +1564,9 @@ void VulkanRenderer::createScenePipeline()
     // Descriptor set: binding 0 = per-frame UBO, binding 1 = shadow map,
     //                 binding 2 = per-draw material UBO, binding 3 = SSAO AO texture.
     //                 binding 8 = forward SSR result (transparent-black fallback).
-    VkDescriptorSetLayoutBinding binds[9]{};
+    //                 binding 9 = local (point/spot) shadow atlas (2D array).
+    //                 bindings 10..12 = clustered-lighting SSBOs (lights/grid/indices).
+    VkDescriptorSetLayoutBinding binds[13]{};
     binds[0].binding         = 0;
     binds[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     binds[0].descriptorCount = 1;
@@ -1548,15 +1589,28 @@ void VulkanRenderer::createScenePipeline()
     // Binding 8: the half-res forward-SSR result, sampled per gl_FragCoord like
     // uAO. Gated by ssrParams.x; a 1×1 transparent black stands in when no trace
     // ran, so a sample contributes nothing even if the gate were ever wrong.
-    for (uint32_t gb = 4; gb <= 8; ++gb)
+    // Binding 9: the local (point/spot) shadow atlas, a sampler2DArray like
+    // binding 1 (written by writeShadowDescriptors; the shader gates every
+    // sample on lightParams.y, which stays -1 until the atlas was rendered).
+    for (uint32_t gb = 4; gb <= 9; ++gb)
     {
         binds[gb].binding         = gb;
         binds[gb].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         binds[gb].descriptorCount = 1;
         binds[gb].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
+    // Bindings 10..12: the clustered-lighting SSBOs (HE::BuildClusterLights),
+    // std430 readonly buffers in scene.frag. Written once per frame slot;
+    // the shader gates every read on clusterParams.x.
+    for (uint32_t cb = 10; cb <= 12; ++cb)
+    {
+        binds[cb].binding         = cb;
+        binds[cb].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        binds[cb].descriptorCount = 1;
+        binds[cb].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = 9;
+    slci.bindingCount = 13;
     slci.pBindings    = binds;
     vkCheck(vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_sceneSetLayout), "descriptor set layout");
 
@@ -1607,15 +1661,55 @@ void VulkanRenderer::createScenePipeline()
     vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_scenePipelineLayout), "pipeline layout");
 
     // Per-frame UBO buffers + descriptor sets (one per frame in flight).
-    VkDescriptorPoolSize ps[2] = {
+    VkDescriptorPoolSize ps[3] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 2 },  // binding0 + binding2
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 7 },  // binding1(shadow) + binding3(AO) + bindings4-7(GI) + binding8(SSR)
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 8 },  // binding1(shadow) + binding3(AO) + bindings4-7(GI) + binding8(SSR) + binding9(local atlas)
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 3 },  // bindings10-12 (cluster lists)
     };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets       = k_maxFramesInFlight;
-    dpci.poolSizeCount = 2;
+    dpci.poolSizeCount = 3;
     dpci.pPoolSizes    = ps;
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_descPool), "descriptor pool");
+
+    // Clustered-lighting SSBOs (bindings 10..12), one triple per frame in
+    // flight, host-visible + coherent and persistently mapped like the Frame
+    // UBO. Sized from the LightPacking caps: 256 lights × 4 vec4, 3456 cells ×
+    // uvec2, 65536 indices. All or nothing — the scene set writes all three.
+    {
+        auto makeSSBO = [&](VkDeviceSize bytes, ClusterBuffer& out) -> bool
+        {
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size  = bytes;
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            if (vkCreateBuffer(m_device, &bci, nullptr, &out.buf) != VK_SUCCESS) return false;
+            VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, out.buf, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize  = req.size;
+            mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (vkAllocateMemory(m_device, &mai, nullptr, &out.mem) != VK_SUCCESS) return false;
+            vkBindBufferMemory(m_device, out.buf, out.mem, 0);
+            return vkMapMemory(m_device, out.mem, 0, bytes, 0, &out.mapped) == VK_SUCCESS;
+        };
+        m_clusterReady = true;
+        for (uint32_t i = 0; i < k_maxFramesInFlight && m_clusterReady; ++i)
+            m_clusterReady =
+                makeSSBO(static_cast<VkDeviceSize>(HE::kMaxClusteredLights) * 4u * sizeof(glm::vec4), m_clusterLights[i])
+             && makeSSBO(static_cast<VkDeviceSize>(HE::kClusterCount) * sizeof(glm::uvec2),           m_clusterGrid[i])
+             && makeSSBO(static_cast<VkDeviceSize>(HE::kMaxClusterIndices) * sizeof(uint32_t),       m_clusterIdx[i]);
+        if (!m_clusterReady)
+        {
+            m_forwardClustered = false;
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: cluster light SSBOs failed — "
+                                   "staying on the 8-light window");
+        }
+        // HE_FORWARD_CLUSTER=0 keeps the mixed 8-light window (A/B guard, the
+        // forward twin of Metal's HE_DEFERRED_CLUSTER). The descriptors stay
+        // written either way — a bound set must be complete.
+        if (const char* cl = std::getenv("HE_FORWARD_CLUSTER"); cl && *cl && std::atoi(cl) == 0)
+            m_forwardClustered = false;
+    }
 
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
@@ -1641,10 +1735,14 @@ void VulkanRenderer::createScenePipeline()
         VkDescriptorBufferInfo dbi{ m_frameUBO[i].buf, 0, sizeof(FrameUBOData) };
         VkDescriptorImageInfo  dii{ m_shadowSampler, m_shadowView,
                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo  lii{ m_shadowSampler, m_localShadowView,
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorBufferInfo matDbi{ m_matUBO, 0, 32 };
         // Binding 3 (AO): filled in by createSSAOPipeline() with the white fallback
         // view after it creates the 1x1 white texture; left unwritten here.
-        VkWriteDescriptorSet w[3]{};
+        // Binding 9 (local atlas) goes in with binding 1 — both exist once
+        // createShadowResources ran (writeShadowDescriptors repeats this).
+        VkWriteDescriptorSet w[4]{};
         w[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         w[0].dstSet          = m_frameUBO[i].set;
         w[0].dstBinding      = 0;
@@ -1663,7 +1761,37 @@ void VulkanRenderer::createScenePipeline()
         w[2].descriptorCount = 1;
         w[2].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         w[2].pBufferInfo     = &matDbi;
-        vkUpdateDescriptorSets(m_device, m_shadowView ? 3 : 2, w, 0, nullptr);
+        w[3].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[3].dstSet          = m_frameUBO[i].set;
+        w[3].dstBinding      = 9;
+        w[3].descriptorCount = 1;
+        w[3].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[3].pImageInfo      = &lii;
+        // Bindings 1 and 9 only when their views exist (both come from
+        // createShadowResources); without the cascade array the local one is
+        // skipped too — the two are created together.
+        vkUpdateDescriptorSets(m_device, (m_shadowView && m_localShadowView) ? 4 : (m_shadowView ? 3 : 2),
+                               w, 0, nullptr);
+
+        // Bindings 10..12: this frame slot's cluster SSBOs. Written once — the
+        // buffers are persistent; only their CONTENTS change per frame.
+        if (m_clusterReady)
+        {
+            const ClusterBuffer* cbs[3] = { &m_clusterLights[i], &m_clusterGrid[i], &m_clusterIdx[i] };
+            VkDescriptorBufferInfo cbi[3]{};
+            VkWriteDescriptorSet   cw[3]{};
+            for (uint32_t c = 0; c < 3; ++c)
+            {
+                cbi[c] = { cbs[c]->buf, 0, VK_WHOLE_SIZE };
+                cw[c].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                cw[c].dstSet          = m_frameUBO[i].set;
+                cw[c].dstBinding      = 10 + c;
+                cw[c].descriptorCount = 1;
+                cw[c].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                cw[c].pBufferInfo     = &cbi[c];
+            }
+            vkUpdateDescriptorSets(m_device, 3, cw, 0, nullptr);
+        }
     }
 
     // ── Base-color texture sampler, per-mesh descriptor pool, and 1x1 white default ──
@@ -1890,10 +2018,25 @@ void VulkanRenderer::createScenePipeline()
             sstage.module = svs;
             sstage.pName  = "main";
 
-            VkGraphicsPipelineCreateInfo spci = pci; // reuse vertex input / depth / dynamic state
+            // Caster-side depth bias, the same the other CSM backends apply
+            // (GL: glPolygonOffset(2, 4); Metal: setDepthBias; D3D11/D3D12:
+            // their depth rasterizer state). DYNAMIC, because EncodeDecalDepth
+            // binds this very pipeline for the camera depth pre-pass and must
+            // run it with zero bias (a biased depth shifts every decal).
+            VkPipelineRasterizationStateCreateInfo srs = rs;
+            srs.depthBiasEnable = VK_TRUE;
+            VkDynamicState sdynStates[3] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+                                             VK_DYNAMIC_STATE_DEPTH_BIAS };
+            VkPipelineDynamicStateCreateInfo sdyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+            sdyn.dynamicStateCount = 3;
+            sdyn.pDynamicStates    = sdynStates;
+
+            VkGraphicsPipelineCreateInfo spci = pci; // reuse vertex input / depth state
             spci.stageCount      = 1;            // vertex only — depth-only pass
             spci.pStages         = &sstage;
             spci.pColorBlendState = nullptr;     // no color attachment
+            spci.pRasterizationState = &srs;
+            spci.pDynamicState   = &sdyn;
             spci.renderPass      = m_shadowPass;
             if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &spci, nullptr, &m_shadowPipeline) != VK_SUCCESS)
                 HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: shadow pipeline creation failed");
@@ -1920,7 +2063,15 @@ void VulkanRenderer::destroyScenePipeline()
         if (m_instanceBuf[i].buf)    vkDestroyBuffer(m_device, m_instanceBuf[i].buf, nullptr);
         if (m_instanceBuf[i].mem)    vkFreeMemory   (m_device, m_instanceBuf[i].mem, nullptr);
         m_instanceBuf[i] = {};
+        for (ClusterBuffer* cb : { &m_clusterLights[i], &m_clusterGrid[i], &m_clusterIdx[i] })
+        {
+            if (cb->mapped) vkUnmapMemory(m_device, cb->mem);
+            if (cb->buf)    vkDestroyBuffer(m_device, cb->buf, nullptr);
+            if (cb->mem)    vkFreeMemory   (m_device, cb->mem, nullptr);
+            *cb = {};
+        }
     }
+    m_clusterReady = false;
     if (m_matUBO)              { vkDestroyBuffer(m_device, m_matUBO, nullptr); m_matUBO = VK_NULL_HANDLE; }
     if (m_matMem)              { vkFreeMemory   (m_device, m_matMem, nullptr); m_matMem = VK_NULL_HANDLE; }
     if (m_descPool)            { vkDestroyDescriptorPool(m_device, m_descPool, nullptr);            m_descPool = VK_NULL_HANDLE; }
@@ -1987,7 +2138,7 @@ void VulkanRenderer::createMaterialResources()
     //    + 8/9 for the WPO custom vertex, which reads HeLighting/HeParams in the VERTEX
     //    stage at those slots (MaterialShaderLibrary.cpp kWpoUniforms). Extra bindings are
     //    harmless for the standard (non-WPO) vertex, which references none of them. ──
-    VkDescriptorSetLayoutBinding b[14]{};
+    VkDescriptorSetLayoutBinding b[15]{};
     auto setB = [&](int i, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stage) {
         b[i].binding = binding; b[i].descriptorType = type; b[i].descriptorCount = 1; b[i].stageFlags = stage;
     };
@@ -2011,8 +2162,12 @@ void VulkanRenderer::createMaterialResources()
     // (Bindings 15-18, 32 and 33 of the preamble are still unbound here — that
     // is a pre-existing gap, not an SSR one, and stays as it is.)
     setB(13, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heSSRFwd
+    // heLocalShadow (binding 13, sampler2DArray): the local (point/spot) shadow
+    // atlas the built-in scene shader samples at binding 9. Gated in the
+    // preamble by lightParams[i].y > 0.
+    setB(14, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT); // heLocalShadow
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = 14;
+    slci.bindingCount = 15;
     slci.pBindings    = b;
     if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_matSetLayout) != VK_SUCCESS)
     {
@@ -2053,7 +2208,7 @@ void VulkanRenderer::createMaterialResources()
     {
         VkDescriptorPoolSize ps[2] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         5u * k_matMaxDraws }, // b0,b1,b3,b8,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 9u * k_matMaxDraws }, // b2,b4-b7,b10-b12,b31
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 10u * k_matMaxDraws }, // b2,b4-b7,b10-b13,b31
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
@@ -2243,35 +2398,11 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
 
 void VulkanRenderer::createShadowResources()
 {
-    // Depth image, sampled by the scene pass.
-    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-    ici.imageType   = VK_IMAGE_TYPE_2D;
-    ici.format      = m_depthFormat;
-    ici.extent      = { m_shadowSize, m_shadowSize, 1 };
-    ici.mipLevels   = 1;
-    ici.arrayLayers = 1;
-    ici.samples     = VK_SAMPLE_COUNT_1_BIT;
-    ici.tiling      = VK_IMAGE_TILING_OPTIMAL;
-    ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    vkCheck(vkCreateImage(m_device, &ici, nullptr, &m_shadowImage), "shadow image");
-
-    VkMemoryRequirements req{};
-    vkGetImageMemoryRequirements(m_device, m_shadowImage, &req);
-    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize  = req.size;
-    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_shadowMemory), "shadow memory");
-    vkBindImageMemory(m_device, m_shadowImage, m_shadowMemory, 0);
-
-    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-    vci.image    = m_shadowImage;
-    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    vci.format   = m_depthFormat;
-    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-    vci.subresourceRange.levelCount = 1;
-    vci.subresourceRange.layerCount = 1;
-    vkCheck(vkCreateImageView(m_device, &vci, nullptr, &m_shadowView), "shadow view");
-
+    // Nearest + clamp-to-border(white): each PCF tap must read ONE texel's
+    // depth (linear would compare against an interpolated depth), and a tap
+    // that leaves the map reads "lit". Sampler and render pass are size-
+    // independent and live for the renderer; only the images are rebuilt on a
+    // resolution change (createShadowImages).
     VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
     sci.magFilter    = VK_FILTER_NEAREST;
     sci.minFilter    = VK_FILTER_NEAREST;
@@ -2282,6 +2413,8 @@ void VulkanRenderer::createShadowResources()
     vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_shadowSampler), "shadow sampler");
 
     // Depth-only render pass; final layout is shader-readable for sampling.
+    // Layer-agnostic: the per-cascade framebuffers below each attach ONE layer
+    // of the array, and EncodeDecalDepth reuses this pass for its own 2D image.
     VkAttachmentDescription depth{};
     depth.format         = m_depthFormat;
     depth.samples        = VK_SAMPLE_COUNT_1_BIT;
@@ -2317,24 +2450,178 @@ void VulkanRenderer::createShadowResources()
     rpci.pDependencies   = deps;
     vkCheck(vkCreateRenderPass(m_device, &rpci, nullptr, &m_shadowPass), "shadow render pass");
 
-    VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-    fci.renderPass      = m_shadowPass;
-    fci.attachmentCount = 1;
-    fci.pAttachments    = &m_shadowView;
-    fci.width           = m_shadowSize;
-    fci.height          = m_shadowSize;
-    fci.layers          = 1;
-    vkCheck(vkCreateFramebuffer(m_device, &fci, nullptr, &m_shadowFB), "shadow framebuffer");
+    createShadowImages();
+    createLocalShadowImages();
+}
+
+void VulkanRenderer::createLocalShadowImages()
+{
+    // The local (point/spot) atlas: same depth-array pattern as the cascades,
+    // kLocalShadowLayers layers at a fixed kLocalShadowSize, rendered one layer
+    // at a time through the shared depth-only pass.
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType   = VK_IMAGE_TYPE_2D;
+    ici.format      = m_depthFormat;
+    ici.extent      = { kLocalShadowSize, kLocalShadowSize, 1 };
+    ici.mipLevels   = 1;
+    ici.arrayLayers = static_cast<uint32_t>(kLocalShadowLayers);
+    ici.samples     = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling      = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    vkCheck(vkCreateImage(m_device, &ici, nullptr, &m_localShadowImage), "local shadow image");
+
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(m_device, m_localShadowImage, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_localShadowMemory), "local shadow memory");
+    vkBindImageMemory(m_device, m_localShadowImage, m_localShadowMemory, 0);
+
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image    = m_localShadowImage;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    vci.format   = m_depthFormat;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.layerCount = static_cast<uint32_t>(kLocalShadowLayers);
+    vkCheck(vkCreateImageView(m_device, &vci, nullptr, &m_localShadowView), "local shadow array view");
+
+    for (int v = 0; v < kLocalShadowLayers; ++v)
+    {
+        VkImageViewCreateInfo lci = vci;
+        lci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        lci.subresourceRange.baseArrayLayer = static_cast<uint32_t>(v);
+        lci.subresourceRange.layerCount     = 1;
+        vkCheck(vkCreateImageView(m_device, &lci, nullptr, &m_localShadowLayerView[v]), "local shadow layer view");
+
+        VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fci.renderPass      = m_shadowPass;
+        fci.attachmentCount = 1;
+        fci.pAttachments    = &m_localShadowLayerView[v];
+        fci.width           = kLocalShadowSize;
+        fci.height          = kLocalShadowSize;
+        fci.layers          = 1;
+        vkCheck(vkCreateFramebuffer(m_device, &fci, nullptr, &m_localShadowFB[v]), "local shadow framebuffer");
+    }
+}
+
+void VulkanRenderer::destroyLocalShadowImages()
+{
+    m_localShadowLayoutValid = false;
+    for (int v = 0; v < kLocalShadowLayers; ++v)
+    {
+        if (m_localShadowFB[v])        { vkDestroyFramebuffer(m_device, m_localShadowFB[v], nullptr);        m_localShadowFB[v] = VK_NULL_HANDLE; }
+        if (m_localShadowLayerView[v]) { vkDestroyImageView  (m_device, m_localShadowLayerView[v], nullptr); m_localShadowLayerView[v] = VK_NULL_HANDLE; }
+    }
+    if (m_localShadowView)   { vkDestroyImageView(m_device, m_localShadowView, nullptr);   m_localShadowView = VK_NULL_HANDLE; }
+    if (m_localShadowImage)  { vkDestroyImage    (m_device, m_localShadowImage, nullptr);  m_localShadowImage = VK_NULL_HANDLE; }
+    if (m_localShadowMemory) { vkFreeMemory      (m_device, m_localShadowMemory, nullptr); m_localShadowMemory = VK_NULL_HANDLE; }
+}
+
+void VulkanRenderer::createShadowImages()
+{
+    // Depth image with one array layer per cascade, sampled by the scene pass
+    // as a 2D array; rendered one layer at a time through the per-layer views.
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType   = VK_IMAGE_TYPE_2D;
+    ici.format      = m_depthFormat;
+    ici.extent      = { m_shadowSize, m_shadowSize, 1 };
+    ici.mipLevels   = 1;
+    ici.arrayLayers = static_cast<uint32_t>(kCsmCascades);
+    ici.samples     = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling      = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage       = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    vkCheck(vkCreateImage(m_device, &ici, nullptr, &m_shadowImage), "shadow image");
+
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(m_device, m_shadowImage, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_shadowMemory), "shadow memory");
+    vkBindImageMemory(m_device, m_shadowImage, m_shadowMemory, 0);
+
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image    = m_shadowImage;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    vci.format   = m_depthFormat;
+    vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.layerCount = static_cast<uint32_t>(kCsmCascades);
+    vkCheck(vkCreateImageView(m_device, &vci, nullptr, &m_shadowView), "shadow array view");
+
+    for (int c = 0; c < kCsmCascades; ++c)
+    {
+        VkImageViewCreateInfo lci = vci;
+        lci.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        lci.subresourceRange.baseArrayLayer = static_cast<uint32_t>(c);
+        lci.subresourceRange.layerCount     = 1;
+        vkCheck(vkCreateImageView(m_device, &lci, nullptr, &m_shadowLayerView[c]), "shadow layer view");
+
+        VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fci.renderPass      = m_shadowPass;
+        fci.attachmentCount = 1;
+        fci.pAttachments    = &m_shadowLayerView[c];
+        fci.width           = m_shadowSize;
+        fci.height          = m_shadowSize;
+        fci.layers          = 1;
+        vkCheck(vkCreateFramebuffer(m_device, &fci, nullptr, &m_shadowFB[c]), "shadow framebuffer");
+    }
+}
+
+void VulkanRenderer::destroyShadowImages()
+{
+    m_shadowLayoutValid = false;
+    for (int c = 0; c < kCsmCascades; ++c)
+    {
+        if (m_shadowFB[c])        { vkDestroyFramebuffer(m_device, m_shadowFB[c], nullptr);        m_shadowFB[c] = VK_NULL_HANDLE; }
+        if (m_shadowLayerView[c]) { vkDestroyImageView  (m_device, m_shadowLayerView[c], nullptr); m_shadowLayerView[c] = VK_NULL_HANDLE; }
+    }
+    if (m_shadowView)    { vkDestroyImageView  (m_device, m_shadowView, nullptr); m_shadowView = VK_NULL_HANDLE; }
+    if (m_shadowImage)   { vkDestroyImage      (m_device, m_shadowImage, nullptr); m_shadowImage = VK_NULL_HANDLE; }
+    if (m_shadowMemory)  { vkFreeMemory        (m_device, m_shadowMemory, nullptr); m_shadowMemory = VK_NULL_HANDLE; }
 }
 
 void VulkanRenderer::destroyShadowResources()
 {
-    if (m_shadowFB)      { vkDestroyFramebuffer(m_device, m_shadowFB, nullptr);   m_shadowFB = VK_NULL_HANDLE; }
+    destroyShadowImages();
+    destroyLocalShadowImages();
     if (m_shadowPass)    { vkDestroyRenderPass (m_device, m_shadowPass, nullptr); m_shadowPass = VK_NULL_HANDLE; }
     if (m_shadowSampler) { vkDestroySampler    (m_device, m_shadowSampler, nullptr); m_shadowSampler = VK_NULL_HANDLE; }
-    if (m_shadowView)    { vkDestroyImageView  (m_device, m_shadowView, nullptr); m_shadowView = VK_NULL_HANDLE; }
-    if (m_shadowImage)   { vkDestroyImage      (m_device, m_shadowImage, nullptr); m_shadowImage = VK_NULL_HANDLE; }
-    if (m_shadowMemory)  { vkFreeMemory        (m_device, m_shadowMemory, nullptr); m_shadowMemory = VK_NULL_HANDLE; }
+}
+
+// Points binding 1 of every frame slot's scene set at the cascade array. Called
+// once the sets exist (createScenePipeline) and again after a resolution swap
+// rebuilt the image — the GPU is idle then, so rewriting a set that a queued
+// frame could still reference is safe.
+void VulkanRenderer::writeShadowDescriptors()
+{
+    if (!m_shadowView) return;
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        if (m_frameUBO[i].set == VK_NULL_HANDLE) continue;
+        VkDescriptorImageInfo dii{ m_shadowSampler, m_shadowView,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkDescriptorImageInfo lii{ m_shadowSampler, m_localShadowView,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet w[2]{};
+        w[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[0].dstSet          = m_frameUBO[i].set;
+        w[0].dstBinding      = 1;
+        w[0].descriptorCount = 1;
+        w[0].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[0].pImageInfo      = &dii;
+        // Binding 9: the local (point/spot) atlas — size-fixed, so a cascade
+        // resolution swap rewrites it unchanged; harmless.
+        w[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[1].dstSet          = m_frameUBO[i].set;
+        w[1].dstBinding      = 9;
+        w[1].descriptorCount = 1;
+        w[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w[1].pImageInfo      = &lii;
+        vkUpdateDescriptorSets(m_device, m_localShadowView ? 2 : 1, w, 0, nullptr);
+    }
 }
 
 // ─── Screen-space decals (docs/decals-cross-backend-plan.md checkpoint E) ─────
@@ -2698,6 +2985,9 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     VkRect2D   sc{ { 0, 0 }, { d.w, d.h } };
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
+    // The shadow pipeline's depth bias is dynamic: the cascade pass sets it,
+    // this camera depth must be exact (decals reconstruct positions from it).
+    vkCmdSetDepthBias(cmd, 0.0f, 0.0f, 0.0f);
 
     for (uint32_t idx : m_sortedIndices)
     {
@@ -3550,56 +3840,199 @@ void* VulkanRenderer::GetViewportVkSampler()   const { return static_cast<void*>
 bool  VulkanRenderer::HasViewportResourceChanged() const { return m_viewportResChanged; }
 void  VulkanRenderer::ClearViewportResourceChanged()     { m_viewportResChanged = false; }
 
-void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd)
+void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
 {
-    if (!m_world || m_shadowPipeline == VK_NULL_HANDLE) return;
+    m_shadowRenderedThisFrame = false;
+    m_localShadowLayerCount   = 0;
+    if (m_shadowPipeline == VK_NULL_HANDLE || m_shadowImage == VK_NULL_HANDLE) return;
+    // A fresh array (first frame, or right after a resolution swap) sits in
+    // UNDEFINED until the depth pass ran once — but the scene set already
+    // samples it. On a frame that does not render the cascades (no world, no
+    // sun, empty scene) put every layer into the sampled layout explicitly so
+    // no frame ever samples an undefined image (the single map used to).
+    auto ensureSampledLayout = [&]()
+    {
+        if (m_shadowLayoutValid) return;
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image               = m_shadowImage;
+        b.subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, static_cast<uint32_t>(kCsmCascades) };
+        b.srcAccessMask       = 0;
+        b.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+        m_shadowLayoutValid = true;
+    };
+    // The local (point/spot) atlas: same rule, but ONCE for all 16 layers and
+    // never per frame — only the layers the extractor assigned are rendered
+    // (a render pass takes its attachment from UNDEFINED regardless of the
+    // layer's actual layout, and every other layer already sits in the sampled
+    // layout from this barrier or from its last pass). Clearing 16 × 1024²
+    // every frame like the cascade tail would be pure waste.
+    auto ensureLocalSampledLayout = [&]()
+    {
+        if (m_localShadowLayoutValid || m_localShadowImage == VK_NULL_HANDLE) return;
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        b.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image               = m_localShadowImage;
+        b.subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, static_cast<uint32_t>(kLocalShadowLayers) };
+        b.srcAccessMask       = 0;
+        b.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &b);
+        m_localShadowLayoutValid = true;
+    };
+    ensureLocalSampledLayout();
+    if (!m_world) { ensureSampledLayout(); return; }
 
+    // The cascades are fit against the camera frustum, so this extract needs
+    // the real aspect (the old whole-scene single map never cared) and the
+    // project shadow settings — the extractor hands back the size that is
+    // actually ALLOCATED, the texel snap must match the texture.
+    m_extractor.setShadowSettings(m_shadowSettings.distance, m_shadowSettings.cascadeCount,
+                                  m_shadowSettings.splitLambda, static_cast<int>(m_shadowSize));
     m_extractor.setContentManager(m_contentManager);
-    m_extractor.extract(*m_world, m_renderWorld, 1.0f, &m_editorCamera);
-    if (!m_renderWorld.shadow.enabled || m_renderWorld.objects.empty()) return;
+    m_extractor.extract(*m_world, m_renderWorld, aspect, &m_editorCamera);
+    // CSM needs a directional light; the local (point/spot) atlas is
+    // independent of it — night scenes with only shadow-casting point lights
+    // still render their atlas (mirrors Metal/GL/D3D).
+    const bool wantCsm   = m_renderWorld.shadow.enabled;
+    const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowImage != VK_NULL_HANDLE;
+    if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) { ensureSampledLayout(); return; }
     for (RenderObject& obj : m_renderWorld.objects)
         if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
             obj.worldBounds = mesh->localBounds.transformed(obj.transform);
-    // Cull casters against the LIGHT frustum, not the camera — an off-screen
-    // object still casts a shadow into the visible scene while it lies within the
-    // shadow map's coverage. (Camera-culling the casters made shadows pop out as
-    // their caster left the screen.)
-    m_culler.cull(m_renderWorld, m_renderWorld.shadow.viewProj, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
-    if (m_sortedIndices.empty()) return;
 
-    const glm::mat4 lightClip = HE::kVulkanClipFix * m_renderWorld.shadow.viewProj;
-
-    VkClearValue clear{};
-    clear.depthStencil = { 1.0f, 0 };
-    VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-    rpbi.renderPass        = m_shadowPass;
-    rpbi.framebuffer       = m_shadowFB;
-    rpbi.renderArea.extent = { m_shadowSize, m_shadowSize };
-    rpbi.clearValueCount   = 1;
-    rpbi.pClearValues      = &clear;
-    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    // ── Cascade frame constants (mirrors GL's shadowFrame / D3D11) ─────────
+    // The extractor's cascade matrices are GL clip (y up, z∈[-1,1]);
+    // kVulkanClipFix flips y and remaps depth to [0,1] — the SAME fix the old
+    // single map got, and scene.frag samples with uv = p.xy*0.5+0.5 under the
+    // same matrix, so no separate UV flip exists anywhere. The planar camera
+    // forward (−Z of camera-to-world) MUST match the planar splits the
+    // cascades were fit with; unused tail cascades get identity (never
+    // sampled — the shader clamps the pick to the count) and a far split of
+    // 1e9 so the pick never lands on them.
+    const ShadowData& csm = m_renderWorld.shadow;
+    const int nCascades  = wantCsm ? std::clamp(csm.cascadeCount, 0, kCsmCascades) : 0;
+    for (int c = 0; c < kCsmCascades; ++c)
+        m_cascadeClip[c] = c < nCascades ? HE::kVulkanClipFix * csm.cascadeViewProj[c] : glm::mat4(1.0f);
+    m_cascadeSplits = glm::vec4(nCascades > 0 ? csm.cascadeSplit[0] : 1e9f,
+                                nCascades > 1 ? csm.cascadeSplit[1] : 1e9f,
+                                nCascades > 2 ? csm.cascadeSplit[2] : 1e9f,
+                                static_cast<float>(nCascades));
+    m_cascadeCamFwd = -glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2]));
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
-    VkViewport vp{ 0.0f, 0.0f, (float)m_shadowSize, (float)m_shadowSize, 0.0f, 1.0f };
-    VkRect2D   sc{ { 0, 0 }, { m_shadowSize, m_shadowSize } };
-    vkCmdSetViewport(cmd, 0, 1, &vp);
-    vkCmdSetScissor(cmd, 0, 1, &sc);
+    // GL's glPolygonOffset(2, 4) in Vulkan terms: slope factor 2, constant 4.
+    const float kShadowBiasConstant = 4.0f, kShadowBiasSlope = 2.0f;
 
-    for (uint32_t idx : m_sortedIndices)
+    // Depth-only draws of every shadow caster into the pass that is currently
+    // open, shared by the cascades and the local (point/spot) layers. Cull +
+    // sort against the view's light frustum into scratch buffers; the sort
+    // groups draws by mesh so the resolve stays memoised. batchDepthCasters
+    // keeps castsShadow objects only and drops `skipEntity`'s geometry: the
+    // entity the local light itself sits on (a light authored onto a mesh
+    // entity would otherwise render that mesh at z≈0 into its own map and
+    // shadow itself out); kNoOwnerEntity (every cascade) skips nothing. Runs
+    // of one mesh are drawn one call per transform through the push constants.
+    auto drawDepthLayer = [&](uint32_t size, const glm::mat4& viewProj, const glm::mat4& clip,
+                              uint32_t skipEntity)
     {
-        const RenderObject& obj = m_renderWorld.objects[idx];
-        const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
-        const GpuMesh& m    = mesh ? *mesh : m_cube;
-        if (!m.indexCount) continue;
-        PushConstants pc{ lightClip * obj.transform, obj.transform };
-        vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-        VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
-        vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+        VkViewport vp{ 0.0f, 0.0f, (float)size, (float)size, 0.0f, 1.0f };
+        VkRect2D   sc{ { 0, 0 }, { size, size } };
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdSetDepthBias(cmd, kShadowBiasConstant, 0.0f, kShadowBiasSlope);
+        m_culler.cull(m_renderWorld, viewProj, m_shadowVisible);
+        m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
+        RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, skipEntity, m_shadowBatches);
+        for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
+        {
+            const GpuMesh* mesh = resolveMesh(b.meshAssetId);
+            const GpuMesh& m    = mesh ? *mesh : m_cube;
+            if (!m.indexCount) continue;
+            VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
+            vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
+            const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
+            for (uint32_t k = 0; k < b.count; ++k)
+            {
+                PushConstants pc{ clip * xf[k], xf[k] };
+                vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+                vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
+            }
+        }
+    };
+
+    // One depth render per cascade into its own array layer. Each cascade
+    // re-culls the casters against ITS light frustum (not the camera): an
+    // off-screen object still casts into the visible scene while it sits
+    // inside the cascade coverage. Mirrors GL's renderDepthLayer / Metal's
+    // encodeDepthLayer / the D3D11+D3D12 passes.
+    //
+    // EVERY layer runs through the pass, also the ones above the project's
+    // cascade count (cleared, no draws): the pass takes the attachment from
+    // UNDEFINED to SHADER_READ_ONLY, and the scene set samples the WHOLE array
+    // in that layout — a layer the pass never touched would be sampled in an
+    // undefined layout (validation error, GPU fault on some drivers). A clear
+    // of an unused 2048² layer is cheap. Without a directional light the
+    // cascade array is left alone (its layout is ensured above).
+    if (wantCsm)
+    {
+        for (int c = 0; c < kCsmCascades; ++c)
+        {
+            VkClearValue clear{};
+            clear.depthStencil = { 1.0f, 0 };
+            VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+            rpbi.renderPass        = m_shadowPass;
+            rpbi.framebuffer       = m_shadowFB[c];
+            rpbi.renderArea.extent = { m_shadowSize, m_shadowSize };
+            rpbi.clearValueCount   = 1;
+            rpbi.pClearValues      = &clear;
+            vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+            if (c < nCascades)
+                drawDepthLayer(m_shadowSize, csm.cascadeViewProj[c], m_cascadeClip[c], kNoOwnerEntity);
+            vkCmdEndRenderPass(cmd);
+        }
+        m_shadowLayoutValid       = true; // every layer went through the pass → SHADER_READ_ONLY
+        m_shadowRenderedThisFrame = true;
     }
-    vkCmdEndRenderPass(cmd);
+    else
+        ensureSampledLayout();
+
+    // ── Local (point/spot) atlas layers ─────────────────────────────────────
+    // Only the layers the extractor assigned (spot = 1, point = 6 cube faces),
+    // each into its own layer of the atlas with its own cull and the owning
+    // entity skipped. The clip transforms are kept for DrawScene's UBO fill
+    // (same reason as m_cascadeClip).
+    if (wantLocal)
+    {
+        const int nLocal = std::clamp(csm.localLayerCount, 0, kLocalShadowLayers);
+        for (int v = 0; v < nLocal; ++v)
+        {
+            m_localShadowClip[v] = HE::kVulkanClipFix * csm.localViewProj[v];
+            VkClearValue clear{};
+            clear.depthStencil = { 1.0f, 0 };
+            VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+            rpbi.renderPass        = m_shadowPass;
+            rpbi.framebuffer       = m_localShadowFB[v];
+            rpbi.renderArea.extent = { kLocalShadowSize, kLocalShadowSize };
+            rpbi.clearValueCount   = 1;
+            rpbi.pClearValues      = &clear;
+            vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+            drawDepthLayer(kLocalShadowSize, csm.localViewProj[v], m_localShadowClip[v],
+                           csm.localOwnerEntity[v]);
+            vkCmdEndRenderPass(cmd);
+        }
+        for (int v = nLocal; v < kLocalShadowLayers; ++v) m_localShadowClip[v] = glm::mat4(1.0f);
+        m_localShadowLayerCount = nLocal;
+    }
 }
 
 bool VulkanRenderer::createMeshBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
@@ -4258,22 +4691,84 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     const glm::mat4 viewProj =
         HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
 
+    // The local (point/spot) atlas is valid this frame when EncodeShadowMap
+    // rendered at least one layer into it (and the array view is bound).
+    const bool localShadows = m_localShadowLayerCount > 0 && m_localShadowView != VK_NULL_HANDLE;
+
     // Per-frame UBO for this in-flight slot.
     {
         FrameUBOData f{};
         f.cameraPos     = glm::vec4(m_renderWorld.camera.position, 1.0f);
-        const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
-        f.lightCount    = glm::ivec4(count, 0, 0, 0);
-        for (int i = 0; i < count; ++i)
+        // Clustered lighting (plan P7 on the forward path): point/spot lights
+        // leave the 8-light window for this frame slot's cluster SSBOs
+        // (HE::BuildClusterLights); the window then carries directional lights
+        // only. The slot's fence was waited on in Render(), so the mapped
+        // buffers are free to rewrite.
+        const bool clustered = m_forwardClustered && m_clusterReady
+                            && !m_renderWorld.lights.empty();
+        if (clustered)
         {
-            const LightData& l = m_renderWorld.lights[i];
-            f.lightPos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
-            f.lightDir[i]    = glm::vec4(l.direction, l.spotAngleCos);
-            f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
-            f.lightParams[i] = glm::vec4(l.range, 0.0f, 0.0f, 0.0f);
+            const HE::ClusterLightBuild cb =
+                HE::BuildClusterLights(m_renderWorld, localShadows, m_giRanThisFrame);
+            if (cb.droppedLights > 0 && !m_clusterCapWarned)
+            {
+                m_clusterCapWarned = true;
+                HE_LOG_WARN(RHI, "VulkanRenderer: %d point/spot light(s) exceed the cluster caps "
+                                 "(%d lights / %d indices) and are not lit",
+                            cb.droppedLights, HE::kMaxClusteredLights, HE::kMaxClusterIndices);
+            }
+            std::memcpy(m_clusterLights[m_currentFrame].mapped, cb.lights.data(),  cb.lights.size()  * sizeof(glm::vec4));
+            std::memcpy(m_clusterGrid[m_currentFrame].mapped,   cb.grid.data(),    cb.grid.size()    * sizeof(glm::uvec2));
+            std::memcpy(m_clusterIdx[m_currentFrame].mapped,    cb.indices.data(), cb.indices.size() * sizeof(uint32_t));
+            f.clusterParams = cb.params;
+            f.clusterCamFwd = cb.camFwd;
+            const HE::DirectionalLightWindow w = HE::BuildDirectionalLightWindow(m_renderWorld);
+            f.lightCount = glm::ivec4(w.count, 0, 0, 0);
+            for (int i = 0; i < w.count; ++i)
+            {
+                f.lightPos[i]    = w.pos[i];
+                f.lightDir[i]    = w.dir[i];
+                f.lightColor[i]  = w.color[i];
+                f.lightParams[i] = w.params[i];
+            }
         }
-        f.lightVP       = HE::kVulkanClipFix * m_renderWorld.shadow.viewProj;
-        f.shadowEnabled = glm::ivec4(m_renderWorld.shadow.enabled ? 1 : 0, 0, 0, 0);
+        else
+        {
+            // clusterParams stays zero → the shader's window loop lights everything.
+            const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+            f.lightCount    = glm::ivec4(count, 0, 0, 0);
+            for (int i = 0; i < count; ++i)
+            {
+                const LightData& l = m_renderWorld.lights[i];
+                f.lightPos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
+                f.lightDir[i]    = glm::vec4(l.direction, l.spotAngleCos);
+                f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
+                // y = the light's base layer in the local shadow atlas, -1 = no
+                // local shadow (built-in convention, same as Metal/GL/D3D). The
+                // layer assignment is deterministic per world state + camera, so
+                // this extract's layers match the ones EncodeShadowMap rendered.
+                f.lightParams[i] = glm::vec4(l.range,
+                                             localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
+                                             0.0f, 0.0f);
+            }
+        }
+        // Local atlas constants from EncodeShadowMap (same reason as the cascades).
+        for (int v = 0; v < kLocalShadowLayers; ++v) f.localShadowVP[v] = m_localShadowClip[v];
+        f.localShadowParams = glm::vec4(1.0f / static_cast<float>(kLocalShadowSize),
+                                        localShadows ? 1.0f : 0.0f, 0.0f, 0.0f);
+        // Cascade constants from EncodeShadowMap's extract (the one the slices
+        // were rendered with). Shadows are on only when that pass actually
+        // ran this frame — the array holds nothing usable otherwise.
+        for (int c = 0; c < kCsmCascades; ++c) f.cascadeVP[c] = m_cascadeClip[c];
+        f.cascadeSplits = m_cascadeSplits;
+        f.cameraFwd     = glm::vec4(m_cascadeCamFwd, 1.0f / float(std::max(m_shadowSize, 1u)));
+        f.shadowBias    = glm::vec4(m_shadowSettings.slopeBias, m_shadowSettings.minBias, 0.0f, 0.0f);
+        f.shadowEnabled = glm::ivec4(m_shadowRenderedThisFrame ? 1 : 0,
+                                     m_debugShadowCascades ? 1 : 0, 0, 0);
+        static_assert(sizeof(f.localShadowVP) / sizeof(f.localShadowVP[0]) == kLocalShadowLayers,
+                      "Frame UBO local atlas array must match kLocalShadowLayers");
+        static_assert(kLocalShadowLayers == ShadowData::kMaxLocalShadowLayers,
+                      "Vulkan local atlas layer count must match the extractor's");
         f.sunDir        = glm::vec4(m_renderWorld.sunDirection, 0.0f);
         f.fog           = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0.0f, 0.0f);
         // viewport.z == 1 iff runSSAO() completed this frame (blurRT holds valid data).
@@ -4343,13 +4838,42 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         const glm::vec3 sc = matSunColor;
         lit.sunColor[0] = sc.r; lit.sunColor[1] = sc.g; lit.sunColor[2] = sc.b;
         // Full light window for heLitP() — same first-8 order as the built-in
-        // shaders. Shared fill (HE::FillMaterialLightWindow); Vulkan has no local
-        // (point/spot) shadow atlas yet, so it passes false and lightParams[i].y
-        // stays 0 = "casts no local shadow".
-        HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/false);
+        // shaders. Shared fill (HE::FillMaterialLightWindow); with the local
+        // (point/spot) atlas rendered this frame, lightParams[i].y carries the
+        // light's base layer + 1 (0 = "casts no local shadow").
+        HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        // Local atlas view-projs for heLocalShadowFactor (heLocalShadow, set 0
+        // binding 13, bound per draw below). kVulkanClipFix is already in
+        // m_localShadowClip and is the whole convention — same as csmVP.
+        if (localShadows)
+            for (int v = 0; v < m_localShadowLayerCount && v < kLocalShadowLayers; ++v)
+                std::memcpy(lit.localShadowVP[v], &m_localShadowClip[v][0][0], 16 * sizeof(float));
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = m_giRanThisFrame ? 1.0f : 0.0f;
+        // CSM fallback for graph materials (Lighting v2.2): only meaningful
+        // when the GI masks are absent this frame — heLitP's directional
+        // lights then sample the SAME cascade array as the built-in shader
+        // (heCsm, binding 12, bound per draw below). kVulkanClipFix is already
+        // in m_cascadeClip and is the whole convention here: scene.frag samples
+        // uv = p.xy*0.5+0.5 with z in [0,1] under it, which is exactly what the
+        // shared preamble's heCsmShadow() expects — no extra UV flip (unlike
+        // the D3D/Metal fills, whose texture origin is top-left).
+        if (!m_giRanThisFrame && m_shadowRenderedThisFrame)
+        {
+            const int nCascades = static_cast<int>(m_cascadeSplits.w);
+            for (int c = 0; c < nCascades && c < kCsmCascades; ++c)
+                std::memcpy(lit.csmVP[c], &m_cascadeClip[c][0][0], 16 * sizeof(float));
+            lit.csmSplits[0] = m_cascadeSplits.x;
+            lit.csmSplits[1] = m_cascadeSplits.y;
+            lit.csmSplits[2] = m_cascadeSplits.z;
+            lit.csmSplits[3] = m_cascadeSplits.w;
+            lit.camFwd[0] = m_cascadeCamFwd.x;
+            lit.camFwd[1] = m_cascadeCamFwd.y;
+            lit.camFwd[2] = m_cascadeCamFwd.z;
+            lit.shadowBias[0] = m_shadowSettings.slopeBias;
+            lit.shadowBias[1] = m_shadowSettings.minBias;
+        }
         // Forward SSR for heLitP's reflection cascade (heSSRFwd, set 0 binding
         // 31). x = the gate, y = intensity, z = max roughness; w is the DEFERRED
         // marker and stays zero — the forward path never zeroes ambSpec, and
@@ -4586,7 +5110,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // (needs a UUID→view cache); bound to the white default for now.
                             VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            VkWriteDescriptorSet w[14]{};
+                            VkWriteDescriptorSet w[15]{};
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
                                 w[idx].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -4620,13 +5144,16 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 (m_giRanThisFrame && m_giLocalMask.view) ? VK_IMAGE_LAYOUT_GENERAL
                                                                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giLocalII);
-                            // heCsm (binding 12, sampler2DArray): Vulkan's shadow map is a
-                            // single 2D map, so the CSM fallback stays off (csmSplits.w = 0)
-                            // and the 1-layer white ARRAY view keeps the descriptor valid —
-                            // a 2D view here would fail validation against the arrayed image
-                            // type in the SPIR-V.
-                            VkDescriptorImageInfo csmII{ m_albedoSampler, m_whiteArrayView,
-                                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            // heCsm (binding 12, sampler2DArray): the cascade shadow array
+                            // the built-in scene shader samples at binding 1, through the
+                            // same nearest/clamp sampler (PCF taps compare single texels).
+                            // The 1-layer white ARRAY view stands in while the array does
+                            // not exist — csmSplits.w is 0 then, and the view DIMENSION
+                            // must still match the arrayed sampler in the SPIR-V.
+                            VkDescriptorImageInfo csmII{
+                                (m_shadowView && m_shadowLayoutValid) ? m_shadowSampler : m_albedoSampler,
+                                (m_shadowView && m_shadowLayoutValid) ? m_shadowView    : m_whiteArrayView,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &csmII);
                             // heSSRFwd (binding 31): the SAME image the built-in
                             // shaders read at scene binding 8, so a graph
@@ -4639,7 +5166,16 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                     : (m_ssrBlackRT.view ? m_ssrBlackRT.view : m_whiteAlbedoView),
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(13, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &ssrII);
-                            vkUpdateDescriptorSets(m_device, 14, w, 0, nullptr);
+                            // heLocalShadow (binding 13, sampler2DArray): the local
+                            // (point/spot) atlas, same nearest/clamp sampler as heCsm.
+                            // The white ARRAY view stands in until the atlas was
+                            // rendered — lightParams[i].y is 0 then (never sampled).
+                            VkDescriptorImageInfo localII{
+                                localShadows ? m_shadowSampler   : m_albedoSampler,
+                                localShadows ? m_localShadowView : m_whiteArrayView,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(14, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &localII);
+                            vkUpdateDescriptorSets(m_device, 15, w, 0, nullptr);
 
                             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, matPipe);
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -5892,6 +6428,21 @@ void VulkanRenderer::SetGISettings(const GISettings& s)
 // no extension — so unlike the ray-traced GI it has no device gate here. What
 // it does need is the shader cross-compiler and the editor viewport's HDR
 // target; both are checked in ssrWantedThisFrame().
+void VulkanRenderer::SetShadowSettings(const ShadowSettings& s)
+{
+    // The images are not touched here: this is called from the editor's frame
+    // push, which may land between passes. Render() re-creates them at its top
+    // (after vkDeviceWaitIdle) when the size no longer matches, and hands the
+    // extractor the size that is actually allocated. Mirrors GL/Metal/D3D.
+    m_shadowSizeDirty |= (s.resolution != m_shadowSettings.resolution);
+    m_shadowSettings   = s;
+}
+
+void VulkanRenderer::SetShadowDebug(bool on)
+{
+    m_debugShadowCascades = on;
+}
+
 void VulkanRenderer::SetSSRSettings(const SSRSettings& s)
 {
     m_ssrEnabled      = s.enabled;
