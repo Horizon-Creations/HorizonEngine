@@ -2034,8 +2034,9 @@ struct D3D12RendererImpl
     // builds at draw time from MaterialShaderLibrary HLSL (SPIRV-Cross). They share ONE
     // root signature + a dedicated 5-slot white SRV heap, and per frame in flight a
     // HeLighting CB (filled once/frame) + U ring + HeParams ring (one 256-B slot per draw).
-    // All of this is inert (never touched) when HE_HAVE_SHADERC is off: m_matReady stays
-    // false and the draw path skips it, so behaviour equals today's built-in PBR path.
+    // Compiled in regardless of HE_HAVE_SHADERC: without the cross-compiler the shaders
+    // come from the pak's precompiled variants (MaterialShaderVariant), and a material
+    // that has neither falls back to the built-in path.
     // Canonical SPIRV-Cross HLSL register mapping (shader_model=50, binding→register):
     //   b0 HeLighting(FS) | b1 U(VS) | b3 HeParams(FS) | b8/b9 HeLighting/HeParams(WPO VS)
     //   t2 heTex0, t4..t7 heTexP0..3 (+ SamplerState s2, s4..s7).
@@ -2054,7 +2055,9 @@ struct D3D12RendererImpl
 
     void createMaterialResources();
     ID3D12PipelineState* GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
-                                               const std::string& vertBody, bool hdr, bool transparent);
+                                               const std::string& vertBody,
+                                               const MaterialShaderVariant* precompiled,
+                                               bool hdr, bool transparent);
 
     // ── Screen-space decals (forward) ───────────────────────────────────────
     // docs/decals-cross-backend-plan.md §6c. D3D12 has no G-buffer, so a decal is
@@ -3442,7 +3445,7 @@ struct D3D12RendererImpl
         createSkinnedPipeline();
         createUIPipeline();
         // A4: build the material-graph root signature, white SRV heap and per-frame UBO
-        // rings once (no-op when HE_HAVE_SHADERC is off). Failure leaves m_matReady false,
+        // rings once. Failure leaves m_matReady false,
         // so the draw path silently stays on the built-in PBR path.
         createMaterialResources();
         // GI up front rather than on the first GI draw — same reasoning as D3D11:
@@ -6622,12 +6625,12 @@ struct D3D12RendererImpl
 // MaterialShaderLibrary HLSL (VS + PS). They share ONE root signature + a dedicated
 // 5-slot white SRV heap, and per frame in flight: a HeLighting CB (filled once/frame)
 // plus U and HeParams rings (one 256-B slot per draw). Mirrors the Vulkan A4 path
-// (VulkanRenderer::createMaterialResources + GetOrBuildMaterialPipeline). No-op when
-// HE_HAVE_SHADERC is off (m_matReady stays false, so the draw path skips it).
+// (VulkanRenderer::createMaterialResources + GetOrBuildMaterialPipeline). Always
+// compiled in: only the runtime cross-compile needs HE_HAVE_SHADERC, the pak's
+// precompiled variants do not (ShaderCompilerStub.cpp explains the flavour split).
 // ─────────────────────────────────────────────────────────────────────────────
 void D3D12RendererImpl::createMaterialResources()
 {
-#if defined(HE_HAVE_SHADERC)
     // Root signature: root CBVs b0/b1/b3/b8/b9 + one SRV table for t2 + t4..t7 + static
     // samplers s2 + s4..s7 (linear-wrap). Registers match SPIRV-Cross HLSL (binding→register,
     // shader_model=50, no remap — verified in ShaderCompiler.cpp / spirv_hlsl.cpp).
@@ -6777,14 +6780,17 @@ void D3D12RendererImpl::createMaterialResources()
 
     m_matReady = true;
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: A4 material resources created");
-#endif
 }
 
+// `precompiled` (the pak's baked HLSL for this backend, MaterialShaderLibrary::
+// precompiledFor) wins over the runtime cross-compile — same split as GL's
+// GetOrBuildMaterialProgram and Metal's GetOrBuildMaterialPipeline, and the only
+// source of shaders in a flavour built without glslang.
 ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, const std::string& frag,
-                                                              const std::string& vertBody, bool hdr,
-                                                              bool transparent)
+                                                              const std::string& vertBody,
+                                                              const MaterialShaderVariant* precompiled,
+                                                              bool hdr, bool transparent)
 {
-#if defined(HE_HAVE_SHADERC)
     // Cache key mixes the shader hash with the render-target + blend variant so LDR (RGBA8) /
     // HDR (RGBA16F) / opaque / transparent PSOs never collide (same constants as Vulkan A4).
     const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
@@ -6792,16 +6798,26 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     if (auto it = m_materialPSOs.find(key); it != m_materialPSOs.end()) return it->second.Get();
 
     using Backend = HE::MaterialShaderLibrary::Backend;
-    // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to HLSL.
-    const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
-        ? m_matShaderLib.standardVertex(Backend::HLSL)
-        : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
-    const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
-    if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+    std::string vsSrc, psSrc;
+    if (precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
     {
-        HE_LOG_WARN(RHI, "%s", "D3D12Renderer: A4 material shader cross-compile failed");
-        m_materialPSOs.emplace(key, nullptr); // cache the miss — don't retry every draw
-        return nullptr;
+        vsSrc = precompiled->vertex; psSrc = precompiled->fragment; // baked at export
+    }
+    else
+    {
+        // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to HLSL.
+        const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
+            ? m_matShaderLib.standardVertex(Backend::HLSL)
+            : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
+        if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material shader cross-compile failed: ")
+                + vc.log + " " + fc.log).c_str());
+            m_materialPSOs.emplace(key, nullptr); // cache the miss — don't retry every draw
+            return nullptr;
+        }
+        vsSrc = vc.source; psSrc = fc.source;
     }
 
     // One-time: dump the generated HLSL so a Windows-GPU run can confirm the register /
@@ -6809,8 +6825,8 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
     if (!m_matHlslLogged)
     {
         m_matHlslLogged = true;
-        HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vc.source).c_str());
-        HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + fc.source).c_str());
+        HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material VS HLSL:\n") + vsSrc).c_str());
+        HE_LOG_INFO(RHI, "%s", (std::string("D3D12 A4 material PS HLSL:\n") + psSrc).c_str());
     }
 
     UINT cflags = 0;
@@ -6819,7 +6835,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
 #endif
     // SPIRV-Cross emits the GLSL-sourced entry point as `main` (not VSMain/PSMain).
     ComPtr<ID3DBlob> vs, ps, cerr;
-    if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "matVS", nullptr, nullptr,
+    if (FAILED(D3DCompile(vsSrc.c_str(), vsSrc.size(), "matVS", nullptr, nullptr,
                           "main", "vs_5_0", cflags, 0, &vs, &cerr)))
     {
         HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material VS compile failed: ")
@@ -6827,7 +6843,7 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
         m_materialPSOs.emplace(key, nullptr);
         return nullptr;
     }
-    if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "matPS", nullptr, nullptr,
+    if (FAILED(D3DCompile(psSrc.c_str(), psSrc.size(), "matPS", nullptr, nullptr,
                           "main", "ps_5_0", cflags, 0, &ps, &cerr)))
     {
         HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: A4 material PS compile failed: ")
@@ -6886,10 +6902,6 @@ ID3D12PipelineState* D3D12RendererImpl::GetOrBuildMaterialPSO(uint64_t hash, con
         return nullptr;
     }
     return m_materialPSOs.emplace(key, pso12).first->second.Get();
-#else
-    (void)hash; (void)frag; (void)vertBody; (void)hdr; (void)transparent;
-    return nullptr;
-#endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -7628,7 +7640,6 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     };
     fillPerFrame(false, p.ssaoEnabled && p.ssaoReady);
 
-#if defined(HE_HAVE_SHADERC)
     // A4: reset this frame slot's material ring/descriptor cursor once per frame.
     if (p.m_matReady)
         p.m_matDrawCursor[p.frameIndex] = 0;
@@ -7674,7 +7685,6 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
     };
     fillMatLight(false);
-#endif
 
     // The heap slot the scene shader's t16 SSR table points at this frame. Set
     // once the trace has run; until then (and on every non-SSR frame) it names
@@ -7923,9 +7933,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // non-zero intensity. Off → t16 names the null descriptor and the
         // cascade folds away on uSSRParams.x.
         fillPerFrame(giShadingActive, aoWanted, ssrResult != nullptr);
-#if defined(HE_HAVE_SHADERC)
         fillMatLight(giShadingActive);
-#endif
 
         // ── Geometry pass: bind combined sceneSrvHeap (shadow t0 + AO t2 +
         // GI mask/atlases t4..t6 — slots [4..6] were written at GI-target/atlas
@@ -8031,7 +8039,6 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             const D3D12IndexRange range = DrawIndexRange(dc, m.indexCount);
             if (range.count == 0) return; // a slot clamped away on the fallback cube
 
-#if defined(HE_HAVE_SHADERC)
             // A4: node-graph material? Render through a per-material PSO built from the
             // MaterialShaderLibrary HLSL, bypassing the built-in PBR path entirely. Falls
             // through unchanged when the material has no graph shader OR resources are down.
@@ -8047,8 +8054,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     // depth-writing PSO (hence RenderSorter::isTransparent, tint alpha
                     // included, not a bare dc.opacity test).
                     const bool matTransp = RenderSorter::isTransparent(dc);
-                    ID3D12PipelineState* matPso = p.GetOrBuildMaterialPSO(matHash, matFrag,
-                                                                          matVertBody, p.usingHDR, matTransp);
+                    // The pak's baked HLSL when the export carried one (any D3D tag),
+                    // else cross-compile now. resolveShaders just fetched this material,
+                    // so the pointer is fresh; it is consumed before anything can load.
+                    const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
+                        m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D12);
+                    ID3D12PipelineState* matPso = p.GetOrBuildMaterialPSO(matHash, matFrag, matVertBody,
+                                                                          matPre, p.usingHDR, matTransp);
                     if (matPso && p.m_matDrawCursor[p.frameIndex] < D3D12RendererImpl::k_matMaxDraws)
                     {
                         // Per-entity HeParams override wins over the material's shared params.
@@ -8136,7 +8148,6 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     }
                 }
             }
-#endif
             // Base color: an explicit MaterialComponent override (dc.materialAssetId) wins
             // over the mesh's own baked texture; else the mesh's baked texture (A1); else flat.
             if (mesh) p.ensureMeshAlbedo(cl, m, dc.meshAssetId, m_contentManager);

@@ -1903,7 +1903,7 @@ void VulkanRenderer::createScenePipeline()
 
     // A4: build the material-graph descriptor-set layout, pipeline layout, per-frame
     // descriptor pools and UBO ring buffers once (the white default + albedo sampler this
-    // path binds already exist from the block above). No-op when HE_HAVE_SHADERC is off.
+    // path binds already exist from the block above).
     createMaterialResources();
 }
 
@@ -1956,7 +1956,6 @@ void VulkanRenderer::destroyScenePipeline()
 // ─────────────────────────────────────────────────────────────────────────────
 void VulkanRenderer::createMaterialResources()
 {
-#if defined(HE_HAVE_SHADERC)
     // The material fragment samples the white default at heTex0/heTexP0..3 for this
     // first increment; without it (or the shared albedo sampler) there is nothing valid
     // to bind, so leave the path disabled rather than sample an unbound descriptor.
@@ -2077,12 +2076,10 @@ void VulkanRenderer::createMaterialResources()
 
     m_matReady = true;
     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: A4 material resources created");
-#endif
 }
 
 void VulkanRenderer::destroyMaterialResources()
 {
-#if defined(HE_HAVE_SHADERC)
     m_matReady = false;
     for (auto& kv : m_materialPipelines)
         if (kv.second) vkDestroyPipeline(m_device, kv.second, nullptr);
@@ -2102,14 +2099,17 @@ void VulkanRenderer::destroyMaterialResources()
     if (m_matPipelineLayout) { vkDestroyPipelineLayout(m_device, m_matPipelineLayout, nullptr); m_matPipelineLayout = VK_NULL_HANDLE; }
     if (m_matSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_matSetLayout, nullptr); m_matSetLayout = VK_NULL_HANDLE; }
     if (m_whiteArrayView)    { vkDestroyImageView(m_device, m_whiteArrayView, nullptr);         m_whiteArrayView = VK_NULL_HANDLE; }
-#endif
 }
 
+// `precompiled` (the pak's baked SPIR-V for Vulkan, MaterialShaderLibrary::precompiledFor)
+// wins over the runtime cross-compile — same split as GL's GetOrBuildMaterialProgram and
+// Metal's GetOrBuildMaterialPipeline, and the only source of shaders in a flavour built
+// without glslang.
 VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
-                                                      const std::string& vertBody, bool hdr,
-                                                      bool transparent)
+                                                      const std::string& vertBody,
+                                                      const MaterialShaderVariant* precompiled,
+                                                      bool hdr, bool transparent)
 {
-#if defined(HE_HAVE_SHADERC)
     // Cache key mixes the shader hash with the render-target + blend variant so LDR (swapchain)
     // / HDR (RGBA16F offscreen) / opaque / transparent pipelines never collide.
     const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
@@ -2121,16 +2121,29 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
         return VK_NULL_HANDLE; // target pass not ready yet — retry next frame (not cached)
 
     using Backend = HE::MaterialShaderLibrary::Backend;
-    // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to SPIR-V.
-    const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
-        ? m_matShaderLib.standardVertex(Backend::SpirV)
-        : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::SpirV);
-    const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::SpirV);
-    if (!vc.ok || !fc.ok || vc.spirv.empty() || fc.spirv.empty())
+    // The variant stores the SPIR-V words as raw bytes; a malformed blob (odd byte
+    // count) is treated as absent so the cross-compile can still save the material.
+    std::vector<uint32_t> preVs, preFs;
+    const bool havePre = precompiled
+        && HE::MaterialShaderLibrary::spirvFromBytes(precompiled->vertex, preVs)
+        && HE::MaterialShaderLibrary::spirvFromBytes(precompiled->fragment, preFs);
+    const std::vector<uint32_t>* vsWords = &preVs;
+    const std::vector<uint32_t>* fsWords = &preFs;
+    if (!havePre)
     {
-        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: A4 material shader cross-compile failed");
-        m_materialPipelines.emplace(key, VK_NULL_HANDLE); // cache the miss — don't retry every draw
-        return VK_NULL_HANDLE;
+        // Standard vertex (no WPO) or the graph's custom vertex body, cross-compiled to SPIR-V.
+        const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
+            ? m_matShaderLib.standardVertex(Backend::SpirV)
+            : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::SpirV);
+        const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::SpirV);
+        if (!vc.ok || !fc.ok || vc.spirv.empty() || fc.spirv.empty())
+        {
+            HE_LOG_WARN(RHI, "%s", (std::string("VulkanRenderer: A4 material shader cross-compile failed: ")
+                + vc.log + " " + fc.log).c_str());
+            m_materialPipelines.emplace(key, VK_NULL_HANDLE); // cache the miss — don't retry every draw
+            return VK_NULL_HANDLE;
+        }
+        vsWords = &vc.spirv; fsWords = &fc.spirv;
     }
 
     auto makeModule = [&](const std::vector<uint32_t>& spv) -> VkShaderModule {
@@ -2141,8 +2154,8 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
         if (vkCreateShaderModule(m_device, &ci, nullptr, &mod) != VK_SUCCESS) return VK_NULL_HANDLE;
         return mod;
     };
-    VkShaderModule vs = makeModule(vc.spirv);
-    VkShaderModule fs = makeModule(fc.spirv);
+    VkShaderModule vs = makeModule(*vsWords);
+    VkShaderModule fs = makeModule(*fsWords);
     if (!vs || !fs)
     {
         if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
@@ -2235,10 +2248,6 @@ VkPipeline VulkanRenderer::GetOrBuildMaterialPipeline(uint64_t hash, const std::
     vkDestroyShaderModule(m_device, fs, nullptr);
     m_materialPipelines.emplace(key, pipe); // cache success OR failure (null → no per-draw retry)
     return pipe;
-#else
-    (void)hash; (void)frag; (void)vertBody; (void)hdr;
-    return VK_NULL_HANDLE;
-#endif
 }
 
 void VulkanRenderer::createShadowResources()
@@ -4315,7 +4324,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         }
     }
 
-#if defined(HE_HAVE_SHADERC)
     // A4: recycle this frame slot's material descriptor sets (the frame fence waited on
     // in Render() guarantees the GPU finished with them) + reset the per-frame ring cursor,
     // then fill the shared HeLighting UBO once — identical for every graph-material draw.
@@ -4369,7 +4377,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         if (m_matLightBuf[m_currentFrame].mapped)
             std::memcpy(m_matLightBuf[m_currentFrame].mapped, &lit, sizeof(lit));
     }
-#endif
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
         hdr && m_scenePipelineHDR ? m_scenePipelineHDR : m_scenePipeline);
@@ -4500,7 +4507,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             const VulkanIndexRange range = DrawIndexRange(dc, m.indexCount);
             if (range.count == 0) return; // a slot clamped away on the fallback cube
 
-#if defined(HE_HAVE_SHADERC)
             // A4: node-graph material? Render through a per-material pipeline built from the
             // MaterialShaderLibrary SPIR-V, bypassing the built-in PBR path entirely. Falls
             // through unchanged when the material has no graph shader OR resources are down.
@@ -4516,8 +4522,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     // depth-writing pipeline (hence RenderSorter::isTransparent, tint
                     // alpha included, not a bare dc.opacity test).
                     const bool matTransp = RenderSorter::isTransparent(dc);
+                    // The pak's baked SPIR-V when the export carried one, else cross-compile
+                    // now. resolveShaders just fetched this material, so the pointer is
+                    // fresh; it is consumed before anything can load.
+                    const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
+                        m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::Vulkan);
                     VkPipeline matPipe = GetOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
-                                                                    hdr, matTransp);
+                                                                    matPre, hdr, matTransp);
                     uint32_t& cursor = m_matDrawCursor[m_currentFrame];
                     if (matPipe != VK_NULL_HANDLE && cursor < k_matMaxDraws)
                     {
@@ -4669,7 +4680,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     }
                 }
             }
-#endif
             // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
             // material is loaded, fully replaces the mesh's baked texture — even to flat.
             VkDescriptorSet albedoSet = m.albedoSet;             // baked (A1); null → flat

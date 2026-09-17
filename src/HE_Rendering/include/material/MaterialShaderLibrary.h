@@ -7,6 +7,7 @@
 // lives here; only the pipeline-object construction stays in each backend.
 #pragma once
 
+#include <Types/Enums.h> // HE::RendererBackend (precompiledFor)
 #include <Types/UUID.h>
 #include <cstdint>
 #include <string>
@@ -14,6 +15,8 @@
 #include <vector>
 
 class ContentManager; // global namespace (HE_Core's ContentManager is not namespaced)
+struct MaterialAsset;
+struct MaterialShaderVariant;
 
 namespace HE
 {
@@ -172,6 +175,20 @@ public:
     bool resolveGBufferShaders(const ContentManager& cm, const UUID& materialId,
                                uint64_t& hashOut, std::string& fragOut,
                                std::string& vertBodyOut) const;
+
+    // The variant the exporter baked for `backend` (MaterialAsset::precompiledShaders,
+    // CHUNK_PSHD), or null → cross-compile at runtime. D3D11 and D3D12 share one HLSL
+    // (same SM 5.0 source, same pinned registers), so either tag serves both: a pak
+    // exported for D3D12 alone still carries its materials onto D3D11 and vice versa.
+    // Every other backend matches exactly. Null `ma` → null.
+    static const MaterialShaderVariant* precompiledFor(const MaterialAsset* ma,
+                                                       RendererBackend backend);
+
+    // A Vulkan variant stores its SPIR-V as the raw word bytes in the variant's string
+    // fields (the exporter memcpy's the words; the runtime reinterprets). Unpack them;
+    // false when the byte count is not a whole number of words or the module is empty —
+    // the caller then treats the variant as absent and cross-compiles.
+    static bool spirvFromBytes(const std::string& bytes, std::vector<uint32_t>& out);
 
     // Deferred lighting-resolve fragment: built from the SAME kLightingPreamble as every
     // material fragment and shades by calling heLitP on the G-buffer attributes — there

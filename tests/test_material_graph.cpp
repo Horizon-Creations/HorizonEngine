@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -8,10 +9,9 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h>
-
-#if defined(HE_TESTS_HAVE_SHADERC)
+// he_materialshader is linked into he_tests in every flavour (the stub answers the
+// compiles); only the cross-compile TEST CASES below are gated on HE_TESTS_HAVE_SHADERC.
 #include <material/MaterialShaderLibrary.h>
-#endif
 
 using HE::MaterialGraph;
 using HE::MatNodeType;
@@ -670,6 +670,58 @@ TEST_CASE("Comment boxes round-trip through graph JSON (and old JSON still loads
 	MaterialGraph old;
 	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(MaterialGraph::makeDefault()), old));
 	CHECK(old.comments.empty());
+}
+
+// The precompiled-variant lookup the D3D11/D3D12/Vulkan draw paths use: exact tag
+// first, the D3D sibling as fallback (one HLSL serves both), nothing else crosses over.
+TEST_CASE("MaterialShaderLibrary::precompiledFor picks the exact tag, then the D3D sibling")
+{
+	using RB = HE::RendererBackend;
+	auto tag = [](RB b) { return static_cast<uint8_t>(b); };
+	MaterialAsset ma;
+	CHECK(HE::MaterialShaderLibrary::precompiledFor(nullptr, RB::D3D11) == nullptr);
+	CHECK(HE::MaterialShaderLibrary::precompiledFor(&ma, RB::D3D11) == nullptr);
+
+	MaterialShaderVariant d12; d12.backend = tag(RB::D3D12); d12.vertex = "v12"; d12.fragment = "f12";
+	MaterialShaderVariant vk;  vk.backend  = tag(RB::Vulkan); vk.vertex  = "vvk"; vk.fragment = "fvk";
+	ma.precompiledShaders = { vk, d12 };
+
+	// D3D11 has no exact variant → takes the D3D12 HLSL; D3D12 takes its own.
+	const MaterialShaderVariant* r11 = HE::MaterialShaderLibrary::precompiledFor(&ma, RB::D3D11);
+	REQUIRE(r11 != nullptr);
+	CHECK(r11->fragment == "f12");
+	const MaterialShaderVariant* r12 = HE::MaterialShaderLibrary::precompiledFor(&ma, RB::D3D12);
+	REQUIRE(r12 != nullptr);
+	CHECK(r12->fragment == "f12");
+	// Vulkan is exact; Metal/OpenGL never borrow anything.
+	const MaterialShaderVariant* rvk = HE::MaterialShaderLibrary::precompiledFor(&ma, RB::Vulkan);
+	REQUIRE(rvk != nullptr);
+	CHECK(rvk->fragment == "fvk");
+	CHECK(HE::MaterialShaderLibrary::precompiledFor(&ma, RB::Metal)  == nullptr);
+	CHECK(HE::MaterialShaderLibrary::precompiledFor(&ma, RB::OpenGL) == nullptr);
+
+	// Both D3D tags present → each backend gets its own, not the sibling.
+	MaterialShaderVariant d11; d11.backend = tag(RB::D3D11); d11.vertex = "v11"; d11.fragment = "f11";
+	ma.precompiledShaders.push_back(d11);
+	CHECK(HE::MaterialShaderLibrary::precompiledFor(&ma, RB::D3D11)->fragment == "f11");
+	CHECK(HE::MaterialShaderLibrary::precompiledFor(&ma, RB::D3D12)->fragment == "f12");
+}
+
+// The Vulkan variant's string field is the exporter's memcpy of the SPIR-V words.
+TEST_CASE("MaterialShaderLibrary::spirvFromBytes round-trips words and rejects torn blobs")
+{
+	const std::vector<uint32_t> words = { 0x07230203u, 0x00010000u, 0xDEADBEEFu };
+	std::string bytes(words.size() * sizeof(uint32_t), '\0');
+	std::memcpy(bytes.data(), words.data(), bytes.size());
+
+	std::vector<uint32_t> out;
+	REQUIRE(HE::MaterialShaderLibrary::spirvFromBytes(bytes, out));
+	CHECK(out == words);
+
+	CHECK_FALSE(HE::MaterialShaderLibrary::spirvFromBytes(std::string(), out));
+	CHECK(out.empty());
+	CHECK_FALSE(HE::MaterialShaderLibrary::spirvFromBytes(bytes.substr(0, 7), out)); // not whole words
+	CHECK(out.empty());
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)

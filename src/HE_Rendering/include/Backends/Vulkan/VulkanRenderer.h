@@ -103,14 +103,15 @@ private:
 	void           destroyDepthResources();
 	void           createScenePipeline();
 	void           destroyScenePipeline();
-	// A4: node-graph material pipelines (built from MaterialShaderLibrary SPIR-V).
-	// createMaterialResources()/destroyMaterialResources() are no-ops when the shader
-	// cross-compiler (HE_HAVE_SHADERC) is absent; GetOrBuildMaterialPipeline returns null.
+	// A4: node-graph material pipelines (built from MaterialShaderLibrary SPIR-V, or from
+	// the pak's precompiled variant when `precompiled` is set — the only source in a
+	// flavour built without the cross-compiler, see ShaderCompilerStub.cpp).
 	void           createMaterialResources();
 	void           destroyMaterialResources();
 	VkPipeline     GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
-	                                           const std::string& vertBody, bool hdr,
-	                                           bool transparent);
+	                                           const std::string& vertBody,
+	                                           const MaterialShaderVariant* precompiled,
+	                                           bool hdr, bool transparent);
 	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr = false);
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
@@ -243,9 +244,9 @@ private:
 
 	// ── A4: node-graph material pipelines ────────────────────────────────────
 	// Graph materials (Material-Node editor) render through per-material VkPipelines
-	// built at draw time from MaterialShaderLibrary SPIR-V. All of this is dead weight
-	// (never touched) when HE_HAVE_SHADERC is off: the member is default-constructed and
-	// the draw path never calls it, so behaviour is identical to the built-in PBR path.
+	// built at draw time from MaterialShaderLibrary SPIR-V. Compiled in regardless of
+	// HE_HAVE_SHADERC: without the cross-compiler the SPIR-V comes from the pak's
+	// precompiled variants, and a material that has neither falls back to built-in PBR.
 	// Canonical descriptor set 0 layout (matches the generated SPIR-V exactly):
 	//   b0 UBO(FS) HeLighting | b1 UBO(VS) U | b2 tex(FS) heTex0 | b3 UBO(FS) HeParams
 	//   b4..7 tex(FS) heTexP0..3 | b8/b9 UBO(VS) HeLighting/HeParams (WPO custom vertex).

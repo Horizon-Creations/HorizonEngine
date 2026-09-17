@@ -1017,8 +1017,9 @@ struct D3D11RendererImpl
     // there is NO PSO / pipeline object: blend + depth + render-target format are separate
     // D3D11 states set at draw time, so a graph material's VS/PS/InputLayout are identical
     // for opaque/transparent/HDR — the draw path simply inherits the pass's blend + depth.
-    // All of this is inert (m_matReady stays false) when HE_HAVE_SHADERC is off, so behaviour
-    // equals today's built-in PBR path. Canonical SPIRV-Cross HLSL register mapping
+    // Compiled in regardless of HE_HAVE_SHADERC: without the cross-compiler the shaders
+    // come from the pak's precompiled variants (MaterialShaderVariant), and a material
+    // that has neither falls back to the built-in path. Canonical SPIRV-Cross HLSL register mapping
     // (shader_model=50, binding→register, verified for D3D12):
     //   b0 HeLighting(PS) | b1 U(VS) | b3 HeParams(PS) | b8/b9 HeLighting/HeParams(WPO VS)
     //   t2 heTex0, t4..t7 heTexP0..3 (+ SamplerState s2, s4..s7, linear-wrap).
@@ -3284,7 +3285,7 @@ struct D3D11RendererImpl
         createDebugLinePipeline();
         createSkinnedPipeline();
         createUIPipeline();
-        createMaterialResources(); // A4: node-graph material CBs + sampler (no-op w/o HE_HAVE_SHADERC)
+        createMaterialResources(); // A4: node-graph material CBs + sampler
         // GI up front rather than on the first GI draw. Two reasons: the shader
         // compile is the expensive part and belongs in init, not in a frame; and
         // a compile failure here clears giSupported BEFORE GetCapabilities() is
@@ -3430,10 +3431,11 @@ struct D3D11RendererImpl
     // Three dynamic constant buffers (HeLighting 64 B, U 176 B, HeParams 256 B) filled via
     // Map(WRITE_DISCARD) exactly like the built-in perObject/perFrame CBs, plus a linear-wrap
     // sampler for heTex0 + heTexP0..3. No PSO/root-sig — D3D11 sets shaders/CBs/SRVs/samplers
-    // individually. No-op (m_matReady stays false) when HE_HAVE_SHADERC is off.
+    // individually. Always compiled in: the shaders come either from the pak's
+    // precompiled variants or from the runtime cross-compile, and only the second one
+    // needs HE_HAVE_SHADERC (ShaderCompilerStub.cpp explains the flavour split).
     void createMaterialResources()
     {
-#if defined(HE_HAVE_SHADERC)
         auto makeCB = [&](UINT bytes, ComPtr<ID3D11Buffer>& out) -> bool {
             D3D11_BUFFER_DESC bd{};
             bd.ByteWidth      = (bytes + 15u) & ~15u; // 16-byte multiple (64/176/256 already aligned)
@@ -3458,7 +3460,6 @@ struct D3D11RendererImpl
         Logger::LogTo(HE::Log::Cat::RHI, m_matReady ? Logger::LogLevel::Info : Logger::LogLevel::Error,
             m_matReady ? "D3D11Renderer: A4 material resources created"
                        : "D3D11Renderer: A4 material resource allocation failed");
-#endif
     }
 
     // Build (or fetch from cache) the per-material VS + PS + input layout from the
@@ -3466,30 +3467,45 @@ struct D3D11RendererImpl
     // the D3D12/Vulkan GetOrBuild* (the transparent bit is redundant on D3D11 — the shader
     // objects don't bake blend/depth — but kept so the cache key matches the other backends).
     // Returns nullptr (and caches the miss so it never retries per-draw) on any failure.
+    // `precompiled` (the pak's baked HLSL for this backend, MaterialShaderLibrary::
+    // precompiledFor) wins over the runtime cross-compile — same split as GL's
+    // GetOrBuildMaterialProgram and Metal's GetOrBuildMaterialPipeline, and the only
+    // source of shaders in a flavour built without glslang.
     MatShaders* GetOrBuildMaterialShaders(uint64_t hash, const std::string& frag,
-                                          const std::string& vertBody, bool transparent)
+                                          const std::string& vertBody,
+                                          const MaterialShaderVariant* precompiled,
+                                          bool transparent)
     {
-#if defined(HE_HAVE_SHADERC)
         const uint64_t key = hash ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
         if (auto it = m_materialShaders.find(key); it != m_materialShaders.end())
             return it->second.vs ? &it->second : nullptr; // null vs == cached miss
 
         using Backend = HE::MaterialShaderLibrary::Backend;
-        const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
-            ? m_matShaderLib.standardVertex(Backend::HLSL)
-            : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
-        const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
-        if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+        std::string vsSrc, psSrc;
+        if (precompiled && !precompiled->vertex.empty() && !precompiled->fragment.empty())
         {
-            HE_LOG_WARN(RHI, "%s", "D3D11Renderer: A4 material shader cross-compile failed");
-            m_materialShaders.emplace(key, MatShaders{});
-            return nullptr;
+            vsSrc = precompiled->vertex; psSrc = precompiled->fragment; // baked at export
+        }
+        else
+        {
+            const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
+                ? m_matShaderLib.standardVertex(Backend::HLSL)
+                : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
+            const HE::MaterialShaderLibrary::Compiled& fc = m_matShaderLib.fragment(hash, frag, Backend::HLSL);
+            if (!vc.ok || !fc.ok || vc.source.empty() || fc.source.empty())
+            {
+                HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material shader cross-compile failed: ")
+                    + vc.log + " " + fc.log).c_str());
+                m_materialShaders.emplace(key, MatShaders{});
+                return nullptr;
+            }
+            vsSrc = vc.source; psSrc = fc.source;
         }
         if (!m_matHlslLogged)
         {
             m_matHlslLogged = true;
-            HE_LOG_INFO(RHI, "%s", (std::string("D3D11 A4 material VS HLSL:\n") + vc.source).c_str());
-            HE_LOG_INFO(RHI, "%s", (std::string("D3D11 A4 material PS HLSL:\n") + fc.source).c_str());
+            HE_LOG_INFO(RHI, "%s", (std::string("D3D11 A4 material VS HLSL:\n") + vsSrc).c_str());
+            HE_LOG_INFO(RHI, "%s", (std::string("D3D11 A4 material PS HLSL:\n") + psSrc).c_str());
         }
 
         UINT cflags = 0;
@@ -3498,7 +3514,7 @@ struct D3D11RendererImpl
 #endif
         // SPIRV-Cross emits the GLSL-sourced entry point as `main` (not VSMain/PSMain).
         ComPtr<ID3DBlob> vsb, psb, cerr;
-        if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "matVS", nullptr, nullptr,
+        if (FAILED(D3DCompile(vsSrc.c_str(), vsSrc.size(), "matVS", nullptr, nullptr,
                               "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
         {
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material VS compile failed: ")
@@ -3506,7 +3522,7 @@ struct D3D11RendererImpl
             m_materialShaders.emplace(key, MatShaders{});
             return nullptr;
         }
-        if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "matPS", nullptr, nullptr,
+        if (FAILED(D3DCompile(psSrc.c_str(), psSrc.size(), "matPS", nullptr, nullptr,
                               "main", "ps_5_0", cflags, 0, &psb, &cerr)))
         {
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material PS compile failed: ")
@@ -3540,10 +3556,6 @@ struct D3D11RendererImpl
             return nullptr;
         }
         return &m_materialShaders.emplace(key, std::move(sh)).first->second;
-#else
-        (void)hash; (void)frag; (void)vertBody; (void)transparent;
-        return nullptr;
-#endif
     }
 
     // ── Screen-space decals ─────────────────────────────────────────────────
@@ -4609,7 +4621,6 @@ void D3D11Renderer::DrawScene(int width, int height)
     };
     fillPerFrame(false, p.ssaoEnabled && p.ssaoReady);
 
-#if defined(HE_HAVE_SHADERC)
     // A4: fill the shared HeLighting CB — identical for every graph-material draw this
     // frame (bound at b0 PS + b8 WPO VS in the material draw path). A lambda because
     // giParams.z is only known after the GI passes ran (refilled in the backbuffer
@@ -4665,7 +4676,6 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
     };
     fillMatLight(false);
-#endif
 
     const UINT stride = 8 * sizeof(float);
     const UINT offset = 0;
@@ -4865,7 +4875,6 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->PSSetShaderResources(16, 1, &ssrSRV);
             fillPerFrame(giShadingActive,
                          aoWanted && aoSRV != p.whiteSRV.Get(), ssrActive);
-#if defined(HE_HAVE_SHADERC)
             fillMatLight(giShadingActive);
             // heLitP GI masks for graph materials: sun mask on t10, per-light
             // local mask on t11 (the REAL mask when GI ran this frame).
@@ -4878,7 +4887,6 @@ void D3D11Renderer::DrawScene(int width, int height)
                 ID3D11SamplerState* matSamps[2] = { p.giLinearClamp.Get(), p.giLinearClamp.Get() };
                 ctx->PSSetSamplers(10, 2, matSamps);
             }
-#endif
         }
 
         const glm::vec3 camPos = p.m_renderWorld.camera.position;
@@ -4975,7 +4983,6 @@ void D3D11Renderer::DrawScene(int width, int height)
             const D3D11IndexRange range = DrawIndexRange(dc, m.indexCount);
             if (range.count == 0) return; // a slot clamped away on the fallback cube
 
-#if defined(HE_HAVE_SHADERC)
             // A4: node-graph material? Render through per-material VS/PS built from the
             // MaterialShaderLibrary HLSL, bypassing the built-in Blinn-Phong path entirely, then
             // RESTORE the scene state so subsequent built-in draws are unaffected. Falls through
@@ -4995,8 +5002,13 @@ void D3D11Renderer::DrawScene(int width, int height)
                     // depth-writing variant (hence RenderSorter::isTransparent, tint
                     // alpha included, not a bare dc.opacity test).
                     const bool matTransp = RenderSorter::isTransparent(dc);
+                    // The pak's baked HLSL when the export carried one (any D3D tag),
+                    // else cross-compile now. resolveShaders just fetched this material,
+                    // so the pointer is fresh; it is consumed before anything can load.
+                    const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
+                        m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D11);
                     D3D11RendererImpl::MatShaders* sh =
-                        p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matTransp);
+                        p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, matTransp);
                     if (sh && sh->vs && sh->ps && sh->il)
                     {
                         // heTex0 = the material's base texture, matching the built-in selection +
@@ -5115,7 +5127,6 @@ void D3D11Renderer::DrawScene(int width, int height)
                     }
                 }
             }
-#endif
             // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
             // material is loaded, fully replaces the mesh's baked texture — even to flat.
             ID3D11ShaderResourceView* albedo = m.texture.Get(); // baked (may be null)

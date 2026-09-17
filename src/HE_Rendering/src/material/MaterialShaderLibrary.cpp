@@ -5,6 +5,7 @@
 #include <ContentManager/Assets.h>
 #include "ShaderCompiler.h" // he::shaderc
 
+#include <cstring>
 #include <functional>
 
 namespace HE
@@ -772,6 +773,33 @@ bool MaterialShaderLibrary::resolveShaders(const ContentManager& cm, const UUID&
         vertBodyOut = mat->customShaderVertGlsl;
     if (!vertBodyOut.empty()) // fold the vertex into the pipeline key
         hashOut ^= std::hash<std::string>{}(vertBodyOut) * 0x9E3779B97F4A7C15ULL;
+    return true;
+}
+
+const MaterialShaderVariant* MaterialShaderLibrary::precompiledFor(const MaterialAsset* ma,
+                                                                   RendererBackend backend)
+{
+    if (!ma) return nullptr;
+    const uint8_t want = static_cast<uint8_t>(backend);
+    // Exact tag first, so a pak that carries both D3D variants hands each backend
+    // its own; the sibling only steps in when the exact one is missing.
+    for (const MaterialShaderVariant& var : ma->precompiledShaders)
+        if (var.backend == want) return &var;
+    uint8_t sibling = want;
+    if (backend == RendererBackend::D3D11) sibling = static_cast<uint8_t>(RendererBackend::D3D12);
+    if (backend == RendererBackend::D3D12) sibling = static_cast<uint8_t>(RendererBackend::D3D11);
+    if (sibling != want)
+        for (const MaterialShaderVariant& var : ma->precompiledShaders)
+            if (var.backend == sibling) return &var;
+    return nullptr;
+}
+
+bool MaterialShaderLibrary::spirvFromBytes(const std::string& bytes, std::vector<uint32_t>& out)
+{
+    out.clear();
+    if (bytes.empty() || (bytes.size() % sizeof(uint32_t)) != 0) return false;
+    out.resize(bytes.size() / sizeof(uint32_t));
+    std::memcpy(out.data(), bytes.data(), bytes.size());
     return true;
 }
 
