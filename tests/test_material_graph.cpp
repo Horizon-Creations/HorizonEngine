@@ -2385,8 +2385,22 @@ TEST_CASE("Material instance resolves to the master's shader hash + baked varian
 #if defined(HE_TESTS_HAVE_SHADERC)
 #include <regex>
 #if defined(_WIN32)
+// windows.h FIRST, so ID3D12InfoQueue::GetMessage is declared and called under
+// the same macro state (winuser.h renames GetMessage to GetMessageW).
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #include <d3dcompiler.h>
+#include <d3d12.h>
+#include <d3d12sdklayers.h>
+#include <d3d12shader.h>
+#include <dxgi1_4.h>
 #include <wrl/client.h>
+#include <Backends/D3D12/D3D12MaterialRootSignature.h>
 #endif
 
 namespace
@@ -2675,6 +2689,406 @@ TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile i
 		}
 	}
 	MESSAGE("FXC accepted ", okPs, "/", total, " node pixel shaders (ps_5_0)");
+}
+
+// ═══ Thema 56: the D3D12 material root signature against a real device ═══════
+// FXC accepting the pixel shader is only half of what D3D12 asks. The other half
+// is CreateGraphicsPipelineState, which checks every register the bytecode binds
+// against the root signature and refuses the PSO (E_INVALIDARG) when one is
+// uncovered. The shared lighting preamble binds t14..t18 / t31..t33 and the
+// moved samplers s0/s1/s3/s8/s9/s14/s15 STATICALLY — their gates are runtime
+// uniforms FXC cannot fold — so a signature that only covers the "material"
+// registers t2/t4..t7/t10..t13 fails every lit graph material on real hardware
+// and the draw silently falls back to built-in PBR. A WARP device reproduces
+// that verdict on a runner without a GPU: the description in
+// D3D12MaterialRootSignature.h (the one the renderer serialises) has to be
+// accepted, the pre-fix one (kLegacyRangeCount / kLegacySamplerCount) has to
+// be rejected, or the premise of the fix is wrong. Nothing here draws: a draw
+// with a gate set (cloud shadow, AO, sky IBL …) needs the D3D12 fill to bind
+// the real targets, which is the D3D11-parity job, not this one.
+namespace
+{
+struct WarpDevice
+{
+	Microsoft::WRL::ComPtr<IDXGIFactory4>  factory;
+	Microsoft::WRL::ComPtr<IDXGIAdapter>   adapter;
+	Microsoft::WRL::ComPtr<ID3D12Device>   device;
+	Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue; // null without the SDK layers (CI runners)
+	std::string log;
+};
+
+// Always WARP, never the box's GPU: the verdict must not depend on the driver
+// the runner happens to have. The debug layer is optional — Graphics Tools is
+// not installed on a stock runner — but when it is there its messages are the
+// best diagnostic a failing CHECK can carry, so they are collected.
+bool createWarpDevice(WarpDevice& w)
+{
+	using Microsoft::WRL::ComPtr;
+	{
+		ComPtr<ID3D12Debug> dbg;
+		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) dbg->EnableDebugLayer();
+	}
+	HRESULT hr = CreateDXGIFactory2(0, IID_PPV_ARGS(&w.factory));
+	if (FAILED(hr)) { w.log = "CreateDXGIFactory2 failed: " + std::to_string(hr); return false; }
+	hr = w.factory->EnumWarpAdapter(IID_PPV_ARGS(&w.adapter));
+	if (FAILED(hr)) { w.log = "EnumWarpAdapter failed: " + std::to_string(hr); return false; }
+	hr = D3D12CreateDevice(w.adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&w.device));
+	if (FAILED(hr)) { w.log = "D3D12CreateDevice(WARP) failed: " + std::to_string(hr); return false; }
+	w.device.As(&w.infoQueue); // stays null without the debug layer
+	return true;
+}
+
+// Everything the info queue collected since the last call, as one string.
+std::string drainInfoQueue(WarpDevice& w)
+{
+	if (!w.infoQueue) return {};
+	std::string out;
+	const UINT64 n = w.infoQueue->GetNumStoredMessages();
+	for (UINT64 i = 0; i < n; ++i)
+	{
+		SIZE_T len = 0;
+		w.infoQueue->GetMessage(i, nullptr, &len);
+		std::vector<char> buf(len);
+		auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+		if (SUCCEEDED(w.infoQueue->GetMessage(i, msg, &len)) && msg->pDescription)
+			out += std::string(msg->pDescription, msg->DescriptionByteLength) + "\n";
+	}
+	w.infoQueue->ClearStoredMessages();
+	return out;
+}
+
+HRESULT makeRootSignature(ID3D12Device* dev, const D3D12_ROOT_SIGNATURE_DESC& desc,
+                          Microsoft::WRL::ComPtr<ID3D12RootSignature>& out, std::string& err)
+{
+	using Microsoft::WRL::ComPtr;
+	ComPtr<ID3DBlob> sig, blob;
+	HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &blob);
+	if (blob) err.assign(static_cast<const char*>(blob->GetBufferPointer()), blob->GetBufferSize());
+	if (FAILED(hr)) return hr;
+	return dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&out));
+}
+
+// The PSO description D3D12Renderer::GetOrBuildMaterialPSO builds (LDR, opaque):
+// same input layout, formats and state, so the ONLY thing that differs between
+// the positive and the negative case below is the root signature.
+HRESULT makeMaterialPso(ID3D12Device* dev, ID3D12RootSignature* rs, ID3DBlob* vs, ID3DBlob* ps,
+                        Microsoft::WRL::ComPtr<ID3D12PipelineState>& out)
+{
+	static const D3D12_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	};
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+	pd.pRootSignature        = rs;
+	pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+	pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+	pd.InputLayout           = { layout, 3 };
+	pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	pd.NumRenderTargets      = 1;
+	pd.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM;
+	pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+	pd.SampleDesc.Count      = 1;
+	pd.SampleMask            = UINT_MAX;
+	pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+	pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+	pd.RasterizerState.DepthClipEnable = TRUE;
+	pd.DepthStencilState.DepthEnable    = TRUE;
+	pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+	pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+	pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+	return dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out));
+}
+
+Microsoft::WRL::ComPtr<ID3DBlob> fxcBlob(const std::string& src, const char* profile, std::string& err)
+{
+	Microsoft::WRL::ComPtr<ID3DBlob> blob, cerr;
+	const HRESULT hr = D3DCompile(src.c_str(), src.size(), "mat", nullptr, nullptr,
+	                              "main", profile, 0, 0, &blob, &cerr);
+	if (cerr) err.assign(static_cast<const char*>(cerr->GetBufferPointer()), cerr->GetBufferSize());
+	return SUCCEEDED(hr) ? blob : nullptr;
+}
+
+// One resource binding the compiled bytecode keeps (D3DReflect): its kind and
+// register. Anything FXC dead-stripped is absent — which is what makes this
+// evidence that the preamble's samples are IN the shader, not merely declared.
+struct Binding { D3D_SHADER_INPUT_TYPE type; UINT reg; std::string name; };
+std::vector<Binding> reflectBindings(ID3DBlob* bytecode)
+{
+	using Microsoft::WRL::ComPtr;
+	std::vector<Binding> out;
+	ComPtr<ID3D12ShaderReflection> refl;
+	if (FAILED(D3DReflect(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), IID_PPV_ARGS(&refl))))
+		return out;
+	D3D12_SHADER_DESC sd{};
+	refl->GetDesc(&sd);
+	for (UINT i = 0; i < sd.BoundResources; ++i)
+	{
+		D3D12_SHADER_INPUT_BIND_DESC b{};
+		if (SUCCEEDED(refl->GetResourceBindingDesc(i, &b)))
+			out.push_back({ b.Type, b.BindPoint, b.Name ? b.Name : "" });
+	}
+	return out;
+}
+bool binds(const std::vector<Binding>& v, D3D_SHADER_INPUT_TYPE t, UINT reg)
+{
+	return std::any_of(v.begin(), v.end(), [&](const Binding& b) { return b.Type == t && b.reg == reg; });
+}
+
+// Does the (possibly truncated) description cover this binding? Textures must
+// fall inside one of the table's ranges, samplers must be one of the static
+// samplers, cbuffers one of the root CBVs. The description's own counts are
+// the truth here, not a second hand-written list.
+bool coveredBy(const HE::d3d12mat::MaterialRootSignature& rs, UINT rangeCount, UINT samplerCount,
+               const Binding& b)
+{
+	switch (b.type)
+	{
+		case D3D_SIT_TEXTURE:
+			for (UINT r = 0; r < rangeCount; ++r)
+				if (b.reg >= rs.ranges[r].BaseShaderRegister &&
+				    b.reg <  rs.ranges[r].BaseShaderRegister + rs.ranges[r].NumDescriptors)
+					return true;
+			return false;
+		case D3D_SIT_SAMPLER:
+			for (UINT i = 0; i < samplerCount; ++i)
+				if (rs.samplers[i].ShaderRegister == b.reg) return true;
+			return false;
+		case D3D_SIT_CBUFFER:
+			for (UINT i = 0; i < HE::d3d12mat::kParamCount; ++i)
+				if (rs.params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV &&
+				    rs.params[i].Descriptor.ShaderRegister == b.reg)
+					return true;
+			return false;
+		default:
+			return false; // a UAV / structured buffer would be news
+	}
+}
+
+// A lit graph that uses the Landscape Layer Blend: heLandscapeWeights (t14,
+// and the s14 it shares with heCloudShadow) only exists in this graph.
+MaterialGraph landscapeGraph()
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int lb  = g.addNode(MatNodeType::LandscapeLayerBlend);
+	g.findNode(lb)->s = "Grass\nRock\nSand";
+	for (int i = 0; i < 3; ++i)
+	{
+		const int c = g.addNode(MatNodeType::ConstColor);
+		g.findNode(c)->p[i] = 1.0f;
+		REQUIRE(g.connect(c, 0, lb, i));
+	}
+	REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+	return g;
+}
+} // namespace
+
+TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signature (WARP)")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	WarpDevice w;
+	const bool haveWarp = createWarpDevice(w);
+	REQUIRE_MESSAGE(haveWarp, w.log);
+	if (!w.infoQueue) MESSAGE("no D3D12 debug layer on this machine (runtime verdicts only)");
+
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	ComPtr<ID3DBlob> vs = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE_MESSAGE(vs.Get() != nullptr, "standard vertex: ", err);
+
+	// The demo graph is LIT (BaseColor + Metallic into a Surface Output): its
+	// heLitP call is what drags the whole preamble in. The reflection proves
+	// the bytecode still binds the sky cube, the AO buffer, both DDGI atlases,
+	// the forward reflection results and the cloud-shadow map — FXC kept every
+	// one of them, so the PSO genuinely depends on the fix.
+	const std::string glsl = HE::generateFragment(makeDemoGraph()).glsl;
+	const auto& hl = lib.fragment(std::hash<std::string>{}(glsl), glsl, B::HLSL);
+	REQUIRE_MESSAGE(hl.ok, hl.log);
+	ComPtr<ID3DBlob> ps = fxcBlob(hl.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(ps.Get() != nullptr, "demo graph pixel shader: ", err);
+	{
+		const std::vector<Binding> b = reflectBindings(ps.Get());
+		REQUIRE(!b.empty());
+		for (UINT t : { 15u, 16u, 17u, 18u, 31u, 32u, 33u })
+			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, t), "the lit PS no longer binds t", t,
+			              " — the preamble changed, re-check D3D12MaterialRootSignature.h");
+		for (UINT sreg : { 0u, 1u, 3u, 8u, 9u, 14u, 15u })
+			CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, sreg), "the lit PS no longer binds s", sreg);
+		CHECK(binds(b, D3D_SIT_CBUFFER, 0)); // HeLighting
+		CHECK(binds(b, D3D_SIT_CBUFFER, 3)); // HeParams
+	}
+
+	// Positive: the description the renderer serialises → root signature + PSO.
+	HE::d3d12mat::MaterialRootSignature full;
+	HE::d3d12mat::DescribeMaterialRootSignature(full);
+	ComPtr<ID3D12RootSignature> fullRs;
+	{
+		const HRESULT hr = makeRootSignature(w.device.Get(), full.desc, fullRs, err);
+		const std::string why = drainInfoQueue(w);
+		REQUIRE_MESSAGE(SUCCEEDED(hr), "full root signature: ", err, why);
+	}
+	{
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = makeMaterialPso(w.device.Get(), fullRs.Get(), vs.Get(), ps.Get(), pso);
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(SUCCEEDED(hr), "PSO against the full signature failed, hr=", hr, ": ", why);
+	}
+
+	// Negative control: the pre-Thema-56 signature (five ranges, nine samplers)
+	// with the SAME shaders and PSO description. If WARP accepts this, the bug
+	// this test guards never existed and the whole premise needs a second look —
+	// do not loosen the assertion, report it.
+	HE::d3d12mat::MaterialRootSignature legacy;
+	HE::d3d12mat::DescribeMaterialRootSignature(legacy, HE::d3d12mat::kLegacyRangeCount,
+	                                            HE::d3d12mat::kLegacySamplerCount);
+	ComPtr<ID3D12RootSignature> legacyRs;
+	{
+		const HRESULT hr = makeRootSignature(w.device.Get(), legacy.desc, legacyRs, err);
+		const std::string why = drainInfoQueue(w);
+		REQUIRE_MESSAGE(SUCCEEDED(hr), "legacy root signature: ", err, why);
+	}
+	{
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = makeMaterialPso(w.device.Get(), legacyRs.Get(), vs.Get(), ps.Get(), pso);
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(hr == E_INVALIDARG, "the legacy signature was NOT rejected (hr=", hr,
+		              ") — the premise of Thema 56 is wrong: ", why);
+		CHECK(pso.Get() == nullptr);
+		if (!why.empty()) MESSAGE("legacy rejection: ", why);
+	}
+
+	// Three more shapes a project ships, all against the full signature: the
+	// Landscape Layer Blend (t14 + the shared s14), Texture Sample nodes
+	// (heTex0 t2 + heTexP0/1 t4/t5) and World Position Offset (the custom
+	// vertex, b8/b9 on the VS side).
+	auto psoFor = [&](const char* what, const std::string& fragGlsl, const std::string& vertBody)
+	{
+		const uint64_t h = std::hash<std::string>{}(fragGlsl);
+		const auto& f = lib.fragment(h, fragGlsl, B::HLSL);
+		REQUIRE_MESSAGE(f.ok, what, ": ", f.log);
+		std::string e;
+		ComPtr<ID3DBlob> p = fxcBlob(f.source, "ps_5_0", e);
+		REQUIRE_MESSAGE(p.Get() != nullptr, what, " pixel shader: ", e);
+		ComPtr<ID3DBlob> v = vs;
+		if (!vertBody.empty())
+		{
+			const auto& cv = lib.customVertex(std::hash<std::string>{}(vertBody), vertBody, B::HLSL);
+			REQUIRE_MESSAGE(cv.ok, what, ": ", cv.log);
+			v = fxcBlob(cv.source, "vs_5_0", e);
+			REQUIRE_MESSAGE(v.Get() != nullptr, what, " custom vertex: ", e);
+		}
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = makeMaterialPso(w.device.Get(), fullRs.Get(), v.Get(), p.Get(), pso);
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(SUCCEEDED(hr), what, ": PSO failed, hr=", hr, ": ", why);
+	};
+	{
+		const HE::MatShaderGen gen = HE::generateFragment(landscapeGraph());
+		psoFor("Landscape Layer Blend", gen.glsl, gen.vertexBody);
+	}
+	{
+		MaterialGraph t;
+		const int out = t.addNode(MatNodeType::Output);
+		const int def = t.addNode(MatNodeType::TextureSample);           // no path → heTex0
+		const int a   = t.addNode(MatNodeType::TextureSample);
+		t.findNode(a)->s = "Tex/grass.hasset";                            // → heTexP0
+		const int b   = t.addNode(MatNodeType::TextureSample);
+		t.findNode(b)->s = "Tex/rock.hasset";                             // → heTexP1
+		const int add = t.addNode(MatNodeType::Add);
+		REQUIRE(t.connect(def, 0, add, 0));
+		REQUIRE(t.connect(a,   0, add, 1));
+		REQUIRE(t.connect(add, 0, out, HE::kMatOutputBaseColorPin));
+		REQUIRE(t.connect(b,   0, out, HE::kMatOutputEmissivePin));
+		const HE::MatShaderGen gen = HE::generateFragment(t);
+		REQUIRE(gen.textures.size() == 2);
+		psoFor("Texture Sample x3", gen.glsl, gen.vertexBody);
+	}
+	{
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int tm  = g.addNode(MatNodeType::Time);
+		const int sn  = g.addNode(MatNodeType::Sine);
+		const int cmb = g.addNode(MatNodeType::Combine3);
+		REQUIRE(g.connect(tm,  0, sn,  0));
+		REQUIRE(g.connect(sn,  0, cmb, 0));
+		REQUIRE(g.connect(cmb, 0, out, HE::kMatOutputWPOPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE_FALSE(gen.vertexBody.empty());
+		psoFor("World Position Offset", gen.glsl, gen.vertexBody);
+	}
+}
+
+TEST_CASE("D3D12: every node's bytecode binds only registers the material root signature covers")
+{
+	// The WARP case above builds PSOs for four shapes; this is the net for the
+	// other ~70 node shaders without ~70 PSOs: reflect each compiled PS (and the
+	// two vertex stages) and check every kept binding against the description's
+	// own ranges / static samplers / root CBVs. The legacy description doubles
+	// as the negative control — it must leave the lit shaders uncovered, or the
+	// coverage check is not checking anything.
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::d3d12mat::MaterialRootSignature rs;
+	HE::d3d12mat::DescribeMaterialRootSignature(rs);
+	auto uncovered = [&](const std::vector<Binding>& b, UINT ranges, UINT samplers) {
+		std::string out;
+		for (const Binding& x : b)
+			if (!coveredBy(rs, ranges, samplers, x))
+				out += (out.empty() ? "" : ", ") + x.name + "(" + std::to_string(static_cast<int>(x.type)) + ":" + std::to_string(x.reg) + ")";
+		return out;
+	};
+
+	// Negative control for the reflection itself: a shader binding t50 / s15
+	// has an uncovered texture, a hand-rolled register outside every range.
+	{
+		std::string err;
+		ComPtr<ID3DBlob> bad = fxcBlob("Texture2D t : register(t50); SamplerState s : register(s15);"
+		                               "float4 main(float2 uv : TEXCOORD0) : SV_Target { return t.Sample(s, uv); }",
+		                               "ps_5_0", err);
+		REQUIRE_MESSAGE(bad.Get() != nullptr, err);
+		const std::vector<Binding> b = reflectBindings(bad.Get());
+		REQUIRE(b.size() == 2);
+		CHECK(uncovered(b, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount) == "t(2:50)");
+	}
+
+	HE::MaterialShaderLibrary lib;
+	{
+		std::string err;
+		ComPtr<ID3DBlob> vs = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+		REQUIRE_MESSAGE(vs.Get() != nullptr, err);
+		CHECK(uncovered(reflectBindings(vs.Get()), HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount).empty());
+	}
+	int shaders = 0, litUncoveredByLegacy = 0;
+	for (const NodeShaderCase& c : allNodeShaderCases())
+	{
+		std::string err;
+		ComPtr<ID3DBlob> ps = fxcBlob(lib.fragment(caseHash(c), c.glsl, B::HLSL).source, "ps_5_0", err);
+		REQUIRE_MESSAGE(ps.Get() != nullptr, "'", c.name, "': ", err);
+		const std::vector<Binding> b = reflectBindings(ps.Get());
+		const std::string miss = uncovered(b, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount);
+		CHECK_MESSAGE(miss.empty(), "'", c.name, "' binds registers the material root signature does not cover: ", miss);
+		if (!uncovered(b, HE::d3d12mat::kLegacyRangeCount, HE::d3d12mat::kLegacySamplerCount).empty())
+			++litUncoveredByLegacy;
+		++shaders;
+		if (!c.vertBody.empty())
+		{
+			const auto& cv = lib.customVertex(std::hash<std::string>{}(c.vertBody), c.vertBody, B::HLSL);
+			ComPtr<ID3DBlob> vs = fxcBlob(cv.source, "vs_5_0", err);
+			REQUIRE_MESSAGE(vs.Get() != nullptr, "'", c.name, "' custom vertex: ", err);
+			const std::string vmiss = uncovered(reflectBindings(vs.Get()), HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount);
+			CHECK_MESSAGE(vmiss.empty(), "'", c.name, "' custom vertex binds uncovered registers: ", vmiss);
+		}
+	}
+	// Every Surface-domain case is lit, so the legacy signature must fail
+	// nearly all of them; only the UI-domain ones (unlit) can pass it.
+	CHECK_MESSAGE(litUncoveredByLegacy > shaders / 2,
+	              "the legacy signature covers ", shaders - litUncoveredByLegacy, "/", shaders,
+	              " node shaders — the negative control is not biting");
+	MESSAGE("material root signature covers ", shaders, " node pixel shaders; the legacy one left ",
+	        litUncoveredByLegacy, " of them uncovered");
 }
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC

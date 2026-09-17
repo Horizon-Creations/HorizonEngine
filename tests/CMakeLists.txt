@@ -809,9 +809,13 @@ if(HE_HAVE_SHADERC)
     # call D3D11Renderer and D3D12Renderer make for every graph material. FXC
     # is the only judge of register limits (X4509) and intrinsic spelling that
     # SPIRV-Cross's "ok" says nothing about. d3dcompiler_47.dll ships with
-    # Windows, so no SDK component beyond the headers is needed.
+    # Windows, so no SDK component beyond the headers is needed. d3d12 + dxgi:
+    # the Thema-56 cases build the material root signature and a real PSO on a
+    # WARP device (CreateGraphicsPipelineState is the only judge of "does the
+    # root signature cover every register the bytecode binds"); WARP ships with
+    # Windows too, so a runner without a GPU still gets the verdict.
     if(WIN32)
-        target_link_libraries(he_tests PRIVATE d3dcompiler)
+        target_link_libraries(he_tests PRIVATE d3dcompiler d3d12 dxgi)
     endif()
 endif()
 
