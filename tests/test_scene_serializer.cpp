@@ -231,6 +231,61 @@ TEST_CASE("SceneSerializer round-trips per-entity material param overrides")
 	}
 }
 
+TEST_CASE("SceneSerializer round-trips per-slot material overrides and writes none when none is set")
+{
+	for (SerializeFormat fmt : { SerializeFormat::JSON, SerializeFormat::Binary })
+	{
+		const fs::path file = fs::temp_directory_path() / "he_test_slotov.hescene";
+		HorizonWorld world;
+		const HE::UUID slot2 = HE::UUID::generate();
+		{
+			auto e = world.createEntity("SlotOverridden");
+			MaterialComponent mc;
+			mc.materialAssetId = HE::UUID::generate();
+			// Slot 0 untouched, slot 2 overridden, trailing nulls get trimmed.
+			mc.slotOverrides = { HE::UUID{}, HE::UUID{}, slot2, HE::UUID{} };
+			world.registry().emplace<MaterialComponent>(e, mc);
+		}
+		{
+			auto e = world.createEntity("Plain");
+			MaterialComponent mc;
+			mc.materialAssetId = HE::UUID::generate();
+			mc.slotOverrides   = { HE::UUID{}, HE::UUID{} }; // all null = nothing to write
+			world.registry().emplace<MaterialComponent>(e, mc);
+		}
+
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, fmt));
+		HorizonWorld loaded;
+		REQUIRE(ser.load(loaded, file, fmt));
+
+		int seen = 0;
+		for (auto [le, lm] : loaded.registry().view<MaterialComponent>().each())
+		{
+			++seen;
+			const auto* name = loaded.registry().try_get<NameComponent>(le);
+			REQUIRE(name != nullptr);
+			if (name->name == "SlotOverridden")
+			{
+				REQUIRE(lm.slotOverrides.size() == 3);   // trimmed to the last set slot
+				CHECK(lm.slotOverrides[0] == HE::UUID{});
+				CHECK(lm.slotOverrides[2] == slot2);
+				CHECK(lm.slotOverride(2) == slot2);
+				CHECK(lm.slotOverride(7) == HE::UUID{}); // off the end = not overridden
+				CHECK(lm.slotOverride(-1) == HE::UUID{});
+				CHECK(lm.hasSlotOverride());
+			}
+			else
+			{
+				CHECK(lm.slotOverrides.empty());          // a list of nulls is not written
+				CHECK_FALSE(lm.hasSlotOverride());
+			}
+		}
+		CHECK(seen == 2);
+		he_test::removeQuiet(file);
+	}
+}
+
 TEST_CASE("SceneSerializer round-trips AnimatorStateMachineComponent (asset reference + per-entity runtime state)")
 {
 	// The graph itself (states/transitions/default params) lives in the

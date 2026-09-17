@@ -943,6 +943,24 @@ namespace
         bool                     albedoTried = false;
     };
 
+    // The index range a DrawCall covers on the mesh it ends up drawing — the
+    // D3D12 twin of GL's/Metal's/D3D11's DrawIndexRange. A whole-mesh draw
+    // (indexCount 0 — every one-section mesh, every draw before sections
+    // existed) spans the buffer; a section draw takes its own [offset, count),
+    // CLAMPED to the buffer: the draw loops substitute the default cube when
+    // the real mesh is not resident yet, and a range taken from the real asset
+    // must not read past the cube's index buffer. `start` is in INDICES, which
+    // is what DrawIndexedInstanced's StartIndexLocation takes (same as D3D11;
+    // GL wants a byte pointer, Metal a byte offset).
+    struct D3D12IndexRange { UINT count; UINT start; };
+    static inline D3D12IndexRange DrawIndexRange(const DrawCall& dc, UINT meshIndexCount)
+    {
+        if (dc.indexCount == 0) return { meshIndexCount, 0u };
+        const UINT off = std::min<UINT>(dc.indexOffset, meshIndexCount);
+        const UINT cnt = std::min<UINT>(dc.indexCount, meshIndexCount - off);
+        return { cnt, off };
+    }
+
     // GPU buffers for a skeletal mesh — three vertex-buffer slots plus an index buffer.
     // Slot 0: interleaved pos(3)+norm(3)+uv(2), stride 32.
     // Slot 1: boneIds   uint4 per vertex,        stride 16.
@@ -4633,6 +4651,11 @@ struct D3D12RendererImpl
             const GpuMesh* mesh = resolveMesh(dc->meshAssetId, cm);
             const GpuMesh& m    = mesh ? *mesh : cube;
             if (!m.indexCount) continue;
+            // Section draw → its own slice of the index buffer; whole-mesh
+            // draw → all of it. The list carries one DC per slot, so the
+            // slices together cover the mesh exactly once.
+            const D3D12IndexRange range = DrawIndexRange(*dc, m.indexCount);
+            if (!range.count) continue; // a slot clamped away on the fallback cube
 
             auto drawPosOne = [&](const glm::mat4& modelMat) {
                 if (posDrawIdx >= k_maxDraws) return;
@@ -4653,7 +4676,7 @@ struct D3D12RendererImpl
                     + static_cast<UINT64>(posDrawIdx) * k_cbSlot);
                 cl->IASetVertexBuffers(0, 1, &m.vbv);
                 cl->IASetIndexBuffer(&m.ibv);
-                cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+                cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
                 ++posDrawIdx;
             };
 
@@ -5729,6 +5752,8 @@ struct D3D12RendererImpl
                 const GpuMesh* mesh = resolveMesh(dc->meshAssetId, cm);
                 const GpuMesh& m    = mesh ? *mesh : cube;
                 if (!m.indexCount) continue;
+                const D3D12IndexRange range = DrawIndexRange(*dc, m.indexCount); // section or whole
+                if (!range.count) continue;
                 cl->IASetVertexBuffers(0, 1, &m.vbv);
                 cl->IASetIndexBuffer(&m.ibv);
                 auto drawOne = [&](const glm::mat4& t)
@@ -5741,7 +5766,7 @@ struct D3D12RendererImpl
                                     &o, sizeof(o));
                     cl->SetGraphicsRootConstantBufferView(0,
                         ringBase + static_cast<UINT64>(gbufIdx) * k_cbSlot);
-                    cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
+                    cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
                     ++gbufIdx;
                 };
                 if (!dc->instanceTransforms.empty())
@@ -7712,6 +7737,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
                 const GpuMesh& m    = mesh ? *mesh : p.cube;
                 if (!m.indexCount) continue;
+                // This walks the raw list, sections included — a multi-section
+                // mesh is one DC per slot here. Its slice per DC, so the depth
+                // sees the mesh exactly once instead of N whole copies.
+                const D3D12IndexRange range = DrawIndexRange(dc, m.indexCount);
+                if (!range.count) continue;
                 PerObjectCB o{};
                 o.mvp = lightClip * dc.transform; o.model = dc.transform;
                 if (ringPtr)
@@ -7719,8 +7749,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
                 cl->IASetVertexBuffers(0, 1, &m.vbv);
                 cl->IASetIndexBuffer(&m.ibv);
-                cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
-                ++p.statDraws; p.statTris += m.indexCount / 3;
+                cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
+                ++p.statDraws; p.statTris += range.count / 3;
                 ++drawIdx;
             }
             transition(p.shadowDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
@@ -7742,9 +7772,15 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // BEHAVIOUR CHANGE: the loop this replaced classified on dc.opacity alone, so a
         // particle fading out through its instance tint stayed in the OPAQUE pass;
         // RenderSorter multiplies in instanceTint.a like GL/Metal always did.
+        // sectionAware: every draw below applies DrawCall::indexOffset/indexCount
+        // (DrawIndexRange), so a multi-section mesh's per-slot DCs all come
+        // through — one draw per material slot, as on GL, Metal and D3D11. Each
+        // slot now takes a k_maxDraws ring slot of its own, so the per-frame
+        // draw cap is reached at fewer MESHES than before.
         const glm::vec3 camPos = p.m_renderWorld.camera.position;
         std::vector<const DrawCall*> opaqueDCs, transparentDCs;
-        RenderSorter::partitionByOpacity(cmds.drawCalls(), opaqueDCs, transparentDCs);
+        RenderSorter::partitionByOpacity(cmds.drawCalls(), opaqueDCs, transparentDCs,
+                                         /*sectionAware=*/true);
 
         // One-time: log the per-pass draw counts so a DRED op index can be mapped to the
         // exact pass (shadow → ssaoPos → [ssao fullscreen] → opaque → skinned → transparent).
@@ -7989,6 +8025,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             if (!mesh) mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.indexCount) return;
+            // Section draw → its own slice of the index buffer; whole-mesh draw
+            // (every one-section mesh, every ribbon) → all of it. Both the
+            // graph-material path and the built-in one below draw this range.
+            const D3D12IndexRange range = DrawIndexRange(dc, m.indexCount);
+            if (range.count == 0) return; // a slot clamped away on the fallback cube
 
 #if defined(HE_HAVE_SHADERC)
             // A4: node-graph material? Render through a per-material PSO built from the
@@ -8064,8 +8105,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             cl->SetGraphicsRootConstantBufferView(1, objVA); // b1 U (VS)
                             cl->SetGraphicsRootConstantBufferView(2, parVA); // b3 HeParams (FS)
                             cl->SetGraphicsRootConstantBufferView(4, parVA); // b9 HeParams (WPO VS)
-                            cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
-                            ++p.statDraws; p.statTris += m.indexCount / 3;
+                            cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
+                            ++p.statDraws; p.statTris += range.count / 3;
                         };
                         // Instanced graph materials draw each instance via the material path
                         // (this increment does NOT combine graph materials with A3 instancing).
@@ -8119,8 +8160,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 if (ringPtr)
                     std::memcpy(ringPtr + static_cast<size_t>(drawIdx) * k_cbSlot, &o, sizeof(o));
                 cl->SetGraphicsRootConstantBufferView(0, ringBase + static_cast<UINT64>(drawIdx) * k_cbSlot);
-                cl->DrawIndexedInstanced(m.indexCount, 1, 0, 0, 0);
-                ++p.statDraws; p.statTris += m.indexCount / 3;
+                cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
+                ++p.statDraws; p.statTris += range.count / 3;
                 ++drawIdx;
             };
             if (!dc.instanceTransforms.empty())
@@ -8159,10 +8200,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     cl->SetGraphicsRootShaderResourceView(4,
                         instRingBase + static_cast<UINT64>(instCursor) * k_instStride);
                     cl->SetPipelineState(instPso);
-                    cl->DrawIndexedInstanced(m.indexCount, count, 0, 0, 0);
+                    cl->DrawIndexedInstanced(range.count, count, range.start, 0, 0);
                     // Restore the opaque scene PSO (instancing runs in the opaque pass only).
                     cl->SetPipelineState((p.usingHDR && p.hdrPso) ? p.hdrPso.Get() : p.pso.Get());
-                    ++p.statDraws; p.statTris += (m.indexCount / 3) * count;
+                    ++p.statDraws; p.statTris += (range.count / 3) * count;
                     ++drawIdx;
                     instCursor += count;
                 }
@@ -8250,8 +8291,15 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 D3D12_VERTEX_BUFFER_VIEW vbvs[3] = { skm->vbv, skm->boneIdVbv, skm->boneWgtVbv };
                 cl->IASetVertexBuffers(0, 3, vbvs);
                 cl->IASetIndexBuffer(&skm->ibv);
-                cl->DrawIndexedInstanced(skm->indexCount, 1, 0, 0, 0);
-                ++p.statDraws; p.statTris += skm->indexCount / 3;
+                // Section or whole — a multi-section skinned mesh arrives as one
+                // SkinnedDrawCall per slot (GeometryPass), each with its range;
+                // every slot spends one ring slot (drawIdx/skinnedIdx) of its own.
+                const D3D12IndexRange range = DrawIndexRange(sdc, skm->indexCount);
+                if (range.count > 0)
+                {
+                    cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
+                    ++p.statDraws; p.statTris += range.count / 3;
+                }
 
                 ++drawIdx;
                 ++skinnedIdx;

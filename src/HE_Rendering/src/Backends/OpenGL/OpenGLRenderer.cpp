@@ -13744,9 +13744,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glActiveTexture(GL_TEXTURE0);
 				glBindTexture(GL_TEXTURE_2D, tex);
 				glBindVertexArray(smesh->vao);
-				glDrawElements(GL_TRIANGLES, smesh->indexCount, GL_UNSIGNED_INT, nullptr);
+				// Section or whole — a multi-section skinned mesh arrives as one
+				// SkinnedDrawCall per slot (GeometryPass), each with its range.
+				const GlIndexRange range = DrawIndexRange(dc, smesh->indexCount);
+				if (range.count <= 0) continue;
+				glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
 				++m_counters.draws;
-				m_counters.tris += static_cast<uint32_t>(smesh->indexCount / 3);
+				m_counters.tris += static_cast<uint32_t>(range.count / 3);
 			}
 
 			glUseProgram(m_unlitProgram); // restore for the sky + transparent passes

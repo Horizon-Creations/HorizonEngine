@@ -249,6 +249,18 @@ namespace
 					                { "value", { ov.value[0], ov.value[1], ov.value[2], ov.value[3] } } });
 				comps["material"]["paramOverrides"] = std::move(ovs);
 			}
+			// Per-slot overrides, index = LOD0 material slot. Written only when
+			// one is actually set, so a scene that never used them is unchanged
+			// on disk; trailing nulls are trimmed for the same reason.
+			if (m->hasSlotOverride())
+			{
+				size_t n = m->slotOverrides.size();
+				while (n > 0 && m->slotOverrides[n - 1] == HE::UUID{}) --n;
+				json slots = json::array();
+				for (size_t i = 0; i < n; ++i)
+					slots.push_back(uuidToJson(m->slotOverrides[i]));
+				comps["material"]["slotOverrides"] = std::move(slots);
+			}
 		}
 		if (auto* c = registry.try_get<CameraComponent>(entity))
 		{
@@ -1007,6 +1019,10 @@ namespace
 						for (size_t k = 0; k < 4 && k < v->size(); ++k) ov.value[k] = (*v)[k].get<float>();
 					if (!ov.name.empty()) m.paramOverrides.push_back(std::move(ov));
 				}
+			if (auto it = comps["material"].find("slotOverrides");
+			    it != comps["material"].end() && it->is_array())
+				for (const auto& js : *it)
+					m.slotOverrides.push_back(jsonToUuid(js));
 			registry.emplace_or_replace<MaterialComponent>(entity, m);
 		}
 		if (comps.contains("camera"))

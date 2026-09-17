@@ -20,6 +20,8 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
+#include <HorizonScene/Components/LODComponent.h>
+#include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -443,6 +445,279 @@ TEST_CASE("RenderExtractor: a one-section mesh carries no slot table (legacy dra
 	REQUIRE(rw.objects.size() == 1);
 	CHECK(rw.objects[0].sections.empty());
 	CHECK(rw.objects[0].materialAssetId == HE::UUID{}); // the mesh's own material, as always
+}
+
+// ─── Per-slot overrides (MaterialComponent::slotOverrides) ───────────────────
+// Precedence per slot: the slot override, else the whole-mesh override, else
+// the slot's own material. The whole-mesh-only case above stays the fast path.
+
+namespace
+{
+	// A two-slot mesh whose slots reference materials by baked id.
+	HE::UUID registerTwoSlotMesh(ContentManager& cm, HE::UUID idA, HE::UUID idB, const char* name = "multi")
+	{
+		StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = name;
+		mesh.indices = { 0,1,2, 3,4,5 };
+		MeshSection s0; s0.indexCount = 3; s0.materialId = idA;
+		MeshSection s1; s1.indexOffset = 3; s1.indexCount = 3; s1.materialId = idB;
+		mesh.sections = { s0, s1 };
+		return cm.registerStaticMesh(mesh);
+	}
+	HE::UUID registerMaterial(ContentManager& cm, const char* name)
+	{
+		MaterialAsset a; a.type = HE::AssetType::Material; a.name = name;
+		return cm.registerMaterial(a);
+	}
+}
+
+TEST_CASE("RenderExtractor: a slot override replaces only its slot; a whole-mesh override fills the rest")
+{
+	ContentManager cm;
+	const HE::UUID idA  = registerMaterial(cm, "a");
+	const HE::UUID idB  = registerMaterial(cm, "b");
+	const HE::UUID idOv = registerMaterial(cm, "override");
+	const HE::UUID idS1 = registerMaterial(cm, "slot1-override");
+	const HE::UUID meshId = registerTwoSlotMesh(cm, idA, idB);
+
+	HorizonWorld world;
+	auto e = world.createEntity("multi");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = meshId;
+	world.registry().emplace<MeshComponent>(e, mc);
+	MaterialComponent mat;
+	mat.slotOverrides = { HE::UUID{}, idS1 }; // slot 1 only
+	world.registry().emplace<MaterialComponent>(e, mat);
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	SUBCASE("no whole-mesh override: slot 0 keeps its own material")
+	{
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.objects.size() == 1);
+		REQUIRE(rw.objects[0].sections.size() == 2);
+		CHECK(rw.objects[0].sections[0].materialAssetId == idA);
+		CHECK(rw.objects[0].sections[1].materialAssetId == idS1);
+		CHECK(rw.objects[0].sections[1].indexOffset == 3); // the range is untouched
+		CHECK(rw.objects[0].materialAssetId == HE::UUID{});
+	}
+	SUBCASE("with a whole-mesh override: it covers slot 0, the slot override still wins slot 1")
+	{
+		world.registry().get<MaterialComponent>(e).materialAssetId = idOv;
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.objects.size() == 1);
+		REQUIRE(rw.objects[0].sections.size() == 2); // per-slot draws now, not the whole-mesh one
+		CHECK(rw.objects[0].sections[0].materialAssetId == idOv);
+		CHECK(rw.objects[0].sections[1].materialAssetId == idS1);
+		CHECK(rw.objects[0].materialAssetId == idOv);
+	}
+	SUBCASE("a list of nulls is no override: the whole-mesh draw stays")
+	{
+		auto& m = world.registry().get<MaterialComponent>(e);
+		m.materialAssetId = idOv;
+		m.slotOverrides   = { HE::UUID{}, HE::UUID{} };
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.objects.size() == 1);
+		CHECK(rw.objects[0].sections.empty());
+		CHECK(rw.objects[0].materialAssetId == idOv);
+	}
+	SUBCASE("a one-section mesh: the slot-0 override becomes the whole draw's material")
+	{
+		StaticMeshAsset single; single.type = HE::AssetType::StaticMesh; single.name = "single";
+		single.indices = { 0,1,2 };
+		MeshSection s0; s0.indexCount = 3; s0.materialId = idA;
+		single.sections = { s0 };
+		world.registry().get<MeshComponent>(e).meshAssetId = cm.registerStaticMesh(single);
+		auto& m = world.registry().get<MaterialComponent>(e);
+		m.slotOverrides = { idS1 };
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.objects.size() == 1);
+		CHECK(rw.objects[0].sections.empty());
+		CHECK(rw.objects[0].materialAssetId == idS1);
+	}
+}
+
+TEST_CASE("RenderExtractor: a slot override also reaches a skinned mesh (one draw per slot)")
+{
+	ContentManager cm;
+	const HE::UUID idA  = registerMaterial(cm, "skin");
+	const HE::UUID idB  = registerMaterial(cm, "eyes");
+	const HE::UUID idS1 = registerMaterial(cm, "eyes-override");
+
+	SkeletalMeshAsset mesh; mesh.type = HE::AssetType::SkeletalMesh; mesh.name = "hero";
+	mesh.indices = { 0,1,2, 3,4,5, 6,7,8 };
+	MeshSection s0; s0.indexCount = 6; s0.materialId = idA;
+	MeshSection s1; s1.indexOffset = 6; s1.indexCount = 3; s1.materialId = idB;
+	mesh.sections = { s0, s1 };
+	const HE::UUID meshId = cm.registerSkeletalMesh(mesh);
+
+	HorizonWorld world;
+	auto e = world.createEntity("hero");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{});
+	SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+	world.registry().emplace<SkeletalMeshComponent>(e, smc);
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	SUBCASE("no override: the asset's slots, as they are")
+	{
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.skinnedObjects.size() == 1);
+		REQUIRE(rw.skinnedObjects[0].sections.size() == 2);
+		CHECK(rw.skinnedObjects[0].sections[0].materialAssetId == idA);
+		CHECK(rw.skinnedObjects[0].sections[1].materialAssetId == idB);
+		CHECK(rw.skinnedObjects[0].sections[1].indexOffset == 6);
+		CHECK(rw.skinnedObjects[0].sections[1].indexCount  == 3);
+	}
+	SUBCASE("slot 1 overridden")
+	{
+		MaterialComponent mat; mat.slotOverrides = { HE::UUID{}, idS1 };
+		world.registry().emplace<MaterialComponent>(e, mat);
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.skinnedObjects.size() == 1);
+		REQUIRE(rw.skinnedObjects[0].sections.size() == 2);
+		CHECK(rw.skinnedObjects[0].sections[0].materialAssetId == idA);
+		CHECK(rw.skinnedObjects[0].sections[1].materialAssetId == idS1);
+	}
+	SUBCASE("whole-mesh override alone: the pre-section single draw")
+	{
+		MaterialComponent mat; mat.materialAssetId = idS1;
+		world.registry().emplace<MaterialComponent>(e, mat);
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.skinnedObjects.size() == 1);
+		CHECK(rw.skinnedObjects[0].sections.empty());
+		CHECK(rw.skinnedObjects[0].materialAssetId == idS1);
+	}
+}
+
+// ─── LOD slot mapping ────────────────────────────────────────────────────────
+// A LOD level is its own asset with its own section table; the entity's slots
+// are LOD0's. lodSlotMap says which LOD0 slot a level's section stands in for.
+
+TEST_CASE("lodSlotMap: by material reference first, by index second, -1 past LOD0's slots")
+{
+	const HE::UUID idA = HE::UUID::generate(), idB = HE::UUID::generate(), idC = HE::UUID::generate();
+	auto sec = [](HE::UUID id, const char* path = "") {
+		MeshSection s; s.indexCount = 3; s.materialId = id; s.materialPath = path; return s;
+	};
+	const std::vector<MeshSection> lod0 = { sec(idA), sec(idB), sec({}, "loose/c.hasset") };
+
+	// Same materials, other order → by reference.
+	CHECK(HE::lodSlotMap({ sec(idB), sec(idA) }, lod0) == std::vector<int32_t>{ 1, 0 });
+	// A loose path matches a loose path.
+	CHECK(HE::lodSlotMap({ sec({}, "loose/c.hasset") }, lod0) == std::vector<int32_t>{ 2 });
+	// Unknown materials (a LOD imported with its own duplicates) → by index.
+	CHECK(HE::lodSlotMap({ sec(idC), sec(idC) }, lod0) == std::vector<int32_t>{ 0, 1 });
+	// Mixed: the one that matches goes by name, the other by its position.
+	CHECK(HE::lodSlotMap({ sec(idC), sec(idA) }, lod0) == std::vector<int32_t>{ 0, 0 });
+	// More sections than LOD0 has slots → the extra ones map to nothing.
+	CHECK(HE::lodSlotMap({ sec(idC), sec(idC), sec(idC), sec(idC) }, lod0)
+	      == std::vector<int32_t>{ 0, 1, 2, -1 });
+	// Two EMPTY references do not "match" — they fall to the index.
+	const std::vector<MeshSection> lod0Empty = { sec({}), sec({}) };
+	CHECK(HE::lodSlotMap({ sec({}), sec({}) }, lod0Empty) == std::vector<int32_t>{ 0, 1 });
+	// Empty inputs.
+	CHECK(HE::lodSlotMap({}, lod0).empty());
+	CHECK(HE::lodSlotMap({ sec(idA) }, {}) == std::vector<int32_t>{ -1 });
+}
+
+TEST_CASE("RenderExtractor: a slot override follows the entity onto a LOD level through the slot map")
+{
+	ContentManager cm;
+	const HE::UUID idA  = registerMaterial(cm, "a");
+	const HE::UUID idB  = registerMaterial(cm, "b");
+	const HE::UUID idA1 = registerMaterial(cm, "a-lod1");  // LOD1's own duplicates
+	const HE::UUID idB1 = registerMaterial(cm, "b-lod1");
+	const HE::UUID idOv = registerMaterial(cm, "slot0-override");
+	const HE::UUID lod0 = registerTwoSlotMesh(cm, idA, idB, "lod0");
+	// LOD1 lists its (own) materials in the OTHER order and one of LOD0's by id.
+	const HE::UUID lod1 = registerTwoSlotMesh(cm, idB, idA1, "lod1");
+	(void)idB1;
+
+	HorizonWorld world;
+	auto e = world.createEntity("lodded");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = lod1;           // LODSystem picked level 1 this frame
+	world.registry().emplace<MeshComponent>(e, mc);
+	LODComponent lod; lod.levels = { { lod0, 10.0f }, { lod1, 100.0f } }; lod.current = 1;
+	world.registry().emplace<LODComponent>(e, lod);
+	MaterialComponent mat; mat.slotOverrides = { idOv }; // LOD0's slot 0 (= material a)
+	world.registry().emplace<MaterialComponent>(e, mat);
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+	REQUIRE(rw.objects.size() == 1);
+	REQUIRE(rw.objects[0].sections.size() == 2);
+	// LOD1 section 0 references b → LOD0 slot 1 (by id): no override there, own material.
+	CHECK(rw.objects[0].sections[0].materialAssetId == idB);
+	// LOD1 section 1 references a-lod1 (unknown to LOD0) → by index: LOD0 slot 1,
+	// no override there either → keeps its own a-lod1.
+	CHECK(rw.objects[0].sections[1].materialAssetId == idA1);
+
+	// Now LOD1 with a section that maps to slot 0 by index: the override lands.
+	const HE::UUID lod1b = registerTwoSlotMesh(cm, idA1, idB1, "lod1b");
+	world.registry().get<MeshComponent>(e).meshAssetId = lod1b;
+	world.registry().get<LODComponent>(e).levels[1].meshId = lod1b;
+	RenderWorld rw2;
+	ex.extract(world, rw2, 1.0f);
+	REQUIRE(rw2.objects.size() == 1);
+	REQUIRE(rw2.objects[0].sections.size() == 2);
+	CHECK(rw2.objects[0].sections[0].materialAssetId == idOv); // slot 0 override, via the map
+	CHECK(rw2.objects[0].sections[1].materialAssetId == idB1); // LOD1's own material stays
+
+	// Drawing LOD0 itself: the override applies directly.
+	world.registry().get<MeshComponent>(e).meshAssetId = lod0;
+	RenderWorld rw3;
+	ex.extract(world, rw3, 1.0f);
+	REQUIRE(rw3.objects.size() == 1);
+	REQUIRE(rw3.objects[0].sections.size() == 2);
+	CHECK(rw3.objects[0].sections[0].materialAssetId == idOv);
+	CHECK(rw3.objects[0].sections[1].materialAssetId == idB);
+}
+
+TEST_CASE("RenderExtractor: a LOD section with no material at all takes the LOD0 slot's")
+{
+	ContentManager cm;
+	const HE::UUID idA = registerMaterial(cm, "a");
+	const HE::UUID idB = registerMaterial(cm, "b");
+	const HE::UUID lod0 = registerTwoSlotMesh(cm, idA, idB, "lod0");
+	// LOD1 assembled without any material reference (an in-memory simplification).
+	StaticMeshAsset m1; m1.type = HE::AssetType::StaticMesh; m1.name = "lod1";
+	m1.indices = { 0,1,2, 3,4,5 };
+	MeshSection s0; s0.indexCount = 3;
+	MeshSection s1; s1.indexOffset = 3; s1.indexCount = 3;
+	m1.sections = { s0, s1 };
+	const HE::UUID lod1 = cm.registerStaticMesh(m1);
+
+	HorizonWorld world;
+	auto e = world.createEntity("lodded");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = lod1;
+	world.registry().emplace<MeshComponent>(e, mc);
+	LODComponent lod; lod.levels = { { lod0, 10.0f }, { lod1, 100.0f } }; lod.current = 1;
+	world.registry().emplace<LODComponent>(e, lod);
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+	REQUIRE(rw.objects.size() == 1);
+	REQUIRE(rw.objects[0].sections.size() == 2);
+	CHECK(rw.objects[0].sections[0].materialAssetId == idA); // inherited from LOD0 slot 0
+	CHECK(rw.objects[0].sections[1].materialAssetId == idB); // … and slot 1
+
+	// The same LOD1 with a whole-mesh override on the entity: the override wins, whole draw.
+	MaterialComponent mat; mat.materialAssetId = idB;
+	world.registry().emplace<MaterialComponent>(e, mat);
+	RenderWorld rw2;
+	ex.extract(world, rw2, 1.0f);
+	REQUIRE(rw2.objects.size() == 1);
+	CHECK(rw2.objects[0].sections.empty());
+	CHECK(rw2.objects[0].materialAssetId == idB);
 }
 
 // ─── Shared cross-backend renderer helpers (audit 1a) ─────────────────────────
@@ -961,10 +1236,12 @@ TEST_CASE("RenderSorter: transparency partition uses the tinted opacity")
 
 TEST_CASE("RenderSorter: the section-unaware partition keeps slot 0 and drops the other slots")
 {
-	// D3D11/D3D12/Vulkan collect through partitionByOpacity and draw the whole
-	// index buffer per DrawCall — so of a multi-section mesh's per-slot draws only
-	// slot 0 may reach them (the mesh's own material, one draw, as before
-	// sections existed). Whole-mesh draws (sectionIndex -1) pass untouched.
+	// A backend that draws the whole index buffer per DrawCall (none since the
+	// section port — D3D11, D3D12 and Vulkan all pass sectionAware now) must of
+	// a multi-section mesh's per-slot draws only ever see slot 0 (the mesh's
+	// own material, one draw, as before sections existed). Whole-mesh draws
+	// (sectionIndex -1) pass untouched. That is the DEFAULT mode: a caller that
+	// says nothing must never get a later slot handed to it.
 	std::vector<DrawCall> calls(4);
 	calls[0].sectionIndex = -1;                                   // plain one-section mesh
 	calls[1].sectionIndex = 0;  calls[1].indexCount = 36;         // slot 0 of a sectioned mesh
@@ -977,6 +1254,17 @@ TEST_CASE("RenderSorter: the section-unaware partition keeps slot 0 and drops th
 	CHECK(opaque[0] == &calls[0]);
 	CHECK(opaque[1] == &calls[1]);
 	CHECK(transparent.empty());
+
+	// The section-AWARE mode (D3D11, D3D12, Vulkan — each applies indexOffset/
+	// indexCount per draw) gets every slot, still in record order and still
+	// split by opacity.
+	RenderSorter::partitionByOpacity(calls, opaque, transparent, /*sectionAware=*/true);
+	REQUIRE(opaque.size() == 3);
+	CHECK(opaque[0] == &calls[0]);
+	CHECK(opaque[1] == &calls[1]);
+	CHECK(opaque[2] == &calls[2]);
+	REQUIRE(transparent.size() == 1);
+	CHECK(transparent[0] == &calls[3]);
 }
 
 TEST_CASE("RenderSorter: blended pass is ordered farthest-first")

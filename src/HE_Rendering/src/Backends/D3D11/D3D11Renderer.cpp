@@ -914,6 +914,24 @@ namespace
         HE::AABB                         localBounds;
     };
 
+    // The index range a DrawCall covers on the mesh it ends up drawing — the
+    // D3D11 twin of GL's/Metal's DrawIndexRange. A whole-mesh draw (indexCount
+    // 0 — every one-section mesh, every draw before sections existed) spans
+    // the buffer; a section draw takes its own [offset, count), CLAMPED to the
+    // buffer: the draw loops substitute the default cube when the real mesh is
+    // not resident yet, and a range taken from the real asset must not read
+    // past the cube's index buffer. `start` is in INDICES, which is what
+    // DrawIndexed's StartIndexLocation takes (GL wants a byte pointer, Metal a
+    // byte offset — this is the one place the three differ).
+    struct D3D11IndexRange { UINT count; UINT start; };
+    static inline D3D11IndexRange DrawIndexRange(const DrawCall& dc, UINT meshIndexCount)
+    {
+        if (dc.indexCount == 0) return { meshIndexCount, 0u };
+        const UINT off = std::min<UINT>(dc.indexOffset, meshIndexCount);
+        const UINT cnt = std::min<UINT>(dc.indexCount, meshIndexCount - off);
+        return { cnt, off };
+    }
+
     // GPU resources for a skinned/skeletal mesh.
     // Three vertex buffers: interleaved pos+norm+uv (slot 0), bone IDs (slot 1), bone weights (slot 2).
     struct GpuSkeletalMesh
@@ -1752,6 +1770,10 @@ struct D3D11RendererImpl
                 if (!m.vbuf || !m.ibuf) continue;
                 ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &off);
                 ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+                // Section draw → its own slice of the index buffer; whole-mesh
+                // draw → all of it. The list carries one DC per slot, so the
+                // slices together cover the mesh exactly once.
+                const D3D11IndexRange range = DrawIndexRange(*dc, m.indexCount);
 
                 auto drawWithTransform = [&](const glm::mat4& modelMat) {
                     // Three matrices for the MRT pre-pass (it also needs `model`
@@ -1767,7 +1789,7 @@ struct D3D11RendererImpl
                                     reflMrt ? sizeof(pcb) : sizeof(glm::mat4) * 2);
                         ctx->Unmap(posCB, 0);
                     }
-                    ctx->DrawIndexed(m.indexCount, 0, 0);
+                    ctx->DrawIndexed(range.count, range.start, 0);
                 };
 
                 if (!dc->instanceTransforms.empty())
@@ -2701,6 +2723,7 @@ struct D3D11RendererImpl
                 if (!m.vbuf || !m.ibuf) continue;
                 ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &off);
                 ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+                const D3D11IndexRange range = DrawIndexRange(*dc, m.indexCount); // section or whole
                 auto drawOne = [&](const glm::mat4& t)
                 {
                     PerObjectCB o{};
@@ -2711,7 +2734,7 @@ struct D3D11RendererImpl
                         std::memcpy(mapped.pData, &o, sizeof(o));
                         ctx->Unmap(perObjectCB.Get(), 0);
                     }
-                    ctx->DrawIndexed(m.indexCount, 0, 0);
+                    ctx->DrawIndexed(range.count, range.start, 0);
                 };
                 if (!dc->instanceTransforms.empty())
                     for (const glm::mat4& t : dc->instanceTransforms) drawOne(t);
@@ -4700,7 +4723,11 @@ void D3D11Renderer::DrawScene(int width, int height)
                              dc.baseColor, 0.0f, dc.metallic, dc.roughness);
                 ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
                 ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
-                ctx->DrawIndexed(m.indexCount, 0, 0);
+                // This walks the raw list, sections included — a multi-section
+                // mesh is one DC per slot here. Its slice per DC, so the depth
+                // sees the mesh exactly once instead of N whole copies.
+                const D3D11IndexRange range = DrawIndexRange(dc, m.indexCount);
+                ctx->DrawIndexed(range.count, range.start, 0);
             }
             // Restore saved target + viewport + scene shaders.
             ID3D11RenderTargetView* restoreRTV = savedRTV.Get();
@@ -4719,8 +4746,12 @@ void D3D11Renderer::DrawScene(int width, int height)
         // BEHAVIOUR CHANGE: the loop this replaced classified on dc.opacity alone, so a
         // particle fading out through its instance tint stayed in the OPAQUE pass;
         // RenderSorter multiplies in instanceTint.a like GL/Metal always did.
+        // sectionAware: every draw below applies DrawCall::indexOffset/indexCount
+        // (DrawIndexRange), so a multi-section mesh's per-slot DCs all come
+        // through — one draw per material slot, as on GL and Metal.
         std::vector<const DrawCall*> opaqueDCs_, transparentDCs_;
-        RenderSorter::partitionByOpacity(cmds.drawCalls(), opaqueDCs_, transparentDCs_);
+        RenderSorter::partitionByOpacity(cmds.drawCalls(), opaqueDCs_, transparentDCs_,
+                                         /*sectionAware=*/true);
 
         // ── Ray-traced GI (software BVH): shadow mask + probe update, BEFORE
         // SSAO — when GI shades, SSAO is skipped entirely (probe indirect
@@ -4938,6 +4969,11 @@ void D3D11Renderer::DrawScene(int width, int height)
             if (!mesh) mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
             const GpuMesh& m    = mesh ? *mesh : p.cube;
             if (!m.vbuf || !m.ibuf) return;
+            // Section draw → its own slice of the index buffer; whole-mesh draw
+            // (every one-section mesh, every ribbon) → all of it. Both the
+            // graph-material path and the built-in one below draw this range.
+            const D3D11IndexRange range = DrawIndexRange(dc, m.indexCount);
+            if (range.count == 0) return; // a slot clamped away on the fallback cube
 
 #if defined(HE_HAVE_SHADERC)
             // A4: node-graph material? Render through per-material VS/PS built from the
@@ -5039,9 +5075,9 @@ void D3D11Renderer::DrawScene(int width, int height)
                             ctx->VSSetConstantBuffers(1, 1, p.m_matObjCB.GetAddressOf());   // b1 U (VS)
                             ctx->PSSetConstantBuffers(3, 1, p.m_matParamCB.GetAddressOf()); // b3 HeParams (PS)
                             ctx->VSSetConstantBuffers(9, 1, p.m_matParamCB.GetAddressOf()); // b9 HeParams (WPO VS)
-                            ctx->DrawIndexed(m.indexCount, 0, 0);
+                            ctx->DrawIndexed(range.count, range.start, 0);
                             ++p.counters.draws;
-                            p.counters.tris += m.indexCount / 3;
+                            p.counters.tris += range.count / 3;
                         };
                         // Instanced graph materials draw each instance via the material path (this
                         // increment does NOT combine graph materials with A3 GPU instancing).
@@ -5120,13 +5156,13 @@ void D3D11Renderer::DrawScene(int width, int height)
                                  dc.receivesShadow ? 0.0f : 1.0f);
                     ctx->VSSetShader(p.vsInstanced.Get(), nullptr, 0);
                     ctx->VSSetShaderResources(3, 1, p.instanceSRV.GetAddressOf());
-                    ctx->DrawIndexedInstanced(m.indexCount, count, 0, 0, 0);
+                    ctx->DrawIndexedInstanced(range.count, count, range.start, 0, 0);
                     // Restore the non-instanced VS and unbind t3 before the next draw/Map.
                     ctx->VSSetShader(p.vs.Get(), nullptr, 0);
                     ID3D11ShaderResourceView* nullSRV = nullptr;
                     ctx->VSSetShaderResources(3, 1, &nullSRV);
                     ++p.counters.draws;
-                    p.counters.tris += (m.indexCount / 3) * count;
+                    p.counters.tris += (range.count / 3) * count;
                 }
                 else
                 {
@@ -5134,9 +5170,9 @@ void D3D11Renderer::DrawScene(int width, int height)
                         uploadObject(viewProj * t, t, dc.baseColor, hasTex,
                                      dc.metallic, dc.roughness, dc.opacity,
                                      dc.receivesShadow ? 0.0f : 1.0f);
-                        ctx->DrawIndexed(m.indexCount, 0, 0);
+                        ctx->DrawIndexed(range.count, range.start, 0);
                         ++p.counters.draws;
-                        p.counters.tris += m.indexCount / 3;
+                        p.counters.tris += range.count / 3;
                     }
                 }
             }
@@ -5144,9 +5180,9 @@ void D3D11Renderer::DrawScene(int width, int height)
                 uploadObject(viewProj * dc.transform, dc.transform,
                              dc.baseColor, hasTex, dc.metallic, dc.roughness, dc.opacity,
                              dc.receivesShadow ? 0.0f : 1.0f);
-                ctx->DrawIndexed(m.indexCount, 0, 0);
+                ctx->DrawIndexed(range.count, range.start, 0);
                 ++p.counters.draws;
-                p.counters.tris += m.indexCount / 3;
+                p.counters.tris += range.count / 3;
             }
         };
 
@@ -5204,9 +5240,13 @@ void D3D11Renderer::DrawScene(int width, int height)
                 ID3D11ShaderResourceView* albedoSrv = albedo ? albedo : p.dummyTexture.Get();
                 ctx->PSSetShaderResources(0, 1, &albedoSrv);
 
-                ctx->DrawIndexed(static_cast<UINT>(sm->indexCount), 0, 0);
+                // Section or whole — a multi-section skinned mesh arrives as one
+                // SkinnedDrawCall per slot (GeometryPass), each with its range.
+                const D3D11IndexRange range = DrawIndexRange(dc, static_cast<UINT>(sm->indexCount));
+                if (range.count == 0) continue;
+                ctx->DrawIndexed(range.count, range.start, 0);
                 ++p.counters.draws;
-                p.counters.tris += static_cast<uint32_t>(sm->indexCount / 3);
+                p.counters.tris += static_cast<uint32_t>(range.count / 3);
             }
 
             // Restore scene VS + layout for the transparent pass

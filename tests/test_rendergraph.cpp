@@ -546,6 +546,75 @@ TEST_CASE("GeometryPass does not batch a sectioned object with a plain one of th
 	CHECK(cmds.drawCalls()[2].indexCount == 0);
 }
 
+TEST_CASE("GeometryPass hands the param block only to the slots that draw the entity's material")
+{
+	// A whole-mesh override (materialAssetId) with a slot override on top: the
+	// extractor leaves slot 0 on the whole-mesh material and slot 1 on the
+	// other one. The HeParams block was merged for the former and must not
+	// ride onto the latter.
+	RenderWorld world;
+	RenderObject o = makeObj(9, { 0, 0, 0 });
+	o.sections        = twoSlots();
+	o.materialAssetId = o.sections[0].materialAssetId;
+	o.paramOverride.assign(64, 0.5f);
+	world.objects.push_back(o);
+	std::vector<uint32_t> sorted = { 0 };
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 2);
+	CHECK(cmds.drawCalls()[0].paramOverride.size() == 64);
+	CHECK(cmds.drawCalls()[1].paramOverride.empty());
+}
+
+TEST_CASE("GeometryPass expands a two-section skinned object into one skinned draw per slot, bones and all")
+{
+	RenderWorld world;
+	SkinnedRenderObject so;
+	so.meshAssetId  = HE::UUID::generate();
+	so.entityId     = 5;
+	so.transform    = glm::translate(glm::mat4(1.0f), glm::vec3(1.0f, 2.0f, 3.0f));
+	so.boneMatrices = { glm::mat4(1.0f), glm::mat4(2.0f), glm::mat4(3.0f) };
+	so.sections     = twoSlots();
+	world.skinnedObjects.push_back(so);
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, {}, cmds);
+
+	CHECK(cmds.drawCalls().empty());
+	REQUIRE(cmds.skinnedDrawCalls().size() == 2);
+	const SkinnedDrawCall& d0 = cmds.skinnedDrawCalls()[0];
+	const SkinnedDrawCall& d1 = cmds.skinnedDrawCalls()[1];
+	CHECK(d0.meshAssetId == so.meshAssetId);
+	CHECK(d1.meshAssetId == so.meshAssetId);
+	CHECK(d0.entityId == 5);
+	CHECK(d1.transform == so.transform);
+	CHECK(d0.sectionIndex == 0); CHECK(d0.indexOffset == 0);  CHECK(d0.indexCount == 36);
+	CHECK(d1.sectionIndex == 1); CHECK(d1.indexOffset == 36); CHECK(d1.indexCount == 24);
+	CHECK(d0.materialAssetId == so.sections[0].materialAssetId);
+	CHECK(d1.materialAssetId == so.sections[1].materialAssetId);
+	// The pose goes with every slot: the backends upload it per draw.
+	REQUIRE(d0.boneMatrices.size() == 3);
+	REQUIRE(d1.boneMatrices.size() == 3);
+	CHECK(d1.boneMatrices[1] == glm::mat4(2.0f));
+
+	// An empty slot is skipped, never drawn as "the whole mesh".
+	world.skinnedObjects[0].sections[0].indexCount = 0;
+	CommandBuffer cmds2;
+	GeometryPass{}.execute(world, {}, cmds2);
+	REQUIRE(cmds2.skinnedDrawCalls().size() == 1);
+	CHECK(cmds2.skinnedDrawCalls()[0].sectionIndex == 1);
+
+	// No table: the one whole-mesh skinned draw it always was.
+	world.skinnedObjects[0].sections.clear();
+	CommandBuffer cmds3;
+	GeometryPass{}.execute(world, {}, cmds3);
+	REQUIRE(cmds3.skinnedDrawCalls().size() == 1);
+	CHECK(cmds3.skinnedDrawCalls()[0].sectionIndex == -1);
+	CHECK(cmds3.skinnedDrawCalls()[0].indexCount == 0);
+}
+
 // ─── Depth-only (shadow) batching ───────────────────────────────────────────
 // RenderSorter::batchDepthCasters is what the GL and Metal shadow passes feed
 // their per-layer sorted list through: consecutive same-mesh casters become

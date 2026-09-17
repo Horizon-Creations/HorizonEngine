@@ -1929,6 +1929,28 @@ bool meshSectionsCover(const std::vector<MeshSection>& sections, size_t indexCou
 	return next == indexCount;
 }
 
+std::vector<int32_t> lodSlotMap(const std::vector<MeshSection>& lodSections,
+                                const std::vector<MeshSection>& lod0Sections)
+{
+	std::vector<int32_t> out(lodSections.size(), -1);
+	for (size_t i = 0; i < lodSections.size(); ++i)
+	{
+		const MeshSection& s = lodSections[i];
+		// By reference: the same baked id, or the same loose path. An empty
+		// reference names nothing, so it cannot find a partner this way.
+		for (size_t j = 0; j < lod0Sections.size() && out[i] < 0; ++j)
+		{
+			const MeshSection& t = lod0Sections[j];
+			const bool sameId   = s.materialId != HE::UUID{} && s.materialId == t.materialId;
+			const bool samePath = !s.materialPath.empty() && s.materialPath == t.materialPath;
+			if (sameId || samePath) out[i] = static_cast<int32_t>(j);
+		}
+		// By position, while LOD0 has a slot there.
+		if (out[i] < 0 && i < lod0Sections.size()) out[i] = static_cast<int32_t>(i);
+	}
+	return out;
+}
+
 std::vector<uint8_t> encodeMeshSections(const std::vector<MeshSection>& sections)
 {
 	std::vector<uint8_t> b;

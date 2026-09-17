@@ -108,10 +108,11 @@ struct MeshSection
 struct StaticMeshAsset : public RuntimeAsset
 {
 	// The mesh's own material: what every renderer resolved before sections
-	// existed and what the section-unaware draw paths (D3D11/D3D12/Vulkan, the
-	// skeletal path) still resolve for the whole mesh. Kept equal to
-	// `sections[0]`'s material by the importer and the loader; whoever edits slot
-	// 0 (the inspector) mirrors it back here so those paths do not drift.
+	// existed and what a whole-mesh draw (a one-section asset, an entity under a
+	// whole-mesh override, a section with an empty reference) still resolves.
+	// Kept equal to `sections[0]`'s material by the importer and the loader;
+	// whoever edits slot 0 (the inspector) mirrors it back here so those paths
+	// do not drift.
 	std::string            materialPath;
 	HE::UUID               materialId;   // pack-time baked from materialPath; {} for loose/editor assets
 	// The material slots (chunk MSEC), in index-buffer order, contiguous and
@@ -153,9 +154,9 @@ struct SkeletalMeshAsset : public RuntimeAsset
 	std::string                 materialPath;
 	HE::UUID                    materialId;   // pack-time baked; {} for loose/editor assets
 	// The same MSEC table the static asset carries — the importer writes one per
-	// glTF material here too. The skeletal DRAW path does not read it yet and
-	// still draws the whole mesh with `materialPath`; the table is what a later
-	// per-section skinned draw finds already in place.
+	// glTF material here too, and the skinned draw path reads it exactly like
+	// the static one (one draw per slot on every backend, the entity's
+	// per-slot overrides applied — RenderExtractor::resolveEntitySlots).
 	std::vector<MeshSection>    sections;
 	std::vector<float>          vertices;
 	std::vector<uint32_t>       indices;
@@ -200,6 +201,30 @@ namespace HE
 	// that is meshSectionsCover's job, once the index count is known.
 	HE_API std::vector<uint8_t> encodeMeshSections(const std::vector<MeshSection>& sections);
 	HE_API bool decodeMeshSections(const std::vector<uint8_t>& bytes, std::vector<MeshSection>& out);
+
+	// LOD slot mapping: which slot of the LOD0 mesh each section of a LOD-k
+	// mesh stands in for. The ENTITY's material slots are LOD0's — that is the
+	// table the inspector shows and the one MaterialComponent::slotOverrides
+	// indexes — while every LOD level is an asset of its own with its own
+	// section table, imported from its own file and in whatever order that
+	// file listed its materials. out[i] is the LOD0 slot section i maps to, or
+	// -1 when there is none.
+	//
+	// Matched by material reference first (the same non-null materialId, or the
+	// same non-empty materialPath — two EMPTY references do not match, they are
+	// "whatever the mesh's own material is" on two different meshes), by index
+	// where the reference finds no partner, and -1 past LOD0's slot count. So a
+	// LOD whose sections are LOD0's in another order maps by name, a LOD whose
+	// materials are duplicates of its own maps by position, and a LOD with more
+	// slots than LOD0 keeps its extra ones to itself.
+	//
+	// The mapping only routes per-entity overrides: a LOD asset's own section
+	// materials stay authoritative for that LOD (a coarser level may well carry
+	// a cheaper material on purpose). The one exception is a slot that resolves
+	// to NO material at all — that one takes the LOD0 slot's rather than
+	// drawing flat grey (see RenderExtractor).
+	HE_API std::vector<int32_t> lodSlotMap(const std::vector<MeshSection>& lodSections,
+	                                       const std::vector<MeshSection>& lod0Sections);
 }
 
 struct MaterialAsset : public RuntimeAsset

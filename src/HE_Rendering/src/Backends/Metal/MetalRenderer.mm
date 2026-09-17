@@ -5719,13 +5719,23 @@ struct TPDraw { UnlitUniforms u; void* vbuf; void* ibuf; NSUInteger indexCount; 
 // read past the cube's index buffer. Offset is in BYTES, as
 // drawIndexedPrimitives wants it.
 struct MtlIndexRange { NSUInteger count; NSUInteger offset; };
-static inline MtlIndexRange DrawIndexRange(const DrawCall& dc, int meshIndexCount)
+static inline MtlIndexRange IndexRangeOf(uint32_t indexOffset, uint32_t indexCount, int meshIndexCount)
 {
 	const NSUInteger total = meshIndexCount > 0 ? (NSUInteger)meshIndexCount : 0;
-	if (dc.indexCount == 0) return { total, 0 };
-	const NSUInteger off = std::min<NSUInteger>(dc.indexOffset, total);
-	const NSUInteger cnt = std::min<NSUInteger>(dc.indexCount, total - off);
+	if (indexCount == 0) return { total, 0 };
+	const NSUInteger off = std::min<NSUInteger>(indexOffset, total);
+	const NSUInteger cnt = std::min<NSUInteger>(indexCount, total - off);
 	return { cnt, off * sizeof(uint32_t) };
+}
+static inline MtlIndexRange DrawIndexRange(const DrawCall& dc, int meshIndexCount)
+{
+	return IndexRangeOf(dc.indexOffset, dc.indexCount, meshIndexCount);
+}
+// The skinned pass draws RenderObjects, not DrawCalls: same clamp, straight
+// from the RenderSection.
+static inline MtlIndexRange SectionIndexRange(const RenderSection& sec, int meshIndexCount)
+{
+	return IndexRangeOf(sec.indexOffset, sec.indexCount, meshIndexCount);
 }
 
 // Per-frame hand-off from the deferred G-buffer pass to the lighting pass (see
@@ -12561,23 +12571,9 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 		const GpuSkeletalMesh* smesh = ResolveSkeletalMesh(obj.meshAssetId);
 		if (!smesh) continue;
 
-		// Per-draw uniforms (mvp, model, color, pbr)
-		UnlitUniforms u;
-		u.mvp   = viewProj * obj.transform;
-		u.model = obj.transform;
-		void* matTex = nullptr;
-		bool  hasTex = ResolveMaterialTexture(obj.materialAssetId, matTex);
-		void* effectiveTex = hasTex ? matTex : smesh->texture;
-		void* texPtr = effectiveTex ? effectiveTex : m_dummyTexture;
-		u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, obj.receivesShadow ? 0.0f : 1.0f, 0, 0);
-		glm::vec3 baseColor(1.0f); float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
-		bool hasMat = ResolveMaterialParams(obj.materialAssetId, baseColor, metallic, roughness, opacity);
-		if (!hasMat) baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
-		u.color = glm::vec4(baseColor, 1.0f);
-		u.pbr   = glm::vec4(metallic, roughness, opacity, 0.0f);
-
-		// Upload bone matrices for this draw — allocate a temporary buffer so
-		// each draw call gets its own range (the encoder retains it until GPU completion).
+		// Upload bone matrices for this object — allocate a temporary buffer so
+		// each object gets its own range (the encoder retains it until GPU
+		// completion). One buffer serves every section of the object.
 		const int boneCount = static_cast<int>(
 		    std::min(obj.boneMatrices.size(), static_cast<size_t>(kMaxBones)));
 		std::fill(boneScratch.begin(), boneScratch.end(), glm::mat4(1.0f));
@@ -12588,19 +12584,49 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 		                                            length:kMaxBones * sizeof(glm::mat4)
 		                                           options:MTLResourceStorageModeShared];
 
-		[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->vertexBuf  offset:0 atIndex:0];
-		[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
-		[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneIdBuf  offset:0 atIndex:2];
-		[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneWgtBuf offset:0 atIndex:3];
-		[encoder setVertexBuffer:boneBuf                                   offset:0 atIndex:4];
-		[encoder setFragmentTexture:(__bridge id<MTLTexture>)texPtr atIndex:0];
-		[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-		                    indexCount:(NSUInteger)smesh->indexCount
-		                     indexType:MTLIndexTypeUInt32
-		                   indexBuffer:(__bridge id<MTLBuffer>)smesh->indexBuf
-		             indexBufferOffset:0];
-		++m_counters.draws;
-		m_counters.tris += static_cast<uint32_t>(smesh->indexCount / 3);
+		// One draw per material slot — or one over the whole mesh when the
+		// extractor left no table (a one-section asset, a whole-mesh override).
+		// The same shape GeometryPass gives the command-buffer backends.
+		static const RenderSection kWhole; // indexCount 0 = whole mesh
+		const size_t sectionCount = obj.sections.empty() ? 1 : obj.sections.size();
+		for (size_t s = 0; s < sectionCount; ++s)
+		{
+			const RenderSection& sec = obj.sections.empty() ? kWhole : obj.sections[s];
+			if (!obj.sections.empty() && sec.indexCount == 0) continue; // empty slot
+			const HE::UUID materialId = obj.sections.empty() ? obj.materialAssetId
+			                                                 : sec.materialAssetId;
+
+			// Per-draw uniforms (mvp, model, color, pbr)
+			UnlitUniforms u;
+			u.mvp   = viewProj * obj.transform;
+			u.model = obj.transform;
+			void* matTex = nullptr;
+			bool  hasTex = ResolveMaterialTexture(materialId, matTex);
+			void* effectiveTex = hasTex ? matTex : smesh->texture;
+			void* texPtr = effectiveTex ? effectiveTex : m_dummyTexture;
+			u.flags = glm::vec4(effectiveTex ? 1.0f : 0.0f, obj.receivesShadow ? 0.0f : 1.0f, 0, 0);
+			glm::vec3 baseColor(1.0f); float metallic = 0.0f, roughness = 0.5f, opacity = 1.0f;
+			bool hasMat = ResolveMaterialParams(materialId, baseColor, metallic, roughness, opacity);
+			if (!hasMat) baseColor = effectiveTex ? glm::vec3(1.0f) : glm::vec3(0.55f, 0.55f, 0.55f);
+			u.color = glm::vec4(baseColor, 1.0f);
+			u.pbr   = glm::vec4(metallic, roughness, opacity, 0.0f);
+
+			const MtlIndexRange range = SectionIndexRange(sec, smesh->indexCount);
+			if (range.count == 0) continue;
+			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->vertexBuf  offset:0 atIndex:0];
+			[encoder setVertexBytes:&u length:sizeof(u) atIndex:1];
+			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneIdBuf  offset:0 atIndex:2];
+			[encoder setVertexBuffer:(__bridge id<MTLBuffer>)smesh->boneWgtBuf offset:0 atIndex:3];
+			[encoder setVertexBuffer:boneBuf                                   offset:0 atIndex:4];
+			[encoder setFragmentTexture:(__bridge id<MTLTexture>)texPtr atIndex:0];
+			[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+			                    indexCount:range.count
+			                     indexType:MTLIndexTypeUInt32
+			                   indexBuffer:(__bridge id<MTLBuffer>)smesh->indexBuf
+			             indexBufferOffset:range.offset];
+			++m_counters.draws;
+			m_counters.tris += static_cast<uint32_t>(range.count / 3);
+		}
 		// boneBuf is released here (ARC); the encoder holds its own strong reference
 	}
 
@@ -12667,8 +12693,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	m_counters.total = static_cast<uint32_t>(m_renderWorld.objects.size());
 
 	// Trails are not in `objects` (they are their own per-frame band list), so an
-	// otherwise empty scene that has one still has something to draw.
-	if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty())
+	// otherwise empty scene that has one still has something to draw. Neither
+	// are skinned meshes (RenderWorld::skinnedObjects, drawn by
+	// EncodeSkinnedObjects below): a scene of nothing but a character used to
+	// take this sky-only exit and never draw it.
+	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty();
+	if (m_renderWorld.objects.empty() && onlySky)
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
 		drawSky();
@@ -12685,7 +12715,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// ── Cull → sort → submit ────────────────────────────────────────────────
 	CullCameraObjects();
 	m_counters.visible = static_cast<uint32_t>(m_sortedIndices.size());
-	if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty())
+	if (m_sortedIndices.empty() && onlySky)
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
 		drawSky(); // nothing visible — fill the whole background with sky

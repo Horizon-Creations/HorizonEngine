@@ -109,6 +109,10 @@ void GeometryPass::execute(const RenderWorld&           world,
 				sd.indexCount      = sec.indexCount;
 				sd.sectionIndex    = static_cast<int32_t>(s);
 				sd.materialAssetId = sec.materialAssetId;
+				// The param block belongs to the entity's whole-mesh material
+				// (RenderExtractor merges it for that one); a slot overridden with
+				// another material draws that one plain.
+				if (sec.materialAssetId != dc.materialAssetId) sd.paramOverride.clear();
 				outCmds.recordDraw(sd);
 			}
 		}
@@ -131,7 +135,27 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.receivesShadow  = obj.receivesShadow;
 		dc.boneMatrices  = obj.boneMatrices;
 		dc.paramOverride = obj.paramOverride; // per-entity HeParams block (empty = none)
-		outCmds.recordSkinnedDraw(dc);
+		if (obj.sections.empty())
+		{
+			outCmds.recordSkinnedDraw(dc);
+			continue;
+		}
+		// Multi-section skinned mesh: the same one-draw-per-slot expansion as
+		// the static path above, bones and all — every backend's skinned loop
+		// applies DrawCall::indexOffset/indexCount through its DrawIndexRange
+		// (D3D12/Vulkan spend one bone-ring slot per SECTION then).
+		for (size_t s = 0; s < obj.sections.size(); ++s)
+		{
+			const RenderSection& sec = obj.sections[s];
+			if (sec.indexCount == 0) continue;
+			SkinnedDrawCall sd = dc;
+			sd.indexOffset     = sec.indexOffset;
+			sd.indexCount      = sec.indexCount;
+			sd.sectionIndex    = static_cast<int32_t>(s);
+			sd.materialAssetId = sec.materialAssetId;
+			if (sec.materialAssetId != dc.materialAssetId) sd.paramOverride.clear();
+			outCmds.recordSkinnedDraw(sd);
+		}
 	}
 }
 

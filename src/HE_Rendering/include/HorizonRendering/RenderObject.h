@@ -30,12 +30,16 @@ struct RenderObject {
     HE::UUID     materialAssetId;
     // Material slots of a MULTI-section mesh (glTF with several materials),
     // filled by the extractor only when the mesh has more than one section AND
-    // the entity carries no MaterialComponent override — an override replaces
+    // the entity's overrides leave something to tell apart: a whole-mesh
+    // MaterialComponent override with no per-slot override on top replaces
     // every slot (the Godot material_override rule), so the mesh then draws
-    // whole with it, as it always did. EMPTY for everything else: a one-section
-    // asset, a primitive, terrain, a skinned mesh — the draw path then is the
-    // pre-section one, one draw over the whole index buffer. GeometryPass turns
-    // a non-empty list into one DrawCall per section; nothing that walks
+    // whole with it, as it always did. The slot materials here are the
+    // resolved ones — per-slot override, else whole-mesh override, else the
+    // asset's (RenderExtractor::resolveEntitySlots). EMPTY for everything
+    // else: a one-section asset, a primitive, terrain — the draw path then is
+    // the pre-section one, one draw over the whole index buffer. GeometryPass
+    // turns a non-empty list into one DrawCall per section (one SkinnedDrawCall
+    // per section for a SkinnedRenderObject); nothing that walks
     // RenderWorld::objects directly (shadow depth, GI instances, picking) needs
     // to know sections exist, the object stays one entity = one entry.
     std::vector<RenderSection> sections;

@@ -42,9 +42,22 @@ public:
     // Split a frame's draw calls into the opaque and the blended pass, preserving
     // record order within each (the opaque pass relies on that for its
     // same-mesh/same-material batching).
+    //
+    // sectionAware says whether the caller draws DrawCall::indexOffset/indexCount
+    // or the whole index buffer per draw. Since the section port every backend
+    // that collects through here (D3D11, D3D12, Vulkan) is section-aware and
+    // passes true; the default stays the conservative guard for a caller that
+    // says nothing. A section-UNAWARE backend must not see a multi-section
+    // mesh's second, third… slot — each would repaint the entire mesh in
+    // another material — so the default drops sectionIndex > 0 and hands it
+    // slot 0 alone: one draw, the mesh's own material, as before sections
+    // existed. A section-aware backend gets every slot. Whole-mesh draws
+    // (sectionIndex -1) and a one-section mesh (never sectionIndex > 0) pass
+    // either way.
     static void partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
                                    std::vector<const DrawCall*>& outOpaque,
-                                   std::vector<const DrawCall*>& outTransparent);
+                                   std::vector<const DrawCall*>& outTransparent,
+                                   bool                          sectionAware = false);
 
     // Order the blended pass back-to-front (farthest first) so alpha compositing
     // is correct. std::sort is NOT stable, so draws at exactly equal distance may

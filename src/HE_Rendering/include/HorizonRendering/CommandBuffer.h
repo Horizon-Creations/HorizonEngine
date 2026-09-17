@@ -22,10 +22,10 @@ struct DrawCall {
     // one-section mesh produces. A multi-section mesh arrives as one DrawCall
     // per section (GeometryPass expands RenderObject::sections), each with the
     // section's [indexOffset, indexCount) and its own materialAssetId, and
-    // sectionIndex says which slot it is (-1 = whole mesh). A backend that draws
-    // per section applies the range; a backend that does not (D3D11/D3D12/
-    // Vulkan today) skips sectionIndex > 0 and draws slot 0 whole — see
-    // RenderSorter::partitionByOpacity.
+    // sectionIndex says which slot it is (-1 = whole mesh). Every backend (GL,
+    // Metal, D3D11, D3D12, Vulkan) draws per section and applies the range; a
+    // backend that did not would have to skip sectionIndex > 0 and draw slot 0
+    // whole — see RenderSorter::partitionByOpacity, which still offers that mode.
     uint32_t     indexOffset   = 0;
     uint32_t     indexCount    = 0;
     int32_t      sectionIndex  = -1;

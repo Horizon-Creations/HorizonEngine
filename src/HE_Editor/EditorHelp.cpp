@@ -236,6 +236,15 @@ namespace
 	  "1 is solid. Below 1 the surface is see-through, which also moves it into "
 	  "the transparent pass — so it no longer writes depth.",
 	  "", "rendering#lighting" },
+	{ "Material/Slot Overrides", "Slot Overrides",
+	  "One picker per material slot of the entity's mesh (its LOD 0 mesh, when "
+	  "it has LOD levels). A slot set here replaces that slot's material for THIS "
+	  "entity only — the mesh asset and every other entity using it are "
+	  "untouched. An empty slot keeps the mesh's own material, or the Asset "
+	  "above when one is set: the asset covers every slot you leave empty, a "
+	  "slot override wins over it. LOD levels follow along: their sections are "
+	  "matched to LOD 0's slots by material, else by position.",
+	  "", "materials#concept" },
 
 	// ── Light ────────────────────────────────────────────────────────────────
 	{ "Light/Type", "",
