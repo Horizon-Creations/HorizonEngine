@@ -117,12 +117,27 @@ vergleichen, die Gewichte müssen ohne Wrap-Artefakte sampeln. Ebenfalls offen: 
 Sampler (AO, DDGI-Atlanten, Forward-SSR/GI-Refl, Wolkenschatten) bindet D3D11/D3D12 pro Material-Draw noch
 nicht. D3D11 liest an einem leeren Slot den Default-Sampler-State, **auf Hardware** deshalb ein lit
 Graph-Material bei aktivem AO/GI gegen GL vergleichen. **D3D12 ist die nächste Wand:** die Material-
-Root-Signature (`createMaterialResources`) deklariert nur t2/t4..t7/t10..t12 und die statischen Sampler
-s2/s4..s7/s10..s12, der jetzt kompilierende Shader referenziert statisch auch t13/t15..t18/t31..t33 und
-s0/s1/s3/s8/s9/s13/s14/s15. `CreateGraphicsPipelineState` validiert das und wird den PSO voraussichtlich mit
+Root-Signature (`createMaterialResources`) deklariert nur t2/t4..t7/t10..t13 und die statischen Sampler
+s2/s4..s7/s10..s13, der jetzt kompilierende Shader referenziert statisch auch t15..t18/t31..t33 und
+s0/s1/s3/s8/s9/s14/s15. `CreateGraphicsPipelineState` validiert das und wird den PSO voraussichtlich mit
 „not compatible with root signature" ablehnen, bis die Ranges das abdecken; im Log wäre das
 `A4 material PSO creation failed`. Ein WARP-Device in he_tests könnte das ohne GPU beweisen, tut es aber noch
 nicht.
+
+**Schatten + Node-Texturen im selben Descriptor-Block (Merge Thema 35 × Thema 51, `8d6c92c1`, nie auf
+Hardware gesehen):** Thema 35 hängt `heCsm` (t12) und `heLocalShadow` (t13) an das Material-Fragment, Thema 51
+den per-Draw-SRV-Ring auf D3D12; zusammengeführt ist der Ring-Block 9 Slots breit (`k_matSrvPerDraw`:
+[0] heTex0, [1..4] heTexP0..3, [5..6] GI-Masken, [7] CSM-Array, [8] Lokal-Atlas), das Staging-Template
+liefert die beiden Schatten-Arrays in jeden Block, und `createShadowArray()` schreibt beim
+Auflösungswechsel ins Template, nicht in den Ring. Auf D3D11 liegen die Slots nebeneinander (t2/t4..t7 gegen
+t12/t13), auf Vulkan sind es 15 Bindings pro Set. Windows-CI belegt nur, dass derselbe HLSL-Shader (lit +
+TextureSample) mit beiden Register-Gruppen durch FXC geht. **Hier prüfen:** eine Szene mit Sonne + CSM an,
+einem schattenwerfenden Punktlicht, GI/DDGI AUS (sonst nimmt heLitP die GI-Masken und sampelt die Arrays
+nicht) und einem lit Graph-Material mit zwei Texture-Sample-Nodes an einem Mesh, das im Schatten beider
+Lichter steht. Erwartet auf D3D11/D3D12/Vulkan: Texturen korrekt UND Kaskaden- wie Punktlichtschatten auf dem
+Material, identisch zum Nachbar-Mesh mit Built-in-PBR. Dann die Schattenauflösung in den Projekteinstellungen
+umstellen → das Graph-Material muss weiter beschattet sein (D3D12: Template-Rewrite); danach Punktlicht
+entfernen → keine Verdunkelung durch den weißen Fallback-Layer.
 
 ## A5 — Sky/Nebula v2–v3.4 + physikalische Atmosphäre auf D3D/Vulkan — ⏳ NOCH NICHT IMPLEMENTIERT
 
