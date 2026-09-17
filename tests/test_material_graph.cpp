@@ -2832,7 +2832,7 @@ std::vector<Binding> reflectBindings(ID3DBlob* bytecode)
 }
 bool binds(const std::vector<Binding>& v, D3D_SHADER_INPUT_TYPE t, UINT reg)
 {
-	return std::any_of(v.begin(), v.end(), [&](const Binding& b) { return b.Type == t && b.reg == reg; });
+	return std::any_of(v.begin(), v.end(), [&](const Binding& b) { return b.type == t && b.reg == reg; });
 }
 
 // Does the (possibly truncated) description cover this binding? Textures must
