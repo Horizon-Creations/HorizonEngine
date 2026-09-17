@@ -5,6 +5,7 @@
 #include <ContentManager/Assets.h>
 #include "ShaderCompiler.h" // he::shaderc
 
+#include <cstring>
 #include <functional>
 
 namespace HE
@@ -772,6 +773,33 @@ bool MaterialShaderLibrary::resolveShaders(const ContentManager& cm, const UUID&
         vertBodyOut = mat->customShaderVertGlsl;
     if (!vertBodyOut.empty()) // fold the vertex into the pipeline key
         hashOut ^= std::hash<std::string>{}(vertBodyOut) * 0x9E3779B97F4A7C15ULL;
+    return true;
+}
+
+const MaterialShaderVariant* MaterialShaderLibrary::precompiledFor(const MaterialAsset* ma,
+                                                                   RendererBackend backend)
+{
+    if (!ma) return nullptr;
+    const uint8_t want = static_cast<uint8_t>(backend);
+    // Exact tag first, so a pak that carries both D3D variants hands each backend
+    // its own; the sibling only steps in when the exact one is missing.
+    for (const MaterialShaderVariant& var : ma->precompiledShaders)
+        if (var.backend == want) return &var;
+    uint8_t sibling = want;
+    if (backend == RendererBackend::D3D11) sibling = static_cast<uint8_t>(RendererBackend::D3D12);
+    if (backend == RendererBackend::D3D12) sibling = static_cast<uint8_t>(RendererBackend::D3D11);
+    if (sibling != want)
+        for (const MaterialShaderVariant& var : ma->precompiledShaders)
+            if (var.backend == sibling) return &var;
+    return nullptr;
+}
+
+bool MaterialShaderLibrary::spirvFromBytes(const std::string& bytes, std::vector<uint32_t>& out)
+{
+    out.clear();
+    if (bytes.empty() || (bytes.size() % sizeof(uint32_t)) != 0) return false;
+    out.resize(bytes.size() / sizeof(uint32_t));
+    std::memcpy(out.data(), bytes.data(), bytes.size());
     return true;
 }
 
@@ -2328,6 +2356,79 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
               // the built-in shaders (fragmentMain's cloudShadowTex, slot 16).
               { Stage::Fragment, 0, 33, 16 } },
             kMaterialMslOptions()));
+    }
+    else if (backend == Backend::HLSL)
+    {
+        // ── Fragment sampler budget, D3D edition ─────────────────────────────
+        // Same wall as Metal above, different bricks. SPIRV-Cross maps GLSL
+        // `binding = N` straight onto `register(sN)`, and shader model 5.0 stops
+        // at s15 — so the preamble's bindings 16, 17, 18, 31, 32 and 33 land on
+        // registers that do not exist and FXC rejects the whole shader with
+        // X4509. Unpinned, NO node-graph material compiles on D3D11 or D3D12:
+        // every one of them falls back to built-in PBR, logged once as "A4
+        // material PS compile failed". It stays hidden because the cross-compile
+        // SUCCEEDS — `Result::ok` only means SPIRV-Cross emitted HLSL; the
+        // rejection happens one step later, inside D3DCompile. The register
+        // test in test_material_graph.cpp is the net for that on macOS/Linux,
+        // the FXC test there the proof on Windows.
+        //
+        // The budget works out to exactly 16, which is why this is a fixed list
+        // and not a heuristic:
+        //     2        heTex0                  4..7  heTexP0..3
+        //     10,11    GI sun / local masks    12    CSM array
+        //     13       local shadow atlas      15    sky env cubemap
+        //     16       screen-space AO         17,18 DDGI irradiance / visibility
+        //     31,32    forward SSR / GI refl   33    cloud-shadow transmittance
+        // Sixteen bindings, sixteen registers. Ten already sit below s16 and keep
+        // their number, so only six move — and the six free registers below the
+        // cap (s0, s1, s3, s8, s9, s14) are exactly enough. The numbers are the
+        // ones claude/backend-parity-p1 (5e52d64e) chose, so the two lines of
+        // work agree on the contract when they meet.
+        //
+        // TEXTURES are not the constraint (t0..t127), so every SRV keeps its
+        // binding number and the renderers' t-register binds (t2, t4..t7,
+        // t10/t11) stay readable against the GLSL; only the SAMPLER half moves.
+        // The six moved samplers are NOT bound by D3D11/D3D12 yet — they never
+        // were, because the shader never compiled. D3D11 reads an unbound slot
+        // as the default sampler state. D3D12 is stricter: its material root
+        // signature (D3D12Renderer createMaterialResources) declares only
+        // t2/t4..t7/t10..t12 and static samplers s2/s4..s7/s10..s12, while the
+        // shader statically references t13/t15..t18/t31..t33 and s0/s1/s3/s8/
+        // s9/s13/s14/s15 — CreateGraphicsPipelineState validates that and is
+        // expected to reject the PSO until the ranges cover them. A WARP device
+        // in he_tests would prove that without a GPU; nothing does yet.
+        //
+        // WHAT DOES NOT FIT: heLandscapeWeights (binding 14) and, in the UI
+        // domain, heBackdrop (binding 9) share a register with a moved sampler
+        // whenever both are declared (two SamplerState on s14 / s9). FXC
+        // accepts that — measured on Windows CI, 17.09.2026, against what
+        // parity-p1's 5e52d64e reports — so the shader builds, but both
+        // resources then sample through whatever state the renderer bound at
+        // that one slot. Making room means declaring textures and samplers
+        // separately in the shared preamble so one SamplerState serves many
+        // textures (parity-p1 9c72cbe7 does exactly that), a change to every
+        // backend.
+        static const std::vector<he::shaderc::HlslPin> kHlslMaterialPins = {
+            //          stage             set  bind  reg  sampler
+            { Stage::Fragment, 0,  2,  2 },     // heTex0
+            { Stage::Fragment, 0,  4,  4 },     // heTexP0
+            { Stage::Fragment, 0,  5,  5 },     // heTexP1
+            { Stage::Fragment, 0,  6,  6 },     // heTexP2
+            { Stage::Fragment, 0,  7,  7 },     // heTexP3
+            { Stage::Fragment, 0, 10, 10 },     // heGIShadow
+            { Stage::Fragment, 0, 11, 11 },     // heGILocal
+            { Stage::Fragment, 0, 12, 12 },     // heCsm
+            { Stage::Fragment, 0, 13, 13 },     // heLocalShadow
+            { Stage::Fragment, 0, 15, 15 },     // heSkyEnv
+            // ── the six that have to move (SRV stays, sampler goes below s16) ──
+            { Stage::Fragment, 0, 16, 16,  0 }, // heAO           → s0
+            { Stage::Fragment, 0, 17, 17,  1 }, // heGIIrradiance → s1
+            { Stage::Fragment, 0, 18, 18,  3 }, // heGIVisibility → s3
+            { Stage::Fragment, 0, 31, 31,  8 }, // heSSRFwd       → s8
+            { Stage::Fragment, 0, 32, 32,  9 }, // heGIReflFwd    → s9
+            { Stage::Fragment, 0, 33, 33, 14 }, // heCloudShadow  → s14
+        };
+        out = toCompiled(compileHlslPinned(injected, Stage::Fragment, kHlslMaterialPins));
     }
     else
     {

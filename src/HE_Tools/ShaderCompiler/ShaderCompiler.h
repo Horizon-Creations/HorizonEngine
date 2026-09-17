@@ -84,12 +84,20 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
 // therefore needs its high bindings pinned down into range (SRVs are fine either way,
 // 128 slots, but they are pinned along with the sampler so the pair stays together).
 // D3D12 has no such limit; it uses the same pins so both backends share one contract.
+//
+// The sampler may be split off from its SRV: a combined GLSL sampler2D is BOTH a
+// register(tN) and a register(sN), and only the sampler half is scarce (16 slots
+// against 128). The material fragment keeps every texture at its binding number,
+// so the renderers' per-draw SRV binds stay readable against the GLSL, and moves
+// only the six samplers that sit past s15.
+inline constexpr uint32_t kHlslPinSamplerAsReg = ~0u;
 struct HlslPin
 {
     Stage    stage;     // which shader stage the resource is used in
     uint32_t set;       // GLSL: layout(set = ...)
     uint32_t binding;   // GLSL: layout(binding = ...)
-    uint32_t reg;       // target HLSL register index (b/t/s all get this index)
+    uint32_t reg;       // target HLSL register index (b/t/u, and s unless `sampler` says otherwise)
+    uint32_t sampler = kHlslPinSamplerAsReg; // register(s…) when it differs from reg
 };
 
 // Compile canonical GLSL to HLSL SM 5.0 with explicit register assignments

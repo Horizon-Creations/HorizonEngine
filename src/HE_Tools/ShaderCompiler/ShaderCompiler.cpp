@@ -237,7 +237,7 @@ Result compileHlslPinned(const std::string& glsl, Stage stage,
                 // index; only the ones the resource actually has are consumed.
                 b.cbv.register_binding     = p.reg;
                 b.srv.register_binding     = p.reg;
-                b.sampler.register_binding = p.reg;
+                b.sampler.register_binding = (p.sampler == kHlslPinSamplerAsReg) ? p.reg : p.sampler;
                 b.uav.register_binding     = p.reg;
                 c.add_hlsl_resource_binding(b);
             }

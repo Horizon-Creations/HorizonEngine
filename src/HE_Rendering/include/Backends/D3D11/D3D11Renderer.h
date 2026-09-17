@@ -50,6 +50,13 @@ public:
     // GPU state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
     void InvalidateMaterial(const HE::UUID& materialId) override;
     void InvalidateMesh(const HE::UUID& meshId) override;
+    // Build node-graph material shaders ahead of their first draw (queued, drained at
+    // the top of the next DrawScene so the build lands on the render thread with the
+    // material resources up) — mirrors GL/Metal; cache hits are free.
+    void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+    // Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
+    // next material draw re-uploads it.
+    void InvalidateTexture(const HE::UUID& textureId) override;
 
     // Whole-frame D3D11 timestamp timing (double-buffered ring, never stalls)
     // + this frame's CPU draw/triangle/visibility counters.

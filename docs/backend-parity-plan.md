@@ -319,7 +319,7 @@ Der Roadmap-Punkt ist damit nicht mehr „nur Metal".
 | Asset-Thumbnails | JA | -- | -- | -- |
 | Partikel-Thumbnails | JA | -- | -- | -- |
 | Widget-Thumbnails | JA | -- | -- | -- |
-| `WarmupMaterials` | JA | -- | -- | -- |
+| `WarmupMaterials` | JA | JA | JA | JA |
 | `InvalidateMaterial/Mesh/Texture` | JA | ~ | ~ | ~ |
 | Multi-Window | JA | -- | -- | JA |
 | Per-Pass-GPU-Timing | JA | -- | -- | -- |
@@ -540,7 +540,16 @@ Der geschlossenste Block der Matrix: elf Features, auf allen drei Zielbackends f
 Nutzerwirkung ist unmittelbar: heute bleiben Content-Browser-Thumbnails und Vorschaufenster
 leer, sobald jemand das Backend umstellt.
 
-- P1a — `InvalidateTexture` vervollständigen (`~` in allen dreien), `WarmupMaterials`.
+- P1a — `InvalidateTexture` vervollständigen (`~` in allen dreien). `WarmupMaterials` ist seit
+  Thema 51 Schritt 2 (September 2026) auf allen dreien da: gequeut, am Anfang von `DrawScene`
+  gedraint (Render-Thread, Material-Ressourcen stehen, HDR/LDR-Ziel des Frames bekannt).
+  Anders als GL/Metal baut es also nicht im Aufruf selbst, sondern im nächsten Frame vor dem
+  ersten Draw. Aus demselben Schritt: D3D11 cacht die Material-Shader nur noch per Hash
+  (Blend/Depth sind dort Pass-State, opaque+blended teilen sich VS/PS), D3D12 lässt FXC einmal
+  pro Hash laufen (`m_matBytecode`), die PSO-Varianten HDR/LDR × opaque/blended teilen sich den
+  Bytecode. D3D12 und Vulkan warnen einmal pro Sitzung, wenn ein Frame mehr Graph-Material-Draws
+  als `k_matMaxDraws` (1024) anfordert; Metal hat kein solches Cap, dort wäre das ein
+  Paritätsunterschied ohne Log gewesen.
 - P1b — Thumbnails: Asset, Partikel, Widget (Offscreen-Target + Readback existiert überall
   schon, siehe `CaptureViewport` = `JA`).
 - P1c — Vorschauen: Material, Skeletal (Bone-Overlay), Partikel.
@@ -709,7 +718,13 @@ hier festgehalten statt einfach umgeschrieben, weil das Absicht sein könnte:
    (die Renderer rufen `MaterialShaderLibrary` nie auf — nur GL+Metal tun das)."
    Das stimmt nicht mehr: D3D11 (`:2458`), D3D12 (`:5414`) und Vulkan (`:1977`) rufen die
    Library alle auf, und CMake linkt `he_materialshader` in jedes Backend. A4 ist
-   implementiert und wartet nur noch auf die Hardware-Abnahme.
+   implementiert und wartet nur noch auf die Hardware-Abnahme. *(Checkliste im September
+   2026 korrigiert, Thema 51; seitdem nehmen die drei Backends auch die gebackenen
+   Pak-Varianten und binden die Graph-Texturen. Schritt 3 hat dann gezeigt, dass „implementiert"
+   ohne FXC nichts bewies: `fragment(HLSL)` war ungepinnt, jedes Graph-Material scheiterte in
+   `D3DCompile` an X4509 — der Pin-Commit `5e52d64e` lag nur auf `claude/backend-parity-p1`.
+   Seit `25d0af25` sind die Sampler-Pins auf dem Zweig, und `test_material_graph` lässt auf
+   Windows-CI alle Node-Typen durch den echten `D3DCompile` laufen.)*
 
 2. **`CopilotDocs/ROADMAP.md:20`** — „Backends (GL 4.1/4.6, Metal, Vulkan*, D3D11/12*)
    🟡 Clear + ImGui-Overlay, keine Draw-Calls". Stand Juni 2026 und lange überholt; alle

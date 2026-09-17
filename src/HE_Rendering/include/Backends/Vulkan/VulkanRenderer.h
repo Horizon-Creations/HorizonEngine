@@ -62,6 +62,13 @@ public:
 	// state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
 	void InvalidateMaterial(const HE::UUID& materialId) override;
 	void InvalidateMesh(const HE::UUID& meshId) override;
+	// Build node-graph material pipelines ahead of their first draw (queued, drained at
+	// the top of the next DrawScene: render thread, material resources up, and the pass
+	// this frame renders into — HDR offscreen or swapchain — known) — mirrors GL/Metal.
+	void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+	// Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
+	// next material draw re-uploads it.
+	void InvalidateTexture(const HE::UUID& textureId) override;
 
 	FrameGpuStats GetFrameGpuStats() const override;
 
@@ -107,14 +114,15 @@ private:
 	void           destroyDepthResources();
 	void           createScenePipeline();
 	void           destroyScenePipeline();
-	// A4: node-graph material pipelines (built from MaterialShaderLibrary SPIR-V).
-	// createMaterialResources()/destroyMaterialResources() are no-ops when the shader
-	// cross-compiler (HE_HAVE_SHADERC) is absent; GetOrBuildMaterialPipeline returns null.
+	// A4: node-graph material pipelines (built from MaterialShaderLibrary SPIR-V, or from
+	// the pak's precompiled variant when `precompiled` is set — the only source in a
+	// flavour built without the cross-compiler, see ShaderCompilerStub.cpp).
 	void           createMaterialResources();
 	void           destroyMaterialResources();
 	VkPipeline     GetOrBuildMaterialPipeline(uint64_t hash, const std::string& frag,
-	                                           const std::string& vertBody, bool hdr,
-	                                           bool transparent);
+	                                           const std::string& vertBody,
+	                                           const MaterialShaderVariant* precompiled,
+	                                           bool hdr, bool transparent);
 	void           DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr = false);
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
@@ -329,9 +337,9 @@ private:
 
 	// ── A4: node-graph material pipelines ────────────────────────────────────
 	// Graph materials (Material-Node editor) render through per-material VkPipelines
-	// built at draw time from MaterialShaderLibrary SPIR-V. All of this is dead weight
-	// (never touched) when HE_HAVE_SHADERC is off: the member is default-constructed and
-	// the draw path never calls it, so behaviour is identical to the built-in PBR path.
+	// built at draw time from MaterialShaderLibrary SPIR-V. Compiled in regardless of
+	// HE_HAVE_SHADERC: without the cross-compiler the SPIR-V comes from the pak's
+	// precompiled variants, and a material that has neither falls back to built-in PBR.
 	// Canonical descriptor set 0 layout (matches the generated SPIR-V exactly):
 	//   b0 UBO(FS) HeLighting | b1 UBO(VS) U | b2 tex(FS) heTex0 | b3 UBO(FS) HeParams
 	//   b4..7 tex(FS) heTexP0..3 | b8/b9 UBO(VS) HeLighting/HeParams (WPO custom vertex).
@@ -393,8 +401,33 @@ private:
 	// Same payload, but resolved through resolveTextureRef instead of a material,
 	// and `.set` stays null — the decal pass writes its own per-draw descriptor.
 	std::unordered_map<HE::UUID, MaterialTexVk> m_decalTexCache;
+	// Node-graph project textures (MaterialAsset::graphTextureIds/Paths → heTexP0..3,
+	// the Texture Sample nodes), keyed exactly like GL's ResolveGraphTexture: "hi:lo"
+	// for a packed UUID, the path for a loose editor asset. Same payload as the decal
+	// cache (`.set` stays null — the material draw writes its own per-draw descriptor);
+	// a miss is cached (view null → white default, no per-frame retry). InvalidateTexture
+	// drops the UUID key; a path-keyed loose asset is not hot-reloaded (same as GL).
+	std::unordered_map<std::string, MaterialTexVk> m_graphTexCache;
 	std::vector<HE::UUID> m_pendingMatInval;
 	std::vector<HE::UUID> m_pendingMeshInval;
+	std::vector<HE::UUID> m_pendingTexInval;
+	// WarmupMaterials queue, drained by drainMaterialWarmup() at DrawScene top with the
+	// frame's `hdr` — the pass a pipeline is built against must be the one it draws in.
+	std::vector<HE::UUID> m_pendingMatWarmup;
+	void drainMaterialWarmup(bool hdr);
+	// One-time notice when a frame asks for more graph-material draws than the U/HeParams
+	// rings hold (k_matMaxDraws): a DrawCall arriving at a full ring falls through to the
+	// built-in path, the tail of an instanced one is skipped — neither is silent any more.
+	bool m_matRingWarned = false;
+	static std::string graphTexKey(const HE::UUID& id, const std::string& path)
+	{
+		return id != HE::UUID{} ? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
+	}
+	// A graph material's project texture for one heTexP slot (null → bind the white
+	// default). resolveTextureRef LOADS a loose asset synchronously, which can move every
+	// ContentManager pointer the caller holds — callers snapshot the slot list first and
+	// re-fetch the material afterwards.
+	VkImageView resolveGraphTexture(const HE::UUID& id, const std::string& path);
 	// Resolve an override material's texture (dc.materialAssetId), cached by UUID. Returns true
 	// iff the material asset is loaded (out->set may be null = no texture → flat); false while
 	// still loading (retry next frame, baked texture stays). Mirrors GL's ResolveMaterialTexture.

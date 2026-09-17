@@ -4,7 +4,7 @@ Alles unter „Block A" wurde **blind auf macOS** entwickelt (GL+Metal sind die 
 laufen nur auf Windows). Die CI verifiziert **nur, dass es kompiliert** — NICHT, dass es korrekt rendert.
 Diese Liste ist der **B3-Schritt**: die tatsächliche GPU-Prüfung auf deiner Windows-Hardware.
 
-Stand: A1 ✅, A2 ✅, A3 ✅ (alle compile-grün + adversariell reviewt); A4/A5 noch offen (siehe unten).
+Stand: A1 ✅, A2 ✅, A3 ✅, A4 ✅ (alle compile-grün + adversariell reviewt); A5 noch offen (siehe unten).
 
 ---
 
@@ -74,14 +74,70 @@ importiertes texturiertes Modell; kein Node-Graph-Material nötig).
 
 ---
 
-## A4 — Material-Node-Graph-Shader auf D3D/Vulkan — ⏳ NOCH NICHT IMPLEMENTIERT
+## A4 — Material-Node-Graph-Shader auf D3D/Vulkan — ✅ implementiert, GPU-Abnahme offen
 
-Aktuell rendert **jedes über den Material-Node-Graph gebaute Material auf D3D/Vulkan gar nicht** wie gebaut
-(die Renderer rufen `MaterialShaderLibrary` nie auf — nur GL+Metal tun das). Die Cross-Compilation
-(GLSL→HLSL/SPIR-V via glslang/SPIRV-Cross) existiert bereits; es fehlt der Per-Material-Pipeline-Pfad in den
-drei Backends. **Sobald implementiert, hier prüfen:** ein Graph-Material (z. B. mit Emissive/Fresnel/Textur-
-Nodes) an ein Mesh hängen → muss auf D3D11/D3D12/Vulkan **identisch zu GL/Metal** aussehen; Material-Parameter
-live ändern → sofortiges Update; Graph-Texturen (heTexP0..3) korrekt.
+Implementiert seit August 2026 (D3D11 `72e4ce3a`, D3D12 `daaec34b`, Vulkan `aa553117`) und im September auf
+dem Zweig `claude/material-node-graph-d3d11-d3d12-vulkan-wiring` vervollständigt: die drei Backends nehmen die
+im Pak gebackenen Shader-Varianten (`MaterialAsset::precompiledShaders`) und brauchen glslang nur noch für den
+Editor-Live-Compile; die Graph-Projekt-Texturen `heTexP0..3` sind auf allen dreien real gebunden (D3D12
+zusätzlich `heTex0`, vorher Null-View). Die HLSL-Sampler-Pins des Material-Fragments (Präambel-Bindings
+16/17/18/31/32/33 → s0/s1/s3/s8/s9/s14, Texturen bleiben auf ihrer t-Nummer) sind seit Thema 51 Schritt 3
+(`25d0af25`) auf DIESEM Zweig; der ältere Commit `5e52d64e` mit denselben Nummern liegt nur auf
+`claude/backend-parity-p1`. Ohne die Pins lehnte FXC jedes Graph-Material mit X4509 ab, und die Windows-CI
+beweist das jetzt: `test_material_graph` jagt alle 72 Node-Fälle durch den echten `D3DCompile`
+(vs_5_0/ps_5_0, Negativkontrolle inklusive) und meldet `FXC accepted 72/72 node pixel shaders` (sichtbar
+bei `ctest -V` bzw. im Log eines roten Laufs, ein grüner ctest verschluckt die Zeile).
+**Hier prüfen:** ein Graph-Material (z. B.
+mit Emissive/Fresnel/Textur-Nodes) an ein Mesh hängen → muss auf D3D11/D3D12/Vulkan **identisch zu GL/Metal**
+aussehen; Material-Parameter live ändern → sofortiges Update; Graph-Texturen (heTexP0..3) korrekt; eine Textur
+im Editor neu importieren → das Material zeigt die neue (InvalidateTexture). Zusätzlich ein gepackter Build mit
+D3D12-Variante auf D3D11 starten (und umgekehrt) → gleiches Bild, kein „cross-compile failed" im Log.
+
+**Material-Instanzen + Parameter (Thema 51 Schritt 2, nie auf Hardware gesehen):** ein Master-Material
+mit Parametern und zwei Instanzen davon (eine mit Param-Override, eine mit Static-Switch-Override) an drei
+Meshes hängen. Erwartet: im Log genau EINE Zeile `warmed up N material shader set(s)/PSO(s)/pipeline(s)`
+nach dem Szenenladen (D3D11 / D3D12 / Vulkan), und beim Ändern eines Parameterwerts an Master oder
+Param-Instanz sofortiges Update ohne Ruckler. Ein erfolgreicher Compile wird NICHT geloggt (nur der
+einmalige HLSL-Dump), der Beleg für „keine Neukompilierung" ist deshalb ein Breakpoint auf `D3DCompile`
+(D3D11/D3D12) bzw. `vkCreateGraphicsPipelines` (Vulkan): er darf nach dem Warmup bei Param-Edits nicht
+mehr anschlagen, nur die Switch-Instanz löst eine zweite Kompilierung aus. Dazu im Details-Panel einen
+Per-Entity-Override setzen → nur dieses Mesh ändert sich. D3D12-Sonderfall: ein Objekt mit Tint-Alpha
+< 1 zusätzlich zur opaken Instanz → `D3DCompile` schlägt NICHT erneut an (der Bytecode hängt am Hash),
+nur `CreateGraphicsPipelineState` einmal. Ab 1025 Graph-Material-Draws in einem Frame (Foliage) muss
+auf D3D12/Vulkan einmalig `more than 1024 graph-material draws` erscheinen, Metal kennt dieses Cap nicht.
+
+Bekannte Grenze (Hardware-Punkt, kein Compile-Fehler): ein **Landscape-Material** ist auf D3D das 17.
+Sampler-Binding, `heLandscapeWeights` teilt sich s14 mit dem verschobenen `heCloudShadow`; ebenso ein
+**Backdrop-Material der UI-Domäne** (`heBackdrop` mit `heGIReflFwd` auf s9). FXC akzeptiert zwei
+SamplerState auf einem Register (auf CI gemessen, die X4500-Behauptung aus `5e52d64e` reproduziert
+`D3DCompile` nicht), beide Ressourcen lesen dann aber denselben Sampler-State. Beide stehen als Zeugen in
+`sharesSamplerRegister` (test_material_graph.cpp) und werden dort rot, sobald die Präambel Texturen und
+Sampler trennt (parity-p1 `9c72cbe7`). **Auf Hardware:** ein bemaltes Landscape-Material auf D3D11 gegen GL
+vergleichen, die Gewichte müssen ohne Wrap-Artefakte sampeln. Ebenfalls offen: die sechs verschobenen
+Sampler (AO, DDGI-Atlanten, Forward-SSR/GI-Refl, Wolkenschatten) bindet D3D11/D3D12 pro Material-Draw noch
+nicht. D3D11 liest an einem leeren Slot den Default-Sampler-State, **auf Hardware** deshalb ein lit
+Graph-Material bei aktivem AO/GI gegen GL vergleichen. **D3D12 ist die nächste Wand:** die Material-
+Root-Signature (`createMaterialResources`) deklariert nur t2/t4..t7/t10..t13 und die statischen Sampler
+s2/s4..s7/s10..s13, der jetzt kompilierende Shader referenziert statisch auch t15..t18/t31..t33 und
+s0/s1/s3/s8/s9/s14/s15. `CreateGraphicsPipelineState` validiert das und wird den PSO voraussichtlich mit
+„not compatible with root signature" ablehnen, bis die Ranges das abdecken; im Log wäre das
+`A4 material PSO creation failed`. Ein WARP-Device in he_tests könnte das ohne GPU beweisen, tut es aber noch
+nicht.
+
+**Schatten + Node-Texturen im selben Descriptor-Block (Merge Thema 35 × Thema 51, `8d6c92c1`, nie auf
+Hardware gesehen):** Thema 35 hängt `heCsm` (t12) und `heLocalShadow` (t13) an das Material-Fragment, Thema 51
+den per-Draw-SRV-Ring auf D3D12; zusammengeführt ist der Ring-Block 9 Slots breit (`k_matSrvPerDraw`:
+[0] heTex0, [1..4] heTexP0..3, [5..6] GI-Masken, [7] CSM-Array, [8] Lokal-Atlas), das Staging-Template
+liefert die beiden Schatten-Arrays in jeden Block, und `createShadowArray()` schreibt beim
+Auflösungswechsel ins Template, nicht in den Ring. Auf D3D11 liegen die Slots nebeneinander (t2/t4..t7 gegen
+t12/t13), auf Vulkan sind es 15 Bindings pro Set. Windows-CI belegt nur, dass derselbe HLSL-Shader (lit +
+TextureSample) mit beiden Register-Gruppen durch FXC geht. **Hier prüfen:** eine Szene mit Sonne + CSM an,
+einem schattenwerfenden Punktlicht, GI/DDGI AUS (sonst nimmt heLitP die GI-Masken und sampelt die Arrays
+nicht) und einem lit Graph-Material mit zwei Texture-Sample-Nodes an einem Mesh, das im Schatten beider
+Lichter steht. Erwartet auf D3D11/D3D12/Vulkan: Texturen korrekt UND Kaskaden- wie Punktlichtschatten auf dem
+Material, identisch zum Nachbar-Mesh mit Built-in-PBR. Dann die Schattenauflösung in den Projekteinstellungen
+umstellen → das Graph-Material muss weiter beschattet sein (D3D12: Template-Rewrite); danach Punktlicht
+entfernen → keine Verdunkelung durch den weißen Fallback-Layer.
 
 ## A5 — Sky/Nebula v2–v3.4 + physikalische Atmosphäre auf D3D/Vulkan — ⏳ NOCH NICHT IMPLEMENTIERT
 
