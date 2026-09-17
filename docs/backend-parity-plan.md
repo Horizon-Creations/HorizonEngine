@@ -698,7 +698,9 @@ hier festgehalten statt einfach umgeschrieben, weil das Absicht sein könnte:
    (die Renderer rufen `MaterialShaderLibrary` nie auf — nur GL+Metal tun das)."
    Das stimmt nicht mehr: D3D11 (`:2458`), D3D12 (`:5414`) und Vulkan (`:1977`) rufen die
    Library alle auf, und CMake linkt `he_materialshader` in jedes Backend. A4 ist
-   implementiert und wartet nur noch auf die Hardware-Abnahme.
+   implementiert und wartet nur noch auf die Hardware-Abnahme. *(Checkliste im September
+   2026 korrigiert, Thema 51; seitdem nehmen die drei Backends auch die gebackenen
+   Pak-Varianten und binden die Graph-Texturen.)*
 
 2. **`CopilotDocs/ROADMAP.md:20`** — „Backends (GL 4.1/4.6, Metal, Vulkan*, D3D11/12*)
    🟡 Clear + ImGui-Overlay, keine Draw-Calls". Stand Juni 2026 und lange überholt; alle

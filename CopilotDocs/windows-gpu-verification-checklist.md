@@ -4,7 +4,7 @@ Alles unter „Block A" wurde **blind auf macOS** entwickelt (GL+Metal sind die 
 laufen nur auf Windows). Die CI verifiziert **nur, dass es kompiliert** — NICHT, dass es korrekt rendert.
 Diese Liste ist der **B3-Schritt**: die tatsächliche GPU-Prüfung auf deiner Windows-Hardware.
 
-Stand: A1 ✅, A2 ✅, A3 ✅ (alle compile-grün + adversariell reviewt); A4/A5 noch offen (siehe unten).
+Stand: A1 ✅, A2 ✅, A3 ✅, A4 ✅ (alle compile-grün + adversariell reviewt); A5 noch offen (siehe unten).
 
 ---
 
@@ -74,14 +74,20 @@ importiertes texturiertes Modell; kein Node-Graph-Material nötig).
 
 ---
 
-## A4 — Material-Node-Graph-Shader auf D3D/Vulkan — ⏳ NOCH NICHT IMPLEMENTIERT
+## A4 — Material-Node-Graph-Shader auf D3D/Vulkan — ✅ implementiert, GPU-Abnahme offen
 
-Aktuell rendert **jedes über den Material-Node-Graph gebaute Material auf D3D/Vulkan gar nicht** wie gebaut
-(die Renderer rufen `MaterialShaderLibrary` nie auf — nur GL+Metal tun das). Die Cross-Compilation
-(GLSL→HLSL/SPIR-V via glslang/SPIRV-Cross) existiert bereits; es fehlt der Per-Material-Pipeline-Pfad in den
-drei Backends. **Sobald implementiert, hier prüfen:** ein Graph-Material (z. B. mit Emissive/Fresnel/Textur-
-Nodes) an ein Mesh hängen → muss auf D3D11/D3D12/Vulkan **identisch zu GL/Metal** aussehen; Material-Parameter
-live ändern → sofortiges Update; Graph-Texturen (heTexP0..3) korrekt.
+Implementiert seit August 2026 (D3D11 `72e4ce3a`, D3D12 `daaec34b`, Vulkan `aa553117`, HLSL-Sampler-Pins
+`5e52d64e`) und im September auf dem Zweig `claude/material-node-graph-d3d11-d3d12-vulkan-wiring` vervollständigt:
+die drei Backends nehmen die im Pak gebackenen Shader-Varianten (`MaterialAsset::precompiledShaders`) und
+brauchen glslang nur noch für den Editor-Live-Compile; die Graph-Projekt-Texturen `heTexP0..3` sind auf allen
+dreien real gebunden (D3D12 zusätzlich `heTex0`, vorher Null-View). **Hier prüfen:** ein Graph-Material (z. B.
+mit Emissive/Fresnel/Textur-Nodes) an ein Mesh hängen → muss auf D3D11/D3D12/Vulkan **identisch zu GL/Metal**
+aussehen; Material-Parameter live ändern → sofortiges Update; Graph-Texturen (heTexP0..3) korrekt; eine Textur
+im Editor neu importieren → das Material zeigt die neue (InvalidateTexture). Zusätzlich ein gepackter Build mit
+D3D12-Variante auf D3D11 starten (und umgekehrt) → gleiches Bild, kein „cross-compile failed" im Log.
+
+Bekannte Grenze (nicht Teil der Abnahme): ein **Landscape-Material** auf D3D scheitert weiter an der
+SM-5.0-Sampler-Grenze (`heLandscapeWeights` wäre das 17. Sampler-Binding, siehe `5e52d64e`).
 
 ## A5 — Sky/Nebula v2–v3.4 + physikalische Atmosphäre auf D3D/Vulkan — ⏳ NOCH NICHT IMPLEMENTIERT
 

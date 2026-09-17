@@ -180,7 +180,11 @@ mehr Nodes/Domains, Instancing/Perf, Hot-Reload.
   `glUniformBlockBinding` per Name; SPIRV-Cross-420pack aus für macOS-GL-4.1). Der Attribut-Vertex nutzt
   loc 0/1/2 = passt exakt aufs bestehende Mesh-VAO. **GL läuft headless auf dem Dev-Mac** → real verifiziert:
   dieselbe Material-Kugel via GL, glGetError=0, **Sphere-Pixel-Diff Metal↔GL = 0.63/255** (praktisch identisch).
-  Offen: Custom-Materials auf den GL-Instanced/Transparent-Pfaden (wie im Metal-Scope) + D3D/Vulkan.
+  Offen: Custom-Materials auf den GL-Instanced/Transparent-Pfaden (wie im Metal-Scope). **D3D11/D3D12/Vulkan
+  ERLEDIGT (A4, 2026-08/09):** alle drei bauen per-Material-Pipelines aus derselben Library (HLSL via
+  `compileHlslPinned`, SPIR-V direkt), nehmen die gebackenen `precompiledShaders` aus dem Pak (D3D11 und D3D12
+  teilen sich eine HLSL-Variante) und binden `heTexP0..3` real; D3D12 hält dafür einen per-Draw-Descriptor-Ring.
+  GPU-Abnahme auf Windows-Hardware steht aus (`CopilotDocs/windows-gpu-verification-checklist.md` A4).
 - **Asset→Pixel-Pfad ist verdrahtet, aber noch nicht bezeugt:** `resolveFragment` liest echte
   `MaterialAsset.customShaderFragGlsl` und der Loop wählt die Pipeline — aber getestet sind bisher nur
   (a) Serialisierungs-Round-Trip (Daten) und (b) Inline-Shader→Pixel (Demo-Kugeln rufen
