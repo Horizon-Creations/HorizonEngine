@@ -804,6 +804,15 @@ target_link_libraries(he_tests PRIVATE he_materialshader)
 # -DHE_ENABLE_SHADERC=OFF build compiles every one of them into a guaranteed failure.
 if(HE_HAVE_SHADERC)
     target_compile_definitions(he_tests PRIVATE HE_TESTS_HAVE_SHADERC=1)
+    # On Windows the material-graph tests go one step further than emission and
+    # run the emitted HLSL through the REAL D3DCompile (vs_5_0 / ps_5_0), the
+    # call D3D11Renderer and D3D12Renderer make for every graph material. FXC
+    # is the only judge of register limits (X4509) and intrinsic spelling that
+    # SPIRV-Cross's "ok" says nothing about. d3dcompiler_47.dll ships with
+    # Windows, so no SDK component beyond the headers is needed.
+    if(WIN32)
+        target_link_libraries(he_tests PRIVATE d3dcompiler)
+    endif()
 endif()
 
 # One ctest entry per test SOURCE FILE, not one for the whole binary.
