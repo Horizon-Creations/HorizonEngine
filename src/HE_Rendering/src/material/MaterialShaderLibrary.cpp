@@ -2388,26 +2388,28 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
         // TEXTURES are not the constraint (t0..t127), so every SRV keeps its
         // binding number and the renderers' t-register binds (t2, t4..t7,
         // t10/t11) stay readable against the GLSL; only the SAMPLER half moves.
-        // The six moved samplers are NOT bound by D3D11/D3D12 yet — they never
-        // were, because the shader never compiled. D3D11 reads an unbound slot
-        // as the default sampler state. D3D12 is stricter: its material root
-        // signature (D3D12Renderer createMaterialResources) declares only
-        // t2/t4..t7/t10..t12 and static samplers s2/s4..s7/s10..s12, while the
-        // shader statically references t13/t15..t18/t31..t33 and s0/s1/s3/s8/
-        // s9/s13/s14/s15 — CreateGraphicsPipelineState validates that and is
-        // expected to reject the PSO until the ranges cover them. A WARP device
-        // in he_tests would prove that without a GPU; nothing does yet.
+        // The six moved samplers are NOT bound by D3D11 yet — they never
+        // were, because the shader never compiled; D3D11 reads an unbound slot
+        // as the default sampler state. D3D12 is stricter: the shader
+        // statically references t13..t18/t31..t33 and s0/s1/s3/s8/s9/s13/s14/
+        // s15, and CreateGraphicsPipelineState rejects a PSO whose root
+        // signature does not cover every one of them (E_INVALIDARG, "Root
+        // Signature doesn't match Pixel Shader"). The material root signature
+        // (D3D12MaterialRootSignature.h, Thema 56) covers them as static
+        // samplers + null SRVs; he_tests proves both verdicts on a WARP device.
         //
         // WHAT DOES NOT FIT: heLandscapeWeights (binding 14) and, in the UI
         // domain, heBackdrop (binding 9) share a register with a moved sampler
         // whenever both are declared (two SamplerState on s14 / s9). FXC
-        // accepts that — measured on Windows CI, 17.09.2026, against what
-        // parity-p1's 5e52d64e reports — so the shader builds, but both
-        // resources then sample through whatever state the renderer bound at
-        // that one slot. Making room means declaring textures and samplers
-        // separately in the shared preamble so one SamplerState serves many
-        // textures (parity-p1 9c72cbe7 does exactly that), a change to every
-        // backend.
+        // accepts the DECLARATION — measured on Windows CI, 17.09.2026 — but
+        // not two live users: a wired Landscape Layer Blend (real layer names,
+        // so the weightmap sample survives) fails with X4500 "overlapping
+        // register semantics not yet implemented 's14'" (run 35217490668, the
+        // registry sweep's unwired blend folds its sample away and passes).
+        // So every real landscape material still fails on D3D11/D3D12. Making
+        // room means declaring textures and samplers separately in the shared
+        // preamble so one SamplerState serves many textures (parity-p1
+        // 9c72cbe7 does exactly that), a change to every backend.
         static const std::vector<he::shaderc::HlslPin> kHlslMaterialPins = {
             //          stage             set  bind  reg  sampler
             { Stage::Fragment, 0,  2,  2 },     // heTex0

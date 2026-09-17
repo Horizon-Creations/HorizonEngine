@@ -2552,13 +2552,14 @@ bool hasDuplicateRegister(const std::string& hlsl, char kind)
 // The SM 5.0 sampler budget is exactly full (MaterialShaderLibrary::fragment,
 // HLSL branch): a material that declares a SEVENTEENTH combined sampler has no
 // register left, and the two that can land on a slot a moved preamble sampler
-// already took. FXC ACCEPTS that — measured on Windows CI (run 35177900601,
-// 17.09.2026), against the claim in parity-p1's 5e52d64e that it is X4500 —
-// so both compile; the two SamplerState then read whatever sampler state the
-// renderer bound at that one slot, which is a hardware-verification item, not
-// a compile failure. Named here, not hidden: the sharing is asserted, so the
-// day the preamble separates textures from samplers (parity-p1 9c72cbe7) this
-// list goes red and gets deleted.
+// already took. FXC ACCEPTS the shared DECLARATION — measured on Windows CI
+// (run 35177900601, 17.09.2026) — but only while one of the two users is dead:
+// the sweep's unwired Landscape Layer Blend folds its weightmap sample away.
+// A WIRED blend keeps both live and FXC stops with X4500 (run 35217490668,
+// pinned in the WARP test below), so parity-p1's 5e52d64e was right for every
+// real landscape material. Named here, not hidden: the sharing is asserted, so
+// the day the preamble separates textures from samplers (parity-p1 9c72cbe7)
+// this list goes red and gets deleted.
 bool sharesSamplerRegister(const std::string& name)
 {
 	return name == "Landscape Layer Blend"     // heLandscapeWeights (14) vs heCloudShadow → s14
@@ -2916,8 +2917,7 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 			              " — the preamble changed, re-check D3D12MaterialRootSignature.h");
 		for (UINT sreg : { 0u, 1u, 3u, 8u, 9u, 14u, 15u })
 			CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, sreg), "the lit PS no longer binds s", sreg);
-		CHECK(binds(b, D3D_SIT_CBUFFER, 0)); // HeLighting
-		CHECK(binds(b, D3D_SIT_CBUFFER, 3)); // HeParams
+		CHECK(binds(b, D3D_SIT_CBUFFER, 0)); // HeLighting (HeParams b3 is dead-stripped: the demo graph has no parameters)
 	}
 
 	// Positive: the description the renderer serialises → root signature + PSO.
@@ -2959,10 +2959,9 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 		if (!why.empty()) MESSAGE("legacy rejection: ", why);
 	}
 
-	// Three more shapes a project ships, all against the full signature: the
-	// Landscape Layer Blend (t14 + the shared s14), Texture Sample nodes
-	// (heTex0 t2 + heTexP0/1 t4/t5) and World Position Offset (the custom
-	// vertex, b8/b9 on the VS side).
+	// Two more shapes a project ships, both against the full signature: Texture
+	// Sample nodes (heTex0 t2 + heTexP0/1 t4/t5) and World Position Offset (the
+	// custom vertex, b8/b9 on the VS side).
 	auto psoFor = [&](const char* what, const std::string& fragGlsl, const std::string& vertBody)
 	{
 		const uint64_t h = std::hash<std::string>{}(fragGlsl);
@@ -2984,10 +2983,6 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 		const std::string why = drainInfoQueue(w);
 		CHECK_MESSAGE(SUCCEEDED(hr), what, ": PSO failed, hr=", hr, ": ", why);
 	};
-	{
-		const HE::MatShaderGen gen = HE::generateFragment(landscapeGraph());
-		psoFor("Landscape Layer Blend", gen.glsl, gen.vertexBody);
-	}
 	{
 		MaterialGraph t;
 		const int out = t.addNode(MatNodeType::Output);
@@ -3018,6 +3013,27 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 		const HE::MatShaderGen gen = HE::generateFragment(g);
 		REQUIRE_FALSE(gen.vertexBody.empty());
 		psoFor("World Position Offset", gen.glsl, gen.vertexBody);
+	}
+
+	// A WIRED Landscape Layer Blend never reaches the PSO: heLandscapeWeights
+	// (binding 14, unpinned → s14) and heCloudShadow (pinned to s14) are BOTH
+	// live once real layers are connected, and FXC stops with X4500
+	// ("overlapping register semantics not yet implemented 's14'"). The registry
+	// sweep's unwired blend passes only because its weightmap sample folds away
+	// with no layer names (layer 0 = vec3(0)). Measured on Windows CI (run
+	// 35217490668, 17.09.2026) — so the claim in cdce17bc that FXC takes the two
+	// shared-register shaders holds for the unwired shape only; every real
+	// landscape material fails on D3D11/D3D12 until the preamble separates
+	// textures from samplers (parity-p1 9c72cbe7). Pinned here so the day that
+	// lands, this goes red and the PSO case gets written.
+	{
+		const std::string lglsl = HE::generateFragment(landscapeGraph()).glsl;
+		const auto& lf = lib.fragment(std::hash<std::string>{}(lglsl), lglsl, B::HLSL);
+		REQUIRE_MESSAGE(lf.ok, lf.log);
+		std::string lerr;
+		ComPtr<ID3DBlob> lps = fxcBlob(lf.source, "ps_5_0", lerr);
+		CHECK_MESSAGE(lps.Get() == nullptr && lerr.find("X4500") != std::string::npos && lerr.find("s14") != std::string::npos,
+		              "a wired Landscape Layer Blend compiles under FXC now — build its PSO here (t14 + s14): ", lerr);
 	}
 }
 
@@ -3069,7 +3085,15 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 		REQUIRE_MESSAGE(ps.Get() != nullptr, "'", c.name, "': ", err);
 		const std::vector<Binding> b = reflectBindings(ps.Get());
 		const std::string miss = uncovered(b, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount);
-		CHECK_MESSAGE(miss.empty(), "'", c.name, "' binds registers the material root signature does not cover: ", miss);
+		// UI-domain materials are not drawn through this root signature — D3D12
+		// (like D3D11/Vulkan) has no UI-domain material path yet, only Metal and
+		// GL bind heBackdrop — so its t9 is outside the signature by design. It
+		// must stay the ONLY thing uncovered there, though.
+		if (c.name.find("(UI domain)") != std::string::npos)
+			CHECK_MESSAGE(miss.empty() || miss == "heBackdrop(2:9)", "'", c.name,
+			              "' binds registers beyond heBackdrop the material root signature does not cover: ", miss);
+		else
+			CHECK_MESSAGE(miss.empty(), "'", c.name, "' binds registers the material root signature does not cover: ", miss);
 		if (!uncovered(b, HE::d3d12mat::kLegacyRangeCount, HE::d3d12mat::kLegacySamplerCount).empty())
 			++litUncoveredByLegacy;
 		++shaders;
