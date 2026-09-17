@@ -251,8 +251,16 @@ geschrieben; er läuft nicht.
 | RenderPath-Umschaltung Forward/Deferred | ~ | -- | -- | -- |
 | Tile-Memory-Resolve (Framebuffer-Fetch) | -- | -- | -- | -- |
 | Deferred Decals | JA | ~ ¹ | ~ ¹ | ~ ¹ |
-| Clustered-Lighting-Build | -- | -- | -- | -- |
+| Clustered-Lighting-Build | -- | ~ ² | ~ ² | ~ ² |
 | SSR deferred / SSR forward | -- | -- | -- | -- |
+
+² **Forward-Clustered im eingebauten Szenen-Shader** (Thema 35 Schritt 8,
+17.09.2026): der CPU-Scatter ist als `HE::BuildClusterLights` (`LightPacking.h`)
+geteilt, die drei Backends lesen ihn aus Structured Buffers t18–t20 (D3D11,
+D3D12 als Root-SRVs) bzw. SSBOs Binding 10–12 (`scene.frag`); das 8-Licht-Fenster
+trägt nur noch Directional-Lichter. Kein Deferred-Resolve, deshalb „~": Graph-
+Materialien (heLitP) bleiben auf diesen Backends beim 8-Licht-Fenster, und
+Metals `EncodeClusterData` ist noch eine eigene Kopie desselben Algorithmus.
 
 ¹ **Vulkan zeichnet Decals, aber nicht deferred.** Vulkan hat keinen G-Buffer, also
 gibt es dort kein Base-Color-Ziel, in das ein Decal *vor* der Beleuchtung blenden
@@ -632,8 +640,11 @@ Zielbackend `SetRenderPath` aus (`grep -c RenderPath` = 0 in allen dreien).
 - P4c — G-Buffer-Variante für Node-Graph-Materialien inkl. Forward-Routing-Fallback.
 - P4d — `SetRenderPath`-Gate scharf schalten.
 - P4e — *Optional, danach:* die Clustered-Sperre in `compileResolveVariant:1030` für
-  D3D11/D3D12/Vulkan öffnen (die GL-4.1-Begründung trägt für sie nicht) und den
-  CPU-Scatter-Build portieren.
+  D3D11/D3D12/Vulkan öffnen (die GL-4.1-Begründung trägt für sie nicht).
+  **Der CPU-Scatter ist bereits portiert** (Thema 35 Schritt 8, 17.09.2026):
+  `HE::BuildClusterLights` in `LightPacking.h` speist die eingebauten Forward-
+  Szenen-Shader der drei Backends; ein späterer Deferred-Resolve bindet dieselben
+  drei Puffer, nur an die Preamble-Bindings 24–26.
 
 **Verifikation:** `HE_DUMP_RENDERPATH` + `HE_DUMP_GBUFFER` pro Backend; Forward- und
 Deferred-Shot derselben Szene müssen einander entsprechen und beide dem GL-Forward-Shot.

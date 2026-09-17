@@ -53,6 +53,10 @@ public:
 	void SetAntiAliasingSettings(const AntiAliasingSettings& s) override;
 	void SetGISettings(const GISettings& s) override;
 	void SetSSRSettings(const SSRSettings& s) override;
+	// Cascaded shadow maps (project ShadowSettings) + the per-cascade debug
+	// tint — the same contract GL, Metal, D3D11 and D3D12 honour.
+	void SetShadowSettings(const ShadowSettings& s) override;
+	void SetShadowDebug(bool on) override;
 
 	// Editor material/mesh hot-reload: drop the cached override-material texture / mesh GPU
 	// state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
@@ -123,18 +127,81 @@ private:
 	VkShaderModule loadShaderModule(const char* spvFileName);
 	uint32_t       findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
 
-	// ── Shadow map ──────────────────────────────────────────────────────────
-	void createShadowResources();
+	// ── Cascaded shadow maps ────────────────────────────────────────────────
+	// One depth image with kCsmCascades array layers (one per cascade): a
+	// 2D_ARRAY view (m_shadowView) the scene pass samples through binding 1
+	// (graph materials: heCsm, binding 12), plus one 2D per-layer view and its
+	// own framebuffer per cascade for the depth pass — a Vulkan framebuffer
+	// renders into a single layer view, the render pass itself is layer-
+	// agnostic and stays shared with EncodeDecalDepth. Mirrors GL's
+	// GL_TEXTURE_2D_ARRAY / Metal's texture2d_array / the D3D11+D3D12 arrays.
+	// The cascade count MUST match scene.frag's cascadeVP[3] and stay ≤
+	// ShadowData::kMaxCascades; the extractor fits the project's count (1..3).
+	static constexpr int kCsmCascades = 3;
+	void createShadowResources();       // pass + sampler (once) + the images
 	void destroyShadowResources();
-	void EncodeShadowMap(VkCommandBuffer cmd); // own render pass, before the scene
+	void createShadowImages();          // the size-dependent part: image, views, framebuffers
+	void destroyShadowImages();
+	void writeShadowDescriptors();      // scene set binding 1 → the array view, every frame slot
+	// Own render pass, before the scene. `aspect` is the camera aspect the
+	// cascades are fit against — the single map never cared, a cascade fit to
+	// a square frustum drops the screen edges of a wide viewport.
+	void EncodeShadowMap(VkCommandBuffer cmd, float aspect);
 	VkImage        m_shadowImage    = VK_NULL_HANDLE;
 	VkDeviceMemory m_shadowMemory   = VK_NULL_HANDLE;
-	VkImageView    m_shadowView     = VK_NULL_HANDLE;
+	VkImageView    m_shadowView     = VK_NULL_HANDLE;              // 2D_ARRAY, all cascades (sampled)
+	VkImageView    m_shadowLayerView[kCsmCascades] = {};           // 2D, one layer (depth target)
+	VkFramebuffer  m_shadowFB[kCsmCascades]        = {};           // one per cascade layer
 	VkSampler      m_shadowSampler  = VK_NULL_HANDLE;
 	VkRenderPass   m_shadowPass     = VK_NULL_HANDLE;
-	VkFramebuffer  m_shadowFB       = VK_NULL_HANDLE;
 	VkPipeline     m_shadowPipeline = VK_NULL_HANDLE;
 	uint32_t       m_shadowSize     = HE::kShadowMapResolution;
+	// Project ShadowSettings (IRenderer::SetShadowSettings): distance /
+	// cascade count / split lambda go to the extractor, the bias pair to the
+	// scene shader, a resolution change re-creates the images at the top of
+	// the next Render() (after vkDeviceWaitIdle, like the viewport resize) —
+	// never from the setter, which may land between passes.
+	ShadowSettings m_shadowSettings;
+	bool           m_shadowSizeDirty = false;
+	bool           m_debugShadowCascades = false;
+	// Per-cascade caster cull/sort scratch (NOT m_visible/m_sortedIndices —
+	// those hold the camera cull DrawScene consumes).
+	std::vector<uint8_t>         m_shadowVisible;
+	std::vector<uint32_t>        m_shadowSorted;
+	RenderSorter::DepthBatchList m_shadowBatches;
+	// The cascade constants DrawScene uploads into the Frame UBO; filled by
+	// EncodeShadowMap from the SAME extract the cascades were rendered with
+	// (DrawScene re-extracts, and a mid-frame world edit would otherwise let
+	// the sampled matrices drift from the rendered slices).
+	glm::mat4 m_cascadeClip[kCsmCascades] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
+	glm::vec4 m_cascadeSplits = glm::vec4(1e9f, 1e9f, 1e9f, 0.0f);
+	glm::vec3 m_cascadeCamFwd = glm::vec3(0.0f, 0.0f, -1.0f);
+	bool      m_shadowRenderedThisFrame = false;
+	bool      m_shadowLayoutValid = false; // all layers left UNDEFINED at least once (see EncodeShadowMap)
+
+	// ── Local (point/spot) shadow atlas ─────────────────────────────────────
+	// Same depth-array pattern as the cascades, independent of the directional
+	// light: ShadowData::kMaxLocalShadowLayers layers (spot = 1, point = 6
+	// cube faces), a per-layer view + framebuffer for the depth pass (through
+	// the shared m_shadowPass / m_shadowPipeline / m_shadowSampler) and one
+	// 2D_ARRAY view the scene pass samples through binding 9 (graph materials:
+	// heLocalShadow, binding 13). Fixed 1024² per view like Metal/GL/D3D —
+	// not part of the project ShadowSettings, built once with the cascades.
+	static constexpr int      kLocalShadowLayers = 16; // == ShadowData::kMaxLocalShadowLayers
+	static constexpr uint32_t kLocalShadowSize   = 1024;
+	void createLocalShadowImages();
+	void destroyLocalShadowImages();
+	VkImage        m_localShadowImage  = VK_NULL_HANDLE;
+	VkDeviceMemory m_localShadowMemory = VK_NULL_HANDLE;
+	VkImageView    m_localShadowView   = VK_NULL_HANDLE;           // 2D_ARRAY, all layers (sampled)
+	VkImageView    m_localShadowLayerView[kLocalShadowLayers] = {}; // 2D, one layer (depth target)
+	VkFramebuffer  m_localShadowFB[kLocalShadowLayers]        = {}; // one per layer
+	// Per-layer light clip transforms DrawScene uploads into the Frame UBO —
+	// filled by EncodeShadowMap from the same extract the layers were rendered
+	// with (same reason as m_cascadeClip). Count = layers rendered this frame.
+	glm::mat4 m_localShadowClip[kLocalShadowLayers] = {};
+	int       m_localShadowLayerCount = 0;   // 0 = the atlas was not rendered this frame
+	bool      m_localShadowLayoutValid = false; // all layers left UNDEFINED at least once
 
 	// ── Screen-space decals (docs/decals-cross-backend-plan.md §2.1 "Weg 2") ─
 	// Vulkan has no G-buffer, so decals are NOT composited into a base-colour
@@ -248,6 +315,25 @@ private:
 		VkDescriptorSet set    = VK_NULL_HANDLE;
 	};
 	FrameUBO m_frameUBO[2];
+
+	// ── Clustered lighting (plan P7 on the forward path) ─────────────────────
+	// Three host-visible SSBOs per frame in flight (lights / grid / indices),
+	// written once per frame from HE::BuildClusterLights and bound at set 0
+	// bindings 10/11/12 of the scene set (the skinned pipeline shares that
+	// layout). Sized once from the LightPacking caps. m_forwardClustered is
+	// the HE_FORWARD_CLUSTER=0 A/B guard (8-light window carries everything).
+	struct ClusterBuffer
+	{
+		VkBuffer       buf    = VK_NULL_HANDLE;
+		VkDeviceMemory mem    = VK_NULL_HANDLE;
+		void*          mapped = nullptr;
+	};
+	ClusterBuffer m_clusterLights[2];
+	ClusterBuffer m_clusterGrid[2];
+	ClusterBuffer m_clusterIdx[2];
+	bool m_clusterReady      = false;
+	bool m_forwardClustered  = true;
+	bool m_clusterCapWarned  = false;
 
 	// ── A4: node-graph material pipelines ────────────────────────────────────
 	// Graph materials (Material-Node editor) render through per-material VkPipelines

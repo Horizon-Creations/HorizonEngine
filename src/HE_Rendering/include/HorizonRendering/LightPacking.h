@@ -3,6 +3,8 @@
 #include "RenderWorld.h"
 #include <material/MaterialShaderLibrary.h> // MaterialShaderLibrary::Lighting (the graph-material light ABI)
 #include <Math/Math.h>
+#include <cstdint>
+#include <vector>
 
 // ─── Shared GPU light packing ─────────────────────────────────────────────────
 // All three packings below were duplicated verbatim in the backends — the first
@@ -77,5 +79,79 @@ HE_RENDERING_API PackedLocalShadowLights BuildMaskedLocalLights(const RenderWorl
 HE_RENDERING_API void FillMaterialLightWindow(const RenderWorld&               rw,
                                               MaterialShaderLibrary::Lighting& out,
                                               bool                             localShadowsActive);
+
+// ── Clustered lighting (plan P7, cross-backend) ───────────────────────────────
+// Lifts the 8-light window for point/spot lights: every local light is
+// scattered on the CPU into a screen-tile × log-depth-slice grid, and the
+// fragment shader shades only its own cluster's list. The window then carries
+// DIRECTIONAL lights only (BuildDirectionalLightWindow) — a local light must
+// live in exactly one of the two, or it is counted twice.
+//
+// This is the same algorithm (and the same buffer layout) as Metal's deferred
+// EncodeClusterData: the forward built-in shaders of D3D11/D3D12/Vulkan consume
+// it through structured buffers / SSBOs. Metal still carries its own copy in
+// MetalRenderer.mm; this builder is shaped so it can take over there too.
+//
+// Buffer contract (positional — the shaders index by it):
+//   lights  : 4 vec4 per light
+//             [0] xyz position,        w type (1 point, 2 spot)
+//             [1] xyz direction,       w cos(spot half angle)
+//             [2] rgb colour,          w intensity
+//             [3] x range, y local-shadow atlas base layer + 1 (0 = none),
+//                 z ray-traced GI local-mask channel + 1 (0 = none), w 0
+//   grid    : kClusterCount × {offset into `indices`, count}
+//   indices : light indices, cluster after cluster
+//   params  : x/y/z = grid dims, w = gridZ / log(far / near)
+//   camFwd  : xyz = camera forward (the slice's depth axis), w = near
+// Screen cells are picked from a TOP-LEFT-origin uv (Metal, D3D SV_Position
+// and Vulkan gl_FragCoord all agree on that); the scatter projects with the
+// GL-convention camera matrices (no clip fix) and flips v itself.
+inline constexpr int   kClusterGridX       = 16;
+inline constexpr int   kClusterGridY       = 9;
+inline constexpr int   kClusterGridZ       = 24;
+inline constexpr int   kClusterCount       = kClusterGridX * kClusterGridY * kClusterGridZ;
+inline constexpr float kClusterNear        = 0.1f;
+inline constexpr float kClusterFar         = 1000.0f;
+inline constexpr int   kMaxClusteredLights = 256;
+// Hard cap on the flattened index list: the D3D12/Vulkan rings are sized once
+// (kMaxClusterIndices × 4 bytes per frame in flight). A light that would
+// overflow it is dropped from the lists — never silently truncated per cell,
+// which would light a surface on one tile and not on its neighbour.
+inline constexpr int   kMaxClusterIndices  = 65536;
+
+struct ClusterLightBuild
+{
+	std::vector<glm::vec4>  lights;   // 4 × vec4 per light, never empty (one zero vec4 when no light)
+	std::vector<glm::uvec2> grid;     // kClusterCount entries
+	std::vector<uint32_t>   indices;  // never empty (one 0 when no light)
+	glm::vec4 params  = glm::vec4(0.0f); // x/y/z grid dims, w slice scale — x == 0 → clustering off
+	glm::vec4 camFwd  = glm::vec4(0.0f); // xyz camera forward, w near
+	int       lightCount   = 0;          // lights admitted to the lists
+	int       droppedLights = 0;         // over kMaxClusteredLights or kMaxClusterIndices
+};
+
+// localShadowsActive: the local atlas is rendered + bound this frame (else the
+// layer lane stays 0 = no shadow). giMasksValid: the ray-traced local mask is
+// bound this frame; the channel is assigned with BuildMaskedLocalLights' exact
+// scan (first 4 local lights of the first-8 window, extractor order), so a
+// cluster light keeps the channel the mask kernel rendered for it.
+HE_RENDERING_API ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
+                                                      bool               localShadowsActive,
+                                                      bool               giMasksValid);
+
+// The light window that goes with a cluster build: directional lights only,
+// first kMaxLightWindow of them in extractor order, in the built-in scene
+// shaders' PerFrame encoding (lightParams.y = atlas layer, -1 = none — unused
+// for directional lights, kept for the memcpy'd struct layout).
+struct DirectionalLightWindow
+{
+	glm::vec4 pos   [kMaxLightWindow] = {}; // xyz position, w type (always 0)
+	glm::vec4 dir   [kMaxLightWindow] = {}; // xyz direction, w cos(spot) (0)
+	glm::vec4 color [kMaxLightWindow] = {}; // rgb colour, w intensity
+	glm::vec4 params[kMaxLightWindow] = {}; // x range, y -1
+	int       count = 0;
+};
+
+HE_RENDERING_API DirectionalLightWindow BuildDirectionalLightWindow(const RenderWorld& rw);
 
 } // namespace HE

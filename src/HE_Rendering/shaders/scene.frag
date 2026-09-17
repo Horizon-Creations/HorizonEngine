@@ -18,13 +18,24 @@
 //     `skyColor()` below is the OLD hand-tuned gradient (the same reduced copy
 //     as in sky.frag), and it feeds BOTH the ambient IBL and the fog colour, so
 //     ambient light and fog tint differ from GL/Metal, not just the background.
-//   * Cascaded shadow maps — GL has uCascadeVP / uCascadeSplits / uCameraFwd and
-//     `computeShadow()` with planar view-Z cascade selection, plus the
-//     uShadowDebug cascade tint. This file has a single `lightVP` +
-//     `shadowFactor()` (the known D3D11/D3D12/Vulkan single-map limitation).
-//   * Point/spot shadow maps — GL's uLocalShadowMap atlas + uLocalShadowVP +
-//     `localShadowFactor()`. Local lights are unshadowed here unless ray-traced
-//     GI is active and writes the uGILocal mask.
+//   * (CLOSED, Thema 35 / Schritt 5) Cascaded shadow maps — `cascadeVP` /
+//     `cascadeSplits` / `cameraFwd` / `shadowBias` in the Frame block and the
+//     `shadowFactor()` below are the GLSL twin of GL's computeShadow(): planar
+//     view-Z cascade pick, normal-offset + slope-scaled bias, 3×3 PCF over a
+//     sampler2DArray, and the shadowEnabled.y cascade tint. Still MISSING from
+//     GL's version: nothing — but the two are hand-kept copies, so a change to
+//     GL's computeShadow() is NOT automatically visible here.
+//   * (CLOSED, Thema 35 / Schritt 7) Point/spot shadow maps — GL's
+//     uLocalShadowMap atlas + uLocalShadowVP + `localShadowFactor()` are here
+//     as `uLocalShadowMap` (binding 9) / `localShadowVP` / `localShadowFactor()`,
+//     min-combined with the uGILocal mask when GI is active. Hand-kept copy
+//     like the cascades above.
+//   * (AHEAD of GL, Thema 35 / Schritt 8) Clustered lighting — point/spot
+//     lights beyond the 8-light window come from per-cluster SSBOs (bindings
+//     10..12, `clusterParams` / `clusterCamFwd` in the Frame block) built by
+//     HE::BuildClusterLights; GL's kUnlitFS still iterates the 8-light window
+//     only (no SSBOs in GL 4.1). The loop body mirrors heClusterLighting in
+//     MaterialShaderLibrary.cpp's deferred resolve.
 //   * uSkyEnv — the baked skyColor cubemap GL samples for ambient diffuse and
 //     specular. This file evaluates skyColor() analytically per fragment.
 //   * uAmbient — the flat ambient fill (never-black floor / overcast term).
@@ -66,8 +77,16 @@ layout(set = 0, binding = 0) uniform Frame {
     vec4  lightDir[8];
     vec4  lightColor[8];
     vec4  lightParams[8];
-    mat4  lightVP;
-    ivec4 shadowEnabled;
+    // Cascaded shadow maps — must match FrameUBOData exactly: per-cascade
+    // light view-proj (kVulkanClipFix pre-applied on the CPU), the planar
+    // view-space far distance of each cascade (w = cascade count), the
+    // camera forward the pick measures along (w = 1 / shadow map size) and
+    // the project ShadowSettings receiver bias (x = slope factor, y = minimum).
+    mat4  cascadeVP[3];
+    vec4  cascadeSplits;
+    vec4  cameraFwd;
+    vec4  shadowBias;
+    ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug)
     vec4  sunDir;   // xyz = sun direction
     vec4  fog;      // x=fogDensity, y=fogHeightFalloff
     vec4  viewport; // x=W, y=H, z=ssaoEnabled(1.0), w=unused — must match FrameUBOData exactly
@@ -78,9 +97,39 @@ layout(set = 0, binding = 0) uniform Frame {
     // uSSRFwd holds it, y = intensity, z = max roughness, w = 0. Same four lanes
     // heLitP reads out of Lighting::ssr — must match FrameUBOData exactly.
     vec4  ssrParams;
+    // Local (point/spot) shadow atlas — must match FrameUBOData exactly: one
+    // light view-proj per atlas layer (kVulkanClipFix pre-applied), 16 layers
+    // = spot 1 / point 6 cube faces. lightParams[i].y is the light's base
+    // layer (-1 = casts no local shadow). localShadowParams.x = 1 / atlas size.
+    mat4  localShadowVP[16];
+    vec4  localShadowParams;
+    // Clustered lighting (plan P7 on the forward path, HE::BuildClusterLights)
+    // — must match FrameUBOData exactly: x/y/z = cluster grid dims (x == 0 →
+    // clustering off, the 8-light window then carries point/spot lights too),
+    // w = gridZ / log(far / near); clusterCamFwd.xyz = camera forward the depth
+    // slice is measured along, w = the grid's near plane. Appended last.
+    vec4  clusterParams;
+    vec4  clusterCamFwd;
 } uf;
 
-layout(set = 0, binding = 1) uniform sampler2D uShadowMap;
+// Clustered lighting lists (HE::BuildClusterLights in LightPacking.h): 4 vec4
+// per light (posType / dirCos / colourIntensity / {range, atlas layer + 1,
+// GI mask channel + 1, 0}), one {offset, count} per cluster, and the flat
+// index list. Bindings 10..12: next free slots after the local atlas on 9;
+// host-visible per-frame SSBOs, written once per frame like the Frame UBO.
+// Read only when clusterParams.x > 0.
+layout(std430, set = 0, binding = 10) readonly buffer ClusterLights { vec4  clLights[]; };
+layout(std430, set = 0, binding = 11) readonly buffer ClusterGrid   { uvec2 clGrid[]; };
+layout(std430, set = 0, binding = 12) readonly buffer ClusterIdx    { uint  clIdx[]; };
+
+// Directional CSM depth array — one layer per cascade, nearest + clamp-to-
+// border(white) sampler: a PCF tap must read ONE texel's depth, and a tap
+// that leaves the map reads "lit".
+layout(set = 0, binding = 1) uniform sampler2DArray uShadowMap;
+// Local (point/spot) shadow atlas — 16-layer depth array, same nearest +
+// clamp-to-border(white) sampler as the cascades. Binding 9: next free slot
+// after the forward-SSR result on 8.
+layout(set = 0, binding = 9) uniform sampler2DArray uLocalShadowMap;
 
 // Per-draw PBR material scalars uploaded via vkCmdUpdateBuffer before each draw.
 layout(set = 0, binding = 2) uniform MatUBO {
@@ -258,17 +307,102 @@ vec3 BRDF(vec3 L, vec3 V, vec3 N, vec3 base, float met, float rough)
     return (kd*base/PI + spec)*NdL;
 }
 
-float shadowFactor(vec3 worldPos, vec3 N, vec3 L)
+// Cascaded shadows — the GLSL twin of GL's computeShadow() and of the Metal /
+// D3D11 / D3D12 shadowFactor(): pick the first cascade whose far distance
+// covers the fragment (by PLANAR camera-forward distance, the same measure the
+// extractor split the cascades with — euclidean distance would push screen-edge
+// pixels into a too-coarse cascade), project into that cascade's light clip,
+// normal-offset + slope-scaled bias scaled by cascade, 3×3 PCF over its layer
+// of the depth array. outCascade returns the chosen index for the debug tint.
+// UV convention: kVulkanClipFix (y flip + [0,1] depth) is baked into cascadeVP
+// and the slices were rendered under the same matrix, so uv = p.xy*0.5+0.5
+// with no further flip — exactly the old single-map lookup.
+float shadowFactor(vec3 worldPos, vec3 N, vec3 L, out int outCascade)
 {
+    outCascade = 0;
     if (uf.shadowEnabled.x == 0) return 1.0;
-    vec4 lp = uf.lightVP * vec4(worldPos, 1.0);
-    vec3 p  = lp.xyz / lp.w;
+    float viewDist = dot(worldPos - uf.cameraPos.xyz, uf.cameraFwd.xyz);
+    int count = int(uf.cascadeSplits.w);
+    int c = (count > 0) ? count - 1 : 0;
+    if      (count > 0 && viewDist < uf.cascadeSplits.x) c = 0;
+    else if (count > 1 && viewDist < uf.cascadeSplits.y) c = 1;
+    else if (count > 2 && viewDist < uf.cascadeSplits.z) c = 2;
+    c = clamp(c, 0, 2);
+    outCascade = c;
+
+    // Normal-offset bias scaled by cascade — coarser (farther) cascades have
+    // larger texels and need a bigger offset to avoid acne.
+    vec4 lp = uf.cascadeVP[c] * vec4(worldPos + N * (0.06 * float(c + 1)), 1.0);
+    vec3 p  = lp.xyz / lp.w;               // z already [0,1] (kVulkanClipFix)
     vec2 uv = p.xy * 0.5 + 0.5;
-    if (p.z > 1.0 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
+    float texel = uf.cameraFwd.w;          // 1 / shadow map size
+    // Reject one texel inside the border so the 3×3 kernel never reads outside
+    // this cascade (border texels → edge fringes).
+    if (p.z > 1.0 || any(lessThan(uv, vec2(texel))) || any(greaterThan(uv, vec2(1.0 - texel))))
         return 1.0;
-    float bias    = max(0.0015 * (1.0 - dot(N, L)), 0.0004);
-    float closest = texture(uShadowMap, uv).r;
-    return (p.z - bias > closest) ? 0.35 : 1.0;
+    float ndl  = clamp(dot(N, L), 0.0, 1.0);
+    float bias = clamp(uf.shadowBias.x * tan(acos(ndl)), uf.shadowBias.y, 0.02) * float(c + 1);
+    float vis = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x)
+        {
+            float cd = texture(uShadowMap, vec3(uv + vec2(x, y) * texel, float(c))).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    // No direct-light floor in shadow (GL/Metal/D3D agree): ambient + IBL
+    // already provide the indirect minimum; a floor bleeds sun colour into shadow.
+    return vis / 9.0;
+}
+
+// Point/spot shadow lookup in the local shadow atlas — the GLSL twin of Metal's
+// localShadowFactor() and the D3D11/D3D12 function of the same name. Spot
+// lights project into their single perspective layer; point lights first pick
+// the cube face from the fragment→light vector's major axis (faces stored as 6
+// consecutive array layers, +X −X +Y −Y +Z −Z), then project into that face's
+// layer. Same 3×3 PCF and normal-offset bias family as the directional CSM
+// above; the receiver bias is fixed (the project ShadowSettings pair tunes the
+// cascades only). Same UV convention as shadowFactor(): kVulkanClipFix is
+// baked into localShadowVP, so uv = p.xy*0.5+0.5 with no further flip.
+// Takes the light EXPLICITLY (position + type, decoded atlas base layer with
+// -1 = none) so the 8-light window and the cluster lists share it — the twin
+// of the preamble's heClusterShadow.
+float localShadowFactor(vec4 posType, int base, vec3 worldPos, vec3 N)
+{
+    // localShadowParams.y = atlas rendered this frame. First gate on purpose:
+    // a zero-initialised Frame fill has lightParams.y = 0, which would
+    // otherwise read as "layer 0" and sample a never-rendered layer.
+    if (uf.localShadowParams.y < 0.5) return 1.0;
+    if (base < 0) return 1.0;
+    int layer = base;
+    if (int(posType.w) == 1) // point: major-axis cube-face pick
+    {
+        vec3 d = worldPos - posType.xyz;
+        vec3 a = abs(d);
+        int face;
+        if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
+        else if (a.y >= a.z)               face = (d.y > 0.0) ? 2 : 3;
+        else                               face = (d.z > 0.0) ? 4 : 5;
+        layer = base + face;
+    }
+    vec3  toL = normalize(posType.xyz - worldPos);
+    float ndl = clamp(dot(N, toL), 0.0, 1.0);
+    vec4 lp = uf.localShadowVP[layer] * vec4(worldPos + N * 0.02, 1.0);
+    if (lp.w <= 0.0) return 1.0;           // behind the light's near plane
+    vec3 p  = lp.xyz / lp.w;               // z in [0,1] (kVulkanClipFix)
+    vec2 uv = p.xy * 0.5 + 0.5;
+    float texel = uf.localShadowParams.x;  // 1 / atlas size
+    if (p.z > 1.0 || p.z < 0.0
+        || any(lessThan(uv, vec2(texel))) || any(greaterThan(uv, vec2(1.0 - texel))))
+        return 1.0;
+    float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
+    float vis = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x)
+        {
+            float cd = texture(uLocalShadowMap, vec3(uv + vec2(x, y) * texel, float(layer))).r;
+            vis += (p.z - bias > cd) ? 0.0 : 1.0;
+        }
+    return vis / 9.0;
 }
 
 void main()
@@ -281,7 +415,11 @@ void main()
     float rough = max(mat_ubo.roughPad.x, 0.04);
     vec3  N     = normalize(vNormal);
 
-    if (uf.lightCount.x == 0)
+    // Flat-shade fallback for a scene without any light. With clustering on
+    // the window holds directional lights only, so a night scene of point
+    // lights has lightCount.x == 0 and still must NOT land here — the CPU
+    // zeroes clusterParams.x when there is no light at all.
+    if (uf.lightCount.x == 0 && uf.clusterParams.x < 0.5)
     {
         vec3  L    = normalize(vec3(0.5, 0.8, 0.6));
         float diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
@@ -331,6 +469,7 @@ void main()
         : ao * (ambDiff * 0.35 + ambSpec * (1.0 - 0.6 * rough));
 
     int giLocalIdx = 0; // counter over non-directional lights → local-mask channel
+    int dbgCascade = 0; // cascade chosen by the directional shadow (debug tint)
     for (int i = 0; i < uf.lightCount.x; ++i)
     {
         int   type  = int(uf.lightPos[i].w);
@@ -361,22 +500,73 @@ void main()
             // GI replaces the shadow map entirely when active: ray-traced mask
             // sampled at the same screen-space UV convention as uAO.
             if (uf.giParams.y > 0.5) sh = texture(uGIShadow, gl_FragCoord.xy / uf.viewport.xy).r;
-            else                     sh = shadowFactor(vWorldPos, N, L);
+            else                     sh = shadowFactor(vWorldPos, N, L, dbgCascade);
         }
         else
         {
-            // Local (point/spot) lights: ray-traced hard shadows when GI is
-            // active — one visibility channel per light (first 4), written by
-            // the shadow kernel from unjittered secondary rays (they had no
-            // shadowing at all before — shone straight through geometry).
+            // Local (point/spot) lights: shadow-mapped when the light casts
+            // shadows (lightParams.y = atlas base layer, set by the extractor).
+            // When GI is active the ray-traced hard mask (first 4 local lights)
+            // is combined in via min() — the map covers lights the mask can't.
+            // Mirrors Metal/GL/D3D11/D3D12.
+            sh = localShadowFactor(uf.lightPos[i], int(uf.lightParams[i].y), vWorldPos, N);
             if (uf.giParams.y > 0.5 && giLocalIdx < 4)
-                sh = texture(uGILocal, gl_FragCoord.xy / uf.viewport.xy)[giLocalIdx];
+                sh = min(sh, texture(uGILocal, gl_FragCoord.xy / uf.viewport.xy)[giLocalIdx]);
             giLocalIdx++;
         }
         // "Receives Shadow" off: the object is lit as if nothing occluded it.
         // After BOTH branches so it covers the shadow map and the GI masks alike.
         if (mat_ubo.roughPad.w > 0.5) sh = 1.0;
         result += BRDF(L, V, N, base, met, rough) * uf.lightColor[i].rgb * uf.lightColor[i].w * atten * sh;
+    }
+    // Clustered point/spot lights (plan P7 on the forward path): the fragment
+    // picks its screen tile × log-depth slice and shades only that cluster's
+    // list — the same attenuation, shadow and BRDF as the window loop above,
+    // so HE_FORWARD_CLUSTER=0 (window carries everything) is a byte-for-byte
+    // A/B of the first 8 lights. Mirrors heClusterLighting in the deferred
+    // resolve (MaterialShaderLibrary.cpp) and the D3D11/D3D12 copies,
+    // including the GI mask channel carried in params.z. gl_FragCoord is
+    // top-left in Vulkan — the same origin the CPU scatter flipped to.
+    if (uf.clusterParams.x > 0.5)
+    {
+        float nearZ = max(uf.clusterCamFwd.w, 1e-4);
+        float viewZ = max(dot(vWorldPos - uf.cameraPos.xyz, uf.clusterCamFwd.xyz), nearZ);
+        int   gx = int(uf.clusterParams.x), gy = int(uf.clusterParams.y), gz = int(uf.clusterParams.z);
+        vec2  cuv = gl_FragCoord.xy / uf.viewport.xy;
+        int   cx = clamp(int(cuv.x * float(gx)), 0, gx - 1);
+        int   cy = clamp(int(cuv.y * float(gy)), 0, gy - 1);
+        int   cz = clamp(int(log(viewZ / nearZ) * uf.clusterParams.w), 0, gz - 1);
+        uvec2 cell = clGrid[(cz * gy + cy) * gx + cx];
+        for (uint k = 0u; k < cell.y; ++k)
+        {
+            uint ci      = clIdx[cell.x + k] * 4u;
+            vec4 posType = clLights[ci + 0u];
+            vec4 dirCos  = clLights[ci + 1u];
+            vec4 colInt  = clLights[ci + 2u];
+            vec4 params  = clLights[ci + 3u];
+            vec3  d    = posType.xyz - vWorldPos;
+            float dist = max(length(d), 1e-4);
+            vec3  L    = d / dist;
+            float range = max(params.x, 1e-4);
+            float atten = clamp(1.0 - dist / range, 0.0, 1.0);
+            atten *= atten;
+            if (posType.w > 1.5) // spot cone
+            {
+                float c       = dot(-L, normalize(dirCos.xyz));
+                float cosCone = dirCos.w;
+                atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+            }
+            if (atten <= 0.0) continue;
+            // params.y = atlas base layer + 1 (0 = none), params.z = GI local
+            // mask channel + 1 (0 = none; assigned with the window's exact
+            // first-4 scan, so the light keeps the channel the mask rendered).
+            float sh = localShadowFactor(posType, int(params.y) - 1, vWorldPos, N);
+            int   mc = int(params.z) - 1;
+            if (uf.giParams.y > 0.5 && mc >= 0)
+                sh = min(sh, texture(uGILocal, gl_FragCoord.xy / uf.viewport.xy)[mc]);
+            if (mat_ubo.roughPad.w > 0.5) sh = 1.0;
+            result += BRDF(L, V, N, base, met, rough) * colInt.rgb * colInt.w * atten * sh;
+        }
     }
     // Atmospheric fog
     if (uf.fog.x > 0.0) {
@@ -388,6 +578,15 @@ void main()
         float f    = 1.0 - exp(-opt);
         vec3  fogCol = skyColor(ray/dist, uf.sunDir.xyz);
         result = mix(result, fogCol, clamp(f, 0.0, 1.0));
+    }
+    // Debug: tint each fragment by its shadow cascade (red / green / blue /
+    // yellow) so the cascade split placement is verifiable at a glance.
+    // Mirrors GL, Metal and D3D (IRenderer::SetShadowDebug).
+    if (uf.shadowEnabled.y != 0 && uf.shadowEnabled.x != 0)
+    {
+        const vec3 tint[4] = vec3[4](vec3(1.0, 0.4, 0.4), vec3(0.4, 1.0, 0.4),
+                                     vec3(0.4, 0.6, 1.0), vec3(1.0, 1.0, 0.4));
+        result *= tint[min(dbgCascade, 3)];
     }
     FragColor = vec4(result, mat_ubo.roughPad.y);
 }

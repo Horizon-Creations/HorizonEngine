@@ -1209,6 +1209,141 @@ TEST_CASE("BuildMaskedLocalLights: counts within the 8-light window, fills the f
 	CHECK(dk.posRange[0].x == doctest::Approx(1.0f));
 }
 
+TEST_CASE("BuildClusterLights: scatter, window split, mask channels and caps are the shader contract")
+{
+	// Camera at the origin looking down -Z (GL convention, the matrices the
+	// scatter projects with), 60° vertical fov, 16:9.
+	RenderWorld rw;
+	rw.camera.view       = glm::lookAt(glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, -1.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	rw.camera.projection = glm::perspective(glm::radians(60.0f), 16.0f / 9.0f, 0.1f, 1000.0f);
+	rw.camera.position   = glm::vec3(0.0f);
+
+	auto local = [](glm::vec3 p, float range, uint8_t type = 1) {
+		LightData l; l.type = type; l.intensity = 1.0f; l.position = p; l.range = range; return l; };
+	auto cell = [](int x, int y, int z) { return (z * HE::kClusterGridY + y) * HE::kClusterGridX + x; };
+	auto inCell = [&](const HE::ClusterLightBuild& b, int x, int y, int z, uint32_t li) {
+		const glm::uvec2 g = b.grid[cell(x, y, z)];
+		for (uint32_t k = 0; k < g.y; ++k) if (b.indices[g.x + k] == li) return true;
+		return false;
+	};
+
+	SUBCASE("one light straight ahead lands in the centre column of its depth slices")
+	{
+		rw.lights = { local(glm::vec3(0.0f, 0.0f, -10.0f), 1.0f) };
+		const HE::ClusterLightBuild b = HE::BuildClusterLights(rw, false, false);
+		REQUIRE(b.lightCount == 1);
+		CHECK(b.grid.size() == static_cast<size_t>(HE::kClusterCount));
+		CHECK(b.params.x == doctest::Approx(HE::kClusterGridX));
+		CHECK(b.params.z == doctest::Approx(HE::kClusterGridZ));
+		CHECK(b.camFwd.z == doctest::Approx(-1.0f));
+		CHECK(b.camFwd.w == doctest::Approx(HE::kClusterNear));
+		// log slice of view-z 9..11 with 24 slices over 0.1..1000: 11 and 12.
+		const float sliceScale = HE::kClusterGridZ / std::log(HE::kClusterFar / HE::kClusterNear);
+		const int z0 = static_cast<int>(std::log(9.0f  / HE::kClusterNear) * sliceScale);
+		const int z1 = static_cast<int>(std::log(11.0f / HE::kClusterNear) * sliceScale);
+		CHECK(inCell(b, HE::kClusterGridX / 2, HE::kClusterGridY / 2, z0, 0));
+		CHECK(inCell(b, HE::kClusterGridX / 2, HE::kClusterGridY / 2, z1, 0));
+		CHECK_FALSE(inCell(b, 0, 0, z0, 0));                      // not the screen corner
+		CHECK_FALSE(inCell(b, HE::kClusterGridX / 2, HE::kClusterGridY / 2, 0, 0)); // not the near slice
+		// 4 vec4 per light, in the documented order.
+		REQUIRE(b.lights.size() == 4);
+		CHECK(b.lights[0] == glm::vec4(0.0f, 0.0f, -10.0f, 1.0f));
+		CHECK(b.lights[3].x == doctest::Approx(1.0f));            // range
+		CHECK(b.lights[3].y == doctest::Approx(0.0f));            // no atlas layer
+		CHECK(b.lights[3].z == doctest::Approx(0.0f));            // no mask channel
+	}
+
+	SUBCASE("screen rows use a TOP-LEFT origin: a light above the centre lands in the upper rows")
+	{
+		rw.lights = { local(glm::vec3(0.0f, 3.0f, -10.0f), 1.0f) };
+		const HE::ClusterLightBuild b = HE::BuildClusterLights(rw, false, false);
+		REQUIRE(b.lightCount == 1);
+		const float sliceScale = HE::kClusterGridZ / std::log(HE::kClusterFar / HE::kClusterNear);
+		const int z = static_cast<int>(std::log(10.0f / HE::kClusterNear) * sliceScale);
+		bool upper = false, lower = false;
+		for (int y = 0; y < HE::kClusterGridY; ++y)
+			if (inCell(b, HE::kClusterGridX / 2, y, z, 0)) (y < HE::kClusterGridY / 2 ? upper : lower) = true;
+		CHECK(upper);
+		CHECK_FALSE(lower);
+	}
+
+	SUBCASE("directional lights stay in the window; local lights leave it; lights behind the camera vanish")
+	{
+		LightData dir; dir.type = 0; dir.intensity = 2.0f; dir.direction = glm::vec3(0.0f, -1.0f, 0.0f);
+		rw.lights = { local(glm::vec3(0.0f, 0.0f, -5.0f), 1.0f), dir,
+		              local(glm::vec3(0.0f, 0.0f, +5.0f), 1.0f) }; // behind the camera
+		const HE::ClusterLightBuild b = HE::BuildClusterLights(rw, false, false);
+		CHECK(b.lightCount == 1);
+		CHECK(b.droppedLights == 0);                              // behind ≠ dropped, just culled
+		const HE::DirectionalLightWindow w = HE::BuildDirectionalLightWindow(rw);
+		REQUIRE(w.count == 1);
+		CHECK(w.pos[0].w == doctest::Approx(0.0f));
+		CHECK(w.color[0].w == doctest::Approx(2.0f));
+		CHECK(w.params[0].y == doctest::Approx(-1.0f));           // built-in "no atlas layer"
+	}
+
+	SUBCASE("GI mask channel and atlas layer follow the window's exact scans")
+	{
+		LightData dir; dir.type = 0; dir.intensity = 1.0f;
+		LightData a = local(glm::vec3(1.0f, 0.0f, -10.0f), 1.0f); a.shadowLayer = 6;
+		LightData c = local(glm::vec3(-1.0f, 0.0f, -10.0f), 1.0f, 2);
+		rw.lights = { dir, a, c };
+		const HE::ClusterLightBuild on = HE::BuildClusterLights(rw, true, true);
+		REQUIRE(on.lightCount == 2);
+		CHECK(on.lights[0 * 4 + 3].y == doctest::Approx(7.0f));   // layer 6 → stored + 1
+		CHECK(on.lights[0 * 4 + 3].z == doctest::Approx(1.0f));   // channel 0 → stored + 1
+		CHECK(on.lights[1 * 4 + 3].y == doctest::Approx(0.0f));   // casts no local shadow
+		CHECK(on.lights[1 * 4 + 3].z == doctest::Approx(2.0f));   // channel 1 (dir consumed none)
+		CHECK(on.lights[1 * 4 + 0].w == doctest::Approx(2.0f));   // spot
+		// Neither gate set → both lanes 0, whatever the light says.
+		const HE::ClusterLightBuild off = HE::BuildClusterLights(rw, false, false);
+		CHECK(off.lights[0 * 4 + 3].y == doctest::Approx(0.0f));
+		CHECK(off.lights[0 * 4 + 3].z == doctest::Approx(0.0f));
+		// Beyond the 8-light window there is no mask channel even with GI on.
+		rw.lights.clear();
+		for (int i = 0; i < 9; ++i) rw.lights.push_back(local(glm::vec3(0.0f, 0.0f, -10.0f - i), 1.0f));
+		const HE::ClusterLightBuild many = HE::BuildClusterLights(rw, false, true);
+		REQUIRE(many.lightCount == 9);
+		CHECK(many.lights[3 * 4 + 3].z == doctest::Approx(4.0f)); // 4th local light → channel 3
+		CHECK(many.lights[4 * 4 + 3].z == doctest::Approx(0.0f)); // 5th: mask is RGBA, no channel
+		CHECK(many.lights[8 * 4 + 3].z == doctest::Approx(0.0f)); // 9th: outside the window
+	}
+
+	SUBCASE("caps: the 8-light limit is gone, the 256-light cap and the index cap drop whole lights")
+	{
+		rw.lights.clear();
+		for (int i = 0; i < 300; ++i)
+			rw.lights.push_back(local(glm::vec3((i % 10) - 5.0f, (i / 10) % 5 - 2.0f, -20.0f - i / 50), 0.5f));
+		const HE::ClusterLightBuild b = HE::BuildClusterLights(rw, false, false);
+		CHECK(b.lightCount == HE::kMaxClusteredLights);
+		CHECK(b.droppedLights == 300 - HE::kMaxClusteredLights);
+		CHECK(b.lights.size() == static_cast<size_t>(HE::kMaxClusteredLights) * 4);
+		CHECK(b.indices.size() <= static_cast<size_t>(HE::kMaxClusterIndices));
+		// Every grid entry stays inside the index list.
+		for (const glm::uvec2& g : b.grid) CHECK(g.x + g.y <= b.indices.size());
+
+		// A light whose bounds swallow the camera covers the WHOLE grid — and a
+		// handful of those exhaust the index cap, dropping the rest entirely
+		// rather than lighting some tiles and not others.
+		rw.lights.clear();
+		for (int i = 0; i < 40; ++i) rw.lights.push_back(local(glm::vec3(0.0f), 2000.0f));
+		const HE::ClusterLightBuild huge = HE::BuildClusterLights(rw, false, false);
+		CHECK(huge.lightCount == HE::kMaxClusterIndices / HE::kClusterCount);
+		CHECK(huge.lightCount + huge.droppedLights == 40);
+		CHECK(huge.indices.size() == static_cast<size_t>(huge.lightCount) * HE::kClusterCount);
+	}
+
+	SUBCASE("no light at all still yields non-empty buffers")
+	{
+		rw.lights.clear();
+		const HE::ClusterLightBuild b = HE::BuildClusterLights(rw, false, false);
+		CHECK(b.lightCount == 0);
+		CHECK(b.lights.size() == 1);
+		CHECK(b.indices.size() == 1);
+		for (const glm::uvec2& g : b.grid) CHECK(g.y == 0u);
+	}
+}
+
 TEST_CASE("RenderSorter: transparency partition uses the tinted opacity")
 {
 	std::vector<DrawCall> calls(4);

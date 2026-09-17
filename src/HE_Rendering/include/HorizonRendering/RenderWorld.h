@@ -41,11 +41,13 @@ struct LightData {
 };
 
 // Directional-light shadow info, computed by the extractor.
-//   viewProj   — single whole-scene light clip transform. Used by the backends that
-//                are still on a single shadow map (D3D11 / D3D12 / Vulkan).
+//   viewProj   — single whole-scene light clip transform. No backend samples a
+//                single map any more (D3D12 and Vulkan were the last, Thema 35);
+//                it still drives the render graph's ShadowPass caster cull.
 //   cascade*   — Cascaded Shadow Maps: `cascadeCount` tight light frusta fit to
 //                successive camera-distance slices (sharp near, coarse far), used by
-//                the Metal and OpenGL backends. cascadeSplit[i] = the cascade's far
+//                every hardware backend (Metal, OpenGL, D3D11, D3D12, Vulkan).
+//                cascadeSplit[i] = the cascade's far
 //                distance in view space (camera-forward metres) for per-fragment
 //                cascade pick.
 struct ShadowData {
