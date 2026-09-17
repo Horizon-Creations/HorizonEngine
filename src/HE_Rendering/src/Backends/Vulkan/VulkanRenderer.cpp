@@ -23,6 +23,7 @@
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/SkyNoise3D.h>
 #include <HorizonRendering/SsaoKernel.h>
+#include <MaterialGraph/MaterialGraph.h>      // kMatMaxGraphTextures (heTexP0..3)
 
 static constexpr uint32_t k_maxFramesInFlight = 2;
 
@@ -272,8 +273,11 @@ void VulkanRenderer::Shutdown()
     // destroyMaterialTex frees descriptor sets from it). Device is already idle here.
     for (auto& [id, mt] : m_materialTexCache) destroyMaterialTex(mt);
     m_materialTexCache.clear();
+    for (auto& [key, mt] : m_graphTexCache) destroyMaterialTex(mt);
+    m_graphTexCache.clear();
     m_pendingMatInval.clear();
     m_pendingMeshInval.clear();
+    m_pendingTexInval.clear();
     destroyDecalPipelines(); // before destroyScenePipeline — it borrows m_albedoSampler
     // Forward SSR: pipelines, passes, ring buffers and every target it owns.
     // Before destroySSAOTargets below, because the pre-pass framebuffer holds
@@ -1956,9 +1960,9 @@ void VulkanRenderer::destroyScenePipeline()
 // ─────────────────────────────────────────────────────────────────────────────
 void VulkanRenderer::createMaterialResources()
 {
-    // The material fragment samples the white default at heTex0/heTexP0..3 for this
-    // first increment; without it (or the shared albedo sampler) there is nothing valid
-    // to bind, so leave the path disabled rather than sample an unbound descriptor.
+    // The white default fills every heTex0/heTexP0..3 slot a material leaves empty;
+    // without it (or the shared albedo sampler) there is nothing valid to bind, so
+    // leave the path disabled rather than sample an unbound descriptor.
     if (!m_whiteAlbedoView || !m_albedoSampler)
     {
         HE_LOG_WARN(RHI, "%s",
@@ -2421,6 +2425,21 @@ const VkImageView* VulkanRenderer::resolveDecalTexture(const HE::UUID& textureId
     uploadTextureImage(tex, mt.image, mt.mem, mt.view);
     auto res = m_decalTexCache.emplace(textureId, mt);
     return res.first->second.view ? &res.first->second.view : nullptr;
+}
+
+VkImageView VulkanRenderer::resolveGraphTexture(const HE::UUID& id, const std::string& path)
+{
+    const std::string key = graphTexKey(id, path);
+    if (key.empty() || !m_contentManager) return VK_NULL_HANDLE;
+    if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
+        return it->second.view;
+    // Unlike the decal cache this caches a null asset too: resolveTextureRef loads
+    // synchronously, so "still null" means unloadable, not "not yet" (mirrors GL).
+    MaterialTexVk mt;
+    if (const TextureAsset* tex = m_contentManager->resolveTextureRef(id, path))
+        uploadTextureImage(tex, mt.image, mt.mem, mt.view); // unsupported format → view stays null
+    auto res = m_graphTexCache.emplace(key, mt);
+    return res.first->second.view;
 }
 
 bool VulkanRenderer::EnsureDecalPipelines()
@@ -4071,7 +4090,7 @@ bool VulkanRenderer::resolveMaterialOverride(const HE::UUID& materialId, const M
 
 void VulkanRenderer::processPendingInvalidations()
 {
-    if (m_pendingMatInval.empty() && m_pendingMeshInval.empty()) return;
+    if (m_pendingMatInval.empty() && m_pendingMeshInval.empty() && m_pendingTexInval.empty()) return;
     // Editor-only path; a full device idle keeps the frees below trivially safe (no in-flight
     // frame references the dropped resources). The idle is a stall, but invalidation is rare
     // outside a terrain-sculpt drag — a documented follow-up (D3D12 uses a per-frame retire list).
@@ -4081,6 +4100,10 @@ void VulkanRenderer::processPendingInvalidations()
         if (auto it = m_materialTexCache.find(id); it != m_materialTexCache.end())
         { destroyMaterialTex(it->second); m_materialTexCache.erase(it); }
     m_pendingMatInval.clear();
+    for (const HE::UUID& id : m_pendingTexInval)
+        if (auto it = m_graphTexCache.find(graphTexKey(id, {})); it != m_graphTexCache.end())
+        { destroyMaterialTex(it->second); m_graphTexCache.erase(it); }
+    m_pendingTexInval.clear();
 
     for (const HE::UUID& id : m_pendingMeshInval)
     {
@@ -4538,6 +4561,32 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         if (resolveMaterialOverride(dc.materialAssetId, matOvr))
                             matTextured = (matOvr->set != VK_NULL_HANDLE);
 
+                        // heTexP0..3 = the graph's project textures (Texture Sample nodes),
+                        // the white default where a slot is empty or unloadable. The slot
+                        // list is snapshotted BEFORE any resolve: a resolve may load, and a
+                        // load can move the material asset out from under a held pointer —
+                        // which is also why `ma` below is fetched only AFTER this block.
+                        VkImageView heTexP[HE::kMatMaxGraphTextures] = {
+                            m_whiteAlbedoView, m_whiteAlbedoView, m_whiteAlbedoView, m_whiteAlbedoView };
+                        {
+                            HE::UUID    gIds[HE::kMatMaxGraphTextures]{};
+                            std::string gPaths[HE::kMatMaxGraphTextures];
+                            size_t nTex = 0;
+                            if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
+                            {
+                                nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
+                                    std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
+                                for (size_t i = 0; i < nTex; ++i)
+                                {
+                                    if (i < ma0->graphTextureIds.size())   gIds[i]   = ma0->graphTextureIds[i];
+                                    if (i < ma0->graphTexturePaths.size()) gPaths[i] = ma0->graphTexturePaths[i];
+                                }
+                            }
+                            for (size_t i = 0; i < nTex; ++i)
+                                if (VkImageView v = resolveGraphTexture(gIds[i], gPaths[i]))
+                                    heTexP[i] = v;
+                        }
+
                         // Per-entity HeParams override wins over the material's shared params.
                         const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
                         const std::vector<float>* params =
@@ -4593,10 +4642,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             else if (m.albedoView) tex0View = m.albedoView;
                             VkDescriptorImageInfo tex0II{ m_albedoSampler, tex0View,
                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            // TODO A4-followup: heTexP0-3 = the graph's picked project textures
-                            // (needs a UUID→view cache); bound to the white default for now.
-                            VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
-                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            // heTexP0..3 (bindings 4..7): the graph's project textures resolved
+                            // above, sampled linear-wrap like heTex0 (the white default where
+                            // a slot is empty).
+                            static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy bindings 4..7");
+                            VkDescriptorImageInfo texPII[HE::kMatMaxGraphTextures];
+                            for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
+                                texPII[k] = { m_albedoSampler, heTexP[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             VkWriteDescriptorSet w[14]{};
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
@@ -4612,10 +4664,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             wr(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &objBI,   nullptr);
                             wr(2, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &tex0II);
                             wr(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr);
-                            wr(4, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
-                            wr(5, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
-                            wr(6, 6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
-                            wr(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &whiteII);
+                            wr(4, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &texPII[0]);
+                            wr(5, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &texPII[1]);
+                            wr(6, 6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &texPII[2]);
+                            wr(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &texPII[3]);
                             wr(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr); // WPO VS
                             wr(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr); // WPO VS
                             // GI screen-space masks for heLitP(): sun mask + per-pixel
@@ -7494,6 +7546,13 @@ void VulkanRenderer::InvalidateMesh(const HE::UUID& meshId)
 {
     if (meshId != HE::UUID{})
         m_pendingMeshInval.push_back(meshId);
+}
+
+void VulkanRenderer::InvalidateTexture(const HE::UUID& textureId)
+{
+    // Same deferral — the graph-texture cache is keyed by "hi:lo" for UUIDs.
+    if (textureId != HE::UUID{})
+        m_pendingTexInval.push_back(textureId);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

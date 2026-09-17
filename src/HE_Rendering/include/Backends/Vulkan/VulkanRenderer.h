@@ -58,6 +58,9 @@ public:
 	// state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
 	void InvalidateMaterial(const HE::UUID& materialId) override;
 	void InvalidateMesh(const HE::UUID& meshId) override;
+	// Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
+	// next material draw re-uploads it.
+	void InvalidateTexture(const HE::UUID& textureId) override;
 
 	FrameGpuStats GetFrameGpuStats() const override;
 
@@ -308,8 +311,25 @@ private:
 	// Same payload, but resolved through resolveTextureRef instead of a material,
 	// and `.set` stays null — the decal pass writes its own per-draw descriptor.
 	std::unordered_map<HE::UUID, MaterialTexVk> m_decalTexCache;
+	// Node-graph project textures (MaterialAsset::graphTextureIds/Paths → heTexP0..3,
+	// the Texture Sample nodes), keyed exactly like GL's ResolveGraphTexture: "hi:lo"
+	// for a packed UUID, the path for a loose editor asset. Same payload as the decal
+	// cache (`.set` stays null — the material draw writes its own per-draw descriptor);
+	// a miss is cached (view null → white default, no per-frame retry). InvalidateTexture
+	// drops the UUID key; a path-keyed loose asset is not hot-reloaded (same as GL).
+	std::unordered_map<std::string, MaterialTexVk> m_graphTexCache;
 	std::vector<HE::UUID> m_pendingMatInval;
 	std::vector<HE::UUID> m_pendingMeshInval;
+	std::vector<HE::UUID> m_pendingTexInval;
+	static std::string graphTexKey(const HE::UUID& id, const std::string& path)
+	{
+		return id != HE::UUID{} ? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
+	}
+	// A graph material's project texture for one heTexP slot (null → bind the white
+	// default). resolveTextureRef LOADS a loose asset synchronously, which can move every
+	// ContentManager pointer the caller holds — callers snapshot the slot list first and
+	// re-fetch the material afterwards.
+	VkImageView resolveGraphTexture(const HE::UUID& id, const std::string& path);
 	// Resolve an override material's texture (dc.materialAssetId), cached by UUID. Returns true
 	// iff the material asset is loaded (out->set may be null = no texture → flat); false while
 	// still loading (retry next frame, baked texture stays). Mirrors GL's ResolveMaterialTexture.

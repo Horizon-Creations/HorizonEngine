@@ -46,6 +46,9 @@ public:
     // GPU state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
     void InvalidateMaterial(const HE::UUID& materialId) override;
     void InvalidateMesh(const HE::UUID& meshId) override;
+    // Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
+    // next material draw re-uploads it.
+    void InvalidateTexture(const HE::UUID& textureId) override;
 
     // Whole-frame D3D11 timestamp timing (double-buffered ring, never stalls)
     // + this frame's CPU draw/triangle/visibility counters.

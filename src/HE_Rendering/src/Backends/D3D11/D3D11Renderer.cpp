@@ -15,6 +15,7 @@
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/Vulkan/Metal-SW)
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/D3D12)
+#include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
 // ── Cross-backend renderer helpers (audit 1a) ────────────────────────────────
 // Each of these replaced a private copy that every backend carried; the copies
 // were byte-identical by contract (the GPU reads the packed bytes positionally),
@@ -1059,6 +1060,18 @@ struct D3D11RendererImpl
     std::unordered_map<HE::UUID, ComPtr<ID3D11ShaderResourceView>> decalTexCache;
     bool decalReady  = false; // resources built
     bool decalFailed = false; // build failed once — never retried per frame
+
+    // Node-graph project textures (MaterialAsset::graphTextureIds/Paths → heTexP0..3, the
+    // Texture Sample nodes), keyed exactly like GL's ResolveGraphTexture: "hi:lo" for a
+    // packed UUID, the path for a loose editor asset. Null is cached too (unloadable →
+    // white default, no per-frame retry). InvalidateTexture drops the UUID key so an
+    // edited texture re-uploads; a path-keyed loose asset is not hot-reloaded (same as GL).
+    std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> graphTexCache;
+    std::vector<HE::UUID> pendingTexInval;
+    static std::string graphTexKey(const HE::UUID& id, const std::string& path)
+    {
+        return id != HE::UUID{} ? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
+    }
 
     // ── Shadow map ──────────────────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>       depthVS;    // depth-only pass
@@ -3691,6 +3704,24 @@ struct D3D11RendererImpl
         return raw;
     }
 
+    // A graph material's project texture for one heTexP slot. resolveTextureRef LOADS a
+    // loose asset synchronously, which can move every ContentManager pointer the caller
+    // holds — callers snapshot the slot list first and re-fetch the material afterwards.
+    ID3D11ShaderResourceView* resolveGraphTexture(const HE::UUID& id, const std::string& path,
+                                                  ContentManager* cm)
+    {
+        const std::string key = graphTexKey(id, path);
+        if (key.empty() || !cm) return nullptr;
+        if (auto it = graphTexCache.find(key); it != graphTexCache.end())
+            return it->second.Get();
+        // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain (skips a block format
+        // this device can't sample → null → white default).
+        ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRV(cm->resolveTextureRef(id, path));
+        ID3D11ShaderResourceView* raw = srv.Get();
+        graphTexCache.emplace(key, std::move(srv));
+        return raw;
+    }
+
     // Draw every decal of the frame into the currently bound colour target, between
     // the opaque and the transparent geometry — the same slot at which Metal and GL
     // put theirs into the G-buffer.
@@ -3823,6 +3854,9 @@ struct D3D11RendererImpl
         for (const HE::UUID& id : pendingMatInval)
             materialTexCache.erase(id);
         pendingMatInval.clear();
+        for (const HE::UUID& id : pendingTexInval)
+            graphTexCache.erase(graphTexKey(id, {}));
+        pendingTexInval.clear();
         for (const HE::UUID& id : pendingMeshInval)
         {
             meshCache.erase(id);
@@ -4447,8 +4481,10 @@ void D3D11Renderer::Shutdown()
     m_impl->m_matObjCB.Reset();
     m_impl->m_matParamCB.Reset();
     m_impl->m_matSampler.Reset();
-    // Screen-space decals.
+    // Screen-space decals + graph project textures (ComPtr auto-release).
     m_impl->decalTexCache.clear();
+    m_impl->graphTexCache.clear();
+    m_impl->pendingTexInval.clear();
     m_impl->decalVS.Reset(); m_impl->decalPS.Reset(); m_impl->decalCB.Reset();
     m_impl->decalTexSampler.Reset(); m_impl->decalDepthSampler.Reset();
     m_impl->decalRast.Reset(); m_impl->decalNoDepth.Reset(); m_impl->decalBlend.Reset();
@@ -5013,8 +5049,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                     {
                         // heTex0 = the material's base texture, matching the built-in selection +
                         // hasTex flag: an override material's texture wins (A2), else the mesh's
-                        // baked texture (A1), else the white default. heTexP0..3 = white default
-                        // this increment (real graph project textures are an A4 follow-up).
+                        // baked texture (A1), else the white default.
                         ID3D11ShaderResourceView* heTex0 = nullptr;
                         bool matTextured = false;
                         ID3D11ShaderResourceView* ovr = nullptr;
@@ -5029,6 +5064,33 @@ void D3D11Renderer::DrawScene(int width, int height)
                             matTextured = true;
                         }
                         if (!heTex0) heTex0 = p.dummyTexture.Get(); // white default → not textured
+
+                        // heTexP0..3 = the graph's project textures (Texture Sample nodes),
+                        // white where a slot is empty or unloadable. The slot list is
+                        // snapshotted BEFORE any resolve: a resolve may load, and a load
+                        // can move the material asset out from under a held pointer —
+                        // which is also why `ma` below is fetched only AFTER this block.
+                        ID3D11ShaderResourceView* heTexP[HE::kMatMaxGraphTextures] = {
+                            p.dummyTexture.Get(), p.dummyTexture.Get(),
+                            p.dummyTexture.Get(), p.dummyTexture.Get() };
+                        {
+                            HE::UUID    gIds[HE::kMatMaxGraphTextures]{};
+                            std::string gPaths[HE::kMatMaxGraphTextures];
+                            size_t nTex = 0;
+                            if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
+                            {
+                                nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
+                                    std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
+                                for (size_t i = 0; i < nTex; ++i)
+                                {
+                                    if (i < ma0->graphTextureIds.size())   gIds[i]   = ma0->graphTextureIds[i];
+                                    if (i < ma0->graphTexturePaths.size()) gPaths[i] = ma0->graphTexturePaths[i];
+                                }
+                            }
+                            for (size_t i = 0; i < nTex; ++i)
+                                if (ID3D11ShaderResourceView* srv = p.resolveGraphTexture(gIds[i], gPaths[i], m_contentManager))
+                                    heTexP[i] = srv;
+                        }
 
                         // Per-entity HeParams override wins over the material's shared params.
                         const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
@@ -5045,13 +5107,11 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // HeLighting (b0 PS, b8 WPO VS) — same CB, filled once per frame.
                         ctx->PSSetConstantBuffers(0, 1, p.m_matLightCB.GetAddressOf());
                         ctx->VSSetConstantBuffers(8, 1, p.m_matLightCB.GetAddressOf());
-                        // heTex0 (t2 PS) + heTexP0..3 (t4..t7 PS, white default) + linear-wrap
-                        // samplers (s2 + s4..s7). t3 is intentionally unused by the mesh path.
+                        // heTex0 (t2 PS) + heTexP0..3 (t4..t7 PS) + linear-wrap samplers
+                        // (s2 + s4..s7). t3 is intentionally unused by the mesh path.
                         ctx->PSSetShaderResources(2, 1, &heTex0);
-                        ID3D11ShaderResourceView* whiteP[4] = {
-                            p.dummyTexture.Get(), p.dummyTexture.Get(),
-                            p.dummyTexture.Get(), p.dummyTexture.Get() };
-                        ctx->PSSetShaderResources(4, 4, whiteP);
+                        static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy t4..t7");
+                        ctx->PSSetShaderResources(4, 4, heTexP);
                         ID3D11SamplerState* matSamp = p.m_matSampler.Get();
                         ctx->PSSetSamplers(2, 1, &matSamp);
                         ID3D11SamplerState* matSamp4[4] = { matSamp, matSamp, matSamp, matSamp };
@@ -5589,6 +5649,13 @@ void D3D11Renderer::InvalidateMesh(const HE::UUID& meshId)
 {
     if (m_impl && meshId != HE::UUID{})
         m_impl->pendingMeshInval.push_back(meshId);
+}
+
+void D3D11Renderer::InvalidateTexture(const HE::UUID& textureId)
+{
+    // Same deferral — the graph-texture cache is keyed by "hi:lo" for UUIDs.
+    if (m_impl && textureId != HE::UUID{})
+        m_impl->pendingTexInval.push_back(textureId);
 }
 
 IRenderer::FrameGpuStats D3D11Renderer::GetFrameGpuStats() const
