@@ -308,6 +308,25 @@ private:
 	};
 	FrameUBO m_frameUBO[2];
 
+	// ── Clustered lighting (plan P7 on the forward path) ─────────────────────
+	// Three host-visible SSBOs per frame in flight (lights / grid / indices),
+	// written once per frame from HE::BuildClusterLights and bound at set 0
+	// bindings 10/11/12 of the scene set (the skinned pipeline shares that
+	// layout). Sized once from the LightPacking caps. m_forwardClustered is
+	// the HE_FORWARD_CLUSTER=0 A/B guard (8-light window carries everything).
+	struct ClusterBuffer
+	{
+		VkBuffer       buf    = VK_NULL_HANDLE;
+		VkDeviceMemory mem    = VK_NULL_HANDLE;
+		void*          mapped = nullptr;
+	};
+	ClusterBuffer m_clusterLights[2];
+	ClusterBuffer m_clusterGrid[2];
+	ClusterBuffer m_clusterIdx[2];
+	bool m_clusterReady      = false;
+	bool m_forwardClustered  = true;
+	bool m_clusterCapWarned  = false;
+
 	// ── A4: node-graph material pipelines ────────────────────────────────────
 	// Graph materials (Material-Node editor) render through per-material VkPipelines
 	// built at draw time from MaterialShaderLibrary SPIR-V. All of this is dead weight

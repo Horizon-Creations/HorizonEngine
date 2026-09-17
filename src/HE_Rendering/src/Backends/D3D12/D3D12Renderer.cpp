@@ -448,6 +448,13 @@ cbuffer PerFrame : register(b1)
     // base layer (-1 = casts no local shadow). uLocalShadowParams.x = 1 / size.
     float4x4 uLocalShadowVP[16];
     float4   uLocalShadowParams;
+    // Clustered lighting (plan P7 on the forward path, HE::BuildClusterLights):
+    // x/y/z = cluster grid dims (x == 0 → clustering off, the 8-light window
+    // then carries point/spot lights too), w = gridZ / log(far / near).
+    // uClusterCamFwd.xyz = camera forward the depth slice is measured along,
+    // w = the grid's near plane. Appended last — the cbuffer is memcpy'd whole.
+    float4   uClusterParams;
+    float4   uClusterCamFwd;
 };
 // Directional CSM depth array — one slice per cascade, sampled through the
 // point/clamp static sampler on s0 (a PCF tap must read ONE texel's depth; a
@@ -470,6 +477,16 @@ Texture2D    uSSRFwd    : register(t16);
 // same point/clamp static sampler (s0) as the cascades. t17: the register
 // D3D11 uses too (shared contract); sceneSrvHeap slot k_localShadowSlot.
 Texture2DArray uLocalShadowMap : register(t17);
+// Clustered lighting lists (HE::BuildClusterLights in LightPacking.h): 4 float4
+// per light (posType / dirCos / colourIntensity / {range, atlas layer + 1,
+// GI mask channel + 1, 0}), one {offset, count} per cluster, and the flat
+// index list. t18..t20 — the registers D3D11 uses too (shared contract) —
+// bound as ROOT SRVs (root parameters 6/7/8 of both the scene and the skinned
+// root signature; structured buffers are legal root descriptors). Read only
+// when uClusterParams.x > 0; the root arguments are set every frame anyway.
+StructuredBuffer<float4> uClusterLights : register(t18);
+StructuredBuffer<uint2>  uClusterGrid   : register(t19);
+StructuredBuffer<uint>   uClusterIdx    : register(t20);
 SamplerState uShadowSamp : register(s0); // point + clamp (CSM depth array)
 SamplerState uAOSampler  : register(s1);
 SamplerState uAlbedoSamp : register(s2); // linear + wrap, for tiling base-color textures
@@ -629,18 +646,20 @@ float shadowFactor(float3 worldPos, float3 N, float3 L, out int outCascade)
 // layers, +X −X +Y −Y +Z −Z), then project into that face's layer. Same 3×3
 // PCF and normal-offset bias family as the directional CSM above; the receiver
 // bias is fixed (the project ShadowSettings pair tunes the cascades only).
-float localShadowFactor(int li, float3 worldPos, float3 N)
+// Takes the light EXPLICITLY (position + type, decoded atlas base layer with
+// -1 = none) so the 8-light window and the cluster lists share it — the twin
+// of the preamble's heClusterShadow.
+float localShadowFactor(float4 posType, int base, float3 worldPos, float3 N)
 {
     // uLocalShadowParams.y = atlas rendered + bound this frame. First gate on
     // purpose: a zero-initialised PerFrame fill has lightParams.y = 0, which
     // would otherwise read as "layer 0" and sample an unbound atlas as black.
     if (uLocalShadowParams.y < 0.5) return 1.0;
-    int base = int(uLightParams[li].y);
     if (base < 0) return 1.0;
     int layer = base;
-    if (int(uLightPos[li].w) == 1) // point: major-axis cube-face pick
+    if (int(posType.w) == 1) // point: major-axis cube-face pick
     {
-        float3 d = worldPos - uLightPos[li].xyz;
+        float3 d = worldPos - posType.xyz;
         float3 a = abs(d);
         int face;
         if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
@@ -648,7 +667,7 @@ float localShadowFactor(int li, float3 worldPos, float3 N)
         else                               face = (d.z > 0.0) ? 4 : 5;
         layer = base + face;
     }
-    float3 toL = normalize(uLightPos[li].xyz - worldPos);
+    float3 toL = normalize(posType.xyz - worldPos);
     float  ndl = saturate(dot(N, toL));
     float4 lp = mul(uLocalShadowVP[layer], float4(worldPos + N * 0.02, 1.0));
     if (lp.w <= 0.0) return 1.0;                          // behind the light's near plane
@@ -694,7 +713,11 @@ float4 PSMain(VSOut i) : SV_TARGET
     float3 base  = (uColor.a > 0.5) ? uAlbedo.Sample(uAlbedoSamp, i.uv).rgb : uColor.rgb;
     float  met   = uPBR.x, rough = max(uPBR.y, 0.04);
     float3 N     = normalize(i.normal);
-    if (uLightCount.x == 0)
+    // Flat-shade fallback for a scene without any light. With clustering on
+    // the window holds directional lights only, so a night scene of point
+    // lights has uLightCount.x == 0 and still must NOT land here — the CPU
+    // zeroes uClusterParams.x when there is no light at all.
+    if (uLightCount.x == 0 && uClusterParams.x < 0.5)
     {
         float3 L    = normalize(float3(0.5, 0.8, 0.6));
         float  diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
@@ -776,7 +799,7 @@ float4 PSMain(VSOut i) : SV_TARGET
             // When GI is active the ray-traced hard mask (first 4 local lights)
             // is combined in via min() — the map covers lights the mask can't.
             // Mirrors Metal/GL/D3D11.
-            sh = localShadowFactor(li, i.worldPos, N);
+            sh = localShadowFactor(uLightPos[li], int(uLightParams[li].y), i.worldPos, N);
             if (uGIParams.x > 0.5f && giLocalIdx < 4)
                 sh = min(sh, uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[giLocalIdx]);
             giLocalIdx++;
@@ -785,6 +808,54 @@ float4 PSMain(VSOut i) : SV_TARGET
         // After BOTH branches so it covers the shadow map and the GI masks alike.
         if (uPBR.w > 0.5f) sh = 1.0;
         result += BRDF12(L, V, N, base, met, rough) * uLightColor[li].rgb * uLightColor[li].w * atten * sh;
+    }
+    // Clustered point/spot lights (plan P7 on the forward path): the fragment
+    // picks its screen tile × log-depth slice and shades only that cluster's
+    // list — the same attenuation, shadow and BRDF as the window loop above,
+    // so HE_FORWARD_CLUSTER=0 (window carries everything) is a byte-for-byte
+    // A/B of the first 8 lights. Mirrors heClusterLighting in the deferred
+    // resolve (MaterialShaderLibrary.cpp) and D3D11's copy, including the GI
+    // mask channel carried in params.z.
+    if (uClusterParams.x > 0.5)
+    {
+        float  nearZ = max(uClusterCamFwd.w, 1e-4);
+        float  viewZ = max(dot(i.worldPos - uCameraPos.xyz, uClusterCamFwd.xyz), nearZ);
+        int    gx = int(uClusterParams.x), gy = int(uClusterParams.y), gz = int(uClusterParams.z);
+        float2 cuv = i.clip.xy / uViewport.xy; // top-left origin, like the CPU scatter
+        int    cx = clamp(int(cuv.x * float(gx)), 0, gx - 1);
+        int    cy = clamp(int(cuv.y * float(gy)), 0, gy - 1);
+        int    cz = clamp(int(log(viewZ / nearZ) * uClusterParams.w), 0, gz - 1);
+        uint2  cell = uClusterGrid[(cz * gy + cy) * gx + cx];
+        [loop] for (uint k = 0; k < cell.y; ++k)
+        {
+            uint   ci      = uClusterIdx[cell.x + k] * 4u;
+            float4 posType = uClusterLights[ci + 0u];
+            float4 dirCos  = uClusterLights[ci + 1u];
+            float4 colInt  = uClusterLights[ci + 2u];
+            float4 params  = uClusterLights[ci + 3u];
+            float3 d    = posType.xyz - i.worldPos;
+            float  dist = max(length(d), 1e-4);
+            float3 L    = d / dist;
+            float  range = max(params.x, 1e-4);
+            float  atten = saturate(1.0 - dist / range);
+            atten *= atten;
+            if (posType.w > 1.5) // spot cone
+            {
+                float c       = dot(-L, normalize(dirCos.xyz));
+                float cosCone = dirCos.w;
+                atten *= smoothstep(cosCone, lerp(cosCone, 1.0, 0.2), c);
+            }
+            if (atten <= 0.0) continue;
+            // params.y = atlas base layer + 1 (0 = none), params.z = GI local
+            // mask channel + 1 (0 = none; assigned with the window's exact
+            // first-4 scan, so the light keeps the channel the mask rendered).
+            float sh = localShadowFactor(posType, int(params.y) - 1, i.worldPos, N);
+            int   mc = int(params.z) - 1;
+            if (uGIParams.x > 0.5f && mc >= 0)
+                sh = min(sh, uGILocal.SampleLevel(uGISampler, i.clip.xy / uViewport.xy, 0)[mc]);
+            if (uPBR.w > 0.5f) sh = 1.0;
+            result += BRDF12(L, V, N, base, met, rough) * colInt.rgb * colInt.w * atten * sh;
+        }
     }
     if (uFog.x > 0.0f) {
         float3 ray = i.worldPos - uCameraPos.xyz;
@@ -1042,6 +1113,11 @@ namespace
         // memcpy'd whole and the HLSL PerFrame block mirrors this order.
         glm::mat4  localShadowVP[16];
         glm::vec4  localShadowParams;
+        // Clustered lighting: x/y/z = grid dims (0 = off), w = slice scale;
+        // camFwd.xyz = depth axis, w = near (HE::ClusterLightBuild). Appended
+        // last — the HLSL PerFrame block mirrors this order.
+        glm::vec4  clusterParams;
+        glm::vec4  clusterCamFwd;
     };
 
     struct SkyCB {
@@ -2281,6 +2357,33 @@ struct D3D12RendererImpl
     uint8_t*                     perObjectPtr[k_frameCount]{};
     ComPtr<ID3D12Resource>       perInstanceRing[k_frameCount]; // upload: instance {mvp,model} (A3)
     uint8_t*                     perInstancePtr[k_frameCount]{};
+    // Clustered lighting (plan P7 on the forward path): three upload buffers
+    // per frame in flight, refilled from HE::BuildClusterLights and bound as
+    // root SRVs t18/t19/t20 (root parameters 6/7/8 of rootSig + skinnedRootSig).
+    // Sized once from the LightPacking caps. `clusterRootValid` = the ring was
+    // created; the root arguments are then set at EVERY rootSig rebind, because
+    // a root-signature switch wipes all root arguments (same rule as t16).
+    ComPtr<ID3D12Resource>       clusterLightRing[k_frameCount];
+    ComPtr<ID3D12Resource>       clusterGridRing[k_frameCount];
+    ComPtr<ID3D12Resource>       clusterIdxRing[k_frameCount];
+    uint8_t*                     clusterLightPtr[k_frameCount]{};
+    uint8_t*                     clusterGridPtr[k_frameCount]{};
+    uint8_t*                     clusterIdxPtr[k_frameCount]{};
+    bool                         clusterRootValid = false;
+    bool                         forwardClustered = true;  // HE_FORWARD_CLUSTER=0 → 8-light A/B guard
+    bool                         clusterCapWarned = false;
+    static constexpr UINT        k_clusterRootLights = 6; // root parameter indices (both root sigs)
+    static constexpr UINT        k_clusterRootGrid   = 7;
+    static constexpr UINT        k_clusterRootIdx    = 8;
+    // Sets the three cluster root SRVs on the current root signature. Call
+    // right after every SetGraphicsRootSignature(rootSig | skinnedRootSig).
+    void bindClusterRoots(ID3D12GraphicsCommandList* cl) const
+    {
+        if (!clusterRootValid) return;
+        cl->SetGraphicsRootShaderResourceView(k_clusterRootLights, clusterLightRing[frameIndex]->GetGPUVirtualAddress());
+        cl->SetGraphicsRootShaderResourceView(k_clusterRootGrid,   clusterGridRing[frameIndex]->GetGPUVirtualAddress());
+        cl->SetGraphicsRootShaderResourceView(k_clusterRootIdx,    clusterIdxRing[frameIndex]->GetGPUVirtualAddress());
+    }
 
     // ── A4: node-graph material PSOs ─────────────────────────────────────────
     // Graph materials (Material-Node editor) render through per-material PSOs the engine
@@ -3404,7 +3507,7 @@ struct D3D12RendererImpl
         ssrRange.RegisterSpace                     = 0;
         ssrRange.OffsetInDescriptorsFromTableStart = 0;
 
-        D3D12_ROOT_PARAMETER params[6]{};
+        D3D12_ROOT_PARAMETER params[9]{};
         params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[0].Descriptor       = { 0, 0 }; // b0
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -3432,6 +3535,20 @@ struct D3D12RendererImpl
         params[5].DescriptorTable.NumDescriptorRanges = 1;
         params[5].DescriptorTable.pDescriptorRanges   = &ssrRange;
         params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        // params[6..8]: root SRVs t18/t19/t20 = the clustered-lighting lists
+        // (lights / grid / indices, structured buffers in the per-frame upload
+        // ring). Root descriptors like t3, so no descriptor heap slots move
+        // per frame; same rebind rule as t16 (bindClusterRoots). Indices are
+        // k_clusterRootLights/Grid/Idx — shared with the skinned root signature.
+        params[6].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[6].Descriptor       = { 18, 0 };
+        params[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[7].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[7].Descriptor       = { 19, 0 };
+        params[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[8].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[8].Descriptor       = { 20, 0 };
+        params[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         // s0 = shadow sampler (point-clamp: each PCF tap of the cascade array
         //      must read ONE texel's depth — linear would compare against an
@@ -3457,7 +3574,7 @@ struct D3D12RendererImpl
         samplers[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters     = 6; // params[5] = the t16 SSR table added in checkpoint D
+        rsd.NumParameters     = 9; // params[5] = the t16 SSR table (checkpoint D), [6..8] = cluster root SRVs
         rsd.pParameters       = params;
         rsd.NumStaticSamplers = 4;
         rsd.pStaticSamplers   = samplers;
@@ -3685,7 +3802,36 @@ struct D3D12RendererImpl
                                                   reinterpret_cast<void**>(&perObjectPtr[f]));
             perInstanceRing[f] = createUploadBuffer(static_cast<UINT64>(k_maxInstances) * k_instStride,
                                                     reinterpret_cast<void**>(&perInstancePtr[f]));
+            // Clustered-lighting lists (root SRVs t18..t20), sized from the
+            // LightPacking caps: 256 lights × 4 float4, 3456 cells × uint2,
+            // 65536 indices. Refilled per frame like the instance ring.
+            clusterLightRing[f] = createUploadBuffer(
+                static_cast<UINT64>(HE::kMaxClusteredLights) * 4u * sizeof(glm::vec4),
+                reinterpret_cast<void**>(&clusterLightPtr[f]));
+            clusterGridRing[f]  = createUploadBuffer(
+                static_cast<UINT64>(HE::kClusterCount) * sizeof(glm::uvec2),
+                reinterpret_cast<void**>(&clusterGridPtr[f]));
+            clusterIdxRing[f]   = createUploadBuffer(
+                static_cast<UINT64>(HE::kMaxClusterIndices) * sizeof(uint32_t),
+                reinterpret_cast<void**>(&clusterIdxPtr[f]));
         }
+        clusterRootValid = true;
+        for (UINT f = 0; f < k_frameCount; ++f)
+            if (!clusterLightRing[f] || !clusterGridRing[f] || !clusterIdxRing[f]
+             || !clusterLightPtr[f]  || !clusterGridPtr[f]  || !clusterIdxPtr[f])
+                clusterRootValid = false;
+        if (!clusterRootValid)
+        {
+            forwardClustered = false;
+            HE_LOG_WARN(RHI, "%s", "D3D12Renderer: cluster light rings failed — "
+                                   "staying on the 8-light window");
+        }
+        // HE_FORWARD_CLUSTER=0 keeps the mixed 8-light window (A/B guard, the
+        // forward twin of Metal's HE_DEFERRED_CLUSTER). The root SRVs stay
+        // bound either way — the shader never reads them with the gate at 0,
+        // but a root argument must be set whenever the PS declares it.
+        if (const char* cl = std::getenv("HE_FORWARD_CLUSTER"); cl && *cl && std::atoi(cl) == 0)
+            forwardClustered = false;
         createSkyPipeline();
         createDebugLinePipeline();
         createSSAOPipeline();
@@ -6657,7 +6803,7 @@ struct D3D12RendererImpl
         ssrRange.RegisterSpace                     = 0;
         ssrRange.OffsetInDescriptorsFromTableStart = 0;
 
-        D3D12_ROOT_PARAMETER params[6]{};
+        D3D12_ROOT_PARAMETER params[9]{};
         params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
         params[0].Descriptor       = { 0, 0 }; // b0 per-object
         params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -6681,6 +6827,20 @@ struct D3D12RendererImpl
         params[5].DescriptorTable.NumDescriptorRanges = 1; // t16 (forward SSR)
         params[5].DescriptorTable.pDescriptorRanges   = &ssrRange;
         params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+        // params[6..8]: the clustered-lighting root SRVs t18/t19/t20 — the
+        // shared PSMain references them statically, and a PSO is rejected when
+        // its PS names a register the root signature does not cover. Same
+        // indices as the scene root signature (k_clusterRoot*), so
+        // bindClusterRoots serves both.
+        params[6].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[6].Descriptor       = { 18, 0 };
+        params[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[7].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[7].Descriptor       = { 19, 0 };
+        params[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        params[8].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+        params[8].Descriptor       = { 20, 0 };
+        params[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         // Same static samplers as the scene root sig: s0 shadow POINT-clamp (the
         // PCF taps of both depth arrays must read single texels — this was
@@ -6706,7 +6866,7 @@ struct D3D12RendererImpl
         samplers[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
         D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters     = 6; // params[5] = the t16 SSR table added in checkpoint D
+        rsd.NumParameters     = 9; // params[5] = the t16 SSR table (checkpoint D), [6..8] = cluster root SRVs
         rsd.pParameters       = params;
         rsd.NumStaticSamplers = 4;
         rsd.pStaticSamplers   = samplers;
@@ -7762,7 +7922,11 @@ void D3D12Renderer::Shutdown()
         m_impl->perFrameCB[i].Reset();
         m_impl->perObjectRing[i].Reset();
         m_impl->perInstanceRing[i].Reset();
+        m_impl->clusterLightRing[i].Reset();
+        m_impl->clusterGridRing[i].Reset();
+        m_impl->clusterIdxRing[i].Reset();
     }
+    m_impl->clusterRootValid = false;
     if (m_impl->tsReadbackPtr) { m_impl->tsReadback->Unmap(0, nullptr); m_impl->tsReadbackPtr = nullptr; }
     m_impl->tsReadback.Reset();
     m_impl->tsQueryHeap.Reset();
@@ -7905,23 +8069,67 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // REWRITTEN there with the final giActive/aoActive flags. The GPU reads it
     // at execute time, so the last CPU write before submission wins for every
     // draw of the frame (single buffer per slot, unlike the per-draw rings).
+    // Clustered lighting (plan P7 on the forward path): point/spot lights leave
+    // the 8-light window for per-cluster lists in this frame slot's upload
+    // ring (HE::BuildClusterLights); the window then carries directional
+    // lights only. The lists are rewritten on each fillPerFrame call like the
+    // CB itself (the GPU reads both at execute time) — only the GI-mask channel
+    // lane depends on the GI decision the refill carries.
+    const bool clustered = p.forwardClustered && p.clusterRootValid
+                        && !p.m_renderWorld.lights.empty();
+    auto uploadClusters = [&](bool giActive) -> std::pair<glm::vec4, glm::vec4>
+    {
+        const HE::ClusterLightBuild cb =
+            HE::BuildClusterLights(p.m_renderWorld, localShadows, giActive && p.giLocalMaskTex);
+        if (cb.droppedLights > 0 && !p.clusterCapWarned)
+        {
+            p.clusterCapWarned = true;
+            HE_LOG_WARN(RHI, "D3D12Renderer: %d point/spot light(s) exceed the cluster caps "
+                             "(%d lights / %d indices) and are not lit",
+                        cb.droppedLights, HE::kMaxClusteredLights, HE::kMaxClusterIndices);
+        }
+        std::memcpy(p.clusterLightPtr[p.frameIndex], cb.lights.data(),  cb.lights.size()  * sizeof(glm::vec4));
+        std::memcpy(p.clusterGridPtr[p.frameIndex],  cb.grid.data(),    cb.grid.size()    * sizeof(glm::uvec2));
+        std::memcpy(p.clusterIdxPtr[p.frameIndex],   cb.indices.data(), cb.indices.size() * sizeof(uint32_t));
+        return { cb.params, cb.camFwd };
+    };
+
     auto fillPerFrame = [&](bool giActive, bool aoActive, bool ssrActive = false)
     {
         PerFrameCB f{};
         f.cameraPos     = glm::vec4(p.m_renderWorld.camera.position, 1.0f);
-        const int count = std::min(static_cast<int>(p.m_renderWorld.lights.size()), 8);
-        f.lightCount    = glm::ivec4(count, 0, 0, 0);
-        for (int i = 0; i < count; ++i)
+        if (clustered)
         {
-            const LightData& l = p.m_renderWorld.lights[i];
-            f.lightPos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
-            f.lightDir[i]    = glm::vec4(l.direction, l.spotAngleCos);
-            f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
-            // y = the light's base layer in the local shadow atlas, -1 = no
-            // local shadow (built-in convention, same as Metal/GL/D3D11).
-            f.lightParams[i] = glm::vec4(l.range,
-                                         localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
-                                         0.0f, 0.0f);
+            const HE::DirectionalLightWindow w = HE::BuildDirectionalLightWindow(p.m_renderWorld);
+            f.lightCount = glm::ivec4(w.count, 0, 0, 0);
+            for (int i = 0; i < w.count; ++i)
+            {
+                f.lightPos[i]    = w.pos[i];
+                f.lightDir[i]    = w.dir[i];
+                f.lightColor[i]  = w.color[i];
+                f.lightParams[i] = w.params[i];
+            }
+            const auto clusterConsts = uploadClusters(giActive);
+            f.clusterParams = clusterConsts.first;
+            f.clusterCamFwd = clusterConsts.second;
+        }
+        else
+        {
+            const int count = std::min(static_cast<int>(p.m_renderWorld.lights.size()), 8);
+            f.lightCount    = glm::ivec4(count, 0, 0, 0);
+            for (int i = 0; i < count; ++i)
+            {
+                const LightData& l = p.m_renderWorld.lights[i];
+                f.lightPos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
+                f.lightDir[i]    = glm::vec4(l.direction, l.spotAngleCos);
+                f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
+                // y = the light's base layer in the local shadow atlas, -1 = no
+                // local shadow (built-in convention, same as Metal/GL/D3D11).
+                f.lightParams[i] = glm::vec4(l.range,
+                                             localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
+                                             0.0f, 0.0f);
+            }
+            // clusterParams stays zero → the shader's window loop lights everything.
         }
         for (int c = 0; c < D3D12RendererImpl::kCsmCascades; ++c) f.cascadeVP[c] = cascadeClip[c];
         for (int v = 0; v < D3D12RendererImpl::kLocalShadowLayers; ++v) f.localShadowVP[v] = localClip[v];
@@ -8041,6 +8249,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     UINT ssrFwdSlot = D3D12RendererImpl::k_ssrNullSlot;
 
     cl->SetGraphicsRootSignature(p.rootSig.Get());
+    p.bindClusterRoots(cl); // t18..t20 root SRVs — set at EVERY rootSig rebind
     cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
     if (p.sceneSrvHeap)
@@ -8312,6 +8521,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
         // Restore scene root signature + per-frame CBV after GI/SSAO changed them.
         cl->SetGraphicsRootSignature(p.rootSig.Get());
+        p.bindClusterRoots(cl);
         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
 
@@ -8518,6 +8728,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         // be re-bound here; per-object (param 0) + albedo table (param 3) are set
                         // per draw by the built-in path, so they don't need restoring.
                         cl->SetGraphicsRootSignature(p.rootSig.Get());
+                        p.bindClusterRoots(cl);
                         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                         if (p.sceneSrvHeap)
                         {
@@ -8632,6 +8843,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
             // Switch to skinned root sig + PSO, re-bind per-frame CB and scene SRV table.
             cl->SetGraphicsRootSignature(p.skinnedRootSig.Get());
+            p.bindClusterRoots(cl); // same root indices as rootSig
             cl->SetPipelineState(activeSkinnedPso);
             cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
             if (p.sceneSrvHeap)
@@ -8696,6 +8908,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
             // Restore scene root sig + PSO for subsequent transparent/debug draws.
             cl->SetGraphicsRootSignature(p.rootSig.Get());
+            p.bindClusterRoots(cl);
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
             if (p.sceneSrvHeap)
@@ -8716,6 +8929,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // A root-signature switch wipes every root argument, so the scene state
             // is rebuilt exactly as the skinned pass rebuilds it above.
             cl->SetGraphicsRootSignature(p.rootSig.Get());
+            p.bindClusterRoots(cl);
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
             if (p.sceneSrvHeap)
@@ -8744,6 +8958,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             p.drawDebugLines(cl, dsv12, viewProj, p.m_debugLines);
             // Restore scene state for any future draws.
             cl->SetGraphicsRootSignature(p.rootSig.Get());
+            p.bindClusterRoots(cl);
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
         }

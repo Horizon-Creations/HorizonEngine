@@ -30,6 +30,12 @@
 //     as `uLocalShadowMap` (binding 9) / `localShadowVP` / `localShadowFactor()`,
 //     min-combined with the uGILocal mask when GI is active. Hand-kept copy
 //     like the cascades above.
+//   * (AHEAD of GL, Thema 35 / Schritt 8) Clustered lighting — point/spot
+//     lights beyond the 8-light window come from per-cluster SSBOs (bindings
+//     10..12, `clusterParams` / `clusterCamFwd` in the Frame block) built by
+//     HE::BuildClusterLights; GL's kUnlitFS still iterates the 8-light window
+//     only (no SSBOs in GL 4.1). The loop body mirrors heClusterLighting in
+//     MaterialShaderLibrary.cpp's deferred resolve.
 //   * uSkyEnv — the baked skyColor cubemap GL samples for ambient diffuse and
 //     specular. This file evaluates skyColor() analytically per fragment.
 //   * uAmbient — the flat ambient fill (never-black floor / overcast term).
@@ -97,7 +103,24 @@ layout(set = 0, binding = 0) uniform Frame {
     // layer (-1 = casts no local shadow). localShadowParams.x = 1 / atlas size.
     mat4  localShadowVP[16];
     vec4  localShadowParams;
+    // Clustered lighting (plan P7 on the forward path, HE::BuildClusterLights)
+    // — must match FrameUBOData exactly: x/y/z = cluster grid dims (x == 0 →
+    // clustering off, the 8-light window then carries point/spot lights too),
+    // w = gridZ / log(far / near); clusterCamFwd.xyz = camera forward the depth
+    // slice is measured along, w = the grid's near plane. Appended last.
+    vec4  clusterParams;
+    vec4  clusterCamFwd;
 } uf;
+
+// Clustered lighting lists (HE::BuildClusterLights in LightPacking.h): 4 vec4
+// per light (posType / dirCos / colourIntensity / {range, atlas layer + 1,
+// GI mask channel + 1, 0}), one {offset, count} per cluster, and the flat
+// index list. Bindings 10..12: next free slots after the local atlas on 9;
+// host-visible per-frame SSBOs, written once per frame like the Frame UBO.
+// Read only when clusterParams.x > 0.
+layout(std430, set = 0, binding = 10) readonly buffer ClusterLights { vec4  clLights[]; };
+layout(std430, set = 0, binding = 11) readonly buffer ClusterGrid   { uvec2 clGrid[]; };
+layout(std430, set = 0, binding = 12) readonly buffer ClusterIdx    { uint  clIdx[]; };
 
 // Directional CSM depth array — one layer per cascade, nearest + clamp-to-
 // border(white) sampler: a PCF tap must read ONE texel's depth, and a tap
@@ -340,18 +363,20 @@ float shadowFactor(vec3 worldPos, vec3 N, vec3 L, out int outCascade)
 // above; the receiver bias is fixed (the project ShadowSettings pair tunes the
 // cascades only). Same UV convention as shadowFactor(): kVulkanClipFix is
 // baked into localShadowVP, so uv = p.xy*0.5+0.5 with no further flip.
-float localShadowFactor(int i, vec3 worldPos, vec3 N)
+// Takes the light EXPLICITLY (position + type, decoded atlas base layer with
+// -1 = none) so the 8-light window and the cluster lists share it — the twin
+// of the preamble's heClusterShadow.
+float localShadowFactor(vec4 posType, int base, vec3 worldPos, vec3 N)
 {
     // localShadowParams.y = atlas rendered this frame. First gate on purpose:
     // a zero-initialised Frame fill has lightParams.y = 0, which would
     // otherwise read as "layer 0" and sample a never-rendered layer.
     if (uf.localShadowParams.y < 0.5) return 1.0;
-    int base = int(uf.lightParams[i].y);
     if (base < 0) return 1.0;
     int layer = base;
-    if (int(uf.lightPos[i].w) == 1) // point: major-axis cube-face pick
+    if (int(posType.w) == 1) // point: major-axis cube-face pick
     {
-        vec3 d = worldPos - uf.lightPos[i].xyz;
+        vec3 d = worldPos - posType.xyz;
         vec3 a = abs(d);
         int face;
         if      (a.x >= a.y && a.x >= a.z) face = (d.x > 0.0) ? 0 : 1;
@@ -359,7 +384,7 @@ float localShadowFactor(int i, vec3 worldPos, vec3 N)
         else                               face = (d.z > 0.0) ? 4 : 5;
         layer = base + face;
     }
-    vec3  toL = normalize(uf.lightPos[i].xyz - worldPos);
+    vec3  toL = normalize(posType.xyz - worldPos);
     float ndl = clamp(dot(N, toL), 0.0, 1.0);
     vec4 lp = uf.localShadowVP[layer] * vec4(worldPos + N * 0.02, 1.0);
     if (lp.w <= 0.0) return 1.0;           // behind the light's near plane
@@ -390,7 +415,11 @@ void main()
     float rough = max(mat_ubo.roughPad.x, 0.04);
     vec3  N     = normalize(vNormal);
 
-    if (uf.lightCount.x == 0)
+    // Flat-shade fallback for a scene without any light. With clustering on
+    // the window holds directional lights only, so a night scene of point
+    // lights has lightCount.x == 0 and still must NOT land here — the CPU
+    // zeroes clusterParams.x when there is no light at all.
+    if (uf.lightCount.x == 0 && uf.clusterParams.x < 0.5)
     {
         vec3  L    = normalize(vec3(0.5, 0.8, 0.6));
         float diff = 0.35 + 0.65 * max(dot(N, L), 0.0);
@@ -480,7 +509,7 @@ void main()
             // When GI is active the ray-traced hard mask (first 4 local lights)
             // is combined in via min() — the map covers lights the mask can't.
             // Mirrors Metal/GL/D3D11/D3D12.
-            sh = localShadowFactor(i, vWorldPos, N);
+            sh = localShadowFactor(uf.lightPos[i], int(uf.lightParams[i].y), vWorldPos, N);
             if (uf.giParams.y > 0.5 && giLocalIdx < 4)
                 sh = min(sh, texture(uGILocal, gl_FragCoord.xy / uf.viewport.xy)[giLocalIdx]);
             giLocalIdx++;
@@ -489,6 +518,55 @@ void main()
         // After BOTH branches so it covers the shadow map and the GI masks alike.
         if (mat_ubo.roughPad.w > 0.5) sh = 1.0;
         result += BRDF(L, V, N, base, met, rough) * uf.lightColor[i].rgb * uf.lightColor[i].w * atten * sh;
+    }
+    // Clustered point/spot lights (plan P7 on the forward path): the fragment
+    // picks its screen tile × log-depth slice and shades only that cluster's
+    // list — the same attenuation, shadow and BRDF as the window loop above,
+    // so HE_FORWARD_CLUSTER=0 (window carries everything) is a byte-for-byte
+    // A/B of the first 8 lights. Mirrors heClusterLighting in the deferred
+    // resolve (MaterialShaderLibrary.cpp) and the D3D11/D3D12 copies,
+    // including the GI mask channel carried in params.z. gl_FragCoord is
+    // top-left in Vulkan — the same origin the CPU scatter flipped to.
+    if (uf.clusterParams.x > 0.5)
+    {
+        float nearZ = max(uf.clusterCamFwd.w, 1e-4);
+        float viewZ = max(dot(vWorldPos - uf.cameraPos.xyz, uf.clusterCamFwd.xyz), nearZ);
+        int   gx = int(uf.clusterParams.x), gy = int(uf.clusterParams.y), gz = int(uf.clusterParams.z);
+        vec2  cuv = gl_FragCoord.xy / uf.viewport.xy;
+        int   cx = clamp(int(cuv.x * float(gx)), 0, gx - 1);
+        int   cy = clamp(int(cuv.y * float(gy)), 0, gy - 1);
+        int   cz = clamp(int(log(viewZ / nearZ) * uf.clusterParams.w), 0, gz - 1);
+        uvec2 cell = clGrid[(cz * gy + cy) * gx + cx];
+        for (uint k = 0u; k < cell.y; ++k)
+        {
+            uint ci      = clIdx[cell.x + k] * 4u;
+            vec4 posType = clLights[ci + 0u];
+            vec4 dirCos  = clLights[ci + 1u];
+            vec4 colInt  = clLights[ci + 2u];
+            vec4 params  = clLights[ci + 3u];
+            vec3  d    = posType.xyz - vWorldPos;
+            float dist = max(length(d), 1e-4);
+            vec3  L    = d / dist;
+            float range = max(params.x, 1e-4);
+            float atten = clamp(1.0 - dist / range, 0.0, 1.0);
+            atten *= atten;
+            if (posType.w > 1.5) // spot cone
+            {
+                float c       = dot(-L, normalize(dirCos.xyz));
+                float cosCone = dirCos.w;
+                atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), c);
+            }
+            if (atten <= 0.0) continue;
+            // params.y = atlas base layer + 1 (0 = none), params.z = GI local
+            // mask channel + 1 (0 = none; assigned with the window's exact
+            // first-4 scan, so the light keeps the channel the mask rendered).
+            float sh = localShadowFactor(posType, int(params.y) - 1, vWorldPos, N);
+            int   mc = int(params.z) - 1;
+            if (uf.giParams.y > 0.5 && mc >= 0)
+                sh = min(sh, texture(uGILocal, gl_FragCoord.xy / uf.viewport.xy)[mc]);
+            if (mat_ubo.roughPad.w > 0.5) sh = 1.0;
+            result += BRDF(L, V, N, base, met, rough) * colInt.rgb * colInt.w * atten * sh;
+        }
     }
     // Atmospheric fog
     if (uf.fog.x > 0.0) {

@@ -73,6 +73,11 @@ namespace
         // x = 1 / atlas size. Appended last.
         glm::mat4  localShadowVP[16];
         glm::vec4  localShadowParams;
+        // Clustered lighting — must match scene.frag's Frame block exactly:
+        // x/y/z = grid dims (0 = off), w = slice scale; camFwd.xyz = depth
+        // axis, w = near (HE::ClusterLightBuild). Appended last.
+        glm::vec4  clusterParams;
+        glm::vec4  clusterCamFwd;
     };
 
     // Sky pass UBO (set=0 binding=0 in sky.frag) — must match std140 exactly.
@@ -1542,7 +1547,8 @@ void VulkanRenderer::createScenePipeline()
     //                 binding 2 = per-draw material UBO, binding 3 = SSAO AO texture.
     //                 binding 8 = forward SSR result (transparent-black fallback).
     //                 binding 9 = local (point/spot) shadow atlas (2D array).
-    VkDescriptorSetLayoutBinding binds[10]{};
+    //                 bindings 10..12 = clustered-lighting SSBOs (lights/grid/indices).
+    VkDescriptorSetLayoutBinding binds[13]{};
     binds[0].binding         = 0;
     binds[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     binds[0].descriptorCount = 1;
@@ -1575,8 +1581,18 @@ void VulkanRenderer::createScenePipeline()
         binds[gb].descriptorCount = 1;
         binds[gb].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
+    // Bindings 10..12: the clustered-lighting SSBOs (HE::BuildClusterLights),
+    // std430 readonly buffers in scene.frag. Written once per frame slot;
+    // the shader gates every read on clusterParams.x.
+    for (uint32_t cb = 10; cb <= 12; ++cb)
+    {
+        binds[cb].binding         = cb;
+        binds[cb].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        binds[cb].descriptorCount = 1;
+        binds[cb].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    slci.bindingCount = 10;
+    slci.bindingCount = 13;
     slci.pBindings    = binds;
     vkCheck(vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_sceneSetLayout), "descriptor set layout");
 
@@ -1627,15 +1643,55 @@ void VulkanRenderer::createScenePipeline()
     vkCheck(vkCreatePipelineLayout(m_device, &plci, nullptr, &m_scenePipelineLayout), "pipeline layout");
 
     // Per-frame UBO buffers + descriptor sets (one per frame in flight).
-    VkDescriptorPoolSize ps[2] = {
+    VkDescriptorPoolSize ps[3] = {
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 2 },  // binding0 + binding2
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 8 },  // binding1(shadow) + binding3(AO) + bindings4-7(GI) + binding8(SSR) + binding9(local atlas)
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 3 },  // bindings10-12 (cluster lists)
     };
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dpci.maxSets       = k_maxFramesInFlight;
-    dpci.poolSizeCount = 2;
+    dpci.poolSizeCount = 3;
     dpci.pPoolSizes    = ps;
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_descPool), "descriptor pool");
+
+    // Clustered-lighting SSBOs (bindings 10..12), one triple per frame in
+    // flight, host-visible + coherent and persistently mapped like the Frame
+    // UBO. Sized from the LightPacking caps: 256 lights × 4 vec4, 3456 cells ×
+    // uvec2, 65536 indices. All or nothing — the scene set writes all three.
+    {
+        auto makeSSBO = [&](VkDeviceSize bytes, ClusterBuffer& out) -> bool
+        {
+            VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+            bci.size  = bytes;
+            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            if (vkCreateBuffer(m_device, &bci, nullptr, &out.buf) != VK_SUCCESS) return false;
+            VkMemoryRequirements req{}; vkGetBufferMemoryRequirements(m_device, out.buf, &req);
+            VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+            mai.allocationSize  = req.size;
+            mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (vkAllocateMemory(m_device, &mai, nullptr, &out.mem) != VK_SUCCESS) return false;
+            vkBindBufferMemory(m_device, out.buf, out.mem, 0);
+            return vkMapMemory(m_device, out.mem, 0, bytes, 0, &out.mapped) == VK_SUCCESS;
+        };
+        m_clusterReady = true;
+        for (uint32_t i = 0; i < k_maxFramesInFlight && m_clusterReady; ++i)
+            m_clusterReady =
+                makeSSBO(static_cast<VkDeviceSize>(HE::kMaxClusteredLights) * 4u * sizeof(glm::vec4), m_clusterLights[i])
+             && makeSSBO(static_cast<VkDeviceSize>(HE::kClusterCount) * sizeof(glm::uvec2),           m_clusterGrid[i])
+             && makeSSBO(static_cast<VkDeviceSize>(HE::kMaxClusterIndices) * sizeof(uint32_t),       m_clusterIdx[i]);
+        if (!m_clusterReady)
+        {
+            m_forwardClustered = false;
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: cluster light SSBOs failed — "
+                                   "staying on the 8-light window");
+        }
+        // HE_FORWARD_CLUSTER=0 keeps the mixed 8-light window (A/B guard, the
+        // forward twin of Metal's HE_DEFERRED_CLUSTER). The descriptors stay
+        // written either way — a bound set must be complete.
+        if (const char* cl = std::getenv("HE_FORWARD_CLUSTER"); cl && *cl && std::atoi(cl) == 0)
+            m_forwardClustered = false;
+    }
 
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
@@ -1698,6 +1754,26 @@ void VulkanRenderer::createScenePipeline()
         // skipped too — the two are created together.
         vkUpdateDescriptorSets(m_device, (m_shadowView && m_localShadowView) ? 4 : (m_shadowView ? 3 : 2),
                                w, 0, nullptr);
+
+        // Bindings 10..12: this frame slot's cluster SSBOs. Written once — the
+        // buffers are persistent; only their CONTENTS change per frame.
+        if (m_clusterReady)
+        {
+            const ClusterBuffer* cbs[3] = { &m_clusterLights[i], &m_clusterGrid[i], &m_clusterIdx[i] };
+            VkDescriptorBufferInfo cbi[3]{};
+            VkWriteDescriptorSet   cw[3]{};
+            for (uint32_t c = 0; c < 3; ++c)
+            {
+                cbi[c] = { cbs[c]->buf, 0, VK_WHOLE_SIZE };
+                cw[c].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                cw[c].dstSet          = m_frameUBO[i].set;
+                cw[c].dstBinding      = 10 + c;
+                cw[c].descriptorCount = 1;
+                cw[c].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                cw[c].pBufferInfo     = &cbi[c];
+            }
+            vkUpdateDescriptorSets(m_device, 3, cw, 0, nullptr);
+        }
     }
 
     // ── Base-color texture sampler, per-mesh descriptor pool, and 1x1 white default ──
@@ -1969,7 +2045,15 @@ void VulkanRenderer::destroyScenePipeline()
         if (m_instanceBuf[i].buf)    vkDestroyBuffer(m_device, m_instanceBuf[i].buf, nullptr);
         if (m_instanceBuf[i].mem)    vkFreeMemory   (m_device, m_instanceBuf[i].mem, nullptr);
         m_instanceBuf[i] = {};
+        for (ClusterBuffer* cb : { &m_clusterLights[i], &m_clusterGrid[i], &m_clusterIdx[i] })
+        {
+            if (cb->mapped) vkUnmapMemory(m_device, cb->mem);
+            if (cb->buf)    vkDestroyBuffer(m_device, cb->buf, nullptr);
+            if (cb->mem)    vkFreeMemory   (m_device, cb->mem, nullptr);
+            *cb = {};
+        }
     }
+    m_clusterReady = false;
     if (m_matUBO)              { vkDestroyBuffer(m_device, m_matUBO, nullptr); m_matUBO = VK_NULL_HANDLE; }
     if (m_matMem)              { vkFreeMemory   (m_device, m_matMem, nullptr); m_matMem = VK_NULL_HANDLE; }
     if (m_descPool)            { vkDestroyDescriptorPool(m_device, m_descPool, nullptr);            m_descPool = VK_NULL_HANDLE; }
@@ -4597,21 +4681,58 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     {
         FrameUBOData f{};
         f.cameraPos     = glm::vec4(m_renderWorld.camera.position, 1.0f);
-        const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
-        f.lightCount    = glm::ivec4(count, 0, 0, 0);
-        for (int i = 0; i < count; ++i)
+        // Clustered lighting (plan P7 on the forward path): point/spot lights
+        // leave the 8-light window for this frame slot's cluster SSBOs
+        // (HE::BuildClusterLights); the window then carries directional lights
+        // only. The slot's fence was waited on in Render(), so the mapped
+        // buffers are free to rewrite.
+        const bool clustered = m_forwardClustered && m_clusterReady
+                            && !m_renderWorld.lights.empty();
+        if (clustered)
         {
-            const LightData& l = m_renderWorld.lights[i];
-            f.lightPos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
-            f.lightDir[i]    = glm::vec4(l.direction, l.spotAngleCos);
-            f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
-            // y = the light's base layer in the local shadow atlas, -1 = no
-            // local shadow (built-in convention, same as Metal/GL/D3D). The
-            // layer assignment is deterministic per world state + camera, so
-            // this extract's layers match the ones EncodeShadowMap rendered.
-            f.lightParams[i] = glm::vec4(l.range,
-                                         localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
-                                         0.0f, 0.0f);
+            const HE::ClusterLightBuild cb =
+                HE::BuildClusterLights(m_renderWorld, localShadows, m_giRanThisFrame);
+            if (cb.droppedLights > 0 && !m_clusterCapWarned)
+            {
+                m_clusterCapWarned = true;
+                HE_LOG_WARN(RHI, "VulkanRenderer: %d point/spot light(s) exceed the cluster caps "
+                                 "(%d lights / %d indices) and are not lit",
+                            cb.droppedLights, HE::kMaxClusteredLights, HE::kMaxClusterIndices);
+            }
+            std::memcpy(m_clusterLights[m_currentFrame].mapped, cb.lights.data(),  cb.lights.size()  * sizeof(glm::vec4));
+            std::memcpy(m_clusterGrid[m_currentFrame].mapped,   cb.grid.data(),    cb.grid.size()    * sizeof(glm::uvec2));
+            std::memcpy(m_clusterIdx[m_currentFrame].mapped,    cb.indices.data(), cb.indices.size() * sizeof(uint32_t));
+            f.clusterParams = cb.params;
+            f.clusterCamFwd = cb.camFwd;
+            const HE::DirectionalLightWindow w = HE::BuildDirectionalLightWindow(m_renderWorld);
+            f.lightCount = glm::ivec4(w.count, 0, 0, 0);
+            for (int i = 0; i < w.count; ++i)
+            {
+                f.lightPos[i]    = w.pos[i];
+                f.lightDir[i]    = w.dir[i];
+                f.lightColor[i]  = w.color[i];
+                f.lightParams[i] = w.params[i];
+            }
+        }
+        else
+        {
+            // clusterParams stays zero → the shader's window loop lights everything.
+            const int count = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
+            f.lightCount    = glm::ivec4(count, 0, 0, 0);
+            for (int i = 0; i < count; ++i)
+            {
+                const LightData& l = m_renderWorld.lights[i];
+                f.lightPos[i]    = glm::vec4(l.position,  static_cast<float>(l.type));
+                f.lightDir[i]    = glm::vec4(l.direction, l.spotAngleCos);
+                f.lightColor[i]  = glm::vec4(l.color,     l.intensity);
+                // y = the light's base layer in the local shadow atlas, -1 = no
+                // local shadow (built-in convention, same as Metal/GL/D3D). The
+                // layer assignment is deterministic per world state + camera, so
+                // this extract's layers match the ones EncodeShadowMap rendered.
+                f.lightParams[i] = glm::vec4(l.range,
+                                             localShadows ? static_cast<float>(l.shadowLayer) : -1.0f,
+                                             0.0f, 0.0f);
+            }
         }
         // Local atlas constants from EncodeShadowMap (same reason as the cascades).
         for (int v = 0; v < kLocalShadowLayers; ++v) f.localShadowVP[v] = m_localShadowClip[v];
