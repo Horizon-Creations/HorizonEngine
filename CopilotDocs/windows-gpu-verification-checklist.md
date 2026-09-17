@@ -85,7 +85,8 @@ zusätzlich `heTex0`, vorher Null-View). Die HLSL-Sampler-Pins des Material-Frag
 (`25d0af25`) auf DIESEM Zweig; der ältere Commit `5e52d64e` mit denselben Nummern liegt nur auf
 `claude/backend-parity-p1`. Ohne die Pins lehnte FXC jedes Graph-Material mit X4509 ab, und die Windows-CI
 beweist das jetzt: `test_material_graph` jagt alle 72 Node-Fälle durch den echten `D3DCompile`
-(vs_5_0/ps_5_0, Negativkontrolle inklusive) und meldet `FXC accepted 72/72 node pixel shaders` im Log.
+(vs_5_0/ps_5_0, Negativkontrolle inklusive) und meldet `FXC accepted 72/72 node pixel shaders` (sichtbar
+bei `ctest -V` bzw. im Log eines roten Laufs, ein grüner ctest verschluckt die Zeile).
 **Hier prüfen:** ein Graph-Material (z. B.
 mit Emissive/Fresnel/Textur-Nodes) an ein Mesh hängen → muss auf D3D11/D3D12/Vulkan **identisch zu GL/Metal**
 aussehen; Material-Parameter live ändern → sofortiges Update; Graph-Texturen (heTexP0..3) korrekt; eine Textur
@@ -114,8 +115,14 @@ SamplerState auf einem Register (auf CI gemessen, die X4500-Behauptung aus `5e52
 Sampler trennt (parity-p1 `9c72cbe7`). **Auf Hardware:** ein bemaltes Landscape-Material auf D3D11 gegen GL
 vergleichen, die Gewichte müssen ohne Wrap-Artefakte sampeln. Ebenfalls offen: die sechs verschobenen
 Sampler (AO, DDGI-Atlanten, Forward-SSR/GI-Refl, Wolkenschatten) bindet D3D11/D3D12 pro Material-Draw noch
-nicht, der Shader liest dort den D3D-Default-Sampler; **auf Hardware** deshalb ein lit Graph-Material bei
-aktivem AO/GI gegen GL vergleichen, bevor die Abnahme als bestanden gilt.
+nicht. D3D11 liest an einem leeren Slot den Default-Sampler-State, **auf Hardware** deshalb ein lit
+Graph-Material bei aktivem AO/GI gegen GL vergleichen. **D3D12 ist die nächste Wand:** die Material-
+Root-Signature (`createMaterialResources`) deklariert nur t2/t4..t7/t10..t12 und die statischen Sampler
+s2/s4..s7/s10..s12, der jetzt kompilierende Shader referenziert statisch auch t13/t15..t18/t31..t33 und
+s0/s1/s3/s8/s9/s13/s14/s15. `CreateGraphicsPipelineState` validiert das und wird den PSO voraussichtlich mit
+„not compatible with root signature" ablehnen, bis die Ranges das abdecken; im Log wäre das
+`A4 material PSO creation failed`. Ein WARP-Device in he_tests könnte das ohne GPU beweisen, tut es aber noch
+nicht.
 
 ## A5 — Sky/Nebula v2–v3.4 + physikalische Atmosphäre auf D3D/Vulkan — ⏳ NOCH NICHT IMPLEMENTIERT
 
