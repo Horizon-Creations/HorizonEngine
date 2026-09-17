@@ -2237,3 +2237,130 @@ TEST_CASE("Engine UI effects: every shipped function cross-compiles for Metal an
 }
 #endif
 #endif // HE_EDITOR_DEPS_DIR
+
+// ── Thema 51, Schritt 2: instances + overrides never cost a second compile ────
+// What the D3D11/D3D12/Vulkan draw loops key their shader/PSO/pipeline caches on is
+// the (hash, source) pair MaterialShaderLibrary::resolveShaders hands them, and the
+// baked variant they feed FXC / vkCreateShaderModule is precompiledFor(). So the
+// backend-neutral proof that a material INSTANCE shares its master's pipeline — and
+// that editing a parameter value on either never recompiles — is: same hash, same
+// baked bytes, for every param edit; only a static-switch permutation changes the key.
+TEST_CASE("Material instance resolves to the master's shader hash + baked variants on D3D11/D3D12/Vulkan")
+{
+	using RB = HE::RendererBackend;
+	ContentManager cm;
+
+	// Master: a colour param feeding BaseColor + Emissive, and a static switch so
+	// the negative control below has something to permute.
+	HE::MaterialGraph g;
+	const int out = g.addNode(HE::MatNodeType::Output);
+	const int pc  = g.addNode(HE::MatNodeType::ParamColor);
+	g.findNode(pc)->s = "Tint";
+	g.findNode(pc)->p[0] = 0.5f; g.findNode(pc)->p[1] = 0.5f; g.findNode(pc)->p[2] = 0.5f;
+	const int sw  = g.addNode(HE::MatNodeType::StaticSwitch);
+	g.findNode(sw)->s = "Fancy";
+	const int red = g.addNode(HE::MatNodeType::ConstColor);
+	g.findNode(red)->p[0] = 0.93f;
+	REQUIRE(g.connect(red, 0, sw, 0));
+	REQUIRE(g.connect(pc,  0, sw, 1));
+	REQUIRE(g.connect(sw,  0, out, 0));
+	REQUIRE(g.connect(pc,  0, out, 3));
+
+	MaterialAsset master;
+	master.type = HE::AssetType::Material;
+	master.name = "Master";
+	master.path = "mats/master.hasset";
+	master.nodeGraphJson = HE::materialGraphToJson(g);
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	master.customShaderFragGlsl = gen.glsl;
+	for (const auto& slot : gen.params)
+	{
+		master.shaderParamData.insert(master.shaderParamData.end(), slot.value, slot.value + 4);
+		master.graphParamNames.push_back(slot.name);
+		master.graphParamTypes.push_back(static_cast<uint8_t>(slot.kind));
+	}
+	// Baked variants as a packaged build ships them (one per target backend; the
+	// bytes only need to be distinguishable here, not compilable).
+	for (RB b : { RB::D3D11, RB::D3D12, RB::Vulkan })
+	{
+		MaterialShaderVariant v;
+		v.backend  = static_cast<uint8_t>(b);
+		v.vertex   = "vs-" + std::to_string(static_cast<int>(b));
+		v.fragment = "ps-" + std::to_string(static_cast<int>(b));
+		master.precompiledShaders.push_back(std::move(v));
+	}
+	const HE::UUID masterId = cm.registerMaterial(std::move(master));
+
+	MaterialAsset inst;
+	inst.type = HE::AssetType::Material;
+	inst.name = "Inst";
+	inst.path = "mats/inst.hasset";
+	inst.parentMaterialPath = "mats/master.hasset";
+	const HE::UUID instId = cm.registerMaterial(std::move(inst));
+	cm.syncMaterialInstance(instId);
+
+	HE::MaterialShaderLibrary lib;
+	auto keyOf = [&](const HE::UUID& id, uint64_t& hash) {
+		std::string frag, vert;
+		return lib.resolveShaders(cm, id, hash, frag, vert);
+	};
+	auto sameBaked = [&](const HE::UUID& a, const HE::UUID& b) {
+		for (RB rb : { RB::D3D11, RB::D3D12, RB::Vulkan })
+		{
+			const MaterialShaderVariant* va = HE::MaterialShaderLibrary::precompiledFor(cm.getMaterial(a), rb);
+			const MaterialShaderVariant* vb = HE::MaterialShaderLibrary::precompiledFor(cm.getMaterial(b), rb);
+			if (!va || !vb) return false;
+			if (va->vertex != vb->vertex || va->fragment != vb->fragment) return false;
+		}
+		return true;
+	};
+
+	uint64_t hMaster = 0, hInst = 0;
+	REQUIRE(keyOf(masterId, hMaster));
+	REQUIRE(keyOf(instId, hInst));
+	CHECK(hInst == hMaster);            // one cache entry for both
+	CHECK(sameBaked(masterId, instId)); // and the same FXC / SPIR-V input
+
+	// Overriding a parameter VALUE on the instance (what the Details panel and
+	// setMaterialParam do) changes the HeParams block, not the key.
+	{
+		MaterialAsset* ia = cm.getMaterialMutable(instId);
+		REQUIRE(ia != nullptr);
+		REQUIRE(ia->graphParamNames.size() == 1);
+		ia->instanceOverriddenParams.push_back("Tint");
+		ia->shaderParamData[0] = 0.11f; ia->shaderParamData[1] = 0.22f; ia->shaderParamData[2] = 0.33f;
+		cm.syncMaterialInstance(instId);
+		ia = cm.getMaterialMutable(instId);
+		CHECK(ia->shaderParamData[0] == doctest::Approx(0.11f));
+		CHECK(ia->shaderParamData[0] != doctest::Approx(cm.getMaterial(masterId)->shaderParamData[0]));
+		uint64_t h = 0;
+		REQUIRE(keyOf(instId, h));
+		CHECK(h == hMaster);
+		CHECK(sameBaked(masterId, instId));
+	}
+	// Same for the master itself: a live edit of its default never re-keys.
+	{
+		MaterialAsset* mm = cm.getMaterialMutable(masterId);
+		mm->shaderParamData[0] = 0.77f;
+		uint64_t h = 0;
+		REQUIRE(keyOf(masterId, h));
+		CHECK(h == hMaster);
+	}
+
+	// Negative control: a static-switch override IS a different permutation → its
+	// own key, and the parent's baked variants no longer apply to it.
+	MaterialAsset instSw;
+	instSw.type = HE::AssetType::Material;
+	instSw.name = "InstSw";
+	instSw.path = "mats/instSw.hasset";
+	instSw.parentMaterialPath = "mats/master.hasset";
+	instSw.instanceSwitchNames.push_back("Fancy");
+	instSw.instanceSwitchValues.push_back(0);
+	const HE::UUID instSwId = cm.registerMaterial(std::move(instSw));
+	cm.syncMaterialInstance(instSwId);
+	uint64_t hSw = 0;
+	REQUIRE(keyOf(instSwId, hSw));
+	CHECK(hSw != hMaster);
+	for (RB rb : { RB::D3D11, RB::D3D12, RB::Vulkan })
+		CHECK(HE::MaterialShaderLibrary::precompiledFor(cm.getMaterial(instSwId), rb) == nullptr);
+}
