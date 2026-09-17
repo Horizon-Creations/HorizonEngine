@@ -278,6 +278,7 @@ void VulkanRenderer::Shutdown()
     m_pendingMatInval.clear();
     m_pendingMeshInval.clear();
     m_pendingTexInval.clear();
+    m_pendingMatWarmup.clear();
     destroyDecalPipelines(); // before destroyScenePipeline — it borrows m_albedoSampler
     // Forward SSR: pipelines, passes, ring buffers and every target it owns.
     // Before destroySSAOTargets below, because the pre-pass framebuffer holds
@@ -4169,6 +4170,40 @@ void VulkanRenderer::processPendingInvalidations()
     m_pendingMeshInval.clear();
 }
 
+// Build the queued materials' pipelines for the pass THIS frame draws into. Runs at
+// DrawScene top, i.e. before the first draw that would otherwise pay the cross-compile
+// + vkCreateGraphicsPipelines inside the loop. A material instance shares its master's
+// hash, so a whole family warms on the first id; the rest are cache hits. The variant
+// is the one the draw loop will pick: the material's own blend class (a per-entity tint
+// alpha can still ask for the other one later — that is a single build, not a stall
+// per frame). Built-in-PBR materials resolve no shader and are skipped.
+void VulkanRenderer::drainMaterialWarmup(bool hdr)
+{
+    if (m_pendingMatWarmup.empty()) return;
+    if (!m_matReady || !m_contentManager) { m_pendingMatWarmup.clear(); return; }
+    std::vector<HE::UUID> ids;
+    ids.swap(m_pendingMatWarmup);
+    int built = 0;
+    for (const HE::UUID& id : ids)
+    {
+        uint64_t hash = 0; std::string frag, vertBody;
+        if (!m_matShaderLib.resolveShaders(*m_contentManager, id, hash, frag, vertBody)) continue;
+        const MaterialAsset* ma = m_contentManager->getMaterial(id);
+        const bool transparent = ma && (ma->blendMode == 2
+                                        || ma->opacity < RenderSorter::kOpaqueOpacityThreshold);
+        const uint64_t key = hash ^ (hdr ? 0x9E3779B97F4A7C15ULL : 0ULL)
+                                  ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
+        if (m_materialPipelines.count(key)) continue; // already warm (or a cached miss)
+        const MaterialShaderVariant* pre =
+            HE::MaterialShaderLibrary::precompiledFor(ma, HE::RendererBackend::Vulkan);
+        if (GetOrBuildMaterialPipeline(hash, frag, vertBody, pre, hdr, transparent) != VK_NULL_HANDLE)
+            ++built;
+    }
+    if (built > 0)
+        HE_LOG_INFO(RHI, "%s",
+            ("VulkanRenderer: warmed up " + std::to_string(built) + " material pipeline(s)").c_str());
+}
+
 void VulkanRenderer::createCube()
 {
     static const float v[] = {
@@ -4243,6 +4278,10 @@ const VulkanRenderer::GpuMesh* VulkanRenderer::resolveMesh(const HE::UUID& asset
 void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr)
 {
     if (!m_world || m_scenePipeline == VK_NULL_HANDLE || width == 0 || height == 0) return;
+
+    // Graph-material pipelines queued by WarmupMaterials, built against THIS frame's pass
+    // before any draw below can stall on them.
+    drainMaterialWarmup(hdr);
 
     // Feed time-of-day so the extractor recomputes the sun/moon direction (otherwise the
     // sky never responds to the time slider). Mirrors OpenGL/Metal.
@@ -4568,6 +4607,17 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     VkPipeline matPipe = GetOrBuildMaterialPipeline(matHash, matFrag, matVertBody,
                                                                     matPre, hdr, matTransp);
                     uint32_t& cursor = m_matDrawCursor[m_currentFrame];
+                    // A full ring is a silent optics change (built-in look, or a skipped
+                    // instance tail) — say so once per session instead of never.
+                    auto noteRingFull = [&]() {
+                        if (m_matRingWarned) return;
+                        m_matRingWarned = true;
+                        HE_LOG_WARN(RHI, "%s",
+                            ("VulkanRenderer: more than " + std::to_string(k_matMaxDraws)
+                             + " graph-material draws in one frame — the surplus renders built-in "
+                               "PBR (or is skipped inside an instanced batch); raise k_matMaxDraws").c_str());
+                    };
+                    if (matPipe != VK_NULL_HANDLE && cursor >= k_matMaxDraws) noteRingFull();
                     if (matPipe != VK_NULL_HANDLE && cursor < k_matMaxDraws)
                     {
                         // Resolve the same PBR scalars / has-texture flag the built-in path uses.
@@ -4613,7 +4663,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
 
                         auto drawMatInstance = [&](const glm::mat4& model) {
-                            if (cursor >= k_matMaxDraws) return;
+                            if (cursor >= k_matMaxDraws) { noteRingFull(); return; }
                             const uint32_t i = cursor++;
 
                             // std140 U block (176 B) into ring slot i (256-B stride).
@@ -7555,6 +7605,16 @@ void VulkanRenderer::InvalidateMaterial(const HE::UUID& materialId)
     // Deferred to the next Render() (render thread), drained under a device idle.
     if (materialId != HE::UUID{})
         m_pendingMatInval.push_back(materialId);
+}
+
+void VulkanRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
+{
+    // Queued, not built here: the pipeline must target the pass the next DrawScene
+    // renders into (HDR offscreen vs swapchain), which only that call knows. Non-material
+    // ids (the streaming poll hands over everything it registered) resolve no shader in
+    // the drain and cost a map lookup each.
+    for (const HE::UUID& id : materialIds)
+        if (id != HE::UUID{}) m_pendingMatWarmup.push_back(id);
 }
 
 void VulkanRenderer::InvalidateMesh(const HE::UUID& meshId)

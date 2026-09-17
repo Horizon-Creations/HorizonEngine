@@ -2443,6 +2443,11 @@ struct D3D12RendererImpl
     std::unordered_map<HE::UUID, MaterialTex> m_materialTexCache;
     std::vector<HE::UUID> m_pendingMatInval;
     std::vector<HE::UUID> m_pendingMeshInval;
+    std::vector<HE::UUID> m_pendingMatWarmup; // WarmupMaterials queue → drainMaterialWarmup()
+    // One-time notice when a frame asks for more graph-material draws than the U/HeParams
+    // rings hold (k_matMaxDraws): a DrawCall arriving at a full ring falls through to the
+    // built-in path, the tail of an instanced one is skipped — neither is silent any more.
+    bool m_matRingWarned = false;
     std::vector<std::pair<ComPtr<ID3D12Resource>, int>> m_retiredTextures;
     // Recycle mesh-texture heap slots freed by invalidation so a repeatedly-edited mesh
     // (e.g. per-frame terrain sculpt, TerrainSystem::InvalidateMesh) can't exhaust the
@@ -2729,6 +2734,41 @@ struct D3D12RendererImpl
 #endif
         }
         m_pendingMeshInval.clear();
+    }
+
+    // Build the queued materials' PSOs ahead of their first draw (WarmupMaterials). Runs
+    // at DrawScene top, after Render() decided usingHDR for this frame, so the variant
+    // built is the one the loop below will bind. A material instance shares its master's
+    // hash, so a whole family warms on the first id; the rest are cache hits (FXC itself
+    // runs once per hash — see m_matBytecode — so the other target/blend variants that
+    // show up later only pay CreateGraphicsPipelineState). The blend class is the
+    // material's own; a per-entity tint alpha can still ask for the other variant later.
+    // Built-in-PBR materials resolve no shader and are skipped.
+    void drainMaterialWarmup(ContentManager* cm)
+    {
+        if (m_pendingMatWarmup.empty()) return;
+        if (!m_matReady || !cm) { m_pendingMatWarmup.clear(); return; }
+        std::vector<HE::UUID> ids;
+        ids.swap(m_pendingMatWarmup);
+        int built = 0;
+        for (const HE::UUID& id : ids)
+        {
+            uint64_t hash = 0; std::string frag, vertBody;
+            if (!m_matShaderLib.resolveShaders(*cm, id, hash, frag, vertBody)) continue;
+            const MaterialAsset* ma = cm->getMaterial(id);
+            const bool transparent = ma && (ma->blendMode == 2
+                                            || ma->opacity < RenderSorter::kOpaqueOpacityThreshold);
+            const uint64_t key = hash ^ (usingHDR ? 0x9E3779B97F4A7C15ULL : 0ULL)
+                                      ^ (transparent ? 0xD1B54A32D192ED03ULL : 0ULL);
+            if (m_materialPSOs.count(key)) continue; // already warm (or a cached miss)
+            const MaterialShaderVariant* pre =
+                HE::MaterialShaderLibrary::precompiledFor(ma, HE::RendererBackend::D3D12);
+            if (GetOrBuildMaterialPSO(hash, frag, vertBody, pre, usingHDR, transparent))
+                ++built;
+        }
+        if (built > 0)
+            HE_LOG_INFO(RHI, "%s",
+                ("D3D12Renderer: warmed up " + std::to_string(built) + " material PSO(s)").c_str());
     }
 
     // ── SSAO ────────────────────────────────────────────────────────────────
@@ -7578,6 +7618,7 @@ void D3D12Renderer::Shutdown()
     m_impl->reflPrepassReady = false; m_impl->reflPrepassFailed = false;
     m_impl->m_pendingMatInval.clear();
     m_impl->m_pendingMeshInval.clear();
+    m_impl->m_pendingMatWarmup.clear();
     m_impl->m_freeSlotPending.clear();
     m_impl->m_freeSlots.clear();
     m_impl->m_skinnedPSO.Reset();
@@ -7683,6 +7724,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // Drop caches for materials/meshes edited since last frame (before the mesh-resolve
     // pre-pass below re-creates them fresh). Safe here: render thread, no draws recorded yet.
     p.processPendingInvalidations();
+    // Graph-material PSOs queued by WarmupMaterials, built for this frame's target before
+    // any draw below can stall on them.
+    p.drainMaterialWarmup(m_contentManager);
 
     // Feed time-of-day to the extractor so it recomputes the sun/moon direction from the
     // day-night clock (otherwise m_timeOfDay stays at its 0.5 default and the sky never
@@ -8209,6 +8253,19 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D12);
                     ID3D12PipelineState* matPso = p.GetOrBuildMaterialPSO(matHash, matFrag, matVertBody,
                                                                           matPre, p.usingHDR, matTransp);
+                    // A full ring is a silent optics change (built-in look, or a skipped
+                    // instance tail) — say so once per session instead of never.
+                    auto noteRingFull = [&]() {
+                        if (p.m_matRingWarned) return;
+                        p.m_matRingWarned = true;
+                        HE_LOG_WARN(RHI, "%s",
+                            ("D3D12Renderer: more than " + std::to_string(D3D12RendererImpl::k_matMaxDraws)
+                             + " graph-material draws in one frame — the surplus renders built-in "
+                               "PBR (or is skipped inside an instanced batch); raise k_matMaxDraws").c_str());
+                    };
+                    if (matPso && (p.m_matDrawCursor[p.frameIndex] >= D3D12RendererImpl::k_matMaxDraws
+                                   || p.m_matSrvCursor[p.frameIndex] >= D3D12RendererImpl::k_matMaxDraws))
+                        noteRingFull();
                     if (matPso && p.m_matDrawCursor[p.frameIndex] < D3D12RendererImpl::k_matMaxDraws
                         && p.m_matSrvCursor[p.frameIndex] < D3D12RendererImpl::k_matMaxDraws)
                     {
@@ -8289,7 +8346,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
                         auto drawMatInstance = [&](const glm::mat4& model) {
                             UINT& cur = p.m_matDrawCursor[p.frameIndex];
-                            if (cur >= D3D12RendererImpl::k_matMaxDraws) return;
+                            if (cur >= D3D12RendererImpl::k_matMaxDraws) { noteRingFull(); return; }
                             const UINT i = cur++;
                             // std140 U block (176 B) into obj-ring slot i (256-B stride).
                             struct MatU { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
@@ -9173,6 +9230,17 @@ void D3D12Renderer::InvalidateMaterial(const HE::UUID& materialId)
     // Deferred to the next DrawScene (render thread), where touching the heap is safe.
     if (m_impl && materialId != HE::UUID{})
         m_impl->m_pendingMatInval.push_back(materialId);
+}
+
+void D3D12Renderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
+{
+    // Queued, not built here: the PSO must target the render target the next frame uses
+    // (HDR RGBA16F vs LDR RGBA8), which Render() decides before DrawScene. Non-material
+    // ids — the streaming poll hands over everything it registered — resolve no shader
+    // in the drain and cost a map lookup each.
+    if (!m_impl) return;
+    for (const HE::UUID& id : materialIds)
+        if (id != HE::UUID{}) m_impl->m_pendingMatWarmup.push_back(id);
 }
 
 void D3D12Renderer::InvalidateMesh(const HE::UUID& meshId)

@@ -58,6 +58,10 @@ public:
 	// state so the next frame re-resolves it from the ContentManager (mirrors GL/Metal).
 	void InvalidateMaterial(const HE::UUID& materialId) override;
 	void InvalidateMesh(const HE::UUID& meshId) override;
+	// Build node-graph material pipelines ahead of their first draw (queued, drained at
+	// the top of the next DrawScene: render thread, material resources up, and the pass
+	// this frame renders into — HDR offscreen or swapchain — known) — mirrors GL/Metal.
+	void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	// Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
 	// next material draw re-uploads it.
 	void InvalidateTexture(const HE::UUID& textureId) override;
@@ -321,6 +325,14 @@ private:
 	std::vector<HE::UUID> m_pendingMatInval;
 	std::vector<HE::UUID> m_pendingMeshInval;
 	std::vector<HE::UUID> m_pendingTexInval;
+	// WarmupMaterials queue, drained by drainMaterialWarmup() at DrawScene top with the
+	// frame's `hdr` — the pass a pipeline is built against must be the one it draws in.
+	std::vector<HE::UUID> m_pendingMatWarmup;
+	void drainMaterialWarmup(bool hdr);
+	// One-time notice when a frame asks for more graph-material draws than the U/HeParams
+	// rings hold (k_matMaxDraws): a DrawCall arriving at a full ring falls through to the
+	// built-in path, the tail of an instanced one is skipped — neither is silent any more.
+	bool m_matRingWarned = false;
 	static std::string graphTexKey(const HE::UUID& id, const std::string& path)
 	{
 		return id != HE::UUID{} ? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;

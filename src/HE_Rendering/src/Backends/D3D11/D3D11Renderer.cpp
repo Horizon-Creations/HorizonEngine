@@ -3090,6 +3090,7 @@ struct D3D11RendererImpl
     std::unordered_map<HE::UUID, MaterialTex> materialTexCache;
     std::vector<HE::UUID> pendingMatInval;
     std::vector<HE::UUID> pendingMeshInval;
+    std::vector<HE::UUID> pendingMatWarmup; // WarmupMaterials queue → drainMaterialWarmup()
 
     void createRTV()
     {
@@ -3888,6 +3889,34 @@ struct D3D11RendererImpl
         pendingMeshInval.clear();
     }
 
+    // Build the queued materials' VS/PS ahead of their first draw (WarmupMaterials).
+    // Runs at DrawScene top so the FXC round lands before the loop below would pay it
+    // per draw. A material instance shares its master's hash, so a whole family warms
+    // on the first id; the rest are cache hits. The D3D11 cache is keyed by hash alone
+    // (blend/depth are pass state), so one build covers opaque AND blended draws.
+    // Built-in-PBR materials resolve no shader and are skipped.
+    void drainMaterialWarmup(ContentManager* cm)
+    {
+        if (pendingMatWarmup.empty()) return;
+        if (!m_matReady || !cm) { pendingMatWarmup.clear(); return; }
+        std::vector<HE::UUID> ids;
+        ids.swap(pendingMatWarmup);
+        int built = 0;
+        for (const HE::UUID& id : ids)
+        {
+            uint64_t hash = 0; std::string frag, vertBody;
+            if (!m_matShaderLib.resolveShaders(*cm, id, hash, frag, vertBody)) continue;
+            if (m_materialShaders.count(hash)) continue; // already warm (or a cached miss)
+            const MaterialShaderVariant* pre =
+                HE::MaterialShaderLibrary::precompiledFor(cm->getMaterial(id), HE::RendererBackend::D3D11);
+            if (GetOrBuildMaterialShaders(hash, frag, vertBody, pre, /*transparent=*/false))
+                ++built;
+        }
+        if (built > 0)
+            HE_LOG_INFO(RHI, "%s",
+                ("D3D11Renderer: warmed up " + std::to_string(built) + " material shader set(s)").c_str());
+    }
+
     const GpuMesh* resolveMesh(const HE::UUID& assetId, ContentManager* cm)
     {
         if (assetId == HE::UUID{} || !cm) return nullptr;
@@ -4489,6 +4518,7 @@ void D3D11Renderer::Shutdown()
     m_impl->materialTexCache.clear(); // override-material textures (ComPtr auto-release)
     m_impl->pendingMatInval.clear();
     m_impl->pendingMeshInval.clear();
+    m_impl->pendingMatWarmup.clear();
     // A4: node-graph material resources (m_matShaderLib.clear() is header-inline → safe
     // unguarded; the shader/CB/sampler ComPtrs auto-release).
     m_impl->m_matReady = false;
@@ -4559,6 +4589,9 @@ void D3D11Renderer::DrawScene(int width, int height)
 
     // Drop caches for materials/meshes edited since last frame; they re-resolve this frame.
     p.processPendingInvalidations();
+    // Graph-material shaders queued by WarmupMaterials, built before any draw below can
+    // stall on them.
+    p.drainMaterialWarmup(m_contentManager);
 
     // Feed time-of-day so the extractor recomputes the sun/moon direction (otherwise the
     // sky never responds to the time slider). Mirrors OpenGL/Metal.
@@ -5661,6 +5694,16 @@ void D3D11Renderer::InvalidateMaterial(const HE::UUID& materialId)
     // Deferred to the next DrawScene (same thread), where the cache is safe to touch.
     if (m_impl && materialId != HE::UUID{})
         m_impl->pendingMatInval.push_back(materialId);
+}
+
+void D3D11Renderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
+{
+    // Queued for the next DrawScene (same deferral as the invalidations, same thread
+    // guarantee). Non-material ids — the streaming poll hands over everything it
+    // registered — resolve no shader in the drain and cost a map lookup each.
+    if (!m_impl) return;
+    for (const HE::UUID& id : materialIds)
+        if (id != HE::UUID{}) m_impl->pendingMatWarmup.push_back(id);
 }
 
 void D3D11Renderer::InvalidateMesh(const HE::UUID& meshId)
