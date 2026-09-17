@@ -3032,8 +3032,9 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 		REQUIRE_MESSAGE(lf.ok, lf.log);
 		std::string lerr;
 		ComPtr<ID3DBlob> lps = fxcBlob(lf.source, "ps_5_0", lerr);
-		CHECK_MESSAGE(lps.Get() == nullptr && lerr.find("X4500") != std::string::npos && lerr.find("s14") != std::string::npos,
-		              "a wired Landscape Layer Blend compiles under FXC now — build its PSO here (t14 + s14): ", lerr);
+		const bool x4500OnS14 = lps.Get() == nullptr && lerr.find("X4500") != std::string::npos
+		                     && lerr.find("s14") != std::string::npos;
+		CHECK_MESSAGE(x4500OnS14, "a wired Landscape Layer Blend compiles under FXC now — build its PSO here (t14 + s14): ", lerr);
 	}
 }
 
@@ -3090,8 +3091,11 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 		// GL bind heBackdrop — so its t9 is outside the signature by design. It
 		// must stay the ONLY thing uncovered there, though.
 		if (c.name.find("(UI domain)") != std::string::npos)
-			CHECK_MESSAGE(miss.empty() || miss == "heBackdrop(2:9)", "'", c.name,
+		{
+			const bool onlyBackdrop = miss.empty() || miss == "heBackdrop(2:9)";
+			CHECK_MESSAGE(onlyBackdrop, "'", c.name,
 			              "' binds registers beyond heBackdrop the material root signature does not cover: ", miss);
+		}
 		else
 			CHECK_MESSAGE(miss.empty(), "'", c.name, "' binds registers the material root signature does not cover: ", miss);
 		if (!uncovered(b, HE::d3d12mat::kLegacyRangeCount, HE::d3d12mat::kLegacySamplerCount).empty())
