@@ -164,9 +164,19 @@ public:
 	// The scene's compiled-class key ("level:<uuid>", levelScriptKeyForUuid).
 	// Set by the game runtime after loading a packed scene; when the process's
 	// CompiledClassTable has an entry for it, fireLevelLoaded runs the COMPILED
-	// level script instead of interpreting m_levelScript. Empty (the editor,
-	// loose-scene dev runs) → always interpreted.
+	// level script instead of interpreting m_levelScript. Empty (loose-scene
+	// dev runs, a scene that was never saved) → always interpreted, and the
+	// instance is registered under kUnkeyedLevelScript instead.
 	void setLevelScriptKey(std::string key) { m_levelScriptKey = std::move(key); }
+	const std::string& levelScriptKey() const { return m_levelScriptKey; }
+	// The class key the level script runs under when nobody set one. NOT
+	// empty, on purpose: the key is what the editor's trace files hits,
+	// breakpoints and console→node reveals under (HcExecTrace::tabKeyFor maps
+	// every "level:…" to the one Level Script tab), and an instance registered
+	// under "" was invisible to all of it — a breakpoint set on the level
+	// script never matched, its nodes never lit up. The compiled lookup is
+	// still only tried for a key somebody set.
+	static constexpr const char* kUnkeyedLevelScript = "level:untitled";
 
 	// Run the level graph's "OnLevelLoaded" / "OnLevelUnloaded" events. Loaded
 	// seeds the variable store from the graph defaults and marks the level

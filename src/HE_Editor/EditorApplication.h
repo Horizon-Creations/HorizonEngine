@@ -916,6 +916,14 @@ private:
 	bool openScene(const std::string& path);
 	void openSceneAdditive(const std::string& path);
 	void newScene();
+	// The class key the current scene's level script runs under in play mode:
+	// "level:<uuid>" from the scene's PROJECT-relative path, spelled exactly as
+	// the packaged game spells it (GameApplication::loadSceneInto →
+	// levelScriptKeyForUuid(sceneUuidForPath)), so the Watch window and the
+	// trace name the level the way the export does. Empty for an unsaved
+	// scene or one outside the project — the world then falls back to
+	// HorizonWorld::kUnkeyedLevelScript.
+	std::string levelScriptKeyForCurrentScene();
 	// Bring every placed prefab in the editor world up to date with its asset
 	// (SceneSerializer::syncPrefabInstances). Run after a scene is read and
 	// before one is written, so the file on disk never lags the prefab it was

@@ -28,6 +28,7 @@ add_executable(he_tests
     test_notification_store.cpp
     # Node highlighting + console→node: hits fade, reveals are two one-shots.
     test_hc_exec_trace.cpp
+    test_hc_breakpoint_play_path.cpp
     # The watch window's rows: a stopped run's event argument, frames, locals,
     # variables and outputs, spelled as the window shows them.
     test_hc_watch.cpp

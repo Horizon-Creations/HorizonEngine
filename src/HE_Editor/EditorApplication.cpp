@@ -54,6 +54,7 @@
 #include <ContentManager/DefaultAssets.h>
 #include <Types/TypeRegistry.h>    // project-open refresh of struct/enum defs
 #include <Scripting/ScriptTypes.h> // setScriptLogTag — the project's script log prefix
+#include <Hpak/ProjectExporter.h>  // sceneUuidForPath + levelScriptKeyForUuid: the level script's key in PIE
 #include <CppTypesHeaderGen.h>     // Source/Generated/GameTypes.h (C++ projects)
 #include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderLibrary.h> // HE_DUMP_MATPRECOMPILE witness
@@ -8610,6 +8611,17 @@ void EditorApplication::setPlayMode(bool play)
 		// the thing that works is the one you cannot step through.
 		// Leaving play mode routes through clear(), which fires the matching
 		// "OnLevelUnloaded".
+		//
+		// Keyed by the scene FIRST, the way the packaged game keys it (its
+		// loadSceneInto: levelScriptKeyForUuid of the project-relative path).
+		// The key is the address the level script's instance runs under — the
+		// one HcExecTrace files hits and breakpoints against, and the one the
+		// Watch window shows — and the editor never set it: setLevelScriptKey
+		// was the packaged game's business, for the compiled lookup, so in PIE
+		// the level script ran under "" and a breakpoint on it, red disc and
+		// all, never matched. An unsaved scene has no path and gets the world's
+		// own fallback (HorizonWorld::kUnkeyedLevelScript).
+		m_editorWorld->setLevelScriptKey(levelScriptKeyForCurrentScene());
 		m_editorWorld->fireLevelLoaded();
 
 		// The fallback camera goes up AFTER the player spawns, mirroring the
@@ -9454,6 +9466,22 @@ void EditorApplication::newScene()
 	m_savedRevision = m_undo.revision();
 	m_autosave.clear();   // guarded the same way as openScene
 	HE_LOG_INFO(Editor, "%s", "EditorApplication: new empty scene");
+}
+
+std::string EditorApplication::levelScriptKeyForCurrentScene()
+{
+	if (m_currentScenePath.empty()) return {};
+	// Scenes are keyed PROJECT-relative (parent of Content/), the spelling the
+	// exporter packs them under and scene.load resolves — see
+	// HcEditorUtil::listScenes for the same derivation.
+	const std::string root = contentManager().contentRoot();
+	if (root.empty()) return {};
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	const fs::path projectRoot = fs::path(root).parent_path();
+	const fs::path rel = fs::path(m_currentScenePath).lexically_relative(projectRoot);
+	if (rel.empty() || rel.native()[0] == '.') return {};   // outside the project
+	return levelScriptKeyForUuid(sceneUuidForPath(rel.generic_string()));
 }
 
 // The gate on m_isPlaying is the load-bearing half: outside play mode the editor
