@@ -300,8 +300,64 @@ TEST_CASE("watch ui: a stopped run shows its sections as rows, and Go to Node as
 	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
 	for (int i = 0; i < 3; ++i) frame(ctx, false, i == 2 ? &img : nullptr);
 	shotTo(img, "watch-live");
-	// Below the hint and the filter box: no Game Instance, so no rows.
-	CHECK(itemsDown(ctx, 60.0f, 135.0f, float(H) - 30.0f).empty());
+	// Below the hint: Break on Next Node and the filter box, then no rows —
+	// there is no Game Instance to list.
+	CHECK(itemsDown(ctx, 60.0f, 40.0f, float(H) - 30.0f).size() == 2);
+}
+
+TEST_CASE("watch ui: Break on Next Node arms the runtime's one-shot, Disarm takes it back")
+{
+	Harness harness;
+	Fixture f;
+	Runtime rt;
+	HcExecTrace::attach(rt);
+	ClassIdentity cls; cls.key = "Content/Enemies/Goblin.hasset";
+	const InstanceId id = rt.add(f.g, {}, cls);
+	ContextBits bits;
+	AppContext ctx = bits.make();
+	ctx.isPlaying = true;
+
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) frame(ctx, false);
+	CHECK_FALSE(rt.debugBreakNextArmed());
+
+	// The first item down the left edge is the button; the second the filter.
+	std::vector<Item> items = itemsDown(ctx, 60.0f, 40.0f, float(H) - 30.0f);
+	REQUIRE(items.size() == 2);
+	const float buttonMid = items[0].mid;
+	clickAt(ctx, 60.0f, buttonMid);
+	CHECK(rt.debugBreakNextArmed());
+
+	// Armed: the button is gone, a sentence stands in its place with Disarm
+	// on the same line, to the right of the text.
+	CHECK(itemsDown(ctx, 60.0f, 40.0f, float(H) - 30.0f).size() == 1);
+	he_ui::Image img;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 2; ++i) frame(ctx, false, i == 1 ? &img : nullptr);
+	shotTo(img, "watch-armed");
+	ImGuiID disarm = 0; float disarmX = 0.0f;
+	for (float x = 100.0f; x < float(W) - 20.0f && disarm == 0; x += 4.0f)
+		if (const ImGuiID hit = idAt(ctx, x, buttonMid - 4.0f)) { disarm = hit; disarmX = x + 6.0f; }
+	REQUIRE_MESSAGE(disarm != 0, "no Disarm button found on the armed line");
+	clickAt(ctx, disarmX, buttonMid - 4.0f);
+	CHECK_FALSE(rt.debugBreakNextArmed());
+	CHECK(itemsDown(ctx, 60.0f, 40.0f, float(H) - 30.0f).size() == 2);
+
+	// Armed for real: the next event stops on its entry node, like a
+	// breakpoint would, and the window switches to the stopped view.
+	clickAt(ctx, 60.0f, buttonMid);
+	REQUIRE(rt.debugBreakNextArmed());
+	rt.fireEvent(id, "Go", 0, Value::ofInt(1));
+	REQUIRE(rt.isSuspended());
+	CHECK_FALSE(rt.debugBreakNextArmed());
+	HcExecTrace::takeBreakHit();
+	HcExecTrace::cancelReveal();
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) frame(ctx, false);
+	// The stopped view has at least the argument's section and row.
+	CHECK(itemsDown(ctx, 60.0f, 96.0f, float(H) - 30.0f).size() >= 2);
+	rt.debugAbort();
+	HcExecTrace::clearPaused();
 }
 
 TEST_CASE("watch ui: nothing running says so instead of listing")

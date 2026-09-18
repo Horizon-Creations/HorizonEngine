@@ -3,9 +3,13 @@
 #include "../src/HE_Editor/LevelScriptPanel.h"
 #include "../src/HE_Editor/GameInstancePanel.h"
 
+#include "TestFsUtil.h"
+
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -299,4 +303,71 @@ TEST_CASE("HcExecTrace: attached to a runtime, a breakpoint stops the run and re
 	rt.fireEvent(id, "Ping");
 	CHECK_FALSE(rt.isSuspended());
 	CHECK_FALSE(HcExecTrace::takeBreakHit());
+}
+
+TEST_CASE("HcExecTrace: the store round-trips breakpoints per project and replaces, never merges")
+{
+	Reset reset;
+	namespace fs = std::filesystem;
+	const fs::path root = fs::temp_directory_path() / "he_test_hc_breakpoints";
+	he_test::removeAllQuiet(root);
+	fs::create_directories(root);
+	struct Cleanup { fs::path r; ~Cleanup() { HcExecTrace::setBreakpointStore(""); he_test::removeAllQuiet(r); } } cleanup{ root };
+
+	// The layout: a .heproj path and its directory name the same file.
+	const std::string proj = (root / "Game.heproj").string();
+	{ std::ofstream(proj) << "{}"; }
+	const std::string store = HcExecTrace::breakpointStoreForProject(proj);
+	CHECK(store == (root / "Saved" / "Breakpoints.json").string());
+	CHECK(HcExecTrace::breakpointStoreForProject(root.string()) == store);
+	CHECK(HcExecTrace::breakpointStoreForProject("").empty());
+
+	// A fresh project: no file, nothing read, nothing there — and setting the
+	// store dropped whatever the previous project had in memory.
+	HcExecTrace::setBreakpoint("Content/Old.hasset", 7, true);
+	CHECK_FALSE(HcExecTrace::setBreakpointStore(store));
+	CHECK(HcExecTrace::breakpointStore() == store);
+	CHECK(HcExecTrace::breakpointCount() == 0);
+	CHECK_FALSE(fs::exists(store));
+
+	// Every change writes through — the directory is made on the way.
+	HcExecTrace::setBreakpoint("Content/A.hasset", 3, true);
+	CHECK(fs::exists(store));
+	HcExecTrace::setBreakpoint("Content/A.hasset", 5, true);
+	HcExecTrace::setBreakpoint("level:0123456789abcdef0123456789abcdef", 9, true);   // filed under the tab
+	const std::string written = HcExecTrace::saveBreakpointsJson();
+	CHECK(written.find("\"Content/A.hasset\"") != std::string::npos);
+	CHECK(written.find(LevelScriptPanel::kTabPath) != std::string::npos);
+	{
+		std::ifstream in(store, std::ios::binary);
+		const std::string onDisk((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		CHECK(onDisk == written);
+	}
+
+	// Another editor session: memory wiped, the store read back.
+	HcExecTrace::setBreakpointStore("");
+	CHECK(HcExecTrace::breakpointCount() == 0);
+	CHECK(HcExecTrace::setBreakpointStore(store));
+	CHECK(HcExecTrace::breakpointCount() == 3);
+	CHECK(HcExecTrace::breakpointsOf("Content/A.hasset") == std::vector<int>{ 3, 5 });
+	CHECK(HcExecTrace::shouldBreakAt("level:fedcba9876543210fedcba9876543210", 9));
+
+	// Removing the last one of a graph and clearing all both reach the file.
+	HcExecTrace::setBreakpoint("Content/A.hasset", 3, false);
+	HcExecTrace::setBreakpoint("Content/A.hasset", 5, false);
+	CHECK(HcExecTrace::saveBreakpointsJson().find("Content/A.hasset") == std::string::npos);
+	HcExecTrace::clearAllBreakpoints();
+	CHECK(HcExecTrace::setBreakpointStore(store));
+	CHECK(HcExecTrace::breakpointCount() == 0);
+
+	// A torn file: nothing resurrected, nothing kept from before either.
+	HcExecTrace::setBreakpoint("Content/B.hasset", 2, true);
+	CHECK_FALSE(HcExecTrace::loadBreakpointsJson("{ \"breakpoints\": { \"Content/B.hasset\": [2"));
+	CHECK(HcExecTrace::breakpointCount() == 0);
+	// Junk inside a good document is skipped, not fatal: ids that are not
+	// integers, a 0, an empty key, a value that is not an array.
+	CHECK(HcExecTrace::loadBreakpointsJson(
+		"{ \"breakpoints\": { \"Content/C.hasset\": [4, \"x\", 0, 6], \"\": [1], \"Content/D.hasset\": 5 } }"));
+	CHECK(HcExecTrace::breakpointsOf("Content/C.hasset") == std::vector<int>{ 4, 6 });
+	CHECK(HcExecTrace::breakpointCount() == 2);
 }

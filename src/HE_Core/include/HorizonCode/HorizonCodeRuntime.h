@@ -402,8 +402,10 @@ public:
 
     // Stop at the NEXT exec node any interpreted instance runs, once — a
     // "pause" that lands on a node instead of between frames. Disarms on the
-    // hit (or with debugAbort).
-    void debugBreakNext() { m_breakNext = true; }
+    // hit (or with debugAbort); arm=false takes it back by hand, for the
+    // editor's button when nothing comes — an armed pause left behind would
+    // stop the first node of the NEXT play session.
+    void debugBreakNext(bool arm = true) { m_breakNext = arm; }
     bool debugBreakNextArmed() const { return m_breakNext; }
     // Let every stopped run carry on where it stopped (oldest first). A run
     // that reaches another breakpoint stops again; the world around it is the

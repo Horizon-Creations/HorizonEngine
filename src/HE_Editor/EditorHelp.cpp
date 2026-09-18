@@ -1599,7 +1599,7 @@ namespace
 	  "object's variables, and what the nodes before the stop produced. Opens "
 	  "by itself when a run stops; while nothing is stopped it shows the Game "
 	  "Instance's variables live.",
-	  "", "horizoncode#graphs" },
+	  "", "horizoncode#debugging" },
 	{ "View/Ground Grid", "",
 	  "The reference grid on the ground plane. Hidden while the scene plays "
 	  "either way.",
@@ -2179,15 +2179,26 @@ namespace
 	  "Opens the graph the run is stopped in and selects the node — the one "
 	  "with the yellow frame. The same jump the stop itself made; for when you "
 	  "have since gone elsewhere.",
-	  "", "horizoncode#graphs" },
+	  "", "horizoncode#debugging" },
 	{ "Watch/Copy Value", "Copy Value",
 	  "Puts this row's value on the clipboard as it is shown here — the whole "
 	  "string, the whole array, not the part that fits the column.",
-	  "", "horizoncode#graphs" },
+	  "", "horizoncode#debugging" },
 	{ "Watch/Copy Row", "Copy Row",
 	  "Puts name, type and value on the clipboard as one line, for a bug "
 	  "report or a note.",
-	  "", "horizoncode#graphs" },
+	  "", "horizoncode#debugging" },
+	{ "Watch/Break on Next Node", "Break on Next Node",
+	  "A pause that lands on a node instead of between frames: the very next "
+	  "exec node ANY graph runs stops as if it had a breakpoint — once. For "
+	  "catching whatever fires next without knowing which node that is. Stays "
+	  "armed until something runs (a game waiting on input runs nothing) or "
+	  "you disarm it; stopping play disarms it too.",
+	  "", "horizoncode#debugging" },
+	{ "Watch/Disarm", "Disarm",
+	  "Takes Break on Next Node back before anything has run, so the next node "
+	  "goes through as usual.",
+	  "", "horizoncode#debugging" },
 
 	// ── Audio Mixer ──────────────────────────────────────────────────────────
 	{ "Audio Mixer/Master", "",
@@ -2379,13 +2390,13 @@ namespace
 	  "remaining iterations of a loop it stopped inside — and then lets the world "
 	  "tick again. The next breakpoint stops it again. Breakpoints are set on a "
 	  "node's right-click menu in the graph.",
-	  "", "horizoncode#graphs" },
+	  "", "horizoncode#debugging" },
 	{ "viewport.step-node", "Step Node",
 	  "Runs exactly the node the graph is stopped at and stops at the next one — "
 	  "into a called function, out to the caller, wherever the next node is. "
 	  "When the chain simply ends, the run is over and the world goes on until "
 	  "the next breakpoint.",
-	  "", "horizoncode#graphs" },
+	  "", "horizoncode#debugging" },
 	{ "viewport.time-scale", "Game time",
 	  "What the RUNNING GAME is doing to its own clock, which is not the same as "
 	  "the Pause button next to it: this reads the scale a script set with Set "
@@ -5651,17 +5662,18 @@ namespace
 	  "execution stops BEFORE the node runs, the world freezes, and the graph "
 	  "opens on the node with a yellow frame. Continue and Step Node in the "
 	  "viewport's transport carry on from there. Only nodes with an exec pin can "
-	  "be stopped at — a pure node is read, never run. Breakpoints live for the "
-	  "editor session and are not saved with the asset; compiled (packaged) "
+	  "be stopped at — a pure node is read, never run. Breakpoints are kept per "
+	  "project in Saved/Breakpoints.json, not in the asset — they survive an "
+	  "editor restart but never travel with the class; compiled (packaged) "
 	  "classes never stop.",
-	  "", "horizoncode#graphs" },
+	  "", "horizoncode#debugging" },
 	{ "HorizonCode Graph/Remove Breakpoint", "Remove Breakpoint",
 	  "Takes the breakpoint off this node. A run already stopped there stays "
 	  "stopped until Continue.",
-	  "", "horizoncode#graphs" },
+	  "", "horizoncode#debugging" },
 	{ "HorizonCode Graph/Remove All Breakpoints", "Remove All Breakpoints",
 	  "Clears every breakpoint in every graph of the project at once.",
-	  "", "horizoncode#graphs" },
+	  "", "horizoncode#debugging" },
 	{ "HorizonCode Graph/Rename Comment", "Rename Comment",
 	  "Opens the frame's title for editing — the same as double-clicking its "
 	  "header.",

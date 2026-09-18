@@ -2540,6 +2540,12 @@ TEST_CASE("breakpoint: Break Next stops at the next node anywhere, once")
 	// Disarmed: the next run goes through.
 	d.rt.fireEvent(id, "Go");
 	CHECK_FALSE(d.rt.isSuspended());
+	// Taken back by hand before anything ran: the same.
+	d.rt.debugBreakNext();
+	d.rt.debugBreakNext(false);
+	CHECK_FALSE(d.rt.debugBreakNextArmed());
+	d.rt.fireEvent(id, "Go");
+	CHECK_FALSE(d.rt.isSuspended());
 }
 
 TEST_CASE("breakpoint: a Sequence's second output still fires after a stop in its first")

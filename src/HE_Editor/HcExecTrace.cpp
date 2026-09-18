@@ -3,8 +3,13 @@
 #include "GameInstancePanel.h"   // kTabPath — the Game Instance tab's
 
 #include <HorizonCode/HorizonCodeRuntime.h>
+#include <nlohmann/json.hpp>
 
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <set>
 #include <unordered_map>
 
@@ -39,6 +44,21 @@ namespace
 	// asks "is there one" per node per frame, and an absent node costs a
 	// lookup in a set that is as small as the number of breakpoints.
 	std::unordered_map<std::string, std::set<int>> s_breakpoints;
+	// The file the set is mirrored into after every change; empty = none.
+	std::string s_breakpointStore;
+
+	// Write the set to the store, if there is one. Best effort: a Saved/
+	// directory that cannot be written costs the breakpoints of the next
+	// session, not this one, and the set in memory stays authoritative.
+	void persistBreakpoints()
+	{
+		if (s_breakpointStore.empty()) return;
+		namespace fs = std::filesystem;
+		std::error_code ec;
+		fs::create_directories(fs::path(s_breakpointStore).parent_path(), ec);
+		std::ofstream out(s_breakpointStore, std::ios::binary | std::ios::trunc);
+		if (out) out << saveBreakpointsJson();
+	}
 
 	// The stop: where the first stopped run stands. `tab` empty = none.
 	std::string s_pausedTab;
@@ -123,11 +143,15 @@ void setBreakpoint(const std::string& tabKey, int nodeId, bool on)
 {
 	const std::string tab = tabKeyFor(tabKey);
 	if (tab.empty() || nodeId == 0) return;
-	if (on) { s_breakpoints[tab].insert(nodeId); return; }
+	if (on)
+	{
+		if (s_breakpoints[tab].insert(nodeId).second) persistBreakpoints();
+		return;
+	}
 	const auto g = s_breakpoints.find(tab);
-	if (g == s_breakpoints.end()) return;
-	g->second.erase(nodeId);
+	if (g == s_breakpoints.end() || g->second.erase(nodeId) == 0) return;
 	if (g->second.empty()) s_breakpoints.erase(g);
+	persistBreakpoints();
 }
 
 void toggleBreakpoint(const std::string& tabKey, int nodeId)
@@ -156,12 +180,76 @@ size_t breakpointCount()
 	return n;
 }
 
-void clearBreakpoints(const std::string& tabKey) { s_breakpoints.erase(tabKeyFor(tabKey)); }
-void clearAllBreakpoints()                        { s_breakpoints.clear(); }
+void clearBreakpoints(const std::string& tabKey)
+{
+	if (s_breakpoints.erase(tabKeyFor(tabKey)) != 0) persistBreakpoints();
+}
+
+void clearAllBreakpoints()
+{
+	if (s_breakpoints.empty()) return;
+	s_breakpoints.clear();
+	persistBreakpoints();
+}
 
 bool shouldBreakAt(const std::string& runtimeKey, int nodeId)
 {
 	return hasBreakpoint(runtimeKey, nodeId);
+}
+
+// ── The store ────────────────────────────────────────────────────────────────
+std::string saveBreakpointsJson()
+{
+	// Sorted keys and sorted ids (the set is ordered): the same breakpoints
+	// always write the same bytes, so the file only changes when they do.
+	nlohmann::json bp = nlohmann::json::object();
+	for (const auto& [tab, ids] : std::map<std::string, std::set<int>>(s_breakpoints.begin(), s_breakpoints.end()))
+		bp[tab] = ids;
+	nlohmann::json j;
+	j["breakpoints"] = std::move(bp);
+	return j.dump(2);
+}
+
+bool loadBreakpointsJson(const std::string& json)
+{
+	s_breakpoints.clear();
+	const nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
+	if (!j.is_object()) return false;
+	const auto bp = j.find("breakpoints");
+	if (bp == j.end() || !bp->is_object()) return false;
+	for (const auto& [tab, ids] : bp->items())
+	{
+		if (!ids.is_array()) continue;
+		const std::string key = tabKeyFor(tab);
+		if (key.empty()) continue;
+		for (const auto& id : ids)
+			if (id.is_number_integer() && id.get<int>() != 0) s_breakpoints[key].insert(id.get<int>());
+		if (s_breakpoints[key].empty()) s_breakpoints.erase(key);
+	}
+	return true;
+}
+
+bool setBreakpointStore(const std::string& file)
+{
+	s_breakpointStore = file;
+	s_breakpoints.clear();
+	if (file.empty()) return false;
+	std::ifstream in(file, std::ios::binary);
+	if (!in) return false;
+	const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	return loadBreakpointsJson(text);
+}
+
+std::string breakpointStore() { return s_breakpointStore; }
+
+std::string breakpointStoreForProject(const std::string& projectPath)
+{
+	namespace fs = std::filesystem;
+	if (projectPath.empty()) return {};
+	fs::path root(projectPath);
+	std::error_code ec;
+	if (fs::is_regular_file(root, ec)) root = root.parent_path();
+	return (root / "Saved" / "Breakpoints.json").string();
 }
 
 // ── The stop ─────────────────────────────────────────────────────────────────

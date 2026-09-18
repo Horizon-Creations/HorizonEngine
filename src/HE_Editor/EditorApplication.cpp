@@ -1560,6 +1560,11 @@ void EditorApplication::OnInit()
 			m_autosave.clear();
 		m_autosave.configure(HE::Ed::SceneAutosave::recoveryDirForProject(
 			m_projectManager.currentProject().path));
+		// So do the HorizonCode breakpoints: the previous project's go (they
+		// are already in ITS Saved/Breakpoints.json, written through on every
+		// change), this project's come back from its own file.
+		HcExecTrace::setBreakpointStore(
+			HcExecTrace::breakpointStoreForProject(m_projectManager.currentProject().path));
 		// Assigned, not merged: an offer the previous project never answered
 		// belongs to that project's folder and must not be shown over this one.
 		m_recoveryOffer = m_autosave.promoteStale();
