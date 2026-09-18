@@ -16,6 +16,14 @@ std::string toStringG(float v)
     return buf;
 }
 
+float divideByZero()
+{
+    // A packaged build has no node to point at, but the line is the same one
+    // the editor showed — so a player's log and the editor's console agree.
+    HE_LOG_ERROR(HorizonCode, "%s", "HorizonCode: Divide by zero — the result is 0");
+    return 0.0f;
+}
+
 void warnArrayGet(int idx, size_t size)
 {
     HE_LOG_WARN(HorizonCode, "%s",

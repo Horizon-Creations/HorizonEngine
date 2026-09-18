@@ -4471,7 +4471,19 @@ float ceil(float x)  { return std::ceil(x); }
 float round(float x) { return std::round(x); }
 float sign(float x)  { return (float)((x > 0.0f) - (x < 0.0f)); }
 float pow(float b, float e) { return std::pow(b, e); }
-float mod(float a, float b) { return b != 0.0f ? std::fmod(a, b) : 0.0f; }
+float mod(float a, float b)
+{
+    if (b != 0.0f) return std::fmod(a, b);
+    // The result stays 0 (not the NaN fmod would give), but a zero divisor is
+    // said: the same row backs the HorizonCode Modulo node (both backends)
+    // and horizon.math.mod in Lua and Python, so one line here covers every
+    // frontend (Lua's own `%` is language semantics and stays as it is).
+    // Under Script like the rest of the API — a
+    // HorizonCode caller is attributed to its node by the exec site, not by
+    // the category; a Lua caller must not read as HorizonCode.
+    HE_LOG_ERROR(Script, "%s", "math.mod: modulo by zero — the result is 0");
+    return 0.0f;
+}
 float atan2(float y, float x) { return std::atan2(y, x); }
 float radians(float deg) { return glm::radians(deg); }
 float degrees(float rad) { return glm::degrees(rad); }

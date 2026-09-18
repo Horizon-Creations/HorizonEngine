@@ -907,7 +907,8 @@ const char* nodeTooltip(NodeType t)
         case T::Add:      return "A + B (Float).";
         case T::Subtract: return "A - B (Float).";
         case T::Multiply: return "A * B (Float).";
-        case T::Divide:   return "A / B (Float). Division by zero yields 0.";
+        case T::Divide:   return "A / B (Float). Division by zero is a runtime error: it is\n"
+                                 "logged (the console opens) and the result is 0.";
         case T::Greater:  return "True when A > B.";
         case T::Less:     return "True when A < B.";
         case T::Equals:   return "True when A equals B.";
@@ -4352,8 +4353,18 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
     case T::Multiply: return Value::ofFloat(evalInput(n, 0, depth + 1).f * evalInput(n, 1, depth + 1).f);
     case T::Divide:
     {
+        // The divisor evaluates FIRST; the dividend only when it is non-zero
+        // (§3.4 — the generated C++ does the same, so host-call traces agree).
         const float b = evalInput(n, 1, depth + 1).f;
-        return Value::ofFloat(b != 0.0f ? evalInput(n, 0, depth + 1).f / b : 0.0f);
+        if (b != 0.0f) return Value::ofFloat(evalInput(n, 0, depth + 1).f / b);
+        // A zero divisor used to yield 0 without a word, so a graph dividing
+        // by an unset variable looked like one that computes 0 on purpose.
+        // The result stays 0 (no NaN downstream), but it is SAID — as an
+        // error, with this node current, so the console row leads back here
+        // and the first one of a play session opens the console. The text is
+        // byte-identical to hc::divideByZero (HorizonCodeGenSupport.cpp).
+        HE_LOG_ERROR(HorizonCode, "%s", "HorizonCode: Divide by zero — the result is 0");
+        return Value::ofFloat(0.0f);
     }
     case T::Greater:  return Value::ofBool(evalInput(n, 0, depth + 1).f >  evalInput(n, 1, depth + 1).f);
     case T::Less:     return Value::ofBool(evalInput(n, 0, depth + 1).f <  evalInput(n, 1, depth + 1).f);

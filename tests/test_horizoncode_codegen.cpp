@@ -16,6 +16,7 @@
 #include <HorizonCode/HorizonCodeGenSupport.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <HorizonScene/EngineApi.h>
+#include <Diagnostics/Log.h>   // addSink — the divide-by-zero case reads what reached the log
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -479,6 +480,105 @@ TEST_CASE("codegen parity: math_ops")
 	CHECK(p.var("eq").b == true);     // |0.3000001 - 0.3| < 1e-6
 	CHECK(p.var("lg").b == true);     // And(Not(false), Or(false, true))
 	CHECK(p.var("str").s == "3.5x");  // %g + Concat
+}
+
+namespace
+{
+	// What reached the log at Warning or worse, for the divide-by-zero case:
+	// the parity harness compares values and host traces, not log lines, and a
+	// silent 0 is exactly what this case is about.
+	struct LogLines
+	{
+		static std::vector<std::pair<HE::LogLevel, std::string>> s_seen;
+		int sink = 0;
+		LogLines()
+		{
+			s_seen.clear();
+			sink = HE::Log::addSink([](const HE::Log::Record& r, void*)
+			{
+				if (r.level < HE::LogLevel::Warning) return;
+				const std::string msg = r.message ? r.message : "";
+				// The log's own fold note ("(previous message repeated N more
+				// times)") arrives at the FOLDED record's level, i.e. as an
+				// Error here, whenever a distinct line releases it — that is
+				// bookkeeping, not a line a backend said.
+				if (msg.rfind("(previous message repeated", 0) == 0) return;
+				s_seen.push_back({ r.level, msg });
+			}, nullptr);
+		}
+		~LogLines() { HE::Log::removeSink(sink); }
+		int count(const char* needle, HE::LogLevel atLeast) const
+		{
+			int n = 0;
+			for (const auto& [lvl, msg] : s_seen)
+				if (lvl >= atLeast && msg.find(needle) != std::string::npos) ++n;
+			return n;
+		}
+	};
+	std::vector<std::pair<HE::LogLevel, std::string>> LogLines::s_seen;
+}
+
+TEST_CASE("codegen parity: math_ops — Divide by zero is an error on BOTH backends, once each, same text")
+{
+	// fix/math_ops has d0 = Divide(5, 0) and d1 = Divide(5, 2). The 0 result
+	// was always parity; that it is SAID is what a packaged build used to lack
+	// (the emitted C++ returned 0.0f in the zero branch). The two backends are
+	// fired one after the other with a distinct line in between: the log folds
+	// identical consecutive records (Log.cpp), and the sink never sees a fold.
+	ParityPair p("fix/math_ops");
+	LogLines seen;
+	// …and one BEFORE the first fire too: the plain math_ops case above already
+	// logged this very line, and the fold spans test cases.
+	HE_LOG_INFO(HorizonCode, "before the interpreted backend");
+	p.interp.rt.fireEvent(p.interp.id, "Calc");
+	REQUIRE(seen.count("HorizonCode: Divide by zero — the result is 0", HE::LogLevel::Error) == 1);
+	HE_LOG_INFO(HorizonCode, "between the two backends");
+	p.comp.rt.fireEvent(p.comp.id, "Calc");
+	CHECK(seen.count("HorizonCode: Divide by zero — the result is 0", HE::LogLevel::Error) == 2);
+	// Exactly one per backend: d1 (the non-zero divisor) said nothing, and
+	// nothing else in the fixture warns.
+	CHECK(seen.count("", HE::LogLevel::Warning) == 2);
+	p.checkParity();
+	CHECK(p.var("d0").f == 0.0f);
+	CHECK(p.var("d1").f == 2.5f);
+}
+
+TEST_CASE("codegen: Divide lowers its zero branch onto hc::divideByZero, never a bare 0")
+{
+	// The text check beside the parity run: the compiled fixture above proves
+	// the helper is CALLED (the log line), this one pins WHERE it comes from,
+	// so a future emitter that inlines `0.0f` again is caught by name.
+	using NT = HorizonCode::NodeType;
+	using PT = HorizonCode::PinType;
+	hcfix::Fx f;
+	f.var("q", PT::Float);
+	const int ev = f.event("Go");
+	const int n = f.op(NT::Divide);
+	f.data(f.constF(1.0f), 0, n, 0);
+	f.data(f.constF(0.0f), 0, n, 1);
+	const int s = f.setVar("q", PT::Float);
+	f.data(n, 0, s, 0);
+	f.exec(ev, s);
+
+	HE::hccg::Options opt;
+	HE::hccg::Result r = HE::hccg::generate({ f.done("divide_zero") }, opt);
+	REQUIRE(r.ok);
+	REQUIRE(r.fallbacks.empty());
+	std::string all;
+	for (const auto& file : r.files) all += file.contents;
+	CHECK(all.find("hc::divideByZero()") != std::string::npos);
+	CHECK(all.find(": 0.0f; }())") == std::string::npos);
+}
+
+TEST_CASE("HE::api::math::mod: a zero divisor is an error, a non-zero one is silent")
+{
+	// One row behind the Modulo node (both backends), horizon.math.mod in Lua
+	// and in Python — so the check lives on the function, not on a graph.
+	LogLines seen;
+	CHECK(HE::api::math::mod(7.0f, 3.0f) == 1.0f);
+	CHECK(seen.count("", HE::LogLevel::Warning) == 0);
+	CHECK(HE::api::math::mod(7.0f, 0.0f) == 0.0f);   // 0, not NaN
+	CHECK(seen.count("math.mod: modulo by zero", HE::LogLevel::Error) == 1);
 }
 
 TEST_CASE("codegen parity: vector_ops")

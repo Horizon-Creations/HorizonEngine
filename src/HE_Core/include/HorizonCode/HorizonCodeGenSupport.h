@@ -277,6 +277,10 @@ inline bool feq(float a, float b) { return std::fabs(a - b) < 1e-6f; }
 inline bool land(bool a, bool b) { return a && b; }
 inline bool lor(bool a, bool b)  { return a || b; }
 HE_API std::string toStringG(float v);   // snprintf "%g", buffer 48 — like ToString
+// Divide's zero-divisor branch: logs the interpreter's error and yields the 0
+// the node's output carries. Emitted code calls it only when B is 0, so the
+// dividend is not evaluated in that case — same order as the interpreter.
+HE_API float divideByZero();
 
 // ── arrays (§3.4: pure copy semantics, clamped ops, exact-equality search) ───
 HE_API void warnArrayGet(int idx, size_t size);   // the interpreter's out-of-range log

@@ -2861,6 +2861,65 @@ TEST_CASE("runtime errors: Array Set and Array Remove out of range are said, lik
 	CHECK(rt.getVariable(id, "list").items[0].s == "a");
 }
 
+TEST_CASE("runtime errors: Divide by zero is said as an error, with the Divide node current, and still yields 0")
+{
+	// Go → Set q = Divide(5, 0). The divisor is 0: the result used to be a
+	// silent 0, indistinguishable from a graph that computes 0 on purpose.
+	Graph g;
+	{ Variable v; v.name = "q"; v.type = PinType::Float; v.f[0] = 7.0f; g.variables.push_back(v); }
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
+	Node a; a.type = NodeType::ConstFloat; a.f[0] = 5.0f; const int ca = g.addNode(a);
+	Node b; b.type = NodeType::ConstFloat; b.f[0] = 0.0f; const int cb = g.addNode(b);
+	Node dv; dv.type = NodeType::Divide; const int div = g.addNode(dv);
+	Node sq; sq.type = NodeType::SetVariable; sq.s = "q"; sq.propType = PinType::Float;
+	const int setQ = g.addNode(sq);
+	REQUIRE(g.connect(ca, 0, div, 0));
+	REQUIRE(g.connect(cb, 0, div, 1));
+	REQUIRE(g.connect(div, 2, setQ, 2));   // Divide: dataIns A 0, B 1; dataOut 2
+	chain(g, e, 0, setQ);
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	HcLogCapture seen;
+	rt.fireEvent(id, "Go");
+	REQUIRE(seen.count("Divide by zero", HE::LogLevel::Error) == 1);
+	// The row leads back to the Divide node itself — the pure node, not the
+	// Set Variable that pulled on it (that is what "Go to Node" opens).
+	CHECK(seen.first("Divide by zero")->node == div);
+	// The value did not change: 0, not NaN or inf, and the chain went on.
+	CHECK(rt.getVariable(id, "q").f == 0.0f);
+	CHECK(rt.alive(id));
+	// Said per evaluation, not once per session. (A distinct line in between,
+	// because the log folds identical consecutive records — Log.cpp — and the
+	// sink never sees the fold.)
+	HE_LOG_INFO(HorizonCode, "between the two runs");
+	rt.fireEvent(id, "Go");
+	CHECK(seen.count("Divide by zero", HE::LogLevel::Error) == 2);
+}
+
+TEST_CASE("runtime errors: a Divide with a non-zero divisor is not an error (negative control)")
+{
+	Graph g;
+	{ Variable v; v.name = "q"; v.type = PinType::Float; g.variables.push_back(v); }
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
+	Node a; a.type = NodeType::ConstFloat; a.f[0] = 5.0f; const int ca = g.addNode(a);
+	Node b; b.type = NodeType::ConstFloat; b.f[0] = 2.0f; const int cb = g.addNode(b);
+	Node dv; dv.type = NodeType::Divide; const int div = g.addNode(dv);
+	Node sq; sq.type = NodeType::SetVariable; sq.s = "q"; sq.propType = PinType::Float;
+	const int setQ = g.addNode(sq);
+	REQUIRE(g.connect(ca, 0, div, 0));
+	REQUIRE(g.connect(cb, 0, div, 1));
+	REQUIRE(g.connect(div, 2, setQ, 2));   // Divide: dataIns A 0, B 1; dataOut 2
+	chain(g, e, 0, setQ);
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	HcLogCapture seen;
+	rt.fireEvent(id, "Go");
+	CHECK(rt.getVariable(id, "q").f == 2.5f);
+	CHECK(seen.count("", HE::LogLevel::Warning) == 0);
+}
+
 TEST_CASE("runtime errors: a run cut short by the nesting limit says so once, as an error")
 {
 	// F calls F: local recursion with no exit. Every level nests one deeper
