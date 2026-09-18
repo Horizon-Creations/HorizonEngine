@@ -245,7 +245,12 @@ layout(set = 0, binding = 13) uniform sampler2DArray heLocalShadow;
 // than a built-in material beside them. heLight.fog.z gates the samples.
 layout(set = 0, binding = 15) uniform samplerCube heSkyEnv;
 // Screen-space ambient occlusion result (binding 16), the same SSAO/HBAO/GTAO
-// buffer the built-in shaders read. Gated by heLight.fog.w.
+// buffer the built-in shaders read. Gated by heLight.fog.w. Read with
+// texelFetch, NOT texture(): the buffer is viewport-sized on every backend and
+// the built-in D3D shaders already point-sample it, so the texel under the
+// fragment is the same value either way — but a fetch needs no sampler, and
+// that is what frees the SM 5.0 sampler register heLandscapeWeights sits on
+// (see the HLSL pin table in MaterialShaderLibrary::fragment).
 layout(set = 0, binding = 16) uniform sampler2D heAO;
 // ── DDGI probe irradiance ─────────────────────────────────────────────────────
 // Octahedral probe atlases (bindings 17/18): the SAME two textures the built-in
@@ -597,8 +602,18 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     // Occlusion darkens ONLY the indirect term; direct lighting stays untouched,
     // same split as the built-in shaders' SSAO handling. The material's own
     // Ambient Occlusion pin multiplies on top of the screen-space result.
-    float ssao = (heLight.fog.w > 0.5)
-        ? texture(heAO, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0))).r : 1.0;
+    float ssao = 1.0;
+    if (heLight.fog.w > 0.5)
+    {
+        // The texel under the fragment — a point read without a sampler (see
+        // the heAO declaration). Scaled through the buffer's own size so a
+        // viewport mismatch degrades to nearest-texel, never to an out-of-range
+        // fetch; max(sz - 1, 0) keeps the clamp well-defined on a 0x0 null view.
+        ivec2 aoSz = textureSize(heAO, 0);
+        ivec2 aoPx = clamp(ivec2(gl_FragCoord.xy * vec2(aoSz) / max(heLight.giParams.xy, vec2(1.0))),
+                           ivec2(0), max(aoSz - ivec2(1), ivec2(0)));
+        ssao = texelFetch(heAO, aoPx, 0).r;
+    }
     float ao = clamp(ambientOcclusion, 0.0, 1.0) * ssao;
 
     // With GI active the probe field REPLACES the sky's diffuse ambient (and AO is
@@ -2372,25 +2387,41 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
         // test in test_material_graph.cpp is the net for that on macOS/Linux,
         // the FXC test there the proof on Windows.
         //
-        // The budget works out to exactly 16, which is why this is a fixed list
-        // and not a heuristic:
+        // The budget is exactly full, which is why this is a fixed list and
+        // not a heuristic. Seventeen combined samplers can be live in one
+        // fragment, sixteen registers exist:
         //     2        heTex0                  4..7  heTexP0..3
         //     10,11    GI sun / local masks    12    CSM array
-        //     13       local shadow atlas      15    sky env cubemap
-        //     16       screen-space AO         17,18 DDGI irradiance / visibility
-        //     31,32    forward SSR / GI refl   33    cloud-shadow transmittance
-        // Sixteen bindings, sixteen registers. Ten already sit below s16 and keep
-        // their number, so only six move — and the six free registers below the
-        // cap (s0, s1, s3, s8, s9, s14) are exactly enough. The numbers are the
-        // ones claude/backend-parity-p1 (5e52d64e) chose, so the two lines of
-        // work agree on the contract when they meet.
+        //     13       local shadow atlas      14    landscape weightmap
+        //     15       sky env cubemap         16    screen-space AO
+        //     17,18    DDGI irradiance / vis.  31,32 forward SSR / GI refl
+        //     33       cloud-shadow transmittance
+        // Ten already sit below s16 and keep their number; six move onto the
+        // free registers below the cap (s1, s3, s8, s9, s14 and s0) — the
+        // numbers claude/backend-parity-p1 (5e52d64e) chose, so the two lines
+        // of work agree on the contract when they meet. That left NO register
+        // for the seventeenth, heLandscapeWeights, and a wired Landscape Layer
+        // Blend failed with X4500 "overlapping register semantics not yet
+        // implemented 's14'" on D3D11 and D3D12 alike (Windows CI run
+        // 35217490668, 17.09.2026).
+        //
+        // The seventeenth fits because heAO does not need a sampler at all: the
+        // preamble reads it with texelFetch (see its declaration), which SPIRV-
+        // Cross emits as Texture2D.Load — no SamplerState in the .Sample sense.
+        // SPIRV-Cross still DECLARES `_heAO_sampler`, because a GLSL sampler2D
+        // is a texture-sampler pair by type, but nothing references it, and FXC
+        // only refuses two LIVE users on one register (X4500); a dead declaration
+        // beside a live one it accepts (measured on the same CI run: the sweep's
+        // unwired blend, dead weightmap sampler on the live s14). So s0 carries
+        // heLandscapeWeights' live sampler and heAO's dead one, and the register
+        // test in test_material_graph.cpp asserts exactly that rule — no two
+        // live samplers on one register — instead of an exception list.
         //
         // TEXTURES are not the constraint (t0..t127), so every SRV keeps its
         // binding number and the renderers' t-register binds (t2, t4..t7,
-        // t10/t11) stay readable against the GLSL; only the SAMPLER half moves.
-        // The six moved samplers are NOT bound by D3D11 yet — they never
-        // were, because the shader never compiled; D3D11 reads an unbound slot
-        // as the default sampler state. D3D12 is stricter: the shader
+        // t10/t11, t14) stay readable against the GLSL; only the SAMPLER half
+        // moves. D3D11 reads an unbound sampler slot as the default state, so
+        // the moved ones cost it nothing. D3D12 is stricter: the shader
         // statically references t13..t18/t31..t33 and s0/s1/s3/s8/s9/s13/s14/
         // s15, and CreateGraphicsPipelineState rejects a PSO whose root
         // signature does not cover every one of them (E_INVALIDARG, "Root
@@ -2398,18 +2429,12 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
         // (D3D12MaterialRootSignature.h, Thema 56) covers them as static
         // samplers + null SRVs; he_tests proves both verdicts on a WARP device.
         //
-        // WHAT DOES NOT FIT: heLandscapeWeights (binding 14) and, in the UI
-        // domain, heBackdrop (binding 9) share a register with a moved sampler
-        // whenever both are declared (two SamplerState on s14 / s9). FXC
-        // accepts the DECLARATION — measured on Windows CI, 17.09.2026 — but
-        // not two live users: a wired Landscape Layer Blend (real layer names,
-        // so the weightmap sample survives) fails with X4500 "overlapping
-        // register semantics not yet implemented 's14'" (run 35217490668, the
-        // registry sweep's unwired blend folds its sample away and passes).
-        // So every real landscape material still fails on D3D11/D3D12. Making
-        // room means declaring textures and samplers separately in the shared
-        // preamble so one SamplerState serves many textures (parity-p1
-        // 9c72cbe7 does exactly that), a change to every backend.
+        // The same dead-beside-live shape still exists in the UI domain:
+        // heBackdrop (binding 9) shares s9 with heGIReflFwd, which is dead there
+        // (no heLitP call). Reading heSSRFwd/heGIReflFwd with texelFetch as well
+        // would retire that one too; the structural answer for all of them is
+        // separate textures and shared samplers in the preamble (parity-p1
+        // 9c72cbe7), a change to every backend's binding code.
         static const std::vector<he::shaderc::HlslPin> kHlslMaterialPins = {
             //          stage             set  bind  reg  sampler
             { Stage::Fragment, 0,  2,  2 },     // heTex0
@@ -2422,8 +2447,9 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragment(
             { Stage::Fragment, 0, 12, 12 },     // heCsm
             { Stage::Fragment, 0, 13, 13 },     // heLocalShadow
             { Stage::Fragment, 0, 15, 15 },     // heSkyEnv
-            // ── the six that have to move (SRV stays, sampler goes below s16) ──
-            { Stage::Fragment, 0, 16, 16,  0 }, // heAO           → s0
+            // ── the seven that have to move (SRV stays, sampler goes below s16) ──
+            { Stage::Fragment, 0, 14, 14,  0 }, // heLandscapeWeights → s0 (live)
+            { Stage::Fragment, 0, 16, 16,  0 }, // heAO           → s0 (declared, never used: texelFetch)
             { Stage::Fragment, 0, 17, 17,  1 }, // heGIIrradiance → s1
             { Stage::Fragment, 0, 18, 18,  3 }, // heGIVisibility → s3
             { Stage::Fragment, 0, 31, 31,  8 }, // heSSRFwd       → s8

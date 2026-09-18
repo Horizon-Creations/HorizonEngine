@@ -7,9 +7,12 @@
 // the pixel shader binds against the root signature and rejects the PSO
 // (E_INVALIDARG, "not compatible with root signature") when one is missing.
 // MaterialShaderLibrary::fragment(HLSL) pins the shared lighting preamble to
-// t2/t4..t7/t10..t18/t31..t33 with samplers s0..s15 — ALL of them referenced
+// t2/t4..t7/t10..t18/t31..t33 with samplers s1..s15 — ALL of them referenced
 // statically, because every gate (heLight.fog.z/w, giProbe.y, ssr.x,
 // cloudShadowB.x, csmSplits.w, giParams.z) is a runtime uniform FXC cannot fold.
+// s0 is the one register the preamble leaves dead (heAO is read with
+// texelFetch, its SamplerState is declared but never used); a Landscape Layer
+// Blend's heLandscapeWeights (t14) samples through it, so it is covered too.
 // The renderer used to declare only t2/t4..t7/t10..t13 + s2/s4..s7/s10..s13
 // (Thema 56): every lit graph material's PSO would have failed on real
 // hardware and the draw fallen back to built-in PBR. Keeping the description
@@ -134,10 +137,11 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
     // s12/s13 POINT-clamp (heCsmShadow's / heLocalShadowFactor's PCF taps
     // compare single texels, like the built-in scene shader's s0). Then the
     // seven the preamble pins below s16 (MaterialShaderLibrary kHlslMaterialPins):
-    // s0 heAO point-clamp (the built-in AO sampler s1), s1/s3 DDGI atlases and
-    // s8/s9 forward SSR / GI-refl linear-clamp (built-in s3), s14 heCloudShadow
-    // linear-clamp (Metal's constexpr linear sampler), s15 heSkyEnv linear-clamp
-    // (a cube; the address mode is moot).
+    // s0 heLandscapeWeights linear-clamp (a [0,1] weightmap; heAO's dead
+    // SamplerState sits on the same register and is never used — texelFetch),
+    // s1/s3 DDGI atlases and s8/s9 forward SSR / GI-refl linear-clamp (built-in
+    // s3), s14 heCloudShadow linear-clamp (Metal's constexpr linear sampler),
+    // s15 heSkyEnv linear-clamp (a cube; the address mode is moot).
     struct S { UINT reg; D3D12_FILTER filter; D3D12_TEXTURE_ADDRESS_MODE addr; };
     static constexpr S kSamplers[kSamplerCount] = {
         {  2, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP  },
@@ -150,7 +154,7 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
         { 12, D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_CLAMP },
         { 13, D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_CLAMP },
         // ── added for the preamble's moved samplers (Thema 56) ──
-        {  0, D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_CLAMP }, // heAO
+        {  0, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP }, // heLandscapeWeights
         {  1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP }, // heGIIrradiance
         {  3, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP }, // heGIVisibility
         {  8, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP }, // heSSRFwd

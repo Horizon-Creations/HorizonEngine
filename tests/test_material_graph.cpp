@@ -2549,21 +2549,57 @@ bool hasDuplicateRegister(const std::string& hlsl, char kind)
 	return std::adjacent_find(regs.begin(), regs.end()) != regs.end();
 }
 
-// The SM 5.0 sampler budget is exactly full (MaterialShaderLibrary::fragment,
-// HLSL branch): a material that declares a SEVENTEENTH combined sampler has no
-// register left, and the two that can land on a slot a moved preamble sampler
-// already took. FXC ACCEPTS the shared DECLARATION — measured on Windows CI
-// (run 35177900601, 17.09.2026) — but only while one of the two users is dead:
-// the sweep's unwired Landscape Layer Blend folds its weightmap sample away.
-// A WIRED blend keeps both live and FXC stops with X4500 (run 35217490668,
-// pinned in the WARP test below), so parity-p1's 5e52d64e was right for every
-// real landscape material. Named here, not hidden: the sharing is asserted, so
-// the day the preamble separates textures from samplers (parity-p1 9c72cbe7)
-// this list goes red and gets deleted.
-bool sharesSamplerRegister(const std::string& name)
+// FXC's actual rule for shared sampler registers (X4500 "overlapping register
+// semantics"): two SamplerState DECLARATIONS on one register are fine as long
+// as at most one of them is USED — measured on Windows CI (run 35177900601,
+// 17.09.2026: the sweep's unwired Landscape Layer Blend, dead weightmap sampler
+// on the live s14, accepted) against run 35217490668 (the wired blend, both
+// live, rejected). The material preamble leans on that: heAO is read with
+// texelFetch, so its SamplerState is declared and dead, and heLandscapeWeights'
+// live sampler shares its register s0 (MaterialShaderLibrary kHlslMaterialPins).
+// So the check is not "no duplicate s register" but "no register with two LIVE
+// samplers" — every SamplerState whose name appears anywhere past its own
+// declaration counts as live.
+std::vector<int> liveSamplerRegisters(const std::string& hlsl)
 {
-	return name == "Landscape Layer Blend"     // heLandscapeWeights (14) vs heCloudShadow → s14
-	    || name == "Backdrop (UI domain)";     // heBackdrop (9) vs heGIReflFwd → s9
+	const std::regex decl("SamplerState\\s+(\\w+)\\s*:\\s*register\\(s([0-9]+)\\)\\s*;");
+	std::vector<int> live;
+	for (auto it = std::sregex_iterator(hlsl.begin(), hlsl.end(), decl); it != std::sregex_iterator(); ++it)
+	{
+		const std::string name = (*it)[1].str();
+		const std::regex use("\\b" + name + "\\b");
+		size_t uses = 0;
+		for (auto u = std::sregex_iterator(hlsl.begin(), hlsl.end(), use); u != std::sregex_iterator(); ++u)
+			++uses;
+		if (uses > 1) live.push_back(std::stoi((*it)[2].str())); // one hit is the declaration itself
+	}
+	return live;
+}
+bool twoLiveSamplersShareRegister(const std::string& hlsl)
+{
+	std::vector<int> live = liveSamplerRegisters(hlsl);
+	std::sort(live.begin(), live.end());
+	return std::adjacent_find(live.begin(), live.end()) != live.end();
+}
+
+// A lit graph with a WIRED Landscape Layer Blend: three named layers with real
+// inputs, so the weightmap sample survives and heLandscapeWeights (t14, the
+// live sampler on s0) is in the shader. The registry sweep's unwired blend
+// folds it away, which is why the sweep alone never saw the X4500.
+MaterialGraph landscapeGraph()
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int lb  = g.addNode(MatNodeType::LandscapeLayerBlend);
+	g.findNode(lb)->s = "Grass\nRock\nSand";
+	for (int i = 0; i < 3; ++i)
+	{
+		const int c = g.addNode(MatNodeType::ConstColor);
+		g.findNode(c)->p[i] = 1.0f;
+		REQUIRE(g.connect(c, 0, lb, i));
+	}
+	REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+	return g;
 }
 } // namespace
 
@@ -2629,14 +2665,36 @@ TEST_CASE("Every node's HLSL stays inside SM 5.0's register range (D3D11/D3D12 b
 		CHECK_MESSAGE(b <= 13,  "'", c.name, "': cbuffer register b", b, " is beyond SM 5.0's b13 (X4567)");
 		CHECK_MESSAGE(t <= 127, "'", c.name, "': SRV register t", t, " is beyond SM 5.0's t127");
 		// One resource per register, or FXC stops with X4500. The pinned table
-		// keeps SRVs at their binding numbers, so t/b never collide; samplers can.
+		// keeps SRVs at their binding numbers, so t/b never collide; samplers
+		// can — and may, as long as only one of the two is used (see
+		// liveSamplerRegisters). A material that samples heAO through its
+		// sampler again would trip this for every lit node.
 		CHECK_MESSAGE(!hasDuplicateRegister(ps, 't'), "'", c.name, "': two SRVs share a t register");
 		CHECK_MESSAGE(!hasDuplicateRegister(ps, 'b'), "'", c.name, "': two cbuffers share a b register");
-		if (sharesSamplerRegister(c.name))
-			CHECK_MESSAGE(hasDuplicateRegister(ps, 's'), "'", c.name,
-			              "' no longer shares a sampler register — the SM 5.0 budget has room now, drop it from sharesSamplerRegister");
-		else
-			CHECK_MESSAGE(!hasDuplicateRegister(ps, 's'), "'", c.name, "': two samplers share an s register");
+		CHECK_MESSAGE(!twoLiveSamplersShareRegister(ps), "'", c.name, "': two LIVE samplers share an s register (X4500)");
+	}
+	// The rule is only worth anything if it can tell dead from live: the lit
+	// preamble's heAO sampler must be the dead one on s0 (texelFetch), and a
+	// wired Landscape Layer Blend the live one.
+	{
+		const std::string lit = lib.fragment(std::hash<std::string>{}("liveprobe-lit"),
+		                                     HE::generateFragment(makeDemoGraph()).glsl, B::HLSL).source;
+		CHECK(lit.find("register(s0)") != std::string::npos);        // declared …
+		const std::vector<int> litRegs = registersOf(lit, 's');
+		CHECK(std::count(litRegs.begin(), litRegs.end(), 0) == 1);
+		const std::vector<int> litLive = liveSamplerRegisters(lit);
+		CHECK(std::find(litLive.begin(), litLive.end(), 0) == litLive.end()); // … but dead
+		CHECK(lit.find("heAO.Load(") != std::string::npos);
+		CHECK(lit.find("heAO.Sample(") == std::string::npos);
+
+		const std::string lsc = lib.fragment(std::hash<std::string>{}("liveprobe-landscape"),
+		                                     HE::generateFragment(landscapeGraph()).glsl, B::HLSL).source;
+		const std::vector<int> lscRegs = registersOf(lsc, 's');
+		CHECK(std::count(lscRegs.begin(), lscRegs.end(), 0) == 2);   // both declared on s0 …
+		const std::vector<int> lscLive = liveSamplerRegisters(lsc);
+		CHECK(std::count(lscLive.begin(), lscLive.end(), 0) == 1);   // exactly one live user of s0
+		CHECK(lsc.find("heLandscapeWeights.Sample(_heLandscapeWeights_sampler") != std::string::npos);
+		CHECK_FALSE(twoLiveSamplersShareRegister(lsc));
 	}
 	const std::string& vs = lib.standardVertex(B::HLSL).source;
 	CHECK(maxRegister(vs, 'b') <= 13);
@@ -2672,8 +2730,48 @@ TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile i
 		std::string err;
 		CHECK_MESSAGE(fxc(lib.standardVertex(B::HLSL).source, "matVS", "vs_5_0", err), "standard vertex: ", err);
 	}
-	// No exclusions: the two shared-register cases (sharesSamplerRegister) are
-	// accepted by FXC too, which is exactly what this loop measured first.
+	// The rule the sampler pins lean on (liveSamplerRegisters), measured on the
+	// real compiler with three synthetic shaders rather than inferred from the
+	// material sweep: (a) a dead SamplerState declared BEFORE a live one on the
+	// same register — the exact shape of s0 (heLandscapeWeights is pinned ahead
+	// of heAO in declaration order); (b) the reverse order; (c) a dead
+	// SamplerState alone on s16, past the SM 5.0 range. Only (a) is what the
+	// preamble depends on, so only (a) is asserted; (b)/(c) are logged so the
+	// next person who has to move a pin knows what FXC will say without a run.
+	{
+		auto probe = [&](const char* body, const char* what) -> bool {
+			std::string e;
+			const bool ok = fxc(body, what, "ps_5_0", e);
+			const std::string verdict = ok ? std::string("accepted") : ("rejected: " + e);
+			MESSAGE("FXC probe [", what, "]: ", verdict);
+			return ok;
+		};
+		const bool deadThenLive = probe(
+			"Texture2D<float4> a : register(t0); SamplerState sa : register(s0);\n"
+			"Texture2D<float4> b : register(t1); SamplerState sb : register(s0);\n"
+			"float4 main(float2 uv : TEXCOORD0) : SV_Target { return a.Load(int3(0,0,0)) + b.Sample(sb, uv); }",
+			"dead SamplerState before a live one on s0");
+		CHECK_MESSAGE(deadThenLive, "FXC no longer accepts a dead SamplerState beside a live one — "
+		                            "the heAO/heLandscapeWeights share of s0 is broken");
+		probe("Texture2D<float4> a : register(t0); SamplerState sa : register(s0);\n"
+		      "Texture2D<float4> b : register(t1); SamplerState sb : register(s0);\n"
+		      "float4 main(float2 uv : TEXCOORD0) : SV_Target { return a.Sample(sa, uv) + b.Load(int3(0,0,0)); }",
+		      "live SamplerState before a dead one on s0");
+		probe("Texture2D<float4> a : register(t0); SamplerState sa : register(s16);\n"
+		      "float4 main(float2 uv : TEXCOORD0) : SV_Target { return a.Load(int3(0,0,0)); }",
+		      "dead SamplerState alone on s16");
+		// And the negative that gives the probe its teeth: two LIVE users.
+		std::string e;
+		const bool bothLive = fxc(
+			"Texture2D<float4> a : register(t0); SamplerState sa : register(s0);\n"
+			"Texture2D<float4> b : register(t1); SamplerState sb : register(s0);\n"
+			"float4 main(float2 uv : TEXCOORD0) : SV_Target { return a.Sample(sa, uv) + b.Sample(sb, uv); }",
+			"two live on s0", "ps_5_0", e);
+		CHECK_FALSE_MESSAGE(bothLive, "FXC accepted two live samplers on one register — X4500 is gone?");
+		CHECK(e.find("X4500") != std::string::npos);
+	}
+	// No exclusions: every node shader, the wired Landscape Layer Blend included
+	// (it is in the sweep only unwired; the WARP case below builds the wired one).
 	int okPs = 0, total = 0;
 	for (const NodeShaderCase& c : allNodeShaderCases())
 	{
@@ -2865,24 +2963,6 @@ bool coveredBy(const HE::d3d12mat::MaterialRootSignature& rs, UINT rangeCount, U
 			return false; // a UAV / structured buffer would be news
 	}
 }
-
-// A lit graph that uses the Landscape Layer Blend: heLandscapeWeights (t14,
-// and the s14 it shares with heCloudShadow) only exists in this graph.
-MaterialGraph landscapeGraph()
-{
-	MaterialGraph g;
-	const int out = g.addNode(MatNodeType::Output);
-	const int lb  = g.addNode(MatNodeType::LandscapeLayerBlend);
-	g.findNode(lb)->s = "Grass\nRock\nSand";
-	for (int i = 0; i < 3; ++i)
-	{
-		const int c = g.addNode(MatNodeType::ConstColor);
-		g.findNode(c)->p[i] = 1.0f;
-		REQUIRE(g.connect(c, 0, lb, i));
-	}
-	REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
-	return g;
-}
 } // namespace
 
 TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signature (WARP)")
@@ -2915,8 +2995,13 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 		for (UINT t : { 15u, 16u, 17u, 18u, 31u, 32u, 33u })
 			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, t), "the lit PS no longer binds t", t,
 			              " — the preamble changed, re-check D3D12MaterialRootSignature.h");
-		for (UINT sreg : { 0u, 1u, 3u, 8u, 9u, 14u, 15u })
+		for (UINT sreg : { 1u, 3u, 8u, 9u, 14u, 15u })
 			CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, sreg), "the lit PS no longer binds s", sreg);
+		// s0 is heAO's DEAD sampler (texelFetch → Load): declared in the HLSL,
+		// absent from the bytecode. That absence is what makes room for
+		// heLandscapeWeights below.
+		CHECK_MESSAGE(!binds(b, D3D_SIT_SAMPLER, 0), "the lit PS binds s0 — heAO is sampled through a sampler again, "
+		                                             "and heLandscapeWeights has no register left");
 		CHECK(binds(b, D3D_SIT_CBUFFER, 0)); // HeLighting (HeParams b3 is dead-stripped: the demo graph has no parameters)
 	}
 
@@ -3015,26 +3100,41 @@ TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signat
 		psoFor("World Position Offset", gen.glsl, gen.vertexBody);
 	}
 
-	// A WIRED Landscape Layer Blend never reaches the PSO: heLandscapeWeights
-	// (binding 14, unpinned → s14) and heCloudShadow (pinned to s14) are BOTH
-	// live once real layers are connected, and FXC stops with X4500
-	// ("overlapping register semantics not yet implemented 's14'"). The registry
-	// sweep's unwired blend passes only because its weightmap sample folds away
-	// with no layer names (layer 0 = vec3(0)). Measured on Windows CI (run
-	// 35217490668, 17.09.2026) — so the claim in cdce17bc that FXC takes the two
-	// shared-register shaders holds for the unwired shape only; every real
-	// landscape material fails on D3D11/D3D12 until the preamble separates
-	// textures from samplers (parity-p1 9c72cbe7). Pinned here so the day that
-	// lands, this goes red and the PSO case gets written.
+	// A WIRED Landscape Layer Blend — the shape that used to die in FXC with
+	// X4500 (heLandscapeWeights unpinned on s14 beside the live heCloudShadow,
+	// run 35217490668). Its sampler now lives on s0, the register heAO leaves
+	// dead, so the real thing has to hold end to end: FXC accepts it, the
+	// bytecode binds t14 AND s0, and the PSO builds against the full signature.
+	// The legacy signature (no t14 range) must still refuse it — the positive
+	// verdict is worthless without a device that can say no.
 	{
 		const std::string lglsl = HE::generateFragment(landscapeGraph()).glsl;
 		const auto& lf = lib.fragment(std::hash<std::string>{}(lglsl), lglsl, B::HLSL);
 		REQUIRE_MESSAGE(lf.ok, lf.log);
 		std::string lerr;
 		ComPtr<ID3DBlob> lps = fxcBlob(lf.source, "ps_5_0", lerr);
-		const bool x4500OnS14 = lps.Get() == nullptr && lerr.find("X4500") != std::string::npos
-		                     && lerr.find("s14") != std::string::npos;
-		CHECK_MESSAGE(x4500OnS14, "a wired Landscape Layer Blend compiles under FXC now — build its PSO here (t14 + s14): ", lerr);
+		REQUIRE_MESSAGE(lps.Get() != nullptr, "wired Landscape Layer Blend pixel shader: ", lerr);
+		{
+			const std::vector<Binding> b = reflectBindings(lps.Get());
+			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, 14), "the landscape PS does not bind t14 (heLandscapeWeights)");
+			CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, 0),  "the landscape PS does not bind s0 (heLandscapeWeights' sampler)");
+			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, 16), "the landscape PS does not bind t16 (heAO)");
+			for (UINT sreg : { 1u, 3u, 8u, 9u, 14u, 15u })
+				CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, sreg), "the landscape PS no longer binds s", sreg);
+		}
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makeMaterialPso(w.device.Get(), fullRs.Get(), vs.Get(), lps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(SUCCEEDED(hr), "wired Landscape Layer Blend: PSO against the full signature failed, hr=", hr, ": ", why);
+		}
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makeMaterialPso(w.device.Get(), legacyRs.Get(), vs.Get(), lps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(hr == E_INVALIDARG, "the legacy signature accepted the landscape PS (hr=", hr, "): ", why);
+			CHECK(pso.Get() == nullptr);
+		}
 	}
 }
 
