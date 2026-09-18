@@ -59,6 +59,7 @@ namespace
 #endif
 			applyHorizonDarkTheme();
 			HcExecTrace::detach();
+			HcExecTrace::setBreakpointStore("");
 			HcExecTrace::clearAllBreakpoints();
 			HcExecTrace::clearPaused();
 			HcExecTrace::cancelReveal();

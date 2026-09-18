@@ -30,6 +30,7 @@ namespace
 			HcExecTrace::detach();
 			HcExecTrace::clearHits();
 			HcExecTrace::cancelReveal();
+			HcExecTrace::setBreakpointStore("");   // in memory only — and empty
 			HcExecTrace::clearAllBreakpoints();
 			HcExecTrace::clearPaused();
 			HcExecTrace::takeBreakHit();
