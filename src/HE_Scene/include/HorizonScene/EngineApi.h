@@ -2034,7 +2034,7 @@ namespace math {
     float round(float x);
     float sign(float x);                         // -1 / 0 / 1
     float pow(float base, float exp);
-    float mod(float a, float b);                 // 0 if b == 0
+    float mod(float a, float b);                 // b == 0: logged as an error, result 0
     float atan2(float y, float x);
     // Angle conversion, named the GLSL way: radians() RETURNS radians.
     // Everything the engine hands out as an angle is in DEGREES (rotations,

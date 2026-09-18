@@ -1229,6 +1229,12 @@ private:
     Context      m_ctx;
     Value        m_eventArg;
     int          m_steps = 0;
+    // The step or depth limit has been reported for this run. Once: the outer
+    // chains keep unwinding through the limit after the first hit, and each of
+    // them would say it again.
+    bool         m_limitReported = false;
+    // Says why a run was cut short (step or depth limit), once per run.
+    void reportLimit(const char* what);
     // Outputs produced by exec nodes with side effects, per data-out pin
     // (CreateWidget's id, a FunctionCall's return values), so a downstream data
     // read returns the value instead of re-running the node. Cleared each run.

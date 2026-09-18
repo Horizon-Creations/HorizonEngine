@@ -602,6 +602,29 @@ TEST_CASE("ScriptContext: Python runtime error surfaces via lastError")
     CHECK(ctx.lastError().find("kaboom") != std::string::npos);
 }
 
+TEST_CASE("ScriptContext: a Python division by zero is a runtime error with type and line, not a silent inf")
+{
+	// Python raises ZeroDivisionError on its own; what is checked here is that
+	// it arrives like any other handler error — `script:line: Type: text` in
+	// lastError, which ScriptContext's HE_SCRIPT_CALL then logs and the
+	// console maps back to the line (Thema 47, Schritte 4+5).
+	static const char* kDivZero = R"py(
+import horizon
+class Div(horizon.Behavior):
+    def on_start(self):
+        self.q = 1.0 / 0.0
+)py";
+	HorizonWorld world;
+	ScriptContext ctx(world);
+	REQUIRE(ctx.loadScript("divzero", kDivZero, HE::ScriptLanguage::Python));
+	auto e  = makeEntity(world, "E");
+	auto id = ctx.createInstance("divzero", e);
+	CHECK_FALSE(ctx.callOnStart(id));
+	const std::string err = ctx.lastError();
+	CHECK(err.find("ZeroDivisionError") != std::string::npos);
+	CHECK(err.find("divzero:5:") != std::string::npos);   // the `1.0 / 0.0` line
+}
+
 TEST_CASE("ScriptContext: unloaded Python name falls back safely")
 {
     HorizonWorld world;

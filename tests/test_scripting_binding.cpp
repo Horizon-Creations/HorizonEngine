@@ -17,7 +17,10 @@
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
+#include <Diagnostics/Log.h>   // addSink — the error-report tests read what reached the log
 #include <filesystem>   // the save-backed container round trips need a sandbox root
+#include <string>
+#include <vector>
 #include <system_error>
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -849,4 +852,74 @@ TEST_CASE("ScriptContext: the application groups reach Lua")
     CHECK(engine.getGlobalNumber("_found") == doctest::Approx(12.0));
     // …and one of them actually dispatches, not just exists.
     CHECK(engine.getGlobalNumber("_json") == doctest::Approx(42.0));
+}
+
+// ─── Every failing instance is reported, not just the first one per callback ──
+// ScriptContext throttles the runtime-error report of a callback so a broken
+// onUpdate does not write sixty lines a second. Keyed on the CALLBACK alone,
+// the throttle let the instance that happens to be ticked first take the one
+// slot of every window, and a second instance failing in the same callback was
+// never reported at all — not delayed, never: a bug in the second script looked
+// exactly like a script that does nothing. The report is keyed per instance.
+namespace
+{
+	struct SeenScriptErrors
+	{
+		static std::vector<std::string> s_lines;
+		int sink = 0;
+		SeenScriptErrors()
+		{
+			s_lines.clear();
+			sink = HE::Log::addSink([](const HE::Log::Record& r, void*)
+			{
+				if (r.category != HE::Log::Cat::Script || r.level < HE::LogLevel::Error) return;
+				s_lines.emplace_back(r.message ? r.message : "");
+			}, nullptr);
+		}
+		~SeenScriptErrors() { HE::Log::removeSink(sink); }
+		int count(const char* needle) const
+		{
+			int n = 0;
+			for (const std::string& l : s_lines) if (l.find(needle) != std::string::npos) ++n;
+			return n;
+		}
+	};
+	std::vector<std::string> SeenScriptErrors::s_lines;
+}
+
+TEST_CASE("ScriptContext: two instances failing in the same callback are BOTH reported")
+{
+	static const char* kFirst = R"lua(
+local M = {}
+function M.onUpdate(self, dt) error("first script broke") end
+return M
+)lua";
+	static const char* kSecond = R"lua(
+local M = {}
+function M.onUpdate(self, dt) error("second script broke") end
+return M
+)lua";
+	HorizonWorld world;
+	ScriptContext ctx(world);
+	REQUIRE(ctx.loadScript("first",  kFirst));
+	REQUIRE(ctx.loadScript("second", kSecond));
+	const auto a = ctx.createInstance("first",  world.registry().create());
+	const auto b = ctx.createInstance("second", world.registry().create());
+	REQUIRE(a != ScriptEngine::kInvalidInstance);
+	REQUIRE(b != ScriptEngine::kInvalidInstance);
+
+	SeenScriptErrors seen;
+	// A few frames, first instance always ticked first — the order a host
+	// walks its instance map in.
+	for (int frame = 0; frame < 5; ++frame)
+	{
+		CHECK_FALSE(ctx.callOnUpdate(a, 0.016f));
+		CHECK_FALSE(ctx.callOnUpdate(b, 0.016f));
+	}
+	// Both scripts are named — and each exactly once: the per-instance
+	// cooldown still holds the repeats back.
+	CHECK(seen.count("first script broke")  == 1);
+	CHECK(seen.count("second script broke") == 1);
+	// The report says which instance and which callback, like before.
+	CHECK(seen.count("failed in onUpdate()") == 2);
 }

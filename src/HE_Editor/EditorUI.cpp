@@ -40,6 +40,7 @@
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
 #include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
 #include "NotificationBar.h"        // "something happened" bell — footer cluster + flyout
+#include "PlayErrorReveal.h"        // the first error of a play session opens the console
 #include "SourceControlPanel.h"     // View > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
 #include "McpStatusBar.h"           // is an external tool driving this editor — footer status
@@ -77,6 +78,7 @@
 #include <Diagnostics/Logger.h>
 #include <SDL3/SDL.h>
 #include <filesystem>
+#include <mutex>       // the play log is read under its mutex (PlayErrorReveal)
 #include <string>
 #include <utility>
 #include <vector>
@@ -3249,6 +3251,29 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 		s_wasHcPaused = paused;
 	}
 	HcWatchPanel::DrawWatchWindow(ctx, s_showWatch);
+	// The console, for the first error of a play session — the same gesture as
+	// the Watch window above, for the same reason: the console is closed by
+	// default, the bell in the footer is ambient by its own description and the
+	// play report only opens after Stop, so a script that failed in onStart
+	// looked, for the whole session, like a script that does nothing. Once per
+	// session, on the edge (PlayErrorReveal.h), and only when the console is
+	// not already up — a console the user closed again stays closed. Read
+	// AFTER the console drew this frame, so the window it opens is the one
+	// revealFloatingWindow's focus latch finds next frame.
+	//
+	// With focus, deliberately: the game keeps running and keeps its keyboard
+	// (that is gated on the mouse capture, not on window focus), and a docked
+	// console that is not the front tab would otherwise open behind whatever is.
+	if (ctx.playLog && ctx.playLogMutex)
+	{
+		static HE::Ed::PlayErrorReveal s_playErrorReveal;
+		bool reveal = false;
+		{
+			std::lock_guard<std::mutex> lk(*ctx.playLogMutex);
+			reveal = s_playErrorReveal.poll(ctx.isPlaying, *ctx.playLog);
+		}
+		if (reveal && !s_showConsole) revealFloatingWindow(s_showConsole, "Console");
+	}
 
 	// The second half of revealFloatingWindow: the window a footer widget asked
 	// for exists by now, so the focus request that was a no-op at click time

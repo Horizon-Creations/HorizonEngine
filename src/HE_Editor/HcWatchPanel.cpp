@@ -82,6 +82,21 @@ void DrawWatchWindow(AppContext& ctx, bool& open)
 		ImGui::TextDisabled("No run is stopped.");
 		ImGui::TextWrapped("Right-click a node in a graph and Add Breakpoint; the run stops before "
 		                   "that node. Until then, the Game Instance's variables, live:");
+		// The pause that lands on a node: arm the runtime's one-shot, and show
+		// that it is armed until something runs — a game waiting on input
+		// executes no node at all, and a silently armed stop would surprise
+		// the next click. Only a flag is flipped here; the stop itself
+		// happens inside the tick, like a breakpoint's.
+		if (rt->debugBreakNextArmed())
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::AccentBright);
+			ImGui::TextUnformatted("Armed: stops at the next node.");
+			ImGui::PopStyleColor();
+			ImGui::SameLine();
+			if (EditorWidgets::smallButton("Disarm")) rt->debugBreakNext(false);
+		}
+		else if (EditorWidgets::button("Break on Next Node"))
+			rt->debugBreakNext();
 		ImGui::Separator();
 		ImGui::InputTextWithHint("##watchFilter", "Filter", &s_filter);
 		const std::vector<HcWatch::Row> live = HcWatch::variableRows(*rt, rt->gameInstance());

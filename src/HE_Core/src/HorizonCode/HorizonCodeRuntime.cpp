@@ -596,7 +596,18 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         Inst* i = find(id);
         if (!i) return false;
         const int lv = levelWithFunction(*i, fn, /*publicOnly=*/true);
-        if (lv < 0) return false;
+        if (lv < 0)
+        {
+            // The Runner only gets here for a name its OWN graph lacks, so this
+            // is a Call Function node naming a function that no level of the
+            // class has (renamed or deleted since the node was placed) — or a
+            // base's private one. Silently skipping it made the call look like
+            // a function that does nothing; the node is current, so the console
+            // row leads back to it.
+            hcError("Call Function '" + fn + "' — no such function in this class or "
+                    "its base classes (or it is private to a base); call skipped");
+            return false;
+        }
         // Same cross-runner recursion guard as Runtime::callFunction — this is
         // the one call edge that builds its Runner without going through it.
         if (m_callDepth >= kMaxCallDepth)

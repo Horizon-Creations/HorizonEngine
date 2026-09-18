@@ -97,8 +97,12 @@ namespace HcExecTrace
 
 	// ── Breakpoints ──────────────────────────────────────────────────────────
 	// Set, clear, flip and read a breakpoint on `nodeId` of the graph `tabKey`
-	// names (a runtime key is accepted too — it is normalised). In memory for
-	// the editor's lifetime; not saved with the asset.
+	// names (a runtime key is accepted too — it is normalised). Held here, not
+	// in the graph: a breakpoint is the PERSON's debugging state, not the
+	// class's content, and the graph's JSON goes everywhere the class goes —
+	// into the GameInstance runtime, over a collaboration session, onto the
+	// clipboard, through the rename sweep, into a packaged build. What keeps
+	// them across an editor restart is the store below.
 	void setBreakpoint(const std::string& tabKey, int nodeId, bool on);
 	void toggleBreakpoint(const std::string& tabKey, int nodeId);
 	bool hasBreakpoint(const std::string& tabKey, int nodeId);
@@ -111,6 +115,31 @@ namespace HcExecTrace
 	// The runtime's question, answered from the set above: stop at this node?
 	// What attach() installs as the break predicate; public for the test.
 	bool shouldBreakAt(const std::string& runtimeKey, int nodeId);
+
+	// ── The store ────────────────────────────────────────────────────────────
+	// Where the breakpoints of the OPEN PROJECT live between editor sessions:
+	// one small JSON file, `{ "breakpoints": { "<tab key>": [node ids] } }`,
+	// meant for <project>/Saved/Breakpoints.json — the editor-private, git-
+	// ignored directory the thumbnails and the autosave already use (see
+	// breakpointStoreForProject). Setting a store REPLACES the set in memory
+	// with the file's contents: tab keys are content-relative paths, so the
+	// breakpoints of one project would otherwise carry over into the next
+	// project that has a class at the same path. Every change after that is
+	// written through at once (the file is a few lines; a crash loses
+	// nothing). An empty path = in memory only, which is what the tests and
+	// an editor without a project get. Returns whether the file was read —
+	// a missing file is a fresh project and reads as "none", not an error.
+	bool        setBreakpointStore(const std::string& file);
+	std::string breakpointStore();
+	// <projectRoot>/Saved/Breakpoints.json for a .heproj path (or a project
+	// directory) — the one place the layout is spelled.
+	std::string breakpointStoreForProject(const std::string& projectPath);
+	// The serialised form, for the store and for a test that wants to see it
+	// without a file. loadBreakpointsJson replaces the set; a document that
+	// does not parse leaves the set EMPTY and returns false — a torn file must
+	// not resurrect half of the previous project's breakpoints.
+	std::string saveBreakpointsJson();
+	bool        loadBreakpointsJson(const std::string& json);
 
 	// ── The stop ─────────────────────────────────────────────────────────────
 	// A run stopped at `nodeId` of `runtimeKey` (the runtime's suspend listener

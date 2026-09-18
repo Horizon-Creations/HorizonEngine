@@ -1911,8 +1911,11 @@ private:
         case NT::Multiply: return "(" + input(n, 0, fnCtx) + " * " + input(n, 1, fnCtx) + ")";
         case NT::Divide:
             // §3.4: the divisor evaluates FIRST; the dividend only when non-zero.
+            // A zero divisor is a runtime error in both backends: hc::divideByZero
+            // logs the interpreter's line and yields its 0 (never a division by
+            // zero in the emitted C++, not even the float kind).
             return "([&]() -> float { const float b__ = " + input(n, 1, fnCtx) +
-                   "; return b__ != 0.0f ? (" + input(n, 0, fnCtx) + ") / b__ : 0.0f; }())";
+                   "; return b__ != 0.0f ? (" + input(n, 0, fnCtx) + ") / b__ : hc::divideByZero(); }())";
         case NT::Greater: return "((" + input(n, 0, fnCtx) + ") > (" + input(n, 1, fnCtx) + "))";
         case NT::Less:    return "((" + input(n, 0, fnCtx) + ") < (" + input(n, 1, fnCtx) + "))";
         case NT::Equals:  return "hc::feq(" + input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ")";

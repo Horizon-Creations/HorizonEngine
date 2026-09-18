@@ -1,6 +1,6 @@
 {
  "baseUrl": "https://horizoncreations.dev/HorizonEngineDocs/",
- "generated": "2026-09-12",
+ "generated": "2026-09-18",
  "groups": [
   {
    "pages": [
@@ -11672,6 +11672,261 @@
      "id": "players",
      "text": "HorizonCode projects can create Player Controller and Player Character classes (Content Browser » HorizonCode Player). When play begins, the engine spawns one instance of each and feeds it the project's input assets: every mapped action arrives as Input.<Action>.Pressed / .Released / .Axis events, alongside BeginPlay and a per-frame Tick — the natural home for movement and camera logic.",
      "title": "Player Classes"
+    },
+    {
+     "blocks": [
+      {
+       "k": "lead",
+       "r": [
+        {
+         "s": "",
+         "t": "A running graph shows itself: every exec node that runs gets an "
+        },
+        {
+         "s": "b",
+         "t": "amber halo"
+        },
+        {
+         "s": "",
+         "t": " that fades out over a moment, so during play the graph lights up along its chain. A "
+        },
+        {
+         "s": "b",
+         "t": "breakpoint"
+        },
+        {
+         "s": "",
+         "t": " turns that glance into a stop — execution halts on one node, the world freezes, and the "
+        },
+        {
+         "s": "b",
+         "t": "Watch"
+        },
+        {
+         "s": "",
+         "t": " window shows what the run is holding."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Breakpoints"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Right-click a node in any HorizonCode graph and choose "
+        },
+        {
+         "s": "b",
+         "t": "Add Breakpoint"
+        },
+        {
+         "s": "",
+         "t": ". A red dot appears on the left edge of the node’s header, the gutter mark every text debugger uses. Only nodes the interpreter can stop "
+        },
+        {
+         "s": "i",
+         "t": "at"
+        },
+        {
+         "s": "",
+         "t": " offer the item — nodes with an exec pin and the entries (Event, Input Action, Function Entry). A pure node is read, never run, so there is nothing to stop on. "
+        },
+        {
+         "s": "b",
+         "t": "Remove Breakpoint"
+        },
+        {
+         "s": "",
+         "t": " takes one off; "
+        },
+        {
+         "s": "b",
+         "t": "Remove All Breakpoints"
+        },
+        {
+         "s": "",
+         "t": " clears every graph in the project at once."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Breakpoints are saved per project in "
+        },
+        {
+         "s": "c",
+         "t": "Saved/Breakpoints.json"
+        },
+        {
+         "s": "",
+         "t": " next to the thumbnails and the autosave, not in the asset — so they survive an editor restart but never travel with a class into source control, a collaboration session or a packaged build. Renaming or moving a class asset leaves its breakpoints behind."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "The stop"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The next time a play session reaches a breakpoint, the run stops "
+        },
+        {
+         "s": "b",
+         "t": "before"
+        },
+        {
+         "s": "",
+         "t": " the node executes. The world tick freezes (physics, scripts, animation, the other graphs), the graph opens on the node and frames it in "
+        },
+        {
+         "s": "b",
+         "t": "yellow"
+        },
+        {
+         "s": "",
+         "t": " — a program counter, not a fading halo — and the Watch window opens by itself. In an application project, whose interface runs without a play session, the stopped run simply waits while the editor stays live."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The viewport’s transport well carries on from there. "
+        },
+        {
+         "s": "b",
+         "t": "Continue"
+        },
+        {
+         "s": "",
+         "t": " (the Pause button, which reads as Continue while something is stopped) runs the stopped node, the rest of its chain and whatever loop it stopped inside, then lets the world tick again; the next breakpoint stops it again. "
+        },
+        {
+         "s": "b",
+         "t": "Step Node"
+        },
+        {
+         "s": "",
+         "t": " runs exactly the stopped node and stops at the next one — into a called function, out to the caller, wherever the next node is. When the chain simply ends, the run is over and the world goes on. "
+        },
+        {
+         "s": "b",
+         "t": "Step"
+        },
+        {
+         "s": "",
+         "t": " (one frame) lets a stopped run finish first: one frame means one whole frame, scripts included. Stopping play drops every stopped run."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Break on Next Node"
+        },
+        {
+         "s": "",
+         "t": ", in the Watch window while nothing is stopped, is a pause that lands on a node instead of between frames: the very next exec node any graph runs stops as if it had a breakpoint, once. Disarm it there if nothing comes."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "The Watch window"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "View » Watch"
+        },
+        {
+         "s": "",
+         "t": " shows what a stopped run is holding, in sections: the event’s argument, the function the run is inside of with its inputs and locals (the innermost frame first), the object’s variables, and the values the nodes before the stop produced. Every row is name, type and value; a filter narrows them, the row menu copies a value or the whole row, and "
+        },
+        {
+         "s": "b",
+         "t": "Go to Node"
+        },
+        {
+         "s": "",
+         "t": " jumps back to the yellow frame. When two instances of one class are stopped on the same breakpoint, a run picker chooses which one to look at — Step Node always acts on the first. While nothing is stopped, the window shows the Game Instance’s variables live."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "From the Console back to the node"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Every line a graph writes to the Console — a Print, a warning, a runtime error — remembers the node that wrote it. Click the line and the graph opens on that node. A runtime error opens the Console by itself the first time it happens in a play session; Lua and Python errors name their script and line the same way."
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Interpreted only."
+          },
+          {
+           "s": "",
+           "t": " Breakpoints, the halo and the Watch window belong to the interpreter that runs graphs in the editor. A class compiled to C++ for a packaged build (see below) runs as native code and never stops."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "note"
+      }
+     ],
+     "eyebrow": "Stop and look",
+     "id": "debugging",
+     "text": "A running graph shows itself: every exec node that runs gets an amber halo that fades out over a moment, so during play the graph lights up along its chain. A breakpoint turns that glance into a stop — execution halts on one node, the world freezes, and the Watch window shows what the run is holding. Breakpoints Right-click a node in any HorizonCode graph and choose Add Breakpoint. A red dot appears on the left edge of the node’s header, the gutter mark every text debugger uses. Only nodes the interpreter can stop at offer the item — nodes with an exec pin and the entries (Event, Input Action, Function Entry). A pure node is read, never run, so there is nothing to stop on. Remove Breakpoint takes one off; Remove All Breakpoints clears every graph in the project at once. Breakpoints are saved per project in Saved/Breakpoints.json next to the thumbnails and the autosave, not in the asset — so they survive an editor restart but never travel with a class into source control, a collaboration session or a packaged build. Renaming or moving a class asset leaves its breakpoints behind. The stop The next time a play session reaches a breakpoint, the run stops before the node executes. The world tick freezes (physics, scripts, animation, the other graphs), the graph opens on the node and frames it in yellow — a program counter, not a fading halo — and the Watch window opens by itself. In an application project, whose interface runs without a play session, the stopped run simply waits while the editor stays live. The viewport’s transport well carries on from there. Continue (the Pause button, which reads as Continue while something is stopped) runs the stopped node, the rest of its chain and whatever loop it stopped inside, then lets the world tick again; the next breakpoint stops it again. Step Node runs exactly the stopped node and stops at the next one — into a called function, out to the caller, wherever the next node is. When the chain simply ends, the run is over and the world goes on. Step (one frame) lets a stopped run finish first: one frame means one whole frame, scripts included. Stopping play drops every stopped run. Break on Next Node, in the Watch window while nothing is stopped, is a pause that lands on a node instead of between frames: the very next exec node any graph runs stops as if it had a breakpoint, once. Disarm it there if nothing comes. The Watch window View » Watch shows what a stopped run is holding, in sections: the event’s argument, the function the run is inside of with its inputs and locals (the innermost frame first), the object’s variables, and the values the nodes before the stop produced. Every row is name, type and value; a filter narrows them, the row menu copies a value or the whole row, and Go to Node jumps back to the yellow frame. When two instances of one class are stopped on the same breakpoint, a run picker chooses which one to look at — Step Node always acts on the first. While nothing is stopped, the window shows the Game Instance’s variables live. From the Console back to the node Every line a graph writes to the Console — a Print, a warning, a runtime error — remembers the node that wrote it. Click the line and the graph opens on that node. A runtime error opens the Console by itself the first time it happens in a play session; Lua and Python errors name their script and line the same way. Interpreted only. Breakpoints, the halo and the Watch window belong to the interpreter that runs graphs in the editor. A class compiled to C++ for a packaged build (see below) runs as native code and never stops.",
+     "title": "Debugging a Graph"
     },
     {
      "blocks": [

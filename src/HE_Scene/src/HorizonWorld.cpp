@@ -664,8 +664,12 @@ void HorizonWorld::fireLevelLoaded()
     // miss (editor, dev runs, per-asset fallback) interprets the graph as always.
     // A level script's class key is its "level:<uuid>" host key, not a content
     // path — it lives inside the .hescene, not in an asset of its own. It stays
-    // a plain Object: a level is not a scene entity and owns none.
-    const HorizonCode::ClassIdentity levelCls{ m_levelScriptKey, "Object" };
+    // a plain Object: a level is not a scene entity and owns none. A host that
+    // set no key still registers under a level key (kUnkeyedLevelScript): the
+    // key is the address the editor's trace and breakpoints use, and "" is no
+    // address (see the header).
+    const HorizonCode::ClassIdentity levelCls{
+        m_levelScriptKey.empty() ? std::string(kUnkeyedLevelScript) : m_levelScriptKey, "Object" };
     if (!m_levelScriptKey.empty())
         if (auto compiled = HorizonCode::compiledClasses().create(m_levelScriptKey))
         {

@@ -920,7 +920,8 @@ namespace
 	  "Raises the base to the exponent." },
 	{ "math.mod",
 	  "The remainder after division. Wrapping an angle back into 0..360, or doing "
-	  "something every Nth item. A divisor of 0 yields 0 rather than a NaN." },
+	  "something every Nth item. A divisor of 0 is a runtime error: it is logged "
+	  "and the result is 0 rather than a NaN." },
 	{ "math.min",
 	  "The smaller of the two values." },
 	{ "math.max",
