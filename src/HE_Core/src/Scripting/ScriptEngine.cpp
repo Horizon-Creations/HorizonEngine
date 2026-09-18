@@ -515,7 +515,15 @@ bool ScriptEngine::hotReloadScript(const std::string& name, const std::string& s
     // Compile the new source into a module table
     if (!loadChunk(name, source)) return false;
     if (!pcall(0, 1)) return false;          // execute chunk → module table on stack
-    if (!lua_istable(m_L, -1)) { lua_pop(m_L, 1); return false; }
+    if (!lua_istable(m_L, -1))
+    {
+        // Said, not just refused: pcall just cleared m_lastError, and the caller
+        // (ScriptContext::hotReloadScript) reports whatever is in it — which was
+        // an empty reason for this one failure.
+        m_lastError = "Script '" + name + "' must return a table";
+        lua_pop(m_L, 1);
+        return false;
+    }
 
     // Replace old module reference with new one
     luaL_unref(m_L, LUA_REGISTRYINDEX, it->second.luaRef);

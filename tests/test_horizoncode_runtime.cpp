@@ -2726,3 +2726,160 @@ TEST_CASE("breakpoint: a stopped run dies with its instance, and clear() drops t
 	d.rt.clear();
 	CHECK_FALSE(d.rt.isSuspended());
 }
+
+// ── Runtime errors are said, not swallowed ───────────────────────────────────
+// Every path below used to return a default value or skip the node without a
+// word, so the graph looked like one that does nothing. Now each of them
+// reaches the log — as an Error for a call that could not happen and a run
+// that was cut short, as a Warning (like Array Get's) for a write that went
+// nowhere — with the node current, so the console row leads back to it.
+namespace
+{
+	struct HcLogCapture
+	{
+		struct Seen { HE::LogLevel level; std::string msg; int node; };
+		static std::vector<Seen> s_seen;
+		int sink = 0;
+		HcLogCapture()
+		{
+			s_seen.clear();
+			sink = HE::Log::addSink([](const HE::Log::Record& r, void*)
+			{
+				if (r.category != HE::Log::Cat::HorizonCode || r.level < HE::LogLevel::Warning) return;
+				s_seen.push_back({ r.level, r.message ? r.message : "", currentExecSite().nodeId });
+			}, nullptr);
+		}
+		~HcLogCapture() { HE::Log::removeSink(sink); }
+		int count(const char* needle, HE::LogLevel atLeast = HE::LogLevel::Warning) const
+		{
+			int n = 0;
+			for (const Seen& s : s_seen)
+				if (s.level >= atLeast && s.msg.find(needle) != std::string::npos) ++n;
+			return n;
+		}
+		const Seen* first(const char* needle) const
+		{
+			for (const Seen& s : s_seen) if (s.msg.find(needle) != std::string::npos) return &s;
+			return nullptr;
+		}
+	};
+	std::vector<HcLogCapture::Seen> HcLogCapture::s_seen;
+}
+
+TEST_CASE("runtime errors: a Call Function naming a function no level has is an error, with the node current")
+{
+	// Go → Call Function "Gone" → Print after. "Gone" exists nowhere — the
+	// function was renamed or deleted after the node was placed.
+	Graph g;
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
+	Node fc; fc.type = NodeType::FunctionCall; fc.s = "Gone"; const int fcId = g.addNode(fc);
+	const int after = printNode(g, "after");
+	chain(g, e, 0, fcId); chain(g, fcId, 1, after);
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	HcLogCapture seen;
+	rt.fireEvent(id, "Go");
+	REQUIRE(seen.count("Call Function 'Gone'", HE::LogLevel::Error) == 1);
+	// The row leads back to the call node, not to the event or the print.
+	CHECK(seen.first("Call Function 'Gone'")->node == fcId);
+	// Said once per call, not once per session: fire again, it is said again.
+	rt.fireEvent(id, "Go");
+	CHECK(seen.count("Call Function 'Gone'", HE::LogLevel::Error) == 2);
+	// The chain went on past the skipped call: the run is not aborted for it.
+	CHECK(rt.alive(id));
+	(void)after;
+}
+
+TEST_CASE("runtime errors: a Call Function that resolves is not an error (negative control)")
+{
+	Graph g;
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "Here"; fe.access = 0; const int feId = g.addNode(fe);
+	const int inner = printNode(g, "inner");
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
+	Node fc; fc.type = NodeType::FunctionCall; fc.s = "Here"; const int fcId = g.addNode(fc);
+	syncFunctionSignatures(g);
+	chain(g, feId, 0, inner);
+	chain(g, e, 0, fcId);
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	HcLogCapture seen;
+	rt.fireEvent(id, "Go");
+	CHECK(seen.count("Call Function", HE::LogLevel::Error) == 0);
+	CHECK(seen.count("", HE::LogLevel::Error) == 0);
+}
+
+TEST_CASE("runtime errors: Array Set and Array Remove out of range are said, like Array Get's miss")
+{
+	// Go → Set list = ArraySet(list, 5, "x") → Set list = ArrayRemove(list, 7).
+	// `list` has one element, so both indices are out of range.
+	Graph g;
+	{ Variable v; v.name = "list"; v.type = PinType::String; v.isArray = true;
+	  v.defaultItems = { Value::ofString("a") };
+	  g.variables.push_back(v); }
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
+	Node gl; gl.type = NodeType::GetVariable; gl.s = "list"; gl.propType = PinType::String; gl.isArray = true;
+	const int getList = g.addNode(gl);
+	Node i5; i5.type = NodeType::ConstInt; i5.f[0] = 5; const int c5 = g.addNode(i5);
+	Node sx; sx.type = NodeType::ConstString; sx.s = "x"; const int cx = g.addNode(sx);
+	// ArraySet: dataIns Array 0, Index 1, Value 2; dataOut Array 3.
+	Node as; as.type = NodeType::ArraySet; as.propType = PinType::String; const int setAt = g.addNode(as);
+	Node s1; s1.type = NodeType::SetVariable; s1.s = "list"; s1.propType = PinType::String; s1.isArray = true;
+	const int set1 = g.addNode(s1);
+	Node gl2 = gl; const int getList2 = g.addNode(gl2);
+	Node i7; i7.type = NodeType::ConstInt; i7.f[0] = 7; const int c7 = g.addNode(i7);
+	// ArrayRemove: dataIns Array 0, Index 1; dataOut Array 2.
+	Node ar; ar.type = NodeType::ArrayRemove; ar.propType = PinType::String; const int removeAt = g.addNode(ar);
+	Node s2 = s1; const int set2 = g.addNode(s2);
+	REQUIRE(g.connect(getList, 0, setAt, 0));
+	REQUIRE(g.connect(c5, 0, setAt, 1));
+	REQUIRE(g.connect(cx, 0, setAt, 2));
+	REQUIRE(g.connect(setAt, 3, set1, 2));
+	REQUIRE(g.connect(getList2, 0, removeAt, 0));
+	REQUIRE(g.connect(c7, 0, removeAt, 1));
+	REQUIRE(g.connect(removeAt, 2, set2, 2));
+	chain(g, e, 0, set1); chain(g, set1, 1, set2);
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	HcLogCapture seen;
+	rt.fireEvent(id, "Go");
+	REQUIRE(seen.count("Array Set index 5 out of range (size 1)") == 1);
+	REQUIRE(seen.count("Array Remove index 7 out of range (size 1)") == 1);
+	// Each names ITS node — the pure node, not the Set Variable that pulled on it.
+	CHECK(seen.first("Array Set index")->node    == setAt);
+	CHECK(seen.first("Array Remove index")->node == removeAt);
+	// The semantics did not change: the array is left as it was.
+	REQUIRE(rt.getVariable(id, "list").items.size() == 1);
+	CHECK(rt.getVariable(id, "list").items[0].s == "a");
+}
+
+TEST_CASE("runtime errors: a run cut short by the nesting limit says so once, as an error")
+{
+	// F calls F: local recursion with no exit. Every level nests one deeper
+	// until the Runner's depth limit cuts the run — which used to be silent.
+	Graph g;
+	Node fe; fe.type = NodeType::FunctionEntry; fe.s = "F"; fe.access = 0; const int feId = g.addNode(fe);
+	Node fc; fc.type = NodeType::FunctionCall; fc.s = "F"; const int fcId = g.addNode(fc);
+	Node ev; ev.type = NodeType::Event; ev.s = "Go"; const int e = g.addNode(ev);
+	Node fc0; fc0.type = NodeType::FunctionCall; fc0.s = "F"; const int fc0Id = g.addNode(fc0);
+	syncFunctionSignatures(g);
+	chain(g, feId, 0, fcId);
+	chain(g, e, 0, fc0Id);
+
+	Runtime rt;
+	const InstanceId id = rt.add(g);
+	HcLogCapture seen;
+	rt.fireEvent(id, "Go");
+	CHECK(rt.alive(id));
+	// Once — not once per level on the way back out.
+	CHECK(seen.count("limit hit", HE::LogLevel::Error) == 1);
+	CHECK(seen.count("the run was aborted here", HE::LogLevel::Error) == 1);
+	// A second run says it again: the once is per run. (A distinct line in
+	// between, because the log itself folds identical consecutive records into
+	// a "repeated N more times" note — Log.cpp — which the sink never sees.)
+	HE_LOG_INFO(HorizonCode, "between the two runs");
+	rt.fireEvent(id, "Go");
+	CHECK(seen.count("limit hit", HE::LogLevel::Error) == 2);
+}

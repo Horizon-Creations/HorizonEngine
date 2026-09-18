@@ -4,6 +4,7 @@
 #include <algorithm>   // sort — the deterministic key order of an unordered Lua map
 #include <functional>
 #include <cstdint>
+#include <iterator>   // std::next — the cooldown sweep in destroyInstance
 #include <filesystem>
 // For thisLibraryDir(): finding the directory this very library was loaded from.
 #if defined(_WIN32)
@@ -1364,6 +1365,10 @@ ScriptEngine::InstanceId ScriptContext::createInstance(const std::string& script
 void ScriptContext::destroyInstance(ScriptEngine::InstanceId id)
 {
     backendForId(id)->destroyInstance(rawId(id));
+    // Its report cooldowns go with it: a session that spawns and destroys
+    // failing instances for hours must not keep a row for each of them.
+    for (auto it = m_callbackReportNext.begin(); it != m_callbackReportNext.end(); )
+        it = (it->first.id == id) ? m_callbackReportNext.erase(it) : std::next(it);
 }
 
 // ─── Bulk start of a scene's ECS scripts ──────────────────────────────────────
@@ -1462,16 +1467,32 @@ int ScriptContext::startScriptsFor(const std::vector<entt::entity>& entities,
 
 // Shared reporting for the per-callback entry points. A runtime error in a
 // script callback is a genuine bug the developer must see, but onUpdate runs
-// every frame for every instance — so the report is throttled per callback kind
-// instead of being dropped or spamming 60 lines a second.
+// every frame for every instance — so the report is throttled instead of being
+// dropped or spamming 60 lines a second.
+//
+// Throttled per INSTANCE and callback, not per callback alone. This used to be
+// one HE_LOG_THROTTLE per entry point, whose cooldown is a single static per
+// expansion site: with two instances both failing in onUpdate, the one the host
+// ticked first took the one slot of every 2 s window, and the second was not
+// delayed but never reported at all — its error looked exactly like a script
+// that does nothing. A first report always goes out; only the repeats of the
+// SAME instance in the SAME callback wait.
+void ScriptContext::reportCallbackError(InstanceId id, const char* cbName, IScriptBackend* b)
+{
+	constexpr int64_t kCooldownMs = 2000;
+	const int64_t now = HE::Log::detail::monotonicMillis();
+	int64_t& next = m_callbackReportNext[CallbackKey{ id, cbName }];
+	if (now < next) return;
+	next = now + kCooldownMs;
+	HE_LOG_ERROR(Script, "%s script instance %llu failed in %s(): %s",
+	             langName(langOf(id)), static_cast<unsigned long long>(rawId(id)),
+	             cbName, b->lastError().c_str());
+}
+
 #define HE_SCRIPT_CALL(cbName, expr)                                            \
 	do {                                                                        \
 		if (expr) return true;                                                  \
-		HE_LOG_THROTTLE(Script, Error, 2.0,                                     \
-		                "%s script instance %llu failed in " cbName "(): %s",   \
-		                langName(langOf(id)),                                   \
-		                static_cast<unsigned long long>(rawId(id)),             \
-		                b->lastError().c_str());                                \
+		reportCallbackError(id, cbName, b);                                     \
 		return false;                                                           \
 	} while (0)
 

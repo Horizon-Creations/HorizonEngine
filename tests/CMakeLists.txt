@@ -31,6 +31,9 @@ add_executable(he_tests
     # The watch window's rows: a stopped run's event argument, frames, locals,
     # variables and outputs, spelled as the window shows them.
     test_hc_watch.cpp
+    # The first error of a play session opens the console: the decision,
+    # run through sessions (header-only, PlayErrorReveal.h).
+    test_play_error_reveal.cpp
     test_editor_dock_state.cpp
     test_scene_autosave.cpp
     test_game_instance.cpp

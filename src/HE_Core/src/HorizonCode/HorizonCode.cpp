@@ -3160,6 +3160,7 @@ const Link* Runner::execLinkFrom(int nodeId, int pin) const
 void Runner::fireEvent(const std::string& eventName, int elem, const Value& arg)
 {
     m_steps = 0;
+    m_limitReported = false;
     m_eventArg = arg;
     m_execOutputs.clear();
     m_callStack.clear();
@@ -3197,6 +3198,7 @@ void Runner::resumeFrom(int nodeId)
     // A fresh run, exactly like a fire: the original run's event arg and
     // exec-output caches are gone (the chain re-reads live state instead).
     m_steps = 0;
+    m_limitReported = false;
     m_eventArg = Value{};
     m_execOutputs.clear();
     m_callStack.clear();
@@ -3212,6 +3214,7 @@ bool Runner::callFunction(const std::string& name, bool requirePublic,
         if (n.type != T::FunctionEntry || n.s != name) continue;
         if (requirePublic && n.access != 0) return false;
         m_steps = 0;
+        m_limitReported = false;
         m_execOutputs.clear();
         m_callStack.clear();
         // Seed the frame: passed args coerced to the param types (missing ones fall
@@ -3245,16 +3248,29 @@ bool Runner::callFunction(const std::string& name, bool requirePublic,
     return false;
 }
 
+// A run that was cut short says so once, as an error: a graph whose loop or
+// recursion hit the ceiling did NOT do what it says on the canvas, and the
+// nodes after the cut silently never ran. Once per run, because every chain
+// above the hit unwinds through the same limit and would repeat it.
+void Runner::reportLimit(const char* what)
+{
+    if (m_limitReported) return;
+    m_limitReported = true;
+    HE_LOG_ERROR(HorizonCode, "%s",
+        (std::string("HorizonCode: ") + what + " — the run was aborted here, "
+         "the nodes after this one did not run (a loop without an exit, or a "
+         "function calling itself?)").c_str());
+}
+
 void Runner::runExecChain(const Node& from, int execOutPin, int depth)
 {
-    if (depth > kMaxDepth) return;
+    if (depth > kMaxDepth) { reportLimit("nesting depth limit hit"); return; }
     const Link* l = execLinkFrom(from.id, execOutPin);
     while (l)
     {
         if (++m_steps > kMaxSteps)
         {
-            HE_LOG_WARN(HorizonCode, "%s",
-                "HorizonCode: execution step limit hit — aborting run");
+            reportLimit("execution step limit hit");
             return;
         }
         const Node* n = m_graph.findNode(l->dstNode);
@@ -3409,7 +3425,7 @@ void Runner::resumeSuspended(SuspendedRun run)
 
 void Runner::execNode(const Node& n, int depth)
 {
-    if (depth > kMaxDepth) return;
+    if (depth > kMaxDepth) { reportLimit("nesting depth limit hit"); return; }
     // Before the site and the listener: a node that stops here has not RUN,
     // and must not light up as if it had.
     if (breakHere(n, -1)) return;
@@ -3550,9 +3566,18 @@ void Runner::execNode(const Node& n, int depth)
                 for (size_t i = 0; i < n.params.size(); ++i)
                     args[i] = coerce(evalInput(n, (int)i, depth + 1), n.params[i].type);
                 std::vector<Value> res;
+                // A false from callOwn has already been said by the host (the
+                // Runtime names the missing function, or the depth limit).
                 if (m_ctx.callOwn(n.s, args, &res))
                     m_execOutputs[n.id] = std::move(res);
             }
+            else
+                // No host to ask: a bare Runner (a test, a graph run outside a
+                // Runtime) has exactly the one graph, and the function is not
+                // in it. Said, not skipped — see callOwn in HorizonCodeRuntime.
+                HE_LOG_ERROR(HorizonCode, "%s",
+                    ("HorizonCode: Call Function '" + n.s + "' — no such function in this "
+                     "graph; call skipped").c_str());
             break;
         }
         // Build the call frame: evaluate arguments in the CALLER's context (before
@@ -3757,7 +3782,11 @@ bool Runner::inputLinked(const Node& n, int dataInIndex) const
 
 Value Runner::evalData(const Node& n, int dataOutPin, int depth)
 {
-    if (depth > kMaxDepth || ++m_steps > kMaxSteps) return {};
+    // A pure chain that hits the ceiling yields a typeless default — and used
+    // to do so without a word, so a value that was silently 0 was the only
+    // symptom. Same report as the exec side, and once per run like it.
+    if (depth > kMaxDepth)        { reportLimit("nesting depth limit hit in a data chain");   return {}; }
+    if (++m_steps > kMaxSteps)    { reportLimit("execution step limit hit in a data chain");  return {}; }
     // Site only, no listener: a pure node is read as often as its output is
     // wired, and a warning it logs should still name IT and not the exec node
     // that pulled on it.
@@ -3909,7 +3938,13 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         const int idx = evalInput(n, 1, depth + 1).i;
         if (idx >= 0 && idx < (int)arr.items.size())
             arr.items[idx] = coerce(evalInput(n, 2, depth + 1), n.propType);
-        return arr;                                       // out of range → unchanged copy
+        else
+            // Unchanged copy, but said — like Array Get's miss. A write that
+            // silently went nowhere is the kind of bug that costs an evening.
+            HE_LOG_WARN(HorizonCode, "%s",
+                ("HorizonCode: Array Set index " + std::to_string(idx) + " out of range (size " +
+                 std::to_string(arr.items.size()) + ") — array left unchanged").c_str());
+        return arr;
     }
     case T::ArrayInsert:
     {
@@ -3928,7 +3963,11 @@ Value Runner::evalData(const Node& n, int dataOutPin, int depth)
         const int idx = evalInput(n, 1, depth + 1).i;
         if (idx >= 0 && idx < (int)arr.items.size())
             arr.items.erase(arr.items.begin() + idx);
-        return arr;                                       // out of range → unchanged copy
+        else
+            HE_LOG_WARN(HorizonCode, "%s",
+                ("HorizonCode: Array Remove index " + std::to_string(idx) + " out of range (size " +
+                 std::to_string(arr.items.size()) + ") — array left unchanged").c_str());
+        return arr;
     }
     case T::ArrayContains:
     {

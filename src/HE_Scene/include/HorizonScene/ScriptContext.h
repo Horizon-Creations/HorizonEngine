@@ -254,6 +254,12 @@ private:
     IScriptBackend* backendForId(InstanceId id);
     IScriptBackend* backendForName(const std::string& name);
 
+    // Reports a callback that returned false (a runtime error in the script),
+    // throttled per (instance, callback) — see the definition for why the key
+    // has to carry the instance. `cbName` must be a string literal: it is kept
+    // by pointer in the cooldown table.
+    void reportCallbackError(InstanceId id, const char* cbName, IScriptBackend* b);
+
     // Brings up the CPython backend from the HorizonPython plugin, if it is on
     // disk. Absent plugin == no Python support, which is an ordinary state.
     void loadPythonPlugin();
@@ -284,4 +290,19 @@ private:
     // context (ScriptContext.cpp explains why unloading it is not allowed).
     std::unique_ptr<IScriptBackend, PyBackendDeleter> m_py;  // null if unavailable
     IScriptBackend* m_lastBackend = &m_engine;     // whose lastError() to report
+
+    // When each (instance, callback) may next be reported, steady-clock ms.
+    // Keyed on the PUBLIC id (language tag included) and the callback's literal.
+    struct CallbackKey
+    {
+        InstanceId  id;
+        const char* cb;
+        bool operator==(const CallbackKey& o) const { return id == o.id && cb == o.cb; }
+    };
+    struct CallbackKeyHash
+    {
+        size_t operator()(const CallbackKey& k) const
+        { return std::hash<InstanceId>()(k.id) ^ (std::hash<const void*>()(k.cb) << 1); }
+    };
+    std::unordered_map<CallbackKey, int64_t, CallbackKeyHash> m_callbackReportNext;
 };
