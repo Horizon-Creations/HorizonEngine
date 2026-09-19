@@ -2397,6 +2397,7 @@ TEST_CASE("Material instance resolves to the master's shader hash + baked varian
 #include <windows.h>
 #include <d3dcompiler.h>
 #include <d3d11.h>
+#include <d3d11sdklayers.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <d3d12shader.h>
@@ -3319,8 +3320,29 @@ struct WarpDevice11
 {
 	Microsoft::WRL::ComPtr<ID3D11Device>        device;
 	Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
+	Microsoft::WRL::ComPtr<ID3D11InfoQueue>     infoQueue; // null without the SDK layers
 	std::string log;
 };
+
+// Everything the D3D11 debug layer collected since the last call, as one string
+// — the diagnostic a failing pixel check carries.
+std::string drainInfoQueue11(WarpDevice11& w)
+{
+	if (!w.infoQueue) return {};
+	std::string out;
+	const UINT64 n = w.infoQueue->GetNumStoredMessages();
+	for (UINT64 i = 0; i < n; ++i)
+	{
+		SIZE_T len = 0;
+		w.infoQueue->GetMessage(i, nullptr, &len);
+		std::vector<char> buf(len);
+		auto* msg = reinterpret_cast<D3D11_MESSAGE*>(buf.data());
+		if (SUCCEEDED(w.infoQueue->GetMessage(i, msg, &len)) && msg->pDescription)
+			out += std::string(msg->pDescription, msg->DescriptionByteLength) + "\n";
+	}
+	w.infoQueue->ClearStoredMessages();
+	return out;
+}
 
 // Always WARP (the verdict must not depend on the runner's driver); the debug
 // layer when the SDK layers are installed, without it otherwise.
@@ -3332,7 +3354,12 @@ bool createWarpDevice11(WarpDevice11& w)
 	{
 		const HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
 		                                     &want, 1, D3D11_SDK_VERSION, &w.device, &got, &w.ctx);
-		if (SUCCEEDED(hr)) { w.log = flags ? "debug layer on" : "no D3D11 debug layer on this machine"; return true; }
+		if (SUCCEEDED(hr))
+		{
+			w.log = flags ? "debug layer on" : "no D3D11 debug layer on this machine";
+			if (flags) w.device.As(&w.infoQueue);
+			return true;
+		}
 		w.log = "D3D11CreateDevice(WARP) failed: " + std::to_string(hr);
 	}
 	return false;
@@ -3491,6 +3518,18 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 	};
 	ComPtr<ID3D11InputLayout> il;
 	REQUIRE(SUCCEEDED(dev->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &il)));
+	// No culling, like the D3D12 case's PSO: the default rasterizer state culls
+	// back faces with clockwise = front, and a clip-space triangle wound the GL
+	// way is counter-clockwise on a D3D target — culled, and the pixel stays at
+	// the clear colour with nothing in the debug layer to say so.
+	ComPtr<ID3D11RasterizerState> rasterNoCull;
+	{
+		D3D11_RASTERIZER_DESC rd{};
+		rd.FillMode = D3D11_FILL_SOLID;
+		rd.CullMode = D3D11_CULL_NONE;
+		rd.DepthClipEnable = TRUE;
+		REQUIRE(SUCCEEDED(dev->CreateRasterizerState(&rd, &rasterNoCull)));
+	}
 
 	// ── Geometry: a fullscreen triangle with UV (1.2, 0.5) everywhere. u = 1.2 is
 	// past the weightmap's right edge on purpose: CLAMP reads the last texel,
@@ -3560,6 +3599,7 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 	// its own sampler on s0. Everything the material path binds per draw follows.
 	ctx->IASetInputLayout(il.Get());
 	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	ctx->RSSetState(rasterNoCull.Get());
 	const UINT stride = sizeof(MatVertex11), offset = 0;
 	ctx->IASetVertexBuffers(0, 1, vb.GetAddressOf(), &stride, &offset);
 	ctx->VSSetShader(vs.Get(), nullptr, 0);
@@ -3584,9 +3624,12 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 	HE::d3d11mat::BindLandscapeWeights(ctx, weightmap.Get(), weightClamp.Get());
 	CHECK(srvAt(HE::d3d11mat::kWeightmapSrvSlot).Get() == weightmap.Get());
 	CHECK(samplerAt(HE::d3d11mat::kWeightmapSamplerSlot).Get() == weightClamp.Get());
+	drainInfoQueue11(w); // setup chatter is not the draw's
 	const Pixel11 fixed = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+	const std::string why = drainInfoQueue11(w);
 	CHECK_MESSAGE((near8(fixed.r, 0) && near8(fixed.g, 255) && near8(fixed.b, 0)),
-	              "t14 + clamp s0: expected layer 1 (green), got ", int(fixed.r), ",", int(fixed.g), ",", int(fixed.b));
+	              "t14 + clamp s0: expected layer 1 (green), got ", int(fixed.r), ",", int(fixed.g), ",", int(fixed.b),
+	              " (alpha ", int(fixed.a), "); debug layer: ", why);
 
 	// 2. Restore: s0 is the built-in pass's sampler again, t14 is off — nothing
 	//    leaks into the next built-in draw.
