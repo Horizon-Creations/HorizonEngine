@@ -27,6 +27,7 @@
 #include <HorizonRendering/ClipSpace.h>       // GL depth (-1..1) → D3D depth (0..1)
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
+#include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
 #include <SDL3/SDL.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -1231,6 +1232,9 @@ struct D3D11RendererImpl
     // (shader_model=50, binding→register, verified for D3D12):
     //   b0 HeLighting(PS) | b1 U(VS) | b3 HeParams(PS) | b8/b9 HeLighting/HeParams(WPO VS)
     //   t2 heTex0, t4..t7 heTexP0..3 (+ SamplerState s2, s4..s7, linear-wrap).
+    //   t14 heLandscapeWeights + SamplerState s0 (linear-CLAMP), per draw, see
+    //   D3D11MaterialBindings.h — s0 is ALSO the built-in pass's albedo sampler
+    //   and goes back to it after every material draw.
     HE::MaterialShaderLibrary m_matShaderLib; // unguarded member (like Vulkan/D3D12)
     struct MatShaders {
         ComPtr<ID3D11VertexShader> vs;
@@ -1242,6 +1246,7 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Buffer>       m_matObjCB;    // U (176 B)         — b1 VS,          filled per draw
     ComPtr<ID3D11Buffer>       m_matParamCB;  // HeParams (256 B)  — b3 PS / b9 WPO VS, filled per draw
     ComPtr<ID3D11SamplerState> m_matSampler;  // linear-wrap, bound at s2 + s4..s7
+    ComPtr<ID3D11SamplerState> m_matWeightSampler; // linear-clamp, bound at s0 for the draw (heLandscapeWeights)
     bool m_matReady      = false; // true once createMaterialResources() succeeded
     bool m_matHlslLogged = false; // one-time dump of generated HLSL for HW verify
     // createMaterialResources() + GetOrBuildMaterialShaders() are defined inline below.
@@ -3834,7 +3839,11 @@ struct D3D11RendererImpl
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
         sd.MaxLOD   = D3D11_FLOAT32_MAX;
         const bool sampOk = SUCCEEDED(device->CreateSamplerState(&sd, &m_matSampler));
-        m_matReady = cbLight && cbObj && cbParam && sampOk;
+        // The weightmap's own sampler (linear-clamp, s0 during the draw). Not
+        // giLinearClamp: that one only exists once the GI path initialised.
+        const D3D11_SAMPLER_DESC wsd = HE::d3d11mat::WeightmapSamplerDesc();
+        const bool wSampOk = SUCCEEDED(device->CreateSamplerState(&wsd, &m_matWeightSampler));
+        m_matReady = cbLight && cbObj && cbParam && sampOk && wSampOk;
         Logger::LogTo(HE::Log::Cat::RHI, m_matReady ? Logger::LogLevel::Info : Logger::LogLevel::Error,
             m_matReady ? "D3D11Renderer: A4 material resources created"
                        : "D3D11Renderer: A4 material resource allocation failed");
@@ -4893,6 +4902,7 @@ void D3D11Renderer::Shutdown()
     m_impl->m_matObjCB.Reset();
     m_impl->m_matParamCB.Reset();
     m_impl->m_matSampler.Reset();
+    m_impl->m_matWeightSampler.Reset();
     // Screen-space decals + graph project textures (ComPtr auto-release).
     m_impl->decalTexCache.clear();
     m_impl->graphTexCache.clear();
@@ -5724,6 +5734,23 @@ void D3D11Renderer::DrawScene(int width, int height)
                                     heTexP[i] = srv;
                         }
 
+                        // heLandscapeWeights (t14) = the object's landscape weightmap, PER
+                        // DRAW like GL unit 13 / Metal slot 13: it belongs to the terrain
+                        // the chunk is part of, not to the material, so two landscapes can
+                        // share one material and keep their own paint. Anything that is
+                        // not a landscape chunk gets the 1x1 (1,0,0,0) default, so a
+                        // Landscape Layer Blend resolves to layer 0 instead of black; the
+                        // white dummy is the last resort so a live sample never hits a
+                        // null SRV. Resolved HERE, inside the snapshot block's rules: the
+                        // resolve may load, and a load can move the material asset —
+                        // which is why `ma` below is fetched only after this.
+                        ID3D11ShaderResourceView* heWeights = nullptr;
+                        if (dc.weightmapTextureId != HE::UUID{})
+                            heWeights = p.resolveGraphTexture(dc.weightmapTextureId, {}, m_contentManager);
+                        if (!heWeights)
+                            heWeights = p.resolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {}, m_contentManager);
+                        if (!heWeights) heWeights = p.dummyTexture.Get();
+
                         // Per-entity HeParams override wins over the material's shared params.
                         const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
                         const std::vector<float>* params =
@@ -5748,6 +5775,12 @@ void D3D11Renderer::DrawScene(int width, int height)
                         ctx->PSSetSamplers(2, 1, &matSamp);
                         ID3D11SamplerState* matSamp4[4] = { matSamp, matSamp, matSamp, matSamp };
                         ctx->PSSetSamplers(4, 4, matSamp4);
+                        // heLandscapeWeights (t14 PS) + its linear-CLAMP sampler on s0 —
+                        // explicitly, because s0 is where the enclosing built-in pass keeps
+                        // its albedo sampler (p.sampler, linear-wrap): without this the
+                        // weightmap is filtered with whatever the last built-in pass left
+                        // on s0. Restored below. (D3D11MaterialBindings.h, Thema 57)
+                        HE::d3d11mat::BindLandscapeWeights(ctx, heWeights, p.m_matWeightSampler.Get());
 
                         auto drawMatInstance = [&](const glm::mat4& model) {
                             // std140 U block (176 B) at b1 VS.
@@ -5797,7 +5830,11 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // s2, which the built-in scene shader now reads (GI mask + probe
                         // atlases + linear-clamp sampler). VS b0 / PS b0 (perObject) and t0
                         // (albedo) are re-bound per draw by the built-in path, but PS b0 is
-                        // restored here too since HeLighting overwrote it.
+                        // restored here too since HeLighting overwrote it. And PS s0: the
+                        // weightmap's clamp sampler sat there for the draw, the built-in
+                        // shader's albedo sampler (p.sampler, set once per pass) goes back;
+                        // t14 (heLandscapeWeights) comes off with it.
+                        HE::d3d11mat::RestoreAfterMaterialDraw(ctx, p.sampler.Get());
                         ctx->VSSetShader(p.vs.Get(), nullptr, 0);
                         ctx->PSSetShader(p.ps.Get(), nullptr, 0);
                         ctx->IASetInputLayout(p.inputLayout.Get());

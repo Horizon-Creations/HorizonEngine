@@ -2601,6 +2601,29 @@ MaterialGraph landscapeGraph()
 	REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
 	return g;
 }
+
+// A UI-domain graph with a WIRED Backdrop — the shipped Glass shape (frosted
+// backdrop times hover state, rounded-rect coverage into Opacity), so
+// heBackdrop (t9, sampler s9) is a live SampleLevel. s9 is ALSO the pinned
+// register of the preamble's heGIReflFwd sampler (kHlslMaterialPins); the two
+// only coexist because a UI-domain shader never calls heLitP, so glslang drops
+// the function and heGIReflFwd's sampler is declared but dead — the same
+// dead-beside-live shape FXC accepts for heAO/heLandscapeWeights on s0.
+MaterialGraph backdropGraph()
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	g.findNode(out)->p[3] = static_cast<float>(HE::MatDomain::UserInterface);
+	const int bd  = g.addNode(MatNodeType::Backdrop);
+	const int st  = g.addNode(MatNodeType::ElementState);
+	const int sdf = g.addNode(MatNodeType::RoundedRectSDF);
+	const int mul = g.addNode(MatNodeType::Multiply);
+	REQUIRE(g.connect(bd,  0, mul, 0));
+	REQUIRE(g.connect(st,  0, mul, 1));
+	REQUIRE(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+	REQUIRE(g.connect(sdf, 1, out, HE::kMatOutputOpacityPin));
+	return g;
+}
 } // namespace
 
 TEST_CASE("Every node emits HLSL and SPIR-V (what D3D11/D3D12 and Vulkan are handed)")
@@ -2695,6 +2718,22 @@ TEST_CASE("Every node's HLSL stays inside SM 5.0's register range (D3D11/D3D12 b
 		CHECK(std::count(lscLive.begin(), lscLive.end(), 0) == 1);   // exactly one live user of s0
 		CHECK(lsc.find("heLandscapeWeights.Sample(_heLandscapeWeights_sampler") != std::string::npos);
 		CHECK_FALSE(twoLiveSamplersShareRegister(lsc));
+
+		// Thema 57: the UI domain's twin of that share. A wired Backdrop samples
+		// heBackdrop through s9, the register heGIReflFwd's sampler is pinned
+		// to; the shader has no heLitP, so that sampler is declared once and
+		// never used. Both on s9, exactly one live — the shape FXC accepts. If
+		// the UI domain ever grows a heLitP call, this is where it shows first.
+		const std::string bd = lib.fragment(std::hash<std::string>{}("liveprobe-backdrop"),
+		                                    HE::generateFragment(backdropGraph()).glsl, B::HLSL).source;
+		const std::vector<int> bdRegs = registersOf(bd, 's');
+		CHECK(std::count(bdRegs.begin(), bdRegs.end(), 9) == 2);      // heBackdrop + heGIReflFwd declared on s9 …
+		const std::vector<int> bdLive = liveSamplerRegisters(bd);
+		CHECK(std::count(bdLive.begin(), bdLive.end(), 9) == 1);      // … exactly one of them live
+		CHECK(bd.find("heBackdrop.SampleLevel(_heBackdrop_sampler") != std::string::npos);
+		CHECK(bd.find("heGIReflFwd.Sample(") == std::string::npos);
+		CHECK(bd.find("heLitP(") == std::string::npos);
+		CHECK_FALSE(twoLiveSamplersShareRegister(bd));
 	}
 	const std::string& vs = lib.standardVertex(B::HLSL).source;
 	CHECK(maxRegister(vs, 'b') <= 13);
@@ -3217,6 +3256,372 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 	              " node shaders — the negative control is not biting");
 	MESSAGE("material root signature covers ", shaders, " node pixel shaders; the legacy one left ",
 	        litUncoveredByLegacy, " of them uncovered");
+}
+
+// ═══ Thema 57: heBackdrop and heGIReflFwd share s9 — measured, not inferred ═══
+// The registry sweep above already runs "Backdrop (UI domain)" through FXC, but
+// with the node's radius wired from a constant and nothing else; this is the
+// shipped Glass shape end to end, with the bytecode reflected so the verdict
+// says WHY it compiles: heBackdrop's sampler is in the bytecode on s9,
+// heGIReflFwd's is not (dead — no heLitP in a UI-domain shader), and t32 is
+// gone with it. The day a UI-domain shader references heGIReflFwd, FXC will
+// refuse the pair with X4500 and this case names the collision.
+TEST_CASE("FXC: a wired UI-domain Backdrop compiles because heGIReflFwd is dead on s9")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const std::string glsl = HE::generateFragment(backdropGraph()).glsl;
+	const auto& hl = lib.fragment(std::hash<std::string>{}(glsl), glsl, B::HLSL);
+	REQUIRE_MESSAGE(hl.ok, hl.log);
+	std::string err;
+	ComPtr<ID3DBlob> ps = fxcBlob(hl.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(ps.Get() != nullptr, "wired Backdrop pixel shader (s9 shared with heGIReflFwd): ", err);
+	const std::vector<Binding> b = reflectBindings(ps.Get());
+	REQUIRE(!b.empty());
+	CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, 9), "the Backdrop PS does not bind t9 (heBackdrop)");
+	CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, 9), "the Backdrop PS does not bind s9 (heBackdrop's sampler)");
+	CHECK_MESSAGE(!binds(b, D3D_SIT_TEXTURE, 32), "the Backdrop PS binds t32 (heGIReflFwd) — a UI-domain shader reached heLitP?");
+	// Exactly one owner of s9 in the bytecode, by name.
+	int s9Owners = 0;
+	for (const Binding& x : b)
+		if (x.type == D3D_SIT_SAMPLER && x.reg == 9) { ++s9Owners; CHECK(x.name == "_heBackdrop_sampler"); }
+	CHECK(s9Owners == 1);
+}
+
+// ═══ Thema 57: D3D11 binds heLandscapeWeights (t14 + s0) for material draws ═══
+// D3D11Renderer's graph-material draw bound heTex0/heTexP0..3 and their samplers
+// and nothing else of the preamble's per-draw state — the landscape weightmap
+// (t14) stayed unbound, so a wired Landscape Layer Blend read zeros and fell
+// back to layer 0 on D3D11 while GL and Metal painted. The fix has two halves,
+// and the second is the one that is easy to forget: the weightmap's sampler is
+// pinned to s0 (the register heAO leaves dead), and s0 is ALSO the built-in
+// scene shader's albedo sampler, set once per pass. So the draw has to put a
+// linear-CLAMP sampler on s0 and the pass's sampler back afterwards, or the
+// weightmap is filtered with the built-in pass's WRAP sampler during the draw
+// and every built-in draw after it samples clamped.
+//
+// Both halves are exercised on a D3D11 WARP device through the very functions
+// the renderer calls (D3D11MaterialBindings.h): a fullscreen triangle with the
+// standard vertex and a wired Landscape Layer Blend pixel shader, a 2x1
+// weightmap (texel 0 = layer 0, texel 1 = layer 1) sampled at u = 1.2 — a UV
+// only the address mode decides: CLAMP lands on texel 1, WRAP on 0.2 and mostly
+// texel 0 — and the pixel read back. That pixel is the evidence: it says both
+// that t14 is really bound (the unbound zeros would give layer 0) and that s0
+// carried the clamp sampler while the draw ran. The state queries after the
+// restore say s0 is back on the built-in pass's sampler and t14 is off.
+namespace
+{
+struct WarpDevice11
+{
+	Microsoft::WRL::ComPtr<ID3D11Device>        device;
+	Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
+	std::string log;
+};
+
+// Always WARP (the verdict must not depend on the runner's driver); the debug
+// layer when the SDK layers are installed, without it otherwise.
+bool createWarpDevice11(WarpDevice11& w)
+{
+	const D3D_FEATURE_LEVEL want = D3D_FEATURE_LEVEL_11_0;
+	D3D_FEATURE_LEVEL got{};
+	for (UINT flags : { UINT(D3D11_CREATE_DEVICE_DEBUG), UINT(0) })
+	{
+		const HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
+		                                     &want, 1, D3D11_SDK_VERSION, &w.device, &got, &w.ctx);
+		if (SUCCEEDED(hr)) { w.log = flags ? "debug layer on" : "no D3D11 debug layer on this machine"; return true; }
+		w.log = "D3D11CreateDevice(WARP) failed: " + std::to_string(hr);
+	}
+	return false;
+}
+
+// RGBA8 1xN texture with the given texels, as a shader resource.
+Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> makeTexture11(ID3D11Device* dev, UINT width,
+                                                               const std::vector<uint8_t>& rgba)
+{
+	using Microsoft::WRL::ComPtr;
+	D3D11_TEXTURE2D_DESC td{};
+	td.Width = width; td.Height = 1; td.MipLevels = 1; td.ArraySize = 1;
+	td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+	td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+	D3D11_SUBRESOURCE_DATA init{ rgba.data(), width * 4, 0 };
+	ComPtr<ID3D11Texture2D> tex;
+	if (FAILED(dev->CreateTexture2D(&td, &init, &tex))) return nullptr;
+	ComPtr<ID3D11ShaderResourceView> srv;
+	if (FAILED(dev->CreateShaderResourceView(tex.Get(), nullptr, &srv))) return nullptr;
+	return srv;
+}
+
+Microsoft::WRL::ComPtr<ID3D11SamplerState> makeSampler11(ID3D11Device* dev, D3D11_TEXTURE_ADDRESS_MODE mode)
+{
+	D3D11_SAMPLER_DESC sd{};
+	sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+	sd.AddressU = sd.AddressV = sd.AddressW = mode;
+	sd.MaxLOD = D3D11_FLOAT32_MAX;
+	Microsoft::WRL::ComPtr<ID3D11SamplerState> s;
+	dev->CreateSamplerState(&sd, &s);
+	return s;
+}
+
+Microsoft::WRL::ComPtr<ID3D11Buffer> makeConstantBuffer11(ID3D11Device* dev, const void* data, UINT bytes)
+{
+	D3D11_BUFFER_DESC bd{};
+	bd.ByteWidth = (bytes + 15u) & ~15u;
+	bd.Usage = D3D11_USAGE_IMMUTABLE;
+	bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+	std::vector<uint8_t> padded(bd.ByteWidth, 0);
+	std::memcpy(padded.data(), data, bytes);
+	D3D11_SUBRESOURCE_DATA init{ padded.data(), 0, 0 };
+	Microsoft::WRL::ComPtr<ID3D11Buffer> b;
+	dev->CreateBuffer(&bd, &init, &b);
+	return b;
+}
+
+// The renderer's vertex layout for the standard material vertex (pos, normal,
+// uv interleaved, 32 B) — the same three TEXCOORD locations the D3D12 case's
+// PSO declares. One fullscreen triangle whose UV is `uv` at every vertex.
+struct MatVertex11 { float pos[3]; float nrm[3]; float uv[2]; };
+
+// A lit graph whose base colour is a Landscape Layer Blend of three PURE layer
+// colours — red, green, blue — so the pixel says which layer (and with which
+// weight) the weightmap picked. The registry's landscapeGraph() tints its layers
+// 0.8 and would leave the verdict a matter of decimals.
+MaterialGraph rgbLandscapeGraph()
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int lb  = g.addNode(MatNodeType::LandscapeLayerBlend);
+	g.findNode(lb)->s = "Red\nGreen\nBlue";
+	for (int i = 0; i < 3; ++i)
+	{
+		const int c = g.addNode(MatNodeType::ConstColor);
+		for (int k = 0; k < 3; ++k) g.findNode(c)->p[k] = (k == i) ? 1.0f : 0.0f;
+		REQUIRE(g.connect(c, 0, lb, i));
+	}
+	REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+	return g;
+}
+
+// A lit graph with no landscape blend at all — the negative control: whatever
+// sits on t14/s0 must not change its pixel.
+MaterialGraph plainColourGraph()
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int c   = g.addNode(MatNodeType::ConstColor);
+	g.findNode(c)->p[0] = 0.25f; g.findNode(c)->p[1] = 0.5f; g.findNode(c)->p[2] = 0.75f;
+	REQUIRE(g.connect(c, 0, out, HE::kMatOutputBaseColorPin));
+	return g;
+}
+
+// One 1x1 draw with the bound state as it stands, the pixel read back as RGBA8.
+struct Pixel11 { uint8_t r, g, b, a; };
+Pixel11 drawOnePixel11(WarpDevice11& w, ID3D11RenderTargetView* rtv, ID3D11Texture2D* target,
+                       ID3D11Texture2D* staging)
+{
+	const float clear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	w.ctx->ClearRenderTargetView(rtv, clear);
+	w.ctx->OMSetRenderTargets(1, &rtv, nullptr);
+	D3D11_VIEWPORT vp{}; vp.Width = 1.0f; vp.Height = 1.0f; vp.MaxDepth = 1.0f;
+	w.ctx->RSSetViewports(1, &vp);
+	w.ctx->Draw(3, 0);
+	w.ctx->CopyResource(staging, target);
+	D3D11_MAPPED_SUBRESOURCE m{};
+	Pixel11 px{};
+	if (SUCCEEDED(w.ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m)))
+	{
+		std::memcpy(&px, m.pData, sizeof(px));
+		w.ctx->Unmap(staging, 0);
+	}
+	return px;
+}
+bool near8(uint8_t v, int want, int tol = 2) { return std::abs(int(v) - want) <= tol; }
+} // namespace
+
+TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a clamp sampler on s0, and gives s0 back (WARP)")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	WarpDevice11 w;
+	REQUIRE_MESSAGE(createWarpDevice11(w), w.log);
+	MESSAGE(w.log);
+	ID3D11Device* dev = w.device.Get();
+	ID3D11DeviceContext* ctx = w.ctx.Get();
+
+	// ── Shaders: the standard vertex + the two pixel shaders, through FXC exactly
+	// as the renderer compiles them. The landscape PS must bind t14 and s0 — the
+	// registers this test is about — or it is not the shape that was broken.
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	ComPtr<ID3DBlob> vsBlob = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE_MESSAGE(vsBlob.Get() != nullptr, "standard vertex: ", err);
+	auto pixelShader = [&](const char* what, const MaterialGraph& g, ComPtr<ID3DBlob>& blob) -> ComPtr<ID3D11PixelShader>
+	{
+		const std::string glsl = HE::generateFragment(g).glsl;
+		const auto& hl = lib.fragment(std::hash<std::string>{}(glsl), glsl, B::HLSL);
+		REQUIRE_MESSAGE(hl.ok, what, ": ", hl.log);
+		std::string e;
+		blob = fxcBlob(hl.source, "ps_5_0", e);
+		REQUIRE_MESSAGE(blob.Get() != nullptr, what, " pixel shader: ", e);
+		ComPtr<ID3D11PixelShader> ps;
+		REQUIRE(SUCCEEDED(dev->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &ps)));
+		return ps;
+	};
+	ComPtr<ID3DBlob> lpsBlob, ppsBlob;
+	ComPtr<ID3D11PixelShader> landscapePS = pixelShader("rgb landscape", rgbLandscapeGraph(), lpsBlob);
+	ComPtr<ID3D11PixelShader> plainPS     = pixelShader("plain colour", plainColourGraph(), ppsBlob);
+	{
+		const std::vector<Binding> b = reflectBindings(lpsBlob.Get());
+		REQUIRE_MESSAGE(binds(b, D3D_SIT_TEXTURE, HE::d3d11mat::kWeightmapSrvSlot),
+		                "the landscape PS does not bind t14 (heLandscapeWeights)");
+		REQUIRE_MESSAGE(binds(b, D3D_SIT_SAMPLER, HE::d3d11mat::kWeightmapSamplerSlot),
+		                "the landscape PS does not bind s0 (heLandscapeWeights' sampler)");
+		const std::vector<Binding> pb = reflectBindings(ppsBlob.Get());
+		CHECK_MESSAGE(!binds(pb, D3D_SIT_TEXTURE, HE::d3d11mat::kWeightmapSrvSlot), "the plain PS binds t14?");
+	}
+	ComPtr<ID3D11VertexShader> vs;
+	REQUIRE(SUCCEEDED(dev->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs)));
+	static const D3D11_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+	};
+	ComPtr<ID3D11InputLayout> il;
+	REQUIRE(SUCCEEDED(dev->CreateInputLayout(layout, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &il)));
+
+	// ── Geometry: a fullscreen triangle with UV (1.2, 0.5) everywhere. u = 1.2 is
+	// past the weightmap's right edge on purpose: CLAMP reads the last texel,
+	// WRAP reads u = 0.2 — the two samplers give different answers, which is what
+	// makes the sampler on s0 observable in a pixel.
+	const float kU = 1.2f;
+	const MatVertex11 tri[3] = {
+		{ { -1.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { kU, 0.5f } },
+		{ {  3.0f, -1.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { kU, 0.5f } },
+		{ { -1.0f,  3.0f, 0.5f }, { 0.0f, 0.0f, 1.0f }, { kU, 0.5f } },
+	};
+	ComPtr<ID3D11Buffer> vb;
+	{
+		D3D11_BUFFER_DESC bd{};
+		bd.ByteWidth = sizeof(tri); bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+		D3D11_SUBRESOURCE_DATA init{ tri, 0, 0 };
+		REQUIRE(SUCCEEDED(dev->CreateBuffer(&bd, &init, &vb)));
+	}
+
+	// ── Constant buffers as the renderer binds them: U (mvp = identity, so the
+	// triangle is already in clip space) at VS b1; HeLighting at PS b0 with
+	// viewMode.x = 1, the Unlit view — heLitP hands the base colour back
+	// untouched and heApplyFog is a no-op, so the pixel IS the blend result.
+	struct MatU { float mvp[16]; float model[16]; float color[4]; float flags[4]; float pbr[4]; };
+	static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
+	MatU u{};
+	for (int i = 0; i < 4; ++i) u.mvp[i * 5] = u.model[i * 5] = 1.0f;
+	u.color[0] = u.color[1] = u.color[2] = u.color[3] = 1.0f;
+	u.pbr[2] = 1.0f;
+	ComPtr<ID3D11Buffer> uCB = makeConstantBuffer11(dev, &u, sizeof(u));
+	HE::MaterialShaderLibrary::Lighting lit{};
+	lit.viewMode[0] = 1.0f;
+	lit.giParams[0] = lit.giParams[1] = 1.0f;
+	ComPtr<ID3D11Buffer> litCB = makeConstantBuffer11(dev, &lit, sizeof(lit));
+	REQUIRE(uCB && litCB);
+
+	// ── Render target: 1x1 RGBA8 + a staging copy to read the pixel back.
+	ComPtr<ID3D11Texture2D> target, staging;
+	ComPtr<ID3D11RenderTargetView> rtv;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = td.Height = 1; td.MipLevels = td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &target)));
+		REQUIRE(SUCCEEDED(dev->CreateRenderTargetView(target.Get(), nullptr, &rtv)));
+		td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+
+	// ── The weightmap: 2x1, texel 0 = layer 0 (red), texel 1 = layer 1 (green).
+	// And the two samplers: the built-in pass's (WRAP, D3D11Renderer's
+	// p.sampler) and the one the fix puts on s0 for the draw (the renderer's
+	// own description, so the test cannot pass with a different address mode
+	// than the renderer ships).
+	ComPtr<ID3D11ShaderResourceView> weightmap = makeTexture11(dev, 2, { 255, 0, 0, 0,  0, 255, 0, 0 });
+	REQUIRE(weightmap);
+	ComPtr<ID3D11SamplerState> builtInWrap = makeSampler11(dev, D3D11_TEXTURE_ADDRESS_WRAP);
+	const D3D11_SAMPLER_DESC wsd = HE::d3d11mat::WeightmapSamplerDesc();
+	CHECK(wsd.AddressU == D3D11_TEXTURE_ADDRESS_CLAMP);
+	ComPtr<ID3D11SamplerState> weightClamp;
+	REQUIRE(SUCCEEDED(dev->CreateSamplerState(&wsd, &weightClamp)));
+	REQUIRE(builtInWrap);
+
+	// ── Pass state as the built-in scene pass leaves it before a material draw:
+	// its own sampler on s0. Everything the material path binds per draw follows.
+	ctx->IASetInputLayout(il.Get());
+	ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	const UINT stride = sizeof(MatVertex11), offset = 0;
+	ctx->IASetVertexBuffers(0, 1, vb.GetAddressOf(), &stride, &offset);
+	ctx->VSSetShader(vs.Get(), nullptr, 0);
+	ctx->VSSetConstantBuffers(1, 1, uCB.GetAddressOf());
+	ctx->PSSetConstantBuffers(0, 1, litCB.GetAddressOf());
+	ctx->PSSetSamplers(0, 1, builtInWrap.GetAddressOf());
+
+	auto samplerAt = [&](UINT slot) {
+		ComPtr<ID3D11SamplerState> s;
+		ctx->PSGetSamplers(slot, 1, &s);
+		return s;
+	};
+	auto srvAt = [&](UINT slot) {
+		ComPtr<ID3D11ShaderResourceView> s;
+		ctx->PSGetShaderResources(slot, 1, &s);
+		return s;
+	};
+
+	// 1. The fix: weightmap on t14, clamp sampler on s0 → the draw reads the
+	//    clamped texel 1 → layer 1, pure green.
+	ctx->PSSetShader(landscapePS.Get(), nullptr, 0);
+	HE::d3d11mat::BindLandscapeWeights(ctx, weightmap.Get(), weightClamp.Get());
+	CHECK(srvAt(HE::d3d11mat::kWeightmapSrvSlot).Get() == weightmap.Get());
+	CHECK(samplerAt(HE::d3d11mat::kWeightmapSamplerSlot).Get() == weightClamp.Get());
+	const Pixel11 fixed = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+	CHECK_MESSAGE(near8(fixed.r, 0) && near8(fixed.g, 255) && near8(fixed.b, 0),
+	              "t14 + clamp s0: expected layer 1 (green), got ", int(fixed.r), ",", int(fixed.g), ",", int(fixed.b));
+
+	// 2. Restore: s0 is the built-in pass's sampler again, t14 is off — nothing
+	//    leaks into the next built-in draw.
+	HE::d3d11mat::RestoreAfterMaterialDraw(ctx, builtInWrap.Get());
+	CHECK(samplerAt(HE::d3d11mat::kWeightmapSamplerSlot).Get() == builtInWrap.Get());
+	CHECK(srvAt(HE::d3d11mat::kWeightmapSrvSlot).Get() == nullptr);
+
+	// 3. The bug's two faces, so the positive verdict has teeth. (a) t14 bound
+	//    but s0 left on the built-in WRAP sampler — the half that is easy to
+	//    forget: u = 1.2 wraps to 0.2 and lands mostly on texel 0 → red-ish,
+	//    NOT green. (b) t14 unbound (the pre-fix renderer): zeros → the blend's
+	//    layer-0 fallback → pure red.
+	{
+		ID3D11ShaderResourceView* wm = weightmap.Get();
+		ctx->PSSetShaderResources(HE::d3d11mat::kWeightmapSrvSlot, 1, &wm);
+		const Pixel11 wrapped = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+		CHECK_MESSAGE(wrapped.r > 128 && wrapped.g < 128,
+		              "t14 + WRAP s0 should read texel 0's side (red), got ", int(wrapped.r), ",", int(wrapped.g), ",", int(wrapped.b));
+		ID3D11ShaderResourceView* nullSrv = nullptr;
+		ctx->PSSetShaderResources(HE::d3d11mat::kWeightmapSrvSlot, 1, &nullSrv);
+		const Pixel11 unbound = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+		CHECK_MESSAGE(near8(unbound.r, 255) && near8(unbound.g, 0) && near8(unbound.b, 0),
+		              "t14 unbound should fall back to layer 0 (red), got ", int(unbound.r), ",", int(unbound.g), ",", int(unbound.b));
+	}
+
+	// 4. Negative control: a material without a Landscape Layer Blend gives the
+	//    same pixel whether t14/s0 carry the weightmap + clamp or nothing at all.
+	{
+		ctx->PSSetShader(plainPS.Get(), nullptr, 0);
+		HE::d3d11mat::BindLandscapeWeights(ctx, weightmap.Get(), weightClamp.Get());
+		const Pixel11 with = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+		HE::d3d11mat::RestoreAfterMaterialDraw(ctx, builtInWrap.Get());
+		const Pixel11 without = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
+		CHECK_MESSAGE(near8(with.r, 64) && near8(with.g, 128) && near8(with.b, 191),
+		              "plain material: expected (64,128,191), got ", int(with.r), ",", int(with.g), ",", int(with.b));
+		CHECK(with.r == without.r);
+		CHECK(with.g == without.g);
+		CHECK(with.b == without.b);
+	}
 }
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC
