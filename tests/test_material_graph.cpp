@@ -3525,7 +3525,8 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 	lit.viewMode[0] = 1.0f;
 	lit.giParams[0] = lit.giParams[1] = 1.0f;
 	ComPtr<ID3D11Buffer> litCB = makeConstantBuffer11(dev, &lit, sizeof(lit));
-	REQUIRE(uCB && litCB);
+	REQUIRE(uCB.Get() != nullptr);
+	REQUIRE(litCB.Get() != nullptr);
 
 	// ── Render target: 1x1 RGBA8 + a staging copy to read the pixel back.
 	ComPtr<ID3D11Texture2D> target, staging;
@@ -3547,13 +3548,13 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 	// own description, so the test cannot pass with a different address mode
 	// than the renderer ships).
 	ComPtr<ID3D11ShaderResourceView> weightmap = makeTexture11(dev, 2, { 255, 0, 0, 0,  0, 255, 0, 0 });
-	REQUIRE(weightmap);
+	REQUIRE(weightmap.Get() != nullptr);
 	ComPtr<ID3D11SamplerState> builtInWrap = makeSampler11(dev, D3D11_TEXTURE_ADDRESS_WRAP);
 	const D3D11_SAMPLER_DESC wsd = HE::d3d11mat::WeightmapSamplerDesc();
 	CHECK(wsd.AddressU == D3D11_TEXTURE_ADDRESS_CLAMP);
 	ComPtr<ID3D11SamplerState> weightClamp;
 	REQUIRE(SUCCEEDED(dev->CreateSamplerState(&wsd, &weightClamp)));
-	REQUIRE(builtInWrap);
+	REQUIRE(builtInWrap.Get() != nullptr);
 
 	// ── Pass state as the built-in scene pass leaves it before a material draw:
 	// its own sampler on s0. Everything the material path binds per draw follows.
@@ -3584,7 +3585,7 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 	CHECK(srvAt(HE::d3d11mat::kWeightmapSrvSlot).Get() == weightmap.Get());
 	CHECK(samplerAt(HE::d3d11mat::kWeightmapSamplerSlot).Get() == weightClamp.Get());
 	const Pixel11 fixed = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
-	CHECK_MESSAGE(near8(fixed.r, 0) && near8(fixed.g, 255) && near8(fixed.b, 0),
+	CHECK_MESSAGE((near8(fixed.r, 0) && near8(fixed.g, 255) && near8(fixed.b, 0)),
 	              "t14 + clamp s0: expected layer 1 (green), got ", int(fixed.r), ",", int(fixed.g), ",", int(fixed.b));
 
 	// 2. Restore: s0 is the built-in pass's sampler again, t14 is off — nothing
@@ -3602,12 +3603,12 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 		ID3D11ShaderResourceView* wm = weightmap.Get();
 		ctx->PSSetShaderResources(HE::d3d11mat::kWeightmapSrvSlot, 1, &wm);
 		const Pixel11 wrapped = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
-		CHECK_MESSAGE(wrapped.r > 128 && wrapped.g < 128,
+		CHECK_MESSAGE((wrapped.r > 128 && wrapped.g < 128),
 		              "t14 + WRAP s0 should read texel 0's side (red), got ", int(wrapped.r), ",", int(wrapped.g), ",", int(wrapped.b));
 		ID3D11ShaderResourceView* nullSrv = nullptr;
 		ctx->PSSetShaderResources(HE::d3d11mat::kWeightmapSrvSlot, 1, &nullSrv);
 		const Pixel11 unbound = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
-		CHECK_MESSAGE(near8(unbound.r, 255) && near8(unbound.g, 0) && near8(unbound.b, 0),
+		CHECK_MESSAGE((near8(unbound.r, 255) && near8(unbound.g, 0) && near8(unbound.b, 0)),
 		              "t14 unbound should fall back to layer 0 (red), got ", int(unbound.r), ",", int(unbound.g), ",", int(unbound.b));
 	}
 
@@ -3619,7 +3620,7 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 		const Pixel11 with = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
 		HE::d3d11mat::RestoreAfterMaterialDraw(ctx, builtInWrap.Get());
 		const Pixel11 without = drawOnePixel11(w, rtv.Get(), target.Get(), staging.Get());
-		CHECK_MESSAGE(near8(with.r, 64) && near8(with.g, 128) && near8(with.b, 191),
+		CHECK_MESSAGE((near8(with.r, 64) && near8(with.g, 128) && near8(with.b, 191)),
 		              "plain material: expected (64,128,191), got ", int(with.r), ",", int(with.g), ",", int(with.b));
 		CHECK(with.r == without.r);
 		CHECK(with.g == without.g);
