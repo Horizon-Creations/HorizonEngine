@@ -165,6 +165,50 @@ TEST_CASE("ScriptContext: registry-driven horizon.math.* (Lua)")
     CHECK(engine.getGlobalNumber("_d") == doctest::Approx(5.0));
 }
 
+TEST_CASE("ScriptContext: bitwise — Lua 5.4's native operators AND the registry rows (Lua)")
+{
+    // Two halves of one audit. First: the embedded Lua is 5.4 (not 5.1/5.2),
+    // so `& | ~ << >>` are language features and no bit32 bridge is needed —
+    // if the vendored Lua ever went back to 5.2, this exec fails to PARSE.
+    // Second: the same six operations the HorizonCode nodes use reach Lua as
+    // horizon.math.* through the registry, Int-typed, so a script can share
+    // flag constants with a graph and get bit-identical answers. Values are
+    // read back as numbers: Lua's 64-bit integers cross lua_pushinteger /
+    // lua_tointeger exactly, nothing rounds through a float on the way.
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(
+        "_G._nAnd = 0x5A5A5A5A & 0x0FF00FF0\n"
+        "_G._nOr  = 0x12340000 | 0x5678\n"
+        "_G._nXor = 6 ~ 3\n"
+        "_G._nNot = ~0\n"
+        "_G._nShl = 1 << 4\n"
+        "_G._nShr = 256 >> 4\n"));
+    CHECK(engine.getGlobalNumber("_nAnd") == 173017680.0);
+    CHECK(engine.getGlobalNumber("_nOr")  == 305419896.0);
+    CHECK(engine.getGlobalNumber("_nXor") == 5.0);
+    CHECK(engine.getGlobalNumber("_nNot") == -1.0);
+    CHECK(engine.getGlobalNumber("_nShl") == 16.0);
+    CHECK(engine.getGlobalNumber("_nShr") == 16.0);
+
+    REQUIRE(engine.exec(
+        "_G._rAnd = horizon.math.bitAnd(0x5A5A5A5A, 0x0FF00FF0)\n"
+        "_G._rOr  = horizon.math.bitOr(0x12340000, 0x5678)\n"
+        "_G._rXor = horizon.math.bitXor(-1, 0x0F)\n"
+        "_G._rNot = horizon.math.bitNot(5)\n"
+        "_G._rShl = horizon.math.shiftLeft(3, 4)\n"
+        "_G._rShr = horizon.math.shiftRight(-8, 1)\n"      // arithmetic on the engine's 32-bit Int
+        "_G._rBig = horizon.math.shiftRight(-1, 40)\n"));  // the guarded count, -1 not garbage
+    CHECK(engine.getGlobalNumber("_rAnd") == 173017680.0);   // bit-exact above 2^24
+    CHECK(engine.getGlobalNumber("_rOr")  == 305419896.0);
+    CHECK(engine.getGlobalNumber("_rXor") == -16.0);
+    CHECK(engine.getGlobalNumber("_rNot") == -6.0);
+    CHECK(engine.getGlobalNumber("_rShl") == 48.0);
+    CHECK(engine.getGlobalNumber("_rShr") == -4.0);
+    CHECK(engine.getGlobalNumber("_rBig") == -1.0);
+}
+
 TEST_CASE("ScriptContext: registry-driven horizon.random.* (Lua)")
 {
     // The Random group reaches Lua through the same registry-driven dispatcher.

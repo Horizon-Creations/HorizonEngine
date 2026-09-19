@@ -444,6 +444,66 @@ TEST_CASE("ScriptContext: registry-driven horizon.math.* (Python)")
     CHECK(t.position.z == doctest::Approx(9.0f));   // max(2, 9)
 }
 
+// Bitwise, both ways: Python's own operators (a language feature, nothing the
+// engine adds) and the six registry rows. Asserted INSIDE the script, so the
+// values never leave Python's exact ints — the position detour the math case
+// above takes would round anything past 2^24 through a float.
+static const char* kPyBitwise = R"py(
+import horizon
+
+class BitUser(horizon.Behavior):
+    def on_start(self):
+        assert (0x5A5A5A5A & 0x0FF00FF0) == 173017680
+        assert (0x12340000 | 0x5678) == 305419896
+        assert (6 ^ 3) == 5 and ~0 == -1 and (1 << 4) == 16 and (256 >> 4) == 16
+        # The registry rows: Int in, Int out, bit-exact above 2^24, and the
+        # engine's 32-bit semantics (arithmetic shift, guarded counts).
+        assert horizon.math.bitAnd(0x5A5A5A5A, 0x0FF00FF0) == 173017680
+        assert horizon.math.bitOr(0x12340000, 0x5678) == 305419896
+        assert horizon.math.bitXor(-1, 0x0F) == -16
+        assert horizon.math.bitNot(5) == -6
+        assert horizon.math.shiftLeft(3, 4) == 48
+        assert horizon.math.shiftRight(-8, 1) == -4
+        assert horizon.math.shiftRight(-1, 40) == -1
+        assert type(horizon.math.bitAnd(1, 1)) is int
+        horizon.setPosition(self.entity_id, 1.0, 0.0, 0.0)
+)py";
+
+TEST_CASE("ScriptContext: bitwise — Python's native operators AND the registry rows (Python)")
+{
+    // The bindings hand an Int across as PyLong (PyLong_AsLong / PyLong_FromLong,
+    // no wrapper that could truncate or float it), so the operators and the
+    // rows agree. A failed assert would surface as AssertionError in lastError
+    // and fail on_start — the position write at the end is the "all passed".
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pybits", kPyBitwise, HE::ScriptLanguage::Python));
+    auto e  = makeEntity(world, "BitHero");
+    auto id = ctx.createInstance("pybits", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    const bool ok = ctx.callOnStart(id);
+    INFO("lastError: " << ctx.lastError());
+    REQUIRE(ok);
+    CHECK(ctx.lastError().empty());
+    CHECK(world.registry().get<TransformComponent>(e).position.x == doctest::Approx(1.0f));
+
+    // Negative control: an assert that must fail DOES reach lastError, so the
+    // green run above was the asserts passing, not the asserts being ignored.
+    static const char* kPyBitwiseWrong = R"py(
+import horizon
+class Wrong(horizon.Behavior):
+    def on_start(self):
+        assert horizon.math.shiftRight(-8, 1) == 2147483644, "logical shift"
+)py";
+    REQUIRE(ctx.loadScript("pybitswrong", kPyBitwiseWrong, HE::ScriptLanguage::Python));
+    auto e2  = makeEntity(world, "BitVillain");
+    auto id2 = ctx.createInstance("pybitswrong", e2);
+    REQUIRE(id2 != ScriptEngine::kInvalidInstance);
+    CHECK_FALSE(ctx.callOnStart(id2));
+    CHECK(ctx.lastError().find("AssertionError") != std::string::npos);
+    CHECK(ctx.lastError().find("logical shift") != std::string::npos);
+}
+
 // Behavior that writes random-library results into its entity's position.
 static const char* kPyRandom = R"py(
 import horizon

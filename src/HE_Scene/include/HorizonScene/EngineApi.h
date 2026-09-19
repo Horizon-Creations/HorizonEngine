@@ -2057,6 +2057,23 @@ namespace math {
     glm::vec3 normalize3(const glm::vec3& v);            // zero vector stays zero
     float     dot3(const glm::vec3& a, const glm::vec3& b);
     glm::vec3 cross(const glm::vec3& a, const glm::vec3& b);
+    // Bitwise operations on the 32-bit Int type (flags, masks, packed ids).
+    // A pure language feature: no privileged access anywhere near this. The
+    // bool nodes And/Or/Not are logic and stay separate — these work on the
+    // BITS of an Int, two's complement, so bitNot(0) == -1.
+    int bitAnd(int a, int b);
+    int bitOr(int a, int b);
+    int bitXor(int a, int b);
+    int bitNot(int x);
+    // Shifts are defined for EVERY count, unlike C++'s (UB at >= 32 or < 0):
+    // a negative count shifts the other way, |count| >= 32 shifts everything
+    // out (0 for left and logical-right; -1 for an arithmetic right shift of
+    // a negative value, as if the sign had kept sliding in). shiftRight is
+    // ARITHMETIC (sign-preserving, -8 >> 1 == -4) like Python's `>>` and the
+    // C++ the codegen would write — not Lua's logical `>>`, which works on
+    // 64-bit integers anyway.
+    int shiftLeft(int x, int count);
+    int shiftRight(int x, int count);
 }
 
 // ── Random (seeded PRNG; process-global state) ───────────────────────────────

@@ -922,6 +922,29 @@ namespace
 	  "The remainder after division. Wrapping an angle back into 0..360, or doing "
 	  "something every Nth item. A divisor of 0 is a runtime error: it is logged "
 	  "and the result is 0 rather than a NaN." },
+	{ "math.bitAnd",
+	  "Keeps only the bits set in BOTH integers. Testing a flag: AND the flags "
+	  "with the one you ask about, and the result is non-zero when it is set. Not "
+	  "the bool And — this works on the bits of an Int." },
+	{ "math.bitOr",
+	  "Sets every bit set in EITHER integer. Adding a flag to a set of flags." },
+	{ "math.bitXor",
+	  "Sets the bits that differ between the two integers. Toggling a flag: XOR "
+	  "with it once turns it on, XOR again turns it off." },
+	{ "math.bitNot",
+	  "Flips every bit of the integer (two's complement, so 0 becomes -1). "
+	  "Clearing a flag: AND with the NOT of it." },
+	{ "math.shiftLeft",
+	  "Moves the bits of X toward the high end by Count places, filling with "
+	  "zeros: each place doubles the value (1 shifted by 3 is 8). Packing two "
+	  "small numbers into one Int. A negative count shifts right instead; a "
+	  "count of 32 or more shifts everything out and gives 0." },
+	{ "math.shiftRight",
+	  "Moves the bits of X toward the low end by Count places: each place halves "
+	  "the value, rounding toward minus infinity. The sign is kept (-8 shifted by "
+	  "1 is -4), so a negative value never turns positive. A negative count "
+	  "shifts left instead; a count of 32 or more leaves 0 (or -1 for a negative "
+	  "value)." },
 	{ "math.min",
 	  "The smaller of the two values." },
 	{ "math.max",
