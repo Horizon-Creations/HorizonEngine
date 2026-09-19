@@ -11,6 +11,7 @@
 #include <Types/TypeRegistry.h>              // struct/enum defs mirror in on load
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -2488,6 +2489,238 @@ TEST_CASE("An audio .hasset written before Vorbis existed still loads as PCM")
 	CHECK(a->sampleRate == 8000);
 	CHECK(a->channels == 1);
 	CHECK(audioPcmFrameCount(*a) == 4);
+}
+
+// ─── Import-time sample-rate / channel conversion ────────────────────────────
+// The AudioEngine resamples every clip at play time (bcfg.sampleRate in
+// startSound), so none of this is needed for a clip to sound right. What the
+// importer offers is a smaller or more uniform ASSET — and the default must
+// therefore keep the source exactly as it was, which the negative controls pin.
+
+namespace
+{
+	constexpr double kTestPi = 3.14159265358979323846;
+
+	// A sine of `hz` at `sampleRate`, `channels` copies interleaved, with the
+	// right channel of a stereo clip at half amplitude so a downmix and a
+	// duplicate are told apart by the numbers.
+	AudioAsset sinePcm(uint32_t sampleRate, int channels, uint32_t frames, double hz)
+	{
+		AudioAsset a;
+		a.type       = HE::AssetType::Audio;
+		a.name       = "sine";
+		a.encoding   = AudioEncoding::PCM16;
+		a.sampleRate = static_cast<int>(sampleRate);
+		a.channels   = channels;
+		a.audioData.resize(static_cast<size_t>(frames) * channels * sizeof(int16_t));
+		for (uint32_t f = 0; f < frames; ++f)
+			for (int c = 0; c < channels; ++c)
+			{
+				const double v = 0.5 * std::sin(2.0 * kTestPi * hz * f / sampleRate) * (c == 0 ? 1.0 : 0.5);
+				const int16_t s = static_cast<int16_t>(std::lrint(v * 32767.0));
+				std::memcpy(a.audioData.data() + (static_cast<size_t>(f) * channels + c) * sizeof(int16_t),
+				            &s, sizeof(int16_t));
+			}
+		return a;
+	}
+
+	double pcmSample(const AudioAsset& a, size_t frame, int channel)
+	{
+		int16_t s;
+		std::memcpy(&s, a.audioData.data() + (frame * a.channels + channel) * sizeof(int16_t), sizeof(int16_t));
+		return s / 32767.0;
+	}
+
+	// A real RIFF/WAVE with any rate/channel layout, carrying the same sine.
+	bool writeSineWav(const fs::path& file, uint32_t sampleRate, int channels, uint32_t frames, double hz)
+	{
+		const AudioAsset pcm = sinePcm(sampleRate, channels, frames, hz);
+		const uint32_t dataSize = static_cast<uint32_t>(pcm.audioData.size());
+		std::vector<uint8_t> buf;
+		auto put32 = [&buf](uint32_t v) {
+			buf.push_back(static_cast<uint8_t>(v));         buf.push_back(static_cast<uint8_t>(v >> 8));
+			buf.push_back(static_cast<uint8_t>(v >> 16));   buf.push_back(static_cast<uint8_t>(v >> 24));
+		};
+		auto put16 = [&buf](uint16_t v) {
+			buf.push_back(static_cast<uint8_t>(v));         buf.push_back(static_cast<uint8_t>(v >> 8));
+		};
+		auto putTag = [&buf](const char* t) { for (int i = 0; i < 4; ++i) buf.push_back(static_cast<uint8_t>(t[i])); };
+		const uint16_t ch = static_cast<uint16_t>(channels), bits = 16;
+		putTag("RIFF"); put32(36 + dataSize); putTag("WAVE");
+		putTag("fmt "); put32(16); put16(1 /*PCM*/); put16(ch);
+		put32(sampleRate); put32(sampleRate * ch * (bits / 8));
+		put16(static_cast<uint16_t>(ch * (bits / 8))); put16(bits);
+		putTag("data"); put32(dataSize);
+		buf.insert(buf.end(), pcm.audioData.begin(), pcm.audioData.end());
+
+		std::error_code ec;
+		fs::create_directories(file.parent_path(), ec);
+		std::ofstream f(file, std::ios::binary | std::ios::trunc);
+		if (!f) return false;
+		f.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+		return static_cast<bool>(f);
+	}
+}
+
+TEST_CASE("AudioImporter::convert resamples 44.1 kHz PCM to 48 kHz and keeps the waveform")
+{
+	// A CD-rate clip in a 48 kHz project: the frame count scales by 160/147
+	// (rounded), and the samples still describe the SAME 1 kHz sine — which is
+	// what separates a resampler from a byte-copy with a new rate in the header
+	// (that one would play 9% sharp) and from linear interpolation (audibly dull
+	// and aliased at this ratio).
+	constexpr uint32_t kFrames = 4410;   // 100 ms
+	AudioAsset a = sinePcm(44100, 1, kFrames, 1000.0);
+	AudioImporter::ImportSettings s;
+	s.targetSampleRate = 48000;
+	REQUIRE(AudioImporter::convert(a, s));
+
+	CHECK(a.sampleRate == 48000);
+	CHECK(a.channels   == 1);
+	CHECK(audioPcmFrameCount(a) == 4800);   // round(4410 * 48000 / 44100)
+
+	// Compare against the ideal sine at the new rate, away from the edges where
+	// the kernel runs off the clip (the first/last ~1 ms are windowed, not wrong).
+	double errSq = 0.0, sigSq = 0.0;
+	for (size_t f = 100; f < 4700; ++f)
+	{
+		const double want = 0.5 * std::sin(2.0 * kTestPi * 1000.0 * f / 48000.0);
+		const double got  = pcmSample(a, f, 0);
+		errSq += (got - want) * (got - want);
+		sigSq += want * want;
+	}
+	CHECK(errSq / sigSq < 1e-4);   // −40 dB; the int16 quantisation floor alone is ~−90 dB
+
+	// Downsampling is band-limited: an 18 kHz tone (above the 8 kHz Nyquist of
+	// a 16 kHz target) must vanish rather than fold down as a 2 kHz alias.
+	AudioAsset hi = sinePcm(44100, 1, kFrames, 18000.0);
+	AudioImporter::ImportSettings down;
+	down.targetSampleRate = 16000;
+	REQUIRE(AudioImporter::convert(hi, down));
+	CHECK(hi.sampleRate == 16000);
+	CHECK(audioPcmFrameCount(hi) == 1600);
+	double residual = 0.0;
+	for (size_t f = 100; f < 1500; ++f) residual = std::max(residual, std::abs(pcmSample(hi, f, 0)));
+	CHECK(residual < 0.01);   // the source was at 0.5
+}
+
+TEST_CASE("AudioImporter::convert downmixes stereo to mono and duplicates mono to stereo")
+{
+	// The right channel was written at half amplitude, so the average lands at
+	// 0.75 of the left and a duplicate would not.
+	AudioAsset st = sinePcm(48000, 2, 480, 1000.0);
+	const double leftBefore = pcmSample(st, 120, 0);
+	AudioImporter::ImportSettings toMono;
+	toMono.targetChannels = 1;
+	REQUIRE(AudioImporter::convert(st, toMono));
+	CHECK(st.channels == 1);
+	CHECK(st.sampleRate == 48000);
+	CHECK(audioPcmFrameCount(st) == 480);
+	CHECK(pcmSample(st, 120, 0) == doctest::Approx(0.75 * leftBefore).epsilon(0.01));
+
+	AudioAsset mo = sinePcm(48000, 1, 480, 1000.0);
+	AudioImporter::ImportSettings toStereo;
+	toStereo.targetChannels = 2;
+	REQUIRE(AudioImporter::convert(mo, toStereo));
+	CHECK(mo.channels == 2);
+	CHECK(audioPcmFrameCount(mo) == 480);
+	CHECK(pcmSample(mo, 120, 0) == pcmSample(mo, 120, 1));
+	CHECK(pcmSample(mo, 120, 0) == doctest::Approx(leftBefore).epsilon(0.001));
+
+	// Both at once, in a 44.1 kHz stereo → 48 kHz mono import: the channels go
+	// first, so the resampler runs over half the data.
+	AudioAsset both = sinePcm(44100, 2, 4410, 1000.0);
+	AudioImporter::ImportSettings all;
+	all.targetSampleRate = 48000;
+	all.targetChannels   = 1;
+	REQUIRE(AudioImporter::convert(both, all));
+	CHECK(both.channels == 1);
+	CHECK(both.sampleRate == 48000);
+	CHECK(audioPcmFrameCount(both) == 4800);
+
+	// What it refuses: anything beyond stereo, either side — the asset is left alone.
+	AudioAsset quad = sinePcm(48000, 4, 10, 1000.0);
+	const std::vector<uint8_t> quadBytes = quad.audioData;
+	CHECK_FALSE(AudioImporter::convert(quad, toMono));
+	CHECK(quad.channels == 4);
+	CHECK(quad.audioData == quadBytes);
+	AudioImporter::ImportSettings toQuad;
+	toQuad.targetChannels = 4;
+	AudioAsset mono2 = sinePcm(48000, 1, 10, 1000.0);
+	CHECK_FALSE(AudioImporter::convert(mono2, toQuad));
+	CHECK(mono2.channels == 1);
+}
+
+TEST_CASE("AudioImporter::import stores the converted format, and the default keeps the source")
+{
+	TempContentDir dir;
+	TempContentDir srcDir("he_test_wav_resample_src");
+	const fs::path srcFile = srcDir.path / "cd_quality.wav";
+	REQUIRE(writeSineWav(srcFile, 44100, 2, 4410, 1000.0));
+
+	// Negative control first: ImportSettings{} — what the editor's Import button,
+	// the asset_compiler and Importer::importSource all pass — must store the
+	// 44.1 kHz stereo clip byte for byte. The engine resamples at play time; an
+	// import that silently changed every clip would double mono footprints and
+	// re-quantise everything for nothing.
+	{
+		REQUIRE(AudioImporter::import(srcFile, dir.path, "Audio") != nullptr);
+		ContentManager cm(dir.path.string());
+		const AudioAsset* a = cm.getAudio(cm.loadAsset("Audio/cd_quality.hasset"));
+		REQUIRE(a != nullptr);
+		CHECK(a->sampleRate == 44100);
+		CHECK(a->channels   == 2);
+		CHECK(audioPcmFrameCount(*a) == 4410);
+		const AudioAsset expect = sinePcm(44100, 2, 4410, 1000.0);
+		CHECK(a->audioData == expect.audioData);
+	}
+
+	// With a target, the asset on disk carries the converted format — rate,
+	// channels and PCM all together, so the AUMI header the engine reads
+	// describes the bytes beside it.
+	{
+		AudioImporter::ImportSettings s;
+		s.targetSampleRate = 48000;
+		s.targetChannels   = 1;
+		auto imported = AudioImporter::import(srcFile, dir.path, "Audio", s);
+		REQUIRE(imported != nullptr);
+		CHECK(imported->sampleRate == 48000);
+		CHECK(imported->channels   == 1);
+
+		ContentManager cm(dir.path.string());
+		const AudioAsset* a = cm.getAudio(cm.loadAsset("Audio/cd_quality.hasset"));
+		REQUIRE(a != nullptr);
+		CHECK(a->encoding   == AudioEncoding::PCM16);
+		CHECK(a->sampleRate == 48000);
+		CHECK(a->channels   == 1);
+		CHECK(audioPcmFrameCount(*a) == 4800);
+		// Still the 1 kHz sine, now at 0.75 amplitude (the downmix of 1.0 + 0.5).
+		double errSq = 0.0, sigSq = 0.0;
+		for (size_t f = 100; f < 4700; ++f)
+		{
+			const double want = 0.75 * 0.5 * std::sin(2.0 * kTestPi * 1000.0 * f / 48000.0);
+			const double got  = pcmSample(*a, f, 0);
+			errSq += (got - want) * (got - want);
+			sigSq += want * want;
+		}
+		CHECK(errSq / sigSq < 1e-4);
+	}
+
+	// An .ogg ignores the target: the compressed stream is the asset, and there
+	// is nothing here that could re-encode it.
+	{
+		const fs::path ogg = srcDir.path / "tone.ogg";
+		REQUIRE(writeToneOgg(ogg));
+		AudioImporter::ImportSettings s;
+		s.targetSampleRate = 8000;
+		s.targetChannels   = 1;
+		auto imported = AudioImporter::import(ogg, dir.path, "Audio", s);
+		REQUIRE(imported != nullptr);
+		CHECK(imported->encoding   == AudioEncoding::Vorbis);
+		CHECK(imported->sampleRate == he_test::kToneVorbisSampleRate);
+		CHECK(imported->channels   == he_test::kToneVorbisChannels);
+		CHECK(imported->audioData.size() == he_test::kToneVorbisOggSize);
+	}
 }
 
 // ─── Reimport keeps what the import cannot rebuild ───────────────────────────
