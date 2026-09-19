@@ -165,7 +165,9 @@ std::vector<uint8_t> packPcm16(const std::vector<float>& samples)
 	std::vector<uint8_t> out(samples.size() * sizeof(int16_t));
 	for (size_t i = 0; i < samples.size(); ++i)
 	{
-		const float   v = std::clamp(samples[i] * 32767.0f, -32768.0f, 32767.0f);
+		// Same scale as unpackPcm16, so a sample that only changed channel
+		// count comes back bit-identical; the clamp catches +1.0.
+		const float   v = std::clamp(samples[i] * 32768.0f, -32768.0f, 32767.0f);
 		const int16_t s = static_cast<int16_t>(std::lrint(v));
 		std::memcpy(out.data() + i * sizeof(int16_t), &s, sizeof(int16_t));
 	}
@@ -194,13 +196,15 @@ std::vector<float> convertChannels(const std::vector<float>& in, int fromCh, int
 }
 
 // Windowed-sinc resampler (Blackman window, 24 zero crossings per side at the
-// output-side cutoff). The kernel is evaluated per output frame rather than
-// tabulated: an import runs once, and 44.1→48 kHz is a 147:160 ratio whose
-// phase table would be larger than any clip we care about. Downsampling widens
-// the kernel by the ratio so the cutoff stays at the NEW Nyquist — that is the
-// band-limiting that linear interpolation lacks. Each output sample's weights
-// are normalised to sum to one, which removes the window's passband ripple and
-// keeps the edges (where the kernel runs off the clip) at unity gain.
+// output-side cutoff). The kernel is evaluated per tap (a sin and two cos each)
+// rather than tabulated, because an import runs once and the code stays short;
+// a 3-minute stereo track takes seconds, not milliseconds. Should this ever
+// run behind a UI button, the fix is a per-phase tap table (44.1→48 kHz is a
+// 147:160 ratio, so 160 phases × 48 taps), not a cheaper kernel. Downsampling
+// widens the kernel by the ratio so the cutoff stays at the NEW Nyquist — that
+// is the band-limiting that linear interpolation lacks. Each output sample's
+// weights are normalised to sum to one, which removes the window's passband
+// ripple and keeps the edges (where the kernel runs off the clip) at unity gain.
 std::vector<float> resampleFrames(const std::vector<float>& in, int channels,
                                   uint32_t fromRate, uint32_t toRate)
 {
@@ -220,13 +224,14 @@ std::vector<float> resampleFrames(const std::vector<float>& in, int channels,
 	for (size_t o = 0; o < outFrames; ++o)
 	{
 		const double centre = static_cast<double>(o) * step;
-		const long   first  = static_cast<long>(std::floor(centre)) - reach + 1;
-		const long   last   = static_cast<long>(std::floor(centre)) + reach;
+		// int64_t, not long: long is 32-bit on Windows.
+		const int64_t first = static_cast<int64_t>(std::floor(centre)) - reach + 1;
+		const int64_t last  = static_cast<int64_t>(std::floor(centre)) + reach;
 		std::fill(acc.begin(), acc.end(), 0.0);
 		double weightSum = 0.0;
-		for (long i = first; i <= last; ++i)
+		for (int64_t i = first; i <= last; ++i)
 		{
-			if (i < 0 || i >= static_cast<long>(inFrames)) continue;
+			if (i < 0 || i >= static_cast<int64_t>(inFrames)) continue;
 			const double d = (static_cast<double>(i) - centre) * cutoff;   // in cutoff periods
 			const double w = std::abs(d) / static_cast<double>(kZeroCrossings);   // 0..1 over the kernel
 			if (w >= 1.0) continue;

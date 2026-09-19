@@ -2625,7 +2625,7 @@ TEST_CASE("AudioImporter::convert downmixes stereo to mono and duplicates mono t
 	CHECK(mo.channels == 2);
 	CHECK(audioPcmFrameCount(mo) == 480);
 	CHECK(pcmSample(mo, 120, 0) == pcmSample(mo, 120, 1));
-	CHECK(pcmSample(mo, 120, 0) == doctest::Approx(leftBefore).epsilon(0.001));
+	CHECK(pcmSample(mo, 120, 0) == leftBefore);   // bit-identical: no resampling touched it
 
 	// Both at once, in a 44.1 kHz stereo → 48 kHz mono import: the channels go
 	// first, so the resampler runs over half the data.
