@@ -86,6 +86,12 @@ if(HE_HAVE_ZSTD)
 endif()
 # Crypto backend (OpenSSL, or fetched mbedTLS fallback) — see root CMakeLists.
 target_link_libraries(HorizonCore PRIVATE he_crypto)
+# Windows crash handler: StackWalk64 / SymFromAddr / MiniDumpWriteDump live in
+# DbgHelp (system DLL, always present). CrashHandler.cpp also carries a
+# #pragma comment(lib) for MSVC; this line is what makes any other toolchain link.
+if(WIN32)
+    target_link_libraries(HorizonCore PRIVATE dbghelp)
+endif()
 if(HE_HAVE_ASTCENC)
     # ISA-specific target name (native / sse4.1 / neon / …) — see HE_PORTABLE_BUILD.
     target_link_libraries(HorizonCore PRIVATE ${HE_ASTCENC_TARGET})
