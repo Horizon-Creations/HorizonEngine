@@ -1,10 +1,13 @@
 #include "AudioImporter.h"
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <vector>
 #include "ImporterCommon.h"
 #include "Diagnostics/Logger.h"
 
@@ -141,7 +144,152 @@ bool loadOgg(const std::filesystem::path& sourcePath, AudioAsset& out)
 	return true;
 }
 
+// ─── PCM conversion ──────────────────────────────────────────────────────────
+// Everything below works on interleaved float frames in [-1, 1]; the int16
+// asset bytes are unpacked once on the way in and clamped once on the way out.
+
+std::vector<float> unpackPcm16(const std::vector<uint8_t>& bytes)
+{
+	std::vector<float> out(bytes.size() / sizeof(int16_t));
+	for (size_t i = 0; i < out.size(); ++i)
+	{
+		int16_t s;
+		std::memcpy(&s, bytes.data() + i * sizeof(int16_t), sizeof(int16_t));
+		out[i] = static_cast<float>(s) / 32768.0f;
+	}
+	return out;
+}
+
+std::vector<uint8_t> packPcm16(const std::vector<float>& samples)
+{
+	std::vector<uint8_t> out(samples.size() * sizeof(int16_t));
+	for (size_t i = 0; i < samples.size(); ++i)
+	{
+		// Same scale as unpackPcm16, so a sample that only changed channel
+		// count comes back bit-identical; the clamp catches +1.0.
+		const float   v = std::clamp(samples[i] * 32768.0f, -32768.0f, 32767.0f);
+		const int16_t s = static_cast<int16_t>(std::lrint(v));
+		std::memcpy(out.data() + i * sizeof(int16_t), &s, sizeof(int16_t));
+	}
+	return out;
+}
+
+// Stereo→mono averages the pair (a hard-panned source loses 6 dB, the same
+// trade every DAW's downmix makes); mono→stereo duplicates, so the clip sits
+// dead centre and costs twice the bytes — which is why nothing does it by
+// default.
+std::vector<float> convertChannels(const std::vector<float>& in, int fromCh, int toCh)
+{
+	const size_t frames = in.size() / static_cast<size_t>(fromCh);
+	std::vector<float> out(frames * static_cast<size_t>(toCh));
+	if (fromCh == 2 && toCh == 1)
+	{
+		for (size_t f = 0; f < frames; ++f)
+			out[f] = 0.5f * (in[f * 2] + in[f * 2 + 1]);
+	}
+	else // 1 → 2
+	{
+		for (size_t f = 0; f < frames; ++f)
+			out[f * 2] = out[f * 2 + 1] = in[f];
+	}
+	return out;
+}
+
+// Windowed-sinc resampler (Blackman window, 24 zero crossings per side at the
+// output-side cutoff). The kernel is evaluated per tap (a sin and two cos each)
+// rather than tabulated, because an import runs once and the code stays short;
+// a 3-minute stereo track takes seconds, not milliseconds. Should this ever
+// run behind a UI button, the fix is a per-phase tap table (44.1→48 kHz is a
+// 147:160 ratio, so 160 phases × 48 taps), not a cheaper kernel. Downsampling
+// widens the kernel by the ratio so the cutoff stays at the NEW Nyquist — that
+// is the band-limiting that linear interpolation lacks. Each output sample's
+// weights are normalised to sum to one, which removes the window's passband
+// ripple and keeps the edges (where the kernel runs off the clip) at unity gain.
+std::vector<float> resampleFrames(const std::vector<float>& in, int channels,
+                                  uint32_t fromRate, uint32_t toRate)
+{
+	const size_t inFrames = in.size() / static_cast<size_t>(channels);
+	// Rounded, so a whole-second clip stays a whole second at the new rate.
+	const size_t outFrames = static_cast<size_t>(
+		(static_cast<uint64_t>(inFrames) * toRate + fromRate / 2) / fromRate);
+
+	const double step   = static_cast<double>(fromRate) / static_cast<double>(toRate);
+	const double cutoff = std::min(1.0, 1.0 / step);   // in input Nyquists
+	constexpr int kZeroCrossings = 24;
+	const double halfWidth = kZeroCrossings / cutoff;  // input samples per side
+	const int    reach     = static_cast<int>(std::ceil(halfWidth));
+
+	std::vector<float>  out(outFrames * static_cast<size_t>(channels), 0.0f);
+	std::vector<double> acc(static_cast<size_t>(channels));
+	for (size_t o = 0; o < outFrames; ++o)
+	{
+		const double centre = static_cast<double>(o) * step;
+		// int64_t, not long: long is 32-bit on Windows.
+		const int64_t first = static_cast<int64_t>(std::floor(centre)) - reach + 1;
+		const int64_t last  = static_cast<int64_t>(std::floor(centre)) + reach;
+		std::fill(acc.begin(), acc.end(), 0.0);
+		double weightSum = 0.0;
+		for (int64_t i = first; i <= last; ++i)
+		{
+			if (i < 0 || i >= static_cast<int64_t>(inFrames)) continue;
+			const double d = (static_cast<double>(i) - centre) * cutoff;   // in cutoff periods
+			const double w = std::abs(d) / static_cast<double>(kZeroCrossings);   // 0..1 over the kernel
+			if (w >= 1.0) continue;
+			constexpr double kPi = 3.14159265358979323846;   // M_PI needs _USE_MATH_DEFINES on MSVC
+			const double sinc   = (d == 0.0) ? 1.0 : std::sin(kPi * d) / (kPi * d);
+			const double window = 0.42 + 0.5 * std::cos(kPi * w) + 0.08 * std::cos(2.0 * kPi * w);
+			const double weight = sinc * window;
+			weightSum += weight;
+			const float* frame = in.data() + static_cast<size_t>(i) * channels;
+			for (int c = 0; c < channels; ++c) acc[c] += weight * frame[c];
+		}
+		if (weightSum > 0.0)
+			for (int c = 0; c < channels; ++c)
+				out[o * channels + c] = static_cast<float>(acc[c] / weightSum);
+	}
+	return out;
+}
+
 } // namespace
+
+bool AudioImporter::convert(AudioAsset& asset, const ImportSettings& settings)
+{
+	if (asset.encoding != AudioEncoding::PCM16)
+	{
+		if (settings.targetSampleRate != 0 || settings.targetChannels != 0)
+			HE_LOG_WARN(Tool, "AudioImporter: %s keeps its compressed stream (%d Hz, %d ch) — "
+			                  "the requested %u Hz / %u ch conversion only applies to PCM",
+			            asset.name.c_str(), asset.sampleRate, asset.channels,
+			            settings.targetSampleRate, settings.targetChannels);
+		return true;
+	}
+
+	const int      fromCh   = asset.channels;
+	const uint32_t fromRate = static_cast<uint32_t>(std::max(asset.sampleRate, 0));
+	const int      toCh     = settings.targetChannels   != 0 ? settings.targetChannels   : fromCh;
+	const uint32_t toRate   = settings.targetSampleRate != 0 ? settings.targetSampleRate : fromRate;
+	if (fromCh == toCh && fromRate == toRate) return true;
+
+	if (fromCh < 1 || fromCh > 2 || toCh < 1 || toCh > 2 || fromRate == 0
+	    || asset.audioData.size() % (sizeof(int16_t) * static_cast<size_t>(fromCh)) != 0)
+	{
+		HE_LOG_ERROR(Tool, "AudioImporter: cannot convert %s (%d ch, %u Hz, %zu bytes) to "
+		                   "%d ch / %u Hz — only mono and stereo PCM are supported",
+		             asset.name.c_str(), fromCh, fromRate, asset.audioData.size(), toCh, toRate);
+		return false;
+	}
+
+	std::vector<float> samples = unpackPcm16(asset.audioData);
+	if (fromCh != toCh)
+		samples = convertChannels(samples, fromCh, toCh);
+	if (fromRate != toRate)
+		samples = resampleFrames(samples, toCh, fromRate, toRate);
+
+	asset.audioData  = packPcm16(samples);
+	asset.channels   = toCh;
+	asset.sampleRate = static_cast<int>(toRate);
+	return true;
+}
 
 bool AudioImporter::isSupportedSource(const std::filesystem::path& sourcePath)
 {
@@ -172,11 +320,17 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 	const ImportSettings&          settings,
 	const Importer::OutputTargets& outputs)
 {
-	(void)settings; // resampling not implemented yet
-
 	auto asset = std::make_unique<AudioAsset>();
 	if (!decode(sourcePath, *asset))
 		return nullptr;
+
+	// The source's own format goes into the log so the line below can say what
+	// the conversion did — the asset carries only the stored format afterwards.
+	const int sourceRate     = asset->sampleRate;
+	const int sourceChannels = asset->channels;
+	if (!convert(*asset, settings))
+		return nullptr;
+	const bool converted = asset->sampleRate != sourceRate || asset->channels != sourceChannels;
 
 	// decode() fills name/rate/channels/PCM; only the on-disk location is the
 	// importer's business — and the name goes with it, because a re-import that
@@ -195,6 +349,9 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 		("AudioImporter: " + sourcePath.filename().string() + " -> " + asset->path
 		 + " (" + std::to_string(sampleRate) + " Hz, "
 		 + std::to_string(channels) + " ch, "
+		 + (converted ? "converted from " + std::to_string(sourceRate) + " Hz / "
+		                + std::to_string(sourceChannels) + " ch, "
+		              : std::string())
 		 + (asset->encoding == AudioEncoding::Vorbis ? "Ogg Vorbis kept compressed, "
 		                                             : "PCM, ")
 		 + std::to_string(asset->audioData.size() / 1024) + " KiB)").c_str());
