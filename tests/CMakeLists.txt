@@ -748,6 +748,20 @@ target_sources(he_tests PRIVATE test_process_runner.cpp)
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_PROC_CHILD="$<TARGET_FILE:he_proc_child>")
 
+# ─── Crash-handler fixture ─────────────────────────────────────────────────────
+# A real child that installs CrashHandler and then really dies. What the handler
+# does is only observable from outside the process it runs in: the .crash file
+# it leaves, and the exit status the OS reports afterwards. A separate binary
+# rather than a mode of he_proc_child, which is deliberately dependency-free —
+# this one has to link HorizonCore. On Windows it lands next to he_tests, where
+# the POST_BUILD step below has already copied the engine DLLs.
+add_executable(he_crash_child crash_child_main.cpp)
+target_link_libraries(he_crash_child PRIVATE HorizonCore)
+target_compile_features(he_crash_child PRIVATE cxx_std_20)
+add_dependencies(he_tests he_crash_child)
+target_compile_definitions(he_tests PRIVATE
+    HE_TEST_CRASH_CHILD="$<TARGET_FILE:he_crash_child>")
+
 # ─── Native game-logic fixture ─────────────────────────────────────────────────
 # A real shared library implementing IGameLogic, loaded at runtime by
 # test_gamelogic_loader.cpp to exercise GameLogicLoader end to end.
