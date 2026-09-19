@@ -1914,7 +1914,12 @@ private:
             // A zero divisor is a runtime error in both backends: hc::divideByZero
             // logs the interpreter's line and yields its 0 (never a division by
             // zero in the emitted C++, not even the float kind).
-            return "([&]() -> float { const float b__ = " + input(n, 1, fnCtx) +
+            // b__ is deliberately NOT const: with a literal 0 on the pin MSVC
+            // folds `const float b__ = 0.0f` into the guarded `/ b__` and stops
+            // with C2124 "divide or mod by zero" (Windows CI, hcgen_C_math_ops)
+            // — the runtime branch never reaches that division, the front end
+            // does not care. A plain local is not a constant expression.
+            return "([&]() -> float { float b__ = " + input(n, 1, fnCtx) +
                    "; return b__ != 0.0f ? (" + input(n, 0, fnCtx) + ") / b__ : hc::divideByZero(); }())";
         case NT::Greater: return "((" + input(n, 0, fnCtx) + ") > (" + input(n, 1, fnCtx) + "))";
         case NT::Less:    return "((" + input(n, 0, fnCtx) + ") < (" + input(n, 1, fnCtx) + "))";

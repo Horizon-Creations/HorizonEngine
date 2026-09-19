@@ -213,7 +213,8 @@ if(WIN32)
     add_library(RendererD3D11 STATIC
         src/Backends/D3D11/D3D11Renderer.cpp
         src/Backends/D3D11/D3D11ShaderManager.cpp
-        include/Backends/D3D11/D3D11ShaderManager.h)
+        include/Backends/D3D11/D3D11ShaderManager.h
+        include/Backends/D3D11/D3D11MaterialBindings.h)
     target_include_directories(RendererD3D11 PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${HE_CORE_INCLUDE}

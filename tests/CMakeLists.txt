@@ -817,9 +817,12 @@ if(HE_HAVE_SHADERC)
     # the Thema-56 cases build the material root signature and a real PSO on a
     # WARP device (CreateGraphicsPipelineState is the only judge of "does the
     # root signature cover every register the bytecode binds"); WARP ships with
-    # Windows too, so a runner without a GPU still gets the verdict.
+    # Windows too, so a runner without a GPU still gets the verdict. d3d11: the
+    # Thema-57 case draws a wired Landscape Layer Blend on a D3D11 WARP device
+    # through the same per-draw bindings D3D11Renderer uses (t14 + s0) and reads
+    # the pixel back — the only D3D11 execution this tree gets without a GPU.
     if(WIN32)
-        target_link_libraries(he_tests PRIVATE d3dcompiler d3d12 dxgi)
+        target_link_libraries(he_tests PRIVATE d3dcompiler d3d12 d3d11 dxgi)
     endif()
 endif()
 
