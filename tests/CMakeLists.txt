@@ -826,6 +826,20 @@ if(HE_HAVE_SHADERC)
     endif()
 endif()
 
+# The D3D11/D3D12 shader managers (Thema 62): compiled straight into the test
+# exe like the other HorizonRendering sources above — RendererD3D11/D3D12 would
+# drag the whole backends in, and neither renderer instantiates these classes
+# anyway. The test drives them on a WARP device and reads COM refcounts across
+# cleanup(). Independent of HE_HAVE_SHADERC: D3DCompile needs no glslang. Added
+# BEFORE the per-file ctest registration below so the test gets its own entry.
+if(WIN32)
+    target_sources(he_tests PRIVATE
+        test_d3d_shader_manager.cpp
+        ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/D3D11/D3D11ShaderManager.cpp
+        ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/D3D12/D3D12ShaderManager.cpp)
+    target_link_libraries(he_tests PRIVATE d3dcompiler d3d11)
+endif()
+
 # One ctest entry per test SOURCE FILE, not one for the whole binary.
 #
 # The suite is wait-bound, not CPU-bound: it spawns real git processes, kills
