@@ -25,6 +25,7 @@
 #include <HorizonRendering/ClipSpace.h>       // GL depth (-1..1) → D3D depth (0..1)
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
+#include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
 #include <SDL3/SDL.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -2413,7 +2414,8 @@ struct D3D12RendererImpl
     // that has neither falls back to the built-in path.
     // Canonical SPIRV-Cross HLSL register mapping (shader_model=50, binding→register):
     //   b0 HeLighting(FS) | b1 U(VS) | b3 HeParams(FS) | b8/b9 HeLighting/HeParams(WPO VS)
-    //   t2 heTex0, t4..t7 heTexP0..3 (+ SamplerState s2, s4..s7).
+    //   t2 heTex0, t4..t7 heTexP0..3, t10..t18 + t31..t33 the lighting preamble
+    //   (+ SamplerState s0..s15) — the full table lives in D3D12MaterialRootSignature.h.
     HE::MaterialShaderLibrary m_matShaderLib;
     std::unordered_map<uint64_t, ComPtr<ID3D12PipelineState>> m_materialPSOs; // key = hash^hdr^transparent
     // FXC output per SHADER hash, shared by the up to four PSO variants (LDR/HDR ×
@@ -2425,7 +2427,8 @@ struct D3D12RendererImpl
     // Shader-visible ring of per-DrawCall SRV blocks — k_matSrvPerDraw consecutive slots
     // in the root table's order: [0] heTex0 (t2), [1..4] heTexP0..3 (t4..t7), [5..6] the
     // GI masks (t10/t11), [7] heCsm (t12, the cascade shadow array), [8] heLocalShadow
-    // (t13, the local point/spot atlas). k_frameCount × k_matMaxDraws blocks: a
+    // (t13, the local point/spot atlas), [9..16] the preamble's remaining SRVs (t14..t18,
+    // t31..t33 — see D3D12MaterialRootSignature.h). k_frameCount × k_matMaxDraws blocks: a
     // shader-visible heap must never be rewritten under a frame in flight, so each frame
     // slot owns its own region and the frame fence in Render() is what makes reuse safe —
     // the same argument as the U/HeParams rings.
@@ -2434,14 +2437,17 @@ struct D3D12RendererImpl
     // the defaults every draw block starts from — null RGBA8 in [0..4], the GI masks in
     // [5..6] (rewritten at GI-target creation), the shadow arrays in [7..8] (the cascade
     // slot is rewritten by createShadowArray() on a resolution swap — it MUST land here,
-    // not in the ring, so every later draw block inherits it). One CopyDescriptorsSimple
-    // per draw, then the draw's real textures overwrite [0..4].
+    // not in the ring, so every later draw block inherits it), null views in [9..16] (the
+    // preamble's gates for those stay 0 on D3D12). One CopyDescriptorsSimple per draw,
+    // then the draw's real textures overwrite [0..4].
     ComPtr<ID3D12DescriptorHeap> m_matSrvStaging;
     UINT                         m_matSrvInc = 0;
     UINT                         m_matSrvCursor[k_frameCount] = {}; // per-frame block cursor (one block per DrawCall)
-    static constexpr UINT        k_matSrvPerDraw = 9;
-    static constexpr UINT        k_matCsmSlot = 7;         // heCsm (t12): the cascade shadow array
-    static constexpr UINT        k_matLocalShadowSlot = 8; // heLocalShadow (t13): the local (point/spot) atlas
+    // Slot layout = the root table in D3D12MaterialRootSignature.h (the ONE description
+    // the signature is serialised from and he_tests builds a WARP PSO against).
+    static constexpr UINT        k_matSrvPerDraw      = HE::d3d12mat::kSrvPerDraw;
+    static constexpr UINT        k_matCsmSlot         = HE::d3d12mat::kSlotCsm;         // heCsm (t12): the cascade shadow array
+    static constexpr UINT        k_matLocalShadowSlot = HE::d3d12mat::kSlotLocalShadow; // heLocalShadow (t13): the local (point/spot) atlas
     D3D12_CPU_DESCRIPTOR_HANDLE matSrvCpu(UINT slot) const
     {
         D3D12_CPU_DESCRIPTOR_HANDLE h = m_matSrvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -7196,8 +7202,9 @@ struct D3D12RendererImpl
 // A4: node-graph material PSOs
 //
 // Graph materials render through per-material PSOs built at draw time from
-// MaterialShaderLibrary HLSL (VS + PS). They share ONE root signature + a dedicated
-// 5-slot white SRV heap, and per frame in flight: a HeLighting CB (filled once/frame)
+// MaterialShaderLibrary HLSL (VS + PS). They share ONE root signature (described in
+// D3D12MaterialRootSignature.h) + a ring of k_matSrvPerDraw-slot SRV blocks, and per
+// frame in flight: a HeLighting CB (filled once/frame)
 // plus U and HeParams rings (one 256-B slot per draw). Mirrors the Vulkan A4 path
 // (VulkanRenderer::createMaterialResources + GetOrBuildMaterialPipeline). Always
 // compiled in: only the runtime cross-compile needs HE_HAVE_SHADERC, the pak's
@@ -7205,88 +7212,28 @@ struct D3D12RendererImpl
 // ─────────────────────────────────────────────────────────────────────────────
 void D3D12RendererImpl::createMaterialResources()
 {
-    // Root signature: root CBVs b0/b1/b3/b8/b9 + one SRV table for t2 + t4..t7 + static
-    // samplers s2 + s4..s7 (linear-wrap). Registers match SPIRV-Cross HLSL (binding→register,
-    // shader_model=50, no remap — verified in ShaderCompiler.cpp / spirv_hlsl.cpp).
-    D3D12_ROOT_PARAMETER params[6]{};
-    auto cbv = [&](int i, UINT reg) {
-        params[i].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
-        params[i].Descriptor       = { reg, 0 };
-        params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    };
-    cbv(0, 0); // b0 HeLighting (FS)
-    cbv(1, 1); // b1 U (VS)
-    cbv(2, 3); // b3 HeParams (FS)
-    cbv(3, 8); // b8 HeLighting (WPO VS)
-    cbv(4, 9); // b9 HeParams   (WPO VS)
-
-    // Texture table: t2 (heTex0), t4..t7 (heTexP0..3), t10..t11 (heGIShadow +
-    // heGILocal, Material-ABI v2.1), t12 (heCsm, Texture2DArray, v2.2) and t13
-    // (heLocalShadow) — five ranges → k_matSrvPerDraw (9) consecutive heap
-    // slots, one such block per DrawCall in the ring. t3 is intentionally skipped
-    // (SPIRV-Cross leaves it unused for the mesh path); t8/t9 belong to the WPO
-    // custom-vertex UBOs. heCsmShadow() samples t12 behind csmSplits.w > 0: the
-    // slot (k_matCsmSlot) holds the cascade shadow array — the SAME array the
-    // built-in scene shader reads at t0 — so graph materials fall back to CSM
-    // when the GI masks are absent, exactly like GL/Metal/D3D11. t13 (heLocalShadow,
-    // slot k_matLocalShadowSlot) is the local (point/spot) shadow atlas the
-    // built-in shader reads at t17; heLocalShadowFactor() samples it behind
-    // lightParams[i].y > 0.
-    D3D12_DESCRIPTOR_RANGE texRanges[5]{};
-    texRanges[0].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    texRanges[0].NumDescriptors                    = 1;
-    texRanges[0].BaseShaderRegister                = 2; // t2
-    texRanges[0].RegisterSpace                     = 0;
-    texRanges[0].OffsetInDescriptorsFromTableStart = 0; // heap slot 0
-    texRanges[1].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    texRanges[1].NumDescriptors                    = 4;
-    texRanges[1].BaseShaderRegister                = 4; // t4..t7
-    texRanges[1].RegisterSpace                     = 0;
-    texRanges[1].OffsetInDescriptorsFromTableStart = 1; // heap slots 1..4
-    texRanges[2].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    texRanges[2].NumDescriptors                    = 2;
-    texRanges[2].BaseShaderRegister                = 10; // t10..t11 (GI masks)
-    texRanges[2].RegisterSpace                     = 0;
-    texRanges[2].OffsetInDescriptorsFromTableStart = 5; // heap slots 5..6
-    texRanges[3].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    texRanges[3].NumDescriptors                    = 1;
-    texRanges[3].BaseShaderRegister                = 12; // t12 (heCsm cascade array)
-    texRanges[3].RegisterSpace                     = 0;
-    texRanges[3].OffsetInDescriptorsFromTableStart = k_matCsmSlot; // heap slot 7
-    texRanges[4].RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    texRanges[4].NumDescriptors                    = 1;
-    texRanges[4].BaseShaderRegister                = 13; // t13 (heLocalShadow atlas)
-    texRanges[4].RegisterSpace                     = 0;
-    texRanges[4].OffsetInDescriptorsFromTableStart = k_matLocalShadowSlot; // heap slot 8
-    params[5].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[5].DescriptorTable.NumDescriptorRanges = 5;
-    params[5].DescriptorTable.pDescriptorRanges   = texRanges;
-    params[5].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
-
-    // s2 + s4..s7 linear-wrap (tiling material textures); s10..s11 linear-clamp
-    // (screen-space GI masks must not wrap at the viewport edge); s12 + s13
-    // POINT-clamp (heCsmShadow's / heLocalShadowFactor's PCF taps compare
-    // against single texels of the depth arrays, the same sampler the
-    // built-in scene shader has on s0).
-    D3D12_STATIC_SAMPLER_DESC samp[9]{};
-    const UINT sregs[9] = { 2, 4, 5, 6, 7, 10, 11, 12, 13 };
-    for (int i = 0; i < 9; ++i)
-    {
-        samp[i].Filter         = (sregs[i] >= 12) ? D3D12_FILTER_MIN_MAG_MIP_POINT
-                                                  : D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        samp[i].AddressU = samp[i].AddressV = samp[i].AddressW =
-            (i < 5) ? D3D12_TEXTURE_ADDRESS_MODE_WRAP : D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        samp[i].ShaderRegister   = sregs[i];
-        samp[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
-        samp[i].MaxLOD           = D3D12_FLOAT32_MAX;
-    }
-
-    D3D12_ROOT_SIGNATURE_DESC rsd{};
-    rsd.NumParameters     = 6;
-    rsd.pParameters       = params;
-    rsd.NumStaticSamplers = 9;
-    rsd.pStaticSamplers   = samp;
-    rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    // Root signature: root CBVs b0/b1/b3/b8/b9 + ONE SRV table (t2, t4..t7, t10..t18,
+    // t31..t33 → k_matSrvPerDraw consecutive heap slots, one block per DrawCall in the
+    // ring) + the 16 static samplers s0..s15. The description is
+    // HE::d3d12mat::DescribeMaterialRootSignature (D3D12MaterialRootSignature.h): every
+    // register MaterialShaderLibrary::fragment(HLSL) pins is in there, because
+    // CreateGraphicsPipelineState rejects a PSO whose pixel shader names a register the
+    // signature does not cover (E_INVALIDARG), and the preamble references ALL of them
+    // statically — the gates (fog.z/w, giParams.z, ssr.x, cloudShadowB.x, csmSplits.w) are
+    // runtime uniforms FXC cannot fold. The old five-range / nine-sampler signature
+    // (t2/t4..t7/t10..t13, s2/s4..s7/s10..s13) made every lit graph material's PSO fail
+    // on real hardware (Thema 56); he_tests keeps that as its negative control.
+    //
+    // Slot meanings: [0] heTex0 (t2), [1..4] heTexP0..3 (t4..t7), [5..6] the GI masks
+    // (t10/t11), [7] k_matCsmSlot = heCsm (t12, the SAME cascade array the built-in scene
+    // shader reads at t0, sampled behind csmSplits.w > 0), [8] k_matLocalShadowSlot =
+    // heLocalShadow (t13, the local atlas the built-in shader reads at t17, sampled behind
+    // lightParams[i].y > 0), [9..16] heLandscapeWeights / heSkyEnv / heAO / DDGI atlases /
+    // heSSRFwd / heGIReflFwd / heCloudShadow (t14..t18, t31..t33) — null views for now,
+    // their gates stay 0 in fillMatLight.
+    HE::d3d12mat::MaterialRootSignature matRs;
+    HE::d3d12mat::DescribeMaterialRootSignature(matRs);
+    const D3D12_ROOT_SIGNATURE_DESC& rsd = matRs.desc;
     ComPtr<ID3DBlob> sig, err;
     if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
         FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
@@ -7303,14 +7250,15 @@ void D3D12RendererImpl::createMaterialResources()
     //   m_matSrvStaging — the CPU-only k_matSrvPerDraw-slot TEMPLATE: null RGBA8 in [0..4]
     //                     (an empty heTex0/heTexP slot samples (0,0,0,0); the shader's
     //                     hasTex flag and the graph's own defaults decide what that means),
-    //                     the GI masks in [5..6], the cascade array for heCsm in [7] and
-    //                     the local atlas for heLocalShadow in [8].
+    //                     the GI masks in [5..6], the cascade array for heCsm in [7],
+    //                     the local atlas for heLocalShadow in [8] and null views of the
+    //                     preamble's remaining SRVs in [9..16].
     //   m_matSrvHeap     — the shader-visible ring of per-draw blocks the template is
     //                     copied into, k_frameCount × k_matMaxDraws × k_matSrvPerDraw.
     {
         m_matSrvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         D3D12_DESCRIPTOR_HEAP_DESC hd{};
-        hd.NumDescriptors = k_matSrvPerDraw; // [0..4] heTex0 + heTexP0..3, [5..6] GI masks (t10/t11), [7] heCsm (t12), [8] heLocalShadow (t13)
+        hd.NumDescriptors = k_matSrvPerDraw; // [0..4] heTex0 + heTexP0..3, [5..6] GI masks (t10/t11), [7] heCsm (t12), [8] heLocalShadow (t13), [9..16] t14..t18 + t31..t33
         hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
         hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; // copy source → CPU-only
         if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m_matSrvStaging))))
@@ -7355,7 +7303,23 @@ void D3D12RendererImpl::createMaterialResources()
         // Slot 8 (k_matLocalShadowSlot): the local (point/spot) shadow atlas for
         // heLocalShadow (t13) — built once in createDepth(), never resized.
         // Same null-array fallback; lightParams[i].y stays 0 then.
-        writeShadowArraySrv(localShadowDepth.Get(), h, kLocalShadowLayers);
+        writeShadowArraySrv(localShadowDepth.Get(), h, kLocalShadowLayers); h.ptr += inc;
+        // Slots 9..16: the preamble's remaining SRVs (heLandscapeWeights, heSkyEnv,
+        // heAO, the DDGI atlases, heSSRFwd, heGIReflFwd, heCloudShadow). Declared so
+        // the PSO is legal, never sampled: fillMatLight leaves their gates at 0
+        // (wiring the real targets through here is the D3D11-parity job). Null views
+        // of the DIMENSION the shader declares — heSkyEnv is a samplerCube, and a null
+        // descriptor of the wrong dimension is undefined behaviour, not "zero".
+        for (UINT slot = HE::d3d12mat::kSlotLocalShadow + 1; slot < HE::d3d12mat::kSrvPerDraw; ++slot)
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC nv = nullSrv;
+            if (slot == HE::d3d12mat::kSlotSkyEnv)
+            {
+                nv.ViewDimension       = D3D12_SRV_DIMENSION_TEXTURECUBE;
+                nv.TextureCube.MipLevels = 1;
+            }
+            device->CreateShaderResourceView(nullptr, &nv, h); h.ptr += inc;
+        }
     }
 
     // Per-frame rings: HeLighting (once/frame) + U ring + HeParams ring (per draw, 256-B slots).

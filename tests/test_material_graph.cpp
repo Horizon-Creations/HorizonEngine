@@ -2385,8 +2385,22 @@ TEST_CASE("Material instance resolves to the master's shader hash + baked varian
 #if defined(HE_TESTS_HAVE_SHADERC)
 #include <regex>
 #if defined(_WIN32)
+// windows.h FIRST, so ID3D12InfoQueue::GetMessage is declared and called under
+// the same macro state (winuser.h renames GetMessage to GetMessageW).
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #include <d3dcompiler.h>
+#include <d3d12.h>
+#include <d3d12sdklayers.h>
+#include <d3d12shader.h>
+#include <dxgi1_4.h>
 #include <wrl/client.h>
+#include <Backends/D3D12/D3D12MaterialRootSignature.h>
 #endif
 
 namespace
@@ -2535,20 +2549,57 @@ bool hasDuplicateRegister(const std::string& hlsl, char kind)
 	return std::adjacent_find(regs.begin(), regs.end()) != regs.end();
 }
 
-// The SM 5.0 sampler budget is exactly full (MaterialShaderLibrary::fragment,
-// HLSL branch): a material that declares a SEVENTEENTH combined sampler has no
-// register left, and the two that can land on a slot a moved preamble sampler
-// already took. FXC ACCEPTS that — measured on Windows CI (run 35177900601,
-// 17.09.2026), against the claim in parity-p1's 5e52d64e that it is X4500 —
-// so both compile; the two SamplerState then read whatever sampler state the
-// renderer bound at that one slot, which is a hardware-verification item, not
-// a compile failure. Named here, not hidden: the sharing is asserted, so the
-// day the preamble separates textures from samplers (parity-p1 9c72cbe7) this
-// list goes red and gets deleted.
-bool sharesSamplerRegister(const std::string& name)
+// FXC's actual rule for shared sampler registers (X4500 "overlapping register
+// semantics"): two SamplerState DECLARATIONS on one register are fine as long
+// as at most one of them is USED — measured on Windows CI (run 35177900601,
+// 17.09.2026: the sweep's unwired Landscape Layer Blend, dead weightmap sampler
+// on the live s14, accepted) against run 35217490668 (the wired blend, both
+// live, rejected). The material preamble leans on that: heAO is read with
+// texelFetch, so its SamplerState is declared and dead, and heLandscapeWeights'
+// live sampler shares its register s0 (MaterialShaderLibrary kHlslMaterialPins).
+// So the check is not "no duplicate s register" but "no register with two LIVE
+// samplers" — every SamplerState whose name appears anywhere past its own
+// declaration counts as live.
+std::vector<int> liveSamplerRegisters(const std::string& hlsl)
 {
-	return name == "Landscape Layer Blend"     // heLandscapeWeights (14) vs heCloudShadow → s14
-	    || name == "Backdrop (UI domain)";     // heBackdrop (9) vs heGIReflFwd → s9
+	const std::regex decl("SamplerState\\s+(\\w+)\\s*:\\s*register\\(s([0-9]+)\\)\\s*;");
+	std::vector<int> live;
+	for (auto it = std::sregex_iterator(hlsl.begin(), hlsl.end(), decl); it != std::sregex_iterator(); ++it)
+	{
+		const std::string name = (*it)[1].str();
+		const std::regex use("\\b" + name + "\\b");
+		size_t uses = 0;
+		for (auto u = std::sregex_iterator(hlsl.begin(), hlsl.end(), use); u != std::sregex_iterator(); ++u)
+			++uses;
+		if (uses > 1) live.push_back(std::stoi((*it)[2].str())); // one hit is the declaration itself
+	}
+	return live;
+}
+bool twoLiveSamplersShareRegister(const std::string& hlsl)
+{
+	std::vector<int> live = liveSamplerRegisters(hlsl);
+	std::sort(live.begin(), live.end());
+	return std::adjacent_find(live.begin(), live.end()) != live.end();
+}
+
+// A lit graph with a WIRED Landscape Layer Blend: three named layers with real
+// inputs, so the weightmap sample survives and heLandscapeWeights (t14, the
+// live sampler on s0) is in the shader. The registry sweep's unwired blend
+// folds it away, which is why the sweep alone never saw the X4500.
+MaterialGraph landscapeGraph()
+{
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int lb  = g.addNode(MatNodeType::LandscapeLayerBlend);
+	g.findNode(lb)->s = "Grass\nRock\nSand";
+	for (int i = 0; i < 3; ++i)
+	{
+		const int c = g.addNode(MatNodeType::ConstColor);
+		g.findNode(c)->p[i] = 1.0f;
+		REQUIRE(g.connect(c, 0, lb, i));
+	}
+	REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+	return g;
 }
 } // namespace
 
@@ -2614,14 +2665,36 @@ TEST_CASE("Every node's HLSL stays inside SM 5.0's register range (D3D11/D3D12 b
 		CHECK_MESSAGE(b <= 13,  "'", c.name, "': cbuffer register b", b, " is beyond SM 5.0's b13 (X4567)");
 		CHECK_MESSAGE(t <= 127, "'", c.name, "': SRV register t", t, " is beyond SM 5.0's t127");
 		// One resource per register, or FXC stops with X4500. The pinned table
-		// keeps SRVs at their binding numbers, so t/b never collide; samplers can.
+		// keeps SRVs at their binding numbers, so t/b never collide; samplers
+		// can — and may, as long as only one of the two is used (see
+		// liveSamplerRegisters). A material that samples heAO through its
+		// sampler again would trip this for every lit node.
 		CHECK_MESSAGE(!hasDuplicateRegister(ps, 't'), "'", c.name, "': two SRVs share a t register");
 		CHECK_MESSAGE(!hasDuplicateRegister(ps, 'b'), "'", c.name, "': two cbuffers share a b register");
-		if (sharesSamplerRegister(c.name))
-			CHECK_MESSAGE(hasDuplicateRegister(ps, 's'), "'", c.name,
-			              "' no longer shares a sampler register — the SM 5.0 budget has room now, drop it from sharesSamplerRegister");
-		else
-			CHECK_MESSAGE(!hasDuplicateRegister(ps, 's'), "'", c.name, "': two samplers share an s register");
+		CHECK_MESSAGE(!twoLiveSamplersShareRegister(ps), "'", c.name, "': two LIVE samplers share an s register (X4500)");
+	}
+	// The rule is only worth anything if it can tell dead from live: the lit
+	// preamble's heAO sampler must be the dead one on s0 (texelFetch), and a
+	// wired Landscape Layer Blend the live one.
+	{
+		const std::string lit = lib.fragment(std::hash<std::string>{}("liveprobe-lit"),
+		                                     HE::generateFragment(makeDemoGraph()).glsl, B::HLSL).source;
+		CHECK(lit.find("register(s0)") != std::string::npos);        // declared …
+		const std::vector<int> litRegs = registersOf(lit, 's');
+		CHECK(std::count(litRegs.begin(), litRegs.end(), 0) == 1);
+		const std::vector<int> litLive = liveSamplerRegisters(lit);
+		CHECK(std::find(litLive.begin(), litLive.end(), 0) == litLive.end()); // … but dead
+		CHECK(lit.find("heAO.Load(") != std::string::npos);
+		CHECK(lit.find("heAO.Sample(") == std::string::npos);
+
+		const std::string lsc = lib.fragment(std::hash<std::string>{}("liveprobe-landscape"),
+		                                     HE::generateFragment(landscapeGraph()).glsl, B::HLSL).source;
+		const std::vector<int> lscRegs = registersOf(lsc, 's');
+		CHECK(std::count(lscRegs.begin(), lscRegs.end(), 0) == 2);   // both declared on s0 …
+		const std::vector<int> lscLive = liveSamplerRegisters(lsc);
+		CHECK(std::count(lscLive.begin(), lscLive.end(), 0) == 1);   // exactly one live user of s0
+		CHECK(lsc.find("heLandscapeWeights.Sample(_heLandscapeWeights_sampler") != std::string::npos);
+		CHECK_FALSE(twoLiveSamplersShareRegister(lsc));
 	}
 	const std::string& vs = lib.standardVertex(B::HLSL).source;
 	CHECK(maxRegister(vs, 'b') <= 13);
@@ -2657,8 +2730,48 @@ TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile i
 		std::string err;
 		CHECK_MESSAGE(fxc(lib.standardVertex(B::HLSL).source, "matVS", "vs_5_0", err), "standard vertex: ", err);
 	}
-	// No exclusions: the two shared-register cases (sharesSamplerRegister) are
-	// accepted by FXC too, which is exactly what this loop measured first.
+	// The rule the sampler pins lean on (liveSamplerRegisters), measured on the
+	// real compiler with three synthetic shaders rather than inferred from the
+	// material sweep: (a) a dead SamplerState declared BEFORE a live one on the
+	// same register — the exact shape of s0 (heLandscapeWeights is pinned ahead
+	// of heAO in declaration order); (b) the reverse order; (c) a dead
+	// SamplerState alone on s16, past the SM 5.0 range. Only (a) is what the
+	// preamble depends on, so only (a) is asserted; (b)/(c) are logged so the
+	// next person who has to move a pin knows what FXC will say without a run.
+	{
+		auto probe = [&](const char* body, const char* what) -> bool {
+			std::string e;
+			const bool ok = fxc(body, what, "ps_5_0", e);
+			const std::string verdict = ok ? std::string("accepted") : ("rejected: " + e);
+			MESSAGE("FXC probe [", what, "]: ", verdict);
+			return ok;
+		};
+		const bool deadThenLive = probe(
+			"Texture2D<float4> a : register(t0); SamplerState sa : register(s0);\n"
+			"Texture2D<float4> b : register(t1); SamplerState sb : register(s0);\n"
+			"float4 main(float2 uv : TEXCOORD0) : SV_Target { return a.Load(int3(0,0,0)) + b.Sample(sb, uv); }",
+			"dead SamplerState before a live one on s0");
+		CHECK_MESSAGE(deadThenLive, "FXC no longer accepts a dead SamplerState beside a live one — "
+		                            "the heAO/heLandscapeWeights share of s0 is broken");
+		probe("Texture2D<float4> a : register(t0); SamplerState sa : register(s0);\n"
+		      "Texture2D<float4> b : register(t1); SamplerState sb : register(s0);\n"
+		      "float4 main(float2 uv : TEXCOORD0) : SV_Target { return a.Sample(sa, uv) + b.Load(int3(0,0,0)); }",
+		      "live SamplerState before a dead one on s0");
+		probe("Texture2D<float4> a : register(t0); SamplerState sa : register(s16);\n"
+		      "float4 main(float2 uv : TEXCOORD0) : SV_Target { return a.Load(int3(0,0,0)); }",
+		      "dead SamplerState alone on s16");
+		// And the negative that gives the probe its teeth: two LIVE users.
+		std::string e;
+		const bool bothLive = fxc(
+			"Texture2D<float4> a : register(t0); SamplerState sa : register(s0);\n"
+			"Texture2D<float4> b : register(t1); SamplerState sb : register(s0);\n"
+			"float4 main(float2 uv : TEXCOORD0) : SV_Target { return a.Sample(sa, uv) + b.Sample(sb, uv); }",
+			"two live on s0", "ps_5_0", e);
+		CHECK_FALSE_MESSAGE(bothLive, "FXC accepted two live samplers on one register — X4500 is gone?");
+		CHECK(e.find("X4500") != std::string::npos);
+	}
+	// No exclusions: every node shader, the wired Landscape Layer Blend included
+	// (it is in the sweep only unwired; the WARP case below builds the wired one).
 	int okPs = 0, total = 0;
 	for (const NodeShaderCase& c : allNodeShaderCases())
 	{
@@ -2675,6 +2788,435 @@ TEST_CASE("Every node's HLSL compiles under FXC exactly as D3D11/D3D12 compile i
 		}
 	}
 	MESSAGE("FXC accepted ", okPs, "/", total, " node pixel shaders (ps_5_0)");
+}
+
+// ═══ Thema 56: the D3D12 material root signature against a real device ═══════
+// FXC accepting the pixel shader is only half of what D3D12 asks. The other half
+// is CreateGraphicsPipelineState, which checks every register the bytecode binds
+// against the root signature and refuses the PSO (E_INVALIDARG) when one is
+// uncovered. The shared lighting preamble binds t14..t18 / t31..t33 and the
+// moved samplers s0/s1/s3/s8/s9/s14/s15 STATICALLY — their gates are runtime
+// uniforms FXC cannot fold — so a signature that only covers the "material"
+// registers t2/t4..t7/t10..t13 fails every lit graph material on real hardware
+// and the draw silently falls back to built-in PBR. A WARP device reproduces
+// that verdict on a runner without a GPU: the description in
+// D3D12MaterialRootSignature.h (the one the renderer serialises) has to be
+// accepted, the pre-fix one (kLegacyRangeCount / kLegacySamplerCount) has to
+// be rejected, or the premise of the fix is wrong. Nothing here draws: a draw
+// with a gate set (cloud shadow, AO, sky IBL …) needs the D3D12 fill to bind
+// the real targets, which is the D3D11-parity job, not this one.
+namespace
+{
+struct WarpDevice
+{
+	Microsoft::WRL::ComPtr<IDXGIFactory4>  factory;
+	Microsoft::WRL::ComPtr<IDXGIAdapter>   adapter;
+	Microsoft::WRL::ComPtr<ID3D12Device>   device;
+	Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue; // null without the SDK layers (CI runners)
+	std::string log;
+};
+
+// Always WARP, never the box's GPU: the verdict must not depend on the driver
+// the runner happens to have. The debug layer is optional — Graphics Tools is
+// not installed on a stock runner — but when it is there its messages are the
+// best diagnostic a failing CHECK can carry, so they are collected.
+bool createWarpDevice(WarpDevice& w)
+{
+	using Microsoft::WRL::ComPtr;
+	{
+		ComPtr<ID3D12Debug> dbg;
+		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) dbg->EnableDebugLayer();
+	}
+	HRESULT hr = CreateDXGIFactory2(0, IID_PPV_ARGS(&w.factory));
+	if (FAILED(hr)) { w.log = "CreateDXGIFactory2 failed: " + std::to_string(hr); return false; }
+	hr = w.factory->EnumWarpAdapter(IID_PPV_ARGS(&w.adapter));
+	if (FAILED(hr)) { w.log = "EnumWarpAdapter failed: " + std::to_string(hr); return false; }
+	hr = D3D12CreateDevice(w.adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&w.device));
+	if (FAILED(hr)) { w.log = "D3D12CreateDevice(WARP) failed: " + std::to_string(hr); return false; }
+	w.device.As(&w.infoQueue); // stays null without the debug layer
+	return true;
+}
+
+// Everything the info queue collected since the last call, as one string.
+std::string drainInfoQueue(WarpDevice& w)
+{
+	if (!w.infoQueue) return {};
+	std::string out;
+	const UINT64 n = w.infoQueue->GetNumStoredMessages();
+	for (UINT64 i = 0; i < n; ++i)
+	{
+		SIZE_T len = 0;
+		w.infoQueue->GetMessage(i, nullptr, &len);
+		std::vector<char> buf(len);
+		auto* msg = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+		if (SUCCEEDED(w.infoQueue->GetMessage(i, msg, &len)) && msg->pDescription)
+			out += std::string(msg->pDescription, msg->DescriptionByteLength) + "\n";
+	}
+	w.infoQueue->ClearStoredMessages();
+	return out;
+}
+
+HRESULT makeRootSignature(ID3D12Device* dev, const D3D12_ROOT_SIGNATURE_DESC& desc,
+                          Microsoft::WRL::ComPtr<ID3D12RootSignature>& out, std::string& err)
+{
+	using Microsoft::WRL::ComPtr;
+	ComPtr<ID3DBlob> sig, blob;
+	HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &blob);
+	if (blob) err.assign(static_cast<const char*>(blob->GetBufferPointer()), blob->GetBufferSize());
+	if (FAILED(hr)) return hr;
+	return dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(), IID_PPV_ARGS(&out));
+}
+
+// The PSO description D3D12Renderer::GetOrBuildMaterialPSO builds (LDR, opaque):
+// same input layout, formats and state, so the ONLY thing that differs between
+// the positive and the negative case below is the root signature.
+HRESULT makeMaterialPso(ID3D12Device* dev, ID3D12RootSignature* rs, ID3DBlob* vs, ID3DBlob* ps,
+                        Microsoft::WRL::ComPtr<ID3D12PipelineState>& out)
+{
+	static const D3D12_INPUT_ELEMENT_DESC layout[] = {
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+	};
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+	pd.pRootSignature        = rs;
+	pd.VS                    = { vs->GetBufferPointer(), vs->GetBufferSize() };
+	pd.PS                    = { ps->GetBufferPointer(), ps->GetBufferSize() };
+	pd.InputLayout           = { layout, 3 };
+	pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	pd.NumRenderTargets      = 1;
+	pd.RTVFormats[0]         = DXGI_FORMAT_R8G8B8A8_UNORM;
+	pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+	pd.SampleDesc.Count      = 1;
+	pd.SampleMask            = UINT_MAX;
+	pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+	pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+	pd.RasterizerState.DepthClipEnable = TRUE;
+	pd.DepthStencilState.DepthEnable    = TRUE;
+	pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+	pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+	pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+	return dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out));
+}
+
+Microsoft::WRL::ComPtr<ID3DBlob> fxcBlob(const std::string& src, const char* profile, std::string& err)
+{
+	Microsoft::WRL::ComPtr<ID3DBlob> blob, cerr;
+	const HRESULT hr = D3DCompile(src.c_str(), src.size(), "mat", nullptr, nullptr,
+	                              "main", profile, 0, 0, &blob, &cerr);
+	if (cerr) err.assign(static_cast<const char*>(cerr->GetBufferPointer()), cerr->GetBufferSize());
+	return SUCCEEDED(hr) ? blob : nullptr;
+}
+
+// One resource binding the compiled bytecode keeps (D3DReflect): its kind and
+// register. Anything FXC dead-stripped is absent — which is what makes this
+// evidence that the preamble's samples are IN the shader, not merely declared.
+struct Binding { D3D_SHADER_INPUT_TYPE type; UINT reg; std::string name; };
+std::vector<Binding> reflectBindings(ID3DBlob* bytecode)
+{
+	using Microsoft::WRL::ComPtr;
+	std::vector<Binding> out;
+	ComPtr<ID3D12ShaderReflection> refl;
+	if (FAILED(D3DReflect(bytecode->GetBufferPointer(), bytecode->GetBufferSize(), IID_PPV_ARGS(&refl))))
+		return out;
+	D3D12_SHADER_DESC sd{};
+	refl->GetDesc(&sd);
+	for (UINT i = 0; i < sd.BoundResources; ++i)
+	{
+		D3D12_SHADER_INPUT_BIND_DESC b{};
+		if (SUCCEEDED(refl->GetResourceBindingDesc(i, &b)))
+			out.push_back({ b.Type, b.BindPoint, b.Name ? b.Name : "" });
+	}
+	return out;
+}
+bool binds(const std::vector<Binding>& v, D3D_SHADER_INPUT_TYPE t, UINT reg)
+{
+	return std::any_of(v.begin(), v.end(), [&](const Binding& b) { return b.type == t && b.reg == reg; });
+}
+
+// Does the (possibly truncated) description cover this binding? Textures must
+// fall inside one of the table's ranges, samplers must be one of the static
+// samplers, cbuffers one of the root CBVs. The description's own counts are
+// the truth here, not a second hand-written list.
+bool coveredBy(const HE::d3d12mat::MaterialRootSignature& rs, UINT rangeCount, UINT samplerCount,
+               const Binding& b)
+{
+	switch (b.type)
+	{
+		case D3D_SIT_TEXTURE:
+			for (UINT r = 0; r < rangeCount; ++r)
+				if (b.reg >= rs.ranges[r].BaseShaderRegister &&
+				    b.reg <  rs.ranges[r].BaseShaderRegister + rs.ranges[r].NumDescriptors)
+					return true;
+			return false;
+		case D3D_SIT_SAMPLER:
+			for (UINT i = 0; i < samplerCount; ++i)
+				if (rs.samplers[i].ShaderRegister == b.reg) return true;
+			return false;
+		case D3D_SIT_CBUFFER:
+			for (UINT i = 0; i < HE::d3d12mat::kParamCount; ++i)
+				if (rs.params[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV &&
+				    rs.params[i].Descriptor.ShaderRegister == b.reg)
+					return true;
+			return false;
+		default:
+			return false; // a UAV / structured buffer would be news
+	}
+}
+} // namespace
+
+TEST_CASE("D3D12: a lit graph material's PSO needs the FULL material root signature (WARP)")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	WarpDevice w;
+	const bool haveWarp = createWarpDevice(w);
+	REQUIRE_MESSAGE(haveWarp, w.log);
+	if (!w.infoQueue) MESSAGE("no D3D12 debug layer on this machine (runtime verdicts only)");
+
+	HE::MaterialShaderLibrary lib;
+	std::string err;
+	ComPtr<ID3DBlob> vs = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+	REQUIRE_MESSAGE(vs.Get() != nullptr, "standard vertex: ", err);
+
+	// The demo graph is LIT (BaseColor + Metallic into a Surface Output): its
+	// heLitP call is what drags the whole preamble in. The reflection proves
+	// the bytecode still binds the sky cube, the AO buffer, both DDGI atlases,
+	// the forward reflection results and the cloud-shadow map — FXC kept every
+	// one of them, so the PSO genuinely depends on the fix.
+	const std::string glsl = HE::generateFragment(makeDemoGraph()).glsl;
+	const auto& hl = lib.fragment(std::hash<std::string>{}(glsl), glsl, B::HLSL);
+	REQUIRE_MESSAGE(hl.ok, hl.log);
+	ComPtr<ID3DBlob> ps = fxcBlob(hl.source, "ps_5_0", err);
+	REQUIRE_MESSAGE(ps.Get() != nullptr, "demo graph pixel shader: ", err);
+	{
+		const std::vector<Binding> b = reflectBindings(ps.Get());
+		REQUIRE(!b.empty());
+		for (UINT t : { 15u, 16u, 17u, 18u, 31u, 32u, 33u })
+			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, t), "the lit PS no longer binds t", t,
+			              " — the preamble changed, re-check D3D12MaterialRootSignature.h");
+		for (UINT sreg : { 1u, 3u, 8u, 9u, 14u, 15u })
+			CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, sreg), "the lit PS no longer binds s", sreg);
+		// s0 is heAO's DEAD sampler (texelFetch → Load): declared in the HLSL,
+		// absent from the bytecode. That absence is what makes room for
+		// heLandscapeWeights below.
+		CHECK_MESSAGE(!binds(b, D3D_SIT_SAMPLER, 0), "the lit PS binds s0 — heAO is sampled through a sampler again, "
+		                                             "and heLandscapeWeights has no register left");
+		CHECK(binds(b, D3D_SIT_CBUFFER, 0)); // HeLighting (HeParams b3 is dead-stripped: the demo graph has no parameters)
+	}
+
+	// Positive: the description the renderer serialises → root signature + PSO.
+	HE::d3d12mat::MaterialRootSignature full;
+	HE::d3d12mat::DescribeMaterialRootSignature(full);
+	ComPtr<ID3D12RootSignature> fullRs;
+	{
+		const HRESULT hr = makeRootSignature(w.device.Get(), full.desc, fullRs, err);
+		const std::string why = drainInfoQueue(w);
+		REQUIRE_MESSAGE(SUCCEEDED(hr), "full root signature: ", err, why);
+	}
+	{
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = makeMaterialPso(w.device.Get(), fullRs.Get(), vs.Get(), ps.Get(), pso);
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(SUCCEEDED(hr), "PSO against the full signature failed, hr=", hr, ": ", why);
+	}
+
+	// Negative control: the pre-Thema-56 signature (five ranges, nine samplers)
+	// with the SAME shaders and PSO description. If WARP accepts this, the bug
+	// this test guards never existed and the whole premise needs a second look —
+	// do not loosen the assertion, report it.
+	HE::d3d12mat::MaterialRootSignature legacy;
+	HE::d3d12mat::DescribeMaterialRootSignature(legacy, HE::d3d12mat::kLegacyRangeCount,
+	                                            HE::d3d12mat::kLegacySamplerCount);
+	ComPtr<ID3D12RootSignature> legacyRs;
+	{
+		const HRESULT hr = makeRootSignature(w.device.Get(), legacy.desc, legacyRs, err);
+		const std::string why = drainInfoQueue(w);
+		REQUIRE_MESSAGE(SUCCEEDED(hr), "legacy root signature: ", err, why);
+	}
+	{
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = makeMaterialPso(w.device.Get(), legacyRs.Get(), vs.Get(), ps.Get(), pso);
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(hr == E_INVALIDARG, "the legacy signature was NOT rejected (hr=", hr,
+		              ") — the premise of Thema 56 is wrong: ", why);
+		CHECK(pso.Get() == nullptr);
+		if (!why.empty()) MESSAGE("legacy rejection: ", why);
+	}
+
+	// Two more shapes a project ships, both against the full signature: Texture
+	// Sample nodes (heTex0 t2 + heTexP0/1 t4/t5) and World Position Offset (the
+	// custom vertex, b8/b9 on the VS side).
+	auto psoFor = [&](const char* what, const std::string& fragGlsl, const std::string& vertBody)
+	{
+		const uint64_t h = std::hash<std::string>{}(fragGlsl);
+		const auto& f = lib.fragment(h, fragGlsl, B::HLSL);
+		REQUIRE_MESSAGE(f.ok, what, ": ", f.log);
+		std::string e;
+		ComPtr<ID3DBlob> p = fxcBlob(f.source, "ps_5_0", e);
+		REQUIRE_MESSAGE(p.Get() != nullptr, what, " pixel shader: ", e);
+		ComPtr<ID3DBlob> v = vs;
+		if (!vertBody.empty())
+		{
+			const auto& cv = lib.customVertex(std::hash<std::string>{}(vertBody), vertBody, B::HLSL);
+			REQUIRE_MESSAGE(cv.ok, what, ": ", cv.log);
+			v = fxcBlob(cv.source, "vs_5_0", e);
+			REQUIRE_MESSAGE(v.Get() != nullptr, what, " custom vertex: ", e);
+		}
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = makeMaterialPso(w.device.Get(), fullRs.Get(), v.Get(), p.Get(), pso);
+		const std::string why = drainInfoQueue(w);
+		CHECK_MESSAGE(SUCCEEDED(hr), what, ": PSO failed, hr=", hr, ": ", why);
+	};
+	{
+		MaterialGraph t;
+		const int out = t.addNode(MatNodeType::Output);
+		const int def = t.addNode(MatNodeType::TextureSample);           // no path → heTex0
+		const int a   = t.addNode(MatNodeType::TextureSample);
+		t.findNode(a)->s = "Tex/grass.hasset";                            // → heTexP0
+		const int b   = t.addNode(MatNodeType::TextureSample);
+		t.findNode(b)->s = "Tex/rock.hasset";                             // → heTexP1
+		const int add = t.addNode(MatNodeType::Add);
+		REQUIRE(t.connect(def, 0, add, 0));
+		REQUIRE(t.connect(a,   0, add, 1));
+		REQUIRE(t.connect(add, 0, out, HE::kMatOutputBaseColorPin));
+		REQUIRE(t.connect(b,   0, out, HE::kMatOutputEmissivePin));
+		const HE::MatShaderGen gen = HE::generateFragment(t);
+		REQUIRE(gen.textures.size() == 2);
+		psoFor("Texture Sample x3", gen.glsl, gen.vertexBody);
+	}
+	{
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int tm  = g.addNode(MatNodeType::Time);
+		const int sn  = g.addNode(MatNodeType::Sine);
+		const int cmb = g.addNode(MatNodeType::Combine3);
+		REQUIRE(g.connect(tm,  0, sn,  0));
+		REQUIRE(g.connect(sn,  0, cmb, 0));
+		REQUIRE(g.connect(cmb, 0, out, HE::kMatOutputWPOPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE_FALSE(gen.vertexBody.empty());
+		psoFor("World Position Offset", gen.glsl, gen.vertexBody);
+	}
+
+	// A WIRED Landscape Layer Blend — the shape that used to die in FXC with
+	// X4500 (heLandscapeWeights unpinned on s14 beside the live heCloudShadow,
+	// run 35217490668). Its sampler now lives on s0, the register heAO leaves
+	// dead, so the real thing has to hold end to end: FXC accepts it, the
+	// bytecode binds t14 AND s0, and the PSO builds against the full signature.
+	// The legacy signature (no t14 range) must still refuse it — the positive
+	// verdict is worthless without a device that can say no.
+	{
+		const std::string lglsl = HE::generateFragment(landscapeGraph()).glsl;
+		const auto& lf = lib.fragment(std::hash<std::string>{}(lglsl), lglsl, B::HLSL);
+		REQUIRE_MESSAGE(lf.ok, lf.log);
+		std::string lerr;
+		ComPtr<ID3DBlob> lps = fxcBlob(lf.source, "ps_5_0", lerr);
+		REQUIRE_MESSAGE(lps.Get() != nullptr, "wired Landscape Layer Blend pixel shader: ", lerr);
+		{
+			const std::vector<Binding> b = reflectBindings(lps.Get());
+			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, 14), "the landscape PS does not bind t14 (heLandscapeWeights)");
+			CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, 0),  "the landscape PS does not bind s0 (heLandscapeWeights' sampler)");
+			CHECK_MESSAGE(binds(b, D3D_SIT_TEXTURE, 16), "the landscape PS does not bind t16 (heAO)");
+			for (UINT sreg : { 1u, 3u, 8u, 9u, 14u, 15u })
+				CHECK_MESSAGE(binds(b, D3D_SIT_SAMPLER, sreg), "the landscape PS no longer binds s", sreg);
+		}
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makeMaterialPso(w.device.Get(), fullRs.Get(), vs.Get(), lps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(SUCCEEDED(hr), "wired Landscape Layer Blend: PSO against the full signature failed, hr=", hr, ": ", why);
+		}
+		{
+			ComPtr<ID3D12PipelineState> pso;
+			const HRESULT hr = makeMaterialPso(w.device.Get(), legacyRs.Get(), vs.Get(), lps.Get(), pso);
+			const std::string why = drainInfoQueue(w);
+			CHECK_MESSAGE(hr == E_INVALIDARG, "the legacy signature accepted the landscape PS (hr=", hr, "): ", why);
+			CHECK(pso.Get() == nullptr);
+		}
+	}
+}
+
+TEST_CASE("D3D12: every node's bytecode binds only registers the material root signature covers")
+{
+	// The WARP case above builds PSOs for four shapes; this is the net for the
+	// other ~70 node shaders without ~70 PSOs: reflect each compiled PS (and the
+	// two vertex stages) and check every kept binding against the description's
+	// own ranges / static samplers / root CBVs. The legacy description doubles
+	// as the negative control — it must leave the lit shaders uncovered, or the
+	// coverage check is not checking anything.
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::d3d12mat::MaterialRootSignature rs;
+	HE::d3d12mat::DescribeMaterialRootSignature(rs);
+	auto uncovered = [&](const std::vector<Binding>& b, UINT ranges, UINT samplers) {
+		std::string out;
+		for (const Binding& x : b)
+			if (!coveredBy(rs, ranges, samplers, x))
+				out += (out.empty() ? "" : ", ") + x.name + "(" + std::to_string(static_cast<int>(x.type)) + ":" + std::to_string(x.reg) + ")";
+		return out;
+	};
+
+	// Negative control for the reflection itself: a shader binding t50 / s15
+	// has an uncovered texture, a hand-rolled register outside every range.
+	{
+		std::string err;
+		ComPtr<ID3DBlob> bad = fxcBlob("Texture2D t : register(t50); SamplerState s : register(s15);"
+		                               "float4 main(float2 uv : TEXCOORD0) : SV_Target { return t.Sample(s, uv); }",
+		                               "ps_5_0", err);
+		REQUIRE_MESSAGE(bad.Get() != nullptr, err);
+		const std::vector<Binding> b = reflectBindings(bad.Get());
+		REQUIRE(b.size() == 2);
+		CHECK(uncovered(b, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount) == "t(2:50)");
+	}
+
+	HE::MaterialShaderLibrary lib;
+	{
+		std::string err;
+		ComPtr<ID3DBlob> vs = fxcBlob(lib.standardVertex(B::HLSL).source, "vs_5_0", err);
+		REQUIRE_MESSAGE(vs.Get() != nullptr, err);
+		CHECK(uncovered(reflectBindings(vs.Get()), HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount).empty());
+	}
+	int shaders = 0, litUncoveredByLegacy = 0;
+	for (const NodeShaderCase& c : allNodeShaderCases())
+	{
+		std::string err;
+		ComPtr<ID3DBlob> ps = fxcBlob(lib.fragment(caseHash(c), c.glsl, B::HLSL).source, "ps_5_0", err);
+		REQUIRE_MESSAGE(ps.Get() != nullptr, "'", c.name, "': ", err);
+		const std::vector<Binding> b = reflectBindings(ps.Get());
+		const std::string miss = uncovered(b, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount);
+		// UI-domain materials are not drawn through this root signature — D3D12
+		// (like D3D11/Vulkan) has no UI-domain material path yet, only Metal and
+		// GL bind heBackdrop — so its t9 is outside the signature by design. It
+		// must stay the ONLY thing uncovered there, though.
+		if (c.name.find("(UI domain)") != std::string::npos)
+		{
+			const bool onlyBackdrop = miss.empty() || miss == "heBackdrop(2:9)";
+			CHECK_MESSAGE(onlyBackdrop, "'", c.name,
+			              "' binds registers beyond heBackdrop the material root signature does not cover: ", miss);
+		}
+		else
+			CHECK_MESSAGE(miss.empty(), "'", c.name, "' binds registers the material root signature does not cover: ", miss);
+		if (!uncovered(b, HE::d3d12mat::kLegacyRangeCount, HE::d3d12mat::kLegacySamplerCount).empty())
+			++litUncoveredByLegacy;
+		++shaders;
+		if (!c.vertBody.empty())
+		{
+			const auto& cv = lib.customVertex(std::hash<std::string>{}(c.vertBody), c.vertBody, B::HLSL);
+			ComPtr<ID3DBlob> vs = fxcBlob(cv.source, "vs_5_0", err);
+			REQUIRE_MESSAGE(vs.Get() != nullptr, "'", c.name, "' custom vertex: ", err);
+			const std::string vmiss = uncovered(reflectBindings(vs.Get()), HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount);
+			CHECK_MESSAGE(vmiss.empty(), "'", c.name, "' custom vertex binds uncovered registers: ", vmiss);
+		}
+	}
+	// Every Surface-domain case is lit, so the legacy signature must fail
+	// nearly all of them; only the UI-domain ones (unlit) can pass it.
+	CHECK_MESSAGE(litUncoveredByLegacy > shaders / 2,
+	              "the legacy signature covers ", shaders - litUncoveredByLegacy, "/", shaders,
+	              " node shaders — the negative control is not biting");
+	MESSAGE("material root signature covers ", shaders, " node pixel shaders; the legacy one left ",
+	        litUncoveredByLegacy, " of them uncovered");
 }
 #endif // _WIN32
 #endif // HE_TESTS_HAVE_SHADERC

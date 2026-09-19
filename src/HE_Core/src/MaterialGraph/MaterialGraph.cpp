@@ -1159,7 +1159,9 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     if (c.usesLandscapeWeights)
         // Binding 14 — the first free slot after the shared preamble's shadow/GI
         // pins (see MaterialShaderLibrary's MSL binding map). Bound per DRAW from
-        // the terrain chunk's parent landscape, not per material.
+        // the terrain chunk's parent landscape, not per material. On D3D its
+        // sampler is pinned to s0, the register heAO leaves dead (texelFetch);
+        // the SM 5.0 budget has no other room (MaterialShaderLibrary, HLSL pins).
         src += "layout(set = 0, binding = 14) uniform sampler2D heLandscapeWeights;\n";
     for (size_t i = 0; i < c.textures.size(); ++i) // project textures (binding 4 + slot)
         src += "layout(set = 0, binding = " + std::to_string(4 + i)
