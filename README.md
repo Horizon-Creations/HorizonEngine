@@ -4,7 +4,7 @@ A cross-platform 3D game engine and editor, written from scratch in C++20. It is
 built to power our own game **Catania**, which is why the feature list leans
 towards what an actual production needs rather than towards a demo reel.
 
-**Current release: 0.3.0 "Aurora"** — [Downloads](https://horizoncreations.dev/HorizonEngine/HE.html) ·
+**Current release: 0.5.0 "Parhelion"** — [Downloads](https://horizoncreations.dev/HorizonEngine/HE.html) ·
 [Documentation](https://horizoncreations.dev/HorizonEngineDocs/) · [Website](https://horizoncreations.dev)
 
 ---
@@ -32,6 +32,9 @@ the network, with an authoritative lock table and per-user undo.
 
 **Four ways to write gameplay.** Visual scripting (HorizonCode), Lua, Python and
 native C++ — chosen per project, with the editor adapting to the choice.
+HorizonCode has real debugging: breakpoints, step/continue, a watch window for
+the paused state, and runtime errors that surface in the console instead of
+failing silently.
 
 **What a shipped game needs.** Jolt-backed physics, skeletal animation and
 blending, navmesh generation and agents, audio, particles, an in-game UI widget
@@ -50,7 +53,7 @@ in daily use on Catania. It is **not at 1.0**, and the honest gaps are:
 | Area | State |
 |---|---|
 | Metal, OpenGL | Complete |
-| Direct3D 11/12, Vulkan | Close to parity — the material node-graph shaders and the newest sky work are still Metal/OpenGL only |
+| Direct3D 11/12, Vulkan | Close to parity — shadows (cascaded + point/spot atlases) and the material node-graph shader pipeline are now wired on all five backends, still awaiting a manual smoke test on real D3D/Vulkan hardware; the newest sky work (nebula/atmosphere, volumetric clouds) is still Metal/OpenGL only |
 | Linux | Builds and runs, but has had far less real-world use than macOS and Windows |
 | Texture compression | ASTC on Apple hardware; BCn encoders are not written yet |
 

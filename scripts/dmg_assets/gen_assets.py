@@ -143,6 +143,14 @@ THEMES = {
                    (0.68, (150, 84, 92)), (0.86, (216, 132, 84)),
                    (1.0, (248, 196, 128))],
                   (255, 186, 110), 175, 45, (255, 200, 130)),
+    # 0.5.0 "Parhelion" — a cold, bright daytime sky, the kind you get sun dogs
+    # in: deep winter blue overhead fading to a pale, almost white haze at the
+    # horizon where the ice-crystal halo would sit. No stars, it is daylight;
+    # the glow leans warm-white rather than a coloured sun to suggest the
+    # halo's light without drawing an actual sun disc.
+    "parhelion": ([(0.0, (20, 46, 92)), (0.40, (58, 92, 148)),
+                   (0.72, (150, 178, 210)), (1.0, (232, 236, 238))],
+                  (255, 240, 214), 165, 0, (238, 232, 216)),
 }
 
 # Themes listed here also get northern-lights curtains over the sky. The base

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HorizonEngine VERSION 0.4.0 LANGUAGES CXX)
+project(HorizonEngine VERSION 0.5.0 LANGUAGES CXX)
 
 # CMP0135 (CMake >= 3.24): archives fetched via FetchContent URL get the
 # extraction time as file timestamp instead of the archive's own, so a changed
@@ -873,7 +873,7 @@ endfunction()
 # FORCE so editing this line always wins over a value already stored in the CMake
 # cache — without it, a reconfigure keeps the old cached codename (the version from
 # project() updates, but the codename would silently stay stale).
-set(HE_VERSION_CODENAME "Alpenglow" CACHE STRING "Sky-themed codename for this release" FORCE)
+set(HE_VERSION_CODENAME "Parhelion" CACHE STRING "Sky-themed codename for this release" FORCE)
 configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/HorizonVersion.h.in"
     "${CMAKE_BINARY_DIR}/generated/HorizonVersion.h"
