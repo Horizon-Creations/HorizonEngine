@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -2395,12 +2396,14 @@ TEST_CASE("Material instance resolves to the master's shader hash + baked varian
 #endif
 #include <windows.h>
 #include <d3dcompiler.h>
+#include <d3d11.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <d3d12shader.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 #include <Backends/D3D12/D3D12MaterialRootSignature.h>
+#include <Backends/D3D11/D3D11MaterialBindings.h>
 #endif
 
 namespace
