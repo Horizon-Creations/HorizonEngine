@@ -19,6 +19,7 @@
 #include <Diagnostics/Log.h>   // addSink — the divide-by-zero case reads what reached the log
 #include <algorithm>
 #include <cmath>
+#include <climits>   // INT_MIN: the bitwise rows' edge operand
 #include <map>
 #include <string>
 #include <vector>
@@ -579,6 +580,35 @@ TEST_CASE("HE::api::math::mod: a zero divisor is an error, a non-zero one is sil
 	CHECK(seen.count("", HE::LogLevel::Warning) == 0);
 	CHECK(HE::api::math::mod(7.0f, 0.0f) == 0.0f);   // 0, not NaN
 	CHECK(seen.count("math.mod: modulo by zero", HE::LogLevel::Error) == 1);
+}
+
+TEST_CASE("codegen parity: bitwise_ops — Int bit operations, full 32-bit patterns, guarded shifts")
+{
+	// Six registry rows, one EngineCall each; fire() already compared every
+	// callApi trace line (args AND results) across the backends, so the
+	// interpreter and the compiled class agreed on each value. The checks
+	// below pin WHAT they agreed on: a wrong-but-identical result (a Float
+	// detour rounding 0x5A5A5A5A, a logical instead of an arithmetic right
+	// shift) would pass parity and fail here.
+	ParityPair p("fix/bitwise_ops");
+	p.fire("Calc");
+	CHECK(p.var("andv").i == 173017680);     // 0x5A5A5A5A & 0x0FF00FF0, above 2^24
+	CHECK(p.var("orv").i == 305419896);      // 0x12345678
+	CHECK(p.var("xorv").i == -16);           // -1 ^ 0x0F
+	CHECK(p.var("notv").i == -6);            // ~5
+	CHECK(p.var("shl").i == 48);             // 3 << 4
+	CHECK(p.var("shlTop").i == INT_MIN);     // 1 << 31 lands in the sign bit
+	CHECK(p.var("shlBig").i == 0);           // count 32: everything shifted out
+	CHECK(p.var("shlNeg").i == -4);          // count -1 → shiftRight(-8, 1)
+	CHECK(p.var("shr").i == 0);              // 0x7FFFFFFF >> 31
+	CHECK(p.var("shrNeg").i == -4);          // arithmetic: -8 >> 1
+	CHECK(p.var("shrBig").i == 0);           // count 40 on a positive value
+	CHECK(p.var("shrBigNeg").i == -1);       // count 40 on a negative value
+	CHECK(p.var("shrCountNeg").i == 48);     // count -4 → shiftLeft(3, 4)
+	// Thirteen pure calls, thirteen dispatches per backend — no caching, no
+	// extra reads, and every one went through the registry seam.
+	const auto isBit = [](const std::string& t) { return t.rfind("callApi math.", 0) == 0; };
+	CHECK(std::count_if(p.interp.trace.begin(), p.interp.trace.end(), isBit) == 13);
 }
 
 TEST_CASE("codegen parity: vector_ops")

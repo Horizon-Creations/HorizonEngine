@@ -480,6 +480,51 @@ inline HE::hccg::ClassSource fxMath()
     return f.done("math_ops");
 }
 
+// 3a — bitwise_ops: the six Int bit operations (registry rows math.bitAnd …
+// math.shiftRight), every one a pure EngineCall, so both backends reach the
+// same HE::api::math function and parity is structural. What the fixture
+// pins is the seam: full 32-bit patterns cross the Value marshalling
+// unrounded (an operand above 2^24 would be lossy on a Float pin), negative
+// operands keep their sign through the uint32_t detour, and the guarded shift
+// counts (negative, >= 32) take the guard path on BOTH sides. Operands go in
+// as pinDefaults, not ConstInt: ConstInt keeps its value in f[0], a float.
+inline HE::hccg::ClassSource fxBitwise()
+{
+    Fx f;
+    for (const char* v : { "andv", "orv", "xorv", "notv",
+                           "shl", "shlTop", "shlBig", "shlNeg",
+                           "shr", "shrNeg", "shrBig", "shrBigNeg", "shrCountNeg" })
+        f.var(v, PT::Int);
+
+    const int ev = f.event("Calc");
+    int prev = ev;
+    auto call = [&](const char* id, int a, int b, const std::string& var, bool unary = false)
+    {
+        const int n = f.engineCall(id);
+        Node* node = f.g.findNode(n);
+        node->pinDefaults[0] = Value::ofInt(a);
+        if (!unary) node->pinDefaults[1] = Value::ofInt(b);
+        const int s = f.setVar(var, PT::Int);
+        f.data(n, 0, s, 0);
+        f.exec(prev, s);
+        prev = s;
+    };
+    call("math.bitAnd",     0x5A5A5A5A, 0x0FF00FF0, "andv");          // 173017680, above 2^24
+    call("math.bitOr",      0x12340000, 0x00005678, "orv");           // 305419896
+    call("math.bitXor",     -1,         0x0F,       "xorv");          // -16
+    call("math.bitNot",     5,          0,          "notv", true);    // -6
+    call("math.shiftLeft",  3,          4,          "shl");           // 48
+    call("math.shiftLeft",  1,          31,         "shlTop");        // INT_MIN: the sign bit is just a bit
+    call("math.shiftLeft",  1,          32,         "shlBig");        // 0, not UB
+    call("math.shiftLeft",  -8,         -1,         "shlNeg");        // = shiftRight(-8, 1) = -4
+    call("math.shiftRight", 0x7FFFFFFF, 31,         "shr");           // 0
+    call("math.shiftRight", -8,         1,          "shrNeg");        // -4: arithmetic
+    call("math.shiftRight", 0x7FFFFFFF, 40,         "shrBig");        // 0
+    call("math.shiftRight", -1,         40,         "shrBigNeg");     // -1: the sign kept sliding in
+    call("math.shiftRight", 3,          -4,         "shrCountNeg");   // = shiftLeft(3, 4) = 48
+    return f.done("bitwise_ops");
+}
+
 // 3b — vector_ops: Make/Break Vector at all three widths, plus the angle
 // conversions. The point of this fixture is the codegen: expr()'s default case
 // emits a zero literal, so a node with no case there compiles SILENTLY to 0 and
@@ -2609,7 +2654,7 @@ inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
     return {
-        fxFlow(), fxCoerce(), fxMath(), fxVectorOps(), fxVariables(), fxFunctionsBasic(),
+        fxFlow(), fxCoerce(), fxMath(), fxBitwise(), fxVectorOps(), fxVariables(), fxFunctionsBasic(),
         fxFunctionsRecursive(), fxForeachArrays(), fxEventsMulti(),
         fxWidgetProps(), fxLimitsSmoke(), fxFunctionsLocals(),
         fxEnginePureMultiout(), fxEngineExecCached(), fxAnimatorSync(),

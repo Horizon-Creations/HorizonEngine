@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include <climits>   // INT_MIN: the bitwise rows' edge operand
 #include <map>
 #include <set>
 #include <nlohmann/json.hpp>   // db.query hands its rows back as JSON text
@@ -603,6 +604,57 @@ TEST_CASE("EngineApi: pure math thunks compute correctly")
     auto dist = HE::api::find("math.distance")->invoke(c,
         { Value::ofVec2(glm::vec2(0.0f)), Value::ofVec2(glm::vec2(3.0f, 4.0f)) });
     CHECK(dist[0].f == doctest::Approx(5.0f));
+}
+
+TEST_CASE("EngineApi: bitwise math is exact on Int pins and defined for every shift count")
+{
+    // The six rows are typed Int end to end: an operand above 2^24 must come
+    // back bit-exact (a Float pin would have rounded it), and the thunk reads
+    // Value::i, not Value::f.
+    Ctx c{};
+    auto call2 = [&](const char* id, int a, int b) {
+        return HE::api::find(id)->invoke(c, { Value::ofInt(a), Value::ofInt(b) })[0]; };
+    for (const char* id : { "math.bitAnd", "math.bitOr", "math.bitXor", "math.bitNot",
+                            "math.shiftLeft", "math.shiftRight" })
+    {
+        INFO("row: " << id);
+        const HE::api::ApiFn* fn = HE::api::find(id);
+        REQUIRE(fn != nullptr);
+        CHECK(fn->isExec == false);
+        CHECK(std::string(fn->category) == "Math");
+        REQUIRE(fn->results.size() == 1);
+        CHECK(fn->results[0].type == P::Int);
+        for (const auto& p : fn->params) CHECK(p.type == P::Int);
+    }
+    CHECK(call2("math.bitAnd", 0x5A5A5A5A, 0x0FF00FF0).type == P::Int);
+    CHECK(call2("math.bitAnd", 0x5A5A5A5A, 0x0FF00FF0).i == 0x0A500A50);
+    CHECK(call2("math.bitOr",  0x12340000, 0x00005678).i == 0x12345678);
+    CHECK(call2("math.bitXor", -1, 0x0F).i == -16);
+    CHECK(HE::api::find("math.bitNot")->invoke(c, { Value::ofInt(0) })[0].i == -1);
+    CHECK(HE::api::find("math.bitNot")->invoke(c, { Value::ofInt(0x7FFFFFFF) })[0].i == INT_MIN);
+
+    // Shifts: what C++ leaves undefined (count < 0, count >= 32) has ONE answer
+    // here, the same one the docs promise, and it never traps or reads a
+    // garbage register.
+    using HE::api::math::shiftLeft;
+    using HE::api::math::shiftRight;
+    CHECK(shiftLeft(1, 0) == 1);
+    CHECK(shiftLeft(1, 31) == INT_MIN);           // into the sign bit, no overflow rule
+    CHECK(shiftLeft(-1, 4) == -16);               // negative operand: defined here, UB before C++20
+    CHECK(shiftLeft(1, 32) == 0);
+    CHECK(shiftLeft(1, 1000) == 0);
+    CHECK(shiftLeft(-8, -1) == -4);               // negative count = the other direction
+    CHECK(shiftLeft(-8, INT_MIN) == -1);          // the count whose negation overflows
+    CHECK(shiftLeft(8, INT_MIN) == 0);
+    CHECK(shiftRight(0x7FFFFFFF, 31) == 0);
+    CHECK(shiftRight(-8, 1) == -4);               // arithmetic
+    CHECK(shiftRight(-1, 1) == -1);
+    CHECK(shiftRight(INT_MIN, 31) == -1);
+    CHECK(shiftRight(INT_MIN, 32) == -1);
+    CHECK(shiftRight(0x7FFFFFFF, 32) == 0);
+    CHECK(shiftRight(-7, 1) == -4);               // rounds toward minus infinity, like `>>`
+    CHECK(shiftRight(3, -4) == 48);
+    CHECK(shiftRight(3, INT_MIN) == 0);
 }
 
 // ═══ Null-Ctx tolerance ═══════════════════════════════════════════════════════

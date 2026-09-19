@@ -53,6 +53,7 @@
 #include <sqlite3.h>
 #include <algorithm>
 #include <cctype>
+#include <climits>  // INT_MIN: the one shift count whose negation overflows
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -4504,6 +4505,35 @@ glm::vec3 normalize3(const glm::vec3& v)
 }
 float     dot3(const glm::vec3& a, const glm::vec3& b)   { return glm::dot(a, b); }
 glm::vec3 cross(const glm::vec3& a, const glm::vec3& b)  { return glm::cross(a, b); }
+// Bitwise: through uint32_t, so the two's-complement pattern is what gets
+// operated on and no signed-overflow rule has a say. The casts are
+// value-preserving both ways on every platform the engine builds for.
+int bitAnd(int a, int b) { return (int)((uint32_t)a & (uint32_t)b); }
+int bitOr(int a, int b)  { return (int)((uint32_t)a | (uint32_t)b); }
+int bitXor(int a, int b) { return (int)((uint32_t)a ^ (uint32_t)b); }
+int bitNot(int x)        { return (int)(~(uint32_t)x); }
+// The shifts guard the count themselves (see EngineApi.h): C++ leaves a count
+// outside 0..31 undefined, and a graph pin can carry any number. A negative
+// count is the opposite shift, not an error — a script that computes
+// `shiftLeft(x, -n)` gets what it wrote.
+int shiftLeft(int x, int count)
+{
+    if (count < 0) return count == INT_MIN ? (x < 0 ? -1 : 0) : shiftRight(x, -count);
+    if (count >= 32) return 0;
+    return (int)((uint32_t)x << count);
+}
+int shiftRight(int x, int count)
+{
+    if (count < 0) return count == INT_MIN ? 0 : shiftLeft(x, -count);
+    // Arithmetic: the sign bit slides in from the left, so a negative value
+    // stays negative and saturates at -1 once every value bit has left.
+    if (count >= 32) return x < 0 ? -1 : 0;
+    if (x >= 0) return (int)((uint32_t)x >> count);
+    // For negative x: shift the ones' complement (non-negative) and flip back —
+    // the identity ~(~x >> n) == x >> n (arithmetic) without relying on the
+    // implementation-defined pre-C++20 behaviour of a signed `>>`.
+    return (int)~((uint32_t)~x >> count);
+}
 } // namespace math
 
 // ── Random ───────────────────────────────────────────────────────────────────
@@ -5681,6 +5711,21 @@ const std::vector<ApiFn>& registry()
         unary("math.degrees", "HE::api::math::degrees", math::degrees);
         binary("math.pow",   "HE::api::math::pow",   math::pow,   "base", "exp");
         binary("math.mod",   "HE::api::math::mod",   math::mod,   "a", "b");
+        // Bitwise, on Int pins. NOT through the float helpers above: a Float
+        // pin would round every pattern above 2^24 and mislabel the node.
+        auto unaryI  = [&](const char* id, const char* cpp, int(*fn)(int)) {
+            t.push_back({ id, "Math", false, {{"x", P::Int}}, {{"result", P::Int}}, cpp,
+                [fn](Ctx&, const VV& a){ return VV{ Value::ofInt(fn(aI(a, 0))) }; } }); };
+        auto binaryI = [&](const char* id, const char* cpp, int(*fn)(int, int),
+                           const char* p0, const char* p1) {
+            t.push_back({ id, "Math", false, {{p0, P::Int}, {p1, P::Int}}, {{"result", P::Int}}, cpp,
+                [fn](Ctx&, const VV& a){ return VV{ Value::ofInt(fn(aI(a, 0), aI(a, 1))) }; } }); };
+        binaryI("math.bitAnd",     "HE::api::math::bitAnd",     math::bitAnd,     "a", "b");
+        binaryI("math.bitOr",      "HE::api::math::bitOr",      math::bitOr,      "a", "b");
+        binaryI("math.bitXor",     "HE::api::math::bitXor",     math::bitXor,     "a", "b");
+        unaryI ("math.bitNot",     "HE::api::math::bitNot",     math::bitNot);
+        binaryI("math.shiftLeft",  "HE::api::math::shiftLeft",  math::shiftLeft,  "x", "count");
+        binaryI("math.shiftRight", "HE::api::math::shiftRight", math::shiftRight, "x", "count");
         binary("math.atan2", "HE::api::math::atan2", math::atan2, "y", "x");
         binary("math.min",   "HE::api::math::min",   math::min,   "a", "b");
         binary("math.max",   "HE::api::math::max",   math::max,   "a", "b");
@@ -6464,6 +6509,11 @@ const std::vector<ApiFn>& registry()
             { "math.sqrt", "Square Root" }, { "math.abs", "Absolute" },
             { "math.floor", "Floor" }, { "math.ceil", "Ceil" }, { "math.round", "Round" },
             { "math.sign", "Sign" },   { "math.pow", "Power" }, { "math.mod", "Modulo" },
+            // "Bitwise" spelled out: bare And/Or/Not are the bool logic nodes
+            // one menu over, and a palette search for "and" must tell them apart.
+            { "math.bitAnd", "Bitwise AND" }, { "math.bitOr", "Bitwise OR" },
+            { "math.bitXor", "Bitwise XOR" }, { "math.bitNot", "Bitwise NOT" },
+            { "math.shiftLeft", "Shift Left" }, { "math.shiftRight", "Shift Right" },
             // Spelled out both ways round: "Radians" alone says nothing about
             // which direction it converts when you meet it in the add menu.
             { "math.radians", "Degrees to Radians" }, { "math.degrees", "Radians to Degrees" },
