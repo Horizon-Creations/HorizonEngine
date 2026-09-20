@@ -32,6 +32,7 @@ namespace HE::AntiCheat
 		case Kind::InputRate:     return "InputRate";
 		case Kind::DtBudget:      return "DtBudget";
 		case Kind::Displacement:  return "Displacement";
+		case Kind::IntegrityMismatch: return "IntegrityMismatch";
 		case Kind::Custom:        return "Custom";
 		}
 		return "?";
@@ -257,6 +258,19 @@ namespace HE::AntiCheat
 		addObservation(conn, st, Observation{ kind, weight, std::move(detail), m_wall }, 0);
 	}
 
+	void AntiCheatService::integrityMismatch(ConnectionId conn, std::string detail)
+	{
+		ConnState& st = stateFor(conn);
+		addObservation(conn, st,
+		               Observation{ Kind::IntegrityMismatch, m_cfg.integrityWeight,
+		                            std::move(detail), m_wall }, 0);
+	}
+
+	bool AntiCheatService::treatAsHard(Kind kind) const
+	{
+		return isHard(kind) || (kind == Kind::IntegrityMismatch && m_cfg.integrityHard);
+	}
+
 	void AntiCheatService::update(float dt)
 	{
 		if (!(dt > 0.0f) || !std::isfinite(dt)) return;
@@ -355,7 +369,8 @@ namespace HE::AntiCheat
 		obs.weight = std::clamp(obs.weight, 0.0f, kMaxObservationWeight);
 		// Hard is a level, not a number: it does not need the score and must
 		// not be something the score could ever have reached on its own.
-		if (isHard(obs.kind)) obs.weight = 0.0f;
+		const bool hard = treatAsHard(obs.kind);
+		if (hard) obs.weight = 0.0f;
 
 		++m_stats.observations;
 		st.history.push_back(obs);
@@ -363,7 +378,7 @@ namespace HE::AntiCheat
 		while (st.history.size() > 1 && st.history.front().atWall < oldest)
 			st.history.pop_front();
 
-		if (isHard(obs.kind))
+		if (hard)
 		{
 			HE_LOG_INFO(AntiCheat, "conn %u%s: %s — %s", conn, labelSuffix(st.label).c_str(),
 			            kindName(obs.kind), obs.detail.c_str());

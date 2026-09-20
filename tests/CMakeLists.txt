@@ -216,6 +216,7 @@ add_executable(he_tests
     test_git_roundtrip.cpp
     test_game_replication.cpp
     test_anticheat.cpp
+    test_integrity.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
     # full HorizonRendering/Editor targets would drag GPU backends and ImGui in.
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp

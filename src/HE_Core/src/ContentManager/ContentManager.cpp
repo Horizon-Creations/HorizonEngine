@@ -2661,6 +2661,15 @@ bool ContentManager::mountPak(const std::string& path, const uint8_t key[32])
 	return true;
 }
 
+std::vector<ContentManager::MountedPakId> ContentManager::mountedPakIds() const
+{
+	std::vector<MountedPakId> out;
+	out.reserve(m_mounts.size());
+	for (const auto& m : m_mounts)
+		out.push_back({ m.path, m.reader ? m.reader->tocHash() : 0 });
+	return out;
+}
+
 size_t ContentManager::mountPakOverlays(const std::filesystem::path& dir)
 {
 	std::error_code ec;

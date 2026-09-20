@@ -62,10 +62,14 @@ namespace HE::AntiCheat
 		InputRate,       // more inputs per second than any client sends
 		DtBudget,        // accepted simulated time outruns wall time (speedhack)
 		Displacement,    // the mover carried the entity further than maxSpeed·dt
+		IntegrityMismatch, // the client's exe/dylib/pak hashes differ from the host's (plan §3.5)
 		Custom,          // reported by the game (anticheat.report, step 5)
 	};
 	const char* kindName(Kind kind);
 	// Malformed and ForeignEntity. The rest are weighed, these are facts.
+	// IntegrityMismatch is weighed by default and Hard only when
+	// Config::integrityHard says so; that is the service's decision, not the
+	// kind's.
 	bool        isHard(Kind kind);
 
 	struct Observation
@@ -108,6 +112,17 @@ namespace HE::AntiCheat
 		// How long a report ticket stays readable after it was made. Long enough
 		// for a widget that opens later to still read it.
 		float reportTtlSec       = 60.0f;
+
+		// ── integrity (plan §3.5) ──
+		// One observation per file that differs between the client's manifest
+		// and the host's. The default weight sits just above the suspect
+		// threshold: a single edited pak is Suspect at once and STAYS so for a
+		// handler that reads the level a few frames later (a weight equal to
+		// the threshold would decay below it on the very next update), and
+		// four differing files reach Confirmed. A game that ships nothing
+		// moddable can make it Hard instead.
+		float integrityWeight = 6.0f;
+		bool  integrityHard   = false;
 	};
 
 	// One weight can never exceed this. A 100-unit teleport against an allowance
@@ -172,6 +187,10 @@ namespace HE::AntiCheat
 		bool postApply(HE::Net::ConnectionId conn, const MoveCheck& check);
 		// A refusal the caller made itself (parse failure, no assignment).
 		void observe(HE::Net::ConnectionId conn, Kind kind, float weight, std::string detail);
+		// One file of the client's manifest that does not match the host's
+		// (GameReplication compares at join). Weight and hardness come from the
+		// config; `detail` names the file (Integrity::describe).
+		void integrityMismatch(HE::Net::ConnectionId conn, std::string detail);
 		// Wall clock. GameReplication::update(dt) drives this on the server;
 		// do not call it a second time from the frame loop while attached.
 		void update(float dt);
@@ -251,6 +270,7 @@ namespace HE::AntiCheat
 		};
 
 		ConnState&       stateFor(HE::Net::ConnectionId conn);
+		bool             treatAsHard(Kind kind) const;
 		const ConnState* findState(HE::Net::ConnectionId conn) const;
 		Level            scoreLevel(double score) const;
 		void             evaluateWindows(HE::Net::ConnectionId conn, ConnState& st);
