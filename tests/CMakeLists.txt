@@ -206,6 +206,7 @@ add_executable(he_tests
     test_mcp_tools_clip.cpp
     test_mcp_tools_build.cpp
     test_mcp_tools_settings.cpp
+    test_mcp_tools_batch.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -373,6 +374,9 @@ add_executable(he_tests
     # keep it" is answered by loading the project again rather than by reading
     # back the struct we just wrote.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsSettings.cpp
+    # The batch dispatcher: runs other tools through the registry, so the test
+    # binary needs only the registry and whatever tools the test registers.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsBatch.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
