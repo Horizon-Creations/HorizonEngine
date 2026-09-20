@@ -30,10 +30,14 @@
 
 #include "HorizonScene/Components/TransformComponent.h"
 
+#include <Integrity/IntegrityProbe.h>
+
 #include <cstdint>
 #include <functional>
 #include <glm/glm.hpp>
+#include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace HE::AntiCheat { class AntiCheatService; }
@@ -82,6 +86,13 @@ public:
 		// second of round trip; beyond that the connection is unusable anyway and
 		// an unbounded buffer would be the real problem.
 		std::size_t maxPendingInputs = 64;
+
+		// Compare each joining client's integrity manifest (exe, engine
+		// libraries, pak TOC hashes) against the host's own (plan §3.5). Only
+		// acts with an anti-cheat service attached and a manifest on the host;
+		// a dev build has neither and the check is simply off. The project
+		// setting of the same name lands here.
+		bool integrityCheck = true;
 	};
 
 	// One player command. The engine does not interpret it — the game supplies a
@@ -128,6 +139,16 @@ public:
 	// races ahead of the assignment would make an honest player look like one.
 	void setAntiCheat(HE::AntiCheat::AntiCheatService* service) { m_antiCheat = service; }
 	HE::AntiCheat::AntiCheatService* antiCheat() const { return m_antiCheat; }
+
+	// ── Integrity (plan §3.5) ──
+	// This side's manifest. Without a call, update() adopts the process-wide
+	// IntegrityProbe once it is Ready, or "no manifest" when it was never
+	// started (dev build). Explicit nullopt says the same. A client sends its
+	// manifest to every connection once, as soon as it knows what it has; the
+	// host compares each client's list against its own and reports every file
+	// that differs as an IntegrityMismatch observation with the file's name.
+	void setLocalManifest(std::optional<HE::Integrity::Manifest> manifest);
+	bool hasLocalManifest() const { return m_localManifest == LocalManifest::Have; }
 
 	// ── Server ──
 	// Give an entity a network identity. Until then it is not replicated, which
@@ -176,6 +197,9 @@ public:
 		std::uint32_t inputsProcessed   = 0;   // server side
 		std::uint32_t reconciliations   = 0;   // corrections that moved us
 		std::uint32_t hardSnaps         = 0;   // corrections too large to ease
+		std::uint32_t manifestsSent     = 0;   // client side
+		std::uint32_t manifestsChecked  = 0;   // host side: compared against our own
+		std::uint32_t integrityMismatches = 0; // host side: files that differed
 	};
 	const Stats& stats() const { return m_stats; }
 	void         resetStats() { m_stats = {}; }
@@ -203,6 +227,22 @@ private:
 	void applySnapshot(HE::Net::BitReader& r);
 	void advanceInterpolation(float dt);
 	void handleInput(HE::Net::ConnectionId conn, HE::Net::BitReader& r);
+
+	// Integrity: the local manifest is resolved lazily (the probe hashes on a
+	// worker at startup and may still be running when the first connection
+	// appears), the client sends once per connection, the host queues what
+	// arrives until its own manifest is known and then compares.
+	enum class LocalManifest : std::uint8_t { Unknown, None, Have };
+	struct GuestManifest
+	{
+		bool                    present = false;   // false: the client said it has none
+		HE::Integrity::Manifest manifest;
+	};
+	void resolveLocalManifest();
+	void sendManifest(HE::Net::ConnectionId conn);
+	void handleIntegrity(HE::Net::ConnectionId conn, HE::Net::BitReader& r);
+	void checkGuestManifests();
+	void checkGuestManifest(HE::Net::ConnectionId conn, const GuestManifest& guest);
 	void reconcile(const Sample& authoritative, std::uint32_t ackedSequence);
 	void applySmoothing(float dt);
 
@@ -237,6 +277,14 @@ private:
 	// Residual error after a correction, eased out over a few frames so a small
 	// misprediction does not read as a visible jolt.
 	glm::vec3     m_positionError { 0.0f };
+
+	// ── Integrity ──
+	LocalManifest           m_localManifest = LocalManifest::Unknown;
+	HE::Integrity::Manifest m_manifest;
+	std::unordered_set<HE::Net::ConnectionId>                 m_manifestSentTo;      // client
+	std::unordered_set<HE::Net::ConnectionId>                 m_manifestReceived;    // host: one per connection
+	std::unordered_map<HE::Net::ConnectionId, GuestManifest>  m_pendingGuestManifests;
+	bool                    m_integrityOffLogged = false;
 
 	// ── Per-client input tracking (server) ──
 	std::unordered_map<HE::Net::ConnectionId, std::uint32_t> m_lastProcessedInput;

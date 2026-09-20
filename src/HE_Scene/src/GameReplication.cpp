@@ -5,6 +5,8 @@
 #include "HorizonScene/Components/NetworkComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 
+#include <Diagnostics/Log.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -17,8 +19,13 @@ namespace
 	// Gameplay snapshots live in their own message-id range, well clear of the
 	// collaboration protocol's — the two systems share a transport but never a
 	// message.
-	constexpr MessageId kMsgSnapshot = kFirstUserMessage + 200;
-	constexpr MessageId kMsgInput    = kFirstUserMessage + 201;   // client → server
+	constexpr MessageId kMsgSnapshot  = kFirstUserMessage + 200;
+	constexpr MessageId kMsgInput     = kFirstUserMessage + 201;   // client → server
+	constexpr MessageId kMsgIntegrity = kFirstUserMessage + 202;   // client → server, once
+
+	// A manifest is the exe, a handful of libraries and a few paks. Anything
+	// beyond this did not come from our writer.
+	constexpr std::uint16_t kMaxManifestEntries = 256;
 
 	// Speed bounds for the anti-cheat displacement check. The engine does not
 	// know the game's mover, so it takes the bound from what the entity carries:
@@ -53,6 +60,9 @@ GameReplication::GameReplication(NetSession* net, NetRole role, Config cfg)
 	{
 		m_net->on(kMsgInput, [this](ConnectionId conn, BitReader& r) {
 			handleInput(conn, r);
+		});
+		m_net->on(kMsgIntegrity, [this](ConnectionId conn, BitReader& r) {
+			handleIntegrity(conn, r);
 		});
 	}
 }
@@ -252,12 +262,16 @@ void GameReplication::update(float dt)
 {
 	if (!m_net || !m_world) return;
 
+	resolveLocalManifest();
+
 	if (m_role == NetRole::Server || m_role == NetRole::Host)
 	{
 		// The anti-cheat's wall clock is this frame delta: the dt budget
 		// compares the simulated time clients claimed against the host time
 		// that really passed, and this is where the host time passes.
 		if (m_antiCheat) m_antiCheat->update(dt);
+
+		checkGuestManifests();
 
 		const float interval = (m_cfg.tickHz > 0.0f) ? (1.0f / m_cfg.tickHz) : 0.0f;
 		if (interval <= 0.0f) return;
@@ -273,8 +287,159 @@ void GameReplication::update(float dt)
 		return;
 	}
 
+	// The manifest goes out once per connection, as soon as this side knows
+	// what it has. NetSession's onConnect slot belongs to the application, so
+	// new connections are noticed here rather than through a callback.
+	if (m_localManifest != LocalManifest::Unknown)
+		for (const ConnectionId conn : m_net->connections())
+			if (m_manifestSentTo.insert(conn).second)
+				sendManifest(conn);
+
 	advanceInterpolation(dt);
 	applySmoothing(dt);
+}
+
+// ─── Integrity (plan §3.5) ───────────────────────────────────────────────────
+
+void GameReplication::setLocalManifest(std::optional<HE::Integrity::Manifest> manifest)
+{
+	if (manifest)
+	{
+		m_manifest      = std::move(*manifest);
+		m_localManifest = LocalManifest::Have;
+	}
+	else
+	{
+		m_manifest      = {};
+		m_localManifest = LocalManifest::None;
+	}
+}
+
+void GameReplication::resolveLocalManifest()
+{
+	if (m_localManifest != LocalManifest::Unknown) return;
+	// The probe hashes on a worker; while it runs, nothing is sent and nothing
+	// is compared. Idle means it was never started: a dev build, no manifest.
+	auto& probe = HE::Integrity::IntegrityProbe::instance();
+	switch (probe.state())
+	{
+	case HE::Integrity::IntegrityProbe::State::Running: return;
+	case HE::Integrity::IntegrityProbe::State::Ready:   setLocalManifest(probe.manifest()); return;
+	case HE::Integrity::IntegrityProbe::State::Idle:    setLocalManifest(std::nullopt);     return;
+	}
+}
+
+void GameReplication::sendManifest(ConnectionId conn)
+{
+	BitWriter w;
+	const bool present = m_localManifest == LocalManifest::Have;
+	w.writeBool(present);
+	if (present)
+	{
+		const auto count = static_cast<std::uint16_t>(
+			std::min<std::size_t>(m_manifest.entries.size(), kMaxManifestEntries));
+		w.writeUInt16(count);
+		for (std::uint16_t i = 0; i < count; ++i)
+		{
+			const auto& e = m_manifest.entries[i];
+			w.writeByte(static_cast<std::uint8_t>(e.kind));
+			w.writeString(e.name);
+			w.writeString(e.hash);
+		}
+	}
+	// Reliable: this is the join handshake's one integrity message, and a lost
+	// one would read as "the client never said" on the host.
+	m_net->send(conn, kMsgIntegrity, w, SendMode::ReliableOrdered);
+	++m_stats.manifestsSent;
+}
+
+void GameReplication::handleIntegrity(ConnectionId conn, BitReader& r)
+{
+	// One manifest per connection. A second one is not a client bug our
+	// writer could produce, but it is also not worth a level: ignore it, and
+	// keep the first — replacing it would let a client "repair" its list.
+	if (!m_manifestReceived.insert(conn).second) return;
+
+	GuestManifest guest;
+	bool parsed = r.readBool(guest.present);
+	if (parsed && guest.present)
+	{
+		std::uint16_t count = 0;
+		parsed = r.readUInt16(count) && count <= kMaxManifestEntries;
+		for (std::uint16_t i = 0; parsed && i < count; ++i)
+		{
+			HE::Integrity::Entry e;
+			std::uint8_t kind = 0;
+			parsed = r.readByte(kind) && kind <= static_cast<std::uint8_t>(HE::Integrity::FileKind::Pak) &&
+			         r.readString(e.name) && r.readString(e.hash);
+			if (!parsed) break;
+			e.kind = static_cast<HE::Integrity::FileKind>(kind);
+			guest.manifest.entries.push_back(std::move(e));
+		}
+	}
+	if (!parsed)
+	{
+		// Same rule as handleInput: our writer never truncates, so this is Hard.
+		if (m_antiCheat)
+			m_antiCheat->observe(conn, HE::AntiCheat::Kind::Malformed, 0.0f,
+			                     "malformed integrity manifest");
+		return;
+	}
+
+	// Queue rather than compare now: our own manifest may still be hashing.
+	m_pendingGuestManifests[conn] = std::move(guest);
+}
+
+void GameReplication::checkGuestManifests()
+{
+	if (m_pendingGuestManifests.empty()) return;
+	if (m_localManifest == LocalManifest::Unknown) return;   // still hashing
+
+	if (m_localManifest == LocalManifest::None)
+	{
+		// A dev build has nothing to compare against. Say so once, not per
+		// join, and drop what arrived.
+		if (!m_integrityOffLogged)
+		{
+			HE_LOG_INFO(AntiCheat, "%s", "integrity check off: this build has no manifest "
+			                             "(dev build or editor)");
+			m_integrityOffLogged = true;
+		}
+		m_pendingGuestManifests.clear();
+		return;
+	}
+
+	for (const auto& [conn, guest] : m_pendingGuestManifests)
+		checkGuestManifest(conn, guest);
+	m_pendingGuestManifests.clear();
+}
+
+void GameReplication::checkGuestManifest(ConnectionId conn, const GuestManifest& guest)
+{
+	// Anti-cheat OFF is the absence of the service; the switch is the
+	// project setting. Either way the comparison is not made, not made and
+	// hidden.
+	if (!m_antiCheat || !m_cfg.integrityCheck) return;
+
+	++m_stats.manifestsChecked;
+	if (!guest.present)
+	{
+		// The host runs a packaged build, so the client should too. A client
+		// without a manifest in a session that has one is a different program.
+		++m_stats.integrityMismatches;
+		m_antiCheat->integrityMismatch(conn, "no manifest from client");
+		return;
+	}
+
+	const auto diffs = HE::Integrity::compare(m_manifest, guest.manifest);
+	for (const auto& d : diffs)
+	{
+		++m_stats.integrityMismatches;
+		m_antiCheat->integrityMismatch(conn, HE::Integrity::describe(d));
+	}
+	if (diffs.empty())
+		HE_LOG_DEBUG(AntiCheat, "conn %u: integrity manifest matches (%zu entries)", conn,
+		             m_manifest.entries.size());
 }
 
 float GameReplication::quantStep() const

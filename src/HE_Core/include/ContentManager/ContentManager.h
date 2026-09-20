@@ -328,6 +328,16 @@ public:
 	// Number of currently mounted archives.
 	size_t mountedPakCount() const { return m_mounts.size(); }
 
+	// Path and TOC hash of every mounted archive, in mount order. The integrity
+	// manifest (Integrity/IntegrityProbe.h) identifies a pak by its tocHash —
+	// already verified at open(), and it covers every entry's content hash —
+	// so a 2 GB archive never has to be read a second time.
+	struct MountedPakId {
+		std::string path;
+		uint64_t    tocHash = 0;
+	};
+	std::vector<MountedPakId> mountedPakIds() const;
+
 	// Parse a raw .hasset blob from memory and register it by its embedded UUID.
 	// Returns the UUID on success, an empty UUID on parse failure.
 	HE::UUID loadAssetFromMemory(const std::vector<uint8_t>& hassetData);

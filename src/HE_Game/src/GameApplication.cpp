@@ -27,6 +27,7 @@
 #include <HorizonScene/TimerSystem.h>
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
+#include <Integrity/IntegrityProbe.h> // exe/dylib/pak hashes for the join check (anti-cheat plan §3.5)
 #include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
 #include <HorizonCode/HcClassResolve.h>
 #include "HorizonVersion.h"          // HE_VERSION_STRING (compiled-classes handshake)
@@ -711,6 +712,33 @@ void GameApplication::OnInit()
 	}
 	else
 		HE_LOG_WARN(Core, "%s", ("GameApplication: pak not found: " + pakPath).c_str());
+
+	// ── Integrity manifest (anti-cheat plan §3.5) ─────────────────────────────
+	// A mounted pak is what makes this a packaged build: hash the executable,
+	// the engine libraries and every pak's TOC once, on a worker, so a host can
+	// compare a joining client's list against its own. The inputs are collected
+	// here, on the main thread, because the mount list is main-thread state; the
+	// job only hashes its private copy. On macOS the exe and the engine dylibs
+	// sit in Contents/MacOS while SDL_GetBasePath (exeDir) is Contents/Resources
+	// with GameLogic.dylib — both directories are scanned, flat exports list the
+	// same directory twice and the probe hashes each name once. The signed bytes
+	// are what gets hashed (codesign/Authenticode run at export), on both sides
+	// alike. A build without a pak is a dev run: no manifest, check off.
+	if (contentManager().mountedPakCount() > 0)
+	{
+		HE::Integrity::Inputs in;
+		in.executable = HE::Integrity::currentExecutablePath();
+		if (!in.executable.empty())
+			in.libraryDirs.push_back(in.executable.parent_path());
+		in.libraryDirs.push_back(exeDir);
+		for (const auto& pak : contentManager().mountedPakIds())
+			in.paks.push_back({ std::filesystem::path(pak.path).filename().string(), pak.tocHash });
+		HE_LOG_INFO(AntiCheat, "IntegrityProbe: hashing %s + libraries + %zu pak(s) in the background",
+		            in.executable.filename().string().c_str(), in.paks.size());
+		HE::Integrity::IntegrityProbe::instance().start(std::move(in));
+	}
+	else
+		HE_LOG_INFO(AntiCheat, "%s", "integrity check off: no pak mounted (dev build)");
 
 	// User-defined types (Struct/Enum assets): register their definitions in the
 	// process-global TypeRegistry BEFORE anything scripts — the Lua/Python
