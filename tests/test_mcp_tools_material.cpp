@@ -2014,6 +2014,711 @@ TEST_CASE("mcp material tools: the graph editors refuse without writing")
 	CHECK(f.reloadCalls == 2);
 }
 
+// ─── The wiring tools ────────────────────────────────────────────────────────
+
+namespace {
+
+// The ids the wiring tests address, read off material_graph_info on the param
+// fixture — never hard-coded, the graph hands out ids in insertion order and a
+// test that assumed them would be a test of that.
+struct ParamIds
+{
+	int out = -1, tint = -1, metal = -1, rough = -1;
+};
+
+ParamIds paramIdsOf(Fixture& f, const std::string& path)
+{
+	ParamIds ids;
+	const ToolResult info = f.call("material_graph_info", json{ { "path", path } });
+	REQUIRE_FALSE(info.isError);
+	for (const json& n : info.content.at("nodes"))
+	{
+		if (n.at("type") == "Output") ids.out = n.at("id");
+		if (n.contains("paramName") && n.at("paramName") == "Tint")  ids.tint  = n.at("id");
+		if (n.contains("paramName") && n.at("paramName") == "Metal") ids.metal = n.at("id");
+		if (n.contains("paramName") && n.at("paramName") == "Rough") ids.rough = n.at("id");
+	}
+	REQUIRE(ids.out > 0);
+	REQUIRE(ids.tint > 0);
+	REQUIRE(ids.metal > 0);
+	REQUIRE(ids.rough > 0);
+	return ids;
+}
+
+// The link into (node, pin) as the FILE holds it, or nullptr.
+const HE::MatGraphLink* savedLinkInto(const HE::MaterialGraph& g, int node, int pin)
+{
+	for (const HE::MatGraphLink& l : g.links)
+		if (l.dstNode == node && l.dstPin == pin) return &l;
+	return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("mcp material tools: wiring tools registration")
+{
+	Fixture f("wire_reg");
+	for (const char* n : { "material_connect", "material_disconnect", "material_set_pin_default" })
+	{
+		const McpTool* t = f.registry.find(n);
+		REQUIRE(t != nullptr);
+		CHECK(McpToolRegistry::enforceNameRule(t->name));
+		CHECK(t->inputSchema.is_object());
+		CHECK_FALSE(t->description.empty());
+		CHECK(t->mutates);
+	}
+}
+
+TEST_CASE("mcp material tools: connect wires by name and index, replaces, coerces, and the file has it")
+{
+	Fixture f("connect");
+	const std::string path = "Materials/Rock.hasset";
+	f.writeMaterial(path, makeParamGraph());
+	const ParamIds ids = paramIdsOf(f, path);
+	const int nodes0 = static_cast<int>(makeParamGraph().nodes.size());
+	const int links0 = static_cast<int>(makeParamGraph().links.size());
+
+	// A constant into Roughness, BY NAME: the Param wire that was there is
+	// replaced and reported, the type pair matches, the link count stays.
+	const ToolResult added = f.call("material_add_node", json{
+		{ "path", path }, { "type", "ConstFloat" }, { "p", json::array({ 0.9 }) } });
+	REQUIRE_FALSE(added.isError);
+	const int cid = added.content.at("node").at("id");
+
+	const ToolResult r1 = f.call("material_connect", json{
+		{ "path", path }, { "srcNode", cid }, { "srcPin", "Value" },
+		{ "dstNode", ids.out }, { "dstPin", "Roughness" } });
+	REQUIRE_FALSE(r1.isError);
+	CHECK(r1.content.at("connected") == true);
+	CHECK(r1.content.at("changed") == true);
+	CHECK(r1.content.at("coercion").is_null());
+	CHECK(r1.content.at("srcType") == "float");
+	CHECK(r1.content.at("dstType") == "float");
+	CHECK(r1.content.at("link") == json{
+		{ "srcNode", cid },     { "srcPin", 0 },                        { "srcName", "Value" },
+		{ "dstNode", ids.out }, { "dstPin", HE::kMatOutputRoughnessPin }, { "dstName", "Roughness" } });
+	REQUIRE(r1.content.at("replacedLinks").size() == 1);
+	CHECK(r1.content.at("replacedLinks")[0] == json{
+		{ "srcNode", ids.rough }, { "srcPin", 0 },
+		{ "dstNode", ids.out },   { "dstPin", HE::kMatOutputRoughnessPin } });
+	CHECK(r1.content.at("nodeCount") == nodes0 + 1);
+	CHECK(r1.content.at("linkCount") == links0);
+	CHECK_FALSE(r1.content.contains("parameter"));   // a constant declares nothing
+
+	// The file: the wire leaves the constant, and Rough — no longer reached
+	// from Output — has no slot in the codegen any more.
+	{
+		HE::MaterialGraph g;
+		REQUIRE(savedGraphOf(f.root, path, g));
+		const HE::MatGraphLink* l = savedLinkInto(g, ids.out, HE::kMatOutputRoughnessPin);
+		REQUIRE(l != nullptr);
+		CHECK(l->srcNode == cid);
+		HE::MatParamSlot slot;
+		CHECK_FALSE(codegenValueOf(f.root, path, "Rough", slot));
+		CHECK(codegenValueOf(f.root, path, "Metal", slot));
+	}
+
+	// The same wire again: nothing to do, nothing written.
+	{
+		const std::string before = f.bytes(path);
+		const ToolResult again = f.call("material_connect", json{
+			{ "path", path }, { "srcNode", cid }, { "srcPin", 0 },
+			{ "dstNode", ids.out }, { "dstPin", HE::kMatOutputRoughnessPin } });
+		REQUIRE_FALSE(again.isError);
+		CHECK(again.content.at("changed") == false);
+		CHECK_FALSE(again.content.contains("nodeCount"));
+		CHECK(f.bytes(path) == before);
+	}
+
+	// A vec3 into a float pin (Tint → Ambient Occlusion): the canvas takes it,
+	// the codegen coerces, the answer says so — and the Param at the source end
+	// reports its slot.
+	const ToolResult r2 = f.call("material_connect", json{
+		{ "path", path }, { "srcNode", ids.tint }, { "srcPin", "RGB" },
+		{ "dstNode", ids.out }, { "dstPin", "Ambient Occlusion" } });
+	REQUIRE_FALSE(r2.isError);
+	CHECK(r2.content.at("coercion") == "vec3 -> float");
+	CHECK(r2.content.at("replacedLinks").empty());
+	CHECK(r2.content.at("linkCount") == links0 + 1);
+	REQUIRE(r2.content.contains("parameter"));
+	CHECK(r2.content.at("parameter").at("name") == "Tint");
+	CHECK(r2.content.at("parameter").at("hasSlot") == true);
+
+	// Refused when the client said no coercion: file untouched.
+	{
+		const std::string before = f.bytes(path);
+		const ToolResult no = f.call("material_connect", json{
+			{ "path", path }, { "srcNode", ids.metal }, { "srcPin", 0 },
+			{ "dstNode", ids.out }, { "dstPin", "Base Color" }, { "allowCoercion", false } });
+		CHECK(no.isError);
+		CHECK(no.errorCode == "failed");
+		CHECK(no.errorMessage.find("float -> vec3") != std::string::npos);
+		CHECK(f.bytes(path) == before);
+	}
+
+	// BY INDEX, the Param back onto Roughness: the constant's wire is the one
+	// replaced now, and Rough owns a slot again.
+	const ToolResult r3 = f.call("material_connect", json{
+		{ "path", path }, { "srcNode", ids.rough }, { "srcPin", 0 },
+		{ "dstNode", ids.out }, { "dstPin", HE::kMatOutputRoughnessPin } });
+	REQUIRE_FALSE(r3.isError);
+	REQUIRE(r3.content.at("replacedLinks").size() == 1);
+	CHECK(r3.content.at("replacedLinks")[0].at("srcNode") == cid);
+	CHECK(r3.content.at("parameter").at("name") == "Rough");
+	CHECK(r3.content.at("parameter").at("hasSlot") == true);
+	HE::MatParamSlot slot;
+	CHECK(codegenValueOf(f.root, path, "Rough", slot));
+
+	// A wire that leads nowhere near Output: a Param node feeding a Multiply
+	// that feeds nothing has no slot, and the answer says so.
+	const ToolResult mul = f.call("material_add_node", json{ { "path", path }, { "type", "Multiply" } });
+	REQUIRE_FALSE(mul.isError);
+	const ToolResult r4 = f.call("material_connect", json{
+		{ "path", path }, { "srcNode", ids.metal }, { "srcPin", "Value" },
+		{ "dstNode", mul.content.at("node").at("id") }, { "dstPin", "A" } });
+	REQUIRE_FALSE(r4.isError);
+	CHECK(r4.content.at("parameter").at("hasSlot") == true);   // still wired to Metallic too
+}
+
+TEST_CASE("mcp material tools: connect resolves dynamic pins — the blend mode's, a function's")
+{
+	Fixture f("connect_dyn");
+
+	// Opaque: the Opacity pin is not drawn and not evaluated, so it is not
+	// wirable — by index or by either name. Masked: it is 'OpacityMask'.
+	// Translucent (the param fixture): 'Opacity'.
+	{
+		HE::MaterialGraph opaque = HE::MaterialGraph::makeDefault();
+		f.writeMaterial("Materials/Opaque.hasset", opaque);
+		HE::MaterialGraph masked = HE::MaterialGraph::makeDefault();
+		for (HE::MatGraphNode& n : masked.nodes)
+			if (n.type == HE::MatNodeType::Output)
+				n.p[1] = static_cast<float>(HE::MatBlendMode::Masked);
+		f.writeMaterial("Materials/Masked.hasset", masked);
+		f.writeMaterial("Materials/Rock.hasset", makeParamGraph());
+
+		auto idsOf = [&](const std::string& path, int& out, int& col) {
+			const ToolResult info = f.call("material_graph_info", json{ { "path", path } });
+			REQUIRE_FALSE(info.isError);
+			out = nodeOfType(info.content.at("nodes"), "Output")->at("id");
+			col = nodeOfType(info.content.at("nodes"), "ConstColor")->at("id");
+		};
+		int out = -1, col = -1;
+		idsOf("Materials/Opaque.hasset", out, col);
+		for (const json& pin : { json(HE::kMatOutputOpacityPin), json("Opacity"), json("OpacityMask") })
+		{
+			const std::string before = f.bytes("Materials/Opaque.hasset");
+			const ToolResult r = f.call("material_connect", json{
+				{ "path", "Materials/Opaque.hasset" }, { "srcNode", col }, { "srcPin", 0 },
+				{ "dstNode", out }, { "dstPin", pin } });
+			CAPTURE(pin.dump());
+			CHECK(r.isError);
+			CHECK(r.errorCode == "invalid_payload");
+			CHECK(f.bytes("Materials/Opaque.hasset") == before);
+		}
+		idsOf("Materials/Masked.hasset", out, col);
+		const ToolResult m = f.call("material_connect", json{
+			{ "path", "Materials/Masked.hasset" }, { "srcNode", col }, { "srcPin", 0 },
+			{ "dstNode", out }, { "dstPin", "OpacityMask" } });
+		REQUIRE_FALSE(m.isError);
+		CHECK(m.content.at("link").at("dstPin") == HE::kMatOutputOpacityPin);
+		CHECK(m.content.at("coercion") == "vec3 -> float");
+		CHECK(f.call("material_connect", json{
+			{ "path", "Materials/Masked.hasset" }, { "srcNode", col }, { "srcPin", 0 },
+			{ "dstNode", out }, { "dstPin", "Opacity" } }).errorCode == "invalid_payload");
+	}
+
+	// A FunctionCall's pins are the function's: makeFunctionGraph has one
+	// FnOutput 'Out' and no FnInput, so 'Out' resolves as a source and the call
+	// has no input to wire into. A call to a function that is not there has no
+	// pins at all, and says so.
+	{
+		const std::string path = "Materials/Rock.hasset";
+		f.writeFunction("Materials/Fn.hasset", makeFunctionGraph());
+		const ParamIds ids = paramIdsOf(f, path);
+		const ToolResult call = f.call("material_add_node", json{
+			{ "path", path }, { "type", "FunctionCall" }, { "s", "Materials/Fn.hasset" } });
+		REQUIRE_FALSE(call.isError);
+		const int fnId = call.content.at("node").at("id");
+
+		const ToolResult r = f.call("material_connect", json{
+			{ "path", path }, { "srcNode", fnId }, { "srcPin", "Out" },
+			{ "dstNode", ids.out }, { "dstPin", "Emissive" } });
+		REQUIRE_FALSE(r.isError);
+		CHECK(r.content.at("link").at("srcPin") == 0);
+		// A fresh FnOutput is a vec3 (addNode sets p[0] = 2), as Emissive is.
+		CHECK(r.content.at("coercion").is_null());
+		// The function's own parameter now reaches the material's layout.
+		HE::MatParamSlot slot;
+		const ToolResult info = f.call("material_info", json{ { "path", path } });
+		REQUIRE_FALSE(info.isError);
+		CHECK(findParam(info.content.at("params"), "FnTint") != nullptr);
+
+		const ToolResult noIn = f.call("material_connect", json{
+			{ "path", path }, { "srcNode", ids.tint }, { "srcPin", 0 },
+			{ "dstNode", fnId }, { "dstPin", 0 } });
+		CHECK(noIn.isError);
+		CHECK(noIn.errorCode == "invalid_payload");
+		CHECK(noIn.errorMessage.find("no input pins") != std::string::npos);
+
+		// A call bound to a path that is not there — written by hand, since
+		// material_add_node refuses to make one.
+		HE::MaterialGraph g = makeParamGraph();
+		const int ghost = g.addNode(HE::MatNodeType::FunctionCall, 0, 0);
+		g.findNode(ghost)->s = "Materials/Nope.hasset";
+		f.writeMaterial("Materials/Ghostly.hasset", g);
+		const ToolResult gi = f.call("material_graph_info", json{ { "path", "Materials/Ghostly.hasset" } });
+		REQUIRE_FALSE(gi.isError);
+		const int ghostId = nodeOfType(gi.content.at("nodes"), "FunctionCall")->at("id");
+		const int outId   = nodeOfType(gi.content.at("nodes"), "Output")->at("id");
+		const std::string before = f.bytes("Materials/Ghostly.hasset");
+		const ToolResult missing = f.call("material_connect", json{
+			{ "path", "Materials/Ghostly.hasset" }, { "srcNode", ghostId }, { "srcPin", 0 },
+			{ "dstNode", outId }, { "dstPin", "Emissive" } });
+		CHECK(missing.isError);
+		CHECK(missing.errorCode == "invalid_payload");
+		CHECK(missing.errorMessage.find("could not be loaded") != std::string::npos);
+		CHECK(f.bytes("Materials/Ghostly.hasset") == before);
+	}
+}
+
+TEST_CASE("mcp material tools: connect refuses a cycle, a self-wire and a wrong end without writing")
+{
+	Fixture f("connect_refuse");
+	const std::string path = "Materials/Rock.hasset";
+	f.writeMaterial(path, makeParamGraph());
+	const ParamIds ids = paramIdsOf(f, path);
+	const int m1 = f.call("material_add_node", json{ { "path", path }, { "type", "Multiply" } })
+	                   .content.at("node").at("id");
+	const int m2 = f.call("material_add_node", json{ { "path", path }, { "type", "Multiply" } })
+	                   .content.at("node").at("id");
+	REQUIRE_FALSE(f.call("material_connect", json{
+		{ "path", path }, { "srcNode", m1 }, { "srcPin", 0 }, { "dstNode", m2 }, { "dstPin", "A" } }).isError);
+	// m2 feeds Output too, so the cycle m1 → m2 → m1 would sit on the live path.
+	REQUIRE_FALSE(f.call("material_connect", json{
+		{ "path", path }, { "srcNode", m2 }, { "srcPin", 0 }, { "dstNode", ids.out }, { "dstPin", "Emissive" } }).isError);
+
+	const std::string before = f.bytes(path);
+	auto refused = [&](json args, const char* code, const char* says) {
+		args["path"] = path;
+		const ToolResult r = f.call("material_connect", args);
+		CAPTURE(args.dump());
+		CHECK(r.isError);
+		CHECK(r.errorCode == code);
+		CHECK(r.errorMessage.find(says) != std::string::npos);
+		CHECK(f.bytes(path) == before);
+	};
+	// The cycle, direct and through a node.
+	refused(json{ { "srcNode", m2 }, { "srcPin", 0 }, { "dstNode", m1 }, { "dstPin", "B" } },
+	        "failed", "cycle");
+	const int m3 = f.call("material_add_node", json{ { "path", path }, { "type", "Multiply" } })
+	                   .content.at("node").at("id");
+	REQUIRE_FALSE(f.call("material_connect", json{
+		{ "path", path }, { "srcNode", m2 }, { "srcPin", 0 }, { "dstNode", m3 }, { "dstPin", "A" } }).isError);
+	const std::string before2 = f.bytes(path);
+	{
+		const ToolResult r = f.call("material_connect", json{
+			{ "path", path }, { "srcNode", m3 }, { "srcPin", 0 }, { "dstNode", m1 }, { "dstPin", "A" } });
+		CHECK(r.isError);
+		CHECK(r.errorCode == "failed");
+		CHECK(f.bytes(path) == before2);
+	}
+	auto refused2 = [&](json args, const char* code, const char* says) {
+		args["path"] = path;
+		const ToolResult r = f.call("material_connect", args);
+		CAPTURE(args.dump());
+		CHECK(r.isError);
+		CHECK(r.errorCode == code);
+		CHECK(r.errorMessage.find(says) != std::string::npos);
+		CHECK(f.bytes(path) == before2);
+	};
+	// A node onto itself.
+	refused2(json{ { "srcNode", m1 }, { "srcPin", 0 }, { "dstNode", m1 }, { "dstPin", "B" } },
+	         "invalid_payload", "same node");
+	// Unknown nodes, each end.
+	refused2(json{ { "srcNode", 9999 }, { "srcPin", 0 }, { "dstNode", ids.out }, { "dstPin", 0 } },
+	         "not_found", "9999");
+	refused2(json{ { "srcNode", ids.tint }, { "srcPin", 0 }, { "dstNode", 9999 }, { "dstPin", 0 } },
+	         "not_found", "9999");
+	// Wrong side: Output has no outputs, a Param has no inputs.
+	refused2(json{ { "srcNode", ids.out }, { "srcPin", 0 }, { "dstNode", m1 }, { "dstPin", "A" } },
+	         "invalid_payload", "no output pins");
+	refused2(json{ { "srcNode", m1 }, { "srcPin", 0 }, { "dstNode", ids.tint }, { "dstPin", 0 } },
+	         "invalid_payload", "no input pins");
+	// Unknown pin: by an index the node lacks, by a name it lacks, by a name
+	// spelled loosely, by the empty name, and by a shape that is neither.
+	refused2(json{ { "srcNode", ids.tint }, { "srcPin", 3 }, { "dstNode", m1 }, { "dstPin", "A" } },
+	         "invalid_payload", "no output pin 3");
+	refused2(json{ { "srcNode", ids.tint }, { "srcPin", 0 }, { "dstNode", m1 }, { "dstPin", "C" } },
+	         "invalid_payload", "'A' (0), 'B' (1)");
+	refused2(json{ { "srcNode", ids.tint }, { "srcPin", 0 }, { "dstNode", ids.out }, { "dstPin", "base color" } },
+	         "invalid_payload", "exact");
+	refused2(json{ { "srcNode", ids.tint }, { "srcPin", "" }, { "dstNode", m1 }, { "dstPin", "A" } },
+	         "invalid_payload", "empty");
+	refused2(json{ { "srcNode", ids.tint }, { "srcPin", 1.5 }, { "dstNode", m1 }, { "dstPin", "A" } },
+	         "invalid_payload", "index");
+	// Missing arguments.
+	refused2(json{ { "srcNode", ids.tint }, { "srcPin", 0 }, { "dstNode", m1 } },
+	         "invalid_payload", "required");
+	refused2(json{ { "srcNode", "1" }, { "srcPin", 0 }, { "dstNode", m1 }, { "dstPin", "A" } },
+	         "invalid_payload", "integer node ids");
+}
+
+TEST_CASE("mcp material tools: disconnect takes the wire and names the fallback")
+{
+	Fixture f("disconnect");
+	const std::string path = "Materials/Rock.hasset";
+	f.writeMaterial(path, makeParamGraph());
+	const ParamIds ids = paramIdsOf(f, path);
+	const int links0 = static_cast<int>(makeParamGraph().links.size());
+
+	// By the input alone: the wire, what the pin reads now, and that the Param
+	// behind it lost its slot.
+	const ToolResult r = f.call("material_disconnect", json{
+		{ "path", path }, { "dstNode", ids.out }, { "dstPin", "Metallic" } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content.at("disconnected") == true);
+	CHECK(r.content.at("link") == json{
+		{ "srcNode", ids.metal }, { "srcPin", 0 },
+		{ "dstNode", ids.out },   { "dstPin", HE::kMatOutputMetallicPin } });
+	CHECK(r.content.at("fallback").at("name") == "Metallic");
+	CHECK(r.content.at("fallback").at("type") == "float");
+	CHECK(r.content.at("fallback").at("default") == 0.0);
+	CHECK(r.content.at("linkCount") == links0 - 1);
+	CHECK(r.content.at("parameter").at("name") == "Metal");
+	CHECK(r.content.at("parameter").at("hasSlot") == false);
+	{
+		HE::MaterialGraph g;
+		REQUIRE(savedGraphOf(f.root, path, g));
+		CHECK(savedLinkInto(g, ids.out, HE::kMatOutputMetallicPin) == nullptr);
+		CHECK(g.findNode(ids.metal) != nullptr);   // the node stays, only the wire went
+		HE::MatParamSlot slot;
+		CHECK_FALSE(codegenValueOf(f.root, path, "Metal", slot));
+		const ToolResult info = f.call("material_info", json{ { "path", path } });
+		REQUIRE_FALSE(info.isError);
+		CHECK(findParam(info.content.at("params"), "Metal") == nullptr);
+	}
+
+	// Again: nothing there.
+	const std::string before = f.bytes(path);
+	{
+		const ToolResult none = f.call("material_disconnect", json{
+			{ "path", path }, { "dstNode", ids.out }, { "dstPin", "Metallic" } });
+		CHECK(none.isError);
+		CHECK(none.errorCode == "not_found");
+		CHECK(none.errorMessage.find("no wire") != std::string::npos);
+		CHECK(f.bytes(path) == before);
+	}
+	// With the source named: it has to be THE wire, and the refusal says which
+	// one is there.
+	{
+		const ToolResult wrong = f.call("material_disconnect", json{
+			{ "path", path }, { "dstNode", ids.out }, { "dstPin", "Roughness" },
+			{ "srcNode", ids.tint }, { "srcPin", "RGB" } });
+		CHECK(wrong.isError);
+		CHECK(wrong.errorCode == "not_found");
+		CHECK(wrong.errorMessage.find("node " + std::to_string(ids.rough)) != std::string::npos);
+		CHECK(f.bytes(path) == before);
+
+		const ToolResult half = f.call("material_disconnect", json{
+			{ "path", path }, { "dstNode", ids.out }, { "dstPin", "Roughness" }, { "srcNode", ids.rough } });
+		CHECK(half.isError);
+		CHECK(half.errorCode == "invalid_payload");
+		CHECK(f.bytes(path) == before);
+
+		const ToolResult ghost = f.call("material_disconnect", json{
+			{ "path", path }, { "dstNode", ids.out }, { "dstPin", "Roughness" },
+			{ "srcNode", 9999 }, { "srcPin", 0 } });
+		CHECK(ghost.errorCode == "not_found");
+		const ToolResult badPin = f.call("material_disconnect", json{
+			{ "path", path }, { "dstNode", ids.out }, { "dstPin", "Roughness" },
+			{ "srcNode", ids.rough }, { "srcPin", "Nope" } });
+		CHECK(badPin.errorCode == "invalid_payload");
+		CHECK(f.bytes(path) == before);
+	}
+	// The right source, both ends by name — the hc shape.
+	{
+		const ToolResult ok = f.call("material_disconnect", json{
+			{ "path", path }, { "dstNode", ids.out }, { "dstPin", "Roughness" },
+			{ "srcNode", ids.rough }, { "srcPin", "Value" } });
+		REQUIRE_FALSE(ok.isError);
+		CHECK(ok.content.at("link").at("srcNode") == ids.rough);
+		CHECK(ok.content.at("linkCount") == links0 - 2);
+	}
+	// The end that is not there.
+	{
+		const ToolResult r1 = f.call("material_disconnect", json{ { "path", path }, { "dstNode", 9999 }, { "dstPin", 0 } });
+		CHECK(r1.errorCode == "not_found");
+		const ToolResult r2 = f.call("material_disconnect", json{ { "path", path }, { "dstNode", ids.out } });
+		CHECK(r2.errorCode == "invalid_payload");
+		const ToolResult r3 = f.call("material_disconnect", json{ { "path", path }, { "dstNode", ids.out }, { "dstPin", "Nope" } });
+		CHECK(r3.errorCode == "invalid_payload");
+	}
+}
+
+TEST_CASE("mcp material tools: set_pin_default makes one constant, updates it in place and removes it")
+{
+	Fixture f("pindef");
+	const std::string path = "Materials/Rock.hasset";
+	f.writeMaterial(path, makeParamGraph());
+	const ParamIds ids = paramIdsOf(f, path);
+	const int nodes0 = static_cast<int>(makeParamGraph().nodes.size());
+	const int links0 = static_cast<int>(makeParamGraph().links.size());
+
+	// A float pin: a ConstFloat appears, wired in, holding the value.
+	const ToolResult r1 = f.call("material_set_pin_default", json{
+		{ "path", path }, { "node", ids.out }, { "pin", "Ambient Occlusion" }, { "value", 0.25 } });
+	REQUIRE_FALSE(r1.isError);
+	CHECK(r1.content.at("changed") == true);
+	CHECK(r1.content.at("created") == true);
+	CHECK(r1.content.at("constantNode").at("type") == "ConstFloat");
+	CHECK(r1.content.at("constantNode").at("p")[0].get<float>() == doctest::Approx(0.25f));
+	CHECK(r1.content.at("pin") == json{ { "node", ids.out }, { "pin", HE::kMatOutputAOPin },
+	                                    { "name", "Ambient Occlusion" }, { "type", "float" } });
+	CHECK(r1.content.at("nodeCount") == nodes0 + 1);
+	CHECK(r1.content.at("linkCount") == links0 + 1);
+	const int cid = r1.content.at("constantNode").at("id");
+	{
+		HE::MaterialGraph g;
+		REQUIRE(savedGraphOf(f.root, path, g));
+		const HE::MatGraphLink* l = savedLinkInto(g, ids.out, HE::kMatOutputAOPin);
+		REQUIRE(l != nullptr);
+		CHECK(l->srcNode == cid);
+		const HE::MatGraphNode* c = g.findNode(cid);
+		REQUIRE(c != nullptr);
+		CHECK(c->type == HE::MatNodeType::ConstFloat);
+		CHECK(c->p[0] == doctest::Approx(0.25f));
+		// Placed left of the node it feeds, not at the origin.
+		CHECK(c->x < g.findNode(ids.out)->x);
+	}
+
+	// Again: the SAME constant, updated — no second node.
+	const ToolResult r2 = f.call("material_set_pin_default", json{
+		{ "path", path }, { "node", ids.out }, { "pin", HE::kMatOutputAOPin }, { "value", 0.75 } });
+	REQUIRE_FALSE(r2.isError);
+	CHECK(r2.content.at("created") == false);
+	CHECK(r2.content.at("constantNode").at("id") == cid);
+	CHECK(r2.content.at("constantNode").at("p")[0].get<float>() == doctest::Approx(0.75f));
+	CHECK(r2.content.at("nodeCount") == nodes0 + 1);
+	{
+		HE::MaterialGraph g;
+		REQUIRE(savedGraphOf(f.root, path, g));
+		CHECK(g.findNode(cid)->p[0] == doctest::Approx(0.75f));
+		CHECK(static_cast<int>(g.nodes.size()) == nodes0 + 1);
+	}
+
+	// A vec3 pin takes three numbers and gets a ConstColor.
+	const ToolResult r3 = f.call("material_set_pin_default", json{
+		{ "path", path }, { "node", ids.out }, { "pin", "Normal" }, { "value", json::array({ 0.0, 0.0, 1.0 }) } });
+	REQUIRE_FALSE(r3.isError);
+	CHECK(r3.content.at("created") == true);
+	CHECK(r3.content.at("constantNode").at("type") == "ConstColor");
+	CHECK(r3.content.at("constantNode").at("p")[2].get<float>() == doctest::Approx(1.0f));
+	CHECK(r3.content.at("nodeCount") == nodes0 + 2);
+
+	// The wrong shape for the pin, and a pin that is wired to something that is
+	// not this tool's: refused, file untouched.
+	const std::string before = f.bytes(path);
+	auto refused = [&](json args, const char* code, const char* says) {
+		args["path"] = path;
+		const ToolResult r = f.call("material_set_pin_default", args);
+		CAPTURE(args.dump());
+		CHECK(r.isError);
+		CHECK(r.errorCode == code);
+		CHECK(r.errorMessage.find(says) != std::string::npos);
+		CHECK(f.bytes(path) == before);
+	};
+	refused(json{ { "node", ids.out }, { "pin", "Normal" }, { "value", 0.5 } },
+	        "invalid_payload", "array of 3 numbers");
+	refused(json{ { "node", ids.out }, { "pin", "Ambient Occlusion" }, { "value", json::array({ 1.0, 2.0 }) } },
+	        "invalid_payload", "a number");
+	refused(json{ { "node", ids.out }, { "pin", "Ambient Occlusion" }, { "value", "0.5" } },
+	        "invalid_payload", "a number");
+	refused(json{ { "node", ids.out }, { "pin", "Base Color" }, { "value", json::array({ 1.0, 1.0, 1.0 }) } },
+	        "failed", "material_disconnect");
+	refused(json{ { "node", ids.out }, { "pin", "Base Color" } },
+	        "failed", "material_disconnect");   // null on a foreign wire is a refusal too
+	refused(json{ { "node", ids.out }, { "pin", "Nope" }, { "value", 1.0 } },
+	        "invalid_payload", "no input pin named");
+	refused(json{ { "node", ids.tint }, { "pin", 0 }, { "value", 1.0 } },
+	        "invalid_payload", "no input pins");
+	refused(json{ { "node", 9999 }, { "pin", 0 }, { "value", 1.0 } },
+	        "not_found", "9999");
+	refused(json{ { "pin", 0 }, { "value", 1.0 } },
+	        "invalid_payload", "required");
+
+	// The constant stops being this tool's once it feeds a second pin — the
+	// human may have wired it — and becomes it again when that wire goes.
+	REQUIRE_FALSE(f.call("material_connect", json{
+		{ "path", path }, { "srcNode", cid }, { "srcPin", 0 },
+		{ "dstNode", ids.out }, { "dstPin", "Roughness" } }).isError);
+	{
+		const std::string shared = f.bytes(path);
+		const ToolResult r = f.call("material_set_pin_default", json{
+			{ "path", path }, { "node", ids.out }, { "pin", "Ambient Occlusion" }, { "value", 0.1 } });
+		CHECK(r.isError);
+		CHECK(r.errorCode == "failed");
+		CHECK(f.bytes(path) == shared);
+	}
+	REQUIRE_FALSE(f.call("material_disconnect", json{
+		{ "path", path }, { "dstNode", ids.out }, { "dstPin", "Roughness" } }).isError);
+	{
+		const ToolResult r = f.call("material_set_pin_default", json{
+			{ "path", path }, { "node", ids.out }, { "pin", "Ambient Occlusion" }, { "value", 0.1 } });
+		REQUIRE_FALSE(r.isError);
+		CHECK(r.content.at("created") == false);
+		CHECK(r.content.at("constantNode").at("id") == cid);
+	}
+
+	// null removes the constant; the pin reads its default again; null on a
+	// pin with no constant is a no-op that writes nothing.
+	const ToolResult r4 = f.call("material_set_pin_default", json{
+		{ "path", path }, { "node", ids.out }, { "pin", "Ambient Occlusion" }, { "value", nullptr } });
+	REQUIRE_FALSE(r4.isError);
+	CHECK(r4.content.at("cleared") == true);
+	CHECK(r4.content.at("changed") == true);
+	CHECK(r4.content.at("removedNode") == cid);
+	CHECK(r4.content.at("pin").at("default") == 1.0);   // Ambient Occlusion's registry default
+	CHECK(r4.content.at("nodeCount") == nodes0 + 1);    // the Normal constant stays
+	{
+		HE::MaterialGraph g;
+		REQUIRE(savedGraphOf(f.root, path, g));
+		CHECK(g.findNode(cid) == nullptr);
+		CHECK(savedLinkInto(g, ids.out, HE::kMatOutputAOPin) == nullptr);
+	}
+	const std::string after = f.bytes(path);
+	const ToolResult r5 = f.call("material_set_pin_default", json{
+		{ "path", path }, { "node", ids.out }, { "pin", "Ambient Occlusion" }, { "value", nullptr } });
+	REQUIRE_FALSE(r5.isError);
+	CHECK(r5.content.at("cleared") == true);
+	CHECK(r5.content.at("changed") == false);
+	CHECK_FALSE(r5.content.contains("nodeCount"));
+	CHECK(f.bytes(path) == after);
+}
+
+TEST_CASE("mcp material tools: the wiring tools refuse without writing")
+{
+	Fixture f("wire_gates");
+	f.writeMaterial("Materials/Rock.hasset", makeParamGraph());
+	f.writeFunction("Materials/Fn.hasset", makeFunctionGraph());
+	f.writeStub("Materials/Stub.hasset", HE::AssetType::Material);
+	REQUIRE_FALSE(f.call("material_create_instance", json{
+		{ "parent", "Materials/Rock.hasset" }, { "path", "Materials/Rock_Inst.hasset" } }).isError);
+	const std::string path = "Materials/Rock.hasset";
+	const ParamIds ids = paramIdsOf(f, path);
+
+	// Three calls that would each succeed on the clean master: a wire into an
+	// unwired Output pin, the wire out of Emissive, a constant into Normal.
+	const std::vector<std::pair<const char*, json>> calls{
+		{ "material_connect", json{ { "path", path }, { "srcNode", ids.tint }, { "srcPin", 0 },
+		                            { "dstNode", ids.out }, { "dstPin", "Ambient Occlusion" } } },
+		{ "material_disconnect", json{ { "path", path }, { "dstNode", ids.out }, { "dstPin", "Emissive" } } },
+		{ "material_set_pin_default", json{ { "path", path }, { "node", ids.out }, { "pin", "Normal" },
+		                                    { "value", json::array({ 0.0, 0.0, 1.0 }) } } },
+	};
+	auto all = [&](const char* code, const std::string& atPath = {}) {
+		for (const auto& [tool, base] : calls)
+		{
+			json args = base;
+			if (!atPath.empty()) args["path"] = atPath;
+			const std::string before = f.bytes(args["path"].get<std::string>());
+			const ToolResult r = f.call(tool, args);
+			CAPTURE(tool);
+			CHECK(r.isError);
+			CHECK(r.errorCode == code);
+			CHECK(f.bytes(args["path"].get<std::string>()) == before);
+		}
+	};
+
+	f.playing = true;   all("play_mode");        f.playing = false;
+	f.lockedRel = path; all("locked_by_other");  f.lockedRel.clear();
+	f.dirtyRel = path; f.openRel = path;
+	all("dirty");
+	f.dirtyRel.clear(); f.openRel.clear();
+	all("no_graph",     "Materials/Rock_Inst.hasset");
+	all("no_graph",     "Materials/Stub.hasset");
+	all("invalid_path", "Materials/Fn.hasset");
+	all("not_found",    "Materials/Ghost.hasset");
+
+	// The engine namespace.
+	{
+		const fs::path engineRoot = f.root / "__engine";
+		fs::create_directories(engineRoot / "Materials");
+		f.content.setEngineContentRoot(engineRoot.string());
+		const fs::path abs = engineRoot / "Materials/Default.hasset";
+		REQUIRE(HE::Ed::writeAssetStub(abs.string(), "Engine/Materials/Default.hasset",
+		                               "Default", HE::AssetType::Material));
+		EditorAssetTypeCache::invalidate(abs.string());
+		all("read_only", "Engine/Materials/Default.hasset");
+	}
+
+	// A CLEAN tab is told to re-read, by each of the three.
+	f.openRel = path;
+	CHECK(f.reloadCalls == 0);
+	for (const auto& [tool, args] : calls)
+	{
+		const ToolResult r = f.call(tool, args);
+		CAPTURE(tool);
+		REQUIRE_FALSE(r.isError);
+		CHECK(r.content.at("reloadedInEditor") == true);
+	}
+	CHECK(f.reloadCalls == 3);
+}
+
+#if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("mcp material tools: a rewired template still cross-compiles")
+{
+	// The wiring tools change what the codegen emits more than add/remove do:
+	// a coerced wire and a constant both land in the shader text. The panel's
+	// own check, on a shipped template rewired three ways.
+	Fixture f("wire_compile");
+	const ToolResult made = f.call("material_create", json{
+		{ "path", "Materials/Rewired.hasset" }, { "template", "OpaquePBR" } });
+	REQUIRE_FALSE(made.isError);
+	const std::string path = "Materials/Rewired.hasset";
+	const ToolResult info = f.call("material_graph_info", json{ { "path", path } });
+	REQUIRE_FALSE(info.isError);
+	const int out = nodeOfType(info.content.at("nodes"), "Output")->at("id");
+	int baseColor = -1;
+	for (const json& n : info.content.at("nodes"))
+		if (n.contains("paramName") && n.at("paramName") == "BaseColor") baseColor = n.at("id");
+	REQUIRE(baseColor > 0);
+
+	// The colour parameter (vec3) onto Metallic (float) — coerced; Roughness
+	// unwired and given a constant; Normal given a constant vector.
+	REQUIRE_FALSE(f.call("material_connect", json{
+		{ "path", path }, { "srcNode", baseColor }, { "srcPin", 0 },
+		{ "dstNode", out }, { "dstPin", "Metallic" } }).isError);
+	REQUIRE_FALSE(f.call("material_disconnect", json{
+		{ "path", path }, { "dstNode", out }, { "dstPin", "Roughness" } }).isError);
+	REQUIRE_FALSE(f.call("material_set_pin_default", json{
+		{ "path", path }, { "node", out }, { "pin", "Roughness" }, { "value", 0.3 } }).isError);
+	REQUIRE_FALSE(f.call("material_set_pin_default", json{
+		{ "path", path }, { "node", out }, { "pin", "Normal" },
+		{ "value", json::array({ 0.0, 0.0, 1.0 }) } }).isError);
+
+	HE::MaterialGraph g;
+	REQUIRE(savedGraphOf(f.root, path, g));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE_FALSE(gen.glsl.empty());
+	bool sawRough = false, sawMetal = false;
+	for (const HE::MatParamSlot& s : gen.params)
+	{
+		if (s.name == "Roughness") sawRough = true;
+		if (s.name == "Metallic")  sawMetal = true;
+	}
+	CHECK_FALSE(sawRough);
+	CHECK_FALSE(sawMetal);
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const uint64_t hash = std::hash<std::string>{}(gen.glsl);
+	const auto& msl = lib.fragment(hash, gen.glsl, B::Metal);
+	CHECK_MESSAGE(msl.ok, "MSL compile failed: ", msl.log);
+	const auto& gl = lib.fragment(hash, gen.glsl, B::GLSL410);
+	CHECK_MESSAGE(gl.ok, "GLSL compile failed: ", gl.log);
+}
+#endif
+
 // ─── Serving the material tools to a real client, by hand ────────────────────
 // Every case above calls a handler in-process. That proves what a tool DOES, but
 // not what a client SEES: the bridge wraps a ToolResult into MCP's wire shape

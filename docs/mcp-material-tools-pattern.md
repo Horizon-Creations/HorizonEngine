@@ -340,3 +340,70 @@ der geladenen Instanz** mit; geteilter Name behält den Slot; Gates für beide
 Editoren (play/lock/dirty/`no_graph`×2/Funktion/Engine/sauberer Tab →
 `reloadedInEditor`); unter `HE_TESTS_HAVE_SHADERC` ein editiertes
 `OpaquePBR`-Template (Roughness raus, Fresnel rein) durch Metal + GLSL410.
+
+## 8. Drähte: `material_connect`, `material_disconnect`, `material_set_pin_default`
+
+Stand 21.09.2026, Schritt 6. Das Gegenstück zu `hc_connect`/`hc_disconnect`/
+`hc_set_pin_default`, in `McpToolsMaterial.cpp` hinter `material_remove_node`,
+auf den Helfern aus §7.1 (`openGraphForEdit`, `commitGraph`). Die Familie hat
+damit 11 Werkzeuge.
+
+### 8.1 Was der Material-Graph anders kann als HorizonCode, und was daraus folgt
+
+| Befund im Code | Folge für das Tool |
+|---|---|
+| `MaterialGraph::connect` prüft nur Richtung, Pin-**Bereich** und Selbstverbindung, **keine Typen** (`MaterialGraph.cpp:399`). Die Codegen `coerce`t jede Paarung (Float splattet hoch, vec4→vec3 lässt w fallen). Der Canvas nimmt jeden Draht an. | Typ-Mismatch ist **keine Ablehnung**. hc's `viaConversion` wird zu `coercion: "vec3 -> float"` (oder `null`); `allowCoercion: false` ist hc's `allowConversion: false` und lehnt mit `failed` ab. Es gibt keinen Konversionsknoten, der gespawnt werden könnte. |
+| `connect` kennt keinen Zyklus-Schutz; die Codegen malt einen Zyklus **magenta** statt zu crashen (`emitNode`, `c.emitting`). | Der Trockenlauf in `commitGraph` fängt einen Zyklus **nicht** (GLSL ist nicht leer). Deshalb eigener Test `reaches(g, dst, src)` stromabwärts; Treffer = `failed`, Datei unangetastet. Der Canvas lässt den Zyklus zu, ein Client sieht aber kein Magenta. |
+| Der Output-Pin `kMatOutputOpacityPin` (5) existiert in der Registry auf jedem Blend-Mode; ein opakes Material zeichnet und wertet ihn nicht aus. `connect` nähme ihn trotzdem (Range-Check). | Pins werden gegen **`resolvePins`** aufgelöst (die Liste, die der Canvas zeichnet und `graph_info` meldet), nicht gegen `connect`s Range. Opaque: Index 5, „Opacity" und „OpacityMask" → `invalid_payload`. Masked: „OpacityMask", Translucent: „Opacity". |
+| `FunctionCall`-Pins sind dynamisch; `connect` akzeptiert dort **jeden** Index. Eine nicht ladbare Funktion hat auf dem Canvas keine Pins. | Ladbare Funktion: Pins = ihr Interface (`matFunctionPins`), Name **und** Index. Nicht ladbar (`FnGraphs::missing`): `invalid_payload` „could not be loaded". |
+| Ein Eingang hält genau einen Link (`connect` ruft `disconnectInput`). | `replacedLinks` (Schlüssel wie hc) hat 0 oder 1 Eintrag. `material_disconnect` braucht nur `dstNode`+`dstPin`; `srcNode`/`srcPin` sind **optional** und werden, wenn gegeben, gegen den tatsächlichen Draht geprüft (`not_found` nennt die echte Quelle). Halb angegeben = `invalid_payload`. |
+| **`MatGraphNode` hat keine Per-Pin-Defaults** (kein `pinDefaults` wie `HC::Node`); ein unverdrahteter Pin liest `MatPinDesc::def` der Registry; der Material-Canvas registriert kein `pinHasInlineEditor` (nur `HcGraphHost`). | `material_set_pin_default` **materialisiert den Default als Const-Knoten**: Float→`ConstFloat`, Vec2→`ConstVec2`, Vec3→`ConstColor`, Vec4→`ConstVec4`, links vom Zielknoten, eine Zeile pro Pin versetzt, per Draht in den Pin. Genau das, was die hc-Beschreibung als Alternative nennt („spending a literal node on it"), und ohne Format-/Codegen-Änderung (Thema schließt die aus). Für den Client identischer Effekt: dieser Pin liest jetzt X. |
+
+### 8.2 Regeln von `material_set_pin_default`
+
+* **Idempotent.** Hängt am Pin bereits ein Const-Knoten *genau des Typs, den
+  das Tool für den Pin anlegen würde*, und speist der **nur diesen Pin**
+  (`ownConstantInto`), wird er in place aktualisiert: `created: false`, gleiche
+  Id, `nodeCount` unverändert. Sonst würde jeder Aufruf einen Waisen erzeugen.
+* **Der Draht gewinnt.** Ist der Pin an irgendetwas anderes verdrahtet (Param,
+  Math, ein Const anderen Typs, ein Const mit Fan-out), `failed` mit dem
+  hc-Satz: erst `material_disconnect`. Gilt auch für `value: null`.
+* **`value: null`** entfernt den eigenen Const-Knoten (`removedNode`, `pin.default`
+  = was der Pin jetzt liest); ohne eigenen Const `{cleared:true, changed:false}`
+  **ohne** `commitGraph` (hc kehrt vor `beginEdit` zurück).
+* **Form aus dem Pin-Typ**, wie `material_set_param` aus dem Kind: Float → Zahl,
+  vec2/vec3/vec4 → Array genau dieser Länge; sonst `invalid_payload` mit der
+  erwarteten Form.
+
+### 8.3 Antwortform
+
+* `material_connect` → `{ connected, changed, link{srcNode,srcPin,srcName,
+  dstNode,dstPin,dstName}, srcType, dstType, coercion|null, replacedLinks[],
+  parameter{name,kind,hasSlot}?, …commitGraph }`. Derselbe Draht noch einmal:
+  `changed: false`, nichts geschrieben. `parameter` nur, wenn die Quelle ein
+  Param-Knoten ist — schließt die `note` aus `material_add_node` („noch nicht
+  Richtung Output verdrahtet").
+* `material_disconnect` → `{ disconnected, link, fallback{pin,name,type,default},
+  parameter{…,hasSlot}?, …commitGraph }`.
+* `material_set_pin_default` → `{ changed, created, pin{node,pin,name,type},
+  constantNode (wie `graph_info`), …commitGraph }` bzw. `{ cleared, changed,
+  removedNode, pin{…,default}, …commitGraph }`.
+* Pin-Adresse überall: Integer-Index **oder** exakter Name, beides wie
+  `material_graph_info` sie meldet. Ablehnung nennt alle Pins der Seite
+  („'A' (0), 'B' (1)"). Leerer Name (Reroute-Pins heißen „") → Index nehmen.
+
+### 8.4 Tests (`tests/test_mcp_tools_material.cpp`, 7 Fälle)
+
+Draht per Name und Index auf die Param-Fixture, `replacedLinks` = der
+verdrängte Param-Draht, `codegenValueOf("Rough")` verliert und gewinnt den
+Slot wieder, Koerzion vec3→float gemeldet und mit `allowCoercion:false`
+abgelehnt (Bytes gleich); dynamische Pins (Opaque lehnt 5/„Opacity"/
+„OpacityMask" ab, Masked nimmt „OpacityMask", `FunctionCall` per „Out",
+Geister-Funktion abgelehnt); Zyklus direkt und über drei Knoten, Selbstdraht,
+falsche Seite, 13 Payload-Ablehnungen; `disconnect` mit `fallback`, Slot weg
+aus `material_info`+Codegen, falsche/halbe Quelle; `set_pin_default` Const
+anlegen → in place → Fan-out macht ihn fremd → nach `disconnect` wieder eigen
+→ `null` entfernt; Gates für alle drei (play/lock/dirty/`no_graph`×2/Funktion/
+`not_found`/Engine/sauberer Tab → `reloadedInEditor` ×3); unter
+`HE_TESTS_HAVE_SHADERC` ein umverdrahtetes `OpaquePBR` (BaseColor→Metallic
+koerziert, Roughness als Const, Normal als ConstColor) durch Metal + GLSL410.

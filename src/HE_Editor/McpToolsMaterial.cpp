@@ -1915,6 +1915,620 @@ void addRemoveNode(McpToolRegistry& registry, ContentManager& content,
 	registry.add(std::move(t));
 }
 
+// ── Wiring: what material_connect, material_disconnect and material_set_pin_default share
+//
+// A pin is addressed the way material_graph_info reports it: a row's integer
+// `pin`, or its `name`. Both are resolved against `resolvePins` — the list the
+// CANVAS draws — and deliberately not against MaterialGraph::connect's own
+// range check, which is looser in two places that matter here:
+//   • the Output node's Opacity pin (kMatOutputOpacityPin) exists in the
+//     registry on every blend mode, but an Opaque material neither draws nor
+//     evaluates it: a wire into it would be stored, invisible and dead.
+//   • a FunctionCall's pins come from the function it names, and `connect`
+//     accepts any index for it, so a wire into pin 7 of a two-input function
+//     would be kept and ignored — and a function that cannot be loaded has no
+//     pins to speak of, so the canvas cannot drag a wire there either.
+// TYPES ARE NOT A REFUSAL. The material codegen coerces every pair (a float
+// splats up, vec4 → vec3 drops w; `coerce` in MaterialGraph.cpp), and the
+// canvas lets any two pins connect. So hc's `viaConversion` becomes
+// `coercion` with the pair spelled out, and `allowCoercion: false` is hc's
+// `allowConversion: false`: refuse instead. No conversion node is spawned;
+// there is none to spawn.
+// A CYCLE is refused although the canvas does not stop one: the codegen
+// answers a cycle with magenta rather than a crash, which means the dry run in
+// commitGraph does NOT catch it (the GLSL is not empty) — and a client cannot
+// see magenta.
+//
+// material_set_pin_default is the one that could not be copied. A HorizonCode
+// node carries `pinDefaults`; a material node carries nothing of the kind, an
+// unwired input reads the registry's `def` and the canvas has no inline field
+// for it. The honest equivalent, and the one the hc description itself names
+// as the alternative ("spending a literal node on it"), is a CONSTANT NODE
+// wired into the pin: Float → ConstFloat, Vec2 → ConstVec2, Vec3 → ConstColor,
+// Vec4 → ConstVec4. For the client the effect is the same — that pin now reads
+// this value — and the graph format is untouched. Calling it twice on one pin
+// updates the same constant (no orphans); a pin wired to anything else is
+// refused, as hc refuses a wired pin: the wire wins.
+
+json linkJson(const HE::MatGraphLink& l)
+{
+	return json{ { "srcNode", l.srcNode }, { "srcPin", l.srcPin },
+	             { "dstNode", l.dstNode }, { "dstPin", l.dstPin } };
+}
+
+struct PinRef
+{
+	int            index = -1;   // as links store it (registry / dynamic index)
+	std::string    name;
+	HE::MatPinType type = HE::MatPinType::Float;
+	float          def  = 0.0f;
+	int            row  = 0;     // position in the canvas' pin column
+};
+
+// One side of a node's pins, resolved as the canvas resolves them, and the
+// address the client gave matched against it. `spec` is an integer index or a
+// pin name; the error names every pin the node actually has on that side.
+bool resolvePinRef(const HE::MaterialGraph& g, const HE::MatGraphNode& n, bool wantOutput,
+                   const json& spec, FnGraphs& fns, PinRef& out, std::string& err)
+{
+	std::vector<std::string> scratch;
+	const ResolvedPins pins = resolvePins(n, blendModeOf(g), fns, scratch);
+	const std::string nodeLabel = std::string(HE::matNodeDesc(n.type).name) + " #" +
+	                              std::to_string(n.id);
+	const char* side = wantOutput ? "output" : "input";
+
+	if (n.type == HE::MatNodeType::FunctionCall && fns.missing.count(n.s))
+	{
+		err = nodeLabel + " calls '" + n.s + "', which could not be loaded, so its pins "
+		      "are unknown — the canvas cannot wire it either. Bind it to a loadable "
+		      "function first (material_node_types lists them).";
+		return false;
+	}
+
+	const std::size_t count = wantOutput ? pins.outputs.size() : pins.inputs.size();
+	auto take = [&](std::size_t row) {
+		const HE::MatPinDesc& d = wantOutput ? pins.outputs[row] : pins.inputs[row];
+		out.index = wantOutput ? static_cast<int>(row) : pins.inputIndex[row];
+		out.name  = d.name ? d.name : "";
+		out.type  = d.type;
+		out.def   = d.def;
+		out.row   = static_cast<int>(row);
+		return true;
+	};
+	auto listing = [&]() {
+		std::string s;
+		for (std::size_t i = 0; i < count; ++i)
+		{
+			const HE::MatPinDesc& d = wantOutput ? pins.outputs[i] : pins.inputs[i];
+			const int idx = wantOutput ? static_cast<int>(i) : pins.inputIndex[i];
+			if (!s.empty()) s += ", ";
+			s += "'" + std::string(d.name ? d.name : "") + "' (" + std::to_string(idx) + ")";
+		}
+		return s.empty() ? std::string("none") : s;
+	};
+
+	if (count == 0)
+	{
+		err = nodeLabel + " has no " + side + " pins at all.";
+		return false;
+	}
+	if (spec.is_number_integer())
+	{
+		const int want = spec.get<int>();
+		for (std::size_t i = 0; i < count; ++i)
+			if ((wantOutput ? static_cast<int>(i) : pins.inputIndex[i]) == want) return take(i);
+		err = nodeLabel + " has no " + side + " pin " + std::to_string(want) +
+		      " (on this material its " + side + " pins are " + listing() + ").";
+		return false;
+	}
+	if (!spec.is_string())
+	{
+		err = "a pin is either its index (integer, as material_graph_info reports "
+		      "it) or its name (string).";
+		return false;
+	}
+	const std::string want = spec.get<std::string>();
+	if (want.empty())
+	{
+		err = "an empty pin name addresses nothing; material_graph_info reports the "
+		      "name and the index of every pin.";
+		return false;
+	}
+	for (std::size_t i = 0; i < count; ++i)
+	{
+		const HE::MatPinDesc& d = wantOutput ? pins.outputs[i] : pins.inputs[i];
+		if (d.name && want == d.name) return take(i);
+	}
+	err = nodeLabel + " has no " + side + " pin named '" + want + "' (its " + side +
+	      " pins are " + listing() + "; names are exact).";
+	return false;
+}
+
+// Is `to` downstream of `from` along the wires (data flows src → dst)? A new
+// wire src → dst closes a cycle exactly when dst already reaches src.
+bool reaches(const HE::MaterialGraph& g, int from, int to)
+{
+	std::vector<int> stack{ from };
+	std::set<int>    seen;
+	while (!stack.empty())
+	{
+		const int cur = stack.back();
+		stack.pop_back();
+		if (cur == to) return true;
+		if (!seen.insert(cur).second) continue;
+		for (const HE::MatGraphLink& l : g.links)
+			if (l.srcNode == cur) stack.push_back(l.dstNode);
+	}
+	return false;
+}
+
+// "vec3 -> float" for a pair the codegen will coerce, empty when the types
+// match. Reported, never refused (unless the client asked to be refused).
+std::string coercionOf(HE::MatPinType from, HE::MatPinType to)
+{
+	if (from == to) return {};
+	return std::string(pinTypeName(from)) + " -> " + pinTypeName(to);
+}
+
+// For a Param node at the source end: does it own a slot now? The `note`
+// material_add_node leaves ("not wired towards Output yet") closes here.
+bool paramReport(ContentManager& cm, const Mat& m, const HE::MatGraphNode& n, json& out)
+{
+	HE::MatParamKind kind{};
+	if (!paramKindOfNode(n.type, kind)) return false;
+	const std::string name = effectiveParamName(n);
+	out = json{ { "name",    name },
+	            { "kind",    paramKindName(kind) },
+	            { "hasSlot", hasSlotNow(cm, m, name) } };
+	return true;
+}
+
+// The two node ids every wiring tool takes, read the same way.
+bool nodeIdArg(const json& args, const char* key, int& out)
+{
+	if (!args.contains(key) || !args[key].is_number_integer()) return false;
+	out = args[key].get<int>();
+	return true;
+}
+
+// ── material_connect ─────────────────────────────────────────────────────────
+
+void addConnect(McpToolRegistry& registry, ContentManager& content,
+                const std::shared_ptr<McpMaterialHooks>& h)
+{
+	ContentManager* cm = &content;
+	McpTool t;
+	t.name        = "material_connect";
+	t.mutates     = true;
+	t.description =
+		"Wire one node's output pin to another node's input pin in a master "
+		"material's graph. A pin is named by its index or its name, both as "
+		"material_graph_info reports them (an Output pin by the name its blend mode "
+		"gives it: 'Opacity' or 'OpacityMask'; a FunctionCall's pins by the function "
+		"it calls). Types need not match: the material codegen coerces every pair "
+		"(a float splats to a vector, a vec4 into a vec3 drops w), the same way the "
+		"canvas accepts any wire, and the answer says which coercion applies; "
+		"allowCoercion: false refuses a mismatch instead. An input holds one wire, "
+		"so a wire it already had is replaced and reported. A wire that would close "
+		"a cycle is refused (the shader would render magenta). Writes the file at "
+		"once, regenerates the shader and the parameter block, updates loaded "
+		"instances and tells a clean open tab to re-read; an open tab with unsaved "
+		"edits is refused. Refuses an instance (edit the parent) and a material "
+		"function.";
+	t.inputSchema = objectSchema(json{
+		{ "path",    stringProp("Content-relative path of a master material.") },
+		{ "srcNode", json{ { "type", "integer" }, { "description", "The node the wire leaves." } } },
+		{ "srcPin",  json{ { "description", "An OUTPUT pin of srcNode: its index or its "
+		                                    "name, as material_graph_info reports it." } } },
+		{ "dstNode", json{ { "type", "integer" }, { "description", "The node the wire enters." } } },
+		{ "dstPin",  json{ { "description", "An INPUT pin of dstNode: its index or its "
+		                                    "name, as material_graph_info reports it." } } },
+		{ "allowCoercion", json{ { "type", "boolean" },
+		                         { "description", "Default true. False refuses a type "
+		                                          "mismatch instead of letting the "
+		                                          "codegen coerce it." } } },
+	}, { "path", "srcNode", "srcPin", "dstNode", "dstPin" });
+	t.handler = [cm, h](const json& args) -> ToolResult {
+		if (cm->contentRoot().empty())
+			return ToolResult::fail("no_project",
+				"No project is open in the editor, so there are no materials. Call "
+				"scene_info first.");
+		GraphEdit e = openGraphForEdit(*cm, *h, args);
+		if (!e.ok) return e.failure;
+
+		int srcId = 0, dstId = 0;
+		if (!nodeIdArg(args, "srcNode", srcId) || !nodeIdArg(args, "dstNode", dstId))
+			return ToolResult::fail("invalid_payload",
+				"'srcNode' and 'dstNode' are required and are integer node ids from "
+				"material_graph_info.");
+		if (!args.contains("srcPin") || !args.contains("dstPin"))
+			return ToolResult::fail("invalid_payload",
+				"'srcPin' and 'dstPin' are required (pin index or pin name).");
+		if (srcId == dstId)
+			return ToolResult::fail("invalid_payload",
+				"'srcNode' and 'dstNode' are the same node; a node cannot feed itself.");
+
+		const HE::MatGraphNode* src = e.g.findNode(srcId);
+		const HE::MatGraphNode* dst = e.g.findNode(dstId);
+		if (!src)
+			return ToolResult::fail("not_found",
+				"No node " + std::to_string(srcId) + " in '" + e.m.rel + "'. "
+				"material_graph_info lists the ids.");
+		if (!dst)
+			return ToolResult::fail("not_found",
+				"No node " + std::to_string(dstId) + " in '" + e.m.rel + "'. "
+				"material_graph_info lists the ids.");
+
+		FnGraphs fns{ *cm, {}, {} };
+		PinRef sp, dp;
+		std::string err;
+		if (!resolvePinRef(e.g, *src, /*wantOutput=*/true, args["srcPin"], fns, sp, err))
+			return ToolResult::fail("invalid_payload", "srcPin: " + err);
+		if (!resolvePinRef(e.g, *dst, /*wantOutput=*/false, args["dstPin"], fns, dp, err))
+			return ToolResult::fail("invalid_payload", "dstPin: " + err);
+
+		const std::string coercion = coercionOf(sp.type, dp.type);
+		bool allowCoercion = true;
+		if (args.contains("allowCoercion") && args["allowCoercion"].is_boolean())
+			allowCoercion = args["allowCoercion"].get<bool>();
+		if (!coercion.empty() && !allowCoercion)
+			return ToolResult::fail("failed",
+				"'" + sp.name + "' is " + pinTypeName(sp.type) + " and '" + dp.name + "' is " +
+				pinTypeName(dp.type) + "; the codegen would coerce (" + coercion + "), "
+				"and allowCoercion is false. Nothing was changed.");
+
+		if (reaches(e.g, dstId, srcId))
+			return ToolResult::fail("failed",
+				"That wire would close a cycle: " + std::string(HE::matNodeDesc(dst->type).name) +
+				" #" + std::to_string(dstId) + " already feeds " +
+				HE::matNodeDesc(src->type).name + " #" + std::to_string(srcId) +
+				" (directly or through other nodes), and the codegen renders a cycle as "
+				"magenta. Nothing was changed.");
+
+		const HE::MatGraphLink* had = linkInto(e.g, dstId, dp.index);
+		json link{ { "srcNode", srcId }, { "srcPin", sp.index }, { "srcName", sp.name },
+		           { "dstNode", dstId }, { "dstPin", dp.index }, { "dstName", dp.name } };
+		if (had && had->srcNode == srcId && had->srcPin == sp.index)
+			return ToolResult::ok(json{
+				{ "connected", true }, { "changed", false }, { "link", std::move(link) },
+				{ "coercion", coercion.empty() ? json(nullptr) : json(coercion) },
+				{ "note", "That wire already exists; nothing was written." },
+			});
+		json replaced = json::array();
+		if (had) replaced.push_back(linkJson(*had));
+
+		if (!e.g.connect(srcId, sp.index, dstId, dp.index))
+			return ToolResult::fail("failed",
+				"The graph refused the wire. Nothing was written.");
+
+		json out{
+			{ "connected",     true },
+			{ "changed",       true },
+			{ "link",          std::move(link) },
+			{ "srcType",       pinTypeName(sp.type) },
+			{ "dstType",       pinTypeName(dp.type) },
+			{ "coercion",      coercion.empty() ? json(nullptr) : json(coercion) },
+			{ "replacedLinks", std::move(replaced) },
+		};
+		ToolResult r = commitGraph(*cm, *h, e.m, e.g, std::move(out));
+		if (r.isError) return r;
+		json param;
+		if (paramReport(*cm, e.m, *e.g.findNode(srcId), param)) r.content["parameter"] = param;
+		return r;
+	};
+	registry.add(std::move(t));
+}
+
+// ── material_disconnect ──────────────────────────────────────────────────────
+
+void addDisconnect(McpToolRegistry& registry, ContentManager& content,
+                   const std::shared_ptr<McpMaterialHooks>& h)
+{
+	ContentManager* cm = &content;
+	McpTool t;
+	t.name        = "material_disconnect";
+	t.mutates     = true;
+	t.description =
+		"Remove the wire into one input pin of a master material's graph. An input "
+		"holds at most one wire, so 'dstNode' and 'dstPin' name it completely; "
+		"'srcNode'/'srcPin' may be given as well (as hc_disconnect wants them) and "
+		"are then checked against the wire that is actually there. The answer says "
+		"what the pin reads now that it is unwired: its type and its default. "
+		"Writes the file at once, regenerates, updates loaded instances and tells a "
+		"clean open tab to re-read; an open tab with unsaved edits is refused. "
+		"Refuses an instance and a material function.";
+	t.inputSchema = objectSchema(json{
+		{ "path",    stringProp("Content-relative path of a master material.") },
+		{ "dstNode", json{ { "type", "integer" }, { "description", "The node the wire enters." } } },
+		{ "dstPin",  json{ { "description", "The INPUT pin of dstNode the wire enters: "
+		                                    "index or name, as material_graph_info "
+		                                    "reports it." } } },
+		{ "srcNode", json{ { "type", "integer" },
+		                   { "description", "Optional: the node the wire leaves; refused "
+		                                    "if the wire leaves another." } } },
+		{ "srcPin",  json{ { "description", "Optional, with srcNode: its OUTPUT pin, "
+		                                    "index or name." } } },
+	}, { "path", "dstNode", "dstPin" });
+	t.handler = [cm, h](const json& args) -> ToolResult {
+		if (cm->contentRoot().empty())
+			return ToolResult::fail("no_project",
+				"No project is open in the editor, so there are no materials. Call "
+				"scene_info first.");
+		GraphEdit e = openGraphForEdit(*cm, *h, args);
+		if (!e.ok) return e.failure;
+
+		int dstId = 0;
+		if (!nodeIdArg(args, "dstNode", dstId) || !args.contains("dstPin"))
+			return ToolResult::fail("invalid_payload",
+				"'dstNode' (integer node id) and 'dstPin' (pin index or name) are "
+				"required.");
+		const HE::MatGraphNode* dst = e.g.findNode(dstId);
+		if (!dst)
+			return ToolResult::fail("not_found",
+				"No node " + std::to_string(dstId) + " in '" + e.m.rel + "'. "
+				"material_graph_info lists the ids.");
+
+		FnGraphs fns{ *cm, {}, {} };
+		PinRef dp;
+		std::string err;
+		if (!resolvePinRef(e.g, *dst, /*wantOutput=*/false, args["dstPin"], fns, dp, err))
+			return ToolResult::fail("invalid_payload", "dstPin: " + err);
+
+		const HE::MatGraphLink* had = linkInto(e.g, dstId, dp.index);
+		if (!had)
+			return ToolResult::fail("not_found",
+				"There is no wire into '" + dp.name + "' (" + std::to_string(dp.index) +
+				") of " + HE::matNodeDesc(dst->type).name + " #" + std::to_string(dstId) +
+				"; it reads its default. material_graph_info lists the wires the graph "
+				"actually has.");
+		const HE::MatGraphLink link = *had;
+
+		// The source end, when the client named it: it has to be THE wire.
+		const bool haveSrcNode = args.contains("srcNode"), haveSrcPin = args.contains("srcPin");
+		if (haveSrcNode || haveSrcPin)
+		{
+			int srcId = 0;
+			if (!haveSrcNode || !haveSrcPin || !nodeIdArg(args, "srcNode", srcId))
+				return ToolResult::fail("invalid_payload",
+					"'srcNode' (integer node id) and 'srcPin' go together; leave both "
+					"out to remove whatever wire enters dstPin.");
+			const HE::MatGraphNode* src = e.g.findNode(srcId);
+			if (!src)
+				return ToolResult::fail("not_found",
+					"No node " + std::to_string(srcId) + " in '" + e.m.rel + "'.");
+			PinRef sp;
+			if (!resolvePinRef(e.g, *src, /*wantOutput=*/true, args["srcPin"], fns, sp, err))
+				return ToolResult::fail("invalid_payload", "srcPin: " + err);
+			if (link.srcNode != srcId || link.srcPin != sp.index)
+				return ToolResult::fail("not_found",
+					"The wire into '" + dp.name + "' of node " + std::to_string(dstId) +
+					" does not leave node " + std::to_string(srcId) + " pin " +
+					std::to_string(sp.index) + "; it leaves node " +
+					std::to_string(link.srcNode) + " pin " + std::to_string(link.srcPin) +
+					". Nothing was changed.");
+		}
+
+		const HE::MatGraphNode* src = e.g.findNode(link.srcNode);
+		e.g.disconnectInput(dstId, dp.index);
+
+		json out{
+			{ "disconnected", true },
+			{ "link",         linkJson(link) },
+			{ "fallback",     json{ { "pin", dp.index }, { "name", dp.name },
+			                        { "type", pinTypeName(dp.type) }, { "default", dp.def } } },
+		};
+		ToolResult r = commitGraph(*cm, *h, e.m, e.g, std::move(out));
+		if (r.isError) return r;
+		json param;
+		if (src && paramReport(*cm, e.m, *src, param)) r.content["parameter"] = param;
+		return r;
+	};
+	registry.add(std::move(t));
+}
+
+// ── material_set_pin_default ─────────────────────────────────────────────────
+
+HE::MatNodeType constNodeFor(HE::MatPinType t)
+{
+	switch (t)
+	{
+	case HE::MatPinType::Float: return HE::MatNodeType::ConstFloat;
+	case HE::MatPinType::Vec2:  return HE::MatNodeType::ConstVec2;
+	case HE::MatPinType::Vec3:  return HE::MatNodeType::ConstColor;
+	case HE::MatPinType::Vec4:  return HE::MatNodeType::ConstVec4;
+	}
+	return HE::MatNodeType::ConstFloat;
+}
+
+int componentsOf(HE::MatPinType t)
+{
+	switch (t)
+	{
+	case HE::MatPinType::Float: return 1;
+	case HE::MatPinType::Vec2:  return 2;
+	case HE::MatPinType::Vec3:  return 3;
+	case HE::MatPinType::Vec4:  return 4;
+	}
+	return 1;
+}
+
+// The value's shape comes from the pin's type, as material_set_param's comes
+// from the parameter's kind: a float pin takes a number, a vector pin an array
+// of exactly its components.
+bool constValueFromJson(const json& v, HE::MatPinType type, float out[4], std::string& err)
+{
+	const int n = componentsOf(type);
+	if (n == 1)
+	{
+		if (!v.is_number()) { err = "a number (the pin is float)"; return false; }
+		out[0] = v.get<float>();
+		return true;
+	}
+	if (!v.is_array() || static_cast<int>(v.size()) != n)
+	{
+		err = "an array of " + std::to_string(n) + " numbers (the pin is " + pinTypeName(type) + ")";
+		return false;
+	}
+	for (int k = 0; k < n; ++k)
+	{
+		if (!v[static_cast<std::size_t>(k)].is_number())
+		{
+			err = "an array of " + std::to_string(n) + " numbers (the pin is " + pinTypeName(type) + ")";
+			return false;
+		}
+		out[k] = v[static_cast<std::size_t>(k)].get<float>();
+	}
+	return true;
+}
+
+// The wire into (node, pin) leaves a Constant node of exactly the type this
+// tool would make for the pin, and that constant feeds nothing else — so it is
+// this tool's to update or remove. Anything else wired there is the human's
+// (or another tool's) and stays.
+const HE::MatGraphNode* ownConstantInto(const HE::MaterialGraph& g, int node, int pin,
+                                        HE::MatPinType pinType)
+{
+	const HE::MatGraphLink* l = linkInto(g, node, pin);
+	if (!l) return nullptr;
+	const HE::MatGraphNode* src = g.findNode(l->srcNode);
+	if (!src || src->type != constNodeFor(pinType)) return nullptr;
+	int fanOut = 0;
+	for (const HE::MatGraphLink& c : g.links)
+		if (c.srcNode == src->id) ++fanOut;
+	return fanOut == 1 ? src : nullptr;
+}
+
+void addSetPinDefault(McpToolRegistry& registry, ContentManager& content,
+                      const std::shared_ptr<McpMaterialHooks>& h)
+{
+	ContentManager* cm = &content;
+	McpTool t;
+	t.name        = "material_set_pin_default";
+	t.mutates     = true;
+	t.description =
+		"Give an UNWIRED input pin a constant value. A material node keeps no "
+		"per-pin default (an unwired pin reads the registry's default, which "
+		"material_graph_info reports), so this does what a human does on the "
+		"canvas: it adds a Constant node of the pin's type (Float, Vector2, Color, "
+		"Vector4) and wires it in — placed left of the node. Calling it again on "
+		"the same pin updates that constant instead of adding another; value: null "
+		"removes it and the pin reads its default again. The value's shape is the "
+		"pin's: a number for a float pin, [x, y] / [r, g, b] / [x, y, z, w] for a "
+		"vector pin. A pin wired to anything else is refused rather than silently "
+		"rewired: the wire wins, disconnect it first with material_disconnect. "
+		"Writes the file at once, regenerates, updates loaded instances and tells a "
+		"clean open tab to re-read; an open tab with unsaved edits is refused. "
+		"Refuses an instance and a material function.";
+	t.inputSchema = objectSchema(json{
+		{ "path",  stringProp("Content-relative path of a master material.") },
+		{ "node",  json{ { "type", "integer" }, { "description", "Node id, from "
+		                                          "material_graph_info or material_add_node." } } },
+		{ "pin",   json{ { "description", "An INPUT pin of the node: index or name, as "
+		                                  "material_graph_info reports it." } } },
+		{ "value", json{ { "description", "The constant, in the pin's shape: a number "
+		                                  "for a float pin, an array of 2 / 3 / 4 numbers "
+		                                  "for a vec2 / vec3 / vec4 pin. null removes the "
+		                                  "constant this tool made." } } },
+	}, { "path", "node", "pin", "value" });
+	t.handler = [cm, h](const json& args) -> ToolResult {
+		if (cm->contentRoot().empty())
+			return ToolResult::fail("no_project",
+				"No project is open in the editor, so there are no materials. Call "
+				"scene_info first.");
+		GraphEdit e = openGraphForEdit(*cm, *h, args);
+		if (!e.ok) return e.failure;
+
+		int nodeId = 0;
+		if (!nodeIdArg(args, "node", nodeId) || !args.contains("pin"))
+			return ToolResult::fail("invalid_payload",
+				"'node' (integer node id) and 'pin' (pin index or name) are required.");
+		const HE::MatGraphNode* n = e.g.findNode(nodeId);
+		if (!n)
+			return ToolResult::fail("not_found",
+				"No node " + std::to_string(nodeId) + " in '" + e.m.rel + "'. "
+				"material_graph_info lists the ids.");
+
+		FnGraphs fns{ *cm, {}, {} };
+		PinRef pin;
+		std::string err;
+		if (!resolvePinRef(e.g, *n, /*wantOutput=*/false, args["pin"], fns, pin, err))
+			return ToolResult::fail("invalid_payload", "pin: " + err);
+
+		const std::string pinLabel = "'" + pin.name + "' (" + std::to_string(pin.index) + ") of " +
+		                             HE::matNodeDesc(n->type).name + " #" + std::to_string(nodeId);
+		const HE::MatGraphLink* wired = linkInto(e.g, nodeId, pin.index);
+		const HE::MatGraphNode* own   = ownConstantInto(e.g, nodeId, pin.index, pin.type);
+		if (wired && !own)
+		{
+			const HE::MatGraphNode* src = e.g.findNode(wired->srcNode);
+			return ToolResult::fail("failed",
+				pinLabel + " is wired (from " +
+				(src ? std::string(HE::matNodeDesc(src->type).name) : std::string("node")) +
+				" #" + std::to_string(wired->srcNode) + " pin " + std::to_string(wired->srcPin) +
+				"), and a wired pin ignores any constant. Disconnect it first with "
+				"material_disconnect if the constant is what you want. Nothing was "
+				"changed.");
+		}
+
+		const bool clear = !args.contains("value") || args["value"].is_null();
+		if (clear)
+		{
+			if (!own)
+				return ToolResult::ok(json{ { "cleared", true }, { "changed", false },
+				                            { "note", pinLabel + " has no constant; it "
+				                                      "reads its default already." } });
+			const int constId = own->id;
+			e.g.removeNode(constId);
+			json out{
+				{ "cleared",     true },
+				{ "changed",     true },
+				{ "removedNode", constId },
+				{ "pin",         json{ { "node", nodeId }, { "pin", pin.index },
+				                       { "name", pin.name }, { "type", pinTypeName(pin.type) },
+				                       { "default", pin.def } } },
+			};
+			return commitGraph(*cm, *h, e.m, e.g, std::move(out));
+		}
+
+		float v[4] = { 0, 0, 0, 0 };
+		if (!constValueFromJson(args["value"], pin.type, v, err))
+			return ToolResult::fail("invalid_payload",
+				"'value' for " + pinLabel + " is " + err + "; null removes the constant.");
+
+		int constId = 0;
+		const bool created = own == nullptr;
+		if (own)
+		{
+			constId = own->id;
+		}
+		else
+		{
+			// Left of the node, one row down per pin, so several constants on one
+			// node do not land on top of each other.
+			constId = e.g.addNode(constNodeFor(pin.type), n->x - 240.0f,
+			                      n->y + 40.0f * static_cast<float>(pin.row));
+			if (!e.g.connect(constId, 0, nodeId, pin.index))
+				return ToolResult::fail("failed",
+					"The graph refused the wire. Nothing was written.");
+		}
+		HE::MatGraphNode* c = e.g.findNode(constId);
+		if (!c) return ToolResult::fail("failed", "The graph refused the node. Nothing was written.");
+		for (int k = 0; k < componentsOf(pin.type); ++k) c->p[k] = v[k];
+
+		json out{
+			{ "changed", true },
+			{ "created", created },
+			{ "pin",     json{ { "node", nodeId }, { "pin", pin.index },
+			                   { "name", pin.name }, { "type", pinTypeName(pin.type) } } },
+		};
+		ToolResult r = commitGraph(*cm, *h, e.m, e.g, std::move(out));
+		if (r.isError) return r;
+		r.content["constantNode"] = nodeJson(e.g, *e.g.findNode(constId), blendModeOf(e.g), fns);
+		return r;
+	};
+	registry.add(std::move(t));
+}
+
 // ── material_set_param ───────────────────────────────────────────────────────
 
 void addSetParam(McpToolRegistry& registry, ContentManager& content,
@@ -2550,6 +3164,9 @@ void registerMaterialTools(McpToolRegistry& registry, ContentManager& content,
 	addNodeTypes(registry, content, h);
 	addAddNode(registry, content, h);
 	addRemoveNode(registry, content, h);
+	addConnect(registry, content, h);
+	addDisconnect(registry, content, h);
+	addSetPinDefault(registry, content, h);
 	addSetParam(registry, content, h);
 	addCreate(registry, content, h);
 	addCreateInstance(registry, content, h);

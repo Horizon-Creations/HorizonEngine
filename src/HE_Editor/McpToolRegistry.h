@@ -618,14 +618,18 @@ void registerInputTools(McpToolRegistry& registry, ContentManager& content,
                         McpInputHooks hooks);
 
 // ─── What a surface looks like ───────────────────────────────────────────────
-// Eight tools — `material_info` (the list and the one material, the same split
+// Eleven tools — `material_info` (the list and the one material, the same split
 // `terrain_info` uses), `material_graph_info` (the graph's structure, and the
 // one reader that accepts a material FUNCTION), `material_set_param`,
 // `material_create` (a master from a template, its PBR inputs as parameters),
 // `material_create_instance`, and the graph editors `material_node_types`,
-// `material_add_node` and `material_remove_node` (masters only — a function's
-// interface nodes are the pin indices of every caller's links, so a function
-// stays read-only here until there is a caller sweep; McpToolsMaterial.cpp).
+// `material_add_node`, `material_remove_node`, `material_connect`,
+// `material_disconnect` and `material_set_pin_default` (masters only — a
+// function's interface nodes are the pin indices of every caller's links, so a
+// function stays read-only here until there is a caller sweep;
+// McpToolsMaterial.cpp). A material node has no per-pin default of its own, so
+// `material_set_pin_default` materialises one as a Constant node wired into the
+// pin — the same effect, the graph format untouched.
 //
 // ── Why a material needs tools of its own ────────────────────────────────────
 // `asset_create` already makes a material FILE, and that file is a stub: no
