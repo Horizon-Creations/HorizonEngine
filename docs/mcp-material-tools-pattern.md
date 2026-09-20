@@ -226,3 +226,47 @@ beide **nicht** in Schritt 2/3:
 
 Parameter-Werte setzen (der dritte Sinn von „Eigenschaften setzen") ist mit
 `material_set_param` bereits abgedeckt.
+
+## 6. Draht-Prüfung: die Tools über den echten MCP-Server aufrufen
+
+Stand 21.09.2026, Schritt 4. Die Testfälle rufen Handler im Prozess; was ein
+Client sieht (`content`/`isError`/`structuredContent` aus `McpBridge`, durch
+`scripts/he_mcp.py` gereicht), prüft nur der Weg über den Socket. Der Editor
+kann ihn ohne geöffnetes Projekt nicht liefern (alles wäre `no_project`),
+deshalb gibt es in `tests/test_mcp_tools_material.cpp` den per Umgebung
+geschalteten Fall „serve to a client": echte `McpBridge` + echtes
+`registerMaterialTools` auf einem Temp-Root (Param-Fixture, Funktion, Stub,
+optional EngineContent unter `Engine/`), gepumpt bis eine Stopp-Datei kommt.
+
+```sh
+EP=/tmp/he_mcp/mcp-endpoint.json; mkdir -p /tmp/he_mcp
+HE_MCP_SERVE_MATERIAL=$EP HE_MCP_SERVE_SECONDS=150 \
+HE_MCP_SERVE_ENGINE_CONTENT=build/src/HE_Editor/EngineContent \
+  build/tests/he_tests -tc='mcp material tools: serve to a client*' &
+# dann wie ein Client: initialize → tools/list → tools/call, zeilenweise
+# JSON-RPC auf stdin/stdout von
+python3 scripts/he_mcp.py --endpoint $EP
+touch $EP.stop            # beendet den Server, der Testfall meldet SUCCESS
+```
+
+Mit laufendem Editor geht derselbe Weg ohne Testbinary: `HE_MCP=1` (und
+`HE_MCP_PORT`) schaltet die Bridge ein, ohne die Config anzufassen; die
+Endpoint-Datei liegt dann in `GlobalState::userDataDir()`.
+
+Was der Draht am 21.09.2026 gezeigt hat (alle 5 Tools, 14 Fehlerfälle):
+
+* Fehler kommen als `isError:true` mit `structuredContent:{code,message}`,
+  der Text-Block ist dieselbe JSON, so wie `McpBridge.cpp` es verspricht.
+* `additionalProperties:false` ist nur Schema: die Bridge validiert nicht,
+  ein unbekanntes Argument wird ignoriert, `path: 42` liest als fehlend
+  (`strArg`-Fallback wie bei hc).
+* Fehlendes `path`: `material_info`/`material_graph_info` sagen
+  `invalid_path` (gemeinsames `checkPath`, `McpToolCommon.cpp`),
+  `material_create` sagt `invalid_payload` (eigene Vorprüfung). Beides
+  deckt §2.5, innerhalb der Familie ist es uneinheitlich.
+* `nodes[].type` trägt Enum-Namen (`ParamColor`), `output.pins[].chain`
+  Anzeigenamen (`Param (Color) #2 (Tint)`). Ein künftiges
+  `material_add_node` muss `type` gegen `nodes[].type` bzw. ein
+  `material_node_types` prüfen, nie gegen `chain`.
+* Die Listenform trägt `{path, type, loaded}`; `kind`/`parent`/`paramCount`
+  nur für bereits residente Materialien, weil die Liste nichts lädt.
