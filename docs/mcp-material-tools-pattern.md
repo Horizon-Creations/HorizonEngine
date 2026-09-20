@@ -392,7 +392,7 @@ damit 11 Werkzeuge.
   `material_graph_info` sie meldet. Ablehnung nennt alle Pins der Seite
   („'A' (0), 'B' (1)"). Leerer Name (Reroute-Pins heißen „") → Index nehmen.
 
-### 8.4 Tests (`tests/test_mcp_tools_material.cpp`, 7 Fälle)
+### 8.4 Tests (`tests/test_mcp_tools_material.cpp`, 7 Fälle + 1 unter SHADERC)
 
 Draht per Name und Index auf die Param-Fixture, `replacedLinks` = der
 verdrängte Param-Draht, `codegenValueOf("Rough")` verliert und gewinnt den
