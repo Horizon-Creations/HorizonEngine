@@ -411,6 +411,18 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "UI Widget",         "Hover cursor" },
 		{ "UI Graph Node",     "Property" },
 		{ "Script",            "Class" },
+		// Project Settings ▸ Game ▸ Anti-Cheat: the labelled rows resolve under
+		// the page's scope; its two tables ask by key (below).
+		{ "Anti-Cheat",        "Enable anti-cheat##acenabled" },
+		{ "Anti-Cheat",        "Check client integrity at join##acintegrity" },
+		{ "Anti-Cheat",        "Clock tolerance##actolerance" },
+		{ "Anti-Cheat",        "Clock window##acwindow" },
+		{ "Anti-Cheat",        "Max inputs per second##acinputs" },
+		{ "Anti-Cheat",        "Score half-life##achalflife" },
+		{ "Anti-Cheat",        "Suspect at##acsuspect" },
+		{ "Anti-Cheat",        "Confirmed at##acconfirmed" },
+		{ "Anti-Cheat",        "Telemetry URL##actelemetry" },
+		{ "Anti-Cheat",        "Add Rule" },
 	};
 	for (const Case& c : cases)
 	{
@@ -446,6 +458,13 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		// camera sits in.
 		"viewport.bookmark-go", "viewport.bookmark-set",
 		"secondary-viewport.view",
+		// The Anti-Cheat page's policy grid (a box per level and response, the
+		// column head is the label) and its rules table (one row shape shared
+		// by every rule, the visible text is data).
+		"Anti-Cheat/Policy Event", "Anti-Cheat/Policy Telemetry", "Anti-Cheat/Policy Flag",
+		"Anti-Cheat/Policy Kick",  "Anti-Cheat/Policy Ban",
+		"Anti-Cheat/Rule Name",    "Anti-Cheat/Rule Min",   "Anti-Cheat/Rule Max",
+		"Anti-Cheat/Rule Per second", "Anti-Cheat/Rule Level", "Anti-Cheat/Remove rule",
 	};
 	for (const char* k : byKey)
 	{

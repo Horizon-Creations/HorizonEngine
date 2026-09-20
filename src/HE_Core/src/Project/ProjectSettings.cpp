@@ -70,7 +70,59 @@ int roundToPowerOfTwo(int v)
     return (v - p) < (p * 2 - v) ? p : p * 2;
 }
 
+// A policy as the file spells it: the names of the set bits, in bit order, so
+// two saves of the same policy are the same text.
+json policyToJson(std::uint32_t mask)
+{
+    json arr = json::array();
+    for (int i = 0; i < kAntiCheatResponseCount; ++i)
+        if (mask & (1u << i)) arr.push_back(kAntiCheatResponseNames[i]);
+    return arr;
+}
+
+// Missing or not an array = the default stays. An array is taken WHOLE, so
+// `[]` really is "nothing but log" (§5.3) and not "the default again"; a
+// name the engine does not know is skipped, a name it does is set. Log is put
+// back by clamp() whatever the file said.
+void readPolicy(const json& j, const char* key, std::uint32_t& out)
+{
+    const auto it = j.find(key);
+    if (it == j.end() || !it->is_array()) return;
+    std::uint32_t mask = 0;
+    for (const json& e : *it)
+    {
+        if (!e.is_string()) continue;
+        const std::string s = e.get<std::string>();
+        for (int i = 0; i < kAntiCheatResponseCount; ++i)
+            if (s == kAntiCheatResponseNames[i]) mask |= 1u << i;
+    }
+    out = mask;
+}
+
+bool rulesEqual(const std::vector<ProjectAntiCheatRule>& a,
+                const std::vector<ProjectAntiCheatRule>& b)
+{
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i)
+    {
+        if (a[i].name != b[i].name || a[i].level != b[i].level) return false;
+        if (!nearlyEqual(a[i].min, b[i].min) || !nearlyEqual(a[i].max, b[i].max)
+            || !nearlyEqual(a[i].maxPerSecond, b[i].maxPerSecond))
+            return false;
+    }
+    return true;
+}
+
 } // namespace
+
+// ─── ProjectAntiCheatRule ─────────────────────────────────────────────────────
+
+int ProjectAntiCheatRule::levelIndex() const
+{
+    for (int i = 0; i < kAntiCheatLevelCount; ++i)
+        if (level == kAntiCheatLevels[i]) return i;
+    return 0;
+}
 
 // ─── ProjectSettings ──────────────────────────────────────────────────────────
 
@@ -100,7 +152,20 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && renderDefaults.windowHeight == o.renderDefaults.windowHeight
         && renderDefaults.windowMode == o.renderDefaults.windowMode
         && renderDefaults.vsync == o.renderDefaults.vsync
-        && renderDefaults.backend == o.renderDefaults.backend;
+        && renderDefaults.backend == o.renderDefaults.backend
+        && antiCheat.enabled == o.antiCheat.enabled
+        && antiCheat.integrityCheck == o.antiCheat.integrityCheck
+        && nearlyEqual(antiCheat.tolerance, o.antiCheat.tolerance)
+        && nearlyEqual(antiCheat.windowSec, o.antiCheat.windowSec)
+        && antiCheat.maxInputsPerSecond == o.antiCheat.maxInputsPerSecond
+        && nearlyEqual(antiCheat.scoreHalfLifeSec, o.antiCheat.scoreHalfLifeSec)
+        && nearlyEqual(antiCheat.scoreSuspect, o.antiCheat.scoreSuspect)
+        && nearlyEqual(antiCheat.scoreConfirmed, o.antiCheat.scoreConfirmed)
+        && antiCheat.policySuspect == o.antiCheat.policySuspect
+        && antiCheat.policyConfirmed == o.antiCheat.policyConfirmed
+        && antiCheat.policyHard == o.antiCheat.policyHard
+        && antiCheat.telemetryUrl == o.antiCheat.telemetryUrl
+        && rulesEqual(antiCheat.rules, o.antiCheat.rules);
 }
 
 void ProjectSettings::clamp()
@@ -131,6 +196,43 @@ void ProjectSettings::clamp()
     if (std::find(std::begin(kWindowModes), std::end(kWindowModes), r.windowMode)
         == std::end(kWindowModes))
         r.windowMode = ProjectRenderDefaults{}.windowMode;
+
+    using AC = ProjectAntiCheatSettings;
+    auto& a = antiCheat;
+    auto finiteOr = [](float v, float fallback) { return std::isfinite(v) ? v : fallback; };
+    a.tolerance          = std::clamp(finiteOr(a.tolerance, AC{}.tolerance), 0.0f, AC::kMaxTolerance);
+    a.windowSec          = std::clamp(finiteOr(a.windowSec, AC{}.windowSec),
+                                      AC::kMinWindowSec, AC::kMaxWindowSec);
+    a.maxInputsPerSecond = std::clamp(a.maxInputsPerSecond,
+                                      AC::kMinInputsPerSecond, AC::kMaxInputsPerSecond);
+    a.scoreHalfLifeSec   = std::clamp(finiteOr(a.scoreHalfLifeSec, AC{}.scoreHalfLifeSec),
+                                      AC::kMinHalfLifeSec, AC::kMaxHalfLifeSec);
+    a.scoreSuspect       = std::clamp(finiteOr(a.scoreSuspect, AC{}.scoreSuspect),
+                                      0.0f, AC::kMaxScoreThreshold);
+    // Confirmed below Suspect would make Suspect unreachable: the score would
+    // jump straight past it. Confirmed is lifted, not Suspect lowered — the
+    // one somebody edited last is the one that has to give way, and a raised
+    // Suspect is the more common edit.
+    a.scoreConfirmed     = std::clamp(finiteOr(a.scoreConfirmed, AC{}.scoreConfirmed),
+                                      a.scoreSuspect, AC::kMaxScoreThreshold);
+    // Log is not optional (§5.2): a level change is always a line in the log.
+    a.policySuspect   = (a.policySuspect   & AC::AllResponses) | AC::Log;
+    a.policyConfirmed = (a.policyConfirmed & AC::AllResponses) | AC::Log;
+    a.policyHard      = (a.policyHard      & AC::AllResponses) | AC::Log;
+
+    if (a.rules.size() > static_cast<std::size_t>(AC::kMaxRules))
+        a.rules.resize(static_cast<std::size_t>(AC::kMaxRules));
+    for (ProjectAntiCheatRule& rule : a.rules)
+    {
+        // An empty name is left alone: the page adds a row before it has a
+        // name and saves the moment the first edit ends, so a clamp that
+        // dropped nameless rules would delete the row under the user's cursor.
+        // The runtime skips a rule it cannot address by name.
+        rule.min          = std::clamp(finiteOr(rule.min, 0.0f), -AC::kMaxRuleValue, AC::kMaxRuleValue);
+        rule.max          = std::clamp(finiteOr(rule.max, 0.0f), rule.min, AC::kMaxRuleValue);
+        rule.maxPerSecond = std::clamp(finiteOr(rule.maxPerSecond, 0.0f), 0.0f, AC::kMaxRuleValue);
+        rule.level        = kAntiCheatLevels[rule.levelIndex()];
+    }
 }
 
 void ProjectSettings::toJson(json& out) const
@@ -164,6 +266,30 @@ void ProjectSettings::toJson(json& out) const
         { "windowMode",        renderDefaults.windowMode },
         { "vsync",             renderDefaults.vsync },
         { "backend",           renderDefaults.backend },
+    };
+
+    // The shape docs/anti-cheat-plan.md §4.4 shows, key for key.
+    json rules = json::array();
+    for (const ProjectAntiCheatRule& r : antiCheat.rules)
+        rules.push_back({ { "name",         r.name },
+                          { "min",          r.min },
+                          { "max",          r.max },
+                          { "maxPerSecond", r.maxPerSecond },
+                          { "level",        r.level } });
+    out["anticheat"] = {
+        { "enabled",            antiCheat.enabled },
+        { "integrityCheck",     antiCheat.integrityCheck },
+        { "tolerance",          antiCheat.tolerance },
+        { "windowSec",          antiCheat.windowSec },
+        { "maxInputsPerSecond", antiCheat.maxInputsPerSecond },
+        { "score", { { "halfLifeSec", antiCheat.scoreHalfLifeSec },
+                     { "suspect",     antiCheat.scoreSuspect },
+                     { "confirmed",   antiCheat.scoreConfirmed } } },
+        { "policy", { { "suspect",   policyToJson(antiCheat.policySuspect) },
+                      { "confirmed", policyToJson(antiCheat.policyConfirmed) },
+                      { "hard",      policyToJson(antiCheat.policyHard) } } },
+        { "telemetryUrl",       antiCheat.telemetryUrl },
+        { "rules",              std::move(rules) },
     };
 }
 
@@ -212,6 +338,43 @@ void ProjectSettings::fromJson(const json& in)
         readString(r, "windowMode",        renderDefaults.windowMode);
         readBool  (r, "vsync",             renderDefaults.vsync);
         readString(r, "backend",           renderDefaults.backend);
+    }
+    {
+        const json& a = section(in, "anticheat");
+        readBool  (a, "enabled",            antiCheat.enabled);
+        readBool  (a, "integrityCheck",     antiCheat.integrityCheck);
+        readNumber(a, "tolerance",          antiCheat.tolerance);
+        readNumber(a, "windowSec",          antiCheat.windowSec);
+        readNumber(a, "maxInputsPerSecond", antiCheat.maxInputsPerSecond);
+        const json& sc = section(a, "score");
+        readNumber(sc, "halfLifeSec", antiCheat.scoreHalfLifeSec);
+        readNumber(sc, "suspect",     antiCheat.scoreSuspect);
+        readNumber(sc, "confirmed",   antiCheat.scoreConfirmed);
+        const json& po = section(a, "policy");
+        readPolicy(po, "suspect",   antiCheat.policySuspect);
+        readPolicy(po, "confirmed", antiCheat.policyConfirmed);
+        readPolicy(po, "hard",      antiCheat.policyHard);
+        readString(a, "telemetryUrl", antiCheat.telemetryUrl);
+        // A rules key that is there and an array is taken whole — an empty one
+        // is "no rules", not "the default's rules" (which is also none). An
+        // element that is not an object is skipped, not turned into a blank
+        // rule; a rule with a missing field gets that field's default.
+        const auto rules = a.find("rules");
+        if (rules != a.end() && rules->is_array())
+        {
+            antiCheat.rules.clear();
+            for (const json& e : *rules)
+            {
+                if (!e.is_object()) continue;
+                ProjectAntiCheatRule rule;
+                readString(e, "name",         rule.name);
+                readNumber(e, "min",          rule.min);
+                readNumber(e, "max",          rule.max);
+                readNumber(e, "maxPerSecond", rule.maxPerSecond);
+                readString(e, "level",        rule.level);
+                antiCheat.rules.push_back(std::move(rule));
+            }
+        }
     }
 
     clamp();
