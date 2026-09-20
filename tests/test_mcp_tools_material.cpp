@@ -13,6 +13,8 @@
 // material_create templates is gated on HE_TESTS_HAVE_SHADERC.
 #include <material/MaterialShaderLibrary.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -1612,7 +1614,8 @@ TEST_CASE("mcp material tools: node_types is the registry minus Output, with the
 		                        t.at("displayName").get<std::string>() + " " +
 		                        t.at("category").get<std::string>();
 		std::string low = hay;
-		std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+		std::transform(low.begin(), low.end(), low.begin(),
+		               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		CHECK(low.find("param") != std::string::npos);
 	}
 	CHECK(q.content.at("functions").empty());   // no function path contains "param"
