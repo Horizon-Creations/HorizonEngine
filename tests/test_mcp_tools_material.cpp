@@ -2665,6 +2665,499 @@ TEST_CASE("mcp material tools: the wiring tools refuse without writing")
 	CHECK(f.reloadCalls == 3);
 }
 
+// ─── material_set_node ───────────────────────────────────────────────────────
+
+namespace {
+
+// A function WITH inputs: the FunctionCall bound to it has two input pins and
+// one output, so a re-bind to makeFunctionGraph (no inputs) has pins to lose.
+HE::MaterialGraph makeTwoInputFunctionGraph()
+{
+	HE::MaterialGraph g;
+	const int a = g.addNode(HE::MatNodeType::FnInput, 40, 60);
+	g.findNode(a)->s = "A";
+	g.findNode(a)->p[0] = 2.0f;   // Vec3
+	const int b = g.addNode(HE::MatNodeType::FnInput, 40, 160);
+	g.findNode(b)->s = "B";
+	g.findNode(b)->p[0] = 0.0f;   // Float
+	const int out = g.addNode(HE::MatNodeType::FnOutput, 380, 120);
+	g.findNode(out)->s = "Out";
+	g.findNode(out)->p[0] = 2.0f;
+	g.connect(a, 0, out, 0);
+	return g;
+}
+
+// The blend mode the FILE's Output node declares (p[1]), -1 without one.
+int blendModeOfSaved(const HE::MaterialGraph& g)
+{
+	for (const HE::MatGraphNode& n : g.nodes)
+		if (n.type == HE::MatNodeType::Output) return static_cast<int>(n.p[1]);
+	return -1;
+}
+
+} // namespace
+
+TEST_CASE("mcp material tools: set_node registration")
+{
+	Fixture f("setnode_reg");
+	const McpTool* t = f.registry.find("material_set_node");
+	REQUIRE(t != nullptr);
+	CHECK(McpToolRegistry::enforceNameRule(t->name));
+	CHECK(t->inputSchema.is_object());
+	CHECK_FALSE(t->description.empty());
+	CHECK(t->mutates);
+}
+
+TEST_CASE("mcp material tools: set_node changes values, range, metadata and position, and the block follows")
+{
+	Fixture f("setnode_values");
+	f.writeMaterial("Materials/Rock.hasset", makeParamGraph());
+	const std::string path = "Materials/Rock.hasset";
+	const ParamIds ids = paramIdsOf(f, path);
+	// A resident instance that does not override Metal — the state in which a
+	// value written to the node alone would leave a stale block on screen.
+	const ToolResult made = f.call("material_create_instance", json{ { "parent", path } });
+	REQUIRE_FALSE(made.isError);
+	const HE::UUID instId = f.content.idForPath(made.content.at("path").get<std::string>());
+	REQUIRE_FALSE(instId == HE::UUID{});
+
+	// ── A wired ParamFloat's value: node default AND block, both to 0.9 ──────
+	const ToolResult r1 = f.call("material_set_node", json{
+		{ "path", path }, { "id", ids.metal }, { "p", json::array({ 0.9 }) } });
+	REQUIRE_FALSE(r1.isError);
+	CHECK(r1.content.at("changed") == true);
+	CHECK(r1.content.at("node").at("p")[0].get<float>() == doctest::Approx(0.9f));
+	CHECK(r1.content.at("parameter").at("name") == "Metal");
+	CHECK(r1.content.at("parameter").at("hasSlot") == true);
+	CHECK(r1.content.at("parameter").at("blockWritten") == true);
+	CHECK(r1.content.at("droppedLinks").empty());
+	HE::MatParamSlot slot;
+	REQUIRE(codegenValueOf(f.root, path, "Metal", slot));
+	CHECK(slot.value[0] == doctest::Approx(0.9f));
+	float block[4] = {};
+	REQUIRE(savedBlockValueOf(f.root, path, "Metal", block));
+	CHECK(block[0] == doctest::Approx(0.9f));   // not put back by the regenerate
+	float instV[4] = {};
+	REQUIRE(f.content.getMaterialParam(instId, "Metal", instV));
+	CHECK(instV[0] == doctest::Approx(0.9f));   // the loaded instance followed
+
+	// ── The same values again: nothing to do, nothing written ────────────────
+	const std::string afterFirst = f.bytes(path);
+	const ToolResult same = f.call("material_set_node", json{
+		{ "path", path }, { "id", ids.metal }, { "p", json::array({ 0.9 }) } });
+	REQUIRE_FALSE(same.isError);
+	CHECK(same.content.at("changed") == false);
+	CHECK(same.content.contains("node"));
+	CHECK(f.bytes(path) == afterFirst);
+
+	// ── A slider range on the free ParamFloat, and metadata on the colour ────
+	const ToolResult r2 = f.call("material_set_node", json{
+		{ "path", path }, { "id", ids.metal }, { "min", 0.0 }, { "max", 2.0 },
+		{ "group", "Surface" }, { "tooltip", "How metallic" },
+		{ "position", json::array({ 10.0, 20.0 }) } });
+	REQUIRE_FALSE(r2.isError);
+	CHECK(r2.content.at("node").at("min") == 0.0f);
+	CHECK(r2.content.at("node").at("max") == 2.0f);
+	CHECK(r2.content.at("node").at("group") == "Surface");
+	CHECK(r2.content.at("node").at("tooltip") == "How metallic");
+	CHECK(r2.content.at("node").at("x") == 10.0f);
+	CHECK(r2.content.at("node").at("y") == 20.0f);
+	// The value survived the range — and vice versa in the file.
+	CHECK(r2.content.at("node").at("p")[0].get<float>() == doctest::Approx(0.9f));
+	HE::MaterialGraph saved;
+	REQUIRE(savedGraphOf(f.root, path, saved));
+	const HE::MatGraphNode* sn = saved.findNode(ids.metal);
+	REQUIRE(sn != nullptr);
+	CHECK(sn->p[0] == doctest::Approx(0.9f));
+	CHECK(sn->p[1] == 0.0f);
+	CHECK(sn->p[2] == 2.0f);
+	CHECK(sn->group == "Surface");
+	CHECK(sn->tooltip == "How metallic");
+	CHECK(sn->x == 10.0f);
+	// material_info reports the range the file now declares.
+	const ToolResult info = f.call("material_info", json{ { "path", path } });
+	REQUIRE_FALSE(info.isError);
+	const json* metal = findParam(info.content.at("params"), "Metal");
+	REQUIRE(metal != nullptr);
+	CHECK(metal->at("group") == "Surface");
+
+	// ── A colour, three components; the fourth slot component is untouched ──
+	const ToolResult r3 = f.call("material_set_node", json{
+		{ "path", path }, { "id", ids.tint }, { "p", json::array({ 1.0, 0.0, 0.5 }) } });
+	REQUIRE_FALSE(r3.isError);
+	REQUIRE(savedBlockValueOf(f.root, path, "Tint", block));
+	CHECK(block[0] == doctest::Approx(1.0f));
+	CHECK(block[1] == doctest::Approx(0.0f));
+	CHECK(block[2] == doctest::Approx(0.5f));
+
+	// ── A constant node: p is the value, no parameter in the answer ──────────
+	const ToolResult added = f.call("material_add_node", json{
+		{ "path", path }, { "type", "ConstFloat" } });
+	REQUIRE_FALSE(added.isError);
+	const int constId = added.content.at("node").at("id");
+	const ToolResult r4 = f.call("material_set_node", json{
+		{ "path", path }, { "id", constId }, { "p", json::array({ 3.5 }) } });
+	REQUIRE_FALSE(r4.isError);
+	CHECK(r4.content.at("node").at("p")[0].get<float>() == doctest::Approx(3.5f));
+	CHECK_FALSE(r4.content.contains("parameter"));
+	REQUIRE(savedGraphOf(f.root, path, saved));
+	REQUIRE(saved.findNode(constId) != nullptr);
+	CHECK(saved.findNode(constId)->p[0] == doctest::Approx(3.5f));
+}
+
+TEST_CASE("mcp material tools: set_node renames a slot, and an instance's override of the old name is gone")
+{
+	Fixture f("setnode_rename");
+	f.writeMaterial("Materials/Rock.hasset", makeParamGraph());
+	const std::string path = "Materials/Rock.hasset";
+	const ParamIds ids = paramIdsOf(f, path);
+	const ToolResult made = f.call("material_create_instance", json{ { "parent", path } });
+	REQUIRE_FALSE(made.isError);
+	const std::string inst = made.content.at("path");
+	REQUIRE_FALSE(f.call("material_set_param", json{
+		{ "path", inst }, { "name", "Metal" }, { "value", 0.7 } }).isError);
+
+	const ToolResult r = f.call("material_set_node", json{
+		{ "path", path }, { "id", ids.metal }, { "s", "Shine" } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content.at("node").at("paramName") == "Shine");
+	CHECK(r.content.at("parameter").at("name") == "Shine");
+	CHECK(r.content.at("parameter").at("renamedFrom") == "Metal");
+	CHECK(r.content.at("parameter").at("hasSlot") == true);
+	CHECK(r.content.contains("note"));
+	// Value given with the rename: the fresh slot takes the node's value, no
+	// block pre-write needed (and none claimed).
+	CHECK_FALSE(r.content.at("parameter").contains("blockWritten"));
+
+	// The master's layout: Metal gone, Shine there with the old value.
+	const ToolResult info = f.call("material_info", json{ { "path", path } });
+	REQUIRE_FALSE(info.isError);
+	CHECK(findParam(info.content.at("params"), "Metal") == nullptr);
+	const json* shine = findParam(info.content.at("params"), "Shine");
+	REQUIRE(shine != nullptr);
+	CHECK(shine->at("value").get<float>() == doctest::Approx(0.1f));
+	HE::MatParamSlot slot;
+	CHECK_FALSE(codegenValueOf(f.root, path, "Metal", slot));
+	CHECK(codegenValueOf(f.root, path, "Shine", slot));
+
+	// The instance: its override was keyed 'Metal'; 'Shine' follows the parent.
+	const ToolResult instInfo = f.call("material_info", json{ { "path", inst } });
+	REQUIRE_FALSE(instInfo.isError);
+	CHECK(findParam(instInfo.content.at("params"), "Metal") == nullptr);
+	const json* instShine = findParam(instInfo.content.at("params"), "Shine");
+	REQUIRE(instShine != nullptr);
+	CHECK(instShine->at("overridden") == false);
+	CHECK(instShine->at("value").get<float>() == doctest::Approx(0.1f));
+
+	// A StaticSwitch rename is reported the same way.
+	const ToolResult sw = f.call("material_add_node", json{
+		{ "path", path }, { "type", "StaticSwitch" }, { "s", "UseDetail" } });
+	REQUIRE_FALSE(sw.isError);
+	const int swId = sw.content.at("node").at("id");
+	const ToolResult sw2 = f.call("material_set_node", json{
+		{ "path", path }, { "id", swId }, { "s", "Detail" }, { "p", json::array({ 1.0 }) } });
+	REQUIRE_FALSE(sw2.isError);
+	CHECK(sw2.content.at("switch").at("name") == "Detail");
+	CHECK(sw2.content.at("switch").at("renamedFrom") == "UseDetail");
+	CHECK(sw2.content.at("node").at("switchDefault") == true);
+}
+
+TEST_CASE("mcp material tools: set_node on the Output node is the blend mode, the lit flag and the domain")
+{
+	Fixture f("setnode_output");
+	f.writeMaterial("Materials/Rock.hasset", makeParamGraph());
+	const std::string path = "Materials/Rock.hasset";
+	const ParamIds ids = paramIdsOf(f, path);
+	// The fixture is Translucent with 'Flag' on the Opacity pin — evaluated, so
+	// it has a slot.
+	HE::MatParamSlot slot;
+	REQUIRE(codegenValueOf(f.root, path, "Flag", slot));
+
+	// ── Opaque: the pin is no longer evaluated; the LINK stays in the file ───
+	const ToolResult r1 = f.call("material_set_node", json{
+		{ "path", path }, { "id", ids.out }, { "blendMode", "Opaque" } });
+	REQUIRE_FALSE(r1.isError);
+	CHECK(r1.content.at("changed") == true);
+	CHECK(r1.content.at("blendMode") == "Opaque");
+	CHECK(r1.content.at("lit") == true);
+	CHECK(r1.content.at("domain") == "Surface");
+	CHECK(r1.content.at("droppedLinks").empty());
+	CHECK_FALSE(codegenValueOf(f.root, path, "Flag", slot));
+	const ToolResult info = f.call("material_info", json{ { "path", path } });
+	REQUIRE_FALSE(info.isError);
+	CHECK(info.content.at("blendMode") == "Opaque");
+	CHECK(findParam(info.content.at("params"), "Flag") == nullptr);
+	HE::MaterialGraph saved;
+	REQUIRE(savedGraphOf(f.root, path, saved));
+	CHECK(savedLinkInto(saved, ids.out, HE::kMatOutputOpacityPin) != nullptr);
+	// The Output node's pins as reported now: no Opacity row.
+	const json& outNode = r1.content.at("node");
+	CHECK(findPinNamed(outNode.at("inputs"), "Opacity") == nullptr);
+	CHECK(findPinNamed(outNode.at("inputs"), "OpacityMask") == nullptr);
+
+	// ── Masked with no cutoff: the editor's 0.5, and the slot is back ────────
+	// (addNode gives an Output a cutoff of 0.5 from birth; a graph with 0
+	// there is one whose author zeroed it — done here while still Opaque,
+	// where the cutoff means nothing.)
+	REQUIRE_FALSE(f.call("material_set_node", json{
+		{ "path", path }, { "id", ids.out }, { "p", json::array({ 1.0, 0.0, 0.0 }) } }).isError);
+	const ToolResult r2 = f.call("material_set_node", json{
+		{ "path", path }, { "id", ids.out }, { "p", json::array({ 1.0, 1.0 }) } });
+	REQUIRE_FALSE(r2.isError);
+	CHECK(r2.content.at("blendMode") == "Masked");
+	CHECK(r2.content.at("maskCutoffDefaulted") == 0.5f);
+	CHECK(r2.content.at("node").at("p")[2].get<float>() == doctest::Approx(0.5f));
+	CHECK(findPinNamed(r2.content.at("node").at("inputs"), "OpacityMask") != nullptr);
+	CHECK(codegenValueOf(f.root, path, "Flag", slot));
+	REQUIRE(savedGraphOf(f.root, path, saved));
+	CHECK(blendModeOfSaved(saved) == static_cast<int>(HE::MatBlendMode::Masked));
+
+	// ── An explicit cutoff is kept; unlit; UI domain ─────────────────────────
+	const ToolResult r3 = f.call("material_set_node", json{
+		{ "path", path }, { "id", ids.out }, { "p", json::array({ 0.0, 1.0, 0.25, 1.0 }) } });
+	REQUIRE_FALSE(r3.isError);
+	CHECK(r3.content.at("lit") == false);
+	CHECK(r3.content.at("domain") == "User Interface");
+	CHECK_FALSE(r3.content.contains("maskCutoffDefaulted"));
+	CHECK(r3.content.at("node").at("p")[2].get<float>() == doctest::Approx(0.25f));
+	const ToolResult info3 = f.call("material_info", json{ { "path", path } });
+	REQUIRE_FALSE(info3.isError);
+	CHECK(info3.content.at("domain") == "User Interface");
+
+	// ── The refusals, none of them writing ───────────────────────────────────
+	const std::string before = f.bytes(path);
+	auto refused = [&](json args, const char* code) {
+		const ToolResult r = f.call("material_set_node", args);
+		CAPTURE(args.dump());
+		CHECK(r.isError);
+		CHECK(r.errorCode == code);
+		CHECK(f.bytes(path) == before);
+	};
+	refused(json{ { "path", path }, { "id", ids.out }, { "blendMode", "Glass" } },     "invalid_payload");
+	refused(json{ { "path", path }, { "id", ids.out }, { "p", json::array({ 1.0, 7.0 }) } }, "invalid_payload");
+	refused(json{ { "path", path }, { "id", ids.out }, { "p", json::array({ 2.0 }) } }, "invalid_payload");
+	refused(json{ { "path", path }, { "id", ids.out }, { "p", json::array({ 1.0, 1.0, 0.5, 3.0 }) } },
+	        "invalid_payload");
+	refused(json{ { "path", path }, { "id", ids.out }, { "blendMode", "Opaque" },
+	              { "p", json::array({ 1.0, 2.0 }) } },                                "invalid_payload");
+	refused(json{ { "path", path }, { "id", ids.out }, { "s", "x" } },                 "invalid_payload");
+	refused(json{ { "path", path }, { "id", ids.metal }, { "blendMode", "Opaque" } }, "invalid_payload");
+}
+
+TEST_CASE("mcp material tools: set_node re-binds a FunctionCall and re-lays a layer blend's wires")
+{
+	Fixture f("setnode_pins");
+	f.writeMaterial("Materials/Rock.hasset", makeParamGraph());
+	f.writeFunction("Materials/Fn.hasset", makeFunctionGraph());
+	f.writeFunction("Materials/Fn2.hasset", makeTwoInputFunctionGraph());
+	f.writeStub("Materials/FnStub.hasset", HE::AssetType::MaterialFunction);
+	const std::string path = "Materials/Rock.hasset";
+	const ParamIds ids = paramIdsOf(f, path);
+
+	// ── A call to the two-input function, wired on both sides ────────────────
+	const ToolResult call = f.call("material_add_node", json{
+		{ "path", path }, { "type", "FunctionCall" }, { "s", "Materials/Fn2.hasset" } });
+	REQUIRE_FALSE(call.isError);
+	const int callId = call.content.at("node").at("id");
+	REQUIRE(call.content.at("node").at("inputs").size() == 2);
+	REQUIRE_FALSE(f.call("material_connect", json{
+		{ "path", path }, { "srcNode", ids.tint }, { "srcPin", 0 },
+		{ "dstNode", callId }, { "dstPin", "A" } }).isError);
+	REQUIRE_FALSE(f.call("material_connect", json{
+		{ "path", path }, { "srcNode", ids.metal }, { "srcPin", 0 },
+		{ "dstNode", callId }, { "dstPin", "B" } }).isError);
+	REQUIRE_FALSE(f.call("material_connect", json{
+		{ "path", path }, { "srcNode", callId }, { "srcPin", "Out" },
+		{ "dstNode", ids.out }, { "dstPin", "Emissive" } }).isError);
+
+	// ── Re-bound to the function with NO inputs: both input wires go ─────────
+	const ToolResult rb = f.call("material_set_node", json{
+		{ "path", path }, { "id", callId }, { "s", "Materials/Fn.hasset" } });
+	REQUIRE_FALSE(rb.isError);
+	CHECK(rb.content.at("node").at("function") == "Materials/Fn.hasset");
+	CHECK(rb.content.at("node").at("inputs").empty());
+	REQUIRE(rb.content.at("droppedLinks").size() == 2);
+	for (const json& l : rb.content.at("droppedLinks")) CHECK(l.at("dstNode") == callId);
+	// The output wire survived: one output before, one after.
+	HE::MaterialGraph saved;
+	REQUIRE(savedGraphOf(f.root, path, saved));
+	CHECK(savedLinkInto(saved, callId, 0) == nullptr);
+	CHECK(savedLinkInto(saved, callId, 1) == nullptr);
+	const HE::MatGraphLink* emissive = savedLinkInto(saved, ids.out, HE::kMatOutputEmissivePin);
+	REQUIRE(emissive != nullptr);
+	CHECK(emissive->srcNode == callId);
+	// What the asset's own regenerate (with the content manager as function
+	// loader) made of it: FnTint, declared inside the function, is a slot now.
+	const ToolResult info = f.call("material_info", json{ { "path", path } });
+	REQUIRE_FALSE(info.isError);
+	const json* fnTint = findParam(info.content.at("params"), "FnTint");
+	REQUIRE(fnTint != nullptr);
+	CHECK(fnTint->at("inGraph") == false);
+
+	// ── Re-binds that are refused, the file untouched ────────────────────────
+	const std::string before = f.bytes(path);
+	auto refused = [&](json args, const char* code) {
+		const ToolResult r = f.call("material_set_node", args);
+		CAPTURE(args.dump());
+		CHECK(r.isError);
+		CHECK(r.errorCode == code);
+		CHECK(f.bytes(path) == before);
+	};
+	refused(json{ { "path", path }, { "id", callId }, { "s", "" } },                         "invalid_payload");
+	refused(json{ { "path", path }, { "id", callId }, { "s", "Materials/Ghost.hasset" } },  "not_found");
+	refused(json{ { "path", path }, { "id", callId }, { "s", path } },                       "invalid_path");
+	refused(json{ { "path", path }, { "id", callId }, { "s", "Materials/FnStub.hasset" } }, "invalid_payload");
+
+	// ── A layer blend: Grass / Rock / Snow, a constant into each ─────────────
+	const ToolResult lb = f.call("material_add_node", json{
+		{ "path", path }, { "type", "LandscapeLayerBlend" }, { "s", "Grass\nRock\nSnow" } });
+	REQUIRE_FALSE(lb.isError);
+	const int lbId = lb.content.at("node").at("id");
+	REQUIRE(lb.content.at("node").at("inputs").size() == 3);
+	int constOf[3] = { -1, -1, -1 };
+	for (int k = 0; k < 3; ++k)
+	{
+		const ToolResult c = f.call("material_set_pin_default", json{
+			{ "path", path }, { "node", lbId }, { "pin", k },
+			{ "value", json::array({ 0.1 * (k + 1), 0.0, 0.0 }) } });
+		REQUIRE_FALSE(c.isError);
+		constOf[k] = c.content.at("constantNode").at("id");
+	}
+
+	// Rock removed: its wire goes, Snow's wire slides from pin 2 to pin 1.
+	const ToolResult rl = f.call("material_set_node", json{
+		{ "path", path }, { "id", lbId }, { "s", "Grass\nSnow" } });
+	REQUIRE_FALSE(rl.isError);
+	REQUIRE(rl.content.at("node").at("inputs").size() == 2);
+	CHECK(rl.content.at("node").at("layers") == json::array({ "Grass", "Snow" }));
+	REQUIRE(rl.content.at("droppedLinks").size() == 1);
+	CHECK(rl.content.at("droppedLinks")[0].at("srcNode") == constOf[1]);
+	CHECK(rl.content.at("droppedLinks")[0].at("dstPin") == 1);
+	REQUIRE(rl.content.at("movedLinks").size() == 1);
+	CHECK(rl.content.at("movedLinks")[0].at("srcNode") == constOf[2]);
+	CHECK(rl.content.at("movedLinks")[0].at("fromPin") == 2);
+	CHECK(rl.content.at("movedLinks")[0].at("toPin") == 1);
+	CHECK(rl.content.at("movedLinks")[0].at("layer") == "Snow");
+	REQUIRE(savedGraphOf(f.root, path, saved));
+	const HE::MatGraphLink* grass = savedLinkInto(saved, lbId, 0);
+	const HE::MatGraphLink* snow  = savedLinkInto(saved, lbId, 1);
+	REQUIRE(grass != nullptr);
+	REQUIRE(snow != nullptr);
+	CHECK(grass->srcNode == constOf[0]);
+	CHECK(snow->srcNode == constOf[2]);
+	CHECK(savedLinkInto(saved, lbId, 2) == nullptr);
+	// The orphaned constant is still a node (the delete is not this tool's).
+	CHECK(saved.findNode(constOf[1]) != nullptr);
+
+	// A pure rename keeps every wire where it is.
+	const ToolResult rn = f.call("material_set_node", json{
+		{ "path", path }, { "id", lbId }, { "s", "Grass\nIce" } });
+	REQUIRE_FALSE(rn.isError);
+	// 'Ice' is a new name: Snow's wire cannot be matched and is dropped;
+	// Grass keeps its wire.
+	REQUIRE(rn.content.at("droppedLinks").size() == 1);
+	CHECK(rn.content.at("droppedLinks")[0].at("srcNode") == constOf[2]);
+	CHECK_FALSE(rn.content.contains("movedLinks"));
+	REQUIRE(savedGraphOf(f.root, path, saved));
+	REQUIRE(savedLinkInto(saved, lbId, 0) != nullptr);
+	CHECK(savedLinkInto(saved, lbId, 0)->srcNode == constOf[0]);
+}
+
+TEST_CASE("mcp material tools: set_node refuses the wrong payloads and every gate, without writing")
+{
+	Fixture f("setnode_gates");
+	f.writeMaterial("Materials/Rock.hasset", makeParamGraph());
+	f.writeFunction("Materials/Fn.hasset", makeFunctionGraph());
+	f.writeStub("Materials/Stub.hasset", HE::AssetType::Material);
+	f.writeStub("Widgets/HUD.hasset", HE::AssetType::Widget);
+	REQUIRE_FALSE(f.call("material_create_instance", json{
+		{ "parent", "Materials/Rock.hasset" }, { "path", "Materials/Rock_Inst.hasset" } }).isError);
+	const std::string path = "Materials/Rock.hasset";
+	const ParamIds ids = paramIdsOf(f, path);
+	const ToolResult add = f.call("material_add_node", json{ { "path", path }, { "type", "Multiply" } });
+	REQUIRE_FALSE(add.isError);
+	const int mulId = add.content.at("node").at("id");
+	const ToolResult tex = f.call("material_add_node", json{ { "path", path }, { "type", "TextureSample" } });
+	REQUIRE_FALSE(tex.isError);
+	const int texId = tex.content.at("node").at("id");
+
+	const std::string before = f.bytes(path);
+	auto refused = [&](json args, const char* code) {
+		if (!args.contains("path")) args["path"] = path;
+		const ToolResult r = f.call("material_set_node", args);
+		CAPTURE(args.dump());
+		CHECK(r.isError);
+		CHECK(r.errorCode == code);
+		CHECK(f.bytes(path) == before);
+	};
+	refused(json{ { "id", 9999 }, { "p", json::array({ 1.0 }) } },                   "not_found");
+	refused(json{ { "p", json::array({ 1.0 }) } },                                   "invalid_payload");
+	refused(json{ { "id", ids.metal } },                                             "invalid_payload");   // nothing to set
+	refused(json{ { "id", ids.metal }, { "type", "ConstFloat" }, { "p", json::array({ 1.0 }) } },
+	        "invalid_payload");   // a type does not change
+	refused(json{ { "id", mulId }, { "p", json::array({ 1.0 }) } },                  "invalid_payload");   // carries no values
+	refused(json{ { "id", ids.metal }, { "p", json::array() } },                     "invalid_payload");
+	refused(json{ { "id", ids.metal }, { "p", json::array({ 1, 2, 3, 4, 5 }) } },    "invalid_payload");
+	refused(json{ { "id", ids.metal }, { "p", "one" } },                             "invalid_payload");
+	refused(json{ { "id", ids.tint }, { "min", 0.0 }, { "max", 1.0 } },              "invalid_payload");   // no range on a colour
+	refused(json{ { "id", ids.metal }, { "min", 1.0 }, { "max", 1.0 } },             "invalid_payload");   // min < max
+	refused(json{ { "id", ids.metal }, { "min", 0.0 } },                             "invalid_payload");   // both or neither
+	refused(json{ { "id", ids.metal }, { "min", 0.0 }, { "max", 1.0 }, { "p", json::array({ 0.5, 0.0 }) } },
+	        "invalid_payload");   // the range twice
+	refused(json{ { "id", mulId }, { "group", "Math" } },                            "invalid_payload");   // metadata on a non-parameter
+	refused(json{ { "id", mulId }, { "position", json::array({ 1.0 }) } },           "invalid_payload");
+	refused(json{ { "id", texId }, { "s", "Widgets/HUD.hasset" } },                  "invalid_path");
+	refused(json{ { "id", texId }, { "s", "Textures/Ghost.hasset" } },               "not_found");
+	// The same type name is accepted — a client echoing what graph_info said.
+	{
+		const ToolResult ok = f.call("material_set_node", json{
+			{ "path", path }, { "id", mulId }, { "type", "Multiply" },
+			{ "position", json::array({ 5.0, 5.0 }) } });
+		REQUIRE_FALSE(ok.isError);
+		CHECK(ok.content.at("node").at("x") == 5.0f);
+	}
+
+	// ── The gates ────────────────────────────────────────────────────────────
+	const json base{ { "path", path }, { "id", ids.metal }, { "p", json::array({ 0.55 }) } };
+	auto gate = [&](const char* code, const std::string& atPath = {}) {
+		json args = base;
+		if (!atPath.empty()) args["path"] = atPath;
+		const std::string b = f.bytes(args["path"].get<std::string>());
+		const ToolResult r = f.call("material_set_node", args);
+		CAPTURE(code);
+		CHECK(r.isError);
+		CHECK(r.errorCode == code);
+		CHECK(f.bytes(args["path"].get<std::string>()) == b);
+	};
+	f.playing = true;   gate("play_mode");        f.playing = false;
+	f.lockedRel = path; gate("locked_by_other");  f.lockedRel.clear();
+	f.dirtyRel = path; f.openRel = path;
+	gate("dirty");
+	f.dirtyRel.clear(); f.openRel.clear();
+	gate("no_graph",     "Materials/Rock_Inst.hasset");
+	gate("no_graph",     "Materials/Stub.hasset");
+	gate("invalid_path", "Materials/Fn.hasset");
+	gate("not_found",    "Materials/Ghost.hasset");
+	{
+		const fs::path engineRoot = f.root / "__engine";
+		fs::create_directories(engineRoot / "Materials");
+		f.content.setEngineContentRoot(engineRoot.string());
+		const fs::path abs = engineRoot / "Materials/Default.hasset";
+		REQUIRE(HE::Ed::writeAssetStub(abs.string(), "Engine/Materials/Default.hasset",
+		                               "Default", HE::AssetType::Material));
+		EditorAssetTypeCache::invalidate(abs.string());
+		gate("read_only", "Engine/Materials/Default.hasset");
+	}
+
+	// A CLEAN tab is told to re-read.
+	f.openRel = path;
+	CHECK(f.reloadCalls == 0);
+	const ToolResult r = f.call("material_set_node", base);
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content.at("reloadedInEditor") == true);
+	CHECK(f.reloadCalls == 1);
+}
+
 #if defined(HE_TESTS_HAVE_SHADERC)
 TEST_CASE("mcp material tools: a rewired template still cross-compiles")
 {
@@ -2709,6 +3202,48 @@ TEST_CASE("mcp material tools: a rewired template still cross-compiles")
 	}
 	CHECK_FALSE(sawRough);
 	CHECK_FALSE(sawMetal);
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const uint64_t hash = std::hash<std::string>{}(gen.glsl);
+	const auto& msl = lib.fragment(hash, gen.glsl, B::Metal);
+	CHECK_MESSAGE(msl.ok, "MSL compile failed: ", msl.log);
+	const auto& gl = lib.fragment(hash, gen.glsl, B::GLSL410);
+	CHECK_MESSAGE(gl.ok, "GLSL compile failed: ", gl.log);
+}
+
+TEST_CASE("mcp material tools: a template re-moded and re-valued by set_node still cross-compiles")
+{
+	// set_node's Output branch is the one that changes the shader's SHAPE (a
+	// Masked material gains the discard, an unlit one loses the lighting tail):
+	// the shipped Opaque template switched to Masked + unlit, a Param node's
+	// default moved, then the panel's own cross-compile check.
+	Fixture f("setnode_compile");
+	const ToolResult made = f.call("material_create", json{
+		{ "path", "Materials/Remoded.hasset" }, { "template", "OpaquePBR" } });
+	REQUIRE_FALSE(made.isError);
+	const std::string path = "Materials/Remoded.hasset";
+	const ToolResult info = f.call("material_graph_info", json{ { "path", path } });
+	REQUIRE_FALSE(info.isError);
+	const int out = nodeOfType(info.content.at("nodes"), "Output")->at("id");
+	int roughness = -1;
+	for (const json& n : info.content.at("nodes"))
+		if (n.contains("paramName") && n.at("paramName") == "Roughness") roughness = n.at("id");
+	REQUIRE(roughness > 0);
+
+	REQUIRE_FALSE(f.call("material_set_node", json{
+		{ "path", path }, { "id", out }, { "blendMode", "Masked" }, { "p", json::array({ 0.0 }) } }).isError);
+	REQUIRE_FALSE(f.call("material_set_node", json{
+		{ "path", path }, { "id", roughness }, { "p", json::array({ 0.15 }) } }).isError);
+
+	HE::MaterialGraph g;
+	REQUIRE(savedGraphOf(f.root, path, g));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE_FALSE(gen.glsl.empty());
+	CHECK(gen.blendMode == static_cast<int>(HE::MatBlendMode::Masked));
+	bool sawRough = false;
+	for (const HE::MatParamSlot& s : gen.params)
+		if (s.name == "Roughness") { sawRough = true; CHECK(s.value[0] == doctest::Approx(0.15f)); }
+	CHECK(sawRough);
 	using B = HE::MaterialShaderLibrary::Backend;
 	HE::MaterialShaderLibrary lib;
 	const uint64_t hash = std::hash<std::string>{}(gen.glsl);

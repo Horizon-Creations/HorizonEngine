@@ -2529,6 +2529,459 @@ void addSetPinDefault(McpToolRegistry& registry, ContentManager& content,
 	registry.add(std::move(t));
 }
 
+// ── material_set_node ────────────────────────────────────────────────────────
+// hc_set_node takes the WHOLE node object back, because an HC::Node is a large
+// and heterogeneous thing (a signature, pin defaults, per-type payloads) and
+// spelling each field as an argument would be a second schema to keep in step.
+// A MatGraphNode is six fields, and material_add_node already spells them as
+// arguments — so this one is a PATCH of those same fields on an existing id,
+// and a client that learned add_node's arguments knows set_node's. Two
+// deviations from hc, on purpose:
+//
+//   • Not an upsert. A foreign id is `not_found`; material_add_node makes nodes.
+//   • 'type' does not change. Links are stored by pin INDEX, and a Multiply
+//     turned into a Lerp would keep its wires on pins that mean something else
+//     now. Remove and add instead.
+//
+// What CAN change a node's pin list is its string payload: a FunctionCall
+// re-bound to another function, a LandscapeLayerBlend given other layers. Links
+// into pins that no longer exist are dropped and reported (hc's droppedLinks);
+// for the layer blend the links are first re-matched by layer NAME, because
+// removing layer k makes layer k+1 the new k and the panel slides the wires the
+// same way — a tail prune would leave every layer after the removed one wired to
+// its predecessor's colour.
+//
+// The Output node is the one node this tool sets that add_node never makes: its
+// p[] is the material's lit flag, blend mode, mask cutoff and domain, so this is
+// the first MCP way to change a material's blend mode after material_create.
+
+HE::MatBlendMode blendModeByName(const std::string& s, bool& ok)
+{
+	ok = true;
+	if (s == "Opaque")      return HE::MatBlendMode::Opaque;
+	if (s == "Masked")      return HE::MatBlendMode::Masked;
+	if (s == "Translucent") return HE::MatBlendMode::Translucent;
+	ok = false;
+	return HE::MatBlendMode::Opaque;
+}
+
+json linkJsonOf(const HE::MatGraphLink& l)
+{
+	return json{ { "srcNode", l.srcNode }, { "srcPin", l.srcPin },
+	             { "dstNode", l.dstNode }, { "dstPin", l.dstPin } };
+}
+
+// Layer k of the old list is layer j of the new one when the names match (first
+// match wins, as the paint tool keys layers by name). Returns -1 for a layer
+// that is gone.
+int layerIndexAfter(const std::vector<std::string>& before, const std::vector<std::string>& after,
+                    int oldPin)
+{
+	if (oldPin < 0 || oldPin >= static_cast<int>(before.size())) return -1;
+	const std::string& name = before[static_cast<std::size_t>(oldPin)];
+	for (std::size_t j = 0; j < after.size(); ++j)
+		if (after[j] == name) return static_cast<int>(j);
+	return -1;
+}
+
+void addSetNode(McpToolRegistry& registry, ContentManager& content,
+                const std::shared_ptr<McpMaterialHooks>& h)
+{
+	ContentManager* cm = &content;
+	McpTool t;
+	t.name        = "material_set_node";
+	t.mutates     = true;
+	t.description =
+		"Change the values of one existing node in a master material's graph — "
+		"the same fields material_add_node takes, applied to a node by 'id'; "
+		"anything not given stays as it is. 's' is the node's string payload "
+		"(parameter name of a Param node, texture path of a TextureSample / "
+		"NormalMapSample, function path of a FunctionCall, switch name of a "
+		"StaticSwitch, layer names one per line of a LandscapeLayerBlend), 'p' its "
+		"values in the order material_graph_info reports them (a Float's value, a "
+		"Color's rgb, a ParamFloat's default), 'min'/'max' a ParamFloat's slider "
+		"range, 'group'/'tooltip' a Param node's panel metadata, 'position' the "
+		"canvas spot. On the Output node 'p' is [lit 0|1, blendMode 0|1|2, "
+		"maskCutoff, domain 0|1] and 'blendMode' takes the mode by name ('Opaque', "
+		"'Masked', 'Translucent') — the way to change a material's blend mode after "
+		"material_create; switching to Masked with no cutoff sets 0.5, as the "
+		"editor does. A node's TYPE does not change here (links are stored by pin "
+		"index): remove it and add another. Re-binding a FunctionCall or changing "
+		"a LandscapeLayerBlend's layers changes the node's pins; wires into pins "
+		"that no longer exist are dropped and reported (layers are re-matched by "
+		"name first, so a removed layer takes only its own wire). Renaming a Param "
+		"node or StaticSwitch renames its slot: a loaded instance's override of "
+		"the old name does not carry over, exactly as in the Material Editor. "
+		"Setting a wired Param node's value also writes the parameter block, so "
+		"the renderer and the node default agree (material_set_param's rule). "
+		"Values already as given → changed: false, nothing written. Writes the "
+		"file at once, regenerates, updates loaded instances and tells a clean "
+		"open tab to re-read; an open tab with unsaved edits is refused. Refuses "
+		"an instance (edit the parent) and a material function.";
+	t.inputSchema = objectSchema(json{
+		{ "path", stringProp("Content-relative path of a master material, e.g. "
+		                     "'Materials/Rock.hasset'.") },
+		{ "id",   json{ { "type", "integer" },
+		                { "description", "Node id, from material_graph_info or "
+		                                 "material_add_node." } } },
+		{ "s",    json{ { "type", "string" },
+		                { "description", "The node's string payload; which one depends "
+		                                 "on the type (see the tool description). "
+		                                 "Empty on a TextureSample = the mesh's own "
+		                                 "texture." } } },
+		{ "p",    json{ { "type", "array" }, { "items", json{ { "type", "number" } } },
+		                { "minItems", 1 }, { "maxItems", 4 },
+		                { "description", "Values p[0..3], as many as given; the rest "
+		                                 "keep their value. Refused for a type that "
+		                                 "carries none (paramCount 0)." } } },
+		{ "blendMode", stringProp("Output node only: 'Opaque', 'Masked' or "
+		                          "'Translucent' (the same as p[1] = 0, 1, 2).") },
+		{ "min",  numberProp("ParamFloat only: slider minimum (with 'max'; min < max).") },
+		{ "max",  numberProp("ParamFloat only: slider maximum.") },
+		{ "group",   stringProp("Param nodes only: the panel group header the "
+		                        "parameter is shown under ('' = ungrouped).") },
+		{ "tooltip", stringProp("Param nodes only: hover help shown next to the "
+		                        "parameter.") },
+		{ "position", json{ { "type", "array" }, { "items", json{ { "type", "number" } } },
+		                    { "minItems", 2 }, { "maxItems", 2 },
+		                    { "description", "Canvas position [x, y]." } } },
+	}, { "path", "id" });
+	t.handler = [cm, h](const json& args) -> ToolResult {
+		if (cm->contentRoot().empty())
+			return ToolResult::fail("no_project",
+				"No project is open in the editor, so there are no materials. Call "
+				"scene_info first.");
+		GraphEdit e = openGraphForEdit(*cm, *h, args);
+		if (!e.ok) return e.failure;
+
+		if (!args.contains("id") || !args["id"].is_number_integer())
+			return ToolResult::fail("invalid_payload",
+				"'id' is required and is the integer node id material_graph_info "
+				"reports.");
+		const int id = args["id"].get<int>();
+		HE::MatGraphNode* n = e.g.findNode(id);
+		if (!n)
+		{
+			for (const HE::MatGraphComment& c : e.g.comments)
+				if (c.id == id)
+					return ToolResult::fail("not_found",
+						"Id " + std::to_string(id) + " is a comment box, not a node; "
+						"comment boxes are editor chrome and are not edited here.");
+			return ToolResult::fail("not_found",
+				"No node " + std::to_string(id) + " in '" + e.m.rel + "'. "
+				"material_graph_info lists the ids; material_add_node makes new ones "
+				"(this tool does not create).");
+		}
+		if (hasArg(args, "type"))
+		{
+			// Sent in good faith by a client that copied hc_set_node's shape — and
+			// the one field that cannot change. Said before anything else is read.
+			const std::string want = strArg(args, "type");
+			HE::MatNodeType asked;
+			if (!(nodeTypeByName(want, asked) && asked == n->type))
+				return ToolResult::fail("invalid_payload",
+					"A node's type does not change: node " + std::to_string(id) + " is a '" +
+					nodeTypeName(n->type) + "', and links are stored by pin index, so a "
+					"different type would keep wires on pins that mean something else. "
+					"material_remove_node it and material_add_node the type you want.");
+		}
+
+		static const char* kFields[] = { "s", "p", "blendMode", "min", "max", "group",
+		                                 "tooltip", "position" };
+		bool any = false;
+		for (const char* f : kFields) any = any || hasArg(args, f);
+		if (!any)
+			return ToolResult::fail("invalid_payload",
+				"Nothing to set: give at least one of 's', 'p', 'blendMode', 'min'/'max', "
+				"'group', 'tooltip', 'position'.");
+
+		const HE::MatNodeType  nt   = n->type;
+		const std::string      typeName = nodeTypeName(nt);
+		const HE::MatNodeDesc& desc = HE::matNodeDesc(nt);
+		HE::MatParamKind kind{};
+		const bool isParam  = paramKindOfNode(nt, kind);
+		const bool isOutput = nt == HE::MatNodeType::Output;
+
+		// ── The payloads, checked before the node is touched ─────────────────
+		const bool        haveS = hasArg(args, "s");
+		const std::string s     = strArg(args, "s");
+		if (haveS && nt == HE::MatNodeType::FunctionCall)
+		{
+			if (s.empty())
+				return ToolResult::fail("invalid_payload",
+					"A FunctionCall needs 's' = the content-relative path of the "
+					"material function it calls; material_node_types lists them under "
+					"'functions'. A call to nothing has no pins.");
+			const PathCheck fp = checkPath(*cm, s, /*mustExist=*/true, "s");
+			if (!fp.ok) return fp.failure;
+			if (EditorAssetTypeCache::assetTypeOf(fp.abs) != HE::AssetType::MaterialFunction)
+				return ToolResult::fail("invalid_path",
+					"'" + fp.rel + "' is not a Material Function asset. asset_resolve "
+					"reports what a path holds; material_node_types lists the functions "
+					"a FunctionCall can be bound to.");
+		}
+		if (haveS && (nt == HE::MatNodeType::TextureSample || nt == HE::MatNodeType::NormalMapSample) &&
+		    !s.empty())
+		{
+			const PathCheck tp = checkPath(*cm, s, /*mustExist=*/true, "s");
+			if (!tp.ok) return tp.failure;
+			if (EditorAssetTypeCache::assetTypeOf(tp.abs) != HE::AssetType::Texture)
+				return ToolResult::fail("invalid_path",
+					"'" + tp.rel + "' is not a Texture asset. asset_resolve reports what "
+					"a path holds; an empty 's' samples the mesh's own texture.");
+		}
+		if (haveS && isOutput)
+			return ToolResult::fail("invalid_payload",
+				"The Output node carries no string payload; its 'p' is [lit, blendMode, "
+				"maskCutoff, domain].");
+
+		std::vector<float> p;
+		if (hasArg(args, "p"))
+		{
+			const json& pj = args["p"];
+			if (!pj.is_array() || pj.empty() || pj.size() > 4)
+				return ToolResult::fail("invalid_payload",
+					"'p' is an array of one to four numbers.");
+			for (const json& v : pj)
+			{
+				if (!v.is_number())
+					return ToolResult::fail("invalid_payload",
+						"'p' is an array of one to four numbers.");
+				p.push_back(v.get<float>());
+			}
+			if (desc.paramCount == 0)
+				return ToolResult::fail("invalid_payload",
+					"'" + typeName + "' carries no values — its inputs are pins, wired "
+					"with material_connect or material_set_pin_default, and it has "
+					"nothing for 'p' to set.");
+		}
+
+		const bool haveBlend = hasArg(args, "blendMode");
+		HE::MatBlendMode blendArg = HE::MatBlendMode::Opaque;
+		if (haveBlend)
+		{
+			if (!isOutput)
+				return ToolResult::fail("invalid_payload",
+					"'blendMode' is the Output node's; '" + typeName + "' has none.");
+			bool okName = false;
+			blendArg = blendModeByName(strArg(args, "blendMode"), okName);
+			if (!okName)
+				return ToolResult::fail("invalid_payload",
+					"'blendMode' is 'Opaque', 'Masked' or 'Translucent'.");
+			if (p.size() >= 2 && static_cast<int>(p[1]) != static_cast<int>(blendArg))
+				return ToolResult::fail("invalid_payload",
+					"'blendMode' and p[1] disagree; send one of them.");
+		}
+		if (isOutput && !p.empty())
+		{
+			auto isOneOf = [](float v, std::initializer_list<int> allowed) {
+				for (int a : allowed) if (v == static_cast<float>(a)) return true;
+				return false;
+			};
+			if (!isOneOf(p[0], { 0, 1 }))
+				return ToolResult::fail("invalid_payload",
+					"Output p[0] is the lit flag: 0 or 1.");
+			if (p.size() >= 2 && !isOneOf(p[1], { 0, 1, 2 }))
+				return ToolResult::fail("invalid_payload",
+					"Output p[1] is the blend mode: 0 Opaque, 1 Masked, 2 Translucent "
+					"(or send 'blendMode' by name).");
+			if (p.size() >= 4 && !isOneOf(p[3], { 0, 1 }))
+				return ToolResult::fail("invalid_payload",
+					"Output p[3] is the domain: 0 Surface, 1 UserInterface.");
+		}
+
+		const bool haveMin = hasArg(args, "min"), haveMax = hasArg(args, "max");
+		if (haveMin || haveMax)
+		{
+			if (nt != HE::MatNodeType::ParamFloat)
+				return ToolResult::fail("invalid_payload",
+					"'min'/'max' are the slider range of a ParamFloat; '" + typeName +
+					"' has none.");
+			if (!haveMin || !haveMax || !args["min"].is_number() || !args["max"].is_number())
+				return ToolResult::fail("invalid_payload",
+					"'min' and 'max' go together and are both numbers.");
+			if (!(args["min"].get<float>() < args["max"].get<float>()))
+				return ToolResult::fail("invalid_payload",
+					"'min' must be less than 'max' — the editor shows a slider only "
+					"for a real range.");
+			if (p.size() >= 2)
+				return ToolResult::fail("invalid_payload",
+					"On a ParamFloat p[1]/p[2] ARE the slider range; send 'min'/'max' "
+					"or a two-plus-element 'p', not both.");
+		}
+
+		if ((hasArg(args, "group") || hasArg(args, "tooltip")) && !isParam)
+			return ToolResult::fail("invalid_payload",
+				"'group' and 'tooltip' are Param-node metadata (they label the "
+				"parameter in the panel); '" + typeName + "' declares no parameter.");
+
+		float x = n->x, y = n->y;
+		if (hasArg(args, "position"))
+		{
+			const json& pos = args["position"];
+			if (!pos.is_array() || pos.size() != 2 || !pos[0].is_number() || !pos[1].is_number())
+				return ToolResult::fail("invalid_payload",
+					"'position' is [x, y], two numbers.");
+			x = pos[0].get<float>();
+			y = pos[1].get<float>();
+		}
+
+		// A FunctionCall re-bound to a function that does not load has no pins
+		// on the canvas, and pruning against "no pins" would take every wire —
+		// material_connect's rule: not loadable is a refusal.
+		FnGraphs fns{ *cm, {}, {} };
+		if (haveS && nt == HE::MatNodeType::FunctionCall && s != n->s && !fns.get(s))
+			return ToolResult::fail("invalid_payload",
+				"'" + s + "' could not be loaded as a material function (its graph is "
+				"empty or unreadable), so a FunctionCall bound to it would have no "
+				"pins. The editor log carries the reason; nothing was changed.");
+
+		// ── Apply, on the graph copy ─────────────────────────────────────────
+		const HE::MatGraphNode before = *n;
+		if (haveS) n->s = s;
+		for (std::size_t k = 0; k < p.size(); ++k) n->p[k] = p[k];
+		if (haveBlend) n->p[1] = static_cast<float>(blendArg);
+		if (haveMin) { n->p[1] = args["min"].get<float>(); n->p[2] = args["max"].get<float>(); }
+		if (hasArg(args, "group"))   n->group   = strArg(args, "group");
+		if (hasArg(args, "tooltip")) n->tooltip = strArg(args, "tooltip");
+		n->x = x;
+		n->y = y;
+		bool cutoffDefaulted = false;
+		if (isOutput &&
+		    static_cast<int>(n->p[1]) == static_cast<int>(HE::MatBlendMode::Masked) &&
+		    static_cast<int>(before.p[1]) != static_cast<int>(HE::MatBlendMode::Masked) &&
+		    n->p[2] <= 0.0f)
+		{
+			// The panel's rule on the same switch: a cutoff of 0 discards everything.
+			n->p[2] = 0.5f;
+			cutoffDefaulted = true;
+		}
+
+		const bool changed =
+			n->s != before.s || n->x != before.x || n->y != before.y ||
+			n->group != before.group || n->tooltip != before.tooltip ||
+			n->p[0] != before.p[0] || n->p[1] != before.p[1] ||
+			n->p[2] != before.p[2] || n->p[3] != before.p[3];
+		if (!changed)
+			return ToolResult::ok(json{
+				{ "changed", false },
+				{ "path",    e.m.rel },
+				{ "node",    nodeJson(e.g, *n, blendModeOf(e.g), fns) },
+			});
+
+		// ── Pins that moved or went, because the string payload changed ──────
+		json dropped = json::array();
+		json moved   = json::array();
+		if (n->s != before.s && nt == HE::MatNodeType::LandscapeLayerBlend)
+		{
+			const std::vector<std::string> oldLayers = HE::matLandscapeLayerNames(before.s);
+			const std::vector<std::string> newLayers = HE::matLandscapeLayerNames(n->s);
+			std::vector<HE::MatGraphLink> kept;
+			for (const HE::MatGraphLink& l : e.g.links)
+			{
+				if (l.dstNode != id) { kept.push_back(l); continue; }
+				const int to = layerIndexAfter(oldLayers, newLayers, l.dstPin);
+				if (to < 0) { dropped.push_back(linkJsonOf(l)); continue; }
+				HE::MatGraphLink m = l;
+				m.dstPin = to;
+				if (to != l.dstPin)
+					moved.push_back(json{ { "srcNode", l.srcNode }, { "srcPin", l.srcPin },
+					                      { "dstNode", id }, { "fromPin", l.dstPin },
+					                      { "toPin", to },
+					                      { "layer", newLayers[static_cast<std::size_t>(to)] } });
+				kept.push_back(m);
+			}
+			e.g.links = std::move(kept);
+		}
+		else if (n->s != before.s && nt == HE::MatNodeType::FunctionCall)
+		{
+			std::vector<std::string> scratch;
+			const ResolvedPins pins = resolvePins(*n, blendModeOf(e.g), fns, scratch);
+			const int inCount  = static_cast<int>(pins.inputs.size());
+			const int outCount = static_cast<int>(pins.outputs.size());
+			std::vector<HE::MatGraphLink> kept;
+			for (const HE::MatGraphLink& l : e.g.links)
+			{
+				const bool bad = (l.dstNode == id && l.dstPin >= inCount) ||
+				                 (l.srcNode == id && l.srcPin >= outCount);
+				if (bad) dropped.push_back(linkJsonOf(l));
+				else     kept.push_back(l);
+			}
+			e.g.links = std::move(kept);
+		}
+
+		// ── A Param node's value: the slot too, before the regenerate ────────
+		// regenerateMaterialFromGraph carries the parameter block over BY NAME,
+		// so a node default written alone is put back to the old block value the
+		// moment the codegen runs (McpToolRegistry.h). Same name, changed value,
+		// slot present → the block gets the value first, as material_set_param
+		// does. A renamed node gets a fresh slot from the codegen, with the
+		// node's value, and needs nothing here.
+		const std::string paramName = isParam ? effectiveParamName(*n) : std::string();
+		const std::string prevName  = isParam ? effectiveParamName(before) : std::string();
+		bool blockWritten = false;
+		if (isParam && paramName == prevName && !p.empty())
+		{
+			const int slot = e.m.slotOf(paramName);
+			if (slot >= 0 && e.m.kindAt(slot) == kind)
+			{
+				MaterialAsset* a = cm->getMaterialMutable(e.m.id);
+				if (!a) return failWrite(e.m.rel);
+				const int comps = HE::matParamKindComponents(kind);
+				for (int k = 0; k < comps; ++k)
+				{
+					const std::size_t at = static_cast<std::size_t>(slot) * 4 +
+					                       static_cast<std::size_t>(k);
+					if (at < a->shaderParamData.size()) a->shaderParamData[at] = n->p[k];
+				}
+				blockWritten = true;
+			}
+		}
+
+		json out{
+			{ "changed",      true },
+			{ "droppedLinks", std::move(dropped) },
+		};
+		if (!moved.empty()) out["movedLinks"] = std::move(moved);
+		ToolResult r = commitGraph(*cm, *h, e.m, e.g, std::move(out));
+		if (r.isError) return r;
+
+		FnGraphs after{ *cm, {}, {} };
+		r.content["node"] = nodeJson(e.g, *e.g.findNode(id), blendModeOf(e.g), after);
+		if (isParam)
+		{
+			json param{
+				{ "name",    paramName },
+				{ "kind",    paramKindName(kind) },
+				{ "hasSlot", hasSlotNow(*cm, e.m, paramName) },
+			};
+			if (paramName != prevName)
+			{
+				param["renamedFrom"] = prevName;
+				r.content["note"] =
+					"Slot '" + prevName + "' is now '" + paramName + "'. An instance that "
+					"overrode '" + prevName + "' follows the parent for '" + paramName +
+					"' from here on — the override was keyed by name, exactly as after a "
+					"rename in the Material Editor.";
+			}
+			if (!p.empty()) param["blockWritten"] = blockWritten;
+			r.content["parameter"] = std::move(param);
+		}
+		if (nt == HE::MatNodeType::StaticSwitch && n->s != before.s)
+			r.content["switch"] = json{ { "name", n->s }, { "renamedFrom", before.s } };
+		if (isOutput)
+		{
+			r.content["blendMode"] = blendModeName(static_cast<std::uint8_t>(n->p[1]));
+			r.content["lit"]       = n->p[0] >= 0.5f;
+			r.content["domain"]    = HE::matDomainName(static_cast<HE::MatDomain>(
+				static_cast<std::uint8_t>(n->p[3])));
+			if (cutoffDefaulted) r.content["maskCutoffDefaulted"] = 0.5f;
+		}
+		return r;
+	};
+	registry.add(std::move(t));
+}
+
 // ── material_set_param ───────────────────────────────────────────────────────
 
 void addSetParam(McpToolRegistry& registry, ContentManager& content,
@@ -3167,6 +3620,7 @@ void registerMaterialTools(McpToolRegistry& registry, ContentManager& content,
 	addConnect(registry, content, h);
 	addDisconnect(registry, content, h);
 	addSetPinDefault(registry, content, h);
+	addSetNode(registry, content, h);
 	addSetParam(registry, content, h);
 	addCreate(registry, content, h);
 	addCreateInstance(registry, content, h);

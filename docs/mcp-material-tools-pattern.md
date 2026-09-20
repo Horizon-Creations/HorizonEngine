@@ -407,3 +407,51 @@ anlegen → in place → Fan-out macht ihn fremd → nach `disconnect` wieder ei
 `not_found`/Engine/sauberer Tab → `reloadedInEditor` ×3); unter
 `HE_TESTS_HAVE_SHADERC` ein umverdrahtetes `OpaquePBR` (BaseColor→Metallic
 koerziert, Roughness als Const, Normal als ConstColor) durch Metal + GLSL410.
+
+## 9. Knoten ändern: `material_set_node`
+
+Stand 21.09.2026, Schritt 7. Das Gegenstück zu `hc_set_node`, in
+`McpToolsMaterial.cpp` hinter `material_set_pin_default`, auf den Helfern aus
+§7.1. Die Familie hat damit 12 Werkzeuge; ein Material-Graph ist per MCP jetzt
+von Grund auf baubar (create → add_node → set_node → connect /
+set_pin_default → remove_node), wie ein HC-Graph per hc_-Tools.
+
+### 9.1 Bewusste Abweichungen vom hc-Vorbild
+
+| hc_set_node | material_set_node | Warum |
+|---|---|---|
+| nimmt das **ganze Node-Objekt** (`node: {…}`) zurück | **Patch** aus den Feldern von `material_add_node`: `s`, `p`, `min`/`max`, `group`, `tooltip`, `position`, dazu `blendMode` (nur Output) | `HC::Node` ist groß und heterogen (Signatur, Pin-Defaults, Payloads), ein `MatGraphNode` sind sechs Felder, und `add_node` buchstabiert sie schon als Argumente. Ein Client, der `add_node` kennt, kennt `set_node`. Ein mitgeschicktes `type` wird angenommen, wenn es dem Ist-Typ entspricht (Echo von `graph_info`), sonst `invalid_payload`. |
+| **Upsert**: fremde Id wird angelegt | **`not_found`** | `material_add_node` legt an; ein Upsert bräuchte `type` als Pflichtfeld und wäre ein zweites Anlegen. |
+| Typwechsel erlaubt (Links jenseits des neuen Pin-Bereichs werden gekappt) | **Typ unveränderbar**, `invalid_payload` mit „remove + add" | Links liegen nach Pin-**Index** in der Datei; ein Multiply, das zum Lerp wird, behielte seine Drähte auf Pins, die jetzt etwas anderes bedeuten. |
+| `droppedLinks` nach Typwechsel | `droppedLinks` nach **`s`-Wechsel** auf `FunctionCall` (Pins = Interface der neuen Funktion, aus `resolvePins`) und `LandscapeLayerBlend` | Das ist, was bei Materialien die Pin-Liste ändert. Nicht ladbare Funktion (`FnGraphs::missing`) → `invalid_payload` statt „alle Drähte weg" (Regel von `material_connect`). |
+| — | `LandscapeLayerBlend`: Links werden erst per Layer-**Name** neu zugeordnet (`movedLinks {fromPin, toPin, layer}`), erst dann gekappt | `MaterialEditorPanel.cpp` ~547: Layer k entfernen heißt Layer k+1 **wird** k, die Drähte müssen mitrutschen; ein reiner Tail-Prune ließe jede Ebene nach der entfernten am Farbeingang ihres Vorgängers hängen. Über MCP kommt der ganze neue String, also Name-gegen-Name (erster Treffer). Ein umbenannter Layer verliert seinen Draht (gemeldet). |
+| — | **Output-Knoten** setzbar: `p = [lit 0/1, blendMode 0/1/2, maskCutoff, domain 0/1]`, oder `blendMode` als Name; beide zusammen nur, wenn sie übereinstimmen. Wechsel auf Masked mit Cutoff ≤ 0 → 0.5 (`maskCutoffDefaulted`), wie der Tab-Header. | `add_node` macht nie einen Output; das ist der erste MCP-Weg, den Blend-Mode nach `material_create` zu ändern. Bereichsprüfung, weil ein Blend-Mode 7 die Datei still kaputt machte. Der Link in den Opacity-Pin bleibt bei Opaque in der Datei (Indizes sind blend-stabil), der Slot verschwindet. |
+| — | Param-Knoten mit geändertem `p` bei **gleichem Namen**: der Slot im Param-Block wird **vor** `commitGraph` geschrieben (`parameter.blockWritten`) | Die dokumentierte Falle dieser Datei (`McpToolRegistry.h`): `regenerateMaterialFromGraph` snapshottet den Block **nach Namen** und stellt ihn wieder her; der Node-Default allein wäre nach dem Regenerate wieder der alte Blockwert. Bei Rename braucht es das nicht, der neue Slot entsteht frisch aus dem Knoten. |
+| — | Rename von Param/StaticSwitch: `parameter.renamedFrom` / `switch.renamedFrom` + `note` | Instanz-Overrides (`instanceOverriddenParams`, `instanceSwitchNames`) hängen am Namen und gehen verloren, genau wie nach einem Rename im Material Editor. Ehrlich melden, nicht heilen. |
+| schreibt immer | identische Werte → `changed: false`, nichts geschrieben; **kein** Feld → `invalid_payload` | Wie `material_connect` bei demselben Draht. |
+
+### 9.2 Antwortform
+
+`{ changed, node (wie graph_info, Pins aufgelöst), droppedLinks[], movedLinks[]?,
+parameter{name, kind, hasSlot, renamedFrom?, blockWritten?}?, switch{name,
+renamedFrom}?, blendMode/lit/domain (Output)?, maskCutoffDefaulted?, note?,
+…commitGraph }`; bei `changed: false` nur `{ changed, path, node }`.
+
+### 9.3 Tests (`tests/test_mcp_tools_material.cpp`, 6 Fälle + 1 unter SHADERC)
+
+Wert auf verdrahtetem `ParamFloat` → Node-Default (`codegenValueOf`) **und**
+Block (`savedBlockValueOf`) **und** geladene Instanz stimmen überein; gleicher
+Wert nochmal → `changed:false`, Bytes gleich; Range/Group/Tooltip/Position in
+der Datei, Wert überlebt die Range; Farbe 3 Komponenten; Const-Knoten ohne
+`parameter`. Rename Metal→Shine: Master-Layout, Codegen, Instanz-Override weg
+(`overridden:false`, folgt dem Parent), StaticSwitch analog. Output: Translucent
+→ Opaque nimmt den `Flag`-Slot (Link bleibt in der Datei), Masked ohne Cutoff →
+0.5, expliziter Cutoff bleibt, unlit + UI-Domain in `material_info`; 7
+Ablehnungen. FunctionCall-Rebind auf Funktion ohne Eingänge → 2 `droppedLinks`,
+Ausgangsdraht bleibt, `FnTint` aus der Funktion ist Slot; Ghost/Material/leerer
+Stub abgelehnt. Layer-Blend Grass/Rock/Snow → Grass/Snow: Rock-Draht weg, Snow
+rutscht 2→1 (`movedLinks`), Waise bleibt Knoten; Grass/Ice: Ice-Draht weg. 16
+Payload-Ablehnungen + alle Gates (play/lock/dirty/`no_graph`×2/Funktion/
+`not_found`/Engine/sauberer Tab → `reloadedInEditor`). Unter
+`HE_TESTS_HAVE_SHADERC`: `OpaquePBR` → Masked + unlit + Roughness 0.15 durch
+Metal + GLSL410, `gen.blendMode == Masked`.
