@@ -203,6 +203,12 @@ public:
     virtual void onShutdown() { fireEvent("OnShutdown", 0, Value{}); }
     virtual void onWindowFocusChanged(bool focused)
     { fireEvent("OnWindowFocusChanged", 0, Value::ofBool(focused)); }
+    // The anti-cheat made a report (or, on a client, the host sent a notice).
+    // The argument is the report TICKET; the anticheat.report* readers say
+    // what it holds. No element: it goes to the Game Instance, the level
+    // script and the Entity the report names.
+    virtual void onCheatDetected(int reportId)
+    { fireEvent("OnCheatDetected", 0, Value::ofInt(reportId)); }
     // Level script lifecycle.
     virtual void onLevelLoaded()   { fireEvent("OnLevelLoaded", 0, Value{}); }
     virtual void onLevelUnloaded() { fireEvent("OnLevelUnloaded", 0, Value{}); }

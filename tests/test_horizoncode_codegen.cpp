@@ -1370,6 +1370,26 @@ TEST_CASE("codegen parity: Input Action nodes route their own chains")
 	                                         "Input.Look.Axis2D", "Input.Move.Axis" });
 }
 
+TEST_CASE("codegen parity: OnCheatDetected carries its ticket into the anticheat readers")
+{
+	// An Int argument on an event with NO element: the engine table's row
+	// decides the hook the codegen emits (onCheatDetected(int)), and a wrong
+	// `elem` there would produce a method that overrides nothing. Driven by
+	// name on the interpreted side and THROUGH THE HOOK on the compiled one.
+	ParityPair p("fix/cheat_event");
+	REQUIRE(p.compInst != nullptr);
+
+	p.interp.rt.fireEvent(p.interp.id, "OnCheatDetected", 0, Value::ofInt(42));
+	p.compInst->onCheatDetected(42);
+	p.checkParity();
+	CHECK(p.var("ticket").i == 42);
+	// No host in either Ctx: the readers answer their neutral defaults on both
+	// backends, and check answers TRUE — the one inverted default, on both.
+	CHECK(p.var("level").i == 0);
+	CHECK(p.var("rule").s.empty());
+	CHECK(p.var("ok").b);
+}
+
 TEST_CASE("codegen parity: a base class with no variables at all")
 {
 	// slots() is a generated static, not a virtual — a child that concatenated

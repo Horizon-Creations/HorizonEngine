@@ -96,6 +96,7 @@ static HE::api::Ctx apiCtx(lua_State* L)
     c.self          = 0;
     c.createObject  = hs.createObject;
     c.destroyObject = hs.destroyObject;
+    c.antiCheat     = hs.antiCheat;
     // What "quit" means, as the host bound it — horizon.app.quit is a logged
     // no-op without it, so a Lua-only project could not close its own game. Read
     // from the registry rather than from HostServices: the quit hook predates
@@ -1585,6 +1586,12 @@ bool ScriptContext::callOnTimer(ScriptEngine::InstanceId id, int handle)
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;
     HE_SCRIPT_CALL("onTimer", b->callOnTimer(rawId(id), handle));
+}
+
+bool ScriptContext::callOnCheatDetected(ScriptEngine::InstanceId id, int reportId)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onCheatDetected", b->callOnCheatDetected(rawId(id), reportId));
 }
 
 #undef HE_SCRIPT_CALL

@@ -1451,6 +1451,68 @@ namespace
 	  "made without libcurl, where every request would fail — worth saying out "
 	  "loud once instead of failing per request." },
 
+	// ── Anti-cheat ───────────────────────────────────────────────────────────
+	{ "anticheat.check",
+	  "Asks the host's anti-cheat whether a value a client claimed (damage, a "
+	  "pickup, a currency delta) is allowed by the rule of that name from the "
+	  "project's Anti-Cheat settings. True = apply it. Always true on a client, "
+	  "with anti-cheat off, or for a rule the project does not declare: a check "
+	  "the engine cannot make never blocks the game." },
+	{ "anticheat.expectDisplacement",
+	  "Tells the anti-cheat that this entity is about to move a long way on "
+	  "purpose (respawn, portal, dash), up to Max Distance. One shot: the next "
+	  "move is allowed, then the usual speed check is back. Without it a respawn "
+	  "would count as a teleport against the player." },
+	{ "anticheat.report",
+	  "Reports something the engine cannot see for itself — a shot through a "
+	  "wall, an impossible pickup — against this player, under a rule name of "
+	  "your choosing. Weight is what it adds to the player's score (5 is the "
+	  "default Suspect threshold, 20 Confirmed); the detail goes into the log." },
+	{ "anticheat.setPlayerLabel",
+	  "Gives a player a name for the anti-cheat's log, reports and telemetry. "
+	  "Without one a player is only a connection number. Also what a Ban holds "
+	  "on to for the rest of the session." },
+	{ "anticheat.respond",
+	  "Inside On Cheat Detected: replaces what the host would do for this "
+	  "report. Response is a sum of 1 log, 2 event, 4 telemetry, 8 flag, 16 kick, "
+	  "32 ban; 0 means log only. The host acts at the END of the frame, so this "
+	  "only counts in the frame the event fired." },
+	{ "anticheat.kick",
+	  "Removes a player from the session at the end of this frame, whatever the "
+	  "score says. The client is told the Reason Code first, so it can show why "
+	  "instead of a dead connection. Ignored in the editor's play mode." },
+	{ "anticheat.reportLevel",
+	  "How serious the report is: 0 Info, 1 Suspect, 2 Confirmed, 3 Hard. Hard "
+	  "means a single thing no honest client can send; the other two are the "
+	  "decaying score crossing a threshold." },
+	{ "anticheat.reportRule",
+	  "The name of what was violated: an engine rule like DtBudget or "
+	  "Displacement, or the name your own Report Observation used. On a client "
+	  "this is the one thing the host tells you about a kick." },
+	{ "anticheat.reportPlayer",
+	  "The connection the report is about — the number Set Player Label and "
+	  "Kick Player take. 0 on a client, where the report is about you." },
+	{ "anticheat.reportEntity",
+	  "The network id of the entity involved, when the report names one (a "
+	  "movement report names the character). 0 when it does not." },
+	{ "anticheat.reportScore",
+	  "The player's score when the report was made. 0 on a client: the host "
+	  "never tells a player their score." },
+	{ "anticheat.reportDetail",
+	  "The observations behind the report as one readable line, for a log or an "
+	  "admin overlay. On a client only the rule name — nothing about how the "
+	  "host decides." },
+	{ "anticheat.reportReason",
+	  "The reason code a kick carried (Kick Player's Reason Code), read on the "
+	  "client to show the right message. 0 when the host's policy kicked." },
+	{ "anticheat.playerScore",
+	  "The player's current anti-cheat score, decaying over time. For a "
+	  "diagnostic overlay; 0 with anti-cheat off or on a client." },
+	{ "anticheat.isEnabled",
+	  "Is the anti-cheat running in this session? True only on a host that has "
+	  "it enabled in the project settings. Useful to hide an admin overlay "
+	  "everywhere else." },
+
 	// ── Save ─────────────────────────────────────────────────────────────────
 	{ "save.create",
 	  "Starts a NEW save from the project's SaveGame Template, with the fields "

@@ -97,6 +97,9 @@ public:
     // Call script.onTimer(self, handle) — a horizon.timer.after/every came due.
     // No-op if not defined.
     bool callOnTimer(InstanceId id, int handle) override;
+    // Call script.onCheatDetected(self, reportId) — the anti-cheat made a report
+    // (or the host sent this client a notice). No-op if not defined.
+    bool callOnCheatDetected(InstanceId id, int reportId) override;
 
     // Last error string from any failed compile or call.
     const std::string& lastError() const override { return m_lastError; }

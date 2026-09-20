@@ -296,6 +296,9 @@ public:
     void fireOnInit(InstanceId id);
     void fireOnShutdown(InstanceId id);
     void fireOnWindowFocusChanged(InstanceId id, bool focused);
+    // An anti-cheat report ticket (docs/anti-cheat-plan.md §5.4). Fired on the
+    // Game Instance, the level script and the Entity class the report names.
+    void fireOnCheatDetected(InstanceId id, int reportId);
     void fireOnLevelLoaded(InstanceId id);
     void fireOnLevelUnloaded(InstanceId id);
     // Physics contacts (Entity classes). `other` is the other entity's id, which

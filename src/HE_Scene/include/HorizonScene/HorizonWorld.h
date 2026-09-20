@@ -186,6 +186,10 @@ public:
 	void fireLevelLoaded();
 	void fireLevelUnloaded();
 	bool isLevelRunning() const { return m_levelRunning; }
+	// The running level script's instance, for events that address the level
+	// after OnLevelLoaded (OnCheatDetected, plan §5.4). 0 while no level runs.
+	HorizonCode::InstanceId levelScriptInstance() const
+	{ return m_levelRunning ? m_levelInstance : 0; }
 	// Live level-script variable store (seeded at load, mutated by Set nodes).
 	// Read-only view for tooling/tests; backed by the runtime instance.
 	const std::unordered_map<std::string, HorizonCode::Value>& levelVariables() const

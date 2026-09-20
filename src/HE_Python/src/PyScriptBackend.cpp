@@ -71,6 +71,7 @@ HE::api::Ctx apiCtx()
 	c.self          = 0;
 	c.createObject  = hs.createObject;
 	c.destroyObject = hs.destroyObject;
+	c.antiCheat     = hs.antiCheat;
 	c.requestQuit   = ScriptContext::hostQuitHandler();
 	return c;
 }
@@ -1315,6 +1316,15 @@ bool PyScriptBackend::callOnTimer(InstanceId id, int handle)
 	PyObject* obj = m_impl->findInstance(id);
 	if (!obj || !PyObject_HasAttrString(obj, "on_timer")) return true;
 	PyObject* r = PyObject_CallMethod(obj, "on_timer", "i", handle);
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
+bool PyScriptBackend::callOnCheatDetected(InstanceId id, int reportId)
+{
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, "on_cheat_detected")) return true;
+	PyObject* r = PyObject_CallMethod(obj, "on_cheat_detected", "i", reportId);
 	if (!r) { m_lastError = takePyError(); return false; }
 	Py_DECREF(r); return true;
 }

@@ -38,6 +38,15 @@ public:
 
     // Called once before the DLL is unloaded (hot-reload or shutdown).
     virtual void onStop(HorizonWorld& world) = 0;
+
+    // The host's anti-cheat made a report about a connection, or — on a client
+    // — the host sent a notice about this player (docs/anti-cheat-plan.md §5.4).
+    // `reportId` is a ticket; he::anticheat::reportLevel/Rule/Player/… in
+    // <HorizonGameServices.h> open it, and he::anticheat::respond(reportId, …)
+    // inside THIS call replaces what the host would otherwise do at the end of
+    // the frame. Defaulted to nothing, so a module from before it existed keeps
+    // building and simply lets the host's policy stand.
+    virtual void onCheatDetected(int reportId) { (void)reportId; }
 };
 
 // Typedefs for the DLL export function pointers

@@ -4,6 +4,7 @@
 #include <set>
 #include <nlohmann/json.hpp>   // db.query hands its rows back as JSON text
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/AntiCheat/AntiCheatHost.h>   // the anticheat rows' service
 #include <Net/HttpsClient.h>   // http.available must answer what the backend says
 #include <Types/TypeRegistry.h>
 #include <HorizonGameServices.h>
@@ -3024,6 +3025,109 @@ TEST_CASE("http: shut by default, and a ticket is the only way in")
     CHECK_FALSE(HE::api::http::takeFinished(ticket));
 }
 
+// ─── Anti-cheat (docs/anti-cheat-plan.md §4.3) ───────────────────────────────
+
+TEST_CASE("anticheat: the rows are in the registry, and a null host answers neutral — except check")
+{
+    const auto& reg = HE::api::registry();
+    auto row = [&](const char* id) -> const HE::api::ApiFn*
+    {
+        for (const HE::api::ApiFn& f : reg) if (std::string(f.id) == id) return &f;
+        return nullptr;
+    };
+    // The plan's table, one row each, plus reportReason: the notice carries a
+    // reason code (§5.5) and a client has to be able to read it back.
+    for (const char* id : { "anticheat.check", "anticheat.expectDisplacement",
+                            "anticheat.report", "anticheat.setPlayerLabel",
+                            "anticheat.respond", "anticheat.kick" })
+    {
+        const HE::api::ApiFn* f = row(id);
+        REQUIRE_MESSAGE(f != nullptr, id);
+        CHECK_MESSAGE(f->isExec, id);
+    }
+    for (const char* id : { "anticheat.reportLevel", "anticheat.reportRule",
+                            "anticheat.reportPlayer", "anticheat.reportEntity",
+                            "anticheat.reportScore", "anticheat.reportDetail",
+                            "anticheat.reportReason", "anticheat.playerScore",
+                            "anticheat.isEnabled" })
+    {
+        const HE::api::ApiFn* f = row(id);
+        REQUIRE_MESSAGE(f != nullptr, id);
+        CHECK_MESSAGE(!f->isExec, id);
+    }
+
+    // No host bound: anti-cheat OFF. Every reader is its type's zero, every
+    // exec row does nothing — and check answers TRUE, the one inverted default,
+    // because a check the engine cannot make must never block the game.
+    Ctx c;
+    CHECK(row("anticheat.check")->invoke(c, { Value::ofString("Damage"), Value::ofFloat(50.0f),
+                                             Value::ofInt(1) })[0].b);
+    CHECK_FALSE(row("anticheat.isEnabled")->invoke(c, {})[0].b);
+    CHECK(row("anticheat.reportLevel")->invoke(c, { Value::ofInt(1) })[0].i == 0);
+    CHECK(row("anticheat.reportRule")->invoke(c, { Value::ofInt(1) })[0].s.empty());
+    CHECK(row("anticheat.reportPlayer")->invoke(c, { Value::ofInt(1) })[0].i == 0);
+    CHECK(row("anticheat.reportEntity")->invoke(c, { Value::ofInt(1) })[0].i == 0);
+    CHECK(row("anticheat.reportScore")->invoke(c, { Value::ofInt(1) })[0].f == 0.0f);
+    CHECK(row("anticheat.reportDetail")->invoke(c, { Value::ofInt(1) })[0].s.empty());
+    CHECK(row("anticheat.reportReason")->invoke(c, { Value::ofInt(1) })[0].i == 0);
+    CHECK(row("anticheat.playerScore")->invoke(c, { Value::ofInt(1) })[0].f == 0.0f);
+    row("anticheat.expectDisplacement")->invoke(c, { Value::ofInt(1), Value::ofFloat(5.0f) });
+    row("anticheat.report")->invoke(c, { Value::ofInt(1), Value::ofString("Sight"),
+                                          Value::ofFloat(5.0f), Value::ofString("") });
+    row("anticheat.setPlayerLabel")->invoke(c, { Value::ofInt(1), Value::ofString("x") });
+    row("anticheat.respond")->invoke(c, { Value::ofInt(1), Value::ofInt(16) });
+    row("anticheat.kick")->invoke(c, { Value::ofInt(1), Value::ofInt(7) });
+
+    // On the list the text frontends build their tables from: the plan's Lua
+    // and Python examples are horizon.anticheat.check / reportLevel / respond.
+    CHECK(HE::api::isScriptGroup("anticheat"));
+}
+
+TEST_CASE("anticheat: with a host the rows read the report a game's own observation made")
+{
+    // A host with a service and no wire: the readers answer, report makes a
+    // report, respond replaces the policy, kick has nobody to drop.
+    HE::AntiCheat::AntiCheatService svc;
+    HE::AntiCheat::AntiCheatHost    host;
+    host.attach(&svc, nullptr);
+    Ctx c;
+    c.antiCheat = &host;
+    auto call = [&](const char* id, std::vector<Value> a)
+    { return HE::api::find(id)->invoke(c, a); };
+
+    CHECK(call("anticheat.isEnabled", {})[0].b);
+    // check is still "passes": the rule table is step 5.
+    CHECK(call("anticheat.check", { Value::ofString("Damage"), Value::ofFloat(1e9f),
+                                    Value::ofInt(7) })[0].b);
+
+    call("anticheat.setPlayerLabel", { Value::ofInt(7), Value::ofString("Mallory") });
+    // Weight above the Confirmed threshold: one observation, one report.
+    call("anticheat.report", { Value::ofInt(7), Value::ofString("Sight"),
+                               Value::ofFloat(25.0f), Value::ofString("through a wall") });
+    CHECK(call("anticheat.playerScore", { Value::ofInt(7) })[0].f == doctest::Approx(25.0f));
+
+    int fired = 0;
+    host.setEventSink([&](int id, const HE::AntiCheat::Report&) { fired = id; });
+    REQUIRE(host.pump() == 1);
+    REQUIRE(fired != 0);
+    CHECK(call("anticheat.reportLevel",  { Value::ofInt(fired) })[0].i == 2);   // Confirmed
+    CHECK(call("anticheat.reportRule",   { Value::ofInt(fired) })[0].s == "Sight");
+    CHECK(call("anticheat.reportPlayer", { Value::ofInt(fired) })[0].i == 7);
+    CHECK(call("anticheat.reportEntity", { Value::ofInt(fired) })[0].i == 0);
+    CHECK(call("anticheat.reportScore",  { Value::ofInt(fired) })[0].f == doctest::Approx(25.0f));
+    CHECK(call("anticheat.reportDetail", { Value::ofInt(fired) })[0].s.find("through a wall")
+          != std::string::npos);
+    CHECK(call("anticheat.reportReason", { Value::ofInt(fired) })[0].i == 0);
+
+    // respond(id, 8) = flag only, replacing the Confirmed policy; executed at
+    // flush, visible through the host's own reader.
+    call("anticheat.respond", { Value::ofInt(fired), Value::ofInt(8) });
+    host.flush();
+    CHECK(host.isFlagged(7));
+    CHECK(host.stats().kicked == 0);
+}
+
+
 // A ContentManager holding one in-memory SaveGameTemplate ("mem://tpl") with
 // hp (Float, 100), title (String, "Rookie"), hardcore (Bool), stats (Struct →
 // a registered PlayerStats def). Shared by the save-v2 cases below.
@@ -4610,6 +4714,74 @@ TEST_CASE("Content: an umbrella from before the content table costs only content
     HE_SetEngineServicesV2(&mixed);
     CHECK(he::save::available());
     CHECK_FALSE(he::content::available());
+
+    HE_SetEngineServicesV2(nullptr);
+}
+
+// The anti-cheat table, after HE_IMPLEMENT_ENGINE_SERVICES() above so the
+// receiving export exists in this binary.
+TEST_CASE("anticheat: the C-ABI table reaches the same host, and answers safely without one")
+{
+    HE::AntiCheat::AntiCheatService svc;
+    HE::AntiCheat::AntiCheatHost    host;
+    host.attach(&svc, nullptr);
+    HE::AntiCheat::AntiCheatHost* hostPtr = &host;
+
+    HE::api::GameServicesBinding binding;
+    binding.antiCheat = [&hostPtr]() { return hostPtr; };
+    HeAntiCheatServices table{};
+    HE::api::fillAntiCheatServices(table, &binding);
+    CHECK(table.abiVersion == HE_ANTICHEAT_ABI_VERSION);
+
+    // Before injection: the wrappers' defaults, with check's inverted one.
+    HE_SetEngineServicesV2(nullptr);
+    CHECK_FALSE(he::anticheat::available());
+    CHECK(he::anticheat::check("Damage", 50.0f, 1));
+    CHECK(he::anticheat::reportLevel(1) == he::anticheat::Level::Info);
+    CHECK(he::anticheat::reportRule(1).empty());
+    CHECK_FALSE(he::anticheat::isEnabled());
+
+    // An umbrella from before the table (v2) hands over nothing for it.
+    HeEngineServices old{};
+    old.abiVersion = 2u;
+    old.anticheat  = &table;
+    HE_SetEngineServicesV2(&old);
+    CHECK_FALSE(he::anticheat::available());
+
+    HeEngineServices now{};
+    now.abiVersion = HE_SERVICES_ABI_VERSION;
+    now.anticheat  = &table;
+    HE_SetEngineServicesV2(&now);
+    REQUIRE(he::anticheat::available());
+    CHECK(he::anticheat::isEnabled());
+
+    he::anticheat::setPlayerLabel(9, "Trent");
+    he::anticheat::report(9, "Pickup", 25.0f, "two in one frame");
+    int fired = 0;
+    host.setEventSink([&](int id, const HE::AntiCheat::Report&) { fired = id; });
+    REQUIRE(host.pump() == 1);
+    CHECK(he::anticheat::reportLevel(fired) == he::anticheat::Level::Confirmed);
+    CHECK(he::anticheat::reportRule(fired) == "Pickup");
+    CHECK(he::anticheat::reportPlayer(fired) == 9u);
+    CHECK(he::anticheat::reportScore(fired) == doctest::Approx(25.0f));
+    CHECK(he::anticheat::reportDetail(fired).find("two in one frame") != std::string::npos);
+    CHECK(he::anticheat::playerScore(9) == doctest::Approx(25.0f));
+    // The two-call string convention, straight at the table.
+    char tiny[4] = { 'x', 'x', 'x', 'x' };
+    const int need = table.reportRule(table.host, fired, tiny, (int)sizeof tiny);
+    CHECK(need == 6);
+    CHECK(std::string(tiny) == "Pic");
+
+    he::anticheat::respond(fired, he::anticheat::Flag);
+    host.flush();
+    CHECK(host.isFlagged(9));
+
+    // The session ends: the resolver answers null and the module's calls go
+    // neutral instead of dangling — check back to "passes".
+    hostPtr = nullptr;
+    CHECK_FALSE(he::anticheat::isEnabled());
+    CHECK(he::anticheat::check("Damage", 50.0f, 1));
+    CHECK(he::anticheat::reportLevel(fired) == he::anticheat::Level::Info);
 
     HE_SetEngineServicesV2(nullptr);
 }

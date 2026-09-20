@@ -27,9 +27,10 @@
 // optional pointer; with nullptr its behaviour is byte-for-byte what it was
 // before this service existed. There is no "enabled" branch inside the checks.
 //
-// Scope of this file (plan §7.1 step 2): the server path only. No policy
-// execution (kick, notice), no script events, no settings page, no telemetry —
-// those read the reports this produces (takeReport) and come in later steps.
+// Scope of this file (plan §7.1 step 2): the server path only. Policy
+// execution (kick, notice), the script events and the telemetry queue live in
+// AntiCheatHost, which takes the reports this produces (takeReport) once per
+// frame; the settings page feeds Config through AntiCheatHost::configFrom.
 
 #include "HorizonScene/GameReplication.h"
 
@@ -76,6 +77,11 @@ namespace HE::AntiCheat
 	{
 		Kind        kind   = Kind::Custom;
 		float       weight = 0.0f;    // what it added to the score (0 for Hard)
+		// What was violated, as a name: kindName(kind) for everything the
+		// engine checks, the game's rule name for Custom. Its own field rather
+		// than the first word of `detail`, because it is the one thing a client
+		// is told on a kick (plan §5.5) and must not be parsed out of prose.
+		std::string rule;
 		std::string detail;           // human-readable, redaction-safe
 		double      atWall = 0.0;     // service wall clock when it was made
 	};
@@ -161,6 +167,7 @@ namespace HE::AntiCheat
 		Level                    level  = Level::Info;
 		float                    score  = 0.0f;
 		Kind                     trigger = Kind::Custom;   // the observation that tipped it
+		std::string              rule;                     // the trigger's rule name
 		std::uint32_t            netId   = 0;              // entity involved, when known
 		std::string              label;                    // player label, "" unless set
 		std::string              detail;                   // observation list as one line

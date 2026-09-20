@@ -1440,7 +1440,11 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 	}
 	else
 	{
-		static const std::vector<std::string> kEvents = { "OnLevelLoaded", "OnLevelUnloaded" };
+		// OnCheatDetected reaches the level script second, after the Game
+		// Instance (docs/anti-cheat-plan.md §5.4): a level that wants to react
+		// to a report — hide the flagged player's loot, say — handles it here.
+		static const std::vector<std::string> kEvents = { "OnLevelLoaded", "OnLevelUnloaded",
+		                                                  "OnCheatDetected" };
 		bool edited = false;
 		drawGraphBody(ctx.world->levelScript(), kEvents, /*allowCustomEvents=*/false, "Level Script",
 		              "Reacts to world events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
@@ -1482,7 +1486,11 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 			"OnTrayItem", "OnMenuItem", "OnHttpResponse", "OnFileChanged", "OnTimer",
 			// A second window this application opened has closed. It belongs to
 			// the application for the same reason the tray does: no page owns it.
-			"OnWindowClosed" };
+			"OnWindowClosed",
+			// The anti-cheat made a report, or the host told this client why it
+			// is being removed. Session-wide, so the Game Instance hears it first
+			// (docs/anti-cheat-plan.md §5.4); the Int is the report ticket.
+			"OnCheatDetected" };
 		bool edited = false;
 		drawGraphBody(*ctx.gameInstanceGraph, kEvents, /*allowCustomEvents=*/false, "Game Instance",
 		              "App-wide. Runs before anything loads.", ctx.contentManager, ctx.gameInstanceGraph, edited);

@@ -1,5 +1,6 @@
 #include "doctest.h"
 
+#include <HorizonScene/AntiCheat/AntiCheatHost.h>
 #include <HorizonScene/AntiCheat/AntiCheatService.h>
 #include <HorizonScene/GameReplication.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -8,9 +9,11 @@
 #include <HorizonScene/Components/TransformComponent.h>
 
 #include <Diagnostics/Log.h>
+#include <Events/EventBus.h>
 #include <Net/LoopbackTransport.h>
 #include <Net/NetSession.h>
 #include <Net/SecureTransport.h>
+#include <Project/ProjectSettings.h>
 
 #include <algorithm>
 #include <limits>
@@ -401,8 +404,9 @@ TEST_CASE("AntiCheat: input from a connection that controls nothing is Hard in o
     CHECK(report->level   == Level::Hard);
     CHECK(report->trigger == Kind::ForeignEntity);
 
-    // Kick and notice are step 4 of the plan. Until then the connection stays;
-    // this pins that so step 4 flips it deliberately.
+    // The service makes reports; it never touches the transport. Without an
+    // AntiCheatHost pumping them (step 4, below) the connection stays — the
+    // kick is the host's frame-end decision, not the service's.
     CHECK(rig->serverNet->connections().size() == 1);
 
     // Hard sticks for the session, whatever the score does afterwards.
@@ -634,4 +638,287 @@ TEST_CASE("AntiCheat: the log carries the observations and never the join secret
     CHECK(spy.mentions("Alice"));
     // The secret is not, and the service has no path by which it could be.
     CHECK_FALSE(spy.mentions(secret));
+}
+
+// ─── Step 4: events and responses (docs/anti-cheat-plan.md §5) ──────────────
+// The host takes the reports the service makes, fires them, and executes the
+// policy — or what a handler put in its place — at the FRAME END. Everything
+// below runs on the same loopback rig, with an AntiCheatHost on each side: the
+// server's pumps the service, the client's pumps the notices.
+
+using HE::AntiCheat::AntiCheatHost;
+using HE::AntiCheat::Report;
+using HE::AntiCheat::Response;
+
+namespace {
+
+// One host frame with the two AntiCheatHosts in it, in the order the frame
+// loop keeps: deliver, simulate, pump (events), …game…, flush (responses).
+struct HostedRig {
+    std::unique_ptr<Rig> rig;
+    AntiCheatHost server, client;
+    std::vector<int>    firedOnServer;   // report ids the server's sink saw
+    std::vector<int>    firedOnClient;   // tickets the client's sink saw
+    std::vector<Report> seenOnServer;
+
+    explicit HostedRig(RigOptions opt = {}) : rig(makeRig(opt)) {
+        server.attach(&rig->svc, rig->server.get());
+        client.attach(nullptr, rig->client.get());
+        server.setEventSink([this](int id, const Report& r) {
+            firedOnServer.push_back(id);
+            seenOnServer.push_back(r);
+        });
+        client.setEventSink([this](int id, const Report&) { firedOnClient.push_back(id); });
+    }
+    void frame(float dt = kFrame) {
+        rig->frame(dt);
+        server.pump();
+        client.pump();
+        server.flush();
+        client.flush();
+    }
+    void frames(int n) { for (int i = 0; i < n; ++i) frame(); }
+    bool serverHasPeer() const { return !rig->serverNet->connections().empty(); }
+};
+
+} // namespace
+
+TEST_CASE("AntiCheatHost: a Hard report fires the event, and the policy kick lands at the frame end")
+{
+    RigOptions opt;
+    opt.assignControl = false;
+    HostedRig h(opt);
+    const ConnectionId conn = LoopbackTransport::kPeer;
+
+    // The event fires in pump(), before any response: the handler's window.
+    h.rig->sendRaw(1, 0.1f, glm::vec3(50.0f, 0, 0));
+    h.rig->frame();
+    CHECK(h.server.pump() == 1);
+    REQUIRE(h.firedOnServer.size() == 1);
+    const int id = h.firedOnServer[0];
+    CHECK(h.server.reportLevel(id) == (int)Level::Hard);
+    CHECK(h.server.reportPlayer(id) == (int)conn);
+    CHECK(h.server.reportRule(id) == "ForeignEntity");
+    CHECK(h.seenOnServer[0].level == Level::Hard);
+    // Nothing has happened to the connection yet — not in pump, not until flush.
+    CHECK(h.serverHasPeer());
+    CHECK(h.rig->server->stats().noticesSent == 0);
+
+    // Flush: the notice leaves now, the link closes on the NEXT flush, so the
+    // notice has a frame to get out before the socket does.
+    h.server.flush();
+    CHECK(h.rig->server->stats().noticesSent == 1);
+    CHECK(h.serverHasPeer());
+    CHECK(h.server.stats().kicked == 0);
+
+    // The client sees the notice BEFORE the link drops, as a ticket of its own
+    // with the rule's name and nothing else about the heuristics.
+    h.rig->frame();
+    CHECK(h.client.pump() == 1);
+    REQUIRE(h.firedOnClient.size() == 1);
+    const int ticket = h.firedOnClient[0];
+    CHECK(h.client.reportLevel(ticket) == (int)Level::Hard);
+    CHECK(h.client.reportRule(ticket) == "ForeignEntity");
+    CHECK(h.client.reportDetail(ticket) == "ForeignEntity");   // no observation list
+    CHECK(h.client.reportPlayer(ticket) == 0);                 // "you"
+    CHECK(h.client.reportScore(ticket) == doctest::Approx(0.0f));
+    CHECK(h.client.reportReason(ticket) == HE::AntiCheat::kReasonPolicy);
+    CHECK(h.rig->clientNet->connections().size() == 1);
+
+    h.server.flush();
+    CHECK_FALSE(h.serverHasPeer());
+    CHECK(h.server.stats().kicked == 1);
+    // The service forgot the connection with it: the state must not outlive
+    // the peer, or a reused id would inherit a Hard level.
+    CHECK(h.rig->svc.level(conn) == Level::Info);
+    h.rig->frame();
+    CHECK(h.rig->clientNet->connections().empty());
+}
+
+TEST_CASE("AntiCheatHost: respond() in the handler replaces the policy, and a frame late it is a no-op")
+{
+    RigOptions opt;
+    opt.assignControl = false;
+    HostedRig h(opt);
+    const ConnectionId conn = LoopbackTransport::kPeer;
+
+    // The handler overrules Hard's kick with "flag only" — the plan's observation
+    // mode for one report. It has to be called INSIDE the event.
+    bool answered = false;
+    h.server.setEventSink([&](int id, const Report&) {
+        answered = h.server.respond(id, Response::Flag);
+    });
+    h.rig->sendRaw(1, 0.1f, glm::vec3(50.0f, 0, 0));
+    h.frames(3);
+    CHECK(answered);
+    CHECK(h.serverHasPeer());
+    CHECK(h.rig->server->stats().noticesSent == 0);
+    CHECK(h.server.isFlagged(conn));
+    CHECK(h.server.stats().responded == 1);
+    CHECK(h.server.stats().kicked == 0);
+
+    // A frame later the report is no longer pending: the answer is refused
+    // rather than kicking somebody the handler already spared.
+    int id = 0;
+    for (int i = 1; i < 64 && id == 0; ++i)
+        if (h.rig->svc.findReport(i)) id = i;
+    REQUIRE(id != 0);
+    CHECK_FALSE(h.server.respond(id, Response::Kick));
+    h.frames(2);
+    CHECK(h.serverHasPeer());
+}
+
+TEST_CASE("AntiCheatHost: an explicit kick carries the game's reason code to the client")
+{
+    HostedRig h;
+    const ConnectionId conn = LoopbackTransport::kPeer;
+
+    h.rig->svc.setPlayerLabel(conn, "Mallory");
+    h.server.kick(conn, 42);
+    // Still a frame-end kick, even though nobody fired an event for it.
+    CHECK(h.serverHasPeer());
+    h.frame();                         // notice out
+    CHECK(h.rig->server->stats().noticesSent == 1);
+    CHECK(h.serverHasPeer());
+    h.frame();                         // client reads it; server drops the link
+    REQUIRE(h.firedOnClient.size() == 1);
+    const int ticket = h.firedOnClient[0];
+    CHECK(h.client.reportReason(ticket) == 42);
+    CHECK(h.client.reportRule(ticket).empty());
+    CHECK(h.client.reportLevel(ticket) == (int)Level::Info);
+    CHECK_FALSE(h.serverHasPeer());
+    // The server fired nothing: an explicit kick is the game's own decision.
+    CHECK(h.firedOnServer.empty());
+}
+
+TEST_CASE("AntiCheatHost: preview keeps everyone in the session, and a ban remembers the label")
+{
+    RigOptions opt;
+    opt.assignControl = false;
+    HostedRig h(opt);
+    const ConnectionId conn = LoopbackTransport::kPeer;
+
+    h.server.setPreview(true);
+    h.rig->sendRaw(1, 0.1f, glm::vec3(50.0f, 0, 0));
+    h.frames(4);
+    // The event fired — the author sees the report — but nothing left the
+    // machine and nobody was dropped.
+    CHECK(h.firedOnServer.size() == 1);
+    CHECK(h.serverHasPeer());
+    CHECK(h.rig->server->stats().noticesSent == 0);
+    CHECK(h.server.stats().kicked == 0);
+    h.server.kick(conn, 1);
+    h.frames(2);
+    CHECK(h.serverHasPeer());
+
+    // Out of preview: a Ban policy on Hard kicks and refuses the label for the
+    // rest of the session — the one identity a session has.
+    h.server.setPreview(false);
+    HE::AntiCheat::Policy p;
+    p.hard = Response::Log | Response::Ban;
+    h.server.setPolicy(p);
+    // Hard is sticky, so a second foreign input would make no second report:
+    // drop the connection's state first, as a fresh join would.
+    h.rig->svc.forgetConnection(conn);
+    h.rig->svc.setPlayerLabel(conn, "Mallory");
+    h.rig->sendRaw(2, 0.1f, glm::vec3(50.0f, 0, 0));
+    h.frames(3);
+    CHECK_FALSE(h.serverHasPeer());
+    CHECK(h.server.isBanned("Mallory"));
+    CHECK_FALSE(h.server.isBanned("Alice"));
+    CHECK(h.server.stats().banned == 1);
+}
+
+TEST_CASE("AntiCheatHost: telemetry is queued at the frame end for the sink of a later step")
+{
+    RigOptions opt;
+    opt.assignControl = false;
+    HostedRig h(opt);
+    h.rig->sendRaw(1, 0.1f, glm::vec3(50.0f, 0, 0));
+    h.frames(2);
+    Report r;
+    REQUIRE(h.server.takeTelemetry(r));
+    CHECK(r.level == Level::Hard);
+    CHECK(r.rule == "ForeignEntity");
+    CHECK_FALSE(h.server.takeTelemetry(r));
+}
+
+TEST_CASE("AntiCheatHost: the EventBus gets the same fields the readers answer")
+{
+    RigOptions opt;
+    opt.assignControl = false;
+    HostedRig h(opt);
+    EventBus bus;
+    h.server.setEventBus(&bus);
+    std::vector<HE::AntiCheat::CheatDetected> seen;
+    auto sub = bus.subscribe<HE::AntiCheat::CheatDetected>(
+        [&](const HE::AntiCheat::CheatDetected& e) { seen.push_back(e); });
+
+    h.rig->svc.setPlayerLabel(LoopbackTransport::kPeer, "Mallory");
+    h.rig->sendRaw(1, 0.1f, glm::vec3(50.0f, 0, 0));
+    h.frames(2);
+    REQUIRE(seen.size() == 1);
+    CHECK(seen[0].reportId == h.firedOnServer.at(0));
+    CHECK(seen[0].level == Level::Hard);
+    CHECK(seen[0].player == LoopbackTransport::kPeer);
+    CHECK(seen[0].rule == "ForeignEntity");
+    CHECK(seen[0].label == "Mallory");
+    CHECK_FALSE(seen[0].local);
+    CHECK(seen[0].detail == h.server.reportDetail(seen[0].reportId));
+}
+
+TEST_CASE("AntiCheatHost: without a service every row is neutral, and check passes")
+{
+    AntiCheatHost host;
+    CHECK_FALSE(host.isEnabled());
+    // The one inverted default: a check the engine cannot make must not block
+    // the game, so "no service" answers true where every other row answers 0.
+    CHECK(host.check("Damage", 50.0f, 1));
+    host.expectDisplacement(1, 10.0f);
+    host.report(1, "Sight", 5.0f, "");
+    host.setPlayerLabel(1, "x");
+    host.kick(1, 7);
+    CHECK_FALSE(host.respond(1, Response::Kick));
+    CHECK(host.reportLevel(1) == 0);
+    CHECK(host.reportRule(1).empty());
+    CHECK(host.reportPlayer(1) == 0);
+    CHECK(host.reportEntity(1) == 0);
+    CHECK(host.reportScore(1) == doctest::Approx(0.0f));
+    CHECK(host.reportDetail(1).empty());
+    CHECK(host.playerScore(1) == doctest::Approx(0.0f));
+    CHECK(host.pump() == 0);
+    host.flush();
+    CHECK(host.stats().kicked == 0);
+}
+
+TEST_CASE("AntiCheatHost: the project settings become the service's knobs and the policy")
+{
+    HE::ProjectAntiCheatSettings s;
+    s.tolerance          = 0.25f;
+    s.windowSec          = 4.0f;
+    s.maxInputsPerSecond = 120;
+    s.scoreHalfLifeSec   = 10.0f;
+    s.scoreSuspect       = 3.0f;
+    s.scoreConfirmed     = 9.0f;
+    s.policySuspect      = HE::ProjectAntiCheatSettings::Log;
+    s.policyConfirmed    = HE::ProjectAntiCheatSettings::Log | HE::ProjectAntiCheatSettings::Event
+                         | HE::ProjectAntiCheatSettings::Kick;
+    s.policyHard         = HE::ProjectAntiCheatSettings::Log | HE::ProjectAntiCheatSettings::Ban;
+
+    const HE::AntiCheat::Config c = AntiCheatHost::configFrom(s);
+    CHECK(c.tolerance == doctest::Approx(0.25f));
+    CHECK(c.windowSec == doctest::Approx(4.0f));
+    CHECK(c.maxInputsPerSecond == doctest::Approx(120.0f));
+    CHECK(c.halfLifeSec == doctest::Approx(10.0f));
+    CHECK(c.suspectThreshold == doctest::Approx(3.0f));
+    CHECK(c.confirmedThreshold == doctest::Approx(9.0f));
+
+    const HE::AntiCheat::Policy p = AntiCheatHost::policyFrom(s);
+    CHECK(p.forLevel(Level::Suspect)   == (Response::Log));
+    CHECK(p.forLevel(Level::Confirmed) == (Response::Log | Response::Event | Response::Kick));
+    CHECK(p.forLevel(Level::Hard)      == (Response::Log | Response::Ban));
+    // Log can never be taken out of a set: a level change is always a line.
+    HE::AntiCheat::Policy none;
+    none.suspect = 0;
+    CHECK(none.forLevel(Level::Suspect) == Response::Log);
 }

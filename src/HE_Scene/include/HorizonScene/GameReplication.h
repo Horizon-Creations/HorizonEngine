@@ -33,6 +33,7 @@
 #include <Integrity/IntegrityProbe.h>
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <glm/glm.hpp>
 #include <optional>
@@ -140,6 +141,38 @@ public:
 	void setAntiCheat(HE::AntiCheat::AntiCheatService* service) { m_antiCheat = service; }
 	HE::AntiCheat::AntiCheatService* antiCheat() const { return m_antiCheat; }
 
+	// ── Anti-cheat notice (plan §5.5) ──
+	// What a client is told before the host drops it: the level, a reason code
+	// and the NAME of the rule — and nothing else. No observation list, no
+	// thresholds, no score: a prober that gets itself kicked learns which rule
+	// fired and not how the heuristics behind it work, the same rule the bare
+	// reject code in failPeer follows.
+	struct AntiCheatNotice
+	{
+		int         level      = 0;   // HE::AntiCheat::Level as an int
+		int         reasonCode = 0;   // 0 = the host's policy; anything else is the game's
+		std::string rule;             // "" when the game kicked without naming one
+	};
+	// Host: send the notice, reliable. The disconnect is the caller's next step
+	// (AntiCheatHost::flush), one frame later, so the frame has left the socket.
+	void sendAntiCheatNotice(HE::Net::ConnectionId conn, const AntiCheatNotice& notice);
+	// Client: notices that arrived since the last call, oldest first. The frame
+	// loop turns each into a local report ticket and fires OnCheatDetected.
+	bool takeAntiCheatNotice(AntiCheatNotice& out);
+
+	// Host: forget everything about a connection this side dropped. NetSession
+	// fires no onDisconnect for a link we severed ourselves, so the per-client
+	// input tracking, the control assignment and the anti-cheat state would
+	// otherwise outlive the peer — and a connection id the transport reuses
+	// would inherit them.
+	void dropConnection(HE::Net::ConnectionId conn);
+
+	// The session this replication runs on, for the one caller that has to
+	// speak to the transport directly (the kick). Null in a headless test.
+	HE::Net::NetSession* session() const { return m_net; }
+	// The entity a network id names on this side, or entt::null.
+	Entity entityOf(std::uint32_t netId) const;
+
 	// ── Integrity (plan §3.5) ──
 	// This side's manifest. Without a call, update() adopts the process-wide
 	// IntegrityProbe once it is Ready, or "no manifest" when it was never
@@ -200,6 +233,8 @@ public:
 		std::uint32_t manifestsSent     = 0;   // client side
 		std::uint32_t manifestsChecked  = 0;   // host side: compared against our own
 		std::uint32_t integrityMismatches = 0; // host side: files that differed
+		std::uint32_t noticesSent       = 0;   // host side: anti-cheat notices before a kick
+		std::uint32_t noticesReceived   = 0;   // client side
 	};
 	const Stats& stats() const { return m_stats; }
 	void         resetStats() { m_stats = {}; }
@@ -243,6 +278,7 @@ private:
 	void handleIntegrity(HE::Net::ConnectionId conn, HE::Net::BitReader& r);
 	void checkGuestManifests();
 	void checkGuestManifest(HE::Net::ConnectionId conn, const GuestManifest& guest);
+	void handleAntiCheatNotice(HE::Net::ConnectionId conn, HE::Net::BitReader& r);
 	void reconcile(const Sample& authoritative, std::uint32_t ackedSequence);
 	void applySmoothing(float dt);
 
@@ -285,6 +321,9 @@ private:
 	std::unordered_set<HE::Net::ConnectionId>                 m_manifestReceived;    // host: one per connection
 	std::unordered_map<HE::Net::ConnectionId, GuestManifest>  m_pendingGuestManifests;
 	bool                    m_integrityOffLogged = false;
+
+	// ── Anti-cheat notices (client) ──
+	std::deque<AntiCheatNotice> m_notices;
 
 	// ── Per-client input tracking (server) ──
 	std::unordered_map<HE::Net::ConnectionId, std::uint32_t> m_lastProcessedInput;

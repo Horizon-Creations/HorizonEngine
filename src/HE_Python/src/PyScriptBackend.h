@@ -65,6 +65,7 @@ public:
 	bool callOnInputAxis(InstanceId id, const std::string& action, float value) override;
 	bool callOnInputAxis2D(InstanceId id, const std::string& action, float x, float y) override;
 	bool callOnTimer(InstanceId id, int handle) override;
+	bool callOnCheatDetected(InstanceId id, int reportId) override;
 
 	std::vector<ScriptPropDef> getScriptProperties(const std::string& name) const override;
 	void injectProperties(InstanceId id,
