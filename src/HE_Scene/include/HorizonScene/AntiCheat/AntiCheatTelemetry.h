@@ -70,8 +70,9 @@ namespace HE::AntiCheat
 		void configure(const std::string& url, const std::string& sessionId,
 		               const std::string& project);
 		bool enabled() const { return !m_url.empty(); }
-		// Tests: stand in for the network, and shorten the cadence.
-		void setPost(Post post) { m_post = std::move(post); }
+		// Tests: stand in for the network, and shorten the cadence. A post
+		// function of its own does not need the platform's HTTPS backend.
+		void setPost(Post post) { m_post = std::move(post); m_customPost = true; }
 		void setIntervalSec(double sec) { m_intervalSec = sec; }
 
 		// The frame. Takes every report out of `queue` and buffers it (when
@@ -123,6 +124,7 @@ namespace HE::AntiCheat
 		std::string m_session;    // shortened
 		std::string m_project;
 		Post        m_post;
+		bool        m_customPost  = false;
 		double      m_intervalSec = kIntervalSec;
 
 		std::vector<std::string> m_buffer;      // redacted JSON objects

@@ -89,7 +89,7 @@ namespace HE::AntiCheat
 			m_url.clear();
 			return;
 		}
-		if (!HE::Net::httpsAvailable())
+		if (!m_customPost && !HE::Net::httpsAvailable())
 		{
 			// Said once here rather than as a failing future every interval.
 			HE_LOG_WARN(AntiCheat, "telemetry URL set but this build has no HTTPS backend (%s); "
