@@ -618,8 +618,11 @@ void registerInputTools(McpToolRegistry& registry, ContentManager& content,
                         McpInputHooks hooks);
 
 // ─── What a surface looks like ───────────────────────────────────────────────
-// Three tools — `material_info` (the list and the one material, the same split
-// `terrain_info` uses), `material_set_param` and `material_create_instance`.
+// Five tools — `material_info` (the list and the one material, the same split
+// `terrain_info` uses), `material_graph_info` (the graph's structure, and the
+// one reader that accepts a material FUNCTION), `material_set_param`,
+// `material_create` (a master from a template, its PBR inputs as parameters)
+// and `material_create_instance`.
 //
 // ── Why a material needs tools of its own ────────────────────────────────────
 // `asset_create` already makes a material FILE, and that file is a stub: no
@@ -627,7 +630,10 @@ void registerInputTools(McpToolRegistry& registry, ContentManager& content,
 // lives in `MaterialAsset::nodeGraphJson` and in the param block generated from
 // it, and neither is reachable through a path-level tool. A client could assign
 // a material to a mesh and had no way to learn what could be tuned on it, let
-// alone tune it.
+// alone tune it. `material_create` is the answer to the stub: it goes through
+// the content manager's own writer (register → regenerate → save), the same
+// road `material_set_param` takes, so there is still one theory of what the
+// file holds — `asset_create` keeps writing the bare stub, deliberately.
 //
 // ── The trap this file exists for: WHERE a parameter's value lives ───────────
 // There are two answers and picking the wrong one writes a change that is

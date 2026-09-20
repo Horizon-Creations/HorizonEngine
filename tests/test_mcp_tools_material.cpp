@@ -8,10 +8,15 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h>
+// Linked into he_tests in every flavour; only the cross-compile of the
+// material_create templates is gated on HE_TESTS_HAVE_SHADERC.
+#include <material/MaterialShaderLibrary.h>
 
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -296,7 +301,7 @@ TEST_CASE("mcp material tools: registration")
 {
 	Fixture f("reg");
 	for (const char* n : { "material_info", "material_set_param",
-	                       "material_create_instance" })
+	                       "material_create", "material_create_instance" })
 	{
 		const McpTool* t = f.registry.find(n);
 		REQUIRE(t != nullptr);
@@ -306,6 +311,7 @@ TEST_CASE("mcp material tools: registration")
 	}
 	CHECK_FALSE(f.registry.find("material_info")->mutates);
 	CHECK(f.registry.find("material_set_param")->mutates);
+	CHECK(f.registry.find("material_create")->mutates);
 	CHECK(f.registry.find("material_create_instance")->mutates);
 }
 
@@ -922,4 +928,539 @@ TEST_CASE("mcp material tools: the engine namespace is read-only")
 		{ "path",   "Engine/Materials/Mine.hasset" } });
 	CHECK(intoEngine.isError);
 	CHECK(intoEngine.errorCode == "read_only");
+}
+
+// ═══ material_create ═════════════════════════════════════════════════════════
+// The chain this tool exists to mend: over MCP, make a material → tune it. With
+// asset_create the second link is refused (`no_params`); with material_create
+// the very next call can be a material_set_param, and the value it writes is
+// what the Material Editor's own regenerate produces from the file.
+
+TEST_CASE("mcp material tools: material_create mends the create-then-tune chain")
+{
+	Fixture f("mcreate");
+
+	// The control: what asset_create leaves behind is a material the tools
+	// cannot tune. That is the gap, stated as a test so its closing is visible.
+	f.writeStub("Materials/Stub.hasset", HE::AssetType::Material);
+	const ToolResult stubSet = f.call("material_set_param", json{
+		{ "path", "Materials/Stub.hasset" }, { "name", "BaseColor" },
+		{ "value", json::array({ 1.0, 0.0, 0.0 }) } });
+	CHECK(stubSet.isError);
+	CHECK(stubSet.errorCode == "no_params");
+
+	const ToolResult made = f.call("material_create", json{ { "path", "Materials/Rock" } });
+	REQUIRE_FALSE(made.isError);
+	CHECK(made.content.at("path") == "Materials/Rock.hasset");
+	CHECK(made.content.at("created") == true);
+	CHECK(made.content.at("kind") == "master");
+	CHECK(made.content.at("template") == "OpaquePBR");
+	CHECK(made.content.at("hasGraph") == true);
+	CHECK(made.content.at("blendMode") == "Opaque");
+	CHECK(made.content.at("domain") == "Surface");
+	CHECK(fs::exists(f.root / "Materials/Rock.hasset"));
+	CHECK(f.appeared == 1);
+	REQUIRE(f.published.size() == 1);
+	CHECK(f.published[0] == "Materials/Rock.hasset");
+
+	// The parameter list IS the template's PBR set — the names a client types
+	// next — and every one of them is declared by the material's own graph, so
+	// a value set on it survives the panel's regenerate.
+	const json& params = made.content.at("params");
+	REQUIRE(params.size() == 5);
+	for (const char* n : { "BaseColor", "Metallic", "Specular", "Roughness", "Emissive" })
+	{
+		const json* p = findParam(params, n);
+		REQUIRE_MESSAGE(p != nullptr, n);
+		CHECK(p->at("inGraph") == true);
+	}
+	// Opaque: no Opacity parameter, because the codegen never reaches the pin.
+	CHECK(findParam(params, "Opacity") == nullptr);
+	CHECK(findParam(params, "OpacityMask") == nullptr);
+	// The floats are sliders, not number fields — the range was authored.
+	const json* rough = findParam(params, "Roughness");
+	CHECK(rough->at("min") == 0.0);
+	CHECK(rough->at("max") == 1.0);
+	CHECK(rough->at("value") == doctest::Approx(0.5));
+
+	// The chain: set a value on the result, read it back through the panel's
+	// own codegen with a FRESH content manager.
+	const ToolResult set = f.call("material_set_param", json{
+		{ "path", "Materials/Rock.hasset" }, { "name", "BaseColor" },
+		{ "value", json::array({ 0.1, 0.2, 0.3 }) } });
+	REQUIRE_FALSE(set.isError);
+	CHECK(set.content.at("graphDefaultUpdated") == true);
+	HE::MatParamSlot slot;
+	REQUIRE(codegenValueOf(f.root, "Materials/Rock.hasset", "BaseColor", slot));
+	CHECK(slot.value[0] == doctest::Approx(0.1f));
+	CHECK(slot.value[1] == doctest::Approx(0.2f));
+	CHECK(slot.value[2] == doctest::Approx(0.3f));
+
+	// And the file is a material the list form and the single form both read.
+	const ToolResult info = f.call("material_info", json{ { "path", "Materials/Rock.hasset" } });
+	REQUIRE_FALSE(info.isError);
+	CHECK(info.content.at("params").size() == 5);
+	// An instance of it inherits the five slots — the master is a real parent.
+	const ToolResult inst = f.call("material_create_instance",
+	                              json{ { "parent", "Materials/Rock.hasset" } });
+	REQUIRE_FALSE(inst.isError);
+	CHECK(inst.content.at("params").size() == 5);
+}
+
+TEST_CASE("mcp material tools: every template compiles and exposes its own parameters")
+{
+	Fixture f("templates");
+
+	struct Expect { const char* tpl; const char* blend; const char* domain;
+	                std::vector<std::string> params; };
+	const std::vector<Expect> table{
+		{ "OpaquePBR",     "Opaque",      "Surface",
+		  { "BaseColor", "Metallic", "Specular", "Roughness", "Emissive" } },
+		{ "Masked",        "Masked",      "Surface",
+		  { "BaseColor", "Metallic", "Specular", "Roughness", "Emissive", "OpacityMask" } },
+		{ "Translucent",   "Translucent", "Surface",
+		  { "BaseColor", "Metallic", "Specular", "Roughness", "Emissive", "Opacity" } },
+		{ "Unlit",         "Opaque",      "Surface",        { "Color" } },
+		{ "UserInterface", "Opaque",      "User Interface", { "Color" } },
+	};
+
+	for (const Expect& e : table)
+	{
+		CAPTURE(e.tpl);
+		const std::string rel = std::string("Materials/T_") + e.tpl + ".hasset";
+		const ToolResult made = f.call("material_create",
+		                              json{ { "path", rel }, { "template", e.tpl } });
+		REQUIRE_FALSE(made.isError);
+		CHECK(made.content.at("template") == e.tpl);
+		CHECK(made.content.at("blendMode") == e.blend);
+		CHECK(made.content.at("domain") == e.domain);
+		const json& params = made.content.at("params");
+		REQUIRE(params.size() == e.params.size());
+		for (const std::string& n : e.params)
+		{
+			const json* p = findParam(params, n);
+			REQUIRE_MESSAGE(p != nullptr, n);
+			CHECK(p->at("inGraph") == true);
+		}
+
+		// What the file holds, read by a fresh manager and run through the real
+		// codegen: a shader, and not the magenta one a broken graph yields.
+		ContentManager fresh;
+		fresh.setContentRoot(f.root.string());
+		const HE::UUID id = fresh.loadAsset(rel);
+		const MaterialAsset* a = id == HE::UUID{} ? nullptr : fresh.getMaterial(id);
+		REQUIRE(a != nullptr);
+		REQUIRE_FALSE(a->nodeGraphJson.empty());
+		CHECK_FALSE(a->customShaderFragGlsl.empty());
+		HE::MaterialGraph g;
+		REQUIRE(HE::materialGraphFromJson(a->nodeGraphJson, g));
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		CHECK_FALSE(gen.glsl.empty());
+		CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
+		CHECK(gen.glsl.find("no Output node") == std::string::npos);
+		CHECK(gen.params.size() == e.params.size());
+#if defined(HE_TESTS_HAVE_SHADERC)
+		// The cross-compile the Material Editor runs inline: a template that
+		// only generates but does not compile would render magenta on a real
+		// backend, and no test above would notice.
+		using B = HE::MaterialShaderLibrary::Backend;
+		HE::MaterialShaderLibrary lib;
+		const uint64_t hash = std::hash<std::string>{}(gen.glsl);
+		const auto& msl = lib.fragment(hash, gen.glsl, B::Metal);
+		CHECK_MESSAGE(msl.ok, e.tpl, ": MSL compile failed: ", msl.log);
+		const auto& gl = lib.fragment(hash, gen.glsl, B::GLSL410);
+		CHECK_MESSAGE(gl.ok, e.tpl, ": GLSL compile failed: ", gl.log);
+#endif
+	}
+
+	// The default is OpaquePBR, and a name that is not a template is refused
+	// with the list.
+	const ToolResult unknown = f.call("material_create", json{
+		{ "path", "Materials/Nope.hasset" }, { "template", "Glass" } });
+	CHECK(unknown.isError);
+	CHECK(unknown.errorCode == "invalid_payload");
+	CHECK(unknown.errorMessage.find("OpaquePBR") != std::string::npos);
+	CHECK_FALSE(fs::exists(f.root / "Materials/Nope.hasset"));
+}
+
+TEST_CASE("mcp material tools: material_create refuses without writing")
+{
+	Fixture f("mcreate_gates");
+	const std::string rel = "Materials/New.hasset";
+	const json good{ { "path", rel } };
+	auto refused = [&](const char* code) {
+		const ToolResult r = f.call("material_create", good);
+		CHECK(r.isError);
+		CHECK(r.errorCode == code);
+		CHECK_FALSE(fs::exists(f.root / rel));
+		CHECK(f.appeared == 0);
+		CHECK(f.published.empty());
+	};
+
+	f.playing = true;   refused("play_mode");        f.playing = false;
+	f.materialsOk = false; refused("invalid_payload"); f.materialsOk = true;
+	f.lockedRel = rel;  refused("locked_by_other");  f.lockedRel.clear();
+
+	// No path at all, the wrong suffix, escaping and absolute paths.
+	ToolResult r = f.call("material_create", json::object());
+	CHECK(r.isError);
+	CHECK(r.errorCode == "invalid_payload");
+	r = f.call("material_create", json{ { "path", "Materials/New.png" } });
+	CHECK(r.isError);
+	CHECK(r.errorCode == "invalid_path");
+	for (const char* bad : { "/Materials/New.hasset", "../outside.hasset" })
+	{
+		r = f.call("material_create", json{ { "path", bad } });
+		CHECK(r.isError);
+		CHECK(r.errorCode == "invalid_path");
+	}
+	CHECK(f.appeared == 0);
+
+	// An existing file is refused, byte for byte untouched.
+	f.writeMaterial(rel, makeParamGraph());
+	const std::string before = f.bytes(rel);
+	r = f.call("material_create", good);
+	CHECK(r.isError);
+	CHECK(r.errorCode == "already_exists");
+	CHECK(f.bytes(rel) == before);
+
+	// The reserved namespace.
+	const fs::path engineRoot = f.root / "__engine";
+	fs::create_directories(engineRoot / "Materials");
+	f.content.setEngineContentRoot(engineRoot.string());
+	r = f.call("material_create", json{ { "path", "Engine/Materials/Mine.hasset" } });
+	CHECK(r.isError);
+	CHECK(r.errorCode == "read_only");
+	CHECK_FALSE(fs::exists(engineRoot / "Materials/Mine.hasset"));
+}
+
+// ═══ material_graph_info ═════════════════════════════════════════════════════
+// The structure material_info throws away. What is worth proving here is that
+// the answer is the CANVAS's answer (pin names from the same functions, the
+// Output pin that depends on the blend mode), that every node type has an
+// unambiguous name on the wire, and that the two things a material cannot
+// answer for itself — an instance, a function — get a real answer too.
+
+namespace {
+
+const json* findNode(const json& nodes, int id)
+{
+	for (const json& n : nodes)
+		if (n.at("id") == id) return &n;
+	return nullptr;
+}
+
+const json* findPinNamed(const json& pins, const std::string& name)
+{
+	for (const json& p : pins)
+		if (p.at("name") == name) return &p;
+	return nullptr;
+}
+
+} // namespace
+
+TEST_CASE("mcp material tools: graph_info registration")
+{
+	Fixture f("ginfo_reg");
+	const McpTool* t = f.registry.find("material_graph_info");
+	REQUIRE(t != nullptr);
+	CHECK(McpToolRegistry::enforceNameRule(t->name));
+	CHECK(t->inputSchema.is_object());
+	CHECK_FALSE(t->description.empty());
+	CHECK_FALSE(t->mutates);
+}
+
+TEST_CASE("mcp material tools: graph_info reports the param fixture as the canvas sees it")
+{
+	Fixture f("ginfo");
+	f.writeMaterial("Materials/Rock.hasset", makeParamGraph());
+
+	const ToolResult r = f.call("material_graph_info", json{ { "path", "Materials/Rock.hasset" } });
+	REQUIRE_FALSE(r.isError);
+	const json& j = r.content;
+	CHECK(j.at("kind") == "master");
+	CHECK(j.at("hasGraph") == true);
+	CHECK(j.at("graphVersion") == HE::kMatGraphVersion);
+	REQUIRE(j.at("nodes").size() == 7);
+	REQUIRE(j.at("links").size() == 6);
+	CHECK(j.at("nodeCount") == 7);
+	CHECK(j.at("linkCount") == 6);
+	CHECK(j.at("warnings").empty());
+
+	// The Output block: Translucent, so pin 5 is "Opacity" and present.
+	const json& out = j.at("output");
+	CHECK(out.at("lit") == true);
+	CHECK(out.at("blendMode") == "Translucent");
+	CHECK(out.at("domain") == "Surface");
+	CHECK(out.at("maskCutoff") == doctest::Approx(0.5));
+	const json& pins = out.at("pins");
+	REQUIRE(pins.size() == 9);
+	const json* opacity = findPinNamed(pins, "Opacity");
+	REQUIRE(opacity != nullptr);
+	CHECK(opacity->at("pin") == HE::kMatOutputOpacityPin);
+	CHECK(opacity->at("connected") == true);
+	CHECK(opacity->at("source").at("node") == 5);   // the ParamBool "Flag"
+	CHECK(opacity->at("chain").get<std::string>().find("Param (Bool) #5 (Flag)") == 0);
+	const json* normal = findPinNamed(pins, "Normal");
+	REQUIRE(normal != nullptr);
+	CHECK(normal->at("connected") == false);
+	CHECK_FALSE(normal->contains("chain"));
+
+	// The fold: Base Color is a Param node, so it reports the LIVE slot value
+	// and says which slot.
+	CHECK(out.at("approx").at("baseColorParam") == "Tint");
+	const json& bc = out.at("approx").at("baseColor");
+	CHECK(bc[0] == doctest::Approx(0.25));
+	CHECK(bc[1] == doctest::Approx(0.5));
+	CHECK(bc[2] == doctest::Approx(0.75));
+
+	// A node, in full: enum name on the wire, display name beside it, the Param
+	// metadata the panel shows, and the slider range only where it is one.
+	const json* tint = findNode(j.at("nodes"), 2);
+	REQUIRE(tint != nullptr);
+	CHECK(tint->at("type") == "ParamColor");
+	CHECK(tint->at("displayName") == "Param (Color)");
+	CHECK(tint->at("category") == "Parameter");
+	CHECK(tint->at("paramName") == "Tint");
+	CHECK(tint->at("kind") == "color");
+	CHECK(tint->at("group") == "Surface");
+	CHECK(tint->at("tooltip") == "Multiplies the albedo");
+	CHECK(tint->at("x") == doctest::Approx(80));
+	REQUIRE(tint->at("p").size() == 3);
+	CHECK(tint->at("p")[2] == doctest::Approx(0.75));
+	REQUIRE(tint->at("outputs").size() == 1);
+	CHECK(tint->at("outputs")[0].at("type") == "vec3");
+
+	const json* rough = findNode(j.at("nodes"), 4);
+	REQUIRE(rough != nullptr);
+	CHECK(rough->at("type") == "ParamFloat");
+	CHECK(rough->at("min") == doctest::Approx(0.0));
+	CHECK(rough->at("max") == doctest::Approx(1.0));
+	const json* metal = findNode(j.at("nodes"), 3);
+	REQUIRE(metal != nullptr);
+	CHECK_FALSE(metal->contains("min"));   // no range → no slider
+
+	// The Output node's input list is the blend-mode-dependent one, and each
+	// row says what feeds it.
+	const json* outNode = findNode(j.at("nodes"), 1);
+	REQUIRE(outNode != nullptr);
+	CHECK(outNode->at("type") == "Output");
+	REQUIRE(outNode->at("inputs").size() == 9);
+	const json* baseIn = findPinNamed(outNode->at("inputs"), "Base Color");
+	REQUIRE(baseIn != nullptr);
+	CHECK(baseIn->at("pin") == HE::kMatOutputBaseColorPin);
+	CHECK(baseIn->at("connected") == true);
+	CHECK(baseIn->at("source") == json{ { "node", 2 }, { "pin", 0 } });
+
+	// Links, verbatim.
+	bool sawTintLink = false;
+	for (const json& l : j.at("links"))
+		if (l.at("srcNode") == 2 && l.at("dstNode") == 1 && l.at("dstPin") == HE::kMatOutputBaseColorPin)
+			sawTintLink = true;
+	CHECK(sawTintLink);
+
+	// The summary form drops the graph and keeps the rest.
+	const ToolResult s = f.call("material_graph_info",
+	                           json{ { "path", "Materials/Rock.hasset" }, { "summary_only", true } });
+	REQUIRE_FALSE(s.isError);
+	CHECK_FALSE(s.content.contains("nodes"));
+	CHECK_FALSE(s.content.contains("links"));
+	CHECK(s.content.at("output").at("pins").size() == 9);
+	CHECK(s.content.at("nodeCount") == 7);
+}
+
+TEST_CASE("mcp material tools: graph_info names the Output pin by the blend mode")
+{
+	Fixture f("ginfo_blend");
+	// Opaque with a wire into the hidden Opacity pin: the pin is absent from
+	// the list and the warning says the wire does nothing.
+	HE::MaterialGraph g;
+	const int out = g.addNode(HE::MatNodeType::Output, 400, 120);
+	const int c = g.addNode(HE::MatNodeType::ConstFloat, 80, 120);
+	g.connect(c, 0, out, HE::kMatOutputOpacityPin);
+	f.writeMaterial("Materials/Opaque.hasset", g);
+	const ToolResult r = f.call("material_graph_info", json{ { "path", "Materials/Opaque.hasset" } });
+	REQUIRE_FALSE(r.isError);
+	const json& pins = r.content.at("output").at("pins");
+	CHECK(pins.size() == 8);
+	CHECK(findPinNamed(pins, "Opacity") == nullptr);
+	CHECK(findPinNamed(pins, "OpacityMask") == nullptr);
+	REQUIRE(r.content.at("warnings").size() == 1);
+	CHECK(r.content.at("warnings")[0].get<std::string>().find("Opaque") != std::string::npos);
+
+	// Masked: the same pin index, under the other name.
+	g.findNode(out)->p[1] = static_cast<float>(HE::MatBlendMode::Masked);
+	f.writeMaterial("Materials/Masked.hasset", g);
+	const ToolResult m = f.call("material_graph_info", json{ { "path", "Materials/Masked.hasset" } });
+	REQUIRE_FALSE(m.isError);
+	CHECK(m.content.at("output").at("blendMode") == "Masked");
+	const json* mask = findPinNamed(m.content.at("output").at("pins"), "OpacityMask");
+	REQUIRE(mask != nullptr);
+	CHECK(mask->at("pin") == HE::kMatOutputOpacityPin);
+	CHECK(mask->at("connected") == true);
+	CHECK(m.content.at("warnings").empty());
+}
+
+TEST_CASE("mcp material tools: graph_info gives every node type an unambiguous name")
+{
+	Fixture f("ginfo_sweep");
+	// One node of every registry type, wired to nothing — the same sweep the
+	// codegen tests run, seen from the wire. A type without a name here is a
+	// type material_add_node could never take.
+	HE::MaterialGraph g;
+	for (const HE::MatNodeDesc& d : HE::matNodeRegistry())
+		g.addNode(d.type, 0, 0);
+	f.writeMaterial("Materials/All.hasset", g);
+
+	const ToolResult r = f.call("material_graph_info", json{ { "path", "Materials/All.hasset" } });
+	REQUIRE_FALSE(r.isError);
+	const json& nodes = r.content.at("nodes");
+	REQUIRE(nodes.size() == HE::matNodeRegistry().size());
+	std::set<std::string> seen;
+	for (const json& n : nodes)
+	{
+		const std::string type = n.at("type");
+		CAPTURE(n.at("displayName").get<std::string>());
+		CHECK_FALSE(type.empty());
+		CHECK(seen.insert(type).second);   // unique
+		// The enum spelling: no spaces, no parentheses — the display name is
+		// the other field.
+		CHECK(type.find(' ') == std::string::npos);
+		CHECK(type.find('(') == std::string::npos);
+		CHECK(n.at("inputs").is_array());
+		CHECK(n.at("outputs").is_array());
+	}
+	// The dynamic-pin nodes resolve their rows from their own strings.
+	bool sawLayers = false;
+	for (const json& n : nodes)
+		if (n.at("type") == "LandscapeLayerBlend")
+		{
+			sawLayers = true;
+			REQUIRE(n.at("layers").size() == 2);   // addNode's "Layer 1\nLayer 2"
+			REQUIRE(n.at("inputs").size() == 2);
+			CHECK(n.at("inputs")[1].at("name") == "Layer 2");
+		}
+	CHECK(sawLayers);
+	// A FunctionCall with no path is a call to nothing, and the summary says so.
+	bool sawMissing = false;
+	for (const json& w : r.content.at("warnings"))
+		if (w.get<std::string>().find("could not be loaded") != std::string::npos) sawMissing = true;
+	CHECK(sawMissing);
+}
+
+TEST_CASE("mcp material tools: graph_info reads a function, an instance and a stub")
+{
+	Fixture f("ginfo_kinds");
+	f.writeFunction("Materials/Fn.hasset", makeFunctionGraph());
+
+	// A function: accepted here (material_info refuses it), with its interface.
+	const ToolResult fn = f.call("material_graph_info", json{ { "path", "Materials/Fn.hasset" } });
+	REQUIRE_FALSE(fn.isError);
+	CHECK(fn.content.at("kind") == "function");
+	CHECK_FALSE(fn.content.contains("output"));
+	const json& iface = fn.content.at("interface");
+	CHECK(iface.at("inputs").empty());
+	REQUIRE(iface.at("outputs").size() == 1);
+	CHECK(iface.at("outputs")[0].at("name") == "Out");
+	CHECK(iface.at("outputs")[0].at("pin") == 0);
+	REQUIRE(fn.content.at("nodes").size() == 2);
+	bool sawFnOut = false;
+	for (const json& n : fn.content.at("nodes"))
+		if (n.at("type") == "FnOutput") sawFnOut = true;
+	CHECK(sawFnOut);
+
+	// A master that calls it: the call node's pins come from the function's
+	// graph, and the function is listed.
+	HE::MaterialGraph g;
+	const int out  = g.addNode(HE::MatNodeType::Output, 400, 120);
+	const int call = g.addNode(HE::MatNodeType::FunctionCall, 80, 120);
+	g.findNode(call)->s = "Materials/Fn.hasset";
+	g.connect(call, 0, out, HE::kMatOutputBaseColorPin);
+	const int sw = g.addNode(HE::MatNodeType::StaticSwitch, 80, 300);
+	g.findNode(sw)->s = "Glossy";
+	f.writeMaterial("Materials/Caller.hasset", g);
+	const ToolResult caller = f.call("material_graph_info", json{ { "path", "Materials/Caller.hasset" } });
+	REQUIRE_FALSE(caller.isError);
+	REQUIRE(caller.content.at("functions").size() == 1);
+	CHECK(caller.content.at("functions")[0] == "Materials/Fn.hasset");
+	const json* callNode = findNode(caller.content.at("nodes"), call);
+	REQUIRE(callNode != nullptr);
+	CHECK(callNode->at("type") == "FunctionCall");
+	CHECK(callNode->at("function") == "Materials/Fn.hasset");
+	CHECK_FALSE(callNode->contains("missing"));
+	REQUIRE(callNode->at("outputs").size() == 1);
+	CHECK(callNode->at("outputs")[0].at("name") == "Out");
+	REQUIRE(caller.content.at("switches").size() == 1);
+	CHECK(caller.content.at("switches")[0].at("name") == "Glossy");
+	CHECK(caller.content.at("switches")[0].at("default") == true);
+	CHECK(caller.content.at("warnings").empty());
+	const json* base = findPinNamed(caller.content.at("output").at("pins"), "Base Color");
+	REQUIRE(base != nullptr);
+	// The chain speaks in display names (what the panel shows), the node list
+	// in enum names (what an edit would type).
+	CHECK(base->at("chain") == "Material Function #2 (Materials/Fn.hasset)");
+	CHECK(callNode->at("displayName") == "Material Function");
+
+	// An instance: the parent's graph under the instance's own overrides.
+	const ToolResult made = f.call("material_create_instance",
+	                              json{ { "parent", "Materials/Caller.hasset" } });
+	REQUIRE_FALSE(made.isError);
+	const ToolResult inst = f.call("material_graph_info",
+	                              json{ { "path", made.content.at("path") } });
+	REQUIRE_FALSE(inst.isError);
+	CHECK(inst.content.at("kind") == "instance");
+	CHECK(inst.content.at("parent") == "Materials/Caller.hasset");
+	CHECK(inst.content.at("hasGraph") == true);
+	CHECK(inst.content.at("nodes").size() == 3);
+	CHECK(inst.content.at("switchOverrides").is_array());
+
+	// A stub: no graph, no refusal, and the note says where one comes from.
+	f.writeStub("Materials/Stub.hasset", HE::AssetType::Material);
+	const ToolResult stub = f.call("material_graph_info", json{ { "path", "Materials/Stub.hasset" } });
+	REQUIRE_FALSE(stub.isError);
+	CHECK(stub.content.at("hasGraph") == false);
+	CHECK(stub.content.at("nodes").empty());
+	CHECK(stub.content.at("note").get<std::string>().find("material_create") != std::string::npos);
+
+	// The same gates as every reader: a missing file, the wrong kind of asset.
+	CHECK(f.call("material_graph_info", json{ { "path", "Materials/Ghost.hasset" } }).errorCode == "not_found");
+	f.writeStub("Widgets/HUD.hasset", HE::AssetType::Widget);
+	CHECK(f.call("material_graph_info", json{ { "path", "Widgets/HUD.hasset" } }).errorCode == "invalid_path");
+}
+
+TEST_CASE("mcp material tools: graph_info's chain skips reroutes and stops at fan-in")
+{
+	Fixture f("ginfo_chain");
+	HE::MaterialGraph g;
+	const int out = g.addNode(HE::MatNodeType::Output, 600, 120);
+	const int mul = g.addNode(HE::MatNodeType::Multiply, 400, 120);
+	const int rr  = g.addNode(HE::MatNodeType::Reroute, 500, 120);
+	const int tex = g.addNode(HE::MatNodeType::TextureSample, 200, 60);
+	g.findNode(tex)->s = "Textures/Rock.hasset";
+	const int uv  = g.addNode(HE::MatNodeType::UV, 80, 60);
+	const int col = g.addNode(HE::MatNodeType::ConstColor, 200, 200);
+	g.connect(uv, 0, tex, 0);
+	g.connect(tex, 0, mul, 0);
+	g.connect(col, 0, mul, 1);
+	g.connect(mul, 0, rr, 0);
+	g.connect(rr, 0, out, HE::kMatOutputBaseColorPin);
+	f.writeMaterial("Materials/Chain.hasset", g);
+
+	const ToolResult r = f.call("material_graph_info", json{ { "path", "Materials/Chain.hasset" } });
+	REQUIRE_FALSE(r.isError);
+	const json* base = findPinNamed(r.content.at("output").at("pins"), "Base Color");
+	REQUIRE(base != nullptr);
+	// The source is the node BEHIND the reroute — what a connect would name.
+	CHECK(base->at("source") == json{ { "node", mul }, { "pin", 0 } });
+	// Multiply has two connected inputs: the chain names it and stops.
+	CHECK(base->at("chain") == "Multiply #2 <- ...");
+	// The texture slot order is the baked one.
+	REQUIRE(r.content.at("textures").size() == 1);
+	CHECK(r.content.at("textures")[0] == "Textures/Rock.hasset");
+	// And the texture node says what it samples.
+	const json* texNode = findNode(r.content.at("nodes"), tex);
+	REQUIRE(texNode != nullptr);
+	CHECK(texNode->at("texture") == "Textures/Rock.hasset");
+	REQUIRE(texNode->at("inputs").size() == 1);
+	CHECK(texNode->at("inputs")[0].at("source") == json{ { "node", uv }, { "pin", 0 } });
 }
