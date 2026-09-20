@@ -1,5 +1,7 @@
 #include "HorizonScene/GameReplication.h"
 
+#include "HorizonScene/AntiCheat/AntiCheatService.h"
+#include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/NetworkComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 
@@ -18,11 +20,20 @@ namespace
 	constexpr MessageId kMsgSnapshot = kFirstUserMessage + 200;
 	constexpr MessageId kMsgInput    = kFirstUserMessage + 201;   // client → server
 
-	// The longest timestep a single command may represent. The server enforces
-	// it so a modified client cannot claim a ten-second frame and teleport, and
-	// the CLIENT must apply exactly the same bound when predicting — otherwise
-	// the two run different simulations and every long frame mispredicts.
-	constexpr float kMaxInputDeltaTime = 0.1f;
+	// Speed bounds for the anti-cheat displacement check. The engine does not
+	// know the game's mover, so it takes the bound from what the entity carries:
+	// NetworkComponent::maxSpeed once step 3 of the plan adds it (it takes
+	// precedence), MovementComponent::maxSpeed as the fallback. Neither present
+	// = 0 = unchecked. Vertical stays unchecked until a game declares it —
+	// jumps and falls depend on the game's gravity, and one horizontal bound
+	// would either forbid falling or allow flying.
+	HE::AntiCheat::MoveLimits resolveMoveLimits(const entt::registry& reg, Entity entity)
+	{
+		HE::AntiCheat::MoveLimits limits;
+		if (const auto* mc = reg.try_get<MovementComponent>(entity))
+			limits.maxSpeed = std::max(0.0f, mc->maxSpeed);
+		return limits;
+	}
 } // namespace
 
 GameReplication::GameReplication(NetSession* net, NetRole role, Config cfg)
@@ -111,23 +122,43 @@ std::uint32_t GameReplication::pushInput(const glm::vec3& move, float yaw, float
 
 void GameReplication::handleInput(ConnectionId conn, BitReader& r)
 {
+	// This is the only place client claims enter the simulation, which makes it
+	// the only place validation can live. Every refusal below used to be a
+	// silent return; with an anti-cheat service attached, the ones a legitimate
+	// client cannot cause become observations. Without one, nothing changes.
 	InputCommand cmd;
-	if (!r.readUInt32(cmd.sequence) || !r.readFloat(cmd.deltaTime)) return;
-	for (int i = 0; i < 3; ++i)
+	const bool parsed = r.readUInt32(cmd.sequence) && r.readFloat(cmd.deltaTime) &&
+	                    r.readFloat(cmd.move[0]) && r.readFloat(cmd.move[1]) &&
+	                    r.readFloat(cmd.move[2]) && r.readFloat(cmd.yaw);
+	if (!parsed)
 	{
-		if (!r.readFloat(cmd.move[i])) return;
+		// A real client never sends a truncated command: the writer is ours.
+		if (m_antiCheat)
+			m_antiCheat->observe(conn, HE::AntiCheat::Kind::Malformed, 0.0f,
+			                     "truncated input command");
+		return;
 	}
-	if (!r.readFloat(cmd.yaw)) return;
 
 	// Out-of-order or duplicated input must not be applied twice — UDP-style
-	// delivery makes both normal.
+	// delivery makes both normal. Silent on purpose, even with anti-cheat: a
+	// duplicate is normal on every channel and says nothing about the client.
 	auto& last = m_lastProcessedInput[conn];
 	if (cmd.sequence <= last) return;
 
 	// A client may only drive the entity it was assigned. Without this check a
-	// client could move anyone's character by sending input for their id.
+	// client could move anyone's character by sending input for their id. No
+	// assignment at all is the client's doing (Hard: it controls nothing and
+	// sends input anyway); an assignment that no longer resolves — the entity
+	// was unregistered while its input was in flight — is server state, and
+	// stays silent.
 	const auto ctrlIt = m_controlledByConn.find(conn);
-	if (ctrlIt == m_controlledByConn.end()) return;
+	if (ctrlIt == m_controlledByConn.end())
+	{
+		if (m_antiCheat)
+			m_antiCheat->observe(conn, HE::AntiCheat::Kind::ForeignEntity, 0.0f,
+			                     "input from a connection that controls no entity");
+		return;
+	}
 	const auto entIt = m_byNetId.find(ctrlIt->second);
 	if (entIt == m_byNetId.end()) return;
 
@@ -136,11 +167,33 @@ void GameReplication::handleInput(ConnectionId conn, BitReader& r)
 	auto* tc = reg.try_get<TransformComponent>(entIt->second);
 	if (!tc || !m_move) return;
 
+	// Pre-apply: format (finite numbers), input rate, dt budget. A refused
+	// command simply falls away; the next snapshot corrects the client exactly
+	// like any misprediction, so no rollback path is needed here.
+	if (m_antiCheat && !m_antiCheat->preApply(conn, cmd)) return;
+
 	// Enforce the bound the client is also supposed to apply: a modified one
 	// could otherwise send dt = 10 and cross the level in a single command.
 	cmd.deltaTime = std::clamp(cmd.deltaTime, 0.0f, kMaxInputDeltaTime);
 
+	const glm::vec3 before = tc->position;
 	m_move(*tc, cmd);
+
+	// Post-apply: the engine does not know the mover, so it measures what the
+	// mover did. Further than maxSpeed·dt allows → back to where it was, and
+	// the command still counts as processed so the client's replay retires it.
+	if (m_antiCheat)
+	{
+		HE::AntiCheat::MoveCheck check;
+		check.netId     = ctrlIt->second;
+		check.before    = before;
+		check.after     = tc->position;
+		check.deltaTime = cmd.deltaTime;
+		check.limits    = resolveMoveLimits(reg, entIt->second);
+		check.quantStep = quantStep();
+		if (!m_antiCheat->postApply(conn, check)) tc->position = before;
+	}
+
 	tc->dirty = true;
 	last = cmd.sequence;
 	++m_stats.inputsProcessed;
@@ -201,6 +254,11 @@ void GameReplication::update(float dt)
 
 	if (m_role == NetRole::Server || m_role == NetRole::Host)
 	{
+		// The anti-cheat's wall clock is this frame delta: the dt budget
+		// compares the simulated time clients claimed against the host time
+		// that really passed, and this is where the host time passes.
+		if (m_antiCheat) m_antiCheat->update(dt);
+
 		const float interval = (m_cfg.tickHz > 0.0f) ? (1.0f / m_cfg.tickHz) : 0.0f;
 		if (interval <= 0.0f) return;
 
@@ -217,6 +275,12 @@ void GameReplication::update(float dt)
 
 	advanceInterpolation(dt);
 	applySmoothing(dt);
+}
+
+float GameReplication::quantStep() const
+{
+	return (2.0f * m_cfg.worldExtent) /
+	       static_cast<float>((1u << std::min(m_cfg.positionBits, 30)) - 1u);
 }
 
 void GameReplication::writeSample(BitWriter& w, const Sample& s) const
@@ -382,10 +446,7 @@ void GameReplication::reconcile(const Sample& authoritative, std::uint32_t acked
 	// one step — treating that as an error would count every snapshot as a
 	// correction and leave a smoothing offset permanently active, which reads as
 	// constant micro-jitter.
-	const float quantStep =
-		(2.0f * m_cfg.worldExtent) /
-		static_cast<float>((1u << std::min(m_cfg.positionBits, 30)) - 1u);
-	if (dist <= quantStep * 3.0f)
+	if (dist <= quantStep() * 3.0f)
 	{
 		// Prediction was right, which is the common case on a healthy link.
 		tc->dirty = true;
