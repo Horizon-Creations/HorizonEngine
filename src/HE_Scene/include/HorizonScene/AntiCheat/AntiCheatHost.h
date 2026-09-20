@@ -245,6 +245,7 @@ namespace HE::AntiCheat
 		std::vector<KickInFlight> m_kicking;      // notice sent, disconnect on the next flush
 		std::unordered_set<HE::Net::ConnectionId> m_flagged;
 		std::unordered_set<std::string>           m_banned;
+		std::unordered_set<std::string>           m_checkLogged;   // rule names check() said "passes" for
 
 		// The client's tickets. Their own counter: a client has no service, so
 		// nothing else mints ids on this side, and detach() clears them before

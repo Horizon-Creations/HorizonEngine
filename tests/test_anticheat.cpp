@@ -30,9 +30,10 @@ using HE::AntiCheat::Level;
 // ─── Anti-cheat, step 2: the server path (docs/anti-cheat-plan.md §7.4) ──────
 // Everything here runs over LoopbackTransport, exactly like the replication
 // tests: no sockets, deterministic delivery, one pump round = one host frame.
-// The nine cases are the plan's test plan one to one. Kick and notice are
-// step 4 of the plan and deliberately absent here; the cases that mention
-// them pin the current behaviour (the connection stays) instead.
+// The nine cases are the plan's test plan one to one, against the service
+// alone: no AntiCheatHost pumps its reports here, so nobody is kicked and the
+// cases that touch on it pin that. Kick and notice are step 4 — the host's
+// event/response side — and have their own cases at the end of this file.
 
 namespace {
 
@@ -789,6 +790,25 @@ TEST_CASE("AntiCheatHost: an explicit kick carries the game's reason code to the
     CHECK_FALSE(h.serverHasPeer());
     // The server fired nothing: an explicit kick is the game's own decision.
     CHECK(h.firedOnServer.empty());
+}
+
+TEST_CASE("AntiCheatHost: an explicit kick needs a wire, not a scorer")
+{
+    // Anti-cheat OFF (no service) on a host that still runs a session: the
+    // game's kick is "independent of the score" (plan §4.3), so it works with
+    // the replication alone — notice, then disconnect, level Info.
+    RigOptions opt;
+    opt.attachService = false;
+    HostedRig h(opt);
+    h.server.attach(nullptr, h.rig->server.get());
+    CHECK_FALSE(h.server.isEnabled());
+
+    h.server.kick(LoopbackTransport::kPeer, 9);
+    h.frames(2);
+    REQUIRE(h.firedOnClient.size() == 1);
+    CHECK(h.client.reportReason(h.firedOnClient[0]) == 9);
+    CHECK(h.client.reportLevel(h.firedOnClient[0]) == (int)Level::Info);
+    CHECK_FALSE(h.serverHasPeer());
 }
 
 TEST_CASE("AntiCheatHost: preview keeps everyone in the session, and a ban remembers the label")

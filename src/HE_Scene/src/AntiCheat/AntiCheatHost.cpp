@@ -281,7 +281,11 @@ namespace HE::AntiCheat
 		// from every other row that lacks its service.
 		(void)value; (void)player;
 		if (!m_service) return true;
-		HE_LOG_DEBUG(AntiCheat, "check '%s': no rule table in this build, passes", rule.c_str());
+		// Once per rule name, not per call: a damage check runs every hit, and
+		// AntiCheat=Debug is the plan's first diagnostic grip — it must stay
+		// readable.
+		if (m_checkLogged.insert(rule).second)
+			HE_LOG_DEBUG(AntiCheat, "check '%s': no rule table in this build, passes", rule.c_str());
 		return true;
 	}
 
@@ -320,7 +324,11 @@ namespace HE::AntiCheat
 
 	void AntiCheatHost::kick(ConnectionId player, int reasonCode)
 	{
-		if (!m_service || player == kInvalidConnection) return;
+		// The game's decision, "independent of the score" (plan §4.3) — and so
+		// independent of the SERVICE too: a host with anti-cheat off still has a
+		// wire to send the notice on and a link to close. Without either there
+		// is nothing to do.
+		if (player == kInvalidConnection || (!m_service && !m_replication)) return;
 		if (m_preview)
 		{
 			HE_LOG_INFO(AntiCheat, "kick(conn %u, reason %d) ignored in preview", player, reasonCode);
@@ -331,7 +339,7 @@ namespace HE::AntiCheat
 		// handler is also a frame-end kick.
 		Pending p;
 		p.conn      = player;
-		p.level     = m_service->level(player);
+		p.level     = m_service ? m_service->level(player) : Level::Info;
 		p.responses = Log | Kick;
 		p.reason    = reasonCode;
 		m_pending.push_back(std::move(p));
