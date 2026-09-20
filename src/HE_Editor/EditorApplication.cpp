@@ -86,6 +86,7 @@
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/TimerSystem.h>
+#include <HorizonScene/AntiCheat/AntiCheatEvents.h>   // OnCheatDetected through every frontend
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
@@ -228,6 +229,9 @@ struct HostCtxParts
 	// not do that".
 	std::function<glm::vec2()> windowSize;
 	std::function<void()>      requestRedraw;
+	// The anti-cheat host (preview mode), so a graph's Respond To Report and a
+	// Lua onCheatDetected reach the same object here as in the shipped game.
+	HE::AntiCheat::AntiCheatHost* antiCheat = nullptr;
 };
 // One editor per process; cleared in OnShutdown so nothing here outlives the
 // object its lambdas capture.
@@ -252,6 +256,7 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.requestQuit   = g_host.quit;
 	c.windowSize    = g_host.windowSize;
 	c.requestRedraw = g_host.requestRedraw;
+	c.antiCheat     = g_host.antiCheat;
 	return c;
 }
 } // namespace
@@ -1389,6 +1394,18 @@ void EditorApplication::OnInit()
 		g_host.audio    = &m_audioEngine;
 		g_host.runtime  = &m_gameInstance.runtime();
 		g_host.entities = &m_entityHost;
+		g_host.antiCheat = &m_antiCheat;
+		// Preview from the first frame: a report in the editor is something to
+		// read, never something that drops a player (plan §6.2.6). The sink is
+		// the one dispatcher the packaged game uses (AntiCheatEvents), so a
+		// handler that works here works there.
+		m_antiCheat.setPreview(true);
+		m_antiCheat.setEventSink([this](int reportId, const HE::AntiCheat::Report& r) {
+			AntiCheatEvents::dispatch(reportId, r, &m_gameInstance.runtime(), m_editorWorld.get(),
+			                          &m_entityHost, m_antiCheat.replication(),
+			                          m_scriptContext.get(), &m_scriptInstances,
+			                          logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+		});
 		// In the editor "quit" is not closing the editor: a game played in a
 		// viewport is a preview, so its Exit button ends the preview. Parked
 		// rather than run — see m_playStopRequested.
@@ -3212,6 +3229,10 @@ void EditorApplication::OnRender(float dt)
 			// shipped build did nothing in the preview.
 			TimerSystem::dispatch(dt, &m_gameInstance.runtime(),
 			                      m_scriptContext.get(), &m_scriptInstances);
+			// Anti-cheat reports, the same two calls the packaged game makes:
+			// events now, responses at the frame's end (below). In preview mode
+			// the responses are log and flag only — see m_antiCheat.
+			m_antiCheat.pump();
 
 			// Toggle SDL text-input to match widget text-field focus, so a focused
 			// PIE text field receives SDL_EVENT_TEXT_INPUT. Only touched on a focus
@@ -4211,6 +4232,12 @@ void EditorApplication::OnRender(float dt)
 		m_frametimeHistory[m_fpsHistoryOffset] = dt * 1000.0f; // ms
 		m_fpsHistoryOffset = (m_fpsHistoryOffset + 1) % k_fpsHistorySize;
 	}
+
+	// ── Frame end: the anti-cheat's responses ────────────────────────────────
+	// The same last line the packaged game has, after every script and the UI
+	// had their turn (plan §5.3). In preview mode what runs here is log and
+	// flag; the kick a policy asked for is dropped, with a line saying so.
+	m_antiCheat.flush();
 }
 
 // ─── Headless frame dump ──────────────────────────────────────────────────────
@@ -8607,6 +8634,7 @@ void EditorApplication::setPlayMode(bool play)
 			hs.runtime       = &m_gameInstance.runtime();
 			hs.createObject  = g_host.createObject;  // the same lambdas HorizonCode uses
 			hs.destroyObject = g_host.destroyObject;
+			hs.antiCheat     = &m_antiCheat;
 			m_scriptContext->setHostServices(std::move(hs));
 		}
 
@@ -9552,16 +9580,19 @@ void EditorApplication::bindGameServices()
 	m_gameServicesBinding.world   = [this]() { return m_editorWorld.get(); };
 	m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
 	m_gameServicesBinding.content = &contentManager();
+	m_gameServicesBinding.antiCheat = [this]() { return &m_antiCheat; };
 	HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
 	HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
 	HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
 	HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
+	HE::api::fillAntiCheatServices(m_antiCheatServices, &m_gameServicesBinding);
 	m_engineServices            = {};
 	m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
 	m_engineServices.save       = &m_saveServices;
 	m_engineServices.physics    = &m_physicsServices;
 	m_engineServices.input      = &m_inputServices;
 	m_engineServices.content    = &m_contentServices;
+	m_engineServices.anticheat  = &m_antiCheatServices;
 }
 
 std::filesystem::path EditorApplication::builtGameLogicPath()
@@ -9725,6 +9756,10 @@ void EditorApplication::OnShutdown()
 	// below, which returns early in a headless build.
 	if (m_scriptContext) m_scriptContext->setHostServices({});
 	g_host = {};
+	// The sink captured `this` and names the script context; drop it here, for
+	// the reason the block above gives.
+	m_antiCheat.setEventSink({});
+	m_antiCheat.detach();
 
 #ifdef HE_IMGUI_ENABLED
 	if (!m_imguiReady) return;

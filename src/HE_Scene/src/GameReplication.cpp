@@ -22,10 +22,14 @@ namespace
 	constexpr MessageId kMsgSnapshot  = kFirstUserMessage + 200;
 	constexpr MessageId kMsgInput     = kFirstUserMessage + 201;   // client → server
 	constexpr MessageId kMsgIntegrity = kFirstUserMessage + 202;   // client → server, once
+	constexpr MessageId kMsgAntiCheatNotice = kFirstUserMessage + 203;   // server → client, before a kick
 
 	// A manifest is the exe, a handful of libraries and a few paks. Anything
 	// beyond this did not come from our writer.
 	constexpr std::uint16_t kMaxManifestEntries = 256;
+	// A rule name is a word ("Damage"), not a paragraph; the writer never
+	// produces more, and a client must not be made to allocate for one.
+	constexpr std::size_t kMaxNoticeRuleLength = 64;
 
 	// Speed bounds for the anti-cheat displacement check. The engine does not
 	// know the game's mover, so it takes the bound from what the entity carries:
@@ -54,6 +58,9 @@ GameReplication::GameReplication(NetSession* net, NetRole role, Config cfg)
 	{
 		m_net->on(kMsgSnapshot, [this](ConnectionId, BitReader& r) {
 			applySnapshot(r);
+		});
+		m_net->on(kMsgAntiCheatNotice, [this](ConnectionId conn, BitReader& r) {
+			handleAntiCheatNotice(conn, r);
 		});
 	}
 	else
@@ -440,6 +447,68 @@ void GameReplication::checkGuestManifest(ConnectionId conn, const GuestManifest&
 	if (diffs.empty())
 		HE_LOG_DEBUG(AntiCheat, "conn %u: integrity manifest matches (%zu entries)", conn,
 		             m_manifest.entries.size());
+}
+
+// ─── Anti-cheat notice and kick bookkeeping (plan §5.5) ──────────────────────
+
+void GameReplication::sendAntiCheatNotice(ConnectionId conn, const AntiCheatNotice& notice)
+{
+	if (!m_net) return;
+	if (m_role != NetRole::Server && m_role != NetRole::Host) return;
+
+	BitWriter w;
+	w.writeByte(static_cast<std::uint8_t>(std::clamp(notice.level, 0, 255)));
+	w.writeUInt32(static_cast<std::uint32_t>(notice.reasonCode));
+	// The rule NAME and nothing else: no observation list, no score, no
+	// threshold. What a prober could learn from this message is which rule it
+	// tripped, and that much a kicked player is owed.
+	w.writeString(notice.rule.size() > kMaxNoticeRuleLength
+	                  ? notice.rule.substr(0, kMaxNoticeRuleLength)
+	                  : notice.rule);
+	// Reliable: a notice that a lost datagram swallowed would leave the client
+	// with the stump disconnect this message exists to explain.
+	m_net->send(conn, kMsgAntiCheatNotice, w, SendMode::ReliableOrdered);
+	++m_stats.noticesSent;
+}
+
+void GameReplication::handleAntiCheatNotice(ConnectionId, BitReader& r)
+{
+	AntiCheatNotice n;
+	std::uint8_t  level  = 0;
+	std::uint32_t reason = 0;
+	if (!r.readByte(level) || !r.readUInt32(reason) || !r.readString(n.rule)) return;
+	if (n.rule.size() > kMaxNoticeRuleLength) n.rule.resize(kMaxNoticeRuleLength);
+	n.level      = level;
+	n.reasonCode = static_cast<int>(reason);
+	// Queued, not fired: the handler runs inside NetSession::pump, and firing a
+	// script event from inside the transport drain is the thing every other
+	// event here avoids (the frame loop takes these out with takeAntiCheatNotice).
+	m_notices.push_back(std::move(n));
+	++m_stats.noticesReceived;
+}
+
+bool GameReplication::takeAntiCheatNotice(AntiCheatNotice& out)
+{
+	if (m_notices.empty()) return false;
+	out = std::move(m_notices.front());
+	m_notices.pop_front();
+	return true;
+}
+
+void GameReplication::dropConnection(ConnectionId conn)
+{
+	m_lastProcessedInput.erase(conn);
+	m_controlledByConn.erase(conn);
+	m_viewpoints.erase(conn);
+	m_manifestReceived.erase(conn);
+	m_pendingGuestManifests.erase(conn);
+	if (m_antiCheat) m_antiCheat->forgetConnection(conn);
+}
+
+Entity GameReplication::entityOf(std::uint32_t netId) const
+{
+	const auto it = m_byNetId.find(netId);
+	return it == m_byNetId.end() ? entt::null : it->second;
 }
 
 float GameReplication::quantStep() const

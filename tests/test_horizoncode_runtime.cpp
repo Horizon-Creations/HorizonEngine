@@ -1393,6 +1393,10 @@ TEST_CASE("a class's event catalog is its whole chain, base first")
     CHECK(has(entity, "OnAnimationNotify"));
     CHECK(has(entity, "OnAnimationNotifyBegin"));
     CHECK(has(entity, "OnAnimationNotifyEnd"));
+    // The anti-cheat report that names this entity — addressed to a thing in
+    // the world, like the contacts, so it lands on Entity and not on Object.
+    CHECK(has(entity, "OnCheatDetected"));
+    CHECK_FALSE(has(object, "OnCheatDetected"));
     CHECK(has(player, "BeginPlay"));
     CHECK(has(player, "OnBeginOverlap"));
     // A plain Object has no world presence, so neither the game lifecycle nor

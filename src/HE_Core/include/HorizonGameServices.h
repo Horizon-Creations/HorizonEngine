@@ -39,11 +39,13 @@
 #define HE_PHYSICS_ABI_VERSION  1u
 #define HE_INPUT_ABI_VERSION    1u
 #define HE_CONTENT_ABI_VERSION  1u
+#define HE_ANTICHEAT_ABI_VERSION 1u
 // The umbrella that carries the tables. Bumped when a table POINTER is appended
 // to HeEngineServices, not when a table itself grows.
 //   1 — save, physics, input
 //   2 — + content
-#define HE_SERVICES_ABI_VERSION 2u
+//   3 — + anticheat
+#define HE_SERVICES_ABI_VERSION 3u
 
 // Export decoration for the receiving symbol — same rule as <IGameLogic.h>,
 // defined here too so this header stands alone (e.g. in tests).
@@ -228,6 +230,39 @@ typedef struct HeContentServices
     int  (*assetTypeName)(void* host, HeAssetId id, char* buf, int cap);
 } HeContentServices;
 
+// The host's anti-cheat, game side (docs/anti-cheat-plan.md §4.3): declare a
+// legitimate teleport, report what the engine cannot see, answer a report the
+// engine made (IGameLogic::onCheatDetected hands over its ticket), and read the
+// ticket's fields. Players and entities are the ids the engine uses on the
+// wire — a ConnectionId, a network id — never pointers.
+//
+// `check` is the one row whose "no engine injected" answer is TRUE: a check
+// the engine cannot make must not block the game (the wrapper below says so
+// too). Everything else defaults to nothing, like the other tables.
+typedef struct HeAntiCheatServices
+{
+    uint32_t abiVersion;   // HE_ANTICHEAT_ABI_VERSION
+    void*    host;         // opaque engine context — pass to every call
+
+    int   (*check)(void* host, const char* rule, float value, uint32_t player);
+    void  (*expectDisplacement)(void* host, uint32_t entity, float maxDistance);
+    void  (*report)(void* host, uint32_t player, const char* rule, float weight, const char* detail);
+    void  (*setPlayerLabel)(void* host, uint32_t player, const char* label);
+    // Replace the pending report's responses (bits: 1 log, 2 event, 4 telemetry,
+    // 8 flag, 16 kick, 32 ban). Only inside onCheatDetected's frame.
+    void  (*respond)(void* host, int reportId, int response);
+    void  (*kick)(void* host, uint32_t player, int reasonCode);
+    int   (*reportLevel)(void* host, int reportId);     // 0 Info … 3 Hard; 0 unknown
+    int   (*reportRule)(void* host, int reportId, char* buf, int cap);     // two-call string
+    uint32_t (*reportPlayer)(void* host, int reportId);
+    uint32_t (*reportEntity)(void* host, int reportId);
+    float (*reportScore)(void* host, int reportId);
+    int   (*reportDetail)(void* host, int reportId, char* buf, int cap);   // two-call string
+    int   (*reportReason)(void* host, int reportId);
+    float (*playerScore)(void* host, uint32_t player);
+    bool  (*isEnabled)(void* host);
+} HeAntiCheatServices;
+
 // ── The umbrella ─────────────────────────────────────────────────────────────
 // Sibling tables rather than one growing table, and one export that hands them
 // over together. A new service appends a POINTER here and bumps
@@ -240,6 +275,7 @@ typedef struct HeEngineServices
     const HePhysicsServices* physics;
     const HeInputServices*   input;
     const HeContentServices* content;      // umbrella v2
+    const HeAntiCheatServices* anticheat;  // umbrella v3
 } HeEngineServices;
 
 typedef void (*FnSetEngineServicesV2)(const HeEngineServices*);
@@ -249,6 +285,7 @@ extern const HeSaveServices*    g_heSaveServices;
 extern const HePhysicsServices* g_hePhysicsServices;
 extern const HeInputServices*   g_heInputServices;
 extern const HeContentServices* g_heContentServices;
+extern const HeAntiCheatServices* g_heAntiCheatServices;
 
 } // extern "C"
 
@@ -274,12 +311,14 @@ extern const HeContentServices* g_heContentServices;
     const HePhysicsServices* g_hePhysicsServices = nullptr; \
     const HeInputServices*   g_heInputServices   = nullptr; \
     const HeContentServices* g_heContentServices = nullptr; \
+    const HeAntiCheatServices* g_heAntiCheatServices = nullptr; \
     HE_GAME_API void HE_SetEngineServices(const HeSaveServices* s) \
     { g_heSaveServices = (s && s->abiVersion >= HE_SAVE_ABI_VERSION) ? s : nullptr; } \
     HE_GAME_API void HE_SetEngineServicesV2(const HeEngineServices* s) \
     { \
         const bool v1 = s && s->abiVersion >= 1u; \
         const bool v2 = s && s->abiVersion >= 2u; \
+        const bool v3 = s && s->abiVersion >= 3u; \
         g_heSaveServices = (v1 && s->save && \
             s->save->abiVersion >= HE_SAVE_ABI_VERSION) ? s->save : nullptr; \
         g_hePhysicsServices = (v1 && s->physics && \
@@ -288,6 +327,8 @@ extern const HeContentServices* g_heContentServices;
             s->input->abiVersion >= HE_INPUT_ABI_VERSION) ? s->input : nullptr; \
         g_heContentServices = (v2 && s->content && \
             s->content->abiVersion >= HE_CONTENT_ABI_VERSION) ? s->content : nullptr; \
+        g_heAntiCheatServices = (v3 && s->anticheat && \
+            s->anticheat->abiVersion >= HE_ANTICHEAT_ABI_VERSION) ? s->anticheat : nullptr; \
     } \
     }
 
@@ -356,6 +397,7 @@ inline const HeSaveServices*    svc()        { return g_heSaveServices; }
 inline const HePhysicsServices* physSvc()    { return g_hePhysicsServices; }
 inline const HeInputServices*   inputSvc()   { return g_heInputServices; }
 inline const HeContentServices* contentSvc() { return g_heContentServices; }
+inline const HeAntiCheatServices* antiCheatSvc() { return g_heAntiCheatServices; }
 inline ::HeAssetId toC(const AssetId& id)   { return ::HeAssetId{ id.hi, id.lo }; }
 inline AssetId     fromC(const ::HeAssetId& id) { return AssetId{ id.hi, id.lo }; }
 inline RaycastHit fromC(const HeRaycastHit& h)
@@ -667,6 +709,68 @@ inline std::string typeName(const AssetId& id)
     { return s->assetTypeName(h, cid, b, c); });
 }
 } // namespace content
+
+// ── Anti-cheat ───────────────────────────────────────────────────────────────
+// The host's anti-cheat from native game code (docs/anti-cheat-plan.md §4.3).
+// A report arrives as IGameLogic::onCheatDetected(reportId); the readers here
+// open it. Levels: 0 Info, 1 Suspect, 2 Confirmed, 3 Hard.
+//
+// The ONE inverted default in this header: `check` answers TRUE when nothing
+// was injected. A check the engine cannot make must never block the game — a
+// client, a session with anti-cheat off, a module under an older engine all
+// still have to apply the damage they were asked about.
+namespace anticheat {
+enum class Level : int { Info = 0, Suspect = 1, Confirmed = 2, Hard = 3 };
+enum Response : int
+{ Log = 1, Event = 2, Telemetry = 4, Flag = 8, Kick = 16, Ban = 32 };
+
+inline bool available() { return detail::antiCheatSvc() != nullptr; }
+
+inline bool check(const std::string& rule, float value, uint32_t player)
+{ auto* s = detail::antiCheatSvc(); return s ? s->check(s->host, rule.c_str(), value, player) != 0 : true; }
+inline void expectDisplacement(uint32_t entity, float maxDistance)
+{ if (auto* s = detail::antiCheatSvc()) s->expectDisplacement(s->host, entity, maxDistance); }
+inline void report(uint32_t player, const std::string& rule, float weight,
+                   const std::string& detailText = std::string())
+{ if (auto* s = detail::antiCheatSvc()) s->report(s->host, player, rule.c_str(), weight, detailText.c_str()); }
+inline void setPlayerLabel(uint32_t player, const std::string& label)
+{ if (auto* s = detail::antiCheatSvc()) s->setPlayerLabel(s->host, player, label.c_str()); }
+// Replace what the host would do for this report — the whole set, Log always
+// included, so respond(id, 0) is "log only". Inside onCheatDetected's frame.
+inline void respond(int reportId, int responses)
+{ if (auto* s = detail::antiCheatSvc()) s->respond(s->host, reportId, responses); }
+inline void kick(uint32_t player, int reasonCode)
+{ if (auto* s = detail::antiCheatSvc()) s->kick(s->host, player, reasonCode); }
+
+inline Level reportLevel(int reportId)
+{ auto* s = detail::antiCheatSvc(); return s ? (Level)s->reportLevel(s->host, reportId) : Level::Info; }
+inline std::string reportRule(int reportId)
+{
+    auto* s = detail::antiCheatSvc();
+    if (!s) return {};
+    return detail::fetchString(s->host, [&](void* h, char* b, int c)
+    { return s->reportRule(h, reportId, b, c); });
+}
+inline uint32_t reportPlayer(int reportId)
+{ auto* s = detail::antiCheatSvc(); return s ? s->reportPlayer(s->host, reportId) : 0u; }
+inline uint32_t reportEntity(int reportId)
+{ auto* s = detail::antiCheatSvc(); return s ? s->reportEntity(s->host, reportId) : 0u; }
+inline float reportScore(int reportId)
+{ auto* s = detail::antiCheatSvc(); return s ? s->reportScore(s->host, reportId) : 0.0f; }
+inline std::string reportDetail(int reportId)
+{
+    auto* s = detail::antiCheatSvc();
+    if (!s) return {};
+    return detail::fetchString(s->host, [&](void* h, char* b, int c)
+    { return s->reportDetail(h, reportId, b, c); });
+}
+inline int reportReason(int reportId)
+{ auto* s = detail::antiCheatSvc(); return s ? s->reportReason(s->host, reportId) : 0; }
+inline float playerScore(uint32_t player)
+{ auto* s = detail::antiCheatSvc(); return s ? s->playerScore(s->host, player) : 0.0f; }
+inline bool isEnabled()
+{ auto* s = detail::antiCheatSvc(); return s && s->isEnabled(s->host); }
+} // namespace anticheat
 
 #if defined(__GNUC__) || defined(__clang__)
 #  pragma GCC visibility pop

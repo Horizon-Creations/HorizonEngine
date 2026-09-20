@@ -1,6 +1,7 @@
 add_library(HorizonScene SHARED
 	src/GameReplication.cpp
 	src/AntiCheat/AntiCheatService.cpp
+	src/AntiCheat/AntiCheatHost.cpp
     src/HorizonWorld.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp

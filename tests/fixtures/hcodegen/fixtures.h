@@ -2650,6 +2650,50 @@ inline HE::hccg::ClassSource fxContainers()
     return f.done("containers");
 }
 
+// The anti-cheat event (docs/anti-cheat-plan.md §5.4): an Int argument on an
+// event with NO element — the shape the codegen derives the hook from — feeding
+// the ticket into the anticheat.* readers. Against a null Ctx every reader
+// answers its neutral default on both backends, and `check` answers TRUE, the
+// one inverted default; that the generated `HE::api::anticheat::…` calls
+// compile and link at all is what this fixture proves.
+inline HE::hccg::ClassSource fxCheatEvent()
+{
+    Fx f;
+    f.var("ticket", PT::Int);
+    f.var("level", PT::Int);
+    f.var("rule", PT::String);
+    f.var("ok", PT::Bool);
+
+    const int ev = f.event("OnCheatDetected", 0, true, PT::Int);
+    const int sT = f.setVar("ticket", PT::Int);
+    f.data(ev, 0, sT, 0);
+    f.exec(ev, sT);
+
+    const int lvl = f.engineCall("anticheat.reportLevel");
+    f.data(ev, 0, lvl, 0);
+    const int sL = f.setVar("level", PT::Int);
+    f.data(lvl, 0, sL, 0);
+    f.exec(sT, sL);
+
+    const int rule = f.engineCall("anticheat.reportRule");
+    f.data(ev, 0, rule, 0);
+    const int sR = f.setVar("rule", PT::String);
+    f.data(rule, 0, sR, 0);
+    f.exec(sL, sR);
+
+    // An exec row with a result: check(rule, value, player) → ok.
+    const int chk = f.engineCall("anticheat.check");
+    { Node* n = f.g.findNode(chk);
+      n->pinDefaults[0] = Value::ofString("Damage");
+      n->pinDefaults[1] = Value::ofFloat(50.0f);
+      n->pinDefaults[2] = Value::ofInt(1); }
+    f.exec(sR, chk);
+    const int sO = f.setVar("ok", PT::Bool);
+    f.data(chk, 0, sO, 0);
+    f.exec(chk, sO);
+    return f.done("cheat_event");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -2664,7 +2708,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxCastTarget(), fxCasts(),
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
-        fxInputActions(), fxContainers(), fxReroutes(),
+        fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
     };
 }
 

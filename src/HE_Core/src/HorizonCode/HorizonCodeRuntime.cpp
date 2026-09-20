@@ -941,6 +941,17 @@ void Runtime::fireOnWindowFocusChanged(InstanceId id, bool focused)
     dispatchToListeners(id, ev, "OnWindowFocusChanged", Value::ofBool(focused));
 }
 
+void Runtime::fireOnCheatDetected(InstanceId id, int reportId)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    const Value arg = Value::ofInt(reportId);
+    if (i->compiled) i->compiled->onCheatDetected(reportId);
+    else runEventOnLevel(*i, id, "OnCheatDetected", 0, arg);
+    static const EventId ev = eventId("OnCheatDetected");
+    dispatchToListeners(id, ev, "OnCheatDetected", arg);
+}
+
 void Runtime::fireEvent(InstanceId id, const std::string& event, int elem, const Value& arg)
 {
     Inst* i = find(id);

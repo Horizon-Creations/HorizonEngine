@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected + horizon.anticheat.*
 #include <Types/TypeRegistry.h>
 #include <cstdint>
 #include <HorizonScene/HorizonWorld.h>
@@ -896,6 +897,81 @@ TEST_CASE("ScriptContext: the application groups reach Lua")
     CHECK(engine.getGlobalNumber("_found") == doctest::Approx(12.0));
     // …and one of them actually dispatches, not just exists.
     CHECK(engine.getGlobalNumber("_json") == doctest::Approx(42.0));
+}
+
+// ─── Anti-cheat: the event and the group reach Lua ───────────────────────────
+// The plan's own Lua example (docs/anti-cheat-plan.md §4.3), nearly verbatim:
+// onCheatDetected gets a ticket, the readers open it, respond overrules the
+// policy from inside the handler. The host has a service and no wire, so a
+// game-made observation is the report.
+static const char* kLuaCheatHandler = R"lua(
+local M = {}
+function M.onStart(self)
+    self.seen = 0
+end
+function M.onCheatDetected(self, reportId)
+    self.seen = reportId
+    _G._level  = horizon.anticheat.reportLevel(reportId)
+    _G._rule   = horizon.anticheat.reportRule(reportId)
+    _G._player = horizon.anticheat.reportPlayer(reportId)
+    _G._detail = horizon.anticheat.reportDetail(reportId)
+    if _G._level >= 2 then
+        horizon.anticheat.respond(reportId, 8)   -- Flag instead of the policy
+    end
+end
+return M
+)lua";
+
+TEST_CASE("ScriptContext: OnCheatDetected reaches a Lua instance with a readable ticket")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    HE::AntiCheat::AntiCheatService svc;
+    HE::AntiCheat::AntiCheatHost    host;
+    host.attach(&svc, nullptr);
+    {
+        ScriptContext::HostServices hs;
+        hs.antiCheat = &host;
+        ctx.setHostServices(std::move(hs));
+    }
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec("_G._enabled = horizon.anticheat.isEnabled() and 1 or 0\n"
+                        "_G._ok = horizon.anticheat.check('Damage', 50, 3) and 1 or 0"));
+    CHECK(engine.getGlobalNumber("_enabled") == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_ok") == doctest::Approx(1.0));
+
+    REQUIRE(ctx.loadScript("cheat", kLuaCheatHandler));
+    auto e  = world.createEntity("Ears");
+    auto id = ctx.createInstance("cheat", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    // A game observation heavy enough for Confirmed, from Lua itself.
+    REQUIRE(engine.exec("horizon.anticheat.setPlayerLabel(3, 'Mallory')\n"
+                        "horizon.anticheat.report(3, 'Sight', 25, 'through a wall')"));
+    int fired = 0;
+    host.setEventSink([&](int reportId, const HE::AntiCheat::Report&) {
+        fired = reportId;
+        CHECK(ctx.callOnCheatDetected(id, reportId));
+    });
+    REQUIRE(host.pump() == 1);
+    REQUIRE(fired != 0);
+    CHECK(engine.getGlobalNumber("_level") == doctest::Approx(2.0));
+    CHECK(engine.getGlobalNumber("_player") == doctest::Approx(3.0));
+    CHECK(engine.getGlobalString("_rule") == "Sight");
+    CHECK(engine.getGlobalString("_detail").find("through a wall") != std::string::npos);
+    // The handler's respond replaced the policy: flagged, nobody kicked.
+    host.flush();
+    CHECK(host.isFlagged(3));
+    CHECK(host.stats().kicked == 0);
+
+    // A script without the handler is a no-op success, like every other
+    // optional callback — this is what lets the pump fire at EVERY instance.
+    REQUIRE(ctx.loadScript("deaf", kNameReader));
+    auto d = ctx.createInstance("deaf", world.createEntity("Deaf"));
+    CHECK(ctx.callOnCheatDetected(d, fired));
+
+    ctx.setHostServices({});
 }
 
 // ─── Every failing instance is reported, not just the first one per callback ──

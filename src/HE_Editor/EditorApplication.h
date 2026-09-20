@@ -28,6 +28,7 @@
 #include <HorizonScene/AnimatorHost.h>
 #include <HorizonScene/HcCodegen.h>
 #include <HorizonScene/EngineApi.h>   // GameServicesBinding + the fill* functions
+#include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected in the preview (no kick)
 #include <HorizonGameServices.h>      // the C-ABI tables a GameLogic module receives
 #include <SourceControl/GitProbe.h>
 #ifdef HE_HAVE_LIBSSH2
@@ -591,7 +592,15 @@ private:
 	HePhysicsServices            m_physicsServices{};
 	HeInputServices              m_inputServices{};
 	HeContentServices            m_contentServices{};
+	HeAntiCheatServices          m_antiCheatServices{};
 	HeEngineServices             m_engineServices{};
+	// The anti-cheat's event/response side for the preview (docs/anti-cheat-
+	// plan.md §6.2.6): in PREVIEW mode from construction, so a report fires
+	// OnCheatDetected and goes to the log, but nobody is kicked from a session
+	// that is the author's own window and nothing leaves the machine. The
+	// `anticheat` rows of every frontend go through it; without a session
+	// attached (the preview has none yet) the readers answer their defaults.
+	HE::AntiCheat::AntiCheatHost m_antiCheat;
 	// Fill the block above from the editor's own world/physics/content. Called
 	// before every injection — never once at startup: the binding's resolvers
 	// are what make a scene switch transparent, and the umbrella has to point at

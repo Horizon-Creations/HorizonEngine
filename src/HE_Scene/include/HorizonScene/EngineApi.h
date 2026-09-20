@@ -14,11 +14,13 @@ class PhysicsWorld;
 class ContentManager;
 class AudioEngine;
 class EntityHost;
+namespace HE::AntiCheat { class AntiCheatHost; }
 struct DebugLine;      // HE_Core DebugDraw.h (renderer debug-line vertex pair)
 struct HeSaveServices;    // HorizonGameServices.h (global scope, C ABI)
 struct HePhysicsServices; //   "
 struct HeInputServices;   //   "
 struct HeContentServices; //   "
+struct HeAntiCheatServices; // "
 
 // ── HE::api ──────────────────────────────────────────────────────────────────
 // The single, engine-wide C++ gameplay API. Every scripting frontend reaches the
@@ -185,6 +187,13 @@ struct Ctx
     std::function<void(uint32_t id)>                                closeWindow;
     std::function<void(uint32_t id, const std::string& title)>      setWindowTitleOf;
     std::function<void(uint32_t id, uint32_t w, uint32_t h)>        setWindowSizeOf;
+    // The anti-cheat's event/response side (docs/anti-cheat-plan.md §5): the
+    // `anticheat` rows read and write through it. Null is anti-cheat OFF —
+    // every reader answers its neutral default, `check` says "passes" (the one
+    // row whose neutral answer is true: an engine that cannot check must not
+    // block the game), every other exec row is a no-op. Bound per session by
+    // the two applications and by ScriptContext::HostServices for Lua/Python.
+    HE::AntiCheat::AntiCheatHost* antiCheat = nullptr;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -1598,6 +1607,44 @@ namespace http {
     void shutdown();
 }
 
+// ── Anti-cheat (docs/anti-cheat-plan.md §4.3, §5) ────────────────────────────
+// The game's side of the host's anti-cheat: declare what a move is allowed to
+// be, report what the engine cannot see, and answer the report the engine made.
+// A report arrives as OnCheatDetected with a TICKET — one Int, because an event
+// carries one value and a report is a dozen — and the report* readers say the
+// rest, exactly the shape http.* has.
+//
+// Host-side by nature. On a client, and in a session with anti-cheat off, every
+// exec row is a no-op and every reader answers its neutral default; the one
+// exception is `check`, which answers TRUE without a service: an engine that
+// cannot make a check must never block the game (plan §4.3).
+//
+// The kick is a FRAME-END action. `respond` inside the OnCheatDetected handler
+// replaces what the policy would do for that report — the whole set, Log
+// always included, so respond(id, 0) is "log only" — and the host executes the
+// result when the frame ends, never where the event fired (plan §5.3).
+namespace anticheat {
+    // Response bits for `respond`, the same numbers the project's policy uses:
+    // 1 log, 2 event, 4 telemetry, 8 flag, 16 kick, 32 ban.
+    bool        check(Ctx&, const std::string& rule, float value, int player);
+    void        expectDisplacement(Ctx&, int entity, float maxDistance);
+    void        report(Ctx&, int player, const std::string& rule, float weight,
+                       const std::string& detail);
+    void        setPlayerLabel(Ctx&, int player, const std::string& label);
+    void        respond(Ctx&, int reportId, int response);
+    void        kick(Ctx&, int player, int reasonCode);
+    // Readers. Level: 0 Info, 1 Suspect, 2 Confirmed, 3 Hard.
+    int         reportLevel(Ctx&, int reportId);
+    std::string reportRule(Ctx&, int reportId);
+    int         reportPlayer(Ctx&, int reportId);   // 0 on a client's own notice: "you"
+    int         reportEntity(Ctx&, int reportId);   // network id, 0 = none
+    float       reportScore(Ctx&, int reportId);
+    std::string reportDetail(Ctx&, int reportId);
+    int         reportReason(Ctx&, int reportId);   // the notice's reason code (kick's)
+    float       playerScore(Ctx&, int player);
+    bool        isEnabled(Ctx&);
+}
+
 // ── JSON ─────────────────────────────────────────────────────────────────────
 // Reading and writing JSON text, addressed by a dotted PATH: "user.name",
 // "items[2].id", "" for the document itself. Text in, text out, because that is
@@ -1902,6 +1949,11 @@ struct GameServicesBinding
     std::function<HorizonWorld*()> world;     // may return null (calls then no-op loud)
     std::function<PhysicsWorld*()> physics;   // may return null (physics rows then neutral)
     ContentManager*                content = nullptr;
+    // A resolver like `world`: the anti-cheat host belongs to a SESSION, and a
+    // module that kept a raw pointer would hold one past the session's end.
+    // Null (unbound, or resolving to null) = anti-cheat OFF for the module —
+    // readers neutral, check passes, the rest no-ops.
+    std::function<HE::AntiCheat::AntiCheatHost*()> antiCheat;
 };
 void fillSaveServices(::HeSaveServices& out, GameServicesBinding* binding);
 void fillPhysicsServices(::HePhysicsServices& out, GameServicesBinding* binding);
@@ -1913,6 +1965,8 @@ void fillInputServices(::HeInputServices& out, GameServicesBinding* binding);
 // Content reaches the ContentManager through `binding->content` — the raw
 // pointer, for the reason the struct's comment gives.
 void fillContentServices(::HeContentServices& out, GameServicesBinding* binding);
+// Anti-cheat resolves per call through `binding->antiCheat`, like the world.
+void fillAntiCheatServices(::HeAntiCheatServices& out, GameServicesBinding* binding);
 
 // ── Scene transitions (process-global request queue; the app executes) ────────
 // load() requests a full deferred world switch at a safe frame boundary;

@@ -12,6 +12,7 @@
 #include <Types/TypeRegistry.h>
 #include <HorizonScene/ScriptContext.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/AntiCheat/AntiCheatHost.h>   // on_cheat_detected + horizon.anticheat.*
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/AudioEngine.h>   // a host service the plugin can only read across the module boundary
@@ -1092,6 +1093,71 @@ TEST_CASE("ScriptContext: input actions and timers reach a Python instance")
     CHECK(ctx.callOnInputPressed(d, "Jump"));
     CHECK(ctx.callOnInputAxis2D(d, "Look", 1.0f, 1.0f));
     CHECK(ctx.callOnTimer(d, 1));
+    CHECK(ctx.callOnCheatDetected(d, 1));
+}
+
+// ─── Anti-cheat: the event and the group reach Python ───────────────────────
+// The plan's own Python example (docs/anti-cheat-plan.md §4.3): on_cheat_detected
+// gets a ticket, the readers open it, respond overrules the policy from inside
+// the handler. The host has a service and no wire, so a game-made observation
+// is the report. The handler writes what it read into the transform, which is
+// the one channel this test has back out of the interpreter.
+static const char* kPyCheatHandler = R"py(
+import horizon
+
+class Warden(horizon.Behavior):
+    def on_start(self):
+        self.flagged = set()
+    def on_cheat_detected(self, report_id):
+        level = horizon.anticheat.reportLevel(report_id)
+        player = horizon.anticheat.reportPlayer(report_id)
+        rule = horizon.anticheat.reportRule(report_id)
+        if level >= 2:
+            self.flagged.add(player)
+            horizon.anticheat.respond(report_id, 8)   # Flag instead of the policy
+        # x = level, y = player, z = length of the rule name
+        horizon.setPosition(self.entity_id, float(level), float(player), float(len(rule)))
+)py";
+
+TEST_CASE("ScriptContext: OnCheatDetected reaches a Python instance with a readable ticket")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    HE::AntiCheat::AntiCheatService svc;
+    HE::AntiCheat::AntiCheatHost    host;
+    host.attach(&svc, nullptr);
+    {
+        ScriptContext::HostServices hs;
+        hs.antiCheat = &host;
+        ctx.setHostServices(std::move(hs));
+    }
+    REQUIRE(ctx.loadScript("warden", kPyCheatHandler, HE::ScriptLanguage::Python));
+    auto e  = makeEntity(world, "Warden");
+    auto id = ctx.createInstance("warden", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    // The observation from the engine side; the readers go through the same
+    // host the Python module resolved from the published services.
+    svc.setPlayerLabel(5, "Mallory");
+    svc.report(5, "Sight", 25.0f, "through a wall");
+    int fired = 0;
+    host.setEventSink([&](int reportId, const HE::AntiCheat::Report&) {
+        fired = reportId;
+        CHECK(ctx.callOnCheatDetected(id, reportId));
+    });
+    REQUIRE(host.pump() == 1);
+    REQUIRE(fired != 0);
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(2.0f));   // Confirmed
+    CHECK(t.position.y == doctest::Approx(5.0f));   // the player
+    CHECK(t.position.z == doctest::Approx(5.0f));   // "Sight"
+    host.flush();
+    CHECK(host.isFlagged(5));
+    CHECK(host.stats().kicked == 0);
+
+    ctx.setHostServices({});
 }
 
 #endif // HE_HAVE_PYTHON

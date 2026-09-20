@@ -25,6 +25,7 @@
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/TimerSystem.h>
+#include <HorizonScene/AntiCheat/AntiCheatEvents.h>   // OnCheatDetected through every frontend
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <Integrity/IntegrityProbe.h> // exe/dylib/pak hashes for the join check (anti-cheat plan §3.5)
@@ -135,6 +136,10 @@ struct HostCtxParts
 	std::function<void(uint32_t)>                                   closeWindow;
 	std::function<void(uint32_t, const std::string&)>               setWindowTitleOf;
 	std::function<void(uint32_t, uint32_t, uint32_t)>               setWindowSizeOf;
+	// The anti-cheat host, bound here for the reason every row above is: a
+	// graph's Respond To Report and a Lua onCheatDetected must reach the same
+	// pending report, not two.
+	HE::AntiCheat::AntiCheatHost* antiCheat = nullptr;
 };
 // One application per process; cleared in OnShutdown so nothing here outlives
 // the object its lambdas capture.
@@ -339,6 +344,7 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.closeWindow        = g_host.closeWindow;
 	c.setWindowTitleOf   = g_host.setWindowTitleOf;
 	c.setWindowSizeOf    = g_host.setWindowSizeOf;
+	c.antiCheat          = g_host.antiCheat;
 	// Not through g_host: notifications need nothing from the application object,
 	// so they are the platform function itself and there is no state to capture.
 	c.notify          = [](const std::string& t, const std::string& b) { return notifyShow(t, b); };
@@ -908,6 +914,17 @@ void GameApplication::OnInit()
 		g_host.audio    = &m_audioEngine;
 		g_host.runtime  = &m_gameInstance.runtime();
 		g_host.entities = &m_entityHost;
+		g_host.antiCheat = &m_antiCheat;
+		// How a report reaches the scripts: the Game Instance, the level script,
+		// the entity's class, the Lua/Python instances, the native module — one
+		// dispatcher shared with the editor's play mode (AntiCheatEvents), so a
+		// handler that works in the preview works in the shipped build.
+		m_antiCheat.setEventSink([this](int reportId, const HE::AntiCheat::Report& r) {
+			AntiCheatEvents::dispatch(reportId, r, &m_gameInstance.runtime(), m_world.get(),
+			                          &m_entityHost, m_antiCheat.replication(),
+			                          m_scriptContext.get(), &m_scriptInstances,
+			                          logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+		});
 		// The shipped game IS the application, so app.quit leaves the loop for
 		// real (the editor binds the same hook to stopping play mode instead).
 		g_host.quit     = [this]{ Quit(); };
@@ -1288,16 +1305,19 @@ void GameApplication::OnInit()
 		m_gameServicesBinding.world   = [this]() { return m_world.get(); };
 		m_gameServicesBinding.physics = [this]() { return m_physicsWorld.get(); };
 		m_gameServicesBinding.content = &contentManager();
+		m_gameServicesBinding.antiCheat = [this]() { return &m_antiCheat; };
 		HE::api::fillSaveServices(m_saveServices, &m_gameServicesBinding);
 		HE::api::fillPhysicsServices(m_physicsServices, &m_gameServicesBinding);
 		HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
 		HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
+		HE::api::fillAntiCheatServices(m_antiCheatServices, &m_gameServicesBinding);
 		m_engineServices = {};
 		m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
 		m_engineServices.save       = &m_saveServices;
 		m_engineServices.physics    = &m_physicsServices;
 		m_engineServices.input      = &m_inputServices;
 		m_engineServices.content    = &m_contentServices;
+		m_engineServices.anticheat  = &m_antiCheatServices;
 		logicLoader().injectServices(&m_engineServices);
 		logicLoader().logic()->onStart(*m_world);
 		HE_LOG_INFO(Core, "%s", "GameApplication: native game logic started");
@@ -1668,6 +1688,7 @@ void GameApplication::startScripts()
 		hs.runtime       = &m_gameInstance.runtime();
 		hs.createObject  = g_host.createObject;   // the same lambdas HorizonCode uses
 		hs.destroyObject = g_host.destroyObject;
+		hs.antiCheat     = &m_antiCheat;
 		m_scriptContext->setHostServices(std::move(hs));
 	}
 
@@ -2507,6 +2528,14 @@ void GameApplication::OnRender(float deltaTime)
 		}
 	}
 
+	// Anti-cheat reports (docs/anti-cheat-plan.md §5.6): the events fire HERE,
+	// at the frame's start beside the timers, so a handler's Respond To Report
+	// lands before the frame ends — the responses run at the very end of this
+	// function (m_antiCheat.flush), never here. Inert until a session attaches a
+	// service and a replication; then a report is what wakes the frame that
+	// draws the reaction.
+	if (m_antiCheat.pump() > 0) requestRedraw();
+
 #ifdef __APPLE__
 	// ── The same menu bar, in the system bar (plan A6) ───────────────────────
 	// Whether there IS one is asked here and not at startup: it is SDL's answer,
@@ -2912,6 +2941,13 @@ void GameApplication::OnRender(float deltaTime)
 			}
 		}
 	}
+
+	// ── Frame end: the anti-cheat's responses ────────────────────────────────
+	// LAST in the frame, after every script had its turn: a kick decided at the
+	// frame's start is executed here, so a handler had the whole frame to
+	// overrule it (plan §5.3). Nothing above returns early, which is what makes
+	// "the end of the frame" one line rather than a promise.
+	m_antiCheat.flush();
 }
 
 void GameApplication::OnWindowClosing(HE::WindowHandle handle)
@@ -2994,6 +3030,10 @@ void GameApplication::OnShutdown()
 	// entity.spawnClass did not.
 	if (m_scriptContext) m_scriptContext->setHostServices({});
 	g_host = {};
+	// The sink captured `this` and names the script context; drop both before
+	// either is gone. detach() also ends any session still attached.
+	m_antiCheat.setEventSink({});
+	m_antiCheat.detach();
 	m_scriptContext.reset();
 	m_scriptInstances.clear();
 

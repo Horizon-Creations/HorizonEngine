@@ -157,7 +157,7 @@ namespace HE::AntiCheat
 			st.inputs.push_back({ m_wall, false });
 			++m_stats.rejectedInputs;
 			addObservation(conn, st,
-			               Observation{ Kind::Malformed, 0.0f,
+			               Observation{ Kind::Malformed, 0.0f, kindName(Kind::Malformed),
 			                            format("non-finite value in input #%u", cmd.sequence),
 			                            m_wall },
 			               0);
@@ -248,14 +248,17 @@ namespace HE::AntiCheat
 		if (worst <= 0.0f) return true;
 
 		++m_stats.rolledBack;
-		addObservation(conn, st, Observation{ Kind::Displacement, worst, detail, m_wall }, c.netId);
+		addObservation(conn, st,
+		               Observation{ Kind::Displacement, worst, kindName(Kind::Displacement),
+		                            detail, m_wall },
+		               c.netId);
 		return false;
 	}
 
 	void AntiCheatService::observe(ConnectionId conn, Kind kind, float weight, std::string detail)
 	{
 		ConnState& st = stateFor(conn);
-		addObservation(conn, st, Observation{ kind, weight, std::move(detail), m_wall }, 0);
+		addObservation(conn, st, Observation{ kind, weight, kindName(kind), std::move(detail), m_wall }, 0);
 	}
 
 	void AntiCheatService::integrityMismatch(ConnectionId conn, std::string detail)
@@ -263,7 +266,8 @@ namespace HE::AntiCheat
 		ConnState& st = stateFor(conn);
 		addObservation(conn, st,
 		               Observation{ Kind::IntegrityMismatch, m_cfg.integrityWeight,
-		                            std::move(detail), m_wall }, 0);
+		                            kindName(Kind::IntegrityMismatch), std::move(detail), m_wall },
+		               0);
 	}
 
 	bool AntiCheatService::treatAsHard(Kind kind) const
@@ -333,7 +337,7 @@ namespace HE::AntiCheat
 				// 10 % over the tolerance = 1 point, 100 % over = 10.
 				const auto weight = static_cast<float>(excess * 10.0);
 				addObservation(conn, st,
-				               Observation{ Kind::DtBudget, weight,
+				               Observation{ Kind::DtBudget, weight, kindName(Kind::DtBudget),
 				                            format("accepted %.2f s of input in %.2f s wall (ratio %.2f)",
 				                                   st.windowAccepted, st.windowWall, ratio),
 				                            m_wall },
@@ -352,7 +356,7 @@ namespace HE::AntiCheat
 			{
 				const auto weight = static_cast<float>((rate / m_cfg.maxInputsPerSecond - 1.0) * 10.0);
 				addObservation(conn, st,
-				               Observation{ Kind::InputRate, weight,
+				               Observation{ Kind::InputRate, weight, kindName(Kind::InputRate),
 				                            format("%.0f inputs/s offered, limit %.0f",
 				                                   rate, m_cfg.maxInputsPerSecond),
 				                            m_wall },
@@ -421,6 +425,7 @@ namespace HE::AntiCheat
 		r.level   = level;
 		r.score   = static_cast<float>(st.score);
 		r.trigger = trigger.kind;
+		r.rule    = trigger.rule;
 		r.netId   = netId;
 		r.label   = st.label;
 		r.atWall  = m_wall;
@@ -482,7 +487,7 @@ namespace HE::AntiCheat
 			text += ": ";
 			text += detail;
 		}
-		addObservation(conn, st, Observation{ Kind::Custom, weight, std::move(text), m_wall }, 0);
+		addObservation(conn, st, Observation{ Kind::Custom, weight, rule, std::move(text), m_wall }, 0);
 	}
 
 	void AntiCheatService::setPlayerLabel(ConnectionId conn, std::string label)

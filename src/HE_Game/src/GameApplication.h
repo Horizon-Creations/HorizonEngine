@@ -17,6 +17,7 @@
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // GameServicesBinding (C++ GameLogic services)
+#include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected + frame-end responses
 #include <UIWidget/UIWindowFrame.h>   // the borderless window's own frame (F3)
 #include <HorizonGameServices.h>      // the injected C-ABI tables + their umbrella
 
@@ -176,7 +177,19 @@ private:
     HePhysicsServices            m_physicsServices{};
     HeInputServices              m_inputServices{};
     HeContentServices            m_contentServices{};
+    HeAntiCheatServices          m_antiCheatServices{};
     HeEngineServices             m_engineServices{};
+
+    // The anti-cheat's event/response side (docs/anti-cheat-plan.md §5): the
+    // `anticheat` rows of every frontend go through it, its pump() fires
+    // OnCheatDetected at the frame's start and its flush() executes the
+    // responses at the frame's END — the kick window (§5.3). It outlives every
+    // scene switch; a session attaches its service and replication to it
+    // (attach) and detaches at its end. Until a session does, it is anti-cheat
+    // OFF: readers neutral, check passes, nothing else happens. The packaged
+    // game has no gameplay session of its own yet (plan §6.2.1) — this is the
+    // door it goes through once one exists.
+    HE::AntiCheat::AntiCheatHost m_antiCheat;
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
     bool m_mouseCaptured = false;          // set true in OnInit once the window exists
     // Last frame's UI-navigation buttons (bits: up/down/left/right/activate).

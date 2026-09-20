@@ -100,6 +100,15 @@ public:
     // from the rest, exactly as a HorizonCode graph does with OnTimer.
     virtual bool callOnTimer(InstanceId id, int handle)
     { (void)id; (void)handle; return true; }
+    // The host's anti-cheat made a report, or — on a client — the host sent a
+    // notice about this player (docs/anti-cheat-plan.md §5.4). `reportId` is
+    // the ticket the horizon.anticheat.report* readers take. Every instance
+    // hears every report, like a timer; the readers say whom it concerns.
+    //
+    // Defaulted like callOnTimer, for the same reason: a backend from before
+    // this existed keeps compiling and simply never delivers one.
+    virtual bool callOnCheatDetected(InstanceId id, int reportId)
+    { (void)id; (void)reportId; return true; }
 
     // Declared properties of a loaded script (editor inspector surface) and
     // per-instance override injection (before callOnStart).

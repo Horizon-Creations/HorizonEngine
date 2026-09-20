@@ -35,6 +35,7 @@
 #include <ContentManager/Assets.h>
 #include <Types/TypeRegistry.h>   // save-template schemas + struct field values
 #include <HorizonGameServices.h>   // the C-ABI table fillSaveServices populates
+#include "HorizonScene/AntiCheat/AntiCheatHost.h"   // the anticheat group's service
 #include <DebugDraw/DebugDraw.h>
 #include <Platform/Process.h>      // the process group runs on HE::Proc
 #include <Net/HttpsClient.h>       // …and the http group on the platform TLS stack
@@ -2929,6 +2930,75 @@ void shutdown()
 }
 
 } // namespace http
+
+// ── Anti-cheat ───────────────────────────────────────────────────────────────
+// Thin over AntiCheatHost: the object holds the session, the policy and the
+// pending responses; these rows only translate the pin types. A null host is
+// anti-cheat OFF — the readers answer zero/empty and the exec rows do nothing —
+// except `check`, which answers true (see the header for why).
+namespace anticheat {
+namespace {
+HE::AntiCheat::AntiCheatHost* host(Ctx& c) { return c.antiCheat; }
+HE::Net::ConnectionId conn(int player)
+{ return player > 0 ? static_cast<HE::Net::ConnectionId>(player) : HE::Net::kInvalidConnection; }
+} // namespace
+
+bool check(Ctx& c, const std::string& rule, float value, int player)
+{
+    // TRUE without a host. Every other row's neutral answer is "nothing"; this
+    // one's is "passes", because a check the engine cannot make must never
+    // block the game (plan §4.3) — a client, or a session with anti-cheat off,
+    // still has to apply the damage.
+    HE::AntiCheat::AntiCheatHost* h = host(c);
+    return h ? h->check(rule, value, conn(player)) : true;
+}
+
+void expectDisplacement(Ctx& c, int entity, float maxDistance)
+{
+    if (HE::AntiCheat::AntiCheatHost* h = host(c))
+        h->expectDisplacement(entity > 0 ? static_cast<std::uint32_t>(entity) : 0u, maxDistance);
+}
+
+void report(Ctx& c, int player, const std::string& rule, float weight, const std::string& detail)
+{
+    if (HE::AntiCheat::AntiCheatHost* h = host(c)) h->report(conn(player), rule, weight, detail);
+}
+
+void setPlayerLabel(Ctx& c, int player, const std::string& label)
+{
+    if (HE::AntiCheat::AntiCheatHost* h = host(c)) h->setPlayerLabel(conn(player), label);
+}
+
+void respond(Ctx& c, int reportId, int response)
+{
+    if (HE::AntiCheat::AntiCheatHost* h = host(c))
+        h->respond(reportId, response < 0 ? 0u : static_cast<std::uint32_t>(response));
+}
+
+void kick(Ctx& c, int player, int reasonCode)
+{
+    if (HE::AntiCheat::AntiCheatHost* h = host(c)) h->kick(conn(player), reasonCode);
+}
+
+int reportLevel(Ctx& c, int reportId)
+{ HE::AntiCheat::AntiCheatHost* h = host(c); return h ? h->reportLevel(reportId) : 0; }
+std::string reportRule(Ctx& c, int reportId)
+{ HE::AntiCheat::AntiCheatHost* h = host(c); return h ? h->reportRule(reportId) : std::string(); }
+int reportPlayer(Ctx& c, int reportId)
+{ HE::AntiCheat::AntiCheatHost* h = host(c); return h ? h->reportPlayer(reportId) : 0; }
+int reportEntity(Ctx& c, int reportId)
+{ HE::AntiCheat::AntiCheatHost* h = host(c); return h ? h->reportEntity(reportId) : 0; }
+float reportScore(Ctx& c, int reportId)
+{ HE::AntiCheat::AntiCheatHost* h = host(c); return h ? h->reportScore(reportId) : 0.0f; }
+std::string reportDetail(Ctx& c, int reportId)
+{ HE::AntiCheat::AntiCheatHost* h = host(c); return h ? h->reportDetail(reportId) : std::string(); }
+int reportReason(Ctx& c, int reportId)
+{ HE::AntiCheat::AntiCheatHost* h = host(c); return h ? h->reportReason(reportId) : 0; }
+float playerScore(Ctx& c, int player)
+{ HE::AntiCheat::AntiCheatHost* h = host(c); return h ? h->playerScore(conn(player)) : 0.0f; }
+bool isEnabled(Ctx& c)
+{ HE::AntiCheat::AntiCheatHost* h = host(c); return h && h->isEnabled(); }
+} // namespace anticheat
 
 // ── Printing ─────────────────────────────────────────────────────────────────
 namespace print {
@@ -6206,6 +6276,62 @@ const std::vector<ApiFn>& registry()
             "HE::api::http::available",
             [](Ctx& c, const VV&){ return VV{ Value::ofBool(http::available(c)) }; } });
 
+        // Anti-cheat (docs/anti-cheat-plan.md §4.3): the exec rows are what a
+        // game DECLARES or DECIDES, the readers take the ticket OnCheatDetected
+        // carries — the http.* shape, for the same reason. Players and entities
+        // are Ints (a ConnectionId, a network id), like every id in this API.
+        t.push_back({ "anticheat.check", "AntiCheat", true,
+            {{"rule", P::String}, {"value", P::Float}, {"player", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::anticheat::check",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(anticheat::check(c, aS(a, 0), aF(a, 1), aI(a, 2))) }; } });
+        t.push_back({ "anticheat.expectDisplacement", "AntiCheat", true,
+            {{"entity", P::Int}, {"maxDistance", P::Float}}, {},
+            "HE::api::anticheat::expectDisplacement",
+            [](Ctx& c, const VV& a){ anticheat::expectDisplacement(c, aI(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "anticheat.report", "AntiCheat", true,
+            {{"player", P::Int}, {"rule", P::String}, {"weight", P::Float}, {"detail", P::String}}, {},
+            "HE::api::anticheat::report",
+            [](Ctx& c, const VV& a){ anticheat::report(c, aI(a, 0), aS(a, 1), aF(a, 2), aS(a, 3)); return VV{}; } });
+        t.push_back({ "anticheat.setPlayerLabel", "AntiCheat", true,
+            {{"player", P::Int}, {"label", P::String}}, {},
+            "HE::api::anticheat::setPlayerLabel",
+            [](Ctx& c, const VV& a){ anticheat::setPlayerLabel(c, aI(a, 0), aS(a, 1)); return VV{}; } });
+        t.push_back({ "anticheat.respond", "AntiCheat", true,
+            {{"reportId", P::Int}, {"response", P::Int}}, {},
+            "HE::api::anticheat::respond",
+            [](Ctx& c, const VV& a){ anticheat::respond(c, aI(a, 0), aI(a, 1)); return VV{}; } });
+        t.push_back({ "anticheat.kick", "AntiCheat", true,
+            {{"player", P::Int}, {"reasonCode", P::Int}}, {},
+            "HE::api::anticheat::kick",
+            [](Ctx& c, const VV& a){ anticheat::kick(c, aI(a, 0), aI(a, 1)); return VV{}; } });
+        t.push_back({ "anticheat.reportLevel", "AntiCheat", false, {{"reportId", P::Int}}, {{"level", P::Int}},
+            "HE::api::anticheat::reportLevel",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(anticheat::reportLevel(c, aI(a, 0))) }; } });
+        t.push_back({ "anticheat.reportRule", "AntiCheat", false, {{"reportId", P::Int}}, {{"rule", P::String}},
+            "HE::api::anticheat::reportRule",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(anticheat::reportRule(c, aI(a, 0))) }; } });
+        t.push_back({ "anticheat.reportPlayer", "AntiCheat", false, {{"reportId", P::Int}}, {{"player", P::Int}},
+            "HE::api::anticheat::reportPlayer",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(anticheat::reportPlayer(c, aI(a, 0))) }; } });
+        t.push_back({ "anticheat.reportEntity", "AntiCheat", false, {{"reportId", P::Int}}, {{"entity", P::Int}},
+            "HE::api::anticheat::reportEntity",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(anticheat::reportEntity(c, aI(a, 0))) }; } });
+        t.push_back({ "anticheat.reportScore", "AntiCheat", false, {{"reportId", P::Int}}, {{"score", P::Float}},
+            "HE::api::anticheat::reportScore",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(anticheat::reportScore(c, aI(a, 0))) }; } });
+        t.push_back({ "anticheat.reportDetail", "AntiCheat", false, {{"reportId", P::Int}}, {{"detail", P::String}},
+            "HE::api::anticheat::reportDetail",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(anticheat::reportDetail(c, aI(a, 0))) }; } });
+        t.push_back({ "anticheat.reportReason", "AntiCheat", false, {{"reportId", P::Int}}, {{"reasonCode", P::Int}},
+            "HE::api::anticheat::reportReason",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(anticheat::reportReason(c, aI(a, 0))) }; } });
+        t.push_back({ "anticheat.playerScore", "AntiCheat", false, {{"player", P::Int}}, {{"score", P::Float}},
+            "HE::api::anticheat::playerScore",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(anticheat::playerScore(c, aI(a, 0))) }; } });
+        t.push_back({ "anticheat.isEnabled", "AntiCheat", false, {}, {{"enabled", P::Bool}},
+            "HE::api::anticheat::isEnabled",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(anticheat::isEnabled(c)) }; } });
+
         // Savegames: ONE active template-shaped document (see the header block).
         // create/load resolve the SaveGameTemplate through the Ctx's content
         // manager; field access validates against it and fails LOUD.
@@ -6632,6 +6758,21 @@ const std::vector<ApiFn>& registry()
             { "http.status", "Response Status" },    { "http.body", "Response Body" },
             { "http.error", "Response Error" },      { "http.forget", "Forget Response" },
             { "http.available", "HTTP Available" },
+            { "anticheat.check", "Check Rule" },
+            { "anticheat.expectDisplacement", "Expect Displacement" },
+            { "anticheat.report", "Report Observation" },
+            { "anticheat.setPlayerLabel", "Set Player Label" },
+            { "anticheat.respond", "Respond To Report" },
+            { "anticheat.kick", "Kick Player" },
+            { "anticheat.reportLevel", "Report Level" },
+            { "anticheat.reportRule", "Report Rule" },
+            { "anticheat.reportPlayer", "Report Player" },
+            { "anticheat.reportEntity", "Report Entity" },
+            { "anticheat.reportScore", "Report Score" },
+            { "anticheat.reportDetail", "Report Detail" },
+            { "anticheat.reportReason", "Report Reason" },
+            { "anticheat.playerScore", "Player Score" },
+            { "anticheat.isEnabled", "Anti-Cheat Enabled" },
             { "save.create", "Create Save" },        { "save.load", "Load Save" },
             { "save.write", "Write Save" },          { "save.close", "Close Save" },
             { "save.activeId", "Active Save Id" },   { "save.list", "List Saves" },
@@ -6882,7 +7023,13 @@ bool isScriptGroup(std::string_view group)
                                                     // nothing can say "have this ready before the
                                                     // door opens" or "let go of the level I just
                                                     // left", which is what residency control is.
-                                                    "content" };
+                                                    "content",
+                                                    // "anticheat" has no flat twin and never will:
+                                                    // the plan's Lua and Python examples (§4.3)
+                                                    // are horizon.anticheat.check / reportLevel /
+                                                    // respond, and onCheatDetected carries only a
+                                                    // ticket that these readers open.
+                                                    "anticheat" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }
@@ -6943,9 +7090,10 @@ Ctx bindingCtx(void* host)
 {
     auto* b = static_cast<GameServicesBinding*>(host);
     Ctx c;
-    c.world   = b && b->world ? b->world() : nullptr;
-    c.physics = b && b->physics ? b->physics() : nullptr;
-    c.content = b ? b->content : nullptr;
+    c.world     = b && b->world ? b->world() : nullptr;
+    c.physics   = b && b->physics ? b->physics() : nullptr;
+    c.content   = b ? b->content : nullptr;
+    c.antiCheat = b && b->antiCheat ? b->antiCheat() : nullptr;
     return c;
 }
 // float[3]/float[2] ↔ glm, the only vector shapes that cross the C boundary.
@@ -7153,6 +7301,63 @@ void fillContentServices(::HeContentServices& out, GameServicesBinding* binding)
     out.assetTypeName = [](void* h, ::HeAssetId id, char* buf, int cap) {
         Ctx c = bindingCtx(h);
         return copyOut(content::typeNameId(c, HE::UUID{ id.hi, id.lo }), buf, cap); };
+}
+
+void fillAntiCheatServices(::HeAntiCheatServices& out, GameServicesBinding* binding)
+{
+    out = {};
+    out.abiVersion = HE_ANTICHEAT_ABI_VERSION;
+    out.host       = binding;
+
+    // Every row goes through the same anticheat::* the registry rows use, so a
+    // module and a graph see one anti-cheat and not two. The Ctx resolves the
+    // host per call (bindingCtx), which is what keeps a session's end from
+    // leaving a dangling pointer in the module's hands.
+    out.check = [](void* h, const char* rule, float value, uint32_t player) {
+        Ctx c = bindingCtx(h);
+        return anticheat::check(c, rule ? rule : "", value, (int)player) ? 1 : 0; };
+    out.expectDisplacement = [](void* h, uint32_t entity, float maxDistance) {
+        Ctx c = bindingCtx(h);
+        anticheat::expectDisplacement(c, (int)entity, maxDistance); };
+    out.report = [](void* h, uint32_t player, const char* rule, float weight, const char* detail) {
+        Ctx c = bindingCtx(h);
+        anticheat::report(c, (int)player, rule ? rule : "", weight, detail ? detail : ""); };
+    out.setPlayerLabel = [](void* h, uint32_t player, const char* label) {
+        Ctx c = bindingCtx(h);
+        anticheat::setPlayerLabel(c, (int)player, label ? label : ""); };
+    out.respond = [](void* h, int reportId, int response) {
+        Ctx c = bindingCtx(h);
+        anticheat::respond(c, reportId, response); };
+    out.kick = [](void* h, uint32_t player, int reasonCode) {
+        Ctx c = bindingCtx(h);
+        anticheat::kick(c, (int)player, reasonCode); };
+    out.reportLevel = [](void* h, int reportId) {
+        Ctx c = bindingCtx(h);
+        return anticheat::reportLevel(c, reportId); };
+    out.reportRule = [](void* h, int reportId, char* buf, int cap) {
+        Ctx c = bindingCtx(h);
+        return copyOut(anticheat::reportRule(c, reportId), buf, cap); };
+    out.reportPlayer = [](void* h, int reportId) {
+        Ctx c = bindingCtx(h);
+        return (uint32_t)anticheat::reportPlayer(c, reportId); };
+    out.reportEntity = [](void* h, int reportId) {
+        Ctx c = bindingCtx(h);
+        return (uint32_t)anticheat::reportEntity(c, reportId); };
+    out.reportScore = [](void* h, int reportId) {
+        Ctx c = bindingCtx(h);
+        return anticheat::reportScore(c, reportId); };
+    out.reportDetail = [](void* h, int reportId, char* buf, int cap) {
+        Ctx c = bindingCtx(h);
+        return copyOut(anticheat::reportDetail(c, reportId), buf, cap); };
+    out.reportReason = [](void* h, int reportId) {
+        Ctx c = bindingCtx(h);
+        return anticheat::reportReason(c, reportId); };
+    out.playerScore = [](void* h, uint32_t player) {
+        Ctx c = bindingCtx(h);
+        return anticheat::playerScore(c, (int)player); };
+    out.isEnabled = [](void* h) {
+        Ctx c = bindingCtx(h);
+        return anticheat::isEnabled(c); };
 }
 
 } // namespace HE::api

@@ -2517,6 +2517,13 @@ const std::vector<EngineEventDesc>& engineEvents()
         { "OnInit",               "onInit",               P::Exec,   false },
         { "OnShutdown",           "onShutdown",           P::Exec,   false },
         { "OnWindowFocusChanged", "onWindowFocusChanged", P::Bool,   false },
+        // The host's anti-cheat made a report (docs/anti-cheat-plan.md §5.4), or
+        // — on a client — the host sent a notice about this very player. Int
+        // payload: the report TICKET, exactly like OnHttpResponse's, because an
+        // event carries one value and a report is a dozen; the anticheat.report*
+        // readers say the rest. No element: it belongs to the Game Instance, the
+        // level script and the Entity the report names, never to a widget.
+        { "OnCheatDetected",      "onCheatDetected",      P::Int,    false },
         { "OnLevelLoaded",        "onLevelLoaded",        P::Exec,   false },
         { "OnLevelUnloaded",      "onLevelUnloaded",      P::Exec,   false },
         // Physics contacts on an Entity class. The argument is the OTHER entity
@@ -2566,7 +2573,13 @@ const std::vector<EngineClassDesc>& engineClasses()
                                           "OnBeginOverlap", "OnEndOverlap",
                                           "OnHit", "OnHitEnd",
                                           "OnAnimationNotify", "OnAnimationNotifyBegin",
-                                          "OnAnimationNotifyEnd" },
+                                          "OnAnimationNotifyEnd",
+                                          // The anti-cheat report that names THIS
+                                          // entity (the one the flagged connection
+                                          // drives). On Entity for the reason the
+                                          // contacts are: it is addressed to a
+                                          // thing in the world.
+                                          "OnCheatDetected" },
                                         { { "Get Owning Entity", "entity.owned", 0 } } },
         { "PlayerCharacter",  "Entity", {},
                                         { { "Get Controller", "player.controllerOf", 0 } } },

@@ -17,6 +17,7 @@ class ContentManager;
 class AudioEngine;
 class EntityHost;
 namespace HorizonCode { class Runtime; }
+namespace HE::AntiCheat { class AntiCheatHost; }
 
 // Hosts the per-language script backends (Lua via ScriptEngine, Python via
 // PyScriptBackend) and binds them to a HorizonWorld, exposing the identical
@@ -134,6 +135,10 @@ public:
     // onTimer(self, handle) / on_timer — a horizon.timer.after or .every came
     // due. Every instance hears every timer; the handle tells them apart.
     bool callOnTimer(ScriptEngine::InstanceId id, int handle);
+    // onCheatDetected(self, reportId) / on_cheat_detected — the anti-cheat made
+    // a report, or the host sent this client a notice. Every instance hears
+    // every report; horizon.anticheat.report* say whom it concerns.
+    bool callOnCheatDetected(ScriptEngine::InstanceId id, int reportId);
 
     // Hot-reload: recompile script and patch function fields in live instances.
     // Data fields (non-function keys in instance tables) are preserved. The
@@ -213,6 +218,10 @@ public:
         // object it then cannot name. destroyObject takes that same ref.
         std::function<uint32_t(const std::string&, const float*, const float*)> createObject;
         std::function<void(uint32_t)> destroyObject;
+        // The anti-cheat's event/response side (horizon.anticheat.*). Null is
+        // anti-cheat OFF: the readers answer their neutral default, check says
+        // "passes", every other row is a no-op.
+        HE::AntiCheat::AntiCheatHost* antiCheat = nullptr;
     };
 
     // Bind the host's services for this session. Call it where setQuitHandler is

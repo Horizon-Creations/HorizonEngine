@@ -336,6 +336,16 @@ bool ScriptEngine::callOnTimer(InstanceId id, int handle)
     return pcall(2, 0);
 }
 
+bool ScriptEngine::callOnCheatDetected(InstanceId id, int reportId)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, "onCheatDetected")) return true;
+    lua_pushinteger(m_L, static_cast<lua_Integer>(reportId));
+    return pcall(2, 0);
+}
+
 bool ScriptEngine::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
     auto it = m_instances.find(id);
