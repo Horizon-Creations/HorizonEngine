@@ -10,7 +10,8 @@
 //   respond(reportId, responses)   any time in between: a handler REPLACES the
 //            pending report's responses — the whole set, Log always included.
 //   flush()  at the frame end: execute what is pending — Flag, Notice + Kick,
-//            Ban, the telemetry queue — and only then.
+//            Ban, the telemetry queue — and only then. It also pumps the
+//            telemetry sink, FIRST, before its own early return (plan §5.6).
 //
 // The one rule this object exists to enforce is the last one: a kick happens at
 // the FRAME END and never where the event fires, because the event is the
@@ -32,6 +33,7 @@
 // and what the editor has for a project that never ticked the box.
 
 #include "HorizonScene/AntiCheat/AntiCheatService.h"
+#include "HorizonScene/AntiCheat/AntiCheatTelemetry.h"
 
 #include <Net/NetCommon.h>
 
@@ -204,10 +206,19 @@ namespace HE::AntiCheat
 		};
 		const Stats& stats() const { return m_stats; }
 
-		// ── Telemetry hand-off (step 7) ──────────────────────────────────────
-		// Reports whose responses included Telemetry, in order. The sink of a
-		// later step takes them out; until one exists the queue is bounded and
-		// the oldest falls off, so a long session cannot grow through it.
+		// ── Telemetry (plan §3.7) ────────────────────────────────────────────
+		// The project's URL (empty = off), whatever session id the application
+		// has (shortened before it is kept) and a project label. Once a URL is
+		// set, flush() hands the queued reports to the sink, which uploads them
+		// asynchronously (AntiCheatTelemetry.h). Preview never queues any.
+		void configureTelemetry(const std::string& url, const std::string& sessionId,
+		                        const std::string& project);
+		AntiCheatTelemetry&       telemetry()       { return m_telemetrySink; }
+		const AntiCheatTelemetry& telemetry() const { return m_telemetrySink; }
+		// Reports whose responses included Telemetry, in order. WITHOUT a URL
+		// they stay here for a native embedder to take out; the queue is
+		// bounded and the oldest falls off, so a long session cannot grow
+		// through it. With a URL the sink drains it every flush.
 		bool takeTelemetry(Report& out);
 		static constexpr std::size_t kMaxTelemetryQueue = 128;
 
@@ -256,6 +267,7 @@ namespace HE::AntiCheat
 		static constexpr std::size_t  kMaxLocalReports = 16;
 
 		std::deque<Report> m_telemetry;
+		AntiCheatTelemetry m_telemetrySink;
 		Stats              m_stats;
 	};
 } // namespace HE::AntiCheat

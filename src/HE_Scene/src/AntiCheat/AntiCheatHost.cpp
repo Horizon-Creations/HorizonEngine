@@ -73,7 +73,17 @@ namespace HE::AntiCheat
 		m_banned.clear();
 		m_local.clear();
 		m_localReason.clear();
+		// What was queued goes out with the session (or is dropped, if an
+		// upload is still out); without a URL the queue is simply emptied.
+		m_telemetrySink.pump(m_telemetry);
+		m_telemetrySink.flushOnDetach();
 		m_telemetry.clear();
+	}
+
+	void AntiCheatHost::configureTelemetry(const std::string& url, const std::string& sessionId,
+	                                       const std::string& project)
+	{
+		m_telemetrySink.configure(url, sessionId, project);
 	}
 
 	Config AntiCheatHost::configFrom(const ProjectAntiCheatSettings& s)
@@ -176,6 +186,12 @@ namespace HE::AntiCheat
 
 	void AntiCheatHost::flush()
 	{
+		// The telemetry sink FIRST, before anything below can return early
+		// (plan §5.6, the pumpDirectory rule): it collects the upload the
+		// previous frames started and sends what is due on a quiet frame. Off
+		// without a URL, and then the queue stays for takeTelemetry.
+		m_telemetrySink.pump(m_telemetry);
+
 		// Disconnects whose notice went out on the previous flush. First, so a
 		// kick decided this frame does not also close its link this frame.
 		if (!m_kicking.empty())
@@ -203,6 +219,10 @@ namespace HE::AntiCheat
 		pending.swap(m_pending);
 		for (const Pending& p : pending)
 			execute(p, m_service ? m_service->findReport(p.id) : nullptr);
+
+		// Again, for what execute() just queued: a Confirmed or Hard report
+		// leaves in the frame it was decided, not thirty seconds later.
+		m_telemetrySink.pump(m_telemetry);
 	}
 
 	void AntiCheatHost::execute(const Pending& p, const Report* r)
