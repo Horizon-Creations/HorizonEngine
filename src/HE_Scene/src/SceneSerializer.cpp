@@ -9,6 +9,7 @@
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/CameraRigComponent.h"
 #include "HorizonScene/Components/MovementComponent.h"
+#include "HorizonScene/Components/NetworkComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/DecalComponent.h"
 #include "HorizonScene/Components/RopeComponent.h"
@@ -282,6 +283,19 @@ namespace
 				{ "turnRate",         mv->turnRate },
 				{ "orientToMovement", mv->orientToMovement },
 				{ "moveSpace",        static_cast<uint8_t>(mv->moveSpace) },
+			};
+		}
+		if (auto* nc = registry.try_get<NetworkComponent>(entity))
+		{
+			// Config only. netId and owner are handed out by the server when the
+			// entity is registered for a session (GameReplication::registerEntity)
+			// and mean nothing outside it — a saved id would come back as a stale
+			// claim on a slot the next session gives to someone else.
+			comps["network"] = {
+				{ "relevanceRadius",    nc->relevanceRadius },
+				{ "replicateTransform", nc->replicateTransform },
+				{ "maxSpeed",           nc->maxSpeed },
+				{ "maxVerticalSpeed",   nc->maxVerticalSpeed },
 			};
 		}
 		if (auto* rig = registry.try_get<CameraRigComponent>(entity))
@@ -1048,6 +1062,18 @@ namespace
 			mv.moveSpace = static_cast<MovementComponent::Space>(
 				c.value("moveSpace", static_cast<uint8_t>(mv.moveSpace)));
 			registry.emplace_or_replace<MovementComponent>(entity, mv);
+		}
+		if (comps.contains("network"))
+		{
+			const json& c = comps["network"];
+			NetworkComponent nc;
+			nc.relevanceRadius    = c.value("relevanceRadius",    nc.relevanceRadius);
+			nc.replicateTransform = c.value("replicateTransform", nc.replicateTransform);
+			// Absent in every scene saved before the anti-cheat fields existed;
+			// 0 is "unchecked", which is what those scenes meant.
+			nc.maxSpeed           = c.value("maxSpeed",           nc.maxSpeed);
+			nc.maxVerticalSpeed   = c.value("maxVerticalSpeed",   nc.maxVerticalSpeed);
+			registry.emplace_or_replace<NetworkComponent>(entity, nc);
 		}
 		if (comps.contains("cameraRig"))
 		{
@@ -2263,6 +2289,7 @@ namespace
 	X("material",            MaterialComponent) \
 	X("camera",              CameraComponent) \
 	X("movement",            MovementComponent) \
+	X("network",             NetworkComponent) \
 	X("cameraRig",           CameraRigComponent) \
 	X("light",               LightComponent) \
 	X("decal",               DecalComponent) \
@@ -2519,6 +2546,9 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"audiolistener",
 		"audiosource", "camera", "cameraRig", "characterController", "collider",
 		"movement",
+		// Gameplay replication (NetworkComponent): the entity's interest radius
+		// and anti-cheat speed limits, not its session-assigned net id.
+		"network",
 		"decal", "environment", "foliage", "joint", "light", "lod", "material", "mesh",
 		"navagent", "navmesh", "particlesystem",
 		// Which prefab an entity was instantiated from (PrefabInstanceComponent).

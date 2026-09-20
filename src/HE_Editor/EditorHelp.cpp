@@ -80,6 +80,12 @@ namespace
 	  "What a character is doing, in the form an animator wants to read: how fast "
 	  "it may go and what it was told to do this frame.",
 	  "", "systems#animation" },
+	{ "Component/Network", "Network",
+	  "Puts the entity on the wire in a multiplayer game: the host sends its "
+	  "state to the clients that are near enough. Without this component an "
+	  "entity is purely local, which is right for muzzle flashes, debris and "
+	  "anything else nobody else needs to see.",
+	  "", "collaboration#gameplay" },
 	{ "Component/Camera", "Camera",
 	  "A viewpoint the game can render from. Exactly one camera per scene may be "
 	  "the main one; that is the one play mode looks through.",
@@ -467,6 +473,31 @@ namespace
 	  "something else owns the facing — a camera rig with coupled rotation. It "
 	  "does NOT change which way forward is; Move Direction Is does that.",
 	  "", "rendering#cameras" },
+	// ── Network ──────────────────────────────────────────────────────────────
+	{ "Network/Relevance Radius", "",
+	  "How far away, in metres, a player can be and still receive updates for "
+	  "this entity. Further than this and it is simply not sent — the single "
+	  "biggest bandwidth saving in a large world, and the reason a distant "
+	  "player cannot see what happens over here.",
+	  "", "collaboration#gameplay" },
+	{ "Network/Replicate Transform", "",
+	  "Send position and rotation every tick. Switch it off for things that "
+	  "never move — level geometry, static props — so they stop taking a slot "
+	  "in every snapshot once their starting state is known.",
+	  "", "collaboration#gameplay" },
+	{ "Network/Max Speed", "",
+	  "The fastest the host will believe this entity moves horizontally, in "
+	  "metres per second; a client claiming more is reported as a possible "
+	  "speed hack. 0 uses the Movement component's Max Speed if there is one, "
+	  "and checks nothing if there is not. Set it explicitly for an entity "
+	  "that dashes or teleports on purpose.",
+	  "", "collaboration#gameplay" },
+	{ "Network/Max Vertical Speed", "",
+	  "The same limit for up and down, in metres per second — how fast a jump "
+	  "or fall may legitimately be. 0 means the vertical axis is not checked; "
+	  "there is no Movement field to derive it from, so a game that wants it "
+	  "says so here.",
+	  "", "collaboration#gameplay" },
 	{ "Camera/FOV", "",
 	  "Vertical field of view in degrees. 60 is a normal game view; higher feels "
 	  "faster and shows more, and distorts the edges.",
@@ -6522,6 +6553,7 @@ namespace
 	constexpr const char* kComponentScopes[] = {
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
 		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
+		"Network",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Root Motion", "Animation Layers",

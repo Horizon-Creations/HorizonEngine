@@ -13,6 +13,8 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/InactiveComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
+#include <HorizonScene/Components/NameComponent.h>
+#include <HorizonScene/Components/NetworkComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 
 #include <imgui.h>
@@ -133,8 +135,9 @@ namespace
 		AppContext&  ctx;
 		HorizonWorld& world;
 		Entity        entity;
-		ImGuiID       lightHeader = 0;   // the "Light" CollapsingHeader's id, read inside the window
-		ImGuiID       activeBox   = 0;   // the Active checkbox's id, likewise
+		ImGuiID       lightHeader   = 0;   // the "Light" CollapsingHeader's id, read inside the window
+		ImGuiID       networkHeader = 0;   // the "Network" one, likewise
+		ImGuiID       activeBox     = 0;   // the Active checkbox's id, likewise
 	};
 
 	// One frame of the panel at a fixed place, with the pointer where the
@@ -149,8 +152,9 @@ namespace
 		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
 		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(H) - 20.0f));
 		ImGui::Begin("Details");
-		p.lightHeader = ImGui::GetID("Light");
-		p.activeBox   = ImGui::GetID("##entity_active");
+		p.lightHeader   = ImGui::GetID("Light");
+		p.networkHeader = ImGui::GetID("Network");
+		p.activeBox     = ImGui::GetID("##entity_active");
 		InspectorPanel::renderFor(p.ctx, p.world, p.entity, p.ctx.undoSys);
 		ImGui::End();
 		EditorWidgets::drawQueuedHelp();
@@ -349,4 +353,96 @@ TEST_CASE("inspector ui: a component header's right-click menu copies, resets an
 	for (int i = 0; i < 3; ++i) frame(p, false, false, i == 2 ? &img : nullptr);
 	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
 		he_ui::writeBmp(img, std::string(dir) + "/inspector-lamp-after.bmp");
+}
+
+TEST_CASE("inspector ui: the Network section is on the panel, and its menu copies and resets by the scene key")
+{
+	// The section is the anti-cheat plan's precondition (docs/anti-cheat-plan.md
+	// §6.2.1): a place in the Details panel where maxSpeed can be typed. One
+	// header with a working Copy / Reset proves the whole chain — the section
+	// draws, its label is in the prefab-key table, and that key is one the
+	// serializer exports and resets — the way the Light test above does.
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity player = world.createEntity("Player");
+	reg.emplace<TransformComponent>(player);
+	NetworkComponent nc;
+	nc.relevanceRadius    = 80.0f;
+	nc.replicateTransform = false;
+	nc.maxSpeed           = 7.0f;
+	nc.maxVerticalSpeed   = 3.0f;
+	reg.emplace<NetworkComponent>(player, nc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	Panel p{ ctx, world, player };
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	he_ui::Image img;
+	for (int i = 0; i < 4; ++i) frame(p, false, false, i == 3 ? &img : nullptr);
+	REQUIRE(img.valid());
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+		he_ui::writeBmp(img, std::string(dir) + "/inspector-network.bmp");
+
+	// The header is there, under the pointer somewhere down the middle.
+	const float midX = 10.0f + (float(W) - 20.0f) * 0.5f;
+	REQUIRE(p.networkHeader != 0);
+	const float headerY = yOf(p, p.networkHeader, midX);
+	REQUIRE_MESSAGE(headerY > 0.0f, "the Network header is not under the pointer anywhere");
+
+	ImGui::SetClipboardText("");
+	clickAt(p, midX, headerY, /*rightButton=*/true);
+	REQUIRE(popupOpen());
+	const std::vector<Row> items = itemsBelow(p, midX + 40.0f, headerY + 2.0f, headerY + 140.0f);
+	REQUIRE_MESSAGE(items.size() >= 4, "found " << items.size() << " items in the header menu");
+	const Row copyItem  = items[0];
+	const Row resetItem = items[2];
+
+	// ── Copy: the clipboard names the component by its scene key ──
+	clickAt(p, midX + 40.0f, copyItem.yMid);
+	CHECK_FALSE(popupOpen());
+	CHECK(InspectorPanel::clipboardComponentKey() == "network");
+	const char* text = ImGui::GetClipboardText();
+	REQUIRE(text != nullptr);
+	// And what it carries is the authored config, without a session id.
+	HorizonWorld other;
+	const Entity twin = other.createEntity("Twin");
+	CHECK(SceneSerializer{}.importComponentText(other, twin, text));
+	{
+		const auto& t = other.registry().get<NetworkComponent>(twin);
+		CHECK(t.maxSpeed         == doctest::Approx(7.0f));
+		CHECK(t.maxVerticalSpeed == doctest::Approx(3.0f));
+		CHECK(t.relevanceRadius  == doctest::Approx(80.0f));
+		CHECK_FALSE(t.replicateTransform);
+		CHECK(t.netId == 0u);
+	}
+
+	// ── Reset: back to the defaults (0 = unchecked), as one undo step ──
+	REQUIRE_FALSE(undo.canUndo());
+	clickAt(p, midX, headerY, /*rightButton=*/true);
+	REQUIRE(popupOpen());
+	clickAt(p, midX + 40.0f, resetItem.yMid);
+	CHECK_FALSE(popupOpen());
+	{
+		const auto& r = reg.get<NetworkComponent>(player);
+		CHECK(r.maxSpeed         == doctest::Approx(NetworkComponent{}.maxSpeed));
+		CHECK(r.maxVerticalSpeed == doctest::Approx(NetworkComponent{}.maxVerticalSpeed));
+		CHECK(r.relevanceRadius  == doctest::Approx(NetworkComponent{}.relevanceRadius));
+		CHECK(r.replicateTransform == NetworkComponent{}.replicateTransform);
+	}
+	CHECK(reg.all_of<TransformComponent>(player));
+	CHECK(undo.canUndo());
+	REQUIRE(undo.undo());
+	// Undo restores the world by clear + reload, so every handle is re-minted
+	// and `player` is stale (entt would assert on it). Find the entity again
+	// by the component it carries — and check it IS the same one by name.
+	const auto restored = reg.view<NetworkComponent>();
+	REQUIRE(restored.size() == 1);
+	const Entity playerAgain = restored.front();
+	CHECK(reg.get<NameComponent>(playerAgain).name == "Player");
+	CHECK(reg.get<NetworkComponent>(playerAgain).maxSpeed         == doctest::Approx(7.0f));
+	CHECK(reg.get<NetworkComponent>(playerAgain).maxVerticalSpeed == doctest::Approx(3.0f));
 }

@@ -10,6 +10,7 @@
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
+#include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
@@ -2106,6 +2107,33 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<MovementComponent>(entity); }
 	}
 
+	// ── Network ─────────────────────────────────────────────────────────────
+	if (auto* nc = registry.try_get<NetworkComponent>(entity))
+	{
+		if (componentHeader("Network", true, removed))
+		{
+			// netId and owner are deliberately not here: the server hands them
+			// out per session, and a number typed in the editor would be a
+			// stale claim the next session overrides — the same reason the
+			// serializer leaves them out.
+			Row::dragFloat("Relevance Radius", &nc->relevanceRadius, 1.0f, 0.0f, 100000.0f, "%.0f m"); trackEdit();
+			EditorWidgets::checkbox("Replicate Transform", &nc->replicateTransform); trackEdit();
+			// The two anti-cheat limits. Drawn AFTER the two levers because they
+			// only mean something once the entity is on the wire at all, and a
+			// 0 in either is the ordinary case, explained in the tooltip.
+			Row::dragFloat("Max Speed",          &nc->maxSpeed,         0.1f, 0.0f, 1000.0f, "%.1f m/s"); trackEdit();
+			Row::dragFloat("Max Vertical Speed", &nc->maxVerticalSpeed, 0.1f, 0.0f, 1000.0f, "%.1f m/s"); trackEdit();
+			if (nc->maxSpeed <= 0.0f)
+			{
+				if (const auto* mv = registry.try_get<MovementComponent>(entity))
+					ImGui::TextDisabled("Max Speed 0: checked against Movement's %.1f m/s.", mv->maxSpeed);
+				else
+					ImGui::TextDisabled("%s", "Max Speed 0 and no Movement — horizontal speed is not checked.");
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<NetworkComponent>(entity); }
+	}
+
 	// ── Camera Rig ──────────────────────────────────────────────────────────
 	if (auto* rig = registry.try_get<CameraRigComponent>(entity))
 	{
@@ -3338,6 +3366,10 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			addItem("Nav Agent",               NavAgentComponent{});
 			addItem("Material",     MaterialComponent{});
 			addItem("Movement",     MovementComponent{});
+			// Offered in every project, not only ones with a session running:
+			// which entities go on the wire is authored with the scene, and
+			// the session is what happens to it later.
+			addItem("Network",      NetworkComponent{});
 			addItem("Camera",       CameraComponent{});
 			// A rig aims a camera, so it brings one along. Adding it alone left
 			// people with a component that silently did nothing, on an entity

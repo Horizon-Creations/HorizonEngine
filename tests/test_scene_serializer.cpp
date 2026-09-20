@@ -8,6 +8,7 @@
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/CameraRigComponent.h>
 #include <HorizonScene/Components/MovementComponent.h>
+#include <HorizonScene/Components/NetworkComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/JointComponent.h>
@@ -1540,6 +1541,7 @@ namespace
 		CameraComponent                camera;
 		CameraRigComponent             cameraRig;
 		MovementComponent              movement;
+		NetworkComponent               network;
 		LightComponent                 light;
 		RigidBodyComponent             rigidbody;
 		ColliderComponent              collider;
@@ -1684,6 +1686,17 @@ namespace
 		a.movement.moveInput = { 1.0f, 0.0f, 1.0f };
 		a.movement.lookYaw   = 33.0f;
 		reg.emplace<MovementComponent>(actor, a.movement);
+
+		a.network.relevanceRadius    = 42.5f;
+		a.network.replicateTransform = false;
+		a.network.maxSpeed           = 9.5f;
+		a.network.maxVerticalSpeed   = 4.25f;
+		// Session state, set here and asserted GONE below: the server hands
+		// these out per session, and a saved id would come back as a stale
+		// claim on a slot the next session gives to someone else.
+		a.network.netId = 77u;
+		a.network.owner = 3u;
+		reg.emplace<NetworkComponent>(actor, a.network);
 
 		a.light.type         = LightType::Spot;
 		a.light.color        = { 0.15f, 0.25f, 0.35f };
@@ -2008,6 +2021,18 @@ namespace
 			// standing still, not mid-stride.
 			CHECK(mv->moveInput == glm::vec3(0.0f));
 			CHECK(mv->lookYaw   == doctest::Approx(0.0f));
+		}
+		{
+			const auto* nc = reg.try_get<NetworkComponent>(actor);
+			REQUIRE(nc != nullptr);
+			CHECK(nc->relevanceRadius    == doctest::Approx(a.network.relevanceRadius));
+			CHECK(nc->replicateTransform == a.network.replicateTransform);
+			CHECK(nc->maxSpeed           == doctest::Approx(a.network.maxSpeed));
+			CHECK(nc->maxVerticalSpeed   == doctest::Approx(a.network.maxVerticalSpeed));
+			// Not persisted: a loaded entity is "not registered yet", owned by
+			// the server, until a session says otherwise.
+			CHECK(nc->netId == 0u);
+			CHECK(nc->owner == 0u);
 		}
 		{
 			const auto* l = reg.try_get<LightComponent>(actor);
@@ -2600,6 +2625,66 @@ TEST_CASE("Every component survives a round-trip with non-default values in ever
 		REQUIRE(ser.loadFromMemory(loaded, blob));
 		verifyEveryComponent(loaded, authored);
 	}
+}
+
+TEST_CASE("NetworkComponent: the scene carries the authored levers and limits, never the session's ids")
+{
+	// The all-components fixture above proves the round trip; this pins the
+	// SHAPE of the block, because two of the component's fields must not be in
+	// it at all — and a scene saved before the anti-cheat limits existed has to
+	// come back with them at 0, which is "unchecked".
+	const fs::path file = fs::temp_directory_path() / "he_test_network_component.hescene";
+	{
+		HorizonWorld world;
+		auto& reg = world.registry();
+		const Entity player = world.createEntity("Player");
+		reg.emplace<TransformComponent>(player, TransformComponent{});
+		NetworkComponent nc;
+		nc.netId = 12u; nc.owner = 2u;          // a session's doing, not the scene's
+		nc.relevanceRadius    = 80.0f;
+		nc.replicateTransform = true;
+		nc.maxSpeed           = 6.5f;
+		nc.maxVerticalSpeed   = 12.0f;
+		reg.emplace<NetworkComponent>(player, nc);
+		REQUIRE(SceneSerializer{}.save(world, file, SerializeFormat::JSON));
+	}
+	nlohmann::json doc;
+	{
+		std::ifstream in(file);
+		REQUIRE(in.good());
+		in >> doc;
+	}
+	nlohmann::json* block = nullptr;
+	for (auto& e : doc["entities"])
+		if (e.contains("components") && e["components"].contains("network")) block = &e["components"]["network"];
+	REQUIRE(block != nullptr);
+	CHECK((*block)["relevanceRadius"].get<float>()  == doctest::Approx(80.0f));
+	CHECK((*block)["replicateTransform"].get<bool>() == true);
+	CHECK((*block)["maxSpeed"].get<float>()         == doctest::Approx(6.5f));
+	CHECK((*block)["maxVerticalSpeed"].get<float>() == doctest::Approx(12.0f));
+	CHECK_FALSE(block->contains("netId"));
+	CHECK_FALSE(block->contains("owner"));
+
+	// An older scene: the block without the two limits. They come back as 0,
+	// and the levers as written.
+	block->erase("maxSpeed");
+	block->erase("maxVerticalSpeed");
+	{
+		std::ofstream out(file);
+		out << doc.dump(2);
+	}
+	HorizonWorld loaded;
+	REQUIRE(SceneSerializer{}.load(loaded, file, SerializeFormat::JSON));
+	const Entity player = findEntityByName(loaded, "Player");
+	REQUIRE((player != entt::null));
+	const auto* nc = loaded.registry().try_get<NetworkComponent>(player);
+	REQUIRE(nc != nullptr);
+	CHECK(nc->relevanceRadius  == doctest::Approx(80.0f));
+	CHECK(nc->maxSpeed         == doctest::Approx(0.0f));
+	CHECK(nc->maxVerticalSpeed == doctest::Approx(0.0f));
+	CHECK(nc->netId == 0u);
+	CHECK(nc->owner == 0u);
+	he_test::removeQuiet(file);
 }
 
 TEST_CASE("A joint survives a save and a load, target and all")

@@ -28,4 +28,22 @@ struct NetworkComponent
 	// every snapshot. Clearing this keeps them out entirely after the initial
 	// state is known.
 	bool replicateTransform = true;
+
+	// ── Anti-cheat: what the host may believe about this entity's movement ──
+	// (docs/anti-cheat-plan.md §4.4). The host checks a client's claimed
+	// displacement against maxSpeed·dt; anything beyond is a report, not a
+	// correction (the snapshot already corrects). Authored here rather than in
+	// a project-wide setting because a dash-capable player and a slow turret
+	// are different entities with different truths.
+	//
+	// Horizontal, in m/s. 0 means "derive from MovementComponent::maxSpeed if
+	// the entity has one, otherwise do not check" — so a character stays
+	// checked by the number that already drives it, and a replicated prop
+	// with no mover is left alone.
+	float maxSpeed = 0.0f;
+
+	// Vertical, in m/s. 0 means "do not check": there is no movement field to
+	// derive a jump or fall speed from, so a game that wants the vertical
+	// axis checked says so explicitly.
+	float maxVerticalSpeed = 0.0f;
 };
