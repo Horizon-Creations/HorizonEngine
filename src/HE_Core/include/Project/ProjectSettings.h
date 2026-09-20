@@ -160,6 +160,17 @@ struct HE_API ProjectRenderDefaults
 // and belongs in a merge request next to the physics rate: a kick threshold is
 // a decision about the game, not about one scene.
 //
+// The spellings the file uses, at namespace scope rather than as static
+// members of the exported structs below: an array a DLL boundary has to hand
+// out by address is a different thing from the scalar constants the other
+// structs carry, and a string literal copied per module is exactly as good —
+// every use compares or copies the text, never the pointer.
+inline constexpr int         kAntiCheatLevelCount = 3;
+inline constexpr const char* kAntiCheatLevels[kAntiCheatLevelCount] = { "suspect", "confirmed", "hard" };
+inline constexpr int         kAntiCheatResponseCount = 6;   // bits in Response, Log first
+inline constexpr const char* kAntiCheatResponseNames[kAntiCheatResponseCount] =
+    { "log", "event", "telemetry", "flag", "kick", "ban" };
+
 // A value rule (§3.4): a number the engine does not know — damage, loot, a
 // currency delta — that the game declares once and has checked with one call
 // (`anticheat.check("Damage", value, player)`). Range, then rate per source.
@@ -174,9 +185,7 @@ struct HE_API ProjectAntiCheatRule
     // other two feed the decaying score like any engine observation.
     std::string level = "suspect";
 
-    static constexpr const char* kLevels[] = { "suspect", "confirmed", "hard" };
-    static constexpr int         kLevelCount = 3;
-    // Index into kLevels, or 0 for a spelling the file does not know.
+    // Index into kAntiCheatLevels, or 0 for a spelling the file does not know.
     int levelIndex() const;
 };
 
@@ -254,10 +263,6 @@ struct HE_API ProjectAntiCheatSettings
     static constexpr float kMaxScoreThreshold     = 1.0e6f;
     static constexpr float kMaxRuleValue          = 1.0e9f;
     static constexpr int   kMaxRules              = 256;
-    static constexpr int   kResponseCount         = 6;   // bits in Response, Log first
-    // Spellings in the file, in bit order.
-    static constexpr const char* kResponseNames[kResponseCount] =
-        { "log", "event", "telemetry", "flag", "kick", "ban" };
 };
 
 struct HE_API ProjectSettings

@@ -75,8 +75,8 @@ int roundToPowerOfTwo(int v)
 json policyToJson(std::uint32_t mask)
 {
     json arr = json::array();
-    for (int i = 0; i < ProjectAntiCheatSettings::kResponseCount; ++i)
-        if (mask & (1u << i)) arr.push_back(ProjectAntiCheatSettings::kResponseNames[i]);
+    for (int i = 0; i < kAntiCheatResponseCount; ++i)
+        if (mask & (1u << i)) arr.push_back(kAntiCheatResponseNames[i]);
     return arr;
 }
 
@@ -93,8 +93,8 @@ void readPolicy(const json& j, const char* key, std::uint32_t& out)
     {
         if (!e.is_string()) continue;
         const std::string s = e.get<std::string>();
-        for (int i = 0; i < ProjectAntiCheatSettings::kResponseCount; ++i)
-            if (s == ProjectAntiCheatSettings::kResponseNames[i]) mask |= 1u << i;
+        for (int i = 0; i < kAntiCheatResponseCount; ++i)
+            if (s == kAntiCheatResponseNames[i]) mask |= 1u << i;
     }
     out = mask;
 }
@@ -119,8 +119,8 @@ bool rulesEqual(const std::vector<ProjectAntiCheatRule>& a,
 
 int ProjectAntiCheatRule::levelIndex() const
 {
-    for (int i = 0; i < kLevelCount; ++i)
-        if (level == kLevels[i]) return i;
+    for (int i = 0; i < kAntiCheatLevelCount; ++i)
+        if (level == kAntiCheatLevels[i]) return i;
     return 0;
 }
 
@@ -231,7 +231,7 @@ void ProjectSettings::clamp()
         rule.min          = std::clamp(finiteOr(rule.min, 0.0f), -AC::kMaxRuleValue, AC::kMaxRuleValue);
         rule.max          = std::clamp(finiteOr(rule.max, 0.0f), rule.min, AC::kMaxRuleValue);
         rule.maxPerSecond = std::clamp(finiteOr(rule.maxPerSecond, 0.0f), 0.0f, AC::kMaxRuleValue);
-        rule.level        = ProjectAntiCheatRule::kLevels[rule.levelIndex()];
+        rule.level        = kAntiCheatLevels[rule.levelIndex()];
     }
 }
 

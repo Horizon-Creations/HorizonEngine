@@ -1064,11 +1064,11 @@ void drawAntiCheatPage(AppContext& ctx)
 			ImGui::SetNextItemWidth(-FLT_MIN);
 			{
 				static const char* const kLevelLabels[] = { "Suspect", "Confirmed", "Hard" };
-				static_assert(IM_ARRAYSIZE(kLevelLabels) == HE::ProjectAntiCheatRule::kLevelCount);
+				static_assert(IM_ARRAYSIZE(kLevelLabels) == HE::kAntiCheatLevelCount);
 				int lvl = rule.levelIndex();
 				if (ImGui::Combo("##level", &lvl, kLevelLabels, IM_ARRAYSIZE(kLevelLabels)))
 				{
-					rule.level = HE::ProjectAntiCheatRule::kLevels[lvl];
+					rule.level = HE::kAntiCheatLevels[lvl];
 					commit = true;
 				}
 				EditorWidgets::helpForKey("Anti-Cheat/Rule Level");
