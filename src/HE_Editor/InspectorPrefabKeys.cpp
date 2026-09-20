@@ -33,6 +33,7 @@ namespace
 		{ "Joint",                  "joint" },
 		{ "Character Controller",   "characterController" },
 		{ "Movement",               "movement" },
+		{ "Network",                "network" },
 		{ "Camera",                 "camera" },
 		{ "Camera Rig",             "cameraRig" },
 		{ "Script",                 "script" },
