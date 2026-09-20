@@ -36,10 +36,59 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      # Windows: the Vulkan SDK, so RendererVulkan is compiled by a real compiler.
+      # Until 20.09.2026 no CI job had the SDK, src/HE_Rendering/CMakeLists.txt
+      # answered with "Vulkan backend disabled (SDK not found)" on every runner,
+      # and the 12k lines of the Vulkan backend were only ever checked with
+      # clang -fsyntax-only against the MoltenVK headers on a developer Mac. A
+      # branch could be green here with a VulkanRenderer.cpp that does not compile.
+      #
+      # Windows rather than Linux because that is the platform the backend is for:
+      # the editor's ImGui Vulkan bridge is compiled from the same switch, and the
+      # package step below already lists "Vulkan Shaders" among what it ships.
+      #
+      # Pinned to the version the shader cross-compiler is fetched at (the
+      # vulkan-sdk-1.4.313.0 tags of glslang and SPIRV-Cross in the root CMakeLists),
+      # and checked against LunarG's published SHA256 (sdk.lunarg.com/sdk/files.json)
+      # so a tampered or truncated download fails here and not as a linker mystery.
+      # The installer is a GUI-subsystem exe: called directly PowerShell returns at
+      # once and configure would run against a half-written SDK, hence
+      # Start-Process -Wait. It writes VULKAN_SDK into the system environment, which
+      # this running job never sees — so the variable is exported by hand, and only
+      # after the headers, the import library and glslc are confirmed to be there.
+      # No cache: 254 MB from LunarG's CDN restores about as fast as actions/cache.
+      - name: Install Vulkan SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '1.4.313.0'
+          $sha256  = 'b643ca8ab4aea5c47b9c4e021a0b33b3a13871bf1d8131e162a9e48c257c4694'
+          $url     = "https://sdk.lunarg.com/sdk/download/$version/windows/vulkansdk-windows-X64-$version.exe"
+          $exe     = "$env:RUNNER_TEMP\vulkansdk-$version.exe"
+          $root    = "C:\VulkanSDK\$version"
+
+          curl.exe --fail --location --retry 5 --retry-delay 10 --silent --show-error --output $exe $url
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK download failed (curl exit $LASTEXITCODE)" }
+          $actual = (Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
+          if ($actual -ne $sha256) { throw "Vulkan SDK installer SHA256 mismatch: expected $sha256, got $actual" }
+
+          $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList @(
+            '--root', $root, '--accept-licenses', '--default-answer', '--confirm-command', 'install')
+          if ($p.ExitCode -ne 0) { throw "Vulkan SDK installer exited with $($p.ExitCode)" }
+
+          foreach ($f in @('Include\vulkan\vulkan.h', 'Lib\vulkan-1.lib', 'Bin\glslc.exe', 'Bin\glslangValidator.exe')) {
+            if (-not (Test-Path "$root\$f")) { throw "Vulkan SDK install incomplete: $root\$f missing" }
+          }
+          "VULKAN_SDK=$root" >> $env:GITHUB_ENV
+          "$root\Bin" >> $env:GITHUB_PATH
+          Write-Host "Vulkan SDK $version installed at $root"
+
       # Linux: SDL3 is compiled from source (FetchContent) and needs the X11/Wayland,
       # OpenGL/EGL, audio and udev/dbus dev headers; the engine also links Python and
       # uses lz4/zstd. Install the dev packages before configuring. (Vulkan is optional
-      # and left out — the Linux build uses the OpenGL backend.)
+      # and left out — the Linux build uses the OpenGL backend; the Windows job above
+      # is where RendererVulkan gets compiled.)
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -108,6 +157,26 @@ jobs:
           HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
+
+      # The SDK step above can succeed and the backend still silently fall out of
+      # the build: find_package(Vulkan) not seeing the variable, a renamed SDK
+      # layout, a future refactor of the detection. CMake only reports that as a
+      # STATUS line nobody reads. HE_VULKAN_ENABLED is CACHE INTERNAL, so the
+      # resolved answer sits in CMakeCache.txt — fail the job right here if it is
+      # not TRUE, because a Windows build without RendererVulkan is exactly the
+      # unchecked state this job exists to end.
+      - name: Assert the Vulkan backend is enabled (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # \r? because CMake on Windows writes the cache with CRLF line ends.
+          if grep -qE $'^HE_VULKAN_ENABLED:INTERNAL=TRUE\r?$' build/CMakeCache.txt; then
+            echo "HE_VULKAN_ENABLED=TRUE — RendererVulkan is part of this build"
+          else
+            echo "::error::HE_VULKAN_ENABLED is not TRUE in build/CMakeCache.txt — the Vulkan SDK was installed but CMake did not pick it up"
+            grep -n 'HE_VULKAN_ENABLED\|Vulkan_' build/CMakeCache.txt || true
+            exit 1
+          fi
 
       - name: Build
         run: cmake --build build -j 4
