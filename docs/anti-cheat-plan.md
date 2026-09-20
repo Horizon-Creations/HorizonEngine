@@ -164,8 +164,10 @@ Gründe, jeder für sich hinreichend:
    Microsofts Attestation-Signing (seit Windows 10 1607 Pflicht, für
    Anti-Cheat faktisch WHQL). Das ist ein laufender Prozess mit Firmenidentität,
    Hardware-Token und Wochen Vorlauf pro Release, nicht ein Build-Schritt.
-2. **Plattformbeschränkung auf Windows.** macOS erlaubt seit Big Sur keine
-   Kexts mehr für diesen Zweck, Linux hat keine stabile Treiber-ABI. Die Engine
+2. **Plattformbeschränkung auf Windows.** Auf macOS sind Kexts seit Big Sur
+   abgekündigt und auf Apple Silicon nur mit reduzierter Systemsicherheit
+   ladbar, für ein Spiel also faktisch ausgeschlossen; Linux hat keine stabile
+   Treiber-ABI. Die Engine
    liefert auf drei Plattformen; ein Treiber schützt eine davon und lässt die
    anderen beiden als „Cheater-Plattform" stehen, auf die der Rest ausweicht.
 3. **Antivirus-Reputationsrisiko.** Ein Treiber, der fremde Prozesse
@@ -284,7 +286,15 @@ Frame-Delta). Über ein gleitendes Fenster von `windowSec = 3.0`:
 ratio = Σ acceptedDt / Σ wall          (erst ab 1 s Fensterfüllung bewertet)
 Observation, wenn ratio > 1 + tolerance   (Default tolerance = 0.15)
 Gewicht = (ratio − 1 − tolerance) · 10   (10 % drüber = 1 Punkt, 100 % = 10)
+Kadenz: EINE Auswertung pro Wall-Sekunde je Connection, nicht pro Frame
 ```
+
+Die Kadenz ist Teil der Formel, nicht ein Detail: pro Frame ausgewertet
+würde ein 1.5×-Speedhack bei 60 Hz in 0.1 s auf `Confirmed` springen, pro
+Sekunde liefert er 3.5 Punkte pro Sekunde, also `Suspect` nach ~2 s und
+`Confirmed` nach ~6 s Fensterfüllung. Das ist der Zeitraum, in dem ein Mensch
+den Unterschied ebenfalls sähe, und er lässt einem Handler Zeit, `Suspect`
+zu bemerken, bevor `Confirmed` kommt.
 
 Warum das gegen Bursts robust ist: nach einem 500-ms-Stall kommen 30 Befehle
 mit je 16 ms auf einmal, ihre Summe ist 0.5 s, und genau 0.5 s sind auf dem
@@ -322,8 +332,8 @@ dt-Budget einzeln noch nicht auslösen. Sie ist Defense in Depth, nicht die
 Hauptverteidigung. Die Hauptverteidigung ist die Topologie.
 
 **d) Ownership.** Eingabe für eine nicht zugewiesene Entity wird schon heute
-verworfen; sie wird zur Observation mit hohem Gewicht, weil kein legitimer
-Client sie erzeugt.
+verworfen; sie wird zur Observation der Stufe `Hard` (§3.6), weil kein
+legitimer Client sie erzeugt.
 
 **e) Was durch Konstruktion gilt und keine Prüfung braucht.**
 Rollback ist gratis: ein verworfener Befehl wird nicht angewendet, der nächste
@@ -362,18 +372,28 @@ zuerst gebaut wird, sonst kommt kein Anspruch je beim Host an (§7.1).
 
 ### 3.5 Client-Integrität, leicht und ehrlich
 
-**Beim Export** schreibt der Exporter neben `project.hcfg` ein
-`integrity.json`: SHA-256 der Exe, jeder Engine-Dylib/DLL, und für jedes Pak
-dessen `tocHash` (existiert schon, `HpakReader::tocHash()`). Signiert mit
-HMAC-SHA256 über einen **Projekt-Schlüssel, der nur im Export-Profil liegt**,
-nicht im Client. Der Client kann sein Manifest also nicht neu signieren.
+**Beim Start** hasht jeder Teilnehmer sein eigenes Programm: SHA-256 der Exe
+und jeder Engine-Dylib/DLL, für jedes Pak dessen `tocHash` (existiert schon,
+`HpakReader::tocHash()`; ein 2-GB-Pak braucht nicht den Inhalt). Einmal, im
+Job-System, nicht auf dem Frame-Thread.
 
-**Beim Join** hasht der Client sein eigenes Programm (einmal beim Start, im
-Job-System, nicht auf dem Frame-Thread; ein 2-GB-Pak braucht nur den
-`tocHash`, nicht den Inhalt) und schickt die Liste im Join-Handshake. **Der
-Host vergleicht** gegen sein eigenes Manifest. Mismatch = Observation
-`IntegrityMismatch` mit dem Dateinamen als Detail. Ob daraus ein Kick wird,
-entscheidet die Policy (Default: Suspect, nur Event).
+**Beim Join** schickt der Gast seine Liste im Handshake, und **der Host
+vergleicht sie gegen seine eigene Liste**. Im Listen-Server laufen Host und
+Gast denselben Packaged Build, also müssen die Listen gleich sein; ein
+Manifest oder eine Signatur braucht es dafür nicht, und ein Schlüssel, den
+der Host nicht hat, könnte auch nichts prüfen. Mismatch = Observation
+`IntegrityMismatch` mit dem Dateinamen als Detail; Stufe per Regel (Default
+`Suspect`, ein Spiel kann Paks auf `hard` setzen).
+
+Ein signiertes `integrity.json` aus dem Export wird erst dann sinnvoll, wenn
+ein Dedicated Server (§6) mit einem **anderen** Build als die Clients läuft
+und den Schlüssel hält; bis dahin ist es nicht Teil des Plans.
+
+**Packaging-Falle, jetzt schon festgehalten:** auf macOS verändert
+`codesign` die Mach-O-Bytes von Exe und Dylibs, auf Windows Authenticode die
+PE-Datei. Wer je ein Manifest schreibt, schreibt es als **letzten**
+Packaging-Schritt, oder hasht nur Paks. Für den Live-Vergleich oben spielt
+das keine Rolle: beide Seiten hashen die signierten Bytes.
 
 **Was das wert ist, und was nicht.** Ein Angreifer, der die Exe patcht, patcht
 auch die Stelle, die die Hash-Liste schickt, und schickt die richtige. Diese
@@ -393,15 +413,19 @@ unter Last, ein Paket-Burst erzeugen dieselben Muster wie ein schlechter Cheat.
 Deshalb ein **abklingender Score** pro Connection:
 
 ```
-score += weight                  bei jeder Observation
-score *= exp(−dt / halfLife)     pro Server-Frame, halfLife = 30 s (Default)
+score += weight                     bei jeder Observation
+score *= pow(0.5, dt / halfLife)    pro Server-Frame, halfLife = 30 s (Default): echte Halbierung
 
 Stufe = Info      wenn score <  suspectThreshold   (Default  5)
         Suspect   wenn score >= suspectThreshold
         Confirmed wenn score >= confirmedThreshold  (Default 20)
-        oder: eine einzelne Observation mit weight >= confirmedThreshold
-              (Malformed, ForeignEntity: Dinge, die kein legitimer Client tut)
+        Hard      eine einzelne Observation, die kein legitimer Client erzeugt
+                  (Malformed, ForeignEntity, Integrity-Regel mit level: hard)
 ```
+
+`Hard` ist bewusst eine eigene Stufe und nicht „Confirmed mit hohem Gewicht":
+sie ist die einzige, bei der ein Kick ohne Kalibrierung vertretbar ist, weil
+kein Hitch, kein Burst und keine Uhr sie auslösen können.
 
 Jeder Stufenwechsel nach oben ist ein **Report**: Connection, Stufe, die
 Observations der letzten 10 s als Liste, der Score. Reports sind das, was
@@ -477,9 +501,11 @@ schon gibt.
    auf 0 lassen, wenn die Figur ein `MovementComponent` hat.
 
 Fertig. Ab jetzt: dt-Budget, Rate, Format, Ownership, Bewegungsplausibilität,
-Weltgrenzen, Integrität (Packaged Build), alles mit Default-Policy „Suspect =
-Log + Event, Confirmed = Log + Event + Kick" (§5.3). Kein Handler nötig, die
-Engine loggt in `Cat::AntiCheat` und kickt bei `Confirmed`.
+Weltgrenzen, Integrität (Packaged Build), alles mit der Default-Policy aus
+§5.3: Suspect und Confirmed = Log + Event + Telemetrie, **Kick nur bei
+`Hard`** (Malformed, fremde Entity). Kein Handler nötig; wer nach ein paar
+Sessions den Score-Stufen traut, schaltet Kick für `Confirmed` in den
+Settings dazu.
 
 **Voraussetzung, die vorher gebaut werden muss:** `NetworkComponent` im
 Inspector und in der Serialisierung (§1.2). Ohne sie gibt es keine
@@ -600,8 +626,9 @@ unbekannter Key = ignoriert, `clamp()` hält Schwellen in Bereichen.
   "windowSec": 3.0,
   "maxInputsPerSecond": 240,
   "score": { "halfLifeSec": 30.0, "suspect": 5.0, "confirmed": 20.0 },
-  "policy": { "suspect": ["log", "event", "telemetry"],
-              "confirmed": ["log", "event", "telemetry", "kick"] },
+  "policy": { "suspect":   ["log", "event", "telemetry"],
+              "confirmed": ["log", "event", "telemetry"],
+              "hard":      ["log", "event", "telemetry", "kick"] },
   "telemetryUrl": "",
   "rules": [
     { "name": "Damage",  "min": 0, "max": 100, "maxPerSecond": 300, "level": "suspect" },
@@ -665,10 +692,13 @@ Zusatz neben diesem Plan, kein Ersatz.
 |---|---|---|
 | **Info** | einzelne Observation unter `suspect`-Schwelle | nein (nur Log ab Debug) |
 | **Suspect** | Score über `suspect` | ja |
-| **Confirmed** | Score über `confirmed`, oder eine Observation, die kein legitimer Client erzeugt (Malformed, ForeignEntity, Integrity mit `level: confirmed`) | ja |
+| **Confirmed** | Score über `confirmed` | ja |
+| **Hard** | eine Observation, die kein legitimer Client erzeugt: Malformed, ForeignEntity, Regel oder Integritätsprüfung mit `level: hard` | ja |
 
-Eine Regel (§3.4) trägt ihre eigene Stufe bei Verstoß; `"level": "confirmed"`
-ist für Dinge, bei denen ein einziger Verstoß reicht (Währung von 0 auf 10^9).
+Eine Regel (§3.4) trägt ihre eigene Stufe bei Verstoß; `"level": "hard"` ist
+für Dinge, bei denen ein einziger Verstoß reicht (Währung von 0 auf 10^9).
+Die drei Score-Stufen sind Heuristik und brauchen Kalibrierung; `Hard` ist
+Tatsache und braucht keine.
 
 ### 5.2 Reaktionen
 
@@ -684,10 +714,14 @@ ist für Dinge, bei denen ein einziger Verstoß reicht (Währung von 0 auf 10^9)
 
 ### 5.3 Policy und die Regel „nie autonom eskalieren"
 
-Default-Policy (§4.4): Suspect = Log + Event + Telemetry, Confirmed = Log +
-Event + Telemetry + **Kick**. Kein Ban per Default: ein sitzungslokaler Ban
-ohne Identität ist kaum mehr als ein Kick, und ein persistenter braucht das
-Spiel. Die Engine schlägt vor, das Spiel entscheidet:
+Default-Policy (§4.4): Suspect und Confirmed = Log + Event + Telemetry,
+**Hard = Log + Event + Telemetry + Kick**. Kein Kick auf den Score-Stufen,
+weil deren Schwellen und Toleranzen Startwerte aus Überlegung sind (§6.2.5)
+und ein Häkchen kein Spieler-Kick auf ungemessenen Heuristiken sein darf;
+`Hard` kickt, weil dort kein Hitch, Burst oder Timer den Fall erzeugen kann.
+Kein Ban per Default: ein sitzungslokaler Ban ohne Identität ist kaum mehr
+als ein Kick, und ein persistenter braucht das Spiel. Die Engine schlägt vor,
+das Spiel entscheidet:
 
 - Ohne Handler gilt die Policy.
 - Ein Handler kann im selben Frame `anticheat.respond(reportId, response)`
@@ -852,7 +886,9 @@ Alle über `LoopbackTransport`, ohne Sockets, wie `test_game_replication.cpp`
 heute:
 
 1. **Speedhack 1.5×:** Client schickt 90 Eingaben à 16.7 ms pro simulierter
-   Host-Sekunde → nach 3 s Fenster `Suspect`, nach ~8 s `Confirmed`.
+   Host-Sekunde → eine Auswertung pro Sekunde à 3.5 Punkte: `Suspect` nach
+   ~2 s, `Confirmed` nach ~6 s Fensterfüllung; **kein Kick** mit
+   Default-Policy.
 2. **Negativkontrolle Burst:** 500 ms Stall, dann 30 Eingaben auf einmal, dann
    normal → Score bleibt unter `suspect`. Ohne diese Kontrolle wäre Test 1 grün
    ohne Aussage.
@@ -861,8 +897,9 @@ heute:
    mit Gewicht ≈ 5, Position unverändert.
 5. **`expectDisplacement` dann Teleport:** keine Observation; **derselbe
    Teleport ohne Freigabe:** Observation Gewicht ≥ 50 → sofort `Confirmed`.
-6. **Handgebautes Frame für fremde Entity:** `Confirmed` in einem Schritt
-   (hohes Gewicht), Entity unbewegt.
+6. **Handgebautes Frame für fremde Entity:** Stufe `Hard` in einem Schritt,
+   Entity unbewegt, mit Default-Policy Kick am Frame-Ende (Notice vor
+   `disconnect`, auf dem Loopback-Gegenstück prüfbar).
 7. **Abklingen:** Score 4.9 nach 30 s ≈ 2.45, kein Report.
 8. **`nullptr`-Service:** alle sechs Fälle verhalten sich wie heute (kein
    Rollback, keine Observation), damit „aus = Abwesenheit" gepinnt ist.
