@@ -36,6 +36,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace HE::AntiCheat { class AntiCheatService; }
+
 // No HE_API here. HorizonScene is built with WINDOWS_EXPORT_ALL_SYMBOLS, so the
 // macro would expand to __declspec(dllimport) inside its own translation units
 // and every definition would clash with its declaration (MSVC C4273,
@@ -44,6 +46,13 @@
 class GameReplication
 {
 public:
+	// The longest timestep a single command may represent. The server enforces
+	// it so a modified client cannot claim a ten-second frame and teleport, and
+	// the CLIENT must apply exactly the same bound when predicting — otherwise
+	// the two run different simulations and every long frame mispredicts.
+	// Public because the anti-cheat dt budget books the clamped value too.
+	static constexpr float kMaxInputDeltaTime = 0.1f;
+
 	struct Config
 	{
 		// Snapshot rate. Higher costs bandwidth linearly; lower makes
@@ -104,6 +113,21 @@ public:
 	// The simulation step, shared by client prediction and server execution.
 	// Without one shared function the two would drift by construction.
 	void setMoveFunction(MoveFn fn) { m_move = std::move(fn); }
+
+	// ── Anti-cheat (server) ──
+	// Optional. With a service attached, handleInput runs its pre-apply check
+	// (format, rate, dt budget) before the mover and its post-apply check
+	// (displacement against maxSpeed·dt) after it, and reports every refusal it
+	// used to make silently. nullptr — the default — is anti-cheat OFF, and the
+	// behaviour is byte-for-byte what it was before the service existed. Not
+	// owned; the caller keeps it alive for as long as it is attached.
+	//
+	// The host must assignControl a connection BEFORE it tells that client to
+	// take control: input from a connection with no assignment is a Hard
+	// observation (no legitimate client produces it), and a spawn message that
+	// races ahead of the assignment would make an honest player look like one.
+	void setAntiCheat(HE::AntiCheat::AntiCheatService* service) { m_antiCheat = service; }
+	HE::AntiCheat::AntiCheatService* antiCheat() const { return m_antiCheat; }
 
 	// ── Server ──
 	// Give an entity a network identity. Until then it is not replicated, which
@@ -184,11 +208,16 @@ private:
 
 	void writeSample(HE::Net::BitWriter& w, const Sample& s) const;
 	bool readSample(HE::Net::BitReader& r, Sample& s) const;
+	// One step of the position quantisation on the wire. Both the reconcile dead
+	// zone and the anti-cheat displacement allowance are widened by it, because
+	// a perfect move still arrives rounded by up to this much.
+	float quantStep() const;
 
 	HE::Net::NetSession* m_net  = nullptr;
 	HE::Net::NetRole     m_role = HE::Net::NetRole::None;
 	Config               m_cfg;
 	HorizonWorld*        m_world = nullptr;
+	HE::AntiCheat::AntiCheatService* m_antiCheat = nullptr;
 
 	std::unordered_map<std::uint32_t, Entity> m_byNetId;
 	std::uint32_t m_nextNetId = 1;
