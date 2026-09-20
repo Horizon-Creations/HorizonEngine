@@ -270,3 +270,73 @@ Was der Draht am 21.09.2026 gezeigt hat (alle 5 Tools, 14 Fehlerfälle):
   `material_node_types` prüfen, nie gegen `chain`.
 * Die Listenform trägt `{path, type, loaded}`; `kind`/`parent`/`paramCount`
   nur für bereits residente Materialien, weil die Liste nichts lädt.
+
+## 7. Graph-Editoren: `material_node_types`, `material_add_node`, `material_remove_node`
+
+Stand 21.09.2026, Schritt 5. Das Gegenstück zu `hc_node_types`/`hc_add_node`/
+`hc_remove_node`, in `McpToolsMaterial.cpp` hinter `material_graph_info`.
+Die Familie hat damit 8 Werkzeuge. Was vom hc-Muster übernommen ist
+(Volles-Objekt-nach-Mutation, `refused_by_policy` für „das Add-Menü bietet
+es nicht an", `not_found` für eine fremde Id, `removedLinks` als Diff der
+Link-Liste vor/nach `removeNode`), steht in §2. Hier nur, was neu ist.
+
+### 7.1 Gemeinsame Helfer, für Schritt 6/7 gedacht
+
+* `openGraphForEdit(cm, h, args)` → `GraphEdit { Mat m; MaterialGraph g; ok;
+  failure }`. Reihenfolge: `checkPath` → Funktions-Sniff (`invalid_path`,
+  eigener Text) → `openMat(forWrite)` (alle Gates aus §2.3) → Instanz
+  (`no_graph`, nennt den Parent) → leeres `nodeGraphJson` (`no_graph`,
+  nennt `material_create`) → Parse-Fehler (`failed`).
+* `commitGraph(cm, h, m, g, out)`: **Trockenlauf** `generateFragment` auf
+  dem geänderten Graphen, leeres GLSL = `failed` ohne Schreiben (der
+  Regenerate-Pfad kehrt bei leerem GLSL still zurück und hätte sonst einen
+  Graphen in die Datei gelegt, zu dem der Shader nicht passt). Dann in der
+  Reihenfolge von `material_set_param`: Graph-JSON ins Asset →
+  `regenerateMaterialFromGraph` → `syncMaterialInstancesOf` → `saveAsset` →
+  `reloadFromDisk`. Ergänzt `path`, `nodeCount`, `linkCount`, `paramCount`,
+  `syncedLoadedInstances`, `reloadedInEditor`.
+* `nodeTypeByName` (Enum-Name **oder** Anzeigename, beide eindeutig),
+  `masterTypeRefusal` (= `MaterialEditorPanel::listed` minus FunctionCall),
+  `hasSlotNow` (hat das gespeicherte Material einen Slot dieses Namens).
+
+### 7.2 Entscheidungen
+
+| Frage | Entscheidung | Warum |
+|---|---|---|
+| Material-**Funktionen** beschreibbar? | **Nein**, `invalid_path` mit eigenem Text | FnInput/FnOutput sind die Pin-Liste jedes `FunctionCall` in jedem Aufrufer; Links dort sind nach Pin-**Index** gespeichert, nichts auf Material-Seite räumt sie auf. `openMat` bleibt bei „forWrite nie mit Funktion". Braucht einen Aufrufer-Sweep, eigener Schritt, Entscheidung beim Chefchen. |
+| Instanz / Stub | neuer Code **`no_graph`** | Analog `no_params`; `invalid_path` wäre falsch, der Pfad ist ein Material. |
+| `Output` anlegen/löschen, `FnInput`/`FnOutput` auf Master | `refused_by_policy` | Exakt `typeExcluded` bei hc: das Panel bietet es nicht an. |
+| `FunctionCall` anlegen | ja, `s` Pflicht (`invalid_payload` leer, `checkPath`-Failure durchgereicht, falscher Typ `invalid_path`) | Das Panel bietet ihn über die Funktionsliste an, nicht über die Typliste; hier ist `s` die Liste. |
+| `TextureSample`/`NormalMapSample` `s` | leer erlaubt (= Mesh-Textur), sonst `checkPath` + Sniff `Texture` | Wie das Kontextmenü „(mesh texture)". |
+| `p` | 1–4 Zahlen, `invalid_payload` bei `paramCount == 0` | `ParamFloat` hat `paramCount 1`, nutzt aber `p[1]/p[2]` als Range; darum nicht auf `paramCount` gekappt. Dazu `min`/`max` (nur ParamFloat, min < max) und `group`/`tooltip` (nur Param-Knoten). |
+| Anfangswerte im Katalog | `defaults {p, s}` aus einem Scratch-`MaterialGraph::addNode` | Kein Abschreiben der Tabelle, kann nicht driften. |
+| Param-Knoten ohne Draht | `parameter.hasSlot: false` + `note` | Der Codegen läuft nur vom Output aus; ein unverbundener Param-Knoten hat keinen Slot, `material_set_param` kann ihn nicht setzen. Ehrlich melden statt „tunbar" behaupten. |
+| Kommentar-Id als Node-Id | `not_found`, Text nennt „comment box" | Kommentare teilen den Id-Zähler, sind aber keine Knoten. |
+
+### 7.3 Antwortform
+
+* `material_node_types` (ohne Pflichtargument; `path` filtert wie das
+  Add-Menü des Assets): `{ scope, nodeTypes[ { type, displayName, category,
+  inputs[{pin,name,type,default}], outputs, paramCount, defaults{p,s},
+  paramKind?, functionOnly?, dynamicPins?, requires? } ], functions[ { path,
+  loadable, inputs, outputs | note } ], functionsTruncated }`. Die Typliste
+  lädt nichts und wird nie gekappt; die Funktionsliste lädt jede gemeldete
+  Funktion (Interface = ihr Graph), `limit` default 80. `Output` ist nie
+  gelistet.
+* `material_add_node` → `{ type, node (wie `graph_info`, Pins aufgelöst),
+  parameter{name,kind,hasSlot}?, note?, …commitGraph }`.
+* `material_remove_node` → `{ removed, removedType, removedLinks[],
+  parameter{name,kind,slotRemoved}?, …commitGraph }`. `slotRemoved: false`,
+  wenn ein zweiter Knoten desselben Namens bleibt.
+
+### 7.4 Tests (`tests/test_mcp_tools_material.cpp`, 7 Fälle)
+
+Katalog = Registry minus Output mit Editor-Defaults; jeder gelistete Typ geht
+durch `add_node` und steht unter seiner Id in der Datei (frischer
+`ContentManager`); Payload-Prüfungen mit 19 Ablehnungen, Datei byteweise
+unverändert; `remove_node` auf „Metal" der Param-Fixture nimmt Link, Slot
+(`material_info`, `codegenValueOf`, Output-Pin unverbunden) **und den Slot
+der geladenen Instanz** mit; geteilter Name behält den Slot; Gates für beide
+Editoren (play/lock/dirty/`no_graph`×2/Funktion/Engine/sauberer Tab →
+`reloadedInEditor`); unter `HE_TESTS_HAVE_SHADERC` ein editiertes
+`OpaquePBR`-Template (Roughness raus, Fresnel rein) durch Metal + GLSL410.

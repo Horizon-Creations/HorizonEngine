@@ -9,7 +9,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstdint>
+#include <initializer_list>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -1240,6 +1242,679 @@ void addGraphInfo(McpToolRegistry& registry, ContentManager& content,
 	registry.add(std::move(t));
 }
 
+// ── Editing the graph: what material_add_node and material_remove_node share ─
+// The write half of material_graph_info. Two rules that are not the hc ones:
+//
+//   • MASTERS ONLY. An instance has no graph (`no_graph`, naming the parent), a
+//     stub from asset_create has none either (`no_graph`, naming
+//     material_create). A material FUNCTION is refused by path: a function's
+//     FnInput/FnOutput rows ARE the pin list of every FunctionCall node in
+//     every material that calls it, and those links are stored by pin INDEX
+//     (MaterialGraph.h) — adding or removing an interface node over MCP would
+//     leave callers with links into pins that moved, and nothing on this side
+//     prunes them. The Material Editor gets away with it because a human sees
+//     the canvas. Until there is a caller sweep, the function stays read-only.
+//
+//   • THE REGENERATE IS DRY-RUN BEFORE ANYTHING IS WRITTEN.
+//     `regenerateMaterialFromGraph` returns silently when the codegen yields no
+//     GLSL, which would leave a graph in the file that its own shader does not
+//     match. So the edited graph goes through `generateFragment` first, and an
+//     empty result is a refusal with the file untouched — the same "a refusal
+//     is a no-op" promise every tool in this file makes.
+//
+// The commit path is material_set_param's, in its order: graph JSON into the
+// asset, regenerate (parameter block, textures, blend mode, GI colours),
+// master → loaded instances, save, then the clean tab is told to re-read.
+
+// The reverse of nodeTypeName. The display name is taken as well — it is what
+// the file stores and what the panel shows — since it is unique too and a
+// client copying it from `displayName` deserves a node, not a lecture.
+bool nodeTypeByName(const std::string& name, HE::MatNodeType& out)
+{
+	for (const HE::MatNodeDesc& d : HE::matNodeRegistry())
+		if (name == nodeTypeName(d.type) || name == d.name)
+		{
+			out = d.type;
+			return true;
+		}
+	return false;
+}
+
+// Why a MASTER's add menu would not offer this type, or nullptr when it would.
+// The same three exclusions MaterialEditorPanel's `listed` makes, minus
+// FunctionCall, which the panel offers through its function list and this
+// interface offers through 's'.
+const char* masterTypeRefusal(HE::MatNodeType t)
+{
+	switch (t)
+	{
+	case HE::MatNodeType::Output:
+		return "A material has exactly one Output node, made when the material was "
+		       "created, and the Material Editor neither adds nor deletes it. Its "
+		       "pins are what the other nodes connect to.";
+	case HE::MatNodeType::FnInput:
+	case HE::MatNodeType::FnOutput:
+		return "Function Input / Function Output are the interface of a material "
+		       "FUNCTION; on a material they would be pins of nothing, and the "
+		       "Material Editor's add menu does not offer them here either.";
+	default:
+		return nullptr;
+	}
+}
+
+bool isFunctionOnly(HE::MatNodeType t)
+{
+	return t == HE::MatNodeType::FnInput || t == HE::MatNodeType::FnOutput;
+}
+
+// The blend mode the Output node declares — pin 5's name depends on it.
+int blendModeOf(const HE::MaterialGraph& g)
+{
+	for (const HE::MatGraphNode& n : g.nodes)
+		if (n.type == HE::MatNodeType::Output) return static_cast<int>(n.p[1]);
+	return 0;
+}
+
+struct GraphEdit
+{
+	Mat               m;
+	HE::MaterialGraph g;
+	bool              ok = false;
+	ToolResult        failure = ToolResult::ok(json::object());
+};
+
+// openMat for a write, plus the two questions a graph edit adds: is there a
+// graph of its own, and is it a material at all rather than a function.
+GraphEdit openGraphForEdit(ContentManager& cm, const McpMaterialHooks& h, const json& args)
+{
+	GraphEdit e;
+	// The function refusal FIRST, in its own words: openMat's is about
+	// parameter slots, and that is not what a client adding a node asked about.
+	const PathCheck p = checkPath(cm, strArg(args, "path"), /*mustExist=*/true, "path");
+	if (!p.ok) { e.failure = p.failure; return e; }
+	if (EditorAssetTypeCache::assetTypeOf(p.abs) == HE::AssetType::MaterialFunction)
+	{
+		e.failure = ToolResult::fail("invalid_path",
+			"'" + p.rel + "' is a Material FUNCTION, and graph edits on a function are "
+			"not offered over this interface: its Function Input / Output nodes are "
+			"the pin list of every material that calls it, and those links are kept "
+			"by pin index, so an edit here would silently re-wire the callers. "
+			"material_graph_info reads it; edit it in the Material Editor.");
+		return e;
+	}
+
+	e.m = openMat(cm, h, args, /*forWrite=*/true);
+	if (!e.m.ok) { e.failure = e.m.failure; return e; }
+
+	if (e.m.isInstance())
+	{
+		e.failure = ToolResult::fail("no_graph",
+			"'" + e.m.rel + "' is a material INSTANCE of '" + e.m.parentMaterialPath +
+			"' and has no graph of its own — it re-uses the parent's and overrides "
+			"parameter values (material_set_param) and static switches. Edit the "
+			"graph on the parent; every instance follows.");
+		return e;
+	}
+	if (e.m.nodeGraphJson.empty())
+	{
+		e.failure = ToolResult::fail("no_graph",
+			"'" + e.m.rel + "' has no node graph — it is either a stub from "
+			"asset_create or a hand-written shader material, so there is nothing to "
+			"add a node to. material_create makes a material with a graph (and an "
+			"Output node) from birth.");
+		return e;
+	}
+	if (!HE::materialGraphFromJson(e.m.nodeGraphJson, e.g))
+	{
+		e.failure = ToolResult::fail("failed",
+			"The node graph stored in '" + e.m.rel + "' could not be read. The editor "
+			"log carries the reason; nothing was changed.");
+		return e;
+	}
+	e.ok = true;
+	return e;
+}
+
+// Write the edited graph and report what the file now holds. `out` already
+// carries the tool's own fields; the shared ones are added here so the three
+// graph editors (and the ones after them) cannot spell them differently.
+ToolResult commitGraph(ContentManager& cm, const McpMaterialHooks& h, const Mat& m,
+                       const HE::MaterialGraph& g, json out)
+{
+	// Dry run. The loader loads (a called function moves the pool), and nothing
+	// from the asset is held across it — Mat is a copy.
+	{
+		FnGraphs fns{ cm, {}, {} };
+		const HE::MatFunctionLoader loader =
+			[&fns](const std::string& path) { return fns.get(path); };
+		const HE::MatShaderGen gen = HE::generateFragment(g, loader, nullptr);
+		if (gen.glsl.empty())
+			return ToolResult::fail("failed",
+				"The edited graph produces no shader (the codegen returned nothing), "
+				"so it was not written: the file would hold a graph its own shader "
+				"does not match. The editor log carries the codegen's reason.");
+	}
+
+	const std::string graphJson = HE::materialGraphToJson(g);
+	// Own scope: the two calls after it LOAD, and the pointer must not outlive
+	// them — Mat's comment says why.
+	{
+		MaterialAsset* a = cm.getMaterialMutable(m.id);
+		if (!a) return failWrite(m.rel);
+		a->nodeGraphJson = graphJson;
+	}
+	cm.regenerateMaterialFromGraph(m.id);
+	cm.syncMaterialInstancesOf(m.rel);
+
+	int paramCount = 0;
+	{
+		MaterialAsset* after = cm.getMaterialMutable(m.id);
+		if (!after || !cm.saveAsset(*after)) return failWrite(m.rel);
+		paramCount = static_cast<int>(after->graphParamNames.size());
+	}
+
+	out["path"]                  = m.rel;
+	out["nodeCount"]             = static_cast<int>(g.nodes.size());
+	out["linkCount"]             = static_cast<int>(g.links.size());
+	out["paramCount"]            = paramCount;
+	out["syncedLoadedInstances"] = true;
+	// The tab was clean — openMat refused otherwise — so this is the
+	// collab-peer path: drop what it had and read the file again next frame.
+	out["reloadedInEditor"] = h.reloadFromDisk ? h.reloadFromDisk(m.rel) : false;
+	return ToolResult::ok(std::move(out));
+}
+
+// Does the material, as saved, carry a slot under this name? A Param node the
+// codegen never reaches (not wired towards Output) declares nothing.
+bool hasSlotNow(ContentManager& cm, const Mat& m, const std::string& name)
+{
+	const MaterialAsset* a = cm.getMaterial(m.id);
+	if (!a) return false;
+	return std::find(a->graphParamNames.begin(), a->graphParamNames.end(), name) !=
+	       a->graphParamNames.end();
+}
+
+// ── material_node_types ──────────────────────────────────────────────────────
+
+void addNodeTypes(McpToolRegistry& registry, ContentManager& content,
+                  const std::shared_ptr<McpMaterialHooks>& h)
+{
+	ContentManager* cm = &content;
+	McpTool t;
+	t.name        = "material_node_types";
+	t.description =
+		"The catalogue material_add_node draws from: every node type of the material "
+		"graph library with its category, its input and output pins (names, types, "
+		"defaults) and the initial values a fresh node gets, and — as a second "
+		"list — every material FUNCTION in the project a 'FunctionCall' node can be "
+		"bound to, with the pins that call would have. 'type' is spelled as "
+		"material_graph_info spells it. With 'path', the type list is filtered to "
+		"what that asset's own add menu offers (Function Input / Output only on a "
+		"function); without it every type is listed and the function-only ones say "
+		"so. The Output node is never listed: a material has exactly one, from "
+		"birth. The type list loads nothing; the function list loads each function "
+		"it reports, because the pins come from its graph.";
+	t.inputSchema = objectSchema(json{
+		{ "path", stringProp("Optional. Content-relative path of the material the "
+		                     "nodes are meant for, e.g. 'Materials/Rock.hasset'; "
+		                     "filters the list to what its add menu offers.") },
+		{ "query", json{ { "type", "string" },
+		                 { "description", "Case-insensitive substring of the type "
+		                                  "name, display name or category, and of a "
+		                                  "function's path." } } },
+		{ "limit", json{ { "type", "integer" }, { "minimum", 1 },
+		                 { "description", "At most this many material functions "
+		                                  "(default 80). Node types are never cut — "
+		                                  "the library is short and closed." } } },
+	}, {});
+	t.handler = [cm, h](const json& args) -> ToolResult {
+		if (cm->contentRoot().empty())
+			return ToolResult::fail("no_project",
+				"No project is open in the editor, so there are no materials. Call "
+				"scene_info first.");
+
+		bool        forFunction = false;
+		bool        filtered    = false;
+		std::string selfPath;
+		json        out = json::object();
+		if (hasArg(args, "path"))
+		{
+			const Mat m = openMat(*cm, *h, args, /*forWrite=*/false, /*acceptFunction=*/true);
+			if (!m.ok) return m.failure;
+			forFunction = m.isFunction;
+			filtered    = true;
+			selfPath    = m.rel;
+			out["path"] = m.rel;
+			out["kind"] = m.isFunction ? "function" : m.isInstance() ? "instance" : "master";
+			if (m.isInstance())
+				out["note"] = "An instance has no graph of its own; material_add_node "
+				              "addresses its parent '" + m.parentMaterialPath + "'.";
+		}
+
+		auto lowered = [](std::string v) {
+			std::transform(v.begin(), v.end(), v.begin(),
+			               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			return v;
+		};
+		const std::string q = lowered(strArg(args, "query"));
+		auto matches = [&](std::initializer_list<std::string> fields) {
+			if (q.empty()) return true;
+			for (const std::string& f : fields)
+				if (lowered(f).find(q) != std::string::npos) return true;
+			return false;
+		};
+		auto pinList = [](const std::vector<HE::MatPinDesc>& pins, bool withDefault) {
+			json a = json::array();
+			for (std::size_t i = 0; i < pins.size(); ++i)
+			{
+				json p{ { "pin",  static_cast<int>(i) },
+				        { "name", pins[i].name },
+				        { "type", pinTypeName(pins[i].type) } };
+				if (withDefault) p["default"] = pins[i].def;
+				a.push_back(std::move(p));
+			}
+			return a;
+		};
+
+		// The initial values are what MaterialGraph::addNode sets — read off a
+		// scratch graph rather than restated here, so they cannot drift.
+		HE::MaterialGraph scratch;
+		json types = json::array();
+		for (const HE::MatNodeDesc& d : HE::matNodeRegistry())
+		{
+			if (d.type == HE::MatNodeType::Output) continue;
+			const bool fnOnly = isFunctionOnly(d.type);
+			if (filtered && fnOnly && !forFunction) continue;
+			const char* enumName = nodeTypeName(d.type);
+			if (!matches({ enumName, d.name, d.category })) continue;
+
+			const int id = scratch.addNode(d.type, 0, 0);
+			const HE::MatGraphNode* fresh = scratch.findNode(id);
+			json p = json::array();
+			for (int k = 0; k < 4; ++k) p.push_back(fresh ? fresh->p[k] : 0.0f);
+			json defaults{ { "p", std::move(p) } };
+			if (fresh && !fresh->s.empty()) defaults["s"] = fresh->s;
+
+			json j{
+				{ "type",        enumName },
+				{ "displayName", d.name },
+				{ "category",    d.category },
+				{ "inputs",      pinList(d.inputs, true) },
+				{ "outputs",     pinList(d.outputs, false) },
+				{ "paramCount",  d.paramCount },
+				{ "defaults",    std::move(defaults) },
+			};
+			if (fnOnly) j["functionOnly"] = true;
+			HE::MatParamKind kind{};
+			if (paramKindOfNode(d.type, kind)) j["paramKind"] = paramKindName(kind);
+			switch (d.type)
+			{
+			case HE::MatNodeType::FunctionCall:
+				j["dynamicPins"] = true;
+				j["requires"]    = "s = content-relative path of a material function "
+				                   "(the 'functions' list below); the pins are that "
+				                   "function's interface.";
+				break;
+			case HE::MatNodeType::LandscapeLayerBlend:
+				j["dynamicPins"] = true;
+				j["requires"]    = "s = layer names, one per line; one input pin per name.";
+				break;
+			case HE::MatNodeType::TextureSample:
+			case HE::MatNodeType::NormalMapSample:
+				j["requires"] = "s = content-relative path of a texture, or empty for "
+				                "the mesh's own texture.";
+				break;
+			case HE::MatNodeType::StaticSwitch:
+				j["requires"] = "s = switch name; p[0] = default (1 = true).";
+				break;
+			default:
+				break;
+			}
+			types.push_back(std::move(j));
+		}
+
+		// The functions a FunctionCall can be bound to. The walk loads nothing;
+		// the interface does — a function's pins are its FnInput/FnOutput
+		// nodes, which live in its graph. Each graph is a local copy held while
+		// its pin names are read (matFunctionPins points into it).
+		int limit = 80;
+		if (args.contains("limit") && args["limit"].is_number_integer())
+			limit = std::max(1, args["limit"].get<int>());
+		bool truncated = false;
+		const std::vector<ContentAsset> found =
+			walkContentAssets(*cm, { HE::AssetType::MaterialFunction }, limit, truncated);
+		json functions = json::array();
+		for (const ContentAsset& a : found)
+		{
+			if (a.rel == selfPath) continue;   // no direct self-call, like the panel
+			if (!matches({ a.rel })) continue;
+			json fj{ { "path", a.rel } };
+			std::string js;
+			{
+				const HE::UUID id = cm->loadAsset(a.rel);
+				const MaterialFunctionAsset* fn =
+					id == HE::UUID{} ? nullptr : cm->getMaterialFunction(id);
+				if (fn) js = fn->nodeGraphJson;
+			}
+			HE::MaterialGraph fg;
+			if (js.empty() || !HE::materialGraphFromJson(js, fg))
+			{
+				fj["loadable"] = false;
+				fj["note"]     = js.empty()
+					? "No graph yet (a stub); a call to it emits pin defaults."
+					: "Could not be read; a call to it emits pin defaults.";
+			}
+			else
+			{
+				std::vector<HE::MatPinDesc> ins, outs;
+				HE::matFunctionPins(fg, ins, outs);
+				fj["loadable"] = true;
+				fj["inputs"]   = pinList(ins, true);
+				fj["outputs"]  = pinList(outs, false);
+			}
+			functions.push_back(std::move(fj));
+		}
+
+		out["scope"]              = forFunction ? "function" : "material";
+		out["nodeTypes"]          = std::move(types);
+		out["functions"]          = std::move(functions);
+		out["functionsTruncated"] = truncated;
+		return ToolResult::ok(std::move(out));
+	};
+	registry.add(std::move(t));
+}
+
+// ── material_add_node ────────────────────────────────────────────────────────
+
+void addAddNode(McpToolRegistry& registry, ContentManager& content,
+                const std::shared_ptr<McpMaterialHooks>& h)
+{
+	ContentManager* cm = &content;
+	McpTool t;
+	t.name        = "material_add_node";
+	t.mutates     = true;
+	t.description =
+		"Add one node to a master material's graph. 'type' is a name from "
+		"material_node_types (or material_graph_info's nodes[].type). 's' is the "
+		"node's string payload where the type has one: the parameter name for a "
+		"Param node, the texture path for TextureSample / NormalMapSample (empty = "
+		"the mesh's own texture), the material function path for FunctionCall "
+		"(required), the switch name for StaticSwitch, the layer names (one per "
+		"line) for LandscapeLayerBlend. 'p' sets the node's values (a Float's "
+		"value, a Color's rgb, a ParamFloat's default) in the order material_node_"
+		"types reports; anything not given keeps the default a fresh node gets in "
+		"the editor. The answer carries the new node with its resolved pin list, so "
+		"the next call can wire it without a second material_graph_info, and for a "
+		"Param node whether it already has a slot (it has one only once it is wired "
+		"towards Output). Writes the file at once, regenerates the shader and the "
+		"parameter block, updates loaded instances, and tells a clean open tab to "
+		"re-read; an open tab with unsaved edits is refused. Refuses a material "
+		"instance (edit the parent) and a material function.";
+	t.inputSchema = objectSchema(json{
+		{ "path", stringProp("Content-relative path of a master material, e.g. "
+		                     "'Materials/Rock.hasset'.") },
+		{ "type", json{ { "type", "string" },
+		                { "description", "Node type, exactly as material_node_types "
+		                                 "spells it, e.g. 'ParamFloat', 'TextureSample', "
+		                                 "'Multiply'." } } },
+		{ "s",    json{ { "type", "string" },
+		                { "description", "The node's string payload; which one depends "
+		                                 "on the type (see the tool description). "
+		                                 "Omitted = the editor's default (e.g. "
+		                                 "'MyParam')." } } },
+		{ "p",    json{ { "type", "array" }, { "items", json{ { "type", "number" } } },
+		                { "minItems", 1 }, { "maxItems", 4 },
+		                { "description", "Initial values p[0..3], as many as given. "
+		                                 "Refused for a type that carries none "
+		                                 "(paramCount 0)." } } },
+		{ "min",  numberProp("ParamFloat only: slider minimum (with 'max'; min < max).") },
+		{ "max",  numberProp("ParamFloat only: slider maximum.") },
+		{ "group",   stringProp("Param nodes only: the panel group header the "
+		                        "parameter is shown under.") },
+		{ "tooltip", stringProp("Param nodes only: hover help shown next to the "
+		                        "parameter.") },
+		{ "position", json{ { "type", "array" }, { "items", json{ { "type", "number" } } },
+		                    { "minItems", 2 }, { "maxItems", 2 },
+		                    { "description", "Canvas position [x, y]. Cosmetic, but a "
+		                                     "graph where everything sits at the "
+		                                     "origin is unreadable for the human." } } },
+	}, { "path", "type" });
+	t.handler = [cm, h](const json& args) -> ToolResult {
+		if (cm->contentRoot().empty())
+			return ToolResult::fail("no_project",
+				"No project is open in the editor, so there are no materials. Call "
+				"scene_info first.");
+		GraphEdit e = openGraphForEdit(*cm, *h, args);
+		if (!e.ok) return e.failure;
+
+		const std::string typeName = strArg(args, "type");
+		HE::MatNodeType nt;
+		if (typeName.empty() || !nodeTypeByName(typeName, nt))
+			return ToolResult::fail("invalid_payload",
+				"'" + typeName + "' is not a material node type. material_node_types "
+				"lists every name, spelled exactly as it has to be sent (e.g. "
+				"'TextureSample', not 'texture sample').");
+		if (const char* why = masterTypeRefusal(nt))
+			return ToolResult::fail("refused_by_policy",
+				"'" + typeName + "' is not offered by this material's add menu, so it "
+				"is not inserted here either. " + why);
+		const HE::MatNodeDesc& desc = HE::matNodeDesc(nt);
+
+		// ── The payloads, checked before the graph is touched ────────────────
+		const bool        haveS = hasArg(args, "s");
+		const std::string s     = strArg(args, "s");
+		if (nt == HE::MatNodeType::FunctionCall)
+		{
+			if (s.empty())
+				return ToolResult::fail("invalid_payload",
+					"A FunctionCall needs 's' = the content-relative path of the "
+					"material function it calls; material_node_types lists them under "
+					"'functions'. A call to nothing has no pins.");
+			const PathCheck fp = checkPath(*cm, s, /*mustExist=*/true, "s");
+			if (!fp.ok) return fp.failure;
+			if (EditorAssetTypeCache::assetTypeOf(fp.abs) != HE::AssetType::MaterialFunction)
+				return ToolResult::fail("invalid_path",
+					"'" + fp.rel + "' is not a Material Function asset. asset_resolve "
+					"reports what a path holds; material_node_types lists the functions "
+					"a FunctionCall can be bound to.");
+		}
+		if ((nt == HE::MatNodeType::TextureSample || nt == HE::MatNodeType::NormalMapSample) &&
+		    !s.empty())
+		{
+			const PathCheck tp = checkPath(*cm, s, /*mustExist=*/true, "s");
+			if (!tp.ok) return tp.failure;
+			if (EditorAssetTypeCache::assetTypeOf(tp.abs) != HE::AssetType::Texture)
+				return ToolResult::fail("invalid_path",
+					"'" + tp.rel + "' is not a Texture asset. asset_resolve reports what "
+					"a path holds; an empty 's' samples the mesh's own texture.");
+		}
+
+		std::vector<float> p;
+		if (hasArg(args, "p"))
+		{
+			const json& pj = args["p"];
+			if (!pj.is_array() || pj.empty() || pj.size() > 4)
+				return ToolResult::fail("invalid_payload",
+					"'p' is an array of one to four numbers.");
+			for (const json& v : pj)
+			{
+				if (!v.is_number())
+					return ToolResult::fail("invalid_payload",
+						"'p' is an array of one to four numbers.");
+				p.push_back(v.get<float>());
+			}
+			if (desc.paramCount == 0)
+				return ToolResult::fail("invalid_payload",
+					"'" + typeName + "' carries no values — its inputs are pins, wired "
+					"with material_connect, and it has nothing for 'p' to set.");
+		}
+
+		const bool haveMin = hasArg(args, "min"), haveMax = hasArg(args, "max");
+		if (haveMin || haveMax)
+		{
+			if (nt != HE::MatNodeType::ParamFloat)
+				return ToolResult::fail("invalid_payload",
+					"'min'/'max' are the slider range of a ParamFloat; '" + typeName +
+					"' has none.");
+			if (!haveMin || !haveMax || !args["min"].is_number() || !args["max"].is_number())
+				return ToolResult::fail("invalid_payload",
+					"'min' and 'max' go together and are both numbers.");
+			if (!(args["min"].get<float>() < args["max"].get<float>()))
+				return ToolResult::fail("invalid_payload",
+					"'min' must be less than 'max' — the editor shows a slider only "
+					"for a real range.");
+		}
+
+		HE::MatParamKind kind{};
+		const bool isParam = paramKindOfNode(nt, kind);
+		if ((hasArg(args, "group") || hasArg(args, "tooltip")) && !isParam)
+			return ToolResult::fail("invalid_payload",
+				"'group' and 'tooltip' are Param-node metadata (they label the "
+				"parameter in the panel); '" + typeName + "' declares no parameter.");
+
+		float x = 0.0f, y = 0.0f;
+		if (hasArg(args, "position"))
+		{
+			const json& pos = args["position"];
+			if (!pos.is_array() || pos.size() != 2 || !pos[0].is_number() || !pos[1].is_number())
+				return ToolResult::fail("invalid_payload",
+					"'position' is [x, y], two numbers.");
+			x = pos[0].get<float>();
+			y = pos[1].get<float>();
+		}
+
+		// ── The node, with the editor's defaults under the client's values ───
+		const int id = e.g.addNode(nt, x, y);
+		HE::MatGraphNode* n = e.g.findNode(id);
+		if (!n)
+			return ToolResult::fail("failed",
+				"The graph refused the node. Nothing was written.");
+		if (haveS) n->s = s;
+		for (std::size_t k = 0; k < p.size(); ++k) n->p[k] = p[k];
+		if (haveMin) { n->p[1] = args["min"].get<float>(); n->p[2] = args["max"].get<float>(); }
+		if (isParam)
+		{
+			n->group   = strArg(args, "group");
+			n->tooltip = strArg(args, "tooltip");
+		}
+
+		json out{ { "type", nodeTypeName(nt) } };
+		ToolResult r = commitGraph(*cm, *h, e.m, e.g, std::move(out));
+		if (r.isError) return r;
+
+		// Reported from the graph that was written, pins resolved as the canvas
+		// resolves them (a FunctionCall's from the function it now calls).
+		FnGraphs fns{ *cm, {}, {} };
+		r.content["node"] = nodeJson(e.g, *e.g.findNode(id), blendModeOf(e.g), fns);
+		if (isParam)
+		{
+			const std::string name = effectiveParamName(*e.g.findNode(id));
+			r.content["parameter"] = json{
+				{ "name",    name },
+				{ "kind",    paramKindName(kind) },
+				{ "hasSlot", hasSlotNow(*cm, e.m, name) },
+			};
+			if (!r.content["parameter"]["hasSlot"].get<bool>())
+				r.content["note"] =
+					"The new Param node is not wired towards Output yet, so the codegen "
+					"never reaches it and '" + name + "' has no slot: material_info does "
+					"not list it and material_set_param cannot set it until a "
+					"material_connect leads from it to the Output node.";
+		}
+		return r;
+	};
+	registry.add(std::move(t));
+}
+
+// ── material_remove_node ─────────────────────────────────────────────────────
+
+void addRemoveNode(McpToolRegistry& registry, ContentManager& content,
+                   const std::shared_ptr<McpMaterialHooks>& h)
+{
+	ContentManager* cm = &content;
+	McpTool t;
+	t.name        = "material_remove_node";
+	t.mutates     = true;
+	t.description =
+		"Delete one node from a master material's graph. Its links go with it — "
+		"every wire that touched it is removed too, and the answer says which, so "
+		"a client does not have to re-read the graph to learn what its delete "
+		"broke; an Output pin that lost its source falls back to the pin's default. "
+		"'id' is a node id from material_graph_info or material_add_node. The "
+		"Output node cannot be removed. For a Param node the answer also says "
+		"whether the parameter slot went with it (it stays while another node of "
+		"the same name remains). Writes the file at once, regenerates, updates "
+		"loaded instances and tells a clean open tab to re-read; an open tab with "
+		"unsaved edits is refused. Refuses an instance and a material function.";
+	t.inputSchema = objectSchema(json{
+		{ "path", stringProp("Content-relative path of a master material, e.g. "
+		                     "'Materials/Rock.hasset'.") },
+		{ "id",   json{ { "type", "integer" },
+		                { "description", "Node id, from material_graph_info or "
+		                                 "material_add_node." } } },
+	}, { "path", "id" });
+	t.handler = [cm, h](const json& args) -> ToolResult {
+		if (cm->contentRoot().empty())
+			return ToolResult::fail("no_project",
+				"No project is open in the editor, so there are no materials. Call "
+				"scene_info first.");
+		GraphEdit e = openGraphForEdit(*cm, *h, args);
+		if (!e.ok) return e.failure;
+
+		if (!args.contains("id") || !args["id"].is_number_integer())
+			return ToolResult::fail("invalid_payload",
+				"'id' is required and is the integer node id material_graph_info "
+				"reports.");
+		const int id = args["id"].get<int>();
+		const HE::MatGraphNode* n = e.g.findNode(id);
+		if (!n)
+		{
+			for (const HE::MatGraphComment& c : e.g.comments)
+				if (c.id == id)
+					return ToolResult::fail("not_found",
+						"Id " + std::to_string(id) + " is a comment box, not a node; "
+						"comment boxes are editor chrome and are not edited here.");
+			return ToolResult::fail("not_found",
+				"No node " + std::to_string(id) + " in '" + e.m.rel + "'. "
+				"material_graph_info lists the ids.");
+		}
+		if (n->type == HE::MatNodeType::Output)
+			return ToolResult::fail("refused_by_policy",
+				"The Output node is the material's fixed sink — the Material Editor's "
+				"Delete is greyed out for it, and it is not removed here either. "
+				"Remove the nodes feeding it instead.");
+
+		const HE::MatNodeType removedType = n->type;
+		HE::MatParamKind kind{};
+		const bool wasParam = paramKindOfNode(removedType, kind);
+		const std::string paramName = wasParam ? effectiveParamName(*n) : std::string();
+
+		const std::vector<HE::MatGraphLink> before = e.g.links;
+		e.g.removeNode(id);
+		json removedLinks = json::array();
+		for (const HE::MatGraphLink& l : before)
+			if (l.srcNode == id || l.dstNode == id)
+				removedLinks.push_back(json{ { "srcNode", l.srcNode }, { "srcPin", l.srcPin },
+				                             { "dstNode", l.dstNode }, { "dstPin", l.dstPin } });
+
+		json out{
+			{ "removed",      id },
+			{ "removedType",  nodeTypeName(removedType) },
+			{ "removedLinks", std::move(removedLinks) },
+		};
+		ToolResult r = commitGraph(*cm, *h, e.m, e.g, std::move(out));
+		if (r.isError) return r;
+		if (wasParam)
+			r.content["parameter"] = json{
+				{ "name",        paramName },
+				{ "kind",        paramKindName(kind) },
+				{ "slotRemoved", !hasSlotNow(*cm, e.m, paramName) },
+			};
+		return r;
+	};
+	registry.add(std::move(t));
+}
+
 // ── material_set_param ───────────────────────────────────────────────────────
 
 void addSetParam(McpToolRegistry& registry, ContentManager& content,
@@ -1872,6 +2547,9 @@ void registerMaterialTools(McpToolRegistry& registry, ContentManager& content,
 	auto h = std::make_shared<McpMaterialHooks>(std::move(hooks));
 	addInfo(registry, content, h);
 	addGraphInfo(registry, content, h);
+	addNodeTypes(registry, content, h);
+	addAddNode(registry, content, h);
+	addRemoveNode(registry, content, h);
 	addSetParam(registry, content, h);
 	addCreate(registry, content, h);
 	addCreateInstance(registry, content, h);
