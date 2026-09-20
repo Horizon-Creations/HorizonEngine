@@ -12,6 +12,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -276,4 +277,194 @@ TEST_CASE("ProjectSettings: the splash rides in the game section and reads back"
 	CHECK(c.game.title == "Old");
 	CHECK_FALSE(c.game.splashEnabled);
 	CHECK(c.game.splashImage.empty());
+}
+
+// ─── Anti-cheat (docs/anti-cheat-plan.md §4.4) ───────────────────────────────
+
+TEST_CASE("ProjectAntiCheatSettings: default-constructed is off, with the plan's policy")
+{
+	using AC = HE::ProjectAntiCheatSettings;
+	HE::ProjectSettings s;
+	CHECK(s.isDefault());
+	CHECK_FALSE(s.antiCheat.enabled);              // the host as it always was
+	CHECK(s.antiCheat.integrityCheck);             // what ticking `enabled` should give
+	CHECK(s.antiCheat.tolerance == doctest::Approx(0.15f));
+	CHECK(s.antiCheat.windowSec == doctest::Approx(3.0f));
+	CHECK(s.antiCheat.maxInputsPerSecond == 240);
+	CHECK(s.antiCheat.scoreHalfLifeSec == doctest::Approx(30.0f));
+	CHECK(s.antiCheat.scoreSuspect == doctest::Approx(5.0f));
+	CHECK(s.antiCheat.scoreConfirmed == doctest::Approx(20.0f));
+	// No kick on the score levels, a kick on Hard (§5.3).
+	CHECK(s.antiCheat.policySuspect   == (AC::Log | AC::Event | AC::Telemetry));
+	CHECK(s.antiCheat.policyConfirmed == (AC::Log | AC::Event | AC::Telemetry));
+	CHECK(s.antiCheat.policyHard      == (AC::Log | AC::Event | AC::Telemetry | AC::Kick));
+	CHECK(s.antiCheat.telemetryUrl.empty());
+	CHECK(s.antiCheat.rules.empty());
+
+	s.antiCheat.enabled = true;
+	CHECK_FALSE(s.isDefault());
+}
+
+TEST_CASE("ProjectAntiCheatSettings: toJson writes the plan's shape and fromJson reads it back")
+{
+	using AC = HE::ProjectAntiCheatSettings;
+	HE::ProjectSettings a;
+	a.antiCheat.enabled            = true;
+	a.antiCheat.integrityCheck     = false;
+	a.antiCheat.tolerance          = 0.25f;
+	a.antiCheat.windowSec          = 5.0f;
+	a.antiCheat.maxInputsPerSecond = 120;
+	a.antiCheat.scoreHalfLifeSec   = 45.0f;
+	a.antiCheat.scoreSuspect       = 8.0f;
+	a.antiCheat.scoreConfirmed     = 30.0f;
+	a.antiCheat.policySuspect      = AC::Log;                         // observation mode
+	a.antiCheat.policyConfirmed    = AC::Log | AC::Event | AC::Flag;
+	a.antiCheat.policyHard         = AC::Log | AC::Event | AC::Telemetry | AC::Kick | AC::Ban;
+	a.antiCheat.telemetryUrl       = "https://example.test/anticheat";
+	a.antiCheat.rules = {
+		{ "Damage", 0.0f, 100.0f, 300.0f, "suspect" },
+		{ "Pickup", 1.0f, 1.0f,   5.0f,   "hard" },
+	};
+
+	json j;
+	a.toJson(j);
+	const json& ac = j["anticheat"];
+	// Key for key what §4.4 shows.
+	CHECK(ac["enabled"] == true);
+	CHECK(ac["integrityCheck"] == false);
+	CHECK(ac["tolerance"] == doctest::Approx(0.25));
+	CHECK(ac["windowSec"] == doctest::Approx(5.0));
+	CHECK(ac["maxInputsPerSecond"] == 120);
+	CHECK(ac["score"]["halfLifeSec"] == doctest::Approx(45.0));
+	CHECK(ac["score"]["suspect"] == doctest::Approx(8.0));
+	CHECK(ac["score"]["confirmed"] == doctest::Approx(30.0));
+	CHECK(ac["policy"]["suspect"]   == json::array({ "log" }));
+	CHECK(ac["policy"]["confirmed"] == json::array({ "log", "event", "flag" }));
+	CHECK(ac["policy"]["hard"]      == json::array({ "log", "event", "telemetry", "kick", "ban" }));
+	CHECK(ac["telemetryUrl"] == "https://example.test/anticheat");
+	REQUIRE(ac["rules"].size() == 2);
+	CHECK(ac["rules"][0]["name"] == "Damage");
+	CHECK(ac["rules"][0]["max"] == doctest::Approx(100.0));
+	CHECK(ac["rules"][0]["maxPerSecond"] == doctest::Approx(300.0));
+	CHECK(ac["rules"][1]["level"] == "hard");
+
+	HE::ProjectSettings b;
+	b.fromJson(j);
+	CHECK(a == b);
+	CHECK(b.antiCheat.policySuspect == AC::Log);
+	CHECK(b.antiCheat.policyHard == (AC::Log | AC::Event | AC::Telemetry | AC::Kick | AC::Ban));
+	REQUIRE(b.antiCheat.rules.size() == 2);
+	CHECK(b.antiCheat.rules[1].name == "Pickup");
+	CHECK(b.antiCheat.rules[1].levelIndex() == 2);
+
+	// Two saves of the same settings are the same text — a policy is written
+	// in bit order, not in whatever order the file happened to list it.
+	json j2;
+	b.toJson(j2);
+	CHECK(j.dump() == j2.dump());
+}
+
+TEST_CASE("ProjectAntiCheatSettings: a file from before it existed is the default, and unknown keys are ignored")
+{
+	HE::ProjectSettings s;
+	s.fromJson(json::parse(R"({"version":1,"physics":{"fixedHz":90}})"));
+	CHECK(s.physics.fixedHz == 90);
+	CHECK_FALSE(s.antiCheat.enabled);
+	CHECK(s.antiCheat.rules.empty());
+	CHECK(s.antiCheat.policyHard == HE::ProjectSettings{}.antiCheat.policyHard);
+
+	// Keys from a newer engine, a policy naming a response this one does not
+	// know, a rule with an extra field: all read past, nothing thrown.
+	s.fromJson(json::parse(R"({
+		"anticheat": {
+			"enabled": true,
+			"futureKnob": 12,
+			"policy": { "hard": ["log", "quarantine", "kick"], "purgatory": ["kick"] },
+			"rules": [ { "name": "Loot", "max": 3, "weight": 9 }, "not a rule", 42 ]
+		}
+	})"));
+	using AC = HE::ProjectAntiCheatSettings;
+	CHECK(s.antiCheat.enabled);
+	CHECK(s.antiCheat.policyHard == (AC::Log | AC::Kick));
+	// The unknown level keeps its default: only "hard" was in the file.
+	CHECK(s.antiCheat.policySuspect == AC{}.policySuspect);
+	REQUIRE(s.antiCheat.rules.size() == 1);           // the two non-objects are skipped
+	CHECK(s.antiCheat.rules[0].name == "Loot");
+	CHECK(s.antiCheat.rules[0].min == doctest::Approx(0.0f));
+	CHECK(s.antiCheat.rules[0].max == doctest::Approx(3.0f));
+	CHECK(s.antiCheat.rules[0].level == "suspect");
+}
+
+TEST_CASE("ProjectAntiCheatSettings: clamp holds the thresholds, keeps Log, and does not eat a nameless rule")
+{
+	using AC = HE::ProjectAntiCheatSettings;
+	HE::ProjectSettings s;
+	AC& a = s.antiCheat;
+
+	// Out of range in both directions, plus a NaN a hand edit could not even
+	// write but a struct can hold.
+	a.tolerance          = -1.0f;
+	a.windowSec          = 1000.0f;
+	a.maxInputsPerSecond = 0;
+	a.scoreHalfLifeSec   = std::nanf("");
+	a.scoreSuspect       = 50.0f;
+	a.scoreConfirmed     = 10.0f;          // below Suspect: lifted, not the other way round
+	a.policySuspect      = 0;              // "[]" — log only, and Log is put back
+	a.policyConfirmed    = 0xFFFFFFFFu;    // bits the engine does not have
+	a.policyHard         = AC::Kick;       // a policy written without "log"
+	a.rules = {
+		{ "",       5.0f,  2.0f,  -3.0f, "suspect" },   // nameless, max < min, negative rate
+		{ "Coins",  0.0f,  1.0f,   0.0f, "severe"  },   // a level the engine does not spell
+	};
+	s.clamp();
+
+	CHECK(a.tolerance == doctest::Approx(0.0f));
+	CHECK(a.windowSec == doctest::Approx(AC::kMaxWindowSec));
+	CHECK(a.maxInputsPerSecond == AC::kMinInputsPerSecond);
+	CHECK(a.scoreHalfLifeSec == doctest::Approx(AC{}.scoreHalfLifeSec));
+	CHECK(a.scoreSuspect == doctest::Approx(50.0f));
+	CHECK(a.scoreConfirmed == doctest::Approx(50.0f));
+	CHECK(a.policySuspect == AC::Log);
+	CHECK(a.policyConfirmed == AC::AllResponses);
+	CHECK(a.policyHard == (AC::Log | AC::Kick));
+	REQUIRE(a.rules.size() == 2);           // the empty name stays: the page adds rows before naming them
+	CHECK(a.rules[0].name.empty());
+	CHECK(a.rules[0].min == doctest::Approx(5.0f));
+	CHECK(a.rules[0].max == doctest::Approx(5.0f));
+	CHECK(a.rules[0].maxPerSecond == doctest::Approx(0.0f));
+	CHECK(a.rules[1].level == "suspect");
+
+	// The same through the file: fromJson clamps too, so a file that says
+	// confirmed < suspect reads back consistent.
+	json j;
+	s.toJson(j);
+	j["anticheat"]["score"]["confirmed"] = 1;
+	j["anticheat"]["policy"]["suspect"]  = json::array();
+	HE::ProjectSettings t;
+	t.fromJson(j);
+	CHECK(t.antiCheat.scoreConfirmed == doctest::Approx(50.0f));
+	CHECK(t.antiCheat.policySuspect == AC::Log);
+
+	// More rules than the ceiling are cut, not refused.
+	a.rules.assign(static_cast<std::size_t>(AC::kMaxRules) + 10, HE::ProjectAntiCheatRule{ "R", 0, 1, 0, "suspect" });
+	s.clamp();
+	CHECK(a.rules.size() == static_cast<std::size_t>(AC::kMaxRules));
+}
+
+TEST_CASE("ProjectAntiCheatSettings: a project keeps its rules across a real save and load")
+{
+	TempRoot tmp("anticheat");
+	HE::ProjectSettings a;
+	a.antiCheat.enabled = true;
+	a.antiCheat.rules   = { { "Damage", 0.0f, 100.0f, 300.0f, "suspect" } };
+	REQUIRE(HE::saveProjectSettings(tmp.root, a));
+
+	HE::ProjectSettings b;
+	REQUIRE(HE::loadProjectSettings(tmp.root, b));
+	CHECK(a == b);
+	CHECK(b.antiCheat.enabled);
+	REQUIRE(b.antiCheat.rules.size() == 1);
+	CHECK(b.antiCheat.rules[0].name == "Damage");
+	// And it is in the text a reviewer would read, under the plan's key.
+	CHECK(readAll(HE::projectSettingsPath(tmp.root)).find("\"anticheat\"") != std::string::npos);
 }

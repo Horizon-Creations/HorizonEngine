@@ -26,8 +26,9 @@ namespace ProjectSettingsPanel
 	// Sub-pages, in the order the rail lists them.
 	enum class Page
 	{
-		// Game — what the project IS
-		General, Application, Permissions, Fonts,
+		// Game — what the project IS; AntiCheat is what its host refuses to
+		// believe from a client (Config/ProjectSettings.json, "anticheat").
+		General, Application, Permissions, Fonts, AntiCheat,
 		// Rendering — how it draws
 		RenderDefaults, Shadows,
 		// Physics — how it simulates

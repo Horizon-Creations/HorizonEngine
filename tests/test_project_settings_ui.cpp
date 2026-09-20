@@ -15,6 +15,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -219,6 +220,7 @@ TEST_CASE("project settings ui: every page draws over a real project, and lookin
 		{ P::General,         "general" },
 		{ P::Application,     "application" },
 		{ P::Permissions,     "permissions" },
+		{ P::AntiCheat,       "anti-cheat" },
 		{ P::RenderDefaults,  "render-defaults" },
 		{ P::Shadows,         "shadows" },
 		{ P::Simulation,      "physics" },
@@ -275,6 +277,88 @@ TEST_CASE("project settings ui: the first edit on Rendering > Defaults lands in 
 	ProjectManager again;
 	REQUIRE(again.loadProject(pm.currentProject().path));
 	CHECK_FALSE(again.currentProject().settings.renderDefaults.useEditorSettings);
+
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("project settings ui: ticking Enable anti-cheat on Game > Anti-Cheat lands in Config/ProjectSettings.json")
+{
+	Harness harness;
+
+	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_anticheat";
+	he_test::removeAllQuiet(dir);
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
+	const auto settingsFile = HE::projectSettingsPath(pm.projectRoot());
+
+	ContextBits bits;
+	AppContext ctx = bits.make(pm);
+	showPage(ProjectSettingsPanel::Page::AntiCheat);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) frame(ctx, false);
+
+	// Down the page's left edge: the first control is "Enable anti-cheat", and
+	// the checkbox square is the first thing on its row.
+	const std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 40.0f, float(H) - 40.0f);
+	REQUIRE_MESSAGE(!items.empty(), "no control found down the Anti-Cheat page");
+	REQUIRE_FALSE(pm.currentProject().settings.antiCheat.enabled);
+
+	clickAt(ctx, kPageX + 8.0f, items[0].mid);
+	CHECK(pm.currentProject().settings.antiCheat.enabled);
+	REQUIRE(std::filesystem::exists(settingsFile));
+
+	// The file, read back through a fresh manager, says so — and the policy
+	// defaults it carries are the plan's, log included.
+	ProjectManager again;
+	REQUIRE(again.loadProject(pm.currentProject().path));
+	CHECK(again.currentProject().settings.antiCheat.enabled);
+	CHECK((again.currentProject().settings.antiCheat.policyHard & HE::ProjectAntiCheatSettings::Kick) != 0);
+	CHECK((again.currentProject().settings.antiCheat.policySuspect & HE::ProjectAntiCheatSettings::Log) != 0);
+
+	he_test::removeAllQuiet(dir);
+}
+
+// The policy grid and the rules table sit below the fold at this height, and
+// the rules table only exists once a rule does — so the default dump above
+// never draws it. Here one rule is put in the model and the body scrolled to
+// the bottom, which is also how the two tables were looked at.
+TEST_CASE("project settings ui: the Anti-Cheat page draws its policy grid and a rules row")
+{
+	Harness harness;
+
+	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_anticheat_tables";
+	he_test::removeAllQuiet(dir);
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
+	pm.currentProject().settings.antiCheat.rules = { { "Damage", 0.0f, 100.0f, 300.0f, "suspect" } };
+
+	ContextBits bits;
+	AppContext ctx = bits.make(pm);
+	showPage(ProjectSettingsPanel::Page::AntiCheat);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	he_ui::Image above;
+	for (int i = 0; i < 3; ++i) frame(ctx, false, i == 2 ? &above : nullptr);
+	REQUIRE(above.valid());
+
+	// Scroll the page body to its end. The child's name is hashed with its
+	// parents', so it is found by the fragment the panel gives it.
+	for (ImGuiWindow* w : GImGui->Windows)
+		if (w->Name && std::strstr(w->Name, "##projbody"))
+			ImGui::SetScrollY(w, w->ScrollMax.y);
+	he_ui::Image below;
+	for (int i = 0; i < 3; ++i) frame(ctx, false, i == 2 ? &below : nullptr);
+	REQUIRE(below.valid());
+	// A different picture: the scroll happened and the lower half has content
+	// of its own (a grid of boxes, a table row, a button) rather than blank.
+	CHECK(below.inkedPixels(kBgR, kBgG, kBgB) > 4000);
+	CHECK(below.inkedPixels(kBgR, kBgG, kBgB) != above.inkedPixels(kBgR, kBgG, kBgB));
+	if (const char* dump = std::getenv("HE_UI_DUMP_DIR"); dump && *dump)
+		he_ui::writeBmp(below, std::string(dump) + "/project-settings-anti-cheat-tables.bmp");
+
+	// Looking is not editing: no file, and the rule is still the one put in.
+	CHECK_FALSE(std::filesystem::exists(HE::projectSettingsPath(pm.projectRoot())));
+	REQUIRE(pm.currentProject().settings.antiCheat.rules.size() == 1);
+	CHECK(pm.currentProject().settings.antiCheat.rules[0].name == "Damage");
 
 	he_test::removeAllQuiet(dir);
 }

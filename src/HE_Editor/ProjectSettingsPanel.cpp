@@ -886,6 +886,217 @@ void drawSimulationPage(AppContext& ctx)
 	}
 }
 
+// ─── Game ▸ Anti-Cheat ───────────────────────────────────────────────────────
+// What the host refuses to believe from a client, and what it does about it
+// (docs/anti-cheat-plan.md §4.4). Default-constructed is OFF, which is the
+// host exactly as it was before the service existed; the other numbers are the
+// plan's starting values and matter only once the switch is on.
+//
+// Four blocks: the switch and the integrity check, the limits the detectors
+// run with, the policy per level, and the game's own value rules. The policy
+// is a small grid — one row per level, one column per response — rather than
+// six loose checkboxes, because "what happens on Confirmed" is a row you read
+// across. Log has no box: it is not optional (§5.2).
+void drawAntiCheatPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Anti-Cheat");
+	ProjectData* pp = openProject(ctx);
+	if (!pp) return;
+	ProjectData& p = *pp;
+	using AC = HE::ProjectAntiCheatSettings;
+	AC& a = p.settings.antiCheat;
+
+	settingsFileHint("Read by the HOST of a session when it starts — the editor's Play as "
+	                 "host and the exported build alike. Switched off, the host behaves "
+	                 "exactly as it always has.");
+
+	bool commit = false;
+
+	// ── Switch ───────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Detection");
+	commit |= EditorWidgets::checkbox("Enable anti-cheat##acenabled", &a.enabled);
+	hint("The host scores what each client sends — input rate, a stretched clock, "
+	     "moves faster than the entity can go — and acts on the policy below. "
+	     "Clients only ever send input either way; this decides whether refusals "
+	     "are counted or merely dropped.");
+	commit |= EditorWidgets::checkbox("Check client integrity at join##acintegrity", &a.integrityCheck);
+	hint("A joining client sends the hashes of its program and paks; the host "
+	     "compares them with its own. Catches an edited script or asset, not a "
+	     "patched executable.");
+	ImGui::Spacing();
+
+	// ── Limits ───────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Limits");
+	Row::dragFloat("Clock tolerance##actolerance", &a.tolerance, 0.005f, 0.0f, AC::kMaxTolerance, "%.2f");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	Row::dragFloat("Clock window##acwindow", &a.windowSec, 0.1f, AC::kMinWindowSec, AC::kMaxWindowSec, "%.1f s");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("How much faster than real time a client's simulated time may run before "
+	     "it counts, and the span it is measured over. The window has to be "
+	     "seconds: after a network stall a burst of commands arrives at once "
+	     "whose time adds up to exactly what the host waited.");
+	Row::dragInt("Max inputs per second##acinputs", &a.maxInputsPerSecond, 1.0f,
+	             AC::kMinInputsPerSecond, AC::kMaxInputsPerSecond);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	Row::dragFloat("Score half-life##achalflife", &a.scoreHalfLifeSec, 0.5f,
+	               AC::kMinHalfLifeSec, AC::kMaxHalfLifeSec, "%.1f s");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	Row::dragFloat("Suspect at##acsuspect", &a.scoreSuspect, 0.1f, 0.0f, AC::kMaxScoreThreshold, "%.1f");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	Row::dragFloat("Confirmed at##acconfirmed", &a.scoreConfirmed, 0.1f, 0.0f, AC::kMaxScoreThreshold, "%.1f");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("Every observation adds its weight to a score that halves over the "
+	     "half-life; the two thresholds are the levels. Confirmed is kept at or "
+	     "above Suspect.");
+	ImGui::Spacing();
+
+	// ── Policy ───────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Policy");
+	hint("What the host does by itself when a connection reaches a level. A "
+	     "script handler for OnCheatDetected may replace it per report. Log is "
+	     "always on; a row with nothing else ticked is observation mode, the "
+	     "recommended way to start.");
+	{
+		struct LevelRow { const char* label; std::uint32_t* mask; };
+		LevelRow rows[] = { { "Suspect",   &a.policySuspect },
+		                    { "Confirmed", &a.policyConfirmed },
+		                    { "Hard",      &a.policyHard } };
+		// Columns after the level name, in bit order after Log.
+		struct Column { const char* head; AC::Response bit; const char* key; };
+		const Column cols[] = {
+			{ "Event",     AC::Event,     "Anti-Cheat/Policy Event" },
+			{ "Telemetry", AC::Telemetry, "Anti-Cheat/Policy Telemetry" },
+			{ "Flag",      AC::Flag,      "Anti-Cheat/Policy Flag" },
+			{ "Kick",      AC::Kick,      "Anti-Cheat/Policy Kick" },
+			{ "Ban",       AC::Ban,       "Anti-Cheat/Policy Ban" },
+		};
+		constexpr int kCols = IM_ARRAYSIZE(cols);
+		if (ImGui::BeginTable("##acpolicy", kCols + 1,
+		                      ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
+		{
+			ImGui::TableSetupColumn("##level", ImGuiTableColumnFlags_WidthFixed);
+			for (const Column& c : cols)
+				ImGui::TableSetupColumn(c.head, ImGuiTableColumnFlags_WidthFixed);
+			ImGui::TableHeadersRow();
+			for (int r = 0; r < IM_ARRAYSIZE(rows); ++r)
+			{
+				ImGui::PushID(r);
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::AlignTextToFramePadding();
+				ImGui::TextUnformatted(rows[r].label);
+				for (int c = 0; c < kCols; ++c)
+				{
+					ImGui::TableSetColumnIndex(c + 1);
+					ImGui::PushID(c);
+					bool on = (*rows[r].mask & cols[c].bit) != 0;
+					if (ImGui::Checkbox("##cell", &on))
+					{
+						if (on) *rows[r].mask |= cols[c].bit;
+						else    *rows[r].mask &= ~static_cast<std::uint32_t>(cols[c].bit);
+						commit = true;
+					}
+					// By key: the box has no label of its own, the column head
+					// and the row name are what the user reads.
+					EditorWidgets::helpForKey(cols[c].key);
+					ImGui::PopID();
+				}
+				ImGui::PopID();
+			}
+			ImGui::EndTable();
+		}
+	}
+	Row::inputText("Telemetry URL##actelemetry", &a.telemetryUrl);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("Where reports are sent when a policy says Telemetry. Empty means no "
+	     "telemetry at all. This is the engine's own setting, not the scripts' "
+	     "Network permission.");
+	ImGui::Spacing();
+
+	// ── Rules ────────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Rules");
+	hint("Values the engine cannot know — damage, loot, currency — declared once "
+	     "here and checked with one call: anticheat.check(\"Damage\", value, "
+	     "player). Range per value, sum per second per player, and what a "
+	     "violation counts as.");
+	if (a.rules.empty())
+		ImGui::TextDisabled("No rules yet. The engine's own checks run without any.");
+	int removeAt = -1;
+	if (!a.rules.empty()
+	    && ImGui::BeginTable("##acrules", 6,
+	                         ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg))
+	{
+		const float num = ImGui::CalcTextSize("00000000").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+		ImGui::TableSetupColumn("Name",       ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Min",        ImGuiTableColumnFlags_WidthFixed, num);
+		ImGui::TableSetupColumn("Max",        ImGuiTableColumnFlags_WidthFixed, num);
+		ImGui::TableSetupColumn("Per second", ImGuiTableColumnFlags_WidthFixed, num);
+		ImGui::TableSetupColumn("Level",      ImGuiTableColumnFlags_WidthFixed,
+		                        ImGui::CalcTextSize("Confirmed").x + ImGui::GetFrameHeight() + 8.0f);
+		ImGui::TableSetupColumn("##remove",   ImGuiTableColumnFlags_WidthFixed);
+		ImGui::TableHeadersRow();
+		for (int i = 0; i < static_cast<int>(a.rules.size()); ++i)
+		{
+			HE::ProjectAntiCheatRule& rule = a.rules[static_cast<std::size_t>(i)];
+			ImGui::PushID(i);
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(0);
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			ImGui::InputTextWithHint("##name", "Damage", &rule.name);
+			EditorWidgets::helpForKey("Anti-Cheat/Rule Name");
+			commit |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::TableSetColumnIndex(1);
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			ImGui::DragFloat("##min", &rule.min, 1.0f, -AC::kMaxRuleValue, AC::kMaxRuleValue, "%g");
+			EditorWidgets::helpForKey("Anti-Cheat/Rule Min");
+			commit |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::TableSetColumnIndex(2);
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			ImGui::DragFloat("##max", &rule.max, 1.0f, -AC::kMaxRuleValue, AC::kMaxRuleValue, "%g");
+			EditorWidgets::helpForKey("Anti-Cheat/Rule Max");
+			commit |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::TableSetColumnIndex(3);
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			ImGui::DragFloat("##persec", &rule.maxPerSecond, 1.0f, 0.0f, AC::kMaxRuleValue, "%g");
+			EditorWidgets::helpForKey("Anti-Cheat/Rule Per second");
+			commit |= ImGui::IsItemDeactivatedAfterEdit();
+			ImGui::TableSetColumnIndex(4);
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			{
+				static const char* const kLevelLabels[] = { "Suspect", "Confirmed", "Hard" };
+				static_assert(IM_ARRAYSIZE(kLevelLabels) == HE::ProjectAntiCheatRule::kLevelCount);
+				int lvl = rule.levelIndex();
+				if (ImGui::Combo("##level", &lvl, kLevelLabels, IM_ARRAYSIZE(kLevelLabels)))
+				{
+					rule.level = HE::ProjectAntiCheatRule::kLevels[lvl];
+					commit = true;
+				}
+				EditorWidgets::helpForKey("Anti-Cheat/Rule Level");
+			}
+			ImGui::TableSetColumnIndex(5);
+			if (EditorWidgets::smallButton("\xc3\x97##removerule")) removeAt = i;
+			EditorWidgets::helpForKey("Anti-Cheat/Remove rule");
+			ImGui::PopID();
+		}
+		ImGui::EndTable();
+	}
+	if (removeAt >= 0)
+	{
+		a.rules.erase(a.rules.begin() + removeAt);
+		commit = true;
+	}
+	if (static_cast<int>(a.rules.size()) < AC::kMaxRules)
+	{
+		if (EditorWidgets::button("Add Rule"))
+		{
+			a.rules.push_back(HE::ProjectAntiCheatRule{});
+			commit = true;
+		}
+	}
+
+	if (commit) commitSettings(ctx, p, "anti-cheat settings");
+}
+
 // ─── Audio ▸ Buses ───────────────────────────────────────────────────────────
 // The mixer is a window of its own (View ▸ Audio Mixer): faders are something
 // you operate while a scene plays, not a page you fill in. This page says where
@@ -924,6 +1135,7 @@ constexpr NavItem kGameItems[] = {
 	{ Page::Application, "Application" },
 	{ Page::Permissions, "Permissions" },
 	{ Page::Fonts,       "Fonts" },
+	{ Page::AntiCheat,   "Anti-Cheat" },
 };
 constexpr NavItem kRenderingItems[] = {
 	{ Page::RenderDefaults, "Defaults" },
@@ -1021,6 +1233,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	case Page::Application:     drawApplicationPage(ctx);     break;
 	case Page::Permissions:     drawPermissionsPage(ctx);     break;
 	case Page::Fonts:           drawFontsPage(ctx);           break;
+	case Page::AntiCheat:       drawAntiCheatPage(ctx);       break;
 	case Page::RenderDefaults:  drawRenderDefaultsPage(ctx);  break;
 	case Page::Shadows:         drawShadowsPage(ctx);         break;
 	case Page::Simulation:      drawSimulationPage(ctx);      break;

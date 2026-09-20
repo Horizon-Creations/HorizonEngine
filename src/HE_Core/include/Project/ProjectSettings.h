@@ -2,8 +2,10 @@
 #include <Types/Defines.h>
 #include <nlohmann/json_fwd.hpp>
 #include <glm/vec3.hpp>
+#include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace HE {
 
@@ -48,6 +50,8 @@ namespace HE {
 //   shadows         IRenderer::ShadowSettings, pushed per frame by editor + game.
 //   physics         PhysicsWorld gravity + the fixed step both apps drive it at.
 //   renderDefaults  the export dialog's config.json when useEditorSettings is off.
+//   anticheat       the host's AntiCheatService (HorizonScene) — thresholds,
+//                   what happens per level, the game's value rules.
 // The exporter copies the file verbatim to <data>/Config/ProjectSettings.json
 // (ExportSettings::projectSettingsFile); the packaged game loads it from there
 // before its window opens.
@@ -150,14 +154,121 @@ struct HE_API ProjectRenderDefaults
     static constexpr int kMaxWindowEdge = 16384;
 };
 
+// ─── Anti-cheat ───────────────────────────────────────────────────────────────
+// What the host's AntiCheatService (docs/anti-cheat-plan.md §4.4) is told about
+// this project. It lives here and not in an asset because it is project-wide
+// and belongs in a merge request next to the physics rate: a kick threshold is
+// a decision about the game, not about one scene.
+//
+// A value rule (§3.4): a number the engine does not know — damage, loot, a
+// currency delta — that the game declares once and has checked with one call
+// (`anticheat.check("Damage", value, player)`). Range, then rate per source.
+struct HE_API ProjectAntiCheatRule
+{
+    std::string name;                 // what the game's check() call names
+    float       min          = 0.0f;  // inclusive range a single value may take
+    float       max          = 0.0f;
+    float       maxPerSecond = 0.0f;  // summed over one second per source; 0 = unchecked
+    // What a violation counts as: "suspect" | "confirmed" | "hard". Hard is for
+    // the values where a single violation is proof (currency 0 → 10^9); the
+    // other two feed the decaying score like any engine observation.
+    std::string level = "suspect";
+
+    static constexpr const char* kLevels[] = { "suspect", "confirmed", "hard" };
+    static constexpr int         kLevelCount = 3;
+    // Index into kLevels, or 0 for a spelling the file does not know.
+    int levelIndex() const;
+};
+
+struct HE_API ProjectAntiCheatSettings
+{
+    // ── Switch ───────────────────────────────────────────────────────────────
+    // Off = the absence of the service; the host behaves byte-for-byte as it
+    // did before anti-cheat existed. That is the default, so a project that
+    // never opened the page ships nothing new.
+    bool enabled = false;
+    // Compare the exe/dylib/pak hashes a guest sends at join against the host's
+    // own (§3.5). True by default: the plan's recommended setup is what ticking
+    // `enabled` should give, and this flag does nothing while `enabled` is off.
+    bool integrityCheck = true;
+
+    // ── Limits (§3.3) ────────────────────────────────────────────────────────
+    // Accepted simulated time may outrun wall time by this fraction before it
+    // counts as a stretched clock. 0.15 = 15 %.
+    float tolerance = 0.15f;
+    // Seconds the dt ratio is measured over. Seconds and not frames, because a
+    // burst after a stall delivers thirty commands in one frame whose dt sums
+    // to exactly the time the host waited.
+    float windowSec = 3.0f;
+    // Inputs per second beyond which commands are dropped — 4× a 60 Hz client,
+    // because bursts after a stall arrive all at once.
+    int maxInputsPerSecond = 240;
+
+    // ── Score (§3.6) ─────────────────────────────────────────────────────────
+    float scoreHalfLifeSec = 30.0f;   // score halves every this many seconds
+    float scoreSuspect     = 5.0f;    // score >= this is Suspect
+    float scoreConfirmed   = 20.0f;   // score >= this is Confirmed; >= suspect
+
+    // ── Policy (§5.2, §5.3) ──────────────────────────────────────────────────
+    // What the host does on its own when a connection reaches a level, as a
+    // set of responses. A game handler may replace it per report; without one
+    // this is what happens. Log is in every set and cannot be taken out — a
+    // level change is always a line in Cat::AntiCheat — so `[]` in the file
+    // means "log only", which is the observation mode for calibrating the
+    // thresholds on real players before the first kick (§5.3).
+    enum Response : std::uint32_t
+    {
+        Log       = 1u << 0,
+        Event     = 1u << 1,   // OnCheatDetected in every frontend + EventBus
+        Telemetry = 1u << 2,   // report into the upload queue (needs telemetryUrl)
+        Flag      = 1u << 3,   // marked for review, no game effect
+        Kick      = 1u << 4,   // NetSession::disconnect after a notice
+        Ban       = 1u << 5,   // kick + refused for the rest of this session
+        AllResponses = Log | Event | Telemetry | Flag | Kick | Ban,
+    };
+    // Defaults are the plan's: no kick on the two score levels, whose
+    // thresholds are unmeasured starting values; a kick on Hard, which no
+    // hitch, burst or clock can produce.
+    std::uint32_t policySuspect   = Log | Event | Telemetry;
+    std::uint32_t policyConfirmed = Log | Event | Telemetry;
+    std::uint32_t policyHard      = Log | Event | Telemetry | Kick;
+
+    // ── Telemetry (§3.7) ─────────────────────────────────────────────────────
+    // Where reports are POSTed. Empty = no telemetry, which is the default;
+    // this is the engine's own setting and NOT the scripts' "Network access"
+    // permission, on purpose.
+    std::string telemetryUrl;
+
+    // ── Rules (§3.4) ─────────────────────────────────────────────────────────
+    std::vector<ProjectAntiCheatRule> rules;
+
+    // Ranges clamp() holds the numbers in. Wide on purpose: these are sanity
+    // bounds against a hand-edited file, not tuning advice.
+    static constexpr float kMaxTolerance          = 2.0f;
+    static constexpr float kMinWindowSec          = 0.5f;
+    static constexpr float kMaxWindowSec          = 60.0f;
+    static constexpr int   kMinInputsPerSecond    = 1;
+    static constexpr int   kMaxInputsPerSecond    = 10000;
+    static constexpr float kMinHalfLifeSec        = 0.1f;
+    static constexpr float kMaxHalfLifeSec        = 3600.0f;
+    static constexpr float kMaxScoreThreshold     = 1.0e6f;
+    static constexpr float kMaxRuleValue          = 1.0e9f;
+    static constexpr int   kMaxRules              = 256;
+    static constexpr int   kResponseCount         = 6;   // bits in Response, Log first
+    // Spellings in the file, in bit order.
+    static constexpr const char* kResponseNames[kResponseCount] =
+        { "log", "event", "telemetry", "flag", "kick", "ban" };
+};
+
 struct HE_API ProjectSettings
 {
     static constexpr int kVersion = 1;
 
-    ProjectGameSettings    game;
-    ProjectShadowSettings  shadows;
-    ProjectPhysicsSettings physics;
-    ProjectRenderDefaults  renderDefaults;
+    ProjectGameSettings      game;
+    ProjectShadowSettings    shadows;
+    ProjectPhysicsSettings   physics;
+    ProjectRenderDefaults    renderDefaults;
+    ProjectAntiCheatSettings antiCheat;
 
     // True when nothing differs from a fresh construction. The saver uses it to
     // leave a project that never touched its settings WITHOUT a file, so an old

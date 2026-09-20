@@ -3064,6 +3064,135 @@ namespace
 	  "Reads the Content folder again for scenes. The list is made once when the "
 	  "page opens, so a scene saved since then is not in it until you press this.",
 	  "", "editor#preferences" },
+	// ── Game ▸ Anti-Cheat ────────────────────────────────────────────────────
+	// The host's side of a multiplayer session: what it refuses to believe from
+	// a client and what it does about it. Off by default, which is the host as
+	// it always was; the numbers below are read only once the switch is on.
+	{ "Anti-Cheat/Enable anti-cheat", "Enable anti-cheat",
+	  "On, the host scores what every client sends — more inputs than a client "
+	  "can produce, simulated time running ahead of the clock, moves faster than "
+	  "the entity's Max Speed — and acts on the policy below when a score "
+	  "crosses a level. Off, the same refusals still happen (the host never "
+	  "trusted a client's position) but nothing is counted, reported or kicked, "
+	  "which is how every session ran before this page existed.\n\n"
+	  "Saved to Config/ProjectSettings.json and read by whoever hosts: the "
+	  "editor in Play as host and the exported build alike.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Check client integrity at join", "Check client integrity at join",
+	  "A joining client sends the hashes of its executable, its engine libraries "
+	  "and every pak; the host compares them with its own, because in a "
+	  "listen-server both run the same packaged build. A mismatch is an "
+	  "observation with the file's name. Catches an edited script or asset and "
+	  "a swapped library; it cannot catch a patched executable, which would "
+	  "send the right hashes anyway. Does nothing while anti-cheat is off, and "
+	  "nothing in the editor, where there is no packaged build to hash.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Clock tolerance", "Clock tolerance",
+	  "How much faster than real time a client's simulated time may run, as a "
+	  "fraction, before it counts as a stretched clock: 0.15 allows 15 %. Clocks "
+	  "drift and a client under load sends long frames, both of which only ever "
+	  "make the ratio SMALLER — only a speed hack pushes it up. Lower is "
+	  "stricter and closer to flagging an honest machine.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Clock window", "Clock window",
+	  "The span, in seconds, over which simulated time is compared with the "
+	  "clock. It has to be seconds and not a frame: after a network stall the "
+	  "client's queued commands arrive in one burst, and their time adds up to "
+	  "exactly what the host waited. Three seconds absorbs a stall; a much "
+	  "longer window notices a speed hack later.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Max inputs per second", "Max inputs per second",
+	  "More input commands than this in a second are dropped, not applied. Four "
+	  "times a 60 Hz client's rate by default, so a burst after a stall still "
+	  "fits; a client that sends this many steadily is not a game client.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Score half-life", "Score half-life",
+	  "Every observation adds its weight to the connection's score, and the score "
+	  "halves every this many seconds. A single hitch therefore fades out; only "
+	  "a pattern keeps the score up. Shorter forgives faster and needs a denser "
+	  "pattern to reach a level.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Suspect at", "Suspect at",
+	  "The score at which a connection becomes Suspect — the first level that "
+	  "produces a report and runs its policy row. A starting value from "
+	  "reasoning, not measurement: run with a log-only policy first and read "
+	  "what real players score before you let this level kick anyone.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Confirmed at", "Confirmed at",
+	  "The score at which Suspect becomes Confirmed, with its own policy row. "
+	  "Kept at or above Suspect at, otherwise Suspect could never be reached. "
+	  "Hard is not a score level: a frame that does not parse or input for an "
+	  "entity the client does not own is Hard on its own, whatever the score.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Policy Event", "Event",
+	  "Raise OnCheatDetected — in HorizonCode, Lua, Python and C++ — with the "
+	  "report's ticket, so the game can look at it and, in the same frame, "
+	  "replace the rest of this row with its own response. Log is always on and "
+	  "has no box.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Policy Telemetry", "Telemetry",
+	  "Queue the report for upload to the Telemetry URL below. Nothing is sent "
+	  "while that URL is empty. Reports carry the connection, the level, the "
+	  "score and the recent observations; never a join secret, key material or a "
+	  "player name the game did not attach itself.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Policy Flag", "Flag",
+	  "Mark the connection as \"for review\": its score and the flag are readable "
+	  "by the game and show in later reports. No effect on play — a marker for "
+	  "a human or a handler to act on.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Policy Kick", "Kick",
+	  "Disconnect the client after a notice with the reason, at the end of the "
+	  "frame so a handler can still overrule it. Off by default on Suspect and "
+	  "Confirmed, whose thresholds are unmeasured starting values; on for Hard, "
+	  "which no hitch, burst or clock can produce.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Policy Ban", "Ban",
+	  "Kick, and refuse the same client for the rest of THIS session. There is no "
+	  "player identity to remember across sessions, so a lasting ban is the "
+	  "game's to keep; this one ends with the host.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Telemetry URL", "Telemetry URL",
+	  "Where reports go when a policy row has Telemetry ticked: an HTTPS "
+	  "endpoint that receives them as JSON, buffered and sent from a background "
+	  "thread. Empty means no telemetry at all, which is the default. This is "
+	  "the engine's own setting and not the scripts' Network permission on the "
+	  "Permissions page — the two are kept apart on purpose.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Rule Name", "Rule name",
+	  "What the game's check names: anticheat.check(\"Damage\", value, player) "
+	  "finds the row called Damage. The engine cannot know what damage or loot "
+	  "means, so the game declares the value here once and asks about each "
+	  "claim with one call; a false answer means \"do not apply it\", and the "
+	  "score, report and log are already taken care of.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Rule Min", "Min",
+	  "The smallest value a single claim may carry. Anything below fails the "
+	  "check and counts as the rule's level.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Rule Max", "Max",
+	  "The largest value a single claim may carry; kept at or above Min. A hit "
+	  "for 10,000 against a Max of 100 fails before the game ever sees it.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Rule Per second", "Per second",
+	  "The most the values of this rule may add up to in one second from one "
+	  "player, whatever each claim says on its own. 0 does not check the rate.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Rule Level", "Level",
+	  "What a violation counts as. Suspect and Confirmed add weight to the "
+	  "score like any engine observation; Hard is for values where a single "
+	  "violation is proof — a currency that jumps from 0 to a billion — and "
+	  "runs the Hard policy row at once.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Remove rule", "Remove rule",
+	  "Takes the rule out. A game that still calls check() with its name gets "
+	  "true — no rule, no check — so remove the call as well.",
+	  "", "collaboration#gameplay" },
+	{ "Anti-Cheat/Add Rule", "Add Rule",
+	  "Adds an empty row. Name it after the value the game will ask about, then "
+	  "set its range and rate; the row is saved as you go, and a nameless row "
+	  "is simply never matched.",
+	  "", "collaboration#gameplay" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
 	  "On, the packaged build boots with whatever this editor's Preferences and "
@@ -6462,6 +6591,7 @@ namespace
 		// the editor, one section per page so the reference is split the way
 		// the tab's rail is.
 		{ "Project General/",  "editor-settings", "Settings Reference", "Project: general" },
+		{ "Anti-Cheat/",       "editor-settings", "Settings Reference", "Project: anti-cheat" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
 		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
