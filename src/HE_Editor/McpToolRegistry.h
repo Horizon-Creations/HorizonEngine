@@ -1256,4 +1256,15 @@ struct McpSettingsHooks
 
 void registerSettingsTools(McpToolRegistry& registry, McpSettingsHooks hooks);
 
+// ─── Several tool calls in one request ───────────────────────────────────────
+// `batch`: a list of {tool, args} pairs, each dispatched through this registry
+// exactly as a single tools/call would be. Partial success is the contract —
+// by default every element runs and reports its own outcome, `stopOnError`
+// stops at the first failure and marks the rest skipped. Never atomic, never
+// nested. The full semantics are in McpToolsBatch.cpp; register it LAST, after
+// every family it may dispatch to, so tools/list shows it at the end where the
+// meta-tool belongs. The reference is captured: the registry has to outlive
+// its own tools, which it does — the tools live in it.
+void registerBatchTool(McpToolRegistry& registry);
+
 } // namespace HE::Ed

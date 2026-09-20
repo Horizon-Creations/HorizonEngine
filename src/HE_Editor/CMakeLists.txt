@@ -200,6 +200,9 @@ add_executable(HorizonEditor WIN32
 	# TABLE rather than as a screen. `row("bloom", …)` in EditorSettingsPanel.cpp
 	# is documentation only a human looking at a widget can read.
 	EditorSettingsCatalog.cpp
+	# Several tool calls in one request, dispatched through the registry itself.
+	# Registered last; McpToolsBatch.cpp states the partial-success contract.
+	McpToolsBatch.cpp
 	# The argument readers, the ONE confinement rule and the one content walk that
 	# all of the above use. Two copies of a boundary are two boundaries.
 	McpToolCommon.cpp

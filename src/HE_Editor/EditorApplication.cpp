@@ -7480,6 +7480,12 @@ void EditorApplication::setupMcpTools()
 		if (what == "maxfps") setMaxFps(cfg.MaxFps);
 	};
 	HE::Ed::registerSettingsTools(m_mcp.registry(), std::move(settings));
+
+	// Several calls in one request. Last, after every family it can dispatch to:
+	// it looks tools up by name at call time, so the order is for tools/list, not
+	// for correctness — but a meta-tool listed before the tools it drives reads
+	// backwards.
+	HE::Ed::registerBatchTool(m_mcp.registry());
 }
 
 // ─── The gateway, wired to this editor ───────────────────────────────────────
