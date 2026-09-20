@@ -301,9 +301,9 @@ den Undo-Stack des Panels.
 
 ### 3.1 Was die Registry heute trägt
 
-84 handgeschriebene Werkzeuge (gezählt wie in §19.1) in 16 `McpTools*.cpp`
-plus `ping`/`scene_info` in `McpToolRegistry.cpp`, dazu die dynamischen
-`api_*`. Pro Datei, mit dem, was sie **liest** (L), **schreibt/ändert** (S)
+84 handgeschriebene Werkzeuge (gezählt wie in §19.1): 82 in den 16
+`McpTools*.cpp` plus `ping`/`scene_info` in `McpToolRegistry.cpp`, dazu die
+dynamischen `api_*`. Pro Datei, mit dem, was sie **liest** (L), **schreibt/ändert** (S)
 und **anlegt** (A):
 
 | Datei | Werkzeuge | L | S | A |
@@ -327,7 +327,7 @@ und **anlegt** (A):
 
 ### 3.2 Die Lücken-Tabelle: alle 26 Asset-Typen
 
-`HE::AssetType` (`Types/Enums.h:85-113`) hat 27 Werte; `Unknown` zählt nicht.
+`HE::AssetType` (`Types/Enums.h:85-113`) hat 26 Werte; `Unknown` zählt nicht.
 `Shader` wird von der Material-Codegen erzeugt und nie autoriert, hat also zu
 Recht kein Werkzeug. Für die übrigen 25:
 
