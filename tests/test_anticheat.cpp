@@ -942,3 +942,311 @@ TEST_CASE("AntiCheatHost: the project settings become the service's knobs and th
     none.suspect = 0;
     CHECK(none.forLevel(Level::Suspect) == Response::Log);
 }
+
+// ─── Step 7: the telemetry sink (docs/anti-cheat-plan.md §3.7) ──────────────
+// Reports leave the machine as redacted JSON, in batches, from a worker thread
+// the frame collects. The network is a fake here: what the sink WOULD have
+// posted is what these cases read.
+
+#include <HorizonScene/AntiCheat/AntiCheatTelemetry.h>
+#include <nlohmann/json.hpp>
+#include <chrono>
+#include <thread>
+
+namespace {
+
+// Stands in for HE::Net::httpsPostJson. Called on the sink's worker thread,
+// so everything it records sits behind a mutex; it outlives every host that
+// posts through it (declared first in each case).
+struct FakePost {
+    mutable std::mutex       mutex;
+    std::vector<std::string> bodies;
+    HttpsResponse            answer;
+
+    FakePost() { answer.ok = true; answer.statusCode = 200; }
+
+    HE::AntiCheat::AntiCheatTelemetry::Post fn() {
+        return [this](const std::string&, const std::string& body) {
+            std::lock_guard<std::mutex> lk(mutex);
+            bodies.push_back(body);
+            return answer;
+        };
+    }
+    std::size_t calls() const {
+        std::lock_guard<std::mutex> lk(mutex);
+        return bodies.size();
+    }
+    std::string body(std::size_t i) const {
+        std::lock_guard<std::mutex> lk(mutex);
+        return bodies.at(i);
+    }
+    bool anyMentions(const std::string& needle) const {
+        std::lock_guard<std::mutex> lk(mutex);
+        for (const std::string& b : bodies)
+            if (b.find(needle) != std::string::npos) return true;
+        return false;
+    }
+};
+
+// Frames until the upload in flight has been collected. Bounded, and never
+// one fixed sleep: the worker is a real thread with its own timing.
+void settle(HostedRig& h) {
+    for (int i = 0; i < 400 && h.server.telemetry().uploadInFlight(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        h.frame();
+    }
+}
+
+} // namespace
+
+TEST_CASE("AntiCheatTelemetry: an empty URL is off, and the host's queue stays for takeTelemetry")
+{
+    FakePost fake;
+    RigOptions opt;
+    opt.assignControl = false;
+    HostedRig h(opt);
+    h.server.telemetry().setPost(fake.fn());
+    h.server.configureTelemetry("", "SESSIONIDABCDEFGHIJ", "Test Game");
+    CHECK_FALSE(h.server.telemetry().enabled());
+
+    h.rig->sendRaw(1, 0.1f, glm::vec3(50.0f, 0, 0));
+    h.frames(3);
+    CHECK(fake.calls() == 0);
+    CHECK(h.server.telemetry().stats().uploads == 0);
+    Report r;
+    REQUIRE(h.server.takeTelemetry(r));
+    CHECK(r.level == Level::Hard);
+    // detach() with no URL posts nothing either.
+    h.server.detach();
+    CHECK(fake.calls() == 0);
+}
+
+TEST_CASE("AntiCheatTelemetry: a Hard report is posted in the frame it was decided, as redacted JSON")
+{
+    FakePost fake;
+    RigOptions opt;
+    opt.assignControl = false;
+    HostedRig h(opt);
+    h.server.telemetry().setPost(fake.fn());
+    h.server.configureTelemetry("https://example.invalid/anticheat", "SESSIONIDABCDEFGHIJ",
+                                "Test Game");
+    REQUIRE(h.server.telemetry().enabled());
+
+    h.rig->sendRaw(1, 0.1f, glm::vec3(50.0f, 0, 0));
+    h.rig->frame();
+    h.server.pump();
+    h.server.flush();
+    // Started at that flush — not thirty seconds later.
+    CHECK(h.server.telemetry().stats().uploads == 1);
+    settle(h);
+    REQUIRE(fake.calls() == 1);
+    CHECK(h.server.telemetry().stats().succeeded == 1);
+    CHECK(h.server.telemetry().stats().reportsSent == 1);
+    // The host's own queue is empty: the sink drained it.
+    Report r;
+    CHECK_FALSE(h.server.takeTelemetry(r));
+
+    const nlohmann::json j = nlohmann::json::parse(fake.body(0));
+    CHECK(j.at("schema").get<int>() == 1);
+    CHECK(j.at("project").get<std::string>() == "Test Game");
+    // The session id shortened as NetLog.h shortens it: six characters, never
+    // the whole invitation.
+    CHECK(j.at("session").get<std::string>().rfind("SESSIO", 0) == 0);
+    CHECK(j.at("session").get<std::string>().find("SESSIONIDA") == std::string::npos);
+    REQUIRE(j.at("reports").size() == 1);
+    const nlohmann::json& rep = j.at("reports")[0];
+    CHECK(rep.at("level").get<std::string>() == "Hard");
+    CHECK(rep.at("rule").get<std::string>() == "ForeignEntity");
+    CHECK(rep.at("trigger").get<std::string>() == "ForeignEntity");
+    CHECK(rep.at("conn").get<unsigned>() == LoopbackTransport::kPeer);
+    CHECK(rep.at("observations").size() >= 1);
+    // No label was set, so none travels — not even an empty one.
+    CHECK_FALSE(rep.contains("label"));
+}
+
+TEST_CASE("AntiCheatTelemetry: a Suspect report waits for the interval, then goes out in a batch")
+{
+    FakePost fake;
+    HostedRig h;   // control assigned: report() needs a known player
+    const ConnectionId conn = LoopbackTransport::kPeer;
+    h.server.telemetry().setPost(fake.fn());
+    h.server.configureTelemetry("https://example.invalid/anticheat", "", "");
+
+    // Weight just above the suspect threshold (plan lesson: a weight equal to
+    // it decays below on the next update).
+    h.server.report(conn, "Damage", 6.0f, "damage 999 > 100");
+    h.frames(3);
+    REQUIRE(h.rig->svc.level(conn) == Level::Suspect);
+    CHECK(h.server.telemetry().stats().buffered == 1);
+    CHECK(h.server.telemetry().stats().uploads == 0);   // not urgent, not due
+    CHECK(fake.calls() == 0);
+
+    // Interval over: the next flush sends, on a frame with nothing pending —
+    // the pump before the early return is what makes that happen.
+    h.server.telemetry().setIntervalSec(0.0);
+    h.server.flush();
+    CHECK(h.server.telemetry().stats().uploads == 1);
+    settle(h);
+    REQUIRE(fake.calls() == 1);
+    const nlohmann::json j = nlohmann::json::parse(fake.body(0));
+    REQUIRE(j.at("reports").size() == 1);
+    CHECK(j.at("reports")[0].at("level").get<std::string>() == "Suspect");
+    CHECK(j.at("reports")[0].at("rule").get<std::string>() == "Damage");
+    CHECK(j.at("reports")[0].at("detail").get<std::string>().find("damage 999") != std::string::npos);
+    CHECK_FALSE(j.contains("project"));
+    CHECK_FALSE(j.contains("session"));
+}
+
+TEST_CASE("AntiCheatTelemetry: the payload and the log never carry the join secret or the URL's token")
+{
+    // The real session shape, as in the log test above: loopback under
+    // SecureTransport, so the secret is genuinely in the process.
+    const std::string secret = "ZZTELEMETRYSECRET7NEVERSEND9XYZQ";
+    const std::string token  = "MGMTTOKEN0NEVERLOGME";
+    FakePost fake;
+    LogSpy   spy;
+
+    auto [a, b] = LoopbackTransport::createPair();
+    auto hostT   = SecureTransport::wrap(std::move(a),
+                       SecureTransport::Config{ secret, NetRole::Host,   false });
+    auto clientT = SecureTransport::wrap(std::move(b),
+                       SecureTransport::Config{ secret, NetRole::Client, false });
+    REQUIRE(hostT);
+    REQUIRE(clientT);
+    NetSession hostNet(hostT.get(), NetRole::Host);
+    NetSession clientNet(clientT.get(), NetRole::Client);
+    bool established = false;
+    for (int i = 0; i < 64 && !established; ++i) {
+        hostT->update(); clientT->update();
+        hostNet.pump();  clientNet.pump();
+        established = !hostNet.connections().empty() && !clientNet.connections().empty();
+    }
+    REQUIRE(established);
+    const ConnectionId conn = hostNet.connections().front();
+
+    HorizonWorld hostWorld, clientWorld;
+    AntiCheatService svc;
+    GameReplication hostRepl(&hostNet, NetRole::Host);
+    GameReplication clientRepl(&clientNet, NetRole::Client);
+    hostRepl.setWorld(&hostWorld);
+    clientRepl.setWorld(&clientWorld);
+    hostRepl.setMoveFunction(unclampedMover());
+    clientRepl.setMoveFunction(unclampedMover());
+    hostRepl.setAntiCheat(&svc);
+
+    AntiCheatHost host;
+    host.attach(&svc, &hostRepl);
+    host.telemetry().setPost(fake.fn());
+    host.configureTelemetry("https://example.invalid/anticheat?token=" + token,
+                            "SESSIONIDABCDEFGHIJ", "Test Game");
+    host.setPlayerLabel(conn, "Alice");
+
+    const Entity he = hostWorld.createEntity("Player");
+    hostWorld.registry().emplace_or_replace<TransformComponent>(he);
+    hostWorld.registry().emplace_or_replace<MovementComponent>(he).maxSpeed = 1.0f;
+    const std::uint32_t netId = hostRepl.registerEntity(he);
+    hostRepl.assignControl(conn, netId);
+    const Entity ce = clientWorld.createEntity("Player");
+    clientWorld.registry().emplace_or_replace<TransformComponent>(ce);
+    clientRepl.adoptEntity(ce, netId);
+    clientRepl.setLocallyControlled(ce, netId);
+
+    auto frame = [&] {
+        hostT->update(); clientT->update();
+        hostNet.pump();  clientNet.pump();
+        hostRepl.update(kFrame); clientRepl.update(kFrame);
+        host.pump();
+        host.flush();
+    };
+    // An unannounced teleport: Confirmed at once, so the upload starts now.
+    clientRepl.pushInput(glm::vec3(1000.0f, 0, 0), 0.0f, 0.1f);
+    for (int i = 0; i < 4; ++i) frame();
+    REQUIRE(svc.level(conn) == Level::Confirmed);
+    REQUIRE(host.telemetry().stats().uploads >= 1);
+    for (int i = 0; i < 400 && host.telemetry().uploadInFlight(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        frame();
+    }
+    REQUIRE(fake.calls() >= 1);
+
+    // The payload: the label the game chose, the shortened session — and
+    // nothing that could open the session.
+    CHECK(fake.anyMentions("Alice"));
+    CHECK(fake.anyMentions("SESSIO"));
+    CHECK_FALSE(fake.anyMentions("SESSIONIDABCDEFGHIJ"));
+    CHECK_FALSE(fake.anyMentions(secret));
+    CHECK_FALSE(fake.anyMentions(token));
+
+    // The log: the sink said something (the URL, the upload), and the secret
+    // and the token are not in it. That is the test_net_secure shape — the
+    // material was in the process, and it was not written down.
+    CHECK(spy.count() > 0);
+    CHECK(spy.mentions("telemetry"));
+    CHECK(spy.mentions("example.invalid/anticheat"));
+    CHECK_FALSE(spy.mentions(secret));
+    CHECK_FALSE(spy.mentions(token));
+    host.detach();
+}
+
+TEST_CASE("AntiCheatTelemetry: a failed upload is logged, counted and lets go of the batch")
+{
+    FakePost fake;
+    fake.answer.ok    = false;
+    fake.answer.error = "connection refused";
+    LogSpy spy;
+    RigOptions opt;
+    opt.assignControl = false;
+    HostedRig h(opt);
+    h.server.telemetry().setPost(fake.fn());
+    h.server.configureTelemetry("https://example.invalid/anticheat", "", "");
+    // Keep the peer: two Hard reports on one connection, and the default
+    // policy would have closed the link after the first.
+    HE::AntiCheat::Policy keep;
+    keep.hard = Response::Log | Response::Event | Response::Telemetry;
+    h.server.setPolicy(keep);
+
+    h.rig->sendRaw(1, 0.1f, glm::vec3(50.0f, 0, 0));
+    h.frames(2);
+    settle(h);
+    REQUIRE(fake.calls() == 1);
+    CHECK(h.server.telemetry().stats().failed == 1);
+    CHECK(h.server.telemetry().stats().succeeded == 0);
+    CHECK(spy.mentions("connection refused"));
+    CHECK_FALSE(h.server.telemetry().uploadInFlight());
+
+    // A non-2xx answer counts the same way, and the sink is ready again.
+    fake.answer.ok = true;
+    fake.answer.statusCode = 500;
+    h.rig->sendRaw(2, 0.1f, glm::vec3(50.0f, 0, 0));
+    h.frames(2);
+    settle(h);
+    REQUIRE(fake.calls() == 2);
+    CHECK(h.server.telemetry().stats().failed == 2);
+    CHECK(spy.mentions("HTTP 500"));
+}
+
+TEST_CASE("AntiCheatTelemetry: the redaction helpers follow NetLog.h")
+{
+    using HE::AntiCheat::AntiCheatTelemetry;
+    CHECK(AntiCheatTelemetry::shortSessionId("") == "");
+    CHECK(AntiCheatTelemetry::shortSessionId("abc") == "abc");
+    CHECK(AntiCheatTelemetry::shortSessionId("abcdef") == "abcdef");
+    CHECK(AntiCheatTelemetry::shortSessionId("abcdefghij").rfind("abcdef", 0) == 0);
+    CHECK(AntiCheatTelemetry::shortSessionId("abcdefghij").find("g") == std::string::npos);
+    CHECK(AntiCheatTelemetry::loggableUrl("https://h/p?token=x") == "https://h/p");
+    CHECK(AntiCheatTelemetry::loggableUrl("https://h/p#frag") == "https://h/p");
+    CHECK(AntiCheatTelemetry::loggableUrl("https://h/p") == "https://h/p");
+
+    // A report with a label is the only way a name travels.
+    Report r;
+    r.id = 7; r.level = Level::Suspect; r.rule = "Damage"; r.detail = "x";
+    const nlohmann::json plain = nlohmann::json::parse(AntiCheatTelemetry::redact(r, ""));
+    CHECK_FALSE(plain.contains("label"));
+    CHECK_FALSE(plain.contains("session"));
+    CHECK_FALSE(plain.contains("entity"));
+    r.label = "Bob"; r.netId = 3;
+    const nlohmann::json named = nlohmann::json::parse(AntiCheatTelemetry::redact(r, "abcdef…"));
+    CHECK(named.at("label").get<std::string>() == "Bob");
+    CHECK(named.at("entity").get<unsigned>() == 3);
+    CHECK(named.at("session").get<std::string>() == "abcdef…");
+}

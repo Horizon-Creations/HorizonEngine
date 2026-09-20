@@ -925,6 +925,13 @@ void GameApplication::OnInit()
 			                          m_scriptContext.get(), &m_scriptInstances,
 			                          logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
 		});
+		// Where the reports go (plan §3.7): the project's URL, empty by default
+		// and then nothing leaves the machine. The shipped build has no
+		// directory session id yet; the title names the project to a collector
+		// that serves several games. The editor never configures this — its
+		// preview strips Telemetry from every response.
+		m_antiCheat.configureTelemetry(m_projectSettings.antiCheat.telemetryUrl, std::string(),
+		                               m_projectSettings.game.title);
 		// The shipped game IS the application, so app.quit leaves the loop for
 		// real (the editor binds the same hook to stopping play mode instead).
 		g_host.quit     = [this]{ Quit(); };
