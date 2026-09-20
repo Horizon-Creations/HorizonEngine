@@ -2,6 +2,7 @@
 
 #include "AssetStubWriter.h"
 #include "EditorAssetTypeCache.h"
+#include "McpBridge.h"
 #include "McpToolRegistry.h"
 #include "TestFsUtil.h"
 
@@ -12,12 +13,16 @@
 // material_create templates is gated on HE_TESTS_HAVE_SHADERC.
 #include <material/MaterialShaderLibrary.h>
 
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <iterator>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ─── Tuning a material from outside the editor ───────────────────────────────
@@ -1463,4 +1468,56 @@ TEST_CASE("mcp material tools: graph_info's chain skips reroutes and stops at fa
 	CHECK(texNode->at("texture") == "Textures/Rock.hasset");
 	REQUIRE(texNode->at("inputs").size() == 1);
 	CHECK(texNode->at("inputs")[0].at("source") == json{ { "node", uv }, { "pin", 0 } });
+}
+
+// ─── Serving the material tools to a real client, by hand ────────────────────
+// Every case above calls a handler in-process. That proves what a tool DOES, but
+// not what a client SEES: the bridge wraps a ToolResult into MCP's wire shape
+// (`content`/`isError`/`structuredContent`), the shim (scripts/he_mcp.py) hands
+// it across, and where `errorCode` ends up on the wire is a fact of that
+// wrapping, not of the handler. The editor cannot serve this check without a
+// project on the machine, so this case IS the running server: the real
+// McpBridge with the real registerMaterialTools on a temp root, plus the
+// engine's own EngineContent under `Engine/`, pumped until told to stop.
+//
+// Off unless HE_MCP_SERVE_MATERIAL names the endpoint file to write — then
+// drive it with `scripts/he_mcp.py --endpoint <that file>` from another
+// process, and touch `<that file>.stop` to end it. HE_MCP_SERVE_SECONDS caps the
+// wait (default 120) so a forgotten run cannot hang a suite.
+TEST_CASE("mcp material tools: serve to a client (HE_MCP_SERVE_MATERIAL)")
+{
+	const char* endpoint = std::getenv("HE_MCP_SERVE_MATERIAL");
+	if (!endpoint || !*endpoint) return;
+	int seconds = 120;
+	if (const char* s = std::getenv("HE_MCP_SERVE_SECONDS"); s && *s) seconds = std::atoi(s);
+
+	// What a client finds on the root: a master with every parameter kind
+	// (the graph_info fixture), a function, a stub, and the shipped engine
+	// content under Engine/ — read-only there, like in the editor.
+	Fixture f("serve");
+	f.writeMaterial("Materials/Params.hasset", makeParamGraph());
+	f.writeFunction("Materials/Fn.hasset", makeFunctionGraph());
+	f.writeStub("Materials/Stub.hasset", HE::AssetType::Material);
+	if (const char* eng = std::getenv("HE_MCP_SERVE_ENGINE_CONTENT"); eng && *eng)
+		f.content.setEngineContentRoot(eng);
+
+	HE::Ed::McpBridge bridge;
+	bridge.setEndpointFile(fs::path(endpoint));
+	HE::Ed::registerMaterialTools(bridge.registry(), f.content, McpMaterialHooks{});
+	REQUIRE(bridge.start());
+	std::cerr << "he_tests: serving material tools on port " << bridge.port()
+	          << ", root " << f.root << ", stop file " << endpoint << ".stop\n";
+
+	const fs::path stopFile = fs::path(std::string(endpoint) + ".stop");
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+	std::uint64_t now = 0;
+	while (std::chrono::steady_clock::now() < deadline && !fs::exists(stopFile))
+	{
+		bridge.update(now);
+		now += 16;
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	CHECK_MESSAGE(fs::exists(stopFile), "no client stopped the server before the cap");
+	bridge.stop();
+	he_test::removeQuiet(stopFile);
 }
