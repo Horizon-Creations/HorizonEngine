@@ -22,10 +22,16 @@
 // the one the client asked for, built the way the client asked (position AND
 // look-at, forward really pointing at the target); do absent camera arguments
 // fall back to the live camera and say so; do the size and the inline limits
-// refuse the way the schema says. What the Metal backend actually draws for
-// that camera is the HE_DUMP_SCENEIMAGE witness's job (EditorApplication.cpp),
-// not this binary's.
+// refuse the way the schema says. And, from the second step on: does each
+// client keep a camera of its own between calls, can it move it absolutely
+// and relatively, can it never reach another client's, and does the camera go
+// when the registry is told the client is gone. What the Metal backend
+// actually draws for that camera is the HE_DUMP_SCENEIMAGE witness's job
+// (EditorApplication.cpp), not this binary's.
 
+using HE::Ed::McpCallContext;
+using HE::Ed::McpClientCameras;
+using HE::Ed::McpClientId;
 using HE::Ed::McpScreenshotHooks;
 using HE::Ed::McpToolRegistry;
 using HE::Ed::ToolResult;
@@ -62,12 +68,13 @@ void paint(std::vector<std::uint8_t>& rgba, std::uint32_t w, std::uint32_t h)
 
 struct Fixture
 {
-	McpToolRegistry registry;
-	LastRender      last;
-	fs::path        dir;
-	bool            worldOpen   = true;
-	bool            liveActive  = true;
-	bool            renderFails = false;
+	McpToolRegistry  registry;
+	McpClientCameras cameras;   // handed in, so a test can look at the table
+	LastRender       last;
+	fs::path         dir;
+	bool             worldOpen   = true;
+	bool             liveActive  = true;
+	bool             renderFails = false;
 
 	Fixture()
 	{
@@ -101,6 +108,7 @@ struct Fixture
 			return true;
 		};
 		h.screenshotDir = [this] { return dir.string(); };
+		h.cameras       = &cameras;
 		HE::Ed::registerScreenshotTools(registry, std::move(h));
 	}
 
@@ -110,11 +118,22 @@ struct Fixture
 		fs::remove_all(dir, ec);
 	}
 
+	// As the anonymous client, the way every older test and the plain
+	// `handler` path call it.
 	ToolResult call(const json& args)
 	{
 		const auto* t = registry.find("scene_screenshot");
 		REQUIRE(t != nullptr);
 		return t->handler(args);
+	}
+
+	// As a named client, the way the bridge calls it.
+	ToolResult callAs(McpClientId client, const json& args)
+	{
+		const auto* t = registry.find("scene_screenshot");
+		REQUIRE(t != nullptr);
+		last = LastRender{};
+		return t->invoke(McpCallContext{ client }, args);
 	}
 };
 
@@ -148,8 +167,12 @@ TEST_CASE("scene_screenshot: registered as a reading tool with the schema the mo
 	CHECK_FALSE(t->mutates);
 	CHECK(t->inputSchema["type"] == "object");
 	CHECK(t->inputSchema["additionalProperties"] == false);
-	for (const char* key : { "position", "look_at", "fov", "width", "height", "output", "name" })
+	for (const char* key : { "position", "look_at", "yaw", "pitch", "fov", "turn", "move",
+	                         "reset", "render", "width", "height", "output", "name" })
 		CHECK(t->inputSchema["properties"].contains(key));
+	// Context-aware, and still callable the plain way (as the anonymous client).
+	CHECK(t->handlerCtx);
+	CHECK(t->handler);
 	// Nothing is required: no arguments = the viewport's own view.
 	CHECK_FALSE(t->inputSchema.contains("required"));
 }
@@ -207,11 +230,18 @@ TEST_CASE("scene_screenshot: the camera is the client's — position, look-at, f
 	CHECK(c.nearPlane == doctest::Approx(0.5f));
 	CHECK(c.farPlane == doctest::Approx(900.0f));
 
-	// And the result says what was used.
+	// And the result says what was used: the look-at is reported one unit
+	// ahead (the camera keeps a direction, not the point it was aimed at),
+	// with the yaw that direction means: -X is yaw -90.
 	CHECK(r.content["camera"]["position"] == json::array({ 10.0, 0.0, 0.0 }));
-	CHECK(r.content["camera"]["lookAt"] == json::array({ 0.0, 0.0, 0.0 }));
+	CHECK(r.content["camera"]["lookAt"][0] == doctest::Approx(9.0));
+	CHECK(r.content["camera"]["lookAt"][1] == doctest::Approx(0.0));
+	CHECK(r.content["camera"]["yaw"] == doctest::Approx(-90.0));
+	CHECK(r.content["camera"]["pitch"] == doctest::Approx(0.0));
 	CHECK(r.content["camera"]["fov"] == doctest::Approx(35.5));
 	CHECK(r.content["camera"]["fromViewport"] == false);
+	CHECK(r.content["camera"]["stored"] == true);
+	CHECK(r.content["rendered"] == true);
 }
 
 TEST_CASE("scene_screenshot: straight down does not degenerate the view")
@@ -435,6 +465,264 @@ TEST_CASE("scene_screenshot: an inline PNG over the shim's budget is refused wit
 	CHECK(r.errorCode == "too_large");
 	CHECK(r.errorMessage.find("file") != std::string::npos);
 	CHECK(r.imageBytes.empty());
+}
+
+// ─── One camera per client ───────────────────────────────────────────────────
+
+TEST_CASE("scene_screenshot: a client's camera is kept between calls and rendered when nothing is said")
+{
+	Fixture f;
+	ToolResult r = f.callAs(7, json{ { "position", json::array({ 0, 5, 10 }) },
+	                                 { "look_at",  json::array({ 0, 5, 0 }) },
+	                                 { "fov", 50 } });
+	REQUIRE_FALSE(r.isError);
+	REQUIRE(f.cameras.size() == 1);
+	REQUIRE(f.cameras.find(7) != nullptr);
+	CHECK(f.cameras.find(7)->position == glm::vec3(0.0f, 5.0f, 10.0f));
+	CHECK(f.cameras.find(7)->fovDeg == doctest::Approx(50.0f));
+
+	// Nothing said: the same camera, not the viewport's.
+	r = f.callAs(7, json::object());
+	REQUIRE_FALSE(r.isError);
+	CHECK(f.last.camera.position == glm::vec3(0.0f, 5.0f, 10.0f));
+	CHECK(f.last.camera.fovDegrees == doctest::Approx(50.0f));
+	CHECK_FALSE(f.last.camera.editorIcons);
+	CHECK(r.content["camera"]["fromViewport"] == false);
+	CHECK(r.content["camera"]["stored"] == true);
+	CHECK(r.content["camera"]["client"] == 7);
+
+	// An absolute argument replaces only its part: the fov stays.
+	r = f.callAs(7, json{ { "position", json::array({ 3, 5, 10 }) } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(f.last.camera.position == glm::vec3(3.0f, 5.0f, 10.0f));
+	CHECK(f.last.camera.fovDegrees == doctest::Approx(50.0f));
+	CHECK(forwardOf(f.last.camera).z == doctest::Approx(-1.0f));
+}
+
+TEST_CASE("scene_screenshot: two clients keep two cameras and cannot reach each other's")
+{
+	Fixture f;
+	REQUIRE_FALSE(f.callAs(1, json{ { "position", json::array({ 10, 0, 0 }) },
+	                                { "look_at",  json::array({ 0, 0, 0 }) } }).isError);
+	REQUIRE_FALSE(f.callAs(2, json{ { "position", json::array({ 0, 0, 10 }) },
+	                                { "look_at",  json::array({ 0, 0, 0 }) },
+	                                { "fov", 30 } }).isError);
+	CHECK(f.cameras.size() == 2);
+
+	// Each renders its own.
+	ToolResult r = f.callAs(1, json::object());
+	REQUIRE_FALSE(r.isError);
+	CHECK(f.last.camera.position == glm::vec3(10.0f, 0.0f, 0.0f));
+	CHECK(forwardOf(f.last.camera).x == doctest::Approx(-1.0f));
+	r = f.callAs(2, json::object());
+	REQUIRE_FALSE(r.isError);
+	CHECK(f.last.camera.position == glm::vec3(0.0f, 0.0f, 10.0f));
+	CHECK(f.last.camera.fovDegrees == doctest::Approx(30.0f));
+	CHECK(forwardOf(f.last.camera).z == doctest::Approx(-1.0f));
+
+	// Client 1 turns around; client 2 has not moved.
+	REQUIRE_FALSE(f.callAs(1, json{ { "turn", json::array({ 180, 0 }) } }).isError);
+	CHECK(forwardOf(f.last.camera).x == doctest::Approx(1.0f));
+	r = f.callAs(2, json::object());
+	CHECK(f.last.camera.position == glm::vec3(0.0f, 0.0f, 10.0f));
+	CHECK(forwardOf(f.last.camera).z == doctest::Approx(-1.0f));
+	CHECK(f.cameras.find(2)->yawDeg == doctest::Approx(0.0f));
+
+	// A third client that never said anything sees the viewport, and no
+	// camera is created for it.
+	r = f.callAs(3, json::object());
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content["camera"]["fromViewport"] == true);
+	CHECK(f.last.camera.editorIcons);
+	CHECK(f.cameras.size() == 2);
+}
+
+TEST_CASE("scene_screenshot: turn and move are relative, in degrees and along the camera's own axes")
+{
+	Fixture f;
+	// Start at the origin looking down -Z (yaw 0), level.
+	REQUIRE_FALSE(f.callAs(4, json{ { "position", json::array({ 0, 0, 0 }) },
+	                                { "yaw", 0 }, { "pitch", 0 } }).isError);
+
+	// Turn 90° right: now looking along +X.
+	ToolResult r = f.callAs(4, json{ { "turn", json::array({ 90, 0 }) } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content["camera"]["yaw"] == doctest::Approx(90.0));
+	CHECK(forwardOf(f.last.camera).x == doctest::Approx(1.0f));
+
+	// Step two forward: along +X, not along -Z.
+	r = f.callAs(4, json{ { "move", json::array({ 0, 0, 2 }) } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(f.last.camera.position.x == doctest::Approx(2.0f));
+	CHECK(f.last.camera.position.z == doctest::Approx(0.0f).epsilon(1e-5));
+
+	// Turn and move in one call: the move follows the new heading (another
+	// 90° right → looking along +Z; "right" is then -X).
+	r = f.callAs(4, json{ { "turn", json::array({ 90, 0 }) }, { "move", json::array({ 1, 0, 0 }) } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content["camera"]["yaw"] == doctest::Approx(180.0));
+	CHECK(f.last.camera.position.x == doctest::Approx(1.0f));
+	CHECK(f.last.camera.position.z == doctest::Approx(0.0f).epsilon(1e-5));
+
+	// Pitch stops at the pole rather than flipping over, yaw wraps.
+	r = f.callAs(4, json{ { "turn", json::array({ 270, 200 }) } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content["camera"]["pitch"] == doctest::Approx(90.0));
+	CHECK(r.content["camera"]["yaw"] == doctest::Approx(90.0));
+	for (int i = 0; i < 4; ++i)
+		for (int j = 0; j < 4; ++j)
+			CHECK(std::isfinite(f.last.camera.view[i][j]));
+}
+
+TEST_CASE("scene_screenshot: the first call of a client starts from the viewport's camera")
+{
+	Fixture f;
+	// A relative move with no camera yet: from where the viewport is, looking
+	// the way it looks (-Z from (1,2,3)) — two units forward is (1,2,1).
+	ToolResult r = f.callAs(5, json{ { "move", json::array({ 0, 0, 2 }) } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(f.last.camera.position == glm::vec3(1.0f, 2.0f, 1.0f));
+	CHECK(f.last.camera.fovDegrees == doctest::Approx(45.0f));
+	CHECK(f.last.camera.nearPlane == doctest::Approx(0.5f));
+	CHECK(r.content["camera"]["stored"] == true);
+
+	// Without a viewport there is nothing to start from.
+	f.liveActive = false;
+	r = f.callAs(6, json{ { "turn", json::array({ 10, 0 }) } });
+	REQUIRE(r.isError);
+	CHECK(r.errorCode == "no_camera");
+	CHECK(f.cameras.find(6) == nullptr);
+	// …but the client that already has a camera is unaffected.
+	r = f.callAs(5, json::object());
+	REQUIRE_FALSE(r.isError);
+	CHECK(f.last.camera.position == glm::vec3(1.0f, 2.0f, 1.0f));
+}
+
+TEST_CASE("scene_screenshot: render false moves without a picture, and a failed picture keeps the move")
+{
+	Fixture f;
+	ToolResult r = f.callAs(8, json{ { "position", json::array({ 0, 1, 0 }) },
+	                                 { "render", false } });
+	REQUIRE_FALSE(r.isError);
+	CHECK_FALSE(f.last.called);
+	CHECK(r.imageBytes.empty());
+	CHECK(r.content["rendered"] == false);
+	CHECK_FALSE(r.content.contains("pngBytes"));
+	REQUIRE(f.cameras.find(8) != nullptr);
+	CHECK(f.cameras.find(8)->position == glm::vec3(0.0f, 1.0f, 0.0f));
+
+	f.renderFails = true;
+	r = f.callAs(8, json{ { "move", json::array({ 0, 0, 3 }) } });
+	REQUIRE(r.isError);
+	CHECK(r.errorCode == "unsupported");
+	CHECK(f.cameras.find(8)->position.z == doctest::Approx(-3.0f));
+
+	// A refused argument, on the other hand, changes nothing.
+	f.renderFails = false;
+	r = f.callAs(8, json{ { "move", json::array({ 0, 0, 3 }) }, { "pitch", 200 } });
+	REQUIRE(r.isError);
+	CHECK(r.errorCode == "invalid_args");
+	CHECK(f.cameras.find(8)->position.z == doctest::Approx(-3.0f));
+	r = f.callAs(8, json{ { "look_at", json::array({ 0, 0, 0 }) }, { "yaw", 10 } });
+	REQUIRE(r.isError);
+	CHECK(r.errorCode == "invalid_args");
+	r = f.callAs(8, json{ { "reset", true }, { "yaw", 10 } });
+	REQUIRE(r.isError);
+	CHECK(r.errorCode == "invalid_args");
+	CHECK(f.cameras.find(8) != nullptr);
+}
+
+TEST_CASE("scene_screenshot: reset drops the camera, and so does the client going away")
+{
+	Fixture f;
+	REQUIRE_FALSE(f.callAs(1, json{ { "position", json::array({ 0, 0, 5 }) } }).isError);
+	REQUIRE_FALSE(f.callAs(2, json{ { "position", json::array({ 0, 0, 6 }) } }).isError);
+	CHECK(f.cameras.size() == 2);
+
+	// reset: back to the viewport's view, this call included.
+	ToolResult r = f.callAs(1, json{ { "reset", true } });
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content["camera"]["fromViewport"] == true);
+	CHECK(f.last.camera.position == glm::vec3(1.0f, 2.0f, 3.0f));
+	CHECK(f.cameras.find(1) == nullptr);
+	CHECK(f.cameras.find(2) != nullptr);
+
+	// The connection goes: the registry is told, the camera is gone, the
+	// other client's is not.
+	REQUIRE_FALSE(f.callAs(1, json{ { "position", json::array({ 0, 0, 7 }) } }).isError);
+	CHECK(f.cameras.size() == 2);
+	f.registry.notifyClientGone(1);
+	CHECK(f.cameras.find(1) == nullptr);
+	REQUIRE(f.cameras.find(2) != nullptr);
+	CHECK(f.cameras.find(2)->position == glm::vec3(0.0f, 0.0f, 6.0f));
+	// A later client with the same number starts clean.
+	r = f.callAs(1, json::object());
+	REQUIRE_FALSE(r.isError);
+	CHECK(r.content["camera"]["fromViewport"] == true);
+	// Unknown ids are fine to report gone.
+	f.registry.notifyClientGone(99);
+	CHECK(f.cameras.size() == 1);
+}
+
+TEST_CASE("scene_screenshot: without a table from the editor the tool keeps its own")
+{
+	McpToolRegistry reg;
+	McpScreenshotHooks h;
+	EditorCameraOverride seen;
+	h.hasWorld    = [] { return true; };
+	h.renderImage = [&seen](const EditorCameraOverride& c, std::uint32_t w, std::uint32_t hh,
+	                        std::vector<std::uint8_t>& rgba) {
+		seen = c;
+		paint(rgba, w, hh);
+		return true;
+	};
+	HE::Ed::registerScreenshotTools(reg, std::move(h));
+	const auto* t = reg.find("scene_screenshot");
+	REQUIRE(t != nullptr);
+	REQUIRE_FALSE(t->invoke(McpCallContext{ 3 }, json{ { "position", json::array({ 0, 0, 4 }) },
+	                                                    { "width", 16 }, { "height", 16 } }).isError);
+	REQUIRE_FALSE(t->invoke(McpCallContext{ 3 }, json{ { "width", 16 }, { "height", 16 } }).isError);
+	CHECK(seen.position == glm::vec3(0.0f, 0.0f, 4.0f));
+	reg.notifyClientGone(3);
+	// No live camera in this fixture, so with the stored one gone there is
+	// nothing to render from.
+	const ToolResult r = t->invoke(McpCallContext{ 3 }, json{ { "width", 16 }, { "height", 16 } });
+	REQUIRE(r.isError);
+	CHECK(r.errorCode == "no_camera");
+}
+
+TEST_CASE("McpClientCamera: yaw/pitch follow EditorCamera, and lookAt inverts forward")
+{
+	HE::Ed::McpClientCamera c;
+	// yaw 0 → -Z; +90 → +X; pitch +90 → +Y.
+	CHECK(c.forward().z == doctest::Approx(-1.0f));
+	c.yawDeg = 90.0f;
+	CHECK(c.forward().x == doctest::Approx(1.0f));
+	c.yawDeg = 0.0f; c.pitchDeg = 90.0f;
+	CHECK(c.forward().y == doctest::Approx(1.0f));
+
+	// Round trip through lookAt for a general direction.
+	c = HE::Ed::McpClientCamera{};
+	c.position = glm::vec3(1.0f, 2.0f, 3.0f);
+	c.lookAt(glm::vec3(4.0f, 4.0f, 1.0f));
+	const glm::vec3 want = glm::normalize(glm::vec3(3.0f, 2.0f, -2.0f));
+	CHECK(c.forward().x == doctest::Approx(want.x));
+	CHECK(c.forward().y == doctest::Approx(want.y));
+	CHECK(c.forward().z == doctest::Approx(want.z));
+
+	// Straight down keeps the yaw and gives a finite view with north up.
+	c.yawDeg = 30.0f;
+	c.lookAt(c.position - glm::vec3(0.0f, 10.0f, 0.0f));
+	CHECK(c.pitchDeg == doctest::Approx(-90.0f));
+	CHECK(c.yawDeg == doctest::Approx(30.0f));
+	const glm::mat4 v = c.view();
+	for (int i = 0; i < 4; ++i)
+		for (int j = 0; j < 4; ++j)
+			CHECK(std::isfinite(v[i][j]));
+
+	// A target on the camera itself changes nothing.
+	c.lookAt(c.position);
+	CHECK(c.pitchDeg == doctest::Approx(-90.0f));
 }
 
 TEST_CASE("mcpBase64Encode: RFC 4648 with padding")

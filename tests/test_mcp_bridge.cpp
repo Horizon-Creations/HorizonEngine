@@ -367,6 +367,71 @@ TEST_CASE("McpBridge: a tool's picture goes out as an MCP image block after the 
 	CHECK((*reply)["result"]["content"].size() == 1);
 }
 
+TEST_CASE("McpBridge: a tool learns which connection is calling, and hears when it is gone")
+{
+	Fixture f;
+	// A tool that answers with the caller's id — what the screenshot tool keys
+	// its camera on. Registered with the context signature only; `add` has to
+	// make it callable the plain way too.
+	McpTool who;
+	who.name        = "who";
+	who.description = "returns the caller's connection id";
+	who.inputSchema = json{ { "type", "object" } };
+	who.handlerCtx  = [](const HE::Ed::McpCallContext& ctx, const json&) {
+		return ToolResult::ok(json{ { "client", ctx.client } });
+	};
+	REQUIRE(f.bridge.registry().add(std::move(who)));
+	REQUIRE(f.bridge.registry().find("who")->handler);
+	CHECK(f.bridge.registry().find("who")->handler(json::object()).content["client"] == 0);
+
+	std::vector<HE::Ed::McpClientId> gone;
+	f.bridge.registry().addClientGoneHook([&gone](HE::Ed::McpClientId id) { gone.push_back(id); });
+
+	TestClient a, b;
+	REQUIRE(f.authenticate(a, 1));
+	REQUIRE(f.authenticate(b, 2));
+	std::vector<TestClient*> both{ &a, &b };
+
+	const json call{ { "jsonrpc", "2.0" }, { "id", 30 }, { "method", "tools/call" },
+	                 { "params", json{ { "name", "who" } } } };
+	a.send(call);
+	b.send(call);
+	REQUIRE(pumpUntil(f.bridge, both,
+	                  [&] { return replyWithId(a, 30) && replyWithId(b, 30); }));
+	const auto idA = structured(*replyWithId(a, 30))["client"].get<HE::Ed::McpClientId>();
+	const auto idB = structured(*replyWithId(b, 30))["client"].get<HE::Ed::McpClientId>();
+	// Real ids, and two different ones: the bridge never hands a tool the
+	// anonymous caller, and never confuses two connections.
+	CHECK(idA != 0);
+	CHECK(idB != 0);
+	CHECK(idA != idB);
+	// Through `batch` the same identity arrives at the inner tool.
+	HE::Ed::registerBatchTool(f.bridge.registry());
+	a.send(json{ { "jsonrpc", "2.0" }, { "id", 31 }, { "method", "tools/call" },
+	             { "params", json{ { "name", "batch" },
+	                               { "arguments", json{ { "operations", json::array({
+	                                   json{ { "tool", "who" } } }) } } } } } });
+	REQUIRE(pumpUntil(f.bridge, both, [&] { return replyWithId(a, 31) != nullptr; }));
+	CHECK(structured(*replyWithId(a, 31))["results"][0]["result"]["client"] == idA);
+
+	// A hangs up: exactly one notice, with A's id, and B is untouched.
+	CHECK(gone.empty());
+	a.t.reset();
+	REQUIRE(pumpUntil(f.bridge, { &b }, [&] { return !gone.empty(); }));
+	REQUIRE(gone.size() == 1);
+	CHECK(gone[0] == idA);
+	CHECK(f.bridge.clientCount() == 1);
+	b.send(json{ { "jsonrpc", "2.0" }, { "id", 32 }, { "method", "ping" } });
+	REQUIRE(pumpUntil(f.bridge, { &b }, [&] { return replyWithId(b, 32) != nullptr; }));
+	CHECK(gone.size() == 1);
+
+	// The listener goes down: B is reported too, so nothing survives into the
+	// next start where the numbering begins again at 1.
+	f.bridge.stop();
+	REQUIRE(gone.size() == 2);
+	CHECK(gone[1] == idB);
+}
+
 TEST_CASE("McpBridge: scene_info reports the editor's real state, not an echo")
 {
 	// The whole point of the stub: prove the pipe carries live editor state.

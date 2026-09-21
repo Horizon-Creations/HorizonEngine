@@ -7604,6 +7604,9 @@ void EditorApplication::setupMcpTools()
 		IRenderer* r = renderer();
 		return r ? r->GetEditorCamera() : EditorCameraOverride{};
 	};
+	// The per-client cameras live in the editor, not in the tool: the viewport
+	// draws them. The tool registers the client-gone hook that empties them.
+	shot.cameras     = &m_mcpCameras;
 	shot.renderImage = [this](const EditorCameraOverride& cam, std::uint32_t w,
 	                          std::uint32_t h, std::vector<std::uint8_t>& rgba) {
 		IRenderer* r = renderer();

@@ -1,35 +1,64 @@
 # MCP: Szenen-Screenshots aus einer Client-Kamera (Thema 74)
 
-Stand 21.09.2026, Schritt 6 (Grundgerüst) auf `claude/mcp-scene-screenshot-camera`.
-Was gebaut ist, wo die Nähte für die Folgeschritte liegen, und was der Renderer
-dabei verspricht.
+Stand 21.09.2026, Schritt 1 (Grundgerüst) und Schritt 2 (Kamera je Client) auf
+`claude/mcp-scene-screenshot-camera`. Was gebaut ist, wo die Nähte für die
+Folgeschritte liegen, und was der Renderer dabei verspricht.
 
 ## 1. Das Werkzeug: `scene_screenshot`
 
 Lesend (`mutates=false`), registriert in `EditorApplication::setupMcpTools`
 über `registerScreenshotTools` (`src/HE_Editor/McpToolsScreenshot.cpp`).
 
+Jeder verbundene Client hat **eine eigene Kamera** (`McpClientCamera`:
+Position, Yaw, Pitch, FOV, Near/Far), die zwischen Aufrufen erhalten bleibt.
+Der erste Aufruf mit irgendeinem Kamera-Argument legt sie an, Startpunkt ist
+die Editor-Kamera; jeder weitere Aufruf geht von ihr aus. Absolute Argumente
+ersetzen ihren Teil, relative werden danach angewandt, in der Reihenfolge
+`turn`, dann `move`.
+
 | Argument | Typ | Bedeutung |
 |---|---|---|
-| `position` | `[x,y,z]` | Kameraposition, Weltkoordinaten, +Y oben. Fehlt: Position der Editor-Kamera. |
-| `look_at` | `[x,y,z]` | Zielpunkt. Fehlt: Blickrichtung der Editor-Kamera (ohne Viewport: Ursprung). |
-| `fov` | 1..170 | vertikales Sichtfeld in Grad. Fehlt: das des Viewports (sonst 60). |
+| `position` | `[x,y,z]` | absolut. Kameraposition, Weltkoordinaten, +Y oben. |
+| `look_at` | `[x,y,z]` | absolut. Zielpunkt; setzt Yaw und Pitch. Nicht zusammen mit `yaw`/`pitch`. |
+| `yaw` | Grad | absolut. 0 blickt nach −Z, +90 nach +X (rechts). |
+| `pitch` | −90..90 | absolut. 0 waagerecht, +90 senkrecht nach oben. |
+| `fov` | 1..170 | absolut. vertikales Sichtfeld in Grad. |
+| `turn` | `[Δyaw,Δpitch]` | relativ, Grad. Pitch stoppt am Pol, Yaw wickelt. |
+| `move` | `[rechts,oben,vorn]` | relativ, Welteinheiten entlang der eigenen Kameraachsen, nach `turn`. |
+| `reset` | bool | wirft die eigene Kamera weg; nur allein senden. |
+| `render` | bool | Standard `true`. `false`: nur Kamera setzen, kein Bild. |
 | `width`, `height` | 16..4096 | Zielgröße, Standard 1280×720, Budget 3840×2160 Pixel. |
 | `output` | `inline` \| `file` | Standard `inline`. |
 | `name` | `[A-Za-z0-9_-]{1,64}` | nur bei `file`: Basisname, `.png` wird angehängt. Fehlt: `scene_<ms>_<n>`. |
 
-Ohne jedes Kamera-Argument ist das Bild die Sicht des Viewports, mit
-Editor-Icons. Sobald der Client eine Kamera beschreibt, sind die Icons aus:
-er will die Szene, nicht die Editor-Hilfen.
+Ohne jedes Kamera-Argument: hat der Client eine Kamera, wird sie gerendert,
+wie sie steht; hat er keine, ist das Bild die Sicht des Viewports, mit
+Editor-Icons, und es wird **keine** Kamera angelegt („was der Mensch sieht"
+gehört dem Client nicht). Sobald der Client eine eigene Kamera hat, sind die
+Icons aus: er will die Szene, nicht die Editor-Hilfen.
+
+Yaw/Pitch folgen exakt `EditorCamera::forward` (`(cp·sy, sp, −cp·cy)`), am
+Pol dieselbe Up-Referenz wie `EditorCamera::upReference` (Karte, Norden
+oben). Ein `look_at` senkrecht nach unten setzt Pitch −90 und lässt den Yaw
+stehen, damit `turn` am Pol sinnvoll bleibt.
+
+Die Kamera wird **vor** dem Render gespeichert: ein `unsupported` vom Backend
+frisst die Bewegung nicht. Ein abgelehntes Argument (`invalid_args`) ändert
+dagegen nichts.
 
 Antwort (immer, in `structuredContent`):
 
 ```json
-{ "width": 1280, "height": 720, "output": "inline", "pngBytes": 412233,
-  "backend": "Metal",
-  "camera": { "position": [0,5,10], "lookAt": [0,0,0], "fov": 60, "fromViewport": false },
+{ "width": 1280, "height": 720, "output": "inline", "rendered": true,
+  "pngBytes": 412233, "backend": "Metal",
+  "camera": { "position": [0,5,10], "lookAt": [0,5,9], "yaw": 0, "pitch": 0,
+              "fov": 60, "fromViewport": false, "stored": true, "client": 3 },
   "path": "/Users/…/HorizonEngine/mcp-screenshots/scene_….png" }   // nur bei file
 ```
+
+`lookAt` ist immer der Punkt eine Einheit voraus (die Kamera merkt sich eine
+Richtung, nicht den Zielpunkt). `client` ist die Verbindungsnummer der Bridge;
+`stored` sagt, ob das die eigene Kamera war.
 
 Bei `inline` hängt die Bridge zusätzlich einen MCP-Inhaltsblock
 `{ "type": "image", "data": <base64>, "mimeType": "image/png" }` **nach** dem
@@ -83,12 +112,27 @@ ist ein Pfad pro Anfrage, keiner pro Frame.
 
 ## 3. Verifikation
 
-* `tests/test_mcp_tools_screenshot.cpp`: 14 Fälle gegen einen Fake-Renderer
+* `tests/test_mcp_tools_screenshot.cpp`: 24 Fälle gegen einen Fake-Renderer
   (Gradient rein, PNG raus, per `heLoadPngRGBA` pixelgenau zurückgelesen;
   Kamera aus position/look_at mit Vorwärtsvektor-Probe; Fallbacks;
   Dateiname-Einsperrung; Größen- und Inline-Budget; Ablehnungen; base64-Vektoren).
+  Schritt 2 (per `McpTool::invoke(McpCallContext{id}, args)`): Kamera bleibt
+  zwischen Aufrufen, zwei Clients halten zwei Kameras und `turn` des einen
+  lässt den anderen stehen, ein dritter ohne Kamera sieht den Viewport ohne
+  dass eine angelegt wird; `turn`/`move` relativ entlang der eigenen Achsen,
+  Pol-Klemme und Yaw-Wrap; erster Aufruf startet bei der Viewport-Kamera;
+  `render:false` speichert ohne Bild, ein gescheitertes Bild behält die
+  Bewegung, ein abgelehntes Argument ändert nichts; `reset` und
+  `notifyClientGone` löschen nur die eine Kamera, eine spätere gleiche Nummer
+  startet leer; ohne Editor-Tabelle führt das Tool eine eigene;
+  `McpClientCamera` Yaw/Pitch-Konvention und `lookAt`-Umkehrung.
 * `tests/test_mcp_bridge.cpp`: „a tool's picture goes out as an MCP image
-  block" (Reihenfolge, MIME, base64, keine Bytes bei Ablehnung).
+  block" (Reihenfolge, MIME, base64, keine Bytes bei Ablehnung). Schritt 2,
+  über echten Loopback-Socket: „a tool learns which connection is calling,
+  and hears when it is gone": zwei authentifizierte Clients bekommen zwei
+  verschiedene, echte Ids (nie 0), `batch` reicht dieselbe Id an das innere
+  Tool, das Auflegen des einen feuert den Client-Gone-Hook genau einmal mit
+  dessen Id, `stop()` meldet den Rest.
 * Echte Hardware: `HE_DUMP_SCENEIMAGE=<png>` in `dumpFrameHeadless`
   (`EditorApplication.cpp`) rendert nach dem normalen Dump (a) ein Still mit
   derselben Kamera und Größe, (b) ein Still um 90° gedreht bei 640×400, dann
@@ -97,19 +141,40 @@ ist ein Pfad pro Anfrage, keiner pro Frame.
   live-after ok (Z% px differ from live-before)`. Erwartung: X und Z klein,
   Y deutlich. Aufruf: `scripts/he_shot.py /tmp/live.png SCENEIMAGE=/tmp/mcp.png`.
 
-## 4. Nähte für die Folgeschritte
+## 4. Kamera je Client (Schritt 2): wie die Identität zum Tool kommt
 
-* **Kamera je Client (Schritt 2):** `McpScreenshotHooks::liveCamera` ist der
-  einzige Rückfall, wenn der Client keine Kamera nennt. Eine Pro-Client-Kamera
-  ersetzt genau diese Stelle. Dafür fehlt heute die Client-Identität im
-  Handler: `McpBridge::dispatch` kennt die `ConnectionId`, ruft aber
-  `tool->handler(args)`. Vorschlag: `McpTool::handler` um einen
-  `McpCallContext { ConnectionId client; }` erweitern (oder eine zweite
-  Handler-Signatur), und die Bridge meldet `Disconnected` an eine
-  Aufräum-Hook, damit die Kamera mit der Verbindung stirbt.
-* **Gizmos im Viewport (Schritt 3):** die Kameras sind dann Werte im Editor;
-  `ViewportPanel` zeichnet Collab-Teilnehmer bereits als Frustum mit Kennung,
-  dieselbe Zeichnung nimmt die Client-Kameras.
+* **`McpCallContext { McpClientId client; }`** (`McpToolRegistry.h`). `McpTool`
+  hat neben `handler(args)` eine zweite Signatur `handlerCtx(ctx, args)`;
+  `McpTool::invoke(ctx, args)` nimmt die Kontext-Variante, wenn gesetzt.
+  `McpToolRegistry::add` synthetisiert für ein Kontext-only-Tool den plain
+  `handler` (Client 0 = anonym), damit `find(name)->handler(args)` in jedem
+  Test und bei jedem älteren Aufrufer weiter funktioniert. `McpClientId` ist
+  per `static_assert` in `McpBridge.cpp` derselbe Typ wie `HE::Net::ConnectionId`
+  (uint32, ab 1 je Listener), der Registry-Header bleibt netzfrei.
+* **Bridge:** `dispatch` ruft `tool->invoke(McpCallContext{id}, args)`; das
+  Batch-Tool ist selbst `handlerCtx` und reicht den Aufrufer an die inneren
+  Tools durch.
+* **Aufräumen:** `McpToolRegistry::addClientGoneHook(fn)` /
+  `notifyClientGone(id)`. Die Bridge meldet an **vier** Stellen: `Disconnected`
+  (nur für zugelassene Verbindungen), beide Unauth-Drops, und in `stop()` für
+  alle verbliebenen Clients, **nachdem** der Transport weg ist (danach wird
+  nichts mehr gepollt, und der nächste Listener zählt wieder ab 1: ohne das
+  erbte der erste Client des nächsten Starts die Kamera des vorigen).
+* **`McpClientCameras`** (`src/HE_Editor/McpClientCameras.h`, header-only):
+  `std::map<McpClientId, McpClientCamera>` mit `find/set/erase/all()`, in
+  Id-Reihenfolge aufzählbar. Der Editor besitzt sie
+  (`EditorApplication::m_mcpCameras`) und reicht sie per
+  `McpScreenshotHooks::cameras` hinein; fehlt der Zeiger, führt das Tool eine
+  private Tabelle (Tests). Der Client-Gone-Hook des Tools löscht daraus.
+
+## 5. Nähte für die Folgeschritte
+
+* **Gizmos im Viewport (Schritt 3):** `EditorApplication::m_mcpCameras.all()`
+  liefert je Client `position`, `forward()`, `up()`, `right()`, `fovDeg`,
+  `nearPlane`/`farPlane` und `view()`; `ViewportPanel` zeichnet
+  Collab-Teilnehmer bereits als Frustum mit Kennung, dieselbe Zeichnung nimmt
+  die Client-Kameras mit der Verbindungsnummer als Kennung. Die Tabelle wird
+  nur im Frame-Thread geschrieben (Bridge-Pump), also ohne Lock lesbar.
 * **Andere Backends:** OpenGL braucht denselben Umbau (Viewport-FBO
   beiseitelegen, Swapchain-Pass überspringen); D3D/Vulkan liefern bis dahin
   `unsupported` mit Namen.

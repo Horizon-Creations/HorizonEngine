@@ -23,11 +23,21 @@
 // (two outputs, why never a client-chosen path, why the live camera is a hook).
 // What is worth stating HERE is what the handler actually promises:
 //
-//   • THE CAMERA IS THE CLIENT'S, NOT THE EDITOR'S. `position` and `look_at`
-//     build a view matrix of their own; the editor's camera is read only when
-//     the client gave no position at all, and it is never written. A client
-//     that wants to "see what the user sees" sends nothing; one that wants its
-//     own angle sends a position and gets exactly that.
+//   • THE CAMERA IS THE CLIENT'S, NOT THE EDITOR'S. The first call that says
+//     anything about the camera creates one for THIS client (keyed on the
+//     connection the bridge hands over in McpCallContext) and every later call
+//     starts from it: absolute arguments replace parts, `move`/`turn` nudge
+//     it, and saying nothing renders it where it stands. The editor's camera
+//     is read only as the starting point of a client that has none yet, and it
+//     is never written. Two clients cannot reach each other's camera — the id
+//     comes from the bridge, not from the arguments. A client that has never
+//     described a camera and sends nothing "sees what the user sees".
+//
+//   • THE CAMERA STATE OUTLIVES A FAILED PICTURE. It is stored BEFORE the
+//     render, so a backend that answers `unsupported` does not also eat the
+//     move the client just made; `render: false` stores without rendering at
+//     all. It does not outlive the connection: the registry's client-gone
+//     hook erases it.
 //
 //   • WHAT COMES BACK IS WHAT WAS ASKED FOR, OR A REFUSAL. The renderer is asked
 //     for exactly `width`×`height`; a backend that cannot (no still-on-request
@@ -109,20 +119,6 @@ bool safeBaseName(const std::string& s)
 }
 
 // ── The camera ───────────────────────────────────────────────────────────────
-// Right-handed, +Y up, the convention EditorCamera::viewMatrix follows; a view
-// straight up or down would make (0,1,0) degenerate, so that one case takes +Z
-// as the up reference instead of failing.
-glm::mat4 lookAtView(const glm::vec3& eye, const glm::vec3& target)
-{
-	const glm::vec3 fwd = target - eye;
-	const float     len = glm::length(fwd);
-	if (len < 1e-6f) return glm::lookAt(eye, eye + glm::vec3(0.0f, 0.0f, -1.0f),
-	                                    glm::vec3(0.0f, 1.0f, 0.0f));
-	const glm::vec3 f  = fwd / len;
-	const glm::vec3 up = (std::fabs(f.y) > 0.999f) ? glm::vec3(0.0f, 0.0f, 1.0f)
-	                                                : glm::vec3(0.0f, 1.0f, 0.0f);
-	return glm::lookAt(eye, target, up);
-}
 
 // The forward direction an override looks along: the third row of the view
 // matrix, negated (view space looks down -Z).
@@ -131,59 +127,149 @@ glm::vec3 forwardOf(const EditorCameraOverride& c)
 	return -glm::vec3(c.view[0][2], c.view[1][2], c.view[2][2]);
 }
 
+// The live viewport camera as a client camera: the starting point of a client
+// that has none of its own yet. Yaw/pitch are read off the view's forward.
+McpClientCamera fromLive(const EditorCameraOverride& live)
+{
+	McpClientCamera c;
+	c.position  = live.position;
+	c.fovDeg    = live.fovDegrees;
+	c.nearPlane = live.nearPlane;
+	c.farPlane  = live.farPlane;
+	c.lookAt(live.position + forwardOf(live));
+	return c;
+}
+
+EditorCameraOverride toOverride(const McpClientCamera& c)
+{
+	EditorCameraOverride o;
+	o.active       = true;
+	o.view         = c.view();
+	o.position     = c.position;
+	o.fovDegrees   = c.fovDeg;
+	o.nearPlane    = c.nearPlane;
+	o.farPlane     = c.farPlane;
+	o.orthographic = false;
+	// The editor's light / camera / audio billboards are for the human at the
+	// viewport; a client asking for its own angle gets the scene.
+	o.editorIcons  = false;
+	return o;
+}
+
+// The camera arguments, read and checked before anything is changed: a call
+// that is refused for one bad argument leaves the client's camera untouched.
+struct CameraArgs
+{
+	bool      hasPos = false, hasTarget = false, hasYaw = false, hasPitch = false,
+	          hasFov = false, hasMove = false, hasTurn = false, reset = false;
+	glm::vec3 position = glm::vec3(0.0f), target = glm::vec3(0.0f), move = glm::vec3(0.0f);
+	float     yaw = 0.0f, pitch = 0.0f, fov = 60.0f;
+	float     turnYaw = 0.0f, turnPitch = 0.0f;
+
+	bool any() const
+	{
+		return hasPos || hasTarget || hasYaw || hasPitch || hasFov || hasMove || hasTurn;
+	}
+};
+
+bool readCameraArgs(const json& args, CameraArgs& a, ToolResult& failure)
+{
+	auto bad = [&](const char* what) {
+		failure = ToolResult::fail("invalid_args", what);
+		return false;
+	};
+	auto number = [&](const char* key, bool& has, float& out, double lo, double hi,
+	                  const char* what) {
+		if (!hasArg(args, key)) return true;
+		if (!args[key].is_number()) return bad(what);
+		const double v = numArg(args, key, 0.0);
+		if (!(v >= lo && v <= hi)) return bad(what);
+		has = true;
+		out = static_cast<float>(v);
+		return true;
+	};
+
+	a.hasPos = vec3Arg(args, "position", a.position);
+	if (hasArg(args, "position") && !a.hasPos)
+		return bad("'position' must be an array of three numbers [x, y, z].");
+	a.hasTarget = vec3Arg(args, "look_at", a.target);
+	if (hasArg(args, "look_at") && !a.hasTarget)
+		return bad("'look_at' must be an array of three numbers [x, y, z].");
+	if (!number("yaw", a.hasYaw, a.yaw, -1e6, 1e6, "'yaw' must be a number (degrees)."))
+		return false;
+	if (!number("pitch", a.hasPitch, a.pitch, -90.0, 90.0,
+	            "'pitch' must be a number within -90..90 (degrees, + looks up)."))
+		return false;
+	if (!number("fov", a.hasFov, a.fov, 1.0, 170.0,
+	            "'fov' is the vertical field of view in degrees and must be within 1..170."))
+		return false;
+	a.hasMove = vec3Arg(args, "move", a.move);
+	if (hasArg(args, "move") && !a.hasMove)
+		return bad("'move' must be an array of three numbers [right, up, forward] in "
+		           "world units, relative to the camera's own axes.");
+	if (hasArg(args, "turn"))
+	{
+		const json& t = args["turn"];
+		if (!t.is_array() || t.size() != 2 || !t[0].is_number() || !t[1].is_number())
+			return bad("'turn' must be an array of two numbers [yaw, pitch] in degrees "
+			           "(+yaw turns right, +pitch looks up).");
+		a.hasTurn   = true;
+		a.turnYaw   = t[0].get<float>();
+		a.turnPitch = t[1].get<float>();
+	}
+	if (hasArg(args, "reset"))
+	{
+		if (!args["reset"].is_boolean()) return bad("'reset' must be a boolean.");
+		a.reset = args["reset"].get<bool>();
+	}
+
+	if (a.hasTarget && (a.hasYaw || a.hasPitch))
+		return bad("'look_at' and 'yaw'/'pitch' both set the direction; send one or "
+		           "the other.");
+	if (a.reset && a.any())
+		return bad("'reset' drops your camera; send it alone, and describe the new "
+		           "camera on the next call.");
+	return true;
+}
+
 struct CameraChoice
 {
 	EditorCameraOverride cam;
-	glm::vec3            lookAt = glm::vec3(0.0f);
+	McpClientCamera      own;              // meaningful when !fromLive
 	bool                 fromLive = false;
 	bool                 ok = false;
 	ToolResult           failure = ToolResult::ok(json::object());
 };
 
-CameraChoice chooseCamera(const McpScreenshotHooks& h, const json& args)
+// Read, update and store the calling client's camera, and say which camera the
+// picture is taken with. The one place the table is written.
+CameraChoice chooseCamera(const McpScreenshotHooks& h, McpClientCameras& table,
+                          McpClientId client, const json& args)
 {
 	CameraChoice c;
+	CameraArgs   a;
+	if (!readCameraArgs(args, a, c.failure)) return c;
 
-	// The live camera is the starting point for everything the client did not
-	// say: near/far, the fov, and — when no position came — the whole view.
+	if (a.reset) table.erase(client);
+
 	EditorCameraOverride live;
 	if (h.liveCamera) live = h.liveCamera();
+	const McpClientCamera* stored = table.find(client);
 
-	glm::vec3  position(0.0f);
-	const bool hasPos = vec3Arg(args, "position", position);
-	if (hasArg(args, "position") && !hasPos)
+	if (!a.any())
 	{
-		c.failure = ToolResult::fail("invalid_args",
-			"'position' must be an array of three numbers [x, y, z].");
-		return c;
-	}
-	glm::vec3  target(0.0f);
-	const bool hasTarget = vec3Arg(args, "look_at", target);
-	if (hasArg(args, "look_at") && !hasTarget)
-	{
-		c.failure = ToolResult::fail("invalid_args",
-			"'look_at' must be an array of three numbers [x, y, z].");
-		return c;
-	}
-
-	float fov = live.active ? live.fovDegrees : 60.0f;
-	if (hasArg(args, "fov"))
-	{
-		const double f = numArg(args, "fov", -1.0);
-		if (!(f >= 1.0 && f <= 170.0))
+		if (stored)
 		{
-			c.failure = ToolResult::fail("invalid_args",
-				"'fov' is the vertical field of view in degrees and must be within 1..170.");
+			// The client's camera, as it stands.
+			c.own      = *stored;
+			c.cam      = toOverride(c.own);
+			c.ok       = true;
 			return c;
 		}
-		fov = static_cast<float>(f);
-	}
-
-	if (!hasPos && !hasTarget && !hasArg(args, "fov"))
-	{
-		// Nothing about the camera was said: the picture is the viewport's own
-		// view, icons and all. Without a live camera there is nothing to fall
-		// back on, and the client has to say where to look from.
+		// Nothing about the camera was ever said: the picture is the
+		// viewport's own view, icons and all — and no camera is created for
+		// that; "what the user sees" is not a camera the client owns. Without
+		// a live camera there is nothing to fall back on.
 		if (!live.active)
 		{
 			c.failure = ToolResult::fail("no_camera",
@@ -192,40 +278,82 @@ CameraChoice chooseCamera(const McpScreenshotHooks& h, const json& args)
 			return c;
 		}
 		c.cam      = live;
-		c.lookAt   = live.position + forwardOf(live);
 		c.fromLive = true;
 		c.ok       = true;
 		return c;
 	}
 
-	if (!hasPos)
+	// Where the changes start from: the client's camera, else the viewport's,
+	// else — with a position — a default camera at that position looking at
+	// the world origin, the one point every scene has.
+	McpClientCamera cam;
+	if (stored)           cam = *stored;
+	else if (live.active) cam = fromLive(live);
+	else if (a.hasPos)
 	{
-		// A look-at or a fov without a position: from where the viewport is.
-		if (!live.active)
-		{
-			c.failure = ToolResult::fail("no_camera",
-				"'position' is required when the editor has no live viewport camera to "
-				"take it from.");
-			return c;
-		}
-		position = live.position;
+		cam.position = a.position;
+		cam.lookAt(glm::vec3(0.0f));
 	}
-	if (!hasTarget)
-		// Keep looking the way the viewport looks, from the new place; with no
-		// viewport, look at the world origin — the one point every scene has.
-		target = live.active ? position + forwardOf(live) : glm::vec3(0.0f);
+	else
+	{
+		c.failure = ToolResult::fail("no_camera",
+			"'position' is required on the first call when the editor has no live "
+			"viewport camera to start from.");
+		return c;
+	}
 
-	c.cam.active          = true;
-	c.cam.view            = lookAtView(position, target);
-	c.cam.position        = position;
-	c.cam.fovDegrees      = fov;
-	c.cam.nearPlane       = live.active ? live.nearPlane : 0.1f;
-	c.cam.farPlane        = live.active ? live.farPlane : 5000.0f;
-	c.cam.orthographic    = false;
-	c.cam.editorIcons     = false;
-	c.lookAt              = target;
-	c.ok                  = true;
+	// Absolute first, relative after: "put me at P looking at T, then step
+	// forward two" reads in that order.
+	if (a.hasPos)    cam.position = a.position;
+	if (a.hasYaw)    cam.yawDeg   = a.yaw;
+	if (a.hasPitch)  cam.pitchDeg = a.pitch;
+	if (a.hasTarget) cam.lookAt(a.target);
+	if (a.hasFov)    cam.fovDeg   = a.fov;
+	if (a.hasTurn)
+	{
+		cam.yawDeg   += a.turnYaw;
+		cam.pitchDeg += a.turnPitch;
+	}
+	cam.normalise();
+	if (a.hasMove)
+		// Along the camera's own axes, after the turn: "turn left, walk
+		// forward" walks the new way.
+		cam.position += cam.right() * a.move.x + cam.up() * a.move.y +
+		                cam.forward() * a.move.z;
+
+	table.set(client, cam);
+	c.own = cam;
+	c.cam = toOverride(cam);
+	c.ok  = true;
 	return c;
+}
+
+json cameraJson(const CameraChoice& c, McpClientId client)
+{
+	if (c.fromLive)
+	{
+		const McpClientCamera live = fromLive(c.cam);
+		return json{
+			{ "position",     vec3Json(c.cam.position) },
+			{ "lookAt",       vec3Json(c.cam.position + forwardOf(c.cam)) },
+			{ "yaw",          live.yawDeg },
+			{ "pitch",        live.pitchDeg },
+			{ "fov",          c.cam.fovDegrees },
+			{ "fromViewport", true },
+			{ "stored",       false },
+			{ "client",       client },
+		};
+	}
+	return json{
+		{ "position",     vec3Json(c.own.position) },
+		{ "lookAt",       vec3Json(c.own.position + c.own.forward()) },
+		{ "yaw",          c.own.yawDeg },
+		{ "pitch",        c.own.pitchDeg },
+		{ "fov",          c.own.fovDeg },
+		{ "fromViewport", false },
+		{ "stored",       true },
+		{ "client",       client },
+	};
 }
 
 // ── The size ─────────────────────────────────────────────────────────────────
@@ -277,35 +405,83 @@ std::string generatedBaseName()
 
 } // namespace
 
+// Everything the handler shares across calls: the hooks, and the camera table
+// when the editor did not hand one in.
+struct ScreenshotState
+{
+	McpScreenshotHooks hooks;
+	McpClientCameras   ownTable;
+	McpClientCameras&  table;
+
+	explicit ScreenshotState(McpScreenshotHooks h)
+		: hooks(std::move(h)), table(hooks.cameras ? *hooks.cameras : ownTable) {}
+};
+
 void registerScreenshotTools(McpToolRegistry& registry, McpScreenshotHooks hooks)
 {
-	auto h = std::make_shared<McpScreenshotHooks>(std::move(hooks));
+	auto s = std::make_shared<ScreenshotState>(std::move(hooks));
+
+	// The camera dies with the connection. The bridge reports every connection
+	// it forgets; a test fires this through registry.notifyClientGone.
+	registry.addClientGoneHook([s](McpClientId client) { s->table.erase(client); });
 
 	McpTool shot;
 	shot.name    = "scene_screenshot";
 	shot.mutates = false;
 	shot.description =
-		"Render one still image of the open scene from a camera you choose and "
-		"return it as a PNG. Reading only: the world, the editor's own camera and "
-		"the live viewport are left exactly as they were. Give 'position' and "
-		"'look_at' (world units, +Y up) for your own angle; give nothing to get the "
-		"viewport's current view. 'output' is 'inline' (the PNG comes back as an "
-		"image content block you can look at; limited to ~2.5 MB of PNG — reduce the "
-		"size or use 'file' above that) or 'file' (the PNG is written to the editor's "
-		"screenshot directory and its absolute path is returned; use this from "
-		"`batch`, which carries no image blocks). The JSON result always reports the "
-		"camera and size actually used. Refuses with 'no_world' when no scene is "
-		"open and 'unsupported' when this renderer backend has no still-on-request "
-		"path (currently Metal only).";
+		"Render one still image of the open scene from YOUR OWN camera and return it "
+		"as a PNG. Reading only: the world, the editor's own camera and the live "
+		"viewport are left exactly as they were. You have one camera of your own, "
+		"kept between calls for as long as you are connected and invisible to other "
+		"clients. The first call that gives any camera argument creates it (starting "
+		"from the viewport's camera); later calls start from where you left it. "
+		"Absolute: 'position' [x,y,z] (world units, +Y up), 'look_at' [x,y,z] or "
+		"'yaw'/'pitch' (degrees; yaw 0 looks along -Z, +yaw turns right, +pitch looks "
+		"up), 'fov'. Relative, applied after the absolute ones: 'turn' [yaw, pitch] "
+		"degrees, then 'move' [right, up, forward] world units along the camera's "
+		"own axes. Give no camera argument to render your camera as it stands, or, "
+		"if you never set one, the viewport's current view. 'reset': true drops your "
+		"camera (send it alone). 'render': false moves the camera without taking a "
+		"picture and returns only the camera. 'output' is 'inline' (the PNG comes "
+		"back as an image content block you can look at; limited to ~2.5 MB of PNG — "
+		"reduce the size or use 'file' above that) or 'file' (the PNG is written to "
+		"the editor's screenshot directory and its absolute path is returned; use "
+		"this from `batch`, which carries no image blocks). The JSON result always "
+		"reports the camera (position, lookAt, yaw, pitch, fov) and size actually "
+		"used. Refuses with 'no_world' when no scene is open and 'unsupported' when "
+		"this renderer backend has no still-on-request path (currently Metal only).";
 	shot.inputSchema = objectSchema(json{
-		{ "position", vec3Prop("Camera position [x, y, z] in world units. Omit to use the "
-		                       "editor's live viewport camera position.") },
-		{ "look_at",  vec3Prop("World point the camera looks at [x, y, z]. Omit to keep "
-		                       "looking the way the viewport looks (or at the origin when "
-		                       "there is no viewport).") },
+		{ "position", vec3Prop("Camera position [x, y, z] in world units (absolute). Omit "
+		                       "to keep your camera's position (or the viewport's, on the "
+		                       "first call).") },
+		{ "look_at",  vec3Prop("World point the camera looks at [x, y, z] (absolute; sets "
+		                       "yaw and pitch). Omit to keep the current direction. Not "
+		                       "together with 'yaw'/'pitch'.") },
+		{ "yaw",      json{ { "type", "number" },
+		                    { "description", "Heading in degrees (absolute): 0 looks along "
+		                                     "-Z, +90 along +X (right)." } } },
+		{ "pitch",    json{ { "type", "number" }, { "minimum", -90 }, { "maximum", 90 },
+		                    { "description", "Elevation in degrees (absolute): 0 level, "
+		                                     "+90 straight up, -90 straight down." } } },
 		{ "fov",      json{ { "type", "number" }, { "minimum", 1 }, { "maximum", 170 },
 		                    { "description", "Vertical field of view in degrees. Default: "
 		                                     "the viewport's (60 without one)." } } },
+		{ "turn",     json{ { "type",        "array" },
+		                    { "items",       json{ { "type", "number" } } },
+		                    { "minItems",    2 },
+		                    { "maxItems",    2 },
+		                    { "description", "Relative rotation [yaw, pitch] in degrees, "
+		                                     "applied after the absolute arguments: "
+		                                     "[+10, 0] turns 10° to the right." } } },
+		{ "move",     vec3Prop("Relative move [right, up, forward] in world units along the "
+		                       "camera's own axes, applied after 'turn': [0, 0, 2] steps two "
+		                       "units the way the camera looks.") },
+		{ "reset",    json{ { "type", "boolean" },
+		                    { "description", "Drop your camera. Send alone; the picture (if "
+		                                     "any) is then the viewport's view." } } },
+		{ "render",   json{ { "type", "boolean" },
+		                    { "description", "Default true. False: update the camera and "
+		                                     "return it without rendering a picture." } } },
 		{ "width",    intProp("Image width in pixels. Default 1280.",  16,
 		                      static_cast<int>(kScreenshotMaxSide)) },
 		{ "height",   intProp("Image height in pixels. Default 720.",  16,
@@ -317,8 +493,9 @@ void registerScreenshotTools(McpToolRegistry& registry, McpScreenshotHooks hooks
 		                         "'-'; '.png' is appended; an existing file of that name "
 		                         "is overwritten). Omit for a generated, timestamped name.") },
 	}, {});
-	shot.handler = [h](const json& args) -> ToolResult {
-		if (!h->hasWorld || !h->hasWorld())
+	shot.handlerCtx = [s](const McpCallContext& ctx, const json& args) -> ToolResult {
+		const McpScreenshotHooks& h = s->hooks;
+		if (!h.hasWorld || !h.hasWorld())
 			return ToolResult::fail("no_world",
 				"No scene is open, so there is nothing to render. Open a project and a "
 				"scene first (scene_open).");
@@ -326,6 +503,13 @@ void registerScreenshotTools(McpToolRegistry& registry, McpScreenshotHooks hooks
 		const std::string output = hasArg(args, "output") ? strArg(args, "output") : "inline";
 		if (output != "inline" && output != "file")
 			return ToolResult::fail("invalid_args", "'output' must be 'inline' or 'file'.");
+		bool render = true;
+		if (hasArg(args, "render"))
+		{
+			if (!args["render"].is_boolean())
+				return ToolResult::fail("invalid_args", "'render' must be a boolean.");
+			render = args["render"].get<bool>();
+		}
 
 		std::string baseName;
 		if (hasArg(args, "name"))
@@ -342,55 +526,55 @@ void registerScreenshotTools(McpToolRegistry& registry, McpScreenshotHooks hooks
 
 		const SizeChoice size = chooseSize(args);
 		if (!size.ok) return size.failure;
-		const CameraChoice cam = chooseCamera(*h, args);
-		if (!cam.ok) return cam.failure;
-
-		// The directory is checked BEFORE the render, so a client that cannot
-		// be given a file does not pay for a frame it will never see.
+		// The directory is checked BEFORE the camera is touched and the render
+		// runs, so a client that cannot be given a file neither pays for a frame
+		// it will never see nor finds its camera moved by a refused call.
 		std::filesystem::path dir;
 		if (output == "file")
 		{
-			const std::string d = h->screenshotDir ? h->screenshotDir() : std::string();
+			const std::string d = h.screenshotDir ? h.screenshotDir() : std::string();
 			if (d.empty())
 				return ToolResult::fail("no_directory",
 					"The editor has no screenshot directory to write into; use output 'inline'.");
 			dir = d;
 		}
+		// From here on the client's camera IS updated, whatever the renderer
+		// says next: a move is a move even when the picture fails.
+		const CameraChoice cam = chooseCamera(h, s->table, ctx.client, args);
+		if (!cam.ok) return cam.failure;
 
-		if (!h->renderImage)
+		json result{
+			{ "width",     size.w },
+			{ "height",    size.h },
+			{ "output",    output },
+			{ "rendered",  render },
+			{ "camera",    cameraJson(cam, ctx.client) },
+		};
+		if (h.backendName) result["backend"] = h.backendName();
+		if (!render) return ToolResult::ok(std::move(result));
+
+		if (!h.renderImage)
 			return ToolResult::fail("unsupported",
 				"This editor build has no still-on-request render path.");
 		std::vector<std::uint8_t> rgba;
-		if (!h->renderImage(cam.cam, size.w, size.h, rgba) ||
+		if (!h.renderImage(cam.cam, size.w, size.h, rgba) ||
 		    rgba.size() != static_cast<std::size_t>(size.w) * size.h * 4u)
 		{
-			const std::string backend = h->backendName ? h->backendName() : std::string();
+			const std::string backend = h.backendName ? h.backendName() : std::string();
 			return ToolResult::fail("unsupported",
 				"The renderer could not produce a " + std::to_string(size.w) + "x" +
 				std::to_string(size.h) + " still" +
 				(backend.empty() ? std::string() : " on the " + backend + " backend") +
 				". Either this backend has no still-on-request path (currently Metal only) "
-				"or the editor window is minimised and has nothing to draw into.");
+				"or the editor window is minimised and has nothing to draw into. Your "
+				"camera has been updated regardless.");
 		}
 
 		const std::vector<std::uint8_t> png =
 			hePngEncode(rgba.data(), static_cast<int>(size.w), static_cast<int>(size.h));
 		if (png.empty())
 			return ToolResult::fail("encode_failed", "The PNG encoder produced no bytes.");
-
-		json result{
-			{ "width",     size.w },
-			{ "height",    size.h },
-			{ "output",    output },
-			{ "pngBytes",  png.size() },
-			{ "camera",    json{
-				{ "position",   vec3Json(cam.cam.position) },
-				{ "lookAt",     vec3Json(cam.lookAt) },
-				{ "fov",        cam.cam.fovDegrees },
-				{ "fromViewport", cam.fromLive },
-			} },
-		};
-		if (h->backendName) result["backend"] = h->backendName();
+		result["pngBytes"] = png.size();
 
 		if (output == "file")
 		{

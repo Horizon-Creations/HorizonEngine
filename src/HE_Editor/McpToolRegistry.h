@@ -21,6 +21,8 @@
 // of a registry is that a test can walk it, and this one can be walked without a
 // window.
 
+#include "McpClientCameras.h"     // McpClientId, and the per-client camera table
+
 #include <Renderer/IRenderer.h>   // EditorCameraOverride — the screenshot hooks speak it
 #include <Scripting/ScriptTypes.h>
 #include <Types/Enums.h>
@@ -72,6 +74,19 @@ struct ToolResult
 	}
 };
 
+// Who is calling. The bridge numbers its connections (HE::Net::ConnectionId,
+// a uint32 starting at 1 per listener; McpBridge.cpp asserts that
+// McpClientId — declared in McpClientCameras.h — is the same type, so this
+// header stays free of the Net headers as its top comment promises). Zero is
+// the anonymous caller: a test that invokes a handler directly, or a tool that
+// has no bridge behind it. The context is a struct rather than a bare id so
+// that the next thing a tool needs to know about its caller lands here rather
+// than in every handler signature.
+struct McpCallContext
+{
+	McpClientId client = 0;
+};
+
 struct McpTool
 {
 	std::string    name;
@@ -82,7 +97,21 @@ struct McpTool
 	// written to the console log. Reading tools are neither.
 	bool mutates = false;
 
-	std::function<ToolResult(const nlohmann::json& args)> handler;
+	// Two ways to be called, one of which every tool has. Most tools do not
+	// care who is asking and take only the arguments. A tool that keeps state
+	// PER CLIENT (the screenshot camera) takes the context as well; the bridge
+	// and the batch tool prefer that one when it is set. `add` fills in the
+	// plain `handler` for a context-only tool, so `find(name)->handler(args)`
+	// works for every registered tool — as the anonymous client.
+	std::function<ToolResult(const nlohmann::json& args)>                       handler;
+	std::function<ToolResult(const McpCallContext& ctx, const nlohmann::json& args)> handlerCtx;
+
+	// The call the bridge makes: with the caller's identity when the tool wants
+	// it, without when it does not.
+	ToolResult invoke(const McpCallContext& ctx, const nlohmann::json& args) const
+	{
+		return handlerCtx ? handlerCtx(ctx, args) : handler(args);
+	}
 };
 
 class McpToolRegistry
@@ -95,7 +124,17 @@ public:
 	const McpTool* find(const std::string& name) const;
 	const std::vector<McpTool>& tools() const { return m_tools; }
 	std::size_t size() const { return m_tools.size(); }
-	void clear() { m_tools.clear(); }
+	void clear() { m_tools.clear(); m_clientGone.clear(); }
+
+	// A client's connection is gone — closed by the client, dropped by the
+	// bridge, or taken down with the listener. Tools that keep per-client state
+	// register here and drop that client's share; the bridge calls `notify`
+	// for every connection it forgets, so the state dies with the connection
+	// and a later connection that happens to get the same number starts clean.
+	// Registered on the registry rather than on the bridge because the tools
+	// see only the registry, and because a test can fire it without a socket.
+	void addClientGoneHook(std::function<void(McpClientId)> fn);
+	void notifyClientGone(McpClientId client) const;
 
 	// The `tools/list` payload, in MCP's own shape:
 	//   { "tools": [ { "name", "description", "inputSchema" }, … ] }
@@ -108,7 +147,8 @@ public:
 	static bool enforceNameRule(const std::string& name);
 
 private:
-	std::vector<McpTool> m_tools;
+	std::vector<McpTool>                          m_tools;
+	std::vector<std::function<void(McpClientId)>> m_clientGone;
 };
 
 // Standard base64 (RFC 4648, with padding) — what an MCP image block's `data`
@@ -1308,9 +1348,16 @@ void registerSettingsTools(McpToolRegistry& registry, McpSettingsHooks hooks);
 //     returned. Never a client-chosen path: McpToolRegistry.h promises no file
 //     access, and "write a PNG where I say" is file access with a picture in it.
 //
-// Every camera argument is optional; absent, the editor's live camera is used.
-// That default is deliberately a hook (`liveCamera`) rather than a constant: the
-// per-client camera of the next step replaces exactly this one seam.
+// Every camera argument is optional. The first call that says anything about
+// the camera creates the CLIENT'S OWN camera (McpClientCameras, keyed on the
+// connection); from then on every call starts from it, absolute arguments
+// (`position`, `look_at`, `yaw`, `pitch`, `fov`) replace parts of it, relative
+// ones (`move`, `turn`) nudge it, and a call that says nothing renders it as it
+// stands. A client that has never described a camera and says nothing gets
+// the editor's live viewport view, icons and all — the fallback of the first
+// step, kept as a hook (`liveCamera`) rather than a constant. `reset` drops the
+// client's camera and returns it to that state; the bridge does the same when
+// the connection goes.
 struct McpScreenshotHooks
 {
 	std::function<bool()>        hasWorld;
@@ -1320,6 +1367,11 @@ struct McpScreenshotHooks
 	// inactive override = "no camera to fall back on" → the client has to give
 	// `position`.
 	std::function<EditorCameraOverride()> liveCamera;
+
+	// The per-client camera table. The editor owns it (the viewport will draw
+	// it); a test may hand its own in to look at it, and absent, the tool keeps
+	// a private one. Must outlive the registry.
+	McpClientCameras* cameras = nullptr;
 
 	// IRenderer::RenderSceneImage, or a stand-in. False = the backend cannot.
 	std::function<bool(const EditorCameraOverride& camera, std::uint32_t width,

@@ -61,10 +61,19 @@ bool McpToolRegistry::add(McpTool tool)
 		             tool.name.c_str());
 		return false;
 	}
-	if (!tool.handler)
+	if (!tool.handler && !tool.handlerCtx)
 	{
 		HE_LOG_ERROR(Editor, "MCP tool '%s' rejected: no handler", tool.name.c_str());
 		return false;
+	}
+	if (!tool.handler)
+	{
+		// A context-only tool still answers `handler(args)`: as the anonymous
+		// client. This is what keeps a direct call in a test — and any older
+		// caller that never learned about contexts — from dereferencing an
+		// empty std::function.
+		auto hc = tool.handlerCtx;
+		tool.handler = [hc](const json& args) { return hc(McpCallContext{}, args); };
 	}
 	if (!tool.inputSchema.is_object())
 	{
@@ -89,6 +98,16 @@ const McpTool* McpToolRegistry::find(const std::string& name) const
 	for (const auto& t : m_tools)
 		if (t.name == name) return &t;
 	return nullptr;
+}
+
+void McpToolRegistry::addClientGoneHook(std::function<void(McpClientId)> fn)
+{
+	if (fn) m_clientGone.push_back(std::move(fn));
+}
+
+void McpToolRegistry::notifyClientGone(McpClientId client) const
+{
+	for (const auto& fn : m_clientGone) fn(client);
 }
 
 json McpToolRegistry::listPayload() const
