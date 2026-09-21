@@ -144,3 +144,21 @@ undocken kann:
 - `EditorHelp.cpp`: `details.add-component-search`, `Add Component/<Gruppe>` ×7
   (Area-Regel `Add Component/` → Details panel), `outliner.create`.
 - `scripts/editor_help_audit.py --check`: 953/953 gedeckt, keine Änderung nötig.
+- `tests/test_inspector_ui.cpp`: „Add Component is grouped, and a typed search
+  ends on Enter" treibt das echte Popup headless (sieben Gruppen, Animation
+  grau, „camera r" + Enter fügt Camera Rig samt Camera hinzu, ein Undo-Schritt;
+  ein bloßes „rig" träfe zuerst Rigid Body, weil Physics vor Gameplay kommt).
+
+## 6. Verifikation
+
+| Teil | Beleg |
+|---|---|
+| Add-Component-Popup | Headless-Test (oben) + Screenshot des Popups über `HE_UI_DUMP_DIR` |
+| Outliner-„+" | bestehende `test_outliner_ui`-Fälle rendern den Kopf mit dem Knopf (grün); der Klickpfad selbst ist nicht getestet |
+| Content-Browser-Leiste | nur Compile/Link + Lesen von `Bar::Bar/group/rightGroup/remaining` (Rechnung stimmt); kein Headless-Test, weil die Leiste einen ContentManager mit Ordnerbaum braucht |
+| Editor baut und startet | `HorizonEditor` gebaut (Debug, Ninja, Worktree), Headless-Frame-Dump via `scripts/he_shot.py` liefert ein Bild |
+| Gesamt | ctest 188/188 grün (3 `runtime_size` geskippt), `editor_help_audit` 953/953 |
+
+Bekannte Kante: steht in der gefilterten Liste ein ausgegrauter Skelett-Eintrag
+an erster Stelle, tut Enter nichts (kein Überspringen auf den nächsten
+Treffer); mit der Maus ist der nächste Treffer eine Zeile tiefer.
