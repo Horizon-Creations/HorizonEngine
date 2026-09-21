@@ -461,6 +461,11 @@ struct AppContext
 	// listener actually came up, on which port, and how many clients are on it.
 	// Null in a headless/test context.
 	HE::Ed::McpBridge* mcp = nullptr;
+	// The MCP clients' screenshot cameras, for the viewport's tags over the
+	// frame (McpCameraGizmos::drawViewportLabels). READ ONLY: the tool writes
+	// it, the bridge erases from it, both on the frame thread. Null in a
+	// headless/test context.
+	const HE::Ed::McpClientCameras* mcpCameras = nullptr;
 
 	// Things that happened without the user asking — a peer that could not apply
 	// a delete, a scan that could not read a file, an asset nobody answered
@@ -675,13 +680,24 @@ private:
 	// off a socket, and both have to do it on the main thread between the world
 	// settling and the UI reading it.
 	// One screenshot camera per connected MCP client, keyed on the connection.
-	// Owned here rather than inside the tool because the viewport is going to
-	// draw them (a frustum with the client's number, like a collaboration
-	// peer); the tool writes it, the bridge's client-gone hook erases from it.
+	// Owned here rather than inside the tool because the viewport draws them
+	// (McpCameraGizmos: a frustum with the client's number in the debug-line
+	// block of OnRender, a tag over the frame in ViewportPanel); the tool
+	// writes it, the bridge's client-gone hook erases from it. Written only on
+	// the frame thread (the bridge pump), read there — no lock.
 	// Declared BEFORE the bridge, so it is destroyed AFTER it: ~McpBridge runs
 	// stop(), which reports every still-connected client to that hook, and
 	// the hook erases from this table.
 	HE::Ed::McpClientCameras m_mcpCameras;
+	// This frame's debug lines as handed to the renderer, and where in them the
+	// MCP camera gizmos sit: a screenshot (RenderSceneImage runs the ordinary
+	// frame, debug lines included) hands the renderer the list without that
+	// range and puts the full one back afterwards. Both set by the debug-line
+	// block in OnRender, every frame; the gizmo range is empty when the block
+	// did not run.
+	std::vector<DebugLine> m_lastDebugLines;
+	std::size_t m_mcpGizmoLineBegin = 0;
+	std::size_t m_mcpGizmoLineEnd   = 0;
 	HE::Ed::McpBridge m_mcp;
 	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
 	// because the config is persisted and these must not be: a headless run must

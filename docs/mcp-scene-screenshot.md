@@ -1,7 +1,7 @@
 # MCP: Szenen-Screenshots aus einer Client-Kamera (Thema 74)
 
-Stand 21.09.2026, Schritt 1 (Grundgerüst) und Schritt 2 (Kamera je Client) auf
-`claude/mcp-scene-screenshot-camera`. Was gebaut ist, wo die Nähte für die
+Stand 21.09.2026, Schritt 1 (Grundgerüst), Schritt 2 (Kamera je Client) und
+Schritt 3 (Kameras im Viewport) auf `claude/mcp-scene-screenshot-camera`. Was gebaut ist, wo die Nähte für die
 Folgeschritte liegen, und was der Renderer dabei verspricht.
 
 ## 1. Das Werkzeug: `scene_screenshot`
@@ -168,14 +168,79 @@ ist ein Pfad pro Anfrage, keiner pro Frame.
   `McpScreenshotHooks::cameras` hinein; fehlt der Zeiger, führt das Tool eine
   private Tabelle (Tests). Der Client-Gone-Hook des Tools löscht daraus.
 
-## 5. Nähte für die Folgeschritte
+## 5. Die Kameras im Viewport (Schritt 3)
 
-* **Gizmos im Viewport (Schritt 3):** `EditorApplication::m_mcpCameras.all()`
-  liefert je Client `position`, `forward()`, `up()`, `right()`, `fovDeg`,
-  `nearPlane`/`farPlane` und `view()`; `ViewportPanel` zeichnet
-  Collab-Teilnehmer bereits als Frustum mit Kennung, dieselbe Zeichnung nimmt
-  die Client-Kameras mit der Verbindungsnummer als Kennung. Die Tabelle wird
-  nur im Frame-Thread geschrieben (Bridge-Pump), also ohne Lock lesbar.
+Jede Client-Kamera aus `m_mcpCameras` ist im Editor-Viewport zu sehen, in
+zwei Hälften nach dem Muster der Collab-Präsenzmarker
+(`src/HE_Editor/McpCameraGizmos.h/.cpp`):
+
+* **Frustum, tiefengetestet** (`McpCameraGizmos::appendFrustums`): im
+  Debug-Linien-Block von `EditorApplication::OnRender`, direkt nach dem
+  Collab-Block, aber ohne dessen Session-Gate. 19 Linien je Kamera
+  (`kLinesPerFrustum`): vier Kanten vom Auge zum fernen Rechteck, das ferne
+  Rechteck doppelt (1,0/0,92, damit es auf unruhigem Hintergrund nicht
+  verschwindet), ein nahes Rechteck bei einem Drittel, ein Up-Dreieck auf
+  der Oberkante (Rolle lesbar). Öffnungswinkel = echtes `fovDeg`, Seitenverhältnis
+  fest 16:9 (`kAspect`, das Default-Format des Tools; die Kamera speichert
+  keins). Länge skaliert mit dem Abstand zur Editor-Kamera
+  (`clamp(dist·0,08, 0,15, 6)`), also bildschirmkonstant wie die Collab-Ringe;
+  steht der Betrachter in der Kamera, wird sie ausgelassen.
+* **Tag über dem Bild** (`McpCameraGizmos::drawViewportLabels`): in
+  `ViewportPanel` direkt neben `CollabPresenceBar::DrawViewportMarkers`, mit
+  dessen `PlaceMarker` (außerhalb des Bildes an den Rand gepinnt, Pfeil
+  zeigt die Richtung). Punkt in Client-Farbe plus dunkle Pille `MCP #<id>`;
+  die Verbindungsnummer ist die einzige Identität, die die Bridge hat, und
+  dieselbe Zahl, die die Tool-Antworten tragen. Der Viewport bekommt die
+  Tabelle über `AppContext::mcpCameras` (nur lesen).
+* **Farbe** (`colorFor`): Golden-Ratio-Hue wie `CollabController::
+  participantColor`, aber um ein Drittel Rad versetzt, damit Client #1 und
+  Teilnehmer #1 nicht gleich aussehen. Frustum und Tag nehmen dieselbe Farbe.
+* **Schalter:** derselbe Show-Flag wie die Collab-Marker
+  (`ShowFlags::collaborators`, Toolbar „Show → Collaborators"; Hilfetext in
+  `EditorHelp.cpp` erweitert). Kein eigener Schalter: eine ferne Kamera ist
+  eine ferne Kamera, ob Mensch oder Modell dahinter.
+* **Echtzeit:** das Tool schreibt die Tabelle im Bridge-Pump (`m_mcp.update`,
+  nach dem Debug-Block desselben Frames), das Gizmo zieht also im nächsten
+  Frame nach, ein Frame hinter dem Tool-Aufruf.
+* **Nicht im Screenshot:** `RenderSceneImage` fährt den normalen Frame samt
+  Debug-Linien. Ohne Gegenmaßnahme säße das eigene Frustum eines Clients als
+  Rahmen in seinem eigenen Bild (das innere 0,92-Rechteck, siehe Kontrollbild
+  des Witness) und die Frustums der anderen machten sein Bild davon
+  abhängig, wer sonst verbunden ist. Deshalb merkt sich `OnRender` den
+  Bereich der Gizmo-Linien in `m_lastDebugLines`
+  (`m_mcpGizmoLineBegin/End`), und der `renderImage`-Hook in
+  `setupMcpTools` gibt dem Renderer für die Dauer des Captures die Liste ohne
+  diesen Bereich und danach die volle zurück. Grid, Auswahl, Collider bleiben
+  im Screenshot wie seit Schritt 1.
+
+Verifikation:
+
+* `tests/test_mcp_camera_gizmos.cpp`: 5 Fälle, reine Geometrie: alle Punkte
+  vor dem Auge in Blickrichtung (Yaw 0 → -Z, Yaw 90 → +X, Pitch -90 → -Y),
+  fernes Rechteck genau `length` voraus; Öffnung wächst mit `fov`, Unterkante
+  bei `-length·tan(fov/2)`, Up-Dreieck darüber; drei Clients → 3×19 Linien
+  in drei Farben (= `colorFor(id)`), Betrachter in einer Kamera → 2×19, leere
+  Tabelle → 0; Länge verdoppelt sich mit dem Abstand, Klemmen 0,15/6;
+  `labelFor`, 20 verschiedene Farben für die ersten 20 Ids.
+* Echte Hardware (Metal): `HE_DUMP_MCPGIZMO=<png>` in `dumpFrameHeadless`
+  sät Client 1 (0, 0.8, 0 → -Z) und Client 2 (0, 0.8, -3 → zurück auf Client
+  1) durch das echte Tool, baut die Frustums wie `OnRender`, schreibt den
+  Dump-Frame mit beiden (`<png>`) und nimmt drei Stills von Client 2 durch
+  das Tool: mit Strip, ohne Strip (Kontrolle) und ganz ohne Linien
+  (Referenz). Log: `mcpgizmo witness — cameras seeded (2 in table, 38
+  lines), … client-2 still via tool ok (X% px differ from no-lines), control
+  without strip ok (Y% px differ from no-lines)`. Erwartung: X ≈ 0, Y
+  deutlich. Aufruf: `HE_SKY_TIME=30 python3 scripts/he_shot.py /tmp/live.png
+  MCPGIZMO=/tmp/gizmo.png TOD=0.5 CAMX=3 CAMY=2 CAMZ=-1.5 YAW=-90 PITCH=-20`.
+  Stand 21.09.2026: X = 0,00 %, Y = 1,67 %; im Dump-Frame zwei Frustums
+  (magenta/cyan) mit Öffnungen aufeinander zu, in der Kontrolle das Frustum
+  von Client 1 frontal plus der eigene cyanfarbene Rahmen, im Tool-Bild
+  keine Linie. Ohne `HE_SKY_TIME` liegt X bei ~0,5 % (Wolkendrift zwischen
+  den Stills). Die ImGui-Tags sind headless nicht im Bild (der Dump läuft
+  nicht durch das Viewport-Panel); real-HW-Sicht auf die Tags offen.
+
+## 6. Nähte für die Folgeschritte
+
 * **Andere Backends:** OpenGL braucht denselben Umbau (Viewport-FBO
   beiseitelegen, Swapchain-Pass überspringen); D3D/Vulkan liefern bis dahin
   `unsupported` mit Namen.

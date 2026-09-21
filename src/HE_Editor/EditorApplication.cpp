@@ -28,6 +28,7 @@
 #include "ViewportViewMode.h"      // HE_DUMP_VIEWMODE / HE_DUMP_GBUFFER → HE::ViewMode
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
+#include "McpCameraGizmos.h"       // the MCP clients' screenshot cameras, drawn in the viewport
 #include "ExportDialogPanel.h"     // the packing worker the MCP build tools start
 #include "GameLogicBuildPanel.h"   // …and the native compile they start the other way
 #include "BuildProgressDialog.h"   // …and the one window both of them report into
@@ -3920,6 +3921,25 @@ void EditorApplication::OnRender(float dt)
 				}
 			}
 
+			// ── MCP clients' cameras ─────────────────────────────────────────
+			// The screenshot camera of every connected MCP client, as a frustum
+			// in the client's colour (McpCameraGizmos.h says why a frustum and
+			// not the peers' rings). Same switch as the collaborators, but NOT
+			// their session gate: a client's camera exists without a session.
+			// The tag with the client's number is ViewportPanel's, over the
+			// frame, like a peer's name tag.
+			//
+			// The range these lines occupy is remembered so a screenshot can
+			// leave them out (the renderImage hook in setupMcpTools): the
+			// capture runs the ordinary frame, debug lines included, and a
+			// client's own frustum would otherwise sit in its own picture as
+			// four lines meeting in the corners — and the other clients' would
+			// make its picture depend on who else happens to be connected.
+			m_mcpGizmoLineBegin = dbg.lines().size();
+			if (show.collaborators)
+				HE::Ed::McpCameraGizmos::appendFrustums(m_mcpCameras, m_editorCamera.position(), dbg);
+			m_mcpGizmoLineEnd = dbg.lines().size();
+
 			// Where the selected figure's root motion would carry it. Only for the
 			// selection: a scene full of characters would be a scene full of
 			// lines, and the question ("does this clip go where I meant it to")
@@ -3958,12 +3978,18 @@ void EditorApplication::OnRender(float dt)
 				HE::api::debug::collect(simulating ? dt : 0.0f, discard);
 			}
 			renderer()->SetDebugLines(merged);
+			// Kept (moved, not copied: the renderer took its own copy) so a
+			// screenshot in this frame can hand the renderer the same list
+			// minus the MCP gizmos and then put this one back.
+			m_lastDebugLines = std::move(merged);
 		}
 		else
 		{
 			std::vector<DebugLine> apiDbg;
 			HE::api::debug::collect(simulating ? dt : 0.0f, apiDbg);
 			renderer()->SetDebugLines(apiDbg);
+			m_lastDebugLines    = std::move(apiDbg);
+			m_mcpGizmoLineBegin = m_mcpGizmoLineEnd = 0;
 		}
 	}
 
@@ -6609,6 +6635,117 @@ void EditorApplication::dumpFrameHeadless()
 		HE_LOG_INFO(Editor, "%s", line);
 	}
 
+	// Witness the MCP camera gizmos (HE_DUMP_MCPGIZMO=<file.png>): two clients'
+	// cameras seeded THROUGH THE TOOL (the same scene_screenshot call a client
+	// makes, as client 1 and client 2), their frustums appended the way
+	// OnRender's debug block does it, and three pictures:
+	//   • <file.png> — the dump camera's own frame with both frustums in it,
+	//     the thing a human sees in the viewport (minus the ImGui tags);
+	//   • client 2's screenshot through the tool, looking straight at client
+	//     1's camera — which must NOT contain client 1's frustum (the
+	//     renderImage hook strips the gizmo range for the capture);
+	//   • the same picture with the strip disabled — the negative control,
+	//     which must.
+	// Measured against a third render with no debug lines at all: the tool's
+	// picture has to be that picture (small diff, TAA noise), the control has
+	// to differ by more. Both percentages are logged; the two client pictures
+	// are written beside <file.png> for eyeballing.
+	if (const char* gz = std::getenv("HE_DUMP_MCPGIZMO"); gz && *gz && m_editorWorld)
+	{
+		if (!m_mcpToolsRegistered) setupMcpTools();
+		m_commands.setWorld(m_editorWorld.get());
+		const HE::Ed::McpTool* tool = m_mcp.registry().find("scene_screenshot");
+
+		auto diffPercent = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+			if (a.size() != b.size() || a.empty()) return 100.0;
+			size_t px = 0, bad = 0;
+			for (size_t i = 0; i + 3 < a.size(); i += 4, ++px)
+				for (int c = 0; c < 3; ++c)
+					if (std::abs(int(a[i + c]) - int(b[i + c])) > 8) { ++bad; break; }
+			return px ? 100.0 * double(bad) / double(px) : 100.0;
+		};
+		// One tool call as `client`, picture read back from the file it wrote.
+		auto shoot = [&](HE::Ed::McpClientId client, nlohmann::json args,
+		                 std::vector<uint8_t>& outRgba, std::string& outPath) {
+			if (!tool) return false;
+			args["output"] = "file";
+			args["width"]  = 640;
+			args["height"] = 360;
+			const HE::Ed::ToolResult res = tool->invoke(HE::Ed::McpCallContext{ client }, args);
+			if (res.isError || !res.content.contains("path")) return false;
+			outPath = res.content["path"].get<std::string>();
+			int pw = 0, ph = 0;
+			return HE::heLoadPngRGBA(outPath, outRgba, pw, ph) && pw == 640 && ph == 360;
+		};
+
+		// Client 1 stands a little in front of the origin looking down -Z,
+		// client 2 stands further down -Z looking back at it — so client 1's
+		// frustum fills the middle of client 2's picture. Both seeded BEFORE
+		// the lines are built: the table is what the frustums are drawn from.
+		std::vector<uint8_t> seed; std::string seedPath;
+		const bool seeded =
+			shoot(1, { { "position", { 0.0, 0.8, 0.0 } }, { "look_at", { 0.0, 0.8, -8.0 } } },
+			      seed, seedPath) &&
+			shoot(2, { { "position", { 0.0, 0.8, -3.0 } }, { "look_at", { 0.0, 0.8, 0.0 } } },
+			      seed, seedPath) &&
+			m_mcpCameras.find(1) != nullptr && m_mcpCameras.find(2) != nullptr;
+
+		// The frustums, as OnRender's debug block appends them (and the range it
+		// remembers for the strip), on top of whatever lines the frame had.
+		DebugDrawBuffer dbg;
+		HE::Ed::McpCameraGizmos::appendFrustums(m_mcpCameras, m_editorCamera.position(), dbg);
+		m_lastDebugLines    = dbg.lines();
+		m_mcpGizmoLineBegin = 0;
+		m_mcpGizmoLineEnd   = m_lastDebugLines.size();
+		r->SetDebugLines(m_lastDebugLines);
+
+		// The dump camera's frame with the gizmo in it.
+		r->Render();
+		std::vector<uint8_t> live; uint32_t lw = 0, lh = 0;
+		const bool liveOk = r->CaptureViewport(live, lw, lh) && lw > 0 && lh > 0 &&
+		                    HE::hePngWrite(std::filesystem::path(gz), live.data(), int(lw), int(lh));
+
+		// Client 2's picture through the tool, from the camera it keeps: strip
+		// active.
+		std::vector<uint8_t> stripped; std::string strippedPath;
+		const bool strippedOk = seeded && shoot(2, nlohmann::json::object(), stripped, strippedPath);
+
+		// The negative control: same call, strip switched off by emptying the
+		// range — the renderer keeps the full list, frustums included.
+		const std::size_t keepEnd = m_mcpGizmoLineEnd;
+		m_mcpGizmoLineEnd = m_mcpGizmoLineBegin;
+		std::vector<uint8_t> control; std::string controlPath;
+		const bool controlOk = seeded && shoot(2, nlohmann::json::object(), control, controlPath);
+		m_mcpGizmoLineEnd = keepEnd;
+
+		// The reference: no debug lines at all.
+		const std::vector<DebugLine> keepLines = m_lastDebugLines;
+		m_lastDebugLines.clear();
+		m_mcpGizmoLineBegin = m_mcpGizmoLineEnd = 0;
+		r->SetDebugLines(m_lastDebugLines);
+		std::vector<uint8_t> bare; std::string barePath;
+		const bool bareOk = seeded && shoot(2, nlohmann::json::object(), bare, barePath);
+		m_lastDebugLines    = keepLines;
+		m_mcpGizmoLineBegin = 0;
+		m_mcpGizmoLineEnd   = keepLines.size();
+		r->SetDebugLines(m_lastDebugLines);
+
+		const double strippedDiff = (strippedOk && bareOk) ? diffPercent(stripped, bare) : 100.0;
+		const double controlDiff  = (controlOk  && bareOk) ? diffPercent(control,  bare) : 100.0;
+
+		char line[768];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: mcpgizmo witness — cameras %s (%zu in table, %zu lines), "
+			"live frame %s → %s, client-2 still via tool %s (%.2f%% px differ from no-lines), "
+			"control without strip %s (%.2f%% px differ from no-lines); stills: %s | %s",
+			seeded ? "seeded" : "NOT seeded", m_mcpCameras.size(), keepLines.size(),
+			liveOk ? "written" : "NOT written", gz,
+			strippedOk ? "ok" : "FAILED", strippedDiff,
+			controlOk ? "ok" : "FAILED", controlDiff,
+			strippedPath.c_str(), controlPath.c_str());
+		HE_LOG_INFO(Editor, "%s", line);
+	}
+
 	m_dumpDone = true;
 	if (m_dumpQuit)
 	{
@@ -7610,7 +7747,30 @@ void EditorApplication::setupMcpTools()
 	shot.renderImage = [this](const EditorCameraOverride& cam, std::uint32_t w,
 	                          std::uint32_t h, std::vector<std::uint8_t>& rgba) {
 		IRenderer* r = renderer();
-		return r && r->RenderSceneImage(cam, w, h, rgba);
+		if (!r) return false;
+		// The capture runs the ordinary frame, debug lines and all — grid,
+		// selection, colliders, the way the viewport shows the scene. The MCP
+		// camera gizmos are the exception: a client's own frustum in its own
+		// picture is four lines meeting in the corners, and the others' would
+		// make the picture depend on who else is connected. So the renderer
+		// gets this frame's list without that range for the one frame, and the
+		// full list back afterwards (the range is the debug block's, OnRender).
+		const bool strip = m_mcpGizmoLineEnd > m_mcpGizmoLineBegin &&
+		                   m_mcpGizmoLineEnd <= m_lastDebugLines.size();
+		if (strip)
+		{
+			std::vector<DebugLine> bare;
+			bare.reserve(m_lastDebugLines.size() - (m_mcpGizmoLineEnd - m_mcpGizmoLineBegin));
+			bare.insert(bare.end(), m_lastDebugLines.begin(),
+			            m_lastDebugLines.begin() + static_cast<std::ptrdiff_t>(m_mcpGizmoLineBegin));
+			bare.insert(bare.end(),
+			            m_lastDebugLines.begin() + static_cast<std::ptrdiff_t>(m_mcpGizmoLineEnd),
+			            m_lastDebugLines.end());
+			r->SetDebugLines(bare);
+		}
+		const bool ok = r->RenderSceneImage(cam, w, h, rgba);
+		if (strip) r->SetDebugLines(m_lastDebugLines);
+		return ok;
 	};
 	// Beside the endpoint file, never in the project: a screenshot a client
 	// asked for is that client's, not a content file — and a project directory
@@ -8418,6 +8578,7 @@ AppContext EditorApplication::makeContext()
 #endif
 		.collab              = &m_collab,
 		.mcp                 = &m_mcp,
+		.mcpCameras          = &m_mcpCameras,
 		.notifications       = &m_notifications,
 		.enqueueRetarget     = [this](const std::string& oldRel, const std::string& newRel,
 		                              bool folder) { enqueueRetargetOnDisk(oldRel, newRel, folder); },
