@@ -112,7 +112,8 @@ ist ein Pfad pro Anfrage, keiner pro Frame.
 
 ## 3. Verifikation
 
-* `tests/test_mcp_tools_screenshot.cpp`: 24 Fälle gegen einen Fake-Renderer
+* `tests/test_mcp_tools_screenshot.cpp`: 22 Fälle gegen einen Fake-Renderer
+  (14 aus Schritt 1, 8 aus Schritt 2, dazu der base64-Fall)
   (Gradient rein, PNG raus, per `heLoadPngRGBA` pixelgenau zurückgelesen;
   Kamera aus position/look_at mit Vorwärtsvektor-Probe; Fallbacks;
   Dateiname-Einsperrung; Größen- und Inline-Budget; Ablehnungen; base64-Vektoren).

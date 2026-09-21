@@ -674,12 +674,15 @@ private:
 	// collaboration pump and for the same reason: both apply things that came
 	// off a socket, and both have to do it on the main thread between the world
 	// settling and the UI reading it.
-	HE::Ed::McpBridge m_mcp;
 	// One screenshot camera per connected MCP client, keyed on the connection.
 	// Owned here rather than inside the tool because the viewport is going to
 	// draw them (a frustum with the client's number, like a collaboration
 	// peer); the tool writes it, the bridge's client-gone hook erases from it.
+	// Declared BEFORE the bridge, so it is destroyed AFTER it: ~McpBridge runs
+	// stop(), which reports every still-connected client to that hook, and
+	// the hook erases from this table.
 	HE::Ed::McpClientCameras m_mcpCameras;
+	HE::Ed::McpBridge m_mcp;
 	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
 	// because the config is persisted and these must not be: a headless run must
 	// not leave the bridge switched on for the next interactive one.
