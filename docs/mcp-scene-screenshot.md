@@ -236,7 +236,9 @@ Verifikation:
   (magenta/cyan) mit Öffnungen aufeinander zu, in der Kontrolle das Frustum
   von Client 1 frontal plus der eigene cyanfarbene Rahmen, im Tool-Bild
   keine Linie. Ohne `HE_SKY_TIME` liegt X bei ~0,5 % (Wolkendrift zwischen
-  den Stills). Die ImGui-Tags sind headless nicht im Bild (der Dump läuft
+  den Stills). Die fünf Stills je Lauf gehen durch das echte Tool und landen
+  daher in `~/Library/Application Support/HorizonEngine/mcp-screenshots/`,
+  dem Ordner des Nutzers: nach dem Lauf wegräumen. Die ImGui-Tags sind headless nicht im Bild (der Dump läuft
   nicht durch das Viewport-Panel); real-HW-Sicht auf die Tags offen.
 
 ## 6. Nähte für die Folgeschritte
