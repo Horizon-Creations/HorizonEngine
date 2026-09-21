@@ -125,6 +125,12 @@ bool hePngWrite(const std::filesystem::path& path, const std::uint8_t* rgba, int
     return !png.empty() && writeFile(path, png);
 }
 
+std::vector<std::uint8_t> hePngEncode(const std::uint8_t* rgba, int w, int h)
+{
+    if (!rgba || w <= 0 || h <= 0) return {};
+    return encodePng(rgba, w, h);
+}
+
 bool heIcnsWrite(const std::filesystem::path& path, const std::vector<AppIconImage>& images)
 {
     if (images.empty()) return false;

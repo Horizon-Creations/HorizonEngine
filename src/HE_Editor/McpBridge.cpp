@@ -423,11 +423,21 @@ bool McpBridge::dispatch(ConnectionId id, const std::string& method, const json&
 		json payload = r.isError
 		                   ? json{ { "code", r.errorCode }, { "message", r.errorMessage } }
 		                   : r.content;
+		json content = json::array({ json{
+			{ "type", "text" },
+			{ "text", payload.dump(2) },
+		} });
+		// A picture, when the tool took one: MCP's image block, after the text
+		// so a client that reads only the first block still gets the JSON. Never
+		// on a refusal — a failed screenshot has no bytes to show.
+		if (!r.isError && !r.imageBytes.empty())
+			content.push_back(json{
+				{ "type",     "image" },
+				{ "data",     mcpBase64Encode(r.imageBytes.data(), r.imageBytes.size()) },
+				{ "mimeType", r.imageMime.empty() ? std::string("image/png") : r.imageMime },
+			});
 		outResult = json{
-			{ "content", json::array({ json{
-				{ "type", "text" },
-				{ "text", payload.dump(2) },
-			} }) },
+			{ "content",       std::move(content) },
 			{ "isError",       r.isError },
 			// The same payload as structured JSON alongside the text block, so a
 			// caller that is not a language model does not have to re-parse a

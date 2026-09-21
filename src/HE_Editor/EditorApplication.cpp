@@ -34,6 +34,7 @@
 #include "HcFallbackReport.h"      // which classes an export had to ship interpreted
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
+#include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
 #include <Platform/PathSafety.h>    // an asset path off the wire must stay in the project
 #include <Platform/Process.h>       // git config for the identity fix
 #include <Diagnostics/Log.h>
@@ -6526,6 +6527,88 @@ void EditorApplication::dumpFrameHeadless()
 		HE_LOG_ERROR(Editor, "%s",
 			("EditorApplication: frame dump failed → " + m_dumpPath).c_str());
 
+	// Witness the MCP screenshot path (HE_DUMP_SCENEIMAGE=<file.png>): the same
+	// IRenderer::RenderSceneImage call scene_screenshot makes, from the dump
+	// camera turned 90° about +Y, at a size that is neither the viewport's nor
+	// its aspect. Three things are measured and logged, because they are the
+	// contract: the still comes back at exactly the size asked; it differs from
+	// the live frame (it is another camera's picture); and the live frame
+	// rendered AFTER it is the one rendered before (the viewport was not left
+	// looking different). A same-camera still is measured too — that one has
+	// to match the live frame, which is what says the override path draws the
+	// scene and not something else. Percentages are of pixels differing by
+	// more than 8/255 in any channel; TAA history is deliberately dropped
+	// around a still, so "0.0" is not expected with TAA on — "small" is.
+	if (const char* si = std::getenv("HE_DUMP_SCENEIMAGE"); si && *si && w > 0 && h > 0)
+	{
+		auto diffPercent = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+			if (a.size() != b.size() || a.empty()) return 100.0;
+			size_t px = 0, bad = 0;
+			for (size_t i = 0; i + 3 < a.size(); i += 4, ++px)
+				for (int c = 0; c < 3; ++c)
+					if (std::abs(int(a[i + c]) - int(b[i + c])) > 8) { ++bad; break; }
+			return px ? 100.0 * double(bad) / double(px) : 100.0;
+		};
+		const std::vector<uint8_t> liveBefore = rgba;
+		const EditorCameraOverride live = r->GetEditorCamera();
+
+		// Same camera, same size: must reproduce the live frame.
+		std::vector<uint8_t> same;
+		const bool sameOk = r->RenderSceneImage(live, w, h, same);
+		const double sameDiff = sameOk ? diffPercent(liveBefore, same) : 100.0;
+
+		// Turned camera, foreign size: must be a different picture at that size.
+		const uint32_t siW = 640, siH = 400;
+		// Turned IN PLACE: V = Rᵀ·T(-p), so V·T(p)·Ryᵀ·T(-p) = (Ry·R)ᵀ·T(-p) — the
+		// same eye, the camera's own orientation yawed 90° about world +Y.
+		EditorCameraOverride turned = live;
+		turned.view = live.view *
+		              glm::translate(glm::mat4(1.0f), live.position) *
+		              glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), glm::vec3(0, 1, 0)) *
+		              glm::translate(glm::mat4(1.0f), -live.position);
+		turned.editorIcons = false;
+		std::vector<uint8_t> still;
+		const bool stillOk = r->RenderSceneImage(turned, siW, siH, still) &&
+		                     still.size() == size_t(siW) * siH * 4;
+		// Compared at the live size is meaningless (different size); the
+		// witness for "different picture" is the same-camera still vs this one
+		// resampled — kept simple: the mean colour has to move.
+		auto meanRgb = [](const std::vector<uint8_t>& v, double out[3]) {
+			out[0] = out[1] = out[2] = 0.0;
+			size_t n = 0;
+			for (size_t i = 0; i + 3 < v.size(); i += 4, ++n)
+				for (int c = 0; c < 3; ++c) out[c] += v[i + c];
+			for (int c = 0; c < 3; ++c) out[c] = n ? out[c] / double(n) : 0.0;
+		};
+		double mLive[3] = {}, mStill[3] = {};
+		meanRgb(liveBefore, mLive);
+		if (stillOk) meanRgb(still, mStill);
+		const double meanShift = stillOk
+			? (std::fabs(mLive[0] - mStill[0]) + std::fabs(mLive[1] - mStill[1]) +
+			   std::fabs(mLive[2] - mStill[2])) / 3.0
+			: -1.0;
+		const bool wrote = stillOk && HE::hePngWrite(std::filesystem::path(si), still.data(),
+		                                             int(siW), int(siH));
+
+		// And the viewport afterwards: one more real frame, captured, compared.
+		r->Render();
+		std::vector<uint8_t> after;
+		uint32_t aw = 0, ah = 0;
+		const bool afterOk = r->CaptureViewport(after, aw, ah) && aw == w && ah == h;
+		const double afterDiff = afterOk ? diffPercent(liveBefore, after) : 100.0;
+
+		char line[512];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: sceneimage witness — same-camera still %s (%.2f%% px differ "
+			"from live), turned still %s at %ux%u (mean rgb shift %.1f), live-after %s "
+			"(%.2f%% px differ from live-before), png %s → %s",
+			sameOk ? "ok" : "FAILED", sameDiff,
+			stillOk ? "ok" : "FAILED", siW, siH, meanShift,
+			afterOk ? "ok" : "FAILED", afterDiff,
+			wrote ? "written" : "NOT written", si);
+		HE_LOG_INFO(Editor, "%s", line);
+	}
+
 	m_dumpDone = true;
 	if (m_dumpQuit)
 	{
@@ -7507,6 +7590,32 @@ void EditorApplication::setupMcpTools()
 		if (what == "maxfps") setMaxFps(cfg.MaxFps);
 	};
 	HE::Ed::registerSettingsTools(m_mcp.registry(), std::move(settings));
+
+	// A picture of the scene. The renderer's still-on-request path is the hook,
+	// so the tool file never sees IRenderer beyond the camera struct — and the
+	// test binary, which has no renderer, hands it a fake.
+	HE::Ed::McpScreenshotHooks shot;
+	shot.hasWorld    = [this] { return m_editorWorld != nullptr; };
+	shot.backendName = [this] { return getRHIName(m_backend); };
+	// The override the renderer holds RIGHT NOW: the Scene window pushes it every
+	// frame (show flags included), so this is what the viewport is drawing, not
+	// what EditorCamera would say if asked afresh.
+	shot.liveCamera  = [this]() -> EditorCameraOverride {
+		IRenderer* r = renderer();
+		return r ? r->GetEditorCamera() : EditorCameraOverride{};
+	};
+	shot.renderImage = [this](const EditorCameraOverride& cam, std::uint32_t w,
+	                          std::uint32_t h, std::vector<std::uint8_t>& rgba) {
+		IRenderer* r = renderer();
+		return r && r->RenderSceneImage(cam, w, h, rgba);
+	};
+	// Beside the endpoint file, never in the project: a screenshot a client
+	// asked for is that client's, not a content file — and a project directory
+	// is what ends up in git.
+	shot.screenshotDir = [] {
+		return (GlobalState::userDataDir() / "mcp-screenshots").string();
+	};
+	HE::Ed::registerScreenshotTools(m_mcp.registry(), std::move(shot));
 
 	// Several calls in one request. Last, after every family it can dispatch to:
 	// it looks tools up by name at call time, so the order is for tools/list, not

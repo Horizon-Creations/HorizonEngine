@@ -316,6 +316,57 @@ TEST_CASE("McpBridge: ping goes out over the socket and comes back")
 	CHECK(s["echo"] == "hallo");
 }
 
+TEST_CASE("McpBridge: a tool's picture goes out as an MCP image block after the text")
+{
+	Fixture f;
+	// A tool that answers with bytes beside its JSON — the shape scene_screenshot
+	// returns, without a renderer: three bytes, so the base64 is checkable by eye.
+	McpTool pic;
+	pic.name        = "pic";
+	pic.description = "returns a picture";
+	pic.inputSchema = json{ { "type", "object" } };
+	pic.handler     = [](const json& args) {
+		ToolResult r = ToolResult::ok(json{ { "width", 1 } });
+		if (args.value("fail", false))
+		{
+			r = ToolResult::fail("nope", "refused");
+			r.imageBytes = { 1, 2, 3 };   // a refusal's bytes must NOT go out
+			return r;
+		}
+		r.imageBytes = { 'f', 'o', 'o' };
+		r.imageMime  = "image/png";
+		return r;
+	};
+	REQUIRE(f.bridge.registry().add(std::move(pic)));
+
+	TestClient c;
+	REQUIRE(f.authenticate(c));
+	c.send(json{ { "jsonrpc", "2.0" },
+	             { "id", 8 },
+	             { "method", "tools/call" },
+	             { "params", json{ { "name", "pic" } } } });
+	REQUIRE(pumpUntil(f.bridge, { &c }, [&] { return replyWithId(c, 8) != nullptr; }));
+	const json* reply = replyWithId(c, 8);
+	REQUIRE((*reply)["result"]["content"].is_array());
+	REQUIRE((*reply)["result"]["content"].size() == 2);
+	CHECK((*reply)["result"]["content"][0]["type"] == "text");
+	CHECK((*reply)["result"]["content"][1]["type"] == "image");
+	CHECK((*reply)["result"]["content"][1]["mimeType"] == "image/png");
+	CHECK((*reply)["result"]["content"][1]["data"] == "Zm9v");
+	// The bytes are in the image block only — never in the JSON the model reads.
+	CHECK(structured(*reply) == json{ { "width", 1 } });
+
+	// A refusal carries no picture, whatever the handler left in the result.
+	c.send(json{ { "jsonrpc", "2.0" },
+	             { "id", 9 },
+	             { "method", "tools/call" },
+	             { "params", json{ { "name", "pic" }, { "arguments", json{ { "fail", true } } } } } });
+	REQUIRE(pumpUntil(f.bridge, { &c }, [&] { return replyWithId(c, 9) != nullptr; }));
+	reply = replyWithId(c, 9);
+	CHECK((*reply)["result"]["isError"] == true);
+	CHECK((*reply)["result"]["content"].size() == 1);
+}
+
 TEST_CASE("McpBridge: scene_info reports the editor's real state, not an echo")
 {
 	// The whole point of the stub: prove the pipe carries live editor state.

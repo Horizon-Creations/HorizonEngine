@@ -10291,6 +10291,69 @@ bool MetalRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width,
 	}
 }
 
+// ─── One still from somebody else's camera ────────────────────────────────────
+// The contract is in IRenderer.h. How it is kept here: the live viewport's two
+// textures are SET ASIDE (not retired — they are handed straight back), so
+// EnsureViewportTarget makes a fresh pair at the requested size; one
+// capture-only EncodeFrame fills it; CaptureViewport reads it back; the pair is
+// retired and the live pair restored. GetViewportTexture never answers with the
+// screenshot's texture, so the UI built later this frame shows the editor's own
+// view, not the client's.
+//
+// The intermediate targets (HDR, G-buffer, TAA) are not set aside — the frame
+// resizes them to the request and the next real frame resizes them back. That
+// is the one cost of not having a second render context, and it is the reason
+// this is a per-request path and not a per-frame one.
+bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
+                                     uint32_t height, std::vector<uint8_t>& rgba)
+{
+	if (!m_primarySdlWindow || !m_primaryTarget.metalLayer || !m_device || !m_commandQueue)
+		return false;
+	if (width == 0 || height == 0) return false;
+
+	// Everything the frame reads that the request changes, saved by value.
+	void*                      liveColor = m_viewportColor;
+	void*                      liveDepth = m_viewportDepth;
+	const uint32_t             liveReqW  = m_viewportReqW;
+	const uint32_t             liveReqH  = m_viewportReqH;
+	const EditorCameraOverride liveCam   = m_editorCamera;
+
+	m_viewportColor = nullptr;
+	m_viewportDepth = nullptr;
+	m_viewportReqW  = width;
+	m_viewportReqH  = height;
+	m_editorCamera  = camera;
+	m_captureOnly   = true;
+	// TAA history is one camera's past. The screenshot must not blend against
+	// the viewport's (a request at exactly the viewport's size would reuse the
+	// targets, so the resize rule alone does not cover it), and the viewport
+	// must not blend against the screenshot's afterwards. Both frames take the
+	// current image only — an unconverged edge for one frame, no ghost.
+	m_taaHistoryValid = false;
+
+	EncodeFrame(m_primarySdlWindow, m_primaryTarget, /*isPrimary=*/true);
+
+	// A minimised window makes EncodeFrame return before it draws anything;
+	// m_viewportColor is then still null and CaptureViewport says so.
+	uint32_t   gotW = 0, gotH = 0;
+	const bool ok   = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+
+	// The screenshot pair goes the retired way (the command buffer that drew it
+	// is complete — CaptureViewport waited — but the convention is one release
+	// path for viewport textures, not two). The live pair comes straight back.
+	DestroyViewportTarget();
+	m_viewportColor = liveColor;
+	m_viewportDepth = liveDepth;
+	m_viewportReqW  = liveReqW;
+	m_viewportReqH  = liveReqH;
+	m_editorCamera  = liveCam;
+	m_captureOnly   = false;
+	m_taaHistoryValid = false;
+
+	if (!ok) rgba.clear();
+	return ok;
+}
+
 void MetalRenderer::RetireTexture(void* texture)
 {
 	if (!texture) return;
@@ -15204,8 +15267,16 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			m_counters = FrameCounters{};
 			++m_frameStamp; // invalidates the per-frame occlusion-cull reuse
 
-			AgeRetiredTextures();
-			AgeRetiredGIObjects();
+			// Not on a capture-only frame (RenderSceneImage): the retire counts
+			// are in REAL frames — the ones whose draw lists and in-flight
+			// buffers may still hold the texture — and a still on request is
+			// not one of those. Ageing here would release a texture one frame
+			// earlier than the rule promises.
+			if (!m_captureOnly)
+			{
+				AgeRetiredTextures();
+				AgeRetiredGIObjects();
+			}
 
 			// Project shadow resolution changed (SetShadowSettings): swap the
 			// cascade depth array here, before any pass of this frame touches
@@ -15916,7 +15987,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		}
 
 		// ── Swapchain pass (direct-mode tonemap and/or overlay) ─────────────
-		id<CAMetalDrawable> drawable = [layer nextDrawable];
+		// Skipped entirely for a capture-only frame (RenderSceneImage): the
+		// scene is already in the offscreen target above, and acquiring a
+		// drawable here would present a black frame with a stale overlay.
+		id<CAMetalDrawable> drawable = m_captureOnly ? nil : [layer nextDrawable];
 		if (drawable)
 		{
 			MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];

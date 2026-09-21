@@ -21,9 +21,11 @@
 // of a registry is that a test can walk it, and this one can be walked without a
 // window.
 
+#include <Renderer/IRenderer.h>   // EditorCameraOverride — the screenshot hooks speak it
 #include <Scripting/ScriptTypes.h>
 #include <Types/Enums.h>
 
+#include <cstdint>
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -52,10 +54,21 @@ struct ToolResult
 	std::string    errorCode;      // machine-readable: not_found, play_mode, …
 	std::string    errorMessage;
 
-	static ToolResult ok(nlohmann::json j) { return ToolResult{ std::move(j), false, {}, {} }; }
+	// An optional picture beside the JSON. MCP has a content type for exactly
+	// this (`{type:"image", data:<base64>, mimeType}`), and a model reads an
+	// image block as an image — base64 pasted into the text block would be a
+	// wall of characters it cannot look at. The bridge appends the block AFTER
+	// the text one and only when `imageBytes` is non-empty, so every tool
+	// without a picture answers exactly as before. The batch tool carries only
+	// `content` per slot; a picture asked for through it is dropped there, and
+	// the screenshot tool's schema says so.
+	std::vector<std::uint8_t> imageBytes;
+	std::string               imageMime;   // "image/png"
+
+	static ToolResult ok(nlohmann::json j) { return ToolResult{ std::move(j), false, {}, {}, {}, {} }; }
 	static ToolResult fail(std::string code, std::string message)
 	{
-		return ToolResult{ nlohmann::json::object(), true, std::move(code), std::move(message) };
+		return ToolResult{ nlohmann::json::object(), true, std::move(code), std::move(message), {}, {} };
 	}
 };
 
@@ -97,6 +110,11 @@ public:
 private:
 	std::vector<McpTool> m_tools;
 };
+
+// Standard base64 (RFC 4648, with padding) — what an MCP image block's `data`
+// has to be. Here rather than in a tool because the BRIDGE is what encodes a
+// ToolResult's imageBytes for the wire; a tool never sees base64.
+std::string mcpBase64Encode(const std::uint8_t* bytes, std::size_t count);
 
 // ─── The scene the tools report on ───────────────────────────────────────────
 // Everything the stub tools need from the editor, as functions rather than as an
@@ -1272,6 +1290,57 @@ struct McpSettingsHooks
 };
 
 void registerSettingsTools(McpToolRegistry& registry, McpSettingsHooks hooks);
+
+// ─── A picture of the scene: the screenshot tool ─────────────────────────────
+// `scene_screenshot`: render the open scene ONCE from a camera the client
+// names — position, a point to look at, a field of view — at a size it names,
+// and hand the picture back. Reading, never mutating: the world is not touched,
+// the editor's own camera is not moved, and the live viewport shows the same
+// thing before and after (that last part is the renderer's contract,
+// IRenderer::RenderSceneImage, not this file's).
+//
+// Two ways out for the picture, chosen by `output`:
+//   • `inline` — a PNG in an MCP image content block. The model sees the image.
+//     Bounded by the shim's 4 MiB frame (scripts/he_mcp.py), so a PNG over
+//     kInlineMaxPngBytes is refused with `too_large` rather than sent into a
+//     wall the client cannot see through.
+//   • `file` — a PNG in the editor's per-user data directory, absolute path
+//     returned. Never a client-chosen path: McpToolRegistry.h promises no file
+//     access, and "write a PNG where I say" is file access with a picture in it.
+//
+// Every camera argument is optional; absent, the editor's live camera is used.
+// That default is deliberately a hook (`liveCamera`) rather than a constant: the
+// per-client camera of the next step replaces exactly this one seam.
+struct McpScreenshotHooks
+{
+	std::function<bool()>        hasWorld;
+	std::function<std::string()> backendName;   // "Metal", "OpenGL", … for the refusal text
+
+	// The editor's live camera, as the renderer sees it. Empty hook or an
+	// inactive override = "no camera to fall back on" → the client has to give
+	// `position`.
+	std::function<EditorCameraOverride()> liveCamera;
+
+	// IRenderer::RenderSceneImage, or a stand-in. False = the backend cannot.
+	std::function<bool(const EditorCameraOverride& camera, std::uint32_t width,
+	                   std::uint32_t height, std::vector<std::uint8_t>& rgba)> renderImage;
+
+	// Where `output: "file"` writes. Absolute; created on demand. Empty = file
+	// output refused with `no_directory`.
+	std::function<std::string()> screenshotDir;
+};
+
+// Limits that are the tool's, not the renderer's. Pixels: 3840×2160 is the
+// biggest still anyone asks a viewport for, and the frame's intermediate targets
+// are resized to the request. Bytes: below the shim's 4 MiB frame with the
+// base64 growth (4/3) and the JSON around it already paid for.
+constexpr std::uint32_t kScreenshotDefaultWidth  = 1280;
+constexpr std::uint32_t kScreenshotDefaultHeight = 720;
+constexpr std::uint32_t kScreenshotMaxSide       = 4096;
+constexpr std::uint64_t kScreenshotMaxPixels     = 3840ull * 2160ull;
+constexpr std::size_t   kInlineMaxPngBytes       = 2560u * 1024u;
+
+void registerScreenshotTools(McpToolRegistry& registry, McpScreenshotHooks hooks);
 
 // ─── Several tool calls in one request ───────────────────────────────────────
 // `batch`: a list of {tool, args} pairs, each dispatched through this registry

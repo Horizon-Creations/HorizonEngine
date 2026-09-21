@@ -665,6 +665,27 @@ public:
     virtual bool  CaptureViewport(std::vector<uint8_t>& /*rgba*/,
                                   uint32_t& /*width*/, uint32_t& /*height*/) { return false; }
 
+    // ── One still image of the scene, from a camera that is not the viewport's ─
+    // Render the current world ONCE from `camera` at exactly `width`×`height`
+    // and read the result back as tightly-packed RGBA8, top row first — without
+    // presenting anything to the window and without leaving the live viewport
+    // looking any different afterwards. This is what an MCP client's
+    // `scene_screenshot` is built on: the editor keeps its own camera and its
+    // own target, the client gets a picture from wherever it asked.
+    //
+    // What it is NOT: a second render context. The frame goes through the same
+    // intermediate targets (HDR, G-buffer, TAA history) the viewport uses, so
+    // they are resized to the request and back on the next real frame, and any
+    // temporal history is one frame of somebody else's camera — the viewport
+    // reconverges over the following frame. Acceptable for a still on request;
+    // not a path to call every frame.
+    //
+    // Backends that do not implement it return false and leave `rgba` alone —
+    // the caller reports "unsupported on this backend" rather than guessing.
+    virtual bool  RenderSceneImage(const EditorCameraOverride& /*camera*/,
+                                   uint32_t /*width*/, uint32_t /*height*/,
+                                   std::vector<uint8_t>& /*rgba*/) { return false; }
+
     // ── Material hot-reload ────────────────────────────────────────────────
     // Drop any GPU state the backend cached for this material (e.g. uploaded
     // base-color textures) so the next frame re-resolves it from the

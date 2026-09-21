@@ -9,6 +9,35 @@ namespace HE::Ed
 
 using nlohmann::json;
 
+std::string mcpBase64Encode(const std::uint8_t* bytes, std::size_t count)
+{
+	static const char kAlphabet[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string out;
+	out.reserve(((count + 2) / 3) * 4);
+	std::size_t i = 0;
+	for (; i + 3 <= count; i += 3)
+	{
+		const std::uint32_t v = (std::uint32_t(bytes[i]) << 16) |
+		                        (std::uint32_t(bytes[i + 1]) << 8) | bytes[i + 2];
+		out.push_back(kAlphabet[(v >> 18) & 63]);
+		out.push_back(kAlphabet[(v >> 12) & 63]);
+		out.push_back(kAlphabet[(v >> 6) & 63]);
+		out.push_back(kAlphabet[v & 63]);
+	}
+	if (i < count)
+	{
+		const std::size_t rest = count - i;   // 1 or 2
+		std::uint32_t v = std::uint32_t(bytes[i]) << 16;
+		if (rest == 2) v |= std::uint32_t(bytes[i + 1]) << 8;
+		out.push_back(kAlphabet[(v >> 18) & 63]);
+		out.push_back(kAlphabet[(v >> 12) & 63]);
+		out.push_back(rest == 2 ? kAlphabet[(v >> 6) & 63] : '=');
+		out.push_back('=');
+	}
+	return out;
+}
+
 bool McpToolRegistry::enforceNameRule(const std::string& name)
 {
 	if (name.empty() || name.size() > 64) return false;

@@ -196,6 +196,10 @@ add_executable(HorizonEditor WIN32
 	# there is no project settings surface, so the project pages live in
 	# Preferences next to the editor ones.
 	McpToolsSettings.cpp
+	# A picture of the scene from a camera the client names, through the
+	# renderer's still-on-request path (IRenderer::RenderSceneImage). The one
+	# tool whose answer is an image block rather than JSON alone.
+	McpToolsScreenshot.cpp
 	# …and the editor half of what those two write: the Preferences settings as a
 	# TABLE rather than as a screen. `row("bloom", …)` in EditorSettingsPanel.cpp
 	# is documentation only a human looking at a widget can read.

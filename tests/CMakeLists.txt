@@ -207,6 +207,7 @@ add_executable(he_tests
     test_mcp_tools_build.cpp
     test_mcp_tools_settings.cpp
     test_mcp_tools_batch.cpp
+    test_mcp_tools_screenshot.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -379,6 +380,10 @@ add_executable(he_tests
     # The batch dispatcher: runs other tools through the registry, so the test
     # binary needs only the registry and whatever tools the test registers.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsBatch.cpp
+    # The screenshot tool: the renderer is a hook, so "does a fake frame come
+    # back as a PNG the decoder reads pixel-for-pixel, as an image block, at the
+    # size asked, from the camera asked" is answerable without a GPU.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsScreenshot.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
