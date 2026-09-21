@@ -20,11 +20,11 @@ Alle Pfade relativ zu `src/HE_Editor/`. Zeilennummern Stand Commit `54bf9032`
 | Dock-Layout (Standard) | `EditorUI.cpp:384-411` `BuildDefaultDockLayout` | Quick Settings links 18 %, Outliner+Details rechts 26 % (50/50), Content Browser+Console unten 33 %, Scene Mitte |
 | Fußleiste | `EditorUI.cpp:2389-2601` `##EditorFooter` | Undo/Redo, Source Control, „Ready", rechts der Status-Cluster |
 | Tab-Streifen (Asset-Editoren) | `EditorUI.cpp:2603-2785` `##EditorTabBar` | Scene-Tab + ein Tab je geöffnetem Asset; bei aktivem Asset-Tab verschwindet das ganze Szenen-Layout (`sceneTabActive`, `EditorUI.cpp:2795`) |
-| Tab-Dispatch | `EditorUI.cpp:3003-3074` | 4 virtuelle Tabs + 17 Asset-Editor-Panels (siehe §7) |
+| Tab-Dispatch | `EditorUI.cpp:3003-3074` | 4 virtuelle Tabs + 16 Asset-Editor-Panels für 17 Asset-Typen (Material und Material Function teilen sich eines, siehe §7) |
 | Viewport-Toolbar | `ViewportToolbar.cpp` | im Scene-Fenster, mit vier Popups |
 | Kontextmenüs | `OutlinerPanel.cpp:717-905, 1065`, `ViewportPanel.cpp:640-710`, `ContentBrowserPanel.cpp:2605-3080, 4312-4360`, `InspectorPanel.cpp:3278-3479` | siehe §5 |
 | Shortcut-Registry | `EditorShortcuts.cpp` | 25 Einträge, alle in Preferences ▸ Shortcuts umbelegbar |
-| Hilfe-Registry | `EditorHelp.cpp`, `Help::Scope` | Schlüssel `"<Bereich>/<Label>"`, 93 Scopes (Anhang A) |
+| Hilfe-Registry | `EditorHelp.cpp`, `Help::Scope` | Schlüssel `"<Bereich>/<Label>"`, 92 benannte Scopes (Anhang A) |
 | Startbildschirm | `ProjectHubPanel.cpp` | Recent Projects nur hier (`:426`) |
 
 Toolkit: Dear ImGui (Docking-Zweig) + ImGuizmo, eigene Widget-Schicht `EditorWidgets`
@@ -117,7 +117,7 @@ Browser ein 20-teiliges Erzeugungsmenü hat (§5.3).
 | Eintrag | Shortcut | Mac |
 |---|---|---|
 | Documentation | F1 | `:297` |
-| Search the Documentation… | Ctrl+F1 (Label) | `:298` |
+| Search the Documentation… | Ctrl+F1 (gebunden, `EditorUI.cpp:706`) | `:298` |
 | Documentation (Website) | | `:299` |
 | Interactive Tutorial | | `:302` |
 | Report Issue… | | `:304` |
@@ -308,7 +308,7 @@ Reihenfolge nach Häufigkeit der betroffenen Handlung.
 14. **Kein Window-Menü auf Windows/Linux**, dafür Panel-Toggles unter View; auf
     macOS existiert ein natives Window-Menü nur mit Minimize/Zoom.
 15. **Kein Tastatur-Weg für Tabs** (nächster/vorheriger/schließen) und keine
-    Befehlspalette; F1 öffnet Docs, Ctrl+F1 Doc-Suche, mehr nicht.
+    Befehlspalette; F1 öffnet Docs, Ctrl+F1 die Doc-Suche, mehr nicht.
 
 Beobachtungen außerhalb des Themas (nicht Teil der Fix-Liste, nur notiert):
 - Asset-Tab-Modus blendet das komplette Szenen-Layout aus (§7); ein Umbau wäre
@@ -355,30 +355,36 @@ Zustände heil bleiben:
 
 ---
 
-## Anhang A: Hilfe-Scopes als Karte der UI-Regionen (93)
+## Anhang A: Hilfe-Scopes als Karte der UI-Regionen (92 benannte)
 
-Blend Space Editor, Bone Mask Editor, Canvas, Collaboration Session, Console,
-Content Browser, Documentation, Edit, Environment Window, Export, File, Fonts,
-Function Return, Graph Appearance, Help, HorizonCode Default Value, HorizonCode
-Event, HorizonCode Graph, HorizonCode Node, Input Action, Landscape, Material
-Graph, Material Node, Material Parameter, Material Preview, Material Settings,
-Mesh Viewer, New Asset, New Entity, New Landscape, Node Parameter, Notifications,
-Permissions, Physics, Play Report, Preferences, Profiler, Project General, Project
-Hub, Rename Across Project, Render Defaults, Report Issue, Scene Recovery, Script
-Graph, Script Node, Script Variable, Secondary Viewport, Sequencer, Session
-Participants, Shadows, Shortcuts, Source Control, Source Control Panel, Source
-Root, State Machine, State Machine Parameters, State Machine Transitions, Sync
-Graph, Theme Editor, Theme Styles, Tool Status, Tutorial, Type Editor, UI Align,
-UI Graph, UI Graph Node, UI Hierarchy, UI Theme Preview, UI Timeline, UI
-Variable, UI Widget, Undo History, View, Viewport Menu, Viewport Options,
-Viewport Show, Viewport View, Viewport View Mode, Watch, World Outliner (plus die
-Details-Komponenten-Scopes, die per `helpForKey("details.*")` laufen).
+`grep -ho 'helpScope("[^"]*")' src/HE_Editor/*.cpp src/HE_Editor/Guides/*.cpp | sort -u`,
+ohne den einen leeren Scope. Die Details-Komponenten laufen daneben per
+`helpForKey("details.*")`.
+
+Anti-Cheat, Application, Assets, Audio Buses, Audio Editor, Audio Mixer, Blend
+Space Editor, Block Participant, Bone Mask Editor, Build, Build Tools, Build
+Window, Canvas, Class Components, Collaboration Session, Collision Layers,
+Console, Content Browser, Documentation, Edit, Environment Window, Export, File,
+Fonts, Function Return, Graph Appearance, Help, HorizonCode Default Value,
+HorizonCode Event, HorizonCode Graph, HorizonCode Node, Input Action, Landscape,
+Material Graph, Material Node, Material Parameter, Material Preview, Material
+Settings, Mesh Viewer, New Asset, New Entity, New Landscape, Node Parameter,
+Notifications, Permissions, Physics, Play Report, Preferences, Profiler, Project
+General, Project Hub, Rename Across Project, Render Defaults, Report Issue,
+Scene Recovery, Script Graph, Script Node, Script Variable, Secondary Viewport,
+Sequencer, Session Participants, Shadows, Shortcuts, Source Control, Source
+Control Panel, Source Root, State Machine, State Machine Parameters, State
+Machine Transitions, Sync Graph, Theme Editor, Theme Styles, Tool Status,
+Tutorial, Type Editor, UI Align, UI Graph, UI Graph Node, UI Hierarchy, UI Theme
+Preview, UI Timeline, UI Variable, UI Widget, Undo History, View, Viewport Menu,
+Viewport Options, Viewport Show, Viewport View, Viewport View Mode, Watch, World
+Outliner
 
 ## Anhang B: Shortcut-Registry (`EditorShortcuts.cpp`, 25)
 
 File: save, saveAll, saveSceneAs, openProject · Edit: undo, redo, redoAlt,
 preferences · Entities: duplicate, copy, cut, paste, delete · View: console,
 fullscreen · Viewport: move, rotate, scale, focus, snapToGround, hide, isolate,
-showAll, group, ungroup. Nicht in der Registry, aber fest verdrahtet: F1 Docs
-(`EditorUI.cpp:701`), Num-Block View-Presets, Alt+2/3/4 View-Modes, Ctrl+1..9
+showAll, group, ungroup. Nicht in der Registry, aber fest verdrahtet: F1 Docs /
+Ctrl+F1 Doc-Suche (`EditorUI.cpp:701-706`), Num-Block View-Presets, Alt+2/3/4 View-Modes, Ctrl+1..9
 Kamera-Bookmarks, Menü-Taste/Shift+F10 Viewport-Kontextmenü.
