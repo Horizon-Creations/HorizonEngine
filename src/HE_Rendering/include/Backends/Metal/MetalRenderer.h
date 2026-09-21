@@ -92,6 +92,8 @@ public:
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
+	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
+	                       std::vector<uint8_t>& rgba) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
@@ -1233,6 +1235,11 @@ private:
 	uint32_t m_viewportReqH    = 0;
 	void*    m_viewportColor   = nullptr; // id<MTLTexture> (retained), doubles as ImTextureID
 	void*    m_viewportDepth   = nullptr; // id<MTLTexture> (retained)
+	// Set for the one EncodeFrame RenderSceneImage drives: the scene goes into
+	// the offscreen target as always, but the swapchain pass (drawable, ImGui
+	// overlay, present) is skipped — a still on request must not flash a black
+	// frame on the window it was not asked to touch.
+	bool     m_captureOnly     = false;
 
 	// Textures replaced on viewport resize. The current frame's ImGui draw
 	// list (and in-flight GPU work) may still reference the old texture, so

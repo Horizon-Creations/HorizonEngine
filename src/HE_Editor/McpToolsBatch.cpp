@@ -41,8 +41,10 @@
 // failures too, which is the consistent reading.
 //
 // ── No special path past the guards ──────────────────────────────────────────
-// Each element goes to `registry.find(tool)->handler(args)`, the same call the
-// bridge makes for a single request. Whatever a tool checks on its own —
+// Each element goes to `registry.find(tool)->invoke(ctx, args)`, the same call
+// the bridge makes for a single request, with the same caller: a tool that
+// keeps state per client (the screenshot camera) sees the client that sent the
+// batch, not an anonymous one. Whatever a tool checks on its own —
 // play-in-editor, a peer's lock, a dirty document, the gateway's lock state —
 // it checks inside a batch too, because it is the same handler with the same
 // arguments. This file knows nothing about locks and must stay that way: the
@@ -150,7 +152,8 @@ void registerBatchTool(McpToolRegistry& registry)
 	batch.mutates = true;
 
 	auto running = std::make_shared<bool>(false);
-	batch.handler = [&registry, running](const json& args) -> ToolResult {
+	batch.handlerCtx = [&registry, running](const McpCallContext& ctx,
+	                                        const json& args) -> ToolResult {
 		if (*running)
 			return ToolResult::fail("nested_batch",
 			                        "'batch' cannot be called from inside a batch. "
@@ -238,7 +241,7 @@ void registerBatchTool(McpToolRegistry& registry)
 					// the bridge gives a missing `arguments`.
 					const json subArgs = (op.contains("args") && op["args"].is_object())
 					                         ? op["args"] : json::object();
-					const ToolResult r = target->handler(subArgs);
+					const ToolResult r = target->invoke(ctx, subArgs);
 					json slot = slotFor(i, tool);
 					if (r.isError)
 					{

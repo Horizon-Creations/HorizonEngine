@@ -63,6 +63,12 @@ HE_API glm::vec4 heAppIconForeground(const glm::vec4& bg);
 HE_API bool hePngWrite(const std::filesystem::path& path,
                        const std::uint8_t* rgba, int w, int h);
 
+// The same PNG as bytes rather than a file, for a caller that hands it on over
+// a wire instead of a path (an MCP screenshot travels as base64 inside a JSON
+// reply and never touches the disk). Empty on failure; hePngWrite is this plus
+// the write, not a second encoder.
+HE_API std::vector<std::uint8_t> hePngEncode(const std::uint8_t* rgba, int w, int h);
+
 // macOS .icns and Windows .ico, both carrying the PNG payloads above.
 // Vista and later read PNG inside .ico; every macOS this engine supports reads
 // the ic-- PNG types.

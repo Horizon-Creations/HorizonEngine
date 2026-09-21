@@ -9,6 +9,35 @@ namespace HE::Ed
 
 using nlohmann::json;
 
+std::string mcpBase64Encode(const std::uint8_t* bytes, std::size_t count)
+{
+	static const char kAlphabet[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string out;
+	out.reserve(((count + 2) / 3) * 4);
+	std::size_t i = 0;
+	for (; i + 3 <= count; i += 3)
+	{
+		const std::uint32_t v = (std::uint32_t(bytes[i]) << 16) |
+		                        (std::uint32_t(bytes[i + 1]) << 8) | bytes[i + 2];
+		out.push_back(kAlphabet[(v >> 18) & 63]);
+		out.push_back(kAlphabet[(v >> 12) & 63]);
+		out.push_back(kAlphabet[(v >> 6) & 63]);
+		out.push_back(kAlphabet[v & 63]);
+	}
+	if (i < count)
+	{
+		const std::size_t rest = count - i;   // 1 or 2
+		std::uint32_t v = std::uint32_t(bytes[i]) << 16;
+		if (rest == 2) v |= std::uint32_t(bytes[i + 1]) << 8;
+		out.push_back(kAlphabet[(v >> 18) & 63]);
+		out.push_back(kAlphabet[(v >> 12) & 63]);
+		out.push_back(rest == 2 ? kAlphabet[(v >> 6) & 63] : '=');
+		out.push_back('=');
+	}
+	return out;
+}
+
 bool McpToolRegistry::enforceNameRule(const std::string& name)
 {
 	if (name.empty() || name.size() > 64) return false;
@@ -32,10 +61,19 @@ bool McpToolRegistry::add(McpTool tool)
 		             tool.name.c_str());
 		return false;
 	}
-	if (!tool.handler)
+	if (!tool.handler && !tool.handlerCtx)
 	{
 		HE_LOG_ERROR(Editor, "MCP tool '%s' rejected: no handler", tool.name.c_str());
 		return false;
+	}
+	if (!tool.handler)
+	{
+		// A context-only tool still answers `handler(args)`: as the anonymous
+		// client. This is what keeps a direct call in a test — and any older
+		// caller that never learned about contexts — from dereferencing an
+		// empty std::function.
+		auto hc = tool.handlerCtx;
+		tool.handler = [hc](const json& args) { return hc(McpCallContext{}, args); };
 	}
 	if (!tool.inputSchema.is_object())
 	{
@@ -60,6 +98,16 @@ const McpTool* McpToolRegistry::find(const std::string& name) const
 	for (const auto& t : m_tools)
 		if (t.name == name) return &t;
 	return nullptr;
+}
+
+void McpToolRegistry::addClientGoneHook(std::function<void(McpClientId)> fn)
+{
+	if (fn) m_clientGone.push_back(std::move(fn));
+}
+
+void McpToolRegistry::notifyClientGone(McpClientId client) const
+{
+	for (const auto& fn : m_clientGone) fn(client);
 }
 
 json McpToolRegistry::listPayload() const

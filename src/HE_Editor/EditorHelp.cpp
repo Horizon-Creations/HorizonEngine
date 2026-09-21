@@ -1948,7 +1948,9 @@ namespace
 	  "", "editor#viewport" },
 	{ "Viewport Show/Collaborators", "",
 	  "Where the other people in a collaboration session are and what they have "
-	  "selected: their rings and boxes in the scene, and their name tags over it.",
+	  "selected: their rings and boxes in the scene, and their name tags over it. "
+	  "Also the screenshot cameras of connected MCP clients (Remote Control): a "
+	  "frustum in the scene and an MCP #n tag over it, one per client.",
 	  "", "editor#viewport" },
 	{ "Viewport Show/Stats", "",
 	  "The frame's counters in the corner of the viewport: frame rate and frame "

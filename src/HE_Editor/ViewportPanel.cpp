@@ -14,6 +14,7 @@
 #include <HorizonScene/Components/TerrainChunkComponent.h>
 #include "TerrainTools.h"                // Landscape brush cursor + sculpt stroke
 #include "CollabPresenceBar.h"           // name tags for the other people in the session
+#include "McpCameraGizmos.h"             // …and for the MCP clients' screenshot cameras
 #include "ViewportToolbar.h"             // the strip along the top of the Scene window
 #include "ViewportViewMode.h"            // the headless HE_DUMP_VIEWMODE override on the mode push
 #include "EditorWidgets.h"               // WrapText — text wraps at the pane edge, never runs off it
@@ -1502,6 +1503,15 @@ void render(AppContext& ctx, float dt)
 				if (s_showFlags.collaborators)
 					CollabPresenceBar::DrawViewportMarkers(
 						ctx, s_sceneSnapshot.camera.view, s_sceneSnapshot.camera.projection,
+						rectMin.x, rectMin.y, rectMax.x, rectMax.y);
+				// The MCP clients' cameras get the same treatment on the same
+				// switch: a tag with the connection number over the frame,
+				// beside their frustum in the debug block. No session gate —
+				// a client's camera exists without a collaboration session.
+				if (s_showFlags.collaborators && ctx.mcpCameras)
+					HE::Ed::McpCameraGizmos::drawViewportLabels(
+						*ctx.mcpCameras, s_sceneSnapshot.camera.view,
+						s_sceneSnapshot.camera.projection,
 						rectMin.x, rectMin.y, rectMax.x, rectMax.y);
 				// The counters, over everything: a diagnostic has to stay
 				// readable whatever the scene is doing underneath it.

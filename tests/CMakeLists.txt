@@ -207,6 +207,8 @@ add_executable(he_tests
     test_mcp_tools_build.cpp
     test_mcp_tools_settings.cpp
     test_mcp_tools_batch.cpp
+    test_mcp_tools_screenshot.cpp
+    test_mcp_camera_gizmos.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -379,6 +381,10 @@ add_executable(he_tests
     # The batch dispatcher: runs other tools through the registry, so the test
     # binary needs only the registry and whatever tools the test registers.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsBatch.cpp
+    # The screenshot tool: the renderer is a hook, so "does a fake frame come
+    # back as a PNG the decoder reads pixel-for-pixel, as an image block, at the
+    # size asked, from the camera asked" is answerable without a GPU.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsScreenshot.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
@@ -480,6 +486,11 @@ add_executable(he_tests
     # PlaceMarker: pure projection geometry, and the piece where a wrong Y flip
     # or a mishandled behind-the-camera case hides best.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/CollabPresenceBar.cpp
+    # The MCP clients' camera gizmos: the frustum half is pure geometry into a
+    # DebugDrawBuffer (does it point where the camera looks, does it scale with
+    # the field of view, does every client get its own colour); the tag half
+    # is ImGui and compiles away here, like the presence bar's.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpCameraGizmos.cpp
     # The graph quick-spawn key table is deliberately plain data and ImGui-free
     # (HcGraphHost turns a letter into an ImGuiKey), so its invariants can be
     # asserted here without a window.

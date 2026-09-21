@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <fstream>
 #include <random>
+#include <type_traits>
 
 #ifdef _WIN32
 #	include <process.h>
@@ -23,6 +24,11 @@ using HE::Net::ConnectionId;
 using HE::Net::NetEvent;
 using HE::Net::NetEventType;
 using HE::Net::SendMode;
+
+// McpToolRegistry.h keeps the Net headers out and names the client by its own
+// alias; this is where the two are held to be the same number.
+static_assert(std::is_same_v<McpClientId, ConnectionId>,
+              "McpClientId must be the transport's ConnectionId");
 
 namespace
 {
@@ -159,6 +165,11 @@ void McpBridge::stop()
 		m_transport.reset();
 		HE_LOG_INFO(Editor, "%s", "MCP: listener stopped");
 	}
+	// Nothing is polled after the transport is gone, so the Disconnected events
+	// for these never arrive — and the NEXT listener numbers its connections
+	// from 1 again. Without this, the first client of the next start would
+	// inherit whatever the first client of this one left behind.
+	for (const auto& [id, c] : m_clients) m_registry.notifyClientGone(id);
 	m_clients.clear();
 	m_token.clear();
 	removeEndpointFile();
@@ -219,7 +230,10 @@ void McpBridge::update(std::uint64_t nowMs)
 			break;
 		}
 		case NetEventType::Disconnected:
-			m_clients.erase(ev.conn);
+			// Only for a connection this bridge admitted: a fifth one was
+			// refused above without ever becoming a client, and the tools
+			// never heard of it.
+			if (m_clients.erase(ev.conn) != 0) m_registry.notifyClientGone(ev.conn);
 			break;
 		case NetEventType::Data:
 			// The one catch site, and it is not belt-and-braces. nlohmann's
@@ -249,6 +263,7 @@ void McpBridge::update(std::uint64_t nowMs)
 				{
 					m_transport->disconnect(ev.conn);
 					m_clients.erase(it);
+					m_registry.notifyClientGone(ev.conn);
 				}
 			}
 			break;
@@ -301,6 +316,7 @@ void McpBridge::handleFrame(ConnectionId id, const std::vector<std::uint8_t>& da
 			// signal to anybody else.
 			m_transport->disconnect(id);
 			m_clients.erase(id);
+			m_registry.notifyClientGone(id);
 			return;
 		}
 
@@ -372,8 +388,6 @@ void McpBridge::handleFrame(ConnectionId id, const std::vector<std::uint8_t>& da
 bool McpBridge::dispatch(ConnectionId id, const std::string& method, const json& params,
                          json& outResult, int& outErrorCode, std::string& outErrorMessage)
 {
-	(void)id;
-
 	if (method == "ping")
 	{
 		outResult = json{ { "pong", true }, { "nowMs", m_nowMs } };
@@ -413,7 +427,10 @@ bool McpBridge::dispatch(ConnectionId id, const std::string& method, const json&
 			return false;
 		}
 
-		const ToolResult r = tool->handler(args);
+		// With the caller's identity: a tool that keeps state per client (the
+		// screenshot camera) keys it on this connection, and a client can only
+		// ever reach its own share.
+		const ToolResult r = tool->invoke(McpCallContext{ id }, args);
 
 		// MCP's own result shape, not ours: the shim forwards this to the client
 		// unchanged, so `content` has to be a content array and a refusal has to
@@ -423,11 +440,21 @@ bool McpBridge::dispatch(ConnectionId id, const std::string& method, const json&
 		json payload = r.isError
 		                   ? json{ { "code", r.errorCode }, { "message", r.errorMessage } }
 		                   : r.content;
+		json content = json::array({ json{
+			{ "type", "text" },
+			{ "text", payload.dump(2) },
+		} });
+		// A picture, when the tool took one: MCP's image block, after the text
+		// so a client that reads only the first block still gets the JSON. Never
+		// on a refusal — a failed screenshot has no bytes to show.
+		if (!r.isError && !r.imageBytes.empty())
+			content.push_back(json{
+				{ "type",     "image" },
+				{ "data",     mcpBase64Encode(r.imageBytes.data(), r.imageBytes.size()) },
+				{ "mimeType", r.imageMime.empty() ? std::string("image/png") : r.imageMime },
+			});
 		outResult = json{
-			{ "content", json::array({ json{
-				{ "type", "text" },
-				{ "text", payload.dump(2) },
-			} }) },
+			{ "content",       std::move(content) },
 			{ "isError",       r.isError },
 			// The same payload as structured JSON alongside the text block, so a
 			// caller that is not a language model does not have to re-parse a
