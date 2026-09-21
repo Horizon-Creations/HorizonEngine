@@ -49,4 +49,10 @@ namespace ContentBrowserPanel
 	// asset tab in front) or while an Engine or Source root is being browsed,
 	// where nothing can be created.
 	void requestCreateMenu();
+
+	// The other direction: the panel's header has an Import cell, and the
+	// import itself (file dialog, target folder, importer) is EditorUI's
+	// Import Asset handler. True once per click, cleared on read; EditorUI
+	// asks at the top of its frame and runs the same code the menu runs.
+	bool takeImportRequest();
 }

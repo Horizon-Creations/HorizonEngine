@@ -145,7 +145,7 @@ Unverändert.
 |---|---|---|
 | 1 | Play/Pause/Step nur über Toolbar | **erledigt**: Play-Menü + 3 Shortcuts + Mac |
 | 2 | Entity anlegen nur per Rechtsklick | **erledigt**: Entity ▸ Create ▸ |
-| 3 | Asset anlegen nur per Rechtsklick | **erledigt** (Menü-Tür): Assets ▸ Create Asset…; Kopfzeilen-Knöpfe sind Schritt 3 |
+| 3 | Asset anlegen nur per Rechtsklick | **erledigt** (Menü-Tür): Assets ▸ Create Asset…; Kopfzeilen-Knöpfe Add/Import/Refresh seit Schritt 3 |
 | 5 | View-Menü mischt vier Arten | **erledigt**: View = Zeichnen, Window = Öffnen |
 | 6 | Virtuelle Tabs verstreut | **teilweise**: Level Script/Game Instance unter Window; Preferences/Project Settings bleiben bewusst unter Edit |
 | 7 | Mac-Edit ohne Cut/Copy/Paste/Duplicate/Delete | **erledigt** |
@@ -155,7 +155,9 @@ Unverändert.
 | 12 | Recent Projects nur im Hub | **erledigt**: File ▸ Recent Projects ▸ (ImGui + Mac) |
 | 13 | Zwei Kontextmenüs mit verschiedenen Verben | **erledigt** (Vereinigung im Entity-Menü); die Kontextmenüs selbst unverändert |
 | 14 | Kein Window-Menü auf Windows/Linux | **erledigt** |
-| 4, 10, 15 | Add Component, Beschriftungen, Tab-Tastatur/Palette | Schritt 3 bzw. offen |
+| 4 | Add Component flach, ohne Suche | **erledigt in Schritt 3** (`docs/editor-panel-cleanup-2026-09-21.md`): sieben Gruppen + Suchfeld |
+| 10 | Unklare Panel-Beschriftungen | bewusst offen (Fenstertitel sind Identität, siehe Schritt-3-Doku §2) |
+| 15 | Tab-Tastatur/Palette | offen (neues Verb) |
 
 ---
 

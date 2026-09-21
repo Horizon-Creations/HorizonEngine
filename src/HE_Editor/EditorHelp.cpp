@@ -2662,6 +2662,13 @@ namespace
 	  "Saves this entity and its children as a reusable asset, so the same thing "
 	  "can be dropped into any scene.",
 	  "", "scenes#prefabs" },
+	{ "outliner.create", "New entity",
+	  "Opens the Create menu — Empty, Cube, a Camera, a Light, a Rope, a Trail "
+	  "— and puts the new entity at the top level of the scene, selected. The "
+	  "same menu a right-click on the panel's empty space opens, and the same "
+	  "one as Entity » Create in the main bar; this button is for an Outliner "
+	  "with no empty space left. Greyed while the game is playing.",
+	  "", "editor#outliner" },
 	{ "outliner.search", "Search",
 	  "Narrows the tree to entities whose name contains this text, in any case. "
 	  "Every entity in the scene is searched, including those under folded "
@@ -2716,6 +2723,47 @@ namespace
 	  "Adds the component on the clipboard to this entity, with the values it "
 	  "was copied with. An entity can carry one of each kind, so a component it "
 	  "already has takes the copied values instead of being doubled.",
+	  "", "editor#details" },
+	{ "details.add-component-search", "Search components",
+	  "Type part of a component's name and the groups give way to a flat list "
+	  "of everything that matches, with the group each one lives in beside it. "
+	  "Enter adds the first hit. Components the entity already carries are not "
+	  "listed — it can have one of each.",
+	  "", "editor#details" },
+	// The Add Component menu's groups. One sentence each on what belongs there,
+	// so a reader who does not know which group holds Decal can hover the
+	// headings instead of opening all seven.
+	{ "Add Component/Transform", "Transform",
+	  "Where the entity is: a position, rotation and scale in the world, or in "
+	  "the plane for a 2D entity. Almost everything else builds on one of these.",
+	  "", "editor#details" },
+	{ "Add Component/Rendering", "Rendering",
+	  "What is drawn for the entity: meshes and their material, lights, decals, "
+	  "particles, foliage, level-of-detail switching, and the rope and trail "
+	  "effects.",
+	  "", "editor#details" },
+	{ "Add Component/Physics", "Physics",
+	  "How the entity takes part in the simulation: a rigid body that moves, a "
+	  "collider that gives it a shape, a joint that ties it to another body.",
+	  "", "editor#details" },
+	{ "Add Component/Animation", "Animation",
+	  "What moves a skeleton: a state machine, root motion, animation layers "
+	  "and inverse kinematics. Every one of them reads a Skeletal Mesh's pose, "
+	  "so the group is greyed until the entity has one — add that first, from "
+	  "Rendering.",
+	  "", "editor#details" },
+	{ "Add Component/Gameplay", "Gameplay",
+	  "What makes the entity part of the game: a camera and its rig, movement, "
+	  "a script or HorizonCode class, a saved state, and a place on the wire "
+	  "for multiplayer.",
+	  "", "editor#details" },
+	{ "Add Component/Navigation", "Navigation",
+	  "Pathfinding: a nav mesh that describes where walking is possible, and an "
+	  "agent that walks it.",
+	  "", "editor#details" },
+	{ "Add Component/Audio", "Audio",
+	  "Sound: a source that plays from the entity's position, and the listener "
+	  "that hears the scene — usually the camera.",
 	  "", "editor#details" },
 	// ── Placed prefabs ───────────────────────────────────────────────────────
 	{ "details.prefab", "Prefab Instance",
@@ -6638,6 +6686,7 @@ namespace
 		{ "content.",  "editor-interface", "Editor Interface", "Content Browser" },
 		{ "details.",  "editor-interface", "Editor Interface", "Details panel" },
 		{ "Prefab Instance/", "editor-interface", "Editor Interface", "Details panel" },
+		{ "Add Component/",   "editor-interface", "Editor Interface", "Details panel" },
 		{ "panel.",    "editor-interface", "Editor Interface", "Panels and windows" },
 		{ "hub.",      "editor-interface", "Editor Interface", "Project Hub" },
 		// The menu bar, one rule per menu — the scope a menu pushes IS its name,

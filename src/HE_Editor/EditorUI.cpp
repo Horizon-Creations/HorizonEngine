@@ -1207,6 +1207,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			dir.empty() ? nullptr : dir.c_str(),
 			/*allow_many=*/true);
 	};
+	// The Content Browser's header Import cell, pressed last frame: same
+	// handler as File/Assets ▸ Import Asset, so it lands in the browsed folder
+	// with the same filters.
+	if (ContentBrowserPanel::takeImportRequest()) triggerImportAsset();
 	auto doCloseProject = [&]()
 	{
 		// Same teardown as switching projects — closing one left its tabs, its

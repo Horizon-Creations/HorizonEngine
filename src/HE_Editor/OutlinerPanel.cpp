@@ -559,9 +559,29 @@ void render(AppContext& ctx)
         {
             const float comboW = 130.0f;
             const float clearW = ImGui::GetFrameHeight();
+            const float addW   = clearW;
             const float avail  = ImGui::GetContentRegionAvail().x;
-            ImGui::SetNextItemWidth(std::max(60.0f, avail - comboW - clearW -
-                                             ImGui::GetStyle().ItemSpacing.x * 2.0f));
+
+            // ── "+": a new entity, from the header ────────────────────────
+            // The same Create menu the empty space's right-click and the
+            // Entity menu open, with a fixed address in the panel: in a full
+            // Outliner there IS no empty space to right-click, and the
+            // background menu was the only place in the panel that made one.
+            // Greyed while playing, like Entity ▸ Create.
+            ImGui::BeginDisabled(ctx.isPlaying);
+            if (ImGui::Button("+##outliner_add", ImVec2(addW, 0.0f)))
+                ImGui::OpenPopup("##outliner_add_menu");
+            ImGui::EndDisabled();
+            EditorWidgets::helpForKey("outliner.create");
+            if (ImGui::BeginPopup("##outliner_add_menu"))
+            {
+                drawCreateEntityMenu(ctx);
+                ImGui::EndPopup();
+            }
+            ImGui::SameLine();
+
+            ImGui::SetNextItemWidth(std::max(60.0f, avail - addW - comboW - clearW -
+                                             ImGui::GetStyle().ItemSpacing.x * 3.0f));
             ImGui::InputTextWithHint("##outliner_search", "Search entities", &s_searchText);
             EditorWidgets::helpForKey("outliner.search");
             ImGui::SameLine();
