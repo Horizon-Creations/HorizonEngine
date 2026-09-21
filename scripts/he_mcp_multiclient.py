@@ -274,7 +274,10 @@ def main():
     live = "--live" in args
     editor_path = EDITOR
     port = 0
-    timeout = int(os.environ.get("HE_SHOT_TIMEOUT", "400"))
+    # A Debug editor on macOS 27 needs ~390 s to its endpoint file on an idle
+    # machine (no Metal pipeline archive there, everything compiles), and a
+    # parallel build on the same box doubles that. 400 was one second short.
+    timeout = int(os.environ.get("HE_SHOT_TIMEOUT", "900"))
     for i, a in enumerate(args):
         if a == "--editor":
             editor_path = pathlib.Path(args[i + 1])
@@ -325,6 +328,13 @@ def main():
         d_ab = pixel_diff(png_a1, png_b1)
         log("  a1 vs b1: %.1f%% px differ" % (100 * d_ab))
         expect(d_ab > 0.10, "A's and B's pictures differ (>10%%): %.1f%%" % (100 * d_ab), failures)
+        if live:
+            # Both frustums at their OWN places, before phase 3 puts B onto A:
+            # the picture for "correctly positioned" (A left of the cube, B
+            # right of it, seen from the editor camera at (6, 4.5, 6)).
+            log("live capture with A and B apart")
+            expect(ed.live_capture(outdir / "live_apart.png"),
+                   "live viewport captured with A and B at their own places", failures)
 
         # 3. B takes A's camera → B's picture is A's picture.
         log("phase 3: B moves onto A's camera")

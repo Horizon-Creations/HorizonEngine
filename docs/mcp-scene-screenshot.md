@@ -268,9 +268,12 @@ Ablauf und Orakel (Stand 22.09.2026, alle grün):
 4. **A dreht** `turn [180,0]` (`render:false`), B's `render:false`-Antwort
    trägt dieselbe Kamera wie zuvor; A's nächstes Bild 73 % anders. Einmal
    `inline`: Bildblock nach dem Textblock, `image/png`, 125 kB bei 480×270.
-5. **Live-Viewport** (`--live`): beide Frustums gleichzeitig im Bild (magenta
-   #1, cyan #2, beide bei (-2,1.5,3), weil B dort steht und A um 180°
-   gedreht ist: cyan öffnet zum Cube, magenta davon weg). Kontrolle, dass die
+5. **Live-Viewport** (`--live`): direkt nach Schritt 2 (`live_apart.png`)
+   beide Frustums an ihren eigenen Plätzen, magenta #1 links des Cubes bei
+   x ≈ 540 (aus der Editor-Kamera vorausberechnet 532), cyan #2 rechts bei
+   x ≈ 1150 (vorausberechnet 1186), beide zum Cube geöffnet. Nach Schritt 4
+   (`live_both.png`) beide bei (-2,1.5,3), weil B dort steht und A um 180°
+   gedreht ist: cyan öffnet zum Cube, magenta davon weg. Kontrolle, dass die
    Aufnahme live ist: Cube per `entity_set_transform` verschoben → 1,9 %
    Pixel anders.
 6. **A legt auf:** B's Kamera überlebt; ein Neuling C (Id 3, nicht A's 1)
@@ -301,7 +304,10 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
   Linien-Pass nimmt dieselbe Matrix wie die Szene (`MetalRenderer.mm`,
   `EncodeDebugLines`). Folge: Grid, Collider, Auswahl, Collab-Ringe und die
   MCP-Frustums sind auf Metal jetzt vor Meshes zu sehen; der Grid auf einer
-  Bodenplatte bei y = 0 zeigt den erwartbaren Z-Fight-Stippel.
+  Bodenplatte bei y = 0 zeigt den erwartbaren Z-Fight-Stippel. Das ändert den
+  Viewport jedes Metal-Nutzers und jedes Tool-Still (Grid im Bild), nicht nur
+  dieses Thema. Ob D3D11/D3D12/Vulkan dieselbe Schieflage zwischen Szenen-
+  und Linien-Pass haben, ist **nicht geprüft**.
 * **`HE_DUMP_RHI` tauscht nur den Renderer, nicht `ctx.backend`.** Eine Config
   mit `RHI: 0` (OpenGL) plus `HE_DUMP_RHI=Metal` stürzt im ersten UI-Frame in
   `ImGui_ImplOpenGL3_NewFrame` → `glGetIntegerv` (SIGSEGV), weil
@@ -311,10 +317,13 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
 
 **Einschränkungen, die bleiben:**
 
-* `McpBridge::kMaxClients = 4`: der fünfte Client wird abgewiesen.
+* `McpBridge::kMaxClients = 4`: laut Code wird der fünfte Client abgewiesen.
+  **Nicht ausprobiert**, der Lauf hatte höchstens drei Clients zugleich.
 * Jeder Screenshot ist ein voller Frame plus GPU-Readback, serialisiert auf
-  dem Hauptthread im Bridge-Pump: 0,23–0,30 s bei 480×270 (Debug-Build);
-  viele Clients teilen sich diese Zeit, der Viewport ruckelt währenddessen.
+  dem Hauptthread im Bridge-Pump: gemessen 0,23–0,30 s bei 480×270
+  (Debug-Build, zwei Clients). Viele Clients teilen sich diese Zeit und der
+  Viewport steht währenddessen; **nicht gemessen**, wie sich vier Clients
+  mit 1280×720 oder größer anfühlen.
 * Inline-PNG ≤ 2,5 MiB (`kInlineMaxPngBytes`), Shim-Frame ≤ 4 MiB; darüber
   `file`.
 * Nur Metal rendert Stills (`RenderSceneImage`); die Gizmos im Viewport gibt
