@@ -11,10 +11,13 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityActive.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>
 #include <HorizonScene/Components/InactiveComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/NameComponent.h>
 #include <HorizonScene/Components/NetworkComponent.h>
+#include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 
 #include <imgui.h>
@@ -445,4 +448,150 @@ TEST_CASE("inspector ui: the Network section is on the panel, and its menu copie
 	CHECK(reg.get<NameComponent>(playerAgain).name == "Player");
 	CHECK(reg.get<NetworkComponent>(playerAgain).maxSpeed         == doctest::Approx(7.0f));
 	CHECK(reg.get<NetworkComponent>(playerAgain).maxVerticalSpeed == doctest::Approx(3.0f));
+}
+
+// ── Add Component: grouped, searchable, keyboard-complete ────────────────────
+// The menu used to be twenty-eight rows in no order. Now it is seven groups
+// with a search box above them, and the search has a keyboard ending: type,
+// Enter, added. This drives the real menu (InspectorPanel::addComponentMenu)
+// inside a popup, reads the rows the pointer finds, types into the box and
+// reads the world afterwards.
+namespace
+{
+	// One frame of a window that holds the Add Component popup. `open` asks
+	// for the popup on this frame; the menu draws for as long as ImGui keeps
+	// it open. Returns what the menu reported.
+	bool menuFrame(HorizonWorld& world, Entity entity, EditorUndo* undo, bool open,
+	               bool leftDown = false, he_ui::Image* shot = nullptr)
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMouseButtonEvent(ImGuiMouseButton_Left, leftDown);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(H) - 20.0f));
+		ImGui::Begin("Details");
+		if (open) ImGui::OpenPopup("##add_component");
+		bool added = false;
+		if (ImGui::BeginPopup("##add_component"))
+		{
+			added = InspectorPanel::addComponentMenu(world, entity, undo);
+			ImGui::EndPopup();
+		}
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, H);
+		return added;
+	}
+
+	// The distinct hoverable ids down a column of the open popup, top to
+	// bottom — the same reading the header-menu tests take.
+	std::vector<ImGuiID> menuRowsAt(HorizonWorld& world, Entity entity, float x)
+	{
+		std::vector<ImGuiID> rows;
+		ImGuiID last = 0;
+		for (float y = 12.0f; y < float(H) - 12.0f; y += 2.0f)
+		{
+			ImGui::GetIO().AddMousePosEvent(x, y);
+			menuFrame(world, entity, nullptr, false);
+			menuFrame(world, entity, nullptr, false);
+			const ImGuiID id = ImGui::GetHoveredID();
+			if (id == 0 || id == last) { if (id == 0) last = 0; continue; }
+			rows.push_back(id);
+			last = id;
+		}
+		return rows;
+	}
+}
+
+TEST_CASE("inspector ui: Add Component is grouped, and a typed search ends on Enter")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity crate = world.createEntity("Crate");
+	reg.emplace<TransformComponent>(crate);
+
+	// The popup opens at the pointer, so the pointer sits near the window's
+	// top-left corner: a popup opened at the bottom-right would be pushed back
+	// inside the display and its rows would be anywhere.
+	ImGuiIO& io = ImGui::GetIO();
+	io.AddMousePosEvent(40.0f, 40.0f);
+	for (int i = 0; i < 3; ++i) menuFrame(world, crate, &undo, false);
+
+	// ── Open: seven groups, not twenty-eight rows ──
+	menuFrame(world, crate, &undo, true);
+	menuFrame(world, crate, &undo, false);
+	REQUIRE(popupOpen());
+	he_ui::Image grouped;
+	menuFrame(world, crate, &undo, false, false, &grouped);
+	REQUIRE(grouped.valid());
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+		he_ui::writeBmp(grouped, std::string(dir) + "/inspector-add-component.bmp");
+
+	// The popup hangs at the pointer's position when it opened, so its rows
+	// are found in a column just inside its left edge.
+	// Transform is on the entity already but Transform 2D is not, so all seven
+	// groups have something to offer; the Animation group is greyed (no
+	// skeleton) and a greyed row is still a row. Fewer than seven would mean a
+	// group vanished; many more would mean the flat list is back.
+	const std::vector<ImGuiID> rows = menuRowsAt(world, crate, 70.0f);
+	REQUIRE(popupOpen());
+	CHECK_MESSAGE(rows.size() >= 6, "found " << rows.size() << " rows in the grouped menu");
+	CHECK_MESSAGE(rows.size() <= 10, "found " << rows.size() << " rows — that is the flat list");
+
+	// ── Type "camera r" ──
+	// The box has focus when the popup opens; the scan above hovered the
+	// groups, though, and a submenu that opens takes the focus with it (as it
+	// would for a user who wandered over a group), so click the box first —
+	// it is the first row, just under the popup's top edge.
+	// The rows give way to the hits; Enter takes the first. "camera r" is
+	// what it takes to make that Camera Rig: a bare "rig" finds Rigid Body
+	// first, Physics being the earlier group — which is the rule working, not
+	// failing. A rig brings its Camera along, in one undo step.
+	CHECK_FALSE(reg.all_of<CameraRigComponent>(crate));
+	CHECK_FALSE(reg.all_of<CameraComponent>(crate));
+	io.AddMousePosEvent(150.0f, 60.0f);
+	menuFrame(world, crate, &undo, false);
+	menuFrame(world, crate, &undo, false);
+	menuFrame(world, crate, &undo, false, /*leftDown=*/true);
+	menuFrame(world, crate, &undo, false);
+	REQUIRE(popupOpen());
+	io.AddInputCharactersUTF8("camera r");
+	menuFrame(world, crate, &undo, false);
+	menuFrame(world, crate, &undo, false);
+	REQUIRE(popupOpen());
+	io.AddKeyEvent(ImGuiKey_Enter, true);
+	bool added = menuFrame(world, crate, &undo, false);
+	io.AddKeyEvent(ImGuiKey_Enter, false);
+	added = menuFrame(world, crate, &undo, false) || added;
+	CHECK(added);
+	CHECK(reg.all_of<CameraRigComponent>(crate));
+	CHECK(reg.all_of<CameraComponent>(crate));
+	CHECK_FALSE(reg.all_of<RigidBodyComponent>(crate));
+	CHECK(undo.canUndo());
+	// The popup closed with the add — one Enter, one component, back to the panel.
+	menuFrame(world, crate, &undo, false);
+	CHECK_FALSE(popupOpen());
+
+	// ── Opened again: the rig is on the entity, so Gameplay still has rows
+	// (Movement, Script…) but a search for "rig" now finds nothing to add.
+	menuFrame(world, crate, &undo, true);
+	menuFrame(world, crate, &undo, false);
+	REQUIRE(popupOpen());
+	io.AddInputCharactersUTF8("camera rig");
+	menuFrame(world, crate, &undo, false);
+	io.AddKeyEvent(ImGuiKey_Enter, true);
+	added = menuFrame(world, crate, &undo, false);
+	io.AddKeyEvent(ImGuiKey_Enter, false);
+	added = menuFrame(world, crate, &undo, false) || added;
+	CHECK_FALSE(added);
+	CHECK(popupOpen());   // nothing matched, nothing closed
+	he_ui::Image empty;
+	menuFrame(world, crate, &undo, false, false, &empty);
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+		he_ui::writeBmp(empty, std::string(dir) + "/inspector-add-component-nomatch.bmp");
 }
