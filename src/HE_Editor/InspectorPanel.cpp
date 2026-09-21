@@ -909,7 +909,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	// Shown whenever the selected entity carries an EnvironmentComponent (the Sky
 	// entity). Edited here so it persists with the scene; pushed to the renderer each
 	// frame by EditorApplication::pushEnvironment. Add/remove the Sky entity itself
-	// from the View ▸ Environment window.
+	// from the Window ▸ Environment window.
 	if (auto* env = registry.try_get<EnvironmentComponent>(entity))
 	{
 		// A scene can end up with more than one Sky (an old bug, or a stray paste).

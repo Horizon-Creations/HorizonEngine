@@ -389,6 +389,10 @@ void clearQuietRefreshRequest() { s_quietContentRefresh = false; }
 int  browsedRootKind()          { return s_selectedRootKind; }
 std::string browsedFolderPath() { return s_browsedFolderPath; }
 
+// Consumed where the grid's own right-click opens the same popup (render()).
+static bool s_createMenuRequested = false;
+void requestCreateMenu() { s_createMenuRequested = true; }
+
 // (The starter template for a freshly created script moved to AssetStubWriter.cpp
 // with the rest of the stub writer — the panel is a caller now, not the owner.)
 
@@ -4306,6 +4310,18 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
 			!ImGui::IsAnyItemHovered())
 		{
+			ImGui::OpenPopup("##cb_create_ctx");
+		}
+		// The main bar's Assets ▸ Create Asset…: the same popup, placed at the
+		// grid's top-left corner rather than under a mouse that is up in the
+		// menu bar. Cleared either way, so a request made while the panel
+		// was not drawn does not fire a frame later at an unrelated moment.
+		if (s_createMenuRequested)
+		{
+			s_createMenuRequested = false;
+			const ImVec2 at = ImGui::GetWindowPos();
+			const ImVec2 pad = ImGui::GetStyle().WindowPadding;
+			ImGui::SetNextWindowPos(ImVec2(at.x + pad.x, at.y + pad.y));
 			ImGui::OpenPopup("##cb_create_ctx");
 		}
 

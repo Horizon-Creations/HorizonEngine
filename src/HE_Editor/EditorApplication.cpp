@@ -13,7 +13,7 @@
 #include "GameInstancePanel.h"     // kTabPath — same, for the project graph
 #include "CppClassEditorPanel.h"   // isCppSourceAsset (the Source/ tree)
 #include "EditorAssetTypeCache.h"  // .hasset header sniff (the TYPE, not the extension)
-#include "ConsolePanel.h"          // the log sink behind View ▸ Console
+#include "ConsolePanel.h"          // the log sink behind Window ▸ Console
 #include "HcExecTrace.h"           // the runtime's exec listener behind the node highlighting
 #include "ThemeAssetPanel.h"       // applyProjectTheme — the project's theme, in the editor
 #include "TypeAssetPanel.h"        // the MCP type tools ask this tab whether it is dirty

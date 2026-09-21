@@ -28,20 +28,21 @@
 #include "InspectorPanel.h"              // right dock: per-entity Details panel
 #include "TerrainTools.h"                // Landscape brush state, viewport sculpt + tool panel
 #include "ViewportPanel.h"               // centre dock: Scene viewport, camera, gizmo, picking
+#include "ViewportToolbar.h"             // the View menu draws the toolbar's pickers
 #include "SecondaryViewportPanel.h"      // Scene 2 / 3 / 4: the level from other sides
 #include "OutlinerPanel.h"               // right dock: World Outliner hierarchy tree
 #include "ProjectHubPanel.h"             // start screen while no project is open
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
-#include "ProfilerPanel.h"               // View > Performance Profiler window
-#include "ConsolePanel.h"                // View > Console — every HE_LOG record, all levels
+#include "ProfilerPanel.h"               // Window > Performance Profiler window
+#include "ConsolePanel.h"                // Window > Console — every HE_LOG record, all levels
 #include "HcExecTrace.h"                 // the console's "go to node": which tab to open
 #include "EnvironmentPanel.h"
-#include "CollabPanel.h"            // View > Collaboration (host / join a live session)
+#include "CollabPanel.h"            // Window > Collaboration (host / join a live session)
 #include "CollabActivityBar.h"      // what the session did to the project — footer line
 #include "CollabPresenceBar.h"      // who else is in the session — footer cluster + menu
 #include "NotificationBar.h"        // "something happened" bell — footer cluster + flyout
 #include "PlayErrorReveal.h"        // the first error of a play session opens the console
-#include "SourceControlPanel.h"     // View > Source Control (repository status)
+#include "SourceControlPanel.h"     // Window > Source Control (repository status)
 #include "EngineContentSyncBar.h"   // EngineContent SFTP download queue — footer status
 #include "McpStatusBar.h"           // is an external tool driving this editor — footer status
 #include "EngineContentPublishDialog.h" // Assets > Publish Engine Content to Server...
@@ -57,9 +58,9 @@
 #include "EditorHelp.h"                  // one scope per menu; the rows look themselves up
 #include "EditorDockState.h"             // "is this panel docked into the layout?"
 #include "PlayReportPanel.h"             // post-PIE warning/error report
-#include "AudioMixerPanel.h"             // View > Audio Mixer window
-#include "UndoHistoryPanel.h"            // View > Undo History window
-#include "HcWatchPanel.h"                // View > Watch window (a stopped HorizonCode run's values)
+#include "AudioMixerPanel.h"             // Window > Audio Mixer window
+#include "UndoHistoryPanel.h"            // Window > Undo History window
+#include "HcWatchPanel.h"                // Window > Watch window (a stopped HorizonCode run's values)
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
 #include "HorizonVersion.h"              // HE_VERSION_FULL — Help ▸ About
@@ -102,7 +103,7 @@ namespace
 	// the action runs once the user resolves the modal.
 	enum class GuardedAction {
 		None, NewScene, OpenSceneDialog, OpenScenePath,
-		OpenProjectDialog, CloseProject, Quit,
+		OpenProjectDialog, OpenProjectPath, CloseProject, Quit,
 	};
 }
 
@@ -141,7 +142,7 @@ namespace fs = std::filesystem;
 // fall into this default instead of floating loose. Mirrors the panel layout in
 // the reference screenshots: thin toolbar floats on top; Quick Settings left,
 // World Outliner + Details stacked right, Content Browser bottom, Scene centre.
-// Set by View > Reset Layout; consumed by the dockspace block in renderEditor()
+// Set by Window > Reset Layout; consumed by the dockspace block in renderEditor()
 // to force a rebuild of the default layout even when a layout is already loaded.
 static bool s_resetLayoutRequested = false;
 
@@ -184,23 +185,23 @@ static void revealFloatingWindow(bool& open, const char* title)
     s_revealFocusFrames = 2;
 }
 
-// Toggled by View > Performance Profiler; drives the profiler panel.
+// Toggled by Window > Performance Profiler; drives the profiler panel.
 static bool s_showProfiler = false;
 
-// Toggled by View > Environment; drives the Sky/Weather add-remove window.
+// Toggled by Window > Environment; drives the Sky/Weather add-remove window.
 static bool s_showEnvironment = false;
 
-// Toggled by View > Collaboration; drives the live-session panel.
+// Toggled by Window > Collaboration; drives the live-session panel.
 static bool s_showCollab = false;
-// Toggled by View > Source Control; drives the repository status panel.
+// Toggled by Window > Source Control; drives the repository status panel.
 static bool s_showSourceControl = false;
-// Toggled by View > Console (and Ctrl/Cmd+`); drives the log window.
+// Toggled by Window > Console (and Ctrl/Cmd+`); drives the log window.
 static bool s_showConsole = false;
-// Toggled by View > Audio Mixer; drives the bus fader window.
+// Toggled by Window > Audio Mixer; drives the bus fader window.
 static bool s_showAudioMixer = false;
-// Toggled by View > Undo History; drives the scene undo stack as a list.
+// Toggled by Window > Undo History; drives the scene undo stack as a list.
 static bool s_showUndoHistory = false;
-// Toggled by View > Watch; drives the window that shows what a HorizonCode run
+// Toggled by Window > Watch; drives the window that shows what a HorizonCode run
 // stopped at a breakpoint is holding. Also raised by a stop itself (below).
 static bool s_showWatch = false;
 
@@ -963,6 +964,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
 	// ── Scene-file dialog helpers ──────────────────────────────────────────
 	static PendingFileOp s_pendingFileOp = PendingFileOp::OpenProject;
+	// A project failed to open (openProjectAt); the "##EditorOpenError" modal
+	// is opened where it is drawn, on the frame after.
+	static bool s_openProjectErrorPopup = false;
 
 	// ── Unsaved-changes guard state ─────────────────────────────────────────
 	// A destructive action requested while the scene is dirty is stashed here and
@@ -1105,6 +1109,34 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 				HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + path).c_str());
 		if (ctx.sceneDirty) doSaveScene();
 	};
+	// Open the project at `chosen` — the file dialog's result and a File ▸
+	// Recent Projects row end up here. End the old session BEFORE loading the
+	// new one. The other order looks safer — keep everything until the new
+	// project is known to load — but it means tearing the old project's tabs
+	// and panels down against a ContentManager that already points somewhere
+	// else, so every path they hold resolves to nothing or to the wrong asset.
+	// A failed load then simply leaves no project open, which is a state the
+	// editor already has (the hub) and says what happened. The error popup is
+	// opened where it is drawn (a flag, not OpenPopup here): a Recent row runs
+	// this from inside a menu, whose ID stack is not the popup's.
+	auto openProjectAt = [&](const std::string& chosen)
+	{
+		const bool switching = ctx.projectLoaded;
+		if (switching) EditorUI::endProjectSession(ctx);
+		if (ctx.projectManager->loadProject(chosen))
+		{
+			ctx.globalState->addKnownProject(chosen);
+			ctx.globalState->writeConfig();
+			ctx.contentRefreshPending = true;
+			ctx.projectLoaded = true;
+		}
+		else
+		{
+			if (switching) ctx.projectLoaded = false;   // the old one is gone
+			ctx.hubOpenError = "Failed to load project file.";
+			s_openProjectErrorPopup = true;
+		}
+	};
 	auto triggerOpenProject = [&]()
 	{
 		ctx.hubOpenError.clear();
@@ -1203,6 +1235,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		case GuardedAction::OpenSceneDialog:   triggerOpenScene();                 break;
 		case GuardedAction::OpenScenePath:     if (ctx.openScene) ctx.openScene(arg); break;
 		case GuardedAction::OpenProjectDialog: triggerOpenProject();               break;
+		case GuardedAction::OpenProjectPath:   openProjectAt(arg);                 break;
 		case GuardedAction::CloseProject:      doCloseProject();                   break;
 		case GuardedAction::Quit:              if (ctx.quit) ctx.quit();           break;
 		case GuardedAction::None:                                                  break;
@@ -1217,7 +1250,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	auto endsSession = [](GuardedAction a)
 	{
 		return a == GuardedAction::Quit || a == GuardedAction::CloseProject ||
-		       a == GuardedAction::OpenProjectDialog;
+		       a == GuardedAction::OpenProjectDialog || a == GuardedAction::OpenProjectPath;
 	};
 	// (asset path, label to show) per unsaved asset. The path is what the prompt's
 	// per-asset Save button writes through EditorUI::saveAsset.
@@ -1370,6 +1403,61 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ctx.hubCreateError.clear();
 	};
 
+	// ── What both menu bars share ────────────────────────────────────────────
+	// The ImGui bar (below) and the native macOS one (MacMenuBar) run the same
+	// lambdas; the gates live here once so a greyed row and a native row that
+	// has no greying agree on when an action does something.
+	//
+	// The built-in "Scene" tab (empty assetPath) is the one with the scene
+	// panels under it; an asset tab fills the same area with its editor. The
+	// same test the panel dispatch makes further down (`sceneTabActive`).
+	const bool sceneTabActiveNow =
+		ctx.activeTab < 0 || ctx.activeTab >= static_cast<int>(ctx.tabs.size())
+		|| ctx.tabs[ctx.activeTab].assetPath.empty();
+	// An application has no scenes and no entities — the rows that act on
+	// them are hidden rather than offered and refused (docs/he-apps-plan.md E2).
+	const bool appProj = ctx.projectManager &&
+	                     ctx.projectManager->currentProject().appProject;
+	auto recentProjects = [&]() -> const std::vector<std::string>&
+	{
+		static const std::vector<std::string> kNone;
+		return ctx.globalState ? ctx.globalState->getKnownProjects() : kNone;
+	};
+	// The transport, exactly as the Scene toolbar's centre well runs it
+	// (ViewportToolbar.cpp): an application project has no play mode, so its
+	// Play restarts the live preview; Pause is Continue while a HorizonCode
+	// run is stopped at a breakpoint, which is also why it works outside play
+	// mode then. Gated on a loaded project: the shortcuts are global and fire
+	// with an asset tab in front too.
+	auto canPlay = [&]() { return ctx.projectLoaded && (ctx.world || ctx.appLivePreview); };
+	auto playToggle = [&]()
+	{
+		if (!canPlay()) return;
+		if (ctx.appLivePreview) { if (ctx.restartAppPreview) ctx.restartAppPreview(); }
+		else if (ctx.setPlayMode) ctx.setPlayMode(!ctx.isPlaying);
+	};
+	auto pauseToggle = [&]()
+	{
+		const bool paused = ctx.isPlaying && ctx.isPaused;
+		if (!(ctx.isPlaying || ctx.hcSuspended) || !ctx.setPaused) return;
+		ctx.setPaused(!(paused || ctx.hcSuspended));
+	};
+	auto stepFrame = [&]() { if (ctx.isPlaying && ctx.stepFrame) ctx.stepFrame(); };
+	auto stepNode  = [&]() { if (ctx.hcSuspended && ctx.stepNode) ctx.stepNode(); };
+	// Window ▸ Landscape Tools: the Scene toolbar's Landscape mode. Entering
+	// it also brings the panel forward — the mode turns the Quick Settings
+	// panel into the landscape tool panel (the "###" id keeps it one window),
+	// and until now nothing said where that panel was.
+	auto toggleLandscapeTools = [&]()
+	{
+		if (!ctx.projectLoaded) return;
+		const bool entering = ctx.editorConfig.mode != EditorMode::Landscape;
+		ctx.editorConfig.mode = entering ? EditorMode::Landscape : EditorMode::View;
+		if (!entering) return;
+		openViewportTab();
+		ImGui::SetWindowFocus("Landscape###Quick Settings");
+	};
+
 	// On macOS the menu lives in the system menu bar (next to the Apple symbol)
 	// like any Mac app, and the in-window ImGui menu row is dropped entirely.
 	bool nativeMenu = false;
@@ -1398,18 +1486,66 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
 		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
 		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);
-		MacMenuBar::setToggleState(MC::ToggleGroundGrid,    ViewportPanel::groundGridEnabled());
 		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
 		MacMenuBar::setToggleState(MC::ToggleScene3,        SecondaryViewportPanel::open(1));
 		MacMenuBar::setToggleState(MC::ToggleScene4,        SecondaryViewportPanel::open(2));
+		MacMenuBar::setToggleState(MC::ToggleLandscapeTools, ctx.editorConfig.mode == EditorMode::Landscape);
 		MacMenuBar::setToggleState(MC::OpenTutorial,        TutorialPanel::isOpen());
+		// The View pickers: one tick per row, from the same state the toolbar
+		// draws. Args are 1-based on the wire (0 = "no argument").
+		for (int m = 0; m < HE::kViewModeCount; ++m)
+			MacMenuBar::setToggleState(MC::SetViewMode, m + 1,
+			                           ViewportPanel::viewMode() == static_cast<HE::ViewMode>(m));
+		{
+			int n = 0;
+			const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+			const ViewportPanel::ShowFlags& f = ViewportPanel::showFlags();
+			for (int i = 0; i < n; ++i)
+				MacMenuBar::setToggleState(MC::ToggleShowFlag, i + 1, f.*(fields[i].member));
+		}
+		if (ctx.editorCamera)
+		{
+			using VP = EditorCamera::ViewPreset;
+			const VP current = ctx.editorCamera->currentPreset();
+			for (int p = 0; p <= static_cast<int>(VP::Right); ++p)
+			{
+				const VP preset = static_cast<VP>(p);
+				const bool on = preset == current
+				             && (preset != VP::Perspective || !ctx.editorCamera->orthographic());
+				MacMenuBar::setToggleState(MC::SetViewPreset, p + 1, on);
+			}
+			MacMenuBar::setToggleState(MC::ToggleOrthographic, ctx.editorCamera->orthographic());
+		}
+		// Rows whose verb follows the state, like the ImGui rows' labels.
+		MacMenuBar::setToggleState(MC::PlayToggle,  ctx.isPlaying);
+		MacMenuBar::setToggleState(MC::PauseToggle, ctx.isPlaying && ctx.isPaused);
+		MacMenuBar::setItemTitle(MC::PlayToggle,
+			ctx.appLivePreview ? "Restart Preview" : ctx.isPlaying ? "Stop" : "Play");
+		MacMenuBar::setItemTitle(MC::PauseToggle,
+			ctx.hcSuspended ? "Continue" : (ctx.isPlaying && ctx.isPaused) ? "Resume" : "Pause");
+		MacMenuBar::setItemTitle(MC::ToggleLock,
+			(ctx.world && sceneTabActiveNow && ViewportPanel::entityActionState(ctx).primaryLocked)
+				? "Unlock" : "Lock");
+		MacMenuBar::setRecentProjects(recentProjects());
 		for (MC c; (c = MacMenuBar::take()) != MC::None; )
 		{
+			// The native rows carry no enabled-state of their own beyond "a
+			// project is loaded", so every case checks what its ImGui twin
+			// greys out on — an empty undo stack, no selection, no scene tab.
+			const bool scene = ctx.projectLoaded && sceneTabActiveNow && ctx.world;
 			switch (c)
 			{
 			case MC::NewProject:      beginNewProject(); openNewProjectPopup = true;         break;
 			case MC::OpenProject:     requestGuarded(GuardedAction::OpenProjectDialog);      break;
-			case MC::CloseProject:    requestGuarded(GuardedAction::CloseProject);           break;
+			case MC::OpenRecentProject:
+			{
+				const std::vector<std::string>& known = recentProjects();
+				const int i = MacMenuBar::arg() - 1;
+				if (i >= 0 && i < static_cast<int>(known.size()))
+					requestGuarded(GuardedAction::OpenProjectPath, known[i]);
+				break;
+			}
+			case MC::CloseProject:    if (ctx.projectLoaded) requestGuarded(GuardedAction::CloseProject); break;
 			case MC::NewScene:        requestGuarded(GuardedAction::NewScene);               break;
 			case MC::OpenScene:       requestGuarded(GuardedAction::OpenSceneDialog);        break;
 			case MC::AddSceneAdditive:triggerAddSceneAdditive();                             break;
@@ -1429,6 +1565,76 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::Redo:
 				if (ctx.undoSys && ctx.undoSys->canRedo() && ctx.redo) ctx.redo();
 				break;
+			case MC::Cut:       if (canEditEntity()  && ctx.cutEntity)       ctx.cutEntity();       break;
+			case MC::Copy:      if (canEditEntity()  && ctx.copyEntity)      ctx.copyEntity();      break;
+			case MC::Paste:     if (canPasteEntity() && ctx.pasteEntity)     ctx.pasteEntity();     break;
+			case MC::Duplicate: if (canEditEntity()  && ctx.duplicateEntity) ctx.duplicateEntity(); break;
+			case MC::Delete:    if (canEditEntity()  && ctx.deleteEntity)    ctx.deleteEntity();    break;
+			// The Entity menu: the viewport's and the Outliner's verbs, each
+			// re-checking its own preconditions (ViewportPanel).
+			case MC::CreateEntity:
+				if (scene && !ctx.isPlaying) OutlinerPanel::createEntityPreset(ctx, MacMenuBar::arg() - 1);
+				break;
+			case MC::FocusSelected:   if (scene) ViewportPanel::focusSelected(ctx);           break;
+			case MC::SnapToGround:    if (scene) ViewportPanel::snapSelectionToGround(ctx);   break;
+			case MC::HideSelected:    if (scene) ViewportPanel::hideSelected(ctx);            break;
+			case MC::IsolateSelected: if (scene) ViewportPanel::isolateSelected(ctx);         break;
+			case MC::ShowAll:         if (scene) ViewportPanel::showAll(ctx);                 break;
+			case MC::Group:           if (scene) ViewportPanel::groupSelected(ctx);           break;
+			case MC::Ungroup:         if (scene) ViewportPanel::ungroupSelected(ctx);         break;
+			case MC::ToggleLock:      if (scene) ViewportPanel::toggleLockSelected(ctx);      break;
+			case MC::SaveAsPrefab:    if (scene && canEditEntity()) OutlinerPanel::saveSelectionAsPrefab(ctx); break;
+			case MC::CreateAsset:     if (ctx.projectLoaded && sceneTabActiveNow) ContentBrowserPanel::requestCreateMenu(); break;
+			case MC::ImportAsset:     triggerImportAsset();                                  break;
+			case MC::RefreshAssets:   if (ctx.projectLoaded) ctx.contentRefreshPending = true; break;
+			case MC::PlayToggle:      playToggle();                                          break;
+			case MC::PauseToggle:     pauseToggle();                                         break;
+			case MC::StepFrame:       stepFrame();                                           break;
+			case MC::StepNode:        stepNode();                                            break;
+			case MC::ExportProject:   if (ctx.projectLoaded) openExportDialog();             break;
+			// start() refuses (with a notification) for a project that has no
+			// native module — the native menu has no per-language gate, so the
+			// row is always live and the answer comes from the action.
+			case MC::BuildGameLogic:  GameLogicBuildPanel::start(ctx);                       break;
+			case MC::SetViewMode:
+			{
+				const int m = MacMenuBar::arg() - 1;
+				if (scene && m >= 0 && m < HE::kViewModeCount)
+					ViewportPanel::setViewMode(static_cast<HE::ViewMode>(m));
+				break;
+			}
+			case MC::ToggleShowFlag:
+			{
+				int n = 0;
+				const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+				const int i = MacMenuBar::arg() - 1;
+				if (i >= 0 && i < n)
+				{
+					bool& flag = ViewportPanel::showFlags().*(fields[i].member);
+					flag = !flag;
+				}
+				break;
+			}
+			// "All" is the DEFAULTS, not "every switch on" — the same rule as
+			// the toolbar's popup (ViewportToolbar.cpp).
+			case MC::ShowAllOverlays: ViewportPanel::showFlags() = ViewportPanel::ShowFlags{}; break;
+			case MC::HideAllOverlays:
+			{
+				int n = 0;
+				const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+				for (int i = 0; i < n; ++i) ViewportPanel::showFlags().*(fields[i].member) = false;
+				break;
+			}
+			case MC::SetViewPreset:
+			{
+				const int p = MacMenuBar::arg() - 1;
+				if (scene && ctx.editorCamera && p >= 0 && p <= static_cast<int>(EditorCamera::ViewPreset::Right))
+					ctx.editorCamera->applyPreset(static_cast<EditorCamera::ViewPreset>(p));
+				break;
+			}
+			case MC::ToggleOrthographic:
+				if (scene && ctx.editorCamera) ctx.editorCamera->setOrthographic(!ctx.editorCamera->orthographic());
+				break;
 			case MC::ResetLayout:     s_resetLayoutRequested = true;                         break;
 			case MC::ToggleProfiler:  togglePanelWindow(s_showProfiler, "Performance Profiler"); break;
 			case MC::ToggleEnvironment: togglePanelWindow(s_showEnvironment, "Environment"); break;
@@ -1439,8 +1645,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleAudioMixer: togglePanelWindow(s_showAudioMixer, "Audio Mixer");     break;
 			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
 			case MC::ToggleWatch:     togglePanelWindow(s_showWatch, "Watch");                break;
-			case MC::ToggleGroundGrid:
-				ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());     break;
 			case MC::ToggleScene2:
 				if (ctx.projectLoaded) togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2"); break;
 			case MC::ToggleScene3:
@@ -1453,13 +1657,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::OpenGameInstance:
 				if (ctx.projectLoaded) openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
 				break;
-			case MC::ImportAsset:     triggerImportAsset();                                  break;
-			case MC::RefreshAssets:   if (ctx.projectLoaded) ctx.contentRefreshPending = true; break;
-			case MC::ExportProject:   if (ctx.projectLoaded) openExportDialog();             break;
-			// start() refuses (with a notification) for a project that has no
-			// native module — the native menu has no per-language gate, so the
-			// row is always live and the answer comes from the action.
-			case MC::BuildGameLogic:  GameLogicBuildPanel::start(ctx);                       break;
+			case MC::ToggleLandscapeTools: toggleLandscapeTools();                          break;
 			case MC::OpenTutorial:    TutorialPanel::open();                                 break;
 			case MC::ReportIssue:     ReportIssueDialog::open();                             break;
 			case MC::Documentation:       DocsPanel::open();                                 break;
@@ -1479,43 +1677,80 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	{
 	ImGui::PushFont(ctx.fontSubheading);
 	ImGui::BeginMainMenuBar();
+	// ── File: projects, scenes, saving ──────────────────────────────────────
 	if (ImGui::BeginMenu("File"))
 	{
 		// Every row below is looked up as "File/<its label>" — one scope, and
 		// the menu explains itself (see EditorWidgets::menuItem).
 		HE::Ed::Help::Scope helpScope("File");
-		if (EditorWidgets::menuItem("New Project", "Ctrl+N"))
+		if (EditorWidgets::menuItem("New Project", EditorShortcuts::label("file.newProject").c_str()))
 		{
 			beginNewProject();
 			openNewProjectPopup = true;
 		}
         if (EditorWidgets::menuItem("Open Project", EditorShortcuts::label("file.openProject").c_str()))
             requestGuarded(GuardedAction::OpenProjectDialog);
-		if (EditorWidgets::menuItem("Close Project", "Ctrl+W"))
+        // The Project Hub's list, reachable without closing the project first.
+        // Rows are built from the config, so they ask for their help by key.
+        if (ImGui::BeginMenu("Recent Projects"))
+        {
+            const std::vector<std::string>& known = recentProjects();
+            if (known.empty()) ImGui::TextDisabled("No recent projects");
+            for (int i = 0; i < static_cast<int>(known.size()); ++i)
+            {
+                // The project's name, with its folder in the dimmed column a
+                // shortcut would occupy: two projects called "Demo" in
+                // different folders are an ordinary thing.
+                const std::filesystem::path file(known[i]);
+                std::string name = file.stem().string();
+                if (name.empty()) name = known[i];
+                const std::string where = file.parent_path().string();
+                std::error_code ec;
+                const bool exists = std::filesystem::exists(file, ec);
+                ImGui::PushID(i);
+                if (ImGui::MenuItem(name.c_str(), where.c_str(), false, exists))
+                    requestGuarded(GuardedAction::OpenProjectPath, known[i]);
+                EditorWidgets::helpForKey("File/Recent Projects");
+                ImGui::PopID();
+            }
+            ImGui::EndMenu();
+        }
+        EditorWidgets::helpForLabel("Recent Projects");
+		if (EditorWidgets::menuItem("Close Project", EditorShortcuts::label("file.closeProject").c_str(),
+		                            false, ctx.projectLoaded))
 			requestGuarded(GuardedAction::CloseProject);
         ImGui::Separator();
         // Scenes are a game's unit of content. An application has none — its
         // interface comes up from the GameInstance — so the four scene rows are
         // hidden rather than offered and then refused (docs/he-apps-plan.md E2).
-        const bool appProj = ctx.projectManager &&
-                             ctx.projectManager->currentProject().appProject;
         if (!appProj)
         {
-            if (EditorWidgets::menuItem("New Scene"))            requestGuarded(GuardedAction::NewScene);
-            if (EditorWidgets::menuItem("Open Scene..."))        requestGuarded(GuardedAction::OpenSceneDialog);
-            if (EditorWidgets::menuItem("Add Scene Additive...")) triggerAddSceneAdditive();
+            if (EditorWidgets::menuItem("New Scene", nullptr, false, ctx.projectLoaded))            requestGuarded(GuardedAction::NewScene);
+            if (EditorWidgets::menuItem("Open Scene...", nullptr, false, ctx.projectLoaded))        requestGuarded(GuardedAction::OpenSceneDialog);
+            if (EditorWidgets::menuItem("Add Scene Additive...", nullptr, false, ctx.projectLoaded)) triggerAddSceneAdditive();
+            ImGui::Separator();
         }
         // Keep these three in step with MacMenuBar.mm's File block — a Mac user
         // never sees this row (see MacMenuBar.h).
-        if (EditorWidgets::menuItem("Save", EditorShortcuts::label("file.save").c_str()))                    doSaveActiveTab();
-        if (EditorWidgets::menuItem("Save All", EditorShortcuts::label("file.saveAll").c_str()))          doSaveAll();
+        if (EditorWidgets::menuItem("Save", EditorShortcuts::label("file.save").c_str(), false, ctx.projectLoaded))         doSaveActiveTab();
+        if (EditorWidgets::menuItem("Save All", EditorShortcuts::label("file.saveAll").c_str(), false, ctx.projectLoaded)) doSaveAll();
         if (!appProj)
-            if (EditorWidgets::menuItem("Save Scene As...", EditorShortcuts::label("file.saveSceneAs").c_str())) triggerSaveSceneAs();
+            if (EditorWidgets::menuItem("Save Scene As...", EditorShortcuts::label("file.saveSceneAs").c_str(), false, ctx.projectLoaded)) triggerSaveSceneAs();
+        ImGui::Separator();
+        // Import lives with the assets (Assets ▸ Import Asset…) and is offered
+        // here too: File is where somebody who has never seen this editor
+        // looks for "get a file in".
+        {
+            const bool doImport = EditorWidgets::menuItem("Import Asset...", nullptr, false, ctx.projectLoaded);
+            EditorWidgets::helpForKey("content.import");
+            if (doImport) triggerImportAsset();
+        }
         ImGui::Separator();
         if (EditorWidgets::menuItem("Exit", "Alt+F4"))
             requestGuarded(GuardedAction::Quit);
         ImGui::EndMenu();
     }
+	// ── Edit: undo, the selection's clipboard, the two settings tabs ────────
     if (ImGui::BeginMenu("Edit"))
     {
         // Every row below is looked up as "Edit/<its label>" — one scope, and
@@ -1551,11 +1786,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             if (EditorWidgets::menuItem("Undo", EditorShortcuts::label("edit.undo").c_str(), false, canUndo) && ctx.undo) ctx.undo();
             if (EditorWidgets::menuItem("Redo", EditorShortcuts::label("edit.redo").c_str(), false, canRedo) && ctx.redo) ctx.redo();
         }
-        ImGui::Separator();
         // Cut/Copy/Paste act on the SELECTED ENTITY, not on text: an editor's Edit
         // menu is the scene's, and the text fields inside panels handle their own
-        // clipboard through ImGui.
+        // clipboard through ImGui. An application has no entities to act on.
+        if (!appProj)
         {
+            ImGui::Separator();
             const bool canEdit  = canEditEntity();
             const bool canPaste = canPasteEntity();
             if (EditorWidgets::menuItem("Cut",   EditorShortcuts::label("entity.cut").c_str(), false, canEdit)  && ctx.cutEntity)  ctx.cutEntity();
@@ -1573,63 +1809,60 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("View"))
-    {
-        // Every row below is looked up as "View/<its label>" — one scope, and
-        // the menu explains itself (see EditorWidgets::menuItem).
-        HE::Ed::Help::Scope helpScope("View");
-        if (EditorWidgets::menuItem("Toggle Fullscreen", EditorShortcuts::label("view.fullscreen").c_str())) toggleFullscreen();
-        if (EditorWidgets::menuItem("Reset Layout")) { s_resetLayoutRequested = true; }
-        if (EditorWidgets::menuItem("Performance Profiler", nullptr, s_showProfiler))
-            togglePanelWindow(s_showProfiler, "Performance Profiler");
-        if (EditorWidgets::menuItem("Environment", nullptr, s_showEnvironment))
-            togglePanelWindow(s_showEnvironment, "Environment");
-        if (EditorWidgets::menuItem("Collaboration", nullptr, s_showCollab))
-            togglePanelWindow(s_showCollab, "Collaboration");
-        if (EditorWidgets::menuItem("Source Control", nullptr, s_showSourceControl))
-            togglePanelWindow(s_showSourceControl, "Source Control");
-        if (EditorWidgets::menuItem("Console", EditorShortcuts::label("view.console").c_str(), s_showConsole))
-            togglePanelWindow(s_showConsole, "Console");
-        if (EditorWidgets::menuItem("Audio Mixer", nullptr, s_showAudioMixer))
-            togglePanelWindow(s_showAudioMixer, "Audio Mixer");
-        if (EditorWidgets::menuItem("Undo History", nullptr, s_showUndoHistory))
-            togglePanelWindow(s_showUndoHistory, "Undo History");
-        if (EditorWidgets::menuItem("Watch", nullptr, s_showWatch))
-            togglePanelWindow(s_showWatch, "Watch");
-        // Also in the viewport toolbar's options popup. It belongs in both: the
-        // toolbar is where you reach for it while working, this menu is where you
-        // look for it the first time. Both are gone in an application: there is
-        // no ground to grid and no level to script — the Game Instance below is
-        // the one an app really does own, and stays.
-        const bool appProjView = ctx.projectManager &&
-                                 ctx.projectManager->currentProject().appProject;
-        if (!appProjView)
-        {
-            if (EditorWidgets::menuItem("Ground Grid", nullptr, ViewportPanel::groundGridEnabled(),
-                                ctx.projectLoaded))
-                ViewportPanel::setGroundGridEnabled(!ViewportPanel::groundGridEnabled());
-            // The extra scene panes. A game thing like the grid: an application
-            // has no level to look at from above.
-            ImGui::Separator();
-            if (EditorWidgets::menuItem("Scene 2", nullptr, SecondaryViewportPanel::open(0), ctx.projectLoaded))
-                togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2");
-            if (EditorWidgets::menuItem("Scene 3", nullptr, SecondaryViewportPanel::open(1), ctx.projectLoaded))
-                togglePanelWindow(SecondaryViewportPanel::open(1), "Scene 3");
-            if (EditorWidgets::menuItem("Scene 4", nullptr, SecondaryViewportPanel::open(2), ctx.projectLoaded))
-                togglePanelWindow(SecondaryViewportPanel::open(2), "Scene 4");
-            ImGui::Separator();
-            if (EditorWidgets::menuItem("Level Script", nullptr, false, ctx.projectLoaded))
-                openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
-        }
-        if (EditorWidgets::menuItem("Game Instance", nullptr, false, ctx.projectLoaded))
-            openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
-        ImGui::EndMenu();
-    }
+	// ── Entity: what the two right-click menus offer, with a fixed address ──
+	// Games only: an application has no scene to put an entity in. The verbs
+	// are the viewport's (ViewportPanel) and the Outliner's (OutlinerPanel);
+	// this menu adds no third meaning to any of them.
+	if (!appProj && ImGui::BeginMenu("Entity", ctx.projectLoaded))
+	{
+		HE::Ed::Help::Scope helpScope("Entity");
+		// The scene has to be on screen: the actions measure against the
+		// Scene window's last extract, and an asset tab has no scene under it.
+		const bool scene = sceneTabActiveNow && ctx.world;
+		const ViewportPanel::EntityActionState st = scene
+			? ViewportPanel::entityActionState(ctx) : ViewportPanel::EntityActionState{};
+		if (ImGui::BeginMenu("Create", scene && !ctx.isPlaying))
+		{
+			OutlinerPanel::drawCreateEntityMenu(ctx);
+			ImGui::EndMenu();
+		}
+		EditorWidgets::helpForLabel("Create");
+		ImGui::Separator();
+		if (EditorWidgets::menuItem("Focus Selected", EditorShortcuts::label("viewport.focus").c_str(), false, scene && st.canFocus))
+			ViewportPanel::focusSelected(ctx);
+		if (EditorWidgets::menuItem("Snap to Ground", EditorShortcuts::label("viewport.snapToGround").c_str(), false, scene && st.canEdit))
+			ViewportPanel::snapSelectionToGround(ctx);
+		ImGui::Separator();
+		if (EditorWidgets::menuItem("Hide Selected", EditorShortcuts::label("viewport.hide").c_str(), false, scene && st.canEdit))
+			ViewportPanel::hideSelected(ctx);
+		if (EditorWidgets::menuItem("Isolate Selected", EditorShortcuts::label("viewport.isolate").c_str(), false, scene && st.canEdit))
+			ViewportPanel::isolateSelected(ctx);
+		if (EditorWidgets::menuItem("Show All", EditorShortcuts::label("viewport.showAll").c_str(), false, scene && st.anyHidden))
+			ViewportPanel::showAll(ctx);
+		ImGui::Separator();
+		if (EditorWidgets::menuItem("Group", EditorShortcuts::label("viewport.group").c_str(), false, scene && st.groupable))
+			ViewportPanel::groupSelected(ctx);
+		if (EditorWidgets::menuItem("Ungroup", EditorShortcuts::label("viewport.ungroup").c_str(), false, scene && st.canUngroup))
+			ViewportPanel::ungroupSelected(ctx);
+		ImGui::Separator();
+		if (EditorWidgets::menuItem(st.primaryLocked ? "Unlock" : "Lock", nullptr, false, scene && st.canEdit))
+			ViewportPanel::toggleLockSelected(ctx);
+		ImGui::Separator();
+		if (EditorWidgets::menuItem("Save as Prefab", nullptr, false, scene && canEditEntity()))
+			OutlinerPanel::saveSelectionAsPrefab(ctx);
+		ImGui::EndMenu();
+	}
+	// ── Assets: the content tree ────────────────────────────────────────────
 	if (ImGui::BeginMenu("Assets"))
 	{
 		// Every row below is looked up as "Assets/<its label>" — one scope, and
 		// the menu explains itself (see EditorWidgets::menuItem).
 		HE::Ed::Help::Scope helpScope("Assets");
+		// The Content Browser's own create list, opened at the folder it shows.
+		// Needs that panel on screen, which only the Scene tab draws.
+		if (EditorWidgets::menuItem("Create Asset...", nullptr, false,
+		                            ctx.projectLoaded && sceneTabActiveNow))
+			ContentBrowserPanel::requestCreateMenu();
 		const bool doImport = EditorWidgets::menuItem("Import Asset...", nullptr, false,
 		                                      ctx.projectLoaded);
 		EditorWidgets::helpForKey("content.import");
@@ -1659,11 +1892,31 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 #endif
 		ImGui::EndMenu();
 	}
+	// ── Play: the toolbar's transport, with shortcuts ───────────────────────
+	if (ImGui::BeginMenu("Play", ctx.projectLoaded))
+	{
+		HE::Ed::Help::Scope helpScope("Play");
+		// Same verbs, same gates as the Scene toolbar's centre well
+		// (ViewportToolbar.cpp): an application restarts its live preview
+		// instead of entering play mode; Pause is Continue while a HorizonCode
+		// run is stopped at a breakpoint.
+		if (EditorWidgets::menuItem(ctx.appLivePreview ? "Restart Preview" : ctx.isPlaying ? "Stop" : "Play",
+		                            EditorShortcuts::label("play.toggle").c_str(), false, canPlay()))
+			playToggle();
+		if (EditorWidgets::menuItem(ctx.hcSuspended ? "Continue" : (ctx.isPlaying && ctx.isPaused) ? "Resume" : "Pause",
+		                            EditorShortcuts::label("play.pause").c_str(),
+		                            ctx.isPlaying && ctx.isPaused, ctx.isPlaying || ctx.hcSuspended))
+			pauseToggle();
+		if (EditorWidgets::menuItem("Step Frame", EditorShortcuts::label("play.step").c_str(), false, ctx.isPlaying))
+			stepFrame();
+		if (EditorWidgets::menuItem("Step Node", nullptr, false, ctx.hcSuspended))
+			stepNode();
+		ImGui::EndMenu();
+	}
+	// ── Build ───────────────────────────────────────────────────────────────
 	if (ImGui::BeginMenu("Build", ctx.projectLoaded))
 	{
 		HE::Ed::Help::Scope helpScope("Build");
-		if (EditorWidgets::menuItem("Export Project..."))
-			openExportDialog();
 		// Only a C++ project has a native module to build. Greyed rather than
 		// hidden: unlike an application project's missing scenes, "this project
 		// scripts its gameplay in another language" is worth saying, and the
@@ -1671,8 +1924,99 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		if (EditorWidgets::menuItem("Build and Reload Game Logic", nullptr, false,
 		                            GameLogicBuildPanel::available(ctx)))
 			GameLogicBuildPanel::start(ctx);
+		ImGui::Separator();
+		if (EditorWidgets::menuItem("Export Project..."))
+			openExportDialog();
 		ImGui::EndMenu();
 	}
+	// ── View: how the Scene window draws ────────────────────────────────────
+	// The three pickers of the viewport toolbar's right-hand zone, as
+	// submenus (the same rows, drawn by ViewportToolbar), and fullscreen.
+	// Nothing here opens a window — that is the Window menu.
+    if (ImGui::BeginMenu("View"))
+    {
+        HE::Ed::Help::Scope helpScope("View");
+        const bool scene = ctx.projectLoaded && !appProj && sceneTabActiveNow && ctx.world;
+        if (ImGui::BeginMenu("View Mode", scene))
+        {
+            HE::ViewMode mode = ViewportPanel::viewMode();
+            ViewportToolbar::viewModeRows(ctx, mode);
+            ViewportPanel::setViewMode(mode);
+            ImGui::EndMenu();
+        }
+        EditorWidgets::helpForLabel("View Mode");
+        if (ImGui::BeginMenu("Show", scene))
+        {
+            ViewportToolbar::showRows(ctx);
+            ImGui::EndMenu();
+        }
+        EditorWidgets::helpForLabel("Show");
+        if (ImGui::BeginMenu("Camera", scene && ctx.editorCamera))
+        {
+            ViewportToolbar::viewPopup(*ctx.editorCamera);
+            ImGui::EndMenu();
+        }
+        EditorWidgets::helpForLabel("Camera");
+        ImGui::Separator();
+        if (EditorWidgets::menuItem("Toggle Fullscreen", EditorShortcuts::label("view.fullscreen").c_str())) toggleFullscreen();
+        ImGui::EndMenu();
+    }
+	// ── Window: everything that opens a panel or a tab ──────────────────────
+    if (ImGui::BeginMenu("Window"))
+    {
+        // Every row below is looked up as "Window/<its label>" — one scope, and
+        // the menu explains itself (see EditorWidgets::menuItem).
+        HE::Ed::Help::Scope helpScope("Window");
+        if (EditorWidgets::menuItem("Console", EditorShortcuts::label("view.console").c_str(), s_showConsole))
+            togglePanelWindow(s_showConsole, "Console");
+        if (EditorWidgets::menuItem("Performance Profiler", nullptr, s_showProfiler))
+            togglePanelWindow(s_showProfiler, "Performance Profiler");
+        if (EditorWidgets::menuItem("Environment", nullptr, s_showEnvironment))
+            togglePanelWindow(s_showEnvironment, "Environment");
+        if (EditorWidgets::menuItem("Collaboration", nullptr, s_showCollab))
+            togglePanelWindow(s_showCollab, "Collaboration");
+        if (EditorWidgets::menuItem("Source Control", nullptr, s_showSourceControl))
+            togglePanelWindow(s_showSourceControl, "Source Control");
+        if (EditorWidgets::menuItem("Audio Mixer", nullptr, s_showAudioMixer))
+            togglePanelWindow(s_showAudioMixer, "Audio Mixer");
+        if (EditorWidgets::menuItem("Undo History", nullptr, s_showUndoHistory))
+            togglePanelWindow(s_showUndoHistory, "Undo History");
+        if (EditorWidgets::menuItem("Watch", nullptr, s_showWatch))
+            togglePanelWindow(s_showWatch, "Watch");
+        // The extra scene panes and the level's own graph: game things, like
+        // the grid — an application has no level to look at from above. The
+        // Game Instance is the one graph an app really does own, and stays.
+        if (!appProj)
+        {
+            ImGui::Separator();
+            if (EditorWidgets::menuItem("Scene 2", nullptr, SecondaryViewportPanel::open(0), ctx.projectLoaded))
+                togglePanelWindow(SecondaryViewportPanel::open(0), "Scene 2");
+            if (EditorWidgets::menuItem("Scene 3", nullptr, SecondaryViewportPanel::open(1), ctx.projectLoaded))
+                togglePanelWindow(SecondaryViewportPanel::open(1), "Scene 3");
+            if (EditorWidgets::menuItem("Scene 4", nullptr, SecondaryViewportPanel::open(2), ctx.projectLoaded))
+                togglePanelWindow(SecondaryViewportPanel::open(2), "Scene 4");
+        }
+        ImGui::Separator();
+        if (!appProj)
+            if (EditorWidgets::menuItem("Level Script", nullptr, false, ctx.projectLoaded))
+                openVirtualTab("Level Script", LevelScriptPanel::kTabPath);
+        if (EditorWidgets::menuItem("Game Instance", nullptr, false, ctx.projectLoaded))
+            openVirtualTab("Game Instance", GameInstancePanel::kTabPath);
+        if (!appProj)
+        {
+            ImGui::Separator();
+            // The Scene toolbar's Landscape mode, which turns the Quick Settings
+            // panel into the landscape tool panel — until now the only way to
+            // find that panel was to know that.
+            if (EditorWidgets::menuItem("Landscape Tools", nullptr,
+                                        ctx.editorConfig.mode == EditorMode::Landscape, ctx.projectLoaded))
+                toggleLandscapeTools();
+        }
+        ImGui::Separator();
+        if (EditorWidgets::menuItem("Reset Layout")) { s_resetLayoutRequested = true; }
+        ImGui::EndMenu();
+    }
+	// ── Help ────────────────────────────────────────────────────────────────
 	if (ImGui::BeginMenu("Help"))
 	{
 		// Every row below is looked up as "Help/<its label>" — one scope, and
@@ -1700,8 +2044,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     ImGui::PopFont();
 	}
 
-    if (openNewProjectPopup)
-        ImGui::OpenPopup("##NewProjectPopup");
+    // (The New Project popup is opened further down, after the shortcut block
+    // that can ask for it too — see `openNewProjectPopup` there.)
 
     // ── About ───────────────────────────────────────────────────────────────
     // Windows and Linux only in practice: macOS drops the ImGui menu row and
@@ -2053,30 +2397,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             s_pendingImportPaths.clear();
         }
         else // OpenProject
-        {
-            // End the old session BEFORE loading the new one. The other order
-            // looks safer — keep everything until the new project is known to
-            // load — but it means tearing the old project's tabs and panels down
-            // against a ContentManager that already points somewhere else, so
-            // every path they hold resolves to nothing or to the wrong asset.
-            // A failed load then simply leaves no project open, which is a state
-            // the editor already has (the hub) and says what happened.
-            const bool switching = ctx.projectLoaded;
-            if (switching) EditorUI::endProjectSession(ctx);
-            if (ctx.projectManager->loadProject(chosen))
-            {
-                ctx.globalState->addKnownProject(chosen);
-                ctx.globalState->writeConfig();
-                ctx.contentRefreshPending = true;
-                ctx.projectLoaded = true;
-            }
-            else
-            {
-                if (switching) ctx.projectLoaded = false;   // the old one is gone
-                ctx.hubOpenError = "Failed to load project file.";
-                ImGui::OpenPopup("##EditorOpenError");
-            }
-        }
+            openProjectAt(chosen);
         s_pendingFileOp = PendingFileOp::OpenProject; // reset to default
     }
 
@@ -2120,8 +2441,33 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             requestGuarded(GuardedAction::OpenProjectDialog);
         if (EditorShortcuts::pressed("view.fullscreen"))
             toggleFullscreen();
+        // The two the File menu printed for years without a binding on
+        // Windows/Linux (macOS has them as ⌘N / ⌘W key equivalents and never
+        // gets here for them).
+        if (EditorShortcuts::pressed("file.newProject"))
+        {
+            beginNewProject();
+            openNewProjectPopup = true;
+        }
+        if (EditorShortcuts::pressed("file.closeProject") && ctx.projectLoaded)
+            requestGuarded(GuardedAction::CloseProject);
+        // The transport. Play mode's most frequent gesture had exactly one
+        // door (the toolbar button) until the Play menu; these are its keys.
+        if (EditorShortcuts::pressed("play.toggle")) playToggle();
+        if (EditorShortcuts::pressed("play.pause"))  pauseToggle();
+        if (EditorShortcuts::pressed("play.step"))   stepFrame();
     }
 
+    // Asked for by File ▸ New Project (either bar) or its shortcut above; the
+    // modal itself is drawn below, at this same level of the ID stack.
+    if (openNewProjectPopup)
+        ImGui::OpenPopup("##NewProjectPopup");
+
+    if (s_openProjectErrorPopup)
+    {
+        s_openProjectErrorPopup = false;
+        ImGui::OpenPopup("##EditorOpenError");
+    }
     if (!ctx.hubOpenError.empty())
     {
         EditorWidgets::pinDialogToEditorWindow();
@@ -3116,7 +3462,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // keepMainDockspaceAlive) and cannot call GetID from inside this window.
         const ImGuiID dockspaceId = EditorDockState::mainDockspaceId();
         // Build the default layout on first run (no saved layout in imgui.ini) or
-        // on demand via View > Reset Layout. A layout loaded from imgui.ini
+        // on demand via Window > Reset Layout. A layout loaded from imgui.ini
         // otherwise always wins, so user customisations persist.
         if (s_resetLayoutRequested || ImGui::DockBuilderGetNode(dockspaceId) == nullptr)
         {
@@ -3142,7 +3488,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// After the window exists this frame: its dock node is only reachable once
 	// "Scene" has been submitted at least once.
 	HideSceneTabBarOnce();
-	// The extra panes (View ▸ Scene 2 / 3 / 4), right after the Scene window:
+	// The extra panes (Window ▸ Scene 2 / 3 / 4), right after the Scene window:
 	// they frame the selection against ITS extract, and they belong to the
 	// scene layout like it does.
 	SecondaryViewportPanel::render(ctx, dt);

@@ -21,6 +21,13 @@ namespace
 			{ "file.saveAll",     "Save All",          "File", Scope::Global, ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S, true },
 			{ "file.saveSceneAs", "Save Scene As\xe2\x80\xa6", "File", Scope::Global, ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_S, true },
 			{ "file.openProject", "Open Project\xe2\x80\xa6", "File", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_O, true },
+			// The two chords the File menu printed for years without anything
+			// behind them on Windows/Linux (the labels were literals, not
+			// bindings). Ctrl+W closes the PROJECT, not a tab — the macOS bar has
+			// carried it as ⌘W since the native menu exists, and a tab-close
+			// command would be a new verb, not a rebinding.
+			{ "file.newProject",  "New Project\xe2\x80\xa6",  "File", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_N, true },
+			{ "file.closeProject", "Close Project",   "File", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_W, true },
 
 			// Edit
 			{ "edit.undo",        "Undo",              "Edit", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_Z },
@@ -36,8 +43,15 @@ namespace
 			{ "entity.paste",     "Paste",             "Entities", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_V },
 			{ "entity.delete",    "Delete",            "Entities", Scope::Global, ImGuiKey_Delete },
 
-			// View
-			{ "view.console",     "Toggle Console",    "View", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_GraveAccent },
+			// Play — the transport the toolbar's centre well drives. Global, so
+			// the scene can be started from the keyboard whichever panel has the
+			// mouse; EditorUI gates them on a loaded world.
+			{ "play.toggle",      "Play / Stop",       "Play", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_P },
+			{ "play.pause",       "Pause / Resume",    "Play", Scope::Global, ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_P },
+			{ "play.step",        "Step Frame",        "Play", Scope::Global, ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_P },
+
+			// View / Window
+			{ "view.console",     "Toggle Console",    "Window", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_GraveAccent },
 			{ "view.fullscreen",  "Toggle Fullscreen", "View", Scope::Global, ImGuiKey_F11, false, true },
 
 			// Viewport — only while the pointer is over the picture.

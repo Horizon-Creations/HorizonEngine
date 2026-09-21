@@ -68,16 +68,16 @@ void setGroundGridEnabled(bool on) { s_showFlags.groundGrid = on; }
 const ShowFlagField* showFlagFields(int& outCount)
 {
 	static const ShowFlagField kFields[] = {
-		{ "ViewportGroundGrid",         &ShowFlags::groundGrid    },   // the key the grid always had
-		{ "ViewportShowSelection",      &ShowFlags::selection     },
-		{ "ViewportShowColliders",      &ShowFlags::colliders     },
-		{ "ViewportShowJoints",         &ShowFlags::joints        },
-		{ "ViewportShowNavMesh",        &ShowFlags::navMesh       },
-		{ "ViewportShowEditorIcons",    &ShowFlags::editorIcons   },
-		{ "ViewportShowGuides",         &ShowFlags::guides        },
-		{ "ViewportShowCollaborators",  &ShowFlags::collaborators },
-		{ "ViewportShowScriptDebug",    &ShowFlags::scriptDebug   },
-		{ "ViewportShowStats",          &ShowFlags::stats         },
+		{ "ViewportGroundGrid",         &ShowFlags::groundGrid,    "Ground Grid"   },   // the key the grid always had
+		{ "ViewportShowSelection",      &ShowFlags::selection,     "Selection"     },
+		{ "ViewportShowColliders",      &ShowFlags::colliders,     "Colliders"     },
+		{ "ViewportShowJoints",         &ShowFlags::joints,        "Joints"        },
+		{ "ViewportShowNavMesh",        &ShowFlags::navMesh,       "NavMesh"       },
+		{ "ViewportShowEditorIcons",    &ShowFlags::editorIcons,   "Editor Icons"  },
+		{ "ViewportShowGuides",         &ShowFlags::guides,        "Guides"        },
+		{ "ViewportShowCollaborators",  &ShowFlags::collaborators, "Collaborators" },
+		{ "ViewportShowScriptDebug",    &ShowFlags::scriptDebug,   "Script Debug"  },
+		{ "ViewportShowStats",          &ShowFlags::stats,         "Stats"         },
 	};
 	outCount = static_cast<int>(sizeof(kFields) / sizeof(kFields[0]));
 	return kFields;
@@ -467,20 +467,22 @@ namespace
 }
 
 // The actions behind the menu, also bound to keys in render(): one place for
-// "what does Hide do", whichever way it was asked for.
-static void hideSelected(AppContext& ctx)
+// "what does Hide do", whichever way it was asked for. External linkage
+// (declared in the header) since the main bar's Entity menu became a third
+// door onto them; nothing about them changed for that.
+void hideSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
 	snapshot(ctx, "Hide Selected");
 	noteEdited(ctx, ViewportActions::hideSelected(*ctx.world, ctx.selection));
 }
-static void isolateSelected(AppContext& ctx)
+void isolateSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
 	snapshot(ctx, "Isolate Selected");
 	noteEdited(ctx, ViewportActions::isolateSelected(*ctx.world, ctx.selection));
 }
-static void showAll(AppContext& ctx)
+void showAll(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying) return;
 	snapshot(ctx, "Show All");
@@ -489,7 +491,7 @@ static void showAll(AppContext& ctx)
 // Group and Ungroup rewrite the local transform of what they move (the world
 // pose is kept, the local is what changes), so those are the edited entities
 // — the roots going in, the children coming out.
-static void groupSelected(AppContext& ctx)
+void groupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
 	const std::vector<Entity> roots = ctx.selection.roots(ctx.world->registry());
@@ -497,7 +499,7 @@ static void groupSelected(AppContext& ctx)
 	if (ViewportActions::groupSelected(*ctx.world, ctx.selection) != entt::null)
 		noteEdited(ctx, roots);
 }
-static void ungroupSelected(AppContext& ctx)
+void ungroupSelected(AppContext& ctx)
 {
 	if (!ctx.world || ctx.isPlaying) return;
 	snapshot(ctx, "Ungroup Selected");
@@ -598,6 +600,51 @@ bool selectionBox(AppContext& ctx, HE::AABB& out)
 	out.expand(pivots.max + glm::vec3(0.5f));
 	return true;
 }
+
+// ── The context menu's verbs, as the main bar's Entity menu calls them ──────
+// Thin wrappers over the file-static actions above and the Scene window's
+// own extract: the main menu has no snapshot of its own to measure against,
+// and it must not need one.
+EntityActionState entityActionState(AppContext& ctx)
+{
+	EntityActionState st;
+	if (!ctx.world) return st;
+	auto& reg = ctx.world->registry();
+	const Entity primary = ctx.selection.primary();
+	const bool   hasSel  = !ctx.selection.empty();
+	const bool   editable = !ctx.isPlaying;
+	st.canFocus  = ctx.editorCamera && primary != entt::null && reg.valid(primary);
+	st.canEdit   = editable && hasSel;
+	st.anyHidden = editable && ViewportActions::anyHidden(*ctx.world);
+	for (const Entity e : ctx.selection.entities())
+		if (reg.valid(e) && !ctx.world->isBuiltin(e)) { st.groupable = true; break; }
+	st.groupable  = editable && st.groupable;
+	st.canUngroup = editable && ViewportActions::canUngroup(*ctx.world, ctx.selection);
+	st.primaryLocked = primary != entt::null && reg.valid(primary)
+	                && reg.all_of<EditorLockComponent>(primary);
+	return st;
+}
+// (Hide / Isolate / Show All / Group / Ungroup are the functions above.)
+void focusSelected(AppContext& ctx)          { focusSelected(ctx, s_sceneSnapshot); }
+void snapSelectionToGround(AppContext& ctx)  { snapSelectionToGround(ctx, s_sceneSnapshot); }
+void toggleLockSelected(AppContext& ctx)
+{
+	if (!ctx.world || ctx.isPlaying || ctx.selection.empty()) return;
+	auto& reg = ctx.world->registry();
+	const Entity primary = ctx.selection.primary();
+	const bool primaryLocked = primary != entt::null && reg.valid(primary)
+	                        && reg.all_of<EditorLockComponent>(primary);
+	snapshot(ctx, primaryLocked ? "Unlock Entity" : "Lock Entity");
+	for (const Entity e : ctx.selection.entities())
+	{
+		if (!reg.valid(e) || e == ctx.world->rootEntity()) continue;
+		if (primaryLocked) reg.remove<EditorLockComponent>(e);
+		else               reg.emplace_or_replace<EditorLockComponent>(e);
+	}
+}
+
+HE::ViewMode viewMode()                 { return s_tb.viewMode; }
+void         setViewMode(HE::ViewMode m) { s_tb.viewMode = m; }
 
 // View presets on the numeric keypad (Blender's layout, the one people arrive
 // with): 7 Top, 1 Front, 3 Right, Ctrl flips each to its opposite, 5 toggles

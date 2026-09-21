@@ -81,7 +81,7 @@ IGNORE = {
 
 # Top-level menu titles. A menu opens when you touch it, which is the whole
 # explanation; an entry would be a tooltip fighting with the menu it describes.
-MENU_TITLES = {"File", "Edit", "View", "Assets", "Build", "Help", "Window"}
+MENU_TITLES = {"File", "Edit", "Entity", "Assets", "Play", "Build", "View", "Window", "Help"}
 
 COMPONENT_HEADER = re.compile(r'componentHeader\("([^"]+)"')
 # A panel says which section its controls belong to by pushing a scope; the

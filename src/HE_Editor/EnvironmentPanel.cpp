@@ -11,7 +11,7 @@
 namespace EnvironmentPanel
 {
 
-// View ▸ Environment — add / remove the scene's Sky and Weather entities. The sky and
+// Window ▸ Environment — add / remove the scene's Sky and Weather entities. The sky and
 // weather *settings* are edited in the Details panel when the "Sky" / "Weather" entity
 // is selected in the Outliner; this window only manages their presence (and offers a
 // shortcut to select each). Sky = an EnvironmentComponent entity, Weather = a

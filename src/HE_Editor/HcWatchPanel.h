@@ -2,7 +2,7 @@
 
 struct AppContext;
 
-// ── Watch (View ▸ Watch) ─────────────────────────────────────────────────────
+// ── Watch (Window ▸ Watch) ─────────────────────────────────────────────────────
 // What a HorizonCode run stopped at a breakpoint is holding: the event
 // argument it was fired with, the function frames it is inside of (arguments
 // and locals, innermost first), the instance's variables, and the outputs the

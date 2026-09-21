@@ -2,7 +2,7 @@
 
 struct AppContext;
 
-// ── Collaboration window (View ▸ Collaboration) ──────────────────────────────
+// ── Collaboration window (Window ▸ Collaboration) ──────────────────────────────
 // Host a live session or join one. A guest needs only the session ID and the
 // join code — the address is resolved through the session directory, so nobody
 // has to know or type an IP.

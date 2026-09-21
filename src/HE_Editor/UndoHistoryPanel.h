@@ -2,7 +2,7 @@
 
 struct AppContext;
 
-// ── Undo History (View ▸ Undo History) ───────────────────────────────────────
+// ── Undo History (Window ▸ Undo History) ───────────────────────────────────────
 // The scene's undo stack as a list: every step that can still be taken back,
 // oldest at the top, the current state marked, and below it everything that
 // was taken back and can be brought back. Clicking a row jumps there in ONE

@@ -22,7 +22,7 @@
 namespace ProfilerPanel
 {
 
-// ─── Performance Profiler window (View > Performance Profiler) ──────────────────
+// ─── Performance Profiler window (Window > Performance Profiler) ──────────────────
 // Five tabs over the runtime EngineProfiler:
 //   Overview     — live HUD: stat tiles, budget bars, frame-time graph with hitch
 //                  colouring and percentile guides, distribution histogram, counters.

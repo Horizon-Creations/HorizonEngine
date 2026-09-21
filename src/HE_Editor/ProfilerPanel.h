@@ -2,7 +2,7 @@
 
 struct AppContext;
 
-// ── Performance Profiler window (View ▸ Performance Profiler) ────────────────
+// ── Performance Profiler window (Window ▸ Performance Profiler) ────────────────
 // The editor front-end of the runtime EngineProfiler: the live HUD + frame-time
 // graph, the benchmark/single-frame capture controls and the per-pass GPU +
 // per-scope CPU breakdown of one captured frame.

@@ -41,4 +41,12 @@ namespace ContentBrowserPanel
 	// result there — every time. The panel's folder state is file-static, so this
 	// is the only way out of it.
 	std::string browsedFolderPath();
+
+	// Open the "Create Asset" menu (the grid's right-click menu) at the folder on
+	// screen, on the next frame the panel draws. Raised by Assets ▸ Create
+	// Asset… in the main bar: the list itself lives with the panel's own state
+	// and is not drawn anywhere else. Ignored while the panel is not drawn (an
+	// asset tab in front) or while an Engine or Source root is being browsed,
+	// where nothing can be created.
+	void requestCreateMenu();
 }

@@ -560,7 +560,7 @@ namespace
 // leaving the user to wonder where the option went. `deferred` = the renderer
 // actually resolves through a G-buffer this frame (its GetRenderPath after the
 // capability gate), not the preference alone.
-void viewModePopup(AppContext& ctx, State& st)
+void viewModePopup(AppContext& ctx, HE::ViewMode& viewMode)
 {
 	HE::Ed::Help::Scope helpScope("Viewport View Mode");
 	using VM = HE::ViewMode;
@@ -586,12 +586,15 @@ void viewModePopup(AppContext& ctx, State& st)
 		}
 		const bool gb = HE::viewModeIsGBuffer(r.mode);
 		if (EditorWidgets::menuItem(HE::viewModeName(r.mode), r.shortcut,
-		                            st.viewMode == r.mode, !gb || deferred))
-			st.viewMode = r.mode;
+		                            viewMode == r.mode, !gb || deferred))
+			viewMode = r.mode;
 	}
 }
 
 } // namespace
+
+void showRows(AppContext& ctx)                        { showPopup(ctx); }
+void viewModeRows(AppContext& ctx, HE::ViewMode& mode) { viewModePopup(ctx, mode); }
 
 float height() { return EditorToolbar::height(); }
 
@@ -981,7 +984,7 @@ void render(AppContext& ctx, State& st)
 				ImGui::OpenPopup("##vpViewModePopup");
 			if (ImGui::BeginPopup("##vpViewModePopup"))
 			{
-				viewModePopup(ctx, st);
+				viewModePopup(ctx, st.viewMode);
 				ImGui::EndPopup();
 			}
 			rx += w + kGroupGap;

@@ -1,6 +1,10 @@
 // macOS native menu bar (see MacMenuBar.h). ObjC++ — compiled on APPLE only.
 #include "MacMenuBar.h"
 #include "HorizonVersion.h"   // HE_VERSION_STRING / HE_VERSION_CODENAME
+#include "OutlinerPanel.h"    // entityPresetTable — the Entity ▸ Create rows
+#include "ViewportPanel.h"    // showFlagFields — the View ▸ Show rows
+#include "EditorCamera.h"     // ViewPreset + presetName — the View ▸ Camera rows
+#include <Renderer/IRenderer.h> // HE::ViewMode + viewModeName — the View ▸ View Mode rows
 
 #import <Cocoa/Cocoa.h>
 #include <SDL3/SDL.h>         // SDL_GetBasePath — locate the bundled logo
@@ -8,35 +12,48 @@
 #include <ContentManager/ContentManager.h> // ContentManager::isEngineContentDevMode
 #endif
 #include <deque>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace
 {
-	std::deque<MacMenuBar::Cmd> s_queue;      // menu actions run on the main thread
+	// A command with the argument its row carries (0 for most rows; a view
+	// mode, a show flag, a recent-project index for the ones that need it).
+	struct Pending { MacMenuBar::Cmd cmd; int arg; };
+	std::deque<Pending>         s_queue;      // menu actions run on the main thread
+	int                         s_lastArg = 0;
 	std::vector<NSMenuItem*>    s_projectItems; // enabled only with a project loaded
-	// Items that show an on/off tick (the View-menu panels + the tutorial).
-	// Small enough that a linear lookup beats a map, and it keeps the item
-	// registration in one place: heAddItem records, setToggleState finds.
-	std::vector<std::pair<MacMenuBar::Cmd, NSMenuItem*>> s_toggleItems;
+	// Items that show an on/off tick (the Window-menu panels, the View
+	// switches, the tutorial). Small enough that a linear lookup beats a map,
+	// and it keeps the item registration in one place: heAddItem records,
+	// setToggleState finds.
+	struct ToggleItem { MacMenuBar::Cmd cmd; int arg; NSMenuItem* item; };
+	std::vector<ToggleItem>     s_toggleItems;
 	// Rows that only mean something in a GAME: scene operations, the ground grid,
-	// the level script. Hidden wholesale in an application project — see
-	// MacMenuBar::setAppProject.
+	// the level script, the whole Entity menu. Hidden wholesale in an application
+	// project — see MacMenuBar::setAppProject.
 	std::vector<NSMenuItem*>    s_gameOnlyItems;
+	NSMenu*                     s_recentMenu = nil;
+	std::vector<std::string>    s_recentPaths;
 	bool s_installed     = false;
 	bool s_projectLoaded = false;
 	bool s_appProject    = false;
 }
 
-// Menu target: every custom item routes here; the Cmd rides in the item's tag.
+// Menu target: every custom item routes here; the Cmd rides in the item's tag,
+// the argument (when the row has one) in its representedObject.
 @interface HEMenuTarget : NSObject
 - (void)fire:(id)sender;
 @end
 @implementation HEMenuTarget
 - (void)fire:(id)sender
 {
-	s_queue.push_back(static_cast<MacMenuBar::Cmd>([(NSMenuItem*)sender tag]));
+	NSMenuItem* item = (NSMenuItem*)sender;
+	const int arg = [item.representedObject isKindOfClass:[NSNumber class]]
+	              ? [(NSNumber*)item.representedObject intValue] : 0;
+	s_queue.push_back({ static_cast<MacMenuBar::Cmd>(item.tag), arg });
 }
 // About panel driven by the compile-time version macros so it shows the right
 // release regardless of whether the editor runs as a bare exe (no Info.plist) or
@@ -67,7 +84,8 @@ namespace
 static HEMenuTarget* s_target = nil;
 
 static NSMenuItem* heAddItem(NSMenu* menu, NSString* title, MacMenuBar::Cmd cmd,
-                             NSString* key, NSEventModifierFlags mods, bool needsProject)
+                             NSString* key, NSEventModifierFlags mods, bool needsProject,
+                             int arg = 0)
 {
 	NSMenuItem* it = [[NSMenuItem alloc] initWithTitle:title
 	                                            action:@selector(fire:)
@@ -75,8 +93,18 @@ static NSMenuItem* heAddItem(NSMenu* menu, NSString* title, MacMenuBar::Cmd cmd,
 	if (mods) it.keyEquivalentModifierMask = mods;
 	it.target = s_target;
 	it.tag = static_cast<NSInteger>(cmd);
+	if (arg) it.representedObject = @(arg);
 	[menu addItem:it];
 	if (needsProject) s_projectItems.push_back(it);
+	return it;
+}
+
+// A row with a tick: registered for setToggleState.
+static NSMenuItem* heAddToggle(NSMenu* menu, NSString* title, MacMenuBar::Cmd cmd,
+                               bool needsProject, int arg = 0)
+{
+	NSMenuItem* it = heAddItem(menu, title, cmd, nil, 0, needsProject, arg);
+	s_toggleItems.push_back({ cmd, arg, it });
 	return it;
 }
 
@@ -147,6 +175,16 @@ void install()
 		NSMenu* file = heAddSubmenu(main, @"File");
 		heAddItem(file, @"New Project…",  C::NewProject,  @"n", NSEventModifierFlagCommand, false);
 		heAddItem(file, @"Open Project…", C::OpenProject, @"o", NSEventModifierFlagCommand, false);
+		// Filled by setRecentProjects; empty until the editor has read its
+		// config, and rebuilt whenever the list changes.
+		{
+			NSMenuItem* holder = [[NSMenuItem alloc] initWithTitle:@"Recent Projects"
+			                                                action:nil keyEquivalent:@""];
+			s_recentMenu = [[NSMenu alloc] initWithTitle:@"Recent Projects"];
+			s_recentMenu.autoenablesItems = NO;
+			holder.submenu = s_recentMenu;
+			[file addItem:holder];
+		}
 		heAddItem(file, @"Close Project", C::CloseProject, @"w", NSEventModifierFlagCommand, true);
 		[file addItem:[NSMenuItem separatorItem]];
 		s_gameOnlyItems.push_back(
@@ -155,6 +193,7 @@ void install()
 			heAddItem(file, @"Open Scene…",          C::OpenScene,       nil, 0, true));
 		s_gameOnlyItems.push_back(
 			heAddItem(file, @"Add Scene Additive…",  C::AddSceneAdditive, nil, 0, true));
+		[file addItem:[NSMenuItem separatorItem]];
 		// ⌘S saves the tab in front, ⇧⌘S saves everything — Save As has to move
 		// off ⇧⌘S, or the menu would swallow that keystroke before Save All ever
 		// sees it (a key equivalent wins over anything the app does with the key).
@@ -164,25 +203,33 @@ void install()
 		s_gameOnlyItems.push_back(
 			heAddItem(file, @"Save Scene As…",       C::SaveSceneAs, @"s",
 			          NSEventModifierFlagCommand | NSEventModifierFlagOption, true));
+		[file addItem:[NSMenuItem separatorItem]];
+		// Import lives with the assets (Assets ▸ Import Asset…) and is offered
+		// here too: File is where somebody who has never seen this editor
+		// looks for "get a file in".
+		heAddItem(file, @"Import Asset…", C::ImportAsset, nil, 0, true);
 	}
 
 	// ── Edit ───────────────────────────────────────────────────────────────
-	// Until now macOS had no Edit menu at all, so undo was reachable only through
-	// ⌘Z or the footer button — and a menu bar with no Edit menu reads as an app
-	// that cannot undo.
-	//
 	// NO KEY EQUIVALENTS here, and that is the whole design of this block. A
 	// native ⌘Z wins over anything the app does with the key (the same rule that
 	// forced Save As off ⇧⌘S above), so it would reach this menu INSTEAD of the
 	// editor — and every panel with its own undo stack (material graph, UI
 	// editor, HorizonCode canvas) plus every text field would lose the key to a
 	// command that only knows about the scene. ⌘Z keeps going to the app, which
-	// routes it per context; these two items are the visible door onto the same
-	// scene stack the footer buttons drive.
+	// routes it per context; these items are the visible door onto the same
+	// scene stack the footer buttons drive. The same holds for ⌘X/⌘C/⌘V/⌘D and
+	// Delete: the rows act on the selected ENTITY, the keys stay with the app.
 	{
 		NSMenu* edit = heAddSubmenu(main, @"Edit");
 		heAddItem(edit, @"Undo", C::Undo, nil, 0, true);
 		heAddItem(edit, @"Redo", C::Redo, nil, 0, true);
+		[edit addItem:[NSMenuItem separatorItem]];
+		s_gameOnlyItems.push_back(heAddItem(edit, @"Cut",       C::Cut,       nil, 0, true));
+		s_gameOnlyItems.push_back(heAddItem(edit, @"Copy",      C::Copy,      nil, 0, true));
+		s_gameOnlyItems.push_back(heAddItem(edit, @"Paste",     C::Paste,     nil, 0, true));
+		s_gameOnlyItems.push_back(heAddItem(edit, @"Duplicate", C::Duplicate, nil, 0, true));
+		s_gameOnlyItems.push_back(heAddItem(edit, @"Delete",    C::Delete,    nil, 0, true));
 		[edit addItem:[NSMenuItem separatorItem]];
 		// The project's own settings, an editor tab like Preferences (which sits
 		// in the app menu, where macOS keeps an application's preferences). No
@@ -190,66 +237,80 @@ void install()
 		heAddItem(edit, @"Project Settings…", C::ProjectSettings, nil, 0, true);
 	}
 
-	// ── View ───────────────────────────────────────────────────────────────
+	// ── Entity (game projects only — hidden whole in an application) ──────
+	// The verbs the viewport's and the Outliner's right-click menus carry, in
+	// the bar so they have a fixed address. Built from the Outliner's preset
+	// table, so the Create list here IS the Outliner's.
 	{
-		NSMenu* view = heAddSubmenu(main, @"View");
-		NSMenuItem* fs = [[NSMenuItem alloc]
-			initWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
-		fs.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagControl;
-		[view addItem:fs];   // responder chain → the key window
-		heAddItem(view, @"Reset Layout",          C::ResetLayout,    nil, 0, false);
-		// The four panel toggles carry a tick showing whether the panel is open,
-		// kept in step every frame by setToggleState.
-		s_toggleItems.emplace_back(C::ToggleProfiler,
-			heAddItem(view, @"Performance Profiler",  C::ToggleProfiler, nil, 0, false));
-		s_toggleItems.emplace_back(C::ToggleEnvironment,
-			heAddItem(view, @"Environment",           C::ToggleEnvironment, nil, 0, false));
-		s_toggleItems.emplace_back(C::ToggleCollab,
-			heAddItem(view, @"Collaboration",         C::ToggleCollab,      nil, 0, false));
-		s_toggleItems.emplace_back(C::ToggleSourceControl,
-			heAddItem(view, @"Source Control",        C::ToggleSourceControl, nil, 0, true));
-		s_toggleItems.emplace_back(C::ToggleConsole,
-			heAddItem(view, @"Console",               C::ToggleConsole,     nil, 0, false));
-		s_toggleItems.emplace_back(C::ToggleAudioMixer,
-			heAddItem(view, @"Audio Mixer",           C::ToggleAudioMixer,  nil, 0, false));
-		s_toggleItems.emplace_back(C::ToggleUndoHistory,
-			heAddItem(view, @"Undo History",          C::ToggleUndoHistory, nil, 0, false));
-		s_toggleItems.emplace_back(C::ToggleWatch,
-			heAddItem(view, @"Watch",                 C::ToggleWatch,       nil, 0, false));
-		// The world grid is not a panel, but it is a View toggle the user looks
-		// for in this menu — on macOS the viewport toolbar's options popup is
-		// otherwise its only route.
+		NSMenuItem* holder = [[NSMenuItem alloc] initWithTitle:@"Entity" action:nil keyEquivalent:@""];
+		NSMenu* entity = [[NSMenu alloc] initWithTitle:@"Entity"];
+		entity.autoenablesItems = NO;
+		holder.submenu = entity;
+		[main addItem:holder];
+		s_gameOnlyItems.push_back(holder);
+
+		NSMenuItem* createHolder = [[NSMenuItem alloc] initWithTitle:@"Create" action:nil keyEquivalent:@""];
+		NSMenu* create = [[NSMenu alloc] initWithTitle:@"Create"];
+		create.autoenablesItems = NO;
+		createHolder.submenu = create;
+		[entity addItem:createHolder];
+		s_projectItems.push_back(createHolder);
 		{
-			NSMenuItem* grid = heAddItem(view, @"Ground Grid", C::ToggleGroundGrid, nil, 0, true);
-			s_toggleItems.emplace_back(C::ToggleGroundGrid, grid);
-			s_gameOnlyItems.push_back(grid);
-		}
-		// The secondary scene viewports, ticked while open like the panels above.
-		{
-			[view addItem:[NSMenuItem separatorItem]];
-			const struct { C cmd; NSString* title; } panes[] = {
-				{ C::ToggleScene2, @"Scene 2" },
-				{ C::ToggleScene3, @"Scene 3" },
-				{ C::ToggleScene4, @"Scene 4" },
-			};
-			for (const auto& p : panes)
+			int n = 0;
+			const OutlinerPanel::EntityPresetRow* rows = OutlinerPanel::entityPresetTable(n);
+			NSMenu* group = nil;
+			const char* groupName = "";
+			for (int i = 0; i < n; ++i)
 			{
-				NSMenuItem* item = heAddItem(view, p.title, p.cmd, nil, 0, true);
-				s_toggleItems.emplace_back(p.cmd, item);
-				s_gameOnlyItems.push_back(item);
+				// A row with a group goes into that group's submenu, opened on
+				// the first row that names it; a top-level row after a group
+				// closes it (the table is grouped contiguously).
+				if (std::string(rows[i].group) != groupName)
+				{
+					// A separator where the list changes from loose rows to
+					// groups or back — the same two the ImGui list draws.
+					if (!*groupName || !*rows[i].group)
+						[create addItem:[NSMenuItem separatorItem]];
+					groupName = rows[i].group;
+					group = nil;
+					if (*groupName)
+					{
+						NSMenuItem* gh = [[NSMenuItem alloc]
+							initWithTitle:[NSString stringWithUTF8String:groupName]
+							       action:nil keyEquivalent:@""];
+						group = [[NSMenu alloc] initWithTitle:gh.title];
+						group.autoenablesItems = NO;
+						gh.submenu = group;
+						[create addItem:gh];
+					}
+				}
+				// arg is 1-based on the wire (0 = "no argument"); the dispatch
+				// takes one off again.
+				heAddItem(group ? group : create, [NSString stringWithUTF8String:rows[i].label],
+				          C::CreateEntity, nil, 0, false, i + 1);
 			}
 		}
-		[view addItem:[NSMenuItem separatorItem]];
-		s_gameOnlyItems.push_back(
-			heAddItem(view, @"Level Script",   C::OpenLevelScript,  nil, 0, true));
-		// The Game Instance stays: it is the one script an application really does
-		// own — the thing whose OnInit builds its interface.
-		heAddItem(view, @"Game Instance",  C::OpenGameInstance, nil, 0, true);
+		[entity addItem:[NSMenuItem separatorItem]];
+		heAddItem(entity, @"Focus Selected",   C::FocusSelected,   nil, 0, true);
+		heAddItem(entity, @"Snap to Ground",   C::SnapToGround,    nil, 0, true);
+		[entity addItem:[NSMenuItem separatorItem]];
+		heAddItem(entity, @"Hide Selected",    C::HideSelected,    nil, 0, true);
+		heAddItem(entity, @"Isolate Selected", C::IsolateSelected, nil, 0, true);
+		heAddItem(entity, @"Show All",         C::ShowAll,         nil, 0, true);
+		[entity addItem:[NSMenuItem separatorItem]];
+		heAddItem(entity, @"Group",            C::Group,           nil, 0, true);
+		heAddItem(entity, @"Ungroup",          C::Ungroup,         nil, 0, true);
+		[entity addItem:[NSMenuItem separatorItem]];
+		// Retitled "Unlock" by setItemTitle while the primary is locked.
+		heAddItem(entity, @"Lock",             C::ToggleLock,      nil, 0, true);
+		[entity addItem:[NSMenuItem separatorItem]];
+		heAddItem(entity, @"Save as Prefab",   C::SaveAsPrefab,    nil, 0, true);
 	}
 
-	// ── Assets / Build ─────────────────────────────────────────────────────
+	// ── Assets ─────────────────────────────────────────────────────────────
 	{
 		NSMenu* assets = heAddSubmenu(main, @"Assets");
+		heAddItem(assets, @"Create Asset…",  C::CreateAsset,   nil, 0, true);
 		heAddItem(assets, @"Import Asset…",  C::ImportAsset,   nil, 0, true);
 		heAddItem(assets, @"Refresh Assets", C::RefreshAssets, nil, 0, true);
 #ifdef HE_HAVE_LIBSSH2
@@ -265,15 +326,101 @@ void install()
 			          C::RebuildManifestFromServer, nil, 0, false);
 		}
 #endif
+	}
+
+	// ── Play ───────────────────────────────────────────────────────────────
+	// The toolbar's transport, with a fixed place in the bar. No key
+	// equivalents (⌘P and friends are read by the editor through SDL and
+	// rebindable in Preferences ▸ Shortcuts); the titles follow the state.
+	{
+		NSMenu* play = heAddSubmenu(main, @"Play");
+		s_toggleItems.push_back({ C::PlayToggle, 0,
+			heAddItem(play, @"Play",       C::PlayToggle,  nil, 0, true) });
+		s_toggleItems.push_back({ C::PauseToggle, 0,
+			heAddItem(play, @"Pause",      C::PauseToggle, nil, 0, true) });
+		heAddItem(play, @"Step Frame", C::StepFrame,   nil, 0, true);
+		heAddItem(play, @"Step Node",  C::StepNode,    nil, 0, true);
+	}
+
+	// ── Build ──────────────────────────────────────────────────────────────
+	{
 		NSMenu* build = heAddSubmenu(main, @"Build");
-		heAddItem(build, @"Export Project…", C::ExportProject, nil, 0, true);
 		// Mirrors EditorUI.cpp's ImGui Build menu. Project-scoped only: whether
 		// this project HAS a native module is answered by the action, because
 		// the menu is built once and the project changes under it.
 		heAddItem(build, @"Build and Reload Game Logic", C::BuildGameLogic, nil, 0, true);
+		[build addItem:[NSMenuItem separatorItem]];
+		heAddItem(build, @"Export Project…", C::ExportProject, nil, 0, true);
 	}
 
-	// ── Window (standard minimize/zoom; registered so macOS lists windows) ──
+	// ── View: how the Scene window draws ───────────────────────────────────
+	{
+		NSMenu* view = heAddSubmenu(main, @"View");
+		// View Mode ▸ — one row per HE::ViewMode, ticked for the current one.
+		{
+			NSMenuItem* holder = [[NSMenuItem alloc] initWithTitle:@"View Mode" action:nil keyEquivalent:@""];
+			NSMenu* modes = [[NSMenu alloc] initWithTitle:@"View Mode"];
+			modes.autoenablesItems = NO;
+			holder.submenu = modes;
+			[view addItem:holder];
+			s_gameOnlyItems.push_back(holder);
+			for (int m = 0; m < HE::kViewModeCount; ++m)
+			{
+				const auto mode = static_cast<HE::ViewMode>(m);
+				if (mode == HE::ViewMode::GBufferBaseColor) [modes addItem:[NSMenuItem separatorItem]];
+				heAddToggle(modes, [NSString stringWithUTF8String:HE::viewModeName(mode)],
+				            C::SetViewMode, true, m + 1);
+			}
+		}
+		// Show ▸ — the overlay switches, from the same table the toolbar's
+		// popup and the config round-trip read.
+		{
+			NSMenuItem* holder = [[NSMenuItem alloc] initWithTitle:@"Show" action:nil keyEquivalent:@""];
+			NSMenu* show = [[NSMenu alloc] initWithTitle:@"Show"];
+			show.autoenablesItems = NO;
+			holder.submenu = show;
+			[view addItem:holder];
+			s_gameOnlyItems.push_back(holder);
+			int n = 0;
+			const ViewportPanel::ShowFlagField* fields = ViewportPanel::showFlagFields(n);
+			for (int i = 0; i < n; ++i)
+				heAddToggle(show, [NSString stringWithUTF8String:fields[i].label],
+				            C::ToggleShowFlag, true, i + 1);
+			[show addItem:[NSMenuItem separatorItem]];
+			heAddItem(show, @"Show All Overlays", C::ShowAllOverlays, nil, 0, true);
+			heAddItem(show, @"Hide All Overlays", C::HideAllOverlays, nil, 0, true);
+		}
+		// Camera ▸ — the axis presets and the lens, over the Scene window's
+		// camera (the keypad and the toolbar's View cell do the same).
+		{
+			NSMenuItem* holder = [[NSMenuItem alloc] initWithTitle:@"Camera" action:nil keyEquivalent:@""];
+			NSMenu* cam = [[NSMenu alloc] initWithTitle:@"Camera"];
+			cam.autoenablesItems = NO;
+			holder.submenu = cam;
+			[view addItem:holder];
+			s_gameOnlyItems.push_back(holder);
+			using VP = EditorCamera::ViewPreset;
+			const VP presets[] = { VP::Perspective, VP::Top, VP::Bottom, VP::Front,
+			                       VP::Back, VP::Right, VP::Left };
+			for (VP p : presets)
+			{
+				heAddToggle(cam, [NSString stringWithUTF8String:EditorCamera::presetName(p)],
+				            C::SetViewPreset, true, static_cast<int>(p) + 1);
+				if (p == VP::Perspective) [cam addItem:[NSMenuItem separatorItem]];
+			}
+			[cam addItem:[NSMenuItem separatorItem]];
+			heAddToggle(cam, @"Orthographic", C::ToggleOrthographic, true);
+		}
+		[view addItem:[NSMenuItem separatorItem]];
+		NSMenuItem* fs = [[NSMenuItem alloc]
+			initWithTitle:@"Toggle Full Screen" action:@selector(toggleFullScreen:) keyEquivalent:@"f"];
+		fs.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagControl;
+		[view addItem:fs];   // responder chain → the key window
+	}
+
+	// ── Window: everything that opens a panel or a tab ─────────────────────
+	// The standard minimize/zoom first (registered so macOS lists windows),
+	// then the editor's panels, ticked while open (setToggleState).
 	{
 		NSMenu* window = heAddSubmenu(main, @"Window");
 		NSMenuItem* mini = [[NSMenuItem alloc]
@@ -283,6 +430,36 @@ void install()
 			initWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
 		[window addItem:zoom];
 		NSApp.windowsMenu = window;
+		[window addItem:[NSMenuItem separatorItem]];
+		heAddToggle(window, @"Console",               C::ToggleConsole,       false);
+		heAddToggle(window, @"Performance Profiler",  C::ToggleProfiler,      false);
+		heAddToggle(window, @"Environment",           C::ToggleEnvironment,   false);
+		heAddToggle(window, @"Collaboration",         C::ToggleCollab,        false);
+		heAddToggle(window, @"Source Control",        C::ToggleSourceControl, true);
+		heAddToggle(window, @"Audio Mixer",           C::ToggleAudioMixer,    false);
+		heAddToggle(window, @"Undo History",          C::ToggleUndoHistory,   false);
+		heAddToggle(window, @"Watch",                 C::ToggleWatch,         false);
+		// The secondary scene viewports, ticked while open like the panels above.
+		{
+			[window addItem:[NSMenuItem separatorItem]];
+			const struct { C cmd; NSString* title; } panes[] = {
+				{ C::ToggleScene2, @"Scene 2" },
+				{ C::ToggleScene3, @"Scene 3" },
+				{ C::ToggleScene4, @"Scene 4" },
+			};
+			for (const auto& p : panes)
+				s_gameOnlyItems.push_back(heAddToggle(window, p.title, p.cmd, true));
+		}
+		[window addItem:[NSMenuItem separatorItem]];
+		s_gameOnlyItems.push_back(
+			heAddItem(window, @"Level Script",   C::OpenLevelScript,  nil, 0, true));
+		// The Game Instance stays: it is the one script an application really does
+		// own — the thing whose OnInit builds its interface.
+		heAddItem(window, @"Game Instance",  C::OpenGameInstance, nil, 0, true);
+		[window addItem:[NSMenuItem separatorItem]];
+		s_gameOnlyItems.push_back(heAddToggle(window, @"Landscape Tools", C::ToggleLandscapeTools, true));
+		[window addItem:[NSMenuItem separatorItem]];
+		heAddItem(window, @"Reset Layout", C::ResetLayout, nil, 0, false);
 	}
 
 	// ── Help (last, as macOS expects) ──────────────────────────────────────
@@ -298,8 +475,7 @@ void install()
 		heAddItem(help, @"Search the Documentation…", C::SearchDocumentation, nil, 0, false);
 		heAddItem(help, @"Documentation (Website)",   C::DocumentationOnline, nil, 0, false);
 		[help addItem:[NSMenuItem separatorItem]];
-		s_toggleItems.emplace_back(C::OpenTutorial,
-			heAddItem(help, @"Interactive Tutorial", C::OpenTutorial, nil, 0, false));
+		heAddToggle(help, @"Interactive Tutorial", C::OpenTutorial, false);
 		[help addItem:[NSMenuItem separatorItem]];
 		heAddItem(help, @"Report Issue…", C::ReportIssue, nil, 0, false);
 		NSApp.helpMenu = help;
@@ -314,7 +490,7 @@ bool available() { return s_installed; }
 
 void setProjectLoaded(bool loaded)
 {
-	s_projectLoaded = loaded;   // ~10 items; cheap enough to set every frame
+	s_projectLoaded = loaded;   // a few dozen items; cheap enough to set every frame
 	for (NSMenuItem* it : s_projectItems) it.enabled = loaded ? YES : NO;
 }
 
@@ -327,25 +503,76 @@ void setAppProject(bool isApp)
 	for (NSMenuItem* it : s_gameOnlyItems) it.hidden = isApp ? YES : NO;
 }
 
-void setToggleState(Cmd cmd, bool on)
+void setToggleState(Cmd cmd, int arg, bool on)
 {
-	for (const auto& [itemCmd, item] : s_toggleItems)
+	for (const ToggleItem& t : s_toggleItems)
 	{
-		if (itemCmd != cmd) continue;
+		if (t.cmd != cmd || t.arg != arg) continue;
 		const NSControlStateValue want = on ? NSControlStateValueOn : NSControlStateValueOff;
 		// Only on a change: assigning re-marks the menu as needing display, and
 		// this is called every frame for every toggle.
-		if (item.state != want) item.state = want;
+		if (t.item.state != want) t.item.state = want;
 		return;
+	}
+}
+
+void setToggleState(Cmd cmd, bool on) { setToggleState(cmd, 0, on); }
+
+void setItemTitle(Cmd cmd, const char* title)
+{
+	if (!title) return;
+	NSMenu* main = NSApp.mainMenu;
+	if (!main) return;
+	// The retitled rows are all top-level rows of one menu (Play, Entity), so
+	// one level of submenus is as deep as this has to look.
+	for (NSMenuItem* top in main.itemArray)
+	{
+		for (NSMenuItem* it in top.submenu.itemArray)
+		{
+			if (it.tag != static_cast<NSInteger>(cmd) || it.representedObject) continue;
+			NSString* want = [NSString stringWithUTF8String:title];
+			if (![it.title isEqualToString:want]) it.title = want;
+			return;
+		}
+	}
+}
+
+void setRecentProjects(const std::vector<std::string>& paths)
+{
+	if (!s_recentMenu || paths == s_recentPaths) return;
+	s_recentPaths = paths;
+	[s_recentMenu removeAllItems];
+	if (paths.empty())
+	{
+		NSMenuItem* none = [[NSMenuItem alloc] initWithTitle:@"No Recent Projects"
+		                                              action:nil keyEquivalent:@""];
+		none.enabled = NO;
+		[s_recentMenu addItem:none];
+		return;
+	}
+	for (std::size_t i = 0; i < paths.size(); ++i)
+	{
+		std::string name = std::filesystem::path(paths[i]).stem().string();
+		if (name.empty()) name = paths[i];
+		// The row is the project's name; the full path is the tooltip, since
+		// two projects called "Demo" in different folders are an ordinary thing.
+		NSMenuItem* it = heAddItem(s_recentMenu, [NSString stringWithUTF8String:name.c_str()],
+		                           Cmd::OpenRecentProject, nil, 0, false, static_cast<int>(i) + 1);
+		it.toolTip = [NSString stringWithUTF8String:paths[i].c_str()];
+		std::error_code ec;
+		if (!std::filesystem::exists(paths[i], ec)) it.enabled = NO;
 	}
 }
 
 Cmd take()
 {
 	if (s_queue.empty()) return Cmd::None;
-	const Cmd c = s_queue.front();
+	const Pending p = s_queue.front();
 	s_queue.pop_front();
-	return c;
+	s_lastArg = p.arg;
+	return p.cmd;
 }
+
+int arg() { return s_lastArg; }
 
 } // namespace MacMenuBar

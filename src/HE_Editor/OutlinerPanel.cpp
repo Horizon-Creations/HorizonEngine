@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <iterator>   // std::size
 #include <string>
 #include <system_error>
 #include <vector>
@@ -154,6 +155,82 @@ namespace
         item("Rope",  Preset::Rope);
         item("Trail", Preset::Trail);
         return picked;
+    }
+
+
+    // ── "Save as Prefab" ─────────────────────────────────────────────────────
+    // The subtree under `entity` written as Content/Prefabs/<name>.hasset —
+    // shared by the row's context menu and the main bar's Entity menu.
+    void savePrefabOf(AppContext& ctx, Entity entity, const std::string& name0)
+    {
+        if (!ctx.world || !ctx.contentManager) return;
+        // Entity names are free text, and a '/' in one would reach
+        // saveAsset's create_directories: "Arm/Left" would silently
+        // land in Content/Prefabs/Arm instead of where the user is
+        // looking for it.
+        std::string base = name0;
+        for (char& c : base)
+            if (c == '/' || c == '\\') c = '_';
+        if (base.empty()) base = "Prefab";
+
+        // Unique "<Name>.hasset" under Content/Prefabs — the folder
+        // ProjectManager seeds for exactly this. Without the counter
+        // a second "Save as Prefab" on a same-named entity would
+        // overwrite the first one with no warning.
+        const std::string dirAbs = ctx.contentManager->contentRoot() + "/Prefabs";
+        std::error_code ec;
+        std::filesystem::create_directories(dirAbs, ec);
+        std::string name = base;
+        for (int n = 1; std::filesystem::exists(dirAbs + "/" + name + ".hasset", ec); ++n)
+            name = base + std::to_string(n);
+
+        SceneSerializer ser;
+        PrefabAsset prefab;
+        prefab.type = HE::AssetType::Prefab;
+        prefab.name = name;
+        prefab.path = "Prefabs/" + name + ".hasset";
+        prefab.data = ser.serializeSubtree(*ctx.world, entity);
+
+        // Write the file BEFORE registering it. Registering alone is
+        // what this menu item used to do, and an asset that lives only
+        // in the SlotMap never reaches the Content Browser and is gone
+        // at shutdown — the save looked like it worked and wasn't.
+        const std::string relPath = prefab.path;
+        // The save hook publishes an UPDATE for anything written
+        // through saveAsset, and this file is a create — held across
+        // the write so the create below is the only announcement, and
+        // so the update's lock claim never lands on a path the host
+        // may be about to rename out from under us.
+        const CollabController::CreatingAsset creating(ctx.collab, relPath);
+        if (ctx.contentManager->saveAsset(prefab))
+        {
+            // Registering the in-memory copy keeps the UUID that was
+            // just written to disk (registerRuntimeAsset only mints one
+            // when there is none), so the path→UUID entry it adds and
+            // the file agree — a later drop of this prefab resolves it
+            // without re-reading it. The refresh flag is what makes the
+            // new file appear in the Content Browser.
+            const std::string fullPath = dirAbs + "/" + name + ".hasset";
+            ctx.contentManager->registerPrefab(std::move(prefab));
+            ctx.contentRefreshPending = true;
+            // Announce it as a CREATE, which is what it is. Without
+            // this the file reached the others only through the
+            // ordinary whole-file save path — as an UPDATE to an
+            // asset they had never heard of, and with no name
+            // arbitration at all. The uniquifier above only ever
+            // consults this machine's disk, so two people saving an
+            // entity called "Arm" at the same moment both pick
+            // Prefabs/Arm.hasset, and whichever update lands second
+            // silently replaces the first person's prefab. The
+            // create path is where the host settles a taken name and
+            // tells the loser their asset was renamed; the content
+            // browser has gone through it since creates began
+            // replicating, and this menu item never did.
+            if (ctx.collab) ctx.collab->publishAssetCreate(relPath, fullPath);
+            HE_LOG_INFO(Editor, "%s", ("Editor: saved prefab " + relPath).c_str());
+        }
+        else
+            HE_LOG_ERROR(Editor, "%s", ("Editor: failed to save prefab " + relPath).c_str());
     }
 
     // ── The eye and the padlock ──────────────────────────────────────────────
@@ -833,75 +910,7 @@ void render(AppContext& ctx)
                 const bool doPrefab = !isRoot && EditorWidgets::menuItem("Save as Prefab");
                 if (!isRoot) EditorWidgets::helpForKey("outliner.prefab");
                 if (doPrefab && ctx.contentManager)
-                {
-                    // Entity names are free text, and a '/' in one would reach
-                    // saveAsset's create_directories: "Arm/Left" would silently
-                    // land in Content/Prefabs/Arm instead of where the user is
-                    // looking for it.
-                    std::string base = node.name;
-                    for (char& c : base)
-                        if (c == '/' || c == '\\') c = '_';
-                    if (base.empty()) base = "Prefab";
-
-                    // Unique "<Name>.hasset" under Content/Prefabs — the folder
-                    // ProjectManager seeds for exactly this. Without the counter
-                    // a second "Save as Prefab" on a same-named entity would
-                    // overwrite the first one with no warning.
-                    const std::string dirAbs = ctx.contentManager->contentRoot() + "/Prefabs";
-                    std::error_code ec;
-                    std::filesystem::create_directories(dirAbs, ec);
-                    std::string name = base;
-                    for (int n = 1; std::filesystem::exists(dirAbs + "/" + name + ".hasset", ec); ++n)
-                        name = base + std::to_string(n);
-
-                    SceneSerializer ser;
-                    PrefabAsset prefab;
-                    prefab.type = HE::AssetType::Prefab;
-                    prefab.name = name;
-                    prefab.path = "Prefabs/" + name + ".hasset";
-                    prefab.data = ser.serializeSubtree(*ctx.world, node.entity);
-
-                    // Write the file BEFORE registering it. Registering alone is
-                    // what this menu item used to do, and an asset that lives only
-                    // in the SlotMap never reaches the Content Browser and is gone
-                    // at shutdown — the save looked like it worked and wasn't.
-                    const std::string relPath = prefab.path;
-                    // The save hook publishes an UPDATE for anything written
-                    // through saveAsset, and this file is a create — held across
-                    // the write so the create below is the only announcement, and
-                    // so the update's lock claim never lands on a path the host
-                    // may be about to rename out from under us.
-                    const CollabController::CreatingAsset creating(ctx.collab, relPath);
-                    if (ctx.contentManager->saveAsset(prefab))
-                    {
-                        // Registering the in-memory copy keeps the UUID that was
-                        // just written to disk (registerRuntimeAsset only mints one
-                        // when there is none), so the path→UUID entry it adds and
-                        // the file agree — a later drop of this prefab resolves it
-                        // without re-reading it. The refresh flag is what makes the
-                        // new file appear in the Content Browser.
-                        const std::string fullPath = dirAbs + "/" + name + ".hasset";
-                        ctx.contentManager->registerPrefab(std::move(prefab));
-                        ctx.contentRefreshPending = true;
-                        // Announce it as a CREATE, which is what it is. Without
-                        // this the file reached the others only through the
-                        // ordinary whole-file save path — as an UPDATE to an
-                        // asset they had never heard of, and with no name
-                        // arbitration at all. The uniquifier above only ever
-                        // consults this machine's disk, so two people saving an
-                        // entity called "Arm" at the same moment both pick
-                        // Prefabs/Arm.hasset, and whichever update lands second
-                        // silently replaces the first person's prefab. The
-                        // create path is where the host settles a taken name and
-                        // tells the loser their asset was renamed; the content
-                        // browser has gone through it since creates began
-                        // replicating, and this menu item never did.
-                        if (ctx.collab) ctx.collab->publishAssetCreate(relPath, fullPath);
-                        HE_LOG_INFO(Editor, "%s", ("Editor: saved prefab " + relPath).c_str());
-                    }
-                    else
-                        HE_LOG_ERROR(Editor, "%s", ("Editor: failed to save prefab " + relPath).c_str());
-                }
+                    savePrefabOf(ctx, node.entity, node.name);
                 const bool doDelete = !isRoot && EditorWidgets::dangerMenuItem("Delete");
                 if (!isRoot) EditorWidgets::helpForKey("outliner.delete");
                 if (doDelete)
@@ -1122,5 +1131,64 @@ void render(AppContext& ctx)
 	(void)ctx;
 #endif // HE_IMGUI_ENABLED
 }
+
+#ifdef HE_IMGUI_ENABLED
+bool drawCreateEntityMenu(AppContext& ctx)
+{
+    Preset preset{};
+    // The rows draw either way (a menu that vanishes with the world is a menu
+    // that reads as broken); only the creation needs a world.
+    if (!drawCreateMenu(preset) || !ctx.world) return false;
+    if (ctx.undoSys) ctx.undoSys->snapshotNow("Create Entity");
+    ctx.selection.set(createPreset(*ctx.world, preset));
+    ctx.world->markHierarchyDirty();
+    return true;
+}
+
+// One row per Preset, in the order drawCreateMenu draws them; the native
+// macOS bar builds its Entity ▸ Create submenu from this table.
+static const struct { EntityPresetRow row; Preset preset; } kPresetTable[] = {
+    { { "Empty",          ""       }, Preset::Empty             },
+    { { "Cube",           ""       }, Preset::Cube              },
+    { { "Third Person",   "Camera" }, Preset::CameraThirdPerson },
+    { { "First Person",   "Camera" }, Preset::CameraFirstPerson },
+    { { "Plain (no rig)", "Camera" }, Preset::CameraPlain       },
+    { { "Directional",    "Light"  }, Preset::LightDirectional  },
+    { { "Point",          "Light"  }, Preset::LightPoint        },
+    { { "Spot",           "Light"  }, Preset::LightSpot         },
+    { { "Rope",           ""       }, Preset::Rope              },
+    { { "Trail",          ""       }, Preset::Trail             },
+};
+
+const EntityPresetRow* entityPresetTable(int& outCount)
+{
+    static const EntityPresetRow* rows = [] {
+        static EntityPresetRow r[std::size(kPresetTable)];
+        for (std::size_t i = 0; i < std::size(kPresetTable); ++i) r[i] = kPresetTable[i].row;
+        return r;
+    }();
+    outCount = static_cast<int>(std::size(kPresetTable));
+    return rows;
+}
+
+void createEntityPreset(AppContext& ctx, int index)
+{
+    if (!ctx.world || index < 0 || index >= static_cast<int>(std::size(kPresetTable))) return;
+    if (ctx.undoSys) ctx.undoSys->snapshotNow("Create Entity");
+    ctx.selection.set(createPreset(*ctx.world, kPresetTable[index].preset));
+    ctx.world->markHierarchyDirty();
+}
+
+void saveSelectionAsPrefab(AppContext& ctx)
+{
+    if (!ctx.world) return;
+    auto& registry = ctx.world->registry();
+    const Entity primary = ctx.selection.primary();
+    if (primary == entt::null || !registry.valid(primary) || primary == ctx.world->rootEntity())
+        return;
+    const auto* name = registry.try_get<NameComponent>(primary);
+    savePrefabOf(ctx, primary, name ? name->name : std::string{});
+}
+#endif // HE_IMGUI_ENABLED
 
 } // namespace OutlinerPanel

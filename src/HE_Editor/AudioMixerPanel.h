@@ -2,7 +2,7 @@
 
 struct AppContext;
 
-// ── Audio Mixer (View ▸ Audio Mixer) ─────────────────────────────────────────
+// ── Audio Mixer (Window ▸ Audio Mixer) ─────────────────────────────────────────
 // One strip per bus, plus the master: a fader, mute, solo, and how many voices
 // are on it right now. The bus LIST and every fader position belong to the
 // project (ProjectData::audioBuses, saved into the .heproj and carried into

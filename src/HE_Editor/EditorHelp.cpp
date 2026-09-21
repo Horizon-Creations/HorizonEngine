@@ -1553,6 +1553,17 @@ namespace
 	  "Opens a .heproj from disk. Everything in the editor belongs to a project: "
 	  "the content tree, the settings, the layout.",
 	  "Ctrl+O", "editor#project-hub" },
+	{ "File/Recent Projects", "",
+	  "The projects opened on this machine, newest first — the Project Hub's "
+	  "list, without going back to the hub. Opening one closes the current "
+	  "project, after asking about anything unsaved. A project whose file has "
+	  "moved is listed greyed out.",
+	  "", "editor#project-hub" },
+	{ "File/Import Asset...", "",
+	  "Brings a file from outside into the project — meshes, textures, audio, "
+	  "fonts — converting it on the way in. The same import as Assets ▸ Import "
+	  "Asset, offered here too because File is where a newcomer looks for it.",
+	  "", "editor#content-browser" },
 	{ "File/Close Project", "",
 	  "Returns to the Project Hub. Tabs, scene and undo history end with the "
 	  "project — the next one starts clean.",
@@ -1604,51 +1615,68 @@ namespace
 	  "system entry is the reliable one — the key is usually claimed before the "
 	  "editor sees it.",
 	  "F11", "editor#layout" },
-	{ "View/Reset Layout", "",
+	{ "Window/Reset Layout", "",
 	  "Puts every panel back where it started. The escape hatch for a layout "
 	  "that ended up with a panel dragged somewhere it cannot be reached.",
 	  "", "editor#layout" },
-	{ "View/Performance Profiler", "",
+	{ "Window/Performance Profiler", "",
 	  "Where the frame time goes: a live CPU and GPU readout, and captures that "
 	  "break one frame down pass by pass.",
 	  "", "editor#profiler" },
-	{ "View/Collaboration", "",
+	{ "Window/Collaboration", "",
 	  "Host or join a live editing session — several people in one scene, with "
 	  "locks so two of you cannot edit the same thing.",
 	  "", "collaboration#overview" },
-	{ "View/Source Control", "",
+	{ "Window/Source Control", "",
 	  "The repository: what changed, what to commit, what the others have "
 	  "pushed. Large assets included.",
 	  "", "editor#layout" },
-	{ "View/Console", "",
+	{ "Window/Console", "",
 	  "Everything the engine logged this session. The first place to look when "
 	  "something did not happen.",
 	  "Ctrl+`", "advanced#diagnostics" },
-	{ "View/Audio Mixer", "",
+	{ "Window/Audio Mixer", "",
 	  "The project's audio buses as fader strips: master, music, sfx and "
 	  "whatever else you add, with mute and solo for listening.",
 	  "", "systems#audio" },
-	{ "View/Undo History", "",
+	{ "Window/Undo History", "",
 	  "Every step Undo can still take back, as a list with the current state "
 	  "marked. Click a row to jump straight there — several steps in one go, "
 	  "forwards or backwards.",
 	  "", "editor#menus" },
-	{ "View/Watch", "",
+	{ "Window/Watch", "",
 	  "What a HorizonCode graph stopped at a breakpoint is holding: the event's "
 	  "argument, the function it is inside of with its inputs and locals, the "
 	  "object's variables, and what the nodes before the stop produced. Opens "
 	  "by itself when a run stops; while nothing is stopped it shows the Game "
 	  "Instance's variables live.",
 	  "", "horizoncode#debugging" },
-	{ "View/Ground Grid", "",
-	  "The reference grid on the ground plane. Hidden while the scene plays "
-	  "either way.",
+	{ "View/View Mode", "",
+	  "How the Scene window draws the whole scene: Lit, Unlit, Wireframe, or "
+	  "one channel of the G-buffer. The same picker as the toolbar's View Mode "
+	  "cell — a menu row for it, with the keys printed.",
 	  "", "editor#viewport" },
+	{ "View/Show", "",
+	  "The overlays the editor draws over the scene — grid, icons, colliders, "
+	  "navmesh, guides, stats — one switch each, and Show All / Hide All. The "
+	  "same list as the toolbar's Show cell.",
+	  "", "editor#viewport" },
+	{ "View/Camera", "",
+	  "Where the Scene window looks from: the axis views (Top, Front, Right and "
+	  "their opposites), Perspective, the Orthographic switch and the camera "
+	  "bookmarks. The same picker as the toolbar's View cell and the keypad.",
+	  "", "editor#viewport" },
+	{ "Window/Landscape Tools", "",
+	  "Switches the Scene toolbar to Landscape mode and brings the landscape "
+	  "panel forward: it is the Quick Settings panel, which turns into the "
+	  "sculpt and paint tools while the mode is on. Pick it again to return "
+	  "to View mode.",
+	  "", "editor#landscape-mode" },
 	// ── Secondary scene viewports ────────────────────────────────────────────
 	// Three more panes onto the same level, each with a camera of its own.
 	// The picture is the preview pass (base colour, sun or headlight, grid),
 	// not the Scene window's renderer — hence the sentence about shadows.
-	{ "View/Scene 2", "",
+	{ "Window/Scene 2", "",
 	  "A second window onto the same level, with its own camera — it opens as a "
 	  "Top view, so the floor plan can be lined up while the Scene window stays "
 	  "where it is. Navigates like the Scene window (orbit, pan, fly, F, the "
@@ -1656,11 +1684,11 @@ namespace
 	  "colour and a sun, no shadows or post, and nothing can be picked or moved "
 	  "in it. Dock it beside the Scene window and it comes back with the layout.",
 	  "", "editor#viewport" },
-	{ "View/Scene 3", "",
+	{ "Window/Scene 3", "",
 	  "A third window onto the level, opening as a Front view. Otherwise the "
 	  "same as Scene 2.",
 	  "", "editor#viewport" },
-	{ "View/Scene 4", "",
+	{ "Window/Scene 4", "",
 	  "A fourth window onto the level, opening as a Right view. Otherwise the "
 	  "same as Scene 2.",
 	  "", "editor#viewport" },
@@ -1677,14 +1705,104 @@ namespace
 	  "this pane's own camera: Perspective, Top, Bottom, Front, Back, Left, "
 	  "Right, the Orthographic switch and the bookmarks.",
 	  "", "editor#viewport" },
-	{ "View/Level Script", "",
+	{ "Window/Level Script", "",
 	  "The HorizonCode graph belonging to THIS scene — where its own events and "
 	  "logic live. Opens as a tab.",
 	  "", "horizoncode#hosts" },
-	{ "View/Game Instance", "",
+	{ "Window/Game Instance", "",
 	  "The graph that outlives every scene: the app-wide state a level change "
 	  "must not reset.",
 	  "", "horizoncode#hosts" },
+	// ── The Entity menu ──────────────────────────────────────────────────────
+	// The viewport's and the Outliner's right-click verbs with a fixed address.
+	// Same actions, same sentences in spirit as "Viewport Menu/…" — written
+	// again because a menu row and a context row are read in different places.
+	{ "Entity/Create", "",
+	  "A new entity at the top of the scene: empty, a cube, a camera with or "
+	  "without a rig, a light, a rope, a trail. The same list the Outliner's "
+	  "right-click menu offers; the new entity becomes the selection.",
+	  "", "editor#outliner" },
+	{ "Entity/Focus Selected", "",
+	  "Moves the Scene camera so the selection fills the view. Also F while "
+	  "the pointer is over the viewport.",
+	  "F", "editor#viewport" },
+	{ "Entity/Snap to Ground", "",
+	  "Drops every selected entity onto whatever scene surface lies beneath it "
+	  "— its own subtree excluded — so a placed object stops floating.",
+	  "End", "editor#viewport" },
+	{ "Entity/Hide Selected", "",
+	  "Hides the selection in the editor view. An editor-only switch — the "
+	  "packaged game does not read it; Show All brings everything back.",
+	  "H", "editor#viewport" },
+	{ "Entity/Isolate Selected", "",
+	  "Hides everything except the selection, for working on one thing in a "
+	  "crowded scene. Show All undoes it.",
+	  "Shift+H", "editor#viewport" },
+	{ "Entity/Show All", "",
+	  "Reveals every entity hidden with Hide or Isolate.",
+	  "Alt+H", "editor#viewport" },
+	{ "Entity/Group", "",
+	  "Parents the selection under a new empty entity, keeping every world "
+	  "pose where it is. Built-ins like the sun cannot be grouped.",
+	  "Ctrl+G", "editor#outliner" },
+	{ "Entity/Ungroup", "",
+	  "Dissolves the selected group: its children move up to its parent, "
+	  "keeping their world pose, and the empty group is removed.",
+	  "Shift+G", "editor#outliner" },
+	{ "Entity/Lock", "",
+	  "Locks the selection against being picked or moved in the viewport. The "
+	  "Outliner still selects it, and the padlock on its row shows the state.",
+	  "", "editor#outliner" },
+	{ "Entity/Unlock", "",
+	  "Lets a locked selection be picked and moved again.",
+	  "", "editor#outliner" },
+	{ "Entity/Save as Prefab", "",
+	  "Writes the selected entity and everything under it to Content/Prefabs "
+	  "as a reusable asset. The entity stays in the scene; dropping the prefab "
+	  "from the Content Browser makes another copy.",
+	  "", "editor#outliner" },
+
+	// ── The Play menu ────────────────────────────────────────────────────────
+	// The toolbar's transport as rows: the same verbs, the same gates
+	// (ViewportToolbar.cpp), with their keys printed. The labels follow the
+	// state, so every spelling has its entry.
+	{ "Play/Play", "",
+	  "Starts the scene: physics, scripts, animation and the game camera, on a "
+	  "throwaway copy of the world. Stop puts the editor's copy back — nothing "
+	  "changed during play survives it.",
+	  "Ctrl+P", "editor#play-mode" },
+	{ "Play/Stop", "",
+	  "Ends the play session and restores the scene as it was before Play. "
+	  "Anything moved, spawned or edited while playing is discarded.",
+	  "Ctrl+P", "editor#play-mode" },
+	{ "Play/Restart Preview", "",
+	  "An application has no play mode: its interface is always live. This "
+	  "restarts that preview from the Game Instance's OnInit.",
+	  "Ctrl+P", "editor#play-mode" },
+	{ "Play/Pause", "",
+	  "Freezes the world tick — physics, scripts, animation, particles — while "
+	  "the viewport keeps drawing. Does not touch the game's own time scale.",
+	  "Ctrl+Shift+P", "editor#play-mode" },
+	{ "Play/Resume", "",
+	  "Lets the paused world tick again.",
+	  "Ctrl+Shift+P", "editor#play-mode" },
+	{ "Play/Continue", "",
+	  "A HorizonCode run is stopped at a breakpoint: runs it on, then lets the "
+	  "world tick. The Watch window shows what it was holding.",
+	  "Ctrl+Shift+P", "horizoncode#debugging" },
+	{ "Play/Step Frame", "",
+	  "Advances the paused world by exactly one frame, then pauses again — for "
+	  "watching a collision or an animation one tick at a time.",
+	  "Ctrl+Alt+P", "editor#play-mode" },
+	{ "Play/Step Node", "",
+	  "With a HorizonCode run stopped at a breakpoint: runs the stopped node "
+	  "and stops at the next one.",
+	  "", "horizoncode#debugging" },
+	{ "Assets/Create Asset...", "",
+	  "Opens the Content Browser's create menu at the folder it is showing — "
+	  "scenes, widgets, gameplay classes, materials, data types, a folder. The "
+	  "same menu a right-click on the browser's empty space opens.",
+	  "", "editor#content-browser" },
 	{ "Assets/Import Asset...", "",
 	  "Brings a file from outside into the project — meshes (glTF/GLB, FBX, OBJ, "
 	  "COLLADA), textures, audio, fonts — converting it to the engine's own format "
@@ -6497,12 +6615,12 @@ namespace
 		{ "editor#details",            "Details",             "" },
 		{ "editor#content-browser",    "Content Browser",     "" },
 		{ "editor#engine-content",     "Content Browser",     "" },
-		{ "editor#profiler",           "Performance Profiler","View » Performance Profiler" },
-		{ "editor#environment-window", "Environment",         "View » Environment" },
+		{ "editor#profiler",           "Performance Profiler","Window » Performance Profiler" },
+		{ "editor#environment-window", "Environment",         "Window » Environment" },
 		{ "editor#layout",             "Scene",               "" },
-		{ "advanced#diagnostics",      "Console",             "View » Console" },
-		{ "collaboration#overview",    "Collaboration",       "View » Collaboration" },
-		{ "collaboration#starting",    "Collaboration",       "View » Collaboration" },
+		{ "advanced#diagnostics",      "Console",             "Window » Console" },
+		{ "collaboration#overview",    "Collaboration",       "Window » Collaboration" },
+		{ "collaboration#starting",    "Collaboration",       "Window » Collaboration" },
 		{ "scenes#terrain",            "Quick Settings",      "" },
 		{ "scenes#components",         "Details",             "" },
 		{ "systems#physics",           "Details",             "" },
@@ -6527,9 +6645,12 @@ namespace
 		// site but the wrapper.
 		{ "File/",   "editor-interface", "Editor Interface", "File menu" },
 		{ "Edit/",   "editor-interface", "Editor Interface", "Edit menu" },
-		{ "View/",   "editor-interface", "Editor Interface", "View menu" },
+		{ "Entity/", "editor-interface", "Editor Interface", "Entity menu" },
 		{ "Assets/", "editor-interface", "Editor Interface", "Assets menu" },
+		{ "Play/",   "editor-interface", "Editor Interface", "Play menu" },
 		{ "Build/",  "editor-interface", "Editor Interface", "Build menu" },
+		{ "View/",   "editor-interface", "Editor Interface", "View menu" },
+		{ "Window/", "editor-interface", "Editor Interface", "Window menu" },
 		{ "Help/",   "editor-interface", "Editor Interface", "Help menu" },
 		// The panels whose controls are looked up by label within the panel.
 		{ "World Outliner/",   "editor-interface", "Editor Interface", "World Outliner" },

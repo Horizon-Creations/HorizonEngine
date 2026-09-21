@@ -4,7 +4,7 @@ struct AppContext;
 struct SDL_Window;
 class  DebugDrawBuffer;
 class  EditorCamera;
-namespace HE { struct AABB; }
+namespace HE { struct AABB; enum class ViewMode : int; }   // Renderer/IRenderer.h
 
 // ── Scene viewport ───────────────────────────────────────────────────────────
 // The centre dock window: the renderer's offscreen target as an ImGui image,
@@ -52,6 +52,39 @@ namespace ViewportPanel
 	void presetKeys(EditorCamera& cam);
 	// Ctrl+<digit> stores the camera's pose as a bookmark, <digit> recalls it.
 	void bookmarkKeys(EditorCamera& cam);
+
+	// ── The right-click menu's verbs, as functions ───────────────────────────
+	// The same actions the viewport's context menu and its hotkeys run, over
+	// the Scene window's last extract — exposed so the Entity menu in the main
+	// bar (and the native macOS one) can be a second door onto them without a
+	// second copy of what "Isolate" means. Every one of them re-checks its own
+	// preconditions and does nothing while the scene plays; the `can*` pair
+	// exist so a menu row can grey out instead of quietly doing nothing.
+	struct EntityActionState
+	{
+		bool canFocus     = false;   // something selected and measurable
+		bool canEdit      = false;   // not playing, a selection, a world
+		bool anyHidden    = false;   // Show All has something to show
+		bool groupable    = false;   // at least one non-built-in selected
+		bool canUngroup   = false;
+		bool primaryLocked = false;  // the verb the Lock row shows
+	};
+	EntityActionState entityActionState(AppContext& ctx);
+	void focusSelected(AppContext& ctx);
+	void snapSelectionToGround(AppContext& ctx);
+	void hideSelected(AppContext& ctx);
+	void isolateSelected(AppContext& ctx);
+	void showAll(AppContext& ctx);
+	void groupSelected(AppContext& ctx);
+	void ungroupSelected(AppContext& ctx);
+	// Lock when the primary is unlocked, unlock when it is — the rest of the
+	// selection follows the primary, exactly as the two menus decide it.
+	void toggleLockSelected(AppContext& ctx);
+
+	// How the scene is drawn (Lit / Unlit / Wireframe / a G-buffer view): the
+	// toolbar's view-mode state, readable and settable from the View menu.
+	HE::ViewMode viewMode();
+	void         setViewMode(HE::ViewMode mode);
 #endif
 
 	// ── Ground grid ──────────────────────────────────────────────────────────
@@ -111,6 +144,7 @@ namespace ViewportPanel
 	// The flags as a table: config key + member, so the editor config
 	// round-trip is a loop rather than one hand-written pair per flag that a
 	// new flag can forget. The ground grid keeps its historical key.
-	struct ShowFlagField { const char* configKey; bool ShowFlags::* member; };
+	// `label` is the row's text in the toolbar's Show popup and the View menu.
+	struct ShowFlagField { const char* configKey; bool ShowFlags::* member; const char* label; };
 	const ShowFlagField* showFlagFields(int& outCount);
 }

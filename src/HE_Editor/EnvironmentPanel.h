@@ -2,7 +2,7 @@
 
 struct AppContext;
 
-// ── Environment window (View ▸ Environment) ──────────────────────────────────
+// ── Environment window (Window ▸ Environment) ──────────────────────────────────
 // Adds / removes the scene's Sky and Weather entities. Their *settings* are
 // edited in the Details panel; this window only manages their presence.
 // Split out of EditorUI.cpp.
