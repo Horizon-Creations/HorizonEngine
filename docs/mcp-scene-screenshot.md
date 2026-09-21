@@ -1,7 +1,8 @@
 # MCP: Szenen-Screenshots aus einer Client-Kamera (Thema 74)
 
-Stand 21.09.2026, Schritt 1 (Grundgerüst), Schritt 2 (Kamera je Client) und
-Schritt 3 (Kameras im Viewport) auf `claude/mcp-scene-screenshot-camera`. Was gebaut ist, wo die Nähte für die
+Stand 22.09.2026, Schritt 1 (Grundgerüst), Schritt 2 (Kamera je Client),
+Schritt 3 (Kameras im Viewport) und Schritt 4 (Vollbau + Test mit zwei echten
+Clients, §6) auf `claude/mcp-scene-screenshot-camera`. Was gebaut ist, wo die Nähte für die
 Folgeschritte liegen, und was der Renderer dabei verspricht.
 
 ## 1. Das Werkzeug: `scene_screenshot`
@@ -241,7 +242,94 @@ Verifikation:
   dem Ordner des Nutzers: nach dem Lauf wegräumen. Die ImGui-Tags sind headless nicht im Bild (der Dump läuft
   nicht durch das Viewport-Panel); real-HW-Sicht auf die Tags offen.
 
-## 6. Nähte für die Folgeschritte
+## 6. Zwei echte Clients gegen einen laufenden Editor (Schritt 4)
+
+`scripts/he_mcp_multiclient.py OUTDIR [--live] [--probe]` ist der Beweis
+für das Fertig-Kriterium des Themas, so nah am Ernstfall wie es ohne Menschen
+geht: der deployte `HorizonEditor` wird mit `HE_MCP=1`, festem Port,
+`HE_DUMP_RHI=Metal` und `HE_SKY_TIME=30` gestartet, unter einem **privaten
+HOME** in OUTDIR (eigene `config.json`, eigene Endpunktdatei, eigener
+`mcp-screenshots/`-Ordner; Config und Endpunkt des Menschen bleiben unberührt)
+und mit einer Kopie des Tutorial-Projekts (`~/Documents/HorizonEngine/
+HorizonTutorial`: Cube bei (0,1,0), Bodenplatte, Punktlicht) als
+`LastProjectPath`. Die Clients sind `he_mcp.Bridge` aus dem echten Shim,
+also derselbe Handshake und dieselbe Rahmung wie bei Claude.
+
+Ablauf und Orakel (Stand 22.09.2026, alle grün):
+
+1. **Sonde:** auth + `tools/list` in < 5 s, sonst Abbruch mit Ansage. Die
+   Hauptschleife pumpt hier mit ~8–20 fps, `tools/list` 0,05 s.
+2. **A** (Client 1) setzt `position (-2,1.5,3) look_at (0,1,0)`, **B**
+   (Client 2) `position (3,1.5,-2) look_at (0,1,0)`; zwei verschiedene Ids,
+   nie 0, beide `stored`; die Bilder unterscheiden sich in 72 % der Pixel.
+3. **B übernimmt A's Zahlen** → B's Bild = A's Bild, **0,00 %** Pixel
+   verschieden (das Bild folgt der Kamera, nicht der Verbindung); A's
+   gespeicherte Kamera unverändert.
+4. **A dreht** `turn [180,0]` (`render:false`), B's `render:false`-Antwort
+   trägt dieselbe Kamera wie zuvor; A's nächstes Bild 73 % anders. Einmal
+   `inline`: Bildblock nach dem Textblock, `image/png`, 125 kB bei 480×270.
+5. **Live-Viewport** (`--live`): beide Frustums gleichzeitig im Bild (magenta
+   #1, cyan #2, beide bei (-2,1.5,3), weil B dort steht und A um 180°
+   gedreht ist: cyan öffnet zum Cube, magenta davon weg). Kontrolle, dass die
+   Aufnahme live ist: Cube per `entity_set_transform` verschoben → 1,9 %
+   Pixel anders.
+6. **A legt auf:** B's Kamera überlebt; ein Neuling C (Id 3, nicht A's 1)
+   bekommt ohne Kamera-Argument `stored:false, fromViewport:true` und die
+   Viewport-Kamera (6, 4.5, 6); die Editor-Tabelle meldet 1 Kamera; die
+   Live-Aufnahme danach zeigt nur noch cyan (0,13 % Pixel anders, nur A's
+   Frustum weg).
+
+**Live-Viewport-Witness** (`HE_DUMP_LIVE=<bmp>` + `HE_DUMP_LIVE_TRIGGER=<datei>`,
+`EditorApplication::captureLiveFrameIfAsked`, am Bridge-Pump): der
+Headless-Dump läuft vor der Hauptschleife, wenn noch kein Client verbunden
+sein kann; dieser Witness nimmt den **laufenden** Viewport auf, sobald die
+Trigger-Datei auftaucht, und löscht sie erst nach dem Schreiben („Trigger
+weg" = „Bild fertig"). Ein `stat()` pro Frame, nur wenn beide Variablen
+gesetzt sind. Log: `live frame captured (1718x884, 2 MCP camera(s), gizmo
+lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
+
+**Zwei Befunde, die der Lauf erst ans Licht gebracht hat:**
+
+* **Metal: tiefengetestete Debug-Linien waren vor Geometrie unsichtbar.** Der
+  Szenen-Pass rastert mit der unkorrigierten GL-Projektion (Tiefe = GL-ndc-z,
+  so steht es am Deferred-Resolve und an `ssaoDepthPosFragment`),
+  `EncodeDebugLines` aber mit `kMetalClipFix · viewProj` (z′ = 0,5·z + 0,5):
+  jede Linie lag im Tiefenpuffer hinter jeder Geometrie, auch wenn sie
+  räumlich davor stand. Sichtbar waren Linien nur gegen den Himmel, weshalb
+  der Witness aus Schritt 3 (leere Welt) es nicht sehen konnte und der Grid
+  in Projekten mit Bodenplatte „unter dem Boden verschwand". Fix: der
+  Linien-Pass nimmt dieselbe Matrix wie die Szene (`MetalRenderer.mm`,
+  `EncodeDebugLines`). Folge: Grid, Collider, Auswahl, Collab-Ringe und die
+  MCP-Frustums sind auf Metal jetzt vor Meshes zu sehen; der Grid auf einer
+  Bodenplatte bei y = 0 zeigt den erwartbaren Z-Fight-Stippel.
+* **`HE_DUMP_RHI` tauscht nur den Renderer, nicht `ctx.backend`.** Eine Config
+  mit `RHI: 0` (OpenGL) plus `HE_DUMP_RHI=Metal` stürzt im ersten UI-Frame in
+  `ImGui_ImplOpenGL3_NewFrame` → `glGetIntegerv` (SIGSEGV), weil
+  `EditorUI::render` seinen ImGui-Backend-Zweig aus der Config wählt. Der
+  Dump-Pfad beendet vor der UI und merkt nichts. Nicht gefixt (kein Teil des
+  Themas), der Treiber schreibt `RHI: 4` in seine private Config.
+
+**Einschränkungen, die bleiben:**
+
+* `McpBridge::kMaxClients = 4`: der fünfte Client wird abgewiesen.
+* Jeder Screenshot ist ein voller Frame plus GPU-Readback, serialisiert auf
+  dem Hauptthread im Bridge-Pump: 0,23–0,30 s bei 480×270 (Debug-Build);
+  viele Clients teilen sich diese Zeit, der Viewport ruckelt währenddessen.
+* Inline-PNG ≤ 2,5 MiB (`kInlineMaxPngBytes`), Shim-Frame ≤ 4 MiB; darüber
+  `file`.
+* Nur Metal rendert Stills (`RenderSceneImage`); die Gizmos im Viewport gibt
+  es auf jedem Backend, das Debug-Linien zeichnet.
+* Die Frustums sind per Bauart in keinem Tool-Bild (§5); die ImGui-Tags
+  (`MCP #n`) sind auch im Live-Witness nicht drin (der Capture liest die
+  Viewport-Textur, nicht das ImGui-Overlay); Sicht auf die Tags bleibt
+  Real-HW mit Mensch.
+* Der Debug-Editor braucht auf macOS 27 ~6,5 min bis zur Endpunktdatei
+  (Metal-Pipeline-Archiv dort deaktiviert, alles wird kompiliert); unter
+  Last entsprechend mehr (`HE_SHOT_TIMEOUT`). Der Treiber verrät das Bild
+  des Gizmos nur, wenn beide Client-Kameras im Blick der Editor-Kamera
+  liegen (Start (6, 4.5, 6) → Ursprung).
+
+## 7. Nähte für die Folgeschritte
 
 * **Andere Backends:** OpenGL braucht denselben Umbau (Viewport-FBO
   beiseitelegen, Swapchain-Pass überspringen); D3D/Vulkan liefern bis dahin

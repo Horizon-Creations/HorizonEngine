@@ -4132,6 +4132,11 @@ void EditorApplication::OnRender(float dt)
 		// After the pump, because it is the pump that notices a client has gone —
 		// and a client going is what hands its locks back.
 		updateMcpLocks(nowMs);
+		// The live-frame witness, beside the pump it exists for: what the
+		// viewport drew last frame, with the client cameras the pump admitted
+		// before that (the gizmos trail the tool call by a frame, see
+		// docs/mcp-scene-screenshot.md §5).
+		captureLiveFrameIfAsked();
 		// Also after the pump, and for the mirror-image reason: the Tool Status
 		// check is finished by a handshake this pump is the one to see.
 		pollClaudeProbe();
@@ -4301,6 +4306,50 @@ namespace
 		}
 		return out.good();
 	}
+}
+
+// ─── Live-frame witness ───────────────────────────────────────────────────────
+// The headless dump above captures ONE frame before the main loop, when no
+// MCP client can have connected yet — so it can only ever show cameras it
+// seeded itself (HE_DUMP_MCPGIZMO). This one captures the RUNNING editor's
+// viewport whenever the trigger file appears: an outside driver connects its
+// clients over the real bridge, sets their cameras, touches the trigger and
+// reads the picture (scripts/he_mcp_multiclient.py --live). The trigger is
+// removed AFTER the write, so "trigger gone" means "picture complete" to the
+// driver. One stat() per frame, and only when both variables are set.
+void EditorApplication::captureLiveFrameIfAsked()
+{
+	static const char* s_out     = std::getenv("HE_DUMP_LIVE");
+	static const char* s_trigger = std::getenv("HE_DUMP_LIVE_TRIGGER");
+	if (!s_out || !*s_out || !s_trigger || !*s_trigger) return;
+	std::error_code ec;
+	if (!std::filesystem::exists(s_trigger, ec)) return;
+
+	IRenderer* r = renderer();
+	std::vector<uint8_t> rgba;
+	uint32_t w = 0, h = 0;
+	const bool ok = r && r->CaptureViewport(rgba, w, h) && w > 0 && h > 0 &&
+	                writeBMP(s_out, rgba, w, h);
+	std::filesystem::remove(s_trigger, ec);
+	if (ok)
+	{
+		// The numbers a driver needs to tell "no gizmo drawn" from "gizmo
+		// outside the picture": the table, the line range OnRender reserved for
+		// it in this frame's list, and the viewer the length was scaled to.
+		const glm::vec3 eye = m_editorCamera.position();
+		HE_LOG_INFO(Editor, "%s",
+			("EditorApplication: live frame captured (" + std::to_string(w) + "x" +
+			 std::to_string(h) + ", " + std::to_string(m_mcpCameras.all().size()) +
+			 " MCP camera(s), gizmo lines [" + std::to_string(m_mcpGizmoLineBegin) + "," +
+			 std::to_string(m_mcpGizmoLineEnd) + ") of " +
+			 std::to_string(m_lastDebugLines.size()) + ", collaborators " +
+			 (ViewportPanel::showFlags().collaborators ? "on" : "off") +
+			 ", editor camera " + std::to_string(eye.x) + "/" + std::to_string(eye.y) + "/" +
+			 std::to_string(eye.z) + ") → " + s_out).c_str());
+	}
+	else
+		HE_LOG_ERROR(Editor, "%s",
+			("EditorApplication: live frame capture failed → " + std::string(s_out)).c_str());
 }
 
 void EditorApplication::dumpFrameHeadless()
