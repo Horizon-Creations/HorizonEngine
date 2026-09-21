@@ -3049,18 +3049,35 @@ TEST_CASE("mcp material tools: set_node re-binds a FunctionCall and re-lays a la
 	// The orphaned constant is still a node (the delete is not this tool's).
 	CHECK(saved.findNode(constOf[1]) != nullptr);
 
-	// A pure rename keeps every wire where it is.
+	// A pure rename keeps every wire where it is — the panel leaves a wire on
+	// its pin through a rename too; nobody claimed index 1 by name, so Snow's
+	// wire is now Ice's.
 	const ToolResult rn = f.call("material_set_node", json{
 		{ "path", path }, { "id", lbId }, { "s", "Grass\nIce" } });
 	REQUIRE_FALSE(rn.isError);
-	// 'Ice' is a new name: Snow's wire cannot be matched and is dropped;
-	// Grass keeps its wire.
-	REQUIRE(rn.content.at("droppedLinks").size() == 1);
-	CHECK(rn.content.at("droppedLinks")[0].at("srcNode") == constOf[2]);
+	CHECK(rn.content.at("droppedLinks").empty());
 	CHECK_FALSE(rn.content.contains("movedLinks"));
+	REQUIRE(rn.content.at("renamedLayers").size() == 1);
+	CHECK(rn.content.at("renamedLayers")[0].at("srcNode") == constOf[2]);
+	CHECK(rn.content.at("renamedLayers")[0].at("pin") == 1);
+	CHECK(rn.content.at("renamedLayers")[0].at("from") == "Snow");
+	CHECK(rn.content.at("renamedLayers")[0].at("to") == "Ice");
 	REQUIRE(savedGraphOf(f.root, path, saved));
 	REQUIRE(savedLinkInto(saved, lbId, 0) != nullptr);
 	CHECK(savedLinkInto(saved, lbId, 0)->srcNode == constOf[0]);
+	REQUIRE(savedLinkInto(saved, lbId, 1) != nullptr);
+	CHECK(savedLinkInto(saved, lbId, 1)->srcNode == constOf[2]);
+
+	// Dropping the last layer: its pin is gone, so its wire is.
+	const ToolResult rd = f.call("material_set_node", json{
+		{ "path", path }, { "id", lbId }, { "s", "Grass" } });
+	REQUIRE_FALSE(rd.isError);
+	REQUIRE(rd.content.at("droppedLinks").size() == 1);
+	CHECK(rd.content.at("droppedLinks")[0].at("srcNode") == constOf[2]);
+	CHECK_FALSE(rd.content.contains("renamedLayers"));
+	REQUIRE(savedGraphOf(f.root, path, saved));
+	CHECK(savedLinkInto(saved, lbId, 1) == nullptr);
+	REQUIRE(savedLinkInto(saved, lbId, 0) != nullptr);
 }
 
 TEST_CASE("mcp material tools: set_node refuses the wrong payloads and every gate, without writing")

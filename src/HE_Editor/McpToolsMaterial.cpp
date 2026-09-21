@@ -1378,8 +1378,13 @@ GraphEdit openGraphForEdit(ContentManager& cm, const McpMaterialHooks& h, const 
 // Write the edited graph and report what the file now holds. `out` already
 // carries the tool's own fields; the shared ones are added here so the three
 // graph editors (and the ones after them) cannot spell them differently.
+// `touchAsset` runs on the loaded asset AFTER the dry run and BEFORE the
+// regenerate — for the one editor that has to write the parameter block
+// alongside the graph (material_set_node), placed there so a refused edit
+// leaves the asset in memory as untouched as the file.
 ToolResult commitGraph(ContentManager& cm, const McpMaterialHooks& h, const Mat& m,
-                       const HE::MaterialGraph& g, json out)
+                       const HE::MaterialGraph& g, json out,
+                       const std::function<void(MaterialAsset&)>& touchAsset = nullptr)
 {
 	// Dry run. The loader loads (a called function moves the pool), and nothing
 	// from the asset is held across it — Mat is a copy.
@@ -1402,6 +1407,7 @@ ToolResult commitGraph(ContentManager& cm, const McpMaterialHooks& h, const Mat&
 		MaterialAsset* a = cm.getMaterialMutable(m.id);
 		if (!a) return failWrite(m.rel);
 		a->nodeGraphJson = graphJson;
+		if (touchAsset) touchAsset(*a);
 	}
 	cm.regenerateMaterialFromGraph(m.id);
 	cm.syncMaterialInstancesOf(m.rel);
@@ -2609,7 +2615,8 @@ void addSetNode(McpToolRegistry& registry, ContentManager& content,
 		"index): remove it and add another. Re-binding a FunctionCall or changing "
 		"a LandscapeLayerBlend's layers changes the node's pins; wires into pins "
 		"that no longer exist are dropped and reported (layers are re-matched by "
-		"name first, so a removed layer takes only its own wire). Renaming a Param "
+		"name first, so a removed layer takes only its own wire, and a renamed "
+		"layer keeps it). Renaming a Param "
 		"node or StaticSwitch renames its slot: a loaded instance's override of "
 		"the old name does not carry over, exactly as in the Material Editor. "
 		"Setting a wired Param node's value also writes the parameter block, so "
@@ -2872,15 +2879,35 @@ void addSetNode(McpToolRegistry& registry, ContentManager& content,
 		// ── Pins that moved or went, because the string payload changed ──────
 		json dropped = json::array();
 		json moved   = json::array();
+		json renamed = json::array();
 		if (n->s != before.s && nt == HE::MatNodeType::LandscapeLayerBlend)
 		{
 			const std::vector<std::string> oldLayers = HE::matLandscapeLayerNames(before.s);
 			const std::vector<std::string> newLayers = HE::matLandscapeLayerNames(n->s);
+			// New indices an old layer took by NAME. An old layer whose name is
+			// gone keeps its index when nobody claimed it — that is a rename, and
+			// the panel leaves a wire on its pin through a rename (only the
+			// explicit × does link surgery). Grass/Rock/Snow → Grass/Snow: Snow
+			// claims 1, so Rock on 1 falls; Grass/Snow → Grass/Ice: nobody claims
+			// 1, so Snow's wire stays and is now Ice's.
+			std::set<int> claimed;
+			for (int k = 0; k < static_cast<int>(oldLayers.size()); ++k)
+				if (const int j = layerIndexAfter(oldLayers, newLayers, k); j >= 0) claimed.insert(j);
 			std::vector<HE::MatGraphLink> kept;
 			for (const HE::MatGraphLink& l : e.g.links)
 			{
 				if (l.dstNode != id) { kept.push_back(l); continue; }
-				const int to = layerIndexAfter(oldLayers, newLayers, l.dstPin);
+				int to = layerIndexAfter(oldLayers, newLayers, l.dstPin);
+				if (to < 0 && l.dstPin >= 0 &&
+				    l.dstPin < static_cast<int>(oldLayers.size()) &&
+				    l.dstPin < static_cast<int>(newLayers.size()) && !claimed.count(l.dstPin))
+				{
+					to = l.dstPin;
+					renamed.push_back(json{ { "srcNode", l.srcNode }, { "srcPin", l.srcPin },
+					                        { "dstNode", id }, { "pin", to },
+					                        { "from", oldLayers[static_cast<std::size_t>(l.dstPin)] },
+					                        { "to",   newLayers[static_cast<std::size_t>(to)] } });
+				}
 				if (to < 0) { dropped.push_back(linkJsonOf(l)); continue; }
 				HE::MatGraphLink m = l;
 				m.dstPin = to;
@@ -2920,20 +2947,22 @@ void addSetNode(McpToolRegistry& registry, ContentManager& content,
 		const std::string paramName = isParam ? effectiveParamName(*n) : std::string();
 		const std::string prevName  = isParam ? effectiveParamName(before) : std::string();
 		bool blockWritten = false;
+		std::function<void(MaterialAsset&)> writeBlock;
 		if (isParam && paramName == prevName && !p.empty())
 		{
 			const int slot = e.m.slotOf(paramName);
 			if (slot >= 0 && e.m.kindAt(slot) == kind)
 			{
-				MaterialAsset* a = cm->getMaterialMutable(e.m.id);
-				if (!a) return failWrite(e.m.rel);
 				const int comps = HE::matParamKindComponents(kind);
-				for (int k = 0; k < comps; ++k)
-				{
-					const std::size_t at = static_cast<std::size_t>(slot) * 4 +
-					                       static_cast<std::size_t>(k);
-					if (at < a->shaderParamData.size()) a->shaderParamData[at] = n->p[k];
-				}
+				float value[4] = { n->p[0], n->p[1], n->p[2], n->p[3] };
+				writeBlock = [slot, comps, value](MaterialAsset& a) {
+					for (int k = 0; k < comps; ++k)
+					{
+						const std::size_t at = static_cast<std::size_t>(slot) * 4 +
+						                       static_cast<std::size_t>(k);
+						if (at < a.shaderParamData.size()) a.shaderParamData[at] = value[k];
+					}
+				};
 				blockWritten = true;
 			}
 		}
@@ -2942,8 +2971,9 @@ void addSetNode(McpToolRegistry& registry, ContentManager& content,
 			{ "changed",      true },
 			{ "droppedLinks", std::move(dropped) },
 		};
-		if (!moved.empty()) out["movedLinks"] = std::move(moved);
-		ToolResult r = commitGraph(*cm, *h, e.m, e.g, std::move(out));
+		if (!moved.empty())   out["movedLinks"]    = std::move(moved);
+		if (!renamed.empty()) out["renamedLayers"] = std::move(renamed);
+		ToolResult r = commitGraph(*cm, *h, e.m, e.g, std::move(out), writeBlock);
 		if (r.isError) return r;
 
 		FnGraphs after{ *cm, {}, {} };
