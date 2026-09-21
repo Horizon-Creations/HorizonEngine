@@ -6278,8 +6278,17 @@ void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& vi
 			*ptr++ = l.color.r; *ptr++ = l.color.g; *ptr++ = l.color.b;
 		}
 
-		// Apply Metal's NDC fix (same as scene pass)
-		glm::mat4 vp = HE::kMetalClipFix * viewProj;
+		// The SAME clip convention as the scene pass, which is the UNfixed GL
+		// projection (u.mvp = viewProj * transform; the stored depth is the GL
+		// ndc z, see the deferred resolve and ssaoDepthPosFragment). With
+		// kMetalClipFix applied here and not there, a line's depth was
+		// 0.5·z + 0.5 against geometry at z — farther than everything, so a
+		// depth-tested line only ever showed against the sky: the ground grid
+		// vanished over the floor, the MCP camera frustums and the collaboration
+		// rings in front of a mesh were simply not there (Thema 74, Schritt 4).
+		// The price is the scene's own: geometry closer than ~2× the near plane
+		// clips, and so do lines.
+		glm::mat4 vp = viewProj;
 
 		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
