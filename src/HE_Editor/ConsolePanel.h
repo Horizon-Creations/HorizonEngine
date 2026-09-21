@@ -2,7 +2,7 @@
 
 struct AppContext;
 
-// ── The editor's console (View ▸ Console) ────────────────────────────────────
+// ── The editor's console (Window ▸ Console) ────────────────────────────────────
 // Until this panel existed the editor had exactly one way to say something went
 // wrong — the footer bell — and that channel filters hard on Error by design
 // (NotificationStore.h: "A log answers 'what happened'; this answers 'what still

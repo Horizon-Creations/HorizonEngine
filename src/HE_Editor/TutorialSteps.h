@@ -89,8 +89,8 @@ namespace HE::tut
 		ContentRootShown, // the Content Browser was switched to `arg`'s root
 		ImportOpened,     // Assets ▸ Import Asset was opened
 		PreferencesOpen,  // Edit ▸ Preferences was opened
-		ProfilerOpen,     // View ▸ Performance Profiler was opened
-		EnvironmentOpen,  // View ▸ Environment was opened
+		ProfilerOpen,     // Window ▸ Performance Profiler was opened
+		EnvironmentOpen,  // Window ▸ Environment was opened
 		ExportOpen,       // Build ▸ Export Project was opened
 	};
 

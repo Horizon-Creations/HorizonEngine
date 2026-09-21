@@ -105,7 +105,7 @@ struct PanelTopic
 {
 	const char* topic;    // "editor#outliner"
 	const char* window;   // the ImGui window name, for focus + spotlight
-	const char* menu;     // how a user opens it, for the label ("View ▸ Console")
+	const char* menu;     // how a user opens it, for the label ("Window ▸ Console")
 };
 
 // The panel for a topic. Falls back from "page#section" to the page's own entry,

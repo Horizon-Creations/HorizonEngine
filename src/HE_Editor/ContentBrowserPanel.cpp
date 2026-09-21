@@ -389,6 +389,22 @@ void clearQuietRefreshRequest() { s_quietContentRefresh = false; }
 int  browsedRootKind()          { return s_selectedRootKind; }
 std::string browsedFolderPath() { return s_browsedFolderPath; }
 
+// Consumed where the grid's own right-click opens the same popup (render()).
+static bool s_createMenuRequested = false;
+void requestCreateMenu() { s_createMenuRequested = true; }
+
+// Raised by the header's Import cell, consumed by EditorUI: the file dialog
+// and everything after it (target folder, importer, refresh) live with the
+// File/Assets ▸ Import Asset handler, and a second copy here would be the
+// drift the right-click Import already went through once (see below).
+static bool s_importRequested = false;
+bool takeImportRequest()
+{
+	const bool was = s_importRequested;
+	s_importRequested = false;
+	return was;
+}
+
 // (The starter template for a freshly created script moved to AssetStubWriter.cpp
 // with the rest of the stub writer — the panel is a caller now, not the owner.)
 
@@ -882,6 +898,57 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			                                                : "Content";
 
 			T::Bar bar;
+
+			// ── Right: what you can do here ──────────────────────────────────
+			// Add, Import, Refresh — the three things the panel is FOR, which
+			// until now lived only in the right-click menu on empty space and
+			// in the Assets menu of the main bar. A newcomer looking at a grid
+			// of assets could not see how one gets made. Declared before the
+			// breadcrumb so the crumbs know how much room is theirs.
+			//
+			// Add is greyed on the Engine root (read-only defaults, see the
+			// popup's own note) and Import outside Content (an import from the
+			// menu falls back to the content root; a button in an Engine
+			// folder that writes somewhere else would be a lie). A greyed cell
+			// says why in its tooltip; an enabled one gets the manual's entry.
+			{
+				const bool canCreate = !(s_selectedRootKind == 1 &&
+				                         !ContentManager::isEngineContentDevMode());
+				const bool canImport = s_selectedRootKind == 0;
+				bar.rightGroup(bar.iconGroupWidth(3));
+				if (bar.item("##cb_add", T::iconPlus, nullptr, false, canCreate,
+				             canCreate ? "Create Asset" : "Engine default assets are read-only here",
+				             canCreate ? "content.create" : nullptr))
+					s_createMenuRequested = true;
+				if (bar.item("##cb_import", T::iconArrowDown, nullptr, false, canImport,
+				             canImport ? "Import Asset" : "Imports land in the Content root",
+				             canImport ? "content.import" : nullptr))
+					s_importRequested = true;
+				if (bar.item("##cb_refresh", T::iconRefresh, nullptr, false, true,
+				             "Refresh Assets", "Assets/Refresh Assets"))
+					ctx.contentRefreshPending = true;
+				bar.endGroup();
+			}
+
+			// ── Left: where you are ──────────────────────────────────────────
+			// A chain deeper than the panel is wide loses its OLDEST folders,
+			// not its newest: the one you are in is the one that matters, and
+			// the root cell is always there to climb back out. The dropped
+			// stretch is shown as "…" so the chain does not pretend to be
+			// shorter than it is.
+			const T::Metrics& m = bar.metrics();
+			auto chainWidth = [&](size_t from) -> float
+			{
+				float w = T::cellWidth(m, rootLabel);
+				if (from > 0) w += T::kSegGap + T::cellWidth(m, "\xe2\x80\xa6");
+				for (size_t ci = from; ci < crumbs.size(); ++ci)
+					w += T::kSegGap + T::cellWidth(m, crumbs[ci]->name.c_str());
+				return w + T::kWellPad * 2.0f;
+			};
+			size_t firstCrumb = 0;
+			while (firstCrumb + 1 < crumbs.size() && chainWidth(firstCrumb) > bar.remaining())
+				++firstCrumb;
+
 			bar.group();
 			if (bar.item("##bc_root", T::iconFolder, rootLabel, crumbs.empty(), true,
 			             "Back to the top of this root"))
@@ -889,10 +956,11 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				s_gridFolder         = nullptr;
 				s_selectedTreeFolder = nullptr;
 			}
-			for (int ci = 0; ci < static_cast<int>(crumbs.size()); ++ci)
+			if (firstCrumb > 0) bar.readout(nullptr, "\xe2\x80\xa6", T::kFgDim);
+			for (size_t ci = firstCrumb; ci < crumbs.size(); ++ci)
 			{
 				const HE::Folder*  crumb  = crumbs[ci];
-				const bool         isLast = (ci == static_cast<int>(crumbs.size()) - 1);
+				const bool         isLast = (ci + 1 == crumbs.size());
 				const std::string  id     = "##bc_" + std::to_string(ci);
 				// The folder you are IN is armed rather than disabled: it is where
 				// you are, not something that failed to be available.
@@ -4306,6 +4374,18 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
 			!ImGui::IsAnyItemHovered())
 		{
+			ImGui::OpenPopup("##cb_create_ctx");
+		}
+		// The main bar's Assets ▸ Create Asset…: the same popup, placed at the
+		// grid's top-left corner rather than under a mouse that is up in the
+		// menu bar. Cleared either way, so a request made while the panel
+		// was not drawn does not fire a frame later at an unrelated moment.
+		if (s_createMenuRequested)
+		{
+			s_createMenuRequested = false;
+			const ImVec2 at = ImGui::GetWindowPos();
+			const ImVec2 pad = ImGui::GetStyle().WindowPadding;
+			ImGui::SetNextWindowPos(ImVec2(at.x + pad.x, at.y + pad.y));
 			ImGui::OpenPopup("##cb_create_ctx");
 		}
 

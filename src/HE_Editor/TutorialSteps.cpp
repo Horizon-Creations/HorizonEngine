@@ -397,9 +397,9 @@ constexpr Step kEnvironment[] = {
 	  "There is no hidden world settings blob: the sky is an entity called Sky "
 	  "carrying an Environment component, and weather is an entity called Weather. "
 	  "Delete them and the scene renders against a flat background.\n"
-	  "View - Environment adds or removes either one; the Sun and Moon are children "
+	  "Window - Environment adds or removes either one; the Sun and Moon are children "
 	  "of the Sky entity and travel with it.",
-	  "Open View - Environment.",
+	  "Open Window - Environment.",
 	  "Environment", Check::EnvironmentOpen, "" },
 
 	{ "sky-tuning",
@@ -585,12 +585,12 @@ constexpr Step kHorizonCode[] = {
 
 	{ "hc-level-script",
 	  "The Level Script",
-	  "View - Level Script opens the graph belonging to the scene you have open. It "
+	  "Window - Level Script opens the graph belonging to the scene you have open. It "
 	  "has the events the level itself cares about: Level Loaded, Level Unloaded "
 	  "and a per-frame update.\n"
 	  "It is stored inside the scene, so it travels with the level and is saved by "
 	  "the same Ctrl/Cmd+S.",
-	  "Open View - Level Script.",
+	  "Open Window - Level Script.",
 	  "", Check::TabOpen, "::LevelScript::" },
 
 	{ "hc-node",
@@ -617,13 +617,13 @@ constexpr Step kHorizonCode[] = {
 
 	{ "hc-game-instance",
 	  "The Game Instance",
-	  "View - Game Instance opens the one graph that outlives every scene: it is "
+	  "Window - Game Instance opens the one graph that outlives every scene: it is "
 	  "created before anything loads and runs until the game quits. Save data, "
 	  "settings, the current player, a scene-change request — anything that must "
 	  "survive a level change belongs here rather than in a level script.\n"
 	  "It is a project asset, not a scene one, so it is the same graph whichever "
 	  "level is open.",
-	  "Open View - Game Instance.",
+	  "Open Window - Game Instance.",
 	  "", Check::TabOpen, "::GameInstance::" },
 
 	{ "hc-compile",
@@ -718,12 +718,12 @@ constexpr Step kPerformance[] = {
 
 	{ "profiler",
 	  "The profiler",
-	  "View - Performance Profiler shows live CPU and GPU frame cost, per-pass GPU "
+	  "Window - Performance Profiler shows live CPU and GPU frame cost, per-pass GPU "
 	  "timings and render counters. F9 starts and stops a benchmark capture, which "
 	  "writes a JSON dump next to the log.\n"
 	  "Capture before and after a change — the per-pass breakdown tells you which "
 	  "pass actually paid for the effect you just turned on.",
-	  "Open View - Performance Profiler.",
+	  "Open Window - Performance Profiler.",
 	  "Performance Profiler", Check::ProfilerOpen, "" },
 };
 

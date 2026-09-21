@@ -26,7 +26,7 @@ struct SDL_Window;
 // box, projected with the pane's own matrix, so what the Scene window has
 // selected is findable from above.
 //
-// Off by default; View ▸ Scene 2 / 3 / 4 opens one, and a pane the user
+// Off by default; Window ▸ Scene 2 / 3 / 4 opens one, and a pane the user
 // docked comes back with the layout (EditorUI's panel prefs).
 namespace SecondaryViewportPanel
 {
@@ -35,7 +35,7 @@ namespace SecondaryViewportPanel
 	// "Scene 2" … "Scene 4": the window title, also the dock/config identity.
 	const char* title(int index);
 
-	// Open/closed, the flag View ▸ Scene N toggles and the window's X clears.
+	// Open/closed, the flag Window ▸ Scene N toggles and the window's X clears.
 	bool& open(int index);
 
 	// Draw every open pane. Call from the scene tab, after the Scene window —

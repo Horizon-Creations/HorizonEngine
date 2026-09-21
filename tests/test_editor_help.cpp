@@ -170,8 +170,30 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		// And one from every other panel scoped this round, so a scope renamed
 		// in the panel and not in the table fails here rather than in silence.
 		{ "File",            "Save All" },
-		{ "View",            "Console" },
+		{ "Window",          "Console" },
 		{ "Help",            "Documentation" },
+		// The 2026-09 regrouping (docs/editor-menu-restructure-2026-09-21.md):
+		// the Entity and Play menus carry rows whose label is a ternary
+		// ("Lock"/"Unlock", "Play"/"Stop"/"Restart Preview", "Pause"/"Resume"/
+		// "Continue") and submenu heads the scan sees only as BeginMenu — all
+		// looked up here, where the lookup is the real one.
+		{ "Entity",          "Create" },
+		{ "Entity",          "Lock" },
+		{ "Entity",          "Unlock" },
+		{ "Entity",          "Save as Prefab" },
+		{ "Play",            "Play" },
+		{ "Play",            "Stop" },
+		{ "Play",            "Restart Preview" },
+		{ "Play",            "Pause" },
+		{ "Play",            "Resume" },
+		{ "Play",            "Continue" },
+		{ "Play",            "Step Frame" },
+		{ "View",            "View Mode" },
+		{ "View",            "Show" },
+		{ "View",            "Camera" },
+		{ "File",            "Recent Projects" },
+		{ "Assets",          "Create Asset..." },
+		{ "Window",          "Landscape Tools" },
 		{ "World Outliner",  "Save as Prefab" },
 		// The context menu's lock verb is a ternary ("Lock" / "Unlock"), which
 		// the static scan cannot read as a literal.
@@ -192,7 +214,7 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Content Browser", "Find References" },
 		{ "New Asset",       "Input Action" },
 		{ "Console",         "Auto-scroll" },
-		{ "View",            "Audio Mixer" },
+		{ "Window",          "Audio Mixer" },
 		// The mixer's strips are data-labelled (a bus name over each fader), so
 		// every control in it asks by key; these are those keys under the
 		// scope the window pushes.
@@ -219,8 +241,8 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		// The secondary panes: three View rows, and the strip above each
 		// picture, whose view button is labelled by the camera's preset and
 		// therefore asks by key (checked below with the other keys).
-		{ "View",             "Scene 2" },
-		{ "View",             "Scene 4" },
+		{ "Window",           "Scene 2" },
+		{ "Window",           "Scene 4" },
 		{ "Secondary Viewport", "Grid" },
 		{ "Secondary Viewport", "Match Scene" },
 		// The Show popup's rows are literals the scan sees; the right-click

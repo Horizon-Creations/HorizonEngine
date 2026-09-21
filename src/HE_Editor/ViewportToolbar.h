@@ -122,6 +122,14 @@ void render(AppContext& ctx, State& st);
 // it inside an open popup or menu.
 void viewPopup(EditorCamera& cam);
 
+// The rows of the Show cell's popup (the overlay switches, grouped, with Show
+// All / Hide All) and of the View Mode cell's popup (Lit / Unlit / Wireframe,
+// the G-buffer views), over the given mode. Public for the same reason as
+// viewPopup: the main bar's View menu offers the same switches, and a second
+// list is how the two would drift. Call inside an open popup or menu.
+void showRows(AppContext& ctx);
+void viewModeRows(AppContext& ctx, HE::ViewMode& mode);
+
 } // namespace ViewportToolbar
 
 #endif // HE_IMGUI_ENABLED

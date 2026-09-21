@@ -23,10 +23,12 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <Diagnostics/Logger.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -909,7 +911,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	// Shown whenever the selected entity carries an EnvironmentComponent (the Sky
 	// entity). Edited here so it persists with the scene; pushed to the renderer each
 	// frame by EditorApplication::pushEnvironment. Add/remove the Sky entity itself
-	// from the View ▸ Environment window.
+	// from the Window ▸ Environment window.
 	if (auto* env = registry.try_get<EnvironmentComponent>(entity))
 	{
 		// A scene can end up with more than one Sky (an old bug, or a stray paste).
@@ -3320,16 +3322,183 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 // window, so the usual "was any item active in my child window" heuristic never
 // sees it — and a component added but not marked dirty is a component silently
 // lost when the tab closes.
+#ifdef HE_IMGUI_ENABLED
+namespace
+{
+// ── The Add Component catalogue ─────────────────────────────────────────────
+// One row per component the menu offers, in groups. The menu used to be a
+// single flat list of twenty-eight rows in no particular order — Nav Mesh
+// between Skeletal Mesh and Material, Save State between Joint and Script —
+// which is a list you read top to bottom every time, because there is no
+// second way to find anything in it. Now it is seven groups of two to ten,
+// and a search box above them for the people who already know the name.
+//
+// `has`/`add` are what the old templated lambda did, lifted into function
+// pointers so the rows can sit in a table the two menu shapes (grouped and
+// filtered) walk without either owning the list.
+struct AddRow
+{
+	const char* label;
+	bool (*has)(entt::registry&, Entity);
+	void (*add)(entt::registry&, Entity);
+	// Offered only where there is a skeleton to act on: a state machine,
+	// root motion, animation layers and IK all read a SkeletalMeshComponent's
+	// pose, and on an entity without one they would do nothing, silently.
+	// It used to be that these rows simply did not appear; now the group is
+	// there and greyed, and the tooltip says what it is waiting for.
+	bool needsSkeleton = false;
+};
+
+template <typename T>
+constexpr AddRow addRow(const char* label, bool needsSkeleton = false)
+{
+	return { label,
+	         [](entt::registry& r, Entity e) { return r.all_of<T>(e); },
+	         [](entt::registry& r, Entity e) { r.emplace<T>(e); },
+	         needsSkeleton };
+}
+
+struct AddGroup
+{
+	const char*   label;
+	const AddRow* rows;
+	int           count;
+};
+
+constexpr AddRow kTransformRows[] = {
+	addRow<TransformComponent>("Transform"),
+	addRow<Transform2DComponent>("Transform 2D"),
+};
+constexpr AddRow kRenderingRows[] = {
+	addRow<MeshComponent>("Mesh"),
+	addRow<SkeletalMeshComponent>("Skeletal Mesh"),
+	addRow<MaterialComponent>("Material"),
+	addRow<LightComponent>("Light"),
+	addRow<DecalComponent>("Decal"),
+	addRow<ParticleSystemComponent>("Particle System"),
+	addRow<FoliageComponent>("Foliage"),
+	addRow<LODComponent>("LOD"),
+	addRow<RopeComponent>("Rope"),
+	addRow<TrailComponent>("Trail"),
+};
+constexpr AddRow kPhysicsRows[] = {
+	addRow<RigidBodyComponent>("Rigid Body"),
+	addRow<ColliderComponent>("Collider"),
+	addRow<JointComponent>("Joint"),
+};
+// A state machine animates a SKELETON, so it is offered exactly where there
+// is one — not on an arbitrary entity, and not nowhere. It used to be left
+// out with a note that it is "set up through its owning asset workflow
+// instead"; that workflow does not add it, and a scene that did not already
+// carry one could never get one. Root motion, layers and IK follow the same
+// rule for the same reason; each defaults to "does nothing until asked".
+constexpr AddRow kAnimationRows[] = {
+	addRow<AnimatorStateMachineComponent>("Animator State Machine", true),
+	addRow<RootMotionComponent>("Root Motion", true),
+	addRow<AnimationLayerComponent>("Animation Layers", true),
+	addRow<IkComponent>("Inverse Kinematics", true),
+};
+constexpr AddRow kGameplayRows[] = {
+	addRow<CameraComponent>("Camera"),
+	// A rig aims a camera, so it brings one along. Adding it alone left people
+	// with a component that silently did nothing, on an entity that could not
+	// be a camera in the first place.
+	{ "Camera Rig",
+	  [](entt::registry& r, Entity e) { return r.all_of<CameraRigComponent>(e); },
+	  [](entt::registry& r, Entity e)
+	  {
+	      if (!r.all_of<CameraComponent>(e)) r.emplace<CameraComponent>(e);
+	      r.emplace_or_replace<CameraRigComponent>(e);
+	  } },
+	addRow<MovementComponent>("Movement"),
+	// Offered in EVERY project. It used to be gated on Lua/Python, because back
+	// then the slot only took a .lua/.py asset and a HorizonCode project drove
+	// entities through the player and level graphs instead. That stopped being
+	// true when the same slot learned to carry a HorizonCode CLASS (see the
+	// Script panel above): putting a class on an entity is now the ordinary way
+	// to give it logic, and the gate was hiding exactly the component you need.
+	addRow<ScriptComponent>("Script"),
+	addRow<SaveStateComponent>("Save State"),
+	// Offered in every project, not only ones with a session running: which
+	// entities go on the wire is authored with the scene, and the session is
+	// what happens to it later.
+	addRow<NetworkComponent>("Network"),
+};
+constexpr AddRow kNavigationRows[] = {
+	addRow<NavMeshComponent>("Nav Mesh"),
+	addRow<NavAgentComponent>("Nav Agent"),
+};
+constexpr AddRow kAudioRows[] = {
+	addRow<AudioSourceComponent>("Audio Source"),
+	addRow<AudioListenerComponent>("Audio Listener"),
+};
+
+// Animator / Animator Blend / Property Animator, Character Controller, and the
+// UI components are intentionally not offered here — they're meaningless
+// bolted onto an arbitrary entity and are set up through their owning asset
+// workflow instead (Skeletal Mesh editor tab, the player/character setup, the
+// UI Widget designer). The component types and their Inspector panels above
+// still work for entities that already carry them (e.g. older scenes).
+constexpr AddGroup kAddGroups[] = {
+	{ "Transform",  kTransformRows,  static_cast<int>(std::size(kTransformRows))  },
+	{ "Rendering",  kRenderingRows,  static_cast<int>(std::size(kRenderingRows))  },
+	{ "Physics",    kPhysicsRows,    static_cast<int>(std::size(kPhysicsRows))    },
+	{ "Animation",  kAnimationRows,  static_cast<int>(std::size(kAnimationRows))  },
+	{ "Gameplay",   kGameplayRows,   static_cast<int>(std::size(kGameplayRows))   },
+	{ "Navigation", kNavigationRows, static_cast<int>(std::size(kNavigationRows)) },
+	{ "Audio",      kAudioRows,      static_cast<int>(std::size(kAudioRows))      },
+};
+
+// Case-insensitive "needle somewhere in haystack" — the same test the Outliner
+// and Content Browser searches apply, so typing "mesh" finds Mesh, Skeletal
+// Mesh and Nav Mesh alike.
+bool labelMatches(const char* label, const std::string& needle)
+{
+	if (needle.empty()) return true;
+	std::string hay(label), n(needle);
+	std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char c) { return std::tolower(c); });
+	std::transform(n.begin(),   n.end(),   n.begin(),   [](unsigned char c) { return std::tolower(c); });
+	return hay.find(n) != std::string::npos;
+}
+} // namespace
+#endif // HE_IMGUI_ENABLED
+
 bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 {
 #ifdef HE_IMGUI_ENABLED
 	if (world.isBuiltin(entity)) return false;
 	auto& registry = world.registry();
 	bool added = false;
-	// What the clipboard holds comes first, named: "Paste Component (Light)".
+	// The group headings below are looked up under this scope ("Add
+	// Component/Rendering"), not under whichever component section happened to
+	// be drawn last — this menu belongs to the entity, not to a component.
+	HE::Ed::Help::Scope helpScope("Add Component");
+
+	// ── Search ──────────────────────────────────────────────────────────────
+	// Typing replaces the groups with a flat list of what matches, across all
+	// of them: the groups are for the reader who is browsing, the box for the
+	// one who already knows the name. Cleared whenever the popup opens, so a
+	// search typed for one entity does not greet the next.
+	static std::string s_filter;
+	if (ImGui::IsWindowAppearing())
+	{
+		s_filter.clear();
+		ImGui::SetKeyboardFocusHere();
+	}
+	ImGui::SetNextItemWidth(220.0f);
+	const bool submitted = ImGui::InputTextWithHint("##add_component_filter", "Search components",
+	                                                &s_filter, ImGuiInputTextFlags_EnterReturnsTrue);
+	EditorWidgets::helpForKey("details.add-component-search");
+	// Enter with a search typed adds the first row that matches — the keyboard
+	// path: type "rig", Enter, done.
+	const bool addFirstMatch = submitted && !s_filter.empty();
+	ImGui::Separator();
+
+	// What the clipboard holds comes next, named: "Paste Component (Light)".
 	// A component the entity already has is overwritten rather than doubled —
 	// the scene format allows one of each — which the tooltip says. The label
 	// is built at run time, so the help is asked for by key.
+	if (s_filter.empty())
 	{
 		const std::string clip = clipboardComponentKey();
 		if (const char* label = clip.empty() ? nullptr : componentLabelForKey(clip.c_str()))
@@ -3347,96 +3516,75 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			ImGui::Separator();
 		}
 	}
-	{
-		{
-			auto addItem = [&]<typename T>(const char* label, T)
-			{
-				if (!registry.all_of<T>(entity) && ImGui::MenuItem(label))
-				{
-					if (undo) undo->snapshotNow();
-					registry.emplace<T>(entity);
-					added = true;
-				}
-			};
-			addItem("Transform",    TransformComponent{});
-			addItem("Transform 2D", Transform2DComponent{});
-			addItem("Mesh",          MeshComponent{});
-			addItem("Skeletal Mesh", SkeletalMeshComponent{});
-			addItem("Nav Mesh",                NavMeshComponent{});
-			addItem("Nav Agent",               NavAgentComponent{});
-			addItem("Material",     MaterialComponent{});
-			addItem("Movement",     MovementComponent{});
-			// Offered in every project, not only ones with a session running:
-			// which entities go on the wire is authored with the scene, and
-			// the session is what happens to it later.
-			addItem("Network",      NetworkComponent{});
-			addItem("Camera",       CameraComponent{});
-			// A rig aims a camera, so it brings one along. Adding it alone left
-			// people with a component that silently did nothing, on an entity
-			// that could not be a camera in the first place.
-			if (ImGui::MenuItem("Camera Rig"))
-			{
-				if (undo) undo->snapshotNow();
-				if (!registry.all_of<CameraComponent>(entity))
-					registry.emplace<CameraComponent>(entity, CameraComponent{});
-				registry.emplace_or_replace<CameraRigComponent>(entity, CameraRigComponent{});
-				added = true;
-				ImGui::CloseCurrentPopup();
-			}
-			addItem("Light",        LightComponent{});
-			addItem("Decal",        DecalComponent{});
-			addItem("Rope",         RopeComponent{});
-			addItem("Trail",        TrailComponent{});
-			addItem("Rigid Body",          RigidBodyComponent{});
-			addItem("Collider",            ColliderComponent{});
-			addItem("Joint",               JointComponent{});
-			addItem("Save State",          SaveStateComponent{});
-			// Offered in EVERY project. It used to be gated on Lua/Python,
-			// because back then the slot only took a .lua/.py asset and a
-			// HorizonCode project drove entities through the player and level
-			// graphs instead. That stopped being true when the same slot learned
-			// to carry a HorizonCode CLASS (see the Script panel above): putting
-			// a class on an entity is now the ordinary way to give it logic, and
-			// the gate was hiding exactly the component you need.
-			addItem("Script",         ScriptComponent{});
-			addItem("Audio Source",    AudioSourceComponent{});
-			addItem("Audio Listener",  AudioListenerComponent{});
-			addItem("Particle System", ParticleSystemComponent{});
-			addItem("LOD",             LODComponent{});
-			addItem("Foliage",         FoliageComponent{});
-			// A state machine animates a SKELETON, so it is offered exactly where
-			// there is one — not on an arbitrary entity, and not nowhere.
-			//
-			// It used to be in the second group below, left out with a note that
-			// it is "set up through its owning asset workflow instead". That
-			// workflow does not add it: outside the serializer there was no
-			// emplace<AnimatorStateMachineComponent> in the whole engine, so a
-			// scene that did not already carry one could never get one. The
-			// dependency is the rule that makes it meaningful, not the absence.
-			if (registry.all_of<SkeletalMeshComponent>(entity))
-				addItem("Animator State Machine", AnimatorStateMachineComponent{});
-			// Same rule, same reason: root motion is about a skeleton's root
-			// bone, so it is offered exactly where there is a skeleton. It
-			// defaults to Off, so adding it changes nothing until asked.
-			if (registry.all_of<SkeletalMeshComponent>(entity))
-				addItem("Root Motion", RootMotionComponent{});
-			// And again: layers are laid on the pose of a skeleton. An empty
-			// stack does nothing, so adding it changes nothing until asked.
-			if (registry.all_of<SkeletalMeshComponent>(entity))
-				addItem("Animation Layers", AnimationLayerComponent{});
-			// And once more: IK corrects the pose of a skeleton. With no feet in
-			// the list and look-at off, adding it changes nothing until asked.
-			if (registry.all_of<SkeletalMeshComponent>(entity))
-				addItem("Inverse Kinematics", IkComponent{});
 
-			// Animator / Animator Blend / Property Animator, Character
-			// Controller, and the UI components are intentionally not offered
-			// here — they're meaningless bolted onto an arbitrary entity and are
-			// set up through their owning asset workflow instead (Skeletal Mesh
-			// editor tab, the player/character setup, the UI Widget designer).
-			// The component types and their Inspector panels above still work
-			// for entities that already carry them (e.g. older scenes).
+	const bool hasSkeleton = registry.all_of<SkeletalMeshComponent>(entity);
+	// One row. A component the entity already has is not offered — the scene
+	// format allows one of each. Returns whether it was added.
+	// `aside` is drawn dimmed at the row's right edge, where a menu would put
+	// the shortcut — the search view puts the group there.
+	auto drawRow = [&](const AddRow& row, const char* aside, bool pressedByKeyboard) -> bool
+	{
+		if (row.has(registry, entity)) return false;
+		const bool enabled = !row.needsSkeleton || hasSkeleton;
+		const bool pressed = ImGui::MenuItem(row.label, aside, false, enabled) || (pressedByKeyboard && enabled);
+		// The component's own entry, on its row — what it IS, before it is added.
+		{
+			char key[96];
+			std::snprintf(key, sizeof(key), "Component/%s", row.label);
+			EditorWidgets::helpForKey(key);
 		}
+		if (!pressed) return false;
+		if (undo) undo->snapshotNow();
+		row.add(registry, entity);
+		ImGui::CloseCurrentPopup();
+		return true;
+	};
+
+	if (s_filter.empty())
+	{
+		// ── Browsing: one submenu per group ─────────────────────────────────
+		for (const AddGroup& g : kAddGroups)
+		{
+			// A group whose rows are all on the entity already has nothing to
+			// offer and is left out, like its rows would be. The skeleton group
+			// is the exception: greyed rather than gone, so the reader learns
+			// what it needs instead of wondering where animation went.
+			bool anyLeft = false, allNeedSkeleton = true;
+			for (int i = 0; i < g.count; ++i)
+			{
+				if (!g.rows[i].has(registry, entity)) anyLeft = true;
+				if (!g.rows[i].needsSkeleton) allNeedSkeleton = false;
+			}
+			if (!anyLeft) continue;
+			const bool enabled = !allNeedSkeleton || hasSkeleton;
+			if (ImGui::BeginMenu(g.label, enabled))
+			{
+				for (int i = 0; i < g.count; ++i)
+					if (drawRow(g.rows[i], nullptr, false)) added = true;
+				ImGui::EndMenu();
+			}
+			// After the menu, hover-gated: a greyed group explains itself.
+			EditorWidgets::helpForLabel(g.label);
+		}
+	}
+	else
+	{
+		// ── Searching: the hits, flat, each with its group beside it ────────
+		int  hits  = 0;
+		bool first = true;
+		for (const AddGroup& g : kAddGroups)
+			for (int i = 0; i < g.count; ++i)
+			{
+				const AddRow& row = g.rows[i];
+				if (row.has(registry, entity) || !labelMatches(row.label, s_filter)) continue;
+				++hits;
+				// The group beside the hit: "Mesh" and "Nav Mesh" are told
+				// apart by where they live as much as by their names.
+				if (drawRow(row, g.label, first && addFirstMatch)) added = true;
+				first = false;
+			}
+		if (hits == 0)
+			ImGui::TextDisabled("No component matches.");
 	}
 	return added;
 

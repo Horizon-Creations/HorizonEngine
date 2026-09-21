@@ -1098,7 +1098,7 @@ void drawAntiCheatPage(AppContext& ctx)
 }
 
 // ─── Audio ▸ Buses ───────────────────────────────────────────────────────────
-// The mixer is a window of its own (View ▸ Audio Mixer): faders are something
+// The mixer is a window of its own (Window ▸ Audio Mixer): faders are something
 // you operate while a scene plays, not a page you fill in. This page says where
 // the buses are and what they are for, so the "Audio" heading on the rail is
 // not a dead end.
