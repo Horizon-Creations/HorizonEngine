@@ -91,8 +91,8 @@ virtual bool RenderSceneImage(const EditorCameraOverride& camera,
 Vertrag (`IRenderer.h`): einmal die aktuelle Welt aus `camera` in exakt
 `width`×`height` rendern und zurücklesen, ohne etwas zu präsentieren und ohne
 dass der Live-Viewport danach anders aussieht. Basis-Implementierung liefert
-`false` (→ `unsupported`). Umgesetzt sind **Metal** und **OpenGL**; D3D11,
-D3D12 und Vulkan liefern noch `unsupported`. Metal
+`false` (→ `unsupported`). Umgesetzt sind **Metal**, **OpenGL** und
+**D3D11**; D3D12 und Vulkan liefern noch `unsupported`. Metal
 (`MetalRenderer::RenderSceneImage`):
 
 1. Live-Viewport-Texturen, `m_viewportReqW/H` und `m_editorCamera` werden
@@ -143,6 +143,53 @@ schwarzes Bild mit `true`, wie der Viewport es zeigen würde. Pixel auf echter
 GL-Hardware sind **nicht verifiziert** (kein Display in der Sandbox); der
 Witness dafür ist `HE_DUMP_SCENEIMAGE` (§3), der auf jedem Backend läuft,
 das `RenderSceneImage` implementiert.
+
+**D3D11** (`D3D11Renderer::RenderSceneImage`, Stand 22.09.2026) nimmt das
+Metal-Muster, nur ohne Flag: der Viewport-Zweig von `Render()` (Szene in HDR
+oder direkt ins Viewport-Target, Bloom, Tonemap, AA-Resolve, UI-Canvas) ist
+in `DrawViewportFrame()` herausgezogen; `Render()` hängt den Swapchain-Teil
+(ImGui-Overlay, Present) an, der Still-Pfad den Readback. Ablauf:
+
+1. Die sechs `ComPtr`s des Live-Paars (`viewportTex/RTV/SRV`,
+   `viewportDepth/DSV/DepthSRV`) werden per `std::move` aus den Membern
+   herausgenommen (nicht freigegeben: `createViewportRT` beginnt mit
+   `Reset()` auf allem, was in den Membern steht), dazu `viewportW/H`,
+   `viewportReqW/H`, `m_editorCamera` und die Profiler-Zähler (`counters`)
+   nach Wert.
+2. `createViewportRT(width, height)` baut ein frisches Paar in der
+   Anforderungsgröße, ein `DrawViewportFrame` füllt es, `CaptureViewport`
+   liest per Staging-`Map` zurück (wartet auf die GPU). Ohne Welt oder ohne
+   Szenen-Shader ein schwarzes Bild mit `true`, wie GL.
+3. Das Screenshot-Paar wird direkt freigegeben (D3D11 hat keine
+   Retire-Liste; `createViewportRT` gibt Viewport-Targets genauso frei, die
+   Runtime hält In-Flight-Referenzen selbst), das Live-Paar kommt zurück.
+
+Zwei Dinge, die D3D11 selbst tun muss, weil sie bei Metal/GL von allein
+passieren:
+
+* **HDR/LDR/Bloom/SSAO-Targets** werden nur von `createViewportRT` gebaut,
+  und `Render()` ruft das nur, wenn Anforderung und Live-Größe auseinander
+  liegen, was nach der Rückgabe nicht der Fall ist. Der Still-Pfad ruft
+  deshalb `createHDRTargets(liveW, liveH)` selbst, sobald die Anforderung
+  eine andere Größe hatte; sonst zeichnete der nächste echte Frame ein
+  anforderungsgroßes HDR-Bild in den Live-Viewport. Ohne Live-Viewport
+  (Direkt-in-Swapchain-Pfad) bleiben sie, dort liest sie niemand.
+* **Kein TAA auf D3D11**; der per-Kamera-Temporalzustand ist der des
+  Forward-SSR (Kopie des vorigen HDR-Frames + Half-Res-Ping-Pong). Er
+  bekommt die TAA-Regel: vor dem Still implizit ungültig
+  (`createHDRTargets` verwirft die Kopie, `destroySSRTargets` das
+  Ping-Pong), danach explizit (`ssrColorHistValid`/`ssrHistValid` = false,
+  weil eine Anforderung in Viewport-Größe die Targets behält und der Frame
+  gerade hineingeschrieben hat). Preis: ein Frame ohne SSR auf beiden
+  Seiten, keine Reflexion aus fremder Kamera. Die GI-Schatten-Akkumulation
+  (`giHistValid`, weltraum-reprojiziert über `giPrevViewProj`) bleibt wie
+  bei Metal/GL stehen.
+
+Nicht ausgeführt: GPU-Timer-Frame (D3D11 misst nur den ganzen Frame,
+`DrawScene` hat keine Scopes), Overlay, Present, Zähler-Reset. Kompiliert
+nur im Windows-CI (`if(WIN32)` in `src/HE_Rendering/CMakeLists.txt`); Pixel
+auf echter D3D11-Hardware **nicht verifiziert**, Witness wäre auch hier
+`HE_DUMP_SCENEIMAGE`.
 
 ## 3. Verifikation
 
@@ -359,7 +406,7 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
   mit 1280×720 oder größer anfühlen.
 * Inline-PNG ≤ 2,5 MiB (`kInlineMaxPngBytes`), Shim-Frame ≤ 4 MiB; darüber
   `file`.
-* Metal und OpenGL rendern Stills (`RenderSceneImage`), D3D11/D3D12/Vulkan
+* Metal, OpenGL und D3D11 rendern Stills (`RenderSceneImage`), D3D12/Vulkan
   noch nicht; die Gizmos im Viewport gibt
   es auf jedem Backend, das Debug-Linien zeichnet.
 * Die Frustums sind per Bauart in keinem Tool-Bild (§5); die ImGui-Tags
@@ -374,7 +421,10 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
 
 ## 7. Nähte für die Folgeschritte
 
-* **Andere Backends:** OpenGL ist nachgezogen (§2). D3D11/D3D12/Vulkan
+* **Andere Backends:** OpenGL und D3D11 sind nachgezogen (§2). D3D12/Vulkan
   liefern bis dahin `unsupported` mit Namen; dort gibt es wie bei Metal einen
   Swapchain-Pass (Present, ImGui-Overlay) zu überspringen, also das
-  `m_captureOnly`-Muster, nicht das GL-Muster.
+  `m_captureOnly`-Muster oder D3D11s Schnitt (Viewport-Frame als eigene
+  Methode, Swapchain-Teil bleibt in `Render()`), nicht das GL-Muster. Wer
+  seine HDR-Zwischenziele wie D3D11 nur beim Anlegen des Viewport-Targets
+  baut, muss sie nach dem Still selbst auf die Live-Größe zurückbauen.

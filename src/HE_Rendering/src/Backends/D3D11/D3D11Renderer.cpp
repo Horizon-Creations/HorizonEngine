@@ -6031,6 +6031,92 @@ void D3D11Renderer::DrawScene(int width, int height)
     });
 }
 
+// The offscreen viewport frame, up to the RGBA8 viewport texture ImGui samples.
+// Render() follows it with the swapchain part (ImGui overlay, Present);
+// RenderSceneImage() follows it with a readback instead.
+void D3D11Renderer::DrawViewportFrame()
+{
+    auto& p = *m_impl;
+    const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+    D3D11_VIEWPORT vvp{};
+    vvp.Width    = static_cast<float>(p.viewportW);
+    vvp.Height   = static_cast<float>(p.viewportH);
+    vvp.MaxDepth = 1.0f;
+
+    // When PostFX is available, render geometry into the RGBA16F HDR target;
+    // otherwise fall back to the RGBA8 viewport target directly.
+    const bool useHDR = p.postFxReady && p.hdrRTV && p.ldrRTV && p.viewportRTV;
+    ID3D11RenderTargetView* sceneRTV = useHDR ? p.hdrRTV.Get() : p.viewportRTV.Get();
+
+    p.context->OMSetRenderTargets(1, &sceneRTV, p.viewportDSV.Get());
+    p.context->ClearRenderTargetView(sceneRTV, bgColor);
+    p.context->ClearDepthStencilView(p.viewportDSV.Get(),
+                                     D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+    p.context->RSSetViewports(1, &vvp);
+    DrawScene(static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+
+    if (useHDR)
+    {
+        // Unbind the HDR RT before using it as an SRV.
+        { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
+
+        // Bloom bright-pass + ping-pong blur → bloomTex[0] (or dummyTexture if disabled).
+        const uint32_t bw = std::max(1u, p.viewportW / 2);
+        const uint32_t bh = std::max(1u, p.viewportH / 2);
+        ID3D11ShaderResourceView* bloomResult =
+            p.bloomEnabled ? p.runBloom(bw, bh) : p.dummyTexture.Get();
+
+        // Restore full-res viewport for the tonemap and FXAA passes.
+        p.context->RSSetViewports(1, &vvp);
+        p.context->IASetInputLayout(nullptr);
+        p.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        p.context->VSSetShader(p.fsVS.Get(), nullptr, 0);
+        p.context->OMSetDepthStencilState(p.noDepthDSS.Get(), 0);
+        p.context->RSSetState(p.fsRastState.Get());
+        p.context->PSSetSamplers(0, 1, p.linearSampler.GetAddressOf());
+        p.context->VSSetConstantBuffers(0, 1, p.postFxCB.GetAddressOf());
+        p.context->PSSetConstantBuffers(0, 1, p.postFxCB.GetAddressOf());
+
+        // Tonemap: (hdrSRV, bloomSRV) → ldrRTV.
+        { const float cb[4] = { p.exposure,
+                                p.bloomEnabled ? p.bloomStrength : 0.0f, 0, 0 };
+          p.updatePostFxCB(cb);
+          p.context->OMSetRenderTargets(1, p.ldrRTV.GetAddressOf(), nullptr);
+          p.context->PSSetShader(p.tonemapPS.Get(), nullptr, 0);
+          ID3D11ShaderResourceView* srvs[2] = { p.hdrSRV.Get(), bloomResult };
+          p.context->PSSetShaderResources(0, 2, srvs);
+          p.context->Draw(3, 0);
+          ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
+
+        // AA resolve: ldrSRV → viewportRTV (final output sampled by ImGui).
+        // Always drawn — the method only picks the pixel shader.
+        { const float cb[4] = { 1.0f / float(p.viewportW),
+                                1.0f / float(p.viewportH), 0, 0 };
+          p.updatePostFxCB(cb);
+          p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
+          p.context->PSSetShader(p.aaMethod == HE::AAMethod::Off  ? p.aaBlitPS.Get()
+                               : p.aaMethod == HE::AAMethod::SMAA ? p.smaaPS.Get()
+                                                                  : p.fxaaPS.Get(), nullptr, 0);
+          ID3D11ShaderResourceView* srv = p.ldrSRV.Get();
+          p.context->PSSetShaderResources(0, 1, &srv);
+          p.context->Draw(3, 0);
+          ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
+
+        // Clear stale bindings, restore scene pipeline state for any future draws.
+        { ID3D11ShaderResourceView* nulls[2] = {}; p.context->PSSetShaderResources(0, 2, nulls); }
+        p.context->OMSetDepthStencilState(p.depthState.Get(), 0);
+        p.context->RSSetState(p.rasterState.Get());
+        p.context->PSSetSamplers(0, 1, p.sampler.GetAddressOf());
+    }
+
+    // UI canvas pass: draw onto the final composited viewport target (after tonemap/FXAA).
+    p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
+    p.context->RSSetViewports(1, &vvp);
+    p.renderUIPass(p.context.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+    { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
+}
+
 void D3D11Renderer::Render()
 {
     auto& p = *m_impl;
@@ -6048,82 +6134,7 @@ void D3D11Renderer::Render()
 
     if (useViewport)
     {
-        D3D11_VIEWPORT vvp{};
-        vvp.Width    = static_cast<float>(p.viewportW);
-        vvp.Height   = static_cast<float>(p.viewportH);
-        vvp.MaxDepth = 1.0f;
-
-        // When PostFX is available, render geometry into the RGBA16F HDR target;
-        // otherwise fall back to the RGBA8 viewport target directly.
-        const bool useHDR = p.postFxReady && p.hdrRTV && p.ldrRTV && p.viewportRTV;
-        ID3D11RenderTargetView* sceneRTV = useHDR ? p.hdrRTV.Get() : p.viewportRTV.Get();
-
-        p.context->OMSetRenderTargets(1, &sceneRTV, p.viewportDSV.Get());
-        p.context->ClearRenderTargetView(sceneRTV, bgColor);
-        p.context->ClearDepthStencilView(p.viewportDSV.Get(),
-                                         D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
-        p.context->RSSetViewports(1, &vvp);
-        DrawScene(static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
-
-        if (useHDR)
-        {
-            // Unbind the HDR RT before using it as an SRV.
-            { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
-
-            // Bloom bright-pass + ping-pong blur → bloomTex[0] (or dummyTexture if disabled).
-            const uint32_t bw = std::max(1u, p.viewportW / 2);
-            const uint32_t bh = std::max(1u, p.viewportH / 2);
-            ID3D11ShaderResourceView* bloomResult =
-                p.bloomEnabled ? p.runBloom(bw, bh) : p.dummyTexture.Get();
-
-            // Restore full-res viewport for the tonemap and FXAA passes.
-            p.context->RSSetViewports(1, &vvp);
-            p.context->IASetInputLayout(nullptr);
-            p.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            p.context->VSSetShader(p.fsVS.Get(), nullptr, 0);
-            p.context->OMSetDepthStencilState(p.noDepthDSS.Get(), 0);
-            p.context->RSSetState(p.fsRastState.Get());
-            p.context->PSSetSamplers(0, 1, p.linearSampler.GetAddressOf());
-            p.context->VSSetConstantBuffers(0, 1, p.postFxCB.GetAddressOf());
-            p.context->PSSetConstantBuffers(0, 1, p.postFxCB.GetAddressOf());
-
-            // Tonemap: (hdrSRV, bloomSRV) → ldrRTV.
-            { const float cb[4] = { p.exposure,
-                                    p.bloomEnabled ? p.bloomStrength : 0.0f, 0, 0 };
-              p.updatePostFxCB(cb);
-              p.context->OMSetRenderTargets(1, p.ldrRTV.GetAddressOf(), nullptr);
-              p.context->PSSetShader(p.tonemapPS.Get(), nullptr, 0);
-              ID3D11ShaderResourceView* srvs[2] = { p.hdrSRV.Get(), bloomResult };
-              p.context->PSSetShaderResources(0, 2, srvs);
-              p.context->Draw(3, 0);
-              ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
-
-            // AA resolve: ldrSRV → viewportRTV (final output sampled by ImGui).
-            // Always drawn — the method only picks the pixel shader.
-            { const float cb[4] = { 1.0f / float(p.viewportW),
-                                    1.0f / float(p.viewportH), 0, 0 };
-              p.updatePostFxCB(cb);
-              p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
-              p.context->PSSetShader(p.aaMethod == HE::AAMethod::Off  ? p.aaBlitPS.Get()
-                                   : p.aaMethod == HE::AAMethod::SMAA ? p.smaaPS.Get()
-                                                                      : p.fxaaPS.Get(), nullptr, 0);
-              ID3D11ShaderResourceView* srv = p.ldrSRV.Get();
-              p.context->PSSetShaderResources(0, 1, &srv);
-              p.context->Draw(3, 0);
-              ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
-
-            // Clear stale bindings, restore scene pipeline state for any future draws.
-            { ID3D11ShaderResourceView* nulls[2] = {}; p.context->PSSetShaderResources(0, 2, nulls); }
-            p.context->OMSetDepthStencilState(p.depthState.Get(), 0);
-            p.context->RSSetState(p.rasterState.Get());
-            p.context->PSSetSamplers(0, 1, p.sampler.GetAddressOf());
-        }
-
-        // UI canvas pass: draw onto the final composited viewport target (after tonemap/FXAA).
-        p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
-        p.context->RSSetViewports(1, &vvp);
-        p.renderUIPass(p.context.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
-        { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
+        DrawViewportFrame();
 
         // ImGui overlay → swapchain RT (clear first so it's a clean dark bg).
         p.context->OMSetRenderTargets(1, p.rtv.GetAddressOf(), nullptr);
@@ -6247,6 +6258,106 @@ bool D3D11Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
 
     p.context->Unmap(staging.Get(), 0);
     return true;
+}
+
+// ─── One still from somebody else's camera ────────────────────────────────────
+// The contract is in IRenderer.h; the shape is Metal's (MetalRenderer.mm,
+// RenderSceneImage): the live viewport pair is SET ASIDE (moved out of the
+// members, not released — createViewportRT starts by resetting whatever is in
+// them), createViewportRT builds a fresh pair at the requested size, one
+// DrawViewportFrame fills it (the same frame Render() draws, minus the
+// swapchain part: no overlay, no Present), CaptureViewport reads it back, the
+// pair is released and the live pair moved back. GetViewportTexture never
+// answers with the screenshot's texture, so the UI built later this frame
+// shows the editor's own view, not the client's.
+//
+// Two things this backend has to do that Metal and GL get for free:
+//
+// * The HDR/LDR/bloom/SSAO targets are built ONLY by createViewportRT, and
+//   Render() only calls that when the request differs from the live size —
+//   which it will not, once the live size is back. So the intermediates are
+//   rebuilt at the live size here, or the next real frame would draw a
+//   request-sized HDR image into the live viewport.
+// * There is no TAA on D3D11; the per-camera temporal state is forward SSR's
+//   (the previous frame's HDR copy plus its half-res ping-pong). It gets the
+//   TAA rule: invalid before the still (implicitly — createHDRTargets drops
+//   the copy and destroySSRTargets the ping-pong) and invalid after, so the
+//   screenshot does not reflect the viewport's past and the viewport not the
+//   screenshot's. One frame without SSR on each side, no wrong reflections.
+//   GI probe history is world-space and stays.
+//
+// Not run: the GPU-timer frame, the overlay, Present, the counter reset —
+// those belong to REAL frames. Per-request path, not per-frame.
+bool D3D11Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
+                                     uint32_t height, std::vector<uint8_t>& rgba)
+{
+    auto& p = *m_impl;
+    if (!p.device || !p.context) return false;
+    if (width == 0 || height == 0) return false;
+
+    // Everything the frame reads that the request changes, saved by value.
+    ComPtr<ID3D11Texture2D>          liveTex      = std::move(p.viewportTex);
+    ComPtr<ID3D11RenderTargetView>   liveRTV      = std::move(p.viewportRTV);
+    ComPtr<ID3D11ShaderResourceView> liveSRV      = std::move(p.viewportSRV);
+    ComPtr<ID3D11Texture2D>          liveDepth    = std::move(p.viewportDepth);
+    ComPtr<ID3D11DepthStencilView>   liveDSV      = std::move(p.viewportDSV);
+    ComPtr<ID3D11ShaderResourceView> liveDepthSRV = std::move(p.viewportDepthSRV);
+    const uint32_t                   liveW        = p.viewportW;
+    const uint32_t                   liveH        = p.viewportH;
+    const uint32_t                   liveReqW     = p.viewportReqW;
+    const uint32_t                   liveReqH     = p.viewportReqH;
+    const EditorCameraOverride       liveCam      = m_editorCamera;
+    // The counters are the profiler's picture of the last real frame; the
+    // screenshot's draws would sit there until the next Render() otherwise.
+    const D3D11RendererImpl::FrameCounters liveCounters = p.counters;
+
+    p.viewportW    = 0;
+    p.viewportH    = 0;
+    p.viewportReqW = width;
+    p.viewportReqH = height;
+    m_editorCamera = camera;
+
+    // Fresh pair at the request (plus HDR & co. at that size; SSR history gone).
+    p.createViewportRT(width, height);
+
+    bool ok = p.viewportRTV && p.viewportDSV;
+    if (ok)
+    {
+        DrawViewportFrame();
+        // The staging Map waits for the GPU; no world → the cleared target,
+        // honestly black, which is what the viewport would show too.
+        uint32_t gotW = 0, gotH = 0;
+        ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+    }
+
+    // The screenshot pair is released the way createViewportRT releases every
+    // viewport target (the runtime keeps in-flight references alive); the live
+    // pair comes straight back.
+    p.viewportTex.Reset(); p.viewportRTV.Reset(); p.viewportSRV.Reset();
+    p.viewportDepth.Reset(); p.viewportDSV.Reset(); p.viewportDepthSRV.Reset();
+    p.viewportTex      = std::move(liveTex);
+    p.viewportRTV      = std::move(liveRTV);
+    p.viewportSRV      = std::move(liveSRV);
+    p.viewportDepth    = std::move(liveDepth);
+    p.viewportDSV      = std::move(liveDSV);
+    p.viewportDepthSRV = std::move(liveDepthSRV);
+    p.viewportW        = liveW;
+    p.viewportH        = liveH;
+    p.viewportReqW     = liveReqW;
+    p.viewportReqH     = liveReqH;
+    m_editorCamera     = liveCam;
+    p.counters         = liveCounters;
+    // Intermediates back to the live size (see above). No live viewport (the
+    // direct-to-swapchain path) means nothing reads them; leave them.
+    if (liveW && liveH && (liveW != width || liveH != height))
+        p.createHDRTargets(liveW, liveH);
+    // The SSR history is the screenshot camera's now (a same-size request kept
+    // the targets, and the frame just captured into them).
+    p.ssrColorHistValid = false;
+    p.ssrHistValid      = false;
+
+    if (!ok) rgba.clear();
+    return ok;
 }
 
 void D3D11Renderer::SetVSync(bool enabled)
