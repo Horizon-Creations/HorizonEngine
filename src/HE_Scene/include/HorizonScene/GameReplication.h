@@ -236,7 +236,7 @@ public:
 	// ── Diagnostics ──
 	struct Stats
 	{
-		std::uint32_t snapshotsSent     = 0;
+		std::uint32_t snapshotsSent     = 0;   // datagrams: a split tick counts each part
 		std::uint32_t entitiesSent      = 0;   // summed over snapshots
 		std::uint32_t entitiesCulled    = 0;   // skipped by interest management
 		std::uint32_t snapshotsReceived = 0;
