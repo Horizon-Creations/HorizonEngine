@@ -379,6 +379,27 @@ einen Zuschauer ohne Eingaben konstant 0 bleibt. **Schritt 3 gibt dem
 Snapshot eine Tick-Nummer** (`u32` vor `ack`) und verwirft ältere; das ist ein
 Vergleich in `applySnapshot` und vier Byte pro Snapshot.
 
+*Stand nach Schritt 3 (22.09.2026):* umgesetzt als `tick:u32 | ack:u32 |
+count:u16`. Der Vergleich ist die vorzeichenbehaftete 32-Bit-Differenz zum
+neuesten angewendeten Tick, damit der Zähler umlaufen darf; der Server beginnt
+bei 1 und überspringt 0, weil 0 auf dem Client „noch nichts gesehen" heißt.
+Älter = ganzes Datagramm weg (`Stats::snapshotsStale`), gleich = weiterer Teil
+desselben Ticks. Ein Duplikat wird **pro Entity** über den Tick des letzten
+Samples erkannt (`Stats::samplesDuplicate`), weil ein nochmaliges Schieben
+`previous = current` setzen und die Entity bis zum nächsten Tick einfrieren
+würde; die Reconciliation der eigenen Entity läuft aus demselben Grund einmal
+pro Tick. Dazu kam ein Punkt, den §4.5 nur als Regel nennt: `UdpTransport`
+**verweigert** Unreliable über `mtuPayload`, und ein Snapshot mit 19 Byte pro
+Entity sprengt 1200 Byte ab ~60 relevanten Entities. `sendSnapshots` teilt
+deshalb pro Client und Tick nach `Config::snapshotBudgetBytes` (Default 1024 =
+1200 minus NetSession-Id 2 minus SecureTransport-Counter+Tag 24 minus Reserve)
+in mehrere `kMsgSnapshot`-Datagramme mit derselben Tick-Nummer; jede Entity
+liegt in genau einem Teil, es gibt nichts zusammenzusetzen, und ein verlorener
+Teil kostet genau die Entities darin einen Sample. Gemessen in
+`test_game_replication`: 200 Entities → 4 Datagramme ≤ 1026 Byte auf dem
+Loopback; das größte Manifest, das der Writer erzeugen kann (256 Einträge,
+255-Zeichen-Namen, SHA-256), ist 82 949 Byte = 70 von 255 Fragmenten.
+
 ### 4.5 Fragmentierung
 
 Nur auf den Reliable-Kanälen (Unreliable-Nachrichten über 1200 Byte sind ein

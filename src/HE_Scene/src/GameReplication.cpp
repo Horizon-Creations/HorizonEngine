@@ -24,9 +24,7 @@ namespace
 	constexpr MessageId kMsgIntegrity = kFirstUserMessage + 202;   // client → server, once
 	constexpr MessageId kMsgAntiCheatNotice = kFirstUserMessage + 203;   // server → client, before a kick
 
-	// A manifest is the exe, a handful of libraries and a few paks. Anything
-	// beyond this did not come from our writer.
-	constexpr std::uint16_t kMaxManifestEntries = 256;
+	constexpr std::uint16_t kMaxManifestEntries = GameReplication::kMaxManifestEntries;
 	// A rule name is a word ("Damage"), not a paragraph; the writer never
 	// produces more, and a client must not be made to allocate for one.
 	constexpr std::size_t kMaxNoticeRuleLength = 64;
@@ -85,6 +83,7 @@ void GameReplication::setLocallyControlled(Entity entity, std::uint32_t netId)
 	m_controlledNetId = netId;
 	m_pendingInputs.clear();
 	m_positionError = glm::vec3(0.0f);
+	m_lastReconcileTick = 0;
 	// The controlled entity is predicted, never interpolated — interpolation
 	// would fight the prediction and produce visible rubber-banding.
 	m_interp.erase(netId);
@@ -545,6 +544,22 @@ void GameReplication::sendSnapshots()
 {
 	auto& reg = m_world->registry();
 
+	// One tick number for everything this call sends, to every client. The
+	// client orders snapshots by it: older than the newest seen is dropped,
+	// equal is another part of the same tick. 0 is reserved for "nothing seen
+	// yet" on the client, so the counter skips it when it wraps.
+	const std::uint32_t tick = m_snapshotTick;
+	if (++m_snapshotTick == 0) m_snapshotTick = 1;
+
+	// How many entities fit one datagram under the byte budget. The header is
+	// tick + ack + count = 10 bytes; an entry is the id plus the quantized
+	// sample, in bits, because the writer packs them.
+	const std::size_t entryBits = 32 + 3u * static_cast<std::size_t>(m_cfg.positionBits) +
+	                              3u * static_cast<std::size_t>(m_cfg.rotationBits);
+	const std::size_t budgetBits = m_cfg.snapshotBudgetBytes * 8;
+	const std::size_t perDatagram =
+		std::max<std::size_t>(1, budgetBits > 80 ? (budgetBits - 80) / entryBits : 0);
+
 	// Built per client, because interest management makes each one different —
 	// that is the whole point of it.
 	for (const ConnectionId conn : m_net->connections())
@@ -582,38 +597,65 @@ void GameReplication::sendSnapshots()
 		// heartbeat, and the transport already has one.
 		if (relevant.empty()) continue;
 
-		BitWriter w;
 		// The last input we processed FROM THIS CLIENT rides along with the
 		// snapshot. Without it the client cannot know which of its predicted
 		// moves the authoritative state already includes, and would replay all
 		// of them — double-applying its own movement.
 		const auto ackIt = m_lastProcessedInput.find(conn);
-		w.writeUInt32(ackIt != m_lastProcessedInput.end() ? ackIt->second : 0u);
-		w.writeUInt16(static_cast<std::uint16_t>(
-			std::min<std::size_t>(relevant.size(), 0xFFFF)));
-		for (const auto& [netId, sample] : relevant)
+		const std::uint32_t ack = ackIt != m_lastProcessedInput.end() ? ackIt->second : 0u;
+
+		// Split into datagrams under the budget. Each entity appears in exactly
+		// one part per tick, and every part carries the same tick and ack, so
+		// the parts may arrive in any order or not at all without the client
+		// having to reassemble anything.
+		for (std::size_t first = 0; first < relevant.size(); first += perDatagram)
 		{
-			w.writeUInt32(netId);
-			writeSample(w, sample);
+			const std::size_t count = std::min(perDatagram, relevant.size() - first);
+
+			BitWriter w;
+			w.writeUInt32(tick);
+			w.writeUInt32(ack);
+			w.writeUInt16(static_cast<std::uint16_t>(std::min<std::size_t>(count, 0xFFFF)));
+			for (std::size_t i = first; i < first + count; ++i)
+			{
+				w.writeUInt32(relevant[i].first);
+				writeSample(w, relevant[i].second);
+			}
+
+			// Unreliable by intent: a lost snapshot is corrected by the next
+			// one, and waiting for a retransmit would deliver state that is
+			// already wrong.
+			m_net->send(conn, kMsgSnapshot, w, SendMode::Unreliable);
+
+			++m_stats.snapshotsSent;
+			if (first > 0) ++m_stats.snapshotsSplit;
+			m_stats.entitiesSent += static_cast<std::uint32_t>(count);
+			m_stats.bytesSent    += static_cast<std::uint32_t>(w.data().size());
 		}
-
-		// Unreliable by intent: a lost snapshot is corrected by the next one, and
-		// waiting for a retransmit would deliver state that is already wrong.
-		m_net->send(conn, kMsgSnapshot, w, SendMode::Unreliable);
-
-		++m_stats.snapshotsSent;
-		m_stats.entitiesSent += static_cast<std::uint32_t>(relevant.size());
-		m_stats.bytesSent    += static_cast<std::uint32_t>(w.data().size());
 	}
 }
 
 void GameReplication::applySnapshot(BitReader& r)
 {
+	std::uint32_t tick = 0;
 	std::uint32_t ack = 0;
 	std::uint16_t count = 0;
-	if (!r.readUInt32(ack) || !r.readUInt16(count)) return;
+	if (!r.readUInt32(tick) || !r.readUInt32(ack) || !r.readUInt16(count)) return;
 
 	++m_stats.snapshotsReceived;
+
+	// Snapshots travel unreliable, and over UDP that means out of order. A
+	// tick older than the newest we applied is dropped whole: applying it would
+	// move every entity in it backwards in time, and the sample it carries is
+	// already superseded. The same tick is fine — it is another part of a
+	// snapshot the server split across datagrams. Signed difference so the
+	// counter may wrap.
+	if (static_cast<std::int32_t>(tick - m_newestTick) < 0)
+	{
+		++m_stats.snapshotsStale;
+		return;
+	}
+	m_newestTick = tick;
 
 	for (std::uint16_t i = 0; i < count; ++i)
 	{
@@ -625,22 +667,42 @@ void GameReplication::applySnapshot(BitReader& r)
 		{
 			// Our own entity is predicted, not interpolated — hand it to
 			// reconciliation instead of the interpolation buffer.
-			reconcile(s, ack);
+			reconcile(s, ack, tick);
+			continue;
+		}
+
+		InterpState& st = m_interp[netId];
+		if (st.hasTick && st.tick == tick)
+		{
+			// A duplicated datagram. Shifting the buffer again would set
+			// previous = current and freeze the entity until the next tick.
+			++m_stats.samplesDuplicate;
 			continue;
 		}
 
 		// Shift the buffer: what was current becomes the interpolation origin.
-		InterpState& st = m_interp[netId];
 		st.previous    = st.current;
 		st.current     = s;
 		st.hasPrevious = true;
 		st.elapsed     = 0.0f;
+		st.tick        = tick;
+		st.hasTick     = true;
 	}
 }
 
-void GameReplication::reconcile(const Sample& authoritative, std::uint32_t ackedSequence)
+void GameReplication::reconcile(const Sample& authoritative, std::uint32_t ackedSequence,
+                                std::uint32_t tick)
 {
 	if (!m_world || !m_move) return;
+
+	// Once per tick: a duplicated datagram carries the same answer and would
+	// only redo the correction; the stale case never reaches here.
+	if (tick == m_lastReconcileTick)
+	{
+		++m_stats.samplesDuplicate;
+		return;
+	}
+	m_lastReconcileTick = tick;
 	auto& reg = m_world->registry();
 	if (!reg.valid(m_controlled)) return;
 	auto* tc = reg.try_get<TransformComponent>(m_controlled);

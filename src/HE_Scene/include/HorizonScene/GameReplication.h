@@ -58,6 +58,11 @@ public:
 	// Public because the anti-cheat dt budget books the clamped value too.
 	static constexpr float kMaxInputDeltaTime = 0.1f;
 
+	// A manifest is the exe, a handful of libraries and a few paks. Anything
+	// beyond this did not come from our writer. Public so the fragmentation
+	// budget test can build the worst case the writer is allowed to produce.
+	static constexpr std::uint16_t kMaxManifestEntries = 256;
+
 	struct Config
 	{
 		// Snapshot rate. Higher costs bandwidth linearly; lower makes
@@ -75,6 +80,16 @@ public:
 
 		// Snapshots older than this are dropped from the interpolation buffer.
 		float  interpolationDelaySec = 0.1f;
+
+		// Largest snapshot payload per datagram. Snapshots travel Unreliable,
+		// and UdpTransport refuses (does not fragment) an unreliable message
+		// over its 1200-byte MTU payload — one lost piece would lose the whole.
+		// So a tick's entities are split across as many kMsgSnapshot datagrams
+		// as this budget needs, all carrying the same tick number. 1024 leaves
+		// room for the NetSession id (2), the SecureTransport counter and GCM
+		// tag (24) and some margin under 1200. Below one entity it clamps to
+		// one entity per datagram.
+		std::size_t snapshotBudgetBytes = 1024;
 
 		// A predicted position further than this from the server's answer is
 		// snapped rather than eased, because easing a large error looks like the
@@ -225,6 +240,9 @@ public:
 		std::uint32_t entitiesSent      = 0;   // summed over snapshots
 		std::uint32_t entitiesCulled    = 0;   // skipped by interest management
 		std::uint32_t snapshotsReceived = 0;
+		std::uint32_t snapshotsSplit    = 0;   // extra datagrams beyond the first, per client and tick
+		std::uint32_t snapshotsStale    = 0;   // client side: dropped, older than the newest tick seen
+		std::uint32_t samplesDuplicate  = 0;   // client side: entity already had this tick's sample
 		std::uint32_t bytesSent         = 0;
 		std::uint32_t inputsSent        = 0;
 		std::uint32_t inputsProcessed   = 0;   // server side
@@ -256,6 +274,12 @@ private:
 		Sample current;
 		float  elapsed = 0.0f;   // seconds since `current` arrived
 		bool   hasPrevious = false;
+		// Tick of `current`. A second sample for the same tick is a duplicated
+		// datagram (or a re-sent part) and must not shift the buffer again —
+		// that would set previous = current and freeze the entity until the
+		// next tick.
+		std::uint32_t tick = 0;
+		bool          hasTick = false;
 	};
 
 	void sendSnapshots();
@@ -279,7 +303,7 @@ private:
 	void checkGuestManifests();
 	void checkGuestManifest(HE::Net::ConnectionId conn, const GuestManifest& guest);
 	void handleAntiCheatNotice(HE::Net::ConnectionId conn, HE::Net::BitReader& r);
-	void reconcile(const Sample& authoritative, std::uint32_t ackedSequence);
+	void reconcile(const Sample& authoritative, std::uint32_t ackedSequence, std::uint32_t tick);
 	void applySmoothing(float dt);
 
 	void writeSample(HE::Net::BitWriter& w, const Sample& s) const;
@@ -303,6 +327,20 @@ private:
 
 	float  m_tickAccumulator = 0.0f;
 	Stats  m_stats;
+
+	// ── Snapshot ordering ──
+	// Server: the number of the tick being sent; every datagram of one tick
+	// carries it, so a client can tell "another part of the same tick" from
+	// "an older tick that arrived late". Starts at 1 and skips 0 on wrap, so
+	// a client that has seen nothing yet (m_newestTick = 0) never mistakes
+	// the first snapshot for a duplicate.
+	std::uint32_t m_snapshotTick = 1;
+	// Client: newest tick applied; anything older is dropped whole. Compared
+	// as a signed 32-bit difference, so the counter may wrap.
+	std::uint32_t m_newestTick = 0;
+	// Client: tick of the last reconciliation, so a duplicated datagram does
+	// not run the correction twice and a stale one cannot rewind the ack.
+	std::uint32_t m_lastReconcileTick = 0;
 
 	// ── Prediction state (client) ──
 	MoveFn        m_move;
