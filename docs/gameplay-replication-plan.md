@@ -287,11 +287,22 @@ Header     = magic:u16 "HU"      Protokoll-Kennung, filtert fremde Datagramme au
              flags:u8            bit0 Connect, bit1 Challenge, bit2 Accept, bit3 Reject,
                                  bit4 Disconnect, bit5 KeepAlive, bit6 Fragment, bit7 AckOnly
              channel:u8          0 Unreliable, 1 Reliable, 2 ReliableOrdered
-             seq:u16             pro Kanal pro Richtung, wrap-around
-             ack:u16             höchste vom Peer empfangene seq (Kanal 1+2 gemeinsam)
+             seq:u16             Paket-Nummer, EIN Zahlenraum pro Richtung für alle Kanäle
+             ack:u16             höchste vom Peer empfangene Paket-seq
              ackBits:u32         Bitfeld der 32 davor (1 = empfangen)
 Fragment   = [fragId:u16][index:u8][count:u8] zusätzlich, wenn bit6
+Ordered    = [msgSeq:u16] zusätzlich auf Kanal 2: Nachrichten-Nummer für die Reihenfolge
 ```
+
+**Ein Paket-Zahlenraum, nicht einer pro Kanal.** `seq` zählt jedes gesendete
+Datagramm dieser Richtung, egal auf welchem Kanal; `ack`/`ackBits` bestätigen
+Paket-Nummern, und der Sender weiß pro Paket-Nummer, ob dahinter eine
+Reliable-Nachricht stand (dann Resend) oder nicht (dann nichts). Das ist die
+Form, in der ein Ack-Feld für alle Kanäle zugleich gelten kann, und in der der
+Unreliable-Strom die Reliable-Acks wirklich huckepack trägt. Die Reihenfolge
+auf `ReliableOrdered` kommt aus dem eigenen `msgSeq`, das ein Resend
+unverändert mitnimmt; Duplikaterkennung für alle Kanäle läuft über die
+Paket-`seq`.
 
 `kMtuPayload = 1200` Byte nach dem Header, die konservative Größe unter der
 1280-Byte-Grenze von IPv6 minus IP-, UDP- und eigenem Header. Alles darüber wird fragmentiert (§4.5). Kein
@@ -328,12 +339,15 @@ kann das andere übernehmen, ohne `SecureTransport` UDP-spezifisch zu machen (E2
 
 ### 4.4 Zuverlässigkeit
 
-Pro Peer und Reliable-Kanal ein Sendfenster (`kSendWindow = 256` Pakete), ein
-Sendpuffer mit Sendezeit, und die Ack-Auswertung aus jedem eingehenden Header:
-`ack` bestätigt eine seq, `ackBits` 32 weitere. Ein Paket gilt als verloren,
-wenn (a) es älter als `rto` ist, oder (b) drei jüngere Pakete bestätigt wurden
-und es nicht (Fast Retransmit). Dann wird es neu gesendet mit **derselben
-seq**, damit der Empfänger Duplikate erkennt.
+Pro Peer ein Sendfenster unbestätigter Reliable-Pakete (`kSendWindow = 256`),
+ein Sendpuffer mit Sendezeit, und die Ack-Auswertung aus jedem eingehenden
+Header: `ack` bestätigt eine Paket-seq, `ackBits` 32 weitere. Ein Paket gilt
+als verloren, wenn (a) es älter als `rto` ist, oder (b) drei jüngere Pakete
+bestätigt wurden und es nicht (Fast Retransmit). Dann wird sein Inhalt neu
+gesendet, als **neues Paket mit neuer Paket-seq**, aber mit demselben
+`msgSeq` (Kanal 2) bzw. derselben Nachrichten-Kennung (Kanal 1); so bleibt
+die Ack-Buchführung eindeutig (jede Paket-seq wird genau einmal gesendet) und
+der Empfänger erkennt die Nachricht trotzdem als Duplikat.
 
 ```
 rtt-Schätzer (Jacobson/Karels):  srtt = 7/8 srtt + 1/8 sample
@@ -342,10 +356,12 @@ rtt-Schätzer (Jacobson/Karels):  srtt = 7/8 srtt + 1/8 sample
 Backoff bei wiederholtem Verlust: rto *= 2 pro Resend desselben Pakets, bis 2 s
 ```
 
-`ReliableOrdered`: der Empfänger hält pro Kanal `nextExpected`; was davor
+`ReliableOrdered`: der Empfänger hält `nextExpected` über `msgSeq`; was davor
 liegt, ist Duplikat (verworfen); was danach liegt, wartet im Reorder-Puffer
-(`kReorderWindow = 256`); `poll()` liefert lückenlos. `Reliable`: dieselbe
-Duplikaterkennung über ein 256-Bit-Fenster, Zustellung sofort.
+(`kReorderWindow = 256`); `poll()` liefert lückenlos. `Reliable`: jede
+Nachricht trägt ebenfalls eine laufende Nummer (`msgSeq` desselben Formats,
+eigener Zähler), die Duplikaterkennung läuft über ein 256-Bit-Fenster darüber,
+Zustellung sofort.
 
 Volles Sendfenster = `send()` puffert weiter, bis `kMaxQueuedReliable = 64
 KiB` pro Peer; darüber wird der Peer getrennt, weil ein Empfänger, der 64 KiB
@@ -353,11 +369,15 @@ Reliable nicht abnimmt, ohnehin verloren ist (dieselbe Lehre wie
 `TcpTransport::kMaxFrameSize`: nie unbegrenzt für einen Peer allokieren).
 
 `Unreliable` kennt kein Resend und keinen Reorder-Puffer, aber die
-`seq`-Duplikaterkennung: ein dupliziertes Snapshot-Datagramm wird verworfen,
-nicht zweimal angewendet. Reorder in Unreliable bleibt sichtbar; `GameReplication`
-verträgt das heute nicht (`applySnapshot` nimmt jeden Snapshot als neuesten).
-**Schritt 3 gibt dem Snapshot eine Tick-Nummer** und verwirft ältere; das ist
-eine Zeile in `applySnapshot` und ein `u32` im Snapshot-Kopf.
+Duplikaterkennung über die Paket-`seq` (256-Bit-Fenster): ein dupliziertes
+Snapshot-Datagramm wird verworfen, nicht zweimal angewendet. Reorder in
+Unreliable bleibt sichtbar, und `GameReplication` verträgt das heute nicht:
+der Snapshot-Kopf ist `ack:u32 | count:u16` (`sendSnapshots`, `applySnapshot`
+`GameReplication.cpp:610-640`), `applySnapshot` schiebt bei **jedem**
+Snapshot `current → previous`, und `ack` taugt nicht als Ordnung, weil es für
+einen Zuschauer ohne Eingaben konstant 0 bleibt. **Schritt 3 gibt dem
+Snapshot eine Tick-Nummer** (`u32` vor `ack`) und verwirft ältere; das ist ein
+Vergleich in `applySnapshot` und vier Byte pro Snapshot.
 
 ### 4.5 Fragmentierung
 
@@ -575,6 +595,38 @@ den der Host prüfen will, und `CallServer` genau dieser Pfad ist. Was die
 Engine dafür liefert: `net.isAuthority()`, `net.isLocallyControlled(entity)`
 und die Konvention in §7.5, damit dieselbe Klasse auf beiden Seiten korrekt
 läuft.
+
+**Was `PlayerHost` dafür lernen muss.** Heute ist er auf einen lokalen
+Spieler gebaut: ein Controller pro `PlayerController`-Klasse, **jedes**
+Input-Event an **jeden** Controller, und Charaktere über `addCharacter`
+registriert (PlayerHost.h, Kopfkommentar „Where input goes"). Vier Folgen,
+die Schritt 4 auflösen muss, weil sonst der Host mit zwei Spielern doppelt
+läuft:
+
+1. **Input-Routing nach Besitzer.** Jede Controller-Instanz bekommt einen
+   `PlayerId`-Besitzer (1 = lokal). Lokale Eingaben gehen nur an Controller
+   mit Besitzer 1 und an deren Charaktere; Remote-Controller hören auf dem
+   Host **keine** lokalen Eingaben. Was sie hören, sind `CallServer`-Aufrufe
+   ihres Clients (§7) und die `InputCommand`s über `handleInput`.
+2. **Kein zweiter lokaler Charakter auf dem Client.** Der Client hat seinen
+   eigenen `PlayerHost` mit eigenem Controller, dessen BeginPlay heute den
+   Charakter spawnt. Im Netz darf er das nicht: der Host spawnt, der Client
+   bekommt `kMsgSpawn`. Die Engine unterdrückt das nicht per Magie, sondern
+   `Create Object` einer Klasse mit `replicates` auf einem **Client** ist ein
+   No-op mit einer Log-Zeile (`Cat::Replication`, einmal pro Klasse): nur
+   die Autorität erzeugt replizierte Objekte. Ein Graph, der offline und
+   online derselbe sein soll, braucht dafür keinen Zweig; die Regel in §7.5
+   sagt trotzdem, wie man es sauber schreibt.
+3. **Possess auf dem Client.** `kMsgControl` (Host → Besitzer, nach dem
+   Spawn) trägt `netId` des Charakters; der Client löst ihn auf, ruft
+   `setLocallyControlled` **und** `player.possess(localController, character)`,
+   damit Kamera-Rig, Input-Weiterleitung und `player.character()` auf dem
+   Client dasselbe sagen wie auf dem Host.
+4. **`Ctx::createObject` auf dem Client registriert PlayerCharacter beim
+   PlayerHost** (Ctx-Kommentar in `EngineApi.h`). Für fremde Spieler ist das
+   falsch: ihre Charaktere dürfen keine lokalen Eingaben bekommen. Der
+   `SpawnReplicator` ruft deshalb einen Spawn-Pfad mit `owner`-Parameter, der
+   die Registrierung nur für `owner == localPlayer` macht.
 
 **Verlassen:** `Disconnected` oder `kMsgBye` → `OnPlayerLeft(playerId)`,
 Despawn des Charakters (konfigurierbar: `keepCharacterOnLeave` für
@@ -1095,9 +1147,12 @@ Kein `registerEntity`, kein `adoptEntity`, keine Message-Id, kein `isHost`.
 
 ### 10.2 Spielerfigur
 
-Nichts Neues gegenüber heute: der Controller spawnt den Charakter aus
-BeginPlay und ruft `player.possess`. Auf dem Host passiert das für jeden
-Spieler, die Engine registriert und weist zu (§5.4). Die Klasse der Figur
+Im Graph nichts Neues gegenüber heute: der Controller spawnt den Charakter
+aus BeginPlay und ruft `player.possess`. Auf dem Host passiert das für jeden
+Spieler, die Engine registriert und weist zu; auf dem Client ist derselbe
+`Create Object` ein No-op und der Charakter kommt per Spawn-Nachricht (§5.4,
+Punkte 2 und 3). Was die Engine dafür intern umbaut (Input-Routing nach
+Besitzer im `PlayerHost`), sieht der Graph nicht. Die Klasse der Figur
 hat **Replicates** an (oder wird es per Spawn, wenn die Klasse es in ihren
 Components-Tab hat: `EntityHost::spawn` liest die Komponentenliste der Klasse,
 `NetworkComponent` reist darin wie jede andere Komponente).
@@ -1129,7 +1184,7 @@ end
 Schritt 1 ist dieses Dokument. Jeder weitere Schritt ist für sich mergebar,
 hat einen Test, der ohne Netzwerk-Hardware läuft, und nennt, was er **nicht**
 tut. Die Reihenfolge ist durch Abhängigkeiten festgelegt, nicht durch
-Sichtbarkeit: der erste sichtbare Knopf kommt in Schritt 5.
+Sichtbarkeit: der erste sichtbare Knopf kommt in Schritt 5b.
 
 ### 11.1 Schritte
 
@@ -1137,9 +1192,11 @@ Sichtbarkeit: der erste sichtbare Knopf kommt in Schritt 5.
 |---|---|---|---|---|
 | 2 | **`UdpTransport`** (Cookie-Handshake, drei Kanäle, Ack-Bitfeld, RTO, Fragmentierung, Keepalive/Timeout, Stats, Test-Drop-Hook) + **`LossyTransport`** + **`SecureTransport::replayWindow`** + `PortMapper::Protocol` + `networking-layer-design.md`-Korrektur (GNS-Reservierung) | `test_net_udp.cpp` (Localhost-Sockets wie `test_net_tcp`), `test_net_lossy.cpp`, neue Fälle in `test_net_secure.cpp` | keine | nichts in HE_Scene; kein Konsument wechselt den Transport |
 | 3 | **`GameReplication` über UDP fit:** Tick-Nummer im Snapshot (ältere verwerfen), `test_game_replication` zusätzlich über `LossyTransport` (Verlust 10 %, Reorder 20 %, Dup 5 %) mit Prediction/Reconcile-Negativkontrollen; Manifest-Größe gegen Fragmentierung geprüft | `test_game_replication.cpp` | 2 | keine neuen Nachrichten |
-| 4 | **`NetGameSession`** (Host/Join/Leave, Roster, Hello/Welcome, Projekt-Id, Version), **`SpawnReplicator`** (Bind/Spawn/Despawn/Baseline), `NetworkComponent::replicates` + Registry-Walk, `AntiCheatHost::attach` am Session-Start, `Cat::Replication`, Beacon-`kind`, Directory-`kind`/Hairpin-Probe, `Ctx::net` | `test_net_game_session.cpp`: zwei Sessions über `LossyTransport`, headless; Late-Join mit 3 Spawns; Despawn; Kick-Pfad des Anti-Cheat nun **erstmals in einer Session** | 2, 3 | keine Frontends, kein Inspector, keine Properties, kein RPC |
-| 5 | **Verdrahtung + Editor-Basis:** `GameApplication` pumpt und bindet, `--host/--join`; `EditorApplication` Play as Host / Join…, PIE ohne Kick/Telemetrie; **Inspector-Kategorie Replication** mit Schalter (Serializer-Feld, Menü-Eintrag weg, Tooltips + Handbuch); Project Settings Page Multiplayer; `net.host/join/…/isAuthority/localPlayer/players/ping/kick`-Rows (Dreiklang + `HCGEN_CLASSES`); Lebenszyklus-Events durch alle vier Frontends (`NetEvents::dispatch`); Website `session-api.php` `kind`/`transport` + Deploy | `test_engine_api`, `test_hc_node_docs`, Panel-Audit 715/715, Inspector headless (`imgui-allow-overlap-row-buttons`-Rezept), **erster Zwei-Prozess-Durchlauf von Hand** (Editor-Host, `--join`-Client), Ergebnis als Devlog | 4 | keine Properties, kein RPC |
-| 6 | **`PropertyReplicator`:** `Variable::replicated/repNotify`, Dirty-Tracking, `kMsgPropertyTable/Properties`, `Value`-Wire-Format, `ReplicatedVarsComponent` + `net.declareVar/setVar*/getVar*`, `OnRep_<Var>` in allen vier Frontends, Baseline-`OnRep`, Variablen-Liste im HC-Editor (Checkboxen, Ref-Sperre, Notify-Generator), Overlay-Zeilen | `test_net_property_replication.cpp` über `LossyTransport`: Wert kommt an, `OnRep` einmal, alter Wert korrekt, Client-Schreibzugriff wird überschrieben, Typ-Mismatch verworfen ohne Crash, Struct/Enum/Map rund; `test_scripting_binding`, `test_python_scripting` für `onRep_*` | 4, 5 | kein RPC |
+| 4 | **`NetGameSession`** (Host/Join/Leave, Roster, Hello/Welcome, Projekt-Id, Version), **`SpawnReplicator`** (Bind/Spawn/Despawn/Baseline), `NetworkComponent::replicates` + Registry-Walk, `AntiCheatHost::attach` am Session-Start, `Cat::Replication`, Beacon-`kind`, `Ctx::net` (Directory bleibt bis 5c auf dem heutigen Stand: Registrierung funktioniert, `reachable` wird ignoriert) | `test_net_game_session.cpp`: zwei Sessions über `LossyTransport`, headless; Late-Join mit 3 Spawns; Despawn; Kick-Pfad des Anti-Cheat nun **erstmals in einer Session** | 2, 3 | keine Frontends, kein Inspector, keine Properties, kein RPC |
+| 5 | **Verdrahtung + `net`-Rows + Lebenszyklus-Events:** `GameApplication` pumpt und bindet (`Ctx::net`), `--host/--join`; `EditorApplication` Play as Host / Join… (Toolbar-Menü), PIE ohne Kick/Telemetrie; `PlayerHost`-Umbau nach §5.4 (Besitzer pro Controller, Spawn-No-op auf Clients, Possess auf dem Client); `net.host/join/joinLan/joinDirect/leave/status/…/isAuthority/localPlayer/players/ping/kick`-Rows (Dreiklang + `HCGEN_CLASSES`); `OnPlayerJoined/Left/OnConnected/OnDisconnected/OnSession*` durch alle vier Frontends (`NetEvents::dispatch`) | `test_engine_api`, `test_hc_node_docs`, `test_scripting_binding`, `test_python_scripting`; **erster Zwei-Prozess-Durchlauf von Hand** (Editor-Host, `--join`-Client), Ergebnis als Devlog | 4 | kein Inspector, keine Settings-Page, keine Properties, kein RPC |
+| 5b | **Editor-Bedienung:** **Inspector-Kategorie Replication** mit Schalter (Serializer-Feld, Menü-Eintrag weg), Project Settings Page Multiplayer (`ProjectMultiplayerSettings`), Tooltips + Handbuch für beides, erste Overlay-Zeilen (Rolle, Spieler, Ping, Verlust) | Panel-Audit 715/715, Inspector headless (`imgui-allow-overlap-row-buttons`-Rezept), `test_project_settings` | 4 (Session), unabhängig von 5 | keine Variablen-Checkboxen, kein Funktionskopf |
+| 5c | **Website/Directory:** `session-api.php` `kind` + `transport`, Directory-Client-Felder, Hairpin-Self-Probe mit ehrlicher UI, Deploy (mit Bestätigung) | `test_net_directory` (Mock), Hand-Test gegen die echte Website | 4 | |
+| 6 | **`PropertyReplicator`:** `Variable::replicated/repNotify`, Dirty-Tracking, `kMsgPropertyTable/Properties`, `Value`-Wire-Format, `ReplicatedVarsComponent` + `net.declareVar/setVar*/getVar*`, `OnRep_<Var>` in allen vier Frontends, Baseline-`OnRep`, Variablen-Liste im HC-Editor (Checkboxen, Ref-Sperre, Notify-Generator), Overlay-Zeilen | `test_net_property_replication.cpp` über `LossyTransport`: Wert kommt an, `OnRep` einmal, alter Wert korrekt, Client-Schreibzugriff wird überschrieben, Typ-Mismatch verworfen ohne Crash, Struct/Enum/Map rund; `test_scripting_binding`, `test_python_scripting` für `onRep_*` | 4, 5, 5b | kein RPC |
 | 7 | **`RpcRouter`:** `Node::runOn` + `anyClient`, Router-Umleitung im Runtime, `kMsgRpc`, Owner/Rate/Format-Checks als Observations, variadische Lua/Python-Rows, `HeNetServices` + `IGameLogic::onRpc/onRep`, `net.call*`-Rows, `net.rpcSender`, Funktionskopf-UI + Validierung, Beispiel-Graph Tür in der In-Engine-Doku | `test_net_rpc.cpp`: CallServer vom Owner ok, vom Fremden `Hard`, `anyClient` erlaubt, Rate-Fenster, Format-Mismatch, Reihenfolge unter Reorder, Cross-Frontend Lua→HC | 5, 6 | keine Rückgabewerte |
 | 8 | **Abschluss:** Overlay komplett, Memory `networking-layer.md` und Website-Roadmap (`roadmap.json` + `deploy.py`, mit Bestätigung), Devlog, Release-Build mit Zwei-Geräte-Test über LAN **und** über Directory + Portfreigabe (echte Router, siehe `port-forward-refusal-vs-absence`) | Hand-Test mit Protokoll, Log-Sink-Test „kein Join-Secret im Log" | 7 | |
 
@@ -1162,16 +1219,21 @@ Sichtbarkeit: der erste sichtbare Knopf kommt in Schritt 5.
 - `src/HE_Core/include/Diagnostics/Log.h` + `.cpp` (`Cat::Replication` vor `Count`, `kCategoryNames`)
 - `src/HE_Scene/include/HorizonScene/EngineApi.h` (`Ctx::net` am Ende)
 
-**Schritt 5 (Verdrahtung, Editor, API):**
-- `src/HE_Game/src/GameApplication.cpp` (Session, Frame-Reihenfolge, `launchArguments`), `EditorApplication.cpp` (PIE-Variante), `EditorApplication.h`
-- `src/HE_Editor/InspectorPanel.cpp` (`:2113` Kategorie, `:3425` Menü-Eintrag weg), `ProjectSettingsPanel.cpp` (`Page::Multiplayer`), Play-Toolbar
-- `src/HE_Core/include/Project/ProjectSettings.h` + `.cpp` (`ProjectMultiplayerSettings`)
+**Schritt 5 (Verdrahtung, `net`-Rows, Events):**
+- `src/HE_Game/src/GameApplication.cpp` (Session, Frame-Reihenfolge, `launchArguments`), `EditorApplication.cpp` (PIE-Variante, Toolbar-Menü), `EditorApplication.h`
+- `src/HE_Scene/include/HorizonScene/PlayerHost.h` + `.cpp` (Besitzer pro Controller, Input-Routing), `EntityHost.h` + `.cpp` (Spawn mit `owner`)
 - `src/HE_Scene/include/HorizonScene/EngineApi.h` + `EngineApi.cpp` (`namespace net`, Rows, Display-Name-Map, `isScriptGroup`), `src/HE_Editor/HcNodeDocs.cpp`, `tests/CMakeLists.txt` `HCGEN_CLASSES`
 - `src/HE_Core/src/HorizonCode/HorizonCode.cpp` (Event-Tabelle `:2526`), `HorizonCodeRuntime.h/.cpp` (`fireOnPlayerJoined` …), `HorizonCodeCompiled.h`, `src/HE_Editor/LevelScriptPanel.cpp` (`kEvents` `:1446`)
 - `src/HE_Core/include/Scripting/IScriptBackend.h`, `ScriptContext.cpp`, `PyScriptBackend.cpp`, `IGameLogic.h`
 - `src/HE_Scene/include/HorizonScene/Net/NetEvents.h` (neu, Muster `AntiCheatEvents.h`)
-- `Website/HorizonEngine/session-api.php`
-- Handbuch-/Tooltip-Tabellen (715/715)
+
+**Schritt 5b (Editor-Bedienung):**
+- `src/HE_Editor/InspectorPanel.cpp` (`:2113` Kategorie, `:3425` Menü-Eintrag weg), `ProjectSettingsPanel.cpp` (`Page::Multiplayer`)
+- `src/HE_Core/include/Project/ProjectSettings.h` + `.cpp` (`ProjectMultiplayerSettings`)
+- Handbuch-/Tooltip-Tabellen (715/715), Overlay-Panel
+
+**Schritt 5c (Website/Directory):**
+- `Website/HorizonEngine/session-api.php`, `src/HE_Net/include/Net/SessionDirectory.h` + `.cpp` (`kind`, `transport`, Self-Probe)
 
 **Schritt 6, 7:**
 - `src/HE_Core/include/HorizonCode/HorizonCode.h` (`Variable::replicated/repNotify`, `Node::runOn/anyClient`), `HorizonCode.cpp` (JSON), `HorizonCodeRuntime.cpp` (`setVariable`-Dirty-Hook, `FunctionCall`-Umleitung), `HorizonCodeCompiled.h`/Codegen (Run-On im kompilierten Pfad)
