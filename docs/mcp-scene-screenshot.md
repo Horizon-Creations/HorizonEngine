@@ -91,7 +91,8 @@ virtual bool RenderSceneImage(const EditorCameraOverride& camera,
 Vertrag (`IRenderer.h`): einmal die aktuelle Welt aus `camera` in exakt
 `width`×`height` rendern und zurücklesen, ohne etwas zu präsentieren und ohne
 dass der Live-Viewport danach anders aussieht. Basis-Implementierung liefert
-`false` (→ `unsupported`). **Nur Metal** ist umgesetzt
+`false` (→ `unsupported`). Umgesetzt sind **Metal** und **OpenGL**; D3D11,
+D3D12 und Vulkan liefern noch `unsupported`. Metal
 (`MetalRenderer::RenderSceneImage`):
 
 1. Live-Viewport-Texturen, `m_viewportReqW/H` und `m_editorCamera` werden
@@ -110,6 +111,38 @@ dass der Live-Viewport danach anders aussieht. Basis-Implementierung liefert
 Was bewusst NICHT beiseitegelegt wird: HDR-, G-Buffer- und TAA-Targets. Sie
 werden auf die Anforderung umgebaut und im nächsten echten Frame zurück. Das
 ist ein Pfad pro Anfrage, keiner pro Frame.
+
+**OpenGL** (`OpenGLRenderer::RenderSceneImage`, Stand 22.09.2026) hält
+denselben Vertrag mit weniger Aufwand, weil der GL-Frame anders geschnitten
+ist: `Render()` ist das Einzige, was den Fenster-Framebuffer anfasst (Clear
+von FBO 0, Direkt-Modus-Draw, ImGui-Overlay-Callback), der Swap liegt in der
+Anwendung. Einen Swapchain-Pass zum Überspringen gibt es also nicht und kein
+`m_captureOnly`-Flag; der Pfad ruft `Render()` schlicht nicht auf.
+`DrawScene(w, h)` zeichnet in den gerade gebundenen FBO und die
+Post-Process-Kette (AA-Resolve) gibt das fertige Bild an genau diese Bindung
+zurück (`prevFBO` im Pass-Lambda). Ablauf:
+
+1. Viewport-FBO-Tripel (`m_viewportFBO/Color/Depth`), `m_viewportW/H`,
+   `m_viewportReqW/H`, `m_editorCamera` und die Profiler-Zähler
+   (`m_counters`) beiseitelegen; FBO-Tripel auf 0, Anforderung eingesetzt.
+2. `EnsureViewportTarget` baut ein frisches Paar in der Anforderungsgröße,
+   dieselben drei Zeilen wie der Offscreen-Zweig von `Render()`
+   (bind, clear, `DrawScene`), Bindung zurück auf 0.
+3. `CaptureViewport` liest per `glReadPixels` zurück (wartet auf die GPU);
+   `DestroyViewportTarget` retired die Screenshot-Farbtextur wie jede
+   Viewport-Textur (drei echte Frames), das Live-Tripel kommt zurück.
+4. `m_taaHistoryValid = false` vor und nach dem Frame, wie bei Metal; das
+   „nach" ist nötig, weil der TAA-Resolve in `DrawScene` die Historie wieder
+   für gültig erklärt.
+
+Nicht ausgeführt, weil es in ECHTEN Frames zählt: Retire-Aging, der
+GPU-Partikel-Schritt (`SimulateGpuParticles`) und der GPU-Timer-Frame des
+Profilers (die `GpuPassScope`s in `DrawScene` sind außerhalb eines
+Timer-Frames No-ops). Ohne Welt liefert der Pfad das geleerte Ziel, also ein
+schwarzes Bild mit `true`, wie der Viewport es zeigen würde. Pixel auf echter
+GL-Hardware sind **nicht verifiziert** (kein Display in der Sandbox); der
+Witness dafür ist `HE_DUMP_SCENEIMAGE` (§3), der auf jedem Backend läuft,
+das `RenderSceneImage` implementiert.
 
 ## 3. Verifikation
 
@@ -326,7 +359,8 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
   mit 1280×720 oder größer anfühlen.
 * Inline-PNG ≤ 2,5 MiB (`kInlineMaxPngBytes`), Shim-Frame ≤ 4 MiB; darüber
   `file`.
-* Nur Metal rendert Stills (`RenderSceneImage`); die Gizmos im Viewport gibt
+* Metal und OpenGL rendern Stills (`RenderSceneImage`), D3D11/D3D12/Vulkan
+  noch nicht; die Gizmos im Viewport gibt
   es auf jedem Backend, das Debug-Linien zeichnet.
 * Die Frustums sind per Bauart in keinem Tool-Bild (§5); die ImGui-Tags
   (`MCP #n`) sind auch im Live-Witness nicht drin (der Capture liest die
@@ -340,6 +374,7 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
 
 ## 7. Nähte für die Folgeschritte
 
-* **Andere Backends:** OpenGL braucht denselben Umbau (Viewport-FBO
-  beiseitelegen, Swapchain-Pass überspringen); D3D/Vulkan liefern bis dahin
-  `unsupported` mit Namen.
+* **Andere Backends:** OpenGL ist nachgezogen (§2). D3D11/D3D12/Vulkan
+  liefern bis dahin `unsupported` mit Namen; dort gibt es wie bei Metal einen
+  Swapchain-Pass (Present, ImGui-Overlay) zu überspringen, also das
+  `m_captureOnly`-Muster, nicht das GL-Muster.

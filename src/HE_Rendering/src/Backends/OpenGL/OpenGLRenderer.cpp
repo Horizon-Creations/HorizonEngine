@@ -11760,6 +11760,100 @@ bool OpenGLRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width
 	return true;
 }
 
+// ─── One still from somebody else's camera ────────────────────────────────────
+// The contract is in IRenderer.h; the shape is Metal's (MetalRenderer.mm,
+// RenderSceneImage). GL is the simpler case: Render() is the only thing that
+// touches the window's framebuffer (the clear of FBO 0, the direct-mode draw,
+// the ImGui overlay callback) and the buffer swap lives in the application, so
+// there is no swapchain pass to skip and no capture flag — this path just does
+// not call Render(). DrawScene draws into whatever framebuffer is bound and
+// its post-process chain hands the finished image back to that same binding
+// (prevFBO in the pass lambda), so a fresh FBO at the requested size is the
+// whole trick.
+//
+// The live viewport's FBO triple and size are SET ASIDE (not destroyed — they
+// are handed straight back), so EnsureViewportTarget builds a fresh pair at the
+// requested size; one DrawScene fills it; CaptureViewport reads it back; the
+// pair is destroyed (its colour texture goes the retired way, like every
+// viewport texture) and the live triple restored. GetViewportTexture never
+// answers with the screenshot's texture, so the UI built later this frame
+// shows the editor's own view, not the client's.
+//
+// Not set aside: the intermediate targets (HDR, LDR, G-buffer, TAA, SSR
+// history) — DrawScene resizes them to the request and the next real frame
+// resizes them back. Not run: the retire ageing, the GPU particle step and
+// the profiler's GPU-timer frame — those count in REAL frames, and a still on
+// request is not one of those (the GpuPassScopes inside DrawScene are no-ops
+// outside a timer frame). Per-request path, not per-frame.
+bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
+                                      uint32_t height, std::vector<uint8_t>& rgba)
+{
+	if (!m_primarySdlWindow || !m_glContext) return false;
+	if (width == 0 || height == 0) return false;
+	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+
+	// Everything the frame reads that the request changes, saved by value.
+	const unsigned int         liveFBO   = m_viewportFBO;
+	const unsigned int         liveColor = m_viewportColor;
+	const unsigned int         liveDepth = m_viewportDepth;
+	const int                  liveW     = m_viewportW;
+	const int                  liveH     = m_viewportH;
+	const uint32_t             liveReqW  = m_viewportReqW;
+	const uint32_t             liveReqH  = m_viewportReqH;
+	const EditorCameraOverride liveCam   = m_editorCamera;
+	// The counters are the profiler's picture of the last real frame; the
+	// screenshot's draws would sit there until the next Render() otherwise.
+	const FrameCounters        liveCounters = m_counters;
+
+	m_viewportFBO   = 0;
+	m_viewportColor = 0;
+	m_viewportDepth = 0;
+	m_viewportW     = 0;
+	m_viewportH     = 0;
+	m_viewportReqW  = width;
+	m_viewportReqH  = height;
+	m_editorCamera  = camera;
+	// TAA history is one camera's past. The screenshot must not blend against
+	// the viewport's (a request at exactly the viewport's size would reuse the
+	// targets, so the resize rule alone does not cover it), and the viewport
+	// must not blend against the screenshot's afterwards. Both frames take the
+	// current image only — an unconverged edge for one frame, no ghost.
+	m_taaHistoryValid = false;
+
+	// Same three lines as the offscreen branch of Render().
+	EnsureViewportTarget();
+	glBindFramebuffer(GL_FRAMEBUFFER, m_viewportFBO);
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	DrawScene(m_viewportW, m_viewportH);
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	// glReadPixels waits for the GPU; no world → the cleared target, honestly
+	// black, which is what the viewport would show too.
+	uint32_t   gotW = 0, gotH = 0;
+	const bool ok   = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+
+	// The screenshot pair goes the way every viewport target goes (the colour
+	// texture is retired, not deleted — one release path, not two). The live
+	// triple comes straight back.
+	DestroyViewportTarget();
+	m_viewportFBO   = liveFBO;
+	m_viewportColor = liveColor;
+	m_viewportDepth = liveDepth;
+	m_viewportW     = liveW;
+	m_viewportH     = liveH;
+	m_viewportReqW  = liveReqW;
+	m_viewportReqH  = liveReqH;
+	m_editorCamera  = liveCam;
+	m_counters      = liveCounters;
+	// DrawScene's TAA resolve marks the history valid again — that history is
+	// the screenshot camera's now, and the next real frame must not use it.
+	m_taaHistoryValid = false;
+
+	if (!ok) rgba.clear();
+	return ok;
+}
+
 void OpenGLRenderer::EnsureViewportTarget()
 {
 	const int w = static_cast<int>(m_viewportReqW);
