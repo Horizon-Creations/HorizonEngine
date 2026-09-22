@@ -25,6 +25,12 @@ public:
     // GetViewportTexture() is inherited from IRenderer and returns m_viewportImGuiHandle.
     bool  CaptureViewport(std::vector<uint8_t>& rgba,
                           uint32_t& width, uint32_t& height) override;
+    // One still from another camera (MCP scene_screenshot), the Metal/GL/D3D11
+    // contract: the live viewport set is set aside, one viewport frame is recorded
+    // into a fresh set at the requested size, executed and read back; nothing is
+    // presented and the live set comes back untouched.
+    bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
+                           std::vector<uint8_t>& rgba) override;
     // Returns ID3D12Resource* for the viewport color RT (or nullptr if not allocated).
     // The editor allocates an SRV in its ImGui heap and calls SetViewportImGuiHandle.
     void* GetViewportD3DResource() const;
@@ -76,6 +82,13 @@ public:
 private:
     // Extract → cull → sort → RenderGraph → replay into the bound command list.
     void DrawScene(void* cmdList, int width, int height);
+    // The offscreen viewport frame, recorded into the open m_impl->cmdList: scene
+    // into HDR (or straight into the viewport RT), PostFX chain, UI canvas, and
+    // the viewport RT left in PIXEL_SHADER_RESOURCE — everything up to the texture
+    // ImGui samples, nothing of the swapchain. Shared by Render() and
+    // RenderSceneImage(); the caller has already made sure the viewport set exists
+    // and the command list is reset.
+    void DrawViewportFrame();
 
     D3D12RendererImpl* m_impl = nullptr;
 };

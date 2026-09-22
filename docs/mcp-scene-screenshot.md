@@ -91,8 +91,8 @@ virtual bool RenderSceneImage(const EditorCameraOverride& camera,
 Vertrag (`IRenderer.h`): einmal die aktuelle Welt aus `camera` in exakt
 `width`×`height` rendern und zurücklesen, ohne etwas zu präsentieren und ohne
 dass der Live-Viewport danach anders aussieht. Basis-Implementierung liefert
-`false` (→ `unsupported`). Umgesetzt sind **Metal**, **OpenGL** und
-**D3D11**; D3D12 und Vulkan liefern noch `unsupported`. Metal
+`false` (→ `unsupported`). Umgesetzt sind **Metal**, **OpenGL**, **D3D11**
+und **D3D12**; Vulkan liefert noch `unsupported`. Metal
 (`MetalRenderer::RenderSceneImage`):
 
 1. Live-Viewport-Texturen, `m_viewportReqW/H` und `m_editorCamera` werden
@@ -190,6 +190,60 @@ Nicht ausgeführt: GPU-Timer-Frame (D3D11 misst nur den ganzen Frame,
 nur im Windows-CI (`if(WIN32)` in `src/HE_Rendering/CMakeLists.txt`); Pixel
 auf echter D3D11-Hardware **nicht verifiziert**, Witness wäre auch hier
 `HE_DUMP_SCENEIMAGE`.
+
+**D3D12** (`D3D12Renderer::RenderSceneImage`, Stand 22.09.2026) nimmt
+D3D11s Schnitt: der Viewport-Zweig von `Render()` (Szene in HDR oder direkt
+ins Viewport-RT, PostFX-Kette, UI-Canvas, Viewport-RT zurück nach
+`PIXEL_SHADER_RESOURCE`) ist in `DrawViewportFrame()` herausgezogen und
+nimmt in die offene `cmdList` auf; `Render()` hängt den Swapchain-Teil
+(Backbuffer-Clear, ImGui-Overlay, Timestamp-Paar, Present) an, der
+Still-Pfad die Ausführung und den Readback. Ablauf:
+
+1. Das Live-Set (`viewportRT/Depth/Readback`, `viewportRtvHeap/DsvHeap`)
+   wird per `std::move` aus den Membern genommen (`createViewportRT`
+   beginnt damit, das Vorhandene zu retiren bzw. zu resetten), dazu nach
+   Wert `viewportW/H`, `viewportReqW/H`, `viewportState`,
+   `viewportResChanged`, `usingHDR`, `m_editorCamera` und die vier
+   Profiler-Zähler.
+2. `createViewportRT(width, height)` flusht die GPU (`waitForAllFrames`)
+   und baut ein frisches Set samt PostFX-Zielen in Anforderungsgröße. Die
+   Kommandoliste wird auf dem Allocator von `p.frameIndex` neu
+   aufgenommen, also dem Slot, den der NÄCHSTE echte Frame nimmt:
+   `DrawScene`, `renderUIPass12`, `runSSAO` und die GI-Per-Slot-Puffer
+   indizieren ihre Ringe darüber, und weil nichts präsentiert wird, landet
+   der nächste `Render()` auf demselben Slot, dessen `waitForFrame` nach
+   dem Flush des Captures ein No-op ist und dessen Allocator-Reset die
+   Screenshot-Aufnahme einfach verwirft. `DrawViewportFrame`, Close,
+   Execute, dann `CaptureViewport` (flusht, kopiert in den Readback-Puffer,
+   flusht, mappt). Ohne Welt ein schwarzes Bild mit `true`, wie GL/D3D11.
+3. Nach einem weiteren `waitForAllFrames` (deckt die Fehlerpfade) wird das
+   Screenshot-Set direkt freigegeben (die ImGui-SRV des Editors zeigte nie
+   darauf, weil `viewportResChanged` vor dem nächsten Blick des Editors
+   zurückgesetzt wird), das Live-Set kommt zurück.
+
+Drei Reparaturen, die D3D12 selbst tun muss:
+
+* **PostFX-Ziele** (HDR/LDR/Bloom + SSR-Farbhistorie) hängen wie bei D3D11
+  an `createViewportRT`; nach dem Still `createPostFXResources(liveW,
+  liveH)`, sobald die Anforderung eine andere Größe hatte.
+* **Decal-Depth-Slot:** `createViewportRT` schreibt die Viewport-Tiefe in
+  den SRV-Slot `k_decalViewportDepthSlot` des Szenen-Heaps, der bei jedem
+  Szenen-Draw gebunden ist. Er wird auf die Live-Tiefe zurückgeschrieben
+  (Null-View, wenn es keinen Live-Viewport gibt).
+* **Kein TAA auf D3D12**, dieselbe SSR-Regel wie D3D11: vor dem Still
+  implizit ungültig, danach `ssrColorHistValid`/`ssrHistValid` = false.
+
+**Keine Parität mit Metal/GL, und so benannt:** SSAO-Ziele, das
+SSR-Ping-Pong und die GI-Schatten-Ziele (`ensureGiShadowTargets`) ziehen in
+`DrawScene` lazy auf die Framegröße nach, jeweils hinter einem GPU-Flush.
+Eine Anforderung, die von der Live-Größe abweicht, kostet deshalb mehrere
+Flushes auf beiden Seiten und verwirft die GI-Schatten-Akkumulation
+(`giHistValid`) zweimal, im Screenshot-Frame und im nächsten echten Frame.
+Eine Anforderung in Viewport-Größe zahlt davon nichts.
+
+Nicht ausgeführt: Retire-Sweeps, Timestamp-Paar, Zähler-Reset, Overlay,
+Present. Kompiliert nur im Windows-CI; Pixel auf echter D3D12-Hardware
+**nicht verifiziert**, Witness wäre `HE_DUMP_SCENEIMAGE`.
 
 ## 3. Verifikation
 
@@ -406,8 +460,8 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
   mit 1280×720 oder größer anfühlen.
 * Inline-PNG ≤ 2,5 MiB (`kInlineMaxPngBytes`), Shim-Frame ≤ 4 MiB; darüber
   `file`.
-* Metal, OpenGL und D3D11 rendern Stills (`RenderSceneImage`), D3D12/Vulkan
-  noch nicht; die Gizmos im Viewport gibt
+* Metal, OpenGL, D3D11 und D3D12 rendern Stills (`RenderSceneImage`),
+  Vulkan noch nicht; die Gizmos im Viewport gibt
   es auf jedem Backend, das Debug-Linien zeichnet.
 * Die Frustums sind per Bauart in keinem Tool-Bild (§5); die ImGui-Tags
   (`MCP #n`) sind auch im Live-Witness nicht drin (der Capture liest die
@@ -421,10 +475,14 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
 
 ## 7. Nähte für die Folgeschritte
 
-* **Andere Backends:** OpenGL und D3D11 sind nachgezogen (§2). D3D12/Vulkan
-  liefern bis dahin `unsupported` mit Namen; dort gibt es wie bei Metal einen
+* **Andere Backends:** OpenGL, D3D11 und D3D12 sind nachgezogen (§2). Vulkan
+  liefert bis dahin `unsupported` mit Namen; dort gibt es wie bei Metal einen
   Swapchain-Pass (Present, ImGui-Overlay) zu überspringen, also das
-  `m_captureOnly`-Muster oder D3D11s Schnitt (Viewport-Frame als eigene
+  `m_captureOnly`-Muster oder D3D11/D3D12s Schnitt (Viewport-Frame als eigene
   Methode, Swapchain-Teil bleibt in `Render()`), nicht das GL-Muster. Wer
-  seine HDR-Zwischenziele wie D3D11 nur beim Anlegen des Viewport-Targets
-  baut, muss sie nach dem Still selbst auf die Live-Größe zurückbauen.
+  seine HDR-Zwischenziele wie D3D11/D3D12 nur beim Anlegen des
+  Viewport-Targets baut, muss sie nach dem Still selbst auf die Live-Größe
+  zurückbauen; wer wie D3D12 Ringe pro Frame-in-Flight hat, nimmt den
+  Slot des nächsten echten Frames nach einem vollen Flush und schreibt
+  Descriptor-Slots, die das Viewport-Target beim Anlegen belegt, nach der
+  Rückgabe zurück.
