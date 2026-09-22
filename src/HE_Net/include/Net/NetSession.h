@@ -7,8 +7,8 @@
 //   • surfaces connect/disconnect lifecycle as callbacks and a live peer list.
 //
 // It is transport-agnostic (holds a non-owning ITransport*), so the very same
-// session drives loopback in tests, GameNetworkingSockets for gameplay, or a
-// WebSocket link for editor collaboration. This is the seam both Layer 3a
+// session drives loopback in tests, UdpTransport for gameplay, or a TCP link
+// for editor collaboration. This is the seam both Layer 3a
 // (replication) and Layer 3b (presence/locks) build on.
 
 #include "Net/BitStream.h"

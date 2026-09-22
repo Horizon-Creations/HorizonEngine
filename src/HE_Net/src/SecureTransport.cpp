@@ -6,6 +6,8 @@
 #include <Hpak/Aes256Gcm.h>
 #include <Hpak/KeyDerivation.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <random>
 #include <utility>
@@ -450,13 +452,24 @@ void SecureTransport::handleData(ConnectionId conn, Peer& p,
     }
 
     const std::uint64_t counter = readU64BE(frame.data());
-    // Strictly increasing: rejects replayed and reordered frames.
-    if (counter <= p.lastRecvCounter) {
-        HE_LOG_WARN(Net, "Replay or reorder on conn %llu: counter %llu after %llu",
-                    static_cast<unsigned long long>(conn),
-                    static_cast<unsigned long long>(counter),
-                    static_cast<unsigned long long>(p.lastRecvCounter));
-        failPeer(conn, p, "frame counter did not increase (replay or reorder)");
+    const std::uint8_t  window  = std::min(m_cfg.replayWindow, kReplayWindowFrames);
+    if (window == 0) {
+        // Strictly increasing: rejects replayed and reordered frames. Over an
+        // ordered transport a reorder cannot happen honestly, so it is treated
+        // as the attack it would be.
+        if (counter <= p.lastRecvCounter) {
+            HE_LOG_WARN(Net, "Replay or reorder on conn %llu: counter %llu after %llu",
+                        static_cast<unsigned long long>(conn),
+                        static_cast<unsigned long long>(counter),
+                        static_cast<unsigned long long>(p.lastRecvCounter));
+            failPeer(conn, p, "frame counter did not increase (replay or reorder)");
+            return;
+        }
+    } else if (!replayWindowAdmits(conn, p, counter, window)) {
+        // Frame gone, connection stays: over UDP an old or duplicated
+        // datagram is ordinary weather, and a genuine replay attempt simply
+        // achieves nothing. The window is only ADVANCED after the tag has
+        // verified (below), so a forged counter cannot push it forward.
         return;
     }
 
@@ -481,12 +494,84 @@ void SecureTransport::handleData(ConnectionId conn, Peer& p,
         return;
     }
 
-    p.lastRecvCounter = counter;
+    if (window == 0) {
+        p.lastRecvCounter = counter;
+    } else {
+        replayWindowRecord(p, counter, window);
+    }
+    p.stats.framesAccepted++;
     HE_LOG_TRACE(Net, "Secure frame in: %s plain, counter %llu (conn %llu)",
                  detail::logBytes(plain.size()).c_str(),
                  static_cast<unsigned long long>(counter),
                  static_cast<unsigned long long>(conn));
     m_events.push_back(NetEvent{ NetEventType::Data, conn, std::move(plain) });
+}
+
+// ─── Anti-replay window ──────────────────────────────────────────────────────
+// lastRecvCounter is the highest counter accepted; bit i of recvWindowBits
+// says whether (lastRecvCounter - i) was accepted. Bit 0 is always set once a
+// frame has been accepted.
+
+bool SecureTransport::replayWindowAdmits(ConnectionId conn, Peer& p,
+                                         std::uint64_t counter, std::uint8_t window) {
+    bool replay = false;
+    bool stale  = false;
+    if (p.lastRecvCounter == 0) {
+        // Nothing accepted yet; every counter is new (they start at 1).
+    } else if (counter > p.lastRecvCounter) {
+        // New highest: admitted.
+    } else {
+        const std::uint64_t back = p.lastRecvCounter - counter;
+        if (back >= window)                          stale  = true;
+        else if (p.recvWindowBits & (1ull << back))  replay = true;
+    }
+    if (!replay && !stale) return true;
+
+    if (replay) p.stats.replaysDropped++;
+    else        p.stats.staleDropped++;
+
+    // Rate-limited: over UDP a reorder past the window is not an anomaly worth
+    // a line each, but a STREAM of drops is worth knowing about. The tenth in
+    // a minute is reported, then silence until the next minute.
+    const auto nowMs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (nowMs - p.dropLogWindowStartMs >= 60'000) {
+        p.dropLogWindowStartMs = nowMs;
+        p.dropsThisMinute      = 0;
+    }
+    if (++p.dropsThisMinute == 10) {
+        HE_LOG_WARN(Net, "Secure channel on conn %llu dropped %u frames this minute outside "
+                         "or inside its replay window (latest: counter %llu after %llu, %s)",
+                    static_cast<unsigned long long>(conn), p.dropsThisMinute,
+                    static_cast<unsigned long long>(counter),
+                    static_cast<unsigned long long>(p.lastRecvCounter),
+                    replay ? "replay" : "too old");
+    } else {
+        HE_LOG_TRACE(Net, "Secure frame dropped on conn %llu: counter %llu after %llu (%s)",
+                     static_cast<unsigned long long>(conn),
+                     static_cast<unsigned long long>(counter),
+                     static_cast<unsigned long long>(p.lastRecvCounter),
+                     replay ? "replay" : "too old");
+    }
+    return false;
+}
+
+void SecureTransport::replayWindowRecord(Peer& p, std::uint64_t counter, std::uint8_t window) {
+    if (p.lastRecvCounter == 0 || counter > p.lastRecvCounter) {
+        const std::uint64_t shift = (p.lastRecvCounter == 0) ? 64 : (counter - p.lastRecvCounter);
+        p.recvWindowBits = (shift >= 64) ? 0 : (p.recvWindowBits << shift);
+        p.recvWindowBits |= 1ull;
+        p.lastRecvCounter = counter;
+        return;
+    }
+    const std::uint64_t back = p.lastRecvCounter - counter;
+    if (back < window) p.recvWindowBits |= (1ull << back);
+}
+
+SecureTransport::PeerStats SecureTransport::statsOf(ConnectionId conn) const {
+    const auto it = m_peers.find(conn);
+    return (it == m_peers.end()) ? PeerStats{} : it->second.stats;
 }
 
 // ─── ITransport ──────────────────────────────────────────────────────────────

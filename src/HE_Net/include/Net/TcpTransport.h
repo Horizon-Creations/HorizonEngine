@@ -6,7 +6,7 @@
 // on — collab needs reliable, ordered, lossless delivery, which is exactly what
 // TCP provides, without the weight of a UDP reliability layer.
 //
-// (GameNetworkingSockets stays reserved for gameplay replication, where
+// (UdpTransport is the transport for gameplay replication, where
 // unreliable low-latency channels actually matter.)
 //
 // TCP is a byte stream, but ITransport is datagram-oriented, so every message is

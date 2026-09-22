@@ -5,6 +5,7 @@
 #ifdef _WIN32
   #include <winsock2.h>
   #include <ws2tcpip.h>
+  #include <mstcpip.h>   // SIO_UDP_CONNRESET
   #pragma comment(lib, "Ws2_32.lib")
 #else
   #include <arpa/inet.h>
@@ -758,6 +759,204 @@ bool socketBindUdpTo(SocketHandle h, const std::string& localAddress, std::uint1
 }
 
 std::string socketErrorText() { return errText(lastError()); }
+
+// ─── UDP for the game transport ──────────────────────────────────────────────
+
+namespace {
+
+// Windows only: a UDP socket that sent to a port nobody listens on gets the
+// ICMP "port unreachable" back as WSAECONNRESET on its NEXT recvfrom — and
+// keeps reporting it, which reads like the socket died. It did not. A game
+// host whose client just quit would see this on every frame. The ioctl turns
+// the behaviour off so recvfrom simply reports "nothing" like every other OS.
+//
+// ⚠ Untested here: this session runs on macOS, and Windows CI only proves it
+// compiles. The fallback in UdpTransport (treat a receive Error as "stop
+// reading this tick", never as a dead socket) covers the case either way.
+void disableUdpConnReset(SocketHandle h) {
+#ifdef _WIN32
+    #ifndef SIO_UDP_CONNRESET
+    #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+    #endif
+    BOOL  off   = FALSE;
+    DWORD bytes = 0;
+    ::WSAIoctl(static_cast<SOCKET>(h), SIO_UDP_CONNRESET, &off, sizeof(off),
+               nullptr, 0, &bytes, nullptr, nullptr);
+#else
+    (void)h;
+#endif
+}
+
+// Requested for every game-transport socket. 1 MiB is comfortably above a full
+// reliable send window and below what any of the three platforms refuses.
+constexpr int kUdpBufferBytes = 1024 * 1024;
+
+} // namespace
+
+bool socketSetBufferSizes(SocketHandle h, int recvBytes, int sendBytes) {
+    if (h == kInvalidSocket) return false;
+    bool ok = true;
+#ifdef _WIN32
+    ok = ::setsockopt(static_cast<SOCKET>(h), SOL_SOCKET, SO_RCVBUF,
+                      reinterpret_cast<const char*>(&recvBytes), sizeof(recvBytes)) == 0 && ok;
+    ok = ::setsockopt(static_cast<SOCKET>(h), SOL_SOCKET, SO_SNDBUF,
+                      reinterpret_cast<const char*>(&sendBytes), sizeof(sendBytes)) == 0 && ok;
+#else
+    ok = ::setsockopt(static_cast<int>(h), SOL_SOCKET, SO_RCVBUF,
+                      &recvBytes, sizeof(recvBytes)) == 0 && ok;
+    ok = ::setsockopt(static_cast<int>(h), SOL_SOCKET, SO_SNDBUF,
+                      &sendBytes, sizeof(sendBytes)) == 0 && ok;
+#endif
+    return ok;
+}
+
+SocketHandle socketCreateUdpDualStack(std::uint16_t port) {
+    if (!socketSystemInit()) return kInvalidSocket;
+
+    SocketHandle h6 = socketCreateUdp6();
+    if (h6 != kInvalidSocket) {
+        // Same discipline as the TCP listener: clear IPV6_V6ONLY, then READ IT
+        // BACK, because a silently ignored option means every IPv4 client's
+        // packets land on what is, to them, a closed port — with nothing in
+        // any log to say the host only ever spoke IPv6.
+        const int off = 0;
+        int       readBack = 1;
+#ifdef _WIN32
+        ::setsockopt(static_cast<SOCKET>(h6), IPPROTO_IPV6, IPV6_V6ONLY,
+                     reinterpret_cast<const char*>(&off), sizeof(off));
+        int rbLen = static_cast<int>(sizeof(readBack));
+        if (::getsockopt(static_cast<SOCKET>(h6), IPPROTO_IPV6, IPV6_V6ONLY,
+                         reinterpret_cast<char*>(&readBack), &rbLen) != 0) readBack = 1;
+#else
+        ::setsockopt(static_cast<int>(h6), IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+        socklen_t rbLen = sizeof(readBack);
+        if (::getsockopt(static_cast<int>(h6), IPPROTO_IPV6, IPV6_V6ONLY,
+                         &readBack, &rbLen) != 0) readBack = 1;
+#endif
+        if (readBack == 0) {
+            socketSetReuseAddr(h6, true);
+            sockaddr_in6 addr{};
+            addr.sin6_family = AF_INET6;
+            addr.sin6_addr   = in6addr_any;
+            addr.sin6_port   = htons(port);
+#ifdef _WIN32
+            const bool bound = ::bind(static_cast<SOCKET>(h6),
+                                      reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+#else
+            const bool bound = ::bind(static_cast<int>(h6),
+                                      reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+#endif
+            if (bound) {
+                socketSetBufferSizes(h6, kUdpBufferBytes, kUdpBufferBytes);
+                disableUdpConnReset(h6);
+                HE_LOG_INFO(Net, "UDP socket is dual-stack (one IPv6 socket serving both "
+                                 "families) on port %u",
+                            static_cast<unsigned>(socketBoundPort(h6)));
+                return h6;
+            }
+            HE_LOG_WARN(Net, "IPv6 UDP bind on port %u failed (%s) — falling back to IPv4 only",
+                        static_cast<unsigned>(port), errText(lastError()).c_str());
+        } else {
+            HE_LOG_WARN(Net, "%s",
+                "This system will not let one UDP socket serve both IP families "
+                "(IPV6_V6ONLY could not be cleared) — binding IPv4 only.");
+        }
+        socketClose(h6);
+    } else {
+        HE_LOG_WARN(Net, "No IPv6 stack available — UDP socket is IPv4 only");
+    }
+
+    SocketHandle h4 = socketCreateUdp();
+    if (h4 == kInvalidSocket) {
+        HE_LOG_ERROR(Net, "Could not create an IPv4 UDP socket");
+        return kInvalidSocket;
+    }
+    if (!socketBindUdp(h4, port)) {
+        HE_LOG_ERROR(Net, "Could not bind UDP port %u — %s",
+                     static_cast<unsigned>(port), errText(lastError()).c_str());
+        socketClose(h4);
+        return kInvalidSocket;
+    }
+    socketSetBufferSizes(h4, kUdpBufferBytes, kUdpBufferBytes);
+    disableUdpConnReset(h4);
+    return h4;
+}
+
+SocketHandle socketCreateUdpFor(bool peerIsIPv6) {
+    SocketHandle h = peerIsIPv6 ? socketCreateUdp6() : socketCreateUdp();
+    if (h == kInvalidSocket) return kInvalidSocket;
+    // An explicit bind to port 0 so the local port exists before the first
+    // send and can be read back for diagnostics; sendto would bind implicitly
+    // anyway, but then the port is unknown until a packet has left.
+    bool bound = false;
+    if (peerIsIPv6) {
+        sockaddr_in6 addr{};
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr   = in6addr_any;
+#ifdef _WIN32
+        bound = ::bind(static_cast<SOCKET>(h), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+#else
+        bound = ::bind(static_cast<int>(h), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
+#endif
+    } else {
+        bound = socketBindUdp(h, 0);
+    }
+    if (!bound) {
+        HE_LOG_ERROR(Net, "Could not bind an ephemeral UDP port — %s",
+                     errText(lastError()).c_str());
+        socketClose(h);
+        return kInvalidSocket;
+    }
+    socketSetBufferSizes(h, kUdpBufferBytes, kUdpBufferBytes);
+    disableUdpConnReset(h);
+    return h;
+}
+
+bool socketResolveUdpAddress(const std::string& host, std::uint16_t port,
+                             std::string& outNumericHost, bool& outIsIPv6) {
+    outNumericHost.clear();
+    outIsIPv6 = false;
+    if (!socketSystemInit()) return false;
+
+    addrinfo hints{};
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+    addrinfo* res = nullptr;
+    if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res) {
+        HE_LOG_ERROR(Net, "Could not resolve %s for UDP", host.c_str());
+        return false;
+    }
+
+    bool ok = false;
+    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+        char buf[INET6_ADDRSTRLEN] = {};
+        if (ai->ai_family == AF_INET6) {
+            auto* v6 = reinterpret_cast<sockaddr_in6*>(ai->ai_addr);
+            if (!::inet_ntop(AF_INET6, &v6->sin6_addr, buf, sizeof(buf))) continue;
+            outNumericHost = buf;
+            // A link-local answer is unusable without its scope; render it the
+            // way socketSendTo's parser expects ("fe80::1%en0").
+            if (v6->sin6_scope_id != 0) {
+                outNumericHost += "%" + std::to_string(v6->sin6_scope_id);
+            }
+            outIsIPv6 = true;
+            ok = true;
+            break;
+        }
+        if (ai->ai_family == AF_INET) {
+            auto* v4 = reinterpret_cast<sockaddr_in*>(ai->ai_addr);
+            if (!::inet_ntop(AF_INET, &v4->sin_addr, buf, sizeof(buf))) continue;
+            outNumericHost = buf;
+            outIsIPv6 = false;
+            ok = true;
+            break;
+        }
+    }
+    ::freeaddrinfo(res);
+    return ok;
+}
+
 
 bool socketSetBroadcast(SocketHandle h, bool enable) {
     if (h == kInvalidSocket) return false;

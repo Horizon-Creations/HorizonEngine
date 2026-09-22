@@ -183,6 +183,12 @@ add_executable(he_tests
     test_net_bitstream.cpp
     test_net_loopback.cpp
     test_net_tcp.cpp
+    # The gameplay transport over real localhost UDP sockets, with an injected
+    # clock and the transport's own drop hook for loss under the reliability.
+    test_net_udp.cpp
+    # The deterministic bad-network decorator itself: does what its numbers say,
+    # the same way every run, on its own simulated clock.
+    test_net_lossy.cpp
     test_net_secure.cpp
     test_net_discovery.cpp
     test_net_directory.cpp
@@ -998,7 +1004,7 @@ endif()
 # run at the same instant makes a failure depend on the scheduler, which is the
 # one thing a test may never do. They share a lock, so they serialise against
 # each other while the other hundred files still run in parallel.
-set(_he_net_tests test_net_tcp test_net_secure test_net_discovery test_net_collab
+set(_he_net_tests test_net_tcp test_net_udp test_net_secure test_net_discovery test_net_collab
                   test_net_directory test_collab_controller)
 foreach(_t IN LISTS _he_net_tests)
     if(TEST ${_t})

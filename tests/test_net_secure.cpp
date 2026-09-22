@@ -5,6 +5,7 @@
 #include <Net/SecureTransport.h>
 #include <Net/TcpTransport.h>
 
+#include <algorithm>
 #include <chrono>
 #include <deque>
 #include <memory>
@@ -536,4 +537,236 @@ TEST_CASE("SecureTransport: a failed handshake logs the reason without the secre
 
     CHECK_FALSE(spy.mentions(hostSecret));
     CHECK_FALSE(spy.mentions(clientSecret));
+}
+
+// ─── Anti-replay window (the UDP mode) ───────────────────────────────────────
+// Over UdpTransport frames arrive out of order, and "counter must strictly
+// increase" would drop the connection on every swapped pair. With
+// Config::replayWindow set, the receiver keeps a window instead: a reorder
+// inside it is accepted, a replay is dropped and the connection lives. The
+// exact-distance cases use the spy endpoint (its inbound queue can be
+// rearranged by hand); the statistical case runs over LossyTransport.
+
+#include <Net/LoopbackTransport.h>
+#include <Net/LossyTransport.h>
+
+namespace {
+
+SpyPair makeWindowedPair(const std::string& secret, std::uint8_t window) {
+    auto a = std::make_unique<SpyEndpoint>();
+    auto b = std::make_unique<SpyEndpoint>();
+    SpyEndpoint* aRaw = a.get();
+    SpyEndpoint* bRaw = b.get();
+    aRaw->peer = bRaw;
+    bRaw->peer = aRaw;
+    aRaw->inbound.push_back(NetEvent{ NetEventType::Connected, 1, {} });
+    bRaw->inbound.push_back(NetEvent{ NetEventType::Connected, 1, {} });
+
+    SecureTransport::Config hostCfg;
+    hostCfg.joinSecret        = secret;
+    hostCfg.role              = NetRole::Host;
+    hostCfg.requireEncryption = false;
+    hostCfg.replayWindow      = window;
+    SecureTransport::Config clientCfg = hostCfg;
+    clientCfg.role = NetRole::Client;
+
+    SpyPair out;
+    out.hostRaw   = aRaw;
+    out.clientRaw = bRaw;
+    out.host   = SecureTransport::wrap(std::move(a), hostCfg);
+    out.client = SecureTransport::wrap(std::move(b), clientCfg);
+    REQUIRE(out.host);
+    REQUIRE(out.client);
+    pumpRounds(*out.host, *out.client);
+    drainSecure(*out.host);
+    drainSecure(*out.client);
+    REQUIRE(out.host->stateOf(1) == HandshakeState::Established);
+    REQUIRE(out.client->stateOf(1) == HandshakeState::Established);
+    return out;
+}
+
+std::vector<std::uint8_t> numbered(std::uint32_t i) {
+    return { static_cast<std::uint8_t>(i >> 24), static_cast<std::uint8_t>(i >> 16),
+             static_cast<std::uint8_t>(i >> 8),  static_cast<std::uint8_t>(i) };
+}
+std::uint32_t numberOf(const std::vector<std::uint8_t>& v) {
+    return (static_cast<std::uint32_t>(v[0]) << 24) | (static_cast<std::uint32_t>(v[1]) << 16) |
+           (static_cast<std::uint32_t>(v[2]) << 8)  |  static_cast<std::uint32_t>(v[3]);
+}
+
+// Host sends `count` frames; they queue in the client's raw inbound deque
+// WITHOUT being processed, so the test can rearrange them before the client
+// pumps.
+void queueFrames(SpyPair& p, std::uint32_t count) {
+    for (std::uint32_t i = 0; i < count; ++i) {
+        p.host->send(1, numbered(i), SendMode::ReliableOrdered);
+    }
+    REQUIRE(p.clientRaw->inbound.size() == count);
+}
+
+std::vector<std::uint32_t> receivedNumbers(SecureTransport& t) {
+    std::vector<std::uint32_t> out;
+    for (const NetEvent& ev : drainSecure(t)) {
+        if (ev.type == NetEventType::Data) out.push_back(numberOf(ev.data));
+    }
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("SecureTransport: with a replay window a reorder inside the window is accepted")
+{
+    SpyPair p = makeWindowedPair("WINDOWSECRET123456789ABCDE", SecureTransport::kReplayWindowFrames);
+    if (!p.host->encryptionActive()) return;
+
+    // 40 frames; the first one is moved to the back: it arrives 39 later.
+    queueFrames(p, 40);
+    NetEvent first = std::move(p.clientRaw->inbound.front());
+    p.clientRaw->inbound.pop_front();
+    p.clientRaw->inbound.push_back(std::move(first));
+
+    p.client->update();
+    const auto got = receivedNumbers(*p.client);
+    REQUIRE(got.size() == 40);
+    CHECK(got.back() == 0);                                 // late, but delivered
+    CHECK(p.client->connectionCount() == 1);
+    CHECK(p.client->statsOf(1).framesAccepted == 40);
+    CHECK(p.client->statsOf(1).replaysDropped == 0);
+    CHECK(p.client->statsOf(1).staleDropped == 0);
+}
+
+TEST_CASE("SecureTransport: with a replay window a replayed frame is dropped and the link lives")
+{
+    SpyPair p = makeWindowedPair("WINDOWSECRET123456789ABCDE", SecureTransport::kReplayWindowFrames);
+    if (!p.host->encryptionActive()) return;
+
+    queueFrames(p, 10);
+    // Frame 3 again, verbatim, behind the rest.
+    p.clientRaw->inbound.push_back(p.clientRaw->inbound[3]);
+
+    p.client->update();
+    const auto got = receivedNumbers(*p.client);
+    REQUIRE(got.size() == 10);                              // exactly once each
+    for (std::uint32_t i = 0; i < 10; ++i) CHECK(got[i] == i);
+    CHECK(p.client->statsOf(1).replaysDropped == 1);
+    CHECK(p.client->connectionCount() == 1);
+
+    // Still usable afterwards: the next frame goes through.
+    p.host->send(1, numbered(99), SendMode::ReliableOrdered);
+    p.client->update();
+    const auto after = receivedNumbers(*p.client);
+    REQUIRE(after.size() == 1);
+    CHECK(after[0] == 99);
+}
+
+TEST_CASE("SecureTransport: a frame older than the window is dropped, the link lives")
+{
+    SpyPair p = makeWindowedPair("WINDOWSECRET123456789ABCDE", SecureTransport::kReplayWindowFrames);
+    if (!p.host->encryptionActive()) return;
+
+    // Frame 0 held back behind 100 others: distance 100 > window 64.
+    queueFrames(p, 101);
+    NetEvent first = std::move(p.clientRaw->inbound.front());
+    p.clientRaw->inbound.pop_front();
+    p.clientRaw->inbound.push_back(std::move(first));
+
+    p.client->update();
+    const auto got = receivedNumbers(*p.client);
+    REQUIRE(got.size() == 100);
+    for (const std::uint32_t n : got) CHECK(n != 0);
+    CHECK(p.client->statsOf(1).staleDropped == 1);
+    CHECK(p.client->statsOf(1).replaysDropped == 0);
+    CHECK(p.client->connectionCount() == 1);
+}
+
+TEST_CASE("SecureTransport: without a window a single swapped pair still fails the peer (negative control)")
+{
+    // replayWindow = 0 is the default every existing consumer runs with, and
+    // the cases above would prove nothing if this one did not fail.
+    SpyPair p = makeWindowedPair("WINDOWSECRET123456789ABCDE", 0);
+    if (!p.host->encryptionActive()) return;
+
+    LogSpy spy;
+    queueFrames(p, 2);
+    std::swap(p.clientRaw->inbound[0], p.clientRaw->inbound[1]);
+
+    p.client->update();
+    const auto got = receivedNumbers(*p.client);
+    CHECK(got.size() == 1);                                 // the first (out-of-order) one
+    CHECK(p.client->connectionCount() == 0);                // then the link is gone
+    CHECK(spy.mentions("did not increase"));
+}
+
+TEST_CASE("SecureTransport: 1000 frames through LossyTransport reorder and duplication with a window")
+{
+    auto [la, lb] = LoopbackTransport::createPair();
+    // The handshake runs over a CLEAN link and the mistreatment starts after
+    // it: there is no reliability under this decorator, so a lost or
+    // duplicated handshake frame is a failed handshake — which over the real
+    // UdpTransport cannot happen, because that one deduplicates and resends
+    // underneath. What is under test is the data path.
+    auto lossyHost   = LossyTransport::wrap(std::move(la), {});
+    auto lossyClient = LossyTransport::wrap(std::move(lb), {});
+    LossyTransport* hostRaw   = lossyHost.get();
+    LossyTransport* clientRaw = lossyClient.get();
+
+    SecureTransport::Config hostCfg;
+    hostCfg.joinSecret        = "LOSSYSECRET123456789ABCDEF";
+    hostCfg.role              = NetRole::Host;
+    hostCfg.requireEncryption = false;
+    hostCfg.replayWindow      = SecureTransport::kReplayWindowFrames;
+    SecureTransport::Config clientCfg = hostCfg;
+    clientCfg.role = NetRole::Client;
+
+    auto host   = SecureTransport::wrap(std::move(lossyHost), hostCfg);
+    auto client = SecureTransport::wrap(std::move(lossyClient), clientCfg);
+    REQUIRE(host);
+    REQUIRE(client);
+
+    // Handshake: the reorder delay means a few simulated ms have to pass.
+    for (int i = 0; i < 200 && (host->stateOf(1) != HandshakeState::Established ||
+                                client->stateOf(1) != HandshakeState::Established); ++i) {
+        host->update();
+        client->update();
+        hostRaw->advance(1);
+        clientRaw->advance(1);
+    }
+    REQUIRE(host->stateOf(1) == HandshakeState::Established);
+    REQUIRE(client->stateOf(1) == HandshakeState::Established);
+    drainSecure(*host);
+    drainSecure(*client);
+    if (!host->encryptionActive()) return;
+
+    // Reorder up to 30 sends back, 5 % duplicates, no loss.
+    LossyTransport::Config bad;
+    bad.reorderPercent   = 30.f;
+    bad.reorderDelayMs   = 30;
+    bad.duplicatePercent = 5.f;
+    bad.seed             = 99;
+    hostRaw->setConfig(bad);
+
+    // One frame per simulated millisecond, so reorder distance ≤ 30 frames.
+    std::vector<std::uint32_t> got;
+    for (std::uint32_t i = 0; i < 1000; ++i) {
+        host->send(1, numbered(i), SendMode::ReliableOrdered);
+        hostRaw->advance(1);
+        host->update();
+        client->update();
+        for (const std::uint32_t n : receivedNumbers(*client)) got.push_back(n);
+    }
+    hostRaw->flush();
+    client->update();
+    for (const std::uint32_t n : receivedNumbers(*client)) got.push_back(n);
+
+    // Every frame exactly once, connection intact, duplicates caught by the window.
+    REQUIRE(got.size() == 1000);
+    std::vector<std::uint32_t> sorted = got;
+    std::sort(sorted.begin(), sorted.end());
+    for (std::uint32_t i = 0; i < 1000; ++i) REQUIRE(sorted[i] == i);
+    CHECK(got != sorted);                                   // reorder really happened
+    CHECK(client->connectionCount() == 1);
+    CHECK(client->statsOf(1).framesAccepted == 1000);
+    CHECK(client->statsOf(1).replaysDropped == hostRaw->stats().duplicated);
+    CHECK(client->statsOf(1).replaysDropped > 0);
+    CHECK(client->statsOf(1).staleDropped == 0);
 }

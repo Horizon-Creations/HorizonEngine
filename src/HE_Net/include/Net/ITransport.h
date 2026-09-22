@@ -3,10 +3,13 @@
 // ─── HorizonNet Layer 1 — transport abstraction ──────────────────────────────
 // The transport is the *only* thing that touches the wire. Everything above it
 // (message dispatch, session, presence/lock collaboration, gameplay replication)
-// is transport-agnostic. Concrete backings, added in later checkpoints:
-//   • LoopbackTransport      — in-process, no sockets (here; for tests + local editor)
-//   • GnsTransport           — Valve GameNetworkingSockets, reliable-UDP (N1 real net)
-//   • WebSocketTransport     — firewall-friendly, editor collaboration / browser
+// is transport-agnostic. Concrete backings:
+//   • LoopbackTransport      — in-process, no sockets (tests + local editor)
+//   • TcpTransport           — editor collaboration and the MCP bridge (reliable stream)
+//   • UdpTransport           — gameplay replication: own reliability layer, all three SendModes
+// Decorators over any of them:
+//   • SecureTransport        — authenticated, encrypted channel
+//   • LossyTransport         — deterministic loss / reorder / duplication for tests
 //
 // Event model is poll-based: the owner pumps update() once per tick, then drains
 // poll() until it returns false. This keeps threading policy in the transport and

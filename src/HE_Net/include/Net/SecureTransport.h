@@ -47,8 +47,14 @@
 //
 // Data frames after the handshake: [8-byte counter BE][ciphertext || 16-byte tag]
 // The 96-bit GCM nonce is (direction tag || counter), so it is unique per key —
-// reuse would break GCM catastrophically. Counters must strictly increase, which
-// also rejects replayed frames.
+// reuse would break GCM catastrophically. The receiver's invariant is "no
+// counter is accepted twice". Over an ordered transport (TCP) that is enforced
+// as "strictly increasing", which also rejects replayed frames and costs
+// nothing. Over UDP, frames arrive out of order, and strictly-increasing would
+// turn every swapped pair into a dropped connection — so Config::replayWindow
+// switches the receiver to an anti-replay window (DTLS / IPsec style): the
+// highest counter seen plus a bitmask of the recent ones. Replays and frames
+// older than the window are dropped, silently, WITHOUT failing the peer.
 
 #include "Net/ITransport.h"
 
@@ -78,6 +84,22 @@ public:
         // Refuse to establish a session when no crypto backend is available,
         // rather than silently falling back to plaintext over the internet.
         bool requireEncryption = true;
+        // Anti-replay window in frames. 0 = counters must strictly increase
+        // (right over TCP and loopback: a reorder there IS corruption). Set to
+        // kReplayWindowFrames over UdpTransport, where reorder is weather.
+        // The caller decides, because an ITransport does not say whether it
+        // reorders and a decorator should not guess.
+        std::uint8_t replayWindow = 0;
+    };
+
+    // The one window size the bitmask supports (one bit per frame behind the
+    // highest counter). Smaller values work too; larger ones are clamped.
+    static constexpr std::uint8_t kReplayWindowFrames = 64;
+
+    struct PeerStats {
+        std::uint64_t framesAccepted = 0;
+        std::uint64_t replaysDropped = 0;   // counter seen before, inside the window
+        std::uint64_t staleDropped   = 0;   // counter older than the window
     };
 
     // Generate a high-entropy join secret (Crockford-style base32, ~128 bits).
@@ -111,6 +133,9 @@ public:
     // Handshake state of a peer — useful for diagnostics and tests.
     HandshakeState stateOf(ConnectionId conn) const;
 
+    // Replay-window counters for a peer (all zero when unknown).
+    PeerStats statsOf(ConnectionId conn) const;
+
     // A short one-way digest of the negotiated session key (never the key
     // itself). Two peers on the same connection compute the same value, so it
     // can be shown in the UI to confirm out-of-band that two users really are in
@@ -131,7 +156,13 @@ private:
         std::uint8_t   ephemeralPriv[32]{};
         std::uint8_t   sessionKey[32]{};
         std::uint64_t  sendCounter = 0;
-        std::uint64_t  lastRecvCounter = 0;
+        std::uint64_t  lastRecvCounter = 0;   // highest accepted (strict and window mode)
+        // Window mode: bit i set = counter (lastRecvCounter - i) was accepted.
+        std::uint64_t  recvWindowBits  = 0;
+        PeerStats      stats;
+        // Rate limit for the "dropped a frame" warning (window mode).
+        std::uint64_t  dropLogWindowStartMs = 0;
+        std::uint32_t  dropsThisMinute      = 0;
     };
 
     void drainInner();
@@ -141,6 +172,12 @@ private:
                          const std::vector<std::uint8_t>& frame);
     void handleData(ConnectionId conn, Peer& p,
                     const std::vector<std::uint8_t>& frame);
+    // Window mode only. `Admits` is the pre-decryption check (replay / too old
+    // → false, counted, rate-limited log); `Record` advances the window and is
+    // called only after the tag verified.
+    bool replayWindowAdmits(ConnectionId conn, Peer& p, std::uint64_t counter,
+                            std::uint8_t window);
+    void replayWindowRecord(Peer& p, std::uint64_t counter, std::uint8_t window);
     // Computes the transcript mac and the session key from the exchanged nonces
     // and public keys. Returns false when the ECDH step fails.
     bool deriveSecrets(Peer& p, std::uint8_t outMac[32]);
