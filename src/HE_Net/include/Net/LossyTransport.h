@@ -17,9 +17,19 @@
 // decorator's own clock, which only advance() moves. A test with 50 ms latency
 // therefore does not wait 50 ms; it calls advance(50).
 //
-// Loss and reorder are per datagram; the inner transport's SendMode is passed
-// through untouched. Wrapping a LoopbackTransport pair — one decorator per
-// end, each with its own seed — gives two independently bad directions.
+// The SendMode decides what may happen to a message, because the decorator
+// models what arrives ABOVE UdpTransport, and that transport has already
+// repaired the reliable channels:
+//   • Unreliable       — loss, reorder, duplication, latency and jitter
+//   • Reliable         — latency, jitter and reorder only (delivery is
+//                        guaranteed but unordered: a retransmission overtakes)
+//   • ReliableOrdered  — latency and jitter only, and never overtaking an
+//                        earlier ordered message to the same peer
+// A session handshake sent ReliableOrdered therefore always completes, while
+// the snapshots around it are mistreated exactly as the numbers say.
+//
+// Wrapping a LoopbackTransport pair — one decorator per end, each with its
+// own seed — gives two independently bad directions.
 
 #include "Net/ITransport.h"
 
@@ -27,6 +37,7 @@
 #include <deque>
 #include <memory>
 #include <random>
+#include <unordered_map>
 #include <vector>
 
 namespace HE::Net {
@@ -101,6 +112,9 @@ private:
     std::mt19937                m_rng;
     std::uint64_t               m_nowMs   = 0;
     std::uint64_t               m_counter = 0;
+    // Latest due time of a ReliableOrdered message per peer: the floor for
+    // the next one, so jitter can never reorder that channel.
+    std::unordered_map<ConnectionId, std::uint64_t> m_orderedFloor;
     std::vector<Delayed>        m_queue;   // unsorted; update() picks the due ones
     Stats                       m_stats;
 };

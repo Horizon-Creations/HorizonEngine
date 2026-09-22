@@ -56,9 +56,10 @@ std::vector<std::uint32_t> drainIds(ITransport& t) {
 }
 
 // Send `count` messages A → B one per simulated millisecond, then flush.
-std::vector<std::uint32_t> run(LossyPair& p, std::uint32_t count) {
+std::vector<std::uint32_t> run(LossyPair& p, std::uint32_t count,
+                               SendMode mode = SendMode::Unreliable) {
     for (std::uint32_t i = 0; i < count; ++i) {
-        p.a->send(LoopbackTransport::kPeer, msg(i), SendMode::Unreliable);
+        p.a->send(LoopbackTransport::kPeer, msg(i), mode);
         p.a->advance(1);
         p.a->update();
         p.b->update();
@@ -182,6 +183,52 @@ TEST_CASE("LossyTransport: duplication delivers a datagram twice")
         CHECK(got[2 * i + 1] == i);
     }
     CHECK(p.a->stats().duplicated == 50);
+}
+
+TEST_CASE("LossyTransport: the reliable modes survive a hostile configuration the way UDP would deliver them")
+{
+    // What sits above UdpTransport never loses a reliable message and never
+    // sees an ordered one out of order — a session handshake sent
+    // ReliableOrdered through this decorator must therefore always complete,
+    // whatever the numbers say about the snapshots next to it.
+    LossyTransport::Config hostile;
+    hostile.lossPercent      = 30.f;
+    hostile.reorderPercent   = 50.f;
+    hostile.reorderDelayMs   = 15;
+    hostile.duplicatePercent = 20.f;
+    hostile.latencyMs        = 20;
+    hostile.jitterMs         = 10;
+    hostile.seed             = 5;
+
+    SUBCASE("ReliableOrdered: complete, once each, in order") {
+        LossyPair p = makePair(hostile);
+        const auto got = run(p, 300, SendMode::ReliableOrdered);
+        REQUIRE(got.size() == 300);
+        for (std::uint32_t i = 0; i < 300; ++i) REQUIRE(got[i] == i);
+        CHECK(p.a->stats().dropped == 0);
+        CHECK(p.a->stats().duplicated == 0);
+    }
+    SUBCASE("Reliable: complete, once each, order free") {
+        LossyPair p = makePair(hostile);
+        const auto got = run(p, 300, SendMode::Reliable);
+        REQUIRE(got.size() == 300);
+        std::set<std::uint32_t> unique(got.begin(), got.end());
+        CHECK(unique.size() == 300);
+        bool swapped = false;
+        for (std::size_t i = 1; i < got.size(); ++i) {
+            if (got[i] < got[i - 1]) { swapped = true; break; }
+        }
+        CHECK(swapped);   // the mode difference is visible
+        CHECK(p.a->stats().dropped == 0);
+        CHECK(p.a->stats().duplicated == 0);
+    }
+    SUBCASE("Unreliable: the numbers apply (negative control for the two above)") {
+        LossyPair p = makePair(hostile);
+        const auto got = run(p, 300, SendMode::Unreliable);
+        CHECK(got.size() < 300);
+        CHECK(p.a->stats().dropped > 0);
+        CHECK(p.a->stats().duplicated > 0);
+    }
 }
 
 TEST_CASE("LossyTransport: the two directions are independent")

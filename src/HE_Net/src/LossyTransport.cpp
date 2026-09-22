@@ -48,7 +48,12 @@ void LossyTransport::enqueue(ConnectionId conn, const std::uint8_t* data, std::s
 void LossyTransport::send(ConnectionId conn, const std::uint8_t* data,
                           std::size_t len, SendMode mode) {
     m_stats.offered++;
-    if (roll(m_cfg.lossPercent)) {
+    const bool unreliable = (mode == SendMode::Unreliable);
+    const bool ordered    = (mode == SendMode::ReliableOrdered);
+
+    // Only the unreliable channel loses anything: the reliable ones arrive,
+    // because the transport this stands in for makes sure they do.
+    if (unreliable && roll(m_cfg.lossPercent)) {
         m_stats.dropped++;
         return;
     }
@@ -60,6 +65,15 @@ void LossyTransport::send(ConnectionId conn, const std::uint8_t* data,
         const int off = j(m_rng);
         due = (off < 0 && static_cast<std::uint64_t>(-off) > due) ? 0 : due + off;
     }
+    if (ordered) {
+        // Never behind an earlier ordered message to the same peer; the
+        // floor absorbs the jitter that would otherwise swap two of them.
+        std::uint64_t& floor = m_orderedFloor[conn];
+        due   = std::max(due, floor);
+        floor = due;
+        enqueue(conn, data, len, mode, due);
+        return;
+    }
     if (roll(m_cfg.reorderPercent)) {
         // Slipping a datagram behind the ones sent after it is what reorder
         // IS on a real path; the extra delay is at least one tick so it can
@@ -69,7 +83,7 @@ void LossyTransport::send(ConnectionId conn, const std::uint8_t* data,
         m_stats.reordered++;
     }
     enqueue(conn, data, len, mode, due);
-    if (roll(m_cfg.duplicatePercent)) {
+    if (unreliable && roll(m_cfg.duplicatePercent)) {
         // The copy takes its own path through latency and jitter, so the two
         // can arrive in either order — as duplicates on a real network do.
         std::uint64_t dupDue = m_nowMs + m_cfg.latencyMs;
@@ -122,6 +136,7 @@ void LossyTransport::disconnect(ConnectionId conn) {
     m_queue.erase(std::remove_if(m_queue.begin(), m_queue.end(),
                                  [conn](const Delayed& d) { return d.conn == conn; }),
                   m_queue.end());
+    m_orderedFloor.erase(conn);
     m_inner->disconnect(conn);
 }
 

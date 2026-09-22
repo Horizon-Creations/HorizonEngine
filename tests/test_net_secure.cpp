@@ -746,9 +746,11 @@ TEST_CASE("SecureTransport: 1000 frames through LossyTransport reorder and dupli
     hostRaw->setConfig(bad);
 
     // One frame per simulated millisecond, so reorder distance ≤ 30 frames.
+    // Unreliable, because that is the mode the decorator mistreats, and the
+    // realistic case for the window: snapshots over SecureTransport over UDP.
     std::vector<std::uint32_t> got;
     for (std::uint32_t i = 0; i < 1000; ++i) {
-        host->send(1, numbered(i), SendMode::ReliableOrdered);
+        host->send(1, numbered(i), SendMode::Unreliable);
         hostRaw->advance(1);
         host->update();
         client->update();
