@@ -2557,6 +2557,24 @@ namespace
 	  "When the chain simply ends, the run is over and the world goes on until "
 	  "the next breakpoint.",
 	  "", "horizoncode#debugging" },
+	// ── Play ▸ multiplayer (docs/gameplay-replication-plan.md §5.6) ──────────
+	// Keyed under the menu's own scope, like every other menu entry: the Play
+	// menu pushes "Play", so the wrapper at the call site needs nothing.
+	{ "Play/Play as Host", "",
+	  "Starts play mode AND opens a session others can join. The menu then shows "
+	  "the port and the join code — the two things somebody else needs. Everyone "
+	  "who joins plays in this editor's world: what happens here is what "
+	  "happened.",
+	  "", "editor#play-mode" },
+	{ "Play/Join Session...", "",
+	  "Starts play mode and connects to somebody else's session, with their "
+	  "address and join code. Without the code the connection cannot complete at "
+	  "all, so both fields are required.",
+	  "", "editor#play-mode" },
+	{ "Play/Copy Join Code", "",
+	  "Puts this session's join code on the clipboard, to send to whoever is "
+	  "about to join.",
+	  "", "editor#play-mode" },
 	{ "viewport.time-scale", "Game time",
 	  "What the RUNNING GAME is doing to its own clock, which is not the same as "
 	  "the Pause button next to it: this reads the scale a script set with Set "

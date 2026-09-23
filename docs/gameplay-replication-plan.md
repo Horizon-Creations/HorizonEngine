@@ -752,6 +752,78 @@ bereit sind, pausiert der Host die Snapshots für die, die noch laden. Additive
 Zonen (`loadAdditive`) sind v1-Nicht-Ziel (§9.1), weil ihre Root-Entities
 Laufzeit-Identitäten haben, die erst ein Zonen-Bind bräuchte.
 
+### 5.9 Stand nach Schritt 5
+
+Umgesetzt (Commits `cec54ae3`, `fdc0c86e` und der Nachtrag dazu): beide
+Anwendungen halten eine `NetGameSession`, `Ctx::net` zeigt darauf, die
+`net`-Gruppe steht mit 22 Rows, und die sechs Lebenszyklus-Events laufen durch
+alle vier Frontends.
+
+**Die zwei Punkte aus §5.8 sind erledigt.** `notifySpawned` las die Pose schon
+in Schritt 4 von der Entity; der zweite, dass Binds und Spawns auch an Peers
+vor dem Welcome gingen, ist jetzt ein `SpawnReplicator::setJoinedFilter`, den
+`NetGameSession` gegen das Roster bindet. Das war kein Schönheitsfehler: `owner
+== localPlayer` ist der Test, mit dem der Client entscheidet, ob ein Spawn in
+seinen `PlayerHost` gehört, und vor dem Welcome ist `localPlayer` noch 0 --
+genau der Wert, den eine host-eigene Entity als `owner` trägt. Ein Client hätte
+also die Kiste des Hosts als seine eigene Spielfigur angemeldet. Die
+Negativkontrolle steht im Test: ohne den Filter zählt `spawnsSent` 1 statt 0.
+
+**Vier Abweichungen von der Beschreibung oben:**
+
+1. **`kMsgControl` (+213) ist aus der Reservierung geholt und `assignControl`
+   ist EINE Funktion**, nicht drei Aufrufe an einer Aufrufstelle. §5.4 Punkt 4
+   nennt die Reihenfolge (Besitz, `assignControl` in der Replikation, dann die
+   Nachricht), und sie falsch zu haben ist unsichtbar: die erste Eingabe des
+   Besitzers käme bei einem Host an, der die Entity noch nicht für seine hält,
+   und das ist eine Hard-Observation gegen einen ehrlichen Spieler.
+2. **Der LAN-Browser wohnt jetzt doch in `NetGameSession`.** Schritt 4 hatte ihn
+   bewusst draußen gelassen ("Browsen ist Sache der UI"), aber `net.joinLan` und
+   `net.lanSessionCount` sind Rows, und eine Row hat keine UI, in der sie
+   nachsehen könnte. Er läuft unabhängig von `status()`, weil ein Hauptmenü
+   sucht, bevor es irgendwo beigetreten ist -- deshalb wird er in `update()`
+   VOR der Leerlauf-Bremse gepumpt.
+3. **`Application::launchFlags()` ist neu.** `--host` wäre nie angekommen:
+   `launchArguments()` wirft alles mit Bindestrich weg, weil ein Dokument keine
+   Option ist. Der Join-Code steht beim `--host` auf INFO im Log, und das ist
+   Absicht -- ohne diese Zeile kann kein zweiter Prozess ihn erfahren.
+4. **Kein `net.declareVar*/setVar*/getVar*` und kein `net.call*`.** Die stehen
+   in §7.1 in derselben Tabelle, gehören aber zu Schritt 6 und 7; sie hier
+   anzulegen hieße, Rows ohne den `PropertyReplicator` bzw. den `RpcRouter`
+   dahinter zu haben.
+
+**Der Zwei-Prozess-Durchlauf, 23.09.2026, macOS 27, zwei echte Prozesse über
+echte UDP-Sockets auf 127.0.0.1** (gebautes Spiel gegen gebautes Spiel, nicht
+Editor gegen Spiel -- siehe unten):
+
+```
+Host   : --host=7777 --name=HostBox
+         "Hosting session 'X7M7WJCC' as 'HostBox': 0 replicated entities"
+         "--host: listening on port 7777, join code HBAQ68M3YVWZSB8YV0VS05WDDM"
+         "Player 2 ('ClientBox') joined on connection 1 (2 in session)"
+         "Player 2 ('ClientBox') left (0)"
+Client : --join=127.0.0.1:7777 --code=<der Code> --name=ClientBox
+         "UDP connect established (conn 1, host's id 1)"
+         "Secure channel armed as client, payload encryption on (AES-256-GCM)"
+         "Welcome: player 2, scene '', 30.0 Hz"  →  "Joined as player 2"
+```
+
+Damit sind Handshake, Cookie, Krypto, Hello/Welcome/JoinComplete, Roster und
+der Abgang über Prozessgrenzen hinweg einmal wirklich gelaufen.
+
+**Was dieser Durchlauf NICHT zeigt, ehrlich gesagt.** Das benutzte Projekt war
+ein alter Export ohne eine einzige Entity mit `Replicates` -- "0 replicated
+scene entities" steht so im Log. Es ist also der Verbindungs- und
+Spielerpfad, der belegt ist, nicht Snapshots, Spawns oder Possession über
+den Draht; die haben ihren Beleg im headless-Test über `LossyTransport`. Und
+es war Spiel gegen Spiel: der Editor-Host geht nur über einen Menüklick, den
+niemand von der Kommandozeile auslösen kann. Beides gehört zu 5b, wo mit der
+Inspector-Kategorie erst eine Szene entsteht, die etwas zu replizieren hat.
+
+Die LAN-Ankündigung scheiterte an der fehlenden Local-Network-Berechtigung des
+Terminals (`LanBeacon.cpp:192` sagt genau das) -- für einen Direkt-Join
+belanglos, für `net.joinLan` auf diesem Rechner nicht, und deshalb hier notiert.
+
 ### 5.6 Play-Modus im Editor
 
 Zwei Wege, der zweite als Ausbau:

@@ -155,6 +155,11 @@ struct Peer {
     // for "the class ran on the client".
     int                              spawnCalls   = 0;
     int                              despawnCalls = 0;
+    // What kMsgControl did on this side: how often the application was told an
+    // entity is ours, and which one it was told about last.
+    int                              controlCalls = 0;
+    Entity                           controlled   = entt::null;
+    std::uint32_t                    controlNetId = 0;
     std::vector<std::string>         spawnedClasses;
 };
 
@@ -225,6 +230,13 @@ Peer& addClient(Rig& rig, NetGameSession::JoinOptions options,
     raw->session->spawns()->setDespawnFunction([raw](Entity e) {
         ++raw->despawnCalls;
         if (raw->world->registry().valid(e)) raw->world->destroyEntity(e);
+    });
+    // The application half of possession: in a real client this is where the
+    // local player controller takes the character.
+    raw->session->setControlFunction([raw](Entity e, std::uint32_t netId) {
+        ++raw->controlCalls;
+        raw->controlled   = e;
+        raw->controlNetId = netId;
     });
 
     rig.clients.push_back(std::move(peer));
@@ -427,6 +439,101 @@ TEST_CASE("net session: a host spawn is created on the client") {
     const auto* nc = client.world->registry().try_get<NetworkComponent>(mirrored);
     REQUIRE(nc != nullptr);
     CHECK(nc->owner == 2u);
+}
+
+// ─── 3b. Possession: the host says which entity a player drives ──────────────
+
+TEST_CASE("net session: assignControl reaches the owner and nobody else") {
+    Rig rig;
+    startHost(rig, defaultHost());
+    Peer& anna = addClient(rig, defaultJoin("Anna"), 2);
+    Peer& bert = addClient(rig, defaultJoin("Bert"), 3);
+    rig.step(20);
+    REQUIRE(anna.session->status() == NetGameSession::Status::Joined);
+    REQUIRE(bert.session->status() == NetGameSession::Status::Joined);
+    const G::PlayerId annaId = anna.session->localPlayer();
+    REQUIRE(annaId != G::kNoPlayer);
+
+    // The host spawns Anna's character and gives it to her, in that order —
+    // there is nothing to assign until the entity is replicated.
+    const Entity body = rig.host.world->createEntity("AnnaBody");
+    rig.host.world->registry().emplace_or_replace<TransformComponent>(body).position = { 3, 0, 0 };
+    const std::uint32_t netId = rig.host.session->spawns()->notifySpawned(
+        body, "classes/PlayerCharacter.hcclass", annaId);
+    REQUIRE(netId != 0u);
+    CHECK(rig.host.session->assignControl(annaId, body));
+    rig.step(10);
+
+    // The owner learned about it; the other client did not. A kMsgControl that
+    // went to everyone would have every client predicting the same character.
+    CHECK(anna.controlCalls == 1);
+    CHECK(anna.controlNetId == netId);
+    CHECK((anna.controlled != entt::null));
+    CHECK(anna.controlled == anna.session->replication()->entityOf(netId));
+    CHECK(anna.session->localCharacter() == anna.controlled);
+    CHECK(bert.controlCalls == 0);
+    CHECK((bert.session->localCharacter() == entt::null));
+
+    // …and the host recorded it, which is what net.playerName's neighbours read.
+    const G::PlayerInfo* info = rig.host.session->roster().find(annaId);
+    REQUIRE(info != nullptr);
+    CHECK(info->characterNetId == netId);
+
+    SUBCASE("an entity that is not replicated cannot be handed to anybody") {
+        const Entity loose = rig.host.world->createEntity("Loose");
+        rig.host.world->registry().emplace_or_replace<TransformComponent>(loose);
+        CHECK_FALSE(rig.host.session->assignControl(annaId, loose));
+    }
+    SUBCASE("neither can a player who is not in the session") {
+        CHECK_FALSE(rig.host.session->assignControl(99u, body));
+    }
+    SUBCASE("leaving clears it, so a second session inherits no character") {
+        anna.session->leave();
+        CHECK((anna.session->localCharacter() == entt::null));
+    }
+}
+
+TEST_CASE("net session: a spawn is not sent to a peer that has not been welcomed") {
+    // The hole step 4 left open, and it is not cosmetic. Before the Welcome a
+    // client's own localPlayer is still 0, and 0 is also what a HOST-owned
+    // entity carries as its owner — so a spawn arriving early reads as "mine"
+    // on the client, and its PlayerHost adopts a crate.
+    //
+    // MUTATION: drop the setJoinedFilter call in NetGameSession::startCommon
+    // (or make joinedConnections return every connection) and the first CHECK
+    // below sees two spawns instead of one.
+    Rig rig;
+    startHost(rig, defaultHost());
+
+    // A peer whose link is up and whose Hello has NOT been processed: the
+    // connection is announced to the host, and nothing is stepped.
+    const ConnectionId lurker = rig.fabric->next++;
+    rig.fabric->up[lurker] = true;
+    rig.fabric->hostIn.push_back(NetEvent{ NetEventType::Connected, lurker, {} });
+    rig.host.session->update(0.016f);   // the host now knows the link, not the player
+    REQUIRE(rig.host.session->roster().size() == 1u);   // the host itself, alone
+
+    const Entity crate = rig.host.world->createEntity("Crate");
+    rig.host.world->registry().emplace_or_replace<TransformComponent>(crate);
+    REQUIRE(rig.host.session->spawns()->notifySpawned(
+        crate, "classes/Crate.hcclass", G::kNoPlayer) != 0u);
+
+    // One datagram for the spawn, and it went nowhere: the only connection is
+    // the lurker's, and it is not in the roster.
+    CHECK(rig.host.session->spawns()->stats().spawnsSent == 0u);
+
+    // A properly joined client does get it, from the same call.
+    Peer& client = addClient(rig, defaultJoin(), 2);
+    rig.step(20);
+    REQUIRE(client.session->status() == NetGameSession::Status::Joined);
+    CHECK(client.spawnCalls == 1);   // out of the late-join baseline
+
+    const Entity second = rig.host.world->createEntity("Barrel");
+    rig.host.world->registry().emplace_or_replace<TransformComponent>(second);
+    REQUIRE(rig.host.session->spawns()->notifySpawned(
+        second, "classes/Barrel.hcclass", G::kNoPlayer) != 0u);
+    rig.step(10);
+    CHECK(client.spawnCalls == 2);
 }
 
 // ─── 4. Late join: binds, spawns and a baseline for what never moves ─────────
