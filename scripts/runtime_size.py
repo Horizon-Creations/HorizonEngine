@@ -97,7 +97,28 @@ LIMITS = {
     # ── macOS/arm64 ─────────────────────────────────────────────────────────
     "darwin": {
         # (total incl. Python, total without Python)
-        "game":         (90.0, 32.0),
+        #
+        # game, without python: 32.0 until 23.09.2026, raised to 36.0 on purpose.
+        # Weighed that day on a LOCAL Release tree (Homebrew libcrypto, no
+        # HE_PREFER_MBEDTLS), HorizonGame target only, twice:
+        #   bc1206aa (main before Thema 77)   62.7 MB total, 31.9 MB without python
+        #   cec6b3b3 (Thema 77 merged)        63.4 MB total, 32.6 MB without python
+        # The 0.7 MB between them is the multiplayer replication layer and
+        # nothing else: HorizonScene +534 KB (Net/ NetGameSession,
+        # PropertyReplicator, SpawnReplicator, RpcRouter, ValueWire, plus the
+        # net.* rows in EngineApi.cpp), HorizonNet +106 KB (UdpTransport),
+        # HorizonCore +42 KB (HorizonCodeRuntime), the exe +31 KB. Rendering,
+        # SDL and Python did not move by a byte. It cannot be switched off per
+        # project: there is one game runtime per platform and multiplayer is a
+        # project setting, so leaving it out would mean a fourth flavour or
+        # HorizonNet as a plugin, and that is A3b work, not a flag.
+        # CI weighed the same two commits at 27.2 and 27.9 MB (runs 35840866847
+        # and 35911830801, mbedTLS recipe) and stayed green; it was the local
+        # tree that went red. That tree had used up the whole 32 MB before this
+        # feature arrived: 31.9 MB is not "10 percent plus 5 MB" of headroom any
+        # more, the growth since 05.09. (CI 23.7 -> 27.2 MB) ate it. So the new
+        # number goes back to the rule below: 32.6 measured plus 10 percent.
+        "game":         (90.0, 36.0),
         # Both measured 04.09.2026, Release, macOS/arm64, on the tree
         # scripts/build_runtimes.py produces, plus roughly 10% headroom:
         #   app-advanced  76.9 MB total, 22.2 MB without python  (rendering 1.1 MB)
