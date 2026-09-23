@@ -1,5 +1,6 @@
 #include "Application/SplashScreen.h"
 #include "Diagnostics/Log.h"
+#include "Window/Window.h"   // hiddenWindowRequested
 
 // PNG only, and this is HorizonCore's ONE copy of the decoder: AppIcon.cpp reads
 // the generated window icon back through the same symbols, so it must not be
@@ -73,6 +74,15 @@ bool SplashScreen::open(const SplashConfig& cfg)
 	if (const char* off = SDL_getenv("HE_NO_SPLASH"); off && *off && *off != '0')
 	{
 		HE_LOG_INFO(Core, "%s", "Splash: disabled by HE_NO_SPLASH");
+		return false;
+	}
+	// Hidden mode: the splash is its own always-on-top window, the one piece
+	// of startup that would still pop up with the primary window held back.
+	// Checked here and not by each application's config, so the editor and a
+	// game with game.splashEnabled are covered by the same line.
+	if (HE::hiddenWindowRequested())
+	{
+		HE_LOG_INFO(Core, "%s", "Splash: off in hidden mode");
 		return false;
 	}
 	m_cfg = cfg;

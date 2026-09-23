@@ -136,6 +136,7 @@ add_executable(he_tests
     # once, and this is the one run that bakes it in the regular weight.
     test_ui_font_weight.cpp
     test_app_icon.cpp
+    test_hidden_window.cpp
     test_document_types.cpp
     test_autostart.cpp
     test_software_raster.cpp

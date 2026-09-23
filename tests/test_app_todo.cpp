@@ -748,8 +748,13 @@ namespace
         // post-processing setting and the sky untouched, the application started
         // perfectly, and it rendered an atmosphere behind its interface.
         const std::string shot = (exe.parent_path() / "boot.ppm").string();
+        // HE_HIDDEN_WINDOW=1: the same start, window and renderer and all, only
+        // never shown — this was the one test in the suite that put a window on
+        // the screen and took the focus, twice per run. The frame budget alone
+        // would already imply it (hiddenWindowRequested), but written out it
+        // survives a change to that rule and says what the test wants.
         const std::string cmd =
-            "cd " + dir + " && HE_EXIT_AFTER_FRAMES=" + std::to_string(frames) +
+            "cd " + dir + " && HE_HIDDEN_WINDOW=1 HE_EXIT_AFTER_FRAMES=" + std::to_string(frames) +
             " HE_CAPTURE_FRAME=" + std::to_string(frames > 4 ? frames - 4 : 1) +
             " HE_CAPTURE_PATH=" + shot +
             " ./" + exe.filename().string() + " > " + log + " 2>&1 & echo $!";
@@ -905,6 +910,22 @@ TEST_CASE("Both app flavours actually start")
         CHECK_MESSAGE(code != -2, "the application never finished 30 frames");
         CHECK_MESSAGE(code == 0, "the application did not reach a clean exit — it "
                                  "crashed or quit early during startup");
+
+        // ── …and it stayed off the screen ────────────────────────────────────
+        // Nothing here can ask the window server whether a window appeared (a
+        // locked session or a CI runner has nobody to ask), so the application
+        // answers for itself: SDL's own flags on the primary window as the loop
+        // starts. Only read after a clean exit — boot.log is complete then.
+        if (code == 0)
+        {
+            std::ifstream in(out / "boot.log");
+            const std::string text((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+            CHECK_MESSAGE(text.find("Primary window hidden as the main loop starts")
+                              != std::string::npos,
+                          "the application ran with a visible window — hidden mode "
+                          "(HE_HIDDEN_WINDOW=1) did not reach it");
+        }
 
         // ── …and it drew the application, not a landscape ────────────────────
         // This page leaves a border of pixels the interface does not cover, so a

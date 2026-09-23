@@ -35,6 +35,32 @@ namespace HE
         bool            startHidden = false;
     };
 
+    // ── Hidden mode: a run nobody is watching ─────────────────────────────
+    // A test, a screenshot script or a smoke run starts the real application,
+    // and until now that meant a real window on somebody's screen for as long
+    // as the run took, plus (on macOS) a Dock icon and the keyboard focus taken
+    // away from whatever they were typing into. startHidden above is not that:
+    // it is the splash's "show it once it is ready", and Run() shows the window
+    // the moment OnInit returns.
+    //
+    // Hidden mode is the other thing. The window is still CREATED — the
+    // renderer needs a surface, and "does it start" is exactly what these runs
+    // check — but it is never shown. No splash, no ImGui windows of its own, no
+    // message box waiting for a click that never comes, no activation.
+    //
+    // HE_HIDDEN_WINDOW decides when it is set ("0" forces a visible window,
+    // anything else hides it). Otherwise a run with HE_EXIT_AFTER_FRAMES or
+    // HE_DUMP_PATH is hidden: both mean "run by a script", and neither was ever
+    // meant to be looked at while it ran.
+    //
+    // The pure half takes the three values, so a test can ask it without
+    // touching its own environment; the other half reads the environment once
+    // and remembers the answer for the life of the process.
+    HE_API bool hiddenWindowFromEnv(const char* hiddenWindow,
+                                    const char* exitAfterFrames,
+                                    const char* dumpPath);
+    HE_API bool hiddenWindowRequested();
+
     class HE_API Window
     {
     public:

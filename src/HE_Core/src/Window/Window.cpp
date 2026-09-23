@@ -2,6 +2,7 @@
 #include "UIWidget/UIWindowFrame.h"   // UIWindowHit — the hit test speaks it
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <SDL3/SDL.h>
 #include "Diagnostics/Log.h"
@@ -46,6 +47,44 @@ namespace
     }
 } // namespace
 
+    bool hiddenWindowFromEnv(const char* hiddenWindow, const char* exitAfterFrames,
+                             const char* dumpPath)
+    {
+        // Explicit wins, both ways: "0" is how a frame-budget run is made
+        // visible on purpose, when somebody does want to watch it.
+        if (hiddenWindow && *hiddenWindow)
+            return !(hiddenWindow[0] == '0' && hiddenWindow[1] == '\0');
+        // Same reading as the frame budget itself: a number that is not zero.
+        // "0" there means "no budget", and so no reason to hide.
+        if (exitAfterFrames && *exitAfterFrames &&
+            std::strtoull(exitAfterFrames, nullptr, 10) != 0)
+            return true;
+        return dumpPath && *dumpPath;
+    }
+
+    bool hiddenWindowRequested()
+    {
+        static const bool kHidden = []
+        {
+            const char* hw = std::getenv("HE_HIDDEN_WINDOW");
+            const char* ex = std::getenv("HE_EXIT_AFTER_FRAMES");
+            const char* dp = std::getenv("HE_DUMP_PATH");
+            const bool hidden = hiddenWindowFromEnv(hw, ex, dp);
+            // Which of the three decided it: a run that is unexpectedly hidden
+            // (or unexpectedly on screen) is answered by one line in the log.
+            if (hidden)
+                HE_LOG_INFO(Window, "Hidden mode on (%s) — no window, splash, Dock icon or "
+                                    "message box will be shown",
+                            (hw && *hw) ? "HE_HIDDEN_WINDOW"
+                            : (ex && *ex && std::strtoull(ex, nullptr, 10) != 0)
+                                ? "HE_EXIT_AFTER_FRAMES" : "HE_DUMP_PATH");
+            else if (hw && *hw)
+                HE_LOG_INFO(Window, "%s", "Hidden mode off (HE_HIDDEN_WINDOW=0)");
+            return hidden;
+        }();
+        return kHidden;
+    }
+
     Window::Window(const WindowProps& props, bool isPrimary) { m_isPrimary = isPrimary; Init(props); }
     Window::~Window()                        { Shutdown(); }
 
@@ -79,7 +118,11 @@ namespace
 
         // Choose SDL window flags and set GL attributes only for OpenGL
         SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE;
-        if (props.startHidden) flags |= SDL_WINDOW_HIDDEN;
+        // Hidden mode covers every window, the secondary ones an application
+        // opens included. SDL defers maximise, fullscreen and raise on a hidden
+        // window (pending_flags) instead of showing it, so nothing later in the
+        // run can bring it up except Show(), which refuses below.
+        if (props.startHidden || hiddenWindowRequested()) flags |= SDL_WINDOW_HIDDEN;
         switch (props.api)
         {
         case RendererBackend::OpenGL:
@@ -393,7 +436,7 @@ namespace
 
     void Window::Show()
     {
-        if (!m_window) return;
+        if (!m_window || hiddenWindowRequested()) return;
         SDL_ShowWindow(m_window);
         // Raise as well as show: the splash it was hidden behind was
         // always-on-top, and on macOS the newly shown window does not

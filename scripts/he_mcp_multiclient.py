@@ -22,7 +22,9 @@ What it checks (docs/mcp-scene-screenshot.md, Thema 74, Schritt 4):
 
 The editor runs with a private HOME under OUTDIR, so the human's config,
 endpoint file and screenshot folder are never touched. Everything (pictures,
-JSON replies, editor log) lands in OUTDIR.
+JSON replies, editor log) lands in OUTDIR. It also runs in hidden mode
+(HE_HIDDEN_WINDOW=1 unless set otherwise, docs/headless-runs.md): the window
+is never shown and the focus stays where it was.
 
 Usage:
     scripts/he_mcp_multiclient.py OUTDIR [--probe] [--live] [--editor PATH]
@@ -142,6 +144,10 @@ class Editor:
         env.setdefault("HE_DUMP_RHI", "Metal")
         env.setdefault("HE_SKY_TIME", "30")          # no cloud drift between stills
         env.setdefault("HE_COLLAB_OFFLINE", "1")
+        # No window, splash, Dock icon or focus grab (docs/headless-runs.md).
+        # This run has no frame budget and no HE_DUMP_PATH, so nothing turns
+        # hidden mode on by itself; HE_HIDDEN_WINDOW=0 from outside still shows it.
+        env.setdefault("HE_HIDDEN_WINDOW", "1")
         self.live_trigger = self.outdir / "live.trigger"
         self.live_bmp = self.outdir / "live.bmp"
         env["HE_DUMP_LIVE"] = str(self.live_bmp)

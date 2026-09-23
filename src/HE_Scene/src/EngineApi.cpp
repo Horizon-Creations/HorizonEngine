@@ -52,6 +52,7 @@
 #include <thread>
 #include <Diagnostics/Logger.h>   // loud save-v2 failures
 #include <SDL3/SDL.h>              // input::pushSdlSnapshot (live keyboard/mouse poll)
+#include <Window/Window.h>         // hiddenWindowRequested — dialogs stay shut in test runs
 #include <nlohmann/json.hpp>
 // The `db` group only. Kept out of EngineApi.h on purpose: no sqlite3* ever
 // leaves this file, so nothing above HorizonScene has to know SQLite exists.
@@ -1666,6 +1667,15 @@ void message(Ctx&, const std::string& title, const std::string& text, int kind)
     const SDL_MessageBoxFlags flag = kind == 2 ? SDL_MESSAGEBOX_ERROR
                                    : kind == 1 ? SDL_MESSAGEBOX_WARNING
                                                : SDL_MESSAGEBOX_INFORMATION;
+    // Hidden mode (a test or script run): nobody is there to dismiss it, and
+    // the block that is the point of the dialog would hold the run until its
+    // deadline. Logged instead, so the text is still on record.
+    if (HE::hiddenWindowRequested())
+    {
+        HE_LOG_INFO(Script, "dialog.message (hidden mode, not shown): %s — %s",
+                    title.c_str(), text.c_str());
+        return;
+    }
     // Null parent window: HE_Scene has no window handle, and a modeless box is
     // better than none. The call blocks until the user dismisses it, which is
     // the whole point of reaching for a native dialog.
@@ -1676,6 +1686,14 @@ void message(Ctx&, const std::string& title, const std::string& text, int kind)
 bool confirm(Ctx&, const std::string& title, const std::string& text,
              const std::string& affirmative, const std::string& negative)
 {
+    // Hidden mode: no one to ask, so the same answer a failed dialog gives
+    // below — no. An unanswered question is not a yes.
+    if (HE::hiddenWindowRequested())
+    {
+        HE_LOG_INFO(Script, "dialog.confirm (hidden mode, not shown): %s — answering no",
+                    title.c_str());
+        return false;
+    }
     // Button 0 is the affirmative one and carries BOTH default flags: Return
     // takes it, Escape takes the other. A dialog where Escape does nothing traps
     // a keyboard user.
