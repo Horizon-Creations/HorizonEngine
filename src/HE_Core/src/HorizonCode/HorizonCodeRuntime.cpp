@@ -359,6 +359,38 @@ std::unordered_map<std::string, Value> Runtime::variablesSnapshot(InstanceId id)
     return out;
 }
 
+std::vector<Runtime::ReplicatedVar> Runtime::replicatedVariablesOf(InstanceId id) const
+{
+    std::vector<ReplicatedVar> out;
+    const Inst* i = find(id);
+    if (!i) return out;
+
+    // A name declared at two levels is ONE property, and the leaf's declaration
+    // is the one that counts — the same "leaf-most wins" rule eventBindingsOf
+    // applies to events. The scan runs root-first (wire order) and a later
+    // level REPLACES an earlier entry in place, so the index a base class's
+    // variable occupies does not move when a derived class re-declares it.
+    auto report = [&out](const std::string& name, PinType type, bool notify)
+    {
+        for (ReplicatedVar& v : out)
+            if (v.name == name) { v.type = type; v.notify = notify; return; }
+        out.push_back({ name, type, notify });
+    };
+
+    if (i->compiled)
+    {
+        for (const auto& vi : i->compiled->varInfos())
+            if (vi.replicated && vi.type != PinType::Ref)
+                report(vi.name, vi.type, vi.repNotify);
+        return out;
+    }
+    for (const Graph& g : i->levels)
+        for (const Variable& v : g.variables)
+            if (v.replicated && v.scope == 0 && v.type != PinType::Ref)
+                report(v.name, v.type, v.repNotify);
+    return out;
+}
+
 std::vector<Runtime::EventBinding> Runtime::eventBindingsOf(InstanceId id) const
 {
     std::vector<EventBinding> out;

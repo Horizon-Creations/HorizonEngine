@@ -51,9 +51,24 @@ inline constexpr MessageId kMsgBaseline = kFirstUserMessage + 210;   // host →
 // player.possess (camera, input routing, player.character()).
 inline constexpr MessageId kMsgControl = kFirstUserMessage + 213;   // host → owner: netId
 
+// ── Replicated variables (PropertyReplicator, step 6) ──
+// Both ReliableOrdered, and the table carries the current VALUES as well as the
+// names. The plan (§6.2) wrote the delta as plain `Reliable` to let two entities
+// overtake each other; against the transport that shipped in step 2 that is a
+// hole rather than a saving — SendMode documents Reliable as "unspecified
+// order", so a delta may arrive before the table that names the property it
+// addresses, be dropped as an unknown index, and never be resent, because the
+// transport did deliver it. Ordering both is what makes a property model that
+// is correct under reorder; see PropertyReplicator.h for the full reasoning and
+// for what it costs.
+//
+// Because the table carries values, it is also the property BASELINE — there is
+// no separate message for a joining client, and kMsgSpawn's format is untouched.
+inline constexpr MessageId kMsgPropertyTable = kFirstUserMessage + 216;  // host → client: netId, names+values
+inline constexpr MessageId kMsgProperties    = kFirstUserMessage + 217;  // host → client: netId, (index, value)…
+
 // ── Reserved, so nothing else takes the number before its step lands ──
 // 214 kMsgScene / 215 kMsgSceneReady (scene change, plan §5.5)        — step 5
-// 216 kMsgPropertyTable / 217 kMsgProperties (plan §6.2)              — step 6
 // 218 kMsgRpc (plan §7.3)                                             — step 7
 
 // The gameplay protocol's own version, compared in the Hello. Separate from

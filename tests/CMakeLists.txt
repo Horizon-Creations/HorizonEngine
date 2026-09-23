@@ -226,6 +226,9 @@ add_executable(he_tests
     # The first real gameplay session: two and three NetGameSessions against
     # each other over LossyTransport, headless and on a simulated clock.
     test_net_game_session.cpp
+    # Replicated variables over the same hostile fabric: the wire format on its
+    # own, then values reaching a client that is losing and reordering.
+    test_net_property_replication.cpp
     test_anticheat.cpp
     test_integrity.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the

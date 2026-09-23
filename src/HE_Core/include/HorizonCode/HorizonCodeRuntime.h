@@ -167,6 +167,25 @@ public:
     // via reflection + overflow entries). Tooling/tests; not for hot paths.
     std::unordered_map<std::string, Value> variablesSnapshot(InstanceId id) const;
 
+    // ── Replicated variables (docs/gameplay-replication-plan.md §6.1) ────────
+    // Which of this instance's variables the authority sends to its clients,
+    // and which of those call OnRep_<Name> when one arrives. INSTANCE variables
+    // only (scope == 0) — a function-local has nobody to replicate to.
+    //
+    // Order is the wire order, and it is therefore part of the protocol rather
+    // than a convenience: the property table sends these names once and every
+    // delta afterwards addresses them by INDEX. Base classes first, each level's
+    // own declaration order after that — the order the graph chain has, which
+    // both peers derive from the same assets.
+    //
+    // It lives HERE, on the Runtime, and not in the replicator, because it is
+    // the one question whose answer differs between the two backends: an
+    // interpreted instance keeps its declarations in graphAt(level).variables, a
+    // generated one in varInfos(). A caller that had to know which it was
+    // holding would be a caller that gets it wrong for one of them.
+    struct ReplicatedVar { std::string name; PinType type; bool notify = false; };
+    std::vector<ReplicatedVar> replicatedVariablesOf(InstanceId id) const;
+
     // Fire an event on ONE instance. `elem` targets a widget element (0 = any).
     // `arg` feeds the event's data output when it has one.
     void fireEvent(InstanceId id, const std::string& event, int elem = 0, const Value& arg = {});

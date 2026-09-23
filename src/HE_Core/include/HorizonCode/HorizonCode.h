@@ -440,6 +440,24 @@ struct Variable
     // variableDefaultValue: the definition's defaults first, then these on top;
     // a name the definition no longer has simply doesn't apply.
     std::unordered_map<std::string, Value> structDefaults;
+    // ── Multiplayer (docs/gameplay-replication-plan.md §6.1) ─────────────────
+    // The authority owns this variable and every client is sent its value. The
+    // checkbox in the variable list IS the declaration — nothing else has to be
+    // written, which is the whole point of the feature. Only meaningful on an
+    // INSTANCE variable (scope == 0): a function-local exists for the length of
+    // one call and has nobody to replicate to.
+    //
+    // `repNotify` calls OnRep_<Name> on the clients after a value arrives, with
+    // the previous value as its one argument (§6.4). Explicit rather than "a
+    // function of that name exists", so renaming a variable cannot silently
+    // stop calling a handler that is still sitting there.
+    //
+    // Ref is never replicable (§6.1): an object handle names nothing on the
+    // other machine. The editor disables the checkbox for those, and the
+    // replicator refuses them again on its own — a graph edited by hand must
+    // not get further than a log line.
+    bool        replicated = false;
+    bool        repNotify  = false;
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };

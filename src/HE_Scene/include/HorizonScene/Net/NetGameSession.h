@@ -32,6 +32,7 @@
 #include "HorizonScene/AntiCheat/AntiCheatService.h"
 #include "HorizonScene/GameReplication.h"
 #include "HorizonScene/Net/PlayerRoster.h"
+#include "HorizonScene/Net/PropertyReplicator.h"
 #include "HorizonScene/Net/SpawnReplicator.h"
 
 #include <Net/ITransport.h>
@@ -303,6 +304,15 @@ public:
 	// in OnInit at which a replicator exists to be told.
 	void setSpawnFunction(SpawnReplicator::SpawnFn fn);
 	void setDespawnFunction(SpawnReplicator::DespawnFn fn);
+
+	// How the property replicator reaches a HorizonCode instance on an entity
+	// (PropertyReplicator::InstanceOfFn). Set on the SESSION for the reason the
+	// two above are: the application binds its services once at startup, and
+	// there is no moment at which a replicator exists to be told. Unbound means
+	// "this project has no HorizonCode classes", which is an ordinary state —
+	// the explicitly declared variables still replicate.
+	void setVariableSource(HorizonCode::Runtime* runtime,
+	                       PropertyReplicator::InstanceOfFn instanceOf);
 	// The entity this side drives, or entt::null. On the host that is whatever
 	// was last assigned to player 1; on a client, what kMsgControl named.
 	Entity localCharacter() const { return m_localCharacter; }
@@ -310,8 +320,9 @@ public:
 	// ── Parts ────────────────────────────────────────────────────────────────
 	// Null outside a session. Callers hold them for one frame at most: leave()
 	// destroys them.
-	GameReplication*  replication() { return m_replication.get(); }
-	SpawnReplicator*  spawns()      { return m_spawns.get(); }
+	GameReplication*   replication() { return m_replication.get(); }
+	SpawnReplicator*   spawns()      { return m_spawns.get(); }
+	PropertyReplicator* properties() { return m_properties.get(); }
 	HE::Net::NetSession* session()  { return m_net.get(); }
 	HE::AntiCheat::AntiCheatHost* antiCheat() { return m_acHost.get(); }
 	// The service is only built when the project asked for it; null = OFF.
@@ -372,6 +383,7 @@ private:
 	std::unique_ptr<HE::Net::NetSession>  m_net;
 	std::unique_ptr<GameReplication>      m_replication;
 	std::unique_ptr<SpawnReplicator>      m_spawns;
+	std::unique_ptr<PropertyReplicator>   m_properties;
 	std::unique_ptr<HE::AntiCheat::AntiCheatService> m_acService;
 	std::unique_ptr<HE::AntiCheat::AntiCheatHost>    m_acHost;
 
@@ -386,6 +398,8 @@ private:
 	// setters.
 	SpawnReplicator::SpawnFn   m_spawnFn;
 	SpawnReplicator::DespawnFn m_despawnFn;
+	HorizonCode::Runtime*              m_varRuntime = nullptr;
+	PropertyReplicator::InstanceOfFn   m_varInstanceOf;
 	Entity        m_localCharacter = entt::null;
 	// Client: a kMsgControl whose net id has no entity YET. It cannot normally
 	// happen (the spawn is ReliableOrdered and goes first), but an authored

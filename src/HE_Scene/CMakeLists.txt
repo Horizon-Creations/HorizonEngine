@@ -2,6 +2,8 @@ add_library(HorizonScene SHARED
 	src/GameReplication.cpp
 	src/Net/NetGameSession.cpp
 	src/Net/SpawnReplicator.cpp
+	src/Net/PropertyReplicator.cpp
+	src/Net/ValueWire.cpp
 	src/AntiCheat/AntiCheatService.cpp
 	src/AntiCheat/AntiCheatHost.cpp
 	src/AntiCheat/AntiCheatTelemetry.cpp

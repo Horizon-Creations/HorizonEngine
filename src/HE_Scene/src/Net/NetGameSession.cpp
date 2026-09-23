@@ -258,6 +258,14 @@ void NetGameSession::setDespawnFunction(SpawnReplicator::DespawnFn fn)
 	if (m_spawns) m_spawns->setDespawnFunction(m_despawnFn);
 }
 
+void NetGameSession::setVariableSource(HorizonCode::Runtime* runtime,
+                                       PropertyReplicator::InstanceOfFn instanceOf)
+{
+	m_varRuntime    = runtime;
+	m_varInstanceOf = std::move(instanceOf);
+	if (m_properties) m_properties->setRuntime(m_varRuntime, m_varInstanceOf);
+}
+
 // ── Finding a session on the LAN (plan §5.3) ────────────────────────────────
 
 bool NetGameSession::refreshLan()
@@ -318,6 +326,17 @@ bool NetGameSession::startCommon(std::unique_ptr<ITransport> transport, NetRole 
 	// every replicator this session builds (see the setters).
 	if (m_spawnFn)   m_spawns->setSpawnFunction(m_spawnFn);
 	if (m_despawnFn) m_spawns->setDespawnFunction(m_despawnFn);
+
+	// Replicated variables (plan §6). Same joined filter as the spawns, and for
+	// the same reason: a peer that is through the crypto handshake but has not
+	// been welcomed is not in the session, and a property table addressed to it
+	// names net ids it has never been told about.
+	m_properties = std::make_unique<PropertyReplicator>(m_net.get(), role, m_replication.get());
+	m_properties->setWorld(m_world);
+	m_properties->setJoinedFilter([this](ConnectionId conn) {
+		return m_roster.findByConnection(conn) != nullptr;
+	});
+	if (m_varRuntime) m_properties->setRuntime(m_varRuntime, m_varInstanceOf);
 
 	// The host is always present, even before anything else is: a session with
 	// nobody in it is a listening socket, not a session.
@@ -433,11 +452,13 @@ void NetGameSession::leave()
 	// waiting out the expiry.
 	m_announcer.stop();
 
-	if (m_acHost)   m_acHost->detach();
-	if (m_spawns)   m_spawns->clear();
+	if (m_acHost)     m_acHost->detach();
+	if (m_spawns)     m_spawns->clear();
+	if (m_properties) m_properties->clear();
 
 	// Reverse of construction: the session points at the transport, the
 	// replicators point at the session.
+	m_properties.reset();
 	m_spawns.reset();
 	m_replication.reset();
 	m_acHost.reset();
@@ -562,6 +583,12 @@ void NetGameSession::completeJoin(ConnectionId conn, PlayerId player)
 
 	// Binds and spawns first — the baseline's samples need somewhere to land.
 	m_spawns->sendWorldTo(conn);
+	// The property tables, for the same reason and in the same place: a table
+	// addresses a net id, so the entity behind it must already have arrived.
+	// The table carries the current values, which makes it the property
+	// baseline as well (PropertyReplicator.h) — a late joiner sees the door
+	// that was opened before it got here.
+	if (m_properties) m_properties->sendTablesTo(conn);
 	m_replication->sendBaseline(conn);
 
 	m_net->send(conn, kMsgJoinComplete, SendMode::ReliableOrdered);
@@ -859,6 +886,10 @@ void NetGameSession::update(float dt)
 	if (m_pendingControlNetId != 0) tryTakeControl();
 
 	m_replication->update(dt);
+	// AFTER the transform replication, which is where the frame's simulation
+	// ends: a property is compared against what was last sent, so it has to be
+	// read once everything that could have written it this frame has run.
+	if (m_properties) m_properties->update();
 
 	// Frame end, in the order AntiCheatHost documents: pump fires the events
 	// while a handler can still overrule the policy, flush executes what is

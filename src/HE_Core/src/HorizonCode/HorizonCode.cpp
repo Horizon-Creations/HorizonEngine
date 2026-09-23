@@ -1850,6 +1850,10 @@ nlohmann::json variableToJsonObj(const Variable& v)
     if (!v.s.empty()) e["s"] = v.s;
     if (v.access)     e["access"] = v.access;
     if (v.scope)      e["scope"] = v.scope;   // function-local (FunctionEntry id)
+    // Written only when set, like every flag here: a graph that replicates
+    // nothing is byte-identical to one saved before replication existed.
+    if (v.replicated) e["rep"] = true;
+    if (v.repNotify)  e["repNotify"] = true;
     if (v.isArray)    e["arr"] = true;
     if (v.isArray && !v.defaultItems.empty())
     {
@@ -1967,6 +1971,14 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     v.s    = e.value("s", std::string());
     v.access = e.value("access", 0);
     v.scope  = e.value("scope", 0);
+    v.replicated = e.value("rep", false);
+    v.repNotify  = e.value("repNotify", false);
+    // Two states that are not representable after a load, for the reason
+    // `isArray`/`container` are reconciled below: a Ref can never travel (§6.1),
+    // and Notify without Replicated would wait for a value that never arrives.
+    // A hand-edited file may say either; nothing downstream has to check.
+    if (v.type == P::Ref)  { v.replicated = false; }
+    if (!v.replicated)     { v.repNotify  = false; }
     v.isArray = e.value("arr", false);
     v.container = (ContainerKind)e.value("ctr", (int)ContainerKind::None);
     if (v.container != ContainerKind::None) v.isArray = true;   // see loadParams
