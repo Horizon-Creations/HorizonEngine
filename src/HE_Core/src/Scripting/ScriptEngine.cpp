@@ -371,6 +371,19 @@ bool ScriptEngine::callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg)
     return pcall(2, 0);
 }
 
+bool ScriptEngine::callInstanceMethod(InstanceId id, const char* fn, const ArgPusher& pushArgs)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    if (!fn) return true;
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, fn)) return true;
+    // `self` is already on the stack, so the argument count is one more than
+    // whatever the caller pushed.
+    const int pushed = pushArgs ? pushArgs(m_L) : 0;
+    return pcall(1 + pushed, 0);
+}
+
 bool ScriptEngine::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
     auto it = m_instances.find(id);

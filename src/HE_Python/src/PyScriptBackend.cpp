@@ -1354,6 +1354,29 @@ bool PyScriptBackend::callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg)
 	Py_DECREF(r); return true;
 }
 
+bool PyScriptBackend::callOnRep(InstanceId id, const std::string& varName,
+                                const HorizonCode::Value& oldValue)
+{
+	// on_rep_<name>, the snake_case twin of Lua's onRep_<name>. The variable's
+	// own name is used VERBATIM after the prefix — it is whatever the script
+	// passed to horizon.net.declareVar, so "health" gives on_rep_health and a
+	// variable somebody called "Health" gives on_rep_Health. Case-folding it
+	// would make two different declarations collide on one handler.
+	const std::string fn = "on_rep_" + varName;
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, fn.c_str())) return true;
+
+	// The same object shape any struct/map/enum takes across this boundary
+	// (pyFieldValueToObj) — a replicated variable is an ordinary value, and a
+	// handler must be able to read it the way it reads every other one.
+	PyObject* arg = pyFieldValueToObj(oldValue, 0);
+	if (!arg) { m_lastError = takePyError(); return false; }
+	PyObject* r = PyObject_CallMethod(obj, fn.c_str(), "O", arg);
+	Py_DECREF(arg);
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
 bool PyScriptBackend::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
 	const char* fn = ev == UIScriptEvent::Click      ? "on_click" :

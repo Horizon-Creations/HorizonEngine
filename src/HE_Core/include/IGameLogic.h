@@ -64,6 +64,18 @@ public:
     virtual void onDisconnected(int reason) { (void)reason; }
     virtual void onSessionStarted()         {}
     virtual void onSessionEnded()           {}
+
+    // A replicated variable on `entity` arrived from the authority
+    // (docs/gameplay-replication-plan.md §6.4). NO OLD VALUE, unlike the three
+    // scripting frontends, and that is the plan's own decision rather than an
+    // oversight: this interface crosses into a hot-loaded dylib, where a
+    // HorizonCode::Value would put a C++ type with strings and vectors in it
+    // across a module boundary that is rebuilt independently. A module that
+    // needs the previous value remembers it; the NEW one is read back through
+    // the net services.
+    //
+    // Appended at the END and defaulted, like the six above.
+    virtual void onRep(uint32_t entity, const char* name) { (void)entity; (void)name; }
 };
 
 // Typedefs for the DLL export function pointers

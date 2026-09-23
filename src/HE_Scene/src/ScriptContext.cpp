@@ -1594,6 +1594,27 @@ bool ScriptContext::callOnCheatDetected(ScriptEngine::InstanceId id, int reportI
     HE_SCRIPT_CALL("onCheatDetected", b->callOnCheatDetected(rawId(id), reportId));
 }
 
+bool ScriptContext::callOnRep(ScriptEngine::InstanceId id, const std::string& varName,
+                              const HorizonCode::Value& oldValue)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    if (langOf(id) == HE::ScriptLanguage::Python)
+        HE_SCRIPT_CALL("onRep", b->callOnRep(rawId(id), varName, oldValue));
+
+    // Lua: the VALUE is pushed here, with luaPushFieldValue — the same shape a
+    // struct, a map (with its `__keys` sidecar) or an enum takes anywhere else
+    // across this boundary, and the shape luaToStructValue reads back. The
+    // engine only supplies the call (ScriptEngine::callInstanceMethod).
+    //
+    // The name is used verbatim after the prefix: `health` gives onRep_health,
+    // and a variable somebody declared as `Health` gives onRep_Health. Folding
+    // the case would make two different declarations collide on one handler.
+    const std::string fn = "onRep_" + varName;
+    HE_SCRIPT_CALL("onRep", m_engine.callInstanceMethod(
+        rawId(id), fn.c_str(),
+        [&oldValue](lua_State* L) { luaPushFieldValue(L, oldValue, 0); return 1; }));
+}
+
 bool ScriptContext::callOnNetEvent(ScriptEngine::InstanceId id, NetScriptEvent ev, int arg)
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;

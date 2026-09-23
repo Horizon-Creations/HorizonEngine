@@ -1,6 +1,7 @@
 #pragma once
 #include "Types/Defines.h"
 #include "Scripting/ScriptTypes.h"
+#include "HorizonCode/HorizonCode.h"   // HorizonCode::Value, for callOnRep
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -120,6 +121,29 @@ public:
     // before this existed keeps compiling and simply never delivers one.
     virtual bool callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg)
     { (void)id; (void)ev; (void)arg; return true; }
+
+    // A replicated variable this entity owns arrived from the authority
+    // (docs/gameplay-replication-plan.md §6.4): onRep_<name>(self, old) in Lua,
+    // on_rep_<name>(self, old) in Python. `old` is the value this machine held
+    // before; the NEW one is already in the variable and is read with
+    // horizon.net.getVar*.
+    //
+    // Unlike the six lifecycle events above, this goes to the ONE instance on
+    // the entity whose property changed, not to every instance of the session:
+    // a property belongs to an entity, and telling every script in the game
+    // that somebody else's door opened would be noise nobody asked for.
+    //
+    // A HorizonCode::Value rather than the four-type ScriptPropValue, because a
+    // replicated variable may be a struct, an enum or a map, and a callback that
+    // silently dropped those would be worse than none. The Lua side does NOT go
+    // through here — ScriptContext pushes the value itself with the marshaller
+    // it already owns (ScriptEngine::callInstanceMethod) — so this is the
+    // Python/plugin path, where the ABI boundary is real.
+    //
+    // Defaulted like callOnNetEvent, for the same reason.
+    virtual bool callOnRep(InstanceId id, const std::string& varName,
+                           const HorizonCode::Value& oldValue)
+    { (void)id; (void)varName; (void)oldValue; return true; }
 
     // Declared properties of a loaded script (editor inspector surface) and
     // per-instance override injection (before callOnStart).

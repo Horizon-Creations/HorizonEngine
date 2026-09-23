@@ -2,6 +2,7 @@
 #include "Types/Defines.h"
 #include "Scripting/IScriptBackend.h"
 #include "Scripting/ScriptTypes.h"
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -136,6 +137,23 @@ public:
 
     // Direct lua_State access for advanced binding (ScriptContext in HE_Scene uses this).
     lua_State* state() { return m_L; }
+
+    // ── Calling a handler whose ARGUMENTS this class cannot marshal ──────────
+    // Every callOn… above takes numbers and strings, which HE_Core can push by
+    // itself. OnRep_<Var> (docs/gameplay-replication-plan.md §6.4) takes a
+    // HorizonCode::Value, and the one place that knows how to put one of those
+    // on a Lua stack — as a struct table, as a map with its `__keys` sidecar —
+    // is ScriptContext in HE_Scene, together with the reader that takes it back.
+    // A second implementation down here would be a second answer to the same
+    // question, and the two would drift the first time a type was added.
+    //
+    // So the CALLER pushes: `pushArgs` receives the state with the function and
+    // `self` already on it, pushes however many arguments it likes, and returns
+    // how many. False only on a Lua error (see lastError); a script that does
+    // not define `fn` is an ordinary no-op and answers true, like every handler
+    // above.
+    using ArgPusher = std::function<int(lua_State*)>;
+    bool callInstanceMethod(InstanceId id, const char* fn, const ArgPusher& pushArgs);
 
 private:
     // Compile `source` as a chunk named `name` and leave it on the stack.

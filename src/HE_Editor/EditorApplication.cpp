@@ -1437,6 +1437,12 @@ void EditorApplication::OnInit()
 			if (controllers.empty()) { m_playerHost.addCharacter(inst); return; }
 			HE::api::player::possess(controllers.front(), inst);
 		});
+		// The same variable source the packaged game binds: EntityHost is what
+		// knows which HorizonCode instance sits on which entity, and the
+		// replicator reads the class's replicated variables through it.
+		m_netSession.setVariableSource(
+			&m_gameInstance.runtime(),
+			[this](Entity e) { return m_entityHost.instanceOf(e); });
 		// Preview from the first frame: a report in the editor is something to
 		// read, never something that drops a player (plan §6.2.6). The sink is
 		// the one dispatcher the packaged game uses (AntiCheatEvents), so a
@@ -4345,6 +4351,18 @@ void EditorApplication::dispatchNetEvents()
 		NetEvents::dispatch(ev, &m_gameInstance.runtime(), m_editorWorld.get(),
 		                    m_scriptContext.get(), &m_scriptInstances,
 		                    logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+
+	// The same OnRep drain the packaged game has, in the same place — a handler
+	// that works in the preview has to work in the shipped build (plan §6.4).
+	if (PropertyReplicator* props = m_netSession.properties())
+	{
+		PropertyReplicator::Notification rep;
+		while (props->takeNotification(rep))
+			NetEvents::dispatchRep(rep, &m_gameInstance.runtime(),
+			                       m_entityHost.instanceOf(rep.entity),
+			                       m_scriptContext.get(), &m_scriptInstances,
+			                       logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+	}
 }
 
 void EditorApplication::startPlayNetSession()

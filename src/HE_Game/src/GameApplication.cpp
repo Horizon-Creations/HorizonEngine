@@ -954,6 +954,13 @@ void GameApplication::OnInit()
 			(void)netId;
 			possessLocally(character);
 		});
+		// REPLICATED VARIABLES. The property replicator reads a HorizonCode
+		// class's variables straight out of the interpreter, and EntityHost is
+		// the only thing that knows which instance sits on which entity — the
+		// same seam as the spawn function above, and bound in the same place.
+		m_netSession.setVariableSource(
+			&m_gameInstance.runtime(),
+			[this](Entity e) { return m_entityHost.instanceOf(e); });
 		// How a report reaches the scripts: the Game Instance, the level script,
 		// the entity's class, the Lua/Python instances, the native module — one
 		// dispatcher shared with the editor's play mode (AntiCheatEvents), so a
@@ -1536,6 +1543,19 @@ void GameApplication::dispatchNetEvents()
 		NetEvents::dispatch(ev, &m_gameInstance.runtime(), m_world.get(),
 		                    m_scriptContext.get(), &m_scriptInstances,
 		                    logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+
+	// OnRep, after the session events and still before the script tick (plan
+	// §6.4). Only a client ever has any: the replicator queues nothing on the
+	// authority, which set the value itself.
+	if (PropertyReplicator* props = m_netSession.properties())
+	{
+		PropertyReplicator::Notification rep;
+		while (props->takeNotification(rep))
+			NetEvents::dispatchRep(rep, &m_gameInstance.runtime(),
+			                       m_entityHost.instanceOf(rep.entity),
+			                       m_scriptContext.get(), &m_scriptInstances,
+			                       logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+	}
 }
 
 void GameApplication::applyNetLaunchArguments()

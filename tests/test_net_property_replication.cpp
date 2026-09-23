@@ -768,6 +768,50 @@ TEST_CASE("properties: declareVar does not shadow a HorizonCode variable of the 
         door, "Paint", Value::ofString("red"), false));
 }
 
+// The HorizonCode half of OnRep (§6.4): the class declares OnRep_<Var> and the
+// dispatcher calls it with the OLD value. Built here rather than in
+// test_horizoncode_runtime because what is under test is the CONVENTION — the
+// name, the one parameter, and that a private handler is still called.
+TEST_CASE("properties: a HorizonCode class hears OnRep_<Var> with the previous value") {
+    using namespace HorizonCode;
+
+    Graph g;
+    Variable open;
+    open.name = "Open"; open.type = PinType::Bool;
+    open.replicated = true; open.repNotify = true;
+    Variable seen;                            // where the handler records what it got
+    seen.name = "SeenOld"; seen.type = PinType::Bool;
+    g.variables = { open, seen };
+
+    // OnRep_Open(old: Bool) { SeenOld = old }. PRIVATE on purpose: a notify
+    // handler is the class's own business, and the dispatcher must not require
+    // it to be public.
+    Node fe; fe.type = NodeType::FunctionEntry; fe.s = "OnRep_Open"; fe.access = 1;
+    fe.params = { { "old", PinType::Bool } };
+    const int feId = g.addNode(fe);
+    Node sv; sv.type = NodeType::SetVariable; sv.s = "SeenOld"; sv.propType = PinType::Bool;
+    const int svId = g.addNode(sv);
+    REQUIRE(g.connect(feId, 0, svId, 0));      // exec
+    REQUIRE(g.connect(feId, 1, svId, 2));      // the parameter into the value pin
+
+    Runtime rt;
+    const InstanceId inst = rt.add(std::move(g));
+    REQUIRE(inst != 0);
+    rt.setVariable(inst, "SeenOld", Value::ofBool(false));
+
+    // Exactly what NetEvents::dispatchRep does for the HorizonCode station.
+    CHECK(rt.callFunction(inst, "OnRep_Open", /*requirePublic*/ false,
+                          { Value::ofBool(true) }));
+    CHECK(rt.getVariable(inst, "SeenOld").b == true);
+
+    // Negative control: requiring public would NOT reach it, which is why the
+    // dispatcher passes false.
+    rt.setVariable(inst, "SeenOld", Value::ofBool(false));
+    CHECK_FALSE(rt.callFunction(inst, "OnRep_Open", /*requirePublic*/ true,
+                                { Value::ofBool(true) }));
+    CHECK(rt.getVariable(inst, "SeenOld").b == false);
+}
+
 TEST_CASE("properties: a Ref variable is refused rather than replicated") {
     Rig rig;
     const Entity e = authoredEntity(*rig.host.world, "Thing");

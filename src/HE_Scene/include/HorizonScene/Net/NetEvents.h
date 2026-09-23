@@ -1,5 +1,6 @@
 #pragma once
 #include "HorizonScene/Net/NetGameSession.h"
+#include "HorizonScene/Net/PropertyReplicator.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/ScriptContext.h"
 #include <HorizonCode/HorizonCodeRuntime.h>
@@ -105,6 +106,47 @@ private:
         }
     }
 
+public:
+    // ── OnRep: a replicated variable arrived (plan §6.4) ─────────────────────
+    // A sibling of dispatch() above and deliberately a SEPARATE entry point,
+    // because the two have opposite addressing: a session event is heard by
+    // every script in the game, and this one by the entity whose property
+    // changed. Passing both through one function would mean a `target` that is
+    // meaningless half the time.
+    //
+    // Three stations, not four — there is no Game Instance and no level script
+    // here for that same reason: the value belongs to an entity.
+    //
+    //   1. the entity's HorizonCode class — OnRep_<Var>(old), called with
+    //      requirePublic = false, because a notify handler is the class's own
+    //      business and nobody outside calls it,
+    //   2. the Lua/Python instance on that entity — onRep_<var> / on_rep_<var>,
+    //   3. the native module — IGameLogic::onRep(entity, name).
+    //
+    // NEVER ON THE HOST. The replicator queues nothing there (it set the value
+    // and knows it), so this is only ever reached on a client — the guard lives
+    // at the source rather than here, where a second copy of it could drift.
+    static void dispatchRep(const PropertyReplicator::Notification& n,
+                            HorizonCode::Runtime* runtime,
+                            HorizonCode::InstanceId classInstance,
+                            ScriptContext* scripts, const InstanceMap* instances,
+                            IGameLogic* logic)
+    {
+        if (runtime && classInstance)
+            runtime->callFunction(classInstance, "OnRep_" + n.name,
+                                  /*requirePublic*/ false, { n.oldValue });
+
+        if (scripts && instances)
+        {
+            const auto it = instances->find(static_cast<uint32_t>(n.entity));
+            if (it != instances->end())
+                scripts->callOnRep(it->second, n.name, n.oldValue);
+        }
+
+        if (logic) logic->onRep(static_cast<uint32_t>(n.entity), n.name.c_str());
+    }
+
+private:
     static void fireLogic(IGameLogic& logic, NetScriptEvent kind, int arg)
     {
         switch (kind)

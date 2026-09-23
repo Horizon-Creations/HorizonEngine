@@ -38,6 +38,8 @@
 #include <HorizonGameServices.h>   // the C-ABI table fillSaveServices populates
 #include "HorizonScene/AntiCheat/AntiCheatHost.h"   // the anticheat group's service
 #include "HorizonScene/Net/NetGameSession.h"        // the net group's service
+#include "HorizonScene/Net/ValueWire.h"             // …and what may cross at all
+#include "HorizonScene/Components/ReplicatedVarsComponent.h"  // the offline storage
 #include <DebugDraw/DebugDraw.h>
 #include <Platform/Process.h>      // the process group runs on HE::Proc
 #include <Net/HttpsClient.h>       // …and the http group on the platform TLS stack
@@ -3191,6 +3193,121 @@ int localCharacter(Ctx& c)
     if (!s) return 0;
     const auto e = static_cast<entt::entity>(s->localCharacter());
     return e == entt::null ? 0 : static_cast<int>(static_cast<std::uint32_t>(e));
+}
+
+// ── Replicated variables (plan §6.1) ────────────────────────────────────────
+namespace {
+// The entity, or entt::null. Shared by all sixteen rows below, so "entity 0" and
+// "an id nothing answers to" mean one thing and not sixteen.
+entt::entity varEntity(Ctx& c, int entity)
+{
+    if (!c.world || entity <= 0) return entt::null;
+    const auto e = static_cast<entt::entity>(entity);
+    return c.world->registry().valid(e) ? e : entt::null;
+}
+
+// The replicator, when a session is running. Null OFFLINE — which is the
+// ordinary state, not an error: the three functions below then work directly on
+// the component, so a graph behaves the same with and without a network.
+PropertyReplicator* props(Ctx& c)
+{
+    NetGameSession* s = live(c);
+    return s ? s->properties() : nullptr;
+}
+
+bool declareVar(Ctx& c, int entity, const std::string& name,
+                const HorizonCode::Value& initial, bool notify)
+{
+    const entt::entity e = varEntity(c, entity);
+    if (e == entt::null || name.empty()) return false;
+    if (PropertyReplicator* p = props(c)) return p->declareVar(e, name, initial, notify);
+    // Offline. The refusal the replicator would make for a Ref is made here
+    // too, so a graph does not start working only to fail the day it is hosted.
+    if (!HE::Net::Game::isReplicableType(initial.type)) return false;
+    c.world->registry().get_or_emplace<ReplicatedVarsComponent>(e).declare(name, initial, notify);
+    return true;
+}
+
+bool setVar(Ctx& c, int entity, const std::string& name, const HorizonCode::Value& v)
+{
+    const entt::entity e = varEntity(c, entity);
+    if (e == entt::null || name.empty()) return false;
+    if (PropertyReplicator* p = props(c)) return p->setVar(e, name, v);
+    auto* rvc = c.world->registry().try_get<ReplicatedVarsComponent>(e);
+    if (!rvc) return false;
+    HorizonCode::Value* slot = rvc->find(name);
+    if (!slot) return false;
+    *slot = v;
+    return true;
+}
+
+// The value, or a type-zero of `t` when the name is not declared here.
+HorizonCode::Value getVar(Ctx& c, int entity, const std::string& name, HorizonCode::PinType t)
+{
+    HorizonCode::Value zero;
+    zero.type = t;
+    const entt::entity e = varEntity(c, entity);
+    if (e == entt::null || name.empty()) return zero;
+
+    HorizonCode::Value out;
+    if (PropertyReplicator* p = props(c))
+    {
+        if (!p->getVar(e, name, out)) return zero;
+    }
+    else
+    {
+        const auto* rvc = c.world->registry().try_get<ReplicatedVarsComponent>(e);
+        const HorizonCode::Value* v = rvc ? rvc->find(name) : nullptr;
+        if (!v) return zero;
+        out = *v;
+    }
+    // A reader asking for a Bool must not be handed a String because somebody
+    // declared the name with the wrong row. The zero is the honest answer; the
+    // mismatch itself is caught at declaration time by whoever wrote the graph.
+    return out.type == t && out.kind() == HorizonCode::ContainerKind::None ? out : zero;
+}
+} // namespace
+
+bool declareVarBool(Ctx& c, int e, const std::string& n, bool v, bool notify)
+{ return declareVar(c, e, n, HorizonCode::Value::ofBool(v), notify); }
+bool declareVarInt(Ctx& c, int e, const std::string& n, int v, bool notify)
+{ return declareVar(c, e, n, HorizonCode::Value::ofInt(v), notify); }
+bool declareVarFloat(Ctx& c, int e, const std::string& n, float v, bool notify)
+{ return declareVar(c, e, n, HorizonCode::Value::ofFloat(v), notify); }
+bool declareVarString(Ctx& c, int e, const std::string& n, const std::string& v, bool notify)
+{ return declareVar(c, e, n, HorizonCode::Value::ofString(v), notify); }
+bool declareVarVec3(Ctx& c, int e, const std::string& n, const glm::vec3& v, bool notify)
+{ return declareVar(c, e, n, HorizonCode::Value::ofVec3(v), notify); }
+
+bool setVarBool(Ctx& c, int e, const std::string& n, bool v)
+{ return setVar(c, e, n, HorizonCode::Value::ofBool(v)); }
+bool setVarInt(Ctx& c, int e, const std::string& n, int v)
+{ return setVar(c, e, n, HorizonCode::Value::ofInt(v)); }
+bool setVarFloat(Ctx& c, int e, const std::string& n, float v)
+{ return setVar(c, e, n, HorizonCode::Value::ofFloat(v)); }
+bool setVarString(Ctx& c, int e, const std::string& n, const std::string& v)
+{ return setVar(c, e, n, HorizonCode::Value::ofString(v)); }
+bool setVarVec3(Ctx& c, int e, const std::string& n, const glm::vec3& v)
+{ return setVar(c, e, n, HorizonCode::Value::ofVec3(v)); }
+
+bool getVarBool(Ctx& c, int e, const std::string& n)
+{ return getVar(c, e, n, HorizonCode::PinType::Bool).b; }
+int getVarInt(Ctx& c, int e, const std::string& n)
+{ return getVar(c, e, n, HorizonCode::PinType::Int).i; }
+float getVarFloat(Ctx& c, int e, const std::string& n)
+{ return getVar(c, e, n, HorizonCode::PinType::Float).f; }
+std::string getVarString(Ctx& c, int e, const std::string& n)
+{ return getVar(c, e, n, HorizonCode::PinType::String).s; }
+glm::vec3 getVarVec3(Ctx& c, int e, const std::string& n)
+{ return getVar(c, e, n, HorizonCode::PinType::Vec3).v3; }
+
+bool hasVar(Ctx& c, int entity, const std::string& name)
+{
+    const entt::entity e = varEntity(c, entity);
+    if (e == entt::null || name.empty()) return false;
+    if (PropertyReplicator* p = props(c)) return p->hasVar(e, name);
+    const auto* rvc = c.world->registry().try_get<ReplicatedVarsComponent>(e);
+    return rvc && rvc->find(name) != nullptr;
 }
 } // namespace net
 
@@ -6611,6 +6728,100 @@ const std::vector<ApiFn>& registry()
             "HE::api::net::localCharacter",
             [](Ctx& c, const VV&){ return VV{ Value::ofInt(net::localCharacter(c)) }; } });
 
+        // ── Replicated variables (plan §6.1) ──
+        // Sixteen rows and not one generic pair, for the reason the savegame
+        // group has the same shape: a typed-pin graph has no "any" pin, and the
+        // declared type is also what a client checks an arriving value against.
+        // A HorizonCode class needs none of these — its checkbox IS the
+        // declaration — so these exist for Lua, Python and the native module.
+        t.push_back({ "net.declareVarBool", "Multiplayer", true,
+            {{"entity", P::Int}, {"name", P::String}, {"initial", P::Bool}, {"notify", P::Bool}},
+            {{"ok", P::Bool}},
+            "HE::api::net::declareVarBool",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::declareVarBool(c, aI(a, 0), aS(a, 1), aB(a, 2), aB(a, 3))) }; } });
+        t.push_back({ "net.declareVarInt", "Multiplayer", true,
+            {{"entity", P::Int}, {"name", P::String}, {"initial", P::Int}, {"notify", P::Bool}},
+            {{"ok", P::Bool}},
+            "HE::api::net::declareVarInt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::declareVarInt(c, aI(a, 0), aS(a, 1), aI(a, 2), aB(a, 3))) }; } });
+        t.push_back({ "net.declareVarFloat", "Multiplayer", true,
+            {{"entity", P::Int}, {"name", P::String}, {"initial", P::Float}, {"notify", P::Bool}},
+            {{"ok", P::Bool}},
+            "HE::api::net::declareVarFloat",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::declareVarFloat(c, aI(a, 0), aS(a, 1), aF(a, 2), aB(a, 3))) }; } });
+        t.push_back({ "net.declareVarString", "Multiplayer", true,
+            {{"entity", P::Int}, {"name", P::String}, {"initial", P::String}, {"notify", P::Bool}},
+            {{"ok", P::Bool}},
+            "HE::api::net::declareVarString",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::declareVarString(c, aI(a, 0), aS(a, 1), aS(a, 2), aB(a, 3))) }; } });
+        t.push_back({ "net.declareVarVec3", "Multiplayer", true,
+            {{"entity", P::Int}, {"name", P::String}, {"initial", P::Vec3}, {"notify", P::Bool}},
+            {{"ok", P::Bool}},
+            "HE::api::net::declareVarVec3",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::declareVarVec3(c, aI(a, 0), aS(a, 1), aV3(a, 2), aB(a, 3))) }; } });
+
+        t.push_back({ "net.setVarBool", "Multiplayer", true,
+            {{"entity", P::Int}, {"name", P::String}, {"value", P::Bool}}, {{"ok", P::Bool}},
+            "HE::api::net::setVarBool",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::setVarBool(c, aI(a, 0), aS(a, 1), aB(a, 2))) }; } });
+        t.push_back({ "net.setVarInt", "Multiplayer", true,
+            {{"entity", P::Int}, {"name", P::String}, {"value", P::Int}}, {{"ok", P::Bool}},
+            "HE::api::net::setVarInt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::setVarInt(c, aI(a, 0), aS(a, 1), aI(a, 2))) }; } });
+        t.push_back({ "net.setVarFloat", "Multiplayer", true,
+            {{"entity", P::Int}, {"name", P::String}, {"value", P::Float}}, {{"ok", P::Bool}},
+            "HE::api::net::setVarFloat",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::setVarFloat(c, aI(a, 0), aS(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "net.setVarString", "Multiplayer", true,
+            {{"entity", P::Int}, {"name", P::String}, {"value", P::String}}, {{"ok", P::Bool}},
+            "HE::api::net::setVarString",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::setVarString(c, aI(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "net.setVarVec3", "Multiplayer", true,
+            {{"entity", P::Int}, {"name", P::String}, {"value", P::Vec3}}, {{"ok", P::Bool}},
+            "HE::api::net::setVarVec3",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::setVarVec3(c, aI(a, 0), aS(a, 1), aV3(a, 2))) }; } });
+
+        t.push_back({ "net.getVarBool", "Multiplayer", false,
+            {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Bool}},
+            "HE::api::net::getVarBool",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::getVarBool(c, aI(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "net.getVarInt", "Multiplayer", false,
+            {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Int}},
+            "HE::api::net::getVarInt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(
+                net::getVarInt(c, aI(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "net.getVarFloat", "Multiplayer", false,
+            {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Float}},
+            "HE::api::net::getVarFloat",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(
+                net::getVarFloat(c, aI(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "net.getVarString", "Multiplayer", false,
+            {{"entity", P::Int}, {"name", P::String}}, {{"value", P::String}},
+            "HE::api::net::getVarString",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(
+                net::getVarString(c, aI(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "net.getVarVec3", "Multiplayer", false,
+            {{"entity", P::Int}, {"name", P::String}}, {{"value", P::Vec3}},
+            "HE::api::net::getVarVec3",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofVec3(
+                net::getVarVec3(c, aI(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "net.hasVar", "Multiplayer", false,
+            {{"entity", P::Int}, {"name", P::String}}, {{"declared", P::Bool}},
+            "HE::api::net::hasVar",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::hasVar(c, aI(a, 0), aS(a, 1))) }; } });
+
         // Savegames: ONE active template-shaped document (see the header block).
         // create/load resolve the SaveGameTemplate through the Ctx's content
         // manager; field access validates against it and fails LOUD.
@@ -7067,6 +7278,22 @@ const std::vector<ApiFn>& registry()
             { "net.ownerOf", "Owner Of" },
             { "net.isLocallyControlled", "Is Locally Controlled" },
             { "net.localCharacter", "Local Character" },
+            { "net.declareVarBool", "Declare Replicated Bool" },
+            { "net.declareVarInt", "Declare Replicated Int" },
+            { "net.declareVarFloat", "Declare Replicated Float" },
+            { "net.declareVarString", "Declare Replicated String" },
+            { "net.declareVarVec3", "Declare Replicated Vector" },
+            { "net.setVarBool", "Set Replicated Bool" },
+            { "net.setVarInt", "Set Replicated Int" },
+            { "net.setVarFloat", "Set Replicated Float" },
+            { "net.setVarString", "Set Replicated String" },
+            { "net.setVarVec3", "Set Replicated Vector" },
+            { "net.getVarBool", "Get Replicated Bool" },
+            { "net.getVarInt", "Get Replicated Int" },
+            { "net.getVarFloat", "Get Replicated Float" },
+            { "net.getVarString", "Get Replicated String" },
+            { "net.getVarVec3", "Get Replicated Vector" },
+            { "net.hasVar", "Has Replicated Variable" },
             { "save.create", "Create Save" },        { "save.load", "Load Save" },
             { "save.write", "Write Save" },          { "save.close", "Close Save" },
             { "save.activeId", "Active Save Id" },   { "save.list", "List Saves" },

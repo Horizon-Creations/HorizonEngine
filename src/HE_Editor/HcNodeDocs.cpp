@@ -1597,6 +1597,46 @@ namespace
 	{ "net.localCharacter",
 	  "The entity this machine drives — our own character — or 0 before the host "
 	  "has given us one." },
+	{ "net.declareVarBool",
+	  "Declares a replicated Bool on this entity: the host owns it, every client "
+	  "is sent its value. Call it in On Init. With Notify on, the clients get "
+	  "On Rep when a value arrives. A HorizonCode class does not need this — it "
+	  "ticks Replicated in the variable list instead." },
+	{ "net.declareVarInt",
+	  "Declares a replicated Int on this entity. See Declare Replicated Bool." },
+	{ "net.declareVarFloat",
+	  "Declares a replicated Float on this entity. See Declare Replicated Bool." },
+	{ "net.declareVarString",
+	  "Declares a replicated String on this entity. See Declare Replicated Bool." },
+	{ "net.declareVarVec3",
+	  "Declares a replicated Vector on this entity. See Declare Replicated Bool." },
+	{ "net.setVarBool",
+	  "Writes a declared Bool. On the host every client is sent the new value; on "
+	  "a client it takes effect HERE and the host's next value replaces it, which "
+	  "is what makes a prediction possible. False = never declared." },
+	{ "net.setVarInt",
+	  "Writes a declared Int. See Set Replicated Bool." },
+	{ "net.setVarFloat",
+	  "Writes a declared Float. See Set Replicated Bool." },
+	{ "net.setVarString",
+	  "Writes a declared String. See Set Replicated Bool." },
+	{ "net.setVarVec3",
+	  "Writes a declared Vector. See Set Replicated Bool." },
+	{ "net.getVarBool",
+	  "Reads a declared Bool. False when the name was never declared here, which "
+	  "Has Replicated Variable tells apart from a value that is simply false." },
+	{ "net.getVarInt",
+	  "Reads a declared Int. 0 when the name was never declared here." },
+	{ "net.getVarFloat",
+	  "Reads a declared Float. 0 when the name was never declared here." },
+	{ "net.getVarString",
+	  "Reads a declared String. Empty when the name was never declared here." },
+	{ "net.getVarVec3",
+	  "Reads a declared Vector. Zero when the name was never declared here." },
+	{ "net.hasVar",
+	  "Is this name declared on this entity at all — by a script or by the "
+	  "entity's HorizonCode class? The one row that tells a missing declaration "
+	  "apart from a value still at its default." },
 
 	// ── Save ─────────────────────────────────────────────────────────────────
 	{ "save.create",

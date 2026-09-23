@@ -1029,6 +1029,74 @@ TEST_CASE("ScriptContext: the session's six events reach a Lua instance under th
     CHECK(ctx.callOnNetEvent(d, NetScriptEvent::PlayerJoined, 1));
 }
 
+// ─── OnRep reaches Lua, with the old value ───────────────────────────────────
+// docs/gameplay-replication-plan.md §6.4. Unlike the six above, the handler's
+// NAME is composed from the variable's (onRep_<name>) and its argument is a
+// HorizonCode::Value — which may be a struct or a map, so the value is pushed by
+// the marshaller this file's own boundary tests already cover, rather than by a
+// second one written for this path.
+static const char* kLuaRepHandler = R"lua(
+local M = {}
+function M.onStart(self) self.n = 0 end
+function M.onRep_health(self, old)  _G._oldHealth = old end
+function M.onRep_name(self, old)    _G._oldName = old end
+function M.onRep_Loadout(self, old) _G._oldSlot = old.slot _G._oldTag = old.tag end
+return M
+)lua";
+
+TEST_CASE("ScriptContext: OnRep reaches a Lua instance under onRep_<name>, with the old value")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec("_G._oldHealth = -1 _G._oldName = '' _G._oldSlot = -1 _G._oldTag = ''"));
+
+    REQUIRE(ctx.loadScript("repears", kLuaRepHandler));
+    auto id = ctx.createInstance("repears", world.createEntity("Ears"));
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    CHECK(ctx.callOnRep(id, "health", HorizonCode::Value::ofInt(42)));
+    CHECK(ctx.callOnRep(id, "name",   HorizonCode::Value::ofString("before")));
+
+    // A struct crosses as the same NAMED table any other Struct-typed value
+    // does at this boundary — which is the whole reason the push is not
+    // reimplemented for this path, and why the field names have to come from a
+    // registered definition rather than from anything this call knows.
+    auto& reg = HE::TypeRegistry::instance();
+    HE::StructDef def;
+    def.name = "RepLoadout"; def.assetPath = "Content/T/RepLoadout.hasset";
+    {
+        HE::StructField slot; slot.name = "slot"; slot.type = HorizonCode::PinType::Int;
+        HE::StructField tag;  tag.name  = "tag";  tag.type  = HorizonCode::PinType::String;
+        def.fields = { slot, tag };
+    }
+    reg.registerStruct(def);
+
+    HorizonCode::Value loadout;
+    loadout.type     = HorizonCode::PinType::Struct;
+    loadout.typeName = def.assetPath;
+    loadout.items    = { HorizonCode::Value::ofInt(3), HorizonCode::Value::ofString("rifle") };
+    CHECK(ctx.callOnRep(id, "Loadout", loadout));
+    CHECK(engine.getGlobalNumber("_oldSlot") == doctest::Approx(3.0));
+    CHECK(engine.getGlobalString("_oldTag") == "rifle");
+
+    CHECK(engine.getGlobalNumber("_oldHealth") == doctest::Approx(42.0));
+    CHECK(engine.getGlobalString("_oldName") == "before");
+
+    // The name is used VERBATIM after the prefix: a handler that only differs
+    // in case must not be called, or two declarations would collide on one.
+    REQUIRE(engine.exec("_G._wrongCase = 0"));
+    CHECK(ctx.callOnRep(id, "Health", HorizonCode::Value::ofInt(99)));
+    CHECK(engine.getGlobalNumber("_oldHealth") == doctest::Approx(42.0));   // unchanged
+
+    // A script with no handler for this variable is an ordinary no-op success,
+    // like every other optional callback.
+    REQUIRE(ctx.loadScript("repdeaf", kNameReader));
+    auto d = ctx.createInstance("repdeaf", world.createEntity("Deaf"));
+    CHECK(ctx.callOnRep(d, "health", HorizonCode::Value::ofInt(1)));
+}
+
 // ─── Every failing instance is reported, not just the first one per callback ──
 // ScriptContext throttles the runtime-error report of a callback so a broken
 // onUpdate does not write sixty lines a second. Keyed on the CALLBACK alone,

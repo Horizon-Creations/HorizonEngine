@@ -1732,6 +1732,58 @@ namespace net {
     bool        isLocallyControlled(Ctx&, int entity);
     // The entity this side drives, or 0.
     int         localCharacter(Ctx&);
+
+    // ── Replicated variables (plan §6.1) ─────────────────────────────────────
+    // For the three frontends whose variables the engine cannot see: a Lua
+    // local, a Python attribute and a C++ member all live inside their own
+    // runtime. A HorizonCode class needs NONE of this — it ticks the Replicated
+    // box in the variable list and the engine reads the variable itself — and
+    // these rows refuse a name such a class already declares, so one property
+    // never ends up with two storages.
+    //
+    // DECLARE FIRST, in onInit. The declaration is what puts the name in the
+    // property table both peers count indices with; setVar on an undeclared
+    // name answers false rather than inventing one mid-session, when the other
+    // side has no index for it. `notify` asks for onRep_<name>(self, old) /
+    // on_rep_<name> when a value arrives (never on the authority — it set it).
+    //
+    // TYPED, one row per type, like the savegame rows: a typed-pin graph has no
+    // "any" pin, and the type is also what a client checks an arriving value
+    // against before applying it.
+    //
+    // OFFLINE they are ordinary local storage. That is not a special case but
+    // the point: a graph written for multiplayer has to behave identically in a
+    // single-player session, or it is two graphs.
+    //
+    // WRITING ON A CLIENT WORKS, and the authority's next value replaces it
+    // (E4, §6.3) — that is what makes `ammo -= 1` predictable. What a client
+    // wants the host to AGREE to goes through CallServer, which is step 7.
+    bool        declareVarBool(Ctx&, int entity, const std::string& name, bool initial, bool notify);
+    bool        declareVarInt(Ctx&, int entity, const std::string& name, int initial, bool notify);
+    bool        declareVarFloat(Ctx&, int entity, const std::string& name, float initial, bool notify);
+    bool        declareVarString(Ctx&, int entity, const std::string& name,
+                                 const std::string& initial, bool notify);
+    bool        declareVarVec3(Ctx&, int entity, const std::string& name,
+                               const glm::vec3& initial, bool notify);
+
+    bool        setVarBool(Ctx&, int entity, const std::string& name, bool value);
+    bool        setVarInt(Ctx&, int entity, const std::string& name, int value);
+    bool        setVarFloat(Ctx&, int entity, const std::string& name, float value);
+    bool        setVarString(Ctx&, int entity, const std::string& name, const std::string& value);
+    bool        setVarVec3(Ctx&, int entity, const std::string& name, const glm::vec3& value);
+
+    // The declared default's type-zero when the name is unknown — false, 0,
+    // "" — which is the same answer every other reader row here gives.
+    bool        getVarBool(Ctx&, int entity, const std::string& name);
+    int         getVarInt(Ctx&, int entity, const std::string& name);
+    float       getVarFloat(Ctx&, int entity, const std::string& name);
+    std::string getVarString(Ctx&, int entity, const std::string& name);
+    glm::vec3   getVarVec3(Ctx&, int entity, const std::string& name);
+
+    // Is this name declared on this entity at all — by a script or by the
+    // entity's HorizonCode class? The one row that tells "not declared" apart
+    // from "declared and still at its default".
+    bool        hasVar(Ctx&, int entity, const std::string& name);
 }
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
