@@ -3134,6 +3134,37 @@ liegen, weil der Baum seither gewachsen ist, nicht weil der Schnitt sich verscho
 an `push` auf `main` und sind auf einem Feature-Zweig nicht auslösbar. Das Bauen der
 Ausprägungen ist dort durch den Lauf oben gedeckt, das Hineinlegen ins Editorpaket nicht.
 
+### Nachtrag: die macOS-Spielschwelle nach der Multiplayer-Replikation (23.09.2026)
+
+Ein lokaler Release-Baum ging nach dem Merge von Thema 77 (`cec6b3b3`) rot: `game` ohne
+Python 32,6 MB gegen 32,0. Zweimal gewogen, beide Bäume lokal, gleiche Optionen, nur das
+Ziel `HorizonGame`:
+
+| Stand | gesamt / ohne Python | Scene | Net | Core | Exe |
+|---|---|---|---|---|---|
+| `bc1206aa` (vor Thema 77) | 62,7 / 31,9 MB | 10 122 592 B | 655 312 B | 5 054 512 B | 557 184 B |
+| `cec6b3b3` (Thema 77 drin) | 63,4 / 32,6 MB | +534 KB | +106 KB | +42 KB | +31 KB |
+
+Der Zuwachs ist die Replikationsschicht selbst, nach Objektdateien: `EngineApi.cpp` (die
+`net.*`-Zeilen) +124 KB, `PropertyReplicator` +77, `NetGameSession` +52, `SpawnReplicator`
++34, `RpcRouter` +27, `HcCodegen` +25, `ValueWire` +22, in HorizonNet `UdpTransport` +65.
+Rendering, SDL und Python haben sich um kein Byte bewegt. Abschaltbar ist das nicht billig:
+es gibt ein Spiel-Runtime pro Plattform, Multiplayer ist eine Projekteinstellung, und es
+wegzulassen hieße eine vierte Ausprägung oder HorizonNet als Plugin, also A3b (siehe A3a,
+„`libHorizonNet`: geht so nicht"). Die Schwelle steht deshalb bewusst auf **36 MB**
+(gemessen plus 10 Prozent), mit beiden Messungen im Kommentar in `scripts/runtime_size.py`.
+
+**Zwei Dinge, die dabei auffielen.** Erstens war der Wächter auf `main` nicht blind: der
+Schritt in `ci.yml` wog dieselben zwei Commits mit dem mbedTLS-Rezept auf 27,2 und 27,9 MB
+und blieb grün. Rot war nur der lokale Baum, und der hatte die 32 MB schon **vor** Thema 77
+aufgebraucht (31,9 MB): die Luft von „10 Prozent plus 5 MB" aus Teil 3 war zwischen dem
+05.09. und dem 22.09. vom übrigen Wachstum aufgezehrt (CI 23,7 → 27,2 MB). Zweitens strippt
+nichts im Build- oder Exportpfad die ausgelieferten Bibliotheken. `strip -x` auf Kopien des
+macOS-Baums spart 5,2 MB (Scene allein 2,6 MB, Rendering 1,2, Core 0,8), mehr als die ganze
+Überschreitung. Das ist eine eigene Entscheidung (Crash-Symbolisierung, dSYMs, Windows
+profitiert davon nicht, weil dort die PDBs ohnehin getrennt liegen), und sie ist hier nicht
+getroffen worden.
+
 ---
 
 ## 11. Risiken und Fallen
