@@ -801,6 +801,68 @@ TEST_CASE("net session: Replicates defaults to on and turning it off keeps the t
     CHECK(nc.maxSpeed == doctest::Approx(9.5f));
 }
 
+// ─── The project's Multiplayer page reaches the session ──────────────────────
+// The page is only worth having if something reads it. This is that something:
+// setProjectDefaults + the two factories every entry point (the editor's Play
+// as Host, a packaged game's --host, the net.host row) now starts from.
+
+TEST_CASE("net session: the project's multiplayer settings are what host and join start from") {
+    NetGameSession s;
+    // Untouched: exactly the options both structs carried before the page
+    // existed, so a project that never opened it is unaffected.
+    {
+        const NetGameSession::HostOptions d = s.defaultHostOptions();
+        CHECK(d.port == 47824);
+        CHECK(d.maxPlayers == 8u);
+        CHECK(d.announceLan == true);
+        CHECK(d.replication.tickHz == doctest::Approx(30.0f));
+        CHECK(d.replication.worldExtent == doctest::Approx(4096.0f));
+    }
+
+    HE::ProjectMultiplayerSettings mp;
+    mp.defaultPort           = 40123;
+    mp.maxPlayers            = 4;
+    mp.timeoutSec            = 12.0f;
+    mp.tickHz                = 60.0f;
+    mp.worldExtent           = 1024.0f;
+    mp.interpolationDelaySec = 0.05f;
+    mp.reconcileSnapDistance = 3.0f;
+    mp.reconcileSmoothing    = 8.0f;
+    mp.maxPendingInputs      = 32;
+    mp.discoverLan           = false;
+    s.setProjectDefaults(mp);
+
+    const NetGameSession::HostOptions h = s.defaultHostOptions();
+    CHECK(h.port == 40123);
+    CHECK(h.maxPlayers == 4u);
+    CHECK(h.announceLan == false);
+    CHECK(h.timeoutSec == doctest::Approx(12.0f));
+    CHECK(h.replication.tickHz == doctest::Approx(60.0f));
+    CHECK(h.replication.worldExtent == doctest::Approx(1024.0f));
+    CHECK(h.replication.interpolationDelaySec == doctest::Approx(0.05f));
+    CHECK(h.replication.reconcileSnapDistance == doctest::Approx(3.0f));
+    CHECK(h.replication.reconcileSmoothing == doctest::Approx(8.0f));
+    CHECK(h.replication.maxPendingInputs == std::size_t(32));
+    // The wire format is NOT the project's to nudge: two builds of the same
+    // game that packed positions differently would fail in a way nothing
+    // reports, so the bit counts and the datagram budget stay at their
+    // constants whatever the page says.
+    CHECK(h.replication.positionBits == GameReplication::Config{}.positionBits);
+    CHECK(h.replication.rotationBits == GameReplication::Config{}.rotationBits);
+    CHECK(h.replication.snapshotBudgetBytes == GameReplication::Config{}.snapshotBudgetBytes);
+
+    // A client needs the same tick and the same prediction bounds, and nothing
+    // else from the page — it does not open a port or hold seats.
+    const NetGameSession::JoinOptions j = s.defaultJoinOptions();
+    CHECK(j.timeoutSec == doctest::Approx(12.0f));
+    CHECK(j.replication.tickHz == doctest::Approx(60.0f));
+    CHECK(j.replication.maxPendingInputs == std::size_t(32));
+
+    // No socket under an idle session: 0 rather than a guess (plan §8.5).
+    CHECK(s.linkStats().pingMs == doctest::Approx(0.0f));
+    CHECK(s.linkStats().lossPercent == doctest::Approx(0.0f));
+}
+
 // ─── The socket path, once, for real ─────────────────────────────────────────
 // Everything above runs on an injected transport, which is what makes it fast
 // and deterministic — and what leaves host()/joinDirect() themselves, the two

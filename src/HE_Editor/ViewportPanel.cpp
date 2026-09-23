@@ -443,6 +443,41 @@ namespace
 			lines.emplace_back(buf);
 		}
 
+		// ── The session, while there is one (plan §8.5) ──────────────────────
+		// Role, players, round trip and loss, under the frame's numbers and only
+		// when a session is running — a multiplayer game's first question is
+		// "am I the host and is the link healthy", and this is the corner
+		// somebody is already looking at. Ping and loss come off the UDP
+		// transport, so they are absent (not 0) when there is no socket
+		// underneath: an in-process pair has no round trip to report, and a 0
+		// there would read as a perfect one.
+		if (ctx.netSessionStatus)
+		{
+			const int st2 = ctx.netSessionStatus();
+			if (st2 != 0)
+			{
+				static const char* kRole[] = { "Idle", "Host", "Connecting", "Client", "Failed" };
+				lines.push_back(std::string("Session    ") + kRole[(st2 >= 0 && st2 < 5) ? st2 : 0]);
+				if (ctx.netPlayerCount)
+				{
+					std::snprintf(buf, sizeof(buf), "Players    %d", ctx.netPlayerCount());
+					lines.emplace_back(buf);
+				}
+				const float ping = ctx.netPingMs ? ctx.netPingMs() : 0.0f;
+				if (ping > 0.0f)
+				{
+					std::snprintf(buf, sizeof(buf), "Ping       %.0f ms", ping);
+					lines.emplace_back(buf);
+				}
+				const float loss = ctx.netLossPercent ? ctx.netLossPercent() : 0.0f;
+				if (loss > 0.0f)
+				{
+					std::snprintf(buf, sizeof(buf), "Loss       %.1f %%", loss);
+					lines.emplace_back(buf);
+				}
+			}
+		}
+
 		// Sized to the widest line; a translucent card so it stays readable
 		// over a bright sky without hiding much of the scene.
 		ImDrawList* dl = ImGui::GetWindowDrawList();

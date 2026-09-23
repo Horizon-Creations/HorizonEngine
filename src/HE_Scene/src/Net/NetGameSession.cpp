@@ -23,6 +23,33 @@ namespace
 	constexpr std::size_t kMaxNameLength      = 64;
 	constexpr std::size_t kMaxProjectIdLength = 128;
 
+	// The Multiplayer page's replication half, as GameReplication spells it.
+	// The quantisation bit counts and the snapshot budget are NOT here on
+	// purpose: they are wire-format decisions both ends have to agree on
+	// byte-for-byte, and a project that could nudge them would make two builds
+	// of the same game incompatible in a way nothing would report.
+	GameReplication::Config defaultReplicationConfig(const HE::ProjectMultiplayerSettings& mp)
+	{
+		GameReplication::Config c;
+		c.tickHz                = mp.tickHz;
+		c.worldExtent           = mp.worldExtent;
+		c.interpolationDelaySec = mp.interpolationDelaySec;
+		c.reconcileSnapDistance = mp.reconcileSnapDistance;
+		c.reconcileSmoothing    = mp.reconcileSmoothing;
+		c.maxPendingInputs      = static_cast<std::size_t>(mp.maxPendingInputs);
+		return c;
+	}
+
+	// Seconds from the page into the transport's milliseconds, floored at one
+	// so a hand-edited 0 cannot mean "time out immediately".
+	UdpTransport::Config udpConfigFor(float timeoutSec)
+	{
+		UdpTransport::Config cfg;
+		const double ms = static_cast<double>(timeoutSec) * 1000.0;
+		cfg.timeoutMs = static_cast<std::uint32_t>(ms < 1.0 ? 1.0 : (ms > 4.0e9 ? 4.0e9 : ms));
+		return cfg;
+	}
+
 	const char* reasonName(NetGameSession::RejectReason r)
 	{
 		switch (r)
@@ -56,13 +83,52 @@ namespace
 NetGameSession::NetGameSession()  = default;
 NetGameSession::~NetGameSession() { leave(); }
 
+// ── The project's numbers, turned into options ────────────────────────────────
+// One place where the Multiplayer page meets the session, so a knob that is
+// read here is read by everyone and a knob that is not is visibly not. The
+// three that are NOT: discoverDirectory and portMapping (the directory is
+// wired in step 5c) and rpcPerSecond (RPC is step 7). They are stored and
+// saved; the settings page says on the row that nothing reads them yet.
+
+NetGameSession::HostOptions NetGameSession::defaultHostOptions() const
+{
+	const HE::ProjectMultiplayerSettings& mp = m_projectDefaults;
+	HostOptions o;
+	// A 0 here is kept and means "let the OS pick" — see the field's comment in
+	// ProjectSettings.h. clamp() guarantees the rest is in range.
+	o.port        = static_cast<std::uint16_t>(mp.defaultPort & 0xFFFF);
+	o.maxPlayers  = static_cast<std::uint32_t>(mp.maxPlayers);
+	o.announceLan = mp.discoverLan;
+	o.timeoutSec  = mp.timeoutSec;
+	o.replication = defaultReplicationConfig(mp);
+	return o;
+}
+
+NetGameSession::JoinOptions NetGameSession::defaultJoinOptions() const
+{
+	JoinOptions o;
+	o.timeoutSec  = m_projectDefaults.timeoutSec;
+	o.replication = defaultReplicationConfig(m_projectDefaults);
+	return o;
+}
+
+NetGameSession::LinkStats NetGameSession::linkStats() const
+{
+	LinkStats out;
+	if (!m_udp) return out;   // injected transport: nothing to measure, and 0 says so
+	const UdpTransport::Stats s = m_udp->stats();
+	out.pingMs      = s.srttMs > 0.0f ? s.srttMs : 0.0f;
+	out.lossPercent = s.lossPercentWindow > 0.0f ? s.lossPercentWindow : 0.0f;
+	return out;
+}
+
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
 bool NetGameSession::host(const HostOptions& options)
 {
 	leave();
 
-	auto listener = UdpTransport::listen(options.port);
+	auto listener = UdpTransport::listen(options.port, udpConfigFor(options.timeoutSec));
 	if (!listener)
 	{
 		m_error  = "Could not open a UDP port for the session.";
@@ -132,7 +198,7 @@ bool NetGameSession::joinDirect(const std::string& address, std::uint16_t port,
 {
 	leave();
 
-	auto link = UdpTransport::connect(address, port);
+	auto link = UdpTransport::connect(address, port, udpConfigFor(options.timeoutSec));
 	if (!link)
 	{
 		m_error  = "Could not reach " + address + ":" + std::to_string(port) + ".";

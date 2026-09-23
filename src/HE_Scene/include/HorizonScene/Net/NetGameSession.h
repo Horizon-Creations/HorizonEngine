@@ -37,6 +37,11 @@
 #include <Net/ITransport.h>
 #include <Net/LanBeacon.h>
 #include <Net/NetSession.h>
+// By value and not forward-declared, unlike ProjectAntiCheatSettings below: the
+// multiplayer block is COPIED into the session (setProjectDefaults) so a
+// project reloaded or closed mid-session cannot pull the numbers out from under
+// a running host, and a copy needs the complete type.
+#include <Project/ProjectSettings.h>
 
 #include <cstdint>
 #include <deque>
@@ -109,6 +114,11 @@ public:
 		bool preview = false;
 
 		GameReplication::Config replication;
+
+		// Silence on the wire for this long and a peer counts as gone
+		// (UdpTransport::Config::timeoutMs). Ignored by hostOn(), which was
+		// handed a transport somebody else configured.
+		float timeoutSec = 5.0f;
 	};
 
 	struct JoinOptions
@@ -117,6 +127,7 @@ public:
 		std::string joinCode;                 // the host's join secret
 		std::string projectId;                // compared by the host
 		GameReplication::Config replication;
+		float       timeoutSec = 5.0f;        // see HostOptions::timeoutSec
 	};
 
 	// What happened, for the frontends step 5 will dispatch to. A queue and not
@@ -148,6 +159,27 @@ public:
 	// The world this session replicates. Must outlive the session.
 	void setWorld(HorizonWorld* world) { m_world = world; }
 	HorizonWorld* world() const { return m_world; }
+
+	// ── The project's own numbers (Config/ProjectSettings.json ▸ Multiplayer) ─
+	// The port, the seats, the tick and the prediction bounds this PROJECT
+	// hosts and joins with (plan §8.4). Set once by whoever owns the project —
+	// the editor when one is opened, the packaged game after it reads its
+	// settings file — and then read by every entry point through the two
+	// factories below, so `net.host` from a script, Play as Host in the editor
+	// and `--host` on a command line cannot end up with three different tick
+	// rates.
+	//
+	// Not applied retroactively: a session already running keeps what it
+	// started with, which is the only honest answer for a tick rate both ends
+	// have agreed on.
+	void setProjectDefaults(const HE::ProjectMultiplayerSettings& mp) { m_projectDefaults = mp; }
+	const HE::ProjectMultiplayerSettings& projectDefaults() const { return m_projectDefaults; }
+	// HostOptions / JoinOptions with everything the page decides already in
+	// place. A caller fills in the rest (display name, join code, scene) and
+	// overrides what it was told explicitly — a port typed into the Join dialog
+	// beats the project's default, and nothing else does.
+	HostOptions defaultHostOptions() const;
+	JoinOptions defaultJoinOptions() const;
 
 	// ── Lifecycle ────────────────────────────────────────────────────────────
 	// Sockets: open a port, secure it, start the session. The join code is
@@ -194,6 +226,23 @@ public:
 	// Read off the UdpTransport under the crypto layer, which is why it is 0
 	// rather than a guess when that is not what is down there.
 	float pingMs(HE::Net::Game::PlayerId player) const;
+
+	// What the LINK as a whole is doing, for a diagnostics overlay (plan §8.5):
+	// the round trip averaged over live peers and the share of reliable traffic
+	// that had to be resent over a sliding window. Both 0 when there is no
+	// socket under the session — an injected transport has no loss to report,
+	// and a zero there is the truth rather than a guess.
+	//
+	// A pair of its own instead of UdpTransport::Stats so this header does not
+	// have to pull the transport in: the overlay wants exactly these two, and
+	// everything else in that struct is a counter only the transport's own
+	// tests read.
+	struct LinkStats
+	{
+		float pingMs      = 0.0f;
+		float lossPercent = 0.0f;
+	};
+	LinkStats linkStats() const;
 
 	// ── Finding a session on the LAN (plan §5.3) ─────────────────────────────
 	// Browsing is the LOBBY's business, not the session's — which is why step 4
@@ -374,6 +423,11 @@ private:
 	// answer (pingMs). Non-owning and null with an injected transport; cleared
 	// by leave() together with the chain it points into.
 	HE::Net::UdpTransport*        m_udp = nullptr;
+
+	// The project's Multiplayer page, copied at the moment it was handed over.
+	// Default-constructed until somebody does, which is the behaviour every
+	// session had before the page existed.
+	HE::ProjectMultiplayerSettings m_projectDefaults;
 
 	std::deque<Event> m_events;
 	Stats             m_stats;

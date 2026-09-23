@@ -3019,9 +3019,13 @@ HE::Net::Game::PlayerId pid(int player)
 
 // The shared half of every join row, so the two of them cannot drift on what an
 // unnamed player is called.
-NetGameSession::JoinOptions joinOptions(const std::string& code, const std::string& displayName)
+NetGameSession::JoinOptions joinOptions(const NetGameSession& s, const std::string& code,
+                                        const std::string& displayName)
 {
-    NetGameSession::JoinOptions o;
+    // From the project's Multiplayer page (plan §8.4), so a script that joins
+    // gets the same tick rate and prediction bounds as the editor's Play as
+    // Host and a `--join` on a command line.
+    NetGameSession::JoinOptions o = s.defaultJoinOptions();
     o.displayName = displayName.empty() ? std::string("Player") : displayName;
     o.joinCode    = code;
     return o;
@@ -3032,8 +3036,10 @@ bool host(Ctx& c, int port, const std::string& displayName)
 {
     NetGameSession* s = any(c);
     if (!s) return false;
-    NetGameSession::HostOptions o;
-    o.port        = (port > 0 && port < 65536) ? static_cast<std::uint16_t>(port) : 0;
+    // The page's numbers first; a port named in the call wins over the default,
+    // and a 0 leaves the project's own (which may itself be 0: "let the OS pick").
+    NetGameSession::HostOptions o = s->defaultHostOptions();
+    if (port > 0 && port < 65536) o.port = static_cast<std::uint16_t>(port);
     o.displayName = displayName.empty() ? std::string("Host") : displayName;
     return s->host(o);
 }
@@ -3044,14 +3050,14 @@ bool joinDirect(Ctx& c, const std::string& address, int port, const std::string&
     NetGameSession* s = any(c);
     if (!s || port <= 0 || port >= 65536) return false;
     return s->joinDirect(address, static_cast<std::uint16_t>(port),
-                         joinOptions(code, displayName));
+                         joinOptions(*s, code, displayName));
 }
 
 bool joinLan(Ctx& c, int index, const std::string& code, const std::string& displayName)
 {
     NetGameSession* s = any(c);
     if (!s || index < 0) return false;
-    return s->joinLan(static_cast<std::size_t>(index), joinOptions(code, displayName));
+    return s->joinLan(static_cast<std::size_t>(index), joinOptions(*s, code, displayName));
 }
 
 void leave(Ctx& c) { if (NetGameSession* s = any(c)) s->leave(); }

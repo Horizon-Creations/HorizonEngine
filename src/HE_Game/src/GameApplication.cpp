@@ -1393,6 +1393,11 @@ void GameApplication::OnInit()
 	// walk registers the scene's replicated entities — which needs the scene to
 	// exist and its classes to be running. Everything above is that scene.
 	m_netSession.setWorld(m_world.get());
+	// The project's Multiplayer page (plan §8.4), read out of the same
+	// Config/ProjectSettings.json the window title and the physics rate come
+	// from — so a packaged game hosts on the port its author chose without a
+	// command line saying so.
+	m_netSession.setProjectDefaults(m_projectSettings.multiplayer);
 	applyNetLaunchArguments();
 }
 
@@ -1538,6 +1543,11 @@ void GameApplication::applyNetLaunchArguments()
 	// The same rows a menu calls, so there is one way to open a session and not
 	// two. Parsed off the raw argument list rather than launchArguments(), which
 	// is the FILES the app was started with.
+	//
+	// A bare --host (no port) hosts on the project's Default port, and takes its
+	// seats, tick rate and prediction bounds from the same Multiplayer page —
+	// which is the point of setProjectDefaults above: a shipped game hosts the
+	// way its author set it up, without a command line repeating it.
 	std::string joinTarget, joinCode, displayName;
 	bool wantHost = false;
 	int  hostPort = 0;

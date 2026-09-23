@@ -1262,6 +1262,73 @@ teuersten Properties nach Bytes. Das ist der Ort, an dem „meine Variable
 gehört in den Snapshot" (§6.2) sichtbar wird, und der einzige Ort, an dem
 `UdpTransport::Stats` je jemand sieht.
 
+### 8.6 Stand nach Schritt 5b
+
+Umgesetzt: die Kategorie, die Seite, das Overlay und, was in der
+Schrittbeschreibung nicht stand, die Verdrahtung der Seite in die Session.
+
+**Inspector.** `componentHeader("Replication", …)` wird jetzt für **jede**
+Entity gezeichnet, nicht nur für die mit `NetworkComponent`; der Schalter
+`Replicates` legt die Komponente beim Anschalten mit Defaults an und lässt sie
+beim Ausschalten stehen (`replicates = false`), mit einer Zeile darunter, die
+das sagt. Der Menü-Eintrag „Network" ist weg. Die Label→Scene-Key-Tabelle in
+`InspectorPrefabKeys.cpp` bildet „Replication" weiter auf `"network"` ab: der
+Scene-Key umzubenennen hätte jede `.hescene` auf der Platte verwaist.
+
+In den stillen Modi (`listComponents`, `removeComponent`) verhält sich die
+Sektion wie jede andere und meldet sich nur, wenn die Komponente da ist —
+sonst hätte der Komponentenbaum des Klassen-Tabs bei jeder Entity
+„Replication" gelistet, und die Kategorie, die jeder angeboten bekommt, wäre
+zu einer Komponente geworden, die jeder besitzt.
+
+**Project Settings.** `ProjectMultiplayerSettings` in HE_Core, Page
+`Page::Multiplayer` mit den drei Blöcken aus §8.4. Die JSON-Form weicht in
+einem Punkt von §8.4 ab: die vier Prediction-Grenzen der Schrittbeschreibung
+(`interpolationDelaySec`, `reconcileSnapDistance`, `reconcileSmoothing`,
+`maxPendingInputs`) stehen unter einem eigenen `"prediction"`-Objekt, weil
+sie zusammen gelesen werden und einzeln nichts heißen.
+
+**Und wer das liest.** Eine Seite, deren Werte niemand liest, ist ein
+Versprechen ohne Deckung, deshalb ist die Verdrahtung Teil dieses Schritts:
+`NetGameSession::setProjectDefaults` + `defaultHostOptions()` /
+`defaultJoinOptions()` sind der eine Ort, an dem die Seite auf die Session
+trifft, und **alle** Einstiege gehen darüber — `net.host`/`joinDirect`/
+`joinLan` in `EngineApi.cpp`, Play as Host im Editor, `--host`/`--join` im
+gepackten Spiel. Gelesen werden damit: Port, Plätze, Timeout, Tick,
+Weltausdehnung und die vier Prediction-Grenzen.
+
+**Nicht** gelesen werden `discovery.directory`, `discovery.portMapping` (beide
+Schritt 5c) und `rpcPerSecond` (Schritt 7). Sie werden gespeichert, und die
+Hilfe-Einträge sagen wörtlich „stored, but nothing reads it yet" — ein
+Schalter, der still nichts tut, ist schlimmer als kein Schalter.
+
+Zwei Werte gehen bewusst **nicht** in die Seite: `positionBits`/`rotationBits`
+und `snapshotBudgetBytes`. Das sind Wire-Format-Entscheidungen, auf die sich
+beide Enden byteweise einigen müssen; ein Projekt, das daran drehen kann,
+erzeugt zwei Builds desselben Spiels, die inkompatibel sind, ohne dass es
+irgendwo auffällt. Ein Test hält das fest.
+
+**Overlay.** Die vier Zeilen (Rolle, Spieler, Ping, Verlust) hängen an der
+bestehenden Stats-Überlagerung des Viewports (Show ▸ Stats) statt an einem
+neuen Fenster: das ist die Ecke, in die beim Spielen ohnehin geschaut wird.
+Ping und Verlust kommen über `NetGameSession::linkStats()` aus dem
+`UdpTransport` und **fehlen** (statt 0 zu sein), wenn darunter kein Socket
+liegt — bei einem injizierten Transport gibt es keine Laufzeit, und eine 0
+läse sich dort als perfekte Verbindung. Das Voll-Overlay aus §8.5 (Bytes/s
+nach Nachrichtenart, die teuersten Properties) kommt mit Schritt 6, wo es
+etwas zu zeigen gibt.
+
+**Belegt durch:** `editor_help_audit --check` 974/974 in allen elf Bereichen 0
+offen (13 neue Einträge für die Seite, die vier `Network/`-Keys auf
+`Replication/` umbenannt samt `kComponentScopes` — ohne das wäre der Bereich
+`components` von 321/321 auf 316 gefallen); drei Inspector-Tests headless
+(Kategorie ohne Komponente da, ein Klick legt sie an, Ausschalten behält den
+Radius, `listComponents` nennt sie nur wo eine ist); fünf
+`ProjectMultiplayerSettings`-Tests (Defaults = heutiges Verhalten, Rundreise,
+fehlender Schlüssel, clamp mit Port 0 als echter Antwort, echter
+Save/Load); ein `net session`-Test für die beiden Fabriken inklusive der
+Negativaussage über das Wire-Format.
+
 ---
 
 ## 9. Nicht-Ziele und offene Fragen

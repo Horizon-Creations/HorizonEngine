@@ -80,11 +80,11 @@ namespace
 	  "What a character is doing, in the form an animator wants to read: how fast "
 	  "it may go and what it was told to do this frame.",
 	  "", "systems#animation" },
-	{ "Component/Network", "Network",
-	  "Puts the entity on the wire in a multiplayer game: the host sends its "
-	  "state to the clients that are near enough. Without this component an "
-	  "entity is purely local, which is right for muzzle flashes, debris and "
-	  "anything else nobody else needs to see.",
+	{ "Component/Replication", "Replication",
+	  "Whether the entity is shared in a multiplayer game: the host sends its "
+	  "state to the clients that are near enough. Every entity has this "
+	  "category and every entity starts switched off, which is right for muzzle "
+	  "flashes, debris and anything else nobody else needs to see.",
 	  "", "collaboration#gameplay" },
 	{ "Component/Camera", "Camera",
 	  "A viewpoint the game can render from. Exactly one camera per scene may be "
@@ -473,26 +473,38 @@ namespace
 	  "something else owns the facing — a camera rig with coupled rotation. It "
 	  "does NOT change which way forward is; Move Direction Is does that.",
 	  "", "rendering#cameras" },
-	// ── Network ──────────────────────────────────────────────────────────────
-	{ "Network/Relevance Radius", "",
+	// ── Replication ──────────────────────────────────────────────────────────
+	{ "Replication/Replicates", "",
+	  "The one switch that shares this entity. On, it is registered when a "
+	  "session starts and its position and rotation ride the snapshot every "
+	  "tick; once variable sync and remote calls land, the variables it marks "
+	  "Replicated and the functions it marks Run On travel on this same switch "
+	  "and no other. Off, the entity is purely "
+	  "local: it still exists on every machine that loaded the scene, but "
+	  "nothing about it is sent, and what it does there is its own business.\n\n"
+	  "Switching it off KEEPS the settings below — the radius and the speed "
+	  "limits come back with a second click. Remove Component in the header's "
+	  "right-click menu is how you get rid of them.",
+	  "", "collaboration#gameplay" },
+	{ "Replication/Relevance Radius", "",
 	  "How far away, in metres, a player can be and still receive updates for "
 	  "this entity. Further than this and it is simply not sent — the single "
 	  "biggest bandwidth saving in a large world, and the reason a distant "
 	  "player cannot see what happens over here.",
 	  "", "collaboration#gameplay" },
-	{ "Network/Replicate Transform", "",
+	{ "Replication/Replicate Transform", "",
 	  "Send position and rotation every tick. Switch it off for things that "
 	  "never move — level geometry, static props — so they stop taking a slot "
 	  "in every snapshot once their starting state is known.",
 	  "", "collaboration#gameplay" },
-	{ "Network/Max Speed", "",
+	{ "Replication/Max Speed", "",
 	  "The fastest the host will believe this entity moves horizontally, in "
 	  "metres per second; a client claiming more is reported as a possible "
 	  "speed hack. 0 uses the Movement component's Max Speed if there is one, "
 	  "and checks nothing if there is not. Set it explicitly for an entity "
 	  "that dashes or teleports on purpose.",
 	  "", "collaboration#gameplay" },
-	{ "Network/Max Vertical Speed", "",
+	{ "Replication/Max Vertical Speed", "",
 	  "The same limit for up and down, in metres per second — how fast a jump "
 	  "or fall may legitimately be. 0 means the vertical axis is not checked; "
 	  "there is no Movement field to derive it from, so a game that wants it "
@@ -2564,7 +2576,11 @@ namespace
 	  "Starts play mode AND opens a session others can join. The menu then shows "
 	  "the port and the join code — the two things somebody else needs. Everyone "
 	  "who joins plays in this editor's world: what happens here is what "
-	  "happened.",
+	  "happened.\n\n"
+	  "The port, the number of seats and the tick rate come from Project "
+	  "Settings under Game, Multiplayer. Two editors hosting on the SAME machine "
+	  "need that page's Default port set to 0, or the second one finds the port "
+	  "taken.",
 	  "", "editor#play-mode" },
 	{ "Play/Join Session...", "",
 	  "Starts play mode and connects to somebody else's session, with their "
@@ -3409,6 +3425,95 @@ namespace
 	  "Adds an empty row. Name it after the value the game will ask about, then "
 	  "set its range and rate; the row is saved as you go, and a nameless row "
 	  "is simply never matched.",
+	  "", "collaboration#gameplay" },
+	// ── Game ▸ Multiplayer ───────────────────────────────────────────────────
+	// What a session of this project IS. Every number here is read the moment a
+	// session STARTS, so an edit reaches the next Play as Host and never the one
+	// already running.
+	{ "Multiplayer/Default port", "Default port",
+	  "The port a host opens when nothing else names one — the editor's Play as "
+	  "Host, a packaged game started with --host, a script calling net.host "
+	  "without a number. 47824 is deliberately one above the port sessions "
+	  "announce themselves on, so a single firewall rule can name the pair.\n\n"
+	  "0 means \"let the system pick a free one\", which is what two instances on "
+	  "the same machine need; the port that was actually opened is then in the "
+	  "log and in the Play menu.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Max players", "Max players",
+	  "How many players fit, counting the host. Somebody joining a full session "
+	  "is refused with a reason they can read, not silently dropped.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Connection timeout", "Connection timeout",
+	  "How long a peer may go completely silent before the session gives up on "
+	  "it. A player whose connection dies sends nothing at all, and over UDP "
+	  "that is indistinguishable from a quiet moment — this is where the line "
+	  "is drawn. Short turns a brief hiccup into a disconnect; long leaves "
+	  "everybody else waiting for somebody whose cable is out.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Tick rate", "Tick rate",
+	  "How many times a second the host sends the state of the entities with "
+	  "Replication switched on. Bandwidth grows with it in a straight line, so "
+	  "this is the biggest single lever on what a session costs; much below 20 "
+	  "and the smoothing between snapshots becomes visible as remote players "
+	  "lagging behind what they do.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/World extent", "World extent",
+	  "Half the width of the area positions are packed for, in metres from the "
+	  "origin. A position is sent as a whole number of tiny steps across this "
+	  "range, which is what makes it nine bytes instead of twelve — and why "
+	  "anything outside it is CLAMPED on the way over. It has to contain the "
+	  "playable area comfortably; making it larger costs precision, not bytes.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Interpolation delay", "Interpolation delay",
+	  "How far in the past a client draws the OTHER players, so it always has "
+	  "two snapshots to move between instead of waiting for the next one. This "
+	  "is what makes remote players glide rather than jump — and it is also "
+	  "exactly how far behind what they are doing you see them, which is why "
+	  "a shooter keeps it small and a slower game can afford more.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Correction snap distance", "Correction snap distance",
+	  "A client moves its OWN character the moment you press a key and the host "
+	  "confirms it a round trip later. When the two disagree by more than this, "
+	  "the character is put straight where the host says, because easing away a "
+	  "large error looks like sliding on ice. Smaller snaps more often and more "
+	  "visibly; larger lets a big error linger.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Correction smoothing", "Correction smoothing",
+	  "And how quickly a SMALL disagreement is eased away, as a fraction of it "
+	  "per second. Higher follows the host more closely and shows more of the "
+	  "correction; 0 leaves the error standing until the next one replaces it.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Max pending inputs", "Max pending inputs",
+	  "How many movements a client keeps after sending them, so it can replay "
+	  "them against a correction that arrives later. At 60 frames a second, 64 "
+	  "is about a second of round trip; past that the connection is the problem "
+	  "and a bigger buffer only delays noticing it.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Announce on the local network", "Announce on the local network",
+	  "The host says it is there on the local network, so a second instance can "
+	  "offer it in a list instead of somebody typing an address. Only the "
+	  "session's name, its project and its port travel — the join code never "
+	  "does, and without the code nobody gets in.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Register with the session directory", "Register with the session directory",
+	  "For a session played over the internet, where an announcement on the "
+	  "local network reaches nobody.\n\n"
+	  "STORED BUT NOT YET READ: the directory is wired up in a later step of "
+	  "the multiplayer work. Until then a session is found on the local network "
+	  "or by its address, whatever this says.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Ask the router to open the port", "Ask the router to open the port",
+	  "Automatic port forwarding (UPnP, NAT-PMP, PCP), so players outside the "
+	  "local network can reach a host that sits behind a router.\n\n"
+	  "STORED BUT NOT YET READ: same later step as the directory above. A host "
+	  "on the internet needs the forwarding set up by hand for now.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Max remote calls per second", "Max remote calls per second",
+	  "What one client may ask the host to run per second before the excess "
+	  "counts as suspicious — the rate limit on calling a function across the "
+	  "wire.\n\n"
+	  "STORED BUT NOT YET READ: calling functions across the wire arrives in a "
+	  "later step of the multiplayer work.",
 	  "", "collaboration#gameplay" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
@@ -6818,6 +6923,7 @@ namespace
 		// the tab's rail is.
 		{ "Project General/",  "editor-settings", "Settings Reference", "Project: general" },
 		{ "Anti-Cheat/",       "editor-settings", "Settings Reference", "Project: anti-cheat" },
+		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
 		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
@@ -6909,7 +7015,7 @@ namespace
 	constexpr const char* kComponentScopes[] = {
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
 		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
-		"Network",
+		"Replication",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Root Motion", "Animation Layers",

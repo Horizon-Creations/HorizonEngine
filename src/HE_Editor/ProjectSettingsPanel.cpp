@@ -1097,6 +1097,122 @@ void drawAntiCheatPage(AppContext& ctx)
 	if (commit) commitSettings(ctx, p, "anti-cheat settings");
 }
 
+// ─── Game ▸ Multiplayer ──────────────────────────────────────────────────────
+// What a session of this project IS (docs/gameplay-replication-plan.md §8.4):
+// the port it opens, how many players fit, how often the world is sent, and the
+// bounds prediction works within. Three blocks, in the order somebody sets them
+// up: Session (where and for whom), Replication (how much and how often),
+// Discovery (how it is found).
+//
+// Default-constructed is today's behaviour, so a project that never opens this
+// page hosts exactly as it did before the page existed. Every number reaches
+// NetGameSession::setProjectDefaults, which is where the editor's Play as Host,
+// a packaged game's --host and the net.host row all begin — except the three
+// marked below, which are stored and saved but have nothing reading them yet.
+// Saying so on the row is the point: a switch that quietly does nothing is
+// worse than no switch.
+void drawMultiplayerPage(AppContext& ctx)
+{
+	HE::Ed::Help::Scope helpScope("Multiplayer");
+	ProjectData* pp = openProject(ctx);
+	if (!pp) return;
+	ProjectData& p = *pp;
+	using MP = HE::ProjectMultiplayerSettings;
+	MP& m = p.settings.multiplayer;
+
+	settingsFileHint("Read when a session STARTS — Play as Host in the editor, a packaged "
+	                 "game's --host or --join, and the net.host row in a script. A session "
+	                 "already running keeps the numbers it began with.");
+
+	bool commit = false;
+
+	// ── Session ──────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Session");
+	Row::dragInt("Default port##mpport", &m.defaultPort, 1.0f, 0, MP::kMaxPort);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("The port a host opens when nothing else names one. 47824 sits right "
+	     "next to the discovery port, so one firewall rule covers both. 0 lets "
+	     "the system pick a free one, which is what two instances on the same "
+	     "machine need.");
+	Row::sliderInt("Max players##mpmax", &m.maxPlayers, MP::kMinPlayers, MP::kMaxPlayers);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("Counting the host. Somebody joining a full session is refused with a "
+	     "reason, not dropped.");
+	Row::dragFloat("Connection timeout##mptimeout", &m.timeoutSec, 0.1f,
+	               MP::kMinTimeoutSec, MP::kMaxTimeoutSec, "%.1f s");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("How long a peer may go completely silent before it counts as gone. "
+	     "Short makes a brief network hiccup look like a disconnect; long "
+	     "leaves the others waiting for somebody whose cable is out.");
+	ImGui::Spacing();
+
+	// ── Replication ──────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Replication");
+	Row::dragFloat("Tick rate##mptick", &m.tickHz, 1.0f, MP::kMinTickHz, MP::kMaxTickHz, "%.0f Hz");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("How many times a second the host sends the state of the entities with "
+	     "Replication switched on. Bandwidth grows with it in a straight line; "
+	     "much below 20 and the smoothing between snapshots starts to show.");
+	Row::dragFloat("World extent##mpextent", &m.worldExtent, 16.0f,
+	               MP::kMinWorldExtent, MP::kMaxWorldExtent, "%.0f m");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("Half the width of the area positions are packed for, in metres from "
+	     "the origin. Anything outside it is CLAMPED on the way over the wire, "
+	     "so it has to contain the playable area comfortably. Larger costs "
+	     "precision, not bytes.");
+	Row::dragFloat("Interpolation delay##mpinterp", &m.interpolationDelaySec, 0.005f,
+	               0.0f, MP::kMaxInterpolationSec, "%.3f s");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("How far in the past a client draws the other players, so it always "
+	     "has two snapshots to move between. This is what makes remote players "
+	     "glide instead of jump; it is also exactly how far behind they are.");
+	Row::dragFloat("Correction snap distance##mpsnap", &m.reconcileSnapDistance, 0.1f,
+	               0.0f, MP::kMaxSnapDistance, "%.2f m");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("A client moves its own character immediately and the host confirms it "
+	     "a moment later. Disagreement further than this is snapped straight to "
+	     "the host's answer, because easing away a large error looks like "
+	     "sliding on ice.");
+	Row::dragFloat("Correction smoothing##mpsmooth", &m.reconcileSmoothing, 0.5f,
+	               0.0f, MP::kMaxSmoothing, "%.1f /s");
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("And how quickly a SMALL disagreement is eased away, as a fraction per "
+	     "second. Higher is more accurate and more visible; 0 leaves the error "
+	     "standing until the next one replaces it.");
+	Row::dragInt("Max pending inputs##mppending", &m.maxPendingInputs, 1.0f,
+	             MP::kMinPendingInputs, MP::kMaxPendingInputs);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("How many unconfirmed movements a client keeps so it can replay them "
+	     "against a correction. At 60 frames a second, 64 is about a second of "
+	     "round trip; beyond that the connection is the problem, not the "
+	     "buffer.");
+	ImGui::Spacing();
+
+	// ── Discovery ────────────────────────────────────────────────────────────
+	ImGui::SeparatorText("Discovery");
+	commit |= EditorWidgets::checkbox("Announce on the local network##mplan", &m.discoverLan);
+	hint("The host says it is there on the local network, so a second instance "
+	     "finds it without anybody typing an address. Only the session's name, "
+	     "project and port travel; the join code never does.");
+	commit |= EditorWidgets::checkbox("Register with the session directory##mpdir", &m.discoverDirectory);
+	hint("For a session over the internet, where the local network cannot help. "
+	     "Stored, but nothing reads it yet: the directory is wired up in a "
+	     "later step, and until then a session is found on the local network or "
+	     "by its address.");
+	commit |= EditorWidgets::checkbox("Ask the router to open the port##mpmap", &m.portMapping);
+	hint("Automatic port forwarding (UPnP, NAT-PMP, PCP) so players outside the "
+	     "local network can reach the host. Stored, but nothing reads it yet — "
+	     "same later step as the directory above.");
+	Row::dragInt("Max remote calls per second##mprpc", &m.rpcPerSecond, 1.0f,
+	             MP::kMinRpcPerSecond, MP::kMaxRpcPerSecond);
+	commit |= ImGui::IsItemDeactivatedAfterEdit();
+	hint("What one client may ask the host to run per second before the excess "
+	     "counts as suspicious. Stored, but nothing reads it yet: calling "
+	     "functions across the wire arrives in a later step.");
+
+	if (commit) commitSettings(ctx, p, "multiplayer settings");
+}
+
 // ─── Audio ▸ Buses ───────────────────────────────────────────────────────────
 // The mixer is a window of its own (Window ▸ Audio Mixer): faders are something
 // you operate while a scene plays, not a page you fill in. This page says where
@@ -1136,6 +1252,7 @@ constexpr NavItem kGameItems[] = {
 	{ Page::Permissions, "Permissions" },
 	{ Page::Fonts,       "Fonts" },
 	{ Page::AntiCheat,   "Anti-Cheat" },
+	{ Page::Multiplayer, "Multiplayer" },
 };
 constexpr NavItem kRenderingItems[] = {
 	{ Page::RenderDefaults, "Defaults" },
@@ -1234,6 +1351,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	case Page::Permissions:     drawPermissionsPage(ctx);     break;
 	case Page::Fonts:           drawFontsPage(ctx);           break;
 	case Page::AntiCheat:       drawAntiCheatPage(ctx);       break;
+	case Page::Multiplayer:     drawMultiplayerPage(ctx);     break;
 	case Page::RenderDefaults:  drawRenderDefaultsPage(ctx);  break;
 	case Page::Shadows:         drawShadowsPage(ctx);         break;
 	case Page::Simulation:      drawSimulationPage(ctx);      break;

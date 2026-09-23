@@ -1516,7 +1516,9 @@ namespace
 	// ── Multiplayer ──────────────────────────────────────────────────────────
 	{ "net.host",
 	  "Opens a multiplayer session on this machine and makes it joinable. Port 0 "
-	  "lets the system pick one; read it back from the session status, and hand "
+	  "takes the project's Default port (Project Settings, Game, Multiplayer), "
+	  "which is where the seats, the tick rate and the rest come from too; read "
+	  "the port that was actually opened back from the session status, and hand "
 	  "joiners the Join Code. Everyone who joins plays in YOUR world: the host "
 	  "decides what really happened." },
 	{ "net.joinDirect",

@@ -1937,7 +1937,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ImGui::Separator();
 		const bool canNet = canPlay() && !ctx.appLivePreview;
 		if (EditorWidgets::menuItem("Play as Host", nullptr, false, canNet && !!ctx.playAsHost))
-			ctx.playAsHost(0);   // 0: let the OS pick, and the log says which
+			// 0: take the project's Default port (Project Settings ▸ Game ▸
+			// Multiplayer). Which port was actually opened is in the log and
+			// in this menu a few lines down.
+			ctx.playAsHost(0);
 		if (EditorWidgets::menuItem("Join Session...", nullptr, false, canNet && !!ctx.playAsJoin))
 			s_netJoinDialogOpen = true;
 		// What the session this editor opened is doing, read-only. Here and not

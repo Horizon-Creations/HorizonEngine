@@ -181,7 +181,9 @@ struct AppContext
 	// Play mode WITH a multiplayer session (docs/gameplay-replication-plan.md
 	// §5.6 variant 1: two processes, like collaboration). Both restart play mode
 	// if it is already running, because a session belongs to the session it was
-	// opened in. `port` 0 = let the OS pick; `address` is host:port.
+	// opened in. `port` 0 = the project's Default port (Project Settings ▸ Game
+	// ▸ Multiplayer), which may itself be 0 and then means "let the OS pick";
+	// `address` is host:port.
 	std::function<void(int port)> playAsHost;
 	std::function<void(const std::string& address, const std::string& code)> playAsJoin;
 	// What the menu shows about the session it opened: 0 Idle, 1 Hosting,
@@ -190,6 +192,13 @@ struct AppContext
 	std::function<int()>         netSessionStatus;
 	std::function<std::string()> netJoinCode;
 	std::function<int()>         netBoundPort;
+	// The four lines the stats overlay shows while a session runs (plan §8.5):
+	// whether this process is the host, how many players are in, the round trip
+	// and the share of reliable traffic that had to be resent. Ping and loss are
+	// 0 without a real socket underneath, which is the truth rather than a guess.
+	std::function<int()>         netPlayerCount;
+	std::function<float()>       netPingMs;
+	std::function<float()>       netLossPercent;
 	// Freeze / thaw the world tick, and let exactly one frame through. stepFrame
 	// pauses first when the scene is still running, so "step" is one gesture from
 	// any transport state.
@@ -636,7 +645,7 @@ private:
 	PlayNetIntent m_playNetIntent = PlayNetIntent::None;
 	std::string   m_playNetAddress;    // Join: host:port, as typed
 	std::string   m_playNetCode;       // Join: the host's join code
-	int           m_playNetPort = 0;   // Host: 0 = let the OS pick
+	int           m_playNetPort = 0;   // Host: 0 = the project's Default port
 	// Drain the session's queue into every script frontend, at the frame's end.
 	void dispatchNetEvents();
 	// Open whatever the toolbar asked for, once the play world exists.

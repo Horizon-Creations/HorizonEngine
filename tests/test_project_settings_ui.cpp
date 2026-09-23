@@ -221,6 +221,7 @@ TEST_CASE("project settings ui: every page draws over a real project, and lookin
 		{ P::Application,     "application" },
 		{ P::Permissions,     "permissions" },
 		{ P::AntiCheat,       "anti-cheat" },
+		{ P::Multiplayer,     "multiplayer" },
 		{ P::RenderDefaults,  "render-defaults" },
 		{ P::Shadows,         "shadows" },
 		{ P::Simulation,      "physics" },

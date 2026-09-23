@@ -28,7 +28,9 @@ namespace ProjectSettingsPanel
 	{
 		// Game — what the project IS; AntiCheat is what its host refuses to
 		// believe from a client (Config/ProjectSettings.json, "anticheat").
-		General, Application, Permissions, Fonts, AntiCheat,
+		// …and Multiplayer is what a SESSION of it is: port, seats, tick rate
+		// (Config/ProjectSettings.json, "multiplayer").
+		General, Application, Permissions, Fonts, AntiCheat, Multiplayer,
 		// Rendering — how it draws
 		RenderDefaults, Shadows,
 		// Physics — how it simulates

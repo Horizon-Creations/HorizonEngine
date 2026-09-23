@@ -4354,11 +4354,19 @@ void EditorApplication::startPlayNetSession()
 	m_playNetIntent = PlayNetIntent::None;   // one click, one attempt
 
 	m_netSession.setWorld(m_editorWorld.get());
+	// Read HERE and not once at project load: the Multiplayer page saves the
+	// moment an edit ends, and the next session started is the one that should
+	// carry it. A session already running keeps what it began with.
+	if (!m_projectManager.currentProject().path.empty())
+		m_netSession.setProjectDefaults(m_projectManager.currentProject().settings.multiplayer);
 
 	if (intent == PlayNetIntent::Host)
 	{
-		NetGameSession::HostOptions o;
-		o.port        = static_cast<std::uint16_t>(m_playNetPort > 0 ? m_playNetPort : 0);
+		// The project's Multiplayer page first (plan §8.4): port, seats, LAN
+		// announce, tick rate, prediction bounds. A port typed into the menu
+		// beats it; nothing else does.
+		NetGameSession::HostOptions o = m_netSession.defaultHostOptions();
+		if (m_playNetPort > 0) o.port = static_cast<std::uint16_t>(m_playNetPort);
 		o.displayName = "Editor Host";
 		o.scenePath   = m_currentScenePath;
 		// PREVIEW, always, and this is the whole difference from the shipped
@@ -4387,7 +4395,7 @@ void EditorApplication::startPlayNetSession()
 		HE_LOG_ERROR(Replication, "Join needs host:port, got '%s'", m_playNetAddress.c_str());
 		return;
 	}
-	NetGameSession::JoinOptions o;
+	NetGameSession::JoinOptions o = m_netSession.defaultJoinOptions();
 	o.displayName = "Editor Player";
 	o.joinCode    = m_playNetCode;
 	if (!m_netSession.joinDirect(m_playNetAddress.substr(0, colon),
@@ -8530,6 +8538,9 @@ AppContext EditorApplication::makeContext()
 			return m_netSession.isAuthority() ? m_netSession.joinCode() : std::string();
 		},
 		.netBoundPort        = [this]{ return static_cast<int>(m_netSession.boundPort()); },
+		.netPlayerCount      = [this]{ return static_cast<int>(m_netSession.roster().size()); },
+		.netPingMs           = [this]{ return m_netSession.linkStats().pingMs; },
+		.netLossPercent      = [this]{ return m_netSession.linkStats().lossPercent; },
 		// Both refuse to freeze an edit-mode session: there is no world tick to
 		// gate there, and a pause that outlived play mode would silently swallow
 		// the first frames of the NEXT one.

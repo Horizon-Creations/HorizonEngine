@@ -2109,31 +2109,70 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<MovementComponent>(entity); }
 	}
 
-	// ── Network ─────────────────────────────────────────────────────────────
-	if (auto* nc = registry.try_get<NetworkComponent>(entity))
+	// ── Replication ─────────────────────────────────────────────────────────
+	// The category EVERY entity has, and the one tick that is the whole opt-in
+	// (docs/gameplay-replication-plan.md §8.1). Before this, sharing an entity
+	// meant knowing that a component called "Network" existed and finding it in
+	// the Add Component menu; now the question "is this thing on the wire?" is
+	// answered in the same place for every entity, whether the answer is yes or
+	// no. The menu entry is gone for exactly that reason.
+	//
+	// Turning it ON emplaces a NetworkComponent with defaults. Turning it OFF
+	// KEEPS the component with replicates = false, so the radius and the limits
+	// survive and a second click restores them; Remove Component (offered only
+	// while there is one) is how you really get rid of it.
+	//
+	// In the silent modes it behaves like every other component: the class
+	// tab's tree lists what the entity HAS, not the category every entity is
+	// offered, and removeComponent removes what is there.
 	{
-		if (componentHeader("Network", true, removed))
+		auto* nc = registry.try_get<NetworkComponent>(entity);
+		if (nc || !quiet)
 		{
-			// netId and owner are deliberately not here: the server hands them
-			// out per session, and a number typed in the editor would be a
-			// stale claim the next session overrides — the same reason the
-			// serializer leaves them out.
-			Row::dragFloat("Relevance Radius", &nc->relevanceRadius, 1.0f, 0.0f, 100000.0f, "%.0f m"); trackEdit();
-			EditorWidgets::checkbox("Replicate Transform", &nc->replicateTransform); trackEdit();
-			// The two anti-cheat limits. Drawn AFTER the two levers because they
-			// only mean something once the entity is on the wire at all, and a
-			// 0 in either is the ordinary case, explained in the tooltip.
-			Row::dragFloat("Max Speed",          &nc->maxSpeed,         0.1f, 0.0f, 1000.0f, "%.1f m/s"); trackEdit();
-			Row::dragFloat("Max Vertical Speed", &nc->maxVerticalSpeed, 0.1f, 0.0f, 1000.0f, "%.1f m/s"); trackEdit();
-			if (nc->maxSpeed <= 0.0f)
+			if (componentHeader("Replication", nc != nullptr, removed))
 			{
-				if (const auto* mv = registry.try_get<MovementComponent>(entity))
-					ImGui::TextDisabled("Max Speed 0: checked against Movement's %.1f m/s.", mv->maxSpeed);
-				else
-					ImGui::TextDisabled("%s", "Max Speed 0 and no Movement — horizontal speed is not checked.");
+				bool on = nc && nc->replicates;
+				if (EditorWidgets::checkbox("Replicates", &on))
+				{
+					if (!nc)
+					{
+						nc = &registry.emplace<NetworkComponent>(entity);
+						structuralChange = true;
+					}
+					nc->replicates = on;
+				}
+				trackEdit();
+				if (nc && nc->replicates)
+				{
+					// netId and owner are deliberately not here: the server hands them
+					// out per session, and a number typed in the editor would be a
+					// stale claim the next session overrides — the same reason the
+					// serializer leaves them out.
+					Row::dragFloat("Relevance Radius", &nc->relevanceRadius, 1.0f, 0.0f, 100000.0f, "%.0f m"); trackEdit();
+					EditorWidgets::checkbox("Replicate Transform", &nc->replicateTransform); trackEdit();
+					// The two anti-cheat limits. Drawn AFTER the two levers because they
+					// only mean something once the entity is on the wire at all, and a
+					// 0 in either is the ordinary case, explained in the tooltip.
+					Row::dragFloat("Max Speed",          &nc->maxSpeed,         0.1f, 0.0f, 1000.0f, "%.1f m/s"); trackEdit();
+					Row::dragFloat("Max Vertical Speed", &nc->maxVerticalSpeed, 0.1f, 0.0f, 1000.0f, "%.1f m/s"); trackEdit();
+					if (nc->maxSpeed <= 0.0f)
+					{
+						if (const auto* mv = registry.try_get<MovementComponent>(entity))
+							ImGui::TextDisabled("Max Speed 0: checked against Movement's %.1f m/s.", mv->maxSpeed);
+						else
+							ImGui::TextDisabled("%s", "Max Speed 0 and no Movement — horizontal speed is not checked.");
+					}
+				}
+				else if (nc)
+				{
+					// The component is still there, which is the whole point of
+					// switching off rather than removing — say so, or the kept
+					// radius looks like it was lost.
+					ImGui::TextDisabled("%s", "Off. The settings below are kept and come back with it.");
+				}
 			}
+			if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<NetworkComponent>(entity); }
 		}
-		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<NetworkComponent>(entity); }
 	}
 
 	// ── Camera Rig ──────────────────────────────────────────────────────────
@@ -3419,10 +3458,6 @@ constexpr AddRow kGameplayRows[] = {
 	// to give it logic, and the gate was hiding exactly the component you need.
 	addRow<ScriptComponent>("Script"),
 	addRow<SaveStateComponent>("Save State"),
-	// Offered in every project, not only ones with a session running: which
-	// entities go on the wire is authored with the scene, and the session is
-	// what happens to it later.
-	addRow<NetworkComponent>("Network"),
 };
 constexpr AddRow kNavigationRows[] = {
 	addRow<NavMeshComponent>("Nav Mesh"),

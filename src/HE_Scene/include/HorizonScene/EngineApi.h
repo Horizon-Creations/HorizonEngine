@@ -1674,8 +1674,11 @@ namespace anticheat {
 // cannot be inherited by whoever the transport gives the connection to next.
 namespace net {
     // ── Lifecycle ──
-    // Open a session on `port` (0 = let the OS choose). The rest of the options
-    // come from the project's settings; displayName is what the others see.
+    // Open a session on `port` (0 = the project's Default port, which may itself
+    // be 0 and then means "let the OS choose"). Everything else — seats, tick
+    // rate, prediction bounds, LAN announce — comes from the project's
+    // Multiplayer page through NetGameSession::defaultHostOptions; displayName
+    // is what the others see.
     bool        host(Ctx&, int port, const std::string& displayName);
     // Join by address. `code` is the host's join secret — without it the crypto
     // handshake never completes, so a wrong one is a failure to connect and not
