@@ -2102,12 +2102,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     if (ImGui::BeginPopupModal("Join Session##netjoin", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize))
     {
+        // Its own scope, not the Play menu's: the dialog is drawn out here,
+        // long after that menu has closed, so nothing is pushed at this point
+        // and the two fields would be looked up bare.
+        HE::Ed::Help::Scope helpScope("Join Session");
         ImGui::TextUnformatted("Address of the host, and the code it is showing.");
         ImGui::Spacing();
         ImGui::SetNextItemWidth(320.0f);
         ImGui::InputText("Host", s_netJoinAddress, sizeof(s_netJoinAddress));
+        EditorWidgets::helpForLabel("Host");
         ImGui::SetNextItemWidth(320.0f);
         ImGui::InputText("Join code", s_netJoinCode, sizeof(s_netJoinCode));
+        EditorWidgets::helpForLabel("Join code");
         ImGui::Spacing();
         // A join without a code cannot complete the crypto handshake at all, so
         // it would fail as "could not connect" — a message that sends somebody
@@ -2115,7 +2121,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         const bool ready = s_netJoinAddress[0] != '\0' && s_netJoinCode[0] != '\0';
         if (!ready) ImGui::TextDisabled("Both are required.");
         ImGui::BeginDisabled(!ready);
-        if (ImGui::Button("Join", ImVec2(120, 0)))
+        // The wrapper, not ImGui::Button: its help lookup is hover-gated and
+        // allows a disabled item, so the greyed button is what answers "why
+        // can I not press this".
+        if (EditorWidgets::button("Join", ImVec2(120, 0)))
         {
             if (ctx.playAsJoin) ctx.playAsJoin(s_netJoinAddress, s_netJoinCode);
             s_netJoinDialogOpen = false;
@@ -2148,6 +2157,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     if (ImGui::BeginPopupModal("About Horizon Engine##about", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize))
     {
+        // Its own scope for the same reason as the join dialog above: drawn out
+        // here, with the Help menu long closed. Until now its two buttons were
+        // counted as covered by the coverage scan only because that scan walks
+        // the file top to bottom and had "Help" still open from line 2071 — an
+        // accident of position, and one entry away from being real.
+        HE::Ed::Help::Scope helpScope("About");
         if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
         ImGui::TextUnformatted("Horizon Engine");
         if (ctx.fontSubheading) ImGui::PopFont();
@@ -2155,9 +2170,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         ImGui::Spacing();
         ImGui::TextUnformatted("Editor and runtime, built by Horizon Creations.");
         ImGui::Spacing();
-        if (ImGui::SmallButton("Documentation")) { DocsPanel::open(); ImGui::CloseCurrentPopup(); }
+        if (EditorWidgets::smallButton("Documentation")) { DocsPanel::open(); ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
-        if (ImGui::SmallButton("Website"))       SDL_OpenURL("https://horizoncreations.dev");
+        if (EditorWidgets::smallButton("Website"))       SDL_OpenURL("https://horizoncreations.dev");
         ImGui::Separator();
         if (ImGui::Button("Close", ImVec2(120.0f, 0.0f))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();

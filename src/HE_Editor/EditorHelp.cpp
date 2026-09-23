@@ -2575,6 +2575,37 @@ namespace
 	  "Puts this session's join code on the clipboard, to send to whoever is "
 	  "about to join.",
 	  "", "editor#play-mode" },
+	// The dialog that entry opens. Its own scope rather than "Play/": the modal
+	// is drawn outside the menu bar, because a dialog inside a menu closes with
+	// the menu — so by the time these are submitted, "Play" is long popped.
+	{ "Join Session/Host", "",
+	  "Where the host is: an address or a name, and a port after a colon if it "
+	  "is not the default one. On the same network the host's local address is "
+	  "enough; over the internet it is the address the host's router shows.",
+	  "", "editor#play-mode" },
+	{ "Join Session/Join code", "",
+	  "The code the host's Play menu is showing. It is not a password for a "
+	  "person, it is half of the handshake: without the right one the "
+	  "connection is refused before anything else is tried, which is why an "
+	  "empty field greys the button rather than failing later as \"could not "
+	  "connect\".",
+	  "", "editor#play-mode" },
+	{ "Join Session/Join", "",
+	  "Starts play mode and connects. The session belongs to the host: this "
+	  "editor's own scene is loaded for the view, but what happens in it is "
+	  "what the host says happens.",
+	  "", "editor#play-mode" },
+	// Help ▸ About. The two buttons under the version string; the third is
+	// Close, which needs nothing. Scoped for the same reason as the dialog
+	// above — the modal outlives the menu that opened it.
+	{ "About/Documentation", "",
+	  "Opens the manual inside the editor, at its first page. The same thing F1 "
+	  "does on a control, minus the control.",
+	  "", "editor#menus" },
+	{ "About/Website", "",
+	  "Opens horizoncreations.dev in the system browser: releases, the roadmap "
+	  "and the online copy of this manual.",
+	  "", "editor#menus" },
 	{ "viewport.time-scale", "Game time",
 	  "What the RUNNING GAME is doing to its own clock, which is not the same as "
 	  "the Pause button next to it: this reads the scale a script set with Set "
@@ -6737,6 +6768,11 @@ namespace
 		{ "Collaboration/",    "editor-interface", "Editor Interface", "Collaboration" },
 		{ "Source Root/",      "editor-interface", "Editor Interface", "Source root" },
 		{ "New Entity/",       "editor-interface", "Editor Interface", "Creating entities" },
+		// The Play menu's join dialog. Under the Play menu's group, because
+		// that is where a reader met it, even though the modal is drawn
+		// elsewhere.
+		{ "Join Session/",     "editor-interface", "Editor Interface", "Play menu" },
+		{ "About/",            "editor-interface", "Editor Interface", "Help menu" },
 		{ "Viewport Options/", "editor-interface", "Editor Interface", "Viewport options" },
 		{ "Viewport View/",    "editor-interface", "Editor Interface", "View presets" },
 		{ "Viewport View Mode/", "editor-interface", "Editor Interface", "View modes" },

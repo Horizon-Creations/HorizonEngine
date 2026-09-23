@@ -211,6 +211,18 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Rope",            "Shape" },
 		{ "Trail",           "Alignment" },
 		{ "Trail",           "Points" },
+		// Two modals that are drawn OUTSIDE the menu that opens them, because a
+		// dialog inside a menu closes with the menu. Each pushes a scope of its
+		// own; the static audit reads the scope a file has open at that LINE, so
+		// it cannot tell a scope that is really pushed from one it inherited
+		// from the menu above — which is how the About dialog's two buttons
+		// passed the audit for months without an entry. Here the lookup is the
+		// real one.
+		{ "Join Session",    "Host" },
+		{ "Join Session",    "Join code" },
+		{ "Join Session",    "Join" },
+		{ "About",           "Documentation" },
+		{ "About",           "Website" },
 		{ "Content Browser", "Find References" },
 		{ "New Asset",       "Input Action" },
 		{ "Console",         "Auto-scroll" },
