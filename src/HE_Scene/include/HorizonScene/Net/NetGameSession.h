@@ -231,6 +231,14 @@ public:
 	// for SpawnReplicator::SpawnFn's reason. Unset is an ordinary state.
 	using ControlFn = std::function<void(Entity character, std::uint32_t netId)>;
 	void setControlFunction(ControlFn fn) { m_control = std::move(fn); }
+
+	// Client: how the application makes and unmakes an object of a class, for
+	// the spawns the host sends (SpawnReplicator::SpawnFn). Set on the SESSION
+	// and not on the replicator, because the replicator is built per session and
+	// the application binds its services once, at startup — there is no moment
+	// in OnInit at which a replicator exists to be told.
+	void setSpawnFunction(SpawnReplicator::SpawnFn fn);
+	void setDespawnFunction(SpawnReplicator::DespawnFn fn);
 	// The entity this side drives, or entt::null. On the host that is whatever
 	// was last assigned to player 1; on a client, what kMsgControl named.
 	Entity localCharacter() const { return m_localCharacter; }
@@ -310,6 +318,10 @@ private:
 	HE::Net::Game::PlayerId     m_localPlayer = HE::Net::Game::kNoPlayer;
 
 	ControlFn     m_control;
+	// Held here and handed to each SpawnReplicator as it is built; see the
+	// setters.
+	SpawnReplicator::SpawnFn   m_spawnFn;
+	SpawnReplicator::DespawnFn m_despawnFn;
 	Entity        m_localCharacter = entt::null;
 	// Client: a kMsgControl whose net id has no entity YET. It cannot normally
 	// happen (the spawn is ReliableOrdered and goes first), but an authored

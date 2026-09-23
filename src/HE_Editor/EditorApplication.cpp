@@ -89,6 +89,7 @@
 #include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/TimerSystem.h>
 #include <HorizonScene/AntiCheat/AntiCheatEvents.h>   // OnCheatDetected through every frontend
+#include <HorizonScene/Net/NetEvents.h>               // the session's events, likewise
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the game runtime)
@@ -234,6 +235,10 @@ struct HostCtxParts
 	// The anti-cheat host (preview mode), so a graph's Respond To Report and a
 	// Lua onCheatDetected reach the same object here as in the shipped game.
 	HE::AntiCheat::AntiCheatHost* antiCheat = nullptr;
+	// The multiplayer session, for the reason the anti-cheat host above is here:
+	// a previewed graph's Host Session and a Lua lobby script must reach the
+	// same session in the preview as in the shipped game.
+	NetGameSession* net = nullptr;
 };
 // One editor per process; cleared in OnShutdown so nothing here outlives the
 // object its lambdas capture.
@@ -259,6 +264,7 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.windowSize    = g_host.windowSize;
 	c.requestRedraw = g_host.requestRedraw;
 	c.antiCheat     = g_host.antiCheat;
+	c.net           = g_host.net;
 	return c;
 }
 } // namespace
@@ -1397,6 +1403,40 @@ void EditorApplication::OnInit()
 		g_host.runtime  = &m_gameInstance.runtime();
 		g_host.entities = &m_entityHost;
 		g_host.antiCheat = &m_antiCheat;
+		g_host.net       = &m_netSession;
+		// The session's hooks into this host, the same two the packaged game
+		// binds (GameApplication) — a preview that spawned differently from the
+		// shipped build would be a preview of something else.
+		m_netSession.setSpawnFunction(
+			[this](const std::string& classPath, const glm::vec3& pos, const glm::vec3& rot,
+			       HE::Net::Game::PlayerId owner) -> Entity {
+				if (!m_entityHost.running()) return entt::null;
+				const float p[3] { pos.x, pos.y, pos.z };
+				const float r[3] { rot.x, rot.y, rot.z };
+				const HorizonCode::ResolvedClass rc =
+					HorizonCode::resolveClassAsset(contentManager(), classPath);
+				if (!HorizonCode::engineClassIsA(rc.engineBase, "Entity")) return entt::null;
+				const EntityHost::Spawned made =
+					m_entityHost.spawn(classPath, entt::null, p, r);
+				// OURS only — another player's character must not be driven by
+				// this window's keyboard (plan §5.4 point 4).
+				if (made.entity != entt::null &&
+				    owner == m_netSession.localPlayer() &&
+				    HorizonCode::engineClassIsA(rc.engineBase, "PlayerCharacter"))
+					m_playerHost.addCharacter(made.instance);
+				return made.entity;
+			});
+		m_netSession.setDespawnFunction([this](Entity e) {
+			if (const HorizonCode::InstanceId inst = m_entityHost.instanceOf(e))
+				g_host.destroyObject(inst);
+		});
+		m_netSession.setControlFunction([this](Entity character, std::uint32_t) {
+			const HorizonCode::InstanceId inst = m_entityHost.instanceOf(character);
+			if (inst == 0) return;
+			const auto& controllers = m_playerHost.controllers();
+			if (controllers.empty()) { m_playerHost.addCharacter(inst); return; }
+			HE::api::player::possess(controllers.front(), inst);
+		});
 		// Preview from the first frame: a report in the editor is something to
 		// read, never something that drops a player (plan §6.2.6). The sink is
 		// the one dispatcher the packaged game uses (AntiCheatEvents), so a
@@ -3231,6 +3271,13 @@ void EditorApplication::OnRender(float dt)
 			// shipped build did nothing in the preview.
 			TimerSystem::dispatch(dt, &m_gameInstance.runtime(),
 			                      m_scriptContext.get(), &m_scriptInstances);
+			// The multiplayer session, BEFORE everything that reads world state
+			// (plan §5.2), exactly where the packaged game pumps it. Inert and
+			// nearly free while no session is open, which is every ordinary
+			// play session.
+			m_netSession.setWorld(m_editorWorld.get());
+			m_netSession.update(dt);
+
 			// Anti-cheat reports, the same two calls the packaged game makes:
 			// events now, responses at the frame's end (below). In preview mode
 			// the responses are log and flag only — see m_antiCheat.
@@ -4265,11 +4312,74 @@ void EditorApplication::OnRender(float dt)
 		m_fpsHistoryOffset = (m_fpsHistoryOffset + 1) % k_fpsHistorySize;
 	}
 
+	// ── Frame end: what the session collected ────────────────────────────────
+	// Joins, leaves, connects — queued during the pump and delivered here, never
+	// from inside a message handler (NetEvents.h).
+	dispatchNetEvents();
+
 	// ── Frame end: the anti-cheat's responses ────────────────────────────────
 	// The same last line the packaged game has, after every script and the UI
 	// had their turn (plan §5.3). In preview mode what runs here is log and
 	// flag; the kick a policy asked for is dropped, with a line saying so.
 	m_antiCheat.flush();
+}
+
+void EditorApplication::dispatchNetEvents()
+{
+	NetGameSession::Event ev;
+	while (m_netSession.takeEvent(ev))
+		NetEvents::dispatch(ev, &m_gameInstance.runtime(), m_editorWorld.get(),
+		                    m_scriptContext.get(), &m_scriptInstances,
+		                    logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+}
+
+void EditorApplication::startPlayNetSession()
+{
+	if (m_playNetIntent == PlayNetIntent::None) return;
+	const PlayNetIntent intent = m_playNetIntent;
+	m_playNetIntent = PlayNetIntent::None;   // one click, one attempt
+
+	m_netSession.setWorld(m_editorWorld.get());
+
+	if (intent == PlayNetIntent::Host)
+	{
+		NetGameSession::HostOptions o;
+		o.port        = static_cast<std::uint16_t>(m_playNetPort > 0 ? m_playNetPort : 0);
+		o.displayName = "Editor Host";
+		o.scenePath   = m_currentScenePath;
+		// PREVIEW, always, and this is the whole difference from the shipped
+		// game's session: reports and events happen, nobody is kicked from a
+		// session that is the author's own window, and no telemetry leaves
+		// (anti-cheat plan §6.2.6). The editor never configures a telemetry URL
+		// either, so there is nowhere for it to go even if it tried.
+		o.preview     = true;
+		if (!m_netSession.host(o))
+		{
+			HE_LOG_ERROR(Replication, "Play as Host failed: %s",
+			             m_netSession.lastError().c_str());
+			return;
+		}
+		// Shown in the log rather than only in a dialog: the join code is what
+		// the second process needs, and a person reading it off the log is how
+		// the two-process test is actually run.
+		HE_LOG_INFO(Replication, "Play as Host: port %u, join code %s",
+		            m_netSession.boundPort(), m_netSession.joinCode().c_str());
+		return;
+	}
+
+	const std::size_t colon = m_playNetAddress.rfind(':');
+	if (colon == std::string::npos || colon + 1 >= m_playNetAddress.size())
+	{
+		HE_LOG_ERROR(Replication, "Join needs host:port, got '%s'", m_playNetAddress.c_str());
+		return;
+	}
+	NetGameSession::JoinOptions o;
+	o.displayName = "Editor Player";
+	o.joinCode    = m_playNetCode;
+	if (!m_netSession.joinDirect(m_playNetAddress.substr(0, colon),
+	                             static_cast<std::uint16_t>(
+	                                 std::atoi(m_playNetAddress.substr(colon + 1).c_str())), o))
+		HE_LOG_ERROR(Replication, "Join failed: %s", m_netSession.lastError().c_str());
 }
 
 // ─── Headless frame dump ──────────────────────────────────────────────────────
@@ -8385,6 +8495,27 @@ AppContext EditorApplication::makeContext()
 		.playLogMutex        = &m_playLogMutex,
 		.playReportOpen      = &m_playReportOpen,
 		.setPlayMode         = [this](bool play){ setPlayMode(play); },
+		// Play as Host / Join…: park the intent, then start play mode normally.
+		// Two steps rather than one, because a session needs the play world and
+		// at the click there is not one yet (see startPlayNetSession).
+		.playAsHost          = [this](int port){
+			if (m_isPlaying) setPlayMode(false);
+			m_playNetIntent = PlayNetIntent::Host;
+			m_playNetPort   = port;
+			setPlayMode(true);
+		},
+		.playAsJoin          = [this](const std::string& address, const std::string& code){
+			if (m_isPlaying) setPlayMode(false);
+			m_playNetIntent  = PlayNetIntent::Join;
+			m_playNetAddress = address;
+			m_playNetCode    = code;
+			setPlayMode(true);
+		},
+		.netSessionStatus    = [this]{ return static_cast<int>(m_netSession.status()); },
+		.netJoinCode         = [this]{
+			return m_netSession.isAuthority() ? m_netSession.joinCode() : std::string();
+		},
+		.netBoundPort        = [this]{ return static_cast<int>(m_netSession.boundPort()); },
 		// Both refuse to freeze an edit-mode session: there is no world tick to
 		// gate there, and a pause that outlived play mode would silently swallow
 		// the first frames of the NEXT one.
@@ -9059,10 +9190,24 @@ void EditorApplication::setPlayMode(bool play)
 		if (!m_projectManager.currentProject().appProject)
 			setPlayMouseCaptured(true);
 
+		// LAST, for the reason the packaged game opens its session last: the
+		// registry walk registers the scene's replicated entities, and until
+		// here the play world's classes were not running. Nothing happens
+		// unless the toolbar asked for it (plan §5.6 variant 1).
+		startPlayNetSession();
+
 		HE_LOG_INFO(Editor, "%s", "EditorApplication: entering play mode");
 	}
 	else
 	{
+		// The session goes with the play session it belongs to. Before the
+		// hosts come down: leave() says goodbye on the wire, and a peer learns
+		// the seat is free now rather than waiting out a transport timeout.
+		m_netSession.leave();
+		// Whatever it queued on the way out (SessionEnded) still reaches the
+		// scripts, while their runtime is intact.
+		dispatchNetEvents();
+		m_netSession.setWorld(nullptr);
 		// The native module goes FIRST: its onStop runs against the world it was
 		// started on, and everything below this line takes that world apart. The
 		// module is unloaded rather than parked, so outside a play session

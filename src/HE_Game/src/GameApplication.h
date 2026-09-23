@@ -18,6 +18,7 @@
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/EngineApi.h>   // GameServicesBinding (C++ GameLogic services)
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected + frame-end responses
+#include <HorizonScene/Net/NetGameSession.h>        // the multiplayer session (plan §5.7)
 #include <UIWidget/UIWindowFrame.h>   // the borderless window's own frame (F3)
 #include <HorizonGameServices.h>      // the injected C-ABI tables + their umbrella
 
@@ -190,6 +191,15 @@ private:
     // game has no gameplay session of its own yet (plan §6.2.1) — this is the
     // door it goes through once one exists.
     HE::AntiCheat::AntiCheatHost m_antiCheat;
+    // The multiplayer session (docs/gameplay-replication-plan.md §5.7). Built
+    // here and INERT until net.host / net.join opens one, which is why it is a
+    // member and not a pointer: Ctx::net has to be the same object for the whole
+    // life of the process, or a menu script would hold a handle to nothing.
+    //
+    // "Inert" is load-bearing for the net rows: a non-null Ctx::net does NOT
+    // mean "in a session", so every row asks isActive() and a single-player game
+    // gets the neutral answers (EngineApi.h, namespace net).
+    NetGameSession m_netSession;
     std::unique_ptr<HorizonWorld> m_world; // startup scene, ticked + rendered each frame
     bool m_mouseCaptured = false;          // set true in OnInit once the window exists
     // Last frame's UI-navigation buttons (bits: up/down/left/right/activate).
@@ -276,6 +286,25 @@ private:
     // ── Scene transitions (HE::api::scene requests, executed at frame start) ──
     void executeSceneRequests();
     bool performSceneSwitch(const std::string& scenePath);
+
+    // ── The multiplayer session's two hooks into this application ────────────
+    // What a client does when the host says an object exists: make one, and —
+    // only if it is OURS — let the PlayerHost hear its input. A character that
+    // belongs to another player must not be registered, or one key press would
+    // drive two characters (plan §5.4 point 4). entt::null = refused.
+    Entity spawnReplicatedObject(const std::string& classPath, const glm::vec3& position,
+                                 const glm::vec3& rotationEuler,
+                                 HE::Net::Game::PlayerId owner);
+    // What a client does when the host says an entity is ours: give it to the
+    // local player controller, so camera, input forwarding and player.character()
+    // say what the host says (plan §5.4 point 3).
+    void possessLocally(Entity character);
+    // Drain NetGameSession's event queue into every script frontend. At the
+    // frame's END and never from a message handler — see NetEvents.h.
+    void dispatchNetEvents();
+    // --host[=port] / --join=<host:port> --code=<joinCode>, read once after the
+    // project settings are up (plan §5.7). They call the same rows a menu does.
+    void applyNetLaunchArguments();
     // Swap the running world for an already-loaded one (shared by switch + activate).
     void swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const std::string& label);
     // Resolve a project-relative .hescene: packed pak entry (path-derived UUID)

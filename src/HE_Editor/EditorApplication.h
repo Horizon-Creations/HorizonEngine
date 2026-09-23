@@ -29,6 +29,7 @@
 #include <HorizonScene/HcCodegen.h>
 #include <HorizonScene/EngineApi.h>   // GameServicesBinding + the fill* functions
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected in the preview (no kick)
+#include <HorizonScene/Net/NetGameSession.h>        // the multiplayer session (plan Â§5.6)
 #include <HorizonGameServices.h>      // the C-ABI tables a GameLogic module receives
 #include <SourceControl/GitProbe.h>
 #ifdef HE_HAVE_LIBSSH2
@@ -177,6 +178,18 @@ struct AppContext
 	std::mutex*                playLogMutex = nullptr;
 	bool*                      playReportOpen = nullptr;
 	std::function<void(bool)> setPlayMode;
+	// Play mode WITH a multiplayer session (docs/gameplay-replication-plan.md
+	// §5.6 variant 1: two processes, like collaboration). Both restart play mode
+	// if it is already running, because a session belongs to the session it was
+	// opened in. `port` 0 = let the OS pick; `address` is host:port.
+	std::function<void(int port)> playAsHost;
+	std::function<void(const std::string& address, const std::string& code)> playAsJoin;
+	// What the menu shows about the session it opened: 0 Idle, 1 Hosting,
+	// 2 Connecting, 3 Joined, 4 Failed; the code a joiner needs (empty on a
+	// client, always); and the port that was actually opened.
+	std::function<int()>         netSessionStatus;
+	std::function<std::string()> netJoinCode;
+	std::function<int()>         netBoundPort;
 	// Freeze / thaw the world tick, and let exactly one frame through. stepFrame
 	// pauses first when the scene is still running, so "step" is one gesture from
 	// any transport state.
@@ -606,6 +619,28 @@ private:
 	// `anticheat` rows of every frontend go through it; without a session
 	// attached (the preview has none yet) the readers answer their defaults.
 	HE::AntiCheat::AntiCheatHost m_antiCheat;
+	// The multiplayer session for play mode (docs/gameplay-replication-plan.md
+	// §5.6 variant 1: two processes, like collaboration). Built here and INERT
+	// until Play as Host or Join opens one; a member rather than a pointer so
+	// Ctx::net is the same object for the editor's whole life.
+	//
+	// Every session it opens is a PREVIEW: reports and events, but nobody is
+	// kicked from a session that is the author's own window, and nothing leaves
+	// the machine (anti-cheat plan §6.2.6).
+	NetGameSession m_netSession;
+	// What Play as Host / Join… were told to do, acted on when play mode starts.
+	// Parked rather than run at the click for the reason every other editor
+	// action is: opening a session needs the play session's world, and at the
+	// click there is not one yet.
+	enum class PlayNetIntent : uint8_t { None, Host, Join };
+	PlayNetIntent m_playNetIntent = PlayNetIntent::None;
+	std::string   m_playNetAddress;    // Join: host:port, as typed
+	std::string   m_playNetCode;       // Join: the host's join code
+	int           m_playNetPort = 0;   // Host: 0 = let the OS pick
+	// Drain the session's queue into every script frontend, at the frame's end.
+	void dispatchNetEvents();
+	// Open whatever the toolbar asked for, once the play world exists.
+	void startPlayNetSession();
 	// Fill the block above from the editor's own world/physics/content. Called
 	// before every injection — never once at startup: the binding's resolvers
 	// are what make a scene switch transparent, and the umbrella has to point at

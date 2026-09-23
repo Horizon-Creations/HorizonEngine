@@ -26,6 +26,7 @@
 #include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/TimerSystem.h>
 #include <HorizonScene/AntiCheat/AntiCheatEvents.h>   // OnCheatDetected through every frontend
+#include <HorizonScene/Net/NetEvents.h>               // the session's events, likewise
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <Integrity/IntegrityProbe.h> // exe/dylib/pak hashes for the join check (anti-cheat plan §3.5)
@@ -140,6 +141,11 @@ struct HostCtxParts
 	// graph's Respond To Report and a Lua onCheatDetected must reach the same
 	// pending report, not two.
 	HE::AntiCheat::AntiCheatHost* antiCheat = nullptr;
+	// The multiplayer session, bound here for the reason every row above is: a
+	// graph's Host Session and a Lua lobby script must open the SAME session,
+	// not two. Non-null for the whole run and idle until somebody hosts or
+	// joins — the net rows ask isActive(), never this pointer.
+	NetGameSession* net = nullptr;
 };
 // One application per process; cleared in OnShutdown so nothing here outlives
 // the object its lambdas capture.
@@ -345,6 +351,7 @@ HE::api::Ctx apiCtx(HorizonWorld* world, PhysicsWorld* physics, ContentManager* 
 	c.setWindowTitleOf   = g_host.setWindowTitleOf;
 	c.setWindowSizeOf    = g_host.setWindowSizeOf;
 	c.antiCheat          = g_host.antiCheat;
+	c.net                = g_host.net;
 	// Not through g_host: notifications need nothing from the application object,
 	// so they are the platform function itself and there is no state to capture.
 	c.notify          = [](const std::string& t, const std::string& b) { return notifyShow(t, b); };
@@ -915,6 +922,38 @@ void GameApplication::OnInit()
 		g_host.runtime  = &m_gameInstance.runtime();
 		g_host.entities = &m_entityHost;
 		g_host.antiCheat = &m_antiCheat;
+		g_host.net       = &m_netSession;
+		// The session's two callbacks into the application, bound once here for
+		// the reason g_host exists at all: binding them per call site is how the
+		// half-filled Ctx got everywhere.
+		//
+		// SPAWN. HE_Scene cannot make an object of a class — resolving the
+		// engine base, sending only Entity classes through EntityHost and
+		// registering a PlayerCharacter with the PlayerHost are all the host
+		// application's job (SpawnReplicator.h). This is the naht step 4 left
+		// open. `owner` decides the last of those three: a character that
+		// belongs to somebody ELSE must not be handed to our PlayerHost, or
+		// every local key press would drive two characters.
+		m_netSession.setSpawnFunction(
+			[this](const std::string& classPath, const glm::vec3& pos, const glm::vec3& rot,
+			       HE::Net::Game::PlayerId owner) -> Entity {
+				return spawnReplicatedObject(classPath, pos, rot, owner);
+			});
+		// DESPAWN goes through the same door Destroy Object does — the class's
+		// Destruct runs, the body goes back to physics, the entity tree goes —
+		// rather than deleting the entity behind its own logic's back.
+		m_netSession.setDespawnFunction([this](Entity e) {
+			if (const HorizonCode::InstanceId inst = m_entityHost.instanceOf(e))
+				g_host.destroyObject(inst);
+		});
+		// POSSESS. The host says which entity is ours; the session has already
+		// made prediction drive it, and this is the other half — the local
+		// controller takes it, so the camera rig, the input forwarding and
+		// player.character() all agree with the host (plan §5.4 point 3).
+		m_netSession.setControlFunction([this](Entity character, std::uint32_t netId) {
+			(void)netId;
+			possessLocally(character);
+		});
 		// How a report reaches the scripts: the Game Instance, the level script,
 		// the entity's class, the Lua/Python instances, the native module — one
 		// dispatcher shared with the editor's play mode (AntiCheatEvents), so a
@@ -1340,6 +1379,12 @@ void GameApplication::OnInit()
 	// Level script "OnLevelLoaded" fires once the world + scripts are up; the
 	// matching "OnLevelUnloaded" fires at shutdown.
 	if (m_world) m_world->fireLevelLoaded();
+
+	// LAST in OnInit: --host / --join open a session, and a session's registry
+	// walk registers the scene's replicated entities — which needs the scene to
+	// exist and its classes to be running. Everything above is that scene.
+	m_netSession.setWorld(m_world.get());
+	applyNetLaunchArguments();
 }
 
 // ── Shared scene bring-up steps ──────────────────────────────────────────────
@@ -1396,6 +1441,144 @@ bool GameApplication::loadSceneInto(HorizonWorld& world, const std::string& scen
 			return additive ? ser.loadAdditive(world, candidates[i], SerializeFormat::JSON, outCreated)
 			                : ser.load(world, candidates[i], SerializeFormat::JSON);
 	return false;
+}
+
+// ── The multiplayer session's hooks into this application (plan §5.4) ────────
+
+Entity GameApplication::spawnReplicatedObject(const std::string& classPath,
+                                              const glm::vec3& position,
+                                              const glm::vec3& rotationEuler,
+                                              HE::Net::Game::PlayerId owner)
+{
+	if (!m_entityHost.running()) return entt::null;
+
+	const HE::UUID id = contentManager().loadAsset(classPath);
+	if (!contentManager().getHorizonCodeClass(id))
+	{
+		HE_LOG_WARN(Replication, "Spawn of '%s' refused: no such class here. "
+		            "Host and client must be running the same project.",
+		            classPath.c_str());
+		return entt::null;
+	}
+	// Copied before anything else loads: asset pointers live in a dense vector
+	// and resolveClassAsset below loads every ancestor (Memory
+	// `asset-pointer-lifetime`).
+	const std::string assetPath = classPath;
+	const HorizonCode::ResolvedClass rc =
+		HorizonCode::resolveClassAsset(contentManager(), assetPath);
+	if (!HorizonCode::engineClassIsA(rc.engineBase, "Entity"))
+	{
+		// Only entities are replicated: an object with no body has nothing a
+		// snapshot could carry, and nothing a bind could name.
+		HE_LOG_WARN(Replication, "Spawn of '%s' refused: not an Entity class.",
+		            assetPath.c_str());
+		return entt::null;
+	}
+
+	const float pos[3] { position.x, position.y, position.z };
+	const float rot[3] { rotationEuler.x, rotationEuler.y, rotationEuler.z };
+	const EntityHost::Spawned made = m_entityHost.spawn(assetPath, entt::null, pos, rot);
+	if (made.entity == entt::null) return entt::null;
+
+	// OURS only. This is the whole difference between this path and
+	// Ctx::createObject: that one registers every PlayerCharacter with the
+	// PlayerHost, which is right for a single player and wrong for a session —
+	// another player's character would then be driven by OUR keyboard as well.
+	if (owner == m_netSession.localPlayer() &&
+	    HorizonCode::engineClassIsA(rc.engineBase, "PlayerCharacter"))
+		m_playerHost.addCharacter(made.instance);
+
+	return made.entity;
+}
+
+void GameApplication::possessLocally(Entity character)
+{
+	if (character == entt::null) return;
+	const HorizonCode::InstanceId inst = m_entityHost.instanceOf(character);
+	if (inst == 0)
+	{
+		HE_LOG_WARN(Replication, "%s", "Told to possess an entity with no class on it; "
+		            "prediction drives it, but no controller took it.");
+		return;
+	}
+	// The project's first controller, which is the one the local player uses
+	// (PlayerHost::controllers is in spawn order and a session has one local
+	// player). A project with no controller at all keeps its pre-possession
+	// behaviour: addCharacter above already made the input reach the character.
+	const auto& controllers = m_playerHost.controllers();
+	if (controllers.empty())
+	{
+		m_playerHost.addCharacter(inst);
+		return;
+	}
+	HE::api::player::possess(controllers.front(), inst);
+	HE_LOG_INFO(Replication, "%s", "Local controller possessed the character the host assigned");
+}
+
+void GameApplication::dispatchNetEvents()
+{
+	NetGameSession::Event ev;
+	while (m_netSession.takeEvent(ev))
+		NetEvents::dispatch(ev, &m_gameInstance.runtime(), m_world.get(),
+		                    m_scriptContext.get(), &m_scriptInstances,
+		                    logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+}
+
+void GameApplication::applyNetLaunchArguments()
+{
+	// The same rows a menu calls, so there is one way to open a session and not
+	// two. Parsed off the raw argument list rather than launchArguments(), which
+	// is the FILES the app was started with.
+	std::string joinTarget, joinCode, displayName;
+	bool wantHost = false;
+	int  hostPort = 0;
+
+	for (const std::string& arg : launchFlags())
+	{
+		if (arg == "--host") { wantHost = true; }
+		else if (arg.rfind("--host=", 0) == 0)
+		{
+			wantHost = true;
+			hostPort = std::atoi(arg.substr(7).c_str());
+		}
+		else if (arg.rfind("--join=", 0) == 0) joinTarget  = arg.substr(7);
+		else if (arg.rfind("--code=", 0) == 0) joinCode    = arg.substr(7);
+		else if (arg.rfind("--name=", 0) == 0) displayName = arg.substr(7);
+	}
+	if (!wantHost && joinTarget.empty()) return;
+
+	HE::api::Ctx c = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager());
+
+	if (wantHost)
+	{
+		if (!HE::api::net::host(c, hostPort, displayName.empty() ? "Host" : displayName))
+		{
+			HE_LOG_ERROR(Replication, "--host failed: %s",
+			             HE::api::net::lastError(c).c_str());
+			return;
+		}
+		// AT INFO AND ON PURPOSE: without this line a second process has no way
+		// to learn the code, and the two-process run the plan asks for would be
+		// a person reading it off a screen. It is the host's own log on the
+		// host's own machine — the same secret its own UI shows.
+		HE_LOG_INFO(Replication, "--host: listening on port %u, join code %s",
+		            m_netSession.boundPort(), m_netSession.joinCode().c_str());
+		return;
+	}
+
+	// host:port. A bare host means the default port is not guessed — say so
+	// rather than connecting somewhere nobody is listening.
+	const std::size_t colon = joinTarget.rfind(':');
+	if (colon == std::string::npos || colon + 1 >= joinTarget.size())
+	{
+		HE_LOG_ERROR(Replication, "--join needs host:port, got '%s'", joinTarget.c_str());
+		return;
+	}
+	const std::string address = joinTarget.substr(0, colon);
+	const int         port    = std::atoi(joinTarget.substr(colon + 1).c_str());
+	if (!HE::api::net::joinDirect(c, address, port, joinCode,
+	                              displayName.empty() ? "Player" : displayName))
+		HE_LOG_ERROR(Replication, "--join failed: %s", HE::api::net::lastError(c).c_str());
 }
 
 bool GameApplication::performSceneSwitch(const std::string& scenePath)
@@ -2711,6 +2894,14 @@ void GameApplication::OnRender(float deltaTime)
 	// BUTTONS are the exception — a mouse-button action binding is gameplay, so
 	// it is masked while the pointer sits on a UI element, the same way the
 	// editor blanks this very frame outside capture.
+	// ── The session, BEFORE the simulation (plan §5.2) ───────────────────────
+	// It drains the socket and runs its handlers: a client's incoming snapshot
+	// and a host's incoming input are both INPUTS to this frame, so they belong
+	// in front of everything that reads world state. Inert and nearly free while
+	// no session is open, which is every single-player frame ever run.
+	m_netSession.setWorld(m_world.get());
+	m_netSession.update(gameDt);
+
 	MouseFrame playerMouse = input().mouse();
 	if (m_uiWantsPointer || inputMode == HE::api::input::Mode::UIOnly)
 		playerMouse.buttons = 0;
@@ -2948,6 +3139,15 @@ void GameApplication::OnRender(float deltaTime)
 			}
 		}
 	}
+
+	// ── Frame end: what the session collected ────────────────────────────────
+	// Joins, leaves, connects, the session opening and closing. Queued by
+	// update() at the frame's start and delivered HERE, not from inside the
+	// handler that noticed them — running a graph in the middle of draining a
+	// socket is the thing NetEvents.h exists to avoid. Before the anti-cheat
+	// flush below, so a handler reacting to a join still has the whole kick
+	// window in front of it.
+	dispatchNetEvents();
 
 	// ── Frame end: the anti-cheat's responses ────────────────────────────────
 	// LAST in the frame, after every script had its turn: a kick decided at the

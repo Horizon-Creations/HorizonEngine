@@ -162,6 +162,19 @@ bool NetGameSession::joinDirect(const std::string& address, std::uint16_t port,
 	return true;
 }
 
+void NetGameSession::setSpawnFunction(SpawnReplicator::SpawnFn fn)
+{
+	m_spawnFn = std::move(fn);
+	// Also to the live one, so binding mid-session is not a silent no-op.
+	if (m_spawns) m_spawns->setSpawnFunction(m_spawnFn);
+}
+
+void NetGameSession::setDespawnFunction(SpawnReplicator::DespawnFn fn)
+{
+	m_despawnFn = std::move(fn);
+	if (m_spawns) m_spawns->setDespawnFunction(m_despawnFn);
+}
+
 // ── Finding a session on the LAN (plan §5.3) ────────────────────────────────
 
 bool NetGameSession::refreshLan()
@@ -218,6 +231,10 @@ bool NetGameSession::startCommon(std::unique_ptr<ITransport> transport, NetRole 
 	m_spawns->setJoinedFilter([this](ConnectionId conn) {
 		return m_roster.findByConnection(conn) != nullptr;
 	});
+	// The application's spawn services, bound once at startup and re-applied to
+	// every replicator this session builds (see the setters).
+	if (m_spawnFn)   m_spawns->setSpawnFunction(m_spawnFn);
+	if (m_despawnFn) m_spawns->setDespawnFunction(m_despawnFn);
 
 	// The host is always present, even before anything else is: a session with
 	// nobody in it is a listening socket, not a session.
