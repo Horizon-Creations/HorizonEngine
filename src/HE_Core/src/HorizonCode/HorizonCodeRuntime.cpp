@@ -400,9 +400,14 @@ Runtime::FunctionSignature Runtime::functionSignatureOf(InstanceId id,
 
     if (i->compiled)
     {
+        // LAST match wins, not the first: the generated table lists a base
+        // class's functions before the class's own, so a re-declared function's
+        // Run On has to be read off the leaf — the same "leaf-most wins" rule
+        // the interpreted branch below applies by scanning levels backwards.
         for (const auto& fi : i->compiled->funcInfos())
         {
             if (!fi.name || fn != fi.name) continue;
+            sig = FunctionSignature{};
             sig.found     = true;
             sig.runOn     = fi.runOn;
             sig.anyClient = fi.anyClient;
@@ -411,7 +416,6 @@ Runtime::FunctionSignature Runtime::functionSignatureOf(InstanceId id,
             sig.hasParams = fi.params != nullptr;
             for (std::size_t k = 0; fi.params && k < fi.paramCount; ++k)
                 sig.params.push_back(fi.params[k]);
-            return sig;
         }
         return sig;
     }

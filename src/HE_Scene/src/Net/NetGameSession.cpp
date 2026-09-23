@@ -374,6 +374,7 @@ bool NetGameSession::startCommon(std::unique_ptr<ITransport> transport, NetRole 
 		return m_roster.findByConnection(conn) != nullptr;
 	});
 	if (m_varRuntime) m_rpc->setRuntime(m_varRuntime, m_varInstanceOf);
+	m_rpc->setMaxCallsPerSecond(static_cast<float>(m_projectDefaults.rpcPerSecond));
 	installRpcHook();
 
 	// The host is always present, even before anything else is: a session with

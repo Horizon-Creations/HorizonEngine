@@ -1912,3 +1912,69 @@ TEST_CASE("codegen: the engine-event hooks do exactly what the named path does")
 	p.compInst->onValueChanged(3, 1.0f);
 	p.checkParity();
 }
+
+TEST_CASE("codegen: a Run On function routes at the call site and lands in funcInfos")
+{
+	// The compiled twin of the interpreter's check in Runner::execNode
+	// (docs/gameplay-replication-plan.md §7.2). A packaged build that emitted a
+	// bare call here would run every remote call locally and look ALMOST right —
+	// the door opens on the machine that pulled the lever and nowhere else —
+	// which is why this is pinned by NAME rather than left to a parity run.
+	using NT = HorizonCode::NodeType;
+	using PT = HorizonCode::PinType;
+	hcfix::Fx f;
+	f.var("opened", PT::Bool);
+
+	// Open(howMuch: Int) [Run On: Server, Any Client] { opened = true }
+	const int open = f.fnEntry("Open", 0, { { "howMuch", PT::Int } }, {});
+	{
+		HorizonCode::Node* e = f.g.findNode(open);
+		REQUIRE(e != nullptr);
+		e->runOn     = (std::uint8_t)HorizonCode::RunOn::Server;
+		e->anyClient = true;
+	}
+	const int s = f.setVar("opened", PT::Bool);
+	f.data(f.constB(true), 0, s, 0);
+	f.exec(open, s);
+
+	// Trigger() { Open(7) } — a plain Call Function node.
+	const int trig = f.fnEntry("Trigger", 0, {}, {});
+	const int call = f.fnCall("Open");
+	HorizonCode::syncFunctionSignatures(f.g);   // the call mirrors the entry's pins
+	f.data(f.constI(7), 0, call, 0);
+	f.exec(trig, call);
+
+	HE::hccg::Options opt;
+	HE::hccg::Result r = HE::hccg::generate({ f.done("run_on_server") }, opt);
+	REQUIRE(r.ok);
+	REQUIRE(r.fallbacks.empty());
+	std::string all;
+	for (const auto& file : r.files) all += file.contents;
+
+	// The call site asks first, and only runs the body when the answer is "not
+	// routed". The mode and the Any Client flag travel with the question.
+	CHECK(all.find("hc::rpcRoute(m_ctx, \"Open\"") != std::string::npos);
+	CHECK(all.find(", 1, true))") != std::string::npos);
+
+	// …and the host can look the function up: without funcInfos a packaged host
+	// has no signature for a generated class and would have to refuse every
+	// call from anyone but the entity's owner.
+	CHECK(all.find("funcInfos() const") != std::string::npos);
+	CHECK(all.find("HorizonCode::CompiledFuncInfo") != std::string::npos);
+
+	// NEGATIVE CONTROL: a Local function is untouched. Without this the checks
+	// above would also pass on an emitter that wrapped EVERY call in a route.
+	hcfix::Fx plain;
+	plain.var("n", PT::Float);
+	const int p1 = plain.fnEntry("Bump", 0, {}, {});
+	const int ps = plain.setVar("n", PT::Float);
+	plain.data(plain.constF(1.0f), 0, ps, 0);
+	plain.exec(p1, ps);
+	const int p2 = plain.fnEntry("Go", 0, {}, {});
+	plain.exec(p2, plain.fnCall("Bump"));
+	HE::hccg::Result pr = HE::hccg::generate({ plain.done("run_on_local") }, opt);
+	REQUIRE(pr.ok);
+	std::string plainAll;
+	for (const auto& file : pr.files) plainAll += file.contents;
+	CHECK(plainAll.find("hc::rpcRoute") == std::string::npos);
+}

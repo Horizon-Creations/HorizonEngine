@@ -687,6 +687,24 @@ inline std::vector<Value> callExternal(const Context& c, uint32_t target, const 
 { return c.callExternal ? c.callExternal(target, fn, args) : std::vector<Value>{}; }
 inline std::vector<Value> callApi(const Context& c, const char* id, const std::vector<Value>& args)
 { return c.callApi ? c.callApi(id, args) : std::vector<Value>{}; }
+
+// Hand a runOn ≠ Local call to the network (docs/gameplay-replication-plan.md
+// §7.2). TRUE = it is on the wire, do not run the body here. The generated
+// call site wraps its body in `if (!hc::rpcRoute(...))`, which is the compiled
+// twin of the interpreter's check in Runner::execNode — without it a packaged
+// build would run every remote call locally and look almost right.
+//
+// Unbound (no session, a tool, a test) is FALSE: run it here, exactly as the
+// interpreter answers.
+// An EMPTY parameter list that is still a list. CompiledFuncInfo::params being
+// null means "this codegen emitted no types", which the router reads as "no
+// signature to check against"; a function that genuinely takes no arguments
+// points here instead, so a call carrying one is still refused.
+inline constexpr PinType kNoParams[1] = { PinType::Exec };
+
+inline bool rpcRoute(const Context& c, const char* fn, const std::vector<Value>& args,
+                     std::uint8_t runOn, bool anyClient)
+{ return c.rpcRoute ? c.rpcRoute(fn, args, runOn, anyClient) : false; }
 inline uint32_t self(const Context& c)         { return c.getSelf ? c.getSelf().ref : 0u; }
 inline uint32_t gameInstance(const Context& c) { return c.getGameInstance ? c.getGameInstance().ref : 0u; }
 // `realTime` defaults to false so code generated before the Delay node grew its

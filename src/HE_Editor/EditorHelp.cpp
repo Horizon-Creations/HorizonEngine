@@ -477,9 +477,8 @@ namespace
 	{ "Replication/Replicates", "",
 	  "The one switch that shares this entity. On, it is registered when a "
 	  "session starts and its position and rotation ride the snapshot every "
-	  "tick; once variable sync and remote calls land, the variables it marks "
-	  "Replicated and the functions it marks Run On travel on this same switch "
-	  "and no other. Off, the entity is purely "
+	  "tick. The variables it marks Replicated and the functions it marks Run "
+	  "On travel on this same switch and no other. Off, the entity is purely "
 	  "local: it still exists on every machine that loaded the scene, but "
 	  "nothing about it is sent, and what it does there is its own business.\n\n"
 	  "Switching it off KEEPS the settings below — the radius and the speed "
@@ -3512,8 +3511,9 @@ namespace
 	  "What one client may ask the host to run per second before the excess "
 	  "counts as suspicious — the rate limit on calling a function across the "
 	  "wire.\n\n"
-	  "STORED BUT NOT YET READ: calling functions across the wire arrives in a "
-	  "later step of the multiplayer work.",
+	  "Measured over a two-second window, so a burst after a stall does not "
+	  "count as an attack. A client past the limit has its extra calls dropped "
+	  "and the overage weighed against it, exactly like a flood of input.",
 	  "", "collaboration#gameplay" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
@@ -6253,6 +6253,45 @@ namespace
 	  "that used it are left where they are, still naming something no longer "
 	  "declared — nothing is repaired for you.",
 	  "", "horizoncode#functions" },
+
+	{ "Script Node/Run On", "",
+	  "Which machine actually runs this function in a multiplayer session. "
+	  "Local is every function that ever existed: it runs wherever it was "
+	  "called. Server hands the call to the host — the ordinary way a player "
+	  "says \"I pulled the lever\", because only the host may change the world. "
+	  "Owning Client runs it on the machine of the player who owns this entity; "
+	  "All Clients runs it everywhere, host included. Nothing at the Call "
+	  "Function node says any of this, so one graph works offline and online: "
+	  "with no session, every mode simply runs here.",
+	  "A function that runs elsewhere returns nothing — there is nobody on this "
+	  "machine to hand a value back to, so the Outputs list disappears and any "
+	  "outputs it had are dropped. If the other side needs a value, pass it as "
+	  "an argument.\n\n"
+	  "A DOOR, END TO END. The class runs on every machine, so the rule is: "
+	  "simulate only with Is Authority, show everywhere, and send intentions "
+	  "with a Server function.\n\n"
+	  "  On Interact  ->  Open()            (Open is Run On: Server, Any Client)\n"
+	  "  Open [Server]  ->  Is Authority?  ->  Set doorOpen = true\n"
+	  "  OnRep_doorOpen  ->  Play Animation\n\n"
+	  "The player's machine runs On Interact and calls Open; because Open is a "
+	  "Server function, the call travels instead of running there. The host runs "
+	  "Open and sets doorOpen, which is a Replicated variable with Notify, so "
+	  "every client hears OnRep_doorOpen and plays the animation.\n\n"
+	  "The host does NOT hear its own OnRep — it set the value and knows it — so "
+	  "if the host should see the door swing too, play the animation right after "
+	  "the Set as well. Any Client is ticked because a door belongs to nobody: "
+	  "without it the host would refuse every player who tried to open it.",
+	  "horizoncode#functions" },
+
+	{ "Script Node/Any Client", "",
+	  "May a player who does NOT own this entity call this Server function? Off "
+	  "by default, so \"anyone may trigger this\" is a decision somebody made. A "
+	  "door belongs to nobody, so its Open needs this ticked; a character's "
+	  "Respawn does not, because its owner is the only one who should ask.",
+	  "The host refuses a call from a player who owns neither the entity nor "
+	  "this permission, and counts it against them — that refusal is what stops "
+	  "one player driving everybody else's character.",
+	  "horizoncode#functions" },
 
 	{ "Script Node/Overridable", "",
 	  "Lets a class derived from this one replace this event or function. It then "

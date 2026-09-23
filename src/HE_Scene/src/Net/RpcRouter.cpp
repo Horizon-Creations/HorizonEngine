@@ -468,12 +468,12 @@ bool RpcRouter::accept(ConnectionId conn, PlayerId fromPlayer, Entity entity,
 	while (!times.empty() && times.front() < cutoff) times.pop_front();
 	times.push_back(m_now);
 	const float rate = static_cast<float>(times.size()) / kRpcRateWindowSec;
-	if (rate > kMaxRpcPerSecond)
+	if (rate > m_maxPerSecond)
 	{
 		++m_stats.rateLimited;
 		if (m_antiCheat)
 		{
-			const float weight = (rate / kMaxRpcPerSecond - 1.0f) * 10.0f;
+			const float weight = (rate / m_maxPerSecond - 1.0f) * 10.0f;
 			m_antiCheat->observe(conn, HE::AntiCheat::Kind::InputRate, weight,
 			                     "remote calls above the rate limit");
 		}

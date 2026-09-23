@@ -86,6 +86,7 @@ namespace HE::AntiCheat { class AntiCheatService; }
 // How many calls one connection may make per second before the host starts
 // counting it against them (plan §7.6 point 3). Generous on purpose: a legit
 // burst after a stall delivers a frame's worth at once, exactly like input.
+// The DEFAULT: the project's Multiplayer page overrides it per session.
 inline constexpr float kMaxRpcPerSecond = 60.0f;
 // The window the rate is measured over. Seconds and not a frame, the lesson the
 // dt budget and the input rate both already carry.
@@ -122,6 +123,13 @@ public:
 	// which is byte-for-byte the behaviour before the service existed: the call
 	// is still refused, nobody is scored for it.
 	void setAntiCheat(HE::AntiCheat::AntiCheatService* ac) { m_antiCheat = ac; }
+	// The project's "Max remote calls per second" (plan §8.4). Anything at or
+	// below zero is ignored rather than taken literally: a hand-edited 0 would
+	// mean "no client may call anything", which is not a setting anybody wants
+	// and not what the page says.
+	void setMaxCallsPerSecond(float perSecond)
+	{ if (perSecond > 0.0f) m_maxPerSecond = perSecond; }
+	float maxCallsPerSecond() const { return m_maxPerSecond; }
 
 	// ── Sending ──────────────────────────────────────────────────────────────
 	// The three explicit doors (the net.call* rows, the scripting frontends).
@@ -230,6 +238,7 @@ private:
 	const HE::Net::Game::PlayerRoster* m_roster = nullptr;
 	HE::AntiCheat::AntiCheatService*   m_antiCheat = nullptr;
 	HE::Net::Game::PlayerId            m_localPlayer = HE::Net::Game::kNoPlayer;
+	float                              m_maxPerSecond = kMaxRpcPerSecond;
 
 	std::deque<Call>        m_inbox;
 	HE::Net::Game::PlayerId m_sender = HE::Net::Game::kNoPlayer;

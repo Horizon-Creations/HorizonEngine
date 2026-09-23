@@ -331,8 +331,8 @@ struct HE_API ProjectMultiplayerSettings
     bool portMapping       = true;
 
     // Remote calls a client may make per second before the host counts the
-    // excess as an observation (§7.6). STORED BUT NOT YET READ: RPC lands in
-    // step 7.
+    // excess as an observation (§7.6), measured over a two-second window.
+    // Read by RpcRouter at the start of every session.
     int rpcPerSecond = 60;
 
     static constexpr int   kMaxPort              = 65535;

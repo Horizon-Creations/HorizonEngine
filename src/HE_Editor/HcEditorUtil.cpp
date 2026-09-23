@@ -899,7 +899,19 @@ void drawFunctionInterface(HorizonCode::Graph& g, HorizonCode::Node& entry, bool
 	};
 
 	editList("Inputs",  "in",  entry.params);
-	editList("Outputs", "out", entry.results);
+	// Outputs are hidden entirely on a function that runs somewhere else: a
+	// remote call is fire-and-forget (plan §7.2), and there is nobody on the
+	// other machine to hand a value back to. Saying so where the rows would be
+	// is better than letting somebody add one and find out three machines
+	// later that nothing reads it.
+	if (entry.runOn == (std::uint8_t)RunOn::Local)
+		editList("Outputs", "out", entry.results);
+	else
+	{
+		ImGui::SeparatorText("Outputs");
+		ImGui::TextDisabled("A function that runs on another machine returns\n"
+		                    "nothing: there is nobody here to hand it back to.");
+	}
 
 	if (changed)
 	{

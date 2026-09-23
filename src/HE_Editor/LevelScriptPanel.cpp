@@ -1031,6 +1031,43 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		EditorWidgets::helpForLabel("Access");
 		ImGui::TextDisabled("public functions are callable from Lua/Python.");
 		overridableRow(*n);
+
+		// ── Where this function runs (plan §7.2) ──
+		// The whole of the multiplayer declaration for a function: a Call
+		// Function node on an entry with this set is not executed by the
+		// caller, it is handed to the network. Nothing at the CALL says so,
+		// which is the point — the decision belongs to the function.
+		{
+			int runOn = (int)n->runOn;
+			if (ImGui::Combo("Run On", &runOn,
+			                 "Local\0Server\0Owning Client\0All Clients\0"))
+			{
+				n->runOn = (std::uint8_t)(runOn < 0 || runOn > 3 ? 0 : runOn);
+				// Return values cannot survive the trip, so switching away from
+				// Local DROPS them rather than leaving a Return node wired to
+				// pins nothing will ever read. Said out loud below, and the
+				// Outputs list disappears with them.
+				if (n->runOn != (std::uint8_t)HC::RunOn::Local && !n->results.empty())
+				{
+					n->results.clear();
+					HC::syncFunctionSignatures(graph);
+				}
+				// Only a Server function asks "may a stranger call it".
+				if (n->runOn != (std::uint8_t)HC::RunOn::Server) n->anyClient = false;
+				edited = true;
+			}
+			EditorWidgets::helpForLabel("Run On");
+			if (n->runOn == (std::uint8_t)HC::RunOn::Server)
+			{
+				if (EditorWidgets::checkbox("Any Client", &n->anyClient)) edited = true;
+				ImGui::TextDisabled(n->anyClient
+					? "Any player may call this."
+					: "Only the player who owns this entity may call it.");
+			}
+			else if (n->runOn != (std::uint8_t)HC::RunOn::Local)
+				ImGui::TextDisabled("Only the host may start this call.");
+		}
+
 		HcEditorUtil::drawFunctionInterface(graph, *n, edited);
 		break;
 	}
