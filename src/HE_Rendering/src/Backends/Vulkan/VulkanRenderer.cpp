@@ -412,256 +412,28 @@ void VulkanRenderer::Render()
     // Frame-begin timestamp (also reaps the slot's previous results — no stall).
     gpuTimerBegin(cmd);
 
-    // Cascade shadow maps first, in their own render passes (before the
-    // scene/swapchain pass), fit against the aspect of the target the scene
-    // will be drawn into.
-    {
-        const float aspectW = useViewport ? float(m_viewportW) : float(std::max(m_swapExtent.width,  1u));
-        const float aspectH = useViewport ? float(m_viewportH) : float(std::max(m_swapExtent.height, 1u));
-        EncodeShadowMap(cmd, aspectW / aspectH);
-    }
-
-    // Camera-depth pre-pass for screen-space decals. It must run before the scene
-    // pass opens, because the decal draw sits INSIDE that pass and samples this
-    // image — the pass's own depth attachment cannot be sampled while bound.
-    // Skips itself when the frame has no decals.
-    m_decalDepthActive = useViewport ? &m_decalDepthVp : &m_decalDepth;
-    EncodeDecalDepth(cmd, useViewport ? m_decalDepthVp : m_decalDepth);
-
     VkClearValue clears[2]{};
     clears[0].color        = { { 0.0f, 0.0f, 0.0f, 1.0f } };
     clears[1].depthStencil = { 1.0f, 0 };
 
     if (useViewport)
     {
-        const bool useHDR = m_postFxReady && m_hdrFB && m_ldrFB && m_fxaaFB;
-        if (useHDR)
-        {
-            // ── Ray-traced GI (software compute): G-buffer + shadow rays +
-            // temporal + blur + probe update. Extracts the scene itself.
-            // Replaces the CSM lookup AND SSAO in scene.frag when it runs.
-            runGi(cmd, m_viewportW, m_viewportH);
-
-            // ── Forward SSR (docs/ssr-cross-backend-plan.md checkpoint B) ──
-            // Built lazily, and only here: the trace's radiance source is the
-            // HDR target of THIS branch, so SSR does not exist in the swapchain
-            // path at all (plan §2.2 — reported, not hidden).
-            if (m_ssrEnabled) EnsureSSRPipelines();
-            const bool ssrWanted = ssrWantedThisFrame();
-
-            // ── SSAO position prepass + occlusion compute + blur ───────────
-            // runSSAO() extracts the scene itself (like EncodeShadowMap) so it
-            // doesn't depend on DrawScene having run first. Skipped when GI
-            // shades this frame (probe indirect replaces AO) — but the pass runs
-            // anyway when SSR wants the reflection MRT out of it, which is the
-            // whole point of the aoWanted flag.
-            const bool aoWanted = !m_giRanThisFrame && m_ssaoEnabled;
-            if (aoWanted || ssrWanted)
-                runSSAO(cmd, m_viewportW, m_viewportH, /*reflMrt=*/ssrWanted, aoWanted);
-
-            // ── SSR trace + blur chain (own render passes, before the scene) ─
-            if (ssrWanted)
-            {
-                m_ssrResultView  = RenderForwardSSR(cmd, m_viewportW, m_viewportH);
-                m_ssrRanThisFrame = m_ssrResultView != VK_NULL_HANDLE;
-            }
-
-            // ── Scene → HDR RT (RGBA16F) ───────────────────────────────────
-            VkRenderPassBeginInfo hdrpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-            hdrpbi.renderPass  = m_postFxSceneRP;
-            hdrpbi.framebuffer = m_hdrFB;
-            hdrpbi.renderArea.extent = { m_viewportW, m_viewportH };
-            hdrpbi.clearValueCount   = 2;
-            hdrpbi.pClearValues      = clears;
-            vkCmdBeginRenderPass(cmd, &hdrpbi, VK_SUBPASS_CONTENTS_INLINE);
-            DrawScene(cmd, m_viewportW, m_viewportH, /*hdr=*/true);
-            vkCmdEndRenderPass(cmd);
-            m_hdrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-            // Forward SSR: keep a full-res copy of the finished HDR frame
-            // (opaque + sky + transparency) — NEXT frame's trace reprojects its
-            // hits into it. Taken here, at the very end of the scene pass, for
-            // the same reason Metal takes it after its scene encoder and GL at
-            // the end of the geometry pass: earlier and the reflection would
-            // show a half-drawn world.
-            if (ssrWanted) CaptureSSRColorHistory(cmd, m_viewportW, m_viewportH);
-
-            // Transition HDR → SHADER_READ_ONLY for bloom bright pass.
-            runPostFXBarrier(cmd, m_hdrImage,
-                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-            m_hdrLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-            // Helper: run one fullscreen blit pass.
-            auto blitPass = [&](VkRenderPass rp, VkFramebuffer fb, uint32_t bw, uint32_t bh,
-                                VkPipeline pipe, VkDescriptorSet ds, const float params[4]) {
-                VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-                bi.renderPass=rp; bi.framebuffer=fb; bi.renderArea.extent={bw,bh};
-                vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    m_postFxPipeLayout, 0, 1, &ds, 0, nullptr);
-                vkCmdPushConstants(cmd, m_postFxPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, params);
-                VkViewport vp{0,0,(float)bw,(float)bh,0,1}; vkCmdSetViewport(cmd,0,1,&vp);
-                VkRect2D sc{{0,0},{bw,bh}}; vkCmdSetScissor(cmd,0,1,&sc);
-                vkCmdDraw(cmd, 3, 1, 0, 0);
-                vkCmdEndRenderPass(cmd);
-            };
-
-            const uint32_t bw = std::max(1u, m_viewportW/2), bh = std::max(1u, m_viewportH/2);
-
-            if (m_bloomEnabled)
-            {
-                // ── Bloom bright pass ──────────────────────────────────────
-                { const float p[4]={m_bloomThreshold,m_bloomKnee,0,0};
-                  blitPass(m_postFxBlitF16, m_bloomFB[0], bw, bh, m_bloomBrightPipe, m_postFxDS[0], p); }
-                m_bloomLayout[0] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-                // ── 10 ping-pong blur passes ───────────────────────────────
-                bool horiz = true;
-                for (int pass = 0; pass < 10; ++pass)
-                {
-                    const int dst = horiz?1:0, src = horiz?0:1;
-                    runPostFXBarrier(cmd, m_bloomImage[src],
-                        m_bloomLayout[src], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-                    m_bloomLayout[src] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    const float p[4]={1.0f/float(bw),1.0f/float(bh),horiz?1.0f:0.0f,0};
-                    blitPass(m_postFxBlitF16, m_bloomFB[dst], bw, bh, m_bloomBlurPipe,
-                             m_postFxDS[1+src], p);
-                    m_bloomLayout[dst] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-                    horiz = !horiz;
-                }
-                // After 10 passes: result in bloom[0] (COLOR_ATTACHMENT_OPTIMAL).
-                runPostFXBarrier(cmd, m_bloomImage[0],
-                    m_bloomLayout[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-                m_bloomLayout[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            }
-            else if (m_bloomLayout[0] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-            {
-                // Bloom disabled: bright/blur are skipped, but the tonemap set
-                // still samples bloom[0]. Fill it once with black (bright pass,
-                // unreachable threshold → contrib 0) so uninitialized F16 memory
-                // (possibly NaN — which survives the strength-0 multiply) never
-                // reaches the tonemapper, then park it in SHADER_READ_ONLY.
-                { const float p[4]={3.4e38f, m_bloomKnee, 0, 0};
-                  blitPass(m_postFxBlitF16, m_bloomFB[0], bw, bh, m_bloomBrightPipe, m_postFxDS[0], p); }
-                runPostFXBarrier(cmd, m_bloomImage[0],
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-                m_bloomLayout[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            }
-
-            // ── Tonemap: hdr+bloom[0] → ldrFB ─────────────────────────────
-            { const float p[4]={m_exposure, m_bloomEnabled ? m_bloomStrength : 0.0f, 0, 0};
-              blitPass(m_postFxBlitF8, m_ldrFB, m_viewportW, m_viewportH, m_tonemapPipe, m_postFxDS[3], p); }
-            m_ldrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-            runPostFXBarrier(cmd, m_ldrImage,
-                m_ldrLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-            m_ldrLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-            // Transition viewportImage to COLOR_ATTACHMENT for FXAA output.
-            runPostFXBarrier(cmd, m_viewportImage,
-                m_viewportLayout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                m_viewportLayout==VK_IMAGE_LAYOUT_UNDEFINED
-                    ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-                    : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-            m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-            // ── AA resolve: ldrSRV → viewportFB ───────────────────────────
-            // Always runs — it is what writes m_viewportImage. The AA method
-            // only decides which pipeline does it (FXAA vs. passthrough).
-            { const float p[4]={1.0f/float(m_viewportW),1.0f/float(m_viewportH),0,0};
-              const VkPipeline aaPipe =
-                  (m_aaMethod == HE::AAMethod::Off  && m_aaBlitPipe) ? m_aaBlitPipe :
-                  (m_aaMethod == HE::AAMethod::SMAA && m_smaaPipe)   ? m_smaaPipe   :
-                                                                       m_fxaaPipe;
-              blitPass(m_postFxFinalRP, m_fxaaFB, m_viewportW, m_viewportH, aaPipe, m_postFxDS[4], p); }
-            m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-            // ── UI canvas: composite onto viewport image (editor path) ──────
-            if (m_uiViewportPipeline && !m_renderWorld.uiObjects.empty() && m_uiViewportFB)
-            {
-                // viewportImage is SHADER_READ_ONLY after FXAA; transition to COLOR_ATTACHMENT.
-                runPostFXBarrier(cmd, m_viewportImage,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-                m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-                VkRenderPassBeginInfo uirpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-                uirpbi.renderPass        = m_uiViewportRP;
-                uirpbi.framebuffer       = m_uiViewportFB;
-                uirpbi.renderArea.extent = { m_viewportW, m_viewportH };
-                vkCmdBeginRenderPass(cmd, &uirpbi, VK_SUBPASS_CONTENTS_INLINE);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiViewportPipeline);
-                VkViewport uivp = { 0, 0, float(m_viewportW), float(m_viewportH), 0, 1 };
-                VkRect2D   uisc = { {0,0}, {m_viewportW, m_viewportH} };
-                vkCmdSetViewport(cmd, 0, 1, &uivp);
-                vkCmdSetScissor(cmd,  0, 1, &uisc);
-                runUIPass(cmd, int(m_viewportW), int(m_viewportH));
-                vkCmdEndRenderPass(cmd);
-                m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            }
-
-            // bloomRT[1] may still be in COLOR_ATTACHMENT_OPTIMAL — normalize for next frame.
-            if (m_bloomLayout[1] == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-                runPostFXBarrier(cmd, m_bloomImage[1],
-                    m_bloomLayout[1], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-                m_bloomLayout[1] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            }
-        }
-        else
-        {
-            // ── Fallback: Scene → viewport RT (no PostFX) ─────────────────
-            const bool fromUndefined = (m_viewportLayout == VK_IMAGE_LAYOUT_UNDEFINED);
-            VkImageMemoryBarrier toColor{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-            toColor.oldLayout = m_viewportLayout; toColor.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            toColor.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; toColor.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            toColor.image = m_viewportImage; toColor.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-            toColor.srcAccessMask = fromUndefined ? 0u : (uint32_t)VK_ACCESS_SHADER_READ_BIT;
-            toColor.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-            vkCmdPipelineBarrier(cmd,
-                fromUndefined ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &toColor);
-            m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-            VkRenderPassBeginInfo vrpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-            vrpbi.renderPass = m_viewportRenderPass; vrpbi.framebuffer = m_viewportFramebuffer;
-            vrpbi.renderArea.extent = { m_viewportW, m_viewportH };
-            vrpbi.clearValueCount = 2; vrpbi.pClearValues = clears;
-            vkCmdBeginRenderPass(cmd, &vrpbi, VK_SUBPASS_CONTENTS_INLINE);
-            DrawScene(cmd, m_viewportW, m_viewportH);
-            vkCmdEndRenderPass(cmd);
-            m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-            // ── UI canvas: composite onto viewport image (no-PostFX editor path) ─
-            if (m_uiViewportPipeline && !m_renderWorld.uiObjects.empty() && m_uiViewportFB)
-            {
-                runPostFXBarrier(cmd, m_viewportImage,
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-                m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-                VkRenderPassBeginInfo uirpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-                uirpbi.renderPass        = m_uiViewportRP;
-                uirpbi.framebuffer       = m_uiViewportFB;
-                uirpbi.renderArea.extent = { m_viewportW, m_viewportH };
-                vkCmdBeginRenderPass(cmd, &uirpbi, VK_SUBPASS_CONTENTS_INLINE);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiViewportPipeline);
-                VkViewport uivp = { 0, 0, float(m_viewportW), float(m_viewportH), 0, 1 };
-                VkRect2D   uisc = { {0,0}, {m_viewportW, m_viewportH} };
-                vkCmdSetViewport(cmd, 0, 1, &uivp);
-                vkCmdSetScissor(cmd,  0, 1, &uisc);
-                runUIPass(cmd, int(m_viewportW), int(m_viewportH));
-                vkCmdEndRenderPass(cmd);
-                m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            }
-        }
+        // The whole offscreen half of the frame — cascades, decal depth pre-pass,
+        // GI/SSAO/SSR, scene, PostFX, AA resolve, UI canvas. Lives in its own
+        // method because RenderSceneImage() records exactly this and nothing of
+        // the swapchain part below.
+        DrawViewportFrame(cmd);
+    }
+    else
+    {
+        // No viewport: the scene goes straight into the swapchain pass below, so
+        // the cascades are fit to the swapchain aspect and the decal pre-pass
+        // fills the swapchain-sized depth. The same two calls as before the
+        // split, with `useViewport` resolved to false.
+        EncodeShadowMap(cmd, float(std::max(m_swapExtent.width,  1u))
+                           / float(std::max(m_swapExtent.height, 1u)));
+        m_decalDepthActive = &m_decalDepth;
+        EncodeDecalDepth(cmd, m_decalDepth);
     }
 
     // ── Swapchain render pass: scene (non-viewport mode) + ImGui overlay ────
@@ -720,6 +492,264 @@ void VulkanRenderer::Render()
         vkCheck(pres, "vkQueuePresentKHR");
 
     m_currentFrame = (m_currentFrame + 1) % k_maxFramesInFlight;
+}
+
+// ─── The offscreen half of a frame ───────────────────────────────────────────
+// Everything Render() records when the editor's viewport target exists, and
+// nothing that belongs to the window: no acquire, no backbuffer pass, no ImGui
+// overlay, no timestamp pair, no present. Split out of Render() unchanged (only
+// `useViewport` folded away, which is true for every caller) so that
+// RenderSceneImage() can record the same frame into a one-shot command buffer
+// from somebody else's camera. Same cut as D3D11Renderer::DrawViewportFrame and
+// D3D12Renderer::DrawViewportFrame.
+//
+// Draws at m_viewportW × m_viewportH into m_viewportImage; the caller has
+// already made sure the viewport resources exist at that size.
+void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
+{
+    // Cascade shadow maps first, in their own render passes (before the scene
+    // pass), fit against the aspect of the target the scene will be drawn into.
+    EncodeShadowMap(cmd, float(m_viewportW) / float(m_viewportH));
+
+    // Camera-depth pre-pass for screen-space decals. It must run before the scene
+    // pass opens, because the decal draw sits INSIDE that pass and samples this
+    // image — the pass's own depth attachment cannot be sampled while bound.
+    // Skips itself when the frame has no decals.
+    m_decalDepthActive = &m_decalDepthVp;
+    EncodeDecalDepth(cmd, m_decalDepthVp);
+
+    VkClearValue clears[2]{};
+    clears[0].color        = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+    clears[1].depthStencil = { 1.0f, 0 };
+
+    const bool useHDR = m_postFxReady && m_hdrFB && m_ldrFB && m_fxaaFB;
+    if (useHDR)
+    {
+        // ── Ray-traced GI (software compute): G-buffer + shadow rays +
+        // temporal + blur + probe update. Extracts the scene itself.
+        // Replaces the CSM lookup AND SSAO in scene.frag when it runs.
+        runGi(cmd, m_viewportW, m_viewportH);
+
+        // ── Forward SSR (docs/ssr-cross-backend-plan.md checkpoint B) ──
+        // Built lazily, and only here: the trace's radiance source is the
+        // HDR target of THIS branch, so SSR does not exist in the swapchain
+        // path at all (plan §2.2 — reported, not hidden).
+        if (m_ssrEnabled) EnsureSSRPipelines();
+        const bool ssrWanted = ssrWantedThisFrame();
+
+        // ── SSAO position prepass + occlusion compute + blur ───────────
+        // runSSAO() extracts the scene itself (like EncodeShadowMap) so it
+        // doesn't depend on DrawScene having run first. Skipped when GI
+        // shades this frame (probe indirect replaces AO) — but the pass runs
+        // anyway when SSR wants the reflection MRT out of it, which is the
+        // whole point of the aoWanted flag.
+        const bool aoWanted = !m_giRanThisFrame && m_ssaoEnabled;
+        if (aoWanted || ssrWanted)
+            runSSAO(cmd, m_viewportW, m_viewportH, /*reflMrt=*/ssrWanted, aoWanted);
+
+        // ── SSR trace + blur chain (own render passes, before the scene) ─
+        if (ssrWanted)
+        {
+            m_ssrResultView  = RenderForwardSSR(cmd, m_viewportW, m_viewportH);
+            m_ssrRanThisFrame = m_ssrResultView != VK_NULL_HANDLE;
+        }
+
+        // ── Scene → HDR RT (RGBA16F) ───────────────────────────────────
+        VkRenderPassBeginInfo hdrpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        hdrpbi.renderPass  = m_postFxSceneRP;
+        hdrpbi.framebuffer = m_hdrFB;
+        hdrpbi.renderArea.extent = { m_viewportW, m_viewportH };
+        hdrpbi.clearValueCount   = 2;
+        hdrpbi.pClearValues      = clears;
+        vkCmdBeginRenderPass(cmd, &hdrpbi, VK_SUBPASS_CONTENTS_INLINE);
+        DrawScene(cmd, m_viewportW, m_viewportH, /*hdr=*/true);
+        vkCmdEndRenderPass(cmd);
+        m_hdrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        // Forward SSR: keep a full-res copy of the finished HDR frame
+        // (opaque + sky + transparency) — NEXT frame's trace reprojects its
+        // hits into it. Taken here, at the very end of the scene pass, for
+        // the same reason Metal takes it after its scene encoder and GL at
+        // the end of the geometry pass: earlier and the reflection would
+        // show a half-drawn world.
+        if (ssrWanted) CaptureSSRColorHistory(cmd, m_viewportW, m_viewportH);
+
+        // Transition HDR → SHADER_READ_ONLY for bloom bright pass.
+        runPostFXBarrier(cmd, m_hdrImage,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        m_hdrLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        // Helper: run one fullscreen blit pass.
+        auto blitPass = [&](VkRenderPass rp, VkFramebuffer fb, uint32_t bw, uint32_t bh,
+                            VkPipeline pipe, VkDescriptorSet ds, const float params[4]) {
+            VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+            bi.renderPass=rp; bi.framebuffer=fb; bi.renderArea.extent={bw,bh};
+            vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_postFxPipeLayout, 0, 1, &ds, 0, nullptr);
+            vkCmdPushConstants(cmd, m_postFxPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, params);
+            VkViewport vp{0,0,(float)bw,(float)bh,0,1}; vkCmdSetViewport(cmd,0,1,&vp);
+            VkRect2D sc{{0,0},{bw,bh}}; vkCmdSetScissor(cmd,0,1,&sc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRenderPass(cmd);
+        };
+
+        const uint32_t bw = std::max(1u, m_viewportW/2), bh = std::max(1u, m_viewportH/2);
+
+        if (m_bloomEnabled)
+        {
+            // ── Bloom bright pass ──────────────────────────────────────
+            { const float p[4]={m_bloomThreshold,m_bloomKnee,0,0};
+              blitPass(m_postFxBlitF16, m_bloomFB[0], bw, bh, m_bloomBrightPipe, m_postFxDS[0], p); }
+            m_bloomLayout[0] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+            // ── 10 ping-pong blur passes ───────────────────────────────
+            bool horiz = true;
+            for (int pass = 0; pass < 10; ++pass)
+            {
+                const int dst = horiz?1:0, src = horiz?0:1;
+                runPostFXBarrier(cmd, m_bloomImage[src],
+                    m_bloomLayout[src], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                m_bloomLayout[src] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                const float p[4]={1.0f/float(bw),1.0f/float(bh),horiz?1.0f:0.0f,0};
+                blitPass(m_postFxBlitF16, m_bloomFB[dst], bw, bh, m_bloomBlurPipe,
+                         m_postFxDS[1+src], p);
+                m_bloomLayout[dst] = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                horiz = !horiz;
+            }
+            // After 10 passes: result in bloom[0] (COLOR_ATTACHMENT_OPTIMAL).
+            runPostFXBarrier(cmd, m_bloomImage[0],
+                m_bloomLayout[0], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            m_bloomLayout[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        else if (m_bloomLayout[0] != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        {
+            // Bloom disabled: bright/blur are skipped, but the tonemap set
+            // still samples bloom[0]. Fill it once with black (bright pass,
+            // unreachable threshold → contrib 0) so uninitialized F16 memory
+            // (possibly NaN — which survives the strength-0 multiply) never
+            // reaches the tonemapper, then park it in SHADER_READ_ONLY.
+            { const float p[4]={3.4e38f, m_bloomKnee, 0, 0};
+              blitPass(m_postFxBlitF16, m_bloomFB[0], bw, bh, m_bloomBrightPipe, m_postFxDS[0], p); }
+            runPostFXBarrier(cmd, m_bloomImage[0],
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            m_bloomLayout[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+
+        // ── Tonemap: hdr+bloom[0] → ldrFB ─────────────────────────────
+        { const float p[4]={m_exposure, m_bloomEnabled ? m_bloomStrength : 0.0f, 0, 0};
+          blitPass(m_postFxBlitF8, m_ldrFB, m_viewportW, m_viewportH, m_tonemapPipe, m_postFxDS[3], p); }
+        m_ldrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        runPostFXBarrier(cmd, m_ldrImage,
+            m_ldrLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        m_ldrLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        // Transition viewportImage to COLOR_ATTACHMENT for FXAA output.
+        runPostFXBarrier(cmd, m_viewportImage,
+            m_viewportLayout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            m_viewportLayout==VK_IMAGE_LAYOUT_UNDEFINED
+                ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        // ── AA resolve: ldrSRV → viewportFB ───────────────────────────
+        // Always runs — it is what writes m_viewportImage. The AA method
+        // only decides which pipeline does it (FXAA vs. passthrough).
+        { const float p[4]={1.0f/float(m_viewportW),1.0f/float(m_viewportH),0,0};
+          const VkPipeline aaPipe =
+              (m_aaMethod == HE::AAMethod::Off  && m_aaBlitPipe) ? m_aaBlitPipe :
+              (m_aaMethod == HE::AAMethod::SMAA && m_smaaPipe)   ? m_smaaPipe   :
+                                                                   m_fxaaPipe;
+          blitPass(m_postFxFinalRP, m_fxaaFB, m_viewportW, m_viewportH, aaPipe, m_postFxDS[4], p); }
+        m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        // ── UI canvas: composite onto viewport image (editor path) ──────
+        if (m_uiViewportPipeline && !m_renderWorld.uiObjects.empty() && m_uiViewportFB)
+        {
+            // viewportImage is SHADER_READ_ONLY after FXAA; transition to COLOR_ATTACHMENT.
+            runPostFXBarrier(cmd, m_viewportImage,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+            VkRenderPassBeginInfo uirpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+            uirpbi.renderPass        = m_uiViewportRP;
+            uirpbi.framebuffer       = m_uiViewportFB;
+            uirpbi.renderArea.extent = { m_viewportW, m_viewportH };
+            vkCmdBeginRenderPass(cmd, &uirpbi, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiViewportPipeline);
+            VkViewport uivp = { 0, 0, float(m_viewportW), float(m_viewportH), 0, 1 };
+            VkRect2D   uisc = { {0,0}, {m_viewportW, m_viewportH} };
+            vkCmdSetViewport(cmd, 0, 1, &uivp);
+            vkCmdSetScissor(cmd,  0, 1, &uisc);
+            runUIPass(cmd, int(m_viewportW), int(m_viewportH));
+            vkCmdEndRenderPass(cmd);
+            m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+
+        // bloomRT[1] may still be in COLOR_ATTACHMENT_OPTIMAL — normalize for next frame.
+        if (m_bloomLayout[1] == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            runPostFXBarrier(cmd, m_bloomImage[1],
+                m_bloomLayout[1], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            m_bloomLayout[1] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+    }
+    else
+    {
+        // ── Fallback: Scene → viewport RT (no PostFX) ─────────────────
+        const bool fromUndefined = (m_viewportLayout == VK_IMAGE_LAYOUT_UNDEFINED);
+        VkImageMemoryBarrier toColor{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        toColor.oldLayout = m_viewportLayout; toColor.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        toColor.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; toColor.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toColor.image = m_viewportImage; toColor.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        toColor.srcAccessMask = fromUndefined ? 0u : (uint32_t)VK_ACCESS_SHADER_READ_BIT;
+        toColor.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            fromUndefined ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &toColor);
+        m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkRenderPassBeginInfo vrpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        vrpbi.renderPass = m_viewportRenderPass; vrpbi.framebuffer = m_viewportFramebuffer;
+        vrpbi.renderArea.extent = { m_viewportW, m_viewportH };
+        vrpbi.clearValueCount = 2; vrpbi.pClearValues = clears;
+        vkCmdBeginRenderPass(cmd, &vrpbi, VK_SUBPASS_CONTENTS_INLINE);
+        DrawScene(cmd, m_viewportW, m_viewportH);
+        vkCmdEndRenderPass(cmd);
+        m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        // ── UI canvas: composite onto viewport image (no-PostFX editor path) ─
+        if (m_uiViewportPipeline && !m_renderWorld.uiObjects.empty() && m_uiViewportFB)
+        {
+            runPostFXBarrier(cmd, m_viewportImage,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+            VkRenderPassBeginInfo uirpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+            uirpbi.renderPass        = m_uiViewportRP;
+            uirpbi.framebuffer       = m_uiViewportFB;
+            uirpbi.renderArea.extent = { m_viewportW, m_viewportH };
+            vkCmdBeginRenderPass(cmd, &uirpbi, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_uiViewportPipeline);
+            VkViewport uivp = { 0, 0, float(m_viewportW), float(m_viewportH), 0, 1 };
+            VkRect2D   uisc = { {0,0}, {m_viewportW, m_viewportH} };
+            vkCmdSetViewport(cmd, 0, 1, &uivp);
+            vkCmdSetScissor(cmd,  0, 1, &uisc);
+            runUIPass(cmd, int(m_viewportW), int(m_viewportH));
+            vkCmdEndRenderPass(cmd);
+            m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+    }
 }
 
 IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
@@ -3877,6 +3907,229 @@ bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW,
     vkDestroyBuffer(m_device, stagingBuf, nullptr);
     vkFreeMemory   (m_device, stagingMem, nullptr);
     return true;
+}
+
+// ─── One still from somebody else's camera ────────────────────────────────────
+// The contract is in IRenderer.h; the shape is D3D11's/D3D12's, which is Metal's
+// without the capture flag: the live viewport set is SET ASIDE (the members are
+// nulled, not released), createViewportResources builds a fresh set at the
+// requested size, one DrawViewportFrame is recorded into a one-shot command
+// buffer and submitted (the same offscreen half Render() records — minus the
+// acquire, the backbuffer pass, the ImGui overlay, the timestamp pair and the
+// present), CaptureViewport reads it back, the screenshot set is destroyed and
+// the live set moved back. The editor's ImGui descriptor never saw the
+// screenshot image: m_viewportResChanged goes back to its saved value before the
+// editor's next look, so GetViewportVkImageView stays the live view.
+//
+// Command buffer and ring slot: the still records on its OWN one-shot buffer
+// from m_cmdPool (CaptureViewport's pattern), not on m_cmdBufs[imageIndex] —
+// those belong to a swapchain image, and no image is acquired here. The
+// per-frame rings (m_frameUBO, m_matPool, m_instanceBuf, the GI per-slot
+// buffers, …) are still indexed by m_currentFrame, the slot the NEXT real frame
+// will take. That is safe only because of the vkDeviceWaitIdle below: nothing is
+// in flight, DrawScene's vkResetDescriptorPool(m_matPool[m_currentFrame]) frees
+// sets no GPU is reading, and since nothing is presented m_currentFrame does not
+// advance — the next Render() lands on the same slot, whose fence is signalled
+// and whose command buffer it re-records from scratch, throwing the still's
+// bookkeeping away.
+//
+// Three repairs Vulkan has to do itself, which Metal and GL get for free:
+//
+// * The PostFX targets, the SSAO targets and the viewport decal depth are built
+//   ONLY by createViewportResources, and Render() only calls that when the
+//   request differs from the live size — which it will not, once the live size
+//   is back. Unlike D3D11/D3D12 they are rebuilt here UNCONDITIONALLY, not just
+//   on a size change: m_hdrFB, m_fxaaFB and m_uiViewportFB are framebuffers
+//   built ON m_viewportView / m_viewportDepthView (createPostFXResources), so
+//   after the screenshot's views are destroyed they dangle even when the
+//   request was exactly viewport-sized.
+// * createSSAOTargets rewrites scene binding 3 (the AO sampler) on every
+//   per-frame descriptor set, so it has to run again for the live blur target.
+//   Without a live viewport there is no size to rebuild against and binding 3
+//   goes back to the 1×1 white fallback the renderer starts on.
+// * There is no TAA on Vulkan; the per-camera temporal state is forward SSR's
+//   (last frame's full-res HDR copy plus its half-res ping-pong). It gets the
+//   TAA rule: invalid before the still (implicitly — CaptureSSRColorHistory
+//   reallocates on a size change, destroySSAOTargets drops the reflection
+//   pre-pass) and invalid after, so the screenshot does not reflect the
+//   viewport's past and the viewport not the screenshot's. One frame without
+//   SSR on each side, no reflections out of a foreign camera. The GI shadow
+//   accumulation (m_giHistValid, world-space reprojected) stays, as on Metal/GL.
+//
+// Not parity with Metal/GL, and stated as such: the GI targets and the SSR
+// ping-pong resize lazily inside runGi/RenderForwardSSR, so a request that
+// differs from the live size costs extra reallocations on both sides. A request
+// in viewport size pays none of that.
+//
+// Not run: the retired-viewport ageing sweep, the timestamp pair, the overlay,
+// the present — those count in REAL frames. Per-request path, not per-frame.
+bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
+                                      uint32_t height, std::vector<uint8_t>& rgba)
+{
+    if (!m_device || !m_graphicsQueue || !m_cmdPool) return false;
+    if (width == 0 || height == 0) return false;
+
+    // Everything the frame reads that the request changes, saved by value. The
+    // handles go into locals and the members are nulled BEFORE
+    // createViewportResources runs: it opens by pushing the old colour image onto
+    // m_retiredViewports and then destroying the rest of the set, and the live
+    // one must survive both untouched.
+    VkImage        liveImage   = m_viewportImage;
+    VkDeviceMemory liveMemory  = m_viewportMemory;
+    VkImageView    liveView    = m_viewportView;
+    VkImage        liveDepthImage  = m_viewportDepthImage;
+    VkDeviceMemory liveDepthMemory = m_viewportDepthMemory;
+    VkImageView    liveDepthView   = m_viewportDepthView;
+    VkRenderPass   liveRenderPass  = m_viewportRenderPass;
+    VkFramebuffer  liveFramebuffer = m_viewportFramebuffer;
+    VkSampler      liveSampler     = m_viewportSampler;
+    const uint32_t      liveW          = m_viewportW;
+    const uint32_t      liveH          = m_viewportH;
+    const uint32_t      liveReqW       = m_viewportReqW;
+    const uint32_t      liveReqH       = m_viewportReqH;
+    const VkImageLayout liveLayout     = m_viewportLayout;
+    const bool          liveResChanged = m_viewportResChanged;
+    const EditorCameraOverride liveCam = m_editorCamera;
+    // The counters are the profiler's picture of the last real frame; the
+    // screenshot's draws would sit there until the next Render() otherwise.
+    const uint32_t liveDraws = m_statDraws, liveTris = m_statTris,
+                   liveVisible = m_statVisible, liveTotal = m_statTotal;
+
+    m_viewportImage   = VK_NULL_HANDLE;
+    m_viewportMemory  = VK_NULL_HANDLE;
+    m_viewportView    = VK_NULL_HANDLE;
+    m_viewportDepthImage  = VK_NULL_HANDLE;
+    m_viewportDepthMemory = VK_NULL_HANDLE;
+    m_viewportDepthView   = VK_NULL_HANDLE;
+    m_viewportRenderPass  = VK_NULL_HANDLE;
+    m_viewportFramebuffer = VK_NULL_HANDLE;
+    m_viewportSampler     = VK_NULL_HANDLE;
+    m_viewportW    = 0;
+    m_viewportH    = 0;
+    m_viewportReqW = width;
+    m_viewportReqH = height;
+    m_viewportLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    m_editorCamera   = camera;
+
+    bool ok = false;
+    try
+    {
+        // Same order as the top of Render(): drop the caches for assets edited
+        // since the last frame (own device idle inside), then start the frame's
+        // per-pass flags from zero — m_giRanThisFrame left over from the live
+        // frame would decide this frame's aoWanted.
+        m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
+        processPendingInvalidations();
+        m_ssaoRanThisFrame = false;
+        m_giRanThisFrame   = false;
+        m_ssrRanThisFrame  = false;
+        m_ssrResultView    = VK_NULL_HANDLE;
+        m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;
+
+        // Nothing may be in flight while the live set's siblings (PostFX, SSAO,
+        // decal depth) are torn down and rebuilt, and the one-shot buffer below
+        // records on m_currentFrame's rings.
+        vkDeviceWaitIdle(m_device);
+        createViewportResources(width, height);
+
+        if (m_viewportImage && m_viewportFramebuffer && m_viewportW == width && m_viewportH == height)
+        {
+            VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+            cbai.commandPool        = m_cmdPool;
+            cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cbai.commandBufferCount = 1;
+            VkCommandBuffer cmd = VK_NULL_HANDLE;
+            if (vkAllocateCommandBuffers(m_device, &cbai, &cmd) == VK_SUCCESS && cmd)
+            {
+                VkCommandBufferBeginInfo cbbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+                cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                vkBeginCommandBuffer(cmd, &cbbi);
+                DrawViewportFrame(cmd);
+                vkEndCommandBuffer(cmd);
+
+                VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+                si.commandBufferCount = 1;
+                si.pCommandBuffers    = &cmd;
+                vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+                vkQueueWaitIdle(m_graphicsQueue);
+                vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
+
+                // CaptureViewport waits for the GPU and maps a staging buffer; no
+                // world → the cleared target, honestly black, which is what the
+                // viewport would show too.
+                uint32_t gotW = 0, gotH = 0;
+                ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        // vkCheck throws; a request too large to allocate must not take the live
+        // viewport down with it — fall through to the give-back below.
+        HE_LOG_ERROR(RHI, "VulkanRenderer::RenderSceneImage failed: %s", e.what());
+        ok = false;
+    }
+
+    // ── Give the live viewport back ─────────────────────────────────────────
+    // The screenshot's set goes away whole (its colour image is NOT retired: the
+    // editor's descriptor never pointed at it, and the device is idle). The live
+    // handles go back into the members BEFORE the intermediates are rebuilt —
+    // createPostFXResources builds m_hdrFB/m_fxaaFB/m_uiViewportFB on them.
+    vkDeviceWaitIdle(m_device);
+    destroyViewportResources();
+    m_viewportImage       = liveImage;
+    m_viewportMemory      = liveMemory;
+    m_viewportView        = liveView;
+    m_viewportDepthImage  = liveDepthImage;
+    m_viewportDepthMemory = liveDepthMemory;
+    m_viewportDepthView   = liveDepthView;
+    m_viewportRenderPass  = liveRenderPass;
+    m_viewportFramebuffer = liveFramebuffer;
+    m_viewportSampler     = liveSampler;
+    m_viewportW          = liveW;
+    m_viewportH          = liveH;
+    m_viewportReqW       = liveReqW;
+    m_viewportReqH       = liveReqH;
+    m_viewportLayout     = liveLayout;
+    m_viewportResChanged = liveResChanged;
+    m_editorCamera       = liveCam;
+    m_statDraws = liveDraws; m_statTris = liveTris;
+    m_statVisible = liveVisible; m_statTotal = liveTotal;
+
+    if (liveW && liveH)
+    {
+        // The tail of createViewportResources, at the live size — unconditionally,
+        // see the framebuffer note above.
+        createPostFXResources(liveW, liveH);
+        createSSAOTargets(liveW, liveH);
+        createDecalDepth(m_decalDepthVp, liveW, liveH);
+    }
+    else if (m_ssaoWhiteView && m_ssaoSampler)
+    {
+        // No live viewport (the direct-to-swapchain path): there is no size to
+        // rebuild against, and createSSAOTargets pointed scene binding 3 at the
+        // screenshot's blur target, which is gone. Back to the 1×1 white AO
+        // fallback every set starts on. Bindings 4–7 (GI) are untouched by
+        // destroyViewportResources and binding 8 is rewritten by every DrawScene.
+        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+        {
+            if (!m_frameUBO[i].set) continue;
+            VkDescriptorImageInfo wdii{ m_ssaoSampler, m_ssaoWhiteView,
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet aw{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            aw.dstSet = m_frameUBO[i].set; aw.dstBinding = 3; aw.descriptorCount = 1;
+            aw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            aw.pImageInfo = &wdii;
+            vkUpdateDescriptorSets(m_device, 1, &aw, 0, nullptr);
+        }
+    }
+    // The SSR history is the screenshot camera's now (a same-size request kept
+    // the copy, and the frame just captured into it).
+    m_ssrColorHistValid = false;
+    m_ssrHistValid      = false;
+
+    if (!ok) rgba.clear();
+    return ok;
 }
 
 void* VulkanRenderer::GetViewportVkImageView() const { return static_cast<void*>(m_viewportView); }

@@ -91,8 +91,8 @@ virtual bool RenderSceneImage(const EditorCameraOverride& camera,
 Vertrag (`IRenderer.h`): einmal die aktuelle Welt aus `camera` in exakt
 `width`×`height` rendern und zurücklesen, ohne etwas zu präsentieren und ohne
 dass der Live-Viewport danach anders aussieht. Basis-Implementierung liefert
-`false` (→ `unsupported`). Umgesetzt sind **Metal**, **OpenGL**, **D3D11**
-und **D3D12**; Vulkan liefert noch `unsupported`. Metal
+`false` (→ `unsupported`). Umgesetzt sind **alle fünf Backends**: Metal,
+OpenGL, D3D11, D3D12 und Vulkan. Metal
 (`MetalRenderer::RenderSceneImage`):
 
 1. Live-Viewport-Texturen, `m_viewportReqW/H` und `m_editorCamera` werden
@@ -244,6 +244,78 @@ Eine Anforderung in Viewport-Größe zahlt davon nichts.
 Nicht ausgeführt: Retire-Sweeps, Timestamp-Paar, Zähler-Reset, Overlay,
 Present. Kompiliert nur im Windows-CI; Pixel auf echter D3D12-Hardware
 **nicht verifiziert**, Witness wäre `HE_DUMP_SCENEIMAGE`.
+
+**Vulkan** (`VulkanRenderer::RenderSceneImage`, Stand 23.09.2026) nimmt
+denselben Schnitt: die Offscreen-Hälfte von `Render()` (Cascades auf das
+Viewport-Seitenverhältnis gefittet, Decal-Tiefen-Prepass, GI/SSAO/SSR, Szene
+nach HDR oder ohne PostFX direkt ins Viewport-Bild, Bloom, Tonemap,
+AA-Resolve, UI-Canvas) ist unverändert in `DrawViewportFrame(VkCommandBuffer)`
+herausgezogen (Block gegen HEAD geprüft: bis auf eine Einrückungsebene
+byte-identisch, nur `useViewport` weggefaltet); `Render()` behält Acquire,
+Swapchain-Pass, ImGui-Overlay, Timestamp-Paar und Present, der Still-Pfad
+zeichnet in einen **eigenen Ein-Schuss-Kommandopuffer** aus `m_cmdPool` (das
+Muster von `CaptureViewport`) — `m_cmdBufs[imageIndex]` gehört einem
+Swapchain-Bild, und hier wird keines geholt. Ablauf:
+
+1. Die neun Handles des Live-Satzes (Farbbild/Speicher/View, Tiefe dreifach,
+   Renderpass, Framebuffer, Sampler) werden in Locals gerettet und die Member
+   auf `VK_NULL_HANDLE` gesetzt, **bevor** `createViewportResources` läuft: das
+   schiebt das vorhandene Farbbild sonst auf `m_retiredViewports` und zerstört
+   den Rest des Satzes. Dazu nach Wert `m_viewportW/H`, `m_viewportReqW/H`,
+   `m_viewportLayout`, `m_viewportResChanged`, `m_editorCamera` und die vier
+   Profiler-Zähler.
+2. Wie am Anfang von `Render()`: `m_wallTime`, `processPendingInvalidations`,
+   die Pro-Frame-Flags (`m_giRanThisFrame` aus dem Live-Frame würde sonst über
+   `aoWanted` dieses Frames entscheiden). Dann `vkDeviceWaitIdle` und
+   `createViewportResources(width, height)`, ein `DrawViewportFrame` in den
+   Ein-Schuss-Puffer, `vkQueueSubmit` + `vkQueueWaitIdle`, `CaptureViewport`.
+   Ohne Welt ein schwarzes Bild mit `true`, wie GL/D3D11/D3D12.
+3. Der Screenshot-Satz wird ganz zerstört (sein Farbbild wird **nicht**
+   retired: der Deskriptor des Editors zeigte nie darauf, und das Gerät ist
+   idle), die Live-Handles kommen zurück, **danach** die Zwischenziele.
+
+Ring-Slot: der Still rechnet auf `m_currentFrame`, dem Slot des NÄCHSTEN
+echten Frames. Das trägt nur wegen des `vkDeviceWaitIdle` — DrawScenes
+`vkResetDescriptorPool(m_matPool[m_currentFrame])` gibt dann Sets frei, die
+keine GPU liest. Weil nichts präsentiert wird, rückt `m_currentFrame` nicht
+vor: der nächste `Render()` nimmt denselben Slot, dessen Fence signalisiert
+ist, und nimmt seinen Kommandopuffer neu auf.
+
+Drei Reparaturen, die Vulkan selbst tun muss:
+
+* **Zwischenziele immer zurückbauen, nicht nur bei anderer Größe** (anders als
+  D3D11/D3D12): `m_hdrFB`, `m_fxaaFB` und `m_uiViewportFB` sind Framebuffer
+  **auf** `m_viewportView`/`m_viewportDepthView` (`createPostFXResources`).
+  Nach dem Zerstören der Screenshot-Views hingen sie auch dann in der Luft,
+  wenn die Anforderung exakt viewportgroß war. Der Still ruft deshalb nach der
+  Rückgabe unbedingt `createPostFXResources` + `createSSAOTargets` +
+  `createDecalDepth(m_decalDepthVp, …)` auf Live-Größe, also genau den Schwanz
+  von `createViewportResources`.
+* **Szenen-Binding 3:** `createSSAOTargets` schreibt den AO-Sampler in jedes
+  Pro-Frame-Deskriptorset. Ohne Live-Viewport gibt es keine Größe zum
+  Nachbauen, dann geht Binding 3 auf die 1×1-Weiß-Notlösung zurück, auf der
+  jedes Set startet. Bindings 4–7 (GI) rührt `destroyViewportResources` nicht
+  an, Binding 8 schreibt jedes `DrawScene` neu.
+* **Kein TAA auf Vulkan**, dieselbe SSR-Regel wie D3D11/D3D12: vorher implizit
+  ungültig, danach `m_ssrColorHistValid`/`m_ssrHistValid` = false. Die
+  GI-Schatten-Akkumulation (`m_giHistValid`, weltraum-reprojiziert) bleibt.
+
+`vkCheck` wirft: eine Anforderung, die nicht allozierbar ist, darf den
+Live-Viewport nicht mitreißen, deshalb liegt der Aufnahmeteil in einem
+`try`/`catch`, und die Rückgabe läuft in jedem Fall.
+
+**Keine Parität mit Metal/GL, und so benannt:** die GI-Ziele und das
+SSR-Ping-Pong ziehen in `runGi`/`RenderForwardSSR` lazy auf die Framegröße
+nach; eine Anforderung, die von der Live-Größe abweicht, kostet deshalb
+zusätzliche Neuanlagen auf beiden Seiten. Eine Anforderung in Viewport-Größe
+zahlt davon nichts.
+
+Nicht ausgeführt: der Retire-Sweep, das Timestamp-Paar, Zähler-Reset, Overlay,
+Present. Kompiliert nur im Windows-CI (Vulkan-SDK seit Thema 60, siehe
+`.github/workflows/ci.yml`); lokal auf dem Mac gibt es nur den
+`clang -fsyntax-only`-Vorabcheck gegen die MoltenVK-Header. Pixel auf echter
+Vulkan-Hardware **nicht verifiziert** — der Windows-Runner hat keinen
+Vulkan-ICD —, Witness wäre auch hier `HE_DUMP_SCENEIMAGE`.
 
 ## 3. Verifikation
 
@@ -460,9 +532,9 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
   mit 1280×720 oder größer anfühlen.
 * Inline-PNG ≤ 2,5 MiB (`kInlineMaxPngBytes`), Shim-Frame ≤ 4 MiB; darüber
   `file`.
-* Metal, OpenGL, D3D11 und D3D12 rendern Stills (`RenderSceneImage`),
-  Vulkan noch nicht; die Gizmos im Viewport gibt
-  es auf jedem Backend, das Debug-Linien zeichnet.
+* Alle fünf Backends rendern Stills (`RenderSceneImage`); die Gizmos im
+  Viewport gibt es auf jedem Backend, das Debug-Linien zeichnet. Echte Pixel
+  gesehen hat davon nur Metal.
 * Die Frustums sind per Bauart in keinem Tool-Bild (§5); die ImGui-Tags
   (`MCP #n`) sind auch im Live-Witness nicht drin (der Capture liest die
   Viewport-Textur, nicht das ImGui-Overlay); Sicht auf die Tags bleibt
@@ -475,14 +547,20 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
 
 ## 7. Nähte für die Folgeschritte
 
-* **Andere Backends:** OpenGL, D3D11 und D3D12 sind nachgezogen (§2). Vulkan
-  liefert bis dahin `unsupported` mit Namen; dort gibt es wie bei Metal einen
-  Swapchain-Pass (Present, ImGui-Overlay) zu überspringen, also das
-  `m_captureOnly`-Muster oder D3D11/D3D12s Schnitt (Viewport-Frame als eigene
-  Methode, Swapchain-Teil bleibt in `Render()`), nicht das GL-Muster. Wer
-  seine HDR-Zwischenziele wie D3D11/D3D12 nur beim Anlegen des
-  Viewport-Targets baut, muss sie nach dem Still selbst auf die Live-Größe
-  zurückbauen; wer wie D3D12 Ringe pro Frame-in-Flight hat, nimmt den
-  Slot des nächsten echten Frames nach einem vollen Flush und schreibt
-  Descriptor-Slots, die das Viewport-Target beim Anlegen belegt, nach der
-  Rückgabe zurück.
+* **Andere Backends:** alle vier sind nachgezogen (§2), das Thema ist damit
+  geschlossen. Für einen künftigen sechsten Renderer ist die Reihenfolge der
+  Fallen dieselbe wie hier: wer wie Metal/Vulkan einen Swapchain-Pass
+  (Present, ImGui-Overlay) hat, nimmt das `m_captureOnly`-Muster oder
+  D3D11/D3D12/Vulkans Schnitt (Viewport-Frame als eigene Methode,
+  Swapchain-Teil bleibt in `Render()`), nicht das GL-Muster. Wer seine
+  HDR-Zwischenziele nur beim Anlegen des Viewport-Targets baut, muss sie nach
+  dem Still selbst auf die Live-Größe zurückbauen — und zwar unbedingt, nicht
+  nur bei abweichender Anforderung, sobald sie wie Vulkans Framebuffer auf der
+  Viewport-View sitzen. Wer Ringe pro Frame-in-Flight hat, nimmt den Slot des
+  nächsten echten Frames nach einem vollen Flush und schreibt Descriptor-Slots,
+  die das Viewport-Target beim Anlegen belegt, nach der Rückgabe zurück.
+* **Echte Hardware:** verifiziert sind Pixel nur auf Metal. GL, D3D11, D3D12
+  und Vulkan sind kompiliert und nach demselben Vertrag gebaut, aber kein
+  Bild ist je gesehen worden; der Witness `HE_DUMP_SCENEIMAGE` (§3) läuft auf
+  jedem der fünf und wäre der erste Schritt, sobald jemand an die Hardware
+  kommt.

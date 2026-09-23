@@ -86,6 +86,11 @@ public:
 	// which is a VkDescriptorSet registered by the editor via SetViewportImGuiHandle.
 	bool  CaptureViewport(std::vector<uint8_t>& rgba,
 	                      uint32_t& width, uint32_t& height) override;
+	// One still of the world from somebody else's camera (MCP scene_screenshot).
+	// Contract in IRenderer.h; the shape is D3D11's/D3D12's — DrawViewportFrame()
+	// below is the part of Render() this borrows, the swapchain half stays behind.
+	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
+	                       std::vector<uint8_t>& rgba) override;
 	// Returns VkImageView for the viewport color image (for ImGui_ImplVulkan_AddTexture).
 	void* GetViewportVkImageView() const;
 	void* GetViewportVkSampler()   const;
@@ -147,6 +152,16 @@ private:
 	// cascades are fit against — the single map never cared, a cascade fit to
 	// a square frustum drops the screen edges of a wide viewport.
 	void EncodeShadowMap(VkCommandBuffer cmd, float aspect);
+	// Everything a frame records when the scene goes into the editor's offscreen
+	// viewport: the cascades fit to the viewport aspect, the decal depth pre-pass,
+	// GI/SSAO/SSR, the scene into HDR (or straight into the viewport image without
+	// PostFX), bloom, tonemap, AA resolve and the UI canvas. Recorded into an
+	// already-open command buffer; records NOTHING of the swapchain (no acquire,
+	// no backbuffer pass, no ImGui overlay, no timestamps, no present) — those
+	// stay in Render(), which is the only caller that has a swapchain image.
+	// RenderSceneImage() records it into a one-shot buffer instead. Assumes the
+	// viewport resources exist and m_viewportW/H are the size to draw at.
+	void DrawViewportFrame(VkCommandBuffer cmd);
 	VkImage        m_shadowImage    = VK_NULL_HANDLE;
 	VkDeviceMemory m_shadowMemory   = VK_NULL_HANDLE;
 	VkImageView    m_shadowView     = VK_NULL_HANDLE;              // 2D_ARRAY, all cascades (sampled)
