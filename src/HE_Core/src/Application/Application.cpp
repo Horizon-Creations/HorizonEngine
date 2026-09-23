@@ -24,6 +24,21 @@ const char* rhiName(HE::RendererBackend api)
 		default:                          return "unknown";
 	}
 }
+
+// A modal box in a run nobody watches does not report the error, it hides it:
+// the process sits on the dialog until whatever started it gives up, and a
+// crash that should have been a red test with a log line becomes a timeout.
+// The text is already in the log (the callers write it first), so hidden mode
+// just skips the box.
+void showErrorBox(const char* title, const char* text)
+{
+	if (HE::hiddenWindowRequested())
+	{
+		HE_LOG_WARN(Core, "Hidden mode: no message box for \"%s\"", title);
+		return;
+	}
+	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, text, nullptr);
+}
 } // namespace
 
 namespace HE
@@ -112,6 +127,22 @@ namespace HE
 		            cfg.fixedTimestep, cfg.maxFixedSteps);
 
 		m_loop = GameLoop({ cfg.fixedTimestep, cfg.maxFixedSteps });
+
+		// ── Hidden mode (see hiddenWindowRequested) ─────────────────────────
+		// Before ANY SDL_Init(VIDEO), which the splash below may already do: on
+		// macOS SDL registers the application right there, gives it a Dock icon
+		// (activation policy Regular) and, once launching finishes, activates
+		// it over whatever the person was typing into. A hidden window alone
+		// stops none of that; this hint is the one thing SDL checks for both.
+		// It does NOT remove the menu bar SDL builds — that is created outside
+		// the hint's gate — it only stops the app from ever becoming active.
+		// Hints need no SDL_Init and are plain strings elsewhere, so no #ifdef.
+		if (hiddenWindowRequested())
+		{
+			SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "1");
+			SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+			SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_RAISED, "0");
+		}
 
 		// The splash goes up before anything else can take a second: on this
 		// machine the Metal renderer alone needs ~1.2 s (a Debug build ~80 s),
@@ -210,7 +241,7 @@ namespace HE
 			// no editor. RAII would take it down too late.
 			closeSplash();
 			HE_LOG_CRIT(Core, "%s", e.what());
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Renderer Init Failed", e.what(), nullptr);
+			showErrorBox("Renderer Init Failed", e.what());
 			return 1;
 		}
 
@@ -220,6 +251,8 @@ namespace HE
 
 		m_splash.setStatus("Ready", 1.0f);
 		closeSplash();
+		// In hidden mode the window was created hidden regardless of startHidden
+		// and Show() declines, so a hidden run stays hidden past this line.
 		if (wp.startHidden) m_window->Show();
 
 		m_running = true;
@@ -278,6 +311,8 @@ namespace HE
 			//
 			// With this set, the application runs that many frames and then asks
 			// to quit, so "does it boot" becomes an exit code a test can read.
+			// It also turns hidden mode on (hiddenWindowRequested) — the run
+			// is a script's, not a person's; HE_HIDDEN_WINDOW=0 shows it anyway.
 			// Read once and cached: getenv per frame is a syscall for a value
 			// that cannot change.
 			{
@@ -437,7 +472,7 @@ namespace HE
 			catch (const std::exception& e)
 			{
 				HE_LOG_ERROR(Core, "%s", e.what());
-				SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Render Error", e.what(), nullptr);
+				showErrorBox("Render Error", e.what());
 				m_running = false;
 				break;
 			}

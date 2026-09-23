@@ -1,4 +1,5 @@
 #include "EditorApplication.h"
+#include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <cstring>
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
@@ -768,7 +769,12 @@ void EditorApplication::OnInit()
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+	// Not in hidden mode: every panel an imgui.ini remembers as dragged out, and
+	// every tooltip or popup that does not fit, would be an OS window of its own
+	// — created hidden by the backend and then shown, on screen, in a run that
+	// was supposed to show nothing. Docked into the (hidden) main window instead.
+	if (!HE::hiddenWindowRequested())
+		io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 	// ImGui windows that end up in their own OS window (a dialog that does not fit
 	// inside the editor, a panel dragged out of it) are top-level and unparented
 	// by default, so the window manager orders them independently of the editor:
