@@ -61,6 +61,10 @@ struct CompiledFuncInfo
     // constructor to run at load time — the shape every other table here has.
     const PinType* params    = nullptr;
     std::size_t    paramCount = 0;
+    // Which of those parameters are CONTAINERS, parallel to `params`. Null
+    // reads as "none of them", which is what every generated table written
+    // before this existed meant.
+    const bool*    paramIsArray = nullptr;
 };
 
 class HE_API CompiledInstance

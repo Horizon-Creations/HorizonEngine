@@ -448,6 +448,21 @@ bool RpcRouter::accept(ConnectionId conn, PlayerId fromPlayer, Entity entity,
 		if (const HorizonCode::InstanceId inst = m_instanceOf(entity))
 			sig = m_runtime->functionSignatureOf(inst, fn);
 
+	// 1b. The sender is somebody. A connection that is through the crypto
+	// handshake but whose Hello has not been accepted yet (NetGameSession's
+	// m_pending) has no roster entry, so fromPlayer is kNoPlayer — which is
+	// ZERO, and zero is also what an authored prop's `owner` is. Without this
+	// line "nobody" would equal "nobody" two checks down and an unwelcomed peer
+	// could call any Server function on any unowned entity in the scene.
+	if (fromPlayer == kNoPlayer)
+	{
+		++m_stats.notOwner;
+		if (m_antiCheat)
+			m_antiCheat->observe(conn, HE::AntiCheat::Kind::ForeignEntity, 0.0f,
+			                     "remote call from a peer that has not joined the session");
+		return false;
+	}
+
 	// 2. Owner. Either the caller owns the entity, or the function said out
 	// loud that anybody may ask for it.
 	const PlayerId owner = ownerOf(entity);
@@ -488,10 +503,17 @@ bool RpcRouter::accept(ConnectionId conn, PlayerId fromPlayer, Entity entity,
 	{
 		bool ok = args.size() == sig.params.size();
 		for (std::size_t i = 0; ok && i < args.size(); ++i)
+		{
 			// Container shape is part of the type: an Array of Int where an Int
-			// is declared is exactly the shape a hand-built message has.
+			// is declared is exactly the shape a hand-built message has. But
+			// the reverse has to hold too — a function that DECLARES an array
+			// parameter must accept one, or every honest call to it is refused
+			// as Hard and its caller kicked.
+			const bool wantContainer = i < sig.paramIsArray.size() && sig.paramIsArray[i];
+			const bool gotContainer  = args[i].kind() != HorizonCode::ContainerKind::None;
 			ok = typesCompatible(args[i].type, sig.params[i]) &&
-			     args[i].kind() == HorizonCode::ContainerKind::None;
+			     gotContainer == wantContainer;
+		}
 		if (!ok)
 		{
 			++m_stats.formatMismatch;

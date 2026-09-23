@@ -415,7 +415,10 @@ Runtime::FunctionSignature Runtime::functionSignatureOf(InstanceId id,
             // is NOT the same as a function of no arguments — see the header.
             sig.hasParams = fi.params != nullptr;
             for (std::size_t k = 0; fi.params && k < fi.paramCount; ++k)
+            {
                 sig.params.push_back(fi.params[k]);
+                sig.paramIsArray.push_back(fi.paramIsArray && fi.paramIsArray[k]);
+            }
         }
         return sig;
     }
@@ -430,7 +433,11 @@ Runtime::FunctionSignature Runtime::functionSignatureOf(InstanceId id,
             sig.runOn     = n.runOn;
             sig.anyClient = n.anyClient;
             sig.hasParams = true;
-            for (const FuncParam& p : n.params) sig.params.push_back(p.type);
+            for (const FuncParam& p : n.params)
+            {
+                sig.params.push_back(p.type);
+                sig.paramIsArray.push_back(p.isArray);
+            }
             return sig;
         }
     return sig;

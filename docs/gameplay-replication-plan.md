@@ -1276,6 +1276,29 @@ Muster, mit dem Schritt 6 dieselbe Lücke bei `declareVar` geschlossen hat. Addi
 erst wird die Signatur gefragt, dann diese Liste, die beiden können sich also nicht
 in eine Ablehnung hineinwidersprechen.
 
+**Drei Löcher, die erst die Prüfung gezeigt hat** und die jetzt Tests haben:
+
+Die Zustellung war in keiner der beiden Anwendungen verdrahtet. Der Router
+prüfte, nahm an und legte in die Warteschlange — und niemand holte sie ab. Jeder
+Aufruf wäre in einer echten Sitzung durch alle vier Prüfungen gekommen und dann
+für immer liegengeblieben, `net.rpcSender` hätte nie etwas anderes als 0 gesagt.
+Die Tests sahen es nicht, weil ihr Rig selbst zustellt; das ist die Kehrseite
+eines Harness, der die Anwendung nachbaut statt sie zu benutzen.
+
+`kNoPlayer` ist 0, und 0 ist auch der `owner` jedes authored Props. Ein Peer, der
+durch den Krypto-Handschlag ist, dessen Hello aber nie angenommen wurde, hat
+keinen Roster-Eintrag — also `fromPlayer == 0` — und „niemand" wäre gleich
+„niemand" gewesen. Damit hätte er jede Server-Funktion auf jeder herrenlosen
+Entity der Szene aufrufen können. Der Absender wird jetzt vor dem Besitzer
+geprüft.
+
+Die Format-Prüfung verlangte die Container-Form „Skalar" bedingungslos. Eine
+Funktion, die einen Array-Parameter deklariert, hätte damit jeden ehrlichen
+Aufruf als Fälschung abgelehnt — und zwar `Hard`, den Aufrufer also gekickt,
+weil er die Funktion richtig benutzt hat. `FunctionSignature` trägt jetzt
+`paramIsArray`, in beiden Backends, und verglichen wird auf Gleichheit statt auf
+„niemals ein Container".
+
 **Zwei Funde, die vor diesem Schritt lagen:**
 
 `ScriptContext::HostServices` hatte kein `net`-Feld. Jede `horizon.net.*`-Row kam

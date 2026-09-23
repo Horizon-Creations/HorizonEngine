@@ -4363,6 +4363,24 @@ void EditorApplication::dispatchNetEvents()
 			                       m_scriptContext.get(), &m_scriptInstances,
 			                       logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
 	}
+
+	// ── Remote calls, after OnRep and still before the script tick ──
+	// The router only QUEUES what arrived (plan §7.2); this is the loop that
+	// runs it. Without it every call would pass all four of the host's checks,
+	// be accepted, and then sit in the queue forever — the one failure the
+	// tests cannot see, because their harness drains it themselves.
+	//
+	// After OnRep deliberately: a handler triggered from another machine should
+	// see the values that arrived in the same frame, not the previous frame's.
+	if (RpcRouter* rpc = m_netSession.rpc())
+	{
+		RpcRouter::Call call;
+		while (rpc->takeCall(call))
+			NetEvents::dispatchRpc(call, &m_gameInstance.runtime(),
+			                       m_entityHost.instanceOf(call.entity),
+			                       m_scriptContext.get(), &m_scriptInstances,
+			                       logicLoader().isLoaded() ? logicLoader().logic() : nullptr);
+	}
 }
 
 void EditorApplication::startPlayNetSession()

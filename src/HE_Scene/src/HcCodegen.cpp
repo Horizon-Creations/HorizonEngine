@@ -2885,8 +2885,34 @@ private:
         for (size_t i = 0; i < resNames.size(); ++i)
             call += (i || !argNames.empty() ? ", " : "") + resNames[i];
         call += ");";
+        // Run On travels with the FUNCTION, not with the graph it happens to
+        // sit in (plan §7.2) — so an inherited call is routed exactly like a
+        // local one. The interpreter does this in Runtime's callOwn; without
+        // the same line here, moving a Server function up into a base class
+        // would quietly turn it local again in a packaged build.
+        bool routedBase = false;
+        if (entry->runOn != (std::uint8_t)HorizonCode::RunOn::Local)
+        {
+            std::string wire = "std::vector<hc::Value>{";
+            for (size_t i = 0; i < argNames.size(); ++i)
+            {
+                if (i) wire += ", ";
+                wire += toValueCall(argNames[i],
+                                    trOf(entry->params[i].type, entry->params[i].isArray,
+                                         entry->params[i].typeName),
+                                    m_opt.namespaceName);
+            }
+            wire += "}";
+            b.line("if (!hc::rpcRoute(m_ctx, " + strLit(n.s) + ", " + wire + ", " +
+                   std::to_string((int)entry->runOn) + ", " +
+                   (entry->anyClient ? "true" : "false") + "))");
+            b.line("{");
+            ++b.indent;
+            routedBase = true;
+        }
         b.line("if (++rs.depth <= hc::kMaxDepth) " + call + "   // depth guard (§3.6)");
         b.line("--rs.depth;");
+        if (routedBase) { --b.indent; b.line("}"); }
         m_rsTouched = true;
         const auto it = m_slots.find(n.id);
         if (it != m_slots.end())
@@ -3380,6 +3406,13 @@ private:
                     c += (i ? ", " : "") + std::string("(HorizonCode::PinType)") +
                          std::to_string((int)fn->params[i].type);
                 c += " };\n";
+                // Parallel: which of them are containers. A function declaring
+                // an array parameter has to ACCEPT an array, or the host reads
+                // every honest call to it as a forgery.
+                c += "static const bool kFnA_" + m_fnName.at(fn->s) + "[] = { ";
+                for (size_t i = 0; i < fn->params.size(); ++i)
+                    c += (i ? ", " : "") + std::string(fn->params[i].isArray ? "true" : "false");
+                c += " };\n";
             }
             c += "const std::vector<HorizonCode::CompiledFuncInfo>& " + m_cls +
                  "::funcInfos() const\n{\n";
@@ -3395,10 +3428,13 @@ private:
                 const std::string tbl = fn->params.empty()
                     ? "hc::kNoParams"
                     : "kFnP_" + m_fnName.at(fn->s);
+                const std::string arrTbl = fn->params.empty()
+                    ? "nullptr"
+                    : "kFnA_" + m_fnName.at(fn->s);
                 c += "        { " + strLit(fn->s) + ", " +
                      std::to_string((int)fn->runOn) + ", " +
                      (fn->anyClient ? "true" : "false") + ", " + tbl + ", " +
-                     std::to_string(fn->params.size()) + " },\n";
+                     std::to_string(fn->params.size()) + ", " + arrTbl + " },\n";
             }
             c += "    };\n";
             if (par)

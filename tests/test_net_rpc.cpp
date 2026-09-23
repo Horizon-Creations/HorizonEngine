@@ -998,3 +998,107 @@ TEST_CASE("rpc: a Lua script on the client triggers a HorizonCode function on th
 
     lua.setHostServices({});
 }
+
+// ─── 8. Two holes the review found (plan §7.7) ───────────────────────────────
+
+TEST_CASE("rpc: a peer that has not joined may not call anything") {
+    // kNoPlayer is 0, and 0 is also what an authored prop's `owner` is. Without
+    // a sender check of its own, "nobody" would equal "nobody" in the owner
+    // comparison and a peer that is through the crypto handshake but whose
+    // Hello was never accepted could call any Server function on any unowned
+    // entity in the scene.
+    Rig rig;
+    const Entity door = authoredEntity(*rig.host.world, "Door");
+    const HorizonCode::InstanceId hostInst =
+        place(rig.host, door, doorClass((std::uint8_t)RunOn::Server, /*anyClient*/ true));
+    startHost(rig, guardedHost());
+
+    // A raw connection that never sends a Hello: the fabric links it, the host
+    // sees it, and no roster entry is ever made.
+    const ConnectionId raw = rig.fabric->next++;
+    rig.fabric->up[raw] = true;
+    rig.fabric->hostIn.push_back(NetEvent{ NetEventType::Connected, raw, {} });
+    rig.step(4);
+
+    const auto* nc = rig.host.world->registry().try_get<NetworkComponent>(door);
+    REQUIRE(nc != nullptr);
+    REQUIRE(nc->netId != 0u);
+    BitWriter w;
+    w.writeUInt32(nc->netId);
+    w.writeByte(static_cast<std::uint8_t>(RunOn::Server));
+    w.writeUInt32(2);                    // claiming to be somebody, as a forger would
+    w.writeString("Open");
+    w.writeByte(0);
+    // Straight onto the host's inbox: this peer has no NetSession of its own,
+    // which is the whole point — it never completed a join.
+    {
+        // Framed by hand, exactly as NetSession::send does it: a 16-bit
+        // message id and then the payload's bytes.
+        NetEvent e{ NetEventType::Data, raw, {} };
+        BitWriter framed;
+        framed.writeUInt16(kMsgRpc);
+        const std::vector<std::uint8_t> payload = w.data();
+        framed.writeBytes(payload.data(), payload.size());
+        e.data = framed.data();
+        rig.fabric->hostIn.push_back(std::move(e));
+    }
+    rig.step(6);
+    deliver(rig.host);
+
+    CHECK(rig.host.session->rpc()->stats().delivered == 0u);
+    CHECK(rig.host.runtime.getVariable(hostInst, "Opened").b == false);
+}
+
+TEST_CASE("rpc: a function that declares an array parameter accepts an array") {
+    // The format check compares container SHAPE as well as type. Requiring
+    // "scalar" unconditionally would refuse every honest call to a function
+    // whose parameter is a list — and refuse it as Hard, so the caller is
+    // kicked for using the feature correctly.
+    Rig rig;
+    const Entity board = authoredEntity(*rig.host.world, "Board");
+
+    using namespace HorizonCode;
+    Graph g;
+    Variable total; total.name = "Total"; total.type = PinType::Int;
+    g.variables = { total };
+    Node fe; fe.type = NodeType::FunctionEntry; fe.s = "Tally";
+    fe.runOn = (std::uint8_t)RunOn::Server; fe.anyClient = true;
+    FuncParam p; p.name = "scores"; p.type = PinType::Int; p.isArray = true;
+    fe.params = { p };
+    const int feId = g.addNode(fe);
+    Node sv; sv.type = NodeType::SetVariable; sv.s = "Total"; sv.propType = PinType::Int;
+    const int svId = g.addNode(sv);
+    Node len; len.type = NodeType::ArrayLength; len.propType = PinType::Int;
+    const int lenId = g.addNode(len);
+    REQUIRE(g.connect(feId, 0, svId, 0));
+    REQUIRE(g.connect(feId, 1, lenId, 0));
+    // Pin 1: Array Length has no exec pins, so its one data-OUT sits right
+    // after its one data-in.
+    REQUIRE(g.connect(lenId, 1, svId, 2));
+    const HorizonCode::InstanceId hostInst = place(rig.host, board, std::move(g));
+
+    startHost(rig, guardedHost());
+    Peer& client = addClient(rig, 60);
+    const Entity clientBoard = mirrorOf(*rig.host.world, board, *client.world);
+    pump(rig);
+    REQUIRE(client.session->status() == NetGameSession::Status::Joined);
+
+    Value scores;
+    scores.type = PinType::Int;
+    scores.isArray = true;
+    scores.container = ContainerKind::Array;
+    scores.items = { Value::ofInt(3), Value::ofInt(4), Value::ofInt(5) };
+    REQUIRE(client.session->rpc()->callServer(clientBoard, "Tally", { scores }));
+    pump(rig);
+
+    CHECK(rig.host.session->rpc()->stats().formatMismatch == 0u);
+    CHECK(rig.host.session->rpc()->stats().delivered == 1u);
+    CHECK(rig.host.runtime.getVariable(hostInst, "Total").i == 3);
+
+    // NEGATIVE CONTROL: a SCALAR where the array is declared is still refused,
+    // so the shape check is loosened and not removed.
+    REQUIRE(client.session->rpc()->callServer(clientBoard, "Tally", { Value::ofInt(9) }));
+    pump(rig);
+    CHECK(rig.host.session->rpc()->stats().formatMismatch == 1u);
+    CHECK(rig.host.session->rpc()->stats().delivered == 1u);
+}

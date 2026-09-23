@@ -207,6 +207,13 @@ public:
         bool                 anyClient = false;
         bool                 hasParams = false;   // was a parameter list available at all
         std::vector<PinType> params;
+        // Whether each parameter is a CONTAINER. Parallel to `params`, and its
+        // own vector rather than a richer element type because that is what
+        // both backends can answer: an interpreted entry reads FuncParam, a
+        // generated one a second static table. A function that declares an
+        // array parameter has to accept an array, or every honest call to it
+        // is refused as a forgery.
+        std::vector<bool>    paramIsArray;
     };
     FunctionSignature functionSignatureOf(InstanceId id, const std::string& fn) const;
 

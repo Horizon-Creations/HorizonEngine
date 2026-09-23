@@ -54,9 +54,11 @@
 // message, the same rule the beacon address follows.
 //
 // The Any Client flag lives on the HorizonCode function header, so a Lua or
-// Python function on an unowned entity has no way to carry it. That is the
-// honest boundary of this step and net.allowAnyClient is the door for it:
-// the entity's own declaration, stored next to the replicated variables.
+// Python function on an unowned entity has no way to carry it.
+// net.allowAnyClient is the door for those: a per-entity list held HERE, in the
+// router, and cleared with the session. It is therefore a call a host makes
+// once a session is running — before that the entity has no net id to key it
+// by, and the call says so rather than remembering it for later.
 //
 // ── Delivery is QUEUED ──────────────────────────────────────────────────────
 // Like NetGameSession's events and PropertyReplicator's notifications, and for
