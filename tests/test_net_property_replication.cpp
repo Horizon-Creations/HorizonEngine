@@ -642,6 +642,113 @@ TEST_CASE("properties: a late joiner gets the current values and one OnRep each"
     CHECK(reps.count("points") == 1);
 }
 
+TEST_CASE("properties: a second player joining does not swallow a pending change") {
+    // The host's table is its record of what it last SENT. Building it afresh
+    // for a joiner would overwrite that record with the CURRENT values — and
+    // the change that had not gone out yet would then compare equal to itself
+    // and never be sent to anybody. A player already in the session would sit
+    // on a stale value forever, which is the exact loss ordering the messages
+    // was supposed to rule out.
+    Rig rig;
+    const Entity door = authoredEntity(*rig.host.world, "Door");
+    startHost(rig);
+
+    Peer& first = addClient(rig, 20);
+    const Entity firstDoor = mirrorOf(*rig.host.world, door, *first.world);
+    REQUIRE(rig.host.session->properties()->declareVar(
+        door, "open", Value::ofBool(false), /*notify*/ true));
+    rig.step(12);
+    REQUIRE(first.session->status() == NetGameSession::Status::Joined);
+    drainNotifications(first);
+
+    // The change and the second player's Hello land in the same window: the
+    // host writes the value, and the join completes before the next frame end.
+    REQUIRE(rig.host.session->properties()->setVar(door, "open", Value::ofBool(true)));
+    Peer& second = addClient(rig, 21, defaultJoin("Second"));
+    const Entity secondDoor = mirrorOf(*rig.host.world, door, *second.world);
+    rig.step(16);
+    REQUIRE(second.session->status() == NetGameSession::Status::Joined);
+
+    Value v;
+    REQUIRE(first.session->properties()->getVar(firstDoor, "open", v));
+    CHECK(v.b == true);                       // the one that would have been lost
+    REQUIRE(second.session->properties()->getVar(secondDoor, "open", v));
+    CHECK(v.b == true);                       // and the newcomer's own table
+
+    CHECK(drainNotifications(first).count("open") == 1);
+    CHECK(drainNotifications(second).count("open") == 1);   // once, not twice
+}
+
+TEST_CASE("properties: building a joiner's table does not erase what has not been sent yet") {
+    // The same hazard as above, driven directly instead of through a join whose
+    // timing decides whether the window is hit at all. `sendTablesTo` is what
+    // completeJoin calls; running it between the write and the frame end is
+    // exactly the order a Hello arriving at the wrong moment produces, and here
+    // it happens every run.
+    Rig rig;
+    const Entity door = authoredEntity(*rig.host.world, "Door");
+    startHost(rig);
+    Peer& client = addClient(rig, 22);
+    const Entity clientDoor = mirrorOf(*rig.host.world, door, *client.world);
+
+    REQUIRE(rig.host.session->properties()->declareVar(
+        door, "open", Value::ofBool(false), /*notify*/ true));
+    rig.step(12);
+    drainNotifications(client);
+
+    // Write, then build a table for the connection BEFORE the frame end runs.
+    REQUIRE(rig.host.session->properties()->setVar(door, "open", Value::ofBool(true)));
+    for (const ConnectionId conn : rig.host.session->session()->connections())
+        rig.host.session->properties()->sendTablesTo(conn);
+    rig.step(12);
+
+    Value v;
+    REQUIRE(client.session->properties()->getVar(clientDoor, "open", v));
+    CHECK(v.b == true);
+    // And the record still knows the value went out, so nothing is resent for
+    // ever after: a second frame with no change sends nothing.
+    const std::uint32_t sent = rig.host.session->properties()->stats().deltasSent;
+    rig.step(6);
+    CHECK(rig.host.session->properties()->stats().deltasSent == sent);
+}
+
+TEST_CASE("properties: a variable declared mid-session re-tables every client, not just one") {
+    // Indices are positions in the name list, so a list that grew has to reach
+    // everybody at once — two clients counting with two different lists would
+    // read the same delta as two different properties.
+    Rig rig;
+    const Entity e = authoredEntity(*rig.host.world, "Thing");
+    startHost(rig);
+    Peer& a = addClient(rig, 23);
+    Peer& b = addClient(rig, 24, defaultJoin("B"));
+    const Entity aE = mirrorOf(*rig.host.world, e, *a.world);
+    const Entity bE = mirrorOf(*rig.host.world, e, *b.world);
+
+    REQUIRE(rig.host.session->properties()->declareVar(e, "first", Value::ofInt(1), false));
+    rig.step(14);
+    REQUIRE(a.session->status() == NetGameSession::Status::Joined);
+    REQUIRE(b.session->status() == NetGameSession::Status::Joined);
+
+    // A second variable appears after both are in.
+    REQUIRE(rig.host.session->properties()->declareVar(e, "second", Value::ofInt(2), false));
+    rig.step(14);
+    REQUIRE(rig.host.session->properties()->setVar(e, "second", Value::ofInt(9)));
+    rig.step(14);
+
+    Value v;
+    REQUIRE(a.session->properties()->getVar(aE, "second", v));
+    CHECK(v.i == 9);
+    REQUIRE(b.session->properties()->getVar(bE, "second", v));
+    CHECK(v.i == 9);
+    // …and the first one was not dragged along by a shifted index.
+    REQUIRE(a.session->properties()->getVar(aE, "first", v));
+    CHECK(v.i == 1);
+    REQUIRE(b.session->properties()->getVar(bE, "first", v));
+    CHECK(v.i == 1);
+    CHECK(a.session->properties()->stats().unknownIndex == 0u);
+    CHECK(b.session->properties()->stats().unknownIndex == 0u);
+}
+
 // ─── 6. The composite types, end to end ──────────────────────────────────────
 
 TEST_CASE("properties: struct, enum and map values replicate through a session") {

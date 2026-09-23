@@ -773,7 +773,19 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 					entry->access   = 1;   // private: nobody outside the class calls it
 					// ONE parameter, the variable's own type: the value this
 					// machine held before the one that just arrived (§6.4).
-					entry->params   = { { "Old", v->type } };
+					// The WHOLE shape, not just the PinType — an array of
+					// structs and a scalar struct are different pins, and a
+					// parameter declared as the wrong one would mistype the old
+					// value for exactly the composite cases that do replicate.
+					HC::FuncParam old;
+					old.name        = "Old";
+					old.type        = v->type;
+					old.isArray     = v->isArray;
+					old.container   = v->container;
+					old.typeName    = v->typeName;
+					old.keyType     = v->keyType;
+					old.keyTypeName = v->keyTypeName;
+					entry->params   = { old };
 					g.currentGraph  = fnId;
 					const int retId = addNode(graph, NT::FunctionReturn, ImVec2(420.0f, 40.0f));
 					graph.findNode(retId)->s = fnName;

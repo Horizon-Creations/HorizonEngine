@@ -1062,6 +1062,15 @@ taugt für eine Property nicht. `scalarValueEquals` ist das richtige Blatt und
 wird benutzt, hat aber keinen Struct-Fall und steigt nicht in Container hinab;
 `ValueWire::valuesEqual` ist genau diese fehlende Rekursion darüber.
 
+**Zwei Fallen, die erst die Pruefung gezeigt hat** und die jetzt Tests haben:
+die Tabelle fuer einen Beitretenden darf den Host-Vermerk „zuletzt gesendet"
+NICHT ueberschreiben (sonst verglich der naechste Frame einen Wert mit sich
+selbst, und wer schon in der Sitzung war, sass dauerhaft auf dem alten) -- und
+eine Variable, die mitten in der Sitzung dazukommt, braucht eine neue Tabelle
+fuer ALLE Clients, weil ein Index eine Position in der Namensliste ist. Ohne
+das Zweite war eine spaeter deklarierte Variable die ganze Sitzung lang
+unsichtbar.
+
 **Offen aus diesem Schritt:** der kompilierte HorizonCode-Pfad trägt die beiden
 Flags in `CompiledVarInfo` (per NSDMI, damit jede bisher erzeugte Tabelle weiter
 kompiliert), aber der Codegen schreibt sie noch nicht — eine Klasse, die als C++

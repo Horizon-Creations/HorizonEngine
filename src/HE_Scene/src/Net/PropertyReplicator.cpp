@@ -24,7 +24,11 @@ namespace
 	// Properties on ONE entity. A class with more than this many replicated
 	// variables is a class whose state belongs in a struct; the cap is here so a
 	// malformed count cannot make a receiver reserve a million strings.
-	constexpr std::uint16_t kMaxProperties = 256;
+	// 255 and not 256, because a delta's `count` and its indices are both ONE
+	// BYTE: with 256 properties the last index would not be representable, and
+	// a full set of changes would go out as count 0 — a datagram that says
+	// "nothing changed" while carrying everything.
+	constexpr std::uint16_t kMaxProperties = 255;
 
 	bool alreadyLogged(std::vector<std::string>& seen, const std::string& key)
 	{
@@ -267,16 +271,69 @@ void PropertyReplicator::sendTableFor(std::uint32_t netId, ConnectionId conn)
 	}
 	if (t.names.size() > kMaxProperties) return;
 
-	// Recorded even when empty: update() compares against this, and an entity
-	// whose table was never built would send its whole state as a "change" the
-	// first time anything else did.
-	m_tables[netId] = t;
+	// WHAT GETS RECORDED, and this distinction is the whole of a bug that only
+	// shows when somebody joins at the wrong moment. `m_tables` is the host's
+	// record of what it last SENT — that is what update() compares against.
+	// The table this connection is handed carries the CURRENT values, because
+	// a joiner wants the truth and not the history.
+	//
+	// Overwriting the record with those current values would erase a change
+	// that has not gone out yet: the next update() would compare the value
+	// against itself, find nothing, and the players who were already in the
+	// session would sit on the old value forever, with nothing to resend it.
+	// That is exactly the permanent divergence ordering the messages was meant
+	// to rule out, arriving through the one door that looked harmless.
+	//
+	// So an existing record keeps its values and only refreshes the entity. The
+	// joiner then receives the same value once more as a delta on the next
+	// frame; that costs a few bytes and is swallowed silently, because it
+	// equals what the table already put there (handleDelta's prediction path).
+	const auto existing = m_tables.find(netId);
+	// Did the NAME LIST change (a script declared another variable mid-session)?
+	// An index is a position in that list, so every peer has to be counting with
+	// the same one — a new list has to reach ALL of them, not just the caller's
+	// connection, or two clients would read the same delta as two properties.
+	const bool listChanged = existing != m_tables.end() && existing->second.names != t.names;
+
+	if (existing == m_tables.end() || listChanged)
+	{
+		// Recorded even when empty: an entity whose table was never built would
+		// send its whole state as a "change" the first time anything else did.
+		// On a changed list the values go with it — an index into the old list
+		// means nothing in the new one.
+		m_tables[netId] = t;
+	}
+	else
+	{
+		existing->second.entity = entity;
+		existing->second.notify = t.notify;
+	}
 	if (t.names.empty()) return;
 
 	BitWriter w;
 	writeTable(w, netId, t);
-	m_net->send(conn, kMsgPropertyTable, w, SendMode::ReliableOrdered);
-	++m_stats.tablesSent;
+	if (listChanged)
+	{
+		for (const ConnectionId to : joinedConnections())
+		{
+			m_net->send(to, kMsgPropertyTable, w, SendMode::ReliableOrdered);
+			++m_stats.tablesSent;
+		}
+		// The caller's own connection may not be in the roster yet (a table
+		// built for a peer mid-handshake), so it is addressed on its own if the
+		// loop above missed it.
+		const auto joined = joinedConnections();
+		if (std::find(joined.begin(), joined.end(), conn) == joined.end())
+		{
+			m_net->send(conn, kMsgPropertyTable, w, SendMode::ReliableOrdered);
+			++m_stats.tablesSent;
+		}
+	}
+	else
+	{
+		m_net->send(conn, kMsgPropertyTable, w, SendMode::ReliableOrdered);
+		++m_stats.tablesSent;
+	}
 	m_stats.bytesSent += static_cast<std::uint32_t>((w.bitCount() + 7) / 8);
 }
 
@@ -339,12 +396,26 @@ void PropertyReplicator::update()
 		if (it == m_tables.end()) continue;
 		Table& t = it->second;
 		t.entity = entity;
-		if (t.names.empty()) continue;
 
 		std::vector<std::string> names;
 		std::vector<bool>        notify;
 		std::vector<Value>       current;
 		collect(entity, names, notify, current);
+
+		// The DECLARATION changed since the last table — a script declared
+		// another variable in a handler, or a hot reload took one away. Nothing
+		// else would notice: a name the table does not know has no index and is
+		// simply never sent, so without this a variable declared one frame after
+		// the join would stay invisible for the whole session. Re-tabling is
+		// also the only way to do it, because an index is a position in the
+		// list, so a list that grew has to reach every client at once
+		// (sendTableFor does that when it sees the names differ).
+		if (names != t.names)
+		{
+			broadcastTableFor(nc.netId);
+			continue;
+		}
+		if (t.names.empty()) continue;
 
 		// Which indices changed. Looked up BY NAME rather than by position: a
 		// script may declare another variable mid-session, which appends to its
@@ -353,7 +424,7 @@ void PropertyReplicator::update()
 		// under an index the client has never heard of is the failure this whole
 		// design is trying to avoid.
 		std::vector<std::uint8_t> changed;
-		for (std::size_t i = 0; i < t.names.size() && i < 0xFFu + 1; ++i)
+		for (std::size_t i = 0; i < t.names.size() && i < kMaxProperties; ++i)
 		{
 			const auto at = std::find(names.begin(), names.end(), t.names[i]);
 			if (at == names.end()) continue;
