@@ -100,6 +100,9 @@ public:
     // Call script.onCheatDetected(self, reportId) — the anti-cheat made a report
     // (or the host sent this client a notice). No-op if not defined.
     bool callOnCheatDetected(InstanceId id, int reportId) override;
+    // Call script.onPlayerJoined(self, player) and its five siblings — the
+    // multiplayer session's lifecycle. No-op if not defined.
+    bool callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg) override;
 
     // Last error string from any failed compile or call.
     const std::string& lastError() const override { return m_lastError; }

@@ -47,6 +47,23 @@ public:
     // the frame. Defaulted to nothing, so a module from before it existed keeps
     // building and simply lets the host's policy stand.
     virtual void onCheatDetected(int reportId) { (void)reportId; }
+
+    // The multiplayer session's lifecycle (docs/gameplay-replication-plan.md
+    // §7.4), in the plan's order. `player` is the PlayerId; `reason` is the
+    // disconnect reason (0 Leave, 1 Timeout, 2 Kicked, 3 Rejected,
+    // 4 VersionMismatch, 5 WrongProject). The player pair fires on the HOST,
+    // the connect pair on the CLIENT, and a kick arrives as onCheatDetected
+    // first and onDisconnected(2) after.
+    //
+    // Appended at the END and defaulted to nothing, like onCheatDetected: a
+    // module built before these existed keeps loading and simply never hears
+    // one. New hooks go after these, for the same reason.
+    virtual void onPlayerJoined(int player) { (void)player; }
+    virtual void onPlayerLeft(int player)   { (void)player; }
+    virtual void onConnected()              {}
+    virtual void onDisconnected(int reason) { (void)reason; }
+    virtual void onSessionStarted()         {}
+    virtual void onSessionEnded()           {}
 };
 
 // Typedefs for the DLL export function pointers

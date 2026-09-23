@@ -43,8 +43,15 @@ inline constexpr MessageId kMsgDespawn  = kFirstUserMessage + 209;   // host →
 // The baseline is the same samples, ReliableOrdered, outside the tick ordering.
 inline constexpr MessageId kMsgBaseline = kFirstUserMessage + 210;   // host → client
 
+// ── Possession (NetGameSession::assignControl, step 5) ──
+// Host → the OWNER alone, after the spawn that created their character. Carries
+// the net id, because a net id is the only name for an entity both sides know:
+// the client resolves it through GameReplication::entityOf and then does the
+// two things that make it theirs — setLocallyControlled (prediction) and
+// player.possess (camera, input routing, player.character()).
+inline constexpr MessageId kMsgControl = kFirstUserMessage + 213;   // host → owner: netId
+
 // ── Reserved, so nothing else takes the number before its step lands ──
-// 213 kMsgControl   (host → owner: which entity you drive)            — step 5
 // 214 kMsgScene / 215 kMsgSceneReady (scene change, plan §5.5)        — step 5
 // 216 kMsgPropertyTable / 217 kMsgProperties (plan §6.2)              — step 6
 // 218 kMsgRpc (plan §7.3)                                             — step 7

@@ -2524,6 +2524,28 @@ const std::vector<EngineEventDesc>& engineEvents()
         // readers say the rest. No element: it belongs to the Game Instance, the
         // level script and the Entity the report names, never to a widget.
         { "OnCheatDetected",      "onCheatDetected",      P::Int,    false },
+        // The multiplayer session's lifecycle (docs/gameplay-replication-plan.md
+        // §7.4). Session-wide like OnCheatDetected and with no element, so they
+        // belong to the Game Instance and the level script; an entity that wants
+        // to know who is in the session asks net.playerCount instead of holding
+        // six handlers of its own.
+        //
+        // The Int on the two player events is the PlayerId — the id that is
+        // minted once per join and never handed out twice, so a score keyed on
+        // it cannot be inherited by whoever gets the connection next. Fires on
+        // the HOST only; a client hears OnConnected/OnDisconnected about itself.
+        { "OnPlayerJoined",       "onPlayerJoined",       P::Int,    false },
+        { "OnPlayerLeft",         "onPlayerLeft",         P::Int,    false },
+        // The client's own two. OnDisconnected's Int is the reason: 0 Leave,
+        // 1 Timeout, 2 Kicked, 3 Rejected, 4 VersionMismatch, 5 WrongProject.
+        // A kick arrives as OnCheatDetected FIRST and OnDisconnected(2) after,
+        // so a handler that wants to say WHY has the ticket by then.
+        { "OnConnected",          "onConnected",          P::Exec,   false },
+        { "OnDisconnected",       "onDisconnected",       P::Int,    false },
+        // The session itself opening and closing. Both sides hear the end; only
+        // the host hears the start, because only the host has one to start.
+        { "OnSessionStarted",     "onSessionStarted",     P::Exec,   false },
+        { "OnSessionEnded",       "onSessionEnded",       P::Exec,   false },
         { "OnLevelLoaded",        "onLevelLoaded",        P::Exec,   false },
         { "OnLevelUnloaded",      "onLevelUnloaded",      P::Exec,   false },
         // Physics contacts on an Entity class. The argument is the OTHER entity

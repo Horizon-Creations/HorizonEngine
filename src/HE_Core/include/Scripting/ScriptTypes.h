@@ -89,6 +89,25 @@ namespace HE
 // on_hover_exit — a missing handler is a silent no-op, like the collision pair.
 enum class UIScriptEvent : uint8_t { Click = 0, HoverEnter = 1, HoverExit = 2 };
 
+// The multiplayer session's lifecycle, as ONE event with a kind rather than six
+// backend methods (docs/gameplay-replication-plan.md §7.4). UIScriptEvent's
+// shape, for UIScriptEvent's reason: what differs between the six is the method
+// NAME a script defines, and every backend spells names its own way anyway
+// (onPlayerJoined in Lua, on_player_joined in Python) — so the mapping belongs
+// in the backend, and six near-identical virtuals would only spread it out.
+//
+// `arg` is the PlayerId for PlayerJoined/Left, the DisconnectReason for
+// Disconnected, and unused (0) for the other three.
+enum class NetScriptEvent : uint8_t
+{
+    PlayerJoined   = 0,
+    PlayerLeft     = 1,
+    Connected      = 2,
+    Disconnected   = 3,
+    SessionStarted = 4,
+    SessionEnded   = 5,
+};
+
 // A single typed value used both as a default (in ScriptPropDef) and as a
 // per-instance override stored in ScriptComponent::properties.
 struct ScriptPropValue {

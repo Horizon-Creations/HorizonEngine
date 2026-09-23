@@ -66,6 +66,19 @@ public:
 	void setSpawnFunction(SpawnFn fn)     { m_spawn = std::move(fn); }
 	void setDespawnFunction(DespawnFn fn) { m_despawn = std::move(fn); }
 
+	// Which connections count as IN the session. A peer that is through the
+	// crypto handshake but has not been welcomed yet is not one, and step 4 sent
+	// to it anyway — harmless while nothing read `owner`, and wrong the moment
+	// step 5 did: before the Welcome a client's own localPlayer is still 0, so a
+	// host-owned spawn (owner 0) arriving early reads as "mine" and the client
+	// hands it to its PlayerHost. Such a peer misses nothing by being skipped —
+	// completeJoin() sends it the whole world with sendWorldTo().
+	//
+	// Unset = every connection, which is what the tests that predate the roster
+	// expect and what a session with no handshake in front of it means.
+	using JoinedFn = std::function<bool(HE::Net::ConnectionId)>;
+	void setJoinedFilter(JoinedFn fn) { m_joined = std::move(fn); }
+
 	// ── Host ─────────────────────────────────────────────────────────────────
 	// The registry walk (plan §5.5): every entity carrying a NetworkComponent
 	// with `replicates` is registered for the session and recorded as a bind.
@@ -143,6 +156,9 @@ private:
 	void writeSpawn(HE::Net::BitWriter& w, std::uint32_t netId, const SpawnRecord& rec) const;
 
 	bool isAuthority() const;
+	// Every connection the filter lets through, or every connection when there
+	// is no filter. The one place a host-side broadcast is spelled out.
+	std::vector<HE::Net::ConnectionId> joinedConnections() const;
 
 	HE::Net::NetSession* m_net  = nullptr;
 	HE::Net::NetRole     m_role = HE::Net::NetRole::None;
@@ -151,6 +167,7 @@ private:
 
 	SpawnFn   m_spawn;
 	DespawnFn m_despawn;
+	JoinedFn  m_joined;
 	bool      m_spawnServiceLogged = false;
 
 	// Host: what to replay for a late joiner. Client: what it has adopted, so a

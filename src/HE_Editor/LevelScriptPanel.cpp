@@ -1443,8 +1443,15 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 		// OnCheatDetected reaches the level script second, after the Game
 		// Instance (docs/anti-cheat-plan.md §5.4): a level that wants to react
 		// to a report — hide the flagged player's loot, say — handles it here.
+		// The session events reach the level script second as well, after the
+		// Game Instance (docs/gameplay-replication-plan.md §7.4): a level that
+		// wants to place a joining player, or to stop when the last one leaves,
+		// handles it here.
 		static const std::vector<std::string> kEvents = { "OnLevelLoaded", "OnLevelUnloaded",
-		                                                  "OnCheatDetected" };
+		                                                  "OnCheatDetected",
+		                                                  "OnPlayerJoined", "OnPlayerLeft",
+		                                                  "OnConnected", "OnDisconnected",
+		                                                  "OnSessionStarted", "OnSessionEnded" };
 		bool edited = false;
 		drawGraphBody(ctx.world->levelScript(), kEvents, /*allowCustomEvents=*/false, "Level Script",
 		              "Reacts to world events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
@@ -1490,7 +1497,14 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 			// The anti-cheat made a report, or the host told this client why it
 			// is being removed. Session-wide, so the Game Instance hears it first
 			// (docs/anti-cheat-plan.md §5.4); the Int is the report ticket.
-			"OnCheatDetected" };
+			"OnCheatDetected",
+			// The multiplayer session's lifecycle (docs/gameplay-replication-
+			// plan.md §7.4). Session-wide, so the Game Instance hears it first:
+			// a lobby, a scoreboard and a "waiting for players" screen all live
+			// here and not in any level.
+			"OnPlayerJoined", "OnPlayerLeft",
+			"OnConnected", "OnDisconnected",
+			"OnSessionStarted", "OnSessionEnded" };
 		bool edited = false;
 		drawGraphBody(*ctx.gameInstanceGraph, kEvents, /*allowCustomEvents=*/false, "Game Instance",
 		              "App-wide. Runs before anything loads.", ctx.contentManager, ctx.gameInstanceGraph, edited);

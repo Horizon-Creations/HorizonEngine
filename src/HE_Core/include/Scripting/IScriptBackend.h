@@ -110,6 +110,17 @@ public:
     virtual bool callOnCheatDetected(InstanceId id, int reportId)
     { (void)id; (void)reportId; return true; }
 
+    // The multiplayer session's lifecycle (docs/gameplay-replication-plan.md
+    // §7.4): onPlayerJoined / onPlayerLeft / onConnected / onDisconnected /
+    // onSessionStarted / onSessionEnded, and their snake_case twins in Python.
+    // Every instance of the session hears every one, like a timer; `arg` is the
+    // PlayerId, the disconnect reason, or 0 (see NetScriptEvent).
+    //
+    // Defaulted like callOnCheatDetected, for the same reason: a backend from
+    // before this existed keeps compiling and simply never delivers one.
+    virtual bool callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg)
+    { (void)id; (void)ev; (void)arg; return true; }
+
     // Declared properties of a loaded script (editor inspector surface) and
     // per-instance override injection (before callOnStart).
     virtual std::vector<ScriptPropDef> getScriptProperties(const std::string& name) const = 0;

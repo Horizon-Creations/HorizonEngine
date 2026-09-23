@@ -299,6 +299,16 @@ public:
     // An anti-cheat report ticket (docs/anti-cheat-plan.md §5.4). Fired on the
     // Game Instance, the level script and the Entity class the report names.
     void fireOnCheatDetected(InstanceId id, int reportId);
+    // The multiplayer session's lifecycle (docs/gameplay-replication-plan.md
+    // §7.4). Fired on the Game Instance and the level script, like the report
+    // above; NetEvents::dispatch is the one place that decides who hears what,
+    // so the packaged game and the editor's play mode cannot drift.
+    void fireOnPlayerJoined(InstanceId id, int player);
+    void fireOnPlayerLeft(InstanceId id, int player);
+    void fireOnConnected(InstanceId id);
+    void fireOnDisconnected(InstanceId id, int reason);
+    void fireOnSessionStarted(InstanceId id);
+    void fireOnSessionEnded(InstanceId id);
     void fireOnLevelLoaded(InstanceId id);
     void fireOnLevelUnloaded(InstanceId id);
     // Physics contacts (Entity classes). `other` is the other entity's id, which

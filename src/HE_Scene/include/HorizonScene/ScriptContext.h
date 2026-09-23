@@ -139,6 +139,10 @@ public:
     // a report, or the host sent this client a notice. Every instance hears
     // every report; horizon.anticheat.report* say whom it concerns.
     bool callOnCheatDetected(ScriptEngine::InstanceId id, int reportId);
+    // onPlayerJoined(self, player) / on_player_joined and their five siblings —
+    // the multiplayer session's lifecycle (docs/gameplay-replication-plan.md
+    // §7.4). Every instance hears every one, like a report above.
+    bool callOnNetEvent(ScriptEngine::InstanceId id, NetScriptEvent ev, int arg);
 
     // Hot-reload: recompile script and patch function fields in live instances.
     // Data fields (non-function keys in instance tables) are preserved. The

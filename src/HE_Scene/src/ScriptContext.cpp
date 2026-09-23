@@ -1594,6 +1594,12 @@ bool ScriptContext::callOnCheatDetected(ScriptEngine::InstanceId id, int reportI
     HE_SCRIPT_CALL("onCheatDetected", b->callOnCheatDetected(rawId(id), reportId));
 }
 
+bool ScriptContext::callOnNetEvent(ScriptEngine::InstanceId id, NetScriptEvent ev, int arg)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    HE_SCRIPT_CALL("onNetEvent", b->callOnNetEvent(rawId(id), ev, arg));
+}
+
 #undef HE_SCRIPT_CALL
 
 bool ScriptContext::hotReloadScript(const std::string& name, const std::string& source)

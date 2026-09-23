@@ -12,6 +12,7 @@
 #include "HorizonScene/Components/HierarchyComponent.h"   // the parent chain the world/local boundary walks
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
+#include "HorizonScene/Components/NetworkComponent.h"   // the net group's owner/netId reads
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
@@ -36,6 +37,7 @@
 #include <Types/TypeRegistry.h>   // save-template schemas + struct field values
 #include <HorizonGameServices.h>   // the C-ABI table fillSaveServices populates
 #include "HorizonScene/AntiCheat/AntiCheatHost.h"   // the anticheat group's service
+#include "HorizonScene/Net/NetGameSession.h"        // the net group's service
 #include <DebugDraw/DebugDraw.h>
 #include <Platform/Process.h>      // the process group runs on HE::Proc
 #include <Net/HttpsClient.h>       // …and the http group on the platform TLS stack
@@ -2999,6 +3001,192 @@ float playerScore(Ctx& c, int player)
 bool isEnabled(Ctx& c)
 { HE::AntiCheat::AntiCheatHost* h = host(c); return h && h->isEnabled(); }
 } // namespace anticheat
+
+// ── Multiplayer ──────────────────────────────────────────────────────────────
+namespace net {
+namespace {
+// The session, but ONLY when there is one running. `Ctx::net` is non-null for
+// the whole life of the application — both hosts construct a session in OnInit
+// and leave it idle until somebody hosts or joins — so a bare null check would
+// answer "we are in a session" for every single-player game ever shipped.
+NetGameSession* live(Ctx& c) { return (c.net && c.net->isActive()) ? c.net : nullptr; }
+// The session including an idle one, for the rows that legitimately work
+// outside a session: browsing the LAN, opening one, reading the last error.
+NetGameSession* any(Ctx& c) { return c.net; }
+
+HE::Net::Game::PlayerId pid(int player)
+{ return player > 0 ? static_cast<HE::Net::Game::PlayerId>(player) : HE::Net::Game::kNoPlayer; }
+
+// The shared half of every join row, so the two of them cannot drift on what an
+// unnamed player is called.
+NetGameSession::JoinOptions joinOptions(const std::string& code, const std::string& displayName)
+{
+    NetGameSession::JoinOptions o;
+    o.displayName = displayName.empty() ? std::string("Player") : displayName;
+    o.joinCode    = code;
+    return o;
+}
+} // namespace
+
+bool host(Ctx& c, int port, const std::string& displayName)
+{
+    NetGameSession* s = any(c);
+    if (!s) return false;
+    NetGameSession::HostOptions o;
+    o.port        = (port > 0 && port < 65536) ? static_cast<std::uint16_t>(port) : 0;
+    o.displayName = displayName.empty() ? std::string("Host") : displayName;
+    return s->host(o);
+}
+
+bool joinDirect(Ctx& c, const std::string& address, int port, const std::string& code,
+                const std::string& displayName)
+{
+    NetGameSession* s = any(c);
+    if (!s || port <= 0 || port >= 65536) return false;
+    return s->joinDirect(address, static_cast<std::uint16_t>(port),
+                         joinOptions(code, displayName));
+}
+
+bool joinLan(Ctx& c, int index, const std::string& code, const std::string& displayName)
+{
+    NetGameSession* s = any(c);
+    if (!s || index < 0) return false;
+    return s->joinLan(static_cast<std::size_t>(index), joinOptions(code, displayName));
+}
+
+void leave(Ctx& c) { if (NetGameSession* s = any(c)) s->leave(); }
+
+int status(Ctx& c)
+{
+    NetGameSession* s = any(c);
+    return s ? static_cast<int>(s->status()) : 0;   // no session at all reads as Idle
+}
+
+std::string lastError(Ctx& c)
+{ NetGameSession* s = any(c); return s ? s->lastError() : std::string(); }
+
+std::string sessionId(Ctx& c)
+{ NetGameSession* s = live(c); return s ? s->sessionId() : std::string(); }
+
+std::string joinCode(Ctx& c)
+{
+    NetGameSession* s = live(c);
+    // The host's secret and nobody else's. A client HOLDS the code it joined
+    // with, so returning it here would let a client's own UI hand out seats to
+    // a session it does not own.
+    return (s && s->isAuthority()) ? s->joinCode() : std::string();
+}
+
+void refreshLan(Ctx& c) { if (NetGameSession* s = any(c)) s->refreshLan(); }
+
+int lanSessionCount(Ctx& c)
+{ NetGameSession* s = any(c); return s ? static_cast<int>(s->lanSessions().size()) : 0; }
+
+std::string lanSessionName(Ctx& c, int index)
+{
+    NetGameSession* s = any(c);
+    if (!s || index < 0) return {};
+    const auto& found = s->lanSessions();
+    if (static_cast<std::size_t>(index) >= found.size()) return {};
+    return found[static_cast<std::size_t>(index)].hostName;
+}
+
+int lanSessionPlayers(Ctx& c, int index)
+{
+    NetGameSession* s = any(c);
+    if (!s || index < 0) return 0;
+    const auto& found = s->lanSessions();
+    if (static_cast<std::size_t>(index) >= found.size()) return 0;
+    return static_cast<int>(found[static_cast<std::size_t>(index)].participants);
+}
+
+bool isAuthority(Ctx& c)
+{
+    NetGameSession* s = live(c);
+    // TRUE with no session, and this is the one inverted default in the group:
+    // a single-player game is its own authority. See the header.
+    return s ? s->isAuthority() : true;
+}
+
+bool isClient(Ctx& c)
+{ NetGameSession* s = live(c); return s && s->isClient(); }
+
+int localPlayer(Ctx& c)
+{
+    NetGameSession* s = live(c);
+    // 1 offline, for isAuthority's reason: alone, you are player one.
+    if (!s) return static_cast<int>(HE::Net::Game::kHostPlayer);
+    return static_cast<int>(s->localPlayer());
+}
+
+int playerCount(Ctx& c)
+{
+    NetGameSession* s = live(c);
+    // 1 offline: there is a player, and it is you.
+    return s ? static_cast<int>(s->roster().size()) : 1;
+}
+
+int playerAt(Ctx& c, int index)
+{
+    NetGameSession* s = live(c);
+    if (!s) return index == 0 ? static_cast<int>(HE::Net::Game::kHostPlayer) : 0;
+    if (index < 0) return 0;
+    const auto& players = s->roster().players();
+    if (static_cast<std::size_t>(index) >= players.size()) return 0;
+    return static_cast<int>(players[static_cast<std::size_t>(index)].id);
+}
+
+std::string playerName(Ctx& c, int player)
+{
+    NetGameSession* s = live(c);
+    if (!s) return {};
+    const auto* info = s->roster().find(pid(player));
+    return info ? info->name : std::string();
+}
+
+float ping(Ctx& c, int player)
+{ NetGameSession* s = live(c); return s ? s->pingMs(pid(player)) : 0.0f; }
+
+void kick(Ctx& c, int player)
+{
+    NetGameSession* s = live(c);
+    if (!s || !s->isAuthority()) return;
+    s->kick(pid(player));
+}
+
+int ownerOf(Ctx& c, int entity)
+{
+    if (!c.world || entity <= 0) return 0;
+    const auto e = static_cast<entt::entity>(entity);
+    if (!c.world->registry().valid(e)) return 0;
+    const auto* nc = c.world->registry().try_get<NetworkComponent>(e);
+    return nc ? static_cast<int>(nc->owner) : 0;
+}
+
+bool isLocallyControlled(Ctx& c, int entity)
+{
+    if (!c.world || entity <= 0) return false;
+    const auto e = static_cast<entt::entity>(entity);
+    if (!c.world->registry().valid(e)) return false;
+
+    NetGameSession* s = live(c);
+    // Offline every entity is ours to drive; there is nobody else.
+    if (!s) return true;
+    const auto* nc = c.world->registry().try_get<NetworkComponent>(e);
+    // Not replicated at all = local by definition (a purely local effect).
+    if (!nc || nc->netId == 0) return true;
+    if (nc->owner == 0) return s->isAuthority();   // unowned: the authority drives it
+    return nc->owner == s->localPlayer();
+}
+
+int localCharacter(Ctx& c)
+{
+    NetGameSession* s = live(c);
+    if (!s) return 0;
+    const auto e = static_cast<entt::entity>(s->localCharacter());
+    return e == entt::null ? 0 : static_cast<int>(static_cast<std::uint32_t>(e));
+}
+} // namespace net
 
 // ── Printing ─────────────────────────────────────────────────────────────────
 namespace print {
@@ -6332,6 +6520,91 @@ const std::vector<ApiFn>& registry()
             "HE::api::anticheat::isEnabled",
             [](Ctx& c, const VV&){ return VV{ Value::ofBool(anticheat::isEnabled(c)) }; } });
 
+        // ── Multiplayer (docs/gameplay-replication-plan.md §7.1) ──
+        t.push_back({ "net.host", "Multiplayer", true,
+            {{"port", P::Int}, {"displayName", P::String}}, {{"ok", P::Bool}},
+            "HE::api::net::host",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(net::host(c, aI(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "net.joinDirect", "Multiplayer", true,
+            {{"address", P::String}, {"port", P::Int}, {"code", P::String},
+             {"displayName", P::String}}, {{"ok", P::Bool}},
+            "HE::api::net::joinDirect",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::joinDirect(c, aS(a, 0), aI(a, 1), aS(a, 2), aS(a, 3))) }; } });
+        t.push_back({ "net.joinLan", "Multiplayer", true,
+            {{"index", P::Int}, {"code", P::String}, {"displayName", P::String}},
+            {{"ok", P::Bool}},
+            "HE::api::net::joinLan",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::joinLan(c, aI(a, 0), aS(a, 1), aS(a, 2))) }; } });
+        t.push_back({ "net.leave", "Multiplayer", true, {}, {},
+            "HE::api::net::leave",
+            [](Ctx& c, const VV&){ net::leave(c); return VV{}; } });
+        t.push_back({ "net.status", "Multiplayer", false, {}, {{"status", P::Int}},
+            "HE::api::net::status",
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt(net::status(c)) }; } });
+        t.push_back({ "net.lastError", "Multiplayer", false, {}, {{"error", P::String}},
+            "HE::api::net::lastError",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(net::lastError(c)) }; } });
+        t.push_back({ "net.sessionId", "Multiplayer", false, {}, {{"sessionId", P::String}},
+            "HE::api::net::sessionId",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(net::sessionId(c)) }; } });
+        t.push_back({ "net.joinCode", "Multiplayer", false, {}, {{"code", P::String}},
+            "HE::api::net::joinCode",
+            [](Ctx& c, const VV&){ return VV{ Value::ofString(net::joinCode(c)) }; } });
+        t.push_back({ "net.refreshLan", "Multiplayer", true, {}, {},
+            "HE::api::net::refreshLan",
+            [](Ctx& c, const VV&){ net::refreshLan(c); return VV{}; } });
+        t.push_back({ "net.lanSessionCount", "Multiplayer", false, {}, {{"count", P::Int}},
+            "HE::api::net::lanSessionCount",
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt(net::lanSessionCount(c)) }; } });
+        t.push_back({ "net.lanSessionName", "Multiplayer", false, {{"index", P::Int}},
+            {{"name", P::String}},
+            "HE::api::net::lanSessionName",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(net::lanSessionName(c, aI(a, 0))) }; } });
+        t.push_back({ "net.lanSessionPlayers", "Multiplayer", false, {{"index", P::Int}},
+            {{"players", P::Int}},
+            "HE::api::net::lanSessionPlayers",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(net::lanSessionPlayers(c, aI(a, 0))) }; } });
+        t.push_back({ "net.isAuthority", "Multiplayer", false, {}, {{"isAuthority", P::Bool}},
+            "HE::api::net::isAuthority",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(net::isAuthority(c)) }; } });
+        t.push_back({ "net.isClient", "Multiplayer", false, {}, {{"isClient", P::Bool}},
+            "HE::api::net::isClient",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(net::isClient(c)) }; } });
+        t.push_back({ "net.localPlayer", "Multiplayer", false, {}, {{"player", P::Int}},
+            "HE::api::net::localPlayer",
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt(net::localPlayer(c)) }; } });
+        t.push_back({ "net.playerCount", "Multiplayer", false, {}, {{"count", P::Int}},
+            "HE::api::net::playerCount",
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt(net::playerCount(c)) }; } });
+        t.push_back({ "net.playerAt", "Multiplayer", false, {{"index", P::Int}},
+            {{"player", P::Int}},
+            "HE::api::net::playerAt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(net::playerAt(c, aI(a, 0))) }; } });
+        t.push_back({ "net.playerName", "Multiplayer", false, {{"player", P::Int}},
+            {{"name", P::String}},
+            "HE::api::net::playerName",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(net::playerName(c, aI(a, 0))) }; } });
+        t.push_back({ "net.ping", "Multiplayer", false, {{"player", P::Int}}, {{"ms", P::Float}},
+            "HE::api::net::ping",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(net::ping(c, aI(a, 0))) }; } });
+        t.push_back({ "net.kick", "Multiplayer", true, {{"player", P::Int}}, {},
+            "HE::api::net::kick",
+            [](Ctx& c, const VV& a){ net::kick(c, aI(a, 0)); return VV{}; } });
+        t.push_back({ "net.ownerOf", "Multiplayer", false, {{"entity", P::Int}},
+            {{"player", P::Int}},
+            "HE::api::net::ownerOf",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofInt(net::ownerOf(c, aI(a, 0))) }; } });
+        t.push_back({ "net.isLocallyControlled", "Multiplayer", false, {{"entity", P::Int}},
+            {{"local", P::Bool}},
+            "HE::api::net::isLocallyControlled",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::isLocallyControlled(c, aI(a, 0))) }; } });
+        t.push_back({ "net.localCharacter", "Multiplayer", false, {}, {{"entity", P::Int}},
+            "HE::api::net::localCharacter",
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt(net::localCharacter(c)) }; } });
+
         // Savegames: ONE active template-shaped document (see the header block).
         // create/load resolve the SaveGameTemplate through the Ctx's content
         // manager; field access validates against it and fails LOUD.
@@ -6773,6 +7046,21 @@ const std::vector<ApiFn>& registry()
             { "anticheat.reportReason", "Report Reason" },
             { "anticheat.playerScore", "Player Score" },
             { "anticheat.isEnabled", "Anti-Cheat Enabled" },
+            { "net.host", "Host Session" },          { "net.joinDirect", "Join By Address" },
+            { "net.joinLan", "Join LAN Session" },   { "net.leave", "Leave Session" },
+            { "net.status", "Session Status" },      { "net.lastError", "Session Error" },
+            { "net.sessionId", "Session Id" },       { "net.joinCode", "Join Code" },
+            { "net.refreshLan", "Refresh LAN Sessions" },
+            { "net.lanSessionCount", "LAN Session Count" },
+            { "net.lanSessionName", "LAN Session Name" },
+            { "net.lanSessionPlayers", "LAN Session Players" },
+            { "net.isAuthority", "Is Authority" },   { "net.isClient", "Is Client" },
+            { "net.localPlayer", "Local Player" },   { "net.playerCount", "Player Count" },
+            { "net.playerAt", "Player At" },         { "net.playerName", "Player Name" },
+            { "net.ping", "Player Ping" },           { "net.kick", "Kick From Session" },
+            { "net.ownerOf", "Owner Of" },
+            { "net.isLocallyControlled", "Is Locally Controlled" },
+            { "net.localCharacter", "Local Character" },
             { "save.create", "Create Save" },        { "save.load", "Load Save" },
             { "save.write", "Write Save" },          { "save.close", "Close Save" },
             { "save.activeId", "Active Save Id" },   { "save.list", "List Saves" },
@@ -7029,7 +7317,15 @@ bool isScriptGroup(std::string_view group)
                                                     // are horizon.anticheat.check / reportLevel /
                                                     // respond, and onCheatDetected carries only a
                                                     // ticket that these readers open.
-                                                    "anticheat" };
+                                                    "anticheat",
+                                                    // "net" has no flat twin either, and it is
+                                                    // the group a Lua or Python main menu needs
+                                                    // most: without it such a project can build
+                                                    // a lobby screen and never open a session
+                                                    // from it. Nothing in it is HorizonCode-only
+                                                    // — a PlayerId and an entity are both
+                                                    // integers on every frontend.
+                                                    "net" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

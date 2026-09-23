@@ -1513,6 +1513,85 @@ namespace
 	  "it enabled in the project settings. Useful to hide an admin overlay "
 	  "everywhere else." },
 
+	// ── Multiplayer ──────────────────────────────────────────────────────────
+	{ "net.host",
+	  "Opens a multiplayer session on this machine and makes it joinable. Port 0 "
+	  "lets the system pick one; read it back from the session status, and hand "
+	  "joiners the Join Code. Everyone who joins plays in YOUR world: the host "
+	  "decides what really happened." },
+	{ "net.joinDirect",
+	  "Joins a session by address and port, with the host's Join Code. The code "
+	  "is not a password you can guess past: without the right one the "
+	  "connection never completes at all." },
+	{ "net.joinLan",
+	  "Joins the session at this index in the LAN list (Refresh LAN Sessions "
+	  "first). Same Join Code as a direct join." },
+	{ "net.leave",
+	  "Leaves the session, or closes it if you are the host. Says goodbye rather "
+	  "than vanishing, so the others learn the seat is free now instead of in "
+	  "thirty seconds." },
+	{ "net.status",
+	  "0 Idle, 1 Hosting, 2 Connecting, 3 Joined, 4 Failed. Joined means the "
+	  "whole world has arrived, not just the connection — a lobby screen may "
+	  "wait for it before it hands over to the game." },
+	{ "net.lastError",
+	  "Why the last host or join attempt failed, in words meant for a player. "
+	  "Empty when nothing has failed." },
+	{ "net.sessionId",
+	  "This session's short id, for showing to somebody who is about to join. "
+	  "Empty outside a session." },
+	{ "net.joinCode",
+	  "The secret a joiner needs. Only the HOST gets it — on a client this is "
+	  "deliberately empty, so a client's own UI cannot hand out seats to a "
+	  "session it does not own." },
+	{ "net.refreshLan",
+	  "Starts listening for sessions announced on the local network, or starts "
+	  "over. Only game sessions are listed; an editor collaboration session on "
+	  "the same network is not one you can join." },
+	{ "net.lanSessionCount",
+	  "How many sessions the LAN browser is currently hearing. Zero right after "
+	  "Refresh is normal: announcements arrive a moment later." },
+	{ "net.lanSessionName",
+	  "The host's display name for the session at this index." },
+	{ "net.lanSessionPlayers",
+	  "How many players are in the session at this index, as it last announced "
+	  "itself." },
+	{ "net.isAuthority",
+	  "Is THIS machine the one that decides? True on the host and true with no "
+	  "session at all — a single-player game is its own authority. Ask this "
+	  "before anything that changes the world: simulation only with Is "
+	  "Authority, display everywhere, intentions through the server." },
+	{ "net.isClient",
+	  "Are we a client in somebody else's session? False offline, unlike Is "
+	  "Authority, because offline there is no host to be a client of." },
+	{ "net.localPlayer",
+	  "Our own player number. 1 on the host and 1 offline; the host hands out "
+	  "2 and up in join order. A number is minted once and never reused, so a "
+	  "score kept under it stays the right player's." },
+	{ "net.playerCount",
+	  "How many players are in the session, including ourselves. 1 offline." },
+	{ "net.playerAt",
+	  "The player number of the index'th player, in join order. 0 past the end, "
+	  "so a loop can stop on it." },
+	{ "net.playerName",
+	  "The display name that player joined with." },
+	{ "net.ping",
+	  "Round trip to that player in milliseconds. 0 when there is nothing to "
+	  "measure: ourselves, and a player nobody has timed yet." },
+	{ "net.kick",
+	  "Host only: remove a player from the session. The same path the anti-cheat "
+	  "takes, so a session that logs one logs the other." },
+	{ "net.ownerOf",
+	  "Which player this entity belongs to, or 0 for the host's own and for "
+	  "anything nobody owns (a door, a crate)." },
+	{ "net.isLocallyControlled",
+	  "Do WE drive this entity? True for our own character, false for everybody "
+	  "else's, and true for anything not replicated at all. This is the question "
+	  "a character's graph asks before it reacts to input." },
+	{ "net.localCharacter",
+	  "The entity this machine drives — our own character — or 0 before the host "
+	  "has given us one." },
+
 	// ── Save ─────────────────────────────────────────────────────────────────
 	{ "save.create",
 	  "Starts a NEW save from the project's SaveGame Template, with the fields "

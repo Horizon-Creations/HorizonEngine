@@ -209,6 +209,16 @@ public:
     // script and the Entity the report names.
     virtual void onCheatDetected(int reportId)
     { fireEvent("OnCheatDetected", 0, Value::ofInt(reportId)); }
+    // The multiplayer session's lifecycle (docs/gameplay-replication-plan.md
+    // §7.4). Int on the player events is the PlayerId, on OnDisconnected the
+    // reason code; no element on any of them — they belong to the Game Instance
+    // and the level script.
+    virtual void onPlayerJoined(int player)  { fireEvent("OnPlayerJoined", 0, Value::ofInt(player)); }
+    virtual void onPlayerLeft(int player)    { fireEvent("OnPlayerLeft",   0, Value::ofInt(player)); }
+    virtual void onConnected()               { fireEvent("OnConnected",    0, Value{}); }
+    virtual void onDisconnected(int reason)  { fireEvent("OnDisconnected", 0, Value::ofInt(reason)); }
+    virtual void onSessionStarted()          { fireEvent("OnSessionStarted", 0, Value{}); }
+    virtual void onSessionEnded()            { fireEvent("OnSessionEnded",   0, Value{}); }
     // Level script lifecycle.
     virtual void onLevelLoaded()   { fireEvent("OnLevelLoaded", 0, Value{}); }
     virtual void onLevelUnloaded() { fireEvent("OnLevelUnloaded", 0, Value{}); }

@@ -1656,6 +1656,81 @@ namespace anticheat {
     bool        isEnabled(Ctx&);
 }
 
+// ── Multiplayer (docs/gameplay-replication-plan.md §7.1) ─────────────────────
+// Opening a session, joining one, and asking who is in it. `Ctx::net` is the
+// NetGameSession; null — and, just as importantly, a session that exists but is
+// IDLE — is a single-player game, and every row answers accordingly.
+//
+// THE NEUTRAL ANSWERS ARE NOT ALL "NOTHING", and that is the point of the
+// group. `isAuthority` is TRUE offline: a single-player game is its own
+// authority, so a graph written as "Is Authority? → apply the damage" runs
+// unchanged with no session, with a host, and on a listen server. If it
+// answered false offline, every such graph would go silent the moment somebody
+// played alone, which is exactly the bug the convention in §7.5 exists to
+// prevent. `localPlayer` is 1 for the same reason: offline you are player one.
+//
+// PlayerId, NOT ConnectionId. Every `player` here is the roster id — minted
+// once per join and never handed out twice — so a score or a name keyed on it
+// cannot be inherited by whoever the transport gives the connection to next.
+namespace net {
+    // ── Lifecycle ──
+    // Open a session on `port` (0 = let the OS choose). The rest of the options
+    // come from the project's settings; displayName is what the others see.
+    bool        host(Ctx&, int port, const std::string& displayName);
+    // Join by address. `code` is the host's join secret — without it the crypto
+    // handshake never completes, so a wrong one is a failure to connect and not
+    // a refusal anybody can read.
+    bool        joinDirect(Ctx&, const std::string& address, int port,
+                           const std::string& code, const std::string& displayName);
+    // Join the index'th session the LAN browser has heard (see refreshLan).
+    bool        joinLan(Ctx&, int index, const std::string& code,
+                        const std::string& displayName);
+    void        leave(Ctx&);
+    // 0 Idle, 1 Hosting, 2 Connecting, 3 Joined, 4 Failed.
+    int         status(Ctx&);
+    std::string lastError(Ctx&);
+    std::string sessionId(Ctx&);
+    // The code a joiner needs. EMPTY on a client, always: it is the host's
+    // secret, and a client that could read it could hand out seats.
+    std::string joinCode(Ctx&);
+
+    // ── Finding one on the LAN ──
+    // Start (or restart) the browser. It runs independently of the session, so
+    // a main menu may look for a game before it has joined anything.
+    void        refreshLan(Ctx&);
+    int         lanSessionCount(Ctx&);
+    std::string lanSessionName(Ctx&, int index);
+    int         lanSessionPlayers(Ctx&, int index);
+
+    // ── Roles ──
+    // True on the host, on a dedicated server, and OFFLINE (see above). This is
+    // the row a graph asks before it simulates anything; `isClient` is the
+    // narrow question and is false offline.
+    bool        isAuthority(Ctx&);
+    bool        isClient(Ctx&);
+    int         localPlayer(Ctx&);
+
+    // ── Roster ──
+    int         playerCount(Ctx&);
+    int         playerAt(Ctx&, int index);          // PlayerId of the index'th, 0 = none
+    std::string playerName(Ctx&, int player);
+    // Round trip in milliseconds, 0 when there is no sample (ourselves, a
+    // session on an injected transport, a player nobody has timed yet).
+    float       ping(Ctx&, int player);
+    // Host only: remove a player. One path with the anti-cheat's kick, so a
+    // session that logs one logs the other (reason code 0 = "asked to leave").
+    void        kick(Ctx&, int player);
+
+    // ── Entities ──
+    // Who owns this entity, as a PlayerId. 0 = the host, or nobody.
+    int         ownerOf(Ctx&, int entity);
+    // Does THIS machine drive it? True for the host's own entities offline and
+    // for whatever kMsgControl named on a client.
+    bool        isLocallyControlled(Ctx&, int entity);
+    // The entity this side drives, or 0.
+    int         localCharacter(Ctx&);
+}
+
 // ── JSON ─────────────────────────────────────────────────────────────────────
 // Reading and writing JSON text, addressed by a dotted PATH: "user.name",
 // "items[2].id", "" for the document itself. Text in, text out, because that is

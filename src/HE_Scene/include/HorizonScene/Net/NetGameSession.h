@@ -40,13 +40,14 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
 class HorizonWorld;
 namespace HE { struct ProjectAntiCheatSettings; }
-namespace HE::Net { class SecureTransport; }
+namespace HE::Net { class SecureTransport; class UdpTransport; }
 
 // No HE_API — HorizonScene exports every symbol (see GameReplication.h).
 class NetGameSession
@@ -186,6 +187,54 @@ public:
 
 	const HE::Net::Game::PlayerRoster& roster() const { return m_roster; }
 
+	// How long a round trip to this player takes, in milliseconds, or 0 when
+	// there is no sample: the host itself, a player who has not been measured
+	// yet, and every session running on an injected transport (a test, the
+	// in-process play-in-editor pair) — none of those have a socket to time.
+	// Read off the UdpTransport under the crypto layer, which is why it is 0
+	// rather than a guess when that is not what is down there.
+	float pingMs(HE::Net::Game::PlayerId player) const;
+
+	// ── Finding a session on the LAN (plan §5.3) ─────────────────────────────
+	// Browsing is the LOBBY's business, not the session's — which is why step 4
+	// put the Announcer here and left the Browser out. The net.lanSession* rows
+	// are that lobby, and a row has nowhere else to look, so it lives here after
+	// all, filtered to Game announcements so an editor collaboration session on
+	// the same segment is never offered as a game to join.
+	//
+	// Running it costs one bound UDP port and nothing else; it is independent of
+	// status(), so a main menu may browse before anything is hosted or joined.
+	bool         refreshLan();
+	void         stopLanBrowse();
+	bool         browsingLan() const { return m_browser.running(); }
+	const std::vector<HE::Net::LanBeacon::Browser::Session>& lanSessions() const
+	{ return m_browser.sessions(); }
+	// Join the index'th row of lanSessions(). False = no such row.
+	bool joinLan(std::size_t index, const JoinOptions& options);
+
+	// ── Possession (plan §5.4 point 4) ───────────────────────────────────────
+	// Host: make `character` this player's. One call and not three at a call
+	// site, because the ORDER is the point and getting it wrong is invisible:
+	// ownership and the input assignment have to be in place BEFORE the message
+	// that announces them, or the owner's first input arrives at a host that
+	// does not yet believe the entity is theirs — a Hard anti-cheat observation
+	// against an honest player (the warning on GameReplication::setAntiCheat).
+	//
+	// The entity must already be replicated (through the scene walk or a spawn).
+	// False = no such player, or no net id.
+	bool assignControl(HE::Net::Game::PlayerId player, Entity character);
+
+	// Client: what to do when the host says an entity is ours. The session does
+	// the network half itself (setLocallyControlled, so prediction takes over);
+	// this callback is the APPLICATION half — possess it with the local player
+	// controller, point the camera at it — which HE_Scene cannot do from here
+	// for SpawnReplicator::SpawnFn's reason. Unset is an ordinary state.
+	using ControlFn = std::function<void(Entity character, std::uint32_t netId)>;
+	void setControlFunction(ControlFn fn) { m_control = std::move(fn); }
+	// The entity this side drives, or entt::null. On the host that is whatever
+	// was last assigned to player 1; on a client, what kMsgControl named.
+	Entity localCharacter() const { return m_localCharacter; }
+
 	// ── Parts ────────────────────────────────────────────────────────────────
 	// Null outside a session. Callers hold them for one frame at most: leave()
 	// destroys them.
@@ -234,6 +283,9 @@ private:
 	void   handleWelcome(HE::Net::BitReader& r);
 	void   handleReject(HE::Net::BitReader& r);
 	void   handleJoinComplete();
+	void   handleControl(HE::Net::BitReader& r);
+	// Resolve a pending kMsgControl once the entity behind its net id exists.
+	void   tryTakeControl();
 
 	void   push(Event::Kind kind, HE::Net::Game::PlayerId player = HE::Net::Game::kNoPlayer,
 	            int reason = 0, std::string name = {});
@@ -257,6 +309,14 @@ private:
 	HE::Net::Game::PlayerRoster m_roster;
 	HE::Net::Game::PlayerId     m_localPlayer = HE::Net::Game::kNoPlayer;
 
+	ControlFn     m_control;
+	Entity        m_localCharacter = entt::null;
+	// Client: a kMsgControl whose net id has no entity YET. It cannot normally
+	// happen (the spawn is ReliableOrdered and goes first), but an authored
+	// entity whose bind found nothing leaves exactly this hole, and dropping the
+	// message would leave the player watching a character nobody drives.
+	std::uint32_t m_pendingControlNetId = 0;
+
 	std::string m_joinCode;
 	std::string m_sessionId;
 	std::string m_scenePath;
@@ -276,7 +336,14 @@ private:
 	// browsing, which belongs to whatever UI is looking for a session — so the
 	// Announcer lives here and the Browser does not.
 	HE::Net::LanBeacon::Announcer m_announcer;
+	// The lobby's side of the same beacon. Survives leave(): a menu that browses
+	// between two sessions should not have to start over because one ended.
+	HE::Net::LanBeacon::Browser   m_browser;
 	std::uint64_t                 m_instanceId = 0;   // dedupes our own beacon
+	// The UDP transport under the crypto layer, for the one thing only it can
+	// answer (pingMs). Non-owning and null with an injected transport; cleared
+	// by leave() together with the chain it points into.
+	HE::Net::UdpTransport*        m_udp = nullptr;
 
 	std::deque<Event> m_events;
 	Stats             m_stats;

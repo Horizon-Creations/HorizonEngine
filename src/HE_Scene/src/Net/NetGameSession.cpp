@@ -1,5 +1,6 @@
 #include "HorizonScene/Net/NetGameSession.h"
 
+#include "HorizonScene/Components/NetworkComponent.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Net/NetMessages.h"
 
@@ -73,6 +74,10 @@ bool NetGameSession::host(const HostOptions& options)
 	// announcement has to carry, and with port 0 it is the only way to learn
 	// which port the OS actually gave us.
 	const std::uint16_t boundPort = listener->boundPort();
+	// Kept for pingMs alone: once wrapped, the chain is an ITransport and the
+	// round-trip estimate lives one layer below that. Non-owning — the crypto
+	// layer owns it from the next line on.
+	UdpTransport* const udp = listener.get();
 
 	// Machine-generated, never user-chosen: an observer who captured the
 	// handshake could brute-force a weak passphrase offline.
@@ -97,6 +102,7 @@ bool NetGameSession::host(const HostOptions& options)
 
 	if (!hostOn(std::move(secure), options)) return false;
 	m_boundPort = boundPort;   // after hostOn: it resets the session's state
+	m_udp       = udp;
 
 	if (options.announceLan)
 	{
@@ -134,6 +140,7 @@ bool NetGameSession::joinDirect(const std::string& address, std::uint16_t port,
 		HE_LOG_ERROR(Replication, "%s", m_error.c_str());
 		return false;
 	}
+	UdpTransport* const udp = link.get();   // see host(): for pingMs alone
 
 	SecureTransport::Config sec;
 	sec.joinSecret        = options.joinCode;
@@ -150,7 +157,45 @@ bool NetGameSession::joinDirect(const std::string& address, std::uint16_t port,
 		return false;
 	}
 
-	return joinOn(std::move(secure), options);
+	if (!joinOn(std::move(secure), options)) return false;
+	m_udp = udp;   // after joinOn: it resets the session's state
+	return true;
+}
+
+// ── Finding a session on the LAN (plan §5.3) ────────────────────────────────
+
+bool NetGameSession::refreshLan()
+{
+	// Game announcements only. An editor collaboration session broadcasts on
+	// the same port and the same wire format, and offering one as a game to
+	// join would hand the player a refusal they cannot act on.
+	m_browser.setKind(LanBeacon::Announcement::Kind::Game);
+	m_browser.setSelfInstance(m_instanceId);
+	if (m_browser.running()) { m_browser.stop(); }
+	return m_browser.start();
+}
+
+void NetGameSession::stopLanBrowse() { m_browser.stop(); }
+
+bool NetGameSession::joinLan(std::size_t index, const JoinOptions& options)
+{
+	const auto& found = m_browser.sessions();
+	if (index >= found.size()) return false;
+	const auto& s = found[index];
+	// The address comes from the PACKET's source, never its payload
+	// (LanBeacon::Browser::Session), which is the same rule the host follows for
+	// a joiner's identity.
+	return joinDirect(s.address, s.port, options);
+}
+
+float NetGameSession::pingMs(PlayerId player) const
+{
+	if (!m_udp) return 0.0f;                         // injected transport: no socket to time
+	const PlayerInfo* info = m_roster.find(player);
+	if (!info || info->local) return 0.0f;           // ourselves: zero, and honestly so
+	if (info->conn == kInvalidConnection) return 0.0f;
+	const float srtt = m_udp->peerStats(info->conn).srttMs;
+	return srtt > 0.0f ? srtt : 0.0f;                // <0 = no sample yet
 }
 
 bool NetGameSession::startCommon(std::unique_ptr<ITransport> transport, NetRole role,
@@ -167,6 +212,12 @@ bool NetGameSession::startCommon(std::unique_ptr<ITransport> transport, NetRole 
 
 	m_spawns = std::make_unique<SpawnReplicator>(m_net.get(), role, m_replication.get());
 	m_spawns->setWorld(m_world);
+	// Only welcomed peers hear about binds and spawns. The roster IS the answer
+	// to "is this one in the session": a connection gets an entry in it at
+	// exactly the moment the host accepts its Hello.
+	m_spawns->setJoinedFilter([this](ConnectionId conn) {
+		return m_roster.findByConnection(conn) != nullptr;
+	});
 
 	// The host is always present, even before anything else is: a session with
 	// nobody in it is a listening socket, not a session.
@@ -293,10 +344,13 @@ void NetGameSession::leave()
 	m_acService.reset();
 	m_net.reset();
 	m_transport.reset();
+	m_udp = nullptr;   // it lived inside the chain that just went away
 
 	m_roster.clear();
 	m_pending.clear();
 	m_localPlayer = kNoPlayer;
+	m_localCharacter      = entt::null;
+	m_pendingControlNetId = 0;
 	m_role        = NetRole::None;
 	m_status      = Status::Idle;
 	m_sessionId.clear();
@@ -343,6 +397,7 @@ void NetGameSession::installHandlers()
 		m_net->on(kMsgWelcome,      [this](ConnectionId, BitReader& r) { handleWelcome(r); });
 		m_net->on(kMsgReject,       [this](ConnectionId, BitReader& r) { handleReject(r); });
 		m_net->on(kMsgJoinComplete, [this](ConnectionId, BitReader&)   { handleJoinComplete(); });
+		m_net->on(kMsgControl,      [this](ConnectionId, BitReader& r) { handleControl(r); });
 	}
 }
 
@@ -416,6 +471,77 @@ void NetGameSession::completeJoin(ConnectionId conn, PlayerId player)
 
 	HE_LOG_INFO(Replication, "Player %u ('%s') joined on connection %u (%zu in session)",
 	            player, info ? info->name.c_str() : "?", conn, m_roster.size());
+}
+
+bool NetGameSession::assignControl(PlayerId player, Entity character)
+{
+	if (!isAuthority() || !m_replication || !m_world) return false;
+	if (character == entt::null || !m_world->registry().valid(character)) return false;
+
+	PlayerInfo* info = m_roster.find(player);
+	if (!info) return false;
+
+	const auto* nc = m_world->registry().try_get<NetworkComponent>(character);
+	if (!nc || nc->netId == 0)
+	{
+		HE_LOG_WARN(Replication,
+		            "assignControl: entity is not replicated, so player %u cannot be given it. "
+		            "Turn Replicates on, or spawn it through the session.",
+		            player);
+		return false;
+	}
+	const std::uint32_t netId = nc->netId;
+
+	// The order the whole function exists for (GameReplication::setAntiCheat):
+	// own it, accept its input, THEN say so. A kMsgControl that overtook the
+	// assignment would make the owner's first input look like input for an
+	// entity they do not drive, which is a Hard observation.
+	m_replication->registerEntity(character, player);
+	info->characterNetId = netId;
+
+	if (info->local)
+	{
+		// The host's own player. Nothing travels; it simply is ours.
+		m_localCharacter = character;
+		if (m_control) m_control(character, netId);
+	}
+	else
+	{
+		m_replication->assignControl(info->conn, netId);
+		BitWriter w;
+		w.writeUInt32(netId);
+		m_net->send(info->conn, kMsgControl, w, SendMode::ReliableOrdered);
+	}
+
+	HE_LOG_INFO(Replication, "Player %u drives net id %u", player, netId);
+	return true;
+}
+
+void NetGameSession::handleControl(BitReader& r)
+{
+	std::uint32_t netId = 0;
+	if (!r.readUInt32(netId) || netId == 0) return;
+	m_pendingControlNetId = netId;
+	tryTakeControl();
+}
+
+void NetGameSession::tryTakeControl()
+{
+	if (m_pendingControlNetId == 0 || !m_replication) return;
+
+	const Entity e = m_replication->entityOf(m_pendingControlNetId);
+	if (e == entt::null) return;   // the spawn has not landed yet; update() retries
+
+	const std::uint32_t netId = m_pendingControlNetId;
+	m_pendingControlNetId = 0;
+	m_localCharacter = e;
+
+	// The network half first: from here the entity is driven by local input and
+	// corrected against the host, rather than interpolated towards it.
+	m_replication->setLocallyControlled(e, netId);
+	if (m_control) m_control(e, netId);
+
+	HE_LOG_INFO(Replication, "We drive net id %u", netId);
 }
 
 void NetGameSession::reject(ConnectionId conn, RejectReason reason)
@@ -590,6 +716,14 @@ void NetGameSession::handleJoinComplete()
 
 void NetGameSession::update(float dt)
 {
+	// BEFORE the guard below, not after: browsing is what a main menu does while
+	// there is no session at all, and behind the guard it would only ever run
+	// once somebody had already joined one.
+	if (m_browser.running())
+		m_browser.update(static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count()));
+
 	if (!m_net || !m_transport) return;
 
 	m_transport->update();
@@ -610,6 +744,11 @@ void NetGameSession::update(float dt)
 	}
 
 	m_net->pump();          // handlers: hello, welcome, bind, spawn, snapshot, input
+
+	// A kMsgControl that arrived before the entity it names existed (an unbound
+	// authored entity, plan §5.5). Retried every frame until it resolves; free
+	// when there is nothing pending, which is every frame but one per session.
+	if (m_pendingControlNetId != 0) tryTakeControl();
 
 	m_replication->update(dt);
 

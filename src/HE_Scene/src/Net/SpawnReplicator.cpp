@@ -58,6 +58,15 @@ void SpawnReplicator::clear()
 
 // ── Host ─────────────────────────────────────────────────────────────────────
 
+std::vector<ConnectionId> SpawnReplicator::joinedConnections() const
+{
+	std::vector<ConnectionId> out;
+	if (!m_net) return out;
+	for (const ConnectionId conn : m_net->connections())
+		if (!m_joined || m_joined(conn)) out.push_back(conn);
+	return out;
+}
+
 int SpawnReplicator::bindSceneEntities()
 {
 	if (!isAuthority() || !m_world || !m_rep) return 0;
@@ -98,8 +107,11 @@ int SpawnReplicator::bindSceneEntities()
 		m_binds[netId] = uuid;
 		++registered;
 
-		// Somebody may already be in the session when a scene streams in.
-		for (const ConnectionId conn : m_net->connections())
+		// Somebody may already be in the session when a scene streams in — but
+		// only somebody who IS in it: a peer still in the handshake gets the
+		// whole world from completeJoin(), and telling it early is what made a
+		// client with localPlayer still 0 adopt a host-owned spawn as its own.
+		for (const ConnectionId conn : joinedConnections())
 			sendBind(conn, netId, uuid);
 	}
 
@@ -140,7 +152,7 @@ std::uint32_t SpawnReplicator::notifySpawned(Entity entity, const std::string& c
 	rec.rotation  = rotationEuler;
 	m_spawns[netId] = rec;
 
-	for (const ConnectionId conn : m_net->connections())
+	for (const ConnectionId conn : joinedConnections())
 		sendSpawn(conn, netId, rec);
 
 	HE_LOG_DEBUG(Replication, "Spawned '%s' as net id %u (owner %u)",

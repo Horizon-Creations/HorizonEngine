@@ -952,6 +952,75 @@ void Runtime::fireOnCheatDetected(InstanceId id, int reportId)
     dispatchToListeners(id, ev, "OnCheatDetected", arg);
 }
 
+// ── The session's lifecycle (docs/gameplay-replication-plan.md §7.4) ─────────
+// Six of the same shape as fireOnCheatDetected above: the compiled hook where
+// there is one, the interpreted graph otherwise, and the listener dispatch
+// either way — a graph may bind another instance's event, and that path does
+// not care which backend the other instance runs on.
+
+void Runtime::fireOnPlayerJoined(InstanceId id, int player)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    const Value arg = Value::ofInt(player);
+    if (i->compiled) i->compiled->onPlayerJoined(player);
+    else runEventOnLevel(*i, id, "OnPlayerJoined", 0, arg);
+    static const EventId ev = eventId("OnPlayerJoined");
+    dispatchToListeners(id, ev, "OnPlayerJoined", arg);
+}
+
+void Runtime::fireOnPlayerLeft(InstanceId id, int player)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    const Value arg = Value::ofInt(player);
+    if (i->compiled) i->compiled->onPlayerLeft(player);
+    else runEventOnLevel(*i, id, "OnPlayerLeft", 0, arg);
+    static const EventId ev = eventId("OnPlayerLeft");
+    dispatchToListeners(id, ev, "OnPlayerLeft", arg);
+}
+
+void Runtime::fireOnConnected(InstanceId id)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    if (i->compiled) i->compiled->onConnected();
+    else runEventOnLevel(*i, id, "OnConnected", 0, Value{});
+    static const EventId ev = eventId("OnConnected");
+    dispatchToListeners(id, ev, "OnConnected", Value{});
+}
+
+void Runtime::fireOnDisconnected(InstanceId id, int reason)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    const Value arg = Value::ofInt(reason);
+    if (i->compiled) i->compiled->onDisconnected(reason);
+    else runEventOnLevel(*i, id, "OnDisconnected", 0, arg);
+    static const EventId ev = eventId("OnDisconnected");
+    dispatchToListeners(id, ev, "OnDisconnected", arg);
+}
+
+void Runtime::fireOnSessionStarted(InstanceId id)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    if (i->compiled) i->compiled->onSessionStarted();
+    else runEventOnLevel(*i, id, "OnSessionStarted", 0, Value{});
+    static const EventId ev = eventId("OnSessionStarted");
+    dispatchToListeners(id, ev, "OnSessionStarted", Value{});
+}
+
+void Runtime::fireOnSessionEnded(InstanceId id)
+{
+    Inst* i = find(id);
+    if (!i) return;
+    if (i->compiled) i->compiled->onSessionEnded();
+    else runEventOnLevel(*i, id, "OnSessionEnded", 0, Value{});
+    static const EventId ev = eventId("OnSessionEnded");
+    dispatchToListeners(id, ev, "OnSessionEnded", Value{});
+}
+
 void Runtime::fireEvent(InstanceId id, const std::string& event, int elem, const Value& arg)
 {
     Inst* i = find(id);

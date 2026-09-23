@@ -1329,6 +1329,31 @@ bool PyScriptBackend::callOnCheatDetected(InstanceId id, int reportId)
 	Py_DECREF(r); return true;
 }
 
+bool PyScriptBackend::callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg)
+{
+	// snake_case, like every other Python hook; the name is the whole
+	// difference between the six (ScriptTypes.h).
+	const char* fn = nullptr;
+	bool carriesArg = true;
+	switch (ev)
+	{
+		case NetScriptEvent::PlayerJoined:   fn = "on_player_joined";   break;
+		case NetScriptEvent::PlayerLeft:     fn = "on_player_left";     break;
+		case NetScriptEvent::Connected:      fn = "on_connected";       carriesArg = false; break;
+		case NetScriptEvent::Disconnected:   fn = "on_disconnected";    break;
+		case NetScriptEvent::SessionStarted: fn = "on_session_started"; carriesArg = false; break;
+		case NetScriptEvent::SessionEnded:   fn = "on_session_ended";   carriesArg = false; break;
+	}
+	if (!fn) return true;
+
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, fn)) return true;
+	PyObject* r = carriesArg ? PyObject_CallMethod(obj, fn, "i", arg)
+	                         : PyObject_CallMethod(obj, fn, nullptr);
+	if (!r) { m_lastError = takePyError(); return false; }
+	Py_DECREF(r); return true;
+}
+
 bool PyScriptBackend::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
 	const char* fn = ev == UIScriptEvent::Click      ? "on_click" :
