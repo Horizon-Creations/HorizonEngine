@@ -9,7 +9,9 @@ Schritt 4. Hintergrund und Ursachenanalyse: `docs/headless-test-runs-audit-2026-
 **Kurz:** `HE_HIDDEN_WINDOW=1` vor jeden solchen Lauf. Dann erscheint kein
 Fenster, kein Splash, kein Dock-Icon, und der Fokus bleibt, wo er war. Das
 Programm läuft sonst ganz normal: Fenster (versteckt), Renderer, Present, Loop,
-OnInit, UI.
+OnInit, UI. (Belegt ist das bisher über SDLs eigenen Fensterzustand im Log;
+die Kontrolle am entsperrten Bildschirm steht noch aus, siehe Audit
+„Nicht verifiziert" und die Negativkontrolle unten.)
 
 ## Die Schalter
 
