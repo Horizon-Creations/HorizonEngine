@@ -18,6 +18,7 @@
 #include "HcExecTrace.h"         // run-time node hits + "go to node" reveals
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/Net/ValueWire.h>   // which types may replicate at all
 #include <HorizonScene/HcCodegen.h>   // in-editor compile check (Compile button)
 #include <HorizonScene/EntityHost.h>   // default component lists per base class
 #include <HorizonScene/SceneSerializer.h>
@@ -720,6 +721,79 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 		int vaccess = v->access;
 		if (ImGui::Combo("Access", &vaccess, "Public\0Private\0")) { v->access = vaccess; edited = true; }
 		EditorWidgets::helpForLabel("Access");
+
+		// ── Multiplayer (docs/gameplay-replication-plan.md §6.1, §8.2) ───────
+		// THIS CHECKBOX IS THE WHOLE DECLARATION. Nothing else has to be
+		// written: the session reads the variable out of the interpreter and
+		// sends it (Runtime::replicatedVariablesOf). A Lua or Python script has
+		// to say horizon.net.declareVar because its variables are invisible to
+		// the engine; a graph does not.
+		//
+		// A Ref can never travel — an object handle names nothing on the other
+		// machine — so the box is disabled rather than merely refused later,
+		// with the reason where the question is asked.
+		const bool canReplicate = HE::Net::Game::isReplicableType(v->type);
+		ImGui::BeginDisabled(!canReplicate);
+		bool rep = v->replicated && canReplicate;
+		if (EditorWidgets::checkbox("Replicated", &rep))
+		{
+			v->replicated = rep;
+			if (!rep) v->repNotify = false;   // Notify alone waits for nothing
+			edited = true;
+		}
+		ImGui::EndDisabled();
+		if (!canReplicate && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("%s", HE::Net::Game::replicationRefusalReason(v->type));
+		EditorWidgets::helpForLabel("Replicated");
+
+		if (v->replicated)
+		{
+			ImGui::SameLine();
+			bool notify = v->repNotify;
+			if (EditorWidgets::checkbox("Notify", &notify))
+			{
+				v->repNotify = notify;
+				edited = true;
+				// Ticking it WRITES THE HANDLER, the way the right-click "Add
+				// Function" does — so nobody has to guess the spelling of a
+				// name the dispatcher composes (OnRep_<Name>). Only when there
+				// is not one already: re-ticking the box must not leave two
+				// functions of the same name, which is dead code (calls
+				// resolve by name, first one wins).
+				const std::string fnName = "OnRep_" + v->name;
+				bool exists = false;
+				for (const auto& n : graph.nodes)
+					if (n.type == NT::FunctionEntry && n.s == fnName) { exists = true; break; }
+				if (notify && !exists && !v->name.empty())
+				{
+					const int fnId = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 40.0f));
+					HC::Node* entry = graph.findNode(fnId);
+					entry->s        = fnName;
+					entry->subgraph = fnId;
+					entry->access   = 1;   // private: nobody outside the class calls it
+					// ONE parameter, the variable's own type: the value this
+					// machine held before the one that just arrived (§6.4).
+					// The WHOLE shape, not just the PinType — an array of
+					// structs and a scalar struct are different pins, and a
+					// parameter declared as the wrong one would mistype the old
+					// value for exactly the composite cases that do replicate.
+					HC::FuncParam old;
+					old.name        = "Old";
+					old.type        = v->type;
+					old.isArray     = v->isArray;
+					old.container   = v->container;
+					old.typeName    = v->typeName;
+					old.keyType     = v->keyType;
+					old.keyTypeName = v->keyTypeName;
+					entry->params   = { old };
+					g.currentGraph  = fnId;
+					const int retId = addNode(graph, NT::FunctionReturn, ImVec2(420.0f, 40.0f));
+					graph.findNode(retId)->s = fnName;
+					HC::syncFunctionSignatures(graph);
+				}
+			}
+			EditorWidgets::helpForLabel("Notify");
+		}
 	}
 
 	// Single value, or a container of the type. Changing it re-types the matching
@@ -957,6 +1031,43 @@ void drawNodeDetails(HC::Graph& graph, const std::vector<std::string>& events,
 		EditorWidgets::helpForLabel("Access");
 		ImGui::TextDisabled("public functions are callable from Lua/Python.");
 		overridableRow(*n);
+
+		// ── Where this function runs (plan §7.2) ──
+		// The whole of the multiplayer declaration for a function: a Call
+		// Function node on an entry with this set is not executed by the
+		// caller, it is handed to the network. Nothing at the CALL says so,
+		// which is the point — the decision belongs to the function.
+		{
+			int runOn = (int)n->runOn;
+			if (ImGui::Combo("Run On", &runOn,
+			                 "Local\0Server\0Owning Client\0All Clients\0"))
+			{
+				n->runOn = (std::uint8_t)(runOn < 0 || runOn > 3 ? 0 : runOn);
+				// Return values cannot survive the trip, so switching away from
+				// Local DROPS them rather than leaving a Return node wired to
+				// pins nothing will ever read. Said out loud below, and the
+				// Outputs list disappears with them.
+				if (n->runOn != (std::uint8_t)HC::RunOn::Local && !n->results.empty())
+				{
+					n->results.clear();
+					HC::syncFunctionSignatures(graph);
+				}
+				// Only a Server function asks "may a stranger call it".
+				if (n->runOn != (std::uint8_t)HC::RunOn::Server) n->anyClient = false;
+				edited = true;
+			}
+			EditorWidgets::helpForLabel("Run On");
+			if (n->runOn == (std::uint8_t)HC::RunOn::Server)
+			{
+				if (EditorWidgets::checkbox("Any Client", &n->anyClient)) edited = true;
+				ImGui::TextDisabled(n->anyClient
+					? "Any player may call this."
+					: "Only the player who owns this entity may call it.");
+			}
+			else if (n->runOn != (std::uint8_t)HC::RunOn::Local)
+				ImGui::TextDisabled("Only the host may start this call.");
+		}
+
 		HcEditorUtil::drawFunctionInterface(graph, *n, edited);
 		break;
 	}
@@ -1443,8 +1554,15 @@ void LevelScriptPanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2& 
 		// OnCheatDetected reaches the level script second, after the Game
 		// Instance (docs/anti-cheat-plan.md §5.4): a level that wants to react
 		// to a report — hide the flagged player's loot, say — handles it here.
+		// The session events reach the level script second as well, after the
+		// Game Instance (docs/gameplay-replication-plan.md §7.4): a level that
+		// wants to place a joining player, or to stop when the last one leaves,
+		// handles it here.
 		static const std::vector<std::string> kEvents = { "OnLevelLoaded", "OnLevelUnloaded",
-		                                                  "OnCheatDetected" };
+		                                                  "OnCheatDetected",
+		                                                  "OnPlayerJoined", "OnPlayerLeft",
+		                                                  "OnConnected", "OnDisconnected",
+		                                                  "OnSessionStarted", "OnSessionEnded" };
 		bool edited = false;
 		drawGraphBody(ctx.world->levelScript(), kEvents, /*allowCustomEvents=*/false, "Level Script",
 		              "Reacts to world events.", ctx.contentManager, ctx.gameInstanceGraph, edited);
@@ -1490,7 +1608,14 @@ void GameInstancePanel::render(AppContext& ctx, const ImVec2& pos, const ImVec2&
 			// The anti-cheat made a report, or the host told this client why it
 			// is being removed. Session-wide, so the Game Instance hears it first
 			// (docs/anti-cheat-plan.md §5.4); the Int is the report ticket.
-			"OnCheatDetected" };
+			"OnCheatDetected",
+			// The multiplayer session's lifecycle (docs/gameplay-replication-
+			// plan.md §7.4). Session-wide, so the Game Instance hears it first:
+			// a lobby, a scoreboard and a "waiting for players" screen all live
+			// here and not in any level.
+			"OnPlayerJoined", "OnPlayerLeft",
+			"OnConnected", "OnDisconnected",
+			"OnSessionStarted", "OnSessionEnded" };
 		bool edited = false;
 		drawGraphBody(*ctx.gameInstanceGraph, kEvents, /*allowCustomEvents=*/false, "Game Instance",
 		              "App-wide. Runs before anything loads.", ctx.contentManager, ctx.gameInstanceGraph, edited);

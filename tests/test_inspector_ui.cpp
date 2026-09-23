@@ -139,7 +139,8 @@ namespace
 		HorizonWorld& world;
 		Entity        entity;
 		ImGuiID       lightHeader   = 0;   // the "Light" CollapsingHeader's id, read inside the window
-		ImGuiID       networkHeader = 0;   // the "Network" one, likewise
+		ImGuiID       networkHeader = 0;   // the "Replication" one, likewise
+		ImGuiID       replicatesBox = 0;   // and the one switch inside it
 		ImGuiID       activeBox     = 0;   // the Active checkbox's id, likewise
 	};
 
@@ -156,7 +157,8 @@ namespace
 		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(H) - 20.0f));
 		ImGui::Begin("Details");
 		p.lightHeader   = ImGui::GetID("Light");
-		p.networkHeader = ImGui::GetID("Network");
+		p.networkHeader = ImGui::GetID("Replication");
+		p.replicatesBox = ImGui::GetID("Replicates");
 		p.activeBox     = ImGui::GetID("##entity_active");
 		InspectorPanel::renderFor(p.ctx, p.world, p.entity, p.ctx.undoSys);
 		ImGui::End();
@@ -358,7 +360,7 @@ TEST_CASE("inspector ui: a component header's right-click menu copies, resets an
 		he_ui::writeBmp(img, std::string(dir) + "/inspector-lamp-after.bmp");
 }
 
-TEST_CASE("inspector ui: the Network section is on the panel, and its menu copies and resets by the scene key")
+TEST_CASE("inspector ui: the Replication section is on the panel, and its menu copies and resets by the scene key")
 {
 	// The section is the anti-cheat plan's precondition (docs/anti-cheat-plan.md
 	// §6.2.1): a place in the Details panel where maxSpeed can be typed. One
@@ -388,13 +390,13 @@ TEST_CASE("inspector ui: the Network section is on the panel, and its menu copie
 	for (int i = 0; i < 4; ++i) frame(p, false, false, i == 3 ? &img : nullptr);
 	REQUIRE(img.valid());
 	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
-		he_ui::writeBmp(img, std::string(dir) + "/inspector-network.bmp");
+		he_ui::writeBmp(img, std::string(dir) + "/inspector-replication.bmp");
 
 	// The header is there, under the pointer somewhere down the middle.
 	const float midX = 10.0f + (float(W) - 20.0f) * 0.5f;
 	REQUIRE(p.networkHeader != 0);
 	const float headerY = yOf(p, p.networkHeader, midX);
-	REQUIRE_MESSAGE(headerY > 0.0f, "the Network header is not under the pointer anywhere");
+	REQUIRE_MESSAGE(headerY > 0.0f, "the Replication header is not under the pointer anywhere");
 
 	ImGui::SetClipboardText("");
 	clickAt(p, midX, headerY, /*rightButton=*/true);
@@ -448,6 +450,177 @@ TEST_CASE("inspector ui: the Network section is on the panel, and its menu copie
 	CHECK(reg.get<NameComponent>(playerAgain).name == "Player");
 	CHECK(reg.get<NetworkComponent>(playerAgain).maxSpeed         == doctest::Approx(7.0f));
 	CHECK(reg.get<NetworkComponent>(playerAgain).maxVerticalSpeed == doctest::Approx(3.0f));
+}
+
+TEST_CASE("inspector ui: Replicates is one click on any entity, and switching it off keeps the settings")
+{
+	// The switch the whole feature was asked for (docs/gameplay-replication-plan.md
+	// §8.1): "as easy as ticking Replicates in the Details panel". So the test
+	// is the gesture, on an entity that has NO NetworkComponent at all — which
+	// is every entity in every scene ever authored.
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity crate = world.createEntity("Crate");
+	reg.emplace<TransformComponent>(crate);
+	REQUIRE_FALSE(reg.all_of<NetworkComponent>(crate));
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	Panel p{ ctx, world, crate };
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	he_ui::Image img;
+	for (int i = 0; i < 4; ++i) frame(p, false, false, i == 3 ? &img : nullptr);
+	REQUIRE(img.valid());
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+		he_ui::writeBmp(img, std::string(dir) + "/inspector-replicates-off.bmp");
+
+	// The category is on the panel although the component is not — that is the
+	// difference from every other section, and it is the whole point.
+	const float midX = 10.0f + (float(W) - 20.0f) * 0.5f;
+	REQUIRE(p.networkHeader != 0);
+	REQUIRE_MESSAGE(yOf(p, p.networkHeader, midX) > 0.0f,
+	                "an entity without a NetworkComponent has no Replication header");
+
+	// One click on the box, down the left edge like the Active test.
+	const float leftX = 10.0f + ImGui::GetStyle().WindowPadding.x + 6.0f;
+	REQUIRE(p.replicatesBox != 0);
+	const float boxY = yOf(p, p.replicatesBox, leftX);
+	REQUIRE_MESSAGE(boxY > 0.0f, "the Replicates box is not under the pointer anywhere");
+
+	REQUIRE_FALSE(undo.canUndo());
+	clickAt(p, leftX, boxY);
+	// A component appeared, switched on, with the defaults — nothing else was
+	// asked of the user, which is the promise.
+	REQUIRE(reg.all_of<NetworkComponent>(crate));
+	{
+		const auto& nc = reg.get<NetworkComponent>(crate);
+		CHECK(nc.replicates);
+		CHECK(nc.relevanceRadius == doctest::Approx(NetworkComponent{}.relevanceRadius));
+		CHECK(nc.replicateTransform == NetworkComponent{}.replicateTransform);
+		CHECK(nc.netId == 0u);   // the session hands that out, not the editor
+	}
+	CHECK(undo.canUndo());
+
+	// Now the rows below it exist, so author one …
+	reg.get<NetworkComponent>(crate).relevanceRadius = 42.0f;
+	for (int i = 0; i < 3; ++i) frame(p, false);
+
+	// … and switch it back off. The component STAYS with the authored radius:
+	// that is what makes a second click a restore rather than a re-setup.
+	const float boxY2 = yOf(p, p.replicatesBox, leftX);
+	REQUIRE(boxY2 > 0.0f);
+	clickAt(p, leftX, boxY2);
+	REQUIRE(reg.all_of<NetworkComponent>(crate));
+	{
+		const auto& nc = reg.get<NetworkComponent>(crate);
+		CHECK_FALSE(nc.replicates);
+		CHECK(nc.relevanceRadius == doctest::Approx(42.0f));
+	}
+
+	// And on again: the radius is still 42, not the default.
+	const float boxY3 = yOf(p, p.replicatesBox, leftX);
+	REQUIRE(boxY3 > 0.0f);
+	clickAt(p, leftX, boxY3);
+	{
+		const auto& nc = reg.get<NetworkComponent>(crate);
+		CHECK(nc.replicates);
+		CHECK(nc.relevanceRadius == doctest::Approx(42.0f));
+	}
+
+	// Undo all the way back past the first click: the component that the very
+	// first tick brought into being is gone again. Undo restores the world by
+	// clear + reload, so the handle is re-minted and the entity is found by
+	// what it carries rather than by `crate`.
+	while (undo.canUndo() && !reg.view<NetworkComponent>().empty())
+		REQUIRE(undo.undo());
+	CHECK(reg.view<NetworkComponent>().empty());
+	const auto named = reg.view<NameComponent>();
+	bool foundCrate = false;
+	for (const Entity e : named) if (reg.get<NameComponent>(e).name == "Crate") foundCrate = true;
+	CHECK_MESSAGE(foundCrate, "undo took the entity with it, not just the component");
+}
+
+TEST_CASE("inspector ui: Reset to Default on the Replication header cannot switch an entity on")
+{
+	// The category is drawn for every entity, so its right-click menu is too —
+	// and Reset to Default is the one item there that WRITES. On an entity with
+	// no NetworkComponent it must do nothing: a reset that emplaced the default
+	// would put the entity on the wire (replicates defaults to true) with a
+	// menu item nobody reads as "start replicating".
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity crate = world.createEntity("Crate");
+	reg.emplace<TransformComponent>(crate);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	Panel p{ ctx, world, crate };
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) frame(p, false);
+
+	const float midX = 10.0f + (float(W) - 20.0f) * 0.5f;
+	const float headerY = yOf(p, p.networkHeader, midX);
+	REQUIRE(headerY > 0.0f);
+	clickAt(p, midX, headerY, /*rightButton=*/true);
+	REQUIRE(popupOpen());
+	const std::vector<Row> items = itemsBelow(p, midX + 40.0f, headerY + 2.0f, headerY + 140.0f);
+	REQUIRE_MESSAGE(items.size() >= 3, "found " << items.size() << " items in the header menu");
+	clickAt(p, midX + 40.0f, items[2].yMid);   // Reset to Default
+	CHECK_FALSE(popupOpen());
+	CHECK_FALSE(reg.all_of<NetworkComponent>(crate));
+
+	// Remove Component is not offered at all while there is nothing to remove —
+	// the three items above are Copy, Paste and Reset, and no separator + Remove
+	// below them.
+	CHECK(items.size() <= 3);
+}
+
+TEST_CASE("inspector ui: the component list names Replication only where there is one")
+{
+	// The silent side of the same section. The class tab's component tree asks
+	// "what does this entity HAVE" — and the category every entity is offered
+	// must not turn into a component every entity owns.
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity bare = world.createEntity("Bare");
+	reg.emplace<TransformComponent>(bare);
+	const Entity shared = world.createEntity("Shared");
+	reg.emplace<TransformComponent>(shared);
+	reg.emplace<NetworkComponent>(shared);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+
+	auto has = [&](Entity e, const char* label) {
+		std::vector<std::string> names;
+		InspectorPanel::listComponents(ctx, world, e, names);
+		for (const std::string& n : names) if (n == label) return true;
+		return false;
+	};
+	CHECK_FALSE(has(bare, "Replication"));
+	CHECK(has(shared, "Replication"));
+	// The old label is gone for good — a caller still asking for it would get
+	// a silent no-op rather than a compile error, so the test says it.
+	CHECK_FALSE(has(shared, "Network"));
+
+	// And the label the prefab sync speaks still points at the scene key that
+	// every .hescene on disk was written with.
+	const char* key = InspectorPanel::componentKeyForLabel("Replication");
+	REQUIRE(key != nullptr);
+	CHECK(std::string(key) == "network");
+	CHECK(InspectorPanel::componentKeyForLabel("Network") == nullptr);
 }
 
 // ── Add Component: grouped, searchable, keyboard-complete ────────────────────

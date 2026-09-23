@@ -36,6 +36,8 @@ namespace HE::AntiCheat { class AntiCheatHost; }
 //
 // Each instance is bound to its entity (self.entityId in Lua / self.entity_id
 // in Python) set to the owning entity's raw handle.
+class NetGameSession;
+
 class ScriptContext
 {
 public:
@@ -139,6 +141,28 @@ public:
     // a report, or the host sent this client a notice. Every instance hears
     // every report; horizon.anticheat.report* say whom it concerns.
     bool callOnCheatDetected(ScriptEngine::InstanceId id, int reportId);
+    // onPlayerJoined(self, player) / on_player_joined and their five siblings —
+    // the multiplayer session's lifecycle (docs/gameplay-replication-plan.md
+    // §7.4). Every instance hears every one, like a report above.
+    bool callOnNetEvent(ScriptEngine::InstanceId id, NetScriptEvent ev, int arg);
+    // onRep_<name>(self, old) / on_rep_<name> — a replicated variable on THIS
+    // instance's entity arrived from the authority (plan §6.4). Unlike the
+    // events above, this one is addressed: only the instance on the entity
+    // whose property changed hears it.
+    //
+    // The Lua half is done HERE rather than in ScriptEngine, because the value
+    // may be a struct, a map or an enum and this file owns the one marshaller
+    // that puts those on a Lua stack (and the reader that takes them back).
+    // Python crosses the plugin ABI and does its own, as it does for every
+    // other value.
+    // A remote call for the script instance on an entity (plan §7.2). False =
+    // this instance has no method of that name, which is the router's cue to
+    // ask the next frontend — NOT an error. See IScriptBackend::callRpc.
+    bool callRpc(ScriptEngine::InstanceId id, const std::string& fn,
+                 const std::vector<HorizonCode::Value>& args);
+
+    bool callOnRep(ScriptEngine::InstanceId id, const std::string& varName,
+                   const HorizonCode::Value& oldValue);
 
     // Hot-reload: recompile script and patch function fields in live instances.
     // Data fields (non-function keys in instance tables) are preserved. The
@@ -222,6 +246,17 @@ public:
         // anti-cheat OFF: the readers answer their neutral default, check says
         // "passes", every other row is a no-op.
         HE::AntiCheat::AntiCheatHost* antiCheat = nullptr;
+        // The multiplayer session (docs/gameplay-replication-plan.md §7.1).
+        // Without it EVERY horizon.net.* row was dead from Lua and Python: the
+        // rows existed in the registry and the dispatcher exposed them, but
+        // their Ctx arrived with a null session, so each one answered its
+        // offline default and a script could not host, join, replicate a
+        // variable or make a remote call.
+        //
+        // Null is the ordinary state and means exactly what it says — no
+        // session in this process — which is what a tool, a test and an
+        // editor outside play mode all are.
+        NetGameSession*               net = nullptr;
     };
 
     // Bind the host's services for this session. Call it where setQuitHandler is

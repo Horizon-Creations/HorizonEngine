@@ -440,8 +440,36 @@ struct Variable
     // variableDefaultValue: the definition's defaults first, then these on top;
     // a name the definition no longer has simply doesn't apply.
     std::unordered_map<std::string, Value> structDefaults;
+    // ── Multiplayer (docs/gameplay-replication-plan.md §6.1) ─────────────────
+    // The authority owns this variable and every client is sent its value. The
+    // checkbox in the variable list IS the declaration — nothing else has to be
+    // written, which is the whole point of the feature. Only meaningful on an
+    // INSTANCE variable (scope == 0): a function-local exists for the length of
+    // one call and has nobody to replicate to.
+    //
+    // `repNotify` calls OnRep_<Name> on the clients after a value arrives, with
+    // the previous value as its one argument (§6.4). Explicit rather than "a
+    // function of that name exists", so renaming a variable cannot silently
+    // stop calling a handler that is still sitting there.
+    //
+    // Ref is never replicable (§6.1): an object handle names nothing on the
+    // other machine. The editor disables the checkbox for those, and the
+    // replicator refuses them again on its own — a graph edited by hand must
+    // not get further than a log line.
+    bool        replicated = false;
+    bool        repNotify  = false;
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
+};
+
+// Where a function runs, for Node::runOn below. The numbers travel in kMsgRpc's
+// `target` byte, so they are frozen: a saved graph and a datagram agree on them.
+enum class RunOn : std::uint8_t
+{
+    Local        = 0,   // here, like every function before multiplayer existed
+    Server       = 1,   // on the authority (CallServer)
+    OwningClient = 2,   // on the machine whose player owns the entity
+    AllClients   = 3,   // on every joined client
 };
 
 struct Node
@@ -460,6 +488,23 @@ struct Node
     // the child's own graph, and from then on ONLY the override runs — for
     // events exactly as for functions.
     bool        overridable = false;
+    // ── Multiplayer: where this function actually runs (plan §7.2) ───────────
+    // FunctionEntry only. 0 Local (every call runs on the caller's machine, the
+    // behaviour every graph had before this existed), 1 Server, 2 OwningClient,
+    // 3 AllClients. A Call Function node naming an entry with runOn ≠ Local is
+    // NOT executed locally by the caller — it is handed to the RpcRouter, which
+    // puts it on the wire and runs it on the target side. The one exception is
+    // the side that IS the target: a host calling its own Server function runs
+    // it, because sending it to itself would be a round trip to nowhere.
+    //
+    // Fire-and-forget: a runOn ≠ Local function has no return values (there is
+    // nobody to hand them back to), which the editor validates rather than
+    // discovering at runtime.
+    std::uint8_t runOn = 0;
+    // runOn == Server only: may a client that does NOT own the entity call it?
+    // Default off, so "anyone may trigger this" is a decision somebody made and
+    // not something that happens because a door belongs to nobody (plan §7.6).
+    bool        anyClient = false;
     float       f[4] = {};                // literal payload
     // ConstTransform literal payload (rotation in euler degrees, identity scale).
     glm::vec3   tpos{ 0.0f }, trot{ 0.0f }, tscl{ 1.0f };
@@ -1013,6 +1058,23 @@ struct Context
     // before inheritance existed.
     std::function<bool(const std::string& fn, const std::vector<Value>& args,
                        std::vector<Value>* results)> callOwn;
+
+    // ── Multiplayer: hand a runOn ≠ Local call to the network (plan §7.2) ────
+    // Asked BEFORE a Call Function node runs anything, for every entry whose
+    // `runOn` is not Local. TRUE means "it has been put on the wire; do not run
+    // it here". FALSE means "run it locally" — which is the answer offline (no
+    // session at all), and on the side that IS the target: a host calling its
+    // own Server function executes it rather than mailing it to itself.
+    //
+    // Unbound is that same FALSE: a bare Runner, a test, a project with no
+    // networking. A graph with Run On set therefore behaves in single player
+    // exactly as if the modes were not there, which is the point — the door in
+    // the docs has to work before anybody hosts anything.
+    //
+    // No results, by design: a routed call is fire-and-forget (§7.2), and the
+    // editor refuses a Function Return on a runOn ≠ Local entry.
+    std::function<bool(const std::string& fn, const std::vector<Value>& args,
+                       std::uint8_t runOn, bool anyClient)> rpcRoute;
 
     // Latent flow (bound by the Runtime): schedule THIS instance's exec chain to
     // resume from `nodeId`'s exec-out after `seconds` (Delay node). Unbound →

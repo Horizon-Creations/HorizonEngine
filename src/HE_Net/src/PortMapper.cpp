@@ -427,7 +427,8 @@ PortMapResult PortMapper::addMapping(const IgdDevice& igd,
                                      const std::string& description,
                                      PortMapping& out,
                                      const std::string& internalHost,
-                                     std::uint32_t leaseSeconds) {
+                                     std::uint32_t leaseSeconds,
+                                     Protocol protocol) {
     std::string host = internalHost.empty() ? socketLocalAddress() : internalHost;
     if (host.empty()) {
         HE_LOG_ERROR(Net, "UPnP: no local address to point the mapping at");
@@ -437,15 +438,15 @@ PortMapResult PortMapper::addMapping(const IgdDevice& igd,
         HE_LOG_ERROR(Net, "UPnP: gateway exposes no WAN connection service");
         return PortMapResult::NoServiceFound;
     }
-    HE_LOG_DEBUG(Net, "UPnP: requesting TCP %u → %s:%u, lease %us",
-                 static_cast<unsigned>(externalPort), host.c_str(),
+    HE_LOG_DEBUG(Net, "UPnP: requesting %s %u → %s:%u, lease %us",
+                 protocolName(protocol), static_cast<unsigned>(externalPort), host.c_str(),
                  static_cast<unsigned>(internalPort), leaseSeconds);
 
     std::string body;
     const bool ok = soapCall(igd, "AddPortMapping", {
         { "NewRemoteHost",             "" },
         { "NewExternalPort",           std::to_string(externalPort) },
-        { "NewProtocol",               "TCP" },
+        { "NewProtocol",               protocolName(protocol) },
         { "NewInternalPort",           std::to_string(internalPort) },
         { "NewInternalClient",         host },
         { "NewEnabled",                "1" },
@@ -469,6 +470,7 @@ PortMapResult PortMapper::addMapping(const IgdDevice& igd,
     }
     setLastUpnpError({});
 
+    out.protocol     = protocol;
     out.externalPort = externalPort;
     out.internalPort = internalPort;
     out.internalHost = host;
@@ -479,25 +481,26 @@ PortMapResult PortMapper::addMapping(const IgdDevice& igd,
     std::string wan;
     if (externalIp(igd, wan) == PortMapResult::Ok) out.externalIp = wan;
 
-    HE_LOG_INFO(Net, "UPnP: mapped TCP %u → %s:%u (router WAN side: %s)",
-                static_cast<unsigned>(externalPort), host.c_str(),
+    HE_LOG_INFO(Net, "UPnP: mapped %s %u → %s:%u (router WAN side: %s)",
+                protocolName(protocol), static_cast<unsigned>(externalPort), host.c_str(),
                 static_cast<unsigned>(internalPort),
                 out.externalIp.empty() ? "not reported" : out.externalIp.c_str());
     return PortMapResult::Ok;
 }
 
-PortMapResult PortMapper::removeMapping(const IgdDevice& igd, std::uint16_t externalPort) {
+PortMapResult PortMapper::removeMapping(const IgdDevice& igd, std::uint16_t externalPort,
+                                        Protocol protocol) {
     std::string body;
     const bool ok = soapCall(igd, "DeletePortMapping", {
         { "NewRemoteHost",   "" },
         { "NewExternalPort", std::to_string(externalPort) },
-        { "NewProtocol",     "TCP" },
+        { "NewProtocol",     protocolName(protocol) },
     }, body);
-    if (ok) HE_LOG_INFO(Net, "UPnP: removed the mapping for TCP %u",
-                        static_cast<unsigned>(externalPort));
-    else    HE_LOG_WARN(Net, "UPnP: could not remove the mapping for TCP %u — it may stay "
+    if (ok) HE_LOG_INFO(Net, "UPnP: removed the mapping for %s %u",
+                        protocolName(protocol), static_cast<unsigned>(externalPort));
+    else    HE_LOG_WARN(Net, "UPnP: could not remove the mapping for %s %u — it may stay "
                              "open until the router is restarted",
-                        static_cast<unsigned>(externalPort));
+                        protocolName(protocol), static_cast<unsigned>(externalPort));
     return ok ? PortMapResult::Ok : PortMapResult::RequestFailed;
 }
 
@@ -520,7 +523,9 @@ namespace {
 
 constexpr std::uint16_t kNatPmpPort   = 5351;
 constexpr std::uint8_t  kOpAddress    = 0;
+constexpr std::uint8_t  kOpMapUdp     = 1;
 constexpr std::uint8_t  kOpMapTcp     = 2;
+std::uint8_t natPmpOpcode(Protocol p) { return p == Protocol::Udp ? kOpMapUdp : kOpMapTcp; }
 constexpr std::uint8_t  kResponseFlag = 128;
 
 void putU16(std::vector<std::uint8_t>& v, std::uint16_t x) {
@@ -684,13 +689,14 @@ PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
                                            std::uint16_t externalPort,
                                            std::uint16_t internalPort,
                                            std::uint32_t lifetimeSeconds,
-                                           PortMapping& out, int timeoutMs) {
+                                           PortMapping& out, int timeoutMs,
+                                           Protocol protocol) {
     if (gateway.empty()) return PortMapResult::NotSupported;
 
-    HE_LOG_DEBUG(Net, "NAT-PMP: asking %s for TCP %u → %u, lifetime %us",
-                 gateway.c_str(), static_cast<unsigned>(externalPort),
+    HE_LOG_DEBUG(Net, "NAT-PMP: asking %s for %s %u → %u, lifetime %us",
+                 gateway.c_str(), protocolName(protocol), static_cast<unsigned>(externalPort),
                  static_cast<unsigned>(internalPort), lifetimeSeconds);
-    const auto req = buildNatPmpRequest(kOpMapTcp, internalPort, externalPort,
+    const auto req = buildNatPmpRequest(natPmpOpcode(protocol), internalPort, externalPort,
                                         lifetimeSeconds);
     std::uint8_t reply[64];
     std::size_t  replyLen = 0;
@@ -728,6 +734,7 @@ PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
                     static_cast<unsigned>(externalPort));
     }
 
+    out.protocol     = protocol;
     out.internalPort = gotInternal;
     // The router may hand back a DIFFERENT external port than requested; using
     // the one we asked for would publish an endpoint nobody is listening on.
@@ -736,8 +743,9 @@ PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
 
     std::string wan;
     if (natPmpExternalIp(gateway, wan, timeoutMs) == PortMapResult::Ok) out.externalIp = wan;
-    HE_LOG_INFO(Net, "NAT-PMP: mapped TCP %u → %s:%u for %us (router WAN side: %s)",
-                static_cast<unsigned>(out.externalPort), out.internalHost.c_str(),
+    HE_LOG_INFO(Net, "NAT-PMP: mapped %s %u → %s:%u for %us (router WAN side: %s)",
+                protocolName(protocol), static_cast<unsigned>(out.externalPort),
+                out.internalHost.c_str(),
                 static_cast<unsigned>(out.internalPort), gotLifetime,
                 out.externalIp.empty() ? "not reported" : out.externalIp.c_str());
     return PortMapResult::Ok;
@@ -745,9 +753,9 @@ PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
 
 PortMapResult PortMapper::natPmpRemoveMapping(const std::string& gateway,
                                               std::uint16_t internalPort,
-                                              int timeoutMs) {
+                                              int timeoutMs, Protocol protocol) {
     // RFC 6886: lifetime 0 with external port 0 deletes the mapping.
-    const auto req = buildNatPmpRequest(kOpMapTcp, internalPort, 0, 0);
+    const auto req = buildNatPmpRequest(natPmpOpcode(protocol), internalPort, 0, 0);
     std::uint8_t reply[64];
     std::size_t  replyLen = 0;
     if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs)) {
@@ -776,7 +784,6 @@ namespace {
 constexpr std::uint8_t kPcpVersion   = 2;
 constexpr std::uint8_t kPcpOpMap     = 1;
 constexpr std::uint8_t kPcpResponse  = 0x80;   // top bit of the opcode byte
-constexpr std::uint8_t kPcpProtoTcp  = 6;      // IANA protocol number
 constexpr std::size_t  kPcpHeaderLen = 24;
 constexpr std::size_t  kPcpMapLen    = 36;
 
@@ -828,7 +835,8 @@ std::vector<std::uint8_t> PortMapper::buildPcpMapRequest(const std::string& clie
                                                          const std::uint8_t nonce[12],
                                                          std::uint16_t internalPort,
                                                          std::uint16_t suggestedExternalPort,
-                                                         std::uint32_t lifetimeSeconds)
+                                                         std::uint32_t lifetimeSeconds,
+                                                         Protocol protocol)
 {
     std::vector<std::uint8_t> v;
     v.reserve(kPcpHeaderLen + kPcpMapLen);
@@ -847,7 +855,7 @@ std::vector<std::uint8_t> PortMapper::buildPcpMapRequest(const std::string& clie
     // MAP payload: nonce, protocol, 3 reserved, internal port, suggested
     // external port, suggested external address.
     v.insert(v.end(), nonce, nonce + 12);
-    v.push_back(kPcpProtoTcp);
+    v.push_back(protocolIanaNumber(protocol));
     v.push_back(0);
     v.push_back(0);
     v.push_back(0);
@@ -883,7 +891,7 @@ PortMapResult PortMapper::pcpMap(const std::string& gateway,
                                  std::uint16_t internalPort,
                                  std::uint16_t suggestedExternalPort,
                                  std::uint32_t lifetimeSeconds,
-                                 PcpMapping& out, int timeoutMs)
+                                 PcpMapping& out, int timeoutMs, Protocol protocol)
 {
     if (gateway.empty() || clientAddress.empty()) return PortMapResult::NotSupported;
 
@@ -898,7 +906,7 @@ PortMapResult PortMapper::pcpMap(const std::string& gateway,
     }
 
     const auto req = buildPcpMapRequest(clientAddress, nonce, internalPort,
-                                        suggestedExternalPort, lifetimeSeconds);
+                                        suggestedExternalPort, lifetimeSeconds, protocol);
     std::uint8_t reply[256];
     std::size_t  replyLen = 0;
     if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs,
@@ -938,11 +946,11 @@ PortMapResult PortMapper::pcpUnmap(const std::string& gateway,
                                    const std::string& clientAddress,
                                    const std::uint8_t nonce[12],
                                    std::uint16_t internalPort,
-                                   int timeoutMs)
+                                   int timeoutMs, Protocol protocol)
 {
     // Lifetime 0 is the delete. The nonce is what tells the router which of its
     // mappings this refers to.
-    const auto req = buildPcpMapRequest(clientAddress, nonce, internalPort, 0, 0);
+    const auto req = buildPcpMapRequest(clientAddress, nonce, internalPort, 0, 0, protocol);
     std::uint8_t reply[256];
     std::size_t  replyLen = 0;
     if (!natPmpExchange(gateway, req, reply, sizeof(reply), replyLen, timeoutMs,
@@ -964,7 +972,7 @@ PortMapResult PortMapper::pcpUnmap(const std::string& gateway,
 
 PortMapResult PortMapper::addPinhole(const IgdDevice& igd, const std::string& internalClient,
                                      std::uint16_t port, std::uint32_t leaseSeconds,
-                                     std::string& outUniqueId) {
+                                     std::string& outUniqueId, Protocol protocol) {
     outUniqueId.clear();
     if (igd.v6fwControlUrl.empty()) return PortMapResult::NoServiceFound;
 
@@ -976,7 +984,7 @@ PortMapResult PortMapper::addPinhole(const IgdDevice& igd, const std::string& in
         { "RemotePort",     "0" },
         { "InternalClient", internalClient },
         { "InternalPort",   std::to_string(port) },
-        { "Protocol",       "6" },                            // TCP, by IANA number
+        { "Protocol",       std::to_string(protocolIanaNumber(protocol)) },   // IANA number
         { "LeaseTime",      std::to_string(leaseSeconds) },
     }, body);
     if (!ok) {
@@ -1004,8 +1012,10 @@ PortMapResult PortMapper::deletePinhole(const IgdDevice& igd, const std::string&
 }
 
 PortMapResult PortMapper::openPinhole(const std::string& globalV6, std::uint16_t port,
-                                      PinholeHandle& out, const IgdDevice& igd) {
+                                      PinholeHandle& out, const IgdDevice& igd,
+                                      Protocol protocol) {
     out = PinholeHandle{};
+    out.protocol = protocol;
     if (globalV6.empty()) return PortMapResult::NotSupported;
 
     bool refused = false;
@@ -1015,15 +1025,15 @@ PortMapResult PortMapper::openPinhole(const std::string& globalV6, std::uint16_t
     const std::string gateway6 = socketDefaultGatewayIPv6();
     if (!gateway6.empty()) {
         PcpMapping pcp;
-        const PortMapResult r = pcpMap(gateway6, globalV6, port, port, 7200, pcp);
+        const PortMapResult r = pcpMap(gateway6, globalV6, port, port, 7200, pcp, 1500, protocol);
         if (r == PortMapResult::Ok) {
             out.method        = PinholeHandle::Method::Pcp;
             out.gateway       = gateway6;
             out.clientAddress = globalV6;
             out.port          = port;
             std::memcpy(out.pcpNonce, pcp.nonce, sizeof(out.pcpNonce));
-            HE_LOG_INFO(Net, "Pinhole: opened TCP [%s]:%u via PCP",
-                        globalV6.c_str(), static_cast<unsigned>(port));
+            HE_LOG_INFO(Net, "Pinhole: opened %s [%s]:%u via PCP",
+                        protocolName(protocol), globalV6.c_str(), static_cast<unsigned>(port));
             return PortMapResult::Ok;
         }
         refused = refused || r == PortMapResult::Refused;
@@ -1045,14 +1055,15 @@ PortMapResult PortMapper::openPinhole(const std::string& globalV6, std::uint16_t
     std::string uniqueId;
     // 86400 s is the ceiling the spec allows for a pinhole lease; a session that
     // outlives a day re-registers long before then anyway.
-    const PortMapResult r = addPinhole(dev, globalV6, port, 86400, uniqueId);
+    const PortMapResult r = addPinhole(dev, globalV6, port, 86400, uniqueId, protocol);
     if (r == PortMapResult::Ok) {
         out.method   = PinholeHandle::Method::Upnp6fc;
         out.igd      = dev;
         out.uniqueId = uniqueId;
         out.port     = port;
-        HE_LOG_INFO(Net, "Pinhole: opened TCP [%s]:%u via UPnP IPv6 firewall control "
-                         "(id %s)", globalV6.c_str(), static_cast<unsigned>(port),
+        HE_LOG_INFO(Net, "Pinhole: opened %s [%s]:%u via UPnP IPv6 firewall control "
+                         "(id %s)", protocolName(protocol), globalV6.c_str(),
+                    static_cast<unsigned>(port),
                     uniqueId.c_str());
         return PortMapResult::Ok;
     }
@@ -1067,7 +1078,8 @@ PortMapResult PortMapper::openPinhole(const std::string& globalV6, std::uint16_t
 void PortMapper::closePinhole(const PinholeHandle& handle) {
     switch (handle.method) {
     case PinholeHandle::Method::Pcp:
-        pcpUnmap(handle.gateway, handle.clientAddress, handle.pcpNonce, handle.port);
+        pcpUnmap(handle.gateway, handle.clientAddress, handle.pcpNonce, handle.port, 1500,
+                 handle.protocol);
         break;
     case PinholeHandle::Method::Upnp6fc:
         deletePinhole(handle.igd, handle.uniqueId);
@@ -1078,10 +1090,13 @@ void PortMapper::closePinhole(const PinholeHandle& handle) {
 }
 
 PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& description,
-                                  MappingHandle& outHandle, PortMapping& outInfo) {
+                                  MappingHandle& outHandle, PortMapping& outInfo,
+                                  Protocol protocol) {
     outHandle = MappingHandle{};
-    HE_LOG_INFO(Net, "Port mapping: trying to open TCP %u automatically",
-                static_cast<unsigned>(port));
+    outHandle.protocol = protocol;
+    outInfo.protocol   = protocol;
+    HE_LOG_INFO(Net, "Port mapping: trying to open %s %u automatically",
+                protocolName(protocol), static_cast<unsigned>(port));
 
     // Sticky across every rung below: any one of them hearing an explicit "no"
     // changes the verdict, even if a later rung merely stays silent.
@@ -1102,14 +1117,14 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
         // code it uses for a device that lacks permission. Diagnosing that from
         // the refusal alone is impossible, so the fix belongs at the source.
         PortMapResult r = addMapping(igd, port, port, description, outInfo, {},
-                                     kMappingLeaseSeconds);
+                                     kMappingLeaseSeconds, protocol);
         // 725 is "OnlyPermanentLeasesSupported": the router understood and wants
         // 0. Honouring that is required by the spec — the cleanup pass is what
         // keeps those bounded instead of the lease.
         if (r == PortMapResult::RequestFailed && lastUpnpError() == "725")
         {
             HE_LOG_DEBUG(Net, "UPnP: router accepts permanent leases only — retrying with 0");
-            r = addMapping(igd, port, port, description, outInfo);
+            r = addMapping(igd, port, port, description, outInfo, {}, 0, protocol);
         }
         refused = refused || r == PortMapResult::Refused;
         if (r == PortMapResult::Ok)
@@ -1138,7 +1153,7 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
         // recommends a finite lifetime so a crashed client's mapping expires
         // instead of lingering forever.
         constexpr std::uint32_t kLifetimeSeconds = 7200;
-        if (natPmpAddMapping(gateway, port, port, kLifetimeSeconds, outInfo)
+        if (natPmpAddMapping(gateway, port, port, kLifetimeSeconds, outInfo, 1500, protocol)
             == PortMapResult::Ok)
         {
             outHandle.method  = MappingHandle::Method::NatPmp;
@@ -1155,7 +1170,7 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
         if (!lan.empty())
         {
             PcpMapping pcp;
-            const PortMapResult r = pcpMap(gateway, lan, port, port, 7200, pcp);
+            const PortMapResult r = pcpMap(gateway, lan, port, port, 7200, pcp, 1500, protocol);
             refused = refused || r == PortMapResult::Refused;
             if (r == PortMapResult::Ok)
             {
@@ -1193,16 +1208,16 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
     // send the user looking for a problem that does not exist.
     if (refused)
     {
-        HE_LOG_WARN(Net, "Port mapping: the router was reached but refuses to forward TCP %u "
+        HE_LOG_WARN(Net, "Port mapping: the router was reached but refuses to forward %s %u "
                          "for this device. It has automatic port forwarding switched off — "
                          "on a FRITZ!Box that is a per-device permission, separate from the "
-                         "global one.", static_cast<unsigned>(port));
+                         "global one.", protocolName(protocol), static_cast<unsigned>(port));
         return PortMapResult::Refused;
     }
 
-    HE_LOG_WARN(Net, "Port mapping: neither UPnP nor NAT-PMP opened TCP %u — both are "
+    HE_LOG_WARN(Net, "Port mapping: neither UPnP nor NAT-PMP opened %s %u — both are "
                      "commonly disabled, and behind carrier-grade NAT neither can work",
-                static_cast<unsigned>(port));
+                protocolName(protocol), static_cast<unsigned>(port));
     return PortMapResult::NoRouterFound;
 }
 
@@ -1210,10 +1225,15 @@ void PortMapper::unmapPort(const MappingHandle& handle)
 {
     switch (handle.method)
     {
-    case MappingHandle::Method::Upnp:   removeMapping(handle.igd, handle.port); break;
-    case MappingHandle::Method::NatPmp: natPmpRemoveMapping(handle.gateway, handle.port); break;
+    case MappingHandle::Method::Upnp:
+        removeMapping(handle.igd, handle.port, handle.protocol);
+        break;
+    case MappingHandle::Method::NatPmp:
+        natPmpRemoveMapping(handle.gateway, handle.port, 1500, handle.protocol);
+        break;
     case MappingHandle::Method::Pcp:
-        pcpUnmap(handle.gateway, handle.clientAddress, handle.pcpNonce, handle.port);
+        pcpUnmap(handle.gateway, handle.clientAddress, handle.pcpNonce, handle.port, 1500,
+                 handle.protocol);
         break;
     // Not an error — most sessions never got a mapping in the first place.
     case MappingHandle::Method::None:

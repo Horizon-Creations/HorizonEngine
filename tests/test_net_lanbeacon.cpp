@@ -263,3 +263,73 @@ TEST_CASE("LanBeacon: a peer on another protocol is kept, not hidden")
     REQUIRE(b.sessions().size() == 1);
     CHECK(b.sessions()[0].protocol == kCollabProtocolVersion - 1);
 }
+
+// ─── The kind field (gameplay-replication-plan §5.3) ─────────────────────────
+// Games and editors announce on the same port with the same datagram. Without
+// this field, an editor's join list would offer a running game it cannot open
+// and a game's lobby would offer somebody's editor.
+
+TEST_CASE("LanBeacon: the kind survives the round trip")
+{
+    Announcement a = sample();
+    a.kind = Announcement::Kind::Game;
+
+    const std::vector<std::uint8_t> bytes = encode(a);
+    Announcement out;
+    REQUIRE(decode(bytes.data(), bytes.size(), out));
+    CHECK(out.kind == Announcement::Kind::Game);
+    // Nothing above it moved: the field went on the END, as the growth rule
+    // in the header demands.
+    CHECK(out.hostName == a.hostName);
+    CHECK(out.participants == a.participants);
+    CHECK(out.syncsLargeAssets == a.syncsLargeAssets);
+}
+
+TEST_CASE("LanBeacon: an announcer built before the kind existed is collaboration")
+{
+    // A datagram that stops after syncsLargeAssets — byte for byte what an
+    // older build sends. It must still decode, and it must decode as the thing
+    // older builds actually were.
+    Announcement a = sample();
+    a.kind = Announcement::Kind::Game;
+    std::vector<std::uint8_t> bytes = encode(a);
+    REQUIRE(bytes.size() >= 1);
+    bytes.pop_back();   // drop the kind byte
+
+    Announcement out;
+    REQUIRE(decode(bytes.data(), bytes.size(), out));
+    CHECK(out.kind == Announcement::Kind::Collaboration);
+    CHECK(out.hostName == a.hostName);
+}
+
+TEST_CASE("LanBeacon: a browser lists only its own kind, and still counts the rest")
+{
+    Browser games;
+    games.setKind(Announcement::Kind::Game);
+
+    Announcement collab = sample();                       // kind defaults to Collaboration
+    Announcement game   = sample();
+    game.kind      = Announcement::Kind::Game;
+    game.instance  = 0x1111222233334444ull;
+    game.hostName  = "Bert";
+
+    feed(games, "192.168.1.10", collab, 1000);
+    feed(games, "192.168.1.11", game,   1000);
+
+    REQUIRE(games.sessions().size() == 1);
+    CHECK(games.sessions()[0].hostName == "Bert");
+    CHECK(games.sessions()[0].kind == Announcement::Kind::Game);
+    // Both were HEARD. That counter answers "does anything reach this machine",
+    // and a datagram we filtered out did reach it — treating the filter as
+    // silence would make a working socket look like a blocked one.
+    CHECK(games.heardCount() == 2u);
+
+    // The default browser is unchanged, which is what keeps the editor's join
+    // panel behaving exactly as it did.
+    Browser editors;
+    CHECK(editors.kind() == Announcement::Kind::Collaboration);
+    feed(editors, "192.168.1.10", collab, 1000);
+    feed(editors, "192.168.1.11", game,   1000);
+    REQUIRE(editors.sessions().size() == 1);
+    CHECK(editors.sessions()[0].hostName == "Anna");
+}

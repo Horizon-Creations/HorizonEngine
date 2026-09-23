@@ -14,6 +14,7 @@ class PhysicsWorld;
 class ContentManager;
 class AudioEngine;
 class EntityHost;
+class NetGameSession;
 namespace HE::AntiCheat { class AntiCheatHost; }
 struct DebugLine;      // HE_Core DebugDraw.h (renderer debug-line vertex pair)
 struct HeSaveServices;    // HorizonGameServices.h (global scope, C ABI)
@@ -21,6 +22,7 @@ struct HePhysicsServices; //   "
 struct HeInputServices;   //   "
 struct HeContentServices; //   "
 struct HeAntiCheatServices; // "
+struct HeNetServices;     //   "
 
 // ── HE::api ──────────────────────────────────────────────────────────────────
 // The single, engine-wide C++ gameplay API. Every scripting frontend reaches the
@@ -194,6 +196,16 @@ struct Ctx
     // block the game), every other exec row is a no-op. Bound per session by
     // the two applications and by ScriptContext::HostServices for Lua/Python.
     HE::AntiCheat::AntiCheatHost* antiCheat = nullptr;
+    // The gameplay session (docs/gameplay-replication-plan.md §5.7): the `net`
+    // rows read and write through it. Null is SINGLE PLAYER — which is not an
+    // error state but the ordinary one, and the rows say so: isAuthority is
+    // true (in a game with no network, you are the authority), the player list
+    // holds you alone, and every call that would reach a peer is a no-op.
+    // Bound per session by the two applications, like antiCheat above.
+    //
+    // Nothing reads it yet: the rows are step 5. It sits here now so the
+    // applications' aggregate init stops changing shape once they do.
+    NetGameSession* net = nullptr;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────
@@ -1645,6 +1657,168 @@ namespace anticheat {
     bool        isEnabled(Ctx&);
 }
 
+// ── Multiplayer (docs/gameplay-replication-plan.md §7.1) ─────────────────────
+// Opening a session, joining one, and asking who is in it. `Ctx::net` is the
+// NetGameSession; null — and, just as importantly, a session that exists but is
+// IDLE — is a single-player game, and every row answers accordingly.
+//
+// THE NEUTRAL ANSWERS ARE NOT ALL "NOTHING", and that is the point of the
+// group. `isAuthority` is TRUE offline: a single-player game is its own
+// authority, so a graph written as "Is Authority? → apply the damage" runs
+// unchanged with no session, with a host, and on a listen server. If it
+// answered false offline, every such graph would go silent the moment somebody
+// played alone, which is exactly the bug the convention in §7.5 exists to
+// prevent. `localPlayer` is 1 for the same reason: offline you are player one.
+//
+// PlayerId, NOT ConnectionId. Every `player` here is the roster id — minted
+// once per join and never handed out twice — so a score or a name keyed on it
+// cannot be inherited by whoever the transport gives the connection to next.
+namespace net {
+    // ── Lifecycle ──
+    // Open a session on `port` (0 = the project's Default port, which may itself
+    // be 0 and then means "let the OS choose"). Everything else — seats, tick
+    // rate, prediction bounds, LAN announce — comes from the project's
+    // Multiplayer page through NetGameSession::defaultHostOptions; displayName
+    // is what the others see.
+    bool        host(Ctx&, int port, const std::string& displayName);
+    // Join by address. `code` is the host's join secret — without it the crypto
+    // handshake never completes, so a wrong one is a failure to connect and not
+    // a refusal anybody can read.
+    bool        joinDirect(Ctx&, const std::string& address, int port,
+                           const std::string& code, const std::string& displayName);
+    // Join the index'th session the LAN browser has heard (see refreshLan).
+    bool        joinLan(Ctx&, int index, const std::string& code,
+                        const std::string& displayName);
+    void        leave(Ctx&);
+    // 0 Idle, 1 Hosting, 2 Connecting, 3 Joined, 4 Failed.
+    int         status(Ctx&);
+    std::string lastError(Ctx&);
+    std::string sessionId(Ctx&);
+    // The code a joiner needs. EMPTY on a client, always: it is the host's
+    // secret, and a client that could read it could hand out seats.
+    std::string joinCode(Ctx&);
+
+    // ── Finding one on the LAN ──
+    // Start (or restart) the browser. It runs independently of the session, so
+    // a main menu may look for a game before it has joined anything.
+    void        refreshLan(Ctx&);
+    int         lanSessionCount(Ctx&);
+    std::string lanSessionName(Ctx&, int index);
+    int         lanSessionPlayers(Ctx&, int index);
+
+    // ── Roles ──
+    // True on the host, on a dedicated server, and OFFLINE (see above). This is
+    // the row a graph asks before it simulates anything; `isClient` is the
+    // narrow question and is false offline.
+    bool        isAuthority(Ctx&);
+    bool        isClient(Ctx&);
+    int         localPlayer(Ctx&);
+
+    // ── Roster ──
+    int         playerCount(Ctx&);
+    int         playerAt(Ctx&, int index);          // PlayerId of the index'th, 0 = none
+    std::string playerName(Ctx&, int player);
+    // Round trip in milliseconds, 0 when there is no sample (ourselves, a
+    // session on an injected transport, a player nobody has timed yet).
+    float       ping(Ctx&, int player);
+    // Host only: remove a player. One path with the anti-cheat's kick, so a
+    // session that logs one logs the other (reason code 0 = "asked to leave").
+    void        kick(Ctx&, int player);
+
+    // ── Entities ──
+    // Who owns this entity, as a PlayerId. 0 = the host, or nobody.
+    int         ownerOf(Ctx&, int entity);
+    // Does THIS machine drive it? True for the host's own entities offline and
+    // for whatever kMsgControl named on a client.
+    bool        isLocallyControlled(Ctx&, int entity);
+    // The entity this side drives, or 0.
+    int         localCharacter(Ctx&);
+
+    // ── Replicated variables (plan §6.1) ─────────────────────────────────────
+    // For the three frontends whose variables the engine cannot see: a Lua
+    // local, a Python attribute and a C++ member all live inside their own
+    // runtime. A HorizonCode class needs NONE of this — it ticks the Replicated
+    // box in the variable list and the engine reads the variable itself — and
+    // these rows refuse a name such a class already declares, so one property
+    // never ends up with two storages.
+    //
+    // DECLARE FIRST, in onInit. The declaration is what puts the name in the
+    // property table both peers count indices with; setVar on an undeclared
+    // name answers false rather than inventing one mid-session, when the other
+    // side has no index for it. `notify` asks for onRep_<name>(self, old) /
+    // on_rep_<name> when a value arrives (never on the authority — it set it).
+    //
+    // TYPED, one row per type, like the savegame rows: a typed-pin graph has no
+    // "any" pin, and the type is also what a client checks an arriving value
+    // against before applying it.
+    //
+    // OFFLINE they are ordinary local storage. That is not a special case but
+    // the point: a graph written for multiplayer has to behave identically in a
+    // single-player session, or it is two graphs.
+    //
+    // WRITING ON A CLIENT WORKS, and the authority's next value replaces it
+    // (E4, §6.3) — that is what makes `ammo -= 1` predictable. What a client
+    // wants the host to AGREE to goes through CallServer, which is step 7.
+    bool        declareVarBool(Ctx&, int entity, const std::string& name, bool initial, bool notify);
+    bool        declareVarInt(Ctx&, int entity, const std::string& name, int initial, bool notify);
+    bool        declareVarFloat(Ctx&, int entity, const std::string& name, float initial, bool notify);
+    bool        declareVarString(Ctx&, int entity, const std::string& name,
+                                 const std::string& initial, bool notify);
+    bool        declareVarVec3(Ctx&, int entity, const std::string& name,
+                               const glm::vec3& initial, bool notify);
+
+    bool        setVarBool(Ctx&, int entity, const std::string& name, bool value);
+    bool        setVarInt(Ctx&, int entity, const std::string& name, int value);
+    bool        setVarFloat(Ctx&, int entity, const std::string& name, float value);
+    bool        setVarString(Ctx&, int entity, const std::string& name, const std::string& value);
+    bool        setVarVec3(Ctx&, int entity, const std::string& name, const glm::vec3& value);
+
+    // The declared default's type-zero when the name is unknown — false, 0,
+    // "" — which is the same answer every other reader row here gives.
+    bool        getVarBool(Ctx&, int entity, const std::string& name);
+    int         getVarInt(Ctx&, int entity, const std::string& name);
+    float       getVarFloat(Ctx&, int entity, const std::string& name);
+    std::string getVarString(Ctx&, int entity, const std::string& name);
+    glm::vec3   getVarVec3(Ctx&, int entity, const std::string& name);
+
+    // Is this name declared on this entity at all — by a script or by the
+    // entity's HorizonCode class? The one row that tells "not declared" apart
+    // from "declared and still at its default".
+    bool        hasVar(Ctx&, int entity, const std::string& name);
+
+    // ── Remote calls (docs/gameplay-replication-plan.md §7) ─────────────────
+    // "Run this function over there." No return values, ever: an RPC is
+    // fire-and-forget, because handing one back would need a request/response
+    // protocol and a graph that waited for one would stall the frame.
+    //
+    // `args` is empty from the registry rows — a pin has a type and an argument
+    // list does not have one shape (§7.2) — and carries the real arguments when
+    // Lua or Python calls in variadically. For HorizonCode the ordinary form is
+    // the Run On mode at the function's header; these rows are the explicit
+    // spelling of the same message.
+    //
+    // OFFLINE, AND ON THE SIDE THAT IS ALREADY THE TARGET, THEY RUN LOCALLY.
+    // That follows net.isAuthority answering true with no session: a graph must
+    // behave the same before anybody hosts, or every door in every project
+    // would be built twice. Locally means the HorizonCode class on the entity —
+    // a Lua or Python script calling its own method offline writes `self:Open()`
+    // and needs nothing from the engine.
+    bool        callServer(Ctx&, int entity, const std::string& fn,
+                           const std::vector<HorizonCode::Value>& args);
+    bool        callClient(Ctx&, int player, int entity, const std::string& fn,
+                           const std::vector<HorizonCode::Value>& args);
+    bool        callAllClients(Ctx&, int entity, const std::string& fn,
+                               const std::vector<HorizonCode::Value>& args);
+    // May a client that does not OWN this entity call `fn` on it? The
+    // HorizonCode twin of this is a checkbox at the function header; Lua,
+    // Python and a native module have no header, so they say it here. Host
+    // only, and only while a session runs.
+    bool        allowAnyClient(Ctx&, int entity, const std::string& fn);
+    // Who made the call being delivered right now, as a PlayerId. 0 outside a
+    // delivery, which is what a graph asking at any other moment gets.
+    int         rpcSender(Ctx&);
+}
+
 // ── JSON ─────────────────────────────────────────────────────────────────────
 // Reading and writing JSON text, addressed by a dotted PATH: "user.name",
 // "items[2].id", "" for the document itself. Text in, text out, because that is
@@ -1967,6 +2141,10 @@ void fillInputServices(::HeInputServices& out, GameServicesBinding* binding);
 void fillContentServices(::HeContentServices& out, GameServicesBinding* binding);
 // Anti-cheat resolves per call through `binding->antiCheat`, like the world.
 void fillAntiCheatServices(::HeAntiCheatServices& out, GameServicesBinding* binding);
+// The multiplayer table (docs/gameplay-replication-plan.md §7). Same shape and
+// same lifetime rule as the one above: the binding resolves the session per
+// call, so a session that ends leaves nothing dangling in a module's hands.
+void fillNetServices(::HeNetServices& out, GameServicesBinding* binding);
 
 // ── Scene transitions (process-global request queue; the app executes) ────────
 // load() requests a full deferred world switch at a safe frame boundary;

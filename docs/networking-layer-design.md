@@ -38,7 +38,7 @@ architecture shares Layers 0–2 and splits at Layer 3.
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 1  Session & transport                                   │
 │  ITransport (send/poll/disconnect) · NetSession · NetRole       │
-│  Backings: Loopback (now) · GameNetworkingSockets · WebSocket   │
+│  Backings: Loopback · TCP (collab, MCP) · UDP (gameplay)        │
 ├─────────────────────────────────────────────────────────────────┤
 │  Layer 0  Platform sockets (shared with the SC HTTPS stack)     │
 └─────────────────────────────────────────────────────────────────┘
@@ -75,8 +75,9 @@ simply a Layer-3b module on top of HorizonNet.
 
 ## Module layout (`src/HE_Net`, target `HorizonNet`)
 
-Explicit `HE_NET_API` export (like HorizonCore), SHARED lib, dependency-light so
-it builds/tests everywhere without GameNetworkingSockets.
+Explicit `HE_NET_API` export (like HorizonCore), SHARED lib, dependency-light:
+every transport sits on `Socket.cpp` and the STL, so it builds/tests everywhere
+without a third-party networking library.
 
 | File | Layer | Role |
 |---|---|---|
@@ -86,15 +87,20 @@ it builds/tests everywhere without GameNetworkingSockets.
 | `include/Net/Socket.{h,cpp}` | 0 | Winsock/BSD TCP wrapper, non-blocking, `TCP_NODELAY`, async connect |
 | `include/Net/LoopbackTransport.{h,cpp}` | 1 | in-process cross-wired pair — sockets-free testing + local play-in-editor |
 | `include/Net/TcpTransport.{h,cpp}` | 1 | real network transport; length-prefixed framing over the byte stream |
-| `include/Net/SecureTransport.{h,cpp}` | 1 | decorator: challenge-response auth + AES-256-GCM per-frame encryption |
+| `include/Net/UdpTransport.{h,cpp}` | 1 | gameplay transport: cookie handshake, Unreliable / Reliable / ReliableOrdered, ack bitfield + RTO, fragmentation, keepalive/timeout, stats |
+| `include/Net/LossyTransport.{h,cpp}` | 1 | decorator: deterministic loss / reorder / duplication / latency with a simulated clock, for tests |
+| `include/Net/SecureTransport.{h,cpp}` | 1 | decorator: challenge-response auth + AES-256-GCM per-frame encryption (strict counter, or anti-replay window over UDP) |
 | `include/Net/NetSession.{h,cpp}` | 1½/2 | message framing `[MessageId:16][payload]`, typed dispatch, connect/disconnect callbacks + peer list |
 
 ### Why TCP for collaboration
 
 Editor collab needs reliable, ordered, lossless delivery — precisely TCP's
-guarantees. A UDP reliability layer (GameNetworkingSockets) buys nothing here and
-costs a heavy dependency; it stays reserved for N4a gameplay replication, where
-unreliable low-latency channels genuinely matter.
+guarantees. A UDP reliability layer buys nothing here; gameplay replication,
+where unreliable low-latency channels genuinely matter, gets its own
+`UdpTransport` (own reliability layer, all three `SendMode`s, cookie handshake,
+fragmentation; see `docs/gameplay-replication-plan.md` §4). `SecureTransport`
+wraps either one; over UDP it runs with an anti-replay window
+(`Config::replayWindow`) instead of the strictly-increasing counter.
 
 TCP is a byte stream while `ITransport` is datagram-oriented, so frames are
 length-prefixed (`[uint32 BE length][payload]`) and partial reads/writes are

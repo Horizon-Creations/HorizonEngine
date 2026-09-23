@@ -468,3 +468,131 @@ TEST_CASE("ProjectAntiCheatSettings: a project keeps its rules across a real sav
 	// And it is in the text a reviewer would read, under the plan's key.
 	CHECK(readAll(HE::projectSettingsPath(tmp.root)).find("\"anticheat\"") != std::string::npos);
 }
+
+// ─── Multiplayer (docs/gameplay-replication-plan.md §8.4) ────────────────────
+
+TEST_CASE("ProjectMultiplayerSettings: default-constructed is what a session already did")
+{
+	HE::ProjectSettings s;
+	CHECK(s.isDefault());
+	// One above LanBeacon::kPort (47823), so the announcement and the session
+	// sit next to each other and one firewall rule names the pair.
+	CHECK(s.multiplayer.defaultPort == 47824);
+	CHECK(s.multiplayer.maxPlayers  == 8);
+	CHECK(s.multiplayer.timeoutSec  == doctest::Approx(5.0f));
+	// The numbers GameReplication::Config has carried since it existed — this
+	// page must not change what a session does merely by appearing.
+	CHECK(s.multiplayer.tickHz      == doctest::Approx(30.0f));
+	CHECK(s.multiplayer.worldExtent == doctest::Approx(4096.0f));
+	CHECK(s.multiplayer.interpolationDelaySec == doctest::Approx(0.1f));
+	CHECK(s.multiplayer.reconcileSnapDistance == doctest::Approx(2.0f));
+	CHECK(s.multiplayer.reconcileSmoothing    == doctest::Approx(12.0f));
+	CHECK(s.multiplayer.maxPendingInputs      == 64);
+	CHECK(s.multiplayer.discoverLan);
+	CHECK(s.multiplayer.rpcPerSecond == 60);
+
+	s.multiplayer.tickHz = 60.0f;
+	CHECK_FALSE(s.isDefault());
+}
+
+TEST_CASE("ProjectMultiplayerSettings: toJson writes the plan's shape and fromJson reads it back")
+{
+	HE::ProjectSettings a;
+	a.multiplayer.defaultPort           = 40000;
+	a.multiplayer.maxPlayers            = 16;
+	a.multiplayer.timeoutSec            = 9.5f;
+	a.multiplayer.tickHz                = 60.0f;
+	a.multiplayer.worldExtent           = 8192.0f;
+	a.multiplayer.interpolationDelaySec = 0.05f;
+	a.multiplayer.reconcileSnapDistance = 3.5f;
+	a.multiplayer.reconcileSmoothing    = 20.0f;
+	a.multiplayer.maxPendingInputs      = 128;
+	a.multiplayer.discoverLan           = false;
+	a.multiplayer.discoverDirectory     = false;
+	a.multiplayer.portMapping           = false;
+	a.multiplayer.rpcPerSecond          = 200;
+
+	json j;
+	a.toJson(j);
+	const json& m = j["multiplayer"];
+	CHECK(m["defaultPort"] == 40000);
+	CHECK(m["maxPlayers"]  == 16);
+	CHECK(m["timeoutSec"]  == doctest::Approx(9.5));
+	CHECK(m["tickHz"]      == doctest::Approx(60.0));
+	CHECK(m["worldExtent"] == doctest::Approx(8192.0));
+	CHECK(m["prediction"]["interpolationDelaySec"] == doctest::Approx(0.05));
+	CHECK(m["prediction"]["reconcileSnapDistance"] == doctest::Approx(3.5));
+	CHECK(m["prediction"]["reconcileSmoothing"]    == doctest::Approx(20.0));
+	CHECK(m["prediction"]["maxPendingInputs"]      == 128);
+	CHECK(m["discovery"]["lan"]         == false);
+	CHECK(m["discovery"]["directory"]   == false);
+	CHECK(m["discovery"]["portMapping"] == false);
+	CHECK(m["rpcPerSecond"] == 200);
+
+	HE::ProjectSettings b;
+	b.fromJson(j);
+	CHECK(a == b);
+}
+
+TEST_CASE("ProjectMultiplayerSettings: a file from before it existed is the default")
+{
+	// Exactly what every ProjectSettings.json on disk looks like today: no
+	// "multiplayer" key at all. It must read as the defaults and not as zeroes,
+	// or an existing project would host at 0 Hz.
+	const json j = json::parse(R"({ "version": 1, "physics": { "fixedHz": 30 } })");
+	HE::ProjectSettings s;
+	s.fromJson(j);
+	CHECK(s.physics.fixedHz == 30);
+	CHECK(s.multiplayer.defaultPort == 47824);
+	CHECK(s.multiplayer.tickHz      == doctest::Approx(30.0f));
+	CHECK(s.multiplayer.maxPendingInputs == 64);
+	CHECK(s.multiplayer.discoverLan);
+}
+
+TEST_CASE("ProjectMultiplayerSettings: clamp corrects a hand-edited file but keeps port 0")
+{
+	using MP = HE::ProjectMultiplayerSettings;
+	HE::ProjectSettings s;
+	s.multiplayer.defaultPort           = 999999;
+	s.multiplayer.maxPlayers            = 0;
+	s.multiplayer.timeoutSec            = -3.0f;
+	s.multiplayer.tickHz                = 0.0f;
+	s.multiplayer.worldExtent           = -1.0f;
+	s.multiplayer.interpolationDelaySec = 99.0f;
+	s.multiplayer.maxPendingInputs      = 0;
+	s.multiplayer.rpcPerSecond          = 0;
+	s.clamp();
+	CHECK(s.multiplayer.defaultPort == MP::kMaxPort);
+	CHECK(s.multiplayer.maxPlayers  == MP::kMinPlayers);
+	CHECK(s.multiplayer.timeoutSec  == doctest::Approx(MP::kMinTimeoutSec));
+	CHECK(s.multiplayer.tickHz      == doctest::Approx(MP::kMinTickHz));
+	CHECK(s.multiplayer.worldExtent == doctest::Approx(MP::kMinWorldExtent));
+	CHECK(s.multiplayer.interpolationDelaySec == doctest::Approx(MP::kMaxInterpolationSec));
+	CHECK(s.multiplayer.maxPendingInputs == MP::kMinPendingInputs);
+	CHECK(s.multiplayer.rpcPerSecond == MP::kMinRpcPerSecond);
+
+	// 0 is a REAL answer for the port ("let the system pick"), so it survives
+	// where every other zero above was corrected.
+	HE::ProjectSettings z;
+	z.multiplayer.defaultPort = 0;
+	z.clamp();
+	CHECK(z.multiplayer.defaultPort == 0);
+}
+
+TEST_CASE("ProjectMultiplayerSettings: a project keeps its session numbers across a real save and load")
+{
+	TempRoot tmp("multiplayer");
+	HE::ProjectSettings a;
+	a.multiplayer.defaultPort = 40001;
+	a.multiplayer.tickHz      = 45.0f;
+	a.multiplayer.discoverLan = false;
+	REQUIRE(HE::saveProjectSettings(tmp.root, a));
+
+	HE::ProjectSettings b;
+	REQUIRE(HE::loadProjectSettings(tmp.root, b));
+	CHECK(a == b);
+	CHECK(b.multiplayer.defaultPort == 40001);
+	CHECK(b.multiplayer.tickHz == doctest::Approx(45.0f));
+	CHECK_FALSE(b.multiplayer.discoverLan);
+	CHECK(readAll(HE::projectSettingsPath(tmp.root)).find("\"multiplayer\"") != std::string::npos);
+}

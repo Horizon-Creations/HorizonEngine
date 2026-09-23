@@ -84,6 +84,7 @@ namespace HE::Log
 		SourceControl, // git / LFS: probes, commands, provider calls
 		ContentSync,   // EngineContent SFTP sync: probes, transfers, manifest diffs
 		AntiCheat,     // server-side input validation: observations, score, reports
+		Replication,   // gameplay session: join/leave, roster, spawn/bind/despawn
 		Count
 	};
 

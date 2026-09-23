@@ -77,6 +77,17 @@ struct Announcement {
     // field is filled from and is checked against the session that is really
     // there rather than against a claim about it.
     bool          syncsLargeAssets = false;
+    // WHICH kind of session this is. Editor collaboration and a running game
+    // both announce on the same port with the same datagram, and neither wants
+    // to see the other: the editor's join list would offer a game it cannot
+    // open, and a game's lobby would offer somebody's editor.
+    //
+    // 0 is collaboration on purpose — it is what every announcer built before
+    // this field existed sends, and a decoder that reads a shorter datagram
+    // takes the default. That default is therefore the truth about those peers
+    // rather than a guess, which is the bar the growth rule above sets.
+    enum class Kind : std::uint8_t { Collaboration = 0, Game = 1 };
+    Kind          kind = Kind::Collaboration;
 };
 
 // Encode/decode are pure and separately testable, which is the whole reason they
@@ -156,6 +167,7 @@ public:
         // peer on another protocol cannot be joined by this build at all, so a
         // row that could not answer is never a row somebody acts on.
         bool          syncsLargeAssets = false;
+        Announcement::Kind kind = Announcement::Kind::Collaboration;
     };
 
     ~Browser();
@@ -168,6 +180,13 @@ public:
     // back to this port, and without this the host's own session would appear
     // as somebody else's.
     void setSelfInstance(std::uint64_t id) { m_self = id; }
+
+    // Which kind of session this browser is looking for. Collaboration by
+    // default, so the editor's join panel keeps behaving exactly as it did
+    // without knowing this exists; a game lobby sets Game. Changing it does not
+    // re-filter what is already listed — set it before start().
+    void setKind(Announcement::Kind kind) { m_kind = kind; }
+    Announcement::Kind kind() const { return m_kind; }
 
     // Drains the socket and drops anything not heard from for kExpiryMs.
     void update(std::uint64_t nowMs);
@@ -191,6 +210,7 @@ private:
     std::vector<Session> m_sessions;
     std::uint32_t        m_heard = 0;
     std::uint64_t        m_self  = 0;
+    Announcement::Kind   m_kind  = Announcement::Kind::Collaboration;
 };
 
 } // namespace HE::Net::LanBeacon

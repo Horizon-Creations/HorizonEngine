@@ -10,6 +10,17 @@
 // nothing above it.
 struct NetworkComponent
 {
+	// THE switch (plan §8.1). One tick in the inspector's "Replication" category
+	// is the whole opt-in: the entity is registered when a session starts, its
+	// transform rides the snapshot, and — once steps 6 and 7 land — its
+	// replicated variables sync and its Run-On functions travel.
+	//
+	// Turning it OFF deliberately KEEPS the component, so the radius and the
+	// speed limits below survive and a second click restores them. That is also
+	// why this defaults to TRUE: a component somebody added by hand, and every
+	// scene saved before this field existed, means "replicate this".
+	bool replicates = true;
+
 	// Identity across peers, assigned by the server. Zero means "not registered
 	// yet" — an entity with no id is simply not replicated, which is how purely
 	// local effects (muzzle flashes, debris) stay off the wire.

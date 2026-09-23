@@ -636,6 +636,60 @@ TEST_CASE("A PCP MAP request has the layout RFC 6887 specifies")
     for (int i = 44; i < 60; ++i) { CAPTURE(i); CHECK(req[i] == 0); }
 }
 
+TEST_CASE("A PCP MAP request names the protocol it was asked for")
+{
+    // A game host (UdpTransport) needs a UDP mapping; a router keeps TCP and
+    // UDP entries apart, so asking for the wrong one opens nothing useful.
+    // The default stays TCP so every collaboration caller is unchanged.
+    std::uint8_t nonce[12] = {};
+    const auto tcp = HE::Net::PortMapper::buildPcpMapRequest("192.168.1.50", nonce,
+                                                             7777, 7777, 7200);
+    const auto udp = HE::Net::PortMapper::buildPcpMapRequest("192.168.1.50", nonce,
+                                                             7777, 7777, 7200,
+                                                             HE::Net::Protocol::Udp);
+    const auto dflt = HE::Net::PortMapper::buildPcpMapRequest("192.168.1.50", nonce,
+                                                              7777, 7777, 7200,
+                                                              HE::Net::Protocol::Tcp);
+    REQUIRE(tcp.size() == 24 + 36);
+    REQUIRE(udp.size() == 24 + 36);
+    CHECK(tcp[36] == 6);    // IANA TCP
+    CHECK(udp[36] == 17);   // IANA UDP
+    CHECK(dflt == tcp);     // the default IS TCP, not merely "something"
+    // Only the protocol byte differs.
+    for (std::size_t i = 0; i < tcp.size(); ++i) {
+        if (i == 36) continue;
+        CAPTURE(i);
+        CHECK(tcp[i] == udp[i]);
+    }
+    CHECK(HE::Net::protocolIanaNumber(HE::Net::Protocol::Udp) == 17);
+    CHECK(HE::Net::protocolIanaNumber(HE::Net::Protocol::Tcp) == 6);
+    CHECK(std::string(HE::Net::protocolName(HE::Net::Protocol::Udp)) == "UDP");
+    CHECK(std::string(HE::Net::protocolName(HE::Net::Protocol::Tcp)) == "TCP");
+}
+
+TEST_CASE("A NAT-PMP request uses opcode 1 for UDP and 2 for TCP")
+{
+    // RFC 6886 §3.3: opcode 1 maps UDP, 2 maps TCP. The mapper picks the
+    // opcode from the Protocol it was handed; here the wire form is pinned.
+    const auto udp = HE::Net::PortMapper::buildNatPmpRequest(1, 7777, 7777, 7200);
+    const auto tcp = HE::Net::PortMapper::buildNatPmpRequest(2, 7777, 7777, 7200);
+    REQUIRE(udp.size() == 12);
+    REQUIRE(tcp.size() == 12);
+    CHECK(udp[1] == 1);
+    CHECK(tcp[1] == 2);
+    for (std::size_t i = 2; i < 12; ++i) { CAPTURE(i); CHECK(udp[i] == tcp[i]); }
+}
+
+TEST_CASE("A mapping handle remembers its protocol so it is taken down the same way")
+{
+    HE::Net::PortMapper::MappingHandle h;
+    CHECK(h.protocol == HE::Net::Protocol::Tcp);   // default: collaboration hosts
+    HE::Net::PortMapper::PinholeHandle ph;
+    CHECK(ph.protocol == HE::Net::Protocol::Tcp);
+    HE::Net::PortMapping m;
+    CHECK(m.protocol == HE::Net::Protocol::Tcp);
+}
+
 TEST_CASE("A PCP request for an IPv6 pinhole carries the address verbatim")
 {
     std::uint8_t nonce[12] = {};

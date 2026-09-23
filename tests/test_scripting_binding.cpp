@@ -974,6 +974,129 @@ TEST_CASE("ScriptContext: OnCheatDetected reaches a Lua instance with a readable
     ctx.setHostServices({});
 }
 
+// ─── The session's lifecycle reaches Lua ─────────────────────────────────────
+// docs/gameplay-replication-plan.md §7.4. Six events, ONE backend method with a
+// kind (NetScriptEvent) — which means the six method NAMES live in a hand-written
+// table in ScriptEngine.cpp, and a typo in one of them is silent: the hook simply
+// never fires and nothing says so. This is the test that says so.
+static const char* kLuaNetHandler = R"lua(
+local M = {}
+function M.onStart(self) self.n = 0 end
+function M.onPlayerJoined(self, player)   _G._joined = player end
+function M.onPlayerLeft(self, player)     _G._left = player end
+function M.onConnected(self)              _G._connected = (_G._connected or 0) + 1 end
+function M.onDisconnected(self, reason)   _G._reason = reason end
+function M.onSessionStarted(self)         _G._started = (_G._started or 0) + 1 end
+function M.onSessionEnded(self)           _G._ended = (_G._ended or 0) + 1 end
+return M
+)lua";
+
+TEST_CASE("ScriptContext: the session's six events reach a Lua instance under their own names")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec("_G._joined = -1 _G._left = -1 _G._reason = -1 "
+                        "_G._connected = 0 _G._started = 0 _G._ended = 0"));
+
+    REQUIRE(ctx.loadScript("netears", kLuaNetHandler));
+    auto id = ctx.createInstance("netears", world.createEntity("Ears"));
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    // The two that carry a PlayerId, the one that carries a reason code, and
+    // the three that carry nothing. A wrong name in the table, or the argument
+    // pushed for a no-arg event, shows up here and nowhere else.
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::PlayerJoined,   7));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::PlayerLeft,     7));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::Connected,      0));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::Disconnected,   2));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::SessionStarted, 0));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::SessionEnded,   0));
+
+    CHECK(engine.getGlobalNumber("_joined")    == doctest::Approx(7.0));
+    CHECK(engine.getGlobalNumber("_left")      == doctest::Approx(7.0));
+    CHECK(engine.getGlobalNumber("_reason")    == doctest::Approx(2.0));   // Kicked
+    CHECK(engine.getGlobalNumber("_connected") == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_started")   == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_ended")     == doctest::Approx(1.0));
+
+    // A script without the handlers is a no-op success, like every other
+    // optional callback — which is what lets the dispatcher fire at EVERY
+    // instance of the session without asking first.
+    REQUIRE(ctx.loadScript("netdeaf", kNameReader));
+    auto d = ctx.createInstance("netdeaf", world.createEntity("Deaf"));
+    CHECK(ctx.callOnNetEvent(d, NetScriptEvent::PlayerJoined, 1));
+}
+
+// ─── OnRep reaches Lua, with the old value ───────────────────────────────────
+// docs/gameplay-replication-plan.md §6.4. Unlike the six above, the handler's
+// NAME is composed from the variable's (onRep_<name>) and its argument is a
+// HorizonCode::Value — which may be a struct or a map, so the value is pushed by
+// the marshaller this file's own boundary tests already cover, rather than by a
+// second one written for this path.
+static const char* kLuaRepHandler = R"lua(
+local M = {}
+function M.onStart(self) self.n = 0 end
+function M.onRep_health(self, old)  _G._oldHealth = old end
+function M.onRep_name(self, old)    _G._oldName = old end
+function M.onRep_Loadout(self, old) _G._oldSlot = old.slot _G._oldTag = old.tag end
+return M
+)lua";
+
+TEST_CASE("ScriptContext: OnRep reaches a Lua instance under onRep_<name>, with the old value")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec("_G._oldHealth = -1 _G._oldName = '' _G._oldSlot = -1 _G._oldTag = ''"));
+
+    REQUIRE(ctx.loadScript("repears", kLuaRepHandler));
+    auto id = ctx.createInstance("repears", world.createEntity("Ears"));
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    CHECK(ctx.callOnRep(id, "health", HorizonCode::Value::ofInt(42)));
+    CHECK(ctx.callOnRep(id, "name",   HorizonCode::Value::ofString("before")));
+
+    // A struct crosses as the same NAMED table any other Struct-typed value
+    // does at this boundary — which is the whole reason the push is not
+    // reimplemented for this path, and why the field names have to come from a
+    // registered definition rather than from anything this call knows.
+    auto& reg = HE::TypeRegistry::instance();
+    HE::StructDef def;
+    def.name = "RepLoadout"; def.assetPath = "Content/T/RepLoadout.hasset";
+    {
+        HE::StructField slot; slot.name = "slot"; slot.type = HorizonCode::PinType::Int;
+        HE::StructField tag;  tag.name  = "tag";  tag.type  = HorizonCode::PinType::String;
+        def.fields = { slot, tag };
+    }
+    reg.registerStruct(def);
+
+    HorizonCode::Value loadout;
+    loadout.type     = HorizonCode::PinType::Struct;
+    loadout.typeName = def.assetPath;
+    loadout.items    = { HorizonCode::Value::ofInt(3), HorizonCode::Value::ofString("rifle") };
+    CHECK(ctx.callOnRep(id, "Loadout", loadout));
+    CHECK(engine.getGlobalNumber("_oldSlot") == doctest::Approx(3.0));
+    CHECK(engine.getGlobalString("_oldTag") == "rifle");
+
+    CHECK(engine.getGlobalNumber("_oldHealth") == doctest::Approx(42.0));
+    CHECK(engine.getGlobalString("_oldName") == "before");
+
+    // The name is used VERBATIM after the prefix: a handler that only differs
+    // in case must not be called, or two declarations would collide on one.
+    REQUIRE(engine.exec("_G._wrongCase = 0"));
+    CHECK(ctx.callOnRep(id, "Health", HorizonCode::Value::ofInt(99)));
+    CHECK(engine.getGlobalNumber("_oldHealth") == doctest::Approx(42.0));   // unchanged
+
+    // A script with no handler for this variable is an ordinary no-op success,
+    // like every other optional callback.
+    REQUIRE(ctx.loadScript("repdeaf", kNameReader));
+    auto d = ctx.createInstance("repdeaf", world.createEntity("Deaf"));
+    CHECK(ctx.callOnRep(d, "health", HorizonCode::Value::ofInt(1)));
+}
+
 // ─── Every failing instance is reported, not just the first one per callback ──
 // ScriptContext throttles the runtime-error report of a callback so a broken
 // onUpdate does not write sixty lines a second. Keyed on the CALLBACK alone,

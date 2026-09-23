@@ -2,6 +2,7 @@
 #include "Types/Defines.h"
 #include "Scripting/IScriptBackend.h"
 #include "Scripting/ScriptTypes.h"
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -100,6 +101,9 @@ public:
     // Call script.onCheatDetected(self, reportId) — the anti-cheat made a report
     // (or the host sent this client a notice). No-op if not defined.
     bool callOnCheatDetected(InstanceId id, int reportId) override;
+    // Call script.onPlayerJoined(self, player) and its five siblings — the
+    // multiplayer session's lifecycle. No-op if not defined.
+    bool callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg) override;
 
     // Last error string from any failed compile or call.
     const std::string& lastError() const override { return m_lastError; }
@@ -133,6 +137,29 @@ public:
 
     // Direct lua_State access for advanced binding (ScriptContext in HE_Scene uses this).
     lua_State* state() { return m_L; }
+
+    // ── Calling a handler whose ARGUMENTS this class cannot marshal ──────────
+    // Every callOn… above takes numbers and strings, which HE_Core can push by
+    // itself. OnRep_<Var> (docs/gameplay-replication-plan.md §6.4) takes a
+    // HorizonCode::Value, and the one place that knows how to put one of those
+    // on a Lua stack — as a struct table, as a map with its `__keys` sidecar —
+    // is ScriptContext in HE_Scene, together with the reader that takes it back.
+    // A second implementation down here would be a second answer to the same
+    // question, and the two would drift the first time a type was added.
+    //
+    // So the CALLER pushes: `pushArgs` receives the state with the function and
+    // `self` already on it, pushes however many arguments it likes, and returns
+    // how many. False only on a Lua error (see lastError); a script that does
+    // not define `fn` is an ordinary no-op and answers true, like every handler
+    // above.
+    using ArgPusher = std::function<int(lua_State*)>;
+    bool callInstanceMethod(InstanceId id, const char* fn, const ArgPusher& pushArgs);
+    // Does this instance define `fn` at all? callInstanceMethod deliberately
+    // answers TRUE for a method that is not there ("nothing to call went
+    // wrong" is not an error), which is right for a hook and wrong for a
+    // remote call: the RPC router has to know whether Lua took it or whether
+    // the next frontend should be asked (NetEvents::dispatchRpc).
+    bool hasInstanceMethod(InstanceId id, const char* fn);
 
 private:
     // Compile `source` as a chunk named `name` and leave it on the stack.

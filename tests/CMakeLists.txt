@@ -183,6 +183,12 @@ add_executable(he_tests
     test_net_bitstream.cpp
     test_net_loopback.cpp
     test_net_tcp.cpp
+    # The gameplay transport over real localhost UDP sockets, with an injected
+    # clock and the transport's own drop hook for loss under the reliability.
+    test_net_udp.cpp
+    # The deterministic bad-network decorator itself: does what its numbers say,
+    # the same way every run, on its own simulated clock.
+    test_net_lossy.cpp
     test_net_secure.cpp
     test_net_discovery.cpp
     test_net_directory.cpp
@@ -217,6 +223,13 @@ add_executable(he_tests
     test_git_status_parse.cpp
     test_git_roundtrip.cpp
     test_game_replication.cpp
+    # The first real gameplay session: two and three NetGameSessions against
+    # each other over LossyTransport, headless and on a simulated clock.
+    test_net_game_session.cpp
+    # Replicated variables over the same hostile fabric: the wire format on its
+    # own, then values reaching a client that is losing and reordering.
+    test_net_property_replication.cpp
+    test_net_rpc.cpp
     test_anticheat.cpp
     test_integrity.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the
@@ -998,8 +1011,8 @@ endif()
 # run at the same instant makes a failure depend on the scheduler, which is the
 # one thing a test may never do. They share a lock, so they serialise against
 # each other while the other hundred files still run in parallel.
-set(_he_net_tests test_net_tcp test_net_secure test_net_discovery test_net_collab
-                  test_net_directory test_collab_controller)
+set(_he_net_tests test_net_tcp test_net_udp test_net_secure test_net_discovery test_net_collab
+                  test_net_directory test_collab_controller test_net_game_session)
 foreach(_t IN LISTS _he_net_tests)
     if(TEST ${_t})
         set_tests_properties(${_t} PROPERTIES RESOURCE_LOCK he_net)
@@ -1013,6 +1026,15 @@ endforeach()
 # RUN_SERIAL gives it the machine for the four seconds it needs.
 if(TEST test_collab_controller)
     set_tests_properties(test_collab_controller PROPERTIES RUN_SERIAL TRUE)
+endif()
+
+# Same story, one case deep: every gameplay-session test but one runs on an
+# injected transport and a simulated clock, and that one brings up host() and
+# joinDirect() over real localhost UDP against a five-second deadline. Under a
+# full -j load a deadline is a race against the scheduler unless the test has
+# the machine.
+if(TEST test_net_game_session)
+    set_tests_properties(test_net_game_session PROPERTIES RUN_SERIAL TRUE)
 endif()
 
 # On Windows the test binary is in tests/ but the engine DLLs are in per-target

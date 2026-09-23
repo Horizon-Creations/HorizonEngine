@@ -93,6 +93,19 @@ std::string getRHIName(HE::RendererBackend backend);
 
 namespace
 {
+	// Play ▸ Join Session…, which is a MODAL and therefore cannot live inside
+	// the menu that opens it: clicking the entry closes the menu, and with it
+	// everything drawn inside. The entry raises the flag; the dialog is drawn
+	// after the menu bar is finished.
+	//
+	// Remembered for the editor's run and persisted NOWHERE — a host:port and a
+	// join code are this session's, not the project's. The export dialog's
+	// remembered backend field is what happens when that distinction is missed
+	// (Memory `dialog-static-leaks-across-projects`).
+	bool s_netJoinDialogOpen = false;
+	char s_netJoinAddress[128] = "127.0.0.1:7777";
+	char s_netJoinCode[128]    = "";
+
 	// The async SDL file slot (pendingFileReady/Result) is shared across project
 	// and scene operations; this records which one is currently in flight so the
 	// single result handler can dispatch correctly.
@@ -1915,6 +1928,39 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			stepFrame();
 		if (EditorWidgets::menuItem("Step Node", nullptr, false, ctx.hcSuspended))
 			stepNode();
+
+		// ── Multiplayer (docs/gameplay-replication-plan.md §5.6) ────────────
+		// Two processes, like collaboration: this editor plays as the host, a
+		// second editor or a game started with --join comes in. Not available
+		// for an application project, which has no play mode to put a session
+		// in.
+		ImGui::Separator();
+		const bool canNet = canPlay() && !ctx.appLivePreview;
+		if (EditorWidgets::menuItem("Play as Host", nullptr, false, canNet && !!ctx.playAsHost))
+			// 0: take the project's Default port (Project Settings ▸ Game ▸
+			// Multiplayer). Which port was actually opened is in the log and
+			// in this menu a few lines down.
+			ctx.playAsHost(0);
+		if (EditorWidgets::menuItem("Join Session...", nullptr, false, canNet && !!ctx.playAsJoin))
+			s_netJoinDialogOpen = true;
+		// What the session this editor opened is doing, read-only. Here and not
+		// in a panel because this is the menu that started it, and "did it come
+		// up, and what is the code" is the whole question at this point.
+		if (ctx.netSessionStatus && ctx.netSessionStatus() != 0)
+		{
+			ImGui::Separator();
+			const int st = ctx.netSessionStatus();
+			static const char* kNames[] = { "Idle", "Hosting", "Connecting", "Joined", "Failed" };
+			ImGui::TextDisabled("Session: %s", kNames[(st >= 0 && st < 5) ? st : 0]);
+			if (ctx.netBoundPort && ctx.netBoundPort() != 0)
+				ImGui::TextDisabled("Port: %d", ctx.netBoundPort());
+			if (ctx.netJoinCode && !ctx.netJoinCode().empty())
+			{
+				ImGui::TextDisabled("Join code: %s", ctx.netJoinCode().c_str());
+				if (EditorWidgets::menuItem("Copy Join Code"))
+					ImGui::SetClipboardText(ctx.netJoinCode().c_str());
+			}
+		}
 		ImGui::EndMenu();
 	}
 	// ── Build ───────────────────────────────────────────────────────────────
@@ -2048,6 +2094,55 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     ImGui::PopFont();
 	}
 
+    // ── Join Session (Play ▸ Join Session…) ─────────────────────────────────
+    // Outside the menu bar, because the menu closes the moment the entry is
+    // clicked and a dialog drawn inside it would close with it.
+    if (s_netJoinDialogOpen)
+    {
+        ImGui::OpenPopup("Join Session##netjoin");
+        EditorWidgets::pinDialogToEditorWindow();
+    }
+    if (ImGui::BeginPopupModal("Join Session##netjoin", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize))
+    {
+        // Its own scope, not the Play menu's: the dialog is drawn out here,
+        // long after that menu has closed, so nothing is pushed at this point
+        // and the two fields would be looked up bare.
+        HE::Ed::Help::Scope helpScope("Join Session");
+        ImGui::TextUnformatted("Address of the host, and the code it is showing.");
+        ImGui::Spacing();
+        ImGui::SetNextItemWidth(320.0f);
+        ImGui::InputText("Host", s_netJoinAddress, sizeof(s_netJoinAddress));
+        EditorWidgets::helpForLabel("Host");
+        ImGui::SetNextItemWidth(320.0f);
+        ImGui::InputText("Join code", s_netJoinCode, sizeof(s_netJoinCode));
+        EditorWidgets::helpForLabel("Join code");
+        ImGui::Spacing();
+        // A join without a code cannot complete the crypto handshake at all, so
+        // it would fail as "could not connect" — a message that sends somebody
+        // looking at their firewall. Say it here instead.
+        const bool ready = s_netJoinAddress[0] != '\0' && s_netJoinCode[0] != '\0';
+        if (!ready) ImGui::TextDisabled("Both are required.");
+        ImGui::BeginDisabled(!ready);
+        // The wrapper, not ImGui::Button: its help lookup is hover-gated and
+        // allows a disabled item, so the greyed button is what answers "why
+        // can I not press this".
+        if (EditorWidgets::button("Join", ImVec2(120, 0)))
+        {
+            if (ctx.playAsJoin) ctx.playAsJoin(s_netJoinAddress, s_netJoinCode);
+            s_netJoinDialogOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0)))
+        {
+            s_netJoinDialogOpen = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
     // (The New Project popup is opened further down, after the shortcut block
     // that can ask for it too — see `openNewProjectPopup` there.)
 
@@ -2065,6 +2160,12 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     if (ImGui::BeginPopupModal("About Horizon Engine##about", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize))
     {
+        // Its own scope for the same reason as the join dialog above: drawn out
+        // here, with the Help menu long closed. Until now its two buttons were
+        // counted as covered by the coverage scan only because that scan walks
+        // the file top to bottom and had "Help" still open from line 2071 — an
+        // accident of position, and one entry away from being real.
+        HE::Ed::Help::Scope helpScope("About");
         if (ctx.fontSubheading) ImGui::PushFont(ctx.fontSubheading);
         ImGui::TextUnformatted("Horizon Engine");
         if (ctx.fontSubheading) ImGui::PopFont();
@@ -2072,9 +2173,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         ImGui::Spacing();
         ImGui::TextUnformatted("Editor and runtime, built by Horizon Creations.");
         ImGui::Spacing();
-        if (ImGui::SmallButton("Documentation")) { DocsPanel::open(); ImGui::CloseCurrentPopup(); }
+        if (EditorWidgets::smallButton("Documentation")) { DocsPanel::open(); ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
-        if (ImGui::SmallButton("Website"))       SDL_OpenURL("https://horizoncreations.dev");
+        if (EditorWidgets::smallButton("Website"))       SDL_OpenURL("https://horizoncreations.dev");
         ImGui::Separator();
         if (ImGui::Button("Close", ImVec2(120.0f, 0.0f))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();

@@ -1513,6 +1513,151 @@ namespace
 	  "it enabled in the project settings. Useful to hide an admin overlay "
 	  "everywhere else." },
 
+	// ── Multiplayer ──────────────────────────────────────────────────────────
+	{ "net.host",
+	  "Opens a multiplayer session on this machine and makes it joinable. Port 0 "
+	  "takes the project's Default port (Project Settings, Game, Multiplayer), "
+	  "which is where the seats, the tick rate and the rest come from too; read "
+	  "the port that was actually opened back from the session status, and hand "
+	  "joiners the Join Code. Everyone who joins plays in YOUR world: the host "
+	  "decides what really happened." },
+	{ "net.joinDirect",
+	  "Joins a session by address and port, with the host's Join Code. The code "
+	  "is not a password you can guess past: without the right one the "
+	  "connection never completes at all." },
+	{ "net.joinLan",
+	  "Joins the session at this index in the LAN list (Refresh LAN Sessions "
+	  "first). Same Join Code as a direct join." },
+	{ "net.leave",
+	  "Leaves the session, or closes it if you are the host. Says goodbye rather "
+	  "than vanishing, so the others learn the seat is free now instead of in "
+	  "thirty seconds." },
+	{ "net.status",
+	  "0 Idle, 1 Hosting, 2 Connecting, 3 Joined, 4 Failed. Joined means the "
+	  "whole world has arrived, not just the connection — a lobby screen may "
+	  "wait for it before it hands over to the game." },
+	{ "net.lastError",
+	  "Why the last host or join attempt failed, in words meant for a player. "
+	  "Empty when nothing has failed." },
+	{ "net.sessionId",
+	  "This session's short id, for showing to somebody who is about to join. "
+	  "Empty outside a session." },
+	{ "net.joinCode",
+	  "The secret a joiner needs. Only the HOST gets it — on a client this is "
+	  "deliberately empty, so a client's own UI cannot hand out seats to a "
+	  "session it does not own." },
+	{ "net.refreshLan",
+	  "Starts listening for sessions announced on the local network, or starts "
+	  "over. Only game sessions are listed; an editor collaboration session on "
+	  "the same network is not one you can join." },
+	{ "net.lanSessionCount",
+	  "How many sessions the LAN browser is currently hearing. Zero right after "
+	  "Refresh is normal: announcements arrive a moment later." },
+	{ "net.lanSessionName",
+	  "The host's display name for the session at this index." },
+	{ "net.lanSessionPlayers",
+	  "How many players are in the session at this index, as it last announced "
+	  "itself." },
+	{ "net.isAuthority",
+	  "Is THIS machine the one that decides? True on the host and true with no "
+	  "session at all — a single-player game is its own authority. Ask this "
+	  "before anything that changes the world: simulation only with Is "
+	  "Authority, display everywhere, intentions through the server." },
+	{ "net.isClient",
+	  "Are we a client in somebody else's session? False offline, unlike Is "
+	  "Authority, because offline there is no host to be a client of." },
+	{ "net.localPlayer",
+	  "Our own player number. 1 on the host and 1 offline; the host hands out "
+	  "2 and up in join order. A number is minted once and never reused, so a "
+	  "score kept under it stays the right player's." },
+	{ "net.playerCount",
+	  "How many players the session are known HERE. On the host that is all of "
+	  "them; on a client it is 1 — itself — because nothing sends a client the "
+	  "list yet. 1 offline as well." },
+	{ "net.playerAt",
+	  "The player number of the index'th player, in join order. 0 past the end, "
+	  "so a loop can stop on it. Only the host sees more than itself (see Player "
+	  "Count)." },
+	{ "net.playerName",
+	  "The display name that player joined with. Empty for a player this machine "
+	  "does not know about — on a client that is everybody but itself." },
+	{ "net.ping",
+	  "Round trip to that player in milliseconds. 0 when there is nothing to "
+	  "measure: ourselves, and a player nobody has timed yet." },
+	{ "net.kick",
+	  "Host only: remove a player from the session. The same path the anti-cheat "
+	  "takes, so a session that logs one logs the other." },
+	{ "net.ownerOf",
+	  "Which player this entity belongs to, or 0 for the host's own and for "
+	  "anything nobody owns (a door, a crate)." },
+	{ "net.isLocallyControlled",
+	  "Do WE drive this entity? True for our own character, false for everybody "
+	  "else's, and true for anything not replicated at all. This is the question "
+	  "a character's graph asks before it reacts to input." },
+	{ "net.localCharacter",
+	  "The entity this machine drives — our own character — or 0 before the host "
+	  "has given us one." },
+	{ "net.callServer",
+	  "Ask the HOST to run a function on this entity. The ordinary way to say "
+	  "\"I pulled the lever\": a client may not change the world, so it asks. "
+	  "Nothing comes back — a remote call has no return value. Allowed for the "
+	  "entity you own, or for a function whose header has Any Client ticked. "
+	  "Offline it simply runs here, so a graph works in single player." },
+	{ "net.callClient",
+	  "Host only: run a function on ONE player's machine — the hit marker, the "
+	  "message only they should see. Addressed by PlayerId. Nothing comes back." },
+	{ "net.callAllClients",
+	  "Host only: run a function on EVERY machine, including this one — the "
+	  "round-over horn, the explosion everybody sees. Nothing comes back." },
+	{ "net.allowAnyClient",
+	  "Let any client call that function on this entity, not just its owner. For "
+	  "Lua, Python and C++ classes, which have no function header to tick. A door "
+	  "belongs to nobody, so without this nobody could open it." },
+	{ "net.rpcSender",
+	  "Which player asked for the call being handled right now. 0 at any other "
+	  "moment. Hand it to Report Cheat or Check when the call is a claim worth "
+	  "weighing." },
+	{ "net.declareVarBool",
+	  "Declares a replicated Bool on this entity: the host owns it, every client "
+	  "is sent its value. Call it in On Init. With Notify on, the clients get "
+	  "On Rep when a value arrives. A HorizonCode class does not need this — it "
+	  "ticks Replicated in the variable list instead." },
+	{ "net.declareVarInt",
+	  "Declares a replicated Int on this entity. See Declare Replicated Bool." },
+	{ "net.declareVarFloat",
+	  "Declares a replicated Float on this entity. See Declare Replicated Bool." },
+	{ "net.declareVarString",
+	  "Declares a replicated String on this entity. See Declare Replicated Bool." },
+	{ "net.declareVarVec3",
+	  "Declares a replicated Vector on this entity. See Declare Replicated Bool." },
+	{ "net.setVarBool",
+	  "Writes a declared Bool. On the host every client is sent the new value; on "
+	  "a client it takes effect HERE and the host's next value replaces it, which "
+	  "is what makes a prediction possible. False = never declared." },
+	{ "net.setVarInt",
+	  "Writes a declared Int. See Set Replicated Bool." },
+	{ "net.setVarFloat",
+	  "Writes a declared Float. See Set Replicated Bool." },
+	{ "net.setVarString",
+	  "Writes a declared String. See Set Replicated Bool." },
+	{ "net.setVarVec3",
+	  "Writes a declared Vector. See Set Replicated Bool." },
+	{ "net.getVarBool",
+	  "Reads a declared Bool. False when the name was never declared here, which "
+	  "Has Replicated Variable tells apart from a value that is simply false." },
+	{ "net.getVarInt",
+	  "Reads a declared Int. 0 when the name was never declared here." },
+	{ "net.getVarFloat",
+	  "Reads a declared Float. 0 when the name was never declared here." },
+	{ "net.getVarString",
+	  "Reads a declared String. Empty when the name was never declared here." },
+	{ "net.getVarVec3",
+	  "Reads a declared Vector. Zero when the name was never declared here." },
+	{ "net.hasVar",
+	  "Is this name declared on this entity at all — by a script or by the "
+	  "entity's HorizonCode class? The one row that tells a missing declaration "
+	  "apart from a value still at its default." },
+
 	// ── Save ─────────────────────────────────────────────────────────────────
 	{ "save.create",
 	  "Starts a NEW save from the project's SaveGame Template, with the fields "

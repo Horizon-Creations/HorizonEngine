@@ -165,7 +165,20 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && antiCheat.policyConfirmed == o.antiCheat.policyConfirmed
         && antiCheat.policyHard == o.antiCheat.policyHard
         && antiCheat.telemetryUrl == o.antiCheat.telemetryUrl
-        && rulesEqual(antiCheat.rules, o.antiCheat.rules);
+        && rulesEqual(antiCheat.rules, o.antiCheat.rules)
+        && multiplayer.defaultPort == o.multiplayer.defaultPort
+        && multiplayer.maxPlayers == o.multiplayer.maxPlayers
+        && nearlyEqual(multiplayer.timeoutSec, o.multiplayer.timeoutSec)
+        && nearlyEqual(multiplayer.tickHz, o.multiplayer.tickHz)
+        && nearlyEqual(multiplayer.worldExtent, o.multiplayer.worldExtent)
+        && nearlyEqual(multiplayer.interpolationDelaySec, o.multiplayer.interpolationDelaySec)
+        && nearlyEqual(multiplayer.reconcileSnapDistance, o.multiplayer.reconcileSnapDistance)
+        && nearlyEqual(multiplayer.reconcileSmoothing, o.multiplayer.reconcileSmoothing)
+        && multiplayer.maxPendingInputs == o.multiplayer.maxPendingInputs
+        && multiplayer.discoverLan == o.multiplayer.discoverLan
+        && multiplayer.discoverDirectory == o.multiplayer.discoverDirectory
+        && multiplayer.portMapping == o.multiplayer.portMapping
+        && multiplayer.rpcPerSecond == o.multiplayer.rpcPerSecond;
 }
 
 void ProjectSettings::clamp()
@@ -233,6 +246,29 @@ void ProjectSettings::clamp()
         rule.maxPerSecond = std::clamp(finiteOr(rule.maxPerSecond, 0.0f), 0.0f, AC::kMaxRuleValue);
         rule.level        = kAntiCheatLevels[rule.levelIndex()];
     }
+
+    using MP = ProjectMultiplayerSettings;
+    auto& m = multiplayer;
+    // 0 stays 0: "let the OS pick a port" is a real answer here, not a typo,
+    // and it is the one the editor's second instance on this machine needs.
+    m.defaultPort           = std::clamp(m.defaultPort, 0, MP::kMaxPort);
+    m.maxPlayers            = std::clamp(m.maxPlayers, MP::kMinPlayers, MP::kMaxPlayers);
+    m.timeoutSec            = std::clamp(finiteOr(m.timeoutSec, MP{}.timeoutSec),
+                                         MP::kMinTimeoutSec, MP::kMaxTimeoutSec);
+    m.tickHz                = std::clamp(finiteOr(m.tickHz, MP{}.tickHz),
+                                         MP::kMinTickHz, MP::kMaxTickHz);
+    m.worldExtent           = std::clamp(finiteOr(m.worldExtent, MP{}.worldExtent),
+                                         MP::kMinWorldExtent, MP::kMaxWorldExtent);
+    m.interpolationDelaySec = std::clamp(finiteOr(m.interpolationDelaySec, MP{}.interpolationDelaySec),
+                                         0.0f, MP::kMaxInterpolationSec);
+    m.reconcileSnapDistance = std::clamp(finiteOr(m.reconcileSnapDistance, MP{}.reconcileSnapDistance),
+                                         0.0f, MP::kMaxSnapDistance);
+    m.reconcileSmoothing    = std::clamp(finiteOr(m.reconcileSmoothing, MP{}.reconcileSmoothing),
+                                         0.0f, MP::kMaxSmoothing);
+    m.maxPendingInputs      = std::clamp(m.maxPendingInputs,
+                                         MP::kMinPendingInputs, MP::kMaxPendingInputs);
+    m.rpcPerSecond          = std::clamp(m.rpcPerSecond,
+                                         MP::kMinRpcPerSecond, MP::kMaxRpcPerSecond);
 }
 
 void ProjectSettings::toJson(json& out) const
@@ -290,6 +326,23 @@ void ProjectSettings::toJson(json& out) const
                       { "hard",      policyToJson(antiCheat.policyHard) } } },
         { "telemetryUrl",       antiCheat.telemetryUrl },
         { "rules",              std::move(rules) },
+    };
+
+    // The shape docs/gameplay-replication-plan.md §8.4 shows, key for key.
+    out["multiplayer"] = {
+        { "defaultPort", multiplayer.defaultPort },
+        { "maxPlayers",  multiplayer.maxPlayers },
+        { "timeoutSec",  multiplayer.timeoutSec },
+        { "tickHz",      multiplayer.tickHz },
+        { "worldExtent", multiplayer.worldExtent },
+        { "prediction", { { "interpolationDelaySec", multiplayer.interpolationDelaySec },
+                          { "reconcileSnapDistance", multiplayer.reconcileSnapDistance },
+                          { "reconcileSmoothing",    multiplayer.reconcileSmoothing },
+                          { "maxPendingInputs",      multiplayer.maxPendingInputs } } },
+        { "discovery", { { "lan",         multiplayer.discoverLan },
+                         { "directory",   multiplayer.discoverDirectory },
+                         { "portMapping", multiplayer.portMapping } } },
+        { "rpcPerSecond", multiplayer.rpcPerSecond },
     };
 }
 
@@ -375,6 +428,24 @@ void ProjectSettings::fromJson(const json& in)
                 antiCheat.rules.push_back(std::move(rule));
             }
         }
+    }
+    {
+        const json& m = section(in, "multiplayer");
+        readNumber(m, "defaultPort", multiplayer.defaultPort);
+        readNumber(m, "maxPlayers",  multiplayer.maxPlayers);
+        readNumber(m, "timeoutSec",  multiplayer.timeoutSec);
+        readNumber(m, "tickHz",      multiplayer.tickHz);
+        readNumber(m, "worldExtent", multiplayer.worldExtent);
+        const json& pr = section(m, "prediction");
+        readNumber(pr, "interpolationDelaySec", multiplayer.interpolationDelaySec);
+        readNumber(pr, "reconcileSnapDistance", multiplayer.reconcileSnapDistance);
+        readNumber(pr, "reconcileSmoothing",    multiplayer.reconcileSmoothing);
+        readNumber(pr, "maxPendingInputs",      multiplayer.maxPendingInputs);
+        const json& di = section(m, "discovery");
+        readBool(di, "lan",         multiplayer.discoverLan);
+        readBool(di, "directory",   multiplayer.discoverDirectory);
+        readBool(di, "portMapping", multiplayer.portMapping);
+        readNumber(m, "rpcPerSecond", multiplayer.rpcPerSecond);
     }
 
     clamp();

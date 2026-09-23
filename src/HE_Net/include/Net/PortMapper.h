@@ -67,7 +67,19 @@ enum class PortMapResult : std::uint8_t {
     Refused,
 };
 
+// Which transport protocol a mapping or pinhole is for. Collaboration hosts
+// map TCP; a game host (UdpTransport) maps UDP. A router treats the two as
+// unrelated entries, so the protocol is part of the mapping's identity and
+// travels in the handles below — taking a UDP mapping down "as TCP" removes
+// nothing.
+enum class Protocol : std::uint8_t { Tcp, Udp };
+
+inline const char* protocolName(Protocol p) { return p == Protocol::Udp ? "UDP" : "TCP"; }
+// IANA protocol number, as PCP and the UPnP IPv6 firewall service spell it.
+inline std::uint8_t protocolIanaNumber(Protocol p) { return p == Protocol::Udp ? 17 : 6; }
+
 struct PortMapping {
+    Protocol      protocol     = Protocol::Tcp;
     std::uint16_t externalPort = 0;
     std::uint16_t internalPort = 0;
     std::string   internalHost;     // LAN address the mapping points at
@@ -104,9 +116,11 @@ public:
                                     const std::string& description,
                                     PortMapping& out,
                                     const std::string& internalHost = {},
-                                    std::uint32_t leaseSeconds = 0);
+                                    std::uint32_t leaseSeconds = 0,
+                                    Protocol protocol = Protocol::Tcp);
 
-    static PortMapResult removeMapping(const IgdDevice& igd, std::uint16_t externalPort);
+    static PortMapResult removeMapping(const IgdDevice& igd, std::uint16_t externalPort,
+                                       Protocol protocol = Protocol::Tcp);
 
     // The router's WAN-side address. Note this is *not* proof of reachability:
     // behind CGNAT it returns a private address (100.64.0.0/10 or RFC1918),
@@ -139,10 +153,12 @@ public:
                                           std::uint16_t internalPort,
                                           std::uint32_t lifetimeSeconds,
                                           PortMapping& out,
-                                          int timeoutMs = 1500);
+                                          int timeoutMs = 1500,
+                                          Protocol protocol = Protocol::Tcp);
     static PortMapResult natPmpRemoveMapping(const std::string& gateway,
                                              std::uint16_t internalPort,
-                                             int timeoutMs = 1500);
+                                             int timeoutMs = 1500,
+                                             Protocol protocol = Protocol::Tcp);
 
     // ── PCP (RFC 6887) ───────────────────────────────────────────────────────
     // The successor to NAT-PMP, on the same port 5351 and deliberately
@@ -176,13 +192,15 @@ public:
                                 std::uint16_t suggestedExternalPort,
                                 std::uint32_t lifetimeSeconds,
                                 PcpMapping& out,
-                                int timeoutMs = 1500);
+                                int timeoutMs = 1500,
+                                Protocol protocol = Protocol::Tcp);
     // Lifetime 0 removes it. The nonce from the original grant identifies which.
     static PortMapResult pcpUnmap(const std::string& gateway,
                                   const std::string& clientAddress,
                                   const std::uint8_t nonce[12],
                                   std::uint16_t internalPort,
-                                  int timeoutMs = 1500);
+                                  int timeoutMs = 1500,
+                                  Protocol protocol = Protocol::Tcp);
 
     // ── One call that tries everything ───────────────────────────────────────
     // UPnP first (broadest support), NAT-PMP second. Records which method won so
@@ -191,6 +209,7 @@ public:
     {
         enum class Method : std::uint8_t { None, Upnp, NatPmp, Pcp };
         Method        method = Method::None;
+        Protocol      protocol = Protocol::Tcp;
         IgdDevice     igd;        // Upnp
         std::string   gateway;    // NatPmp / Pcp
         std::uint16_t port = 0;
@@ -202,7 +221,8 @@ public:
     };
 
     static PortMapResult mapPort(std::uint16_t port, const std::string& description,
-                                 MappingHandle& outHandle, PortMapping& outInfo);
+                                 MappingHandle& outHandle, PortMapping& outInfo,
+                                 Protocol protocol = Protocol::Tcp);
     static void          unmapPort(const MappingHandle& handle);
 
     // ── IPv6 firewall pinhole ────────────────────────────────────────────────
@@ -215,6 +235,7 @@ public:
     {
         enum class Method : std::uint8_t { None, Pcp, Upnp6fc };
         Method        method = Method::None;
+        Protocol      protocol = Protocol::Tcp;
         // Pcp
         std::string   gateway;          // IPv6, scope included
         std::string   clientAddress;
@@ -225,19 +246,21 @@ public:
         std::string   uniqueId;         // the router's name for the pinhole
     };
 
-    // Open TCP `port` on the router's IPv6 firewall for `globalV6` (this
-    // machine's address). Tries PCP first (the standards path), then UPnP
+    // Open `port` (TCP or UDP) on the router's IPv6 firewall for `globalV6`
+    // (this machine's address). Tries PCP first (the standards path), then UPnP
     // WANIPv6FirewallControl (the FRITZ!Box path). `igd` may carry a device
     // found by an earlier discover() to skip a second SSDP round; pass an empty
     // one to let this discover on its own.
     static PortMapResult openPinhole(const std::string& globalV6, std::uint16_t port,
-                                     PinholeHandle& out, const IgdDevice& igd = {});
+                                     PinholeHandle& out, const IgdDevice& igd = {},
+                                     Protocol protocol = Protocol::Tcp);
     static void          closePinhole(const PinholeHandle& handle);
 
     // UPnP WANIPv6FirewallControl primitives (IGDv2).
     static PortMapResult addPinhole(const IgdDevice& igd, const std::string& internalClient,
                                     std::uint16_t port, std::uint32_t leaseSeconds,
-                                    std::string& outUniqueId);
+                                    std::string& outUniqueId,
+                                    Protocol protocol = Protocol::Tcp);
     static PortMapResult deletePinhole(const IgdDevice& igd, const std::string& uniqueId);
 
     // ── Pure helpers, exposed for testing without a live router ──
@@ -246,7 +269,8 @@ public:
                                                         const std::uint8_t nonce[12],
                                                         std::uint16_t internalPort,
                                                         std::uint16_t suggestedExternalPort,
-                                                        std::uint32_t lifetimeSeconds);
+                                                        std::uint32_t lifetimeSeconds,
+                                                        Protocol protocol = Protocol::Tcp);
     static bool parsePcpMapResponse(const std::uint8_t* data, std::size_t len,
                                     PcpMapping& out, std::uint8_t& outResultCode);
 

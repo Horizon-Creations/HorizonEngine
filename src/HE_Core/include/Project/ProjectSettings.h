@@ -52,6 +52,9 @@ namespace HE {
 //   renderDefaults  the export dialog's config.json when useEditorSettings is off.
 //   anticheat       the host's AntiCheatService (HorizonScene) — thresholds,
 //                   what happens per level, the game's value rules.
+//   multiplayer     NetGameSession::setProjectDefaults — the port, the seats,
+//                   the tick and the prediction bounds every host() and join()
+//                   of this project starts from.
 // The exporter copies the file verbatim to <data>/Config/ProjectSettings.json
 // (ExportSettings::projectSettingsFile); the packaged game loads it from there
 // before its window opens.
@@ -265,15 +268,101 @@ struct HE_API ProjectAntiCheatSettings
     static constexpr int   kMaxRules              = 256;
 };
 
+// ─── Multiplayer ──────────────────────────────────────────────────────────────
+// What a game session of THIS project is (docs/gameplay-replication-plan.md
+// §8.4): the port it opens, how many players fit, how often the world is sent,
+// and the bounds client-side prediction works within. Project-wide and not
+// per-scene for the anti-cheat block's reason: a tick rate is a decision about
+// the game, and two scenes that disagreed about it would be two games.
+//
+// Default-constructed IS today's behaviour — the numbers below are the ones
+// NetGameSession::HostOptions and GameReplication::Config already carry, so a
+// project that never opens the page hosts exactly as it did before the page
+// existed. The one exception is `defaultPort`: hosting with no port named used
+// to mean "let the OS pick", and it still does, because a 0 typed here is kept
+// and means precisely that.
+struct HE_API ProjectMultiplayerSettings
+{
+    // ── Session ──────────────────────────────────────────────────────────────
+    // The port a host opens when nothing else names one. 47824 is
+    // LanBeacon::kPort + 1, so the announcement and the session sit next to
+    // each other and ONE firewall rule can name the pair. 0 = let the OS pick,
+    // which is what the editor's Play as Host did before this existed and what
+    // a second editor on the same machine still needs.
+    int defaultPort = 47824;
+    // Counting the host. A joiner beyond it is refused with SessionFull.
+    int maxPlayers  = 8;
+    // No datagram at all for this long and the peer counts as gone
+    // (UdpTransport::Config::timeoutMs). Seconds here because that is what a
+    // person tuning it means.
+    float timeoutSec = 5.0f;
+
+    // ── Replication ──────────────────────────────────────────────────────────
+    // Snapshots a second. Bandwidth is linear in it; below ~20 the
+    // interpolation lag starts to show.
+    float tickHz      = 30.0f;
+    // Position quantisation bound, in metres from the origin. Positions
+    // outside it CLAMP, so it has to contain the playable area comfortably.
+    float worldExtent = 4096.0f;
+    // How far back in time a client draws other players, so it always has two
+    // samples to interpolate between. Higher is smoother and later.
+    float interpolationDelaySec = 0.1f;
+    // Prediction bounds (§6.3): a predicted position further than this from
+    // the host's answer is snapped rather than eased, because easing a big
+    // error looks like sliding on ice…
+    float reconcileSnapDistance = 2.0f;
+    // …and this is how quickly a small one is eased away, as a fraction per
+    // second.
+    float reconcileSmoothing = 12.0f;
+    // Unacknowledged inputs kept for replay. At 60 Hz, 64 is a second of round
+    // trip; past that the connection is unusable and the buffer is not the
+    // problem.
+    int maxPendingInputs = 64;
+
+    // ── Discovery ────────────────────────────────────────────────────────────
+    // Announce the session on the local network so a second instance finds it
+    // without an address (LanBeacon). Reaches HostOptions::announceLan.
+    bool discoverLan = true;
+    // Register with the session directory, and ask the router for a port
+    // forward. STORED BUT NOT YET READ: the directory and the port mapper are
+    // wired up in step 5c of the plan's roadmap. Authoring them now would be a
+    // switch that does nothing, so the page says so on the row.
+    bool discoverDirectory = true;
+    bool portMapping       = true;
+
+    // Remote calls a client may make per second before the host counts the
+    // excess as an observation (§7.6), measured over a two-second window.
+    // Read by RpcRouter at the start of every session.
+    int rpcPerSecond = 60;
+
+    static constexpr int   kMaxPort              = 65535;
+    static constexpr int   kMinPlayers           = 1;
+    static constexpr int   kMaxPlayers           = 64;
+    static constexpr float kMinTimeoutSec        = 0.5f;
+    static constexpr float kMaxTimeoutSec        = 120.0f;
+    static constexpr float kMinTickHz            = 1.0f;
+    static constexpr float kMaxTickHz            = 120.0f;
+    static constexpr float kMinWorldExtent       = 1.0f;
+    static constexpr float kMaxWorldExtent       = 1.0e6f;
+    static constexpr float kMaxInterpolationSec  = 2.0f;
+    static constexpr float kMaxSnapDistance      = 1000.0f;
+    static constexpr float kMaxSmoothing         = 1000.0f;
+    static constexpr int   kMinPendingInputs     = 1;
+    static constexpr int   kMaxPendingInputs     = 1024;
+    static constexpr int   kMinRpcPerSecond      = 1;
+    static constexpr int   kMaxRpcPerSecond      = 10000;
+};
+
 struct HE_API ProjectSettings
 {
     static constexpr int kVersion = 1;
 
-    ProjectGameSettings      game;
-    ProjectShadowSettings    shadows;
-    ProjectPhysicsSettings   physics;
-    ProjectRenderDefaults    renderDefaults;
-    ProjectAntiCheatSettings antiCheat;
+    ProjectGameSettings        game;
+    ProjectShadowSettings      shadows;
+    ProjectPhysicsSettings     physics;
+    ProjectRenderDefaults      renderDefaults;
+    ProjectAntiCheatSettings   antiCheat;
+    ProjectMultiplayerSettings multiplayer;
 
     // True when nothing differs from a fresh construction. The saver uses it to
     // leave a project that never touched its settings WITHOUT a file, so an old

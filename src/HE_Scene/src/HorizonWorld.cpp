@@ -14,6 +14,7 @@
 #include "HorizonScene/Components/AnimationLayerComponent.h"
 #include "HorizonScene/Components/IkComponent.h"
 #include "HorizonScene/Components/InactiveComponent.h"
+#include "HorizonScene/Components/ReplicatedVarsComponent.h"
 #include <Diagnostics/Log.h>
 #include <algorithm>
 
@@ -85,6 +86,10 @@ void HorizonWorld::reserveComponentStorage()
     // reads this pool through a const registry, which only ever finds a pool
     // that already exists — so it exists from the first frame.
     (void)m_registry.storage<InactiveComponent>();
+    // Replicated variables (plan §6.1). The C++ frontend's net.declareVar writes
+    // this pool, and that call comes FROM the hot-loaded game-logic dylib — so
+    // this is not merely a plausible first toucher, it is the expected one.
+    (void)m_registry.storage<ReplicatedVarsComponent>();
 }
 
 bool HorizonWorld::isBuiltin(Entity entity) const

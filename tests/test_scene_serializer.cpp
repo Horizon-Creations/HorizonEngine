@@ -1687,6 +1687,9 @@ namespace
 		a.movement.lookYaw   = 33.0f;
 		reg.emplace<MovementComponent>(actor, a.movement);
 
+		// Off, against the struct's default of on: a round trip that only ever
+		// saw the default value would pass whether or not the key is written.
+		a.network.replicates         = false;
 		a.network.relevanceRadius    = 42.5f;
 		a.network.replicateTransform = false;
 		a.network.maxSpeed           = 9.5f;
@@ -2025,6 +2028,7 @@ namespace
 		{
 			const auto* nc = reg.try_get<NetworkComponent>(actor);
 			REQUIRE(nc != nullptr);
+			CHECK(nc->replicates         == a.network.replicates);
 			CHECK(nc->relevanceRadius    == doctest::Approx(a.network.relevanceRadius));
 			CHECK(nc->replicateTransform == a.network.replicateTransform);
 			CHECK(nc->maxSpeed           == doctest::Approx(a.network.maxSpeed));
@@ -2641,6 +2645,9 @@ TEST_CASE("NetworkComponent: the scene carries the authored levers and limits, n
 		reg.emplace<TransformComponent>(player, TransformComponent{});
 		NetworkComponent nc;
 		nc.netId = 12u; nc.owner = 2u;          // a session's doing, not the scene's
+		// The switch OFF, against its default of on: the entity keeps the
+		// component and its tuning, which is what a second click restores.
+		nc.replicates         = false;
 		nc.relevanceRadius    = 80.0f;
 		nc.replicateTransform = true;
 		nc.maxSpeed           = 6.5f;
@@ -2658,6 +2665,7 @@ TEST_CASE("NetworkComponent: the scene carries the authored levers and limits, n
 	for (auto& e : doc["entities"])
 		if (e.contains("components") && e["components"].contains("network")) block = &e["components"]["network"];
 	REQUIRE(block != nullptr);
+	CHECK((*block)["replicates"].get<bool>()        == false);
 	CHECK((*block)["relevanceRadius"].get<float>()  == doctest::Approx(80.0f));
 	CHECK((*block)["replicateTransform"].get<bool>() == true);
 	CHECK((*block)["maxSpeed"].get<float>()         == doctest::Approx(6.5f));
@@ -2665,10 +2673,13 @@ TEST_CASE("NetworkComponent: the scene carries the authored levers and limits, n
 	CHECK_FALSE(block->contains("netId"));
 	CHECK_FALSE(block->contains("owner"));
 
-	// An older scene: the block without the two limits. They come back as 0,
-	// and the levers as written.
+	// An older scene: the block without the two limits and without the switch.
+	// The limits come back as 0 ("unchecked"), the switch as ON — a scene saved
+	// before it existed replicated everything with the component, and it must
+	// keep doing so.
 	block->erase("maxSpeed");
 	block->erase("maxVerticalSpeed");
+	block->erase("replicates");
 	{
 		std::ofstream out(file);
 		out << doc.dump(2);
@@ -2679,6 +2690,7 @@ TEST_CASE("NetworkComponent: the scene carries the authored levers and limits, n
 	REQUIRE((player != entt::null));
 	const auto* nc = loaded.registry().try_get<NetworkComponent>(player);
 	REQUIRE(nc != nullptr);
+	CHECK(nc->replicates       == true);
 	CHECK(nc->relevanceRadius  == doctest::Approx(80.0f));
 	CHECK(nc->maxSpeed         == doctest::Approx(0.0f));
 	CHECK(nc->maxVerticalSpeed == doctest::Approx(0.0f));

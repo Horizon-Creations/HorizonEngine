@@ -5,6 +5,8 @@
 #include <nlohmann/json.hpp>   // db.query hands its rows back as JSON text
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // the anticheat rows' service
+#include <HorizonScene/Net/NetGameSession.h>        // the net rows' service
+#include <HorizonScene/Components/NetworkComponent.h>   // net.ownerOf / isLocallyControlled
 #include <Net/HttpsClient.h>   // http.available must answer what the backend says
 #include <Types/TypeRegistry.h>
 #include <HorizonGameServices.h>
@@ -3081,6 +3083,116 @@ TEST_CASE("anticheat: the rows are in the registry, and a null host answers neut
     // On the list the text frontends build their tables from: the plan's Lua
     // and Python examples are horizon.anticheat.check / reportLevel / respond.
     CHECK(HE::api::isScriptGroup("anticheat"));
+}
+
+TEST_CASE("net: the neutral answers are what makes one graph run online and offline")
+{
+    // The whole point of the group's defaults (docs/gameplay-replication-plan.md
+    // §7.1): a graph written as "Is Authority? → apply the damage" has to run
+    // unchanged with no session at all. If isAuthority answered false offline,
+    // every such graph would go silent the moment somebody played alone.
+    //
+    // MUTATION: make net::isAuthority return `s && s->isAuthority()` in
+    // EngineApi.cpp and this fails on the first CHECK below.
+    const auto& reg = HE::api::registry();
+    auto row = [&](const char* id) -> const HE::api::ApiFn*
+    {
+        for (const HE::api::ApiFn& f : reg) if (std::string(f.id) == id) return &f;
+        return nullptr;
+    };
+    for (const char* id : { "net.host", "net.joinDirect", "net.joinLan", "net.leave",
+                            "net.refreshLan", "net.kick" })
+    {
+        const HE::api::ApiFn* f = row(id);
+        REQUIRE_MESSAGE(f != nullptr, id);
+        CHECK_MESSAGE(f->isExec, id);
+    }
+    for (const char* id : { "net.status", "net.lastError", "net.sessionId", "net.joinCode",
+                            "net.lanSessionCount", "net.lanSessionName", "net.lanSessionPlayers",
+                            "net.isAuthority", "net.isClient", "net.localPlayer",
+                            "net.playerCount", "net.playerAt", "net.playerName", "net.ping",
+                            "net.ownerOf", "net.isLocallyControlled", "net.localCharacter" })
+    {
+        const HE::api::ApiFn* f = row(id);
+        REQUIRE_MESSAGE(f != nullptr, id);
+        CHECK_MESSAGE(!f->isExec, id);
+    }
+
+    SUBCASE("no session object at all")
+    {
+        Ctx c;
+        CHECK(row("net.isAuthority")->invoke(c, {})[0].b);          // the inverted default
+        CHECK_FALSE(row("net.isClient")->invoke(c, {})[0].b);
+        CHECK(row("net.localPlayer")->invoke(c, {})[0].i == 1);
+        CHECK(row("net.playerCount")->invoke(c, {})[0].i == 1);
+        CHECK(row("net.playerAt")->invoke(c, { Value::ofInt(0) })[0].i == 1);
+        CHECK(row("net.playerAt")->invoke(c, { Value::ofInt(1) })[0].i == 0);
+        CHECK(row("net.status")->invoke(c, {})[0].i == 0);          // Idle
+        CHECK(row("net.sessionId")->invoke(c, {})[0].s.empty());
+        CHECK(row("net.joinCode")->invoke(c, {})[0].s.empty());
+        CHECK(row("net.lanSessionCount")->invoke(c, {})[0].i == 0);
+        CHECK(row("net.ping")->invoke(c, { Value::ofInt(2) })[0].f == 0.0f);
+        CHECK(row("net.localCharacter")->invoke(c, {})[0].i == 0);
+        // Exec rows without a session: no-ops, not crashes.
+        row("net.leave")->invoke(c, {});
+        row("net.refreshLan")->invoke(c, {});
+        row("net.kick")->invoke(c, { Value::ofInt(2) });
+        CHECK_FALSE(row("net.joinLan")->invoke(c, { Value::ofInt(0), Value::ofString("x"),
+                                                    Value::ofString("P") })[0].b);
+    }
+
+    SUBCASE("a session object that exists but is IDLE reads exactly the same")
+    {
+        // THIS is the case a bare null check would get wrong, and it is the
+        // normal one: both applications construct a session in OnInit and leave
+        // it idle until somebody hosts or joins, so Ctx::net is non-null for
+        // every single-player game ever shipped.
+        //
+        // MUTATION: change net::live() in EngineApi.cpp to `return c.net;` and
+        // the first two CHECKs below fail.
+        NetGameSession idle;
+        Ctx c;
+        c.net = &idle;
+        CHECK(row("net.isAuthority")->invoke(c, {})[0].b);
+        CHECK(row("net.localPlayer")->invoke(c, {})[0].i == 1);
+        CHECK(row("net.playerCount")->invoke(c, {})[0].i == 1);
+        CHECK_FALSE(row("net.isClient")->invoke(c, {})[0].b);
+        CHECK(row("net.status")->invoke(c, {})[0].i == 0);
+        CHECK(row("net.joinCode")->invoke(c, {})[0].s.empty());
+        // …but the rows that legitimately work OUTSIDE a session still reach it.
+        row("net.refreshLan")->invoke(c, {});
+        CHECK(idle.browsingLan());
+        idle.stopLanBrowse();
+    }
+
+    SUBCASE("ownerOf and isLocallyControlled read the component, not the session")
+    {
+        HorizonWorld world;
+        const auto e = world.createEntity("Crate");
+        Ctx c;
+        c.world = &world;
+        const Value ent = Value::ofInt(static_cast<int>(static_cast<uint32_t>(e)));
+
+        // No NetworkComponent at all: unowned, and ours to drive — offline
+        // everything is, and a purely local effect stays local in a session too.
+        CHECK(row("net.ownerOf")->invoke(c, { ent })[0].i == 0);
+        CHECK(row("net.isLocallyControlled")->invoke(c, { ent })[0].b);
+
+        auto& nc = world.registry().emplace<NetworkComponent>(e);
+        nc.netId = 12;
+        nc.owner = 3;
+        CHECK(row("net.ownerOf")->invoke(c, { ent })[0].i == 3);
+        // Still true: with no LIVE session there is nobody else to own it.
+        CHECK(row("net.isLocallyControlled")->invoke(c, { ent })[0].b);
+
+        // A dead entity id is an ordinary state, not a crash.
+        CHECK(row("net.ownerOf")->invoke(c, { Value::ofInt(999999) })[0].i == 0);
+        CHECK_FALSE(row("net.isLocallyControlled")->invoke(c, { Value::ofInt(0) })[0].b);
+    }
+
+    // On the list the text frontends build their tables from: without it a Lua
+    // or Python main menu could build a lobby screen and never open a session.
+    CHECK(HE::api::isScriptGroup("net"));
 }
 
 TEST_CASE("anticheat: with a host the rows read the report a game's own observation made")

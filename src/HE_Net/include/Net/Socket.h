@@ -161,6 +161,43 @@ HE_NET_API bool         socketSetMulticastTtl(SocketHandle h, int ttl);
 HE_NET_API bool         socketBindUdpTo(SocketHandle h, const std::string& localAddress,
                                         std::uint16_t port);
 
+// ─── UDP for the game transport ──────────────────────────────────────────────
+// UdpTransport (Layer 1) is the consumer of these three. Everything above in
+// this section exists for discovery and router talk; these are the pieces a
+// connection-oriented protocol on top of datagrams needs and those do not.
+
+// One UDP socket bound on `port` that receives from BOTH families: AF_INET6
+// with IPV6_V6ONLY cleared, so IPv4 peers arrive as v4-mapped addresses
+// ("::ffff:192.168.1.5"). Falls back to IPv4-only where that is impossible,
+// for the same reason socketCreateListenerDualStack does. Port 0 lets the OS
+// pick; read it back with socketBoundPort(). Non-blocking, with the receive
+// buffer enlarged (see socketSetBufferSizes). kInvalidSocket on failure.
+HE_NET_API SocketHandle socketCreateUdpDualStack(std::uint16_t port);
+
+// An unbound-by-name UDP socket of the family `peerIsIPv6` asks for, bound to
+// an ephemeral port, ready to talk to one peer. The family has to match the
+// destination — the caller learns it from socketResolveUdpAddress first.
+HE_NET_API SocketHandle socketCreateUdpFor(bool peerIsIPv6);
+
+// Resolve `host` (IPv4 literal, IPv6 literal, or DNS name) to ONE numeric
+// address usable with socketSendTo, and say which family it is. socketSendTo
+// itself only parses numeric addresses (AI_NUMERICHOST), so a name has to go
+// through here first. Prefers the first answer the resolver gives, which on a
+// dual-stack machine is usually IPv6 for a name with both records.
+HE_NET_API bool socketResolveUdpAddress(const std::string& host, std::uint16_t port,
+                                        std::string& outNumericHost, bool& outIsIPv6);
+
+// Ask for larger kernel send/receive buffers.
+//
+// Needed on the datagram path specifically: a burst of reliable packets (a
+// 256-packet window is ~300 KB) that the receiving process has not read yet
+// sits in the kernel's receive buffer, and Linux's default for that is about
+// 200 KB. Anything beyond is dropped silently — packet loss at "0 % loss" —
+// which the reliability layer then repairs at the cost of resends that were
+// never necessary. The kernel may grant less than asked (it clamps to a
+// sysctl ceiling); this returns false only when the call itself failed.
+HE_NET_API bool socketSetBufferSizes(SocketHandle h, int recvBytes, int sendBytes);
+
 // ─── Local-network discovery ─────────────────────────────────────────────────
 // Announcing a collaboration session on the LAN so peers can find it without
 // an address. All three of these exist only for that.

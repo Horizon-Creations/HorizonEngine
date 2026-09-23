@@ -167,6 +167,56 @@ public:
     // via reflection + overflow entries). Tooling/tests; not for hot paths.
     std::unordered_map<std::string, Value> variablesSnapshot(InstanceId id) const;
 
+    // ── Replicated variables (docs/gameplay-replication-plan.md §6.1) ────────
+    // Which of this instance's variables the authority sends to its clients,
+    // and which of those call OnRep_<Name> when one arrives. INSTANCE variables
+    // only (scope == 0) — a function-local has nobody to replicate to.
+    //
+    // Order is the wire order, and it is therefore part of the protocol rather
+    // than a convenience: the property table sends these names once and every
+    // delta afterwards addresses them by INDEX. Base classes first, each level's
+    // own declaration order after that — the order the graph chain has, which
+    // both peers derive from the same assets.
+    //
+    // It lives HERE, on the Runtime, and not in the replicator, because it is
+    // the one question whose answer differs between the two backends: an
+    // interpreted instance keeps its declarations in graphAt(level).variables, a
+    // generated one in varInfos(). A caller that had to know which it was
+    // holding would be a caller that gets it wrong for one of them.
+    struct ReplicatedVar { std::string name; PinType type; bool notify = false; };
+    std::vector<ReplicatedVar> replicatedVariablesOf(InstanceId id) const;
+
+    // ── One function's multiplayer face (plan §7.6) ─────────────────────────
+    // Here for exactly the reason replicatedVariablesOf is: it is the question
+    // whose answer differs between the two backends — an interpreted instance
+    // keeps its FunctionEntry nodes in graphAt(level), a generated one in
+    // funcInfos() — and a caller that had to know which it was holding is a
+    // caller that gets it wrong for one of them.
+    //
+    // Resolved leaf-first across the instance's levels, like every other member
+    // lookup: a derived class that re-declares a function decides its Run On.
+    // `found` false means no level has it, which is what the router logs and
+    // drops on. `params` is empty for a generated class whose codegen predates
+    // funcInfos(), and the router treats an empty list as "no signature to
+    // check against" rather than "a function of no arguments" — the two differ,
+    // and guessing would reject every honest call.
+    struct FunctionSignature
+    {
+        bool                 found     = false;
+        std::uint8_t         runOn     = 0;
+        bool                 anyClient = false;
+        bool                 hasParams = false;   // was a parameter list available at all
+        std::vector<PinType> params;
+        // Whether each parameter is a CONTAINER. Parallel to `params`, and its
+        // own vector rather than a richer element type because that is what
+        // both backends can answer: an interpreted entry reads FuncParam, a
+        // generated one a second static table. A function that declares an
+        // array parameter has to accept an array, or every honest call to it
+        // is refused as a forgery.
+        std::vector<bool>    paramIsArray;
+    };
+    FunctionSignature functionSignatureOf(InstanceId id, const std::string& fn) const;
+
     // Fire an event on ONE instance. `elem` targets a widget element (0 = any).
     // `arg` feeds the event's data output when it has one.
     void fireEvent(InstanceId id, const std::string& event, int elem = 0, const Value& arg = {});
@@ -299,6 +349,16 @@ public:
     // An anti-cheat report ticket (docs/anti-cheat-plan.md §5.4). Fired on the
     // Game Instance, the level script and the Entity class the report names.
     void fireOnCheatDetected(InstanceId id, int reportId);
+    // The multiplayer session's lifecycle (docs/gameplay-replication-plan.md
+    // §7.4). Fired on the Game Instance and the level script, like the report
+    // above; NetEvents::dispatch is the one place that decides who hears what,
+    // so the packaged game and the editor's play mode cannot drift.
+    void fireOnPlayerJoined(InstanceId id, int player);
+    void fireOnPlayerLeft(InstanceId id, int player);
+    void fireOnConnected(InstanceId id);
+    void fireOnDisconnected(InstanceId id, int reason);
+    void fireOnSessionStarted(InstanceId id);
+    void fireOnSessionEnded(InstanceId id);
     void fireOnLevelLoaded(InstanceId id);
     void fireOnLevelUnloaded(InstanceId id);
     // Physics contacts (Entity classes). `other` is the other entity's id, which
@@ -348,6 +408,28 @@ public:
                                          const std::vector<Value>& args)> callApi;
     };
     void setServices(Services s) { m_services = std::move(s); }
+
+    // ── Multiplayer: route a runOn ≠ Local call (plan §7.2) ─────────────────
+    // Forwarded into every instance's Context as Context::rpcRoute, with `self`
+    // in front for the same reason Services::callApi carries it: the router
+    // answers per ENTITY, and only the instance says which one. TRUE = it is on
+    // the wire, do not run it here.
+    //
+    // Unbound means every function runs locally whatever its Run On says, which
+    // is the honest answer for a runtime with no session under it — a tool, a
+    // test, the editor's asset preview.
+    //
+    // ITS OWN SETTER and not a field in Services, deliberately: a session
+    // installs this when it starts and removes it when it ends, while the
+    // application fills Services once at startup. Sharing the struct would mean
+    // each side reading the other's half back before writing, and whichever
+    // wrote last would silently erase the other — a hook that vanishes when a
+    // level loads is exactly the bug nobody finds.
+    using RpcRouteFn = std::function<bool(InstanceId self, const std::string& fn,
+                                          const std::vector<Value>& args,
+                                          std::uint8_t runOn, bool anyClient)>;
+    void setRpcRoute(RpcRouteFn fn) { m_rpcRoute = std::move(fn); }
+    bool hasRpcRoute() const { return static_cast<bool>(m_rpcRoute); }
 
     // ── Execution trace (debugging) ──────────────────────────────────────────
     // Called for every EXEC node an interpreted instance runs, with the
@@ -566,6 +648,7 @@ private:
     static constexpr int kMaxCallDepth = 64;
     int m_callDepth = 0;
     Services   m_services;
+    RpcRouteFn m_rpcRoute;
     // Contexts hold a POINTER to this (Context::onExecNode), so it lives here
     // for the runtime's lifetime and never moves — which also means every
     // Context built before setExecListener sees the listener afterwards, the

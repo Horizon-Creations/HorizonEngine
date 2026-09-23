@@ -219,6 +219,13 @@ namespace HE
 		// and Linux (macOS sends an event instead), and by the time anything can
 		// act on that, main() is long gone.
 		const std::vector<std::string>& launchArguments() const { return m_launchArgs; }
+		// The other half of the same list: everything that DID start with a dash,
+		// which the line above deliberately drops because an option is not a
+		// document. Kept for the flags a shipped game reads for itself —
+		// --host[=port], --join=host:port, --code=… (docs/gameplay-replication-
+		// plan.md §5.7) — which is how a second process can be driven into a
+		// session without a person clicking anything.
+		const std::vector<std::string>& launchFlags() const { return m_launchFlags; }
 
 	protected:
 		// Frames completed by the main loop. Stamped onto every log record (see
@@ -247,6 +254,7 @@ namespace HE
 		void closeSplash();
 
 		std::vector<std::string>   m_launchArgs;   // see launchArguments()
+		std::vector<std::string>   m_launchFlags;  // see launchFlags()
 		bool                       m_running  = false;
 		bool                       m_vsyncEnabled = true;  // current vsync state
 		bool                       m_savedVsync   = true;  // vsync to restore after a capture

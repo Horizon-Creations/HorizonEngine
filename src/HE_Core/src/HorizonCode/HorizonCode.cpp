@@ -1786,6 +1786,10 @@ nlohmann::json nodeToJsonObj(const Node& n)
     if (n.hasArg)            e["hasArg"]   = n.hasArg;
     if (n.access)            e["access"]   = n.access;
     if (n.overridable)       e["virtual"]  = true;
+    // Absent means Local, which is what every graph authored before
+    // multiplayer existed meant (plan §7.2).
+    if (n.runOn)             e["runOn"]    = (int)n.runOn;
+    if (n.anyClient)         e["anyClient"] = true;
     if (n.f[0] || n.f[1] || n.f[2] || n.f[3])
         e["f"] = { n.f[0], n.f[1], n.f[2], n.f[3] };
     if (n.type == NodeType::ConstTransform)
@@ -1850,6 +1854,10 @@ nlohmann::json variableToJsonObj(const Variable& v)
     if (!v.s.empty()) e["s"] = v.s;
     if (v.access)     e["access"] = v.access;
     if (v.scope)      e["scope"] = v.scope;   // function-local (FunctionEntry id)
+    // Written only when set, like every flag here: a graph that replicates
+    // nothing is byte-identical to one saved before replication existed.
+    if (v.replicated) e["rep"] = true;
+    if (v.repNotify)  e["repNotify"] = true;
     if (v.isArray)    e["arr"] = true;
     if (v.isArray && !v.defaultItems.empty())
     {
@@ -1909,6 +1917,19 @@ bool nodeFromJsonObj(const nlohmann::json& e, Node& n)
     // Absent means "not overridable" — every graph authored before this
     // existed keeps exactly the behaviour it had.
     n.overridable = e.value("virtual", false);
+    // Multiplayer (plan §7.2). Absent, and anything outside the four RunOn
+    // values, reads as Local: a graph from a newer build opened in an older one
+    // runs its functions here rather than routing them nowhere.
+    {
+        const int ro = e.value("runOn", 0);
+        n.runOn = (ro >= 0 && ro <= 3) ? (std::uint8_t)ro : (std::uint8_t)0;
+    }
+    n.anyClient = e.value("anyClient", false);
+    // anyClient only means anything on a Server function — it is the answer to
+    // "may a client that does not own this entity call it", and no other target
+    // asks that question. Normalised on load so the editor's checkbox and the
+    // router's check cannot read two different stories out of one file.
+    if (n.runOn != (std::uint8_t)RunOn::Server) n.anyClient = false;
     if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
         for (int i = 0; i < 4; ++i) n.f[i] = f[i].get<float>();
     if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
@@ -1967,6 +1988,14 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     v.s    = e.value("s", std::string());
     v.access = e.value("access", 0);
     v.scope  = e.value("scope", 0);
+    v.replicated = e.value("rep", false);
+    v.repNotify  = e.value("repNotify", false);
+    // Two states that are not representable after a load, for the reason
+    // `isArray`/`container` are reconciled below: a Ref can never travel (§6.1),
+    // and Notify without Replicated would wait for a value that never arrives.
+    // A hand-edited file may say either; nothing downstream has to check.
+    if (v.type == P::Ref)  { v.replicated = false; }
+    if (!v.replicated)     { v.repNotify  = false; }
     v.isArray = e.value("arr", false);
     v.container = (ContainerKind)e.value("ctr", (int)ContainerKind::None);
     if (v.container != ContainerKind::None) v.isArray = true;   // see loadParams
@@ -2524,6 +2553,28 @@ const std::vector<EngineEventDesc>& engineEvents()
         // readers say the rest. No element: it belongs to the Game Instance, the
         // level script and the Entity the report names, never to a widget.
         { "OnCheatDetected",      "onCheatDetected",      P::Int,    false },
+        // The multiplayer session's lifecycle (docs/gameplay-replication-plan.md
+        // §7.4). Session-wide like OnCheatDetected and with no element, so they
+        // belong to the Game Instance and the level script; an entity that wants
+        // to know who is in the session asks net.playerCount instead of holding
+        // six handlers of its own.
+        //
+        // The Int on the two player events is the PlayerId — the id that is
+        // minted once per join and never handed out twice, so a score keyed on
+        // it cannot be inherited by whoever gets the connection next. Fires on
+        // the HOST only; a client hears OnConnected/OnDisconnected about itself.
+        { "OnPlayerJoined",       "onPlayerJoined",       P::Int,    false },
+        { "OnPlayerLeft",         "onPlayerLeft",         P::Int,    false },
+        // The client's own two. OnDisconnected's Int is the reason: 0 Leave,
+        // 1 Timeout, 2 Kicked, 3 Rejected, 4 VersionMismatch, 5 WrongProject.
+        // A kick arrives as OnCheatDetected FIRST and OnDisconnected(2) after,
+        // so a handler that wants to say WHY has the ticket by then.
+        { "OnConnected",          "onConnected",          P::Exec,   false },
+        { "OnDisconnected",       "onDisconnected",       P::Int,    false },
+        // The session itself opening and closing. Both sides hear the end; only
+        // the host hears the start, because only the host has one to start.
+        { "OnSessionStarted",     "onSessionStarted",     P::Exec,   false },
+        { "OnSessionEnded",       "onSessionEnded",       P::Exec,   false },
         { "OnLevelLoaded",        "onLevelLoaded",        P::Exec,   false },
         { "OnLevelUnloaded",      "onLevelUnloaded",      P::Exec,   false },
         // Physics contacts on an Entity class. The argument is the OTHER entity
@@ -3593,6 +3644,21 @@ void Runner::execNode(const Node& n, int depth)
                     ("HorizonCode: Call Function '" + n.s + "' — no such function in this "
                      "graph; call skipped").c_str());
             break;
+        }
+        // ── Multiplayer: does this call belong on another machine? (§7.2) ──
+        // Before the frame is built, because a routed call runs NOTHING here —
+        // not the body, not the locals. The arguments are still evaluated in
+        // the caller's context, exactly as both paths below do, since they are
+        // what travels. `rpcRoute` returning false is the ordinary answer
+        // offline and on the target side itself, and then this falls through
+        // to the local call as if Run On were not set.
+        if (entry->runOn != (std::uint8_t)RunOn::Local && m_ctx.rpcRoute)
+        {
+            std::vector<Value> rpcArgs(n.params.size());
+            for (size_t i = 0; i < n.params.size(); ++i)
+                rpcArgs[i] = coerce(evalInput(n, (int)i, depth + 1), n.params[i].type);
+            if (m_ctx.rpcRoute(n.s, rpcArgs, entry->runOn, entry->anyClient))
+                break;
         }
         // Build the call frame: evaluate arguments in the CALLER's context (before
         // pushing, so the caller's own params still resolve), seed typed results

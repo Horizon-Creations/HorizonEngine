@@ -45,7 +45,8 @@
 //   1 — save, physics, input
 //   2 — + content
 //   3 — + anticheat
-#define HE_SERVICES_ABI_VERSION 3u
+#define HE_NET_ABI_VERSION 1u
+#define HE_SERVICES_ABI_VERSION 4u
 
 // Export decoration for the receiving symbol — same rule as <IGameLogic.h>,
 // defined here too so this header stands alone (e.g. in tests).
@@ -263,6 +264,36 @@ typedef struct HeAntiCheatServices
     bool  (*isEnabled)(void* host);
 } HeAntiCheatServices;
 
+// ── Multiplayer: remote calls (docs/gameplay-replication-plan.md §7) ─────────
+// "Run this function over there", from native game code. The counterpart of
+// IGameLogic::onRpc, which is how one ARRIVES.
+//
+// Arguments travel as a JSON ARRAY string, the same trade every other wide
+// value in this header makes: a HorizonCode::Value is a C++ type with strings
+// and vectors in it, and this boundary is a hot-loaded dylib rebuilt on its own
+// schedule. "[]" and null both mean no arguments.
+//
+// No return values, ever — an RPC is fire-and-forget (§7.2).
+typedef struct HeNetServices
+{
+    uint32_t abiVersion;   // HE_NET_ABI_VERSION
+    void*    host;         // opaque engine context — pass to every call
+
+    bool  (*callServer)(void* host, uint32_t entity, const char* fn, const char* argsJson);
+    bool  (*callClient)(void* host, uint32_t player, uint32_t entity, const char* fn,
+                        const char* argsJson);
+    bool  (*callAllClients)(void* host, uint32_t entity, const char* fn, const char* argsJson);
+    // May a client that does not own this entity call `fn` on it? The
+    // HorizonCode twin is a checkbox at the function header; a native class has
+    // no header, so it says it here.
+    bool  (*allowAnyClient)(void* host, uint32_t entity, const char* fn);
+    // Who asked for the call being delivered right now. 0 at any other moment.
+    uint32_t (*rpcSender)(void* host);
+    // The session, for the handful of questions a handler actually asks.
+    bool  (*isAuthority)(void* host);
+    uint32_t (*localPlayer)(void* host);
+} HeNetServices;
+
 // ── The umbrella ─────────────────────────────────────────────────────────────
 // Sibling tables rather than one growing table, and one export that hands them
 // over together. A new service appends a POINTER here and bumps
@@ -276,6 +307,7 @@ typedef struct HeEngineServices
     const HeInputServices*   input;
     const HeContentServices* content;      // umbrella v2
     const HeAntiCheatServices* anticheat;  // umbrella v3
+    const HeNetServices*       net;        // umbrella v4
 } HeEngineServices;
 
 typedef void (*FnSetEngineServicesV2)(const HeEngineServices*);
@@ -286,6 +318,7 @@ extern const HePhysicsServices* g_hePhysicsServices;
 extern const HeInputServices*   g_heInputServices;
 extern const HeContentServices* g_heContentServices;
 extern const HeAntiCheatServices* g_heAntiCheatServices;
+extern const HeNetServices*       g_heNetServices;
 
 } // extern "C"
 
@@ -312,6 +345,7 @@ extern const HeAntiCheatServices* g_heAntiCheatServices;
     const HeInputServices*   g_heInputServices   = nullptr; \
     const HeContentServices* g_heContentServices = nullptr; \
     const HeAntiCheatServices* g_heAntiCheatServices = nullptr; \
+    const HeNetServices*       g_heNetServices       = nullptr; \
     HE_GAME_API void HE_SetEngineServices(const HeSaveServices* s) \
     { g_heSaveServices = (s && s->abiVersion >= HE_SAVE_ABI_VERSION) ? s : nullptr; } \
     HE_GAME_API void HE_SetEngineServicesV2(const HeEngineServices* s) \
@@ -319,6 +353,7 @@ extern const HeAntiCheatServices* g_heAntiCheatServices;
         const bool v1 = s && s->abiVersion >= 1u; \
         const bool v2 = s && s->abiVersion >= 2u; \
         const bool v3 = s && s->abiVersion >= 3u; \
+        const bool v4 = s && s->abiVersion >= 4u; \
         g_heSaveServices = (v1 && s->save && \
             s->save->abiVersion >= HE_SAVE_ABI_VERSION) ? s->save : nullptr; \
         g_hePhysicsServices = (v1 && s->physics && \
@@ -329,6 +364,8 @@ extern const HeAntiCheatServices* g_heAntiCheatServices;
             s->content->abiVersion >= HE_CONTENT_ABI_VERSION) ? s->content : nullptr; \
         g_heAntiCheatServices = (v3 && s->anticheat && \
             s->anticheat->abiVersion >= HE_ANTICHEAT_ABI_VERSION) ? s->anticheat : nullptr; \
+        g_heNetServices = (v4 && s->net && \
+            s->net->abiVersion >= HE_NET_ABI_VERSION) ? s->net : nullptr; \
     } \
     }
 
@@ -398,6 +435,7 @@ inline const HePhysicsServices* physSvc()    { return g_hePhysicsServices; }
 inline const HeInputServices*   inputSvc()   { return g_heInputServices; }
 inline const HeContentServices* contentSvc() { return g_heContentServices; }
 inline const HeAntiCheatServices* antiCheatSvc() { return g_heAntiCheatServices; }
+inline const HeNetServices*       netSvc()      { return g_heNetServices; }
 inline ::HeAssetId toC(const AssetId& id)   { return ::HeAssetId{ id.hi, id.lo }; }
 inline AssetId     fromC(const ::HeAssetId& id) { return AssetId{ id.hi, id.lo }; }
 inline RaycastHit fromC(const HeRaycastHit& h)
@@ -771,6 +809,42 @@ inline float playerScore(uint32_t player)
 inline bool isEnabled()
 { auto* s = detail::antiCheatSvc(); return s && s->isEnabled(s->host); }
 } // namespace anticheat
+
+// ── Multiplayer: remote calls ────────────────────────────────────────────────
+// "Run this function over there" from a native module
+// (docs/gameplay-replication-plan.md §7). The counterpart of
+// IGameLogic::onRpc, which is how one arrives.
+//
+// `argsJson` is a JSON ARRAY of the arguments, in call order — the shape
+// HE::Net::Game::argsToJson produces and onRpc hands you. Omitting it means no
+// arguments. No return values: an RPC is fire-and-forget.
+//
+// Every row defaults to FALSE with nothing injected, which is the truth about
+// it: no engine, no session, nothing ran anywhere. The one exception is
+// isAuthority, which answers TRUE — a module with no session under it is its
+// own authority, exactly as net.isAuthority does for a graph, so the same
+// "only the authority simulates" guard works offline.
+namespace net {
+inline bool available() { return detail::netSvc() != nullptr; }
+
+inline bool callServer(uint32_t entity, const std::string& fn,
+                       const std::string& argsJson = "[]")
+{ auto* s = detail::netSvc(); return s && s->callServer(s->host, entity, fn.c_str(), argsJson.c_str()); }
+inline bool callClient(uint32_t player, uint32_t entity, const std::string& fn,
+                       const std::string& argsJson = "[]")
+{ auto* s = detail::netSvc(); return s && s->callClient(s->host, player, entity, fn.c_str(), argsJson.c_str()); }
+inline bool callAllClients(uint32_t entity, const std::string& fn,
+                           const std::string& argsJson = "[]")
+{ auto* s = detail::netSvc(); return s && s->callAllClients(s->host, entity, fn.c_str(), argsJson.c_str()); }
+inline bool allowAnyClient(uint32_t entity, const std::string& fn)
+{ auto* s = detail::netSvc(); return s && s->allowAnyClient(s->host, entity, fn.c_str()); }
+inline uint32_t rpcSender()
+{ auto* s = detail::netSvc(); return s ? s->rpcSender(s->host) : 0u; }
+inline bool isAuthority()
+{ auto* s = detail::netSvc(); return s ? s->isAuthority(s->host) : true; }
+inline uint32_t localPlayer()
+{ auto* s = detail::netSvc(); return s ? s->localPlayer(s->host) : 1u; }
+} // namespace net
 
 #if defined(__GNUC__) || defined(__clang__)
 #  pragma GCC visibility pop

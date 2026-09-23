@@ -1912,3 +1912,114 @@ TEST_CASE("codegen: the engine-event hooks do exactly what the named path does")
 	p.compInst->onValueChanged(3, 1.0f);
 	p.checkParity();
 }
+
+TEST_CASE("codegen: a Run On function routes at the call site and lands in funcInfos")
+{
+	// The compiled twin of the interpreter's check in Runner::execNode
+	// (docs/gameplay-replication-plan.md §7.2). A packaged build that emitted a
+	// bare call here would run every remote call locally and look ALMOST right —
+	// the door opens on the machine that pulled the lever and nowhere else —
+	// which is why this is pinned by NAME rather than left to a parity run.
+	using NT = HorizonCode::NodeType;
+	using PT = HorizonCode::PinType;
+	hcfix::Fx f;
+	f.var("opened", PT::Bool);
+
+	// Open(howMuch: Int) [Run On: Server, Any Client] { opened = true }
+	const int open = f.fnEntry("Open", 0, { { "howMuch", PT::Int } }, {});
+	{
+		HorizonCode::Node* e = f.g.findNode(open);
+		REQUIRE(e != nullptr);
+		e->runOn     = (std::uint8_t)HorizonCode::RunOn::Server;
+		e->anyClient = true;
+	}
+	const int s = f.setVar("opened", PT::Bool);
+	f.data(f.constB(true), 0, s, 0);
+	f.exec(open, s);
+
+	// Trigger() { Open(7) } — a plain Call Function node.
+	const int trig = f.fnEntry("Trigger", 0, {}, {});
+	const int call = f.fnCall("Open");
+	HorizonCode::syncFunctionSignatures(f.g);   // the call mirrors the entry's pins
+	f.data(f.constI(7), 0, call, 0);
+	f.exec(trig, call);
+
+	HE::hccg::Options opt;
+	HE::hccg::Result r = HE::hccg::generate({ f.done("run_on_server") }, opt);
+	REQUIRE(r.ok);
+	REQUIRE(r.fallbacks.empty());
+	std::string all;
+	for (const auto& file : r.files) all += file.contents;
+
+	// The call site asks first, and only runs the body when the answer is "not
+	// routed". The mode and the Any Client flag travel with the question.
+	CHECK(all.find("hc::rpcRoute(m_ctx, \"Open\"") != std::string::npos);
+	CHECK(all.find(", 1, true))") != std::string::npos);
+
+	// …and the host can look the function up: without funcInfos a packaged host
+	// has no signature for a generated class and would have to refuse every
+	// call from anyone but the entity's owner.
+	CHECK(all.find("funcInfos() const") != std::string::npos);
+	CHECK(all.find("HorizonCode::CompiledFuncInfo") != std::string::npos);
+
+	// NEGATIVE CONTROL: a Local function is untouched. Without this the checks
+	// above would also pass on an emitter that wrapped EVERY call in a route.
+	hcfix::Fx plain;
+	plain.var("n", PT::Float);
+	const int p1 = plain.fnEntry("Bump", 0, {}, {});
+	const int ps = plain.setVar("n", PT::Float);
+	plain.data(plain.constF(1.0f), 0, ps, 0);
+	plain.exec(p1, ps);
+	const int p2 = plain.fnEntry("Go", 0, {}, {});
+	plain.exec(p2, plain.fnCall("Bump"));
+	HE::hccg::Result pr = HE::hccg::generate({ plain.done("run_on_local") }, opt);
+	REQUIRE(pr.ok);
+	std::string plainAll;
+	for (const auto& file : pr.files) plainAll += file.contents;
+	CHECK(plainAll.find("hc::rpcRoute") == std::string::npos);
+}
+
+TEST_CASE("codegen: a Replicated variable keeps its flags in the generated slot table")
+{
+	// The hole docs/gameplay-replication-plan.md §6.5 left open: the compiled
+	// path CARRIED the two flags in CompiledVarInfo, but the emitter never
+	// wrote them — so a class shipped as generated C++ replicated nothing, and
+	// an OnRep-driven door worked in the editor and died in the packaged build.
+	using PT = HorizonCode::PinType;
+	hcfix::Fx f;
+	f.var("doorOpen", PT::Bool);
+	f.var("secret", PT::Int);
+	{
+		// Only the first one is shared, and it notifies.
+		for (HorizonCode::Variable& v : f.g.variables)
+			if (v.name == "doorOpen") { v.replicated = true; v.repNotify = true; }
+	}
+	const int ev = f.event("Go");
+	const int s = f.setVar("doorOpen", PT::Bool);
+	f.data(f.constB(true), 0, s, 0);
+	f.exec(ev, s);
+
+	HE::hccg::Options opt;
+	HE::hccg::Result r = HE::hccg::generate({ f.done("replicated_var") }, opt);
+	REQUIRE(r.ok);
+	REQUIRE(r.fallbacks.empty());
+	std::string all;
+	for (const auto& file : r.files) all += file.contents;
+
+	// The ticked variable's slot carries the pair; the untouched one does not,
+	// which is the negative control — without it this would pass on an emitter
+	// that marked every variable replicated.
+	const std::size_t door = all.find("\"doorOpen\"");
+	REQUIRE(door != std::string::npos);
+	// To the end of the LINE, not to the next "),": the default value is itself
+	// a call (hc::toValue(false)), so a parenthesis-based cut lands inside it.
+	const std::size_t doorEnd = all.find('\n', door);
+	REQUIRE(doorEnd != std::string::npos);
+	CHECK(all.substr(door, doorEnd - door).find("true, true") != std::string::npos);
+
+	const std::size_t sec = all.find("\"secret\"");
+	REQUIRE(sec != std::string::npos);
+	const std::size_t secEnd = all.find('\n', sec);
+	REQUIRE(secEnd != std::string::npos);
+	CHECK(all.substr(sec, secEnd - sec).find("true") == std::string::npos);
+}

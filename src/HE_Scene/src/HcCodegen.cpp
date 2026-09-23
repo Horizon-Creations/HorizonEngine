@@ -2523,8 +2523,29 @@ private:
             for (const auto& a : argNames) call += ", " + a;
             for (const auto& rn : resNames) call += ", " + rn;
             call += ");";
+            // Run On (plan §7.2): the compiled twin of the interpreter's check.
+            // Without it a packaged build would run every remote call locally
+            // and look ALMOST right — the worst shape a bug can take.
+            bool routed = false;
+            if (entry->runOn != (std::uint8_t)HorizonCode::RunOn::Local)
+            {
+                std::string wire = "std::vector<hc::Value>{";
+                for (size_t i = 0; i < argNames.size(); ++i)
+                {
+                    if (i) wire += ", ";
+                    wire += toValueCall(argNames[i], trOf(entry->params[i]), m_opt.namespaceName);
+                }
+                wire += "}";
+                b.line("if (!hc::rpcRoute(m_ctx, " + strLit(n.s) + ", " + wire + ", " +
+                       std::to_string((int)entry->runOn) + ", " +
+                       (entry->anyClient ? "true" : "false") + "))");
+                b.line("{");
+                ++b.indent;
+                routed = true;
+            }
             b.line("if (++rs.depth <= hc::kMaxDepth) " + call + "   // depth guard (§3.6)");
             b.line("--rs.depth;");
+            if (routed) { --b.indent; b.line("}"); }
             m_rsTouched = true;
             const auto it = m_slots.find(n.id);
             if (it != m_slots.end())
@@ -2864,8 +2885,34 @@ private:
         for (size_t i = 0; i < resNames.size(); ++i)
             call += (i || !argNames.empty() ? ", " : "") + resNames[i];
         call += ");";
+        // Run On travels with the FUNCTION, not with the graph it happens to
+        // sit in (plan §7.2) — so an inherited call is routed exactly like a
+        // local one. The interpreter does this in Runtime's callOwn; without
+        // the same line here, moving a Server function up into a base class
+        // would quietly turn it local again in a packaged build.
+        bool routedBase = false;
+        if (entry->runOn != (std::uint8_t)HorizonCode::RunOn::Local)
+        {
+            std::string wire = "std::vector<hc::Value>{";
+            for (size_t i = 0; i < argNames.size(); ++i)
+            {
+                if (i) wire += ", ";
+                wire += toValueCall(argNames[i],
+                                    trOf(entry->params[i].type, entry->params[i].isArray,
+                                         entry->params[i].typeName),
+                                    m_opt.namespaceName);
+            }
+            wire += "}";
+            b.line("if (!hc::rpcRoute(m_ctx, " + strLit(n.s) + ", " + wire + ", " +
+                   std::to_string((int)entry->runOn) + ", " +
+                   (entry->anyClient ? "true" : "false") + "))");
+            b.line("{");
+            ++b.indent;
+            routedBase = true;
+        }
         b.line("if (++rs.depth <= hc::kMaxDepth) " + call + "   // depth guard (§3.6)");
         b.line("--rs.depth;");
+        if (routedBase) { --b.indent; b.line("}"); }
         m_rsTouched = true;
         const auto it = m_slots.find(n.id);
         if (it != m_slots.end())
@@ -3068,6 +3115,7 @@ private:
         }
         if (!fns.empty())
         {
+            h += "    const std::vector<HorizonCode::CompiledFuncInfo>& funcInfos() const override;\n";
             h += "    bool callFunction(const std::string& name, bool requirePublic,\n";
             h += "                      const std::vector<hc::Value>& args,\n";
             h += "                      std::vector<hc::Value>* results) override;\n";
@@ -3200,6 +3248,18 @@ private:
                                 std::string(tr.kind() == HorizonCode::ContainerKind::Set ? "Set" : "Map") +
                                 ", hc::PinType::" + pinName(v.keyType)
                               : std::string()) +
+                         // Replication (plan §6.1). Only when the checkbox is
+                         // ticked, and then the container pair has to be spelt
+                         // out too — these are positional. Without this a class
+                         // shipped as generated C++ replicates nothing, which
+                         // is the hole §6.5 left open.
+                         (v.replicated
+                              ? (tr.kind() == HorizonCode::ContainerKind::Set ||
+                                 tr.kind() == HorizonCode::ContainerKind::Map
+                                     ? std::string()
+                                     : ", hc::ContainerKind::None, hc::PinType::String") +
+                                std::string(", true, ") + (v.repNotify ? "true" : "false")
+                              : std::string()) +
                          "),\n";
                 }
                 c += "    };\n    return k;\n}\n\n";
@@ -3329,6 +3389,72 @@ private:
                 else c += "    if (elem == " + std::to_string(n->elem) + ") " + call + "\n";
             }
             c += "}\n\n";
+        }
+
+        // funcInfos: what the RPC router asks about a function it did not author
+        // (plan §7.6) — where it runs, whether a stranger may call it, and the
+        // parameter types the format check compares an argument list against.
+        // Without this table a packaged host has no signature for any generated
+        // class and would have to treat every function as owner-only.
+        if (!fns.empty())
+        {
+            for (const Node* fn : fns)
+            {
+                if (fn->params.empty()) continue;
+                c += "static const HorizonCode::PinType kFnP_" + m_fnName.at(fn->s) + "[] = { ";
+                for (size_t i = 0; i < fn->params.size(); ++i)
+                    c += (i ? ", " : "") + std::string("(HorizonCode::PinType)") +
+                         std::to_string((int)fn->params[i].type);
+                c += " };\n";
+                // Parallel: which of them are containers. A function declaring
+                // an array parameter has to ACCEPT an array, or the host reads
+                // every honest call to it as a forgery.
+                c += "static const bool kFnA_" + m_fnName.at(fn->s) + "[] = { ";
+                for (size_t i = 0; i < fn->params.size(); ++i)
+                    c += (i ? ", " : "") + std::string(fn->params[i].isArray ? "true" : "false");
+                c += " };\n";
+            }
+            c += "const std::vector<HorizonCode::CompiledFuncInfo>& " + m_cls +
+                 "::funcInfos() const\n{\n";
+            c += "    static const std::vector<HorizonCode::CompiledFuncInfo> kFns = {\n";
+            for (const Node* fn : fns)
+            {
+                // A zero-parameter function still carries a table pointer — an
+                // EMPTY list and "no list at all" are different answers, and
+                // the router treats the second as "nothing to check against"
+                // (CompiledFuncInfo::params). kNone is that empty-but-present
+                // list, so a function of no arguments is checked and refused
+                // when somebody sends one.
+                const std::string tbl = fn->params.empty()
+                    ? "hc::kNoParams"
+                    : "kFnP_" + m_fnName.at(fn->s);
+                const std::string arrTbl = fn->params.empty()
+                    ? "nullptr"
+                    : "kFnA_" + m_fnName.at(fn->s);
+                c += "        { " + strLit(fn->s) + ", " +
+                     std::to_string((int)fn->runOn) + ", " +
+                     (fn->anyClient ? "true" : "false") + ", " + tbl + ", " +
+                     std::to_string(fn->params.size()) + ", " + arrTbl + " },\n";
+            }
+            c += "    };\n";
+            if (par)
+            {
+                // Plus the base's, for eventInfos' reason: an inherited
+                // function is callable, so the host has to be able to look it
+                // up. The derived class's own rows come LAST, so a re-declared
+                // function's Run On is the one that counts — the leaf-first
+                // rule the interpreter follows.
+                c += "    static const std::vector<HorizonCode::CompiledFuncInfo> kAllFns = [this]\n";
+                c += "    {\n";
+                c += "        std::vector<HorizonCode::CompiledFuncInfo> v = " + par->cpp +
+                     "::funcInfos();\n";
+                c += "        v.insert(v.end(), kFns.begin(), kFns.end());\n";
+                c += "        return v;\n";
+                c += "    }();\n";
+                c += "    return kAllFns;\n}\n\n";
+            }
+            else
+                c += "    return kFns;\n}\n\n";
         }
 
         // callFunction: coerced args, typed default results (§3.1).

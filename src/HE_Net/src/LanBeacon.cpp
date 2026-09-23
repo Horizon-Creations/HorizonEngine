@@ -43,6 +43,9 @@ std::vector<std::uint8_t> encode(const Announcement& a) {
     // before this field stops reading above and throws the byte away, which is
     // what keeps it visible in an older browser instead of vanishing from it.
     w.writeByte(a.syncsLargeAssets ? 1 : 0);
+    // Appended for the same reason, and with the same contract: a peer built
+    // before this reads up to the flag above and discards the rest.
+    w.writeByte(static_cast<std::uint8_t>(a.kind));
     return w.data();
 }
 
@@ -86,6 +89,19 @@ bool decode(const std::uint8_t* data, std::size_t len, Announcement& out) {
         std::uint8_t large = 0;
         if (!r.readByte(large)) return false;
         out.syncsLargeAssets = large != 0;
+    }
+
+    // Same rule once more. Absent means Collaboration, and that default is the
+    // TRUTH about an older announcer rather than a guess: nothing but an editor
+    // announced on this port before games did.
+    out.kind = Announcement::Kind::Collaboration;
+    if (r.bitsRemaining() >= 8) {
+        std::uint8_t kind = 0;
+        if (!r.readByte(kind)) return false;
+        // An unknown number from a newer build is not Collaboration and not
+        // Game; it is something this build has no list for, so it is kept as
+        // itself and filtered out by both.
+        out.kind = static_cast<Announcement::Kind>(kind);
     }
 
     // A port of zero cannot be connected to, so an announcement carrying one is
@@ -230,6 +246,12 @@ void Browser::ingest(const std::string& fromHost, const std::uint8_t* data,
     Announcement a;
     if (!decode(data, len, a)) return;
 
+    // A different kind of session entirely — an editor's, when we are a game
+    // looking for games, or the other way round. Dropped before the heard
+    // counter, because that counter answers "does anything reach this machine",
+    // and a datagram we filtered out did reach it.
+    if (a.kind != m_kind) { ++m_heard; return; }
+
     // Our own beacon, coming straight back off the segment. Counted — it proves
     // the socket works — but never listed: a host must not find itself.
     const bool self = (m_self != 0 && a.instance == m_self);
@@ -281,6 +303,7 @@ void Browser::ingest(const std::string& fromHost, const std::uint8_t* data,
     s->projectLabel = a.projectLabel;
     s->projectKey   = a.projectKey;
     s->protocol     = a.protocol;
+    s->kind         = a.kind;
     s->participants = a.participants;
     s->instance     = a.instance;
     s->syncsLargeAssets = a.syncsLargeAssets;

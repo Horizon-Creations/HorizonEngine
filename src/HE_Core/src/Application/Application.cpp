@@ -97,6 +97,7 @@ namespace HE
 				// Windows and Linux. Options are not documents, so anything
 				// starting with a dash stays out of the list.
 				if (!a.empty() && a[0] != '-') m_launchArgs.push_back(a);
+				else if (!a.empty())           m_launchFlags.push_back(a);
 			}
 			HE_LOG_INFO(Core, "Command line: %s", cmd.c_str());
 		}

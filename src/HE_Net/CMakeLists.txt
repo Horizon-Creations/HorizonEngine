@@ -3,15 +3,18 @@
 # editor collaboration / source-control presence+locks (Layer 3b) share one
 # transport + serialization core:
 #   Layer 0  Platform sockets      (shared with the SC HTTP stack; later checkpoint)
-#   Layer 1  ITransport / Session   (LoopbackTransport here; GNS + WebSocket later)
+#   Layer 1  ITransport / Session   (Loopback, TCP, UDP; SecureTransport + LossyTransport as decorators)
 #   Layer 2  BitStream / messages   (bit-packed, quantized serialization)
 #
-# Deliberately dependency-light for now: the loopback transport needs nothing but
-# the STL, so this builds and tests everywhere without pulling GameNetworkingSockets.
+# Deliberately dependency-light: every transport is built on the platform
+# sockets in Socket.cpp and the STL, so this builds and tests everywhere
+# without a third-party networking library.
 add_library(HorizonNet SHARED
 	src/Socket.cpp
 	src/LoopbackTransport.cpp
 	src/TcpTransport.cpp
+	src/UdpTransport.cpp
+	src/LossyTransport.cpp
 	src/SecureTransport.cpp
 	src/HttpClient.cpp
 	src/PortMapper.cpp

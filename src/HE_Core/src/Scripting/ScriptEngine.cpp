@@ -346,6 +346,55 @@ bool ScriptEngine::callOnCheatDetected(InstanceId id, int reportId)
     return pcall(2, 0);
 }
 
+bool ScriptEngine::callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+
+    // The name is the whole difference between the six (ScriptTypes.h).
+    const char* fn = nullptr;
+    bool carriesArg = true;
+    switch (ev)
+    {
+        case NetScriptEvent::PlayerJoined:   fn = "onPlayerJoined";   break;
+        case NetScriptEvent::PlayerLeft:     fn = "onPlayerLeft";     break;
+        case NetScriptEvent::Connected:      fn = "onConnected";      carriesArg = false; break;
+        case NetScriptEvent::Disconnected:   fn = "onDisconnected";   break;
+        case NetScriptEvent::SessionStarted: fn = "onSessionStarted"; carriesArg = false; break;
+        case NetScriptEvent::SessionEnded:   fn = "onSessionEnded";   carriesArg = false; break;
+    }
+    if (!fn) return true;
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, fn)) return true;
+    if (!carriesArg) return pcall(1, 0);
+    lua_pushinteger(m_L, static_cast<lua_Integer>(arg));
+    return pcall(2, 0);
+}
+
+bool ScriptEngine::callInstanceMethod(InstanceId id, const char* fn, const ArgPusher& pushArgs)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    if (!fn) return true;
+
+    if (!pushInstanceMethod(m_L, it->second.luaRef, fn)) return true;
+    // `self` is already on the stack, so the argument count is one more than
+    // whatever the caller pushed.
+    const int pushed = pushArgs ? pushArgs(m_L) : 0;
+    return pcall(1 + pushed, 0);
+}
+
+bool ScriptEngine::hasInstanceMethod(InstanceId id, const char* fn)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end() || !fn) return false;
+    if (!pushInstanceMethod(m_L, it->second.luaRef, fn)) return false;
+    // pushInstanceMethod leaves the function and `self` on the stack for a
+    // call that is not going to happen here.
+    lua_pop(m_L, 2);
+    return true;
+}
+
 bool ScriptEngine::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
     auto it = m_instances.find(id);

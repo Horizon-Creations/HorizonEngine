@@ -80,11 +80,11 @@ namespace
 	  "What a character is doing, in the form an animator wants to read: how fast "
 	  "it may go and what it was told to do this frame.",
 	  "", "systems#animation" },
-	{ "Component/Network", "Network",
-	  "Puts the entity on the wire in a multiplayer game: the host sends its "
-	  "state to the clients that are near enough. Without this component an "
-	  "entity is purely local, which is right for muzzle flashes, debris and "
-	  "anything else nobody else needs to see.",
+	{ "Component/Replication", "Replication",
+	  "Whether the entity is shared in a multiplayer game: the host sends its "
+	  "state to the clients that are near enough. Every entity has this "
+	  "category and every entity starts switched off, which is right for muzzle "
+	  "flashes, debris and anything else nobody else needs to see.",
 	  "", "collaboration#gameplay" },
 	{ "Component/Camera", "Camera",
 	  "A viewpoint the game can render from. Exactly one camera per scene may be "
@@ -473,26 +473,37 @@ namespace
 	  "something else owns the facing — a camera rig with coupled rotation. It "
 	  "does NOT change which way forward is; Move Direction Is does that.",
 	  "", "rendering#cameras" },
-	// ── Network ──────────────────────────────────────────────────────────────
-	{ "Network/Relevance Radius", "",
+	// ── Replication ──────────────────────────────────────────────────────────
+	{ "Replication/Replicates", "",
+	  "The one switch that shares this entity. On, it is registered when a "
+	  "session starts and its position and rotation ride the snapshot every "
+	  "tick. The variables it marks Replicated and the functions it marks Run "
+	  "On travel on this same switch and no other. Off, the entity is purely "
+	  "local: it still exists on every machine that loaded the scene, but "
+	  "nothing about it is sent, and what it does there is its own business.\n\n"
+	  "Switching it off KEEPS the settings below — the radius and the speed "
+	  "limits come back with a second click. Remove Component in the header's "
+	  "right-click menu is how you get rid of them.",
+	  "", "collaboration#gameplay" },
+	{ "Replication/Relevance Radius", "",
 	  "How far away, in metres, a player can be and still receive updates for "
 	  "this entity. Further than this and it is simply not sent — the single "
 	  "biggest bandwidth saving in a large world, and the reason a distant "
 	  "player cannot see what happens over here.",
 	  "", "collaboration#gameplay" },
-	{ "Network/Replicate Transform", "",
+	{ "Replication/Replicate Transform", "",
 	  "Send position and rotation every tick. Switch it off for things that "
 	  "never move — level geometry, static props — so they stop taking a slot "
 	  "in every snapshot once their starting state is known.",
 	  "", "collaboration#gameplay" },
-	{ "Network/Max Speed", "",
+	{ "Replication/Max Speed", "",
 	  "The fastest the host will believe this entity moves horizontally, in "
 	  "metres per second; a client claiming more is reported as a possible "
 	  "speed hack. 0 uses the Movement component's Max Speed if there is one, "
 	  "and checks nothing if there is not. Set it explicitly for an entity "
 	  "that dashes or teleports on purpose.",
 	  "", "collaboration#gameplay" },
-	{ "Network/Max Vertical Speed", "",
+	{ "Replication/Max Vertical Speed", "",
 	  "The same limit for up and down, in metres per second — how fast a jump "
 	  "or fall may legitimately be. 0 means the vertical axis is not checked; "
 	  "there is no Movement field to derive it from, so a game that wants it "
@@ -2557,6 +2568,59 @@ namespace
 	  "When the chain simply ends, the run is over and the world goes on until "
 	  "the next breakpoint.",
 	  "", "horizoncode#debugging" },
+	// ── Play ▸ multiplayer (docs/gameplay-replication-plan.md §5.6) ──────────
+	// Keyed under the menu's own scope, like every other menu entry: the Play
+	// menu pushes "Play", so the wrapper at the call site needs nothing.
+	{ "Play/Play as Host", "",
+	  "Starts play mode AND opens a session others can join. The menu then shows "
+	  "the port and the join code — the two things somebody else needs. Everyone "
+	  "who joins plays in this editor's world: what happens here is what "
+	  "happened.\n\n"
+	  "The port, the number of seats and the tick rate come from Project "
+	  "Settings under Game, Multiplayer. Two editors hosting on the SAME machine "
+	  "need that page's Default port set to 0, or the second one finds the port "
+	  "taken.",
+	  "", "editor#play-mode" },
+	{ "Play/Join Session...", "",
+	  "Starts play mode and connects to somebody else's session, with their "
+	  "address and join code. Without the code the connection cannot complete at "
+	  "all, so both fields are required.",
+	  "", "editor#play-mode" },
+	{ "Play/Copy Join Code", "",
+	  "Puts this session's join code on the clipboard, to send to whoever is "
+	  "about to join.",
+	  "", "editor#play-mode" },
+	// The dialog that entry opens. Its own scope rather than "Play/": the modal
+	// is drawn outside the menu bar, because a dialog inside a menu closes with
+	// the menu — so by the time these are submitted, "Play" is long popped.
+	{ "Join Session/Host", "",
+	  "Where the host is: an address or a name, and a port after a colon if it "
+	  "is not the default one. On the same network the host's local address is "
+	  "enough; over the internet it is the address the host's router shows.",
+	  "", "editor#play-mode" },
+	{ "Join Session/Join code", "",
+	  "The code the host's Play menu is showing. It is not a password for a "
+	  "person, it is half of the handshake: without the right one the "
+	  "connection is refused before anything else is tried, which is why an "
+	  "empty field greys the button rather than failing later as \"could not "
+	  "connect\".",
+	  "", "editor#play-mode" },
+	{ "Join Session/Join", "",
+	  "Starts play mode and connects. The session belongs to the host: this "
+	  "editor's own scene is loaded for the view, but what happens in it is "
+	  "what the host says happens.",
+	  "", "editor#play-mode" },
+	// Help ▸ About. The two buttons under the version string; the third is
+	// Close, which needs nothing. Scoped for the same reason as the dialog
+	// above — the modal outlives the menu that opened it.
+	{ "About/Documentation", "",
+	  "Opens the manual inside the editor, at its first page. The same thing F1 "
+	  "does on a control, minus the control.",
+	  "", "editor#menus" },
+	{ "About/Website", "",
+	  "Opens horizoncreations.dev in the system browser: releases, the roadmap "
+	  "and the online copy of this manual.",
+	  "", "editor#menus" },
 	{ "viewport.time-scale", "Game time",
 	  "What the RUNNING GAME is doing to its own clock, which is not the same as "
 	  "the Pause button next to it: this reads the scale a script set with Set "
@@ -3360,6 +3424,96 @@ namespace
 	  "Adds an empty row. Name it after the value the game will ask about, then "
 	  "set its range and rate; the row is saved as you go, and a nameless row "
 	  "is simply never matched.",
+	  "", "collaboration#gameplay" },
+	// ── Game ▸ Multiplayer ───────────────────────────────────────────────────
+	// What a session of this project IS. Every number here is read the moment a
+	// session STARTS, so an edit reaches the next Play as Host and never the one
+	// already running.
+	{ "Multiplayer/Default port", "Default port",
+	  "The port a host opens when nothing else names one — the editor's Play as "
+	  "Host, a packaged game started with --host, a script calling net.host "
+	  "without a number. 47824 is deliberately one above the port sessions "
+	  "announce themselves on, so a single firewall rule can name the pair.\n\n"
+	  "0 means \"let the system pick a free one\", which is what two instances on "
+	  "the same machine need; the port that was actually opened is then in the "
+	  "log and in the Play menu.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Max players", "Max players",
+	  "How many players fit, counting the host. Somebody joining a full session "
+	  "is refused with a reason they can read, not silently dropped.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Connection timeout", "Connection timeout",
+	  "How long a peer may go completely silent before the session gives up on "
+	  "it. A player whose connection dies sends nothing at all, and over UDP "
+	  "that is indistinguishable from a quiet moment — this is where the line "
+	  "is drawn. Short turns a brief hiccup into a disconnect; long leaves "
+	  "everybody else waiting for somebody whose cable is out.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Tick rate", "Tick rate",
+	  "How many times a second the host sends the state of the entities with "
+	  "Replication switched on. Bandwidth grows with it in a straight line, so "
+	  "this is the biggest single lever on what a session costs; much below 20 "
+	  "and the smoothing between snapshots becomes visible as remote players "
+	  "lagging behind what they do.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/World extent", "World extent",
+	  "Half the width of the area positions are packed for, in metres from the "
+	  "origin. A position is sent as a whole number of tiny steps across this "
+	  "range, which is what makes it nine bytes instead of twelve — and why "
+	  "anything outside it is CLAMPED on the way over. It has to contain the "
+	  "playable area comfortably; making it larger costs precision, not bytes.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Interpolation delay", "Interpolation delay",
+	  "How far in the past a client draws the OTHER players, so it always has "
+	  "two snapshots to move between instead of waiting for the next one. This "
+	  "is what makes remote players glide rather than jump — and it is also "
+	  "exactly how far behind what they are doing you see them, which is why "
+	  "a shooter keeps it small and a slower game can afford more.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Correction snap distance", "Correction snap distance",
+	  "A client moves its OWN character the moment you press a key and the host "
+	  "confirms it a round trip later. When the two disagree by more than this, "
+	  "the character is put straight where the host says, because easing away a "
+	  "large error looks like sliding on ice. Smaller snaps more often and more "
+	  "visibly; larger lets a big error linger.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Correction smoothing", "Correction smoothing",
+	  "And how quickly a SMALL disagreement is eased away, as a fraction of it "
+	  "per second. Higher follows the host more closely and shows more of the "
+	  "correction; 0 leaves the error standing until the next one replaces it.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Max pending inputs", "Max pending inputs",
+	  "How many movements a client keeps after sending them, so it can replay "
+	  "them against a correction that arrives later. At 60 frames a second, 64 "
+	  "is about a second of round trip; past that the connection is the problem "
+	  "and a bigger buffer only delays noticing it.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Announce on the local network", "Announce on the local network",
+	  "The host says it is there on the local network, so a second instance can "
+	  "offer it in a list instead of somebody typing an address. Only the "
+	  "session's name, its project and its port travel — the join code never "
+	  "does, and without the code nobody gets in.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Register with the session directory", "Register with the session directory",
+	  "For a session played over the internet, where an announcement on the "
+	  "local network reaches nobody.\n\n"
+	  "STORED BUT NOT YET READ: the directory is wired up in a later step of "
+	  "the multiplayer work. Until then a session is found on the local network "
+	  "or by its address, whatever this says.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Ask the router to open the port", "Ask the router to open the port",
+	  "Automatic port forwarding (UPnP, NAT-PMP, PCP), so players outside the "
+	  "local network can reach a host that sits behind a router.\n\n"
+	  "STORED BUT NOT YET READ: same later step as the directory above. A host "
+	  "on the internet needs the forwarding set up by hand for now.",
+	  "", "collaboration#gameplay" },
+	{ "Multiplayer/Max remote calls per second", "Max remote calls per second",
+	  "What one client may ask the host to run per second before the excess "
+	  "counts as suspicious — the rate limit on calling a function across the "
+	  "wire.\n\n"
+	  "Measured over a two-second window, so a burst after a stall does not "
+	  "count as an attack. A client past the limit has its extra calls dropped "
+	  "and the overage weighed against it, exactly like a flood of input.",
 	  "", "collaboration#gameplay" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
@@ -6063,6 +6217,27 @@ namespace
 	  "A function-local has no access at all, which is why a \"Local to\" line "
 	  "stands here instead for those.",
 	  "", "horizoncode#functions" },
+	{ "Script Variable/Replicated", "",
+	  "In a multiplayer session the host owns this variable and every client is "
+	  "sent its value. This box is the whole declaration — nothing has to be "
+	  "called and nothing has to be wired; Set Variable keeps working exactly as "
+	  "it does offline, and the change is on its way at the end of the frame. A "
+	  "client may write it too: the write takes effect there and the host's next "
+	  "value replaces it, which is what lets a graph predict. An Object variable "
+	  "cannot be ticked, because a reference points into THIS machine's memory "
+	  "and means nothing on another one — replicate a name or an id instead. A "
+	  "value that changes every frame belongs in the transform replication, not "
+	  "here; Debug > Network Stats shows which variables cost the most.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Notify", "",
+	  "Calls OnRep_<variable> on the clients whenever a new value arrives, with "
+	  "the value this machine held before as its one parameter. Ticking the box "
+	  "writes that function for you, private and with the right parameter, so "
+	  "the name cannot be mistyped. It is never called on the host — the host "
+	  "set the value and knows it — so a graph that has to react on both sides "
+	  "calls its own handler after the Set. Untick and tick again and the "
+	  "existing function is kept, not duplicated.",
+	  "", "horizoncode#functions" },
 	{ "Script Variable/Position##vdef", "Default Position",
 	  "The position this Transform variable starts at. It is a starting value, "
 	  "not a binding to anything.",
@@ -6078,6 +6253,45 @@ namespace
 	  "that used it are left where they are, still naming something no longer "
 	  "declared — nothing is repaired for you.",
 	  "", "horizoncode#functions" },
+
+	{ "Script Node/Run On", "",
+	  "Which machine actually runs this function in a multiplayer session. "
+	  "Local is every function that ever existed: it runs wherever it was "
+	  "called. Server hands the call to the host — the ordinary way a player "
+	  "says \"I pulled the lever\", because only the host may change the world. "
+	  "Owning Client runs it on the machine of the player who owns this entity; "
+	  "All Clients runs it everywhere, host included. Nothing at the Call "
+	  "Function node says any of this, so one graph works offline and online: "
+	  "with no session, every mode simply runs here.",
+	  "A function that runs elsewhere returns nothing — there is nobody on this "
+	  "machine to hand a value back to, so the Outputs list disappears and any "
+	  "outputs it had are dropped. If the other side needs a value, pass it as "
+	  "an argument.\n\n"
+	  "A DOOR, END TO END. The class runs on every machine, so the rule is: "
+	  "simulate only with Is Authority, show everywhere, and send intentions "
+	  "with a Server function.\n\n"
+	  "  On Interact  ->  Open()            (Open is Run On: Server, Any Client)\n"
+	  "  Open [Server]  ->  Is Authority?  ->  Set doorOpen = true\n"
+	  "  OnRep_doorOpen  ->  Play Animation\n\n"
+	  "The player's machine runs On Interact and calls Open; because Open is a "
+	  "Server function, the call travels instead of running there. The host runs "
+	  "Open and sets doorOpen, which is a Replicated variable with Notify, so "
+	  "every client hears OnRep_doorOpen and plays the animation.\n\n"
+	  "The host does NOT hear its own OnRep — it set the value and knows it — so "
+	  "if the host should see the door swing too, play the animation right after "
+	  "the Set as well. Any Client is ticked because a door belongs to nobody: "
+	  "without it the host would refuse every player who tried to open it.",
+	  "horizoncode#functions" },
+
+	{ "Script Node/Any Client", "",
+	  "May a player who does NOT own this entity call this Server function? Off "
+	  "by default, so \"anyone may trigger this\" is a decision somebody made. A "
+	  "door belongs to nobody, so its Open needs this ticked; a character's "
+	  "Respawn does not, because its owner is the only one who should ask.",
+	  "The host refuses a call from a player who owns neither the entity nor "
+	  "this permission, and counts it against them — that refusal is what stops "
+	  "one player driving everybody else's character.",
+	  "horizoncode#functions" },
 
 	{ "Script Node/Overridable", "",
 	  "Lets a class derived from this one replace this event or function. It then "
@@ -6719,6 +6933,11 @@ namespace
 		{ "Collaboration/",    "editor-interface", "Editor Interface", "Collaboration" },
 		{ "Source Root/",      "editor-interface", "Editor Interface", "Source root" },
 		{ "New Entity/",       "editor-interface", "Editor Interface", "Creating entities" },
+		// The Play menu's join dialog. Under the Play menu's group, because
+		// that is where a reader met it, even though the modal is drawn
+		// elsewhere.
+		{ "Join Session/",     "editor-interface", "Editor Interface", "Play menu" },
+		{ "About/",            "editor-interface", "Editor Interface", "Help menu" },
 		{ "Viewport Options/", "editor-interface", "Editor Interface", "Viewport options" },
 		{ "Viewport View/",    "editor-interface", "Editor Interface", "View presets" },
 		{ "Viewport View Mode/", "editor-interface", "Editor Interface", "View modes" },
@@ -6764,6 +6983,7 @@ namespace
 		// the tab's rail is.
 		{ "Project General/",  "editor-settings", "Settings Reference", "Project: general" },
 		{ "Anti-Cheat/",       "editor-settings", "Settings Reference", "Project: anti-cheat" },
+		{ "Multiplayer/",      "editor-settings", "Settings Reference", "Project: multiplayer" },
 		{ "Render Defaults/",  "editor-settings", "Settings Reference", "Project: render defaults" },
 		{ "Shadows/",          "editor-settings", "Settings Reference", "Project: shadows" },
 		{ "Physics/",          "editor-settings", "Settings Reference", "Project: physics" },
@@ -6855,7 +7075,7 @@ namespace
 	constexpr const char* kComponentScopes[] = {
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
 		"Decal", "Rope", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
-		"Network",
+		"Replication",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Root Motion", "Animation Layers",
