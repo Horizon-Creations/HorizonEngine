@@ -1978,3 +1978,48 @@ TEST_CASE("codegen: a Run On function routes at the call site and lands in funcI
 	for (const auto& file : pr.files) plainAll += file.contents;
 	CHECK(plainAll.find("hc::rpcRoute") == std::string::npos);
 }
+
+TEST_CASE("codegen: a Replicated variable keeps its flags in the generated slot table")
+{
+	// The hole docs/gameplay-replication-plan.md §6.5 left open: the compiled
+	// path CARRIED the two flags in CompiledVarInfo, but the emitter never
+	// wrote them — so a class shipped as generated C++ replicated nothing, and
+	// an OnRep-driven door worked in the editor and died in the packaged build.
+	using PT = HorizonCode::PinType;
+	hcfix::Fx f;
+	f.var("doorOpen", PT::Bool);
+	f.var("secret", PT::Int);
+	{
+		// Only the first one is shared, and it notifies.
+		for (HorizonCode::Variable& v : f.g.variables)
+			if (v.name == "doorOpen") { v.replicated = true; v.repNotify = true; }
+	}
+	const int ev = f.event("Go");
+	const int s = f.setVar("doorOpen", PT::Bool);
+	f.data(f.constB(true), 0, s, 0);
+	f.exec(ev, s);
+
+	HE::hccg::Options opt;
+	HE::hccg::Result r = HE::hccg::generate({ f.done("replicated_var") }, opt);
+	REQUIRE(r.ok);
+	REQUIRE(r.fallbacks.empty());
+	std::string all;
+	for (const auto& file : r.files) all += file.contents;
+
+	// The ticked variable's slot carries the pair; the untouched one does not,
+	// which is the negative control — without it this would pass on an emitter
+	// that marked every variable replicated.
+	const std::size_t door = all.find("\"doorOpen\"");
+	REQUIRE(door != std::string::npos);
+	// To the end of the LINE, not to the next "),": the default value is itself
+	// a call (hc::toValue(false)), so a parenthesis-based cut lands inside it.
+	const std::size_t doorEnd = all.find('\n', door);
+	REQUIRE(doorEnd != std::string::npos);
+	CHECK(all.substr(door, doorEnd - door).find("true, true") != std::string::npos);
+
+	const std::size_t sec = all.find("\"secret\"");
+	REQUIRE(sec != std::string::npos);
+	const std::size_t secEnd = all.find('\n', sec);
+	REQUIRE(secEnd != std::string::npos);
+	CHECK(all.substr(sec, secEnd - sec).find("true") == std::string::npos);
+}

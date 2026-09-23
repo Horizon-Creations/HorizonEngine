@@ -1232,6 +1232,81 @@ Auf dem Host, in dieser Reihenfolge, **vor** der Zustellung:
 4. **Format:** `argc` und Typen gegen die Funktionssignatur; Mismatch = `Hard` (kein legitimer Client erzeugt das).
 5. Zustellung. Was der Handler dann mit `anticheat.check("Damage", amount, player)` tut, ist Spielsache; die Engine hat ihm `player` als `fromPlayer` schon in `net.rpcSender()` (pure Row, gültig während der Zustellung) hingelegt.
 
+### 7.7 Stand nach Schritt 7
+
+Umgesetzt: `Node::runOn` + `anyClient`, die Umleitung im Interpreter **und** im
+Codegen, `kMsgRpc`, `RpcRouter` mit den vier Prüfungen aus §7.6, die fünf
+`net`-Rows, variadische Lua/Python-Bindings, `HeNetServices` +
+`IGameLogic::onRpc`, `NetEvents::dispatchRpc`, Funktionskopf-UI und das
+Tür-Beispiel im Handbuch. Vier Stellen weichen von dem ab, was oben steht, und
+zwei Funde gehören nicht zu diesem Schritt, blockierten ihn aber.
+
+**1. Die explizite Form läuft offline LOKAL, nicht ins Leere.** §7.1 schreibt
+für einen null-`Ctx::net` „jede exec-Row no-op". Gegen §7.1s eigene Begründung
+für `isAuthority == true` gelesen ist das ein Widerspruch: ein Graph soll
+offline genau so laufen. Die Tür aus §7.5 ist `OnInteract → CallServer "Open"`;
+wäre die Row offline ein no-op, ginge die Tür im Einzelspieler nie auf und jedes
+Projekt müsste jede Interaktion zweimal bauen. Also laufen `net.callServer`,
+`callClient` und `callAllClients` ohne Session — und auf der Seite, die schon
+das Ziel ist — auf der HorizonCode-Klasse der Entity. Für Lua und Python ist das
+keine Einschränkung: ein Skript, das seine eigene Methode lokal rufen will,
+schreibt `self:Open()`.
+
+**2. `AllClients` läuft auf dem Host mit.** §7.2 sagt dazu nichts. Ein Multicast
+erreicht jede Maschine, und der Host ist eine; ihn auszunehmen hieße, jeden
+Effekt zweimal zu verdrahten. `route()` sendet also und gibt trotzdem „hier
+ausführen" zurück. Ein CLIENT schickt nie einem anderen Client etwas: ein
+`OwningClient`- oder `AllClients`-Aufruf auf einem Client läuft lokal und geht
+nirgendwohin, sonst wäre §7.3s Ablehnung auf der Gegenseite nur eine zweite
+Verteidigungslinie für etwas, das wir selbst versenden.
+
+**3. Die Format-Prüfung behandelt Int/Float/Enum als eine Familie.** §7.6 Punkt 4
+sagt „Typen gegen die Funktionssignatur". Wörtlich genommen scheitert daran jeder
+ehrliche Aufruf aus einem Text-Frontend: Lua und Python reichen untypisierte
+Zahlen, `takeDamage(40)` erzeugt einen Int für einen Float-Parameter. Die
+Zustellung coerct ohnehin auf die deklarierten Typen (`Runner::callFunction`),
+der Unterschied ist also stromabwärts unsichtbar. Was die Prüfung soll — ein
+String, wo eine Zahl hingehört, ein Array statt eines Skalars — fängt sie weiter.
+
+**4. `anyClient` gibt es auch pro Entity.** Das Häkchen sitzt am
+HorizonCode-Funktionskopf, und eine Lua-, Python- oder C++-Funktion auf einer
+Entity, die niemandem gehört, hat keinen Kopf zum Ankreuzen — sie wäre für jeden
+Client unaufrufbar. `net.allowAnyClient(entity, fn)` ist die Tür dafür, nach dem
+Muster, mit dem Schritt 6 dieselbe Lücke bei `declareVar` geschlossen hat. Additiv:
+erst wird die Signatur gefragt, dann diese Liste, die beiden können sich also nicht
+in eine Ablehnung hineinwidersprechen.
+
+**Zwei Funde, die vor diesem Schritt lagen:**
+
+`ScriptContext::HostServices` hatte kein `net`-Feld. Jede `horizon.net.*`-Row kam
+aus Lua und Python mit einer Null-Session an und antwortete still ihren
+Offline-Wert — seit Schritt 5 war die ganze Gruppe aus beiden Textsprachen
+unerreichbar, ohne Fehlermeldung, weil „keine Session" ein gültiger Zustand ist.
+Feld ergänzt, in beiden Anwendungen verdrahtet.
+
+Und der aus §6.5 offene Codegen-Punkt ist mit erledigt: `VarSlot` trägt jetzt
+`replicated`/`repNotify` und der Emitter schreibt sie. Vorher replizierte eine
+als C++ ausgelieferte Klasse keine einzige Variable — die Tür aus §7.5 hätte im
+Editor funktioniert und im gepackten Build nicht, was genau die Form ist, in der
+ein Fehler am teuersten wird.
+
+**Offen aus diesem Schritt:**
+
+- **Kein Zwei-Prozess-Durchlauf.** Alles hier ist headless über `LossyTransport`
+  geprüft, mit simulierter Uhr. Über echte Sockets, zwischen zwei Prozessen, ist
+  ein RPC nie gelaufen. Das gehört zu Schritt 8.
+- **Die Website hat keine Seite dafür.** Jeder Multiplayer-Handbucheintrag seit
+  Schritt 5 zeigt auf `collaboration#gameplay`, und diesen Abschnitt gibt es
+  nicht: `collaboration.html` sagt ausdrücklich, dass es NICHT um
+  Multiplayer-Gameplay geht. Die Tooltips stimmen, der „Mehr dazu"-Link führt
+  ins Leere. Eine eigene Seite plus Deploy steht in Schritt 8 und braucht die
+  Zustimmung des Menschen.
+- **Kein Rückgabewert**, wie §7.2 es festlegt, und kein Zeitlimit oder
+  Zustellbeleg. Ein RPC ist abgeschickt und vergessen.
+- **Die Ordnung gegen Property-Deltas** ist weiterhin keine. §7.3 sagt es, das
+  Handbuch sagt es an `Run On`, und der Rat bleibt: hängt ein Aufruf an einem
+  Wert aus demselben Frame, trage ihn als Argument.
+
 ---
 
 ## 8. (e) Editor-Bedienung
@@ -1526,7 +1601,7 @@ Sichtbarkeit: der erste sichtbare Knopf kommt in Schritt 5b.
 | 5b | **Editor-Bedienung:** **Inspector-Kategorie Replication** mit Schalter (Serializer-Feld, Menü-Eintrag weg), Project Settings Page Multiplayer (`ProjectMultiplayerSettings`), Tooltips + Handbuch für beides, erste Overlay-Zeilen (Rolle, Spieler, Ping, Verlust) | Panel-Audit 715/715, Inspector headless (`imgui-allow-overlap-row-buttons`-Rezept), `test_project_settings` | 4 (Session), unabhängig von 5 | keine Variablen-Checkboxen, kein Funktionskopf |
 | 5c | **Website/Directory:** `session-api.php` `kind` + `transport`, Directory-Client-Felder, Hairpin-Self-Probe mit ehrlicher UI, Deploy (mit Bestätigung) | `test_net_directory` (Mock), Hand-Test gegen die echte Website | 4 | |
 | 6 | **`PropertyReplicator`:** `Variable::replicated/repNotify`, Dirty-Tracking, `kMsgPropertyTable/Properties`, `Value`-Wire-Format, `ReplicatedVarsComponent` + `net.declareVar/setVar*/getVar*`, `OnRep_<Var>` in allen vier Frontends, Baseline-`OnRep`, Variablen-Liste im HC-Editor (Checkboxen, Ref-Sperre, Notify-Generator), Overlay-Zeilen | `test_net_property_replication.cpp` über `LossyTransport`: Wert kommt an, `OnRep` einmal, alter Wert korrekt, Client-Schreibzugriff wird überschrieben, Typ-Mismatch verworfen ohne Crash, Struct/Enum/Map rund; `test_scripting_binding`, `test_python_scripting` für `onRep_*` | 4, 5, 5b | kein RPC |
-| 7 | **`RpcRouter`:** `Node::runOn` + `anyClient`, Router-Umleitung im Runtime, `kMsgRpc`, Owner/Rate/Format-Checks als Observations, variadische Lua/Python-Rows, `HeNetServices` + `IGameLogic::onRpc/onRep`, `net.call*`-Rows, `net.rpcSender`, Funktionskopf-UI + Validierung, Beispiel-Graph Tür in der In-Engine-Doku | `test_net_rpc.cpp`: CallServer vom Owner ok, vom Fremden `Hard`, `anyClient` erlaubt, Rate-Fenster, Format-Mismatch, Reihenfolge unter Reorder, Cross-Frontend Lua→HC | 5, 6 | keine Rückgabewerte |
+| 7 ✔ | **`RpcRouter`:** `Node::runOn` + `anyClient`, Router-Umleitung im Runtime, `kMsgRpc`, Owner/Rate/Format-Checks als Observations, variadische Lua/Python-Rows, `HeNetServices` + `IGameLogic::onRpc/onRep`, `net.call*`-Rows, `net.rpcSender`, Funktionskopf-UI + Validierung, Beispiel-Graph Tür in der In-Engine-Doku | `test_net_rpc.cpp`: CallServer vom Owner ok, vom Fremden `Hard`, `anyClient` erlaubt, Rate-Fenster, Format-Mismatch, Reihenfolge unter Reorder, Cross-Frontend Lua→HC | 5, 6 | keine Rückgabewerte |
 | 8 | **Abschluss:** Overlay komplett, Memory `networking-layer.md` und Website-Roadmap (`roadmap.json` + `deploy.py`, mit Bestätigung), Devlog, Release-Build mit Zwei-Geräte-Test über LAN **und** über Directory + Portfreigabe (echte Router, siehe `port-forward-refusal-vs-absence`) | Hand-Test mit Protokoll, Log-Sink-Test „kein Join-Secret im Log" | 7 | |
 
 ### 11.2 Checkliste berührter Dateien

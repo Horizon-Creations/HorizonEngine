@@ -3222,6 +3222,18 @@ private:
                                 std::string(tr.kind() == HorizonCode::ContainerKind::Set ? "Set" : "Map") +
                                 ", hc::PinType::" + pinName(v.keyType)
                               : std::string()) +
+                         // Replication (plan §6.1). Only when the checkbox is
+                         // ticked, and then the container pair has to be spelt
+                         // out too — these are positional. Without this a class
+                         // shipped as generated C++ replicates nothing, which
+                         // is the hole §6.5 left open.
+                         (v.replicated
+                              ? (tr.kind() == HorizonCode::ContainerKind::Set ||
+                                 tr.kind() == HorizonCode::ContainerKind::Map
+                                     ? std::string()
+                                     : ", hc::ContainerKind::None, hc::PinType::String") +
+                                std::string(", true, ") + (v.repNotify ? "true" : "false")
+                              : std::string()) +
                          "),\n";
                 }
                 c += "    };\n    return k;\n}\n\n";

@@ -738,6 +738,11 @@ struct VarSlot
     // the value side alone.
     ContainerKind container = ContainerKind::None;
     PinType       keyType = PinType::String;
+    // Mirrors Variable::replicated / repNotify (plan §6.1). Appended last with
+    // defaults, like the two above, so every slot() call written before
+    // multiplayer existed still compiles and still means "does not replicate".
+    bool          replicated = false;
+    bool          repNotify  = false;
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
@@ -767,10 +772,12 @@ template <auto M>
 inline VarSlot slot(const char* name, PinType type, bool isArray, int access,
                     const char* typeName, Value def,
                     ContainerKind container = ContainerKind::None,
-                    PinType keyType = PinType::String)
+                    PinType keyType = PinType::String,
+                    bool replicated = false, bool repNotify = false)
 {
     return VarSlot{ name, type, isArray, access, typeName, std::move(def),
-                    &SlotAccess<M>::get, &SlotAccess<M>::set, container, keyType };
+                    &SlotAccess<M>::get, &SlotAccess<M>::set, container, keyType,
+                    replicated, repNotify };
 }
 
 // Enum members are plain ints in C++, so the Value coming back out has to be
@@ -861,7 +868,12 @@ inline std::vector<HorizonCode::CompiledVarInfo> varInfosOf(const VarSlots& slot
 {
     std::vector<HorizonCode::CompiledVarInfo> out;
     out.reserve(slots.size());
-    for (const VarSlot& s : slots) out.push_back({ s.name, s.type, s.isArray, s.access });
+    // The replication pair rides along, or a class shipped as generated C++
+    // would replicate nothing at all: Runtime::replicatedVariablesOf reads this
+    // table for a compiled instance, and an unset flag there means the variable
+    // never reaches a client (plan §6.1).
+    for (const VarSlot& s : slots)
+        out.push_back({ s.name, s.type, s.isArray, s.access, s.replicated, s.repNotify });
     return out;
 }
 
