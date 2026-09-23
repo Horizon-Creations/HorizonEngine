@@ -6217,6 +6217,27 @@ namespace
 	  "A function-local has no access at all, which is why a \"Local to\" line "
 	  "stands here instead for those.",
 	  "", "horizoncode#functions" },
+	{ "Script Variable/Replicated", "",
+	  "In a multiplayer session the host owns this variable and every client is "
+	  "sent its value. This box is the whole declaration — nothing has to be "
+	  "called and nothing has to be wired; Set Variable keeps working exactly as "
+	  "it does offline, and the change is on its way at the end of the frame. A "
+	  "client may write it too: the write takes effect there and the host's next "
+	  "value replaces it, which is what lets a graph predict. An Object variable "
+	  "cannot be ticked, because a reference points into THIS machine's memory "
+	  "and means nothing on another one — replicate a name or an id instead. A "
+	  "value that changes every frame belongs in the transform replication, not "
+	  "here; Debug > Network Stats shows which variables cost the most.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Notify", "",
+	  "Calls OnRep_<variable> on the clients whenever a new value arrives, with "
+	  "the value this machine held before as its one parameter. Ticking the box "
+	  "writes that function for you, private and with the right parameter, so "
+	  "the name cannot be mistyped. It is never called on the host — the host "
+	  "set the value and knows it — so a graph that has to react on both sides "
+	  "calls its own handler after the Set. Untick and tick again and the "
+	  "existing function is kept, not duplicated.",
+	  "", "horizoncode#functions" },
 	{ "Script Variable/Position##vdef", "Default Position",
 	  "The position this Transform variable starts at. It is a starting value, "
 	  "not a binding to anything.",

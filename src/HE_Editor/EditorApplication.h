@@ -199,6 +199,14 @@ struct AppContext
 	std::function<int()>         netPlayerCount;
 	std::function<float()>       netPingMs;
 	std::function<float()>       netLossPercent;
+	// And what the replicated VARIABLES cost (plan §6.2, §8.5). The overlay is
+	// the one place "this variable changes thirty times a second and belongs in
+	// the snapshot instead" becomes visible rather than folklore, so it names
+	// the three most expensive by bytes since the session started. A pair of
+	// plain strings, because the panel has no business knowing what a
+	// PropertyReplicator is.
+	std::function<int()>                      netPropertyCount;
+	std::function<std::vector<std::string>()> netCostliestProperties;
 	// Freeze / thaw the world tick, and let exactly one frame through. stepFrame
 	// pauses first when the scene is still running, so "step" is one gesture from
 	// any transport state.

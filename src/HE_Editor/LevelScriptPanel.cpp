@@ -18,6 +18,7 @@
 #include "HcExecTrace.h"         // run-time node hits + "go to node" reveals
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EngineApi.h>
+#include <HorizonScene/Net/ValueWire.h>   // which types may replicate at all
 #include <HorizonScene/HcCodegen.h>   // in-editor compile check (Compile button)
 #include <HorizonScene/EntityHost.h>   // default component lists per base class
 #include <HorizonScene/SceneSerializer.h>
@@ -720,6 +721,67 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 		int vaccess = v->access;
 		if (ImGui::Combo("Access", &vaccess, "Public\0Private\0")) { v->access = vaccess; edited = true; }
 		EditorWidgets::helpForLabel("Access");
+
+		// ── Multiplayer (docs/gameplay-replication-plan.md §6.1, §8.2) ───────
+		// THIS CHECKBOX IS THE WHOLE DECLARATION. Nothing else has to be
+		// written: the session reads the variable out of the interpreter and
+		// sends it (Runtime::replicatedVariablesOf). A Lua or Python script has
+		// to say horizon.net.declareVar because its variables are invisible to
+		// the engine; a graph does not.
+		//
+		// A Ref can never travel — an object handle names nothing on the other
+		// machine — so the box is disabled rather than merely refused later,
+		// with the reason where the question is asked.
+		const bool canReplicate = HE::Net::Game::isReplicableType(v->type);
+		ImGui::BeginDisabled(!canReplicate);
+		bool rep = v->replicated && canReplicate;
+		if (EditorWidgets::checkbox("Replicated", &rep))
+		{
+			v->replicated = rep;
+			if (!rep) v->repNotify = false;   // Notify alone waits for nothing
+			edited = true;
+		}
+		ImGui::EndDisabled();
+		if (!canReplicate && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("%s", HE::Net::Game::replicationRefusalReason(v->type));
+		EditorWidgets::helpForLabel("Replicated");
+
+		if (v->replicated)
+		{
+			ImGui::SameLine();
+			bool notify = v->repNotify;
+			if (EditorWidgets::checkbox("Notify", &notify))
+			{
+				v->repNotify = notify;
+				edited = true;
+				// Ticking it WRITES THE HANDLER, the way the right-click "Add
+				// Function" does — so nobody has to guess the spelling of a
+				// name the dispatcher composes (OnRep_<Name>). Only when there
+				// is not one already: re-ticking the box must not leave two
+				// functions of the same name, which is dead code (calls
+				// resolve by name, first one wins).
+				const std::string fnName = "OnRep_" + v->name;
+				bool exists = false;
+				for (const auto& n : graph.nodes)
+					if (n.type == NT::FunctionEntry && n.s == fnName) { exists = true; break; }
+				if (notify && !exists && !v->name.empty())
+				{
+					const int fnId = addNode(graph, NT::FunctionEntry, ImVec2(40.0f, 40.0f));
+					HC::Node* entry = graph.findNode(fnId);
+					entry->s        = fnName;
+					entry->subgraph = fnId;
+					entry->access   = 1;   // private: nobody outside the class calls it
+					// ONE parameter, the variable's own type: the value this
+					// machine held before the one that just arrived (§6.4).
+					entry->params   = { { "Old", v->type } };
+					g.currentGraph  = fnId;
+					const int retId = addNode(graph, NT::FunctionReturn, ImVec2(420.0f, 40.0f));
+					graph.findNode(retId)->s = fnName;
+					HC::syncFunctionSignatures(graph);
+				}
+			}
+			EditorWidgets::helpForLabel("Notify");
+		}
 	}
 
 	// Single value, or a container of the type. Changing it re-types the matching

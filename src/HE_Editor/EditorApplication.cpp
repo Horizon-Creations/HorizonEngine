@@ -8559,6 +8559,21 @@ AppContext EditorApplication::makeContext()
 		.netPlayerCount      = [this]{ return static_cast<int>(m_netSession.roster().size()); },
 		.netPingMs           = [this]{ return m_netSession.linkStats().pingMs; },
 		.netLossPercent      = [this]{ return m_netSession.linkStats().lossPercent; },
+		.netPropertyCount    = [this]{
+			PropertyReplicator* p = m_netSession.properties();
+			return p ? static_cast<int>(p->trackedCount()) : 0; },
+		.netCostliestProperties = [this]{
+			std::vector<std::string> out;
+			PropertyReplicator* p = m_netSession.properties();
+			if (!p) return out;
+			char buf[128];
+			for (const auto& c : p->costliestProperties(3))
+			{
+				std::snprintf(buf, sizeof(buf), "  %-14.14s %u B / %u", c.name.c_str(),
+				              c.bytes, c.sends);
+				out.emplace_back(buf);
+			}
+			return out; },
 		// Both refuse to freeze an edit-mode session: there is no world tick to
 		// gate there, and a pause that outlived play mode would silently swallow
 		// the first frames of the NEXT one.

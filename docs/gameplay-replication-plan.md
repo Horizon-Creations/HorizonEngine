@@ -1020,6 +1020,56 @@ Beim Spawn und bei der Baseline feuert `OnRep` **einmal pro Property**, nach
 BeginPlay der Klasse, mit dem Default als `old`. Sonst sähe eine Tür, die
 schon offen war, als der Spieler kam, nie den Grund, ihre Animation zu setzen.
 
+### 6.5 Stand nach Schritt 6
+
+Umgesetzt: `ValueWire`, `ReplicatedVarsComponent`, `PropertyReplicator`,
+`Variable::replicated/repNotify`, `Runtime::replicatedVariablesOf`, 16 `net`-Rows,
+`OnRep` in allen vier Frontends, die beiden Checkboxen im HorizonCode-Editor samt
+Notify-Generator, und die Overlay-Zeilen. Drei Stellen weichen bewusst von dem ab,
+was oben steht, und eine Zusage ist nicht eingelöst.
+
+**1. Beide Nachrichten laufen `ReliableOrdered`, und die Tabelle trägt Werte.**
+§6.2 schrieb `kMsgProperties` als `Reliable`, also ungeordnet über Entities, damit
+Tür A und Tür B einander überholen dürfen. Gegen den Transport gelesen, der in
+Schritt 2 tatsächlich entstanden ist, ist das kein Sparen sondern ein Loch:
+`SendMode` dokumentiert `Reliable` als „guaranteed delivery, unspecified order",
+ein Delta kann also die `ReliableOrdered`-Tabelle überholen, die seine Property
+überhaupt erst benennt. Dann greift die Regel aus §6.2 selbst — unbekannter
+Index, verwerfen, Log-Zeile — und nachgeliefert wird nichts, weil der Transport
+ja zugestellt hat. Das Ergebnis ist die Tür, die beim Host offen und bei einem
+Client zu ist, also genau der Fall, gegen den die zuverlässige Zustellung
+gewählt wurde, und zwar nur unter Reorder und damit nur manchmal.
+
+Deshalb ist beides geordnet, und `kMsgPropertyTable` trägt die aktuellen WERTE
+statt nur die Namen. Das kostet die Entity-übergreifende Unordnung (ein
+Tür-Delta wartet jetzt hinter einem fremden) und bringt ein Property-Modell,
+das unter Umsortierung stimmt. Der Weg zurück sind Kanäle pro Entity; das ist
+eine Transport-Eigenschaft, und der Transport hat einen Kanal. Nebeneffekt:
+die Tabelle IST die Property-Baseline, ein eigener Nachzügler-Pfad entfällt und
+`kMsgSpawn`s Format bleibt unangetastet.
+
+**2. Interest-Management gilt hier NICHT.** §6.2 sagt „gilt auch hier".
+`GameReplication` rechnet Relevanz privat in `sendSnapshots` aus und hat keine
+Abfrage pro (Client, Entity); ohne eine Baseline beim Eintritt in den Radius
+würde ein weggeculltes Delta einen Client dauerhaft auf einem alten Wert sitzen
+lassen, was schlechter ist als senden. Deltas gehen an alle beigetretenen
+Clients. Der ehrliche Zeitpunkt dafür ist der, an dem Relevanz etwas wird, das
+man fragen kann.
+
+**3. Der Vergleich ist neu geschrieben, nicht geerbt.** §6.2 sagt „Vergleich wie
+der `Equals`-Knoten". Der `Equals`-Knoten vergleicht zwei Floats mit Epsilon und
+taugt für eine Property nicht. `scalarValueEquals` ist das richtige Blatt und
+wird benutzt, hat aber keinen Struct-Fall und steigt nicht in Container hinab;
+`ValueWire::valuesEqual` ist genau diese fehlende Rekursion darüber.
+
+**Offen aus diesem Schritt:** der kompilierte HorizonCode-Pfad trägt die beiden
+Flags in `CompiledVarInfo` (per NSDMI, damit jede bisher erzeugte Tabelle weiter
+kompiliert), aber der Codegen schreibt sie noch nicht — eine Klasse, die als C++
+ausgeliefert wird, repliziert ihre Variablen also noch nicht. `HeNetServices` für
+das native GameLogic-Modul steht laut Roadmap ohnehin in Schritt 7; bis dahin
+hört ein C++-Modul `IGameLogic::onRep` und liest den neuen Wert noch nicht
+zurück.
+
 ---
 
 ## 7. (d) RPC: `CallServer`, `CallClient`, `CallAllClients`

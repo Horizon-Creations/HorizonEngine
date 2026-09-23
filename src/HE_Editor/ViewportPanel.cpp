@@ -475,6 +475,19 @@ namespace
 					std::snprintf(buf, sizeof(buf), "Loss       %.1f %%", loss);
 					lines.emplace_back(buf);
 				}
+				// The replicated variables, and the three that cost the most
+				// (plan §6.2): this is where "my variable changes every frame"
+				// stops being folklore. Only when there is something to show —
+				// a session whose entities declare none needs no empty heading.
+				const int props = ctx.netPropertyCount ? ctx.netPropertyCount() : 0;
+				if (props > 0)
+				{
+					std::snprintf(buf, sizeof(buf), "Properties %d entities", props);
+					lines.emplace_back(buf);
+					if (ctx.netCostliestProperties)
+						for (const std::string& row : ctx.netCostliestProperties())
+							lines.push_back(row);
+				}
 			}
 		}
 
