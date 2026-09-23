@@ -206,14 +206,26 @@ Heartbeat), hidden und sichtbar exakt gleich (90 Frames je 17,1 s).
 Metal + „shown". Dump-Lauf (`HE_DUMP_PATH`, wie `he_shot.py`) ist automatisch
 hidden und schreibt trotzdem das Bild (639 verschiedene Farben in der
 Stichprobe). Voller ctest: 195/196 grün, `runtime_size` rot (Game-Runtime ohne
-Python 32,6 > 32,0 MB, im frischen Worktree-Build; nicht gegen einen Build
-ohne diese Änderung gegengemessen, die Änderung selbst ist im KB-Bereich).
+Python 32,6 > 32,0 MB). Das liegt nicht an diesem Schritt: gegen den
+Release-Build auf main vom 20.09. (vor dem Merge von Thema 77, `cec6b3b3`) ist
+`libHorizonNet` um 90 KB gewachsen, obwohl hier nichts in HE_Net geändert
+wurde, `libHorizonScene` um 538 KB, `libHorizonCore` um 42 KB. Zusammen sind
+das die ~0,6 MB. Die Schwelle in `scripts/runtime_size.py` ist seit dem 05.09.
+unverändert.
 
 **Nicht verifiziert:** dass am Bildschirm wirklich nichts erscheint. Während der
 Läufe war die Sitzung gesperrt (Vordergrund `loginwindow`), und dann meldet
 `CGWindowListCopyWindowInfo` auch für den sichtbaren Kontrolllauf kein Fenster.
 Das Orakel konnte also nicht trennen. Belegt ist nur SDLs eigener Fensterzustand
-(Zeuge oben), nicht der des Window-Servers.
+(Zeuge oben), nicht der des Window-Servers. Dasselbe gilt für die Hebel-6-Zahlen:
+auch der „sichtbare" Kontrolllauf lief auf der gesperrten Sitzung. Belegt ist
+also „hidden hängt nicht und liefert Frames im normalen Takt", nicht „so schnell
+wie ein wirklich sichtbares Fenster".
+
+Nachholen am entsperrten Bildschirm (30 s):
+`HOME=$(mktemp -d) HE_HIDDEN_WINDOW=1 HE_EXIT_AFTER_FRAMES=600 out/deploy/Editor/HorizonEditor`.
+Erwartung: kein Fenster, kein Splash, kein Dock-Icon, der Fokus bleibt, wo er
+war. Negativkontrolle: dasselbe mit `HE_HIDDEN_WINDOW=0`.
 
 **Offen für Schritt 3:** `he_mcp_multiclient.py` (F5, `HE_DUMP_LIVE` ohne
 Frame-Budget) muss `HE_HIDDEN_WINDOW=1` selbst setzen. Doku/Rezepte (Hebel 7)
