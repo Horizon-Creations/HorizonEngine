@@ -254,6 +254,12 @@ namespace HE
 		// In hidden mode the window was created hidden regardless of startHidden
 		// and Show() declines, so a hidden run stays hidden past this line.
 		if (wp.startHidden) m_window->Show();
+		// The witness for it: what SDL itself says about the window as the loop
+		// starts. A locked screen or a CI runner has no window server to ask
+		// "is anything on screen", so the run's own log has to answer.
+		if (SDL_Window* sw = m_window->GetNativeWindow())
+			HE_LOG_INFO(Core, "Primary window %s as the main loop starts",
+			            (SDL_GetWindowFlags(sw) & SDL_WINDOW_HIDDEN) ? "hidden" : "shown");
 
 		m_running = true;
 		m_vsyncEnabled = cfg.windowprops.vsync;

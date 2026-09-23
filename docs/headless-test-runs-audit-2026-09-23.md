@@ -161,3 +161,60 @@ Im ganzen ctest ist F1 also die **einzige** Fensterquelle.
 7. **Doku/Rezepte:** F3/F4 zeigen, dass die vorhandenen Env-Vars nicht bekannt
    sind. Eine Stelle mit „Editor/Game unbeaufsichtigt starten" (Namen, was sie
    tun, was nicht) gehört mit in den Umbau.
+
+## Stand nach Schritt 2 (Hidden-Modus gebaut)
+
+**Schalter:** `HE::hiddenWindowRequested()` (`Window.h`, HE_API), einmal pro
+Prozess gelesen. `HE_HIDDEN_WINDOW` entscheidet, wenn gesetzt (`0` = sichtbar
+erzwingen, alles andere = hidden). Sonst hidden bei `HE_EXIT_AFTER_FRAMES`≠0
+oder `HE_DUMP_PATH`. Die Logzeile „Hidden mode on (<Auslöser>)" nennt den Grund.
+Unit-Test: `tests/test_hidden_window.cpp`.
+
+**Wirkung, je Baustein:**
+
+- B1/B2/B3: jedes `Window` (auch Sekundärfenster) wird mit `SDL_WINDOW_HIDDEN`
+  erzeugt, `Window::Show()` ist im Hidden-Modus ein No-op. Maximize, Fullscreen
+  und Raise auf einem versteckten Fenster legt SDL3 nur in `pending_flags` ab
+  (`SDL_video.c`), die machen es also nicht sichtbar.
+- B6: `SDL_HINT_MAC_BACKGROUND_APP=1` (plus `WINDOW_ACTIVATE_WHEN_SHOWN/RAISED=0`)
+  ganz oben in `Application::Run`, vor dem ersten `SDL_Init(VIDEO)`. Das
+  Menü, das SDL baut, liegt in `Cocoa_RegisterApp` außerhalb des Hint-Gates und
+  bleibt also. Es fallen nur die Activation-Policy Regular und
+  `activateIgnoringOtherApps` weg. **Grenze:** eine gebündelte `.app` bekommt die
+  Policy aus ihrem Info.plist, dort bliebe das Dock-Icon. Alle heutigen
+  Test-/Skriptläufe starten unbundled Binaries (`HorizonGame` im Export,
+  `out/deploy/Editor/HorizonEditor`).
+- B9: `SplashScreen::open` steigt im Hidden-Modus aus (Editor und Game, auch bei
+  `game.splashEnabled`).
+- B7: `ImGuiConfigFlags_ViewportsEnable` im Hidden-Modus aus
+  (`EditorUI.cpp` hängt `UpdatePlatformWindows` schon am Flag).
+- B8: `Application`-Fehlerboxen und die Skript-Dialoge `dialog.message` /
+  `dialog.confirm` (`EngineApi.cpp`) loggen nur; `confirm` antwortet „nein".
+  Datei-Picker (`dialog.open*`/`save*`) sind **nicht** abgedeckt.
+- Zeuge: „Primary window hidden|shown as the main loop starts" im Log.
+
+**Hebel 6, gemessen (Release, M5, Metal, 23.09.2026):** der Present-Pfad läuft
+mit verstecktem Fenster normal weiter. Editor ohne Projekt, eingeschwungen aus
+der Differenz 900−300 Frames: hidden 21,1 ms/Frame, sichtbar 24,0 ms/Frame,
+beide ohne einen einzigen Hitch. Kein Present-Skip nötig, daher nicht gebaut.
+Die Todo-App ist dafür kein Orakel: sie läuft ereignisgetrieben (~190 ms/Frame
+Heartbeat), hidden und sichtbar exakt gleich (90 Frames je 17,1 s).
+
+**Verifiziert:** `test_app_todo` grün (25 s im ctest, beide Flavours, Log
+„Hidden mode on (HE_EXIT_AFTER_FRAMES)"). Editor 60 Frames hidden gegen
+`HE_HIDDEN_WINDOW=0`: „Splash: off in hidden mode" + „hidden" gegen Splash über
+Metal + „shown". Dump-Lauf (`HE_DUMP_PATH`, wie `he_shot.py`) ist automatisch
+hidden und schreibt trotzdem das Bild (639 verschiedene Farben in der
+Stichprobe). Voller ctest: 195/196 grün, `runtime_size` rot (Game-Runtime ohne
+Python 32,6 > 32,0 MB, im frischen Worktree-Build; nicht gegen einen Build
+ohne diese Änderung gegengemessen, die Änderung selbst ist im KB-Bereich).
+
+**Nicht verifiziert:** dass am Bildschirm wirklich nichts erscheint. Während der
+Läufe war die Sitzung gesperrt (Vordergrund `loginwindow`), und dann meldet
+`CGWindowListCopyWindowInfo` auch für den sichtbaren Kontrolllauf kein Fenster.
+Das Orakel konnte also nicht trennen. Belegt ist nur SDLs eigener Fensterzustand
+(Zeuge oben), nicht der des Window-Servers.
+
+**Offen für Schritt 3:** `he_mcp_multiclient.py` (F5, `HE_DUMP_LIVE` ohne
+Frame-Budget) muss `HE_HIDDEN_WINDOW=1` selbst setzen. Doku/Rezepte (Hebel 7)
+und die Datei-Picker stehen auch noch aus.
