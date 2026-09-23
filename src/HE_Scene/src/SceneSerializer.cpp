@@ -292,6 +292,7 @@ namespace
 			// and mean nothing outside it — a saved id would come back as a stale
 			// claim on a slot the next session gives to someone else.
 			comps["network"] = {
+				{ "replicates",         nc->replicates },
 				{ "relevanceRadius",    nc->relevanceRadius },
 				{ "replicateTransform", nc->replicateTransform },
 				{ "maxSpeed",           nc->maxSpeed },
@@ -1067,6 +1068,9 @@ namespace
 		{
 			const json& c = comps["network"];
 			NetworkComponent nc;
+			// Absent in every scene saved before the switch existed. The default
+			// is true, so those scenes keep replicating what they replicated.
+			nc.replicates         = c.value("replicates",         nc.replicates);
 			nc.relevanceRadius    = c.value("relevanceRadius",    nc.relevanceRadius);
 			nc.replicateTransform = c.value("replicateTransform", nc.replicateTransform);
 			// Absent in every scene saved before the anti-cheat fields existed;

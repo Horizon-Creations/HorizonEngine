@@ -14,6 +14,7 @@ class PhysicsWorld;
 class ContentManager;
 class AudioEngine;
 class EntityHost;
+class NetGameSession;
 namespace HE::AntiCheat { class AntiCheatHost; }
 struct DebugLine;      // HE_Core DebugDraw.h (renderer debug-line vertex pair)
 struct HeSaveServices;    // HorizonGameServices.h (global scope, C ABI)
@@ -194,6 +195,16 @@ struct Ctx
     // block the game), every other exec row is a no-op. Bound per session by
     // the two applications and by ScriptContext::HostServices for Lua/Python.
     HE::AntiCheat::AntiCheatHost* antiCheat = nullptr;
+    // The gameplay session (docs/gameplay-replication-plan.md §5.7): the `net`
+    // rows read and write through it. Null is SINGLE PLAYER — which is not an
+    // error state but the ordinary one, and the rows say so: isAuthority is
+    // true (in a game with no network, you are the authority), the player list
+    // holds you alone, and every call that would reach a peer is a no-op.
+    // Bound per session by the two applications, like antiCheat above.
+    //
+    // Nothing reads it yet: the rows are step 5. It sits here now so the
+    // applications' aggregate init stops changing shape once they do.
+    NetGameSession* net = nullptr;
 };
 
 // ── Debug ────────────────────────────────────────────────────────────────────

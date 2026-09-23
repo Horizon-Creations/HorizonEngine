@@ -60,7 +60,7 @@ namespace
 		"Foliage",     "LOD",       "Weather",     "UI",         "Widget",
 		"Script",      "Lua",       "Python",      "HorizonCode","GameLogic",
 		"Net",         "Editor",    "Tool",        "Profiler",   "SourceControl",
-		"ContentSync", "AntiCheat",
+		"ContentSync", "AntiCheat", "Replication",
 	};
 	static_assert(sizeof(kCategoryNames) / sizeof(kCategoryNames[0]) == kCatCount,
 	              "kCategoryNames must stay index-aligned with HE::Log::Cat");

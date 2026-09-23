@@ -175,6 +175,24 @@ public:
 	// loop turns each into a local report ticket and fires OnCheatDetected.
 	bool takeAntiCheatNotice(AntiCheatNotice& out);
 
+	// ── Join baseline (plan §5.5) ──
+	// Host: one transform sample for EVERY registered entity, to one client,
+	// ReliableOrdered — including the ones with replicateTransform = false and
+	// the ones interest management would cull, because this is the only state
+	// those will ever be sent.
+	//
+	// Not a snapshot, and deliberately its own message: a snapshot travels
+	// Unreliable (a lost baseline would never come again) and carries a tick
+	// number the client uses to drop anything older than the newest it has
+	// applied (the first regular snapshot after the baseline would race it and
+	// win). Outside that ordering, the baseline is simply "this is where
+	// everything stands right now".
+	//
+	// Order matters at the call site: the binds and spawns must already be on
+	// the wire, or the client has no entity to put the samples on. Everything
+	// in the join sequence is ReliableOrdered, so "already sent" is enough.
+	void sendBaseline(HE::Net::ConnectionId conn);
+
 	// Host: forget everything about a connection this side dropped. NetSession
 	// fires no onDisconnect for a link we severed ourselves, so the per-client
 	// input tracking, the control assignment and the anti-cheat state would
@@ -253,6 +271,9 @@ public:
 		std::uint32_t integrityMismatches = 0; // host side: files that differed
 		std::uint32_t noticesSent       = 0;   // host side: anti-cheat notices before a kick
 		std::uint32_t noticesReceived   = 0;   // client side
+		std::uint32_t baselinesSent     = 0;   // host side: one per joining client
+		std::uint32_t baselinesReceived = 0;   // client side
+		std::uint32_t baselineEntities  = 0;   // client side: samples taken from them
 	};
 	const Stats& stats() const { return m_stats; }
 	void         resetStats() { m_stats = {}; }
@@ -284,6 +305,7 @@ private:
 
 	void sendSnapshots();
 	void applySnapshot(HE::Net::BitReader& r);
+	void applyBaseline(HE::Net::BitReader& r);
 	void advanceInterpolation(float dt);
 	void handleInput(HE::Net::ConnectionId conn, HE::Net::BitReader& r);
 

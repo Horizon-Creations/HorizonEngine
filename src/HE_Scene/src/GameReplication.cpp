@@ -4,6 +4,7 @@
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/NetworkComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
+#include "HorizonScene/Net/NetMessages.h"
 
 #include <Diagnostics/Log.h>
 
@@ -16,13 +17,15 @@ using namespace HE::Net;
 
 namespace
 {
-	// Gameplay snapshots live in their own message-id range, well clear of the
+	// Gameplay messages live in their own id range, well clear of the
 	// collaboration protocol's — the two systems share a transport but never a
-	// message.
-	constexpr MessageId kMsgSnapshot  = kFirstUserMessage + 200;
-	constexpr MessageId kMsgInput     = kFirstUserMessage + 201;   // client → server
-	constexpr MessageId kMsgIntegrity = kFirstUserMessage + 202;   // client → server, once
-	constexpr MessageId kMsgAntiCheatNotice = kFirstUserMessage + 203;   // server → client, before a kick
+	// message. The table itself is in Net/NetMessages.h, shared with the session
+	// and the spawn replicator, which send on the same NetSession.
+	using HE::Net::Game::kMsgSnapshot;
+	using HE::Net::Game::kMsgInput;
+	using HE::Net::Game::kMsgIntegrity;
+	using HE::Net::Game::kMsgAntiCheatNotice;
+	using HE::Net::Game::kMsgBaseline;
 
 	constexpr std::uint16_t kMaxManifestEntries = GameReplication::kMaxManifestEntries;
 	// A rule name is a word ("Damage"), not a paragraph; the writer never
@@ -59,6 +62,9 @@ GameReplication::GameReplication(NetSession* net, NetRole role, Config cfg)
 		});
 		m_net->on(kMsgAntiCheatNotice, [this](ConnectionId conn, BitReader& r) {
 			handleAntiCheatNotice(conn, r);
+		});
+		m_net->on(kMsgBaseline, [this](ConnectionId, BitReader& r) {
+			applyBaseline(r);
 		});
 	}
 	else
@@ -538,6 +544,115 @@ bool GameReplication::readSample(BitReader& r, Sample& s) const
 			return false;
 	}
 	return true;
+}
+
+void GameReplication::sendBaseline(ConnectionId conn)
+{
+	if (!m_net || !m_world) return;
+	if (m_role != NetRole::Server && m_role != NetRole::Host) return;
+
+	auto& reg = m_world->registry();
+
+	// EVERY registered entity, with no interest-management cull and no
+	// replicateTransform filter. Both of those are bandwidth rules for the
+	// steady state; a client that just joined has nothing at all, and a static
+	// prop it never receives again would sit at the origin for the whole match.
+	std::vector<std::pair<std::uint32_t, Sample>> all;
+	all.reserve(m_byNetId.size());
+	for (const auto& [netId, entity] : m_byNetId)
+	{
+		if (!reg.valid(entity)) continue;
+		const auto* tc = reg.try_get<TransformComponent>(entity);
+		if (!tc) continue;
+		Sample s;
+		s.position = tc->position;
+		s.rotation = tc->rotation;
+		all.emplace_back(netId, s);
+	}
+
+	// Iteration over an unordered_map has no defined order, and a baseline is
+	// the one message a test reads entity by entity. Sorting costs nothing here
+	// (it happens once per join) and makes the wire deterministic.
+	std::sort(all.begin(), all.end(),
+	          [](const auto& a, const auto& b) { return a.first < b.first; });
+
+	const std::size_t entryBits = 32 + 3u * static_cast<std::size_t>(m_cfg.positionBits) +
+	                              3u * static_cast<std::size_t>(m_cfg.rotationBits);
+	const std::size_t budgetBits = m_cfg.snapshotBudgetBytes * 8;
+	const std::size_t perDatagram =
+		std::max<std::size_t>(1, budgetBits > 16 ? (budgetBits - 16) / entryBits : 0);
+
+	// An empty baseline is still sent: it is the client's signal that the host
+	// has nothing replicated yet, and skipping it would make "no entities" look
+	// exactly like "the message was lost" to anything counting them.
+	std::size_t first = 0;
+	do
+	{
+		const std::size_t count = std::min(perDatagram, all.size() - first);
+
+		BitWriter w;
+		w.writeUInt16(static_cast<std::uint16_t>(std::min<std::size_t>(count, 0xFFFF)));
+		for (std::size_t i = first; i < first + count; ++i)
+		{
+			w.writeUInt32(all[i].first);
+			writeSample(w, all[i].second);
+		}
+
+		// ReliableOrdered, unlike every other sample this class sends: it must
+		// arrive, and it must arrive after the binds and spawns that give the
+		// client somewhere to put it.
+		m_net->send(conn, kMsgBaseline, w, SendMode::ReliableOrdered);
+		++m_stats.baselinesSent;
+		m_stats.bytesSent += static_cast<std::uint32_t>(w.data().size());
+
+		first += count;
+	} while (first < all.size());
+
+	HE_LOG_DEBUG(Replication, "Baseline to connection %u: %zu entities",
+	             conn, all.size());
+}
+
+void GameReplication::applyBaseline(BitReader& r)
+{
+	std::uint16_t count = 0;
+	if (!r.readUInt16(count)) return;
+
+	++m_stats.baselinesReceived;
+
+	for (std::uint16_t i = 0; i < count; ++i)
+	{
+		std::uint32_t netId = 0;
+		Sample s;
+		if (!r.readUInt32(netId) || !readSample(r, s)) return;   // truncated
+
+		++m_stats.baselineEntities;
+
+		// The controlled entity is predicted; a baseline for it is the start
+		// state, not a correction, so it is placed and left alone.
+		InterpState& st = m_interp[netId];
+		st.previous    = s;
+		st.current     = s;
+		st.hasPrevious = true;
+		st.elapsed     = 0.0f;
+		// Deliberately NOT stamped with a tick: the baseline sits outside the
+		// snapshot ordering, and claiming a tick here would make the next real
+		// snapshot look like a duplicate of it.
+		st.hasTick     = false;
+
+		// Place it NOW rather than waiting for the next update(): a client that
+		// asks where something is between the baseline and its first frame must
+		// not be told "the origin".
+		if (!m_world) continue;
+		const auto it = m_byNetId.find(netId);
+		if (it == m_byNetId.end()) continue;
+		auto& registry = m_world->registry();
+		if (!registry.valid(it->second)) continue;
+		if (auto* tc = registry.try_get<TransformComponent>(it->second))
+		{
+			tc->position = s.position;
+			tc->rotation = s.rotation;
+		}
+	}
 }
 
 void GameReplication::sendSnapshots()
