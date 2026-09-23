@@ -1,12 +1,15 @@
 #pragma once
 #include "HorizonScene/Net/NetGameSession.h"
 #include "HorizonScene/Net/PropertyReplicator.h"
+#include "HorizonScene/Net/RpcRouter.h"
+#include "HorizonScene/Net/ValueWire.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/ScriptContext.h"
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <IGameLogic.h>
 #include <Scripting/ScriptEngine.h>
 #include <Scripting/ScriptTypes.h>
+#include <Diagnostics/Log.h>
 #include <cstdint>
 #include <unordered_map>
 
@@ -144,6 +147,54 @@ public:
         }
 
         if (logic) logic->onRep(static_cast<uint32_t>(n.entity), n.name.c_str());
+    }
+
+    // ── A remote call arrived (plan §7.2) ────────────────────────────────────
+    // A third entry point, addressed like dispatchRep and for the same reason:
+    // a call names an ENTITY, so the Game Instance and the level script are not
+    // stations here either.
+    //
+    // FIRST MATCH WINS, which is the whole of the cross-frontend rule (§7.2):
+    //
+    //   1. the entity's HorizonCode class — callFunction with
+    //      requirePublic = false, because a function somebody else triggers
+    //      over the network is still the class's own business,
+    //   2. the Lua/Python instance on that entity — the method of that name,
+    //   3. the native module — IGameLogic::onRpc(entity, name, argsJson).
+    //
+    // The first one that HAS the function takes it, and nobody after it is
+    // asked; a client's Lua calling a host's HorizonCode function is therefore
+    // the ordinary case and not a special one. Nothing at all has it: one log
+    // line naming the entity and the function, and no error — the plan is
+    // explicit that a missing handler is not a fault, because the two machines
+    // may legitimately run different halves of a game.
+    static void dispatchRpc(const RpcRouter::Call& call,
+                            HorizonCode::Runtime* runtime,
+                            HorizonCode::InstanceId classInstance,
+                            ScriptContext* scripts, const InstanceMap* instances,
+                            IGameLogic* logic)
+    {
+        if (runtime && classInstance &&
+            runtime->callFunction(classInstance, call.name, /*requirePublic*/ false, call.args))
+            return;
+
+        if (scripts && instances)
+        {
+            const auto it = instances->find(static_cast<uint32_t>(call.entity));
+            if (it != instances->end() && scripts->callRpc(it->second, call.name, call.args))
+                return;
+        }
+
+        if (logic)
+        {
+            logic->onRpc(static_cast<uint32_t>(call.entity), call.name.c_str(),
+                         HE::Net::Game::argsToJson(call.args).c_str());
+            return;
+        }
+
+        HE_LOG_INFO(Replication,
+                    "Remote call '%s' for net id %u: no frontend on this entity has that "
+                    "function; nothing ran", call.name.c_str(), (unsigned)call.netId);
     }
 
 private:

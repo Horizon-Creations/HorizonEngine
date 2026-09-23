@@ -264,6 +264,32 @@ void NetGameSession::setVariableSource(HorizonCode::Runtime* runtime,
 	m_varRuntime    = runtime;
 	m_varInstanceOf = std::move(instanceOf);
 	if (m_properties) m_properties->setRuntime(m_varRuntime, m_varInstanceOf);
+	if (m_rpc)        m_rpc->setRuntime(m_varRuntime, m_varInstanceOf);
+	installRpcHook();
+}
+
+void NetGameSession::installRpcHook()
+{
+	if (!m_varRuntime) return;
+	// The instance says which ENTITY it sits on; Runtime::ownedEntity is that
+	// answer for both backends, so nothing here needs the EntityHost.
+	m_varRuntime->setRpcRoute([this](HorizonCode::InstanceId self, const std::string& fn,
+	                                 const std::vector<HorizonCode::Value>& args,
+	                                 std::uint8_t runOn, bool anyClient) -> bool
+	{
+		if (!m_rpc || !m_varRuntime) return false;
+		const auto owned = m_varRuntime->ownedEntity(self);
+		// Not on an entity — the Game Instance, a widget, a level script. There
+		// is nothing for the other machine to address, so it runs here, which
+		// is what it did before Run On existed.
+		if (owned == 0) return false;
+		return m_rpc->route(static_cast<Entity>(owned), fn, args, runOn, anyClient);
+	});
+}
+
+void NetGameSession::removeRpcHook()
+{
+	if (m_varRuntime) m_varRuntime->setRpcRoute(nullptr);
 }
 
 // ── Finding a session on the LAN (plan §5.3) ────────────────────────────────
@@ -338,6 +364,18 @@ bool NetGameSession::startCommon(std::unique_ptr<ITransport> transport, NetRole 
 	});
 	if (m_varRuntime) m_properties->setRuntime(m_varRuntime, m_varInstanceOf);
 
+	// Remote calls (plan §7). Same joined filter again: a CallAllClients must
+	// not go to a peer that has not been welcomed, for the same reason a
+	// property table must not.
+	m_rpc = std::make_unique<RpcRouter>(m_net.get(), role, m_replication.get());
+	m_rpc->setWorld(m_world);
+	m_rpc->setRoster(&m_roster);
+	m_rpc->setJoinedFilter([this](ConnectionId conn) {
+		return m_roster.findByConnection(conn) != nullptr;
+	});
+	if (m_varRuntime) m_rpc->setRuntime(m_varRuntime, m_varInstanceOf);
+	installRpcHook();
+
 	// The host is always present, even before anything else is: a session with
 	// nobody in it is a listening socket, not a session.
 	m_acHost = std::make_unique<HE::AntiCheat::AntiCheatHost>();
@@ -373,6 +411,10 @@ bool NetGameSession::hostOn(std::unique_ptr<ITransport> transport, const HostOpt
 			HE::AntiCheat::AntiCheatHost::configFrom(*options.antiCheat));
 		m_acHost->setPolicy(HE::AntiCheat::AntiCheatHost::policyFrom(*options.antiCheat));
 		m_replication->setAntiCheat(m_acService.get());
+		// The router scores its own refusals against the same service, so a
+		// player who fakes inputs and a player who fakes calls land on one score
+		// rather than two that each stay under the threshold.
+		if (m_rpc) m_rpc->setAntiCheat(m_acService.get());
 	}
 	m_acHost->setPreview(options.preview);
 	m_acHost->attach(m_acService.get(), m_replication.get());
@@ -380,6 +422,8 @@ bool NetGameSession::hostOn(std::unique_ptr<ITransport> transport, const HostOpt
 	// The host is player 1, always, and has no connection of its own.
 	m_roster.clear();
 	m_localPlayer = m_roster.add(kInvalidConnection, options.displayName, /*local*/ true);
+	// Decides whether an OwningClient call is already home (RpcRouter::route).
+	if (m_rpc) m_rpc->setLocalPlayer(m_localPlayer);
 
 	// The registry walk (plan §5.5). THIS is what the inspector switch buys:
 	// nobody calls registerEntity by hand any more.
@@ -455,9 +499,14 @@ void NetGameSession::leave()
 	if (m_acHost)     m_acHost->detach();
 	if (m_spawns)     m_spawns->clear();
 	if (m_properties) m_properties->clear();
+	if (m_rpc)        m_rpc->clear();
+	// Back to running every function locally: a runtime outlives its session
+	// (the application owns it), and a stale hook would ask a destroyed router.
+	removeRpcHook();
 
 	// Reverse of construction: the session points at the transport, the
 	// replicators point at the session.
+	m_rpc.reset();
 	m_properties.reset();
 	m_spawns.reset();
 	m_replication.reset();
@@ -715,6 +764,8 @@ void NetGameSession::onPeerGone(ConnectionId conn, DisconnectReason reason)
 	// otherwise outlive the peer — and a connection id the transport reuses
 	// would inherit them.
 	if (m_replication) m_replication->dropConnection(conn);
+	// A connection id the transport reuses must inherit no rate history.
+	if (m_rpc) m_rpc->dropConnection(conn);
 
 	if (left == kNoPlayer) return;   // never got past the hello
 
@@ -792,6 +843,7 @@ void NetGameSession::handleWelcome(BitReader& r)
 		return;
 
 	m_localPlayer = player;
+	if (m_rpc) m_rpc->setLocalPlayer(m_localPlayer);
 	m_scenePath   = scene;
 	// The roster on a client holds ITSELF ALONE, and under the id the HOST
 	// minted — not one of its own, which is what add() would give it (1, the
@@ -874,6 +926,9 @@ void NetGameSession::update(float dt)
 		{
 			m_net->disconnect(conn);
 			if (m_replication) m_replication->dropConnection(conn);
+			if (m_rpc) m_rpc->dropConnection(conn);
+	// A connection id the transport reuses must inherit no rate history.
+	if (m_rpc) m_rpc->dropConnection(conn);
 		}
 		m_rejected.clear();
 	}
@@ -884,6 +939,18 @@ void NetGameSession::update(float dt)
 	// authored entity, plan §5.5). Retried every frame until it resolves; free
 	// when there is nothing pending, which is every frame but one per session.
 	if (m_pendingControlNetId != 0) tryTakeControl();
+
+	// ── Remote calls, straight after pump (plan §7.3) ──
+	// On a HOST this is BEFORE the simulation, which is where a CallServer
+	// belongs: it is an input, and an input decided after the frame it was
+	// meant for arrives a frame late. On a CLIENT it is after pump and before
+	// the script tick, which is the same sentence read from the other side.
+	// One place rather than two, so the two cannot drift.
+	//
+	// The calls are only QUEUED here; the application drains them through
+	// NetEvents::dispatchRpc, for the reason every other queue in this file
+	// exists — a graph must not run inside a message handler.
+	if (m_rpc) m_rpc->update(dt);
 
 	m_replication->update(dt);
 	// AFTER the transform replication, which is where the frame's simulation

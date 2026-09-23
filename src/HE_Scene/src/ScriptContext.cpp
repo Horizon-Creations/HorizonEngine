@@ -1615,6 +1615,29 @@ bool ScriptContext::callOnRep(ScriptEngine::InstanceId id, const std::string& va
         [&oldValue](lua_State* L) { luaPushFieldValue(L, oldValue, 0); return 1; }));
 }
 
+bool ScriptContext::callRpc(ScriptEngine::InstanceId id, const std::string& fn,
+                            const std::vector<HorizonCode::Value>& args)
+{
+    IScriptBackend* b = backendForId(id); m_lastBackend = b;
+    if (!b) return false;
+    if (langOf(id) == HE::ScriptLanguage::Python) return b->callRpc(rawId(id), fn, args);
+
+    // Lua: the ARGUMENTS are pushed here, with luaPushFieldValue — the same
+    // shape a struct, a map (with its `__keys` sidecar) or an enum takes
+    // anywhere else across this boundary, exactly as callOnRep does it. The
+    // engine only supplies the call.
+    if (!m_engine.hasInstanceMethod(rawId(id), fn.c_str())) return false;
+    m_engine.callInstanceMethod(rawId(id), fn.c_str(), [&args](lua_State* L) {
+        int pushed = 0;
+        for (const HorizonCode::Value& v : args) { luaPushFieldValue(L, v, 0); ++pushed; }
+        return pushed;
+    });
+    // TRUE even when the call itself raised: the instance HAD the method, so
+    // the call was claimed. Handing it on to the next frontend after a Lua
+    // error would run the same intent twice.
+    return true;
+}
+
 bool ScriptContext::callOnNetEvent(ScriptEngine::InstanceId id, NetScriptEvent ev, int arg)
 {
     IScriptBackend* b = backendForId(id); m_lastBackend = b;

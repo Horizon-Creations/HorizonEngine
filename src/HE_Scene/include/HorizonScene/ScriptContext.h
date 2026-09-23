@@ -153,6 +153,12 @@ public:
     // that puts those on a Lua stack (and the reader that takes them back).
     // Python crosses the plugin ABI and does its own, as it does for every
     // other value.
+    // A remote call for the script instance on an entity (plan §7.2). False =
+    // this instance has no method of that name, which is the router's cue to
+    // ask the next frontend — NOT an error. See IScriptBackend::callRpc.
+    bool callRpc(ScriptEngine::InstanceId id, const std::string& fn,
+                 const std::vector<HorizonCode::Value>& args);
+
     bool callOnRep(ScriptEngine::InstanceId id, const std::string& varName,
                    const HorizonCode::Value& oldValue);
 

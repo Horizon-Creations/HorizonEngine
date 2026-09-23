@@ -229,6 +229,7 @@ add_executable(he_tests
     # Replicated variables over the same hostile fabric: the wire format on its
     # own, then values reaching a client that is losing and reordering.
     test_net_property_replication.cpp
+    test_net_rpc.cpp
     test_anticheat.cpp
     test_integrity.cpp
     # Culling/sorting/undo/camera/graph are compiled in directly — pulling in the

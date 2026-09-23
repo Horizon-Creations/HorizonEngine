@@ -37,6 +37,9 @@
 #include <HorizonCode/HorizonCode.h>
 #include <Net/BitStream.h>
 
+#include <string>
+#include <vector>
+
 namespace HE::Net::Game {
 
 // Is this type allowed to cross? Everything but Ref (plan §6.1). Also the
@@ -68,5 +71,20 @@ bool valuesEqual(const HorizonCode::Value& a, const HorizonCode::Value& b);
 // before applying a delta (plan §6.2 "dessen Typ nicht passt"); it deliberately
 // ignores the payload, so an empty array still matches a full one.
 bool valueTypesMatch(const HorizonCode::Value& a, const HorizonCode::Value& b);
+
+// ── A call's arguments as JSON, for the native module boundary (plan §7.2) ───
+// IGameLogic::onRpc takes a string and not a Value list, the same trade
+// IGameLogic::onRep makes and for the same reason: a HorizonCode::Value is a
+// C++ type with strings and vectors in it, and this interface crosses into a
+// hot-loaded dylib that is rebuilt on its own schedule. A JSON array costs a
+// parse and survives that boundary; a vector of Values does not.
+//
+// Always a JSON ARRAY, one element per argument, in call order. Scalars become
+// the obvious JSON scalar (an Enum its integer, a Vec3 a three-element array);
+// Array and Set become arrays, Map an array of {"key":…,"value":…} pairs so the
+// authored order survives — the lesson `horizoncode-containers` records about
+// nlohmann sorting object keys. A Ref never gets this far (writeValue refused
+// it) and reads as null if one somehow does.
+std::string argsToJson(const std::vector<HorizonCode::Value>& args);
 
 } // namespace HE::Net::Game

@@ -384,6 +384,17 @@ bool ScriptEngine::callInstanceMethod(InstanceId id, const char* fn, const ArgPu
     return pcall(1 + pushed, 0);
 }
 
+bool ScriptEngine::hasInstanceMethod(InstanceId id, const char* fn)
+{
+    auto it = m_instances.find(id);
+    if (it == m_instances.end() || !fn) return false;
+    if (!pushInstanceMethod(m_L, it->second.luaRef, fn)) return false;
+    // pushInstanceMethod leaves the function and `self` on the stack for a
+    // call that is not going to happen here.
+    lua_pop(m_L, 2);
+    return true;
+}
+
 bool ScriptEngine::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
     auto it = m_instances.find(id);

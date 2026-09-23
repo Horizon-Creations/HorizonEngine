@@ -145,6 +145,24 @@ public:
                            const HorizonCode::Value& oldValue)
     { (void)id; (void)varName; (void)oldValue; return true; }
 
+    // A remote call arrived for this instance (plan §7.2): run the method of
+    // that name with `args`. The name is used VERBATIM — a graph's `Open` is a
+    // script's `Open`, because the two sides have to agree on one spelling and
+    // the one the caller wrote is the only one both know.
+    //
+    // THE RETURN VALUE MEANS SOMETHING ELSE HERE than in every hook above.
+    // False is not a failure: it is "this instance has no such method", and
+    // the router then asks the next frontend (NetEvents::dispatchRpc). A hook
+    // answers true for a missing method because nothing went wrong; a remote
+    // call has to know, or a Lua script would swallow a call meant for the
+    // native module.
+    //
+    // Defaulted to false, so a backend that predates RPC simply never claims a
+    // call — which is the truth about it.
+    virtual bool callRpc(InstanceId id, const std::string& fn,
+                         const std::vector<HorizonCode::Value>& args)
+    { (void)id; (void)fn; (void)args; return false; }
+
     // Declared properties of a loaded script (editor inspector surface) and
     // per-instance override injection (before callOnStart).
     virtual std::vector<ScriptPropDef> getScriptProperties(const std::string& name) const = 0;

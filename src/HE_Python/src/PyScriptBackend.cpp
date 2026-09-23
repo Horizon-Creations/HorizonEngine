@@ -1377,6 +1377,38 @@ bool PyScriptBackend::callOnRep(InstanceId id, const std::string& varName,
 	Py_DECREF(r); return true;
 }
 
+bool PyScriptBackend::callRpc(InstanceId id, const std::string& fn,
+                              const std::vector<HorizonCode::Value>& args)
+{
+	// The name VERBATIM — a graph's `Open` is a script's `Open`. No snake_case
+	// twin here, unlike on_rep_<name>: that prefix is the engine's own and this
+	// name is the caller's, and translating it would mean a Lua script calling
+	// `takeDamage` could not reach a Python `takeDamage`.
+	PyObject* obj = m_impl->findInstance(id);
+	if (!obj || !PyObject_HasAttrString(obj, fn.c_str())) return false;
+
+	PyObject* tuple = PyTuple_New(static_cast<Py_ssize_t>(args.size()));
+	if (!tuple) { m_lastError = takePyError(); return false; }
+	for (std::size_t i = 0; i < args.size(); ++i)
+	{
+		PyObject* a = pyFieldValueToObj(args[i], 0);
+		if (!a) { Py_DECREF(tuple); m_lastError = takePyError(); return true; }
+		// Steals the reference, which is why `a` is not released here.
+		PyTuple_SET_ITEM(tuple, static_cast<Py_ssize_t>(i), a);
+	}
+	PyObject* method = PyObject_GetAttrString(obj, fn.c_str());
+	if (!method) { Py_DECREF(tuple); m_lastError = takePyError(); return true; }
+	PyObject* r = PyObject_CallObject(method, tuple);
+	Py_DECREF(method);
+	Py_DECREF(tuple);
+	// TRUE either way from here on: the instance HAD the method, so the call is
+	// claimed. Passing it to the next frontend after a Python error would run
+	// the same intent twice.
+	if (!r) { m_lastError = takePyError(); return true; }
+	Py_DECREF(r);
+	return true;
+}
+
 bool PyScriptBackend::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
 	const char* fn = ev == UIScriptEvent::Click      ? "on_click" :

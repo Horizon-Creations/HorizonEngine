@@ -76,6 +76,29 @@ public:
     //
     // Appended at the END and defaulted, like the six above.
     virtual void onRep(uint32_t entity, const char* name) { (void)entity; (void)name; }
+
+    // Somebody on another machine asked this entity to run `name`
+    // (docs/gameplay-replication-plan.md §7.2). `argsJson` is a JSON ARRAY of
+    // the arguments in call order (HE::Net::Game::argsToJson documents each
+    // type's shape); an empty call is "[]", never null.
+    //
+    // A STRING and not a Value list, the same trade onRep makes above and for
+    // the same reason: this interface crosses into a hot-loaded dylib that is
+    // rebuilt on its own schedule, and a HorizonCode::Value is a C++ type with
+    // strings and vectors in it.
+    //
+    // LAST IN LINE. The entity's HorizonCode class is asked first and its
+    // Lua/Python instance second; this is reached only when neither had the
+    // function (NetEvents::dispatchRpc). Who asked is he::net::rpcSender()
+    // during this call and nothing afterwards.
+    //
+    // No return value, by design: an RPC is fire-and-forget, because there is
+    // no request/response protocol to hand one back through and a graph that
+    // waited for one would stall the frame.
+    //
+    // Appended at the END and defaulted, like the seven above.
+    virtual void onRpc(uint32_t entity, const char* name, const char* argsJson)
+    { (void)entity; (void)name; (void)argsJson; }
 };
 
 // Typedefs for the DLL export function pointers

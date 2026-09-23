@@ -33,6 +33,7 @@
 #include "HorizonScene/GameReplication.h"
 #include "HorizonScene/Net/PlayerRoster.h"
 #include "HorizonScene/Net/PropertyReplicator.h"
+#include "HorizonScene/Net/RpcRouter.h"
 #include "HorizonScene/Net/SpawnReplicator.h"
 
 #include <Net/ITransport.h>
@@ -313,6 +314,15 @@ public:
 	// the explicitly declared variables still replicate.
 	void setVariableSource(HorizonCode::Runtime* runtime,
 	                       PropertyReplicator::InstanceOfFn instanceOf);
+	// Hand the RUNTIME the door back into the session: from here on a Call
+	// Function node on a function with Run On set asks this session's router
+	// whether the call belongs on another machine (plan §7.2). Installed by
+	// setVariableSource, which already receives both halves it needs — the
+	// runtime and the entity map — so an application that wired variables has
+	// wired RPCs too, and the two cannot be half-connected.
+	//
+	// Uninstalled by leave(): a runtime that outlives its session must go back
+	// to running every function locally rather than asking a dead router.
 	// The entity this side drives, or entt::null. On the host that is whatever
 	// was last assigned to player 1; on a client, what kMsgControl named.
 	Entity localCharacter() const { return m_localCharacter; }
@@ -323,6 +333,7 @@ public:
 	GameReplication*   replication() { return m_replication.get(); }
 	SpawnReplicator*   spawns()      { return m_spawns.get(); }
 	PropertyReplicator* properties() { return m_properties.get(); }
+	RpcRouter*          rpc()        { return m_rpc.get(); }
 	HE::Net::NetSession* session()  { return m_net.get(); }
 	HE::AntiCheat::AntiCheatHost* antiCheat() { return m_acHost.get(); }
 	// The service is only built when the project asked for it; null = OFF.
@@ -349,6 +360,11 @@ public:
 	const Stats& stats() const { return m_stats; }
 
 private:
+	// Point the runtime's Call Function path at this session's router, and
+	// unpoint it again. Both no-ops without a runtime.
+	void   installRpcHook();
+	void   removeRpcHook();
+
 	bool   startCommon(std::unique_ptr<HE::Net::ITransport> transport,
 	                   HE::Net::NetRole role, const GameReplication::Config& repCfg);
 	void   installHandlers();
@@ -384,6 +400,7 @@ private:
 	std::unique_ptr<GameReplication>      m_replication;
 	std::unique_ptr<SpawnReplicator>      m_spawns;
 	std::unique_ptr<PropertyReplicator>   m_properties;
+	std::unique_ptr<RpcRouter>           m_rpc;
 	std::unique_ptr<HE::AntiCheat::AntiCheatService> m_acService;
 	std::unique_ptr<HE::AntiCheat::AntiCheatHost>    m_acHost;
 

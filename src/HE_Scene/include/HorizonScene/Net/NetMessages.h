@@ -67,9 +67,25 @@ inline constexpr MessageId kMsgControl = kFirstUserMessage + 213;   // host → 
 inline constexpr MessageId kMsgPropertyTable = kFirstUserMessage + 216;  // host → client: netId, names+values
 inline constexpr MessageId kMsgProperties    = kFirstUserMessage + 217;  // host → client: netId, (index, value)…
 
+// ── Remote procedure calls (plan §7.3) ───────────────────────────────────────
+// BOTH directions, unlike everything above: a client's CallServer and a host's
+// CallClient/CallAllClients are the same message with a different `target`
+// byte, because they are the same thing — "run this function over there".
+//
+// ReliableOrdered, so `Open` after `Close` arrives as `Open` after `Close`.
+// Against the property deltas it is NOT ordered (that is the transport's other
+// channel), which is why an RPC that depends on a value set in the same frame
+// should carry the value as an argument; the Run On docs say so.
+//
+// Format: netId:u32 | target:u8 | fromPlayer:u32 | name:string | argc:u8 |
+//         Value… (ValueWire). `fromPlayer` is written by the sender and
+// OVERWRITTEN by the host out of the connection it arrived on — the same rule
+// the beacon address and REMOTE_ADDR follow, and the reason a client cannot
+// claim to be somebody else.
+inline constexpr MessageId kMsgRpc = kFirstUserMessage + 218;
+
 // ── Reserved, so nothing else takes the number before its step lands ──
 // 214 kMsgScene / 215 kMsgSceneReady (scene change, plan §5.5)        — step 5
-// 218 kMsgRpc (plan §7.3)                                             — step 7
 
 // The gameplay protocol's own version, compared in the Hello. Separate from
 // kCollabProtocolVersion because the two protocols change for different reasons

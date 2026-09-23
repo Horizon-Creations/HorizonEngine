@@ -154,6 +154,12 @@ public:
     // above.
     using ArgPusher = std::function<int(lua_State*)>;
     bool callInstanceMethod(InstanceId id, const char* fn, const ArgPusher& pushArgs);
+    // Does this instance define `fn` at all? callInstanceMethod deliberately
+    // answers TRUE for a method that is not there ("nothing to call went
+    // wrong" is not an error), which is right for a hook and wrong for a
+    // remote call: the RPC router has to know whether Lua took it or whether
+    // the next frontend should be asked (NetEvents::dispatchRpc).
+    bool hasInstanceMethod(InstanceId id, const char* fn);
 
 private:
     // Compile `source` as a chunk named `name` and leave it on the stack.

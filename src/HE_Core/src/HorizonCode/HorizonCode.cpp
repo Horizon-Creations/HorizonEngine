@@ -1786,6 +1786,10 @@ nlohmann::json nodeToJsonObj(const Node& n)
     if (n.hasArg)            e["hasArg"]   = n.hasArg;
     if (n.access)            e["access"]   = n.access;
     if (n.overridable)       e["virtual"]  = true;
+    // Absent means Local, which is what every graph authored before
+    // multiplayer existed meant (plan §7.2).
+    if (n.runOn)             e["runOn"]    = (int)n.runOn;
+    if (n.anyClient)         e["anyClient"] = true;
     if (n.f[0] || n.f[1] || n.f[2] || n.f[3])
         e["f"] = { n.f[0], n.f[1], n.f[2], n.f[3] };
     if (n.type == NodeType::ConstTransform)
@@ -1913,6 +1917,19 @@ bool nodeFromJsonObj(const nlohmann::json& e, Node& n)
     // Absent means "not overridable" — every graph authored before this
     // existed keeps exactly the behaviour it had.
     n.overridable = e.value("virtual", false);
+    // Multiplayer (plan §7.2). Absent, and anything outside the four RunOn
+    // values, reads as Local: a graph from a newer build opened in an older one
+    // runs its functions here rather than routing them nowhere.
+    {
+        const int ro = e.value("runOn", 0);
+        n.runOn = (ro >= 0 && ro <= 3) ? (std::uint8_t)ro : (std::uint8_t)0;
+    }
+    n.anyClient = e.value("anyClient", false);
+    // anyClient only means anything on a Server function — it is the answer to
+    // "may a client that does not own this entity call it", and no other target
+    // asks that question. Normalised on load so the editor's checkbox and the
+    // router's check cannot read two different stories out of one file.
+    if (n.runOn != (std::uint8_t)RunOn::Server) n.anyClient = false;
     if (const auto& f = e.value("f", nlohmann::json::array()); f.size() >= 4)
         for (int i = 0; i < 4; ++i) n.f[i] = f[i].get<float>();
     if (const auto& x = e.value("xform", nlohmann::json::array()); x.size() >= 9)
@@ -3627,6 +3644,21 @@ void Runner::execNode(const Node& n, int depth)
                     ("HorizonCode: Call Function '" + n.s + "' — no such function in this "
                      "graph; call skipped").c_str());
             break;
+        }
+        // ── Multiplayer: does this call belong on another machine? (§7.2) ──
+        // Before the frame is built, because a routed call runs NOTHING here —
+        // not the body, not the locals. The arguments are still evaluated in
+        // the caller's context, exactly as both paths below do, since they are
+        // what travels. `rpcRoute` returning false is the ordinary answer
+        // offline and on the target side itself, and then this falls through
+        // to the local call as if Run On were not set.
+        if (entry->runOn != (std::uint8_t)RunOn::Local && m_ctx.rpcRoute)
+        {
+            std::vector<Value> rpcArgs(n.params.size());
+            for (size_t i = 0; i < n.params.size(); ++i)
+                rpcArgs[i] = coerce(evalInput(n, (int)i, depth + 1), n.params[i].type);
+            if (m_ctx.rpcRoute(n.s, rpcArgs, entry->runOn, entry->anyClient))
+                break;
         }
         // Build the call frame: evaluate arguments in the CALLER's context (before
         // pushing, so the caller's own params still resolve), seed typed results

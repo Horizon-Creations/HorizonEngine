@@ -42,6 +42,26 @@ struct CompiledEventInfo
     const char* name;     // one entry per Event node in the source graph
     int         elem;     // widget element filter (0 = any), mirrors Node::elem
 };
+// One FunctionEntry's multiplayer face (docs/gameplay-replication-plan.md §7).
+// Only what the RPC router has to ask about a function it did not author: where
+// it runs, whether a stranger may ask for it, and the parameter types the format
+// check compares an incoming argument list against.
+//
+// A class with no functions emits no table, and funcInfos() below then answers
+// the empty list — the same "not mine" the Runtime already handles. That is why
+// a generated class written before multiplayer existed keeps compiling: it never
+// mentions this type at all, and an interpreted class answers from its graph.
+struct CompiledFuncInfo
+{
+    const char*  name;
+    std::uint8_t runOn     = 0;      // mirrors Node::runOn (RunOn)
+    bool         anyClient = false;  // mirrors Node::anyClient
+    // Parameter types in declaration order. A pointer and a count rather than a
+    // vector, so the generated table stays a static aggregate with no
+    // constructor to run at load time — the shape every other table here has.
+    const PinType* params    = nullptr;
+    std::size_t    paramCount = 0;
+};
 
 class HE_API CompiledInstance
 {
@@ -82,6 +102,12 @@ public:
     { static const std::vector<CompiledVarInfo> kNone; return kNone; }
     virtual const std::vector<CompiledEventInfo>& eventInfos() const
     { static const std::vector<CompiledEventInfo> kNone; return kNone; }
+    // The multiplayer face of this class's functions (plan §7.6). Empty is an
+    // ordinary answer and means "ask nothing of this class": the router then
+    // runs no format check and treats every function as owner-only, which is
+    // the safe side of both questions.
+    virtual const std::vector<CompiledFuncInfo>& funcInfos() const
+    { static const std::vector<CompiledFuncInfo> kNone; return kNone; }
 
     // ── the engine's own events, as methods ─────────────────────────────────
     // These names are not data: each is a string LITERAL at exactly one place in

@@ -1,5 +1,7 @@
 #include "HorizonScene/Net/ValueWire.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace HE::Net::Game {
@@ -294,6 +296,161 @@ bool valuesEqual(const Value& a, const Value& b)
 	for (std::size_t i = 0; i < a.items.size(); ++i)
 		if (!valuesEqual(a.items[i], b.items[i])) return false;
 	return true;
+}
+
+// ── A call's arguments as JSON (plan §7.2) ───────────────────────────────────
+
+namespace {
+
+// Hand-written rather than nlohmann, for one reason that matters: a Map has to
+// keep its insertion order, and nlohmann's default object is a sorted std::map
+// — the trap Memory `horizoncode-containers` records. A map therefore becomes
+// an ARRAY of pairs here, which no ordering can spoil.
+void appendJson(std::string& out, const Value& v, int depth);
+
+void appendJsonString(std::string& out, const std::string& in)
+{
+	out += '"';
+	for (const char c : in)
+	{
+		switch (c)
+		{
+		case '"':  out += "\\\""; break;
+		case '\\': out += "\\\\"; break;
+		case '\n': out += "\\n";  break;
+		case '\r': out += "\\r";  break;
+		case '\t': out += "\\t";  break;
+		default:
+			// Control characters have to be escaped or the result is not JSON.
+			if (static_cast<unsigned char>(c) < 0x20)
+			{
+				char buf[8];
+				std::snprintf(buf, sizeof buf, "\\u%04x", (unsigned)(unsigned char)c);
+				out += buf;
+			}
+			else out += c;
+			break;
+		}
+	}
+	out += '"';
+}
+
+void appendNumber(std::string& out, double d)
+{
+	// %.9g round-trips a float exactly and does not print the seventeen digits
+	// a double would. A non-finite value is not JSON at all, so it becomes null
+	// rather than the literal `nan`, which no parser on the other side accepts.
+	if (!(d == d) || d > 1e308 || d < -1e308) { out += "null"; return; }
+	char buf[32];
+	std::snprintf(buf, sizeof buf, "%.9g", d);
+	out += buf;
+}
+
+void appendVec(std::string& out, const float* f, int n)
+{
+	out += '[';
+	for (int i = 0; i < n; ++i) { if (i) out += ','; appendNumber(out, f[i]); }
+	out += ']';
+}
+
+void appendScalarJson(std::string& out, const Value& v)
+{
+	switch (v.type)
+	{
+	case PinType::Bool:   out += v.b ? "true" : "false"; break;
+	case PinType::Int:
+	case PinType::Enum:   out += std::to_string(v.i); break;
+	case PinType::Float:  appendNumber(out, v.f); break;
+	case PinType::String: appendJsonString(out, v.s); break;
+	case PinType::Vec2:   appendVec(out, &v.v2.x, 2); break;
+	case PinType::Vec3:   appendVec(out, &v.v3.x, 3); break;
+	case PinType::Vec4:   appendVec(out, &v.v4.x, 4); break;
+	case PinType::Color:  appendVec(out, &v.col.x, 4); break;
+	case PinType::Transform:
+	{
+		// Nine numbers in the order the rest of the engine writes a transform:
+		// position, rotation in euler degrees, scale.
+		const float f[9] = { v.tpos.x, v.tpos.y, v.tpos.z,
+		                     v.trot.x, v.trot.y, v.trot.z,
+		                     v.tscl.x, v.tscl.y, v.tscl.z };
+		appendVec(out, f, 9);
+		break;
+	}
+	case PinType::Ref:
+		// Never reaches here through the wire — writeValue refused it — and a
+		// local handle would mean nothing to the module anyway.
+		out += "null";
+		break;
+	case PinType::Struct:
+	case PinType::Exec:
+		out += "null";
+		break;
+	}
+}
+
+void appendJson(std::string& out, const Value& v, int depth)
+{
+	if (depth > kMaxDepth) { out += "null"; return; }
+
+	const CK kind = v.kind();
+	if (kind == CK::Map)
+	{
+		out += '[';
+		const std::size_t n = std::min(v.keys.size(), v.items.size());
+		for (std::size_t i = 0; i < n; ++i)
+		{
+			if (i) out += ',';
+			out += "{\"key\":";
+			appendJson(out, v.keys[i], depth + 1);
+			out += ",\"value\":";
+			appendJson(out, v.items[i], depth + 1);
+			out += '}';
+		}
+		out += ']';
+		return;
+	}
+	if (kind == CK::Array || kind == CK::Set)
+	{
+		out += '[';
+		for (std::size_t i = 0; i < v.items.size(); ++i)
+		{
+			if (i) out += ',';
+			appendJson(out, v.items[i], depth + 1);
+		}
+		out += ']';
+		return;
+	}
+	if (v.type == PinType::Struct)
+	{
+		// Field values in DEFINITION order, which is the order they sit in
+		// `items` and the order the definition names them. An object keyed by
+		// field name would need the TypeRegistry, which this file deliberately
+		// does not depend on; the module reads its own struct and knows the
+		// order it declared.
+		out += '[';
+		for (std::size_t i = 0; i < v.items.size(); ++i)
+		{
+			if (i) out += ',';
+			appendJson(out, v.items[i], depth + 1);
+		}
+		out += ']';
+		return;
+	}
+	appendScalarJson(out, v);
+}
+
+} // namespace
+
+std::string argsToJson(const std::vector<Value>& args)
+{
+	std::string out = "[";
+	for (std::size_t i = 0; i < args.size(); ++i)
+	{
+		if (i) out += ',';
+		appendJson(out, args[i], 0);
+	}
+	out += ']';
+	return out;
 }
 
 } // namespace HE::Net::Game

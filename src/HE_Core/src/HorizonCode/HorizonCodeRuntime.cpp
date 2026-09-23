@@ -391,6 +391,47 @@ std::vector<Runtime::ReplicatedVar> Runtime::replicatedVariablesOf(InstanceId id
     return out;
 }
 
+Runtime::FunctionSignature Runtime::functionSignatureOf(InstanceId id,
+                                                        const std::string& fn) const
+{
+    FunctionSignature sig;
+    const Inst* i = find(id);
+    if (!i) return sig;
+
+    if (i->compiled)
+    {
+        for (const auto& fi : i->compiled->funcInfos())
+        {
+            if (!fi.name || fn != fi.name) continue;
+            sig.found     = true;
+            sig.runOn     = fi.runOn;
+            sig.anyClient = fi.anyClient;
+            // A null table is "this codegen emitted no parameter types", which
+            // is NOT the same as a function of no arguments — see the header.
+            sig.hasParams = fi.params != nullptr;
+            for (std::size_t k = 0; fi.params && k < fi.paramCount; ++k)
+                sig.params.push_back(fi.params[k]);
+            return sig;
+        }
+        return sig;
+    }
+
+    // Leaf-first: the derived class's declaration is the one that counts, the
+    // same rule levelWithFunction and levelHandlingEvent follow.
+    for (size_t lv = i->levels.size(); lv-- > 0; )
+        for (const Node& n : i->levels[lv].nodes)
+        {
+            if (n.type != NodeType::FunctionEntry || n.s != fn) continue;
+            sig.found     = true;
+            sig.runOn     = n.runOn;
+            sig.anyClient = n.anyClient;
+            sig.hasParams = true;
+            for (const FuncParam& p : n.params) sig.params.push_back(p.type);
+            return sig;
+        }
+    return sig;
+}
+
 std::vector<Runtime::EventBinding> Runtime::eventBindingsOf(InstanceId id) const
 {
     std::vector<EventBinding> out;
@@ -608,6 +649,12 @@ Context Runtime::makeContext(InstanceId id, size_t level)
     ctx.destroyObject = [this](uint32_t ref) { if (m_services.destroyObject) m_services.destroyObject(ref); };
     ctx.callApi       = [this, id](const std::string& apiId, const std::vector<Value>& args) -> std::vector<Value>
     { return m_services.callApi ? m_services.callApi(id, apiId, args) : std::vector<Value>{}; };
+    // Multiplayer: the Call Function node asks this before running anything
+    // whose entry has Run On set (plan §7.2). Unbound = false = run it here,
+    // which is what every runtime without a session answers.
+    ctx.rpcRoute      = [this, id](const std::string& fn, const std::vector<Value>& args,
+                                   std::uint8_t runOn, bool anyClient) -> bool
+    { return m_rpcRoute ? m_rpcRoute(id, fn, args, runOn, anyClient) : false; };
     // Latent flow + liveness + per-node state (all runtime-side).
     ctx.scheduleResume = [this, id, level](int nodeId, float seconds, bool realTime)
     {
@@ -639,6 +686,19 @@ Context Runtime::makeContext(InstanceId id, size_t level)
             hcError("Call Function '" + fn + "' — no such function in this class or "
                     "its base classes (or it is private to a base); call skipped");
             return false;
+        }
+        // An INHERITED function carries its Run On exactly like a local one
+        // (plan §7.2): the mode lives on the entry node, and which graph that
+        // node happens to sit in is not the caller's business. Without this,
+        // moving a Server function up into a base class would quietly turn it
+        // back into a local call on whichever machine ran the caller.
+        for (const Node& fe : i->levels[lv].nodes)
+        {
+            if (fe.type != NodeType::FunctionEntry || fe.s != fn) continue;
+            if (fe.runOn != (std::uint8_t)RunOn::Local && m_rpcRoute &&
+                m_rpcRoute(id, fn, args, fe.runOn, fe.anyClient))
+                return true;   // on the wire; nothing runs here, and no results
+            break;
         }
         // Same cross-runner recursion guard as Runtime::callFunction — this is
         // the one call edge that builds its Runner without going through it.
