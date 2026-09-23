@@ -1569,12 +1569,16 @@ namespace
 	  "2 and up in join order. A number is minted once and never reused, so a "
 	  "score kept under it stays the right player's." },
 	{ "net.playerCount",
-	  "How many players are in the session, including ourselves. 1 offline." },
+	  "How many players the session are known HERE. On the host that is all of "
+	  "them; on a client it is 1 — itself — because nothing sends a client the "
+	  "list yet. 1 offline as well." },
 	{ "net.playerAt",
 	  "The player number of the index'th player, in join order. 0 past the end, "
-	  "so a loop can stop on it." },
+	  "so a loop can stop on it. Only the host sees more than itself (see Player "
+	  "Count)." },
 	{ "net.playerName",
-	  "The display name that player joined with." },
+	  "The display name that player joined with. Empty for a player this machine "
+	  "does not know about — on a client that is everybody but itself." },
 	{ "net.ping",
 	  "Round trip to that player in milliseconds. 0 when there is nothing to "
 	  "measure: ourselves, and a player nobody has timed yet." },

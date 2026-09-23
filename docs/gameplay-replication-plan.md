@@ -769,6 +769,48 @@ genau der Wert, den eine host-eigene Entity als `owner` trägt. Ein Client hätt
 also die Kiste des Hosts als seine eigene Spielfigur angemeldet. Die
 Negativkontrolle steht im Test: ohne den Filter zählt `spawnsSent` 1 statt 0.
 
+**Der PlayerHost-Umbau ist NUR ZUR HÄLFTE gemacht, und das ist die wichtigste
+Zeile dieses Abschnitts.** §5.4 verlangt drei Dinge; Schritt 5 hat eineinhalb:
+
+| §5.4 | Stand |
+|---|---|
+| 3. Possess auf dem Client | **fertig.** `kMsgControl` → `setLocallyControlled` + `player.possess` über die `ControlFn`, in beiden Anwendungen gebunden. |
+| 2. `Create Object` auf einem Client ist ein No-op | **fertig.** `NetGameSession::refuseClientSpawn` in beiden `Ctx::createObject`, eine Log-Zeile pro Klasse. |
+| 1. Besitzer pro Controller, Eingaben nur an Besitzer 1 | **offen.** |
+| Host instanziiert pro Beitretendem einen Controller, dessen BeginPlay spawnt und possesst | **offen.** |
+
+Die letzten beiden gehören zusammen und sind deshalb zusammen offen: solange
+der Host für einen Beitretenden gar keinen Controller anlegt, gibt es auch
+keinen, an den lokale Eingaben fälschlich gingen. Die Folge heute, klar
+gesagt: **ein Beitretender ist ein Zuschauer.** Er bekommt Binds, Spawns,
+Baseline und Snapshots, aber niemand ruft in der Produktion `assignControl` --
+`kMsgControl` hat bisher nur den Test als Aufrufer -- und sein eigener
+`Create Object` ist seit diesem Schritt korrekt ein No-op. Er sieht die Welt
+des Hosts und fährt nichts darin. Das ist der erste Punkt für den nächsten
+Schritt.
+
+**Zwei weitere offene Punkte, an denen dieser Schritt vorbeigegangen ist:**
+
+- **Ein Client kennt die anderen Spieler nicht.** Sein Roster hält sich selbst,
+  unter der Id, die der Host im Welcome vergeben hat (das war ein Fehler in
+  Schritt 4: der Eintrag trug 1, `localPlayer()` sagte 2, also gab
+  `net.playerName(net.localPlayer())` auf jedem Client leer zurück). Die
+  anderen fehlen, weil nichts sie schickt; der natürliche Ort ist die
+  Late-Join-Baseline, eine Nachrichten-Id ist dafür noch nicht reserviert. Die
+  Docs von `net.playerCount/playerAt/playerName` sagen das jetzt.
+- **Szenenwechsel in laufender Session.** `kMsgScene`/`kMsgSceneReady` (214/215)
+  sind weiterhin nur reserviert. Schlimmer als nur fehlend: die Replikation
+  hält Entity-Handles in die Welt, die `performSceneSwitch` ersetzt, und ein
+  Handle aus der alten Registry kann in der neuen eine andere Entity
+  bezeichnen. Deshalb beendet der Schritt die Session beim Szenenwechsel, mit
+  einer Warnung -- ein sichtbarer Ausgang statt zweier Peers, die still
+  verschiedener Meinung darüber sind, was Netz-Id 12 ist.
+
+**Nicht gebaut, bewusst:** die Parity-Fixture `net_events` in `HCGEN_CLASSES`.
+Damit ist nicht bewiesen, dass der Codegen `onPlayerJoined(int)` genau so
+emittiert, wie die Virtuals in `HorizonCodeCompiled.h` sie deklarieren -- das
+Muster ist `cheat_event`, das Risiko klein, die Lücke aber echt.
+
 **Vier Abweichungen von der Beschreibung oben:**
 
 1. **`kMsgControl` (+213) ist aus der Reservierung geholt und `assignControl`
@@ -791,6 +833,11 @@ Negativkontrolle steht im Test: ohne den Filter zählt `spawnsSent` 1 statt 0.
    in §7.1 in derselben Tabelle, gehören aber zu Schritt 6 und 7; sie hier
    anzulegen hieße, Rows ohne den `PropertyReplicator` bzw. den `RpcRouter`
    dahinter zu haben.
+5. **Der Editor pumpt die Session auf `m_isPlaying`, nicht auf `simulating`.**
+   Zuerst stand sie beim Anti-Cheat-Pump, und der hängt hinter der Pause. Ein
+   Host, der aufhört, seinen Socket zu leeren, weil sein Autor Pause gedrückt
+   hat, ist ein Host, dessen Spieler alle in den Timeout laufen. Pause friert
+   die Simulation ein, nicht die Verbindung.
 
 **Der Zwei-Prozess-Durchlauf, 23.09.2026, macOS 27, zwei echte Prozesse über
 echte UDP-Sockets auf 127.0.0.1** (gebautes Spiel gegen gebautes Spiel, nicht

@@ -224,6 +224,21 @@ public:
 	// False = no such player, or no net id.
 	bool assignControl(HE::Net::Game::PlayerId player, Entity character);
 
+	// "Should this Create Object be refused?" — true on a CLIENT in a live
+	// session, for a class that would replicate (plan §5.4 point 2: only the
+	// authority makes replicated objects). Lives here rather than in each
+	// application because both have the same rule and a second copy is how two
+	// hosts end up disagreeing about it; the applications call it from their
+	// Ctx::createObject, which is the one door every frontend's spawn goes
+	// through. Logs once per class, so a graph author looking for their missing
+	// spawn finds the reason instead of silence.
+	//
+	// Offline and on the host: always false. NOT a promise about `replicates` —
+	// the flag lives on the entity, which does not exist yet at this point; the
+	// default is on, so the honest answer for a client is "the host will send
+	// you one".
+	bool refuseClientSpawn(const std::string& classPath);
+
 	// Client: what to do when the host says an entity is ours. The session does
 	// the network half itself (setLocallyControlled, so prediction takes over);
 	// this callback is the APPLICATION half — possess it with the local player
@@ -328,6 +343,9 @@ private:
 	// entity whose bind found nothing leaves exactly this hole, and dropping the
 	// message would leave the player watching a character nobody drives.
 	std::uint32_t m_pendingControlNetId = 0;
+	// Classes refuseClientSpawn has already complained about, so the refusal is
+	// one line and not one per frame. Cleared by leave().
+	std::vector<std::string> m_refusedSpawnClasses;
 
 	std::string m_joinCode;
 	std::string m_sessionId;

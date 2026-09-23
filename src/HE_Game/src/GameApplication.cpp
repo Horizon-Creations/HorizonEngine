@@ -1121,6 +1121,15 @@ void GameApplication::OnInit()
 						HorizonCode::resolveClassAsset(contentManager(), assetPath);
 					if (HorizonCode::engineClassIsA(rc.engineBase, "Entity"))
 					{
+						// ONLY THE AUTHORITY MAKES REPLICATED OBJECTS (plan §5.4
+						// point 2). A client's own controller BeginPlay still
+						// says Create Object, and without this it would stand a
+						// second, purely local character next to the one the host
+						// spawns and sends — two bodies, one player. Refused with
+						// one line per class rather than silently, because a graph
+						// author looking for their missing spawn deserves to find
+						// the reason in the log.
+						if (m_netSession.refuseClientSpawn(assetPath)) return 0u;
 						// Placement travels with the spawn (null = authored), so
 						// Construct/BeginPlay already run at the destination.
 						const HorizonCode::InstanceId inst =
@@ -1616,6 +1625,22 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	// frameCount() deliberately keep running: they are session clocks, and a
 	// session clock that restarts at every door is not one.
 	HE::api::time::resetControls();
+
+	// A SCENE SWITCH INSIDE A SESSION IS NOT IMPLEMENTED (plan §5.5:
+	// kMsgScene/kMsgSceneReady, message ids 214/215 reserved and unused). And it
+	// is worse than merely missing: the replication holds entity handles into
+	// the world that is about to be replaced, and a handle from the old registry
+	// can alias a different entity in the new one. So the session is ended
+	// rather than carried across — a visible, explainable outcome instead of
+	// two peers quietly disagreeing about what net id 12 is.
+	if (m_netSession.isActive())
+	{
+		HE_LOG_WARN(Replication, "%s",
+		            "Scene switch during a session: the session is ended. Carrying one "
+		            "across a scene change is not built yet (plan §5.5).");
+		m_netSession.leave();
+		dispatchNetEvents();
+	}
 
 	// Swap + bring the new scene up exactly like OnInit does for the startup scene.
 	m_world = std::move(newWorld);
@@ -3178,6 +3203,14 @@ void GameApplication::OnWindowClosing(HE::WindowHandle handle)
 
 void GameApplication::OnShutdown()
 {
+	// The session FIRST, and said out loud: leave() writes a goodbye and drops
+	// every peer, so the others learn the seat is free now rather than waiting
+	// out the transport timeout. A quitting host that simply vanished would
+	// leave everybody staring at a frozen world for seconds. Whatever it queues
+	// on the way out still reaches the scripts, whose runtime is intact here.
+	m_netSession.leave();
+	dispatchNetEvents();
+
 	// The tray outlives the window unless it is taken down deliberately, and an
 	// icon left in the menu bar of a program that has exited is the worst thing
 	// a tray can do.

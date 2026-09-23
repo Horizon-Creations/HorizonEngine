@@ -1482,6 +1482,11 @@ void EditorApplication::OnInit()
 			// would answer a Cast to Entity, own no entity, and never tick.
 			if (HorizonCode::engineClassIsA(rc.engineBase, "Entity") && m_entityHost.running())
 			{
+				// ONLY THE AUTHORITY MAKES REPLICATED OBJECTS (plan §5.4 point
+				// 2), the same rule the packaged game follows — and through the
+				// same function, so a preview that joined a session behaves like
+				// a shipped client rather than like a second host.
+				if (m_netSession.refuseClientSpawn(assetPath)) return 0u;
 				// Placement travels with the spawn (null = authored), so
 				// Construct/BeginPlay already run at the destination.
 				// The spawn is given its PHYSICS inside the host, before
@@ -2356,6 +2361,22 @@ void EditorApplication::OnRender(float dt)
 	// Deliberately not "simulating || app": for a game nothing changes at all,
 	// and for an app there is no second state that could disagree with this one.
 	const bool uiLive = simulating || m_projectManager.currentProject().appProject;
+
+	// ── The multiplayer session, on `m_isPlaying` and NOT on `simulating` ────
+	// Before everything that reads world state (plan §5.2), and deliberately
+	// outside the pause: `simulating` is false while the editor is paused, and
+	// a host that stops draining its socket because its author hit Pause is a
+	// host whose players all time out. Pausing must freeze the SIMULATION, not
+	// the connection — the peers keep their link and simply stop seeing new
+	// snapshots, which is what a paused host should look like from outside.
+	//
+	// Inert and nearly free while no session is open, which is every ordinary
+	// play session.
+	if (m_isPlaying && m_editorWorld)
+	{
+		m_netSession.setWorld(m_editorWorld.get());
+		m_netSession.update(dt);
+	}
 
 	// Start an application's UI once per project. The packaged runtime does this
 	// in OnInit; here there is no "start", so the first frame that finds an app
@@ -3271,13 +3292,6 @@ void EditorApplication::OnRender(float dt)
 			// shipped build did nothing in the preview.
 			TimerSystem::dispatch(dt, &m_gameInstance.runtime(),
 			                      m_scriptContext.get(), &m_scriptInstances);
-			// The multiplayer session, BEFORE everything that reads world state
-			// (plan §5.2), exactly where the packaged game pumps it. Inert and
-			// nearly free while no session is open, which is every ordinary
-			// play session.
-			m_netSession.setWorld(m_editorWorld.get());
-			m_netSession.update(dt);
-
 			// Anti-cheat reports, the same two calls the packaged game makes:
 			// events now, responses at the frame's end (below). In preview mode
 			// the responses are log and flag only — see m_antiCheat.

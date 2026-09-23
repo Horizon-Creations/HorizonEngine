@@ -162,6 +162,23 @@ bool NetGameSession::joinDirect(const std::string& address, std::uint16_t port,
 	return true;
 }
 
+bool NetGameSession::refuseClientSpawn(const std::string& classPath)
+{
+	if (!isActive() || !isClient()) return false;
+
+	if (std::find(m_refusedSpawnClasses.begin(), m_refusedSpawnClasses.end(), classPath) ==
+	    m_refusedSpawnClasses.end())
+	{
+		m_refusedSpawnClasses.push_back(classPath);
+		HE_LOG_INFO(Replication,
+		            "Create Object of '%s' does nothing here: only the host makes replicated "
+		            "objects, and it sends you the one it made. Guard the spawn with "
+		            "Is Authority to say so in the graph.",
+		            classPath.c_str());
+	}
+	return true;
+}
+
 void NetGameSession::setSpawnFunction(SpawnReplicator::SpawnFn fn)
 {
 	m_spawnFn = std::move(fn);
@@ -368,6 +385,7 @@ void NetGameSession::leave()
 	m_localPlayer = kNoPlayer;
 	m_localCharacter      = entt::null;
 	m_pendingControlNetId = 0;
+	m_refusedSpawnClasses.clear();
 	m_role        = NetRole::None;
 	m_status      = Status::Idle;
 	m_sessionId.clear();
@@ -682,11 +700,18 @@ void NetGameSession::handleWelcome(BitReader& r)
 
 	m_localPlayer = player;
 	m_scenePath   = scene;
-	// The roster on a client holds itself; the full list arrives with the
-	// player-list message step 5 adds. Until then "who am I" is the half that
-	// matters, and it is answered.
+	// The roster on a client holds ITSELF ALONE, and under the id the HOST
+	// minted — not one of its own, which is what add() would give it (1, the
+	// host's own number). That mismatch made net.playerName(net.localPlayer())
+	// answer empty on every client.
+	//
+	// The other players are still missing: nothing sends a client the list, and
+	// no message id is reserved for one. Until there is (the natural place is
+	// the late-join baseline), net.playerCount and net.playerAt see one player
+	// on a client, and the docs for those rows say so.
 	m_roster.clear();
-	m_roster.add(kInvalidConnection, m_joinOptions.displayName, /*local*/ true);
+	m_roster.addWithId(m_localPlayer, kInvalidConnection, m_joinOptions.displayName,
+	                   /*local*/ true);
 
 	HE_LOG_INFO(Replication, "Welcome: player %u, scene '%s', %.1f Hz",
 	            player, scene.c_str(), static_cast<double>(tickHz));

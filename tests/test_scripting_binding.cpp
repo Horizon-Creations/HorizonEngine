@@ -974,6 +974,61 @@ TEST_CASE("ScriptContext: OnCheatDetected reaches a Lua instance with a readable
     ctx.setHostServices({});
 }
 
+// ─── The session's lifecycle reaches Lua ─────────────────────────────────────
+// docs/gameplay-replication-plan.md §7.4. Six events, ONE backend method with a
+// kind (NetScriptEvent) — which means the six method NAMES live in a hand-written
+// table in ScriptEngine.cpp, and a typo in one of them is silent: the hook simply
+// never fires and nothing says so. This is the test that says so.
+static const char* kLuaNetHandler = R"lua(
+local M = {}
+function M.onStart(self) self.n = 0 end
+function M.onPlayerJoined(self, player)   _G._joined = player end
+function M.onPlayerLeft(self, player)     _G._left = player end
+function M.onConnected(self)              _G._connected = (_G._connected or 0) + 1 end
+function M.onDisconnected(self, reason)   _G._reason = reason end
+function M.onSessionStarted(self)         _G._started = (_G._started or 0) + 1 end
+function M.onSessionEnded(self)           _G._ended = (_G._ended or 0) + 1 end
+return M
+)lua";
+
+TEST_CASE("ScriptContext: the session's six events reach a Lua instance under their own names")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec("_G._joined = -1 _G._left = -1 _G._reason = -1 "
+                        "_G._connected = 0 _G._started = 0 _G._ended = 0"));
+
+    REQUIRE(ctx.loadScript("netears", kLuaNetHandler));
+    auto id = ctx.createInstance("netears", world.createEntity("Ears"));
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    // The two that carry a PlayerId, the one that carries a reason code, and
+    // the three that carry nothing. A wrong name in the table, or the argument
+    // pushed for a no-arg event, shows up here and nowhere else.
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::PlayerJoined,   7));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::PlayerLeft,     7));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::Connected,      0));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::Disconnected,   2));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::SessionStarted, 0));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::SessionEnded,   0));
+
+    CHECK(engine.getGlobalNumber("_joined")    == doctest::Approx(7.0));
+    CHECK(engine.getGlobalNumber("_left")      == doctest::Approx(7.0));
+    CHECK(engine.getGlobalNumber("_reason")    == doctest::Approx(2.0));   // Kicked
+    CHECK(engine.getGlobalNumber("_connected") == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_started")   == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_ended")     == doctest::Approx(1.0));
+
+    // A script without the handlers is a no-op success, like every other
+    // optional callback — which is what lets the dispatcher fire at EVERY
+    // instance of the session without asking first.
+    REQUIRE(ctx.loadScript("netdeaf", kNameReader));
+    auto d = ctx.createInstance("netdeaf", world.createEntity("Deaf"));
+    CHECK(ctx.callOnNetEvent(d, NetScriptEvent::PlayerJoined, 1));
+}
+
 // ─── Every failing instance is reported, not just the first one per callback ──
 // ScriptContext throttles the runtime-error report of a callback so a broken
 // onUpdate does not write sixty lines a second. Keyed on the CALLBACK alone,

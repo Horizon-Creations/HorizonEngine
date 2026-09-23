@@ -64,6 +64,23 @@ public:
 		return m_players.back().id;
 	}
 
+	// Record a player under an id somebody ELSE minted — which on a client is
+	// every id, including its own: the host hands it out in the Welcome. Without
+	// this a client's roster entry carried 1 while localPlayer() said 2, so
+	// net.playerName(net.localPlayer()) came back empty on every client.
+	// The counter is pulled past it, so a later add() cannot mint it twice.
+	void addWithId(PlayerId id, ConnectionId conn, std::string name, bool local = false)
+	{
+		if (id == kNoPlayer) return;
+		PlayerInfo info;
+		info.id    = id;
+		info.conn  = conn;
+		info.name  = std::move(name);
+		info.local = local;
+		m_players.push_back(std::move(info));
+		if (id >= m_nextId) m_nextId = id + 1;
+	}
+
 	// Remove by id or by connection. Returns the id that left, or kNoPlayer.
 	PlayerId removeById(PlayerId id)
 	{

@@ -1160,4 +1160,78 @@ TEST_CASE("ScriptContext: OnCheatDetected reaches a Python instance with a reada
     ctx.setHostServices({});
 }
 
+// ─── The session's lifecycle reaches Python ──────────────────────────────────
+// docs/gameplay-replication-plan.md §7.4. The six events go through ONE backend
+// method with a kind, so the six snake_case NAMES live in a hand-written table
+// in PyScriptBackend.cpp — and a typo there is silent: the hook never fires and
+// nothing says so. The handler writes what it saw into the transform, the one
+// channel this file has back out of the interpreter.
+static const char* kPyNetHandler = R"py(
+import horizon
+
+class Lobby(horizon.Behavior):
+    def on_start(self):
+        self.joined = -1
+        self.left = -1
+        self.reason = -1
+        self.noarg = 0
+    def on_player_joined(self, player):
+        self.joined = player
+        self._report()
+    def on_player_left(self, player):
+        self.left = player
+        self._report()
+    def on_connected(self):
+        self.noarg += 1
+        self._report()
+    def on_disconnected(self, reason):
+        self.reason = reason
+        self._report()
+    def on_session_started(self):
+        self.noarg += 1
+        self._report()
+    def on_session_ended(self):
+        self.noarg += 1
+        self._report()
+    def _report(self):
+        # x = who joined, y = the disconnect reason, z = how many no-arg hooks ran
+        horizon.setPosition(self.entity_id, float(self.joined), float(self.reason),
+                            float(self.noarg))
+)py";
+
+TEST_CASE("ScriptContext: the session's six events reach a Python instance under their own names")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("lobby", kPyNetHandler, HE::ScriptLanguage::Python));
+    auto e  = makeEntity(world, "Lobby");
+    auto id = ctx.createInstance("lobby", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    // The two that carry a PlayerId, the one that carries a reason code, and
+    // the three that carry nothing. Pushing an argument at a no-arg hook would
+    // be a TypeError inside the interpreter, which is what the three no-arg
+    // calls below are really checking.
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::PlayerJoined,   4));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::PlayerLeft,     4));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::Connected,      0));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::Disconnected,   3));   // Rejected
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::SessionStarted, 0));
+    CHECK(ctx.callOnNetEvent(id, NetScriptEvent::SessionEnded,   0));
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.x == doctest::Approx(4.0f));   // on_player_joined saw the id
+    CHECK(t.position.y == doctest::Approx(3.0f));   // on_disconnected saw the reason
+    CHECK(t.position.z == doctest::Approx(3.0f));   // all three no-arg hooks ran
+
+    // A script without the handlers is a no-op success, like every other
+    // optional callback — which is what lets the dispatcher fire at EVERY
+    // instance without asking first.
+    REQUIRE(ctx.loadScript("netdeaf", kSpeedEcho, HE::ScriptLanguage::Python));
+    auto d = ctx.createInstance("netdeaf", makeEntity(world, "Deaf"));
+    CHECK(ctx.callOnNetEvent(d, NetScriptEvent::PlayerJoined, 1));
+    CHECK(ctx.callOnNetEvent(d, NetScriptEvent::SessionEnded, 0));
+}
+
 #endif // HE_HAVE_PYTHON
