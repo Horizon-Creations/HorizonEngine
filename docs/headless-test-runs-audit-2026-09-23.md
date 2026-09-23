@@ -230,3 +230,27 @@ war. Negativkontrolle: dasselbe mit `HE_HIDDEN_WINDOW=0`.
 **Offen für Schritt 3:** `he_mcp_multiclient.py` (F5, `HE_DUMP_LIVE` ohne
 Frame-Budget) muss `HE_HIDDEN_WINDOW=1` selbst setzen. Doku/Rezepte (Hebel 7)
 und die Datei-Picker stehen auch noch aus.
+
+## Stand nach Schritt 3 (F1 explizit hidden, Rezept)
+
+- **F1:** `bootOnce` setzt `HE_HIDDEN_WINDOW=1` ausdrücklich, statt sich auf
+  die Ableitung aus `HE_EXIT_AFTER_FRAMES` zu verlassen, und der Testfall
+  prüft nach sauberem Exit die Zeile „Primary window hidden as the main loop
+  starts" in `boot.log`. „Kein Fenster" ist damit eine Assertion, keine
+  Beobachtung. Negativkontrolle: mit `HE_HIDDEN_WINDOW=0` wird der Test an
+  genau dieser Stelle rot (beide Flavours).
+- **F5:** `he_mcp_multiclient.py` setzt `HE_HIDDEN_WINDOW=1` per `setdefault`.
+  Nicht laufen lassen (6,5-min-Live-Rezept), nur die Env-Zeile geändert.
+- **F2** braucht nichts (`HE_DUMP_PATH` schaltet selbst), **F3/F4** sind
+  Rezepte: **`docs/headless-runs.md`** („Editor/Game unbeaufsichtigt starten",
+  Hebel 7) nennt alle Schalter, die Zeugen-Zeilen, den Smoke-Test-Aufruf und
+  die Fallen.
+- **Gemessen (Release, M5, 23.09.2026, Sitzung gesperrt):** `test_app_todo`
+  allein 32 s (vorher 176-486 s mit Fenster), im vollen `ctest -j8` 69 s. Die
+  Differenz ist nicht Drosselung: die 30 Loop-Frames brauchen im Parallellauf
+  6,3/7,1 s gegen 5,6/6,0 s allein, die Mehrzeit liegt vor „OnInit complete"
+  im Metal-Flavour (46,7 s gegen 11,7 s), also Pipeline-Kompilieren unter
+  CPU-Last. Voller ctest 195/196, rot nur `runtime_size` (32,6 > 32,0 MB,
+  Thema 88).
+- **Weiter nicht verifiziert:** dass der Window-Server nichts zeigt (gesperrte
+  Sitzung, siehe oben). Datei-Picker im Hidden-Modus bleiben offen.
