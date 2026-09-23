@@ -22,6 +22,7 @@ struct HePhysicsServices; //   "
 struct HeInputServices;   //   "
 struct HeContentServices; //   "
 struct HeAntiCheatServices; // "
+struct HeNetServices;     //   "
 
 // ── HE::api ──────────────────────────────────────────────────────────────────
 // The single, engine-wide C++ gameplay API. Every scripting frontend reaches the
@@ -1784,6 +1785,38 @@ namespace net {
     // entity's HorizonCode class? The one row that tells "not declared" apart
     // from "declared and still at its default".
     bool        hasVar(Ctx&, int entity, const std::string& name);
+
+    // ── Remote calls (docs/gameplay-replication-plan.md §7) ─────────────────
+    // "Run this function over there." No return values, ever: an RPC is
+    // fire-and-forget, because handing one back would need a request/response
+    // protocol and a graph that waited for one would stall the frame.
+    //
+    // `args` is empty from the registry rows — a pin has a type and an argument
+    // list does not have one shape (§7.2) — and carries the real arguments when
+    // Lua or Python calls in variadically. For HorizonCode the ordinary form is
+    // the Run On mode at the function's header; these rows are the explicit
+    // spelling of the same message.
+    //
+    // OFFLINE, AND ON THE SIDE THAT IS ALREADY THE TARGET, THEY RUN LOCALLY.
+    // That follows net.isAuthority answering true with no session: a graph must
+    // behave the same before anybody hosts, or every door in every project
+    // would be built twice. Locally means the HorizonCode class on the entity —
+    // a Lua or Python script calling its own method offline writes `self:Open()`
+    // and needs nothing from the engine.
+    bool        callServer(Ctx&, int entity, const std::string& fn,
+                           const std::vector<HorizonCode::Value>& args);
+    bool        callClient(Ctx&, int player, int entity, const std::string& fn,
+                           const std::vector<HorizonCode::Value>& args);
+    bool        callAllClients(Ctx&, int entity, const std::string& fn,
+                               const std::vector<HorizonCode::Value>& args);
+    // May a client that does not OWN this entity call `fn` on it? The
+    // HorizonCode twin of this is a checkbox at the function header; Lua,
+    // Python and a native module have no header, so they say it here. Host
+    // only, and only while a session runs.
+    bool        allowAnyClient(Ctx&, int entity, const std::string& fn);
+    // Who made the call being delivered right now, as a PlayerId. 0 outside a
+    // delivery, which is what a graph asking at any other moment gets.
+    int         rpcSender(Ctx&);
 }
 
 // ── JSON ─────────────────────────────────────────────────────────────────────
@@ -2108,6 +2141,10 @@ void fillInputServices(::HeInputServices& out, GameServicesBinding* binding);
 void fillContentServices(::HeContentServices& out, GameServicesBinding* binding);
 // Anti-cheat resolves per call through `binding->antiCheat`, like the world.
 void fillAntiCheatServices(::HeAntiCheatServices& out, GameServicesBinding* binding);
+// The multiplayer table (docs/gameplay-replication-plan.md §7). Same shape and
+// same lifetime rule as the one above: the binding resolves the session per
+// call, so a session that ends leaves nothing dangling in a module's hands.
+void fillNetServices(::HeNetServices& out, GameServicesBinding* binding);
 
 // ── Scene transitions (process-global request queue; the app executes) ────────
 // load() requests a full deferred world switch at a safe frame boundary;

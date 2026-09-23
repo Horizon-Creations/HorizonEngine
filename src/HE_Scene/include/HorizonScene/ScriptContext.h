@@ -36,6 +36,8 @@ namespace HE::AntiCheat { class AntiCheatHost; }
 //
 // Each instance is bound to its entity (self.entityId in Lua / self.entity_id
 // in Python) set to the owning entity's raw handle.
+class NetGameSession;
+
 class ScriptContext
 {
 public:
@@ -244,6 +246,17 @@ public:
         // anti-cheat OFF: the readers answer their neutral default, check says
         // "passes", every other row is a no-op.
         HE::AntiCheat::AntiCheatHost* antiCheat = nullptr;
+        // The multiplayer session (docs/gameplay-replication-plan.md §7.1).
+        // Without it EVERY horizon.net.* row was dead from Lua and Python: the
+        // rows existed in the registry and the dispatcher exposed them, but
+        // their Ctx arrived with a null session, so each one answered its
+        // offline default and a script could not host, join, replicate a
+        // variable or make a remote call.
+        //
+        // Null is the ordinary state and means exactly what it says — no
+        // session in this process — which is what a tool, a test and an
+        // editor outside play mode all are.
+        NetGameSession*               net = nullptr;
     };
 
     // Bind the host's services for this session. Call it where setQuitHandler is

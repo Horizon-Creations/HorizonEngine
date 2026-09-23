@@ -9146,6 +9146,7 @@ void EditorApplication::setPlayMode(bool play)
 			hs.createObject  = g_host.createObject;  // the same lambdas HorizonCode uses
 			hs.destroyObject = g_host.destroyObject;
 			hs.antiCheat     = &m_antiCheat;
+			hs.net           = &m_netSession;
 			m_scriptContext->setHostServices(std::move(hs));
 		}
 
@@ -10111,6 +10112,7 @@ void EditorApplication::bindGameServices()
 	HE::api::fillInputServices(m_inputServices, &m_gameServicesBinding);
 	HE::api::fillContentServices(m_contentServices, &m_gameServicesBinding);
 	HE::api::fillAntiCheatServices(m_antiCheatServices, &m_gameServicesBinding);
+	HE::api::fillNetServices(m_netServices, &m_gameServicesBinding);
 	m_engineServices            = {};
 	m_engineServices.abiVersion = HE_SERVICES_ABI_VERSION;
 	m_engineServices.save       = &m_saveServices;
@@ -10118,6 +10120,7 @@ void EditorApplication::bindGameServices()
 	m_engineServices.input      = &m_inputServices;
 	m_engineServices.content    = &m_contentServices;
 	m_engineServices.anticheat  = &m_antiCheatServices;
+	m_engineServices.net        = &m_netServices;
 }
 
 std::filesystem::path EditorApplication::builtGameLogicPath()

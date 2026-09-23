@@ -3290,6 +3290,87 @@ bool setVarString(Ctx& c, int e, const std::string& n, const std::string& v)
 bool setVarVec3(Ctx& c, int e, const std::string& n, const glm::vec3& v)
 { return setVar(c, e, n, HorizonCode::Value::ofVec3(v)); }
 
+// ── Remote calls (plan §7) ───────────────────────────────────────────────────
+namespace {
+// Run the call HERE, on whatever HorizonCode class sits on the entity. This is
+// the OFFLINE answer, and the answer on the side that is already the target.
+//
+// HorizonCode only, and that is the honest boundary rather than an oversight: a
+// Lua or Python script that wants to call its own method offline writes
+// `self:Open()` and needs nothing from the engine to do it. What genuinely
+// cannot express a local call any other way is a GRAPH, and a graph is exactly
+// what this reaches.
+bool callHere(Ctx& c, int entity, const std::string& fn,
+              const std::vector<HorizonCode::Value>& args)
+{
+    if (!c.runtime || !c.entities) return false;
+    const entt::entity e = varEntity(c, entity);
+    if (e == entt::null) return false;
+    const HorizonCode::InstanceId inst = c.entities->instanceOf(e);
+    if (!inst) return false;
+    return c.runtime->callFunction(inst, fn, /*requirePublic*/ false, args);
+}
+
+RpcRouter* router(Ctx& c)
+{
+    NetGameSession* s = live(c);
+    return s ? s->rpc() : nullptr;
+}
+} // namespace
+
+bool callServer(Ctx& c, int entity, const std::string& fn,
+                const std::vector<HorizonCode::Value>& args)
+{
+    if (fn.empty()) return false;
+    RpcRouter* r = router(c);
+    // OFFLINE, and on the host itself: the call runs here. A single-player game
+    // is its own authority — the same decision net.isAuthority makes when it
+    // answers true with no session (plan §7.1), followed through to its
+    // conclusion, so a door built with CallServer works before anybody hosts.
+    if (!r || (live(c) && live(c)->isAuthority())) return callHere(c, entity, fn, args);
+    return r->callServer(varEntity(c, entity), fn, args);
+}
+
+bool callClient(Ctx& c, int player, int entity, const std::string& fn,
+                const std::vector<HorizonCode::Value>& args)
+{
+    if (fn.empty()) return false;
+    RpcRouter* r = router(c);
+    if (!r) return callHere(c, entity, fn, args);   // offline: this IS the client
+    NetGameSession* s = live(c);
+    // The host addressing its own player, and a client addressing anybody: both
+    // mean "here". A client never makes another machine run anything (§7.3).
+    if (!s->isAuthority() || pid(player) == s->localPlayer())
+        return callHere(c, entity, fn, args);
+    return r->callClient(pid(player), varEntity(c, entity), fn, args);
+}
+
+bool callAllClients(Ctx& c, int entity, const std::string& fn,
+                    const std::vector<HorizonCode::Value>& args)
+{
+    if (fn.empty()) return false;
+    RpcRouter* r = router(c);
+    NetGameSession* s = live(c);
+    // Sent AND run here, when there is anybody to send to: a multicast reaches
+    // every machine and the host is one of them.
+    if (r && s && s->isAuthority()) r->callAllClients(varEntity(c, entity), fn, args);
+    return callHere(c, entity, fn, args);
+}
+
+bool allowAnyClient(Ctx& c, int entity, const std::string& fn)
+{
+    RpcRouter* r = router(c);
+    if (!r || fn.empty()) return false;
+    r->allowAnyClient(varEntity(c, entity), fn);
+    return true;
+}
+
+int rpcSender(Ctx& c)
+{
+    RpcRouter* r = router(c);
+    return r ? static_cast<int>(r->rpcSender()) : 0;
+}
+
 bool getVarBool(Ctx& c, int e, const std::string& n)
 { return getVar(c, e, n, HorizonCode::PinType::Bool).b; }
 int getVarInt(Ctx& c, int e, const std::string& n)
@@ -6816,6 +6897,37 @@ const std::vector<ApiFn>& registry()
             "HE::api::net::getVarVec3",
             [](Ctx& c, const VV& a){ return VV{ Value::ofVec3(
                 net::getVarVec3(c, aI(a, 0), aS(a, 1))) }; } });
+        // ── Remote calls (plan §7.2) ──
+        // The EXPLICIT form. For HorizonCode the implicit one is the mode at the
+        // function header, and these three carry no arguments on purpose: a pin
+        // has a type, and a call's argument list does not have one shape. Lua
+        // and Python reach the same router variadically, through a hand-written
+        // binding that the generic dispatcher cannot express.
+        t.push_back({ "net.callServer", "Multiplayer", true,
+            {{"entity", P::Int}, {"function", P::String}}, {{"ok", P::Bool}},
+            "HE::api::net::callServer",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::callServer(c, aI(a, 0), aS(a, 1), {})) }; } });
+        t.push_back({ "net.callClient", "Multiplayer", true,
+            {{"player", P::Int}, {"entity", P::Int}, {"function", P::String}},
+            {{"ok", P::Bool}},
+            "HE::api::net::callClient",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::callClient(c, aI(a, 0), aI(a, 1), aS(a, 2), {})) }; } });
+        t.push_back({ "net.callAllClients", "Multiplayer", true,
+            {{"entity", P::Int}, {"function", P::String}}, {{"ok", P::Bool}},
+            "HE::api::net::callAllClients",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::callAllClients(c, aI(a, 0), aS(a, 1), {})) }; } });
+        t.push_back({ "net.allowAnyClient", "Multiplayer", true,
+            {{"entity", P::Int}, {"function", P::String}}, {{"ok", P::Bool}},
+            "HE::api::net::allowAnyClient",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(
+                net::allowAnyClient(c, aI(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "net.rpcSender", "Multiplayer", false, {}, {{"player", P::Int}},
+            "HE::api::net::rpcSender",
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt(net::rpcSender(c)) }; } });
+
         t.push_back({ "net.hasVar", "Multiplayer", false,
             {{"entity", P::Int}, {"name", P::String}}, {{"declared", P::Bool}},
             "HE::api::net::hasVar",
@@ -7278,6 +7390,11 @@ const std::vector<ApiFn>& registry()
             { "net.ownerOf", "Owner Of" },
             { "net.isLocallyControlled", "Is Locally Controlled" },
             { "net.localCharacter", "Local Character" },
+            { "net.callServer", "Call Server" },
+            { "net.callClient", "Call Client" },
+            { "net.callAllClients", "Call All Clients" },
+            { "net.allowAnyClient", "Allow Any Client" },
+            { "net.rpcSender", "Call Sender" },
             { "net.declareVarBool", "Declare Replicated Bool" },
             { "net.declareVarInt", "Declare Replicated Int" },
             { "net.declareVarFloat", "Declare Replicated Float" },
@@ -7887,6 +8004,85 @@ void fillAntiCheatServices(::HeAntiCheatServices& out, GameServicesBinding* bind
     out.isEnabled = [](void* h) {
         Ctx c = bindingCtx(h);
         return anticheat::isEnabled(c); };
+}
+
+// ── Multiplayer services for a native module (plan §7.2) ─────────────────────
+
+namespace {
+// The inverse of HE::Net::Game::argsToJson, as far as it goes. Scalars, strings
+// and arrays of those round-trip; a Vec3 does NOT come back as a Vec3, because
+// argsToJson wrote it as three numbers and nothing in the text says which
+// three-number array was a vector. That is the same boundary setStructJson
+// draws, and it is stated at HeNetServices: a native module hands over scalars
+// and lists of scalars.
+HorizonCode::Value valueFromRpcJson(const nlohmann::json& j)
+{
+    using P = HorizonCode::PinType;
+    using V = HorizonCode::Value;
+    if (j.is_boolean()) return V::ofBool(j.get<bool>());
+    // is_number_integer covers the unsigned case too; a float stays a float.
+    if (j.is_number_integer()) return V::ofInt(j.get<int>());
+    if (j.is_number())  return V::ofFloat(j.get<float>());
+    if (j.is_string())  return V::ofString(j.get<std::string>());
+    if (j.is_array())
+    {
+        V arr;
+        arr.isArray   = true;
+        arr.container = HorizonCode::ContainerKind::Array;
+        for (const auto& e : j) arr.items.push_back(valueFromRpcJson(e));
+        arr.type = arr.items.empty() ? P::Float : arr.items.front().type;
+        return arr;
+    }
+    return V{};
+}
+
+std::vector<HorizonCode::Value> argsFromJson(const char* json)
+{
+    std::vector<HorizonCode::Value> out;
+    if (!json || !*json) return out;
+    // Never throws: the string comes from a module that may have built it by
+    // hand, and a malformed one is an ordinary event, not a crash.
+    const nlohmann::json j = nlohmann::json::parse(json, nullptr, /*allow_exceptions*/ false);
+    if (!j.is_array()) return out;
+    for (const auto& e : j) out.push_back(valueFromRpcJson(e));
+    return out;
+}
+} // namespace
+
+void fillNetServices(::HeNetServices& out, GameServicesBinding* binding)
+{
+    out = {};
+    out.abiVersion = HE_NET_ABI_VERSION;
+    out.host       = binding;
+
+    // Every row goes through the same net::* the registry rows use, so a module
+    // and a graph reach one router and not two. The Ctx is resolved per call
+    // (bindingCtx), which is what keeps a session ending from leaving a
+    // dangling pointer in the module's hands — the rule fillAntiCheatServices
+    // follows for the same reason.
+    out.callServer = [](void* h, uint32_t entity, const char* fn, const char* argsJson) {
+        Ctx c = bindingCtx(h);
+        return net::callServer(c, (int)entity, fn ? fn : "", argsFromJson(argsJson)); };
+    out.callClient = [](void* h, uint32_t player, uint32_t entity, const char* fn,
+                        const char* argsJson) {
+        Ctx c = bindingCtx(h);
+        return net::callClient(c, (int)player, (int)entity, fn ? fn : "",
+                               argsFromJson(argsJson)); };
+    out.callAllClients = [](void* h, uint32_t entity, const char* fn, const char* argsJson) {
+        Ctx c = bindingCtx(h);
+        return net::callAllClients(c, (int)entity, fn ? fn : "", argsFromJson(argsJson)); };
+    out.allowAnyClient = [](void* h, uint32_t entity, const char* fn) {
+        Ctx c = bindingCtx(h);
+        return net::allowAnyClient(c, (int)entity, fn ? fn : ""); };
+    out.rpcSender = [](void* h) {
+        Ctx c = bindingCtx(h);
+        return (uint32_t)net::rpcSender(c); };
+    out.isAuthority = [](void* h) {
+        Ctx c = bindingCtx(h);
+        return net::isAuthority(c); };
+    out.localPlayer = [](void* h) {
+        Ctx c = bindingCtx(h);
+        return (uint32_t)net::localPlayer(c); };
 }
 
 } // namespace HE::api

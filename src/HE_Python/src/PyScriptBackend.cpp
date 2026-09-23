@@ -72,6 +72,7 @@ HE::api::Ctx apiCtx()
 	c.createObject  = hs.createObject;
 	c.destroyObject = hs.destroyObject;
 	c.antiCheat     = hs.antiCheat;
+	c.net           = hs.net;
 	c.requestQuit   = ScriptContext::hostQuitHandler();
 	return c;
 }
@@ -721,8 +722,127 @@ PyObject* py_engineCall(PyObject*, PyObject* args)
 	PyObject* tup = PyList_AsTuple(out); Py_DECREF(out); return tup;
 }
 
+// ── The three rows the registry dispatcher cannot express (plan §7.2) ────────
+// _engineCall reads exactly the row's declared parameters, which is right for
+// every other row and wrong for a remote call: its arguments are whatever the
+// CALLED function takes, and the registry has no pin for them. So these three
+// read their tail variadically and infer each type from the Python value —
+// there is no declared pin to read it from.
+//
+// bool is checked BEFORE int, because in Python a bool IS an int and checking
+// the other way round would turn every True into 1.
+HorizonCode::Value pyGuessValue(PyObject* o, int depth);
+
+std::vector<HorizonCode::Value> pyVarargs(PyObject* args, Py_ssize_t from)
+{
+	std::vector<HorizonCode::Value> out;
+	const Py_ssize_t n = PyTuple_Size(args);
+	for (Py_ssize_t i = from; i < n; ++i)
+		out.push_back(pyGuessValue(PyTuple_GetItem(args, i), 0));
+	return out;
+}
+
+HorizonCode::Value pyGuessValue(PyObject* o, int depth)
+{
+	using P = HorizonCode::PinType;
+	using V = HorizonCode::Value;
+	if (!o || depth > 8) return V{};
+	if (PyBool_Check(o))    return V::ofBool(o == Py_True);
+	if (PyLong_Check(o))    return V::ofInt((int)PyLong_AsLong(o));
+	if (PyFloat_Check(o))   return V::ofFloat((float)PyFloat_AsDouble(o));
+	if (PyUnicode_Check(o))
+	{
+		const char* str = PyUnicode_AsUTF8(o);
+		return V::ofString(str ? str : "");
+	}
+	if (PyDict_Check(o))
+	{
+		// A dict is a MAP, in insertion order — Python keeps it, which is the
+		// whole reason a map survives this boundary unsorted.
+		V map;
+		map.isArray   = true;
+		map.container = HorizonCode::ContainerKind::Map;
+		PyObject *k = nullptr, *v = nullptr;
+		Py_ssize_t pos = 0;
+		while (PyDict_Next(o, &pos, &k, &v))
+		{
+			V key = pyGuessValue(k, depth + 1);
+			map.keyType = key.type;
+			map.keys.push_back(std::move(key));
+			map.items.push_back(pyGuessValue(v, depth + 1));
+		}
+		if (!map.items.empty()) map.type = map.items.front().type;
+		return map;
+	}
+	if (PyList_Check(o) || PyTuple_Check(o))
+	{
+		V arr;
+		arr.isArray   = true;
+		arr.container = HorizonCode::ContainerKind::Array;
+		const Py_ssize_t n = PySequence_Size(o);
+		for (Py_ssize_t i = 0; i < n; ++i)
+		{
+			PyObject* item = PySequence_GetItem(o, i);
+			arr.items.push_back(pyGuessValue(item, depth + 1));
+			Py_XDECREF(item);
+		}
+		// An EMPTY sequence has no element to read a type off; Float is the
+		// engine's default wherever a type is missing.
+		arr.type = arr.items.empty() ? P::Float : arr.items.front().type;
+		return arr;
+	}
+	return V{};
+}
+
+PyObject* py_netCallServer(PyObject*, PyObject* args)
+{
+	const Py_ssize_t n = PyTuple_Size(args);
+	if (n < 2) { PyErr_SetString(PyExc_TypeError,
+		"call_server(entity, name, *args)"); return nullptr; }
+	const long entity = PyLong_AsLong(PyTuple_GetItem(args, 0));
+	const char* fn    = PyUnicode_AsUTF8(PyTuple_GetItem(args, 1));
+	if (PyErr_Occurred() || !fn) return nullptr;
+	HE::api::Ctx c = apiCtx();
+	const bool ok = HE::api::net::callServer(c, (int)entity, fn, pyVarargs(args, 2));
+	return PyBool_FromLong(ok ? 1 : 0);
+}
+
+PyObject* py_netCallClient(PyObject*, PyObject* args)
+{
+	const Py_ssize_t n = PyTuple_Size(args);
+	if (n < 3) { PyErr_SetString(PyExc_TypeError,
+		"call_client(player, entity, name, *args)"); return nullptr; }
+	const long player = PyLong_AsLong(PyTuple_GetItem(args, 0));
+	const long entity = PyLong_AsLong(PyTuple_GetItem(args, 1));
+	const char* fn    = PyUnicode_AsUTF8(PyTuple_GetItem(args, 2));
+	if (PyErr_Occurred() || !fn) return nullptr;
+	HE::api::Ctx c = apiCtx();
+	const bool ok = HE::api::net::callClient(c, (int)player, (int)entity, fn,
+	                                         pyVarargs(args, 3));
+	return PyBool_FromLong(ok ? 1 : 0);
+}
+
+PyObject* py_netCallAllClients(PyObject*, PyObject* args)
+{
+	const Py_ssize_t n = PyTuple_Size(args);
+	if (n < 2) { PyErr_SetString(PyExc_TypeError,
+		"call_all_clients(entity, name, *args)"); return nullptr; }
+	const long entity = PyLong_AsLong(PyTuple_GetItem(args, 0));
+	const char* fn    = PyUnicode_AsUTF8(PyTuple_GetItem(args, 1));
+	if (PyErr_Occurred() || !fn) return nullptr;
+	HE::api::Ctx c = apiCtx();
+	const bool ok = HE::api::net::callAllClients(c, (int)entity, fn, pyVarargs(args, 2));
+	return PyBool_FromLong(ok ? 1 : 0);
+}
+
 PyMethodDef kHorizonMethods[] = {
 	{"log",         py_log,         METH_VARARGS, "log(message)"},
+	{"_netCallServer",     py_netCallServer,     METH_VARARGS,
+	 "_netCallServer(entity, name, *args) -> bool"},
+	{"_netCallClient",     py_netCallClient,     METH_VARARGS,
+	 "_netCallClient(player, entity, name, *args) -> bool"},
+	{"_netCallAllClients", py_netCallAllClients, METH_VARARGS,
+	 "_netCallAllClients(entity, name, *args) -> bool"},
 	{"_engineCall", py_engineCall,  METH_VARARGS, "_engineCall(id, *args) — dispatch through the HE::api registry"},
 	{"getName",     py_getName,     METH_VARARGS, "getName(entity) -> str"},
 	{"getPosition", py_getPosition, METH_VARARGS, "getPosition(entity) -> (x,y,z)"},
@@ -791,6 +911,14 @@ void bootstrapEngineApiGroups()
 		src += "horizon." + group + "." + name +
 		       " = lambda *a, _id='" + id + "': horizon._engineCall(_id, *a)\n";
 	}
+	// AFTER the loop, so these replace the generated lambdas: a remote call's
+	// arguments are whatever the called function takes, and the row-derived
+	// lambda would hand the registry only the two the row declares. The rows
+	// still exist and still work — a graph uses them — but from Python the
+	// variadic form is the only one worth having.
+	src += "horizon.net.callServer = lambda e, n, *a: horizon._netCallServer(e, n, *a)\n"
+	       "horizon.net.callClient = lambda p, e, n, *a: horizon._netCallClient(p, e, n, *a)\n"
+	       "horizon.net.callAllClients = lambda e, n, *a: horizon._netCallAllClients(e, n, *a)\n";
 	PyRun_SimpleString(src.c_str());
 	PyErr_Clear();
 }

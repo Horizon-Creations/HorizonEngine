@@ -10,6 +10,7 @@
 #include <HorizonScene/Net/NetMessages.h>
 #include <HorizonScene/Net/RpcRouter.h>
 #include <HorizonScene/Net/ValueWire.h>
+#include <HorizonScene/ScriptContext.h>
 
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
@@ -943,4 +944,57 @@ TEST_CASE("rpc: arguments become JSON for the native module boundary") {
     // "b" first, because that is the order it was written in — the one thing a
     // JSON object would have quietly changed.
     CHECK(argsToJson({ map }) == "[[{\"key\":\"b\",\"value\":1},{\"key\":\"a\",\"value\":2}]]");
+}
+
+// ─── 7. Cross-frontend: a Lua client reaches a HorizonCode host (plan §7.2) ──
+// The case the whole design exists for. A script on one machine calls a
+// function it knows only by NAME; on the other machine a graph has that
+// function, and neither side knows the other's language. The router knows an
+// entity and a name and asks the frontends in turn.
+
+TEST_CASE("rpc: a Lua script on the client triggers a HorizonCode function on the host") {
+    Rig rig;
+    const Entity door = authoredEntity(*rig.host.world, "Door");
+    const HorizonCode::InstanceId hostInst = place(
+        rig.host, door, doorClass((std::uint8_t)RunOn::Server, /*anyClient*/ true,
+                                  /*withParam*/ true));
+    startHost(rig);
+
+    Peer& client = addClient(rig, 50);
+    const Entity clientDoor = mirrorOf(*rig.host.world, door, *client.world);
+    pump(rig);
+    REQUIRE(client.session->status() == NetGameSession::Status::Joined);
+
+    // The client's Lua context, wired the way an application wires one — which
+    // includes the session, without which every horizon.net.* row answers its
+    // offline default.
+    ScriptContext lua(*client.world);
+    ScriptContext::HostServices hs;
+    hs.runtime = &client.runtime;
+    hs.net     = client.session.get();
+    lua.setHostServices(std::move(hs));
+
+    // VARIADIC, which is the part the registry row cannot express: the second
+    // argument is the function's, not the row's.
+    const std::string src =
+        "Knock = {}\n"
+        "function Knock:pull(e)\n"
+        "  return horizon.net.callServer(e, 'Open', 5)\n"
+        "end\n"
+        "return Knock\n";
+    REQUIRE(lua.loadScript("knock", src));
+    const auto inst = lua.createInstance("knock", clientDoor);
+    REQUIRE(inst != 0);
+    // Driven through callRpc, which is also the path a remote call takes INTO
+    // Lua — so this one line exercises both directions of the same door.
+    REQUIRE(lua.callRpc(inst, "pull",
+                        { Value::ofInt(static_cast<int>(clientDoor)) }));
+
+    pump(rig);
+    CHECK(rig.host.session->rpc()->stats().delivered == 1u);
+    CHECK(rig.host.runtime.getVariable(hostInst, "Opened").b == true);
+    // The argument travelled as an Int and the graph's Int parameter took it.
+    CHECK(rig.host.runtime.getVariable(hostInst, "Amount").i == 5);
+
+    lua.setHostServices({});
 }

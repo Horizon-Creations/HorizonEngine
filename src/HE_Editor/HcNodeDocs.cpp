@@ -1597,6 +1597,26 @@ namespace
 	{ "net.localCharacter",
 	  "The entity this machine drives — our own character — or 0 before the host "
 	  "has given us one." },
+	{ "net.callServer",
+	  "Ask the HOST to run a function on this entity. The ordinary way to say "
+	  "\"I pulled the lever\": a client may not change the world, so it asks. "
+	  "Nothing comes back — a remote call has no return value. Allowed for the "
+	  "entity you own, or for a function whose header has Any Client ticked. "
+	  "Offline it simply runs here, so a graph works in single player." },
+	{ "net.callClient",
+	  "Host only: run a function on ONE player's machine — the hit marker, the "
+	  "message only they should see. Addressed by PlayerId. Nothing comes back." },
+	{ "net.callAllClients",
+	  "Host only: run a function on EVERY machine, including this one — the "
+	  "round-over horn, the explosion everybody sees. Nothing comes back." },
+	{ "net.allowAnyClient",
+	  "Let any client call that function on this entity, not just its owner. For "
+	  "Lua, Python and C++ classes, which have no function header to tick. A door "
+	  "belongs to nobody, so without this nobody could open it." },
+	{ "net.rpcSender",
+	  "Which player asked for the call being handled right now. 0 at any other "
+	  "moment. Hand it to Report Cheat or Check when the call is a claim worth "
+	  "weighing." },
 	{ "net.declareVarBool",
 	  "Declares a replicated Bool on this entity: the host owns it, every client "
 	  "is sent its value. Call it in On Init. With Notify on, the clients get "

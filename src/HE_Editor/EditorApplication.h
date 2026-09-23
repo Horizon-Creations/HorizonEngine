@@ -628,6 +628,7 @@ private:
 	HeInputServices              m_inputServices{};
 	HeContentServices            m_contentServices{};
 	HeAntiCheatServices          m_antiCheatServices{};
+	HeNetServices                m_netServices{};
 	HeEngineServices             m_engineServices{};
 	// The anti-cheat's event/response side for the preview (docs/anti-cheat-
 	// plan.md §6.2.6): in PREVIEW mode from construction, so a report fires

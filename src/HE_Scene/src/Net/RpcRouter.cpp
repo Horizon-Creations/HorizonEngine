@@ -27,6 +27,26 @@ namespace
 	// them.
 	constexpr std::uint8_t kMaxArgs = 32;
 
+	// Is an argument of type `got` acceptable where `want` is declared?
+	//
+	// Exactly equal, OR both numeric. The second half is not a loophole, it is
+	// what makes the text frontends usable: Lua and Python hand over untyped
+	// numbers, so `takeDamage(40)` produces an Int for a parameter somebody
+	// declared Float, and a strict comparison would refuse every honest call
+	// from a script. The callee coerces to its declared types on the way in
+	// anyway (Runner::callFunction), so nothing downstream sees the difference
+	// — and what the check is for, a String where a number belongs or an array
+	// where a scalar belongs, is still caught.
+	bool typesCompatible(HorizonCode::PinType got, HorizonCode::PinType want)
+	{
+		if (got == want) return true;
+		const auto numeric = [](HorizonCode::PinType t) {
+			return t == HorizonCode::PinType::Int || t == HorizonCode::PinType::Float ||
+			       t == HorizonCode::PinType::Enum;
+		};
+		return numeric(got) && numeric(want);
+	}
+
 	bool alreadyLogged(std::vector<std::string>& seen, const std::string& key)
 	{
 		if (std::find(seen.begin(), seen.end(), key) != seen.end()) return true;
@@ -470,7 +490,7 @@ bool RpcRouter::accept(ConnectionId conn, PlayerId fromPlayer, Entity entity,
 		for (std::size_t i = 0; ok && i < args.size(); ++i)
 			// Container shape is part of the type: an Array of Int where an Int
 			// is declared is exactly the shape a hand-built message has.
-			ok = args[i].type == sig.params[i] &&
+			ok = typesCompatible(args[i].type, sig.params[i]) &&
 			     args[i].kind() == HorizonCode::ContainerKind::None;
 		if (!ok)
 		{

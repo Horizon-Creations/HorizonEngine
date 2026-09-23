@@ -97,6 +97,7 @@ static HE::api::Ctx apiCtx(lua_State* L)
     c.createObject  = hs.createObject;
     c.destroyObject = hs.destroyObject;
     c.antiCheat     = hs.antiCheat;
+    c.net           = hs.net;
     // What "quit" means, as the host bound it — horizon.app.quit is a logged
     // no-op without it, so a Lua-only project could not close its own game. Read
     // from the registry rather than from HostServices: the quit hook predates
@@ -830,6 +831,115 @@ static int lua_engine_dispatch(lua_State* L)
     return pushed;
 }
 
+// ── The three rows the generic dispatcher cannot express (plan §7.2) ─────────
+// Every other row has a fixed parameter list, and the dispatcher reads exactly
+// that many values off the stack. A remote call's arguments are whatever the
+// called function takes, which the caller knows and the registry does not — so
+// these three are hand-written, read their arguments VARIADICALLY, and are
+// installed OVER the generic closures afterwards.
+//
+// The types come from the Lua values themselves, since there is no declared pin
+// to read them from: a boolean is a Bool, an integer an Int, any other number a
+// Float, a string a String, a table an array of the same (or a map, when it
+// carries the `__keys` sidecar every map takes across this boundary). The host
+// checks the list against the function's signature and treats the numeric types
+// as one family, precisely because a script's 40 could honestly be either.
+static HorizonCode::Value luaGuessValue(lua_State* L, int idx, int depth)
+{
+    using P = HorizonCode::PinType;
+    using V = HorizonCode::Value;
+    if (depth > 8) return V{};
+    if (lua_isboolean(L, idx)) return V::ofBool(lua_toboolean(L, idx) != 0);
+    if (lua_isnumber(L, idx))
+        return lua_isinteger(L, idx) ? V::ofInt((int)lua_tointeger(L, idx))
+                                     : V::ofFloat((float)lua_tonumber(L, idx));
+    if (lua_isstring(L, idx)) return V::ofString(lua_tostring(L, idx));
+    if (!lua_istable(L, idx)) return V{};
+
+    const int t = lua_absindex(L, idx);
+    // A map, in the shape luaPushFieldValue writes and luaToStructValue reads:
+    // the pairs plus `__keys` carrying the authored ORDER, which a plain table
+    // would lose (Memory `horizoncode-containers`).
+    lua_getfield(L, t, "__keys");
+    if (lua_istable(L, -1))
+    {
+        const int keys = lua_absindex(L, -1);
+        HorizonCode::Value map;
+        map.isArray   = true;
+        map.container = HorizonCode::ContainerKind::Map;
+        const lua_Integer n = (lua_Integer)lua_rawlen(L, keys);
+        for (lua_Integer i = 1; i <= n; ++i)
+        {
+            lua_rawgeti(L, keys, i);
+            HorizonCode::Value k = luaGuessValue(L, lua_gettop(L), depth + 1);
+            lua_gettable(L, t);                      // consumes the key, pushes the value
+            map.items.push_back(luaGuessValue(L, lua_gettop(L), depth + 1));
+            lua_pop(L, 1);
+            map.keyType = k.type;
+            map.keys.push_back(std::move(k));
+        }
+        if (!map.items.empty()) map.type = map.items.front().type;
+        lua_pop(L, 1);                               // __keys
+        return map;
+    }
+    lua_pop(L, 1);                                   // the nil (or non-table) __keys
+
+    HorizonCode::Value arr;
+    arr.isArray   = true;
+    arr.container = HorizonCode::ContainerKind::Array;
+    const lua_Integer n = (lua_Integer)lua_rawlen(L, t);
+    for (lua_Integer i = 1; i <= n; ++i)
+    {
+        lua_rawgeti(L, t, (int)i);
+        arr.items.push_back(luaGuessValue(L, lua_gettop(L), depth + 1));
+        lua_pop(L, 1);
+    }
+    // An EMPTY table has no element to read a type off. Float is the engine's
+    // own default everywhere else a type is missing, so it is the answer here.
+    arr.type = arr.items.empty() ? P::Float : arr.items.front().type;
+    return arr;
+}
+
+// Collect stack slots `from`..top as the call's arguments.
+static std::vector<HorizonCode::Value> luaVarargs(lua_State* L, int from)
+{
+    std::vector<HorizonCode::Value> out;
+    const int top = lua_gettop(L);
+    for (int i = from; i <= top; ++i) out.push_back(luaGuessValue(L, i, 0));
+    return out;
+}
+
+// horizon.net.callServer(entity, "fn", …)
+static int lua_net_callServer(lua_State* L)
+{
+    HE::api::Ctx c = apiCtx(L);
+    const int entity = (int)luaL_checkinteger(L, 1);
+    const char* fn   = luaL_checkstring(L, 2);
+    lua_pushboolean(L, HE::api::net::callServer(c, entity, fn, luaVarargs(L, 3)) ? 1 : 0);
+    return 1;
+}
+
+// horizon.net.callClient(player, entity, "fn", …)
+static int lua_net_callClient(lua_State* L)
+{
+    HE::api::Ctx c = apiCtx(L);
+    const int player = (int)luaL_checkinteger(L, 1);
+    const int entity = (int)luaL_checkinteger(L, 2);
+    const char* fn   = luaL_checkstring(L, 3);
+    lua_pushboolean(L, HE::api::net::callClient(c, player, entity, fn, luaVarargs(L, 4)) ? 1 : 0);
+    return 1;
+}
+
+// horizon.net.callAllClients(entity, "fn", …)
+static int lua_net_callAllClients(lua_State* L)
+{
+    HE::api::Ctx c = apiCtx(L);
+    const int entity = (int)luaL_checkinteger(L, 1);
+    const char* fn   = luaL_checkstring(L, 2);
+    lua_pushboolean(L, HE::api::net::callAllClients(c, entity, fn, luaVarargs(L, 3)) ? 1 : 0);
+    return 1;
+}
+
 // Expose namespaced HE::api entries as nested tables: horizon.<group>.<fn>.
 static void registerEngineApiGroups(lua_State* L)
 {
@@ -856,6 +966,24 @@ static void registerEngineApiGroups(lua_State* L)
         lua_setfield(L, -2, name.c_str());                 // group[name]=closure → [horizon, group]
         lua_pop(L, 1);                                     // [horizon]
     }
+
+    // AFTER the loop, so these replace the generic closures the registry rows
+    // produced. The rows still exist and still work — a graph uses them — but
+    // from Lua the variadic form is the only one worth having, and two
+    // functions of the same name would be a coin toss decided by iteration
+    // order.
+    lua_getfield(L, -1, "net");                            // [horizon, net?]
+    if (lua_istable(L, -1))
+    {
+        lua_pushcfunction(L, lua_net_callServer);
+        lua_setfield(L, -2, "callServer");
+        lua_pushcfunction(L, lua_net_callClient);
+        lua_setfield(L, -2, "callClient");
+        lua_pushcfunction(L, lua_net_callAllClients);
+        lua_setfield(L, -2, "callAllClients");
+    }
+    lua_pop(L, 1);                                         // [horizon]
+
     lua_pop(L, 1);                                         // []
 }
 
