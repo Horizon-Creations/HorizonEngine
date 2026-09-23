@@ -173,6 +173,11 @@ public:
 	const std::string& joinCode() const { return m_joinCode; }
 	const std::string& sessionId() const { return m_sessionId; }
 	const std::string& scenePath() const { return m_scenePath; }
+	// The port host() actually opened. 0 with an injected transport (there is
+	// no port) and 0 on a client. Worth having because HostOptions::port is
+	// routinely 0 for "let the OS pick", and this is then the only way anyone —
+	// a direct join, the announcement, a diagnostics line — learns the answer.
+	std::uint16_t boundPort() const { return m_boundPort; }
 	bool isAuthority() const { return m_role == HE::Net::NetRole::Host ||
 	                                  m_role == HE::Net::NetRole::Server; }
 	bool isClient() const { return m_role == HE::Net::NetRole::Client; }
@@ -256,6 +261,7 @@ private:
 	std::string m_sessionId;
 	std::string m_scenePath;
 	std::string m_projectId;
+	std::uint16_t m_boundPort = 0;
 
 	// Host: connections whose Hello has not been accepted yet. A peer that is
 	// through the crypto handshake but has not identified itself is NOT a player

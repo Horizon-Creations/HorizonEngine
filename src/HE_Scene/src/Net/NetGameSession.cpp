@@ -96,6 +96,7 @@ bool NetGameSession::host(const HostOptions& options)
 	}
 
 	if (!hostOn(std::move(secure), options)) return false;
+	m_boundPort = boundPort;   // after hostOn: it resets the session's state
 
 	if (options.announceLan)
 	{
@@ -300,6 +301,7 @@ void NetGameSession::leave()
 	m_status      = Status::Idle;
 	m_sessionId.clear();
 	m_joinCode.clear();
+	m_boundPort = 0;
 
 	HE_LOG_INFO(Replication, "Session ended");
 }

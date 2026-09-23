@@ -13,9 +13,11 @@
 #include <Net/LossyTransport.h>
 #include <Project/ProjectSettings.h>
 
+#include <chrono>
 #include <deque>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -237,12 +239,14 @@ Entity authoredEntity(HorizonWorld& world, const char* name, const glm::vec3& po
     const Entity e = world.createEntity(name);
     auto& tc = world.registry().emplace_or_replace<TransformComponent>(e);
     tc.position = pos;
-    if (replicates || !replicateTransform) {
-        NetworkComponent nc;
-        nc.replicates         = replicates;
-        nc.replicateTransform = replicateTransform;
-        world.registry().emplace_or_replace<NetworkComponent>(e, nc);
-    }
+    // ALWAYS emplaced, including when the switch is off. An earlier version
+    // skipped the component in that case, which made "Replicates off" and "no
+    // component at all" the same entity — and the walk's `if (!replicates)
+    // continue` branch, the whole point of this step, was never once executed.
+    NetworkComponent nc;
+    nc.replicates         = replicates;
+    nc.replicateTransform = replicateTransform;
+    world.registry().emplace_or_replace<NetworkComponent>(e, nc);
     return e;
 }
 
@@ -316,12 +320,32 @@ TEST_CASE("net session: only entities with Replicates are bound") {
     authoredEntity(*rig.host.world, "Crate",  { 1, 0, 0 }, true);
     authoredEntity(*rig.host.world, "Door",   { 2, 0, 0 }, true);
     authoredEntity(*rig.host.world, "Statue", { 3, 0, 0 }, true);
-    authoredEntity(*rig.host.world, "Grass",  { 4, 0, 0 }, false);   // component, switch off
+    authoredEntity(*rig.host.world, "Grass",  { 4, 0, 0 }, false);   // component, switch OFF
     rig.host.world->createEntity("Decor");                           // no component at all
+
+    // Four entities carry a NetworkComponent; only three have the switch on.
+    // The two counts differing is what proves the flag is read at all — with
+    // the component's mere presence as the criterion, both would be 4.
+    auto& reg = rig.host.world->registry();
+    CHECK(reg.view<NetworkComponent>().size() == 4u);
 
     startHost(rig, defaultHost());
     CHECK(rig.host.session->spawns()->boundCount() == 3u);
     CHECK(rig.host.session->replication()->replicatedCount() == 3u);
+
+    // Grass keeps its component and its tuning — turning the switch off does
+    // not throw the radius and the speed limits away (plan §8.1) — and it has
+    // no session identity.
+    const Entity grass = [&] {
+        for (const Entity e : reg.view<NameComponent>())
+            if (reg.get<NameComponent>(e).name == "Grass") return e;
+        return Entity{ entt::null };
+    }();
+    REQUIRE((grass != entt::null));
+    const auto* grassNet = reg.try_get<NetworkComponent>(grass);
+    REQUIRE(grassNet != nullptr);
+    CHECK(grassNet->replicates == false);
+    CHECK(grassNet->netId == 0u);
 
     Peer& client = addClient(rig, defaultJoin(), 2);
     mirrorInto(*rig.host.world, *client.world);
@@ -333,11 +357,34 @@ TEST_CASE("net session: only entities with Replicates are bound") {
     CHECK(client.session->spawns()->boundCount() == 3u);
 
     // The two that were left out carry no session identity on either side.
-    auto& hostReg = rig.host.world->registry();
     int registered = 0;
-    for (const Entity e : hostReg.view<NetworkComponent>())
-        if (hostReg.get<NetworkComponent>(e).netId != 0) ++registered;
+    for (const Entity e : reg.view<NetworkComponent>())
+        if (reg.get<NetworkComponent>(e).netId != 0) ++registered;
     CHECK(registered == 3);
+}
+
+TEST_CASE("net session: a runtime spawn with the switch off is not replicated") {
+    Rig rig;
+    startHost(rig, defaultHost());
+    Peer& client = addClient(rig, defaultJoin(), 2);
+    rig.step(20);
+    REQUIRE(client.session->status() == NetGameSession::Status::Joined);
+
+    // The same switch governs both paths. A spawned effect with Replicates off
+    // is a purely local thing — a muzzle flash, debris — and must not cost a
+    // message, let alone appear on somebody else's screen.
+    const Entity effect = rig.host.world->createEntity("Muzzle flash");
+    rig.host.world->registry().emplace_or_replace<TransformComponent>(effect);
+    NetworkComponent off;
+    off.replicates = false;
+    rig.host.world->registry().emplace_or_replace<NetworkComponent>(effect, off);
+
+    const std::uint32_t before = rig.host.session->spawns()->stats().spawnsSent;
+    CHECK(rig.host.session->spawns()->notifySpawned(effect, "classes/Flash.hcclass", 0) == 0u);
+    CHECK(rig.host.session->spawns()->stats().spawnsSent == before);
+
+    rig.step(10);
+    CHECK(client.spawnCalls == 0);
 }
 
 // ─── 3. A runtime spawn reaches the client ───────────────────────────────────
@@ -513,19 +560,10 @@ TEST_CASE("net session: a hello for a different project is rejected") {
 }
 
 TEST_CASE("net session: a hello with the wrong protocol version is rejected") {
-    Rig rig;
-    startHost(rig, defaultHost());
-    Peer& client = addClient(rig, defaultJoin(), 2);
-
-    // Let the transport come up, then say hello by hand with a version this
-    // build does not speak — the session's own Hello has already gone, so this
-    // is a second one and must be refused on its version, not ignored as a
-    // duplicate.
-    rig.step(1);
-    REQUIRE(client.session->session() != nullptr);
-
+    // A bare NetSession rather than a NetGameSession on the client end: the
+    // session always sends the version it was built with, and the case worth
+    // testing is a peer that does not — a build from before or after this one.
     Rig other;
-    other.fabric = std::make_shared<Fabric>();
     startHost(other, defaultHost());
     auto ep    = std::make_unique<HubEndpoint>(other.fabric, false, 1);
     other.fabric->up[1] = true;
@@ -654,4 +692,53 @@ TEST_CASE("net session: Replicates defaults to on and turning it off keeps the t
     // numbers rather than resetting them.
     CHECK(nc.relevanceRadius == doctest::Approx(42.0f));
     CHECK(nc.maxSpeed == doctest::Approx(9.5f));
+}
+
+// ─── The socket path, once, for real ─────────────────────────────────────────
+// Everything above runs on an injected transport, which is what makes it fast
+// and deterministic — and what leaves host()/joinDirect() themselves, the two
+// functions that assemble UdpTransport → SecureTransport → NetSession, proven
+// only to compile. This runs that chain once over localhost.
+//
+// Real time, therefore a deadline rather than a fixed frame count, and
+// RUN_SERIAL in CMake: under a full -j load a fixed count is a race against the
+// scheduler, which is the one thing a test may never be.
+TEST_CASE("net session: host() and joinDirect() complete over real UDP sockets") {
+    NetGameSession::HostOptions hostOpts = defaultHost();
+    hostOpts.port        = 0;        // let the OS pick
+    hostOpts.announceLan = false;    // no multicast, no Local Network permission
+
+    HorizonWorld    hostWorld, clientWorld;
+    NetGameSession  host, client;
+    host.setWorld(&hostWorld);
+    client.setWorld(&clientWorld);
+
+    if (!host.host(hostOpts)) {
+        // No UDP on this machine at all (a locked-down CI container). Saying so
+        // beats a red test that blames the session for the sandbox.
+        MESSAGE("no local UDP socket available: " << host.lastError());
+        return;
+    }
+    REQUIRE(host.status() == NetGameSession::Status::Hosting);
+    REQUIRE_FALSE(host.joinCode().empty());
+
+    const std::uint16_t port = host.boundPort();
+    REQUIRE(port != 0);
+
+    NetGameSession::JoinOptions joinOpts = defaultJoin("Anna");
+    joinOpts.joinCode = host.joinCode();
+    REQUIRE(client.joinDirect("127.0.0.1", port, joinOpts));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (client.status() != NetGameSession::Status::Joined &&
+           std::chrono::steady_clock::now() < deadline) {
+        host.update(1.0f / 60.0f);
+        client.update(1.0f / 60.0f);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    CHECK(client.status() == NetGameSession::Status::Joined);
+    CHECK(client.localPlayer() == 2u);
+    CHECK(host.roster().size() == 2u);
+    CHECK(host.stats().joinsAccepted == 1u);
 }

@@ -683,6 +683,69 @@ Session-Start (und bei jedem Szenenwechsel) läuft ein Walk über
 Das ersetzt das heutige manuelle `registerEntity` im Spielcode: **niemand ruft
 das mehr selbst**; der Schalter im Inspector ist die Registrierung.
 
+### 5.8 Stand nach Schritt 4
+
+Umgesetzt (Commits 1c5d9a7b und der Nachtrag dazu): `NetGameSession`,
+`SpawnReplicator`, `PlayerRoster`, `NetworkComponent::replicates` samt
+Registry-Walk und Serializer-Feld, `Cat::Replication`, `LanBeacon`-`kind`,
+`Ctx::net`. Test `tests/test_net_game_session.cpp`, 12 Fälle.
+
+**Die Nachrichten-Ids liegen jetzt an einer Stelle**
+(`HorizonScene/Net/NetMessages.h`), weil drei Konsumenten auf derselben
+`NetSession` senden und drei private Tabellen beim ersten gemeinsamen freien
+Wert kollidiert wären:
+
+| Id | Nachricht | Richtung | Modus |
+|---|---|---|---|
+| +200…203 | Snapshot, Input, Integrity, AntiCheatNotice | wie bisher | wie bisher |
+| +204 | `kMsgHello` | Client → Host | ReliableOrdered |
+| +205 | `kMsgWelcome` | Host → Client | ReliableOrdered |
+| +206 | `kMsgReject` | Host → Client | ReliableOrdered |
+| +207 | `kMsgBind` | Host → Client | ReliableOrdered |
+| +208 | `kMsgSpawn` | Host → Client | ReliableOrdered |
+| +209 | `kMsgDespawn` | Host → Client | ReliableOrdered |
+| +210 | `kMsgBaseline` | Host → Client | ReliableOrdered |
+| +211 | `kMsgJoinComplete` | Host → Client | ReliableOrdered |
+| +212 | `kMsgBye` | Client → Host | ReliableOrdered |
+
+**Vier Abweichungen von der Beschreibung oben**, jede mit Grund:
+
+1. **`kMsgJoinComplete` steht nicht im Entwurf.** §5.5 sagt „erst dann gilt
+   der Client als `Joined`", nennt aber keinen Marker, an dem der Client das
+   merkt. Weil die ganze Join-Folge ReliableOrdered ist, reicht eine leere
+   Nachricht am Ende; ohne sie müsste der Client raten, ob noch Binds kommen.
+2. **Die Baseline ist eine eigene Nachricht, kein Snapshot.** Als Snapshot
+   ginge sie zweifach verloren: `sendSnapshots` geht Unreliable (die einmalige
+   Baseline wäre verlustgefährdet) und filtert `replicateTransform = false`
+   heraus — genau die Entities, für die sie existiert —, und `applySnapshot`
+   verwirft jeden Tick, der älter als der neueste angewendete ist, sodass der
+   erste reguläre Snapshot nach der Baseline diese überholen und killen kann.
+   `GameReplication::sendBaseline(conn)` steht deshalb außerhalb der
+   Tick-Ordnung.
+3. **Der Client-Spawn läuft über eine Callback-Naht, nicht über
+   `Ctx::createObject`.** Objekte erzeugen ist Anwendungssache (Engine-Basis
+   auflösen, nur Entity-Klassen durch `EntityHost`, PlayerCharacter beim
+   `PlayerHost` anmelden); HE_Scene kann davon nichts rufen. Schritt 5 hängt
+   `Ctx::createObject` an `SpawnReplicator::setSpawnFunction`. Damit ist auch
+   „BeginPlay lief dort (Zähler in der Klasse)" aus §11.5 Fall 3 im Test
+   vorerst durch den Callback-Zähler vertreten.
+4. **Directory-Registrierung und `PortMapper::mapPort` sind NICHT verdrahtet**,
+   anders als die Klammer in der Roadmap-Zeile 4 sagt, und `joinBySessionId`
+   (§5.1) fehlt entsprechend. Beides hängt an denselben Feldern, die 5c ohnehin
+   anfasst (`kind`, `transport`, Hairpin-Self-Probe); es zweimal zu verdrahten
+   wäre Arbeit, die 5c wieder aufmacht. LAN-Announce ist da, mit `kind = Game`.
+
+**Zwei Punkte für Schritt 5**, im Test sichtbar geworden:
+
+- `notifySpawned` liest die Pose von der Entity, statt sie als Parameter zu
+  nehmen. Als Parameter konnten Nachricht und Host-Transform auseinanderlaufen,
+  und genau das tat der erste Testlauf: der Spawn landete beim Client an der
+  richtigen Stelle und wurde vom nächsten Snapshot zum Ursprung gezogen.
+- `bindSceneEntities` und `notifySpawned` senden an alle Verbindungen, auch an
+  solche, die noch kein Hello geschickt haben. Der Dedupe im Client fängt die
+  Doppelung ab, aber Schritt 5 wertet `owner == localPlayer` aus, und vor dem
+  Welcome ist `localPlayer` noch 0.
+
 Szenenwechsel (`scene.load`) im Multiplayer: der Host schickt `kMsgScene`
 (Pfad), Clients laden, melden `kMsgSceneReady`, der Host bindet neu. Bis alle
 bereit sind, pausiert der Host die Snapshots für die, die noch laden. Additive

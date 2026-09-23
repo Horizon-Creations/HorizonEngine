@@ -1008,7 +1008,7 @@ endif()
 # one thing a test may never do. They share a lock, so they serialise against
 # each other while the other hundred files still run in parallel.
 set(_he_net_tests test_net_tcp test_net_udp test_net_secure test_net_discovery test_net_collab
-                  test_net_directory test_collab_controller)
+                  test_net_directory test_collab_controller test_net_game_session)
 foreach(_t IN LISTS _he_net_tests)
     if(TEST ${_t})
         set_tests_properties(${_t} PROPERTIES RESOURCE_LOCK he_net)
@@ -1022,6 +1022,15 @@ endforeach()
 # RUN_SERIAL gives it the machine for the four seconds it needs.
 if(TEST test_collab_controller)
     set_tests_properties(test_collab_controller PROPERTIES RUN_SERIAL TRUE)
+endif()
+
+# Same story, one case deep: every gameplay-session test but one runs on an
+# injected transport and a simulated clock, and that one brings up host() and
+# joinDirect() over real localhost UDP against a five-second deadline. Under a
+# full -j load a deadline is a race against the scheduler unless the test has
+# the machine.
+if(TEST test_net_game_session)
+    set_tests_properties(test_net_game_session PROPERTIES RUN_SERIAL TRUE)
 endif()
 
 # On Windows the test binary is in tests/ but the engine DLLs are in per-target
