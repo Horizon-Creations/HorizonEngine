@@ -9259,6 +9259,96 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     });
 }
 
+// The offscreen viewport frame, recorded into the open p.cmdList, up to the
+// RGBA8 viewport RT ImGui samples (left in PIXEL_SHADER_RESOURCE). Render()
+// follows it with the swapchain part (clear, ImGui overlay, Present);
+// RenderSceneImage() follows it with a readback instead.
+void D3D12Renderer::DrawViewportFrame()
+{
+    auto& p = *m_impl;
+    const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+
+    const bool useHDR = p.postFxReady && p.hdrRT && p.ldrRT;
+
+    if (useHDR)
+    {
+        // ── Scene → HDR RT (RGBA16F) ─────────────────────────────────────
+        // hdrRT is already in RENDER_TARGET state (initial or restored by runPostFX).
+        auto hrtv = p.hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        p.cmdList->OMSetRenderTargets(1, &hrtv, FALSE, &vdsv);
+        p.cmdList->ClearRenderTargetView(hrtv, bgColor, 0, nullptr);
+        p.cmdList->ClearDepthStencilView(vdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+        D3D12_VIEWPORT vvp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
+        D3D12_RECT     vsc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
+        p.cmdList->RSSetViewports(1, &vvp);
+        p.cmdList->RSSetScissorRects(1, &vsc);
+        p.usingHDR = true;
+        DrawScene(p.cmdList.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+        p.hdrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+        // PostFX chain: HDR→bloom→tonemap→FXAA→viewportRT (leaves viewportRT in PSR).
+        p.runPostFX(p.cmdList.Get(), p.viewportW, p.viewportH);
+
+        // ── 2D UI canvas: draw on top of the final tonemapped image ─────────
+        // runPostFX left viewportRT in PSR; transition back to RT for UI draw.
+        p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
+                    p.viewportState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        p.viewportState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        {
+            auto uirtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            p.cmdList->OMSetRenderTargets(1, &uirtv, FALSE, nullptr);
+            D3D12_VIEWPORT uivp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
+            D3D12_RECT     uisc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
+            p.cmdList->RSSetViewports(1, &uivp);
+            p.cmdList->RSSetScissorRects(1, &uisc);
+        }
+        p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
+                         static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+        // Transition back to PSR so ImGui can sample viewportRT.
+        p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
+                    p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+    else
+    {
+        // ── Fallback: Scene → viewport RT directly (no PostFX) ───────────
+        p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
+                    p.viewportState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        p.viewportState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+        auto vrtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        p.cmdList->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
+        p.cmdList->ClearRenderTargetView(vrtv, bgColor, 0, nullptr);
+        p.cmdList->ClearDepthStencilView(vdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+        D3D12_VIEWPORT vvp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
+        D3D12_RECT     vsc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
+        p.cmdList->RSSetViewports(1, &vvp);
+        p.cmdList->RSSetScissorRects(1, &vsc);
+        p.usingHDR = false;
+        DrawScene(p.cmdList.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+
+        // ── 2D UI canvas on the viewport RT (still in RENDER_TARGET state) ─
+        {
+            auto uirtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            p.cmdList->OMSetRenderTargets(1, &uirtv, FALSE, nullptr);
+            D3D12_VIEWPORT uivp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
+            D3D12_RECT     uisc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
+            p.cmdList->RSSetViewports(1, &uivp);
+            p.cmdList->RSSetScissorRects(1, &uisc);
+        }
+        p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
+                         static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
+
+        p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
+                    p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    }
+}
+
 void D3D12Renderer::Render()
 {
     auto& p = *m_impl;
@@ -9328,87 +9418,7 @@ void D3D12Renderer::Render()
     const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
     if (useViewport)
-    {
-        const bool useHDR = p.postFxReady && p.hdrRT && p.ldrRT;
-
-        if (useHDR)
-        {
-            // ── Scene → HDR RT (RGBA16F) ─────────────────────────────────────
-            // hdrRT is already in RENDER_TARGET state (initial or restored by runPostFX).
-            auto hrtv = p.hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
-            auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
-            p.cmdList->OMSetRenderTargets(1, &hrtv, FALSE, &vdsv);
-            p.cmdList->ClearRenderTargetView(hrtv, bgColor, 0, nullptr);
-            p.cmdList->ClearDepthStencilView(vdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-
-            D3D12_VIEWPORT vvp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
-            D3D12_RECT     vsc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
-            p.cmdList->RSSetViewports(1, &vvp);
-            p.cmdList->RSSetScissorRects(1, &vsc);
-            p.usingHDR = true;
-            DrawScene(p.cmdList.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
-            p.hdrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-
-            // PostFX chain: HDR→bloom→tonemap→FXAA→viewportRT (leaves viewportRT in PSR).
-            p.runPostFX(p.cmdList.Get(), p.viewportW, p.viewportH);
-
-            // ── 2D UI canvas: draw on top of the final tonemapped image ─────────
-            // runPostFX left viewportRT in PSR; transition back to RT for UI draw.
-            p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
-                        p.viewportState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            p.viewportState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            {
-                auto uirtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
-                p.cmdList->OMSetRenderTargets(1, &uirtv, FALSE, nullptr);
-                D3D12_VIEWPORT uivp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
-                D3D12_RECT     uisc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
-                p.cmdList->RSSetViewports(1, &uivp);
-                p.cmdList->RSSetScissorRects(1, &uisc);
-            }
-            p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
-                             static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
-            // Transition back to PSR so ImGui can sample viewportRT.
-            p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
-                        p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        }
-        else
-        {
-            // ── Fallback: Scene → viewport RT directly (no PostFX) ───────────
-            p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
-                        p.viewportState, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            p.viewportState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-
-            auto vrtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
-            auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
-            p.cmdList->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
-            p.cmdList->ClearRenderTargetView(vrtv, bgColor, 0, nullptr);
-            p.cmdList->ClearDepthStencilView(vdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-
-            D3D12_VIEWPORT vvp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
-            D3D12_RECT     vsc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
-            p.cmdList->RSSetViewports(1, &vvp);
-            p.cmdList->RSSetScissorRects(1, &vsc);
-            p.usingHDR = false;
-            DrawScene(p.cmdList.Get(), static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
-
-            // ── 2D UI canvas on the viewport RT (still in RENDER_TARGET state) ─
-            {
-                auto uirtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
-                p.cmdList->OMSetRenderTargets(1, &uirtv, FALSE, nullptr);
-                D3D12_VIEWPORT uivp{ 0, 0, (float)p.viewportW, (float)p.viewportH, 0.0f, 1.0f };
-                D3D12_RECT     uisc{ 0, 0, (LONG)p.viewportW, (LONG)p.viewportH };
-                p.cmdList->RSSetViewports(1, &uivp);
-                p.cmdList->RSSetScissorRects(1, &uisc);
-            }
-            p.renderUIPass12(p.cmdList.Get(), p.frameIndex,
-                             static_cast<int>(p.viewportW), static_cast<int>(p.viewportH));
-
-            p.barrier12(p.cmdList.Get(), p.viewportRT.Get(),
-                        p.viewportState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        }
-    }
+        DrawViewportFrame();
 
     // ── Swapchain → transition to RTV, clear, run ImGui overlay ────────────
     D3D12_RESOURCE_BARRIER swapBarrier{};
@@ -9655,6 +9665,141 @@ bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
     D3D12_RANGE noWrite{ 0, 0 };
     p.viewportReadback->Unmap(0, &noWrite);
     return true;
+}
+
+// ─── One still from somebody else's camera ────────────────────────────────────
+// The contract is in IRenderer.h; the shape is D3D11's (D3D11Renderer.cpp,
+// RenderSceneImage), which is Metal's without the flag: the live viewport set is
+// SET ASIDE (moved out of the members, not released — createViewportRT starts by
+// retiring/resetting whatever is in them), createViewportRT builds a fresh set at
+// the requested size, one DrawViewportFrame is recorded and executed (the same
+// frame Render() records, minus the swapchain part: no clear of the backbuffer,
+// no overlay, no timestamp pair, no Present), CaptureViewport reads it back, the
+// set is released and the live set moved back. The editor's ImGui SRV never
+// pointed at the screenshot RT: viewportResChanged goes back to its saved value
+// before the editor's next look, so GetViewportD3DResource stays the live one.
+//
+// Command list and ring slot: createViewportRT flushes the GPU (waitForAllFrames),
+// so every allocator and every per-frame ring is idle. The frame is recorded on
+// p.frameIndex, the slot the NEXT real frame will use: DrawScene, renderUIPass12,
+// runSSAO and the GI per-slot buffers all index their rings by p.frameIndex, and
+// since nothing is presented, the next Render() lands on the same slot, whose
+// waitForFrame is a no-op after the capture's flush and whose allocator reset
+// simply throws the screenshot's recording away.
+//
+// Things this backend has to repair afterwards that Metal and GL get for free:
+//
+// * The HDR/LDR/bloom targets and the SSR colour history are built ONLY by
+//   createViewportRT → createPostFXResources, and Render() only calls that when
+//   the request differs from the live size — which it will not, once the live
+//   size is back. So the intermediates are rebuilt at the live size here, or the
+//   next real frame would draw a request-sized HDR image into the live viewport.
+// * createViewportRT writes the viewport depth into the decal pass's SRV slot of
+//   the scene heap (k_decalViewportDepthSlot, bound on every scene draw). It is
+//   rewritten for the live depth (or a null view when there is none).
+// * There is no TAA on D3D12; the per-camera temporal state is forward SSR's
+//   (the previous frame's HDR copy plus its half-res ping-pong). It gets the TAA
+//   rule: invalid before the still (implicitly — createPostFXResources drops the
+//   copy and destroySSRTargets the ping-pong) and invalid after, so the
+//   screenshot does not reflect the viewport's past and the viewport not the
+//   screenshot's. One frame without SSR on each side, no wrong reflections.
+//
+// Not parity with Metal/GL and stated as such: SSAO, the SSR ping-pong and the
+// GI shadow targets resize lazily inside DrawScene, each behind a GPU flush, so
+// a request that differs from the live size costs several flushes on both sides
+// and drops the GI shadow accumulation (giHistValid) twice — in the screenshot
+// frame and again in the next real frame. A request in viewport size pays none
+// of that.
+//
+// Not run: the retire sweeps, the timestamp query pair, the counter reset, the
+// overlay, Present — those belong to REAL frames. Per-request path, not per-frame.
+bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
+                                     uint32_t height, std::vector<uint8_t>& rgba)
+{
+    auto& p = *m_impl;
+    if (!p.device || !p.cmdQueue || !p.cmdList) return false;
+    if (width == 0 || height == 0) return false;
+
+    // Everything the frame reads that the request changes, saved by value.
+    ComPtr<ID3D12Resource>       liveRT         = std::move(p.viewportRT);
+    ComPtr<ID3D12Resource>       liveDepth      = std::move(p.viewportDepth);
+    ComPtr<ID3D12Resource>       liveReadback   = std::move(p.viewportReadback);
+    ComPtr<ID3D12DescriptorHeap> liveRtvHeap    = std::move(p.viewportRtvHeap);
+    ComPtr<ID3D12DescriptorHeap> liveDsvHeap    = std::move(p.viewportDsvHeap);
+    const UINT                   liveW          = p.viewportW;
+    const UINT                   liveH          = p.viewportH;
+    const UINT                   liveReqW       = p.viewportReqW;
+    const UINT                   liveReqH       = p.viewportReqH;
+    const D3D12_RESOURCE_STATES  liveState      = p.viewportState;
+    const bool                   liveResChanged = p.viewportResChanged;
+    const bool                   liveUsingHDR   = p.usingHDR;
+    const EditorCameraOverride   liveCam        = m_editorCamera;
+    // The counters are the profiler's picture of the last real frame; the
+    // screenshot's draws would sit there until the next Render() otherwise.
+    const uint32_t liveDraws = p.statDraws, liveTris = p.statTris,
+                   liveVisible = p.statVisible, liveTotal = p.statTotal;
+
+    p.viewportW    = 0;
+    p.viewportH    = 0;
+    p.viewportReqW = static_cast<UINT>(width);
+    p.viewportReqH = static_cast<UINT>(height);
+    m_editorCamera = camera;
+
+    // Fresh set at the request (plus HDR & co. at that size; SSR history gone).
+    // Flushes the GPU first, so the slot used below is idle.
+    p.createViewportRT(static_cast<UINT>(width), static_cast<UINT>(height));
+
+    bool ok = p.viewportRT && p.viewportDepth && p.viewportReadback
+           && p.viewportRtvHeap && p.viewportDsvHeap;
+    if (ok)
+    {
+        p.cmdAllocators[p.frameIndex]->Reset();
+        p.cmdList->Reset(p.cmdAllocators[p.frameIndex].Get(), nullptr);
+        DrawViewportFrame();
+        p.cmdList->Close();
+        ID3D12CommandList* lists[] = { p.cmdList.Get() };
+        p.cmdQueue->ExecuteCommandLists(1, lists);
+        // CaptureViewport flushes, copies to the readback buffer, flushes again
+        // and maps; no world → the cleared target, honestly black, which is what
+        // the viewport would show too.
+        uint32_t gotW = 0, gotH = 0;
+        ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+    }
+
+    // Nothing of the screenshot may still be in flight when its set goes away
+    // (cheap: the capture already flushed; this also covers the failure paths).
+    p.waitForAllFrames();
+    p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
+    p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
+    p.viewportRT         = std::move(liveRT);
+    p.viewportDepth      = std::move(liveDepth);
+    p.viewportReadback   = std::move(liveReadback);
+    p.viewportRtvHeap    = std::move(liveRtvHeap);
+    p.viewportDsvHeap    = std::move(liveDsvHeap);
+    p.viewportW          = liveW;
+    p.viewportH          = liveH;
+    p.viewportReqW       = liveReqW;
+    p.viewportReqH       = liveReqH;
+    p.viewportState      = liveState;
+    p.viewportResChanged = liveResChanged;
+    p.usingHDR           = liveUsingHDR;
+    m_editorCamera       = liveCam;
+    p.statDraws = liveDraws; p.statTris = liveTris;
+    p.statVisible = liveVisible; p.statTotal = liveTotal;
+    // The decal pass's viewport-depth SRV back to the live depth (null view
+    // when there is no live viewport; the table is bound regardless).
+    p.createDepthSrv(p.viewportDepth.Get(), D3D12RendererImpl::k_decalViewportDepthSlot);
+    // Intermediates back to the live size (see above). No live viewport (the
+    // direct-to-swapchain path) means nothing reads them; leave them.
+    if (liveW && liveH && (liveW != width || liveH != height))
+        p.createPostFXResources(liveW, liveH);
+    // The SSR history is the screenshot camera's now (a same-size request kept
+    // the targets, and the frame just captured into them).
+    p.ssrColorHistValid = false;
+    p.ssrHistValid      = false;
+
+    if (!ok) rgba.clear();
+    return ok;
 }
 
 void* D3D12Renderer::GetViewportD3DResource()    const { return m_impl->viewportRT.Get(); }

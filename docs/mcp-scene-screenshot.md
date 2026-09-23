@@ -91,7 +91,8 @@ virtual bool RenderSceneImage(const EditorCameraOverride& camera,
 Vertrag (`IRenderer.h`): einmal die aktuelle Welt aus `camera` in exakt
 `width`×`height` rendern und zurücklesen, ohne etwas zu präsentieren und ohne
 dass der Live-Viewport danach anders aussieht. Basis-Implementierung liefert
-`false` (→ `unsupported`). **Nur Metal** ist umgesetzt
+`false` (→ `unsupported`). Umgesetzt sind **alle fünf Backends**: Metal,
+OpenGL, D3D11, D3D12 und Vulkan. Metal
 (`MetalRenderer::RenderSceneImage`):
 
 1. Live-Viewport-Texturen, `m_viewportReqW/H` und `m_editorCamera` werden
@@ -110,6 +111,211 @@ dass der Live-Viewport danach anders aussieht. Basis-Implementierung liefert
 Was bewusst NICHT beiseitegelegt wird: HDR-, G-Buffer- und TAA-Targets. Sie
 werden auf die Anforderung umgebaut und im nächsten echten Frame zurück. Das
 ist ein Pfad pro Anfrage, keiner pro Frame.
+
+**OpenGL** (`OpenGLRenderer::RenderSceneImage`, Stand 22.09.2026) hält
+denselben Vertrag mit weniger Aufwand, weil der GL-Frame anders geschnitten
+ist: `Render()` ist das Einzige, was den Fenster-Framebuffer anfasst (Clear
+von FBO 0, Direkt-Modus-Draw, ImGui-Overlay-Callback), der Swap liegt in der
+Anwendung. Einen Swapchain-Pass zum Überspringen gibt es also nicht und kein
+`m_captureOnly`-Flag; der Pfad ruft `Render()` schlicht nicht auf.
+`DrawScene(w, h)` zeichnet in den gerade gebundenen FBO und die
+Post-Process-Kette (AA-Resolve) gibt das fertige Bild an genau diese Bindung
+zurück (`prevFBO` im Pass-Lambda). Ablauf:
+
+1. Viewport-FBO-Tripel (`m_viewportFBO/Color/Depth`), `m_viewportW/H`,
+   `m_viewportReqW/H`, `m_editorCamera` und die Profiler-Zähler
+   (`m_counters`) beiseitelegen; FBO-Tripel auf 0, Anforderung eingesetzt.
+2. `EnsureViewportTarget` baut ein frisches Paar in der Anforderungsgröße,
+   dieselben drei Zeilen wie der Offscreen-Zweig von `Render()`
+   (bind, clear, `DrawScene`), Bindung zurück auf 0.
+3. `CaptureViewport` liest per `glReadPixels` zurück (wartet auf die GPU);
+   `DestroyViewportTarget` retired die Screenshot-Farbtextur wie jede
+   Viewport-Textur (drei echte Frames), das Live-Tripel kommt zurück.
+4. `m_taaHistoryValid = false` vor und nach dem Frame, wie bei Metal; das
+   „nach" ist nötig, weil der TAA-Resolve in `DrawScene` die Historie wieder
+   für gültig erklärt.
+
+Nicht ausgeführt, weil es in ECHTEN Frames zählt: Retire-Aging, der
+GPU-Partikel-Schritt (`SimulateGpuParticles`) und der GPU-Timer-Frame des
+Profilers (die `GpuPassScope`s in `DrawScene` sind außerhalb eines
+Timer-Frames No-ops). Ohne Welt liefert der Pfad das geleerte Ziel, also ein
+schwarzes Bild mit `true`, wie der Viewport es zeigen würde. Pixel auf echter
+GL-Hardware sind **nicht verifiziert** (kein Display in der Sandbox); der
+Witness dafür ist `HE_DUMP_SCENEIMAGE` (§3), der auf jedem Backend läuft,
+das `RenderSceneImage` implementiert.
+
+**D3D11** (`D3D11Renderer::RenderSceneImage`, Stand 22.09.2026) nimmt das
+Metal-Muster, nur ohne Flag: der Viewport-Zweig von `Render()` (Szene in HDR
+oder direkt ins Viewport-Target, Bloom, Tonemap, AA-Resolve, UI-Canvas) ist
+in `DrawViewportFrame()` herausgezogen; `Render()` hängt den Swapchain-Teil
+(ImGui-Overlay, Present) an, der Still-Pfad den Readback. Ablauf:
+
+1. Die sechs `ComPtr`s des Live-Paars (`viewportTex/RTV/SRV`,
+   `viewportDepth/DSV/DepthSRV`) werden per `std::move` aus den Membern
+   herausgenommen (nicht freigegeben: `createViewportRT` beginnt mit
+   `Reset()` auf allem, was in den Membern steht), dazu `viewportW/H`,
+   `viewportReqW/H`, `m_editorCamera` und die Profiler-Zähler (`counters`)
+   nach Wert.
+2. `createViewportRT(width, height)` baut ein frisches Paar in der
+   Anforderungsgröße, ein `DrawViewportFrame` füllt es, `CaptureViewport`
+   liest per Staging-`Map` zurück (wartet auf die GPU). Ohne Welt oder ohne
+   Szenen-Shader ein schwarzes Bild mit `true`, wie GL.
+3. Das Screenshot-Paar wird direkt freigegeben (D3D11 hat keine
+   Retire-Liste; `createViewportRT` gibt Viewport-Targets genauso frei, die
+   Runtime hält In-Flight-Referenzen selbst), das Live-Paar kommt zurück.
+
+Zwei Dinge, die D3D11 selbst tun muss, weil sie bei Metal/GL von allein
+passieren:
+
+* **HDR/LDR/Bloom/SSAO-Targets** werden nur von `createViewportRT` gebaut,
+  und `Render()` ruft das nur, wenn Anforderung und Live-Größe auseinander
+  liegen, was nach der Rückgabe nicht der Fall ist. Der Still-Pfad ruft
+  deshalb `createHDRTargets(liveW, liveH)` selbst, sobald die Anforderung
+  eine andere Größe hatte; sonst zeichnete der nächste echte Frame ein
+  anforderungsgroßes HDR-Bild in den Live-Viewport. Ohne Live-Viewport
+  (Direkt-in-Swapchain-Pfad) bleiben sie, dort liest sie niemand.
+* **Kein TAA auf D3D11**; der per-Kamera-Temporalzustand ist der des
+  Forward-SSR (Kopie des vorigen HDR-Frames + Half-Res-Ping-Pong). Er
+  bekommt die TAA-Regel: vor dem Still implizit ungültig
+  (`createHDRTargets` verwirft die Kopie, `destroySSRTargets` das
+  Ping-Pong), danach explizit (`ssrColorHistValid`/`ssrHistValid` = false,
+  weil eine Anforderung in Viewport-Größe die Targets behält und der Frame
+  gerade hineingeschrieben hat). Preis: ein Frame ohne SSR auf beiden
+  Seiten, keine Reflexion aus fremder Kamera. Die GI-Schatten-Akkumulation
+  (`giHistValid`, weltraum-reprojiziert über `giPrevViewProj`) bleibt wie
+  bei Metal/GL stehen.
+
+Nicht ausgeführt: GPU-Timer-Frame (D3D11 misst nur den ganzen Frame,
+`DrawScene` hat keine Scopes), Overlay, Present, Zähler-Reset. Kompiliert
+nur im Windows-CI (`if(WIN32)` in `src/HE_Rendering/CMakeLists.txt`); Pixel
+auf echter D3D11-Hardware **nicht verifiziert**, Witness wäre auch hier
+`HE_DUMP_SCENEIMAGE`.
+
+**D3D12** (`D3D12Renderer::RenderSceneImage`, Stand 22.09.2026) nimmt
+D3D11s Schnitt: der Viewport-Zweig von `Render()` (Szene in HDR oder direkt
+ins Viewport-RT, PostFX-Kette, UI-Canvas, Viewport-RT zurück nach
+`PIXEL_SHADER_RESOURCE`) ist in `DrawViewportFrame()` herausgezogen und
+nimmt in die offene `cmdList` auf; `Render()` hängt den Swapchain-Teil
+(Backbuffer-Clear, ImGui-Overlay, Timestamp-Paar, Present) an, der
+Still-Pfad die Ausführung und den Readback. Ablauf:
+
+1. Das Live-Set (`viewportRT/Depth/Readback`, `viewportRtvHeap/DsvHeap`)
+   wird per `std::move` aus den Membern genommen (`createViewportRT`
+   beginnt damit, das Vorhandene zu retiren bzw. zu resetten), dazu nach
+   Wert `viewportW/H`, `viewportReqW/H`, `viewportState`,
+   `viewportResChanged`, `usingHDR`, `m_editorCamera` und die vier
+   Profiler-Zähler.
+2. `createViewportRT(width, height)` flusht die GPU (`waitForAllFrames`)
+   und baut ein frisches Set samt PostFX-Zielen in Anforderungsgröße. Die
+   Kommandoliste wird auf dem Allocator von `p.frameIndex` neu
+   aufgenommen, also dem Slot, den der NÄCHSTE echte Frame nimmt:
+   `DrawScene`, `renderUIPass12`, `runSSAO` und die GI-Per-Slot-Puffer
+   indizieren ihre Ringe darüber, und weil nichts präsentiert wird, landet
+   der nächste `Render()` auf demselben Slot, dessen `waitForFrame` nach
+   dem Flush des Captures ein No-op ist und dessen Allocator-Reset die
+   Screenshot-Aufnahme einfach verwirft. `DrawViewportFrame`, Close,
+   Execute, dann `CaptureViewport` (flusht, kopiert in den Readback-Puffer,
+   flusht, mappt). Ohne Welt ein schwarzes Bild mit `true`, wie GL/D3D11.
+3. Nach einem weiteren `waitForAllFrames` (deckt die Fehlerpfade) wird das
+   Screenshot-Set direkt freigegeben (die ImGui-SRV des Editors zeigte nie
+   darauf, weil `viewportResChanged` vor dem nächsten Blick des Editors
+   zurückgesetzt wird), das Live-Set kommt zurück.
+
+Drei Reparaturen, die D3D12 selbst tun muss:
+
+* **PostFX-Ziele** (HDR/LDR/Bloom + SSR-Farbhistorie) hängen wie bei D3D11
+  an `createViewportRT`; nach dem Still `createPostFXResources(liveW,
+  liveH)`, sobald die Anforderung eine andere Größe hatte.
+* **Decal-Depth-Slot:** `createViewportRT` schreibt die Viewport-Tiefe in
+  den SRV-Slot `k_decalViewportDepthSlot` des Szenen-Heaps, der bei jedem
+  Szenen-Draw gebunden ist. Er wird auf die Live-Tiefe zurückgeschrieben
+  (Null-View, wenn es keinen Live-Viewport gibt).
+* **Kein TAA auf D3D12**, dieselbe SSR-Regel wie D3D11: vor dem Still
+  implizit ungültig, danach `ssrColorHistValid`/`ssrHistValid` = false.
+
+**Keine Parität mit Metal/GL, und so benannt:** SSAO-Ziele, das
+SSR-Ping-Pong und die GI-Schatten-Ziele (`ensureGiShadowTargets`) ziehen in
+`DrawScene` lazy auf die Framegröße nach, jeweils hinter einem GPU-Flush.
+Eine Anforderung, die von der Live-Größe abweicht, kostet deshalb mehrere
+Flushes auf beiden Seiten und verwirft die GI-Schatten-Akkumulation
+(`giHistValid`) zweimal, im Screenshot-Frame und im nächsten echten Frame.
+Eine Anforderung in Viewport-Größe zahlt davon nichts.
+
+Nicht ausgeführt: Retire-Sweeps, Timestamp-Paar, Zähler-Reset, Overlay,
+Present. Kompiliert nur im Windows-CI; Pixel auf echter D3D12-Hardware
+**nicht verifiziert**, Witness wäre `HE_DUMP_SCENEIMAGE`.
+
+**Vulkan** (`VulkanRenderer::RenderSceneImage`, Stand 23.09.2026) nimmt
+denselben Schnitt: die Offscreen-Hälfte von `Render()` (Cascades auf das
+Viewport-Seitenverhältnis gefittet, Decal-Tiefen-Prepass, GI/SSAO/SSR, Szene
+nach HDR oder ohne PostFX direkt ins Viewport-Bild, Bloom, Tonemap,
+AA-Resolve, UI-Canvas) ist unverändert in `DrawViewportFrame(VkCommandBuffer)`
+herausgezogen (Block gegen HEAD geprüft: bis auf eine Einrückungsebene
+byte-identisch, nur `useViewport` weggefaltet); `Render()` behält Acquire,
+Swapchain-Pass, ImGui-Overlay, Timestamp-Paar und Present, der Still-Pfad
+zeichnet in einen **eigenen Ein-Schuss-Kommandopuffer** aus `m_cmdPool` (das
+Muster von `CaptureViewport`) — `m_cmdBufs[imageIndex]` gehört einem
+Swapchain-Bild, und hier wird keines geholt. Ablauf:
+
+1. Die neun Handles des Live-Satzes (Farbbild/Speicher/View, Tiefe dreifach,
+   Renderpass, Framebuffer, Sampler) werden in Locals gerettet und die Member
+   auf `VK_NULL_HANDLE` gesetzt, **bevor** `createViewportResources` läuft: das
+   schiebt das vorhandene Farbbild sonst auf `m_retiredViewports` und zerstört
+   den Rest des Satzes. Dazu nach Wert `m_viewportW/H`, `m_viewportReqW/H`,
+   `m_viewportLayout`, `m_viewportResChanged`, `m_editorCamera` und die vier
+   Profiler-Zähler.
+2. Wie am Anfang von `Render()`: `m_wallTime`, `processPendingInvalidations`,
+   die Pro-Frame-Flags (`m_giRanThisFrame` aus dem Live-Frame würde sonst über
+   `aoWanted` dieses Frames entscheiden). Dann `vkDeviceWaitIdle` und
+   `createViewportResources(width, height)`, ein `DrawViewportFrame` in den
+   Ein-Schuss-Puffer, `vkQueueSubmit` + `vkQueueWaitIdle`, `CaptureViewport`.
+   Ohne Welt ein schwarzes Bild mit `true`, wie GL/D3D11/D3D12.
+3. Der Screenshot-Satz wird ganz zerstört (sein Farbbild wird **nicht**
+   retired: der Deskriptor des Editors zeigte nie darauf, und das Gerät ist
+   idle), die Live-Handles kommen zurück, **danach** die Zwischenziele.
+
+Ring-Slot: der Still rechnet auf `m_currentFrame`, dem Slot des NÄCHSTEN
+echten Frames. Das trägt nur wegen des `vkDeviceWaitIdle` — DrawScenes
+`vkResetDescriptorPool(m_matPool[m_currentFrame])` gibt dann Sets frei, die
+keine GPU liest. Weil nichts präsentiert wird, rückt `m_currentFrame` nicht
+vor: der nächste `Render()` nimmt denselben Slot, dessen Fence signalisiert
+ist, und nimmt seinen Kommandopuffer neu auf.
+
+Drei Reparaturen, die Vulkan selbst tun muss:
+
+* **Zwischenziele immer zurückbauen, nicht nur bei anderer Größe** (anders als
+  D3D11/D3D12): `m_hdrFB`, `m_fxaaFB` und `m_uiViewportFB` sind Framebuffer
+  **auf** `m_viewportView`/`m_viewportDepthView` (`createPostFXResources`).
+  Nach dem Zerstören der Screenshot-Views hingen sie auch dann in der Luft,
+  wenn die Anforderung exakt viewportgroß war. Der Still ruft deshalb nach der
+  Rückgabe unbedingt `createPostFXResources` + `createSSAOTargets` +
+  `createDecalDepth(m_decalDepthVp, …)` auf Live-Größe, also genau den Schwanz
+  von `createViewportResources`.
+* **Szenen-Binding 3:** `createSSAOTargets` schreibt den AO-Sampler in jedes
+  Pro-Frame-Deskriptorset. Ohne Live-Viewport gibt es keine Größe zum
+  Nachbauen, dann geht Binding 3 auf die 1×1-Weiß-Notlösung zurück, auf der
+  jedes Set startet. Bindings 4–7 (GI) rührt `destroyViewportResources` nicht
+  an, Binding 8 schreibt jedes `DrawScene` neu.
+* **Kein TAA auf Vulkan**, dieselbe SSR-Regel wie D3D11/D3D12: vorher implizit
+  ungültig, danach `m_ssrColorHistValid`/`m_ssrHistValid` = false. Die
+  GI-Schatten-Akkumulation (`m_giHistValid`, weltraum-reprojiziert) bleibt.
+
+`vkCheck` wirft: eine Anforderung, die nicht allozierbar ist, darf den
+Live-Viewport nicht mitreißen, deshalb liegt der Aufnahmeteil in einem
+`try`/`catch`, und die Rückgabe läuft in jedem Fall.
+
+**Keine Parität mit Metal/GL, und so benannt:** die GI-Ziele und das
+SSR-Ping-Pong ziehen in `runGi`/`RenderForwardSSR` lazy auf die Framegröße
+nach; eine Anforderung, die von der Live-Größe abweicht, kostet deshalb
+zusätzliche Neuanlagen auf beiden Seiten. Eine Anforderung in Viewport-Größe
+zahlt davon nichts.
+
+Nicht ausgeführt: der Retire-Sweep, das Timestamp-Paar, Zähler-Reset, Overlay,
+Present. Kompiliert nur im Windows-CI (Vulkan-SDK seit Thema 60, siehe
+`.github/workflows/ci.yml`); lokal auf dem Mac gibt es nur den
+`clang -fsyntax-only`-Vorabcheck gegen die MoltenVK-Header. Pixel auf echter
+Vulkan-Hardware **nicht verifiziert** — der Windows-Runner hat keinen
+Vulkan-ICD —, Witness wäre auch hier `HE_DUMP_SCENEIMAGE`.
 
 ## 3. Verifikation
 
@@ -326,8 +532,9 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
   mit 1280×720 oder größer anfühlen.
 * Inline-PNG ≤ 2,5 MiB (`kInlineMaxPngBytes`), Shim-Frame ≤ 4 MiB; darüber
   `file`.
-* Nur Metal rendert Stills (`RenderSceneImage`); die Gizmos im Viewport gibt
-  es auf jedem Backend, das Debug-Linien zeichnet.
+* Alle fünf Backends rendern Stills (`RenderSceneImage`); die Gizmos im
+  Viewport gibt es auf jedem Backend, das Debug-Linien zeichnet. Echte Pixel
+  gesehen hat davon nur Metal.
 * Die Frustums sind per Bauart in keinem Tool-Bild (§5); die ImGui-Tags
   (`MCP #n`) sind auch im Live-Witness nicht drin (der Capture liest die
   Viewport-Textur, nicht das ImGui-Overlay); Sicht auf die Tags bleibt
@@ -340,6 +547,20 @@ lines [0,38) of 1166, collaborators on, editor camera 6/4.5/6)`.
 
 ## 7. Nähte für die Folgeschritte
 
-* **Andere Backends:** OpenGL braucht denselben Umbau (Viewport-FBO
-  beiseitelegen, Swapchain-Pass überspringen); D3D/Vulkan liefern bis dahin
-  `unsupported` mit Namen.
+* **Andere Backends:** alle vier sind nachgezogen (§2), das Thema ist damit
+  geschlossen. Für einen künftigen sechsten Renderer ist die Reihenfolge der
+  Fallen dieselbe wie hier: wer wie Metal/Vulkan einen Swapchain-Pass
+  (Present, ImGui-Overlay) hat, nimmt das `m_captureOnly`-Muster oder
+  D3D11/D3D12/Vulkans Schnitt (Viewport-Frame als eigene Methode,
+  Swapchain-Teil bleibt in `Render()`), nicht das GL-Muster. Wer seine
+  HDR-Zwischenziele nur beim Anlegen des Viewport-Targets baut, muss sie nach
+  dem Still selbst auf die Live-Größe zurückbauen — und zwar unbedingt, nicht
+  nur bei abweichender Anforderung, sobald sie wie Vulkans Framebuffer auf der
+  Viewport-View sitzen. Wer Ringe pro Frame-in-Flight hat, nimmt den Slot des
+  nächsten echten Frames nach einem vollen Flush und schreibt Descriptor-Slots,
+  die das Viewport-Target beim Anlegen belegt, nach der Rückgabe zurück.
+* **Echte Hardware:** verifiziert sind Pixel nur auf Metal. GL, D3D11, D3D12
+  und Vulkan sind kompiliert und nach demselben Vertrag gebaut, aber kein
+  Bild ist je gesehen worden; der Witness `HE_DUMP_SCENEIMAGE` (§3) läuft auf
+  jedem der fünf und wäre der erste Schritt, sobald jemand an die Hardware
+  kommt.

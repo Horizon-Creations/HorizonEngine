@@ -43,6 +43,8 @@ public:
 	void  SetViewportSize(uint32_t width, uint32_t height) override;
 	void* GetViewportTexture() override;
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
+	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
+	                       std::vector<uint8_t>& rgba) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
