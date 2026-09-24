@@ -416,7 +416,7 @@ alles; `setPosition`/`…AndReset` nehmen **lokale** Positionen (Kind unter (10,
 Welt (10,5,0)), `…AtPosition` Weltpunkte; Kräfte scheitern auf kinematischen Körpern, also auch
 auf Charakteren; `setVelocity` auf einem Charakter mit Movement wird im nächsten Frame
 überschrieben; `setGravity` gilt nicht für Charaktere; nur der Joint-Besitzer meldet
-`hasJoint`, Typ außerhalb 0–4 wird Fixed; `nav.moveTo` verweigert einen Punkt 4 m über dem
+`hasJoint`, Typ außerhalb 0–4 wird Fixed; `nav.moveTo` verweigert einen Punkt 5 m über dem
 Mesh, `remainingDistance` ist nach der Ankunft −1, nie 0, `setSpeed(−2)` wird 0 bei weiter
 `isMoving` = true; Player-Refs sind HorizonCode-Objektreferenzen (Ganzzahlen), die Tabelle
 prüft nichts; Tastennamen sind SDL-Scancode-Namen und groß/klein-sensitiv („w" nie wahr,
