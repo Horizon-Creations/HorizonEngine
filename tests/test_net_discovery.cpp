@@ -648,7 +648,9 @@ TEST_CASE("NAT-PMP against a loopback router: resend, refusal, granted port, ren
                                      refusedInfo, 1500);
     router.finish();
     CHECK(refused == PortMapResult::Refused);
-    REQUIRE(router.requests.size() == 2);
+    // At least two: a runner stalled past the next interval may send a third,
+    // which proves the same thing.
+    REQUIRE(router.requests.size() >= 2);
     CHECK(router.requests[0] == router.requests[1]);   // a resend, not a new request
 
     // ── Success: the granted port and the granted lease are what is kept ──
