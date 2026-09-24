@@ -4,7 +4,7 @@ Erzeugt von `scripts/script_api_docs/coverage.py` aus `scripts/script_api_docs/r
 
 Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Referenz `scripting-reference.html` oder flacher Zwilling in `scripting-api.html#api`), **named** = Id wörtlich auf einer anderen Doku-Seite, **catalog** = nur der Name im HorizonCode-Knotenkatalog, **missing** = nirgends. **hand** = es gibt Handinhalt aus `overlay/` (Gruppen-Einleitung oder zur Id eine Notiz, ein Beispiel, ein Recht, eine Skript-Signatur): das, was der Generator nicht schreiben kann, und die Zahl, die die Gruppen-Schritte bewegen.
 
-**Gesamt: 582 Registry-Ids in 42 Gruppen** — ref 582, named 0, catalog 0, missing 0; hand 428.
+**Gesamt: 582 Registry-Ids in 42 Gruppen** — ref 582, named 0, catalog 0, missing 0; hand 526.
 
 | Gruppe | Kategorie | Ids | Lua/Py `horizon.<gruppe>.*` | ref | named | catalog | missing | hand |
 |---|---|---:|:---:|---:|---:|---:|---:|---:|
@@ -12,9 +12,9 @@ Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Refe
 | `net` | Multiplayer | 44 | ja | 44 | 0 | 0 | 0 | 3 |
 | `physics` | Physics | 33 | ja | 33 | 0 | 0 | 0 | 33 |
 | `math` | Math | 31 | ja | 31 | 0 | 0 | 0 | 31 |
-| `widget` | Widget | 28 | ja | 28 | 0 | 0 | 0 | 0 |
+| `widget` | Widget | 28 | ja | 28 | 0 | 0 | 0 | 28 |
 | `camera` | Camera | 26 | ja | 26 | 0 | 0 | 0 | 26 |
-| `app` | App | 24 | ja | 24 | 0 | 0 | 0 | 1 |
+| `app` | App | 24 | ja | 24 | 0 | 0 | 0 | 24 |
 | `audio` | Audio | 18 | ja | 18 | 0 | 0 | 0 | 18 |
 | `entity` | Entity | 18 | ja | 18 | 0 | 0 | 0 | 18 |
 | `input` | Input | 17 | ja | 17 | 0 | 0 | 0 | 17 |
@@ -24,31 +24,31 @@ Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Refe
 | `time` | Time | 13 | ja | 13 | 0 | 0 | 0 | 13 |
 | `scene` | Scene | 12 | ja | 12 | 0 | 0 | 0 | 12 |
 | `string` | String | 12 | ja | 12 | 0 | 0 | 0 | 12 |
-| `ui` | UI | 12 | ja | 12 | 0 | 0 | 0 | 0 |
+| `ui` | UI | 12 | ja | 12 | 0 | 0 | 0 | 12 |
 | `datetime` | DateTime | 9 | ja | 9 | 0 | 0 | 0 | 9 |
-| `http` | HTTP | 9 | ja | 9 | 0 | 0 | 0 | 2 |
+| `http` | HTTP | 9 | ja | 9 | 0 | 0 | 0 | 9 |
 | `prefs` | Prefs | 9 | ja | 9 | 0 | 0 | 0 | 9 |
 | `animator` | Animator | 8 | ja | 8 | 0 | 0 | 0 | 8 |
 | `json` | JSON | 8 | ja | 8 | 0 | 0 | 0 | 8 |
 | `transform` | Transform | 8 | **nein** | 8 | 0 | 0 | 0 | 8 |
-| `db` | Database | 7 | ja | 7 | 0 | 0 | 0 | 1 |
+| `db` | Database | 7 | ja | 7 | 0 | 0 | 0 | 7 |
 | `locomotion` | Locomotion | 6 | ja | 6 | 0 | 0 | 0 | 6 |
 | `movement` | Movement | 6 | ja | 6 | 0 | 0 | 0 | 6 |
 | `nav` | Navigation | 6 | ja | 6 | 0 | 0 | 0 | 6 |
 | `player` | Player | 6 | ja | 6 | 0 | 0 | 0 | 6 |
-| `theme` | Theme | 6 | ja | 6 | 0 | 0 | 0 | 0 |
-| `dialog` | Dialog | 5 | ja | 5 | 0 | 0 | 0 | 0 |
+| `theme` | Theme | 6 | ja | 6 | 0 | 0 | 0 | 6 |
+| `dialog` | Dialog | 5 | ja | 5 | 0 | 0 | 0 | 5 |
 | `random` | Random | 5 | ja | 5 | 0 | 0 | 0 | 5 |
 | `timer` | Timer | 5 | ja | 5 | 0 | 0 | 0 | 5 |
-| `window` | Window | 5 | ja | 5 | 0 | 0 | 0 | 0 |
+| `window` | Window | 5 | ja | 5 | 0 | 0 | 0 | 5 |
 | `content` | Content | 4 | ja | 4 | 0 | 0 | 0 | 4 |
 | `debug` | Debug | 4 | ja | 4 | 0 | 0 | 0 | 4 |
 | `particle` | Particles | 4 | ja | 4 | 0 | 0 | 0 | 4 |
-| `clipboard` | Clipboard | 3 | ja | 3 | 0 | 0 | 0 | 0 |
-| `print` | Print | 3 | ja | 3 | 0 | 0 | 0 | 2 |
-| `process` | Process | 3 | ja | 3 | 0 | 0 | 0 | 2 |
+| `clipboard` | Clipboard | 3 | ja | 3 | 0 | 0 | 0 | 3 |
+| `print` | Print | 3 | ja | 3 | 0 | 0 | 0 | 3 |
+| `process` | Process | 3 | ja | 3 | 0 | 0 | 0 | 3 |
 | `material` | Material | 2 | **nein** | 2 | 0 | 0 | 0 | 2 |
-| `cursor` | Cursor | 1 | **nein** | 1 | 0 | 0 | 0 | 0 |
+| `cursor` | Cursor | 1 | **nein** | 1 | 0 | 0 | 0 | 1 |
 | `log` | Debug | 1 | **nein** | 1 | 0 | 0 | 0 | 1 |
 
 ## Flache `horizon.*`-Funktionen (35, nicht in der Registry)
@@ -259,34 +259,34 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `widget.setZOrder(widget: Ref, z: Int)` | exec | ref | scripting-reference.html#widget-setZOrder |
-| `widget.isVisible(widget: Ref)` → visible: Bool | pure | ref | scripting-reference.html#widget-isVisible |
-| `widget.callFunction(widget: Ref, function: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-callFunction |
-| `widget.addChild(widget: Ref, parent: String, widgetAsset: String)` → child: Ref | exec | ref | scripting-reference.html#widget-addChild |
-| `widget.removeChild(widget: Ref, child: Ref)` → ok: Bool | exec | ref | scripting-reference.html#widget-removeChild |
-| `widget.clearChildren(widget: Ref, parent: String)` → removed: Int | exec | ref | scripting-reference.html#widget-clearChildren |
-| `widget.setListCount(widget: Ref, list: String, count: Int)` → ok: Bool | exec | ref | scripting-reference.html#widget-setListCount |
-| `widget.listCount(widget: Ref, list: String)` → count: Int | pure | ref | scripting-reference.html#widget-listCount |
-| `widget.listRow(widget: Ref, list: String, index: Int)` → row: Ref | pure | ref | scripting-reference.html#widget-listRow |
-| `widget.refreshList(widget: Ref, list: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-refreshList |
-| `widget.setListSelected(widget: Ref, list: String, index: Int, selected: Bool)` → ok: Bool | exec | ref | scripting-reference.html#widget-setListSelected |
-| `widget.listSelected(widget: Ref, list: String)` → index: Int | pure | ref | scripting-reference.html#widget-listSelected |
-| `widget.scrollListToItem(widget: Ref, list: String, index: Int)` → ok: Bool | exec | ref | scripting-reference.html#widget-scrollListToItem |
-| `widget.animate(widget=self: Ref, element: String, property: String, to: Float, seconds: Float, easing: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-animate |
-| `widget.animateColor(widget=self: Ref, element: String, property: String, to: Color, seconds: Float, easing: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-animateColor |
-| `widget.animateVec2(widget=self: Ref, element: String, property: String, to: Vec2, seconds: Float, easing: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-animateVec2 |
-| `widget.stopAnimation(widget=self: Ref, element: String, property: String)` → stopped: Int | exec | ref | scripting-reference.html#widget-stopAnimation |
-| `widget.playAnimation(widget=self: Ref, animation: String, restoreAfterCompleted: Bool, direction: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-playAnimation |
-| `widget.playAnimationLooped(widget=self: Ref, animation: String, loop: Bool, direction: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-playAnimationLooped |
-| `widget.stopAnimationClip(widget=self: Ref, animation: String)` → stopped: Int | exec | ref | scripting-reference.html#widget-stopAnimationClip |
-| `widget.isPlayingAnimation(widget=self: Ref, animation: String)` → playing: Bool | pure | ref | scripting-reference.html#widget-isPlayingAnimation |
-| `widget.childRef(widget=self: Ref, element: String)` → child: Ref | pure | ref | scripting-reference.html#widget-childRef |
-| `widget.stopAllAnimations(widget=self: Ref)` → stopped: Int | exec | ref | scripting-reference.html#widget-stopAllAnimations |
-| `widget.restoreOriginalState(widget=self: Ref)` → restored: Int | exec | ref | scripting-reference.html#widget-restoreOriginalState |
-| `widget.showModal(widget: Ref)` | exec | ref | scripting-reference.html#widget-showModal |
-| `widget.openPopup(widget: Ref, x: Float, y: Float)` | exec | ref | scripting-reference.html#widget-openPopup |
-| `widget.openPopupAtPointer(widget: Ref)` | exec | ref | scripting-reference.html#widget-openPopupAtPointer |
-| `widget.closeTopLayer()` → closed: Bool | exec | ref | scripting-reference.html#widget-closeTopLayer |
+| `widget.setZOrder(widget: Ref, z: Int)` | exec | ref | scripting-reference.html#widget-setZOrder · hand |
+| `widget.isVisible(widget: Ref)` → visible: Bool | pure | ref | scripting-reference.html#widget-isVisible · hand |
+| `widget.callFunction(widget: Ref, function: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-callFunction · hand |
+| `widget.addChild(widget: Ref, parent: String, widgetAsset: String)` → child: Ref | exec | ref | scripting-reference.html#widget-addChild · hand |
+| `widget.removeChild(widget: Ref, child: Ref)` → ok: Bool | exec | ref | scripting-reference.html#widget-removeChild · hand |
+| `widget.clearChildren(widget: Ref, parent: String)` → removed: Int | exec | ref | scripting-reference.html#widget-clearChildren · hand |
+| `widget.setListCount(widget: Ref, list: String, count: Int)` → ok: Bool | exec | ref | scripting-reference.html#widget-setListCount · hand |
+| `widget.listCount(widget: Ref, list: String)` → count: Int | pure | ref | scripting-reference.html#widget-listCount · hand |
+| `widget.listRow(widget: Ref, list: String, index: Int)` → row: Ref | pure | ref | scripting-reference.html#widget-listRow · hand |
+| `widget.refreshList(widget: Ref, list: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-refreshList · hand |
+| `widget.setListSelected(widget: Ref, list: String, index: Int, selected: Bool)` → ok: Bool | exec | ref | scripting-reference.html#widget-setListSelected · hand |
+| `widget.listSelected(widget: Ref, list: String)` → index: Int | pure | ref | scripting-reference.html#widget-listSelected · hand |
+| `widget.scrollListToItem(widget: Ref, list: String, index: Int)` → ok: Bool | exec | ref | scripting-reference.html#widget-scrollListToItem · hand |
+| `widget.animate(widget=self: Ref, element: String, property: String, to: Float, seconds: Float, easing: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-animate · hand |
+| `widget.animateColor(widget=self: Ref, element: String, property: String, to: Color, seconds: Float, easing: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-animateColor · hand |
+| `widget.animateVec2(widget=self: Ref, element: String, property: String, to: Vec2, seconds: Float, easing: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-animateVec2 · hand |
+| `widget.stopAnimation(widget=self: Ref, element: String, property: String)` → stopped: Int | exec | ref | scripting-reference.html#widget-stopAnimation · hand |
+| `widget.playAnimation(widget=self: Ref, animation: String, restoreAfterCompleted: Bool, direction: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-playAnimation · hand |
+| `widget.playAnimationLooped(widget=self: Ref, animation: String, loop: Bool, direction: String)` → ok: Bool | exec | ref | scripting-reference.html#widget-playAnimationLooped · hand |
+| `widget.stopAnimationClip(widget=self: Ref, animation: String)` → stopped: Int | exec | ref | scripting-reference.html#widget-stopAnimationClip · hand |
+| `widget.isPlayingAnimation(widget=self: Ref, animation: String)` → playing: Bool | pure | ref | scripting-reference.html#widget-isPlayingAnimation · hand |
+| `widget.childRef(widget=self: Ref, element: String)` → child: Ref | pure | ref | scripting-reference.html#widget-childRef · hand |
+| `widget.stopAllAnimations(widget=self: Ref)` → stopped: Int | exec | ref | scripting-reference.html#widget-stopAllAnimations · hand |
+| `widget.restoreOriginalState(widget=self: Ref)` → restored: Int | exec | ref | scripting-reference.html#widget-restoreOriginalState · hand |
+| `widget.showModal(widget: Ref)` | exec | ref | scripting-reference.html#widget-showModal · hand |
+| `widget.openPopup(widget: Ref, x: Float, y: Float)` | exec | ref | scripting-reference.html#widget-openPopup · hand |
+| `widget.openPopupAtPointer(widget: Ref)` | exec | ref | scripting-reference.html#widget-openPopupAtPointer · hand |
+| `widget.closeTopLayer()` → closed: Bool | exec | ref | scripting-reference.html#widget-closeTopLayer · hand |
 
 ### `camera` — Camera (26)
 
@@ -323,30 +323,30 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `app.quit()` | exec | ref | scripting-reference.html#app-quit |
-| `app.setTitle(title: String)` | exec | ref | scripting-reference.html#app-setTitle |
-| `app.setSize(width: Int, height: Int)` | exec | ref | scripting-reference.html#app-setSize |
-| `app.size()` → size: Vec2 | pure | ref | scripting-reference.html#app-size |
-| `app.requestRedraw()` | exec | ref | scripting-reference.html#app-requestRedraw |
-| `app.minimize()` | exec | ref | scripting-reference.html#app-minimize |
-| `app.maximize(maximized: Bool)` | exec | ref | scripting-reference.html#app-maximize |
-| `app.isMaximized()` → maximized: Bool | pure | ref | scripting-reference.html#app-isMaximized |
-| `app.showTray(tooltip: String)` | exec | ref | scripting-reference.html#app-showTray |
-| `app.hideTray()` | exec | ref | scripting-reference.html#app-hideTray |
-| `app.addTrayItem(id: String, label: String)` | exec | ref | scripting-reference.html#app-addTrayItem |
-| `app.clearTrayMenu()` | exec | ref | scripting-reference.html#app-clearTrayMenu |
-| `app.addMenu(id: String, label: String)` | exec | ref | scripting-reference.html#app-addMenu |
-| `app.addMenuItem(menu: String, id: String, label: String, shortcut: String)` | exec | ref | scripting-reference.html#app-addMenuItem |
-| `app.addMenuSeparator(menu: String)` | exec | ref | scripting-reference.html#app-addMenuSeparator |
-| `app.clearMenuBar()` | exec | ref | scripting-reference.html#app-clearMenuBar |
-| `app.setMenuItemEnabled(id: String, enabled: Bool)` | exec | ref | scripting-reference.html#app-setMenuItemEnabled |
-| `app.setMenuItemChecked(id: String, checked: Bool)` | exec | ref | scripting-reference.html#app-setMenuItemChecked |
-| `app.menuItemEnabled(id: String)` → enabled: Bool | pure | ref | scripting-reference.html#app-menuItemEnabled |
-| `app.menuItemChecked(id: String)` → checked: Bool | pure | ref | scripting-reference.html#app-menuItemChecked |
-| `app.notify(title: String, text: String)` → shown: Bool | exec | ref | scripting-reference.html#app-notify |
-| `app.notifyAvailable()` → available: Bool | pure | ref | scripting-reference.html#app-notifyAvailable |
+| `app.quit()` | exec | ref | scripting-reference.html#app-quit · hand |
+| `app.setTitle(title: String)` | exec | ref | scripting-reference.html#app-setTitle · hand |
+| `app.setSize(width: Int, height: Int)` | exec | ref | scripting-reference.html#app-setSize · hand |
+| `app.size()` → size: Vec2 | pure | ref | scripting-reference.html#app-size · hand |
+| `app.requestRedraw()` | exec | ref | scripting-reference.html#app-requestRedraw · hand |
+| `app.minimize()` | exec | ref | scripting-reference.html#app-minimize · hand |
+| `app.maximize(maximized: Bool)` | exec | ref | scripting-reference.html#app-maximize · hand |
+| `app.isMaximized()` → maximized: Bool | pure | ref | scripting-reference.html#app-isMaximized · hand |
+| `app.showTray(tooltip: String)` | exec | ref | scripting-reference.html#app-showTray · hand |
+| `app.hideTray()` | exec | ref | scripting-reference.html#app-hideTray · hand |
+| `app.addTrayItem(id: String, label: String)` | exec | ref | scripting-reference.html#app-addTrayItem · hand |
+| `app.clearTrayMenu()` | exec | ref | scripting-reference.html#app-clearTrayMenu · hand |
+| `app.addMenu(id: String, label: String)` | exec | ref | scripting-reference.html#app-addMenu · hand |
+| `app.addMenuItem(menu: String, id: String, label: String, shortcut: String)` | exec | ref | scripting-reference.html#app-addMenuItem · hand |
+| `app.addMenuSeparator(menu: String)` | exec | ref | scripting-reference.html#app-addMenuSeparator · hand |
+| `app.clearMenuBar()` | exec | ref | scripting-reference.html#app-clearMenuBar · hand |
+| `app.setMenuItemEnabled(id: String, enabled: Bool)` | exec | ref | scripting-reference.html#app-setMenuItemEnabled · hand |
+| `app.setMenuItemChecked(id: String, checked: Bool)` | exec | ref | scripting-reference.html#app-setMenuItemChecked · hand |
+| `app.menuItemEnabled(id: String)` → enabled: Bool | pure | ref | scripting-reference.html#app-menuItemEnabled · hand |
+| `app.menuItemChecked(id: String)` → checked: Bool | pure | ref | scripting-reference.html#app-menuItemChecked · hand |
+| `app.notify(title: String, text: String)` → shown: Bool | exec | ref | scripting-reference.html#app-notify · hand |
+| `app.notifyAvailable()` → available: Bool | pure | ref | scripting-reference.html#app-notifyAvailable · hand |
 | `app.setAutostart(enabled: Bool)` | exec | ref | scripting-reference.html#app-setAutostart · hand |
-| `app.autostart()` → enabled: Bool | pure | ref | scripting-reference.html#app-autostart |
+| `app.autostart()` → enabled: Bool | pure | ref | scripting-reference.html#app-autostart · hand |
 
 ### `audio` — Audio (18)
 
@@ -532,18 +532,18 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `ui.getText(entity=self: Int)` → text: String | pure | ref | scripting-reference.html#ui-getText |
-| `ui.setText(entity=self: Int, text: String)` | exec | ref | scripting-reference.html#ui-setText |
-| `ui.getColor(entity=self: Int)` → color: Color | pure | ref | scripting-reference.html#ui-getColor |
-| `ui.setColor(entity=self: Int, color: Color)` | exec | ref | scripting-reference.html#ui-setColor |
-| `ui.getVisible(entity=self: Int)` → visible: Bool | pure | ref | scripting-reference.html#ui-getVisible |
-| `ui.setVisible(entity=self: Int, visible: Bool)` | exec | ref | scripting-reference.html#ui-setVisible |
-| `ui.getPosition(entity=self: Int)` → position: Vec2 | pure | ref | scripting-reference.html#ui-getPosition |
-| `ui.setPosition(entity=self: Int, position: Vec2)` | exec | ref | scripting-reference.html#ui-setPosition |
-| `ui.getSize(entity=self: Int)` → size: Vec2 | pure | ref | scripting-reference.html#ui-getSize |
-| `ui.setSize(entity=self: Int, size: Vec2)` | exec | ref | scripting-reference.html#ui-setSize |
-| `ui.setMaterialParam(entity=self: Int, name: String, value: Color)` → ok: Bool | exec | ref | scripting-reference.html#ui-setMaterialParam |
-| `ui.pointerOverUI()` → over: Bool | pure | ref | scripting-reference.html#ui-pointerOverUI |
+| `ui.getText(entity=self: Int)` → text: String | pure | ref | scripting-reference.html#ui-getText · hand |
+| `ui.setText(entity=self: Int, text: String)` | exec | ref | scripting-reference.html#ui-setText · hand |
+| `ui.getColor(entity=self: Int)` → color: Color | pure | ref | scripting-reference.html#ui-getColor · hand |
+| `ui.setColor(entity=self: Int, color: Color)` | exec | ref | scripting-reference.html#ui-setColor · hand |
+| `ui.getVisible(entity=self: Int)` → visible: Bool | pure | ref | scripting-reference.html#ui-getVisible · hand |
+| `ui.setVisible(entity=self: Int, visible: Bool)` | exec | ref | scripting-reference.html#ui-setVisible · hand |
+| `ui.getPosition(entity=self: Int)` → position: Vec2 | pure | ref | scripting-reference.html#ui-getPosition · hand |
+| `ui.setPosition(entity=self: Int, position: Vec2)` | exec | ref | scripting-reference.html#ui-setPosition · hand |
+| `ui.getSize(entity=self: Int)` → size: Vec2 | pure | ref | scripting-reference.html#ui-getSize · hand |
+| `ui.setSize(entity=self: Int, size: Vec2)` | exec | ref | scripting-reference.html#ui-setSize · hand |
+| `ui.setMaterialParam(entity=self: Int, name: String, value: Color)` → ok: Bool | exec | ref | scripting-reference.html#ui-setMaterialParam · hand |
+| `ui.pointerOverUI()` → over: Bool | pure | ref | scripting-reference.html#ui-pointerOverUI · hand |
 
 ### `datetime` — DateTime (9)
 
@@ -565,13 +565,13 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 |---|---|---|---|
 | `http.get(url: String)` → ticket: Int | exec | ref | scripting-reference.html#http-get · hand |
 | `http.post(url: String, contentType: String, body: String)` → ticket: Int | exec | ref | scripting-reference.html#http-post · hand |
-| `http.done(ticket: Int)` → done: Bool | pure | ref | scripting-reference.html#http-done |
-| `http.ok(ticket: Int)` → ok: Bool | pure | ref | scripting-reference.html#http-ok |
-| `http.status(ticket: Int)` → status: Int | pure | ref | scripting-reference.html#http-status |
-| `http.body(ticket: Int)` → body: String | pure | ref | scripting-reference.html#http-body |
-| `http.error(ticket: Int)` → error: String | pure | ref | scripting-reference.html#http-error |
-| `http.forget(ticket: Int)` | exec | ref | scripting-reference.html#http-forget |
-| `http.available()` → available: Bool | pure | ref | scripting-reference.html#http-available |
+| `http.done(ticket: Int)` → done: Bool | pure | ref | scripting-reference.html#http-done · hand |
+| `http.ok(ticket: Int)` → ok: Bool | pure | ref | scripting-reference.html#http-ok · hand |
+| `http.status(ticket: Int)` → status: Int | pure | ref | scripting-reference.html#http-status · hand |
+| `http.body(ticket: Int)` → body: String | pure | ref | scripting-reference.html#http-body · hand |
+| `http.error(ticket: Int)` → error: String | pure | ref | scripting-reference.html#http-error · hand |
+| `http.forget(ticket: Int)` | exec | ref | scripting-reference.html#http-forget · hand |
+| `http.available()` → available: Bool | pure | ref | scripting-reference.html#http-available · hand |
 
 ### `prefs` — Prefs (9)
 
@@ -633,12 +633,12 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
 | `db.open(path: String)` → handle: Int | exec | ref | scripting-reference.html#db-open · hand |
-| `db.close(handle: Int)` | exec | ref | scripting-reference.html#db-close |
-| `db.exec(handle: Int, sql: String, params: String)` → ok: Bool | exec | ref | scripting-reference.html#db-exec |
-| `db.query(handle: Int, sql: String, params: String)` → rows: String | exec | ref | scripting-reference.html#db-query |
-| `db.changes(handle: Int)` → rows: Int | pure | ref | scripting-reference.html#db-changes |
-| `db.lastInsertId(handle: Int)` → id: Int | pure | ref | scripting-reference.html#db-lastInsertId |
-| `db.lastError(handle: Int)` → error: String | pure | ref | scripting-reference.html#db-lastError |
+| `db.close(handle: Int)` | exec | ref | scripting-reference.html#db-close · hand |
+| `db.exec(handle: Int, sql: String, params: String)` → ok: Bool | exec | ref | scripting-reference.html#db-exec · hand |
+| `db.query(handle: Int, sql: String, params: String)` → rows: String | exec | ref | scripting-reference.html#db-query · hand |
+| `db.changes(handle: Int)` → rows: Int | pure | ref | scripting-reference.html#db-changes · hand |
+| `db.lastInsertId(handle: Int)` → id: Int | pure | ref | scripting-reference.html#db-lastInsertId · hand |
+| `db.lastError(handle: Int)` → error: String | pure | ref | scripting-reference.html#db-lastError · hand |
 
 ### `locomotion` — Locomotion (6)
 
@@ -688,22 +688,22 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `theme.set(themeAsset: String)` → ok: Bool | exec | ref | scripting-reference.html#theme-set |
-| `theme.setMode(mode: String)` | exec | ref | scripting-reference.html#theme-setMode |
-| `theme.getMode()` → mode: String | pure | ref | scripting-reference.html#theme-getMode |
-| `theme.getPreference()` → preference: String | pure | ref | scripting-reference.html#theme-getPreference |
-| `theme.setFontScale(scale: Float)` | exec | ref | scripting-reference.html#theme-setFontScale |
-| `theme.getFontScale()` → scale: Float | pure | ref | scripting-reference.html#theme-getFontScale |
+| `theme.set(themeAsset: String)` → ok: Bool | exec | ref | scripting-reference.html#theme-set · hand |
+| `theme.setMode(mode: String)` | exec | ref | scripting-reference.html#theme-setMode · hand |
+| `theme.getMode()` → mode: String | pure | ref | scripting-reference.html#theme-getMode · hand |
+| `theme.getPreference()` → preference: String | pure | ref | scripting-reference.html#theme-getPreference · hand |
+| `theme.setFontScale(scale: Float)` | exec | ref | scripting-reference.html#theme-setFontScale · hand |
+| `theme.getFontScale()` → scale: Float | pure | ref | scripting-reference.html#theme-getFontScale · hand |
 
 ### `dialog` — Dialog (5)
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `dialog.message(title: String, text: String, kind: Int)` | exec | ref | scripting-reference.html#dialog-message |
-| `dialog.confirm(title: String, text: String, affirmative: String, negative: String)` → confirmed: Bool | exec | ref | scripting-reference.html#dialog-confirm |
-| `dialog.openFile(filter: String)` → path: String | exec | ref | scripting-reference.html#dialog-openFile |
-| `dialog.saveFile(filter: String)` → path: String | exec | ref | scripting-reference.html#dialog-saveFile |
-| `dialog.pickFolder()` → path: String | exec | ref | scripting-reference.html#dialog-pickFolder |
+| `dialog.message(title: String, text: String, kind: Int)` | exec | ref | scripting-reference.html#dialog-message · hand |
+| `dialog.confirm(title: String, text: String, affirmative: String, negative: String)` → confirmed: Bool | exec | ref | scripting-reference.html#dialog-confirm · hand |
+| `dialog.openFile(filter: String)` → path: String | exec | ref | scripting-reference.html#dialog-openFile · hand |
+| `dialog.saveFile(filter: String)` → path: String | exec | ref | scripting-reference.html#dialog-saveFile · hand |
+| `dialog.pickFolder()` → path: String | exec | ref | scripting-reference.html#dialog-pickFolder · hand |
 
 ### `random` — Random (5)
 
@@ -729,11 +729,11 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `window.open(title: String, width: Int, height: Int)` → window: Int | exec | ref | scripting-reference.html#window-open |
-| `window.close(window: Int)` | exec | ref | scripting-reference.html#window-close |
-| `window.setTitle(window: Int, title: String)` | exec | ref | scripting-reference.html#window-setTitle |
-| `window.setSize(window: Int, width: Int, height: Int)` | exec | ref | scripting-reference.html#window-setSize |
-| `window.show(window: Int, widget: Ref)` | exec | ref | scripting-reference.html#window-show |
+| `window.open(title: String, width: Int, height: Int)` → window: Int | exec | ref | scripting-reference.html#window-open · hand |
+| `window.close(window: Int)` | exec | ref | scripting-reference.html#window-close · hand |
+| `window.setTitle(window: Int, title: String)` | exec | ref | scripting-reference.html#window-setTitle · hand |
+| `window.setSize(window: Int, width: Int, height: Int)` | exec | ref | scripting-reference.html#window-setSize · hand |
+| `window.show(window: Int, widget: Ref)` | exec | ref | scripting-reference.html#window-show · hand |
 
 ### `content` — Content (4)
 
@@ -766,9 +766,9 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `clipboard.getText()` → text: String | pure | ref | scripting-reference.html#clipboard-getText |
-| `clipboard.setText(text: String)` | exec | ref | scripting-reference.html#clipboard-setText |
-| `clipboard.hasText()` → has: Bool | pure | ref | scripting-reference.html#clipboard-hasText |
+| `clipboard.getText()` → text: String | pure | ref | scripting-reference.html#clipboard-getText · hand |
+| `clipboard.setText(text: String)` | exec | ref | scripting-reference.html#clipboard-setText · hand |
+| `clipboard.hasText()` → has: Bool | pure | ref | scripting-reference.html#clipboard-hasText · hand |
 
 ### `print` — Print (3)
 
@@ -776,7 +776,7 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 |---|---|---|---|
 | `print.toPdf(path: String, text: String, title: String)` → ok: Bool | exec | ref | scripting-reference.html#print-toPdf · hand |
 | `print.file(path: String)` → ok: Bool | exec | ref | scripting-reference.html#print-file · hand |
-| `print.available()` → available: Bool | pure | ref | scripting-reference.html#print-available |
+| `print.available()` → available: Bool | pure | ref | scripting-reference.html#print-available · hand |
 
 ### `process` — Process (3)
 
@@ -784,7 +784,7 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 |---|---|---|---|
 | `process.run(exe: String, args: String[], timeoutSeconds: Float)` → ok: Bool, exitCode: Int, out: String, err: String | exec | ref | scripting-reference.html#process-run · hand |
 | `process.openUrl(url: String)` → ok: Bool | exec | ref | scripting-reference.html#process-openUrl · hand |
-| `process.which(exe: String)` → path: String | pure | ref | scripting-reference.html#process-which |
+| `process.which(exe: String)` → path: String | pure | ref | scripting-reference.html#process-which · hand |
 
 ### `material` — Material (2)
 
@@ -801,7 +801,7 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `cursor.setVisible(show: Bool)` | exec | ref | scripting-reference.html#cursor-setVisible |
+| `cursor.setVisible(show: Bool)` | exec | ref | scripting-reference.html#cursor-setVisible · hand |
 
 ### `log` — Debug (1)
 

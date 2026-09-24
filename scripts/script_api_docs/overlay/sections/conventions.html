@@ -157,7 +157,9 @@ hit, other, px, py, pz, nx, ny, nz, dist, layer = \
               <code>scene.available</code>, and <code>process.run</code> takes one.
               HorizonCode and C++ handle these fine. The Lua and Python bridge does
               not yet translate lists: such a call currently returns a single
-              <code>0</code> or <code>""</code> instead of the list. These rows are
+              <code>0</code> or <code>""</code> instead of the list, and the list
+              argument of <code>process.run</code> only accepts a string, which it
+              then drops. These rows are
               marked <strong>list: HorizonCode/C++ only</strong> below. Until the bridge
               is fixed, use them from a HorizonCode graph.
             </p>
@@ -210,7 +212,13 @@ hit, other, px, py, pz, nx, ny, nz, dist, layer = \
             </table>
           </div>
           <p>
-            Dialogs and the clipboard need no permission.
+            Dialogs and the clipboard need no permission. A path the user picked
+            in a file dialog stands in for <em>Files outside the project</em>, but
+            only for the <code>fs.*</code> rows: <code>print.toPdf</code> and
+            <code>db.open</code> need the permission for every path, a relative one
+            inside the project included (build 7d49d44f). The log line about a
+            missing permission is written for the first refused call only; further
+            refusals of any row within the next ten seconds are not logged.
           </p>
 
           <h3 id="remote-calls">Remote calls take any arguments</h3>

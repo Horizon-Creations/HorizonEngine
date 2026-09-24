@@ -84,7 +84,7 @@
       "note": "Widgets are instances of Widget Designer assets. They live outside the entity world and are addressed by the widget id <code>createWidget</code> returns, not by an entity id. The rest of the widget API (lists, animation, popups, children) is <code>horizon.widget.*</code>.",
       "items": [
         { "name": "createWidget", "args": "assetPath", "returns": "widget", "twin": null,
-          "desc": "Instantiates the widget asset at the content-relative path and returns its id, <code>0</code> on failure. HorizonCode does the same with the <em>Create Widget</em> node." },
+          "desc": "Instantiates the widget asset at the content-relative path and returns its id, <code>0</code> on failure. The widget starts hidden; <code>showWidget</code> puts it on screen. HorizonCode does the same with the <em>Create Widget</em> node." },
         { "name": "destroyWidget", "args": "widget", "returns": "—", "twin": null,
           "desc": "Removes the widget instance." },
         { "name": "showWidget", "args": "widget", "returns": "—", "twin": null,

@@ -502,3 +502,100 @@ ignoriert; `seek` klemmt auf 0…Länge; `setBusVolume` legt Busse an. Partikel:
 zum letzten lebenden Partikel, `stop` weich, `burst` ≤ Max Particles lebend (10 lebend, Cap 30:
 500 → 20), startet einen fertigen Emitter neu. Animator: `setParam` mit `true` in Lua ein Fehler,
 Python 1; unbekannte Namen werden angelegt; doppelte Layernamen = erster; Gewicht geklemmt.
+
+## Nachtrag Schritt 11 (24.09.2026): UI, Widget, Cursor, Theme, Window, Dialog, Clipboard, App, Process, Print, Database, HTTP
+
+(Neuversuch von Schritt 7, der vor dem ersten Arbeitsschritt gestoppt worden war.)
+
+Handinhalt für 106 Ids: zwölf Gruppen-Einleitungen (`overlay/groups/ui|widget|cursor|theme|window|dialog|clipboard|app|process|print|db|http.html`),
+Notes an 67 Ids (davon `script_sig`/`script_returns` für `process.run`) und sechs Beispiele in
+Lua und Python (`level_clock`, `pause_dialog`, `theme_toggle`, `highscores`, `fetch_news`,
+`open_manual`). Grundlage war eine Wegwerf-Probe (`/tmp/he_probe79s11`) gegen `libHorizonScene`
+des Builds 7d49d44f (`build/` vom 23.09.): UI-Entities mit Text/Image/Button/Panel und einem
+geteilten UI-Material, ein Widget-Asset mit Panel, Text, VerticalBox und ListView samt Row- und
+Chip-Asset, ein Theme-Asset (gültig und kaputt), Sandbox-Wurzel, `HE_HIDDEN_WINDOW=1`,
+Berechtigungen erst aus, dann an, ein lokaler `python3 -m http.server` für 200/404/501 und
+`127.0.0.1:1` für eine abgelehnte Verbindung. Rund 150 Aufrufe aus Lua, die Kernfälle aus
+Python, beide gleich. Datei-Picker und `process.openUrl`/`print.file` mit Recht wurden bewusst
+nicht aufgerufen (Picker blockieren bis zu 5 min, die anderen öffnen Browser bzw. drucken).
+Die sechs Beispiele liefen wortgleich zu `notes.json` in beiden Sprachen mit ausgelösten
+Callbacks (onStart, onUpdate, onInputPressed); einzige Abweichung: `fetch_news` lief mit der
+lokalen statt der Beispiel-URL. Geprüft wurden die Wirkungen (Uhr 1:05 → rot unter 10 s →
+ausgeblendet; Dialog mit Cursor-Hook, `time.pause` und Schließen per `closeTopLayer`; Prefs
+überleben einen Neustart; Highscores 800/400/0; Schlagzeile, „HTTP 404", „Offline";
+Zwischenablage gesetzt, Dialogtext im Log). `coverage.py`: 582/582 **ref**, **hand** 428 → 526
+(die 428 enthielten schon 8 `perm`-Zeilen dieser Gruppen; alle 106 Ids haben jetzt Handinhalt).
+
+Beschreibungen an der Quelle korrigiert (Editor-Tooltip und Referenz); `registry.json` neu
+gedumpt, Diff genau diese sechs `doc`-Felder:
+
+- `widget.isVisible`: „A new widget starts visible" ist falsch, Widgets werden **versteckt**
+  angelegt (`WidgetManager.h:894`, Probe: `isVisible` direkt nach `createWidget` = false).
+  Auch `flat.json` (`createWidget`) sagt es jetzt.
+- `ui.getColor` / `ui.setColor`: Image-Tint, sonst Text-Farbe, sonst Button-Normalfarbe
+  (`ScriptApi.cpp:181`); andere Elemente ignorieren den Setter, der Getter liefert Weiß.
+- `ui.setMaterialParam`: schreibt das Material-**Asset** (siehe Befund unten).
+- `print.toPdf`: nannte die Berechtigung „Read and write files", die es nicht gibt; richtig ist
+  „Files outside the project" (`ProjectSettingsPanel.cpp:125`), und zwar für jeden Pfad.
+- `db.open`: nannte die Berechtigung gar nicht und versprach, ein Dialog-Pfad genüge.
+
+Dazu zwei veraltete Editor-Texte: „Network access" hieß im Panel und in der Hilfe noch
+„Reserved: nothing reads this yet", obwohl `http.get/post` das Recht lesen
+(`ProjectSettingsPanel.cpp:141`, `EditorHelp.cpp`). Die Hilfe zu „Files outside the project"
+nennt jetzt die Ausnahme Open Database / Write PDF. Beide Dateien mit den Flags des
+Editor-Targets per `-fsyntax-only` geprüft (plus Negativkontrolle), nicht gebaut.
+`EngineApi.h:1424` („reserved for http; nothing reads it yet") ist ebenfalls veraltet, aber
+nicht angefasst, weil der Header den ganzen Build neu anstößt.
+
+Querschnitt (`sections/conventions.html`): `#arrays` sagt jetzt, dass `process.run` die Liste
+nur als String annimmt und verwirft; `#permissions` nennt die Dialog-Ausnahme und die
+gedrosselte Log-Meldung.
+
+Engine-Befunde, dokumentiert (Callout bzw. Note) und im Hive gemeldet, **nicht behoben**:
+
+- **`app.*` und `window.*` sind aus Lua/Python auch im exportierten Spiel tot.** Die
+  Skript-Kontexte (`ScriptContext.cpp:81`, `PyScriptBackend.cpp:56`) übernehmen vom Host nur
+  `requestQuit`; `ScriptContext::HostServices` (`ScriptContext.h:222`) hat für Fenster, Menüs,
+  Tray, Notify und Autostart keine Felder. Nur das HorizonCode-`apiCtx()` in
+  `GameApplication.cpp:314` füllt sie. Wirkt aus Skripten: `app.quit` und `window.show`.
+  23 `app`-Rows und 4 `window`-Rows loggen „no … bound by the host", liefern 0/false oder
+  tun still nichts (`requestRedraw`)
+  (Probe: `app.size` 0,0, `window.open` 0, `notify` false).
+- **`process.run` übergibt aus Lua/Python keine Argumente.** Der Array-Pin `args` wird als
+  String gelesen: Lua-Tabelle → *bad argument #2 (string expected, got table)*, Python-Liste →
+  `TypeError`, ein String wird angenommen und verworfen (`echo "a b"` gibt nur `\n` aus). Fall
+  des Array-Befunds aus Schritt 2, hier mit der Folge „nur argumentlose Programme".
+- **`db.open` und `print.toPdf` brauchen „Files outside the project" für jeden Pfad**, auch
+  relativ im Saved-Ordner (`EngineApi.cpp:3748`, `:3512` prüfen vor `fs::resolved`), und ein im
+  Dialog gewählter Pfad ersetzt das Recht nicht (Probe mit `fs::grantPath`: `fs.writeText`
+  true, `db.open` 0, `toPdf` false). Panel-Hinweis, Hilfe und `dialog.openFile` versprechen das
+  Gegenteil. Ob Code oder Text falsch ist, ist eine Entscheidung; dokumentiert ist das
+  Verhalten.
+- **`ui.setMaterialParam` schreibt das geteilte Asset** (`ScriptApi.cpp:258`), wie
+  `material.setParam` aus Schritt 6. Probe: Asset-Wert 0.25 → 0.80.
+- **Die Berechtigungs-Warnung ist über alle Rows gedrosselt.** `HE_LOG_THROTTLE` hält den
+  Zeitstempel als `static` an der einen Stelle in `perm::allowed` (`EngineApi.cpp:2282`); von
+  fünf verweigerten Aufrufen in Folge erscheint nur der erste im Log. Der Header verspricht
+  „logs once per row name".
+- **`db.exec` führt von mehreren Anweisungen nur die erste aus** und meldet `true`
+  (`sqlite3_prepare_v2` ohne Tail-Schleife). **`db.lastInsertId`** klemmt über 2³¹−1
+  (3000000001 → 2147483647, `Int`-Pin).
+- **`widget.animate*` meldet `ok` für eine unbekannte Eigenschaft** (nur das Element wird
+  geprüft), unbekannte Easing-Namen laufen still als Linear.
+
+Verhalten, gemessen und in Einleitung/Notes: `ui.*` ohne passende Komponente still; Farben vier
+Zahlen (drei: *bad argument #5* / `IndexError`), fehlendes Bool in Lua = false; negative Größen
+bleiben. `pointerOverUI` nur Widget-Schicht, wahr solange ein Modal offen ist
+(`WidgetManager.cpp:4037`). Theme: Modusnamen exakt („dark" ignoriert), ohne Desktop-Antwort
+Dark, Schriftskala 0.5…3. Widgets: Ref ≠ Widget-Id, Widget 0 → false, negative Listenanzahl → 0,
+Auswahl über Anzahl hinaus ändert nichts und meldet true, Schließen = Verstecken,
+`restoreOriginalState` zählt die Eigenschaften. Dialog im Hidden-Modus: `message` ins Log,
+`confirm` false. Zwischenablage ohne Video-Subsystem leer/fehlschlagend. `process.run`: Exit −1
+wenn nicht startbar, 0 s Timeout = 30 s. PDF: A4, Courier 10, 80×60, nur Latin-1 (€ → ?).
+DB: `":memory:"` wird eine Datei, `..` abgewiesen, ATTACH „not authorized", BLOB → null,
+REAL 12 → 12.0, zu wenige Parameter → NULL, Nicht-Array-Params ignoriert, unbekanntes Handle
+`exec` false ohne `lastError`; `horizon.json.set*` überschreiben Array-Plätze, hängen aber
+nichts an (deshalb die Vorlage `'["", 0]'` im Lua-Beispiel). HTTP: auch `http://`, 404 = ok
+true, abgelehnt = ok false/Status 0/„Could not connect to the server.", `post` an
+SimpleHTTP → 501, nach 33 weiteren Anfragen ist die erste vergessen, eine Anfrage nach der
+anderen mit 5 s Timeout.

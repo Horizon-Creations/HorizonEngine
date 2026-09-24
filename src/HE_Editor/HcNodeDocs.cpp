@@ -442,10 +442,12 @@ namespace
 	  "Replaces a UI Text element's text. The usual way a score, a timer or a "
 	  "subtitle reaches the screen." },
 	{ "ui.getColor",
-	  "The element's colour, alpha included." },
+	  "The element's colour, alpha included: an Image's tint, else a Text's colour, "
+	  "else a Button's normal colour. White for an element with none of the three." },
 	{ "ui.setColor",
-	  "Sets the element's colour. On a Text element this is the text itself; on an "
-	  "Image element it is the tint over the texture." },
+	  "Sets the element's colour. On an Image element it is the tint over the "
+	  "texture, on a Text element the text itself, on a Button its normal colour. "
+	  "Any other element ignores it." },
 	{ "ui.getVisible",
 	  "Is this UI element currently shown?" },
 	{ "ui.setVisible",
@@ -462,9 +464,12 @@ namespace
 	  "Resizes a UI element. A stretched anchor overrides this on the axes it "
 	  "stretches." },
 	{ "ui.setMaterialParam",
-	  "Overrides a material parameter on a UI element that uses a material — a "
-	  "progress bar's fill, a shader-driven panel. Ok is false when the element "
-	  "has no material or the parameter is not declared." },
+	  "Sets a material parameter for a UI Image element that uses a material — a "
+	  "progress bar's fill, a shader-driven panel. It writes the MATERIAL ASSET, "
+	  "not the element: every element and entity using the same material changes "
+	  "with it, so give an element that needs its own value its own material. Ok "
+	  "is false when the element has no material or the parameter is not "
+	  "declared." },
 	{ "ui.pointerOverUI",
 	  "Is the pointer over any UI right now? The guard to put in front of a click "
 	  "that acts on the world, so a press on a button does not also shoot." },
@@ -477,8 +482,9 @@ namespace
 	  "Which widget draws over which: higher is nearer the front. For keeping a "
 	  "pause menu above a HUD. Takes the Widget from a Create Widget node." },
 	{ "widget.isVisible",
-	  "Is this widget on screen? A new widget starts visible, so this is false "
-	  "only after Hide Widget, or for a Widget that was destroyed." },
+	  "Is this widget on screen? A new widget starts hidden, so this is false "
+	  "until Show Widget (or Show Modal, Open Popup), again after Hide Widget or "
+	  "a closed dialog, and for a Widget that was destroyed." },
 	{ "widget.callFunction",
 	  "Calls a public function on the widget's own graph by name — the way the "
 	  "outside talks to a screen. Ok is false when the widget or the function is "
@@ -1349,10 +1355,12 @@ namespace
 
 	// ── Printing ─────────────────────────────────────────────────────────────
 	{ "print.toPdf",
-	  "Writes text as a PDF, at a path that follows the same rules as the file "
-	  "nodes. It is set in Courier and laid out as a page of text: lines break "
-	  "at your newlines and at the page width, pages break when they are full. "
-	  "Needs the project's \"Read and write files\" permission." },
+	  "Writes text as a PDF: a relative path lands in the project's Saved folder, "
+	  "like the file nodes. It is set in Courier and laid out as a page of text: "
+	  "lines break at your newlines and at the page width, pages break when they "
+	  "are full; characters outside Latin-1 print as '?'. Needs the project's "
+	  "\"Files outside the project\" permission for EVERY path, a relative one "
+	  "included, and a path picked in a file dialog does not stand in for it." },
 	{ "print.file",
 	  "Hands a file to the system's printing. Ok means it was handed over, not "
 	  "that it came out of a printer — what the queue does next is between the "
@@ -1364,13 +1372,16 @@ namespace
 	  "piece of work." },
 
 	// ── Database ─────────────────────────────────────────────────────────────
-	// Open needs the project's "Read and write files" permission; a database is
-	// a file. The readers do not.
+	// Open needs the project's "Files outside the project" permission, for every
+	// path (EngineApi.cpp db::open checks it before resolving); a database is a
+	// file. The readers do not.
 	{ "db.open",
 	  "Opens a SQLite database file, creating it if it is not there yet, and "
-	  "gives you a handle for the other Database nodes. The path follows the "
-	  "same rules as the file nodes: relative to your project, or somewhere the "
-	  "user picked in a dialog. 0 means it did not open." },
+	  "gives you a handle for the other Database nodes. A relative path lands in "
+	  "the project's Saved folder, like the file nodes. Needs the project's "
+	  "\"Files outside the project\" permission for EVERY path, a relative one "
+	  "included, and unlike the file nodes a path picked in a dialog does not "
+	  "stand in for it. 0 means it did not open." },
 	{ "db.close",
 	  "Closes a database. They also all close when the application does." },
 	{ "db.exec",

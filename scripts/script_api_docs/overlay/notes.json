@@ -87,14 +87,107 @@
   "debug.box": {
     "script_sig": "box(minX, minY, minZ, _, maxX, maxY, maxZ, _, r, g, b, _, seconds)"
   },
-  "app.setAutostart": { "perm": "Run other programs" },
-  "process.run": { "perm": "Run other programs" },
-  "process.openUrl": { "perm": "Run other programs" },
-  "print.file": { "perm": "Run other programs" },
-  "print.toPdf": { "perm": "Files outside the project" },
-  "db.open": { "perm": "Files outside the project" },
-  "http.get": { "perm": "Network access" },
+  "ui.setText": {
+    "note": "Only a UI Text element takes it; on any other element it does nothing.",
+    "examples": {"file": "level_clock", "lua": "local M = {}\nlocal LIMIT = 90   -- seconds for the level\n\n-- This script sits on the HUD's UI Text entity.\nfunction M.onStart(self)\n    self.left = LIMIT\nend\n\nfunction M.onUpdate(self, dt)\n    if self.left <= 0 then return end\n    self.left = math.max(0, self.left - dt)\n    local e = self.entityId\n    horizon.ui.setText(e, string.format(\"%d:%02d\", self.left // 60, math.floor(self.left) % 60))\n    if self.left < 10 then\n        horizon.ui.setColor(e, 1, 0.25, 0.2, 1)   -- a colour is four numbers\n    end\n    if self.left == 0 then\n        horizon.ui.setVisible(e, false)\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nLIMIT = 90  # seconds for the level\n\n# This script sits on the HUD's UI Text entity.\nclass LevelClock(horizon.Behavior):\n    def on_start(self):\n        self.left = LIMIT\n\n    def on_update(self, dt):\n        if self.left <= 0:\n            return\n        self.left = max(0.0, self.left - dt)\n        e = self.entity_id\n        horizon.ui.setText(e, \"%d:%02d\" % (self.left // 60, int(self.left) % 60))\n        if self.left < 10:\n            horizon.ui.setColor(e, 1, 0.25, 0.2, 1)   # a colour is four numbers\n        if self.left == 0:\n            horizon.ui.setVisible(e, False)\n"}
+  },
+  "ui.getColor": { "note": "<code>(1, 1, 1, 1)</code> for an element with no Image, Text or Button." },
+  "ui.setColor": { "note": "Four numbers: <code>setColor(e, r, g, b, a)</code>. Image tint first, else Text colour, else a Button's normal colour; any other element ignores it." },
+  "ui.setVisible": { "note": "In Lua a missing <code>visible</code> reads as <code>false</code> and hides the element." },
+  "ui.setSize": { "note": "Not checked: a negative size is stored as it is." },
+  "ui.setMaterialParam": { "note": "The value is four numbers. <strong>Known issue:</strong> it writes the material asset, so every element sharing that material changes (see the <a href=\"#ui\">group notes</a>)." },
+  "ui.pointerOverUI": { "note": "Counts widgets only, and is <code>true</code> the whole time a widget dialog is open." },
+  "widget.isVisible": { "note": "<code>false</code> right after <code>createWidget</code>, and for a child or row reference, which is not a widget id." },
+  "widget.callFunction": { "note": "Only a widget with a HorizonCode graph has functions to call." },
+  "widget.addChild": { "note": "The reference is for HorizonCode's Set/Call External; from a script it is good for <code>removeChild</code>." },
+  "widget.setListCount": { "note": "A negative count becomes 0. Rows are filled by the row widget's own graph: a script gets no On Row Bind." },
+  "widget.listRow": { "note": "A reference, not a widget id; a script has no Set External to write into it." },
+  "widget.setListSelected": { "note": "An index at or past the count changes nothing and still answers <code>true</code>. A script gets no On Selection Changed." },
+  "widget.animate": { "note": "<code>ok</code> is <code>true</code> for a property name the element does not have (nothing moves), and an unknown easing runs as <code>\"Linear\"</code>." },
+  "widget.animateColor": { "note": "The colour is four numbers, as everywhere." },
+  "widget.animateVec2": { "note": "The point is two numbers." },
+  "widget.playAnimation": { "note": "A clip name the widget does not carry answers <code>false</code>. Directions: <code>\"Forward\"</code>, <code>\"Backward\"</code>, <code>\"Ping Pong\"</code>." },
+  "widget.childRef": { "note": "0 for an element that is not a component slot." },
+  "widget.showModal": {
+    "note": "A script gets no On Dismissed: ask <code>isVisible</code> to notice that the dialog was closed.",
+    "examples": {"file": "pause_dialog", "lua": "local M = {}\nlocal MENU = \"UI/pause_menu.hasset\"   -- a widget with an element called \"Panel\"\n\nfunction M.onStart(self)\n    self.menu = horizon.createWidget(MENU)   -- starts hidden; 0 if the asset is missing\nend\n\nfunction M.onInputPressed(self, name)\n    if name ~= \"Pause\" or self.paused or self.menu == 0 then return end\n    self.paused = true\n    horizon.time.pause()\n    horizon.showCursor()\n    -- A dialog: dims the game, takes the input, closes on Escape or Back.\n    horizon.widget.showModal(self.menu)\n    horizon.widget.animate(self.menu, \"Panel\", \"Render Opacity\", 0, 0, \"Linear\")\n    horizon.widget.animate(self.menu, \"Panel\", \"Render Opacity\", 1, 0.2, \"Out Quad\")\nend\n\nfunction M.onUpdate(self, dt)\n    -- A script gets no On Dismissed: notice the close by asking.\n    if self.paused and not horizon.widget.isVisible(self.menu) then\n        self.paused = false\n        horizon.time.resume()\n        horizon.hideCursor()\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nMENU = \"UI/pause_menu.hasset\"   # a widget with an element called \"Panel\"\n\nclass PauseMenu(horizon.Behavior):\n    paused = False\n\n    def on_start(self):\n        self.menu = horizon.createWidget(MENU)   # starts hidden; 0 if the asset is missing\n\n    def on_input_pressed(self, name):\n        if name != \"Pause\" or self.paused or self.menu == 0:\n            return\n        self.paused = True\n        horizon.time.pause()\n        horizon.showCursor()\n        # A dialog: dims the game, takes the input, closes on Escape or Back.\n        horizon.widget.showModal(self.menu)\n        horizon.widget.animate(self.menu, \"Panel\", \"Render Opacity\", 0, 0, \"Linear\")\n        horizon.widget.animate(self.menu, \"Panel\", \"Render Opacity\", 1, 0.2, \"Out Quad\")\n\n    def on_update(self, dt):\n        # A script gets no On Dismissed: notice the close by asking.\n        if self.paused and not horizon.widget.isVisible(self.menu):\n            self.paused = False\n            horizon.time.resume()\n            horizon.hideCursor()\n"}
+  },
+  "widget.closeTopLayer": { "note": "<code>false</code> when nothing was open." },
+  "theme.setMode": {
+    "note": "The names are exact: <code>\"dark\"</code> is ignored.",
+    "examples": {"file": "theme_toggle", "lua": "local M = {}\n-- Store the PREFERENCE, not the mode: System is a rule that follows the desktop.\nlocal NEXT = { System = \"Light\", Light = \"Dark\", Dark = \"System\" }\n\nfunction M.onStart(self)\n    horizon.theme.setMode(horizon.prefs.getString(\"theme\", \"System\"))\n    horizon.theme.setFontScale(horizon.prefs.getNumber(\"textScale\", 1))\nend\n\nfunction M.onInputPressed(self, name)\n    if name == \"CycleTheme\" then\n        local pref = NEXT[horizon.theme.getPreference()]\n        horizon.theme.setMode(pref)\n        horizon.prefs.setString(\"theme\", pref)\n        horizon.log(\"theme \" .. pref .. \", showing \" .. horizon.theme.getMode())\n    elseif name == \"BiggerText\" or name == \"SmallerText\" then\n        local step = name == \"BiggerText\" and 0.25 or -0.25\n        horizon.theme.setFontScale(horizon.theme.getFontScale() + step)   -- kept in 0.5..3\n        horizon.prefs.setNumber(\"textScale\", horizon.theme.getFontScale())\n    end\nend\n\nreturn M\n", "python": "import horizon\n\n# Store the PREFERENCE, not the mode: System is a rule that follows the desktop.\nNEXT = {\"System\": \"Light\", \"Light\": \"Dark\", \"Dark\": \"System\"}\n\nclass ThemeToggle(horizon.Behavior):\n    def on_start(self):\n        horizon.theme.setMode(horizon.prefs.getString(\"theme\", \"System\"))\n        horizon.theme.setFontScale(horizon.prefs.getNumber(\"textScale\", 1))\n\n    def on_input_pressed(self, name):\n        if name == \"CycleTheme\":\n            pref = NEXT[horizon.theme.getPreference()]\n            horizon.theme.setMode(pref)\n            horizon.prefs.setString(\"theme\", pref)\n            horizon.log(\"theme %s, showing %s\" % (pref, horizon.theme.getMode()))\n        elif name in (\"BiggerText\", \"SmallerText\"):\n            step = 0.25 if name == \"BiggerText\" else -0.25\n            horizon.theme.setFontScale(horizon.theme.getFontScale() + step)   # kept in 0.5..3\n            horizon.prefs.setNumber(\"textScale\", horizon.theme.getFontScale())\n"}
+  },
+  "theme.getMode": { "note": "Dark where the desktop reports no preference." },
+  "theme.setFontScale": { "note": "Clamped to 0.5 … 3." },
+  "window.open": { "note": "From Lua/Python always 0, see the <a href=\"#window\">group notes</a>. A width or height of 0 or less opens at 640 × 480." },
+  "window.close": { "note": "From Lua/Python this only logs, see the <a href=\"#window\">group notes</a>." },
+  "window.setTitle": { "note": "From Lua/Python this only logs, see the <a href=\"#window\">group notes</a>. Window 0 is <code>app.setTitle</code>." },
+  "window.setSize": { "note": "From Lua/Python this only logs, see the <a href=\"#window\">group notes</a>. Window 0 is <code>app.setSize</code>." },
+  "window.show": { "note": "Works from scripts, and shows the widget as well." },
+  "dialog.message": { "note": "Kind 1 is a warning, 2 an error, anything else information. A hidden run writes the text to the log instead." },
+  "dialog.confirm": { "note": "A hidden run answers <code>false</code>." },
+  "dialog.openFile": { "note": "The pick opens the path to the <code>fs</code> rows, not to <code>db.open</code> or <code>print.toPdf</code>." },
+  "dialog.pickFolder": { "note": "The pick opens the folder to the <code>fs</code> rows, not to <code>db.open</code> or <code>print.toPdf</code>." },
+  "app.quit": { "note": "The one <code>app</code> row that works from Lua and Python." },
+  "app.setTitle": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.setSize": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.minimize": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.maximize": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.showTray": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.hideTray": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.addTrayItem": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.clearTrayMenu": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.addMenu": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.addMenuItem": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.addMenuSeparator": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.clearMenuBar": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.setMenuItemEnabled": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.setMenuItemChecked": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.requestRedraw": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.size": { "note": "From Lua/Python always 0, 0, see the <a href=\"#app\">group notes</a>." },
+  "app.isMaximized": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.menuItemEnabled": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.menuItemChecked": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.notifyAvailable": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.autostart": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.notify": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.setAutostart": {
+    "perm": "Run other programs",
+    "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>."
+  },
+  "process.run": {
+    "perm": "Run other programs",
+    "script_sig": "run(exe, argsIgnored, timeoutSeconds)",
+    "script_returns": "ok, exitCode, out, err",
+    "note": "<strong>Known issue:</strong> from Lua/Python the arguments are not passed, see the <a href=\"#process\">group notes</a>. A program that cannot be started gives exit code −1."
+  },
+  "process.openUrl": {
+    "perm": "Run other programs",
+    "examples": {"file": "open_manual", "lua": "local M = {}\nlocal MANUAL = \"https://example.com/manual/\"\n\nfunction M.onInputPressed(self, name)\n    if name ~= \"Help\" then return end\n    -- openUrl needs \"Run other programs\". Without it, hand the address over.\n    if horizon.process.openUrl(MANUAL) then return end\n    horizon.clipboard.setText(MANUAL)\n    horizon.dialog.message(\"Manual\", \"The manual's address is on your clipboard:\\n\" .. MANUAL, 0)\nend\n\nreturn M\n", "python": "import horizon\n\nMANUAL = \"https://example.com/manual/\"\n\nclass OpenManual(horizon.Behavior):\n    def on_input_pressed(self, name):\n        if name != \"Help\":\n            return\n        # openUrl needs \"Run other programs\". Without it, hand the address over.\n        if horizon.process.openUrl(MANUAL):\n            return\n        horizon.clipboard.setText(MANUAL)\n        horizon.dialog.message(\"Manual\", \"The manual's address is on your clipboard:\\n\" + MANUAL, 0)\n"}
+  },
+  "print.toPdf": {
+    "perm": "Files outside the project",
+    "note": "Needed even for a relative path. Only Latin-1 characters survive, others print as <code>?</code>."
+  },
+  "print.file": {
+    "perm": "Run other programs",
+    "note": "Uses <code>lp</code>; <code>false</code> on Windows and for a missing file."
+  },
+  "db.open": {
+    "perm": "Files outside the project",
+    "note": "Needed even for a relative path; a path picked in a dialog does not replace it (see the <a href=\"#db\">group notes</a>)."
+  },
+  "db.exec": { "note": "Runs only the first statement of several, and still answers <code>true</code>." },
+  "db.query": {
+    "examples": {"file": "highscores", "lua": "local M = {}\nlocal PLAYER = \"Player 1\"\n\nfunction M.onStart(self)\n    -- Lands in the project's Saved folder, but needs the \"Files outside the\n    -- project\" permission all the same (see the group notes).\n    self.db = horizon.db.open(\"scores.db\")\n    if self.db ~= 0 then\n        horizon.db.exec(self.db, \"CREATE TABLE IF NOT EXISTS scores(name TEXT, points INTEGER)\", \"\")\n    end\nend\n\nfunction M.onInputPressed(self, name)\n    if name ~= \"LevelDone\" or self.db == 0 then return end\n    local points = math.max(0, 1000 - math.floor(horizon.time.elapsed() * 10))\n    -- Values travel as a JSON array behind the ?s, never pasted into the SQL.\n    -- json.set* can overwrite array slots but not add them, so start from two.\n    local params = horizon.json.setNumber(horizon.json.setString('[\"\", 0]', \"[0]\", PLAYER), \"[1]\", points)\n    if not horizon.db.exec(self.db, \"INSERT INTO scores(name, points) VALUES(?, ?)\", params) then\n        horizon.log(\"scores: \" .. horizon.db.lastError(self.db))\n        return\n    end\n    local rows = horizon.db.query(self.db,\n        \"SELECT name, points FROM scores ORDER BY points DESC LIMIT 5\", \"\")\n    for i = 0, horizon.json.count(rows, \"\") - 1 do\n        horizon.log(string.format(\"%d. %s  %d\", i + 1,\n            horizon.json.getString(rows, \"[\" .. i .. \"].name\", \"?\"),\n            horizon.json.getNumber(rows, \"[\" .. i .. \"].points\", 0)))\n    end\nend\n\nreturn M\n", "python": "import horizon\nimport json\n\nPLAYER = \"Player 1\"\n\nclass Highscores(horizon.Behavior):\n    def on_start(self):\n        # Lands in the project's Saved folder, but needs the \"Files outside the\n        # project\" permission all the same (see the group notes).\n        self.db = horizon.db.open(\"scores.db\")\n        if self.db:\n            horizon.db.exec(self.db, \"CREATE TABLE IF NOT EXISTS scores(name TEXT, points INTEGER)\", \"\")\n\n    def on_input_pressed(self, name):\n        if name != \"LevelDone\" or not self.db:\n            return\n        points = max(0, 1000 - int(horizon.time.elapsed() * 10))\n        # Values travel as a JSON array behind the ?s, never pasted into the SQL.\n        if not horizon.db.exec(self.db, \"INSERT INTO scores(name, points) VALUES(?, ?)\",\n                               json.dumps([PLAYER, points])):\n            horizon.log(\"scores: \" + horizon.db.lastError(self.db))\n            return\n        rows = json.loads(horizon.db.query(\n            self.db, \"SELECT name, points FROM scores ORDER BY points DESC LIMIT 5\", \"\"))\n        for i, row in enumerate(rows, 1):\n            horizon.log(\"%d. %s  %d\" % (i, row[\"name\"], row[\"points\"]))\n"}
+  },
+  "db.lastInsertId": { "note": "Ids above 2 147 483 647 read back as 2 147 483 647." },
+  "http.get": {
+    "perm": "Network access",
+    "examples": {"file": "fetch_news", "lua": "local M = {}\nlocal URL = \"https://example.com/news.json\"   -- answers {\"headline\": \"...\"}\n\n-- This script sits on a UI Text entity; the headline goes there.\nfunction M.onStart(self)\n    self.ticket = horizon.http.get(URL)   -- 0: no \"Network access\" permission\n    horizon.ui.setText(self.entityId, self.ticket ~= 0 and \"Loading...\" or \"\")\nend\n\nfunction M.onUpdate(self, dt)\n    local t = self.ticket\n    -- A script gets no On Http Response: ask until the ticket is answered.\n    if t == 0 or not horizon.http.done(t) then return end\n    self.ticket = 0\n    if not horizon.http.ok(t) then                    -- never reached the server\n        horizon.ui.setText(self.entityId, \"Offline\")\n        horizon.log(\"news: \" .. horizon.http.error(t))\n    elseif horizon.http.status(t) ~= 200 then         -- reached it, and it said no\n        horizon.ui.setText(self.entityId, \"\")\n        horizon.log(\"news: HTTP \" .. horizon.http.status(t))\n    else\n        local body = horizon.http.body(t)\n        horizon.ui.setText(self.entityId, horizon.json.getString(body, \"headline\", \"\"))\n    end\n    horizon.http.forget(t)\nend\n\nreturn M\n", "python": "import horizon\n\nURL = \"https://example.com/news.json\"   # answers {\"headline\": \"...\"}\n\n# This script sits on a UI Text entity; the headline goes there.\nclass FetchNews(horizon.Behavior):\n    def on_start(self):\n        self.ticket = horizon.http.get(URL)   # 0: no \"Network access\" permission\n        horizon.ui.setText(self.entity_id, \"Loading...\" if self.ticket else \"\")\n\n    def on_update(self, dt):\n        t = self.ticket\n        # A script gets no On Http Response: ask until the ticket is answered.\n        if t == 0 or not horizon.http.done(t):\n            return\n        self.ticket = 0\n        if not horizon.http.ok(t):                     # never reached the server\n            horizon.ui.setText(self.entity_id, \"Offline\")\n            horizon.log(\"news: \" + horizon.http.error(t))\n        elif horizon.http.status(t) != 200:            # reached it, and it said no\n            horizon.ui.setText(self.entity_id, \"\")\n            horizon.log(\"news: HTTP %d\" % horizon.http.status(t))\n        else:\n            body = horizon.http.body(t)\n            horizon.ui.setText(self.entity_id, horizon.json.getString(body, \"headline\", \"\"))\n        horizon.http.forget(t)\n"}
+  },
   "http.post": { "perm": "Network access" },
+  "http.done": { "note": "<code>false</code> again once the answer is forgotten or pushed out by 32 newer ones." },
   "net.callServer": {
     "script_sig": "callServer(entity, name, …)",
     "script_returns": "ok: bool",
