@@ -40,6 +40,7 @@ add_executable(he_tests
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
+    test_world_preview_backends.cpp
     test_gi_bvh.cpp
     test_undo.cpp
     test_editor_selection.cpp

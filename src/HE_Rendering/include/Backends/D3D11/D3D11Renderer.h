@@ -33,6 +33,16 @@ public:
     // into a fresh pair at the requested size and read back, nothing is presented.
     bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
                            std::vector<uint8_t>& rgba) override;
+    // An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
+    // viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h.
+    // Returns the target's ID3D11ShaderResourceView*.
+    void* RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+                             uint32_t width, uint32_t height,
+                             const EditorCameraOverride& camera,
+                             const glm::vec3& origin = glm::vec3(0.0f),
+                             const WorldPreviewEnv& env = {},
+                             glm::mat4* outViewProj = nullptr,
+                             uint32_t slot = 0) override;
 
     // [blind] added D3D11 sky+IBL+debuglines parity
     void SetDebugLines(const std::vector<DebugLine>& lines) override;

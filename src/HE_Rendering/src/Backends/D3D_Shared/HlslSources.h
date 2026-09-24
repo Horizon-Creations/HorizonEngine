@@ -884,4 +884,70 @@ void GiProbeCS(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
 }
 )HLSL";
 
+// ─── World-preview pixel shaders (IRenderer::RenderWorldPreview) ─────────────
+// Ports of GL's kMeshPreviewFS / kSkelPreviewFS: the preview's own fixed
+// lighting — no shadow map, SSAO, IBL or fog is bound in a preview target —
+// with the same numbers, so a mesh viewer shows the same picture on every
+// backend. Paired with the backend's scene VS (static) and VSMainSkinned
+// (skinned), whose VSOut this repeats; b0 is their PerObject block (color.a =
+// has-texture, pbr.xy = metallic/roughness), b1 the preview's light.
+// uSun.w > 0 arms the sun (xyz points TOWARD it); w == 0 keeps the studio
+// light the thumbnails were always rendered with.
+// The albedo register is a macro because the two backends' root layouts put it
+// in different places; D3D11 takes the default.
+inline constexpr const char* kWorldPreviewPSHLSL = R"HLSL(
+#ifndef HE_PREVIEW_TEX_REG
+#define HE_PREVIEW_TEX_REG t0
+#endif
+cbuffer PerObject : register(b0)
+{
+    float4x4 uMVP;
+    float4x4 uModel;
+    float4   uColor;    // rgb = base color, a = hasTexture (0/1)
+    float4   uPBR;      // x = metallic, y = roughness
+};
+cbuffer PreviewLight : register(b1)
+{
+    float4 uCamPos;     // xyz
+    float4 uSun;        // xyz toward the light, w > 0 = armed
+    float4 uSunColor;   // rgb
+    float4 uAmbient;    // rgb
+};
+Texture2D    uPreviewTex  : register(HE_PREVIEW_TEX_REG);
+SamplerState uPreviewSamp : register(s0);
+struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; float2 uv : TEXCOORD2; };
+
+float3 previewAlbedo(float2 uv)
+{
+    return uColor.a > 0.5 ? uPreviewTex.Sample(uPreviewSamp, uv).rgb * uColor.rgb : uColor.rgb;
+}
+
+float4 PSPreviewMesh(VSOut i) : SV_Target
+{
+    bool   lit = uSun.w > 0.0;
+    float3 L   = lit ? normalize(uSun.xyz) : normalize(float3(0.45, 0.75, 0.55));
+    float3 lc  = lit ? uSunColor.rgb : float3(1.0, 1.0, 1.0);
+    float3 amb = lit ? uAmbient.rgb  : float3(0.32, 0.32, 0.32);
+    float3 N = normalize(i.normal);
+    float3 V = normalize(uCamPos.xyz - i.worldPos);
+    float3 H = normalize(L + V);
+    float diff  = max(dot(N, L), 0.0);
+    float rough = clamp(uPBR.y, 0.05, 1.0);
+    float spec  = pow(max(dot(N, H), 0.0), lerp(128.0, 8.0, rough))
+                * (1.0 - rough) * lerp(0.25, 1.0, saturate(uPBR.x));
+    float3 lightIn = amb + lc * (lit ? diff : 0.68 * diff);
+    return float4(previewAlbedo(i.uv) * lightIn + spec * lc, 1.0);
+}
+
+float4 PSPreviewSkinned(VSOut i) : SV_Target
+{
+    bool   lit = uSun.w > 0.0;
+    float3 L   = lit ? normalize(uSun.xyz) : normalize(float3(0.45, 0.75, 0.55));
+    float3 lc  = lit ? uSunColor.rgb : float3(1.0, 1.0, 1.0);
+    float3 amb = lit ? uAmbient.rgb  : float3(0.35, 0.35, 0.35);
+    float diff = max(dot(normalize(i.normal), L), 0.0);
+    return float4(previewAlbedo(i.uv) * (amb + lc * (lit ? diff : 0.65 * diff)), 1.0);
+}
+)HLSL";
+
 } // namespace HE::hlsl

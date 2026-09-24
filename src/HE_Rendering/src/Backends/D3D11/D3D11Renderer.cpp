@@ -30,6 +30,7 @@
 #endif
 #include <HorizonRendering/LightPacking.h>    // GPU light window + shadow-mask lights
 #include <HorizonRendering/ClipSpace.h>       // GL depth (-1..1) → D3D depth (0..1)
+#include <HorizonRendering/WorldPreviewGrid.h> // RenderWorldPreview: grid, background, dump
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
 #include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
@@ -1475,6 +1476,28 @@ struct D3D11RendererImpl
     ComPtr<ID3D11InputLayout>   debugIL;
     bool debugReady = false;
     std::vector<DebugLine> m_debugLines;
+
+    // ── World preview (RenderWorldPreview) ───────────────────────────────
+    // One target set per slot, as on GL/Metal: the asset tabs share slot 0,
+    // each secondary Scene viewport has its own, because several of them draw
+    // in the same frame and ImGui samples every one of them later. HDR colour
+    // (the sky and a sun at 2.2 run past 1.0) resolved through the scene's
+    // tonemap into the RGBA8 texture ImGui shows. The vertex side is the
+    // scene's own (vs / skinnedVS); only the two small pixel shaders and the
+    // light cbuffer are the preview's.
+    struct WorldPreviewTarget
+    {
+        ComPtr<ID3D11Texture2D>          hdrTex, ldrTex, depthTex;
+        ComPtr<ID3D11RenderTargetView>   hdrRTV, ldrRTV;
+        ComPtr<ID3D11ShaderResourceView> hdrSRV, ldrSRV;
+        ComPtr<ID3D11DepthStencilView>   dsv;
+        int w = 0, h = 0;
+    };
+    WorldPreviewTarget worldPreview[IRenderer::kWorldPreviewSlots];
+    ComPtr<ID3D11PixelShader> previewMeshPS, previewSkinnedPS;
+    ComPtr<ID3D11Buffer>      previewLightCB;
+    bool previewReady  = false;
+    bool previewFailed = false; // compile failed once — not retried per call
 
     // ── Motion trails (RenderWorld::ribbonBatches) ────────────────────────
     // A ribbon needs neither a shader nor a pass of its own: it arrives as CPU
@@ -4505,8 +4528,12 @@ struct D3D11RendererImpl
         return debugReady;
     }
 
+    // `cameraPos` anchors the 3D clouds and the aurora; `time` drives their
+    // drift. Parameters, not m_renderWorld / m_wallTime, because the world
+    // preview draws this sky from ITS camera, with the clock stopped.
     void drawSky(ID3D11DeviceContext* ctx, const glm::mat4& invVP,
-                 const glm::vec3& sunDir, const IRenderer::EnvironmentSettings& env)
+                 const glm::vec3& sunDir, const IRenderer::EnvironmentSettings& env,
+                 const glm::vec3& cameraPos, float time)
     {
         if (!skyReady) return;
         if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
@@ -4519,8 +4546,8 @@ struct D3D11RendererImpl
         HE::SkyFrameInputs skyIn;
         skyIn.invViewProj    = invVP;
         skyIn.sunDir         = sunDir;
-        skyIn.cameraPos      = m_renderWorld.camera.position; // 3D clouds + aurora are world-anchored
-        skyIn.time           = m_wallTime;
+        skyIn.cameraPos      = cameraPos; // 3D clouds + aurora are world-anchored
+        skyIn.time           = time;
         skyIn.hasMoonTexture = moonSRV ? true : false; // ComPtr → contextual bool
         const HE::SkyFrameParams sp = HE::BuildSkyFrameParams(env, skyIn);
         SkyCB cb{};
@@ -4561,8 +4588,11 @@ struct D3D11RendererImpl
         ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
     }
 
+    // `lineDepth` overrides the depth state (null = the scene's test+write);
+    // the world preview's grid passes a read-only one so it occludes nothing.
     void drawDebugLines(ID3D11DeviceContext* ctx, const glm::mat4& viewProj,
-                        const std::vector<DebugLine>& lines)
+                        const std::vector<DebugLine>& lines,
+                        ID3D11DepthStencilState* lineDepth = nullptr)
     {
         if (!debugReady || lines.empty()) return;
         std::vector<float> verts;
@@ -4595,9 +4625,10 @@ struct D3D11RendererImpl
         ctx->VSSetShader(debugVS.Get(), nullptr, 0);
         ctx->PSSetShader(debugPS.Get(), nullptr, 0);
         ctx->VSSetConstantBuffers(0, 1, debugCB.GetAddressOf());
-        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        ctx->OMSetDepthStencilState(lineDepth ? lineDepth : depthState.Get(), 0);
         ctx->RSSetState(rasterState.Get());
         ctx->Draw(static_cast<UINT>(lines.size() * 2), 0);
+        ctx->OMSetDepthStencilState(depthState.Get(), 0);
         // Restore scene state
         ctx->IASetInputLayout(inputLayout.Get());
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -4649,6 +4680,84 @@ struct D3D11RendererImpl
         device->CreateBuffer(&bd, nullptr, &bonesCB);
 
         return skinnedVS && skinnedLayout && bonesCB;
+    }
+
+    // ── World preview: pixel shaders + light cbuffer, built on first use ─────
+    // Everything else the preview draws with already exists by then: the scene
+    // VS + layout, the skinned VS + bone cbuffer, the sky, the debug-line
+    // pipeline (the grid is pos3+color3 lines) and the tonemap.
+    bool ensureWorldPreviewPipeline()
+    {
+        if (previewReady)  return true;
+        if (previewFailed) return false;
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        auto compile = [&](const char* entry, ComPtr<ID3D11PixelShader>& out) -> bool
+        {
+            ComPtr<ID3DBlob> b, err;
+            if (FAILED(D3DCompile(kWorldPreviewPSHLSL, std::strlen(kWorldPreviewPSHLSL), "worldpreview",
+                                  nullptr, nullptr, entry, "ps_5_0", flags, 0, &b, &err)))
+            {
+                HE_LOG_ERROR(RHI, "%s", (std::string("D3D11 world preview '") + entry + "': "
+                    + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
+                return false;
+            }
+            return SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(),
+                                                       nullptr, &out));
+        };
+        const bool ok = compile("PSPreviewMesh", previewMeshPS) && compile("PSPreviewSkinned", previewSkinnedPS);
+        if (ok)
+        {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = 4 * sizeof(glm::vec4); bd.Usage = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            device->CreateBuffer(&bd, nullptr, &previewLightCB);
+        }
+        previewReady  = ok && previewLightCB && vs && inputLayout && perObjectCB && postFxReady;
+        previewFailed = !previewReady;
+        return previewReady;
+    }
+
+    // (Re)creates a slot's targets at w×h. False leaves the slot empty.
+    bool ensureWorldPreviewTarget(WorldPreviewTarget& wp, int w, int h)
+    {
+        if (wp.ldrSRV && wp.w == w && wp.h == h) return true;
+        wp = WorldPreviewTarget{};
+        auto colour = [&](DXGI_FORMAT fmt, ComPtr<ID3D11Texture2D>& tex,
+                          ComPtr<ID3D11RenderTargetView>& rtv, ComPtr<ID3D11ShaderResourceView>& srv)
+        {
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = static_cast<UINT>(w); td.Height = static_cast<UINT>(h);
+            td.MipLevels = td.ArraySize = 1;
+            td.Format = fmt;
+            td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            return SUCCEEDED(device->CreateTexture2D(&td, nullptr, &tex))
+                && SUCCEEDED(device->CreateRenderTargetView(tex.Get(), nullptr, &rtv))
+                && SUCCEEDED(device->CreateShaderResourceView(tex.Get(), nullptr, &srv));
+        };
+        D3D11_TEXTURE2D_DESC dd{};
+        dd.Width = static_cast<UINT>(w); dd.Height = static_cast<UINT>(h);
+        dd.MipLevels = dd.ArraySize = 1;
+        dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        dd.SampleDesc.Count = 1;
+        dd.Usage = D3D11_USAGE_DEFAULT;
+        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+        const bool ok = colour(DXGI_FORMAT_R16G16B16A16_FLOAT, wp.hdrTex, wp.hdrRTV, wp.hdrSRV)
+                     && colour(DXGI_FORMAT_R8G8B8A8_UNORM,     wp.ldrTex, wp.ldrRTV, wp.ldrSRV)
+                     && SUCCEEDED(device->CreateTexture2D(&dd, nullptr, &wp.depthTex))
+                     && SUCCEEDED(device->CreateDepthStencilView(wp.depthTex.Get(), nullptr, &wp.dsv));
+        if (!ok)
+        {
+            HE_LOG_ERROR(RHI, "D3D11Renderer: world preview target %dx%d creation failed", w, h);
+            wp = WorldPreviewTarget{};
+            return false;
+        }
+        wp.w = w; wp.h = h;
+        return true;
     }
 
     void createUIPipeline()
@@ -5048,7 +5157,8 @@ void D3D11Renderer::DrawScene(int width, int height)
     {
         ID3D11DeviceContext* skyCtx = p.context.Get();
         const glm::mat4 skyVP = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
-        p.drawSky(skyCtx, glm::inverse(skyVP), p.m_renderWorld.sunDirection, m_environment);
+        p.drawSky(skyCtx, glm::inverse(skyVP), p.m_renderWorld.sunDirection, m_environment,
+                  p.m_renderWorld.camera.position, p.m_wallTime);
     }
 
     // Trails live in their own per-frame band list, not in `objects`, so a scene
@@ -6402,6 +6512,294 @@ bool D3D11Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 
     if (!ok) rgba.clear();
     return ok;
+}
+
+// ─── Any world into a preview target ──────────────────────────────────────────
+// The contract is in IRenderer.h; the steps are GL's RenderWorldPreview
+// (OpenGLRenderer.cpp) one for one: its OWN extractor (m_extractor carries the
+// scene's day-night state), sky first without depth, grid lines that write no
+// depth, static meshes, skinned meshes, then the scene's tonemap into the RGBA8
+// texture ImGui samples. Same lighting numbers (kWorldPreviewPSHLSL), same grid
+// (WorldPreviewGrid.h), same background.
+//
+// Called while the editor builds its UI, i.e. between frames. The immediate
+// context's target and viewport are put back anyway, so a call from anywhere
+// else cannot leave the next pass drawing into a preview texture.
+void* D3D11Renderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+                                        uint32_t width, uint32_t height,
+                                        const EditorCameraOverride& camera,
+                                        const glm::vec3& origin,
+                                        const WorldPreviewEnv& env,
+                                        glm::mat4* outViewProj,
+                                        uint32_t slot)
+{
+    auto& p = *m_impl;
+    if (!p.device || !p.context) return nullptr;
+    const int W = std::clamp(static_cast<int>(width),  32, 4096);
+    const int H = std::clamp(static_cast<int>(height), 32, 4096);
+    if (!m_contentManager) m_contentManager = &cm;
+    if (!p.ensureWorldPreviewPipeline()) return nullptr;
+    D3D11RendererImpl::WorldPreviewTarget& wp = p.worldPreview[std::min(slot, kWorldPreviewSlots - 1)];
+    if (!p.ensureWorldPreviewTarget(wp, W, H)) return nullptr;
+
+    // ── Camera. The caller's pose; the projection is the shared rule's, and it
+    // reaches the extractor through the override — the Hor+ narrowing goes into
+    // the fov BEFORE the extract, so the extractor culls with exactly the
+    // frustum drawn below (for an orthographic camera the extractor's matrix
+    // already is the rule's).
+    const float aspect = static_cast<float>(W) / static_cast<float>(H);
+    EditorCameraOverride previewCam = camera;
+    previewCam.active = true;
+    if (!camera.orthographic)
+        previewCam.fovDegrees = worldPreviewVerticalFov(camera.fovDegrees, aspect);
+
+    RenderExtractor previewExtractor;
+    previewExtractor.setContentManager(m_contentManager);
+    // The sky and its sun, built the way the editor and the packaged game build
+    // theirs (makeWorldPreviewEnvironment), not hand-assembled here.
+    IRenderer::EnvironmentSettings previewEnvSettings{};
+    if (env.sky)
+    {
+        previewEnvSettings = HE::makeWorldPreviewEnvironment(env.timeOfDay, env.cloudCoverage);
+        previewExtractor.setDayNight(true, env.timeOfDay,
+                                     previewEnvSettings.sunColor, previewEnvSettings.sunIntensity,
+                                     previewEnvSettings.moonColor, previewEnvSettings.moonIntensity,
+                                     previewEnvSettings.cloudCoverage);
+    }
+    RenderWorld snapshot;
+    previewExtractor.extract(world, snapshot, aspect, &previewCam);
+
+    // The projection comes out of the snapshot and is brought to GL depth
+    // explicitly: this file compiles with GLM_FORCE_DEPTH_ZERO_TO_ONE and the
+    // extractor does not, so neither convention may be assumed. The caller
+    // gets the GL form — what worldPreviewProjection builds on its side — and
+    // the draws get it with the D3D depth fix applied exactly once.
+    const float     nearViewZ = camera.orthographic ? camera.farPlane : -camera.nearPlane;
+    const glm::mat4 proj      = HE::toNegOneToOneDepth(snapshot.camera.projection, nearViewZ);
+    const glm::mat4 viewProj  = proj * snapshot.camera.view;
+    const glm::mat4 drawVP    = HE::kD3DClipFix * viewProj;
+    const glm::vec3 camPos    = camera.position;
+    if (outViewProj) *outViewProj = viewProj;
+
+    // Lighting from the extracted sun: dominantDirectionalLight, NOT
+    // sunDirection — the sky-dome sun sits below the horizon at night and would
+    // light the mesh from underneath. w == 0 keeps the studio headlight.
+    glm::vec4 sunUniform(0.0f);
+    glm::vec3 sunColor(1.0f), ambient(0.0f);
+    if (env.sky)
+    {
+        glm::vec3 toward(0.0f, 1.0f, 0.0f), colorIntensity(0.0f);
+        if (snapshot.dominantDirectionalLight(toward, colorIntensity))
+        {
+            sunUniform = glm::vec4(toward, 1.0f);
+            sunColor   = colorIntensity;
+        }
+        else
+        {
+            // Night with nothing shining: armed anyway, so the ambient floor
+            // lights the mesh instead of the studio light snapping back on.
+            sunUniform = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
+            sunColor   = glm::vec3(0.0f);
+        }
+        ambient = glm::max(snapshot.ambient, glm::vec3(0.10f, 0.11f, 0.13f));
+    }
+
+    ID3D11DeviceContext* ctx = p.context.Get();
+    ComPtr<ID3D11RenderTargetView> prevRTV;
+    ComPtr<ID3D11DepthStencilView> prevDSV;
+    ctx->OMGetRenderTargets(1, prevRTV.GetAddressOf(), prevDSV.GetAddressOf());
+    UINT prevVPCount = 1;
+    D3D11_VIEWPORT prevVP{};
+    ctx->RSGetViewports(&prevVPCount, &prevVP);
+
+    D3D11_VIEWPORT vp{};
+    vp.Width    = static_cast<float>(W);
+    vp.Height   = static_cast<float>(H);
+    vp.MaxDepth = 1.0f;
+    // Studio background, LINEAR — the tonemap below lifts it (kPreviewBackground).
+    const float clear[4] = { HE::kPreviewBackground[0], HE::kPreviewBackground[1],
+                             HE::kPreviewBackground[2], 1.0f };
+    ctx->OMSetRenderTargets(1, wp.hdrRTV.GetAddressOf(), wp.dsv.Get());
+    ctx->ClearRenderTargetView(wp.hdrRTV.Get(), clear);
+    ctx->ClearDepthStencilView(wp.dsv.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+    ctx->RSSetViewports(1, &vp);
+    ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+
+    // ── Sky FIRST, unlike the scene: the grid writes no depth, so a sky drawn
+    // after it would paint straight over it. Clock stopped (HE_SKY_TIME for a
+    // reproducible headless shot), as on Metal — nothing drifts in a preview.
+    if (env.sky && p.skyReady)
+    {
+        float skyClock = 0.0f;
+        if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
+            skyClock = static_cast<float>(std::atof(ov));
+        p.drawSky(ctx, glm::inverse(viewProj), snapshot.sunDirection, previewEnvSettings,
+                  camPos, skyClock);
+    }
+
+    // ── Grid + origin marker: lines only, no depth writes, so neither the
+    // underside of the mesh nor (with a sky) the lower half of the world is
+    // hidden. Extent follows the camera's distance from the origin, capped.
+    if (env.grid && p.debugReady)
+    {
+        const float halfExtent = std::clamp(
+            std::ceil(glm::length(camPos - origin) * 2.0f), 10.0f, 200.0f);
+        std::vector<float> verts;
+        HE::buildPreviewGrid(halfExtent, 1.0f, verts, origin);
+        std::vector<DebugLine> lines;
+        lines.reserve(verts.size() / 12);
+        for (size_t i = 0; i + 11 < verts.size(); i += 12)
+            lines.push_back({ { verts[i],     verts[i + 1], verts[i + 2] },
+                              { verts[i + 6], verts[i + 7], verts[i + 8] },
+                              { verts[i + 3], verts[i + 4], verts[i + 5] } });
+        p.drawDebugLines(ctx, drawVP, lines, p.depthReadOnlyState.Get());
+    }
+
+    auto uploadObject = [&](const glm::mat4& model, const glm::vec3& color, bool hasTex,
+                            float metallic, float roughness)
+    {
+        PerObjectCB o{};
+        o.mvp   = drawVP * model;
+        o.model = model;
+        o.color = glm::vec4(color, hasTex ? 1.0f : 0.0f);
+        o.pbr   = glm::vec4(metallic, roughness, 1.0f, 0.0f);
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(p.perObjectCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+        {
+            std::memcpy(m.pData, &o, sizeof(o));
+            ctx->Unmap(p.perObjectCB.Get(), 0);
+        }
+    };
+    {
+        const glm::vec4 light[4] = { glm::vec4(camPos, 1.0f), sunUniform,
+                                     glm::vec4(sunColor, 1.0f), glm::vec4(ambient, 1.0f) };
+        D3D11_MAPPED_SUBRESOURCE m{};
+        if (SUCCEEDED(ctx->Map(p.previewLightCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+        {
+            std::memcpy(m.pData, light, sizeof(light));
+            ctx->Unmap(p.previewLightCB.Get(), 0);
+        }
+    }
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->OMSetDepthStencilState(p.depthState.Get(), 0);
+    ctx->RSSetState(p.fsRastState.Get());   // no culling, as GL's preview: winding is not guaranteed
+    ctx->VSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+    ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+    ctx->PSSetConstantBuffers(1, 1, p.previewLightCB.GetAddressOf());
+    ctx->PSSetSamplers(0, 1, p.sampler.GetAddressOf());
+
+    // ── Static meshes.
+    ctx->IASetInputLayout(p.inputLayout.Get());
+    ctx->VSSetShader(p.vs.Get(), nullptr, 0);
+    ctx->PSSetShader(p.previewMeshPS.Get(), nullptr, 0);
+    for (const RenderObject& obj : snapshot.objects)
+    {
+        const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
+        if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
+        uploadObject(obj.transform, obj.baseColor, mesh->texture.Get() != nullptr, obj.metallic, obj.roughness);
+        ID3D11ShaderResourceView* srv = mesh->texture ? mesh->texture.Get() : p.dummyTexture.Get();
+        ctx->PSSetShaderResources(0, 1, &srv);
+        const UINT stride = 8 * sizeof(float), offset = 0;
+        ctx->IASetVertexBuffers(0, 1, mesh->vbuf.GetAddressOf(), &stride, &offset);
+        ctx->IASetIndexBuffer(mesh->ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+        ctx->DrawIndexed(mesh->indexCount, 0, 0);
+    }
+
+    // ── Skinned meshes (the pose the AnimatorHost last wrote, or the bind pose).
+    if (p.skinnedVS && p.skinnedLayout && p.bonesCB && !snapshot.skinnedObjects.empty())
+    {
+        constexpr int kMaxBones = 128;
+        ctx->IASetInputLayout(p.skinnedLayout.Get());
+        ctx->VSSetShader(p.skinnedVS.Get(), nullptr, 0);
+        ctx->PSSetShader(p.previewSkinnedPS.Get(), nullptr, 0);
+        ctx->VSSetConstantBuffers(2, 1, p.bonesCB.GetAddressOf());
+        std::vector<glm::mat4> bones(kMaxBones);
+        for (const SkinnedRenderObject& obj : snapshot.skinnedObjects)
+        {
+            const GpuSkeletalMesh* smesh = p.resolveSkeletalMesh(obj.meshAssetId, m_contentManager);
+            if (!smesh || !smesh->vb || !smesh->ib || smesh->indexCount <= 0) continue;
+            std::fill(bones.begin(), bones.end(), glm::mat4(1.0f));
+            const size_t boneCount = std::min(obj.boneMatrices.size(), static_cast<size_t>(kMaxBones));
+            std::copy_n(obj.boneMatrices.begin(), boneCount, bones.begin());
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (SUCCEEDED(ctx->Map(p.bonesCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
+            {
+                std::memcpy(m.pData, bones.data(), kMaxBones * sizeof(glm::mat4));
+                ctx->Unmap(p.bonesCB.Get(), 0);
+            }
+            // Pbr zero: GL's skinned preview has no highlight to drive.
+            uploadObject(obj.transform, obj.baseColor, smesh->srv.Get() != nullptr, 0.0f, 0.0f);
+            ID3D11ShaderResourceView* srv = smesh->srv ? smesh->srv.Get() : p.dummyTexture.Get();
+            ctx->PSSetShaderResources(0, 1, &srv);
+            ID3D11Buffer* vbs[3]     = { smesh->vb.Get(), smesh->boneIdVb.Get(), smesh->boneWgtVb.Get() };
+            const UINT    strides[3] = { 8 * sizeof(float), 4 * sizeof(uint32_t), 4 * sizeof(float) };
+            const UINT    offsets[3] = { 0, 0, 0 };
+            ctx->IASetVertexBuffers(0, 3, vbs, strides, offsets);
+            ctx->IASetIndexBuffer(smesh->ib.Get(), DXGI_FORMAT_R32_UINT, 0);
+            ctx->DrawIndexed(static_cast<UINT>(smesh->indexCount), 0, 0);
+        }
+    }
+
+    // ── Tonemap resolve: HDR → the RGBA8 texture ImGui shows, through the
+    // scene's own tonemap. Bloom at strength 0 (a preview is not a film
+    // camera); the second slot still needs something bound.
+    {
+        ID3D11RenderTargetView* nullRTV = nullptr;
+        ctx->OMSetRenderTargets(1, &nullRTV, nullptr);
+        const float cb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+        p.updatePostFxCB(cb);
+        ctx->OMSetRenderTargets(1, wp.ldrRTV.GetAddressOf(), nullptr);
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(p.fsVS.Get(), nullptr, 0);
+        ctx->PSSetShader(p.tonemapPS.Get(), nullptr, 0);
+        ctx->OMSetDepthStencilState(p.noDepthDSS.Get(), 0);
+        ctx->RSSetState(p.fsRastState.Get());
+        ctx->PSSetSamplers(0, 1, p.linearSampler.GetAddressOf());
+        ctx->VSSetConstantBuffers(0, 1, p.postFxCB.GetAddressOf());
+        ctx->PSSetConstantBuffers(0, 1, p.postFxCB.GetAddressOf());
+        ID3D11ShaderResourceView* srvs[2] = { wp.hdrSRV.Get(), p.dummyTexture.Get() };
+        ctx->PSSetShaderResources(0, 2, srvs);
+        ctx->Draw(3, 0);
+        ID3D11ShaderResourceView* nulls[2] = {};
+        ctx->PSSetShaderResources(0, 2, nulls);
+    }
+
+    // Headless witness (HE_WORLD_PREVIEW_DUMP=<file.ppm>), same convention as
+    // GL/Metal: the LDR result, i.e. what the editor shows.
+    if (const char* dp = std::getenv("HE_WORLD_PREVIEW_DUMP"); dp && *dp)
+    {
+        D3D11_TEXTURE2D_DESC sd{};
+        wp.ldrTex->GetDesc(&sd);
+        sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
+        ComPtr<ID3D11Texture2D> staging;
+        if (SUCCEEDED(p.device->CreateTexture2D(&sd, nullptr, &staging)))
+        {
+            ctx->CopyResource(staging.Get(), wp.ldrTex.Get());
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (SUCCEEDED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)))
+            {
+                HE::writeWorldPreviewDump(dp, static_cast<const uint8_t*>(m.pData), W, H, m.RowPitch);
+                ctx->Unmap(staging.Get(), 0);
+            }
+        }
+    }
+
+    // Scene state back: the next DrawScene assumes its pipeline is bound.
+    ctx->OMSetRenderTargets(1, prevRTV.GetAddressOf(), prevDSV.Get());
+    if (prevVPCount > 0) ctx->RSSetViewports(1, &prevVP);
+    ctx->OMSetDepthStencilState(p.depthState.Get(), 0);
+    ctx->RSSetState(p.rasterState.Get());
+    ctx->PSSetSamplers(0, 1, p.sampler.GetAddressOf());
+    ctx->IASetInputLayout(p.inputLayout.Get());
+    ctx->VSSetShader(p.vs.Get(), nullptr, 0);
+    ctx->PSSetShader(p.ps.Get(), nullptr, 0);
+    ctx->VSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+    ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
+    ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+    ctx->PSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
+    return wp.ldrSRV.Get();
 }
 
 void D3D11Renderer::SetVSync(bool enabled)
