@@ -203,6 +203,9 @@ add_executable(HorizonEditor WIN32
 	# The clients' cameras in the viewport: a frustum with the connection number
 	# (debug lines) and a tag over the frame (ImGui), the presence marker's split.
 	McpCameraGizmos.cpp
+	# The selection boxes and collider outlines of the viewport's debug block,
+	# as plain geometry so the headless dump and the tests draw them too.
+	ViewportOverlays.cpp
 	# …and the editor half of what those two write: the Preferences settings as a
 	# TABLE rather than as a screen. `row("bloom", …)` in EditorSettingsPanel.cpp
 	# is documentation only a human looking at a widget can read.

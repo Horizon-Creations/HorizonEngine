@@ -30,6 +30,7 @@
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "McpCameraGizmos.h"       // the MCP clients' screenshot cameras, drawn in the viewport
+#include "ViewportOverlays.h"      // selection boxes + collider outlines, shared with the dump
 #include "ExportDialogPanel.h"     // the packing worker the MCP build tools start
 #include "GameLogicBuildPanel.h"   // …and the native compile they start the other way
 #include "BuildProgressDialog.h"   // …and the one window both of them report into
@@ -3576,112 +3577,14 @@ void EditorApplication::OnRender(float dt)
 			// grid are the expensive ones.
 			const ViewportPanel::ShowFlags& show = ViewportPanel::showFlags();
 
-			// Selected-entity markers: unit AABB centered on each member's
-			// transform position. The primary is the bright one; the rest of a
-			// multi-selection get the same amber a shade dimmer, so which one
-			// the gizmo will move is visible without reading the outliner.
-			if (show.selection) for (Entity sel : m_selection.entities())
-			{
-				if (!m_editorWorld->registry().valid(sel)) continue;
-				auto* tc = m_editorWorld->registry().try_get<TransformComponent>(sel);
-				if (!tc) continue;
-				const glm::vec3 p = tc->position;
-				const glm::vec3 color = (sel == m_selection.primary())
-					? glm::vec3(1.0f, 0.8f, 0.0f)
-					: glm::vec3(0.8f, 0.6f, 0.05f);
-				dbg.aabb(p - glm::vec3(0.5f), p + glm::vec3(0.5f), color);
-			}
-
-			// Collider wireframes: cyan for solid, magenta for triggers
+			// Selected-entity markers and collider wireframes. Built in
+			// ViewportOverlays so the headless dump's HE_DUMP_SELBOXTEST
+			// witness draws them by this same code.
+			if (show.selection)
+				HE::Ed::ViewportOverlays::appendSelectionMarkers(*m_editorWorld, m_selection, dbg);
 			if (show.colliders)
-			{
-				auto& reg = m_editorWorld->registry();
-				// Local-space box of a mesh asset, measured once and kept. The
-				// mesh-shaped colliders below need it every frame, a loose editor
-				// mesh carries no precomputed bounds, and measuring a hundred
-				// thousand vertices per frame for a debug line is not a trade.
-				static std::unordered_map<HE::UUID, std::pair<glm::vec3, glm::vec3>> s_colliderMeshBox;
-				for (auto [entity, col, transform] :
-				     reg.view<ColliderComponent, TransformComponent>().each())
-				{
-					const glm::vec3 color = col.isTrigger
-					    ? glm::vec3(1.0f, 0.0f, 1.0f)   // trigger: magenta
-					    : glm::vec3(0.0f, 1.0f, 1.0f);  // solid:   cyan
-					const glm::vec3 pos = transform.position;
-					switch (col.shape)
-					{
-					case ColliderShape::Box:
-						dbg.aabb(pos - col.halfExtents, pos + col.halfExtents, color);
-						break;
-					case ColliderShape::Sphere:
-						dbg.sphere(pos, col.radius, color);
-						break;
-					case ColliderShape::Capsule:
-						dbg.capsule(pos, col.radius, col.height, color);
-						break;
-					case ColliderShape::Mesh:
-					case ColliderShape::ConvexHull:
-					{
-						// These two take their geometry from the entity's MESH, so
-						// the authored half extents describe nothing and the honest
-						// outline is the mesh's own box. Same source PhysicsWorld
-						// builds the shape from — LOD0 where there is a LODComponent,
-						// because LODSystem rewrites MeshComponent's id as the camera
-						// moves and a collider that changed with the camera would be
-						// a different game at every distance.
-						HE::UUID meshId{};
-						if (const auto* mc = reg.try_get<MeshComponent>(entity))
-							meshId = mc->meshAssetId;
-						if (const auto* lod = reg.try_get<LODComponent>(entity);
-						    lod && !lod->levels.empty())
-							meshId = lod->levels.front().meshId;
-						if (meshId == HE::UUID{}) break;
-
-						auto it = s_colliderMeshBox.find(meshId);
-						if (it == s_colliderMeshBox.end())
-						{
-							const StaticMeshAsset* mesh = contentManager().getStaticMesh(meshId);
-							if (!mesh) break;   // not loaded yet — measured on a later frame
-							const bool        cooked = mesh->cooked && !mesh->interleaved.empty();
-							const std::size_t count  = cooked ? mesh->vertexCount
-							                                  : mesh->vertices.size() / 3;
-							const std::size_t stride = cooked ? 8u : 3u;
-							const float*      data   = cooked ? mesh->interleaved.data()
-							                                  : mesh->vertices.data();
-							if (count == 0 || (cooked && mesh->interleaved.size() < count * stride))
-								break;
-							glm::vec3 lo(data[0], data[1], data[2]);
-							glm::vec3 hi = lo;
-							for (std::size_t i = 1; i < count; ++i)
-							{
-								const glm::vec3 v(data[i * stride + 0], data[i * stride + 1],
-								                  data[i * stride + 2]);
-								lo = glm::min(lo, v);
-								hi = glm::max(hi, v);
-							}
-							it = s_colliderMeshBox.emplace(meshId, std::make_pair(lo, hi)).first;
-						}
-						// Scaled like the shape itself is (PhysicsWorld bakes
-						// transform.scale into the triangles). Axis-aligned, so a
-						// rotated mesh reads as its box — the same simplification
-						// the Box case above has always made.
-						dbg.aabb(pos + it->second.first  * transform.scale,
-						         pos + it->second.second * transform.scale, color);
-						break;
-					}
-					case ColliderShape::HeightField:
-						// Deliberately nothing: the height field IS the landscape
-						// mesh in the viewport, and a box around a whole terrain
-						// would hide the scene inside it.
-						break;
-					default:
-						// An enum value this build does not know. Silent here on
-						// purpose — PhysicsWorld logs it once where it matters, and
-						// a debug overlay is not the place to repeat that per frame.
-						break;
-					}
-				}
-			}
+				HE::Ed::ViewportOverlays::appendColliderWireframes(*m_editorWorld,
+				                                                   contentManager(), dbg);
 
 			// ── Joints ───────────────────────────────────────────────────────
 			// Drawn for every joint in the scene, like the colliders above and
@@ -6706,6 +6609,111 @@ void EditorApplication::dumpFrameHeadless()
 		}
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_ROPETEST tube + ribbon rope and a swept trail added");
+	}
+
+	// ── Selection / collider witness (HE_DUMP_SELBOXTEST=1): entities that sit
+	// under a MOVED parent, which is where a local position and a world
+	// position part ways.
+	//   • a point light with a box collider, child of a parent shifted 3 m to
+	//     the right: its icon billboard is drawn at the WORLD position (the
+	//     extractor reads the propagated matrix), so the amber selection box and
+	//     the cyan collider outline must sit around that icon, not 3 m to the
+	//     left of it where the local position would put them;
+	//   • a cube with a convex-hull collider, child of a parent scaled ×2: the
+	//     outline must be the size the cube is drawn at, around where it is.
+	// The lines come from ViewportOverlays, the code OnRender's debug block
+	// uses, pushed by hand because the dump never runs that block. The log
+	// line counts the box corners that landed at each candidate spot — the
+	// numbers to read without looking at the picture.
+	if (const char* sb = std::getenv("HE_DUMP_SELBOXTEST"); sb && *sb && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0, 1, 0)));
+		const glm::vec3 up(0.0f, 1.0f, 0.0f);
+		const glm::vec3 base = m_editorCamera.position() + camFwd * 8.0f;
+
+		auto floorE = m_editorWorld->createEntity("SelBoxFloor");
+		TransformComponent ftc;
+		ftc.position = base - glm::vec3(0.0f, 1.5f, 0.0f);
+		ftc.scale    = glm::vec3(30.0f, 0.2f, 30.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto makeChild = [&](const char* parentName, const char* childName,
+		                     const glm::vec3& parentPos, float parentScale,
+		                     const glm::vec3& childLocal) {
+			auto p = m_editorWorld->createEntity(parentName);
+			TransformComponent ptc;
+			ptc.position = parentPos;
+			ptc.scale    = glm::vec3(parentScale);
+			reg.emplace<TransformComponent>(p, ptc);
+			auto c = m_editorWorld->createEntity(childName);
+			TransformComponent ctc;
+			ctc.position = childLocal;
+			reg.emplace<TransformComponent>(c, ctc);
+			m_editorWorld->reparentEntity(c, p);
+			reg.get<TransformComponent>(c).position = childLocal;
+			return c;
+		};
+
+		// The light: local position just left of centre, the parent carries it
+		// 3 m right, so it STANDS right of centre.
+		const glm::vec3 lightLocal = base - camRight * 1.5f;
+		const Entity light = makeChild("SelBoxParent", "SelBoxLight",
+		                               camRight * 3.0f, 1.0f, lightLocal);
+		LightComponent point; point.type = HE::LightType::Point;
+		reg.emplace<LightComponent>(light, point);
+		ColliderComponent box; box.shape = ColliderShape::Box;
+		box.halfExtents = glm::vec3(0.8f);
+		reg.emplace<ColliderComponent>(light, box);
+
+		// The cube: world = parentPos + 2 × local. Chosen so it stands above
+		// the light and its local position, read as a world point, above the
+		// wrong spot — both in frame.
+		const glm::vec3 cubeLocal = lightLocal + up * 3.0f;
+		const glm::vec3 cubeWorldWanted = base + camRight * 1.5f + up * 3.0f;
+		const Entity cube = makeChild("SelBoxScaledParent", "SelBoxCube",
+		                              cubeWorldWanted - 2.0f * cubeLocal, 2.0f, cubeLocal);
+		reg.emplace<MeshComponent>(cube, MeshComponent{ HE::kDefaultCubeMeshId });
+		ColliderComponent hull; hull.shape = ColliderShape::ConvexHull;
+		reg.emplace<ColliderComponent>(cube, hull);
+
+		m_selection.set(cube);
+		m_selection.add(light);   // the light is the primary
+
+		DebugDrawBuffer selLines, colLines;
+		HE::Ed::ViewportOverlays::appendSelectionMarkers(*m_editorWorld, m_selection, selLines);
+		HE::Ed::ViewportOverlays::appendColliderWireframes(*m_editorWorld, contentManager(), colLines);
+
+		// Box corners within `radius` of `at`. A box is 12 lines, 24 endpoints.
+		auto cornersNear = [](const DebugDrawBuffer& buf, const glm::vec3& at, float radius) {
+			int n = 0;
+			for (const DebugLine& l : buf.lines())
+				for (const glm::vec3& q : { l.start, l.end })
+					if (glm::length(q - at) < radius) ++n;
+			return n;
+		};
+		const glm::vec3 lightWorld = HE::worldPositionOf(*m_editorWorld, light);
+		const glm::vec3 cubeWorld  = HE::worldPositionOf(*m_editorWorld, cube);
+		char line[512];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: HE_DUMP_SELBOXTEST light world=(%.2f, %.2f, %.2f) "
+			"local=(%.2f, %.2f, %.2f) | selection corners near world=%d near local=%d | "
+			"box-collider corners near world=%d near local=%d | cube world=(%.2f, %.2f, %.2f) "
+			"hull-collider corners near world=%d near local=%d (of 24 each)",
+			lightWorld.x, lightWorld.y, lightWorld.z, lightLocal.x, lightLocal.y, lightLocal.z,
+			cornersNear(selLines, lightWorld, 1.0f), cornersNear(selLines, lightLocal, 1.0f),
+			cornersNear(colLines, lightWorld, 1.5f), cornersNear(colLines, lightLocal, 1.5f),
+			cubeWorld.x, cubeWorld.y, cubeWorld.z,
+			cornersNear(colLines, cubeWorld, 1.8f), cornersNear(colLines, cubeLocal, 1.8f));
+		HE_LOG_INFO(Editor, "%s", line);
+
+		std::vector<DebugLine> all = selLines.lines();
+		all.insert(all.end(), colLines.lines().begin(), colLines.lines().end());
+		r->SetDebugLines(all);
 	}
 
 	// HE_DUMP_FRAMES: settle frames before the capture (default 3). Temporal
