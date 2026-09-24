@@ -7,6 +7,10 @@
 #include <string>
 
 #include <HorizonRendering/ClipSpace.h>
+#include <HorizonRendering/WorldPreviewFrame.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/Components/MeshComponent.h>
 #include "../src/HE_Rendering/src/Backends/D3D_Shared/HlslSources.h"
 
 #ifdef _WIN32
@@ -88,6 +92,59 @@ TEST_CASE("toNegOneToOneDepth handles the orthographic preview camera (near plan
 	CHECK(up.y / up.w == doctest::Approx(-1.0f));
 	CHECK(ndcZ(vk, f) == doctest::Approx(0.0f).epsilon(1e-4));
 	CHECK(ndcZ(vk, -f) == doctest::Approx(1.0f).epsilon(1e-4));
+}
+
+TEST_CASE("buildWorldPreviewFrame reports exactly the matrix the editor rebuilds for its gizmos")
+{
+	// The panel draws gizmos, colliders and its pick ray with
+	// worldPreviewProjection(camera, aspect) * view, built in ITS translation
+	// unit (GL depth). The backends take the projection out of their snapshot
+	// instead (Hor+ narrowed into the fov before the extract); both roads must
+	// arrive at the same matrix, or the handles sit next to the object.
+	HorizonWorld world;
+	const Entity e = world.createEntity("Cube");
+	world.addComponent(e, TransformComponent{});
+	world.addComponent(e, MeshComponent{});
+
+	EditorCameraOverride cam;
+	cam.position = glm::vec3(3.0f, 2.0f, 6.0f);
+	cam.view     = glm::lookAt(cam.position, glm::vec3(0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	cam.fovDegrees = 60.0f;
+
+	for (const float aspect : { 1.0f, 16.0f / 9.0f, 3.0f }) // 3:1 is past the Hor+ cap
+	{
+		HE::WorldPreviewFrame frame;
+		HE::buildWorldPreviewFrame(nullptr, world, cam, WorldPreviewEnv{}, aspect, frame);
+		const glm::mat4 editorSide = worldPreviewProjection(cam, aspect) * cam.view;
+		INFO("aspect ", aspect);
+		CHECK(nearlyEqual(frame.viewProj, editorSide));
+		CHECK(frame.camPos == cam.position);
+		CHECK(frame.sun.w == 0.0f); // no sky → the studio light
+		CHECK(frame.snapshot.objects.size() == 1u);
+	}
+
+	cam.orthographic    = true;
+	cam.orthoHalfHeight = 12.0f;
+	HE::WorldPreviewFrame ortho;
+	HE::buildWorldPreviewFrame(nullptr, world, cam, WorldPreviewEnv{}, 2.0f, ortho);
+	CHECK(nearlyEqual(ortho.viewProj, worldPreviewProjection(cam, 2.0f) * cam.view));
+
+	// With a sky the preview lights from the extracted sun (armed, noon above
+	// the horizon) and never drops below the ambient floor.
+	cam.orthographic = false;
+	WorldPreviewEnv noon;
+	noon.sky       = true;
+	noon.timeOfDay = 0.5f;
+	HE::WorldPreviewFrame lit;
+	HE::buildWorldPreviewFrame(nullptr, world, cam, noon, 1.0f, lit);
+	CHECK(lit.sun.w > 0.0f);
+	CHECK(lit.sun.y > 0.0f);
+	CHECK(lit.ambient.x >= 0.10f);
+	CHECK(lit.sky.skyEnabled);
+
+	CHECK(HE::worldPreviewGridExtent(glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(0.0f)) == 10.0f);
+	CHECK(HE::worldPreviewGridExtent(glm::vec3(30.0f, 0.0f, 0.0f), glm::vec3(0.0f)) == 60.0f);
+	CHECK(HE::worldPreviewGridExtent(glm::vec3(5000.0f, 0.0f, 0.0f), glm::vec3(0.0f)) == 200.0f);
 }
 
 TEST_CASE("The world-preview pixel shaders keep their entry points and bindings")
