@@ -423,3 +423,82 @@ prüft nichts; Tastennamen sind SDL-Scancode-Namen und groß/klein-sensitiv („
 „Left Shift"), Gamepad-Namen nicht („A" = „a", „south" gibt es nicht); Actions per Polling
 aus `onUpdate` sind einen Frame alt (`GameApplication.cpp:2906` vor `:2984`, Editor
 `:3240` vor `:3290`).
+
+## Nachtrag Schritt 6 (24.09.2026): Animator, Particles, Audio, Camera, Material, Environment
+
+Handinhalt für 174 Ids: sechs Gruppen-Einleitungen (`overlay/groups/animator|particle|audio|camera|material|env.html`),
+Notes an 28 Ids und sechs Beispiele in Lua und Python (`footsteps`, `music_fade`, `impact`,
+`sprint_fov`, `anim_speed`, `sleep`). Grundlage war eine Wegwerf-Probe gegen `libHorizonScene`
+des Builds 7d49d44f: Sky mit Environment + Weather, Hauptkamera mit Rig unter einem
+Eltern-Entity, zwei weitere Kameras (mit und ohne Rig), ein Einmal- und ein Dauer-Emitter,
+Animator mit doppelt benannten Layern, zwei Entities mit geteiltem Graph-Material (eines mit
+Details-Override) und eine `AudioEngine` im noDevice-Modus mit PCM-Clip, getickt wie die Apps
+(Weather, Partikel, Kamera-Rig, `makeEnvironmentSettings`, Mixer-Pull). Rund 120 Aufrufe aus Lua,
+die Kernfälle aus Python, beide gleich. Die sechs Beispiele liefen wortgleich zu `notes.json` in
+beiden Sprachen mit ausgelösten Callbacks (onStart, onUpdate, onInputPressed/Released,
+onCollisionEnter, onAnimationNotify); geprüft wurden die Wirkungen (eine gehaltene Stimme statt
+vier, Fade 0.6 → 0.3 → 0 mit freigegebener Stimme, 24 Partikel + Kamera wackelt und kehrt exakt
+zurück, `fovOffset` 8 und Lag an/aus, Animator-Parameter überschrieben, Uhr 0.3 und Nebel 0.02
+bleiben trotz Weather). `coverage.py`: 582/582 **ref**, **hand** 254 → 428.
+
+**env ist automatisiert, nicht von Hand.** Die Kette steht: `HE_ENV_FIELDS_*` (EngineApi.h) →
+Registry-Rows → `HcNodeDocs::engineCall` setzt die Beschreibung aus `kEnvFields` zusammen →
+`registry.json` → `env_table()`. Neu in `gen_reference.py`: die Feldtabelle liest Feldliste und
+Reihenfolge direkt aus den X-Listen, die Weather-Spalte aus `WeatherSystem.cpp`
+(`drive(env->…)` = gesteuert, `env->… = wx.` = jeden Tick überschrieben), und prüft beides gegen
+die Registry und gegen den Setter-Text von HcNodeDocs; eine Abweichung bricht den Lauf ab. Der
+gemeinsame Satz „This is the Sky entity's Environment component …" steht einmal über der Tabelle
+statt 116-mal. Ein neues Feld in der X-Liste erscheint damit ohne Handarbeit. Die 116 **hand**
+der env-Gruppe kommen aus der Einleitung, die Zeilen sind generiert.
+
+Beschreibungen in `HcNodeDocs.cpp`, an der Quelle korrigiert (Editor-Tooltip und Referenz);
+`registry.json` neu gedumpt, Diff genau 70 `doc`-Felder:
+
+- **Weather-Satz an allen 58 env-Settern** („overwritten while one exists") war doppelt falsch:
+  Weather schreibt nur sechs Felder (cloudCoverage, fogDensity, windSpeed, rain, snow, wetness)
+  und gibt jedes frei, sobald es von außen geändert wurde (`drive`-Back-off,
+  `WeatherSystem.cpp:160`), bis ein neues Preset es zurückholt; `flash` wird jeden Tick
+  überschrieben (`:207`). Probe: 0.9/0.7 bleiben 2,5 s stehen, Storm holt 1/1 zurück,
+  starBrightness unberührt. `kEnvFields` trägt jetzt ein `Wx`-Merkmal je Feld; jeder Setter nennt
+  weiter „Weather component" (Test `test_hc_node_docs` bleibt per Konstruktion grün, nicht
+  ausgeführt), aber feldgenau.
+- **DayNightCycle / AutoAdvance / MoonPhaseAuto / CycleSeconds**: DayNightCycle beschrieb
+  AutoAdvance, AutoAdvance den Mond. Richtig: DayNightCycle = Uhr treibt Sonne/Himmel
+  (`EnvironmentSettings.h`), AutoAdvance = Uhr läuft (`EnvironmentPush.cpp:11`, braucht
+  DayNightCycle), MoonPhaseAuto = Mond läuft mit. TimeOfDay nennt jetzt, dass ohne DayNightCycle
+  die Sonne nicht folgt; CloudQuality nennt 0/1/2.
+- **camera.getPosition/getRotation** sagten „world": gelesen wird `TransformComponent` lokal
+  (Probe: Kamera unter (10,0,0) liefert 0,2,5).
+- **camera.blendTo**: ohne Rig an der Zielkamera immer ein Schnitt (`CameraRigController.cpp:603`).
+- **audio.playAt**: ohne Audio Listener hört man vom Ursprung, nicht „gar nicht".
+- **material.getParam/setParam**: siehe Befund unten; die Beschreibung sagt jetzt, was passiert.
+
+Engine-Befunde, dokumentiert (Callout bzw. Note) und im Hive gemeldet, **nicht behoben**:
+
+- **`material.setParam` / `horizon.setMaterialParam` schreiben das geteilte Asset**, nicht das
+  Entity (`ScriptApi.cpp:130` → `ContentManager::setMaterialParam`). Probe: Set auf A, B liest
+  den neuen Wert; Bs Details-Override (`MaterialComponent::paramOverrides`, der eigentliche
+  Per-Entity-Weg) wird weder geschrieben noch von `getParam` gelesen. Die alte Beschreibung
+  versprach „THIS entity only". Vermutlich gleich bei `ui.setMaterialParam`
+  (`ScriptApi.cpp:258`, Schritt 7).
+- **Beendete Sounds werden nie freigegeben.** `startSound` kopiert die Clip-Bytes in jede Stimme
+  (`AudioEngine.cpp:350`), entfernt wird sie nur von `stop`/`stopAll`/`removeBus`/`shutdown`.
+  Probe: 2 s nach 50 Einmal-Sounds spielt keiner mehr, gehalten werden 51 Stimmen. Szenenwechsel
+  und Play-Stopp rufen `stopAll`, innerhalb einer Szene wächst der Speicher mit jedem Schritt-Sound.
+- **Audio Listener liest die lokale Position** (`AudioSystem.h:64`, `t.position`); ein Listener
+  unter dem Spieler-Charakter hört vom falschen Ort. Aus dem Code gelesen, nicht per Probe.
+- Array-Rows `animator.notifiesOf`/`layerNames` liefern aus Lua/Python weiter `""` (Befund
+  Schritt 2, erneut gemessen).
+
+Verhalten, gemessen und in Einleitung/Notes: env-Farben aus Lua/Python vier Zahlen (mit drei
+*bad argument #4* / `IndexError`), Getter Alpha 1; env klemmt nichts (1.7, −1, 9 bleiben);
+ohne Sky 0/false/schwarz, Setter still; AutoAdvance mit 10-s-Tag: 1 s = +0.1, Mond +0.0034.
+Kamera: `setRigMode` ≠ 0 = dritte Person, `setTargetYawMode` außer 0/2 = Follow, Pitch auf
+−80…75 geklemmt, Yaw nicht umgebrochen, negative Armlänge angenommen, Lag-Speeds ≥ 0; Shake steht
+in der Transform (Kamera wackelt und kehrt exakt zurück), FOV-Kick nur in `fovOffset`;
+`blendTo` macht die Zielkamera sofort Main. Audio: Handles ab 1, 0 = nichts gestartet (auch ohne
+Session); Lua liest fehlendes `loop` als false, Python wirft; Lautstärke ungeklemmt, Pitch ≤ 0
+ignoriert; `seek` klemmt auf 0…Länge; `setBusVolume` legt Busse an. Partikel: `isPlaying` bis
+zum letzten lebenden Partikel, `stop` weich, `burst` ≤ Max Particles lebend (10 lebend, Cap 30:
+500 → 20), startet einen fertigen Emitter neu. Animator: `setParam` mit `true` in Lua ein Fehler,
+Python 1; unbekannte Namen werden angelegt; doppelte Layernamen = erster; Gewicht geklemmt.

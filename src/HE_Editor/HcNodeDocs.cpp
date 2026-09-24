@@ -271,11 +271,14 @@ namespace
 	{ "material.getParam",
 	  "Reads one named parameter of the entity's material as a colour. The name is "
 	  "the one the material graph's Param node declares; all four components are "
-	  "stored, whatever the shader reads." },
+	  "stored, whatever the shader reads. It reads the material asset's value, not "
+	  "an override set on this entity's Details panel." },
 	{ "material.setParam",
-	  "Overrides one named material parameter for THIS entity only — the material "
-	  "asset and every other entity using it are untouched. Ok is false when the "
-	  "entity has no material or the parameter is not declared." },
+	  "Writes one named parameter of the entity's material. It writes the material "
+	  "ASSET, not this entity: every entity using the same material changes with "
+	  "it, while an entity whose Details panel overrides this parameter keeps its "
+	  "override. Ok is false when the entity has no material or the parameter is "
+	  "not declared." },
 
 	// ── Animator ─────────────────────────────────────────────────────────────
 	{ "animator.setParam",
@@ -1133,12 +1136,16 @@ namespace
 
 	// ── Camera ───────────────────────────────────────────────────────────────
 	{ "camera.getPosition",
-	  "The active camera's world position." },
+	  "The active camera's position, read from its own transform: relative to its "
+	  "parent when it has one, so it is the world position only for a camera at "
+	  "the top of the hierarchy. The active camera is the one marked Main, else "
+	  "the first camera in the scene." },
 	{ "camera.setPosition",
 	  "Moves the active camera. Ignored the moment a camera rig is driving it — "
 	  "the rig recomputes the position from its target every frame." },
 	{ "camera.getRotation",
-	  "The active camera's rotation as euler degrees." },
+	  "The active camera's rotation as euler degrees, from its own transform — "
+	  "relative to its parent, like Get Camera Position." },
 	{ "camera.setRotation",
 	  "Turns the active camera. Same caveat as Set Position: a rig overrides it." },
 	{ "camera.getFov",
@@ -1209,7 +1216,9 @@ namespace
 	{ "camera.blendTo",
 	  "Hands the view to another camera over a number of seconds. Curve 0 is "
 	  "linear, 1 smoothstep, 2 ease-out. 0 seconds is a straight cut, and so is "
-	  "switching the main camera by hand — a blend only ever starts here." },
+	  "switching the main camera by hand — a blend only ever starts here. The "
+	  "camera blended to needs a camera rig of its own; to a camera without one "
+	  "this is always a cut." },
 	{ "camera.isBlending",
 	  "Whether the picture is currently easing in from another camera. True "
 	  "until the blend has fully arrived." },
@@ -1241,8 +1250,8 @@ namespace
 	  "Playing take; a one-shot can simply drop it." },
 	{ "audio.playAt",
 	  "Plays a sound at a world position, quieter with distance. Full volume "
-	  "inside Min Dist, silent past Max Dist. Needs an Audio Listener in the "
-	  "scene, or there are no ears to hear it from." },
+	  "inside Min Dist, silent past Max Dist. Distance is measured from the "
+	  "scene's Audio Listener; without one the ears stay at the world origin." },
 	{ "audio.stop",
 	  "Stops one playing sound by handle. A handle that has already finished is "
 	  "harmless." },
@@ -1783,7 +1792,7 @@ namespace
 	};
 
 	// ── The sky properties ───────────────────────────────────────────────────
-	// The Environment category is generated from an X-list in EngineApi.h: fifty
+	// The Environment category is generated from an X-list in EngineApi.h: 58
 	// fields, each producing an env.get… and an env.set… row. A hand-written
 	// table would be a hundred rows that say the same thing twice and go stale
 	// the moment a field is added — so this is keyed by the FIELD (the part after
@@ -1791,17 +1800,23 @@ namespace
 	//
 	// The sentences are the ones the Sky entity's own properties carry in the
 	// Details panel (EditorHelp.cpp), because they describe the same value.
-	struct Field { const char* name; const char* what; };
+	//
+	// `weather` says what a Weather component does to the field, read off
+	// WeatherSystem::update: Driven fields are written toward the preset every
+	// tick but released once something else changes them (its `drive` back-off),
+	// until the next preset reclaims them; Forced is rewritten every tick.
+	enum class Wx { None, Driven, Forced };
+	struct Field { const char* name; const char* what; Wx weather = Wx::None; };
 	constexpr Field kEnvFields[] = {
-		{ "TimeOfDay", "the sky's clock: 0 and 1 are midnight, 0.25 sunrise, 0.5 noon" },
-		{ "CycleSeconds", "how long a full day takes while the day-night cycle runs, in seconds" },
+		{ "TimeOfDay", "the sky's clock: 0 and 1 are midnight, 0.25 sunrise, 0.5 noon. It only moves the sun while Day Night Cycle is on" },
+		{ "CycleSeconds", "how many real seconds a full day takes while Auto Advance runs the clock" },
 		{ "SunIntensity", "how strong the sun is, and with it the whole daylit scene" },
 		{ "MoonIntensity", "how strong the moonlight is — the difference between a night you can see in and a black screen" },
 		{ "MoonPhase", "the moon's phase: 0 new, 0.5 full" },
 		{ "MoonCycleDays", "how many days a full new-to-full-to-new cycle takes" },
-		{ "CloudCoverage", "how much of the sky the cloud layer fills: 0 clear, 1 overcast" },
+		{ "CloudCoverage", "how much of the sky the cloud layer fills: 0 clear, 1 overcast", Wx::Driven },
 		{ "WindDirection", "which way the clouds drift, in degrees" },
-		{ "WindSpeed", "how fast the clouds drift" },
+		{ "WindSpeed", "how fast the clouds drift", Wx::Driven },
 		{ "CloudHeight", "the world height of the cloud deck's base, in metres" },
 		{ "CloudShadowStrength", "how dark the shadows the cloud layer casts on the ground get" },
 		{ "CloudEvolution", "how fast clouds change shape as they drift; 0 freezes the formation" },
@@ -1813,12 +1828,12 @@ namespace
 		{ "GodRays", "the shafts of light through gaps in the cloud; they need broken cover to shine through" },
 		{ "ShootingStars", "how often meteors streak across the night sky" },
 		{ "LensFlare", "the camera artefact when the sun is in shot" },
-		{ "FogDensity", "how thick the atmospheric haze is; even a very small amount gives a landscape distance" },
+		{ "FogDensity", "how thick the atmospheric haze is; even a very small amount gives a landscape distance", Wx::Driven },
 		{ "FogHeightFalloff", "how much the fog pools near the ground instead of filling the air evenly" },
-		{ "RainAmount", "how hard it is raining, 0 to 1" },
-		{ "SnowAmount", "how hard it is snowing, 0 to 1" },
-		{ "Wetness", "how wet surfaces look after rain" },
-		{ "Flash", "the lightning flash, driven per strike by the Weather system" },
+		{ "RainAmount", "how hard it is raining, 0 to 1", Wx::Driven },
+		{ "SnowAmount", "how hard it is snowing, 0 to 1", Wx::Driven },
+		{ "Wetness", "how wet surfaces look after rain", Wx::Driven },
+		{ "Flash", "the lightning flash, driven per strike by the Weather system", Wx::Forced },
 		{ "AuroraIntensity", "how strong the aurora ribbons are; 0 switches them off" },
 		{ "MilkyWayIntensity", "how bright the galaxy's band is across the night sky" },
 		{ "NebulaIntensity", "how visible the deep-space nebula is behind the stars" },
@@ -1832,14 +1847,14 @@ namespace
 		{ "StarTwinkle", "how much the stars flicker" },
 		{ "AuroraHeight", "how tall the aurora ribbons stand above the horizon" },
 		{ "AuroraFragmentation", "how broken the ribbons are, from a smooth curtain to ragged streaks" },
-		{ "DayNightCycle", "whether time of day advances on its own while the scene runs" },
-		{ "AutoAdvance", "whether the moon phase moves with the days on its own" },
-		{ "MoonPhaseAuto", "whether the moon phase advances with the day-night cycle" },
+		{ "DayNightCycle", "whether Time Of Day drives the sun, sky and shadows; off, the scene's own directional light is used" },
+		{ "AutoAdvance", "whether Time Of Day runs on by itself, one day per Day Cycle Seconds; it needs Day Night Cycle on as well" },
+		{ "MoonPhaseAuto", "whether the moon phase moves on with the days while Auto Advance runs the clock" },
 		{ "CloudShadows", "whether the cloud layer darkens the ground under it" },
 		{ "CloudInterShadows", "whether clouds cast shadows within their own body, so a tall tower darkens what is behind it" },
 		{ "LowResClouds", "whether the clouds are raymarched at quarter resolution and upscaled — much cheaper, slightly softer" },
 		{ "CloudMode", "the cloud layer: 0 painted on the sky dome (cheap, never comes closer), 1 real 3D volumes the camera can fly into" },
-		{ "CloudQuality", "how many steps the cloud raymarch takes — the most expensive sky setting there is" },
+		{ "CloudQuality", "how many steps the cloud raymarch takes: 0 low, 1 medium, 2 high — the most expensive sky setting there is" },
 		{ "CloudStyle", "0 the original flat drifting layer, 1 cauliflower shapes that tower and dissolve" },
 		{ "NebulaQuality", "the nebula's detail level: 0 performance, 1 high, 2 max" },
 		{ "SunColor", "the tint of the sunlight; the sky reddens the sun near the horizon on its own" },
@@ -1853,11 +1868,11 @@ namespace
 		{ "StarColor", "the tint over the whole star field; the per-star variation survives it" },
 	};
 
-	// The sentence both env rows for a field are built from, or null.
-	const char* envField(std::string_view name)
+	// The entry both env rows for a field are built from, or null.
+	const Field* envField(std::string_view name)
 	{
 		for (const Field& f : kEnvFields)
-			if (name == f.name) return f.what;
+			if (name == f.name) return &f;
 		return nullptr;
 	}
 
@@ -1883,18 +1898,33 @@ std::string engineCall(std::string_view id)
 	std::string_view field;
 	if (splitEnv(id, isSet, field))
 	{
-		if (const char* what = envField(field))
+		if (const Field* f = envField(field))
 		{
 			std::string out = isSet ? "Sets " : "Reads ";
-			out += what;
+			out += f->what;
 			out += ". This is the Sky entity's Environment component — the same "
-			       "value its Details panel shows";
+			       "value its Details panel shows.";
 			// The one thing a graph author has to know before writing to the sky:
-			// the Weather system owns some of these while it is present.
-			out += isSet ? ". A Weather component in the scene writes cloud "
-			               "coverage, fog, wind and precipitation every tick, so a "
-			               "value set here is overwritten while one exists."
-			             : ".";
+			// whether the Weather system owns this field while it is present.
+			if (isSet)
+			{
+				switch (f->weather)
+				{
+				case Wx::Driven:
+					out += " A Weather component in the scene steers this field toward "
+					       "its preset every tick, but lets go of it once something "
+					       "else changes it — a value set here stays until a new "
+					       "weather preset is chosen.";
+					break;
+				case Wx::Forced:
+					out += " A Weather component in the scene rewrites it every tick, "
+					       "so a value set here does not survive while one exists.";
+					break;
+				case Wx::None:
+					out += " A Weather component in the scene leaves this field alone.";
+					break;
+				}
+			}
 			return out;
 		}
 	}

@@ -4,18 +4,18 @@ Erzeugt von `scripts/script_api_docs/coverage.py` aus `scripts/script_api_docs/r
 
 Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Referenz `scripting-reference.html` oder flacher Zwilling in `scripting-api.html#api`), **named** = Id wörtlich auf einer anderen Doku-Seite, **catalog** = nur der Name im HorizonCode-Knotenkatalog, **missing** = nirgends. **hand** = es gibt Handinhalt aus `overlay/` (Gruppen-Einleitung oder zur Id eine Notiz, ein Beispiel, ein Recht, eine Skript-Signatur): das, was der Generator nicht schreiben kann, und die Zahl, die die Gruppen-Schritte bewegen.
 
-**Gesamt: 582 Registry-Ids in 42 Gruppen** — ref 582, named 0, catalog 0, missing 0; hand 254.
+**Gesamt: 582 Registry-Ids in 42 Gruppen** — ref 582, named 0, catalog 0, missing 0; hand 428.
 
 | Gruppe | Kategorie | Ids | Lua/Py `horizon.<gruppe>.*` | ref | named | catalog | missing | hand |
 |---|---|---:|:---:|---:|---:|---:|---:|---:|
-| `env` | Environment | 116 | ja | 116 | 0 | 0 | 0 | 0 |
+| `env` | Environment | 116 | ja | 116 | 0 | 0 | 0 | 116 |
 | `net` | Multiplayer | 44 | ja | 44 | 0 | 0 | 0 | 3 |
 | `physics` | Physics | 33 | ja | 33 | 0 | 0 | 0 | 33 |
 | `math` | Math | 31 | ja | 31 | 0 | 0 | 0 | 31 |
 | `widget` | Widget | 28 | ja | 28 | 0 | 0 | 0 | 0 |
-| `camera` | Camera | 26 | ja | 26 | 0 | 0 | 0 | 0 |
+| `camera` | Camera | 26 | ja | 26 | 0 | 0 | 0 | 26 |
 | `app` | App | 24 | ja | 24 | 0 | 0 | 0 | 1 |
-| `audio` | Audio | 18 | ja | 18 | 0 | 0 | 0 | 0 |
+| `audio` | Audio | 18 | ja | 18 | 0 | 0 | 0 | 18 |
 | `entity` | Entity | 18 | ja | 18 | 0 | 0 | 0 | 18 |
 | `input` | Input | 17 | ja | 17 | 0 | 0 | 0 | 17 |
 | `save` | Save | 17 | ja | 17 | 0 | 0 | 0 | 17 |
@@ -28,7 +28,7 @@ Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Refe
 | `datetime` | DateTime | 9 | ja | 9 | 0 | 0 | 0 | 9 |
 | `http` | HTTP | 9 | ja | 9 | 0 | 0 | 0 | 2 |
 | `prefs` | Prefs | 9 | ja | 9 | 0 | 0 | 0 | 9 |
-| `animator` | Animator | 8 | ja | 8 | 0 | 0 | 0 | 0 |
+| `animator` | Animator | 8 | ja | 8 | 0 | 0 | 0 | 8 |
 | `json` | JSON | 8 | ja | 8 | 0 | 0 | 0 | 8 |
 | `transform` | Transform | 8 | **nein** | 8 | 0 | 0 | 0 | 8 |
 | `db` | Database | 7 | ja | 7 | 0 | 0 | 0 | 1 |
@@ -43,11 +43,11 @@ Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Refe
 | `window` | Window | 5 | ja | 5 | 0 | 0 | 0 | 0 |
 | `content` | Content | 4 | ja | 4 | 0 | 0 | 0 | 4 |
 | `debug` | Debug | 4 | ja | 4 | 0 | 0 | 0 | 4 |
-| `particle` | Particles | 4 | ja | 4 | 0 | 0 | 0 | 0 |
+| `particle` | Particles | 4 | ja | 4 | 0 | 0 | 0 | 4 |
 | `clipboard` | Clipboard | 3 | ja | 3 | 0 | 0 | 0 | 0 |
 | `print` | Print | 3 | ja | 3 | 0 | 0 | 0 | 2 |
 | `process` | Process | 3 | ja | 3 | 0 | 0 | 0 | 2 |
-| `material` | Material | 2 | **nein** | 2 | 0 | 0 | 0 | 0 |
+| `material` | Material | 2 | **nein** | 2 | 0 | 0 | 0 | 2 |
 | `cursor` | Cursor | 1 | **nein** | 1 | 0 | 0 | 0 | 0 |
 | `log` | Debug | 1 | **nein** | 1 | 0 | 0 | 0 | 1 |
 
@@ -292,32 +292,32 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `camera.getPosition()` → position: Vec3 | pure | ref | scripting-reference.html#camera-getPosition |
-| `camera.setPosition(position: Vec3)` | exec | ref | scripting-reference.html#camera-setPosition |
-| `camera.getRotation()` → rotation: Vec3 | pure | ref | scripting-reference.html#camera-getRotation |
-| `camera.setRotation(rotation: Vec3)` | exec | ref | scripting-reference.html#camera-setRotation |
-| `camera.getFov()` → degrees: Float | pure | ref | scripting-reference.html#camera-getFov |
-| `camera.setFov(degrees: Float)` | exec | ref | scripting-reference.html#camera-setFov |
-| `camera.setRigMode(mode: Int)` | exec | ref | scripting-reference.html#camera-setRigMode |
-| `camera.getRigMode()` → mode: Int | pure | ref | scripting-reference.html#camera-getRigMode |
-| `camera.setRigTarget(entity=self: Int)` | exec | ref | scripting-reference.html#camera-setRigTarget |
-| `camera.setArmLength(length: Float)` | exec | ref | scripting-reference.html#camera-setArmLength |
-| `camera.getArmLength()` → length: Float | pure | ref | scripting-reference.html#camera-getArmLength |
-| `camera.setTargetYawMode(mode: Int)` | exec | ref | scripting-reference.html#camera-setTargetYawMode |
-| `camera.getTargetYawMode()` → mode: Int | pure | ref | scripting-reference.html#camera-getTargetYawMode |
-| `camera.getRigYaw()` → degrees: Float | pure | ref | scripting-reference.html#camera-getRigYaw |
-| `camera.getRigPitch()` → degrees: Float | pure | ref | scripting-reference.html#camera-getRigPitch |
-| `camera.addYawPitch(deltaYaw: Float, deltaPitch: Float)` | exec | ref | scripting-reference.html#camera-addYawPitch |
-| `camera.setLagEnabled(enabled: Bool)` | exec | ref | scripting-reference.html#camera-setLagEnabled |
-| `camera.getLagEnabled()` → enabled: Bool | pure | ref | scripting-reference.html#camera-getLagEnabled |
-| `camera.setLagSpeeds(position: Float, rotation: Float)` | exec | ref | scripting-reference.html#camera-setLagSpeeds |
-| `camera.snapRig()` | exec | ref | scripting-reference.html#camera-snapRig |
-| `camera.playShake(positionAmplitude: Float, rotationAmplitude: Float, frequency: Float, duration: Float)` → handle: Int | exec | ref | scripting-reference.html#camera-playShake |
-| `camera.stopShake(handle: Int)` | exec | ref | scripting-reference.html#camera-stopShake |
-| `camera.stopAllShakes()` | exec | ref | scripting-reference.html#camera-stopAllShakes |
-| `camera.kickFov(degrees: Float, attack: Float, hold: Float, decay: Float)` | exec | ref | scripting-reference.html#camera-kickFov |
-| `camera.blendTo(camera: Int, seconds: Float, curve: Int)` | exec | ref | scripting-reference.html#camera-blendTo |
-| `camera.isBlending()` → blending: Bool | pure | ref | scripting-reference.html#camera-isBlending |
+| `camera.getPosition()` → position: Vec3 | pure | ref | scripting-reference.html#camera-getPosition · hand |
+| `camera.setPosition(position: Vec3)` | exec | ref | scripting-reference.html#camera-setPosition · hand |
+| `camera.getRotation()` → rotation: Vec3 | pure | ref | scripting-reference.html#camera-getRotation · hand |
+| `camera.setRotation(rotation: Vec3)` | exec | ref | scripting-reference.html#camera-setRotation · hand |
+| `camera.getFov()` → degrees: Float | pure | ref | scripting-reference.html#camera-getFov · hand |
+| `camera.setFov(degrees: Float)` | exec | ref | scripting-reference.html#camera-setFov · hand |
+| `camera.setRigMode(mode: Int)` | exec | ref | scripting-reference.html#camera-setRigMode · hand |
+| `camera.getRigMode()` → mode: Int | pure | ref | scripting-reference.html#camera-getRigMode · hand |
+| `camera.setRigTarget(entity=self: Int)` | exec | ref | scripting-reference.html#camera-setRigTarget · hand |
+| `camera.setArmLength(length: Float)` | exec | ref | scripting-reference.html#camera-setArmLength · hand |
+| `camera.getArmLength()` → length: Float | pure | ref | scripting-reference.html#camera-getArmLength · hand |
+| `camera.setTargetYawMode(mode: Int)` | exec | ref | scripting-reference.html#camera-setTargetYawMode · hand |
+| `camera.getTargetYawMode()` → mode: Int | pure | ref | scripting-reference.html#camera-getTargetYawMode · hand |
+| `camera.getRigYaw()` → degrees: Float | pure | ref | scripting-reference.html#camera-getRigYaw · hand |
+| `camera.getRigPitch()` → degrees: Float | pure | ref | scripting-reference.html#camera-getRigPitch · hand |
+| `camera.addYawPitch(deltaYaw: Float, deltaPitch: Float)` | exec | ref | scripting-reference.html#camera-addYawPitch · hand |
+| `camera.setLagEnabled(enabled: Bool)` | exec | ref | scripting-reference.html#camera-setLagEnabled · hand |
+| `camera.getLagEnabled()` → enabled: Bool | pure | ref | scripting-reference.html#camera-getLagEnabled · hand |
+| `camera.setLagSpeeds(position: Float, rotation: Float)` | exec | ref | scripting-reference.html#camera-setLagSpeeds · hand |
+| `camera.snapRig()` | exec | ref | scripting-reference.html#camera-snapRig · hand |
+| `camera.playShake(positionAmplitude: Float, rotationAmplitude: Float, frequency: Float, duration: Float)` → handle: Int | exec | ref | scripting-reference.html#camera-playShake · hand |
+| `camera.stopShake(handle: Int)` | exec | ref | scripting-reference.html#camera-stopShake · hand |
+| `camera.stopAllShakes()` | exec | ref | scripting-reference.html#camera-stopAllShakes · hand |
+| `camera.kickFov(degrees: Float, attack: Float, hold: Float, decay: Float)` | exec | ref | scripting-reference.html#camera-kickFov · hand |
+| `camera.blendTo(camera: Int, seconds: Float, curve: Int)` | exec | ref | scripting-reference.html#camera-blendTo · hand |
+| `camera.isBlending()` → blending: Bool | pure | ref | scripting-reference.html#camera-isBlending · hand |
 
 ### `app` — App (24)
 
@@ -352,24 +352,24 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `audio.play(asset: String, volume: Float, pitch: Float, loop: Bool)` → handle: Int | exec | ref | scripting-reference.html#audio-play |
-| `audio.playAt(asset: String, position: Vec3, volume: Float, pitch: Float, loop: Bool, minDist: Float, maxDist: Float)` → handle: Int | exec | ref | scripting-reference.html#audio-playAt |
-| `audio.stop(handle: Int)` | exec | ref | scripting-reference.html#audio-stop |
-| `audio.stopAll()` | exec | ref | scripting-reference.html#audio-stopAll |
-| `audio.isPlaying(handle: Int)` → playing: Bool | pure | ref | scripting-reference.html#audio-isPlaying |
-| `audio.setBusVolume(bus: String, volume: Float)` | exec | ref | scripting-reference.html#audio-setBusVolume |
-| `audio.setSoundPosition(handle: Int, position: Vec3)` | exec | ref | scripting-reference.html#audio-setSoundPosition |
-| `audio.pause(handle: Int)` | exec | ref | scripting-reference.html#audio-pause |
-| `audio.resume(handle: Int)` | exec | ref | scripting-reference.html#audio-resume |
-| `audio.isPaused(handle: Int)` → paused: Bool | pure | ref | scripting-reference.html#audio-isPaused |
-| `audio.setVolume(handle: Int, volume: Float)` | exec | ref | scripting-reference.html#audio-setVolume |
-| `audio.getVolume(handle: Int)` → volume: Float | pure | ref | scripting-reference.html#audio-getVolume |
-| `audio.setPitch(handle: Int, pitch: Float)` | exec | ref | scripting-reference.html#audio-setPitch |
-| `audio.getPitch(handle: Int)` → pitch: Float | pure | ref | scripting-reference.html#audio-getPitch |
-| `audio.setLooping(handle: Int, loop: Bool)` | exec | ref | scripting-reference.html#audio-setLooping |
-| `audio.seek(handle: Int, seconds: Float)` | exec | ref | scripting-reference.html#audio-seek |
-| `audio.getTime(handle: Int)` → seconds: Float | pure | ref | scripting-reference.html#audio-getTime |
-| `audio.getLength(handle: Int)` → seconds: Float | pure | ref | scripting-reference.html#audio-getLength |
+| `audio.play(asset: String, volume: Float, pitch: Float, loop: Bool)` → handle: Int | exec | ref | scripting-reference.html#audio-play · hand |
+| `audio.playAt(asset: String, position: Vec3, volume: Float, pitch: Float, loop: Bool, minDist: Float, maxDist: Float)` → handle: Int | exec | ref | scripting-reference.html#audio-playAt · hand |
+| `audio.stop(handle: Int)` | exec | ref | scripting-reference.html#audio-stop · hand |
+| `audio.stopAll()` | exec | ref | scripting-reference.html#audio-stopAll · hand |
+| `audio.isPlaying(handle: Int)` → playing: Bool | pure | ref | scripting-reference.html#audio-isPlaying · hand |
+| `audio.setBusVolume(bus: String, volume: Float)` | exec | ref | scripting-reference.html#audio-setBusVolume · hand |
+| `audio.setSoundPosition(handle: Int, position: Vec3)` | exec | ref | scripting-reference.html#audio-setSoundPosition · hand |
+| `audio.pause(handle: Int)` | exec | ref | scripting-reference.html#audio-pause · hand |
+| `audio.resume(handle: Int)` | exec | ref | scripting-reference.html#audio-resume · hand |
+| `audio.isPaused(handle: Int)` → paused: Bool | pure | ref | scripting-reference.html#audio-isPaused · hand |
+| `audio.setVolume(handle: Int, volume: Float)` | exec | ref | scripting-reference.html#audio-setVolume · hand |
+| `audio.getVolume(handle: Int)` → volume: Float | pure | ref | scripting-reference.html#audio-getVolume · hand |
+| `audio.setPitch(handle: Int, pitch: Float)` | exec | ref | scripting-reference.html#audio-setPitch · hand |
+| `audio.getPitch(handle: Int)` → pitch: Float | pure | ref | scripting-reference.html#audio-getPitch · hand |
+| `audio.setLooping(handle: Int, loop: Bool)` | exec | ref | scripting-reference.html#audio-setLooping · hand |
+| `audio.seek(handle: Int, seconds: Float)` | exec | ref | scripting-reference.html#audio-seek · hand |
+| `audio.getTime(handle: Int)` → seconds: Float | pure | ref | scripting-reference.html#audio-getTime · hand |
+| `audio.getLength(handle: Int)` → seconds: Float | pure | ref | scripting-reference.html#audio-getLength · hand |
 
 ### `entity` — Entity (18)
 
@@ -591,14 +591,14 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `animator.setParam(entity=self: Int, name: String, value: Float)` | exec | ref | scripting-reference.html#animator-setParam |
-| `animator.getParam(entity=self: Int, name: String)` → value: Float | pure | ref | scripting-reference.html#animator-getParam |
-| `animator.getState(entity=self: Int)` → state: String | pure | ref | scripting-reference.html#animator-getState |
-| `animator.notifiesOf(clipPath: String)` → names: String[] | pure | ref | scripting-reference.html#animator-notifiesOf |
-| `animator.setLayerWeight(entity=self: Int, layer: String, weight: Float)` | exec | ref | scripting-reference.html#animator-setLayerWeight |
-| `animator.getLayerWeight(entity=self: Int, layer: String)` → weight: Float | pure | ref | scripting-reference.html#animator-getLayerWeight |
-| `animator.playLayer(entity=self: Int, layer: String)` | exec | ref | scripting-reference.html#animator-playLayer |
-| `animator.layerNames(entity=self: Int)` → names: String[] | pure | ref | scripting-reference.html#animator-layerNames |
+| `animator.setParam(entity=self: Int, name: String, value: Float)` | exec | ref | scripting-reference.html#animator-setParam · hand |
+| `animator.getParam(entity=self: Int, name: String)` → value: Float | pure | ref | scripting-reference.html#animator-getParam · hand |
+| `animator.getState(entity=self: Int)` → state: String | pure | ref | scripting-reference.html#animator-getState · hand |
+| `animator.notifiesOf(clipPath: String)` → names: String[] | pure | ref | scripting-reference.html#animator-notifiesOf · hand |
+| `animator.setLayerWeight(entity=self: Int, layer: String, weight: Float)` | exec | ref | scripting-reference.html#animator-setLayerWeight · hand |
+| `animator.getLayerWeight(entity=self: Int, layer: String)` → weight: Float | pure | ref | scripting-reference.html#animator-getLayerWeight · hand |
+| `animator.playLayer(entity=self: Int, layer: String)` | exec | ref | scripting-reference.html#animator-playLayer · hand |
+| `animator.layerNames(entity=self: Int)` → names: String[] | pure | ref | scripting-reference.html#animator-layerNames · hand |
 
 ### `json` — JSON (8)
 
@@ -757,10 +757,10 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `particle.play(entity=self: Int)` | exec | ref | scripting-reference.html#particle-play |
-| `particle.stop(entity=self: Int)` | exec | ref | scripting-reference.html#particle-stop |
-| `particle.burst(entity=self: Int, count: Int)` → emitted: Int | exec | ref | scripting-reference.html#particle-burst |
-| `particle.isPlaying(entity=self: Int)` → playing: Bool | pure | ref | scripting-reference.html#particle-isPlaying |
+| `particle.play(entity=self: Int)` | exec | ref | scripting-reference.html#particle-play · hand |
+| `particle.stop(entity=self: Int)` | exec | ref | scripting-reference.html#particle-stop · hand |
+| `particle.burst(entity=self: Int, count: Int)` → emitted: Int | exec | ref | scripting-reference.html#particle-burst · hand |
+| `particle.isPlaying(entity=self: Int)` → playing: Bool | pure | ref | scripting-reference.html#particle-isPlaying · hand |
 
 ### `clipboard` — Clipboard (3)
 
@@ -792,8 +792,8 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `material.getParam(entity=self: Int, name: String)` → value: Color | pure | ref | scripting-reference.html#material-getParam |
-| `material.setParam(entity=self: Int, name: String, value: Color)` → ok: Bool | exec | ref | scripting-reference.html#material-setParam |
+| `material.getParam(entity=self: Int, name: String)` → value: Color | pure | ref | scripting-reference.html#material-getParam · hand |
+| `material.setParam(entity=self: Int, name: String, value: Color)` → ok: Bool | exec | ref | scripting-reference.html#material-setParam · hand |
 
 ### `cursor` — Cursor (1)
 

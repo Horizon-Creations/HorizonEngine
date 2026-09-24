@@ -46,9 +46,9 @@
       "title": "Material",
       "items": [
         { "name": "setMaterialParam", "args": "entity, name, x [, y, z, w]", "returns": "bool", "twin": "material.setParam",
-          "desc": "Sets the node-graph material parameter <code>name</code> on the entity's material at runtime. One to four numbers, omitted ones are 0, so a scalar parameter takes just <code>x</code>. <code>false</code> when the entity has no material or the parameter does not exist. There is no <code>horizon.material.*</code> group." },
+          "desc": "Sets the node-graph material parameter <code>name</code> on the entity's material at runtime. One to four numbers, omitted ones are 0, so a scalar parameter takes just <code>x</code>. <code>false</code> when the entity has no material or the parameter does not exist. <strong>Known issue:</strong> it writes the material asset, so every entity using that material changes with it (see <a href=\"scripting-reference.html#material\">Material</a>). There is no <code>horizon.material.*</code> group." },
         { "name": "getMaterialParam", "args": "entity, name", "returns": "x, y, z, w", "twin": "material.getParam",
-          "desc": "Reads a material parameter back as four numbers; <code>(0, 0, 0, 0)</code> when it cannot be found." }
+          "desc": "Reads a material parameter back as four numbers, from the material asset (an override on the entity's Details panel is not seen); <code>(0, 0, 0, 0)</code> when it cannot be found." }
       ]
     },
     {

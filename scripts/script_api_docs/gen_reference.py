@@ -138,6 +138,34 @@ def callbacks_from_source() -> tuple[set[str], set[str]]:
     return lua, py
 
 
+def env_fields_from_source() -> list[tuple[str, str, str]]:
+    """(member, Name, type) per HE_ENV_FIELDS_* row in EngineApi.h, in list order —
+    the X-lists the env.* registry rows, the component and the scene file are all
+    generated from."""
+    h = src("src/HE_Scene/include/HorizonScene/EngineApi.h")
+    out = []
+    for kind in ("FLOAT", "BOOL", "INT", "COLOR"):
+        m = re.search(rf"#define HE_ENV_FIELDS_{kind}\(X\)((?:.*\\\n)*.*)", h)
+        if not m:
+            raise SystemExit(f"EngineApi.h: HE_ENV_FIELDS_{kind} not found")
+        for member, name in re.findall(r"X\(\s*(\w+),\s*(\w+),", m.group(1)):
+            out.append((member, name, kind))
+    return out
+
+
+def weather_owned_from_source() -> dict[str, str]:
+    """EnvironmentComponent member -> what WeatherSystem::update does to it:
+    'driven' (its drive() back-off: written toward the preset until something
+    else changes it) or 'forced' (assigned every tick)."""
+    w = src("src/HE_Scene/src/WeatherSystem.cpp")
+    out = {m: "driven" for m in re.findall(r"drive\(env->(\w+),", w)}
+    for m in re.findall(r"env->(\w+) = wx\.", w):
+        out.setdefault(m, "forced")
+    if not out:
+        raise SystemExit("WeatherSystem.cpp: no drive(env->…) found — the weather column would be empty")
+    return out
+
+
 def cb_name(sig: str) -> str:
     """onRep_&lt;var&gt;(self, old) -> onRep_; a remote call's <name>(…) -> ""."""
     name = html.unescape(sig).split("(")[0].replace("<var>", "")
@@ -508,7 +536,7 @@ def section_group(g: str, rows: list[dict], cluster: str, notes: dict, link,
             L.append(f'          <h3 id="ex-{slug(f["id"])}">Example: {esc(f["id"])}</h3>')
             L.append(examples_block(f"ex-{slug(f['id'])}", ex).rstrip())
     if g == "env":
-        L.append(env_table(rows, link))
+        L.append(env_table(rows, link, notes))
     else:
         L.append("""          <div class="docs-table-wrap">
             <table class="docs-table">
@@ -524,36 +552,73 @@ def section_group(g: str, rows: list[dict], cluster: str, notes: dict, link,
     return "\n".join(L)
 
 
-def env_table(rows: list[dict], link) -> str:
-    """env.* is get/set pairs over the sky and weather fields: one line per field."""
-    fields: dict[str, dict] = {}
-    for f in rows:
-        m = re.match(r"env\.(get|set)(.+)", f["id"])
-        fields.setdefault(m.group(2), {})[m.group(1)] = f
+# The part of every env row's description that is the same for all 58 fields
+# (HcNodeDocs composes it around the field's own sentence). The table states it
+# once above itself instead of 116 times.
+ENV_DOC_SUFFIX = re.compile(r"\s*This is the Sky entity's Environment component — the same "
+                            r"value its Details panel shows\.(?:\s*A Weather component.*)?$")
+WEATHER_TEXT = {"driven": "steered toward the preset, released once changed",
+                "forced": "rewritten every tick",
+                None: "—"}
+
+
+def env_table(rows: list[dict], link, notes: dict) -> str:
+    """env.* is get/set pairs over the sky and weather fields: one line per field.
+
+    Everything in a line is derived: the field list and its order from the
+    HE_ENV_FIELDS_* X-lists in EngineApi.h (the same lists the registry rows are
+    generated from), the Weather column from WeatherSystem.cpp, the description
+    from the registry's doc text. Each is checked against the other sources, so
+    a field added to the engine cannot be missing here or described wrongly."""
+    by_id = {f["id"]: f for f in rows}
+    src_fields = env_fields_from_source()
+    want = {f"env.{p}{name}" for _, name, _ in src_fields for p in ("get", "set")}
+    if want != set(by_id):
+        raise SystemExit(f"env rows disagree with HE_ENV_FIELDS_*: missing {sorted(want - set(by_id))}, "
+                         f"extra {sorted(set(by_id) - want)}")
+    weather = weather_owned_from_source()
+    members = {m for m, _, _ in src_fields}
+    if not set(weather) <= members:
+        raise SystemExit(f"WeatherSystem.cpp writes env fields the X-lists do not have: "
+                         f"{sorted(set(weather) - members)}")
     L = [f"""          <p>
-            Every sky and weather field of the scene's Environment component, as a
-            <code>get</code>/<code>set</code> pair: {len(fields)} fields,
-            {len(rows)} functions. <code>horizon.env.getFogDensity()</code> reads
-            the field, <code>horizon.env.setFogDensity(value)</code> writes it;
-            a <code>color</code> or <code>vec3</code> field is spread into its
-            numbers like any other argument. Setters are actions, getters queries,
-            and both act on the active scene's environment.
+            All {len(src_fields)} fields as one table, {len(rows)} functions: for a
+            field <em>Name</em>, <code>horizon.env.get<em>Name</em>()</code> reads it
+            and <code>horizon.env.set<em>Name</em>(value)</code> writes it; in
+            HorizonCode they are <em>Get …</em> and <em>Set …</em> nodes, in C++
+            <code>HE::api::env::get<em>Name</em>(ctx)</code> /
+            <code>set<em>Name</em>(ctx, value)</code>. Setters are actions, getters
+            queries. Each field is the value of the same name on the Sky entity's
+            Environment component, which its Details panel shows. The
+            <strong>Weather</strong> column says what a Weather component in the scene
+            does to the field.
           </p>
           <div class="docs-table-wrap">
             <table class="docs-table">
               <thead>
-                <tr><th>Field</th><th>Type</th><th>Description</th></tr>
+                <tr><th>Field</th><th>Type</th><th>Weather</th><th>Description</th></tr>
               </thead>
               <tbody>"""]
-    for name, pair in fields.items():
-        get, set_ = pair.get("get"), pair.get("set")
-        ref = get or set_
-        t = (get["results"][0]["type"] if get and get["results"]
-             else set_["params"][-1]["type"])
+    for member, name, _ in src_fields:
+        get, set_ = by_id[f"env.get{name}"], by_id[f"env.set{name}"]
+        t = get["results"][0]["type"]
+        wx = weather.get(member)
+        # The doc text of the setter says the same thing in prose (HcNodeDocs
+        # derives it from its own table); a disagreement is a bug in one of them.
+        said = ("steers this field" in set_["doc"]) and "driven" or \
+               ("rewrites it every tick" in set_["doc"]) and "forced" or None
+        if said != wx:
+            raise SystemExit(f"env.set{name}: HcNodeDocs says weather={said}, WeatherSystem.cpp {wx}")
         ids = " / ".join(f'<code id="{slug(x["id"])}">{esc(x["id"].split(".", 1)[1])}</code>'
-                         for x in (get, set_) if x)
-        L.append(f'                <tr><td>{esc(name)}<br>{ids}</td>'
-                 f'<td>{TYPE_NAME.get(t, t.lower())}</td><td>{link(ref["doc"], ref["id"])}</td></tr>')
+                         for x in (get, set_))
+        desc = ENV_DOC_SUFFIX.sub("", get["doc"])
+        desc = re.sub(r"^Reads (.)", lambda m: m.group(1).upper(), desc)
+        extra = " ".join(n for n in (notes.get(get["id"], {}).get("note"),
+                                     notes.get(set_["id"], {}).get("note")) if n)
+        disp = get["display"].removeprefix("Get ")
+        L.append(f'                <tr><td>{esc(disp)}<br>{ids}</td>'
+                 f'<td>{TYPE_NAME.get(t, t.lower())}</td><td>{WEATHER_TEXT[wx]}</td>'
+                 f'<td>{link(desc, get["id"])}{(" " + extra) if extra else ""}</td></tr>')
     L.append("""              </tbody>
             </table>
           </div>""")
