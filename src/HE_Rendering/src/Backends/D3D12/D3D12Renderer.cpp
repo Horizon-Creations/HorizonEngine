@@ -605,6 +605,13 @@ VSOut VSMainInstanced(VSIn i, uint iid : SV_InstanceID)
 }
 // Depth-only vertex shader for the shadow pass: uMVP carries cascadeVP * model.
 float4 VSDepth(VSIn i) : SV_POSITION { return mul(uMVP, float4(i.pos, 1.0)); }
+// Instanced twin for a run of same-mesh shadow casters: one DrawIndexedInstanced
+// per run, {cascadeVP * model, model} per caster in the t3 instance ring —
+// VSDepth's own product, so the depth map does not change.
+float4 VSDepthInstanced(VSIn i, uint iid : SV_InstanceID) : SV_POSITION
+{
+    return mul(gInstances[iid].mvp, float4(i.pos, 1.0));
+}
 
 // Cascaded shadows — the same function D3D11 runs (the HLSL twin of Metal's
 // shadowFactor() and GL's computeShadow()): pick the first cascade whose far
@@ -1388,6 +1395,7 @@ struct D3D12RendererImpl
     // project's count (1..3).
     static constexpr int         kCsmCascades = 3;
     ComPtr<ID3D12PipelineState>  depthPSO;        // depth-only pass (with depth bias)
+    ComPtr<ID3D12PipelineState>  depthPSOInstanced; // same, one draw per same-mesh caster run (t3 ring)
     ComPtr<ID3D12Resource>       shadowDepth;
     int                          shadowSize = HE::kShadowMapResolution;
     D3D12_RESOURCE_STATES        shadowState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -2713,6 +2721,42 @@ struct D3D12RendererImpl
     uint8_t*                     perObjectPtr[k_frameCount]{};
     ComPtr<ID3D12Resource>       perInstanceRing[k_frameCount]; // upload: instance {mvp,model} (A3)
     uint8_t*                     perInstancePtr[k_frameCount]{};
+    UINT                         instRingCursor = 0; // next free slot, reset per DrawScene
+
+    // One instanced draw for a depth-only batch (a shadow caster run, an SSAO
+    // or GI pre-pass batch): `count` {A, B} matrix pairs from fill(k, pair) go
+    // into the next free slots of perInstanceRing[fi] — the geometry pass's
+    // 128-byte ring — and the bound PSO's instanced VS reads them through the
+    // root SRV `t3Param` of instPSO's root signature (the same one restorePSO
+    // uses, already bound). Every caller writes the products its per-object
+    // loop puts into a constant buffer, so the instanced frame is the loop's
+    // frame. Vertex/index buffers are the caller's; restorePSO is bound again
+    // afterwards. false = nothing drawn (no twin PSO, ring full, too few
+    // instances, HE_DEPTH_INSTANCING=0): the caller loops.
+    template <class Fill>
+    bool drawDepthInstanced(ID3D12GraphicsCommandList* cl, UINT fi,
+                            ID3D12PipelineState* instPSO, ID3D12PipelineState* restorePSO,
+                            UINT t3Param, UINT indexCount, UINT startIndex, UINT count, Fill&& fill)
+    {
+        static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be two mat4");
+        if (!instPSO || !perInstancePtr[fi] || count < 2 || !RenderSorter::depthInstancingEnabled()
+            || static_cast<UINT64>(instRingCursor) + count > k_maxInstances)
+            return false;
+        uint8_t* dst = perInstancePtr[fi] + static_cast<size_t>(instRingCursor) * k_instStride;
+        for (UINT k = 0; k < count; ++k)
+        {
+            glm::mat4 pair[2];
+            fill(k, pair);
+            std::memcpy(dst + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
+        }
+        cl->SetPipelineState(instPSO);
+        cl->SetGraphicsRootShaderResourceView(t3Param,
+            perInstanceRing[fi]->GetGPUVirtualAddress() + static_cast<UINT64>(instRingCursor) * k_instStride);
+        cl->DrawIndexedInstanced(indexCount, count, startIndex, 0, 0);
+        cl->SetPipelineState(restorePSO);
+        instRingCursor += count;
+        return true;
+    }
     // Clustered lighting (plan P7 on the forward path): three upload buffers
     // per frame in flight, refilled from HE::BuildClusterLights and bound as
     // root SRVs t18/t19/t20 (root parameters 6/7/8 of rootSig + skinnedRootSig).
@@ -3501,6 +3545,7 @@ struct D3D12RendererImpl
 
     // ── SSAO ────────────────────────────────────────────────────────────────
     ComPtr<ID3D12PipelineState>  ssaoPosPSO;
+    ComPtr<ID3D12PipelineState>  ssaoPosPSOInstanced; // VSPosInstanced, {mvp, modelView} per instance at t3
     ComPtr<ID3D12PipelineState>  ssaoPSO;
     ComPtr<ID3D12PipelineState>  ssaoBlurPSO;
     ComPtr<ID3D12RootSignature>  ssaoPosRS;
@@ -4261,6 +4306,19 @@ struct D3D12RendererImpl
                 dp.RasterizerState.SlopeScaledDepthBias = 2.0f;
                 dp.RasterizerState.DepthBiasClamp       = 0.0f;
                 device->CreateGraphicsPipelineState(&dp, IID_PPV_ARGS(&depthPSO));
+                // Instanced twin: same states and root signature (t3 is its
+                // root SRV, param 4), VS swapped. Optional — without it every
+                // caster run loops through depthPSO.
+                ComPtr<ID3DBlob> divs, dierr;
+                if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+                                         "VSDepthInstanced", "vs_5_0", flags, 0, &divs, &dierr)))
+                {
+                    dp.VS = { divs->GetBufferPointer(), divs->GetBufferSize() };
+                    device->CreateGraphicsPipelineState(&dp, IID_PPV_ARGS(&depthPSOInstanced));
+                }
+                else
+                    HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: VSDepthInstanced compile failed: ")
+                        + (dierr ? static_cast<const char*>(dierr->GetBufferPointer()) : "")).c_str());
             }
         }
 
@@ -4379,13 +4437,18 @@ struct D3D12RendererImpl
 
         // ── Root signature for pos prepass ───────────────────────────────────
         // [0] CBV b0 (per-object: mvp + modelView)
+        // [1] root SRV t3 (vertex): the instance ring for VSPosInstanced —
+        //     unset and unread by the per-object VSPos draws
         {
-            D3D12_ROOT_PARAMETER p0{};
-            p0.ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
-            p0.Descriptor       = { 0, 0 }; // b0
-            p0.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            D3D12_ROOT_PARAMETER p0[2]{};
+            p0[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            p0[0].Descriptor       = { 0, 0 }; // b0
+            p0[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            p0[1].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            p0[1].Descriptor       = { 3, 0 }; // t3
+            p0[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
             D3D12_ROOT_SIGNATURE_DESC rsd{};
-            rsd.NumParameters = 1; rsd.pParameters = &p0;
+            rsd.NumParameters = 2; rsd.pParameters = p0;
             rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
             ComPtr<ID3DBlob> sig, e;
             if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e)) ||
@@ -4461,6 +4524,14 @@ struct D3D12RendererImpl
             pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
             if (FAILED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&ssaoPosPSO))))
             { HE_LOG_ERROR(RHI, "%s", "D3D12 SSAO pos PSO failed"); return false; }
+            // Instanced twin for GeometryPass batches, VS swapped. Optional: a
+            // failure is logged by compile() and every batch loops through VSPos.
+            ComPtr<ID3DBlob> posivs;
+            if (compile(kSSAOPosHLSL, "VSPosInstanced", "vs_5_0", posivs))
+            {
+                pd.VS = { posivs->GetBufferPointer(), posivs->GetBufferSize() };
+                device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&ssaoPosPSOInstanced));
+            }
         }
 
         // ── SSAO main pass PSO (fullscreen, R8, no depth) ────────────────────
@@ -5580,8 +5651,36 @@ struct D3D12RendererImpl
                 ++posDrawIdx;
             };
 
-            if (!dc->instanceTransforms.empty())
-                for (const glm::mat4& t : dc->instanceTransforms) drawPosOne(t);
+            // A GeometryPass batch (instanceTransforms non-empty ⇔ run > 1) is
+            // one instanced draw on the position-only path, with the loop's
+            // {mvp, modelView} per instance (root parameter 1 of ssaoPosRS =
+            // t3). The MRT reflection pre-pass keeps the loop: its VS is the
+            // library's cross-compiled GLSL, whose instanced variant reads the
+            // model as vertex attributes, not from a structured buffer.
+            const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+            if (!reflMrt)
+            {
+                cl->IASetVertexBuffers(0, 1, &m.vbv);
+                cl->IASetIndexBuffer(&m.ibv);
+                if (drawDepthInstanced(cl, fi, ssaoPosPSOInstanced.Get(), ssaoPosPSO.Get(), 1,
+                        range.count, range.start, static_cast<UINT>(inst.size()),
+                        [&](UINT k, glm::mat4* pair) {
+                            pair[0] = viewProj * inst[k];
+                            pair[1] = view     * inst[k];
+                        }))
+                {
+                    static bool loggedOnce = false; // the runtime witness on Windows
+                    if (!loggedOnce)
+                    {
+                        loggedOnce = true;
+                        HE_LOG_INFO(RHI, "D3D12Renderer: SSAO pre-pass instanced (first batch: %u instances)",
+                                    static_cast<unsigned>(inst.size()));
+                    }
+                    continue;
+                }
+            }
+            if (!inst.empty())
+                for (const glm::mat4& t : inst) drawPosOne(t);
             else
                 drawPosOne(dc->transform);
         }
@@ -5699,6 +5798,7 @@ struct D3D12RendererImpl
     ComPtr<ID3D12RootSignature> giComputeRS;   // b0/b1 CBVs, t0-t1+t5-t6 table, t2/t3/t4 root SRVs, u0-u1 table, t7 root SRV (DXR TLAS)
     ComPtr<ID3D12RootSignature> giFsRS;        // b0 CBV + t0-t2 table + s0 static point-clamp
     ComPtr<ID3D12PipelineState> giGBufPSO;     // MRT pos+norm, D16
+    ComPtr<ID3D12PipelineState> giGBufPSOInstanced; // GiGBufVSInstanced, {mvp, model} per instance at t3
     ComPtr<ID3D12PipelineState> giShadowPSO;   // compute
     ComPtr<ID3D12PipelineState> giProbePSO;    // compute
     ComPtr<ID3D12PipelineState> giTemporalPSO; // fullscreen RGBA16F
@@ -6045,15 +6145,20 @@ struct D3D12RendererImpl
 
         bool ok = true;
 
-        // ── G-buffer root signature: b0 root CBV only ───────────────────────
+        // ── G-buffer root signature: b0 root CBV + t3 root SRV ──────────────
+        // t3 (vertex) is the instance ring GiGBufVSInstanced reads; the
+        // per-object GiGBufVS draws neither set nor read it.
         if (ok)
         {
-            D3D12_ROOT_PARAMETER p0{};
-            p0.ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
-            p0.Descriptor       = { 0, 0 };
-            p0.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            D3D12_ROOT_PARAMETER p0[2]{};
+            p0[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            p0[0].Descriptor       = { 0, 0 };
+            p0[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            p0[1].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            p0[1].Descriptor       = { 3, 0 }; // t3
+            p0[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
             D3D12_ROOT_SIGNATURE_DESC rsd{};
-            rsd.NumParameters = 1; rsd.pParameters = &p0;
+            rsd.NumParameters = 2; rsd.pParameters = p0;
             rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
             ComPtr<ID3DBlob> sig, e;
             ok = SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e))
@@ -6192,6 +6297,15 @@ struct D3D12RendererImpl
             pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
             pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
             ok = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&giGBufPSO)));
+            // Instanced twin for GeometryPass batches, VS swapped. Kept out of
+            // `ok` on purpose: a failure here must not take GI down with it —
+            // every batch then loops through giGBufPSO.
+            ComPtr<ID3DBlob> gbufIVS;
+            if (ok && compile(kGiGBufHLSL, "GiGBufVSInstanced", "vs_5_0", gbufIVS))
+            {
+                pd.VS = { gbufIVS->GetBufferPointer(), gbufIVS->GetBufferSize() };
+                device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&giGBufPSOInstanced));
+            }
         }
         if (ok) // compute PSOs
         {
@@ -6298,7 +6412,7 @@ struct D3D12RendererImpl
             HE_LOG_ERROR(RHI, "%s",
                         "D3D12Renderer: GI pipeline build failed — GI disabled");
             giGBufRS.Reset(); giComputeRS.Reset(); giFsRS.Reset();
-            giGBufPSO.Reset(); giShadowPSO.Reset(); giProbePSO.Reset();
+            giGBufPSO.Reset(); giGBufPSOInstanced.Reset(); giShadowPSO.Reset(); giProbePSO.Reset();
             giTemporalPSO.Reset(); giBlurPSO.Reset();
             giSrvHeap.Reset(); giRtvHeap.Reset(); giDsvHeap.Reset();
             giSupported = false;
@@ -6669,8 +6783,27 @@ struct D3D12RendererImpl
                     cl->DrawIndexedInstanced(range.count, 1, range.start, 0, 0);
                     ++gbufIdx;
                 };
-                if (!dc->instanceTransforms.empty())
-                    for (const glm::mat4& t : dc->instanceTransforms) drawOne(t);
+                // A GeometryPass batch is one instanced draw with the loop's
+                // {mvp, model} per instance (root parameter 1 of giGBufRS = t3).
+                const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+                if (drawDepthInstanced(cl, fi, giGBufPSOInstanced.Get(), giGBufPSO.Get(), 1,
+                        range.count, range.start, static_cast<UINT>(inst.size()),
+                        [&](UINT k, glm::mat4* pair) {
+                            pair[0] = viewProj * inst[k];
+                            pair[1] = inst[k];
+                        }))
+                {
+                    static bool loggedOnce = false;
+                    if (!loggedOnce)
+                    {
+                        loggedOnce = true;
+                        HE_LOG_INFO(RHI, "D3D12Renderer: GI pre-pass instanced (first batch: %u instances)",
+                                    static_cast<unsigned>(inst.size()));
+                    }
+                    continue;
+                }
+                if (!inst.empty())
+                    for (const glm::mat4& t : inst) drawOne(t);
                 else
                     drawOne(dc->transform);
             }
@@ -8389,7 +8522,7 @@ void D3D12Renderer::Shutdown()
     m_impl->destroyGiTargets();
     m_impl->m_retiredTextures.clear(); // includes GI buffers just retired above
     m_impl->giGBufRS.Reset(); m_impl->giComputeRS.Reset(); m_impl->giFsRS.Reset();
-    m_impl->giGBufPSO.Reset(); m_impl->giShadowPSO.Reset(); m_impl->giProbePSO.Reset();
+    m_impl->giGBufPSO.Reset(); m_impl->giGBufPSOInstanced.Reset(); m_impl->giShadowPSO.Reset(); m_impl->giProbePSO.Reset();
     m_impl->giTemporalPSO.Reset(); m_impl->giBlurPSO.Reset();
     m_impl->giSrvHeap.Reset(); m_impl->giRtvHeap.Reset(); m_impl->giDsvHeap.Reset();
     for (UINT i = 0; i < k_frameCount; ++i)
@@ -8426,6 +8559,7 @@ void D3D12Renderer::Shutdown()
     m_impl->pso.Reset();
     m_impl->transparentPSO.Reset();
     m_impl->depthPSO.Reset();
+    m_impl->depthPSOInstanced.Reset();
     m_impl->shadowDepth.Reset();
     m_impl->localShadowDepth.Reset();
     m_impl->rootSig.Reset();
@@ -8793,7 +8927,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // Instance-transform ring (A3): sub-allocated per instanced batch, one instanced draw each.
     const D3D12_GPU_VIRTUAL_ADDRESS instRingBase = p.perInstanceRing[p.frameIndex]->GetGPUVirtualAddress();
     uint8_t* instRingPtr = p.perInstancePtr[p.frameIndex];
-    UINT instCursor = 0; // next free instance slot in the ring
+    // Next free instance slot in the ring. An impl member, not a local: the
+    // instanced depth draws of the shadow pass, runGiShadow and runSSAO take
+    // their slots from the same ring in the same command list, BEFORE the
+    // geometry pass — the CPU writes land now, the GPU reads them at execute
+    // time, so every pass must get slots of its own.
+    p.instRingCursor = 0;
+    UINT& instCursor = p.instRingCursor;
 
     auto transition = [&](ID3D12Resource* res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
     {
@@ -8838,9 +8978,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // drops `skipEntity`'s geometry: the entity the local light itself
             // sits on (a light authored onto a mesh entity would otherwise
             // render that mesh at z≈0 into its own map and shadow itself out);
-            // kNoOwnerEntity (every cascade) skips nothing. Runs of one mesh
-            // are drawn one call per transform, one ring slot each — the depth
-            // VS reads b0, not the instance ring.
+            // kNoOwnerEntity (every cascade) skips nothing. A run of more than
+            // one caster of the same mesh is ONE instanced draw (depthPSOInstanced,
+            // {clip * model, model} per caster in the instance ring at root SRV
+            // t3 — VSDepth's own product); a run of one, or one the ring cannot
+            // take, stays on the per-caster draw with one b0 ring slot each.
+            // Mirrors GL's renderDepthLayer / Metal's encodeDepthLayer.
             auto renderDepthLayer = [&](D3D12_CPU_DESCRIPTOR_HANDLE sdsv, int size,
                                         const glm::mat4& viewProj, const glm::mat4& clip,
                                         uint32_t skipEntity)
@@ -8863,6 +9006,24 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                     cl->IASetVertexBuffers(0, 1, &m.vbv);
                     cl->IASetIndexBuffer(&m.ibv);
                     const glm::mat4* xf = p.shadowBatches.transforms.data() + b.first;
+                    // Root parameter 4 of rootSig = the t3 instance SRV.
+                    if (p.drawDepthInstanced(cl, p.frameIndex, p.depthPSOInstanced.Get(), p.depthPSO.Get(),
+                            4, m.indexCount, 0, b.count,
+                            [&](UINT k, glm::mat4* pair) {
+                                pair[0] = clip * xf[k];
+                                pair[1] = xf[k];
+                            }))
+                    {
+                        ++p.statDraws; p.statTris += (m.indexCount / 3) * b.count;
+                        static bool loggedOnce = false; // the runtime witness on Windows
+                        if (!loggedOnce)
+                        {
+                            loggedOnce = true;
+                            HE_LOG_INFO(RHI, "D3D12Renderer: shadow pass instanced (first run: %u casters)",
+                                        b.count);
+                        }
+                        continue;
+                    }
                     for (uint32_t k = 0; k < b.count; ++k)
                     {
                         if (drawIdx >= k_maxDraws) break;
