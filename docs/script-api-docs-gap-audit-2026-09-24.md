@@ -252,3 +252,27 @@ Ablauf nach einer Registry-Änderung: `dump_engine_api.sh` → `gen_reference.py
 - Die Stufe „catalog" beruht auf einer Namenssuche in der Katalogtabelle (auch „get/set Position" zählt
   für `getPosition`/`setPosition`). Sie ist grob, spielt für die Lücken aber keine Rolle: eine
   Katalognennung ist keine Dokumentation.
+
+## Nachtrag Schritt 10 (24.09.2026): Website-Hälfte nachgeliefert
+
+Der Engine-Teil von Schritt 2 (5c70123d) war vollständig, im Website-Checkout lag davon aber
+nichts mehr: `scripting-reference.html` fehlte, die drei GEN-Seiten standen auf dem Stand vom
+08.09. Der Checkout war zurückgesetzt worden, die Hand-Edits von Schritt 2 an
+`scripting-api.html` und `scripting.html` überlebten nur im eingecheckten `he-docs.json` und sind
+von dort wiederhergestellt (Bündel danach byte-gleich).
+
+- Website-Commit **2b9c276** im Checkout `Website` (lokal auf `main`, **nicht gepusht, nicht
+  deployt**). Er enthält die Referenzseite, die GEN-Blöcke, die Hand-Edits und den neu gebauten
+  `docs-index.json` (179 Abschnitte, 16 Seiten).
+- `gen_reference.py` schreibt jetzt zusätzlich auf jede Doku-Seite einen Sidebar-Link „Engine
+  API", die Blätterkette Scripting API → Engine API → HorizonCode Nodes und die Zählung im
+  Hero/Meta von `horizoncode-nodes.html` (dort stand noch „20 groups, ~250 functions"). Der
+  GEN-Text des Katalogs sagt nicht mehr „exactly the same engine surface", sondern nennt die
+  vier Gruppen ohne `horizon.<gruppe>.*`-Tabelle.
+- Geprüft: `gen_reference.py --check` sauber, alle internen Links und Anker der 16 Seiten
+  lösen auf, `site_check` ohne Befund, `docs_search` findet die Callbacks, `coverage.py`
+  582/582 **ref**, 24 **hand**.
+
+Wird der Checkout erneut zurückgesetzt: `gen_reference.py` stellt Referenzseite, GEN-Blöcke und
+Navigation wieder her; die Hand-Edits in `scripting-api.html` (#how-scripts-run, #api,
+#behavior) und `scripting.html#api` stehen nur im Website-Commit.

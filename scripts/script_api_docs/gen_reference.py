@@ -18,6 +18,9 @@ Writes, into the website checkout's HorizonEngineDocs/:
                              the table of all flat functions, from flat.json
   scripting.html             only the block between the GEN markers in #api:
                              the list of horizon.<group>.* groups
+  every other page           a sidebar link to the reference, and the pager
+                             chain Scripting API -> Engine API -> HorizonCode
+                             Nodes (inserted once, then left alone)
 
 Hand-written content lives next to this file in overlay/ and is merged, never
 overwritten: sections/*.html (whole sections), flat.json, callbacks.json,
@@ -641,9 +644,11 @@ def catalogue_block(reg: list[dict]) -> str:
          "          <p>",
          "            One descriptor registry lights up <code>Engine Call</code> nodes and the",
          "            <code>horizon.&lt;group&gt;.&lt;fn&gt;</code> Lua/Python APIs at the same",
-         "            time, so a HorizonCode graph and a script reach exactly the same engine",
-         f"            surface: <strong>{len(by)} groups, {len(reg)} functions</strong>. Every one",
-         f'            is described, with its pins, in the <a href="{PAGE}">Engine API',
+         "            time, so a HorizonCode graph and a script reach the same engine",
+         f"            surface: <strong>{len(by)} groups, {len(reg)} functions</strong>. Four groups",
+         f"            ({', '.join(f'<code>{g}</code>' for g in NOT_SCRIPT_NOTE)}) have no",
+         "            <code>horizon.&lt;group&gt;.*</code> table; scripts reach them through flat",
+         f'            functions. Every row is described, with its pins, in the <a href="{PAGE}">Engine API',
          "            Reference</a>; inside the editor, F1 on a node opens its entry.",
          "          </p>",
          '          <div class="docs-table-wrap">',
@@ -671,13 +676,21 @@ def patch_catalogue(text: str, reg: list[dict]) -> str:
     if GEN_BEGIN in text:
         a = text.index(GEN_BEGIN)
         b = text.index(GEN_END, a) + len(GEN_END)
-        return text[:a] + block + text[b:]
-    # First run: replace the hand-written intro paragraph + table.
-    sec = text.index('id="engine-call"')
-    a = text.index("<p>", text.index('<div class="docs-divider"></div>', sec))
-    b = text.index("</table>", a)
-    b = text.index("</div>", b) + len("</div>")
-    return text[:a] + block + text[b:]
+        text = text[:a] + block + text[b:]
+    else:
+        # First run: replace the hand-written intro paragraph + table.
+        sec = text.index('id="engine-call"')
+        a = text.index("<p>", text.index('<div class="docs-divider"></div>', sec))
+        b = text.index("</table>", a)
+        b = text.index("</div>", b) + len("</div>")
+        text = text[:a] + block + text[b:]
+    # The hero and the meta description count the catalogue too ("20 groups,
+    # ~250 functions" until September 2026); keep them on the registry's numbers.
+    groups = len({f["group"] for f in reg})
+    text = re.sub(r"\b\d+ groups, ~?\d+ functions",
+                  f"{groups} groups, {len(reg)} functions", text)
+    return re.sub(r"\b\d+ groups and roughly \d+ functions",
+                  f"{groups} groups and {len(reg)} functions", text)
 
 
 # ── scripting-api.html: the flat function table in #api ──────────────────────
@@ -753,6 +766,44 @@ def patch_script_groups(text: str, reg: list[dict]) -> str:
     return text[:a] + block + text[b:]
 
 
+# ── Every other page: a way to reach the reference ────────────────────────────
+# The sidebars and pagers are plain markup repeated on every page, so the new
+# page is linked in by inserting after a known neighbour. Idempotent: a page
+# that already links it is left alone.
+NAV_LINK = f'<a class="docs-sidebar-link" href="{PAGE}">'
+# (page or "*", neighbour line, label) — "*" is every page with that line.
+NAV_AFTER = [
+    ("*", '<a class="docs-sidebar-link" href="scripting-api.html">Scripting API</a>',
+     "Engine API"),
+    ("scripting-api.html", '<a class="docs-sidebar-link" href="scripting.html">Scripting Guide</a>',
+     "Engine API Reference"),
+    ("horizoncode-nodes.html",
+     '<a class="docs-sidebar-link" href="scripting-api.html">Scripting API Reference</a>',
+     "Engine API Reference"),
+]
+# The reading order: Scripting API -> Engine API -> HorizonCode Nodes.
+PAGER = {
+    "scripting-api.html": ("pager-next", "horizoncode-nodes.html", "HorizonCode Node Reference"),
+    "horizoncode-nodes.html": ("pager-prev", "scripting-api.html", "Scripting API Reference"),
+}
+
+
+def patch_nav(name: str, text: str) -> str:
+    if NAV_LINK not in text:
+        for page, after, label in NAV_AFTER:
+            if page in ("*", name) and after in text:
+                indent = text[:text.index(after)].rsplit("\n", 1)[1]
+                text = text.replace(after, f"{after}\n{indent}{NAV_LINK}{label}</a>", 1)
+                break
+    if name in PAGER:
+        cls, old_href, old_title = PAGER[name]
+        text = re.sub(
+            rf'(<a class="{cls}" href=")({re.escape(old_href)})(">\s*<span class="pager-label">'
+            rf'[^<]*</span>\s*<span class="pager-title">){re.escape(old_title)}(</span>)',
+            rf"\g<1>{PAGE}\g<3>Engine API Reference\g<4>", text, count=1)
+    return text
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--registry", type=Path, default=HERE / "registry.json")
@@ -768,6 +819,11 @@ def main() -> int:
     outputs[api] = patch_flat_table(api.read_text(encoding="utf-8"))
     guide = a.docs / "scripting.html"
     outputs[guide] = patch_script_groups(guide.read_text(encoding="utf-8"), reg)
+    for path in sorted(a.docs.glob("*.html")):
+        if path.name == PAGE:
+            continue
+        text = outputs.get(path) or path.read_text(encoding="utf-8")
+        outputs[path] = patch_nav(path.name, text)
 
     stale = []
     for path, text in outputs.items():
