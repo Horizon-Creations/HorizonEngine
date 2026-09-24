@@ -191,6 +191,59 @@ Jeder Schritt sollte `coverage.py` am Ende neu laufen lassen. Dazu muss es lerne
 Referenzseite als **ref** zu zählen: heute erkennt es Signaturen nur in der alten Tabelle
 `scripting-api.html#api`.
 
+## Nachtrag Schritt 2 (24.09.2026): am Code und am Build geprüft
+
+Schritt 2 hat Befund 3 und 5 nicht übernommen, sondern nachgeprüft: im Quelltext und mit
+Wegwerf-Proben, die gegen `libHorizonScene` des Builds 7d49d44f echte Lua- und Python-Aufrufe
+ausführen. Sechs Punkte oben stimmen so **nicht**:
+
+1. **`selfDefault` gilt in Lua/Python nicht.** Der Wrapper (`EngineApi.cpp:7501`) setzt „Self“
+   über `entity::self(c)` ein, und der Lua-/Python-Ctx hat `self = 0`. Ergebnis: Warnung „Entity is
+   empty and there is no calling object“, die 0 geht unverändert durch und meint die
+   Szenen-Wurzel (`horizon.entity.getName(0)` liefert `"World"`). Skripte müssen immer
+   `self.entityId` / `self.entity_id` übergeben. „Spart in jedem Beispiel `self.entityId`“ ist
+   falsch.
+2. **Callback-Namen.** `onUIEvent`, `onNetEvent` und `onRep` sind nur die `HE_SCRIPT_CALL`-Labels
+   in `ScriptContext.cpp`. Die Methoden, die ein Skript definiert, heißen `onClick`,
+   `onHoverEnter`, `onHoverExit`, `onConnected`, `onDisconnected(reason)`,
+   `onPlayerJoined(player)`, `onPlayerLeft(player)`, `onSessionStarted`, `onSessionEnded` und
+   `onRep_<var>(old)` (`ScriptEngine.cpp`). Dazu RPC-Methoden unter ihrem wörtlichen Namen. Es sind
+   25 feste Namen je Sprache, alle in `horizon.Behavior`: Python hat **keine**
+   GameInstance-/Widget-Klassen. Timer, Input-Actions, Netz- und Cheat-Ereignisse gehen an
+   **alle** Skriptinstanzen. Kontakte, Notifies und UI-Zeiger gehen nur an die betroffene Entity.
+   `onRep_` feuert nie auf dem Host.
+3. **Berechtigungen.** `dialog` und `clipboard` hängen an keiner Berechtigung. Gegatet sind
+   `process.run`, `process.openUrl`, `print.file`, `app.setAutostart` („Run other programs“),
+   `print.toPdf`, `db.open` und `fs.*` mit absolutem Pfad ohne Dialog („Files outside the
+   project“) sowie `http.get`/`http.post` („Network access“). Der Editor-Hinweis zu „Network
+   access“ („Reserved: nothing reads this yet“, `ProjectSettingsPanel.cpp`) ist veraltet, denn
+   `EngineApi.cpp:2849` liest das Recht.
+4. **Array-Pins sind aus Lua/Python kaputt** (Engine-Bug, als Warnung im Hive gemeldet).
+   `luaReadValue`/`luaPushValue` und `pyReadValue`/`pyAppendValue` ignorieren
+   `ApiParam::isArray`. Betroffen sind 14 Rows: `physics.overlap*`/`raycastAll`/`pollJointBroken`,
+   `animator.notifiesOf`/`layerNames`, `fs.list`, `save.list`/`fields`,
+   `scene.loadedZones`/`available` und `process.run`. Probe: `overlapSphere` gibt `0` statt einer
+   Liste zurück, `save.list()` gibt `""` zurück.
+5. **C++.** `cppCall` (`HE::api::…`) ist die engine-interne Funktion. Ein `GameLogic`-Modul linkt
+   nicht gegen die Engine und erreicht nur die `he::`-Service-Helfer (save, entity, physics,
+   input, content, anticheat, net).
+6. **Fehlende Argumente** werfen in Lua einen Fehler (`luaL_check*`); einzige Ausnahme ist `bool`,
+   das still zu `false` wird. In Python werfen sie `IndexError`, auch bei `bool`. Überzählige
+   Argumente werden in beiden Sprachen ignoriert. Neun HorizonCode-Ereignisse (On Http
+   Response, On File Changed, On Menu Item, On Tray Item, On Row Bind, On Window Closed, On
+   Dismissed, On Selection Changed, On Right Clicked) haben kein Lua/Python-Gegenstück.
+
+Werkzeug, das Schritt 2 hinzugefügt hat:
+
+| Datei | Zweck |
+|---|---|
+| `scripts/script_api_docs/gen_reference.py` | baut `HorizonEngineDocs/scripting-reference.html` aus `registry.json` + `overlay/`, dazu die GEN-Blöcke in `horizoncode-nodes.html#engine-call`, `scripting-api.html#api` und `scripting.html#api`. Prüft bei jedem Lauf `flat.json` gegen `kHorizonFuncs` und `callbacks.json` gegen die Quelltexte; `--check` für CI |
+| `scripts/script_api_docs/overlay/` | Handinhalt, der jeden Lauf überlebt: `sections/conventions.html`, `flat.json`, `callbacks.json`, `notes.json` (je Id: `note`, `perm`, `script_sig`, `examples`), `groups/<gruppe>.html` (Einleitung) |
+| `coverage.py` | zählt jetzt die Referenzzeilen als **ref** und zeigt dazu **hand**, also Ids mit Handinhalt. Das ist die Kennzahl für die Schritte 3–8 |
+
+Ablauf nach einer Registry-Änderung: `dump_engine_api.sh` → `gen_reference.py` →
+`build_docs_index.py` (im Website-Checkout) → `scripts/build_docs_bundle.py` → `coverage.py`.
+
 ## Was dieser Schritt nicht getan hat
 
 - Keine Website-Datei geändert, nichts deployt, Roadmap unverändert.

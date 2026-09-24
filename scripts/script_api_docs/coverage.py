@@ -10,12 +10,18 @@ shims and the lifecycle callbacks).
     scripts/script_api_docs/coverage.py [--registry R] [--docs D] [--out O]
 
 Status per id, strongest first:
-  ref      a signature + return value is documented (today only the flat twins
-           in scripting-api.html#api, e.g. transform.setPosition -> setPosition)
+  ref      a signature + return value is documented: the id has its row in the
+           generated Engine API Reference (scripting-reference.html, anchor
+           <group>-<fn>), or its flat twin is in scripting-api.html#api
   named    the literal id ("physics.addImpulse") appears in a docs page
   catalog  the function name appears in the HorizonCode node catalogue row of its
            group (horizoncode-nodes.html#engine-call) — a name, nothing more
   missing  none of the above
+
+Once the generator runs, "ref" is close to 100 % by construction, so a second
+column measures what the generator cannot write: hand-written content from
+overlay/ (a group intro, or for the id a note, an example, a permission or a
+script signature). That is the number Thema 79 steps 3-8 move.
 """
 from __future__ import annotations
 
@@ -91,7 +97,34 @@ def flat_documented(docs: Path) -> set[str]:
     raw = (docs / "scripting-api.html").read_text(encoding="utf-8")
     at = raw.find('id="api"')
     end = raw.find("<section", at + 1)
-    return set(re.findall(r"<code>([a-zA-Z]+)\(", raw[at:end if end > 0 else None]))
+    out = set(re.findall(r"<code>([a-zA-Z]+)\(", raw[at:end if end > 0 else None]))
+    # The reference page's #flat rows carry id="flat-<name>".
+    return out | {a[len("flat-"):] for a in reference_anchors(docs) if a.startswith("flat-")}
+
+
+REFERENCE = "scripting-reference.html"
+
+
+def reference_anchors(docs: Path) -> set[str]:
+    """Every id="…" on the generated reference page (empty before it exists)."""
+    p = docs / REFERENCE
+    if not p.is_file():
+        return set()
+    return set(re.findall(r'\bid="([^"]+)"', p.read_text(encoding="utf-8")))
+
+
+def ref_slug(fid: str) -> str:
+    # Same rule as gen_reference.slug().
+    return fid.replace(".", "-") if "." in fid else f"fn-{fid}"
+
+
+def hand_content() -> tuple[set[str], set[str]]:
+    """(ids with a hand-written overlay entry, groups with a hand-written intro)."""
+    ov = HERE / "overlay"
+    notes = json.loads((ov / "notes.json").read_text(encoding="utf-8")) if (ov / "notes.json").is_file() else {}
+    ids = {k for k in notes if not k.startswith("_")}
+    groups = {p.stem for p in (ov / "groups").glob("*.html")} if (ov / "groups").is_dir() else set()
+    return ids, groups
 
 
 def in_catalogue(fn: str, row: str) -> bool:
@@ -111,11 +144,13 @@ def sig(f: dict) -> str:
 
 
 def lifecycle_callbacks() -> tuple[list[str], list[str]]:
-    lua = (REPO / "src/HE_Scene/src/ScriptContext.cpp").read_text(encoding="utf-8")
-    py = (REPO / "src/HE_Python/src/PyScriptBackend.cpp").read_text(encoding="utf-8")
-    lua_cb = sorted(set(re.findall(r'HE_SCRIPT_CALL\("(on[A-Za-z0-9_]*)"', lua)))
-    py_cb = sorted(set(re.findall(r'"(on_[a-z_]+)"', py)))
-    return lua_cb, py_cb
+    # The method names a script actually defines, read where the engine looks
+    # them up (gen_reference.callbacks_from_source). NOT the HE_SCRIPT_CALL
+    # labels in ScriptContext.cpp: "onUIEvent"/"onNetEvent" there are log tags
+    # for onClick/onHoverEnter/… and onPlayerJoined/onConnected/…
+    from gen_reference import callbacks_from_source
+    lua, py = callbacks_from_source()
+    return sorted(lua), sorted(py)
 
 
 def flat_functions() -> list[str]:
@@ -134,15 +169,21 @@ def main() -> None:
     texts = page_texts(a.docs)
     cat = catalogue(a.docs)
     flat_doc = flat_documented(a.docs)
+    anchors = reference_anchors(a.docs)
+    hand_ids, hand_groups = hand_content()
 
     rows = []
     for f in reg:
         fn = f["id"].split(".", 1)[1] if "." in f["id"] else f["id"]
         twin = FLAT_TWIN.get(f["id"])
         pages = [p for p, t in texts.items()
-                 if re.search(r"(?<!\w)" + re.escape(f["id"]) + r"(?![\w])", t)]
+                 if p != REFERENCE and re.search(r"(?<!\w)" + re.escape(f["id"]) + r"(?![\w])", t)]
         c = cat.get(f["category"])
-        if twin and all(t in flat_doc for t in twin.split("/")):
+        hand = f["id"] in hand_ids or f["group"] in hand_groups
+        if ref_slug(f["id"]) in anchors:
+            status = "ref"
+            pages = [REFERENCE] + pages
+        elif twin and all(t in flat_doc for t in twin.split("/")):
             status = "ref"
         elif pages:
             status = "named"
@@ -150,7 +191,7 @@ def main() -> None:
             status = "catalog"
         else:
             status = "missing"
-        rows.append({**f, "fn": fn, "status": status, "pages": pages, "twin": twin})
+        rows.append({**f, "fn": fn, "status": status, "pages": pages, "twin": twin, "hand": hand})
 
     by = collections.defaultdict(list)
     for r in rows:
@@ -165,20 +206,26 @@ def main() -> None:
       "(Dump von `HE::api::registry()`) und der lokalen Website-Doku. Nicht von Hand pflegen, neu erzeugen. "
       "Einordnung und Folgeschritte: `docs/script-api-docs-gap-audit-2026-09-24.md`.")
     w("")
-    w("Status: **ref** = Signatur+Rückgabe dokumentiert (nur über den flachen Zwilling), **named** = Id "
-      "wörtlich auf einer Doku-Seite, **catalog** = nur der Name im HorizonCode-Knotenkatalog, **missing** = nirgends.")
+    w("Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Referenz "
+      f"`{REFERENCE}` oder flacher Zwilling in `scripting-api.html#api`), **named** = Id "
+      "wörtlich auf einer anderen Doku-Seite, **catalog** = nur der Name im HorizonCode-Knotenkatalog, "
+      "**missing** = nirgends. **hand** = es gibt Handinhalt aus `overlay/` (Gruppen-Einleitung oder "
+      "zur Id eine Notiz, ein Beispiel, ein Recht, eine Skript-Signatur): das, was der Generator nicht "
+      "schreiben kann, und die Zahl, die die Gruppen-Schritte bewegen.")
     w("")
     tot = collections.Counter(r["status"] for r in rows)
+    hand_tot = sum(1 for r in rows if r["hand"])
     w(f"**Gesamt: {len(rows)} Registry-Ids in {len(by)} Gruppen** — ref {tot['ref']}, named {tot['named']}, "
-      f"catalog {tot['catalog']}, missing {tot['missing']}.")
+      f"catalog {tot['catalog']}, missing {tot['missing']}; hand {hand_tot}.")
     w("")
-    w("| Gruppe | Kategorie | Ids | Lua/Py `horizon.<gruppe>.*` | ref | named | catalog | missing |")
-    w("|---|---|---:|:---:|---:|---:|---:|---:|")
+    w("| Gruppe | Kategorie | Ids | Lua/Py `horizon.<gruppe>.*` | ref | named | catalog | missing | hand |")
+    w("|---|---|---:|:---:|---:|---:|---:|---:|---:|")
     for g in order:
         rs = by[g]
         cnt = collections.Counter(r["status"] for r in rs)
         w(f"| `{g}` | {rs[0]['category']} | {len(rs)} | {'ja' if rs[0]['script'] else '**nein**'} | "
-          f"{cnt['ref']} | {cnt['named']} | {cnt['catalog']} | {cnt['missing']} |")
+          f"{cnt['ref']} | {cnt['named']} | {cnt['catalog']} | {cnt['missing']} | "
+          f"{sum(1 for r in rs if r['hand'])} |")
     w("")
 
     flat = flat_functions()
@@ -196,11 +243,12 @@ def main() -> None:
     alltext = "\n".join(texts.values())
     w("## Lifecycle-Callbacks")
     w("")
-    w("Aus dem Code gelesen (Lua: `HE_SCRIPT_CALL`-Namen, Python: `on_*`-Strings). Dokumentiert = Name "
+    w("Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.cpp`, Python: "
+      "`PyScriptBackend.cpp`; `onRep_`/`on_rep_` = Präfix vor dem Variablennamen). Dokumentiert = Name "
       "kommt auf einer Doku-Seite vor.")
     w("")
-    w("- Lua: " + ", ".join(f"`{c}`" + ("" if c in alltext else " **fehlt**") for c in lua_cb))
-    w("- Python: " + ", ".join(f"`{c}`" + ("" if c in alltext else " **fehlt**") for c in py_cb))
+    w(f"- Lua ({len(lua_cb)}): " + ", ".join(f"`{c}`" + ("" if c in alltext else " **fehlt**") for c in lua_cb))
+    w(f"- Python ({len(py_cb)}): " + ", ".join(f"`{c}`" + ("" if c in alltext else " **fehlt**") for c in py_cb))
     w("")
 
     w("## Je Gruppe")
@@ -236,14 +284,18 @@ def main() -> None:
         for r in rs:
             art = "exec" if r["exec"] else "pure"
             beleg = ", ".join(r["pages"]) if r["pages"] else ""
-            if r["status"] == "ref":
+            if r["status"] == "ref" and REFERENCE in r["pages"]:
+                beleg = f"{REFERENCE}#{ref_slug(r['id'])}"
+            elif r["status"] == "ref":
                 beleg = f"flach `{r['twin']}` (scripting-api.html#api)"
             elif r["status"] == "catalog":
                 beleg = "horizoncode-nodes.html#engine-call"
+            if r["hand"]:
+                beleg += " · hand"
             w(f"| {sig(r)} | {art} | {r['status']} | {beleg} |")
 
     a.out.write_text("\n".join(L) + "\n", encoding="utf-8")
-    print(f"{len(rows)} ids, {dict(tot)} -> {a.out}")
+    print(f"{len(rows)} ids, {dict(tot)}, hand {hand_tot} -> {a.out}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,26 @@
+{
+  "_comment": "Hand-written additions per registry id, merged by gen_reference.py. Keys: 'note' (HTML, appended to the description), 'perm' (name of the Project Settings permission the row needs, see EngineApi.cpp perm::allowed), 'script_sig' / 'script_returns' (the Lua/Python call when it differs from the registry signature), 'examples' ({lua, python} source, rendered with the language switcher). Steps 3-8 of Thema 79 fill this per group.",
+  "app.setAutostart": { "perm": "Run other programs" },
+  "process.run": { "perm": "Run other programs" },
+  "process.openUrl": { "perm": "Run other programs" },
+  "print.file": { "perm": "Run other programs" },
+  "print.toPdf": { "perm": "Files outside the project" },
+  "db.open": { "perm": "Files outside the project" },
+  "http.get": { "perm": "Network access" },
+  "http.post": { "perm": "Network access" },
+  "net.callServer": {
+    "script_sig": "callServer(entity, name, …)",
+    "script_returns": "ok: bool",
+    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>)."
+  },
+  "net.callClient": {
+    "script_sig": "callClient(player, entity, name, …)",
+    "script_returns": "ok: bool",
+    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>)."
+  },
+  "net.callAllClients": {
+    "script_sig": "callAllClients(entity, name, …)",
+    "script_returns": "ok: bool",
+    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>)."
+  }
+}
