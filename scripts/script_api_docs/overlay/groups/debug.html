@@ -3,8 +3,9 @@
             is doing: where a ray went, what an overlap covered. A shape stays for
             <code>seconds</code>; 0 draws it for one frame, so a shape that follows
             something moving is drawn again every frame from
-            <code>onUpdate</code>. The time counts down only while the game runs.
-            The color is red, green and blue from 0 to 1; its alpha is ignored.
+            <code>onUpdate</code>. <code>seconds</code> counts down in real time,
+            so a paused game does not keep a shape alive longer; in the editor
+            the countdown runs only during Play. The color is red, green and blue from 0 to 1; its alpha is ignored.
             <code>clear</code> removes every shape, including the ones other
             scripts drew. Debug shapes appear in a packaged game too, so take them
             out, or put them behind a flag of your own, before you ship.
