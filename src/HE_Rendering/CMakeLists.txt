@@ -141,7 +141,8 @@ if(HE_VULKAN_ENABLED)
                       gi_shadow.comp gi_probe.comp
                       gi_shadow_hw.comp gi_probe_hw.comp
                       skinned.vert
-                      ui.vert ui.frag)
+                      ui.vert ui.frag
+                      world_preview.vert world_preview_skinned.vert world_preview.frag)
             set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${stage}")
             set(dst "${HE_SHADER_OUT_DIR}/${stage}.spv")
             # The *_hw.comp kernels use GL_EXT_ray_query (SPIR-V 1.4+) and need an

@@ -91,6 +91,17 @@ public:
 	// below is the part of Render() this borrows, the swapchain half stays behind.
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
+	// An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
+	// viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
+	// recorded into a one-shot command buffer and waited for. Returns the
+	// VkDescriptorSet the editor's registrar built for the slot (null without one).
+	void* RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+	                         uint32_t width, uint32_t height,
+	                         const EditorCameraOverride& camera,
+	                         const glm::vec3& origin = glm::vec3(0.0f),
+	                         const WorldPreviewEnv& env = {},
+	                         glm::mat4* outViewProj = nullptr,
+	                         uint32_t slot = 0) override;
 	// Returns VkImageView for the viewport color image (for ImGui_ImplVulkan_AddTexture).
 	void* GetViewportVkImageView() const;
 	void* GetViewportVkSampler()   const;
@@ -620,6 +631,13 @@ private:
 	void createSkyPipeline();
 	void destroySkyPipeline();
 	void drawSky(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr);
+	// The sky from any camera: `clipViewProj` already carries kVulkanClipFix,
+	// `cameraPos` anchors the 3D clouds and the aurora, `time` drives their
+	// drift. drawSky passes the scene's; the world preview passes its own
+	// camera with the clock stopped.
+	void drawSkyFrom(VkCommandBuffer cmd, bool hdr, const glm::mat4& clipViewProj,
+	                 const glm::vec3& sunDir, const glm::vec3& cameraPos, float time,
+	                 const EnvironmentSettings& env);
 
 	// Per-frame sky UBO (mirrors FrameUBO pattern).
 	struct SkyUBO
@@ -671,6 +689,10 @@ private:
 	void createDebugLinePipeline();
 	void destroyDebugLinePipeline();
 	void drawDebugLines(VkCommandBuffer cmd, const glm::mat4& viewProj, bool hdr = false);
+	// Any line list through the debug-line pipeline (depth test, no depth
+	// write) — drawDebugLines passes the editor's, the world preview its grid.
+	void drawLineList(VkCommandBuffer cmd, const glm::mat4& viewProj,
+	                  const std::vector<DebugLine>& lines, bool hdr);
 
 	// Per-frame debug UBO + vertex buffer.
 	struct DebugUBO
@@ -680,6 +702,49 @@ private:
 		void*           mapped = nullptr;
 		VkDescriptorSet set    = VK_NULL_HANDLE;
 	};
+	// ── World preview (RenderWorldPreview) ──────────────────────────────────
+	// One target set per slot, as on the other backends: several secondary
+	// Scene viewports draw in the same frame and ImGui samples each later.
+	// The scene half renders through m_postFxSceneRP (RGBA16F + depth, so the
+	// HDR sky and debug-line pipelines fit it), the tonemap through
+	// m_postFxFinalRP with m_tonemapPipe into an RGBA8 image that ends in
+	// SHADER_READ_ONLY for ImGui. The ImGui descriptor set is registered once
+	// per slot and REWRITTEN on a resize (vkUpdateDescriptorSets) — the
+	// registrar has no free path, and a dragged splitter would drain its pool.
+	// Every call waits for the device before and after: the shared sky/debug
+	// buffers, the rings and the descriptor sets below are then free to touch.
+	struct WorldPreviewTargetVk
+	{
+		VkImage         hdrImage = VK_NULL_HANDLE, ldrImage = VK_NULL_HANDLE, depthImage = VK_NULL_HANDLE;
+		VkDeviceMemory  hdrMem   = VK_NULL_HANDLE, ldrMem   = VK_NULL_HANDLE, depthMem   = VK_NULL_HANDLE;
+		VkImageView     hdrView  = VK_NULL_HANDLE, ldrView  = VK_NULL_HANDLE, depthView  = VK_NULL_HANDLE;
+		VkFramebuffer   sceneFB  = VK_NULL_HANDLE; // m_postFxSceneRP: hdr + depth
+		VkFramebuffer   ldrFB    = VK_NULL_HANDLE; // m_postFxFinalRP: ldr
+		VkDescriptorSet tonemapSet  = VK_NULL_HANDLE; // m_postFxDSLayout: hdr + dummy bloom
+		void*           imguiHandle = nullptr;        // registrar's set, kept across resizes
+		uint32_t        w = 0, h = 0;
+	};
+	WorldPreviewTargetVk  m_worldPreview[kWorldPreviewSlots];
+	VkDescriptorSetLayout m_previewSetLayout  = VK_NULL_HANDLE; // b0 object (dyn), b1 light, b2 bones (dyn)
+	VkPipelineLayout      m_previewPipeLayout = VK_NULL_HANDLE; // set 0 above, set 1 = m_albedoSetLayout
+	VkPipeline            m_previewMeshPipe    = VK_NULL_HANDLE;
+	VkPipeline            m_previewSkinnedPipe = VK_NULL_HANDLE;
+	VkDescriptorPool      m_previewPool       = VK_NULL_HANDLE;
+	VkDescriptorSet       m_previewSet        = VK_NULL_HANDLE;
+	VkSampler             m_previewSampler    = VK_NULL_HANDLE; // what ImGui samples the LDR with
+	struct PreviewRing { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
+	                     void* mapped = nullptr; VkDeviceSize size = 0; };
+	PreviewRing           m_previewObjRing;   // PerObject blocks, 256 B apart
+	PreviewRing           m_previewLightBuf;  // the light, 64 B
+	PreviewRing           m_previewBoneRing;  // one 128-matrix block per skinned draw
+	bool                  m_previewReady  = false;
+	bool                  m_previewFailed = false; // built once, not retried per call
+	bool ensureWorldPreviewPipeline();
+	bool ensureWorldPreviewTarget(WorldPreviewTargetVk& wp, uint32_t w, uint32_t h);
+	void destroyWorldPreviewTarget(WorldPreviewTargetVk& wp);
+	bool ensurePreviewRing(PreviewRing& ring, VkDeviceSize size, VkBufferUsageFlags usage);
+	void destroyWorldPreview();
+
 	DebugUBO              m_debugUBO[2];
 	VkBuffer              m_debugVB[2]        = {};
 	VkDeviceMemory        m_debugVBMem[2]     = {};

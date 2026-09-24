@@ -92,6 +92,7 @@ HLSL_ENTRY_PROFILE = {
     "PSSky": "ps_5_0", "VSSky": "vs_5_0", "VSSkyCross": "vs_5_0",
     "SSAOMain": "ps_5_0", "SSAOBlurMain": "ps_5_0",
     "UIPSMain": "ps_5_0", "UIVSMain": "vs_5_0",
+    "PSPreviewMesh": "ps_5_0", "PSPreviewSkinned": "ps_5_0",  # kWorldPreviewPSHLSL
     "main": "ps_5_0",  # the common case; exceptions below
 }
 
