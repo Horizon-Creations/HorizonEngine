@@ -235,8 +235,18 @@ const SkyBytecode& skyBytecode()
 
 HE::SkyFrameParams skyLookingUp(const glm::vec3& sunDir)
 {
+	// Clear sky with the night layers off: the zenith colour is the atmosphere
+	// alone. The target is one pixel looking straight up, so with the default
+	// star field it lands on whatever star sits at the zenith — at timeOfDay 0.5
+	// that is a bright one, and GL's own kSkyFS draws the night zenith at ~0.9
+	// there too (checked against a GL 4.1 render of the same inputs).
 	IRenderer::EnvironmentSettings env;
-	env.cloudCoverage = 0.0f; // clear sky: the zenith colour is the atmosphere alone
+	env.cloudCoverage     = 0.0f;
+	env.starBrightness    = 0.0f; // stars + Milky Way (starField)
+	env.milkyWayIntensity = 0.0f;
+	env.nebulaIntensity   = 0.0f;
+	env.auroraIntensity   = 0.0f;
+	env.shootingStars     = 0.0f;
 	const glm::vec3 eye(0.0f, 1.0f, 0.0f);
 	const glm::mat4 view = glm::lookAt(eye, eye + glm::vec3(0.0f, 1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
 	const glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.0f, 0.1f, 1000.0f);
@@ -402,6 +412,9 @@ TEST_CASE("D3D11: the cross-compiled sky draws a blue zenith by day and a dark o
 	CHECK_MESSAGE(day.b > day.r, dayLog);
 	CHECK(day.b > 0.05f);
 	CHECK(day.r + day.g + day.b > 2.0f * (night.r + night.g + night.b));
+	// ...and dark in absolute terms: GL draws ~0.09 here, so a night layer
+	// leaking into the "atmosphere alone" setup shows up on its own.
+	CHECK(night.r + night.g + night.b < 0.2f);
 }
 
 TEST_CASE("D3D12: the cross-compiled sky builds a PSO against the renderer's sky root signature (WARP)")
@@ -499,8 +512,8 @@ TEST_CASE("D3D12: the cross-compiled sky builds a PSO against the renderer's sky
 			pd.VS = { oldVs->GetBufferPointer(), oldVs->GetBufferSize() };
 			ComPtr<ID3D12PipelineState> oldPso;
 			const HRESULT hrOld = dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&oldPso));
-			MESSAGE("PSO with the old SV_POSITION-first VS: ", SUCCEEDED(hrOld) ? "accepted" : "rejected",
-			        " (", hrOld, ") ", drain());
+			MESSAGE("negative control, not a failure: PSO with the old SV_POSITION-first VS ",
+			        SUCCEEDED(hrOld) ? "accepted" : "rejected (expected)", " (", hrOld, ") ", drain());
 		}
 	}
 }
