@@ -276,3 +276,35 @@ von dort wiederhergestellt (Bündel danach byte-gleich).
 Wird der Checkout erneut zurückgesetzt: `gen_reference.py` stellt Referenzseite, GEN-Blöcke und
 Navigation wieder her; die Hand-Edits in `scripting-api.html` (#how-scripts-run, #api,
 #behavior) und `scripting.html#api` stehen nur im Website-Commit.
+
+## Nachtrag Schritt 3 (24.09.2026): Math, String, Random, Time, Timer, DateTime, Debug, Log
+
+Handinhalt für 80 Ids: acht Gruppen-Einleitungen (`overlay/groups/`), Notes an 20 Ids und
+sieben Beispiele in Lua und Python (`overlay/notes.json`). Jede Aussage über Sonderfälle ist mit
+einer Wegwerf-Probe gegen `libHorizonScene` des Builds 7d49d44f gemessen worden, nicht aus der
+Beschreibung übernommen. Die sieben Beispiele liefen aus `notes.json` extrahiert in beiden Sprachen
+mit ausgelösten Callbacks (onStart/onUpdate/onTimer/onInputPressed/onCollisionEnter) und
+lieferten die erwarteten Ergebnisse. `coverage.py`: 582/582 **ref**, **hand** 24 → 104.
+
+Zwei Engine-Bugs, dokumentiert und im Hive gemeldet, nicht behoben:
+
+- **`datetime.*` ist nur auf 128 s genau.** Die Epoch-Sekunden laufen als `Float` (32 Bit) durch
+  die Rows (`EngineApi.cpp:6147`). Probe: `now()` = 1790248832 gegen `os.time()` = 1790248840,
+  `second(os.time())` = 32 statt 40. Minute/Sekunde/`%S` sind bis zu 64 s falsch.
+- **`debug.line/sphere/box` haben `Color`-Pins für Positionen** (`EngineApi.cpp:6513`), also
+  vier Zahlen je Position: `line` braucht 13 Argumente. Die Referenz zeigt das per `script_sig`.
+
+Sechs Beschreibungen in `HcNodeDocs.cpp` waren nachweislich falsch und sind an der Quelle korrigiert
+(damit auch im Editor-Tooltip): `math.round` (Hälften weg von null, nicht „nach oben"),
+`math.mod` (Vorzeichen des Dividenden, −1 mod 360 = −1), `string.length/substring` (Bytes, nicht
+Zeichen), `string.toUpper/toLower` (nur A–Z), `random.seed` (ohne Seed startet jeder Start mit
+derselben Folge) und `debug.line` (auch ein gepacktes Spiel zeichnet, `GameApplication.cpp:2886`;
+„Shipping“ ist nur ein Pak-Profil). `registry.json` neu gedumpt, Diff genau diese acht `doc`-Felder.
+
+Generator: Die Gruppenzeile behauptete `C++: HE::api::<gruppe>::<function>(ctx, …)`. Für
+`string` heißt der Namespace `str`, und math/random/time/timer/debug nehmen keinen `Ctx`. Die Zeile
+liest den Namespace jetzt aus den Rows und nennt keine Parameter mehr.
+
+**Falle für die Folgeschritte:** `scripts/build_docs_bundle.py` ohne Pillow schreibt die acht
+Figuren in `EditorDeps/Docs/img/` in voller Größe neu. Danach `git checkout -- EditorDeps/Docs/img/`;
+`--check` bleibt sauber, es prüft nur `he-docs.json`.

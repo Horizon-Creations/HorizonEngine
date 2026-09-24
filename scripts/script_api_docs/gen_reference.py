@@ -469,8 +469,12 @@ def section_group(g: str, rows: list[dict], cluster: str, notes: dict, link) -> 
          f"          <h2>{esc(title)}</h2>",
          '          <div class="docs-divider"></div>']
     if "." in rows[0]["id"] and rows[0]["script"]:
+        # The C++ namespace is not always the group ("string" is HE::api::str)
+        # and not every function takes a Ctx, so name only the namespace, read
+        # off the rows; each row carries its full C++ name.
+        ns = rows[0]["cpp"].rsplit("::", 1)[0]
         L.append(f"          <p>Lua / Python: <code>horizon.{g}.&lt;function&gt;</code> · "
-                 f"C++: <code>HE::api::{g}::&lt;function&gt;(ctx, …)</code></p>")
+                 f"C++: <code>{esc(ns)}::&lt;function&gt;</code></p>")
     elif g in NOT_SCRIPT_NOTE:
         L.append(f'          <div class="callout note">\n            <span class="callout-icon">◆</span>\n'
                  f"            <p>{NOT_SCRIPT_NOTE[g]}</p>\n          </div>")

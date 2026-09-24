@@ -1,5 +1,92 @@
 {
   "_comment": "Hand-written additions per registry id, merged by gen_reference.py. Keys: 'note' (HTML, appended to the description), 'perm' (name of the Project Settings permission the row needs, see EngineApi.cpp perm::allowed), 'script_sig' / 'script_returns' (the Lua/Python call when it differs from the registry signature), 'examples' ({lua, python} source, rendered with the language switcher). Steps 3-8 of Thema 79 fill this per group.",
+  "log": {
+    "note": "Lua also accepts a number; Python only a <code>str</code>."
+  },
+  "math.dot3": {
+    "examples": {
+      "file": "view_cone",
+      "lua": "local M = {}\n\n-- True when target lies within coneDeg degrees around the direction\n-- (fx, fy, fz) this entity faces.\nfunction M.canSee(self, target, fx, fy, fz, coneDeg)\n    local x, y, z = horizon.getPosition(self.entityId)\n    local tx, ty, tz = horizon.getPosition(target)\n    local dx, dy, dz = horizon.math.normalize3(tx - x, ty - y, tz - z)\n    local limit = horizon.math.cos(horizon.math.radians(coneDeg / 2))\n    return horizon.math.dot3(dx, dy, dz, fx, fy, fz) >= limit\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass ViewCone(horizon.Behavior):\n    def can_see(self, target, fx, fy, fz, cone_deg):\n        \"\"\"True when target lies within cone_deg degrees around (fx, fy, fz).\"\"\"\n        x, y, z = horizon.getPosition(self.entity_id)\n        tx, ty, tz = horizon.getPosition(target)\n        dx, dy, dz = horizon.math.normalize3(tx - x, ty - y, tz - z)\n        limit = horizon.math.cos(horizon.math.radians(cone_deg / 2))\n        return horizon.math.dot3(dx, dy, dz, fx, fy, fz) >= limit\n"
+    }
+  },
+  "string.find": {
+    "note": "In Lua, add 1 before handing the result to <code>string.sub</code>.",
+    "examples": {
+      "file": "settings_line",
+      "lua": "local M = {}\n\n-- \"volume = 75\" -> \"volume\", 75. Positions count from 0.\nlocal function parse(line)\n    local eq = horizon.string.find(line, \"=\")\n    if eq < 0 then return nil end\n    local key = horizon.string.trim(horizon.string.substring(line, 0, eq))\n    local rest = horizon.string.substring(line, eq + 1, horizon.string.length(line))\n    return key, horizon.string.toNumber(rest)\nend\n\nfunction M.onStart(self)\n    local key, value = parse(\"volume = 75\")\n    if key then horizon.log(key .. \" is \" .. value) end\nend\n\nreturn M\n",
+      "python": "import horizon\n\ndef parse(line):\n    \"\"\"'volume = 75' -> ('volume', 75.0). Positions count from 0.\"\"\"\n    eq = horizon.string.find(line, \"=\")\n    if eq < 0:\n        return None\n    key = horizon.string.trim(horizon.string.substring(line, 0, eq))\n    rest = horizon.string.substring(line, eq + 1, horizon.string.length(line))\n    return key, horizon.string.toNumber(rest)\n\nclass Settings(horizon.Behavior):\n    def on_start(self):\n        parsed = parse(\"volume = 75\")\n        if parsed:\n            key, value = parsed\n            horizon.log(f\"{key} is {value}\")\n"
+    }
+  },
+  "random.seed": {
+    "examples": {
+      "file": "dice",
+      "lua": "local M = {}\n\nfunction M.onStart(self)\n    -- Without this, every launch rolls the same numbers. Seed in one\n    -- script only: every seed restarts the sequence for all of them.\n    horizon.random.seed(os.time())\nend\n\nfunction M.roll(self)\n    local eyes = horizon.random.rangeInt(1, 6)      -- 1 to 6, both included\n    local critical = horizon.random.chance(0.05)     -- one in twenty\n    return eyes, critical\nend\n\nreturn M\n",
+      "python": "import time\nimport horizon\n\nclass Dice(horizon.Behavior):\n    def on_start(self):\n        # Without this, every launch rolls the same numbers. Seed in one\n        # script only: every seed restarts the sequence for all of them.\n        horizon.random.seed(int(time.time()))\n\n    def roll(self):\n        eyes = horizon.random.rangeInt(1, 6)     # 1 to 6, both included\n        critical = horizon.random.chance(0.05)   # one in twenty\n        return eyes, critical\n"
+    }
+  },
+  "random.range": {
+    "note": "Can return <code>min</code>, never <code>max</code>."
+  },
+  "time.setTimeScale": {
+    "note": "Limited to 0…5."
+  },
+  "time.pause": {
+    "note": "Input actions stop arriving unless they have <em>Fires while the game is paused</em> ticked.",
+    "examples": {
+      "file": "pause_menu",
+      "lua": "local M = {}\n\n-- \"Pause\" is an input action with \"Fires while the game is paused\"\n-- ticked; without it the second press would never arrive.\nfunction M.onInputPressed(self, name)\n    if name ~= \"Pause\" then return end\n    if horizon.time.isPaused() then\n        horizon.time.resume()\n    else\n        horizon.time.pause()\n    end\nend\n\nfunction M.onCollisionEnter(self, other)\n    horizon.time.hitStop(0.1)   -- a landed hit freezes for a tenth of a second\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass PauseMenu(horizon.Behavior):\n    # \"Pause\" is an input action with \"Fires while the game is paused\"\n    # ticked; without it the second press would never arrive.\n    def on_input_pressed(self, name):\n        if name != \"Pause\":\n            return\n        if horizon.time.isPaused():\n            horizon.time.resume()\n        else:\n            horizon.time.pause()\n\n    def on_collision_enter(self, other):\n        horizon.time.hitStop(0.1)   # a landed hit freezes for a tenth of a second\n"
+    }
+  },
+  "time.hitStop": {
+    "note": "0 or less does nothing, and does not end a hit stop that is running."
+  },
+  "timer.after": {
+    "note": "0 also when 64 timers are already running."
+  },
+  "timer.every": {
+    "note": "0 when the interval is under 0.001 seconds or 64 timers are already running.",
+    "examples": {
+      "file": "reminders",
+      "lua": "local M = {}\n\nfunction M.onStart(self)\n    self.autosave = horizon.timer.every(30)\n    self.hint = horizon.timer.after(5)\nend\n\nfunction M.onTimer(self, handle)\n    if handle == self.autosave then\n        horizon.log(\"autosave\")\n    elseif handle == self.hint then\n        horizon.log(\"Press E to open the door\")\n    end\n    -- any other handle belongs to another script\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass Reminders(horizon.Behavior):\n    def on_start(self):\n        self.autosave = horizon.timer.every(30)\n        self.hint = horizon.timer.after(5)\n\n    def on_timer(self, handle):\n        if handle == self.autosave:\n            horizon.log(\"autosave\")\n        elif handle == self.hint:\n            horizon.log(\"Press E to open the door\")\n        # any other handle belongs to another script\n"
+    }
+  },
+  "timer.cancelAll": {
+    "note": "That includes the timers of every other script and of the GameInstance."
+  },
+  "datetime.now": {
+    "note": "Accurate only to about a minute, see the <a href=\"#datetime\">known issue</a>.",
+    "examples": {
+      "file": "clock_label",
+      "lua": "local M = {}\n\nlocal DAYS = { [0] = \"Sunday\", \"Monday\", \"Tuesday\", \"Wednesday\",\n               \"Thursday\", \"Friday\", \"Saturday\" }\n\nfunction M.onStart(self)\n    local now = horizon.datetime.now()\n    horizon.log(\"Today is \" .. DAYS[horizon.datetime.weekday(now)] .. \", \"\n                .. horizon.datetime.format(now, \"%d.%m.%Y\"))\n    -- To the second: from Lua itself until the precision issue is fixed.\n    horizon.log(\"It is \" .. os.date(\"%H:%M:%S\"))\nend\n\nreturn M\n",
+      "python": "import time\nimport horizon\n\nDAYS = [\"Sunday\", \"Monday\", \"Tuesday\", \"Wednesday\",\n        \"Thursday\", \"Friday\", \"Saturday\"]\n\nclass ClockLabel(horizon.Behavior):\n    def on_start(self):\n        now = horizon.datetime.now()\n        day = DAYS[horizon.datetime.weekday(now)]\n        horizon.log(f\"Today is {day}, {horizon.datetime.format(now, '%d.%m.%Y')}\")\n        # To the second: from Python itself until the precision issue is fixed.\n        horizon.log(\"It is \" + time.strftime(\"%H:%M:%S\"))\n"
+    }
+  },
+  "datetime.format": {
+    "note": "<code>%M</code> and <code>%S</code> are accurate only to about a minute, see the <a href=\"#datetime\">known issue</a>."
+  },
+  "datetime.minute": {
+    "note": "Accurate only to about a minute, see the <a href=\"#datetime\">known issue</a>."
+  },
+  "datetime.second": {
+    "note": "Not usable until the <a href=\"#datetime\">known issue</a> is fixed."
+  },
+  "debug.line": {
+    "script_sig": "line(x1, y1, z1, _, x2, y2, z2, _, r, g, b, _, seconds)",
+    "examples": {
+      "file": "ground_probe",
+      "lua": "local M = {}\n\nfunction M.onUpdate(self, dt)\n    local x, y, z = horizon.getPosition(self.entityId)\n    -- Four numbers per position and color, the fourth is ignored.\n    -- 0 seconds: drawn this frame only, so the shapes follow the entity.\n    horizon.debug.line(x, y, z, 0,   x, y - 2, z, 0,   1, 0, 0, 1,   0)\n    horizon.debug.sphere(x, y - 2, z, 0,   0.25,   0, 1, 0, 1,   0)\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass GroundProbe(horizon.Behavior):\n    def on_update(self, dt):\n        x, y, z = horizon.getPosition(self.entity_id)\n        # Four numbers per position and color, the fourth is ignored.\n        # 0 seconds: drawn this frame only, so the shapes follow the entity.\n        horizon.debug.line(x, y, z, 0,   x, y - 2, z, 0,   1, 0, 0, 1,   0)\n        horizon.debug.sphere(x, y - 2, z, 0,   0.25,   0, 1, 0, 1,   0)\n"
+    }
+  },
+  "debug.sphere": {
+    "script_sig": "sphere(x, y, z, _, radius, r, g, b, _, seconds)"
+  },
+  "debug.box": {
+    "script_sig": "box(minX, minY, minZ, _, maxX, maxY, maxZ, _, r, g, b, _, seconds)"
+  },
   "app.setAutostart": { "perm": "Run other programs" },
   "process.run": { "perm": "Run other programs" },
   "process.openUrl": { "perm": "Run other programs" },

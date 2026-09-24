@@ -22,8 +22,8 @@ namespace
 	  "Writes a line to the editor's Console panel and to HorizonEngine.log. The "
 	  "cheapest way to find out whether an exec chain ran at all." },
 	{ "debug.line",
-	  "Draws a line in the world for Seconds (0 = this frame only). Editor and "
-	  "development builds only; a packaged game draws nothing." },
+	  "Draws a line in the world for Seconds (0 = this frame only). A packaged "
+	  "game draws it too, so take debug drawing out before you ship." },
 	{ "debug.sphere",
 	  "Draws a wireframe sphere in the world for Seconds. Useful for showing what "
 	  "an overlap or sphere cast actually covered." },
@@ -912,16 +912,18 @@ namespace
 	{ "math.ceil",
 	  "Rounds UP to a whole number: 2.1 becomes 3." },
 	{ "math.round",
-	  "Rounds to the nearest whole number, halves going up." },
+	  "Rounds to the nearest whole number, halves away from zero: 2.5 becomes 3, "
+	  "-2.5 becomes -3." },
 	{ "math.sign",
 	  "-1 for a negative number, 1 for a positive one, 0 for zero. Which way, "
 	  "without how far." },
 	{ "math.pow",
 	  "Raises the base to the exponent." },
 	{ "math.mod",
-	  "The remainder after division. Wrapping an angle back into 0..360, or doing "
-	  "something every Nth item. A divisor of 0 is a runtime error: it is logged "
-	  "and the result is 0 rather than a NaN." },
+	  "The remainder after division, for doing something every Nth item. It keeps "
+	  "the sign of A: -1 mod 360 is -1, not 359, so wrapping an angle into 0..360 "
+	  "takes a second Modulo of the result plus 360. A divisor of 0 is a runtime "
+	  "error: it is logged and the result is 0 rather than a NaN." },
 	{ "math.bitAnd",
 	  "Keeps only the bits set in BOTH integers. Testing a flag: AND the flags "
 	  "with the one you ask about, and the result is non-zero when it is set. Not "
@@ -987,8 +989,10 @@ namespace
 
 	// ── Random ───────────────────────────────────────────────────────────────
 	{ "random.seed",
-	  "Fixes the random sequence, so a run can be repeated exactly. Seed with a "
-	  "constant while debugging and everything random happens the same way twice." },
+	  "Restarts the random sequence from this seed, so a run can be repeated "
+	  "exactly. Without it the sequence starts from the same built-in seed at every "
+	  "launch, so a game that should differ each time seeds once at start, from "
+	  "the clock." },
 	{ "random.value",
 	  "A random number from 0 up to (but not including) 1. An exec node, not a "
 	  "pure one, precisely because it changes every call: a pure node would be "
@@ -1743,10 +1747,11 @@ namespace
 	  "and two texts arriving there both count as 0, so every id would match "
 	  "every other one." },
 	{ "string.length",
-	  "How many characters the text has." },
+	  "How long the text is in bytes. Plain letters and digits are one byte each, "
+	  "but an accented or non-Latin letter takes two to four (\"ä\" is 2)." },
 	{ "string.substring",
-	  "Count characters starting at Start (counting from 0). A range past the end "
-	  "is clamped rather than an error." },
+	  "Count bytes starting at Start (counting from 0). A range past the end is "
+	  "clamped rather than an error." },
 	{ "string.contains",
 	  "Does the text contain this piece? Case-sensitive." },
 	{ "string.find",
@@ -1754,9 +1759,11 @@ namespace
 	{ "string.replace",
 	  "Replaces every occurrence of From with To." },
 	{ "string.toUpper",
-	  "The text in upper case." },
+	  "The text in upper case. Only A to Z change; accented letters stay as they "
+	  "are." },
 	{ "string.toLower",
-	  "The text in lower case." },
+	  "The text in lower case. Only A to Z change; accented letters stay as they "
+	  "are." },
 	{ "string.trim",
 	  "Removes whitespace from both ends — what a text input needs before it is "
 	  "compared to anything." },

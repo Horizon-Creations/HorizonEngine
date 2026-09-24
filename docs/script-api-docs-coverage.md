@@ -4,14 +4,14 @@ Erzeugt von `scripts/script_api_docs/coverage.py` aus `scripts/script_api_docs/r
 
 Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Referenz `scripting-reference.html` oder flacher Zwilling in `scripting-api.html#api`), **named** = Id wörtlich auf einer anderen Doku-Seite, **catalog** = nur der Name im HorizonCode-Knotenkatalog, **missing** = nirgends. **hand** = es gibt Handinhalt aus `overlay/` (Gruppen-Einleitung oder zur Id eine Notiz, ein Beispiel, ein Recht, eine Skript-Signatur): das, was der Generator nicht schreiben kann, und die Zahl, die die Gruppen-Schritte bewegen.
 
-**Gesamt: 582 Registry-Ids in 42 Gruppen** — ref 582, named 0, catalog 0, missing 0; hand 24.
+**Gesamt: 582 Registry-Ids in 42 Gruppen** — ref 582, named 0, catalog 0, missing 0; hand 104.
 
 | Gruppe | Kategorie | Ids | Lua/Py `horizon.<gruppe>.*` | ref | named | catalog | missing | hand |
 |---|---|---:|:---:|---:|---:|---:|---:|---:|
 | `env` | Environment | 116 | ja | 116 | 0 | 0 | 0 | 0 |
 | `net` | Multiplayer | 44 | ja | 44 | 0 | 0 | 0 | 3 |
 | `physics` | Physics | 33 | ja | 33 | 0 | 0 | 0 | 0 |
-| `math` | Math | 31 | ja | 31 | 0 | 0 | 0 | 0 |
+| `math` | Math | 31 | ja | 31 | 0 | 0 | 0 | 31 |
 | `widget` | Widget | 28 | ja | 28 | 0 | 0 | 0 | 0 |
 | `camera` | Camera | 26 | ja | 26 | 0 | 0 | 0 | 0 |
 | `app` | App | 24 | ja | 24 | 0 | 0 | 0 | 1 |
@@ -21,11 +21,11 @@ Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Refe
 | `save` | Save | 17 | ja | 17 | 0 | 0 | 0 | 0 |
 | `anticheat` | AntiCheat | 15 | ja | 15 | 0 | 0 | 0 | 0 |
 | `fs` | File | 13 | ja | 13 | 0 | 0 | 0 | 13 |
-| `time` | Time | 13 | ja | 13 | 0 | 0 | 0 | 0 |
+| `time` | Time | 13 | ja | 13 | 0 | 0 | 0 | 13 |
 | `scene` | Scene | 12 | ja | 12 | 0 | 0 | 0 | 0 |
-| `string` | String | 12 | ja | 12 | 0 | 0 | 0 | 0 |
+| `string` | String | 12 | ja | 12 | 0 | 0 | 0 | 12 |
 | `ui` | UI | 12 | ja | 12 | 0 | 0 | 0 | 0 |
-| `datetime` | DateTime | 9 | ja | 9 | 0 | 0 | 0 | 0 |
+| `datetime` | DateTime | 9 | ja | 9 | 0 | 0 | 0 | 9 |
 | `http` | HTTP | 9 | ja | 9 | 0 | 0 | 0 | 2 |
 | `prefs` | Prefs | 9 | ja | 9 | 0 | 0 | 0 | 0 |
 | `animator` | Animator | 8 | ja | 8 | 0 | 0 | 0 | 0 |
@@ -38,18 +38,18 @@ Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Refe
 | `player` | Player | 6 | ja | 6 | 0 | 0 | 0 | 0 |
 | `theme` | Theme | 6 | ja | 6 | 0 | 0 | 0 | 0 |
 | `dialog` | Dialog | 5 | ja | 5 | 0 | 0 | 0 | 0 |
-| `random` | Random | 5 | ja | 5 | 0 | 0 | 0 | 0 |
-| `timer` | Timer | 5 | ja | 5 | 0 | 0 | 0 | 0 |
+| `random` | Random | 5 | ja | 5 | 0 | 0 | 0 | 5 |
+| `timer` | Timer | 5 | ja | 5 | 0 | 0 | 0 | 5 |
 | `window` | Window | 5 | ja | 5 | 0 | 0 | 0 | 0 |
 | `content` | Content | 4 | ja | 4 | 0 | 0 | 0 | 0 |
-| `debug` | Debug | 4 | ja | 4 | 0 | 0 | 0 | 0 |
+| `debug` | Debug | 4 | ja | 4 | 0 | 0 | 0 | 4 |
 | `particle` | Particles | 4 | ja | 4 | 0 | 0 | 0 | 0 |
 | `clipboard` | Clipboard | 3 | ja | 3 | 0 | 0 | 0 | 0 |
 | `print` | Print | 3 | ja | 3 | 0 | 0 | 0 | 2 |
 | `process` | Process | 3 | ja | 3 | 0 | 0 | 0 | 2 |
 | `material` | Material | 2 | **nein** | 2 | 0 | 0 | 0 | 0 |
 | `cursor` | Cursor | 1 | **nein** | 1 | 0 | 0 | 0 | 0 |
-| `log` | Debug | 1 | **nein** | 1 | 0 | 0 | 0 | 0 |
+| `log` | Debug | 1 | **nein** | 1 | 0 | 0 | 0 | 1 |
 
 ## Flache `horizon.*`-Funktionen (35, nicht in der Registry)
 
@@ -223,37 +223,37 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `math.sin(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-sin |
-| `math.cos(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-cos |
-| `math.tan(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-tan |
-| `math.sqrt(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-sqrt |
-| `math.abs(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-abs |
-| `math.floor(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-floor |
-| `math.ceil(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-ceil |
-| `math.round(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-round |
-| `math.sign(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-sign |
-| `math.radians(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-radians |
-| `math.degrees(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-degrees |
-| `math.pow(base: Float, exp: Float)` → result: Float | pure | ref | scripting-reference.html#math-pow |
-| `math.mod(a: Float, b: Float)` → result: Float | pure | ref | scripting-reference.html#math-mod |
-| `math.bitAnd(a: Int, b: Int)` → result: Int | pure | ref | scripting-reference.html#math-bitAnd |
-| `math.bitOr(a: Int, b: Int)` → result: Int | pure | ref | scripting-reference.html#math-bitOr |
-| `math.bitXor(a: Int, b: Int)` → result: Int | pure | ref | scripting-reference.html#math-bitXor |
-| `math.bitNot(x: Int)` → result: Int | pure | ref | scripting-reference.html#math-bitNot |
-| `math.shiftLeft(x: Int, count: Int)` → result: Int | pure | ref | scripting-reference.html#math-shiftLeft |
-| `math.shiftRight(x: Int, count: Int)` → result: Int | pure | ref | scripting-reference.html#math-shiftRight |
-| `math.atan2(y: Float, x: Float)` → result: Float | pure | ref | scripting-reference.html#math-atan2 |
-| `math.min(a: Float, b: Float)` → result: Float | pure | ref | scripting-reference.html#math-min |
-| `math.max(a: Float, b: Float)` → result: Float | pure | ref | scripting-reference.html#math-max |
-| `math.clamp(x: Float, lo: Float, hi: Float)` → result: Float | pure | ref | scripting-reference.html#math-clamp |
-| `math.lerp(a: Float, b: Float, t: Float)` → result: Float | pure | ref | scripting-reference.html#math-lerp |
-| `math.length(v: Vec2)` → result: Float | pure | ref | scripting-reference.html#math-length |
-| `math.distance(a: Vec2, b: Vec2)` → result: Float | pure | ref | scripting-reference.html#math-distance |
-| `math.length3(v: Vec3)` → result: Float | pure | ref | scripting-reference.html#math-length3 |
-| `math.distance3(a: Vec3, b: Vec3)` → result: Float | pure | ref | scripting-reference.html#math-distance3 |
-| `math.normalize3(v: Vec3)` → result: Vec3 | pure | ref | scripting-reference.html#math-normalize3 |
-| `math.dot3(a: Vec3, b: Vec3)` → result: Float | pure | ref | scripting-reference.html#math-dot3 |
-| `math.cross(a: Vec3, b: Vec3)` → result: Vec3 | pure | ref | scripting-reference.html#math-cross |
+| `math.sin(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-sin · hand |
+| `math.cos(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-cos · hand |
+| `math.tan(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-tan · hand |
+| `math.sqrt(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-sqrt · hand |
+| `math.abs(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-abs · hand |
+| `math.floor(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-floor · hand |
+| `math.ceil(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-ceil · hand |
+| `math.round(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-round · hand |
+| `math.sign(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-sign · hand |
+| `math.radians(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-radians · hand |
+| `math.degrees(x: Float)` → result: Float | pure | ref | scripting-reference.html#math-degrees · hand |
+| `math.pow(base: Float, exp: Float)` → result: Float | pure | ref | scripting-reference.html#math-pow · hand |
+| `math.mod(a: Float, b: Float)` → result: Float | pure | ref | scripting-reference.html#math-mod · hand |
+| `math.bitAnd(a: Int, b: Int)` → result: Int | pure | ref | scripting-reference.html#math-bitAnd · hand |
+| `math.bitOr(a: Int, b: Int)` → result: Int | pure | ref | scripting-reference.html#math-bitOr · hand |
+| `math.bitXor(a: Int, b: Int)` → result: Int | pure | ref | scripting-reference.html#math-bitXor · hand |
+| `math.bitNot(x: Int)` → result: Int | pure | ref | scripting-reference.html#math-bitNot · hand |
+| `math.shiftLeft(x: Int, count: Int)` → result: Int | pure | ref | scripting-reference.html#math-shiftLeft · hand |
+| `math.shiftRight(x: Int, count: Int)` → result: Int | pure | ref | scripting-reference.html#math-shiftRight · hand |
+| `math.atan2(y: Float, x: Float)` → result: Float | pure | ref | scripting-reference.html#math-atan2 · hand |
+| `math.min(a: Float, b: Float)` → result: Float | pure | ref | scripting-reference.html#math-min · hand |
+| `math.max(a: Float, b: Float)` → result: Float | pure | ref | scripting-reference.html#math-max · hand |
+| `math.clamp(x: Float, lo: Float, hi: Float)` → result: Float | pure | ref | scripting-reference.html#math-clamp · hand |
+| `math.lerp(a: Float, b: Float, t: Float)` → result: Float | pure | ref | scripting-reference.html#math-lerp · hand |
+| `math.length(v: Vec2)` → result: Float | pure | ref | scripting-reference.html#math-length · hand |
+| `math.distance(a: Vec2, b: Vec2)` → result: Float | pure | ref | scripting-reference.html#math-distance · hand |
+| `math.length3(v: Vec3)` → result: Float | pure | ref | scripting-reference.html#math-length3 · hand |
+| `math.distance3(a: Vec3, b: Vec3)` → result: Float | pure | ref | scripting-reference.html#math-distance3 · hand |
+| `math.normalize3(v: Vec3)` → result: Vec3 | pure | ref | scripting-reference.html#math-normalize3 · hand |
+| `math.dot3(a: Vec3, b: Vec3)` → result: Float | pure | ref | scripting-reference.html#math-dot3 · hand |
+| `math.cross(a: Vec3, b: Vec3)` → result: Vec3 | pure | ref | scripting-reference.html#math-cross · hand |
 
 ### `widget` — Widget (28)
 
@@ -480,19 +480,19 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `time.deltaTime()` → dt: Float | pure | ref | scripting-reference.html#time-deltaTime |
-| `time.elapsed()` → seconds: Float | pure | ref | scripting-reference.html#time-elapsed |
-| `time.frameCount()` → frame: Int | pure | ref | scripting-reference.html#time-frameCount |
-| `time.setTimeScale(scale: Float)` | exec | ref | scripting-reference.html#time-setTimeScale |
-| `time.timeScale()` → scale: Float | pure | ref | scripting-reference.html#time-timeScale |
-| `time.unscaledDeltaTime()` → dt: Float | pure | ref | scripting-reference.html#time-unscaledDeltaTime |
-| `time.unscaledElapsed()` → seconds: Float | pure | ref | scripting-reference.html#time-unscaledElapsed |
-| `time.pause()` | exec | ref | scripting-reference.html#time-pause |
-| `time.resume()` | exec | ref | scripting-reference.html#time-resume |
-| `time.isPaused()` → paused: Bool | pure | ref | scripting-reference.html#time-isPaused |
-| `time.hitStop(seconds: Float)` | exec | ref | scripting-reference.html#time-hitStop |
-| `time.isFrozen()` → frozen: Bool | pure | ref | scripting-reference.html#time-isFrozen |
-| `time.effectiveScale()` → scale: Float | pure | ref | scripting-reference.html#time-effectiveScale |
+| `time.deltaTime()` → dt: Float | pure | ref | scripting-reference.html#time-deltaTime · hand |
+| `time.elapsed()` → seconds: Float | pure | ref | scripting-reference.html#time-elapsed · hand |
+| `time.frameCount()` → frame: Int | pure | ref | scripting-reference.html#time-frameCount · hand |
+| `time.setTimeScale(scale: Float)` | exec | ref | scripting-reference.html#time-setTimeScale · hand |
+| `time.timeScale()` → scale: Float | pure | ref | scripting-reference.html#time-timeScale · hand |
+| `time.unscaledDeltaTime()` → dt: Float | pure | ref | scripting-reference.html#time-unscaledDeltaTime · hand |
+| `time.unscaledElapsed()` → seconds: Float | pure | ref | scripting-reference.html#time-unscaledElapsed · hand |
+| `time.pause()` | exec | ref | scripting-reference.html#time-pause · hand |
+| `time.resume()` | exec | ref | scripting-reference.html#time-resume · hand |
+| `time.isPaused()` → paused: Bool | pure | ref | scripting-reference.html#time-isPaused · hand |
+| `time.hitStop(seconds: Float)` | exec | ref | scripting-reference.html#time-hitStop · hand |
+| `time.isFrozen()` → frozen: Bool | pure | ref | scripting-reference.html#time-isFrozen · hand |
+| `time.effectiveScale()` → scale: Float | pure | ref | scripting-reference.html#time-effectiveScale · hand |
 
 ### `scene` — Scene (12)
 
@@ -515,18 +515,18 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `string.length(s: String)` → length: Int | pure | ref | scripting-reference.html#string-length |
-| `string.equals(a: String, b: String)` → result: Bool | pure | ref | scripting-reference.html#string-equals |
-| `string.substring(s: String, start: Int, count: Int)` → result: String | pure | ref | scripting-reference.html#string-substring |
-| `string.contains(s: String, needle: String)` → contains: Bool | pure | ref | scripting-reference.html#string-contains |
-| `string.find(s: String, needle: String)` → index: Int | pure | ref | scripting-reference.html#string-find |
-| `string.replace(s: String, from: String, to: String)` → result: String | pure | ref | scripting-reference.html#string-replace |
-| `string.toUpper(s: String)` → result: String | pure | ref | scripting-reference.html#string-toUpper |
-| `string.toLower(s: String)` → result: String | pure | ref | scripting-reference.html#string-toLower |
-| `string.trim(s: String)` → result: String | pure | ref | scripting-reference.html#string-trim |
-| `string.startsWith(s: String, prefix: String)` → result: Bool | pure | ref | scripting-reference.html#string-startsWith |
-| `string.endsWith(s: String, suffix: String)` → result: Bool | pure | ref | scripting-reference.html#string-endsWith |
-| `string.toNumber(s: String)` → number: Float | pure | ref | scripting-reference.html#string-toNumber |
+| `string.length(s: String)` → length: Int | pure | ref | scripting-reference.html#string-length · hand |
+| `string.equals(a: String, b: String)` → result: Bool | pure | ref | scripting-reference.html#string-equals · hand |
+| `string.substring(s: String, start: Int, count: Int)` → result: String | pure | ref | scripting-reference.html#string-substring · hand |
+| `string.contains(s: String, needle: String)` → contains: Bool | pure | ref | scripting-reference.html#string-contains · hand |
+| `string.find(s: String, needle: String)` → index: Int | pure | ref | scripting-reference.html#string-find · hand |
+| `string.replace(s: String, from: String, to: String)` → result: String | pure | ref | scripting-reference.html#string-replace · hand |
+| `string.toUpper(s: String)` → result: String | pure | ref | scripting-reference.html#string-toUpper · hand |
+| `string.toLower(s: String)` → result: String | pure | ref | scripting-reference.html#string-toLower · hand |
+| `string.trim(s: String)` → result: String | pure | ref | scripting-reference.html#string-trim · hand |
+| `string.startsWith(s: String, prefix: String)` → result: Bool | pure | ref | scripting-reference.html#string-startsWith · hand |
+| `string.endsWith(s: String, suffix: String)` → result: Bool | pure | ref | scripting-reference.html#string-endsWith · hand |
+| `string.toNumber(s: String)` → number: Float | pure | ref | scripting-reference.html#string-toNumber · hand |
 
 ### `ui` — UI (12)
 
@@ -549,15 +549,15 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `datetime.now()` → epochSeconds: Float | pure | ref | scripting-reference.html#datetime-now |
-| `datetime.format(epochSeconds: Float, format: String)` → text: String | pure | ref | scripting-reference.html#datetime-format |
-| `datetime.year(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-year |
-| `datetime.month(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-month |
-| `datetime.day(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-day |
-| `datetime.hour(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-hour |
-| `datetime.minute(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-minute |
-| `datetime.second(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-second |
-| `datetime.weekday(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-weekday |
+| `datetime.now()` → epochSeconds: Float | pure | ref | scripting-reference.html#datetime-now · hand |
+| `datetime.format(epochSeconds: Float, format: String)` → text: String | pure | ref | scripting-reference.html#datetime-format · hand |
+| `datetime.year(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-year · hand |
+| `datetime.month(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-month · hand |
+| `datetime.day(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-day · hand |
+| `datetime.hour(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-hour · hand |
+| `datetime.minute(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-minute · hand |
+| `datetime.second(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-second · hand |
+| `datetime.weekday(epochSeconds: Float)` → value: Int | pure | ref | scripting-reference.html#datetime-weekday · hand |
 
 ### `http` — HTTP (9)
 
@@ -709,21 +709,21 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `random.seed(seed: Int)` | exec | ref | scripting-reference.html#random-seed |
-| `random.value()` → value: Float | exec | ref | scripting-reference.html#random-value |
-| `random.range(min: Float, max: Float)` → value: Float | exec | ref | scripting-reference.html#random-range |
-| `random.rangeInt(min: Int, max: Int)` → value: Int | exec | ref | scripting-reference.html#random-rangeInt |
-| `random.chance(p: Float)` → value: Bool | exec | ref | scripting-reference.html#random-chance |
+| `random.seed(seed: Int)` | exec | ref | scripting-reference.html#random-seed · hand |
+| `random.value()` → value: Float | exec | ref | scripting-reference.html#random-value · hand |
+| `random.range(min: Float, max: Float)` → value: Float | exec | ref | scripting-reference.html#random-range · hand |
+| `random.rangeInt(min: Int, max: Int)` → value: Int | exec | ref | scripting-reference.html#random-rangeInt · hand |
+| `random.chance(p: Float)` → value: Bool | exec | ref | scripting-reference.html#random-chance · hand |
 
 ### `timer` — Timer (5)
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `timer.after(seconds: Float)` → handle: Int | exec | ref | scripting-reference.html#timer-after |
-| `timer.every(seconds: Float)` → handle: Int | exec | ref | scripting-reference.html#timer-every |
-| `timer.cancel(handle: Int)` → ok: Bool | exec | ref | scripting-reference.html#timer-cancel |
-| `timer.active(handle: Int)` → active: Bool | pure | ref | scripting-reference.html#timer-active |
-| `timer.cancelAll()` | exec | ref | scripting-reference.html#timer-cancelAll |
+| `timer.after(seconds: Float)` → handle: Int | exec | ref | scripting-reference.html#timer-after · hand |
+| `timer.every(seconds: Float)` → handle: Int | exec | ref | scripting-reference.html#timer-every · hand |
+| `timer.cancel(handle: Int)` → ok: Bool | exec | ref | scripting-reference.html#timer-cancel · hand |
+| `timer.active(handle: Int)` → active: Bool | pure | ref | scripting-reference.html#timer-active · hand |
+| `timer.cancelAll()` | exec | ref | scripting-reference.html#timer-cancelAll · hand |
 
 ### `window` — Window (5)
 
@@ -748,10 +748,10 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `debug.line(from: Color, to: Color, color: Color, seconds: Float)` | exec | ref | scripting-reference.html#debug-line |
-| `debug.sphere(center: Color, radius: Float, color: Color, seconds: Float)` | exec | ref | scripting-reference.html#debug-sphere |
-| `debug.box(min: Color, max: Color, color: Color, seconds: Float)` | exec | ref | scripting-reference.html#debug-box |
-| `debug.clear()` | exec | ref | scripting-reference.html#debug-clear |
+| `debug.line(from: Color, to: Color, color: Color, seconds: Float)` | exec | ref | scripting-reference.html#debug-line · hand |
+| `debug.sphere(center: Color, radius: Float, color: Color, seconds: Float)` | exec | ref | scripting-reference.html#debug-sphere · hand |
+| `debug.box(min: Color, max: Color, color: Color, seconds: Float)` | exec | ref | scripting-reference.html#debug-box · hand |
+| `debug.clear()` | exec | ref | scripting-reference.html#debug-clear · hand |
 
 ### `particle` — Particles (4)
 
@@ -809,4 +809,4 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `log(message: String)` | exec | ref | scripting-reference.html#fn-log |
+| `log(message: String)` | exec | ref | scripting-reference.html#fn-log · hand |
