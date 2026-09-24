@@ -314,6 +314,7 @@ add_library(HorizonRendering SHARED
     src/CommandBuffer.cpp
     src/GiBvh.cpp
     src/GiInstanceSurface.cpp
+    src/MaterialScalars.cpp
     src/RendererFactory.cpp)
 
 target_include_directories(HorizonRendering

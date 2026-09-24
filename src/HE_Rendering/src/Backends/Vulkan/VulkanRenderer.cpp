@@ -19,6 +19,7 @@
 #include <Diagnostics/Logger.h>
 #include <HorizonRendering/ClipSpace.h>
 #include <HorizonRendering/LightPacking.h>
+#include <HorizonRendering/MaterialScalars.h>
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/SkyNoise3D.h>
@@ -3016,15 +3017,13 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     {
         if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
             obj.worldBounds = mesh->localBounds.transformed(obj.transform);
-        // The material asset overrides the component's opacity, and DrawScene
-        // splits opaque from transparent AFTER applying it. Without the same
-        // override here a material-driven glass pane would count as opaque in
-        // this pre-pass and transparent in the scene pass — depth where the
-        // scene writes none, and the decal lands on the glass.
-        if (m_contentManager && obj.materialAssetId != HE::UUID{})
-            if (const MaterialAsset* mat = m_contentManager->getMaterial(obj.materialAssetId))
-                obj.opacity = mat->opacity;
     }
+    // The material asset overrides the component's opacity, and DrawScene
+    // splits opaque from transparent AFTER applying it. Without the same
+    // resolve here (Translucent clamp included) a material-driven glass pane
+    // would count as opaque in this pre-pass and transparent in the scene pass
+    // — depth where the scene writes none, and the decal lands on the glass.
+    HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
     m_culler.cull(m_renderWorld, m_visible);
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
     if (m_sortedIndices.empty()) return;
@@ -5003,19 +5002,11 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
             mesh && mesh->localBounds.isValid())
             obj.worldBounds = mesh->localBounds.transformed(obj.transform);
-        if (m_contentManager)
-        {
-            const HE::UUID matId = obj.materialAssetId;
-            if (const MaterialAsset* mat = (matId == HE::UUID{}) ? nullptr
-                                           : m_contentManager->getMaterial(matId))
-            {
-                obj.baseColor = { mat->baseColor[0], mat->baseColor[1], mat->baseColor[2] };
-                obj.metallic  = mat->metallic;
-                obj.roughness = mat->roughness;
-                obj.opacity   = mat->opacity;
-            }
-        }
     }
+    // PBR scalars per object, per material slot and per skinned object, each from
+    // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
+    // ResolveMaterialParams gives them, in time for partitionByOpacity.
+    HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
 
     m_culler.cull(m_renderWorld, m_visible);
     m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);

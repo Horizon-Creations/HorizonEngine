@@ -8,6 +8,7 @@
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
+#include <HorizonRendering/MaterialScalars.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <Math/AABB.h>
@@ -5008,19 +5009,11 @@ void D3D11Renderer::DrawScene(int width, int height)
         if (const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
             mesh && mesh->localBounds.isValid())
             obj.worldBounds = mesh->localBounds.transformed(obj.transform);
-        if (m_contentManager)
-        {
-            const HE::UUID matId = obj.materialAssetId;
-            if (const MaterialAsset* mat = (matId == HE::UUID{}) ? nullptr
-                                           : m_contentManager->getMaterial(matId))
-            {
-                obj.baseColor = { mat->baseColor[0], mat->baseColor[1], mat->baseColor[2] };
-                obj.metallic  = mat->metallic;
-                obj.roughness = mat->roughness;
-                obj.opacity   = mat->opacity;
-            }
-        }
     }
+    // PBR scalars per object, per material slot and per skinned object, each from
+    // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
+    // ResolveMaterialParams gives them, in time for partitionByOpacity.
+    HE::resolveWorldMaterialScalars(p.m_renderWorld, m_contentManager);
 
     // GI acceleration structures: refresh the BLAS cache + per-frame instance
     // array right after extraction (UNCULLED — off-screen casters still occlude),

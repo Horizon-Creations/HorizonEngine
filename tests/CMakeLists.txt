@@ -247,6 +247,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/LightPacking.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderGraph.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderPass.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/MaterialScalars.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/CommandBuffer.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GPUMemoryAllocator.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderResourceManager.cpp
