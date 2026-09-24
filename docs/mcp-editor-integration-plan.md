@@ -2923,5 +2923,10 @@ zwei Rechnern, keinen über das Directory oder eine echte Portfreigabe (alles
 Loopback, offline). Keine Asset- oder Dokument-Deltas (`CollabDocSync`),
 nur Entities. Und beide Editoren reagierten nicht innerhalb von 10 s auf
 SIGTERM und wurden getötet (rc −9), der Schluss ihrer Logs fehlt deshalb.
-Das Aufräumen beim Beenden (`CollabController::shutdown`) ist also in diesem
-Lauf nicht gelaufen.
+Die Ursache ist gewollt: SDL macht aus SIGTERM ein `SDL_EVENT_QUIT`, und weil
+die Szene nach den MCP-Änderungen ungespeichert ist, blockiert die
+Ungespeichert-Sperre (`EditorApplication.cpp`, `osCloseRequest`) das Beenden
+und wartet auf eine Speichern-Abfrage, die im versteckten Fenster niemand
+beantwortet. Das Aufräumen beim Beenden (`CollabController::shutdown`) ist
+also in diesem Lauf nicht gelaufen. Ein `scene_save` auf beiden Seiten vor
+dem Stoppen würde es ermöglichen, ist aber nicht ausprobiert.
