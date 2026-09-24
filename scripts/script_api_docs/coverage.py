@@ -208,7 +208,10 @@ def main() -> None:
         rs = by[g]
         w("")
         w(f"### `{g}` — {rs[0]['category']} ({len(rs)})")
-        if not rs[0]["script"]:
+        if "." not in rs[0]["id"]:
+            w("")
+            w(f"> Id ohne Gruppe: in Lua/Python als flache Funktion `horizon.{g}` da.")
+        elif not rs[0]["script"]:
             w("")
             w(f"> Nicht in `isScriptGroup()`: in Lua/Python gibt es **kein** `horizon.{g}.*`; "
               "erreichbar nur über HorizonCode, C++ und ggf. einen flachen Zwilling.")

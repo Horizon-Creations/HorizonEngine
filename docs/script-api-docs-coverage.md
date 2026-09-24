@@ -805,7 +805,7 @@ Aus dem Code gelesen (Lua: `HE_SCRIPT_CALL`-Namen, Python: `on_*`-Strings). Doku
 
 ### `log` — Debug (1)
 
-> Nicht in `isScriptGroup()`: in Lua/Python gibt es **kein** `horizon.log.*`; erreichbar nur über HorizonCode, C++ und ggf. einen flachen Zwilling.
+> Id ohne Gruppe: in Lua/Python als flache Funktion `horizon.log` da.
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|

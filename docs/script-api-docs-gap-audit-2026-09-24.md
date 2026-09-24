@@ -149,7 +149,9 @@ Jede Signatur hängt an diesen Regeln, sie gehören einmal zentral auf die Refer
   (`horizon.structs.<Name>()`), mehrere Ergebnisse = Lua-Mehrfachrückgabe / Python-Tupel.
   Die flachen Shims weichen davon ab (optionale Argumente, `raycast` liefert eine benannte Tabelle,
   `setMaterialParam(e, name, x[,y,z,w])`). Das ist `docs/rework-2026-07-deferrals.md` §1, und dort steht
-  die Vec3-Spreizung noch als „vier Zahlen"; seit es `PinType::Vec3` gibt, sind es drei.
+  die Vec3-Spreizung noch als „vier Zahlen"; seit es `PinType::Vec3` gibt, sind es drei. Auch die
+  Gruppenliste dort (ui/widget/physics nicht freigeschaltet) ist überholt, maßgeblich ist
+  `isScriptGroup()` in `EngineApi.cpp:7589`.
   **Noch am Code zu prüfen:** ob fehlende Argumente in Lua einen Fehler werfen (`luaL_check*`) oder mit
   Defaults auffüllen, wie Array-Parameter/-Ergebnisse (`physics.raycastAll`) ankommen und ob der
   Python-Weg identisch ist.
