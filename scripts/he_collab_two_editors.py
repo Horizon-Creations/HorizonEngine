@@ -22,8 +22,10 @@ What it checks, each from the side that did NOT make the change:
      marker is gone, and both uuid sets are identical;
   5. A creates an entity → B sees it, same uuid, same position;
   6. B moves it (lock requested from the host, lock_pending retried) → A sees it;
-  7. while B holds that lock, A's move is refused `locked_by_other`; B's client
-     hangs up, the lock goes back, A's move lands and B sees it;
+  7. while B holds that lock, A's move is refused `locked_by_other`; with every
+     MCP client of B gone, B hands the lock back, A's move lands and B sees it
+     (and, reported without asserting: what happens when only the HOLDING
+     client leaves and another stays — see the note at step 7a);
   8. B creates and renames an entity → A sees the name;
   9. deletes both ways → gone on the other side;
  10. B leaves → A's roster shrinks back to A.
@@ -147,6 +149,34 @@ def roster_names(status):
     return sorted(p.get("name") for p in status.get("participants", []))
 
 
+def same_content(a, b, when, expect, transcript):
+    """Scene content (non-builtin) identical by uuid on both sides.
+
+    The built-ins — the environment lights the Sky entity owns — are made by
+    every editor for itself and deliberately never replicated
+    (EditorApplication::syncStructuralChanges, isLocalOnly), so their uuids
+    differ per process by design. They are compared by name and count instead,
+    and listed, so "differs by design" stays something the log shows rather
+    than something this script assumes."""
+    ents_a, ents_b = a.entities(), b.entities()
+    content_a = {u for u, e in ents_a.items() if not e.get("builtin")}
+    content_b = {u for u, e in ents_b.items() if not e.get("builtin")}
+    only_a, only_b = content_a - content_b, content_b - content_a
+    for tag, only, ents in (("A", only_a, ents_a), ("B", only_b, ents_b)):
+        for u in sorted(only):
+            log("    only on %s: %s %s %s" % (tag, u, ents[u].get("name"), ents[u].get("components")))
+    expect(not only_a and not only_b,
+           "%s: A and B hold the same %d content uuids (only A: %d, only B: %d)"
+           % (when, len(content_a), len(only_a), len(only_b)))
+    built_a = sorted(e.get("name") for e in ents_a.values() if e.get("builtin"))
+    built_b = sorted(e.get("name") for e in ents_b.values() if e.get("builtin"))
+    log("    builtins A: %s / B: %s (local per editor, not replicated)" % (built_a, built_b))
+    expect(built_a == built_b, "%s: both editors have the same built-ins by name" % when)
+    transcript.setdefault("content", {})[when] = {
+        "content_uuids": len(content_a), "builtins_a": built_a, "builtins_b": built_b,
+        "only_a": sorted(only_a), "only_b": sorted(only_b)}
+
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -243,11 +273,7 @@ def main():
         expect(pre_a["uuid"] in ents_b, "B has A's pre-join marker under A's uuid (snapshot)")
         expect(pre_b["uuid"] not in ents_b and not b.by_name("GuestLocalOnlyB"),
                "B's own pre-join marker is gone (world replaced, not merged)")
-        only_a = set(ents_a) - set(ents_b)
-        only_b = set(ents_b) - set(ents_a)
-        expect(not only_a and not only_b,
-               "A and B hold the same %d uuids (only A: %d, only B: %d)"
-               % (len(ents_a), len(only_a), len(only_b)))
+        same_content(a, b, "after the join", expect, transcript)
 
         # ── 5. A creates → B sees ────────────────────────────────────────────
         live_a = a.call("entity_create", {"name": "LiveFromA", "position": [1.0, 2.0, 3.0]})
@@ -267,16 +293,36 @@ def main():
         expect(not ok and sc.get("code") == "locked_by_other",
                "A's move of B's entity is refused: %s" % (sc.get("code") if not ok else "ACCEPTED"))
         expect(close(world_pos(a, ua), [-4.0, 1.0, 2.0]), "…and did not move it on A")
-        b.reconnect()   # the client that held the lock hangs up → its locks go back
+        # 7a. What B's editor does when the client that took the lock hangs up
+        #     while ANOTHER client stays connected to it. Reported, not
+        #     asserted: EditorApplication::updateMcpLocks hands the external
+        #     locks back only once clientCount() is 0, i.e. they belong to the
+        #     editor's clients as a group, not to the one that asked
+        #     (docs/mcp-editor-integration-plan.md proposed per-connection).
+        b2 = mc.Client("B2", b.ed.endpoint)
+        b.client.close()
+        b.client = b2
+        time.sleep(2.0)
+        ok, sc = a.raw("entity_set_transform", {"uuid": ua, "position": [9.0, 9.0, 9.0]})
+        gap = "accepted" if ok else sc.get("code")
+        transcript["lock_after_holder_left_other_client_stays"] = gap
+        log("  NOTE holder hung up, a second client on B stayed → A's move: %s" % gap)
+
+        # 7b. Every client of B gone → B's editor hands the lock back.
+        b.client.close()
+        b.client = None
         ok, sc, pend = False, {}, 0
         deadline = time.time() + SYNC_TIMEOUT
+        t0 = time.time()
         while time.time() < deadline:
             ok, sc, p = a.retry_lock("entity_set_transform", {"uuid": ua, "position": [5.0, 0.0, 5.0]})
             pend += p
             if ok or sc.get("code") != "locked_by_other":
                 break
             time.sleep(0.2)
-        expect(ok, "after B's client left, A's move lands (%s, %d pending)" % (sc.get("code", "ok"), pend))
+        expect(ok, "with no client left on B, A's move lands (%.1fs, %s, %d pending)"
+               % (time.time() - t0, sc.get("code", "ok"), pend))
+        b.reconnect()
         got, dt = wait_for("B sees A's move", lambda: close(world_pos(b, ua), [5.0, 0.0, 5.0]))
         expect(got, "B sees A's move (%.1fs): %s" % (dt, world_pos(b, ua)))
 
@@ -300,8 +346,7 @@ def main():
         expect(ok, "A deletes LiveFromA (%s)" % sc.get("code", "ok"))
         got, dt = wait_for("B loses LiveFromA", lambda: ua not in b.entities())
         expect(got, "the delete reached B (%.1fs)" % dt)
-        ents_a, ents_b = a.entities(), b.entities()
-        expect(set(ents_a) == set(ents_b), "after all of it both hold the same %d uuids" % len(ents_a))
+        same_content(a, b, "after all edits", expect, transcript)
 
         # ── 10. B leaves ─────────────────────────────────────────────────────
         left = b.call("collab_leave")
@@ -319,8 +364,9 @@ def main():
                 continue
             if p.client:
                 p.client.close()
-            p.ed.stop()
+            # Read BEFORE stop(): stop closes the log file handle.
             text = p.ed.log_text()
+            p.ed.stop()
             lines = [l for l in text.splitlines() if "Collab" in l or "MCP: collab" in l]
             (outdir / ("collab_log_%s.txt" % p.tag.lower())).write_text("\n".join(lines))
             log("%s editor log: %d collab lines" % (p.tag, len(lines)))
