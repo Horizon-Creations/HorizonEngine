@@ -28,6 +28,8 @@
 #endif
 #include <HorizonRendering/LightPacking.h>    // GPU light window + shadow-mask lights
 #include <HorizonRendering/ClipSpace.h>       // GL depth (-1..1) → D3D depth (0..1)
+#include <HorizonRendering/WorldPreviewGrid.h> // RenderWorldPreview: grid, background, dump
+#include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
@@ -2336,13 +2338,18 @@ struct D3D12RendererImpl
         return debugReady;
     }
 
+    // `cameraPos` anchors the 3D clouds and the aurora, `time` drives their
+    // drift, `hdr` picks the PSO for the bound target. Parameters, not
+    // m_renderWorld / m_wallTime / usingHDR, because the world preview draws
+    // this sky from ITS camera, with the clock stopped, into its own HDR target.
     void drawSky(ID3D12GraphicsCommandList* cl, UINT fi,
                  const glm::mat4& invVP, const glm::vec3& sunDir,
-                 const IRenderer::EnvironmentSettings& env)
+                 const IRenderer::EnvironmentSettings& env,
+                 const glm::vec3& cameraPos, float time, bool hdr)
     {
         if (!skyReady) return;
         if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
-        auto* pso12 = usingHDR ? skyHdrPso.Get() : (skyLdrPso ? skyLdrPso.Get() : nullptr);
+        auto* pso12 = hdr ? skyHdrPso.Get() : (skyLdrPso ? skyLdrPso.Get() : nullptr);
         if (!pso12) return;
         // Translate the environment through the SHARED sky-constants builder
         // instead of hand-assigning fields (which is how D3D12 previously ended up
@@ -2353,8 +2360,8 @@ struct D3D12RendererImpl
         HE::SkyFrameInputs skyIn;
         skyIn.invViewProj    = invVP;
         skyIn.sunDir         = sunDir;
-        skyIn.cameraPos      = m_renderWorld.camera.position; // 3D clouds + aurora are world-anchored
-        skyIn.time           = m_wallTime;
+        skyIn.cameraPos      = cameraPos; // 3D clouds + aurora are world-anchored
+        skyIn.time           = time;
         skyIn.hasMoonTexture = moonTex12 ? true : false; // ComPtr → contextual bool
         const HE::SkyFrameParams sp = HE::BuildSkyFrameParams(env, skyIn);
         SkyCB cb{};
@@ -2386,13 +2393,15 @@ struct D3D12RendererImpl
         cl->DrawInstanced(3, 1, 0, 0);
     }
 
+    // `hdr` picks the PSO for the bound target (the world preview's is always HDR).
     void drawDebugLines(ID3D12GraphicsCommandList* cl,
                         const D3D12_CPU_DESCRIPTOR_HANDLE& dsv,
                         const glm::mat4& viewProj,
-                        const std::vector<DebugLine>& lines)
+                        const std::vector<DebugLine>& lines,
+                        bool hdr)
     {
         if (!debugReady || lines.empty()) return;
-        auto* pso12 = usingHDR ? debugHdrPso.Get() : (debugLdrPso ? debugLdrPso.Get() : nullptr);
+        auto* pso12 = hdr ? debugHdrPso.Get() : (debugLdrPso ? debugLdrPso.Get() : nullptr);
         if (!pso12) return;
 
         // Fill vertex buffer.
@@ -2419,6 +2428,277 @@ struct D3D12RendererImpl
         cl->IASetVertexBuffers(0, 1, &vbv);
         cl->SetGraphicsRootConstantBufferView(0, debugCBuf->GetGPUVirtualAddress());
         cl->DrawInstanced(static_cast<UINT>(lines.size() * 2), 1, 0, 0);
+    }
+
+    // ── World preview (RenderWorldPreview) ──────────────────────────────────
+    // One target set per slot, as on GL/Metal/D3D11: several secondary Scene
+    // viewports draw in the same frame and ImGui samples every one of them
+    // later. HDR colour resolved through the scene's tonemap PSO into an RGBA8
+    // target ImGui samples through the SRV slot the editor's registrar handed
+    // out — ONE slot per preview slot for the whole session: a resize rewrites
+    // that slot (registrar's second argument) instead of taking a new one from
+    // the editor's fixed-size ImGui heap, which a dragged dock splitter would
+    // otherwise drain within seconds.
+    //
+    // The preview records into a command list of its own and waits for the
+    // queue before and after (the IRenderer contract calls it a synchronous
+    // round trip): before, so the shared sky/debug-line upload buffers, the
+    // ImGui descriptor and a resized target are all free to touch; after, so
+    // the per-call CB/bone rings can be refilled by the next call.
+    struct WorldPreviewTarget12
+    {
+        ComPtr<ID3D12Resource>       hdr, ldr, depth;
+        ComPtr<ID3D12DescriptorHeap> rtvHeap;   // [0] hdr, [1] ldr
+        ComPtr<ID3D12DescriptorHeap> dsvHeap;
+        D3D12_RESOURCE_STATES        hdrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        D3D12_RESOURCE_STATES        ldrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        void*                        imguiHandle = nullptr; // kept across resizes, see above
+        int                          w = 0, h = 0;
+    };
+    WorldPreviewTarget12              worldPreview[IRenderer::kWorldPreviewSlots];
+    ComPtr<ID3D12RootSignature>       previewRootSig;   // b0 object, b1 light, b2 bones, t0 albedo, s0
+    ComPtr<ID3D12PipelineState>       previewMeshPso, previewSkinnedPso; // RGBA16F + D32
+    ComPtr<ID3D12DescriptorHeap>      previewSrvHeap;   // [0] null (bloom stand-in), [1 + slot] slot's HDR
+    ComPtr<ID3D12CommandAllocator>    previewAlloc;
+    ComPtr<ID3D12GraphicsCommandList> previewList;
+    ComPtr<ID3D12Resource>            previewCBRing;    // per-draw PerObject + the light, k_cbSlot apart
+    uint8_t*                          previewCBPtr   = nullptr;
+    UINT64                            previewCBBytes = 0;
+    ComPtr<ID3D12Resource>            previewBoneRing;  // one k_bonesCBSlot per skinned draw
+    uint8_t*                          previewBonePtr   = nullptr;
+    UINT64                            previewBoneBytes = 0;
+    bool                              previewReady  = false;
+    bool                              previewFailed = false; // built once, not retried per call
+
+    D3D12_GPU_DESCRIPTOR_HANDLE previewSrvGpu(UINT i) const
+    {
+        D3D12_GPU_DESCRIPTOR_HANDLE h = previewSrvHeap->GetGPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<UINT64>(i) * sceneSrvDescSize;
+        return h;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE previewSrvCpu(UINT i) const
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = previewSrvHeap->GetCPUDescriptorHandleForHeapStart();
+        h.ptr += static_cast<SIZE_T>(i) * sceneSrvDescSize;
+        return h;
+    }
+
+    // Root signature, the two PSOs, the SRV heap and the command list. The
+    // vertex side is the scene's own source (VSMain, VSMainSkinned) compiled
+    // against the preview's root signature; the pixel side is the shared
+    // kWorldPreviewPSHLSL with the albedo at its default t0.
+    bool ensureWorldPreviewPipeline()
+    {
+        if (previewReady)  return true;
+        if (previewFailed) return false;
+        previewFailed = true; // until everything below succeeded
+        if (!device || !sceneSrvHeap || !postFxReady || !tonemapPSO || !postFxRootSig) return false;
+
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        auto compile = [&](const std::string& src, const char* entry, const char* profile,
+                           ComPtr<ID3DBlob>& out) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(D3DCompile(src.c_str(), src.size(), "worldpreview", nullptr, nullptr,
+                                  entry, profile, flags, 0, &out, &err)))
+            {
+                HE_LOG_ERROR(RHI, "%s", (std::string("D3D12 world preview '") + entry + "': "
+                    + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
+                return false;
+            }
+            return true;
+        };
+        ComPtr<ID3DBlob> vsB, skVsB, meshPsB, skPsB;
+        if (!compile(std::string(kSkyFuncHLSL) + kSceneHLSL, "VSMain", "vs_5_0", vsB)
+            || !compile(kSkinnedHLSL, "VSMainSkinned", "vs_5_0", skVsB)
+            || !compile(kWorldPreviewPSHLSL, "PSPreviewMesh", "ps_5_0", meshPsB)
+            || !compile(kWorldPreviewPSHLSL, "PSPreviewSkinned", "ps_5_0", skPsB))
+            return false;
+
+        {
+            D3D12_DESCRIPTOR_RANGE albedo{};
+            albedo.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            albedo.NumDescriptors     = 1;
+            albedo.BaseShaderRegister = 0; // t0
+            D3D12_ROOT_PARAMETER params[4]{};
+            params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[0].Descriptor       = { 0, 0 }; // b0 PerObject (VS + PS)
+            params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+            params[1].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[1].Descriptor       = { 1, 0 }; // b1 PreviewLight
+            params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            params[2].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+            params[2].Descriptor       = { 2, 0 }; // b2 bones
+            params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+            params[3].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            params[3].DescriptorTable.NumDescriptorRanges = 1;
+            params[3].DescriptorTable.pDescriptorRanges   = &albedo;
+            params[3].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_STATIC_SAMPLER_DESC samp{};
+            samp.Filter   = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+            samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            samp.MaxLOD   = D3D12_FLOAT32_MAX;
+            samp.ShaderRegister   = 0; // s0
+            samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters     = 4;
+            rsd.pParameters       = params;
+            rsd.NumStaticSamplers = 1;
+            rsd.pStaticSamplers   = &samp;
+            rsd.Flags             = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+            ComPtr<ID3DBlob> sig, err;
+            if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err))
+                || FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                                      IID_PPV_ARGS(&previewRootSig))))
+            {
+                HE_LOG_ERROR(RHI, "%s", "D3D12 world preview: root signature failed");
+                return false;
+            }
+        }
+
+        const D3D12_INPUT_ELEMENT_DESC meshLayout[] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        };
+        const D3D12_INPUT_ELEMENT_DESC skinnedLayout[] = {
+            { "POSITION",     0, DXGI_FORMAT_R32G32B32_FLOAT,    0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "NORMAL",       0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD",     0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "BLENDINDICES", 0, DXGI_FORMAT_R32G32B32A32_UINT,  1,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "BLENDWEIGHT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 2,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+        };
+        auto makePso = [&](ID3DBlob* vs, ID3DBlob* ps, const D3D12_INPUT_ELEMENT_DESC* il, UINT ilCount,
+                           ComPtr<ID3D12PipelineState>& out) -> bool
+        {
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature = previewRootSig.Get();
+            pd.VS = { vs->GetBufferPointer(), vs->GetBufferSize() };
+            pd.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+            pd.InputLayout = { il, ilCount };
+            pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.SampleMask = UINT_MAX;
+            pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE; // as GL's preview: winding not guaranteed
+            pd.RasterizerState.DepthClipEnable = TRUE;
+            pd.DepthStencilState.DepthEnable    = TRUE;
+            pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+            pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS;
+            pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pd.SampleDesc.Count = 1;
+            return SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
+        };
+        if (!makePso(vsB.Get(), meshPsB.Get(), meshLayout, 3, previewMeshPso)
+            || !makePso(skVsB.Get(), skPsB.Get(), skinnedLayout, 5, previewSkinnedPso))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12 world preview: PSO creation failed");
+            return false;
+        }
+
+        D3D12_DESCRIPTOR_HEAP_DESC hd{};
+        hd.NumDescriptors = 1 + IRenderer::kWorldPreviewSlots;
+        hd.Type           = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        hd.Flags          = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&previewSrvHeap)))) return false;
+        for (UINT i = 0; i < hd.NumDescriptors; ++i)
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC nullSrv{};
+            nullSrv.Format                  = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            nullSrv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+            nullSrv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            nullSrv.Texture2D.MipLevels     = 1;
+            device->CreateShaderResourceView(nullptr, &nullSrv, previewSrvCpu(i));
+        }
+
+        if (FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&previewAlloc)))
+            || FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, previewAlloc.Get(),
+                                                nullptr, IID_PPV_ARGS(&previewList))))
+            return false;
+        previewList->Close();
+
+        previewReady  = true;
+        previewFailed = false;
+        return true;
+    }
+
+    // (Re)creates a slot's targets at w×h. The GPU must be idle (the caller
+    // waited): the old resources go at once, and the editor's ImGui SRV slot is
+    // rewritten in place for the new LDR texture.
+    bool ensureWorldPreviewTarget(WorldPreviewTarget12& wp, UINT slot, int w, int h,
+                                  const std::function<void*(void*, void*)>& registrar)
+    {
+        if (wp.ldr && wp.w == w && wp.h == h) return true;
+        void* const imguiHandle = wp.imguiHandle;
+        wp = WorldPreviewTarget12{};
+        wp.imguiHandle = imguiHandle;
+
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        auto texDesc = [&](DXGI_FORMAT fmt, D3D12_RESOURCE_FLAGS resFlags) {
+            D3D12_RESOURCE_DESC d{};
+            d.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            d.Width            = static_cast<UINT64>(w);
+            d.Height           = static_cast<UINT>(h);
+            d.DepthOrArraySize = 1;
+            d.MipLevels        = 1;
+            d.Format           = fmt;
+            d.SampleDesc.Count = 1;
+            d.Flags            = resFlags;
+            return d;
+        };
+        const D3D12_RESOURCE_DESC hdrD = texDesc(DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        const D3D12_RESOURCE_DESC ldrD = texDesc(DXGI_FORMAT_R8G8B8A8_UNORM,     D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);
+        const D3D12_RESOURCE_DESC depD = texDesc(DXGI_FORMAT_D32_FLOAT,          D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+        D3D12_CLEAR_VALUE hdrClear{};
+        hdrClear.Format   = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        hdrClear.Color[0] = HE::kPreviewBackground[0];
+        hdrClear.Color[1] = HE::kPreviewBackground[1];
+        hdrClear.Color[2] = HE::kPreviewBackground[2];
+        hdrClear.Color[3] = 1.0f;
+        D3D12_CLEAR_VALUE depClear{};
+        depClear.Format             = DXGI_FORMAT_D32_FLOAT;
+        depClear.DepthStencil.Depth = 1.0f;
+        bool ok = SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &hdrD,
+                      D3D12_RESOURCE_STATE_RENDER_TARGET, &hdrClear, IID_PPV_ARGS(&wp.hdr)))
+               && SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &ldrD,
+                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&wp.ldr)))
+               && SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &depD,
+                      D3D12_RESOURCE_STATE_DEPTH_WRITE, &depClear, IID_PPV_ARGS(&wp.depth)));
+        if (ok)
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC rh{}; rh.NumDescriptors = 2; rh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+            D3D12_DESCRIPTOR_HEAP_DESC dh{}; dh.NumDescriptors = 1; dh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+            ok = SUCCEEDED(device->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&wp.rtvHeap)))
+              && SUCCEEDED(device->CreateDescriptorHeap(&dh, IID_PPV_ARGS(&wp.dsvHeap)));
+        }
+        if (!ok)
+        {
+            HE_LOG_ERROR(RHI, "D3D12Renderer: world preview target %dx%d creation failed", w, h);
+            wp = WorldPreviewTarget12{};
+            wp.imguiHandle = imguiHandle;
+            return false;
+        }
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = wp.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        device->CreateRenderTargetView(wp.hdr.Get(), nullptr, rtv);
+        rtv.ptr += device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        device->CreateRenderTargetView(wp.ldr.Get(), nullptr, rtv);
+        device->CreateDepthStencilView(wp.depth.Get(), nullptr, wp.dsvHeap->GetCPUDescriptorHandleForHeapStart());
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format                  = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.Texture2D.MipLevels     = 1;
+        device->CreateShaderResourceView(wp.hdr.Get(), &sv, previewSrvCpu(1 + slot));
+        // First creation takes a slot from the editor's ImGui heap, a resize
+        // rewrites the one it has. No registrar (a run without the editor's
+        // ImGui) → the picture is still drawn, there is just no handle to show.
+        if (registrar) wp.imguiHandle = registrar(wp.ldr.Get(), wp.imguiHandle);
+        wp.w = w; wp.h = h;
+        return true;
     }
 
     // ── Scene pipeline ──────────────────────────────────────────────────────
@@ -8240,7 +8520,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // it always renders even when objects/sortedIndices is empty.
     {
         const glm::mat4 svp = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
-        p.drawSky(cl, p.frameIndex, glm::inverse(svp), p.m_renderWorld.sunDirection, m_environment);
+        p.drawSky(cl, p.frameIndex, glm::inverse(svp), p.m_renderWorld.sunDirection, m_environment,
+                  p.m_renderWorld.camera.position, p.m_wallTime, p.usingHDR);
     }
 
     // Trails live in their own per-frame band list, not in `objects`, so a scene
@@ -9286,7 +9567,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             auto dsv12 = p.viewportDsvHeap ?
                 p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart() :
                 p.dsvHandle(0);
-            p.drawDebugLines(cl, dsv12, viewProj, p.m_debugLines);
+            p.drawDebugLines(cl, dsv12, viewProj, p.m_debugLines, p.usingHDR);
             // Restore scene state for any future draws.
             cl->SetGraphicsRootSignature(p.rootSig.Get());
             p.bindClusterRoots(cl);
@@ -9853,6 +10134,263 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 
     if (!ok) rgba.clear();
     return ok;
+}
+
+// ─── Any world into a preview target ──────────────────────────────────────────
+// The contract is in IRenderer.h; the steps are GL's (OpenGLRenderer.cpp) and
+// D3D11's: sky first without depth, grid lines that write no depth, static and
+// skinned meshes through the preview pixel shaders, then the scene's tonemap
+// PSO into the RGBA8 target ImGui samples. Recorded into the preview's own
+// command list between two queue flushes — see WorldPreviewTarget12.
+void* D3D12Renderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+                                        uint32_t width, uint32_t height,
+                                        const EditorCameraOverride& camera,
+                                        const glm::vec3& origin,
+                                        const WorldPreviewEnv& env,
+                                        glm::mat4* outViewProj,
+                                        uint32_t slot)
+{
+    auto& p = *m_impl;
+    if (!p.device || !p.cmdQueue) return nullptr;
+    const int W = std::clamp(static_cast<int>(width),  32, 4096);
+    const int H = std::clamp(static_cast<int>(height), 32, 4096);
+    if (!m_contentManager) m_contentManager = &cm;
+    if (!p.ensureWorldPreviewPipeline()) return nullptr;
+    slot = std::min(slot, kWorldPreviewSlots - 1);
+    D3D12RendererImpl::WorldPreviewTarget12& wp = p.worldPreview[slot];
+
+    // Nothing of an earlier frame or preview may still read what is touched
+    // below: the shared sky/debug-line upload buffers, the CB rings, the
+    // editor's ImGui descriptor, a target about to be replaced.
+    p.waitForAllFrames();
+    if (!p.ensureWorldPreviewTarget(wp, slot, W, H, m_imguiTexRegistrar)) return nullptr;
+
+    // Camera, snapshot, sky and light — shared with D3D11/Vulkan. viewProj is
+    // GL clip (what the caller rebuilds); the draws get the D3D depth fix once.
+    HE::WorldPreviewFrame frame;
+    HE::buildWorldPreviewFrame(m_contentManager, world, camera, env,
+                               static_cast<float>(W) / static_cast<float>(H), frame);
+    const RenderWorld& snapshot = frame.snapshot;
+    const glm::mat4    viewProj = frame.viewProj;
+    const glm::mat4    drawVP   = HE::kD3DClipFix * viewProj;
+    const glm::vec3    camPos   = frame.camPos;
+    if (outViewProj) *outViewProj = viewProj;
+
+    // Per-call rings, grown to fit this world (the queue is idle, so the old
+    // ones can go at once): one k_cbSlot per draw plus the light, one bone
+    // block per skinned draw.
+    const UINT64 cbNeeded   = (snapshot.objects.size() + snapshot.skinnedObjects.size() + 1) * k_cbSlot;
+    const UINT64 boneNeeded = std::max<UINT64>(1, snapshot.skinnedObjects.size()) * D3D12RendererImpl::k_bonesCBSlot;
+    if (p.previewCBBytes < cbNeeded)
+    {
+        p.previewCBRing  = p.createUploadBuffer(cbNeeded, reinterpret_cast<void**>(&p.previewCBPtr));
+        p.previewCBBytes = p.previewCBRing ? cbNeeded : 0;
+    }
+    if (p.previewBoneBytes < boneNeeded)
+    {
+        p.previewBoneRing  = p.createUploadBuffer(boneNeeded, reinterpret_cast<void**>(&p.previewBonePtr));
+        p.previewBoneBytes = p.previewBoneRing ? boneNeeded : 0;
+    }
+    if (!p.previewCBPtr || !p.previewBonePtr) return nullptr;
+
+    ID3D12GraphicsCommandList* cl = p.previewList.Get();
+    p.previewAlloc->Reset();
+    cl->Reset(p.previewAlloc.Get(), nullptr);
+
+    p.barrier12(cl, wp.hdr.Get(), wp.hdrState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    wp.hdrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    const D3D12_CPU_DESCRIPTOR_HANDLE hdrRtv = wp.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE ldrRtv = hdrRtv;
+    ldrRtv.ptr += p.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    const D3D12_CPU_DESCRIPTOR_HANDLE dsv = wp.dsvHeap->GetCPUDescriptorHandleForHeapStart();
+    cl->OMSetRenderTargets(1, &hdrRtv, FALSE, &dsv);
+    // Studio background, LINEAR — the tonemap below lifts it (kPreviewBackground).
+    const float clear[4] = { HE::kPreviewBackground[0], HE::kPreviewBackground[1],
+                             HE::kPreviewBackground[2], 1.0f };
+    cl->ClearRenderTargetView(hdrRtv, clear, 0, nullptr);
+    cl->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+    const D3D12_VIEWPORT vp{ 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H), 0.0f, 1.0f };
+    const D3D12_RECT     sc{ 0, 0, static_cast<LONG>(W), static_cast<LONG>(H) };
+    cl->RSSetViewports(1, &vp);
+    cl->RSSetScissorRects(1, &sc);
+
+    // ── Sky FIRST, unlike the scene: the grid writes no depth, so a sky drawn
+    // after it would paint straight over it. Clock stopped (HE_SKY_TIME for a
+    // reproducible headless shot), as on Metal and D3D11.
+    if (env.sky)
+    {
+        float skyClock = 0.0f;
+        if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
+            skyClock = static_cast<float>(std::atof(ov));
+        p.drawSky(cl, p.frameIndex, glm::inverse(viewProj), snapshot.sunDirection, frame.sky,
+                  camPos, skyClock, /*hdr=*/true);
+    }
+
+    // ── Grid + origin marker through the debug-line PSO (depth read-only), so
+    // it hides neither the underside of the mesh nor the lower half of the sky.
+    if (env.grid)
+    {
+        std::vector<float> verts;
+        HE::buildPreviewGrid(HE::worldPreviewGridExtent(camPos, origin), 1.0f, verts, origin);
+        std::vector<DebugLine> lines;
+        lines.reserve(verts.size() / 12);
+        for (size_t i = 0; i + 11 < verts.size(); i += 12)
+            lines.push_back({ { verts[i],     verts[i + 1], verts[i + 2] },
+                              { verts[i + 6], verts[i + 7], verts[i + 8] },
+                              { verts[i + 3], verts[i + 4], verts[i + 5] } });
+        p.drawDebugLines(cl, dsv, drawVP, lines, /*hdr=*/true);
+    }
+
+    // ── Meshes. Albedo SRVs live in sceneSrvHeap (uploaded on first sight
+    // into this list, exactly as the scene does it); untextured draws bind the
+    // null-albedo slot so the table never points at nothing.
+    const D3D12_GPU_VIRTUAL_ADDRESS cbBase   = p.previewCBRing->GetGPUVirtualAddress();
+    const D3D12_GPU_VIRTUAL_ADDRESS boneBase = p.previewBoneRing->GetGPUVirtualAddress();
+    UINT cbIdx = 0;
+    {
+        const glm::vec4 light[4] = { glm::vec4(camPos, 1.0f), frame.sun,
+                                     glm::vec4(frame.sunColor, 1.0f), glm::vec4(frame.ambient, 1.0f) };
+        std::memcpy(p.previewCBPtr, light, sizeof(light));
+        ++cbIdx;
+    }
+    auto uploadObject = [&](const glm::mat4& model, const glm::vec3& color, bool hasTex,
+                            float metallic, float roughness) -> D3D12_GPU_VIRTUAL_ADDRESS
+    {
+        PerObjectCB o{};
+        o.mvp   = drawVP * model;
+        o.model = model;
+        o.color = glm::vec4(color, hasTex ? 1.0f : 0.0f);
+        o.pbr   = glm::vec4(metallic, roughness, 1.0f, 0.0f);
+        std::memcpy(p.previewCBPtr + static_cast<size_t>(cbIdx) * k_cbSlot, &o, sizeof(o));
+        return cbBase + static_cast<UINT64>(cbIdx++) * k_cbSlot;
+    };
+
+    cl->SetGraphicsRootSignature(p.previewRootSig.Get());
+    ID3D12DescriptorHeap* sceneHeaps[] = { p.sceneSrvHeap.Get() };
+    cl->SetDescriptorHeaps(1, sceneHeaps);
+    cl->SetGraphicsRootConstantBufferView(1, cbBase); // the light, slot 0 of the ring
+    cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    cl->SetPipelineState(p.previewMeshPso.Get());
+    for (const RenderObject& obj : snapshot.objects)
+    {
+        GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
+        if (!mesh || !mesh->indexCount) continue;
+        p.ensureMeshAlbedo(cl, *mesh, obj.meshAssetId, m_contentManager);
+        const bool textured = mesh->albedoSlot >= 0;
+        cl->SetGraphicsRootDescriptorTable(3, p.sceneSrvGpu(
+            textured ? static_cast<UINT>(mesh->albedoSlot) : p.k_albedoNullSlot));
+        cl->SetGraphicsRootConstantBufferView(0, uploadObject(obj.transform, obj.baseColor, textured,
+                                                              obj.metallic, obj.roughness));
+        cl->IASetVertexBuffers(0, 1, &mesh->vbv);
+        cl->IASetIndexBuffer(&mesh->ibv);
+        cl->DrawIndexedInstanced(mesh->indexCount, 1, 0, 0, 0);
+    }
+
+    // ── Skinned meshes (the pose the AnimatorHost last wrote, or the bind pose).
+    if (!snapshot.skinnedObjects.empty())
+    {
+        constexpr size_t kMaxBones = 128;
+        cl->SetPipelineState(p.previewSkinnedPso.Get());
+        UINT boneIdx = 0;
+        for (const SkinnedRenderObject& obj : snapshot.skinnedObjects)
+        {
+            GpuSkeletalMesh12* skm = p.resolveSkeletalMesh12(obj.meshAssetId, m_contentManager);
+            if (!skm || !skm->indexCount) continue;
+            p.ensureSkeletalAlbedo(cl, *skm, obj.meshAssetId, m_contentManager);
+            const bool textured = skm->albedoSlot >= 0;
+            cl->SetGraphicsRootDescriptorTable(3, p.sceneSrvGpu(
+                textured ? static_cast<UINT>(skm->albedoSlot) : p.k_albedoNullSlot));
+            // Identity past the pose, as GL fills its uniform array.
+            glm::mat4* bones = reinterpret_cast<glm::mat4*>(
+                p.previewBonePtr + static_cast<size_t>(boneIdx) * D3D12RendererImpl::k_bonesCBSlot);
+            const size_t boneCount = std::min(obj.boneMatrices.size(), kMaxBones);
+            for (size_t b = 0; b < kMaxBones; ++b)
+                bones[b] = b < boneCount ? obj.boneMatrices[b] : glm::mat4(1.0f);
+            cl->SetGraphicsRootConstantBufferView(2, boneBase + static_cast<UINT64>(boneIdx++)
+                                                                * D3D12RendererImpl::k_bonesCBSlot);
+            // Pbr zero: GL's skinned preview has no highlight to drive.
+            cl->SetGraphicsRootConstantBufferView(0, uploadObject(obj.transform, obj.baseColor, textured,
+                                                                  0.0f, 0.0f));
+            const D3D12_VERTEX_BUFFER_VIEW vbvs[3] = { skm->vbv, skm->boneIdVbv, skm->boneWgtVbv };
+            cl->IASetVertexBuffers(0, 3, vbvs);
+            cl->IASetIndexBuffer(&skm->ibv);
+            cl->DrawIndexedInstanced(skm->indexCount, 1, 0, 0, 0);
+        }
+    }
+
+    // ── Tonemap resolve: HDR → the RGBA8 target ImGui shows, through the
+    // scene's own tonemap PSO. Bloom at strength 0, its table on the null view.
+    p.barrier12(cl, wp.hdr.Get(), wp.hdrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    wp.hdrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    p.barrier12(cl, wp.ldr.Get(), wp.ldrState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    wp.ldrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    cl->OMSetRenderTargets(1, &ldrRtv, FALSE, nullptr);
+    cl->SetGraphicsRootSignature(p.postFxRootSig.Get());
+    ID3D12DescriptorHeap* previewHeaps[] = { p.previewSrvHeap.Get() };
+    cl->SetDescriptorHeaps(1, previewHeaps);
+    cl->SetPipelineState(p.tonemapPSO.Get());
+    { const float cb[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+      cl->SetGraphicsRoot32BitConstants(0, 4, cb, 0); }
+    cl->SetGraphicsRootDescriptorTable(1, p.previewSrvGpu(1 + slot)); // t0 = this slot's HDR
+    cl->SetGraphicsRootDescriptorTable(2, p.previewSrvGpu(0));        // t1 = null (bloom off)
+    cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cl->IASetVertexBuffers(0, 0, nullptr);
+    cl->DrawInstanced(3, 1, 0, 0);
+
+    // Headless witness (HE_WORLD_PREVIEW_DUMP=<file.ppm>), as on GL/Metal/D3D11:
+    // the LDR result, copied into a readback buffer before it goes back to ImGui.
+    const char* dumpPath = std::getenv("HE_WORLD_PREVIEW_DUMP");
+    ComPtr<ID3D12Resource> readback;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    if (dumpPath && *dumpPath)
+    {
+        const D3D12_RESOURCE_DESC ld = wp.ldr->GetDesc();
+        UINT64 total = 0;
+        p.device->GetCopyableFootprints(&ld, 0, 1, 0, &fp, nullptr, nullptr, &total);
+        D3D12_HEAP_PROPERTIES rh{}; rh.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = total; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_UNKNOWN; rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (SUCCEEDED(p.device->CreateCommittedResource(&rh, D3D12_HEAP_FLAG_NONE, &rd,
+                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback))))
+        {
+            p.barrier12(cl, wp.ldr.Get(), wp.ldrState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            wp.ldrState = D3D12_RESOURCE_STATE_COPY_SOURCE;
+            D3D12_TEXTURE_COPY_LOCATION src{};
+            src.pResource        = wp.ldr.Get();
+            src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            src.SubresourceIndex = 0;
+            D3D12_TEXTURE_COPY_LOCATION dst{};
+            dst.pResource       = readback.Get();
+            dst.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst.PlacedFootprint = fp;
+            cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+    }
+    p.barrier12(cl, wp.ldr.Get(), wp.ldrState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    wp.ldrState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+    cl->Close();
+    ID3D12CommandList* lists[] = { cl };
+    p.cmdQueue->ExecuteCommandLists(1, lists);
+    p.waitForAllFrames();
+
+    if (readback)
+    {
+        void* mapped = nullptr;
+        const D3D12_RANGE readRange{ 0, static_cast<SIZE_T>(fp.Footprint.RowPitch) * static_cast<SIZE_T>(H) };
+        if (SUCCEEDED(readback->Map(0, &readRange, &mapped)) && mapped)
+        {
+            HE::writeWorldPreviewDump(dumpPath, static_cast<const uint8_t*>(mapped) + fp.Offset,
+                                      W, H, fp.Footprint.RowPitch);
+            const D3D12_RANGE noWrite{ 0, 0 };
+            readback->Unmap(0, &noWrite);
+        }
+    }
+    return wp.imguiHandle;
 }
 
 void* D3D12Renderer::GetViewportD3DResource()    const { return m_impl->viewportRT.Get(); }

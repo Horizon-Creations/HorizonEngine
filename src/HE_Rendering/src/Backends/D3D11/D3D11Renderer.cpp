@@ -31,6 +31,7 @@
 #include <HorizonRendering/LightPacking.h>    // GPU light window + shadow-mask lights
 #include <HorizonRendering/ClipSpace.h>       // GL depth (-1..1) → D3D depth (0..1)
 #include <HorizonRendering/WorldPreviewGrid.h> // RenderWorldPreview: grid, background, dump
+#include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
 #include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
@@ -6542,67 +6543,17 @@ void* D3D11Renderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
     D3D11RendererImpl::WorldPreviewTarget& wp = p.worldPreview[std::min(slot, kWorldPreviewSlots - 1)];
     if (!p.ensureWorldPreviewTarget(wp, W, H)) return nullptr;
 
-    // ── Camera. The caller's pose; the projection is the shared rule's, and it
-    // reaches the extractor through the override — the Hor+ narrowing goes into
-    // the fov BEFORE the extract, so the extractor culls with exactly the
-    // frustum drawn below (for an orthographic camera the extractor's matrix
-    // already is the rule's).
-    const float aspect = static_cast<float>(W) / static_cast<float>(H);
-    EditorCameraOverride previewCam = camera;
-    previewCam.active = true;
-    if (!camera.orthographic)
-        previewCam.fovDegrees = worldPreviewVerticalFov(camera.fovDegrees, aspect);
-
-    RenderExtractor previewExtractor;
-    previewExtractor.setContentManager(m_contentManager);
-    // The sky and its sun, built the way the editor and the packaged game build
-    // theirs (makeWorldPreviewEnvironment), not hand-assembled here.
-    IRenderer::EnvironmentSettings previewEnvSettings{};
-    if (env.sky)
-    {
-        previewEnvSettings = HE::makeWorldPreviewEnvironment(env.timeOfDay, env.cloudCoverage);
-        previewExtractor.setDayNight(true, env.timeOfDay,
-                                     previewEnvSettings.sunColor, previewEnvSettings.sunIntensity,
-                                     previewEnvSettings.moonColor, previewEnvSettings.moonIntensity,
-                                     previewEnvSettings.cloudCoverage);
-    }
-    RenderWorld snapshot;
-    previewExtractor.extract(world, snapshot, aspect, &previewCam);
-
-    // The projection comes out of the snapshot and is brought to GL depth
-    // explicitly: this file compiles with GLM_FORCE_DEPTH_ZERO_TO_ONE and the
-    // extractor does not, so neither convention may be assumed. The caller
-    // gets the GL form — what worldPreviewProjection builds on its side — and
-    // the draws get it with the D3D depth fix applied exactly once.
-    const float     nearViewZ = camera.orthographic ? camera.farPlane : -camera.nearPlane;
-    const glm::mat4 proj      = HE::toNegOneToOneDepth(snapshot.camera.projection, nearViewZ);
-    const glm::mat4 viewProj  = proj * snapshot.camera.view;
-    const glm::mat4 drawVP    = HE::kD3DClipFix * viewProj;
-    const glm::vec3 camPos    = camera.position;
+    // Camera, snapshot, sky and light — shared with D3D12/Vulkan. viewProj is
+    // GL clip (what the caller rebuilds with worldPreviewProjection); the draws
+    // get it with the D3D depth fix applied exactly once.
+    HE::WorldPreviewFrame frame;
+    HE::buildWorldPreviewFrame(m_contentManager, world, camera, env,
+                               static_cast<float>(W) / static_cast<float>(H), frame);
+    const RenderWorld& snapshot = frame.snapshot;
+    const glm::mat4    viewProj = frame.viewProj;
+    const glm::mat4    drawVP   = HE::kD3DClipFix * viewProj;
+    const glm::vec3    camPos   = frame.camPos;
     if (outViewProj) *outViewProj = viewProj;
-
-    // Lighting from the extracted sun: dominantDirectionalLight, NOT
-    // sunDirection — the sky-dome sun sits below the horizon at night and would
-    // light the mesh from underneath. w == 0 keeps the studio headlight.
-    glm::vec4 sunUniform(0.0f);
-    glm::vec3 sunColor(1.0f), ambient(0.0f);
-    if (env.sky)
-    {
-        glm::vec3 toward(0.0f, 1.0f, 0.0f), colorIntensity(0.0f);
-        if (snapshot.dominantDirectionalLight(toward, colorIntensity))
-        {
-            sunUniform = glm::vec4(toward, 1.0f);
-            sunColor   = colorIntensity;
-        }
-        else
-        {
-            // Night with nothing shining: armed anyway, so the ambient floor
-            // lights the mesh instead of the studio light snapping back on.
-            sunUniform = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);
-            sunColor   = glm::vec3(0.0f);
-        }
-        ambient = glm::max(snapshot.ambient, glm::vec3(0.10f, 0.11f, 0.13f));
-    }
 
     ID3D11DeviceContext* ctx = p.context.Get();
     ComPtr<ID3D11RenderTargetView> prevRTV;
@@ -6633,19 +6584,16 @@ void* D3D11Renderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
         float skyClock = 0.0f;
         if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
             skyClock = static_cast<float>(std::atof(ov));
-        p.drawSky(ctx, glm::inverse(viewProj), snapshot.sunDirection, previewEnvSettings,
-                  camPos, skyClock);
+        p.drawSky(ctx, glm::inverse(viewProj), snapshot.sunDirection, frame.sky, camPos, skyClock);
     }
 
     // ── Grid + origin marker: lines only, no depth writes, so neither the
     // underside of the mesh nor (with a sky) the lower half of the world is
-    // hidden. Extent follows the camera's distance from the origin, capped.
+    // hidden.
     if (env.grid && p.debugReady)
     {
-        const float halfExtent = std::clamp(
-            std::ceil(glm::length(camPos - origin) * 2.0f), 10.0f, 200.0f);
         std::vector<float> verts;
-        HE::buildPreviewGrid(halfExtent, 1.0f, verts, origin);
+        HE::buildPreviewGrid(HE::worldPreviewGridExtent(camPos, origin), 1.0f, verts, origin);
         std::vector<DebugLine> lines;
         lines.reserve(verts.size() / 12);
         for (size_t i = 0; i + 11 < verts.size(); i += 12)
@@ -6671,8 +6619,8 @@ void* D3D11Renderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
         }
     };
     {
-        const glm::vec4 light[4] = { glm::vec4(camPos, 1.0f), sunUniform,
-                                     glm::vec4(sunColor, 1.0f), glm::vec4(ambient, 1.0f) };
+        const glm::vec4 light[4] = { glm::vec4(camPos, 1.0f), frame.sun,
+                                     glm::vec4(frame.sunColor, 1.0f), glm::vec4(frame.ambient, 1.0f) };
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(p.previewLightCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
         {

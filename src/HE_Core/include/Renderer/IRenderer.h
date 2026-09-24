@@ -891,8 +891,14 @@ public:
     // themselves. The editor installs this callback after ImGui is initialized;
     // the backend creates+uploads the GPU texture and then calls the registrar to
     // turn its native handle into an ImGui ImTextureID.
-    //   D3D12:  a = ID3D12Resource*,  b = nullptr.
-    //   Vulkan: a = VkImageView,      b = VkSampler.
+    //   D3D12:  a = ID3D12Resource*,  b = nullptr for a new ImGui heap slot, or
+    //           a handle this registrar returned earlier: the new resource's
+    //           SRV is written into THAT slot and the same handle comes back
+    //           (a resized world-preview target; ImGui's heap has 64 slots and
+    //           no free path from here). The caller has made sure the GPU no
+    //           longer reads the old view.
+    //   Vulkan: a = VkImageView,      b = VkSampler. (A resized preview target
+    //           rewrites its descriptor set itself — vkUpdateDescriptorSets.)
     void SetImGuiTextureRegistrar(std::function<void*(void*, void*)> fn) { m_imguiTexRegistrar = std::move(fn); }
 
     // ── Night-sky moon texture (optional) ──────────────────────────────────
