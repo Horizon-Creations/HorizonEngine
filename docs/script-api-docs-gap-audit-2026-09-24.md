@@ -346,6 +346,10 @@ Engine-Bugs, dokumentiert (Callout bzw. Note) und im Hive gemeldet, **nicht beho
   Prozess (`static bool loaded`, `EngineApi.cpp:4168`), ohne Reset beim Projektwechsel. Probe mit
   zwei Sandbox-Wurzeln: nach dem Wechsel liefert `getString` den Wert von Projekt A, und der
   nächste Set schreibt A's Schlüssel in B's `Prefs.json`.
+- **`entity.distance` misst lokal** (`EngineApi.cpp:325`, `ScriptApi::getPosition` =
+  `TransformComponent::position`): für ein Kind-Entity der Abstand zum Elternteil-Ursprung, nicht
+  zur Weltposition. Aus dem Code gelesen, nicht per Probe (die gespawnten Probe-Entities hatten
+  keine Transform, siehe oben). Richtig wäre `HE::worldPositionOf`.
 
 Grenzen (kein Bug, `PinType::Float` ist 32 Bit), in Einleitung/Notes: `prefs`/`json`/`save`-Zahlen
 und `fs.size` gehen durch float32 (0.1 → 0.10000000149011612, 16777217 → 16777216,

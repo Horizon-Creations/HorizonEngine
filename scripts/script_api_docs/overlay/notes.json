@@ -115,7 +115,7 @@
   },
   "entity.self": { "note": "Always 0 in Lua and Python; use <code>self.entityId</code> / <code>self.entity_id</code>." },
   "entity.selfObject": { "note": "Always 0 in Lua and Python." },
-  "entity.distance": { "note": "An entity without a transform counts as standing at the origin." },
+  "entity.distance": { "note": "<strong>Known issue:</strong> it measures between the <em>local</em> positions, so the answer is right only for entities with the same parent (or none). An entity without a transform counts as standing at the origin." },
   "entity.exists": {
     "note": "<code>false</code> for 0.",
     "examples": {"file": "boss_gate", "lua": "local M = {}\n\n-- Opens the gate once the boss is gone. Look the ids up once, not every\n-- frame: findByName walks every named entity.\nfunction M.onStart(self)\n    self.boss = horizon.entity.findByName(\"Boss\")\n    self.gate = horizon.entity.findByName(\"Gate\")\nend\n\nfunction M.onUpdate(self, dt)\n    if self.gate ~= 0 and not horizon.entity.exists(self.boss) then\n        horizon.entity.destroy(self.gate)   -- takes its children along\n        self.gate = 0\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nclass BossGate(horizon.Behavior):\n    # Opens the gate once the boss is gone. Look the ids up once, not every\n    # frame: findByName walks every named entity.\n    def on_start(self):\n        self.boss = horizon.entity.findByName(\"Boss\")\n        self.gate = horizon.entity.findByName(\"Gate\")\n\n    def on_update(self, dt):\n        if self.gate != 0 and not horizon.entity.exists(self.boss):\n            horizon.entity.destroy(self.gate)   # takes its children along\n            self.gate = 0\n"}
