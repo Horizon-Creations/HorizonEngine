@@ -6,3 +6,54 @@
             project</a>. Anything else fails with the call's “failed” value and a
             log line that names the path.
           </p>
+          <p>
+            Where the sandbox is: in the editor, the <code>Saved</code> folder next
+            to the project file. In the exported game, a per-user folder named
+            after the project, <code>HorizonCreations/&lt;Project&gt;/Saved</code>
+            under <code>%APPDATA%</code> on Windows,
+            <code>~/Library/Application Support</code> on macOS and
+            <code>~/.local/share</code> on Linux. Savegames
+            (<code>Saves/</code>) and <a href="#prefs">Preferences</a>
+            (<code>Prefs.json</code>) live there too, so <code>fs.*</code> can see
+            and delete them.
+          </p>
+          <ul>
+            <li>
+              <code>writeText</code> creates missing folders on the way.
+              <code>readText</code> returns an empty string for a missing file.
+            </li>
+            <li>
+              <code>copy</code> never overwrites: it returns <code>false</code>
+              when the target exists. <code>rename</code> <strong>does</strong>
+              overwrite an existing file at the target, without asking.
+            </li>
+            <li>
+              <code>remove</code> deletes files only, never a folder.
+              <code>makeDir</code> returns <code>true</code> when the folder
+              already exists.
+            </li>
+            <li>
+              An empty path means the top of the sandbox for <code>list</code>
+              and <code>watch</code>, and is refused everywhere else.
+            </li>
+            <li>
+              <code>size</code> and <code>modified</code> return
+              <code>-1</code> for anything that is not there, and
+              <code>size</code> also for a folder. Both pass through a 32-bit
+              float: sizes are exact up to 16 MB, and <code>modified</code> is up
+              to 64 seconds off, the same issue as <a href="#datetime">Date and
+              Time</a>. It can even lie a little in the future.
+            </li>
+          </ul>
+          <div class="callout note">
+            <span class="callout-icon">◆</span>
+            <p>
+              <code>watch</code> reports changes through the HorizonCode event
+              <em>On File Changed</em> on the GameInstance, and only in the
+              exported game: the editor's play mode does not check watched paths,
+              and scripts have no callback for it (see
+              <a href="#events">Events</a>). From a script, read the file again
+              on a <a href="#timer">timer</a> and compare; <code>modified</code>
+              is too coarse for that.
+            </p>
+          </div>

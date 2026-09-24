@@ -1,0 +1,35 @@
+          <p>
+            Small settings that outlive the game: volume, the last folder, “don't
+            show this again”. Each value sits under a key of your choosing in
+            <code>Prefs.json</code> in the game's data folder (see
+            <a href="#fs">File System</a>), shared by every script and graph of
+            the game. Every set and <code>remove</code> writes the file at once.
+            Progress belongs in a <a href="#save">save</a> instead.
+          </p>
+          <ul>
+            <li>
+              A getter returns its fallback when the key was never set or holds
+              another type: <code>getBool</code> on a number gives the fallback,
+              not <code>true</code>. <code>has</code> tells a missing key from one
+              that is set to the default value.
+            </li>
+            <li>
+              Numbers are stored with about seven significant digits:
+              <code>setNumber("volume", 0.1)</code> writes
+              <code>0.10000000149011612</code>, and whole numbers are exact only
+              up to 16 777 216. Keep ids and large counts as strings.
+            </li>
+          </ul>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue in the editor: preferences follow you into the
+              next project.</strong> The file is read once per run of the
+              program. After opening another project in the same editor session,
+              the getters still answer with the first project's preferences, and
+              the next set writes all of them into the new project's
+              <code>Prefs.json</code> (measured on build 7d49d44f). Restart the
+              editor after switching projects before you play. An exported game
+              has only one project and is not affected.
+            </p>
+          </div>

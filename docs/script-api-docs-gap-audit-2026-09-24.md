@@ -308,3 +308,53 @@ liest den Namespace jetzt aus den Rows und nennt keine Parameter mehr.
 **Falle für die Folgeschritte:** `scripts/build_docs_bundle.py` ohne Pillow schreibt die acht
 Figuren in `EditorDeps/Docs/img/` in voller Größe neu. Danach `git checkout -- EditorDeps/Docs/img/`;
 `--check` bleibt sauber, es prüft nur `he-docs.json`.
+
+## Nachtrag Schritt 4 (24.09.2026): Entity, Transform, Scene, Content, Save, File, Prefs, JSON
+
+Handinhalt für 89 Ids: sieben neue Gruppen-Einleitungen und eine erweiterte (`fs`), Notes an
+35 Ids, fünf Beispiele in Lua und Python (`boss_gate`, `checkpoint`, `tutorial_hint`,
+`settings_file`, `cave_stream`). Grundlage war eine Wegwerf-Probe gegen `libHorizonScene` des Builds
+7d49d44f mit echtem `ContentManager` (Temp-Ordner, ein StaticMesh, ein SaveGame-Template samt
+Struct), Sandbox-Wurzel und rund 100 Aufrufen aus beiden Sprachen. Die fünf Beispiele liefen
+wortgleich zu `notes.json` in beiden Sprachen mit ausgelösten Callbacks (onStart, onUpdate,
+onBeginOverlap, onInputPressed); geprüft wurden die Wirkungen (Entities weg, Save-Datei mit
+level 3/kills 2 und Neuladen, `Prefs.json`, Settings-Datei, Scene-Requests in der Queue).
+`coverage.py`: 582/582 **ref**, **hand** 104 → 180 (alle 89 Ids dieses Schritts).
+
+**Befund 1 (transform & Co.) im Generator gelöst:** Jede Zeile einer Gruppe ohne
+`horizon.<gruppe>.*` nennt jetzt ihren Weg aus Lua/Python: „Lua/Python only as flat
+`horizon.getPosition`" (verlinkt auf die Flach-Tabelle, gebaut aus den `twin`-Feldern in
+`flat.json`) oder „**not reachable from Lua/Python**" (`transform.getWorldPosition`,
+`setWorldPosition`). Das gilt auch für `material.*` und `cursor.set*` (Schritt 6/7 erben es).
+Script-Rows mit flachem Zwilling nennen ihn zusätzlich („or flat `horizon.spawn`", 20 Rows).
+
+Engine-Bugs, dokumentiert (Callout bzw. Note) und im Hive gemeldet, **nicht behoben**:
+
+- **`entity.spawn` legt keine Transform an** (`ScriptApi.cpp:89` ruft nur `createEntity`, das
+  Name, Hierarchy und EntityId setzt). `setPosition/Rotation/Scale` auf einem gespawnten Entity
+  sind still wirkungslos, `getPosition` gibt 0,0,0 zurück, `distance` misst vom Ursprung. Gilt
+  auch für das flache `horizon.spawn` und den HorizonCode-Knoten. Beschreibung in `HcNodeDocs.cpp`
+  („It has a transform") und der Testkommentar `test_scripting_binding.cpp:804` sagen das
+  Gegenteil; die Beschreibung ist bewusst **nicht** umgeschrieben, weil sie die Absicht nennt.
+- **`scene.loadAdditive` hat einen `Color`-Pin für die Position** (`EngineApi.cpp:7006`), aus
+  Lua/Python also vier Zahlen; mit drei wirft Lua *bad argument #6*, Python `IndexError`. Per
+  `script_sig` gezeigt, wie bei `debug.line`.
+- **`fs.modified` ist bis 64 s falsch**, dieselbe Ursache wie `datetime.*` (Thema 89):
+  `Value::ofFloat((float)…)` (`EngineApi.cpp:6544`). Probe: 1790250880 gegen `os.time()` 1790250870,
+  also sogar in der Zukunft.
+- **Prefs lecken im Editor zwischen Projekten:** `prefs::doc()` liest `Prefs.json` einmal pro
+  Prozess (`static bool loaded`, `EngineApi.cpp:4168`), ohne Reset beim Projektwechsel. Probe mit
+  zwei Sandbox-Wurzeln: nach dem Wechsel liefert `getString` den Wert von Projekt A, und der
+  nächste Set schreibt A's Schlüssel in B's `Prefs.json`.
+
+Grenzen (kein Bug, `PinType::Float` ist 32 Bit), in Einleitung/Notes: `prefs`/`json`/`save`-Zahlen
+und `fs.size` gehen durch float32 (0.1 → 0.10000000149011612, 16777217 → 16777216,
+`json.setNumber` schreibt `3.0`); JSON-Setter sortieren die Schlüssel alphabetisch, Schlüssel mit
+Punkt sind nicht adressierbar, `has` ist bei `null` wahr. Verhalten: `fs.rename` überschreibt (im
+Gegensatz zu `copy`), `fs.remove` löscht keine Ordner, `fs.watch` pollt nur im gepackten Spiel
+(`GameApplication.cpp:2760`) und meldet nur an das *On File Changed* der GameInstance;
+`save.setNumber` schneidet bei Int-Feldern Richtung null ab; `save.setStruct` braucht
+`horizon.structs.<Name>()`; `save.delete` auf den aktiven Save lässt ihn aktiv;
+`entity.self/selfObject` sind aus Lua/Python immer 0; Scene-Requests laufen am Anfang des
+nächsten Frames vor den Skripten (`GameApplication.cpp:2881` vor `:2906`), im Editor-Play
+wirken nur Zonen, `load`/`activate` loggen nur.

@@ -430,7 +430,17 @@ def section_index(by: dict[str, list[dict]], clusters) -> str:
     return "\n".join(L)
 
 
-def row_html(f: dict, notes: dict, link) -> str:
+def flat_twins(flat: dict) -> dict[str, list[str]]:
+    """Registry id -> the flat horizon.* functions flat.json names as its twin."""
+    out: dict[str, list[str]] = {}
+    for g in flat["groups"]:
+        for it in g["items"]:
+            if it.get("twin"):
+                out.setdefault(it["twin"], []).append(it["name"])
+    return out
+
+
+def row_html(f: dict, notes: dict, link, twins: dict[str, list[str]]) -> str:
     g = f["group"]
     fn = f["id"].split(".", 1)[1] if "." in f["id"] else f["id"]
     n = notes.get(f["id"], {})
@@ -440,11 +450,21 @@ def row_html(f: dict, notes: dict, link) -> str:
     desc = link(f["doc"], f["id"])
     if n.get("note"):
         desc += " " + n["note"]
+    flats = " / ".join(f'<a href="#flat-{t}"><code>horizon.{esc(t)}</code></a>'
+                       for t in twins.get(f["id"], []))
     meta = []
     if script:
-        meta.append(f"Lua/Python <code>horizon.{esc(f['id'])}</code>")
+        meta.append(f"Lua/Python <code>horizon.{esc(f['id'])}</code>"
+                    + (f", or flat {flats}" if flats else ""))
     elif "." not in f["id"]:
         meta.append(f"Lua/Python <code>horizon.{esc(f['id'])}</code> (flat)")
+    elif flats:
+        # A group isScriptGroup leaves out (transform, material, cursor): the
+        # row itself has no horizon.<group>.* name, only its flat twin does
+        # (the linked flat row shows that function's own arguments).
+        meta.append(f"Lua/Python only as flat {flats}")
+    else:
+        meta.append("<strong>not reachable from Lua/Python</strong>")
     meta.append(f"HorizonCode <em>{esc(f['display'])}</em>")
     meta.append(f"C++ <code>{esc(f['cpp'])}</code>")
     meta.append("action" if f["exec"] else "query")
@@ -461,7 +481,8 @@ def row_html(f: dict, notes: dict, link) -> str:
     return out
 
 
-def section_group(g: str, rows: list[dict], cluster: str, notes: dict, link) -> str:
+def section_group(g: str, rows: list[dict], cluster: str, notes: dict, link,
+                  twins: dict[str, list[str]]) -> str:
     title = title_of(g, rows)
     count = f"{len(rows)} function{'s' if len(rows) != 1 else ''}"
     L = [f'        <section id="{g}" class="reveal">',
@@ -495,7 +516,7 @@ def section_group(g: str, rows: list[dict], cluster: str, notes: dict, link) -> 
                 <tr><th>Function</th><th>Returns</th><th>Description</th></tr>
               </thead>
               <tbody>""")
-        L += [row_html(f, notes, link) for f in rows]
+        L += [row_html(f, notes, link, twins) for f in rows]
         L.append("""              </tbody>
             </table>
           </div>""")
@@ -595,6 +616,7 @@ def build_page(reg: list[dict]) -> str:
         by.setdefault(f["group"], []).append(f)
     clusters = cluster_of(list(by))
     link = build_linker(reg)
+    twins = flat_twins(flat)
     script_groups = sum(1 for g, rs in by.items() if rs[0]["script"] and "." in rs[0]["id"])
 
     desc = (f"Every engine call Horizon Engine scripts can make: {len(reg)} functions in "
@@ -626,7 +648,7 @@ def build_page(reg: list[dict]) -> str:
     P.append(section_index(by, clusters))
     for name, gs in clusters:
         for g in gs:
-            P.append(section_group(g, by[g], name, notes, link))
+            P.append(section_group(g, by[g], name, notes, link, twins))
     P.append(foot())
     page = "\n".join(P)
     # Numbers the hand-written overlay states in prose must match the registry.

@@ -1,0 +1,14 @@
+          <p>
+            Position, rotation and scale are <strong>local</strong>: relative to
+            the parent, in metres and Euler degrees (X pitch, Y yaw, Z roll).
+            Without a parent, local and world are the same. On an entity with a
+            rigid body or a character controller, <code>setPosition</code> and
+            <code>setRotation</code> teleport the body as well, so the physics
+            step does not pull it back; nothing checks for walls on the way.
+          </p>
+          <p>
+            The world-space pair <code>getWorldPosition</code> /
+            <code>setWorldPosition</code> exists only in HorizonCode and C++. A
+            script that needs the world position of a child adds up its parents
+            itself, or keeps such entities unparented.
+          </p>
