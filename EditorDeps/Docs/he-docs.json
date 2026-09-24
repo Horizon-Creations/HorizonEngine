@@ -35237,6 +35237,524 @@
        ]
       },
       {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Queries against the physics world and pushes on its bodies. Without a running physics world (edit mode, a world with no bodies built) every query misses, every push returns "
+        },
+        {
+         "s": "c",
+         "t": "false"
+        },
+        {
+         "s": "",
+         "t": " and every read is zero. Units are metres, seconds, newtons and kilograms; the one exception is spin, which is in "
+        },
+        {
+         "s": "b",
+         "t": "radians"
+        },
+        {
+         "s": "",
+         "t": " per second."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Hits from Lua/Python."
+         },
+         {
+          "s": "",
+          "t": " "
+         },
+         {
+          "s": "c",
+          "t": "raycast"
+         },
+         {
+          "s": "",
+          "t": " and the four casts return ten values: "
+         },
+         {
+          "s": "c",
+          "t": "hit, entity, px, py, pz, nx, ny, nz, distance, layer"
+         },
+         {
+          "s": "",
+          "t": ". On a miss they are "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": " and zeros. The flat "
+         },
+         {
+          "h": "#flat-raycast",
+          "s": "l",
+          "t": "horizon.raycast"
+         },
+         {
+          "s": "",
+          "t": " returns a table / dict ("
+         },
+         {
+          "s": "c",
+          "t": "entity, x, y, z, nx, ny, nz, distance"
+         },
+         {
+          "s": "",
+          "t": ", no layer) or "
+         },
+         {
+          "s": "c",
+          "t": "nil"
+         },
+         {
+          "s": "",
+          "t": " / "
+         },
+         {
+          "s": "c",
+          "t": "None"
+         },
+         {
+          "s": "",
+          "t": ". The direction does not have to be normalised."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "A ray started inside a collider hits that collider"
+         },
+         {
+          "s": "",
+          "t": " at distance 0. A ray from a character's own position therefore finds the character. Start it outside the own capsule (a step ahead, see the example below) or give the character its own collision layer and leave that bit out of the mask."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Shape casts report the centre, not the contact."
+         },
+         {
+          "s": "",
+          "t": " For "
+         },
+         {
+          "s": "c",
+          "t": "sphereCast"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "boxCast"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "capsuleCast"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "point"
+         },
+         {
+          "s": "",
+          "t": " is where the shape's centre stopped (a 0.25 m sphere dropped on a floor at y = 1 reports y = 1.25), which is what a camera boom or a placement check wants. The shape casts ignore trigger volumes; "
+         },
+         {
+          "s": "c",
+          "t": "raycast"
+         },
+         {
+          "s": "",
+          "t": " and the overlaps see them."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Layer masks"
+         },
+         {
+          "s": "",
+          "t": " are bitfields: bit N is collision layer N, 65535 (or -1) is every layer, 0 sees nothing. The layer names are in Project Settings under Collision Layers."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "World and local."
+         },
+         {
+          "s": "",
+          "t": " Every point a query returns is in world space, and so are the positions of "
+         },
+         {
+          "s": "c",
+          "t": "addForceAtPosition"
+         },
+         {
+          "s": "",
+          "t": " / "
+         },
+         {
+          "s": "c",
+          "t": "addImpulseAtPosition"
+         },
+         {
+          "s": "",
+          "t": ". "
+         },
+         {
+          "s": "c",
+          "t": "setPosition"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "setPositionAndReset"
+         },
+         {
+          "s": "",
+          "t": " take a "
+         },
+         {
+          "s": "i",
+          "t": "local"
+         },
+         {
+          "s": "",
+          "t": " position, like "
+         },
+         {
+          "s": "c",
+          "t": "horizon.setPosition"
+         },
+         {
+          "s": "",
+          "t": ": for a child entity the value is relative to its parent. Joint anchors are local to their own entity."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Forces"
+         },
+         {
+          "s": "",
+          "t": " ("
+         },
+         {
+          "s": "c",
+          "t": "addForce"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "addImpulse"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "addTorque"
+         },
+         {
+          "s": "",
+          "t": ", the two "
+         },
+         {
+          "s": "c",
+          "t": "…AtPosition"
+         },
+         {
+          "s": "",
+          "t": ") need a "
+         },
+         {
+          "s": "i",
+          "t": "Dynamic"
+         },
+         {
+          "s": "",
+          "t": " rigid body and return "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": " with a log line on a static or kinematic one, so also on a character. A character moves through "
+         },
+         {
+          "h": "#locomotion",
+          "s": "l",
+          "t": "Locomotion"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "c",
+          "t": "setVelocity"
+         },
+         {
+          "s": "",
+          "t": " addresses the character controller when there is one, otherwise the rigid body. On a character with a Movement component the next frame overwrites the horizontal part with whatever "
+         },
+         {
+          "s": "c",
+          "t": "locomotion.move"
+         },
+         {
+          "s": "",
+          "t": " asked for (nothing = standing still), so use "
+         },
+         {
+          "s": "c",
+          "t": "setVelocity"
+         },
+         {
+          "s": "",
+          "t": " on characters only without one."
+         }
+        ],
+        [
+         {
+          "s": "c",
+          "t": "setGravity"
+         },
+         {
+          "s": "",
+          "t": " changes gravity for rigid bodies in the whole world. A character falls by its own Character Controller gravity and does not follow it."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Joints"
+        },
+        {
+         "s": "",
+         "t": " tie two rigid bodies together; the entity passed first owns the joint, and only it reports "
+        },
+        {
+         "s": "c",
+         "t": "hasJoint"
+        },
+        {
+         "s": "",
+         "t": ". A type outside 0–4 becomes Fixed. "
+        },
+        {
+         "s": "c",
+         "t": "setJointMotor"
+        },
+        {
+         "s": "",
+         "t": " works on a Hinge or Slider only and returns "
+        },
+        {
+         "s": "c",
+         "t": "false"
+        },
+        {
+         "s": "",
+         "t": " otherwise. A joint made at runtime is written to the owner's Joint component, the same component the editor places, and "
+        },
+        {
+         "s": "c",
+         "t": "removeJoint"
+        },
+        {
+         "s": "",
+         "t": " or a break removes it again."
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "List results do not reach Lua or Python."
+          },
+          {
+           "s": "",
+           "t": " "
+          },
+          {
+           "s": "c",
+           "t": "overlapSphere"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "overlapSphereLayers"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "overlapBox"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "overlapCapsule"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "raycastAll"
+          },
+          {
+           "s": "",
+           "t": " and "
+          },
+          {
+           "s": "c",
+           "t": "pollJointBroken"
+          },
+          {
+           "s": "",
+           "t": " return scalar zeros there instead of lists (see "
+          },
+          {
+           "h": "#arrays",
+           "s": "l",
+           "t": "Lists"
+          },
+          {
+           "s": "",
+           "t": ", measured on build 7d49d44f). "
+          },
+          {
+           "s": "c",
+           "t": "pollJointBroken"
+          },
+          {
+           "s": "",
+           "t": " still empties the queue, so a script calling it takes the events away from a HorizonCode graph that polls the same queue. Until this is fixed, use these from HorizonCode, and in scripts react to contacts with "
+          },
+          {
+           "h": "#callbacks",
+           "s": "l",
+           "t": "onBeginOverlap"
+          },
+          {
+           "s": "",
+           "t": " on a trigger volume."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "warning"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Example: physics.raycast"
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\nlocal REACH = 2.0   -- metres in front of the character\nlocal PUSH  = 4.0   -- impulse, newton-seconds\n\n-- \"Interact\" is a button action. Pushes whatever dynamic body is in front.\nfunction M.onInputPressed(self, name)\n    if name ~= \"Interact\" then return end\n    local e = self.entityId\n    local x, y, z = horizon.getPosition(e)\n    local _, yaw = horizon.getRotation(e)\n    local r = horizon.math.radians(yaw)\n    local fx, fz = -horizon.math.sin(r), -horizon.math.cos(r)   -- facing, -Z at yaw 0\n    -- Start a step ahead: a ray from inside the own capsule would hit it.\n    local ox, oz = x + fx * 0.75, z + fz * 0.75\n    local hit, other, px, py, pz = horizon.physics.raycast(ox, y, oz, fx, 0, fz, REACH)\n    if hit and horizon.physics.hasPhysics(other) then\n        -- The hit point is world space, which is what AtPosition expects.\n        horizon.physics.addImpulseAtPosition(other, fx * PUSH, 0, fz * PUSH, px, py, pz)\n    end\nend\n\nreturn M",
+         "title": "push_crate.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nREACH = 2.0   # metres in front of the character\nPUSH = 4.0    # impulse, newton-seconds\n\nclass PushCrate(horizon.Behavior):\n    # \"Interact\" is a button action. Pushes whatever dynamic body is in front.\n    def on_input_pressed(self, name):\n        if name != \"Interact\":\n            return\n        e = self.entity_id\n        x, y, z = horizon.getPosition(e)\n        _, yaw, _ = horizon.getRotation(e)\n        r = horizon.math.radians(yaw)\n        fx, fz = -horizon.math.sin(r), -horizon.math.cos(r)   # facing, -Z at yaw 0\n        # Start a step ahead: a ray from inside the own capsule would hit it.\n        ox, oz = x + fx * 0.75, z + fz * 0.75\n        hit, other, px, py, pz, *_ = horizon.physics.raycast(ox, y, oz, fx, 0, fz, REACH)\n        if hit and horizon.physics.hasPhysics(other):\n            # The hit point is world space, which is what AtPosition expects.\n            horizon.physics.addImpulseAtPosition(other, fx * PUSH, 0, fz * PUSH, px, py, pz)",
+         "title": "push_crate.py"
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Example: physics.setPositionAndReset"
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\nlocal FLOOR = -20   -- below this height the character has fallen out\n\nfunction M.onStart(self)\n    self.sx, self.sy, self.sz = horizon.getPosition(self.entityId)\nend\n\nfunction M.onUpdate(self, dt)\n    local _, y = horizon.getPosition(self.entityId)\n    if y < FLOOR then\n        -- Back to where the level started it, without the speed of the fall.\n        horizon.physics.setPositionAndReset(self.entityId, self.sx, self.sy, self.sz)\n    end\nend\n\nreturn M",
+         "title": "kill_plane.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nFLOOR = -20   # below this height the character has fallen out\n\nclass KillPlane(horizon.Behavior):\n    def on_start(self):\n        self.spawn = horizon.getPosition(self.entity_id)\n\n    def on_update(self, dt):\n        _, y, _ = horizon.getPosition(self.entity_id)\n        if y < FLOOR:\n            # Back to where the level started it, without the speed of the fall.\n            horizon.physics.setPositionAndReset(self.entity_id, *self.spawn)",
+         "title": "kill_plane.py"
+        }
+       ]
+      },
+      {
        "head": [
         [
          {
@@ -35269,13 +35787,13 @@
          [
           {
            "s": "",
-           "t": "hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int"
+           "t": "hit, entity, px, py, pz, nx, ny, nz, distance, layer"
           }
          ],
          [
           {
            "s": "",
-           "t": "Fires a ray from Origin along Direction and reports the first thing it hits. Direction does not have to be normalised. Hit is false when nothing is in the way, and the other outputs are then meaningless rather than stale — always branch on Hit first.\nLua/Python "
+           "t": "Fires a ray from Origin along Direction and reports the first thing it hits. Direction does not have to be normalised. Hit is false when nothing is in the way, and the other outputs are then meaningless rather than stale — always branch on Hit first. A ray that starts inside a collider hits it at distance 0, so a ray from a character's own position finds the character. Sees trigger volumes.\nLua/Python "
           },
           {
            "s": "c",
@@ -35337,7 +35855,15 @@
           },
           {
            "s": "",
-           "t": ", which adds to the motion instead of replacing it.\nLua/Python "
+           "t": ", which adds to the motion instead of replacing it. On a character with a Movement component the next frame replaces the horizontal part with what "
+          },
+          {
+           "s": "c",
+           "t": "locomotion.move"
+          },
+          {
+           "s": "",
+           "t": " asked for.\nLua/Python "
           },
           {
            "s": "c",
@@ -35455,13 +35981,21 @@
          [
           {
            "s": "",
-           "t": "hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int"
+           "t": "hit, entity, px, py, pz, nx, ny, nz, distance, layer"
           }
          ],
          [
           {
            "s": "",
-           "t": "Like Raycast, but sweeps a sphere of Radius along the ray, so it catches what a thin ray slips past — a gap between two crates, the edge of a step. The extra cost is worth it for anything a character has to stand on.\nLua/Python "
+           "t": "Like Raycast, but sweeps a sphere of Radius along the ray, so it catches what a thin ray slips past — a gap between two crates, the edge of a step. The extra cost is worth it for anything a character has to stand on. "
+          },
+          {
+           "s": "c",
+           "t": "point"
+          },
+          {
+           "s": "",
+           "t": " is where the sphere's centre stopped, not the contact point. Ignores trigger volumes.\nLua/Python "
           },
           {
            "s": "c",
@@ -35505,7 +36039,15 @@
          [
           {
            "s": "",
-           "t": "Every entity whose collider overlaps this sphere, as an array. The explosion-radius query; walk the result with a For Each.\nLua/Python "
+           "t": "Every entity whose collider overlaps this sphere, as an array. The explosion-radius query; walk the result with a For Each. From Lua/Python this returns "
+          },
+          {
+           "s": "c",
+           "t": "0"
+          },
+          {
+           "s": "",
+           "t": " instead of a list (build 7d49d44f).\nLua/Python "
           },
           {
            "s": "c",
@@ -35548,7 +36090,7 @@
          [
           {
            "s": "",
-           "t": "hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int"
+           "t": "hit, entity, px, py, pz, nx, ny, nz, distance, layer"
           }
          ],
          [
@@ -35592,7 +36134,7 @@
          [
           {
            "s": "",
-           "t": "hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int"
+           "t": "hit, entity, px, py, pz, nx, ny, nz, distance, layer"
           }
          ],
          [
@@ -35603,7 +36145,15 @@
           },
           {
            "s": "",
-           "t": " restricted to the collision layers in Layer Mask, which is a bitfield: 1 is layer 0, 2 is layer 1, 4 is layer 2, 65535 is all of them. What a camera boom wants, so it stops on walls and ignores the player.\nLua/Python "
+           "t": " restricted to the collision layers in Layer Mask, which is a bitfield: 1 is layer 0, 2 is layer 1, 4 is layer 2, 65535 is all of them. What a camera boom wants, so it stops on walls and ignores the player. "
+          },
+          {
+           "s": "c",
+           "t": "point"
+          },
+          {
+           "s": "",
+           "t": " is the sphere's centre where it stopped.\nLua/Python "
           },
           {
            "s": "c",
@@ -35695,13 +36245,21 @@
          [
           {
            "s": "",
-           "t": "hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int"
+           "t": "hit, entity, px, py, pz, nx, ny, nz, distance, layer"
           }
          ],
          [
           {
            "s": "",
-           "t": "Sweeps a box along a direction and reports the first thing it touches. Half Extents is half the box's size on each axis, Rotation is its tilt in degrees, the same numbers the Details panel shows for an entity. Layer Mask is a bitfield: 1 is layer 0, 2 is layer 1, 65535 is all of them. Distance is where the box's centre stopped, not where it touched.\nLua/Python "
+           "t": "Sweeps a box along a direction and reports the first thing it touches. Half Extents is half the box's size on each axis, Rotation is its tilt in degrees, the same numbers the Details panel shows for an entity. Layer Mask is a bitfield: 1 is layer 0, 2 is layer 1, 65535 is all of them. Distance is where the box's centre stopped, not where it touched. "
+          },
+          {
+           "s": "c",
+           "t": "point"
+          },
+          {
+           "s": "",
+           "t": " is the box's centre where it stopped. Ignores trigger volumes.\nLua/Python "
           },
           {
            "s": "c",
@@ -35739,13 +36297,21 @@
          [
           {
            "s": "",
-           "t": "hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int"
+           "t": "hit, entity, px, py, pz, nx, ny, nz, distance, layer"
           }
          ],
          [
           {
            "s": "",
-           "t": "Sweeps a capsule along a direction: the query that asks whether a character fits through a gap, using that character's own Radius and Height. Height is the full height including both rounded ends. Rotation tilts the capsule in degrees, Layer Mask is a bitfield as on the other casts.\nLua/Python "
+           "t": "Sweeps a capsule along a direction: the query that asks whether a character fits through a gap, using that character's own Radius and Height. Height is the full height including both rounded ends. Rotation tilts the capsule in degrees, Layer Mask is a bitfield as on the other casts. "
+          },
+          {
+           "s": "c",
+           "t": "point"
+          },
+          {
+           "s": "",
+           "t": " is the capsule's centre where it stopped. Ignores trigger volumes.\nLua/Python "
           },
           {
            "s": "c",
@@ -35896,7 +36462,7 @@
          [
           {
            "s": "",
-           "t": "Fires a ray and reports EVERY body along it rather than the first, nearest first. The five outputs are parallel arrays, so index 3 of Points belongs to index 3 of Entities. A shot that passes through two enemies, or a line of sight that has to know it crossed a window. Each entity appears once.\nLua/Python "
+           "t": "Fires a ray and reports EVERY body along it rather than the first, nearest first. The five outputs are parallel arrays, so index 3 of Points belongs to index 3 of Entities. A shot that passes through two enemies, or a line of sight that has to know it crossed a window. Each entity appears once. From Lua/Python this returns nine zeros instead of five lists (build 7d49d44f).\nLua/Python "
           },
           {
            "s": "c",
@@ -35945,7 +36511,15 @@
          [
           {
            "s": "",
-           "t": "Adds a continuous force (newtons) for this tick — call it every frame while it should push. Returns false when the entity has no dynamic body, which is the usual reason nothing moves.\nLua/Python "
+           "t": "Adds a continuous force (newtons) for this tick — call it every frame while it should push. Returns false when the entity has no dynamic body, which is the usual reason nothing moves. "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " on a static or kinematic body, which includes a character.\nLua/Python "
           },
           {
            "s": "c",
@@ -35998,7 +36572,23 @@
          [
           {
            "s": "",
-           "t": "Adds an instant change in momentum: a jump, a hit, an explosion. Call it once, not every frame.\nLua/Python "
+           "t": "Adds an instant change in momentum: a jump, a hit, an explosion. Call it once, not every frame. "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " on a static or kinematic body, which includes a character; a character jumps with "
+          },
+          {
+           "s": "c",
+           "t": "locomotion.jump"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -36369,7 +36959,7 @@
          [
           {
            "s": "",
-           "t": "Sets gravity for the WHOLE physics world, not for one entity. The default is (0, -9.81, 0).\nLua/Python "
+           "t": "Sets gravity for the WHOLE physics world, not for one entity. The default is (0, -9.81, 0). Rigid bodies only: a character falls by the gravity on its own Character Controller.\nLua/Python "
           },
           {
            "s": "c",
@@ -36466,7 +37056,39 @@
           },
           {
            "s": "",
-           "t": " And Stop is the respawn variant.\nLua/Python "
+           "t": " And Stop is the respawn variant. The position is "
+          },
+          {
+           "s": "b",
+           "t": "local"
+          },
+          {
+           "s": "",
+           "t": ", relative to the parent, like "
+          },
+          {
+           "s": "c",
+           "t": "horizon.setPosition"
+          },
+          {
+           "s": "",
+           "t": ". For a world point on a child use "
+          },
+          {
+           "s": "c",
+           "t": "transform.setWorldPosition"
+          },
+          {
+           "s": "",
+           "t": " (HorizonCode only). "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " and a log line without a body.\nLua/Python "
           },
           {
            "s": "c",
@@ -36528,7 +37150,15 @@
           },
           {
            "s": "",
-           "t": " and zeroes the velocity on arrival. What a respawn wants, so a player put back at a checkpoint does not keep the fall that killed them.\nLua/Python "
+           "t": " and zeroes the velocity on arrival. What a respawn wants, so a player put back at a checkpoint does not keep the fall that killed them. Local position like "
+          },
+          {
+           "s": "c",
+           "t": "setPosition"
+          },
+          {
+           "s": "",
+           "t": "; zeroes the linear and the angular velocity.\nLua/Python "
           },
           {
            "s": "c",
@@ -36634,7 +37264,7 @@
          [
           {
            "s": "",
-           "t": "Ties two rigid bodies together. Type picks the kind: 0 Fixed welds them, 1 Point is a ball socket, 2 Hinge turns on one axis, 3 Slider travels along one, 4 Distance keeps two points apart like a rope. Anchors are local to their own entity, Min and Max Limit are degrees for a hinge and metres for a slider, and Min above Max means no limit.\nLua/Python "
+           "t": "Ties two rigid bodies together. Type picks the kind: 0 Fixed welds them, 1 Point is a ball socket, 2 Hinge turns on one axis, 3 Slider travels along one, 4 Distance keeps two points apart like a rope. Anchors are local to their own entity, Min and Max Limit are degrees for a hinge and metres for a slider, and Min above Max means no limit. A type outside 0–4 becomes Fixed. The first entity owns the joint.\nLua/Python "
           },
           {
            "s": "c",
@@ -36731,7 +37361,23 @@
          [
           {
            "s": "",
-           "t": "True while this entity is actually jointed to something in the simulation. A joint whose other end has not spawned yet is authored but not built, and this reports the simulation rather than the component.\nLua/Python "
+           "t": "True while this entity is actually jointed to something in the simulation. A joint whose other end has not spawned yet is authored but not built, and this reports the simulation rather than the component. Only the owner, the first entity passed to "
+          },
+          {
+           "s": "c",
+           "t": "addJoint"
+          },
+          {
+           "s": "",
+           "t": ", reports "
+          },
+          {
+           "s": "c",
+           "t": "true"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -36784,7 +37430,15 @@
          [
           {
            "s": "",
-           "t": "Drives a hinge or a slider under its own power: the door swings open, the platform rises. Target Speed is radians per second for a hinge and metres per second for a slider. Max Force is the switch — zero turns the motor off, and a target of zero with force behind it is a brake that holds the joint still. The other three joint types have no motor.\nLua/Python "
+           "t": "Drives a hinge or a slider under its own power: the door swings open, the platform rises. Target Speed is radians per second for a hinge and metres per second for a slider. Max Force is the switch — zero turns the motor off, and a target of zero with force behind it is a brake that holds the joint still. The other three joint types have no motor. "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " and an error log on a Fixed, Point or Distance joint.\nLua/Python "
           },
           {
            "s": "c",
@@ -36952,7 +37606,15 @@
          [
           {
            "s": "",
-           "t": "Every joint that BROKE since the last call, as two parallel arrays: index i of Entities A owned the joint, index i of Entities B was the other end. Reading empties the list, so read it in one place. A joint that was removed or whose entity was destroyed never appears here.\nLua/Python "
+           "t": "Every joint that BROKE since the last call, as two parallel arrays: index i of Entities A owned the joint, index i of Entities B was the other end. Reading empties the list, so read it in one place. A joint that was removed or whose entity was destroyed never appears here. From Lua/Python this returns "
+          },
+          {
+           "s": "c",
+           "t": "0, 0"
+          },
+          {
+           "s": "",
+           "t": " and still empties the queue (build 7d49d44f).\nLua/Python "
           },
           {
            "s": "c",
@@ -36990,7 +37652,7 @@
      ],
      "eyebrow": "Gameplay · 33 functions",
      "id": "physics",
-     "text": "Lua / Python: horizon.physics.<function> · C++: HE::api::physics::<function> Function Returns Description raycast(origin: vec3, direction: vec3, maxDistance: float) hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int Fires a ray from Origin along Direction and reports the first thing it hits. Direction does not have to be normalised. Hit is false when nothing is in the way, and the other outputs are then meaningless rather than stale — always branch on Hit first.\nLua/Python horizon.physics.raycast, or flat horizon.raycast · HorizonCode Raycast · C++ HE::api::physics::raycast · query setVelocity(entity: int, velocity: vec3) — Sets a body's velocity in metres per second outright, discarding whatever it had. For a nudge use Add Impulse, which adds to the motion instead of replacing it.\nLua/Python horizon.physics.setVelocity, or flat horizon.setVelocity · HorizonCode Set Velocity · C++ HE::api::physics::setVelocity · action · entity is Self in HorizonCode isGrounded(entity: int) grounded: bool Is this character controller standing on something right now? False for an entity that has no character controller.\nLua/Python horizon.physics.isGrounded, or flat horizon.isGrounded · HorizonCode Is Grounded (Physics) · C++ HE::api::physics::isGrounded · query · entity is Self in HorizonCode sphereCast(origin: vec3, direction: vec3, radius: float, maxDistance: float) hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int Like Raycast, but sweeps a sphere of Radius along the ray, so it catches what a thin ray slips past — a gap between two crates, the edge of a step. The extra cost is worth it for anything a character has to stand on.\nLua/Python horizon.physics.sphereCast · HorizonCode Sphere Cast · C++ HE::api::physics::sphereCast · query overlapSphere(center: vec3, radius: float) entities: int[] Every entity whose collider overlaps this sphere, as an array. The explosion-radius query; walk the result with a For Each.\nLua/Python horizon.physics.overlapSphere · HorizonCode Overlap Sphere · C++ HE::api::physics::overlapSphere · query · list: HorizonCode/C++ only raycastLayers(origin: vec3, direction: vec3, maxDistance: float, layerMask: int) hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int Raycast, but it only sees the collision layers you name. Layer Mask is a bitfield and not a layer number: add 1 for layer 0, 2 for layer 1, 4 for layer 2 and so on, or pass 65535 for every layer. Zero sees nothing at all. The layer names live in Project Settings under Collision Layers.\nLua/Python horizon.physics.raycastLayers · HorizonCode Raycast (Layers) · C++ HE::api::physics::raycastLayers · query sphereCastLayers(origin: vec3, direction: vec3, radius: float, maxDistance: float, layerMask: int) hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int Sphere Cast restricted to the collision layers in Layer Mask, which is a bitfield: 1 is layer 0, 2 is layer 1, 4 is layer 2, 65535 is all of them. What a camera boom wants, so it stops on walls and ignores the player.\nLua/Python horizon.physics.sphereCastLayers · HorizonCode Sphere Cast (Layers) · C++ HE::api::physics::sphereCastLayers · query overlapSphereLayers(center: vec3, radius: float, layerMask: int) entities: int[] Overlap Sphere restricted to the collision layers in Layer Mask, a bitfield in the same shape as the two casts above. An explosion that hurts enemies and leaves the scenery alone is this node with one bit set.\nLua/Python horizon.physics.overlapSphereLayers · HorizonCode Overlap Sphere (Layers) · C++ HE::api::physics::overlapSphereLayers · query · list: HorizonCode/C++ only boxCast(origin: vec3, halfExtents: vec3, rotation: vec3, direction: vec3, maxDistance: float, layerMask: int) hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int Sweeps a box along a direction and reports the first thing it touches. Half Extents is half the box's size on each axis, Rotation is its tilt in degrees, the same numbers the Details panel shows for an entity. Layer Mask is a bitfield: 1 is layer 0, 2 is layer 1, 65535 is all of them. Distance is where the box's centre stopped, not where it touched.\nLua/Python horizon.physics.boxCast · HorizonCode Box Cast · C++ HE::api::physics::boxCast · query capsuleCast(origin: vec3, radius: float, height: float, rotation: vec3, direction: vec3, maxDistance: float, layerMask: int) hit: bool, entity: int, point: vec3, normal: vec3, distance: float, layer: int Sweeps a capsule along a direction: the query that asks whether a character fits through a gap, using that character's own Radius and Height. Height is the full height including both rounded ends. Rotation tilts the capsule in degrees, Layer Mask is a bitfield as on the other casts.\nLua/Python horizon.physics.capsuleCast · HorizonCode Capsule Cast · C++ HE::api::physics::capsuleCast · query overlapBox(center: vec3, halfExtents: vec3, rotation: vec3, layerMask: int) entities: int[] Every entity whose collider is inside this box right now, as an array. Half Extents is half the box's size on each axis and Rotation turns it, both in the same units the Details panel uses. A room, a corridor or a selection rectangle, where Overlap Sphere would also catch the corners.\nLua/Python horizon.physics.overlapBox · HorizonCode Overlap Box · C++ HE::api::physics::overlapBox · query · list: HorizonCode/C++ only overlapCapsule(center: vec3, radius: float, height: float, rotation: vec3, layerMask: int) entities: int[] Every entity inside an upright capsule, as an array. Height is the full height including both ends, and Rotation lays it on its side if you want that. The query a respawn makes before it puts a player somewhere: is anybody already standing there?\nLua/Python horizon.physics.overlapCapsule · HorizonCode Overlap Capsule · C++ HE::api::physics::overlapCapsule · query · list: HorizonCode/C++ only raycastAll(origin: vec3, direction: vec3, maxDistance: float, layerMask: int) entities: int[], points: vec3[], normals: vec3[], distances: float[], layers: int[] Fires a ray and reports EVERY body along it rather than the first, nearest first. The five outputs are parallel arrays, so index 3 of Points belongs to index 3 of Entities. A shot that passes through two enemies, or a line of sight that has to know it crossed a window. Each entity appears once.\nLua/Python horizon.physics.raycastAll · HorizonCode Raycast All · C++ HE::api::physics::raycastAll · query · list: HorizonCode/C++ only addForce(entity: int, force: vec3) ok: bool Adds a continuous force (newtons) for this tick — call it every frame while it should push. Returns false when the entity has no dynamic body, which is the usual reason nothing moves.\nLua/Python horizon.physics.addForce · HorizonCode Add Force · C++ HE::api::physics::addForce · action · entity is Self in HorizonCode addImpulse(entity: int, impulse: vec3) ok: bool Adds an instant change in momentum: a jump, a hit, an explosion. Call it once, not every frame.\nLua/Python horizon.physics.addImpulse · HorizonCode Add Impulse · C++ HE::api::physics::addImpulse · action · entity is Self in HorizonCode addTorque(entity: int, torque: vec3) ok: bool Adds rotational force about the world axes, spinning the body.\nLua/Python horizon.physics.addTorque · HorizonCode Add Torque · C++ HE::api::physics::addTorque · action · entity is Self in HorizonCode addForceAtPosition(entity: int, force: vec3, position: vec3) ok: bool A continuous force applied at a point rather than through the middle, so it turns the body as well as moving it. Position is a point in the WORLD, not an offset inside the entity, so a raycast hit point can be wired straight into it. Call it every frame while it should push.\nLua/Python horizon.physics.addForceAtPosition · HorizonCode Add Force At Position · C++ HE::api::physics::addForceAtPosition · action · entity is Self in HorizonCode addImpulseAtPosition(entity: int, impulse: vec3, position: vec3) ok: bool An instant push at a point rather than through the middle: the crate tumbles away from the blast instead of sliding away from it. Position is a point in the WORLD, so a hit point wires straight in. Call it once, not every frame.\nLua/Python horizon.physics.addImpulseAtPosition · HorizonCode Add Impulse At Position · C++ HE::api::physics::addImpulseAtPosition · action · entity is Self in HorizonCode getVelocity(entity: int) velocity: vec3 The body's current velocity in metres per second. Zero for an entity without a physics body.\nLua/Python horizon.physics.getVelocity · HorizonCode Get Velocity (Physics) · C++ HE::api::physics::getVelocity · query · entity is Self in HorizonCode setAngularVelocity(entity: int, angularVelocity: vec3) ok: bool Sets how fast the body spins, in RADIANS per second about the world axes and not in degrees. One full turn a second is about 6.28. It turns rigid bodies only: a character controller is kept upright and does not spin.\nLua/Python horizon.physics.setAngularVelocity · HorizonCode Set Angular Velocity · C++ HE::api::physics::setAngularVelocity · action · entity is Self in HorizonCode getAngularVelocity(entity: int) angularVelocity: vec3 How fast the body is spinning, in RADIANS per second about the world axes and not in degrees. Zero for an entity without a rigid body.\nLua/Python horizon.physics.getAngularVelocity · HorizonCode Get Angular Velocity · C++ HE::api::physics::getAngularVelocity · query · entity is Self in HorizonCode setGravity(gravity: vec3) — Sets gravity for the WHOLE physics world, not for one entity. The default is (0, -9.81, 0).\nLua/Python horizon.physics.setGravity · HorizonCode Set Gravity · C++ HE::api::physics::setGravity · action getGravity() gravity: vec3 The physics world's gravity vector.\nLua/Python horizon.physics.getGravity · HorizonCode Get Gravity · C++ HE::api::physics::getGravity · query setPosition(entity: int, position: vec3) ok: bool Teleports the entity's physics body and its transform to this position in one step. Nothing sweeps on the way, and the velocity is kept — Set Position And Stop is the respawn variant.\nLua/Python horizon.physics.setPosition · HorizonCode Set Position (Physics) · C++ HE::api::physics::setPosition · action · entity is Self in HorizonCode setPositionAndReset(entity: int, position: vec3) ok: bool Teleports like Set Position and zeroes the velocity on arrival. What a respawn wants, so a player put back at a checkpoint does not keep the fall that killed them.\nLua/Python horizon.physics.setPositionAndReset · HorizonCode Set Position And Stop (Physics) · C++ HE::api::physics::setPositionAndReset · action · entity is Self in HorizonCode hasPhysics(entity: int) has: bool Whether the entity has a rigid body or a character controller at all. False without a physics world, and the honest answer to why a force did nothing.\nLua/Python horizon.physics.hasPhysics · HorizonCode Has Physics · C++ HE::api::physics::hasPhysics · query · entity is Self in HorizonCode addJoint(entityA: int, entityB: int, type: int, anchorA: vec3, anchorB: vec3, axis: vec3, minLimit: float, maxLimit: float) ok: bool Ties two rigid bodies together. Type picks the kind: 0 Fixed welds them, 1 Point is a ball socket, 2 Hinge turns on one axis, 3 Slider travels along one, 4 Distance keeps two points apart like a rope. Anchors are local to their own entity, Min and Max Limit are degrees for a hinge and metres for a slider, and Min above Max means no limit.\nLua/Python horizon.physics.addJoint · HorizonCode Add Joint · C++ HE::api::physics::addJoint · action removeJoint(entity: int) ok: bool Cuts an entity's joint, both the constraint and the component, so it does not come back the next time the scene is loaded. The call that drops a grapple line or breaks a chain apart on purpose.\nLua/Python horizon.physics.removeJoint · HorizonCode Remove Joint · C++ HE::api::physics::removeJoint · action · entity is Self in HorizonCode hasJoint(entity: int) has: bool True while this entity is actually jointed to something in the simulation. A joint whose other end has not spawned yet is authored but not built, and this reports the simulation rather than the component.\nLua/Python horizon.physics.hasJoint · HorizonCode Has Joint · C++ HE::api::physics::hasJoint · query · entity is Self in HorizonCode setJointMotor(entity: int, targetSpeed: float, maxForce: float) ok: bool Drives a hinge or a slider under its own power: the door swings open, the platform rises. Target Speed is radians per second for a hinge and metres per second for a slider. Max Force is the switch — zero turns the motor off, and a target of zero with force behind it is a brake that holds the joint still. The other three joint types have no motor.\nLua/Python horizon.physics.setJointMotor · HorizonCode Set Joint Motor · C++ HE::api::physics::setJointMotor · action · entity is Self in HorizonCode setJointBreakForce(entity: int, breakForce: float) ok: bool How much force this joint carries before it lets go, in newtons; 0 never breaks. When it breaks the joint is gone for good — the component with it — and the pair shows up once in Poll Joint Broken.\nLua/Python horizon.physics.setJointBreakForce · HorizonCode Set Joint Break Force · C++ HE::api::physics::setJointBreakForce · action · entity is Self in HorizonCode setJointCollideConnected(entity: int, collide: bool) ok: bool Whether the two jointed bodies may touch each other. Off by default, which is what a chain of overlapping links needs; on for a door that must not swing through its own frame.\nLua/Python horizon.physics.setJointCollideConnected · HorizonCode Set Joint Collide Connected · C++ HE::api::physics::setJointCollideConnected · action · entity is Self in HorizonCode pollJointBroken() entitiesA: int[], entitiesB: int[] Every joint that BROKE since the last call, as two parallel arrays: index i of Entities A owned the joint, index i of Entities B was the other end. Reading empties the list, so read it in one place. A joint that was removed or whose entity was destroyed never appears here.\nLua/Python horizon.physics.pollJointBroken · HorizonCode Poll Joint Broken · C++ HE::api::physics::pollJointBroken · action · list: HorizonCode/C++ only",
+     "text": "Lua / Python: horizon.physics.<function> · C++: HE::api::physics::<function> Queries against the physics world and pushes on its bodies. Without a running physics world (edit mode, a world with no bodies built) every query misses, every push returns false and every read is zero. Units are metres, seconds, newtons and kilograms; the one exception is spin, which is in radians per second. Hits from Lua/Python. raycast and the four casts return ten values: hit, entity, px, py, pz, nx, ny, nz, distance, layer. On a miss they are false and zeros. The flat horizon.raycast returns a table / dict (entity, x, y, z, nx, ny, nz, distance, no layer) or nil / None. The direction does not have to be normalised. A ray started inside a collider hits that collider at distance 0. A ray from a character's own position therefore finds the character. Start it outside the own capsule (a step ahead, see the example below) or give the character its own collision layer and leave that bit out of the mask. Shape casts report the centre, not the contact. For sphereCast, boxCast and capsuleCast, point is where the shape's centre stopped (a 0.25 m sphere dropped on a floor at y = 1 reports y = 1.25), which is what a camera boom or a placement check wants. The shape casts ignore trigger volumes; raycast and the overlaps see them. Layer masks are bitfields: bit N is collision layer N, 65535 (or -1) is every layer, 0 sees nothing. The layer names are in Project Settings under Collision Layers. World and local. Every point a query returns is in world space, and so are the positions of addForceAtPosition / addImpulseAtPosition. setPosition and setPositionAndReset take a local position, like horizon.setPosition: for a child entity the value is relative to its parent. Joint anchors are local to their own entity. Forces (addForce, addImpulse, addTorque, the two …AtPosition) need a Dynamic rigid body and return false with a log line on a static or kinematic one, so also on a character. A character moves through Locomotion. setVelocity addresses the character controller when there is one, otherwise the rigid body. On a character with a Movement component the next frame overwrites the horizontal part with whatever locomotion.move asked for (nothing = standing still), so use setVelocity on characters only without one. setGravity changes gravity for rigid bodies in the whole world. A character falls by its own Character Controller gravity and does not follow it. Joints tie two rigid bodies together; the entity passed first owns the joint, and only it reports hasJoint. A type outside 0–4 becomes Fixed. setJointMotor works on a Hinge or Slider only and returns false otherwise. A joint made at runtime is written to the owner's Joint component, the same component the editor places, and removeJoint or a break removes it again. List results do not reach Lua or Python. overlapSphere, overlapSphereLayers, overlapBox, overlapCapsule, raycastAll and pollJointBroken return scalar zeros there instead of lists (see Lists, measured on build 7d49d44f). pollJointBroken still empties the queue, so a script calling it takes the events away from a HorizonCode graph that polls the same queue. Until this is fixed, use these from HorizonCode, and in scripts react to contacts with onBeginOverlap on a trigger volume. Example: physics.raycast push_crate.lua local M = {}\nlocal REACH = 2.0   -- metres in front of the character\nlocal PUSH  = 4.0   -- impulse, newton-seconds\n\n-- \"Interact\" is a button action. Pushes whatever dynamic body is in front.\nfunction M.onInputPressed(self, name)\n    if name ~= \"Interact\" then return end\n    local e = self.entityId\n    local x, y, z = horizon.getPosition(e)\n    local _, yaw = horizon.getRotation(e)\n    local r = horizon.math.radians(yaw)\n    local fx, fz = -horizon.math.sin(r), -horizon.math.cos(r)   -- facing, -Z at yaw 0\n    -- Start a step ahead: a ray from inside the own capsule would hit it.\n    local ox, oz = x + fx * 0.75, z + fz * 0.75\n    local hit, other, px, py, pz = horizon.physics.raycast(ox, y, oz, fx, 0, fz, REACH)\n    if hit and horizon.physics.hasPhysics(other) then\n        -- The hit point is world space, which is what AtPosition expects.\n        horizon.physics.addImpulseAtPosition(other, fx * PUSH, 0, fz * PUSH, px, py, pz)\n    end\nend\n\nreturn M push_crate.py import horizon\n\nREACH = 2.0   # metres in front of the character\nPUSH = 4.0    # impulse, newton-seconds\n\nclass PushCrate(horizon.Behavior):\n    # \"Interact\" is a button action. Pushes whatever dynamic body is in front.\n    def on_input_pressed(self, name):\n        if name != \"Interact\":\n            return\n        e = self.entity_id\n        x, y, z = horizon.getPosition(e)\n        _, yaw, _ = horizon.getRotation(e)\n        r = horizon.math.radians(yaw)\n        fx, fz = -horizon.math.sin(r), -horizon.math.cos(r)   # facing, -Z at yaw 0\n        # Start a step ahead: a ray from inside the own capsule would hit it.\n        ox, oz = x + fx * 0.75, z + fz * 0.75\n        hit, other, px, py, pz, *_ = horizon.physics.raycast(ox, y, oz, fx, 0, fz, REACH)\n        if hit and horizon.physics.hasPhysics(other):\n            # The hit point is world space, which is what AtPosition expects.\n            horizon.physics.addImpulseAtPosition(other, fx * PUSH, 0, fz * PUSH, px, py, pz) Example: physics.setPositionAndReset kill_plane.lua local M = {}\nlocal FLOOR = -20   -- below this height the character has fallen out\n\nfunction M.onStart(self)\n    self.sx, self.sy, self.sz = horizon.getPosition(self.entityId)\nend\n\nfunction M.onUpdate(self, dt)\n    local _, y = horizon.getPosition(self.entityId)\n    if y < FLOOR then\n        -- Back to where the level started it, without the speed of the fall.\n        horizon.physics.setPositionAndReset(self.entityId, self.sx, self.sy, self.sz)\n    end\nend\n\nreturn M kill_plane.py import horizon\n\nFLOOR = -20   # below this height the character has fallen out\n\nclass KillPlane(horizon.Behavior):\n    def on_start(self):\n        self.spawn = horizon.getPosition(self.entity_id)\n\n    def on_update(self, dt):\n        _, y, _ = horizon.getPosition(self.entity_id)\n        if y < FLOOR:\n            # Back to where the level started it, without the speed of the fall.\n            horizon.physics.setPositionAndReset(self.entity_id, *self.spawn) Function Returns Description raycast(origin: vec3, direction: vec3, maxDistance: float) hit, entity, px, py, pz, nx, ny, nz, distance, layer Fires a ray from Origin along Direction and reports the first thing it hits. Direction does not have to be normalised. Hit is false when nothing is in the way, and the other outputs are then meaningless rather than stale — always branch on Hit first. A ray that starts inside a collider hits it at distance 0, so a ray from a character's own position finds the character. Sees trigger volumes.\nLua/Python horizon.physics.raycast, or flat horizon.raycast · HorizonCode Raycast · C++ HE::api::physics::raycast · query setVelocity(entity: int, velocity: vec3) — Sets a body's velocity in metres per second outright, discarding whatever it had. For a nudge use Add Impulse, which adds to the motion instead of replacing it. On a character with a Movement component the next frame replaces the horizontal part with what locomotion.move asked for.\nLua/Python horizon.physics.setVelocity, or flat horizon.setVelocity · HorizonCode Set Velocity · C++ HE::api::physics::setVelocity · action · entity is Self in HorizonCode isGrounded(entity: int) grounded: bool Is this character controller standing on something right now? False for an entity that has no character controller.\nLua/Python horizon.physics.isGrounded, or flat horizon.isGrounded · HorizonCode Is Grounded (Physics) · C++ HE::api::physics::isGrounded · query · entity is Self in HorizonCode sphereCast(origin: vec3, direction: vec3, radius: float, maxDistance: float) hit, entity, px, py, pz, nx, ny, nz, distance, layer Like Raycast, but sweeps a sphere of Radius along the ray, so it catches what a thin ray slips past — a gap between two crates, the edge of a step. The extra cost is worth it for anything a character has to stand on. point is where the sphere's centre stopped, not the contact point. Ignores trigger volumes.\nLua/Python horizon.physics.sphereCast · HorizonCode Sphere Cast · C++ HE::api::physics::sphereCast · query overlapSphere(center: vec3, radius: float) entities: int[] Every entity whose collider overlaps this sphere, as an array. The explosion-radius query; walk the result with a For Each. From Lua/Python this returns 0 instead of a list (build 7d49d44f).\nLua/Python horizon.physics.overlapSphere · HorizonCode Overlap Sphere · C++ HE::api::physics::overlapSphere · query · list: HorizonCode/C++ only raycastLayers(origin: vec3, direction: vec3, maxDistance: float, layerMask: int) hit, entity, px, py, pz, nx, ny, nz, distance, layer Raycast, but it only sees the collision layers you name. Layer Mask is a bitfield and not a layer number: add 1 for layer 0, 2 for layer 1, 4 for layer 2 and so on, or pass 65535 for every layer. Zero sees nothing at all. The layer names live in Project Settings under Collision Layers.\nLua/Python horizon.physics.raycastLayers · HorizonCode Raycast (Layers) · C++ HE::api::physics::raycastLayers · query sphereCastLayers(origin: vec3, direction: vec3, radius: float, maxDistance: float, layerMask: int) hit, entity, px, py, pz, nx, ny, nz, distance, layer Sphere Cast restricted to the collision layers in Layer Mask, which is a bitfield: 1 is layer 0, 2 is layer 1, 4 is layer 2, 65535 is all of them. What a camera boom wants, so it stops on walls and ignores the player. point is the sphere's centre where it stopped.\nLua/Python horizon.physics.sphereCastLayers · HorizonCode Sphere Cast (Layers) · C++ HE::api::physics::sphereCastLayers · query overlapSphereLayers(center: vec3, radius: float, layerMask: int) entities: int[] Overlap Sphere restricted to the collision layers in Layer Mask, a bitfield in the same shape as the two casts above. An explosion that hurts enemies and leaves the scenery alone is this node with one bit set.\nLua/Python horizon.physics.overlapSphereLayers · HorizonCode Overlap Sphere (Layers) · C++ HE::api::physics::overlapSphereLayers · query · list: HorizonCode/C++ only boxCast(origin: vec3, halfExtents: vec3, rotation: vec3, direction: vec3, maxDistance: float, layerMask: int) hit, entity, px, py, pz, nx, ny, nz, distance, layer Sweeps a box along a direction and reports the first thing it touches. Half Extents is half the box's size on each axis, Rotation is its tilt in degrees, the same numbers the Details panel shows for an entity. Layer Mask is a bitfield: 1 is layer 0, 2 is layer 1, 65535 is all of them. Distance is where the box's centre stopped, not where it touched. point is the box's centre where it stopped. Ignores trigger volumes.\nLua/Python horizon.physics.boxCast · HorizonCode Box Cast · C++ HE::api::physics::boxCast · query capsuleCast(origin: vec3, radius: float, height: float, rotation: vec3, direction: vec3, maxDistance: float, layerMask: int) hit, entity, px, py, pz, nx, ny, nz, distance, layer Sweeps a capsule along a direction: the query that asks whether a character fits through a gap, using that character's own Radius and Height. Height is the full height including both rounded ends. Rotation tilts the capsule in degrees, Layer Mask is a bitfield as on the other casts. point is the capsule's centre where it stopped. Ignores trigger volumes.\nLua/Python horizon.physics.capsuleCast · HorizonCode Capsule Cast · C++ HE::api::physics::capsuleCast · query overlapBox(center: vec3, halfExtents: vec3, rotation: vec3, layerMask: int) entities: int[] Every entity whose collider is inside this box right now, as an array. Half Extents is half the box's size on each axis and Rotation turns it, both in the same units the Details panel uses. A room, a corridor or a selection rectangle, where Overlap Sphere would also catch the corners.\nLua/Python horizon.physics.overlapBox · HorizonCode Overlap Box · C++ HE::api::physics::overlapBox · query · list: HorizonCode/C++ only overlapCapsule(center: vec3, radius: float, height: float, rotation: vec3, layerMask: int) entities: int[] Every entity inside an upright capsule, as an array. Height is the full height including both ends, and Rotation lays it on its side if you want that. The query a respawn makes before it puts a player somewhere: is anybody already standing there?\nLua/Python horizon.physics.overlapCapsule · HorizonCode Overlap Capsule · C++ HE::api::physics::overlapCapsule · query · list: HorizonCode/C++ only raycastAll(origin: vec3, direction: vec3, maxDistance: float, layerMask: int) entities: int[], points: vec3[], normals: vec3[], distances: float[], layers: int[] Fires a ray and reports EVERY body along it rather than the first, nearest first. The five outputs are parallel arrays, so index 3 of Points belongs to index 3 of Entities. A shot that passes through two enemies, or a line of sight that has to know it crossed a window. Each entity appears once. From Lua/Python this returns nine zeros instead of five lists (build 7d49d44f).\nLua/Python horizon.physics.raycastAll · HorizonCode Raycast All · C++ HE::api::physics::raycastAll · query · list: HorizonCode/C++ only addForce(entity: int, force: vec3) ok: bool Adds a continuous force (newtons) for this tick — call it every frame while it should push. Returns false when the entity has no dynamic body, which is the usual reason nothing moves. false on a static or kinematic body, which includes a character.\nLua/Python horizon.physics.addForce · HorizonCode Add Force · C++ HE::api::physics::addForce · action · entity is Self in HorizonCode addImpulse(entity: int, impulse: vec3) ok: bool Adds an instant change in momentum: a jump, a hit, an explosion. Call it once, not every frame. false on a static or kinematic body, which includes a character; a character jumps with locomotion.jump.\nLua/Python horizon.physics.addImpulse · HorizonCode Add Impulse · C++ HE::api::physics::addImpulse · action · entity is Self in HorizonCode addTorque(entity: int, torque: vec3) ok: bool Adds rotational force about the world axes, spinning the body.\nLua/Python horizon.physics.addTorque · HorizonCode Add Torque · C++ HE::api::physics::addTorque · action · entity is Self in HorizonCode addForceAtPosition(entity: int, force: vec3, position: vec3) ok: bool A continuous force applied at a point rather than through the middle, so it turns the body as well as moving it. Position is a point in the WORLD, not an offset inside the entity, so a raycast hit point can be wired straight into it. Call it every frame while it should push.\nLua/Python horizon.physics.addForceAtPosition · HorizonCode Add Force At Position · C++ HE::api::physics::addForceAtPosition · action · entity is Self in HorizonCode addImpulseAtPosition(entity: int, impulse: vec3, position: vec3) ok: bool An instant push at a point rather than through the middle: the crate tumbles away from the blast instead of sliding away from it. Position is a point in the WORLD, so a hit point wires straight in. Call it once, not every frame.\nLua/Python horizon.physics.addImpulseAtPosition · HorizonCode Add Impulse At Position · C++ HE::api::physics::addImpulseAtPosition · action · entity is Self in HorizonCode getVelocity(entity: int) velocity: vec3 The body's current velocity in metres per second. Zero for an entity without a physics body.\nLua/Python horizon.physics.getVelocity · HorizonCode Get Velocity (Physics) · C++ HE::api::physics::getVelocity · query · entity is Self in HorizonCode setAngularVelocity(entity: int, angularVelocity: vec3) ok: bool Sets how fast the body spins, in RADIANS per second about the world axes and not in degrees. One full turn a second is about 6.28. It turns rigid bodies only: a character controller is kept upright and does not spin.\nLua/Python horizon.physics.setAngularVelocity · HorizonCode Set Angular Velocity · C++ HE::api::physics::setAngularVelocity · action · entity is Self in HorizonCode getAngularVelocity(entity: int) angularVelocity: vec3 How fast the body is spinning, in RADIANS per second about the world axes and not in degrees. Zero for an entity without a rigid body.\nLua/Python horizon.physics.getAngularVelocity · HorizonCode Get Angular Velocity · C++ HE::api::physics::getAngularVelocity · query · entity is Self in HorizonCode setGravity(gravity: vec3) — Sets gravity for the WHOLE physics world, not for one entity. The default is (0, -9.81, 0). Rigid bodies only: a character falls by the gravity on its own Character Controller.\nLua/Python horizon.physics.setGravity · HorizonCode Set Gravity · C++ HE::api::physics::setGravity · action getGravity() gravity: vec3 The physics world's gravity vector.\nLua/Python horizon.physics.getGravity · HorizonCode Get Gravity · C++ HE::api::physics::getGravity · query setPosition(entity: int, position: vec3) ok: bool Teleports the entity's physics body and its transform to this position in one step. Nothing sweeps on the way, and the velocity is kept — Set Position And Stop is the respawn variant. The position is local, relative to the parent, like horizon.setPosition. For a world point on a child use transform.setWorldPosition (HorizonCode only). false and a log line without a body.\nLua/Python horizon.physics.setPosition · HorizonCode Set Position (Physics) · C++ HE::api::physics::setPosition · action · entity is Self in HorizonCode setPositionAndReset(entity: int, position: vec3) ok: bool Teleports like Set Position and zeroes the velocity on arrival. What a respawn wants, so a player put back at a checkpoint does not keep the fall that killed them. Local position like setPosition; zeroes the linear and the angular velocity.\nLua/Python horizon.physics.setPositionAndReset · HorizonCode Set Position And Stop (Physics) · C++ HE::api::physics::setPositionAndReset · action · entity is Self in HorizonCode hasPhysics(entity: int) has: bool Whether the entity has a rigid body or a character controller at all. False without a physics world, and the honest answer to why a force did nothing.\nLua/Python horizon.physics.hasPhysics · HorizonCode Has Physics · C++ HE::api::physics::hasPhysics · query · entity is Self in HorizonCode addJoint(entityA: int, entityB: int, type: int, anchorA: vec3, anchorB: vec3, axis: vec3, minLimit: float, maxLimit: float) ok: bool Ties two rigid bodies together. Type picks the kind: 0 Fixed welds them, 1 Point is a ball socket, 2 Hinge turns on one axis, 3 Slider travels along one, 4 Distance keeps two points apart like a rope. Anchors are local to their own entity, Min and Max Limit are degrees for a hinge and metres for a slider, and Min above Max means no limit. A type outside 0–4 becomes Fixed. The first entity owns the joint.\nLua/Python horizon.physics.addJoint · HorizonCode Add Joint · C++ HE::api::physics::addJoint · action removeJoint(entity: int) ok: bool Cuts an entity's joint, both the constraint and the component, so it does not come back the next time the scene is loaded. The call that drops a grapple line or breaks a chain apart on purpose.\nLua/Python horizon.physics.removeJoint · HorizonCode Remove Joint · C++ HE::api::physics::removeJoint · action · entity is Self in HorizonCode hasJoint(entity: int) has: bool True while this entity is actually jointed to something in the simulation. A joint whose other end has not spawned yet is authored but not built, and this reports the simulation rather than the component. Only the owner, the first entity passed to addJoint, reports true.\nLua/Python horizon.physics.hasJoint · HorizonCode Has Joint · C++ HE::api::physics::hasJoint · query · entity is Self in HorizonCode setJointMotor(entity: int, targetSpeed: float, maxForce: float) ok: bool Drives a hinge or a slider under its own power: the door swings open, the platform rises. Target Speed is radians per second for a hinge and metres per second for a slider. Max Force is the switch — zero turns the motor off, and a target of zero with force behind it is a brake that holds the joint still. The other three joint types have no motor. false and an error log on a Fixed, Point or Distance joint.\nLua/Python horizon.physics.setJointMotor · HorizonCode Set Joint Motor · C++ HE::api::physics::setJointMotor · action · entity is Self in HorizonCode setJointBreakForce(entity: int, breakForce: float) ok: bool How much force this joint carries before it lets go, in newtons; 0 never breaks. When it breaks the joint is gone for good — the component with it — and the pair shows up once in Poll Joint Broken.\nLua/Python horizon.physics.setJointBreakForce · HorizonCode Set Joint Break Force · C++ HE::api::physics::setJointBreakForce · action · entity is Self in HorizonCode setJointCollideConnected(entity: int, collide: bool) ok: bool Whether the two jointed bodies may touch each other. Off by default, which is what a chain of overlapping links needs; on for a door that must not swing through its own frame.\nLua/Python horizon.physics.setJointCollideConnected · HorizonCode Set Joint Collide Connected · C++ HE::api::physics::setJointCollideConnected · action · entity is Self in HorizonCode pollJointBroken() entitiesA: int[], entitiesB: int[] Every joint that BROKE since the last call, as two parallel arrays: index i of Entities A owned the joint, index i of Entities B was the other end. Reading empties the list, so read it in one place. A joint that was removed or whose entity was destroyed never appears here. From Lua/Python this returns 0, 0 and still empties the queue (build 7d49d44f).\nLua/Python horizon.physics.pollJointBroken · HorizonCode Poll Joint Broken · C++ HE::api::physics::pollJointBroken · action · list: HorizonCode/C++ only",
      "title": "Physics"
     },
     {
@@ -37013,6 +37675,206 @@
         {
          "s": "c",
          "t": "HE::api::nav::<function>"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Sends an entity with a "
+        },
+        {
+         "s": "b",
+         "t": "Nav Agent"
+        },
+        {
+         "s": "",
+         "t": " component across the scene's baked NavMesh. The agent walks by itself once "
+        },
+        {
+         "s": "c",
+         "t": "moveTo"
+        },
+        {
+         "s": "",
+         "t": " has started it; if it has a Character Controller it is steered through it, so it collides and falls like the player. Every call on an entity without a Nav Agent does nothing, returns "
+        },
+        {
+         "s": "c",
+         "t": "false"
+        },
+        {
+         "s": "",
+         "t": " / -1 and logs "
+        },
+        {
+         "s": "i",
+         "t": "has no NavAgentComponent"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "Destinations are "
+         },
+         {
+          "s": "b",
+          "t": "world"
+         },
+         {
+          "s": "",
+          "t": " positions, also for a parented agent, and they have to lie on the walkable surface: a point beside the mesh "
+         },
+         {
+          "s": "i",
+          "t": "or a few metres above it"
+         },
+         {
+          "s": "",
+          "t": " is refused. For a target that moves, call "
+         },
+         {
+          "s": "c",
+          "t": "moveTo"
+         },
+         {
+          "s": "",
+          "t": " again; each call plans a new route from where the agent stands."
+         }
+        ],
+        [
+         {
+          "s": "c",
+          "t": "moveTo"
+         },
+         {
+          "s": "",
+          "t": " plans the route inside the call, so its "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": " is final: no NavMesh, destination off it, or no connection. A refused call also stops an agent that was already walking, and the log line says which of the reasons it was."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "After arrival "
+         },
+         {
+          "s": "c",
+          "t": "isMoving"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "hasPath"
+         },
+         {
+          "s": "",
+          "t": " are "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "remainingDistance"
+         },
+         {
+          "s": "",
+          "t": " is -1, the same as after "
+         },
+         {
+          "s": "c",
+          "t": "stop"
+         },
+         {
+          "s": "",
+          "t": " or a refusal. It never reads 0, so test \"arrived\" with "
+         },
+         {
+          "s": "c",
+          "t": "isMoving"
+         },
+         {
+          "s": "",
+          "t": ". The agent stops within the Nav Agent's Stopping Distance of the target."
+         }
+        ],
+        [
+         {
+          "s": "c",
+          "t": "setSpeed"
+         },
+         {
+          "s": "",
+          "t": " is the agent's own speed (default 3.5 m/s), not the Movement component's Max Speed. A negative value becomes 0, and an agent at speed 0 stands still while "
+         },
+         {
+          "s": "c",
+          "t": "isMoving"
+         },
+         {
+          "s": "",
+          "t": " stays "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Example: nav.moveTo"
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\n-- On an entity with a Nav Agent. World positions on the baked NavMesh.\nlocal POINTS = { {6, 0, -6}, {6, 0, 6}, {-6, 0, 6} }\n\nlocal function goNext(self)\n    self.i = self.i % #POINTS + 1\n    local p = POINTS[self.i]\n    if not horizon.nav.moveTo(self.entityId, p[1], p[2], p[3]) then\n        horizon.log(\"patrol point \" .. self.i .. \" is not reachable\")\n    end\nend\n\nfunction M.onStart(self)\n    self.i = 0\n    goNext(self)\nend\n\nfunction M.onUpdate(self, dt)\n    -- isMoving turns false on arrival (and after a refusal).\n    if not horizon.nav.isMoving(self.entityId) then goNext(self) end\nend\n\nreturn M",
+         "title": "patrol.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\n# On an entity with a Nav Agent. World positions on the baked NavMesh.\nPOINTS = [(6, 0, -6), (6, 0, 6), (-6, 0, 6)]\n\nclass Patrol(horizon.Behavior):\n    def on_start(self):\n        self.i = -1\n        self.go_next()\n\n    def go_next(self):\n        self.i = (self.i + 1) % len(POINTS)\n        if not horizon.nav.moveTo(self.entity_id, *POINTS[self.i]):\n            horizon.log(f\"patrol point {self.i} is not reachable\")\n\n    def on_update(self, dt):\n        # isMoving turns false on arrival (and after a refusal).\n        if not horizon.nav.isMoving(self.entity_id):\n            self.go_next()",
+         "title": "patrol.py"
         }
        ]
       },
@@ -37055,7 +37917,7 @@
          [
           {
            "s": "",
-           "t": "Sends a Nav Agent walking to a world position: the route across the baked nav mesh is searched right here, and then followed over the next frames without anything else being called. The one node an enemy needs in order to come after the player. It answers whether the walk started, and the answer is worth branching on, because a false means the agent will not move at all: no nav mesh has been baked, the destination is off the walkable surface, or the two ends sit on parts of the level that do not connect. A refused call also leaves the agent walking wherever it already was. For a target that keeps moving, simply call it again — each call replans from where the agent stands.\nLua/Python "
+           "t": "Sends a Nav Agent walking to a world position: the route across the baked nav mesh is searched right here, and then followed over the next frames without anything else being called. The one node an enemy needs in order to come after the player. It answers whether the walk started, and the answer is worth branching on, because a false means the agent will not move at all: no nav mesh has been baked, the destination is off the walkable surface, or the two ends sit on parts of the level that do not connect. A refused call also stops an agent that was already walking somewhere. For a target that keeps moving, simply call it again — each call replans from where the agent stands. The point must lie on the NavMesh surface; the same x/z four metres above it is refused.\nLua/Python "
           },
           {
            "s": "c",
@@ -37347,7 +38209,23 @@
          [
           {
            "s": "",
-           "t": "The speed in metres per second at which the agent walks its route from now on. The current route is kept and only the pace changes, so this is how one guard strolls a patrol and then charges. It is the Nav Agent's own speed, not the character's Max Speed, which belongs to input-driven movement; a negative value is taken as standing still.\nLua/Python "
+           "t": "The speed in metres per second at which the agent walks its route from now on. The current route is kept and only the pace changes, so this is how one guard strolls a patrol and then charges. It is the Nav Agent's own speed, not the character's Max Speed, which belongs to input-driven movement; a negative value is taken as standing still. At speed 0 the agent stands still and "
+          },
+          {
+           "s": "c",
+           "t": "isMoving"
+          },
+          {
+           "s": "",
+           "t": " stays "
+          },
+          {
+           "s": "c",
+           "t": "true"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -37389,7 +38267,7 @@
      ],
      "eyebrow": "Gameplay · 6 functions",
      "id": "nav",
-     "text": "Lua / Python: horizon.nav.<function> · C++: HE::api::nav::<function> Function Returns Description moveTo(entity: int, x: float, y: float, z: float) started: bool Sends a Nav Agent walking to a world position: the route across the baked nav mesh is searched right here, and then followed over the next frames without anything else being called. The one node an enemy needs in order to come after the player. It answers whether the walk started, and the answer is worth branching on, because a false means the agent will not move at all: no nav mesh has been baked, the destination is off the walkable surface, or the two ends sit on parts of the level that do not connect. A refused call also leaves the agent walking wherever it already was. For a target that keeps moving, simply call it again — each call replans from where the agent stands.\nLua/Python horizon.nav.moveTo · HorizonCode Move To · C++ HE::api::nav::moveTo · action · entity is Self in HorizonCode stop(entity: int) — Halts the agent where it stands and throws its route away. The way to break off a chase or hold a patrol still during a conversation. It leaves the destination as it was, so Move To starts a fresh walk afterwards.\nLua/Python horizon.nav.stop · HorizonCode Stop Moving · C++ HE::api::nav::stop · action · entity is Self in HorizonCode isMoving(entity: int) moving: bool Is this agent walking a route right now? It falls to false by itself the moment the agent arrives, which is how a patrol knows it is time to hand out the next waypoint.\nLua/Python horizon.nav.isMoving · HorizonCode Is Moving · C++ HE::api::nav::isMoving · query · entity is Self in HorizonCode hasPath(entity: int) hasPath: bool Whether the agent is holding a route it can still follow. Is Moving is the order that was given; this is whether there turned out to be a way. Telling the two apart is how \"walking\" is distinguished from \"was sent somewhere it cannot reach\".\nLua/Python horizon.nav.hasPath · HorizonCode Has Path · C++ HE::api::nav::hasPath · query · entity is Self in HorizonCode remainingDistance(entity: int) distance: float How far the agent still has to walk, measured in metres along the route's corners rather than straight through the walls between. Good for slowing an NPC down near its goal, or for deciding that a chaser is close enough to strike. It is -1, never 0, whenever there is no route to measure — an agent standing still, or one that has just arrived — so compare against 0 only after Has Path says there is something to compare.\nLua/Python horizon.nav.remainingDistance · HorizonCode Remaining Distance · C++ HE::api::nav::remainingDistance · query · entity is Self in HorizonCode setSpeed(entity: int, speed: float) — The speed in metres per second at which the agent walks its route from now on. The current route is kept and only the pace changes, so this is how one guard strolls a patrol and then charges. It is the Nav Agent's own speed, not the character's Max Speed, which belongs to input-driven movement; a negative value is taken as standing still.\nLua/Python horizon.nav.setSpeed · HorizonCode Set Agent Speed · C++ HE::api::nav::setSpeed · action · entity is Self in HorizonCode",
+     "text": "Lua / Python: horizon.nav.<function> · C++: HE::api::nav::<function> Sends an entity with a Nav Agent component across the scene's baked NavMesh. The agent walks by itself once moveTo has started it; if it has a Character Controller it is steered through it, so it collides and falls like the player. Every call on an entity without a Nav Agent does nothing, returns false / -1 and logs has no NavAgentComponent. Destinations are world positions, also for a parented agent, and they have to lie on the walkable surface: a point beside the mesh or a few metres above it is refused. For a target that moves, call moveTo again; each call plans a new route from where the agent stands. moveTo plans the route inside the call, so its false is final: no NavMesh, destination off it, or no connection. A refused call also stops an agent that was already walking, and the log line says which of the reasons it was. After arrival isMoving and hasPath are false and remainingDistance is -1, the same as after stop or a refusal. It never reads 0, so test \"arrived\" with isMoving. The agent stops within the Nav Agent's Stopping Distance of the target. setSpeed is the agent's own speed (default 3.5 m/s), not the Movement component's Max Speed. A negative value becomes 0, and an agent at speed 0 stands still while isMoving stays true. Example: nav.moveTo patrol.lua local M = {}\n\n-- On an entity with a Nav Agent. World positions on the baked NavMesh.\nlocal POINTS = { {6, 0, -6}, {6, 0, 6}, {-6, 0, 6} }\n\nlocal function goNext(self)\n    self.i = self.i % #POINTS + 1\n    local p = POINTS[self.i]\n    if not horizon.nav.moveTo(self.entityId, p[1], p[2], p[3]) then\n        horizon.log(\"patrol point \" .. self.i .. \" is not reachable\")\n    end\nend\n\nfunction M.onStart(self)\n    self.i = 0\n    goNext(self)\nend\n\nfunction M.onUpdate(self, dt)\n    -- isMoving turns false on arrival (and after a refusal).\n    if not horizon.nav.isMoving(self.entityId) then goNext(self) end\nend\n\nreturn M patrol.py import horizon\n\n# On an entity with a Nav Agent. World positions on the baked NavMesh.\nPOINTS = [(6, 0, -6), (6, 0, 6), (-6, 0, 6)]\n\nclass Patrol(horizon.Behavior):\n    def on_start(self):\n        self.i = -1\n        self.go_next()\n\n    def go_next(self):\n        self.i = (self.i + 1) % len(POINTS)\n        if not horizon.nav.moveTo(self.entity_id, *POINTS[self.i]):\n            horizon.log(f\"patrol point {self.i} is not reachable\")\n\n    def on_update(self, dt):\n        # isMoving turns false on arrival (and after a refusal).\n        if not horizon.nav.isMoving(self.entity_id):\n            self.go_next() Function Returns Description moveTo(entity: int, x: float, y: float, z: float) started: bool Sends a Nav Agent walking to a world position: the route across the baked nav mesh is searched right here, and then followed over the next frames without anything else being called. The one node an enemy needs in order to come after the player. It answers whether the walk started, and the answer is worth branching on, because a false means the agent will not move at all: no nav mesh has been baked, the destination is off the walkable surface, or the two ends sit on parts of the level that do not connect. A refused call also stops an agent that was already walking somewhere. For a target that keeps moving, simply call it again — each call replans from where the agent stands. The point must lie on the NavMesh surface; the same x/z four metres above it is refused.\nLua/Python horizon.nav.moveTo · HorizonCode Move To · C++ HE::api::nav::moveTo · action · entity is Self in HorizonCode stop(entity: int) — Halts the agent where it stands and throws its route away. The way to break off a chase or hold a patrol still during a conversation. It leaves the destination as it was, so Move To starts a fresh walk afterwards.\nLua/Python horizon.nav.stop · HorizonCode Stop Moving · C++ HE::api::nav::stop · action · entity is Self in HorizonCode isMoving(entity: int) moving: bool Is this agent walking a route right now? It falls to false by itself the moment the agent arrives, which is how a patrol knows it is time to hand out the next waypoint.\nLua/Python horizon.nav.isMoving · HorizonCode Is Moving · C++ HE::api::nav::isMoving · query · entity is Self in HorizonCode hasPath(entity: int) hasPath: bool Whether the agent is holding a route it can still follow. Is Moving is the order that was given; this is whether there turned out to be a way. Telling the two apart is how \"walking\" is distinguished from \"was sent somewhere it cannot reach\".\nLua/Python horizon.nav.hasPath · HorizonCode Has Path · C++ HE::api::nav::hasPath · query · entity is Self in HorizonCode remainingDistance(entity: int) distance: float How far the agent still has to walk, measured in metres along the route's corners rather than straight through the walls between. Good for slowing an NPC down near its goal, or for deciding that a chaser is close enough to strike. It is -1, never 0, whenever there is no route to measure — an agent standing still, or one that has just arrived — so compare against 0 only after Has Path says there is something to compare.\nLua/Python horizon.nav.remainingDistance · HorizonCode Remaining Distance · C++ HE::api::nav::remainingDistance · query · entity is Self in HorizonCode setSpeed(entity: int, speed: float) — The speed in metres per second at which the agent walks its route from now on. The current route is kept and only the pace changes, so this is how one guard strolls a patrol and then charges. It is the Nav Agent's own speed, not the character's Max Speed, which belongs to input-driven movement; a negative value is taken as standing still. At speed 0 the agent stands still and isMoving stays true.\nLua/Python horizon.nav.setSpeed · HorizonCode Set Agent Speed · C++ HE::api::nav::setSpeed · action · entity is Self in HorizonCode",
      "title": "Navigation"
     },
     {
@@ -37414,6 +38292,135 @@
          "t": "HE::api::movement::<function>"
         }
        ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "What a character is doing right now, read from its Character Controller. Queries only; to make a character move use "
+        },
+        {
+         "h": "#locomotion",
+         "s": "l",
+         "t": "Locomotion"
+        },
+        {
+         "s": "",
+         "t": ". An entity without a Character Controller reads 0 and "
+        },
+        {
+         "s": "c",
+         "t": "false"
+        },
+        {
+         "s": "",
+         "t": ", without a log line."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "All speeds are metres per second. "
+         },
+         {
+          "s": "c",
+          "t": "speed"
+         },
+         {
+          "s": "",
+          "t": " is horizontal only (falling is not running), "
+         },
+         {
+          "s": "c",
+          "t": "verticalSpeed"
+         },
+         {
+          "s": "",
+          "t": " is positive while rising."
+         }
+        ],
+        [
+         {
+          "s": "c",
+          "t": "forwardAmount"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "rightAmount"
+         },
+         {
+          "s": "",
+          "t": " are the same horizontal velocity split along the character's facing, "
+         },
+         {
+          "s": "b",
+          "t": "also in metres per second"
+         },
+         {
+          "s": "",
+          "t": ", not a fraction: a character strafing right at 5 m/s reads "
+         },
+         {
+          "s": "c",
+          "t": "rightAmount"
+         },
+         {
+          "s": "",
+          "t": " 5. Divide by "
+         },
+         {
+          "s": "c",
+          "t": "speed"
+         },
+         {
+          "s": "",
+          "t": " for −1…1, and guard against a speed of 0. Forward is the entity's −Z axis turned by its yaw."
+         }
+        ],
+        [
+         {
+          "s": "c",
+          "t": "isGrounded"
+         },
+         {
+          "s": "",
+          "t": " is the same answer as "
+         },
+         {
+          "s": "c",
+          "t": "physics.isGrounded"
+         },
+         {
+          "s": "",
+          "t": " and the flat "
+         },
+         {
+          "s": "c",
+          "t": "horizon.isGrounded"
+         },
+         {
+          "s": "",
+          "t": ", and the one "
+         },
+         {
+          "s": "c",
+          "t": "locomotion.jump"
+         },
+         {
+          "s": "",
+          "t": " checks."
+         }
+        ]
+       ],
+       "k": "ul"
       },
       {
        "head": [
@@ -37666,7 +38673,16 @@
          [
           {
            "s": "",
-           "t": "How much of the character's motion points the way it is facing, from -1 (backwards) through 0 (still or sideways) to 1 (straight ahead). One half of a locomotion blend space.\nLua/Python "
+           "t": "How fast the character moves the way it is facing, in metres per second: positive ahead, negative backwards, 0 when still or moving sideways. It is a speed and not a -1 to 1 fraction, so divide by "
+          },
+          {
+           "h": "#movement-speed",
+           "s": "l",
+           "t": "Get Speed"
+          },
+          {
+           "s": "",
+           "t": " for that. One half of a locomotion blend space.\nLua/Python "
           },
           {
            "s": "c",
@@ -37719,7 +38735,7 @@
          [
           {
            "s": "",
-           "t": "The sideways half of the same pair: -1 strafing left, 1 strafing right.\nLua/Python "
+           "t": "The sideways half of the same pair, also in metres per second: negative strafing left, positive strafing right.\nLua/Python "
           },
           {
            "s": "c",
@@ -37761,7 +38777,7 @@
      ],
      "eyebrow": "Gameplay · 6 functions",
      "id": "movement",
-     "text": "Lua / Python: horizon.movement.<function> · C++: HE::api::movement::<function> Function Returns Description speed(entity: int) speed: float How fast the character is moving across the ground, in metres per second, ignoring any vertical motion. The value an animator's walk/run blend wants.\nLua/Python horizon.movement.speed · HorizonCode Get Speed · C++ HE::api::movement::speed · query · entity is Self in HorizonCode verticalSpeed(entity: int) speed: float The character's vertical speed in metres per second: positive rising, negative falling. What tells a jump from a fall.\nLua/Python horizon.movement.verticalSpeed · HorizonCode Get Vertical Speed · C++ HE::api::movement::verticalSpeed · query · entity is Self in HorizonCode isGrounded(entity: int) grounded: bool Is the character standing on something? Read from the character controller, so it is the same answer physics used this tick.\nLua/Python horizon.movement.isGrounded · HorizonCode Is Grounded · C++ HE::api::movement::isGrounded · query · entity is Self in HorizonCode velocity(entity: int) velocity: vec3 The character's full velocity vector in metres per second.\nLua/Python horizon.movement.velocity · HorizonCode Get Velocity · C++ HE::api::movement::velocity · query · entity is Self in HorizonCode forwardAmount(entity: int) amount: float How much of the character's motion points the way it is facing, from -1 (backwards) through 0 (still or sideways) to 1 (straight ahead). One half of a locomotion blend space.\nLua/Python horizon.movement.forwardAmount · HorizonCode Get Forward Amount · C++ HE::api::movement::forwardAmount · query · entity is Self in HorizonCode rightAmount(entity: int) amount: float The sideways half of the same pair: -1 strafing left, 1 strafing right.\nLua/Python horizon.movement.rightAmount · HorizonCode Get Right Amount · C++ HE::api::movement::rightAmount · query · entity is Self in HorizonCode",
+     "text": "Lua / Python: horizon.movement.<function> · C++: HE::api::movement::<function> What a character is doing right now, read from its Character Controller. Queries only; to make a character move use Locomotion. An entity without a Character Controller reads 0 and false, without a log line. All speeds are metres per second. speed is horizontal only (falling is not running), verticalSpeed is positive while rising. forwardAmount and rightAmount are the same horizontal velocity split along the character's facing, also in metres per second, not a fraction: a character strafing right at 5 m/s reads rightAmount 5. Divide by speed for −1…1, and guard against a speed of 0. Forward is the entity's −Z axis turned by its yaw. isGrounded is the same answer as physics.isGrounded and the flat horizon.isGrounded, and the one locomotion.jump checks. Function Returns Description speed(entity: int) speed: float How fast the character is moving across the ground, in metres per second, ignoring any vertical motion. The value an animator's walk/run blend wants.\nLua/Python horizon.movement.speed · HorizonCode Get Speed · C++ HE::api::movement::speed · query · entity is Self in HorizonCode verticalSpeed(entity: int) speed: float The character's vertical speed in metres per second: positive rising, negative falling. What tells a jump from a fall.\nLua/Python horizon.movement.verticalSpeed · HorizonCode Get Vertical Speed · C++ HE::api::movement::verticalSpeed · query · entity is Self in HorizonCode isGrounded(entity: int) grounded: bool Is the character standing on something? Read from the character controller, so it is the same answer physics used this tick.\nLua/Python horizon.movement.isGrounded · HorizonCode Is Grounded · C++ HE::api::movement::isGrounded · query · entity is Self in HorizonCode velocity(entity: int) velocity: vec3 The character's full velocity vector in metres per second.\nLua/Python horizon.movement.velocity · HorizonCode Get Velocity · C++ HE::api::movement::velocity · query · entity is Self in HorizonCode forwardAmount(entity: int) amount: float How fast the character moves the way it is facing, in metres per second: positive ahead, negative backwards, 0 when still or moving sideways. It is a speed and not a -1 to 1 fraction, so divide by Get Speed for that. One half of a locomotion blend space.\nLua/Python horizon.movement.forwardAmount · HorizonCode Get Forward Amount · C++ HE::api::movement::forwardAmount · query · entity is Self in HorizonCode rightAmount(entity: int) amount: float The sideways half of the same pair, also in metres per second: negative strafing left, positive strafing right.\nLua/Python horizon.movement.rightAmount · HorizonCode Get Right Amount · C++ HE::api::movement::rightAmount · query · entity is Self in HorizonCode",
      "title": "Movement"
     },
     {
@@ -37784,6 +38800,239 @@
         {
          "s": "c",
          "t": "HE::api::locomotion::<function>"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Tells a character what to do this frame. "
+        },
+        {
+         "s": "c",
+         "t": "move"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "look"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "c",
+         "t": "setMaxSpeed"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "c",
+         "t": "setOrientToMovement"
+        },
+        {
+         "s": "",
+         "t": " write the entity's "
+        },
+        {
+         "s": "b",
+         "t": "Movement"
+        },
+        {
+         "s": "",
+         "t": " component and do nothing, silently, on an entity without one; the jumps need a Character Controller and log when there is none. A Player Character gets both components automatically. The Movement system turns the request into velocity once per frame before physics steps."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "c",
+          "t": "move"
+         },
+         {
+          "s": "b",
+          "t": " is an intent for one frame"
+         },
+         {
+          "s": "",
+          "t": ": call it every frame the character should walk. Two calls in the same frame add up, and the sum is cut back to length 1, so "
+         },
+         {
+          "s": "c",
+          "t": "move(e, 1, 0, 0)"
+         },
+         {
+          "s": "",
+          "t": " twice still walks at the top speed, not twice it. Length 0.5 walks at half speed."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "The direction is read as the Movement component's "
+         },
+         {
+          "s": "i",
+          "t": "Move Direction Is"
+         },
+         {
+          "s": "",
+          "t": " setting says: "
+         },
+         {
+          "s": "i",
+          "t": "World"
+         },
+         {
+          "s": "",
+          "t": " (the default) takes it as it is, "
+         },
+         {
+          "s": "i",
+          "t": "Camera"
+         },
+         {
+          "s": "",
+          "t": " (the default for a Player Character) turns it by the main camera rig's heading, so "
+         },
+         {
+          "s": "c",
+          "t": "(0, 0, -1)"
+         },
+         {
+          "s": "",
+          "t": " is \"away from the camera\". With an input action from the WASD preset, forward is "
+         },
+         {
+          "s": "c",
+          "t": "move(e, x, 0, -y)"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "The Y component is dropped, but only after the length is cut to 1: "
+         },
+         {
+          "s": "c",
+          "t": "move(e, 0.5, 3, 0)"
+         },
+         {
+          "s": "",
+          "t": " walks at 0.16 of the top speed. Pass 0 for Y."
+         }
+        ],
+        [
+         {
+          "s": "c",
+          "t": "look"
+         },
+         {
+          "s": "",
+          "t": " adds its yaw to the character's rotation; several calls in a frame add up. The pitch is accepted and ignored, nothing reads it (build 7d49d44f). Tilt the view through the camera rig with "
+         },
+         {
+          "h": "#camera-addYawPitch",
+          "s": "l",
+          "t": "camera.addYawPitch"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "c",
+          "t": "setOrientToMovement(e, true)"
+         },
+         {
+          "s": "",
+          "t": " turns the character towards its travel direction at the component's turn rate (720°/s by default). Leave it off while "
+         },
+         {
+          "s": "c",
+          "t": "look"
+         },
+         {
+          "s": "",
+          "t": " or a camera rig owns the facing, or the two fight each other."
+         }
+        ],
+        [
+         {
+          "s": "c",
+          "t": "jump"
+         },
+         {
+          "s": "",
+          "t": " uses the Character Controller's Jump Speed, "
+         },
+         {
+          "s": "c",
+          "t": "jumpWith"
+         },
+         {
+          "s": "",
+          "t": " a speed of its own. Both return "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "",
+          "t": " only when the character left the ground; a second call in the same frame, a call in mid-air or a speed of 0 or less returns "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": ". A jump within 0.12 s of walking off a ledge is still granted."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Example: locomotion.move"
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\n-- On a Player Character. \"Move\" is an Axis2D input action (the WASD\n-- preset: W is +y), \"Sprint\" and \"Jump\" are button actions.\nfunction M.onUpdate(self, dt)\n    local e = self.entityId\n    local x, y = horizon.input.actionAxis2D(\"Move\")\n    -- Forward is -Z. With \"Move Direction Is: Camera\" (the Player Character\n    -- default) that is away from the camera.\n    horizon.locomotion.move(e, x, 0, -y)\n    horizon.locomotion.setMaxSpeed(e, horizon.input.actionDown(\"Sprint\") and 8 or 5)\nend\n\nfunction M.onInputPressed(self, name)\n    if name == \"Jump\" and horizon.locomotion.jump(self.entityId) then\n        horizon.log(\"jump\")\n    end\nend\n\nreturn M",
+         "title": "player_move.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass PlayerMove(horizon.Behavior):\n    # On a Player Character. \"Move\" is an Axis2D input action (the WASD\n    # preset: W is +y), \"Sprint\" and \"Jump\" are button actions.\n    def on_update(self, dt):\n        e = self.entity_id\n        x, y = horizon.input.actionAxis2D(\"Move\")\n        # Forward is -Z. With \"Move Direction Is: Camera\" (the Player Character\n        # default) that is away from the camera.\n        horizon.locomotion.move(e, x, 0, -y)\n        horizon.locomotion.setMaxSpeed(e, 8 if horizon.input.actionDown(\"Sprint\") else 5)\n\n    def on_input_pressed(self, name):\n        if name == \"Jump\" and horizon.locomotion.jump(self.entity_id):\n            horizon.log(\"jump\")",
+         "title": "player_move.py"
         }
        ]
       },
@@ -37826,7 +39075,7 @@
          [
           {
            "s": "",
-           "t": "Tells the character to move in a WORLD-space direction this frame; the length is the throttle, 0 to 1. It has to be called every frame it should move — the intent is cleared at the end of each one, so a missed frame reads as \"stopped\" rather than as \"keep going\".\nLua/Python "
+           "t": "Tells the character to move in a direction this frame; the length is the throttle, 0 to 1, and anything longer is cut back to 1. The direction is read as the Movement component's \"Move Direction Is\" says: World by default, the main camera's heading for a Player Character. Up and down are ignored. It has to be called every frame it should move — the intent is cleared at the end of each one, so a missed frame reads as \"stopped\" rather than as \"keep going\". Two calls in one frame add up. Does nothing, without a log line, on an entity without a Movement component. The Y component counts towards the length before it is dropped.\nLua/Python "
           },
           {
            "s": "c",
@@ -37879,7 +39128,7 @@
          [
           {
            "s": "",
-           "t": "Turns the character by these degrees this frame. Yaw turns it; pitch is consumed by a camera rig if one is coupled to it.\nLua/Python "
+           "t": "Turns the character by Yaw degrees this frame. Pitch is accepted but nothing reads it yet; tilt the view with the camera rig instead. Several calls in a frame add up.\nLua/Python "
           },
           {
            "s": "c",
@@ -37932,7 +39181,15 @@
          [
           {
            "s": "",
-           "t": "The character's top speed in metres per second at full input. Changing it is how sprinting and wading are done.\nLua/Python "
+           "t": "The character's top speed in metres per second at full input. Changing it is how sprinting and wading are done. Default 5 m/s. Not the speed of a Nav Agent, see "
+          },
+          {
+           "s": "c",
+           "t": "nav.setSpeed"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -38142,7 +39399,7 @@
      ],
      "eyebrow": "Gameplay · 6 functions",
      "id": "locomotion",
-     "text": "Lua / Python: horizon.locomotion.<function> · C++: HE::api::locomotion::<function> Function Returns Description move(entity: int, direction: vec3) — Tells the character to move in a WORLD-space direction this frame; the length is the throttle, 0 to 1. It has to be called every frame it should move — the intent is cleared at the end of each one, so a missed frame reads as \"stopped\" rather than as \"keep going\".\nLua/Python horizon.locomotion.move · HorizonCode Move · C++ HE::api::locomotion::move · action · entity is Self in HorizonCode look(entity: int, yaw: float, pitch: float) — Turns the character by these degrees this frame. Yaw turns it; pitch is consumed by a camera rig if one is coupled to it.\nLua/Python horizon.locomotion.look · HorizonCode Look · C++ HE::api::locomotion::look · action · entity is Self in HorizonCode setMaxSpeed(entity: int, speed: float) — The character's top speed in metres per second at full input. Changing it is how sprinting and wading are done.\nLua/Python horizon.locomotion.setMaxSpeed · HorizonCode Set Max Speed · C++ HE::api::locomotion::setMaxSpeed · action · entity is Self in HorizonCode setOrientToMovement(entity: int, on: bool) — Whether the character turns to face the way it walks. Switch it off while something else owns the facing — a camera rig with coupled rotation, an aim mode.\nLua/Python horizon.locomotion.setOrientToMovement · HorizonCode Set Orient To Movement · C++ HE::api::locomotion::setOrientToMovement · action · entity is Self in HorizonCode jump(entity: int) jumped: bool Throws the character upward at the Jump Speed its Character Controller was authored with. Unlike Move this is a single event, not an intent held per frame: call it once when the button goes down. It returns whether the character actually left the ground, and refuses in mid-air — which is what stops a held button from flying. So when a jump never fires, look at Is Grounded before you look at the speed. It is not quite that strict: a jump asked for within a tenth of a second of walking off a ledge is still granted, because a player who presses a frame late means to jump.\nLua/Python horizon.locomotion.jump · HorizonCode Jump · C++ HE::api::locomotion::jump · action · entity is Self in HorizonCode jumpWith(entity: int, speed: float) jumped: bool A jump at the upward speed given here in metres per second, instead of the authored one. For the jumps one number cannot cover: a charge that grows while the button is held, a low hop out of a crouch, a launch pad that throws whoever steps on it. The ground rule is the same, and a speed of zero or less is refused rather than treated as a jump.\nLua/Python horizon.locomotion.jumpWith · HorizonCode Jump With Speed · C++ HE::api::locomotion::jumpWith · action · entity is Self in HorizonCode",
+     "text": "Lua / Python: horizon.locomotion.<function> · C++: HE::api::locomotion::<function> Tells a character what to do this frame. move, look, setMaxSpeed and setOrientToMovement write the entity's Movement component and do nothing, silently, on an entity without one; the jumps need a Character Controller and log when there is none. A Player Character gets both components automatically. The Movement system turns the request into velocity once per frame before physics steps. move is an intent for one frame: call it every frame the character should walk. Two calls in the same frame add up, and the sum is cut back to length 1, so move(e, 1, 0, 0) twice still walks at the top speed, not twice it. Length 0.5 walks at half speed. The direction is read as the Movement component's Move Direction Is setting says: World (the default) takes it as it is, Camera (the default for a Player Character) turns it by the main camera rig's heading, so (0, 0, -1) is \"away from the camera\". With an input action from the WASD preset, forward is move(e, x, 0, -y). The Y component is dropped, but only after the length is cut to 1: move(e, 0.5, 3, 0) walks at 0.16 of the top speed. Pass 0 for Y. look adds its yaw to the character's rotation; several calls in a frame add up. The pitch is accepted and ignored, nothing reads it (build 7d49d44f). Tilt the view through the camera rig with camera.addYawPitch. setOrientToMovement(e, true) turns the character towards its travel direction at the component's turn rate (720°/s by default). Leave it off while look or a camera rig owns the facing, or the two fight each other. jump uses the Character Controller's Jump Speed, jumpWith a speed of its own. Both return true only when the character left the ground; a second call in the same frame, a call in mid-air or a speed of 0 or less returns false. A jump within 0.12 s of walking off a ledge is still granted. Example: locomotion.move player_move.lua local M = {}\n\n-- On a Player Character. \"Move\" is an Axis2D input action (the WASD\n-- preset: W is +y), \"Sprint\" and \"Jump\" are button actions.\nfunction M.onUpdate(self, dt)\n    local e = self.entityId\n    local x, y = horizon.input.actionAxis2D(\"Move\")\n    -- Forward is -Z. With \"Move Direction Is: Camera\" (the Player Character\n    -- default) that is away from the camera.\n    horizon.locomotion.move(e, x, 0, -y)\n    horizon.locomotion.setMaxSpeed(e, horizon.input.actionDown(\"Sprint\") and 8 or 5)\nend\n\nfunction M.onInputPressed(self, name)\n    if name == \"Jump\" and horizon.locomotion.jump(self.entityId) then\n        horizon.log(\"jump\")\n    end\nend\n\nreturn M player_move.py import horizon\n\nclass PlayerMove(horizon.Behavior):\n    # On a Player Character. \"Move\" is an Axis2D input action (the WASD\n    # preset: W is +y), \"Sprint\" and \"Jump\" are button actions.\n    def on_update(self, dt):\n        e = self.entity_id\n        x, y = horizon.input.actionAxis2D(\"Move\")\n        # Forward is -Z. With \"Move Direction Is: Camera\" (the Player Character\n        # default) that is away from the camera.\n        horizon.locomotion.move(e, x, 0, -y)\n        horizon.locomotion.setMaxSpeed(e, 8 if horizon.input.actionDown(\"Sprint\") else 5)\n\n    def on_input_pressed(self, name):\n        if name == \"Jump\" and horizon.locomotion.jump(self.entity_id):\n            horizon.log(\"jump\") Function Returns Description move(entity: int, direction: vec3) — Tells the character to move in a direction this frame; the length is the throttle, 0 to 1, and anything longer is cut back to 1. The direction is read as the Movement component's \"Move Direction Is\" says: World by default, the main camera's heading for a Player Character. Up and down are ignored. It has to be called every frame it should move — the intent is cleared at the end of each one, so a missed frame reads as \"stopped\" rather than as \"keep going\". Two calls in one frame add up. Does nothing, without a log line, on an entity without a Movement component. The Y component counts towards the length before it is dropped.\nLua/Python horizon.locomotion.move · HorizonCode Move · C++ HE::api::locomotion::move · action · entity is Self in HorizonCode look(entity: int, yaw: float, pitch: float) — Turns the character by Yaw degrees this frame. Pitch is accepted but nothing reads it yet; tilt the view with the camera rig instead. Several calls in a frame add up.\nLua/Python horizon.locomotion.look · HorizonCode Look · C++ HE::api::locomotion::look · action · entity is Self in HorizonCode setMaxSpeed(entity: int, speed: float) — The character's top speed in metres per second at full input. Changing it is how sprinting and wading are done. Default 5 m/s. Not the speed of a Nav Agent, see nav.setSpeed.\nLua/Python horizon.locomotion.setMaxSpeed · HorizonCode Set Max Speed · C++ HE::api::locomotion::setMaxSpeed · action · entity is Self in HorizonCode setOrientToMovement(entity: int, on: bool) — Whether the character turns to face the way it walks. Switch it off while something else owns the facing — a camera rig with coupled rotation, an aim mode.\nLua/Python horizon.locomotion.setOrientToMovement · HorizonCode Set Orient To Movement · C++ HE::api::locomotion::setOrientToMovement · action · entity is Self in HorizonCode jump(entity: int) jumped: bool Throws the character upward at the Jump Speed its Character Controller was authored with. Unlike Move this is a single event, not an intent held per frame: call it once when the button goes down. It returns whether the character actually left the ground, and refuses in mid-air — which is what stops a held button from flying. So when a jump never fires, look at Is Grounded before you look at the speed. It is not quite that strict: a jump asked for within a tenth of a second of walking off a ledge is still granted, because a player who presses a frame late means to jump.\nLua/Python horizon.locomotion.jump · HorizonCode Jump · C++ HE::api::locomotion::jump · action · entity is Self in HorizonCode jumpWith(entity: int, speed: float) jumped: bool A jump at the upward speed given here in metres per second, instead of the authored one. For the jumps one number cannot cover: a charge that grows while the button is held, a low hop out of a crouch, a launch pad that throws whoever steps on it. The ground rule is the same, and a speed of zero or less is refused rather than treated as a jump.\nLua/Python horizon.locomotion.jumpWith · HorizonCode Jump With Speed · C++ HE::api::locomotion::jumpWith · action · entity is Self in HorizonCode",
      "title": "Locomotion"
     },
     {
@@ -38165,6 +39422,142 @@
         {
          "s": "c",
          "t": "HE::api::player::<function>"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Which player controller drives which character. The references here are "
+        },
+        {
+         "s": "b",
+         "t": "HorizonCode object references"
+        },
+        {
+         "s": "",
+         "t": ", not entity ids: a controller is an instance of a "
+        },
+        {
+         "s": "i",
+         "t": "PlayerController"
+        },
+        {
+         "s": "",
+         "t": " class, a character an instance of a "
+        },
+        {
+         "s": "i",
+         "t": "PlayerCharacter"
+        },
+        {
+         "s": "",
+         "t": " class. In Lua and Python they are plain integers, 0 meaning \"none\". To get from one to an entity use "
+        },
+        {
+         "h": "#entity-owned",
+         "s": "l",
+         "t": "horizon.entity.owned(ref)"
+        },
+        {
+         "s": "",
+         "t": ", the other way "
+        },
+        {
+         "h": "#entity-instance",
+         "s": "l",
+         "t": "horizon.entity.instance(e)"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "c",
+          "t": "controller()"
+         },
+         {
+          "s": "",
+          "t": " is the session's first controller, 0 in a project without a PlayerController class; "
+         },
+         {
+          "s": "c",
+          "t": "character()"
+         },
+         {
+          "s": "",
+          "t": " is what it possesses. Both are 0 outside a play session."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "A controller drives one character and a character has one controller: "
+         },
+         {
+          "s": "c",
+          "t": "possess"
+         },
+         {
+          "s": "",
+          "t": " releases the controller's previous character and takes the new one away from any other controller. "
+         },
+         {
+          "s": "c",
+          "t": "possess(0, …)"
+         },
+         {
+          "s": "",
+          "t": " does nothing."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "The table only records numbers and checks none of them, so a wrong reference is stored as it is. Pass what "
+         },
+         {
+          "s": "c",
+          "t": "controller()"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "entity.instance"
+         },
+         {
+          "s": "",
+          "t": " return."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A Lua or Python script is not a controller, so possession does not decide which script hears input: input actions reach every script (see "
+        },
+        {
+         "h": "#callbacks",
+         "s": "l",
+         "t": "Callbacks"
+        },
+        {
+         "s": "",
+         "t": "). What possession changes is which HorizonCode character graph receives the controller's input events, and which character the camera rig follows."
         }
        ]
       },
@@ -38207,7 +39600,15 @@
          [
           {
            "s": "",
-           "t": "Hands a character to a player controller: from here on the controller's input drives it, and the camera rig follows it. Possessing a second character releases the first.\nLua/Python "
+           "t": "Hands a character to a player controller: from here on the controller's input drives it, and the camera rig follows it. Possessing a second character releases the first. In Lua/Python both references are integers; "
+          },
+          {
+           "s": "c",
+           "t": "possess(0, …)"
+          },
+          {
+           "s": "",
+           "t": " does nothing.\nLua/Python "
           },
           {
            "s": "c",
@@ -38383,7 +39784,15 @@
          [
           {
            "s": "",
-           "t": "The local player's controller. The starting point in a single-player game, where there is exactly one.\nLua/Python "
+           "t": "The local player's controller. The starting point in a single-player game, where there is exactly one. 0 in a project without a PlayerController class. A reference, not an entity: "
+          },
+          {
+           "s": "c",
+           "t": "entity.owned"
+          },
+          {
+           "s": "",
+           "t": " gives the entity.\nLua/Python "
           },
           {
            "s": "c",
@@ -38427,7 +39836,15 @@
          [
           {
            "s": "",
-           "t": "The character the local player is driving right now. Shorthand for Possessed of Controller.\nLua/Python "
+           "t": "The character the local player is driving right now. Shorthand for Possessed of Controller. A reference, not an entity: "
+          },
+          {
+           "s": "c",
+           "t": "horizon.entity.owned(horizon.player.character())"
+          },
+          {
+           "s": "",
+           "t": " is the character's entity.\nLua/Python "
           },
           {
            "s": "c",
@@ -38460,7 +39877,7 @@
      ],
      "eyebrow": "Gameplay · 6 functions",
      "id": "player",
-     "text": "Lua / Python: horizon.player.<function> · C++: HE::api::player::<function> Function Returns Description possess(controller: ref, character: ref) — Hands a character to a player controller: from here on the controller's input drives it, and the camera rig follows it. Possessing a second character releases the first.\nLua/Python horizon.player.possess · HorizonCode Possess · C++ HE::api::player::possess · action unpossess(controller: ref) — Releases whatever the controller was driving. The character stays in the world, just without anyone at the controls.\nLua/Python horizon.player.unpossess · HorizonCode Un Possess · C++ HE::api::player::unpossess · action possessed(controller: ref) character: ref The character this controller is currently driving, or an empty reference.\nLua/Python horizon.player.possessed · HorizonCode Get Possessed Character · C++ HE::api::player::possessed · query controllerOf(character: ref) controller: ref Which controller is driving this character — the inverse of Possessed.\nLua/Python horizon.player.controllerOf · HorizonCode Get Controller · C++ HE::api::player::controllerOf · query controller() controller: ref The local player's controller. The starting point in a single-player game, where there is exactly one.\nLua/Python horizon.player.controller · HorizonCode Get Player Controller · C++ HE::api::player::controller · query character() character: ref The character the local player is driving right now. Shorthand for Possessed of Controller.\nLua/Python horizon.player.character · HorizonCode Get Player Character · C++ HE::api::player::character · query",
+     "text": "Lua / Python: horizon.player.<function> · C++: HE::api::player::<function> Which player controller drives which character. The references here are HorizonCode object references, not entity ids: a controller is an instance of a PlayerController class, a character an instance of a PlayerCharacter class. In Lua and Python they are plain integers, 0 meaning \"none\". To get from one to an entity use horizon.entity.owned(ref), the other way horizon.entity.instance(e). controller() is the session's first controller, 0 in a project without a PlayerController class; character() is what it possesses. Both are 0 outside a play session. A controller drives one character and a character has one controller: possess releases the controller's previous character and takes the new one away from any other controller. possess(0, …) does nothing. The table only records numbers and checks none of them, so a wrong reference is stored as it is. Pass what controller() and entity.instance return. A Lua or Python script is not a controller, so possession does not decide which script hears input: input actions reach every script (see Callbacks). What possession changes is which HorizonCode character graph receives the controller's input events, and which character the camera rig follows. Function Returns Description possess(controller: ref, character: ref) — Hands a character to a player controller: from here on the controller's input drives it, and the camera rig follows it. Possessing a second character releases the first. In Lua/Python both references are integers; possess(0, …) does nothing.\nLua/Python horizon.player.possess · HorizonCode Possess · C++ HE::api::player::possess · action unpossess(controller: ref) — Releases whatever the controller was driving. The character stays in the world, just without anyone at the controls.\nLua/Python horizon.player.unpossess · HorizonCode Un Possess · C++ HE::api::player::unpossess · action possessed(controller: ref) character: ref The character this controller is currently driving, or an empty reference.\nLua/Python horizon.player.possessed · HorizonCode Get Possessed Character · C++ HE::api::player::possessed · query controllerOf(character: ref) controller: ref Which controller is driving this character — the inverse of Possessed.\nLua/Python horizon.player.controllerOf · HorizonCode Get Controller · C++ HE::api::player::controllerOf · query controller() controller: ref The local player's controller. The starting point in a single-player game, where there is exactly one. 0 in a project without a PlayerController class. A reference, not an entity: entity.owned gives the entity.\nLua/Python horizon.player.controller · HorizonCode Get Player Controller · C++ HE::api::player::controller · query character() character: ref The character the local player is driving right now. Shorthand for Possessed of Controller. A reference, not an entity: horizon.entity.owned(horizon.player.character()) is the character's entity.\nLua/Python horizon.player.character · HorizonCode Get Player Character · C++ HE::api::player::character · query",
      "title": "Player"
     },
     {
@@ -38483,6 +39900,472 @@
         {
          "s": "c",
          "t": "HE::api::input::<function>"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Polling the keyboard, mouse, gamepad and the project's input actions. The engine takes one snapshot per frame, so every query gives the same answer for the rest of that frame. Only a running game or play mode fills it; in the editor outside play the values are stale. For one-shot reactions prefer the action callbacks ("
+        },
+        {
+         "h": "#callbacks",
+         "s": "l",
+         "t": "onInputPressed"
+        },
+        {
+         "s": "",
+         "t": " and friends) over polling."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Key names"
+         },
+         {
+          "s": "",
+          "t": " are SDL scancode names and case-sensitive: "
+         },
+         {
+          "s": "c",
+          "t": "\"W\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"Space\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"Left Shift\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"Return\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"Escape\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"Up\""
+         },
+         {
+          "s": "",
+          "t": ". "
+         },
+         {
+          "s": "c",
+          "t": "keyDown(\"w\")"
+         },
+         {
+          "s": "",
+          "t": " is always "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Mouse buttons"
+         },
+         {
+          "s": "",
+          "t": ": 0 left, 1 right, 2 middle. "
+         },
+         {
+          "s": "c",
+          "t": "mousePosition"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "mouseDelta"
+         },
+         {
+          "s": "",
+          "t": " return two numbers in Lua and a tuple "
+         },
+         {
+          "s": "c",
+          "t": "(x, y)"
+         },
+         {
+          "s": "",
+          "t": " in Python."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Gamepad names"
+         },
+         {
+          "s": "",
+          "t": " are SDL's, not case-sensitive: buttons "
+         },
+         {
+          "s": "c",
+          "t": "\"a\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"b\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"x\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"y\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"leftshoulder\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"dpup\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"start\""
+         },
+         {
+          "s": "",
+          "t": "; axes "
+         },
+         {
+          "s": "c",
+          "t": "\"leftx\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"lefty\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"rightx\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"righty\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"lefttrigger\""
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "\"righttrigger\""
+         },
+         {
+          "s": "",
+          "t": ". "
+         },
+         {
+          "s": "c",
+          "t": "\"south\""
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "\"cross\""
+         },
+         {
+          "s": "",
+          "t": " are not names and read "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": ". Sticks go −1…1 with Y "
+         },
+         {
+          "s": "b",
+          "t": "positive downwards"
+         },
+         {
+          "s": "",
+          "t": ", triggers 0…1, and the deadzone is already applied."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Actions"
+         },
+         {
+          "s": "",
+          "t": " are looked up by the InputAction asset's name, case-sensitive; an unknown name reads "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": " / 0. "
+         },
+         {
+          "s": "c",
+          "t": "onUpdate"
+         },
+         {
+          "s": "",
+          "t": " runs before the actions are updated, so a poll from there sees the "
+         },
+         {
+          "s": "i",
+          "t": "previous"
+         },
+         {
+          "s": "",
+          "t": " frame's state; "
+         },
+         {
+          "s": "c",
+          "t": "actionPressed"
+         },
+         {
+          "s": "",
+          "t": " is still true for exactly one frame per press. The callbacks always carry the current frame. While the game is paused or the input mode is UI only, an action reads as released unless its asset has "
+         },
+         {
+          "s": "i",
+          "t": "Fires while the game is paused"
+         },
+         {
+          "s": "",
+          "t": " ticked."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Input modes"
+        },
+        {
+         "s": "",
+         "t": " decide who receives input. The default is "
+        },
+        {
+         "s": "c",
+         "t": "GameAndUI"
+        },
+        {
+         "s": "",
+         "t": ": both do, and a click on a widget is masked out of the game. "
+        },
+        {
+         "s": "c",
+         "t": "GameOnly"
+        },
+        {
+         "s": "",
+         "t": " leaves the UI drawn but deaf. "
+        },
+        {
+         "s": "c",
+         "t": "UIOnly"
+        },
+        {
+         "s": "",
+         "t": " gives the UI everything: the game then reads no keys, no mouse buttons and no gamepad (it reports disconnected), only "
+        },
+        {
+         "s": "c",
+         "t": "mousePosition"
+        },
+        {
+         "s": "",
+         "t": " stays true. The mode does not show or hide the cursor; do that with the flat "
+        },
+        {
+         "h": "#flat-showCursor",
+         "s": "l",
+         "t": "horizon.showCursor"
+        },
+        {
+         "s": "",
+         "t": " / "
+        },
+        {
+         "s": "c",
+         "t": "hideCursor"
+        },
+        {
+         "s": "",
+         "t": ". Play mode starts in "
+        },
+        {
+         "s": "c",
+         "t": "GameAndUI"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Known issue: "
+          },
+          {
+           "s": "c",
+           "t": "scrollDelta"
+          },
+          {
+           "s": "b",
+           "t": " is always 0"
+          },
+          {
+           "s": "",
+           "t": " in the running game and in play mode (build 7d49d44f). The per-frame snapshot is filled without the mouse wheel. Read the wheel through an input action instead: bind the Mouse Wheel source to an Axis action and poll it with "
+          },
+          {
+           "s": "c",
+           "t": "actionAxis"
+          },
+          {
+           "s": "",
+           "t": " or handle "
+          },
+          {
+           "s": "c",
+           "t": "onInputAxis"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "warning"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Example: input.setModeGameAndUI"
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\n-- \"Inventory\" is a button action. While the inventory is open the cursor is\n-- visible and clicks go to the UI; the game still reads the keys.\nfunction M.onInputPressed(self, name)\n    if name ~= \"Inventory\" then return end\n    self.open = not self.open\n    if self.open then\n        horizon.input.setModeGameAndUI()\n        horizon.showCursor()\n    else\n        horizon.input.setModeGameOnly()\n        horizon.hideCursor()\n    end\nend\n\nreturn M",
+         "title": "inventory.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass Inventory(horizon.Behavior):\n    open = False\n\n    # \"Inventory\" is a button action. While the inventory is open the cursor\n    # is visible and clicks go to the UI; the game still reads the keys.\n    def on_input_pressed(self, name):\n        if name != \"Inventory\":\n            return\n        self.open = not self.open\n        if self.open:\n            horizon.input.setModeGameAndUI()\n            horizon.showCursor()\n        else:\n            horizon.input.setModeGameOnly()\n            horizon.hideCursor()",
+         "title": "inventory.py"
         }
        ]
       },
@@ -38525,7 +40408,39 @@
          [
           {
            "s": "",
-           "t": "Is this key held down right now? The name is SDL's spelling (\"W\", \"Space\", \"Escape\"). True for as long as it is held, so use it for movement and put one-shot actions behind an Input Action instead.\nLua/Python "
+           "t": "Is this key held down right now? The name is SDL's spelling (\"W\", \"Space\", \"Escape\"). True for as long as it is held, so use it for movement and put one-shot actions behind an Input Action instead. Case-sensitive: "
+          },
+          {
+           "s": "c",
+           "t": "\"w\""
+          },
+          {
+           "s": "",
+           "t": " is always "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": ". Two-word keys read "
+          },
+          {
+           "s": "c",
+           "t": "\"Left Shift\""
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "\"Left Ctrl\""
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -38569,7 +40484,7 @@
          [
           {
            "s": "",
-           "t": "Is this mouse button held? 0 left, 1 middle, 2 right.\nLua/Python "
+           "t": "Is this mouse button held? 0 left, 1 right, 2 middle.\nLua/Python "
           },
           {
            "s": "c",
@@ -38701,7 +40616,23 @@
          [
           {
            "s": "",
-           "t": "How far the wheel turned this frame; positive is away from the user.\nLua/Python "
+           "t": "How far the wheel turned this frame; positive is away from the user. "
+          },
+          {
+           "s": "b",
+           "t": "Always 0"
+          },
+          {
+           "s": "",
+           "t": " in the running game and in play mode (build 7d49d44f): the wheel is not put into the snapshot. Bind Mouse Wheel to an Axis action and use "
+          },
+          {
+           "s": "c",
+           "t": "actionAxis"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -38789,7 +40720,31 @@
          [
           {
            "s": "",
-           "t": "Is this gamepad button held? SDL's names, so \"a\", \"b\", \"dpup\" — not \"south\" and not \"cross\".\nLua/Python "
+           "t": "Is this gamepad button held? SDL's names, so \"a\", \"b\", \"dpup\" — not \"south\" and not \"cross\". Not case-sensitive; "
+          },
+          {
+           "s": "c",
+           "t": "\"south\""
+          },
+          {
+           "s": "",
+           "t": " and "
+          },
+          {
+           "s": "c",
+           "t": "\"cross\""
+          },
+          {
+           "s": "",
+           "t": " are not names and read "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -38833,7 +40788,15 @@
          [
           {
            "s": "",
-           "t": "A gamepad axis from -1 to 1, deadzone already applied. Names are SDL's: \"leftx\", \"lefty\", \"righttrigger\".\nLua/Python "
+           "t": "A gamepad axis from -1 to 1, deadzone already applied. Names are SDL's: \"leftx\", \"lefty\", \"righttrigger\". Y axes are positive "
+          },
+          {
+           "s": "b",
+           "t": "downwards"
+          },
+          {
+           "s": "",
+           "t": ", as in SDL.\nLua/Python "
           },
           {
            "s": "c",
@@ -38921,7 +40884,23 @@
          [
           {
            "s": "",
-           "t": "Whether an input action went down THIS frame — true for one frame per press, the same moment Input.<Action>.Pressed fires.\nLua/Python "
+           "t": "Whether an input action went down THIS frame — true for one frame per press, the same moment Input.<Action>.Pressed fires. Polled from "
+          },
+          {
+           "s": "c",
+           "t": "onUpdate"
+          },
+          {
+           "s": "",
+           "t": " this is last frame's press (still exactly one frame per press); "
+          },
+          {
+           "s": "c",
+           "t": "onInputPressed"
+          },
+          {
+           "s": "",
+           "t": " is current.\nLua/Python "
           },
           {
            "s": "c",
@@ -39141,7 +41120,7 @@
          [
           {
            "s": "",
-           "t": "Both receive input — the cursor is visible, the UI is clickable, and the game still reads keys. Inventory screens and build modes.\nLua/Python "
+           "t": "Both receive input — the cursor is visible, the UI is clickable, and the game still reads keys. Inventory screens and build modes. The default, and what play mode starts in.\nLua/Python "
           },
           {
            "s": "c",
@@ -39185,7 +41164,15 @@
          [
           {
            "s": "",
-           "t": "Only the UI receives input; the game sees nothing. What a pause menu wants, so a click behind it cannot fire a weapon.\nLua/Python "
+           "t": "Only the UI receives input; the game sees nothing. What a pause menu wants, so a click behind it cannot fire a weapon. Also reports the gamepad as disconnected to the game. Actions with "
+          },
+          {
+           "s": "i",
+           "t": "Fires while the game is paused"
+          },
+          {
+           "s": "",
+           "t": " still work, so the key that opened the menu can close it.\nLua/Python "
           },
           {
            "s": "c",
@@ -39262,7 +41249,7 @@
      ],
      "eyebrow": "Gameplay · 17 functions",
      "id": "input",
-     "text": "Lua / Python: horizon.input.<function> · C++: HE::api::input::<function> Function Returns Description keyDown(key: string) down: bool Is this key held down right now? The name is SDL's spelling (\"W\", \"Space\", \"Escape\"). True for as long as it is held, so use it for movement and put one-shot actions behind an Input Action instead.\nLua/Python horizon.input.keyDown · HorizonCode Key Down · C++ HE::api::input::keyDown · query mouseButton(button: int) down: bool Is this mouse button held? 0 left, 1 middle, 2 right.\nLua/Python horizon.input.mouseButton · HorizonCode Mouse Button · C++ HE::api::input::mouseButton · query mousePosition() position: vec2 The pointer's position in window pixels, measured from the top-left.\nLua/Python horizon.input.mousePosition · HorizonCode Mouse Position · C++ HE::api::input::mousePosition · query mouseDelta() delta: vec2 How far the pointer moved since the previous frame, in pixels. This is what mouse look reads — not the position, which stops changing once the cursor is captured.\nLua/Python horizon.input.mouseDelta · HorizonCode Mouse Delta · C++ HE::api::input::mouseDelta · query scrollDelta() scroll: float How far the wheel turned this frame; positive is away from the user.\nLua/Python horizon.input.scrollDelta · HorizonCode Scroll Delta · C++ HE::api::input::scrollDelta · query gamepadConnected() connected: bool Is a gamepad plugged in? Worth checking before showing button prompts.\nLua/Python horizon.input.gamepadConnected · HorizonCode Gamepad Connected · C++ HE::api::input::gamepadConnected · query gamepadButton(button: string) down: bool Is this gamepad button held? SDL's names, so \"a\", \"b\", \"dpup\" — not \"south\" and not \"cross\".\nLua/Python horizon.input.gamepadButton · HorizonCode Gamepad Button · C++ HE::api::input::gamepadButton · query gamepadAxis(axis: string) value: float A gamepad axis from -1 to 1, deadzone already applied. Names are SDL's: \"leftx\", \"lefty\", \"righttrigger\".\nLua/Python horizon.input.gamepadAxis · HorizonCode Gamepad Axis · C++ HE::api::input::gamepadAxis · query actionDown(action: string) down: bool Whether an input action (by the name of its InputAction asset, \"Jump\") is held this frame. The polling twin of the Input.<Action>.Pressed event: ask this inside Tick rather than keeping a flag yourself. Reads as released while the game is paused or the UI has the input.\nLua/Python horizon.input.actionDown · HorizonCode Input Action Down · C++ HE::api::input::actionDown · query actionPressed(action: string) pressed: bool Whether an input action went down THIS frame — true for one frame per press, the same moment Input.<Action>.Pressed fires.\nLua/Python horizon.input.actionPressed · HorizonCode Input Action Pressed · C++ HE::api::input::actionPressed · query actionReleased(action: string) released: bool Whether an input action went up THIS frame — true for one frame per release, the same moment Input.<Action>.Released fires.\nLua/Python horizon.input.actionReleased · HorizonCode Input Action Released · C++ HE::api::input::actionReleased · query actionAxis(action: string) value: float The value of a one-dimensional axis action this frame, as the mapping context resolved it (-1 to 1 for keys and sticks, a displacement for the mouse). Zero while silenced by a pause or the UI.\nLua/Python horizon.input.actionAxis · HorizonCode Input Action Axis · C++ HE::api::input::actionAxis · query actionAxis2D(action: string) value: vec2 The value of a two-dimensional axis action this frame, as a Vec2 — a stick, WASD, the mouse. Zero while silenced by a pause or the UI.\nLua/Python horizon.input.actionAxis2D · HorizonCode Input Action Axis 2D · C++ HE::api::input::actionAxis2D · query setModeGameOnly() — The game receives input and the UI does not: the cursor is captured and hidden, mouse look works, buttons cannot be clicked. First-person play.\nLua/Python horizon.input.setModeGameOnly · HorizonCode Set Input Mode: Game Only · C++ HE::api::input::setModeGameOnly · action setModeGameAndUI() — Both receive input — the cursor is visible, the UI is clickable, and the game still reads keys. Inventory screens and build modes.\nLua/Python horizon.input.setModeGameAndUI · HorizonCode Set Input Mode: Game and UI · C++ HE::api::input::setModeGameAndUI · action setModeUIOnly() — Only the UI receives input; the game sees nothing. What a pause menu wants, so a click behind it cannot fire a weapon.\nLua/Python horizon.input.setModeUIOnly · HorizonCode Set Input Mode: UI Only · C++ HE::api::input::setModeUIOnly · action mode() mode: string Which input mode is active: \"GameOnly\", \"GameAndUI\" or \"UIOnly\".\nLua/Python horizon.input.mode · HorizonCode Input Mode · C++ HE::api::input::modeName · query",
+     "text": "Lua / Python: horizon.input.<function> · C++: HE::api::input::<function> Polling the keyboard, mouse, gamepad and the project's input actions. The engine takes one snapshot per frame, so every query gives the same answer for the rest of that frame. Only a running game or play mode fills it; in the editor outside play the values are stale. For one-shot reactions prefer the action callbacks (onInputPressed and friends) over polling. Key names are SDL scancode names and case-sensitive: \"W\", \"Space\", \"Left Shift\", \"Return\", \"Escape\", \"Up\". keyDown(\"w\") is always false. Mouse buttons: 0 left, 1 right, 2 middle. mousePosition and mouseDelta return two numbers in Lua and a tuple (x, y) in Python. Gamepad names are SDL's, not case-sensitive: buttons \"a\", \"b\", \"x\", \"y\", \"leftshoulder\", \"dpup\", \"start\"; axes \"leftx\", \"lefty\", \"rightx\", \"righty\", \"lefttrigger\", \"righttrigger\". \"south\" and \"cross\" are not names and read false. Sticks go −1…1 with Y positive downwards, triggers 0…1, and the deadzone is already applied. Actions are looked up by the InputAction asset's name, case-sensitive; an unknown name reads false / 0. onUpdate runs before the actions are updated, so a poll from there sees the previous frame's state; actionPressed is still true for exactly one frame per press. The callbacks always carry the current frame. While the game is paused or the input mode is UI only, an action reads as released unless its asset has Fires while the game is paused ticked. Input modes decide who receives input. The default is GameAndUI: both do, and a click on a widget is masked out of the game. GameOnly leaves the UI drawn but deaf. UIOnly gives the UI everything: the game then reads no keys, no mouse buttons and no gamepad (it reports disconnected), only mousePosition stays true. The mode does not show or hide the cursor; do that with the flat horizon.showCursor / hideCursor. Play mode starts in GameAndUI. Known issue: scrollDelta is always 0 in the running game and in play mode (build 7d49d44f). The per-frame snapshot is filled without the mouse wheel. Read the wheel through an input action instead: bind the Mouse Wheel source to an Axis action and poll it with actionAxis or handle onInputAxis. Example: input.setModeGameAndUI inventory.lua local M = {}\n\n-- \"Inventory\" is a button action. While the inventory is open the cursor is\n-- visible and clicks go to the UI; the game still reads the keys.\nfunction M.onInputPressed(self, name)\n    if name ~= \"Inventory\" then return end\n    self.open = not self.open\n    if self.open then\n        horizon.input.setModeGameAndUI()\n        horizon.showCursor()\n    else\n        horizon.input.setModeGameOnly()\n        horizon.hideCursor()\n    end\nend\n\nreturn M inventory.py import horizon\n\nclass Inventory(horizon.Behavior):\n    open = False\n\n    # \"Inventory\" is a button action. While the inventory is open the cursor\n    # is visible and clicks go to the UI; the game still reads the keys.\n    def on_input_pressed(self, name):\n        if name != \"Inventory\":\n            return\n        self.open = not self.open\n        if self.open:\n            horizon.input.setModeGameAndUI()\n            horizon.showCursor()\n        else:\n            horizon.input.setModeGameOnly()\n            horizon.hideCursor() Function Returns Description keyDown(key: string) down: bool Is this key held down right now? The name is SDL's spelling (\"W\", \"Space\", \"Escape\"). True for as long as it is held, so use it for movement and put one-shot actions behind an Input Action instead. Case-sensitive: \"w\" is always false. Two-word keys read \"Left Shift\", \"Left Ctrl\".\nLua/Python horizon.input.keyDown · HorizonCode Key Down · C++ HE::api::input::keyDown · query mouseButton(button: int) down: bool Is this mouse button held? 0 left, 1 right, 2 middle.\nLua/Python horizon.input.mouseButton · HorizonCode Mouse Button · C++ HE::api::input::mouseButton · query mousePosition() position: vec2 The pointer's position in window pixels, measured from the top-left.\nLua/Python horizon.input.mousePosition · HorizonCode Mouse Position · C++ HE::api::input::mousePosition · query mouseDelta() delta: vec2 How far the pointer moved since the previous frame, in pixels. This is what mouse look reads — not the position, which stops changing once the cursor is captured.\nLua/Python horizon.input.mouseDelta · HorizonCode Mouse Delta · C++ HE::api::input::mouseDelta · query scrollDelta() scroll: float How far the wheel turned this frame; positive is away from the user. Always 0 in the running game and in play mode (build 7d49d44f): the wheel is not put into the snapshot. Bind Mouse Wheel to an Axis action and use actionAxis.\nLua/Python horizon.input.scrollDelta · HorizonCode Scroll Delta · C++ HE::api::input::scrollDelta · query gamepadConnected() connected: bool Is a gamepad plugged in? Worth checking before showing button prompts.\nLua/Python horizon.input.gamepadConnected · HorizonCode Gamepad Connected · C++ HE::api::input::gamepadConnected · query gamepadButton(button: string) down: bool Is this gamepad button held? SDL's names, so \"a\", \"b\", \"dpup\" — not \"south\" and not \"cross\". Not case-sensitive; \"south\" and \"cross\" are not names and read false.\nLua/Python horizon.input.gamepadButton · HorizonCode Gamepad Button · C++ HE::api::input::gamepadButton · query gamepadAxis(axis: string) value: float A gamepad axis from -1 to 1, deadzone already applied. Names are SDL's: \"leftx\", \"lefty\", \"righttrigger\". Y axes are positive downwards, as in SDL.\nLua/Python horizon.input.gamepadAxis · HorizonCode Gamepad Axis · C++ HE::api::input::gamepadAxis · query actionDown(action: string) down: bool Whether an input action (by the name of its InputAction asset, \"Jump\") is held this frame. The polling twin of the Input.<Action>.Pressed event: ask this inside Tick rather than keeping a flag yourself. Reads as released while the game is paused or the UI has the input.\nLua/Python horizon.input.actionDown · HorizonCode Input Action Down · C++ HE::api::input::actionDown · query actionPressed(action: string) pressed: bool Whether an input action went down THIS frame — true for one frame per press, the same moment Input.<Action>.Pressed fires. Polled from onUpdate this is last frame's press (still exactly one frame per press); onInputPressed is current.\nLua/Python horizon.input.actionPressed · HorizonCode Input Action Pressed · C++ HE::api::input::actionPressed · query actionReleased(action: string) released: bool Whether an input action went up THIS frame — true for one frame per release, the same moment Input.<Action>.Released fires.\nLua/Python horizon.input.actionReleased · HorizonCode Input Action Released · C++ HE::api::input::actionReleased · query actionAxis(action: string) value: float The value of a one-dimensional axis action this frame, as the mapping context resolved it (-1 to 1 for keys and sticks, a displacement for the mouse). Zero while silenced by a pause or the UI.\nLua/Python horizon.input.actionAxis · HorizonCode Input Action Axis · C++ HE::api::input::actionAxis · query actionAxis2D(action: string) value: vec2 The value of a two-dimensional axis action this frame, as a Vec2 — a stick, WASD, the mouse. Zero while silenced by a pause or the UI.\nLua/Python horizon.input.actionAxis2D · HorizonCode Input Action Axis 2D · C++ HE::api::input::actionAxis2D · query setModeGameOnly() — The game receives input and the UI does not: the cursor is captured and hidden, mouse look works, buttons cannot be clicked. First-person play.\nLua/Python horizon.input.setModeGameOnly · HorizonCode Set Input Mode: Game Only · C++ HE::api::input::setModeGameOnly · action setModeGameAndUI() — Both receive input — the cursor is visible, the UI is clickable, and the game still reads keys. Inventory screens and build modes. The default, and what play mode starts in.\nLua/Python horizon.input.setModeGameAndUI · HorizonCode Set Input Mode: Game and UI · C++ HE::api::input::setModeGameAndUI · action setModeUIOnly() — Only the UI receives input; the game sees nothing. What a pause menu wants, so a click behind it cannot fire a weapon. Also reports the gamepad as disconnected to the game. Actions with Fires while the game is paused still work, so the key that opened the menu can close it.\nLua/Python horizon.input.setModeUIOnly · HorizonCode Set Input Mode: UI Only · C++ HE::api::input::setModeUIOnly · action mode() mode: string Which input mode is active: \"GameOnly\", \"GameAndUI\" or \"UIOnly\".\nLua/Python horizon.input.mode · HorizonCode Input Mode · C++ HE::api::input::modeName · query",
      "title": "Input"
     },
     {

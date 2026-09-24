@@ -348,21 +348,27 @@ namespace
 	{ "movement.velocity",
 	  "The character's full velocity vector in metres per second." },
 	{ "movement.forwardAmount",
-	  "How much of the character's motion points the way it is facing, from -1 "
-	  "(backwards) through 0 (still or sideways) to 1 (straight ahead). One half "
+	  "How fast the character moves the way it is facing, in metres per second: "
+	  "positive ahead, negative backwards, 0 when still or moving sideways. It is a "
+	  "speed and not a -1 to 1 fraction, so divide by Get Speed for that. One half "
 	  "of a locomotion blend space." },
 	{ "movement.rightAmount",
-	  "The sideways half of the same pair: -1 strafing left, 1 strafing right." },
+	  "The sideways half of the same pair, also in metres per second: negative "
+	  "strafing left, positive strafing right." },
 
 	// ── Locomotion ───────────────────────────────────────────────────────────
 	{ "locomotion.move",
-	  "Tells the character to move in a WORLD-space direction this frame; the "
-	  "length is the throttle, 0 to 1. It has to be called every frame it should "
-	  "move — the intent is cleared at the end of each one, so a missed frame "
-	  "reads as \"stopped\" rather than as \"keep going\"." },
+	  "Tells the character to move in a direction this frame; the length is the "
+	  "throttle, 0 to 1, and anything longer is cut back to 1. The direction is "
+	  "read as the Movement component's \"Move Direction Is\" says: World by "
+	  "default, the main camera's heading for a Player Character. Up and down are "
+	  "ignored. It has to "
+	  "be called every frame it should move — the intent is cleared at the end of "
+	  "each one, so a missed frame reads as \"stopped\" rather than as \"keep "
+	  "going\". Two calls in one frame add up." },
 	{ "locomotion.look",
-	  "Turns the character by these degrees this frame. Yaw turns it; pitch is "
-	  "consumed by a camera rig if one is coupled to it." },
+	  "Turns the character by Yaw degrees this frame. Pitch is accepted but "
+	  "nothing reads it yet; tilt the view with the camera rig instead." },
 	{ "locomotion.setMaxSpeed",
 	  "The character's top speed in metres per second at full input. Changing it "
 	  "is how sprinting and wading are done." },
@@ -395,7 +401,7 @@ namespace
 	  "is worth branching on, because a false means the agent will not move at "
 	  "all: no nav mesh has been baked, the destination is off the walkable "
 	  "surface, or the two ends sit on parts of the level that do not connect. A "
-	  "refused call also leaves the agent walking wherever it already was. For a "
+	  "refused call also stops an agent that was already walking somewhere. For a "
 	  "target that keeps moving, simply call it again — each call replans from "
 	  "where the agent stands." },
 	{ "nav.stop",
@@ -1078,7 +1084,7 @@ namespace
 	  "\"Space\", \"Escape\"). True for as long as it is held, so use it for "
 	  "movement and put one-shot actions behind an Input Action instead." },
 	{ "input.mouseButton",
-	  "Is this mouse button held? 0 left, 1 middle, 2 right." },
+	  "Is this mouse button held? 0 left, 1 right, 2 middle." },
 	{ "input.mousePosition",
 	  "The pointer's position in window pixels, measured from the top-left." },
 	{ "input.mouseDelta",

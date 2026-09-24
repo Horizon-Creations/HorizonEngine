@@ -4,20 +4,20 @@ Erzeugt von `scripts/script_api_docs/coverage.py` aus `scripts/script_api_docs/r
 
 Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Referenz `scripting-reference.html` oder flacher Zwilling in `scripting-api.html#api`), **named** = Id wörtlich auf einer anderen Doku-Seite, **catalog** = nur der Name im HorizonCode-Knotenkatalog, **missing** = nirgends. **hand** = es gibt Handinhalt aus `overlay/` (Gruppen-Einleitung oder zur Id eine Notiz, ein Beispiel, ein Recht, eine Skript-Signatur): das, was der Generator nicht schreiben kann, und die Zahl, die die Gruppen-Schritte bewegen.
 
-**Gesamt: 582 Registry-Ids in 42 Gruppen** — ref 582, named 0, catalog 0, missing 0; hand 180.
+**Gesamt: 582 Registry-Ids in 42 Gruppen** — ref 582, named 0, catalog 0, missing 0; hand 254.
 
 | Gruppe | Kategorie | Ids | Lua/Py `horizon.<gruppe>.*` | ref | named | catalog | missing | hand |
 |---|---|---:|:---:|---:|---:|---:|---:|---:|
 | `env` | Environment | 116 | ja | 116 | 0 | 0 | 0 | 0 |
 | `net` | Multiplayer | 44 | ja | 44 | 0 | 0 | 0 | 3 |
-| `physics` | Physics | 33 | ja | 33 | 0 | 0 | 0 | 0 |
+| `physics` | Physics | 33 | ja | 33 | 0 | 0 | 0 | 33 |
 | `math` | Math | 31 | ja | 31 | 0 | 0 | 0 | 31 |
 | `widget` | Widget | 28 | ja | 28 | 0 | 0 | 0 | 0 |
 | `camera` | Camera | 26 | ja | 26 | 0 | 0 | 0 | 0 |
 | `app` | App | 24 | ja | 24 | 0 | 0 | 0 | 1 |
 | `audio` | Audio | 18 | ja | 18 | 0 | 0 | 0 | 0 |
 | `entity` | Entity | 18 | ja | 18 | 0 | 0 | 0 | 18 |
-| `input` | Input | 17 | ja | 17 | 0 | 0 | 0 | 0 |
+| `input` | Input | 17 | ja | 17 | 0 | 0 | 0 | 17 |
 | `save` | Save | 17 | ja | 17 | 0 | 0 | 0 | 17 |
 | `anticheat` | AntiCheat | 15 | ja | 15 | 0 | 0 | 0 | 0 |
 | `fs` | File | 13 | ja | 13 | 0 | 0 | 0 | 13 |
@@ -32,10 +32,10 @@ Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Refe
 | `json` | JSON | 8 | ja | 8 | 0 | 0 | 0 | 8 |
 | `transform` | Transform | 8 | **nein** | 8 | 0 | 0 | 0 | 8 |
 | `db` | Database | 7 | ja | 7 | 0 | 0 | 0 | 1 |
-| `locomotion` | Locomotion | 6 | ja | 6 | 0 | 0 | 0 | 0 |
-| `movement` | Movement | 6 | ja | 6 | 0 | 0 | 0 | 0 |
-| `nav` | Navigation | 6 | ja | 6 | 0 | 0 | 0 | 0 |
-| `player` | Player | 6 | ja | 6 | 0 | 0 | 0 | 0 |
+| `locomotion` | Locomotion | 6 | ja | 6 | 0 | 0 | 0 | 6 |
+| `movement` | Movement | 6 | ja | 6 | 0 | 0 | 0 | 6 |
+| `nav` | Navigation | 6 | ja | 6 | 0 | 0 | 0 | 6 |
+| `player` | Player | 6 | ja | 6 | 0 | 0 | 0 | 6 |
 | `theme` | Theme | 6 | ja | 6 | 0 | 0 | 0 | 0 |
 | `dialog` | Dialog | 5 | ja | 5 | 0 | 0 | 0 | 0 |
 | `random` | Random | 5 | ja | 5 | 0 | 0 | 0 | 5 |
@@ -185,39 +185,39 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `physics.raycast(origin: Vec3, direction: Vec3, maxDistance: Float)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-raycast |
-| `physics.setVelocity(entity=self: Int, velocity: Vec3)` | exec | ref | scripting-reference.html#physics-setVelocity |
-| `physics.isGrounded(entity=self: Int)` → grounded: Bool | pure | ref | scripting-reference.html#physics-isGrounded |
-| `physics.sphereCast(origin: Vec3, direction: Vec3, radius: Float, maxDistance: Float)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-sphereCast |
-| `physics.overlapSphere(center: Vec3, radius: Float)` → entities: Int[] | pure | ref | scripting-reference.html#physics-overlapSphere |
-| `physics.raycastLayers(origin: Vec3, direction: Vec3, maxDistance: Float, layerMask: Int)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-raycastLayers |
-| `physics.sphereCastLayers(origin: Vec3, direction: Vec3, radius: Float, maxDistance: Float, layerMask: Int)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-sphereCastLayers |
-| `physics.overlapSphereLayers(center: Vec3, radius: Float, layerMask: Int)` → entities: Int[] | pure | ref | scripting-reference.html#physics-overlapSphereLayers |
-| `physics.boxCast(origin: Vec3, halfExtents: Vec3, rotation: Vec3, direction: Vec3, maxDistance: Float, layerMask: Int)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-boxCast |
-| `physics.capsuleCast(origin: Vec3, radius: Float, height: Float, rotation: Vec3, direction: Vec3, maxDistance: Float, layerMask: Int)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-capsuleCast |
-| `physics.overlapBox(center: Vec3, halfExtents: Vec3, rotation: Vec3, layerMask: Int)` → entities: Int[] | pure | ref | scripting-reference.html#physics-overlapBox |
-| `physics.overlapCapsule(center: Vec3, radius: Float, height: Float, rotation: Vec3, layerMask: Int)` → entities: Int[] | pure | ref | scripting-reference.html#physics-overlapCapsule |
-| `physics.raycastAll(origin: Vec3, direction: Vec3, maxDistance: Float, layerMask: Int)` → entities: Int[], points: Vec3[], normals: Vec3[], distances: Float[], layers: Int[] | pure | ref | scripting-reference.html#physics-raycastAll |
-| `physics.addForce(entity=self: Int, force: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-addForce |
-| `physics.addImpulse(entity=self: Int, impulse: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-addImpulse |
-| `physics.addTorque(entity=self: Int, torque: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-addTorque |
-| `physics.addForceAtPosition(entity=self: Int, force: Vec3, position: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-addForceAtPosition |
-| `physics.addImpulseAtPosition(entity=self: Int, impulse: Vec3, position: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-addImpulseAtPosition |
-| `physics.getVelocity(entity=self: Int)` → velocity: Vec3 | pure | ref | scripting-reference.html#physics-getVelocity |
-| `physics.setAngularVelocity(entity=self: Int, angularVelocity: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-setAngularVelocity |
-| `physics.getAngularVelocity(entity=self: Int)` → angularVelocity: Vec3 | pure | ref | scripting-reference.html#physics-getAngularVelocity |
-| `physics.setGravity(gravity: Vec3)` | exec | ref | scripting-reference.html#physics-setGravity |
-| `physics.getGravity()` → gravity: Vec3 | pure | ref | scripting-reference.html#physics-getGravity |
-| `physics.setPosition(entity=self: Int, position: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-setPosition |
-| `physics.setPositionAndReset(entity=self: Int, position: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-setPositionAndReset |
-| `physics.hasPhysics(entity=self: Int)` → has: Bool | pure | ref | scripting-reference.html#physics-hasPhysics |
-| `physics.addJoint(entityA: Int, entityB: Int, type: Int, anchorA: Vec3, anchorB: Vec3, axis: Vec3, minLimit: Float, maxLimit: Float)` → ok: Bool | exec | ref | scripting-reference.html#physics-addJoint |
-| `physics.removeJoint(entity=self: Int)` → ok: Bool | exec | ref | scripting-reference.html#physics-removeJoint |
-| `physics.hasJoint(entity=self: Int)` → has: Bool | pure | ref | scripting-reference.html#physics-hasJoint |
-| `physics.setJointMotor(entity=self: Int, targetSpeed: Float, maxForce: Float)` → ok: Bool | exec | ref | scripting-reference.html#physics-setJointMotor |
-| `physics.setJointBreakForce(entity=self: Int, breakForce: Float)` → ok: Bool | exec | ref | scripting-reference.html#physics-setJointBreakForce |
-| `physics.setJointCollideConnected(entity=self: Int, collide: Bool)` → ok: Bool | exec | ref | scripting-reference.html#physics-setJointCollideConnected |
-| `physics.pollJointBroken()` → entitiesA: Int[], entitiesB: Int[] | exec | ref | scripting-reference.html#physics-pollJointBroken |
+| `physics.raycast(origin: Vec3, direction: Vec3, maxDistance: Float)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-raycast · hand |
+| `physics.setVelocity(entity=self: Int, velocity: Vec3)` | exec | ref | scripting-reference.html#physics-setVelocity · hand |
+| `physics.isGrounded(entity=self: Int)` → grounded: Bool | pure | ref | scripting-reference.html#physics-isGrounded · hand |
+| `physics.sphereCast(origin: Vec3, direction: Vec3, radius: Float, maxDistance: Float)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-sphereCast · hand |
+| `physics.overlapSphere(center: Vec3, radius: Float)` → entities: Int[] | pure | ref | scripting-reference.html#physics-overlapSphere · hand |
+| `physics.raycastLayers(origin: Vec3, direction: Vec3, maxDistance: Float, layerMask: Int)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-raycastLayers · hand |
+| `physics.sphereCastLayers(origin: Vec3, direction: Vec3, radius: Float, maxDistance: Float, layerMask: Int)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-sphereCastLayers · hand |
+| `physics.overlapSphereLayers(center: Vec3, radius: Float, layerMask: Int)` → entities: Int[] | pure | ref | scripting-reference.html#physics-overlapSphereLayers · hand |
+| `physics.boxCast(origin: Vec3, halfExtents: Vec3, rotation: Vec3, direction: Vec3, maxDistance: Float, layerMask: Int)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-boxCast · hand |
+| `physics.capsuleCast(origin: Vec3, radius: Float, height: Float, rotation: Vec3, direction: Vec3, maxDistance: Float, layerMask: Int)` → hit: Bool, entity: Int, point: Vec3, normal: Vec3, distance: Float, layer: Int | pure | ref | scripting-reference.html#physics-capsuleCast · hand |
+| `physics.overlapBox(center: Vec3, halfExtents: Vec3, rotation: Vec3, layerMask: Int)` → entities: Int[] | pure | ref | scripting-reference.html#physics-overlapBox · hand |
+| `physics.overlapCapsule(center: Vec3, radius: Float, height: Float, rotation: Vec3, layerMask: Int)` → entities: Int[] | pure | ref | scripting-reference.html#physics-overlapCapsule · hand |
+| `physics.raycastAll(origin: Vec3, direction: Vec3, maxDistance: Float, layerMask: Int)` → entities: Int[], points: Vec3[], normals: Vec3[], distances: Float[], layers: Int[] | pure | ref | scripting-reference.html#physics-raycastAll · hand |
+| `physics.addForce(entity=self: Int, force: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-addForce · hand |
+| `physics.addImpulse(entity=self: Int, impulse: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-addImpulse · hand |
+| `physics.addTorque(entity=self: Int, torque: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-addTorque · hand |
+| `physics.addForceAtPosition(entity=self: Int, force: Vec3, position: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-addForceAtPosition · hand |
+| `physics.addImpulseAtPosition(entity=self: Int, impulse: Vec3, position: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-addImpulseAtPosition · hand |
+| `physics.getVelocity(entity=self: Int)` → velocity: Vec3 | pure | ref | scripting-reference.html#physics-getVelocity · hand |
+| `physics.setAngularVelocity(entity=self: Int, angularVelocity: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-setAngularVelocity · hand |
+| `physics.getAngularVelocity(entity=self: Int)` → angularVelocity: Vec3 | pure | ref | scripting-reference.html#physics-getAngularVelocity · hand |
+| `physics.setGravity(gravity: Vec3)` | exec | ref | scripting-reference.html#physics-setGravity · hand |
+| `physics.getGravity()` → gravity: Vec3 | pure | ref | scripting-reference.html#physics-getGravity · hand |
+| `physics.setPosition(entity=self: Int, position: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-setPosition · hand |
+| `physics.setPositionAndReset(entity=self: Int, position: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#physics-setPositionAndReset · hand |
+| `physics.hasPhysics(entity=self: Int)` → has: Bool | pure | ref | scripting-reference.html#physics-hasPhysics · hand |
+| `physics.addJoint(entityA: Int, entityB: Int, type: Int, anchorA: Vec3, anchorB: Vec3, axis: Vec3, minLimit: Float, maxLimit: Float)` → ok: Bool | exec | ref | scripting-reference.html#physics-addJoint · hand |
+| `physics.removeJoint(entity=self: Int)` → ok: Bool | exec | ref | scripting-reference.html#physics-removeJoint · hand |
+| `physics.hasJoint(entity=self: Int)` → has: Bool | pure | ref | scripting-reference.html#physics-hasJoint · hand |
+| `physics.setJointMotor(entity=self: Int, targetSpeed: Float, maxForce: Float)` → ok: Bool | exec | ref | scripting-reference.html#physics-setJointMotor · hand |
+| `physics.setJointBreakForce(entity=self: Int, breakForce: Float)` → ok: Bool | exec | ref | scripting-reference.html#physics-setJointBreakForce · hand |
+| `physics.setJointCollideConnected(entity=self: Int, collide: Bool)` → ok: Bool | exec | ref | scripting-reference.html#physics-setJointCollideConnected · hand |
+| `physics.pollJointBroken()` → entitiesA: Int[], entitiesB: Int[] | exec | ref | scripting-reference.html#physics-pollJointBroken · hand |
 
 ### `math` — Math (31)
 
@@ -398,23 +398,23 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `input.keyDown(key: String)` → down: Bool | pure | ref | scripting-reference.html#input-keyDown |
-| `input.mouseButton(button: Int)` → down: Bool | pure | ref | scripting-reference.html#input-mouseButton |
-| `input.mousePosition()` → position: Vec2 | pure | ref | scripting-reference.html#input-mousePosition |
-| `input.mouseDelta()` → delta: Vec2 | pure | ref | scripting-reference.html#input-mouseDelta |
-| `input.scrollDelta()` → scroll: Float | pure | ref | scripting-reference.html#input-scrollDelta |
-| `input.gamepadConnected()` → connected: Bool | pure | ref | scripting-reference.html#input-gamepadConnected |
-| `input.gamepadButton(button: String)` → down: Bool | pure | ref | scripting-reference.html#input-gamepadButton |
-| `input.gamepadAxis(axis: String)` → value: Float | pure | ref | scripting-reference.html#input-gamepadAxis |
-| `input.actionDown(action: String)` → down: Bool | pure | ref | scripting-reference.html#input-actionDown |
-| `input.actionPressed(action: String)` → pressed: Bool | pure | ref | scripting-reference.html#input-actionPressed |
-| `input.actionReleased(action: String)` → released: Bool | pure | ref | scripting-reference.html#input-actionReleased |
-| `input.actionAxis(action: String)` → value: Float | pure | ref | scripting-reference.html#input-actionAxis |
-| `input.actionAxis2D(action: String)` → value: Vec2 | pure | ref | scripting-reference.html#input-actionAxis2D |
-| `input.setModeGameOnly()` | exec | ref | scripting-reference.html#input-setModeGameOnly |
-| `input.setModeGameAndUI()` | exec | ref | scripting-reference.html#input-setModeGameAndUI |
-| `input.setModeUIOnly()` | exec | ref | scripting-reference.html#input-setModeUIOnly |
-| `input.mode()` → mode: String | pure | ref | scripting-reference.html#input-mode |
+| `input.keyDown(key: String)` → down: Bool | pure | ref | scripting-reference.html#input-keyDown · hand |
+| `input.mouseButton(button: Int)` → down: Bool | pure | ref | scripting-reference.html#input-mouseButton · hand |
+| `input.mousePosition()` → position: Vec2 | pure | ref | scripting-reference.html#input-mousePosition · hand |
+| `input.mouseDelta()` → delta: Vec2 | pure | ref | scripting-reference.html#input-mouseDelta · hand |
+| `input.scrollDelta()` → scroll: Float | pure | ref | scripting-reference.html#input-scrollDelta · hand |
+| `input.gamepadConnected()` → connected: Bool | pure | ref | scripting-reference.html#input-gamepadConnected · hand |
+| `input.gamepadButton(button: String)` → down: Bool | pure | ref | scripting-reference.html#input-gamepadButton · hand |
+| `input.gamepadAxis(axis: String)` → value: Float | pure | ref | scripting-reference.html#input-gamepadAxis · hand |
+| `input.actionDown(action: String)` → down: Bool | pure | ref | scripting-reference.html#input-actionDown · hand |
+| `input.actionPressed(action: String)` → pressed: Bool | pure | ref | scripting-reference.html#input-actionPressed · hand |
+| `input.actionReleased(action: String)` → released: Bool | pure | ref | scripting-reference.html#input-actionReleased · hand |
+| `input.actionAxis(action: String)` → value: Float | pure | ref | scripting-reference.html#input-actionAxis · hand |
+| `input.actionAxis2D(action: String)` → value: Vec2 | pure | ref | scripting-reference.html#input-actionAxis2D · hand |
+| `input.setModeGameOnly()` | exec | ref | scripting-reference.html#input-setModeGameOnly · hand |
+| `input.setModeGameAndUI()` | exec | ref | scripting-reference.html#input-setModeGameAndUI · hand |
+| `input.setModeUIOnly()` | exec | ref | scripting-reference.html#input-setModeUIOnly · hand |
+| `input.mode()` → mode: String | pure | ref | scripting-reference.html#input-mode · hand |
 
 ### `save` — Save (17)
 
@@ -644,45 +644,45 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `locomotion.move(entity=self: Int, direction: Vec3)` | exec | ref | scripting-reference.html#locomotion-move |
-| `locomotion.look(entity=self: Int, yaw: Float, pitch: Float)` | exec | ref | scripting-reference.html#locomotion-look |
-| `locomotion.setMaxSpeed(entity=self: Int, speed: Float)` | exec | ref | scripting-reference.html#locomotion-setMaxSpeed |
-| `locomotion.setOrientToMovement(entity=self: Int, on: Bool)` | exec | ref | scripting-reference.html#locomotion-setOrientToMovement |
-| `locomotion.jump(entity=self: Int)` → jumped: Bool | exec | ref | scripting-reference.html#locomotion-jump |
-| `locomotion.jumpWith(entity=self: Int, speed: Float)` → jumped: Bool | exec | ref | scripting-reference.html#locomotion-jumpWith |
+| `locomotion.move(entity=self: Int, direction: Vec3)` | exec | ref | scripting-reference.html#locomotion-move · hand |
+| `locomotion.look(entity=self: Int, yaw: Float, pitch: Float)` | exec | ref | scripting-reference.html#locomotion-look · hand |
+| `locomotion.setMaxSpeed(entity=self: Int, speed: Float)` | exec | ref | scripting-reference.html#locomotion-setMaxSpeed · hand |
+| `locomotion.setOrientToMovement(entity=self: Int, on: Bool)` | exec | ref | scripting-reference.html#locomotion-setOrientToMovement · hand |
+| `locomotion.jump(entity=self: Int)` → jumped: Bool | exec | ref | scripting-reference.html#locomotion-jump · hand |
+| `locomotion.jumpWith(entity=self: Int, speed: Float)` → jumped: Bool | exec | ref | scripting-reference.html#locomotion-jumpWith · hand |
 
 ### `movement` — Movement (6)
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `movement.speed(entity=self: Int)` → speed: Float | pure | ref | scripting-reference.html#movement-speed |
-| `movement.verticalSpeed(entity=self: Int)` → speed: Float | pure | ref | scripting-reference.html#movement-verticalSpeed |
-| `movement.isGrounded(entity=self: Int)` → grounded: Bool | pure | ref | scripting-reference.html#movement-isGrounded |
-| `movement.velocity(entity=self: Int)` → velocity: Vec3 | pure | ref | scripting-reference.html#movement-velocity |
-| `movement.forwardAmount(entity=self: Int)` → amount: Float | pure | ref | scripting-reference.html#movement-forwardAmount |
-| `movement.rightAmount(entity=self: Int)` → amount: Float | pure | ref | scripting-reference.html#movement-rightAmount |
+| `movement.speed(entity=self: Int)` → speed: Float | pure | ref | scripting-reference.html#movement-speed · hand |
+| `movement.verticalSpeed(entity=self: Int)` → speed: Float | pure | ref | scripting-reference.html#movement-verticalSpeed · hand |
+| `movement.isGrounded(entity=self: Int)` → grounded: Bool | pure | ref | scripting-reference.html#movement-isGrounded · hand |
+| `movement.velocity(entity=self: Int)` → velocity: Vec3 | pure | ref | scripting-reference.html#movement-velocity · hand |
+| `movement.forwardAmount(entity=self: Int)` → amount: Float | pure | ref | scripting-reference.html#movement-forwardAmount · hand |
+| `movement.rightAmount(entity=self: Int)` → amount: Float | pure | ref | scripting-reference.html#movement-rightAmount · hand |
 
 ### `nav` — Navigation (6)
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `nav.moveTo(entity=self: Int, x: Float, y: Float, z: Float)` → started: Bool | exec | ref | scripting-reference.html#nav-moveTo |
-| `nav.stop(entity=self: Int)` | exec | ref | scripting-reference.html#nav-stop |
-| `nav.isMoving(entity=self: Int)` → moving: Bool | pure | ref | scripting-reference.html#nav-isMoving |
-| `nav.hasPath(entity=self: Int)` → hasPath: Bool | pure | ref | scripting-reference.html#nav-hasPath |
-| `nav.remainingDistance(entity=self: Int)` → distance: Float | pure | ref | scripting-reference.html#nav-remainingDistance |
-| `nav.setSpeed(entity=self: Int, speed: Float)` | exec | ref | scripting-reference.html#nav-setSpeed |
+| `nav.moveTo(entity=self: Int, x: Float, y: Float, z: Float)` → started: Bool | exec | ref | scripting-reference.html#nav-moveTo · hand |
+| `nav.stop(entity=self: Int)` | exec | ref | scripting-reference.html#nav-stop · hand |
+| `nav.isMoving(entity=self: Int)` → moving: Bool | pure | ref | scripting-reference.html#nav-isMoving · hand |
+| `nav.hasPath(entity=self: Int)` → hasPath: Bool | pure | ref | scripting-reference.html#nav-hasPath · hand |
+| `nav.remainingDistance(entity=self: Int)` → distance: Float | pure | ref | scripting-reference.html#nav-remainingDistance · hand |
+| `nav.setSpeed(entity=self: Int, speed: Float)` | exec | ref | scripting-reference.html#nav-setSpeed · hand |
 
 ### `player` — Player (6)
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `player.possess(controller: Ref, character: Ref)` | exec | ref | scripting-reference.html#player-possess |
-| `player.unpossess(controller: Ref)` | exec | ref | scripting-reference.html#player-unpossess |
-| `player.possessed(controller: Ref)` → character: Ref | pure | ref | scripting-reference.html#player-possessed |
-| `player.controllerOf(character: Ref)` → controller: Ref | pure | ref | scripting-reference.html#player-controllerOf |
-| `player.controller()` → controller: Ref | pure | ref | scripting-reference.html#player-controller |
-| `player.character()` → character: Ref | pure | ref | scripting-reference.html#player-character |
+| `player.possess(controller: Ref, character: Ref)` | exec | ref | scripting-reference.html#player-possess · hand |
+| `player.unpossess(controller: Ref)` | exec | ref | scripting-reference.html#player-unpossess · hand |
+| `player.possessed(controller: Ref)` → character: Ref | pure | ref | scripting-reference.html#player-possessed · hand |
+| `player.controllerOf(character: Ref)` → controller: Ref | pure | ref | scripting-reference.html#player-controllerOf · hand |
+| `player.controller()` → controller: Ref | pure | ref | scripting-reference.html#player-controller · hand |
+| `player.character()` → character: Ref | pure | ref | scripting-reference.html#player-character · hand |
 
 ### `theme` — Theme (6)
 

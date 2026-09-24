@@ -362,3 +362,64 @@ Gegensatz zu `copy`), `fs.remove` löscht keine Ordner, `fs.watch` pollt nur im 
 `entity.self/selfObject` sind aus Lua/Python immer 0; Scene-Requests laufen am Anfang des
 nächsten Frames vor den Skripten (`GameApplication.cpp:2881` vor `:2906`), im Editor-Play
 wirken nur Zonen, `load`/`activate` loggen nur.
+
+## Nachtrag Schritt 5 (24.09.2026): Physics, Navigation, Movement, Locomotion, Player, Input
+
+Handinhalt für 74 Ids: sechs Gruppen-Einleitungen (`overlay/groups/physics|movement|locomotion|nav|player|input.html`),
+Notes an 33 Ids (davon sechs `script_returns` für die Treffer-Rückgabe der Casts) und fünf
+Beispiele in Lua und Python (`player_move`, `push_crate`, `kill_plane`, `patrol`, `inventory`).
+Grundlage war eine Wegwerf-Probe gegen `libHorizonScene` des Builds 7d49d44f mit echter
+`PhysicsWorld` (Boden, dynamische Kiste, Charakter mit Character Controller + Movement,
+Kind-Entity, Scharnierpaar), gebackenem NavMesh mit Agent, zwischen den Messetappen
+getickt wie `SceneSystems` (Movement → Navigation → Physik), dazu Input- und
+Player-Zustand so gepusht, wie die Apps es tun. Rund 110 Aufrufe aus Lua, die Kernfälle
+wiederholt aus Python, beide Sprachen gleich. Die fünf Beispiele liefen wortgleich zu
+`notes.json` in beiden Sprachen mit ausgelösten Callbacks (onStart, onUpdate,
+onInputPressed); geprüft wurden die Wirkungen (Geschwindigkeit 8/5/0 m/s und Sprung,
+Kiste fliegt bei Yaw 0 nach −Z und bei Yaw 90 nach −X, Rücksetzen von y = −25, drei
+Patrouillenrunden, Moduswechsel). `coverage.py`: 582/582 **ref**, **hand** 180 → 254.
+
+Sechs Beschreibungen in `HcNodeDocs.cpp` waren nachweislich falsch und sind an der Quelle
+korrigiert (Editor-Tooltip und Referenz); `registry.json` neu gedumpt, Diff genau diese sechs
+`doc`-Felder:
+
+- `input.mouseButton`: 1 ist **rechts**, 2 die Mitte (`EngineApi.cpp:5181`, Test
+  `test_engine_api.cpp:1314`), die Beschreibung sagte umgekehrt.
+- `movement.forwardAmount` / `rightAmount`: Meter pro Sekunde, nicht −1…1 (Probe: seitwärts
+  mit 5 m/s ergibt `rightAmount` 5; `test_movement.cpp:141` erwartet genau das).
+- `locomotion.move`: nicht immer Weltraum, sondern „Move Direction Is" des Movement-Components
+  (World, für einen PlayerCharacter Camera, `EntityHost.cpp:385`); Länge auf 1 gekappt, Y
+  verworfen, zwei Aufrufe pro Frame addieren sich.
+- `locomotion.look`: Pitch „vom Kamera-Rig verbraucht" stimmt nicht, `lookPitch` liest niemand
+  (`MovementSystem.cpp` löscht ihn, kein Leser im Code).
+- `nav.moveTo`: eine Ablehnung **stoppt** einen laufenden Agenten (Probe: isMoving/hasPath
+  false), die Beschreibung sagte, er laufe weiter. Der Header sagte es richtig.
+
+Engine-Befunde, dokumentiert (Callout bzw. Note) und im Hive gemeldet, **nicht behoben**:
+
+- **`input.scrollDelta` ist im Spiel und im Play-Modus immer 0.** `pushSdlSnapshot`
+  (`EngineApi.cpp:5184`) setzt das Rad fest auf 0, und sonst ruft niemand `setMouse` mit
+  einem Radwert; `Input::mouse().wheel` gäbe es. Umweg in der Doku: Mouse Wheel an eine
+  Axis-Action binden.
+- **`locomotion.look` verwirft den Pitch** (siehe oben), dokumentiert mit Verweis auf
+  `camera.addYawPitch`.
+- Die Array-Rows (`physics.overlap*`, `raycastAll`, `pollJointBroken`) liefern aus Lua/Python
+  weiter Skalar-Nullen (Befund aus Schritt 2, erneut gemessen). Neu: `pollJointBroken` leert
+  die Queue dabei trotzdem, ein Skript nimmt die Ereignisse also einem HorizonCode-Graphen weg.
+
+Verhalten, gemessen und in Einleitung/Notes: `raycast` & Casts geben aus Lua/Python zehn Werte
+zurück, das flache `horizon.raycast` eine Tabelle ohne `hit`/`layer` oder `nil`; ein Strahl,
+der in einem Collider startet, trifft ihn mit Abstand 0 (vom eigenen Charakter aus also den
+Charakter selbst); bei Sphere/Box/Capsule-Cast ist `point` die Formmitte beim Stopp, nicht der
+Kontakt (`PhysicsWorld.cpp:2927`), und sie ignorieren Trigger; Layer-Maske 0 sieht nichts, −1
+alles; `setPosition`/`…AndReset` nehmen **lokale** Positionen (Kind unter (10,0,0): (0,5,0) →
+Welt (10,5,0)), `…AtPosition` Weltpunkte; Kräfte scheitern auf kinematischen Körpern, also auch
+auf Charakteren; `setVelocity` auf einem Charakter mit Movement wird im nächsten Frame
+überschrieben; `setGravity` gilt nicht für Charaktere; nur der Joint-Besitzer meldet
+`hasJoint`, Typ außerhalb 0–4 wird Fixed; `nav.moveTo` verweigert einen Punkt 4 m über dem
+Mesh, `remainingDistance` ist nach der Ankunft −1, nie 0, `setSpeed(−2)` wird 0 bei weiter
+`isMoving` = true; Player-Refs sind HorizonCode-Objektreferenzen (Ganzzahlen), die Tabelle
+prüft nichts; Tastennamen sind SDL-Scancode-Namen und groß/klein-sensitiv („w" nie wahr,
+„Left Shift"), Gamepad-Namen nicht („A" = „a", „south" gibt es nicht); Actions per Polling
+aus `onUpdate` sind einen Frame alt (`GameApplication.cpp:2906` vor `:2984`, Editor
+`:3240` vor `:3290`).
