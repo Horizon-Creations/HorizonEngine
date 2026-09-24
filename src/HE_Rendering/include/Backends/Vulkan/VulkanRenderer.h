@@ -635,6 +635,10 @@ private:
 	VkPipelineLayout      m_skyPipelineLayout  = VK_NULL_HANDLE;
 	VkPipeline            m_skyPipeline        = VK_NULL_HANDLE;
 	VkPipeline            m_skyPipelineHDR     = VK_NULL_HANDLE;
+	// True when the sky pipelines run the GL sky compiled to SPIR-V at startup
+	// (HorizonRendering/SkyShaderSource.h; the UBO then holds a whole
+	// HE::SkyFrameParams); false on the reduced sky.frag.spv fallback (SkyUBOData).
+	bool                  m_skyFullModel       = false;
 
 	// Moon texture (uploaded once via SetMoonTexture).
 	VkImage        m_moonImage   = VK_NULL_HANDLE;

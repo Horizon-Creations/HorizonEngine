@@ -24,6 +24,10 @@
 #include <HorizonRendering/SkyNoise3D.h>      // CPU sky/cloud noise volume bake
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
+#include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
+#if defined(HE_HAVE_SHADERC)
+#include "ShaderCompiler.h"                   // he::shaderc::compileHlslPinned (sky pass)
+#endif
 #include <HorizonRendering/LightPacking.h>    // GPU light window + shadow-mask lights
 #include <HorizonRendering/ClipSpace.h>       // GL depth (-1..1) → D3D depth (0..1)
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
@@ -62,7 +66,11 @@ using Microsoft::WRL::ComPtr;
 // so the compile sites further down read exactly as they did before.
 using namespace HE::hlsl;
 
-// ─── Sky background pass HLSL ───────────────────────────────────────────────
+// ─── Sky background pass HLSL (FALLBACK) ────────────────────────────────────
+// The sky pass normally runs the GL sky cross-compiled through he::shaderc
+// (HorizonRendering/SkyShaderSource.h, see createSkyPipeline). This older,
+// reduced sky — gradient atmosphere, 2D aurora, no nebula/cirrus/god rays — is
+// only what a build without the cross-compiler, or a failed compile, draws.
 // PSSky: reconstruct world ray from inv(viewProj), evaluate sky + effects.
 // Prepend kSkyFuncHLSL when compiling so skyColor() is in scope.
 static const char* kSkyPSHLSL = R"HLSL(
@@ -1456,6 +1464,9 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView> noiseSRV;
     ComPtr<ID3D11SamplerState>       skyNoiseSampler;
     bool skyReady = false;
+    // True when skyPS is the GL sky cross-compiled through he::shaderc (skyCB is
+    // then a whole HE::SkyFrameParams); false on the kSkyPSHLSL fallback (SkyCB).
+    bool skyFullModel = false;
     // ── Debug line pipeline ───────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>  debugVS;
     ComPtr<ID3D11PixelShader>   debugPS;
@@ -4365,13 +4376,47 @@ struct D3D11RendererImpl
             return true;
         };
         ComPtr<ID3DBlob> vsB, psB;
-        const std::string skyPS_src = std::string(kSkyFuncHLSL) + kSkyPSHLSL;
-        if (!compile(kSkyVSHLSL, std::strlen(kSkyVSHLSL), "VSSky", "vs_5_0", vsB)) return false;
-        if (!compile(skyPS_src.c_str(), skyPS_src.size(), "PSSky", "ps_5_0", psB)) return false;
+        // The GL sky (HorizonRendering/SkyShaderSource.h) cross-compiled to HLSL:
+        // atmosphere, three-colour nebula, 3D aurora, phased moon, cirrus, 3D
+        // volumetric clouds, god rays — the same text GL runs. Its loops exit on
+        // the cloud transmittance, so FXC is asked for real loops instead of
+        // unrolling them (test_sky_shader.cpp compiles with the same flags).
+        // Without the cross-compiler, or if either compile fails, the older
+        // kSkyPSHLSL below takes over.
+        skyFullModel = false;
+#if defined(HE_HAVE_SHADERC)
+        {
+            using he::shaderc::Stage;
+            using namespace HE::glsl;
+            const he::shaderc::Result hlsl = he::shaderc::compileHlslPinned(
+                BuildSkyFragmentGLSL450(), Stage::Fragment, {
+                    { Stage::Fragment, 0, kSkySlotEnv.binding,   kSkySlotEnv.hlslReg   },
+                    { Stage::Fragment, 0, kSkySlotMoon.binding,  kSkySlotMoon.hlslReg  },
+                    { Stage::Fragment, 0, kSkySlotNoise.binding, kSkySlotNoise.hlslReg },
+                });
+            const UINT savedFlags = flags;
+            flags |= D3DCOMPILE_PREFER_FLOW_CONTROL;
+            skyFullModel = hlsl.ok
+                && compile(kSkyVSCrossHLSL, std::strlen(kSkyVSCrossHLSL), "VSSkyCross", "vs_5_0", vsB)
+                && compile(hlsl.source.c_str(), hlsl.source.size(), "main", "ps_5_0", psB);
+            flags = savedFlags;
+            if (!skyFullModel)
+                HE_LOG_WARN(RHI, "%s", "D3D11 sky: cross-compiled GL sky unavailable, "
+                                       "falling back to the reduced kSkyPSHLSL");
+        }
+#endif
+        if (!skyFullModel)
+        {
+            vsB.Reset(); psB.Reset();
+            const std::string skyPS_src = std::string(kSkyFuncHLSL) + kSkyPSHLSL;
+            if (!compile(kSkyVSHLSL, std::strlen(kSkyVSHLSL), "VSSky", "vs_5_0", vsB)) return false;
+            if (!compile(skyPS_src.c_str(), skyPS_src.size(), "PSSky", "ps_5_0", psB)) return false;
+        }
         device->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &skyVS);
         device->CreatePixelShader (psB->GetBufferPointer(), psB->GetBufferSize(), nullptr, &skyPS);
         D3D11_BUFFER_DESC bd{};
-        bd.ByteWidth = (sizeof(SkyCB) + 15u) & ~15u;
+        // Sized for the larger of the two layouts, so either shader fits.
+        bd.ByteWidth = (static_cast<UINT>(std::max(sizeof(HE::SkyFrameParams), sizeof(SkyCB))) + 15u) & ~15u;
         bd.Usage = D3D11_USAGE_DYNAMIC;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -4468,11 +4513,13 @@ struct D3D11RendererImpl
         // Translate the environment through the SHARED sky-constants builder
         // instead of hand-assigning fields (which is how D3D11 previously ended up
         // with +cos where GL/Metal have -cos, drifting the clouds 180° the wrong
-        // way). SkyCB is a small subset of SkyFrameParams, so read the named
-        // fields out — NOT a memcpy: the layouts differ.
+        // way). The cross-compiled GL sky's cbuffer IS SkyFrameParams (one
+        // memcpy); the kSkyPSHLSL fallback's SkyCB is a small subset of it, so
+        // there the named fields are read out — the layouts differ.
         HE::SkyFrameInputs skyIn;
         skyIn.invViewProj    = invVP;
         skyIn.sunDir         = sunDir;
+        skyIn.cameraPos      = m_renderWorld.camera.position; // 3D clouds + aurora are world-anchored
         skyIn.time           = m_wallTime;
         skyIn.hasMoonTexture = moonSRV ? true : false; // ComPtr → contextual bool
         const HE::SkyFrameParams sp = HE::BuildSkyFrameParams(env, skyIn);
@@ -4486,7 +4533,11 @@ struct D3D11RendererImpl
         cb.hasMoonTex  = sp.sunDir.w > 0.5f ? 1 : 0;   // sunDir.w is the 0/1 has-moon flag
         D3D11_MAPPED_SUBRESOURCE m{};
         if (SUCCEEDED(ctx->Map(skyCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
-        { std::memcpy(m.pData, &cb, sizeof(cb)); ctx->Unmap(skyCB.Get(), 0); }
+        {
+            if (skyFullModel) std::memcpy(m.pData, &sp, sizeof(sp));
+            else              std::memcpy(m.pData, &cb, sizeof(cb));
+            ctx->Unmap(skyCB.Get(), 0);
+        }
         ctx->IASetInputLayout(nullptr);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx->VSSetShader(skyVS.Get(), nullptr, 0);

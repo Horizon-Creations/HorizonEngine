@@ -76,6 +76,9 @@ add_executable(he_tests
     test_camera_bookmarks.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
+    # The GL sky as the one source for Vulkan/D3D11/D3D12: prelude coverage,
+    # SkyFrameParams layout, cross-compile, and on Windows FXC + WARP.
+    test_sky_shader.cpp
     test_jobsystem.cpp
     test_terrain.cpp
     # Greyscale heightmap → heights: the pixel path, the texture and file
@@ -849,6 +852,9 @@ target_link_libraries(he_tests PRIVATE
 # the material-graph tests validate that GENERATED GLSL cross-compiles through the REAL
 # path (standard vertex + lighting preamble + fragment) for the Metal + GL targets.
 target_link_libraries(he_tests PRIVATE he_materialshader)
+# test_sky_shader.cpp calls he::shaderc directly, as the Vulkan/D3D sky passes do
+# (he_materialshader links it PRIVATE, so its header does not come along).
+target_link_libraries(he_tests PRIVATE he_shadercompiler)
 # The TARGET is always there now (A3b Teil 2 — without glslang it is built against the
 # stub), so "can I link it" stopped being the question. The question these cases ask is
 # "can this build actually cross-compile", and only HE_HAVE_SHADERC answers that: a

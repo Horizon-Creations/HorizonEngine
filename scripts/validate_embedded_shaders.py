@@ -43,17 +43,23 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 RENDER = REPO / "src" / "HE_Rendering" / "src" / "Backends"
+SKY_SOURCE = REPO / "src" / "HE_Rendering" / "include" / "HorizonRendering" / "SkyShaderSource.h"
 
 HLSL_SOURCES = {
     "HlslSources.h": RENDER / "D3D_Shared" / "HlslSources.h",
     "D3D11Renderer.cpp": RENDER / "D3D11" / "D3D11Renderer.cpp",
     "D3D12Renderer.cpp": RENDER / "D3D12" / "D3D12Renderer.cpp",
+    # kSkyVSCrossHLSL, the VS in front of the cross-compiled sky PS.
+    "SkyShaderSource.h": SKY_SOURCE,
 }
-GLSL_SOURCE = RENDER / "OpenGL" / "OpenGLRenderer.cpp"
+# kSkyFS + kSkyFuncGLSL moved to SkyShaderSource.h (Thema 78, Schritt 3): the
+# GL sky is also what Vulkan/D3D11/D3D12 compile, behind kSkyVulkanPrelude.
+GLSL_SOURCES = [RENDER / "OpenGL" / "OpenGLRenderer.cpp", SKY_SOURCE]
 
 # Strings that are NOT standalone shaders — they are spliced into others and have
 # no entry point of their own.
-PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kGiTraversalGLSL", "kSkyFuncGLSL"}
+PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kGiTraversalGLSL", "kSkyFuncGLSL",
+            "kSkyVulkanPrelude"}
 
 # What each call site prepends before compiling. Mirrors the C++ verbatim:
 #   D3D11Renderer.cpp:2309  std::string(kSkyFuncHLSL) + kSceneHLSL
@@ -83,7 +89,7 @@ HLSL_ENTRY_PROFILE = {
     "PSMain": "ps_5_0", "VSMain": "vs_5_0",
     "VSMainInstanced": "vs_5_0", "VSMainSkinned": "vs_5_0", "VSDepth": "vs_5_0",
     "PSPos": "ps_5_0", "VSPos": "vs_5_0",
-    "PSSky": "ps_5_0", "VSSky": "vs_5_0",
+    "PSSky": "ps_5_0", "VSSky": "vs_5_0", "VSSkyCross": "vs_5_0",
     "SSAOMain": "ps_5_0", "SSAOBlurMain": "ps_5_0",
     "UIPSMain": "ps_5_0", "UIVSMain": "vs_5_0",
     "main": "ps_5_0",  # the common case; exceptions below
@@ -196,12 +202,34 @@ def check_glsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
     if not gv:
         print("  glslangValidator not found (Vulkan SDK) — GLSL check SKIPPED")
         return 0, 0, []
-    if not GLSL_SOURCE.exists():
-        return 0, 1, [f"missing {GLSL_SOURCE}"]
-
-    strings = extract(GLSL_SOURCE, "GLSL")
+    strings: dict[str, str] = {}
+    for path in GLSL_SOURCES:
+        if not path.exists():
+            return 0, 1, [f"missing {path}"]
+        strings.update(extract(path, "GLSL"))
     skyfunc = strings.get("kSkyFuncGLSL", "")
     ok_n, failures = 0, []
+
+    # The Vulkan/D3D build of the GL sky, assembled like BuildSkyFragmentGLSL450()
+    # (SkyShaderSource.h) and checked with Vulkan semantics (-V). The HLSL that
+    # D3D11/D3D12 compile is emitted from this at runtime by SPIRV-Cross, so it
+    # has no string here; tests/test_sky_shader.cpp runs FXC on it.
+    prelude, sky_fs = strings.get("kSkyVulkanPrelude"), strings.get("kSkyFS")
+    marker = "//#SKYFUNC#"
+    if prelude is None or sky_fs is None or marker not in sky_fs:
+        failures.append("kSkyFS (Vulkan build): kSkyVulkanPrelude / kSkyFS / marker not found")
+    else:
+        f = tmp / "gl__kSkyFS_vulkan.frag"
+        f.write_text(prelude + skyfunc + sky_fs.split(marker, 1)[1], encoding="utf-8")
+        ok, out = run([gv, "-V", "-S", "frag", "-o", os.devnull, str(f)])
+        if ok:
+            ok_n += 1
+            if verbose:
+                print(f"  ok   {'kSkyFS (Vulkan build)':44s} frag")
+        else:
+            errs = [l.strip() for l in out.splitlines() if "ERROR:" in l]
+            failures.append("kSkyFS (Vulkan build):\n      " + "\n      ".join(errs[:3]))
+            print(f"  FAIL {'kSkyFS (Vulkan build)':44s} frag")
 
     for name, body in strings.items():
         if name in PRELUDES:

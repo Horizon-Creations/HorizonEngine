@@ -23,6 +23,10 @@
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/SkyNoise3D.h>
+#include <HorizonRendering/SkyShaderSource.h> // the GL sky, compiled to SPIR-V for the sky pass
+#if defined(HE_HAVE_SHADERC)
+#include "ShaderCompiler.h"                   // he::shaderc::compile (sky pass)
+#endif
 #include <HorizonRendering/SsaoKernel.h>
 #include <MaterialGraph/MaterialGraph.h>      // kMatMaxGraphTextures (heTexP0..3)
 
@@ -100,7 +104,9 @@ namespace
         glm::vec4  clusterCamFwd;
     };
 
-    // Sky pass UBO (set=0 binding=0 in sky.frag) — must match std140 exactly.
+    // Sky pass UBO of the FALLBACK shader (set=0 binding=0 in shaders/sky.frag)
+    // — must match std140 exactly. The GL sky compiled at startup reads a whole
+    // HE::SkyFrameParams instead (kSkyVulkanPrelude); see createSkyPipeline.
     struct SkyUBOData
     {
         glm::mat4  invViewProj;                          // offset   0, 64 bytes
@@ -111,6 +117,8 @@ namespace
         float      milkyWay;     float flash;  int hasMoonTex;  float nebula; // offset 128, 16 bytes
         glm::vec3  nebulaColor;  float _pad2;            // offset 144, 16 bytes
     }; // 160 bytes
+    // The per-frame sky UBO is sized for the larger layout, so either shader fits.
+    constexpr VkDeviceSize kSkyUBOBytes = std::max(sizeof(SkyUBOData), sizeof(HE::SkyFrameParams));
 
     // Debug line pass constant buffer (set=0 binding=0 in debug_line.vert).
     struct DebugUBOData
@@ -6000,7 +6008,7 @@ void VulkanRenderer::createSkyPipeline()
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
         VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bci.size        = sizeof(SkyUBOData);
+        bci.size        = kSkyUBOBytes;
         bci.usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         vkCheck(vkCreateBuffer(m_device, &bci, nullptr, &m_skyUBO[i].buf), "sky UBO buffer");
@@ -6013,7 +6021,7 @@ void VulkanRenderer::createSkyPipeline()
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_skyUBO[i].mem), "sky UBO memory");
         vkBindBufferMemory(m_device, m_skyUBO[i].buf, m_skyUBO[i].mem, 0);
-        vkMapMemory(m_device, m_skyUBO[i].mem, 0, sizeof(SkyUBOData), 0, &m_skyUBO[i].mapped);
+        vkMapMemory(m_device, m_skyUBO[i].mem, 0, kSkyUBOBytes, 0, &m_skyUBO[i].mapped);
 
         VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
         dsai.descriptorPool     = m_skyDSPool;
@@ -6021,7 +6029,7 @@ void VulkanRenderer::createSkyPipeline()
         dsai.pSetLayouts        = &m_skyDSLayout;
         vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_skyUBO[i].set), "sky descriptor set");
 
-        VkDescriptorBufferInfo dbi{ m_skyUBO[i].buf, 0, sizeof(SkyUBOData) };
+        VkDescriptorBufferInfo dbi{ m_skyUBO[i].buf, 0, kSkyUBOBytes };
         VkWriteDescriptorSet wr[3]{};
         wr[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         wr[0].dstSet          = m_skyUBO[i].set;
@@ -6068,8 +6076,36 @@ void VulkanRenderer::createSkyPipeline()
     vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_moonSampler), "moon sampler");
 
     // ── Shader modules ───────────────────────────────────────────────────────
+    // Fragment: the GL sky (HorizonRendering/SkyShaderSource.h) compiled to
+    // SPIR-V here — atmosphere, three-colour nebula, 3D aurora, phased moon,
+    // cirrus, 3D volumetric clouds, god rays, the same text GL runs. Its prelude
+    // uses exactly this set layout (0 = UBO, 1 = moon, 2 = noise). Without the
+    // cross-compiler, or if the compile fails, the reduced shaders/sky.frag
+    // (built by glslc) takes over.
     VkShaderModule vs = loadShaderModule("sky.vert.spv");
-    VkShaderModule fs = loadShaderModule("sky.frag.spv");
+    VkShaderModule fs = VK_NULL_HANDLE;
+    m_skyFullModel = false;
+#if defined(HE_HAVE_SHADERC)
+    {
+        const he::shaderc::Result spv = he::shaderc::compile(HE::glsl::BuildSkyFragmentGLSL450(),
+                                                             he::shaderc::Stage::Fragment,
+                                                             he::shaderc::Target::SpirvBinary);
+        if (spv.ok && !spv.spirv.empty())
+        {
+            VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+            ci.codeSize = spv.spirv.size() * sizeof(uint32_t);
+            ci.pCode    = spv.spirv.data();
+            m_skyFullModel = vkCreateShaderModule(m_device, &ci, nullptr, &fs) == VK_SUCCESS;
+        }
+        if (!m_skyFullModel)
+        {
+            fs = VK_NULL_HANDLE;
+            HE_LOG_WARN(RHI, "%s", "VulkanRenderer: GL sky did not compile to SPIR-V, "
+                                   "falling back to the reduced sky.frag");
+        }
+    }
+#endif
+    if (!fs) fs = loadShaderModule("sky.frag.spv");
     if (!vs || !fs)
     {
         if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
@@ -6184,10 +6220,11 @@ void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /
 
     const glm::mat4 vp = HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
 
-    // The one shared EnvironmentSettings → sky-constants translation. sky.frag's
-    // UBO is a REDUCED copy of HE::SkyFrameParams (see the header block in
-    // shaders/sky.frag), so the fields are read out by name instead of memcpy'd —
-    // a blanket copy would misalign every offset past invViewProj.
+    // The one shared EnvironmentSettings → sky-constants translation. The GL sky
+    // compiled at startup reads HE::SkyFrameParams as its UBO (one memcpy). The
+    // fallback sky.frag's UBO is a REDUCED copy of it (see the header block in
+    // shaders/sky.frag), so there the fields are read out by name — a blanket
+    // copy would misalign every offset past invViewProj.
     HE::SkyFrameInputs in;
     in.invViewProj    = glm::inverse(vp);
     in.sunDir         = glm::normalize(m_renderWorld.sunDirection);
@@ -6217,7 +6254,10 @@ void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /
     // sky._pad2 is left zeroed by the SkyUBOData{} value-initialisation above.
 
     if (m_skyUBO[m_currentFrame].mapped)
-        std::memcpy(m_skyUBO[m_currentFrame].mapped, &sky, sizeof(sky));
+    {
+        if (m_skyFullModel) std::memcpy(m_skyUBO[m_currentFrame].mapped, &p, sizeof(p));
+        else                std::memcpy(m_skyUBO[m_currentFrame].mapped, &sky, sizeof(sky));
+    }
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout,

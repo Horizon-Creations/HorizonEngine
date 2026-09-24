@@ -22,6 +22,10 @@
 #include <HorizonRendering/SkyNoise3D.h>      // CPU sky/cloud noise volume bake
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
+#include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
+#if defined(HE_HAVE_SHADERC)
+#include "ShaderCompiler.h"                   // he::shaderc::compileHlslPinned (sky pass)
+#endif
 #include <HorizonRendering/LightPacking.h>    // GPU light window + shadow-mask lights
 #include <HorizonRendering/ClipSpace.h>       // GL depth (-1..1) → D3D depth (0..1)
 #include <HorizonRendering/RenderConstants.h> // shadow-map size
@@ -98,8 +102,11 @@ using namespace HE::hlsl;
 // out" — was stale: kSceneHLSL below is Cook-Torrance and samples a base-colour
 // texture at t1.)
 
-// Sky pixel shader — NOT shared: this copy has the space-nebula pass (nebula()
-// plus uNebula/uNebulaColor in SkyCB) that the D3D11 copy still lacks.
+// Sky pixel shader (FALLBACK) — the sky pass normally runs the GL sky cross-
+// compiled through he::shaderc (HorizonRendering/SkyShaderSource.h, see
+// createSkyPipeline); this reduced copy is what a build without the cross-
+// compiler, or a failed compile, draws. NOT shared with D3D11: it has the old
+// single-colour nebula (nebula() plus uNebula/uNebulaColor in SkyCB).
 static const char* kSkyPSHLSL12 = R"HLSL(
 cbuffer SkyEnv : register(b0)
 {
@@ -2113,9 +2120,38 @@ struct D3D12RendererImpl
             return true;
         };
         ComPtr<ID3DBlob> vsB, psB;
-        const std::string skyPS = std::string(kSkyFuncHLSL) + kSkyPSHLSL12;
-        if (!compile(kSkyVSHLSL, "VSSky", "vs_5_0", vsB)) return false;
-        if (!compile(skyPS, "PSSky", "ps_5_0", psB)) return false;
+        // The GL sky (HorizonRendering/SkyShaderSource.h) cross-compiled to HLSL
+        // with the registers this root signature already has: b0, t0/s0, t1/s1.
+        // Same flags and fallback as D3D11Renderer::createSkyPipeline.
+        skyFullModel = false;
+#if defined(HE_HAVE_SHADERC)
+        {
+            using he::shaderc::Stage;
+            using namespace HE::glsl;
+            const he::shaderc::Result hlsl = he::shaderc::compileHlslPinned(
+                BuildSkyFragmentGLSL450(), Stage::Fragment, {
+                    { Stage::Fragment, 0, kSkySlotEnv.binding,   kSkySlotEnv.hlslReg   },
+                    { Stage::Fragment, 0, kSkySlotMoon.binding,  kSkySlotMoon.hlslReg  },
+                    { Stage::Fragment, 0, kSkySlotNoise.binding, kSkySlotNoise.hlslReg },
+                });
+            const UINT savedFlags = flags;
+            flags |= D3DCOMPILE_PREFER_FLOW_CONTROL;
+            skyFullModel = hlsl.ok
+                && compile(kSkyVSCrossHLSL, "VSSkyCross", "vs_5_0", vsB)
+                && compile(hlsl.source, "main", "ps_5_0", psB);
+            flags = savedFlags;
+            if (!skyFullModel)
+                HE_LOG_WARN(RHI, "%s", "D3D12 sky: cross-compiled GL sky unavailable, "
+                                       "falling back to the reduced kSkyPSHLSL12");
+        }
+#endif
+        if (!skyFullModel)
+        {
+            vsB.Reset(); psB.Reset();
+            const std::string skyPS = std::string(kSkyFuncHLSL) + kSkyPSHLSL12;
+            if (!compile(kSkyVSHLSL, "VSSky", "vs_5_0", vsB)) return false;
+            if (!compile(skyPS, "PSSky", "ps_5_0", psB)) return false;
+        }
 
         // Root sig: [0] CBV b0 (sky env), [1] SRV table t0..t1 (moon + 3D noise),
         // static samplers s0 (CLAMP linear, moon) + s1 (WRAP linear, noise volume).
@@ -2192,7 +2228,8 @@ struct D3D12RendererImpl
         // Upload CBs for sky env (one per frame in flight).
         for (UINT f = 0; f < k_frameCount; ++f)
         {
-            skyCBuf[f] = createUploadBuffer(alignUp(sizeof(SkyCB), k_cbSlot),
+            // Sized for the larger of the two layouts, so either shader fits.
+            skyCBuf[f] = createUploadBuffer(alignUp(static_cast<UINT>(std::max(sizeof(HE::SkyFrameParams), sizeof(SkyCB))), k_cbSlot),
                                             reinterpret_cast<void**>(&skyCBufPtr[f]));
         }
 
@@ -2213,7 +2250,21 @@ struct D3D12RendererImpl
             pd.SampleDesc.Count = 1;
             return SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
         };
-        if (!makeSkyPso(DXGI_FORMAT_R16G16B16A16_FLOAT, skyHdrPso)) return false;
+        if (!makeSkyPso(DXGI_FORMAT_R16G16B16A16_FLOAT, skyHdrPso) && skyFullModel)
+        {
+            // The runtime refused the cross-compiled pair (test_sky_shader.cpp
+            // builds this PSO on WARP, so this is a driver disagreement): drop
+            // to the reduced sky rather than to no sky at all.
+            HE_LOG_WARN(RHI, "%s", "D3D12 sky: PSO for the cross-compiled GL sky failed, "
+                                   "falling back to the reduced kSkyPSHLSL12");
+            skyFullModel = false;
+            vsB.Reset(); psB.Reset();
+            const std::string skyPS = std::string(kSkyFuncHLSL) + kSkyPSHLSL12;
+            if (!compile(kSkyVSHLSL, "VSSky", "vs_5_0", vsB)) return false;
+            if (!compile(skyPS, "PSSky", "ps_5_0", psB)) return false;
+            makeSkyPso(DXGI_FORMAT_R16G16B16A16_FLOAT, skyHdrPso);
+        }
+        if (!skyHdrPso) return false;
         makeSkyPso(DXGI_FORMAT_R8G8B8A8_UNORM, skyLdrPso);  // best-effort fallback
 
         skyReady = skyRootSig && skyHdrPso && skyEnvHeap && skyCBuf[0];
@@ -2296,11 +2347,13 @@ struct D3D12RendererImpl
         // Translate the environment through the SHARED sky-constants builder
         // instead of hand-assigning fields (which is how D3D12 previously ended up
         // with +cos where GL/Metal have -cos, drifting the clouds 180° the wrong
-        // way). SkyCB is a small subset of SkyFrameParams, so read the named
-        // fields out — NOT a memcpy: the layouts differ.
+        // way). The cross-compiled GL sky's cbuffer IS SkyFrameParams (one
+        // memcpy); the kSkyPSHLSL12 fallback's SkyCB is a small subset of it, so
+        // there the named fields are read out — the layouts differ.
         HE::SkyFrameInputs skyIn;
         skyIn.invViewProj    = invVP;
         skyIn.sunDir         = sunDir;
+        skyIn.cameraPos      = m_renderWorld.camera.position; // 3D clouds + aurora are world-anchored
         skyIn.time           = m_wallTime;
         skyIn.hasMoonTexture = moonTex12 ? true : false; // ComPtr → contextual bool
         const HE::SkyFrameParams sp = HE::BuildSkyFrameParams(env, skyIn);
@@ -2316,7 +2369,10 @@ struct D3D12RendererImpl
         cb.nebulaColor  = glm::vec3(sp.nebulaColor);
         cb.nebula       = sp.nebulaColor.w;
         if (skyCBufPtr[fi])
-            std::memcpy(skyCBufPtr[fi], &cb, sizeof(cb));
+        {
+            if (skyFullModel) std::memcpy(skyCBufPtr[fi], &sp, sizeof(sp));
+            else              std::memcpy(skyCBufPtr[fi], &cb, sizeof(cb));
+        }
 
         cl->SetGraphicsRootSignature(skyRootSig.Get());
         cl->SetPipelineState(pso12);
@@ -2566,6 +2622,10 @@ struct D3D12RendererImpl
     // resources outlive ImGui's use of the SRVs the editor creates over them.
     std::vector<ComPtr<ID3D12Resource>> m_imguiTextures;
     bool                         skyReady   = false;
+    // True when the sky PSOs run the GL sky cross-compiled through he::shaderc
+    // (skyCBuf then holds a whole HE::SkyFrameParams); false on the kSkyPSHLSL12
+    // fallback (SkyCB).
+    bool                         skyFullModel = false;
     bool                         usingHDR   = false;  // set by Render() before DrawScene()
 
     // ── Debug line pipeline ───────────────────────────────────────────────────
