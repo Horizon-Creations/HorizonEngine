@@ -11,6 +11,11 @@
 // the same code, not by a copy of it (HE_DUMP_SELBOXTEST does). And they are
 // pure geometry into a DebugDrawBuffer, so the tests can ask where the box
 // actually lands without an editor.
+//
+// Both stand at the WORLD pose, parents included, composed on the spot
+// (HE::worldMatrixOf): the icons and meshes they belong to are drawn there,
+// and PhysicsWorld builds the bodies there. Reading TransformComponent's own
+// (local) position put them beside their entity under any moved parent.
 
 #include <DebugDraw/DebugDraw.h>
 

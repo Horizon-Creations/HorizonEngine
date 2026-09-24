@@ -9,7 +9,9 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/TransformHierarchy.h>
 
+#include <limits>
 #include <unordered_map>
 #include <utility>
 
@@ -22,9 +24,12 @@ namespace HE::Ed::ViewportOverlays
 		for (Entity sel : selection.entities())
 		{
 			if (!reg.valid(sel)) continue;
-			auto* tc = reg.try_get<TransformComponent>(sel);
-			if (!tc) continue;
-			const glm::vec3 p = tc->position;
+			if (!reg.all_of<TransformComponent>(sel)) continue;
+			// WORLD position, where the entity's icon and mesh are drawn.
+			// TransformComponent::position is local, and under a moved parent
+			// the box stood beside the thing it marks. worldPositionOf rather
+			// than worldMatrix: that is only as fresh as the last propagate.
+			const glm::vec3 p = HE::worldPositionOf(world, sel);
 			const glm::vec3 color = (sel == selection.primary()) ? kPrimarySelectionColor
 			                                                     : kSecondarySelectionColor;
 			out.aabb(p - glm::vec3(0.5f), p + glm::vec3(0.5f), color);
@@ -40,11 +45,18 @@ namespace HE::Ed::ViewportOverlays
 		// mesh carries no precomputed bounds, and measuring a hundred
 		// thousand vertices per frame for a debug line is not a trade.
 		static std::unordered_map<HE::UUID, std::pair<glm::vec3, glm::vec3>> s_colliderMeshBox;
-		for (auto [entity, col, transform] :
-		     reg.view<ColliderComponent, TransformComponent>().each())
+		auto view = reg.view<ColliderComponent, TransformComponent>();
+		for (Entity entity : view)
 		{
+			const auto&     col   = view.get<ColliderComponent>(entity);
 			const glm::vec3 color = col.isTrigger ? kTriggerColor : kColliderColor;
-			const glm::vec3 pos = transform.position;
+			// The WORLD pose, the one PhysicsWorld builds the body at
+			// (worldPoseOf), composed on the spot like the joints' lines are.
+			// TransformComponent::position is local: under a moved parent the
+			// outline stood where the parent's offset had taken the body away
+			// from.
+			const glm::mat4 worldM = HE::worldMatrixOf(world, entity);
+			const glm::vec3 pos    = glm::vec3(worldM[3]);
 			switch (col.shape)
 			{
 			case ColliderShape::Box:
@@ -98,12 +110,24 @@ namespace HE::Ed::ViewportOverlays
 					}
 					it = s_colliderMeshBox.emplace(meshId, std::make_pair(lo, hi)).first;
 				}
-				// Scaled like the shape itself is (PhysicsWorld bakes
-				// transform.scale into the triangles). Axis-aligned, so a
-				// rotated mesh reads as its box — the same simplification
-				// the Box case above has always made.
-				out.aabb(pos + it->second.first  * transform.scale,
-				         pos + it->second.second * transform.scale, color);
+				// Scaled like the shape itself is: PhysicsWorld bakes the
+				// COMPOSED scale into the triangles, so a mesh under a scaled
+				// parent collides at the parent's size too. The mesh box's
+				// eight corners go through the world matrix and the outline
+				// is their axis-aligned box — which also keeps a mirrored
+				// axis from turning lo and hi around.
+				const glm::vec3 lo = it->second.first, hi = it->second.second;
+				glm::vec3 wlo(std::numeric_limits<float>::max());
+				glm::vec3 whi(std::numeric_limits<float>::lowest());
+				for (int c = 0; c < 8; ++c)
+				{
+					const glm::vec3 corner((c & 1) ? hi.x : lo.x, (c & 2) ? hi.y : lo.y,
+					                       (c & 4) ? hi.z : lo.z);
+					const glm::vec3 w = glm::vec3(worldM * glm::vec4(corner, 1.0f));
+					wlo = glm::min(wlo, w);
+					whi = glm::max(whi, w);
+				}
+				out.aabb(wlo, whi, color);
 				break;
 			}
 			case ColliderShape::HeightField:
