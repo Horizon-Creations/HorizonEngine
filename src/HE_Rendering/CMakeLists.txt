@@ -131,13 +131,14 @@ if(HE_VULKAN_ENABLED)
         file(MAKE_DIRECTORY "${HE_SHADER_OUT_DIR}")
         set(HE_VULKAN_SPV "")
         foreach(stage scene.vert scene_instanced.vert scene.frag scene_shadow.vert
+                      scene_shadow_instanced.vert
                       postfx.vert postfx_tonemap.frag postfx_fxaa.frag
                       postfx_smaa.frag postfx_aa_blit.frag
                       postfx_bloom_bright.frag postfx_bloom_blur.frag
                       sky.vert sky.frag
                       debug_line.vert debug_line.frag
-                      ssao_pos.vert ssao_pos.frag ssao.frag ssao_blur.frag
-                      gi_gbuf.vert gi_gbuf.frag gi_temporal.frag gi_blur.frag
+                      ssao_pos.vert ssao_pos_instanced.vert ssao_pos.frag ssao.frag ssao_blur.frag
+                      gi_gbuf.vert gi_gbuf_instanced.vert gi_gbuf.frag gi_temporal.frag gi_blur.frag
                       gi_shadow.comp gi_probe.comp
                       gi_shadow_hw.comp gi_probe_hw.comp
                       skinned.vert
