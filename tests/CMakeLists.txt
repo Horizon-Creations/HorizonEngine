@@ -215,6 +215,7 @@ add_executable(he_tests
     test_mcp_tools_settings.cpp
     test_mcp_tools_batch.cpp
     test_mcp_tools_screenshot.cpp
+    test_mcp_tools_collab.cpp
     test_mcp_camera_gizmos.cpp
     test_viewport_overlays.cpp
     test_mcp_hc.cpp
@@ -400,6 +401,10 @@ add_executable(he_tests
     # back as a PNG the decoder reads pixel-for-pixel, as an image block, at the
     # size asked, from the camera asked" is answerable without a GPU.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsScreenshot.cpp
+    # The collaboration tools over two real CollabControllers on loopback: the
+    # same host → join → roster path the two-editor script drives, minus the
+    # processes.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsCollab.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
@@ -1018,7 +1023,8 @@ endif()
 # one thing a test may never do. They share a lock, so they serialise against
 # each other while the other hundred files still run in parallel.
 set(_he_net_tests test_net_tcp test_net_udp test_net_secure test_net_discovery test_net_collab
-                  test_net_directory test_collab_controller test_net_game_session)
+                  test_net_directory test_collab_controller test_net_game_session
+                  test_mcp_tools_collab)
 foreach(_t IN LISTS _he_net_tests)
     if(TEST ${_t})
         set_tests_properties(${_t} PROPERTIES RESOURCE_LOCK he_net)

@@ -8011,6 +8011,16 @@ void EditorApplication::setupMcpTools()
 	};
 	HE::Ed::registerScreenshotTools(m_mcp.registry(), std::move(shot));
 
+	// The session. Reading it is always allowed; hosting, joining and leaving
+	// only when whoever started this editor said so for this run — see
+	// McpCollabHooks for why that is not a Preferences switch.
+	HE::Ed::McpCollabHooks collab;
+	collab.projectOpen = [this] { return m_projectLoaded && m_editorWorld != nullptr; };
+	collab.displayName = [] { return CollabController::localIdentity().name; };
+	if (const char* env = std::getenv("HE_MCP_COLLAB_CONTROL"))
+		collab.controlAllowed = env[0] == '1';
+	HE::Ed::registerCollabTools(m_mcp.registry(), m_collab, std::move(collab));
+
 	// Several calls in one request. Last, after every family it can dispatch to:
 	// it looks tools up by name at call time, so the order is for tools/list, not
 	// for correctness — but a meta-tool listed before the tools it drives reads
