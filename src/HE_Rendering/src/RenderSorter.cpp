@@ -1,6 +1,7 @@
 #include "HorizonRendering/RenderSorter.h"
 #include <cstdint>
 #include <algorithm>
+#include <cstdlib>
 
 // Sort key: group by mesh asset (minimises GPU state changes), then
 // front-to-back within a group (early-z friendliness). The distance and mesh
@@ -98,4 +99,13 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
 			                                  static_cast<uint32_t>(out.transforms.size()), 1u });
 		out.transforms.push_back(obj.transform);
 	}
+}
+
+bool RenderSorter::depthInstancingEnabled()
+{
+	static const bool on = []{
+		const char* v = std::getenv("HE_DEPTH_INSTANCING");
+		return !(v && *v && std::atoi(v) == 0);
+	}();
+	return on;
 }

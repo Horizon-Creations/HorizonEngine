@@ -577,6 +577,13 @@ float4 VSDepth(VSIn i) : SV_POSITION
 {
     return mul(uMVP, float4(i.pos, 1.0));
 }
+// Instanced twin for a run of same-mesh shadow casters: one DrawIndexedInstanced
+// per run. The CPU fills gInstances (t3) with {lightClip * model, model}, the
+// same product VSDepth gets through uMVP, so the depth map does not change.
+float4 VSDepthInstanced(VSIn i, uint iid : SV_InstanceID) : SV_POSITION
+{
+    return mul(gInstances[iid].mvp, float4(i.pos, 1.0));
+}
 
 // Cascaded shadows — the HLSL twin of Metal's shadowFactor() (same top-left
 // texture origin and [0,1] clip depth) and GL's computeShadow(): pick the first
@@ -1304,6 +1311,7 @@ struct D3D11RendererImpl
     // ShadowData::kMaxCascades; the extractor fits the project's count (1..3).
     static constexpr int kCsmCascades = 3;
     ComPtr<ID3D11VertexShader>       depthVS;    // depth-only pass
+    ComPtr<ID3D11VertexShader>       depthVSInstanced; // same, one draw per same-mesh run (reads t3)
     ComPtr<ID3D11Texture2D>          shadowTex;
     ComPtr<ID3D11DepthStencilView>   shadowDSV[kCsmCascades];
     ComPtr<ID3D11ShaderResourceView> shadowSRV;
@@ -1566,6 +1574,7 @@ struct D3D11RendererImpl
     // ── SSAO pipeline ──────────────────────────────────────────────────────
     // Position prepass
     ComPtr<ID3D11VertexShader>       ssaoPosVS;
+    ComPtr<ID3D11VertexShader>       ssaoPosVSInstanced; // VSPosInstanced: {mvp, modelView} per instance at t3
     ComPtr<ID3D11PixelShader>        ssaoPosPS;
     ComPtr<ID3D11Buffer>             ssaoPosPerObjCB;   // { mat4 posMVP; mat4 posModelView; }
     // SSAO passes
@@ -1913,6 +1922,16 @@ struct D3D11RendererImpl
             }
             device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &ssaoPosVS);
             device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &ssaoPosPS);
+            // Instanced twin for GeometryPass batches. Optional: without it every
+            // batch loops through VSPos, so a failure is logged, not returned.
+            ComPtr<ID3DBlob> ivsBlob;
+            if (SUCCEEDED(D3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
+                                     "VSPosInstanced", "vs_5_0", 0, 0, &ivsBlob, &err)))
+                device->CreateVertexShader(ivsBlob->GetBufferPointer(), ivsBlob->GetBufferSize(),
+                                           nullptr, &ssaoPosVSInstanced);
+            else
+                HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: VSPosInstanced compile failed: ")
+                    + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
             // Per-object CB for position prepass: { mat4 posMVP; mat4 posModelView; }
             D3D11_BUFFER_DESC cbd{}; cbd.ByteWidth = 128; cbd.Usage = D3D11_USAGE_DYNAMIC;
             cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -2075,6 +2094,42 @@ struct D3D11RendererImpl
     }
 
     // Returns the SRV that the scene shader should bind as t2 (AO texture).
+    // One instanced draw for a depth-only batch (a shadow caster run, an SSAO or
+    // GI pre-pass batch): `count` {A, B} matrix pairs from fill(k, pair) go into
+    // instanceSB — the scene pass's 128-byte buffer — and instVS reads them at
+    // t3 by SV_InstanceID. Every caller writes the products its per-object loop
+    // puts into a constant buffer, so the instanced frame is the loop's frame.
+    // Afterwards restoreVS is bound again and t3 is unbound (instanceSB is
+    // re-Mapped by the next batch). false = nothing drawn (no twin shader, no
+    // buffer, too many instances, HE_DEPTH_INSTANCING=0): the caller loops.
+    template <class Fill>
+    bool drawDepthInstanced(ID3D11DeviceContext* ctx, ID3D11VertexShader* instVS,
+                            ID3D11VertexShader* restoreVS, UINT indexCount, UINT startIndex,
+                            UINT count, Fill&& fill)
+    {
+        static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be two mat4");
+        if (!instVS || !instanceSB || !instanceSRV || count < 2 || count > k_maxInstances
+            || !RenderSorter::depthInstancingEnabled())
+            return false;
+        D3D11_MAPPED_SUBRESOURCE im{};
+        if (FAILED(ctx->Map(instanceSB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &im))) return false;
+        auto* dst = static_cast<uint8_t*>(im.pData);
+        for (UINT k = 0; k < count; ++k)
+        {
+            glm::mat4 pair[2];
+            fill(k, pair);
+            std::memcpy(dst + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
+        }
+        ctx->Unmap(instanceSB.Get(), 0);
+        ctx->VSSetShader(instVS, nullptr, 0);
+        ctx->VSSetShaderResources(3, 1, instanceSRV.GetAddressOf());
+        ctx->DrawIndexedInstanced(indexCount, count, startIndex, 0, 0);
+        ctx->VSSetShader(restoreVS, nullptr, 0);
+        ID3D11ShaderResourceView* nullSRV = nullptr;
+        ctx->VSSetShaderResources(3, 1, &nullSRV);
+        return true;
+    }
+
     ID3D11ShaderResourceView* runSSAO(ID3D11DeviceContext* ctx,
                                       const std::vector<const DrawCall*>& opaqueDCs,
                                       const glm::mat4& viewProj, const glm::mat4& view,
@@ -2165,8 +2220,31 @@ struct D3D11RendererImpl
                     ctx->DrawIndexed(range.count, range.start, 0);
                 };
 
-                if (!dc->instanceTransforms.empty())
-                    for (const glm::mat4& t : dc->instanceTransforms) drawWithTransform(t);
+                // A GeometryPass batch (instanceTransforms non-empty ⇔ run > 1) is
+                // one instanced draw on the position-only path, with the loop's
+                // {mvp, modelView} per instance. The MRT reflection pre-pass
+                // keeps the loop: its VS is the library's cross-compiled GLSL,
+                // whose instanced variant reads the model as vertex attributes,
+                // not from a structured buffer.
+                const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+                if (!reflMrt && drawDepthInstanced(ctx, ssaoPosVSInstanced.Get(), ssaoPosVS.Get(),
+                        range.count, range.start, static_cast<UINT>(inst.size()),
+                        [&](UINT k, glm::mat4* pair) {
+                            pair[0] = viewProj * inst[k];
+                            pair[1] = view     * inst[k];
+                        }))
+                {
+                    static bool loggedOnce = false; // the runtime witness on Windows
+                    if (!loggedOnce)
+                    {
+                        loggedOnce = true;
+                        HE_LOG_INFO(RHI, "D3D11Renderer: SSAO pre-pass instanced (first batch: %u instances)",
+                                    static_cast<unsigned>(inst.size()));
+                    }
+                    continue;
+                }
+                if (!inst.empty())
+                    for (const glm::mat4& t : inst) drawWithTransform(t);
                 else
                     drawWithTransform(dc->transform);
             }
@@ -2649,6 +2727,7 @@ struct D3D11RendererImpl
     int   giProbeBudgetPerFrame = 256;
 
     ComPtr<ID3D11VertexShader>  giGBufVS;
+    ComPtr<ID3D11VertexShader>  giGBufVSInstanced; // GiGBufVSInstanced: {mvp, model} per instance at t3
     ComPtr<ID3D11PixelShader>   giGBufPS;
     ComPtr<ID3D11ComputeShader> giShadowCS;
     ComPtr<ID3D11ComputeShader> giProbeCS;
@@ -2842,6 +2921,11 @@ struct D3D11RendererImpl
             ok = SUCCEEDED(device->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giGBufVS));
         if (ok && (ok = compile(kGiGBufHLSL, "GiGBufPS", "ps_5_0", b)))
             ok = SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giGBufPS));
+        // Instanced G-buffer twin for GeometryPass batches. Optional, and kept
+        // out of `ok` on purpose: a failure here must not take GI down with it —
+        // every batch then loops through giGBufVS.
+        if (ok && compile(kGiGBufHLSL, "GiGBufVSInstanced", "vs_5_0", b))
+            device->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giGBufVSInstanced);
         if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", b)))
             ok = SUCCEEDED(device->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giShadowCS));
         if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL, "GiProbeCS", "cs_5_0", b)))
@@ -2869,7 +2953,7 @@ struct D3D11RendererImpl
         {
             HE_LOG_ERROR(RHI, "%s",
                         "D3D11Renderer: GI pipeline build failed — GI disabled");
-            giGBufVS.Reset(); giGBufPS.Reset(); giShadowCS.Reset(); giProbeCS.Reset();
+            giGBufVS.Reset(); giGBufVSInstanced.Reset(); giGBufPS.Reset(); giShadowCS.Reset(); giProbeCS.Reset();
             giTemporalPS.Reset(); giBlurPS.Reset();
             giSupported = false;
             return;
@@ -3109,8 +3193,27 @@ struct D3D11RendererImpl
                     }
                     ctx->DrawIndexed(range.count, range.start, 0);
                 };
-                if (!dc->instanceTransforms.empty())
-                    for (const glm::mat4& t : dc->instanceTransforms) drawOne(t);
+                // A GeometryPass batch is one instanced draw with the loop's
+                // {mvp, model} per instance (same bytes as PerObjectCB's head).
+                const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+                if (drawDepthInstanced(ctx, giGBufVSInstanced.Get(), giGBufVS.Get(),
+                        range.count, range.start, static_cast<UINT>(inst.size()),
+                        [&](UINT k, glm::mat4* pair) {
+                            pair[0] = viewProj * inst[k];
+                            pair[1] = inst[k];
+                        }))
+                {
+                    static bool loggedOnce = false;
+                    if (!loggedOnce)
+                    {
+                        loggedOnce = true;
+                        HE_LOG_INFO(RHI, "D3D11Renderer: GI pre-pass instanced (first batch: %u instances)",
+                                    static_cast<unsigned>(inst.size()));
+                    }
+                    continue;
+                }
+                if (!inst.empty())
+                    for (const glm::mat4& t : inst) drawOne(t);
                 else
                     drawOne(dc->transform);
             }
@@ -3539,6 +3642,16 @@ struct D3D11RendererImpl
         if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                                  "VSDepth", "vs_5_0", flags, 0, &dvsBlob, &err)))
             device->CreateVertexShader(dvsBlob->GetBufferPointer(), dvsBlob->GetBufferSize(), nullptr, &depthVS);
+        // Its instanced twin (one draw per same-mesh caster run, reads t3 like
+        // VSMainInstanced). Optional: without it every run loops through VSDepth.
+        ComPtr<ID3DBlob> divsBlob;
+        if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+                                 "VSDepthInstanced", "vs_5_0", flags, 0, &divsBlob, &err)))
+            device->CreateVertexShader(divsBlob->GetBufferPointer(), divsBlob->GetBufferSize(),
+                                       nullptr, &depthVSInstanced);
+        else
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: VSDepthInstanced compile failed: ")
+                + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
 
         // Instanced geometry VS (A3) + the per-instance {mvp,model} structured buffer
         // it reads at t3 (dynamic, refilled per instanced batch via MAP_WRITE_DISCARD).
@@ -5100,7 +5213,7 @@ void D3D11Renderer::Shutdown()
     // GI resources (accel buffers, targets, atlases, pipelines).
     m_impl->destroyGiAccel();
     m_impl->destroyGiTargets();
-    m_impl->giGBufVS.Reset(); m_impl->giGBufPS.Reset();
+    m_impl->giGBufVS.Reset(); m_impl->giGBufVSInstanced.Reset(); m_impl->giGBufPS.Reset();
     m_impl->giShadowCS.Reset(); m_impl->giProbeCS.Reset();
     m_impl->giTemporalPS.Reset(); m_impl->giBlurPS.Reset();
     m_impl->giShadowCB.Reset(); m_impl->giCountCB.Reset(); m_impl->giTemporalCB.Reset();
@@ -5510,10 +5623,12 @@ void D3D11Renderer::DrawScene(int width, int height)
             // drops `skipEntity`'s geometry: the entity the local light itself
             // sits on (a light authored onto a mesh entity would otherwise
             // render that mesh at z≈0 into its own map and shadow itself out);
-            // kNoOwnerEntity (every cascade) skips nothing. Runs of one mesh
-            // are drawn one call per transform — the D3D11 instanced scene VS
-            // reads its own structured buffer, the depth VS does not, and a
-            // depth instancing port is not this change's job.
+            // kNoOwnerEntity (every cascade) skips nothing. A run of more than
+            // one caster of the same mesh is ONE instanced draw (VSDepthInstanced
+            // over instanceSB, {clip * model, model} per caster — VSDepth's own
+            // product); a run of one, or a run the buffer cannot take, stays on
+            // the per-caster draw. Mirrors GL's renderDepthLayer / Metal's
+            // encodeDepthLayer.
             auto renderDepthLayer = [&](ID3D11DepthStencilView* dsv, int size,
                                         const glm::mat4& viewProj, const glm::mat4& clip,
                                         uint32_t skipEntity)
@@ -5534,6 +5649,22 @@ void D3D11Renderer::DrawScene(int width, int height)
                     ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
                     ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
                     const glm::mat4* xf = p.shadowBatches.transforms.data() + b.first;
+                    if (p.drawDepthInstanced(ctx, p.depthVSInstanced.Get(), p.depthVS.Get(),
+                            m.indexCount, 0, b.count,
+                            [&](UINT k, glm::mat4* pair) {
+                                pair[0] = clip * xf[k];
+                                pair[1] = xf[k];
+                            }))
+                    {
+                        static bool loggedOnce = false; // the runtime witness on Windows
+                        if (!loggedOnce)
+                        {
+                            loggedOnce = true;
+                            HE_LOG_INFO(RHI, "D3D11Renderer: shadow pass instanced (first run: %u casters)",
+                                        b.count);
+                        }
+                        continue;
+                    }
                     for (uint32_t k = 0; k < b.count; ++k)
                     {
                         uploadObject(clip * xf[k], xf[k], glm::vec3(1.0f), 0.0f, 0.0f, 1.0f);

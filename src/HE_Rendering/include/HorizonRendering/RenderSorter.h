@@ -125,6 +125,12 @@ public:
         batchDepthRuns(world, sortedIndices, DepthFilter::ShadowCasters, skipEntity, out);
     }
 
+    // HE_DEPTH_INSTANCING=0 sends the instanced depth-only draws of D3D11, D3D12
+    // and Vulkan (shadow runs, SSAO + GI pre-pass batches) back to the
+    // per-object loop — the A/B for a hardware smoke test, the same role
+    // HE_MTL_INSTANCING plays on Metal. Read once per process.
+    static bool depthInstancingEnabled();
+
 private:
     // Precomputed per-object sort key so the O(n log n) comparator never has to
     // recompute camera distance or extract a matrix column. Reused across frames

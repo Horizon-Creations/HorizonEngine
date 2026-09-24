@@ -83,12 +83,13 @@ GLSL_PRELUDE_OF = {
 # Entry point -> HLSL profile. Taken from the `compile(..., "<entry>", "<profile>", ...)`
 # call sites in D3D11Renderer.cpp / D3D12Renderer.cpp.
 HLSL_ENTRY_PROFILE = {
-    "GiGBufVS": "vs_5_0", "GiGBufPS": "ps_5_0",
+    "GiGBufVS": "vs_5_0", "GiGBufVSInstanced": "vs_5_0", "GiGBufPS": "ps_5_0",
     "GiProbeCS": "cs_5_0", "GiShadowCS": "cs_5_0",
     "PSLine": "ps_5_0", "VSLine": "vs_5_0",
     "PSMain": "ps_5_0", "VSMain": "vs_5_0",
     "VSMainInstanced": "vs_5_0", "VSMainSkinned": "vs_5_0", "VSDepth": "vs_5_0",
-    "PSPos": "ps_5_0", "VSPos": "vs_5_0",
+    "VSDepthInstanced": "vs_5_0",
+    "PSPos": "ps_5_0", "VSPos": "vs_5_0", "VSPosInstanced": "vs_5_0",
     "PSSky": "ps_5_0", "VSSky": "vs_5_0", "VSSkyCross": "vs_5_0",
     "SSAOMain": "ps_5_0", "SSAOBlurMain": "ps_5_0",
     "UIPSMain": "ps_5_0", "UIVSMain": "vs_5_0",

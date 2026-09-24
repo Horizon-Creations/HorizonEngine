@@ -167,6 +167,20 @@ VSOut VSPos(VSIn i)
     o.clip    = mul(uPosMVP,       float4(i.pos, 1.0));
     return o;
 }
+// Instanced twin for a GeometryPass batch: the CPU writes the SAME two products
+// the loop puts into SSAOPosCB, one {mvp, modelView} pair per instance, into the
+// scene's 128-byte instance buffer at t3 — so the instanced frame is the loop's
+// frame, bit for bit.
+struct PosInst { float4x4 mvp; float4x4 modelView; };
+StructuredBuffer<PosInst> gPosInstances : register(t3);
+VSOut VSPosInstanced(VSIn i, uint iid : SV_InstanceID)
+{
+    PosInst x = gPosInstances[iid];
+    VSOut o;
+    o.viewPos = mul(x.modelView, float4(i.pos, 1.0)).xyz;
+    o.clip    = mul(x.mvp,       float4(i.pos, 1.0));
+    return o;
+}
 float4 PSPos(VSOut i) : SV_TARGET
 {
     return float4(i.viewPos, 1.0);  // a=1 marks valid geometry
@@ -431,6 +445,20 @@ VSOut GiGBufVS(VSIn i)
     o.worldPos = mul(uModel, float4(i.pos, 1.0)).xyz;
     o.normal   = mul((float3x3)uModel, i.normal);
     o.clip     = mul(uMVP, float4(i.pos, 1.0));
+    return o;
+}
+// Instanced twin for a GeometryPass batch: per-instance {mvp, model} from the
+// scene's 128-byte instance buffer at t3 — the loop's PerObject products, so
+// the instanced G-buffer is the loop's G-buffer.
+struct GiGBufInst { float4x4 mvp; float4x4 model; };
+StructuredBuffer<GiGBufInst> gGiGBufInstances : register(t3);
+VSOut GiGBufVSInstanced(VSIn i, uint iid : SV_InstanceID)
+{
+    GiGBufInst x = gGiGBufInstances[iid];
+    VSOut o;
+    o.worldPos = mul(x.model, float4(i.pos, 1.0)).xyz;
+    o.normal   = mul((float3x3)x.model, i.normal);
+    o.clip     = mul(x.mvp, float4(i.pos, 1.0));
     return o;
 }
 struct GiGBufOut { float4 pos : SV_Target0; float4 norm : SV_Target1; };
