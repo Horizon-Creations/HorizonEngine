@@ -9,6 +9,7 @@
 #include <chrono>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace HE::Net;
 
@@ -535,6 +536,179 @@ TEST_CASE("NAT-PMP: a CGNAT external address is recognised as unreachable")
     REQUIRE(PortMapper::parseNatPmpAddressResponse(reply, sizeof(reply), ip, result));
     CHECK(ip == "100.90.1.5");
     CHECK(PortMapper::isPrivateOrCgnat(ip));
+}
+
+TEST_CASE("NAT-PMP: result code 2 is a refusal, not an absent router")
+{
+    // Same verdict as UPnP 606 and PCP 2: reached, understood, declined. If it
+    // read as a generic failure the user would be told nothing answered.
+    CHECK(PortMapper::natPmpResultCode(0) == PortMapResult::Ok);
+    CHECK(PortMapper::natPmpResultCode(1) == PortMapResult::NotSupported);
+    CHECK(PortMapper::natPmpResultCode(2) == PortMapResult::Refused);
+    CHECK(PortMapper::natPmpResultCode(3) == PortMapResult::RequestFailed);
+    CHECK(PortMapper::natPmpResultCode(4) == PortMapResult::RequestFailed);
+    CHECK(PortMapper::natPmpResultCode(5) == PortMapResult::NotSupported);
+    CHECK(PortMapper::natPmpResultCode(99) == PortMapResult::RequestFailed);
+}
+
+namespace {
+
+// A NAT-PMP router on loopback. NAT-PMP has no port of its own to choose — the
+// client always talks to 5351 — so this binds that port and answers whatever
+// `respond` builds; an empty reply drops the request, the way a lossy link would.
+struct FakeNatPmpRouter
+{
+    SocketHandle socket = kInvalidSocket;
+    std::thread  worker;
+    std::atomic<bool> stop{false};
+    std::vector<std::vector<std::uint8_t>> requests;   // read after stop()
+
+    bool bind() {
+        socket = socketCreateUdp();
+        return socket != kInvalidSocket && socketBindUdpTo(socket, "127.0.0.1", 5351);
+    }
+
+    template <typename Fn>
+    void serve(Fn respond) {
+        worker = std::thread([this, respond] {
+            while (!stop.load()) {
+                if (!socketWaitReadable(socket, 50)) continue;
+                std::uint8_t buf[64];
+                std::size_t got = 0;
+                std::string fromHost;
+                std::uint16_t fromPort = 0;
+                if (socketRecvFrom(socket, buf, sizeof(buf), got, fromHost, fromPort)
+                    != SocketResult::Ok) continue;
+                std::vector<std::uint8_t> req(buf, buf + got);
+                requests.push_back(req);
+                const std::vector<std::uint8_t> reply = respond(req, requests.size());
+                std::size_t sent = 0;
+                if (!reply.empty())
+                    socketSendTo(socket, reply.data(), reply.size(), fromHost, fromPort, sent);
+            }
+        });
+    }
+
+    void finish() {
+        stop = true;
+        if (worker.joinable()) worker.join();
+    }
+
+    ~FakeNatPmpRouter() {
+        finish();
+        if (socket != kInvalidSocket) socketClose(socket);
+    }
+};
+
+std::vector<std::uint8_t> natPmpMapReply(std::uint8_t opcode, std::uint16_t result,
+                                         std::uint16_t internalPort,
+                                         std::uint16_t externalPort, std::uint32_t lifetime)
+{
+    return { 0, static_cast<std::uint8_t>(opcode + 128),
+             static_cast<std::uint8_t>(result >> 8), static_cast<std::uint8_t>(result),
+             0, 0, 0, 42,
+             static_cast<std::uint8_t>(internalPort >> 8), static_cast<std::uint8_t>(internalPort),
+             static_cast<std::uint8_t>(externalPort >> 8), static_cast<std::uint8_t>(externalPort),
+             static_cast<std::uint8_t>(lifetime >> 24), static_cast<std::uint8_t>(lifetime >> 16),
+             static_cast<std::uint8_t>(lifetime >> 8),  static_cast<std::uint8_t>(lifetime) };
+}
+
+std::uint16_t reqU16(const std::vector<std::uint8_t>& r, std::size_t at)
+{
+    return static_cast<std::uint16_t>((r[at] << 8) | r[at + 1]);
+}
+std::uint32_t reqU32(const std::vector<std::uint8_t>& r, std::size_t at)
+{
+    return (std::uint32_t(r[at]) << 24) | (std::uint32_t(r[at + 1]) << 16) |
+           (std::uint32_t(r[at + 2]) << 8) | std::uint32_t(r[at + 3]);
+}
+
+} // namespace
+
+TEST_CASE("NAT-PMP against a loopback router: resend, refusal, granted port, renewal")
+{
+    // One case for all three so the fixed port is bound once: separate cases run
+    // in parallel would fight over it.
+    FakeNatPmpRouter router;
+    if (!router.bind()) {
+        MESSAGE("port 5351 is taken on this machine — skipping the loopback NAT-PMP test");
+        return;
+    }
+
+    // ── A lost datagram is resent, and a refusal comes back as Refused ──
+    // The first copy is dropped. Before the resend a single lost packet on the
+    // LAN made the host fall a rung down the ladder for nothing.
+    router.serve([](const std::vector<std::uint8_t>& req, std::size_t n) {
+        if (n == 1) return std::vector<std::uint8_t>{};
+        return natPmpMapReply(req[1], 2, 0, 0, 0);
+    });
+    PortMapping refusedInfo;
+    const PortMapResult refused =
+        PortMapper::natPmpAddMapping("127.0.0.1", 7777, 7777, PortMapper::kLeaseSeconds,
+                                     refusedInfo, 1500);
+    router.finish();
+    CHECK(refused == PortMapResult::Refused);
+    REQUIRE(router.requests.size() == 2);
+    CHECK(router.requests[0] == router.requests[1]);   // a resend, not a new request
+
+    // ── Success: the granted port and the granted lease are what is kept ──
+    router.stop = false;
+    router.requests.clear();
+    router.serve([](const std::vector<std::uint8_t>& req, std::size_t) {
+        if (req.size() == 2)   // address request, asked for after the mapping
+            return std::vector<std::uint8_t>{ 0, 128, 0, 0, 0, 0, 0, 42, 203, 0, 113, 7 };
+        return natPmpMapReply(req[1], 0, reqU16(req, 4), 40000, 3600);
+    });
+    PortMapping info;
+    const PortMapResult ok =
+        PortMapper::natPmpAddMapping("127.0.0.1", 7777, 7777, PortMapper::kLeaseSeconds,
+                                     info, 1500);
+    router.finish();
+    REQUIRE(ok == PortMapResult::Ok);
+    CHECK(info.externalPort == 40000);   // the router's choice, not ours
+    CHECK(info.leaseSeconds == 3600);    // shortened by the router; renewal times off this
+    CHECK(info.externalIp == "203.0.113.7");
+    REQUIRE_FALSE(router.requests.empty());
+    CHECK(reqU32(router.requests[0], 8) == PortMapper::kLeaseSeconds);
+
+    // ── Renewal asks for the port it was GRANTED, with a fresh full lease ──
+    PortMapper::MappingHandle handle;
+    handle.method       = PortMapper::MappingHandle::Method::NatPmp;
+    handle.gateway      = "127.0.0.1";
+    handle.port         = 7777;
+    handle.externalPort = info.externalPort;
+    handle.leaseSeconds = info.leaseSeconds;
+
+    router.stop = false;
+    router.requests.clear();
+    router.serve([](const std::vector<std::uint8_t>& req, std::size_t) {
+        if (req.size() == 2)
+            return std::vector<std::uint8_t>{ 0, 128, 0, 0, 0, 0, 0, 42, 203, 0, 113, 7 };
+        return natPmpMapReply(req[1], 0, reqU16(req, 4), reqU16(req, 6), 7200);
+    });
+    const PortMapResult renewed = PortMapper::renewMapping(handle);
+    router.finish();
+    CHECK(renewed == PortMapResult::Ok);
+    REQUIRE_FALSE(router.requests.empty());
+    const std::vector<std::uint8_t>& renewal = router.requests[0];
+    REQUIRE(renewal.size() == 12);
+    CHECK(renewal[1] == 2);                                 // TCP map opcode
+    CHECK(reqU16(renewal, 4) == 7777);                      // internal port
+    CHECK(reqU16(renewal, 6) == 40000);                     // the granted external port
+    CHECK(reqU32(renewal, 8) == PortMapper::kLeaseSeconds); // a full new lease
+}
+
+TEST_CASE("Renewing a permanent or absent mapping sends nothing and succeeds")
+{
+    // A UPnP router that only takes permanent leases (error 725) never lets the
+    // entry lapse, and a session that never mapped has nothing to renew.
+    PortMapper::MappingHandle none;
+    CHECK(PortMapper::renewMapping(none) == PortMapResult::Ok);
+
+    PortMapper::MappingHandle permanent;
+    permanent.method       = PortMapper::MappingHandle::Method::Upnp;
+    permanent.leaseSeconds = 0;
+    CHECK(PortMapper::renewMapping(permanent) == PortMapResult::Ok);
 }
 
 TEST_CASE("socketDefaultGateway: reports a usable router address")

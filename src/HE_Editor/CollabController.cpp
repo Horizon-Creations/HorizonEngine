@@ -2001,6 +2001,7 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 		// directory itself succeeded.
 		m_mapping       = r.mapping;
 		m_portMapped    = r.portMapped;
+		m_lastMapRenewMs = nowMs;
 		m_pinhole       = r.pinhole;
 		m_pinholeOpen   = r.pinholeOpen;
 		m_portMapStatus = r.mapStatus;
@@ -2055,6 +2056,30 @@ void CollabController::pumpDirectory(std::uint64_t nowMs)
 			SessionDirectory dir(endpoint);
 			dir.heartbeat(sid, token);
 		}).detach();
+	}
+
+	// ── Host: keep the router's forward alive ──
+	// The heartbeat above only reaches the directory; the router's lease is a
+	// separate clock. Without this a session past the lease keeps being handed
+	// out by the directory while the router has quietly stopped forwarding.
+	// Renewed at half the granted lease, as RFC 6886 has it, which leaves a whole
+	// second attempt before it lapses. Keyed on the mapping rather than the
+	// directory token: a forward is worth keeping for guests given the address
+	// directly even when publishing failed.
+	if (m_isHost && m_portMapped && m_mapping.leaseSeconds > 0)
+	{
+		const std::uint64_t renewEveryMs =
+			std::max<std::uint64_t>(60'000, std::uint64_t(m_mapping.leaseSeconds) * 500);
+		if (nowMs - m_lastMapRenewMs > renewEveryMs)
+		{
+			m_lastMapRenewMs = nowMs;
+			// Fire and forget like the heartbeat. A renewal still in flight when
+			// the session ends can re-add the entry after the unmap, but only
+			// for one lease — the finite lifetime is what bounds that.
+			std::thread([handle = m_mapping] {
+				HE::Net::PortMapper::renewMapping(handle);
+			}).detach();
+		}
 	}
 
 	// ── Client: the lookup finished; now connect ──

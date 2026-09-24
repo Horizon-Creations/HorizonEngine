@@ -86,6 +86,9 @@ struct PortMapping {
     std::string   externalIp;       // router's WAN address, when it reports one
     std::string   controlUrl;       // needed to remove the mapping later
     std::string   serviceType;
+    // The lease the router actually granted, which may be shorter than the one
+    // asked for. 0 = permanent (UPnP routers that only take permanent leases).
+    std::uint32_t leaseSeconds = 0;
 };
 
 // A discovered InternetGatewayDevice.
@@ -104,6 +107,12 @@ struct IgdDevice {
 
 class HE_NET_API PortMapper {
 public:
+    // The lease every mechanism asks for. Long enough that renewing it is rare,
+    // short enough that an entry left behind by a crash is gone by the next day
+    // rather than sitting in the router's table forever. A session that outlives
+    // it has to renew — see renewMapping.
+    static constexpr std::uint32_t kLeaseSeconds = 7200;
+
     // Find an IGD on the LAN. `timeoutMs` bounds the SSDP wait.
     static PortMapResult discover(IgdDevice& out, int timeoutMs = 3000);
 
@@ -159,6 +168,11 @@ public:
                                              std::uint16_t internalPort,
                                              int timeoutMs = 1500,
                                              Protocol protocol = Protocol::Tcp);
+    // What a NAT-PMP result code means for the caller. Code 2 is "Not
+    // Authorized/Refused" — the router speaks NAT-PMP and the user switched
+    // mapping off — which is the same verdict as UPnP 606 and PCP 2 and must not
+    // be reported as the router being absent.
+    static PortMapResult natPmpResultCode(std::uint16_t code);
 
     // ── PCP (RFC 6887) ───────────────────────────────────────────────────────
     // The successor to NAT-PMP, on the same port 5351 and deliberately
@@ -186,6 +200,8 @@ public:
 
     // `clientAddress` is this machine's own address on the interface facing the
     // router — the LAN IPv4 for a mapping, the global IPv6 for a pinhole.
+    // `renewNonce` renews an existing mapping: RFC 6887 identifies it by the
+    // nonce, so a fresh one would ask for a second mapping instead.
     static PortMapResult pcpMap(const std::string& gateway,
                                 const std::string& clientAddress,
                                 std::uint16_t internalPort,
@@ -193,7 +209,8 @@ public:
                                 std::uint32_t lifetimeSeconds,
                                 PcpMapping& out,
                                 int timeoutMs = 1500,
-                                Protocol protocol = Protocol::Tcp);
+                                Protocol protocol = Protocol::Tcp,
+                                const std::uint8_t* renewNonce = nullptr);
     // Lifetime 0 removes it. The nonce from the original grant identifies which.
     static PortMapResult pcpUnmap(const std::string& gateway,
                                   const std::string& clientAddress,
@@ -213,6 +230,10 @@ public:
         IgdDevice     igd;        // Upnp
         std::string   gateway;    // NatPmp / Pcp
         std::uint16_t port = 0;
+        // What the router granted, so a renewal asks for the same entry again.
+        std::uint16_t externalPort = 0;
+        std::uint32_t leaseSeconds = 0;   // 0 = permanent, nothing to renew
+        std::string   description;        // Upnp — re-sent on renewal
         // Pcp — needed to take the mapping down again, and the address family
         // that was opened.
         std::uint8_t  pcpNonce[12] = {};
@@ -224,6 +245,11 @@ public:
                                  MappingHandle& outHandle, PortMapping& outInfo,
                                  Protocol protocol = Protocol::Tcp);
     static void          unmapPort(const MappingHandle& handle);
+    // Re-requests the mapping the handle describes, the same way it was put up.
+    // Every lease here is finite, so a host that outlives it loses its forward
+    // without a word from the router; RFC 6886 has the client renew at half the
+    // granted lifetime. Blocks on network I/O like everything else here.
+    static PortMapResult renewMapping(const MappingHandle& handle);
 
     // ── IPv6 firewall pinhole ────────────────────────────────────────────────
     // Deliberately separate from mapPort: a pinhole and an IPv4 mapping are not

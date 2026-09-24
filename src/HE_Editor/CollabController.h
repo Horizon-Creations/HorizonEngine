@@ -1219,6 +1219,9 @@ private:
 	HE::Net::PortMapper::PinholeHandle m_pinhole;
 	bool m_pinholeOpen = false;
 	bool               m_portMapped = false;
+	// When the router's lease was last (re)taken. Every mapping is finite, so a
+	// session longer than the lease has to ask again or silently lose its forward.
+	std::uint64_t      m_lastMapRenewMs = 0;
 	std::string        m_portMapStatus;
 	std::string        m_advice;   // shown once, below both status lines
 	std::future<LookupResult>   m_lookupFuture;

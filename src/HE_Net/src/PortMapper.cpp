@@ -410,11 +410,6 @@ std::string& lastUpnpErrorSlot() {
 }
 void setLastUpnpError(std::string code) { lastUpnpErrorSlot() = std::move(code); }
 
-// Two hours, the same figure NAT-PMP and PCP ask for below. Long enough that no
-// ordinary session outlives it, short enough that an entry left behind by a
-// crash is gone by the next day rather than sitting in the table forever.
-constexpr std::uint32_t kMappingLeaseSeconds = 7200;
-
 } // namespace
 
 // Free function rather than a member: it belongs to the UPnP conversation, not
@@ -476,6 +471,7 @@ PortMapResult PortMapper::addMapping(const IgdDevice& igd,
     out.internalHost = host;
     out.controlUrl   = igd.controlUrl;
     out.serviceType  = igd.serviceType;
+    out.leaseSeconds = leaseSeconds;
 
     // Best-effort: a router that refuses this still has a working mapping.
     std::string wan;
@@ -543,9 +539,13 @@ std::uint32_t getU32(const std::uint8_t* p) {
            (static_cast<std::uint32_t>(p[2]) << 8)  |  static_cast<std::uint32_t>(p[3]);
 }
 
-// One request, one reply, bounded wait. NAT-PMP is UDP, so a lost datagram just
-// means no answer — treated as "router does not speak it" rather than retried
-// forever, since the caller has a fallback ladder anyway.
+// One request, one reply, bounded wait. NAT-PMP is UDP, so a lost datagram
+// would otherwise read as "router does not speak it" and drop the host a rung
+// down the ladder for nothing. RFC 6886 §3.1 has the client resend after 250 ms,
+// doubling each time; that schedule runs here INSIDE `timeoutMs` rather than for
+// the RFC's full minute, because the caller has a fallback ladder and a startup
+// probe waiting on it. Every resend is the identical request, so a late answer
+// to an earlier copy is just as good as one to the latest.
 bool natPmpExchange(const std::string& gateway, const std::vector<std::uint8_t>& request,
                     std::uint8_t* reply, std::size_t replyCapacity,
                     std::size_t& replyLen, int timeoutMs,
@@ -571,36 +571,59 @@ bool natPmpExchange(const std::string& gateway, const std::vector<std::uint8_t>&
         return false;
     }
 
-    std::size_t sent = 0;
-    if (socketSendTo(udp, request.data(), request.size(), gateway, kNatPmpPort, sent)
-        != SocketResult::Ok) {
-        socketClose(udp);
-        return false;
-    }
-
-    const bool ready = socketWaitReadable(udp, timeoutMs);
-    if (!ready) {
-        HE_LOG_DEBUG(Net, "NAT-PMP: gateway %s did not answer within %d ms",
-                     gateway.c_str(), timeoutMs);
-        socketClose(udp);
-        return false;
-    }
-
-    std::string fromHost;
-    std::uint16_t fromPort = 0;
-    const SocketResult rc =
-        socketRecvFrom(udp, reply, replyCapacity, replyLen, fromHost, fromPort);
-    socketClose(udp);
-
     // Only trust an answer that actually came from the gateway we asked. The
     // scope suffix is ours, not part of the wire address, so it is stripped
     // before comparing — recvfrom reports the bare address.
     const std::string bare = gateway.substr(0, gateway.find('%'));
-    if (rc == SocketResult::Ok && fromHost != bare) {
-        HE_LOG_WARN(Net, "NAT-PMP: ignoring a reply from %s — we asked %s",
-                    fromHost.c_str(), bare.c_str());
+
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point deadline = Clock::now() + std::chrono::milliseconds(timeoutMs);
+    int interval = 250;
+    int sends    = 0;
+    for (;;) {
+        std::size_t sent = 0;
+        if (socketSendTo(udp, request.data(), request.size(), gateway, kNatPmpPort, sent)
+            != SocketResult::Ok) {
+            socketClose(udp);
+            return false;
+        }
+        ++sends;
+
+        // Wait for this copy's interval, or whatever is left of the budget. A
+        // stray datagram from someone else does not cost the resend: the wait
+        // resumes against the same instant.
+        // Parenthesised: <winsock2.h> drags in the Windows min macro.
+        const Clock::time_point resendAt =
+            (std::min)(deadline, Clock::now() + std::chrono::milliseconds(interval));
+        for (;;) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                resendAt - Clock::now()).count();
+            if (left <= 0 || !socketWaitReadable(udp, static_cast<int>(left))) break;
+
+            std::string fromHost;
+            std::uint16_t fromPort = 0;
+            if (socketRecvFrom(udp, reply, replyCapacity, replyLen, fromHost, fromPort)
+                != SocketResult::Ok) {
+                socketClose(udp);
+                return false;
+            }
+            if (fromHost == bare) {
+                socketClose(udp);
+                return true;
+            }
+            HE_LOG_WARN(Net, "NAT-PMP: ignoring a reply from %s — we asked %s",
+                        fromHost.c_str(), bare.c_str());
+            replyLen = 0;
+        }
+
+        if (Clock::now() >= deadline) break;
+        interval *= 2;
     }
-    return rc == SocketResult::Ok && fromHost == bare;
+
+    HE_LOG_DEBUG(Net, "NAT-PMP: gateway %s did not answer within %d ms (%d attempts)",
+                 gateway.c_str(), timeoutMs, sends);
+    socketClose(udp);
+    return false;
 }
 
 } // namespace
@@ -650,6 +673,18 @@ bool PortMapper::parseNatPmpAddressResponse(const std::uint8_t* data, std::size_
     return true;
 }
 
+PortMapResult PortMapper::natPmpResultCode(std::uint16_t code) {
+    switch (code) {
+    case 0:  return PortMapResult::Ok;
+    case 1:  return PortMapResult::NotSupported;    // Unsupported Version
+    case 2:  return PortMapResult::Refused;         // Not Authorized/Refused
+    case 5:  return PortMapResult::NotSupported;    // Unsupported opcode
+    // 3 Network Failure (no WAN address yet), 4 Out of resources, and anything
+    // a later revision adds: the router could not oblige right now.
+    default: return PortMapResult::RequestFailed;
+    }
+}
+
 PortMapResult PortMapper::natPmpExternalIp(const std::string& gateway, std::string& out,
                                            int timeoutMs) {
     if (gateway.empty()) return PortMapResult::NotSupported;
@@ -678,7 +713,7 @@ PortMapResult PortMapper::natPmpExternalIp(const std::string& gateway, std::stri
     if (result != 0) {
         HE_LOG_WARN(Net, "NAT-PMP: gateway %s refused the address request (result code %u)",
                     gateway.c_str(), static_cast<unsigned>(result));
-        return PortMapResult::RequestFailed;
+        return natPmpResultCode(result);
     }
     HE_LOG_DEBUG(Net, "NAT-PMP: gateway %s reports WAN address %s",
                  gateway.c_str(), out.c_str());
@@ -721,9 +756,13 @@ PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
         return PortMapResult::RequestFailed;
     }
     if (result != 0) {
-        HE_LOG_WARN(Net, "NAT-PMP: gateway %s refused the mapping (result code %u)",
-                    gateway.c_str(), static_cast<unsigned>(result));
-        return PortMapResult::RequestFailed;
+        if (result == 2)
+            HE_LOG_WARN(Net, "NAT-PMP: %s refuses port forwarding — mapping is switched "
+                             "off on the router (Not Authorized/Refused)", gateway.c_str());
+        else
+            HE_LOG_WARN(Net, "NAT-PMP: gateway %s refused the mapping (result code %u)",
+                        gateway.c_str(), static_cast<unsigned>(result));
+        return natPmpResultCode(result);
     }
     // Worth calling out explicitly: publishing the requested port instead of
     // the granted one would advertise an endpoint nobody listens on.
@@ -740,6 +779,8 @@ PortMapResult PortMapper::natPmpAddMapping(const std::string& gateway,
     // the one we asked for would publish an endpoint nobody is listening on.
     out.externalPort = gotExternal;
     out.internalHost = socketLocalAddress();
+    // The router may also shorten the lease; renewal is timed off this one.
+    out.leaseSeconds = gotLifetime;
 
     std::string wan;
     if (natPmpExternalIp(gateway, wan, timeoutMs) == PortMapResult::Ok) out.externalIp = wan;
@@ -891,15 +932,19 @@ PortMapResult PortMapper::pcpMap(const std::string& gateway,
                                  std::uint16_t internalPort,
                                  std::uint16_t suggestedExternalPort,
                                  std::uint32_t lifetimeSeconds,
-                                 PcpMapping& out, int timeoutMs, Protocol protocol)
+                                 PcpMapping& out, int timeoutMs, Protocol protocol,
+                                 const std::uint8_t* renewNonce)
 {
     if (gateway.empty() || clientAddress.empty()) return PortMapResult::NotSupported;
 
     // The nonce identifies this mapping for the rest of its life: the router
     // matches a later delete against it, so a caller that loses it can no longer
-    // take its own mapping down.
+    // take its own mapping down. A renewal replays the original for the same
+    // reason.
     std::uint8_t nonce[12];
-    if (!Hpak::randomBytes(nonce, sizeof(nonce)))
+    if (renewNonce)
+        std::memcpy(nonce, renewNonce, sizeof(nonce));
+    else if (!Hpak::randomBytes(nonce, sizeof(nonce)))
     {
         for (std::size_t i = 0; i < sizeof(nonce); ++i)
             nonce[i] = static_cast<std::uint8_t>((internalPort * 31u + i * 7u) & 0xFF);
@@ -1025,7 +1070,8 @@ PortMapResult PortMapper::openPinhole(const std::string& globalV6, std::uint16_t
     const std::string gateway6 = socketDefaultGatewayIPv6();
     if (!gateway6.empty()) {
         PcpMapping pcp;
-        const PortMapResult r = pcpMap(gateway6, globalV6, port, port, 7200, pcp, 1500, protocol);
+        const PortMapResult r = pcpMap(gateway6, globalV6, port, port, kLeaseSeconds, pcp,
+                                       1500, protocol);
         if (r == PortMapResult::Ok) {
             out.method        = PinholeHandle::Method::Pcp;
             out.gateway       = gateway6;
@@ -1117,7 +1163,7 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
         // code it uses for a device that lacks permission. Diagnosing that from
         // the refusal alone is impossible, so the fix belongs at the source.
         PortMapResult r = addMapping(igd, port, port, description, outInfo, {},
-                                     kMappingLeaseSeconds, protocol);
+                                     kLeaseSeconds, protocol);
         // 725 is "OnlyPermanentLeasesSupported": the router understood and wants
         // 0. Honouring that is required by the spec — the cleanup pass is what
         // keeps those bounded instead of the lease.
@@ -1129,9 +1175,12 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
         refused = refused || r == PortMapResult::Refused;
         if (r == PortMapResult::Ok)
         {
-            outHandle.method = MappingHandle::Method::Upnp;
-            outHandle.igd    = igd;
-            outHandle.port   = port;
+            outHandle.method       = MappingHandle::Method::Upnp;
+            outHandle.igd          = igd;
+            outHandle.port         = port;
+            outHandle.externalPort = outInfo.externalPort;
+            outHandle.leaseSeconds = outInfo.leaseSeconds;
+            outHandle.description  = description;
             HE_LOG_INFO(Net, "Port mapping: succeeded via UPnP");
             return PortMapResult::Ok;
         }
@@ -1149,16 +1198,21 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
     if (!gateway.empty())
     {
         HE_LOG_DEBUG(Net, "Port mapping: default gateway is %s", gateway.c_str());
-        // Two hours, and re-requested whenever the session re-registers; RFC 6886
-        // recommends a finite lifetime so a crashed client's mapping expires
-        // instead of lingering forever.
-        constexpr std::uint32_t kLifetimeSeconds = 7200;
-        if (natPmpAddMapping(gateway, port, port, kLifetimeSeconds, outInfo, 1500, protocol)
-            == PortMapResult::Ok)
+        // A finite lifetime, as RFC 6886 recommends, so a crashed client's
+        // mapping expires instead of lingering forever. The price is that a
+        // longer session has to renew it — renewMapping, timed by the caller.
+        const PortMapResult nr =
+            natPmpAddMapping(gateway, port, port, kLeaseSeconds, outInfo, 1500, protocol);
+        // Result code 2 is the router saying no, exactly like UPnP 606 — it has
+        // to reach the verdict below or the user is told nothing answered.
+        refused = refused || nr == PortMapResult::Refused;
+        if (nr == PortMapResult::Ok)
         {
-            outHandle.method  = MappingHandle::Method::NatPmp;
-            outHandle.gateway = gateway;
-            outHandle.port    = port;
+            outHandle.method       = MappingHandle::Method::NatPmp;
+            outHandle.gateway      = gateway;
+            outHandle.port         = port;
+            outHandle.externalPort = outInfo.externalPort;
+            outHandle.leaseSeconds = outInfo.leaseSeconds;
             HE_LOG_INFO(Net, "Port mapping: succeeded via NAT-PMP");
             return PortMapResult::Ok;
         }
@@ -1170,7 +1224,8 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
         if (!lan.empty())
         {
             PcpMapping pcp;
-            const PortMapResult r = pcpMap(gateway, lan, port, port, 7200, pcp, 1500, protocol);
+            const PortMapResult r = pcpMap(gateway, lan, port, port, kLeaseSeconds, pcp, 1500,
+                                           protocol);
             refused = refused || r == PortMapResult::Refused;
             if (r == PortMapResult::Ok)
             {
@@ -1185,6 +1240,9 @@ PortMapResult PortMapper::mapPort(std::uint16_t port, const std::string& descrip
                 outInfo.internalPort = port;
                 outInfo.internalHost = lan;
                 outInfo.externalIp   = pcp.externalAddress;
+                outInfo.leaseSeconds = pcp.lifetimeSeconds;
+                outHandle.externalPort = outInfo.externalPort;
+                outHandle.leaseSeconds = outInfo.leaseSeconds;
                 HE_LOG_INFO(Net, "Port mapping: succeeded via PCP (IPv4)");
                 return PortMapResult::Ok;
             }
@@ -1240,6 +1298,63 @@ void PortMapper::unmapPort(const MappingHandle& handle)
         HE_LOG_DEBUG(Net, "Port mapping: nothing to take down");
         break;
     }
+}
+
+PortMapResult PortMapper::renewMapping(const MappingHandle& handle)
+{
+    // Asking for the entry we already hold: the granted external port, not the
+    // one originally requested, so the router extends it rather than moving it.
+    const std::uint16_t external = handle.externalPort ? handle.externalPort : handle.port;
+    PortMapping info;
+    PortMapResult r = PortMapResult::NotSupported;
+    std::uint16_t granted = external;
+
+    switch (handle.method)
+    {
+    case MappingHandle::Method::Upnp:
+        // A permanent lease (the 725 fallback) never lapses.
+        if (handle.leaseSeconds == 0) return PortMapResult::Ok;
+        // AddPortMapping for an entry that already points at this client is an
+        // update per the IGD spec, not a conflict.
+        r = addMapping(handle.igd, external, handle.port, handle.description, info, {},
+                       kLeaseSeconds, handle.protocol);
+        break;
+    case MappingHandle::Method::NatPmp:
+        r = natPmpAddMapping(handle.gateway, external, handle.port, kLeaseSeconds, info, 1500,
+                             handle.protocol);
+        granted = info.externalPort;
+        break;
+    case MappingHandle::Method::Pcp:
+    {
+        PcpMapping pcp;
+        r = pcpMap(handle.gateway, handle.clientAddress, handle.port, external, kLeaseSeconds,
+                   pcp, 1500, handle.protocol, handle.pcpNonce);
+        if (pcp.externalPort) granted = pcp.externalPort;
+        break;
+    }
+    case MappingHandle::Method::None:
+        return PortMapResult::Ok;
+    }
+
+    if (r != PortMapResult::Ok)
+    {
+        HE_LOG_WARN(Net, "Port mapping: renewing %s %u failed — the forward lapses when the "
+                         "current lease runs out", protocolName(handle.protocol),
+                    static_cast<unsigned>(handle.port));
+        return r;
+    }
+    // Only possible after a router restart lost the entry. The published
+    // endpoint still names the old port, and nothing here can republish it.
+    if (granted != external)
+        HE_LOG_WARN(Net, "Port mapping: the router moved the renewed forward from external "
+                         "port %u to %u — guests given the old address can no longer reach "
+                         "this host", static_cast<unsigned>(external),
+                    static_cast<unsigned>(granted));
+    else
+        HE_LOG_INFO(Net, "Port mapping: renewed %s %u for another %us",
+                    protocolName(handle.protocol), static_cast<unsigned>(handle.port),
+                    static_cast<unsigned>(kLeaseSeconds));
+    return PortMapResult::Ok;
 }
 
 } // namespace HE::Net
