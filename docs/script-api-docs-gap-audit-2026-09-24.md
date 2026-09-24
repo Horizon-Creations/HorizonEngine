@@ -458,7 +458,7 @@ Beschreibungen in `HcNodeDocs.cpp`, an der Quelle korrigiert (Editor-Tooltip und
   Weather schreibt nur sechs Felder (cloudCoverage, fogDensity, windSpeed, rain, snow, wetness)
   und gibt jedes frei, sobald es von außen geändert wurde (`drive`-Back-off,
   `WeatherSystem.cpp:160`), bis ein neues Preset es zurückholt; `flash` wird jeden Tick
-  überschrieben (`:207`). Probe: 0.9/0.7 bleiben 2,5 s stehen, Storm holt 1/1 zurück,
+  überschrieben (`:207`). Probe: 0.9/0.7 bleiben 3,5 s stehen, Storm holt 1/1 zurück,
   starBrightness unberührt. `kEnvFields` trägt jetzt ein `Wx`-Merkmal je Feld; jeder Setter nennt
   weiter „Weather component" (Test `test_hc_node_docs` bleibt per Konstruktion grün, nicht
   ausgeführt), aber feldgenau.
