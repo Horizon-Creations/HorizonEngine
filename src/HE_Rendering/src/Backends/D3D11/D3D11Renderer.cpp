@@ -6630,7 +6630,7 @@ void* D3D11Renderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
     }
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->OMSetDepthStencilState(p.depthState.Get(), 0);
-    ctx->RSSetState(p.fsRastState.Get());   // no culling, as GL's preview: winding is not guaranteed
+    ctx->RSSetState(p.rasterState.Get());   // the scene's: no culling (winding not guaranteed), depth clip on
     ctx->VSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
     ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
     ctx->PSSetConstantBuffers(1, 1, p.previewLightCB.GetAddressOf());

@@ -174,7 +174,7 @@ TEST_CASE("The world-preview pixel shaders compile under FXC (ps_5_0), both albe
 			INFO("entry ", entry, defines ? " (t1)" : " (t0)", ": ",
 			     err ? static_cast<const char*>(err->GetBufferPointer()) : "");
 			CHECK(SUCCEEDED(hr));
-			CHECK(code);
+			CHECK(code.Get() != nullptr);
 		}
 
 	// Negative control: the same call on a broken copy has to fail, or the
