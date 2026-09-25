@@ -2694,6 +2694,58 @@ inline HE::hccg::ClassSource fxCheatEvent()
     return f.done("cheat_event");
 }
 
+// datetime_double: the Double pin type end to end. The datetime rows carry
+// epoch seconds on Double pins because a float steps in 128 s there; kFixEpoch
+// is chosen so that step shows — (float)kFixEpoch is 1758800000, seven seconds
+// earlier, so a narrowing anywhere on the way turns second 27 into second 20.
+// A fixed instant rather than datetime.now: the two backends run one after the
+// other, and a clock read would differ between them whenever a second ticks over.
+constexpr double kFixEpoch = 1758800007.0;
+inline HE::hccg::ClassSource fxDatetimeDouble()
+{
+    Fx f;
+    f.var("stamp", PT::Double);
+    f.var("sec", PT::Int);
+    f.var("sec2", PT::Int);
+    f.var("text", PT::String);
+    f.var("narrow", PT::Float);
+
+    const int ev = f.event("Query");
+    int prev = ev;
+    auto chainSet = [&](const std::string& var, PT t, int src, int srcOut)
+    {
+        const int s = f.setVar(var, t);
+        f.data(src, srcOut, s, 0);
+        f.exec(prev, s);
+        prev = s;
+    };
+
+    // A Double literal on a Double parameter pin → Int result.
+    const int sec = f.engineCall("datetime.second");
+    f.g.findNode(sec)->pinDefaults[0] = Value::ofDouble(kFixEpoch);
+    chainSet("sec", PT::Int, sec, 0);
+
+    // …and into the formatter, which shares the parameter shape.
+    const int fmt = f.engineCall("datetime.format");
+    { Node* n = f.g.findNode(fmt);
+      n->pinDefaults[0] = Value::ofDouble(kFixEpoch);
+      n->pinDefaults[1] = Value::ofString("%S"); }
+    chainSet("text", PT::String, fmt, 0);
+
+    // A Double VARIABLE: set from a literal, read back into the engine call.
+    const int setStamp = f.setVar("stamp", PT::Double);
+    f.g.findNode(setStamp)->pinDefaults[0] = Value::ofDouble(kFixEpoch);
+    f.exec(prev, setStamp);
+    prev = setStamp;
+    const int sec2 = f.engineCall("datetime.second");
+    f.data(f.getVar("stamp", PT::Double), 0, sec2, 0);
+    chainSet("sec2", PT::Int, sec2, 0);
+
+    // Double → Float narrows at the wire, identically on both backends.
+    chainSet("narrow", PT::Float, f.getVar("stamp", PT::Double), 0);
+    return f.done("datetime_double");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -2709,6 +2761,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
+        fxDatetimeDouble(),
     };
 }
 

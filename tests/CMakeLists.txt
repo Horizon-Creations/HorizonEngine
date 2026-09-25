@@ -216,6 +216,7 @@ add_executable(he_tests
     test_mcp_tools_batch.cpp
     test_mcp_tools_screenshot.cpp
     test_mcp_camera_gizmos.cpp
+    test_viewport_overlays.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -505,6 +506,10 @@ add_executable(he_tests
     # the field of view, does every client get its own colour); the tag half
     # is ImGui and compiles away here, like the presence bar's.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpCameraGizmos.cpp
+    # The viewport's selection boxes and collider outlines: pure geometry into
+    # a DebugDrawBuffer, and the question worth asking is whether they stand at
+    # the WORLD position under a moved or scaled parent.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportOverlays.cpp
     # The graph quick-spawn key table is deliberately plain data and ImGui-free
     # (HcGraphHost turns a letter into an ImGuiKey), so its invariants can be
     # asserted here without a window.
@@ -723,7 +728,7 @@ set(HCGEN_CLASSES
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived
     inherit_novars_base inherit_novars input_actions containers reroutes
-    cheat_event
+    cheat_event datetime_double
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

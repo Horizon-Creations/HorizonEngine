@@ -352,6 +352,7 @@ json defaultToJson(const StructField& f)
     switch (f.type)
     {
     case PinType::Float:  return v.f;
+    case PinType::Double: return v.d;
     case PinType::Int:    return v.i;
     case PinType::Bool:   return v.b;
     case PinType::String: return v.s;
@@ -374,6 +375,7 @@ void defaultFromJson(const json& j, StructField& f)
     switch (f.type)
     {
     case PinType::Float:  if (j.is_number())  v.f = j.get<float>(); break;
+    case PinType::Double: if (j.is_number())  v.d = j.get<double>(); break;
     case PinType::Int:    if (j.is_number())  v.i = j.get<int>();   break;
     case PinType::Bool:   if (j.is_boolean()) v.b = j.get<bool>();  break;
     case PinType::String: if (j.is_string())  v.s = j.get<std::string>(); break;

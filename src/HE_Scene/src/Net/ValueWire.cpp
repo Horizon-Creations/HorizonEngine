@@ -14,7 +14,7 @@ namespace {
 
 // The last PinType. A byte off the wire above this names no type, and reading
 // it as one would index past every switch in the engine.
-constexpr std::uint8_t kMaxPinType = static_cast<std::uint8_t>(PinType::Vec4);
+constexpr std::uint8_t kMaxPinType = static_cast<std::uint8_t>(PinType::Double);
 
 // Recursion bound. A struct whose field is a struct is ordinary; a stream that
 // claims a thousand levels of it is not, and the reader would recurse until the
@@ -34,6 +34,14 @@ bool writeScalarPayload(BitWriter& w, const Value& v, PinType t, int depth)
 		case PinType::Bool:   w.writeBool(v.b); return true;
 		case PinType::Int:    w.writeUInt32(static_cast<std::uint32_t>(v.i)); return true;
 		case PinType::Float:  w.writeFloat(v.f); return true;
+		case PinType::Double:
+		{
+			// The bit pattern, whole: a Double exists because 32 bits were not enough.
+			std::uint64_t bits = 0;
+			std::memcpy(&bits, &v.d, sizeof bits);
+			w.writeUInt64(bits);
+			return true;
+		}
 		case PinType::String: w.writeString(v.s); return true;
 		case PinType::Vec2:   w.writeFloat(v.v2.x); w.writeFloat(v.v2.y); return true;
 		case PinType::Vec3:   w.writeFloat(v.v3.x); w.writeFloat(v.v3.y); w.writeFloat(v.v3.z);
@@ -91,6 +99,13 @@ bool readScalarPayload(BitReader& r, Value& out, PinType t, int depth)
 			return true;
 		}
 		case PinType::Float:  return r.readFloat(out.f);
+		case PinType::Double:
+		{
+			std::uint64_t bits = 0;
+			if (!r.readUInt64(bits)) return false;
+			std::memcpy(&out.d, &bits, sizeof bits);
+			return true;
+		}
 		case PinType::String: return r.readString(out.s);
 		case PinType::Vec2:   return r.readFloat(out.v2.x) && r.readFloat(out.v2.y);
 		case PinType::Vec3:   return r.readFloat(out.v3.x) && r.readFloat(out.v3.y) &&
@@ -361,6 +376,7 @@ void appendScalarJson(std::string& out, const Value& v)
 	case PinType::Int:
 	case PinType::Enum:   out += std::to_string(v.i); break;
 	case PinType::Float:  appendNumber(out, v.f); break;
+	case PinType::Double: appendNumber(out, v.d); break;
 	case PinType::String: appendJsonString(out, v.s); break;
 	case PinType::Vec2:   appendVec(out, &v.v2.x, 2); break;
 	case PinType::Vec3:   appendVec(out, &v.v3.x, 3); break;

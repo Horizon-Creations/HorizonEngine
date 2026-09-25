@@ -139,6 +139,7 @@ namespace
 		switch (t)
 		{
 			case P::Float:     return "Float";
+			case P::Double:    return "Double";
 			case P::Bool:      return "Bool";
 			case P::Int:       return "Int";
 			case P::String:    return "String";
@@ -388,6 +389,8 @@ std::uint32_t pinTypeColor(HorizonCode::PinType t)
 	{
 		case P::Exec:   return IM_COL32(235, 235, 235, 255);
 		case P::Float:  return IM_COL32(160, 200, 120, 255);
+		// Float's green, darker: the same kind of thing, more of it.
+		case P::Double: return IM_COL32(100, 170,  70, 255);
 		case P::Bool:   return IM_COL32(210,  90,  90, 255);
 		case P::Int:    return IM_COL32(110, 200, 200, 255);
 		case P::String: return IM_COL32(220, 130, 210, 255);
@@ -506,6 +509,7 @@ namespace
 		switch (t)
 		{
 			case P::Float:  return "Float";  case P::Bool:  return "Bool";
+			case P::Double: return "Double";
 			case P::Int:    return "Int";    case P::String:return "String";
 			case P::Vec2:   return "Vec2";   case P::Color: return "Color";
 			case P::Vec3:   return "Vec3";   case P::Vec4:  return "Vec4";
@@ -538,7 +542,7 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 		auto hit = [&](const std::string& s){ return q.empty() || lc(s).find(q) != std::string::npos; };
 
 		ImGui::TextDisabled("Default");
-		const P defs[] = { P::Float, P::Bool, P::Int, P::String,
+		const P defs[] = { P::Float, P::Double, P::Bool, P::Int, P::String,
 		                   P::Vec2, P::Vec3, P::Vec4, P::Color, P::Transform };
 		for (P d : defs)
 			if (hit(valueTypeName(d)) && ImGui::Selectable(valueTypeName(d), type == d && (!className || className->empty())))
@@ -1471,6 +1475,7 @@ bool drawStructDefaultEditor(HorizonCode::Variable& v)
 		switch (f.type)
 		{
 			case P::Float:  if (ImGui::DragFloat("##sd", &edit.f, 0.1f)) touched = true; break;
+			case P::Double: if (ImGui::DragScalar("##sd", ImGuiDataType_Double, &edit.d, 0.1f)) touched = true; break;
 			case P::Int:    if (ImGui::DragInt("##sd", &edit.i)) touched = true; break;
 			case P::Bool:   if (ImGui::Checkbox("##sd", &edit.b)) touched = true; break;
 			case P::String: ImGui::InputText("##sd", &edit.s);
@@ -1547,6 +1552,7 @@ bool drawArraySlotsEditor(std::vector<HorizonCode::Value>& items,
 		switch (elemType)
 		{
 			case P::Float:  if (ImGui::DragFloat("##el", &it.f, 0.1f)) changed = true; break;
+			case P::Double: if (ImGui::DragScalar("##el", ImGuiDataType_Double, &it.d, 0.1f)) changed = true; break;
 			case P::Int:  { int tmp = it.i; if (ImGui::DragInt("##el", &tmp)) { it.i = tmp; changed = true; } break; }
 			case P::Bool: { bool b = it.b; if (ImGui::Checkbox("##el", &b)) { it.b = b; changed = true; } break; }
 			case P::String: ImGui::InputText("##el", &it.s);
@@ -1657,7 +1663,7 @@ bool pinSupportsInlineDefault(const HorizonCode::Node& n, int unifiedPin)
 	const int di = dataInIndexOf(n, unifiedPin, pd);
 	if (di < 0 || pd.isArray) return false;
 	return pd.type == P::Bool || pd.type == P::Int ||
-	       pd.type == P::Float || pd.type == P::String;
+	       pd.type == P::Float || pd.type == P::Double || pd.type == P::String;
 }
 
 float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin)
@@ -1699,6 +1705,10 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
 	}
 	// The stored default keeps the PIN's type (retypes re-seed on next edit).
 	V& v = n.pinDefaults[di];
+	// Float → Double keeps the number: the datetime/fs rows moved from one to
+	// the other, and a literal typed into one of those pins before then is still
+	// what its author meant.
+	if (v.type == P::Float && pd.type == P::Double) { const float f = v.f; v = V::ofDouble(f); }
 	if (v.type != pd.type) { v = V{}; v.type = pd.type; }
 	// No SetNextItemWidth here: the canvas pushed the width of the slot it gave
 	// us (GraphEditor), and "fill the window" would lay the widget out across
@@ -1717,6 +1727,13 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
 		}
 		case P::Float:
 			ImGui::DragFloat("##pd", &v.f, 0.1f, 0.0f, 0.0f, "%.3g");
+			committed |= ImGui::IsItemDeactivatedAfterEdit();
+			break;
+		case P::Double:
+			// %.0f rather than %.3g: the numbers on these pins are epoch seconds
+			// and byte counts, which %g would show as 1.76e+09 — the very
+			// rounding this type exists to avoid, just on screen instead.
+			ImGui::DragScalar("##pd", ImGuiDataType_Double, &v.d, 1.0f, nullptr, nullptr, "%.0f");
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			break;
 		case P::String:

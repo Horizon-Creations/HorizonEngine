@@ -4342,6 +4342,7 @@ nlohmann::json scalarToJson(const Value& v)
     switch (v.type)
     {
     case P::Float:  return v.f;
+    case P::Double: return v.d;
     case P::Int:    return v.i;
     case P::Enum:   return v.i;
     case P::Bool:   return v.b;
@@ -4395,6 +4396,7 @@ Value scalarFromJson(const nlohmann::json& j, HorizonCode::PinType t, const std:
     switch (t)
     {
     case P::Float:  if (j.is_number())  v.f = j.get<float>(); break;
+    case P::Double: if (j.is_number())  v.d = j.get<double>(); break;
     case P::Int:
     case P::Enum:   if (j.is_number())  v.i = j.get<int>();   break;
     case P::Bool:   if (j.is_boolean()) v.b = j.get<bool>();  break;
@@ -5265,6 +5267,24 @@ using VV = std::vector<Value>;
 
 // Value readers — tolerant of missing args (return the type's zero).
 float       aF (const VV& a, size_t k) { return k < a.size() ? a[k].f   : 0.0f; }
+// Double reads go by the value's OWN type, like aV3 below: the datetime/fs rows
+// were Float-typed until the precision fix, and a C++ caller handing the
+// registry a Float (or an Int from `os.time()`-shaped code) still means that
+// number — reading `.d` unconditionally would turn it into 1970.
+double      aD (const VV& a, size_t k)
+{
+    if (k >= a.size()) return 0.0;
+    const Value& v = a[k];
+    switch (v.type)
+    {
+        case P::Double: return v.d;
+        case P::Float:  return (double)v.f;
+        case P::Int:
+        case P::Enum:   return (double)v.i;
+        case P::Bool:   return v.b ? 1.0 : 0.0;
+        default:        return 0.0;
+    }
+}
 bool        aB (const VV& a, size_t k) { return k < a.size() ? a[k].b   : false; }
 int         aI (const VV& a, size_t k) { return k < a.size() ? a[k].i   : 0; }
 // A Ref pin carries its instance handle in `ref`, not in `i` — reading it as an
@@ -6143,14 +6163,16 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "prefs.clear", "Prefs", true, {}, {}, "HE::api::prefs::clear",
             [](Ctx& c, const VV&){ prefs::clear(c); return VV{}; } });
 
-        // Date and time — the WALL clock, unlike the time group.
-        t.push_back({ "datetime.now", "DateTime", false, {}, {{"epochSeconds", P::Float}},
+        // Date and time — the WALL clock, unlike the time group. Double pins:
+        // at today's epoch a float steps in 128 s, so on a Float pin `now` read
+        // up to a minute wrong and `second(now())` was noise.
+        t.push_back({ "datetime.now", "DateTime", false, {}, {{"epochSeconds", P::Double}},
             "HE::api::datetime::now",
-            [](Ctx& c, const VV&){ return VV{ Value::ofFloat((float)datetime::now(c)) }; } });
+            [](Ctx& c, const VV&){ return VV{ Value::ofDouble(datetime::now(c)) }; } });
         t.push_back({ "datetime.format", "DateTime", false,
-            {{"epochSeconds", P::Float}, {"format", P::String}}, {{"text", P::String}},
+            {{"epochSeconds", P::Double}, {"format", P::String}}, {{"text", P::String}},
             "HE::api::datetime::format",
-            [](Ctx& c, const VV& a){ return VV{ Value::ofString(datetime::format(c, aF(a, 0), aS(a, 1))) }; } });
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(datetime::format(c, aD(a, 0), aS(a, 1))) }; } });
         {
             // One row per field, all the same shape.
             struct Part { const char* id; const char* cpp; int (*fn)(Ctx&, double); };
@@ -6164,9 +6186,9 @@ const std::vector<ApiFn>& registry()
                 { "datetime.weekday", "HE::api::datetime::weekday", &datetime::weekday },
             };
             for (const Part& p : kParts)
-                t.push_back({ p.id, "DateTime", false, {{"epochSeconds", P::Float}},
+                t.push_back({ p.id, "DateTime", false, {{"epochSeconds", P::Double}},
                     {{"value", P::Int}}, p.cpp,
-                    [fn = p.fn](Ctx& c, const VV& a){ return VV{ Value::ofInt(fn(c, aF(a, 0))) }; } });
+                    [fn = p.fn](Ctx& c, const VV& a){ return VV{ Value::ofInt(fn(c, aD(a, 0))) }; } });
         }
 
         // Math (pure)
@@ -6538,10 +6560,13 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::makeDir(aS(a, 0))) }; } });
         t.push_back({ "fs.isDir", "File", false, {{"path", P::String}}, {{"isDir", P::Bool}}, "HE::api::fs::isDir",
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::isDir(aS(a, 0))) }; } });
-        t.push_back({ "fs.size", "File", false, {{"path", P::String}}, {{"bytes", P::Float}}, "HE::api::fs::size",
-            [](Ctx&, const VV& a){ return VV{ Value::ofFloat((float)fs::size(aS(a, 0))) }; } });
-        t.push_back({ "fs.modified", "File", false, {{"path", P::String}}, {{"time", P::Float}}, "HE::api::fs::modified",
-            [](Ctx&, const VV& a){ return VV{ Value::ofFloat((float)fs::modified(aS(a, 0))) }; } });
+        // Double for the same reason as datetime: `modified` is on that clock (a
+        // file's age is `now - modified`), and a float counts bytes exactly only
+        // up to 16 MiB.
+        t.push_back({ "fs.size", "File", false, {{"path", P::String}}, {{"bytes", P::Double}}, "HE::api::fs::size",
+            [](Ctx&, const VV& a){ return VV{ Value::ofDouble(fs::size(aS(a, 0))) }; } });
+        t.push_back({ "fs.modified", "File", false, {{"path", P::String}}, {{"time", P::Double}}, "HE::api::fs::modified",
+            [](Ctx&, const VV& a){ return VV{ Value::ofDouble(fs::modified(aS(a, 0))) }; } });
         t.push_back({ "fs.list", "File", false, {{"dir", P::String}}, {{"names", P::String, /*isArray=*/true}}, "HE::api::fs::list",
             [](Ctx&, const VV& a){
                 Value arr; arr.isArray = true; arr.type = P::String;
