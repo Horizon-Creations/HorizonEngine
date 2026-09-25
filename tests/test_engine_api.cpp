@@ -4078,6 +4078,76 @@ TEST_CASE("datetime: the registry rows carry whole seconds (Double pins)")
     CHECK(call("datetime.year", { Value::ofInt(1000000000) })[0].i == 2001);
 }
 
+// A graph saved BEFORE the Double pins still carries `results = [Float]` on its
+// datetime.now node — EngineCall mirrors its pins into the asset, and the
+// runtime does not re-mirror from the registry (only the codegen does). The row
+// now answers a Double; that must narrow at the Float wire like it always did,
+// not read an empty `.f` and put the clock at 1970.
+TEST_CASE("datetime: a graph saved with Float pins still reads the clock")
+{
+    HE::api::Ctx api{};
+    auto build = [](P pinType)
+    {
+        HC::Graph g;
+        HC::Node ev; ev.type = NT::Event; ev.s = "Run"; const int evId = g.addNode(ev);
+        // Pure datetime.now: dataOut [epochSeconds 0]
+        HC::Node now; now.type = NT::EngineCall; now.s = "datetime.now"; now.hasArg = false;
+        now.results = { { "epochSeconds", pinType } };
+        const int nowId = g.addNode(now);
+        // Pure datetime.second: dataIn [epochSeconds 0], dataOut [value 1]
+        HC::Node sec; sec.type = NT::EngineCall; sec.s = "datetime.second"; sec.hasArg = false;
+        sec.params  = { { "epochSeconds", pinType } };
+        sec.results = { { "value", P::Int } };
+        const int secId = g.addNode(sec);
+        // SetVariable "t" (of the pin's type) then "s" (Int)
+        HC::Node st; st.type = NT::SetVariable; st.s = "t"; st.propType = pinType;
+        const int stId = g.addNode(st);
+        HC::Node ss; ss.type = NT::SetVariable; ss.s = "s"; ss.propType = P::Int;
+        const int ssId = g.addNode(ss);
+        REQUIRE(g.connect(evId, 0, stId, 0));
+        REQUIRE(g.connect(nowId, 0, stId, 2));    // now → t
+        REQUIRE(g.connect(stId, 1, ssId, 0));
+        REQUIRE(g.connect(nowId, 0, secId, 0));   // now → second
+        REQUIRE(g.connect(secId, 1, ssId, 2));    // second → s
+        return g;
+    };
+
+    SUBCASE("old asset: Float pins narrow, they do not zero")
+    {
+        const HC::Graph g = build(P::Float);
+        std::unordered_map<std::string, Value> vars;
+        HC::Runner runner(g, makeApiContext(api, vars));
+        runner.fireEvent("Run", 0);
+        REQUIRE(vars.count("t") == 1);
+        CHECK(vars["t"].type == P::Float);
+        CHECK(vars["t"].f > 1.6e9f);   // not 0 — not 1970
+        CHECK(std::fabs((double)vars["t"].f - (double)std::time(nullptr)) <= 130.0);   // a float's step, as before
+        CHECK(vars["s"].i >= 0);
+        CHECK(vars["s"].i <= 60);
+    }
+    SUBCASE("current mirror: Double pins keep the second")
+    {
+        const HC::Graph g = build(P::Double);
+        std::unordered_map<std::string, Value> vars;
+        HC::Runner runner(g, makeApiContext(api, vars));
+        runner.fireEvent("Run", 0);
+        REQUIRE(vars.count("t") == 1);
+        CHECK(vars["t"].type == P::Double);
+        CHECK(std::fabs(vars["t"].d - (double)std::time(nullptr)) <= 2.0);
+        const std::time_t tt = static_cast<std::time_t>(vars["t"].d);
+        std::tm parts{};
+#ifdef _WIN32
+        localtime_s(&parts, &tt);
+#else
+        localtime_r(&tt, &parts);
+#endif
+        // Two reads of a pure node are two dispatches (§3.4), so a tick of the
+        // clock between them may move the second on by one — never by a minute.
+        const int d = (vars["s"].i - parts.tm_sec + 60) % 60;
+        CHECK(d <= 1);
+    }
+}
+
 TEST_CASE("Double pin: converts like a number, and only like a number")
 {
     using HorizonCode::canConvertPinType;
