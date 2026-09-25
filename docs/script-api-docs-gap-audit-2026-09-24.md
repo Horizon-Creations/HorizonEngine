@@ -599,3 +599,127 @@ nichts an (deshalb die Vorlage `'["", 0]'` im Lua-Beispiel). HTTP: auch `http://
 true, abgelehnt = ok false/Status 0/„Could not connect to the server.", `post` an
 SimpleHTTP → 501, nach 33 weiteren Anfragen ist die erste vergessen, eine Anfrage nach der
 anderen mit 5 s Timeout.
+
+## Nachtrag Schritt 8 (25.09.2026): Multiplayer (net) + AntiCheat
+
+Handinhalt für 59 Ids: zwei Gruppen-Einleitungen (`overlay/groups/net.html` mit Tabelle
+Offline/Host/Client und den Abschnitten `#net-vars`, `#net-calls`, `#net-leaving`;
+`overlay/groups/anticheat.html`), Notes an 30 Ids (drei davon ergänzt) und vier Beispiele in Lua und Python
+(`lobby` an `net.joinDirect`, `health` an `net.declareVarInt`, `lever` an
+`net.allowAnyClient`, `cheat_log` an `anticheat.respond`). `callbacks.json`: die Gruppe
+„Multiplayer session" und die Einträge zu `onRep_<var>`, Remote Calls und `onCheatDetected`
+richtiggestellt (siehe unten).
+
+Grundlage war eine Wegwerf-Probe (`/tmp/he_probe79s8`) gegen `libHorizonScene` des Builds
+7d49d44f (`build/` vom 23.09.; `git diff 7d49d44f HEAD` über HE_Scene/HE_Core/HE_Python ist
+leer): zwei `NetGameSession` in einem Prozess über echtes UDP auf 127.0.0.1, je Welt ein
+`ScriptContext`, Szenen-Entities mit gleicher Szenen-UUID (Replicates an bzw. aus), Events,
+OnRep und Remote Calls abgeholt wie `GameApplication::dispatchNetEvents`. Zwei Modi: **app**
+(verdrahtet wie das Spiel: `net.host` aus dem Skript, Skripte sehen ein nicht angehängtes
+`AntiCheatHost`) und **ac** (Anti-Cheat so verbunden, wie die Engine es meint:
+`HostOptions::antiCheat` gesetzt, Skripte sehen den `AntiCheatHost` der Sitzung, dessen
+Senke `AntiCheatEvents::dispatch` ruft). Läufe Lua↔Lua, Python-Host↔Lua-Client und
+Lua-Host↔Python-Client, rund 130 Aufrufe je Lauf.
+
+**Zwei Harness-Fallen** (keine Engine-Befunde): `ScriptContext::hostServices()` ist ein
+Prozess-Static, also vor jedem Aufrufblock `setHostServices` der jeweiligen Seite; und das
+Python-Plugin hält *ein* `g_world` pro Prozess, gebunden vom zuletzt konstruierten
+`ScriptContext`. Python auf beiden Seiten oder Python-Host mit zuerst konstruiertem Kontext
+schreibt in die falsche Welt (erste Beispielläufe zeigten „health 0"). Gültig sind nur die
+Läufe mit einer Python-Seite, deren Kontext zuletzt gebaut wurde.
+
+Die vier Beispiele liefen wortgleich zu `notes.json` mit ausgelösten Callbacks, jeweils in
+drei Paarungen (Lua/Lua, Python-Host/Lua-Client, Lua-Host/Python-Client): Lobby mit falschem
+Code (Abbruch nach 10 s), dann richtigem (Host „Guest joined", Client „Joined as player 2");
+Health 90/80 auf Host und Client über `onRep_health`; Lever offline, dann Host und Client
+abwechselnd, Tor auf/zu mit Namen; Cheat-Log mit Suspect-Meldung, dann Confirmed →
+`respond(id, 1 + 16)` → Kick, Client meldet „Removed from the session: Wallhack (code 0)".
+`coverage.py`: 582/582 **ref**, **hand** 526 → 582.
+
+Beschreibungen in `HcNodeDocs.cpp`, an der Quelle korrigiert (Editor-Tooltip und Referenz);
+`registry.json` neu gedumpt, Diff genau diese neun `doc`-Felder:
+
+- `anticheat.check`: versprach die Regel aus den Projekteinstellungen. Die Regeln werden nur
+  gespeichert/geladen (`ProjectSettings.cpp`), `AntiCheatHost::check` liest sie nie und
+  antwortet immer true (Plan-Schritt 5 „Regel-Tabelle + check" offen). Probe: Regel Damage
+  0…100, Wert 500 → true.
+- `anticheat.reportPlayer`: nennt jetzt alle Rows, die eine Verbindungsnummer nehmen, und dass
+  sie keine Spielernummer ist.
+- `net.rpcSender`: riet, den Wert an Report/Check zu geben. Er ist eine PlayerId, die
+  Anti-Cheat-Rows nehmen eine ConnectionId (siehe Befund unten).
+- `net.host`: „read the port … back from the session status" gibt es nicht, keine Row liefert
+  den Port. Neu: fester Port, und dass erneutes Hosten die laufende Sitzung beendet.
+- `net.sessionId`: auf dem Client leer (nur `host()` setzt sie).
+- `net.ping`: auf dem Client immer 0 (sein Roster kennt nur ihn selbst,
+  `NetGameSession::pingMs`).
+- `net.kick`: „The same path the anti-cheat takes" gilt nur mit Anti-Cheat. Ohne schließt der
+  Host nur die Verbindung, der Client sieht `onDisconnected(1)` „Lost the connection to the
+  host." (gemessen); mit Anti-Cheat Grund 2 (aus dem Code, `anticheat.kick` gemessen).
+- `net.callServer`: nennt die Folge einer Ablehnung (still verworfen, mit Anti-Cheat Hard +
+  Kick) und dass der lokale Weg nur HorizonCode erreicht.
+- `net.callAllClients`: der Host-Anteil erreicht nur HorizonCode, Rückgabe dann false.
+
+Engine-Befunde, dokumentiert (Callout bzw. Note) und im Hive gemeldet, **nicht behoben**:
+
+- **Anti-Cheat läuft in keiner echten Sitzung.** `HostOptions::antiCheat` setzt nur der
+  Testcode (`test_net_game_session.cpp:718`, `test_net_rpc.cpp:327`); `net::host`
+  (`EngineApi.cpp:3061`), `--host` und Play as Host (`EditorApplication.cpp:4410`) bauen die
+  Optionen aus `defaultHostOptions()` ohne das Feld. Zusätzlich reden alle Frontends mit
+  `GameApplication::m_antiCheat` bzw. `EditorApplication::m_antiCheat`, einem zweiten
+  `AntiCheatHost`, den nie jemand `attach`t (nur `NetGameSession::m_acHost` wird angehängt,
+  `NetGameSession.cpp:421`) und dessen Event-Senke deshalb nie feuert; die Senke des
+  Sitzungs-Hosts setzt niemand. Folge in allen Frontends (auch C++-GameLogic über
+  `m_antiCheatServices`): `isEnabled` false, `check` true, `report`/`respond`/`kick`/
+  `setPlayerLabel` wirkungslos, Leser 0/"", `onCheatDetected` feuert nie. Probe app-Modus:
+  genau so. `git log -S` findet kein früheres `attach` der App-Instanz.
+- **Spielernummer ≠ Verbindungsnummer.** `net.*` zählt Spieler (Host 1, Joiner ab 2),
+  `anticheat.*` nimmt ConnectionIds (`EngineApi.cpp:2964`, `conn(player)`). Probe: Anna =
+  Spieler 2 auf Verbindung 1; `onCheatDetected` meldet `reportPlayer` 1; ein
+  `anticheat.report(net.rpcSender(), …)` im RPC-Handler landete auf Verbindung 2, die niemand
+  hält, Annas Score blieb 0. Keine Row übersetzt zwischen beiden.
+- **Remote Calls laufen lokal nur in HorizonCode.** `callHere` (`EngineApi.cpp:3321`) ruft
+  `Runtime::callFunction`; offline und auf dem Host liefern `callServer`, `callClient` an den
+  eigenen Spieler und der Host-Anteil von `callAllClients` für eine Lua/Python-Methode false
+  und führen nichts aus. `callAllClients` meldet dabei false, obwohl die Clients den Aufruf
+  bekommen und ausgeführt haben. Der Code-Kommentar nennt es eine bewusste Grenze; die
+  Beschreibungen versprachen „runs here"/„including this one".
+- **Ein verbotener `callServer` ist eine Hard-Meldung.** Ein Aufruf auf ein fremdes Entity
+  ohne `allowAnyClient` wird ohne Log verworfen, der Client bekam true; mit Anti-Cheat ist er
+  `ForeignEntity`, Level 3, und der Spieler flog sofort (Probe). Ein Skriptfehler reicht dafür.
+- **Lua: `old` eines Vec3 ist 0.** `luaPushFieldValue` (`ScriptContext.cpp:494`) hat keinen
+  `Vec3`-Fall und schiebt `v.f`. Probe: `onRep_pos(old)` bekam 0 bei alten Werten 0,0,0 und
+  1,2,3; Python bekommt `[x, y, z]`. Derselbe Konverter pusht RPC-Argumente an Lua, ein Vec3
+  aus einem Graphen käme also ebenfalls als 0 an (aus dem Code, nicht gemessen).
+- **Zweite Sitzung in derselben Szene repliziert keine Szenen-Entities.**
+  `SpawnReplicator::bindSceneEntities` überspringt Entities mit `netId != 0`, `leave()` setzt
+  sie nicht zurück. Probe: nach erneutem `host` bzw. `leave` → `host` „Session walk: 0
+  replicated scene entities"; ein Client, der dieser Sitzung beitrat, bekam keine Bindung
+  („CallServer 'open': the entity is not replicated").
+- **Falscher Join-Code scheitert nie.** Der Host lehnt den Handshake ab
+  („join code did not match"), der Client bleibt bei Status 2 mit leerem `lastError`
+  (gemessen 8 s, `timeoutSec` 5). Kein Absturz, aber ohne eigenen Timeout hängt eine Lobby.
+- **Setter mit falschem Typ ändern den Typ der Variable** und liefern true; in einer Sitzung
+  schickt der Host danach jeden Tick die ganze Tabelle („Variable 'label' changed type during
+  the session — resending", 60-mal in rund 2 s).
+
+Verhalten, gemessen und in Einleitung/Notes: Offline isAuthority true, localPlayer 1,
+playerCount 1, playerAt(0) 1, declare/set/get arbeiten auf der Komponente; Host status 1,
+sessionId 8 Zeichen, joinCode 26; Client status 2 → 3, localPlayer 0 → 2, playerCount 1,
+playerAt(0) eigene Nummer, playerName nur eigener, ping 0, sessionId/joinCode leer.
+`onSessionStarted` nur Host (nur aus `host()`), `onPlayerJoined/Left` nur Host (Name in
+`onPlayerLeft` schon leer), `onConnected/onDisconnected` nur Client, `onSessionEnded` nur aus
+`leave()` (auch beim erneuten Hosten), nicht nach Kick/Verbindungsverlust. `onRep_` nur auf
+dem Client, nur mit notify, nur an der betroffenen Entity; eine Client-Vorhersage wird binnen
+0,5 s vom Host überschrieben, auch unverändert, mit erneutem `onRep_`. RPC-Argumente behalten
+ihren Typ (int/float/bool/string, Liste, Dict mit `__keys`), `rpcSender` auf dem Host die
+Spielernummer, auf dem Client 1. `allowAnyClient` gilt je Sitzung (offline false), antwortet
+auf dem Client und für nicht replizierte Entities true ohne Wirkung. Ints 32 Bit
+(3000000000 → −1294967296). Nach dem Ende behält der Client die letzten Werte. Lua: fehlendes
+Bool = false, fehlender Name → *bad argument*; Python: `IndexError` bzw. `TypeError`.
+Anti-Cheat (ac-Modus): Suspect ab 5, Confirmed ab 20, Halbwertszeit 30 s; `respond` nur im
+Frame des Events (später: „no such pending report"), 9 = log+flag, 17 = log+kick;
+`anticheat.kick(conn, 42)` → Client-Ticket Level 2, leere Regel, `reportReason` 42, dann
+`onDisconnected(2)` „Removed from the session."; Policy-Kick → Regelname, Grund 0; Join-Name ist
+Label, `setPlayerLabel` ersetzt ihn im Log. LAN nicht messbar: macOS verweigert dem
+Probe-Prozess Multicast/Broadcast („the system refused to send an announcement"), die Liste
+blieb leer. `expectDisplacement` und `localCharacter` mit Charakter nicht gemessen.

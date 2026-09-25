@@ -70,36 +70,36 @@
     },
     {
       "title": "Multiplayer session",
-      "note": "Every script instance receives these, on host and client alike.",
+      "note": "Every script instance on the machine concerned receives these. Each event happens on one side only: the host hears players come and go, a client hears its own connection. Measured with host and client in Lua and Python.",
       "items": [
         { "lua": "onConnected(self)", "python": "on_connected(self)", "to": "all",
-          "when": "This client finished connecting to a host." },
+          "when": "Client only: the connection is up and the host's world has arrived (<code>net.status()</code> is 3). A client gets no <code>onSessionStarted</code>." },
         { "lua": "onDisconnected(self, reason)", "python": "on_disconnected(self, reason)", "to": "all",
-          "when": "The connection ended; <code>reason</code> is the numeric reason code." },
+          "when": "Client only: the host is gone or removed us; the status is now 4. <code>reason</code>: 0 left, 1 connection lost, 2 kicked, 3 refused, 4 other engine version, 5 other project. A kick with anti-cheat off arrives as 1. Not sent for a <code>leave()</code> of our own, and not followed by <code>onSessionEnded</code>." },
         { "lua": "onPlayerJoined(self, player)", "python": "on_player_joined(self, player)", "to": "all",
-          "when": "A player joined; <code>player</code> is their connection number." },
+          "when": "Host only: a player joined and has the world. <code>player</code> is their player number (2, 3, …), the one <code>net.playerName</code> takes, not an anti-cheat connection number." },
         { "lua": "onPlayerLeft(self, player)", "python": "on_player_left(self, player)", "to": "all",
-          "when": "A player left." },
+          "when": "Host only: a player left, was kicked or timed out. <code>net.playerName(player)</code> is already empty." },
         { "lua": "onSessionStarted(self)", "python": "on_session_started(self)", "to": "all",
-          "when": "A session started (hosting or joined)." },
+          "when": "Host only: <code>net.host</code> opened a session." },
         { "lua": "onSessionEnded(self)", "python": "on_session_ended(self)", "to": "all",
-          "when": "The session ended." }
+          "when": "<code>net.leave()</code> ended the session on this machine, on the host also when hosting again. Not sent to a client that was removed or lost the host (that is <code>onDisconnected</code>)." }
       ]
     },
     {
       "title": "Replication and remote calls",
       "items": [
         { "lua": "onRep_&lt;var&gt;(self, old)", "python": "on_rep_&lt;var&gt;(self, old)", "to": "entity",
-          "when": "A replicated variable (declared with <code>horizon.net.declareVarInt</code> and its siblings) arrived with a new value on this client. Never called on the host, which set the value itself. <code>&lt;var&gt;</code> is the variable's name <em>verbatim</em> (<code>health</code> gives <code>onRep_health</code> / <code>on_rep_health</code>); <code>old</code> is the previous value. Read the new one with <code>horizon.net.getVarInt</code> and its siblings." },
+          "when": "A replicated variable (declared with <code>horizon.net.declareVarInt</code> and its siblings) arrived with a new value on this client. Never called on the host, which set the value itself. <code>&lt;var&gt;</code> is the variable's name <em>verbatim</em> (<code>health</code> gives <code>onRep_health</code> / <code>on_rep_health</code>); <code>old</code> is the previous value: in Python a list <code>[x, y, z]</code> for a Vector, in Lua the number 0 for a Vector (known issue). Read the new one with <code>horizon.net.getVarInt</code> and its siblings. Only on the entity whose variable changed, and only for variables declared with <code>notify</code>. A client that wrote the variable itself gets it again when the host's value comes back." },
         { "lua": "&lt;name&gt;(self, …)", "python": "&lt;name&gt;(self, …)", "to": "entity",
-          "when": "A remote call from <code>horizon.net.callServer</code>, <code>callClient</code> or <code>callAllClients</code> runs the method of exactly that name on the target entity's script, with the caller's extra arguments. No renaming between languages: a Lua <code>takeDamage</code> is reached by a Python caller as <code>takeDamage</code>." }
+          "when": "A remote call from <code>horizon.net.callServer</code>, <code>callClient</code> or <code>callAllClients</code> runs the method of exactly that name on the target entity's script, with the caller's extra arguments. No renaming between languages: a Lua <code>takeDamage</code> is reached by a Python caller as <code>takeDamage</code>. On the host the method runs only for a call from a client: offline and on the host itself these rows reach a HorizonCode class only, see <a href=\"#net-calls\">Remote calls</a>." }
       ]
     },
     {
       "title": "Anti-cheat",
       "items": [
         { "lua": "onCheatDetected(self, reportId)", "python": "on_cheat_detected(self, reportId)", "to": "all",
-          "when": "The host's anti-cheat filed a report. Read it with <code>horizon.anticheat.reportLevel</code>, <code>reportRule</code>, <code>reportPlayer</code> … and override the host's reaction with <code>horizon.anticheat.respond</code> in the same frame." }
+          "when": "The host's anti-cheat filed a report. Read it with <code>horizon.anticheat.reportLevel</code>, <code>reportRule</code>, <code>reportPlayer</code> … and override the host's reaction with <code>horizon.anticheat.respond</code> in the same frame. On a client it fires once, when the host is removing it (<code>reportPlayer</code> 0). Never fires in build 7d49d44f, see <a href=\"#anticheat\">Anti-Cheat</a>." }
       ]
     }
   ]

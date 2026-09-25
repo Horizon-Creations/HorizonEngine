@@ -1484,10 +1484,12 @@ namespace
 	// ── Anti-cheat ───────────────────────────────────────────────────────────
 	{ "anticheat.check",
 	  "Asks the host's anti-cheat whether a value a client claimed (damage, a "
-	  "pickup, a currency delta) is allowed by the rule of that name from the "
-	  "project's Anti-Cheat settings. True = apply it. Always true on a client, "
-	  "with anti-cheat off, or for a rule the project does not declare: a check "
-	  "the engine cannot make never blocks the game." },
+	  "pickup, a currency delta) is allowed by the rule of that name. True = "
+	  "apply it. The rule table is not built yet: the rules on the project's "
+	  "Anti-Cheat page are saved but never read, so every check answers true. "
+	  "That is also the answer on a client, with anti-cheat off and for a rule "
+	  "nobody declared: a check the engine cannot make never blocks the game. "
+	  "Player is a connection number, like Report Player's." },
 	{ "anticheat.expectDisplacement",
 	  "Tells the anti-cheat that this entity is about to move a long way on "
 	  "purpose (respawn, portal, dash), up to Max Distance. One shot: the next "
@@ -1520,8 +1522,11 @@ namespace
 	  "Displacement, or the name your own Report Observation used. On a client "
 	  "this is the one thing the host tells you about a kick." },
 	{ "anticheat.reportPlayer",
-	  "The connection the report is about — the number Set Player Label and "
-	  "Kick Player take. 0 on a client, where the report is about you." },
+	  "The connection the report is about — the number Check Rule, Report "
+	  "Observation, Set Player Label, Kick Player and Player Score take. Not a "
+	  "multiplayer player number: players are numbered 1, 2, … in join order, "
+	  "connections separately (the first joiner is usually player 2 on "
+	  "connection 1). 0 on a client, where the report is about you." },
 	{ "anticheat.reportEntity",
 	  "The network id of the entity involved, when the report names one (a "
 	  "movement report names the character). 0 when it does not." },
@@ -1547,10 +1552,11 @@ namespace
 	{ "net.host",
 	  "Opens a multiplayer session on this machine and makes it joinable. Port 0 "
 	  "takes the project's Default port (Project Settings, Game, Multiplayer), "
-	  "which is where the seats, the tick rate and the rest come from too; read "
-	  "the port that was actually opened back from the session status, and hand "
-	  "joiners the Join Code. Everyone who joins plays in YOUR world: the host "
-	  "decides what really happened." },
+	  "which is where the seats, the tick rate and the rest come from too. If "
+	  "that is 0 as well the system picks one, and no node reads it back, so a "
+	  "game that tells joiners its port hosts on a fixed one; hand them the Join "
+	  "Code too. Hosting again ends the running session first. Everyone who "
+	  "joins plays in YOUR world: the host decides what really happened." },
 	{ "net.joinDirect",
 	  "Joins a session by address and port, with the host's Join Code. The code "
 	  "is not a password you can guess past: without the right one the "
@@ -1571,7 +1577,7 @@ namespace
 	  "Empty when nothing has failed." },
 	{ "net.sessionId",
 	  "This session's short id, for showing to somebody who is about to join. "
-	  "Empty outside a session." },
+	  "Only the host has it: empty on a client and outside a session." },
 	{ "net.joinCode",
 	  "The secret a joiner needs. Only the HOST gets it — on a client this is "
 	  "deliberately empty, so a client's own UI cannot hand out seats to a "
@@ -1612,11 +1618,14 @@ namespace
 	  "The display name that player joined with. Empty for a player this machine "
 	  "does not know about — on a client that is everybody but itself." },
 	{ "net.ping",
-	  "Round trip to that player in milliseconds. 0 when there is nothing to "
-	  "measure: ourselves, and a player nobody has timed yet." },
+	  "Round trip to that player in milliseconds, as the host measures it. 0 "
+	  "when there is nothing to measure: ourselves, a player nobody has timed "
+	  "yet, and every player on a client, which knows only itself." },
 	{ "net.kick",
-	  "Host only: remove a player from the session. The same path the anti-cheat "
-	  "takes, so a session that logs one logs the other." },
+	  "Host only: remove a player from the session. With anti-cheat on it takes "
+	  "the anti-cheat's path: the player is told and sees reason 2, Kicked. "
+	  "Without, the connection is simply closed and the player sees reason 1, a "
+	  "lost connection." },
 	{ "net.ownerOf",
 	  "Which player this entity belongs to, or 0 for the host's own and for "
 	  "anything nobody owns (a door, a crate)." },
@@ -1631,22 +1640,29 @@ namespace
 	  "Ask the HOST to run a function on this entity. The ordinary way to say "
 	  "\"I pulled the lever\": a client may not change the world, so it asks. "
 	  "Nothing comes back — a remote call has no return value. Allowed for the "
-	  "entity you own, or for a function whose header has Any Client ticked. "
-	  "Offline it simply runs here, so a graph works in single player." },
+	  "entity you own, or for a function whose header has Any Client ticked; "
+	  "anything else the host drops, and with anti-cheat on it is a Hard report "
+	  "that removes the caller. Offline and on the host it runs here, on the "
+	  "entity's HorizonCode class, so a graph works in single player; a Lua or "
+	  "Python method is not reached that way." },
 	{ "net.callClient",
 	  "Host only: run a function on ONE player's machine — the hit marker, the "
 	  "message only they should see. Addressed by PlayerId. Nothing comes back." },
 	{ "net.callAllClients",
 	  "Host only: run a function on EVERY machine, including this one — the "
-	  "round-over horn, the explosion everybody sees. Nothing comes back." },
+	  "round-over horn, the explosion everybody sees. Nothing comes back. Here "
+	  "on the host only the entity's HorizonCode class runs it (a Lua or Python "
+	  "method is not reached, and the result is then false although the clients "
+	  "were sent the call)." },
 	{ "net.allowAnyClient",
 	  "Let any client call that function on this entity, not just its owner. For "
 	  "Lua, Python and C++ classes, which have no function header to tick. A door "
 	  "belongs to nobody, so without this nobody could open it." },
 	{ "net.rpcSender",
-	  "Which player asked for the call being handled right now. 0 at any other "
-	  "moment. Hand it to Report Cheat or Check when the call is a claim worth "
-	  "weighing." },
+	  "Which player asked for the call being handled right now: a player number, "
+	  "as Player Name and Kick From Session take it. 0 at any other moment. Not "
+	  "a connection number, so it is not what the anti-cheat rows take (Report "
+	  "Player gives that one)." },
 	{ "net.declareVarBool",
 	  "Declares a replicated Bool on this entity: the host owns it, every client "
 	  "is sent its value. Call it in On Init. With Notify on, the clients get "

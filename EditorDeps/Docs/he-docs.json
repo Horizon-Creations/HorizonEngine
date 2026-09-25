@@ -1,6 +1,6 @@
 {
  "baseUrl": "https://horizoncreations.dev/HorizonEngineDocs/",
- "generated": "2026-09-24",
+ "generated": "2026-09-25",
  "groups": [
   {
    "pages": [
@@ -21537,7 +21537,7 @@
        "r": [
         {
          "s": "",
-         "t": "Every script instance receives these, on host and client alike."
+         "t": "Every script instance on the machine concerned receives these. Each event happens on one side only: the host hears players come and go, a client hears its own connection. Measured with host and client in Lua and Python."
         }
        ]
       },
@@ -21580,7 +21580,23 @@
          [
           {
            "s": "",
-           "t": "This client finished connecting to a host."
+           "t": "Client only: the connection is up and the host's world has arrived ("
+          },
+          {
+           "s": "c",
+           "t": "net.status()"
+          },
+          {
+           "s": "",
+           "t": " is 3). A client gets no "
+          },
+          {
+           "s": "c",
+           "t": "onSessionStarted"
+          },
+          {
+           "s": "",
+           "t": "."
           }
          ]
         ],
@@ -21600,7 +21616,7 @@
          [
           {
            "s": "",
-           "t": "The connection ended; "
+           "t": "Client only: the host is gone or removed us; the status is now 4. "
           },
           {
            "s": "c",
@@ -21608,7 +21624,23 @@
           },
           {
            "s": "",
-           "t": " is the numeric reason code."
+           "t": ": 0 left, 1 connection lost, 2 kicked, 3 refused, 4 other engine version, 5 other project. A kick with anti-cheat off arrives as 1. Not sent for a "
+          },
+          {
+           "s": "c",
+           "t": "leave()"
+          },
+          {
+           "s": "",
+           "t": " of our own, and not followed by "
+          },
+          {
+           "s": "c",
+           "t": "onSessionEnded"
+          },
+          {
+           "s": "",
+           "t": "."
           }
          ]
         ],
@@ -21628,7 +21660,7 @@
          [
           {
            "s": "",
-           "t": "A player joined; "
+           "t": "Host only: a player joined and has the world. "
           },
           {
            "s": "c",
@@ -21636,7 +21668,15 @@
           },
           {
            "s": "",
-           "t": " is their connection number."
+           "t": " is their player number (2, 3, …), the one "
+          },
+          {
+           "s": "c",
+           "t": "net.playerName"
+          },
+          {
+           "s": "",
+           "t": " takes, not an anti-cheat connection number."
           }
          ]
         ],
@@ -21656,7 +21696,15 @@
          [
           {
            "s": "",
-           "t": "A player left."
+           "t": "Host only: a player left, was kicked or timed out. "
+          },
+          {
+           "s": "c",
+           "t": "net.playerName(player)"
+          },
+          {
+           "s": "",
+           "t": " is already empty."
           }
          ]
         ],
@@ -21676,7 +21724,15 @@
          [
           {
            "s": "",
-           "t": "A session started (hosting or joined)."
+           "t": "Host only: "
+          },
+          {
+           "s": "c",
+           "t": "net.host"
+          },
+          {
+           "s": "",
+           "t": " opened a session."
           }
          ]
         ],
@@ -21695,8 +21751,20 @@
          ],
          [
           {
+           "s": "c",
+           "t": "net.leave()"
+          },
+          {
            "s": "",
-           "t": "The session ended."
+           "t": " ended the session on this machine, on the host also when hosting again. Not sent to a client that was removed or lost the host (that is "
+          },
+          {
+           "s": "c",
+           "t": "onDisconnected"
+          },
+          {
+           "s": "",
+           "t": ")."
           }
          ]
         ]
@@ -21806,7 +21874,15 @@
           },
           {
            "s": "",
-           "t": " is the previous value. Read the new one with "
+           "t": " is the previous value: in Python a list "
+          },
+          {
+           "s": "c",
+           "t": "[x, y, z]"
+          },
+          {
+           "s": "",
+           "t": " for a Vector, in Lua the number 0 for a Vector (known issue). Read the new one with "
           },
           {
            "s": "c",
@@ -21814,7 +21890,15 @@
           },
           {
            "s": "",
-           "t": " and its siblings."
+           "t": " and its siblings. Only on the entity whose variable changed, and only for variables declared with "
+          },
+          {
+           "s": "c",
+           "t": "notify"
+          },
+          {
+           "s": "",
+           "t": ". A client that wrote the variable itself gets it again when the host's value comes back."
           }
          ]
         ],
@@ -21871,6 +21955,15 @@
           {
            "s": "c",
            "t": "takeDamage"
+          },
+          {
+           "s": "",
+           "t": ". On the host the method runs only for a call from a client: offline and on the host itself these rows reach a HorizonCode class only, see "
+          },
+          {
+           "h": "#net-calls",
+           "s": "l",
+           "t": "Remote calls"
           },
           {
            "s": "",
@@ -21960,7 +22053,24 @@
           },
           {
            "s": "",
-           "t": " in the same frame."
+           "t": " in the same frame. On a client it fires once, when the host is removing it ("
+          },
+          {
+           "s": "c",
+           "t": "reportPlayer"
+          },
+          {
+           "s": "",
+           "t": " 0). Never fires in build 7d49d44f, see "
+          },
+          {
+           "h": "#anticheat",
+           "s": "l",
+           "t": "Anti-Cheat"
+          },
+          {
+           "s": "",
+           "t": "."
           }
          ]
         ]
@@ -21969,7 +22079,7 @@
      ],
      "eyebrow": "What the engine calls on your script",
      "id": "callbacks",
-     "text": "A Lua script returns a table of functions, a Python script defines one subclass of horizon.Behavior. The engine calls the functions below on it by name; every one is optional, and a missing one is simply skipped. Lua names are camelCase, Python names snake_case. Receives says who gets the call: this entity means only the script on the entity concerned, every script means every Lua and Python instance in the session, so check the arguments before reacting. Results of many calls on this page arrive here: timers, input actions, network events, anti-cheat reports. Lifecycle Lua / Python Receives When onStart(self)\non_start(self) this entity Once, when the script starts: at the start of play mode, in a packaged game when its scene loads, and for scripts on entities that arrive later (an additive zone). Exposed properties are already set. onUpdate(self, dt)\non_update(self, dt) this entity Every frame. dt is the scaled frame time in seconds (0 while the game is paused through horizon.time.setTimeScale(0)). Physics contacts Both entities of a contact get the event, each with the other's id. A contact where either side no longer exists is dropped entirely. A trigger contact fires both pairs: onCollisionEnter and onBeginOverlap, then onCollisionExit and onEndOverlap. Lua / Python Receives When onCollisionEnter(self, other)\non_collision_enter(self, other) this entity Another physics body starts touching this entity. onCollisionExit(self, other)\non_collision_exit(self, other) this entity It stops touching. onBeginOverlap(self, other)\non_begin_overlap(self, other) this entity Something enters a trigger collider on this entity, or this entity enters one. onEndOverlap(self, other)\non_end_overlap(self, other) this entity The overlap ends. Input actions Actions are the ones defined in the project's input mapping. These go to every script instance, not only to the player's entity; pick the action by name. For polling instead of events use horizon.input.actionDown and friends. Lua / Python Receives When onInputPressed(self, name)\non_input_pressed(self, name) every script A button action went down this frame. onInputReleased(self, name)\non_input_released(self, name) every script A button action went up this frame. onInputAxis(self, name, value)\non_input_axis(self, name, value) every script Every frame, for each 1D axis action, with its current value (not multiplied by dt). onInputAxis2D(self, name, x, y)\non_input_axis2d(self, name, x, y) every script Every frame, for each 2D axis action. Note the lower-case d in the Python name. Timers Lua / Python Receives When onTimer(self, handle)\non_timer(self, handle) every script A timer started with horizon.timer.after or horizon.timer.every went off. handle is the value those calls returned; compare it to tell your timers apart, because every instance receives every timer. Timers run on real time, a paused game does not stretch them. Animation notifies Lua / Python Receives When onAnimationNotify(self, name)\non_animation_notify(self, name) this entity The entity's animation passed a single-frame notify called name. onAnimationNotifyBegin(self, name)\non_animation_notify_begin(self, name) this entity A notify state (a notify with a duration) started. onAnimationNotifyEnd(self, name)\non_animation_notify_end(self, name) this entity The notify state ended. In-game UI pointer Sent to scripts on entities with an interactive UI element (a button, or any element carrying a script) under the mouse. Lua / Python Receives When onClick(self)\non_click(self) this entity The element was clicked: pressed and released over it. onHoverEnter(self)\non_hover_enter(self) this entity The pointer moved onto the element. onHoverExit(self)\non_hover_exit(self) this entity The pointer left it. Multiplayer session Every script instance receives these, on host and client alike. Lua / Python Receives When onConnected(self)\non_connected(self) every script This client finished connecting to a host. onDisconnected(self, reason)\non_disconnected(self, reason) every script The connection ended; reason is the numeric reason code. onPlayerJoined(self, player)\non_player_joined(self, player) every script A player joined; player is their connection number. onPlayerLeft(self, player)\non_player_left(self, player) every script A player left. onSessionStarted(self)\non_session_started(self) every script A session started (hosting or joined). onSessionEnded(self)\non_session_ended(self) every script The session ended. Replication and remote calls Lua / Python Receives When onRep_<var>(self, old)\non_rep_<var>(self, old) this entity A replicated variable (declared with horizon.net.declareVarInt and its siblings) arrived with a new value on this client. Never called on the host, which set the value itself. <var> is the variable's name verbatim (health gives onRep_health / on_rep_health); old is the previous value. Read the new one with horizon.net.getVarInt and its siblings. <name>(self, …)\n<name>(self, …) this entity A remote call from horizon.net.callServer, callClient or callAllClients runs the method of exactly that name on the target entity's script, with the caller's extra arguments. No renaming between languages: a Lua takeDamage is reached by a Python caller as takeDamage. Anti-cheat Lua / Python Receives When onCheatDetected(self, reportId)\non_cheat_detected(self, reportId) every script The host's anti-cheat filed a report. Read it with horizon.anticheat.reportLevel, reportRule, reportPlayer … and override the host's reaction with horizon.anticheat.respond in the same frame.",
+     "text": "A Lua script returns a table of functions, a Python script defines one subclass of horizon.Behavior. The engine calls the functions below on it by name; every one is optional, and a missing one is simply skipped. Lua names are camelCase, Python names snake_case. Receives says who gets the call: this entity means only the script on the entity concerned, every script means every Lua and Python instance in the session, so check the arguments before reacting. Results of many calls on this page arrive here: timers, input actions, network events, anti-cheat reports. Lifecycle Lua / Python Receives When onStart(self)\non_start(self) this entity Once, when the script starts: at the start of play mode, in a packaged game when its scene loads, and for scripts on entities that arrive later (an additive zone). Exposed properties are already set. onUpdate(self, dt)\non_update(self, dt) this entity Every frame. dt is the scaled frame time in seconds (0 while the game is paused through horizon.time.setTimeScale(0)). Physics contacts Both entities of a contact get the event, each with the other's id. A contact where either side no longer exists is dropped entirely. A trigger contact fires both pairs: onCollisionEnter and onBeginOverlap, then onCollisionExit and onEndOverlap. Lua / Python Receives When onCollisionEnter(self, other)\non_collision_enter(self, other) this entity Another physics body starts touching this entity. onCollisionExit(self, other)\non_collision_exit(self, other) this entity It stops touching. onBeginOverlap(self, other)\non_begin_overlap(self, other) this entity Something enters a trigger collider on this entity, or this entity enters one. onEndOverlap(self, other)\non_end_overlap(self, other) this entity The overlap ends. Input actions Actions are the ones defined in the project's input mapping. These go to every script instance, not only to the player's entity; pick the action by name. For polling instead of events use horizon.input.actionDown and friends. Lua / Python Receives When onInputPressed(self, name)\non_input_pressed(self, name) every script A button action went down this frame. onInputReleased(self, name)\non_input_released(self, name) every script A button action went up this frame. onInputAxis(self, name, value)\non_input_axis(self, name, value) every script Every frame, for each 1D axis action, with its current value (not multiplied by dt). onInputAxis2D(self, name, x, y)\non_input_axis2d(self, name, x, y) every script Every frame, for each 2D axis action. Note the lower-case d in the Python name. Timers Lua / Python Receives When onTimer(self, handle)\non_timer(self, handle) every script A timer started with horizon.timer.after or horizon.timer.every went off. handle is the value those calls returned; compare it to tell your timers apart, because every instance receives every timer. Timers run on real time, a paused game does not stretch them. Animation notifies Lua / Python Receives When onAnimationNotify(self, name)\non_animation_notify(self, name) this entity The entity's animation passed a single-frame notify called name. onAnimationNotifyBegin(self, name)\non_animation_notify_begin(self, name) this entity A notify state (a notify with a duration) started. onAnimationNotifyEnd(self, name)\non_animation_notify_end(self, name) this entity The notify state ended. In-game UI pointer Sent to scripts on entities with an interactive UI element (a button, or any element carrying a script) under the mouse. Lua / Python Receives When onClick(self)\non_click(self) this entity The element was clicked: pressed and released over it. onHoverEnter(self)\non_hover_enter(self) this entity The pointer moved onto the element. onHoverExit(self)\non_hover_exit(self) this entity The pointer left it. Multiplayer session Every script instance on the machine concerned receives these. Each event happens on one side only: the host hears players come and go, a client hears its own connection. Measured with host and client in Lua and Python. Lua / Python Receives When onConnected(self)\non_connected(self) every script Client only: the connection is up and the host's world has arrived (net.status() is 3). A client gets no onSessionStarted. onDisconnected(self, reason)\non_disconnected(self, reason) every script Client only: the host is gone or removed us; the status is now 4. reason: 0 left, 1 connection lost, 2 kicked, 3 refused, 4 other engine version, 5 other project. A kick with anti-cheat off arrives as 1. Not sent for a leave() of our own, and not followed by onSessionEnded. onPlayerJoined(self, player)\non_player_joined(self, player) every script Host only: a player joined and has the world. player is their player number (2, 3, …), the one net.playerName takes, not an anti-cheat connection number. onPlayerLeft(self, player)\non_player_left(self, player) every script Host only: a player left, was kicked or timed out. net.playerName(player) is already empty. onSessionStarted(self)\non_session_started(self) every script Host only: net.host opened a session. onSessionEnded(self)\non_session_ended(self) every script net.leave() ended the session on this machine, on the host also when hosting again. Not sent to a client that was removed or lost the host (that is onDisconnected). Replication and remote calls Lua / Python Receives When onRep_<var>(self, old)\non_rep_<var>(self, old) this entity A replicated variable (declared with horizon.net.declareVarInt and its siblings) arrived with a new value on this client. Never called on the host, which set the value itself. <var> is the variable's name verbatim (health gives onRep_health / on_rep_health); old is the previous value: in Python a list [x, y, z] for a Vector, in Lua the number 0 for a Vector (known issue). Read the new one with horizon.net.getVarInt and its siblings. Only on the entity whose variable changed, and only for variables declared with notify. A client that wrote the variable itself gets it again when the host's value comes back. <name>(self, …)\n<name>(self, …) this entity A remote call from horizon.net.callServer, callClient or callAllClients runs the method of exactly that name on the target entity's script, with the caller's extra arguments. No renaming between languages: a Lua takeDamage is reached by a Python caller as takeDamage. On the host the method runs only for a call from a client: offline and on the host itself these rows reach a HorizonCode class only, see Remote calls. Anti-cheat Lua / Python Receives When onCheatDetected(self, reportId)\non_cheat_detected(self, reportId) every script The host's anti-cheat filed a report. Read it with horizon.anticheat.reportLevel, reportRule, reportPlayer … and override the host's reaction with horizon.anticheat.respond in the same frame. On a client it fires once, when the host is removing it (reportPlayer 0). Never fires in build 7d49d44f, see Anti-Cheat.",
      "title": "Callbacks"
     },
     {
@@ -57157,6 +57267,1238 @@
        ]
       },
       {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Multiplayer: one machine "
+        },
+        {
+         "s": "b",
+         "t": "hosts"
+        },
+        {
+         "s": "",
+         "t": " and is the authority, the others "
+        },
+        {
+         "s": "b",
+         "t": "join"
+        },
+        {
+         "s": "",
+         "t": " as clients and play in the host's world. The rows fall into five parts: the session (host, join, leave, status), the players, who owns an entity, replicated variables, and remote calls. Session events, "
+        },
+        {
+         "s": "c",
+         "t": "onRep_<var>"
+        },
+        {
+         "s": "",
+         "t": " and the remote-call targets are script methods, listed under "
+        },
+        {
+         "h": "#callbacks",
+         "s": "l",
+         "t": "Callbacks"
+        },
+        {
+         "s": "",
+         "t": ". The examples below ran word for word in Lua and Python, host and client in both languages, over a real connection on one machine."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Hosting."
+         },
+         {
+          "s": "",
+          "t": " "
+         },
+         {
+          "s": "c",
+          "t": "host(port, name)"
+         },
+         {
+          "s": "",
+          "t": " answers "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "",
+          "t": " once the socket is open; the status is 1 at once and the host's scripts get "
+         },
+         {
+          "s": "c",
+          "t": "onSessionStarted"
+         },
+         {
+          "s": "",
+          "t": ". Port 0 takes the project's Default port (Project Settings, Game, Multiplayer, 47824 in a new project). If that is 0 as well the system picks one, and no row reads it back, so a game that tells joiners its port hosts on a fixed one. Hosting again while a session runs ends it first ("
+         },
+         {
+          "s": "c",
+          "t": "onSessionEnded"
+         },
+         {
+          "s": "",
+          "t": ", then "
+         },
+         {
+          "s": "c",
+          "t": "onSessionStarted"
+         },
+         {
+          "s": "",
+          "t": ", a new session id and join code; everybody who had joined is out)."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Joining."
+         },
+         {
+          "s": "",
+          "t": " "
+         },
+         {
+          "s": "c",
+          "t": "joinDirect(address, port, code, name)"
+         },
+         {
+          "s": "",
+          "t": " answers "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "",
+          "t": " when the attempt has started (status 2); "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": " for port 0 or above 65535, and for "
+         },
+         {
+          "s": "c",
+          "t": "joinLan"
+         },
+         {
+          "s": "",
+          "t": " with no LAN entry at that index. The client's scripts get "
+         },
+         {
+          "s": "c",
+          "t": "onConnected"
+         },
+         {
+          "s": "",
+          "t": " once the whole world has arrived (status 3), the host's get "
+         },
+         {
+          "s": "c",
+          "t": "onPlayerJoined(player)"
+         },
+         {
+          "s": "",
+          "t": ". "
+         },
+         {
+          "s": "b",
+          "t": "A wrong join code never fails:"
+         },
+         {
+          "s": "",
+          "t": " the host refuses the handshake, but the client stays at status 2 with an empty "
+         },
+         {
+          "s": "c",
+          "t": "lastError"
+         },
+         {
+          "s": "",
+          "t": " (measured for 8 seconds). Give up yourself, as "
+         },
+         {
+          "h": "#ex-net-joinDirect",
+          "s": "l",
+          "t": "the lobby example"
+         },
+         {
+          "s": "",
+          "t": " does."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "LAN browsing"
+         },
+         {
+          "s": "",
+          "t": " needs the system's permission to use the local network. Without it (macOS asks per application) the host logs “the system refused to send an announcement” and every list stays empty; "
+         },
+         {
+          "s": "c",
+          "t": "joinDirect"
+         },
+         {
+          "s": "",
+          "t": " keeps working. The LAN rows were not measured with the permission granted."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Player numbers."
+         },
+         {
+          "s": "",
+          "t": " The host is player 1, joiners are 2, 3, … in join order, and a number is never reused. That is the number "
+         },
+         {
+          "s": "c",
+          "t": "playerName"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "ping"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "kick"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "callClient"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "rpcSender"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "onPlayerJoined"
+         },
+         {
+          "s": "",
+          "t": "/"
+         },
+         {
+          "s": "c",
+          "t": "onPlayerLeft"
+         },
+         {
+          "s": "",
+          "t": " use. It is "
+         },
+         {
+          "s": "i",
+          "t": "not"
+         },
+         {
+          "s": "",
+          "t": " the connection number the "
+         },
+         {
+          "h": "#anticheat",
+          "s": "l",
+          "t": "anticheat"
+         },
+         {
+          "s": "",
+          "t": " rows take."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Ownership."
+         },
+         {
+          "s": "",
+          "t": " Scene entities belong to nobody: "
+         },
+         {
+          "s": "c",
+          "t": "ownerOf"
+         },
+         {
+          "s": "",
+          "t": " is 0. "
+         },
+         {
+          "s": "c",
+          "t": "isLocallyControlled"
+         },
+         {
+          "s": "",
+          "t": " is "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "",
+          "t": " offline and for any entity without Replicates; for a replicated entity nobody owns it is "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "",
+          "t": " on the host and "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": " on a client."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Row"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Offline"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Host"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Client"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "status"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "2 while connecting, 3 joined, 4 after losing the host"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "isAuthority"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "isClient"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "true"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "true"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "true"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "localPlayer"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "its own number (2, 3, …); 0 while connecting"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "playerCount"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "playerAt"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1 / "
+          },
+          {
+           "s": "c",
+           "t": "playerAt(0)"
+          },
+          {
+           "s": "",
+           "t": " = 1"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "everybody, in join order"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1: a client knows only itself"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "playerName"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "\"\""
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "every player's"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "only its own"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "ping"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "round trip to each client, ms"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "always 0"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "sessionId"
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "joinCode"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "\"\""
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "8 / 26 characters"
+          }
+         ],
+         [
+          {
+           "s": "c",
+           "t": "\"\""
+          },
+          {
+           "s": "",
+           "t": " / "
+          },
+          {
+           "s": "c",
+           "t": "\"\""
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Replicated variables"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Declare, then write on the host."
+         },
+         {
+          "s": "",
+          "t": " "
+         },
+         {
+          "s": "c",
+          "t": "declareVar…(entity, name, initial, notify)"
+         },
+         {
+          "s": "",
+          "t": " works on any entity and also offline; a declaration made before the session starts is carried into it (the "
+         },
+         {
+          "h": "#ex-net-declareVarInt",
+          "s": "l",
+          "t": "health example"
+         },
+         {
+          "s": "",
+          "t": " declares in "
+         },
+         {
+          "s": "c",
+          "t": "onStart"
+         },
+         {
+          "s": "",
+          "t": "). Only entities with Replicates on are sent to clients: on any other the variable exists on this machine only. Declaring a name a second time answers "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "",
+          "t": " and changes nothing (measured offline)."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "What a client sees."
+         },
+         {
+          "s": "",
+          "t": " A write on the host reaches every client a moment later (well within half a second on one machine); with "
+         },
+         {
+          "s": "c",
+          "t": "notify"
+         },
+         {
+          "s": "",
+          "t": " the client's script gets "
+         },
+         {
+          "s": "c",
+          "t": "onRep_<name>(old)"
+         },
+         {
+          "s": "",
+          "t": ", never the host's (it made the change) and never for a variable declared without notify. A client's own "
+         },
+         {
+          "s": "c",
+          "t": "setVar…"
+         },
+         {
+          "s": "",
+          "t": " changes only its copy; the host sends its value again within a moment, even an unchanged one, and "
+         },
+         {
+          "s": "c",
+          "t": "onRep_"
+         },
+         {
+          "s": "",
+          "t": " fires once more with "
+         },
+         {
+          "s": "c",
+          "t": "old"
+         },
+         {
+          "s": "",
+          "t": " = the client's value."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Types are not checked on write."
+         },
+         {
+          "s": "",
+          "t": " A getter of another type answers zero ("
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": ", 0, "
+         },
+         {
+          "s": "c",
+          "t": "\"\""
+         },
+         {
+          "s": "",
+          "t": ", 0,0,0). A setter of another type answers "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "",
+          "t": " and changes the variable's type, after which the declared getter reads zero; during a session the host then re-sends the entity's whole variable table every tick. Ints are 32-bit: 3000000000 is stored as −1294967296."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "After the session ends, a client keeps the last values it received."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Known issue (build 7d49d44f): in Lua, "
+          },
+          {
+           "s": "c",
+           "t": "old"
+          },
+          {
+           "s": "b",
+           "t": " of a Vector variable is the number 0."
+          },
+          {
+           "s": "",
+           "t": " The value handed to "
+          },
+          {
+           "s": "c",
+           "t": "onRep_<name>(old)"
+          },
+          {
+           "s": "",
+           "t": " goes through a converter that has no case for vectors, so Lua always receives "
+          },
+          {
+           "s": "c",
+           "t": "0"
+          },
+          {
+           "s": "",
+           "t": " (measured with old values 0,0,0 and 1,2,3). Python receives a list "
+          },
+          {
+           "s": "c",
+           "t": "[x, y, z]"
+          },
+          {
+           "s": "",
+           "t": ". Read the new value with "
+          },
+          {
+           "s": "c",
+           "t": "getVarVec3"
+          },
+          {
+           "s": "",
+           "t": ", and keep the previous one yourself if you need it. A Vector argument of a remote call from a HorizonCode graph goes through the same converter."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "warning"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Remote calls"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Who runs what."
+         },
+         {
+          "s": "",
+          "t": " "
+         },
+         {
+          "s": "c",
+          "t": "callServer"
+         },
+         {
+          "s": "",
+          "t": " on a client sends the call to the host, which runs the method of that name on the entity: its HorizonCode class first, else its Lua or Python script, else the C++ module (first one that has it). "
+         },
+         {
+          "s": "c",
+          "t": "callClient"
+         },
+         {
+          "s": "",
+          "t": " and "
+         },
+         {
+          "s": "c",
+          "t": "callAllClients"
+         },
+         {
+          "s": "",
+          "t": " go from the host to the clients' copies of the entity. The arguments after the name arrive with their types: integers, other numbers, booleans and strings as they are, a Lua table or Python list as a list, a Python dict as a table with "
+         },
+         {
+          "s": "c",
+          "t": "__keys"
+         },
+         {
+          "s": "",
+          "t": ". Inside the method "
+         },
+         {
+          "s": "c",
+          "t": "rpcSender()"
+         },
+         {
+          "s": "",
+          "t": " is the caller's player number (on a client: 1, the host)."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Nothing runs locally in a script."
+         },
+         {
+          "s": "",
+          "t": " Offline and on the host, "
+         },
+         {
+          "s": "c",
+          "t": "callServer"
+         },
+         {
+          "s": "",
+          "t": ", "
+         },
+         {
+          "s": "c",
+          "t": "callClient"
+         },
+         {
+          "s": "",
+          "t": " to the host's own player and the host's own share of "
+         },
+         {
+          "s": "c",
+          "t": "callAllClients"
+         },
+         {
+          "s": "",
+          "t": " reach only a HorizonCode class. A Lua or Python method is not called and the row answers "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": ", for "
+         },
+         {
+          "s": "c",
+          "t": "callAllClients"
+         },
+         {
+          "s": "",
+          "t": " even though the clients were sent the call. On the host, call your own method directly ("
+         },
+         {
+          "h": "#ex-net-allowAnyClient",
+          "s": "l",
+          "t": "lever example"
+         },
+         {
+          "s": "",
+          "t": ")."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Who may call."
+         },
+         {
+          "s": "",
+          "t": " A client may call the entities it owns, plus functions opened with "
+         },
+         {
+          "s": "c",
+          "t": "allowAnyClient"
+         },
+         {
+          "s": "",
+          "t": " (or Any Client on a HorizonCode function header). Anything else the host drops without a log line, while the client's "
+         },
+         {
+          "s": "c",
+          "t": "callServer"
+         },
+         {
+          "s": "",
+          "t": " still answered "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "",
+          "t": "; with anti-cheat on it is a "
+         },
+         {
+          "s": "i",
+          "t": "Hard"
+         },
+         {
+          "s": "",
+          "t": " report and the caller is removed at once (measured). "
+         },
+         {
+          "s": "c",
+          "t": "allowAnyClient"
+         },
+         {
+          "s": "",
+          "t": " lasts for one session and answers "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": " offline, so call it in "
+         },
+         {
+          "s": "c",
+          "t": "onSessionStarted"
+         },
+         {
+          "s": "",
+          "t": ". It answers "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "",
+          "t": " on a client, where it changes nothing, and for an entity without a network id, which is refused with a log line."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "A call needs a replicated entity: for any other the row answers "
+         },
+         {
+          "s": "c",
+          "t": "false"
+         },
+         {
+          "s": "",
+          "t": ". The host accepts up to 60 calls per second from one client, averaged over 2 seconds; more are dropped (default, the Multiplayer page can change it)."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Leaving and being removed"
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "c",
+          "t": "leave()"
+         },
+         {
+          "s": "",
+          "t": " ends the session on this machine, sends "
+         },
+         {
+          "s": "c",
+          "t": "onSessionEnded"
+         },
+         {
+          "s": "",
+          "t": " and puts the status back to 0."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "A client that is removed or loses the host gets "
+         },
+         {
+          "s": "c",
+          "t": "onDisconnected(reason)"
+         },
+         {
+          "s": "",
+          "t": " and status 4, and no "
+         },
+         {
+          "s": "c",
+          "t": "onSessionEnded"
+         },
+         {
+          "s": "",
+          "t": ". "
+         },
+         {
+          "s": "c",
+          "t": "net.kick"
+         },
+         {
+          "s": "",
+          "t": " with anti-cheat off only closes the connection, so the client sees reason 1 and “Lost the connection to the host.”; with anti-cheat on the client is told first and sees reason 2 and “Removed from the session.”. The host's scripts get "
+         },
+         {
+          "s": "c",
+          "t": "onPlayerLeft(player)"
+         },
+         {
+          "s": "",
+          "t": ", by which time "
+         },
+         {
+          "s": "c",
+          "t": "playerName"
+         },
+         {
+          "s": "",
+          "t": " of that player is already empty."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Known issue (build 7d49d44f): a second session in the same scene replicates no scene entity."
+          },
+          {
+           "s": "",
+           "t": " Hosting walks the scene for entities with Replicates on and skips those that already carry a network id; "
+          },
+          {
+           "s": "c",
+           "t": "leave()"
+          },
+          {
+           "s": "",
+           "t": " does not clear it. After "
+          },
+          {
+           "s": "c",
+           "t": "host"
+          },
+          {
+           "s": "",
+           "t": " -> "
+          },
+          {
+           "s": "c",
+           "t": "leave"
+          },
+          {
+           "s": "",
+           "t": " -> "
+          },
+          {
+           "s": "c",
+           "t": "host"
+          },
+          {
+           "s": "",
+           "t": ", or hosting twice, the log says “Session walk: 0 replicated scene entities”, and clients that join the new session get none of those entities: their variables and remote calls do not arrive."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "warning"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Example: net.joinDirect"
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\nlocal PORT = 47824   -- the project's Default port. Fixed on purpose: no row reads back a port the OS picked.\n\nfunction M.onInputPressed(self, action)\n    if action == \"Host\" and horizon.net.status() == 0 then\n        if horizon.net.host(PORT, \"Host\") then\n            horizon.log(\"Hosting. Join code: \" .. horizon.net.joinCode())\n        else\n            horizon.log(\"Could not host: \" .. horizon.net.lastError())\n        end\n    end\nend\n\n-- Called by the join screen with what the player typed in.\nfunction M.join(self, address, code)\n    horizon.net.leave()                       -- a new attempt replaces an old one\n    if horizon.net.joinDirect(address, PORT, code, \"Guest\") then\n        self.waited = 0\n    end\nend\n\nfunction M.onUpdate(self, dt)\n    if self.waited == nil then return end\n    -- A wrong join code never fails: the attempt stays at 2 (Connecting). Give up yourself.\n    self.waited = self.waited + dt\n    if horizon.net.status() == 2 and self.waited > 10 then\n        horizon.net.leave()\n        self.waited = nil\n        horizon.log(\"No answer from the host. Check the address and the join code.\")\n    end\nend\n\nfunction M.onConnected(self)\n    self.waited = nil\n    horizon.log(\"Joined as player \" .. horizon.net.localPlayer())\nend\n\nfunction M.onDisconnected(self, reason)   -- 1 lost, 2 kicked, 3 refused\n    self.waited = nil\n    horizon.log(\"Out of the session (\" .. reason .. \"): \" .. horizon.net.lastError())\nend\n\nfunction M.onPlayerJoined(self, player)  -- host only\n    horizon.log(horizon.net.playerName(player) .. \" joined\")\nend\n\nreturn M",
+         "title": "lobby.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nPORT = 47824   # the project's Default port. Fixed on purpose: no row reads back a port the OS picked.\n\nclass Lobby(horizon.Behavior):\n    waited = None\n\n    def on_input_pressed(self, action):\n        if action == \"Host\" and horizon.net.status() == 0:\n            if horizon.net.host(PORT, \"Host\"):\n                horizon.log(\"Hosting. Join code: \" + horizon.net.joinCode())\n            else:\n                horizon.log(\"Could not host: \" + horizon.net.lastError())\n\n    def join(self, address, code):\n        \"\"\"Called by the join screen with what the player typed in.\"\"\"\n        horizon.net.leave()                   # a new attempt replaces an old one\n        if horizon.net.joinDirect(address, PORT, code, \"Guest\"):\n            self.waited = 0.0\n\n    def on_update(self, dt):\n        if self.waited is None:\n            return\n        # A wrong join code never fails: the attempt stays at 2 (Connecting). Give up yourself.\n        self.waited += dt\n        if horizon.net.status() == 2 and self.waited > 10:\n            horizon.net.leave()\n            self.waited = None\n            horizon.log(\"No answer from the host. Check the address and the join code.\")\n\n    def on_connected(self):\n        self.waited = None\n        horizon.log(\"Joined as player %d\" % horizon.net.localPlayer())\n\n    def on_disconnected(self, reason):    # 1 lost, 2 kicked, 3 refused\n        self.waited = None\n        horizon.log(\"Out of the session (%d): %s\" % (reason, horizon.net.lastError()))\n\n    def on_player_joined(self, player):   # host only\n        horizon.log(horizon.net.playerName(player) + \" joined\")",
+         "title": "lobby.py"
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Example: net.declareVarInt"
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\nfunction M.onStart(self)\n    -- The same script runs on every machine; each declares the variable.\n    -- The host's value is the one every client ends up with.\n    horizon.net.declareVarInt(self.entityId, \"health\", 100, true)\nend\n\n-- Only the host decides what a hit does.\nfunction M.onCollisionEnter(self, other)\n    if not horizon.net.isAuthority() then return end\n    local hp = horizon.net.getVarInt(self.entityId, \"health\") - 10\n    horizon.net.setVarInt(self.entityId, \"health\", math.max(hp, 0))\n    self:showHealth()      -- onRep_health never runs on the host\nend\n\n-- On the clients: a new value arrived. `old` is the one before it.\nfunction M.onRep_health(self, old)\n    self:showHealth()\nend\n\nfunction M.showHealth(self)\n    horizon.log(\"health \" .. horizon.net.getVarInt(self.entityId, \"health\"))\nend\n\nreturn M",
+         "title": "health.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass Health(horizon.Behavior):\n    def on_start(self):\n        # The same script runs on every machine; each declares the variable.\n        # The host's value is the one every client ends up with.\n        horizon.net.declareVarInt(self.entity_id, \"health\", 100, True)\n\n    def on_collision_enter(self, other):\n        # Only the host decides what a hit does.\n        if not horizon.net.isAuthority():\n            return\n        hp = horizon.net.getVarInt(self.entity_id, \"health\") - 10\n        horizon.net.setVarInt(self.entity_id, \"health\", max(hp, 0))\n        self.show_health()     # on_rep_health never runs on the host\n\n    def on_rep_health(self, old):\n        # On the clients: a new value arrived. `old` is the one before it.\n        self.show_health()\n\n    def show_health(self):\n        horizon.log(\"health %d\" % horizon.net.getVarInt(self.entity_id, \"health\"))",
+         "title": "health.py"
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Example: net.allowAnyClient"
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\nfunction M.onStart(self)\n    horizon.net.declareVarBool(self.entityId, \"open\", false, true)\nend\n\n-- Per session: the list of calls any client may make starts empty with every session.\nfunction M.onSessionStarted(self)\n    -- The lever belongs to nobody. Without this only its owner could pull it,\n    -- and a refused call counts against the caller as cheating.\n    horizon.net.allowAnyClient(self.entityId, \"pull\")\nend\n\nfunction M.onInputPressed(self, action)\n    if action ~= \"Interact\" then return end\n    if horizon.net.isAuthority() then\n        self:pull()        -- host or offline: callServer would not reach a script method here\n    else\n        horizon.net.callServer(self.entityId, \"pull\")\n    end\nend\n\n-- Runs on the host, whoever asked.\nfunction M.pull(self)\n    local who = horizon.net.rpcSender()       -- 0: the host pulled it itself\n    local open = not horizon.net.getVarBool(self.entityId, \"open\")\n    horizon.net.setVarBool(self.entityId, \"open\", open)\n    local name = who ~= 0 and horizon.net.playerName(who) or \"The host\"\n    horizon.log(name .. (open and \" opened\" or \" closed\") .. \" the gate\")\nend\n\nfunction M.onRep_open(self, old)\n    horizon.log(horizon.net.getVarBool(self.entityId, \"open\") and \"gate opens\" or \"gate closes\")\nend\n\nreturn M",
+         "title": "lever.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass Lever(horizon.Behavior):\n    def on_start(self):\n        horizon.net.declareVarBool(self.entity_id, \"open\", False, True)\n\n    def on_session_started(self):\n        # Per session: the list of calls any client may make starts empty with every session.\n        # The lever belongs to nobody. Without this only its owner could pull it,\n        # and a refused call counts against the caller as cheating.\n        horizon.net.allowAnyClient(self.entity_id, \"pull\")\n\n    def on_input_pressed(self, action):\n        if action != \"Interact\":\n            return\n        if horizon.net.isAuthority():\n            self.pull()        # host or offline: callServer would not reach a script method here\n        else:\n            horizon.net.callServer(self.entity_id, \"pull\")\n\n    def pull(self):\n        \"\"\"Runs on the host, whoever asked.\"\"\"\n        who = horizon.net.rpcSender()          # 0: the host pulled it itself\n        is_open = not horizon.net.getVarBool(self.entity_id, \"open\")\n        horizon.net.setVarBool(self.entity_id, \"open\", is_open)\n        name = horizon.net.playerName(who) if who else \"The host\"\n        horizon.log(name + (\" opened\" if is_open else \" closed\") + \" the gate\")\n\n    def on_rep_open(self, old):\n        horizon.log(\"gate opens\" if horizon.net.getVarBool(self.entity_id, \"open\") else \"gate closes\")",
+         "title": "lever.py"
+        }
+       ]
+      },
+      {
        "head": [
         [
          {
@@ -57195,7 +58537,7 @@
          [
           {
            "s": "",
-           "t": "Opens a multiplayer session on this machine and makes it joinable. Port 0 takes the project's Default port (Project Settings, Game, Multiplayer), which is where the seats, the tick rate and the rest come from too; read the port that was actually opened back from the session status, and hand joiners the "
+           "t": "Opens a multiplayer session on this machine and makes it joinable. Port 0 takes the project's Default port (Project Settings, Game, Multiplayer), which is where the seats, the tick rate and the rest come from too. If that is 0 as well the system picks one, and no node reads it back, so a game that tells joiners its port hosts on a fixed one; hand them the "
           },
           {
            "h": "#net-joinCode",
@@ -57204,7 +58546,7 @@
           },
           {
            "s": "",
-           "t": ". Everyone who joins plays in YOUR world: the host decides what really happened.\nLua/Python "
+           "t": " too. Hosting again ends the running session first. Everyone who joins plays in YOUR world: the host decides what really happened.\nLua/Python "
           },
           {
            "s": "c",
@@ -57257,7 +58599,23 @@
           },
           {
            "s": "",
-           "t": ". The code is not a password you can guess past: without the right one the connection never completes at all.\nLua/Python "
+           "t": ". The code is not a password you can guess past: without the right one the connection never completes at all. Answers "
+          },
+          {
+           "s": "c",
+           "t": "true"
+          },
+          {
+           "s": "",
+           "t": " when the attempt has started. With a wrong join code the status stays 2 and "
+          },
+          {
+           "s": "c",
+           "t": "lastError"
+          },
+          {
+           "s": "",
+           "t": " empty (measured for 8 seconds): time the attempt out yourself, as the example does.\nLua/Python "
           },
           {
            "s": "c",
@@ -57319,7 +58677,15 @@
           },
           {
            "s": "",
-           "t": " as a direct join.\nLua/Python "
+           "t": " as a direct join. "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " when there is no entry at that index, which without the system's Local Network permission is always.\nLua/Python "
           },
           {
            "s": "c",
@@ -57363,7 +58729,15 @@
          [
           {
            "s": "",
-           "t": "Leaves the session, or closes it if you are the host. Says goodbye rather than vanishing, so the others learn the seat is free now instead of in thirty seconds.\nLua/Python "
+           "t": "Leaves the session, or closes it if you are the host. Says goodbye rather than vanishing, so the others learn the seat is free now instead of in thirty seconds. Sends "
+          },
+          {
+           "s": "c",
+           "t": "onSessionEnded"
+          },
+          {
+           "s": "",
+           "t": " on this machine. Offline it does nothing.\nLua/Python "
           },
           {
            "s": "c",
@@ -57407,7 +58781,15 @@
          [
           {
            "s": "",
-           "t": "0 Idle, 1 Hosting, 2 Connecting, 3 Joined, 4 Failed. Joined means the whole world has arrived, not just the connection — a lobby screen may wait for it before it hands over to the game.\nLua/Python "
+           "t": "0 Idle, 1 Hosting, 2 Connecting, 3 Joined, 4 Failed. Joined means the whole world has arrived, not just the connection — a lobby screen may wait for it before it hands over to the game. After a kick or a lost host it stays 4 until the next "
+          },
+          {
+           "s": "c",
+           "t": "leave"
+          },
+          {
+           "s": "",
+           "t": " or join.\nLua/Python "
           },
           {
            "s": "c",
@@ -57451,7 +58833,7 @@
          [
           {
            "s": "",
-           "t": "Why the last host or join attempt failed, in words meant for a player. Empty when nothing has failed.\nLua/Python "
+           "t": "Why the last host or join attempt failed, in words meant for a player. Empty when nothing has failed. After a removal: “Removed from the session.” (anti-cheat on) or “Lost the connection to the host.”.\nLua/Python "
           },
           {
            "s": "c",
@@ -57495,7 +58877,7 @@
          [
           {
            "s": "",
-           "t": "This session's short id, for showing to somebody who is about to join. Empty outside a session.\nLua/Python "
+           "t": "This session's short id, for showing to somebody who is about to join. Only the host has it: empty on a client and outside a session.\nLua/Python "
           },
           {
            "s": "c",
@@ -57539,7 +58921,7 @@
          [
           {
            "s": "",
-           "t": "The secret a joiner needs. Only the HOST gets it — on a client this is deliberately empty, so a client's own UI cannot hand out seats to a session it does not own.\nLua/Python "
+           "t": "The secret a joiner needs. Only the HOST gets it — on a client this is deliberately empty, so a client's own UI cannot hand out seats to a session it does not own. 26 characters.\nLua/Python "
           },
           {
            "s": "c",
@@ -57583,7 +58965,7 @@
          [
           {
            "s": "",
-           "t": "Starts listening for sessions announced on the local network, or starts over. Only game sessions are listed; an editor collaboration session on the same network is not one you can join.\nLua/Python "
+           "t": "Starts listening for sessions announced on the local network, or starts over. Only game sessions are listed; an editor collaboration session on the same network is not one you can join. Needs the system's Local Network permission, see the group notes above.\nLua/Python "
           },
           {
            "s": "c",
@@ -57856,7 +59238,7 @@
          [
           {
            "s": "",
-           "t": "Our own player number. 1 on the host and 1 offline; the host hands out 2 and up in join order. A number is minted once and never reused, so a score kept under it stays the right player's.\nLua/Python "
+           "t": "Our own player number. 1 on the host and 1 offline; the host hands out 2 and up in join order. A number is minted once and never reused, so a score kept under it stays the right player's. 0 on a client that is still connecting.\nLua/Python "
           },
           {
            "s": "c",
@@ -57953,7 +59335,15 @@
           },
           {
            "s": "",
-           "t": ").\nLua/Python "
+           "t": "). On a client "
+          },
+          {
+           "s": "c",
+           "t": "playerAt(0)"
+          },
+          {
+           "s": "",
+           "t": " is its own number.\nLua/Python "
           },
           {
            "s": "c",
@@ -57997,7 +59387,15 @@
          [
           {
            "s": "",
-           "t": "The display name that player joined with. Empty for a player this machine does not know about — on a client that is everybody but itself.\nLua/Python "
+           "t": "The display name that player joined with. Empty for a player this machine does not know about — on a client that is everybody but itself. Inside "
+          },
+          {
+           "s": "c",
+           "t": "onPlayerLeft"
+          },
+          {
+           "s": "",
+           "t": " the name is already gone.\nLua/Python "
           },
           {
            "s": "c",
@@ -58041,7 +59439,7 @@
          [
           {
            "s": "",
-           "t": "Round trip to that player in milliseconds. 0 when there is nothing to measure: ourselves, and a player nobody has timed yet.\nLua/Python "
+           "t": "Round trip to that player in milliseconds, as the host measures it. 0 when there is nothing to measure: ourselves, a player nobody has timed yet, and every player on a client, which knows only itself.\nLua/Python "
           },
           {
            "s": "c",
@@ -58085,7 +59483,7 @@
          [
           {
            "s": "",
-           "t": "Host only: remove a player from the session. The same path the anti-cheat takes, so a session that logs one logs the other.\nLua/Python "
+           "t": "Host only: remove a player from the session. With anti-cheat on it takes the anti-cheat's path: the player is told and sees reason 2, Kicked. Without, the connection is simply closed and the player sees reason 1, a lost connection. Does nothing on a client or offline.\nLua/Python "
           },
           {
            "s": "c",
@@ -58182,7 +59580,15 @@
          [
           {
            "s": "",
-           "t": "Do WE drive this entity? True for our own character, false for everybody else's, and true for anything not replicated at all. This is the question a character's graph asks before it reacts to input.\nLua/Python "
+           "t": "Do WE drive this entity? True for our own character, false for everybody else's, and true for anything not replicated at all. This is the question a character's graph asks before it reacts to input. Entity 0 or an id nothing answers to: "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -58235,7 +59641,7 @@
          [
           {
            "s": "",
-           "t": "The entity this machine drives — our own character — or 0 before the host has given us one.\nLua/Python "
+           "t": "The entity this machine drives — our own character — or 0 before the host has given us one. 0 in every state measured here (no host assigned a character).\nLua/Python "
           },
           {
            "s": "c",
@@ -58288,7 +59694,48 @@
           },
           {
            "s": "",
-           "t": " when a value arrives. A HorizonCode class does not need this — it ticks Replicated in the variable list instead.\nLua/Python "
+           "t": " when a value arrives. A HorizonCode class does not need this — it ticks Replicated in the variable list instead. Entity 0 or an empty name: "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": ". A missing "
+          },
+          {
+           "s": "c",
+           "t": "notify"
+          },
+          {
+           "s": "",
+           "t": " is "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " in Lua and an "
+          },
+          {
+           "s": "c",
+           "t": "IndexError"
+          },
+          {
+           "s": "",
+           "t": " in Python. See "
+          },
+          {
+           "h": "#net-vars",
+           "s": "l",
+           "t": "Replicated variables"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -58350,7 +59797,7 @@
           },
           {
            "s": "",
-           "t": ".\nLua/Python "
+           "t": ". 32-bit: 3000000000 is stored as −1294967296.\nLua/Python "
           },
           {
            "s": "c",
@@ -58536,7 +59983,32 @@
           },
           {
            "s": "",
-           "t": ".\nLua/Python "
+           "t": ". In Lua the "
+          },
+          {
+           "s": "c",
+           "t": "old"
+          },
+          {
+           "s": "",
+           "t": " value of "
+          },
+          {
+           "s": "c",
+           "t": "onRep_<name>"
+          },
+          {
+           "s": "",
+           "t": " is the number 0 (known issue, see "
+          },
+          {
+           "h": "#net-vars",
+           "s": "l",
+           "t": "Replicated variables"
+          },
+          {
+           "s": "",
+           "t": ").\nLua/Python "
           },
           {
            "s": "c",
@@ -58589,7 +60061,24 @@
          [
           {
            "s": "",
-           "t": "Writes a declared Bool. On the host every client is sent the new value; on a client it takes effect HERE and the host's next value replaces it, which is what makes a prediction possible. False = never declared.\nLua/Python "
+           "t": "Writes a declared Bool. On the host every client is sent the new value; on a client it takes effect HERE and the host's next value replaces it, which is what makes a prediction possible. False = never declared. On a client the write is its own prediction until the host's value comes back. A variable of another type is overwritten too: the row answers "
+          },
+          {
+           "s": "c",
+           "t": "true"
+          },
+          {
+           "s": "",
+           "t": " and the variable changes type. See "
+          },
+          {
+           "h": "#net-vars",
+           "s": "l",
+           "t": "Replicated variables"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -58899,7 +60388,15 @@
           },
           {
            "s": "",
-           "t": " tells apart from a value that is simply false.\nLua/Python "
+           "t": " tells apart from a value that is simply false. A variable declared with another type reads as "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -59164,7 +60661,7 @@
          [
           {
            "s": "",
-           "t": "Ask the HOST to run a function on this entity. The ordinary way to say \"I pulled the lever\": a client may not change the world, so it asks. Nothing comes back — a remote call has no return value. Allowed for the entity you own, or for a function whose header has Any Client ticked. Offline it simply runs here, so a graph works in single player. In Lua and Python the arguments after "
+           "t": "Ask the HOST to run a function on this entity. The ordinary way to say \"I pulled the lever\": a client may not change the world, so it asks. Nothing comes back — a remote call has no return value. Allowed for the entity you own, or for a function whose header has Any Client ticked; anything else the host drops, and with anti-cheat on it is a Hard report that removes the caller. Offline and on the host it runs here, on the entity's HorizonCode class, so a graph works in single player; a Lua or Python method is not reached that way. In Lua and Python the arguments after "
           },
           {
            "s": "c",
@@ -59176,6 +60673,31 @@
           },
           {
            "h": "#remote-calls",
+           "s": "l",
+           "t": "Remote calls"
+          },
+          {
+           "s": "",
+           "t": "). On a client "
+          },
+          {
+           "s": "c",
+           "t": "true"
+          },
+          {
+           "s": "",
+           "t": " means sent, also for a call the host then refuses. Offline and on the host a Lua or Python method is not reached: the row answers "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " and nothing runs, so call the method directly (see "
+          },
+          {
+           "h": "#net-calls",
            "s": "l",
            "t": "Remote calls"
           },
@@ -59251,7 +60773,15 @@
           },
           {
            "s": "",
-           "t": ").\nLua/Python "
+           "t": "). Answers "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " and runs nothing in a script on a client, for the host's own player and for a player number nobody has.\nLua/Python "
           },
           {
            "s": "c",
@@ -59295,7 +60825,7 @@
          [
           {
            "s": "",
-           "t": "Host only: run a function on EVERY machine, including this one — the round-over horn, the explosion everybody sees. Nothing comes back. In Lua and Python the arguments after "
+           "t": "Host only: run a function on EVERY machine, including this one — the round-over horn, the explosion everybody sees. Nothing comes back. Here on the host only the entity's HorizonCode class runs it (a Lua or Python method is not reached, and the result is then false although the clients were sent the call). In Lua and Python the arguments after "
           },
           {
            "s": "c",
@@ -59312,7 +60842,15 @@
           },
           {
            "s": "",
-           "t": ").\nLua/Python "
+           "t": "). Answers "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " on a client, and on the host for an entity without a HorizonCode class, although the clients were sent the call and ran it; the host's own script method does not run.\nLua/Python "
           },
           {
            "s": "c",
@@ -59365,7 +60903,40 @@
          [
           {
            "s": "",
-           "t": "Let any client call that function on this entity, not just its owner. For Lua, Python and C++ classes, which have no function header to tick. A door belongs to nobody, so without this nobody could open it.\nLua/Python "
+           "t": "Let any client call that function on this entity, not just its owner. For Lua, Python and C++ classes, which have no function header to tick. A door belongs to nobody, so without this nobody could open it. Lasts one session: call it in "
+          },
+          {
+           "s": "c",
+           "t": "onSessionStarted"
+          },
+          {
+           "s": "",
+           "t": ". "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " offline or for an empty name; "
+          },
+          {
+           "s": "c",
+           "t": "true"
+          },
+          {
+           "s": "",
+           "t": " on a client and for an entity without a network id, where it does nothing. See "
+          },
+          {
+           "h": "#net-calls",
+           "s": "l",
+           "t": "Remote calls"
+          },
+          {
+           "s": "",
+           "t": ".\nLua/Python "
           },
           {
            "s": "c",
@@ -59418,7 +60989,34 @@
          [
           {
            "s": "",
-           "t": "Which player asked for the call being handled right now. 0 at any other moment. Hand it to Report Cheat or Check when the call is a claim worth weighing.\nLua/Python "
+           "t": "Which player asked for the call being handled right now: a player number, as "
+          },
+          {
+           "h": "#net-playerName",
+           "s": "l",
+           "t": "Player Name"
+          },
+          {
+           "s": "",
+           "t": " and "
+          },
+          {
+           "h": "#net-kick",
+           "s": "l",
+           "t": "Kick From Session"
+          },
+          {
+           "s": "",
+           "t": " take it. 0 at any other moment. Not a connection number, so it is not what the anti-cheat rows take ("
+          },
+          {
+           "h": "#anticheat-reportPlayer",
+           "s": "l",
+           "t": "Report Player"
+          },
+          {
+           "s": "",
+           "t": " gives that one). On a client, inside a call the host made: 1.\nLua/Python "
           },
           {
            "s": "c",
@@ -59462,7 +61060,15 @@
          [
           {
            "s": "",
-           "t": "Is this name declared on this entity at all — by a script or by the entity's HorizonCode class? The one row that tells a missing declaration apart from a value still at its default.\nLua/Python "
+           "t": "Is this name declared on this entity at all — by a script or by the entity's HorizonCode class? The one row that tells a missing declaration apart from a value still at its default. Also "
+          },
+          {
+           "s": "c",
+           "t": "true"
+          },
+          {
+           "s": "",
+           "t": " for a variable a client declared on its own copy.\nLua/Python "
           },
           {
            "s": "c",
@@ -59504,7 +61110,7 @@
      ],
      "eyebrow": "Multiplayer · 44 functions",
      "id": "net",
-     "text": "Lua / Python: horizon.net.<function> · C++: HE::api::net::<function> Function Returns Description host(port: int, displayName: string) ok: bool Opens a multiplayer session on this machine and makes it joinable. Port 0 takes the project's Default port (Project Settings, Game, Multiplayer), which is where the seats, the tick rate and the rest come from too; read the port that was actually opened back from the session status, and hand joiners the Join Code. Everyone who joins plays in YOUR world: the host decides what really happened.\nLua/Python horizon.net.host · HorizonCode Host Session · C++ HE::api::net::host · action joinDirect(address: string, port: int, code: string, displayName: string) ok: bool Joins a session by address and port, with the host's Join Code. The code is not a password you can guess past: without the right one the connection never completes at all.\nLua/Python horizon.net.joinDirect · HorizonCode Join By Address · C++ HE::api::net::joinDirect · action joinLan(index: int, code: string, displayName: string) ok: bool Joins the session at this index in the LAN list (Refresh LAN Sessions first). Same Join Code as a direct join.\nLua/Python horizon.net.joinLan · HorizonCode Join LAN Session · C++ HE::api::net::joinLan · action leave() — Leaves the session, or closes it if you are the host. Says goodbye rather than vanishing, so the others learn the seat is free now instead of in thirty seconds.\nLua/Python horizon.net.leave · HorizonCode Leave Session · C++ HE::api::net::leave · action status() status: int 0 Idle, 1 Hosting, 2 Connecting, 3 Joined, 4 Failed. Joined means the whole world has arrived, not just the connection — a lobby screen may wait for it before it hands over to the game.\nLua/Python horizon.net.status · HorizonCode Session Status · C++ HE::api::net::status · query lastError() error: string Why the last host or join attempt failed, in words meant for a player. Empty when nothing has failed.\nLua/Python horizon.net.lastError · HorizonCode Session Error · C++ HE::api::net::lastError · query sessionId() sessionId: string This session's short id, for showing to somebody who is about to join. Empty outside a session.\nLua/Python horizon.net.sessionId · HorizonCode Session Id · C++ HE::api::net::sessionId · query joinCode() code: string The secret a joiner needs. Only the HOST gets it — on a client this is deliberately empty, so a client's own UI cannot hand out seats to a session it does not own.\nLua/Python horizon.net.joinCode · HorizonCode Join Code · C++ HE::api::net::joinCode · query refreshLan() — Starts listening for sessions announced on the local network, or starts over. Only game sessions are listed; an editor collaboration session on the same network is not one you can join.\nLua/Python horizon.net.refreshLan · HorizonCode Refresh LAN Sessions · C++ HE::api::net::refreshLan · action lanSessionCount() count: int How many sessions the LAN browser is currently hearing. Zero right after Refresh is normal: announcements arrive a moment later.\nLua/Python horizon.net.lanSessionCount · HorizonCode LAN Session Count · C++ HE::api::net::lanSessionCount · query lanSessionName(index: int) name: string The host's display name for the session at this index.\nLua/Python horizon.net.lanSessionName · HorizonCode LAN Session Name · C++ HE::api::net::lanSessionName · query lanSessionPlayers(index: int) players: int How many players are in the session at this index, as it last announced itself.\nLua/Python horizon.net.lanSessionPlayers · HorizonCode LAN Session Players · C++ HE::api::net::lanSessionPlayers · query isAuthority() isAuthority: bool Is THIS machine the one that decides? True on the host and true with no session at all — a single-player game is its own authority. Ask this before anything that changes the world: simulation only with Is Authority, display everywhere, intentions through the server.\nLua/Python horizon.net.isAuthority · HorizonCode Is Authority · C++ HE::api::net::isAuthority · query isClient() isClient: bool Are we a client in somebody else's session? False offline, unlike Is Authority, because offline there is no host to be a client of.\nLua/Python horizon.net.isClient · HorizonCode Is Client · C++ HE::api::net::isClient · query localPlayer() player: int Our own player number. 1 on the host and 1 offline; the host hands out 2 and up in join order. A number is minted once and never reused, so a score kept under it stays the right player's.\nLua/Python horizon.net.localPlayer · HorizonCode Local Player · C++ HE::api::net::localPlayer · query playerCount() count: int How many players the session are known HERE. On the host that is all of them; on a client it is 1 — itself — because nothing sends a client the list yet. 1 offline as well.\nLua/Python horizon.net.playerCount · HorizonCode Player Count · C++ HE::api::net::playerCount · query playerAt(index: int) player: int The player number of the index'th player, in join order. 0 past the end, so a loop can stop on it. Only the host sees more than itself (see Player Count).\nLua/Python horizon.net.playerAt · HorizonCode Player At · C++ HE::api::net::playerAt · query playerName(player: int) name: string The display name that player joined with. Empty for a player this machine does not know about — on a client that is everybody but itself.\nLua/Python horizon.net.playerName · HorizonCode Player Name · C++ HE::api::net::playerName · query ping(player: int) ms: float Round trip to that player in milliseconds. 0 when there is nothing to measure: ourselves, and a player nobody has timed yet.\nLua/Python horizon.net.ping · HorizonCode Player Ping · C++ HE::api::net::ping · query kick(player: int) — Host only: remove a player from the session. The same path the anti-cheat takes, so a session that logs one logs the other.\nLua/Python horizon.net.kick · HorizonCode Kick From Session · C++ HE::api::net::kick · action ownerOf(entity: int) player: int Which player this entity belongs to, or 0 for the host's own and for anything nobody owns (a door, a crate).\nLua/Python horizon.net.ownerOf · HorizonCode Owner Of · C++ HE::api::net::ownerOf · query · entity is Self in HorizonCode isLocallyControlled(entity: int) local: bool Do WE drive this entity? True for our own character, false for everybody else's, and true for anything not replicated at all. This is the question a character's graph asks before it reacts to input.\nLua/Python horizon.net.isLocallyControlled · HorizonCode Is Locally Controlled · C++ HE::api::net::isLocallyControlled · query · entity is Self in HorizonCode localCharacter() entity: int The entity this machine drives — our own character — or 0 before the host has given us one.\nLua/Python horizon.net.localCharacter · HorizonCode Local Character · C++ HE::api::net::localCharacter · query declareVarBool(entity: int, name: string, initial: bool, notify: bool) ok: bool Declares a replicated Bool on this entity: the host owns it, every client is sent its value. Call it in On Init. With Notify on, the clients get On Rep when a value arrives. A HorizonCode class does not need this — it ticks Replicated in the variable list instead.\nLua/Python horizon.net.declareVarBool · HorizonCode Declare Replicated Bool · C++ HE::api::net::declareVarBool · action · entity is Self in HorizonCode declareVarInt(entity: int, name: string, initial: int, notify: bool) ok: bool Declares a replicated Int on this entity. See Declare Replicated Bool.\nLua/Python horizon.net.declareVarInt · HorizonCode Declare Replicated Int · C++ HE::api::net::declareVarInt · action · entity is Self in HorizonCode declareVarFloat(entity: int, name: string, initial: float, notify: bool) ok: bool Declares a replicated Float on this entity. See Declare Replicated Bool.\nLua/Python horizon.net.declareVarFloat · HorizonCode Declare Replicated Float · C++ HE::api::net::declareVarFloat · action · entity is Self in HorizonCode declareVarString(entity: int, name: string, initial: string, notify: bool) ok: bool Declares a replicated String on this entity. See Declare Replicated Bool.\nLua/Python horizon.net.declareVarString · HorizonCode Declare Replicated String · C++ HE::api::net::declareVarString · action · entity is Self in HorizonCode declareVarVec3(entity: int, name: string, initial: vec3, notify: bool) ok: bool Declares a replicated Vector on this entity. See Declare Replicated Bool.\nLua/Python horizon.net.declareVarVec3 · HorizonCode Declare Replicated Vector · C++ HE::api::net::declareVarVec3 · action · entity is Self in HorizonCode setVarBool(entity: int, name: string, value: bool) ok: bool Writes a declared Bool. On the host every client is sent the new value; on a client it takes effect HERE and the host's next value replaces it, which is what makes a prediction possible. False = never declared.\nLua/Python horizon.net.setVarBool · HorizonCode Set Replicated Bool · C++ HE::api::net::setVarBool · action · entity is Self in HorizonCode setVarInt(entity: int, name: string, value: int) ok: bool Writes a declared Int. See Set Replicated Bool.\nLua/Python horizon.net.setVarInt · HorizonCode Set Replicated Int · C++ HE::api::net::setVarInt · action · entity is Self in HorizonCode setVarFloat(entity: int, name: string, value: float) ok: bool Writes a declared Float. See Set Replicated Bool.\nLua/Python horizon.net.setVarFloat · HorizonCode Set Replicated Float · C++ HE::api::net::setVarFloat · action · entity is Self in HorizonCode setVarString(entity: int, name: string, value: string) ok: bool Writes a declared String. See Set Replicated Bool.\nLua/Python horizon.net.setVarString · HorizonCode Set Replicated String · C++ HE::api::net::setVarString · action · entity is Self in HorizonCode setVarVec3(entity: int, name: string, value: vec3) ok: bool Writes a declared Vector. See Set Replicated Bool.\nLua/Python horizon.net.setVarVec3 · HorizonCode Set Replicated Vector · C++ HE::api::net::setVarVec3 · action · entity is Self in HorizonCode getVarBool(entity: int, name: string) value: bool Reads a declared Bool. False when the name was never declared here, which Has Replicated Variable tells apart from a value that is simply false.\nLua/Python horizon.net.getVarBool · HorizonCode Get Replicated Bool · C++ HE::api::net::getVarBool · query · entity is Self in HorizonCode getVarInt(entity: int, name: string) value: int Reads a declared Int. 0 when the name was never declared here.\nLua/Python horizon.net.getVarInt · HorizonCode Get Replicated Int · C++ HE::api::net::getVarInt · query · entity is Self in HorizonCode getVarFloat(entity: int, name: string) value: float Reads a declared Float. 0 when the name was never declared here.\nLua/Python horizon.net.getVarFloat · HorizonCode Get Replicated Float · C++ HE::api::net::getVarFloat · query · entity is Self in HorizonCode getVarString(entity: int, name: string) value: string Reads a declared String. Empty when the name was never declared here.\nLua/Python horizon.net.getVarString · HorizonCode Get Replicated String · C++ HE::api::net::getVarString · query · entity is Self in HorizonCode getVarVec3(entity: int, name: string) value: vec3 Reads a declared Vector. Zero when the name was never declared here.\nLua/Python horizon.net.getVarVec3 · HorizonCode Get Replicated Vector · C++ HE::api::net::getVarVec3 · query · entity is Self in HorizonCode callServer(entity, name, …) ok: bool Ask the HOST to run a function on this entity. The ordinary way to say \"I pulled the lever\": a client may not change the world, so it asks. Nothing comes back — a remote call has no return value. Allowed for the entity you own, or for a function whose header has Any Client ticked. Offline it simply runs here, so a graph works in single player. In Lua and Python the arguments after name are passed on as the remote function's arguments, as many as it takes (see Remote calls).\nLua/Python horizon.net.callServer · HorizonCode Call Server · C++ HE::api::net::callServer · action · entity is Self in HorizonCode callClient(player, entity, name, …) ok: bool Host only: run a function on ONE player's machine — the hit marker, the message only they should see. Addressed by PlayerId. Nothing comes back. In Lua and Python the arguments after name are passed on as the remote function's arguments, as many as it takes (see Remote calls).\nLua/Python horizon.net.callClient · HorizonCode Call Client · C++ HE::api::net::callClient · action callAllClients(entity, name, …) ok: bool Host only: run a function on EVERY machine, including this one — the round-over horn, the explosion everybody sees. Nothing comes back. In Lua and Python the arguments after name are passed on as the remote function's arguments, as many as it takes (see Remote calls).\nLua/Python horizon.net.callAllClients · HorizonCode Call All Clients · C++ HE::api::net::callAllClients · action · entity is Self in HorizonCode allowAnyClient(entity: int, function: string) ok: bool Let any client call that function on this entity, not just its owner. For Lua, Python and C++ classes, which have no function header to tick. A door belongs to nobody, so without this nobody could open it.\nLua/Python horizon.net.allowAnyClient · HorizonCode Allow Any Client · C++ HE::api::net::allowAnyClient · action · entity is Self in HorizonCode rpcSender() player: int Which player asked for the call being handled right now. 0 at any other moment. Hand it to Report Cheat or Check when the call is a claim worth weighing.\nLua/Python horizon.net.rpcSender · HorizonCode Call Sender · C++ HE::api::net::rpcSender · query hasVar(entity: int, name: string) declared: bool Is this name declared on this entity at all — by a script or by the entity's HorizonCode class? The one row that tells a missing declaration apart from a value still at its default.\nLua/Python horizon.net.hasVar · HorizonCode Has Replicated Variable · C++ HE::api::net::hasVar · query · entity is Self in HorizonCode",
+     "text": "Lua / Python: horizon.net.<function> · C++: HE::api::net::<function> Multiplayer: one machine hosts and is the authority, the others join as clients and play in the host's world. The rows fall into five parts: the session (host, join, leave, status), the players, who owns an entity, replicated variables, and remote calls. Session events, onRep_<var> and the remote-call targets are script methods, listed under Callbacks. The examples below ran word for word in Lua and Python, host and client in both languages, over a real connection on one machine. Hosting. host(port, name) answers true once the socket is open; the status is 1 at once and the host's scripts get onSessionStarted. Port 0 takes the project's Default port (Project Settings, Game, Multiplayer, 47824 in a new project). If that is 0 as well the system picks one, and no row reads it back, so a game that tells joiners its port hosts on a fixed one. Hosting again while a session runs ends it first (onSessionEnded, then onSessionStarted, a new session id and join code; everybody who had joined is out). Joining. joinDirect(address, port, code, name) answers true when the attempt has started (status 2); false for port 0 or above 65535, and for joinLan with no LAN entry at that index. The client's scripts get onConnected once the whole world has arrived (status 3), the host's get onPlayerJoined(player). A wrong join code never fails: the host refuses the handshake, but the client stays at status 2 with an empty lastError (measured for 8 seconds). Give up yourself, as the lobby example does. LAN browsing needs the system's permission to use the local network. Without it (macOS asks per application) the host logs “the system refused to send an announcement” and every list stays empty; joinDirect keeps working. The LAN rows were not measured with the permission granted. Player numbers. The host is player 1, joiners are 2, 3, … in join order, and a number is never reused. That is the number playerName, ping, kick, callClient, rpcSender and onPlayerJoined/onPlayerLeft use. It is not the connection number the anticheat rows take. Ownership. Scene entities belong to nobody: ownerOf is 0. isLocallyControlled is true offline and for any entity without Replicates; for a replicated entity nobody owns it is true on the host and false on a client. Row Offline Host Client status 0 1 2 while connecting, 3 joined, 4 after losing the host isAuthority / isClient true / false true / false false / true localPlayer 1 1 its own number (2, 3, …); 0 while connecting playerCount / playerAt 1 / playerAt(0) = 1 everybody, in join order 1: a client knows only itself playerName \"\" every player's only its own ping 0 round trip to each client, ms always 0 sessionId / joinCode \"\" 8 / 26 characters \"\" / \"\" Replicated variables Declare, then write on the host. declareVar…(entity, name, initial, notify) works on any entity and also offline; a declaration made before the session starts is carried into it (the health example declares in onStart). Only entities with Replicates on are sent to clients: on any other the variable exists on this machine only. Declaring a name a second time answers true and changes nothing (measured offline). What a client sees. A write on the host reaches every client a moment later (well within half a second on one machine); with notify the client's script gets onRep_<name>(old), never the host's (it made the change) and never for a variable declared without notify. A client's own setVar… changes only its copy; the host sends its value again within a moment, even an unchanged one, and onRep_ fires once more with old = the client's value. Types are not checked on write. A getter of another type answers zero (false, 0, \"\", 0,0,0). A setter of another type answers true and changes the variable's type, after which the declared getter reads zero; during a session the host then re-sends the entity's whole variable table every tick. Ints are 32-bit: 3000000000 is stored as −1294967296. After the session ends, a client keeps the last values it received. Known issue (build 7d49d44f): in Lua, old of a Vector variable is the number 0. The value handed to onRep_<name>(old) goes through a converter that has no case for vectors, so Lua always receives 0 (measured with old values 0,0,0 and 1,2,3). Python receives a list [x, y, z]. Read the new value with getVarVec3, and keep the previous one yourself if you need it. A Vector argument of a remote call from a HorizonCode graph goes through the same converter. Remote calls Who runs what. callServer on a client sends the call to the host, which runs the method of that name on the entity: its HorizonCode class first, else its Lua or Python script, else the C++ module (first one that has it). callClient and callAllClients go from the host to the clients' copies of the entity. The arguments after the name arrive with their types: integers, other numbers, booleans and strings as they are, a Lua table or Python list as a list, a Python dict as a table with __keys. Inside the method rpcSender() is the caller's player number (on a client: 1, the host). Nothing runs locally in a script. Offline and on the host, callServer, callClient to the host's own player and the host's own share of callAllClients reach only a HorizonCode class. A Lua or Python method is not called and the row answers false, for callAllClients even though the clients were sent the call. On the host, call your own method directly (lever example). Who may call. A client may call the entities it owns, plus functions opened with allowAnyClient (or Any Client on a HorizonCode function header). Anything else the host drops without a log line, while the client's callServer still answered true; with anti-cheat on it is a Hard report and the caller is removed at once (measured). allowAnyClient lasts for one session and answers false offline, so call it in onSessionStarted. It answers true on a client, where it changes nothing, and for an entity without a network id, which is refused with a log line. A call needs a replicated entity: for any other the row answers false. The host accepts up to 60 calls per second from one client, averaged over 2 seconds; more are dropped (default, the Multiplayer page can change it). Leaving and being removed leave() ends the session on this machine, sends onSessionEnded and puts the status back to 0. A client that is removed or loses the host gets onDisconnected(reason) and status 4, and no onSessionEnded. net.kick with anti-cheat off only closes the connection, so the client sees reason 1 and “Lost the connection to the host.”; with anti-cheat on the client is told first and sees reason 2 and “Removed from the session.”. The host's scripts get onPlayerLeft(player), by which time playerName of that player is already empty. Known issue (build 7d49d44f): a second session in the same scene replicates no scene entity. Hosting walks the scene for entities with Replicates on and skips those that already carry a network id; leave() does not clear it. After host -> leave -> host, or hosting twice, the log says “Session walk: 0 replicated scene entities”, and clients that join the new session get none of those entities: their variables and remote calls do not arrive. Example: net.joinDirect lobby.lua local M = {}\nlocal PORT = 47824   -- the project's Default port. Fixed on purpose: no row reads back a port the OS picked.\n\nfunction M.onInputPressed(self, action)\n    if action == \"Host\" and horizon.net.status() == 0 then\n        if horizon.net.host(PORT, \"Host\") then\n            horizon.log(\"Hosting. Join code: \" .. horizon.net.joinCode())\n        else\n            horizon.log(\"Could not host: \" .. horizon.net.lastError())\n        end\n    end\nend\n\n-- Called by the join screen with what the player typed in.\nfunction M.join(self, address, code)\n    horizon.net.leave()                       -- a new attempt replaces an old one\n    if horizon.net.joinDirect(address, PORT, code, \"Guest\") then\n        self.waited = 0\n    end\nend\n\nfunction M.onUpdate(self, dt)\n    if self.waited == nil then return end\n    -- A wrong join code never fails: the attempt stays at 2 (Connecting). Give up yourself.\n    self.waited = self.waited + dt\n    if horizon.net.status() == 2 and self.waited > 10 then\n        horizon.net.leave()\n        self.waited = nil\n        horizon.log(\"No answer from the host. Check the address and the join code.\")\n    end\nend\n\nfunction M.onConnected(self)\n    self.waited = nil\n    horizon.log(\"Joined as player \" .. horizon.net.localPlayer())\nend\n\nfunction M.onDisconnected(self, reason)   -- 1 lost, 2 kicked, 3 refused\n    self.waited = nil\n    horizon.log(\"Out of the session (\" .. reason .. \"): \" .. horizon.net.lastError())\nend\n\nfunction M.onPlayerJoined(self, player)  -- host only\n    horizon.log(horizon.net.playerName(player) .. \" joined\")\nend\n\nreturn M lobby.py import horizon\n\nPORT = 47824   # the project's Default port. Fixed on purpose: no row reads back a port the OS picked.\n\nclass Lobby(horizon.Behavior):\n    waited = None\n\n    def on_input_pressed(self, action):\n        if action == \"Host\" and horizon.net.status() == 0:\n            if horizon.net.host(PORT, \"Host\"):\n                horizon.log(\"Hosting. Join code: \" + horizon.net.joinCode())\n            else:\n                horizon.log(\"Could not host: \" + horizon.net.lastError())\n\n    def join(self, address, code):\n        \"\"\"Called by the join screen with what the player typed in.\"\"\"\n        horizon.net.leave()                   # a new attempt replaces an old one\n        if horizon.net.joinDirect(address, PORT, code, \"Guest\"):\n            self.waited = 0.0\n\n    def on_update(self, dt):\n        if self.waited is None:\n            return\n        # A wrong join code never fails: the attempt stays at 2 (Connecting). Give up yourself.\n        self.waited += dt\n        if horizon.net.status() == 2 and self.waited > 10:\n            horizon.net.leave()\n            self.waited = None\n            horizon.log(\"No answer from the host. Check the address and the join code.\")\n\n    def on_connected(self):\n        self.waited = None\n        horizon.log(\"Joined as player %d\" % horizon.net.localPlayer())\n\n    def on_disconnected(self, reason):    # 1 lost, 2 kicked, 3 refused\n        self.waited = None\n        horizon.log(\"Out of the session (%d): %s\" % (reason, horizon.net.lastError()))\n\n    def on_player_joined(self, player):   # host only\n        horizon.log(horizon.net.playerName(player) + \" joined\") Example: net.declareVarInt health.lua local M = {}\n\nfunction M.onStart(self)\n    -- The same script runs on every machine; each declares the variable.\n    -- The host's value is the one every client ends up with.\n    horizon.net.declareVarInt(self.entityId, \"health\", 100, true)\nend\n\n-- Only the host decides what a hit does.\nfunction M.onCollisionEnter(self, other)\n    if not horizon.net.isAuthority() then return end\n    local hp = horizon.net.getVarInt(self.entityId, \"health\") - 10\n    horizon.net.setVarInt(self.entityId, \"health\", math.max(hp, 0))\n    self:showHealth()      -- onRep_health never runs on the host\nend\n\n-- On the clients: a new value arrived. `old` is the one before it.\nfunction M.onRep_health(self, old)\n    self:showHealth()\nend\n\nfunction M.showHealth(self)\n    horizon.log(\"health \" .. horizon.net.getVarInt(self.entityId, \"health\"))\nend\n\nreturn M health.py import horizon\n\nclass Health(horizon.Behavior):\n    def on_start(self):\n        # The same script runs on every machine; each declares the variable.\n        # The host's value is the one every client ends up with.\n        horizon.net.declareVarInt(self.entity_id, \"health\", 100, True)\n\n    def on_collision_enter(self, other):\n        # Only the host decides what a hit does.\n        if not horizon.net.isAuthority():\n            return\n        hp = horizon.net.getVarInt(self.entity_id, \"health\") - 10\n        horizon.net.setVarInt(self.entity_id, \"health\", max(hp, 0))\n        self.show_health()     # on_rep_health never runs on the host\n\n    def on_rep_health(self, old):\n        # On the clients: a new value arrived. `old` is the one before it.\n        self.show_health()\n\n    def show_health(self):\n        horizon.log(\"health %d\" % horizon.net.getVarInt(self.entity_id, \"health\")) Example: net.allowAnyClient lever.lua local M = {}\n\nfunction M.onStart(self)\n    horizon.net.declareVarBool(self.entityId, \"open\", false, true)\nend\n\n-- Per session: the list of calls any client may make starts empty with every session.\nfunction M.onSessionStarted(self)\n    -- The lever belongs to nobody. Without this only its owner could pull it,\n    -- and a refused call counts against the caller as cheating.\n    horizon.net.allowAnyClient(self.entityId, \"pull\")\nend\n\nfunction M.onInputPressed(self, action)\n    if action ~= \"Interact\" then return end\n    if horizon.net.isAuthority() then\n        self:pull()        -- host or offline: callServer would not reach a script method here\n    else\n        horizon.net.callServer(self.entityId, \"pull\")\n    end\nend\n\n-- Runs on the host, whoever asked.\nfunction M.pull(self)\n    local who = horizon.net.rpcSender()       -- 0: the host pulled it itself\n    local open = not horizon.net.getVarBool(self.entityId, \"open\")\n    horizon.net.setVarBool(self.entityId, \"open\", open)\n    local name = who ~= 0 and horizon.net.playerName(who) or \"The host\"\n    horizon.log(name .. (open and \" opened\" or \" closed\") .. \" the gate\")\nend\n\nfunction M.onRep_open(self, old)\n    horizon.log(horizon.net.getVarBool(self.entityId, \"open\") and \"gate opens\" or \"gate closes\")\nend\n\nreturn M lever.py import horizon\n\nclass Lever(horizon.Behavior):\n    def on_start(self):\n        horizon.net.declareVarBool(self.entity_id, \"open\", False, True)\n\n    def on_session_started(self):\n        # Per session: the list of calls any client may make starts empty with every session.\n        # The lever belongs to nobody. Without this only its owner could pull it,\n        # and a refused call counts against the caller as cheating.\n        horizon.net.allowAnyClient(self.entity_id, \"pull\")\n\n    def on_input_pressed(self, action):\n        if action != \"Interact\":\n            return\n        if horizon.net.isAuthority():\n            self.pull()        # host or offline: callServer would not reach a script method here\n        else:\n            horizon.net.callServer(self.entity_id, \"pull\")\n\n    def pull(self):\n        \"\"\"Runs on the host, whoever asked.\"\"\"\n        who = horizon.net.rpcSender()          # 0: the host pulled it itself\n        is_open = not horizon.net.getVarBool(self.entity_id, \"open\")\n        horizon.net.setVarBool(self.entity_id, \"open\", is_open)\n        name = horizon.net.playerName(who) if who else \"The host\"\n        horizon.log(name + (\" opened\" if is_open else \" closed\") + \" the gate\")\n\n    def on_rep_open(self, old):\n        horizon.log(\"gate opens\" if horizon.net.getVarBool(self.entity_id, \"open\") else \"gate closes\") Function Returns Description host(port: int, displayName: string) ok: bool Opens a multiplayer session on this machine and makes it joinable. Port 0 takes the project's Default port (Project Settings, Game, Multiplayer), which is where the seats, the tick rate and the rest come from too. If that is 0 as well the system picks one, and no node reads it back, so a game that tells joiners its port hosts on a fixed one; hand them the Join Code too. Hosting again ends the running session first. Everyone who joins plays in YOUR world: the host decides what really happened.\nLua/Python horizon.net.host · HorizonCode Host Session · C++ HE::api::net::host · action joinDirect(address: string, port: int, code: string, displayName: string) ok: bool Joins a session by address and port, with the host's Join Code. The code is not a password you can guess past: without the right one the connection never completes at all. Answers true when the attempt has started. With a wrong join code the status stays 2 and lastError empty (measured for 8 seconds): time the attempt out yourself, as the example does.\nLua/Python horizon.net.joinDirect · HorizonCode Join By Address · C++ HE::api::net::joinDirect · action joinLan(index: int, code: string, displayName: string) ok: bool Joins the session at this index in the LAN list (Refresh LAN Sessions first). Same Join Code as a direct join. false when there is no entry at that index, which without the system's Local Network permission is always.\nLua/Python horizon.net.joinLan · HorizonCode Join LAN Session · C++ HE::api::net::joinLan · action leave() — Leaves the session, or closes it if you are the host. Says goodbye rather than vanishing, so the others learn the seat is free now instead of in thirty seconds. Sends onSessionEnded on this machine. Offline it does nothing.\nLua/Python horizon.net.leave · HorizonCode Leave Session · C++ HE::api::net::leave · action status() status: int 0 Idle, 1 Hosting, 2 Connecting, 3 Joined, 4 Failed. Joined means the whole world has arrived, not just the connection — a lobby screen may wait for it before it hands over to the game. After a kick or a lost host it stays 4 until the next leave or join.\nLua/Python horizon.net.status · HorizonCode Session Status · C++ HE::api::net::status · query lastError() error: string Why the last host or join attempt failed, in words meant for a player. Empty when nothing has failed. After a removal: “Removed from the session.” (anti-cheat on) or “Lost the connection to the host.”.\nLua/Python horizon.net.lastError · HorizonCode Session Error · C++ HE::api::net::lastError · query sessionId() sessionId: string This session's short id, for showing to somebody who is about to join. Only the host has it: empty on a client and outside a session.\nLua/Python horizon.net.sessionId · HorizonCode Session Id · C++ HE::api::net::sessionId · query joinCode() code: string The secret a joiner needs. Only the HOST gets it — on a client this is deliberately empty, so a client's own UI cannot hand out seats to a session it does not own. 26 characters.\nLua/Python horizon.net.joinCode · HorizonCode Join Code · C++ HE::api::net::joinCode · query refreshLan() — Starts listening for sessions announced on the local network, or starts over. Only game sessions are listed; an editor collaboration session on the same network is not one you can join. Needs the system's Local Network permission, see the group notes above.\nLua/Python horizon.net.refreshLan · HorizonCode Refresh LAN Sessions · C++ HE::api::net::refreshLan · action lanSessionCount() count: int How many sessions the LAN browser is currently hearing. Zero right after Refresh is normal: announcements arrive a moment later.\nLua/Python horizon.net.lanSessionCount · HorizonCode LAN Session Count · C++ HE::api::net::lanSessionCount · query lanSessionName(index: int) name: string The host's display name for the session at this index.\nLua/Python horizon.net.lanSessionName · HorizonCode LAN Session Name · C++ HE::api::net::lanSessionName · query lanSessionPlayers(index: int) players: int How many players are in the session at this index, as it last announced itself.\nLua/Python horizon.net.lanSessionPlayers · HorizonCode LAN Session Players · C++ HE::api::net::lanSessionPlayers · query isAuthority() isAuthority: bool Is THIS machine the one that decides? True on the host and true with no session at all — a single-player game is its own authority. Ask this before anything that changes the world: simulation only with Is Authority, display everywhere, intentions through the server.\nLua/Python horizon.net.isAuthority · HorizonCode Is Authority · C++ HE::api::net::isAuthority · query isClient() isClient: bool Are we a client in somebody else's session? False offline, unlike Is Authority, because offline there is no host to be a client of.\nLua/Python horizon.net.isClient · HorizonCode Is Client · C++ HE::api::net::isClient · query localPlayer() player: int Our own player number. 1 on the host and 1 offline; the host hands out 2 and up in join order. A number is minted once and never reused, so a score kept under it stays the right player's. 0 on a client that is still connecting.\nLua/Python horizon.net.localPlayer · HorizonCode Local Player · C++ HE::api::net::localPlayer · query playerCount() count: int How many players the session are known HERE. On the host that is all of them; on a client it is 1 — itself — because nothing sends a client the list yet. 1 offline as well.\nLua/Python horizon.net.playerCount · HorizonCode Player Count · C++ HE::api::net::playerCount · query playerAt(index: int) player: int The player number of the index'th player, in join order. 0 past the end, so a loop can stop on it. Only the host sees more than itself (see Player Count). On a client playerAt(0) is its own number.\nLua/Python horizon.net.playerAt · HorizonCode Player At · C++ HE::api::net::playerAt · query playerName(player: int) name: string The display name that player joined with. Empty for a player this machine does not know about — on a client that is everybody but itself. Inside onPlayerLeft the name is already gone.\nLua/Python horizon.net.playerName · HorizonCode Player Name · C++ HE::api::net::playerName · query ping(player: int) ms: float Round trip to that player in milliseconds, as the host measures it. 0 when there is nothing to measure: ourselves, a player nobody has timed yet, and every player on a client, which knows only itself.\nLua/Python horizon.net.ping · HorizonCode Player Ping · C++ HE::api::net::ping · query kick(player: int) — Host only: remove a player from the session. With anti-cheat on it takes the anti-cheat's path: the player is told and sees reason 2, Kicked. Without, the connection is simply closed and the player sees reason 1, a lost connection. Does nothing on a client or offline.\nLua/Python horizon.net.kick · HorizonCode Kick From Session · C++ HE::api::net::kick · action ownerOf(entity: int) player: int Which player this entity belongs to, or 0 for the host's own and for anything nobody owns (a door, a crate).\nLua/Python horizon.net.ownerOf · HorizonCode Owner Of · C++ HE::api::net::ownerOf · query · entity is Self in HorizonCode isLocallyControlled(entity: int) local: bool Do WE drive this entity? True for our own character, false for everybody else's, and true for anything not replicated at all. This is the question a character's graph asks before it reacts to input. Entity 0 or an id nothing answers to: false.\nLua/Python horizon.net.isLocallyControlled · HorizonCode Is Locally Controlled · C++ HE::api::net::isLocallyControlled · query · entity is Self in HorizonCode localCharacter() entity: int The entity this machine drives — our own character — or 0 before the host has given us one. 0 in every state measured here (no host assigned a character).\nLua/Python horizon.net.localCharacter · HorizonCode Local Character · C++ HE::api::net::localCharacter · query declareVarBool(entity: int, name: string, initial: bool, notify: bool) ok: bool Declares a replicated Bool on this entity: the host owns it, every client is sent its value. Call it in On Init. With Notify on, the clients get On Rep when a value arrives. A HorizonCode class does not need this — it ticks Replicated in the variable list instead. Entity 0 or an empty name: false. A missing notify is false in Lua and an IndexError in Python. See Replicated variables.\nLua/Python horizon.net.declareVarBool · HorizonCode Declare Replicated Bool · C++ HE::api::net::declareVarBool · action · entity is Self in HorizonCode declareVarInt(entity: int, name: string, initial: int, notify: bool) ok: bool Declares a replicated Int on this entity. See Declare Replicated Bool. 32-bit: 3000000000 is stored as −1294967296.\nLua/Python horizon.net.declareVarInt · HorizonCode Declare Replicated Int · C++ HE::api::net::declareVarInt · action · entity is Self in HorizonCode declareVarFloat(entity: int, name: string, initial: float, notify: bool) ok: bool Declares a replicated Float on this entity. See Declare Replicated Bool.\nLua/Python horizon.net.declareVarFloat · HorizonCode Declare Replicated Float · C++ HE::api::net::declareVarFloat · action · entity is Self in HorizonCode declareVarString(entity: int, name: string, initial: string, notify: bool) ok: bool Declares a replicated String on this entity. See Declare Replicated Bool.\nLua/Python horizon.net.declareVarString · HorizonCode Declare Replicated String · C++ HE::api::net::declareVarString · action · entity is Self in HorizonCode declareVarVec3(entity: int, name: string, initial: vec3, notify: bool) ok: bool Declares a replicated Vector on this entity. See Declare Replicated Bool. In Lua the old value of onRep_<name> is the number 0 (known issue, see Replicated variables).\nLua/Python horizon.net.declareVarVec3 · HorizonCode Declare Replicated Vector · C++ HE::api::net::declareVarVec3 · action · entity is Self in HorizonCode setVarBool(entity: int, name: string, value: bool) ok: bool Writes a declared Bool. On the host every client is sent the new value; on a client it takes effect HERE and the host's next value replaces it, which is what makes a prediction possible. False = never declared. On a client the write is its own prediction until the host's value comes back. A variable of another type is overwritten too: the row answers true and the variable changes type. See Replicated variables.\nLua/Python horizon.net.setVarBool · HorizonCode Set Replicated Bool · C++ HE::api::net::setVarBool · action · entity is Self in HorizonCode setVarInt(entity: int, name: string, value: int) ok: bool Writes a declared Int. See Set Replicated Bool.\nLua/Python horizon.net.setVarInt · HorizonCode Set Replicated Int · C++ HE::api::net::setVarInt · action · entity is Self in HorizonCode setVarFloat(entity: int, name: string, value: float) ok: bool Writes a declared Float. See Set Replicated Bool.\nLua/Python horizon.net.setVarFloat · HorizonCode Set Replicated Float · C++ HE::api::net::setVarFloat · action · entity is Self in HorizonCode setVarString(entity: int, name: string, value: string) ok: bool Writes a declared String. See Set Replicated Bool.\nLua/Python horizon.net.setVarString · HorizonCode Set Replicated String · C++ HE::api::net::setVarString · action · entity is Self in HorizonCode setVarVec3(entity: int, name: string, value: vec3) ok: bool Writes a declared Vector. See Set Replicated Bool.\nLua/Python horizon.net.setVarVec3 · HorizonCode Set Replicated Vector · C++ HE::api::net::setVarVec3 · action · entity is Self in HorizonCode getVarBool(entity: int, name: string) value: bool Reads a declared Bool. False when the name was never declared here, which Has Replicated Variable tells apart from a value that is simply false. A variable declared with another type reads as false.\nLua/Python horizon.net.getVarBool · HorizonCode Get Replicated Bool · C++ HE::api::net::getVarBool · query · entity is Self in HorizonCode getVarInt(entity: int, name: string) value: int Reads a declared Int. 0 when the name was never declared here.\nLua/Python horizon.net.getVarInt · HorizonCode Get Replicated Int · C++ HE::api::net::getVarInt · query · entity is Self in HorizonCode getVarFloat(entity: int, name: string) value: float Reads a declared Float. 0 when the name was never declared here.\nLua/Python horizon.net.getVarFloat · HorizonCode Get Replicated Float · C++ HE::api::net::getVarFloat · query · entity is Self in HorizonCode getVarString(entity: int, name: string) value: string Reads a declared String. Empty when the name was never declared here.\nLua/Python horizon.net.getVarString · HorizonCode Get Replicated String · C++ HE::api::net::getVarString · query · entity is Self in HorizonCode getVarVec3(entity: int, name: string) value: vec3 Reads a declared Vector. Zero when the name was never declared here.\nLua/Python horizon.net.getVarVec3 · HorizonCode Get Replicated Vector · C++ HE::api::net::getVarVec3 · query · entity is Self in HorizonCode callServer(entity, name, …) ok: bool Ask the HOST to run a function on this entity. The ordinary way to say \"I pulled the lever\": a client may not change the world, so it asks. Nothing comes back — a remote call has no return value. Allowed for the entity you own, or for a function whose header has Any Client ticked; anything else the host drops, and with anti-cheat on it is a Hard report that removes the caller. Offline and on the host it runs here, on the entity's HorizonCode class, so a graph works in single player; a Lua or Python method is not reached that way. In Lua and Python the arguments after name are passed on as the remote function's arguments, as many as it takes (see Remote calls). On a client true means sent, also for a call the host then refuses. Offline and on the host a Lua or Python method is not reached: the row answers false and nothing runs, so call the method directly (see Remote calls).\nLua/Python horizon.net.callServer · HorizonCode Call Server · C++ HE::api::net::callServer · action · entity is Self in HorizonCode callClient(player, entity, name, …) ok: bool Host only: run a function on ONE player's machine — the hit marker, the message only they should see. Addressed by PlayerId. Nothing comes back. In Lua and Python the arguments after name are passed on as the remote function's arguments, as many as it takes (see Remote calls). Answers false and runs nothing in a script on a client, for the host's own player and for a player number nobody has.\nLua/Python horizon.net.callClient · HorizonCode Call Client · C++ HE::api::net::callClient · action callAllClients(entity, name, …) ok: bool Host only: run a function on EVERY machine, including this one — the round-over horn, the explosion everybody sees. Nothing comes back. Here on the host only the entity's HorizonCode class runs it (a Lua or Python method is not reached, and the result is then false although the clients were sent the call). In Lua and Python the arguments after name are passed on as the remote function's arguments, as many as it takes (see Remote calls). Answers false on a client, and on the host for an entity without a HorizonCode class, although the clients were sent the call and ran it; the host's own script method does not run.\nLua/Python horizon.net.callAllClients · HorizonCode Call All Clients · C++ HE::api::net::callAllClients · action · entity is Self in HorizonCode allowAnyClient(entity: int, function: string) ok: bool Let any client call that function on this entity, not just its owner. For Lua, Python and C++ classes, which have no function header to tick. A door belongs to nobody, so without this nobody could open it. Lasts one session: call it in onSessionStarted. false offline or for an empty name; true on a client and for an entity without a network id, where it does nothing. See Remote calls.\nLua/Python horizon.net.allowAnyClient · HorizonCode Allow Any Client · C++ HE::api::net::allowAnyClient · action · entity is Self in HorizonCode rpcSender() player: int Which player asked for the call being handled right now: a player number, as Player Name and Kick From Session take it. 0 at any other moment. Not a connection number, so it is not what the anti-cheat rows take (Report Player gives that one). On a client, inside a call the host made: 1.\nLua/Python horizon.net.rpcSender · HorizonCode Call Sender · C++ HE::api::net::rpcSender · query hasVar(entity: int, name: string) declared: bool Is this name declared on this entity at all — by a script or by the entity's HorizonCode class? The one row that tells a missing declaration apart from a value still at its default. Also true for a variable a client declared on its own copy.\nLua/Python horizon.net.hasVar · HorizonCode Has Replicated Variable · C++ HE::api::net::hasVar · query · entity is Self in HorizonCode",
      "title": "Multiplayer"
     },
     {
@@ -59527,6 +61133,463 @@
         {
          "s": "c",
          "t": "HE::api::anticheat::<function>"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The host's anti-cheat scores what clients send and decides what to do about it. It runs on the host of a multiplayer session whose project has anti-cheat switched on (Project Settings, Game, Anti-Cheat). Each report reaches every script as "
+        },
+        {
+         "s": "c",
+         "t": "onCheatDetected(reportId)"
+        },
+        {
+         "s": "",
+         "t": "; the "
+        },
+        {
+         "s": "c",
+         "t": "report…"
+        },
+        {
+         "s": "",
+         "t": " rows read it, "
+        },
+        {
+         "s": "c",
+         "t": "respond"
+        },
+        {
+         "s": "",
+         "t": " overrules the host's reaction. A client gets the same callback once, when the host tells it that it is being removed."
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Known issue (build 7d49d44f): anti-cheat never runs, in the exported game and in Play as Host alike."
+          },
+          {
+           "s": "",
+           "t": " The project setting does not reach the session: "
+          },
+          {
+           "s": "c",
+           "t": "net.host"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "--host"
+          },
+          {
+           "s": "",
+           "t": " and Play as Host all open it without the anti-cheat settings. And the anti-cheat that scripts, graphs and C++ modules talk to is a second object that no session is connected to. So in every frontend "
+          },
+          {
+           "s": "c",
+           "t": "isEnabled"
+          },
+          {
+           "s": "",
+           "t": " is "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "check"
+          },
+          {
+           "s": "",
+           "t": " "
+          },
+          {
+           "s": "c",
+           "t": "true"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "report"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "respond"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "kick"
+          },
+          {
+           "s": "",
+           "t": " and "
+          },
+          {
+           "s": "c",
+           "t": "setPlayerLabel"
+          },
+          {
+           "s": "",
+           "t": " do nothing, the readers answer 0 or "
+          },
+          {
+           "s": "c",
+           "t": "\"\""
+          },
+          {
+           "s": "",
+           "t": ", and "
+          },
+          {
+           "s": "c",
+           "t": "onCheatDetected"
+          },
+          {
+           "s": "",
+           "t": " never fires. The rest of this section was measured with the anti-cheat connected by hand, the way the engine intends it."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "warning"
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "c",
+          "t": "player"
+         },
+         {
+          "s": "b",
+          "t": " is a connection number, not a player number."
+         },
+         {
+          "s": "",
+          "t": " Every row here that takes a player, and "
+         },
+         {
+          "s": "c",
+          "t": "reportPlayer"
+         },
+         {
+          "s": "",
+          "t": ", counts the host's connections, which are numbered separately from the players of "
+         },
+         {
+          "h": "#net",
+          "s": "l",
+          "t": "net"
+         },
+         {
+          "s": "",
+          "t": ". The first joiner was player 2 on connection 1; after a failed join attempt had used connection 1, the next joiner was player 2 on connection 2. No row converts one into the other, so take the number from "
+         },
+         {
+          "s": "c",
+          "t": "reportPlayer"
+         },
+         {
+          "s": "",
+          "t": ". A report filed under "
+         },
+         {
+          "s": "c",
+          "t": "net.rpcSender()"
+         },
+         {
+          "s": "",
+          "t": " (player 2) went to connection 2, which was nobody, and the real caller's score stayed 0. A connection nobody holds is scored and reported all the same."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Score and level."
+         },
+         {
+          "s": "",
+          "t": " "
+         },
+         {
+          "s": "c",
+          "t": "report(player, rule, weight, detail)"
+         },
+         {
+          "s": "",
+          "t": " adds "
+         },
+         {
+          "s": "c",
+          "t": "weight"
+         },
+         {
+          "s": "",
+          "t": " to that connection's score, which halves every 30 seconds (the defaults on the Anti-Cheat page). Reaching 5 files a "
+         },
+         {
+          "s": "i",
+          "t": "Suspect"
+         },
+         {
+          "s": "",
+          "t": " report (level 1), 20 a "
+         },
+         {
+          "s": "i",
+          "t": "Confirmed"
+         },
+         {
+          "s": "",
+          "t": " one (level 2). "
+         },
+         {
+          "s": "i",
+          "t": "Hard"
+         },
+         {
+          "s": "",
+          "t": " (level 3) is a single observation no honest build sends, for example a "
+         },
+         {
+          "h": "#net-calls",
+          "s": "l",
+          "t": "remote call"
+         },
+         {
+          "s": "",
+          "t": " to an entity the client may not call. "
+         },
+         {
+          "s": "c",
+          "t": "reportDetail"
+         },
+         {
+          "s": "",
+          "t": " lists the observations behind the score (“Custom 6.00 (Aimbot: through wall)”)."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Reactions."
+         },
+         {
+          "s": "",
+          "t": " Unless a handler says otherwise the host logs Suspect and Confirmed reports and kicks on Hard. "
+         },
+         {
+          "s": "c",
+          "t": "respond(reportId, response)"
+         },
+         {
+          "s": "",
+          "t": " replaces that, but only inside "
+         },
+         {
+          "s": "c",
+          "t": "onCheatDetected"
+         },
+         {
+          "s": "",
+          "t": ", in the frame the report fired: "
+         },
+         {
+          "s": "c",
+          "t": "respond(id, 1 + 8)"
+         },
+         {
+          "s": "",
+          "t": " made the host log and flag, "
+         },
+         {
+          "s": "c",
+          "t": "1 + 16"
+         },
+         {
+          "s": "",
+          "t": " log and kick. A later call is ignored with the log line “no such pending report”. Log is always kept."
+         }
+        ],
+        [
+         {
+          "s": "c",
+          "t": "check"
+         },
+         {
+          "s": "b",
+          "t": " always answers "
+         },
+         {
+          "s": "c",
+          "t": "true"
+         },
+         {
+          "s": "b",
+          "t": "."
+         },
+         {
+          "s": "",
+          "t": " The rules on the Anti-Cheat page are saved with the project but nothing reads them yet (measured with a rule “Damage” from 0 to 100 and a value of 500), so code that applies a value only when "
+         },
+         {
+          "s": "c",
+          "t": "check"
+         },
+         {
+          "s": "",
+          "t": " agrees keeps working when they arrive."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "What the kicked client learns."
+         },
+         {
+          "s": "",
+          "t": " Its scripts get "
+         },
+         {
+          "s": "c",
+          "t": "onCheatDetected"
+         },
+         {
+          "s": "",
+          "t": " with "
+         },
+         {
+          "s": "c",
+          "t": "reportPlayer"
+         },
+         {
+          "s": "",
+          "t": " 0 (“you”), then "
+         },
+         {
+          "s": "c",
+          "t": "onDisconnected(2)"
+         },
+         {
+          "s": "",
+          "t": " with “Removed from the session.”. After "
+         },
+         {
+          "s": "c",
+          "t": "kick(player, code)"
+         },
+         {
+          "s": "",
+          "t": " it reads "
+         },
+         {
+          "s": "c",
+          "t": "reportReason"
+         },
+         {
+          "s": "",
+          "t": " = "
+         },
+         {
+          "s": "c",
+          "t": "code"
+         },
+         {
+          "s": "",
+          "t": ", level 2 and an empty rule; after a kick by the host's policy or a "
+         },
+         {
+          "s": "c",
+          "t": "respond"
+         },
+         {
+          "s": "",
+          "t": ", the rule's name and reason 0. Score and detail are never sent to a client. In the editor's Play mode nobody is kicked."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Labels."
+         },
+         {
+          "s": "",
+          "t": " A client's join name is its label from the start; "
+         },
+         {
+          "s": "c",
+          "t": "setPlayerLabel"
+         },
+         {
+          "s": "",
+          "t": " replaces it in the log and in later reports (“conn 1 [Anna#1]”). "
+         },
+         {
+          "s": "c",
+          "t": "expectDisplacement"
+         },
+         {
+          "s": "",
+          "t": " was not measured here: it needs a moving character."
+         }
+        ]
+       ],
+       "k": "ul"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Example: anticheat.respond"
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\nlocal AC = horizon.anticheat\n\nfunction M.onCheatDetected(self, id)\n    if AC.reportPlayer(id) == 0 then\n        -- On a client: the host is removing us. Say why before the link drops.\n        horizon.log(\"Removed from the session: \" .. AC.reportRule(id) .. \" (code \" .. AC.reportReason(id) .. \")\")\n        return\n    end\n    -- On the host. reportPlayer is a CONNECTION number, not a net player number.\n    horizon.log(string.format(\"[anti-cheat] %s, connection %d, score %.1f: %s\",\n        AC.reportRule(id), AC.reportPlayer(id), AC.reportScore(id), AC.reportDetail(id)))\n    if AC.reportLevel(id) == 2 then\n        AC.respond(id, 1 + 16)    -- Confirmed: log and kick (the default policy only logs)\n    end\nend\n\nreturn M",
+         "title": "cheat_log.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nAC = horizon.anticheat\n\nclass CheatLog(horizon.Behavior):\n    def on_cheat_detected(self, rid):\n        if AC.reportPlayer(rid) == 0:\n            # On a client: the host is removing us. Say why before the link drops.\n            horizon.log(\"Removed from the session: %s (code %d)\" % (AC.reportRule(rid), AC.reportReason(rid)))\n            return\n        # On the host. reportPlayer is a CONNECTION number, not a net player number.\n        horizon.log(\"[anti-cheat] %s, connection %d, score %.1f: %s\" % (\n            AC.reportRule(rid), AC.reportPlayer(rid), AC.reportScore(rid), AC.reportDetail(rid)))\n        if AC.reportLevel(rid) == 2:\n            AC.respond(rid, 1 + 16)    # Confirmed: log and kick (the default policy only logs)",
+         "title": "cheat_log.py"
         }
        ]
       },
@@ -59569,7 +61632,16 @@
          [
           {
            "s": "",
-           "t": "Asks the host's anti-cheat whether a value a client claimed (damage, a pickup, a currency delta) is allowed by the rule of that name from the project's Anti-Cheat settings. True = apply it. Always true on a client, with anti-cheat off, or for a rule the project does not declare: a check the engine cannot make never blocks the game.\nLua/Python "
+           "t": "Asks the host's anti-cheat whether a value a client claimed (damage, a pickup, a currency delta) is allowed by the rule of that name. True = apply it. The rule table is not built yet: the rules on the project's Anti-Cheat page are saved but never read, so every check answers true. That is also the answer on a client, with anti-cheat off and for a rule nobody declared: a check the engine cannot make never blocks the game. Player is a connection number, like "
+          },
+          {
+           "h": "#anticheat-reportPlayer",
+           "s": "l",
+           "t": "Report Player"
+          },
+          {
+           "s": "",
+           "t": "'s.\nLua/Python "
           },
           {
            "s": "c",
@@ -59666,7 +61738,15 @@
          [
           {
            "s": "",
-           "t": "Reports something the engine cannot see for itself — a shot through a wall, an impossible pickup — against this player, under a rule name of your choosing. Weight is what it adds to the player's score (5 is the default Suspect threshold, 20 Confirmed); the detail goes into the log.\nLua/Python "
+           "t": "Reports something the engine cannot see for itself — a shot through a wall, an impossible pickup — against this player, under a rule name of your choosing. Weight is what it adds to the player's score (5 is the default Suspect threshold, 20 Confirmed); the detail goes into the log. Filed at the end of the frame; "
+          },
+          {
+           "s": "c",
+           "t": "onCheatDetected"
+          },
+          {
+           "s": "",
+           "t": " fires then. See the group notes on connection numbers.\nLua/Python "
           },
           {
            "s": "c",
@@ -59807,7 +61887,23 @@
          [
           {
            "s": "",
-           "t": "Removes a player from the session at the end of this frame, whatever the score says. The client is told the Reason Code first, so it can show why instead of a dead connection. Ignored in the editor's play mode.\nLua/Python "
+           "t": "Removes a player from the session at the end of this frame, whatever the score says. The client is told the Reason Code first, so it can show why instead of a dead connection. Ignored in the editor's play mode. The client reads "
+          },
+          {
+           "s": "c",
+           "t": "reasonCode"
+          },
+          {
+           "s": "",
+           "t": " back through "
+          },
+          {
+           "s": "c",
+           "t": "reportReason"
+          },
+          {
+           "s": "",
+           "t": "; its ticket has level 2 and an empty rule.\nLua/Python "
           },
           {
            "s": "c",
@@ -59904,7 +62000,15 @@
           },
           {
            "s": "",
-           "t": " used. On a client this is the one thing the host tells you about a kick.\nLua/Python "
+           "t": " used. On a client this is the one thing the host tells you about a kick. Empty on the client after an explicit "
+          },
+          {
+           "s": "c",
+           "t": "kick"
+          },
+          {
+           "s": "",
+           "t": ", which sends a reason code instead.\nLua/Python "
           },
           {
            "s": "c",
@@ -59951,13 +62055,31 @@
            "t": "The connection the report is about — the number "
           },
           {
+           "h": "#anticheat-check",
+           "s": "l",
+           "t": "Check Rule"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "h": "#anticheat-report",
+           "s": "l",
+           "t": "Report Observation"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
            "h": "#anticheat-setPlayerLabel",
            "s": "l",
            "t": "Set Player Label"
           },
           {
            "s": "",
-           "t": " and "
+           "t": ", "
           },
           {
            "h": "#anticheat-kick",
@@ -59966,7 +62088,16 @@
           },
           {
            "s": "",
-           "t": " take. 0 on a client, where the report is about you.\nLua/Python "
+           "t": " and "
+          },
+          {
+           "h": "#anticheat-playerScore",
+           "s": "l",
+           "t": "Player Score"
+          },
+          {
+           "s": "",
+           "t": " take. Not a multiplayer player number: players are numbered 1, 2, … in join order, connections separately (the first joiner is usually player 2 on connection 1). 0 on a client, where the report is about you.\nLua/Python "
           },
           {
            "s": "c",
@@ -60010,7 +62141,7 @@
          [
           {
            "s": "",
-           "t": "The network id of the entity involved, when the report names one (a movement report names the character). 0 when it does not.\nLua/Python "
+           "t": "The network id of the entity involved, when the report names one (a movement report names the character). 0 when it does not. A network id, not an entity id. 0 in every report measured here.\nLua/Python "
           },
           {
            "s": "c",
@@ -60195,7 +62326,7 @@
          [
           {
            "s": "",
-           "t": "The player's current anti-cheat score, decaying over time. For a diagnostic overlay; 0 with anti-cheat off or on a client.\nLua/Python "
+           "t": "The player's current anti-cheat score, decaying over time. For a diagnostic overlay; 0 with anti-cheat off or on a client. Halves every 30 seconds with the default settings.\nLua/Python "
           },
           {
            "s": "c",
@@ -60239,7 +62370,15 @@
          [
           {
            "s": "",
-           "t": "Is the anti-cheat running in this session? True only on a host that has it enabled in the project settings. Useful to hide an admin overlay everywhere else.\nLua/Python "
+           "t": "Is the anti-cheat running in this session? True only on a host that has it enabled in the project settings. Useful to hide an admin overlay everywhere else. "
+          },
+          {
+           "s": "c",
+           "t": "false"
+          },
+          {
+           "s": "",
+           "t": " on a client.\nLua/Python "
           },
           {
            "s": "c",
@@ -60272,7 +62411,7 @@
      ],
      "eyebrow": "Multiplayer · 15 functions",
      "id": "anticheat",
-     "text": "Lua / Python: horizon.anticheat.<function> · C++: HE::api::anticheat::<function> Function Returns Description check(rule: string, value: float, player: int) ok: bool Asks the host's anti-cheat whether a value a client claimed (damage, a pickup, a currency delta) is allowed by the rule of that name from the project's Anti-Cheat settings. True = apply it. Always true on a client, with anti-cheat off, or for a rule the project does not declare: a check the engine cannot make never blocks the game.\nLua/Python horizon.anticheat.check · HorizonCode Check Rule · C++ HE::api::anticheat::check · action expectDisplacement(entity: int, maxDistance: float) — Tells the anti-cheat that this entity is about to move a long way on purpose (respawn, portal, dash), up to Max Distance. One shot: the next move is allowed, then the usual speed check is back. Without it a respawn would count as a teleport against the player.\nLua/Python horizon.anticheat.expectDisplacement · HorizonCode Expect Displacement · C++ HE::api::anticheat::expectDisplacement · action · entity is Self in HorizonCode report(player: int, rule: string, weight: float, detail: string) — Reports something the engine cannot see for itself — a shot through a wall, an impossible pickup — against this player, under a rule name of your choosing. Weight is what it adds to the player's score (5 is the default Suspect threshold, 20 Confirmed); the detail goes into the log.\nLua/Python horizon.anticheat.report · HorizonCode Report Observation · C++ HE::api::anticheat::report · action setPlayerLabel(player: int, label: string) — Gives a player a name for the anti-cheat's log, reports and telemetry. Without one a player is only a connection number. Also what a Ban holds on to for the rest of the session.\nLua/Python horizon.anticheat.setPlayerLabel · HorizonCode Set Player Label · C++ HE::api::anticheat::setPlayerLabel · action respond(reportId: int, response: int) — Inside On Cheat Detected: replaces what the host would do for this report. Response is a sum of 1 log, 2 event, 4 telemetry, 8 flag, 16 kick, 32 ban; 0 means log only. The host acts at the END of the frame, so this only counts in the frame the event fired.\nLua/Python horizon.anticheat.respond · HorizonCode Respond To Report · C++ HE::api::anticheat::respond · action kick(player: int, reasonCode: int) — Removes a player from the session at the end of this frame, whatever the score says. The client is told the Reason Code first, so it can show why instead of a dead connection. Ignored in the editor's play mode.\nLua/Python horizon.anticheat.kick · HorizonCode Kick Player · C++ HE::api::anticheat::kick · action reportLevel(reportId: int) level: int How serious the report is: 0 Info, 1 Suspect, 2 Confirmed, 3 Hard. Hard means a single thing no honest client can send; the other two are the decaying score crossing a threshold.\nLua/Python horizon.anticheat.reportLevel · HorizonCode Report Level · C++ HE::api::anticheat::reportLevel · query reportRule(reportId: int) rule: string The name of what was violated: an engine rule like DtBudget or Displacement, or the name your own Report Observation used. On a client this is the one thing the host tells you about a kick.\nLua/Python horizon.anticheat.reportRule · HorizonCode Report Rule · C++ HE::api::anticheat::reportRule · query reportPlayer(reportId: int) player: int The connection the report is about — the number Set Player Label and Kick Player take. 0 on a client, where the report is about you.\nLua/Python horizon.anticheat.reportPlayer · HorizonCode Report Player · C++ HE::api::anticheat::reportPlayer · query reportEntity(reportId: int) entity: int The network id of the entity involved, when the report names one (a movement report names the character). 0 when it does not.\nLua/Python horizon.anticheat.reportEntity · HorizonCode Report Entity · C++ HE::api::anticheat::reportEntity · query reportScore(reportId: int) score: float The player's score when the report was made. 0 on a client: the host never tells a player their score.\nLua/Python horizon.anticheat.reportScore · HorizonCode Report Score · C++ HE::api::anticheat::reportScore · query reportDetail(reportId: int) detail: string The observations behind the report as one readable line, for a log or an admin overlay. On a client only the rule name — nothing about how the host decides.\nLua/Python horizon.anticheat.reportDetail · HorizonCode Report Detail · C++ HE::api::anticheat::reportDetail · query reportReason(reportId: int) reasonCode: int The reason code a kick carried (Kick Player's Reason Code), read on the client to show the right message. 0 when the host's policy kicked.\nLua/Python horizon.anticheat.reportReason · HorizonCode Report Reason · C++ HE::api::anticheat::reportReason · query playerScore(player: int) score: float The player's current anti-cheat score, decaying over time. For a diagnostic overlay; 0 with anti-cheat off or on a client.\nLua/Python horizon.anticheat.playerScore · HorizonCode Player Score · C++ HE::api::anticheat::playerScore · query isEnabled() enabled: bool Is the anti-cheat running in this session? True only on a host that has it enabled in the project settings. Useful to hide an admin overlay everywhere else.\nLua/Python horizon.anticheat.isEnabled · HorizonCode Anti-Cheat Enabled · C++ HE::api::anticheat::isEnabled · query",
+     "text": "Lua / Python: horizon.anticheat.<function> · C++: HE::api::anticheat::<function> The host's anti-cheat scores what clients send and decides what to do about it. It runs on the host of a multiplayer session whose project has anti-cheat switched on (Project Settings, Game, Anti-Cheat). Each report reaches every script as onCheatDetected(reportId); the report… rows read it, respond overrules the host's reaction. A client gets the same callback once, when the host tells it that it is being removed. Known issue (build 7d49d44f): anti-cheat never runs, in the exported game and in Play as Host alike. The project setting does not reach the session: net.host, --host and Play as Host all open it without the anti-cheat settings. And the anti-cheat that scripts, graphs and C++ modules talk to is a second object that no session is connected to. So in every frontend isEnabled is false, check true, report, respond, kick and setPlayerLabel do nothing, the readers answer 0 or \"\", and onCheatDetected never fires. The rest of this section was measured with the anti-cheat connected by hand, the way the engine intends it. player is a connection number, not a player number. Every row here that takes a player, and reportPlayer, counts the host's connections, which are numbered separately from the players of net. The first joiner was player 2 on connection 1; after a failed join attempt had used connection 1, the next joiner was player 2 on connection 2. No row converts one into the other, so take the number from reportPlayer. A report filed under net.rpcSender() (player 2) went to connection 2, which was nobody, and the real caller's score stayed 0. A connection nobody holds is scored and reported all the same. Score and level. report(player, rule, weight, detail) adds weight to that connection's score, which halves every 30 seconds (the defaults on the Anti-Cheat page). Reaching 5 files a Suspect report (level 1), 20 a Confirmed one (level 2). Hard (level 3) is a single observation no honest build sends, for example a remote call to an entity the client may not call. reportDetail lists the observations behind the score (“Custom 6.00 (Aimbot: through wall)”). Reactions. Unless a handler says otherwise the host logs Suspect and Confirmed reports and kicks on Hard. respond(reportId, response) replaces that, but only inside onCheatDetected, in the frame the report fired: respond(id, 1 + 8) made the host log and flag, 1 + 16 log and kick. A later call is ignored with the log line “no such pending report”. Log is always kept. check always answers true. The rules on the Anti-Cheat page are saved with the project but nothing reads them yet (measured with a rule “Damage” from 0 to 100 and a value of 500), so code that applies a value only when check agrees keeps working when they arrive. What the kicked client learns. Its scripts get onCheatDetected with reportPlayer 0 (“you”), then onDisconnected(2) with “Removed from the session.”. After kick(player, code) it reads reportReason = code, level 2 and an empty rule; after a kick by the host's policy or a respond, the rule's name and reason 0. Score and detail are never sent to a client. In the editor's Play mode nobody is kicked. Labels. A client's join name is its label from the start; setPlayerLabel replaces it in the log and in later reports (“conn 1 [Anna#1]”). expectDisplacement was not measured here: it needs a moving character. Example: anticheat.respond cheat_log.lua local M = {}\nlocal AC = horizon.anticheat\n\nfunction M.onCheatDetected(self, id)\n    if AC.reportPlayer(id) == 0 then\n        -- On a client: the host is removing us. Say why before the link drops.\n        horizon.log(\"Removed from the session: \" .. AC.reportRule(id) .. \" (code \" .. AC.reportReason(id) .. \")\")\n        return\n    end\n    -- On the host. reportPlayer is a CONNECTION number, not a net player number.\n    horizon.log(string.format(\"[anti-cheat] %s, connection %d, score %.1f: %s\",\n        AC.reportRule(id), AC.reportPlayer(id), AC.reportScore(id), AC.reportDetail(id)))\n    if AC.reportLevel(id) == 2 then\n        AC.respond(id, 1 + 16)    -- Confirmed: log and kick (the default policy only logs)\n    end\nend\n\nreturn M cheat_log.py import horizon\n\nAC = horizon.anticheat\n\nclass CheatLog(horizon.Behavior):\n    def on_cheat_detected(self, rid):\n        if AC.reportPlayer(rid) == 0:\n            # On a client: the host is removing us. Say why before the link drops.\n            horizon.log(\"Removed from the session: %s (code %d)\" % (AC.reportRule(rid), AC.reportReason(rid)))\n            return\n        # On the host. reportPlayer is a CONNECTION number, not a net player number.\n        horizon.log(\"[anti-cheat] %s, connection %d, score %.1f: %s\" % (\n            AC.reportRule(rid), AC.reportPlayer(rid), AC.reportScore(rid), AC.reportDetail(rid)))\n        if AC.reportLevel(rid) == 2:\n            AC.respond(rid, 1 + 16)    # Confirmed: log and kick (the default policy only logs) Function Returns Description check(rule: string, value: float, player: int) ok: bool Asks the host's anti-cheat whether a value a client claimed (damage, a pickup, a currency delta) is allowed by the rule of that name. True = apply it. The rule table is not built yet: the rules on the project's Anti-Cheat page are saved but never read, so every check answers true. That is also the answer on a client, with anti-cheat off and for a rule nobody declared: a check the engine cannot make never blocks the game. Player is a connection number, like Report Player's.\nLua/Python horizon.anticheat.check · HorizonCode Check Rule · C++ HE::api::anticheat::check · action expectDisplacement(entity: int, maxDistance: float) — Tells the anti-cheat that this entity is about to move a long way on purpose (respawn, portal, dash), up to Max Distance. One shot: the next move is allowed, then the usual speed check is back. Without it a respawn would count as a teleport against the player.\nLua/Python horizon.anticheat.expectDisplacement · HorizonCode Expect Displacement · C++ HE::api::anticheat::expectDisplacement · action · entity is Self in HorizonCode report(player: int, rule: string, weight: float, detail: string) — Reports something the engine cannot see for itself — a shot through a wall, an impossible pickup — against this player, under a rule name of your choosing. Weight is what it adds to the player's score (5 is the default Suspect threshold, 20 Confirmed); the detail goes into the log. Filed at the end of the frame; onCheatDetected fires then. See the group notes on connection numbers.\nLua/Python horizon.anticheat.report · HorizonCode Report Observation · C++ HE::api::anticheat::report · action setPlayerLabel(player: int, label: string) — Gives a player a name for the anti-cheat's log, reports and telemetry. Without one a player is only a connection number. Also what a Ban holds on to for the rest of the session.\nLua/Python horizon.anticheat.setPlayerLabel · HorizonCode Set Player Label · C++ HE::api::anticheat::setPlayerLabel · action respond(reportId: int, response: int) — Inside On Cheat Detected: replaces what the host would do for this report. Response is a sum of 1 log, 2 event, 4 telemetry, 8 flag, 16 kick, 32 ban; 0 means log only. The host acts at the END of the frame, so this only counts in the frame the event fired.\nLua/Python horizon.anticheat.respond · HorizonCode Respond To Report · C++ HE::api::anticheat::respond · action kick(player: int, reasonCode: int) — Removes a player from the session at the end of this frame, whatever the score says. The client is told the Reason Code first, so it can show why instead of a dead connection. Ignored in the editor's play mode. The client reads reasonCode back through reportReason; its ticket has level 2 and an empty rule.\nLua/Python horizon.anticheat.kick · HorizonCode Kick Player · C++ HE::api::anticheat::kick · action reportLevel(reportId: int) level: int How serious the report is: 0 Info, 1 Suspect, 2 Confirmed, 3 Hard. Hard means a single thing no honest client can send; the other two are the decaying score crossing a threshold.\nLua/Python horizon.anticheat.reportLevel · HorizonCode Report Level · C++ HE::api::anticheat::reportLevel · query reportRule(reportId: int) rule: string The name of what was violated: an engine rule like DtBudget or Displacement, or the name your own Report Observation used. On a client this is the one thing the host tells you about a kick. Empty on the client after an explicit kick, which sends a reason code instead.\nLua/Python horizon.anticheat.reportRule · HorizonCode Report Rule · C++ HE::api::anticheat::reportRule · query reportPlayer(reportId: int) player: int The connection the report is about — the number Check Rule, Report Observation, Set Player Label, Kick Player and Player Score take. Not a multiplayer player number: players are numbered 1, 2, … in join order, connections separately (the first joiner is usually player 2 on connection 1). 0 on a client, where the report is about you.\nLua/Python horizon.anticheat.reportPlayer · HorizonCode Report Player · C++ HE::api::anticheat::reportPlayer · query reportEntity(reportId: int) entity: int The network id of the entity involved, when the report names one (a movement report names the character). 0 when it does not. A network id, not an entity id. 0 in every report measured here.\nLua/Python horizon.anticheat.reportEntity · HorizonCode Report Entity · C++ HE::api::anticheat::reportEntity · query reportScore(reportId: int) score: float The player's score when the report was made. 0 on a client: the host never tells a player their score.\nLua/Python horizon.anticheat.reportScore · HorizonCode Report Score · C++ HE::api::anticheat::reportScore · query reportDetail(reportId: int) detail: string The observations behind the report as one readable line, for a log or an admin overlay. On a client only the rule name — nothing about how the host decides.\nLua/Python horizon.anticheat.reportDetail · HorizonCode Report Detail · C++ HE::api::anticheat::reportDetail · query reportReason(reportId: int) reasonCode: int The reason code a kick carried (Kick Player's Reason Code), read on the client to show the right message. 0 when the host's policy kicked.\nLua/Python horizon.anticheat.reportReason · HorizonCode Report Reason · C++ HE::api::anticheat::reportReason · query playerScore(player: int) score: float The player's current anti-cheat score, decaying over time. For a diagnostic overlay; 0 with anti-cheat off or on a client. Halves every 30 seconds with the default settings.\nLua/Python horizon.anticheat.playerScore · HorizonCode Player Score · C++ HE::api::anticheat::playerScore · query isEnabled() enabled: bool Is the anti-cheat running in this session? True only on a host that has it enabled in the project settings. Useful to hide an admin overlay everywhere else. false on a client.\nLua/Python horizon.anticheat.isEnabled · HorizonCode Anti-Cheat Enabled · C++ HE::api::anticheat::isEnabled · query",
      "title": "Anti-Cheat"
     }
    ],

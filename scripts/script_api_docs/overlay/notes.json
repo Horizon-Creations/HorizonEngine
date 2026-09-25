@@ -191,17 +191,17 @@
   "net.callServer": {
     "script_sig": "callServer(entity, name, …)",
     "script_returns": "ok: bool",
-    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>)."
+    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>). On a client <code>true</code> means sent, also for a call the host then refuses. Offline and on the host a Lua or Python method is not reached: the row answers <code>false</code> and nothing runs, so call the method directly (see <a href=\"#net-calls\">Remote calls</a>)."
   },
   "net.callClient": {
     "script_sig": "callClient(player, entity, name, …)",
     "script_returns": "ok: bool",
-    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>)."
+    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>). Answers <code>false</code> and runs nothing in a script on a client, for the host's own player and for a player number nobody has."
   },
   "net.callAllClients": {
     "script_sig": "callAllClients(entity, name, …)",
     "script_returns": "ok: bool",
-    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>)."
+    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>). Answers <code>false</code> on a client, and on the host for an entity without a HorizonCode class, although the clients were sent the call and ran it; the host's own script method does not run."
   },
   "entity.spawn": {
     "note": "An empty name becomes <code>\"Entity\"</code>; parent 0 puts it at the top level. <strong>Known issue:</strong> the entity gets no transform, so position calls on it do nothing (see the <a href=\"#entity\">group notes</a>)."
@@ -348,5 +348,108 @@
   "env.setTimeOfDay": {
     "note": "Not wrapped by the setter: 1.7 reads back as 1.7 until Auto Advance moves the clock on.",
     "examples": {"file": "sleep", "lua": "local M = {}\n\n-- \"Sleep\" is a button action: skip to the next morning.\nfunction M.onInputPressed(self, name)\n    if name ~= \"Sleep\" then return end\n    horizon.env.setDayNightCycle(true)   -- without it the sun ignores the clock\n    horizon.env.setTimeOfDay(0.3)        -- a little after sunrise\n    -- Colours are four numbers; the fourth is ignored but required.\n    horizon.env.setSunColor(1.0, 0.85, 0.7, 1)\n    -- Weather lets go of a field a script changed, until the next preset.\n    horizon.env.setFogDensity(0.02)\nend\n\nreturn M\n", "python": "import horizon\n\nclass Sleep(horizon.Behavior):\n    # \"Sleep\" is a button action: skip to the next morning.\n    def on_input_pressed(self, name):\n        if name != \"Sleep\":\n            return\n        horizon.env.setDayNightCycle(True)   # without it the sun ignores the clock\n        horizon.env.setTimeOfDay(0.3)        # a little after sunrise\n        # Colours are four numbers; the fourth is ignored but required.\n        horizon.env.setSunColor(1.0, 0.85, 0.7, 1)\n        # Weather lets go of a field a script changed, until the next preset.\n        horizon.env.setFogDensity(0.02)\n"}
+  },
+  "net.joinDirect": {
+    "note": "Answers <code>true</code> when the attempt has started. With a wrong join code the status stays 2 and <code>lastError</code> empty (measured for 8 seconds): time the attempt out yourself, as the example does.",
+    "examples": {
+      "file": "lobby",
+      "lua": "local M = {}\nlocal PORT = 47824   -- the project's Default port. Fixed on purpose: no row reads back a port the OS picked.\n\nfunction M.onInputPressed(self, action)\n    if action == \"Host\" and horizon.net.status() == 0 then\n        if horizon.net.host(PORT, \"Host\") then\n            horizon.log(\"Hosting. Join code: \" .. horizon.net.joinCode())\n        else\n            horizon.log(\"Could not host: \" .. horizon.net.lastError())\n        end\n    end\nend\n\n-- Called by the join screen with what the player typed in.\nfunction M.join(self, address, code)\n    horizon.net.leave()                       -- a new attempt replaces an old one\n    if horizon.net.joinDirect(address, PORT, code, \"Guest\") then\n        self.waited = 0\n    end\nend\n\nfunction M.onUpdate(self, dt)\n    if self.waited == nil then return end\n    -- A wrong join code never fails: the attempt stays at 2 (Connecting). Give up yourself.\n    self.waited = self.waited + dt\n    if horizon.net.status() == 2 and self.waited > 10 then\n        horizon.net.leave()\n        self.waited = nil\n        horizon.log(\"No answer from the host. Check the address and the join code.\")\n    end\nend\n\nfunction M.onConnected(self)\n    self.waited = nil\n    horizon.log(\"Joined as player \" .. horizon.net.localPlayer())\nend\n\nfunction M.onDisconnected(self, reason)   -- 1 lost, 2 kicked, 3 refused\n    self.waited = nil\n    horizon.log(\"Out of the session (\" .. reason .. \"): \" .. horizon.net.lastError())\nend\n\nfunction M.onPlayerJoined(self, player)  -- host only\n    horizon.log(horizon.net.playerName(player) .. \" joined\")\nend\n\nreturn M\n",
+      "python": "import horizon\n\nPORT = 47824   # the project's Default port. Fixed on purpose: no row reads back a port the OS picked.\n\nclass Lobby(horizon.Behavior):\n    waited = None\n\n    def on_input_pressed(self, action):\n        if action == \"Host\" and horizon.net.status() == 0:\n            if horizon.net.host(PORT, \"Host\"):\n                horizon.log(\"Hosting. Join code: \" + horizon.net.joinCode())\n            else:\n                horizon.log(\"Could not host: \" + horizon.net.lastError())\n\n    def join(self, address, code):\n        \"\"\"Called by the join screen with what the player typed in.\"\"\"\n        horizon.net.leave()                   # a new attempt replaces an old one\n        if horizon.net.joinDirect(address, PORT, code, \"Guest\"):\n            self.waited = 0.0\n\n    def on_update(self, dt):\n        if self.waited is None:\n            return\n        # A wrong join code never fails: the attempt stays at 2 (Connecting). Give up yourself.\n        self.waited += dt\n        if horizon.net.status() == 2 and self.waited > 10:\n            horizon.net.leave()\n            self.waited = None\n            horizon.log(\"No answer from the host. Check the address and the join code.\")\n\n    def on_connected(self):\n        self.waited = None\n        horizon.log(\"Joined as player %d\" % horizon.net.localPlayer())\n\n    def on_disconnected(self, reason):    # 1 lost, 2 kicked, 3 refused\n        self.waited = None\n        horizon.log(\"Out of the session (%d): %s\" % (reason, horizon.net.lastError()))\n\n    def on_player_joined(self, player):   # host only\n        horizon.log(horizon.net.playerName(player) + \" joined\")\n"
+    }
+  },
+  "net.joinLan": {
+    "note": "<code>false</code> when there is no entry at that index, which without the system's Local Network permission is always."
+  },
+  "net.leave": {
+    "note": "Sends <code>onSessionEnded</code> on this machine. Offline it does nothing."
+  },
+  "net.status": {
+    "note": "After a kick or a lost host it stays 4 until the next <code>leave</code> or join."
+  },
+  "net.lastError": {
+    "note": "After a removal: “Removed from the session.” (anti-cheat on) or “Lost the connection to the host.”."
+  },
+  "net.joinCode": {
+    "note": "26 characters."
+  },
+  "net.refreshLan": {
+    "note": "Needs the system's Local Network permission, see the group notes above."
+  },
+  "net.localPlayer": {
+    "note": "0 on a client that is still connecting."
+  },
+  "net.playerAt": {
+    "note": "On a client <code>playerAt(0)</code> is its own number."
+  },
+  "net.playerName": {
+    "note": "Inside <code>onPlayerLeft</code> the name is already gone."
+  },
+  "net.kick": {
+    "note": "Does nothing on a client or offline."
+  },
+  "net.isLocallyControlled": {
+    "note": "Entity 0 or an id nothing answers to: <code>false</code>."
+  },
+  "net.localCharacter": {
+    "note": "0 in every state measured here (no host assigned a character)."
+  },
+  "net.declareVarBool": {
+    "note": "Entity 0 or an empty name: <code>false</code>. A missing <code>notify</code> is <code>false</code> in Lua and an <code>IndexError</code> in Python. See <a href=\"#net-vars\">Replicated variables</a>."
+  },
+  "net.declareVarInt": {
+    "note": "32-bit: 3000000000 is stored as −1294967296.",
+    "examples": {
+      "file": "health",
+      "lua": "local M = {}\n\nfunction M.onStart(self)\n    -- The same script runs on every machine; each declares the variable.\n    -- The host's value is the one every client ends up with.\n    horizon.net.declareVarInt(self.entityId, \"health\", 100, true)\nend\n\n-- Only the host decides what a hit does.\nfunction M.onCollisionEnter(self, other)\n    if not horizon.net.isAuthority() then return end\n    local hp = horizon.net.getVarInt(self.entityId, \"health\") - 10\n    horizon.net.setVarInt(self.entityId, \"health\", math.max(hp, 0))\n    self:showHealth()      -- onRep_health never runs on the host\nend\n\n-- On the clients: a new value arrived. `old` is the one before it.\nfunction M.onRep_health(self, old)\n    self:showHealth()\nend\n\nfunction M.showHealth(self)\n    horizon.log(\"health \" .. horizon.net.getVarInt(self.entityId, \"health\"))\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass Health(horizon.Behavior):\n    def on_start(self):\n        # The same script runs on every machine; each declares the variable.\n        # The host's value is the one every client ends up with.\n        horizon.net.declareVarInt(self.entity_id, \"health\", 100, True)\n\n    def on_collision_enter(self, other):\n        # Only the host decides what a hit does.\n        if not horizon.net.isAuthority():\n            return\n        hp = horizon.net.getVarInt(self.entity_id, \"health\") - 10\n        horizon.net.setVarInt(self.entity_id, \"health\", max(hp, 0))\n        self.show_health()     # on_rep_health never runs on the host\n\n    def on_rep_health(self, old):\n        # On the clients: a new value arrived. `old` is the one before it.\n        self.show_health()\n\n    def show_health(self):\n        horizon.log(\"health %d\" % horizon.net.getVarInt(self.entity_id, \"health\"))\n"
+    }
+  },
+  "net.declareVarVec3": {
+    "note": "In Lua the <code>old</code> value of <code>onRep_&lt;name&gt;</code> is the number 0 (known issue, see <a href=\"#net-vars\">Replicated variables</a>)."
+  },
+  "net.setVarBool": {
+    "note": "On a client the write is its own prediction until the host's value comes back. A variable of another type is overwritten too: the row answers <code>true</code> and the variable changes type. See <a href=\"#net-vars\">Replicated variables</a>."
+  },
+  "net.getVarBool": {
+    "note": "A variable declared with another type reads as <code>false</code>."
+  },
+  "net.hasVar": {
+    "note": "Also <code>true</code> for a variable a client declared on its own copy."
+  },
+  "net.allowAnyClient": {
+    "note": "Lasts one session: call it in <code>onSessionStarted</code>. <code>false</code> offline or for an empty name; <code>true</code> on a client and for an entity without a network id, where it does nothing. See <a href=\"#net-calls\">Remote calls</a>.",
+    "examples": {
+      "file": "lever",
+      "lua": "local M = {}\n\nfunction M.onStart(self)\n    horizon.net.declareVarBool(self.entityId, \"open\", false, true)\nend\n\n-- Per session: the list of calls any client may make starts empty with every session.\nfunction M.onSessionStarted(self)\n    -- The lever belongs to nobody. Without this only its owner could pull it,\n    -- and a refused call counts against the caller as cheating.\n    horizon.net.allowAnyClient(self.entityId, \"pull\")\nend\n\nfunction M.onInputPressed(self, action)\n    if action ~= \"Interact\" then return end\n    if horizon.net.isAuthority() then\n        self:pull()        -- host or offline: callServer would not reach a script method here\n    else\n        horizon.net.callServer(self.entityId, \"pull\")\n    end\nend\n\n-- Runs on the host, whoever asked.\nfunction M.pull(self)\n    local who = horizon.net.rpcSender()       -- 0: the host pulled it itself\n    local open = not horizon.net.getVarBool(self.entityId, \"open\")\n    horizon.net.setVarBool(self.entityId, \"open\", open)\n    local name = who ~= 0 and horizon.net.playerName(who) or \"The host\"\n    horizon.log(name .. (open and \" opened\" or \" closed\") .. \" the gate\")\nend\n\nfunction M.onRep_open(self, old)\n    horizon.log(horizon.net.getVarBool(self.entityId, \"open\") and \"gate opens\" or \"gate closes\")\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass Lever(horizon.Behavior):\n    def on_start(self):\n        horizon.net.declareVarBool(self.entity_id, \"open\", False, True)\n\n    def on_session_started(self):\n        # Per session: the list of calls any client may make starts empty with every session.\n        # The lever belongs to nobody. Without this only its owner could pull it,\n        # and a refused call counts against the caller as cheating.\n        horizon.net.allowAnyClient(self.entity_id, \"pull\")\n\n    def on_input_pressed(self, action):\n        if action != \"Interact\":\n            return\n        if horizon.net.isAuthority():\n            self.pull()        # host or offline: callServer would not reach a script method here\n        else:\n            horizon.net.callServer(self.entity_id, \"pull\")\n\n    def pull(self):\n        \"\"\"Runs on the host, whoever asked.\"\"\"\n        who = horizon.net.rpcSender()          # 0: the host pulled it itself\n        is_open = not horizon.net.getVarBool(self.entity_id, \"open\")\n        horizon.net.setVarBool(self.entity_id, \"open\", is_open)\n        name = horizon.net.playerName(who) if who else \"The host\"\n        horizon.log(name + (\" opened\" if is_open else \" closed\") + \" the gate\")\n\n    def on_rep_open(self, old):\n        horizon.log(\"gate opens\" if horizon.net.getVarBool(self.entity_id, \"open\") else \"gate closes\")\n"
+    }
+  },
+  "net.rpcSender": {
+    "note": "On a client, inside a call the host made: 1."
+  },
+  "anticheat.report": {
+    "note": "Filed at the end of the frame; <code>onCheatDetected</code> fires then. See the group notes on connection numbers."
+  },
+  "anticheat.respond": {
+    "examples": {
+      "file": "cheat_log",
+      "lua": "local M = {}\nlocal AC = horizon.anticheat\n\nfunction M.onCheatDetected(self, id)\n    if AC.reportPlayer(id) == 0 then\n        -- On a client: the host is removing us. Say why before the link drops.\n        horizon.log(\"Removed from the session: \" .. AC.reportRule(id) .. \" (code \" .. AC.reportReason(id) .. \")\")\n        return\n    end\n    -- On the host. reportPlayer is a CONNECTION number, not a net player number.\n    horizon.log(string.format(\"[anti-cheat] %s, connection %d, score %.1f: %s\",\n        AC.reportRule(id), AC.reportPlayer(id), AC.reportScore(id), AC.reportDetail(id)))\n    if AC.reportLevel(id) == 2 then\n        AC.respond(id, 1 + 16)    -- Confirmed: log and kick (the default policy only logs)\n    end\nend\n\nreturn M\n",
+      "python": "import horizon\n\nAC = horizon.anticheat\n\nclass CheatLog(horizon.Behavior):\n    def on_cheat_detected(self, rid):\n        if AC.reportPlayer(rid) == 0:\n            # On a client: the host is removing us. Say why before the link drops.\n            horizon.log(\"Removed from the session: %s (code %d)\" % (AC.reportRule(rid), AC.reportReason(rid)))\n            return\n        # On the host. reportPlayer is a CONNECTION number, not a net player number.\n        horizon.log(\"[anti-cheat] %s, connection %d, score %.1f: %s\" % (\n            AC.reportRule(rid), AC.reportPlayer(rid), AC.reportScore(rid), AC.reportDetail(rid)))\n        if AC.reportLevel(rid) == 2:\n            AC.respond(rid, 1 + 16)    # Confirmed: log and kick (the default policy only logs)\n"
+    }
+  },
+  "anticheat.kick": {
+    "note": "The client reads <code>reasonCode</code> back through <code>reportReason</code>; its ticket has level 2 and an empty rule."
+  },
+  "anticheat.reportRule": {
+    "note": "Empty on the client after an explicit <code>kick</code>, which sends a reason code instead."
+  },
+  "anticheat.reportEntity": {
+    "note": "A network id, not an entity id. 0 in every report measured here."
+  },
+  "anticheat.playerScore": {
+    "note": "Halves every 30 seconds with the default settings."
+  },
+  "anticheat.isEnabled": {
+    "note": "<code>false</code> on a client."
   }
 }

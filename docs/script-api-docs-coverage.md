@@ -4,12 +4,12 @@ Erzeugt von `scripts/script_api_docs/coverage.py` aus `scripts/script_api_docs/r
 
 Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Referenz `scripting-reference.html` oder flacher Zwilling in `scripting-api.html#api`), **named** = Id wörtlich auf einer anderen Doku-Seite, **catalog** = nur der Name im HorizonCode-Knotenkatalog, **missing** = nirgends. **hand** = es gibt Handinhalt aus `overlay/` (Gruppen-Einleitung oder zur Id eine Notiz, ein Beispiel, ein Recht, eine Skript-Signatur): das, was der Generator nicht schreiben kann, und die Zahl, die die Gruppen-Schritte bewegen.
 
-**Gesamt: 582 Registry-Ids in 42 Gruppen** — ref 582, named 0, catalog 0, missing 0; hand 526.
+**Gesamt: 582 Registry-Ids in 42 Gruppen** — ref 582, named 0, catalog 0, missing 0; hand 582.
 
 | Gruppe | Kategorie | Ids | Lua/Py `horizon.<gruppe>.*` | ref | named | catalog | missing | hand |
 |---|---|---:|:---:|---:|---:|---:|---:|---:|
 | `env` | Environment | 116 | ja | 116 | 0 | 0 | 0 | 116 |
-| `net` | Multiplayer | 44 | ja | 44 | 0 | 0 | 0 | 3 |
+| `net` | Multiplayer | 44 | ja | 44 | 0 | 0 | 0 | 44 |
 | `physics` | Physics | 33 | ja | 33 | 0 | 0 | 0 | 33 |
 | `math` | Math | 31 | ja | 31 | 0 | 0 | 0 | 31 |
 | `widget` | Widget | 28 | ja | 28 | 0 | 0 | 0 | 28 |
@@ -19,7 +19,7 @@ Status: **ref** = Signatur+Rückgabe dokumentiert (Zeile in der generierten Refe
 | `entity` | Entity | 18 | ja | 18 | 0 | 0 | 0 | 18 |
 | `input` | Input | 17 | ja | 17 | 0 | 0 | 0 | 17 |
 | `save` | Save | 17 | ja | 17 | 0 | 0 | 0 | 17 |
-| `anticheat` | AntiCheat | 15 | ja | 15 | 0 | 0 | 0 | 0 |
+| `anticheat` | AntiCheat | 15 | ja | 15 | 0 | 0 | 0 | 15 |
 | `fs` | File | 13 | ja | 13 | 0 | 0 | 0 | 13 |
 | `time` | Time | 13 | ja | 13 | 0 | 0 | 0 | 13 |
 | `scene` | Scene | 12 | ja | 12 | 0 | 0 | 0 | 12 |
@@ -136,50 +136,50 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `net.host(port: Int, displayName: String)` → ok: Bool | exec | ref | scripting-reference.html#net-host |
-| `net.joinDirect(address: String, port: Int, code: String, displayName: String)` → ok: Bool | exec | ref | scripting-reference.html#net-joinDirect |
-| `net.joinLan(index: Int, code: String, displayName: String)` → ok: Bool | exec | ref | scripting-reference.html#net-joinLan |
-| `net.leave()` | exec | ref | scripting-reference.html#net-leave |
-| `net.status()` → status: Int | pure | ref | scripting-reference.html#net-status |
-| `net.lastError()` → error: String | pure | ref | scripting-reference.html#net-lastError |
-| `net.sessionId()` → sessionId: String | pure | ref | scripting-reference.html#net-sessionId |
-| `net.joinCode()` → code: String | pure | ref | scripting-reference.html#net-joinCode |
-| `net.refreshLan()` | exec | ref | scripting-reference.html#net-refreshLan |
-| `net.lanSessionCount()` → count: Int | pure | ref | scripting-reference.html#net-lanSessionCount |
-| `net.lanSessionName(index: Int)` → name: String | pure | ref | scripting-reference.html#net-lanSessionName |
-| `net.lanSessionPlayers(index: Int)` → players: Int | pure | ref | scripting-reference.html#net-lanSessionPlayers |
-| `net.isAuthority()` → isAuthority: Bool | pure | ref | scripting-reference.html#net-isAuthority |
-| `net.isClient()` → isClient: Bool | pure | ref | scripting-reference.html#net-isClient |
-| `net.localPlayer()` → player: Int | pure | ref | scripting-reference.html#net-localPlayer |
-| `net.playerCount()` → count: Int | pure | ref | scripting-reference.html#net-playerCount |
-| `net.playerAt(index: Int)` → player: Int | pure | ref | scripting-reference.html#net-playerAt |
-| `net.playerName(player: Int)` → name: String | pure | ref | scripting-reference.html#net-playerName |
-| `net.ping(player: Int)` → ms: Float | pure | ref | scripting-reference.html#net-ping |
-| `net.kick(player: Int)` | exec | ref | scripting-reference.html#net-kick |
-| `net.ownerOf(entity=self: Int)` → player: Int | pure | ref | scripting-reference.html#net-ownerOf |
-| `net.isLocallyControlled(entity=self: Int)` → local: Bool | pure | ref | scripting-reference.html#net-isLocallyControlled |
-| `net.localCharacter()` → entity: Int | pure | ref | scripting-reference.html#net-localCharacter |
-| `net.declareVarBool(entity=self: Int, name: String, initial: Bool, notify: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-declareVarBool |
-| `net.declareVarInt(entity=self: Int, name: String, initial: Int, notify: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-declareVarInt |
-| `net.declareVarFloat(entity=self: Int, name: String, initial: Float, notify: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-declareVarFloat |
-| `net.declareVarString(entity=self: Int, name: String, initial: String, notify: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-declareVarString |
-| `net.declareVarVec3(entity=self: Int, name: String, initial: Vec3, notify: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-declareVarVec3 |
-| `net.setVarBool(entity=self: Int, name: String, value: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-setVarBool |
-| `net.setVarInt(entity=self: Int, name: String, value: Int)` → ok: Bool | exec | ref | scripting-reference.html#net-setVarInt |
-| `net.setVarFloat(entity=self: Int, name: String, value: Float)` → ok: Bool | exec | ref | scripting-reference.html#net-setVarFloat |
-| `net.setVarString(entity=self: Int, name: String, value: String)` → ok: Bool | exec | ref | scripting-reference.html#net-setVarString |
-| `net.setVarVec3(entity=self: Int, name: String, value: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#net-setVarVec3 |
-| `net.getVarBool(entity=self: Int, name: String)` → value: Bool | pure | ref | scripting-reference.html#net-getVarBool |
-| `net.getVarInt(entity=self: Int, name: String)` → value: Int | pure | ref | scripting-reference.html#net-getVarInt |
-| `net.getVarFloat(entity=self: Int, name: String)` → value: Float | pure | ref | scripting-reference.html#net-getVarFloat |
-| `net.getVarString(entity=self: Int, name: String)` → value: String | pure | ref | scripting-reference.html#net-getVarString |
-| `net.getVarVec3(entity=self: Int, name: String)` → value: Vec3 | pure | ref | scripting-reference.html#net-getVarVec3 |
+| `net.host(port: Int, displayName: String)` → ok: Bool | exec | ref | scripting-reference.html#net-host · hand |
+| `net.joinDirect(address: String, port: Int, code: String, displayName: String)` → ok: Bool | exec | ref | scripting-reference.html#net-joinDirect · hand |
+| `net.joinLan(index: Int, code: String, displayName: String)` → ok: Bool | exec | ref | scripting-reference.html#net-joinLan · hand |
+| `net.leave()` | exec | ref | scripting-reference.html#net-leave · hand |
+| `net.status()` → status: Int | pure | ref | scripting-reference.html#net-status · hand |
+| `net.lastError()` → error: String | pure | ref | scripting-reference.html#net-lastError · hand |
+| `net.sessionId()` → sessionId: String | pure | ref | scripting-reference.html#net-sessionId · hand |
+| `net.joinCode()` → code: String | pure | ref | scripting-reference.html#net-joinCode · hand |
+| `net.refreshLan()` | exec | ref | scripting-reference.html#net-refreshLan · hand |
+| `net.lanSessionCount()` → count: Int | pure | ref | scripting-reference.html#net-lanSessionCount · hand |
+| `net.lanSessionName(index: Int)` → name: String | pure | ref | scripting-reference.html#net-lanSessionName · hand |
+| `net.lanSessionPlayers(index: Int)` → players: Int | pure | ref | scripting-reference.html#net-lanSessionPlayers · hand |
+| `net.isAuthority()` → isAuthority: Bool | pure | ref | scripting-reference.html#net-isAuthority · hand |
+| `net.isClient()` → isClient: Bool | pure | ref | scripting-reference.html#net-isClient · hand |
+| `net.localPlayer()` → player: Int | pure | ref | scripting-reference.html#net-localPlayer · hand |
+| `net.playerCount()` → count: Int | pure | ref | scripting-reference.html#net-playerCount · hand |
+| `net.playerAt(index: Int)` → player: Int | pure | ref | scripting-reference.html#net-playerAt · hand |
+| `net.playerName(player: Int)` → name: String | pure | ref | scripting-reference.html#net-playerName · hand |
+| `net.ping(player: Int)` → ms: Float | pure | ref | scripting-reference.html#net-ping · hand |
+| `net.kick(player: Int)` | exec | ref | scripting-reference.html#net-kick · hand |
+| `net.ownerOf(entity=self: Int)` → player: Int | pure | ref | scripting-reference.html#net-ownerOf · hand |
+| `net.isLocallyControlled(entity=self: Int)` → local: Bool | pure | ref | scripting-reference.html#net-isLocallyControlled · hand |
+| `net.localCharacter()` → entity: Int | pure | ref | scripting-reference.html#net-localCharacter · hand |
+| `net.declareVarBool(entity=self: Int, name: String, initial: Bool, notify: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-declareVarBool · hand |
+| `net.declareVarInt(entity=self: Int, name: String, initial: Int, notify: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-declareVarInt · hand |
+| `net.declareVarFloat(entity=self: Int, name: String, initial: Float, notify: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-declareVarFloat · hand |
+| `net.declareVarString(entity=self: Int, name: String, initial: String, notify: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-declareVarString · hand |
+| `net.declareVarVec3(entity=self: Int, name: String, initial: Vec3, notify: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-declareVarVec3 · hand |
+| `net.setVarBool(entity=self: Int, name: String, value: Bool)` → ok: Bool | exec | ref | scripting-reference.html#net-setVarBool · hand |
+| `net.setVarInt(entity=self: Int, name: String, value: Int)` → ok: Bool | exec | ref | scripting-reference.html#net-setVarInt · hand |
+| `net.setVarFloat(entity=self: Int, name: String, value: Float)` → ok: Bool | exec | ref | scripting-reference.html#net-setVarFloat · hand |
+| `net.setVarString(entity=self: Int, name: String, value: String)` → ok: Bool | exec | ref | scripting-reference.html#net-setVarString · hand |
+| `net.setVarVec3(entity=self: Int, name: String, value: Vec3)` → ok: Bool | exec | ref | scripting-reference.html#net-setVarVec3 · hand |
+| `net.getVarBool(entity=self: Int, name: String)` → value: Bool | pure | ref | scripting-reference.html#net-getVarBool · hand |
+| `net.getVarInt(entity=self: Int, name: String)` → value: Int | pure | ref | scripting-reference.html#net-getVarInt · hand |
+| `net.getVarFloat(entity=self: Int, name: String)` → value: Float | pure | ref | scripting-reference.html#net-getVarFloat · hand |
+| `net.getVarString(entity=self: Int, name: String)` → value: String | pure | ref | scripting-reference.html#net-getVarString · hand |
+| `net.getVarVec3(entity=self: Int, name: String)` → value: Vec3 | pure | ref | scripting-reference.html#net-getVarVec3 · hand |
 | `net.callServer(entity=self: Int, function: String)` → ok: Bool | exec | ref | scripting-reference.html#net-callServer · hand |
 | `net.callClient(player: Int, entity: Int, function: String)` → ok: Bool | exec | ref | scripting-reference.html#net-callClient · hand |
 | `net.callAllClients(entity=self: Int, function: String)` → ok: Bool | exec | ref | scripting-reference.html#net-callAllClients · hand |
-| `net.allowAnyClient(entity=self: Int, function: String)` → ok: Bool | exec | ref | scripting-reference.html#net-allowAnyClient |
-| `net.rpcSender()` → player: Int | pure | ref | scripting-reference.html#net-rpcSender |
-| `net.hasVar(entity=self: Int, name: String)` → declared: Bool | pure | ref | scripting-reference.html#net-hasVar |
+| `net.allowAnyClient(entity=self: Int, function: String)` → ok: Bool | exec | ref | scripting-reference.html#net-allowAnyClient · hand |
+| `net.rpcSender()` → player: Int | pure | ref | scripting-reference.html#net-rpcSender · hand |
+| `net.hasVar(entity=self: Int, name: String)` → declared: Bool | pure | ref | scripting-reference.html#net-hasVar · hand |
 
 ### `physics` — Physics (33)
 
@@ -442,21 +442,21 @@ Aus dem Code gelesen, dort wo die Engine die Methode sucht (Lua: `ScriptEngine.c
 
 | Id / Signatur | Art | Status | Beleg |
 |---|---|---|---|
-| `anticheat.check(rule: String, value: Float, player: Int)` → ok: Bool | exec | ref | scripting-reference.html#anticheat-check |
-| `anticheat.expectDisplacement(entity=self: Int, maxDistance: Float)` | exec | ref | scripting-reference.html#anticheat-expectDisplacement |
-| `anticheat.report(player: Int, rule: String, weight: Float, detail: String)` | exec | ref | scripting-reference.html#anticheat-report |
-| `anticheat.setPlayerLabel(player: Int, label: String)` | exec | ref | scripting-reference.html#anticheat-setPlayerLabel |
-| `anticheat.respond(reportId: Int, response: Int)` | exec | ref | scripting-reference.html#anticheat-respond |
-| `anticheat.kick(player: Int, reasonCode: Int)` | exec | ref | scripting-reference.html#anticheat-kick |
-| `anticheat.reportLevel(reportId: Int)` → level: Int | pure | ref | scripting-reference.html#anticheat-reportLevel |
-| `anticheat.reportRule(reportId: Int)` → rule: String | pure | ref | scripting-reference.html#anticheat-reportRule |
-| `anticheat.reportPlayer(reportId: Int)` → player: Int | pure | ref | scripting-reference.html#anticheat-reportPlayer |
-| `anticheat.reportEntity(reportId: Int)` → entity: Int | pure | ref | scripting-reference.html#anticheat-reportEntity |
-| `anticheat.reportScore(reportId: Int)` → score: Float | pure | ref | scripting-reference.html#anticheat-reportScore |
-| `anticheat.reportDetail(reportId: Int)` → detail: String | pure | ref | scripting-reference.html#anticheat-reportDetail |
-| `anticheat.reportReason(reportId: Int)` → reasonCode: Int | pure | ref | scripting-reference.html#anticheat-reportReason |
-| `anticheat.playerScore(player: Int)` → score: Float | pure | ref | scripting-reference.html#anticheat-playerScore |
-| `anticheat.isEnabled()` → enabled: Bool | pure | ref | scripting-reference.html#anticheat-isEnabled |
+| `anticheat.check(rule: String, value: Float, player: Int)` → ok: Bool | exec | ref | scripting-reference.html#anticheat-check · hand |
+| `anticheat.expectDisplacement(entity=self: Int, maxDistance: Float)` | exec | ref | scripting-reference.html#anticheat-expectDisplacement · hand |
+| `anticheat.report(player: Int, rule: String, weight: Float, detail: String)` | exec | ref | scripting-reference.html#anticheat-report · hand |
+| `anticheat.setPlayerLabel(player: Int, label: String)` | exec | ref | scripting-reference.html#anticheat-setPlayerLabel · hand |
+| `anticheat.respond(reportId: Int, response: Int)` | exec | ref | scripting-reference.html#anticheat-respond · hand |
+| `anticheat.kick(player: Int, reasonCode: Int)` | exec | ref | scripting-reference.html#anticheat-kick · hand |
+| `anticheat.reportLevel(reportId: Int)` → level: Int | pure | ref | scripting-reference.html#anticheat-reportLevel · hand |
+| `anticheat.reportRule(reportId: Int)` → rule: String | pure | ref | scripting-reference.html#anticheat-reportRule · hand |
+| `anticheat.reportPlayer(reportId: Int)` → player: Int | pure | ref | scripting-reference.html#anticheat-reportPlayer · hand |
+| `anticheat.reportEntity(reportId: Int)` → entity: Int | pure | ref | scripting-reference.html#anticheat-reportEntity · hand |
+| `anticheat.reportScore(reportId: Int)` → score: Float | pure | ref | scripting-reference.html#anticheat-reportScore · hand |
+| `anticheat.reportDetail(reportId: Int)` → detail: String | pure | ref | scripting-reference.html#anticheat-reportDetail · hand |
+| `anticheat.reportReason(reportId: Int)` → reasonCode: Int | pure | ref | scripting-reference.html#anticheat-reportReason · hand |
+| `anticheat.playerScore(player: Int)` → score: Float | pure | ref | scripting-reference.html#anticheat-playerScore · hand |
+| `anticheat.isEnabled()` → enabled: Bool | pure | ref | scripting-reference.html#anticheat-isEnabled · hand |
 
 ### `fs` — File (13)
 

@@ -1,0 +1,197 @@
+          <p>
+            Multiplayer: one machine <strong>hosts</strong> and is the authority,
+            the others <strong>join</strong> as clients and play in the host's
+            world. The rows fall into five parts: the session (host, join, leave,
+            status), the players, who owns an entity, replicated variables, and
+            remote calls. Session events, <code>onRep_&lt;var&gt;</code> and the
+            remote-call targets are script methods, listed under
+            <a href="#callbacks">Callbacks</a>. The examples below ran word for word
+            in Lua and Python, host and client in both languages, over a real
+            connection on one machine.
+          </p>
+          <ul>
+            <li>
+              <strong>Hosting.</strong> <code>host(port, name)</code> answers
+              <code>true</code> once the socket is open; the status is 1 at once and
+              the host's scripts get <code>onSessionStarted</code>. Port 0 takes the
+              project's Default port (Project Settings, Game, Multiplayer, 47824 in
+              a new project). If that is 0 as well the system picks one, and no row
+              reads it back, so a game that tells joiners its port hosts on a fixed
+              one. Hosting again while a session runs ends it first
+              (<code>onSessionEnded</code>, then <code>onSessionStarted</code>, a new
+              session id and join code; everybody who had joined is out).
+            </li>
+            <li>
+              <strong>Joining.</strong> <code>joinDirect(address, port, code,
+              name)</code> answers <code>true</code> when the attempt has started
+              (status 2); <code>false</code> for port 0 or above 65535, and for
+              <code>joinLan</code> with no LAN entry at that index. The client's
+              scripts get <code>onConnected</code> once the whole world has arrived
+              (status 3), the host's get <code>onPlayerJoined(player)</code>.
+              <strong>A wrong join code never fails:</strong> the host refuses the
+              handshake, but the client stays at status 2 with an empty
+              <code>lastError</code> (measured for 8 seconds). Give up yourself, as
+              <a href="#ex-net-joinDirect">the lobby example</a> does.
+            </li>
+            <li>
+              <strong>LAN browsing</strong> needs the system's permission to use the
+              local network. Without it (macOS asks per application) the host logs
+              “the system refused to send an announcement” and every list stays
+              empty; <code>joinDirect</code> keeps working. The LAN rows were not
+              measured with the permission granted.
+            </li>
+            <li>
+              <strong>Player numbers.</strong> The host is player 1, joiners are
+              2, 3, … in join order, and a number is never reused. That is the
+              number <code>playerName</code>, <code>ping</code>, <code>kick</code>,
+              <code>callClient</code>, <code>rpcSender</code> and
+              <code>onPlayerJoined</code>/<code>onPlayerLeft</code> use. It is
+              <em>not</em> the connection number the
+              <a href="#anticheat">anticheat</a> rows take.
+            </li>
+            <li>
+              <strong>Ownership.</strong> Scene entities belong to nobody:
+              <code>ownerOf</code> is 0. <code>isLocallyControlled</code> is
+              <code>true</code> offline and for any entity without Replicates; for a
+              replicated entity nobody owns it is <code>true</code> on the host and
+              <code>false</code> on a client.
+            </li>
+          </ul>
+          <div class="docs-table-wrap">
+            <table class="docs-table">
+              <thead>
+                <tr><th>Row</th><th>Offline</th><th>Host</th><th>Client</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>status</code></td><td>0</td><td>1</td><td>2 while connecting, 3 joined, 4 after losing the host</td></tr>
+                <tr><td><code>isAuthority</code> / <code>isClient</code></td><td><code>true</code> / <code>false</code></td><td><code>true</code> / <code>false</code></td><td><code>false</code> / <code>true</code></td></tr>
+                <tr><td><code>localPlayer</code></td><td>1</td><td>1</td><td>its own number (2, 3, …); 0 while connecting</td></tr>
+                <tr><td><code>playerCount</code> / <code>playerAt</code></td><td>1 / <code>playerAt(0)</code> = 1</td><td>everybody, in join order</td><td>1: a client knows only itself</td></tr>
+                <tr><td><code>playerName</code></td><td><code>""</code></td><td>every player's</td><td>only its own</td></tr>
+                <tr><td><code>ping</code></td><td>0</td><td>round trip to each client, ms</td><td>always 0</td></tr>
+                <tr><td><code>sessionId</code> / <code>joinCode</code></td><td><code>""</code></td><td>8 / 26 characters</td><td><code>""</code> / <code>""</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <h3 id="net-vars">Replicated variables</h3>
+          <ul>
+            <li>
+              <strong>Declare, then write on the host.</strong>
+              <code>declareVar…(entity, name, initial, notify)</code> works on any
+              entity and also offline; a declaration made before the session starts
+              is carried into it (the <a href="#ex-net-declareVarInt">health
+              example</a> declares in <code>onStart</code>). Only entities with
+              Replicates on are sent to clients: on any other the variable exists
+              on this machine only. Declaring a name a second time answers
+              <code>true</code> and changes nothing (measured offline).
+            </li>
+            <li>
+              <strong>What a client sees.</strong> A write on the host reaches every
+              client a moment later (well within half a second on one
+              machine); with <code>notify</code> the client's script gets
+              <code>onRep_&lt;name&gt;(old)</code>, never the host's (it made the
+              change) and never for a variable declared without notify. A
+              client's own <code>setVar…</code> changes only its copy; the host sends
+              its value again within a moment, even an unchanged one, and
+              <code>onRep_</code> fires once more with <code>old</code> = the
+              client's value.
+            </li>
+            <li>
+              <strong>Types are not checked on write.</strong> A getter of another
+              type answers zero (<code>false</code>, 0, <code>""</code>, 0,0,0). A
+              setter of another type answers <code>true</code> and changes the
+              variable's type, after which the declared getter reads zero; during a
+              session the host then re-sends the entity's whole variable table every
+              tick. Ints are 32-bit: 3000000000 is stored as −1294967296.
+            </li>
+            <li>
+              After the session ends, a client keeps the last values it received.
+            </li>
+          </ul>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue (build 7d49d44f): in Lua, <code>old</code> of a
+              Vector variable is the number 0.</strong> The value handed to
+              <code>onRep_&lt;name&gt;(old)</code> goes through a converter that has
+              no case for vectors, so Lua always receives <code>0</code> (measured
+              with old values 0,0,0 and 1,2,3). Python receives a list
+              <code>[x, y, z]</code>. Read the new value with
+              <code>getVarVec3</code>, and keep the previous one yourself if you need
+              it. A Vector argument of a remote call from a HorizonCode graph goes
+              through the same converter.
+            </p>
+          </div>
+          <h3 id="net-calls">Remote calls</h3>
+          <ul>
+            <li>
+              <strong>Who runs what.</strong> <code>callServer</code> on a client
+              sends the call to the host, which runs the method of that name on the
+              entity: its HorizonCode class first, else its Lua or Python script,
+              else the C++ module (first one that has it). <code>callClient</code>
+              and <code>callAllClients</code> go from the host to the clients'
+              copies of the entity. The arguments after the name arrive with their
+              types: integers, other numbers, booleans and strings as they are, a
+              Lua table or Python list as a list, a Python dict as a table with
+              <code>__keys</code>. Inside the method <code>rpcSender()</code> is the
+              caller's player number (on a client: 1, the host).
+            </li>
+            <li>
+              <strong>Nothing runs locally in a script.</strong> Offline and on the
+              host, <code>callServer</code>, <code>callClient</code> to the host's
+              own player and the host's own share of <code>callAllClients</code>
+              reach only a HorizonCode class. A Lua or Python method is not called
+              and the row answers <code>false</code>, for <code>callAllClients</code>
+              even though the clients were sent the call. On the host, call your own
+              method directly (<a href="#ex-net-allowAnyClient">lever example</a>).
+            </li>
+            <li>
+              <strong>Who may call.</strong> A client may call the entities it owns,
+              plus functions opened with <code>allowAnyClient</code> (or Any Client
+              on a HorizonCode function header). Anything else the host drops
+              without a log line, while the client's <code>callServer</code> still
+              answered <code>true</code>; with anti-cheat on it is a
+              <em>Hard</em> report and the caller is removed at once (measured).
+              <code>allowAnyClient</code> lasts for one session and answers
+              <code>false</code> offline, so call it in
+              <code>onSessionStarted</code>. It answers <code>true</code> on a
+              client, where it changes nothing, and for an entity without a network
+              id, which is refused with a log line.
+            </li>
+            <li>
+              A call needs a replicated entity: for any other the row answers
+              <code>false</code>. The host accepts up to 60 calls per second from
+              one client, averaged over 2 seconds; more are dropped (default, the
+              Multiplayer page can change it).
+            </li>
+          </ul>
+          <h3 id="net-leaving">Leaving and being removed</h3>
+          <ul>
+            <li>
+              <code>leave()</code> ends the session on this machine, sends
+              <code>onSessionEnded</code> and puts the status back to 0.
+            </li>
+            <li>
+              A client that is removed or loses the host gets
+              <code>onDisconnected(reason)</code> and status 4, and no
+              <code>onSessionEnded</code>. <code>net.kick</code> with anti-cheat off
+              only closes the connection, so the client sees reason 1 and “Lost the
+              connection to the host.”; with anti-cheat on the client is told first
+              and sees reason 2 and “Removed from the session.”. The host's scripts
+              get <code>onPlayerLeft(player)</code>, by which time
+              <code>playerName</code> of that player is already empty.
+            </li>
+          </ul>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue (build 7d49d44f): a second session in the same
+              scene replicates no scene entity.</strong> Hosting walks the scene
+              for entities with Replicates on and skips those that already carry a
+              network id; <code>leave()</code> does not clear it. After
+              <code>host</code> → <code>leave</code> → <code>host</code>, or hosting
+              twice, the log says “Session walk: 0 replicated scene entities”, and
+              clients that join the new session get none of those entities: their
+              variables and remote calls do not arrive.
+            </p>
+          </div>
