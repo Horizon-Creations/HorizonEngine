@@ -59,6 +59,7 @@ struct Vec4
 // Color's alpha 1 and Transform's identity scale.
 template <typename T> inline T zeroOf();
 template <> inline float       zeroOf<float>()       { return 0.0f; }
+template <> inline double      zeroOf<double>()      { return 0.0; }
 template <> inline bool        zeroOf<bool>()        { return false; }
 template <> inline int         zeroOf<int>()         { return 0; }
 template <> inline std::string zeroOf<std::string>() { return {}; }
@@ -75,6 +76,7 @@ template <> inline Transform   zeroOf<Transform>()   { return {}; }
 // raw<T> reproduces that (no coercion, no type-tag check).
 template <typename T> inline T raw(const Value& v);
 template <> inline float       raw<float>(const Value& v)       { return v.f; }
+template <> inline double      raw<double>(const Value& v)      { return v.d; }
 template <> inline bool        raw<bool>(const Value& v)        { return v.b; }
 template <> inline int         raw<int>(const Value& v)         { return v.i; }
 template <> inline std::string raw<std::string>(const Value& v) { return v.s; }
@@ -94,6 +96,7 @@ template <typename T> inline Array<T> rawArray(const Value& v)
 }
 
 inline Value toValue(float v)              { return Value::ofFloat(v); }
+inline Value toValue(double v)             { return Value::ofDouble(v); }
 inline Value toValue(bool v)               { return Value::ofBool(v); }
 inline Value toValue(int v)                { return Value::ofInt(v); }
 inline Value toValue(const std::string& v) { return Value::ofString(v); }
@@ -108,6 +111,7 @@ inline Value toValue(const Transform& v)   { return Value::ofTransform(v.pos, v.
 // Element type tag for array Values (matches the pin's element PinType).
 template <typename T> inline PinType tagOf();
 template <> inline PinType tagOf<float>()       { return PinType::Float; }
+template <> inline PinType tagOf<double>()      { return PinType::Double; }
 template <> inline PinType tagOf<bool>()        { return PinType::Bool; }
 template <> inline PinType tagOf<int>()         { return PinType::Int; }
 template <> inline PinType tagOf<std::string>() { return PinType::String; }
@@ -141,7 +145,7 @@ inline Value arg(const std::vector<Value>& args, size_t i)
 
 // ── coerce (§3.3, byte-for-byte the interpreter's `coerce` + raw field read) ─
 // Arrays pass through coerce untouched, then the reader reads the field raw —
-// so each helper reads the raw field for arrays too. Only Float↔Int↔Bool
+// so each helper reads the raw field for arrays too. Only Float↔Double↔Int↔Bool
 // convert; any other mismatch yields the target's zero value.
 //
 // *** DELIBERATE DUPLICATE — KEEP IN SYNC WITH HorizonCode.cpp's `coerce`. ***
@@ -157,13 +161,24 @@ inline float coerceFloat(const Value& v)
     if (v.isArray || v.type == PinType::Float) return v.f;
     if (v.type == PinType::Bool) return v.b ? 1.0f : 0.0f;
     if (v.type == PinType::Int)  return (float)v.i;
+    if (v.type == PinType::Double) return (float)v.d;
     if (v.type == PinType::Enum) return (float)v.i;   // int-backed
     return 0.0f;
+}
+inline double coerceDouble(const Value& v)
+{
+    if (v.isArray || v.type == PinType::Double) return v.d;
+    if (v.type == PinType::Bool)  return v.b ? 1.0 : 0.0;
+    if (v.type == PinType::Int)   return (double)v.i;
+    if (v.type == PinType::Float) return (double)v.f;
+    if (v.type == PinType::Enum)  return (double)v.i;   // int-backed
+    return 0.0;
 }
 inline int coerceInt(const Value& v)
 {
     if (v.isArray || v.type == PinType::Int) return v.i;
     if (v.type == PinType::Float) return (int)v.f;
+    if (v.type == PinType::Double) return (int)v.d;
     if (v.type == PinType::Bool)  return v.b ? 1 : 0;
     if (v.type == PinType::Enum)  return v.i;   // int-backed
     return 0;
@@ -172,6 +187,7 @@ inline bool coerceBool(const Value& v)
 {
     if (v.isArray || v.type == PinType::Bool) return v.b;
     if (v.type == PinType::Float) return v.f != 0.0f;
+    if (v.type == PinType::Double) return v.d != 0.0;
     if (v.type == PinType::Int)   return v.i != 0;
     return false;
 }
@@ -214,6 +230,7 @@ template <typename T> inline Array<T> coerceArray(const Value& v)
 // Overload set so generated code can spell hc::coerce<T>(v) generically.
 template <typename T> inline T coerce(const Value& v);
 template <> inline float       coerce<float>(const Value& v)       { return coerceFloat(v); }
+template <> inline double      coerce<double>(const Value& v)      { return coerceDouble(v); }
 template <> inline bool        coerce<bool>(const Value& v)        { return coerceBool(v); }
 template <> inline int         coerce<int>(const Value& v)         { return coerceInt(v); }
 template <> inline std::string coerce<std::string>(const Value& v) { return coerceString(v); }
@@ -256,6 +273,7 @@ inline int coerceEnum(const Value& v)
     if (v.isArray || v.type == PinType::Enum) return v.i;
     if (v.type == PinType::Int)   return v.i;
     if (v.type == PinType::Float) return (int)v.f;
+    if (v.type == PinType::Double) return (int)v.d;
     return 0;
 }
 

@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <cmath>
 #include <climits>   // INT_MIN: the bitwise rows' edge operand
+#include <cstdio>
+#include <ctime>     // localtime_r: what datetime_double's second must be
 #include <map>
 #include <string>
 #include <vector>
@@ -57,6 +59,9 @@ namespace
 		switch (v.type)
 		{
 			case PinType::Float:  std::snprintf(buf, sizeof buf, "f:%g", v.f); return buf;
+			// %.17g: a trace that printed a Double with %g would call two
+			// timestamps a minute apart the same value.
+			case PinType::Double: std::snprintf(buf, sizeof buf, "d:%.17g", v.d); return buf;
 			case PinType::Bool:   return v.b ? "b:true" : "b:false";
 			case PinType::Int:    return "i:" + std::to_string(v.i);
 			case PinType::String: return "s:\"" + v.s + "\"";
@@ -138,6 +143,7 @@ namespace
 		switch (a.type)
 		{
 			case PinType::Float:  return a.f == b.f;   // bit-exact parity
+			case PinType::Double: return a.d == b.d;
 			case PinType::Bool:   return a.b == b.b;
 			case PinType::Int:    return a.i == b.i;
 			case PinType::String: return a.s == b.s;
@@ -1182,6 +1188,49 @@ TEST_CASE("codegen parity: animator_sync")
 	CHECK(p.var("wrote").f == 0.0f);
 	const auto isSet = [](const std::string& t) { return t.rfind("callApi animator.setParam", 0) == 0; };
 	CHECK(std::count_if(p.interp.trace.begin(), p.interp.trace.end(), isSet) == 1);
+}
+
+TEST_CASE("codegen parity: datetime_double (epoch seconds on Double pins, no narrowing)")
+{
+	ParityPair p("fix/datetime_double");
+	p.fire("Query");   // variables + callApi traces compared bit-exact across backends
+
+	const double T = hcfix::kFixEpoch;
+	const std::time_t tt = static_cast<std::time_t>(T);
+	std::tm parts{};
+#ifdef _WIN32
+	localtime_s(&parts, &tt);
+#else
+	localtime_r(&tt, &parts);
+#endif
+	// Negative control for the fixture itself: T is only a probe if a float
+	// cannot hold it. If this ever fails, pick an epoch that is not a multiple
+	// of 128 — the checks below would pass even on Float pins.
+	REQUIRE(static_cast<double>(static_cast<float>(T)) != T);
+	const std::time_t tf = static_cast<std::time_t>(static_cast<float>(T));
+	std::tm partsF{};
+#ifdef _WIN32
+	localtime_s(&partsF, &tf);
+#else
+	localtime_r(&tf, &partsF);
+#endif
+	REQUIRE(partsF.tm_sec != parts.tm_sec);
+
+	// BEFORE THE CHANGE (Float pins): 20, the second of 1758800000.
+	CHECK(p.var("sec").i  == parts.tm_sec);
+	CHECK(p.var("sec2").i == parts.tm_sec);
+	char two[4];
+	std::snprintf(two, sizeof two, "%02d", parts.tm_sec);
+	CHECK(p.var("text").s == two);
+	CHECK(p.var("stamp").type == PinType::Double);
+	CHECK(p.var("stamp").d == T);
+	// Narrowing still happens where a graph asks for a Float — the same way on
+	// both sides (fire() compared it bit-exact), and to the float nearest T.
+	CHECK(p.var("narrow").f == static_cast<float>(T));
+	// The engine saw the whole number: the argument travels as a Double.
+	const auto sawT = [](const std::string& t)
+	{ return t.rfind("callApi datetime.second(d:1758800007)", 0) == 0; };
+	CHECK(std::count_if(p.interp.trace.begin(), p.interp.trace.end(), sawT) == 2);
 }
 
 TEST_CASE("codegen parity: engine_exec_cached (one dispatch, cached reads, save round-trip)")

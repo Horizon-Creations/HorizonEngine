@@ -2028,7 +2028,8 @@ namespace prefs {
 // showing "last saved 14:32" needs the one that keeps running when the game is
 // paused and matches what the operating system says.
 namespace datetime {
-    // Seconds since the Unix epoch, as a double so it survives a Float pin.
+    // Seconds since the Unix epoch. A double, and a Double pin in the registry:
+    // a Float pin cannot hold it (128 s steps at today's epoch).
     double      now(Ctx&);
     // strftime format ("%Y-%m-%d %H:%M:%S" and friends), in LOCAL time.
     std::string format(Ctx&, double epochSeconds, const std::string& fmt);

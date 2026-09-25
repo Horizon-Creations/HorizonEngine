@@ -42,7 +42,7 @@ namespace
 		if (got == want) return true;
 		const auto numeric = [](HorizonCode::PinType t) {
 			return t == HorizonCode::PinType::Int || t == HorizonCode::PinType::Float ||
-			       t == HorizonCode::PinType::Enum;
+			       t == HorizonCode::PinType::Double || t == HorizonCode::PinType::Enum;
 		};
 		return numeric(got) && numeric(want);
 	}

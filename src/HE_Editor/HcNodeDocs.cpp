@@ -851,7 +851,10 @@ namespace
 	// ── Date and time ────────────────────────────────────────────────────────
 	{ "datetime.now",
 	  "The current wall-clock time as seconds since 1970. This is the clock the "
-	  "operating system shows, not the game clock: pausing does not stop it." },
+	  "operating system shows, not the game clock: pausing does not stop it. It "
+	  "comes out on a Double pin, because a Float can only count this far in "
+	  "steps of two minutes: keep it Double all the way into Format or the field "
+	  "nodes, and it stays exact to the second." },
 	{ "datetime.format",
 	  "Turns a time into text using a strftime pattern, in local time. "
 	  "\"%Y-%m-%d %H:%M\" gives you 2026-08-27 14:32." },
@@ -1306,7 +1309,9 @@ namespace
 	{ "fs.modified",
 	  "When the file was last written, in seconds, on the same clock Now uses. So "
 	  "\"how old is this file\" is Now minus this, and not a second time format to "
-	  "learn. -1 when there is nothing there." },
+	  "learn. -1 when there is nothing there. A Double, like Now; the math nodes "
+	  "still work in Float, so do that subtraction in a script when the answer "
+	  "has to be exact to the second." },
 	{ "fs.list",
 	  "The names of everything directly inside a directory, sorted. Names only, "
 	  "not full paths — joining stays yours. Empty for a path that is not a "

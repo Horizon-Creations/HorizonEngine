@@ -1030,6 +1030,41 @@ TEST_CASE("ScriptContext: the application groups reach Python")
     CHECK(t.position.y == doctest::Approx(42.0f));   // …and one of them dispatches
 }
 
+// The Python half of the datetime precision probe (Lua: test_scripting_binding).
+// A transform carries floats, so the script does the comparing itself and only
+// hands out small numbers: the drift against time.time() and two match flags.
+static const char* kPyDatetimePrecision = R"py(
+import horizon, time
+
+class DtProbe(horizon.Behavior):
+    def on_start(self):
+        T = 1758800007  # float(T) would be 1758800000: second 20, not 27
+        want = time.localtime(T).tm_sec
+        sec_ok = 1 if horizon.datetime.second(T) == want else 0
+        fmt_ok = 1 if horizon.datetime.format(float(T), '%S') == '%02d' % want else 0
+        drift = abs(horizon.datetime.now() - time.time())
+        horizon.setPosition(self.entity_id, sec_ok, fmt_ok, drift)
+)py";
+
+TEST_CASE("ScriptContext: horizon.datetime keeps whole seconds in Python")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pydt", kPyDatetimePrecision, HE::ScriptLanguage::Python));
+
+    auto e  = makeEntity(world, "DtHero");
+    auto id = ctx.createInstance("pydt", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+
+    const auto& t = world.registry().get<TransformComponent>(e);
+    // BEFORE THE CHANGE: 0, 0 and a drift of up to 64 s.
+    CHECK(t.position.x == doctest::Approx(1.0f));
+    CHECK(t.position.y == doctest::Approx(1.0f));
+    // now() is whole seconds, time.time() is not — up to 1 s apart legitimately.
+    CHECK(t.position.z <= 2.0f);
+}
+
 // ─── Input actions and timers ───────────────────────────────────────────────
 // The events a PlayerController graph gets as Input.<Action>.*, and the timer
 // callback, delivered through the SAME ScriptContext door the apps use. Each

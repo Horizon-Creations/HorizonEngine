@@ -36,7 +36,9 @@
 #include <UIWidget/UIWidgetTree.h>
 #include <DebugDraw/DebugDraw.h>
 #include <Hpak/ProjectExporter.h>
+#include <cstdio>
 #include <cstring>
+#include <ctime>   // the datetime rows are checked against localtime_r
 #include <filesystem>
 #include <fstream>
 #include <glm/glm.hpp>
@@ -4013,6 +4015,91 @@ TEST_CASE("datetime: fields and formatting agree with each other")
 
     // An empty format is not a reason to guess.
     CHECK(datetime::format(c, t, "").empty());
+}
+
+// The case above calls datetime:: directly in C++, which is exactly why the bug
+// lived: every script frontend goes through the REGISTRY, whose rows carried the
+// seconds on Float pins — 128 s steps at today's epoch. These go through the rows.
+TEST_CASE("datetime: the registry rows carry whole seconds (Double pins)")
+{
+    Ctx c;
+    auto call = [&](const char* id, std::vector<Value> a){ return HE::api::find(id)->invoke(c, a); };
+
+    // now() against the wall clock. BEFORE THE CHANGE: off by up to 64 s,
+    // and 8 s in the probe that found it.
+    const auto nowR = call("datetime.now", {});
+    REQUIRE(nowR.size() == 1);
+    CHECK(nowR[0].type == P::Double);
+    const double wall = static_cast<double>(std::time(nullptr));
+    CHECK(std::fabs(nowR[0].d - wall) <= 2.0);
+
+    // A fixed instant a float cannot hold: (float)T is 1758800000, 7 s earlier.
+    const double T = 1758800007.0;
+    REQUIRE(static_cast<double>(static_cast<float>(T)) != T);
+    const std::time_t tt = static_cast<std::time_t>(T);
+    std::tm parts{};
+#ifdef _WIN32
+    localtime_s(&parts, &tt);
+#else
+    localtime_r(&tt, &parts);
+#endif
+    CHECK(call("datetime.second", { Value::ofDouble(T) })[0].i == parts.tm_sec);
+    CHECK(call("datetime.minute", { Value::ofDouble(T) })[0].i == parts.tm_min);
+    char two[4];
+    std::snprintf(two, sizeof two, "%02d", parts.tm_sec);
+    CHECK(call("datetime.format", { Value::ofDouble(T), Value::ofString("%S") })[0].s == two);
+    // now() → second() through the pins agrees with the clock it came from.
+    const double n = nowR[0].d;
+    const std::time_t nt = static_cast<std::time_t>(n);
+    std::tm nowParts{};
+#ifdef _WIN32
+    localtime_s(&nowParts, &nt);
+#else
+    localtime_r(&nt, &nowParts);
+#endif
+    CHECK(call("datetime.second", { nowR[0] })[0].i == nowParts.tm_sec);
+
+    // Every parameter is Double, every seconds result is Double.
+    for (const char* id : { "datetime.format", "datetime.year", "datetime.month", "datetime.day",
+                            "datetime.hour", "datetime.minute", "datetime.second", "datetime.weekday" })
+    {
+        const HE::api::ApiFn* fn = HE::api::find(id);
+        REQUIRE(fn);
+        REQUIRE(!fn->params.empty());
+        CHECK_MESSAGE(fn->params[0].type == P::Double, id);
+    }
+    CHECK(HE::api::find("fs.modified")->results[0].type == P::Double);
+    CHECK(HE::api::find("fs.size")->results[0].type == P::Double);
+
+    // A caller still handing over a Float or an Int means that number — the
+    // reader goes by the value's own type rather than reading `.d` blind.
+    // 1e9 is exact in a float (a multiple of 64): 2001-09-09 everywhere on Earth.
+    CHECK(call("datetime.year", { Value::ofFloat(1.0e9f) })[0].i == 2001);
+    CHECK(call("datetime.year", { Value::ofInt(1000000000) })[0].i == 2001);
+}
+
+TEST_CASE("Double pin: converts like a number, and only like a number")
+{
+    using HorizonCode::canConvertPinType;
+    CHECK(canConvertPinType(P::Double, P::Float));
+    CHECK(canConvertPinType(P::Float,  P::Double));
+    CHECK(canConvertPinType(P::Double, P::Int));
+    CHECK(canConvertPinType(P::Int,    P::Double));
+    CHECK(canConvertPinType(P::Double, P::Bool));
+    CHECK(canConvertPinType(P::Double, P::Enum));
+    CHECK(canConvertPinType(P::Enum,   P::Double));
+    CHECK_FALSE(canConvertPinType(P::Double, P::String));
+    CHECK_FALSE(canConvertPinType(P::Double, P::Vec3));
+
+    // A graph that wired datetime.now into a Float variable before the change
+    // keeps loading: the Double→Float wire is legal, it narrows where it always did.
+    HorizonCode::NodeType conv{};
+    CHECK_FALSE(HorizonCode::conversionNodeFor(P::Double, HorizonCode::ContainerKind::None,
+                                               P::Float,  HorizonCode::ContainerKind::None, conv));
+    // …and "show me the time as text" still offers To String.
+    CHECK(HorizonCode::conversionNodeFor(P::Double, HorizonCode::ContainerKind::None,
+                                         P::String, HorizonCode::ContainerKind::None, conv));
+    CHECK(conv == NT::ToString);
 }
 
 // ─── Preferences ─────────────────────────────────────────────────────────────

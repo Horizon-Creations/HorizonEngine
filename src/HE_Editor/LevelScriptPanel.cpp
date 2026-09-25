@@ -821,7 +821,10 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 		ImGui::SeparatorText("Default");
 		switch (v->type)
 		{
-			case PT::Float:  if (ImGui::DragFloat("##vdef", &v->f[0], 0.1f)) edited = true; break;
+			// A Double's authored default lives in the same float slot (see
+			// variableDefaultValue); its precision is for what arrives at runtime.
+			case PT::Float:
+			case PT::Double: if (ImGui::DragFloat("##vdef", &v->f[0], 0.1f)) edited = true; break;
 			case PT::Int:  { int iv = (int)v->f[0]; if (ImGui::DragInt("##vdef", &iv)) { v->f[0] = (float)iv; edited = true; } break; }
 			case PT::Bool: { bool b = v->f[0] != 0.0f; if (ImGui::Checkbox("##vdef", &b)) { v->f[0] = b ? 1.0f : 0.0f; edited = true; } break; }
 			case PT::String: ImGui::InputText("##vdef", &v->s); if (ImGui::IsItemDeactivatedAfterEdit()) edited = true; break;

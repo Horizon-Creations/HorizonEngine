@@ -39,8 +39,16 @@ class CompiledInstance;
 // before the split keeps its wires and coerce does the work. Vec2 stays outside
 // that set: nothing ever converted into it and adding it would only widen the
 // rules that two coerce implementations have to agree on.
+//
+// Double is the 64-bit number, for the handful of engine values a float cannot
+// hold: wall-clock seconds since the epoch (datetime.*, fs.modified) and byte
+// counts (fs.size). A float's 24-bit mantissa steps in 128 s at today's epoch,
+// so `datetime.now` on a Float pin was a clock that read a minute wrong. Double
+// converts with Float/Int/Bool like any number, which is what keeps a graph
+// that wired `now` into a Float pin before the change still wired — it just
+// narrows at that wire, where it always did. Appended last, like the rest.
 enum class PinType : uint8_t { Exec = 0, Float, Bool, Int, String, Vec2, Color, Ref, Transform,
-                               Enum, Struct, Vec3, Vec4 };
+                               Enum, Struct, Vec3, Vec4, Double };
 
 // ── Containers ───────────────────────────────────────────────────────────────
 // A pin/variable/value is a scalar or a CONTAINER of its type. `isArray` is the
@@ -86,6 +94,7 @@ struct Value
 {
     PinType     type = PinType::Float;
     float       f = 0.0f;
+    double      d = 0.0;   // type == Double; its own slot so `f` stays a float everywhere
     bool        b = false;
     int         i = 0;
     glm::vec2   v2{ 0.0f };
@@ -121,6 +130,7 @@ struct Value
     std::string        typeName;
 
     static Value ofFloat(float v)            { Value r; r.type = PinType::Float;  r.f = v;  return r; }
+    static Value ofDouble(double v)          { Value r; r.type = PinType::Double; r.d = v;  return r; }
     static Value ofBool(bool v)              { Value r; r.type = PinType::Bool;   r.b = v;  return r; }
     static Value ofInt(int v)                { Value r; r.type = PinType::Int;    r.i = v;  return r; }
     static Value ofString(std::string v)     { Value r; r.type = PinType::String; r.s = std::move(v); return r; }
@@ -834,8 +844,8 @@ HE_API EventId            eventId(const std::string& name);
 HE_API std::string eventName(EventId id);
 
 // May a wire carry `from` into `to`? Equal types always; beyond that exactly the
-// conversions the interpreter's `coerce` performs and no others — Float/Int/Bool
-// among themselves, and Enum against Float/Int (it is int-backed). Deliberately
+// conversions the interpreter's `coerce` performs and no others — Float/Double/
+// Int/Bool among themselves, and Enum against Float/Double/Int (it is int-backed). Deliberately
 // NOT String, whose coerce yields the zero value: allowing that at a wire would
 // look like a conversion and silently be a data loss. Arrays never convert —
 // coerce passes an array through untouched, so an element-wise reinterpretation
