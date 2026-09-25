@@ -48,8 +48,9 @@ public:
 	// the editor's crash-recovery copy of an asset tab (AssetAutosave). It is a
 	// COPY, not a save: no onAssetSaved notification (a collaboration session
 	// must never publish a timer's snapshot as an edit), no path resolution,
-	// and the asset's own file is not touched. Mints the UUID of a fresh asset
-	// exactly as saveAsset() would, so the copy and a later save agree on it.
+	// and the asset's own file is not touched. An asset without a UUID gets one,
+	// so META is never written without; the editor hands in a COPY of the live
+	// asset, so this never changes the one the ContentManager holds.
 	bool writeAssetTo(RuntimeAsset& asset, const std::string& fullPath) const;
 
 	// Fired after saveAsset() has written the file, with (relativePath, fullPath).

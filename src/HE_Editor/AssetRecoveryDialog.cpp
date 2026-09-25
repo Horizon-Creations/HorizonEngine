@@ -163,6 +163,13 @@ void Draw(AppContext& ctx)
 		ctx.discardAssetRecovery(actKey);
 		s_error.clear();
 	}
+	// The last row answered: close now rather than show an empty list for a frame.
+	if (act != Act::None && ctx.assetRecoveryOffers->empty())
+	{
+		ImGui::CloseCurrentPopup();
+		ImGui::EndPopup();
+		return;
+	}
 
 	{
 		EditorWidgets::WrapText wrap(wrapWidth);
