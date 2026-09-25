@@ -329,8 +329,10 @@ Umgesetzt:
 - Referenzsuche und Retarget kennen `CHUNK_SEQU`; `HE::sequenceAssetRefs` liefert die Clips und
   Töne einer Sequenz für die Vorlade-Liste.
 - Content Browser: Typfilter „Sequence“, Symbol (Glyphe des Property-Clips, andere Tönung),
-  Namensanzeige in Asset-Slots. `asset_create` über MCP kann Sequenzen anlegen
-  (`isCreatableAssetType`).
+  Namensanzeige in Asset-Slots. Der Stub-Writer kann eine Sequenz anlegen
+  (`isCreatableAssetType`, `assetTypeFromName("Sequence")`); im laufenden Editor bietet
+  `asset_create` sie trotzdem noch **nicht** an, weil dort `creatableTypes` gilt, und das spiegelt
+  mit Absicht das Anlegen-Menü (siehe unten).
 
 Bewusst **nicht** in Schritt 2, mit Grund:
 
@@ -338,10 +340,12 @@ Bewusst **nicht** in Schritt 2, mit Grund:
   wie weit. Die Pose braucht beide Weltposen und ist Teil von Schritt 4 („Blend-Pose zur Zeit t“).
 - `collectAssetRefs` in die Sequenz schauen lassen: es gibt noch keine Abspielkomponente, an der
   die Sequenz hängt; das kommt mit ihr in Schritt 3 (`sequenceAssetRefs` liegt bereit).
-- Anlegen-Menüeintrag im Content Browser und `creatableTypes` des Editors: ohne den
-  Cinematic-Tab wäre das ein Asset, das man anlegen, aber nicht öffnen kann. Kommt mit Schritt 6.
+- Anlegen-Menüeintrag im Content Browser und `creatableTypes` des Editors
+  (`EditorApplication.cpp`, „MCP must not create what the menu refuses“, beide gehören
+  zusammen): ohne den Cinematic-Tab wäre das ein Asset, das man anlegen, aber nicht öffnen
+  kann. Kommt mit Schritt 6, dann gleichzeitig mit einem Handbuch-Eintrag „New Asset/…“.
 - Eigene MCP-Lese-/Schreibwerkzeuge für den Inhalt einer Sequenz: Schritt 7 nennt sie
-  ausdrücklich; bis dahin reicht `asset_create`.
+  ausdrücklich.
 
 Befund zur Prüfung aus §3.2 Punkt 5: **Die Lücke beim State-Machine-Asset ist echt.**
 `SceneSystems::collectAssetRefs` trägt nur `stateMachineAssetId` ein, nicht die Clips in der State
