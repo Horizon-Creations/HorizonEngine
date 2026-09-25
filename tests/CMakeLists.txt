@@ -72,6 +72,9 @@ add_executable(he_tests
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
     test_scene_recovery_ui.cpp
+    # The texture colour-space dialog, driven the same way: Apply rewrites the
+    # rows that change, a tick changed in the dialog is the flag the import writes.
+    test_texture_colour_space_ui.cpp
     test_editorcamera.cpp
     test_camera_bookmarks.cpp
     test_asset_thumbnail_cache.cpp
@@ -588,6 +591,10 @@ add_executable(he_tests
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
+    # The texture colour-space dialog, for test_texture_colour_space_ui.cpp: same
+    # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
+    # (HorizonImporters, linked below) and CollabController (already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     # The Project Settings tab, for test_project_settings_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
     # writes Config/ProjectSettings.json through the ProjectManager.
@@ -623,6 +630,8 @@ set_source_files_properties(
     test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
+    test_texture_colour_space_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp

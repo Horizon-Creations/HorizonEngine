@@ -2174,7 +2174,36 @@ namespace
 	  "", "editor#content-browser" },
 	{ "Content Browser/Reimport", "",
 	  "Reads the source file again and rebuilds the asset from it — after the "
-	  "model was changed in the program it came from.",
+	  "model was changed in the program it came from. A texture keeps its "
+	  "color space setting.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Color Space...", "",
+	  "Says whether the selected textures hold color (sRGB, decoded by the GPU) "
+	  "or data such as normals, roughness or masks (linear). Changes the asset "
+	  "in place; nothing is re-imported.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Texture Color Spaces...", "",
+	  "Lists every texture in this folder and below with a guess from its file "
+	  "name. The fix for textures imported before the color space setting "
+	  "existed, which all read as linear and look washed out.",
+	  "", "editor#content-browser" },
+
+	// ── The color space dialog (TextureColourSpaceDialog) ────────────────────
+	{ "Texture Color Space/All Color", "",
+	  "Ticks every row: all of these textures are color, stored sRGB-encoded.",
+	  "", "editor#content-browser" },
+	{ "Texture Color Space/All Data", "",
+	  "Unticks every row: all of these textures are data (normals, masks, "
+	  "roughness and the like) and are sampled as stored.",
+	  "", "editor#content-browser" },
+	{ "Texture Color Space/Guess from Name", "",
+	  "Sets every tick back to what the file name suggests: names ending in "
+	  "_normal, _n, _orm, _rough, _metal, _ao, _height or _mask are data, "
+	  "everything else is color.",
+	  "", "editor#content-browser" },
+	{ "Texture Color Space/Keep Current", "",
+	  "Sets every tick to what the texture already has, so Apply would change "
+	  "nothing. Start here to fix only a few rows by hand.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Create Material Instance", "",
 	  "A new material that inherits this one and overrides only what you change. "
@@ -6920,6 +6949,9 @@ namespace
 		// The panels whose controls are looked up by label within the panel.
 		{ "World Outliner/",   "editor-interface", "Editor Interface", "World Outliner" },
 		{ "Content Browser/",  "editor-interface", "Editor Interface", "Content Browser" },
+		// Raised from the Content Browser (and File ▸ Import Asset), so it is
+		// read under the same heading.
+		{ "Texture Color Space/", "editor-interface", "Editor Interface", "Content Browser" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },

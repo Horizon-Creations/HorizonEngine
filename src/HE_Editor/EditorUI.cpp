@@ -53,6 +53,7 @@
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
+#include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
 #include "DocsPanel.h"                   // Help > Documentation (the in-editor manual)
 #include "EditorHelp.h"                  // one scope per menu; the rows look themselves up
@@ -652,6 +653,11 @@ void EditorUI::render(AppContext& ctx, float dt)
 
     // ── Assets ▸ Publish Engine Content to Server… ───────────────────────────
     EngineContentPublishDialog::Draw(ctx);
+
+    // ── "Is this texture colour or data?" (import and Color Space...) ────────
+    // Here rather than in the Content Browser: File ▸ Import Asset raises it
+    // too, and the browser is not drawn while an asset tab is in front.
+    TextureColourSpaceDialog::Draw(ctx);
 
     // ── "That rename reaches other files" ────────────────────────────────────
     // Raised by the graph editors after a HorizonCode member was renamed. Drawn
@@ -2482,21 +2488,34 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 const std::filesystem::path root(ctx.contentManager->contentRoot());
                 const std::filesystem::path relDir = importTargetDir();
 
+                // Textures wait for the colour-space dialog (sRGB or linear is a
+                // choice the file cannot make); everything else imports now.
                 size_t imported = 0;
+                std::vector<std::string> textures;
                 for (const std::string& src : s_pendingImportPaths)
                 {
+                    if (Importer::isTextureSource(src)) { textures.push_back(src); continue; }
                     if (Importer::importSource(src, root, relDir)) ++imported;
                     else HE_LOG_ERROR(Editor, "%s",
                         ("Editor: import failed for " + src).c_str());
                 }
+                if (!textures.empty())
+                    TextureColourSpaceDialog::openImport(
+                        textures,
+                        std::vector<std::string>(textures.size(), relDir.generic_string()),
+                        root.string());
                 // One line for the whole batch, one refresh at the end: a hundred
                 // textures must not mean a hundred progress modals or a hundred
                 // rescans of the content tree.
                 HE_LOG_INFO(Editor, "%s",
                     ("Editor: imported " + std::to_string(imported) + " of "
-                     + std::to_string(s_pendingImportPaths.size()) + " file(s) into "
+                     + std::to_string(s_pendingImportPaths.size() - textures.size())
+                     + " file(s) into "
                      + (relDir.empty() ? std::string("the content root")
-                                       : relDir.generic_string())).c_str());
+                                       : relDir.generic_string())
+                     + (textures.empty() ? std::string()
+                        : ", " + std::to_string(textures.size())
+                          + " texture(s) wait for their color space")).c_str());
                 ctx.contentRefreshPending = true;
             }
             s_pendingImportPaths.clear();
