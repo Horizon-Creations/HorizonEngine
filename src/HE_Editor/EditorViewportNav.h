@@ -63,4 +63,9 @@ namespace EditorViewportNav
 	// look), so an actual fly-look is never cut short. A toggled trackpad fly
 	// holds no button by design and is exempt.
 	void enforceCaptureInvariant(SDL_Window* win);
+
+	// Whether a fly-look holds the mouse right now (held RMB or the trackpad
+	// toggle). Esc belongs to the toggle's release while it does, so the
+	// editor's "Esc clears the selection" asks this first.
+	bool lookCaptured();
 }

@@ -1609,6 +1609,19 @@ namespace
 	  "to the original. The copies become the selection; one undo removes them "
 	  "all.",
 	  "Ctrl+D", "editor#outliner" },
+	{ "Edit/Select All", "",
+	  "Selects every entity the Outliner lists, children included; the sun, the "
+	  "moon and a terrain's generated chunks stay out. The entity that was "
+	  "active stays active, so the Details panel keeps showing its values. The "
+	  "key works when a Scene view, the Outliner or the Details panel was the "
+	  "last thing clicked, and not while you type.",
+	  "Ctrl+A", "editor#outliner" },
+	{ "Edit/Deselect All", "",
+	  "Empties the selection. Esc does the same from a Scene view, the Outliner "
+	  "or the Details panel, but only when it has nothing else to do: an open "
+	  "menu or list, a field being typed into, a dialog and a fly-look in the "
+	  "viewport each take the Esc first, and the next press clears.",
+	  "Esc", "editor#outliner" },
 	{ "Edit/Project Settings", "",
 	  "Opens the project's own settings as an editor tab: its title and startup "
 	  "scene, shadows, physics rate and gravity, what the packaged build boots "
@@ -2928,6 +2941,12 @@ namespace
 	{ "details.multi.partial", "Not on every selected entity",
 	  "Components the active entity has but at least one other selected entity "
 	  "does not. They are left out above because there is no shared value to show.",
+	  "", "editor#details" },
+	{ "details.multi.add-component", "Add Component to every selected entity",
+	  "The same menu as for one entity, over the whole selection. It lists every "
+	  "component at least one selected entity is missing, including the ones in "
+	  "the list above, and gives the one you pick to each entity that does not "
+	  "have it yet. One undo takes it off all of them again.",
 	  "", "editor#details" },
 
 	// ── Content Browser ──────────────────────────────────────────────────────
