@@ -273,9 +273,6 @@ bool setTextureSrgb(const std::filesystem::path& assetFile,
                     const std::filesystem::path& contentRoot,
                     bool                         srgb)
 {
-	if (textureSrgbOf(assetFile) == srgb)
-		return true;   // nothing to write, and no reason to touch the file's mtime
-
 	std::error_code ec;
 	const std::string rel =
 		toAssetPath(std::filesystem::relative(assetFile, contentRoot, ec));
@@ -285,6 +282,9 @@ bool setTextureSrgb(const std::filesystem::path& assetFile,
 			("Importer: " + assetFile.string() + " is not inside " + contentRoot.string()).c_str());
 		return false;
 	}
+
+	if (textureSrgbOf(assetFile) == srgb)
+		return true;   // nothing to write, and no reason to touch the file's mtime
 
 	// A full load and save rather than poking the one byte: a TXMI chunk from
 	// before the cook tail has no byte to poke, and the save writes the current
