@@ -137,6 +137,74 @@ std::vector<Entity> membersToSkip(AppContext& ctx, const entt::registry& registr
 	return skip;
 }
 
+// ── What the panel works out per SELECTION, not per frame ───────────────────
+// The shared/partial component lists and the mixed leaves both walk every
+// member — the lists through renderFor's collect mode, the mixed leaves
+// through the serializer. Cheap for five entities, not for the thousand
+// Ctrl+A now selects in a large level, every frame. So they are kept until the
+// selection changes (its revision), until this panel changes something itself
+// (`stale`), or until a short period runs out — what catches an edit made
+// elsewhere (the gizmo, a script, a peer). Undo and scene loads replace the
+// world, which clears the selection and bumps the revision anyway.
+struct MultiSelectionCache
+{
+	const HorizonWorld* world    = nullptr;
+	std::uint64_t       revision = ~0ull;
+	int                 frame    = -100000;
+	bool                stale    = true;
+	std::vector<std::string>            common;    // on every member, primary's order
+	std::vector<std::string>            partial;   // on the primary, not on every member
+	std::vector<EditorMultiEdit::Mixed> mixed;
+};
+static MultiSelectionCache s_multi;
+
+void refreshMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary,
+                           const std::vector<Entity>& members)
+{
+	auto& registry = world.registry();
+	MultiSelectionCache& c = s_multi;
+
+	// Intersection of the component lists, in the primary's order.
+	c.common.clear();
+	c.partial.clear();
+	InspectorPanel::listComponents(ctx, world, primary, c.common);
+	for (Entity e : members)
+	{
+		if (e == primary) continue;
+		std::vector<std::string> theirs;
+		InspectorPanel::listComponents(ctx, world, e, theirs);
+		for (auto it = c.common.begin(); it != c.common.end();)
+		{
+			if (std::find(theirs.begin(), theirs.end(), *it) != theirs.end()) { ++it; continue; }
+			if (std::find(c.partial.begin(), c.partial.end(), *it) == c.partial.end())
+				c.partial.push_back(*it);
+			it = c.common.erase(it);
+		}
+	}
+
+	// The mixed leaves: the primary's state against every other member's. A
+	// terrain is left out on either side — its state is a quarter of a million
+	// floats, and it never takes a copied value anyway (membersToSkip).
+	c.mixed.clear();
+	if (!registry.all_of<TerrainComponent>(primary))
+	{
+		std::vector<EditorMultiEdit::json> states;
+		states.reserve(members.size());
+		states.push_back(EditorMultiEdit::state(world, primary));
+		for (Entity e : members)
+		{
+			if (e == primary || !registry.valid(e) || registry.all_of<TerrainComponent>(e)) continue;
+			states.push_back(EditorMultiEdit::state(world, e));
+		}
+		c.mixed = EditorMultiEdit::mixed(states);
+	}
+
+	c.world    = &world;
+	c.revision = ctx.selection.revision();
+	c.frame    = ImGui::GetFrameCount();
+	c.stale    = false;
+}
+
 void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 {
 	auto& registry = world.registry();
@@ -146,39 +214,44 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	EditorWidgets::helpForKey("details.multi.count");
 	{
 		// The names, one line each; the primary is marked because it is the
-		// one the fields below belong to.
+		// one the fields below belong to. A Select All in a big level makes
+		// this list thousands long, so past a screenful the rest is counted
+		// rather than listed — the active one is always shown, last.
+		constexpr std::size_t kNamesShown = 50;
+		const bool cut = members.size() > kNamesShown;
+		auto nameOf = [&](Entity e) {
+			const auto* nc = registry.try_get<NameComponent>(e);
+			return (nc && !nc->name.empty()) ? nc->name.c_str() : "(unnamed)";
+		};
 		ImGui::Indent();
+		std::size_t listed = 0;
 		for (Entity e : members)
 		{
-			const auto* nc = registry.try_get<NameComponent>(e);
-			const char* name = (nc && !nc->name.empty()) ? nc->name.c_str() : "(unnamed)";
-			if (e == primary) ImGui::BulletText("%s  (active)", name);
-			else              ImGui::BulletText("%s", name);
+			if (cut && (e == primary || listed == kNamesShown - 1)) continue;
+			if (e == primary) ImGui::BulletText("%s  (active)", nameOf(e));
+			else              ImGui::BulletText("%s", nameOf(e));
+			++listed;
+		}
+		if (cut)
+		{
+			ImGui::TextDisabled("\xe2\x80\xa6 and %zu more", members.size() - listed - 1);
+			ImGui::BulletText("%s  (active)", nameOf(primary));
 		}
 		ImGui::Unindent();
 	}
 	ImGui::Separator();
 
-	// Intersection of the component lists, in the primary's order.
-	std::vector<std::string> common;
-	InspectorPanel::listComponents(ctx, world, primary, common);
-	std::vector<std::string> partial; // on the primary but not on every member
-	for (Entity e : members)
-	{
-		if (e == primary) continue;
-		std::vector<std::string> theirs;
-		InspectorPanel::listComponents(ctx, world, e, theirs);
-		for (auto it = common.begin(); it != common.end();)
-		{
-			if (std::find(theirs.begin(), theirs.end(), *it) != theirs.end()) { ++it; continue; }
-			if (std::find(partial.begin(), partial.end(), *it) == partial.end())
-				partial.push_back(*it);
-			it = common.erase(it);
-		}
-	}
+	const int period = members.size() <= 256 ? 30 : 240;   // frames
+	if (s_multi.stale || s_multi.world != &world ||
+	    s_multi.revision != ctx.selection.revision() ||
+	    ImGui::GetFrameCount() - s_multi.frame >= period)
+		refreshMultiSelection(ctx, world, primary, members);
+	const std::vector<std::string> common  = s_multi.common;
+	const std::vector<std::string> partial = s_multi.partial;
 
 	hint("Edits below apply to every selected entity that has the component; "
-	     "the active entity's values are shown.");
+	     "the active entity's values are shown, and a field the selection "
+	     "disagrees on says (mixed).");
 	EditorWidgets::helpForKey("details.multi.shared");
 	const std::vector<Entity> held = membersToSkip(ctx, registry, members, primary);
 	if (ctx.collab && ctx.collab->inSession())
@@ -207,11 +280,31 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	// One renderFor per shared section. Each call capturePre()s on the mouse
 	// press inside the window — a handful of whole-world captures on one frame,
 	// which is the price of not duplicating the component editor.
+	//
+	// Around each, the fields the selection disagrees on: marked on the rows
+	// whose label is the field's own name (Row::MixedScope), and all of them —
+	// nested ones included — named in one line under the section.
 	for (const std::string& label : common)
 	{
-		const bool structural =
-			InspectorPanel::renderFor(ctx, world, primary, ctx.undoSys, label.c_str());
+		const char* key = InspectorPanel::componentKeyForLabel(label.c_str());
+		bool structural = false;
+		{
+			const Row::MixedScope mixedRows(
+				key ? EditorMultiEdit::rowMarks(s_multi.mixed, key)
+				    : std::unordered_map<std::string, unsigned>{});
+			structural = InspectorPanel::renderFor(ctx, world, primary, ctx.undoSys, label.c_str());
+		}
+		if (key)
+		{
+			const std::string differs = EditorMultiEdit::describe(s_multi.mixed, key);
+			if (!differs.empty())
+			{
+				hint("Differs across the selection: %s", differs.c_str());
+				EditorWidgets::helpForKey("details.multi.mixed");
+			}
+		}
 		if (!structural) continue;
+		s_multi.stale = true;
 		// The header's "Remove Component" took the section off the primary
 		// (with its own snapshotNow before the removal, which already holds
 		// every member's state). The same removal on each member, WITHOUT an
@@ -231,6 +324,9 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	{
 		const auto changes = EditorMultiEdit::diff(before, EditorMultiEdit::state(world, primary));
 		EditorMultiEdit::propagate(world, changes, members, primary, held);
+		// The value just written is no longer mixed (except on a member that
+		// could not take it) — the next frame has to say so, not the next period.
+		if (!changes.empty()) s_multi.stale = true;
 	}
 
 	if (!partial.empty())
@@ -269,7 +365,7 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	EditorWidgets::helpForKey("details.multi.add-component");
 	if (ImGui::BeginPopup("##add_component_multi"))
 	{
-		InspectorPanel::addComponentMenu(world, targets, ctx.undoSys);
+		if (InspectorPanel::addComponentMenu(world, targets, ctx.undoSys)) s_multi.stale = true;
 		ImGui::EndPopup();
 	}
 }

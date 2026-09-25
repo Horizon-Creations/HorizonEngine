@@ -2930,7 +2930,14 @@ namespace
 	  "share, with the active entity's values. Changing a value here sets that "
 	  "same value on every selected entity that has the component — only the "
 	  "value you touched, so dragging Position X leaves each entity's Y and Z as "
-	  "they were. One undo puts all of them back.",
+	  "they were. One undo puts all of them back. A field on which the selected "
+	  "entities disagree says (mixed) beside its name.",
+	  "", "editor#details" },
+	{ "details.multi.mixed", "Differs across the selection",
+	  "The fields of this component that do not hold the same value on every "
+	  "selected entity. The row above shows the active entity's value; where "
+	  "the row is that field's own, it says (mixed) and shows a dash instead of "
+	  "the number. Setting the field gives all of them the value you set.",
 	  "", "editor#details" },
 	{ "details.multi.held", "Only the entity you hold",
 	  "In a collaboration session the editor holds a lock on the active entity "

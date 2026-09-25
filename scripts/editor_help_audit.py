@@ -65,6 +65,9 @@ IGNORE = {
     # Covered by an explicit helpForKey("details.add-component") call — the scan
     # matches labels against scopes and cannot see a key passed by hand.
     ("UI Button", "Add Component"),
+    # The multi-selection panel's own Add Component (renderMultiSelection, drawn
+    # before any section scope): covered by helpForKey("details.multi.add-component").
+    (None, "Add Component"),
     # The documentation reader pushes its scope in draw(), which is at the END
     # of the file, while these buttons are drawn by helpers defined above it.
     # At run time the scope is open before the helper is called; a scan that
