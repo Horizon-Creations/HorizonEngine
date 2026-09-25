@@ -4948,6 +4948,17 @@ namespace
 	  "What a scrollbar's thumb is filled with. There is no track behind it — an "
 	  "empty groove is furniture nobody reads.",
 	  "", "ui#elements" },
+	{ "UI Widget/Flip Horizontal", "",
+	  "Mirrors the image left to right inside its box, the way the finished picture "
+	  "looks: an arrow that points right now points left. On a 9-sliced image the "
+	  "whole frame is mirrored, so the Slice Left margin ends up on the right edge. "
+	  "The editor preview and the running game flip the same way.",
+	  "", "ui#elements" },
+	{ "UI Widget/Flip Vertical", "",
+	  "Mirrors the image top to bottom inside its box. Combined with Flip "
+	  "Horizontal it is the picture turned half a circle. On a 9-sliced image the "
+	  "Slice Top margin ends up at the bottom edge.",
+	  "", "ui#elements" },
 	{ "UI Widget/Corner Radius", "",
 	  "How far the surface's corners are rounded off, in canvas pixels. It is one "
 	  "number for all four; at half the shorter side the shape becomes a capsule, "

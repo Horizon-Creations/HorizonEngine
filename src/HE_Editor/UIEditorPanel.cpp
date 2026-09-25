@@ -3326,10 +3326,27 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 			const float sb = propFloatOr(n, "Slice Bottom", 0.0f);
 			const bool  sliced = n.textureW > 0 && n.textureH > 0 &&
 			                     (sl > 0.0f || stp > 0.0f || sr > 0.0f || sb > 0.0f);
+			// Flip the way UIImage::render does: every piece moves to its
+			// mirrored place in the box and reads its source rect backwards.
+			const bool flipH = propBoolOr(n, "Flip Horizontal", false);
+			const bool flipV = propBoolOr(n, "Flip Vertical",   false);
+			const auto piece = [&](ImVec2 p0, ImVec2 p1, ImVec2 uv0, ImVec2 uv1)
+			{
+				if (flipH)
+				{
+					p0.x = mn.x + mx.x - p0.x; p1.x = mn.x + mx.x - p1.x;
+					std::swap(p0.x, p1.x); std::swap(uv0.x, uv1.x);
+				}
+				if (flipV)
+				{
+					p0.y = mn.y + mx.y - p0.y; p1.y = mn.y + mx.y - p1.y;
+					std::swap(p0.y, p1.y); std::swap(uv0.y, uv1.y);
+				}
+				dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), p0, p1, uv0, uv1, tint);
+			};
 			if (!sliced)
 			{
-				dl->AddImage(reinterpret_cast<ImTextureID>(texHandle), mn, mx,
-				             ImVec2(0, 0), ImVec2(1, 1), tint);
+				piece(mn, mx, ImVec2(0, 0), ImVec2(1, 1));
 				break;
 			}
 			const float w = mx.x - mn.x, h = mx.y - mn.y;
@@ -3353,9 +3370,8 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 				{
 					if (row == 1 && col == 1 && !fillCentre) continue;
 					if (xs[col + 1] <= xs[col] || ys[row + 1] <= ys[row]) continue;
-					dl->AddImage(reinterpret_cast<ImTextureID>(texHandle),
-					             ImVec2(xs[col], ys[row]), ImVec2(xs[col + 1], ys[row + 1]),
-					             ImVec2(us[col], vs[row]), ImVec2(us[col + 1], vs[row + 1]), tint);
+					piece(ImVec2(xs[col], ys[row]), ImVec2(xs[col + 1], ys[row + 1]),
+					      ImVec2(us[col], vs[row]), ImVec2(us[col + 1], vs[row + 1]));
 				}
 			break;
 		}

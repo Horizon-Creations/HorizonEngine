@@ -52,6 +52,14 @@ public:
     // size, instead of a picture that smears when the element grows.
     float sliceLeft = 0.0f, sliceTop = 0.0f, sliceRight = 0.0f, sliceBottom = 0.0f;
     bool  sliceFillCentre = true;   // off leaves the middle transparent (a frame)
+    // ── Flip ─────────────────────────────────────────────────────────────────
+    // Mirrors the FINISHED picture inside the element's box: what would have
+    // been drawn on the left is drawn on the right (H), top and bottom trade
+    // places (V). The slice margins stay in source pixels, so after Flip
+    // Horizontal the Slice Left margin is the piece on the right edge — the
+    // frame is mirrored as a whole, not re-cut. One arrow texture pointing both
+    // ways, one corner ornament for all four corners.
+    bool  flipH = false, flipV = false;
 
     UIImage() { sizeX = 128.0f; sizeY = 128.0f; }
     UIWidgetType type() const override { return UIWidgetType::Image; }
@@ -70,6 +78,11 @@ public:
                 float, std::vector<UIRenderObject>&) const override;
     void writeJson(nlohmann::json&) const override;
     void readJson(const nlohmann::json&) override;
+
+private:
+    // The picture as authored before Flip: one quad, or nine when sliced.
+    void renderUnflipped(const UIWidgetRect&, const UIElementRenderState&, const HE::UUID&,
+                         float, std::vector<UIRenderObject>&) const;
 };
 
 // ── Text ──────────────────────────────────────────────────────────────────────

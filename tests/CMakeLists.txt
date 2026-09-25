@@ -119,6 +119,7 @@ add_executable(he_tests
     test_skeletalmeshimporter.cpp
     test_meshimporter.cpp
     test_texture_orientation.cpp
+    test_ui_image_flip.cpp
     test_assimpimport.cpp
     test_gltf_material_import.cpp
     test_skeletalmeshcomponent.cpp
