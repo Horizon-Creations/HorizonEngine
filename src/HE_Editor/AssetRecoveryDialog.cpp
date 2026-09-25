@@ -104,7 +104,15 @@ void Draw(AppContext& ctx)
 	enum class Act { None, Restore, Discard };
 	Act         act = Act::None;
 	std::string actKey;
-	const float listH = std::min(260.0f, 58.0f * static_cast<float>(offers.size()) + 8.0f);
+	// Two lines a row, three with a warning; past 260 px the list scrolls.
+	const float lineH = ImGui::GetTextLineHeightWithSpacing();
+	float listH = ImGui::GetStyle().WindowPadding.y * 2.0f;
+	for (const HE::Ed::AssetRecoveryEntry& e : offers)
+	{
+		const bool warn = e.targetPath.empty() || e.targetMissing || e.changedSince;
+		listH += lineH * (warn ? 3.0f : 2.0f) + ImGui::GetStyle().ItemSpacing.y + 1.0f;
+	}
+	listH = std::min(260.0f, listH);
 	ImGui::BeginChild("##asset_recovery_rows", ImVec2(0.0f, listH), true);
 	for (const HE::Ed::AssetRecoveryEntry& e : offers)
 	{
@@ -115,22 +123,7 @@ void Draw(AppContext& ctx)
 		ImGui::TextDisabled("%s", e.relativePath.c_str());
 
 		const std::string when = savedAtText(e.savedAtUnix);
-		if (!when.empty()) ImGui::TextDisabled("Copied %s", when.c_str());
-		if (e.targetPath.empty())
-		{
-			ImGui::SameLine();
-			ImGui::TextColored(kWarn, "Outside this project, cannot be restored here.");
-		}
-		else if (e.targetMissing)
-		{
-			ImGui::SameLine();
-			ImGui::TextColored(kWarn, "The file is gone; Restore creates it again.");
-		}
-		else if (e.changedSince)
-		{
-			ImGui::SameLine();
-			ImGui::TextColored(kWarn, "The file changed after this copy; Restore rolls that back.");
-		}
+		ImGui::TextDisabled("%s", when.empty() ? "Copied" : ("Copied " + when).c_str());
 
 		const float btnW = 100.0f;
 		ImGui::SameLine(ImGui::GetContentRegionMax().x - 2.0f * btnW - ImGui::GetStyle().ItemSpacing.x);
@@ -147,6 +140,13 @@ void Draw(AppContext& ctx)
 			act = Act::Discard;
 			actKey = e.key;
 		}
+		// On a line of its own: beside the date it ran under the buttons.
+		if (e.targetPath.empty())
+			ImGui::TextColored(kWarn, "Outside this project, cannot be restored here.");
+		else if (e.targetMissing)
+			ImGui::TextColored(kWarn, "The file is gone; Restore creates it again.");
+		else if (e.changedSince)
+			ImGui::TextColored(kWarn, "The file changed after this copy was taken; Restore rolls that change back.");
 		ImGui::Separator();
 		ImGui::PopID();
 	}
