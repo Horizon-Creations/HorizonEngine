@@ -181,6 +181,9 @@ private:
 	VkSampler      m_shadowSampler  = VK_NULL_HANDLE;
 	VkRenderPass   m_shadowPass     = VK_NULL_HANDLE;
 	VkPipeline     m_shadowPipeline = VK_NULL_HANDLE;
+	// Instanced twin (scene_shadow_instanced.vert): one draw per run of
+	// same-mesh casters, clip * model per caster from the instance buffer.
+	VkPipeline     m_shadowInstancedPipeline = VK_NULL_HANDLE;
 	uint32_t       m_shadowSize     = HE::kShadowMapResolution;
 	// Project ShadowSettings (IRenderer::SetShadowSettings): distance /
 	// cascade count / split lambda go to the extractor, the bias pair to the
@@ -332,6 +335,25 @@ private:
 	InstanceBuf           m_instanceBuf[2];
 	static constexpr uint32_t k_maxInstances = 65536; // instance-buffer capacity (A3)
 	static constexpr uint32_t k_instStride   = 128;   // bytes per instance = 2 × mat4 (mvp, model)
+	// Next free slot in m_instanceBuf[m_currentFrame]. A member, not a DrawScene
+	// local: the shadow pass, runGi and runSSAO record their instanced depth
+	// draws into the SAME command buffer before the geometry pass, and the GPU
+	// reads every slot only at submit — so each pass takes slots of its own.
+	// Reset at the top of Render() and DrawViewportFrame().
+	uint32_t              m_instCursor = 0;
+	// Same-mesh runs of the camera-view depth pre-passes (SSAO position, GI
+	// G-buffer); the shadow layers keep m_shadowBatches.
+	RenderSorter::DepthBatchList m_preBatches;
+	// One instanced draw for a depth-only run (shadow caster run, SSAO or GI
+	// pre-pass run): `count` {A, B} matrix pairs from fill(k, pair) go into the
+	// next free slots of the frame's instance buffer, bound at binding 1, and
+	// `restorePipe` is bound again afterwards. Vertex/index buffers are the
+	// caller's. false = nothing drawn (no twin pipeline, buffer full, a run of
+	// one, HE_DEPTH_INSTANCING=0): the caller loops. Defined in the .cpp, the
+	// only translation unit that calls it.
+	template <class Fill>
+	bool drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe, VkPipeline restorePipe,
+	                        uint32_t indexCount, uint32_t count, Fill&& fill);
 	VkDescriptorPool      m_descPool            = VK_NULL_HANDLE;
 	struct FrameUBO
 	{
@@ -815,6 +837,7 @@ private:
 
 	// Position prepass: push-constant layout (reuses scene m_scenePipelineLayout).
 	VkPipeline   m_ssaoPosGfxPipeline  = VK_NULL_HANDLE;
+	VkPipeline   m_ssaoPosInstancedPipeline = VK_NULL_HANDLE; // ssao_pos_instanced.vert
 
 	// SSAO fullscreen pass descriptors (set=0: UBO + posRT + noise).
 	VkDescriptorSetLayout m_ssaoDescLayout     = VK_NULL_HANDLE;
@@ -1022,6 +1045,7 @@ private:
 	VkPipeline m_giShadowPipe   = VK_NULL_HANDLE; // compute
 	VkPipeline m_giProbePipe    = VK_NULL_HANDLE; // compute
 	VkPipeline m_giGBufPipe     = VK_NULL_HANDLE;
+	VkPipeline m_giGBufInstancedPipe = VK_NULL_HANDLE; // gi_gbuf_instanced.vert
 	VkPipeline m_giTemporalPipe = VK_NULL_HANDLE;
 	VkPipeline m_giBlurPipe     = VK_NULL_HANDLE;
 	VkRenderPass m_giGBufRP     = VK_NULL_HANDLE; // 2x RGBA16F + depth → SHADER_READ_ONLY

@@ -63,6 +63,37 @@ namespace
         return { cnt, off };
     }
 
+    // Vertex input of the instanced depth twins (scene_shadow_instanced.vert,
+    // ssao_pos_instanced.vert, gi_gbuf_instanced.vert): the mesh at binding 0
+    // (pos, normal, uv) and the scene's 128-byte {A, B} instance pair at
+    // binding 1 (VK_VERTEX_INPUT_RATE_INSTANCE) — A at locations 3..6, B at
+    // 7..10, the layout scene_instanced.vert reads. `pairColumns` = 4 declares
+    // A only (the shadow twin never reads B), 8 declares both. `info` points
+    // into this object, hence no copies.
+    struct InstancedDepthInput
+    {
+        VkVertexInputBindingDescription      binds[2];
+        VkVertexInputAttributeDescription    attrs[11];
+        VkPipelineVertexInputStateCreateInfo info{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+
+        InstancedDepthInput(uint32_t instStride, uint32_t pairColumns)
+        {
+            binds[0] = { 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX };
+            binds[1] = { 1, instStride,         VK_VERTEX_INPUT_RATE_INSTANCE };
+            attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT,  0 };
+            attrs[1] = { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12 };
+            attrs[2] = { 2, 0, VK_FORMAT_R32G32_SFLOAT,    24 };
+            for (uint32_t c = 0; c < pairColumns; ++c)
+                attrs[3 + c] = { 3 + c, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 16u * c };
+            info.vertexBindingDescriptionCount   = 2;
+            info.pVertexBindingDescriptions      = binds;
+            info.vertexAttributeDescriptionCount = 3 + pairColumns;
+            info.pVertexAttributeDescriptions    = attrs;
+        }
+        InstancedDepthInput(const InstancedDepthInput&)            = delete;
+        InstancedDepthInput& operator=(const InstancedDepthInput&) = delete;
+    };
+
     // Per-frame UBO, std140 layout (matches the GLSL `Frame` block).
     struct FrameUBOData
     {
@@ -195,7 +226,8 @@ void VulkanRenderer::Shutdown()
             b[i].size = 0;
         }
     if (m_giGBufPipe)     { vkDestroyPipeline(m_device, m_giGBufPipe, nullptr);     m_giGBufPipe = VK_NULL_HANDLE; }
-    if (m_giTemporalPipe) { vkDestroyPipeline(m_device, m_giTemporalPipe, nullptr); m_giTemporalPipe = VK_NULL_HANDLE; }
+    if (m_giGBufInstancedPipe) { vkDestroyPipeline(m_device, m_giGBufInstancedPipe, nullptr); m_giGBufInstancedPipe = VK_NULL_HANDLE; }
+    if (m_giTemporalPipe){ vkDestroyPipeline(m_device, m_giTemporalPipe, nullptr); m_giTemporalPipe = VK_NULL_HANDLE; }
     if (m_giBlurPipe)     { vkDestroyPipeline(m_device, m_giBlurPipe, nullptr);     m_giBlurPipe = VK_NULL_HANDLE; }
     if (m_giShadowPipe)   { vkDestroyPipeline(m_device, m_giShadowPipe, nullptr);   m_giShadowPipe = VK_NULL_HANDLE; }
     if (m_giProbePipe)    { vkDestroyPipeline(m_device, m_giProbePipe, nullptr);    m_giProbePipe = VK_NULL_HANDLE; }
@@ -225,6 +257,7 @@ void VulkanRenderer::Shutdown()
     m_giReady          = false;
     // SSAO pipeline-level resources (static, not viewport-size-dependent).
     if (m_ssaoPosGfxPipeline)   { vkDestroyPipeline      (m_device, m_ssaoPosGfxPipeline,   nullptr); m_ssaoPosGfxPipeline   = VK_NULL_HANDLE; }
+    if (m_ssaoPosInstancedPipeline) { vkDestroyPipeline  (m_device, m_ssaoPosInstancedPipeline, nullptr); m_ssaoPosInstancedPipeline = VK_NULL_HANDLE; }
     if (m_ssaoGfxPipeline)      { vkDestroyPipeline      (m_device, m_ssaoGfxPipeline,       nullptr); m_ssaoGfxPipeline      = VK_NULL_HANDLE; }
     if (m_ssaoBlurGfxPipeline)  { vkDestroyPipeline      (m_device, m_ssaoBlurGfxPipeline,   nullptr); m_ssaoBlurGfxPipeline  = VK_NULL_HANDLE; }
     if (m_ssaoPipeLayout)       { vkDestroyPipelineLayout(m_device, m_ssaoPipeLayout,         nullptr); m_ssaoPipeLayout       = VK_NULL_HANDLE; }
@@ -349,6 +382,7 @@ void VulkanRenderer::Render()
     m_ssrRanThisFrame  = false;  // cleared each frame; set true only by RenderForwardSSR()
     m_ssrResultView    = VK_NULL_HANDLE;
     m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;  // rebuilt by DrawScene
+    m_instCursor = 0; // this frame's instance-buffer slots start from the top
 
     // Drop caches for materials/meshes edited since last frame, before any recording — the
     // frame's DrawScene then re-resolves them fresh from the ContentManager.
@@ -520,6 +554,11 @@ void VulkanRenderer::Render()
 // already made sure the viewport resources exist at that size.
 void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 {
+    // The shadow, GI and SSAO depth passes and the geometry pass below all take
+    // instance-buffer slots from this frame's m_instCursor. Reset here too, not
+    // only in Render(): RenderSceneImage records this frame on its own.
+    m_instCursor = 0;
+
     // Cascade shadow maps first, in their own render passes (before the scene
     // pass), fit against the aspect of the target the scene will be drawn into.
     EncodeShadowMap(cmd, float(m_viewportW) / float(m_viewportH));
@@ -2089,6 +2128,24 @@ void VulkanRenderer::createScenePipeline()
             if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &spci, nullptr, &m_shadowPipeline) != VK_SUCCESS)
                 HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: shadow pipeline creation failed");
             vkDestroyShaderModule(m_device, svs, nullptr);
+
+            // Instanced twin: same states, the same dynamic depth bias (set once
+            // per layer, kept across the rebind because both pipelines declare
+            // it dynamic), VS swapped. Optional — without it every caster run
+            // loops through m_shadowPipeline.
+            if (VkShaderModule sivs = loadShaderModule("scene_shadow_instanced.vert.spv"))
+            {
+                VkPipelineShaderStageCreateInfo sistage = sstage;
+                sistage.module = sivs;
+                InstancedDepthInput sin(k_instStride, 4); // reads the clip * model half only
+                VkGraphicsPipelineCreateInfo sipci = spci;
+                sipci.pStages           = &sistage;
+                sipci.pVertexInputState = &sin.info;
+                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &sipci, nullptr,
+                                              &m_shadowInstancedPipeline) != VK_SUCCESS)
+                    HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced shadow pipeline creation failed");
+                vkDestroyShaderModule(m_device, sivs, nullptr);
+            }
         }
     }
 
@@ -2133,7 +2190,8 @@ void VulkanRenderer::destroyScenePipeline()
     if (m_albedoSetLayout)     { vkDestroyDescriptorSetLayout(m_device, m_albedoSetLayout, nullptr); m_albedoSetLayout = VK_NULL_HANDLE; }
     if (m_emptySetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_emptySetLayout, nullptr);  m_emptySetLayout = VK_NULL_HANDLE; }
     if (m_shadowPipeline)                { vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);                m_shadowPipeline = VK_NULL_HANDLE; }
-    if (m_sceneTransparentPipelineHDR)   { vkDestroyPipeline(m_device, m_sceneTransparentPipelineHDR, nullptr);   m_sceneTransparentPipelineHDR = VK_NULL_HANDLE; }
+    if (m_shadowInstancedPipeline)       { vkDestroyPipeline(m_device, m_shadowInstancedPipeline, nullptr);       m_shadowInstancedPipeline = VK_NULL_HANDLE; }
+    if (m_sceneTransparentPipelineHDR)  { vkDestroyPipeline(m_device, m_sceneTransparentPipelineHDR, nullptr);   m_sceneTransparentPipelineHDR = VK_NULL_HANDLE; }
     if (m_sceneInstancedPipelineHDR)     { vkDestroyPipeline(m_device, m_sceneInstancedPipelineHDR, nullptr);     m_sceneInstancedPipelineHDR = VK_NULL_HANDLE; }
     if (m_sceneInstancedPipeline)        { vkDestroyPipeline(m_device, m_sceneInstancedPipeline, nullptr);        m_sceneInstancedPipeline = VK_NULL_HANDLE; }
     if (m_scenePipelineHDR)              { vkDestroyPipeline(m_device, m_scenePipelineHDR, nullptr);              m_scenePipelineHDR = VK_NULL_HANDLE; }
@@ -4735,6 +4793,36 @@ void* VulkanRenderer::GetViewportVkSampler()   const { return static_cast<void*>
 bool  VulkanRenderer::HasViewportResourceChanged() const { return m_viewportResChanged; }
 void  VulkanRenderer::ClearViewportResourceChanged()     { m_viewportResChanged = false; }
 
+// The Vulkan twin of D3D11/D3D12's drawDepthInstanced: every caller writes the
+// products its per-object loop pushes as constants, so the instanced frame is
+// the loop's frame. The buffer is host-coherent and read at submit, which is
+// why the slots come from the frame-wide m_instCursor and never get reused
+// inside one frame.
+template <class Fill>
+bool VulkanRenderer::drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe, VkPipeline restorePipe,
+                                        uint32_t indexCount, uint32_t count, Fill&& fill)
+{
+    static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be two mat4");
+    InstanceBuf& ib = m_instanceBuf[m_currentFrame];
+    if (!instPipe || !ib.mapped || count < 2 || !RenderSorter::depthInstancingEnabled()
+        || static_cast<uint64_t>(m_instCursor) + count > k_maxInstances)
+        return false;
+    auto* dst = static_cast<uint8_t*>(ib.mapped) + static_cast<size_t>(m_instCursor) * k_instStride;
+    for (uint32_t k = 0; k < count; ++k)
+    {
+        glm::mat4 pair[2];
+        fill(k, pair);
+        std::memcpy(dst + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
+    }
+    const VkDeviceSize off = static_cast<VkDeviceSize>(m_instCursor) * k_instStride;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, instPipe);
+    vkCmdBindVertexBuffers(cmd, 1, 1, &ib.buf, &off);
+    vkCmdDrawIndexed(cmd, indexCount, count, 0, 0, 0);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, restorePipe);
+    m_instCursor += count;
+    return true;
+}
+
 void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
 {
     m_shadowRenderedThisFrame = false;
@@ -4834,8 +4922,12 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
     // keeps castsShadow objects only and drops `skipEntity`'s geometry: the
     // entity the local light itself sits on (a light authored onto a mesh
     // entity would otherwise render that mesh at z≈0 into its own map and
-    // shadow itself out); kNoOwnerEntity (every cascade) skips nothing. Runs
-    // of one mesh are drawn one call per transform through the push constants.
+    // shadow itself out); kNoOwnerEntity (every cascade) skips nothing. A run
+    // of more than one caster of the same mesh is ONE instanced draw
+    // (m_shadowInstancedPipeline, clip * model per caster in the instance
+    // buffer — the push-constant path's own product); a run of one, or one the
+    // buffer cannot take, stays on the per-caster push-constant draw. Mirrors
+    // GL's renderDepthLayer / Metal's encodeDepthLayer / D3D11 + D3D12.
     auto drawDepthLayer = [&](uint32_t size, const glm::mat4& viewProj, const glm::mat4& clip,
                               uint32_t skipEntity)
     {
@@ -4856,6 +4948,20 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
             vkCmdBindVertexBuffers(cmd, 0, 1, &m.vbuf, &offset);
             vkCmdBindIndexBuffer(cmd, m.ibuf, 0, VK_INDEX_TYPE_UINT32);
             const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
+            if (drawDepthInstanced(cmd, m_shadowInstancedPipeline, m_shadowPipeline, m.indexCount, b.count,
+                    [&](uint32_t k, glm::mat4* pair) {
+                        pair[0] = clip * xf[k];
+                        pair[1] = xf[k];
+                    }))
+            {
+                static bool loggedOnce = false; // the runtime witness on Windows
+                if (!loggedOnce)
+                {
+                    loggedOnce = true;
+                    HE_LOG_INFO(RHI, "VulkanRenderer: shadow pass instanced (first run: %u casters)", b.count);
+                }
+                continue;
+            }
             for (uint32_t k = 0; k < b.count; ++k)
             {
                 PushConstants pc{ clip * xf[k], xf[k] };
@@ -5924,9 +6030,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 
         // A3: real instancing applies to the opaque pass only (transparent keeps the
         // per-instance loop for blend + depth sort). instCursor sub-allocates the
-        // per-frame instance buffer across the frame's instanced batches.
+        // per-frame instance buffer across the frame's instanced batches — the
+        // frame-wide cursor, because the instanced depth draws of the shadow
+        // pass, runGi and runSSAO already hold the slots below it and the GPU
+        // reads all of them only at submit.
         bool allowInstancing = true;
-        uint32_t instCursor = 0;
+        uint32_t& instCursor = m_instCursor;
         // A4: the scene pipeline the CURRENT pass expects bound on entry to drawDCVk. A
         // graph-material draw binds its own per-material pipeline, so it restores THIS after
         // itself — otherwise the next built-in draw would inherit the material pipeline.
@@ -8248,6 +8357,23 @@ void VulkanRenderer::createGiPipelines()
         pci.layout = m_giGBufPL;      pci.renderPass = m_giGBufRP;
         pipesOk = pipesOk && vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
                                                        &m_giGBufPipe) == VK_SUCCESS;
+        // Instanced twin for same-mesh runs, VS swapped. Kept out of pipesOk on
+        // purpose: a failure here must not take GI down with it — every run
+        // then loops through m_giGBufPipe.
+        if (pipesOk)
+            if (VkShaderModule gbufIVS = loadShaderModule("gi_gbuf_instanced.vert.spv"))
+            {
+                VkPipelineShaderStageCreateInfo istages[2] = { stages[0], stages[1] };
+                istages[0].module = gbufIVS;
+                InstancedDepthInput iin(k_instStride, 8); // {mvp, model}
+                VkGraphicsPipelineCreateInfo ipci = pci;
+                ipci.pStages           = istages;
+                ipci.pVertexInputState = &iin.info;
+                if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr,
+                                              &m_giGBufInstancedPipe) != VK_SUCCESS)
+                    HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced GI G-buffer pipeline creation failed");
+                vkDestroyShaderModule(m_device, gbufIVS, nullptr);
+            }
     }
     // Temporal + blur (attribute-less fullscreen, no depth).
     VkPipelineVertexInputStateCreateInfo fsVI{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
@@ -8891,20 +9017,41 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     VkRect2D   vsc{ { 0, 0 }, { gw, gh } };
     vkCmdSetViewport(cmd, 0, 1, &vvp);
     vkCmdSetScissor(cmd, 0, 1, &vsc);
-    for (uint32_t idx : m_sortedIndices)
+    // Runs of consecutive same-mesh objects (precip/particles don't shade the
+    // mask — AoContributors); a run of more than one is ONE instanced draw with
+    // the push-constant path's {mvp, model} per instance.
+    RenderSorter::batchDepthRuns(m_renderWorld, m_sortedIndices,
+                                 RenderSorter::DepthFilter::AoContributors, kNoOwnerEntity, m_preBatches);
+    for (const RenderSorter::DepthBatch& b : m_preBatches.batches)
     {
-        const RenderObject& obj = m_renderWorld.objects[idx];
-        if (!obj.contributesAO) continue; // precip/particles don't shade the mask
-        const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
+        const GpuMesh* mesh = resolveMesh(b.meshAssetId);
         const GpuMesh& gm   = mesh ? *mesh : m_cube;
         if (!gm.indexCount) continue;
-        // gi_gbuf.vert: uMVP (clip-fixed) + uModel — same 128-byte shape.
-        PushConstants pc{ vp * obj.transform, obj.transform };
-        vkCmdPushConstants(cmd, m_giGBufPL, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
         VkDeviceSize offset = 0;
         vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vbuf, &offset);
         vkCmdBindIndexBuffer(cmd, gm.ibuf, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
+        const glm::mat4* xf = m_preBatches.transforms.data() + b.first;
+        if (drawDepthInstanced(cmd, m_giGBufInstancedPipe, m_giGBufPipe, gm.indexCount, b.count,
+                [&](uint32_t k, glm::mat4* pair) {
+                    pair[0] = vp * xf[k];
+                    pair[1] = xf[k];
+                }))
+        {
+            static bool loggedOnce = false;
+            if (!loggedOnce)
+            {
+                loggedOnce = true;
+                HE_LOG_INFO(RHI, "VulkanRenderer: GI pre-pass instanced (first batch: %u instances)", b.count);
+            }
+            continue;
+        }
+        for (uint32_t k = 0; k < b.count; ++k)
+        {
+            // gi_gbuf.vert: uMVP (clip-fixed) + uModel — same 128-byte shape.
+            PushConstants pc{ vp * xf[k], xf[k] };
+            vkCmdPushConstants(cmd, m_giGBufPL, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+            vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
+        }
     }
     vkCmdEndRenderPass(cmd); // colors → SHADER_READ_ONLY (dep covers COMPUTE too)
 
@@ -9629,6 +9776,21 @@ void VulkanRenderer::createSSAOPipeline()
         pci.renderPass          = m_ssaoPosRenderPass;
         vkCheck(vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr,
                                           &m_ssaoPosGfxPipeline), "ssao pos pipeline");
+        // Instanced twin for same-mesh runs, VS swapped. Optional — without it
+        // every run loops through m_ssaoPosGfxPipeline.
+        if (VkShaderModule posIVS = loadShaderModule("ssao_pos_instanced.vert.spv"))
+        {
+            VkPipelineShaderStageCreateInfo istages[2] = { stages[0], stages[1] };
+            istages[0].module = posIVS;
+            InstancedDepthInput iin(k_instStride, 8); // {mvp, modelView}
+            VkGraphicsPipelineCreateInfo ipci = pci;
+            ipci.pStages           = istages;
+            ipci.pVertexInputState = &iin.info;
+            if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &ipci, nullptr,
+                                          &m_ssaoPosInstancedPipeline) != VK_SUCCESS)
+                HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: instanced SSAO pos pipeline creation failed");
+            vkDestroyShaderModule(m_device, posIVS, nullptr);
+        }
     }
 
     // Fullscreen (attribute-less) pipeline template — no vertex input, no depth.
@@ -9879,17 +10041,60 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
 
     const uint32_t prepassFrame = m_currentFrame;
     uint32_t       prepassSlot  = 0;
-    for (uint32_t idx : m_sortedIndices)
+    if (!reflMrt)
     {
-        const RenderObject& obj = m_renderWorld.objects[idx];
-        if (!obj.contributesAO) continue;   // skip particles/precipitation
-        const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
-        const GpuMesh& gm   = mesh ? *mesh : m_cube;
-        if (!gm.indexCount) continue;
-
-        const glm::mat4 modelView = view * obj.transform;
-        if (reflMrt)
+        // Position-only path: runs of consecutive same-mesh AO contributors
+        // (particles/precipitation opt out), a run of more than one is ONE
+        // instanced draw with the push-constant path's {mvp, modelView} per
+        // instance. The MRT reflection pre-pass below keeps the loop: its VS is
+        // the library's cross-compiled GLSL with a per-draw UBO slot, not the
+        // 128-byte instance buffer (same split as D3D11/D3D12).
+        RenderSorter::batchDepthRuns(m_renderWorld, m_sortedIndices,
+                                     RenderSorter::DepthFilter::AoContributors, kNoOwnerEntity, m_preBatches);
+        for (const RenderSorter::DepthBatch& b : m_preBatches.batches)
         {
+            const GpuMesh* mesh = resolveMesh(b.meshAssetId);
+            const GpuMesh& gm   = mesh ? *mesh : m_cube;
+            if (!gm.indexCount) continue;
+            VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vbuf, &offset);
+            vkCmdBindIndexBuffer(cmd, gm.ibuf, 0, VK_INDEX_TYPE_UINT32);
+            const glm::mat4* xf = m_preBatches.transforms.data() + b.first;
+            if (drawDepthInstanced(cmd, m_ssaoPosInstancedPipeline, m_ssaoPosGfxPipeline, gm.indexCount, b.count,
+                    [&](uint32_t k, glm::mat4* pair) {
+                        pair[0] = vp   * xf[k];
+                        pair[1] = view * xf[k];
+                    }))
+            {
+                static bool loggedOnce = false; // the runtime witness on Windows
+                if (!loggedOnce)
+                {
+                    loggedOnce = true;
+                    HE_LOG_INFO(RHI, "VulkanRenderer: SSAO pre-pass instanced (first batch: %u instances)", b.count);
+                }
+                continue;
+            }
+            for (uint32_t k = 0; k < b.count; ++k)
+            {
+                // Push constants: mvp (clip-space) + modelView (view-space) —
+                // ssao_pos.vert's push_constant block has the PushConstants layout.
+                PushConstants pc{ vp * xf[k], view * xf[k] };
+                vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+                                   0, sizeof(pc), &pc);
+                vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
+            }
+        }
+    }
+    else
+    {
+        for (uint32_t idx : m_sortedIndices)
+        {
+            const RenderObject& obj = m_renderWorld.objects[idx];
+            if (!obj.contributesAO) continue;   // skip particles/precipitation
+            const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
+            const GpuMesh& gm   = mesh ? *mesh : m_cube;
+            if (!gm.indexCount) continue;
+
             if (prepassSlot >= k_ssrMaxPrepassDraws)
             {
                 HE_LOG_ONCE(RHI, Warning,
@@ -9897,6 +10102,7 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
                     "the rest are skipped (they will not reflect)", k_ssrMaxPrepassDraws);
                 break;
             }
+            const glm::mat4 modelView = view * obj.transform;
             HE::MaterialShaderLibrary::ReflPrepassUniforms ru;
             const glm::mat4 mvp = vp * obj.transform;
             std::memcpy(ru.mvp,       &mvp[0][0],           16 * sizeof(float));
@@ -9910,19 +10116,12 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 m_reflPrepassPipeLayout, 0, 1, &m_reflPrepassSet[prepassFrame], 1, &off);
             ++prepassSlot;
+
+            VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vbuf, &offset);
+            vkCmdBindIndexBuffer(cmd, gm.ibuf, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
         }
-        else
-        {
-            // Push constants: mvp (clip-space) + modelView (view-space).
-            // The ssao_pos.vert shader uses push_constant block with same layout as PushConstants.
-            PushConstants pc{ vp * obj.transform, modelView };
-            vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                               0, sizeof(pc), &pc);
-        }
-        VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &gm.vbuf, &offset);
-        vkCmdBindIndexBuffer(cmd, gm.ibuf, 0, VK_INDEX_TYPE_UINT32);
-        vkCmdDrawIndexed(cmd, gm.indexCount, 1, 0, 0, 0);
     }
     vkCmdEndRenderPass(cmd);
     // posRT transitions to SHADER_READ_ONLY via renderpass finalLayout.
