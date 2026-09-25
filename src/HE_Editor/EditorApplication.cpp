@@ -3581,7 +3581,18 @@ void EditorApplication::OnRender(float dt)
 			// ViewportOverlays so the headless dump's HE_DUMP_SELBOXTEST
 			// witness draws them by this same code.
 			if (show.selection)
+			{
 				HE::Ed::ViewportOverlays::appendSelectionMarkers(*m_editorWorld, m_selection, dbg);
+				// A selected light's range / cone, a selected camera's view
+				// volume at the aspect the viewport renders at. Part of the
+				// selection's picture, so the same switch: only what is
+				// selected is drawn, and a second switch would buy nothing.
+				int vpW = 0, vpH = 0;
+				ViewportPanel::renderSizePx(vpW, vpH);
+				const float vpAspect = (vpW > 0 && vpH > 0) ? float(vpW) / float(vpH) : 0.0f;
+				HE::Ed::ViewportOverlays::appendSelectedLightAndCameraShapes(
+					*m_editorWorld, m_selection, m_editorCamera.position(), vpAspect, dbg);
+			}
 			if (show.colliders)
 				HE::Ed::ViewportOverlays::appendColliderWireframes(*m_editorWorld,
 				                                                   contentManager(), dbg);
@@ -6714,6 +6725,87 @@ void EditorApplication::dumpFrameHeadless()
 		std::vector<DebugLine> all = selLines.lines();
 		all.insert(all.end(), colLines.lines().begin(), colLines.lines().end());
 		r->SetDebugLines(all);
+	}
+
+	// ── Light / camera reach witness (HE_DUMP_LIGHTGIZMOTEST=1): a red point
+	// light, a green spot tilted down onto the floor and a camera looking
+	// sideways, all three selected. The picture must show the red range
+	// sphere, the green cone ending on the floor, the pale frustum, and the
+	// two light icons in their lights' colours (the camera's stays white).
+	// Lines from ViewportOverlays, pushed by hand like the witness above; the
+	// log line gives the counts and the spot's ring distance to read without
+	// the picture.
+	if (const char* lg = std::getenv("HE_DUMP_LIGHTGIZMOTEST"); lg && *lg && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0, 1, 0)));
+		const glm::vec3 base = m_editorCamera.position() + camFwd * 10.0f;
+
+		auto floorE = m_editorWorld->createEntity("LightGizmoFloor");
+		TransformComponent ftc;
+		ftc.position = base - glm::vec3(0.0f, 2.0f, 0.0f);
+		ftc.scale    = glm::vec3(30.0f, 0.2f, 30.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto place = [&](const char* name, const glm::vec3& pos, const glm::vec3& rotDeg) {
+			const Entity e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.rotation = rotDeg;
+			reg.emplace<TransformComponent>(e, tc);
+			return e;
+		};
+		const Entity point = place("LightGizmoPoint", base - camRight * 3.0f, glm::vec3(0.0f));
+		LightComponent pl; pl.type = HE::LightType::Point; pl.range = 1.5f;
+		pl.color = { 0.6f, 0.05f, 0.05f };   // dim red: the icon still shows full red
+		reg.emplace<LightComponent>(point, pl);
+
+		const Entity spot = place("LightGizmoSpot", base + glm::vec3(0.0f, 1.0f, 0.0f),
+		                          glm::vec3(-90.0f, 0.0f, 0.0f));   // straight down
+		LightComponent sl; sl.type = HE::LightType::Spot; sl.range = 3.2f; sl.spotAngle = 50.0f;
+		sl.color = { 0.1f, 1.0f, 0.2f };
+		reg.emplace<LightComponent>(spot, sl);
+
+		const Entity camE = place("LightGizmoCamera", base + camRight * 3.0f,
+		                          glm::vec3(0.0f, 90.0f, 0.0f));
+		reg.emplace<CameraComponent>(camE, CameraComponent{});
+
+		m_selection.set(point);
+		m_selection.add(spot);
+		m_selection.add(camE);
+
+		DebugDrawBuffer lines;
+		HE::Ed::ViewportOverlays::appendSelectionMarkers(*m_editorWorld, m_selection, lines);
+		const size_t markerLines = lines.lines().size();
+		HE::Ed::ViewportOverlays::appendSelectedLightAndCameraShapes(
+			*m_editorWorld, m_selection, m_editorCamera.position(), 16.0f / 9.0f, lines);
+
+		// The spot's cone must end on the sphere of its range: every non-apex
+		// endpoint of its lines at `range` from the light.
+		const glm::vec3 spotPos = HE::worldPositionOf(*m_editorWorld, spot);
+		int onRange = 0, spotEnds = 0;
+		for (const DebugLine& l : lines.lines())
+		{
+			if (l.color != HE::lightDisplayColor(sl.color)) continue;
+			for (const glm::vec3& q : { l.start, l.end })
+			{
+				const float d = glm::length(q - spotPos);
+				if (d < 1e-3f) continue;
+				++spotEnds;
+				if (std::abs(d - sl.range) < 1e-3f) ++onRange;
+			}
+		}
+		char line[320];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: HE_DUMP_LIGHTGIZMOTEST marker lines=%zu reach lines=%zu "
+			"| spot endpoints on its range sphere=%d of %d",
+			markerLines, lines.lines().size() - markerLines, onRange, spotEnds);
+		HE_LOG_INFO(Editor, "%s", line);
+		r->SetDebugLines(lines.lines());
 	}
 
 	// HE_DUMP_FRAMES: settle frames before the capture (default 3). Temporal

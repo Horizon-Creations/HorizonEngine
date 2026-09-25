@@ -3124,18 +3124,26 @@ void ContentManager::initDefaultAssets()
 			registerTexture(std::move(tex));
 
 			// Unlit + Translucent: UV → Texture Sample (slot 0 = this material's
-			// own texture, heTex0) → BaseColor, its A → Opacity. The UV node is
-			// not optional: an unconnected UV pin bakes to the CONSTANT (0, 0),
-			// which samples the transparent corner over the whole quad.
+			// own texture, heTex0) × Vertex Color → BaseColor, its A → Opacity.
+			// The UV node is not optional: an unconnected UV pin bakes to the
+			// CONSTANT (0, 0), which samples the transparent corner over the
+			// whole quad. Vertex Color is the draw's base colour times its
+			// RenderObject::instanceTint — white for a camera or a speaker, the
+			// light's hue for a light (extractEditorIcons) — so the white glyph
+			// takes that colour and its dark halo stays dark.
 			HE::MaterialGraph g;
 			const int out = g.addNode(HE::MatNodeType::Output);
 			g.findNode(out)->p[0] = 0.0f;                                        // unlit
 			g.findNode(out)->p[1] = static_cast<float>(HE::MatBlendMode::Translucent);
-			const int uv  = g.addNode(HE::MatNodeType::UV);
-			const int smp = g.addNode(HE::MatNodeType::TextureSample);
-			g.connect(uv,  0, smp, 0);
-			g.connect(smp, 0, out, HE::kMatOutputBaseColorPin);
-			g.connect(smp, 1, out, HE::kMatOutputOpacityPin);
+			const int uv   = g.addNode(HE::MatNodeType::UV);
+			const int smp  = g.addNode(HE::MatNodeType::TextureSample);
+			const int vcol = g.addNode(HE::MatNodeType::VertexColor);
+			const int mul  = g.addNode(HE::MatNodeType::Multiply);
+			g.connect(uv,   0, smp, 0);
+			g.connect(smp,  0, mul, 0);
+			g.connect(vcol, 0, mul, 1);
+			g.connect(mul,  0, out, HE::kMatOutputBaseColorPin);
+			g.connect(smp,  1, out, HE::kMatOutputOpacityPin);
 			const HE::MatShaderGen gen = HE::generateFragment(g);
 
 			MaterialAsset mat;

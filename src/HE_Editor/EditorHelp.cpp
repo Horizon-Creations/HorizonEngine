@@ -1927,13 +1927,18 @@ namespace
 	  "", "editor#viewport" },
 	{ "Viewport Show/Editor Icons", "",
 	  "The symbols standing in for lights, cameras and audio sources, which "
-	  "have no mesh of their own. With them off those entities are still there "
+	  "have no mesh of their own. A light's symbol wears the light's colour. "
+	  "With them off those entities are still there "
 	  "and still selectable in the Outliner — but not by clicking in the scene, "
 	  "since there is nothing to click.",
 	  "", "editor#viewport" },
 	{ "Viewport Show/Selection", "",
-	  "The amber box on each selected entity. Off is for judging a scene "
-	  "without the marker over the thing you are looking at; the gizmo stays.",
+	  "The amber box on each selected entity, and what a selected light or "
+	  "camera reaches: a point light's range as a sphere, a spot light's cone, "
+	  "a camera's view frustum (blue). Only for what is selected, so a scene "
+	  "full of lights is not a scene full of spheres. Off is for judging a "
+	  "scene without the marker over the thing you are looking at; the gizmo "
+	  "stays.",
 	  "", "editor#viewport" },
 	{ "Viewport Show/Colliders", "",
 	  "Collider wireframes for every entity that has one: cyan for solid, "
