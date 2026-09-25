@@ -217,6 +217,7 @@ add_executable(he_tests
     test_mcp_tools_screenshot.cpp
     test_mcp_camera_gizmos.cpp
     test_viewport_overlays.cpp
+    test_texture_colour_space.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
