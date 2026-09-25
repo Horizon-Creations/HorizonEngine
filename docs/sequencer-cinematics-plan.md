@@ -15,7 +15,7 @@ genauso läuft wie in der Vorschau. Um diese Schicht geht es hier.
 
 | Teil | Ort | Was es kann | Brauchbar für Cinematics |
 |---|---|---|---|
-| `PropertyAnimClipAsset` | `src/HE_Core/include/ContentManager/Assets.h:695`, Chunk `CHUNK_PANM` (`HAsset.h:185`), Laden/Speichern `ContentManager.cpp:590`/`:1790` | Skalare Kanäle (`PropertyAnimChannel`: `times`/`values`) für 15 Ziele (`PropTarget`, `Assets.h:678`): Position/Rotation/Skalierung XYZ, Materialfarbe/-metallic/-roughness/-opacity | Ja, als Datenform der Property-Spur. Kein FOV, keine Sichtbarkeit |
+| `PropertyAnimClipAsset` | `src/HE_Core/include/ContentManager/Assets.h:695`, Chunk `CHUNK_PANM` (`HAsset.h:185`), Laden/Speichern `ContentManager.cpp:596`/`:1802` | Skalare Kanäle (`PropertyAnimChannel`: `times`/`values`) für 15 Ziele (`PropTarget`, `Assets.h:678`): Position/Rotation/Skalierung XYZ, Materialfarbe/-metallic/-roughness/-opacity | Ja, als Datenform der Property-Spur. Kein FOV, keine Sichtbarkeit |
 | `PropertyAnimationSystem` | `src/HE_Scene/include/HorizonScene/PropertyAnimationSystem.h`, `src/HE_Scene/src/PropertyAnimationSystem.cpp` | `sampleChannel` (linear, an den Enden gehalten), `applyAt(world, cm, e, clip, t)` schreibt alle Kanäle in Transform/Material, `advance` ist die Abspielkopf-Regel | Ja. `applyAt` ist genau die Funktion „Zustand zur Zeit t“, die Vorschau und Laufzeit teilen müssen |
 | `PropertyAnimatorComponent` | `Components/PropertyAnimatorComponent.h` | `clipId`, Zeit, Tempo, Loop, Playing, pro Entity | Nein. Eine Entity spielt sich selbst ab, es gibt keinen gemeinsamen Takt über Entities hinweg |
 | Sequencer (Thema 36) | `src/HE_Editor/SequencerPanel.{h,cpp}` (Tab, Werkzeugleiste, Undo, Speichern, Akteure), `src/HE_Editor/SequencerTimeline.{h,cpp}` (Spurliste, Lineal, Scrubbing, Keys, Kurvenansicht, ohne `AppContext`) | Keys setzen, verschieben, löschen mit Sortier-Invariante; Kurvenansicht; Vorschau über `applyAt` an allen Entities, die den Clip abspielen | Die Streifen-Logik (`insertKey`/`moveKey`/`removeKey`, Lineal, Scrub) ja. Das Panel selbst ist auf einen Clip und skalare Spuren zugeschnitten |
@@ -69,7 +69,10 @@ die Kamera?“, die beide Anwendungen vor dem Kamera-Controller stellen.
 
 Dazu die Reihenfolge im Frame: `updateCameraController` läuft **vor** `tickWorld`/`tickAnimation`.
 Setzt die Sequenz Schnitt und Pose erst in `tickAnimation`, ist das für die Extraktion desselben
-Frames rechtzeitig (die kommt danach). Nur ein Kamera-Controller, der im nächsten Frame davor
+Frames rechtzeitig: die kommt danach und ruft selbst `propagateTransforms`
+(`RenderExtractor.cpp:63`), die Weltmatrix der Kamera ist also frisch. Wer innerhalb des Systems
+eine Weltposition braucht (Blend-Quelle), nimmt `HE::worldPositionOf` bzw. propagiert selbst wie
+`CameraRigController::update`, nicht `worldMatrix`. Nur ein Kamera-Controller, der im nächsten Frame davor
 läuft, darf nichts zurückschreiben, und genau das verhindert die Abfrage.
 
 ### 2.4 Skelett-Clips lassen sich nicht auf eine Zeit setzen
@@ -149,16 +152,18 @@ SequenceAsset
   Liste `slot → Entity` (§3.5), die Vorrang vor der UUID im Asset hat, und die Skript-API kann
   einen Slot vor dem Start belegen.
 - **Spurziele**: `PropTarget` wird um `CameraFov` und `Visible` erweitert (hinten angehängt, alte
-  Dateien bleiben gültig, der alte Sequencer bekommt sie gleich mit).
+  Dateien bleiben gültig, der alte Sequencer bekommt sie gleich mit). `Visible` ist ein Schalter,
+  kein Wert: linear gesampelt stünde er zwischen zwei Keys auf 0,5. Regel für dieses Ziel: Stufe,
+  der Wert des letzten Keys vor t gilt (und der Streifen zeichnet ihn als Stufe).
 
 Ein neuer Assettyp muss an **allen** diesen Stellen eingetragen werden. Das Audit hat
 `PropertyAnimClip` einmal als „toten Assettyp“ gefunden, weil genau zwei davon fehlten:
 
 1. `AssetType` in `src/HE_Core/include/Types/Enums.h` (Enum, beide Namens-Switches)
-2. Beide Dispatch-Switches in `ContentManager.cpp` (Laden `:590`-Gegenstück, Speichern `:1790`-Gegenstück), Getter/Register/Acquire in `ContentManager.h`
+2. Beide Dispatch-Switches in `ContentManager.cpp` (Laden neben `:596`, Speichern neben `:1802`), Getter/Register/Acquire in `ContentManager.h`
 3. `AssetStubWriter.cpp` (Anlegen aus dem Content Browser, Stub = leere Sequenz)
 4. Content Browser: Anlegen-Menü, Symbol (`EditorApplication.h`, neben `m_iconPropertyAnimClip`), Doppelklick-/Tab-Dispatch
-5. `SceneSystems::collectAssetRefs` (`SceneSystems.cpp:244`): die Sequenz der Abspielkomponente **und** die Assets in der Sequenz (Skelett-Clips, Ton). Prüfen, ob der Pack-Schritt nur die UUID-Hülle der Szene packt; dann muss er in die Sequenz hineinsehen wie beim State-Machine-`clipId`
+5. `SceneSystems::collectAssetRefs` (`SceneSystems.cpp:244`): die Sequenz der Abspielkomponente **und** die Assets in der Sequenz (Skelett-Clips, Ton). Gepackt wird ohnehin alles: `HpakWriter` läuft rekursiv über die ganzen Content-Wurzeln (`HpakWriter.cpp:943`). `collectAssetRefs` entscheidet aber, was beim Szenenstart vorab gestreamt wird (`GameApplication::streamSceneAssets`, `GameApplication.cpp:1430`). Ein Clip, der nur in der Sequenz steht, wäre beim ersten Auswerten noch nicht geladen, und die Spur würde still nichts tun. Also entweder `collectAssetRefs` schaut in die geladene Sequenz hinein, oder das System lädt beim Start nach (`loadAssetAsync`) und wertet erst aus, wenn alles da ist. Dieselbe Lücke hat heute schon der State-Machine-Asset (`AnimatorStateMachineComponent` wird eingetragen, die Clips darin nicht); Schritt 2 prüft das dort mit
 6. `AssetRefScan` (UUID-Form im Chunk) und Rename-Retarget, sonst meldet der Lösch-Dialog „unreferenziert“
 7. MCP: mindestens Lesen/Schreiben der Sequenz (Muster `McpToolsClip.cpp`)
 
@@ -167,10 +172,10 @@ Ein neuer Assettyp muss an **allen** diesen Stellen eingetragen werden. Das Audi
 | Spur | Auswertung zur Zeit t | Baustein |
 |---|---|---|
 | **Property** (Transform, Material, FOV, Sichtbarkeit) | `sampleChannel` pro Kanal, Schreiben wie `applyAt` | `PropertyAnimChannel`, `PropertyAnimationSystem`. `applyAt` wird in „ein Kanal auf eine Entity“ zerlegt, damit Clip und Sequenz dieselbe Schreibfunktion benutzen |
-| **Skeletal** | Aktive Sektion finden, Clipzeit = `(t - start) * playRate + clipOffset` (geloopt oder geklemmt), Pose über den Weg von `AnimationPreview::evaluateClipPose` direkt in `SkeletalMeshComponent::boneMatrices` | Eigener Auswertungsweg wegen §2.4. Läuft als **letzter** Skelett-Treiber im Frame, gewinnt also gegen den Animator der Entity. Überblenden zwischen zwei Sektionen kommt später |
+| **Skeletal** | Aktive Sektion finden, Clipzeit = `(t - start) * playRate + clipOffset` (geloopt oder geklemmt), Pose über den Weg von `AnimationPreview::evaluateClipPose` direkt in `SkeletalMeshComponent::boneMatrices` | Eigener Auswertungsweg wegen §2.4. Läuft als **letzter** Skelett-Treiber im Frame, gewinnt also gegen den Animator der Entity. Offen für Schritt 3: `tickAnimation` klammert die Treiber mit `poseBeginFrame`/`poseEndFrame` (Layer-Stapel, IK, `PoseFinalize.h`). Die Sequenz muss dort als Basis-Treiber zählen, sonst laufen Layer und IK auf ihrer Pose nicht oder doppelt. Überblenden zwischen zwei Sektionen kommt später |
 | **Camera Cut** | Letzter Schnitt vor t bestimmt die Kamera; liegt t innerhalb `blendIn` nach dem Schnitt, Pose = Slerp/Lerp zwischen der Pose der vorigen Kamera zur Zeit t und der neuen, geformt mit `applyBlendCurve` | `BlendCurve`, `applyBlendCurve`, `SolvedPose`. Erster Schnitt mit `blendIn > 0`: Quelle ist die beim Start eingefrorene Gameplay-Kamerapose (`snapshotCameraPose`-Muster) |
 | **Event** | Nur beim Abspielen: Spannen-Lauf über (tPrev, tEnd] | Aus `collectNotifies` gelöste Regel (§2.5). Zustellung über `NotifyQueue` + `AnimationNotifySystem::dispatch` an die gebundene Entity (ohne Bindung: an die abspielende Entity). Damit bekommen Lua, Python, HorizonCode und Sync-Graph das Ereignis ohne ein einziges neues Handler-API |
-| **Audio** | Nur beim Abspielen: Sektion starten, wenn die Spanne ihren Start überquert; beim Stopp/Abbruch stoppen | `audio.play` / `audio.playAt` (an der gebundenen Entity). Springt die Sequenz mitten in eine Sektion (`setTime`), startet der Ton **nicht** mittendrin: das braucht Seek, und Seek gibt es nur im Pull-Modus (siehe Memory zu miniaudio) |
+| **Audio** | Nur beim Abspielen: Sektion starten, wenn die Spanne ihren Start überquert; beim Stopp/Abbruch stoppen | `audio.play` / `audio.playAt` (an der gebundenen Entity). Springt die Sequenz mitten in eine Sektion (`setTime`), startet der Ton **nicht** mittendrin: das braucht Seek, und Seek (wie auch die Länge) liefert miniaudio nur im Pull-Modus des Decoders, nicht auf dem heutigen Abspielweg |
 
 ### 3.4 Kamera: Besitz, Schnitt, Blend
 
@@ -274,7 +279,7 @@ und Laufzeit vor UI, damit jede Stufe ohne Editor testbar ist.
 4. **Kamera und Eingabe.** `ownsCamera`, Gates in `GameApplication` und Editor-PIE, Blend rein
    und zwischen Cutscene-Kameras, Blend raus über `blendTo`, `lockPlayerInput`. Tests: Fly-Fallback
    bewegt die Kamera während der Sequenz nicht, Blend-Pose zur Zeit t, Rückgabe an das Rig.
-   Prüfen mit `he_shot.py` (nur optisch, Memory headless-visual-verification).
+   Zusätzlich optisch mit `scripts/he_shot.py` (Bildvergleich nur als Sichtprüfung, kein Test).
 5. **Skript-API.** `sequence.*`-Zeilen, `SequenceFinished`, Parity-Fixture, Handbuch der Knoten.
    Ab hier ist eine Cutscene aus Skript und aus Szene heraus abspielbar, auch im gebauten Spiel.
 6. **Editor-Tab „Cinematic“.** Streifen verallgemeinern (Zeilenarten, Gruppen), Bindungen,
@@ -285,7 +290,10 @@ und Laufzeit vor UI, damit jede Stufe ohne Editor testbar ist.
    „Cutscenes“, Website-Roadmap-Eintrag (Deploy nur nach Bestätigung).
 
 Schritt 2 bis 5 sind je ein mittelgroßer Schritt, Schritt 6 ist der größte und darf bei Bedarf in
-„Streifen“ und „Panel + Vorschau-Sitzung“ geteilt werden.
+„Streifen“ und „Panel + Vorschau-Sitzung“ geteilt werden. Achtung bei der Reihenfolge 6 vor 7:
+Bis „durch die Kamera schauen“ steht, sieht man Kameraschnitte im Editor nur als Frustum, nicht
+als Bild. Soll Schritt 6 schon für Kameraarbeit taugen, den Viewport-Schalter aus 7 vorziehen und
+mit 6 zusammenlegen.
 
 ---
 
