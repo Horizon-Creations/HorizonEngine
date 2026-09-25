@@ -4,6 +4,7 @@
 #include <imgui.h>
 #include <cstddef>
 #include <string>
+#include <unordered_map>
 
 struct AppContext;
 struct SDL_Window;   // opaque — avoids pulling SDL into every panel that includes this
@@ -165,6 +166,34 @@ namespace Row
 	bool inputTextMultiline(const char* label, std::string* s, float height);
 	// Read-only value line, laid out like the editable rows above it.
 	void labelText(const char* label, const char* fmt, ...) IM_FMTARGS(2);
+
+	// ── Mixed values (several entities in the Details panel) ────────────────
+	// While a MixedScope is alive, a row whose VISIBLE label names one of its
+	// fields ("Position" ↔ "position", "Casts Shadow" ↔ "castsShadow": case,
+	// spaces and punctuation ignored) is drawn as mixed: "(mixed)" beside the
+	// label, and "—" instead of the number in each mixed element of a drag or
+	// slider (a combo previews "—", a checkbox shows ImGui's mixed dash).
+	// Colours and text keep the active entity's value and carry the label
+	// mark alone. The value underneath is still the active entity's, so a drag
+	// starts from there and the edit lands on everyone, as before.
+	//
+	// `fields` is field → element mask (bit i = element i; all bits = the
+	// whole value), as EditorMultiEdit::rowMarks makes it. Scopes nest; the
+	// innermost wins. Rows with no scope alive are untouched.
+	class MixedScope
+	{
+	public:
+		explicit MixedScope(const std::unordered_map<std::string, unsigned>& fields);
+		~MixedScope();
+		MixedScope(const MixedScope&) = delete;
+		MixedScope& operator=(const MixedScope&) = delete;
+	private:
+		std::unordered_map<std::string, unsigned> m_fields;   // keys normalised
+		const MixedScope* m_prev = nullptr;
+		friend unsigned mixedMask(const char* label);
+	};
+	// The mask for a row's label under the innermost scope; 0 = not mixed.
+	unsigned mixedMask(const char* label);
 }
 
 // An explanatory line under a control. Dimmed, and wrapped to the panel width

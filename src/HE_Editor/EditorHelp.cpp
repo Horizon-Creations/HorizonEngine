@@ -1609,6 +1609,19 @@ namespace
 	  "to the original. The copies become the selection; one undo removes them "
 	  "all.",
 	  "Ctrl+D", "editor#outliner" },
+	{ "Edit/Select All", "",
+	  "Selects every entity the Outliner lists, children included; the sun, the "
+	  "moon and a terrain's generated chunks stay out. The entity that was "
+	  "active stays active, so the Details panel keeps showing its values. The "
+	  "key works when a Scene view, the Outliner or the Details panel was the "
+	  "last thing clicked, and not while you type.",
+	  "Ctrl+A", "editor#outliner" },
+	{ "Edit/Deselect All", "",
+	  "Empties the selection. Esc does the same from a Scene view, the Outliner "
+	  "or the Details panel, but only when it has nothing else to do: an open "
+	  "menu or list, a field being typed into, a dialog and a fly-look in the "
+	  "viewport each take the Esc first, and the next press clears.",
+	  "Esc", "editor#outliner" },
 	{ "Edit/Project Settings", "",
 	  "Opens the project's own settings as an editor tab: its title and startup "
 	  "scene, shadows, physics rate and gravity, what the packaged build boots "
@@ -2917,7 +2930,14 @@ namespace
 	  "share, with the active entity's values. Changing a value here sets that "
 	  "same value on every selected entity that has the component — only the "
 	  "value you touched, so dragging Position X leaves each entity's Y and Z as "
-	  "they were. One undo puts all of them back.",
+	  "they were. One undo puts all of them back. A field on which the selected "
+	  "entities disagree says (mixed) beside its name.",
+	  "", "editor#details" },
+	{ "details.multi.mixed", "Differs across the selection",
+	  "The fields of this component that do not hold the same value on every "
+	  "selected entity. The row above shows the active entity's value; where "
+	  "the row is that field's own, it says (mixed) and shows a dash instead of "
+	  "the number. Setting the field gives all of them the value you set.",
 	  "", "editor#details" },
 	{ "details.multi.held", "Only the entity you hold",
 	  "In a collaboration session the editor holds a lock on the active entity "
@@ -2928,6 +2948,12 @@ namespace
 	{ "details.multi.partial", "Not on every selected entity",
 	  "Components the active entity has but at least one other selected entity "
 	  "does not. They are left out above because there is no shared value to show.",
+	  "", "editor#details" },
+	{ "details.multi.add-component", "Add Component to every selected entity",
+	  "The same menu as for one entity, over the whole selection. It lists every "
+	  "component at least one selected entity is missing, including the ones in "
+	  "the list above, and gives the one you pick to each entity that does not "
+	  "have it yet. One undo takes it off all of them again.",
 	  "", "editor#details" },
 
 	// ── Content Browser ──────────────────────────────────────────────────────

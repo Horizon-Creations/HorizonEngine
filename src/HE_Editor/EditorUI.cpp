@@ -30,6 +30,8 @@
 #include "ViewportPanel.h"               // centre dock: Scene viewport, camera, gizmo, picking
 #include "ViewportToolbar.h"             // the View menu draws the toolbar's pickers
 #include "SecondaryViewportPanel.h"      // Scene 2 / 3 / 4: the level from other sides
+#include "ViewportActions.h"             // Edit > Select All: what "all" means
+#include "EditorViewportNav.h"           // Esc belongs to a fly-look's release first
 #include "OutlinerPanel.h"               // right dock: World Outliner hierarchy tree
 #include "ProjectHubPanel.h"             // start screen while no project is open
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
@@ -1407,6 +1409,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	{
 		return ctx.projectLoaded && !ctx.isPlaying && ctx.world && ctx.entityClipboardFull;
 	};
+	// Selecting is not editing: allowed while playing (the Outliner's clicks
+	// are too), but only in a game project — an application has no entities
+	// to act on, which is why its Edit menu has none of these rows.
+	auto canSelectEntities = [&]() -> bool
+	{
+		return ctx.projectLoaded && ctx.world && ctx.projectManager &&
+		       !ctx.projectManager->currentProject().appProject;
+	};
+	auto selectAllEntities = [&]()
+	{
+		if (canSelectEntities()) ViewportActions::selectAll(*ctx.world, ctx.selection);
+	};
 	// Window::SetFullscreen is write-only, so the current state is read back off
 	// the SDL window rather than mirrored in a static that drifts the first time
 	// the user goes fullscreen through the window manager instead of this menu.
@@ -1593,6 +1607,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::Paste:     if (canPasteEntity() && ctx.pasteEntity)     ctx.pasteEntity();     break;
 			case MC::Duplicate: if (canEditEntity()  && ctx.duplicateEntity) ctx.duplicateEntity(); break;
 			case MC::Delete:    if (canEditEntity()  && ctx.deleteEntity)    ctx.deleteEntity();    break;
+			case MC::SelectAll:   selectAllEntities(); break;
+			case MC::DeselectAll: if (canSelectEntities()) ctx.selection.clear(); break;
 			// The Entity menu: the viewport's and the Outliner's verbs, each
 			// re-checking its own preconditions (ViewportPanel).
 			case MC::CreateEntity:
@@ -1824,6 +1840,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ctx.duplicateEntity();
             if (EditorWidgets::menuItem("Delete", EditorShortcuts::label("entity.delete").c_str(), false, canEdit) && ctx.deleteEntity)
                 ctx.deleteEntity();
+            ImGui::Separator();
+            if (EditorWidgets::menuItem("Select All", EditorShortcuts::label("entity.selectAll").c_str(), false,
+                                        canSelectEntities()))
+                selectAllEntities();
+            if (EditorWidgets::menuItem("Deselect All", EditorShortcuts::label("entity.deselect").c_str(), false,
+                                        canSelectEntities() && !ctx.selection.empty()))
+                ctx.selection.clear();
         }
         ImGui::Separator();
 		if (EditorWidgets::menuItem("Project Settings", nullptr, false, ctx.projectLoaded))
@@ -3273,6 +3296,52 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
     {
         const ImGuiIO& kio = ImGui::GetIO();
         const bool typing = kio.WantTextInput || ImGui::IsAnyItemActive();
+
+        // ── Esc: whose key was it? ───────────────────────────────────────────
+        // ImGui answers Escape itself, in NewFrame (NavUpdateCancelRequest):
+        // it closes the open combo or context menu and deactivates the field
+        // being typed into BEFORE any of this code runs. On the Esc frame the
+        // popup is already gone and nothing is active, so "is anything busy"
+        // asked now says no, and the one press would close a combo in the
+        // Details panel AND empty the selection that panel was showing. The
+        // answer has to come from the frame before: a stamp of the last frame
+        // on which a popup was open or an item held the keyboard, and Esc
+        // clears only when that frame is at least two frames old. Modal
+        // dialogs handle Esc in their own code, which also ran earlier this
+        // frame — the same stamp covers them. A held mouse button counts too:
+        // the viewport picture is a plain Image that holds no ActiveId, so a
+        // gizmo drag or a marquee in progress is only visible as the button.
+        static int s_escBusyFrame = -10;
+        const int  frameNow  = ImGui::GetFrameCount();
+        const bool escBusyNow =
+            typing || ImGui::GetActiveID() != 0 || ImGui::IsAnyMouseDown() ||
+            ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+        const bool escFree = !escBusyNow && frameNow - s_escBusyFrame >= 2 &&
+                             !EditorViewportNav::lookCaptured();
+        if (escBusyNow) s_escBusyFrame = frameNow;
+
+        // Select All and Esc are selection verbs, and fire only where the
+        // selection lives: the Scene viewports, the Outliner, the Details
+        // panel — or nowhere focused at all. Every other panel keeps both keys
+        // (the manual backs out of a search on Esc, a text list may one day
+        // select its own rows on Ctrl+A).
+        const auto focusOnSelection = []() {
+            const ImGuiContext* g = ImGui::GetCurrentContext();
+            if (!g || !g->NavWindow) return true;
+            const char* root = g->NavWindow->RootWindow ? g->NavWindow->RootWindow->Name
+                                                        : g->NavWindow->Name;
+            for (const char* title : { "Scene", "Scene 2", "Scene 3", "Scene 4",
+                                       "World Outliner", "Details" })
+                if (std::strcmp(root, title) == 0) return true;
+            return false;
+        };
+        if (sceneTabActive && !typing && canSelectEntities() && focusOnSelection())
+        {
+            if (EditorShortcuts::pressed("entity.selectAll"))
+                selectAllEntities();
+            if (escFree && !ctx.selection.empty() && EditorShortcuts::pressed("entity.deselect"))
+                ctx.selection.clear();
+        }
 
         // The scene tab is not enough on its own: the Content Browser is docked
         // into it and binds Delete for its own asset deletion
