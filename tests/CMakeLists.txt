@@ -118,6 +118,7 @@ add_executable(he_tests
     test_camera_rig.cpp
     test_skeletalmeshimporter.cpp
     test_meshimporter.cpp
+    test_texture_orientation.cpp
     test_assimpimport.cpp
     test_gltf_material_import.cpp
     test_skeletalmeshcomponent.cpp
@@ -160,6 +161,7 @@ add_executable(he_tests
     test_hc_node_docs.cpp
     # Editor UI rendered on the CPU and looked at — see ImGuiSoftwareRaster.h.
     test_ui_shot.cpp
+    test_widget_designer_ui.cpp
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_rope_trail.cpp
@@ -593,6 +595,16 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     # The icon/splash rows the settings tab draws (shared with the Export dialog).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
+    # The UI widget designer, for test_widget_designer_ui.cpp (Thema 92): same
+    # AppContext, same per-file HE_IMGUI_ENABLED. It brings the HorizonCode
+    # canvas host along (the Graph view) and the per-tab state helper; the two
+    # symbols those would pull whole panels in for are stubbed in
+    # WidgetDesignerLinkStubs.cpp, which says which and why.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/UIEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphHost.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphClipboard.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorPanelState.cpp
+    WidgetDesignerLinkStubs.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -625,6 +637,12 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/UIEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphHost.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphClipboard.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorPanelState.cpp
+    WidgetDesignerLinkStubs.cpp
+    test_widget_designer_ui.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE
