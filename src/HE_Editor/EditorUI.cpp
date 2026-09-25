@@ -3308,11 +3308,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // on which a popup was open or an item held the keyboard, and Esc
         // clears only when that frame is at least two frames old. Modal
         // dialogs handle Esc in their own code, which also ran earlier this
-        // frame — the same stamp covers them.
+        // frame — the same stamp covers them. A held mouse button counts too:
+        // the viewport picture is a plain Image that holds no ActiveId, so a
+        // gizmo drag or a marquee in progress is only visible as the button.
         static int s_escBusyFrame = -10;
         const int  frameNow  = ImGui::GetFrameCount();
         const bool escBusyNow =
-            typing || ImGui::GetActiveID() != 0 ||
+            typing || ImGui::GetActiveID() != 0 || ImGui::IsAnyMouseDown() ||
             ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
         const bool escFree = !escBusyNow && frameNow - s_escBusyFrame >= 2 &&
                              !EditorViewportNav::lookCaptured();
