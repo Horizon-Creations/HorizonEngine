@@ -129,7 +129,14 @@ verhindert, dass ein Hin-und-her-Ziehen zwanzig Explosionen auslöst.
 was er ist (eine Entity, die sich selbst im Kreis bewegt: Plattform, pulsierendes Material). Eine
 Sequenz hat Bindungen und verschiedene Spurarten, das passt nicht in `CHUNK_PANM`.
 
-Ein `.hasset` mit einem Chunk `CHUNK_SEQU` (Binärform wie alle Nachbarn):
+Ein `.hasset` mit einem Chunk `CHUNK_SEQU`. **Geändert in Schritt 2: JSON statt Binärform.**
+Die Referenzsuche (`AssetRefScan.cpp`) und das Umbenennen (`AssetRefRetarget.cpp`) sehen eine
+UUID nur als `{"hi":…,"lo":…}` in einem JSON-Chunk; sechzehn rohe Bytes in einem Binär-Chunk sind
+für beide unsichtbar, und der Lösch-Dialog hätte einen Clip, den eine Cutscene abspielt, als
+„unreferenziert“ gemeldet. Alle Autoren-Assets seit `PANM` (BLSP, BMSK, THEM, ASMG, SGTP) sind
+aus demselben Grund JSON. Das Asset hält trotzdem die **geparste** Form (nicht den Text wie
+`BlendSpaceAsset`), weil die Laufzeit jedes Frame auswertet. Umgesetzt in
+`Sequence/SequenceJson.{h,cpp}`, Datenmodell `SequenceAsset` in `Assets.h`. Die Struktur:
 
 ```
 SequenceAsset
@@ -294,6 +301,58 @@ Schritt 2 bis 5 sind je ein mittelgroßer Schritt, Schritt 6 ist der größte un
 Bis „durch die Kamera schauen“ steht, sieht man Kameraschnitte im Editor nur als Frustum, nicht
 als Bild. Soll Schritt 6 schon für Kameraarbeit taugen, den Viewport-Schalter aus 7 vorziehen und
 mit 6 zusammenlegen.
+
+### Stand nach Schritt 2 (Asset + Auswertung)
+
+Umgesetzt:
+
+- `AssetType::Sequence` (Enum, Name, kollab-synchronisierbar), `SequenceAsset` mit allen fünf
+  Spurarten im Datenmodell (`Assets.h`), `CHUNK_SEQU` als JSON (siehe §3.2), Laden/Speichern im
+  `ContentManager` inkl. `unloadAsset`/Umbenennen/Projektwechsel-Ketten. Kein Chunk = leere
+  Sequenz; ein Chunk, der kein JSON-Objekt ist, lässt das Laden **scheitern** (sonst würde das
+  nächste Speichern die Datei leer überschreiben). Unbekannte Spurarten/Ziele werden verworfen
+  und gezählt.
+- `PropTarget::CameraFov` und `PropTarget::Visible` (hinten angehängt, `kLastPropTarget`).
+  `Visible` wird als Stufe gesampelt (`PropertyAnimationSystem::isStepTarget`, in
+  `sampleChannel`), schreibt die `visible`-Flags von Mesh, SkeletalMesh, Light, Particle, Rope,
+  Trail, nie `InactiveComponent`. `applyAt` ist in `applyChannel` (ein Wert, ein Ziel, eine
+  Entity) zerlegt; Clip und Sequenz schreiben über dieselbe Funktion. Der alte Sequencer bietet
+  die zwei neuen Ziele an (Gruppen „Camera“/„Visibility“); der Streifen zeichnet `Visible` noch
+  linear, die Stufen-Darstellung gehört zu Schritt 6.
+- `HE::collectNotifySpan(notifies, duration, …)`: die Feuerregel ohne `AnimationClipAsset`,
+  `collectNotifies` ruft sie nur noch auf. Die 37 alten Notify-Testfälle laufen unverändert.
+- `HE::SequenceEval` (`SequenceEval.h`): `evaluate(seq, t)` rein, liefert Property-Schreibwerte
+  und den Kamerazustand (aktive Kamera, Blend-Quelle, geformtes `alpha`); `resolveBindings`
+  (UUID, Slot-Überschreibung hat Vorrang); `apply` schreibt über `applyChannel`. Die Signatur
+  ist damit `evaluate(seq, t)` + `apply(…, bindings)` statt eines einzigen
+  `evaluate(seq, bindings, t)`, damit die Auswertung ohne Welt testbar ist.
+- Referenzsuche und Retarget kennen `CHUNK_SEQU`; `HE::sequenceAssetRefs` liefert die Clips und
+  Töne einer Sequenz für die Vorlade-Liste.
+- Content Browser: Typfilter „Sequence“, Symbol (Glyphe des Property-Clips, andere Tönung),
+  Namensanzeige in Asset-Slots. `asset_create` über MCP kann Sequenzen anlegen
+  (`isCreatableAssetType`).
+
+Bewusst **nicht** in Schritt 2, mit Grund:
+
+- Die **Blend-Pose** zwischen zwei Kameras: `evaluate` sagt nur, welche Kamera, von welcher und
+  wie weit. Die Pose braucht beide Weltposen und ist Teil von Schritt 4 („Blend-Pose zur Zeit t“).
+- `collectAssetRefs` in die Sequenz schauen lassen: es gibt noch keine Abspielkomponente, an der
+  die Sequenz hängt; das kommt mit ihr in Schritt 3 (`sequenceAssetRefs` liegt bereit).
+- Anlegen-Menüeintrag im Content Browser und `creatableTypes` des Editors: ohne den
+  Cinematic-Tab wäre das ein Asset, das man anlegen, aber nicht öffnen kann. Kommt mit Schritt 6.
+- Eigene MCP-Lese-/Schreibwerkzeuge für den Inhalt einer Sequenz: Schritt 7 nennt sie
+  ausdrücklich; bis dahin reicht `asset_create`.
+
+Befund zur Prüfung aus §3.2 Punkt 5: **Die Lücke beim State-Machine-Asset ist echt.**
+`SceneSystems::collectAssetRefs` trägt nur `stateMachineAssetId` ein, nicht die Clips in der State
+Machine (und nicht die Sample-Clips eines Blend Space). Die Getter des `ContentManager` laden
+nicht nach, also fehlen solche Clips in einem gestreamten Paket beim ersten Auswerten. Nicht in
+diesem Schritt behoben; eigener Punkt.
+
+Nebenbefund: Die Ketten in `ContentManager::unloadAsset`, `rekeyAssetPaths` und
+`forgetProjectContent` führen schon vor diesem Schritt nicht alle Pools (Theme, BoneMask,
+BlendSpace, Struct/Enum/SaveGame fehlen teils). `Sequence` steht in allen dreien; die alten
+Lücken sind nicht angefasst.
 
 ---
 
