@@ -643,6 +643,11 @@ target_include_directories(he_tests PRIVATE
 # resolves to dllexport (definitions are local to this exe) rather than dllimport,
 # which would emit unresolved __imp_ references for those same locally-built symbols.
 target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
+# test_scene_serializer.cpp outgrew the 2^16 COFF sections of a Debug MSVC
+# object (fatal error C1128); CI builds Windows in Release only and never saw it.
+if(MSVC)
+    target_compile_options(he_tests PRIVATE /bigobj)
+endif()
 # The documentation bundle the editor ships (EditorDeps is copied next to the
 # executable at build time). Handed to the test as a path rather than found by
 # walking up from the working directory, which differs between ctest, an IDE

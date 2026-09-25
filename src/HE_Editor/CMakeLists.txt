@@ -389,6 +389,12 @@ endif()
 target_compile_definitions(HorizonEditor PRIVATE HE_EDITOR)
 target_compile_definitions(HorizonCore   PRIVATE HE_EDITOR)
 
+# EditorApplication.cpp outgrew the 2^16 COFF sections of a Debug MSVC object
+# (fatal error C1128); CI builds Windows in Release only and never saw it.
+if(MSVC)
+    target_compile_options(HorizonEditor PRIVATE /bigobj)
+endif()
+
 # ── Post-build: deploy HorizonEditor.exe + engine DLLs ────────────────────────
 if(NOT DEPLOY_EDITOR OR DEPLOY_EDITOR STREQUAL "")
 	set(DEPLOY_EDITOR "$<TARGET_FILE_DIR:HorizonEditor>")
