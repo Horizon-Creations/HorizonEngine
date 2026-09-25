@@ -45,6 +45,7 @@ namespace
 			// with no name on it. A typed getter exists; it belongs here.
 			case HE::AssetType::BoneMask:             return take(cm.getBoneMask(id));
 			case HE::AssetType::BlendSpace:           return take(cm.getBlendSpace(id));
+			case HE::AssetType::Sequence:             return take(cm.getSequence(id));
 			default:                                  return cm.assetType(id) == want;
 		}
 	}

@@ -26,6 +26,8 @@ const char* targetName(PropTarget t)
 	case PropTarget::MatMetallic:  return "Metallic";
 	case PropTarget::MatRoughness: return "Roughness";
 	case PropTarget::MatOpacity:   return "Opacity";
+	case PropTarget::CameraFov:    return "Field of View";
+	case PropTarget::Visible:      return "Visible";
 	}
 	// Only reachable through a file whose byte nobody wrote: said out loud
 	// rather than shown as "Position X", which would be a lie the runtime does
@@ -45,6 +47,10 @@ const char* targetGroup(PropTarget t)
 	case PropTarget::MatMetallic: case PropTarget::MatRoughness:
 	case PropTarget::MatOpacity:
 		return "Material";
+	case PropTarget::CameraFov:
+		return "Camera";
+	case PropTarget::Visible:
+		return "Visibility";
 	}
 	return "";
 }
@@ -57,6 +63,13 @@ void formatValue(PropTarget t, float v, char* buf, size_t n)
 		// TransformComponent::rotation is Euler degrees; the readout says so
 		// rather than leaving a reader to guess radians.
 		std::snprintf(buf, n, "%.1f\xC2\xB0", v);
+		break;
+	case PropTarget::CameraFov:
+		std::snprintf(buf, n, "%.1f\xC2\xB0", v);
+		break;
+	case PropTarget::Visible:
+		// A switch reads as one (the runtime's own threshold, applyChannel).
+		std::snprintf(buf, n, "%s", v >= 0.5f ? "on" : "off");
 		break;
 	default:
 		std::snprintf(buf, n, "%.3f", v);
@@ -148,7 +161,10 @@ float defaultValue(PropTarget t)
 	case PropTarget::ScaleX: case PropTarget::ScaleY: case PropTarget::ScaleZ:
 	case PropTarget::MatColorR: case PropTarget::MatColorG: case PropTarget::MatColorB:
 	case PropTarget::MatOpacity:
+	case PropTarget::Visible:
 		return 1.0f;
+	case PropTarget::CameraFov:
+		return 60.0f;   // CameraComponent's own default
 	default:
 		return 0.0f;
 	}

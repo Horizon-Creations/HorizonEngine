@@ -165,7 +165,7 @@ namespace HE::Ed::Sequencer
 	// everything else. Writes into `buf`.
 	void formatValue(PropTarget t, float v, char* buf, size_t n);
 	// One past the last PropTarget — how many properties can be animated.
-	constexpr int kTargetCount = static_cast<int>(PropTarget::MatOpacity) + 1;
+	constexpr int kTargetCount = static_cast<int>(kLastPropTarget) + 1;
 
 	// The geometry the strip is drawn with. Exposed so a test can compute where
 	// a key or a second sits without repeating the constants.

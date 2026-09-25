@@ -37,6 +37,7 @@ add_library(HorizonScene SHARED
     src/AnimationStateMachineSystem.cpp
     src/AnimationPreview.cpp
     src/PropertyAnimationSystem.cpp
+    src/SequenceEval.cpp
     src/NavigationSystem.cpp
     src/ParticleSystem.cpp
     src/SplineGeometry.cpp

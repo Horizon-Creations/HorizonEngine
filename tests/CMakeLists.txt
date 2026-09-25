@@ -127,6 +127,7 @@ add_executable(he_tests
     test_animation_layers.cpp
     test_blend_space.cpp
     test_sequencer_timeline.cpp
+    test_sequence.cpp
     test_animation_ik.cpp
     test_navigation.cpp
     test_particles.cpp
