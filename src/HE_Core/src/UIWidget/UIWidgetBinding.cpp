@@ -49,7 +49,7 @@ HorizonCode::Value uiPropToHcValue(const UIPropValue& v)
 //     cross-type conversion driven by v.type (which for an array names the
 //     ELEMENT type, so converting off it produced garbage: an Int-element array
 //     landing on a Float property used to be read as (float)v.i).
-//   • Otherwise only Float↔Int↔Bool convert.
+//   • Otherwise only Float↔Double↔Int↔Bool convert.
 UIPropValue uiHcValueToProp(const HorizonCode::Value& v, UIPropType want)
 {
     using P = HorizonCode::PinType;
@@ -57,9 +57,12 @@ UIPropValue uiHcValueToProp(const HorizonCode::Value& v, UIPropType want)
     out.type = want;
     switch (want)
     {
-        case UIPropType::Float:  out.f = v.isArray ? v.f : (v.type == P::Int ? (float)v.i : (v.type == P::Bool ? (v.b ? 1.0f : 0.0f) : v.f)); break;
-        case UIPropType::Int:    out.i = v.isArray ? v.i : (v.type == P::Float ? (int)v.f : (v.type == P::Bool ? (v.b ? 1 : 0) : v.i)); break;
-        case UIPropType::Bool:   out.b = v.isArray ? v.b : (v.type == P::Float ? v.f != 0.0f : (v.type == P::Int ? v.i != 0 : v.b)); break;
+        case UIPropType::Float:  out.f = v.isArray ? v.f : (v.type == P::Int ? (float)v.i : (v.type == P::Bool ? (v.b ? 1.0f : 0.0f)
+                                                         : (v.type == P::Double ? (float)v.d : v.f))); break;
+        case UIPropType::Int:    out.i = v.isArray ? v.i : (v.type == P::Float ? (int)v.f : (v.type == P::Bool ? (v.b ? 1 : 0)
+                                                         : (v.type == P::Double ? (int)v.d : v.i))); break;
+        case UIPropType::Bool:   out.b = v.isArray ? v.b : (v.type == P::Float ? v.f != 0.0f : (v.type == P::Int ? v.i != 0
+                                                         : (v.type == P::Double ? v.d != 0.0 : v.b))); break;
         case UIPropType::String: out.s = v.s; break;
         case UIPropType::Color:  out.col = v.col; break;
         case UIPropType::Vec2:   out.v2 = v.v2; break;

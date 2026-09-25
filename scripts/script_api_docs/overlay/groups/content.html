@@ -1,0 +1,18 @@
+          <p>
+            Loading assets ahead of time. Everything a scene uses is loaded with
+            it, so these calls are for what a scene does not name yet: the level
+            behind a door, a mesh a script will spawn. An asset is named by its
+            path inside the project's <code>Content</code> folder, as the Content
+            Browser shows it, for example <code>Meshes/Crate.hasset</code>.
+            <code>load</code> reads the file right away, in the calling frame,
+            so call it before the moment the asset is needed.
+          </p>
+          <p>
+            <code>load</code> on an asset that is already in memory returns
+            <code>true</code> without reading it again. A path that does not exist
+            returns <code>false</code> and logs where it looked.
+            <code>unload</code> returns <code>false</code> the second time.
+            <code>typeName</code> answers only for a loaded asset, with names like
+            <code>StaticMesh</code>, <code>Texture</code> or
+            <code>Material</code>, and an empty string otherwise.
+          </p>

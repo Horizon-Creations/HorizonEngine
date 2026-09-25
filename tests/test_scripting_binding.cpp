@@ -886,6 +886,32 @@ _G._found = found
 _G._json  = horizon.json.getNumber('{"a":42}', 'a', 0)
 )lua";
 
+// horizon.datetime against Lua's own clock. The rows carried epoch seconds on
+// Float pins, and a float steps in 128 s at today's epoch: now() came back up
+// to a minute off and second(t) was the second of a different instant.
+// 1758800007 is such an instant — (float) of it is 1758800000.
+static const char* kLuaDatetimePrecision = R"lua(
+local T = 1758800007
+_G._sec     = horizon.datetime.second(T)
+_G._wantSec = os.date('*t', T).sec
+_G._fmtOk   = (horizon.datetime.format(T, '%S') == string.format('%02d', _G._wantSec)) and 1 or 0
+_G._drift   = math.abs(horizon.datetime.now() - os.time())
+_G._nowType = math.type(horizon.datetime.now()) == 'float' and 1 or 0
+)lua";
+
+TEST_CASE("ScriptContext: horizon.datetime keeps whole seconds in Lua")
+{
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(kLuaDatetimePrecision));
+    // BEFORE THE CHANGE: 20 against 27, and a drift of up to 64.
+    CHECK(engine.getGlobalNumber("_sec") == engine.getGlobalNumber("_wantSec"));
+    CHECK(engine.getGlobalNumber("_fmtOk") == 1.0);
+    CHECK(engine.getGlobalNumber("_drift") <= 2.0);
+    CHECK(engine.getGlobalNumber("_nowType") == 1.0);   // a Lua number, not truncated to int
+}
+
 TEST_CASE("ScriptContext: the application groups reach Lua")
 {
     HorizonWorld world;

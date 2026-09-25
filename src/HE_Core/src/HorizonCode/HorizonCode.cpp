@@ -1289,6 +1289,9 @@ Value variableDefaultValue(const Variable& v)
     switch (v.type)
     {
         case P::Float:  return Value::ofFloat(v.f[0]);
+        // An authored Double default is a float literal like every other number
+        // slot here; the precision is for values that arrive at runtime.
+        case P::Double: return Value::ofDouble(v.f[0]);
         case P::Bool:   return Value::ofBool(v.f[0] != 0.0f);
         case P::Int:    return Value::ofInt((int)v.f[0]);
         case P::String: return Value::ofString(v.s);
@@ -1683,6 +1686,7 @@ nlohmann::json scalarValueToJson(const Value& v, PinType t)
     switch (t)
     {
         case P::Float:  return v.f;
+        case P::Double: return v.d;
         case P::Bool:   return v.b;
         case P::Int:    return v.i;
         case P::String: return v.s;
@@ -1715,6 +1719,7 @@ Value scalarValueFromJson(const nlohmann::json& j, PinType t)
     switch (t)
     {
         case P::Float:  if (j.is_number()) v.f = j.get<float>(); break;
+        case P::Double: if (j.is_number()) v.d = j.get<double>(); break;
         case P::Bool:   if (j.is_boolean()) v.b = j.get<bool>(); break;
         case P::Int:    if (j.is_number()) v.i = j.get<int>(); break;
         case P::String: if (j.is_string()) v.s = j.get<std::string>(); break;
@@ -2770,11 +2775,12 @@ bool canConvertPinType(PinType from, PinType to)
 {
     if (from == to) return true;
     auto numeric = [](PinType t)
-    { return t == P::Float || t == P::Int || t == P::Bool; };
+    { return t == P::Float || t == P::Double || t == P::Int || t == P::Bool; };
     if (numeric(from) && numeric(to)) return true;
     // Enum is int-backed, so it reads as a number and a number can name one.
-    if (from == P::Enum && (to == P::Float || to == P::Int)) return true;
-    if (to == P::Enum && (from == P::Float || from == P::Int)) return true;
+    auto number = [](PinType t) { return t == P::Float || t == P::Double || t == P::Int; };
+    if (from == P::Enum && number(to))   return true;
+    if (to == P::Enum   && number(from)) return true;
     // Vec3/Vec4/Color are three views of the same numbers. They interconvert so
     // that a graph authored while Color WAS the vec3 type keeps its wires — links
     // are restored from JSON without re-checking pin types, so the conversion is
@@ -2829,7 +2835,7 @@ bool conversionNodeFor(PinType from, ContainerKind fromKind,
         if (from == P::Enum) { out = T::EnumToString; return true; }
         // To String's input is Float; Int and Bool reach it through the very
         // coercion Graph::connect performs, so both halves provably connect.
-        if (from == P::Float || from == P::Int || from == P::Bool)
+        if (from == P::Float || from == P::Double || from == P::Int || from == P::Bool)
         { out = T::ToString; return true; }
     }
     return false;
@@ -3088,6 +3094,7 @@ bool scalarValueEquals(const Value& a, const Value& b, PinType t)
     switch (t)
     {
         case P::Float:  return a.f == b.f;
+        case P::Double: return a.d == b.d;
         case P::Bool:   return a.b == b.b;
         case P::Int:    return a.i == b.i;
         case P::String: return a.s == b.s;
@@ -3112,7 +3119,7 @@ namespace
 //     diverges from what the editor previewed.
 //   • UIWidgetBinding.cpp `uiHcValueToProp` — the widget-property bridge, which
 //     coerces into UIPropValue instead of Value but follows the same rule.
-// Only Float↔Int↔Bool convert (an Enum counts as its Int); any other mismatch
+// Only Float↔Double↔Int↔Bool convert (an Enum counts as its Int); any other mismatch
 // yields the target's zero. Coercing INTO Enum/Struct never invents a typeName —
 // wiring already type-checked the definition, so a same-type value passes
 // through above and a mismatch degrades to a typed empty value.
@@ -3125,14 +3132,22 @@ Value coerce(Value v, PinType want)
     {
         case P::Float:  r.f = v.type == P::Bool ? (v.b ? 1.0f : 0.0f)
                             : v.type == P::Int ? (float)v.i
+                            : v.type == P::Double ? (float)v.d
                             : v.type == P::Enum ? (float)v.i : 0.0f; break;
+        case P::Double: r.d = v.type == P::Bool ? (v.b ? 1.0 : 0.0)
+                            : v.type == P::Int ? (double)v.i
+                            : v.type == P::Float ? (double)v.f
+                            : v.type == P::Enum ? (double)v.i : 0.0; break;
         case P::Int:    r.i = v.type == P::Float ? (int)v.f
+                            : v.type == P::Double ? (int)v.d
                             : v.type == P::Bool ? (v.b ? 1 : 0)
                             : v.type == P::Enum ? v.i : 0; break;
         case P::Bool:   r.b = v.type == P::Float ? v.f != 0.0f
+                            : v.type == P::Double ? v.d != 0.0
                             : v.type == P::Int ? v.i != 0 : false; break;
         case P::Enum:   r.i = v.type == P::Int ? v.i
-                            : v.type == P::Float ? (int)v.f : 0; break;
+                            : v.type == P::Float ? (int)v.f
+                            : v.type == P::Double ? (int)v.d : 0; break;
         // Vector ↔ colour. Widening pads, narrowing drops — and the pad differs
         // by TARGET, not by source: a vector's fourth component is 0 (a direction
         // has no w), a colour's is 1 (opaque). Anything that is not one of the

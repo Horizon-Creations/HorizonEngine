@@ -1,0 +1,36 @@
+          <p>
+            The operating system's own message boxes and file pickers. Every one
+            of them <strong>blocks</strong>: the frame stops until the person
+            answers, so a game keeps them for what really has to be read or chosen
+            first. No permission is needed.
+          </p>
+          <ul>
+            <li>
+              <strong>Choosing is the permission</strong> for the
+              <a href="#fs"><code>fs</code></a> rows: a path returned by
+              <code>openFile</code> or <code>saveFile</code>, and everything inside
+              a folder from <code>pickFolder</code>, may be read and written with an
+              absolute path from then on, even when the project does not allow
+              files outside the project. It does <em>not</em> open
+              <code>db.open</code> or <code>print.toPdf</code>, see
+              <a href="#db">Database</a>.
+            </li>
+            <li>
+              <strong>An empty path means cancelled</strong>, and it is also the
+              answer when the picker fails. A picker left open for five minutes is
+              given up on and answers empty as well.
+            </li>
+            <li>
+              <code>message</code> kind 1 is a warning, 2 an error, anything else
+              information. <code>confirm</code> returns <code>true</code> for the
+              first button; empty labels become <code>"OK"</code> and
+              <code>"Cancel"</code>, Return takes the first button and Escape the
+              second.
+            </li>
+            <li>
+              <strong>Hidden runs</strong> (<code>HE_HIDDEN_WINDOW</code>, headless
+              exports and tests) show no box: <code>message</code> writes its text
+              to the log and <code>confirm</code> answers <code>false</code>. The
+              three pickers do not check for a hidden run, so keep them out of one.
+            </li>
+          </ul>
