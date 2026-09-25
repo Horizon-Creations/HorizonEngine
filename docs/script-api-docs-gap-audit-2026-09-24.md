@@ -40,7 +40,8 @@ Registry-Ids nach Stufe: **ref 13, named 39, catalog 96, missing 434.** Eine ehr
 Roadmap-Eintrag wäre „Ids mit Signatur + Beschreibung / (582 + 35)". Sie liegt heute bei
 **26 / 617 ≈ 4 %** (13 flache Funktionen, die 13 Registry-Ids über ihre Zwillinge mitgezählt). Die 35 %
 auf der Website messen etwas anderes, die Seiten *um* die API herum (Lifecycle, Properties, Beispiele).
-Die Roadmap wurde in diesem Schritt nicht angefasst.
+Die Roadmap wurde in diesem Schritt nicht angefasst. Stand nach Schritt 9 (25.09.): **617 / 617**, siehe
+„Nachtrag Schritt 9" am Ende.
 
 ### Je Gruppe
 
@@ -723,3 +724,66 @@ Frame des Events (später: „no such pending report"), 9 = log+flag, 17 = log+k
 Label, `setPlayerLabel` ersetzt ihn im Log. LAN nicht messbar: macOS verweigert dem
 Probe-Prozess Multicast/Broadcast („the system refused to send an announcement"), die Liste
 blieb leer. `expectDisplacement` und `localCharacter` mit Charakter nicht gemessen.
+
+## Nachtrag Schritt 9 (25.09.2026): Kennzahl neu gemessen, Roadmap-Vorschlag
+
+**Ergebnis: 617 / 617 = 100 %** nach der Kennzahl oben („Ids mit Signatur + Beschreibung /
+(582 + 35)"), dazu 25 / 25 Callbacks je Sprache. Vorher (Schritt 1) 26 / 617 ≈ 4 %.
+
+Stand der Messung: Zweig auf 735e5798, Website-Checkout auf c98073c.
+`gen_reference.py --check` meldet „up to date", die Seite entspricht also `registry.json` +
+`overlay/`. `git diff 7d49d44f origin/main` über `EngineApi.cpp`, `EngineApi.h` und
+`HcNodeDocs.cpp` ist leer: main hat seit der Basis keine Registry-Zeile dazubekommen, 582 ist
+noch die ganze Registry.
+
+`coverage.py` zählt als **ref** nur, ob der Anker da ist (582/582, hand 582/582). Das sagt
+nichts darüber, ob die Zeile eine Signatur und eine Beschreibung hat. Deshalb eine zweite,
+strengere Prüfung mit einem Wegwerf-Skript über `scripting-reference.html`: je Registry-Id die
+Zeile `<tr id="<slug>">` mit genau drei Zellen, Funktionsname mit `(` und jeder Parametername in
+der Signatur, bei Rows mit Ergebnis eine nicht leere Rückgabezelle, eine Beschreibung mit
+mindestens 15 Zeichen. Leere `doc`-Felder in `registry.json`: keine. Doppelte Zeilen-Ids:
+keine. Aufschlüsselung:
+
+| Teil | Anzahl | wie dokumentiert |
+|---|---:|---|
+| Registry-Zeilen mit Signatur, Rückgabe, Beschreibung | 459 | eigene Tabellenzeile |
+| Registry-Zeilen mit Hand-Signatur (`script_sig`) | 7 | `debug.line`/`sphere`/`box`, `net.callServer`/`callClient`/`callAllClients`, `scene.loadAdditive`: Lua/Python bekommen vec3/Farbe als Einzelzahlen bzw. variable Argumente, die Signatur zeigt das so (gemessen in den Schritten 3, 4, 8). Die Prüfung meldet dort „Parameter fehlt", weil `from`/`to` als `x1, y1, z1, _` steht |
+| `env.*` in der Feldtabelle | 116 | 58 Zeilen mit je zwei Ankern (`<code id="env-get…">`/`env-set…`), Typ- und Beschreibungsspalte; das Get/Set-Muster samt Signatur steht über der Tabelle |
+| flache `horizon.*` | 35 | Zeilen `flat-<name>` mit Signatur, Rückgabe, Beschreibung |
+| **zusammen** | **617** | |
+
+Der eine Treffer „Beschreibung weicht ab" (`save.load`) ist ein Fehler der Prüfung: sie hat
+`<id>` im `doc`-Text als HTML-Tag entfernt, die Zeile enthält den Text wortgleich.
+
+Was die Zahl **nicht** misst: ob jede Beschreibung stimmt. Die Schritte 3–8 und 11 haben jede
+Gruppe mit einer Probe gegen den Build geprüft und falsche Beschreibungen an der Quelle
+(`HcNodeDocs.cpp`) korrigiert, aber nicht jede der 582 Rows einzeln ausgeführt. Die dabei
+gefundenen Engine-Fehler (Array-Pins aus Lua/Python, datetime float32 (Thema 89),
+`entity.spawn` ohne Transform, `scrollDelta` 0, Anti-Cheat nie verbunden, …) sind auf der Seite als
+Known issue bzw. Note beschrieben und nicht behoben. Sie sind Engine-Lücken, keine Doku-Lücken.
+
+**Roadmap.** Der Eintrag „Script API Documentation" steht lokal und live auf `in-progress`, 35 %,
+mit „Still missing: a complete horizon.* scripting API reference covering every engine call".
+Beides stimmt nach dieser Messung nicht mehr. Vorschlag: `done` (die Website lässt `progress` bei
+`done` weg) mit dieser Beschreibung:
+
+> Public docs site covers engine overview, getting started and advanced guides, verified against
+> the code, plus a complete Engine API Reference (scripting-reference.html): every horizon.* call,
+> generated from the engine's HE::api registry (582 functions in 42 groups, the 35 flat horizon.*
+> shortcuts and all 25 Lua/Python callbacks) with signature, return values and description, and
+> for each call its Lua/Python, HorizonCode and C++ name. Hand-written group intros, notes on
+> special cases and Lua/Python examples were checked against a real engine build.
+
+Den Schreibzugriff (`roadmap_upsert`, sogar `site_check`) hat die Rechteprüfung dieser
+Sitzung als Produktions-Deploy abgelehnt. `roadmap.json` ist deshalb **nicht** geändert, und
+die Entscheidung liegt beim Menschen (Hive-Frage).
+
+**Live-Stand** (curl am 25.09.): `https://horizoncreations.dev/HorizonEngineDocs/scripting-reference.html`
+→ 404, `roadmap.json` live 35 %. Von den Schritten 2–11 ist also noch nichts deployt. Der
+Website-Checkout liegt 11 Commits vor `origin/main` (nicht auseinandergelaufen, nicht gepusht).
+Die zwei nicht committeten Dateien `HorizonEngine/downloads.json` und `preview-downloads.json`
+sind Download-Zähler vom Server (lokal 163/149/106, live 172/160/117), die ein früherer
+Zwei-Wege-Sync geholt hat. deploy.py lädt nur hoch, wenn die lokale mtime neuer ist
+(`deploy.py:173`), die Zähler setzt ein Deploy also nicht zurück. Empfehlung für den Deploy:
+`--no-pull` (upload_only), weil der Zwei-Wege-Sync in Schritt 10 im Verdacht stand, den
+Checkout zurückgesetzt zu haben.
