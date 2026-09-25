@@ -65,7 +65,9 @@ namespace HE::Ed::ViewportOverlays
 	constexpr int kSpotSideLines       = 8;    // apex to ring
 	constexpr int kSpotArcSegments     = 12;   // per arc over the cap, two arcs
 
-	constexpr glm::vec3 kCameraFrustumColor     { 0.75f, 0.85f, 1.0f };
+	// A mid blue: a paler one vanished against a sunlit floor in the
+	// HE_DUMP_LIGHTGIZMOTEST picture, and it must not read as collider cyan.
+	constexpr glm::vec3 kCameraFrustumColor     { 0.25f, 0.5f, 1.0f };
 	constexpr glm::vec3 kPrimarySelectionColor  { 1.0f, 0.8f, 0.0f };
 	constexpr glm::vec3 kSecondarySelectionColor{ 0.8f, 0.6f, 0.05f };
 	constexpr glm::vec3 kColliderColor          { 0.0f, 1.0f, 1.0f };
