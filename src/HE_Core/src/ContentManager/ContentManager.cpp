@@ -1473,21 +1473,11 @@ std::vector<uint8_t> ContentManager::readMountedEntry(HE::UUID id)
 }
 
 // ─── saveAsset ────────────────────────────────────────────────────────────────
-bool ContentManager::saveAsset(RuntimeAsset& asset)
+// The chunk encoding of every savable type, shared by saveAsset (the asset's own
+// file) and writeAssetTo (a copy somewhere else). False for a type with no
+// encoding here — nothing has been written at that point.
+static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 {
-	// First save of a fresh asset — mint its permanent identity now so the
-	// META chunk never hits disk without one.
-	if (asset.id == HE::UUID{})
-		asset.id = HE::UUID::generate();
-
-	const std::string fullPath = resolveSavePath(asset.path);
-	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
-	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
-		HE_LOG_INFO(Asset, "%s",
-			("ContentManager: '" + asset.path + "' is an engine default — saved a project-local copy to " + fullPath).c_str());
-
-	HAsset::Writer w;
-
 	// META chunk — common to all
 	{ auto m = buildMetaChunk(asset); w.addChunk(HAsset::CHUNK_META, m.data(), m.size()); }
 
@@ -1805,6 +1795,20 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	default:
 		return false;
 	}
+	return true;
+}
+
+// Encode + write, without the notification and without the log line: the part
+// saveAsset and writeAssetTo have in common.
+static bool writeAssetFile(RuntimeAsset& asset, const std::string& fullPath)
+{
+	// First write of a fresh asset — mint its permanent identity now so the
+	// META chunk never hits disk without one.
+	if (asset.id == HE::UUID{})
+		asset.id = HE::UUID::generate();
+
+	HAsset::Writer w;
+	if (!encodeAssetChunks(asset, w)) return false;
 
 	// The override location (Content/Engine/<rest>) may not exist yet on the
 	// first save of a given engine default — unlike ordinary project saves,
@@ -1813,8 +1817,31 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 		std::error_code ec;
 		std::filesystem::create_directories(std::filesystem::path(fullPath).parent_path(), ec);
 	}
+	return w.write(fullPath, static_cast<uint16_t>(asset.type));
+}
 
-	if (!w.write(fullPath, typeId))
+bool ContentManager::writeAssetTo(RuntimeAsset& asset, const std::string& fullPath) const
+{
+	if (fullPath.empty()) return false;
+	if (!writeAssetFile(asset, fullPath))
+	{
+		HE_LOG_WARN(Asset, "Could not write a copy of asset '%s' to '%s'",
+		            asset.path.c_str(), fullPath.c_str());
+		return false;
+	}
+	HE_LOG_DEBUG(Asset, "Wrote a copy of asset '%s' to '%s'", asset.path.c_str(), fullPath.c_str());
+	return true;
+}
+
+bool ContentManager::saveAsset(RuntimeAsset& asset)
+{
+	const std::string fullPath = resolveSavePath(asset.path);
+	const uint16_t    typeId   = static_cast<uint16_t>(asset.type);
+	if (!m_engineContentRoot.empty() && asset.path.rfind(kEnginePrefix, 0) == 0 && !isEngineContentDevMode())
+		HE_LOG_INFO(Asset, "%s",
+			("ContentManager: '" + asset.path + "' is an engine default — saved a project-local copy to " + fullPath).c_str());
+
+	if (!writeAssetFile(asset, fullPath))
 	{
 		// Losing a save silently is the worst possible failure mode in an editor.
 		HE_LOG_ERROR(Asset, "Failed to write asset '%s' to '%s' — the change was NOT saved",
