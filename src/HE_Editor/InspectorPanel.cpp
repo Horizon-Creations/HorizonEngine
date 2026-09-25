@@ -114,15 +114,19 @@ bool inputMayEditThisFrame()
 //   - A terrain, in or out of a session: its state is a quarter of a million
 //     floats per capture, and a marquee around props near the origin picks
 //     it up by its pivot. Nothing of a terrain's is right to copy anyway.
+//     `skipTerrain` false leaves that rule out, for an edit that is not a
+//     value copy (Add Component gives a terrain a fresh default component
+//     like any other entity).
 std::vector<Entity> membersToSkip(AppContext& ctx, const entt::registry& registry,
-                                  const std::vector<Entity>& members, Entity primary)
+                                  const std::vector<Entity>& members, Entity primary,
+                                  bool skipTerrain = true)
 {
 	std::vector<Entity> skip;
 	const bool inSession = ctx.collab && ctx.collab->inSession();
 	for (Entity e : members)
 	{
 		if (e == primary || !registry.valid(e)) continue;
-		if (registry.all_of<TerrainComponent>(e)) { skip.push_back(e); continue; }
+		if (skipTerrain && registry.all_of<TerrainComponent>(e)) { skip.push_back(e); continue; }
 		if (!inSession) continue;
 		const auto subject = ctx.collab->subjectFor(
 			static_cast<std::uint32_t>(entt::to_integral(e)));
@@ -238,6 +242,35 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 		for (const std::string& label : partial)
 			ImGui::TextDisabled("%s", label.c_str());
 		ImGui::Unindent();
+	}
+
+	// ── Add Component, for all of them ───────────────────────────────────────
+	// The single-entity button lives in renderFor, which draws it only for a
+	// whole entity, never for one section — so a multi-selection had Remove on
+	// every shared header and no way to add. The same menu over the whole
+	// selection: it offers what any member lacks (the partial list above
+	// included) and gives it to every member without it, under one snapshot.
+	// In a session only what we hold takes it, like every other edit here.
+	std::vector<Entity> targets;
+	{
+		const std::vector<Entity> skip =
+			membersToSkip(ctx, registry, members, primary, /*skipTerrain=*/false);
+		for (Entity e : members)
+			if (std::find(skip.begin(), skip.end(), e) == skip.end()) targets.push_back(e);
+	}
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	const float buttonW = 180.0f;
+	ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - buttonW) * 0.5f
+	                     + ImGui::GetCursorPosX());
+	if (ImGui::Button("Add Component", ImVec2(buttonW, 0)))
+		ImGui::OpenPopup("##add_component_multi");
+	EditorWidgets::helpForKey("details.multi.add-component");
+	if (ImGui::BeginPopup("##add_component_multi"))
+	{
+		InspectorPanel::addComponentMenu(world, targets, ctx.undoSys);
+		ImGui::EndPopup();
 	}
 }
 #endif
@@ -3500,10 +3533,41 @@ bool labelMatches(const char* label, const std::string& needle)
 
 bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 {
+	return addComponentMenu(world, std::vector<Entity>{ entity }, undo);
+}
+
+bool addComponentMenu(HorizonWorld& world, const std::vector<Entity>& entities, EditorUndo* undo)
+{
 #ifdef HE_IMGUI_ENABLED
-	if (world.isBuiltin(entity)) return false;
 	auto& registry = world.registry();
+	// The entities the menu acts on: the caller's, minus what cannot take a
+	// component (the built-ins) or no longer exists.
+	std::vector<Entity> targets;
+	targets.reserve(entities.size());
+	for (const Entity e : entities)
+		if (registry.valid(e) && !world.isBuiltin(e)) targets.push_back(e);
+	if (targets.empty()) return false;
 	bool added = false;
+
+	// Per row, over every target: a row is offered while at least one target
+	// lacks it, and adding it gives it to each target that does — so with
+	// several entities selected, a component only some of them carry is here
+	// too, and one click completes the set. The skeleton rows are enabled only
+	// when every target that would receive one has a skeleton; adding to half
+	// of them without a word is worse than a greyed row whose tooltip says why.
+	auto anyLacks = [&](const AddRow& row)
+	{
+		for (const Entity e : targets)
+			if (!row.has(registry, e)) return true;
+		return false;
+	};
+	auto rowEnabled = [&](const AddRow& row)
+	{
+		if (!row.needsSkeleton) return true;
+		for (const Entity e : targets)
+			if (!row.has(registry, e) && !registry.all_of<SkeletalMeshComponent>(e)) return false;
+		return true;
+	};
 	// The group headings below are looked up under this scope ("Add
 	// Component/Rendering"), not under whichever component section happened to
 	// be drawn last — this menu belongs to the entity, not to a component.
@@ -3543,8 +3607,11 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			if (ImGui::MenuItem(item))
 			{
 				if (undo) undo->snapshotNow();
+				// Onto every target, under the one snapshot above — one undo
+				// takes the paste off all of them.
 				if (const char* text = ImGui::GetClipboardText())
-					added = SceneSerializer{}.importComponentText(world, entity, text);
+					for (const Entity e : targets)
+						if (SceneSerializer{}.importComponentText(world, e, text)) added = true;
 				ImGui::CloseCurrentPopup();
 			}
 			EditorWidgets::helpForKey("details.paste-component");
@@ -3552,15 +3619,14 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 		}
 	}
 
-	const bool hasSkeleton = registry.all_of<SkeletalMeshComponent>(entity);
-	// One row. A component the entity already has is not offered — the scene
-	// format allows one of each. Returns whether it was added.
+	// One row. A component every target already has is not offered — the
+	// scene format allows one of each. Returns whether it was added.
 	// `aside` is drawn dimmed at the row's right edge, where a menu would put
 	// the shortcut — the search view puts the group there.
 	auto drawRow = [&](const AddRow& row, const char* aside, bool pressedByKeyboard) -> bool
 	{
-		if (row.has(registry, entity)) return false;
-		const bool enabled = !row.needsSkeleton || hasSkeleton;
+		if (!anyLacks(row)) return false;
+		const bool enabled = rowEnabled(row);
 		const bool pressed = ImGui::MenuItem(row.label, aside, false, enabled) || (pressedByKeyboard && enabled);
 		// The component's own entry, on its row — what it IS, before it is added.
 		{
@@ -3569,8 +3635,11 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			EditorWidgets::helpForKey(key);
 		}
 		if (!pressed) return false;
+		// One snapshot for the whole batch, so one undo takes the component
+		// off every entity it was just given to.
 		if (undo) undo->snapshotNow();
-		row.add(registry, entity);
+		for (const Entity e : targets)
+			if (!row.has(registry, e)) row.add(registry, e);
 		ImGui::CloseCurrentPopup();
 		return true;
 	};
@@ -3584,14 +3653,14 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			// offer and is left out, like its rows would be. The skeleton group
 			// is the exception: greyed rather than gone, so the reader learns
 			// what it needs instead of wondering where animation went.
-			bool anyLeft = false, allNeedSkeleton = true;
+			bool anyLeft = false, enabled = false;
 			for (int i = 0; i < g.count; ++i)
 			{
-				if (!g.rows[i].has(registry, entity)) anyLeft = true;
-				if (!g.rows[i].needsSkeleton) allNeedSkeleton = false;
+				if (!anyLacks(g.rows[i])) continue;
+				anyLeft = true;
+				if (rowEnabled(g.rows[i])) enabled = true;
 			}
 			if (!anyLeft) continue;
-			const bool enabled = !allNeedSkeleton || hasSkeleton;
 			if (ImGui::BeginMenu(g.label, enabled))
 			{
 				for (int i = 0; i < g.count; ++i)
@@ -3611,7 +3680,7 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			for (int i = 0; i < g.count; ++i)
 			{
 				const AddRow& row = g.rows[i];
-				if (row.has(registry, entity) || !labelMatches(row.label, s_filter)) continue;
+				if (!anyLacks(row) || !labelMatches(row.label, s_filter)) continue;
 				++hits;
 				// The group beside the hit: "Mesh" and "Nav Mesh" are told
 				// apart by where they live as much as by their names.
@@ -3624,7 +3693,7 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 	return added;
 
 #else
-	(void)world; (void)entity; (void)undo;
+	(void)world; (void)entities; (void)undo;
 	return false;
 #endif // HE_IMGUI_ENABLED
 }
