@@ -203,6 +203,7 @@ const char* pinTypeName(PT t)
 	switch (t)
 	{
 		case PT::Float:  return "Float";
+		case PT::Double: return "Double";
 		case PT::Bool:   return "Bool";
 		case PT::Int:    return "Int";
 		case PT::String: return "String";

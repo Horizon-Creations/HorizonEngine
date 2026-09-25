@@ -407,6 +407,7 @@ PyObject* pyFieldValueToObj(const HorizonCode::Value& v, int depth)
 	switch (v.type)
 	{
 	case P::Bool:   return PyBool_FromLong(v.b);
+	case P::Double: return PyFloat_FromDouble(v.d);
 	case P::Int:
 	case P::Enum:   return PyLong_FromLong(v.i);
 	case P::String: return PyUnicode_FromString(v.s.c_str());
@@ -546,6 +547,12 @@ HorizonCode::Value pyObjToFieldValue(PyObject* o, const HE::StructField& f, int 
 	switch (f.type)
 	{
 	case P::Bool:   return V::ofBool(o && PyObject_IsTrue(o));
+	case P::Double:
+	{
+		const double d2 = o && PyNumber_Check(o) ? PyFloat_AsDouble(o) : 0.0;
+		PyErr_Clear();
+		return V::ofDouble(d2);
+	}
 	case P::Int:    { const int i2 = o ? (int)PyLong_AsLong(o) : 0; PyErr_Clear(); return V::ofInt(i2); }
 	case P::Enum:
 	{
@@ -655,6 +662,8 @@ HorizonCode::Value pyReadValue(PyObject* args, Py_ssize_t& idx, HorizonCode::Pin
 	switch (t)
 	{
 	case P::Bool:   { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofBool(o && PyObject_IsTrue(o)); }
+	// time.time() and friends are Python floats, i.e. doubles — keep them whole.
+	case P::Double: { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofDouble(o ? PyFloat_AsDouble(o) : 0.0); }
 	case P::Int:    { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofInt(o ? (int)PyLong_AsLong(o) : 0); }
 	case P::Enum:   { PyObject* o = PyTuple_GetItem(args, idx++); return V::ofInt(o ? (int)PyLong_AsLong(o) : 0); }
 	case P::String: { PyObject* o = PyTuple_GetItem(args, idx++); const char* s = o ? PyUnicode_AsUTF8(o) : nullptr; return V::ofString(s ? s : ""); }
@@ -679,6 +688,7 @@ void pyAppendValue(PyObject* out, const HorizonCode::Value& v, HorizonCode::PinT
 	switch (t)
 	{
 	case P::Bool:   add(PyBool_FromLong(v.b)); break;
+	case P::Double: add(PyFloat_FromDouble(v.d)); break;
 	case P::Int:    add(PyLong_FromLong(v.i)); break;
 	case P::String: add(PyUnicode_FromString(v.s.c_str())); break;
 	case P::Vec2:   add(PyFloat_FromDouble(v.v2.x)); add(PyFloat_FromDouble(v.v2.y)); break;
@@ -982,6 +992,7 @@ void bootstrapUserTypes()
 		case P::Bool:   return v.b ? "True" : "False";
 		case P::Int:
 		case P::Enum:   return std::to_string(v.i);
+		case P::Double: { char b[32]; std::snprintf(b, sizeof b, "%.17g", v.d); return std::string(b); }
 		case P::String: return pyStr(v.s);
 		case P::Vec2:   return "[" + std::to_string(v.v2.x) + "," + std::to_string(v.v2.y) + "]";
 		case P::Color:  return "[" + std::to_string(v.col.x) + "," + std::to_string(v.col.y) + ","
