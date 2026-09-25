@@ -8946,6 +8946,43 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         cl->ResourceBarrier(1, &b);
     };
 
+    // Re-bind the scene's colour + depth target and viewport after a pass that
+    // re-pointed the output merger (shadow layers, GI, SSAO). D3D11 saves and
+    // restores what was bound (OMGetRenderTargets); a D3D12 command list cannot
+    // be asked, so the target is rebuilt from what the caller bound before
+    // DrawScene: hdrRT on the HDR path, else the viewport RT when Render() took
+    // the viewport branch (its own `useViewport` test), else the backbuffer.
+    // The shadow pass used to restore the BACKBUFFER on every path —
+    // with neither GI nor SSAO re-binding afterwards (both off), the editor's
+    // viewport frame then drew its geometry with the HDR PSOs into the RGBA8
+    // swapchain image (debug layer: RT format mismatch, draws dropped) and the
+    // viewport showed the sky only.
+    auto rebindSceneTarget = [&]()
+    {
+        if (p.usingHDR && p.hdrRtvHeap)
+        {
+            auto hrtv = p.hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+            cl->OMSetRenderTargets(1, &hrtv, FALSE, &vdsv);
+        }
+        else if (p.viewportRtvHeap && p.viewportRT && p.viewportW > 0 && p.viewportH > 0)
+        {
+            auto vrtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+            cl->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
+        }
+        else
+        {
+            auto rtv  = p.rtvHandle(p.frameIndex);
+            auto dsv0 = p.dsvHandle(0);
+            cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv0);
+        }
+        D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0.0f, 1.0f };
+        D3D12_RECT     sc{ 0, 0, width, height };
+        cl->RSSetViewports(1, &vp);
+        cl->RSSetScissorRects(1, &sc);
+    };
+
     // One ring slot per draw across BOTH passes (the CPU writes are recorded
     // now; the GPU reads them at execute time, so shadow and geometry draws
     // must use distinct slots).
@@ -9061,14 +9098,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 transition(p.localShadowDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
                            D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
-            // Restore the backbuffer RTV + scene DSV + viewport.
-            auto rtv  = p.rtvHandle(p.frameIndex);
-            auto dsv0 = p.dsvHandle(0);
-            cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv0);
-            D3D12_VIEWPORT vp{ 0, 0, (float)width, (float)height, 0.0f, 1.0f };
-            D3D12_RECT     sc{ 0, 0, width, height };
-            cl->RSSetViewports(1, &vp);
-            cl->RSSetScissorRects(1, &sc);
+            // Restore the scene RTV + DSV + viewport (NOT always the backbuffer).
+            rebindSceneTarget();
             return;
         }
 
@@ -9116,29 +9147,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             giShadingActive = maskOk && p.giIrrTex && p.giVisTex && p.giProbeGridBuilt;
 
             // Restore the scene RTV + depth + viewport after the GI passes
-            // changed them (same target resolution logic as the SSAO restore).
-            if (p.usingHDR && p.hdrRtvHeap)
-            {
-                auto hrtv = p.hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
-                auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
-                cl->OMSetRenderTargets(1, &hrtv, FALSE, &vdsv);
-            }
-            else if (p.viewportRtvHeap)
-            {
-                auto vrtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
-                auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
-                cl->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
-            }
-            else
-            {
-                auto rtv  = p.rtvHandle(p.frameIndex);
-                auto dsv0 = p.dsvHandle(0);
-                cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv0);
-            }
-            D3D12_VIEWPORT gvp{ 0, 0, (float)width, (float)height, 0.0f, 1.0f };
-            D3D12_RECT     gsc{ 0, 0, width, height };
-            cl->RSSetViewports(1, &gvp);
-            cl->RSSetScissorRects(1, &gsc);
+            // changed them.
+            rebindSceneTarget();
         }
 
         // ── Forward screen-space reflections (plan checkpoint D) ─────────────
@@ -9176,43 +9186,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 if (ssrResult && p.ssrIntensity > 0.0f) ssrFwdSlot = p.ssrResultSlot(ssrResult);
                 else                                    ssrResult  = nullptr;
             }
-            // Restore the scene RTV + depth after SSAO changed them.
-            // (The RTV that was active before depends on HDR vs LDR path;
-            //  Render() will have already called OMSetRenderTargets to the correct one.
-            //  Re-bind it here so subsequent sky/geometry writes go to the right target.)
-            // We store the active RTV handle in a local so we can restore it.
-            // SSAO doesn't know the active RTV, so we rebuild from known state:
-            // In the HDR path: hdrRT RTV; in LDR path: viewportRT or swapchain RTV.
-            // The simplest correct approach is to re-issue OMSetRenderTargets using the
-            // same targets that Render() bound before calling DrawScene().
-            // Since we don't have that handle here, we leave it to the sky/geometry
-            // stage below, which will use the already-bound RTV (sky doesn't re-set it).
-            // DrawScene is called with the correct RTV already set by Render().
-            // The SSAO pass changes RTV but leaves the command list in a drawable state.
-            // We must rebind here.
-            // Determine which RTV is active: hdrRT if usingHDR, else viewportRT if present.
-            if (p.usingHDR && p.hdrRtvHeap)
-            {
-                auto hrtv = p.hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
-                auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
-                cl->OMSetRenderTargets(1, &hrtv, FALSE, &vdsv);
-            }
-            else if (p.viewportRtvHeap)
-            {
-                auto vrtv = p.viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
-                auto vdsv = p.viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
-                cl->OMSetRenderTargets(1, &vrtv, FALSE, &vdsv);
-            }
-            else
-            {
-                auto rtv  = p.rtvHandle(p.frameIndex);
-                auto dsv0 = p.dsvHandle(0);
-                cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv0);
-            }
-            D3D12_VIEWPORT vvp{ 0, 0, (float)width, (float)height, 0.0f, 1.0f };
-            D3D12_RECT     vsc{ 0, 0, width, height };
-            cl->RSSetViewports(1, &vvp);
-            cl->RSSetScissorRects(1, &vsc);
+            // Restore the scene RTV + depth + viewport after SSAO changed them.
+            rebindSceneTarget();
         }
 
         // Restore scene root signature + per-frame CBV after GI/SSAO changed them.
