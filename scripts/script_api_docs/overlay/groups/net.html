@@ -19,7 +19,9 @@
               reads it back, so a game that tells joiners its port hosts on a fixed
               one. Hosting again while a session runs ends it first
               (<code>onSessionEnded</code>, then <code>onSessionStarted</code>, a new
-              session id and join code; everybody who had joined is out).
+              session id and join code). It goes through <code>leave()</code>, so
+              players who had joined are dropped; that part is read from the code,
+              the re-host was measured with nobody connected.
             </li>
             <li>
               <strong>Joining.</strong> <code>joinDirect(address, port, code,
