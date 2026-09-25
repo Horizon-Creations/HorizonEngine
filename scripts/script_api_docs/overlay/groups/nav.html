@@ -1,0 +1,36 @@
+          <p>
+            Sends an entity with a <strong>Nav Agent</strong> component across
+            the scene's baked NavMesh. The agent walks by itself once
+            <code>moveTo</code> has started it; if it has a Character Controller
+            it is steered through it, so it collides and falls like the player.
+            Every call on an entity without a Nav Agent does nothing, returns
+            <code>false</code> / -1 and logs <em>has no NavAgentComponent</em>.
+          </p>
+          <ul>
+            <li>
+              Destinations are <strong>world</strong> positions, also for a
+              parented agent, and they have to lie on the walkable surface: a
+              point beside the mesh <em>or a few metres above it</em> is refused.
+              For a target that moves, call <code>moveTo</code> again; each call
+              plans a new route from where the agent stands.
+            </li>
+            <li>
+              <code>moveTo</code> plans the route inside the call, so its
+              <code>false</code> is final: no NavMesh, destination off it, or no
+              connection. A refused call also stops an agent that was already
+              walking, and the log line says which of the reasons it was.
+            </li>
+            <li>
+              After arrival <code>isMoving</code> and <code>hasPath</code> are
+              <code>false</code> and <code>remainingDistance</code> is -1, the
+              same as after <code>stop</code> or a refusal. It never reads 0, so
+              test "arrived" with <code>isMoving</code>. The agent stops within
+              the Nav Agent's Stopping Distance of the target.
+            </li>
+            <li>
+              <code>setSpeed</code> is the agent's own speed (default 3.5 m/s),
+              not the Movement component's Max Speed. A negative value becomes 0,
+              and an agent at speed 0 stands still while <code>isMoving</code>
+              stays <code>true</code>.
+            </li>
+          </ul>

@@ -1,0 +1,29 @@
+          <p>
+            Paper and PDF. <code>toPdf</code> writes a plain page of text itself;
+            <code>file</code> hands an existing file to the system's print queue.
+          </p>
+          <ul>
+            <li>
+              <strong>The PDF layout is fixed:</strong> A4, Courier 10 pt, 80
+              characters by 60 lines per page. Lines break at your newlines and at
+              the last space that fits, pages when they are full.
+              <code>title</code> becomes the document title in its properties.
+              Characters of Latin-1 come through (<code>Ä</code>, <code>é</code>);
+              every other one, the euro sign included, prints as <code>?</code>.
+              Missing folders on the way to the path are created.
+            </li>
+            <li>
+              <strong><code>toPdf</code> always needs the permission <em>Files
+              outside the project</em></strong>, even for a relative path, which
+              lands in the project's Saved folder like the <a href="#fs">fs</a>
+              rows. A path the user picked in a file dialog does not stand in for
+              it (build 7d49d44f).
+            </li>
+            <li>
+              <code>file</code> and <code>available</code> use the system's
+              <code>lp</code>, on macOS and Linux. On Windows both answer
+              <code>false</code>. <code>file</code> needs <em>Run other programs</em>
+              and answers <code>true</code> once the queue took the file, which says
+              nothing about paper; a missing file is <code>false</code>.
+            </li>
+          </ul>

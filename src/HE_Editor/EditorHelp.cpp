@@ -3630,7 +3630,10 @@ namespace
 	  "This is about what a SCRIPT may name on its own, never about what a PERSON "
 	  "may choose: a file somebody picks in a file dialog is allowed either way, "
 	  "because choosing it IS the permission. Most applications never need this "
-	  "switch — they need the dialog.",
+	  "switch — they need the dialog.\n\n"
+	  "Open Database and Write PDF are the exception today: they need this switch "
+	  "for every path, one inside the project included, and a file picked in a "
+	  "dialog does not count for them.",
 	  "", "editor#preferences" },
 	{ "Permissions/Run other programs", "Run other programs",
 	  "Whether Run Program and Open URL work. Off, they do nothing and say so in "
@@ -3641,9 +3644,10 @@ namespace
 	  "the permission at all.",
 	  "", "editor#preferences" },
 	{ "Permissions/Network access", "Network access",
-	  "Reserved. Nothing reads it yet — the `http` group is a later wave. It is "
-	  "here so that a project which has already thought about what it may reach "
-	  "does not have to be asked a second time when that group arrives.",
+	  "Whether HTTP Get and HTTP Post work. Off, they start no request, answer "
+	  "ticket 0 and say so in the log.\n\n"
+	  "This is the scripts' own network access. It has nothing to do with the "
+	  "engine's multiplayer sessions, which have their own settings.",
 	  "", "editor#preferences" },
 	{ "Application/Icon", "Icon",
 	  "The name of one of the engine's built-in icons — the same names <icon=…> "
