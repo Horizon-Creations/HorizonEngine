@@ -55,6 +55,7 @@
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
+#include "AssetRecoveryDialog.h"          // the same for asset tabs
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
 #include "DocsPanel.h"                   // Help > Documentation (the in-editor manual)
@@ -652,6 +653,8 @@ void EditorUI::render(AppContext& ctx, float dt)
     // After the two checks above on purpose: all three raise root-level modals
     // at startup and only one can be open, so this one waits for theirs.
     SceneRecoveryDialog::Draw(ctx);
+    // The asset tabs' copies, once the scene's offer is answered (it waits).
+    AssetRecoveryDialog::Draw(ctx);
 
     // ── Assets ▸ Publish Engine Content to Server… ───────────────────────────
     EngineContentPublishDialog::Draw(ctx);
@@ -839,6 +842,27 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	// The panels are the authority on their own dirty flag; re-asking also catches
 	// a save that reported success but left the state dirty.
 	return ok && !tabHasUnsavedEdits(assetPath);
+}
+
+// The recovery half of saveAsset: the same fourteen panels, each reporting its
+// dirty files and how to write what a Save would write to another path.
+// AssetAutosave does the rest (EditorApplication::updateAssetAutosave).
+void EditorUI::appendAssetSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ScriptEditorPanel::appendSnapshots(ctx, out);
+	CppClassEditorPanel::appendSnapshots(ctx, out);
+	MaterialEditorPanel::appendSnapshots(ctx, out);
+	UIEditorPanel::appendSnapshots(ctx, out);
+	HorizonCodeClassPanel::appendSnapshots(ctx, out);
+	InputAssetPanel::appendSnapshots(ctx, out);
+	TypeAssetPanel::appendSnapshots(ctx, out);
+	ThemeAssetPanel::appendSnapshots(ctx, out);
+	BoneMaskPanel::appendSnapshots(ctx, out);
+	BlendSpacePanel::appendSnapshots(ctx, out);
+	SequencerPanel::appendSnapshots(ctx, out);
+	ParticleGraphEditorPanel::appendSnapshots(ctx, out);
+	AnimatorStateMachineEditorPanel::appendSnapshots(ctx, out);
+	SkeletalMeshEditorPanel::appendSnapshots(ctx, out);
 }
 
 // The live documents behind an open tab, for collaboration's item-level sync.

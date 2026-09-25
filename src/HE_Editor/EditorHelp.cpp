@@ -3198,15 +3198,18 @@ namespace
 	  "changed outside the editor.",
 	  "", "editor#content-browser" },
 	{ "Preferences/Autosave/Autosave", "",
-	  "Writes a recovery copy of the edited scene into the project's "
-	  "Saved/Autosave folder at a fixed interval. The scene file itself is never "
+	  "Writes a recovery copy of the edited scene, and of every asset tab with "
+	  "unsaved edits (scripts, C++ classes, materials, widgets, HorizonCode "
+	  "classes, input, types, themes, animation assets), into the project's "
+	  "Saved/Autosave folder at a fixed interval. The files themselves are never "
 	  "written by the timer: saving stays your decision. A real save or a clean "
 	  "exit removes the copy; after a crash it is what the next start can "
 	  "restore from.",
 	  "", "editor#preferences" },
 	{ "Preferences/Autosave/Autosave Interval (s)", "",
-	  "Seconds between two recovery copies. A copy is only written when the "
-	  "scene has changed since the last one. Ten seconds is the floor: below "
+	  "Seconds between two recovery copies. The scene's copy is only written when "
+	  "the scene has changed since the last one; an asset tab's is rewritten while "
+	  "the tab has unsaved edits. Ten seconds is the floor: below "
 	  "that, writing the scene is itself the pause it was meant to spare you.",
 	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
@@ -3880,6 +3883,30 @@ namespace
 	  "Closes the dialog and leaves the copy where it is, so it is offered "
 	  "again the next time this project opens. The one answer that cannot lose "
 	  "anything, which is why Escape does the same.",
+	  "Esc", "editor#preferences" },
+
+	// ── The asset recovery dialog (AssetRecoveryDialog) ──────────────────────
+	// The same offer for asset tabs (scripts, materials, widgets, classes, ...).
+	// Unlike the scene's Restore, this one writes the file, so it says where the
+	// replaced version went.
+	{ "Asset Recovery/Restore", "Restore",
+	  "Writes the autosaved copy into this asset's file and reloads any tab that "
+	  "shows it. The version on disk is copied to Saved/Autosave/Assets/Replaced "
+	  "first, so nothing is lost if the copy turns out to be the wrong one.",
+	  "", "editor#preferences" },
+	{ "Asset Recovery/Delete Copy", "Delete Copy",
+	  "Removes this autosaved copy for good. The asset's file is not touched.",
+	  "", "editor#preferences" },
+	{ "Asset Recovery/Restore All", "Restore All",
+	  "Restore for every row that can be restored. A row that fails stays in the "
+	  "list with the reason underneath; the others are done.",
+	  "", "editor#preferences" },
+	{ "Asset Recovery/Delete All", "Delete All",
+	  "Removes every autosaved copy in the list. No asset file is touched.",
+	  "", "editor#preferences" },
+	{ "Asset Recovery/Keep for Later", "Keep for Later",
+	  "Closes the dialog and leaves every copy where it is, so they are offered "
+	  "again the next time this project opens. Escape does the same.",
 	  "Esc", "editor#preferences" },
 
 	// ── The material editor ──────────────────────────────────────────────────
@@ -7063,6 +7090,7 @@ namespace
 		// The recovery dialog is the autosave's other half, so its three
 		// buttons are listed under the setting that produces the copy.
 		{ "Scene Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
+		{ "Asset Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
 		{ "Shortcuts/",        "editor-settings", "Settings Reference", "Shortcuts" },
 		{ "shortcuts.",        "editor-settings", "Settings Reference", "Shortcuts" },

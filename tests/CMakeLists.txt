@@ -37,6 +37,10 @@ add_executable(he_tests
     test_play_error_reveal.cpp
     test_editor_dock_state.cpp
     test_scene_autosave.cpp
+    # The asset tabs' autosave: interval, the per-tick prune that makes a save
+    # remove its copy, pending at the next start, Restore's backup, and the
+    # ContentManager::writeAssetTo path every asset panel's copy takes.
+    test_asset_autosave.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
@@ -72,6 +76,9 @@ add_executable(he_tests
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
     test_scene_recovery_ui.cpp
+    # Its sibling for asset tabs: per-row answers carry the row's key, and it
+    # waits for the scene's offer.
+    test_asset_recovery_ui.cpp
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
@@ -496,6 +503,8 @@ add_executable(he_tests
     # a previous run's leftover becomes at the next start. Clock, dirty flag
     # and revision are handed in, so it runs on a fake clock, not a stopwatch.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneAutosave.cpp
+    # Its sibling for the asset tabs — same clock-in-hand design.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetAutosave.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
     # profile picture; both call into it, so the tests need it linked too.
@@ -591,6 +600,8 @@ add_executable(he_tests
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
+    # And the asset tabs' recovery dialog, for test_asset_recovery_ui.cpp.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
     # The texture colour-space dialog, for test_texture_colour_space_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
@@ -630,6 +641,8 @@ set_source_files_properties(
     test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
+    test_asset_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp

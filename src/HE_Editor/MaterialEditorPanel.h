@@ -4,6 +4,7 @@
 #include <imgui.h>
 #include <string>
 #include <vector>
+#include "AssetAutosave.h"
 
 // The material node-graph editor (M3) — a top-level editor tab opened by double-clicking
 // a material asset in the Content Browser. Edits the HE::MaterialGraph stored in the
@@ -37,6 +38,8 @@ namespace MaterialEditorPanel
 	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
 	// state but leaves the tab vector, so the quit guard must ask here.
 	void appendDirtyPaths(std::vector<std::string>& out);
+	// Crash-recovery copies of the unsaved graphs (EditorUI::appendAssetSnapshots).
+	void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
 
 	// Write this tab's graph/overrides to disk, exactly like the header's Save
 	// button — so the close/quit prompt can save this asset without the user
