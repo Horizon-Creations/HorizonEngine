@@ -343,6 +343,49 @@ bool TypeAssetPanel::reloadByContentPath(const std::string& contentPath)
 
 void TypeAssetPanel::appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 
+void TypeAssetPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, PanelState& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			// saveState's encoding into a copy — without registering anything:
+			// the TypeRegistry learns about a definition when it is SAVED.
+			if (st.isEnum)
+			{
+				const EnumTypeAsset* a = cm->getEnumType(st.assetId);
+				if (!a) return false;
+				HE::EnumDef def = st.enumDef;
+				def.name = st.name;
+				def.assetPath = st.relPath;
+				EnumTypeAsset copy = *a;
+				copy.json = HE::TypeRegistry::enumToJson(def);
+				return cm->writeAssetTo(copy, dest);
+			}
+			HE::StructDef def = st.structDef;
+			def.name = st.name;
+			def.assetPath = st.relPath;
+			if (st.isTemplate)
+			{
+				const SaveGameTemplateAsset* a = cm->getSaveGameTemplate(st.assetId);
+				if (!a) return false;
+				SaveGameTemplateAsset copy = *a;
+				copy.json = HE::TypeRegistry::structToJson(def);
+				return cm->writeAssetTo(copy, dest);
+			}
+			// The same refusal a save makes: a struct that closes a cycle is not
+			// something a restore may put on disk either. The previous copy stays.
+			if (HE::TypeRegistry::instance().structWouldCycle(def)) return false;
+			const StructTypeAsset* a = cm->getStructType(st.assetId);
+			if (!a) return false;
+			StructTypeAsset copy = *a;
+			copy.json = HE::TypeRegistry::structToJson(def);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
+
 bool TypeAssetPanel::save(AppContext& ctx, const std::string& path)
 {
 	PanelState* st = s_states.find(path);

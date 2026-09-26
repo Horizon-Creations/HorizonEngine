@@ -114,15 +114,19 @@ bool inputMayEditThisFrame()
 //   - A terrain, in or out of a session: its state is a quarter of a million
 //     floats per capture, and a marquee around props near the origin picks
 //     it up by its pivot. Nothing of a terrain's is right to copy anyway.
+//     `skipTerrain` false leaves that rule out, for an edit that is not a
+//     value copy (Add Component gives a terrain a fresh default component
+//     like any other entity).
 std::vector<Entity> membersToSkip(AppContext& ctx, const entt::registry& registry,
-                                  const std::vector<Entity>& members, Entity primary)
+                                  const std::vector<Entity>& members, Entity primary,
+                                  bool skipTerrain = true)
 {
 	std::vector<Entity> skip;
 	const bool inSession = ctx.collab && ctx.collab->inSession();
 	for (Entity e : members)
 	{
 		if (e == primary || !registry.valid(e)) continue;
-		if (registry.all_of<TerrainComponent>(e)) { skip.push_back(e); continue; }
+		if (skipTerrain && registry.all_of<TerrainComponent>(e)) { skip.push_back(e); continue; }
 		if (!inSession) continue;
 		const auto subject = ctx.collab->subjectFor(
 			static_cast<std::uint32_t>(entt::to_integral(e)));
@@ -131,6 +135,74 @@ std::vector<Entity> membersToSkip(AppContext& ctx, const entt::registry& registr
 			skip.push_back(e);
 	}
 	return skip;
+}
+
+// ── What the panel works out per SELECTION, not per frame ───────────────────
+// The shared/partial component lists and the mixed leaves both walk every
+// member — the lists through renderFor's collect mode, the mixed leaves
+// through the serializer. Cheap for five entities, not for the thousand
+// Ctrl+A now selects in a large level, every frame. So they are kept until the
+// selection changes (its revision), until this panel changes something itself
+// (`stale`), or until a short period runs out — what catches an edit made
+// elsewhere (the gizmo, a script, a peer). Undo and scene loads replace the
+// world, which clears the selection and bumps the revision anyway.
+struct MultiSelectionCache
+{
+	const HorizonWorld* world    = nullptr;
+	std::uint64_t       revision = ~0ull;
+	int                 frame    = -100000;
+	bool                stale    = true;
+	std::vector<std::string>            common;    // on every member, primary's order
+	std::vector<std::string>            partial;   // on the primary, not on every member
+	std::vector<EditorMultiEdit::Mixed> mixed;
+};
+static MultiSelectionCache s_multi;
+
+void refreshMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary,
+                           const std::vector<Entity>& members)
+{
+	auto& registry = world.registry();
+	MultiSelectionCache& c = s_multi;
+
+	// Intersection of the component lists, in the primary's order.
+	c.common.clear();
+	c.partial.clear();
+	InspectorPanel::listComponents(ctx, world, primary, c.common);
+	for (Entity e : members)
+	{
+		if (e == primary) continue;
+		std::vector<std::string> theirs;
+		InspectorPanel::listComponents(ctx, world, e, theirs);
+		for (auto it = c.common.begin(); it != c.common.end();)
+		{
+			if (std::find(theirs.begin(), theirs.end(), *it) != theirs.end()) { ++it; continue; }
+			if (std::find(c.partial.begin(), c.partial.end(), *it) == c.partial.end())
+				c.partial.push_back(*it);
+			it = c.common.erase(it);
+		}
+	}
+
+	// The mixed leaves: the primary's state against every other member's. A
+	// terrain is left out on either side — its state is a quarter of a million
+	// floats, and it never takes a copied value anyway (membersToSkip).
+	c.mixed.clear();
+	if (!registry.all_of<TerrainComponent>(primary))
+	{
+		std::vector<EditorMultiEdit::json> states;
+		states.reserve(members.size());
+		states.push_back(EditorMultiEdit::state(world, primary));
+		for (Entity e : members)
+		{
+			if (e == primary || !registry.valid(e) || registry.all_of<TerrainComponent>(e)) continue;
+			states.push_back(EditorMultiEdit::state(world, e));
+		}
+		c.mixed = EditorMultiEdit::mixed(states);
+	}
+
+	c.world    = &world;
+	c.revision = ctx.selection.revision();
+	c.frame    = ImGui::GetFrameCount();
+	c.stale    = false;
 }
 
 void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
@@ -142,39 +214,44 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	EditorWidgets::helpForKey("details.multi.count");
 	{
 		// The names, one line each; the primary is marked because it is the
-		// one the fields below belong to.
+		// one the fields below belong to. A Select All in a big level makes
+		// this list thousands long, so past a screenful the rest is counted
+		// rather than listed — the active one is always shown, last.
+		constexpr std::size_t kNamesShown = 50;
+		const bool cut = members.size() > kNamesShown;
+		auto nameOf = [&](Entity e) {
+			const auto* nc = registry.try_get<NameComponent>(e);
+			return (nc && !nc->name.empty()) ? nc->name.c_str() : "(unnamed)";
+		};
 		ImGui::Indent();
+		std::size_t listed = 0;
 		for (Entity e : members)
 		{
-			const auto* nc = registry.try_get<NameComponent>(e);
-			const char* name = (nc && !nc->name.empty()) ? nc->name.c_str() : "(unnamed)";
-			if (e == primary) ImGui::BulletText("%s  (active)", name);
-			else              ImGui::BulletText("%s", name);
+			if (cut && (e == primary || listed == kNamesShown - 1)) continue;
+			if (e == primary) ImGui::BulletText("%s  (active)", nameOf(e));
+			else              ImGui::BulletText("%s", nameOf(e));
+			++listed;
+		}
+		if (cut)
+		{
+			ImGui::TextDisabled("\xe2\x80\xa6 and %zu more", members.size() - listed - 1);
+			ImGui::BulletText("%s  (active)", nameOf(primary));
 		}
 		ImGui::Unindent();
 	}
 	ImGui::Separator();
 
-	// Intersection of the component lists, in the primary's order.
-	std::vector<std::string> common;
-	InspectorPanel::listComponents(ctx, world, primary, common);
-	std::vector<std::string> partial; // on the primary but not on every member
-	for (Entity e : members)
-	{
-		if (e == primary) continue;
-		std::vector<std::string> theirs;
-		InspectorPanel::listComponents(ctx, world, e, theirs);
-		for (auto it = common.begin(); it != common.end();)
-		{
-			if (std::find(theirs.begin(), theirs.end(), *it) != theirs.end()) { ++it; continue; }
-			if (std::find(partial.begin(), partial.end(), *it) == partial.end())
-				partial.push_back(*it);
-			it = common.erase(it);
-		}
-	}
+	const int period = members.size() <= 256 ? 30 : 240;   // frames
+	if (s_multi.stale || s_multi.world != &world ||
+	    s_multi.revision != ctx.selection.revision() ||
+	    ImGui::GetFrameCount() - s_multi.frame >= period)
+		refreshMultiSelection(ctx, world, primary, members);
+	const std::vector<std::string> common  = s_multi.common;
+	const std::vector<std::string> partial = s_multi.partial;
 
 	hint("Edits below apply to every selected entity that has the component; "
-	     "the active entity's values are shown.");
+	     "the active entity's values are shown, and a field the selection "
+	     "disagrees on says (mixed).");
 	EditorWidgets::helpForKey("details.multi.shared");
 	const std::vector<Entity> held = membersToSkip(ctx, registry, members, primary);
 	if (ctx.collab && ctx.collab->inSession())
@@ -203,11 +280,31 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	// One renderFor per shared section. Each call capturePre()s on the mouse
 	// press inside the window — a handful of whole-world captures on one frame,
 	// which is the price of not duplicating the component editor.
+	//
+	// Around each, the fields the selection disagrees on: marked on the rows
+	// whose label is the field's own name (Row::MixedScope), and all of them —
+	// nested ones included — named in one line under the section.
 	for (const std::string& label : common)
 	{
-		const bool structural =
-			InspectorPanel::renderFor(ctx, world, primary, ctx.undoSys, label.c_str());
+		const char* key = InspectorPanel::componentKeyForLabel(label.c_str());
+		bool structural = false;
+		{
+			const Row::MixedScope mixedRows(
+				key ? EditorMultiEdit::rowMarks(s_multi.mixed, key)
+				    : std::unordered_map<std::string, unsigned>{});
+			structural = InspectorPanel::renderFor(ctx, world, primary, ctx.undoSys, label.c_str());
+		}
+		if (key)
+		{
+			const std::string differs = EditorMultiEdit::describe(s_multi.mixed, key);
+			if (!differs.empty())
+			{
+				hint("Differs across the selection: %s", differs.c_str());
+				EditorWidgets::helpForKey("details.multi.mixed");
+			}
+		}
 		if (!structural) continue;
+		s_multi.stale = true;
 		// The header's "Remove Component" took the section off the primary
 		// (with its own snapshotNow before the removal, which already holds
 		// every member's state). The same removal on each member, WITHOUT an
@@ -227,6 +324,9 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	{
 		const auto changes = EditorMultiEdit::diff(before, EditorMultiEdit::state(world, primary));
 		EditorMultiEdit::propagate(world, changes, members, primary, held);
+		// The value just written is no longer mixed (except on a member that
+		// could not take it) — the next frame has to say so, not the next period.
+		if (!changes.empty()) s_multi.stale = true;
 	}
 
 	if (!partial.empty())
@@ -238,6 +338,35 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 		for (const std::string& label : partial)
 			ImGui::TextDisabled("%s", label.c_str());
 		ImGui::Unindent();
+	}
+
+	// ── Add Component, for all of them ───────────────────────────────────────
+	// The single-entity button lives in renderFor, which draws it only for a
+	// whole entity, never for one section — so a multi-selection had Remove on
+	// every shared header and no way to add. The same menu over the whole
+	// selection: it offers what any member lacks (the partial list above
+	// included) and gives it to every member without it, under one snapshot.
+	// In a session only what we hold takes it, like every other edit here.
+	std::vector<Entity> targets;
+	{
+		const std::vector<Entity> skip =
+			membersToSkip(ctx, registry, members, primary, /*skipTerrain=*/false);
+		for (Entity e : members)
+			if (std::find(skip.begin(), skip.end(), e) == skip.end()) targets.push_back(e);
+	}
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	const float buttonW = 180.0f;
+	ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - buttonW) * 0.5f
+	                     + ImGui::GetCursorPosX());
+	if (ImGui::Button("Add Component", ImVec2(buttonW, 0)))
+		ImGui::OpenPopup("##add_component_multi");
+	EditorWidgets::helpForKey("details.multi.add-component");
+	if (ImGui::BeginPopup("##add_component_multi"))
+	{
+		if (InspectorPanel::addComponentMenu(world, targets, ctx.undoSys)) s_multi.stale = true;
+		ImGui::EndPopup();
 	}
 }
 #endif
@@ -1714,6 +1843,46 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<PropertyAnimatorComponent>(entity); }
+	}
+
+	// ── Sequence Player ─────────────────────────────────────────────────────
+	// Only the authored half is editable. The playhead is session state
+	// (SequencePlayerComponent.h): it is shown during play, never saved.
+	if (auto* sp = registry.try_get<SequencePlayerComponent>(entity))
+	{
+		if (componentHeader("Sequence Player", true, removed))
+		{
+			EditorWidgets::WrapText wrap;
+			EditorWidgets::assetDropSlot(ctx, "Sequence", sp->sequenceId,
+				HE::AssetType::Sequence, "seqp");
+			const SequenceAsset* seq = (sp->sequenceId != HE::UUID{} && ctx.contentManager)
+				? ctx.contentManager->getSequence(sp->sequenceId) : nullptr;
+
+			EditorWidgets::checkbox("Autoplay##seqp", &sp->autoplay); trackEdit();
+			ImGui::SameLine();
+			EditorWidgets::checkbox("Loop##seqp", &sp->loop); trackEdit();
+			Row::dragFloat("Play Rate##seqp", &sp->playRate, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+
+			// How the view goes back to gameplay, and whether the player can move
+			// meanwhile. Per player, not in the asset (SequencePlayerComponent.h).
+			Row::dragFloat("Blend Out##seqp", &sp->blendOutSeconds, 0.01f, 0.0f, 10.0f, "%.2f s"); trackEdit();
+			static const char* kCurves[] = { "Linear", "Smooth Step", "Ease Out" };
+			int curve = static_cast<int>(sp->blendOutCurve);
+			if (Row::combo("Blend Out Curve##seqp", &curve, kCurves, IM_ARRAYSIZE(kCurves)))
+			{ sp->blendOutCurve = static_cast<HE::BlendCurve>(curve); trackEdit(); }
+			EditorWidgets::checkbox("Lock Player Input##seqp", &sp->lockPlayerInput); trackEdit();
+
+			if (seq)
+			{
+				ImGui::Separator();
+				ImGui::Text("Duration: %.2f s | Tracks: %zu | Actors: %zu",
+				            seq->duration, seq->tracks.size(), seq->bindings.size());
+				if (sp->started)
+					ImGui::Text("%s at %.2f s%s", sp->playing ? (sp->paused ? "Paused" : "Playing") : "Stopped",
+					            sp->time, sp->cameraOwned ? " | holds the camera" : "");
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SequencePlayerComponent>(entity); }
 	}
 
 	// ── NavMesh ─────────────────────────────────────────────────────────────
@@ -3437,6 +3606,9 @@ constexpr AddRow kAnimationRows[] = {
 	addRow<RootMotionComponent>("Root Motion", true),
 	addRow<AnimationLayerComponent>("Animation Layers", true),
 	addRow<IkComponent>("Inverse Kinematics", true),
+	// Unlike the rows above, on ANY entity: a cutscene's owner is usually an
+	// empty trigger or level object, and its actors are bindings in the asset.
+	addRow<SequencePlayerComponent>("Sequence Player"),
 };
 constexpr AddRow kGameplayRows[] = {
 	addRow<CameraComponent>("Camera"),
@@ -3501,10 +3673,41 @@ bool labelMatches(const char* label, const std::string& needle)
 
 bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 {
+	return addComponentMenu(world, std::vector<Entity>{ entity }, undo);
+}
+
+bool addComponentMenu(HorizonWorld& world, const std::vector<Entity>& entities, EditorUndo* undo)
+{
 #ifdef HE_IMGUI_ENABLED
-	if (world.isBuiltin(entity)) return false;
 	auto& registry = world.registry();
+	// The entities the menu acts on: the caller's, minus what cannot take a
+	// component (the built-ins) or no longer exists.
+	std::vector<Entity> targets;
+	targets.reserve(entities.size());
+	for (const Entity e : entities)
+		if (registry.valid(e) && !world.isBuiltin(e)) targets.push_back(e);
+	if (targets.empty()) return false;
 	bool added = false;
+
+	// Per row, over every target: a row is offered while at least one target
+	// lacks it, and adding it gives it to each target that does — so with
+	// several entities selected, a component only some of them carry is here
+	// too, and one click completes the set. The skeleton rows are enabled only
+	// when every target that would receive one has a skeleton; adding to half
+	// of them without a word is worse than a greyed row whose tooltip says why.
+	auto anyLacks = [&](const AddRow& row)
+	{
+		for (const Entity e : targets)
+			if (!row.has(registry, e)) return true;
+		return false;
+	};
+	auto rowEnabled = [&](const AddRow& row)
+	{
+		if (!row.needsSkeleton) return true;
+		for (const Entity e : targets)
+			if (!row.has(registry, e) && !registry.all_of<SkeletalMeshComponent>(e)) return false;
+		return true;
+	};
 	// The group headings below are looked up under this scope ("Add
 	// Component/Rendering"), not under whichever component section happened to
 	// be drawn last — this menu belongs to the entity, not to a component.
@@ -3544,8 +3747,11 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			if (ImGui::MenuItem(item))
 			{
 				if (undo) undo->snapshotNow();
+				// Onto every target, under the one snapshot above — one undo
+				// takes the paste off all of them.
 				if (const char* text = ImGui::GetClipboardText())
-					added = SceneSerializer{}.importComponentText(world, entity, text);
+					for (const Entity e : targets)
+						if (SceneSerializer{}.importComponentText(world, e, text)) added = true;
 				ImGui::CloseCurrentPopup();
 			}
 			EditorWidgets::helpForKey("details.paste-component");
@@ -3553,15 +3759,14 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 		}
 	}
 
-	const bool hasSkeleton = registry.all_of<SkeletalMeshComponent>(entity);
-	// One row. A component the entity already has is not offered — the scene
-	// format allows one of each. Returns whether it was added.
+	// One row. A component every target already has is not offered — the
+	// scene format allows one of each. Returns whether it was added.
 	// `aside` is drawn dimmed at the row's right edge, where a menu would put
 	// the shortcut — the search view puts the group there.
 	auto drawRow = [&](const AddRow& row, const char* aside, bool pressedByKeyboard) -> bool
 	{
-		if (row.has(registry, entity)) return false;
-		const bool enabled = !row.needsSkeleton || hasSkeleton;
+		if (!anyLacks(row)) return false;
+		const bool enabled = rowEnabled(row);
 		const bool pressed = ImGui::MenuItem(row.label, aside, false, enabled) || (pressedByKeyboard && enabled);
 		// The component's own entry, on its row — what it IS, before it is added.
 		{
@@ -3570,8 +3775,11 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			EditorWidgets::helpForKey(key);
 		}
 		if (!pressed) return false;
+		// One snapshot for the whole batch, so one undo takes the component
+		// off every entity it was just given to.
 		if (undo) undo->snapshotNow();
-		row.add(registry, entity);
+		for (const Entity e : targets)
+			if (!row.has(registry, e)) row.add(registry, e);
 		ImGui::CloseCurrentPopup();
 		return true;
 	};
@@ -3585,14 +3793,14 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			// offer and is left out, like its rows would be. The skeleton group
 			// is the exception: greyed rather than gone, so the reader learns
 			// what it needs instead of wondering where animation went.
-			bool anyLeft = false, allNeedSkeleton = true;
+			bool anyLeft = false, enabled = false;
 			for (int i = 0; i < g.count; ++i)
 			{
-				if (!g.rows[i].has(registry, entity)) anyLeft = true;
-				if (!g.rows[i].needsSkeleton) allNeedSkeleton = false;
+				if (!anyLacks(g.rows[i])) continue;
+				anyLeft = true;
+				if (rowEnabled(g.rows[i])) enabled = true;
 			}
 			if (!anyLeft) continue;
-			const bool enabled = !allNeedSkeleton || hasSkeleton;
 			if (ImGui::BeginMenu(g.label, enabled))
 			{
 				for (int i = 0; i < g.count; ++i)
@@ -3612,7 +3820,7 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 			for (int i = 0; i < g.count; ++i)
 			{
 				const AddRow& row = g.rows[i];
-				if (row.has(registry, entity) || !labelMatches(row.label, s_filter)) continue;
+				if (!anyLacks(row) || !labelMatches(row.label, s_filter)) continue;
 				++hits;
 				// The group beside the hit: "Mesh" and "Nav Mesh" are told
 				// apart by where they live as much as by their names.
@@ -3625,7 +3833,7 @@ bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo)
 	return added;
 
 #else
-	(void)world; (void)entity; (void)undo;
+	(void)world; (void)entities; (void)undo;
 	return false;
 #endif // HE_IMGUI_ENABLED
 }

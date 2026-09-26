@@ -159,3 +159,67 @@ TEST_CASE("Row labels drop the ## id suffix but keep the ids apart")
 	CHECK(idA != 0);
 	CHECK(idA != idB);   // same visible label, different items
 }
+
+TEST_CASE("Mixed rows: the label decides, case and spacing do not, and scopes nest")
+{
+	using EditorWidgets::Row::MixedScope;
+	using EditorWidgets::Row::mixedMask;
+
+	// No scope, no marks — every row outside the multi-selection panel.
+	CHECK(mixedMask("Position") == 0u);
+	{
+		const MixedScope outer({ { "position", 0b101u }, { "castsShadow", ~0u }, { "range", 0u } });
+		CHECK(mixedMask("Position") == 0b101u);
+		CHECK(mixedMask("Position##2d") == 0b101u);           // the id suffix is not the name
+		CHECK(mixedMask("Casts Shadow##light") == ~0u);       // "Casts Shadow" ↔ castsShadow
+		CHECK(mixedMask("Range") == 0u);                      // an empty mask is no mark
+		CHECK(mixedMask("Rotation") == 0u);
+		{
+			// The inner scope (the next section) replaces, not adds to, the outer.
+			const MixedScope inner({ { "intensity", ~0u } });
+			CHECK(mixedMask("Intensity") == ~0u);
+			CHECK(mixedMask("Position") == 0u);
+		}
+		CHECK(mixedMask("Position") == 0b101u);
+	}
+	CHECK(mixedMask("Position") == 0u);
+}
+
+TEST_CASE("Mixed rows still lay out inside the panel and end on the control")
+{
+	ImGuiCtx ctx;
+	float v3[3] = { 1.0f, 2.0f, 3.0f };
+	float f = 0.5f;
+	int   i = 1;
+	bool  on = true;
+	const char* items[] = { "Point", "Spot", "Directional" };
+
+	const EditorWidgets::Row::MixedScope scope(
+		{ { "position", 0b010u }, { "intensity", ~0u }, { "type", ~0u }, { "visible", ~0u },
+		  { "mode", ~0u } });
+	ImGuiID comboId = 0, comboZId = 0;
+	Measured m{};
+	for (int frame = 0; frame < 2; ++frame)
+	{
+		m = measure(220.0f, [&](auto note)
+		{
+			EditorWidgets::Row::dragFloat3("Position", v3, 0.05f);        note();
+			EditorWidgets::Row::dragFloat("Intensity", &f, 0.05f);        note();
+			EditorWidgets::Row::combo("Type", &i, items, 3);              note();
+			comboId = ImGui::GetItemID();
+			EditorWidgets::Row::comboZ("Mode", &i, "One\0Two\0Three\0");  note();
+			comboZId = ImGui::GetItemID();
+			EditorWidgets::checkbox("Visible", &on);                      note();
+		});
+	}
+	CHECK(m.maxItemRight <= m.contentRight + 0.5f);
+	// The mixed combos are still the last item, so the Details panel's undo
+	// tracking (IsItemActivated / IsItemDeactivatedAfterEdit) finds them.
+	CHECK(comboId != 0);
+	CHECK(comboZId != 0);
+	CHECK(comboId != comboZId);
+	// Drawing mixed changes nothing underneath: the values are the caller's.
+	CHECK(v3[1] == doctest::Approx(2.0f));
+	CHECK(i == 1);
+	CHECK(on);
+}

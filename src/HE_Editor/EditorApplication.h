@@ -11,6 +11,7 @@
 #include "CollabDocSync.h"   // DocMirror for the two documents the editor owns
 #include "CollabUndo.h"
 #include "SceneAutosave.h"   // the solo recovery snapshot, independent of a session
+#include "AssetAutosave.h"   // the same for dirty asset tabs
 #include "NotificationStore.h"
 #include <HorizonScene/HorizonScene.h>
 #include <Scripting/ScriptEngine.h>
@@ -263,6 +264,18 @@ struct AppContext
 	std::function<bool()> restoreRecovery;
 	std::function<void()> discardRecovery;
 	std::function<void()> deferRecovery;
+	// The same for asset tabs (AssetAutosave): every recovery copy of an
+	// unsaved script/material/widget/... file an earlier session left behind.
+	// Null when there are none or the dialog has been answered; the asset
+	// recovery dialog raises itself on it, after the scene's. Restore writes the
+	// copy over the file (keeping the replaced version under
+	// Saved/Autosave/Assets/Replaced) and reloads whatever shows it; delete
+	// removes the copy; defer keeps them all for the next start.
+	const std::vector<HE::Ed::AssetRecoveryEntry>* assetRecoveryOffers = nullptr;
+	std::string assetRecoveryReplacedDir;
+	std::function<bool(const std::string& key, std::string* error)> restoreAssetRecovery;
+	std::function<void(const std::string& key)> discardAssetRecovery;
+	std::function<void()> deferAssetRecovery;
 
 	// Undo/redo. UI calls undoSys capture/stash/commit around mutations;
 	// undo()/redo() also reset the selection (entity handles are remapped).
@@ -876,6 +889,19 @@ private:
 	// the scene is dirty until the user saves it. Returns false if there was
 	// nothing to restore or the snapshot would not load.
 	bool restoreRecoveredScene();
+	// The asset tabs' recovery copies (AssetAutosave.h): same timer settings as
+	// the scene's, configured in the same project-loaded callback, ticked after
+	// the UI with the panels' dirty files. Its prune is what removes the copy of
+	// a file that was saved, so there is no call in any panel's save path.
+	HE::Ed::AssetAutosave m_assetAutosave;
+	void updateAssetAutosave(std::uint64_t nowMs, AppContext& ctx);
+	// Offered by AssetRecoveryDialog; entries leave as they are answered.
+	std::vector<HE::Ed::AssetRecoveryEntry> m_assetRecoveryOffers;
+	// Files a restore just rewrote. The ContentManager only re-reads a loaded
+	// asset on its hot-reload poll (loadAsset is a no-op for a loaded path), so
+	// the tabs are told to reload AFTER that poll, which the restore forces to
+	// run on the next frame — otherwise a tab would re-read the stale copy.
+	std::vector<std::string> m_reloadTabsAfterPoll;
 	// Set by the quit the UI hands us (AppContext::quit), which only fires once
 	// the unsaved-changes prompt is through. OnShutdown reads it: the base loop
 	// also reaches OnShutdown after an exception in OnRender, and THAT exit must
@@ -1015,8 +1041,17 @@ private:
 	// before one is written, so the file on disk never lags the prefab it was
 	// placed from. Skipped in a collaboration session: the pass edits the
 	// world directly rather than through EditorCommands, and nothing it changed
-	// would reach the other participants.
-	void syncPrefabInstances(const char* when);
+	// would reach the other participants. True when the pass changed the world.
+	bool syncPrefabInstances(const char* when);
+	// The same pass when a prefab file changed on disk (git pull, source
+	// control sync, another program) and the hot-reload poll re-read it: the
+	// open scene follows at once instead of at the next open or save. Undoable,
+	// but only when something moved — the poll also re-reads a prefab this
+	// editor just pushed, and that pass changes nothing. During play the world
+	// is the running session's, so the pass waits for play to end
+	// (m_prefabReloadSyncPending, picked up by the next poll).
+	void syncPrefabInstancesAfterReload();
+	bool m_prefabReloadSyncPending = false;
 	// The other direction: what a human just changed on a placed prefab is
 	// marked as authored here (SceneSerializer::recordPrefabOverrides), or the
 	// save-time sync above would put the asset's value back over it. Runs once

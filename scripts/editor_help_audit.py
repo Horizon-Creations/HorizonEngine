@@ -65,6 +65,9 @@ IGNORE = {
     # Covered by an explicit helpForKey("details.add-component") call — the scan
     # matches labels against scopes and cannot see a key passed by hand.
     ("UI Button", "Add Component"),
+    # The multi-selection panel's own Add Component (renderMultiSelection, drawn
+    # before any section scope): covered by helpForKey("details.multi.add-component").
+    (None, "Add Component"),
     # The documentation reader pushes its scope in draw(), which is at the END
     # of the file, while these buttons are drawn by helpers defined above it.
     # At run time the scope is open before the helper is called; a scan that
@@ -102,7 +105,8 @@ AREAS: dict[str, list[str]] = {
                   "OutlinerPanel.cpp",
                   "ContentBrowserPanel.cpp", "ProjectHubPanel.cpp", "ConsolePanel.cpp",
                   "NotificationBar.cpp", "PlayReportPanel.cpp", "DocsPanel.cpp",
-                  "TutorialPanel.cpp", "McpStatusBar.cpp", "AudioMixerPanel.cpp"],
+                  "TutorialPanel.cpp", "McpStatusBar.cpp", "AudioMixerPanel.cpp",
+                  "TextureColourSpaceDialog.cpp", "AssetRecoveryDialog.cpp"],
     "components": ["InspectorPanel.cpp"],
     "settings": ["EditorSettingsPanel.cpp", "ProjectSettingsPanel.cpp", "ToolchainDialog.cpp"],
     "materials": ["MaterialEditorPanel.cpp"],
@@ -113,7 +117,8 @@ AREAS: dict[str, list[str]] = {
     "animation": ["AnimatorStateMachineEditorPanel.cpp", "AudioEditorPanel.cpp",
                   "StaticMeshEditorPanel.cpp", "SkeletalMeshEditorPanel.cpp",
                   "BoneMaskPanel.cpp", "BlendSpacePanel.cpp",
-                  "SequencerPanel.cpp", "SequencerTimeline.cpp"],
+                  "SequencerPanel.cpp", "SequencerTimeline.cpp",
+                  "CinematicPanel.cpp", "CinematicTimeline.cpp"],
     "landscape": ["TerrainTools.cpp", "EnvironmentPanel.cpp"],
     "export": ["ExportDialogPanel.cpp", "BuildProgressDialog.cpp", "ProfilerPanel.cpp"],
     "collab": ["CollabPanel.cpp", "CollabPresenceBar.cpp", "SourceControlPanel.cpp",

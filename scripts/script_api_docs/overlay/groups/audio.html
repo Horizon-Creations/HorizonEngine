@@ -1,0 +1,53 @@
+          <p>
+            Sounds by asset path, controlled afterwards through the handle
+            <code>play</code> or <code>playAt</code> returns. Handles are whole
+            numbers counting up from 1; <strong>0 means nothing was
+            started</strong>: the asset path did not load, or there is no audio
+            engine. The audio engine belongs to a play session, so outside one
+            (the editor while not playing, a tool script) every function here does
+            nothing and the queries answer 0, <code>false</code>, or 1 for the
+            pitch.
+          </p>
+          <ul>
+            <li>
+              <strong>Every argument is required.</strong> <code>play(asset, volume,
+              pitch, loop)</code> has no defaults in Python (a missing
+              <code>loop</code> is an <code>IndexError</code>); in Lua a missing
+              <code>loop</code> is read as <code>false</code>.
+              <code>playAt</code> takes the position as three numbers:
+              <code>playAt(asset, x, y, z, volume, pitch, loop, minDist,
+              maxDist)</code>.
+            </li>
+            <li>
+              <strong>Stop what you start.</strong> A sound that finishes on its
+              own is no longer playing, but the engine keeps it, with its own copy
+              of the clip, until it is stopped: its handle still answers its volume
+              and pitch, and fifty finished one-shots are fifty held voices (build
+              7d49d44f). For sounds fired again and again (footsteps, shots) call
+              <code>stop</code> on the previous handle before playing the next,
+              or <code>stopAll</code> at a natural break. A scene change stops
+              everything.
+            </li>
+            <li>
+              <strong>Transport.</strong> <code>isPlaying</code> is
+              <code>false</code> both for a paused and for a finished sound;
+              <code>isPaused</code> tells them apart. <code>seek</code> clamps to
+              the clip (5 s into a 1 s clip lands at 1 s, −2 at 0) and works while
+              paused; <code>getTime</code> stands still while paused.
+            </li>
+            <li>
+              <strong>Values are not clamped</strong>, with one exception: a
+              volume above 1 amplifies and a negative one is stored as it is,
+              while a pitch of 0 or below is ignored and the old pitch stays.
+            </li>
+            <li>
+              <strong>Spatial sounds</strong> are heard from the scene's Audio
+              Listener (the first one). Without a listener the ears stay at the
+              world origin. <code>setSoundPosition</code> only matters for a sound
+              started with <code>playAt</code>.
+            </li>
+            <li>
+              <code>setBusVolume</code> creates a bus that does not exist yet, so a
+              misspelled bus name silently becomes a new, empty bus.
+            </li>
+          </ul>

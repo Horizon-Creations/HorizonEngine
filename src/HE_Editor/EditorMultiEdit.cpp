@@ -2,6 +2,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <algorithm>
+#include <cctype>
 
 namespace EditorMultiEdit
 {
@@ -102,6 +103,148 @@ int propagate(HorizonWorld& world, const std::vector<Change>& changes,
 		++written;
 	}
 	return written;
+}
+
+namespace
+{
+	std::vector<std::string> tokensOf(json::json_pointer p)
+	{
+		std::vector<std::string> out;
+		while (!p.empty()) { out.push_back(p.back()); p.pop_back(); }
+		std::reverse(out.begin(), out.end());
+		return out;
+	}
+
+	// "3" → 3; anything that is not a small array index → -1.
+	int indexOf(const std::string& token)
+	{
+		if (token.empty() || token.size() > 4) return -1;
+		for (const char c : token)
+			if (c < '0' || c > '9') return -1;
+		return std::stoi(token);
+	}
+
+	// "castsShadow" → "Casts Shadow", "spotAngle" → "Spot Angle".
+	std::string spelled(const std::string& key)
+	{
+		std::string out;
+		for (std::size_t i = 0; i < key.size(); ++i)
+		{
+			const char c = key[i];
+			if (c == '_') { out += ' '; continue; }
+			if (i == 0) { out += static_cast<char>(std::toupper(static_cast<unsigned char>(c))); continue; }
+			const bool upper = std::isupper(static_cast<unsigned char>(c)) != 0;
+			const bool prevLower = std::islower(static_cast<unsigned char>(key[i - 1])) != 0;
+			if (upper && prevLower) out += ' ';
+			out += c;
+		}
+		return out;
+	}
+
+	std::string elementName(const std::string& field, int i)
+	{
+		std::string lower;
+		for (const char c : field) lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		const bool colour = lower.find("color") != std::string::npos ||
+		                    lower.find("colour") != std::string::npos ||
+		                    lower.find("tint") != std::string::npos;
+		static const char* kXyzw[] = { "X", "Y", "Z", "W" };
+		static const char* kRgba[] = { "R", "G", "B", "A" };
+		if (i >= 0 && i < 4) return colour ? kRgba[i] : kXyzw[i];
+		return "#" + std::to_string(i + 1);
+	}
+}
+
+std::vector<Mixed> mixed(const std::vector<json>& states)
+{
+	std::vector<Mixed> out;
+	if (states.size() < 2 || !states[0].is_object()) return out;
+	const json& ref = states[0];
+	for (const auto& [component, value] : ref.items())
+	{
+		std::vector<Change> leaves;
+		for (std::size_t i = 1; i < states.size(); ++i)
+		{
+			if (!states[i].is_object()) continue;
+			const auto it = states[i].find(component);
+			if (it == states[i].end()) continue;
+			diffInto(component, json::json_pointer(), value, *it, leaves);
+		}
+		for (Change& c : leaves)
+		{
+			const bool seen = std::any_of(out.begin(), out.end(), [&](const Mixed& m)
+				{ return m.component == c.component && m.path == c.path; });
+			if (!seen) out.push_back({ std::move(c.component), std::move(c.path) });
+		}
+	}
+	return out;
+}
+
+std::unordered_map<std::string, unsigned> rowMarks(const std::vector<Mixed>& mixed,
+                                                   const std::string& component)
+{
+	std::unordered_map<std::string, unsigned> marks;
+	for (const Mixed& m : mixed)
+	{
+		if (m.component != component) continue;
+		const std::vector<std::string> t = tokensOf(m.path);
+		if (t.size() == 1)
+			marks[t[0]] = ~0u;
+		else if (t.size() == 2 && indexOf(t[1]) >= 0 && indexOf(t[1]) < 32)
+			marks[t[0]] |= 1u << indexOf(t[1]);
+		// Deeper: summary line only (see the header).
+	}
+	return marks;
+}
+
+std::string describe(const std::vector<Mixed>& mixed, const std::string& component)
+{
+	// Grouped by field, in first-seen order, so a vec3 that differs in X and
+	// Z reads "Position (X, Z)" rather than two entries.
+	std::vector<std::pair<std::string, std::vector<std::string>>> groups;
+	for (const Mixed& m : mixed)
+	{
+		if (m.component != component) continue;
+		const std::vector<std::string> t = tokensOf(m.path);
+		std::string field;
+		std::string element;
+		if (t.empty())
+			field = spelled(component);
+		else if (t.size() == 2 && indexOf(t[1]) >= 0)
+		{
+			field   = spelled(t[0]);
+			element = elementName(t[0], indexOf(t[1]));
+		}
+		else
+		{
+			// Nested: the path spelled out, array indices counted from 1.
+			for (std::size_t i = 0; i < t.size(); ++i)
+			{
+				if (i) field += " / ";
+				const int idx = indexOf(t[i]);
+				field += idx >= 0 ? "#" + std::to_string(idx + 1) : spelled(t[i]);
+			}
+		}
+		auto g = std::find_if(groups.begin(), groups.end(),
+		                      [&](const auto& p) { return p.first == field; });
+		if (g == groups.end()) { groups.push_back({ field, {} }); g = groups.end() - 1; }
+		if (!element.empty()) g->second.push_back(element);
+	}
+	std::string out;
+	for (const auto& [field, elements] : groups)
+	{
+		if (!out.empty()) out += ", ";
+		out += field;
+		if (elements.empty()) continue;
+		out += " (";
+		for (std::size_t i = 0; i < elements.size(); ++i)
+		{
+			if (i) out += ", ";
+			out += elements[i];
+		}
+		out += ")";
+	}
+	return out;
 }
 
 } // namespace EditorMultiEdit
