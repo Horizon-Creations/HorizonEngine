@@ -1823,6 +1823,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	}
 	HE_LOG_INFO(Asset, "Saved asset '%s' (type %u) to '%s'",
 	            asset.path.c_str(), static_cast<unsigned>(typeId), fullPath.c_str());
+	noteContentChanged();   // may be the file somebody looked for and did not find
 
 	// Tell whoever is listening that this asset's bytes changed. Fired only on a
 	// successful write, so a collaboration session never publishes a save that

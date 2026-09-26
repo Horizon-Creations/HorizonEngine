@@ -534,8 +534,13 @@ void EditorUI::render(AppContext& ctx, float dt)
                 ctx.globalState->refreshContentFolder();
                 ctx.globalState->refreshSourceFolder();
                 if (ctx.contentManager)
+                {
                     ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot(),
                                                           ctx.contentManager->contentRoot());
+                    // Whatever was looked for and not found may be here now
+                    // (a mesh's slot material imported after the mesh).
+                    ctx.contentManager->noteContentChanged();
+                }
                 ctx.contentRefreshPending = false;
                 ctx.contentRefreshDone    = true;
             }
