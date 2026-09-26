@@ -8084,7 +8084,7 @@ void MetalRenderer::EnsureGIProbeGrid()
 	// added/removed, or a mesh rebuilt via InvalidateMesh) — never on motion
 	// alone (GIProbeGrid.h).
 	const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
-	if (m_giProbeGridBuilt && sig == m_giGridSceneSig && !m_giGridRecheck) return;
+	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
 	// m_renderWorld was re-extracted by EncodeGIAccelBuild's m_extractor.extract()
 	// call earlier this frame, which creates BRAND NEW RenderObjects whose
@@ -8111,8 +8111,7 @@ void MetalRenderer::EnsureGIProbeGrid()
 		bounds.min = glm::vec3(-10.0f);
 		bounds.max = glm::vec3(10.0f);
 	}
-	m_giGridSceneSig = sig;
-	m_giGridRecheck  = unresolved > 0; // keep looking until every mesh resolved
+	if (!m_giGridTrack.shouldEvaluate(m_giProbeGridBuilt, sig, unresolved)) return;
 
 	if (m_giProbeGridBuilt)
 	{
@@ -15345,7 +15344,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			}
 			// A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the
 			// scene box without changing which objects exist → re-check the fit.
-			if (!m_pendingMeshInvalidations.empty()) m_giGridRecheck = true;
+			if (!m_pendingMeshInvalidations.empty()) m_giGridTrack.meshRebuilt = true;
 			m_pendingMeshInvalidations.clear();
 
 			// Same for textures rewritten in place (landscape weightmap paints).

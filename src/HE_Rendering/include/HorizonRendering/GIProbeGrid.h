@@ -17,18 +17,21 @@
 // after the first props never made it in at all.
 //
 // Now: the spacing grows past 4 m until the whole scene box fits a fixed probe
-// BUDGET (10³ = the old worst case, so memory and per-frame cost are unchanged),
+// BUDGET (10³ = the old worst case, so probe count and atlas memory stay
+// bounded; the probe rays' max distance grows with the grid, though),
 // with a per-axis cap of 32 instead of 10 so a flat landscape spends its probes
 // horizontally. Scenes the old grid already covered fit bit-identically (same
 // 4 m spacing, same counts, same centred origin). The spacing reaches the
 // shaders through gridOrigin.w, which every kernel already reads — no shader
 // change.
 //
-// Refit policy: the backends re-check only when the scene's GEOMETRY changed
-// (objects added/removed → GIProbeSceneSignature, a mesh rebuilt through
-// InvalidateMesh: sculpt, terrain LOD/tessellation, or meshes whose bounds were
-// not resolvable yet at the last check), never on motion alone — a
-// physics body falling off the world must not drag the grid after it. A re-check
+// Refit policy (GIProbeGridTracker): the backends re-check only when the
+// scene's GEOMETRY changed — objects added/removed (GIProbeSceneSignature), a
+// mesh rebuilt through InvalidateMesh (sculpt, terrain LOD/tessellation), or a
+// mesh whose bounds were unresolvable at the last check has resolved since —
+// never on motion alone: a physics body falling off the world must not drag
+// the grid after it, even while some other object's bounds stay unresolvable
+// for good (a broken mesh reference). A re-check
 // refits only when the scene box pokes out of the grid by more than half a
 // spacing, or when the scene shrank enough that a fresh fit would be at least
 // twice as fine. A refit recreates the probe atlases, so indirect light
@@ -97,8 +100,8 @@ inline GIProbeGridFit FitGIProbeGrid(const AABB& box,
 // Union of every object's world bounds (callers refresh worldBounds from the
 // real mesh bounds first — the extractor seeds proxies). `unresolved` counts
 // objects left out because their bounds are invalid (mesh not uploaded yet):
-// while that is non-zero the backends keep re-checking every frame, since the
-// signature alone would not notice those meshes arriving.
+// the signature alone would not notice those meshes arriving, so the tracker
+// watches this count.
 inline AABB GIProbeSceneBounds(const std::vector<RenderObject>& objects, int* unresolved = nullptr)
 {
 	AABB box;
@@ -127,6 +130,37 @@ inline uint64_t GIProbeSceneSignature(const std::vector<RenderObject>& objects)
 	}
 	return sum;
 }
+
+// Per-backend bookkeeping for the re-check triggers above. Usage, per frame:
+//   if (tracker.canSkip(built, sig)) return;          // O(1), the usual frame
+//   … refresh worldBounds, box = GIProbeSceneBounds(objects, &unresolved) …
+//   if (!tracker.shouldEvaluate(built, sig, unresolved)) return;
+//   … GIProbeGridNeedsRefit / FitGIProbeGrid …
+// and `meshRebuilt = true` from the backend's InvalidateMesh drain.
+struct GIProbeGridTracker
+{
+	uint64_t sig         = 0;     // GIProbeSceneSignature at the last evaluation
+	int      unresolved  = 0;     // objects with invalid bounds at the last evaluation
+	bool     meshRebuilt = false; // set by the InvalidateMesh drain
+
+	// Nothing that could move the fit happened: skip without touching bounds.
+	bool canSkip(bool built, uint64_t s) const
+	{
+		return built && s == sig && !meshRebuilt && unresolved == 0;
+	}
+	// Bounds are known now — is a (re)fit decision due? Records the new state.
+	// Pending unresolved objects alone only count once some of them RESOLVED;
+	// otherwise a permanently unresolvable one would re-check every frame and
+	// let plain motion refit the grid.
+	bool shouldEvaluate(bool built, uint64_t s, int nowUnresolved)
+	{
+		const bool due = !built || s != sig || meshRebuilt || nowUnresolved < unresolved;
+		sig         = s;
+		unresolved  = nowUnresolved;
+		meshRebuilt = false;
+		return due;
+	}
+};
 
 // Should an existing grid be replaced for this scene box? See the policy above.
 inline bool GIProbeGridNeedsRefit(const GIProbeGridFit& current, const AABB& box)

@@ -1205,8 +1205,7 @@ private:
 	int   m_giProbeCount   = 0;                  // gridCounts.x*y*z
 	int   m_giProbesPerRow = 0;                  // atlas tile layout (ceil(sqrt(probeCount)))
 	bool  m_giProbeGridBuilt = false;            // built lazily; refit when the scene's geometry leaves it
-	uint64_t m_giGridSceneSig = 0;               // GIProbeSceneSignature at the last fit/check
-	bool  m_giGridRecheck = false;               // a mesh was rebuilt → re-check the fit
+	HE::GIProbeGridTracker m_giGridTrack; // when to re-check the fit (GIProbeGrid.h)
 	int   m_giProbeUpdateCursor = 0;             // round-robin index into [0, probeCount) for frame-sliced updates
 	void* m_giProbeUpdatePipeline = nullptr;     // id<MTLComputePipelineState>
 	void* m_giIrradianceAtlas = nullptr;         // id<MTLTexture> RGBA16F, read_write (in-place EMA blend)

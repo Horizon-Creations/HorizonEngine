@@ -3112,7 +3112,7 @@ struct D3D12RendererImpl
                 destroyGiAccel();
             // A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the
             // scene box without changing which objects exist → re-check the fit.
-            giGridRecheck = true;
+            giGridTrack.meshRebuilt = true;
 #if HE_D3D12_DXR
             // The DXR BLAS cache is per-mesh — retire just this entry (frames
             // in flight may still trace against it); it rebuilds lazily.
@@ -5439,8 +5439,7 @@ struct D3D12RendererImpl
     float giProbeSpacing = HE::kGIProbeMinSpacing; // metres; grows with the scene (GIProbeGrid.h)
     int  giProbeCount = 0, giProbesPerRow = 0, giProbeCursor = 0;
     bool giProbeGridBuilt = false;
-    uint64_t giGridSceneSig = 0;     // GIProbeSceneSignature at the last fit/check
-    bool     giGridRecheck  = false; // a mesh was rebuilt → re-check the fit
+    HE::GIProbeGridTracker giGridTrack; // when to re-check the fit (GIProbeGrid.h)
     ComPtr<ID3D12Resource> giIrrTex, giVisTex, giIrrPrevTex, giVisPrevTex;
     D3D12_RESOURCE_STATES  giIrrState     = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES  giVisState     = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -6134,13 +6133,12 @@ struct D3D12RendererImpl
     {
         if (rw.objects.empty()) return;
         const uint64_t sig = HE::GIProbeSceneSignature(rw.objects);
-        if (giProbeGridBuilt && sig == giGridSceneSig && !giGridRecheck) return;
+        if (giGridTrack.canSkip(giProbeGridBuilt, sig)) return;
 
         int unresolved = 0;
         const HE::AABB sceneBox = HE::GIProbeSceneBounds(rw.objects, &unresolved);
         if (!sceneBox.isValid()) return;
-        giGridSceneSig = sig;
-        giGridRecheck  = unresolved > 0; // keep looking until every mesh resolved
+        if (!giGridTrack.shouldEvaluate(giProbeGridBuilt, sig, unresolved)) return;
 
         if (giProbeGridBuilt)
         {

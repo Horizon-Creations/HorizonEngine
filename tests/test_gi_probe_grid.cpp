@@ -172,3 +172,43 @@ TEST_CASE("GI probe grid: scene signature tracks geometry, not motion")
 	HE::GIProbeSceneBounds(scene, &unresolved);
 	CHECK(unresolved == 0);
 }
+
+TEST_CASE("GI probe grid: tracker re-checks on geometry, never on motion alone")
+{
+	HE::GIProbeGridTracker t;
+	const uint64_t sig = 42;
+
+	// First frame: nothing built yet → evaluate, whatever the counts.
+	CHECK_FALSE(t.canSkip(false, sig));
+	CHECK(t.shouldEvaluate(false, sig, 0));
+	// Built, same objects, nothing rebuilt → the O(1) skip.
+	CHECK(t.canSkip(true, sig));
+	// Objects added/removed → evaluate.
+	CHECK_FALSE(t.canSkip(true, sig + 1));
+	CHECK(t.shouldEvaluate(true, sig + 1, 0));
+	// A mesh rebuilt in place (sculpt, tessellation) → evaluate once.
+	t.meshRebuilt = true;
+	CHECK_FALSE(t.canSkip(true, sig + 1));
+	CHECK(t.shouldEvaluate(true, sig + 1, 0));
+	CHECK(t.canSkip(true, sig + 1));
+}
+
+TEST_CASE("GI probe grid: a permanently unresolvable object does not turn motion into refits")
+{
+	HE::GIProbeGridTracker t;
+	const uint64_t sig = 7;
+	// Two meshes not resident yet at the first fit.
+	CHECK(t.shouldEvaluate(false, sig, 2));
+	// While some stay unresolved the backend has to look at bounds every frame…
+	CHECK_FALSE(t.canSkip(true, sig));
+	// …but with nothing newly resolved (only things moved) no decision is due.
+	for (int frame = 0; frame < 100; ++frame)
+		CHECK_FALSE(t.shouldEvaluate(true, sig, 2));
+	// One of them arrives → evaluate (the grid may now need to grow).
+	CHECK(t.shouldEvaluate(true, sig, 1));
+	// The other is a broken reference and never resolves: still no churn.
+	for (int frame = 0; frame < 100; ++frame)
+		CHECK_FALSE(t.shouldEvaluate(true, sig, 1));
+	// Geometry changes are still seen through it.
+	CHECK(t.shouldEvaluate(true, sig + 1, 1));
+}

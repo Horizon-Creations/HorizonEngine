@@ -2650,8 +2650,7 @@ struct D3D11RendererImpl
     float giProbeSpacing = HE::kGIProbeMinSpacing; // metres; grows with the scene (GIProbeGrid.h)
     int  giProbeCount = 0, giProbesPerRow = 0, giProbeCursor = 0;
     bool giProbeGridBuilt = false;
-    uint64_t giGridSceneSig = 0;     // GIProbeSceneSignature at the last fit/check
-    bool     giGridRecheck  = false; // a mesh was rebuilt → re-check the fit
+    HE::GIProbeGridTracker giGridTrack; // when to re-check the fit (GIProbeGrid.h)
     ComPtr<ID3D11Texture2D>           giIrrTex, giVisTex, giIrrPrevTex, giVisPrevTex;
     ComPtr<ID3D11ShaderResourceView>  giIrrSRV, giVisSRV, giIrrPrevSRV, giVisPrevSRV;
     ComPtr<ID3D11UnorderedAccessView> giIrrUAV, giVisUAV;
@@ -2925,13 +2924,12 @@ struct D3D11RendererImpl
     {
         if (rw.objects.empty()) return;
         const uint64_t sig = HE::GIProbeSceneSignature(rw.objects);
-        if (giProbeGridBuilt && sig == giGridSceneSig && !giGridRecheck) return;
+        if (giGridTrack.canSkip(giProbeGridBuilt, sig)) return;
 
         int unresolved = 0;
         const HE::AABB sceneBox = HE::GIProbeSceneBounds(rw.objects, &unresolved);
         if (!sceneBox.isValid()) return;
-        giGridSceneSig = sig;
-        giGridRecheck  = unresolved > 0; // keep looking until every mesh resolved
+        if (!giGridTrack.shouldEvaluate(giProbeGridBuilt, sig, unresolved)) return;
 
         if (giProbeGridBuilt)
         {
@@ -4282,7 +4280,7 @@ struct D3D11RendererImpl
         }
         // A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the scene
         // box without changing which objects exist → re-check the probe grid fit.
-        if (!pendingMeshInval.empty()) giGridRecheck = true;
+        if (!pendingMeshInval.empty()) giGridTrack.meshRebuilt = true;
         pendingMeshInval.clear();
     }
 

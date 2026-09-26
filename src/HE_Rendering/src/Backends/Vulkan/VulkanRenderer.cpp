@@ -4855,7 +4855,7 @@ void VulkanRenderer::processPendingInvalidations()
     }
     // A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the scene
     // box without changing which objects exist → re-check the probe grid fit.
-    if (!m_pendingMeshInval.empty()) m_giGridRecheck = true;
+    if (!m_pendingMeshInval.empty()) m_giGridTrack.meshRebuilt = true;
     m_pendingMeshInval.clear();
 }
 
@@ -7964,13 +7964,12 @@ void VulkanRenderer::ensureGiProbeGrid()
 {
     if (m_renderWorld.objects.empty()) return;
     const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
-    if (m_giProbeGridBuilt && sig == m_giGridSceneSig && !m_giGridRecheck) return;
+    if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
     int unresolved = 0;
     const HE::AABB sceneBox = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
     if (!sceneBox.isValid()) return;
-    m_giGridSceneSig = sig;
-    m_giGridRecheck  = unresolved > 0; // keep looking until every mesh resolved
+    if (!m_giGridTrack.shouldEvaluate(m_giProbeGridBuilt, sig, unresolved)) return;
 
     if (m_giProbeGridBuilt)
     {

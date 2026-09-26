@@ -982,8 +982,7 @@ private:
 	float m_giProbeSpacing = HE::kGIProbeMinSpacing; // metres; grows with the scene (GIProbeGrid.h)
 	int  m_giProbeCount = 0, m_giProbesPerRow = 0, m_giProbeCursor = 0;
 	bool m_giProbeGridBuilt = false;
-	uint64_t m_giGridSceneSig = 0;     // GIProbeSceneSignature at the last fit/check
-	bool     m_giGridRecheck  = false; // a mesh was rebuilt → re-check the fit
+	HE::GIProbeGridTracker m_giGridTrack; // when to re-check the fit (GIProbeGrid.h)
 	GiImage m_giIrrAtlas, m_giVisAtlas;
 	// Per-in-flight-frame descriptor sets + params UBOs (sets are rewritten each
 	// frame BEFORE recording — safe because that slot's fence was waited on).

@@ -310,8 +310,9 @@ alte Grid-Kante, nur roter Untergrund): **links 0,850, rechts 0,678**.
 fünf Backends benutzt statt fünf Kopien:
 
 - `FitGIProbeGrid`: Abstand ab 4 m in 5-%-Schritten vergrößern, bis die ganze Szene-Box mit einer
-  Spacing Rand in ein **Budget von 1000 Sonden** passt (= alter Höchstwert 10³, Speicher und
-  Kosten pro Frame bleiben gleich), höchstens 32 pro Achse (flaches Terrain bekommt die Sonden
+  Spacing Rand in ein **Budget von 1000 Sonden** passt (= alter Höchstwert 10³; Sondenzahl und
+  Atlas-Speicher bleiben begrenzt, die maximale Strahllänge der Sonden wächst aber mit dem Grid,
+  im Witness von ~52 m auf ~190 m, also teurere SW-BVH-Strahlen), höchstens 32 pro Achse (flaches Terrain bekommt die Sonden
   in die Breite). Immer zentriert, auch Metal (verankerte bisher an `bounds.min`). Szenen, die das
   alte Grid schon abdeckte, fitten **bit-gleich** (gleiche Formel, gleiche Reihenfolge;
   Unit-Test gegen die alte Formel).
@@ -319,11 +320,14 @@ fünf Backends benutzt statt fünf Kopien:
   gi_probe*.comp/.hlsl, Metal-MSL, `MaterialShaderLibrary`, GL/D3D-Strings) liest ihn schon dort.
   **Keine Shader-Änderung.** `kGIProbeSpacing`/`kGIMaxProbesPerAxis` sind aus allen Backends raus,
   ersetzt durch ein Member (`m_giProbeSpacing` bzw. `giProbeSpacing`).
-- **Neu-Einpassen statt einmalig:** geprüft wird nur, wenn sich die *Geometrie* ändert:
-  Objekt-Signatur (Entity + Mesh, reihenfolgeunabhängig, bewusst blind für Transforms),
-  `InvalidateMesh` (Sculpt, LOD-/Tessellationsstufen) oder solange noch Objekte mit ungültigen
-  Bounds fehlen (Mesh noch nicht hochgeladen: die zweite Lesart aus 4). Reine Bewegung löst nichts
-  aus; ein aus der Welt fallender Körper bläht das Grid nicht auf. Neu eingepasst wird, wenn die
+- **Neu-Einpassen statt einmalig** (`GIProbeGridTracker`): geprüft wird nur, wenn sich die
+  *Geometrie* ändert: Objekt-Signatur (Entity + Mesh, reihenfolgeunabhängig, bewusst blind für
+  Transforms), `InvalidateMesh` (Sculpt, LOD-/Tessellationsstufen) oder wenn Objekte, deren Bounds
+  bei der letzten Prüfung ungültig waren (Mesh noch nicht resident: die zweite Lesart aus 4),
+  inzwischen **aufgelöst** sind. Reine Bewegung löst nichts aus, auch nicht, solange ein anderes
+  Objekt dauerhaft unauflösbar bleibt (kaputte Mesh-Referenz; der Extractor lässt Foliage-, Seil-
+  und nicht residente Bounds absichtlich ungültig); ein aus der Welt fallender Körper bläht das
+  Grid nicht auf. Neu eingepasst wird, wenn die
   Box mehr als eine halbe Spacing über das Grid ragt oder ein frischer Fit mindestens doppelt so
   fein wäre (Szene stark geschrumpft). Atlas-Neuanlage: GL/D3D11/Metal direkt (Referenzzählung),
   D3D12 legt die alten Atlanten über `m_retiredTextures` still (Descriptor-Slots erst nach
@@ -340,17 +344,28 @@ Terrain bei x = 170 dazu → auf GL, D3D11, D3D12 (mit `HE_GPU_DEBUG=1`) und Vul
 `22x4x11 (968 probes), spacing 14.222674`, Bild weiter sauber; D3D12-Debug-Layer nur mit dem
 bekannten „Ignoring InitialState“-Hinweis, Vulkan-Validierung nach Art und Anzahl identisch zum
 Lauf ohne Neu-Einpassen (alles vorbestehend, siehe unten). Unit-Tests `tests/test_gi_probe_grid.cpp`
-(5 Fälle), volle Suite Release 3768/3768 grün. **Metal: hier weder gebaut noch gesehen**, nur
+(7 Fälle, inkl. Tracker: 100 Frames Bewegung bei dauerhaft unaufgelöstem Objekt → keine
+Neubewertung), volle Suite Release grün (3768/3768 vor dem Tracker-Nachzug; danach die 7
+Grid-Fälle und der Refit-Zeuge auf allen vier Backends erneut). `HE_DUMP_SHADOWINSTTEST` mit
+Kameradrehung (`MBYAWSTEP`): genau eine Grid-Zeile, `11x4x11` bei 4 m (der Boden ist knapp über
+36 m, das alte Grid schnitt ihn bei 10 ab), kein Churn.
+
+**Unbemaltes Terrain auf D3D11/Vulkan** (Default-Terrain-Material ist reines PBR, also der
+eingebaute Scene-Shader, der DDGI auf allen Backends sampelt): Refit-Zeuge, Kamera über dem zweiten
+Terrain (`CAMX=170`), GI-an/GI-aus Mitte gegen Ränder: GL 0,851 / 0,837–0,840, D3D11
+0,894 / 0,862–0,867, Vulkan 0,938 / 0,892–0,897, also kein dunkler Rand; auf D3D11 ist das
+Sondengitter (~14 m) als schwaches Fleckmuster über die ganze Terrainbreite zu sehen. (Kein A/B
+gegen die Baseline auf diesen Backends, weil der Zeuge erst mit diesem Schritt existiert.) **Metal: hier weder gebaut noch gesehen**, nur
 macOS-CI; dort ändert sich zusätzlich die Verankerung (zentriert statt `bounds.min`).
 
-**Bounce vom Terrain:** Terrain-Chunks sind `StaticMeshAsset`s mit CPU-Vertices und laufen über
+**Bounce vom Terrain (code-gelesen, nicht gemessen):** Terrain-Chunks sind `StaticMeshAsset`s mit CPU-Vertices und laufen über
 denselben `castsShadow`-Filter in BLAS/TLAS aller Backends; `InvalidateMesh` verwirft den BLAS-Cache
 (Sculpt bleibt korrekt, Cache wächst nicht). Sie werfen also GI-Schatten und liefern Bounce-Licht
 (mit der flachen Instanzfarbe, siehe `GiLandscape.h`).
 
 **Offen (nicht in diesem Schritt, belegt):**
 
-1. **Graph-Materialien bekommen auf D3D11/D3D12/Vulkan kein DDGI.** Nur GL
+1. **Bemalte Terrains bekommen auf D3D11/D3D12/Vulkan kein DDGI (Graph-Materialien generell).** Nur GL
    (`OpenGLRenderer.cpp`, `lit.giProbe`) und Metal füllen `giGridOrigin/giGridCounts/giProbe` im
    Material-Lichtpräfix; D3D11/D3D12/Vulkan lassen `giProbe.y = 0`, der Material-Shader nimmt dann
    Sky-Ambient. Jedes **bemalte** Terrain ist ein Graph-Material (`LandscapeLayerBlend`), bekommt
