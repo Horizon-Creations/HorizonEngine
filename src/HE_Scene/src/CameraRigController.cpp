@@ -10,6 +10,7 @@
 #include "HorizonScene/Components/MeshComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/NameComponent.h"
+#include "HorizonScene/EngineApi.h"   // settings: the player's stick look over the rig's
 #include <Application/Input.h>
 #include <Diagnostics/Log.h>
 
@@ -351,9 +352,15 @@ CameraRigController::Frame CameraRigController::update(HorizonWorld& world,
     // speed depends on the framerate. Same sign convention as the mouse (SDL
     // stick Y positive = down); stickInvertY flips pitch only, the way every
     // "invert look" option means it.
-    const float stickDeg = rig.stickSensitivity * look.dt;
+    //
+    // The PLAYER's settings sit on top (camera.setStickSensitivityScale /
+    // setStickInvertY): the speed as a scale on the rig's own, so rigs keep
+    // their designed difference; invert as a replacement once chosen.
+    const HE::api::settings::Values& player = HE::api::settings::values();
+    const float stickDeg = rig.stickSensitivity * player.stickSensitivityScale.value_or(1.0f) * look.dt;
+    const bool  invertY  = player.stickInvertY.value_or(rig.stickInvertY);
     rig.yaw   -= look.stickX * stickDeg;
-    rig.pitch -= look.stickY * stickDeg * (rig.stickInvertY ? -1.0f : 1.0f);
+    rig.pitch -= look.stickY * stickDeg * (invertY ? -1.0f : 1.0f);
     rig.pitch  = std::clamp(rig.pitch, rig.pitchMin, rig.pitchMax);
 
     // Keep yaw in (-180, 180] so it neither drifts into float mush over a long

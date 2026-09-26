@@ -26,6 +26,9 @@
 #include <Application/InputAssets.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HcClassResolve.h>
+#include <HorizonCode/HorizonCodeRuntime.h>
+#include <UIWidget/WidgetManager.h>
+#include <UIWidget/UIWidgetTree.h>
 
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityHost.h>
@@ -81,6 +84,9 @@ TEST_CASE("third person: the six assets a player is made of are all on disk")
 	CHECK(fs::exists(content / "Input" / "Look.hasset"));
 	CHECK(fs::exists(content / "Input" / "Jump.hasset"));
 	CHECK(fs::exists(content / "Input" / "DefaultMappings.hasset"));
+	// …and the settings menu with the action that opens it (Thema 85, Schritt 5).
+	CHECK(fs::exists(content / "Input" / "Menu.hasset"));
+	CHECK(fs::exists(content / "UI" / "SettingsMenu.hasset"));
 
 	// The preset survives in the manifest, so a reopened project still knows
 	// which template it came from.
@@ -219,9 +225,11 @@ TEST_CASE("third person: the controller graph really spawns and possesses")
 	REQUIRE(HorizonCode::fromJson(a->graphJson, g));
 
 	// Every node survived the round trip. fromJson drops an unrecognised type
-	// silently, so the count IS the assertion.
-	CHECK(g.nodes.size() == 5);
-	CHECK(g.links.size() == 5);
+	// silently, so the count IS the assertion. 5 + 5 are the spawn-and-possess
+	// literal; 8 nodes and 9 links more are the settings menu (created after
+	// Possess, shown by the Menu action — see the settings-menu case below).
+	CHECK(g.nodes.size() == 5 + 8);
+	CHECK(g.links.size() == 5 + 9);
 
 	const HorizonCode::Node* spawn = nullptr;
 	const HorizonCode::Node* possess = nullptr;
@@ -346,8 +354,8 @@ TEST_CASE("third person: the default mappings bind stick and mouse through the r
 	const std::string mappingJson = ctx->json;   // the pool may move on the next load
 
 	InputMapping m;
-	// Move, Look and Jump. Before the fix Look lost every row and was not bound.
-	CHECK(HE::applyInputMappingContext(m, mappingJson) == 3);
+	// Move, Look, Jump and Menu. Before the fix Look lost every row and was not bound.
+	CHECK(HE::applyInputMappingContext(m, mappingJson) == 4);
 
 	// Left stick right and up: Move follows, with up as NEGATIVE Y — the same
 	// forward the W key is signed for (see the sign-chain test above).
@@ -640,6 +648,277 @@ TEST_CASE("third person: picking another language does not produce a project wit
 	const json manifest = json::parse(in, nullptr, false);
 	REQUIRE_FALSE(manifest.is_discarded());
 	CHECK(manifest.value("scriptLanguage", std::string()) == "HorizonCode");
+}
+
+// ── The settings menu (Thema 85, Schritt 5) ─────────────────────────────────
+// Every Engine Call node in the template's graphs carries its params BY HAND
+// (HE_Tools does not link the registry), and a param list that disagrees with
+// the row shifts pins or drops values without a word. So each one is held
+// against the registry here.
+//
+// MUTATION: in ProjectManager.cpp, declare input.setStickDeadzone's param as
+// Int — the menu still loads and the slider moves nothing.
+TEST_CASE("third person: every engine call in the template matches its registry row")
+{
+	const auto root = makeProject("he_tps_rows", "Starter");
+	ContentManager cm((root / "Content").string());
+
+	std::vector<std::string> graphs;
+	if (const auto* a = cm.getHorizonCodeClass(cm.loadAsset("Gameplay/PlayerController.hasset")))
+		graphs.push_back(a->graphJson);
+	if (const auto* a = cm.getHorizonCodeClass(cm.loadAsset("Gameplay/PlayerCharacter.hasset")))
+		graphs.push_back(a->graphJson);
+	if (const auto* w = cm.getWidget(cm.loadAsset("UI/SettingsMenu.hasset")))
+		graphs.push_back(w->graphJson);
+	REQUIRE(graphs.size() == 3);
+
+	int checked = 0;
+	for (const std::string& json : graphs)
+	{
+		HorizonCode::Graph g;
+		REQUIRE(HorizonCode::fromJson(json, g));
+		for (const HorizonCode::Node& n : g.nodes)
+		{
+			if (n.type != HorizonCode::NodeType::EngineCall) continue;
+			INFO("row: " << n.s);
+			const HE::api::ApiFn* fn = HE::api::find(n.s);
+			REQUIRE(fn != nullptr);
+			CHECK(n.hasArg == fn->isExec);
+			REQUIRE(n.params.size() == fn->params.size());
+			for (size_t i = 0; i < n.params.size(); ++i)
+			{
+				CHECK(n.params[i].name == fn->params[i].name);
+				CHECK(n.params[i].type == fn->params[i].type);
+			}
+			REQUIRE(n.results.size() == fn->results.size());
+			for (size_t i = 0; i < n.results.size(); ++i)
+				CHECK(n.results[i].type == fn->results[i].type);
+			++checked;
+		}
+	}
+	CHECK(checked > 25);   // the menu's rows are all there, not just the character's
+}
+
+// The menu end to end: the real widget asset, created through the real
+// WidgetManager, its graph run by a runtime wired to the engine API the way the
+// game wires it. Events are fired the way pointer input fires them.
+//
+// MUTATION: in settingsMenuGraphJson, wire the deadzone slider's event to
+// camera.setStickSensitivityScale — every check on the deadzone goes red.
+TEST_CASE("third person: the settings menu drives the player settings and the bindings")
+{
+	namespace api = HE::api;
+	const auto root = makeProject("he_tps_settings", "Starter");
+	ContentManager cm((root / "Content").string());
+	HorizonWorld world;
+
+	HorizonCode::Runtime runtime;
+	{
+		HorizonCode::Runtime::Services svc;
+		svc.callApi = [&](HorizonCode::InstanceId, const std::string& id,
+		                  const std::vector<HorizonCode::Value>& args)
+			-> std::vector<HorizonCode::Value>
+		{
+			const api::ApiFn* fn = api::find(id);
+			if (!fn) return {};
+			api::Ctx c{ &world, nullptr, &cm };
+			return fn->invoke(c, args);
+		};
+		// The widget lifecycle nodes, as the game wires them — Back hides the
+		// menu through Hide Widget, not through a row.
+		svc.showWidget = [&](int id) { world.widgets().showWidget(id); };
+		svc.hideWidget = [&](int id) { world.widgets().hideWidget(id); };
+		runtime.setServices(std::move(svc));
+	}
+	world.widgets().setRuntime(&runtime);
+
+	// A clean store, a sandbox for save, and a binding service standing in for
+	// the session's PlayerHost.
+	api::settings::uninstall();
+	api::settings::resetToDefaults();
+	const auto sandbox = fs::temp_directory_path() / "he_tps_settings_prefs";
+	he_test::removeAllQuiet(sandbox);
+	api::fs::setSandboxRoot(sandbox.string());
+	api::Ctx ctx;
+	api::prefs::remove(ctx, api::settings::kPrefsKey);
+
+	std::vector<std::string> bindCalls;
+	bool listening = false;
+	std::string kbName = "Space";
+	api::input::setBindingService({
+		[&](const std::string& a, const std::string& d)
+		{ bindCalls.push_back("begin " + a + " " + d); listening = true; return true; },
+		[&]() { listening = false; },
+		[&]() { return listening; },
+		[&]() { return std::string(); },
+		[&](const std::string& a, const std::string& d)
+		{ return a == "Jump" ? (d == "keyboard" ? kbName : std::string("A (South)")) : std::string(); },
+		[&]() { bindCalls.push_back("reset"); },
+		[&]() { bindCalls.push_back("save"); return true; } });
+
+	WidgetManager& wm = world.widgets();
+	const int menu = wm.createWidget(cm, "UI/SettingsMenu.hasset");
+	REQUIRE(menu != 0);
+	wm.showWidget(menu);
+	const HE::UIWidgetTree* tree = wm.tree(menu);
+	REQUIRE(tree != nullptr);
+	auto byName = [&](const char* name)
+	{
+		for (const auto& e : tree->elements)
+			if (e && e->name == name) return e->id;
+		FAIL("no element " << name);
+		return 0;
+	};
+	auto labelOf = [&](int button)
+	{
+		for (const auto& e : tree->elements)
+			if (e && e->parentId == button) return e->id;
+		return 0;
+	};
+	auto prop = [&](int elem, const char* name) { return tree->find(elem)->getPropAny(name); };
+	const int deadzone = byName("DeadzoneSlider"), sens = byName("SensitivitySlider");
+	const int invert = byName("InvertCheck"), vsync = byName("VSyncCheck");
+	const int full = byName("FullscreenCheck"), volume = byName("VolumeSlider");
+	const int reset = byName("Reset"), back = byName("Back");
+	const int kb = byName("JumpKeyboardButton"), pad = byName("JumpGamepadButton");
+
+	// Construct filled the controls from the API — and choosing nothing: a
+	// property set fires no event, so no value became the player's.
+	CHECK(prop(deadzone, "Value").f == doctest::Approx(0.15f));
+	CHECK(prop(sens, "Value").f == doctest::Approx(1.0f));
+	CHECK(prop(vsync, "Checked").b);
+	CHECK_FALSE(api::settings::values().stickDeadzone.has_value());
+	CHECK_FALSE(api::settings::values().vsync.has_value());
+	CHECK(api::settings::values().volumes.empty());
+	CHECK(prop(labelOf(kb), "Text").s == "Space");
+
+	// Each control reaches its row.
+	runtime.fireOnValueChanged(menu, deadzone, 0.3f);
+	CHECK(api::input::stickDeadzone() == doctest::Approx(0.3f));
+	runtime.fireOnValueChanged(menu, sens, 2.0f);
+	CHECK(api::camera::stickSensitivityScale() == doctest::Approx(2.0f));
+	runtime.fireOnCheckChanged(menu, invert, true);
+	CHECK(api::camera::stickInvertY());
+	runtime.fireOnCheckChanged(menu, vsync, false);
+	CHECK_FALSE(api::app::vsync());
+	runtime.fireOnCheckChanged(menu, full, true);
+	CHECK(api::app::isFullscreen());
+	runtime.fireOnValueChanged(menu, volume, 0.4f);
+	CHECK(api::settings::volume("Master") == doctest::Approx(0.4f));
+
+	// Rebinding: the button starts the capture on its device and says so; the
+	// label follows the binding again once the capture is over (Tick).
+	runtime.fireOnClicked(menu, kb);
+	REQUIRE(!bindCalls.empty());
+	CHECK(bindCalls.back() == "begin Jump keyboard");
+	CHECK(prop(labelOf(kb), "Text").s == "Press a key...");
+	wm.tick(0.016f);
+	CHECK(prop(labelOf(kb), "Text").s == "Press a key...");   // still listening
+	listening = false;
+	kbName = "C";
+	wm.tick(0.016f);
+	CHECK(prop(labelOf(kb), "Text").s == "C");
+	runtime.fireOnClicked(menu, pad);
+	CHECK(bindCalls.back() == "begin Jump gamepad");
+	listening = false;
+
+	// Back: settings and bindings saved, the game's input back, the menu gone.
+	api::input::setModeUIOnly();
+	runtime.fireOnClicked(menu, back);
+	CHECK(api::prefs::has(ctx, api::settings::kPrefsKey));
+	CHECK(bindCalls.back() == "save");
+	CHECK(api::input::mode() == api::input::Mode::GameOnly);
+	CHECK_FALSE(wm.isVisible(menu));
+
+	// Reopening: the controller calls Refresh through widget.callFunction, and
+	// the controls then show the player's values. Firing an event moves no
+	// control, so without this the reset checks below would pass on their own.
+	wm.showWidget(menu);
+	{
+		const api::ApiFn* callFn = api::find("widget.callFunction");
+		REQUIRE(callFn != nullptr);
+		api::Ctx c{ &world, nullptr, &cm };
+		const auto r = callFn->invoke(c, { HorizonCode::Value::ofRef((uint32_t)menu),
+		                                   HorizonCode::Value::ofString("Refresh") });
+		REQUIRE(!r.empty());
+		CHECK(r[0].b);
+	}
+	CHECK(prop(deadzone, "Value").f == doctest::Approx(0.3f));
+	CHECK(prop(sens, "Value").f == doctest::Approx(2.0f));
+	CHECK(prop(invert, "Checked").b);
+
+	// Reset: the project's values again, and the controls show them.
+	runtime.fireOnClicked(menu, reset);
+	CHECK_FALSE(api::settings::values().stickDeadzone.has_value());
+	CHECK(api::input::stickDeadzone() == doctest::Approx(0.15f));
+	CHECK(std::find(bindCalls.begin(), bindCalls.end(), "reset") != bindCalls.end());
+	CHECK(prop(deadzone, "Value").f == doctest::Approx(0.15f));
+	CHECK(prop(sens, "Value").f == doctest::Approx(1.0f));
+	CHECK_FALSE(prop(invert, "Checked").b);
+
+	api::input::setBindingService({});
+	api::input::setMode(api::input::Mode::GameAndUI);
+	api::prefs::remove(ctx, api::settings::kPrefsKey);
+	api::settings::resetToDefaults();
+	api::fs::setSandboxRoot("");
+	he_test::removeAllQuiet(sandbox);
+}
+
+// The controller opens it: made once after Possess, shown by the Menu action,
+// refreshed, with the game's input off and the mouse free.
+TEST_CASE("third person: the Menu action opens the settings menu")
+{
+	const auto root = makeProject("he_tps_menu", "Starter");
+	ContentManager cm((root / "Content").string());
+	std::string graphJson;
+	{
+		const HorizonCodeClassAsset* a =
+			cm.getHorizonCodeClass(cm.loadAsset("Gameplay/PlayerController.hasset"));
+		REQUIRE(a != nullptr);
+		graphJson = a->graphJson;
+	}
+	HorizonCode::Graph g;
+	REQUIRE(HorizonCode::fromJson(graphJson, g));
+
+	const HorizonCode::Node *create = nullptr, *menu = nullptr, *show = nullptr;
+	for (const HorizonCode::Node& n : g.nodes)
+	{
+		if (n.type == HorizonCode::NodeType::CreateWidget) create = &n;
+		if (n.type == HorizonCode::NodeType::InputAction && n.s == "Menu") menu = &n;
+		if (n.type == HorizonCode::NodeType::ShowWidget) show = &n;
+	}
+	REQUIRE(create != nullptr);
+	REQUIRE(menu != nullptr);
+	REQUIRE(show != nullptr);
+	CHECK(create->s == "UI/SettingsMenu.hasset");
+	CHECK_FALSE(menu->hasArg);   // a button action: Pressed/Released
+	auto linked = [&](int from, int fromPin, int to)
+	{
+		for (const auto& l : g.links)
+			if (l.srcNode == from && l.srcPin == fromPin && l.dstNode == to) return true;
+		return false;
+	};
+	CHECK(linked(menu->id, 0, show->id));   // Pressed → Show Widget
+	// Possess's exec-out (pin 1) → Create Widget: made once the player exists.
+	int possess = 0;
+	for (const HorizonCode::Node& n : g.nodes)
+		if (n.type == HorizonCode::NodeType::EngineCall && n.s == "player.possess") possess = n.id;
+	CHECK(linked(possess, 1, create->id));
+
+	// …and the action is bound, on both devices, through the real loader.
+	const InputMappingContextAsset* ctx =
+		cm.getInputMappingContext(cm.loadAsset("Input/DefaultMappings.hasset"));
+	REQUIRE(ctx != nullptr);
+	const std::string mappingJson = ctx->json;
+	InputMapping m;
+	HE::applyInputMappingContext(m, mappingJson);
+	GamepadFrame padFrame;
+	padFrame.connected = true;
+	padFrame.buttons[SDL_GAMEPAD_BUTTON_START] = true;
+	Input input;
+	input.SetGamepadFrame(padFrame);
+	m.tick(input);
+	CHECK(m.isPressed("Menu"));
 }
 
 // The regression guard the Tutorial preset got when it was added, and for the

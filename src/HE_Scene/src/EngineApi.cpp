@@ -6365,6 +6365,15 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "app.notifyAvailable", "App", false, {}, {{"available", P::Bool}},
             "HE::api::app::notifyAvailable",
             [](Ctx& c, const VV&){ return VV{ Value::ofBool(app::notifyAvailable(c)) }; } });
+        // The player's display settings (settings, PlayerSettings.cpp).
+        t.push_back({ "app.setVSync", "App", true, {{"enabled", P::Bool}}, {}, "HE::api::app::setVSync",
+            [](Ctx&, const VV& a){ app::setVSync(aB(a, 0)); return VV{}; } });
+        t.push_back({ "app.vsync", "App", false, {}, {{"enabled", P::Bool}}, "HE::api::app::vsync",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(app::vsync()) }; } });
+        t.push_back({ "app.setFullscreen", "App", true, {{"fullscreen", P::Bool}}, {}, "HE::api::app::setFullscreen",
+            [](Ctx&, const VV& a){ app::setFullscreen(aB(a, 0)); return VV{}; } });
+        t.push_back({ "app.isFullscreen", "App", false, {}, {{"fullscreen", P::Bool}}, "HE::api::app::isFullscreen",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(app::isFullscreen()) }; } });
         t.push_back({ "app.setAutostart", "App", true, {{"enabled", P::Bool}}, {},
             "HE::api::app::setAutostart",
             [](Ctx& c, const VV& a){ app::setAutostart(c, aB(a, 0)); return VV{}; } });
@@ -6475,6 +6484,17 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ return VV{ Value::ofBool(prefs::remove(c, aS(a, 0))) }; } });
         t.push_back({ "prefs.clear", "Prefs", true, {}, {}, "HE::api::prefs::clear",
             [](Ctx& c, const VV&){ prefs::clear(c); return VV{}; } });
+
+        // Player settings: the store behind input.setStickDeadzone,
+        // camera.setStickSensitivityScale, app.setVSync … and the volume rows.
+        t.push_back({ "settings.setVolume", "Settings", true, {{"bus", P::String}, {"volume", P::Float}}, {}, "HE::api::settings::setVolume",
+            [](Ctx&, const VV& a){ settings::setVolume(aS(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "settings.volume", "Settings", false, {{"bus", P::String}}, {{"volume", P::Float}}, "HE::api::settings::volume",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(settings::volume(aS(a, 0))) }; } });
+        t.push_back({ "settings.save", "Settings", true, {}, {{"ok", P::Bool}}, "HE::api::settings::save",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(settings::save()) }; } });
+        t.push_back({ "settings.resetToDefaults", "Settings", true, {}, {}, "HE::api::settings::resetToDefaults",
+            [](Ctx&, const VV&){ settings::resetToDefaults(); return VV{}; } });
 
         // Date and time — the WALL clock, unlike the time group. Double pins:
         // at today's epoch a float steps in 128 s, so on a Float pin `now` read
@@ -6673,6 +6693,11 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ input::resetBindings(); return VV{}; } });
         t.push_back({ "input.saveBindings", "Input", true, {}, {{"ok", P::Bool}}, "HE::api::input::saveBindings",
             [](Ctx&, const VV&){ return VV{ Value::ofBool(input::saveBindings()) }; } });
+        // The player's deadzone (settings, PlayerSettings.cpp).
+        t.push_back({ "input.setStickDeadzone", "Input", true, {{"deadzone", P::Float}}, {}, "HE::api::input::setStickDeadzone",
+            [](Ctx&, const VV& a){ input::setStickDeadzone(aF(a, 0)); return VV{}; } });
+        t.push_back({ "input.stickDeadzone", "Input", false, {}, {{"deadzone", P::Float}}, "HE::api::input::stickDeadzone",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(input::stickDeadzone()) }; } });
 
         // Input actions by name — the polling twin of the Input.<Action>.*
         // events, pushed by PlayerHost each frame (see input::ActionState).
@@ -6773,6 +6798,16 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ camera::blendTo(c, (Entity)aI(a, 0), aF(a, 1), aI(a, 2)); return VV{}; } });
         t.push_back({ "camera.isBlending", "Camera", false, {}, {{"blending", P::Bool}}, "HE::api::camera::isBlending",
             [](Ctx& c, const VV&){ return VV{ Value::ofBool(camera::isBlending(c)) }; } });
+
+        // The player's stick look over every rig (settings, PlayerSettings.cpp).
+        t.push_back({ "camera.setStickSensitivityScale", "Camera", true, {{"scale", P::Float}}, {}, "HE::api::camera::setStickSensitivityScale",
+            [](Ctx&, const VV& a){ camera::setStickSensitivityScale(aF(a, 0)); return VV{}; } });
+        t.push_back({ "camera.stickSensitivityScale", "Camera", false, {}, {{"scale", P::Float}}, "HE::api::camera::stickSensitivityScale",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(camera::stickSensitivityScale()) }; } });
+        t.push_back({ "camera.setStickInvertY", "Camera", true, {{"invert", P::Bool}}, {}, "HE::api::camera::setStickInvertY",
+            [](Ctx&, const VV& a){ camera::setStickInvertY(aB(a, 0)); return VV{}; } });
+        t.push_back({ "camera.stickInvertY", "Camera", false, {}, {{"invert", P::Bool}}, "HE::api::camera::stickInvertY",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(camera::stickInvertY()) }; } });
 
         // Environment — EVERY EnvironmentComponent field, generated from the
         // HE_ENV_FIELDS_* X-lists in EngineApi.h (get = pure read, set = exec).
@@ -7583,6 +7618,8 @@ const std::vector<ApiFn>& registry()
             { "app.addMenuSeparator", "Add Menu Separator" },
             { "app.notify", "Notify" },
             { "app.notifyAvailable", "Notifications Available" },
+            { "app.setVSync", "Set VSync" },               { "app.vsync", "Get VSync" },
+            { "app.setFullscreen", "Set Fullscreen" },     { "app.isFullscreen", "Is Fullscreen" },
             { "app.clearMenuBar", "Clear Menu Bar" },
             { "app.setMenuItemEnabled", "Set Menu Item Enabled" },
             { "app.setMenuItemChecked", "Set Menu Item Checked" },
@@ -7612,6 +7649,8 @@ const std::vector<ApiFn>& registry()
             { "prefs.setNumber", "Set Pref Number" }, { "prefs.setBool", "Set Pref Bool" },
             { "prefs.has", "Has Pref" }, { "prefs.remove", "Remove Pref" },
             { "prefs.clear", "Clear Prefs" },
+            { "settings.setVolume", "Set Volume Setting" }, { "settings.volume", "Get Volume Setting" },
+            { "settings.save", "Save Settings" },        { "settings.resetToDefaults", "Reset Settings" },
             { "datetime.now", "Now" }, { "datetime.format", "Format Time" },
             { "datetime.year", "Year" }, { "datetime.month", "Month" }, { "datetime.day", "Day" },
             { "datetime.hour", "Hour" }, { "datetime.minute", "Minute" },
@@ -7669,6 +7708,8 @@ const std::vector<ApiFn>& registry()
             { "input.bindingName", "Input Binding Name" },
             { "input.resetBindings", "Reset Input Bindings" },
             { "input.saveBindings", "Save Input Bindings" },
+            { "input.setStickDeadzone", "Set Stick Deadzone" },
+            { "input.stickDeadzone", "Get Stick Deadzone" },
             { "input.actionDown", "Input Action Down" },
             { "input.actionPressed", "Input Action Pressed" },
             { "input.actionReleased", "Input Action Released" },
@@ -7700,6 +7741,10 @@ const std::vector<ApiFn>& registry()
             { "camera.stopAllShakes", "Stop All Camera Shakes" },
             { "camera.kickFov", "Kick Camera FOV" },
             { "camera.blendTo", "Blend To Camera" },         { "camera.isBlending", "Is Camera Blending" },
+            { "camera.setStickSensitivityScale", "Set Stick Look Sensitivity" },
+            { "camera.stickSensitivityScale", "Get Stick Look Sensitivity" },
+            { "camera.setStickInvertY", "Set Invert Stick Look" },
+            { "camera.stickInvertY", "Get Invert Stick Look" },
             // Environment display names — generated from the same X-lists as
             // the functions ("Get "/"Set " + the display string per field).
 #define HE_ENV_NAME_ROW(m, Name, disp) { "env.get" #Name, "Get " disp }, { "env.set" #Name, "Set " disp },
@@ -8026,6 +8071,10 @@ bool isScriptGroup(std::string_view group)
                                                     // key/value store — the two things every
                                                     // application script reaches for first.
                                                     "json", "prefs",
+                                                    // "settings" is the store behind a settings
+                                                    // menu: volume, save and reset. Its other
+                                                    // rows are filed under input, camera and app.
+                                                    "settings",
                                                     // "datetime" has no flat twin at all: without
                                                     // it a text script can read the clock as a
                                                     // number of seconds and never say what day
@@ -8337,6 +8386,9 @@ void fillInputServices(::HeInputServices& out, GameServicesBinding* binding)
         return copyOut(input::bindingName(action ? action : "", device ? device : ""), buf, cap); };
     out.resetBindings = [](void*) { input::resetBindings(); };
     out.saveBindings  = [](void*) { return input::saveBindings(); };
+
+    out.setStickDeadzone = [](void*, float deadzone) { input::setStickDeadzone(deadzone); };
+    out.stickDeadzone    = [](void*) { return input::stickDeadzone(); };
 }
 
 void fillContentServices(::HeContentServices& out, GameServicesBinding* binding)

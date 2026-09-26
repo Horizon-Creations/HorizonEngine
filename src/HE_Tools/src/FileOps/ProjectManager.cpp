@@ -966,6 +966,421 @@ constexpr const char* kCharacterGraph = R"JSON({
   ],
   "variables": []
 })JSON";
+
+// ── The settings menu (Thema 85, Schritt 5) ──────────────────────────────────
+// A widget that does nothing but call the player-settings rows: deadzone, stick
+// look speed and invert, VSync, fullscreen, volume, and the Jump binding on both
+// devices. The menu hangs on the API, not the other way round — everything it
+// does, a project's own menu can do with the same nodes.
+//
+// Built through the graph API rather than written as JSON: forty-odd nodes of
+// hand-counted absolute pin indices is exactly the kind of literal the note
+// above kControllerGraph warns about. The Engine Call nodes still carry their
+// params by hand (the registry lives a layer up, in HE_Scene), which is why
+// test_third_person_template checks every one of them against the registry.
+constexpr const char* kSettingsMenuRel = "UI/SettingsMenu.hasset";
+
+using HcPin = HorizonCode::PinType;
+
+// Pins by kind and position, computed from the node's signature — the unified
+// index space shifts with every node type's pin count (see writeAppGameInstance).
+struct GraphBuilder
+{
+	HorizonCode::Graph g;
+	bool ok = true;
+	// The sub-graph new nodes land in: 0 = the event graph, else the owning
+	// FunctionEntry's id — which is also what the entry itself carries, the way
+	// the editor's own "add function" writes it (UIEditorPanel).
+	int scope = 0;
+
+	int add(HorizonCode::Node n, float x, float y)
+	{
+		n.x = x; n.y = y; n.subgraph = scope;
+		return g.addNode(std::move(n));
+	}
+	HorizonCode::NodeSig sig(int id) const { return HorizonCode::signatureOf(*g.findNode(id)); }
+	int execOut(int id, int k) const { return (int)sig(id).execIns.size() + k; }
+	int dataIn(int id, int k) const
+	{ const auto s = sig(id); return (int)(s.execIns.size() + s.execOuts.size()) + k; }
+	int dataOut(int id, int k) const
+	{ const auto s = sig(id); return (int)(s.execIns.size() + s.execOuts.size() + s.dataIns.size()) + k; }
+
+	void exec(int from, int to, int k = 0) { ok &= g.connect(from, execOut(from, k), to, 0); }
+	void data(int from, int kOut, int to, int kIn)
+	{ ok &= g.connect(from, dataOut(from, kOut), to, dataIn(to, kIn)); }
+
+	int event(const char* name, int elem, float x, float y, HcPin arg = HcPin::Exec)
+	{
+		HorizonCode::Node n;
+		n.type = HorizonCode::NodeType::Event; n.s = name; n.elem = elem;
+		if (arg != HcPin::Exec) { n.hasArg = true; n.propType = arg; }
+		return add(std::move(n), x, y);
+	}
+	int call(const char* id, bool isExec, std::vector<HorizonCode::FuncParam> params,
+	         std::vector<HorizonCode::FuncParam> results, float x, float y)
+	{
+		HorizonCode::Node n;
+		n.type = HorizonCode::NodeType::EngineCall; n.s = id; n.hasArg = isExec;
+		n.params = std::move(params); n.results = std::move(results);
+		return add(std::move(n), x, y);
+	}
+	int setProp(int elem, const char* prop, HcPin type, float x, float y)
+	{
+		HorizonCode::Node n;
+		n.type = HorizonCode::NodeType::SetProperty; n.elem = elem; n.s = prop; n.propType = type;
+		return add(std::move(n), x, y);
+	}
+	int callFn(const char* fn, float x, float y)
+	{
+		HorizonCode::Node n;
+		n.type = HorizonCode::NodeType::FunctionCall; n.s = fn;
+		return add(std::move(n), x, y);
+	}
+	// Opens the function's sub-graph: every node added until endFn() lives in it.
+	int fnEntry(const char* fn, float x, float y)
+	{
+		HorizonCode::Node n;
+		n.type = HorizonCode::NodeType::FunctionEntry; n.s = fn; n.access = 0;
+		const int id = add(std::move(n), x, y);
+		g.findNode(id)->subgraph = id;
+		scope = id;
+		return id;
+	}
+	void endFn() { scope = 0; }
+	void def(int node, int dataInIndex, HorizonCode::Value v)
+	{ g.findNode(node)->pinDefaults[dataInIndex] = std::move(v); }
+};
+
+// The elements the graph talks to, by id.
+struct SettingsMenuIds
+{
+	int deadzone = 0, sensitivity = 0, invert = 0, vsync = 0, fullscreen = 0, volume = 0;
+	int bindKeyboard = 0, bindKeyboardLabel = 0, bindGamepad = 0, bindGamepadLabel = 0;
+	int reset = 0, back = 0;
+};
+
+std::string settingsMenuTreeJson(SettingsMenuIds& ids)
+{
+	using namespace tpl;
+	HE::UIWidgetTree t;
+	t.canvasWidth  = 1280.0f;
+	t.canvasHeight = 720.0f;
+
+	// A dimmed full-screen ground (the game stays visible behind it) and a card.
+	const int root = panel(t, 0, "Root", glm::vec4(0.0f, 0.0f, 0.0f, 0.55f));
+	{
+		auto* r = t.find(root);
+		HE::uiSetAnchorPreset(*r, 15);
+		r->posX = r->posY = r->sizeX = r->sizeY = 0.0f;
+	}
+	const int card = panel(t, root, "Card", kSurf, 12.0f);
+	{
+		auto* c = t.find(card);
+		HE::uiSetAnchorPreset(*c, 5);   // centred
+		c->posX = c->posY = 0.0f;
+		c->sizeX = 560.0f; c->sizeY = 640.0f;
+	}
+	const int col = box(t, card, HE::UIWidgetType::VerticalBox, "Content", 24.0f, 10.0f);
+	{
+		auto* c = t.find(col);
+		HE::uiSetAnchorPreset(*c, 15);
+		c->posX = c->posY = c->sizeX = c->sizeY = 0.0f;
+	}
+	text(t, col, "Title", "Settings", 26.0f);
+
+	auto grid = [&](const char* name, int rows)
+	{
+		const int id = t.add(HE::UIWidgetType::Grid);
+		auto* g = t.find(id);
+		g->name = name; g->parentId = col;
+		if (auto* x = dynamic_cast<HE::UIGrid*>(g))
+		{
+			x->columns = { "auto", "*" };
+			x->rows.assign((size_t)rows, "auto");
+			x->spacing = 16.0f; x->rowSpacing = 8.0f;
+			x->reparse();
+		}
+		return id;
+	};
+	auto label = [&](int g, const char* s)
+	{
+		const int id = text(t, g, s, s, 16.0f, kMuted);
+		t.find(id)->sizeY = 32.0f;
+	};
+	auto slider = [&](int g, const char* name, float lo, float hi, float value)
+	{
+		const int id = t.add(HE::UIWidgetType::Slider);
+		auto* e = t.find(id);
+		e->name = name; e->parentId = g; e->sizeY = 28.0f;
+		if (auto* x = dynamic_cast<HE::UISlider*>(e))
+		{ x->minValue = lo; x->maxValue = hi; x->value = value; x->fillColor = kAccent; }
+		return id;
+	};
+	auto check = [&](int g, const char* name)
+	{
+		const int id = t.add(HE::UIWidgetType::CheckBox);
+		auto* e = t.find(id);
+		e->name = name; e->parentId = g; e->sizeY = 28.0f;
+		if (auto* x = dynamic_cast<HE::UICheckBox*>(e)) x->label = "";
+		return id;
+	};
+	// A button's text is a child element (tpl::button), and the rebind rows
+	// rewrite it — so the graph needs the label's id, not the button's.
+	auto labelOf = [&](int button)
+	{
+		for (const auto& e : t.elements)
+			if (e && e->parentId == button) return e->id;
+		return 0;
+	};
+
+	// Ranges: a deadzone past 0.5 swallows half the stick, and a look speed
+	// outside a quarter to three times the design is not a preference any
+	// more. The API accepts wider (0..0.9, 0.05..10); the menu offers the sane
+	// part. Volume 0..1 — boost stays the mixer's business.
+	//
+	// The controls are named apart from their labels ("VSyncCheck" beside the
+	// label "VSync"): a label is named after its text, and two elements called
+	// "VSync" is one too many in the designer's outliner.
+	const int gv = grid("Options", 6);
+	label(gv, "Stick deadzone");   ids.deadzone    = slider(gv, "DeadzoneSlider", 0.0f, 0.5f, 0.15f);
+	label(gv, "Look sensitivity"); ids.sensitivity = slider(gv, "SensitivitySlider", 0.25f, 3.0f, 1.0f);
+	label(gv, "Invert look");      ids.invert      = check(gv, "InvertCheck");
+	label(gv, "VSync");            ids.vsync       = check(gv, "VSyncCheck");
+	label(gv, "Fullscreen");       ids.fullscreen  = check(gv, "FullscreenCheck");
+	label(gv, "Volume");           ids.volume      = slider(gv, "VolumeSlider", 0.0f, 1.0f, 1.0f);
+
+	spacer(t, col, 0.0f, 6.0f);
+	text(t, col, "ControlsTitle", "Controls", 20.0f);
+	const int gc = grid("Controls", 2);
+	label(gc, "Jump (keyboard)");
+	// Named for what they rebind, not for the text they start with: the text
+	// is whatever the binding is, and changes.
+	ids.bindKeyboard      = button(t, gc, "Space", 0.0f, 34.0f);
+	t.find(ids.bindKeyboard)->name = "JumpKeyboardButton";
+	ids.bindKeyboardLabel = labelOf(ids.bindKeyboard);
+	label(gc, "Jump (gamepad)");
+	ids.bindGamepad       = button(t, gc, "A (South)", 0.0f, 34.0f);
+	t.find(ids.bindGamepad)->name = "JumpGamepadButton";
+	ids.bindGamepadLabel  = labelOf(ids.bindGamepad);
+	hint(t, col, "Click a binding, then press the new key or button. Escape or Start "
+	             "cancels. Move and Look are axes and are not rebindable yet.");
+
+	spacer(t, col, 1.0f);
+	const int row = box(t, col, HE::UIWidgetType::HorizontalBox, "Actions", 0.0f, 10.0f);
+	t.find(row)->sizeY = 44.0f;
+	spacer(t, row, 1.0f);
+	ids.reset = button(t, row, "Reset");
+	ids.back  = button(t, row, "Back", 140.0f, 38.0f, kAccent);
+	return HE::uiWidgetTreeToJson(t);
+}
+
+std::string settingsMenuGraphJson(const SettingsMenuIds& ids, bool& ok)
+{
+	using HorizonCode::Value;
+	GraphBuilder b;
+	const HorizonCode::FuncParam fDeadzone{ "deadzone", HcPin::Float };
+
+	// ── Refresh: every control shows what the settings say NOW ───────────────
+	// Setting a property fires no event, so this cannot write the values back
+	// and mark them as the player's choice.
+	const int refresh = b.fnEntry("Refresh", 0.0f, 0.0f);
+	{
+		struct Row { const char* id; const char* result; HcPin type; int elem; const char* prop; };
+		const Row rows[] = {
+			{ "input.stickDeadzone",          "deadzone",   HcPin::Float, ids.deadzone,    "Value"   },
+			{ "camera.stickSensitivityScale", "scale",      HcPin::Float, ids.sensitivity, "Value"   },
+			{ "camera.stickInvertY",          "invert",     HcPin::Bool,  ids.invert,      "Checked" },
+			{ "app.vsync",                    "enabled",    HcPin::Bool,  ids.vsync,       "Checked" },
+			{ "app.isFullscreen",             "fullscreen", HcPin::Bool,  ids.fullscreen,  "Checked" },
+		};
+		int prev = refresh;
+		float x = 260.0f;
+		for (const Row& r : rows)
+		{
+			const int get = b.call(r.id, false, {}, { { r.result, r.type } }, x, 160.0f);
+			const int set = b.setProp(r.elem, r.prop, r.type, x, 0.0f);
+			b.data(get, 0, set, 0);
+			b.exec(prev, set);
+			prev = set;
+			x += 240.0f;
+		}
+		const int vol = b.call("settings.volume", false, { { "bus", HcPin::String } },
+		                       { { "volume", HcPin::Float } }, x, 160.0f);
+		b.def(vol, 0, Value::ofString("Master"));
+		const int setVol = b.setProp(ids.volume, "Value", HcPin::Float, x, 0.0f);
+		b.data(vol, 0, setVol, 0);
+		b.exec(prev, setVol);
+	}
+	b.endFn();
+
+	// ── RefreshBindings: the two rebind buttons say what Jump is bound to ────
+	const int refreshBind = b.fnEntry("RefreshBindings", 0.0f, 400.0f);
+	{
+		int prev = refreshBind;
+		float x = 260.0f;
+		for (const auto& [device, labelElem] : { std::pair<const char*, int>{ "keyboard", ids.bindKeyboardLabel },
+		                                        std::pair<const char*, int>{ "gamepad",  ids.bindGamepadLabel } })
+		{
+			const int name = b.call("input.bindingName", false,
+			                        { { "action", HcPin::String }, { "device", HcPin::String } },
+			                        { { "name", HcPin::String } }, x, 560.0f);
+			b.def(name, 0, Value::ofString("Jump"));
+			b.def(name, 1, Value::ofString(device));
+			const int set = b.setProp(labelElem, "Text", HcPin::String, x, 400.0f);
+			b.data(name, 0, set, 0);
+			b.exec(prev, set);
+			prev = set;
+			x += 240.0f;
+		}
+	}
+	b.endFn();
+
+	float y = 800.0f;
+	// Construct: fill the controls once. The controller calls Refresh again on
+	// every open, because a script may have changed a setting meanwhile.
+	{
+		const int ev = b.event("Construct", 0, 0.0f, y);
+		const int r1 = b.callFn("Refresh", 260.0f, y);
+		const int r2 = b.callFn("RefreshBindings", 500.0f, y);
+		b.exec(ev, r1); b.exec(r1, r2);
+		y += 160.0f;
+	}
+	// Tick: the binding labels follow the capture — "Press a key…" while it
+	// listens, the new binding once the key is let go.
+	{
+		const int ev = b.event("Tick", 0, 0.0f, y);
+		const int busy = b.call("input.isRebinding", false, {}, { { "rebinding", HcPin::Bool } }, 0.0f, y + 100.0f);
+		HorizonCode::Node br; br.type = HorizonCode::NodeType::Branch;
+		const int branch = b.add(std::move(br), 260.0f, y);
+		const int r = b.callFn("RefreshBindings", 500.0f, y);
+		b.exec(ev, branch);
+		b.data(busy, 0, branch, 0);
+		b.exec(branch, r, /*False*/ 1);
+		y += 200.0f;
+	}
+	// A control changed → the matching row, with the event's value.
+	auto wire = [&](int elem, const char* event, HcPin type, const char* row,
+	                std::vector<HorizonCode::FuncParam> params, int argPin,
+	                const char* bus = nullptr)
+	{
+		const int ev = b.event(event, elem, 0.0f, y, type);
+		const int c  = b.call(row, true, std::move(params), {}, 300.0f, y);
+		if (bus) b.def(c, 0, Value::ofString(bus));
+		b.exec(ev, c);
+		b.data(ev, 0, c, argPin);
+		y += 160.0f;
+	};
+	wire(ids.deadzone,    "OnValueChanged", HcPin::Float, "input.setStickDeadzone", { fDeadzone }, 0);
+	wire(ids.sensitivity, "OnValueChanged", HcPin::Float, "camera.setStickSensitivityScale",
+	     { { "scale", HcPin::Float } }, 0);
+	wire(ids.invert,      "OnCheckChanged", HcPin::Bool,  "camera.setStickInvertY", { { "invert", HcPin::Bool } }, 0);
+	wire(ids.vsync,       "OnCheckChanged", HcPin::Bool,  "app.setVSync", { { "enabled", HcPin::Bool } }, 0);
+	wire(ids.fullscreen,  "OnCheckChanged", HcPin::Bool,  "app.setFullscreen", { { "fullscreen", HcPin::Bool } }, 0);
+	wire(ids.volume,      "OnValueChanged", HcPin::Float, "settings.setVolume",
+	     { { "bus", HcPin::String }, { "volume", HcPin::Float } }, 1, "Master");
+
+	// A rebind button: start listening on its device, and say so on the button.
+	auto rebind = [&](int button, int labelElem, const char* device, const char* prompt)
+	{
+		const int ev = b.event("OnClicked", button, 0.0f, y);
+		const int c  = b.call("input.rebindBegin", true,
+		                      { { "action", HcPin::String }, { "device", HcPin::String } },
+		                      { { "ok", HcPin::Bool } }, 300.0f, y);
+		b.def(c, 0, Value::ofString("Jump"));
+		b.def(c, 1, Value::ofString(device));
+		const int set = b.setProp(labelElem, "Text", HcPin::String, 600.0f, y);
+		b.def(set, 0, Value::ofString(prompt));
+		b.exec(ev, c); b.exec(c, set);
+		y += 160.0f;
+	};
+	rebind(ids.bindKeyboard, ids.bindKeyboardLabel, "keyboard", "Press a key...");
+	rebind(ids.bindGamepad,  ids.bindGamepadLabel,  "gamepad",  "Press a button...");
+
+	// Reset: the project's settings and bindings again (applied, not yet saved).
+	{
+		const int ev = b.event("OnClicked", ids.reset, 0.0f, y);
+		const int c1 = b.call("settings.resetToDefaults", true, {}, {}, 300.0f, y);
+		const int c2 = b.call("input.resetBindings", true, {}, {}, 560.0f, y);
+		const int r1 = b.callFn("Refresh", 820.0f, y);
+		const int r2 = b.callFn("RefreshBindings", 1060.0f, y);
+		b.exec(ev, c1); b.exec(c1, c2); b.exec(c2, r1); b.exec(r1, r2);
+		y += 160.0f;
+	}
+	// Back: keep it (settings AND bindings), give the game its input and the
+	// mouse back, and get out of the way. Hidden, not destroyed — the
+	// controller shows the same instance again next time.
+	{
+		const int ev = b.event("OnClicked", ids.back, 0.0f, y);
+		const int s1 = b.call("settings.save", true, {}, { { "ok", HcPin::Bool } }, 300.0f, y);
+		const int s2 = b.call("input.saveBindings", true, {}, { { "ok", HcPin::Bool } }, 560.0f, y);
+		const int m  = b.call("input.setModeGameOnly", true, {}, {}, 820.0f, y);
+		const int cur = b.call("cursor.setVisible", true, { { "show", HcPin::Bool } }, {}, 1080.0f, y);
+		b.def(cur, 0, Value::ofBool(false));
+		HorizonCode::Node self; self.type = HorizonCode::NodeType::GetSelf;
+		const int selfId = b.add(std::move(self), 1080.0f, y + 120.0f);
+		HorizonCode::Node hide; hide.type = HorizonCode::NodeType::HideWidget;
+		const int hideId = b.add(std::move(hide), 1340.0f, y);
+		b.exec(ev, s1); b.exec(s1, s2); b.exec(s2, m); b.exec(m, cur); b.exec(cur, hideId);
+		b.data(selfId, 0, hideId, 0);
+	}
+
+	ok = b.ok;
+	return HorizonCode::toJson(b.g);
+}
+
+// The template's controller graph, plus the menu: made hidden after possessing
+// (Begin Play), shown by the Menu action with the game's input off and the
+// mouse free. Built on top of kControllerGraph so the part the other tests
+// already guard stays byte-for-byte the graph it was.
+std::string controllerGraphWithMenu(bool& ok)
+{
+	using HorizonCode::Value;
+	GraphBuilder b;
+	ok = HorizonCode::fromJson(kControllerGraph, b.g);
+	if (!ok) return kControllerGraph;
+
+	constexpr int kPossess = 4;   // the Engine Call player.possess in the literal
+
+	HorizonCode::Variable var;
+	var.name = "SettingsMenu"; var.type = HcPin::Ref;
+	b.g.variables.push_back(var);
+
+	HorizonCode::Node create;
+	create.type = HorizonCode::NodeType::CreateWidget; create.s = kSettingsMenuRel;
+	const int createId = b.add(std::move(create), 740.0f, 0.0f);
+	HorizonCode::Node store;
+	store.type = HorizonCode::NodeType::SetVariable; store.s = "SettingsMenu"; store.propType = HcPin::Ref;
+	const int storeId = b.add(std::move(store), 1000.0f, 0.0f);
+	b.exec(kPossess, createId);
+	b.exec(createId, storeId);
+	b.data(createId, 0, storeId, 0);
+
+	HorizonCode::Node menu;
+	menu.type = HorizonCode::NodeType::InputAction; menu.s = "Menu";
+	const int menuId = b.add(std::move(menu), -280.0f, 360.0f);
+	HorizonCode::Node get;
+	get.type = HorizonCode::NodeType::GetVariable; get.s = "SettingsMenu"; get.propType = HcPin::Ref;
+	const int getId = b.add(std::move(get), -20.0f, 480.0f);
+	HorizonCode::Node show;
+	show.type = HorizonCode::NodeType::ShowWidget;
+	const int showId = b.add(std::move(show), 20.0f, 360.0f);
+	const int refresh = b.call("widget.callFunction", true,
+	                           { { "widget", HcPin::Ref }, { "function", HcPin::String } },
+	                           { { "ok", HcPin::Bool } }, 260.0f, 360.0f);
+	b.def(refresh, 1, Value::ofString("Refresh"));
+	const int ui  = b.call("input.setModeUIOnly", true, {}, {}, 520.0f, 360.0f);
+	const int cur = b.call("cursor.setVisible", true, { { "show", HcPin::Bool } }, {}, 780.0f, 360.0f);
+	b.def(cur, 0, Value::ofBool(true));
+	b.exec(menuId, showId, /*Pressed*/ 0);
+	b.data(getId, 0, showId, 0);
+	b.exec(showId, refresh);
+	b.data(getId, 0, refresh, 0);
+	b.exec(refresh, ui);
+	b.exec(ui, cur);
+
+	ok = b.ok;
+	return HorizonCode::toJson(b.g);
+}
 } // namespace
 
 bool scaffoldThirdPersonProject(const std::string& projectRoot)
@@ -978,10 +1393,20 @@ bool scaffoldThirdPersonProject(const std::string& projectRoot)
 	// character controller, collider, movement component and camera child from
 	// whatever those are TODAY rather than from what they were when this
 	// template was written.
+	// The controller also opens the settings menu (Menu action → show it), so
+	// its graph is the literal plus those nodes. A wiring failure there is a bug
+	// in this file, and it fails the scaffold rather than shipping a controller
+	// whose menu silently never opens.
+	bool menuWired = false;
+	const std::string controllerGraph = controllerGraphWithMenu(menuWired);
+	if (!menuWired)
+		HE_LOG_WARN(Config, "%s", "Third-person template: could not wire the settings menu "
+		                          "into the controller graph");
+	ok &= menuWired;
 	ok &= writeChunkedAsset(content / "Gameplay" / "PlayerController.hasset",
 	                        "Gameplay/PlayerController.hasset", "PlayerController",
 	                        HE::AssetType::HorizonCodeClass,
-	                        { { HAsset::CHUNK_HCGR, kControllerGraph },
+	                        { { HAsset::CHUNK_HCGR, controllerGraph },
 	                          { HAsset::CHUNK_HCBC, "PlayerController" } });
 	ok &= writeChunkedAsset(content / "Gameplay" / "PlayerCharacter.hasset",
 	                        "Gameplay/PlayerCharacter.hasset", "PlayerCharacter",
@@ -1000,6 +1425,27 @@ bool scaffoldThirdPersonProject(const std::string& projectRoot)
 	ok &= writeChunkedAsset(content / "Input" / "Jump.hasset", "Input/Jump.hasset", "Jump",
 	                        HE::AssetType::InputAction,
 	                        { { HAsset::CHUNK_IACT, R"({"valueType":"Button","runWhilePaused":false})" } });
+	// Opens the settings menu. Not Escape: the applications consume Escape
+	// before Input sees it (mouse release, closing menus), so an action bound
+	// to it would never fire.
+	ok &= writeChunkedAsset(content / "Input" / "Menu.hasset", "Input/Menu.hasset", "Menu",
+	                        HE::AssetType::InputAction,
+	                        { { HAsset::CHUNK_IACT, R"({"valueType":"Button","runWhilePaused":false})" } });
+
+	// The settings menu itself: a widget that only calls the settings rows.
+	{
+		SettingsMenuIds ids;
+		const std::string tree = settingsMenuTreeJson(ids);
+		bool graphWired = false;
+		const std::string graph = settingsMenuGraphJson(ids, graphWired);
+		if (!graphWired)
+			HE_LOG_WARN(Config, "%s", "Third-person template: could not wire the settings "
+			                          "menu's graph");
+		ok &= graphWired;
+		ok &= writeChunkedAsset(content / kSettingsMenuRel, kSettingsMenuRel, "SettingsMenu",
+		                        HE::AssetType::Widget,
+		                        { { HAsset::CHUNK_UIWT, tree }, { HAsset::CHUNK_UIWG, graph } });
+	}
 
 	// …and what they are bound to. Keyboard and gamepad both, because "it does
 	// not work with a controller" is otherwise the second thing anyone reports.
@@ -1036,7 +1482,8 @@ bool scaffoldThirdPersonProject(const std::string& projectRoot)
            {"source":"GamepadRightX","scale":1.0}],
   "axesY":[{"source":"MouseY","scale":1.0},
            {"source":"GamepadRightY","scale":1.0}]},
- {"action":"Input/Jump.hasset","keys":["Space"],"gamepadButtons":["a"]}
+ {"action":"Input/Jump.hasset","keys":["Space"],"gamepadButtons":["a"]},
+ {"action":"Input/Menu.hasset","keys":["O"],"gamepadButtons":["start"]}
 ]})JSON";
 	ok &= writeChunkedAsset(content / "Input" / "DefaultMappings.hasset",
 	                        "Input/DefaultMappings.hasset", "DefaultMappings",

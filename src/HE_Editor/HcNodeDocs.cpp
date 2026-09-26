@@ -790,6 +790,20 @@ namespace
 	  "Can this program show notifications at all? False in the editor preview, "
 	  "and on a Linux without notify-send. Ask once instead of finding out per "
 	  "notification." },
+	{ "app.setVSync",
+	  "The player's VSync choice, over what the export configured. Applied at "
+	  "once; Save Settings keeps it for the next start. In the editor preview it "
+	  "is remembered but the editor's window is left alone." },
+	{ "app.vsync",
+	  "Whether VSync is on: the player's choice, else the exported setting." },
+	{ "app.setFullscreen",
+	  "The player's fullscreen choice. Off goes back to the exported window mode, "
+	  "or to a window when that was fullscreen, so a borderless game stays "
+	  "borderless. Applied at once, kept by Save Settings; only remembered in the "
+	  "editor preview." },
+	{ "app.isFullscreen",
+	  "Whether the game runs fullscreen: the player's choice, else the exported "
+	  "window mode." },
 	{ "app.setMenuItemEnabled",
 	  "Greys a menu entry out, or brings it back. Addressed by the ENTRY's id — "
 	  "the same id On Menu Item carries — so an id used in two menus is one "
@@ -896,6 +910,24 @@ namespace
 	  "there was nothing under that key." },
 	{ "prefs.clear",
 	  "Forgets every setting at once — what a \"reset to defaults\" button does." },
+
+	// ── Player settings ──────────────────────────────────────────────────────
+	{ "settings.setVolume",
+	  "The player's volume for a mixer bus (\"Music\", \"SFX\"), or \"Master\" for "
+	  "everything at once. 0 is silent, 1 as authored, up to 2. Applied at once; "
+	  "Save Settings keeps it." },
+	{ "settings.volume",
+	  "The player's volume for a bus (\"Master\" for everything), else what the "
+	  "bus is at now. What a settings menu shows its slider at." },
+	{ "settings.save",
+	  "Store the player's settings (deadzone, stick look, VSync, fullscreen, "
+	  "volumes) in the preferences file; the game applies them at every start. "
+	  "Bindings have their own Save Input Bindings. False when there is nowhere "
+	  "to write." },
+	{ "settings.resetToDefaults",
+	  "Forget the player's settings and go back to the project's, applied at "
+	  "once. Use Save Settings to make that stick; bindings have their own "
+	  "Reset Input Bindings." },
 
 	// ── Date and time ────────────────────────────────────────────────────────
 	{ "datetime.now",
@@ -1186,6 +1218,12 @@ namespace
 	{ "input.saveBindings",
 	  "Store the player's bindings in the preferences file, so the next start of "
 	  "the game loads them again. Unsaved rebinds last until the game ends." },
+	{ "input.setStickDeadzone",
+	  "The player's stick deadzone: how far a stick has to move before it counts, "
+	  "0 to 0.9. Raise it for a worn pad that drifts. Applied from the next frame; "
+	  "Save Settings keeps it." },
+	{ "input.stickDeadzone",
+	  "The stick deadzone in use: the player's choice, else the game's own (0.15)." },
 	{ "input.actionDown",
 	  "Whether an input action (by the name of its InputAction asset, \"Jump\") "
 	  "is held this frame. The polling twin of the Input.<Action>.Pressed event: "
@@ -1304,6 +1342,19 @@ namespace
 	{ "camera.isBlending",
 	  "Whether the picture is currently easing in from another camera. True "
 	  "until the blend has fully arrived." },
+	{ "camera.setStickSensitivityScale",
+	  "The player's stick look speed, as a factor on top of every camera rig's "
+	  "own Stick Sensitivity: 1 as designed, 2 twice as fast, 0.5 half. A factor "
+	  "and not a speed, so rigs keep the difference their author gave them. "
+	  "0.05 to 10; Save Settings keeps it." },
+	{ "camera.stickSensitivityScale",
+	  "The player's stick look factor, 1 when never chosen." },
+	{ "camera.setStickInvertY",
+	  "The player's \"invert look\" for the stick: up looks down. Replaces every "
+	  "rig's own Invert Stick Y once chosen; Save Settings keeps it." },
+	{ "camera.stickInvertY",
+	  "The player's stick invert choice; false when never chosen (the rig's own "
+	  "setting applies then)." },
 
 	// ── Content ──────────────────────────────────────────────────────────────
 	{ "content.load",

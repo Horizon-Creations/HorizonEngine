@@ -1337,6 +1337,53 @@ TEST_CASE("codegen parity: input_rebind (the rebinding rows reach the service id
 	HE::api::input::setBindingService({});
 }
 
+TEST_CASE("codegen parity: player_settings (the settings rows reach one store identically)")
+{
+	// A recording host in place of an application. The fixture ends with
+	// resetToDefaults, so the compiled run starts where the interpreted one did.
+	HE::api::settings::resetToDefaults();
+	std::vector<std::string> calls;
+	HE::api::settings::Host host;
+	host.stickDeadzone = 0.15f;
+	host.vsync         = true;
+	host.fullscreen    = false;
+	host.applyStickDeadzone = [&](float dz) { calls.push_back("dz " + std::to_string(dz)); };
+	host.applyVSync         = [&](bool on) { calls.push_back(on ? "vsync on" : "vsync off"); };
+	host.applyFullscreen    = [&](bool on) { calls.push_back(on ? "full on" : "full off"); };
+	host.applyVolume = [&](const std::string& bus, std::optional<float> v)
+	{ calls.push_back("vol " + bus + (v ? " " + std::to_string(*v) : " project")); };
+	HE::api::settings::install(std::move(host));
+	calls.clear();   // install's own start-up apply is not the fixture's
+
+	ParityPair p("fix/player_settings");
+	p.fire("Apply");
+
+	CHECK(p.var("dz").f == doctest::Approx(0.25f));
+	CHECK(p.var("scale").f == doctest::Approx(1.5f));
+	CHECK(p.var("invert").b);
+	CHECK_FALSE(p.var("vsync").b);
+	CHECK(p.var("full").b);
+	CHECK(p.var("music").f == doctest::Approx(0.5f));
+
+	const std::vector<std::string> one = {
+		"dz " + std::to_string(0.25f), "vsync off", "full on", "vol Music " + std::to_string(0.5f),
+		// resetToDefaults: every hook back to the base, the bus to the project's.
+		"dz " + std::to_string(0.15f), "vsync on", "full off", "vol Music project" };
+	REQUIRE(calls.size() == one.size() * 2);
+	for (size_t i = 0; i < one.size(); ++i)
+	{
+		INFO("call ", i);
+		CHECK(calls[i] == one[i]);                  // interpreter
+		CHECK(calls[one.size() + i] == one[i]);     // compiled
+	}
+
+	// settings.save may have written into whatever sandbox an earlier case
+	// left set; take the key back out so no later case loads it.
+	HE::api::Ctx ctx;
+	HE::api::prefs::remove(ctx, HE::api::settings::kPrefsKey);
+	HE::api::settings::uninstall();
+}
+
 TEST_CASE("codegen parity: engine_exec_cached (one dispatch, cached reads, save round-trip)")
 {
 	ParityPair p("fix/engine_exec_cached");

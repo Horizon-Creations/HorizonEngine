@@ -889,6 +889,11 @@ void GameApplication::OnInit()
 			SDL_free(pref);
 		}
 	}
+	// The player's settings live in the prefs file under that root, so they can
+	// be read from here on — before fireInit, so a start-up script asking
+	// settings.volume sees the saved value. APPLIED later (installPlayerSettings),
+	// once the audio device and its buses exist.
+	HE::api::settings::load();
 	// What this build may reach outside itself, straight off the hcfg. Set even
 	// when everything is false: perm::set replaces the whole struct, and a
 	// process that ran an application with permissions and then one without has
@@ -1348,6 +1353,10 @@ void GameApplication::OnInit()
 	else
 		HE_LOG_WARN(Core, "%s",
 			"GameApplication: audio device init failed — running silent");
+
+	// The player's settings over all of that: after the buses (a saved volume
+	// lands on the project's mixer, not under it) and after the window exists.
+	installPlayerSettings();
 
 	// Nothing to stream without a scene: an app's assets are reached through its
 	// widgets, which load on demand.
@@ -3303,6 +3312,61 @@ void GameApplication::OnWindowClosing(HE::WindowHandle handle)
 		m_gameInstance.runtime().fireOnWindowClosed(gi, 0, static_cast<int>(handle.id));
 }
 
+// The player's settings (HE::api::settings) reach this application through
+// these hooks: the API sits in HE_Scene and cannot see Input, the window or
+// this audio engine. Base values are the CONFIGURED ones, captured here once,
+// so "never chosen" and resetToDefaults both land on what the export said.
+void GameApplication::installPlayerSettings()
+{
+	m_playerWindowMode = m_windowMode;
+
+	HE::api::settings::Host host;
+	host.stickDeadzone = input().stickDeadzone;
+	host.vsync         = m_vsyncOn;
+	host.fullscreen    = m_windowMode == HE::WindowMode::Fullscreen;
+	host.applyStickDeadzone = [this](float dz) { input().stickDeadzone = dz; };
+	// Both display hooks compare before they touch the window: install applies
+	// every value once, and re-entering the mode the window is already in is a
+	// visible flicker on some platforms for nothing.
+	host.applyVSync = [this](bool on)
+	{
+		if (on == m_vsyncOn) return;
+		m_vsyncOn = on;
+		setVSync(on);
+	};
+	host.applyFullscreen = [this](bool fullscreen)
+	{
+		// Off = the configured mode, unless THAT was fullscreen: a game exported
+		// borderless must not come back from fullscreen as a bordered window.
+		const HE::WindowMode target = fullscreen ? HE::WindowMode::Fullscreen
+			: (m_windowMode == HE::WindowMode::Fullscreen ? HE::WindowMode::Windowed : m_windowMode);
+		if (target == m_playerWindowMode) return;
+		m_playerWindowMode = target;
+		setWindowMode(target);
+	};
+	host.applyVolume = [this](const std::string& bus, std::optional<float> volume)
+	{
+		if (!m_audioEngine.isInitialized()) return;
+		const bool master = bus == HE::api::settings::kMaster;
+		// nullopt: the project's own value — the mixer's, or unity for a bus the
+		// project never authored (it exists only because the player named it).
+		float v = 1.0f;
+		if (volume)      v = *volume;
+		else if (master) v = m_config.audioBuses.masterVolume;
+		else if (const HE::AudioBusDef* def = m_config.audioBuses.find(bus)) v = def->volume;
+		if (master) { m_audioEngine.setMasterVolume(v); return; }
+		if (!m_audioEngine.hasBus(bus)) m_audioEngine.createBus(bus, v);
+		m_audioEngine.setBusVolume(bus, v);
+	};
+	host.currentVolume = [this](const std::string& bus)
+	{
+		if (!m_audioEngine.isInitialized()) return 1.0f;
+		return bus == HE::api::settings::kMaster ? m_audioEngine.getMasterVolume()
+		                                         : m_audioEngine.getBusVolume(bus);
+	};
+	HE::api::settings::install(std::move(host));
+}
+
 void GameApplication::OnShutdown()
 {
 	// The session FIRST, and said out loud: leave() writes a goodbye and drops
@@ -3317,6 +3381,8 @@ void GameApplication::OnShutdown()
 	// Input, then take the sink down — it captures `this`.
 	HE::api::input::setRumbleGate(false, false);
 	HE::api::input::setRumbleSink({});
+	// Its hooks capture `this` as well.
+	HE::api::settings::uninstall();
 
 	// The tray outlives the window unless it is taken down deliberately, and an
 	// icon left in the menu bar of a program that has exited is the worst thing

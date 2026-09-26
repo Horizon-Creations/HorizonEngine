@@ -37,8 +37,9 @@
 
 #define HE_SAVE_ABI_VERSION     1u
 #define HE_PHYSICS_ABI_VERSION  1u
-#define HE_INPUT_ABI_VERSION    3u   // 2 — + rumble, rumbleTriggers, stopRumble
+#define HE_INPUT_ABI_VERSION    4u   // 2 — + rumble, rumbleTriggers, stopRumble
                                      // 3 — + rebindBegin … saveBindings
+                                     // 4 — + setStickDeadzone, stickDeadzone
 #define HE_CONTENT_ABI_VERSION  1u
 #define HE_ANTICHEAT_ABI_VERSION 1u
 // The umbrella that carries the tables. Bumped when a table POINTER is appended
@@ -219,6 +220,13 @@ typedef struct HeInputServices
     int   (*bindingName)(void* host, const char* action, const char* device, char* buf, int cap);
     void  (*resetBindings)(void* host);
     bool  (*saveBindings)(void* host);
+
+    // ── v4 ──
+    // The player's stick deadzone (HE::api::input::setStickDeadzone), 0..0.9.
+    // Saved with the other player settings, which have no table of their own
+    // yet (camera/app/audio are not C-ABI groups).
+    void  (*setStickDeadzone)(void* host, float deadzone);
+    float (*stickDeadzone)(void* host);
 } HeInputServices;
 
 // ── Content (see HE::api::content) ───────────────────────────────────────────
@@ -766,6 +774,13 @@ inline void resetBindings()
 { if (auto* s = detail::inputSvc(); s && s->resetBindings) s->resetBindings(s->host); }
 inline bool saveBindings()
 { auto* s = detail::inputSvc(); return s && s->saveBindings && s->saveBindings(s->host); }
+
+// The player's stick deadzone, 0..0.9 — what a settings menu's slider sets.
+// Applied from the next frame; persisted by the engine's settings save.
+inline void setStickDeadzone(float deadzone)
+{ if (auto* s = detail::inputSvc(); s && s->setStickDeadzone) s->setStickDeadzone(s->host, deadzone); }
+inline float stickDeadzone()
+{ auto* s = detail::inputSvc(); return s && s->stickDeadzone ? s->stickDeadzone(s->host) : 0.15f; }
 
 inline Mode mode()
 { auto* s = detail::inputSvc(); return s ? (Mode)s->mode(s->host) : Mode::GameAndUI; }
