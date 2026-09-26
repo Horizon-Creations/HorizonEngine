@@ -1865,6 +1865,7 @@ nlohmann::json variableToJsonObj(const Variable& v)
     // nothing is byte-identical to one saved before replication existed.
     if (v.replicated) e["rep"] = true;
     if (v.repNotify)  e["repNotify"] = true;
+    if (v.saveGame)   e["saveGame"] = true;
     if (v.isArray)    e["arr"] = true;
     if (v.isArray && !v.defaultItems.empty())
     {
@@ -2003,6 +2004,9 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     // A hand-edited file may say either; nothing downstream has to check.
     if (v.type == P::Ref)  { v.replicated = false; }
     if (!v.replicated)     { v.repNotify  = false; }
+    // Same reasoning for Save Game: a handle does not survive into the next
+    // run, and a function-local is gone before anybody could save it.
+    v.saveGame = e.value("saveGame", false) && isSaveableType(v.type) && v.scope == 0;
     v.isArray = e.value("arr", false);
     v.container = (ContainerKind)e.value("ctr", (int)ContainerKind::None);
     if (v.container != ContainerKind::None) v.isArray = true;   // see loadParams

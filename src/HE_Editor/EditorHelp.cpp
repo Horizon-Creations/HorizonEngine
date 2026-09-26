@@ -1476,6 +1476,14 @@ namespace
 	  "Remember whether it was visible — a door that was opened, a pickup that "
 	  "was taken.",
 	  "", "scenes#scene-files" },
+	{ "Save State/Script Variables", "",
+	  "Remember the variables of this entity's HorizonCode class that are ticked "
+	  "Save Game in the class. Which ones travel is decided there, per variable; "
+	  "this box only says whether they do for this entity. A variable the class "
+	  "no longer has is skipped when loading, one the save does not have keeps "
+	  "its value. Lua and Python scripts are not captured — keep their state in "
+	  "the save's own fields (save.set / save.get).",
+	  "", "scenes#scene-files" },
 	{ "UI Canvas/Active", "",
 	  "Off hides the whole canvas and everything on it, and it stops receiving "
 	  "clicks.",
@@ -6237,6 +6245,14 @@ namespace
 	  "set the value and knows it — so a graph that has to react on both sides "
 	  "calls its own handler after the Set. Untick and tick again and the "
 	  "existing function is kept, not duplicated.",
+	  "", "horizoncode#functions" },
+	{ "Script Variable/Save Game", "",
+	  "Part of the savegame. When an entity running this class has a Save State "
+	  "component, entity.saveState writes this variable's value into the active "
+	  "save and entity.applySavedState sets it back, by name. Unticked variables "
+	  "are never saved. An Object variable cannot be ticked: a reference points "
+	  "at something that exists only in this run — save a name or an id "
+	  "instead.",
 	  "", "horizoncode#functions" },
 	{ "Script Variable/Position##vdef", "Default Position",
 	  "The position this Transform variable starts at. It is a starting value, "

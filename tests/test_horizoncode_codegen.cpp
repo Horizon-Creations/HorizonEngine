@@ -2072,3 +2072,44 @@ TEST_CASE("codegen: a Replicated variable keeps its flags in the generated slot 
 	REQUIRE(secEnd != std::string::npos);
 	CHECK(all.substr(sec, secEnd - sec).find("true") == std::string::npos);
 }
+
+TEST_CASE("codegen: a Save Game variable keeps its flag in the generated slot table")
+{
+	// Same hole as Replicated would have been: entity.saveState asks
+	// Runtime::savedVariablesOf, which reads varInfos() for a compiled class —
+	// an emitter that dropped the flag would save nothing in a shipped game.
+	using PT = HorizonCode::PinType;
+	hcfix::Fx f;
+	f.var("gold", PT::Int);
+	f.var("both", PT::Int);
+	f.var("plain", PT::Int);
+	for (HorizonCode::Variable& v : f.g.variables)
+	{
+		if (v.name == "gold") v.saveGame = true;
+		if (v.name == "both") { v.saveGame = true; v.replicated = true; }
+	}
+	const int ev = f.event("Go");
+	const int s = f.setVar("gold", PT::Int);
+	f.data(f.constI(1), 0, s, 0);
+	f.exec(ev, s);
+
+	HE::hccg::Options opt;
+	HE::hccg::Result r = HE::hccg::generate({ f.done("savegame_var") }, opt);
+	REQUIRE(r.ok);
+	REQUIRE(r.fallbacks.empty());
+	std::string all;
+	for (const auto& file : r.files) all += file.contents;
+
+	auto line = [&all](const char* name)
+	{
+		const std::size_t at = all.find(std::string("\"") + name + "\"");
+		REQUIRE(at != std::string::npos);
+		return all.substr(at, all.find('\n', at) - at);
+	};
+	// The positional groups before it are spelt out, replication as "no".
+	CHECK(line("gold").find("hc::ContainerKind::None, hc::PinType::String, false, false, true")
+	      != std::string::npos);
+	CHECK(line("both").find("true, false, true") != std::string::npos);
+	// Negative control: an unticked variable emits exactly as before.
+	CHECK(line("plain").find("ContainerKind") == std::string::npos);
+}

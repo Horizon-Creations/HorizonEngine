@@ -391,6 +391,36 @@ std::vector<Runtime::ReplicatedVar> Runtime::replicatedVariablesOf(InstanceId id
     return out;
 }
 
+std::vector<std::string> Runtime::savedVariablesOf(InstanceId id) const
+{
+    std::vector<std::string> out;
+    const Inst* i = find(id);
+    if (!i) return out;
+    // Leaf-most declaration wins, as in replicatedVariablesOf: a derived class
+    // that re-declares a variable without the box takes it OUT of the save.
+    std::vector<std::pair<std::string, bool>> seen;
+    auto report = [&seen](const std::string& name, bool saved)
+    {
+        for (auto& s : seen)
+            if (s.first == name) { s.second = saved; return; }
+        seen.emplace_back(name, saved);
+    };
+    if (i->compiled)
+    {
+        for (const auto& vi : i->compiled->varInfos())
+            report(vi.name, vi.saveGame && isSaveableType(vi.type));
+    }
+    else
+    {
+        for (const Graph& g : i->levels)
+            for (const Variable& v : g.variables)
+                if (v.scope == 0) report(v.name, v.saveGame && isSaveableType(v.type));
+    }
+    for (auto& s : seen)
+        if (s.second) out.push_back(std::move(s.first));
+    return out;
+}
+
 Runtime::FunctionSignature Runtime::functionSignatureOf(InstanceId id,
                                                         const std::string& fn) const
 {

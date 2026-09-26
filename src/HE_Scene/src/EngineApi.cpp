@@ -223,6 +223,16 @@ bool teleportToLocalPose(Ctx& c, Entity e, TransformComponent& tc,
 }
 } // namespace
 
+// The save's value codec (defined with the rest of the save further down):
+// entity.saveState writes a class's Save Game variables through it, so a
+// variable and a template field of the same type are spelt the same on disk.
+namespace save {
+namespace {
+nlohmann::json valueToJson(const Value& v);
+Value valueFromJson(const nlohmann::json& j, const HE::StructField& f);
+} // namespace
+} // namespace save
+
 // ── Entities ─────────────────────────────────────────────────────────────────
 namespace entity {
 std::string getName(Ctx& c, Entity e)                          { return c.world ? ScriptApi::getName(*c.world, e) : std::string(); }
@@ -417,6 +427,84 @@ const SaveStateComponent* saveStateGuard(const char* op, Ctx& c, Entity e, std::
     }
     return ss;
 }
+
+// The entity's HorizonCode class instance, or 0. Asked of EntityHost for the
+// reason `instance` below gives: several instances may own one entity, and the
+// class binding is the one whose variables are the entity's state.
+HorizonCode::InstanceId classInstanceOf(Ctx& c, Entity e)
+{
+    if (!c.runtime || !c.entities) return 0;
+    return c.entities->instanceOf((entt::entity)e);
+}
+
+// The class's Save Game variables, name-keyed (Runtime::savedVariablesOf).
+// Empty for an entity without a class, or a class that ticks none.
+nlohmann::json scriptVarsToJson(Ctx& c, Entity e)
+{
+    nlohmann::json vars = nlohmann::json::object();
+    const HorizonCode::InstanceId inst = classInstanceOf(c, e);
+    if (!inst) return vars;
+    for (const std::string& name : c.runtime->savedVariablesOf(inst))
+        vars[name] = save::valueToJson(c.runtime->getVariable(inst, name));
+    return vars;
+}
+
+// The decode shape of one saved variable is the LIVE variable's: the instance
+// was seeded from its declaration, and that works the same for an interpreted
+// and a generated class (a CompiledVarInfo has no typeName to ask). A
+// container's Value carries no element typeName in either backend, so a
+// container of structs takes it from a live element or, if the container is
+// empty right now, from the "__type" every saved struct element carries.
+HE::StructField savedVarShape(const Value& live, const nlohmann::json& saved)
+{
+    HE::StructField f;
+    f.type = live.type;           f.isArray = live.isArray;
+    f.container = live.container; f.typeName = live.typeName;
+    f.keyType = live.keyType;     f.keyTypeName = live.keyTypeName;
+    if (f.type == PinType::Struct && f.typeName.empty())
+    {
+        if (!live.items.empty()) f.typeName = live.items.front().typeName;
+        const nlohmann::json* elems = saved.is_array() ? &saved
+            : (saved.is_object() && saved.contains("values") ? &saved["values"] : nullptr);
+        if (f.typeName.empty() && elems && elems->is_array())
+            for (const auto& el : *elems)
+                if (el.is_object() && el.value("__type", std::string()).size())
+                { f.typeName = el["__type"].get<std::string>(); break; }
+    }
+    return f;
+}
+
+// Name-keyed and partial, like the rest of applySavedState: a variable the save
+// lacks keeps its value, a saved name the class no longer marks Save Game (or
+// no longer has) is skipped — the class decides what is state, not the file.
+void applyScriptVars(Ctx& c, Entity e, const nlohmann::json& vars)
+{
+    const HorizonCode::InstanceId inst = classInstanceOf(c, e);
+    if (!inst)
+    {
+        HE_LOG_WARN(Script, "%s", "entity.applySavedState: the save holds script variables, "
+                                  "but the entity runs no HorizonCode class — skipped");
+        return;
+    }
+    const std::vector<std::string> saved = c.runtime->savedVariablesOf(inst);
+    std::string skipped;
+    for (auto it = vars.begin(); it != vars.end(); ++it)
+    {
+        if (std::find(saved.begin(), saved.end(), it.key()) == saved.end())
+        {
+            skipped += (skipped.empty() ? "" : ", ") + it.key();
+            continue;
+        }
+        const Value live = c.runtime->getVariable(inst, it.key());
+        c.runtime->setVariable(inst, it.key(),
+                               save::valueFromJson(it.value(), savedVarShape(live, it.value())));
+    }
+    // Info, not a warning: a shipped game that unticked a variable in an update
+    // meets this on every old save until it is written again.
+    if (!skipped.empty())
+        HE_LOG_INFO(Script, "%s", ("entity.applySavedState: not a Save Game variable of the "
+                                   "class (any more), left as it is: " + skipped).c_str());
+}
 } // namespace
 
 bool saveState(Ctx& c, Entity e)
@@ -435,6 +523,11 @@ bool saveState(Ctx& c, Entity e)
     }
     if (ss->saveVisibility)
         j["visible"] = getVisible(c, e);
+    // Only when there is something: an entity whose class ticks nothing (or
+    // that has no class) writes exactly the state it wrote before this existed.
+    if (ss->saveScriptVars)
+        if (nlohmann::json vars = scriptVarsToJson(c, e); !vars.empty())
+            j["vars"] = std::move(vars);
     return save::setEntityState(uuid, j.dump());
 }
 
@@ -493,6 +586,8 @@ bool applySavedState(Ctx& c, Entity e)
     }
     if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss->saveVisibility)
         setVisible(c, e, v->get<bool>());
+    if (auto v = j.find("vars"); v != j.end() && v->is_object() && ss->saveScriptVars)
+        applyScriptVars(c, e, *v);
     return true;
 }
 } // namespace entity
@@ -4348,6 +4443,10 @@ nlohmann::json scalarToJson(const Value& v)
     case P::Bool:   return v.b;
     case P::String: return v.s;
     case P::Vec2:   return nlohmann::json::array({ v.v2.x, v.v2.y });
+    // Vec3/Vec4 used to fall to `null` here — a template field of either type
+    // was saved as nothing and loaded as zero, without a word.
+    case P::Vec3:   return nlohmann::json::array({ v.v3.x, v.v3.y, v.v3.z });
+    case P::Vec4:   return nlohmann::json::array({ v.v4.x, v.v4.y, v.v4.z, v.v4.w });
     case P::Color:  return nlohmann::json::array({ v.col.x, v.col.y, v.col.z, v.col.w });
     case P::Transform:
         return nlohmann::json{
@@ -4404,6 +4503,14 @@ Value scalarFromJson(const nlohmann::json& j, HorizonCode::PinType t, const std:
     case P::Vec2:
         if (j.is_array() && j.size() >= 2)
             v.v2 = { j[0].get<float>(), j[1].get<float>() };
+        break;
+    case P::Vec3:
+        if (j.is_array() && j.size() >= 3)
+            v.v3 = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>() };
+        break;
+    case P::Vec4:
+        if (j.is_array() && j.size() >= 4)
+            v.v4 = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
         break;
     case P::Color:
         if (j.is_array() && j.size() >= 4)

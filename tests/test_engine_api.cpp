@@ -21,7 +21,10 @@
 #include <HorizonScene/Components/CharacterControllerComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/SaveStateComponent.h>
+#include <HorizonScene/Components/ScriptComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/EntityHost.h>
+#include <HorizonCode/HorizonCodeRuntime.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -3614,6 +3617,188 @@ TEST_CASE("entity save-state: guarded round-trip through the active save")
     CHECK(reg.get<TransformComponent>(e).position.z == doctest::Approx(3.0f));
 
     save::setPlayMode(false);
+}
+
+TEST_CASE("entity save-state: a class's Save Game variables round-trip, the rest stay out")
+{
+    SaveTestRig rig;
+    namespace save = HE::api::save;
+    using HorizonCode::Variable;
+    const char* kStats = SaveTestRig::kStatsDef;
+
+    // The class: four ticked variables covering a scalar, a Vec3 (the save
+    // codec used to write those as null), a struct and an ARRAY of structs
+    // (whose Value carries no element typeName), plus two that must never
+    // travel — an unticked String and a ticked Ref, which the loader unticks.
+    HorizonCode::Graph g;
+    auto var = [&g](const char* name, P type, bool saveGame, const char* typeName = "",
+                    bool isArray = false)
+    {
+        Variable v; v.name = name; v.type = type; v.saveGame = saveGame;
+        v.typeName = typeName; v.isArray = isArray;
+        g.variables.push_back(v);
+    };
+    var("gold",   P::Int,    true);
+    var("home",   P::Vec3,   true);
+    var("stats",  P::Struct, true, kStats);
+    var("loot",   P::Struct, true, kStats, /*isArray=*/true);
+    var("note",   P::String, false);
+    var("target", P::Ref,    true);
+
+    const auto dir = std::filesystem::temp_directory_path() / "he_api_save_vars_classes";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir);
+    ContentManager classes(dir.string());
+    auto writeClass = [&classes](const char* name, const HorizonCode::Graph& graph)
+    {
+        HorizonCodeClassAsset a;
+        a.type      = HE::AssetType::HorizonCodeClass;
+        a.name      = name;
+        a.path      = std::string(name) + ".hasset";
+        a.baseClass = "Entity";
+        a.graphJson = HorizonCode::toJson(graph);
+        REQUIRE(classes.saveAsset(a));
+        return a.path;
+    };
+    const std::string heroCls  = writeClass("Hero", g);
+    HorizonCode::Graph plain;
+    { Variable v; v.name = "hp"; v.type = P::Int; plain.variables.push_back(v); }
+    const std::string crateCls = writeClass("Crate", plain);
+
+    HorizonWorld world;
+    auto& reg = world.registry();
+    auto spawnWith = [&](const char* name, const std::string& cls)
+    {
+        const auto ent = world.createEntity(name);
+        reg.emplace<TransformComponent>(ent);
+        reg.emplace<SaveStateComponent>(ent);
+        ScriptComponent sc;
+        sc.scriptAssetId = classes.loadAsset(cls);
+        reg.emplace<ScriptComponent>(ent, sc);
+        return ent;
+    };
+    const auto hero  = spawnWith("Hero1", heroCls);
+    const auto crate = spawnWith("Crate1", crateCls);
+
+    HorizonCode::Runtime rt;
+    EntityHost host;
+    host.begin(rt, world, classes);
+    const HorizonCode::InstanceId inst = host.instanceOf(hero);
+    REQUIRE(inst != 0);
+
+    // The runtime's answer is the whole declaration: the ticked non-Ref ones.
+    CHECK(rt.savedVariablesOf(inst) ==
+          std::vector<std::string>({ "gold", "home", "stats", "loot" }));
+    CHECK(rt.savedVariablesOf(host.instanceOf(crate)).empty());
+
+    auto statsOf = [&](int level)
+    {
+        Value s = HE::TypeRegistry::instance().makeDefaultValue(kStats);
+        REQUIRE(s.items.size() == 1);
+        s.items[0].i = level;
+        return s;
+    };
+    rt.setVariable(inst, "gold",  Value::ofInt(42));
+    rt.setVariable(inst, "home",  Value::ofVec3({ 1.5f, -2.0f, 3.25f }));
+    rt.setVariable(inst, "stats", statsOf(7));
+    {
+        Value loot = rt.getVariable(inst, "loot");
+        loot.items = { statsOf(3), statsOf(4) };
+        rt.setVariable(inst, "loot", loot);
+    }
+    rt.setVariable(inst, "note",  Value::ofString("kept"));
+
+    HE::api::Ctx c{ &world, nullptr, &rig.cm };
+    c.runtime  = &rt;
+    c.entities = &host;
+    const auto heroH  = (HE::api::Entity)hero;
+    const auto crateH = (HE::api::Entity)crate;
+
+    save::setPlayMode(true);
+    REQUIRE(save::create("vars", &rig.cm));
+    REQUIRE(HE::api::entity::saveState(c, heroH));
+    REQUIRE(HE::api::entity::saveState(c, crateH));
+
+    // Scramble everything, then apply: the ticked ones come back, the unticked
+    // one keeps what it has now.
+    auto scramble = [&]
+    {
+        rt.setVariable(inst, "gold",  Value::ofInt(-1));
+        rt.setVariable(inst, "home",  Value::ofVec3({ 0.0f, 0.0f, 0.0f }));
+        rt.setVariable(inst, "stats", statsOf(99));
+        Value loot = rt.getVariable(inst, "loot");
+        loot.items.clear();          // empty: the element type has to come from the save
+        rt.setVariable(inst, "loot", loot);
+        rt.setVariable(inst, "note",  Value::ofString("changed"));
+    };
+    auto checkRestored = [&]
+    {
+        CHECK(rt.getVariable(inst, "gold").i == 42);
+        const glm::vec3 home = rt.getVariable(inst, "home").v3;
+        CHECK(home.x == doctest::Approx(1.5f));
+        CHECK(home.y == doctest::Approx(-2.0f));
+        CHECK(home.z == doctest::Approx(3.25f));
+        const Value stats = rt.getVariable(inst, "stats");
+        REQUIRE(stats.items.size() == 1);
+        CHECK(stats.items[0].i == 7);
+        const Value loot = rt.getVariable(inst, "loot");
+        REQUIRE(loot.items.size() == 2);
+        REQUIRE(loot.items[0].items.size() == 1);
+        CHECK(loot.items[0].items[0].i == 3);
+        CHECK(loot.items[1].items[0].i == 4);
+        CHECK(rt.getVariable(inst, "note").s == "changed");
+    };
+    scramble();
+    REQUIRE(HE::api::entity::applySavedState(c, heroH));
+    checkRestored();
+
+    // On disk: the ticked names under "vars", nothing else — and an entity
+    // whose class ticks nothing writes no "vars" at all, so its state is what
+    // it was before script variables were captured.
+    REQUIRE(save::write());
+    save::close();
+    {
+        const nlohmann::json file = nlohmann::json::parse(HE::api::fs::readText("Saves/vars.json"));
+        const nlohmann::json* heroState = nullptr;
+        const nlohmann::json* crateState = nullptr;
+        for (const auto& [uuid, st] : file.at("entities").items())
+            (st.contains("vars") ? heroState : crateState) = &st;
+        REQUIRE(heroState);
+        REQUIRE(crateState);
+        CHECK(crateState->contains("transform"));
+        const nlohmann::json& vars = heroState->at("vars");
+        CHECK(vars.size() == 4);
+        CHECK(vars.at("gold").get<int>() == 42);
+        CHECK(vars.at("home").size() == 3);                  // a Vec3, not null
+        CHECK(vars.at("stats").at("level").get<int>() == 7);
+        CHECK(!vars.contains("note"));
+        CHECK(!vars.contains("target"));
+    }
+
+    // …and it comes back from disk.
+    REQUIRE(save::load("vars", &rig.cm));
+    scramble();
+    REQUIRE(HE::api::entity::applySavedState(c, heroH));
+    checkRestored();
+
+    // saveScriptVars off: the saved variables are left alone on apply (the
+    // transform, which this component still restores, is not in question here).
+    reg.get<SaveStateComponent>(hero).saveScriptVars = false;
+    scramble();
+    REQUIRE(HE::api::entity::applySavedState(c, heroH));
+    CHECK(rt.getVariable(inst, "gold").i == -1);
+    // …and off on write, too: the entity's state loses its "vars".
+    rt.setVariable(inst, "gold", Value::ofInt(5));
+    REQUIRE(HE::api::entity::saveState(c, heroH));
+    reg.get<SaveStateComponent>(hero).saveScriptVars = true;
+    REQUIRE(HE::api::entity::applySavedState(c, heroH));
+    CHECK(rt.getVariable(inst, "gold").i == 5);              // nothing to restore from
+
+    save::close();
+    save::setPlayMode(false);
+    host.end();
+    std::filesystem::remove_all(dir, ec);
 }
 
 // The game-side receiver, exactly as a GameLogic library defines it — the test

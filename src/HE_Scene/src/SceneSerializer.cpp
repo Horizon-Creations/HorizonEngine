@@ -470,6 +470,7 @@ namespace
 				{ "enabled",        ss->enabled },
 				{ "saveTransform",  ss->saveTransform },
 				{ "saveVisibility", ss->saveVisibility },
+				{ "saveScriptVars", ss->saveScriptVars },
 			};
 		}
 		if (auto* pl = registry.try_get<PrefabInstanceComponent>(entity))
@@ -1261,6 +1262,7 @@ namespace
 			ss.enabled        = c.value("enabled",        ss.enabled);
 			ss.saveTransform  = c.value("saveTransform",  ss.saveTransform);
 			ss.saveVisibility = c.value("saveVisibility", ss.saveVisibility);
+			ss.saveScriptVars = c.value("saveScriptVars", ss.saveScriptVars);
 			registry.emplace_or_replace<SaveStateComponent>(entity, ss);
 		}
 		if (comps.contains("prefab"))

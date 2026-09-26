@@ -238,3 +238,59 @@ vorgeschlagen. Stand:
 2-A → 2-B → 3-A → 2-C → 3-B. 2-A ist der kleinste Schritt mit dem groessten
 Schutz. 2-B verhindert den einzigen Fall, der beim Spieler kaputtgeht. 3-A hat
 eine fertige Vorlage.
+
+## Nachtrag Schritt 3 (26.09.): 3-A umgesetzt, 3-B bewusst offen
+
+Welche Skript-Variablen ein Save erfasst, ist jetzt eine Entscheidung im Skript
+selbst und nicht mehr "keine":
+
+- **Deklaration:** `Variable::saveGame` (`HorizonCode.h`), im Variablen-Panel
+  als Haken **Save Game** neben Replicated. JSON-Schluessel `"saveGame"` nur wenn
+  gesetzt, also bleiben Graphen ohne Haken byte-gleich. Regel an einer Stelle:
+  `HorizonCode::isSaveableType` (alles ausser Ref und Exec). Der Loader nimmt den
+  Haken bei Ref und bei Funktions-Locals wieder weg, das Panel sperrt ihn fuer Ref
+  mit Begruendung.
+- **Kompiliert:** `CompiledVarInfo::saveGame` und `VarSlot::saveGame` (hinten
+  angehaengt, mit Default, wie `replicated`), `slot()` hat einen Parameter mehr,
+  `varInfosOf` reicht ihn durch. Der Codegen schreibt die hinteren
+  `slot()`-Argumente jetzt als Kette positioneller Gruppen (Container,
+  Replikation, Save Game), jede nur wenn sie oder eine spaetere vom Default
+  abweicht. Slots ohne Haken sind unveraendert.
+- **Aufzaehlung:** `Runtime::savedVariablesOf(id)`, fuer interpretiert und
+  kompiliert, nur Instanzvariablen, die Blatt-Deklaration gewinnt (eine
+  abgeleitete Klasse ohne Haken nimmt die Variable aus dem Save).
+- **Schreiben/Lesen:** `SaveStateComponent::saveScriptVars` (Default an,
+  Inspector-Haken "Script Variables", Szenen-Schluessel `saveScriptVars`).
+  `entity.saveState` schreibt `"vars": { name: wert }` ueber denselben Codec wie
+  die Template-Felder, **nur wenn nicht leer**. Entities ohne Klasse oder ohne
+  Haken schreiben also denselben Zustand wie vorher. `entity.applySavedState`
+  setzt name-keyed und partiell per `Runtime::setVariable`. Die Form zum
+  Dekodieren kommt von der lebenden Variable (einer `CompiledVarInfo` fehlt der
+  typeName); bei Containern von Structs aus einem lebenden Element oder aus dem
+  `__type` im Save. Gespeicherte Namen, die die Klasse nicht (mehr) als Save Game
+  fuehrt, werden uebersprungen und einmal als Info geloggt.
+- **Beifang:** Der Save-Codec schrieb `Vec3`/`Vec4` als `null` und las sie als
+  Null. Das traf schon vorher Template-Felder dieser Typen. Beide Typen sind
+  jetzt drin.
+- **Test:** `test_engine_api.cpp`, "entity save-state: a class's Save Game
+  variables round-trip, the rest stay out": Int, Vec3, Struct und Array von
+  Structs (leer beim Anwenden, Typ aus `__type`) im Speicher und ueber die
+  Platte; unmarkierte String-Variable und markierte Ref bleiben draussen; eine
+  Klasse ohne Haken schreibt kein `"vars"`; `saveScriptVars` aus wirkt beim
+  Anwenden und beim Schreiben.
+
+**Weiter offen:**
+- **3-B Lua/Python:** nicht erfasst. `IScriptBackend` kann Properties nur vor
+  `onStart` einspeisen, nicht zuruecklesen. Bis dahin gehoert Skriptzustand
+  dieser Sprachen in die Template-Felder (`save.set`/`save.get`). So steht es in
+  `SaveStateComponent.h`, in `EngineApi.h` und in der Hilfe zu "Save State /
+  Script Variables".
+- **3-C C++-GameLogic:** keine eigene Zeile noetig, `he::entity::saveState`
+  laeuft durch dieselbe Funktion und nimmt Klassen-Variablen damit mit. Eigene
+  C++-Member einer GameLogic erfasst nichts.
+- Kein Paritaetstest, der eine *generierte* Klasse ueber `entity.saveState`
+  rundtrippt. Abgedeckt ist nur die Emission des Flags im Codegen
+  (`test_horizoncode_codegen.cpp`) und der Lesepfad `varInfos()` →
+  `savedVariablesOf` ist derselbe Code wie fuer `replicated`.
+- Ref-Felder *innerhalb* eines gespeicherten Structs werden weiter als `null`
+  geschrieben und als 0 gelesen (wie bei Template-Feldern).

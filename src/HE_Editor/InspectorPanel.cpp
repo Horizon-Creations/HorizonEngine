@@ -2857,6 +2857,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// concerned — which is what the "conflicting ID" warning reports.
 			EditorWidgets::checkbox("Transform##savestate", &ss->saveTransform); trackEdit();
 			EditorWidgets::checkbox("Visibility##savestate", &ss->saveVisibility); trackEdit();
+			EditorWidgets::checkbox("Script Variables", &ss->saveScriptVars); trackEdit();
 			ImGui::EndDisabled();
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SaveStateComponent>(entity); }
