@@ -1734,14 +1734,23 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			EditorWidgets::checkbox("Loop##seqp", &sp->loop); trackEdit();
 			Row::dragFloat("Play Rate##seqp", &sp->playRate, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
 
+			// How the view goes back to gameplay, and whether the player can move
+			// meanwhile. Per player, not in the asset (SequencePlayerComponent.h).
+			Row::dragFloat("Blend Out##seqp", &sp->blendOutSeconds, 0.01f, 0.0f, 10.0f, "%.2f s"); trackEdit();
+			static const char* kCurves[] = { "Linear", "Smooth Step", "Ease Out" };
+			int curve = static_cast<int>(sp->blendOutCurve);
+			if (Row::combo("Blend Out Curve##seqp", &curve, kCurves, IM_ARRAYSIZE(kCurves)))
+			{ sp->blendOutCurve = static_cast<HE::BlendCurve>(curve); trackEdit(); }
+			EditorWidgets::checkbox("Lock Player Input##seqp", &sp->lockPlayerInput); trackEdit();
+
 			if (seq)
 			{
 				ImGui::Separator();
 				ImGui::Text("Duration: %.2f s | Tracks: %zu | Actors: %zu",
 				            seq->duration, seq->tracks.size(), seq->bindings.size());
 				if (sp->started)
-					ImGui::Text("%s at %.2f s", sp->playing ? (sp->paused ? "Paused" : "Playing") : "Stopped",
-					            sp->time);
+					ImGui::Text("%s at %.2f s%s", sp->playing ? (sp->paused ? "Paused" : "Playing") : "Stopped",
+					            sp->time, sp->cameraOwned ? " | holds the camera" : "");
 			}
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SequencePlayerComponent>(entity); }

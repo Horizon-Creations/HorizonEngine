@@ -3289,8 +3289,10 @@ void EditorApplication::OnRender(float dt)
 			// gets the cursor back without the game turning with it.
 			if (simulating)
 			{
+				// A cutscene with Lock Player Input silences it like a pause.
 				m_playerHost.tick(input(), gameDt,
-				                  m_playMouseCaptured ? input().mouse() : MouseFrame{});
+				                  m_playMouseCaptured ? input().mouse() : MouseFrame{},
+				                  SequenceSystem::locksPlayerInput(m_editorWorld->registry()));
 				// Entity classes: Tick, plus reaping the ones whose entity is gone.
 				m_entityHost.tick(gameDt);
 			}
@@ -8963,6 +8965,12 @@ void EditorApplication::updatePlayCameraController(float dt)
 		if (SDL_CursorVisible())
 			SDL_HideCursor();
 	}
+
+	// A cutscene holds the camera: neither the rig nor free flight may touch it
+	// until it hands the view back (SequenceSystem.h, "Camera and input"). After
+	// the capture re-assert above, not before: the mouse stays held through the
+	// cutscene, so the player does not have to click back in when it ends.
+	if (SequenceSystem::ownsCamera(m_editorWorld->registry())) return;
 
 	// A camera rig wins when the scene has one it can drive — PIE has to show the
 	// same camera the shipped game will, or it is not a preview.

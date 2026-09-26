@@ -745,6 +745,11 @@ namespace
 				{ "autoplay", sp->autoplay },
 				{ "loop",     sp->loop },
 				{ "playRate", sp->playRate },
+				{ "blendOut", sp->blendOutSeconds },
+				// The curve as its index — the same numbers camera.blendTo and
+				// the sequence asset's cuts use.
+				{ "blendOutCurve",   static_cast<int>(sp->blendOutCurve) },
+				{ "lockPlayerInput", sp->lockPlayerInput },
 			};
 		}
 		if (auto* nm = registry.try_get<NavMeshComponent>(entity))
@@ -1615,6 +1620,16 @@ namespace
 			sp.autoplay   = c.value("autoplay", sp.autoplay);
 			sp.loop       = c.value("loop",     sp.loop);
 			sp.playRate   = c.value("playRate", sp.playRate);
+			sp.blendOutSeconds = c.value("blendOut", sp.blendOutSeconds);
+			// An unknown curve index reads as the default rather than as an enum
+			// value nothing handles.
+			switch (c.value("blendOutCurve", static_cast<int>(sp.blendOutCurve)))
+			{
+				case static_cast<int>(HE::BlendCurve::Linear):  sp.blendOutCurve = HE::BlendCurve::Linear;     break;
+				case static_cast<int>(HE::BlendCurve::EaseOut): sp.blendOutCurve = HE::BlendCurve::EaseOut;    break;
+				default:                                        sp.blendOutCurve = HE::BlendCurve::SmoothStep; break;
+			}
+			sp.lockPlayerInput = c.value("lockPlayerInput", sp.lockPlayerInput);
 			registry.emplace_or_replace<SequencePlayerComponent>(entity, std::move(sp));
 		}
 		if (comps.contains("navmesh"))

@@ -156,10 +156,11 @@ namespace
 	  "platform, a fading light — with no skeleton involved.",
 	  "", "systems#animation" },
 	{ "Component/Sequence Player", "Sequence Player",
-	  "Plays a cinematic sequence: several actors, their skeletal clips, events "
-	  "and sound on one clock. The actors are the sequence's own bindings, found "
-	  "by their entity ID; this entity is the cutscene's owner and receives the "
-	  "events that name no actor. Runs only while the game plays.",
+	  "Plays a cinematic sequence: several actors, their skeletal clips, camera "
+	  "cuts, events and sound on one clock. The actors are the sequence's own "
+	  "bindings, found by their entity ID; this entity is the cutscene's owner "
+	  "and receives the events that name no actor. Runs only while the game "
+	  "plays.",
 	  "", "systems#animation" },
 	{ "Component/Particle System", "Particle System",
 	  "Emits particles from this entity. The emitter's shape, rate and look come "
@@ -1368,6 +1369,20 @@ namespace
 	{ "Sequence Player/Play Rate", "",
 	  "Playback speed: 1 is as authored, negative plays backwards. Events fire "
 	  "backwards too; sounds only start going forwards.",
+	  "", "systems#animation" },
+	{ "Sequence Player/Blend Out", "",
+	  "Seconds the view takes to travel back to the gameplay camera when the "
+	  "sequence lets go of it: at its end, when it is stopped, or at a cut to no "
+	  "camera. 0 is a cut, and so is a gameplay camera without a rig.",
+	  "", "systems#animation" },
+	{ "Sequence Player/Blend Out Curve", "",
+	  "How that travel is paced. Smooth Step eases in and out; Linear moves at "
+	  "one speed; Ease Out starts fast and settles.",
+	  "", "systems#animation" },
+	{ "Sequence Player/Lock Player Input", "",
+	  "While the sequence plays, the player's controls do nothing, as in a "
+	  "pause. Actions marked to run while paused still arrive, so a skip key "
+	  "or the pause menu keeps working.",
 	  "", "systems#animation" },
 	{ "Particle System/Playing", "",
 	  "Emits in the editor, so an effect can be judged without entering play "

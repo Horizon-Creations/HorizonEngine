@@ -88,6 +88,46 @@ namespace SequenceSystem
     // override). Takes effect at once if it is playing.
     void bindSlot(HorizonWorld& world, entt::entity player, uint16_t slot, entt::entity target);
 
+    // ── Camera and input ─────────────────────────────────────────────────────
+    // A playing (or paused) sequence whose camera-cut track has a live cut
+    // HOLDS THE CAMERA (plan §3.4). apply() then does what a camera controller
+    // would: makes the cut's camera the only isMain and, inside a cut's blendIn,
+    // writes the blended pose into it.
+    //
+    //   Taking it:  the camera on screen at that moment (the gameplay camera) is
+    //               remembered, its world pose frozen — that is where a blend
+    //               into the first cut starts — and every rig lets go
+    //               (CameraRigController::releaseAll). Taken at the first cut,
+    //               not at play(): until a cut happens the gameplay camera is
+    //               still the player's to move.
+    //   Blending:   between the source pose (the frozen gameplay pose, or the
+    //               previous cut's camera at the same instant) and the live
+    //               camera's pose, both at sequence time t — so a blend scrubs
+    //               like any other track. The live camera's own transform and
+    //               FOV offset are saved before the write and put back at the
+    //               top of the next apply(), before the tracks run: its keys, or
+    //               where it was placed, stay what the author made them.
+    //   Giving it back: at the end, on stop(), on a cut to no camera, when the
+    //               live cut's actor is missing or is no camera, and when the
+    //               owner itself is destroyed. CameraRigController::blendTo into
+    //               the remembered gameplay camera over the player's
+    //               blendOutSeconds — for a rig camera its transform also gets
+    //               the pose the cutscene showed last, so the frame of the
+    //               hand-over does not flash the pose the rig had before.
+    //
+    // ONE sequence holds the camera at a time. Another player whose cut comes
+    // live meanwhile waits until the holder lets go, then takes it.
+    //
+    // Both applications ask ownsCamera() before their camera controllers (rig
+    // and fly) and leave the camera alone while it is true. Without that the fly
+    // fallback would move a cutscene camera under the player's mouse.
+    bool ownsCamera(const entt::registry& reg);
+
+    // Some playing (or paused) player has lockPlayerInput set. Both applications
+    // pass it to PlayerHost::tick, which then silences gameplay input the way a
+    // pause does.
+    bool locksPlayerInput(const entt::registry& reg);
+
     // ── Skeletal section rule ────────────────────────────────────────────────
     // Pure, public for the tests. The live section at `t`: the one with the
     // LATEST start among those whose [start, end] contains t, the later-listed on

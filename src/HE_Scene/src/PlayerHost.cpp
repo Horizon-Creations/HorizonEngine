@@ -209,7 +209,7 @@ void PlayerHost::fireInputEvent(const std::string& event, const HorizonCode::Val
 	}
 }
 
-void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse)
+void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse, bool locked)
 {
 	if (!m_runtime) return;
 	m_mapping.tick(input, mouse);
@@ -239,7 +239,9 @@ void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse)
 	// conditions ask "is the game being played right now", so they share the
 	// author's answer rather than growing a second flag that can contradict it.
 	const bool uiOnly = HE::api::input::mode() == HE::api::input::Mode::UIOnly;
-	const bool silenced = paused || uiOnly;
+	// A cutscene's lock is the third such reason, with the same exception: the
+	// key that skips the cutscene is an action the author marked the same way.
+	const bool silenced = paused || uiOnly || locked;
 
 	// The text-script side of every event below: the same event, to every
 	// Lua/Python instance of the session (see the header). Written once as a

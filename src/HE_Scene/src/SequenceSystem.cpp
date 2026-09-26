@@ -5,12 +5,20 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityActive.h>
 #include <HorizonScene/TransformHierarchy.h>
+#include <HorizonScene/CameraRigController.h>
+#include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>
+#include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/SequencePlayerComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
 #include <ContentManager/ContentManager.h>
 #include "AnimationEval.h"
 #include "PoseFinalize.h"
 #include <Diagnostics/Log.h>
+
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -157,6 +165,233 @@ bool skeletalPoseAt(entt::registry& reg, ContentManager& cm, const SequencePlaye
         return false;
     }
     return true;
+}
+
+// ── Camera ───────────────────────────────────────────────────────────────────
+// Who holds the camera, in the registry's context rather than on a player: the
+// lease has to outlive its owner, because an owner destroyed mid-cutscene still
+// leaves its camera on screen, and somebody has to hand the view back.
+struct CameraLease
+{
+    entt::entity   owner          = entt::null;
+    // What was on screen when the sequence took over, and its world pose then:
+    // where the view goes back to, and where a blend into the first cut starts.
+    entt::entity   gameplayCamera = entt::null;
+    HE::SolvedPose gameplayPose;   // valid == false: there was no camera to blend from
+    // The owner's blend-out, copied every frame it holds the camera so a
+    // destroyed owner still hands back the way it was authored.
+    float          blendOutSeconds = 0.0f;
+    HE::BlendCurve blendOutCurve   = HE::BlendCurve::SmoothStep;
+    // The camera whose transform holds a BLENDED pose right now, and what it held
+    // before that write. Put back before the tracks run again: the blend is this
+    // frame's output, never the camera's state (the rig's law, CameraPose.h).
+    entt::entity   blended = entt::null;
+    glm::vec3      savedPosition{ 0.0f };
+    glm::vec3      savedRotation{ 0.0f };
+    float          savedFovOffset = 0.0f;
+};
+
+// The camera on screen: isMain, else the first — the renderer's rule.
+entt::entity shownCamera(entt::registry& reg)
+{
+    entt::entity found = entt::null;
+    for (auto [e, cam] : reg.view<CameraComponent>().each())
+    {
+        if (found == entt::null) found = e;
+        if (cam.isMain) return e;
+    }
+    return found;
+}
+
+bool isCamera(const entt::registry& reg, entt::entity e)
+{
+    return e != entt::null && reg.valid(e) && reg.all_of<CameraComponent, TransformComponent>(e);
+}
+
+// A camera's world pose NOW — composed from the parent chain, not read out of
+// worldMatrix, because the tracks have just moved it and nothing has propagated.
+HE::SolvedPose cameraWorldPose(HorizonWorld& world, entt::entity e)
+{
+    HE::SolvedPose p;
+    const glm::mat4 m = HE::worldMatrixOf(world, e);
+    p.position = glm::vec3(m[3]);
+    glm::mat3 basis(m);
+    for (int i = 0; i < 3; ++i)
+    {
+        const float len = glm::length(basis[i]);
+        if (len > 1e-6f) basis[i] /= len;
+    }
+    p.rotation     = glm::normalize(glm::quat_cast(basis));
+    p.eulerDegrees = glm::degrees(glm::eulerAngles(p.rotation));
+    if (const auto* cam = world.registry().try_get<CameraComponent>(e))
+        p.fovDegrees = cam->fovDegrees + cam->fovOffset;
+    p.valid = true;
+    return p;
+}
+
+// Put a world pose on a camera: the transform in its parent's space, the FOV as
+// an offset against the authored value (fovDegrees is never written).
+void writeCameraPose(HorizonWorld& world, entt::entity e, const HE::SolvedPose& p)
+{
+    auto& reg = world.registry();
+    auto* t = reg.try_get<TransformComponent>(e);
+    if (!t) return;
+    const auto* h = reg.try_get<HierarchyComponent>(e);
+    const entt::entity parent = h ? h->parent : entt::null;
+    if (parent == entt::null || parent == world.rootEntity() || !reg.valid(parent))
+    {
+        t->position = p.position;
+        t->rotation = p.eulerDegrees;
+    }
+    else
+    {
+        const glm::mat4 desired =
+            glm::translate(glm::mat4(1.0f), p.position) * glm::mat4_cast(p.rotation);
+        const glm::mat4 local = glm::inverse(HE::worldMatrixOf(world, parent)) * desired;
+        t->position = glm::vec3(local[3]);
+        t->rotation = glm::degrees(glm::eulerAngles(glm::quat_cast(local)));
+    }
+    t->dirty = true;
+    if (auto* cam = reg.try_get<CameraComponent>(e))
+        cam->fovOffset = p.fovDegrees - cam->fovDegrees;
+}
+
+void restoreBlended(entt::registry& reg, CameraLease& lease)
+{
+    if (lease.blended == entt::null) return;
+    if (reg.valid(lease.blended))
+    {
+        if (auto* t = reg.try_get<TransformComponent>(lease.blended))
+        {
+            t->position = lease.savedPosition;
+            t->rotation = lease.savedRotation;
+            t->dirty    = true;
+        }
+        if (auto* cam = reg.try_get<CameraComponent>(lease.blended))
+            cam->fovOffset = lease.savedFovOffset;
+    }
+    lease.blended = entt::null;
+}
+
+// Give the view back to the camera that had it, and end the lease.
+void handBack(HorizonWorld& world, CameraLease& lease)
+{
+    auto& reg = world.registry();
+    const entt::entity shown = shownCamera(reg);
+    const entt::entity back  = lease.gameplayCamera;
+    if (isCamera(reg, back) && back != shown)
+    {
+        if (reg.all_of<CameraRigComponent>(back))
+        {
+            // blendTo freezes the pose on screen (the cutscene camera has no rig)
+            // as its source — BEFORE the blended write is taken back below, so a
+            // sequence that ends mid-blend leaves from where the view really is.
+            const bool haveLast = isCamera(reg, shown);
+            const HE::SolvedPose last = haveLast ? cameraWorldPose(world, shown) : HE::SolvedPose{};
+            HE::CameraRigController::blendTo(world, back, lease.blendOutSeconds, lease.blendOutCurve);
+            // The rig is not solved again until next frame's controller, and
+            // this frame is drawn from the rig camera's transform as it stood
+            // before the cutscene. Give it the cutscene's last pose instead;
+            // the rig overwrites it next frame, blending or cutting from there.
+            if (haveLast) writeCameraPose(world, back, last);
+        }
+        else
+        {
+            // No rig, nothing to blend: a cut. And no pose written — a fly
+            // camera would be teleported to where the cutscene ended.
+            HE::CameraRigController::makeMain(reg, back);
+        }
+    }
+    // No gameplay camera to go back to (a menu level, or it was destroyed):
+    // the view stays on the cutscene's last camera.
+    restoreBlended(reg, lease);
+    if (reg.valid(lease.owner))
+        if (auto* sp = reg.try_get<SequencePlayerComponent>(lease.owner)) sp->cameraOwned = false;
+    reg.ctx().erase<CameraLease>();
+}
+
+// Hand the view back if `owner` holds it; clear a stale flag otherwise.
+void releaseCamera(HorizonWorld& world, entt::entity owner, SequencePlayerComponent& sp)
+{
+    auto& reg = world.registry();
+    if (auto* lease = reg.ctx().find<CameraLease>(); lease && lease->owner == owner)
+        handBack(world, *lease);
+    sp.cameraOwned = false;
+}
+
+// The camera for one player's frame at its time: take, hold, blend, or let go.
+void cameraFrame(HorizonWorld& world, entt::entity owner, SequencePlayerComponent& sp,
+                 const HE::SequenceEval::CameraState& cam)
+{
+    auto& reg = world.registry();
+
+    entt::entity live = entt::null;
+    if (sp.playing && cam.active)
+    {
+        live = slotEntity(reg, sp, cam.slot);
+        if (live != entt::null && !isCamera(reg, live))
+        {
+            HE_LOG_THROTTLE(Animation, Warning, 5.0,
+                            "Entity %u: the sequence cuts to slot %u, which is not a camera — "
+                            "the view stays with gameplay", static_cast<uint32_t>(owner),
+                            static_cast<unsigned>(cam.slot));
+            live = entt::null;
+        }
+    }
+
+    CameraLease* lease = reg.ctx().find<CameraLease>();
+    const bool   mine  = lease && lease->owner == owner;
+    if (live == entt::null)
+    {
+        // Before the first cut, after a cut to no camera, or with the cut's
+        // camera missing: the view is gameplay's.
+        if (mine) handBack(world, *lease);
+        return;
+    }
+    if (!mine)
+    {
+        // One sequence holds the camera at a time; this one waits its turn.
+        if (lease) return;
+        CameraLease fresh;
+        fresh.owner          = owner;
+        fresh.gameplayCamera = shownCamera(reg);
+        if (isCamera(reg, fresh.gameplayCamera))
+            fresh.gameplayPose = cameraWorldPose(world, fresh.gameplayCamera);
+        // After the pose is taken: releasing zeroes the rig's FOV offset, and the
+        // blend into the first cut starts from the FOV that was on screen.
+        HE::CameraRigController::releaseAll(reg);
+        lease = &reg.ctx().emplace<CameraLease>(fresh);
+        sp.cameraOwned = true;
+    }
+    lease->blendOutSeconds = (std::max)(0.0f, sp.blendOutSeconds);
+    lease->blendOutCurve   = sp.blendOutCurve;
+
+    HE::CameraRigController::makeMain(reg, live);
+    if (!cam.blending) return;
+
+    HE::SolvedPose from;
+    if (cam.fromGameplay)
+        from = lease->gameplayPose;
+    else if (const entt::entity src = slotEntity(reg, sp, cam.fromSlot); isCamera(reg, src))
+        from = cameraWorldPose(world, src);
+    // Nothing to come from (no gameplay camera, the previous cut's camera is
+    // gone): the cut is a cut.
+    if (!from.valid) return;
+
+    const HE::SolvedPose to = cameraWorldPose(world, live);
+    HE::SolvedPose shown = to;
+    shown.position     = glm::mix(from.position, to.position, cam.alpha);
+    // Slerp, not Euler numbers: 170° to −170° is 20° across the seam.
+    shown.rotation     = glm::slerp(from.rotation, to.rotation, cam.alpha);
+    shown.eulerDegrees = glm::degrees(glm::eulerAngles(shown.rotation));
+    shown.fovDegrees   = glm::mix(from.fovDegrees, to.fovDegrees, cam.alpha);
+
+    auto& t = reg.get<TransformComponent>(live);
+    lease->blended        = live;
+    lease->savedPosition  = t.position;
+    lease->savedRotation  = t.rotation;
+    lease->savedFovOffset = reg.get<CameraComponent>(live).fovOffset;
+    writeCameraPose(world, live, shown);
 }
 
 } // namespace
@@ -370,19 +605,43 @@ void SequenceSystem::begin(HorizonWorld& world, ContentManager& cm, float dt,
 void SequenceSystem::apply(HorizonWorld& world, ContentManager& cm, float dt,
                            HE::SequenceContext* ctx, HE::NotifyQueue* notifies)
 {
-    if (!ctx) return;
     auto& reg = world.registry();
+    if (!ctx)
+    {
+        // No session, no lease. The editor's edit frames land here between two
+        // play sessions, and a lease that survived into the next one would name
+        // entities of a scene that has since been reloaded.
+        reg.ctx().erase<CameraLease>();
+        return;
+    }
+
+    if (auto* lease = reg.ctx().find<CameraLease>())
+    {
+        // Last frame's blend is taken back before any track runs, so the live
+        // camera's keys (or where it was placed) are what the tracks see.
+        restoreBlended(reg, *lease);
+        const auto* owner = reg.valid(lease->owner)
+                          ? reg.try_get<SequencePlayerComponent>(lease->owner) : nullptr;
+        if (!owner)                   handBack(world, *lease);    // destroyed mid-cutscene
+        else if (!owner->cameraOwned) reg.ctx().erase<CameraLease>();   // stale
+    }
 
     std::vector<JointTRS> localTRS;
     for (auto [e, sp] : reg.view<SequencePlayerComponent>().each())
     {
+        // Stopped since last frame (stop(), or the end): the view goes back.
+        if (!sp.playing && sp.cameraOwned) releaseCamera(world, e, sp);
+
         if (!sp.playing && !sp.applyOnce) continue;
         const SequenceAsset* seq = cm.getSequence(sp.sequenceId);
         if (!seq) continue;
 
         // Properties first: the skeletons below may carry IK, and IK casts from
-        // the transform the sequence has just written.
-        HE::SequenceEval::apply(world, cm, HE::SequenceEval::evaluate(*seq, sp.time), sp.slots);
+        // the transform the sequence has just written. The camera after them —
+        // its blend reads the poses the property tracks have just written.
+        const HE::SequenceEval::Result frame = HE::SequenceEval::evaluate(*seq, sp.time);
+        HE::SequenceEval::apply(world, cm, frame, sp.slots);
+        cameraFrame(world, e, sp, frame.camera);
 
         for (const SequenceTrack& tr : seq->tracks)
         {
@@ -407,6 +666,27 @@ void SequenceSystem::apply(HorizonWorld& world, ContentManager& cm, float dt,
             sp.finishing = false;
             sp.playing   = false;
             sp.paused    = false;
+            // In the same frame: the last frame's camera pose is what the
+            // hand-over starts from, and a frame later it would be one old.
+            if (sp.cameraOwned) releaseCamera(world, e, sp);
         }
     }
+}
+
+bool SequenceSystem::ownsCamera(const entt::registry& reg)
+{
+    const auto* lease = reg.ctx().find<CameraLease>();
+    if (!lease) return false;
+    // An owner destroyed mid-cutscene still holds it until apply() hands it
+    // back; an owner that does not know it holds it is a stale lease.
+    if (!reg.valid(lease->owner)) return true;
+    const auto* sp = reg.try_get<SequencePlayerComponent>(lease->owner);
+    return !sp || sp->cameraOwned;
+}
+
+bool SequenceSystem::locksPlayerInput(const entt::registry& reg)
+{
+    for (auto [e, sp] : reg.view<const SequencePlayerComponent>().each())
+        if (sp.playing && sp.lockPlayerInput) return true;
+    return false;
 }

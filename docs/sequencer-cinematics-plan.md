@@ -428,6 +428,82 @@ Bewusst **nicht** in Schritt 3:
 - Innerhalb eines Frames kommen Ereignisse Spur für Spur, nicht über alle Spuren nach Zeit
   sortiert.
 
+### Stand nach Schritt 4 (Kamera und Eingabe)
+
+Umgesetzt:
+
+- **Kamera-Besitz als Lease** (`SequenceSystem.cpp`, `CameraLease` im Kontext der Registry,
+  `SequenceSystem::ownsCamera`). Die Lease liegt nicht an der Komponente, weil sie ihren Besitzer
+  überleben muss: Wird der Besitzer mitten in der Cutscene zerstört, gibt der nächste Frame die
+  Sicht trotzdem zurück. `SequencePlayerComponent::cameraOwned` ist die Hälfte des Besitzers. Eine
+  Lease, deren Besitzer davon nichts weiß (Szene unter denselben Entity-IDs neu geladen), ist
+  veraltet und wird verworfen. Ohne `SequenceContext` (Edit-Frames des Editors zwischen zwei
+  PIE-Sitzungen) wird sie immer verworfen.
+- **Übernahme beim ersten aktiven Schnitt, nicht bei `play()`** (Abweichung von §3.3, dort hieß
+  es „beim Start eingefroren“): Bis zum ersten Schnitt gehört die Kamera noch dem Spieler. Beim
+  Übernehmen wird die Kamera gemerkt, die gerade zu sehen ist, und ihre Weltpose eingefroren (die
+  Quelle eines Blends in den ersten Schnitt). Danach geben alle Rigs frei
+  (`CameraRigController::releaseAll`: versteckter Körper zurück, `fovOffset` 0, Blend und
+  Lag-Pose vergessen). Nach einem Schnitt auf „keine Kamera“ wird beim nächsten Schnitt erneut
+  übernommen und neu eingefroren. `SequenceEval.h` sagt dasselbe.
+- **Schnitt**: `CameraRigController::makeMain` (aus `blendTo` herausgezogen) setzt `isMain`
+  eindeutig, in jedem Frame, in dem die Sequenz die Kamera hält.
+- **Blend rein und zwischen Cutscene-Kameras**: in `apply` nach den Property-Spuren, zwischen der
+  Quellpose (eingefrorene Gameplay-Pose oder die Kamera des vorigen Schnitts zur selben Zeit t)
+  und der Pose der aktiven Kamera. Position per `mix`, Drehung per `slerp`, FOV als `fovOffset`
+  (`fovDegrees` wird nie geschrieben). Die Pose wird in die aktive Kamera geschrieben. Ihre
+  Transform und ihr `fovOffset` werden vorher gesichert und am Anfang des nächsten `apply`
+  zurückgeschrieben, **bevor** die Spuren laufen. Eine platzierte Schnittkamera ohne Keys steht
+  nach dem Blend also exakt wieder dort, wo sie steht, und eine gefahrene liest ihre Keys.
+  Weltposen über `worldMatrixOf` (die Spuren haben die Transform gerade erst bewegt).
+- **Rückgabe** (Ende, `stop()`, Schnitt auf keine Kamera, fehlender Akteur oder ein Slot ohne
+  `CameraComponent`, zerstörter Besitzer): `CameraRigController::blendTo` in die gemerkte
+  Gameplay-Kamera über `blendOutSeconds`/`blendOutCurve` der Komponente. Bei einer Rig-Kamera
+  bekommt deren Transform im Übergabe-Frame zusätzlich die zuletzt gezeigte Cutscene-Pose. Sonst
+  zeigt dieser Frame (die Rückgabe passiert in `tickAnimation`, nach dem Kamera-Controller) die
+  Pose, die das Rig **vor** der Cutscene hatte. Eine Kamera ohne Rig (Fly) bekommt keine Pose,
+  weil sie sonst teleportiert würde; dort ist die Rückgabe ein Schnitt.
+- **Eine Sequenz zur Zeit hält die Kamera.** Ein zweiter Spieler, dessen Schnitt aktiv wird,
+  spielt weiter und übernimmt, sobald der erste loslässt (im selben oder im nächsten Frame).
+- **Gates in beiden Anwendungen**: `GameApplication::updateCameraController` und
+  `EditorApplication::updatePlayCameraController` kehren zurück, solange `ownsCamera` gilt. Im
+  Editor sitzt das Gate **nach** dem Wiederherstellen der Maus-Capture, damit der Spieler nach der
+  Cutscene nicht neu klicken muss.
+- **`lockPlayerInput`**: `SequenceSystem::locksPlayerInput` (irgendein spielender oder pausierter
+  Spieler mit dem Schalter) geht als neuer Parameter an `PlayerHost::tick`, in beiden
+  Anwendungen. Dort ist die Sperre der dritte Grund für Stille neben Pause und UI-only, mit
+  derselben Ausnahme: Aktionen mit „run while paused“ kommen durch, damit Überspringen und
+  Pausenmenü gehen. Die Kamera-Sperre ist davon unabhängig. Standard ist **aus**, weil eine
+  schleifende Ambient-Sequenz dem Spieler sonst dauerhaft die Steuerung nähme.
+- Komponentenfelder `blendOutSeconds` (Standard 0 = Schnitt), `blendOutCurve`, `lockPlayerInput`:
+  Serializer (JSON und CBOR, Kurve als Index wie bei `camera.blendTo`), Inspector (Statuszeile
+  zeigt „holds the camera“), Hilfe. Audit 984/984.
+- Tests (`tests/test_sequence_runtime.cpp`, jetzt 26 Fälle): Übernahme erst am Schnitt und
+  Rückgabe am Ende; ein auf `ownsCamera` gesperrter Kamera-Controller bewegt die Schnittkamera
+  nicht (Stellvertreter für den Fly-Fallback, der headless kein SDL lesen kann, mit
+  Negativkontrolle ohne Gate); Blend rein von der eingefrorenen Gameplay-Pose (Position, Drehung,
+  FOV zur Zeit t) und danach die unveränderte Schnittkamera; Blend zwischen zwei Kameras, von
+  denen eine fährt; Rückgabe an ein echtes Rig mit Blend-Out, ohne veralteten Frame (mit
+  Negativkontrolle: ohne das Schreiben der Übergabe-Pose wird der Test rot); Körper des
+  First-Person-Rigs sichtbar; `stop()`, Schnitt auf keine Kamera und Slot ohne Kamera; eine
+  Sequenz zur Zeit und zerstörter Besitzer; Lease ohne Sitzung verworfen; `locksPlayerInput`;
+  Serializer um die drei Felder erweitert. Dazu in `tests/test_player_host.cpp`: gesperrter Frame
+  still wie eine Pause, `runWhilePaused` kommt durch.
+
+Bewusst **nicht** in Schritt 4:
+
+- **Sichtprüfung mit `scripts/he_shot.py`** (§5, Schritt 4): nicht möglich. Der Headless-Dump
+  rendert die Edit-Welt durch die Editor-Kamera und startet nie PIE. Ohne Sitzung gibt es keinen
+  `SequenceContext`, es läuft also keine Sequenz, und die Szenenkamera wird nicht gezeigt. Das
+  gehört zu „durch die Kamera schauen“ (Schritt 7) oder zu einem Dump-Schalter, der PIE startet.
+  Die Verdrahtung in beiden Anwendungen ist per `grep` und Build belegt, nicht per Bild.
+- `sequence.*`-Zeilen und `SequenceFinished`: Schritt 5.
+- Rückgabe, wenn der Besitzer durch **Deaktivieren** (`InactiveComponent`) statt Zerstören
+  wegfällt: Die Sequenz läuft dann weiter wie in Schritt 3 und hält die Kamera. Das entscheidet
+  sich mit den Skript-Zeilen in Schritt 5.
+- Look-Eingabe während einer Sequenz, die die Kamera nicht hält: Das Rig dreht dann weiter mit
+  der Maus, auch mit `lockPlayerInput`. Die Sperre gilt der Steuerung, nicht dem Blick.
+
 ---
 
 ## 6. Bewusst außen vor (v1)

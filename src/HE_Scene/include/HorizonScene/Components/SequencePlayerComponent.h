@@ -1,4 +1,5 @@
 #pragma once
+#include <HorizonScene/CameraPose.h>
 #include <HorizonScene/SequenceEval.h>
 #include <Types/UUID.h>
 #include <entt/entt.hpp>
@@ -27,6 +28,21 @@ struct SequencePlayerComponent
     // 1 is as authored; negative plays backwards (events mirror, sound does not
     // start — see SequenceSystem.h).
     float    playRate = 1.0f;
+
+    // How the view goes back to gameplay when the sequence lets go of the camera
+    // (its end, stop(), a cut to no camera): CameraRigController::blendTo into
+    // the camera that was showing before, over this many seconds. 0 is a cut,
+    // and so is a gameplay camera without a rig — there is nothing to blend.
+    // Here and not in the asset: the same sequence in a menu level has no
+    // player rig to go back to (plan §3.4).
+    float          blendOutSeconds = 0.0f;
+    HE::BlendCurve blendOutCurve   = HE::BlendCurve::SmoothStep;
+    // Silence the player's gameplay input while this sequence plays (paused
+    // included): PlayerHost delivers no action events, the same silence a pause
+    // or UI-only mode gives — so the actions marked "run while paused" still
+    // arrive, which is what a skip key or the pause menu needs. Off by default:
+    // a looping ambient sequence must not take the controls away for good.
+    bool           lockPlayerInput = false;
 
     // ── Runtime (never serialized) ───────────────────────────────────────────
     // Everything below is session state. The editor's play snapshot is a
@@ -67,4 +83,11 @@ struct SequencePlayerComponent
     // Whether audioHandles are paused right now; begin() brings them in line
     // with `paused`.
     bool  audioPaused = false;
+
+    // This player holds the camera (SequenceSystem::ownsCamera). The lease
+    // itself lives in the registry, because it has to outlive this component:
+    // an owner destroyed mid-cutscene still has to hand the view back. This flag
+    // is the owner's half of it — a lease whose owner does not say so (a scene
+    // reloaded under the same entity ids) is stale and dropped.
+    bool  cameraOwned = false;
 };

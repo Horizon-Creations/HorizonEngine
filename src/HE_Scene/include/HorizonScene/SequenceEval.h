@@ -31,7 +31,8 @@ class ContentManager;
 //   * Skeletal tracks: they need the pose pipeline (plan §2.4, step 3).
 //   * The blended camera POSE. evaluate() says which camera is live, which one
 //     it blends from and how far along the blend is; turning that into a pose
-//     needs both cameras' world transforms and is the camera step's job (step 4).
+//     needs both cameras' world transforms, and SequenceSystem::apply does it
+//     (see "Camera and input" in SequenceSystem.h).
 namespace HE::SequenceEval {
 
 // One property value for one bound actor.
@@ -57,8 +58,11 @@ struct CameraState
     bool     blending = false;
     float    alpha    = 1.0f;
     // What it blends from: the previous cut's camera, or — for the very first cut
-    // — the gameplay camera as it stood when the sequence started (`fromGameplay`,
-    // `fromSlot` = none). A cut to the camera that is already live never blends.
+    // (or the first after a cut to no camera) — gameplay (`fromGameplay`,
+    // `fromSlot` = none). The runtime freezes the gameplay camera's pose at the
+    // moment the sequence takes the camera, i.e. at that cut, not at play():
+    // until then the player may still move it. A cut to the camera that is
+    // already live never blends.
     uint16_t fromSlot     = kSequenceNoBinding;
     bool     fromGameplay = false;
 };
@@ -92,7 +96,8 @@ std::vector<entt::entity> resolveBindings(const HorizonWorld& world, const Seque
 
 // Write `r.writes` into the world. A slot with no entity (unbound, missing
 // actor) is skipped, never an error — a cutscene with one actor deleted still
-// plays the rest. The camera state is NOT applied here (step 4).
+// plays the rest. The camera state is NOT applied here: SequenceSystem::apply
+// does that, because taking and giving back the camera is state over time.
 void apply(HorizonWorld& world, ContentManager& cm, const Result& r,
            const std::vector<entt::entity>& slots);
 

@@ -10,7 +10,11 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/SequenceSystem.h>
+#include <HorizonScene/CameraRigController.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
+#include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/CameraRigComponent.h>
+#include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/PropertyAnimatorComponent.h>
 #include <HorizonScene/Components/SequencePlayerComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
@@ -621,9 +625,13 @@ TEST_CASE("sequence runtime: the player saves its authored half only, in both fo
 		sp.autoplay   = false;
 		sp.loop       = true;
 		sp.playRate   = -0.5f;
+		sp.blendOutSeconds = 1.25f;
+		sp.blendOutCurve   = HE::BlendCurve::EaseOut;
+		sp.lockPlayerInput = true;
 		sp.time       = 3.0f;    // session state: must not come back
 		sp.playing    = true;
 		sp.started    = true;
+		sp.cameraOwned = true;
 		world.registry().emplace<SequencePlayerComponent>(e, sp);
 
 		SceneSerializer ser;
@@ -639,6 +647,10 @@ TEST_CASE("sequence runtime: the player saves its authored half only, in both fo
 			CHECK_FALSE(lsp.autoplay);
 			CHECK(lsp.loop);
 			CHECK(lsp.playRate == doctest::Approx(-0.5f));
+			CHECK(lsp.blendOutSeconds == doctest::Approx(1.25f));
+			CHECK(lsp.blendOutCurve == HE::BlendCurve::EaseOut);
+			CHECK(lsp.lockPlayerInput);
+			CHECK_FALSE(lsp.cameraOwned);
 			CHECK(lsp.time == 0.0f);
 			CHECK_FALSE(lsp.playing);
 			CHECK_FALSE(lsp.started);
@@ -656,4 +668,424 @@ TEST_CASE("sequence runtime: a scene names the sequence of its player for stream
 	world.registry().emplace<SequencePlayerComponent>(world.createEntity("Owner"), sp);
 	const auto refs = SceneSystems::collectAssetRefs(world);
 	CHECK(std::find(refs.begin(), refs.end(), sp.sequenceId) != refs.end());
+}
+
+// ─── Camera and input (plan step 4) ──────────────────────────────────────────
+// The sequence holds the camera from its first live cut until it lets go: it
+// cuts, blends in and between its own cameras, and hands the view back through
+// CameraRigController::blendTo. `appFrame` below is the order both applications
+// run: the camera controller (gated on ownsCamera) BEFORE the animation phase.
+
+namespace
+{
+	entt::entity makeCamera(HorizonWorld& world, const char* name, glm::vec3 pos,
+	                        float fov = 60.0f, bool main = false)
+	{
+		const entt::entity e = makeActor(world, name);
+		world.registry().get<TransformComponent>(e).position = pos;
+		CameraComponent cam;
+		cam.fovDegrees = fov;
+		cam.isMain     = main;
+		world.registry().emplace<CameraComponent>(e, cam);
+		return e;
+	}
+
+	SequenceTrack cutTrack(std::vector<SequenceCameraCut> cuts)
+	{
+		SequenceTrack t;
+		t.kind = SequenceTrackKind::CameraCut;
+		t.cuts = std::move(cuts);
+		return t;
+	}
+
+	bool isMain(const entt::registry& reg, entt::entity e) { return reg.get<CameraComponent>(e).isMain; }
+
+	int mainCount(const entt::registry& reg)
+	{
+		int n = 0;
+		for (auto [e, cam] : reg.view<const CameraComponent>().each()) n += cam.isMain ? 1 : 0;
+		return n;
+	}
+
+	glm::vec3 posOf(const entt::registry& reg, entt::entity e) { return reg.get<TransformComponent>(e).position; }
+}
+
+TEST_CASE("sequence camera: the first cut takes the camera, the end gives it back")
+{
+	Rig r;
+	auto& reg = r.world.registry();
+	const entt::entity gameplay = makeCamera(r.world, "Gameplay", { 0, 2, 0 }, 60.0f, true);
+	const entt::entity shot     = makeCamera(r.world, "Shot",     { 10, 0, 0 }, 40.0f);
+	SequenceAsset s;
+	s.duration = 1.0f;
+	s.bindings = { { 0, "Shot", r.world.entityId(shot) } };
+	s.tracks.push_back(cutTrack({ { 0.45f, 0, 0.0f } }));
+	r.make(std::move(s));
+
+	// Before the cut the view is gameplay's.
+	for (int i = 0; i < 4; ++i) r.frame();
+	CHECK_FALSE(SequenceSystem::ownsCamera(reg));
+	CHECK(isMain(reg, gameplay));
+
+	// The frame that crosses the cut switches, and only one camera is main.
+	r.frame();
+	CHECK(SequenceSystem::ownsCamera(reg));
+	CHECK(r.player().cameraOwned);
+	CHECK(isMain(reg, shot));
+	CHECK(mainCount(reg) == 1);
+	// A hard cut writes nothing into the shot camera: it shows where it stands.
+	CHECK(posOf(reg, shot) == glm::vec3(10, 0, 0));
+	CHECK(reg.get<CameraComponent>(shot).fovOffset == 0.0f);
+
+	// The end: the last frame is shown, then the view goes back — a cut, since
+	// the gameplay camera has no rig — in the same frame. (One frame spare for
+	// float accumulation onto 1.0.)
+	for (int i = 0; i < 6; ++i) r.frame();
+	CHECK_FALSE(r.player().playing);
+	CHECK_FALSE(SequenceSystem::ownsCamera(reg));
+	CHECK_FALSE(r.player().cameraOwned);
+	CHECK(isMain(reg, gameplay));
+	CHECK(mainCount(reg) == 1);
+	// A camera without a rig is not moved on the way back: a fly camera would be
+	// teleported to where the cutscene ended.
+	CHECK(posOf(reg, gameplay) == glm::vec3(0, 2, 0));
+}
+
+TEST_CASE("sequence camera: a camera controller gated on ownsCamera cannot move the cutscene camera")
+{
+	// The applications' gate, as a stand-in for the fly fallback (which reads SDL
+	// and cannot run headless): each frame it moves the main camera a metre,
+	// unless a sequence holds the camera.
+	Rig r;
+	auto& reg = r.world.registry();
+	const entt::entity gameplay = makeCamera(r.world, "Gameplay", { 0, 0, 0 }, 60.0f, true);
+	const entt::entity shot     = makeCamera(r.world, "Shot",     { 10, 0, 0 });
+	SequenceAsset s;
+	s.duration = 0.5f;
+	s.bindings = { { 0, "Shot", r.world.entityId(shot) } };
+	s.tracks.push_back(cutTrack({ { 0.0f, 0, 0.0f } }));
+	r.make(std::move(s));
+
+	auto flyStandIn = [&](bool gated)
+	{
+		if (gated && SequenceSystem::ownsCamera(reg)) return;
+		for (auto [e, cam, t] : reg.view<CameraComponent, TransformComponent>().each())
+			if (cam.isMain) t.position.x += 1.0f;
+	};
+
+	r.frame();                       // takes the camera
+	REQUIRE(isMain(reg, shot));
+	for (int i = 0; i < 3; ++i) { flyStandIn(true); r.frame(); }
+	CHECK(posOf(reg, shot).x == 10.0f);
+	CHECK(posOf(reg, gameplay).x == 0.0f);
+
+	// Negative control: the same stand-in without the gate does move it — the
+	// assertion above is about the gate, not about a controller that did nothing.
+	flyStandIn(false);
+	CHECK(posOf(reg, shot).x == 11.0f);
+
+	// After the hand-back the controller has its camera again.
+	for (int i = 0; i < 3; ++i) r.frame();
+	REQUIRE_FALSE(SequenceSystem::ownsCamera(reg));
+	flyStandIn(true);
+	CHECK(posOf(reg, gameplay).x == 1.0f);
+}
+
+TEST_CASE("sequence camera: a blend in starts at the gameplay pose frozen when the camera was taken")
+{
+	Rig r;
+	auto& reg = r.world.registry();
+	const entt::entity gameplay = makeCamera(r.world, "Gameplay", { 0, 0, 0 }, 60.0f, true);
+	const entt::entity shot     = makeCamera(r.world, "Shot",     { 10, 0, 0 }, 90.0f);
+	reg.get<TransformComponent>(shot).rotation = { 0.0f, 90.0f, 0.0f };
+	SequenceAsset s;
+	s.duration = 2.0f;
+	s.bindings = { { 0, "Shot", r.world.entityId(shot) } };
+	s.tracks.push_back(cutTrack({ { 0.0f, 0, 1.0f, SequenceBlendCurve::Linear } }));
+	r.make(std::move(s));
+
+	r.frame();   // t = 0.1: taken, 10 % of the way
+	REQUIRE(isMain(reg, shot));
+	CHECK(posOf(reg, shot).x == doctest::Approx(1.0f));
+	CHECK(reg.get<CameraComponent>(shot).fovOffset == doctest::Approx(63.0f - 90.0f));
+	// The source is FROZEN: gameplay moving on after the take changes nothing.
+	reg.get<TransformComponent>(gameplay).position = { 100, 100, 100 };
+
+	for (int i = 0; i < 4; ++i) r.frame();   // t = 0.5
+	CHECK(posOf(reg, shot).x == doctest::Approx(5.0f));
+	CHECK(posOf(reg, shot).y == doctest::Approx(0.0f).epsilon(1e-4));
+	CHECK(reg.get<TransformComponent>(shot).rotation.y == doctest::Approx(45.0f).epsilon(1e-3));
+	CHECK(reg.get<CameraComponent>(shot).fovOffset == doctest::Approx(75.0f - 90.0f));
+	// Its authored FOV is never written, only the offset.
+	CHECK(reg.get<CameraComponent>(shot).fovDegrees == 90.0f);
+
+	// Past the blend the shot camera is exactly where it was placed again — the
+	// blended pose was this frame's output, never its state.
+	for (int i = 0; i < 6; ++i) r.frame();   // t = 1.1
+	CHECK(posOf(reg, shot) == glm::vec3(10, 0, 0));
+	CHECK(reg.get<TransformComponent>(shot).rotation == glm::vec3(0, 90, 0));
+	CHECK(reg.get<CameraComponent>(shot).fovOffset == 0.0f);
+}
+
+TEST_CASE("sequence camera: a blend between two cutscene cameras reads both at the same instant")
+{
+	Rig r;
+	auto& reg = r.world.registry();
+	makeCamera(r.world, "Gameplay", { 0, 0, 0 }, 60.0f, true);
+	const entt::entity a = makeCamera(r.world, "A", { 0, 0, 0 });
+	const entt::entity b = makeCamera(r.world, "B", { 20, 0, 0 });
+	SequenceAsset s;
+	s.duration = 3.0f;
+	s.bindings = { { 0, "A", r.world.entityId(a) }, { 1, "B", r.world.entityId(b) } };
+	// B is dollying along Z while the view travels to it.
+	s.tracks.push_back(propertyTrack(1, PropTarget::PosZ, { 0.0f, 2.0f }, { 0.0f, 10.0f }));
+	// The cut sits off the frame grid on purpose, so no frame lands on it.
+	s.tracks.push_back(cutTrack({ { 0.0f, 0, 0.0f }, { 0.95f, 1, 1.0f, SequenceBlendCurve::Linear } }));
+	r.make(std::move(s));
+
+	for (int i = 0; i < 10; ++i) r.frame();   // t = 1.0: just past the cut
+	CHECK(isMain(reg, b));
+	CHECK(mainCount(reg) == 1);
+	for (int i = 0; i < 5; ++i) r.frame();    // t = 1.5: alpha 0.55
+	// 55 % from A (0,0,0) to B where its track has it NOW (20,0,7.5).
+	CHECK(posOf(reg, b).x == doctest::Approx(11.0f));
+	CHECK(posOf(reg, b).z == doctest::Approx(4.125f));
+	CHECK(posOf(reg, a) == glm::vec3(0, 0, 0));
+
+	// After the blend B carries its track's value and its placed X again.
+	for (int i = 0; i < 10; ++i) r.frame();   // t = 2.5
+	CHECK(posOf(reg, b).x == doctest::Approx(20.0f));
+	CHECK(posOf(reg, b).z == doctest::Approx(10.0f));
+}
+
+TEST_CASE("sequence camera: the view goes back to the rig with a blend out, without a stale frame")
+{
+	Rig r;
+	auto& reg = r.world.registry();
+	const entt::entity target = makeActor(r.world, "Player");
+	const entt::entity rigCam = makeCamera(r.world, "RigCam", { 0, 0, 0 }, 60.0f, true);
+	CameraRigComponent rc;
+	rc.mode      = CameraRigComponent::Mode::ThirdPerson;
+	rc.target    = r.world.entityId(target);
+	rc.yaw       = 0.0f;
+	rc.pitch     = 0.0f;
+	rc.armLength = 4.0f;
+	reg.emplace<CameraRigComponent>(rigCam, rc);
+	const entt::entity shot = makeCamera(r.world, "Shot", { 50, 5, 0 });
+
+	SequenceAsset s;
+	s.duration = 0.25f;   // ends inside the third frame
+	s.bindings = { { 0, "Shot", r.world.entityId(shot) } };
+	s.tracks.push_back(cutTrack({ { 0.0f, 0, 0.0f } }));
+	r.make(std::move(s));
+	r.player().blendOutSeconds = 1.0f;
+	r.player().blendOutCurve   = HE::BlendCurve::Linear;
+
+	HE::CameraLookInput look;
+	look.dt = kDt;
+	auto appFrame = [&]
+	{
+		if (!SequenceSystem::ownsCamera(reg)) HE::CameraRigController::update(r.world, look);
+		r.frame();
+	};
+
+	appFrame();
+	REQUIRE(isMain(reg, shot));
+	const glm::vec3 rigPose = posOf(reg, rigCam);   // where the rig put it before the take
+	CHECK(rigPose.z == doctest::Approx(4.0f));      // the boom behind the target
+
+	// The rig is not run during the cutscene, so it cannot fight the shot.
+	reg.get<TransformComponent>(target).position = { 0, 0, -10 };
+	appFrame();
+	CHECK(posOf(reg, rigCam) == rigPose);
+
+	appFrame();   // t = 0.25: the end — hand-back in this frame
+	REQUIRE_FALSE(r.player().playing);
+	CHECK(isMain(reg, rigCam));
+	CHECK(mainCount(reg) == 1);
+	CHECK(reg.get<CameraRigComponent>(rigCam).isBlending());
+	// The frame of the hand-over shows the cutscene's last pose, not the one the
+	// rig held before the cutscene.
+	CHECK(posOf(reg, rigCam) == glm::vec3(50, 5, 0));
+
+	// Next frame the rig blends from there towards where its target is NOW —
+	// solved fresh, not sailing in from the lag pose it had before.
+	appFrame();
+	const glm::vec3 solved = rigPose + glm::vec3(0.0f, 0.0f, -10.0f);
+	const glm::vec3 tenth  = glm::mix(glm::vec3(50, 5, 0), solved, 0.1f);
+	CHECK(posOf(reg, rigCam).x == doctest::Approx(tenth.x));
+	CHECK(posOf(reg, rigCam).y == doctest::Approx(tenth.y));
+	CHECK(posOf(reg, rigCam).z == doctest::Approx(tenth.z));
+	for (int i = 0; i < 10; ++i) appFrame();
+	CHECK_FALSE(reg.get<CameraRigComponent>(rigCam).isBlending());
+	CHECK(posOf(reg, rigCam).x == doctest::Approx(solved.x));
+	CHECK(posOf(reg, rigCam).y == doctest::Approx(solved.y));
+	CHECK(posOf(reg, rigCam).z == doctest::Approx(solved.z));
+}
+
+TEST_CASE("sequence camera: taking the view gives back a first-person rig's hidden body")
+{
+	Rig r;
+	auto& reg = r.world.registry();
+	const entt::entity target = makeActor(r.world, "Player");
+	reg.emplace<MeshComponent>(target);
+	const entt::entity rigCam = makeCamera(r.world, "RigCam", { 0, 0, 0 }, 60.0f, true);
+	CameraRigComponent rc;
+	rc.mode           = CameraRigComponent::Mode::FirstPerson;
+	rc.target         = r.world.entityId(target);
+	rc.hideTargetMesh = true;
+	reg.emplace<CameraRigComponent>(rigCam, rc);
+	const entt::entity shot = makeCamera(r.world, "Shot", { 5, 0, 0 });
+
+	HE::CameraRigController::update(r.world, MouseFrame{});
+	REQUIRE_FALSE(reg.get<MeshComponent>(target).visible);
+
+	SequenceAsset s;
+	s.duration = 1.0f;
+	s.bindings = { { 0, "Shot", r.world.entityId(shot) } };
+	s.tracks.push_back(cutTrack({ { 0.0f, 0, 0.0f } }));
+	r.make(std::move(s));
+	r.frame();
+	REQUIRE(isMain(reg, shot));
+	// The cutscene shows the player; a hidden body would be a hole in the shot.
+	CHECK(reg.get<MeshComponent>(target).visible);
+	CHECK((reg.get<CameraRigComponent>(rigCam).meshHiddenEntity == entt::null));
+}
+
+TEST_CASE("sequence camera: stop(), a cut to no camera and a missing camera give the view back")
+{
+	Rig r;
+	auto& reg = r.world.registry();
+	const entt::entity gameplay = makeCamera(r.world, "Gameplay", { 0, 0, 0 }, 60.0f, true);
+	const entt::entity shot     = makeCamera(r.world, "Shot",     { 10, 0, 0 });
+	const entt::entity prop     = makeActor(r.world, "NotACamera");
+	SequenceAsset s;
+	s.duration = 4.0f;
+	s.bindings = { { 0, "Shot", r.world.entityId(shot) }, { 1, "Prop", r.world.entityId(prop) } };
+	// Shot, back to gameplay, Shot again, then a "camera" that is not one.
+	s.tracks.push_back(cutTrack({ { 0.0f, 0, 0.0f },
+	                              { 1.0f, kSequenceNoBinding, 0.0f },
+	                              { 2.0f, 0, 0.0f },
+	                              { 3.0f, 1, 0.0f } }));
+	r.make(std::move(s));
+
+	r.frame();
+	CHECK(isMain(reg, shot));
+	for (int i = 0; i < 10; ++i) r.frame();   // t = 1.1: past the cut to none
+	CHECK_FALSE(SequenceSystem::ownsCamera(reg));
+	CHECK(isMain(reg, gameplay));
+	CHECK(r.player().playing);
+	for (int i = 0; i < 10; ++i) r.frame();   // t = 2.1: taken again
+	CHECK(SequenceSystem::ownsCamera(reg));
+	CHECK(isMain(reg, shot));
+	for (int i = 0; i < 10; ++i) r.frame();   // t = 3.1: slot 1 is no camera
+	CHECK_FALSE(SequenceSystem::ownsCamera(reg));
+	CHECK(isMain(reg, gameplay));
+
+	// stop() mid-shot: the view is back by the end of the next frame.
+	SequenceSystem::setTime(r.world, r.cm, r.owner, 0.5f);
+	r.frame();
+	REQUIRE(isMain(reg, shot));
+	SequenceSystem::stop(r.world, r.owner);
+	r.frame();
+	CHECK_FALSE(SequenceSystem::ownsCamera(reg));
+	CHECK(isMain(reg, gameplay));
+	CHECK(mainCount(reg) == 1);
+}
+
+TEST_CASE("sequence camera: one sequence holds the camera at a time, a destroyed owner still hands back")
+{
+	Rig r;
+	auto& reg = r.world.registry();
+	const entt::entity gameplay = makeCamera(r.world, "Gameplay", { 0, 0, 0 }, 60.0f, true);
+	const entt::entity shotA    = makeCamera(r.world, "ShotA", { 10, 0, 0 });
+	const entt::entity shotB    = makeCamera(r.world, "ShotB", { 20, 0, 0 });
+
+	SequenceAsset sa;
+	sa.duration = 0.5f;
+	sa.bindings = { { 0, "ShotA", r.world.entityId(shotA) } };
+	sa.tracks.push_back(cutTrack({ { 0.0f, 0, 0.0f } }));
+	r.make(std::move(sa));
+
+	SequenceAsset sb;
+	sb.duration = 5.0f;
+	sb.bindings = { { 0, "ShotB", r.world.entityId(shotB) } };
+	sb.tracks.push_back(cutTrack({ { 0.0f, 0, 0.0f } }));
+	const HE::UUID idB = r.cm.registerSequence(std::move(sb));
+	const entt::entity ownerB = r.world.createEntity("OwnerB");
+	SequencePlayerComponent spB;
+	spB.sequenceId = idB;
+	spB.autoplay   = false;
+	reg.emplace<SequencePlayerComponent>(ownerB, spB);
+
+	r.frame();
+	REQUIRE(isMain(reg, shotA));
+	// B starts while A holds the camera: it plays, but waits for the view.
+	REQUIRE(SequenceSystem::play(r.world, r.cm, ownerB));
+	r.frame();
+	CHECK(isMain(reg, shotA));
+	CHECK_FALSE(reg.get<SequencePlayerComponent>(ownerB).cameraOwned);
+
+	// A ends and hands back; B takes it no later than the frame after.
+	for (int i = 0; i < 5; ++i) r.frame();
+	CHECK_FALSE(r.player().playing);
+	CHECK(isMain(reg, shotB));
+	CHECK(reg.get<SequencePlayerComponent>(ownerB).cameraOwned);
+	CHECK(mainCount(reg) == 1);
+
+	// B's owner is destroyed mid-cutscene: the lease outlives it and the view
+	// still goes back to the camera that had it — gameplay's, as A left it.
+	r.world.destroyEntity(ownerB);
+	CHECK(SequenceSystem::ownsCamera(reg));   // until the next frame hands it back
+	r.frame();
+	CHECK_FALSE(SequenceSystem::ownsCamera(reg));
+	CHECK(isMain(reg, gameplay));
+}
+
+TEST_CASE("sequence camera: without a session the lease is dropped")
+{
+	Rig r;
+	auto& reg = r.world.registry();
+	makeCamera(r.world, "Gameplay", { 0, 0, 0 }, 60.0f, true);
+	const entt::entity shot = makeCamera(r.world, "Shot", { 10, 0, 0 });
+	SequenceAsset s;
+	s.duration = 5.0f;
+	s.bindings = { { 0, "Shot", r.world.entityId(shot) } };
+	s.tracks.push_back(cutTrack({ { 0.0f, 0, 0.0f } }));
+	r.make(std::move(s));
+	r.frame();
+	REQUIRE(SequenceSystem::ownsCamera(reg));
+	// The editor's edit frames between two play sessions: a lease that lived on
+	// would lock the camera of the next session, whose scene was reloaded.
+	r.frame(kDt, false);
+	CHECK_FALSE(SequenceSystem::ownsCamera(reg));
+}
+
+TEST_CASE("sequence input: Lock Player Input holds while playing or paused, not after")
+{
+	Rig r;
+	SequenceAsset s;
+	s.duration = 0.3f;
+	r.make(std::move(s), false);
+	auto& reg = r.world.registry();
+	CHECK_FALSE(SequenceSystem::locksPlayerInput(reg));
+
+	r.player().lockPlayerInput = true;
+	CHECK_FALSE(SequenceSystem::locksPlayerInput(reg));   // not playing yet
+	REQUIRE(SequenceSystem::play(r.world, r.cm, r.owner));
+	r.frame();
+	CHECK(SequenceSystem::locksPlayerInput(reg));
+	SequenceSystem::pause(r.world, r.owner);
+	r.frame();
+	CHECK(SequenceSystem::locksPlayerInput(reg));
+	REQUIRE(SequenceSystem::play(r.world, r.cm, r.owner));
+	for (int i = 0; i < 5; ++i) r.frame();
+	CHECK_FALSE(r.player().playing);
+	CHECK_FALSE(SequenceSystem::locksPlayerInput(reg));
+
+	// Off on a playing player: nothing is locked.
+	r.player().lockPlayerInput = false;
+	REQUIRE(SequenceSystem::play(r.world, r.cm, r.owner));
+	r.frame();
+	CHECK_FALSE(SequenceSystem::locksPlayerInput(reg));
 }

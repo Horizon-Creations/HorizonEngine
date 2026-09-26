@@ -2292,6 +2292,11 @@ void GameApplication::updateCameraController(float dt)
 {
 	if (!m_mouseCaptured || !m_world || dt <= 0.0f) return;
 
+	// A cutscene holds the camera: it cuts, blends and poses it in the animation
+	// phase, and neither the rig nor free flight may touch it until it hands the
+	// view back (SequenceSystem.h, "Camera and input").
+	if (SequenceSystem::ownsCamera(m_world->registry())) return;
+
 	// The cursor is parked back at this window's centre every frame — but only
 	// while WE have focus, so an alt-tabbed game never yanks the cursor away from
 	// another app.
@@ -2982,7 +2987,9 @@ void GameApplication::OnRender(float deltaTime)
 	MouseFrame playerMouse = input().mouse();
 	if (m_uiWantsPointer || inputMode == HE::api::input::Mode::UIOnly)
 		playerMouse.buttons = 0;
-	m_playerHost.tick(input(), gameDt, playerMouse);
+	// A cutscene with Lock Player Input silences gameplay input like a pause.
+	m_playerHost.tick(input(), gameDt, playerMouse,
+	                  m_world && SequenceSystem::locksPlayerInput(m_world->registry()));
 	// Entity classes: Tick, plus reaping the ones whose entity is gone — and
 	// handing their bodies back as it notices them, rather than leaving them to
 	// step()'s own sweep a frame later.
