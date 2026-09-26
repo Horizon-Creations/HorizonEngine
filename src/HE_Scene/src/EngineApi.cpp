@@ -461,7 +461,14 @@ HE::StructField savedVarShape(const Value& live, const nlohmann::json& saved)
     f.type = live.type;           f.isArray = live.isArray;
     f.container = live.container; f.typeName = live.typeName;
     f.keyType = live.keyType;     f.keyTypeName = live.keyTypeName;
-    if (f.type == PinType::Struct && f.typeName.empty())
+    if (f.type == PinType::Struct && f.typeName.empty() && !f.isArray)
+    {
+        // Both backends tag a scalar struct (generated toValue bakes its path),
+        // so this is belt and braces: the saved object names its own type.
+        if (saved.is_object() && saved.value("__type", std::string()).size())
+            f.typeName = saved["__type"].get<std::string>();
+    }
+    else if (f.type == PinType::Struct && f.typeName.empty())
     {
         if (!live.items.empty()) f.typeName = live.items.front().typeName;
         const nlohmann::json* elems = saved.is_array() ? &saved

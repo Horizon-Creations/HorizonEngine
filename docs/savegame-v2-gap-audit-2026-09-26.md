@@ -294,3 +294,7 @@ selbst und nicht mehr "keine":
   `savedVariablesOf` ist derselbe Code wie fuer `replicated`.
 - Ref-Felder *innerhalb* eines gespeicherten Structs werden weiter als `null`
   geschrieben und als 0 gelesen (wie bei Template-Feldern).
+- **Umbenennen einer Save-Game-Variable** verwaist den gespeicherten Eintrag:
+  er wird beim Anwenden uebersprungen (Info-Log), die Variable startet auf ihrem
+  aktuellen Wert. Das ist dasselbe Problem, das Schritt 2 fuer Struct-Felder per
+  `formerNames` geloest hat, fuer Variablen aber noch nicht.
