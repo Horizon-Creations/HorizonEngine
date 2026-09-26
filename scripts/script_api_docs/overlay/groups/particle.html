@@ -1,0 +1,32 @@
+          <p>
+            Firing and stopping the Particle System component on an entity. An
+            emitter plays on its own from the start (its <em>Playing</em> box is
+            ticked by default); these functions are for effects that have to happen
+            at a moment. Calling <code>play</code>, <code>stop</code> or
+            <code>burst</code> on an entity without a Particle System writes a
+            warning to the log (at most every five seconds) and does nothing;
+            <code>isPlaying</code> answers <code>false</code> without a warning,
+            because asking is how a script finds out.
+          </p>
+          <ul>
+            <li>
+              <strong>One-shots.</strong> An emitter whose graph does not loop emits
+              its <em>Max Particles</em> once and finishes. <code>play</code>
+              restarts it from the beginning, however often.
+              <code>isPlaying</code> stays <code>true</code> until the last
+              particle has died, not only until the emitting ends.
+            </li>
+            <li>
+              <strong><code>stop</code> is soft.</strong> It stops the emitting and
+              lets the particles that are out live their lifetime, so
+              <code>isPlaying</code> is still <code>true</code> right after it and
+              turns <code>false</code> when the last one dies.
+            </li>
+            <li>
+              <strong><code>burst(e, count)</code></strong> emits at the emitter's
+              current world position and returns how many it actually made: never
+              more than <em>Max Particles</em> alive at once (with 10 alive and a
+              cap of 30, a burst of 500 makes 20), and 0 for a count of 0 or
+              below. A burst also restarts a stopped or finished emitter.
+            </li>
+          </ul>

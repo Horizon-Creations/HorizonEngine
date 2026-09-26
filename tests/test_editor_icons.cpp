@@ -140,6 +140,27 @@ TEST_CASE("Editor icons: one quad per light, camera and audio source, only under
 		CHECK(rw.lights.size() == 3);
 	}
 
+	SUBCASE("a light's icon wears the light's hue, everything else stays white")
+	{
+		// Dim orange: the icon is tinted by the hue with its brightest channel
+		// at 1 (HE::lightDisplayColor), not by the dim value itself.
+		reg.get<LightComponent>(point).color = { 0.5f, 0.25f, 0.0f };
+		reg.get<LightComponent>(spot).color  = { 0.0f, 0.0f, 3.0f };
+		const EditorCameraOverride cam0 = editorCamAt({ 0, 0, 0 });
+		ex.extract(world, rw, 16.0f / 9.0f, &cam0);
+		const RenderObject* ip = iconOf(rw, point);
+		const RenderObject* io = iconOf(rw, spot);
+		const RenderObject* is = iconOf(rw, sun);
+		const RenderObject* ic = iconOf(rw, cam);
+		const RenderObject* ia = iconOf(rw, audio);
+		REQUIRE(ip); REQUIRE(io); REQUIRE(is); REQUIRE(ic); REQUIRE(ia);
+		CHECK(ip->instanceTint == glm::vec4(1.0f, 0.5f, 0.0f, 1.0f));
+		CHECK(io->instanceTint == glm::vec4(0.0f, 0.0f, 1.0f, 1.0f));
+		CHECK(is->instanceTint == glm::vec4(1.0f));   // default white light
+		CHECK(ic->instanceTint == glm::vec4(1.0f));
+		CHECK(ia->instanceTint == glm::vec4(1.0f));
+	}
+
 	SUBCASE("constant screen size: the quad grows with view depth")
 	{
 		const EditorCameraOverride cam0 = editorCamAt({ 0, 0, 0 });
@@ -264,6 +285,9 @@ TEST_CASE("Editor icons: the icon textures and materials are built into every Co
 		CHECK(mat->customShaderFragGlsl.find("texture(heTex0, ") != std::string::npos);
 		CHECK(mat->customShaderFragGlsl.find("= vUV;") != std::string::npos);
 		CHECK(mat->customShaderFragGlsl.find("texture(heTex0, vec2(") == std::string::npos);
+		// The sample is multiplied by Vertex Color, the per-instance tint a
+		// light's icon carries its hue in; without it every icon stays white.
+		CHECK(mat->customShaderFragGlsl.find("= vColor;") != std::string::npos);
 		CHECK(!mat->nodeGraphJson.empty());
 	}
 }

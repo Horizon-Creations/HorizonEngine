@@ -24,23 +24,90 @@ void InputMapping::mapAxis2D(std::string name, std::vector<AxisBinding> xBinding
     e.is2D      = true;
 }
 
+namespace
+{
+// Field by field: the structs are aggregates meant to stay brace-initialisable,
+// so they get no operator== of their own.
+bool sameBinding(const ActionBinding& a, const ActionBinding& b)
+{
+    return a.key == b.key && a.gamepadButton == b.gamepadButton &&
+           a.mouseButton == b.mouseButton;
+}
+
+bool sameBinding(const AxisBinding& a, const AxisBinding& b)
+{
+    return a.positiveKey == b.positiveKey && a.negativeKey == b.negativeKey &&
+           a.scale == b.scale && a.source == b.source &&
+           a.positiveButton == b.positiveButton && a.negativeButton == b.negativeButton;
+}
+
+template <class B>
+void appendNew(std::vector<B>& into, const std::vector<B>& from)
+{
+    for (const B& b : from)
+        if (std::none_of(into.begin(), into.end(),
+                         [&](const B& have) { return sameBinding(have, b); }))
+            into.push_back(b);
+}
+} // namespace
+
+void InputMapping::addAction(const std::string& name, const std::vector<ActionBinding>& bindings)
+{
+    appendNew(m_actions[name].bindings, bindings);
+}
+
+void InputMapping::addAxis(const std::string& name, const std::vector<AxisBinding>& bindings)
+{
+    AxisEntry& e = m_axes[name];
+    if (e.is2D)
+    {
+        e.bindings.clear();
+        e.yBindings.clear();
+        e.is2D = false;
+    }
+    appendNew(e.bindings, bindings);
+}
+
+void InputMapping::addAxis2D(const std::string& name, const std::vector<AxisBinding>& xBindings,
+                             const std::vector<AxisBinding>& yBindings)
+{
+    AxisEntry& e = m_axes[name];
+    if (!e.is2D)
+    {
+        e.bindings.clear();   // a fresh entry is 1D by default and empty anyway
+        e.yBindings.clear();
+        e.is2D = true;
+    }
+    appendNew(e.bindings,  xBindings);
+    appendNew(e.yBindings, yBindings);
+}
+
 void InputMapping::clear()
 {
     m_actions.clear();
     m_axes.clear();
 }
 
-void InputMapping::tick(const Input& input, const MouseFrame& mouse)
+void InputMapping::tick(const Input& input, const MouseFrame& deskMouse, InputDevices devices)
 {
+    // Without the desk, no key reads as down and the mouse did nothing — the
+    // same answer a player gets whose keyboard is on someone else's lap.
+    const MouseFrame mouse = devices.keyboardMouse ? deskMouse : MouseFrame{};
+    auto keyDown = [&](SDL_Scancode k)
+    { return devices.keyboardMouse && k != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(k); };
+    auto padDown = [&](SDL_GamepadButton b)
+    { return b != SDL_GAMEPAD_BUTTON_INVALID && input.isGamepadButtonDown(b, devices.gamepadSlot); };
+    auto padAxis = [&](SDL_GamepadAxis a)
+    { return input.gamepadAxisFiltered(a, devices.gamepadSlot); };
+
     for (auto& [name, entry] : m_actions)
     {
         bool prev = entry.state.isPressed;
         bool cur  = false;
         for (auto& b : entry.bindings)
         {
-            cur = cur || (b.key != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(b.key));
-            cur = cur || (b.gamepadButton != SDL_GAMEPAD_BUTTON_INVALID &&
-                          input.isGamepadButtonDown(b.gamepadButton));
+            cur = cur || keyDown(b.key);
+            cur = cur || padDown(b.gamepadButton);
             cur = cur || (b.mouseButton >= 0 && b.mouseButton < kMouseButtonCount &&
                           (mouse.buttons & (1u << b.mouseButton)) != 0);
         }
@@ -66,16 +133,10 @@ void InputMapping::tick(const Input& input, const MouseFrame& mouse)
             switch (b.source)
             {
             case AxisSource::Key:
-                if (b.positiveKey != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(b.positiveKey))
-                    keys += b.scale;
-                if (b.negativeKey != SDL_SCANCODE_UNKNOWN && input.IsKeyDown(b.negativeKey))
-                    keys -= b.scale;
-                if (b.positiveButton != SDL_GAMEPAD_BUTTON_INVALID &&
-                    input.isGamepadButtonDown(b.positiveButton))
-                    keys += b.scale;
-                if (b.negativeButton != SDL_GAMEPAD_BUTTON_INVALID &&
-                    input.isGamepadButtonDown(b.negativeButton))
-                    keys -= b.scale;
+                if (keyDown(b.positiveKey))    keys += b.scale;
+                if (keyDown(b.negativeKey))    keys -= b.scale;
+                if (padDown(b.positiveButton)) keys += b.scale;
+                if (padDown(b.negativeButton)) keys -= b.scale;
                 break;
             case AxisSource::MouseX:     delta += mouse.dx    * b.scale; break;
             case AxisSource::MouseY:     delta += mouse.dy    * b.scale; break;
@@ -83,17 +144,17 @@ void InputMapping::tick(const Input& input, const MouseFrame& mouse)
             // Held states like the keys: they join the clamped sum, so a stick
             // plus a key bound to the same axis cannot exceed full deflection.
             case AxisSource::GamepadLeftX:
-                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFTX) * b.scale; break;
+                keys += padAxis(SDL_GAMEPAD_AXIS_LEFTX) * b.scale; break;
             case AxisSource::GamepadLeftY:
-                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFTY) * b.scale; break;
+                keys += padAxis(SDL_GAMEPAD_AXIS_LEFTY) * b.scale; break;
             case AxisSource::GamepadRightX:
-                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX) * b.scale; break;
+                keys += padAxis(SDL_GAMEPAD_AXIS_RIGHTX) * b.scale; break;
             case AxisSource::GamepadRightY:
-                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY) * b.scale; break;
+                keys += padAxis(SDL_GAMEPAD_AXIS_RIGHTY) * b.scale; break;
             case AxisSource::GamepadLeftTrigger:
-                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) * b.scale; break;
+                keys += padAxis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) * b.scale; break;
             case AxisSource::GamepadRightTrigger:
-                keys += input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) * b.scale; break;
+                keys += padAxis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) * b.scale; break;
             }
         }
         return std::clamp(keys, -1.0f, 1.0f) + delta;
@@ -156,4 +217,46 @@ void InputMapping::axis2DValue(const std::string& name, float& x, float& y) cons
     const InputAxisState* s = getAxis(name);
     x = s ? s->x : 0.0f;
     y = s ? s->y : 0.0f;
+}
+
+const std::vector<ActionBinding>* InputMapping::actionBindings(const std::string& name) const
+{
+    auto it = m_actions.find(name);
+    return it != m_actions.end() ? &it->second.bindings : nullptr;
+}
+
+const std::vector<AxisBinding>* InputMapping::axisBindings(const std::string& name) const
+{
+    auto it = m_axes.find(name);
+    return it != m_axes.end() ? &it->second.bindings : nullptr;
+}
+
+const std::vector<AxisBinding>* InputMapping::axisYBindings(const std::string& name) const
+{
+    auto it = m_axes.find(name);
+    return it != m_axes.end() ? &it->second.yBindings : nullptr;
+}
+
+bool InputMapping::axisIs2D(const std::string& name) const
+{
+    auto it = m_axes.find(name);
+    return it != m_axes.end() && it->second.is2D;
+}
+
+std::vector<std::string> InputMapping::actionNames() const
+{
+    std::vector<std::string> out;
+    out.reserve(m_actions.size());
+    for (const auto& [name, e] : m_actions) out.push_back(name);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<std::string> InputMapping::axisNames() const
+{
+    std::vector<std::string> out;
+    out.reserve(m_axes.size());
+    for (const auto& [name, e] : m_axes) out.push_back(name);
+    std::sort(out.begin(), out.end());
+    return out;
 }

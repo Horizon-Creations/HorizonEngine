@@ -227,7 +227,21 @@ SSR-/GI-Reprojektionsschwäche geplant werden, damit der Velocity-Buffer nur ein
 > weil die Occlusion-Pass-Projektion und die Reflexions-Reprojektion mit den sauberen
 > Matrizen rechnen; AO/Reflexionen liegen damit bis zu einem halben Pixel neben dem
 > gejitterten Scene-Raster — unter dem AO-Blur unsichtbar, und der temporale Filter mittelt
-> das Wackeln weg. D3D/Vulkan: weiterhin offen (dort gibt es noch keinen Velocity-Pass).
+> das Wackeln weg. D3D11/D3D12/Vulkan: seit 26.09.2026 ebenso (Thema 78, Schritt 6, s. u.).
+>
+> **D3D11, D3D12, Vulkan (26.09.2026, Thema 78 Schritt 6): derselbe Aufbau, forward-only.**
+> Jitter, gejitterte Matrix und History-Gewicht teilen sich die drei in
+> `HorizonRendering/TemporalAA.h`, die HLSL-Shader die beiden D3D-Backends in
+> `D3D_Shared/HlslSources.h`; Vulkan hat `shaders/taa_*.{vert,frag}`. Velocity-Pass nach
+> Opaque + Skinned (LEQUAL ohne Schreiben gegen die Szenentiefe; Vulkans HDR-Scene-Pass
+> speichert dafür jetzt seine Tiefe), Resolve zwischen Tonemap und AA-Slot, Sharpen im Slot.
+> Jitter nur im HDR-Viewport-Pfad, der ihn auch auflöst — der Swapchain-Pfad bleibt
+> ungejittert. Vulkan nimmt statt drei Matrizen zwei (128 B Push-Constants): die vorherige
+> saubere Matrix mit dem Jitter DIESES Frames, der dann aus der NDC-Differenz herausfällt.
+> Geprüft: WARP-Tests (Velocity-Vorzeichen, Resolve mit Negativkontrolle, Sharpen, D3D12-PSOs)
+> und ein Debug-Lauf auf einer RTX 4070 mit Kamera-Drehung, Negativkontrolle Velocity 0 /
+> umgedrehtes Vorzeichen auf Vulkan. Wie GL: geskinnte Meshes, WPO/Wind und Himmel melden
+> Velocity 0.
 >
 > **OpenGL (16.09.2026, Thema 52 Schritt 2): derselbe Aufbau, drei `#version 410`-Programme.**
 > Der Velocity-Pass zeichnet die sichtbare Objektliste positions-only mit `uMvpJitter` /
@@ -266,7 +280,7 @@ SSR-/GI-Reprojektionsschwäche geplant werden, damit der Velocity-Buffer nur ein
 | Stufe | Stand | Anmerkung |
 |---|---|---|
 | **A0** | ✅ auf dem Branch | `HE::AAMethod` + `IRenderer::AntiAliasingSettings` + `ResolveAAMethod`, Editor-Preferences-Zeile, Projekt-Config, Push aus Editor **und** gepacktem Spiel, `HE_DUMP_AA` / `HE_DUMP_RENDERSCALE` / `HE_DUMP_SPECAA`. „Off" tauscht den Shader gegen einen Passthrough — der Pass läuft weiter, weil er das Ausgabetarget füllt. Metal headless verifiziert |
-| **A2+A3** | ✅ Metal **und OpenGL**, jeweils deferred **und forward** (Metal forward + GL seit 16.09.2026) | Halton(2,3)-Jitter nur in der Rasterisierungsmatrix, **eigener Velocity-Pass** statt fünftem G-Buffer-Attachment (siehe unten), TAA auf dem getonemappten Bild mit Neighbourhood-Clamp + Sharpen im vorhandenen Resolve-Slot. Der Velocity-Pass läuft deferred nach dem G-Buffer-Pass, forward nach dem HDR-Scene-Pass (der dafür seine Tiefe speichert); `supportsTemporalAA` ist auf Metal und GL bedingungslos wahr (GL: sobald die drei Programme gelinkt sind). GL: Ping-Pong-History statt Blit (4.1), Velocity ohne y-Flip. D3D/Vulkan: offen |
+| **A2+A3** | ✅ Metal **und OpenGL**, jeweils deferred **und forward** (Metal forward + GL seit 16.09.2026) | Halton(2,3)-Jitter nur in der Rasterisierungsmatrix, **eigener Velocity-Pass** statt fünftem G-Buffer-Attachment (siehe unten), TAA auf dem getonemappten Bild mit Neighbourhood-Clamp + Sharpen im vorhandenen Resolve-Slot. Der Velocity-Pass läuft deferred nach dem G-Buffer-Pass, forward nach dem HDR-Scene-Pass (der dafür seine Tiefe speichert); `supportsTemporalAA` ist auf Metal und GL bedingungslos wahr (GL: sobald die drei Programme gelinkt sind). GL: Ping-Pong-History statt Blit (4.1), Velocity ohne y-Flip. **D3D11/D3D12/Vulkan seit 26.09.2026** (forward, nur Editor-Viewport; `supportsTemporalAA`, sobald die TAA-Shader/-Pipelines stehen) |
 | **A4** | ✅ Metal auf dem Branch | Output-Größe und Render-Größe getrennt: der AA-Resolve ist ein Fullscreen-Dreieck mit normalisierten UVs und skaliert deshalb gratis. Gemessen: Scale 0.5 → 832, Scale 2.0 → 506 geglättete Silhouetten-Spalten (ohne AA: 135). Offen: Mip-Bias `log2(scale)` — dafür müsste jeder Material-Sampler ein `bias()` mitbekommen |
 | **A5** | ⚠️ verdrahtet, per Opt-in aus | `MTLFXTemporalScaler` hängt an denselben Eingaben wie unser TAA (Farbe, Tiefe, Velocity, Jitter) und läuft **vor** dem Tonemap auf dem HDR-Bild; der Tonemap arbeitet dann in Ausgabeauflösung. Gerät meldet Unterstützung, der Scaler schreibt das Ergebnis aber 1:1 in die Ecke statt hochzuskalieren — bei im Log verifizierten Größen (858x482 → 1280x720). Deshalb `supportsMetalFX` nur mit `HE_METALFX=1`; ohne das fällt der Modus auf TAA zurück, **bit-identisch verifiziert** (0 Pixel Unterschied zur TAA-Aufnahme). Offene Verdächtige: `inputContentPropertiesEnabled` + min/max-Scale im Deskriptor, oder ein 27-Beta-Verhalten (dieselbe Klasse Falle wie `MTLBinaryArchive`) |
 | **A7 (MSAA)** | ❌ bewusst nicht gebaut | Kostenrechnung in §5c: ~40 Pipeline-Deskriptoren plus drei Caches, deren Schlüssel die Sample-Anzahl aufnehmen müsste. Render Scale 2.0 (A4) löst dieselben Kanten und supersampled zusätzlich das Shading |

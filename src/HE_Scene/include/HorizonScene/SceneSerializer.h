@@ -292,6 +292,19 @@ public:
                             const std::vector<uint8_t>& currentAssetBlob,
                             std::vector<uint8_t>& outBlob);
 
+    // ── Save as Prefab ───────────────────────────────────────────────────────
+    // The subtree that was just captured into a new prefab (`blob`, from
+    // serializeSubtree on `root`) made a placement of it, so it follows the
+    // asset from then on instead of staying an unlinked copy. Every record
+    // carries the uuid of the entity it was captured from, so the bindings
+    // are the identity over the records, and there are no overrides — the
+    // asset IS this subtree. A link the root already had is replaced, as
+    // dropping the new prefab in its place would; a nested placement further
+    // down keeps its own. False when `root` is gone, `asset` is null or the
+    // blob is not a subtree whose root record is `root`.
+    static bool linkPrefabSource(HorizonWorld& world, Entity root, const HE::UUID& asset,
+                                 const std::vector<uint8_t>& blob);
+
     // Remove the component a scene-format key names ("light", "rigidbody"), the
     // inverse of the one block applyComponents restores for it. False when the
     // key is unknown or the entity does not carry the component. "__name" is

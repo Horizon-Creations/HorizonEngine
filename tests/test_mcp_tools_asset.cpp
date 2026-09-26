@@ -97,7 +97,7 @@ struct Fixture
 		h.creatableTypes = [this]() -> std::vector<HE::AssetType> {
 			if (restrictTypes) return allowedTypes;
 			std::vector<HE::AssetType> all;
-			for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::BlendSpace); ++i)
+			for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::Sequence); ++i)
 			{
 				const auto t = static_cast<HE::AssetType>(i);
 				if (HE::Ed::isCreatableAssetType(t)) all.push_back(t);
@@ -336,7 +336,7 @@ TEST_CASE("asset_create covers every authored type it offers")
 {
 	Fixture f("create_all");
 	int made = 0;
-	for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::BlendSpace); ++i)
+	for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::Sequence); ++i)
 	{
 		const auto t = static_cast<HE::AssetType>(i);
 		if (!HE::Ed::isCreatableAssetType(t)) continue;
@@ -722,7 +722,7 @@ TEST_CASE("assetTypeFromName is the exact inverse of assetTypeName")
 	// The pair these tools' `type` argument rides on. A type the forward
 	// direction cannot name is one no client can ever ask for — which is how
 	// BoneMask and BlendSpace went missing from the switch in Types/Enums.h.
-	for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::BlendSpace); ++i)
+	for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::Sequence); ++i)
 	{
 		const auto t = static_cast<HE::AssetType>(i);
 		const std::string name = HE::assetTypeName(t);

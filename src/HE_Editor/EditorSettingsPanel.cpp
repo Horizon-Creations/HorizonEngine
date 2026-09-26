@@ -883,9 +883,10 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			Row::inputInt("Autosave Interval (s)", &cfg.AutosaveIntervalSec);
 			cfg.AutosaveIntervalSec = std::clamp(cfg.AutosaveIntervalSec, 10, 3600);
 		}
-		hint("Writes a copy of the edited scene to the project's Saved/Autosave "
-		     "folder. A clean exit or a real save removes it; after a crash the "
-		     "copy is what the next start can restore from.");
+		hint("Writes a copy of the edited scene and of every asset tab with unsaved "
+		     "edits to the project's Saved/Autosave folder. A clean exit or a real "
+		     "save removes it; after a crash the copy is what the next start can "
+		     "restore from.");
 	});
 
 	if (mode == SettingsMode::QuickSettings && shown == 0)

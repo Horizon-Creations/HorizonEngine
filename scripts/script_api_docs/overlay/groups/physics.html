@@ -1,0 +1,93 @@
+          <p>
+            Queries against the physics world and pushes on its bodies. Without a
+            running physics world (edit mode, a world with no bodies built) every
+            query misses, every push returns <code>false</code> and every read is
+            zero. Units are metres, seconds, newtons and kilograms; the one
+            exception is spin, which is in <strong>radians</strong> per second.
+          </p>
+          <ul>
+            <li>
+              <strong>Hits from Lua/Python.</strong> <code>raycast</code> and the
+              four casts return ten values: <code>hit, entity, px, py, pz, nx, ny,
+              nz, distance, layer</code>. On a miss they are <code>false</code>
+              and zeros. The flat <a href="#flat-raycast"><code>horizon.raycast</code></a>
+              returns a table / dict (<code>entity, x, y, z, nx, ny, nz,
+              distance</code>, no layer) or <code>nil</code> / <code>None</code>.
+              The direction does not have to be normalised.
+            </li>
+            <li>
+              <strong>A ray started inside a collider hits that collider</strong>
+              at distance 0. A ray from a character's own position therefore
+              finds the character. Start it outside the own capsule (a step
+              ahead, see the example below) or give the character its own
+              collision layer and leave that bit out of the mask.
+            </li>
+            <li>
+              <strong>Shape casts report the centre, not the contact.</strong>
+              For <code>sphereCast</code>, <code>boxCast</code> and
+              <code>capsuleCast</code>, <code>point</code> is where the shape's
+              centre stopped (a 0.25 m sphere dropped on a floor at y = 1 reports
+              y = 1.25), which is what a camera boom or a placement check wants.
+              The shape casts ignore trigger volumes; <code>raycast</code> and
+              the overlaps see them.
+            </li>
+            <li>
+              <strong>Layer masks</strong> are bitfields: bit N is collision layer
+              N, 65535 (or -1) is every layer, 0 sees nothing. The layer names
+              are in Project Settings under Collision Layers.
+            </li>
+            <li>
+              <strong>World and local.</strong> Every point a query returns is in
+              world space, and so are the positions of
+              <code>addForceAtPosition</code> / <code>addImpulseAtPosition</code>.
+              <code>setPosition</code> and <code>setPositionAndReset</code> take a
+              <em>local</em> position, like <code>horizon.setPosition</code>: for a
+              child entity the value is relative to its parent. Joint anchors are
+              local to their own entity.
+            </li>
+            <li>
+              <strong>Forces</strong> (<code>addForce</code>, <code>addImpulse</code>,
+              <code>addTorque</code>, the two <code>…AtPosition</code>) need a
+              <em>Dynamic</em> rigid body and return <code>false</code> with a log
+              line on a static or kinematic one, so also on a character.
+              A character moves through <a href="#locomotion">Locomotion</a>.
+            </li>
+            <li>
+              <code>setVelocity</code> addresses the character controller when
+              there is one, otherwise the rigid body. On a character with a
+              Movement component the next frame overwrites the horizontal part
+              with whatever <code>locomotion.move</code> asked for (nothing =
+              standing still), so use <code>setVelocity</code> on characters only
+              without one.
+            </li>
+            <li>
+              <code>setGravity</code> changes gravity for rigid bodies in the
+              whole world. A character falls by its own Character Controller
+              gravity and does not follow it.
+            </li>
+          </ul>
+          <p>
+            <strong>Joints</strong> tie two rigid bodies together; the entity
+            passed first owns the joint, and only it reports <code>hasJoint</code>.
+            A type outside 0–4 becomes Fixed. <code>setJointMotor</code> works on
+            a Hinge or Slider only and returns <code>false</code> otherwise. A
+            joint made at runtime is written to the owner's Joint component, the
+            same component the editor places, and <code>removeJoint</code> or a
+            break removes it again.
+          </p>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>List results do not reach Lua or Python.</strong>
+              <code>overlapSphere</code>, <code>overlapSphereLayers</code>,
+              <code>overlapBox</code>, <code>overlapCapsule</code>,
+              <code>raycastAll</code> and <code>pollJointBroken</code> return
+              scalar zeros there instead of lists (see <a href="#arrays">Lists</a>,
+              measured on build 7d49d44f). <code>pollJointBroken</code> still
+              empties the queue, so a script calling it takes the events away from
+              a HorizonCode graph that polls the same queue. Until this is fixed,
+              use these from HorizonCode, and in scripts react to contacts with
+              <a href="#callbacks"><code>onBeginOverlap</code></a> on a trigger
+              volume.
+            </p>
+          </div>

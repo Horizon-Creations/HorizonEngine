@@ -1,0 +1,27 @@
+          <p>
+            What a character is doing right now, read from its Character
+            Controller. Queries only; to make a character move use
+            <a href="#locomotion">Locomotion</a>. An entity without a Character
+            Controller reads 0 and <code>false</code>, without a log line.
+          </p>
+          <ul>
+            <li>
+              All speeds are metres per second. <code>speed</code> is horizontal
+              only (falling is not running), <code>verticalSpeed</code> is
+              positive while rising.
+            </li>
+            <li>
+              <code>forwardAmount</code> and <code>rightAmount</code> are the same
+              horizontal velocity split along the character's facing, <strong>also
+              in metres per second</strong>, not a fraction: a character strafing
+              right at 5 m/s reads <code>rightAmount</code> 5. Divide by
+              <code>speed</code> for −1…1, and guard against a speed of 0.
+              Forward is the entity's −Z axis turned by its yaw.
+            </li>
+            <li>
+              <code>isGrounded</code> is the same answer as
+              <code>physics.isGrounded</code> and the flat
+              <code>horizon.isGrounded</code>, and the one
+              <code>locomotion.jump</code> checks.
+            </li>
+          </ul>

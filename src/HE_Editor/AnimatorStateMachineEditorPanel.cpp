@@ -121,14 +121,11 @@ CollabDocSync::DocBindings collabDocs(const std::string& assetPath)
 
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
-// Persist a tab's graph. The header's Save button AND the close/quit prompt's
-// "Save All" both come through here, so the two can never drift apart.
-static bool saveToDisk(State& st, AppContext& ctx)
+// The tab's two graphs into `asset` — what a save writes, and what the
+// recovery copy (appendSnapshots) writes into a copy of the asset.
+static void encodeInto(const State& st, AnimatorStateMachineAsset& asset)
 {
-	if (!ctx.contentManager) return false;
-	AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachineMutable(st.assetId);
-	if (!asset) return false;
-	asset->graphJson = HE::animatorStateMachineToJson(st.graph);
+	asset.graphJson = HE::animatorStateMachineToJson(st.graph);
 	// An UNTOUCHED sync graph is written as no chunk at all, so an asset that
 	// never got one stays byte-identical to what it was before sync graphs
 	// existed. "Untouched" is not "empty": the view seeds the Update event on
@@ -140,7 +137,33 @@ static bool saveToDisk(State& st, AppContext& ctx)
 		 (st.syncGraph.nodes.size() == 1 &&
 		  st.syncGraph.nodes[0].type == HorizonCode::NodeType::Event &&
 		  st.syncGraph.nodes[0].s == "Update"));
-	asset->syncGraphJson = syncUntouched ? std::string() : HorizonCode::toJson(st.syncGraph);
+	asset.syncGraphJson = syncUntouched ? std::string() : HorizonCode::toJson(st.syncGraph);
+}
+
+void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, State& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			const AnimatorStateMachineAsset* a = cm->getAnimatorStateMachine(st.assetId);
+			if (!a) return false;
+			AnimatorStateMachineAsset copy = *a;
+			encodeInto(st, copy);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
+
+// Persist a tab's graph. The header's Save button AND the close/quit prompt's
+// "Save All" both come through here, so the two can never drift apart.
+static bool saveToDisk(State& st, AppContext& ctx)
+{
+	if (!ctx.contentManager) return false;
+	AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachineMutable(st.assetId);
+	if (!asset) return false;
+	encodeInto(st, *asset);
 	if (!ctx.contentManager->saveAsset(*asset)) return false;
 	st.dirty = false;
 	// Live entities already using this asset should reflect the edit now, not only

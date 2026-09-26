@@ -42,6 +42,11 @@ namespace
 			{ "entity.cut",       "Cut",               "Entities", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_X },
 			{ "entity.paste",     "Paste",             "Entities", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_V },
 			{ "entity.delete",    "Delete",            "Entities", Scope::Global, ImGuiKey_Delete },
+			// Everything the Outliner lists, and nothing. Esc only clears when
+			// nothing else wanted the key this frame or the last (a popup, a
+			// field being typed into) — see EditorUI.
+			{ "entity.selectAll", "Select All",        "Entities", Scope::Global, ImGuiMod_Ctrl | ImGuiKey_A },
+			{ "entity.deselect",  "Deselect All",      "Entities", Scope::Global, ImGuiKey_Escape },
 
 			// Play — the transport the toolbar's centre well drives. Global, so
 			// the scene can be started from the keyboard whichever panel has the

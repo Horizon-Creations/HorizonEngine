@@ -16,6 +16,7 @@
 #include "BoneMaskPanel.h"
 #include "BlendSpacePanel.h"
 #include "SequencerPanel.h"
+#include "CinematicPanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -30,6 +31,8 @@
 #include "ViewportPanel.h"               // centre dock: Scene viewport, camera, gizmo, picking
 #include "ViewportToolbar.h"             // the View menu draws the toolbar's pickers
 #include "SecondaryViewportPanel.h"      // Scene 2 / 3 / 4: the level from other sides
+#include "ViewportActions.h"             // Edit > Select All: what "all" means
+#include "EditorViewportNav.h"           // Esc belongs to a fly-look's release first
 #include "OutlinerPanel.h"               // right dock: World Outliner hierarchy tree
 #include "ProjectHubPanel.h"             // start screen while no project is open
 #include "TutorialPanel.h"               // first-start welcome + Help ▸ Interactive Tutorial
@@ -53,6 +56,8 @@
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
+#include "AssetRecoveryDialog.h"          // the same for asset tabs
+#include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
 #include "ReportIssueDialog.h"           // Help > Report Issue (pre-filled GitHub issue)
 #include "DocsPanel.h"                   // Help > Documentation (the in-editor manual)
 #include "EditorHelp.h"                  // one scope per menu; the rows look themselves up
@@ -534,8 +539,13 @@ void EditorUI::render(AppContext& ctx, float dt)
                 ctx.globalState->refreshContentFolder();
                 ctx.globalState->refreshSourceFolder();
                 if (ctx.contentManager)
+                {
                     ctx.globalState->refreshEngineFolder(ctx.contentManager->engineContentRoot(),
                                                           ctx.contentManager->contentRoot());
+                    // Whatever was looked for and not found may be here now
+                    // (a mesh's slot material imported after the mesh).
+                    ctx.contentManager->noteContentChanged();
+                }
                 ctx.contentRefreshPending = false;
                 ctx.contentRefreshDone    = true;
             }
@@ -649,9 +659,16 @@ void EditorUI::render(AppContext& ctx, float dt)
     // After the two checks above on purpose: all three raise root-level modals
     // at startup and only one can be open, so this one waits for theirs.
     SceneRecoveryDialog::Draw(ctx);
+    // The asset tabs' copies, once the scene's offer is answered (it waits).
+    AssetRecoveryDialog::Draw(ctx);
 
     // ── Assets ▸ Publish Engine Content to Server… ───────────────────────────
     EngineContentPublishDialog::Draw(ctx);
+
+    // ── "Is this texture colour or data?" (import and Color Space...) ────────
+    // Here rather than in the Content Browser: File ▸ Import Asset raises it
+    // too, and the browser is not drawn while an asset tab is in front.
+    TextureColourSpaceDialog::Draw(ctx);
 
     // ── "That rename reaches other files" ────────────────────────────────────
     // Raised by the graph editors after a HorizonCode member was renamed. Drawn
@@ -773,6 +790,7 @@ bool EditorUI::tabHasUnsavedEdits(const std::string& assetPath)
 	       BoneMaskPanel::isDirty(assetPath)            ||
 	       BlendSpacePanel::isDirty(assetPath)          ||
 	       SequencerPanel::isDirty(assetPath)           ||
+       CinematicPanel::isDirty(assetPath)           ||
 	       ParticleGraphEditorPanel::isDirty(assetPath) ||
 	       AnimatorStateMachineEditorPanel::isDirty(assetPath) ||
 	       SkeletalMeshEditorPanel::isDirty(assetPath);
@@ -797,6 +815,7 @@ std::vector<std::string> EditorUI::unsavedAssetPaths()
 	BoneMaskPanel::appendDirtyPaths(out);
 	BlendSpacePanel::appendDirtyPaths(out);
 	SequencerPanel::appendDirtyPaths(out);
+	CinematicPanel::appendDirtyPaths(out);
 	ParticleGraphEditorPanel::appendDirtyPaths(out);
 	AnimatorStateMachineEditorPanel::appendDirtyPaths(out);
 	SkeletalMeshEditorPanel::appendDirtyPaths(out);
@@ -825,12 +844,34 @@ bool EditorUI::saveAsset(AppContext& ctx, const std::string& assetPath)
 	ok = BoneMaskPanel::save(ctx, assetPath)                         && ok;
 	ok = BlendSpacePanel::save(ctx, assetPath)                       && ok;
 	ok = SequencerPanel::save(ctx, assetPath)                        && ok;
+	ok = CinematicPanel::save(ctx, assetPath)                        && ok;
 	ok = ParticleGraphEditorPanel::save(ctx, assetPath)              && ok;
 	ok = AnimatorStateMachineEditorPanel::save(ctx, assetPath)       && ok;
 	ok = SkeletalMeshEditorPanel::save(ctx, assetPath)              && ok;
 	// The panels are the authority on their own dirty flag; re-asking also catches
 	// a save that reported success but left the state dirty.
 	return ok && !tabHasUnsavedEdits(assetPath);
+}
+
+// The recovery half of saveAsset: the same fourteen panels, each reporting its
+// dirty files and how to write what a Save would write to another path.
+// AssetAutosave does the rest (EditorApplication::updateAssetAutosave).
+void EditorUI::appendAssetSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ScriptEditorPanel::appendSnapshots(ctx, out);
+	CppClassEditorPanel::appendSnapshots(ctx, out);
+	MaterialEditorPanel::appendSnapshots(ctx, out);
+	UIEditorPanel::appendSnapshots(ctx, out);
+	HorizonCodeClassPanel::appendSnapshots(ctx, out);
+	InputAssetPanel::appendSnapshots(ctx, out);
+	TypeAssetPanel::appendSnapshots(ctx, out);
+	ThemeAssetPanel::appendSnapshots(ctx, out);
+	BoneMaskPanel::appendSnapshots(ctx, out);
+	BlendSpacePanel::appendSnapshots(ctx, out);
+	SequencerPanel::appendSnapshots(ctx, out);
+	ParticleGraphEditorPanel::appendSnapshots(ctx, out);
+	AnimatorStateMachineEditorPanel::appendSnapshots(ctx, out);
+	SkeletalMeshEditorPanel::appendSnapshots(ctx, out);
 }
 
 // The live documents behind an open tab, for collaboration's item-level sync.
@@ -870,6 +911,7 @@ void EditorUI::discardPanelState(AppContext& ctx, const std::string& assetPath)
 	BoneMaskPanel::forget(assetPath);
 	BlendSpacePanel::forget(assetPath);
 	SequencerPanel::forget(assetPath);
+	CinematicPanel::forget(assetPath);
 	ParticleGraphEditorPanel::forget(assetPath);
 	AnimatorStateMachineEditorPanel::forget(assetPath);
 	StaticMeshEditorPanel::forget(assetPath);
@@ -962,6 +1004,7 @@ bool EditorUI::reloadAssetTabFromDisk(const std::string& assetPath)
 	any = BoneMaskPanel::reloadFromDisk(assetPath)                        || any;
 	any = BlendSpacePanel::reloadFromDisk(assetPath)                      || any;
 	any = SequencerPanel::reloadFromDisk(assetPath)                       || any;
+	any = CinematicPanel::reloadFromDisk(assetPath)                       || any;
 	any = ParticleGraphEditorPanel::reloadFromDisk(assetPath)             || any;
 	any = AnimatorStateMachineEditorPanel::reloadFromDisk(assetPath)      || any;
 	return any;
@@ -1407,6 +1450,18 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	{
 		return ctx.projectLoaded && !ctx.isPlaying && ctx.world && ctx.entityClipboardFull;
 	};
+	// Selecting is not editing: allowed while playing (the Outliner's clicks
+	// are too), but only in a game project — an application has no entities
+	// to act on, which is why its Edit menu has none of these rows.
+	auto canSelectEntities = [&]() -> bool
+	{
+		return ctx.projectLoaded && ctx.world && ctx.projectManager &&
+		       !ctx.projectManager->currentProject().appProject;
+	};
+	auto selectAllEntities = [&]()
+	{
+		if (canSelectEntities()) ViewportActions::selectAll(*ctx.world, ctx.selection);
+	};
 	// Window::SetFullscreen is write-only, so the current state is read back off
 	// the SDL window rather than mirrored in a static that drifts the first time
 	// the user goes fullscreen through the window manager instead of this menu.
@@ -1593,6 +1648,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::Paste:     if (canPasteEntity() && ctx.pasteEntity)     ctx.pasteEntity();     break;
 			case MC::Duplicate: if (canEditEntity()  && ctx.duplicateEntity) ctx.duplicateEntity(); break;
 			case MC::Delete:    if (canEditEntity()  && ctx.deleteEntity)    ctx.deleteEntity();    break;
+			case MC::SelectAll:   selectAllEntities(); break;
+			case MC::DeselectAll: if (canSelectEntities()) ctx.selection.clear(); break;
 			// The Entity menu: the viewport's and the Outliner's verbs, each
 			// re-checking its own preconditions (ViewportPanel).
 			case MC::CreateEntity:
@@ -1824,6 +1881,13 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 ctx.duplicateEntity();
             if (EditorWidgets::menuItem("Delete", EditorShortcuts::label("entity.delete").c_str(), false, canEdit) && ctx.deleteEntity)
                 ctx.deleteEntity();
+            ImGui::Separator();
+            if (EditorWidgets::menuItem("Select All", EditorShortcuts::label("entity.selectAll").c_str(), false,
+                                        canSelectEntities()))
+                selectAllEntities();
+            if (EditorWidgets::menuItem("Deselect All", EditorShortcuts::label("entity.deselect").c_str(), false,
+                                        canSelectEntities() && !ctx.selection.empty()))
+                ctx.selection.clear();
         }
         ImGui::Separator();
 		if (EditorWidgets::menuItem("Project Settings", nullptr, false, ctx.projectLoaded))
@@ -2489,23 +2553,36 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 const std::filesystem::path root(ctx.contentManager->contentRoot());
                 const std::filesystem::path relDir = importTargetDir();
 
+                // Textures wait for the colour-space dialog (sRGB or linear is a
+                // choice the file cannot make); everything else imports now.
                 // Reward moment (EditorRewards.h): AssetsImported(imported) —
                 // one for the batch, after the loop, only if imported > 0.
                 size_t imported = 0;
+                std::vector<std::string> textures;
                 for (const std::string& src : s_pendingImportPaths)
                 {
+                    if (Importer::isTextureSource(src)) { textures.push_back(src); continue; }
                     if (Importer::importSource(src, root, relDir)) ++imported;
                     else HE_LOG_ERROR(Editor, "%s",
                         ("Editor: import failed for " + src).c_str());
                 }
+                if (!textures.empty())
+                    TextureColourSpaceDialog::openImport(
+                        textures,
+                        std::vector<std::string>(textures.size(), relDir.generic_string()),
+                        root.string());
                 // One line for the whole batch, one refresh at the end: a hundred
                 // textures must not mean a hundred progress modals or a hundred
                 // rescans of the content tree.
                 HE_LOG_INFO(Editor, "%s",
                     ("Editor: imported " + std::to_string(imported) + " of "
-                     + std::to_string(s_pendingImportPaths.size()) + " file(s) into "
+                     + std::to_string(s_pendingImportPaths.size() - textures.size())
+                     + " file(s) into "
                      + (relDir.empty() ? std::string("the content root")
-                                       : relDir.generic_string())).c_str());
+                                       : relDir.generic_string())
+                     + (textures.empty() ? std::string()
+                        : ", " + std::to_string(textures.size())
+                          + " texture(s) wait for their color space")).c_str());
                 ctx.contentRefreshPending = true;
             }
             s_pendingImportPaths.clear();
@@ -3268,6 +3345,52 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         const ImGuiIO& kio = ImGui::GetIO();
         const bool typing = kio.WantTextInput || ImGui::IsAnyItemActive();
 
+        // ── Esc: whose key was it? ───────────────────────────────────────────
+        // ImGui answers Escape itself, in NewFrame (NavUpdateCancelRequest):
+        // it closes the open combo or context menu and deactivates the field
+        // being typed into BEFORE any of this code runs. On the Esc frame the
+        // popup is already gone and nothing is active, so "is anything busy"
+        // asked now says no, and the one press would close a combo in the
+        // Details panel AND empty the selection that panel was showing. The
+        // answer has to come from the frame before: a stamp of the last frame
+        // on which a popup was open or an item held the keyboard, and Esc
+        // clears only when that frame is at least two frames old. Modal
+        // dialogs handle Esc in their own code, which also ran earlier this
+        // frame — the same stamp covers them. A held mouse button counts too:
+        // the viewport picture is a plain Image that holds no ActiveId, so a
+        // gizmo drag or a marquee in progress is only visible as the button.
+        static int s_escBusyFrame = -10;
+        const int  frameNow  = ImGui::GetFrameCount();
+        const bool escBusyNow =
+            typing || ImGui::GetActiveID() != 0 || ImGui::IsAnyMouseDown() ||
+            ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+        const bool escFree = !escBusyNow && frameNow - s_escBusyFrame >= 2 &&
+                             !EditorViewportNav::lookCaptured();
+        if (escBusyNow) s_escBusyFrame = frameNow;
+
+        // Select All and Esc are selection verbs, and fire only where the
+        // selection lives: the Scene viewports, the Outliner, the Details
+        // panel — or nowhere focused at all. Every other panel keeps both keys
+        // (the manual backs out of a search on Esc, a text list may one day
+        // select its own rows on Ctrl+A).
+        const auto focusOnSelection = []() {
+            const ImGuiContext* g = ImGui::GetCurrentContext();
+            if (!g || !g->NavWindow) return true;
+            const char* root = g->NavWindow->RootWindow ? g->NavWindow->RootWindow->Name
+                                                        : g->NavWindow->Name;
+            for (const char* title : { "Scene", "Scene 2", "Scene 3", "Scene 4",
+                                       "World Outliner", "Details" })
+                if (std::strcmp(root, title) == 0) return true;
+            return false;
+        };
+        if (sceneTabActive && !typing && canSelectEntities() && focusOnSelection())
+        {
+            if (EditorShortcuts::pressed("entity.selectAll"))
+                selectAllEntities();
+            if (escFree && !ctx.selection.empty() && EditorShortcuts::pressed("entity.deselect"))
+                ctx.selection.clear();
+        }
+
         // The scene tab is not enough on its own: the Content Browser is docked
         // into it and binds Delete for its own asset deletion
         // (ContentBrowserPanel.cpp), so one press would delete an asset AND the
@@ -3514,6 +3637,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             BlendSpacePanel::render(ctx, tabPath, tabPos, tabSize);
         else if (SequencerPanel::isSequencerAsset(tabPath))
             SequencerPanel::render(ctx, tabPath, tabPos, tabSize);
+        else if (CinematicPanel::isCinematicAsset(tabPath))
+            CinematicPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (TypeAssetPanel::isTypeAsset(tabPath))
             TypeAssetPanel::render(ctx, tabPath, tabPos, tabSize);
         else if (SkeletalMeshEditorPanel::isSkeletalMeshAsset(tabPath))

@@ -5,6 +5,8 @@
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -306,6 +308,9 @@ namespace entity {
     // play mode (PIE/packaged — the SceneSerializer owns edit-mode persistence),
     // an active save, and an enabled SaveStateComponent — anything missing
     // fails LOUD (log + false). hasSavedState only needs an active save.
+    // Script state: the entity's HorizonCode class's Save Game variables
+    // (Variable::saveGame) ride along under "vars" when saveScriptVars is on;
+    // Lua/Python script state is not captured (see SaveStateComponent.h).
     bool saveState(Ctx&, Entity e);
     bool hasSavedState(Ctx&, Entity e);
     bool applySavedState(Ctx&, Entity e);
@@ -663,6 +668,42 @@ namespace animator {
     // The layer names on this entity, in stack order. The read a debug view
     // makes, and the read a graph makes instead of guessing at a typo'd name.
     std::vector<std::string> layerNames(Ctx&, Entity e);
+}
+
+// ── Sequence: playing a cutscene ─────────────────────────────────────────────
+// The transport of a Sequence Player component (docs/sequencer-cinematics-plan.md
+// §3.5), a thin layer over SequenceSystem. `e` is the entity carrying the
+// player — the cutscene's owner — never one of its actors.
+//
+// The end arrives as the notify "SequenceFinished" on the owner
+// (SequenceSystem::kSequenceFinished), through OnAnimationNotify, at the natural
+// end and after a stop of a running player; see SequenceSystem.h.
+//
+// Unknown entity or no Sequence Player: the actions do nothing, play answers
+// false, the reads answer 0/false.
+namespace sequence {
+    // Start from the top (or from where setTime put it), or resume a pause.
+    // False without a player, and on a switched-off owner.
+    bool  play(Ctx&, Entity e);
+    void  pause(Ctx&, Entity e);
+    // Stop and rewind to 0. A running cutscene sends SequenceFinished — which is
+    // what a skip key wants.
+    void  stop(Ctx&, Entity e);
+    // Jump; nothing between the old and the new time fires. Clamped to the
+    // sequence's length (wrapped, for a looping player).
+    void  setTime(Ctx&, Entity e, float seconds);
+    float getTime(Ctx&, Entity e);
+    // The sequence's length in seconds; 0 while it is still loading.
+    float duration(Ctx&, Entity e);
+    // The clock is running: false when stopped, finished, or paused.
+    bool  isPlaying(Ctx&, Entity e);
+    // Play the binding named `binding` with `target` instead of the entity the
+    // sequence names — "the player", spawned at runtime, is the reason. By NAME,
+    // the label the editor shows; it may be called before the sequence has
+    // loaded. A target of 0 — this API's "no entity" — clears the override and
+    // the asset's own actor plays again; a target that does not exist is
+    // refused with a warning rather than read as 0.
+    void  bindSlot(Ctx&, Entity e, const std::string& binding, Entity target);
 }
 
 // ── Particles: firing an effect ──────────────────────────────────────────────
@@ -1074,6 +1115,20 @@ namespace app {
     // bound), and on a Linux without notify-send. Worth asking once rather than
     // discovering it per notification.
     bool notifyAvailable(Ctx&);
+
+    // ── The PLAYER's display settings (see namespace settings) ──────────────
+    // Over what the export configured (config.json GameVSync / GameWindowMode),
+    // applied at once and persisted with settings.save. setFullscreen(false)
+    // goes back to the configured mode, or to a window when that mode WAS
+    // fullscreen — a game exported borderless stays borderless. The getters
+    // answer the player's choice, else the configured one.
+    //
+    // In play-in-editor both are recorded and saved but not applied: the
+    // window is the editor's.
+    void setVSync(bool enabled);
+    bool vsync();
+    void setFullscreen(bool fullscreen);
+    bool isFullscreen();
 }
 
 // ── A second window (A5, docs/he-apps-plan.md §13.3) ─────────────────────────
@@ -1217,6 +1272,23 @@ namespace camera {
     // blend starts: setting isMain by hand stays a hard cut.
     void  blendTo(Ctx&, Entity camera, float seconds, int curve);
     bool  isBlending(Ctx&);
+
+    // ── The PLAYER's stick look (settings, see namespace settings) ───────────
+    // Not the rig's fields: those are the project's design and stay scene data.
+    // These sit on top of every rig, persist with settings.save and outlive
+    // scene switches.
+    //
+    // The sensitivity is a SCALE on the rig's own degrees per second (1 = as
+    // designed, 2 = twice as fast), not a replacement for it — a project with a
+    // slow vehicle rig and a fast on-foot rig keeps the difference between them
+    // whatever the player picks. Clamped to 0.05..10.
+    //
+    // Invert replaces the rig's stickInvertY once the player has chosen; until
+    // then stickInvertY() answers false and the rig's own value applies.
+    void  setStickSensitivityScale(float scale);
+    float stickSensitivityScale();                      // 1 when never chosen
+    void  setStickInvertY(bool invert);
+    bool  stickInvertY();
 }
 
 // ── Environment (the world's EnvironmentComponent) ───────────────────────────
@@ -2023,6 +2095,88 @@ namespace prefs {
     void        clear    (Ctx&);
 }
 
+// ── Player settings: what a settings menu changes ────────────────────────────
+// The player's own choices over the project's: stick deadzone, stick look
+// speed and invert, VSync, fullscreen, volume. Each value is OPTIONAL — "never
+// chosen" means the project's (or the application's) own, so a project that
+// changes its defaults later still reaches every player who did not override
+// them. The same reasoning as the binding overrides (input.rebindBegin).
+//
+// The rows that change them are spread over the groups they belong to
+// (input.setStickDeadzone, camera.setStickSensitivityScale, app.setVSync, …);
+// what lives here is the store, the persistence and the volume rows.
+//
+// Changes apply AT ONCE, through the Host the application installs, and last
+// for the session. save() writes them to prefs (one key, "settings", holding
+// a JSON object) and the application loads and applies them at start-up.
+// Nothing is written until save — the same contract as input.saveBindings, so
+// a menu's slider does not hit the disk on every step of a drag.
+namespace settings {
+    struct Values
+    {
+        std::optional<float> stickDeadzone;           // 0..0.9
+        std::optional<float> stickSensitivityScale;   // 0.05..10
+        std::optional<bool>  stickInvertY;
+        std::optional<bool>  vsync;
+        std::optional<bool>  fullscreen;
+        std::map<std::string, float> volumes;          // bus → 0..2, kMaster = master
+    };
+    inline constexpr const char* kMaster   = "Master";
+    inline constexpr const char* kPrefsKey = "settings";
+
+    // What the application offers. The base values are what a setting falls
+    // back to when the player never chose it — the configured VSync, the app's
+    // deadzone — so the getters can answer and reset() can go back to them.
+    // Every hook may be empty (a test, an application without a window).
+    struct Host
+    {
+        float stickDeadzone = 0.15f;
+        bool  vsync         = true;
+        bool  fullscreen    = false;
+        std::function<void(float)> applyStickDeadzone;
+        std::function<void(bool)>  applyVSync;
+        std::function<void(bool)>  applyFullscreen;
+        // One bus (kMaster = master) whose player volume changed. nullopt =
+        // the player no longer overrides it: back to the project's own (the
+        // mixer's authored value). Only the buses that changed are called, so
+        // a bus a script turned down (audio.setBusVolume) is left alone.
+        std::function<void(const std::string& bus, std::optional<float> volume)> applyVolume;
+        // What a bus is at now, for volume() when the player never set it.
+        std::function<float(const std::string& bus)> currentVolume;
+    };
+    // install applies every value once (the start-up apply); uninstall only
+    // drops the hooks. The values stay — the camera rig keeps reading them.
+    void install(Host host);
+    void uninstall();
+    bool installed();
+
+    // prefs → values, applied through the host when one is installed (else
+    // install applies them when it comes). Replaces what was held,
+    // so a play session in the editor starts from what was saved rather than
+    // from the last session's unsaved changes. False when the stored text is
+    // not an object; the values are then the defaults.
+    bool          load();
+    const Values& values();
+    // Replace in memory and apply (tests, and load paths that already hold one).
+    void          set(const Values& v);
+
+    std::string toJson(const Values& v);
+    bool        fromJson(const std::string& json, Values& out);
+
+    // ── Rows ──
+    // Volume is linear gain on a mixer bus, kMaster ("Master") for everything
+    // at once; 0..2 like the mixer's faders. A bus the project has not
+    // authored is created. volume() answers the player's value, else the bus's
+    // current one (1 when neither is known).
+    void  setVolume(const std::string& bus, float volume);
+    float volume(const std::string& bus);
+    // Persist everything above (NOT the bindings — input.saveBindings) and
+    // answer whether the prefs file took it. Nothing chosen removes the key.
+    bool  save();
+    // Back to the project's values, applied at once. Not saved until save().
+    void  resetToDefaults();
+}
+
 // ── Date and time ────────────────────────────────────────────────────────────
 // The WALL clock, unlike the time group, which is the game's. An application
 // showing "last saved 14:32" needs the one that keeps running when the game is
@@ -2410,6 +2564,11 @@ namespace player {
     uint32_t controllerOf(uint32_t character);   // who drives this character
     uint32_t controller();                       // the (first) player controller
     uint32_t character();                        // what it possesses (0 = none)
+    // Local players (couch co-op): the session's controllers are the local
+    // players, sorted by asset path — index 0 is controller(). With two or
+    // more, controller i reads pad slot i (PlayerHost). 0 = no such player.
+    uint32_t controllerAt(int index);
+    int      localPlayerCount();
     // App hooks: PlayerHost registers the session's controllers so controller()
     // has something to answer, and clears the table when the session ends.
     void     setControllers(const std::vector<uint32_t>& controllers);
@@ -2462,6 +2621,95 @@ namespace input {
     bool  gamepadConnected();
     bool  gamepadButton(const std::string& name);
     float gamepadAxis(const std::string& name);
+
+    // ── Rumble: the one input row that WRITES to a device ────────────────────
+    // The reverse of setGamepad: Input (HE_Core) owns the pads and this layer
+    // cannot see it, so the app installs a sink once at startup and the rows
+    // below call through it. No sink → every call answers false, silently.
+    struct RumbleSink
+    {
+        std::function<bool(float low, float high, uint32_t durationMs)>   rumble;
+        std::function<bool(float left, float right, uint32_t durationMs)> rumbleTriggers;
+        std::function<void()>                                             stop;
+    };
+    void setRumbleSink(RumbleSink sink);   // app hook; RumbleSink{} uninstalls
+    // App hook, EVERY frame. Two different pauses, two different answers:
+    //   allowed    — "is a game running at all" (the editor: playing and not
+    //                halted at a breakpoint/pause button; the packaged game:
+    //                always). Going false STOPS the pads and refuses further
+    //                requests — a buzz started in PIE must not outlive Stop.
+    //   gamePaused — time.isPaused(). Going true STOPS the pads, but requests
+    //                made while paused still go through: a pause menu may
+    //                want a click to be felt, the explosion before it may not
+    //                keep shaking the hands of whoever is reading that menu.
+    // Starts closed (allowed=false), so an app that never opens it — the
+    // editor in edit mode — cannot be made to buzz by a graph preview.
+    void setRumbleGate(bool allowed, bool gamePaused);
+    // Script side. Intensities 0..1, `low` = heavy motor, `high` = light motor.
+    // `duration` in SECONDS like camera.playShake; <= 0 runs until stopRumble
+    // or the next call (at most ~65 s on a positive one). ONE effect per pad:
+    // a call replaces the running one, it does not mix — no handle for that
+    // reason. True if at least one pad took it. Trigger rumble answers false on
+    // pads without trigger motors (anything but Xbox One/Series and DualSense).
+    bool rumble(float low, float high, float duration);
+    bool rumbleTriggers(float left, float right, float duration);
+    void stopRumble();
+
+    // ── Rebinding: the player's own bindings, over the project's ─────────────
+    // The session's PlayerHost owns the bindings and the capture, so it installs
+    // this for as long as it runs (begin → end); without one every row below
+    // answers false / "" and does nothing — edit mode, a session with no host.
+    // Plain functions rather than an interface so the host's header need not
+    // pull this one in (same shape as RumbleSink).
+    struct BindingService
+    {
+        std::function<bool(const std::string& action, const std::string& device)> rebindBegin;
+        std::function<void()>                                                     rebindCancel;
+        std::function<bool()>                                                     isRebinding;
+        std::function<std::string()>                                              rebindConflict;
+        std::function<std::string(const std::string& action, const std::string& device)> bindingName;
+        std::function<void()>                                                     resetBindings;
+        std::function<bool()>                                                     saveBindings;
+    };
+    void setBindingService(BindingService service);   // host hook; {} uninstalls
+    // Script side. `device` is "keyboard" (keys AND mouse buttons — one class)
+    // or "gamepad"; a rebind replaces that half of the action's bindings and
+    // leaves the other half alone. Button actions only for now.
+    //
+    // rebindBegin: listen for the next press on that device and bind it to
+    //   `action`. False for an unknown action, an axis, a bad device name, or
+    //   no running session. The press that is already down when it is called
+    //   (the menu click or South press that asked for it) never counts. Escape
+    //   or the pad's Start button cancels. While it listens, every gameplay
+    //   action is silent — even the ones marked to run while paused — and the
+    //   menu does not react to keys, pad or clicks.
+    // isRebinding: true from rebindBegin until the captured button is released
+    //   again (or the capture was cancelled). Poll it to know when to refresh
+    //   the labels.
+    // rebindConflict: after a capture, the OTHER actions that input also
+    //   triggers, comma-separated ("" = none). The binding is made anyway.
+    // bindingName: what `action` is bound to on `device`, readable ("Space",
+    //   "A (South)", "Left Mouse Button"); several joined with " / ", "" none.
+    // resetBindings: drop every player binding (the project's again). Not saved
+    //   until saveBindings.
+    // saveBindings: persist the player's bindings in prefs (key
+    //   "input.overrides.0"; a later per-player step adds 1, 2, …). Loaded
+    //   again at the start of every session.
+    bool        rebindBegin(const std::string& action, const std::string& device);
+    void        rebindCancel();
+    bool        isRebinding();
+    std::string rebindConflict();
+    std::string bindingName(const std::string& action, const std::string& device);
+    void        resetBindings();
+    bool        saveBindings();
+
+    // ── The player's stick deadzone (settings, see namespace settings) ───────
+    // The radius around the rest position a stick has to leave before it
+    // counts, 0..0.9 (clamped). Takes effect on the next frame and is saved
+    // with settings.save. stickDeadzone() answers the player's value, else the
+    // application's (0.15 in a packaged game; the editor's preference in PIE).
+    void  setStickDeadzone(float deadzone);
+    float stickDeadzone();
 
     // ── Input ACTIONS: the project's InputAction assets, by name ─────────────
     // What the mapping contexts resolved this frame, keyed by the logical

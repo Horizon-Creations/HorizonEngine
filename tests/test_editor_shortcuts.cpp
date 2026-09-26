@@ -128,6 +128,38 @@ TEST_CASE("shortcuts: overrides round-trip through the config string")
 	CHECK(encode() == "edit.redo=F5");
 }
 
+TEST_CASE("shortcuts: Select All is Ctrl+A, Deselect All a bare Esc, neither while typing")
+{
+	Ctx ctx;
+	CHECK(chordToText(chord("entity.deselect")) == "Escape");
+	CHECK(label("entity.deselect") == "Esc");
+	CHECK(label("entity.selectAll") == HE::Ed::Help::shortcutLabel("Ctrl+A"));
+
+	ctx.frame({ ImGuiMod_Ctrl, ImGuiKey_A });
+	CHECK(pressed("entity.selectAll"));
+	ctx.endFrame({ ImGuiMod_Ctrl, ImGuiKey_A });
+	// A alone is not Select All (and must stay free for the fly camera).
+	ctx.frame({ ImGuiKey_A });
+	CHECK_FALSE(pressed("entity.selectAll"));
+	ctx.endFrame({ ImGuiKey_A });
+
+	ctx.frame({ ImGuiKey_Escape });
+	CHECK(pressed("entity.deselect"));
+	ctx.endFrame({ ImGuiKey_Escape });
+	// Shift+Esc is not the bare key.
+	ctx.frame({ ImGuiMod_Shift, ImGuiKey_Escape });
+	CHECK_FALSE(pressed("entity.deselect"));
+	ctx.endFrame({ ImGuiMod_Shift, ImGuiKey_Escape });
+
+	// In a text field Ctrl+A selects the text and Esc leaves the field.
+	ctx.frame({ ImGuiMod_Ctrl, ImGuiKey_A }, /*typing=*/true);
+	CHECK_FALSE(pressed("entity.selectAll"));
+	ctx.endFrame({ ImGuiMod_Ctrl, ImGuiKey_A });
+	ctx.frame({ ImGuiKey_Escape }, /*typing=*/true);
+	CHECK_FALSE(pressed("entity.deselect"));
+	ctx.endFrame({ ImGuiKey_Escape });
+}
+
 TEST_CASE("shortcuts: a clash is per scope, and Global clashes with everything")
 {
 	Ctx ctx;
