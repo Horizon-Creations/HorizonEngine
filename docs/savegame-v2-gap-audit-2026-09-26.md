@@ -180,6 +180,48 @@ die Stellen, die ein `saveGame`-Flag braucht:
   bekommen denselben Weg nur, wenn jemand ihn braucht. Die C-ABI-Tabelle ist
   versioniert, ein Feld dazu heisst eine neue Version.
 
+## Nachtrag Schritt 2 (26.09.): 2-C umgesetzt
+
+Feld- und Eintrags-Renames laufen jetzt ueber Aliase (`formerNames`), wie
+vorgeschlagen. Stand:
+
+- **Modell/Codec:** `StructField::formerNames`, `EnumEntry::formerNames`
+  (`TypeRegistry.h`). In STDF/ENDF/SGTP nur geschrieben, wenn nicht leer, also
+  bleiben nie umbenannte Definitionen byte-gleich. Beim Schreiben fallen leere,
+  doppelte und Aliase weg, die gleich einem lebenden Namen sind.
+- **Eine Regel fuer alle Mehrdeutigkeiten:** ein lebender Name gewinnt immer.
+  "x→y umbenannt, dann neues x angelegt" gibt alte x-Daten an das neue x.
+- **Leser:** `findField`/`findEntry` suchen erst den aktuellen Namen, dann die
+  Aliase. `StructDef::storedKey` liefert fuer name-keyed Speicher den Schluessel
+  (aktueller Name, sonst neuester vorhandener Alias). Genutzt in `save.load`
+  (Template-Felder), im verschachtelten Struct-Decoder des Saves, bei
+  `structDefaults` (Interpreter + Override-Editor). Enum-Defaults in Graphen,
+  Feld-Defaults, Codegen und C++-Header gehen ueber `findEntry` von selbst mit.
+- **Retarget (Zurueckschreiben):** Spielstaende schreiben beim naechsten
+  `save.write` die aktuellen Namen. Graphen: `syncTypeSignatures` schreibt
+  beim Laden Variablen-Enum-Defaults, `defaultItems`/`defaultKeys` und
+  `structDefaults`-Schluessel auf die aktuellen Namen um, Get/Set Struct Field
+  folgt dem umbenannten Feld, und der Link-Remap nimmt Aliase mit, sodass ein
+  Draht auch dann bleibt, wenn im selben Edit ein anderes Feld wegfiel.
+- **Erzeuger:** TypeAssetPanel bucht beim Speichern jede Zeile, deren Name vom
+  zuletzt gespeicherten abweicht (indexparallele Liste, Zeilen werden nie
+  umsortiert), zeigt "Formerly: ..." an. MCP: `type_field_set` und
+  `type_enum_set` haben `renameFrom`.
+- **Tests:** `test_type_registry.cpp` (Codec, Lookups, Schatten-Regel, Ketten,
+  Enum-Default ueber alten Namen), `test_engine_api.cpp` ("a save written before
+  a field rename...", mit Negativkontrolle ohne Aliase und Rueckschreib-Pruefung),
+  `test_horizoncode_types.cpp` (Graph laedt nach Rename+Loeschen), 
+  `test_mcp_tools_type.cpp` (`renameFrom`).
+
+**Weiter offen:**
+- 2-A und 2-B (Asset verschieben/umbenennen, Template-UUID im Save). Das ist
+  die andere Lesart von Luecke 2 und in diesem Schritt nicht angefasst.
+- Enum-Umnummerieren: Saves speichern Enum-Werte als Zahl, ein Umnummerieren
+  verschiebt Daten weiterhin. Unabhaengig vom Umbenennen.
+- Skriptquelltext (`horizon.enums.X.Alt`, Lua/Python-Tabellen mit alten
+  Feldnamen, `save.get("alt")`) wird nicht umgeleitet. Bewusst: `save.get`
+  mit altem Namen bleibt ein lauter Fehler.
+
 ## Empfohlene Reihenfolge
 
 2-A → 2-B → 3-A → 2-C → 3-B. 2-A ist der kleinste Schritt mit dem groessten

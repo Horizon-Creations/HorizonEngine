@@ -4426,13 +4426,17 @@ Value scalarFromJson(const nlohmann::json& j, HorizonCode::PinType t, const std:
     case P::Struct:
     {
         // Seed defaults, then overwrite the fields present — a schema edit
-        // between write and load keeps missing fields at their defaults.
+        // between write and load keeps missing fields at their defaults. A
+        // field renamed since the write is found under its former name.
         v = HE::TypeRegistry::instance().makeDefaultValue(typeName);
         HE::StructDef def;
         if (j.is_object() && HE::TypeRegistry::instance().getStruct(typeName, def))
-            for (size_t i = 0; i < def.fields.size(); ++i)
-                if (auto it = j.find(def.fields[i].name); it != j.end() && i < v.items.size())
-                    v.items[i] = valueFromJson(*it, def.fields[i]);
+            for (size_t i = 0; i < def.fields.size() && i < v.items.size(); ++i)
+            {
+                const std::string key = def.storedKey(def.fields[i],
+                    [&j](const std::string& k) { return j.contains(k); });
+                if (!key.empty()) v.items[i] = valueFromJson(j.at(key), def.fields[i]);
+            }
         break;
     }
     default: break;
@@ -4549,10 +4553,15 @@ bool load(const std::string& id, ::ContentManager* cm)
     doc->id = id;
     doc->templatePath = schema.assetPath;
     doc->fields = seedFields(schema);          // defaults first — partial files load clean
+    // Name-keyed; a template field renamed since the write is found under its
+    // former name, and the next write() stores it under the current one.
     if (auto f = j.find("fields"); f != j.end() && f->is_object())
         for (size_t i = 0; i < schema.fields.size(); ++i)
-            if (auto it = f->find(schema.fields[i].name); it != f->end())
-                doc->fields[i] = valueFromJson(*it, schema.fields[i]);
+        {
+            const std::string key = schema.storedKey(schema.fields[i],
+                [&f](const std::string& k) { return f->contains(k); });
+            if (!key.empty()) doc->fields[i] = valueFromJson(f->at(key), schema.fields[i]);
+        }
     if (auto e = j.find("entities"); e != j.end() && e->is_object())
         doc->entities = *e;
     doc->schema = std::move(schema);

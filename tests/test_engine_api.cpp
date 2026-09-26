@@ -3462,6 +3462,111 @@ TEST_CASE("save v2: Set and Map fields survive the disk round trip IN ORDER")
     std::filesystem::remove_all(root, ec);
 }
 
+TEST_CASE("save v2: a save written before a field rename loads into the renamed field")
+{
+    // Saves are name-keyed and live with the PLAYER — nothing can rewrite them
+    // when the developer renames a template field or a nested struct field. The
+    // definitions carry the old names (formerNames) instead; the loader falls
+    // back to them, and the next write stores the current name.
+    namespace save = HE::api::save;
+    using P = HorizonCode::PinType;
+    const char* kRankDef = "Content/T/SaveRank.hasset";
+    const auto root = std::filesystem::temp_directory_path() / "he_api_save_rename_test";
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
+    HE::api::fs::setSandboxRoot(root.string());
+    save::close();
+
+    HE::StructDef rank;
+    rank.name = "SaveRank"; rank.assetPath = kRankDef;
+    {
+        HE::StructField r; r.name = "rank"; r.type = P::Int;
+        r.defaultValue = HE::api::Value::ofInt(1);
+        rank.fields = { r };                             // level → rank, alias added below
+    }
+    HE::TypeRegistry::instance().registerStruct(rank);
+
+    ContentManager cm;
+    auto registerTemplate = [&cm](const char* path, bool withAliases)
+    {
+        HE::StructDef tpl;
+        HE::StructField health; health.name = "health"; health.type = P::Float;
+        health.defaultValue = HE::api::Value::ofFloat(100.0f);
+        HE::StructField title; title.name = "title"; title.type = P::String;
+        HE::StructField gold; gold.name = "gold"; gold.type = P::Float;
+        HE::StructField coins; coins.name = "coins"; coins.type = P::Float;
+        HE::StructField prog; prog.name = "progress"; prog.type = P::Struct;
+        prog.typeName = "Content/T/SaveRank.hasset";
+        if (withAliases)
+        {
+            health.formerNames = { "hp" };               // hp → health
+            title.formerNames  = { "name", "label" };    // name → label → title
+            coins.formerNames  = { "gold" };             // shadowed: "gold" is live
+        }
+        tpl.fields = { health, title, gold, coins, prog };
+        SaveGameTemplateAsset a;
+        a.name = "RenameTemplate";
+        a.path = path;
+        a.json = HE::TypeRegistry::structToJson(tpl);    // the aliases go through the codec
+        cm.registerSaveGameTemplate(std::move(a));
+    };
+    registerTemplate("mem://save_rename_template", true);
+    registerTemplate("mem://save_rename_template_noalias", false);
+
+    // What a build from before the renames wrote: old keys everywhere.
+    auto legacy = [](const char* tpl)
+    {
+        return std::string("{ \"template\": \"") + tpl + "\", \"fields\": {"
+               " \"hp\": 37.5, \"label\": \"Veteran\", \"gold\": 5,"
+               " \"progress\": { \"__type\": \"Content/T/SaveRank.hasset\", \"level\": 9 } },"
+               " \"entities\": {} }";
+    };
+    REQUIRE(HE::api::fs::writeText("Saves/legacy.json", legacy("mem://save_rename_template")));
+    REQUIRE(HE::api::fs::writeText("Saves/control.json", legacy("mem://save_rename_template_noalias")));
+
+    // Negative control: the same file against a template WITHOUT the aliases
+    // loses every renamed field to its default — the failure this closes.
+    REQUIRE(save::load("control", &cm));
+    CHECK(save::getNumber("health", -1.0f) == doctest::Approx(100.0f));
+    CHECK(save::getString("title", "?").empty());
+    CHECK(save::getStructV("progress").items[0].i == 1);
+    save::close();
+
+    rank.fields[0].formerNames = { "level" };
+    HE::TypeRegistry::instance().registerStruct(rank);
+    REQUIRE(save::load("legacy", &cm));
+    CHECK(save::getNumber("health", -1.0f) == doctest::Approx(37.5f));   // via "hp"
+    CHECK(save::getString("title", "?") == "Veteran");                  // via the NEWER alias
+    CHECK(save::getNumber("gold", -1.0f) == doctest::Approx(5.0f));      // a live name wins…
+    CHECK(save::getNumber("coins", -1.0f) == doctest::Approx(0.0f));     // …over an alias of it
+    const HE::api::Value prog = save::getStructV("progress");
+    REQUIRE(prog.items.size() == 1);
+    CHECK(prog.items[0].i == 9);                                         // nested, via "level"
+
+    // Writing it back retargets the file onto the current names.
+    REQUIRE(save::write());
+    save::close();
+    const nlohmann::json back = nlohmann::json::parse(HE::api::fs::readText("Saves/legacy.json"));
+    const nlohmann::json& f = back.at("fields");
+    CHECK(f.contains("health"));
+    CHECK(!f.contains("hp"));
+    CHECK(f.contains("title"));
+    CHECK(!f.contains("label"));
+    CHECK(f.at("progress").contains("rank"));
+    CHECK(!f.at("progress").contains("level"));
+    CHECK(f.at("health").get<float>() == doctest::Approx(37.5f));
+    CHECK(f.at("progress").at("rank").get<int>() == 9);
+
+    // And the rewritten file loads again (now by the current names).
+    REQUIRE(save::load("legacy", &cm));
+    CHECK(save::getNumber("health", -1.0f) == doctest::Approx(37.5f));
+    CHECK(save::getStructV("progress").items[0].i == 9);
+
+    save::close();
+    HE::TypeRegistry::instance().removeType(kRankDef);
+    std::filesystem::remove_all(root, ec);
+}
+
 TEST_CASE("entity save-state: guarded round-trip through the active save")
 {
     SaveTestRig rig;

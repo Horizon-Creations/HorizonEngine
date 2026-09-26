@@ -18,9 +18,31 @@ using HorizonCode::Value;
 
 // ─── Def lookups ─────────────────────────────────────────────────────────────
 
+void noteRename(std::vector<std::string>& formerNames,
+                const std::string& oldName, const std::string& newName)
+{
+    if (oldName.empty() || oldName == newName) return;
+    formerNames.erase(std::remove(formerNames.begin(), formerNames.end(), newName),
+                      formerNames.end());
+    if (std::find(formerNames.begin(), formerNames.end(), oldName) == formerNames.end())
+        formerNames.push_back(oldName);
+}
+
+namespace {
+
+bool hasAlias(const std::vector<std::string>& formerNames, const std::string& n)
+{
+    return std::find(formerNames.begin(), formerNames.end(), n) != formerNames.end();
+}
+
+} // namespace
+
 const EnumEntry* EnumDef::findEntry(const std::string& n) const
 {
     for (const EnumEntry& e : entries) if (e.name == n) return &e;
+    // No live entry has this name, so no alias match below can steal one.
+    if (n.empty()) return nullptr;
+    for (const EnumEntry& e : entries) if (hasAlias(e.formerNames, n)) return &e;
     return nullptr;
 }
 const EnumEntry* EnumDef::findValue(int v) const
@@ -28,10 +50,31 @@ const EnumEntry* EnumDef::findValue(int v) const
     for (const EnumEntry& e : entries) if (e.value == v) return &e;
     return nullptr;
 }
+bool EnumDef::isLiveName(const std::string& n) const
+{
+    for (const EnumEntry& e : entries) if (e.name == n) return true;
+    return false;
+}
 const StructField* StructDef::findField(const std::string& n) const
 {
     for (const StructField& f : fields) if (f.name == n) return &f;
+    if (n.empty()) return nullptr;
+    for (const StructField& f : fields) if (hasAlias(f.formerNames, n)) return &f;
     return nullptr;
+}
+bool StructDef::isLiveName(const std::string& n) const
+{
+    for (const StructField& f : fields) if (f.name == n) return true;
+    return false;
+}
+std::string StructDef::storedKey(const StructField& f,
+                                 const std::function<bool(const std::string&)>& has) const
+{
+    if (has(f.name)) return f.name;
+    // Newest first: data written after the latest rename beats an older copy.
+    for (auto it = f.formerNames.rbegin(); it != f.formerNames.rend(); ++it)
+        if (!it->empty() && !isLiveName(*it) && has(*it)) return *it;
+    return {};
 }
 
 // ─── Registry storage ────────────────────────────────────────────────────────
@@ -343,6 +386,7 @@ Value TypeRegistry::makeFieldDefault(const StructField& f) const
 // Vec2 → [x,y], Color → [r,g,b,a], Transform → {"pos":[3],"rot":[3],"scl":[3]},
 // Enum → entry name (string). Struct fields and arrays carry no inline default
 // (nested defs supply their own; arrays start empty).
+// Either item may carry "formerNames": [ "oldName", ... ] after a rename.
 
 namespace {
 
@@ -415,13 +459,43 @@ void defaultFromJson(const json& j, StructField& f)
     v.type = f.type;
 }
 
+// The aliases worth persisting: no empties, no duplicates, none that is the
+// item's own name or another live name (those can never win a lookup — the
+// live name does). Written only when non-empty, so a definition that was
+// never renamed keeps the exact bytes it had before aliases existed.
+template <class IsLive>
+void formerNamesToJson(json& out, const std::string& ownName,
+                       const std::vector<std::string>& formerNames, IsLive isLive)
+{
+    json arr = json::array();
+    std::unordered_set<std::string> seen;
+    for (const std::string& n : formerNames)
+        if (!n.empty() && n != ownName && !isLive(n) && seen.insert(n).second)
+            arr.push_back(n);
+    if (!arr.empty()) out["formerNames"] = std::move(arr);
+}
+
+std::vector<std::string> formerNamesFromJson(const json& e)
+{
+    std::vector<std::string> out;
+    if (auto it = e.find("formerNames"); it != e.end() && it->is_array())
+        for (const json& n : *it)
+            if (n.is_string() && !n.get<std::string>().empty()) out.push_back(n.get<std::string>());
+    return out;
+}
+
 } // namespace
 
 std::string TypeRegistry::enumToJson(const EnumDef& def)
 {
     json entries = json::array();
     for (const EnumEntry& e : def.entries)
-        entries.push_back({ { "name", e.name }, { "value", e.value } });
+    {
+        json je{ { "name", e.name }, { "value", e.value } };
+        formerNamesToJson(je, e.name, e.formerNames,
+                          [&def](const std::string& n) { return def.isLiveName(n); });
+        entries.push_back(std::move(je));
+    }
     return json{ { "entries", std::move(entries) } }.dump(2);
 }
 
@@ -437,6 +511,7 @@ bool TypeRegistry::enumFromJson(const std::string& text, EnumDef& out)
             EnumEntry en;
             en.name  = e.value("name", std::string{});
             en.value = e.value("value", 0);
+            en.formerNames = formerNamesFromJson(e);
             if (!en.name.empty()) out.entries.push_back(std::move(en));
         }
     return true;
@@ -451,6 +526,8 @@ std::string TypeRegistry::structToJson(const StructDef& def)
                  { "type", static_cast<int>(f.type) },
                  { "isArray", f.isArray },
                  { "typeName", f.typeName } };
+        formerNamesToJson(jf, f.name, f.formerNames,
+                          [&def](const std::string& n) { return def.isLiveName(n); });
         // "container" is written only for Set/Map, so an array field keeps the
         // exact bytes it had before containers existed.
         if (f.container != HorizonCode::ContainerKind::None &&
@@ -528,6 +605,7 @@ bool TypeRegistry::structFromJson(const std::string& text, StructDef& out)
             f.type     = static_cast<PinType>(e.value("type", 1));
             f.isArray  = e.value("isArray", false);
             f.typeName = e.value("typeName", std::string{});
+            f.formerNames = formerNamesFromJson(e);
             f.container = static_cast<HorizonCode::ContainerKind>(
                 e.value("container", static_cast<int>(HorizonCode::ContainerKind::None)));
             // A kind present means container, full stop — the two-field state

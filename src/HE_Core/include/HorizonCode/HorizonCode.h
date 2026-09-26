@@ -925,7 +925,15 @@ HE_API void remapLinksForMirror(Graph& g, const std::vector<int>& nodes);
 struct LinkRemapSnapshot
 {
     // Per node id: the pin names of each region, in pin order.
-    struct Sig { std::vector<std::string> execIns, execOuts, dataIns, dataOuts; };
+    struct Sig
+    {
+        std::vector<std::string> execIns, execOuts, dataIns, dataOuts;
+        // User-type nodes (Make/Break Struct, Switch on Enum): former field /
+        // entry name → current one, from the definition's formerNames. Lets a
+        // wire follow a RENAMED pin even when the same edit also added or
+        // removed one (the region size changed, so the index fallback is off).
+        std::unordered_map<std::string, std::string> renamed;
+    };
     std::unordered_map<int, Sig> sigs;
 };
 HE_API LinkRemapSnapshot captureLinkRemapSnapshot(const Graph& g,

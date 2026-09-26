@@ -6514,13 +6514,19 @@ namespace
 	  "Adds one named constant to this enum. It takes the next free value — one "
 	  "past the highest already in the list, never below 0 — and both the name "
 	  "and the number can be changed afterwards. Two entries sharing a name are "
-	  "flagged in red, because the generated constants would be ambiguous.",
+	  "flagged in red, because the generated constants would be ambiguous. "
+	  "Renaming an entry and saving keeps the old name as an alias (hover the "
+	  "name to see it), so graphs and defaults that still spell it find the "
+	  "entry; scripts that spell it in their source have to be updated by hand.",
 	  "", "" },
 	{ "Type Editor/+ Add Field", "Add Field",
 	  "Adds one field to this struct or savegame template. Give it a type, "
 	  "optionally a container, and a default. A duplicate field name is flagged "
 	  "in red, and a struct whose fields lead back to itself refuses to save — "
-	  "that cycle would never finish.",
+	  "that cycle would never finish. Renaming a field and saving keeps the old "
+	  "name as an alias (\"Formerly\" under the name), so savegames and graphs "
+	  "written before the rename still load into it. Remove and re-add loses "
+	  "them; rename instead.",
 	  "", "" },
 	{ "Type Editor/Set as Project Default", "Set as Project Default",
 	  "Makes this savegame template the one a script gets when it creates a save "

@@ -333,6 +333,7 @@ json fieldJson(const HE::StructField& f)
 		{ "type", pinTypeName(f.type) },
 	};
 	if (!f.typeName.empty()) j["typeName"] = f.typeName;
+	if (!f.formerNames.empty()) j["formerNames"] = f.formerNames;
 	const ContainerKind k = f.kind();
 	if (k != ContainerKind::None)
 	{
@@ -389,7 +390,11 @@ json defJson(const Def& d)
 	{
 		json entries = json::array();
 		for (const HE::EnumEntry& e : d.enumDef.entries)
-			entries.push_back(json{ { "name", e.name }, { "value", e.value } });
+		{
+			json je{ { "name", e.name }, { "value", e.value } };
+			if (!e.formerNames.empty()) je["formerNames"] = e.formerNames;
+			entries.push_back(std::move(je));
+		}
 		j["entries"] = std::move(entries);
 	}
 	else
@@ -562,7 +567,10 @@ void addFieldSet(McpToolRegistry& registry, ContentManager& content,
 		"position), a new one is appended unless 'index' says otherwise. Everything not "
 		"named in the call keeps its current value on an update, so changing only a "
 		"default does not silently reset the type. A field that would make the struct "
-		"contain itself is refused.";
+		"contain itself is refused. To RENAME a field, pass its current name as "
+		"'renameFrom' and the new one as 'name': the old name is kept as an alias, so "
+		"savegames and graphs written under it still load into the field (removing "
+		"and re-adding it would lose them).";
 	t.inputSchema = objectSchema(json{
 		{ "path", stringProp("Content-relative path of the Struct or SaveGame Template, "
 		                     "e.g. 'Types/Loadout.hasset'.") },
@@ -586,6 +594,9 @@ void addFieldSet(McpToolRegistry& registry, ContentManager& content,
 		                     "their own definition." } } },
 		{ "index", numberProp("Where to put a NEW field (0 = first). Omit to append; "
 		                      "ignored when the field already exists.") },
+		{ "renameFrom", stringProp("Rename: the field's CURRENT name. It becomes 'name' "
+		                           "and keeps its position, type and default; the old "
+		                           "name is remembered as an alias.") },
 	}, { "path", "name" });
 	t.mutates = true;
 	t.handler = [cm, h](const json& args) -> ToolResult {
@@ -600,12 +611,29 @@ void addFieldSet(McpToolRegistry& registry, ContentManager& content,
 				"dropped by the loader without a word.");
 
 		auto& fields = d.structDef.fields;
-		const auto at = std::find_if(fields.begin(), fields.end(),
-		                             [&name](const HE::StructField& f) { return f.name == name; });
+		auto byName = [&fields](const std::string& n) {
+			return std::find_if(fields.begin(), fields.end(),
+			                    [&n](const HE::StructField& f) { return f.name == n; });
+		};
+		const std::string renameFrom = strArg(args, "renameFrom");
+		const bool renaming = !renameFrom.empty() && renameFrom != name;
+		if (renaming)
+		{
+			if (byName(renameFrom) == fields.end())
+				return ToolResult::fail("invalid_payload",
+					"There is no field '" + renameFrom + "' to rename. type_info lists "
+					"the fields as they are now.");
+			if (byName(name) != fields.end())
+				return ToolResult::fail("invalid_payload",
+					"'" + name + "' is already a field of this definition — two fields "
+					"of one name would leave every save and graph guessing which is meant.");
+		}
+		const auto at = byName(renaming ? renameFrom : name);
 		const bool existing = at != fields.end();
 		// Updated in place: everything the call does not mention keeps its value,
 		// so setting a default cannot reset a type and vice versa.
 		HE::StructField f = existing ? *at : HE::StructField{};
+		if (renaming) HE::noteRename(f.formerNames, renameFrom, name);
 		f.name = name;
 
 		const std::string typeArg = strArg(args, "type");
@@ -732,6 +760,7 @@ void addFieldSet(McpToolRegistry& registry, ContentManager& content,
 			{ "created",    !existing },
 			{ "fieldCount", static_cast<int>(fields.size()) },
 		};
+		if (renaming) out["renamedFrom"] = renameFrom;
 		const auto now = std::find_if(fields.begin(), fields.end(),
 		                              [&name](const HE::StructField& x) { return x.name == name; });
 		if (now != fields.end())
@@ -800,13 +829,18 @@ void addEnumSet(McpToolRegistry& registry, ContentManager& content,
 		"by NAME, which is what everything else refers to an entry by — a saved value "
 		"that no longer matches an entry falls back to the first one, so renumbering an "
 		"existing entry moves data. Omit 'value' for the next free number, which is "
-		"what the editor's own '+ Add Entry' picks.";
+		"what the editor's own '+ Add Entry' picks. To RENAME an entry, pass its "
+		"current name as 'renameFrom' and the new one as 'name': the old name is kept "
+		"as an alias, so graphs and defaults that spell it still find the entry.";
 	t.inputSchema = objectSchema(json{
 		{ "path",  stringProp("Content-relative path of the Enum asset, e.g. "
 		                      "'Types/Rarity.hasset'.") },
 		{ "name",  stringProp("Entry name. An existing one is updated, a new one added.") },
 		{ "value", numberProp("The whole number behind the name. Omit for the next free "
 		                      "one (highest + 1).") },
+		{ "renameFrom", stringProp("Rename: the entry's CURRENT name. It becomes 'name' "
+		                           "and keeps its value unless 'value' says otherwise; "
+		                           "the old name is remembered as an alias.") },
 	}, { "path", "name" });
 	t.mutates = true;
 	t.handler = [cm, h](const json& args) -> ToolResult {
@@ -824,9 +858,30 @@ void addEnumSet(McpToolRegistry& registry, ContentManager& content,
 				"would arrive as 2 with nothing to say so.");
 
 		auto& entries = d.enumDef.entries;
-		const auto at = std::find_if(entries.begin(), entries.end(),
-		                             [&name](const HE::EnumEntry& e) { return e.name == name; });
+		auto byName = [&entries](const std::string& n) {
+			return std::find_if(entries.begin(), entries.end(),
+			                    [&n](const HE::EnumEntry& e) { return e.name == n; });
+		};
+		const std::string renameFrom = strArg(args, "renameFrom");
+		const bool renaming = !renameFrom.empty() && renameFrom != name;
+		if (renaming)
+		{
+			if (byName(renameFrom) == entries.end())
+				return ToolResult::fail("invalid_payload",
+					"There is no entry '" + renameFrom + "' to rename. type_info lists "
+					"the entries as they are now.");
+			if (byName(name) != entries.end())
+				return ToolResult::fail("invalid_payload",
+					"'" + name + "' is already an entry of this enum — two entries of one "
+					"name make the generated constants collide.");
+		}
+		const auto at = byName(renaming ? renameFrom : name);
 		const bool existing = at != entries.end();
+		if (renaming)
+		{
+			HE::noteRename(at->formerNames, renameFrom, name);
+			at->name = name;
+		}
 
 		int value;
 		if (hasArg(args, "value")) value = intArg(args, "value", 0);
@@ -842,14 +897,16 @@ void addEnumSet(McpToolRegistry& registry, ContentManager& content,
 		// is not: findEntry takes the first and the generated constants collide.
 		// The name is the address here, so a duplicate cannot arise from an update.
 		if (existing) at->value = value;
-		else          entries.push_back(HE::EnumEntry{ name, value });
+		else          entries.push_back(HE::EnumEntry{ name, value, {} });
 
-		return writeDef(*cm, *h, d, json{
+		json out{
 			{ "name",       name },
 			{ "value",      value },
 			{ "created",    !existing },
 			{ "entryCount", static_cast<int>(entries.size()) },
-		});
+		};
+		if (renaming) out["renamedFrom"] = renameFrom;
+		return writeDef(*cm, *h, d, std::move(out));
 	};
 	registry.add(std::move(t));
 }
