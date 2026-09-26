@@ -573,6 +573,112 @@ Bewusst **nicht** in Schritt 5:
 - Der Python-Weg ist nicht eigens getestet: Er baut seine Tabelle aus derselben
   `isScriptGroup`-Liste wie Lua, und der Lua-Fall geht ihn von Anfang bis Ende.
 
+### Stand nach Schritt 6 (Editor-Tab „Cinematic“)
+
+Umgesetzt:
+
+- **Streifen** `CinematicTimeline.{h,cpp}` (ohne `AppContext`): oben die Camera-Cuts-Zeile,
+  dann pro Bindung eine einklappbare Gruppe mit ihren Spuren, zuletzt „Unbound“ (Spuren ohne
+  Akteur, Spuren, deren Slot keine Bindung mehr hat, und eine zweite Schnittspur, die zur
+  Laufzeit tot ist, damit man sie löschen kann). Vier Zeilenarten: Keys (Rauten; `Visible` als
+  Stufe, hell, wo der Akteur gezeigt wird), Sektionen (Balken, Körper verschieben, Kanten
+  trimmen, Ende bleibt am Sequenzende), Marken (Schnitte mit Blend-Rampe, Events mit
+  Zustandsdauer, Töne), Gruppenköpfe (fehlender Akteur rot, „(missing)“). Scrub am Lineal,
+  Doppelklick fügt Key, Event oder Schnitt ein, Delete, Rechtsklick-Menüs, Mausrad-Zoom.
+  Das Zeilenmodell (`buildRows`) ist reine Daten, damit Tests fragen können, welche Zeile wo
+  steht.
+- **Editierregeln** im selben Header, ohne ImGui: ein Slot wird einmal vergeben (höchster + 1)
+  und nie umnummeriert oder wiederverwendet; `removeBinding` nimmt die Spuren des Akteurs und
+  alle Schnitte auf ihn mit (ein Schnitt auf eine verschwundene Kamera gäbe den Blick an einer
+  Stelle zurück, die niemand gewählt hat); alle Listen bleiben nach Zeit sortiert, ein neues
+  Element bei Gleichstand hinter die vorhandenen (bei der Laufzeit gewinnt der später
+  gelistete); genau eine Schnittspur, vorne; höchstens eine Property-Spur pro Akteur und Ziel,
+  ihr erster Key hält den **aktuellen** Wert des Akteurs; die Länge nie unter
+  `lastContentTime` (Key, Schnitt, Sektionsende, Event-Ende, Tonstart). Property-Keys laufen
+  über `Sequencer::insertKey/moveKey/removeKey`, eine Regel für „Key“, zwei Streifen.
+- **Panel** `CinematicPanel.{h,cpp}`: Transport (Play/Pause, Stop, Loop, Space), Länge, Zoom,
+  „Add Track“ passend zum Fokus (Property-Ziele, Skelett, Events/Ton am Akteur; Camera Cuts,
+  Events, Ton ohne Akteur), „Add at Playhead“, Akteurzeile (klicken wählt das Entity in der
+  Szene, „Bind Selected“ für alle ausgewählten noch nicht gebundenen, „Rebind to Selected“,
+  „Remove Binding“), Readout pro Element (Zeit; Key-Wert bzw. Schalter „Shown“; Kamera per
+  Auswahl samt „(gameplay camera)“, Blend-In, Kurve; Eventname und Dauer; Ton, Lautstärke,
+  Tonhöhe; Clip, Ende, Clip-Offset, Rate, Loop). Eigenes Undo wie der Sequencer, Snapshots als
+  `sequenceToJson` (Vergleich per String, Zurückholen über den Loader). Speichern,
+  Dirty-Vertrag, Neu-Laden, Schließen in `EditorUI` eingetragen. Clips und Töne, die die
+  Sequenz nennt, lädt der Tab per `ensureResident` nach (vor dem Holen der Asset-Zeiger des
+  Frames, weil ein Laden sie verschiebt; ein fehlgeschlagenes nur einmal).
+- **Anlegen**: „Sequence“ im Anlegen-Menü des Content Browsers (Animation), Doppelklick und
+  Tab-Dispatch öffnen den Cinematic-Tab, `creatableTypes` enthält jetzt `Sequence`, also bietet
+  auch `asset_create` im Live-Editor sie an (die in Schritt 2 offengelassene Stelle).
+- **Hilfe**: Eintrag für jedes Bedienelement (`Cinematic/…`, `cinematic.…`), „New
+  Asset/Sequence“, Handbuchbereich „Animation Editors / Cinematic“. Audit 1007/1007, die beiden
+  neuen Dateien stehen in der Audit-Liste.
+- Das Lineal des alten Streifens ist als `Sequencer::drawRuler` herausgezogen und wird von
+  beiden benutzt.
+
+**Abweichungen von §3.6, mit Grund:**
+
+1. **Eigener Streifen statt verallgemeinertem.** `SequencerTimeline::draw` ist auf einen Clip
+   mit skalaren Kanälen und eine Kurvenansicht zugeschnitten; ihn auf Gruppen und Zeilenarten
+   umzubauen hätte den Clip-Editor und seine 14 Testfälle mit angefasst. Geteilt sind die
+   Teile, die gleich sein müssen: Key-Regeln, Lineal, Zeitachse (`UITimelineView`),
+   Wertformat. Der alte Sequencer ist unverändert (14/14).
+2. **Vorschau als Klammer in einem Aufruf statt Sitzung mit Hooks**
+   (`CinematicPreview.{h,cpp}`). Befund: Ein Asset-Tab **verdeckt den Szenen-Viewport
+   vollständig** (`EditorUI`, `sceneTabActive`), eine Vorschau in der Edit-Welt wäre also gar
+   nicht zu sehen gewesen, solange der Tab vorne ist. Der Tab rendert deshalb sein eigenes Bild
+   (`RenderWorldPreview`, Slot 0 der Asset-Tabs), und weil dieser Aufruf synchron ist und die
+   Welt darin extrahiert, schreibt `Bracket::apply` die Sequenz zur Zeit t in die Welt, das Bild
+   wird gerendert, und `Bracket::restore` stellt alles zurück, **bevor `render()`
+   zurückkehrt**. Gesichert werden Transform (danach `propagateTransforms`, sonst behielten die
+   Weltmatrizen der Akteure und ihrer Kinder die Vorschau-Pose), Kamera, `visible` jeder
+   Darstellungskomponente, Knochenmatrizen, und die Werte jedes **Materials**, das eine Spur
+   berührt, einmal pro Material-Asset (es ist geteilt), mit `dirty` an jeder
+   `MaterialComponent`, die es benutzt. Speichern, PIE, Undo-Snapshots, Autosave und
+   Collab-Abgleich sehen so nie einen Cutscene-Frame; die Hooks aus §3.6 (Stopp,
+   Tab-Wechsel, Schließen, Speichern, Undo) werden überflüssig. Während PIE zeigt der Tab
+   kein Bild (dann gehört die Welt dem Spiel).
+3. **„Durch die Kamera schauen“ teilweise vorgezogen**, wie §5 es für diesen Fall empfiehlt:
+   Das Vorschaubild des Tabs schaut mit „Through Camera“ durch den aktiven Schnitt, Blends
+   eingeschlossen (dieselbe `mix`/`slerp`-Rechnung wie `SequenceSystem`, Quelle des ersten
+   Blends ist die `isMain`-Kamera der Szene); vor dem ersten Schnitt oder ausgeschaltet durch
+   die Editor-Kamera. Der **Schalter im Szenen-Viewport** selbst bleibt Schritt 7.
+
+Tests:
+
+- `tests/test_cinematic_timeline.cpp` (12 Fälle): Slots nie umnummeriert, `removeBinding` mit
+  Spuren und Schnitten, eine Schnittspur, Property-Spur pro Ziel, Sortierung und neue Indizes
+  nach dem Verschieben, Sektionskanten, Länge gegen den Inhalt, Zeilenmodell samt Falten und
+  „Unbound“, Kameravorgabe eines neuen Schnitts; der Streifen mit echten Mausereignissen
+  (Scrub, Schnitt ziehen als **eine** Undo-Einheit, Sektionsende trimmen, Körper verschieben
+  bis ans Ende, Doppelklick-Event, Delete, Doppelklick-Schnitt, Falten per Pfeil, Gruppe
+  wählen); die Klammer gegen eine echte Welt (Werte zur Zeit t, Blick durch den Schnitt mitten
+  im Blend, nach `restore` Transform, Weltmatrix des Kindes, geteiltes Material,
+  Sichtbarkeit, FOV, `isMain`, Knochen unverändert, Material-Dirty auch am Unbeteiligten;
+  zweites `apply` ohne `restore`, zerstörte Akteure). **Negativkontrolle:** ohne das
+  Propagieren und ohne das Material-Dirty in `restore` werden genau die zwei zugehörigen
+  Prüfungen rot.
+- `tests/test_ui_shot.cpp`, „ui shot: cinematic strip with every kind of row“ (angesehen:
+  alle Zeilenarten, Blend-Rampe, Visible-Stufe, fehlender Akteur rot; geprüft wird die
+  Balkenfarbe an ihren Sekunden und die rote Schrift).
+
+Bewusst **nicht** in Schritt 6:
+
+- **Kein Lauf im echten Editor-Fenster.** Gebaut ist der Editor, und der Streifen ist per
+  Software-Rasterizer geschossen; das ganze Panel samt Vorschaubild braucht einen echten
+  `AppContext` und eine GPU, und der Headless-Dump öffnet keine Asset-Tabs. Ob das Bild auf
+  Metal/GL richtig herum steht und die Klammer auf echter Hardware nichts übersieht (etwa ein
+  Backend, das Materialwerte erst nach dem Aufruf liest), ist ungeprüft.
+- **Die alte Sequencer-Vorschau** schreibt weiter dauerhaft in Szene und geteiltes Material
+  (§2.6). Die Klammer ließe sich dort genauso einsetzen; das ist ein eigener kleiner Schritt.
+- MCP-Werkzeuge für den Inhalt einer Sequenz und `isDirtyByContentPath`/`reloadByContentPath`
+  in den MCP-Haken: Schritt 7 (die Funktionen gibt es schon).
+- Einrasten auf `frameRate`, Kopieren/Einfügen von Keys, Mehrfachauswahl, eine Kurvenansicht
+  für Property-Spuren, überlappende Sektionen sichtbar trennen, Tonlänge im Streifen (die
+  Länge eines Tons kennt der heutige Abspielweg nicht, §3.3).
+- Skelett-Vorschau ohne Layer und IK: Die Klammer posiert nur den Clip
+  (`AnimationPreview::evaluateClipPose`); die Laufzeit legt Layer und IK darauf.
+
 ---
 
 ## 6. Bewusst außen vor (v1)
