@@ -105,16 +105,26 @@ struct AppContext;
 // nothing happens); ending a play session calls stopAll(), which may cut a chime
 // short; the project's master volume/mute applies to it.
 //
-// Progress display (step 3 of the topic, not built yet): in the same centred
-// label while idle, e.g. "Ready · 3 builds today · day 5 in a row" — the
-// idleText argument of drawFooterStatus. NOT a new widget in the footer's
-// right-anchored group — that chain is hand-maintained and every insertion
-// edits every block to its left (see the comment there in EditorUI.cpp).
+// Progress display (step 3): in the same centred label while idle —
+// "Ready · 3 builds today · 5 days in a row". drawFooterStatus composes it from
+// its idleText, so EditorUI still passes plain "Ready" and the switches are
+// read in this file only. NOT a new widget in the footer's right-anchored
+// group — that chain is hand-maintained and every insertion edits every block
+// to its left (see the comment there in EditorUI.cpp). While a moment's line is
+// showing, the counters wait; the line fades back into the composed idle text.
+// If the composed text would take more than a third of the footer's width
+// (a narrow window), the label falls back to plain "Ready" rather than run
+// into Undo/Redo or the right-hand group.
 //
 // ── The switches (EditorConfig, Preferences ▸ Feedback) ──────────────────────
-//   bool RewardsEnabled = true;    master: off = no feedback, no sound (and, once
-//                                  step 3 lands, no progress and no counting)
-//   bool RewardsSound   = false;   the chime (only with the master on)
+//   bool RewardsEnabled      = true;   master: off = no feedback, no sound, no
+//                                      progress shown and nothing counted
+//   bool RewardsSound        = false;  the chime (only with the master on)
+//   bool RewardsShowProgress = true;   the footer counters (only with the
+//                                      master on). Off HIDES them; counting goes
+//                                      on while the master is on, so turning the
+//                                      display back on does not find a streak
+//                                      that was broken by hiding it.
 // Wired in the six places every EditorConfig setting is, exactly like
 // AutosaveEnabled: EditorConfig.h (field) · EditorApplication.cpp load
 // (getCustomConfigBool) · EditorApplication.cpp save (setCustomConfigEntry)
@@ -123,16 +133,35 @@ struct AppContext;
 // Defaults". The catalog row's id argument must equal the panel's row() id, or
 // pinning the setting to Quick Settings breaks. Each label also has an entry in
 // EditorHelp.cpp ("Preferences/Feedback/…").
-// Step 3 adds RewardsShowProgress (on) the same way.
 //
-// ── The counters are NOT settings (step 3) ───────────────────────────────────
+// ── The counters are NOT settings ────────────────────────────────────────────
 // "Builds today", "last active day" and "days in a row" are state, not
 // preferences: they go into GlobalState custom config keys (per user, across
 // projects), NOT into EditorConfig — anything in EditorConfig is in the settings
-// catalog and therefore writable through MCP settings_set. Suggested keys:
+// catalog and therefore writable through MCP settings_set. The keys:
 //   RewardsDay (YYYY-MM-DD, local time), RewardsBuildsToday, RewardsStreakDays.
-// A day counts as "used" on the first moment of that day, not on editor start,
-// so leaving the editor open overnight does not extend a streak.
+// Loaded once, on first use; written through (writeConfig) only when a moment
+// changed them — the first moment of a day and each build, a handful of writes
+// a session. No globalState (tests): counted in memory, never written.
+//
+// Rules (recordUse / progressText, tested with string dates):
+//   • A day counts as "used" on its first MOMENT, not on editor start, so
+//     leaving the editor open overnight does not extend a streak. Any of the
+//     three moments counts; they are all counted before fire()'s once-per-frame
+//     fold, so a build that lands in the same frame as a save is not lost.
+//   • "Builds" are successful builds — the BuildSucceeded moments, one per run.
+//   • First moment of a new day: the day before the stored one → streak + 1;
+//     any other gap → streak 1; builds today back to 0.
+//   • The clock behind the stored day (set back by hand, a flight west): the
+//     tally is left alone, nothing counted — a streak is not worth a guess.
+//   • A stored day that does not parse (hand-edited file): treated as no
+//     previous day.
+//   • Display: builds today are 0 unless the stored day IS today. The streak
+//     still shows when the stored day was yesterday — it is not broken until
+//     today ends without a moment — and is gone after that. "N days in a row"
+//     only from 2 on; builds today always, once anything was ever counted
+//     ("0 builds today" is the honest morning state). Never counted: nothing
+//     shown, the label is plain "Ready".
 namespace HE::Ed::Rewards
 {
 	enum class Moment { Saved, BuildSucceeded, AssetsImported };
@@ -148,8 +177,9 @@ namespace HE::Ed::Rewards
 	// so this file does not link against it (he_tests builds it without).
 	void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool success);
 
-	// The footer's centred status label: idleText, or the moment's line while
-	// one is showing. Positions itself (SameLine to the window's centre).
+	// The footer's centred status label: idleText with the progress counters
+	// after it, or the moment's line while one is showing. Positions itself
+	// (SameLine to the window's centre).
 	void drawFooterStatus(AppContext& ctx, const char* idleText);
 
 	// ── The core, ImGui-free — the tests drive it with their own clock ───────
@@ -191,6 +221,28 @@ namespace HE::Ed::Rewards
 		int                m_lastFrame = -1;
 		unsigned long long m_lastRun   = 0;
 	};
+
+	// ── Progress: the persistent counters (rules above) ──────────────────────
+
+	struct Tally
+	{
+		std::string day;              // YYYY-MM-DD of the last counted moment, "" = never
+		int         buildsToday = 0;  // successful builds on `day`
+		int         streakDays  = 0;  // consecutive days ending with `day`
+	};
+
+	// "2026-03-01" → "2026-02-28"; "" if ymd is not a valid YYYY-MM-DD.
+	std::string dayBefore(const std::string& ymd);
+
+	// A moment on `today` (build = it was a BuildSucceeded). true = the tally
+	// changed and wants writing.
+	bool recordUse(Tally& t, const std::string& today, bool build);
+
+	// "3 builds today · 5 days in a row", or "" when there is nothing to show.
+	std::string progressText(const Tally& t, const std::string& today);
+
+	// Today's local date as YYYY-MM-DD.
+	std::string localDay();
 
 	// The chime: mono int16 PCM, two short decaying sine notes a fifth apart,
 	// well under half a second. Built once and cached by fire().

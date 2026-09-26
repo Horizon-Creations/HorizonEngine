@@ -3164,7 +3164,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
 		// Middle — status
 		// Reward feedback (EditorRewards.h) lives here: the moment's line fading
-		// back to "Ready" (the idle progress counters join it in step 3). The
+		// back to "Ready", and the progress counters beside "Ready". The
 		// BuildSucceeded edge detector runs at the top of render(), every frame.
 		HE::Ed::Rewards::drawFooterStatus(ctx, "Ready");
 
