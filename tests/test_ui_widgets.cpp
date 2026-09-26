@@ -3263,7 +3263,9 @@ TEST_CASE("UIElement: the texture slot round-trips and reaches the quad")
     REQUIRE(out.size() == 1);
     CHECK(out[0].textureAssetId == HE::UUID{ 7, 9 });
     CHECK(out[0].uvMax.x == doctest::Approx(1.0f));   // full source rect
-    CHECK(out[0].uvMax.y == doctest::Approx(1.0f));
+    // v runs the other way on a textured quad: the asset stores its rows
+    // bottom-up, so the quad's bottom edge reads v = 0 (test_texture_orientation).
+    CHECK(out[0].uvMax.y == doctest::Approx(0.0f));
     // A clone carries both (the runtime renders from a deep copy).
     CHECK(e.clone()->textureAssetId == HE::UUID{ 7, 9 });
     CHECK(e.clone()->texture == "Textures/Other.hasset");
@@ -9109,14 +9111,15 @@ TEST_CASE("UIImage 9-slice: nine pieces, corners at their source size")
     REQUIRE(out.size() == 9);
 
     // Top-left corner: 16x16 of destination, and the top-left quarter of the
-    // source in UVs.
+    // picture in UVs — which, rows being stored bottom-up, is v 1 → 0.75.
     const UIRenderObject& tl = out[0];
     CHECK(tl.position.x == doctest::Approx(0.0f));
     CHECK(tl.size.x == doctest::Approx(16.0f));
     CHECK(tl.size.y == doctest::Approx(16.0f));
     CHECK(tl.uvMin.x == doctest::Approx(0.0f));
     CHECK(tl.uvMax.x == doctest::Approx(0.25f));
-    CHECK(tl.uvMax.y == doctest::Approx(0.25f));
+    CHECK(tl.uvMin.y == doctest::Approx(1.0f));
+    CHECK(tl.uvMax.y == doctest::Approx(0.75f));
 
     // The top edge between the corners stretches on X only.
     const UIRenderObject& top = out[1];

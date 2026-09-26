@@ -165,7 +165,9 @@ namespace AssetThumbnailCache
 		uint64_t reserved;      // 0
 	};
 	static_assert(sizeof(FileHeader) == 32, "on-disk header must stay 32 bytes");
-	constexpr uint32_t kVersion = 1;
+	// 2: texture tiles read the stored rows bottom-up (Thema 92); version-1 files
+	// hold them upside down. Costs one re-render of every tile, meshes included.
+	constexpr uint32_t kVersion = 2;
 
 	// Write/read one cache file. `pixels` must hold size*size*4 bytes. readFile
 	// fails (returns false) when the file is missing, malformed, written by

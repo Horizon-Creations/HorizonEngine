@@ -1215,6 +1215,20 @@ namespace
         ro.cornerRadius = glm::vec4(cornerRadius);
         ro.uvMin    = uv0;
         ro.uvMax    = uv1;
+        // Callers give uv in the PICTURE's terms: (0,0) is its top-left, so
+        // "Slice Top" means the top of the picture. A texture asset stores its
+        // rows bottom-up though (TextureImporter flips on load and the mesh
+        // importers turn their V to match — load-bearing, not to be touched
+        // there), so texel row 0, v = 0, is the picture's BOTTOM row on every
+        // backend. Turned around here, the one place every textured UI quad
+        // passes through, it reaches Metal, GL and the software rasteriser
+        // alike (Thema 92: imported pictures were drawn upside down). A
+        // material quad reads its own fixed 0..1 and never these UVs.
+        if (tex != HE::UUID{})
+        {
+            ro.uvMin.y = 1.0f - uv0.y;
+            ro.uvMax.y = 1.0f - uv1.y;
+        }
         out.push_back(std::move(ro));
     }
     // Corner radius that matches the editor preview: a small rounding clamped to

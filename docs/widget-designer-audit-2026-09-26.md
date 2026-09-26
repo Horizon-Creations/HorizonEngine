@@ -227,3 +227,34 @@ Was sich geändert hat:
 
 Offen und bewusst nicht gemacht: Details-Spalte in der Breite ziehbar (Splitter). Label-links
 (Unreal-Stil, dichter) wäre die Alternative zur Label-oben-Regel, falls die Spalte zu lang wirkt.
+
+## Schritt 2: Fix der Orientierung
+
+Behoben ist die reproduzierte Vertikal-Spiegelung (oben/unten). Links/rechts war nie falsch, der
+Import-Test pinnt die Spalten weiterhin.
+
+- **Importer unverändert.** Zeilen bleiben bottom-up gespeichert, Meshes sind nicht betroffen.
+- **UI-Quads:** Der `quad`-Helfer in `src/HE_Core/src/UIWidget/UIElement.cpp` dreht v für jedes
+  Quad mit Textur um (`v → 1 − v`). Aufrufer geben uv weiter in Bild-Begriffen an, (0,0) ist die
+  linke obere Ecke des Bildes, „Slice Top" also die Oberkante des Bildes. Das gilt für Image
+  (flach und 9-Slice), Panel, Button und alle anderen Elemente mit Textur-Slot, auf Metal, GL und
+  im Software-Rasterizer zugleich. Glyphen haben keine Textur-Id und Material-Quads lesen die
+  UVs des Quads nicht (fest 0..1), beide bleiben unberührt. Flip H/V aus Schritt 3 spiegelt relativ
+  zum ungeflippten Bild und passt ohne Änderung.
+- **Kacheln:** `makeTextureThumbnail` (`src/HE_Editor/AssetThumbnailCache.cpp`) liest Zeile
+  `h − 1 − sy`. Damit stehen Content-Browser-Kacheln **und** die Designer-Vorschau (die aus der
+  Kachel zeichnet) richtig herum. `.hthumb`-Version 1 → 2: alte Kacheln werden einmal neu erzeugt,
+  Mesh- und Material-Kacheln eingeschlossen.
+- Der Textur-Viewer aus Schritt 4 las schon richtig (`toDisplayRgba`, Zeile `h − 1 − y`).
+
+Tests (`tests/test_texture_orientation.cpp`, ein Bild mit vier farbigen Quadranten, importiert
+über `TextureImporter::decodeFromMemory`): uv-Werte des Quads, Ende-zu-Ende über den
+Software-Rasterizer (rot oben links), dazu Flip V/H, 9-Slice mit ungleichen Rändern
+(Top 16, Bottom 8), Panel mit Textur und die Kachel aus dem `AssetThumbnailCache`. Mit
+abgeschaltetem Fix sind alle diese Fälle rot (Negativkontrolle), mit Fix grün. Zwei ältere
+Erwartungen in `tests/test_ui_widgets.cpp` hatten die alte v-Richtung eingebacken und sind
+umgedreht.
+
+Nicht Teil des Fixes: UI-Domain-Materialien, die im Graph eine Textur über `vUV` samplen, lesen
+weiter ohne Umkehr und stehen damit vermutlich ebenfalls auf dem Kopf (nicht geprüft). D3D11,
+D3D12 und Vulkan zeichnen texturierte UI-Quads weiterhin gar nicht.
