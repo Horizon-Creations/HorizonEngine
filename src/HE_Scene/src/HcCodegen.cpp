@@ -3998,6 +3998,8 @@ namespace {
 // Quote one argument for the shell command line (v1: std::system on a worker
 // thread). The string overload exists for arguments that are not paths but
 // CONTAIN one — a "-DNAME=<path>" cmake define has to survive as a single word.
+// On Windows a line built from these only reaches its program intact through
+// cmdLine() below — cmd.exe /c would otherwise eat its first and last quote.
 std::string shq(const std::string& s)
 {
 #if defined(_WIN32)
@@ -4009,6 +4011,25 @@ std::string shq(const std::string& s)
 #endif
 }
 std::string shq(const std::filesystem::path& p) { return shq(p.string()); }
+
+// The string std::system/_popen hand to the shell for `line`. POSIX: unchanged.
+// Windows: both run `cmd.exe /c <string>`, and when that string starts with a quote
+// and holds more than two, cmd strips the FIRST and the LAST quote of it. A bundled
+// cmake is a quoted path, so `"…\cmake.exe" -S "…" -B "…" 2>&1` reached cmd cut
+// apart ("The filename, directory name, or volume label syntax is incorrect", or
+// "'C:\Program' is not recognized…") — the probe then reported no C++ compiler on
+// a machine with Visual Studio installed (Thema 96). One extra pair around the whole
+// line is what cmd strips instead. Every line passed here carries a redirection,
+// so cmd's keep-the-quotes special case (exactly two, nothing special between
+// them) can never apply and the stripping is unconditional.
+std::string cmdLine(const std::string& line)
+{
+#if defined(_WIN32)
+    return "\"" + line + "\"";
+#else
+    return line;
+#endif
+}
 
 // macOS/Linux apps launched from Finder/Launchpad (a packaged .app, Spotlight, the
 // Dock) inherit a minimal PATH — typically "/usr/bin:/bin:/usr/sbin:/sbin" — that
@@ -4050,11 +4071,13 @@ void ensureToolPathAugmented()
 
 namespace {
 std::filesystem::path g_bundledCmakeDir; // set by the editor to <app>/cmake (SDL_GetBasePath)
+std::string g_resolvedCmake;             // resolveCmake()'s cache; setBundledCmakeDir drops it
+bool        g_cmakeResolved = false;
 
 bool cmakeAnswers(const std::string& cmd)
 {
 #if defined(_WIN32)
-    return std::system((cmd + " --version >NUL 2>&1").c_str()) == 0;
+    return std::system(cmdLine(cmd + " --version >NUL 2>&1").c_str()) == 0;
 #else
     return std::system((cmd + " --version >/dev/null 2>&1").c_str()) == 0;
 #endif
@@ -4064,13 +4087,14 @@ bool cmakeAnswers(const std::string& cmd)
 // (<app>/cmake/bin/cmake[.exe]) so a user only has to install a C++ compiler, then
 // falling back to a system cmake on PATH. Returns a shell-ready token (a quoted path,
 // or the bare word "cmake"), or empty when neither answers --version — the caller then
-// surfaces the Toolchain-Missing dialog. Resolved once and cached.
+// surfaces the Toolchain-Missing dialog. Resolved once and cached until the bundle
+// directory changes.
 const std::string& resolveCmake()
 {
-    static std::string s_cmake;
-    static bool s_done = false;
-    if (s_done) return s_cmake;
-    s_done = true;
+    std::string& s_cmake = g_resolvedCmake;
+    if (g_cmakeResolved) return s_cmake;
+    g_cmakeResolved = true;
+    s_cmake.clear();
     ensureToolPathAugmented(); // make a Homebrew cmake on /opt/homebrew visible (see note above)
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -4092,7 +4116,14 @@ const std::string& resolveCmake()
 }
 } // namespace
 
-void setBundledCmakeDir(const std::filesystem::path& dir) { g_bundledCmakeDir = dir; }
+void setBundledCmakeDir(const std::filesystem::path& dir)
+{
+    // Only a CHANGED directory drops the cache: the editor re-sets the same one on
+    // every Recheck, possibly while an export worker is inside resolveCmake().
+    if (dir == g_bundledCmakeDir) return;
+    g_bundledCmakeDir = dir;
+    g_cmakeResolved   = false;
+}
 
 bool toolchainAvailable()
 {
@@ -4106,7 +4137,7 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
                  std::string& captured)
 {
 #if defined(_WIN32)
-    FILE* pipe = _popen((cmd + " 2>&1").c_str(), "r");
+    FILE* pipe = _popen(cmdLine(cmd + " 2>&1").c_str(), "r");
 #else
     FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");
 #endif
