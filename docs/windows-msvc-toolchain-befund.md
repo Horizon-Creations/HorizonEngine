@@ -172,6 +172,55 @@ Nebenbefund: Bei drei Instanzen nahm cmakes Default-Generator „Visual Studio 1
 die `cl.exe` aus **BuildTools 18.9**, nicht aus Community 18.10 (gleiches Toolset
 14.51.36231). Wichtig nur, falls später „neueste Instanz gewinnt“ explizit gebaut wird.
 
+## 4b. Live-Check im echten Editor (Schritt 3, NN-WS03, 2026-09-27)
+
+Editor aus main `336d09f9` gebaut wie das CI-Paket: Release, Ninja, `-DHE_BUNDLE_CMAKE=ON`
+(gebündelt: Kitware-cmake 4.4.0), eigener `DEPLOY_DIR`. Den Build selbst treibt vcvars, den
+Editor danach nicht. Gestartet aus einer PowerShell mit leerem `VCINSTALLDIR`/`INCLUDE`/`LIB`/
+`CMAKE_GENERATOR` und einem PATH, aus dem alle `CMake`- und `Microsoft Visual Studio`-Einträge
+entfernt waren. `where cl|cmake|link` fand nichts, antworten konnte also **nur** das gebündelte
+cmake. Privates `APPDATA` (die config.json des Menschen blieb unberührt), `HE_MCP=1`. Der
+GameLogic-Build lief über `project_build`/`project_build_status`, also denselben Weg wie
+Build › Build and Reload Game Logic. Testprojekt: C++-Projekt unter `C:\hw96\HE Proj\Probe`
+(Leerzeichen), mit Scaffold-CMakeLists + Probe-Quelle aus `tests/test_gamelogic_build.cpp`.
+
+| Lauf | Editor-Pfad | Env | Toolchain-Dialog nach 15 s | GameLogic-Build |
+|---|---|---|---|---|
+| A | `C:\hw96\deploy\Editor` | sauber | keiner | ok, `GameLogic.dll` |
+| C | `C:\hw96\HE Test\Editor` (Leerzeichen) | sauber | keiner | ok, `GameLogic.dll` |
+| B (Negativkontrolle) | `C:\hw96\HE Test\Editor` | `CMAKE_GENERATOR=NMake Makefiles` | **„C++ Toolchain Not Found“**: „cmake 4.4.0 found.“, „No working C++ compiler was detected.“ | scheitert nach Sekunden mit cmakes eigener Meldung: `Running 'nmake' '-?' failed` / `CMAKE_CXX_COMPILER not set` |
+
+Belege aus `<Projekt>/Source/build/CMakeCache.txt` (Lauf C):
+`CMAKE_COMMAND:INTERNAL=C:/hw96/HE Test/Editor/cmake/bin/cmake.exe` (das gebündelte, gequotete
+cmake, Pfad mit Leerzeichen), `CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026`,
+`CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools`,
+Linker `…/18/BuildTools/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/link.exe`, Compiler-ID
+MSVC 19.51.36257.0. **Benutzt wird von den drei Instanzen BuildTools 2026 (18.9)**, wie in §4a.
+
+Lauf B zeigt, dass das Ausbleiben des Dialogs in A/C etwas bedeutet: Die Start-Probe ist nach
+15 s fertig, und ein fehlender Compiler öffnet den Dialog mit einem cmake-Fehler statt eines
+cmd-Syntaxfehlers. Nichts hängt. Code-seitig laufen unter Windows alle Aufrufe in HcCodegen durch
+`cmdLine()`: `cmakeAnswers` (`std::system`) und `runStreaming` (`_popen`), und darüber
+auch `commandExists("winget")` und der winget-Installer hinter „Install Automatically“.
+
+Was nicht direkt beobachtet wurde: Preferences › Tool Status selbst. Die Konsolensitzung war
+wenige Minuten vorher aktiv, und Mausklicks per PostMessage verwirft der Editor. Die Zeilen in
+Tool Status lesen aber denselben `m_toolchainProbe` wie der Dialog, und den belegen A/B/C.
+
+Verbleibende Lücken:
+
+- **H2/H3 bleiben offen.** Lauf B ist genau H2: Ein global gesetztes `CMAKE_GENERATOR`
+  (VS Code CMake Tools, vcpkg, CLion) oder ein alter Cache mit Ninja/NMake im Build-Ordner
+  meldet „kein Compiler“, obwohl VS installiert ist. Probe und buildDylib übergeben kein `-G`.
+  Die Abhilfe (vswhere → `-G "Visual Studio <N> <Jahr>"`) samt Test mit simulierter
+  vswhere-Ausgabe (mehrere/keine/nur BuildTools) ist nicht gebaut.
+- Nur eine Maschine: NN-WS03 hat alle drei Instanzen. Eine Maschine mit ausschließlich
+  BuildTools oder nur VS 2022 wurde nicht gesehen.
+- Nicht das CI-Zip selbst: lokal gebaut mit `HE_BUNDLE_CMAKE=ON`, aber ohne `HE_PORTABLE_BUILD`.
+  Ohne gestagtes `SDK/` im Deploy wurde `he_sdk_config.json` (Dev-Fallback) aus dem Build-Baum
+  neben die exe kopiert.
+- Export mit „Compile HorizonCode“ nicht gefahren; `buildDylib` ist dort derselbe Aufruf.
+
 ## 5. Offen für Schritt 2
 
 - Reproduktion auf Windows (Rezept oben) — entscheidet zwischen H1 und H2–H5.
