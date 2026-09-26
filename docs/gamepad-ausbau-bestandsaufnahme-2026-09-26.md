@@ -41,6 +41,8 @@ SDL-Version im Build: **3.2.14**. Vorhanden: `SDL_RumbleGamepad`, `SDL_RumbleGam
 **B2: „Union aller Mapping-Contexts" ist in Wahrheit Last-Writer-Wins mit nicht festgelegter Reihenfolge.**
 Der Kommentar in `PlayerHost.cpp` sagt „union of every mapping context". `InputMapping::mapAction/mapAxis/mapAxis2D` **ersetzen** aber die Bindings pro Aktionsname. Taucht eine Aktion in zwei Contexts auf, gewinnt der zuletzt angewendete, und die Reihenfolge kommt aus `ContentManager::discoverAssets`: zuerst `m_assetTypeIndex` (eine `unordered_map`), danach `recursive_directory_iterator`. Beides ist nicht festgelegt, das Ergebnis kann also je nach Plattform bzw. Dateisystem anders ausfallen. Für das Rebinding ist das wichtig, weil eine Override-Schicht genau diese Ersetzungs-Semantik nutzen will, aber auf einer **festen** Basis. Vorschlag: Contexts beim Laden nach Pfad sortieren und im selben Zug entscheiden, ob mehrere Contexts pro Aktion vereinigt (append) oder ersetzt werden. Vereinigen passt zum Kommentar und zur Erwartung der Autoren.
 
+*Gelöst in Schritt 3:* `PlayerHost::begin` wendet die Contexts nach Pfad sortiert an (`PlayerHost::mappingContexts()` nennt die Reihenfolge). `applyInputMappingContext` vereinigt standardmäßig (`HE::MappingMerge::Union` über `InputMapping::addAction/addAxis/addAxis2D`, doppelte Bindings zählen einmal). `MappingMerge::Replace` (die alten `map*`-Aufrufe) bleibt für die Override-Schicht aus Schritt 3 der Reihenfolge unten. Bei einem Formkonflikt (1D in einem Context, 2D im anderen) gewinnt der im Pfad spätere Context. Tests: `test_player_host.cpp` („mapping contexts are a union applied in path order"), `test_inputmapping.cpp` (Union/Replace, X und Y aus zwei Contexts, Formkonflikt).
+
 ## 3. Andockpunkte
 
 ### Rumble

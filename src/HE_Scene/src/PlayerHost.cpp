@@ -44,11 +44,27 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm,
 			                      HE::inputActionRunsWhilePaused(a->json) });
 		}
 
-	// Bindings: union of every mapping context in the project.
-	size_t bound = 0;
+	// Bindings: the union of every mapping context in the project. An action
+	// named in two contexts keeps the bindings of both (a duplicate counts once),
+	// rather than whichever context happened to be applied last — and "last"
+	// was never defined: discoverAssets hands back an unordered_map first and a
+	// directory walk after it. The contexts are applied sorted by path, so the
+	// order of the merged bindings (what a binding UI lists, and what a shape
+	// conflict between two contexts falls back to) is the same on every machine.
+	// Path and JSON are COPIED out before sorting: the getter's pointer is into
+	// the asset pool, which the next load may move.
+	std::vector<std::pair<std::string, std::string>> contexts;
 	for (const HE::UUID id : discoverAssets(cm, HE::AssetType::InputMappingContext))
 		if (const InputMappingContextAsset* m = cm.getInputMappingContext(id))
-			bound += HE::applyInputMappingContext(m_mapping, m->json);
+			contexts.emplace_back(m->path, m->json);
+	std::sort(contexts.begin(), contexts.end(),
+	          [](const auto& a, const auto& b) { return a.first < b.first; });
+	size_t bound = 0;
+	for (auto& [path, json] : contexts)
+	{
+		bound += HE::applyInputMappingContext(m_mapping, json);
+		m_contextPaths.push_back(std::move(path));
+	}
 
 	// Player classes: one instance per PlayerController asset. Characters are
 	// only COUNTED — see the "What is NOT spawned here" note in the header.
@@ -318,6 +334,7 @@ void PlayerHost::end()
 	m_characters.clear();
 	m_actions.clear();
 	m_mapping.clear();
+	m_contextPaths.clear();
 	m_runtime = nullptr;
 	m_scripts         = nullptr;
 	m_scriptInstances = nullptr;

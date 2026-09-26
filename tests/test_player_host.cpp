@@ -159,6 +159,119 @@ TEST_CASE("PlayerHost: a character registered twice is still one character")
 	HE::api::player::clear();
 }
 
+// ─── Several mapping contexts: a union, in path order ────────────────────────
+// Two contexts naming the same action used to be last-writer-wins, and "last"
+// was whatever ContentManager::discoverAssets handed back first — an
+// unordered_map, then a directory walk. Pinned here: the contexts are applied
+// sorted by path, the same action in both keeps BOTH bindings, a binding both
+// contexts carry counts once (a doubled MouseX row would double look speed),
+// and none of it depends on which asset happened to be saved first.
+namespace
+{
+	void writeMappingContext(ContentManager& cm, const char* path, const char* json)
+	{
+		InputMappingContextAsset mc;
+		mc.type = HE::AssetType::InputMappingContext;
+		mc.name = fs::path(path).stem().string();
+		mc.path = path;
+		mc.json = json;
+		REQUIRE(cm.saveAsset(mc));
+	}
+
+	void checkContextUnionInPathOrder(bool saveZFirst)
+	{
+		TempDir dir(saveZFirst ? "he_test_playerhost_ctx_z_first"
+		                       : "he_test_playerhost_ctx_a_first");
+		ContentManager cm(dir.path.string());
+
+		InputActionAsset jump;
+		jump.type = HE::AssetType::InputAction;
+		jump.name = "Jump";
+		jump.path = "Input/Jump.hasset";
+		jump.json = HE::makeInputActionJson("Button", false);
+		REQUIRE(cm.saveAsset(jump));
+		InputActionAsset look;
+		look.type = HE::AssetType::InputAction;
+		look.name = "Look";
+		look.path = "Input/Look.hasset";
+		look.json = HE::makeInputActionJson("Axis", false);
+		REQUIRE(cm.saveAsset(look));
+
+		// Each context has a binding the other lacks (K / J, H / L), so no
+		// single context on its own — which is all last-writer-wins keeps —
+		// can pass the counts below.
+		const char* aKeys = R"({"entries":[
+			{"action":"Input/Jump.hasset","keys":["Space","K"]},
+			{"action":"Input/Look.hasset","axes":[{"source":"MouseX","scale":1.0},
+			                                     {"positive":"H","scale":1.0}]}
+		]})";
+		const char* zMore = R"({"entries":[
+			{"action":"Input/Jump.hasset","keys":["J","Space"]},
+			{"action":"Input/Look.hasset","axes":[{"source":"MouseX","scale":1.0},
+			                                     {"positive":"L","scale":1.0}]}
+		]})";
+		if (saveZFirst)
+		{
+			writeMappingContext(cm, "Input/Z_More.hasset", zMore);
+			writeMappingContext(cm, "Input/A_Keys.hasset", aKeys);
+		}
+		else
+		{
+			writeMappingContext(cm, "Input/A_Keys.hasset", aKeys);
+			writeMappingContext(cm, "Input/Z_More.hasset", zMore);
+		}
+
+		Runtime rt;
+		PlayerHost host;
+		host.begin(rt, cm);
+
+		const std::vector<std::string> order{ "Input/A_Keys.hasset", "Input/Z_More.hasset" };
+		CHECK(host.mappingContexts() == order);
+
+		// Jump: A's Space and K, then Z's J; Z's Space is the same binding again.
+		const std::vector<ActionBinding>* jb = host.mapping().actionBindings("Jump");
+		REQUIRE(jb != nullptr);
+		REQUIRE(jb->size() == 3);
+		CHECK((*jb)[0].key == SDL_SCANCODE_SPACE);
+		CHECK((*jb)[1].key == SDL_SCANCODE_K);
+		CHECK((*jb)[2].key == SDL_SCANCODE_J);
+
+		// Look: A's MouseX and H, then Z's L; Z's MouseX is not a second one.
+		const std::vector<AxisBinding>* lb = host.mapping().axisBindings("Look");
+		REQUIRE(lb != nullptr);
+		REQUIRE(lb->size() == 3);
+		CHECK((*lb)[0].source == AxisSource::MouseX);
+		CHECK((*lb)[1].positiveKey == SDL_SCANCODE_H);
+		CHECK((*lb)[2].positiveKey == SDL_SCANCODE_L);
+
+		// And the frame agrees: J alone is a jump (Z's binding survived A), and
+		// ten pixels of mouse are ten units of look, not twenty.
+		HE::api::time::resume();
+		HE::api::input::setModeGameAndUI();
+		Input input;
+		SDL_Event down{};
+		down.type         = SDL_EVENT_KEY_DOWN;
+		down.key.scancode = SDL_SCANCODE_J;
+		down.key.key      = SDLK_UNKNOWN;
+		input.ProcessEvent(down);
+		MouseFrame mouse;
+		mouse.dx = 10.0f;
+		host.tick(input, 1.0f / 60.0f, mouse);
+		CHECK(HE::api::input::actionDown("Jump"));
+		CHECK(host.mapping().axisValue("Look") == doctest::Approx(10.0f));
+
+		host.end();
+		CHECK(host.mappingContexts().empty());
+		HE::api::player::clear();
+	}
+}
+
+TEST_CASE("PlayerHost: mapping contexts are a union applied in path order")
+{
+	SUBCASE("A saved first") { checkContextUnionInPathOrder(false); }
+	SUBCASE("Z saved first") { checkContextUnionInPathOrder(true); }
+}
+
 // ─── Text scripts hear the actions ───────────────────────────────────────────
 // The pump ran in a Lua project exactly as in a HorizonCode one, and nobody
 // listened: PlayerHost fired Input.<Action>.* at controllers and characters
