@@ -49,6 +49,7 @@ add_executable(he_tests
     # velocity/resolve/sharpen drawn on WARP (Windows only for the latter).
     test_temporal_aa.cpp
     test_gi_bvh.cpp
+    test_gi_probe_grid.cpp
     test_undo.cpp
     test_editor_selection.cpp
     test_editor_marquee.cpp
@@ -97,6 +98,9 @@ add_executable(he_tests
     test_sky_shader.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # The refined level near the camera: Catmull-Rom between the samples,
+    # displacement, the build/release life cycle and its budget.
+    test_terrain_tessellation.cpp
     # Greyscale heightmap → heights: the pixel path, the texture and file
     # wrappers (8/16-bit PGM, .r16), orientation and the down-sampling box.
     test_terrain_heightmap.cpp

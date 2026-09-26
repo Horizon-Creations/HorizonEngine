@@ -10,6 +10,7 @@
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/GiBvh.h>
+#include <HorizonRendering/GIProbeGrid.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer
@@ -1086,8 +1087,6 @@ private:
 	void destroyGiProbeAtlas();
 	void runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h);
 
-	static constexpr float kGIProbeSpacing     = 4.0f;
-	static constexpr int   kGIMaxProbesPerAxis = 10;
 	static constexpr int   kGIProbeOctSize     = 8;
 
 	bool m_giPipelinesTried = false;
@@ -1132,8 +1131,10 @@ private:
 	// Probe grid + atlases (GENERAL layout: imageLoad/Store + sampled).
 	glm::vec3  m_giGridOrigin{0.0f};
 	glm::ivec3 m_giGridCounts{0};
+	float m_giProbeSpacing = HE::kGIProbeMinSpacing; // metres; grows with the scene (GIProbeGrid.h)
 	int  m_giProbeCount = 0, m_giProbesPerRow = 0, m_giProbeCursor = 0;
 	bool m_giProbeGridBuilt = false;
+	HE::GIProbeGridTracker m_giGridTrack; // when to re-check the fit (GIProbeGrid.h)
 	GiImage m_giIrrAtlas, m_giVisAtlas;
 	// Per-in-flight-frame descriptor sets + params UBOs (sets are rewritten each
 	// frame BEFORE recording — safe because that slot's fence was waited on).

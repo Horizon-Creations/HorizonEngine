@@ -14,6 +14,7 @@
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/Vulkan/Metal-SW)
+#include <HorizonRendering/GIProbeGrid.h>    // GI: probe-grid fit + refit policy (all backends)
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/D3D12)
 #include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
@@ -2874,8 +2875,6 @@ struct D3D11RendererImpl
         glm::vec4 baseColor;
         int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
     };
-    static constexpr float kGIProbeSpacing     = 4.0f;
-    static constexpr int   kGIMaxProbesPerAxis = 10;
     static constexpr int   kGIProbeOctSize     = 8;
 
     bool  giSupported          = true;  // FL 11.0 guarantees CS 5.0; compile failure clears it
@@ -2922,8 +2921,10 @@ struct D3D11RendererImpl
 
     glm::vec3  giGridOrigin{ 0.0f };
     glm::ivec3 giGridCounts{ 0 };
+    float giProbeSpacing = HE::kGIProbeMinSpacing; // metres; grows with the scene (GIProbeGrid.h)
     int  giProbeCount = 0, giProbesPerRow = 0, giProbeCursor = 0;
     bool giProbeGridBuilt = false;
+    HE::GIProbeGridTracker giGridTrack; // when to re-check the fit (GIProbeGrid.h)
     ComPtr<ID3D11Texture2D>           giIrrTex, giVisTex, giIrrPrevTex, giVisPrevTex;
     ComPtr<ID3D11ShaderResourceView>  giIrrSRV, giVisSRV, giIrrPrevSRV, giVisPrevSRV;
     ComPtr<ID3D11UnorderedAccessView> giIrrUAV, giVisUAV;
@@ -3192,34 +3193,57 @@ struct D3D11RendererImpl
         }
     }
 
-    // One-shot probe-grid fit over the scene AABB (worldBounds are refreshed
-    // from the real mesh bounds in DrawScene before this runs).
+    // Probe-grid fit over the scene AABB (GIProbeGrid.h: the spacing grows so
+    // the whole scene — a 100 m terrain included — fits the probe budget).
+    // worldBounds are refreshed from the real mesh bounds in DrawScene before
+    // this runs. Once built, the fit is only re-checked when the scene's
+    // geometry changed (signature or an InvalidateMesh), and replaced when the
+    // scene left it.
     void ensureGiProbeGrid(const RenderWorld& rw)
     {
-        if (giProbeGridBuilt) return;
         if (rw.objects.empty()) return;
+        const uint64_t sig = HE::GIProbeSceneSignature(rw.objects);
+        if (giGridTrack.canSkip(giProbeGridBuilt, sig)) return;
 
-        HE::AABB sceneBox;
-        for (const RenderObject& obj : rw.objects)
-            if (obj.worldBounds.isValid())
-                sceneBox.expand(obj.worldBounds);
+        int unresolved = 0;
+        const HE::AABB sceneBox = HE::GIProbeSceneBounds(rw.objects, &unresolved);
         if (!sceneBox.isValid()) return;
+        if (!giGridTrack.shouldEvaluate(giProbeGridBuilt, sig, unresolved)) return;
 
-        const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGIProbeSpacing);
-        giGridCounts = glm::ivec3(
-            std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
-            std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
-            std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis));
-        const glm::vec3 gridSpan = glm::vec3(giGridCounts - 1) * kGIProbeSpacing;
-        giGridOrigin   = sceneBox.center() - gridSpan * 0.5f;
-        giProbeCount   = giGridCounts.x * giGridCounts.y * giGridCounts.z;
+        if (giProbeGridBuilt)
+        {
+            HE::GIProbeGridFit current;
+            current.origin = giGridOrigin; current.counts = giGridCounts; current.spacing = giProbeSpacing;
+            if (!HE::GIProbeGridNeedsRefit(current, sceneBox)) return;
+            destroyGiProbeAtlas(); // new counts → new atlas; probes re-converge
+        }
+        const HE::GIProbeGridFit fit = HE::FitGIProbeGrid(sceneBox);
+        if (!fit.valid()) return;
+
+        giGridCounts   = fit.counts;
+        giGridOrigin   = fit.origin;
+        giProbeSpacing = fit.spacing;
+        giProbeCount   = fit.probeCount();
         giProbesPerRow = std::min(giProbeCount, 32);
         giProbeCursor  = 0;
         giProbeGridBuilt = true;
         HE_LOG_INFO(RHI, "%s",
                     ("D3D11Renderer: GI probe grid " + std::to_string(giGridCounts.x) + "x"
                      + std::to_string(giGridCounts.y) + "x" + std::to_string(giGridCounts.z)
-                     + " (" + std::to_string(giProbeCount) + " probes)").c_str());
+                     + " (" + std::to_string(giProbeCount) + " probes), spacing "
+                     + std::to_string(giProbeSpacing)).c_str());
+    }
+
+    // The atlases alone (a refit changes their size). The immediate context
+    // keeps its own references to anything still bound, so plain Reset is safe.
+    void destroyGiProbeAtlas()
+    {
+        giIrrTex.Reset(); giVisTex.Reset(); giIrrPrevTex.Reset(); giVisPrevTex.Reset();
+        giIrrSRV.Reset(); giVisSRV.Reset(); giIrrPrevSRV.Reset(); giVisPrevSRV.Reset();
+        giIrrUAV.Reset(); giVisUAV.Reset();
+        giProbeGridBuilt = false;
+        giProbeCount = 0;
+        giProbeCursor = 0;
     }
 
     void ensureGiProbeAtlas()
@@ -3283,12 +3307,7 @@ struct D3D11RendererImpl
         giResultTex.Reset(); giResultRTV.Reset(); giResultSRV.Reset();
         giShadowW = giShadowH = 0;
         giHistValid = false;
-        giIrrTex.Reset(); giVisTex.Reset(); giIrrPrevTex.Reset(); giVisPrevTex.Reset();
-        giIrrSRV.Reset(); giVisSRV.Reset(); giIrrPrevSRV.Reset(); giVisPrevSRV.Reset();
-        giIrrUAV.Reset(); giVisUAV.Reset();
-        giProbeGridBuilt = false;
-        giProbeCount = 0;
-        giProbeCursor = 0;
+        destroyGiProbeAtlas();
     }
 
     // The 4-stage shadow-mask pipeline (G-buffer → compute rays → temporal →
@@ -3496,9 +3515,9 @@ struct D3D11RendererImpl
             glm::vec4 gridOrigin, gridCounts, rayParams, sunDirRadius, sunColor, skyAmbient;
             glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
         } pcb{};
-        pcb.gridOrigin = glm::vec4(giGridOrigin, kGIProbeSpacing);
+        pcb.gridOrigin = glm::vec4(giGridOrigin, giProbeSpacing);
         pcb.gridCounts = glm::vec4(glm::vec3(giGridCounts), float(giProbesPerRow));
-        const float maxDist = glm::length(glm::vec3(giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
+        const float maxDist = glm::length(glm::vec3(giGridCounts) * giProbeSpacing) + giProbeSpacing;
         pcb.rayParams = glm::vec4(maxDist, 0.92f, float(giProbeCursor), float(budget));
         glm::vec3 towardLight, lightColorIntensity;
         rw.dominantDirectionalLight(towardLight, lightColorIntensity);
@@ -4615,6 +4634,9 @@ struct D3D11RendererImpl
             if (giBlasCache.count(id))
                 destroyGiAccel();
         }
+        // A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the scene
+        // box without changing which objects exist → re-check the probe grid fit.
+        if (!pendingMeshInval.empty()) giGridTrack.meshRebuilt = true;
         pendingMeshInval.clear();
     }
 
@@ -5667,7 +5689,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
-        f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D11RendererImpl::kGIProbeSpacing);
+        f.giGridOrigin = glm::vec4(p.giGridOrigin, p.giProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
         // x is the gate the built-in scene shader's reflection cascade tests;
         // the roughness fade happens there, with the exact shading roughness,
@@ -5718,6 +5740,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         // (point/spot) atlas rendered this frame, lightParams[i].y carries the
         // light's base layer + 1 (0 = "casts no local shadow").
         HE::FillMaterialLightWindow(p.m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        HE::FillMaterialWind(m_environment, lit); // Wind / Wind Sway nodes, next to Time
         // Local atlas view-projs for heLocalShadowFactor (heLocalShadow,
         // preamble binding 13 → t13/s13, bound in the scene pass). Same
         // pre-baked conventions as csmVP below (uvFlipY * kD3DClipFix), so the

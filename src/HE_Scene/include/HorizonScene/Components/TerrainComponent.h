@@ -23,6 +23,27 @@ struct TerrainComponent {
     // texture). 1 = the historical behaviour.
     float    uvTiling    = 1.0f;
     HE::UUID heightmapTexture{};  // Phase 2: greyscale heightmap source
+
+    // ── Tessellation / displacement (serialised) ─────────────────────────────
+    // Chunks whose centre is within tessellationDistance of the camera get one
+    // level FINER than LOD0: tessellationFactor × the chunk's LOD0 grid, the
+    // height smooth (Catmull-Rom) between the source samples, plus the detail
+    // of the displacement map. 1 = off (the default; nothing is built).
+    //
+    // This is CPU tessellation, not a hull/domain shader stage: the refined
+    // level is an ordinary mesh, so it renders the same on all five backends.
+    // It is built on demand for the chunks near the camera only (a few per
+    // tick, capped per terrain) and given back when the camera leaves.
+    //
+    // Visual only: collision, navigation and foliage placement keep reading
+    // the height field, so they sit up to half the displacement strength
+    // away from the displaced surface. Keep the strength small (detail, not
+    // landform — landform is what sculpting is for).
+    int      tessellationFactor   = 1;      // 1 = off, 2 or 4
+    float    tessellationDistance = 50.0f;  // camera → chunk centre, world units
+    HE::UUID displacementTexture{};         // tileable greyscale detail; none = smooth only
+    float    displacementStrength = 0.0f;   // black-to-white, world units; mid-grey = 0
+    float    displacementTiling   = 0.0f;   // repeats across the terrain; 0 = follow uvTiling
     bool     dirty = true;        // set to regenerate ALL chunks; not serialised
     // Per-vertex sculpted heights (size == res*res overrides fBm); serialised.
     std::vector<float> sculptHeights;

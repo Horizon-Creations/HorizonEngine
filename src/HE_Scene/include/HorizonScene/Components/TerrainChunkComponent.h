@@ -1,5 +1,6 @@
 #pragma once
 #include <entt/entt.hpp>
+#include <Types/UUID.h>
 #include <cstdint>
 
 // Marks a runtime-generated terrain chunk entity. Chunk entities are children of
@@ -10,4 +11,12 @@
 struct TerrainChunkComponent {
     entt::entity terrain = entt::null;  // owning terrain entity
     uint32_t     cx = 0, cz = 0;        // chunk grid coordinate
+
+    // Tessellated level (TerrainComponent::tessellationFactor). The mesh is
+    // registered ONCE per chunk and afterwards only replaced — emptied when the
+    // camera leaves, refilled when it comes back — because every registration
+    // can move the content manager's pool under other holders' pointers.
+    // tessActive = the mesh is filled and hooked in as LODComponent::refinedMeshId.
+    HE::UUID     tessMeshId{};
+    bool         tessActive = false;
 };

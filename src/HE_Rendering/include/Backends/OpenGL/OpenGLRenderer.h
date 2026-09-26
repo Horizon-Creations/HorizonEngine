@@ -11,6 +11,7 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/GiBvh.h>
+#include <HorizonRendering/GIProbeGrid.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
@@ -1139,7 +1140,7 @@ private:
 	void         CreateGIPipelines();
 	void         EnsureGIShadowTargets(int width, int height);
 	void         DestroyGIShadowTargets();
-	void         EnsureGIProbeGrid();   // one-shot grid fit over the scene AABB
+	void         EnsureGIProbeGrid();   // grid fit over the scene AABB, refit on geometry change
 	void         EnsureGIProbeAtlas();
 	void         DestroyGIProbeAtlas();
 	// Half-res world-space G-buffer (position + normal + roughness/metallic).
@@ -1158,8 +1159,6 @@ private:
 	                                 bool probesValid);
 	void         DispatchGIProbeUpdate();
 
-	static constexpr float kGIProbeSpacing     = 4.0f; // metres between probes
-	static constexpr int   kGIMaxProbesPerAxis = 10;   // grid clamp (matches Metal)
 	static constexpr int   kGIProbeOctSize     = 8;    // octahedral tile size
 
 	bool         m_giPipelinesBuilt   = false;
@@ -1202,8 +1201,10 @@ private:
 	// Probe grid + atlases.
 	glm::vec3    m_giGridOrigin{0.0f};
 	glm::ivec3   m_giGridCounts{0};
+	float        m_giProbeSpacing = HE::kGIProbeMinSpacing; // metres; grows with the scene (GIProbeGrid.h)
 	int          m_giProbeCount = 0, m_giProbesPerRow = 0, m_giProbeCursor = 0;
 	bool         m_giProbeGridBuilt = false;
+	HE::GIProbeGridTracker m_giGridTrack; // when to re-check the fit (GIProbeGrid.h)
 	unsigned int m_giIrrAtlas = 0, m_giVisAtlas = 0;
 	// Per-program GI uniform locations for the three programs sharing kUnlitFS.
 	struct GISceneLocs

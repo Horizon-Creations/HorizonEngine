@@ -560,6 +560,19 @@ namespace
 			// that never used one does not grow a null key.
 			if (t->heightmapTexture != HE::UUID{})
 				tc["heightmapTexture"] = uuidToJson(t->heightmapTexture);
+			// Tessellation / displacement: written as a group, and only once
+			// any of it is used, so a scene without it saves exactly as before.
+			if (t->tessellationFactor != 1 || t->displacementStrength != 0.0f ||
+			    t->displacementTexture != HE::UUID{} || t->tessellationDistance != 50.0f ||
+			    t->displacementTiling != 0.0f)
+			{
+				tc["tessellationFactor"]   = t->tessellationFactor;
+				tc["tessellationDistance"] = t->tessellationDistance;
+				tc["displacementStrength"] = t->displacementStrength;
+				tc["displacementTiling"]   = t->displacementTiling;
+				if (t->displacementTexture != HE::UUID{})
+					tc["displacementTexture"] = uuidToJson(t->displacementTexture);
+			}
 			// Painted layer weights (RGBA8). Same base64 treatment as the
 			// heights: a JSON array of N bytes dominates the undo snapshot.
 			if (!t->layerWeights.empty())
@@ -1391,7 +1404,13 @@ namespace
 			t.lodDistanceScale = c.value("lodDistanceScale", t.lodDistanceScale);
 			if (c.contains("heightmapTexture"))
 				t.heightmapTexture = jsonToUuid(c["heightmapTexture"]);
-			t.weightRes   = c.value("weightRes",    t.weightRes);
+			t.tessellationFactor   = c.value("tessellationFactor",   t.tessellationFactor);
+			t.tessellationDistance = c.value("tessellationDistance", t.tessellationDistance);
+			t.displacementStrength = c.value("displacementStrength", t.displacementStrength);
+			t.displacementTiling   = c.value("displacementTiling",   t.displacementTiling);
+			if (c.contains("displacementTexture"))
+				t.displacementTexture = jsonToUuid(c["displacementTexture"]);
+			t.weightRes  = c.value("weightRes",    t.weightRes);
 			if (c.contains("layerWeightsB64") && c["layerWeightsB64"].is_string())
 			{
 				t.layerWeights = base64Decode(c["layerWeightsB64"].get<std::string>());
