@@ -185,6 +185,9 @@ add_executable(HorizonEditor WIN32
 	# and the root-motion switch are authored in the Skeletal Mesh Editor and live
 	# in a chunk of their own, so that half is editable from outside too.
 	McpToolsClip.cpp
+	# A cutscene: sequence_info / sequence_write, the whole Sequence as one
+	# document in the tool vocabulary (entity uuids, asset paths, names).
+	McpToolsSequence.cpp
 	# Making the project run: Build ▸ Export Project and Build ▸ Build and Reload
 	# Game Logic, plus the reading of the window both of them report into. The
 	# only asynchronous family here — both tools answer "started", and the
@@ -238,6 +241,9 @@ add_executable(HorizonEditor WIN32
 	BlendSpacePanel.cpp
 	SequencerPanel.cpp
 	SequencerTimeline.cpp
+	CinematicPanel.cpp
+	CinematicTimeline.cpp
+	CinematicPreview.cpp
 	SkeletalMeshEditorPanel.cpp
 	StaticMeshEditorPanel.cpp
 	MeshMaterialSlots.cpp

@@ -1,6 +1,6 @@
 {
  "baseUrl": "https://horizoncreations.dev/HorizonEngineDocs/",
- "generated": "2026-09-25",
+ "generated": "2026-09-26",
  "groups": [
   {
    "pages": [
@@ -9,6 +9,7 @@
     "scenes",
     "rendering",
     "systems",
+    "cutscenes",
     "ui",
     "scripting",
     "materials",
@@ -5607,6 +5608,1045 @@
    ],
    "summary": "",
    "title": "Networking & Collaboration"
+  },
+  {
+   "file": "cutscenes.html",
+   "id": "cutscenes",
+   "sections": [
+    {
+     "blocks": [
+      {
+       "k": "lead",
+       "r": [
+        {
+         "s": "",
+         "t": "A cutscene is a "
+        },
+        {
+         "s": "b",
+         "t": "Sequence"
+        },
+        {
+         "s": "",
+         "t": " asset: one timeline that drives several entities of a scene at once. Its "
+        },
+        {
+         "s": "b",
+         "t": "bindings"
+        },
+        {
+         "s": "",
+         "t": " name the actors — a door, a character, two cameras — and its "
+        },
+        {
+         "s": "b",
+         "t": "tracks"
+        },
+        {
+         "s": "",
+         "t": " say what each of them does over time. A "
+        },
+        {
+         "s": "b",
+         "t": "Sequence Player"
+        },
+        {
+         "s": "",
+         "t": " component plays it in the game; the "
+        },
+        {
+         "s": "b",
+         "t": "Cinematic"
+        },
+        {
+         "s": "",
+         "t": " tab authors and previews it in the editor. Both evaluate the sequence with the same code, so what the tab shows at a given second is what the game shows."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Create one"
+         },
+         {
+          "s": "",
+          "t": " from the Content Browser: "
+         },
+         {
+          "s": "i",
+          "t": "Create » Animation » Sequence"
+         },
+         {
+          "s": "",
+          "t": ". Double-click it to open the Cinematic tab."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Actors are bound by identity, not by name."
+         },
+         {
+          "s": "",
+          "t": " A binding stores the entity's id, so renaming or moving the entity keeps the cutscene working. The name is a label; when the entity is gone the binding shows it in red as "
+         },
+         {
+          "s": "i",
+          "t": "(missing)"
+         },
+         {
+          "s": "",
+          "t": ", and its tracks are skipped instead of failing."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Sequences are separate from Property Animation clips."
+         },
+         {
+          "s": "",
+          "t": " The Sequencer tab still edits a single entity's looping property clip (a platform, a pulsing light); a Sequence is for scenes with several actors and a camera."
+         }
+        ]
+       ],
+       "k": "ul"
+      }
+     ],
+     "eyebrow": "Sequences",
+     "id": "overview",
+     "text": "A cutscene is a Sequence asset: one timeline that drives several entities of a scene at once. Its bindings name the actors — a door, a character, two cameras — and its tracks say what each of them does over time. A Sequence Player component plays it in the game; the Cinematic tab authors and previews it in the editor. Both evaluate the sequence with the same code, so what the tab shows at a given second is what the game shows. Create one from the Content Browser: Create » Animation » Sequence. Double-click it to open the Cinematic tab. Actors are bound by identity, not by name. A binding stores the entity's id, so renaming or moving the entity keeps the cutscene working. The name is a label; when the entity is gone the binding shows it in red as (missing), and its tracks are skipped instead of failing. Sequences are separate from Property Animation clips. The Sequencer tab still edits a single entity's looping property clip (a platform, a pulsing light); a Sequence is for scenes with several actors and a camera.",
+     "title": "Overview"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Each track belongs to one actor, except camera cuts and — when they have no actor — events and sounds, which belong to the sequence itself."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Track"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "What it does"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Property"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Keys on one value: position, rotation or scale per axis, material colour, metallic, roughness, opacity, a camera's "
+          },
+          {
+           "s": "i",
+           "t": "Field of View"
+          },
+          {
+           "s": "",
+           "t": ", or "
+          },
+          {
+           "s": "i",
+           "t": "Visible"
+          },
+          {
+           "s": "",
+           "t": ". Values between keys are interpolated linearly; "
+          },
+          {
+           "s": "i",
+           "t": "Visible"
+          },
+          {
+           "s": "",
+           "t": " is a switch and holds the last key's value until the next one."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Skeletal"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Sections that each play an animation clip on the actor's skeleton, with a start, an end, a clip offset, a play rate and an optional loop. While a section is live the sequence poses the skeleton in place of the entity's Animator; layers and IK still apply on top."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Camera Cuts"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Which camera the game looks through, from each cut on. A cut can "
+          },
+          {
+           "s": "i",
+           "t": "blend in"
+          },
+          {
+           "s": "",
+           "t": " over a number of seconds with a Linear, Smooth Step or Ease Out curve. One per sequence."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Event"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Named markers, delivered to scripts and graphs as an animation notify — a marker with a duration sends a begin and an end."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Audio"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Sounds started at a time, with volume and pitch; with an actor they play at its position."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Events and sounds only fire while a cutscene plays."
+          },
+          {
+           "s": "",
+           "t": " Scrubbing the timeline in the editor, or jumping with "
+          },
+          {
+           "s": "c",
+           "t": "sequence.setTime"
+          },
+          {
+           "s": "",
+           "t": ", fires nothing in between and does not start a sound halfway through — dragging the playhead back and forth never sets off twenty explosions."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "note"
+      }
+     ],
+     "eyebrow": "What moves",
+     "id": "tracks",
+     "text": "Each track belongs to one actor, except camera cuts and — when they have no actor — events and sounds, which belong to the sequence itself. Track What it does Property Keys on one value: position, rotation or scale per axis, material colour, metallic, roughness, opacity, a camera's Field of View, or Visible. Values between keys are interpolated linearly; Visible is a switch and holds the last key's value until the next one. Skeletal Sections that each play an animation clip on the actor's skeleton, with a start, an end, a clip offset, a play rate and an optional loop. While a section is live the sequence poses the skeleton in place of the entity's Animator; layers and IK still apply on top. Camera Cuts Which camera the game looks through, from each cut on. A cut can blend in over a number of seconds with a Linear, Smooth Step or Ease Out curve. One per sequence. Event Named markers, delivered to scripts and graphs as an animation notify — a marker with a duration sends a begin and an end. Audio Sounds started at a time, with volume and pitch; with an actor they play at its position. Events and sounds only fire while a cutscene plays. Scrubbing the timeline in the editor, or jumping with sequence.setTime, fires nothing in between and does not start a sound halfway through — dragging the playhead back and forth never sets off twenty explosions.",
+     "title": "Tracks"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The tab shows the camera-cut row at the top, then one foldable group per actor with its tracks, and finally "
+        },
+        {
+         "s": "i",
+         "t": "Unbound"
+        },
+        {
+         "s": "",
+         "t": " — tracks whose actor was removed, kept so you can delete them. Keys are diamonds, sections are bars, cuts, events and sounds are flags on their rows; a cut with a blend draws its ramp."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "b",
+          "t": "Transport"
+         },
+         {
+          "s": "",
+          "t": " — Play/Pause (Space), Stop, Loop, the length, zoom. Click the ruler to scrub; the mouse wheel zooms."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Actors"
+         },
+         {
+          "s": "",
+          "t": " — select entities in the scene and use "
+         },
+         {
+          "s": "i",
+          "t": "Bind Selected"
+         },
+         {
+          "s": "",
+          "t": "; "
+         },
+         {
+          "s": "i",
+          "t": "Rebind to Selected"
+         },
+         {
+          "s": "",
+          "t": " points an existing binding at a different entity; "
+         },
+         {
+          "s": "i",
+          "t": "Remove Binding"
+         },
+         {
+          "s": "",
+          "t": " takes its tracks and every cut to it along."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Editing"
+         },
+         {
+          "s": "",
+          "t": " — "
+         },
+         {
+          "s": "i",
+          "t": "Add Track"
+         },
+         {
+          "s": "",
+          "t": " offers what fits the focused actor; "
+         },
+         {
+          "s": "i",
+          "t": "Add at Playhead"
+         },
+         {
+          "s": "",
+          "t": " or a double-click adds a key, event or cut; drag items along the row, drag a section's edges to trim it, Delete removes. The panel below shows the selected item's values. A new property track starts with a key holding the actor's current value."
+         }
+        ],
+        [
+         {
+          "s": "b",
+          "t": "Preview"
+         },
+         {
+          "s": "",
+          "t": " — the tab renders its own picture of the scene at the playhead, through the live cut's camera ("
+         },
+         {
+          "s": "i",
+          "t": "Through Camera"
+         },
+         {
+          "s": "",
+          "t": ", blends included) or through the editor camera. The preview writes the sequence into the scene only for the length of that one picture and puts everything back before anything else can see it: saving, undo, play mode and a collaboration session never see a cutscene frame, and the scene is never marked modified by previewing."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Undo, Save and reload work like every other asset tab; a sequence cannot end before its last key, cut, event, sound or section."
+         }
+        ]
+       ],
+       "k": "ul"
+      }
+     ],
+     "eyebrow": "Author",
+     "id": "cinematic-tab",
+     "text": "The tab shows the camera-cut row at the top, then one foldable group per actor with its tracks, and finally Unbound — tracks whose actor was removed, kept so you can delete them. Keys are diamonds, sections are bars, cuts, events and sounds are flags on their rows; a cut with a blend draws its ramp. Transport — Play/Pause (Space), Stop, Loop, the length, zoom. Click the ruler to scrub; the mouse wheel zooms. Actors — select entities in the scene and use Bind Selected; Rebind to Selected points an existing binding at a different entity; Remove Binding takes its tracks and every cut to it along. Editing — Add Track offers what fits the focused actor; Add at Playhead or a double-click adds a key, event or cut; drag items along the row, drag a section's edges to trim it, Delete removes. The panel below shows the selected item's values. A new property track starts with a key holding the actor's current value. Preview — the tab renders its own picture of the scene at the playhead, through the live cut's camera (Through Camera, blends included) or through the editor camera. The preview writes the sequence into the scene only for the length of that one picture and puts everything back before anything else can see it: saving, undo, play mode and a collaboration session never see a cutscene frame, and the scene is never marked modified by previewing. Undo, Save and reload work like every other asset tab; a sequence cannot end before its last key, cut, event, sound or section.",
+     "title": "The Cinematic Tab"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "In the Scene window, select a camera entity and choose "
+        },
+        {
+         "s": "i",
+         "t": "View » Look Through Selected Camera"
+        },
+        {
+         "s": "",
+         "t": " in the viewport toolbar. The viewport renders through that camera — its position, heading and field of view — and the View cell reads "
+        },
+        {
+         "s": "i",
+         "t": "Camera"
+        },
+        {
+         "s": "",
+         "t": ". The lock is on the camera, not on the selection: select and move the actors while the shot stays on screen, or move the camera itself with the gizmo and the picture follows."
+        }
+       ]
+      },
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "Flying, orbiting or zooming ends the lock and carries on from the camera's position, so you can nudge the view and then place the camera there."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "A view preset, a bookmark, "
+         },
+         {
+          "s": "i",
+          "t": "F"
+         },
+         {
+          "s": "",
+          "t": " or "
+         },
+         {
+          "s": "i",
+          "t": "Stop Looking Through Camera"
+         },
+         {
+          "s": "",
+          "t": " returns to the editor camera. Deleting the camera or starting play does too."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Editor icons are hidden while looking through — the picture is the shot."
+         }
+        ]
+       ],
+       "k": "ul"
+      }
+     ],
+     "eyebrow": "Frame the shot",
+     "id": "look-through",
+     "text": "In the Scene window, select a camera entity and choose View » Look Through Selected Camera in the viewport toolbar. The viewport renders through that camera — its position, heading and field of view — and the View cell reads Camera. The lock is on the camera, not on the selection: select and move the actors while the shot stays on screen, or move the camera itself with the gizmo and the picture follows. Flying, orbiting or zooming ends the lock and carries on from the camera's position, so you can nudge the view and then place the camera there. A view preset, a bookmark, F or Stop Looking Through Camera returns to the editor camera. Deleting the camera or starting play does too. Editor icons are hidden while looking through — the picture is the shot.",
+     "title": "Looking Through a Camera"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Add a "
+        },
+        {
+         "s": "b",
+         "t": "Sequence Player"
+        },
+        {
+         "s": "",
+         "t": " component (Add Component » Animation) to any entity — a trigger volume, an empty \"Director\" — and give it the sequence. The entity with the player is the cutscene's "
+        },
+        {
+         "s": "b",
+         "t": "owner"
+        },
+        {
+         "s": "",
+         "t": ": scripts address the cutscene through it, and it receives the end notification."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Setting"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Meaning"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Autoplay"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Starts when the scene starts."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Loop"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Wraps around at the end instead of finishing."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Play Rate"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Speed; negative plays backwards."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Blend Out"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "b",
+           "t": "Blend Out Curve"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "How the view returns to the player's camera rig when the cutscene ends or is stopped."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Lock Player Input"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The player's character ignores movement input while the cutscene runs."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A cutscene runs on game time: "
+        },
+        {
+         "s": "c",
+         "t": "time.setTimeScale"
+        },
+        {
+         "s": "",
+         "t": " slows it and a pause holds it. Switching the owner off (deactivating it) stops the cutscene; destroying it mid-shot still hands the camera back. Assets a sequence uses — its clips and sounds — are loaded with the scene, so a cutscene does not start with a missing animation in a packaged game."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "Run it",
+     "id": "playing",
+     "text": "Add a Sequence Player component (Add Component » Animation) to any entity — a trigger volume, an empty \"Director\" — and give it the sequence. The entity with the player is the cutscene's owner: scripts address the cutscene through it, and it receives the end notification. Setting Meaning Autoplay Starts when the scene starts. Loop Wraps around at the end instead of finishing. Play Rate Speed; negative plays backwards. Blend Out, Blend Out Curve How the view returns to the player's camera rig when the cutscene ends or is stopped. Lock Player Input The player's character ignores movement input while the cutscene runs. A cutscene runs on game time: time.setTimeScale slows it and a pause holds it. Switching the owner off (deactivating it) stops the cutscene; destroying it mid-shot still hands the camera back. Assets a sequence uses — its clips and sounds — are loaded with the scene, so a cutscene does not start with a missing animation in a packaged game.",
+     "title": "Playing a Cutscene"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "While a playing sequence has camera cuts, it owns the camera: the player's camera rig and the editor's fly camera leave it alone. Each cut makes its camera the main one; a cut with a blend-in moves position, rotation and field of view from the previous camera to the new one. The first cut blends from wherever the gameplay camera was when the cutscene started. Only one sequence owns the camera at a time; a second one takes over when the first lets go."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "At the end — or on "
+        },
+        {
+         "s": "c",
+         "t": "sequence.stop"
+        },
+        {
+         "s": "",
+         "t": " — the view goes back to the player's rig over the player's "
+        },
+        {
+         "s": "i",
+         "t": "Blend Out"
+        },
+        {
+         "s": "",
+         "t": " time. "
+        },
+        {
+         "s": "i",
+         "t": "Lock Player Input"
+        },
+        {
+         "s": "",
+         "t": " locks movement, not looking: a cutscene without camera cuts still lets the mouse turn the rig."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "The view",
+     "id": "camera",
+     "text": "While a playing sequence has camera cuts, it owns the camera: the player's camera rig and the editor's fly camera leave it alone. Each cut makes its camera the main one; a cut with a blend-in moves position, rotation and field of view from the previous camera to the new one. The first cut blends from wherever the gameplay camera was when the cutscene started. Only one sequence owns the camera at a time; a second one takes over when the first lets go. At the end — or on sequence.stop — the view goes back to the player's rig over the player's Blend Out time. Lock Player Input locks movement, not looking: a cutscene without camera cuts still lets the mouse turn the rig.",
+     "title": "Cuts, Blends and Control"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Eight functions under "
+        },
+        {
+         "s": "c",
+         "t": "sequence"
+        },
+        {
+         "s": "",
+         "t": ", the same in Lua, Python, HorizonCode and C++. Every one takes the "
+        },
+        {
+         "s": "b",
+         "t": "owner"
+        },
+        {
+         "s": "",
+         "t": " — the entity with the Sequence Player."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Function"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Does"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "play(owner)"
+          },
+          {
+           "s": "",
+           "t": " -> started"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Starts, or resumes from a pause."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "pause(owner)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Holds the clock and the sounds; actors, camera and input lock stay with the cutscene."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "stop(owner)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Ends and rewinds: sounds stop, the camera returns, the lock lifts. This is a skip button."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "setTime(owner, seconds)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Jumps; nothing in between fires."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "getTime(owner)"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "duration(owner)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Where the playhead is, how long the sequence is."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "isPlaying(owner)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "True while the clock runs (false when paused)."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "bindSlot(owner, binding, entity)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Plays a binding — addressed by its name — with a different entity, e.g. the player character spawned at runtime in place of a stand-in. 0 restores the authored actor."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "When a cutscene finishes — at its natural end, or when a running one is stopped — the owner receives the animation notify "
+        },
+        {
+         "s": "c",
+         "t": "SequenceFinished"
+        },
+        {
+         "s": "",
+         "t": ". Because a skip is "
+        },
+        {
+         "s": "c",
+         "t": "stop"
+        },
+        {
+         "s": "",
+         "t": ", whatever waits for the end runs after a skip as well. A looping cutscene never finishes by itself."
+        }
+       ]
+      },
+      {
+       "k": "langs",
+       "vars": [
+        {
+         "label": "Lua",
+         "lang": "lua",
+         "text": "local M = {}\n\n-- On the entity with the Sequence Player (Autoplay off).\nfunction M.onStart(self)\n    -- The sequence was authored against a stand-in called \"Hero\".\n    local player = horizon.entity.findByName(\"Player\")\n    horizon.sequence.bindSlot(self.entityId, \"Hero\", player)\n    horizon.sequence.play(self.entityId)\nend\n\nfunction M.onUpdate(self, dt)\n    -- \"Skip\" is an Input Action (Project Settings » Input) bound to a key.\n    if horizon.input.actionPressed(\"Skip\") then\n        horizon.sequence.stop(self.entityId)   -- a skip still finishes\n    end\nend\n\nfunction M.onAnimationNotify(self, name)\n    if name == \"SequenceFinished\" then\n        horizon.scene.load(\"Levels/Chapter1.hescene\", false)\n    end\nend\n\nreturn M",
+         "title": "intro_director.lua"
+        },
+        {
+         "label": "Python",
+         "lang": "python",
+         "text": "import horizon\n\nclass IntroDirector(horizon.Behavior):\n    # On the entity with the Sequence Player (Autoplay off).\n    def on_start(self):\n        # The sequence was authored against a stand-in called \"Hero\".\n        player = horizon.entity.findByName(\"Player\")\n        horizon.sequence.bindSlot(self.entity_id, \"Hero\", player)\n        horizon.sequence.play(self.entity_id)\n\n    def on_update(self, dt):\n        # \"Skip\" is an Input Action (Project Settings » Input) bound to a key.\n        if horizon.input.actionPressed(\"Skip\"):\n            horizon.sequence.stop(self.entity_id)   # a skip still finishes\n\n    def on_animation_notify(self, name):\n        if name == \"SequenceFinished\":\n            horizon.scene.load(\"Levels/Chapter1.hescene\", False)",
+         "title": "intro_director.py"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "In HorizonCode the same eight are nodes in the "
+        },
+        {
+         "s": "i",
+         "t": "Sequence"
+        },
+        {
+         "s": "",
+         "t": " category ("
+        },
+        {
+         "s": "i",
+         "t": "Play Sequence"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Stop Sequence"
+        },
+        {
+         "s": "",
+         "t": ", …), and the end arrives at "
+        },
+        {
+         "s": "i",
+         "t": "On Animation Notify"
+        },
+        {
+         "s": "",
+         "t": ". Your own event markers arrive the same way, under the name you gave them."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "Control it",
+     "id": "scripting",
+     "text": "Eight functions under sequence, the same in Lua, Python, HorizonCode and C++. Every one takes the owner — the entity with the Sequence Player. Function Does play(owner) -> started Starts, or resumes from a pause. pause(owner) Holds the clock and the sounds; actors, camera and input lock stay with the cutscene. stop(owner) Ends and rewinds: sounds stop, the camera returns, the lock lifts. This is a skip button. setTime(owner, seconds) Jumps; nothing in between fires. getTime(owner), duration(owner) Where the playhead is, how long the sequence is. isPlaying(owner) True while the clock runs (false when paused). bindSlot(owner, binding, entity) Plays a binding — addressed by its name — with a different entity, e.g. the player character spawned at runtime in place of a stand-in. 0 restores the authored actor. When a cutscene finishes — at its natural end, or when a running one is stopped — the owner receives the animation notify SequenceFinished. Because a skip is stop, whatever waits for the end runs after a skip as well. A looping cutscene never finishes by itself. intro_director.lua local M = {}\n\n-- On the entity with the Sequence Player (Autoplay off).\nfunction M.onStart(self)\n    -- The sequence was authored against a stand-in called \"Hero\".\n    local player = horizon.entity.findByName(\"Player\")\n    horizon.sequence.bindSlot(self.entityId, \"Hero\", player)\n    horizon.sequence.play(self.entityId)\nend\n\nfunction M.onUpdate(self, dt)\n    -- \"Skip\" is an Input Action (Project Settings » Input) bound to a key.\n    if horizon.input.actionPressed(\"Skip\") then\n        horizon.sequence.stop(self.entityId)   -- a skip still finishes\n    end\nend\n\nfunction M.onAnimationNotify(self, name)\n    if name == \"SequenceFinished\" then\n        horizon.scene.load(\"Levels/Chapter1.hescene\", false)\n    end\nend\n\nreturn M intro_director.py import horizon\n\nclass IntroDirector(horizon.Behavior):\n    # On the entity with the Sequence Player (Autoplay off).\n    def on_start(self):\n        # The sequence was authored against a stand-in called \"Hero\".\n        player = horizon.entity.findByName(\"Player\")\n        horizon.sequence.bindSlot(self.entity_id, \"Hero\", player)\n        horizon.sequence.play(self.entity_id)\n\n    def on_update(self, dt):\n        # \"Skip\" is an Input Action (Project Settings » Input) bound to a key.\n        if horizon.input.actionPressed(\"Skip\"):\n            horizon.sequence.stop(self.entity_id)   # a skip still finishes\n\n    def on_animation_notify(self, name):\n        if name == \"SequenceFinished\":\n            horizon.scene.load(\"Levels/Chapter1.hescene\", False) In HorizonCode the same eight are nodes in the Sequence category (Play Sequence, Stop Sequence, …), and the end arrives at On Animation Notify. Your own event markers arrive the same way, under the name you gave them.",
+     "title": "From Scripts"
+    },
+    {
+     "blocks": [
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "With "
+        },
+        {
+         "s": "i",
+         "t": "Editor Remote Control"
+        },
+        {
+         "s": "",
+         "t": " on, an MCP client can read and write sequences. "
+        },
+        {
+         "s": "c",
+         "t": "sequence_info"
+        },
+        {
+         "s": "",
+         "t": " lists every sequence, or returns one as a document — bindings, tracks and who each binding is in the open scene. "
+        },
+        {
+         "s": "c",
+         "t": "sequence_write"
+        },
+        {
+         "s": "",
+         "t": " takes that document back, changed. Actors are named by the entity id "
+        },
+        {
+         "s": "c",
+         "t": "entity_list"
+        },
+        {
+         "s": "",
+         "t": " reports, clips and sounds by their content path, targets and blend curves by name. A document the runtime would get silently wrong — two actors on one slot, keys out of order, a second camera-cut track, content past the end — is refused with the reason, and nothing is written. A sequence open with unsaved edits in a Cinematic tab is refused as well; a clean tab reloads. New sequences come from "
+        },
+        {
+         "s": "c",
+         "t": "asset_create"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      }
+     ],
+     "eyebrow": "Automate",
+     "id": "mcp",
+     "text": "With Editor Remote Control on, an MCP client can read and write sequences. sequence_info lists every sequence, or returns one as a document — bindings, tracks and who each binding is in the open scene. sequence_write takes that document back, changed. Actors are named by the entity id entity_list reports, clips and sounds by their content path, targets and blend curves by name. A document the runtime would get silently wrong — two actors on one slot, keys out of order, a second camera-cut track, content past the end — is refused with the reason, and nothing is written. A sequence open with unsaved edits in a Cinematic tab is refused as well; a clean tab reloads. New sequences come from asset_create.",
+     "title": "From an AI Client"
+    },
+    {
+     "blocks": [
+      {
+       "items": [
+        [
+         {
+          "s": "",
+          "t": "Keys interpolate linearly; there are no curve tangents yet."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "No nested sequences (shots), and no actors spawned only for the cutscene — bind existing entities, or bind at runtime with "
+         },
+         {
+          "s": "c",
+          "t": "bindSlot"
+         },
+         {
+          "s": "",
+          "t": "."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Skeletal sections do not blend into each other, and do not drive root motion."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "No subtitle track — use an event and set the text from a script — and no fade, particle or video-export tracks."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "A sound started by a cutscene cannot begin mid-way: a jump into the middle of a sound skips it."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "The Cinematic tab's preview poses skeletons from the clip alone; layers and IK are applied only when the game plays."
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "A cutscene runs locally on each machine; starting it on every client of a networked game is up to your scripts."
+         }
+        ]
+       ],
+       "k": "ul"
+      }
+     ],
+     "eyebrow": "Know the edges",
+     "id": "limits",
+     "text": "Keys interpolate linearly; there are no curve tangents yet. No nested sequences (shots), and no actors spawned only for the cutscene — bind existing entities, or bind at runtime with bindSlot. Skeletal sections do not blend into each other, and do not drive root motion. No subtitle track — use an event and set the text from a script — and no fade, particle or video-export tracks. A sound started by a cutscene cannot begin mid-way: a jump into the middle of a sound skips it. The Cinematic tab's preview poses skeletons from the clip alone; layers and IK are applied only when the game plays. A cutscene runs locally on each machine; starting it on every client of a networked game is up to your scripts.",
+     "title": "Limits"
+    }
+   ],
+   "summary": "",
+   "title": "Cutscenes"
   },
   {
    "file": "editor.html",

@@ -1150,6 +1150,15 @@ bool isEditorIconMaterial(const UUID& materialId)
 RenderExtractor::RenderExtractor()  = default;
 RenderExtractor::~RenderExtractor() = default;
 
+void RenderExtractor::setContentManager(ContentManager* cm)
+{
+	const uint64_t epoch = cm ? cm->contentEpoch() : 0;
+	if (cm != m_contentManager || epoch != m_sectionMaterialEpoch)
+		m_sectionMaterialMissing.clear();
+	m_sectionMaterialEpoch = epoch;
+	m_contentManager       = cm;
+}
+
 void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspectRatio,
                               const EditorCameraOverride* editorCam)
 {

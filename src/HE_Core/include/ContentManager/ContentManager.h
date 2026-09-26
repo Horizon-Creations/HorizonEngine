@@ -53,6 +53,15 @@ public:
 	// asset, so this never changes the one the ContentManager holds.
 	bool writeAssetTo(RuntimeAsset& asset, const std::string& fullPath) const;
 
+	// A counter that moves whenever files may have appeared under the content
+	// root: every successful saveAsset, and every noteContentChanged() — the
+	// editor calls that after its content refresh (an import, a file copied in,
+	// a pull). For readers that remember a path as "not there" so they do not
+	// retry it every frame (RenderExtractor's section materials): when it
+	// moved, they forget and look once more. Never goes back, starts at 0.
+	uint64_t contentEpoch() const { return m_contentEpoch; }
+	void     noteContentChanged() { ++m_contentEpoch; }
+
 	// Fired after saveAsset() has written the file, with (relativePath, fullPath).
 	// A pure notification: ContentManager knows nothing about who listens or why.
 	// The editor uses it to publish authored-asset changes to a collaboration
@@ -120,6 +129,10 @@ public:
 	// Same contract as the animation clip above: the Sequencer edits the loaded
 	// asset in place, so what it shows is what the Property Animator plays.
 	PropertyAnimClipAsset*       getPropertyAnimClipMutable(HE::UUID id);
+	// A cinematic Sequence, parsed once at load. Mutable for the property clip's
+	// reason: the editor edits the loaded asset and persists it with saveAsset().
+	const SequenceAsset*         getSequence(HE::UUID id) const;
+	SequenceAsset*               getSequenceMutable(HE::UUID id);
 	const ThemeAsset*            getTheme(HE::UUID id) const;
 	ThemeAsset*                  getThemeMutable(HE::UUID id);
 	const BoneMaskAsset*         getBoneMask(HE::UUID id) const;
@@ -197,6 +210,7 @@ public:
 	HE::UUID registerInputMappingContext(InputMappingContextAsset asset);
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
+	HE::UUID registerSequence(SequenceAsset asset);
 	HE::UUID registerParticleGraph(ParticleGraphAsset asset);
 	HE::UUID registerAnimatorStateMachine(AnimatorStateMachineAsset asset);
 	HE::UUID registerStructType(StructTypeAsset asset);
@@ -495,6 +509,7 @@ public:
 	AssetRef<PrefabAsset>        acquirePrefab(HE::UUID id);
 	AssetRef<AnimationClipAsset>      acquireAnimationClip(HE::UUID id);
 	AssetRef<PropertyAnimClipAsset>   acquirePropertyAnimClip(HE::UUID id);
+	AssetRef<SequenceAsset>           acquireSequence(HE::UUID id);
 
 	// Pin bookkeeping — called by AssetRef; do not call directly.
 	void pinAsset(HE::UUID id);
@@ -646,6 +661,7 @@ private:
 	SlotMap<ThemeAsset>              m_themeAssets;
 	SlotMap<BoneMaskAsset>           m_boneMaskAssets;
 	SlotMap<BlendSpaceAsset>         m_blendSpaceAssets;
+	SlotMap<SequenceAsset>           m_sequenceAssets;
 
 	// ── Mounted paks (on-demand streaming) ─────────────────────────────────────
 	struct MountedPak {
@@ -673,6 +689,7 @@ private:
 	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex;
 	std::unordered_map<std::string, HE::UUID>                            m_pathToUUID;
 	std::unordered_map<std::string, std::filesystem::file_time_type>     m_pathMtime;      // disk mtime at last load
+	uint64_t                                                             m_contentEpoch = 0; // see contentEpoch()
 	std::unordered_map<HE::UUID, int>                                    m_pinCounts;      // active AssetRef handles per asset
 
 	// Drop everything that belonged to the project we were pointing at, then
@@ -770,3 +787,4 @@ inline AssetRef<ShaderAsset>        ContentManager::acquireShader(HE::UUID id)  
 inline AssetRef<PrefabAsset>        ContentManager::acquirePrefab(HE::UUID id)        { ensureResident(id); return { this, id, getPrefab(id) }; }
 inline AssetRef<AnimationClipAsset>      ContentManager::acquireAnimationClip(HE::UUID id)     { ensureResident(id); return { this, id, getAnimationClip(id) }; }
 inline AssetRef<PropertyAnimClipAsset>   ContentManager::acquirePropertyAnimClip(HE::UUID id)  { ensureResident(id); return { this, id, getPropertyAnimClip(id) }; }
+inline AssetRef<SequenceAsset>           ContentManager::acquireSequence(HE::UUID id)          { ensureResident(id); return { this, id, getSequence(id) }; }

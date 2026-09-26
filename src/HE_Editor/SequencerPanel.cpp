@@ -151,9 +151,14 @@ void drawControls(PanelState& st, PropertyAnimClipAsset& clip, HE::Ed::Sequencer
 	// render() has pushed this already; pushed again here because the help
 	// audit reads the file top to bottom and this function stands above it.
 	HE::Ed::Help::Scope helpScope("Sequencer");
-	int transformTracks = 0, materialTracks = 0;
+	int transformTracks = 0, materialTracks = 0, otherTracks = 0;
 	for (const PropertyAnimChannel& ch : clip.channels)
-		(Seq::targetGroup(ch.target)[0] == 'T' ? transformTracks : materialTracks)++;
+	{
+		const char* group = Seq::targetGroup(ch.target);
+		if (std::strcmp(group, "Transform") == 0)     ++transformTracks;
+		else if (std::strcmp(group, "Material") == 0) ++materialTracks;
+		else                                          ++otherTracks;   // camera FOV, visibility
+	}
 
 	// ── The transport ────────────────────────────────────────────────────────
 	// Play runs the playhead at the clip's own pace and drives every entity in
@@ -181,9 +186,14 @@ void drawControls(PanelState& st, PropertyAnimClipAsset& clip, HE::Ed::Sequencer
 	fmtTime(nowTxt, sizeof(nowTxt), st.view.playhead, clip.duration);
 	ImGui::TextDisabled("%s / %s", nowTxt, lenTxt);
 	ImGui::SameLine();
-	ImGui::TextDisabled("·  %zu track%s (%d transform, %d material)",
-	                    clip.channels.size(), clip.channels.size() == 1 ? "" : "s",
-	                    transformTracks, materialTracks);
+	if (otherTracks > 0)
+		ImGui::TextDisabled("·  %zu track%s (%d transform, %d material, %d other)",
+		                    clip.channels.size(), clip.channels.size() == 1 ? "" : "s",
+		                    transformTracks, materialTracks, otherTracks);
+	else
+		ImGui::TextDisabled("·  %zu track%s (%d transform, %d material)",
+		                    clip.channels.size(), clip.channels.size() == 1 ? "" : "s",
+		                    transformTracks, materialTracks);
 
 	// The clip's length, editable. It cannot go under the last key — a key
 	// past the end would be one nobody could reach (SequencerTimeline.h,

@@ -20,6 +20,7 @@
 #include "BoneMaskPanel.h"
 #include "BlendSpacePanel.h"
 #include "SequencerPanel.h"
+#include "CinematicPanel.h"
 #include "SkeletalMeshEditorPanel.h"
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
@@ -1010,6 +1011,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{ "Bone Mask",         HE::AssetType::BoneMask },
 			{ "Blend Space",       HE::AssetType::BlendSpace },
 			{ "Property Animation", HE::AssetType::PropertyAnimClip },
+			{ "Sequence",          HE::AssetType::Sequence },
 			{ "Input Action",      HE::AssetType::InputAction },
 			{ "Input Mapping",     HE::AssetType::InputMappingContext },
 			{ "Audio",             HE::AssetType::Audio },
@@ -1105,6 +1107,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				case HE::AssetType::Theme:               return { I.widget,               {0.55f, 0.80f, 0.95f, 1.0f} };
 				case HE::AssetType::BoneMask:            return { I.animationClip,        {0.95f, 0.70f, 0.55f, 1.0f} };
 				case HE::AssetType::BlendSpace:          return { I.animationClip,        {0.95f, 0.55f, 0.40f, 1.0f} };
+				// The property clip's glyph — a timeline — tinted apart until a
+				// cinematic sequence earns its own .tga.
+				case HE::AssetType::Sequence:            return { I.propertyAnimClip,     {0.70f, 0.80f, 1.00f, 1.0f} };
 				case HE::AssetType::Unknown: break; // not an HAsset — try the extension
 			}
 
@@ -1309,7 +1314,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			      AnimatorStateMachineEditorPanel::isAnimatorStateMachineAsset(fullPath) ||
 			      BoneMaskPanel::isBoneMaskAsset(fullPath) ||
 			      BlendSpacePanel::isBlendSpaceAsset(fullPath) ||
-			      SequencerPanel::isSequencerAsset(fullPath)))
+			      SequencerPanel::isSequencerAsset(fullPath) ||
+			      CinematicPanel::isCinematicAsset(fullPath)))
 				return; // no dedicated editor for this type — same no-op the old inline dispatch had
 
 			const std::string tabLabel = std::filesystem::path(fullPath).stem().string();
@@ -2383,6 +2389,10 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// Not a character thing, but animation all the same: a clip the
 				// Sequencer fills with tracks and a Property Animator plays.
 				if (EditorWidgets::menuItem("Property Animation Clip")) tryCreate("NewPropertyAnimation", ".hasset", HE::AssetType::PropertyAnimClip);
+				// A cutscene: several actors, camera cuts, clips, events and
+				// sound on one clock, edited in the Cinematic tab and played
+				// by a Sequence Player component.
+				if (EditorWidgets::menuItem("Sequence")) tryCreate("NewSequence", ".hasset", HE::AssetType::Sequence);
 				ImGui::EndMenu();
 			}
 

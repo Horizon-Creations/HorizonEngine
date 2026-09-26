@@ -107,7 +107,12 @@ public:
 	// Passed in rather than read off `input` because who may act on the mouse is
 	// the caller's decision: a running game always may, the editor only while
 	// play mode holds it. Default {} = no mouse this frame.
-	void tick(const Input& input, float dt, const MouseFrame& mouse = {});
+	// `locked` silences gameplay input for this frame exactly the way a pause
+	// does — the actions marked "run while paused" still arrive. A cutscene with
+	// Lock Player Input passes true (SequenceSystem::locksPlayerInput), so the
+	// player cannot walk out of their own cutscene but can still skip it or
+	// open the pause menu.
+	void tick(const Input& input, float dt, const MouseFrame& mouse = {}, bool locked = false);
 
 	// Destroy the spawned instances (fires Destruct) and drop all state.
 	// Idempotent; begin() may be called again for the next session.

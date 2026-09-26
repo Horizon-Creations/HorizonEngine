@@ -22,6 +22,7 @@
 #include "AnimatorStateMachineEditorPanel.h" // …and the animator tools these two
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
+#include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
@@ -78,6 +79,7 @@
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/RootMotion.h>
+#include <HorizonScene/SequenceSystem.h>
 #include <HorizonScene/AnimationNotify.h>              // kNotifyDominanceAlpha — which half of a blend leads
 #include <HorizonScene/AnimationPreview.h>             // rootMotionPath — the line under the selected figure
 #include <HorizonScene/AnimationIk.h>                  // findJointByName — the head the look-at line starts at
@@ -2779,10 +2781,17 @@ void EditorApplication::OnRender(float dt)
 			// twenty entities is one module, and reloading it twenty times only
 			// costs twenty compiles of the same source.
 			std::unordered_set<std::string> reloadedModules;
+			// One prefab sync per poll, however many prefab files changed —
+			// the pass walks every placement anyway. A reload that arrived
+			// during play is caught up on the first poll after it.
+			bool prefabChanged = m_prefabReloadSyncPending;
 			for (const HE::UUID& id : changed)
 			{
 				switch (contentManager().assetType(id))
 				{
+				case HE::AssetType::Prefab:
+					prefabChanged = true;
+					break;
 				case HE::AssetType::StaticMesh:
 				case HE::AssetType::SkeletalMesh:
 					renderer()->InvalidateMesh(id);
@@ -2828,6 +2837,7 @@ void EditorApplication::OnRender(float dt)
 					break;
 				}
 			}
+			if (prefabChanged) syncPrefabInstancesAfterReload();
 			// A recovery restore rewrote these files; the poll above has put the
 			// new bytes into the ContentManager, so a tab re-reading now gets them.
 			for (const std::string& path : m_reloadTabsAfterPoll)
@@ -3336,7 +3346,9 @@ void EditorApplication::OnRender(float dt)
 				MouseFrame playerMouse = m_playMouseCaptured ? input().mouse() : MouseFrame{};
 				if (!m_playMouseCaptured && m_uiPointerValid && HE::api::input::isRebinding())
 					playerMouse.buttons = input().mouse().buttons;
-				m_playerHost.tick(input(), gameDt, playerMouse);
+				// A cutscene with Lock Player Input silences it like a pause.
+				m_playerHost.tick(input(), gameDt, playerMouse,
+				                  SequenceSystem::locksPlayerInput(m_editorWorld->registry()));
 				// Entity classes: Tick, plus reaping the ones whose entity is gone.
 				m_entityHost.tick(gameDt);
 			}
@@ -3394,11 +3406,18 @@ void EditorApplication::OnRender(float dt)
 			// Notifies are gated on the same session, for the third form of the
 			// same argument: a null queue means they are not even evaluated, so an
 			// editor nobody plays in neither pays for them nor accumulates them.
+			//
+			// Cinematic sequences are the fourth, and the strictest: outside play
+			// a Sequence Player does not advance or write at all, because its
+			// actors would be SAVED wherever the cutscene left them. Scrubbing a
+			// sequence in the editor is the Cinematic tab's preview session.
 			const bool playing = m_animatorHost.running();
 			HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+			HE::SequenceContext   sequences{ &m_audioEngine, m_physicsWorld.get() };
 			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost,
 			                            playing ? &rootMotion : nullptr,
-			                            playing ? &m_animNotifies : nullptr);
+			                            playing ? &m_animNotifies : nullptr,
+			                            playing ? &sequences : nullptr);
 
 			// Immediately after, and not at the collision drain above: that one
 			// sits in the frame BEFORE this phase and would cost every notify a
@@ -7679,6 +7698,7 @@ void EditorApplication::setupMcpTools()
 			HE::AssetType::BoneMask,
 			HE::AssetType::BlendSpace,
 			HE::AssetType::PropertyAnimClip,
+			HE::AssetType::Sequence,
 			HE::AssetType::StructType,
 			HE::AssetType::EnumType,
 			HE::AssetType::SaveGameTemplate,
@@ -7984,6 +8004,32 @@ void EditorApplication::setupMcpTools()
 		return SkeletalMeshEditorPanel::isDirty(rel);
 	};
 	HE::Ed::registerClipTools(m_mcp.registry(), contentManager(), std::move(clips));
+
+	// ── A cutscene ───────────────────────────────────────────────────────────
+	// The four gates of the particle family, plus the one question only a
+	// sequence asks: who its bindings ARE in the open scene. That lookup goes
+	// through findByEntityId like the runtime's, never by name.
+	HE::Ed::McpSequenceHooks seq;
+	seq.isPlaying     = [this] { return m_isPlaying; };
+	seq.lockedByOther = [this](const std::string& rel) {
+		return m_collab.assetLockedByOther(rel);
+	};
+	seq.isDirty = [](const std::string& rel) {
+		return CinematicPanel::isDirtyByContentPath(rel);
+	};
+	seq.reloadFromDisk = [](const std::string& rel) {
+		return CinematicPanel::reloadByContentPath(rel);
+	};
+	seq.findActor = [this](const HE::UUID& id, std::string& name, bool& isCamera) {
+		if (!m_editorWorld) return false;
+		const Entity e = m_editorWorld->findByEntityId(id);
+		if (e == entt::null) return false;
+		auto& reg = m_editorWorld->registry();
+		name     = reg.all_of<NameComponent>(e) ? reg.get<NameComponent>(e).name : std::string();
+		isCamera = reg.all_of<CameraComponent>(e);
+		return true;
+	};
+	HE::Ed::registerSequenceTools(m_mcp.registry(), contentManager(), std::move(seq));
 
 	// ── Making the project run ───────────────────────────────────────────────
 	// The two Build menu actions and the window they both report into. Neither
@@ -9129,6 +9175,12 @@ void EditorApplication::updatePlayCameraController(float dt)
 			SDL_HideCursor();
 	}
 
+	// A cutscene holds the camera: neither the rig nor free flight may touch it
+	// until it hands the view back (SequenceSystem.h, "Camera and input"). After
+	// the capture re-assert above, not before: the mouse stays held through the
+	// cutscene, so the player does not have to click back in when it ends.
+	if (SequenceSystem::ownsCamera(m_editorWorld->registry())) return;
+
 	// A camera rig wins when the scene has one it can drive — PIE has to show the
 	// same camera the shipped game will, or it is not a preview.
 	// Ask POSSESSION, not spawn order: characters come out of the game's own
@@ -9876,26 +9928,50 @@ void EditorApplication::enqueueRetargetOnDisk(const std::string& oldRel,
 	}));
 }
 
-void EditorApplication::syncPrefabInstances(const char* when)
+bool EditorApplication::syncPrefabInstances(const char* when)
 {
-	if (!m_editorWorld) return;
+	if (!m_editorWorld) return false;
 	if (m_collab.inSession())
 	{
 		HE_LOG_INFO(Editor, "Prefab sync skipped (%s): a collaboration session is running and "
 		                    "the pass does not replicate", when);
-		return;
+		return false;
 	}
 	SceneSerializer serializer;
 	SceneSerializer::PrefabSyncReport rep;
 	const size_t synced = serializer.syncPrefabInstances(*m_editorWorld, contentManager(), &rep);
 	// The save-time pass rewrites what a human may have been looking at, so
 	// say when it did — one line, only when something moved.
-	if (synced && (rep.componentsApplied || rep.componentsRemoved || rep.entitiesCreated ||
-	               rep.entitiesRemoved))
+	const bool moved = synced && (rep.componentsApplied || rep.componentsRemoved ||
+	                              rep.entitiesCreated || rep.entitiesRemoved);
+	if (moved)
 		HE_LOG_INFO(Editor, "Prefab sync (%s): %zu instance(s), %zu component(s) applied, "
 		                    "%zu removed, %zu entity/-ies created, %zu removed, %zu override(s) kept",
 		            when, synced, rep.componentsApplied, rep.componentsRemoved,
 		            rep.entitiesCreated, rep.entitiesRemoved, rep.overridesKept);
+	return moved;
+}
+
+void EditorApplication::syncPrefabInstancesAfterReload()
+{
+	if (!m_editorWorld) return;
+	if (m_isPlaying)
+	{
+		m_prefabReloadSyncPending = true;
+		return;
+	}
+	m_prefabReloadSyncPending = false;
+	if (m_editorWorld->registry().view<PrefabInstanceComponent>().empty()) return;
+	// An edit committed this very frame is marked first, as before a save —
+	// or the sync would be what undoes it.
+	recordPrefabEdits();
+	std::vector<uint8_t> before;
+	SceneSerializer serializer;
+	serializer.saveToMemory(*m_editorWorld, before);
+	if (syncPrefabInstances("reload"))
+		m_undo.pushSnapshot(std::move(before), "Prefab Update");
+	// The sync's writes are not a human's (see revertPrefabOverride).
+	m_prefabEditRevision = m_undo.revision();
 }
 
 void EditorApplication::recordPrefabEdits()

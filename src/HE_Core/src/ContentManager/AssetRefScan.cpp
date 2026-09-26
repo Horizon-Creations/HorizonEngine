@@ -31,7 +31,8 @@ bool isJsonPayloadChunk(uint32_t id)
 	return id == HAsset::CHUNK_MGRF || id == HAsset::CHUNK_UIWT || id == HAsset::CHUNK_UIWG
 	    || id == HAsset::CHUNK_HCGR || id == HAsset::CHUNK_IACT || id == HAsset::CHUNK_IMAP
 	    || id == HAsset::CHUNK_PTGR || id == HAsset::CHUNK_ASMG
-	    || id == HAsset::CHUNK_STDF || id == HAsset::CHUNK_ENDF || id == HAsset::CHUNK_SGTP;
+	    || id == HAsset::CHUNK_STDF || id == HAsset::CHUNK_ENDF || id == HAsset::CHUNK_SGTP
+	    || id == HAsset::CHUNK_SEQU;
 }
 
 // Chunks holding plain UTF-8 source with no length prefix (script bodies, shader

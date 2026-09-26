@@ -667,6 +667,42 @@ namespace animator {
     std::vector<std::string> layerNames(Ctx&, Entity e);
 }
 
+// ── Sequence: playing a cutscene ─────────────────────────────────────────────
+// The transport of a Sequence Player component (docs/sequencer-cinematics-plan.md
+// §3.5), a thin layer over SequenceSystem. `e` is the entity carrying the
+// player — the cutscene's owner — never one of its actors.
+//
+// The end arrives as the notify "SequenceFinished" on the owner
+// (SequenceSystem::kSequenceFinished), through OnAnimationNotify, at the natural
+// end and after a stop of a running player; see SequenceSystem.h.
+//
+// Unknown entity or no Sequence Player: the actions do nothing, play answers
+// false, the reads answer 0/false.
+namespace sequence {
+    // Start from the top (or from where setTime put it), or resume a pause.
+    // False without a player, and on a switched-off owner.
+    bool  play(Ctx&, Entity e);
+    void  pause(Ctx&, Entity e);
+    // Stop and rewind to 0. A running cutscene sends SequenceFinished — which is
+    // what a skip key wants.
+    void  stop(Ctx&, Entity e);
+    // Jump; nothing between the old and the new time fires. Clamped to the
+    // sequence's length (wrapped, for a looping player).
+    void  setTime(Ctx&, Entity e, float seconds);
+    float getTime(Ctx&, Entity e);
+    // The sequence's length in seconds; 0 while it is still loading.
+    float duration(Ctx&, Entity e);
+    // The clock is running: false when stopped, finished, or paused.
+    bool  isPlaying(Ctx&, Entity e);
+    // Play the binding named `binding` with `target` instead of the entity the
+    // sequence names — "the player", spawned at runtime, is the reason. By NAME,
+    // the label the editor shows; it may be called before the sequence has
+    // loaded. A target of 0 — this API's "no entity" — clears the override and
+    // the asset's own actor plays again; a target that does not exist is
+    // refused with a warning rather than read as 0.
+    void  bindSlot(Ctx&, Entity e, const std::string& binding, Entity target);
+}
+
 // ── Particles: firing an effect ──────────────────────────────────────────────
 // A Particle System component used to have one control, an inspector checkbox
 // that could turn it OFF. Nothing could turn one on, nothing could fire one, and

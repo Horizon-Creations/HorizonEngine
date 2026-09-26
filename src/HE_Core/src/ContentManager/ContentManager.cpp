@@ -4,6 +4,7 @@
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
 #include "ContentManager/HAsset.h"
 #include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
+#include "Sequence/SequenceJson.h"        // CHUNK_SEQU <-> SequenceAsset
 #include "Hpak/HpakReader.h"
 #include "Hpak/ProjectExporter.h"        // sceneUuidForPath + the reserved pak entry names
 #include "JobSystem/JobSystem.h"
@@ -616,6 +617,31 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			}
 		}
 		handle = m_propAnimClipAssets.insert(std::move(a)); break;
+	}
+	case HE::AssetType::Sequence:
+	{
+		// No chunk is an empty sequence (a stub from the Content Browser, or a
+		// file older than the chunk). A chunk that does not parse is a FAILED
+		// load, not an empty sequence: registering it empty would let the next
+		// editor save overwrite the author's file with nothing.
+		SequenceAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_SEQU))
+		{
+			const std::string text(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+			int dropped = 0;
+			if (!HE::sequenceFromJson(text, a, &dropped))
+			{
+				HE_LOG_ERROR(Asset, "Sequence '%s': the SEQU chunk is not a readable JSON "
+				                    "document — not loaded, so a save cannot overwrite it",
+				             relativePath.c_str());
+				return HE::UUID();
+			}
+			if (dropped > 0)
+				HE_LOG_WARN(Asset, "Sequence '%s': %d entr%s this build cannot use (unknown "
+				                   "track kind or target, keys without values) — skipped",
+				            relativePath.c_str(), dropped, dropped == 1 ? "y" : "ies");
+		}
+		handle = m_sequenceAssets.insert(std::move(a)); break;
 	}
 	default:
 		return HE::UUID();
@@ -1457,6 +1483,17 @@ void ContentManager::expandFrontier(HE::UUID id)
 			for (HE::UUID t : a->textureIds) enqueue(t);
 		}
 		break;
+	case HE::AssetType::Sequence:
+		// The clips and sounds a cutscene plays: a scene names only the sequence
+		// (SceneSystems::collectAssetRefs), and a clip still streaming when its
+		// section comes up is an actor that does not move.
+		if (const auto* a = getSequence(id))
+		{
+			std::vector<HE::UUID> refs;
+			HE::sequenceAssetRefs(*a, refs);
+			for (HE::UUID r : refs) enqueue(r);
+		}
+		break;
 	default:
 		break;
 	}
@@ -1792,6 +1829,15 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		w.addChunk(HAsset::CHUNK_PANM, b.data(), b.size());
 		break;
 	}
+	case HE::AssetType::Sequence:
+	{
+		// Written even when empty, for the clip's reason: a sequence whose tracks
+		// were all removed keeps its length and bindings rather than turning back
+		// into a stub.
+		const std::string text = HE::sequenceToJson(static_cast<SequenceAsset&>(asset));
+		w.addChunk(HAsset::CHUNK_SEQU, text.data(), text.size());
+		break;
+	}
 	default:
 		return false;
 	}
@@ -1850,6 +1896,7 @@ bool ContentManager::saveAsset(RuntimeAsset& asset)
 	}
 	HE_LOG_INFO(Asset, "Saved asset '%s' (type %u) to '%s'",
 	            asset.path.c_str(), static_cast<unsigned>(typeId), fullPath.c_str());
+	noteContentChanged();   // may be the file somebody looked for and did not find
 
 	// Tell whoever is listening that this asset's bytes changed. Fired only on a
 	// successful write, so a collaboration session never publishes a save that
@@ -2075,6 +2122,8 @@ const AnimationClipAsset*      ContentManager::getAnimationClip(HE::UUID id) con
 AnimationClipAsset*            ContentManager::getAnimationClipMutable(HE::UUID id)     { return lookupAssetMutable(m_handleToUUID, m_animClipAssets, id); }
 const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) const   { return lookupAsset(m_handleToUUID, m_propAnimClipAssets, id); }
 PropertyAnimClipAsset*         ContentManager::getPropertyAnimClipMutable(HE::UUID id)  { return lookupAssetMutable(m_handleToUUID, m_propAnimClipAssets, id); }
+const SequenceAsset*           ContentManager::getSequence(HE::UUID id) const           { return lookupAsset(m_handleToUUID, m_sequenceAssets, id); }
+SequenceAsset*                 ContentManager::getSequenceMutable(HE::UUID id)          { return lookupAssetMutable(m_handleToUUID, m_sequenceAssets, id); }
 const ThemeAsset*            ContentManager::getTheme(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_themeAssets, id); }
 ThemeAsset*                  ContentManager::getThemeMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_themeAssets, id); }
 const BoneMaskAsset*         ContentManager::getBoneMask(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_boneMaskAssets, id); }
@@ -2180,6 +2229,7 @@ HE::UUID ContentManager::registerStructType(StructTypeAsset asset) { return regi
 HE::UUID ContentManager::registerSaveGameTemplate(SaveGameTemplateAsset asset) { return registerRuntimeAsset(m_saveTemplateAssets, std::move(asset), HE::AssetType::SaveGameTemplate); }
 HE::UUID ContentManager::registerTheme(ThemeAsset asset) { return registerRuntimeAsset(m_themeAssets, std::move(asset), HE::AssetType::Theme); }
 HE::UUID ContentManager::registerBoneMask(BoneMaskAsset asset) { return registerRuntimeAsset(m_boneMaskAssets, std::move(asset), HE::AssetType::BoneMask); }
+HE::UUID ContentManager::registerSequence(SequenceAsset asset) { return registerRuntimeAsset(m_sequenceAssets, std::move(asset), HE::AssetType::Sequence); }
 HE::UUID ContentManager::registerBlendSpace(BlendSpaceAsset asset) { return registerRuntimeAsset(m_blendSpaceAssets, std::move(asset), HE::AssetType::BlendSpace); }
 HE::UUID ContentManager::registerEnumType(EnumTypeAsset asset)     { return registerRuntimeAsset(m_enumTypeAssets,   std::move(asset), HE::AssetType::EnumType);   }
 
@@ -2244,7 +2294,7 @@ bool ContentManager::unloadAsset(HE::UUID id)
 		tryRemove(m_prefabAssets)       || tryRemove(m_inputActionAssets) ||
 		tryRemove(m_inputMappingAssets) || tryRemove(m_particleGraphAssets) ||
 		tryRemove(m_animatorStateMachineAssets) || tryRemove(m_boneMaskAssets) ||
-		tryRemove(m_blendSpaceAssets);
+		tryRemove(m_blendSpaceAssets)   || tryRemove(m_sequenceAssets);
 	if (!removed)
 		return false;
 
@@ -2545,6 +2595,7 @@ void ContentManager::retargetAssetReferencesInMemory(const std::string& oldRel,
 	rekeyAssetPaths(m_audioAssets);        rekeyAssetPaths(m_fontAssets);
 	rekeyAssetPaths(m_shaderAssets);       rekeyAssetPaths(m_prefabAssets);
 	rekeyAssetPaths(m_animClipAssets);     rekeyAssetPaths(m_propAnimClipAssets);
+	rekeyAssetPaths(m_sequenceAssets);
 }
 
 // ─── loadAssetFromMemory ─────────────────────────────────────────────────────
@@ -2792,7 +2843,8 @@ void ContentManager::forgetProjectContent()
 	m_audioAssets.clear();            m_fontAssets.clear();
 	m_shaderAssets.clear();           m_prefabAssets.clear();
 	m_animClipAssets.clear();         m_propAnimClipAssets.clear();
-	m_structTypeAssets.clear();       m_enumTypeAssets.clear();
+	m_sequenceAssets.clear();
+	m_structTypeAssets.clear();      m_enumTypeAssets.clear();
 	m_saveTemplateAssets.clear();
 
 	// …and every index that pointed into them. m_pathToUUID is the one that

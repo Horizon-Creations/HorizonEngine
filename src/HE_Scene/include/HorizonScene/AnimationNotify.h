@@ -65,6 +65,16 @@ using NotifyQueue = std::vector<AnimationNotifyEvent>;
 void collectNotifies(const AnimationClipAsset& clip, uint32_t entity,
                      float tPrev, float tEnd, bool includeStart, NotifyQueue& out);
 
+// The same rule over a bare list on a timeline of `duration` seconds — what
+// collectNotifies runs on the clip's own notifies. Separate so a timeline that
+// is not an animation clip (a cinematic Sequence's event track) fires by the
+// identical rule instead of a second copy of it. `duration` is where a lap ends
+// and where a notify state is clamped; a caller that does not loop clamps
+// `tEnd` itself, exactly as it does for a clip.
+void collectNotifySpan(const std::vector<AnimationNotify>& notifies, float duration,
+                       uint32_t entity, float tPrev, float tEnd, bool includeStart,
+                       NotifyQueue& out);
+
 // Which half of a crossfade is allowed to fire: the outgoing playhead below this
 // weight, the incoming one at or above it. Only one of them, because letting both
 // fire means two footsteps in every single transition — the complaint this whole
