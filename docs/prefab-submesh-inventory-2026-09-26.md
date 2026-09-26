@@ -161,3 +161,44 @@ Nur ein Vorschlag, die Planung macht der Chefchen. Reihenfolge nach Wirkung pro 
 7. **Submesh-Randpunkte** (je S–M): Slot-Namen im MSEC-Chunk, Sichtbarkeit pro Section
    (`MaterialComponent`-Maske), Import-Option „als Einzel-Meshes + Prefab".
 8. **Isolierter Prefab-Editor** (L): eigener Tab mit Wegwerf-Welt wie der Klassen-Tab.
+
+---
+
+## 4. Stand nach Schritt 2 (26.09.2026)
+
+Thema 83, Schritt 2: jeder Restpunkt einzeln bewertet. Gebaut wurden `he_tests` und
+`HorizonEditor` im Worktree (macOS, Debug), gelaufen sind die Testdateien `test_prefab.cpp`,
+`test_scene_serializer.cpp`, `test_mcp_tools_prefab.cpp`, `test_outliner_filter.cpp`,
+`test_editor_help.cpp` und `test_culling.cpp`, **nicht** die ganze Suite und **kein** Editor-Lauf.
+Was nur kompiliert ist, steht dabei.
+
+### Prefab
+
+| # | Punkt | Urteil | Beleg |
+|---|---|---|---|
+| 2 | Verschachtelte Prefabs | **Defekt belegt und behoben.** Der Test war in der Reihenfolge „innen zuerst" rot: O schrieb seine eingefrorene Kopie über die neuen I-Werte (Wert, Name, Range). Jetzt wendet O auf Records einer lebenden inneren Platzierung nur an, was sein Autor dort geändert hat (Override-Liste im Nested-Block von O's Blob) plus was I's Sync nie schreibt (Transform der inneren Wurzel), und übergibt die Marker an die Tabelle der inneren Platzierung. Zweiter Defekt dabei gefunden und behoben: ein Record, den I gewinnt und O später per Push übernimmt, wurde von beiden Syncs angelegt (zwei Kopien, beide Reihenfolgen). | `a28a4bb7`, `b9c045b8`; 6 Tests `PrefabNested:*`, je beide Sync-Reihenfolgen; Negativkontrolle für „frisch angelegte innere Platzierung" |
+| 4 | Änderung auf der Platte zieht nicht nach | **Behoben** für Hot-Reload: ein Sync pro Poll, wenn ein Prefab neu gelesen wurde; Undo-Eintrag „Prefab Update" nur, wenn sich etwas bewegt hat (`EditorUndo::pushSnapshot`), weil der Poll auch ein eben selbst gepushtes Prefab neu liest (`saveAsset` setzt die gemerkte mtime nicht). Während Play aufgeschoben bis zum ersten Poll danach. Peer-Update (`applyAssetBytes`) bleibt ohne Sync: es kommt nur in Sessions vor, und dort ist der Sync ganz aus (Punkt 1). | `e4dc5e87`; **nur kompiliert**, der Pfad Hot-Reload → Sync ist nicht zur Laufzeit gesehen (der Sync selbst ist getestet) |
+| 3 | „Save as Prefab" verknüpft die Quelle nicht | **Behoben** im Outliner: `SceneSerializer::linkPrefabSource` stempelt Identitäts-Bindungen über die Records des geschriebenen Blobs, mit Undo-Snapshot; nicht während Play, nicht in Sessions. MCP `prefab_save` bleibt bewusst beim dokumentierten „die Szene wird nicht geändert" (Weltänderungen laufen dort über `EditorCommands`), die Beschreibung sagt jetzt, dass es darin vom Outliner abweicht. Nebenbefund: die Beschreibung von `prefab_instances` behauptete noch, Platzierungen folgten dem Asset nicht; korrigiert. Hilfetext `outliner.prefab` ergänzt. | `369750aa`; Tests `PrefabSaveAs:*` (Identität, Sync ohne Änderung, Push in beide Richtungen, Neuverknüpfung, verschachtelte behält ihren Link) |
+| 5 | Export nimmt Szenen, wie sie auf der Platte liegen | **Behoben.** Der Export lädt jede Szene ohnehin in eine Wegwerf-Welt; dazwischen läuft jetzt `syncPrefabInstances` gegen den ContentManager. Die Szenendatei bleibt unverändert, das Export-Log sagt, wenn etwas nachgezogen wurde. | `b5df80d3`; **nur kompiliert**, kein Export-Lauf |
+| 1 | Keine Propagation in Collab-Sessions | **Offen, eigener Schritt (L).** Der Sync müsste über `EditorCommands` laufen oder nur beim Asset-Besitzer, mit Replikation als Entity-Updates. Das ist ein Umbau der Replikationsseite, kein Rand. | — |
+| 6 | Kein isolierter Prefab-Bearbeitungsmodus | **Offen, eigener Schritt (L).** Eigener Tab mit Wegwerf-Welt wie der Klassen-Tab; Push-to-Prefab über eine Instanz deckt den Arbeitsablauf heute ab. | — |
+| 7 | Kein Prefab-Spawn aus Skripten | **Offen, eigener Schritt (M).** Neben den vier Registry-Stellen (Merkliste „Neue Registry-Row") braucht es im gepackten Spiel ein Prefab im Pak, das nur per Pfad aus einem Skript genannt wird, also eine Entscheidung zum Referenz-Abschluss beim Export. Zusammen mit Submesh-Punkt 1 als ein Schritt sinnvoll. | — |
+
+### Submeshes
+
+| # | Punkt | Urteil | Beleg |
+|---|---|---|---|
+| 5a | Slot-Material, das erst nach dem ersten Zeichnen erscheint | **Bestätigt und behoben.** Der Extractor vergaß seine Fehlliste nur bei einem anderen ContentManager, also praktisch erst beim Neustart. Jetzt `ContentManager::contentEpoch()`, bewegt von jedem erfolgreichen `saveAsset` und vom Content-Refresh des Editors (Import, Pull, kopierte Datei); der Extractor leert seine Liste, wenn es sich bewegt hat, und schaut pro fehlendem Pfad einmal neu. | `3a0cf50a`; Test „a slot material that appears after first sight …" in `test_culling.cpp` |
+| 5b | Slot mit verwaistem Pfad lässt sich nicht leeren | **Bestätigt und behoben.** Das Asset-Feld bietet „(none)"/Clear nur für eine aufgelöste UUID. Der Mesh-Tab zeigt neben „(missing: …)" jetzt einen eigenen Clear-Knopf (`setSlot` mit Null-UUID leerte den Pfad schon). | `028b21c9`; **nur kompiliert**, UI nicht gesehen |
+| 5c | D3D/Vulkan-Skinned-Schleifen nur per CI kompiliert | **Unverändert offen**, braucht Windows-Hardware. | — |
+| 1 | Kein Material-Tausch aus Skripten | **Offen, eigener Schritt (M)**, zusammen mit Prefab-Punkt 7: `material.set(entity, path)` / `material.setSlot(entity, slot, path)` als Registry-Rows. Die Datenseite ist fertig (`MaterialComponent::slotOverrides`, der Extractor liest sie jeden Frame). | — |
+| 2 | Section ausblenden | **Offen, Feature (S–M).** Maske auf `MaterialComponent`, Skip im Extractor, Checkbox in der Slot-Liste. Kein Defekt, ein transparentes Material ist der heutige Umweg. | — |
+| 3 | Slots haben keine Namen | **Offen, Feature (M).** Formatänderung am MSEC-Chunk plus Importer (glTF-Materialname, Assimp) plus Anzeige. | — |
+| 4 | Kein „als Einzel-Meshes importieren" | **Offen, Feature (M–L).** Import-Option, die pro Node/Primitive ein Asset und ein Prefab daraus schreibt. | — |
+
+**Fazit:** Von den Randpunkten mit Fehlverhalten (verschachtelte Prefabs, Nachziehen von der
+Platte, Save-as-Prefab, Export, Slot-Material spät, Slot nicht leerbar) ist keiner mehr offen.
+Übrig sind Erweiterungen: Skript-API (M, ein Schritt für Prefab-Spawn und Material-Tausch),
+Section-Sichtbarkeit, Slot-Namen, Einzel-Mesh-Import, dazu die zwei großen Umbauten
+Collab-Propagation und isolierter Prefab-Editor. Vorschlag für den Chefchen: Skript-API als
+nächster Schritt, die übrigen als eigene Themen.
