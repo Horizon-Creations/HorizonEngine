@@ -2287,6 +2287,13 @@ struct D3D12RendererImpl
             // Back to the chain's root signature (the SRV heap stays bound).
             cl->SetGraphicsRootSignature(postFxRootSig.Get());
             aaSrcSlot = k_taaSrvHistory + static_cast<UINT>(cur);
+            // One line per session, so a capture log shows TAA really ran.
+            static bool s_taaLogged = false;
+            if (!s_taaLogged)
+            {
+                s_taaLogged = true;
+                HE_LOG_INFO(RHI, "D3D12Renderer: TAA resolve active (%ux%u)", w, h);
+            }
             // This frame's result IS next frame's history: flip the ping-pong.
             taaHistoryCur   = prev;
             taaHistoryValid = true;

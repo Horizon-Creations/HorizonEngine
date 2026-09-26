@@ -6649,6 +6649,13 @@ void D3D11Renderer::DrawViewportFrame()
             ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr);
             ID3D11ShaderResourceView* nulls[3] = {};
             p.context->PSSetShaderResources(0, 3, nulls);
+            // One line per session, so a capture log shows TAA really ran.
+            static bool s_taaLogged = false;
+            if (!s_taaLogged)
+            {
+                s_taaLogged = true;
+                HE_LOG_INFO(RHI, "D3D11Renderer: TAA resolve active (%ux%u)", p.viewportW, p.viewportH);
+            }
             // This frame's result IS next frame's history: flip the ping-pong.
             aaSrc = p.taaHistorySRV[cur].Get();
             p.taaHistoryCur   = prev;

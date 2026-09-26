@@ -767,6 +767,13 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
             aaSet = m_taaSharpenDS[cur];
+            // One line per session, so a capture log shows TAA really ran.
+            static bool s_taaLogged = false;
+            if (!s_taaLogged)
+            {
+                s_taaLogged = true;
+                HE_LOG_INFO(RHI, "VulkanRenderer: TAA resolve active (%ux%u)", m_viewportW, m_viewportH);
+            }
             // This frame's result IS next frame's history: flip the ping-pong.
             m_taaHistoryCur   = prev;
             m_taaHistoryValid = true;
@@ -3963,7 +3970,9 @@ void VulkanRenderer::createTaaPipelines(VkShaderModule fullscreenVS)
     makeFullscreen(shpFS, m_postFxPipeLayout,     m_postFxFinalRP, m_taaSharpenPipe);
     releaseModules();
 
-    if (!taaReady())
+    // Not taaReady(): that also asks m_postFxReady, which createPostFXPipelines
+    // sets only AFTER this call — it would tear down a complete set.
+    if (!(m_taaVelocityRP && m_taaVelocityPipe && m_taaResolvePipe && m_taaSharpenPipe && m_taaDSPool))
     {
         HE_LOG_WARN(RHI, "%s", "VulkanRenderer: TAA pipelines incomplete — temporal AA unavailable");
         destroyTaaPipelines();
