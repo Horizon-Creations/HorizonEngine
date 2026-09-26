@@ -191,6 +191,10 @@ vorgeschlagen. Stand:
   doppelte und Aliase weg, die gleich einem lebenden Namen sind.
 - **Eine Regel fuer alle Mehrdeutigkeiten:** ein lebender Name gewinnt immer.
   "x→y umbenannt, dann neues x angelegt" gibt alte x-Daten an das neue x.
+  Und ein Alias hat genau einen Besitzer: `noteFieldRename`/`noteEntryRename`
+  nehmen ihn beim Buchen allen anderen Zeilen weg ("x→a, spaeter neues x→y":
+  x gehoert y). Haendisch doppelt eingetragene Aliase loesen alle Leser gleich
+  auf, erstes Feld in Definitionsreihenfolge.
 - **Leser:** `findField`/`findEntry` suchen erst den aktuellen Namen, dann die
   Aliase. `StructDef::storedKey` liefert fuer name-keyed Speicher den Schluessel
   (aktueller Name, sonst neuester vorhandener Alias). Genutzt in `save.load`
@@ -221,6 +225,13 @@ vorgeschlagen. Stand:
 - Skriptquelltext (`horizon.enums.X.Alt`, Lua/Python-Tabellen mit alten
   Feldnamen, `save.get("alt")`) wird nicht umgeleitet. Bewusst: `save.get`
   mit altem Namen bleibt ein lauter Fehler.
+- Ein Graph, der beim Umbenennen schon im Editor offen ist, behaelt seine
+  Knoten-`params` (Get/Set Struct Field, Pins) bis zum naechsten Laden; nach
+  dem Speichern eines Typs synchronisiert kein offener Graph-Tab neu. Das galt
+  schon vorher fuer Feld-Einfuegen/-Loeschen. Die Daten (`structDefaults`,
+  Enum-Defaults) sind ueber die Alias-Leser trotzdem richtig.
+- Gebaut und getestet: `he_tests` (24 Testdateien gruen) und
+  `TypeAssetPanel.cpp.o` einzeln. Voller Editor-/Game-Link und CI nicht gelaufen.
 
 ## Empfohlene Reihenfolge
 

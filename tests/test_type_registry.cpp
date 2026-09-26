@@ -319,6 +319,39 @@ TEST_CASE("TypeRegistry: renamed fields and entries answer to their former names
     CHECK(s.findField("level") == &s.fields[2]);
 }
 
+TEST_CASE("TypeRegistry: an alias has one owner — booking moves it, readers settle duplicates")
+{
+    // x → a, later a NEW field named x → y. The name x now belongs to y (it
+    // held it last); a must let go, or a save's "x" would load into both.
+    StructDef s;
+    StructField a; a.name = "a"; a.type = PinType::Int;
+    StructField y; y.name = "y"; y.type = PinType::Int;
+    s.fields = { a, y };
+    HE::noteFieldRename(s, 0, "x");
+    CHECK(s.fields[0].formerNames == std::vector<std::string>{ "x" });
+    HE::noteFieldRename(s, 1, "x");
+    CHECK(s.fields[0].formerNames.empty());
+    CHECK(s.fields[1].formerNames == std::vector<std::string>{ "x" });
+    CHECK(s.findField("x") == &s.fields[1]);
+
+    // A hand-edited file where both still list it: exactly one field reads the
+    // value (the first, which is also what findField and the graph retarget pick).
+    s.fields[0].formerNames = { "x" };
+    auto has = [](const std::string& k) { return k == "x"; };
+    CHECK(s.storedKey(s.fields[0], has) == "x");
+    CHECK(s.storedKey(s.fields[1], has).empty());
+
+    EnumDef e;
+    e.entries = { { "Wand", 1 }, { "Rod", 2 } };
+    HE::noteEntryRename(e, 0, "Staff");
+    HE::noteEntryRename(e, 1, "Staff");
+    CHECK(e.entries[0].formerNames.empty());
+    CHECK(e.findEntry("Staff")->name == "Rod");
+    HE::noteEntryRename(e, 1, "");                     // new row: no-op
+    HE::noteEntryRename(e, 1, "Rod");                  // unchanged: no-op
+    CHECK(e.entries[1].formerNames == std::vector<std::string>{ "Staff" });
+}
+
 TEST_CASE("TypeRegistry: formerNames round-trip, and a never-renamed def keeps its bytes")
 {
     EnumDef e;

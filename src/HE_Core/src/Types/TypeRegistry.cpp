@@ -72,9 +72,38 @@ std::string StructDef::storedKey(const StructField& f,
 {
     if (has(f.name)) return f.name;
     // Newest first: data written after the latest rename beats an older copy.
+    // An alias counts only if it resolves to THIS field: not a live name, and
+    // not claimed by an earlier field too — otherwise two fields would both
+    // read the one stored value (findField settles it, first in order).
     for (auto it = f.formerNames.rbegin(); it != f.formerNames.rend(); ++it)
-        if (!it->empty() && !isLiveName(*it) && has(*it)) return *it;
+        if (!it->empty() && findField(*it) == &f && has(*it)) return *it;
     return {};
+}
+
+namespace {
+
+template <class Rows>
+void noteRowRename(Rows& rows, size_t index, const std::string& oldName)
+{
+    if (index >= rows.size() || oldName.empty() || oldName == rows[index].name) return;
+    noteRename(rows[index].formerNames, oldName, rows[index].name);
+    for (size_t j = 0; j < rows.size(); ++j)
+    {
+        if (j == index) continue;
+        auto& fn = rows[j].formerNames;
+        fn.erase(std::remove(fn.begin(), fn.end(), oldName), fn.end());
+    }
+}
+
+} // namespace
+
+void noteFieldRename(StructDef& def, size_t index, const std::string& oldName)
+{
+    noteRowRename(def.fields, index, oldName);
+}
+void noteEntryRename(EnumDef& def, size_t index, const std::string& oldName)
+{
+    noteRowRename(def.entries, index, oldName);
 }
 
 // ─── Registry storage ────────────────────────────────────────────────────────

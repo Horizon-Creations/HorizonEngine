@@ -58,12 +58,17 @@ std::vector<std::string> rowNames(const Rows& rows)
 }
 
 // Book every row whose name differs from the one it was saved under.
-template <class Rows>
-void bookRenames(Rows& rows, std::vector<std::string>& savedNames)
+void bookRenames(HE::EnumDef& def, std::vector<std::string>& savedNames)
 {
-	savedNames.resize(rows.size());
-	for (size_t i = 0; i < rows.size(); ++i)
-		HE::noteRename(rows[i].formerNames, savedNames[i], rows[i].name);
+	savedNames.resize(def.entries.size());
+	for (size_t i = 0; i < def.entries.size(); ++i)
+		HE::noteEntryRename(def, i, savedNames[i]);
+}
+void bookRenames(HE::StructDef& def, std::vector<std::string>& savedNames)
+{
+	savedNames.resize(def.fields.size());
+	for (size_t i = 0; i < def.fields.size(); ++i)
+		HE::noteFieldRename(def, i, savedNames[i]);
 }
 
 // "Formerly: a, b" — the aliases a row still answers to.
@@ -122,7 +127,7 @@ bool saveState(PanelState& st, AppContext& ctx)
 		if (!a) return false;
 		st.enumDef.name = st.name;
 		st.enumDef.assetPath = st.relPath;
-		bookRenames(st.enumDef.entries, st.savedNames);
+		bookRenames(st.enumDef, st.savedNames);
 		a->json = HE::TypeRegistry::enumToJson(st.enumDef);
 		if (!ctx.contentManager->saveAsset(*a)) return false;
 		reg.registerEnum(st.enumDef);
@@ -135,7 +140,7 @@ bool saveState(PanelState& st, AppContext& ctx)
 		if (!a) return false;
 		st.structDef.name = st.name;
 		st.structDef.assetPath = st.relPath;
-		bookRenames(st.structDef.fields, st.savedNames);
+		bookRenames(st.structDef, st.savedNames);
 		a->json = HE::TypeRegistry::structToJson(st.structDef);
 		if (!ctx.contentManager->saveAsset(*a)) return false;
 		st.savedNames = rowNames(st.structDef.fields);
@@ -154,7 +159,7 @@ bool saveState(PanelState& st, AppContext& ctx)
 		}
 		StructTypeAsset* a = ctx.contentManager->getStructTypeMutable(st.assetId);
 		if (!a) return false;
-		bookRenames(st.structDef.fields, st.savedNames);
+		bookRenames(st.structDef, st.savedNames);
 		a->json = HE::TypeRegistry::structToJson(st.structDef);
 		if (!ctx.contentManager->saveAsset(*a)) return false;
 		reg.registerStruct(st.structDef);
@@ -230,11 +235,15 @@ void defaultValueEditor(HE::StructField& f, bool& dirty)
 			ImGui::TextDisabled("pick an enum first");
 			break;
 		}
-		const char* shown = v.s.empty() ? ed.entries.front().name.c_str() : v.s.c_str();
+		// A default written before the entry was renamed shows (and is matched
+		// as) the entry it resolves to — the old name stays valid via the alias.
+		const HE::EnumEntry* live = v.s.empty() ? nullptr : ed.findEntry(v.s);
+		const std::string& cur = live ? live->name : v.s;
+		const char* shown = v.s.empty() ? ed.entries.front().name.c_str() : cur.c_str();
 		if (ImGui::BeginCombo("##def", shown))
 		{
 			for (const auto& e : ed.entries)
-				if (ImGui::Selectable(e.name.c_str(), e.name == v.s))
+				if (ImGui::Selectable(e.name.c_str(), e.name == cur))
 				{ v.s = e.name; dirty = true; }
 			ImGui::EndCombo();
 		}

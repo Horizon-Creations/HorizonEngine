@@ -633,8 +633,7 @@ void addFieldSet(McpToolRegistry& registry, ContentManager& content,
 		// Updated in place: everything the call does not mention keeps its value,
 		// so setting a default cannot reset a type and vice versa.
 		HE::StructField f = existing ? *at : HE::StructField{};
-		if (renaming) HE::noteRename(f.formerNames, renameFrom, name);
-		f.name = name;
+		f.name = name;   // a rename is booked once the row is back in place, below
 
 		const std::string typeArg = strArg(args, "type");
 		if (!typeArg.empty())
@@ -745,7 +744,12 @@ void addFieldSet(McpToolRegistry& registry, ContentManager& content,
 		f.defaultValue.keyTypeName = f.keyTypeName;
 
 		int index = -1;
-		if (existing) *at = std::move(f);
+		if (existing)
+		{
+			*at = std::move(f);
+			if (renaming)
+				HE::noteFieldRename(d.structDef, static_cast<size_t>(at - fields.begin()), renameFrom);
+		}
 		else
 		{
 			index = intArg(args, "index", -1);
@@ -879,8 +883,8 @@ void addEnumSet(McpToolRegistry& registry, ContentManager& content,
 		const bool existing = at != entries.end();
 		if (renaming)
 		{
-			HE::noteRename(at->formerNames, renameFrom, name);
 			at->name = name;
+			HE::noteEntryRename(d.enumDef, static_cast<size_t>(at - entries.begin()), renameFrom);
 		}
 
 		int value;

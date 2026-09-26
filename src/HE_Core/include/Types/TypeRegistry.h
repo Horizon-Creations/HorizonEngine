@@ -118,6 +118,15 @@ struct HE_API StructDef
                           const std::function<bool(const std::string&)>& has) const;
 };
 
+// Book the rename of row `index` (already carrying its NEW name) from
+// `oldName`: noteRename on that row, and the old name is taken OFF every other
+// row. An alias has exactly one owner — the row that held the name last — so
+// "x→a, later a new x→y" leaves x pointing at y, never at both. What the panel
+// and the MCP tools call; hand-edited duplicates are settled by the readers
+// (findField/findEntry: first in definition order).
+HE_API void noteFieldRename(StructDef& def, size_t index, const std::string& oldName);
+HE_API void noteEntryRename(EnumDef& def, size_t index, const std::string& oldName);
+
 // Process-global registry of every loaded struct/enum definition. Thread-safe
 // (script bootstrap and codegen run off the main thread).
 class HE_API TypeRegistry
