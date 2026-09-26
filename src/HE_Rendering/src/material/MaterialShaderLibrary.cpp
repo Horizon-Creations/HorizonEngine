@@ -198,9 +198,9 @@ MaterialShaderLibrary::Compiled toCompiled(he::shaderc::Result&& r)
 constexpr const char* kLightingPreamble = R"(
 layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 sunDir;    // xyz = direction TO the sun (normalized); w = engine time (s)
-    vec4 sunColor;  // rgb = sun radiance
-    vec4 ambient;   // rgb = ambient / sky fill
-    vec4 camPos;    // xyz = camera world position
+    vec4 sunColor;  // rgb = sun radiance; w = wind direction X (unit, world)
+    vec4 ambient;   // rgb = ambient / sky fill; w = wind direction Z (unit, world)
+    vec4 camPos;    // xyz = camera world position; w = wind strength (EnvironmentSettings::windSpeed)
     vec4 lightPos[8];    // xyz = position, w = type (0 dir / 1 point / 2 spot)
     vec4 lightDir[8];    // xyz = travel direction, w = cos(spot half angle)
     vec4 lightColor[8];  // rgb = colour, w = intensity
@@ -717,8 +717,9 @@ std::string injectPreamble(const std::string& src)
 
 namespace
 {
-// Blocks the WPO body may reference (Time = heLight.sunDir.w, params). Vertex-stage
-// bindings 8/9 avoid the fragment slots; Metal pins them to vertex buffers 2/3.
+// Blocks the WPO body may reference (Time = heLight.sunDir.w, wind = the .w of
+// sunColor/ambient/camPos, params). Vertex-stage bindings 8/9 avoid the fragment
+// slots; Metal pins them to vertex buffers 2/3.
 constexpr const char* kWpoUniforms = R"(layout(std140, set = 0, binding = 8) uniform HeLighting {
     vec4 sunDir; vec4 sunColor; vec4 ambient; vec4 camPos;
 } heLight;

@@ -155,6 +155,17 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::Backdrop, "Backdrop", "UI",
           { { "Radius", F::Float, 8.0f } }, { { "Color", F::Vec3, 0 } }, 0 },
 
+        // ── v12: foliage wind ──
+        // "Landscape", beside Landscape Layer Blend: the palette already has
+        // that group, and grass is what these are for.
+        { MatNodeType::Wind, "Wind", "Landscape",
+          {}, { { "Direction", F::Vec3, 0 }, { "Strength", F::Float, 0 },
+                { "Vector", F::Vec3, 0 } }, 0 },
+        { MatNodeType::WindSway, "Wind Sway", "Landscape",
+          { { "Amount", F::Float, 0.1f }, { "Frequency", F::Float, 0.8f },
+            { "Bend Height", F::Float, 1.0f }, { "Mask", F::Float, 1.0f } },
+          { { "Offset", F::Vec3, 0 } }, 0 },
+
         // ── v5: baked constants, parameter types, logic ──
         { MatNodeType::ConstBool, "Bool", "Constant",
           {}, { { "Out", F::Float, 0 } }, 1 }, // p[0] = 0/1
@@ -964,6 +975,49 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
                  + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
         case MatNodeType::Not:
             decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= 0.5);"; break;
+
+        case MatNodeType::Wind:
+            // Both stages declare the lighting prefix these channels live in
+            // (the fragment preamble and kWpoUniforms), so the text is the same.
+            decl = "vec3 " + v + " = vec3(heLight.sunColor.w, 0.0, heLight.ambient.w);"
+                 + " float " + v + "_s = heLight.camPos.w;";
+            pinExpr = { v, v + "_s", "(" + v + " * " + v + "_s)" };
+            break;
+        case MatNodeType::WindSway:
+        {
+            // The WPO body is emitted in scope "vs"; a function called from it
+            // inlines as "vs/<id>". Only there is the object-space `pos` of the
+            // vertex template in reach.
+            const bool vertex = sc.key == "vs" || sc.key.rfind("vs/", 0) == 0;
+            // The vertex stage carries its own copy of the noise helpers
+            // (kWpoNoise); asking for the fragment's would only add dead text.
+            if (!vertex) c.usesNoise = true;
+            const std::string amount = inputExpr(c, sc, n, 0, F::Float);
+            const std::string freq   = inputExpr(c, sc, n, 1, F::Float);
+            const std::string bend   = inputExpr(c, sc, n, 2, F::Float);
+            const std::string mask   = inputExpr(c, sc, n, 3, F::Float);
+            // Lean: always downwind, breathing between 0.55 and 1 of full so the
+            // plant never snaps back upright. Phase from a coarse noise over
+            // world XZ, so neighbours do not move in lockstep. Gust: a broader
+            // noise field scrolled downwind, faster in stronger wind.
+            decl = "vec3 " + v + "_d = vec3(heLight.sunColor.w, 0.0, heLight.ambient.w);"
+                 + " float " + v + "_s = heLight.camPos.w;"
+                 + " float " + v + "_t = heLight.sunDir.w;"
+                 + " float " + v + "_ph = heValueNoise(vWorldPos.xz * 0.35) * 6.2831853;"
+                 + " float " + v + "_g = heValueNoise(vWorldPos.xz * 0.08 - " + v + "_d.xz * ("
+                 + v + "_t * (0.4 + 0.3 * " + v + "_s)));"
+                 + " float " + v + "_b = (0.55 + 0.45 * sin(" + v + "_t * " + freq
+                 + " * 6.2831853 + " + v + "_ph)) * (0.35 + 0.65 * " + v + "_g);";
+            if (vertex)
+                decl += " float " + v + "_hb = " + bend + ";"
+                      + " float " + v + "_h = " + v + "_hb > 0.0 ? clamp(pos.y / " + v
+                      + "_hb, 0.0, 1.0) : 1.0; " + v + "_h *= " + v + "_h;";
+            else
+                decl += " float " + v + "_h = 1.0;"; // no object position in the fragment
+            decl += " vec3 " + v + " = " + v + "_d * (" + v + "_s * " + amount + " * " + mask
+                  + " * " + v + "_b * " + v + "_h);";
+            break;
+        }
 
         case MatNodeType::Output:
             decl = ""; break; // handled by generateFragment

@@ -75,6 +75,9 @@ Umsetzungsschritt hier; Entscheidung für den Chefchen, ob der Zweig nach main o
 
 ### 3.3 Falsche Roadmap-Zusage: Wind
 
+(Nachtrag: Windgröße, Wind-Knoten und Foliage-Vorlage sind seit Schritt 3 da, siehe Abschnitt 7;
+die Grenzen unten gelten weiter.)
+
 Im Code gibt es **keinen Foliage-Wind**. „wind" kommt nur bei Wolken (`EnvironmentSettings.h:75`)
 und den GPU-Wetterpartikeln (`IRenderer.h:638`) vor. Was es gibt: der Material-Graph hat einen
 **World-Position-Offset**-Pin (Vertex-Stage, `MaterialGraph.cpp:37`, Codegen `:1141-1152`,
@@ -207,3 +210,58 @@ Höhenfeld, liegen also bis zur halben Displacement-Stärke neben der sichtbaren
 Displacement ist Detail, nicht Landform. Die Umschaltung Stufe ↔ LOD0 ist ein harter Wechsel wie
 zwischen den übrigen LODs (kein Geomorphing, siehe 3.4). Hot-Reload der Displacement-Textur wird
 erst beim nächsten Neubau der Chunks sichtbar. Visuell auf echter Hardware nicht geprüft.
+
+## 7. Nachtrag Schritt 3: Foliage-Wind (umgesetzt)
+
+**Windgröße:** Keine neue Größe. Die Engine hat schon eine: `EnvironmentSettings::windDirection`
+(Kompassgrad, 0° = nach −Z, im Uhrzeigersinn) und `windSpeed`, gesetzt aus der
+`EnvironmentComponent` und im Wetter vom `WeatherSystem` getrieben. Bisher las sie nur der
+Wolken-Shader. Jetzt liest sie auch jedes Graph-Material.
+
+**Transport:** In die drei bisher ungenutzten w-Kanäle des Material-Licht-Präfixes
+(`MaterialShaderLibrary::Lighting`): `sunColor.w`/`ambient.w` = Einheitsrichtung x/z (wohin der
+Wind weht), `camPos.w` = Stärke (`windSpeed`, ohne den 0,025-Faktor der Wolken, negativ = 0).
+Gründe: die WPO-Vertex-Stufe deklariert nur diese vier vec4 (`kWpoUniforms`); ein neues Feld hätte
+alle Offsets dahinter verschoben (vorkompilierte Blobs) und neue Bindings in fünf Backends
+gebraucht. Gefüllt von einem gemeinsamen Helfer `HE::FillMaterialWind` (`LightPacking.h`) an jeder
+Stelle, die auch die Zeit (`sunDir.w`) schreibt: Metal UI/Forward/Resolve (`FillMaterialLighting`)
+/G-Buffer, GL UI + `fillMatLight`, D3D11, D3D12, Vulkan. Vorschauen (Zeit 0) bleiben windstill.
+
+**Knoten** (Kategorie „Landscape"):
+
+- `Wind`: Direction (vec3), Strength (float), Vector (= Direction × Strength). Reiner Uniform-Read,
+  in Vertex- und Fragment-Stufe gleich.
+- `Wind Sway`: fertiger Offset für World Position Offset. Lehnt immer mit dem Wind (atmet zwischen
+  55 % und 100 %, schnappt also nie aufrecht zurück), schwingt mit `Frequency` (Hz) und einer
+  Phase aus Rauschen über Welt-XZ (Nachbarn nicht im Gleichschritt), Böen als Rauschfeld, das mit
+  dem Wind treibt. `Amount` = Meter je Stärke-Einheit (Default 0,1), `Bend Height` = Objekt-Höhe
+  in Metern bis zum vollen Ausschlag, quadratisch von der Mesh-Wurzel aus (0 = aus), `Mask` für
+  eigene Gewichte (UV, Vertex-Farbe). Die Biegemaske braucht die Objektposition und gibt es nur in
+  der Vertex-Stufe (auch innerhalb einer Material-Funktion in der WPO-Kette); im Fragment fällt sie
+  auf 1 zurück.
+
+**Vorlage:** `material_create` mit `template: "Foliage"`: lit, Masked, die PBR-Parameter plus
+`WindAmount`, `WindFrequency`, `BendHeight` als Parameter vor einem Wind-Sway-Knoten auf dem
+WPO-Pin. Über `material_set_param` zur Laufzeit einstellbar wie jeder andere Parameter.
+
+**Tests:** `test_material_graph.cpp` (Kanäle, Vertex/Fragment-Zweig, Funktions-Scope,
+`FillMaterialWind` gegen die Wolken-Kompassrichtung, Vertex-Cross-Compile Metal/GL/GLES, Wind-Sway-
+WPO im Backend-Sweep für HLSL/SPIR-V), `test_mcp_tools_material.cpp` (Foliage-Vorlage: Parameter,
+Vertex-Body im Asset, Fragment + Vertex kompilieren für Metal und GL).
+
+**Bewusste Grenzen** (Entscheidung für den Chefchen):
+
+1. **OpenGL: gebatchte Foliage weht nicht.** Der GL-Szenenpfad schickt Instancing-Batches
+   (gleiches Mesh, mehr als eine Instanz, also genau der Foliage-Fall) durch das eingebaute
+   Instanz-Programm, **bevor** der Graph-Material-Zweig greift (`OpenGLRenderer.cpp`, Forward
+   `if (!dc.instanceTransforms.empty() && m_instancedProgram ...)`, G-Buffer ebenso), und der
+   Graph-Zweig zeichnet nur `dc.transform`. Das trifft jedes Graph-Material auf GL, nicht nur
+   Wind (der Metal-Kommentar „the GL path's open bug" meint genau das). Metal schließt
+   Graph-Materialien vom Batch aus, D3D11/D3D12/Vulkan zeichnen sie pro Instanz
+   (`drawMatInstance`), dort wirkt der Wind. Fix: GL-Gate um „kein Graph-Material" ergänzen und
+   den Graph-Zweig über `instanceTransforms` laufen lassen, eigener Schritt.
+2. **Schatten und Tiefe ohne WPO:** die festen Schatten-/Depth-Shader kennen `heWpo` nicht, ein
+   wehendes Gras wirft also einen starren Schatten (Befund aus 3.3, unverändert).
+3. **Normalen:** WPO korrigiert die Normale nicht. Für Gras-Karten und kleine Ausschläge
+   unauffällig, für große Biegungen sichtbar.
+4. **Nur code- und compile-geprüft.** Kein Laufzeitbild, auf keinem Backend.

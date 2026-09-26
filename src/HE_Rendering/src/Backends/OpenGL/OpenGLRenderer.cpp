@@ -9354,6 +9354,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 				// PBR shaders. Shared fill (HE::FillMaterialLightWindow); the UI pass
 				// has no local shadow atlas, so it passes false.
 				HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/false);
+				HE::FillMaterialWind(GetEnvironment(), lit); // Wind nodes, next to Time
 				glBindBuffer(GL_UNIFORM_BUFFER, m_matLightUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
 				uiLightUploaded = true;
@@ -12940,6 +12941,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// writes the per-light atlas layer into lightParams[i].y when
 			// `localShadows` says the atlas is bound this frame.
 			HE::FillMaterialLightWindow(m_renderWorld, lit, localShadows);
+			HE::FillMaterialWind(GetEnvironment(), lit); // Wind / Wind Sway nodes, next to Time
 			// Local (point/spot) shadow atlas for heLitP — same matrices the
 			// built-in shaders use, with the GL depth remap (z: [-1,1]→[0,1])
 			// PRE-BAKED so the shared preamble stays convention-free.

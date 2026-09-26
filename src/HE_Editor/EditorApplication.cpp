@@ -4756,6 +4756,24 @@ void EditorApplication::dumpFrameHeadless()
 				g.connect(col, 0, out, 0);
 				g.connect(chk, 0, out, 4); // OpacityMask
 			}
+			else if (std::string(mt) == "wind")
+			{
+				// Foliage-wind witness (Thema 80): Wind Sway on WPO with a large Amount,
+				// so the upper half of the sphere (Bend Height 1 → the pos.y branch)
+				// leans with the environment wind. The offset scales with the wind
+				// strength the renderer writes into the lighting prefix, so two shots
+				// at different HE_SKY_TIME only differ if that strength reaches the
+				// VERTEX stage; the same time twice is the noise floor.
+				const int out  = g.addNode(HE::MatNodeType::Output);
+				const int col  = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.3f; g.findNode(col)->p[1] = 0.75f; g.findNode(col)->p[2] = 0.35f;
+				g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+				const int sway = g.addNode(HE::MatNodeType::WindSway);
+				const int amt  = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(amt)->p[0] = 0.6f;
+				g.connect(amt,  0, sway, 0);
+				g.connect(sway, 0, out, HE::kMatOutputWPOPin);
+			}
 			else if (std::string(mt) == "wpo")
 			{
 				// WPO witness: sin(worldPos.y * 8) * 0.35 offsets X → a wavy sphere.

@@ -5180,6 +5180,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // (point/spot) atlas rendered this frame, lightParams[i].y carries the
         // light's base layer + 1 (0 = "casts no local shadow").
         HE::FillMaterialLightWindow(m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        HE::FillMaterialWind(GetEnvironment(), lit); // Wind / Wind Sway nodes, next to Time
         // Local atlas view-projs for heLocalShadowFactor (heLocalShadow, set 0
         // binding 13, bound per draw below). kVulkanClipFix is already in
         // m_localShadowClip and is the whole convention — same as csmVP.

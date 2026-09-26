@@ -60,6 +60,14 @@ void FillMaterialLightWindow(const RenderWorld&               rw,
 	out.counts[0] = static_cast<float>(lc);
 }
 
+void FillMaterialWind(const ::EnvironmentSettings& env, MaterialShaderLibrary::Lighting& out)
+{
+	const float rad = glm::radians(env.windDirection);
+	out.sunColor[3] = std::sin(rad);
+	out.ambient[3]  = -std::cos(rad);
+	out.camPos[3]   = std::max(env.windSpeed, 0.0f);
+}
+
 ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
                                      bool               localShadowsActive,
                                      bool               giMasksValid)

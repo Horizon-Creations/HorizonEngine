@@ -5225,6 +5225,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         // (point/spot) atlas rendered this frame, lightParams[i].y carries the
         // light's base layer + 1 (0 = "casts no local shadow").
         HE::FillMaterialLightWindow(p.m_renderWorld, lit, /*localShadowsActive=*/localShadows);
+        HE::FillMaterialWind(m_environment, lit); // Wind / Wind Sway nodes, next to Time
         // Local atlas view-projs for heLocalShadowFactor (heLocalShadow,
         // preamble binding 13 → t13/s13, bound in the scene pass). Same
         // pre-baked conventions as csmVP below (uvFlipY * kD3DClipFix), so the
