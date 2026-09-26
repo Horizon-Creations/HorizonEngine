@@ -214,7 +214,7 @@ Tool Status lesen aber denselben `m_toolchainProbe` wie der Dialog, und den bele
 
 Verbleibende Lücken:
 
-- **H2/H3 bleiben offen.** Lauf B ist genau H2: Ein global gesetztes `CMAKE_GENERATOR`
+- **H2/H3 bleiben offen** (geschlossen in Schritt 4, siehe §4c). Lauf B ist genau H2: Ein global gesetztes `CMAKE_GENERATOR`
   (VS Code CMake Tools, vcpkg, CLion) oder ein alter Cache mit Ninja/NMake im Build-Ordner
   meldet „kein Compiler“, obwohl VS installiert ist. Probe und buildDylib übergeben kein `-G`.
   Die Abhilfe (vswhere → `-G "Visual Studio <N> <Jahr>"`) samt Test mit simulierter
@@ -227,6 +227,108 @@ Verbleibende Lücken:
 - Export mit „Compile HorizonCode“ nicht gefahren; `buildDylib` ist dort derselbe Aufruf.
 - `he_tests` in diesem Schritt nicht erneut gelaufen. Stand ist der Lauf des Chefchens auf
   `336d09f9` (218/218).
+
+## 4c. H2/H3 geschlossen: Generator explizit über vswhere (Schritt 4, NN-WS03, 2026-09-27)
+
+Unter Windows hängen Probe (`probeToolchain`) und `buildDylib` jetzt an jeden Configure
+`-G "Visual Studio <N> <Jahr>" -A x64 "-DCMAKE_GENERATOR_INSTANCE=<installationPath>"`.
+Ein global gesetztes `CMAKE_GENERATOR` wirkt nur, wenn kein `-G` übergeben wird, und ist
+damit wirkungslos (H2). macOS/Linux bekommen weiterhin kein `-G`.
+
+Ablauf (`chooseGenerator` in `HcCodegen.cpp`):
+
+1. `vswhere.exe` unter `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer`, dann
+   `%ProgramFiles%\…`, dann auf PATH (choco/winget-Kopie).
+2. `vswhere -products * -prerelease -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+   -format json -utf8`. Ohne `-products *` fehlen die Build Tools. Ohne `-all` fehlen
+   unvollständige oder kaputte Installationen, und das ist gewollt. `-utf8` ist nötig, weil
+   `description` lokalisiert ist (auf NN-WS03 mit Umlauten und Gedankenstrich).
+3. `cmake -E capabilities` liefert die Generatornamen, die dieses cmake kennt.
+4. `selectVsInstance` (rein, im Header, auf allen Plattformen kompiliert und getestet)
+   nimmt die höchste `installationVersion`, **pro Zahlenkomponente verglichen**
+   (18.10 > 18.9). Eine Release-Version schlägt jede Prerelease. Berücksichtigt werden nur
+   Instanzen, deren Generator das cmake kennt. Ein cmake 3.31 bekommt also VS 2022 statt eines
+   Generators, den es ablehnt (H4-Teilfall). Den Namen bildet `Visual Studio <Major> ` aus
+   der cmake-Liste. `catalog.productLineVersion` taugt nicht dafür, denn es sagt `"2022"` bei
+   VS 2022, aber `"18"` bei VS 2026. Gibt es keine cmake-Liste, entscheidet eine Tabelle
+   (15/2017, 16/2019, 17/2022, 18/2026).
+5. Keine passende Instanz: kein `-G`, also das alte Verhalten, damit ein clang/MinGW-Setup ohne
+   VS weiter geht. Die Probe schreibt dann vor den Log-Auszug in `detail`, warum
+   (`vswhere.exe not found …` bzw. `vswhere found no Visual Studio with the C++ tools …`).
+
+**Nebenbefund entschieden: die Wahl wird korrigiert.** cmakes Default nahm auf NN-WS03
+BuildTools 18.9 statt Community 18.10 (§4a/§4b; beobachtet, die Ursache in cmake ist nicht
+untersucht). `-G` allein ändert daran nichts, denn beide sind „Visual Studio 18 2026“. Erst
+`CMAKE_GENERATOR_INSTANCE` legt die Instanz fest. Jetzt gewinnt die neueste, also Community
+18.10. Das Toolset ist hier bei beiden 14.51.36231. Die Regel heißt „neueste gewinnt“ und ist
+unabhängig davon, in welcher Reihenfolge vswhere oder cmake die Instanzen auflisten. Beobachtet
+im Cache, den `buildDylib` auf NN-WS03 schreibt:
+`CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026`, `CMAKE_GENERATOR_PLATFORM:INTERNAL=x64`,
+`CMAKE_GENERATOR_INSTANCE:UNINITIALIZED=C:/Program Files/Microsoft Visual Studio/18/Community`.
+
+**H3: fremder Cache im Build-Ordner.** cmake verweigert einen Configure, dessen Cache einen
+anderen Generator, eine andere Plattform oder eine andere Instanz nennt. Das trifft einen von
+Hand mit NMake/Ninja konfigurierten `Source/build` und **jeden** GameLogic-Build-Ordner eines
+älteren Editors, denn der gab kein `-A` mit, im Cache steht dort `CMAKE_GENERATOR_PLATFORM`
+also leer. `buildDylib` liest deshalb vor dem Configure `CMAKE_GENERATOR`,
+`CMAKE_GENERATOR_PLATFORM` und `CMAKE_GENERATOR_INSTANCE` (`:INTERNAL=`) aus
+`CMakeCache.txt`, und zwar mit jedem Typ. Ein per `-D` übergebenes `CMAKE_GENERATOR_INSTANCE`
+legt cmake als `:UNINITIALIZED=` ab, nicht als `:INTERNAL=`. Die erste Fassung las nur
+`INTERNAL`, sah deshalb nie eine Instanz und warf den eigenen Cache bei **jedem** Build weg:
+voller Neubau, aber grün. Aufgefallen ist das erst durch den zweiten Build in denselben Ordner
+im Test. Weicht einer der drei Werte ab, löscht es `CMakeCache.txt` und `CMakeFiles/`, nicht
+den ganzen Ordner, und schreibt eine Zeile ins Build-Log. Pfade werden ohne Rücksicht auf
+Groß-/Kleinschreibung und Schrägstrichrichtung verglichen. Folge: Ein bestehendes Projekt wird
+beim ersten Build nach dem Update einmal neu konfiguriert und voll gebaut. Wer denselben
+Ordner danach wieder von Hand mit Ninja konfiguriert, löst beim nächsten Editor-Build erneut
+einen Reset aus.
+
+Tests: `tests/test_toolchain_vswhere.cpp`.
+
+- Rein, mit vswhere-JSON aus der echten Ausgabe von NN-WS03:
+  - drei Instanzen in beiden Reihenfolgen ⇒ Community 18.10
+  - 18.9 gegen 18.10 in beiden Reihenfolgen
+  - nur BuildTools
+  - keine Instanz: `[]`, leer, „'vswhere' is not recognized…“, abgeschnittenes JSON, Einträge ohne Version/Pfad
+  - stderr-Text vor dem JSON
+  - cmake ohne VS 2026 ⇒ VS 2022, und gar nichts, wenn es keine der Instanzen kennt
+  - MSYS-cmake ohne VS-Generatoren
+  - Tabellen-Rückfall, dazu eine unbekannte Major 19
+  - Release schlägt neuere Prerelease
+  - `cmakeGeneratorNames`
+- Nur Windows, gegen die echte Installation (übersprungen ohne vswhere.exe bzw. ohne
+  funktionierende Toolchain):
+  - Probe mit `CMAKE_GENERATOR=NMake Makefiles` (Lauf B) und mit einem nicht existierenden
+    Generator. Der zweite Wert scheitert auch in einer Developer Prompt, wo NMake funktionieren
+    würde.
+  - `buildDylib` in einen Ordner mit NMake-Cache.
+  - `buildDylib` in einen Ordner, den ein schlichtes `cmake -S -B` vorkonfiguriert hat, also
+    genau so, wie der alte Editor es tat.
+  - In beiden H3-Fällen zeigt der erste Build die Reset-Zeile. Danach baut `buildDylib` ein
+    zweites Mal in denselben Ordner, und dort darf **keine** Reset-Zeile mehr stehen.
+
+Ergebnisse, Release-Build `C:\hw96s4` (Ninja, eigener `DEPLOY_DIR`). he_tests lief aus einer
+PowerShell ohne `VCINSTALLDIR`/`CMAKE_GENERATOR`/`cl` auf PATH und mit privatem `APPDATA`:
+
+| Lauf | Ergebnis |
+|---|---|
+| neue + bestehende Toolchain-Fälle | 13/13 grün, 46 Assertions |
+| Negativkontrolle ohne `-G` | rot: Probe mit NMake zeigt wörtlich Lauf B (`Building for: NMake Makefiles` … `'nmake' '-?'` … `CMAKE_CXX_COMPILER not set`); Fantasie-Generator: `CMAKE_GENERATOR was set but the specified generator doesn't exist. Using CMake default.` + Configure-Fehler; NMake-Cache rot. Der Alt-Editor-Cache ist hier grün, wie erwartet, denn ohne `-G` gibt es nichts, was nicht passt |
+| Negativkontrolle mit `-G`, ohne Cache-Reset | Probe grün; beide H3-Fälle rot: `Does not match the generator used previously: NMake Makefiles` bzw. `generator platform: x64 Does not match the platform used previously:` (leer) |
+| zweiter Build, erste Fassung (nur `:INTERNAL` gelesen) | rot: Reset-Zeile auch im zweiten Build, in beiden H3-Fällen |
+| zweiter Build nach dem Fix | grün, 4/4 Toolchain-Fälle, 20 Assertions |
+| vorübergehender Schalter „nur BuildTools“ (Pfad mit `(x86)` durch `cmd /c`) | grün, 4/4. Cache: `CMAKE_GENERATOR_INSTANCE:UNINITIALIZED=C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools`, Probe mit `CMAKE_GENERATOR=NMake Makefiles` ebenfalls grün |
+| volle Suite nach Rückbau aller Kontrollschalter | 4001/4001, 524389 Assertions, 0 fehlgeschlagen |
+
+Nicht gemacht:
+
+- Kein Live-Check im Editor. Die Probe ist derselbe Code, den die Tests fahren, Tool
+  Status/Dialog lesen ihr Ergebnis (§4b).
+- Kein Build auf macOS/Linux. Dort ändert sich nur, dass die reinen Funktionen mitkompiliert
+  werden. `chooseGenerator` liefert auf POSIX leere Argumente.
+- Keine Maschine mit nur BuildTools oder nur VS 2022 real gesehen. Diese Fälle sind als
+  vswhere-Daten abgedeckt, BuildTools zusätzlich über den Schalter oben, allerdings auf einer
+  Maschine, auf der auch die anderen Instanzen liegen.
 
 ## 5. Offen für Schritt 2
 
