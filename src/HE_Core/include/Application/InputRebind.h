@@ -120,7 +120,9 @@ namespace HE
 		// Once per frame with this frame's input. Answers Captured/Cancelled on
 		// the frame the capture FINISHES — for Captured that is when the
 		// captured button comes back up — and None on every other frame.
-		Result update(const Input& input, const MouseFrame& mouse);
+		// `devices` is whose hands it listens to (a local player's pad slot,
+		// with or without the desk); the default is everything, merged.
+		Result update(const Input& input, const MouseFrame& mouse, InputDevices devices = {});
 
 		Phase         phase()    const { return m_phase; }
 		bool          busy()     const { return m_phase != Phase::Idle; }
@@ -131,7 +133,10 @@ namespace HE
 	private:
 		void snapshot(const Input& input, const MouseFrame& mouse);
 		bool heldNow(const Input& input, const MouseFrame& mouse) const;
+		bool keyDown(const Input& input, int sc) const;
+		bool padDown(const Input& input, int b) const;
 
+		InputDevices  m_devices;
 		Phase         m_phase  = Phase::Idle;
 		BindingDevice m_device = BindingDevice::KeyboardMouse;
 		ActionBinding m_captured;

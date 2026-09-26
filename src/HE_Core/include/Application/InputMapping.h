@@ -137,7 +137,10 @@ public:
     // Update all action and axis states for this frame. `mouse` is what the
     // mouse did since the last tick; pass {} where there is no mouse to give
     // (a headless test, or an editor frame that is not playing).
-    void tick(const Input& input, const MouseFrame& mouse = {});
+    // `devices` is whose hands this mapping reads (Input.h): by default the
+    // keyboard, the mouse and the merged pad; for one of several local players
+    // one pad slot, with or without the desk.
+    void tick(const Input& input, const MouseFrame& mouse = {}, InputDevices devices = {});
 
     // Returns nullptr if the action was never mapped.
     const InputActionState* getAction(const std::string& name) const;

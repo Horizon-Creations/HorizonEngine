@@ -204,26 +204,41 @@ void BindingCapture::cancel()
 	m_pending = Result::None;
 }
 
+bool BindingCapture::keyDown(const Input& input, int sc) const
+{
+	return m_devices.keyboardMouse && input.IsKeyDown(static_cast<SDL_Scancode>(sc));
+}
+
+bool BindingCapture::padDown(const Input& input, int b) const
+{
+	return input.isGamepadButtonDown(static_cast<SDL_GamepadButton>(b), m_devices.gamepadSlot);
+}
+
 void BindingCapture::snapshot(const Input& input, const MouseFrame& mouse)
 {
 	for (int sc = 0; sc < SDL_SCANCODE_COUNT; ++sc)
-		m_keys[sc] = input.IsKeyDown(static_cast<SDL_Scancode>(sc));
+		m_keys[sc] = keyDown(input, sc);
 	for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b)
-		m_pad[b] = input.isGamepadButtonDown(static_cast<SDL_GamepadButton>(b));
+		m_pad[b] = padDown(input, b);
 	m_mouse = mouse.buttons;
 }
 
 bool BindingCapture::heldNow(const Input& input, const MouseFrame& mouse) const
 {
-	if (m_captured.key != SDL_SCANCODE_UNKNOWN) return input.IsKeyDown(m_captured.key);
+	if (m_captured.key != SDL_SCANCODE_UNKNOWN) return keyDown(input, m_captured.key);
 	if (m_captured.gamepadButton != SDL_GAMEPAD_BUTTON_INVALID)
-		return input.isGamepadButtonDown(m_captured.gamepadButton);
+		return padDown(input, m_captured.gamepadButton);
 	if (m_captured.mouseButton >= 0) return (mouse.buttons >> m_captured.mouseButton) & 1u;
 	return false;
 }
 
-BindingCapture::Result BindingCapture::update(const Input& input, const MouseFrame& mouse)
+BindingCapture::Result BindingCapture::update(const Input& input, const MouseFrame& deskMouse,
+                                              InputDevices devices)
 {
+	// Only this player's hands: a pad-only player's capture must not catch a
+	// key someone else pressed on the desk, nor another player's pad.
+	m_devices = devices;
+	const MouseFrame mouse = devices.keyboardMouse ? deskMouse : MouseFrame{};
 	switch (m_phase)
 	{
 	case Phase::Idle:
@@ -238,9 +253,8 @@ BindingCapture::Result BindingCapture::update(const Input& input, const MouseFra
 
 	case Phase::Listening:
 	{
-		auto keyEdge = [&](int sc) { return input.IsKeyDown(static_cast<SDL_Scancode>(sc)) && !m_keys[sc]; };
-		auto padEdge = [&](int b)
-		{ return input.isGamepadButtonDown(static_cast<SDL_GamepadButton>(b)) && !m_pad[b]; };
+		auto keyEdge = [&](int sc) { return keyDown(input, sc) && !m_keys[sc]; };
+		auto padEdge = [&](int b)  { return padDown(input, b) && !m_pad[b]; };
 
 		ActionBinding hit;
 		Result        what = Result::None;

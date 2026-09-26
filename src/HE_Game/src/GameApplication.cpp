@@ -2337,8 +2337,12 @@ void GameApplication::updateCameraController(float dt)
 	// as it always did.
 	HE::CameraLookInput look;
 	look.mouse  = input().mouse();
-	look.stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX);
-	look.stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY);
+	// The camera follows player 1's character, so it turns with player 1's
+	// stick: every pad merged in single player, slot 0 once there are several
+	// local players (PlayerHost::devicesOf).
+	const int lookSlot = m_playerHost.devicesOf(0).gamepadSlot;
+	look.stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX, lookSlot);
+	look.stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY, lookSlot);
 	look.dt     = dt;
 	if (HE::CameraRigController::update(*m_world, look,
 	                                    possessedCharacterEntity(),

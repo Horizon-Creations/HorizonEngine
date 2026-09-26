@@ -666,6 +666,190 @@ TEST_CASE("PlayerHost: rebinding in a UI-only menu, the conflict, prefs, reset a
 	he_test::removeAllQuiet(sandbox);
 }
 
+// ─── Local players: one controller per player, one pad slot each ─────────────
+// With two PlayerController classes the session has two local players: the
+// controllers are spawned sorted by path, controller i hears pad slot i only,
+// and controller 0 also has the desk. With ONE controller nothing changes —
+// every pad, merged, plus the desk. Pinned from the controller's side: a graph
+// that counts its own Input.Jump.Pressed.
+namespace
+{
+	Graph jumpCounter()
+	{
+		Graph g;
+		Variable v; v.name = "jumps"; v.type = PinType::Int;
+		g.variables.push_back(v);
+
+		Node ev; ev.type = NodeType::Event; ev.s = HE::inputEventPressed("Jump");
+		const int e = g.addNode(std::move(ev));
+		Node get; get.type = NodeType::GetVariable; get.s = "jumps"; get.propType = PinType::Int;
+		const int gv = g.addNode(std::move(get));
+		Node one; one.type = NodeType::ConstInt; one.f[0] = 1.0f;
+		const int k = g.addNode(std::move(one));
+		Node add; add.type = NodeType::Add;
+		const int a = g.addNode(std::move(add));
+		Node set; set.type = NodeType::SetVariable; set.s = "jumps"; set.propType = PinType::Int;
+		const int s = g.addNode(std::move(set));
+		REQUIRE(g.connect(gv, 0, a, 0));
+		REQUIRE(g.connect(k,  0, a, 1));
+		REQUIRE(g.connect(e,  0, s, 0));
+		REQUIRE(g.connect(a,  2, s, 2));
+		return g;
+	}
+
+	void writeJumpController(ContentManager& cm, const char* name)
+	{
+		HorizonCodeClassAsset a;
+		a.type      = HE::AssetType::HorizonCodeClass;
+		a.name      = name;
+		a.path      = std::string(name) + ".hasset";
+		a.baseClass = "PlayerController";
+		a.graphJson = toJson(jumpCounter());
+		REQUIRE(cm.saveAsset(a));
+	}
+
+	int jumpsOf(const Runtime& rt, InstanceId inst) { return rt.getVariable(inst, "jumps").i; }
+
+	void padSlotButton(Input& input, int slot, SDL_GamepadButton b, bool down)
+	{
+		GamepadFrame f = input.gamepad(slot);
+		f.connected  = true;
+		f.buttons[b] = down;
+		input.SetGamepadFrame(slot, f);
+	}
+
+	// Press and release in two ticks.
+	void tap(PlayerHost& host, Input& input, int slot, SDL_GamepadButton b)
+	{
+		padSlotButton(input, slot, b, true);
+		host.tick(input, 1.0f / 60.0f);
+		padSlotButton(input, slot, b, false);
+		host.tick(input, 1.0f / 60.0f);
+	}
+}
+
+TEST_CASE("PlayerHost: two controllers are two local players, each on its own pad slot")
+{
+	using namespace HE::api;
+	TempDir dir("he_test_playerhost_local_players");
+	ContentManager cm(dir.path.string());
+	writeRebindAssets(cm);   // Jump: Space + pad South; Menu: C; Move: D/A
+	// Player 2 saved first: the order must come from the path, not the save.
+	writeJumpController(cm, "P2Controller");
+	writeJumpController(cm, "P1Controller");
+
+	const auto sandbox = std::filesystem::temp_directory_path() / "he_test_playerhost_players_prefs";
+	he_test::removeAllQuiet(sandbox);
+	HE::api::fs::setSandboxRoot(sandbox.string());
+	Ctx ctx;
+	prefs::clear(ctx);
+
+	Runtime rt;
+	PlayerHost host;
+	host.begin(rt, cm);
+	time::resume();
+	input::setMode(input::Mode::GameAndUI);
+
+	REQUIRE(host.controllerCount() == 2);
+	REQUIRE(host.playerCount() == 2);
+	const InstanceId p1 = host.controllers()[0];
+	const InstanceId p2 = host.controllers()[1];
+	CHECK(rt.classKeyOf(p1) == "P1Controller.hasset");
+	CHECK(rt.classKeyOf(p2) == "P2Controller.hasset");
+	CHECK(player::localPlayerCount() == 2);
+	CHECK(player::controllerAt(0) == p1);
+	CHECK(player::controllerAt(1) == p2);
+	CHECK(player::controllerAt(2) == 0);
+	CHECK(player::controllerAt(-1) == 0);
+	CHECK(player::controller() == p1);
+	CHECK(host.devicesOf(0).gamepadSlot == 0);
+	CHECK(host.devicesOf(0).keyboardMouse);
+	CHECK(host.devicesOf(1).gamepadSlot == 1);
+	CHECK_FALSE(host.devicesOf(1).keyboardMouse);
+
+	Input input;
+	// Player 2's pad: player 2 jumps, player 1 does not.
+	tap(host, input, 1, SDL_GAMEPAD_BUTTON_SOUTH);
+	CHECK(jumpsOf(rt, p1) == 0);
+	CHECK(jumpsOf(rt, p2) == 1);
+	// Player 1's pad and the desk: player 1 only.
+	tap(host, input, 0, SDL_GAMEPAD_BUTTON_SOUTH);
+	keyEvent(input, SDL_SCANCODE_SPACE, true);
+	host.tick(input, 1.0f / 60.0f);
+	// The polling rows are player 1's.
+	CHECK(input::actionPressed("Jump"));
+	keyEvent(input, SDL_SCANCODE_SPACE, false);
+	host.tick(input, 1.0f / 60.0f);
+	CHECK(jumpsOf(rt, p1) == 2);
+	CHECK(jumpsOf(rt, p2) == 1);
+	// A pad in a slot nobody plays is heard by nobody.
+	tap(host, input, 2, SDL_GAMEPAD_BUTTON_SOUTH);
+	CHECK(jumpsOf(rt, p1) == 2);
+	CHECK(jumpsOf(rt, p2) == 1);
+
+	// Rebinding is per player: player 2 has no keyboard, and their pad capture
+	// listens to their slot only.
+	CHECK_FALSE(host.rebindBegin("Jump", "keyboard", 1));
+	CHECK_FALSE(host.rebindBegin("Jump", "gamepad", 2));   // no player 3
+	REQUIRE(host.rebindBegin("Jump", "gamepad", 1));
+	host.tick(input, 1.0f / 60.0f);                        // arms
+	tap(host, input, 0, SDL_GAMEPAD_BUTTON_WEST);          // player 1's West: not it
+	CHECK(host.isRebinding());
+	tap(host, input, 1, SDL_GAMEPAD_BUTTON_WEST);
+	CHECK_FALSE(host.isRebinding());
+	CHECK(host.bindingName("Jump", "gamepad", 1) == "X (West)");
+	CHECK(host.bindingName("Jump", "gamepad", 0) == "A (South)");
+	CHECK(input::bindingName("Jump", "gamepad") == "A (South)");   // the rows are player 1's
+	tap(host, input, 1, SDL_GAMEPAD_BUTTON_WEST);
+	CHECK(jumpsOf(rt, p2) == 2);
+	tap(host, input, 1, SDL_GAMEPAD_BUTTON_SOUTH);
+	CHECK(jumpsOf(rt, p2) == 2);                           // South is not player 2's any more
+
+	// Saved under player 2's key only, and the next session gives it back to
+	// player 2.
+	CHECK(host.saveBindings());
+	CHECK(prefs::has(ctx, PlayerHost::bindingsPrefsKey(1)));
+	CHECK_FALSE(prefs::has(ctx, PlayerHost::kBindingsPrefsKey));
+	host.end();
+	CHECK(player::localPlayerCount() == 0);
+	host.begin(rt, cm);
+	CHECK(host.bindingName("Jump", "gamepad", 1) == "X (West)");
+	CHECK(host.bindingName("Jump", "gamepad", 0) == "A (South)");
+
+	host.end();
+	player::clear();
+	prefs::clear(ctx);
+	he_test::removeAllQuiet(sandbox);
+}
+
+TEST_CASE("PlayerHost: one controller hears every pad slot, merged, and the desk")
+{
+	TempDir dir("he_test_playerhost_one_player");
+	ContentManager cm(dir.path.string());
+	writeRebindAssets(cm);
+	writeJumpController(cm, "Solo");
+
+	Runtime rt;
+	PlayerHost host;
+	host.begin(rt, cm);
+	HE::api::time::resume();
+	HE::api::input::setMode(HE::api::input::Mode::GameAndUI);
+
+	REQUIRE(host.playerCount() == 1);
+	CHECK(host.devicesOf(0).gamepadSlot == -1);
+	CHECK(host.devicesOf(0).keyboardMouse);
+	CHECK(HE::api::player::localPlayerCount() == 1);
+	const InstanceId solo = host.controllers()[0];
+
+	Input input;
+	tap(host, input, 3, SDL_GAMEPAD_BUTTON_SOUTH);
+	tap(host, input, 0, SDL_GAMEPAD_BUTTON_SOUTH);
+	CHECK(jumpsOf(rt, solo) == 2);
+
+	host.end();
+	HE::api::player::clear();
+}
+
 // ─── Timers reach both frontends ─────────────────────────────────────────────
 TEST_CASE("TimerSystem: a due timer reaches the GameInstance and every Lua instance")
 {
