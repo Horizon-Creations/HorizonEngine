@@ -1,0 +1,167 @@
+# Terrain & Vegetation: Bestandsaufnahme (26.09.2026, Thema 80, Schritt 1)
+
+Stand: main `152659ff`. Ziel: klären, was der Website-Wert **50 %** konkret bedeutet, was im Code
+wirklich fehlt oder kaputt ist, und wo die GI-Probe-Grid-Lücke tatsächlich liegt.
+
+**Konfidenz:** Alles unten ist **code-gelesen** (Datei:Zeile angegeben), nichts laufzeit-geprüft.
+Ein Laufzeit-Zeuge für das GI-Grid wurde versucht (headless Editor, `HE_DUMP_LANDSCAPELAYERS=1
+HE_DUMP_GI=1`): das deployte `out/deploy/Editor/HorizonEditor` ist ein Debug-Build vom 23.09. und
+lieferte bei Rechnerlast ~18 in 450 s kein Bild. Er steht deshalb als erster Folgeschritt unten.
+
+## 1. Was der Roadmap-Eintrag sagt, und was davon stimmt
+
+Eintrag „Terrain & Vegetation" (`advanced`, `in-progress`, 50 %):
+„Chunked heightfield terrain with automatic per-chunk LOD and frustum culling, in-editor sculpting
+with region-dirty regeneration, and GPU-instanced foliage with wind animation."
+
+Die 50 % lassen sich an der ursprünglichen Phase-2-Liste aus dem Landscape-Plan (Masterplan
+Forts. 19) festmachen: *Heightmap-Import, Sculpt-Brushes, Material-Splatting, Chunking/LOD,
+Tessellation, Kollision*. Davon ist heute **alles außer Tessellation da**. Der Wert ist also zu
+niedrig, und die Beschreibung ist gleichzeitig **zu hoch**: „foliage with wind animation" gibt es
+nicht (siehe 3.3). Beides gehört korrigiert (eigener Schritt, siehe 6).
+
+## 2. Was vorhanden ist (belegt)
+
+| Bereich | Stand | Beleg |
+|---|---|---|
+| Heightfield, Chunking, Auto-LOD | C×C Chunk-Kinder mit je 4 LODs (65/33/17/9 Verts), `LODComponent`, Frustum-Cull pro Chunk, Skirts gegen Risse, Master auf 2ⁿ+1 resampelt | `TerrainSystem.cpp:115-170`, `TerrainMeshGenerator.cpp` |
+| Region-Dirty-Regeneration | Pinsel setzt `regionDirty`, nur betroffene Chunks werden neu gebaut | `TerrainTools.cpp:484`, `TerrainSculpt.h` |
+| Sculpt-Pinsel | Raise, Lower, Smooth, Flatten, Ramp, Roughen (+ Set über MCP), dt-getaktet, Undo | `TerrainTools.cpp:882-887`, `TerrainSculpt.h` |
+| Heightmap-Import | 8/16-bit PNG und `.r16`, aus Textur-Asset oder Datei, eigener Undo-Schritt | `TerrainHeightmap.h`, `TerrainTools.cpp:955ff` (Merge `d653f908`, Thema 40) |
+| Layer-Painting / Splatting | 4 Layer (RGBA8-Weightmap, `weightRes`=256), normalisiert, `Landscape Layer Blend`-Knoten im Material-Graph | `TerrainPaint.h`, `TerrainComponent.h:30-54` |
+| Kollision | Ein Jolt-`HeightFieldShape` pro Terrain, wird beim Sculpten im Play neu gebaut | `PhysicsWorld.cpp:866-910`, `TerrainSystem.h` (Physics-Overload) |
+| Foliage | Scatter über das Terrain, Zufallsrotation um Y, Skalenbereich, `drawDistance`, gemalte Dichtemaske mit Ausschlussbereichen (Grow/Erase-Pinsel) | `FoliageSystem.cpp`, `FoliagePaint.h` |
+| Foliage-Instancing | Instanzen als `RenderObject`s, gleiche Mesh-UUID wird vom Batch-Pfad instanziert | `RenderExtractor.cpp:574-606` |
+| Serialisierung | Heights + Weights + Dichtemaske inline Base64 | `SceneSerializer.cpp:798ff`, `:1650ff` |
+| Runtime | Terrain + Foliage laufen auch im gepackten Spiel (`SceneSystems::tickWorld`) | `GameApplication.cpp:3025`, `SceneSystems.cpp:139` |
+| MCP | Terrain-Werkzeuge (Sculpt, Paint, Info) | `McpToolsTerrain.cpp` (Thema 29) |
+| GI-Reflexion | Gemalte Landscapes werden in GI-Reflexionen pro Texel eingefärbt | `GiLandscape.h`, `RenderExtractor.cpp:287-371` |
+| Tests | `test_terrain` 28, `test_terrain_heightmap` 9, `test_foliage` 12, `test_mcp_tools_terrain` 20, `test_terrain_tools_ui` 1 TEST_CASEs | `tests/` |
+
+## 3. Echte Lücken, nach Töpfen
+
+### 3.1 Bugs (klein, zuerst)
+
+1. **Sculpten streut Foliage nicht neu.** `FoliageComponent::dirty` wird nur vom Inspector, vom
+   Foliage-Pinsel und vom Heightmap-Import gesetzt (`TerrainTools.cpp:988-989`). Weder der
+   interaktive Sculpt-Pfad (`TerrainTools.cpp:484`) noch `TerrainSculpt::apply`
+   (MCP, `McpToolsTerrain.cpp:504`) noch `TerrainSystem.cpp` fassen `FoliageComponent` an.
+   Folge: nach einem Strich schweben oder versinken Gräser/Bäume, bis jemand „Regenerate" drückt.
+   Fix: bei Höhenänderung die Foliage der Entity dirty setzen, idealerweise nur im Dirty-Rect
+   neu streuen.
+2. **Foliage ignoriert die Welt-Transformation des Terrains.** `FoliageSystem.cpp:54` nimmt
+   `tf->position` (lokal) als Ursprung, ohne Rotation und Skalierung, und backt die Instanzen in
+   Weltkoordinaten. Das Terrain selbst rendert über Chunk-Kinder mit voller Weltmatrix. Folge:
+   unter einem Eltern-Knoten, bei gedrehtem oder skaliertem Terrain liegt die Foliage daneben
+   (siehe Memory `worldmatrix-staleness`: `HE::worldPositionOf` bzw. die volle Weltmatrix nehmen).
+   Außerdem setzt ein Verschieben des Terrains die Foliage nicht dirty; sie bleibt am alten Ort.
+3. **Veralteter Kommentar mit falscher Aussage**: `MetalRenderer.mm:8097` („Terrain-Chunks sind
+   nicht in `m_renderWorld.objects`"). Die Chunks sind gewöhnliche `MeshComponent`-Entities und
+   laufen durch die Mesh-Schleife des Extractors (`RenderExtractor.cpp:356-371`, `castsShadow`
+   Default `true`, `MeshComponent.h:9`). Kommentar erst nach dem Zeugen aus 4. korrigieren.
+
+### 3.2 Hängt an einem anderen Thema: Paint auf D3D12/Vulkan
+
+Die Weightmap wird auf main nur von **GL, Metal und D3D11** pro Draw aufgelöst
+(`grep weightmapTextureId`: D3D11 2, Metal 4, GL 6, D3D12 0, Vulkan 0). D3D12 bindet für
+`heLandscapeWeights` eine Null-View (`D3D12Renderer.cpp:7231-7233`, „null views for now, their gates stay 0"), der Shader bleibt also auf Layer 0.
+Gemalte Landscapes sehen auf D3D12/Vulkan also nicht so aus wie gemalt.
+
+Der Fix existiert: `f704282d` „Bemalte Landschaften erscheinen auf D3D und Vulkan" liegt **nur** auf
+`origin/claude/backend-parity-p1` (13 Commits vor main, letzter Stand 24.08.2026, nie gemergt),
+auch **nicht** auf dem Zweig von Thema 78 (`claude/d3d-vulkan-parity-remaining-gaps`). Kein eigener
+Umsetzungsschritt hier; Entscheidung für den Chefchen, ob der Zweig nach main oder in Thema 78 geht.
+
+### 3.3 Falsche Roadmap-Zusage: Wind
+
+Im Code gibt es **keinen Foliage-Wind**. „wind" kommt nur bei Wolken (`EnvironmentSettings.h:75`)
+und den GPU-Wetterpartikeln (`IRenderer.h:638`) vor. Was es gibt: der Material-Graph hat einen
+**World-Position-Offset**-Pin (Vertex-Stage, `MaterialGraph.cpp:37`, Codegen `:1141-1152`,
+Vorlage `MaterialShaderLibrary.cpp:120-124`) und einen **Time**-Knoten. Wind ist damit per
+Material autorierbar, aber:
+
+- Es gibt keine Engine-Windgröße, die ein Material lesen könnte (Richtung/Stärke aus der
+  Environment in den Material-Uniforms), und keinen fertigen Wind-Knoten bzw. keine
+  Foliage-Standardmaterialvorlage.
+- Die festen Schatten-/Tiefen-Shader der Backends kennen `heWpo` nicht (kein Treffer in
+  `src/HE_Rendering/src/Backends`) → ein wehendes Gras würfe einen starren Schatten
+  (code-gelesen, nicht geprüft).
+- WPO korrigiert die Normale nicht und nutzt die Transpose-Näherung für uniforme Skalierung.
+
+Aufwand: M (Wind-Uniform + Knoten + Vorlage), plus L falls WPO in Schatten-/Depth-Prepass aller
+fünf Backends soll.
+
+### 3.4 Autoring-Lücken (Feature-Arbeit)
+
+| Lücke | Heute | Aufwand |
+|---|---|---|
+| Mehrere Foliage-Schichten pro Terrain | genau eine `FoliageComponent` pro Terrain-Entity (entt: eine Komponente je Typ), also z. B. Gras ODER Bäume | M |
+| Scatter-Regeln | nur Dichte + Maske; keine Hang-/Höhen-/Layer-Filter, keine Ausrichtung an der Normalen, kein Mindestabstand | M |
+| Foliage-LOD / Impostor | Instanz nutzt nur `meshAssetId`, keine Mesh-LODs, kein Cross-Fade; harter Schnitt an `drawDistance` | M |
+| Foliage-Extraktion | jede Instanz wird pro Frame als eigenes `RenderObject` in den Extractor geschoben, Distanztest auf der CPU (`RenderExtractor.cpp:588-605`); skaliert schlecht bei 100k+ | M |
+| Foliage-Kollision | keine (Bäume sind begehbar) | M |
+| Mehr als 4 Paint-Layer | RGBA8 = 4, harte Grenze | M |
+| Heightmap-Export | nur Import | S |
+| Terrain-Löcher (Höhlen, Tunneleingänge) | nicht vorhanden | M |
+| Erosion / Noise-/Stamp-Pinsel | nur die sechs Grund-Ops | M |
+| LOD-Geomorphing | Pop beim LOD-Wechsel, Skirts verdecken nur Risse | M |
+| Größe | Auflösung hart auf 1024 Verts/Seite (`TerrainMeshGenerator.cpp:68`), keine Kachelung/Streaming, kein Naht-Abgleich zwischen Nachbar-Terrains | L |
+| Tessellation / Displacement | nicht vorhanden (war Phase-2-Punkt) | L |
+| Splines/Straßen, Wasser | nicht vorhanden (Lückenaudit 4.6 nennt sie) | L |
+
+## 4. Die GI-Probe-Grid-Lücke, neu eingeordnet
+
+Memory `ao-gi-roadmap` und der Kommentar `MetalRenderer.mm:8097` sagen: Terrain ist nicht im
+Probe-Grid, weil es kein RenderObject ist. **Der Code sagt etwas anderes**: die Chunks sind
+RenderObjects (3.1 Punkt 3), und im späteren Nachtrag von `docs/gi-reflections-plan.md` werden
+gemalte Landscapes sogar schon per Ray-Treffer in GI-Reflexionen eingefärbt. Die älteren Absätze
+desselben Plans („Terrain fehlt in TLAS/BVH", §2 und §8) widersprechen dem Nachtrag; die Doku ist
+in sich uneins.
+
+Was den Code tatsächlich begrenzt, und zwar in **allen fünf Backends gleich**:
+
+- `kGIProbeSpacing = 4 m`, `kGIMaxProbesPerAxis = 10` (`MetalRenderer.h:1200-1201`,
+  `OpenGLRenderer.h:1161-1162`, `VulkanRenderer.h:938-939`, `D3D11Renderer.cpp:2604-2605`,
+  `D3D12Renderer.cpp:5345-5346`). Das Grid deckt damit **höchstens 36 m pro Achse** ab. Ein
+  Default-Terrain ist 100 × 100 m.
+- Das Grid wird **einmal** gebaut (`m_giProbeGridBuilt`), sobald `objects` nicht leer ist, und
+  nie neu eingepasst. Kommt das Terrain nach den ersten Requisiten oder sind seine Chunk-Meshes im
+  ersten Frame noch nicht auflösbar (ungültige `worldBounds` fallen aus der Union), bleibt es
+  draußen.
+- Verankerung ist uneinheitlich: Metal legt den Ursprung auf `bounds.min`
+  (`MetalRenderer.mm:8126`), also deckt es die −X/−Z-Ecke der Szene; GL, D3D11, D3D12 und Vulkan
+  zentrieren (`OpenGLRenderer.cpp:7915`, `D3D11Renderer.cpp:2935`, `D3D12Renderer.cpp:6141`,
+  `VulkanRenderer.cpp:7973`).
+- Außerhalb des Grids liefert `sampleDDGIIrradiance` 0 (`shaders/scene.frag:205-207`), es gibt
+  keinen Fade zum Sky-Ambient.
+
+Beide Lesarten erklären die alte Beobachtung „Grid blieb bei 2×2×2 trotz großem Terrain": entweder
+war das Terrain damals nicht in `objects`, oder das einmalig gebaute Grid hat es verpasst. Welche
+heute gilt, entscheidet ein Laufzeit-Zeuge (Log-Zeile aus `EnsureGIProbeGrid` bei einer
+Nur-Terrain-Szene: 10×n×10 = Terrain drin, 2×2×2 oder kein Grid = draußen).
+
+**Einordnung:** Das ist ein **DDGI-Skalierungsproblem**, kein Terrain-Problem. Auch ein großes
+Gebäude aus Einzelmeshes über 36 m hat dieselbe Lücke. Lösung (Kaskaden oder kamerafolgendes
+Grid, Neu-Einpassen bei Szenenänderung, Fade statt 0 am Rand) betrifft fünf Backends und gehört in
+ein **eigenes Rendering-Thema**. Auf macOS-OpenGL (4.1, kein Compute) gibt es ohnehin kein DDGI.
+Memory `ao-gi-roadmap` erst nach dem Zeugen umschreiben.
+
+## 5. Vorgeschlagene Schritte für dieses Thema
+
+1. **Bugfixes Foliage** (3.1/1+2): Sculpt/MCP/Terrain-Verschieben setzen Foliage dirty; Scatter
+   über die volle Weltmatrix des Terrains. Mit Tests (Sculpt → Instanz-Y folgt; gedrehtes/geparentes
+   Terrain → Instanzen liegen auf der Oberfläche). Aufwand S.
+2. **GI-Grid-Zeuge** (4): Release-Build, Nur-Terrain-Szene, Grid-Logzeile lesen; danach
+   veralteten Kommentar + Memory korrigieren und die Grid-Skalierung als eigenes Thema anlegen.
+   Aufwand S.
+3. **Foliage-Wind** (3.3): Wind aus der Environment als Material-Uniform, ein `Wind`-Knoten
+   (oder Funktion) im Material-Graph, Foliage-Standardmaterial; Schatten-WPO als bewusst
+   getrennte Entscheidung. Aufwand M.
+4. **Mehrere Foliage-Schichten + Scatter-Regeln** (Hang, Höhe, Paint-Layer, Normalenausrichtung).
+   Aufwand M.
+5. **Roadmap angleichen** (nach 1–3): Beschreibung ohne unbelegte Zusage, Prozentwert neu.
+   `roadmap_upsert` + `deploy` nur nach Bestätigung durch den Menschen.
+
+Nicht hier, sondern Querverweis: D3D12/Vulkan-Paint (3.2, Zweig `backend-parity-p1` / Thema 78),
+DDGI-Grid-Skalierung (4, neues Rendering-Thema). Die Autoring-Lücken aus 3.4 jenseits von Schritt 4
+sind Backlog, keine Voraussetzung für „fertig" im Sinne der Roadmap-Beschreibung.
