@@ -261,7 +261,10 @@ BuildTools 18.9 statt Community 18.10 (§4a/§4b; beobachtet, die Ursache in cma
 untersucht). `-G` allein ändert daran nichts, denn beide sind „Visual Studio 18 2026“. Erst
 `CMAKE_GENERATOR_INSTANCE` legt die Instanz fest. Jetzt gewinnt die neueste, also Community
 18.10. Das Toolset ist hier bei beiden 14.51.36231. Die Regel heißt „neueste gewinnt“ und ist
-unabhängig davon, in welcher Reihenfolge vswhere oder cmake die Instanzen auflisten.
+unabhängig davon, in welcher Reihenfolge vswhere oder cmake die Instanzen auflisten. Beobachtet
+im Cache, den `buildDylib` auf NN-WS03 schreibt:
+`CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026`, `CMAKE_GENERATOR_PLATFORM:INTERNAL=x64`,
+`CMAKE_GENERATOR_INSTANCE:UNINITIALIZED=C:/Program Files/Microsoft Visual Studio/18/Community`.
 
 **H3: fremder Cache im Build-Ordner.** cmake verweigert einen Configure, dessen Cache einen
 anderen Generator, eine andere Plattform oder eine andere Instanz nennt. Das trifft einen von
@@ -269,7 +272,11 @@ Hand mit NMake/Ninja konfigurierten `Source/build` und **jeden** GameLogic-Build
 älteren Editors, denn der gab kein `-A` mit, im Cache steht dort `CMAKE_GENERATOR_PLATFORM`
 also leer. `buildDylib` liest deshalb vor dem Configure `CMAKE_GENERATOR`,
 `CMAKE_GENERATOR_PLATFORM` und `CMAKE_GENERATOR_INSTANCE` (`:INTERNAL=`) aus
-`CMakeCache.txt`. Weicht einer davon ab, löscht es `CMakeCache.txt` und `CMakeFiles/`, nicht
+`CMakeCache.txt`, und zwar mit jedem Typ. Ein per `-D` übergebenes `CMAKE_GENERATOR_INSTANCE`
+legt cmake als `:UNINITIALIZED=` ab, nicht als `:INTERNAL=`. Die erste Fassung las nur
+`INTERNAL`, sah deshalb nie eine Instanz und warf den eigenen Cache bei **jedem** Build weg:
+voller Neubau, aber grün. Aufgefallen ist das erst durch den zweiten Build in denselben Ordner
+im Test. Weicht einer der drei Werte ab, löscht es `CMakeCache.txt` und `CMakeFiles/`, nicht
 den ganzen Ordner, und schreibt eine Zeile ins Build-Log. Pfade werden ohne Rücksicht auf
 Groß-/Kleinschreibung und Schrägstrichrichtung verglichen. Folge: Ein bestehendes Projekt wird
 beim ersten Build nach dem Update einmal neu konfiguriert und voll gebaut. Wer denselben
@@ -297,6 +304,8 @@ Tests: `tests/test_toolchain_vswhere.cpp`.
   - `buildDylib` in einen Ordner mit NMake-Cache.
   - `buildDylib` in einen Ordner, den ein schlichtes `cmake -S -B` vorkonfiguriert hat, also
     genau so, wie der alte Editor es tat.
+  - In beiden H3-Fällen zeigt der erste Build die Reset-Zeile. Danach baut `buildDylib` ein
+    zweites Mal in denselben Ordner, und dort darf **keine** Reset-Zeile mehr stehen.
 
 Ergebnisse, Release-Build `C:\hw96s4` (Ninja, eigener `DEPLOY_DIR`). he_tests lief aus einer
 PowerShell ohne `VCINSTALLDIR`/`CMAKE_GENERATOR`/`cl` auf PATH und mit privatem `APPDATA`:
@@ -306,7 +315,10 @@ PowerShell ohne `VCINSTALLDIR`/`CMAKE_GENERATOR`/`cl` auf PATH und mit privatem 
 | neue + bestehende Toolchain-Fälle | 13/13 grün, 46 Assertions |
 | Negativkontrolle ohne `-G` | rot: Probe mit NMake zeigt wörtlich Lauf B (`Building for: NMake Makefiles` … `'nmake' '-?'` … `CMAKE_CXX_COMPILER not set`); Fantasie-Generator: `CMAKE_GENERATOR was set but the specified generator doesn't exist. Using CMake default.` + Configure-Fehler; NMake-Cache rot. Der Alt-Editor-Cache ist hier grün, wie erwartet, denn ohne `-G` gibt es nichts, was nicht passt |
 | Negativkontrolle mit `-G`, ohne Cache-Reset | Probe grün; beide H3-Fälle rot: `Does not match the generator used previously: NMake Makefiles` bzw. `generator platform: x64 Does not match the platform used previously:` (leer) |
-| volle Suite nach Rückbau der Kontrollschalter | 4001/4001, 524388 Assertions, 0 fehlgeschlagen |
+| zweiter Build, erste Fassung (nur `:INTERNAL` gelesen) | rot: Reset-Zeile auch im zweiten Build, in beiden H3-Fällen |
+| zweiter Build nach dem Fix | grün, 4/4 Toolchain-Fälle, 20 Assertions |
+| vorübergehender Schalter „nur BuildTools“ (Pfad mit `(x86)` durch `cmd /c`) | grün, 4/4. Cache: `CMAKE_GENERATOR_INSTANCE:UNINITIALIZED=C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools`, Probe mit `CMAKE_GENERATOR=NMake Makefiles` ebenfalls grün |
+| volle Suite nach Rückbau aller Kontrollschalter | 4001/4001, 524389 Assertions, 0 fehlgeschlagen |
 
 Nicht gemacht:
 
@@ -315,7 +327,8 @@ Nicht gemacht:
 - Kein Build auf macOS/Linux. Dort ändert sich nur, dass die reinen Funktionen mitkompiliert
   werden. `chooseGenerator` liefert auf POSIX leere Argumente.
 - Keine Maschine mit nur BuildTools oder nur VS 2022 real gesehen. Diese Fälle sind als
-  vswhere-Daten abgedeckt.
+  vswhere-Daten abgedeckt, BuildTools zusätzlich über den Schalter oben, allerdings auf einer
+  Maschine, auf der auch die anderen Instanzen liegen.
 
 ## 5. Offen für Schritt 2
 

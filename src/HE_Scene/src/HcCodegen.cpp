@@ -4364,14 +4364,18 @@ std::string dropForeignGeneratorCache(const std::filesystem::path& buildDir,
     for (std::string line; std::getline(f, line); )
     {
         if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Any type: cmake keeps an instance it chose itself as :INTERNAL, but one
+        // passed with -D as :UNINITIALIZED — reading only INTERNAL made every build
+        // after the first drop the cache again.
         const auto take = [&](const char* key, std::string& into)
         {
             const size_t n = std::strlen(key);
-            if (line.compare(0, n, key) == 0) into = line.substr(n);
+            if (line.compare(0, n, key) != 0 || line.size() <= n || line[n] != ':') return;
+            if (const size_t eq = line.find('=', n); eq != std::string::npos) into = line.substr(eq + 1);
         };
-        take("CMAKE_GENERATOR:INTERNAL=", generator);
-        take("CMAKE_GENERATOR_PLATFORM:INTERNAL=", platform);
-        take("CMAKE_GENERATOR_INSTANCE:INTERNAL=", instance);
+        take("CMAKE_GENERATOR", generator);
+        take("CMAKE_GENERATOR_PLATFORM", platform);
+        take("CMAKE_GENERATOR_INSTANCE", instance);
     }
     f.close();
     // Paths compare the way Windows does: case and slash direction do not matter.

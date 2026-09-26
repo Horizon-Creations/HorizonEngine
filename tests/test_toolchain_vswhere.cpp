@@ -294,7 +294,7 @@ TEST_CASE("Toolchain build: a build directory configured with another generator 
         f << "int he_stale_cache_probe() { return 7; }\n";
     }
 
-    const auto build = [&](const fs::path& buildDir)
+    const auto buildOnce = [&](const fs::path& buildDir) -> std::string
     {
         HE::hccg::DylibBuildSpec spec;
         spec.sourceDir     = source;
@@ -309,6 +309,21 @@ TEST_CASE("Toolchain build: a build directory configured with another generator 
         INFO("build message: " << out.message);
         INFO("build log tail: " << (log.size() > 1500 ? log.substr(log.size() - 1500) : log));
         CHECK(out.ok);
+        return log;
+    };
+    // The foreign cache goes once — and the one buildDylib wrote itself must then
+    // STAY: were the instance cmake caches compared wrongly, every Build and Reload
+    // would silently reconfigure and rebuild from scratch, and still succeed.
+    const auto build = [&](const fs::path& buildDir)
+    {
+        const std::string first = buildOnce(buildDir);
+        CHECK(first.find("dropping its CMakeCache.txt") != std::string::npos);
+        std::ifstream cache(buildDir / "CMakeCache.txt", std::ios::binary);
+        for (std::string line; std::getline(cache, line); )
+            if (line.rfind("CMAKE_GENERATOR", 0) == 0) MESSAGE("cache: " << line);
+        cache.close();
+        const std::string second = buildOnce(buildDir);
+        CHECK(second.find("dropping its CMakeCache.txt") == std::string::npos);
     };
 
     SUBCASE("configured by hand with NMake")
