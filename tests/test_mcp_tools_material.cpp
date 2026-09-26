@@ -1029,6 +1029,9 @@ TEST_CASE("mcp material tools: every template compiles and exposes its own param
 		  { "BaseColor", "Metallic", "Specular", "Roughness", "Emissive", "Opacity" } },
 		{ "Unlit",         "Opaque",      "Surface",        { "Color" } },
 		{ "UserInterface", "Opaque",      "User Interface", { "Color" } },
+		{ "Foliage",       "Masked",      "Surface",
+		  { "BaseColor", "Metallic", "Specular", "Roughness", "Emissive", "OpacityMask",
+		    "WindAmount", "WindFrequency", "BendHeight" } },
 	};
 
 	for (const Expect& e : table)
@@ -1066,6 +1069,16 @@ TEST_CASE("mcp material tools: every template compiles and exposes its own param
 		CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
 		CHECK(gen.glsl.find("no Output node") == std::string::npos);
 		CHECK(gen.params.size() == e.params.size());
+		// Only Foliage moves its vertices, and the asset on disk must carry
+		// the WPO body: without it the material would draw standing still.
+		const bool wantWind = std::string(e.tpl) == "Foliage";
+		CHECK(gen.vertexBody.empty() != wantWind);
+		CHECK(a->customShaderVertGlsl.empty() != wantWind);
+		if (wantWind)
+		{
+			CHECK(a->customShaderVertGlsl.find("heLight.camPos.w") != std::string::npos);
+			CHECK(a->customShaderVertGlsl.find("pos.y") != std::string::npos);
+		}
 #if defined(HE_TESTS_HAVE_SHADERC)
 		// The cross-compile the Material Editor runs inline: a template that
 		// only generates but does not compile would render magenta on a real
@@ -1077,6 +1090,14 @@ TEST_CASE("mcp material tools: every template compiles and exposes its own param
 		CHECK_MESSAGE(msl.ok, e.tpl, ": MSL compile failed: ", msl.log);
 		const auto& gl = lib.fragment(hash, gen.glsl, B::GLSL410);
 		CHECK_MESSAGE(gl.ok, e.tpl, ": GLSL compile failed: ", gl.log);
+		if (!gen.vertexBody.empty())
+		{
+			const uint64_t vh = std::hash<std::string>{}(gen.vertexBody);
+			const auto& mv = lib.customVertex(vh, gen.vertexBody, B::Metal);
+			CHECK_MESSAGE(mv.ok, e.tpl, ": MSL vertex compile failed: ", mv.log);
+			const auto& gv = lib.customVertex(vh, gen.vertexBody, B::GLSL410);
+			CHECK_MESSAGE(gv.ok, e.tpl, ": GLSL vertex compile failed: ", gv.log);
+		}
 #endif
 	}
 

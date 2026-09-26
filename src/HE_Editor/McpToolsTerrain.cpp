@@ -311,7 +311,11 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 					{ "gain",        tc.gain },
 					{ "uvTiling",    tc.uvTiling },
 					{ "lodDistanceScale", tc.lodDistanceScale },
-					{ "painted",     !tc.layerWeights.empty() },
+					// Visual only: the heights above (and collision) do not
+					// include the displacement.
+					{ "tessellationFactor",   tc.tessellationFactor },
+					{ "displacementStrength", tc.displacementStrength },
+					{ "painted",    !tc.layerWeights.empty() },
 					{ "weightRes",   tc.weightRes },
 					// The mean layer mix over the whole landscape, normalised.
 					// Unpainted reads as [1, 0, 0, 0], which is what the shader

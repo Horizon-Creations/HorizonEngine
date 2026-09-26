@@ -31,6 +31,36 @@ TEST_CASE("LODSystem selects nearest level when camera is close")
     CHECK(reg.get<LODComponent>(e).current == 0);
 }
 
+// The refined level (terrain tessellation) sits outside `levels`, so levels[0]
+// stays LOD0 for everything else that reads it, and is picked first in range.
+TEST_CASE("LODSystem picks the refined level first within its distance, and only there")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+    auto e = world.createEntity("Chunk");
+    reg.emplace<TransformComponent>(e, TransformComponent{ .position = glm::vec3(0.f) });
+    reg.emplace<MeshComponent>(e, MeshComponent{});
+
+    LODComponent lod;
+    lod.levels = { { makeId(1,0), 10.f }, { makeId(2,0), 1e9f } };
+    lod.refinedMeshId      = makeId(9,0);
+    lod.refinedMaxDistance = 4.f;
+    reg.emplace<LODComponent>(e, lod);
+
+    LODSystem::update(world, glm::vec3(3.f, 0.f, 0.f));   // inside 4 → refined
+    CHECK(reg.get<MeshComponent>(e).meshAssetId == makeId(9,0));
+    CHECK(reg.get<LODComponent>(e).current == LODComponent::kRefined);
+
+    LODSystem::update(world, glm::vec3(6.f, 0.f, 0.f));   // past it → the chain again
+    CHECK(reg.get<MeshComponent>(e).meshAssetId == makeId(1,0));
+    CHECK(reg.get<LODComponent>(e).current == 0);
+
+    // Unhooked: never chosen, however close.
+    reg.get<LODComponent>(e).refinedMeshId = HE::UUID{};
+    LODSystem::update(world, glm::vec3(0.f, 0.f, 0.f));
+    CHECK(reg.get<MeshComponent>(e).meshAssetId == makeId(1,0));
+}
+
 TEST_CASE("LODSystem switches to lower LOD at greater distance")
 {
     HorizonWorld world;

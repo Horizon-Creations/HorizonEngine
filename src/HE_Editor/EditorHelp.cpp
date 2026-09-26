@@ -658,6 +658,29 @@ namespace
 	  "How far from the camera full detail is kept: 2 keeps it twice as far as the "
 	  "default. Near ground is always full resolution.",
 	  "", "rendering#performance" },
+	{ "Terrain/Tessellation", "",
+	  "Gives the ground near the camera 2 or 4 times more triangles than the "
+	  "landscape's own grid: smooth between the height samples instead of "
+	  "creased, plus the displacement map's detail. Built only for the nearest "
+	  "chunks. Off costs nothing.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Tess Distance", "",
+	  "How close a chunk's centre has to be to the camera, in metres, before it "
+	  "switches to the tessellated mesh.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Displacement", "",
+	  "A tileable greyscale texture whose detail is added to the tessellated "
+	  "ground: white raises, black lowers, mid-grey leaves it. Without one the "
+	  "tessellation only smooths.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Disp. Strength", "",
+	  "Height between the displacement map's black and white, in metres. Keep it "
+	  "small: collision and foliage follow the landscape, not this detail.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Disp. Tiling", "",
+	  "How many times the displacement map repeats across the whole landscape. "
+	  "0 follows Texture Tiling, so it lines up with the material.",
+	  "", "scenes#terrain" },
 	{ "Terrain/Seed", "",
 	  "Which random landscape is generated. 0 is flat ground; any other number is "
 	  "a different set of hills, reproduced exactly on every load.",

@@ -139,6 +139,22 @@ enum class MatNodeType : uint8_t
                     // glass every modern dialog is made of. A UI-domain node in
                     // the strong sense — outside it there is no pass underneath
                     // to read, and it emits black instead of a sampler.
+
+    // ── v12: foliage wind (Thema 80) ──
+    // The environment wind (EnvironmentSettings::windDirection / windSpeed, the
+    // numbers the weather system drives for the clouds) as a material input. It
+    // rides in the spare .w channels of the lighting prefix — sunColor.w /
+    // ambient.w = unit direction x/z, camPos.w = strength — which the WPO vertex
+    // stage declares too, so both stages read it (HE::FillMaterialWind).
+    Wind,           // → Direction (unit world vec3 the wind blows TOWARD, y = 0),
+                    //   Strength (windSpeed), Vector (Direction * Strength)
+    WindSway,       // ready-made foliage offset for World Position Offset: leans
+                    // downwind, oscillates at Frequency (Hz) with a per-position
+                    // phase, gusts drift downwind. Amount = metres per unit of
+                    // strength. In the VERTEX stage Bend Height (object-space
+                    // metres, 0 = off) fades the offset in from the mesh origin
+                    // (squared, like a bending stem); the fragment stage has no
+                    // object position and ignores it. Mask multiplies the result.
 };
 
 // Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap

@@ -13,6 +13,10 @@
 // he_materialshader is linked into he_tests in every flavour (the stub answers the
 // compiles); only the cross-compile TEST CASES below are gated on HE_TESTS_HAVE_SHADERC.
 #include <material/MaterialShaderLibrary.h>
+#include <Renderer/IRenderer.h>
+#include <HorizonRendering/LightPacking.h>   // FillMaterialWind
+#include <HorizonRendering/SkyFrameParams.h> // CloudWindVector (the compass it must share)
+#include <cmath>
 
 using HE::MaterialGraph;
 using HE::MatNodeType;
@@ -396,10 +400,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// Backdrop is the LAST enum value today; a node added after it must move
+	// WindSway is the LAST enum value today; a node added after it must move
 	// this bound, or it silently drops out of the loop (which is how v10/v11
 	// went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::Backdrop; ++t)
+	for (int t = 0; t <= (int)MatNodeType::WindSway; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -651,6 +655,110 @@ TEST_CASE("WPO pin generates a vertex body; its statements leave the fragment")
 	CHECK(gen.vertexBody.find("vec3 heWpo") != std::string::npos);
 	CHECK(gen.vertexBody.find("0.777000") != std::string::npos); // tracer in the VS body…
 	CHECK(gen.glsl.find("0.777000") == std::string::npos);       // …and NOT in the fragment
+}
+
+// ═══ Thema 80 Schritt 3: foliage wind ═════════════════════════════════════════
+TEST_CASE("Wind reads the environment wind from the spare lighting-prefix channels")
+{
+	MaterialGraph g;
+	const int out  = g.addNode(MatNodeType::Output);
+	const int wind = g.addNode(MatNodeType::Wind);
+	REQUIRE(g.connect(wind, 0, out, HE::kMatOutputBaseColorPin)); // Direction
+	REQUIRE(g.connect(wind, 1, out, HE::kMatOutputMetallicPin));  // Strength
+	REQUIRE(g.connect(wind, 2, out, HE::kMatOutputEmissivePin));  // Vector
+	const std::string glsl = HE::generateFragment(g).glsl;
+	// sunColor.w / ambient.w = direction x / z, camPos.w = strength — the
+	// channels HE::FillMaterialWind writes. Anything else reads a colour.
+	CHECK(glsl.find("vec3(heLight.sunColor.w, 0.0, heLight.ambient.w)") != std::string::npos);
+	CHECK(glsl.find("= heLight.camPos.w;") != std::string::npos);
+}
+
+TEST_CASE("Wind Sway bends with object height in the vertex stage only")
+{
+	MaterialGraph g;
+	const int out  = g.addNode(MatNodeType::Output);
+	const int vs   = g.addNode(MatNodeType::WindSway);
+	const int fs   = g.addNode(MatNodeType::WindSway);
+	REQUIRE(g.connect(vs, 0, out, HE::kMatOutputWPOPin));
+	REQUIRE(g.connect(fs, 0, out, HE::kMatOutputEmissivePin));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+
+	REQUIRE_FALSE(gen.vertexBody.empty());
+	// Vertex: object-space height mask from the template's `pos`, the wind and
+	// the clock from the lighting prefix, per-position phase from world XZ.
+	CHECK(gen.vertexBody.find("clamp(pos.y / ") != std::string::npos);
+	CHECK(gen.vertexBody.find("heLight.camPos.w") != std::string::npos);
+	CHECK(gen.vertexBody.find("heLight.sunDir.w") != std::string::npos);
+	CHECK(gen.vertexBody.find("heValueNoise(vWorldPos.xz") != std::string::npos);
+	// Defaults of the unconnected pins: 0.1 m per unit strength, 0.8 Hz, 1 m.
+	CHECK(gen.vertexBody.find("0.100000") != std::string::npos);
+	CHECK(gen.vertexBody.find("0.800000") != std::string::npos);
+
+	// Fragment: no object position there, so no bend mask — and it needs the
+	// fragment's own noise helpers, which the vertex stage brings itself.
+	CHECK(gen.glsl.find("pos.y") == std::string::npos);
+	CHECK(gen.glsl.find("float heValueNoise(vec2 p)") != std::string::npos);
+	CHECK(gen.glsl.find("heLight.camPos.w") != std::string::npos);
+}
+
+TEST_CASE("Wind Sway inside a function called from WPO still gets the bend mask")
+{
+	// A function inlines as scope "vs/<call id>"; the node must still count
+	// that as the vertex stage, or a shared "Grass Wind" function would lose
+	// its bend and sway from the root.
+	MaterialGraph fn;
+	const int sway = fn.addNode(MatNodeType::WindSway);
+	const int fo   = fn.addNode(MatNodeType::FnOutput);
+	fn.findNode(fo)->s    = "Offset";
+	fn.findNode(fo)->p[0] = 2.0f; // Vec3
+	REQUIRE(fn.connect(sway, 0, fo, 0));
+
+	MaterialGraph g;
+	const int out  = g.addNode(MatNodeType::Output);
+	const int call = g.addNode(MatNodeType::FunctionCall);
+	g.findNode(call)->s = "Fns/GrassWind.hasset";
+	REQUIRE(g.connect(call, 0, out, HE::kMatOutputWPOPin));
+	HE::MatFunctionLoader loader = [&](const std::string& path) -> const MaterialGraph*
+	{ return path == "Fns/GrassWind.hasset" ? &fn : nullptr; };
+	const HE::MatShaderGen gen = HE::generateFragment(g, loader);
+	REQUIRE_FALSE(gen.vertexBody.empty());
+	CHECK(gen.vertexBody.find("clamp(pos.y / ") != std::string::npos);
+	CHECK(gen.glsl.find("pos.y") == std::string::npos);
+}
+
+TEST_CASE("FillMaterialWind: the cloud compass, a unit direction and the raw strength")
+{
+	IRenderer::EnvironmentSettings env;
+	HE::MaterialShaderLibrary::Lighting lit;
+	const float r = lit.sunColor[0], a = lit.ambient[0], c = lit.camPos[0];
+
+	env.windDirection = 0.0f; env.windSpeed = 2.5f;       // 0° = toward -Z (north)
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.sunColor[3] == doctest::Approx(0.0f).epsilon(1e-6));
+	CHECK(lit.ambient[3]  == doctest::Approx(-1.0f));
+	CHECK(lit.camPos[3]   == doctest::Approx(2.5f));      // no 0.025 cloud-scroll factor
+
+	env.windDirection = 90.0f;                            // clockwise → toward +X
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.sunColor[3] == doctest::Approx(1.0f));
+	CHECK(std::fabs(lit.ambient[3]) < 1e-5f);
+
+	// Grass leans the way the clouds drift, for any heading.
+	env.windDirection = 237.0f; env.windSpeed = 4.0f;
+	HE::FillMaterialWind(env, lit);
+	const glm::vec3 cloud = glm::normalize(HE::CloudWindVector(env));
+	CHECK(lit.sunColor[3] == doctest::Approx(cloud.x));
+	CHECK(lit.ambient[3]  == doctest::Approx(cloud.z));
+
+	// A negative speed from a script is calm, not a reversed wind.
+	env.windSpeed = -3.0f;
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.camPos[3] == doctest::Approx(0.0f));
+
+	// Only the .w channels: sun colour, ambient and camera stay untouched.
+	CHECK(lit.sunColor[0] == r);
+	CHECK(lit.ambient[0]  == a);
+	CHECK(lit.camPos[0]   == c);
 }
 
 TEST_CASE("Comment boxes round-trip through graph JSON (and old JSON still loads)")
@@ -2521,6 +2629,19 @@ std::vector<NodeShaderCase> allNodeShaderCases()
 		REQUIRE_FALSE(gen.vertexBody.empty());
 		cases.push_back({ "World Position Offset (custom vertex)", gen.glsl, gen.vertexBody });
 	}
+	// Wind Sway on WPO: the vertex branch of the node (object-space `pos`, the
+	// vertex copy of the noise helpers, the wind channels of the vertex HeLighting) is
+	// text the fragment-only sweep above never produces.
+	{
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int sway = g.addNode(MatNodeType::WindSway);
+		REQUIRE(g.connect(sway, 0, out, HE::kMatOutputWPOPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g);
+		REQUIRE(gen.vertexBody.find("pos.y") != std::string::npos);
+		cases.push_back({ "Wind Sway on WPO (custom vertex)", gen.glsl, gen.vertexBody });
+	}
 	return cases;
 }
 
@@ -3671,4 +3792,76 @@ TEST_CASE("D3D11: a graph material draw binds heLandscapeWeights on t14 with a c
 	}
 }
 #endif // _WIN32
+#endif // HE_TESTS_HAVE_SHADERC
+
+#if defined(HE_TESTS_HAVE_SHADERC)
+TEST_CASE("Wind Sway's vertex body cross-compiles for Metal and GL")
+{
+	// The HLSL/SPIR-V side runs through allNodeShaderCases; these are the two
+	// backends a Mac can actually draw with. Metal pins HeLighting to vertex
+	// buffer 2, so the wind channels must survive the pinned compile.
+	MaterialGraph g = MaterialGraph::makeDefault();
+	int out = 0;
+	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+	const int sway = g.addNode(MatNodeType::WindSway);
+	REQUIRE(g.connect(sway, 0, out, HE::kMatOutputWPOPin));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE_FALSE(gen.vertexBody.empty());
+
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const uint64_t vh = std::hash<std::string>{}(gen.vertexBody);
+	for (B b : { B::Metal, B::GLSL410, B::GLSLES300 })
+	{
+		const auto& cv = lib.customVertex(vh, gen.vertexBody, b);
+		CHECK_MESSAGE(cv.ok, "Wind Sway vertex failed for backend ", (int)b, ": ", cv.log);
+		CHECK_FALSE(cv.source.empty());
+	}
+}
+
+TEST_CASE("GL links a WPO material: HeLighting is the same block in both stages")
+{
+	// OpenGL links vertex + fragment into ONE program, and a uniform block of
+	// the same name must be declared identically in both. The WPO vertex used
+	// to declare a four-vec4 prefix of HeLighting; every WPO graph that read
+	// Time (and every Wind Sway) then failed at link time on GL with
+	// "Uniform type mismatch '<uniform HeLighting>'" — seen in a headless GL
+	// dump, invisible to every compile-only test. This compares the block the
+	// two cross-compiled GLSL stages actually carry.
+	MaterialGraph g = MaterialGraph::makeDefault(); // lit → the fragment reads heLight
+	int out = 0;
+	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+	const int sway = g.addNode(MatNodeType::WindSway);
+	REQUIRE(g.connect(sway, 0, out, HE::kMatOutputWPOPin));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE_FALSE(gen.vertexBody.empty());
+
+	// GLSL ES spells the fragment's members `highp vec4`; the vertex stage
+	// defaults to highp and leaves it out. Same precision, so drop the word.
+	auto block = [](const std::string& src) -> std::string {
+		const size_t b = src.find("uniform HeLighting");
+		if (b == std::string::npos) return {};
+		const size_t e = src.find("heLight;", b);
+		if (e == std::string::npos) return {};
+		std::string s = src.substr(b, e - b);
+		for (size_t p; (p = s.find("highp ")) != std::string::npos; ) s.erase(p, 6);
+		return s;
+	};
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (B b : { B::GLSL410, B::GLSLES300 })
+	{
+		const auto& fs = lib.fragment(std::hash<std::string>{}(gen.glsl), gen.glsl, b);
+		const auto& vs = lib.customVertex(std::hash<std::string>{}(gen.vertexBody), gen.vertexBody, b);
+		REQUIRE_MESSAGE(fs.ok, fs.log);
+		REQUIRE_MESSAGE(vs.ok, vs.log);
+		const std::string fb = block(fs.source), vb = block(vs.source);
+		REQUIRE_FALSE(fb.empty());
+		REQUIRE_FALSE(vb.empty());
+		CHECK_MESSAGE(vb == fb, "backend ", (int)b, "\nvertex:\n", vb, "\nfragment:\n", fb);
+		// The wind lives in the prefix both stages share.
+		CHECK(vb.find("vec4 camPos;") != std::string::npos);
+		CHECK(vb.find("mat4 localShadowVP[16];") != std::string::npos); // the whole block, not a prefix
+	}
+}
 #endif // HE_TESTS_HAVE_SHADERC

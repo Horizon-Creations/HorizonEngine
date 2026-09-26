@@ -4858,6 +4858,24 @@ void EditorApplication::dumpFrameHeadless()
 				g.connect(col, 0, out, 0);
 				g.connect(chk, 0, out, 4); // OpacityMask
 			}
+			else if (std::string(mt) == "wind")
+			{
+				// Foliage-wind witness (Thema 80): Wind Sway on WPO with a large Amount,
+				// so the upper half of the sphere (Bend Height 1 → the pos.y branch)
+				// leans with the environment wind. The offset scales with the wind
+				// strength the renderer writes into the lighting prefix, so two shots
+				// at different HE_SKY_TIME only differ if that strength reaches the
+				// VERTEX stage; the same time twice is the noise floor.
+				const int out  = g.addNode(HE::MatNodeType::Output);
+				const int col  = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.3f; g.findNode(col)->p[1] = 0.75f; g.findNode(col)->p[2] = 0.35f;
+				g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+				const int sway = g.addNode(HE::MatNodeType::WindSway);
+				const int amt  = g.addNode(HE::MatNodeType::ConstFloat);
+				g.findNode(amt)->p[0] = 0.6f;
+				g.connect(amt,  0, sway, 0);
+				g.connect(sway, 0, out, HE::kMatOutputWPOPin);
+			}
 			else if (std::string(mt) == "wpo")
 			{
 				// WPO witness: sin(worldPos.y * 8) * 0.35 offsets X → a wavy sphere.
@@ -6942,8 +6960,38 @@ void EditorApplication::dumpFrameHeadless()
 			 + " deg for the captured frame").c_str());
 		settleFrames = 1;
 	}
+	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
+	// probe-grid refit witness. Halfway through the settle frames a second
+	// landscape appears beside the first, so the scene box leaves the fitted
+	// grid and the backend must refit and recreate its probe atlases mid-run
+	// (GIProbeGrid.h) — the log shows "GI probe grid" twice, the capture still
+	// shows the first landscape lit, and Vulkan validation / the D3D12 debug
+	// layer stay quiet.
+	const char* giRefit = std::getenv("HE_DUMP_GIREFIT");
+	const bool  giRefitWitness = giRefit && *giRefit && s_layerMatId != HE::UUID{};
 	for (int i = 0; i < settleFrames; ++i)
+	{
+		if (giRefitWitness && i == settleFrames / 2)
+		{
+			auto& reg  = m_editorWorld->registry();
+			auto  land = m_editorWorld->createEntity("RefitLandscape");
+			TransformComponent tf;
+			tf.position = glm::vec3(170.0f, 300.0f, 0.0f); // beside the first, out of the top-down frame
+			reg.emplace<TransformComponent>(land, tf);
+			TerrainComponent tc;
+			tc.sizeX = tc.sizeZ = 100.0f;
+			tc.resolution  = 33;
+			tc.heightScale = 0.0f;
+			tc.seed  = 0;
+			tc.dirty = true;
+			reg.emplace<TerrainComponent>(land, tc);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_GIREFIT second landscape added before settle frame "
+				 + std::to_string(i)).c_str());
+		}
 		r->Render();
+	}
 
 	std::vector<uint8_t> rgba;
 	uint32_t w = 0, h = 0;

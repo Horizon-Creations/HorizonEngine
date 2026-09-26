@@ -7,7 +7,10 @@
 #include "HorizonScene/Components/LODComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
+#include "HorizonScene/TerrainHeightmap.h"
+#include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/PhysicsWorld.h"
+#include <Diagnostics/Log.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <Renderer/IRenderer.h>
@@ -107,24 +110,175 @@ namespace
     // like the rest of the systems tick.
     std::unordered_map<const HorizonWorld*, std::unordered_map<uint32_t, bool>>
         g_pendingTerrainColliders;
+
+    // ── Tessellation ─────────────────────────────────────────────────────────
+    // Build a chunk's refined level a little BEFORE LODSystem would pick it
+    // (it switches at tessellationDistance), and give it back only well past
+    // that, so a camera hovering at the threshold does not rebuild every frame.
+    constexpr float    kTessBuildMargin   = 1.25f;
+    constexpr float    kTessReleaseMargin = 1.5f;
+    // A factor-4 chunk is 257² vertices (~3.5 MB with indices). Two builds per
+    // tick keeps a flight over new ground from stalling a frame; sixteen per
+    // terrain bounds the memory to ~60 MB however large the landscape is.
+    constexpr uint32_t kTessBuildsPerTick       = 2;
+    constexpr size_t   kTessMaxChunksPerTerrain = 16;
+
+    uint32_t tessFactorOf(const TerrainComponent& tc)
+    {
+        return tc.tessellationFactor >= 4 ? 4u : (tc.tessellationFactor >= 2 ? 2u : 1u);
+    }
+
+    // Grey pixels of each displacement texture, converted once and shared by
+    // every chunk build (a 1024² map is a million luma conversions — per chunk
+    // that would be the whole cost of the build). Re-converted when the asset
+    // behind the UUID changed (hot reload replaces the payload in place).
+    struct GreyMap
+    {
+        const void*        bytes = nullptr;
+        size_t             size  = 0;
+        uint32_t           w = 0, h = 0;
+        std::vector<float> grey;
+    };
+    std::unordered_map<HE::UUID, GreyMap> g_displacementGrey;
+
+    TerrainDisplacementMap displacementFor(const TerrainComponent& tc, ContentManager& cm)
+    {
+        TerrainDisplacementMap d;
+        if (tc.displacementStrength == 0.0f || tc.displacementTexture == HE::UUID{}) return d;
+        // acquire, not get: a texture only listed by the Content Browser is not
+        // resident until something asks for its pixels.
+        const auto tex = cm.acquireTexture(tc.displacementTexture);
+        if (!tex) return d;
+        GreyMap& g = g_displacementGrey[tc.displacementTexture];
+        if (g.bytes != tex->data.data() || g.size != tex->data.size() ||
+            g.w != tex->width || g.h != tex->height)
+        {
+            g.bytes = tex->data.data();
+            g.size  = tex->data.size();
+            g.w = tex->width; g.h = tex->height;
+            if (!TerrainHeightmap::greyFromTexture(*tex, g.grey))
+                g.grey.clear();   // block-compressed or empty: no displacement
+        }
+        if (g.grey.empty()) return d;
+        d.grey     = g.grey.data();
+        d.width    = g.w;
+        d.height   = g.h;
+        d.strength = tc.displacementStrength;
+        d.tiling   = tc.displacementTiling > 0.0f ? tc.displacementTiling
+                   : (tc.uvTiling > 0.0f ? tc.uvTiling : 1.0f);
+        return d;
+    }
+
+    StaticMeshAsset buildTessMesh(const std::vector<float>& field, uint32_t res,
+                                  const TerrainComponent& tc, const ChunkGrid& g,
+                                  uint32_t cx, uint32_t cz, const TerrainDisplacementMap& disp)
+    {
+        const float cps = static_cast<float>(g.chunksPerSide);
+        return generateTerrainChunkMeshTessellated(
+            field, res, tc.sizeX, tc.sizeZ,
+            static_cast<float>(cx) / cps, static_cast<float>(cz) / cps,
+            static_cast<float>(cx + 1) / cps, static_cast<float>(cz + 1) / cps,
+            g.lod0Cells * tessFactorOf(tc) + 1u, tc.uvTiling, disp);
+    }
+
+    // Chunk entity → its refined mesh, per world, so the mesh of a chunk that
+    // is gone (undo rebuilds the scene, a deleted landscape, a resized grid)
+    // can be given back. The same bookkeeping RopeTrailSystem keeps: entt
+    // recycles handles, so the key alone is not proof — the id must match too.
+    std::unordered_map<const HorizonWorld*, std::unordered_map<uint32_t, HE::UUID>>
+        g_tessMeshes;
+
+    bool hasTessLevel(const LODComponent* lod, const TerrainChunkComponent& cc)
+    {
+        return cc.tessActive && cc.tessMeshId != HE::UUID{} && lod &&
+               lod->refinedMeshId == cc.tessMeshId;
+    }
+
+    // Unhook the refined level from the chunk's LODComponent and empty its
+    // mesh. The UUID stays registered and owned, so coming back is a replace.
+    void emptyTessLevel(entt::registry& reg, ContentManager& cm, IRenderer* renderer,
+                        entt::entity ce, TerrainChunkComponent& cc)
+    {
+        auto* lod = reg.try_get<LODComponent>(ce);
+        if (hasTessLevel(lod, cc))
+        {
+            lod->refinedMeshId      = HE::UUID{};
+            lod->refinedMaxDistance = 0.0f;
+            // Off the refined mesh right now, not a tick later when LODSystem
+            // runs — the mesh is about to be empty.
+            if (auto* mc = reg.try_get<MeshComponent>(ce);
+                mc && mc->meshAssetId == cc.tessMeshId && !lod->levels.empty())
+            {
+                lod->current    = 0;
+                mc->meshAssetId = lod->levels.front().meshId;
+                mc->dirty       = true;
+            }
+        }
+        if (cc.tessMeshId != HE::UUID{} && cm.getStaticMesh(cc.tessMeshId) != nullptr)
+        {
+            StaticMeshAsset empty;
+            empty.type = HE::AssetType::StaticMesh;
+            cm.replaceStaticMesh(cc.tessMeshId, std::move(empty));
+            if (renderer) renderer->InvalidateMesh(cc.tessMeshId);
+        }
+        cc.tessActive = false;
+    }
+
+    // Fill (or refill) the chunk's refined mesh and hook it into the chunk's
+    // LODComponent (refinedMeshId — NOT levels, which other systems read as
+    // "LOD0 = full detail"). Registers the mesh on the first refinement only.
+    void fillTessLevel(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
+                       entt::entity ce, TerrainChunkComponent& cc, StaticMeshAsset mesh,
+                       float maxDistance)
+    {
+        auto& reg = world.registry();
+        if (cc.tessMeshId != HE::UUID{} && cm.getStaticMesh(cc.tessMeshId) != nullptr)
+        {
+            cm.replaceStaticMesh(cc.tessMeshId, std::move(mesh));
+            if (renderer) renderer->InvalidateMesh(cc.tessMeshId);
+        }
+        else
+        {
+            cc.tessMeshId = cm.registerStaticMesh(std::move(mesh));
+            g_tessMeshes[&world][static_cast<uint32_t>(ce)] = cc.tessMeshId;
+        }
+        auto& lod = reg.get_or_emplace<LODComponent>(ce);
+        lod.refinedMeshId      = cc.tessMeshId;
+        lod.refinedMaxDistance = maxDistance;
+        cc.tessActive = true;
+    }
 }
 
 namespace TerrainSystem
 {
     // Build (or replace, reusing UUIDs) the L LOD meshes for one chunk and wire up
     // its LODComponent + MeshComponent. Returns nothing; mutates the chunk entity.
-    static void buildChunk(entt::registry& reg, ContentManager& cm, IRenderer* renderer,
+    //
+    // A chunk that currently has its tessellated level gets that rebuilt in
+    // place too (sculpting under the camera must not drop the near terrain
+    // back to LOD0 for a frame); `disp` is only read then.
+    static void buildChunk(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
                            entt::entity chunkEnt, const std::vector<float>& field,
                            uint32_t res, const TerrainComponent& tc, const ChunkGrid& g,
-                           uint32_t cx, uint32_t cz)
+                           uint32_t cx, uint32_t cz, const TerrainDisplacementMap& disp)
     {
+        auto& reg = world.registry();
         const float u0 = static_cast<float>(cx)     / static_cast<float>(g.chunksPerSide);
         const float u1 = static_cast<float>(cx + 1) / static_cast<float>(g.chunksPerSide);
         const float v0 = static_cast<float>(cz)     / static_cast<float>(g.chunksPerSide);
         const float v1 = static_cast<float>(cz + 1) / static_cast<float>(g.chunksPerSide);
 
         auto* lod = reg.try_get<LODComponent>(chunkEnt);
+        auto& cc  = reg.get<TerrainChunkComponent>(chunkEnt);
         const bool haveLevels = lod && lod->levels.size() == g.numLODs;
+        // A chunk that has its refined level keeps it through the rebuild —
+        // and if that is what it draws right now, it goes on drawing it: the
+        // editor's direct updateTerrains calls have no LOD tick behind them,
+        // so falling back to LOD0 here would show for a frame per brush step.
+        const bool keepTess = hasTessLevel(lod, cc) && tessFactorOf(tc) > 1u
+                           && tc.tessellationDistance > 0.0f;
+        const auto* oldMc = reg.try_get<MeshComponent>(chunkEnt);
+        const bool drawsTess = keepTess && oldMc && oldMc->meshAssetId == cc.tessMeshId;
 
         LODComponent newLod;
         const float chunkWorld = tc.sizeX / static_cast<float>(g.chunksPerSide);
@@ -156,6 +310,12 @@ namespace TerrainSystem
             newLod.levels.push_back({ id, maxDist });
         }
         reg.emplace_or_replace<LODComponent>(chunkEnt, newLod);
+        if (keepTess)
+            fillTessLevel(world, cm, renderer, chunkEnt, cc,
+                          buildTessMesh(field, res, tc, g, cx, cz, disp),
+                          tc.tessellationDistance);
+        else if (cc.tessActive)
+            emptyTessLevel(reg, cm, renderer, chunkEnt, cc);   // tessellation switched off
 
         // Drive the mesh from LOD0 initially; LODSystem swaps it per-frame by distance.
         // Terrain casts shadows again (self-shadowing) — the shadow pass renders each
@@ -165,6 +325,11 @@ namespace TerrainSystem
         // single-frame artifact — median shadow time is ~1ms, which is fine.)
         MeshComponent mc;
         mc.meshAssetId = newLod.levels.empty() ? HE::UUID{} : newLod.levels.front().meshId;
+        if (drawsTess)
+        {
+            mc.meshAssetId = cc.tessMeshId;
+            reg.get<LODComponent>(chunkEnt).current = LODComponent::kRefined;
+        }
         mc.dirty       = true;
         reg.emplace_or_replace<MeshComponent>(chunkEnt, mc);
     }
@@ -314,6 +479,9 @@ namespace TerrainSystem
 
             const bool gridChanged = (tc.builtRes != res || tc.builtChunksPerSide != g.chunksPerSide);
             const bool rebuildAll  = tc.dirty || gridChanged;
+            // Only read by chunks that already carry a tessellated level.
+            const TerrainDisplacementMap disp = tessFactorOf(tc) > 1u
+                ? displacementFor(tc, cm) : TerrainDisplacementMap{};
 
             // Ensure the terrain entity has the terrain material but NOT its own
             // renderable mesh — the chunks render now (avoids drawing it twice).
@@ -381,7 +549,7 @@ namespace TerrainSystem
                         }
                     }
 
-                    buildChunk(reg, cm, renderer, chunkEnt, field, res, tc, g, cx, cz);
+                    buildChunk(world, cm, renderer, chunkEnt, field, res, tc, g, cx, cz, disp);
                 }
 
             tc.builtRes           = res;
@@ -460,5 +628,128 @@ namespace TerrainSystem
     void updateTerrains(HorizonWorld& world, ContentManager& cm, IRenderer* renderer)
     {
         updateTerrains(world, cm, renderer, nullptr);
+    }
+
+    void updateTessellation(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
+                            const glm::vec3& cameraPos)
+    {
+        auto& reg = world.registry();
+
+        // ── Give back the refined meshes of chunks that are gone ─────────────
+        if (auto w = g_tessMeshes.find(&world); w != g_tessMeshes.end())
+        {
+            auto& owned = w->second;
+            for (auto it = owned.begin(); it != owned.end(); )
+            {
+                const entt::entity e = static_cast<entt::entity>(it->first);
+                const auto* cc = reg.valid(e) ? reg.try_get<TerrainChunkComponent>(e) : nullptr;
+                if (cc && cc->tessMeshId == it->second) { ++it; continue; }
+                if (renderer) renderer->InvalidateMesh(it->second);
+                if (!cm.unloadAsset(it->second))
+                    HE_LOG_DEBUG(Asset, "Terrain tessellation mesh %016llx%016llx stayed loaded"
+                                 " — something still holds a handle on it",
+                                 static_cast<unsigned long long>(it->second.hi),
+                                 static_cast<unsigned long long>(it->second.lo));
+                it = owned.erase(it);
+            }
+            if (owned.empty()) g_tessMeshes.erase(w);
+        }
+
+        // ── Chunks per terrain, with their camera distance ───────────────────
+        struct Near { entt::entity e; float dist; };
+        std::unordered_map<uint32_t, std::vector<Near>> byTerrain;
+        const auto owned = g_tessMeshes.find(&world);
+        for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
+        {
+            // A refined mesh this chunk does not own (a copied component) is
+            // not its to refill or empty: forget it and start from none.
+            if (cc.tessMeshId != HE::UUID{})
+            {
+                const bool mine = owned != g_tessMeshes.end() &&
+                    [&] { const auto f = owned->second.find(static_cast<uint32_t>(ce));
+                          return f != owned->second.end() && f->second == cc.tessMeshId; }();
+                if (!mine)
+                {
+                    if (auto* lod = reg.try_get<LODComponent>(ce); hasTessLevel(lod, cc))
+                    {
+                        lod->refinedMeshId      = HE::UUID{};
+                        lod->refinedMaxDistance = 0.0f;
+                    }
+                    cc.tessMeshId = HE::UUID{};
+                    cc.tessActive = false;
+                }
+            }
+            // Same distance LODSystem measures: world position of the chunk
+            // centre, composed from the parent chain (see LODSystem::update).
+            const float d = glm::distance(cameraPos, HE::worldPositionOf(world, ce));
+            byTerrain[static_cast<uint32_t>(cc.terrain)].push_back({ ce, d });
+        }
+
+        uint32_t budget = kTessBuildsPerTick;
+        for (auto& [terrainKey, chunks] : byTerrain)
+        {
+            const entt::entity te = static_cast<entt::entity>(terrainKey);
+            const auto* tcp = reg.valid(te) ? reg.try_get<TerrainComponent>(te) : nullptr;
+            if (!tcp) continue;
+            const TerrainComponent& tc = *tcp;
+            const float D = tc.tessellationDistance;
+
+            if (tessFactorOf(tc) <= 1u || !(D > 0.0f))
+            {
+                for (const Near& n : chunks)
+                    if (auto& cc = reg.get<TerrainChunkComponent>(n.e); cc.tessActive)
+                        emptyTessLevel(reg, cm, renderer, n.e, cc);
+                continue;
+            }
+            // Not built yet (or rebuilding): updateTerrains owns this tick.
+            if (tc.builtRes == 0 || tc.dirty || tc.regionDirty) continue;
+
+            std::sort(chunks.begin(), chunks.end(),
+                      [](const Near& a, const Near& b) { return a.dist < b.dist; });
+
+            const uint32_t   res = tc.builtRes;
+            const ChunkGrid  g   = computeGrid(res);
+            std::vector<float> field;              // computed on the first build only
+            TerrainDisplacementMap disp;
+
+            // Nearest first: the refined slots go to the closest chunks. A
+            // near chunk still waiting for its build does not take a slot, so
+            // a farther refined one keeps its level until the near one has
+            // been built — and then loses it once the cap is reached.
+            size_t kept = 0;
+            for (const Near& n : chunks)
+            {
+                auto& cc = reg.get<TerrainChunkComponent>(n.e);
+                if (cc.tessActive)
+                {
+                    if (n.dist > D * kTessReleaseMargin || kept >= kTessMaxChunksPerTerrain)
+                        emptyTessLevel(reg, cm, renderer, n.e, cc);
+                    else
+                    {
+                        ++kept;
+                        // Distance edited in the Inspector: follow it without a rebuild.
+                        if (auto* lod = reg.try_get<LODComponent>(n.e); hasTessLevel(lod, cc))
+                            lod->refinedMaxDistance = D;
+                    }
+                    continue;
+                }
+                if (n.dist > D * kTessBuildMargin || kept >= kTessMaxChunksPerTerrain ||
+                    budget == 0)
+                    continue;
+                if (field.empty())
+                {
+                    field = computeTerrainHeightField(tc);
+                    disp  = displacementFor(tc, cm);
+                }
+                // Grid coordinate from the chunk itself; a chunk left over from
+                // a different grid would have been destroyed by updateTerrains.
+                if (cc.cx >= g.chunksPerSide || cc.cz >= g.chunksPerSide) continue;
+                const uint32_t cx = cc.cx, cz = cc.cz;
+                fillTessLevel(world, cm, renderer, n.e, cc,
+                              buildTessMesh(field, res, tc, g, cx, cz, disp), D);
+                ++kept;
+                --budget;
+            }
+        }
     }
 }

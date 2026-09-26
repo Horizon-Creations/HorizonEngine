@@ -2,6 +2,7 @@
 #include "../HE_RENDERING_API.h"
 #include "RenderWorld.h"
 #include <material/MaterialShaderLibrary.h> // MaterialShaderLibrary::Lighting (the graph-material light ABI)
+#include <Renderer/EnvironmentSettings.h>   // FillMaterialWind's source
 #include <Math/Math.h>
 #include <cstdint>
 #include <vector>
@@ -79,6 +80,24 @@ HE_RENDERING_API PackedLocalShadowLights BuildMaskedLocalLights(const RenderWorl
 HE_RENDERING_API void FillMaterialLightWindow(const RenderWorld&               rw,
                                               MaterialShaderLibrary::Lighting& out,
                                               bool                             localShadowsActive);
+
+// ── Graph-material wind (the Wind / Wind Sway nodes) ──────────────────────────
+// Writes the environment wind into the spare .w channels of the Lighting
+// prefix: sunColor.w / ambient.w = the unit world-space direction the wind
+// blows TOWARD (x, z), camPos.w = its strength (EnvironmentSettings::windSpeed,
+// the same number the weather system drives for the clouds).
+//
+// Same compass as CloudWindVector (0° = toward -Z / north, clockwise), so grass
+// leans the way the clouds drift, but WITHOUT its 0.025 cloud-scroll factor:
+// the material decides what a strength of 1 means in metres.
+//
+// Unlike the fields the doc above leaves at the call sites, wind is a pure
+// world-space vector with no clip-space convention, so one helper serves all
+// five backends. Call it wherever sunDir.w (the Time input) is written — every
+// pass that animates a graph material. Passes that pin time to 0 (previews)
+// leave the wind at 0 too.
+HE_RENDERING_API void FillMaterialWind(const ::EnvironmentSettings&     env,
+                                       MaterialShaderLibrary::Lighting& out);
 
 // ── Clustered lighting (plan P7, cross-backend) ───────────────────────────────
 // Lifts the 8-light window for point/spot lights: every local light is
