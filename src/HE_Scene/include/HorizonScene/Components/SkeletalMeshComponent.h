@@ -13,4 +13,8 @@ struct SkeletalMeshComponent {
     bool                   castsShadow    = true;
     bool                   receivesShadow = true;
     bool                   dirty          = true;
+    // Runtime, never serialized: a cinematic Sequence poses this skeleton this
+    // frame. Set by SequenceSystem::begin, and the clip, blend and state-machine
+    // drivers skip the entity while it is — see SequenceSystem.h.
+    bool                   sequencePosed  = false;
 };

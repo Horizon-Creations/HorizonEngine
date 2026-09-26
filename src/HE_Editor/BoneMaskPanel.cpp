@@ -250,6 +250,22 @@ bool BoneMaskPanel::reloadFromDisk(const std::string& assetPath)
 void BoneMaskPanel::appendDirtyPaths(std::vector<std::string>& out)
 { s_states.appendDirtyPaths(out); }
 
+void BoneMaskPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, PanelState& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			const BoneMaskAsset* a = cm->getBoneMask(st.assetId);
+			if (!a) return false;
+			BoneMaskAsset copy = *a;
+			copy.json = HE::boneMaskToJson(st.mask);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
+
 bool BoneMaskPanel::save(AppContext& ctx, const std::string& path)
 {
 	PanelState* st = s_states.find(path);

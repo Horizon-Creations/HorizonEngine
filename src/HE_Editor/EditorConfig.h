@@ -88,6 +88,12 @@ struct EditorConfig
 	bool AutosaveEnabled     = true;
 	int  AutosaveIntervalSec = 60;
 
+	// Reward feedback (topic 75, Preferences ▸ Feedback) — see EditorRewards.h
+	// for what they switch and why the counters are NOT fields here.
+	bool RewardsEnabled      = true;    // master: the footer's "Saved"/"Build succeeded" line, and the counting
+	bool RewardsSound        = false;   // the chime with it (only with the master on)
+	bool RewardsShowProgress = true;    // "3 builds today · 5 days in a row" beside "Ready" (only with the master on)
+
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
 	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second

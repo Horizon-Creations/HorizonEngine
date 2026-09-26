@@ -2,6 +2,7 @@
 #include <HorizonScene/HorizonWorld.h> // Entity
 #include <nlohmann/json.hpp>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // ── Editing several entities at once: the rule, without the widgets ─────────
@@ -59,4 +60,36 @@ namespace EditorMultiEdit
 	int propagate(HorizonWorld& world, const std::vector<Change>& changes,
 	              const std::vector<Entity>& members, Entity primary,
 	              const std::vector<Entity>& skip = {});
+
+	// ── Where the selection disagrees ───────────────────────────────────────
+	// The rows show the ACTIVE entity's values; without this, three lights of
+	// intensity 1, 5 and 9 read "9" and nothing on screen says the other two
+	// are not. A leaf is mixed when any member that has the component holds a
+	// different value there — found with the same element-wise walk as diff(),
+	// so a vec3 that differs only in Y is mixed in Y alone.
+	struct Mixed
+	{
+		std::string        component;
+		json::json_pointer path;
+	};
+
+	// `states[0]` is the reference (the active entity's state()), the rest the
+	// other members'. Each component of the reference is compared against
+	// every other state that carries it; a component the reference lacks is
+	// not reported. Paths come once each, in the reference's (key-sorted) order.
+	std::vector<Mixed> mixed(const std::vector<json>& states);
+
+	// What the Details rows can mark, for one component: top-level field name
+	// → which elements are mixed (bit i = element i, all bits = the whole
+	// value). Only a field ("/intensity") or one element of a top-level array
+	// ("/position/1") qualifies: a nested leaf ("/lag/positionSpeed") has no
+	// row whose label is guaranteed to be ITS name, and a mark on the wrong
+	// row would be a false claim. Those stay in the summary line only.
+	std::unordered_map<std::string, unsigned> rowMarks(const std::vector<Mixed>& mixed,
+	                                                   const std::string& component);
+
+	// The summary line under a section: "Position (X, Z), Intensity, Lag /
+	// Position Speed" — field names spelled out from camelCase, the elements
+	// of a vector as X/Y/Z/W (R/G/B/A for a colour). Empty for no leaves.
+	std::string describe(const std::vector<Mixed>& mixed, const std::string& component);
 }

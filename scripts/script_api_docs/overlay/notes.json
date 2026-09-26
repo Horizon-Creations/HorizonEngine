@@ -1,0 +1,455 @@
+{
+  "_comment": "Hand-written additions per registry id, merged by gen_reference.py. Keys: 'note' (HTML, appended to the description), 'perm' (name of the Project Settings permission the row needs, see EngineApi.cpp perm::allowed), 'script_sig' / 'script_returns' (the Lua/Python call when it differs from the registry signature), 'examples' ({lua, python} source, rendered with the language switcher). Steps 3-8 of Thema 79 fill this per group.",
+  "log": {
+    "note": "Lua also accepts a number; Python only a <code>str</code>."
+  },
+  "math.dot3": {
+    "examples": {
+      "file": "view_cone",
+      "lua": "local M = {}\n\n-- True when target lies within coneDeg degrees around the direction\n-- (fx, fy, fz) this entity faces.\nfunction M.canSee(self, target, fx, fy, fz, coneDeg)\n    local x, y, z = horizon.getPosition(self.entityId)\n    local tx, ty, tz = horizon.getPosition(target)\n    local dx, dy, dz = horizon.math.normalize3(tx - x, ty - y, tz - z)\n    local limit = horizon.math.cos(horizon.math.radians(coneDeg / 2))\n    return horizon.math.dot3(dx, dy, dz, fx, fy, fz) >= limit\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass ViewCone(horizon.Behavior):\n    def can_see(self, target, fx, fy, fz, cone_deg):\n        \"\"\"True when target lies within cone_deg degrees around (fx, fy, fz).\"\"\"\n        x, y, z = horizon.getPosition(self.entity_id)\n        tx, ty, tz = horizon.getPosition(target)\n        dx, dy, dz = horizon.math.normalize3(tx - x, ty - y, tz - z)\n        limit = horizon.math.cos(horizon.math.radians(cone_deg / 2))\n        return horizon.math.dot3(dx, dy, dz, fx, fy, fz) >= limit\n"
+    }
+  },
+  "string.find": {
+    "note": "In Lua, add 1 before handing the result to <code>string.sub</code>.",
+    "examples": {
+      "file": "settings_line",
+      "lua": "local M = {}\n\n-- \"volume = 75\" -> \"volume\", 75. Positions count from 0.\nlocal function parse(line)\n    local eq = horizon.string.find(line, \"=\")\n    if eq < 0 then return nil end\n    local key = horizon.string.trim(horizon.string.substring(line, 0, eq))\n    local rest = horizon.string.substring(line, eq + 1, horizon.string.length(line))\n    return key, horizon.string.toNumber(rest)\nend\n\nfunction M.onStart(self)\n    local key, value = parse(\"volume = 75\")\n    if key then horizon.log(key .. \" is \" .. value) end\nend\n\nreturn M\n",
+      "python": "import horizon\n\ndef parse(line):\n    \"\"\"'volume = 75' -> ('volume', 75.0). Positions count from 0.\"\"\"\n    eq = horizon.string.find(line, \"=\")\n    if eq < 0:\n        return None\n    key = horizon.string.trim(horizon.string.substring(line, 0, eq))\n    rest = horizon.string.substring(line, eq + 1, horizon.string.length(line))\n    return key, horizon.string.toNumber(rest)\n\nclass Settings(horizon.Behavior):\n    def on_start(self):\n        parsed = parse(\"volume = 75\")\n        if parsed:\n            key, value = parsed\n            horizon.log(f\"{key} is {value}\")\n"
+    }
+  },
+  "random.seed": {
+    "examples": {
+      "file": "dice",
+      "lua": "local M = {}\n\nfunction M.onStart(self)\n    -- Without this, every launch rolls the same numbers. Seed in one\n    -- script only: every seed restarts the sequence for all of them.\n    horizon.random.seed(os.time())\nend\n\nfunction M.roll(self)\n    local eyes = horizon.random.rangeInt(1, 6)      -- 1 to 6, both included\n    local critical = horizon.random.chance(0.05)     -- one in twenty\n    return eyes, critical\nend\n\nreturn M\n",
+      "python": "import time\nimport horizon\n\nclass Dice(horizon.Behavior):\n    def on_start(self):\n        # Without this, every launch rolls the same numbers. Seed in one\n        # script only: every seed restarts the sequence for all of them.\n        horizon.random.seed(int(time.time()))\n\n    def roll(self):\n        eyes = horizon.random.rangeInt(1, 6)     # 1 to 6, both included\n        critical = horizon.random.chance(0.05)   # one in twenty\n        return eyes, critical\n"
+    }
+  },
+  "random.range": {
+    "note": "Can return <code>min</code>, never <code>max</code>."
+  },
+  "time.setTimeScale": {
+    "note": "Limited to 0…5."
+  },
+  "time.pause": {
+    "note": "Input actions stop arriving unless they have <em>Fires while the game is paused</em> ticked.",
+    "examples": {
+      "file": "pause_menu",
+      "lua": "local M = {}\n\n-- \"Pause\" is an input action with \"Fires while the game is paused\"\n-- ticked; without it the second press would never arrive.\nfunction M.onInputPressed(self, name)\n    if name ~= \"Pause\" then return end\n    if horizon.time.isPaused() then\n        horizon.time.resume()\n    else\n        horizon.time.pause()\n    end\nend\n\nfunction M.onCollisionEnter(self, other)\n    horizon.time.hitStop(0.1)   -- a landed hit freezes for a tenth of a second\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass PauseMenu(horizon.Behavior):\n    # \"Pause\" is an input action with \"Fires while the game is paused\"\n    # ticked; without it the second press would never arrive.\n    def on_input_pressed(self, name):\n        if name != \"Pause\":\n            return\n        if horizon.time.isPaused():\n            horizon.time.resume()\n        else:\n            horizon.time.pause()\n\n    def on_collision_enter(self, other):\n        horizon.time.hitStop(0.1)   # a landed hit freezes for a tenth of a second\n"
+    }
+  },
+  "time.hitStop": {
+    "note": "0 or less does nothing, and does not end a hit stop that is running."
+  },
+  "timer.after": {
+    "note": "0 also when 64 timers are already running."
+  },
+  "timer.every": {
+    "note": "0 when the interval is under 0.001 seconds or 64 timers are already running.",
+    "examples": {
+      "file": "reminders",
+      "lua": "local M = {}\n\nfunction M.onStart(self)\n    self.autosave = horizon.timer.every(30)\n    self.hint = horizon.timer.after(5)\nend\n\nfunction M.onTimer(self, handle)\n    if handle == self.autosave then\n        horizon.log(\"autosave\")\n    elseif handle == self.hint then\n        horizon.log(\"Press E to open the door\")\n    end\n    -- any other handle belongs to another script\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass Reminders(horizon.Behavior):\n    def on_start(self):\n        self.autosave = horizon.timer.every(30)\n        self.hint = horizon.timer.after(5)\n\n    def on_timer(self, handle):\n        if handle == self.autosave:\n            horizon.log(\"autosave\")\n        elif handle == self.hint:\n            horizon.log(\"Press E to open the door\")\n        # any other handle belongs to another script\n"
+    }
+  },
+  "timer.cancelAll": {
+    "note": "That includes the timers of every other script and of the GameInstance."
+  },
+  "datetime.now": {
+    "note": "Accurate only to about a minute, see the <a href=\"#datetime\">known issue</a>.",
+    "examples": {
+      "file": "clock_label",
+      "lua": "local M = {}\n\nlocal DAYS = { [0] = \"Sunday\", \"Monday\", \"Tuesday\", \"Wednesday\",\n               \"Thursday\", \"Friday\", \"Saturday\" }\n\nfunction M.onStart(self)\n    local now = horizon.datetime.now()\n    horizon.log(\"Today is \" .. DAYS[horizon.datetime.weekday(now)] .. \", \"\n                .. horizon.datetime.format(now, \"%d.%m.%Y\"))\n    -- To the second: from Lua itself until the precision issue is fixed.\n    horizon.log(\"It is \" .. os.date(\"%H:%M:%S\"))\nend\n\nreturn M\n",
+      "python": "import time\nimport horizon\n\nDAYS = [\"Sunday\", \"Monday\", \"Tuesday\", \"Wednesday\",\n        \"Thursday\", \"Friday\", \"Saturday\"]\n\nclass ClockLabel(horizon.Behavior):\n    def on_start(self):\n        now = horizon.datetime.now()\n        day = DAYS[horizon.datetime.weekday(now)]\n        horizon.log(f\"Today is {day}, {horizon.datetime.format(now, '%d.%m.%Y')}\")\n        # To the second: from Python itself until the precision issue is fixed.\n        horizon.log(\"It is \" + time.strftime(\"%H:%M:%S\"))\n"
+    }
+  },
+  "datetime.format": {
+    "note": "<code>%M</code> and <code>%S</code> are accurate only to about a minute, see the <a href=\"#datetime\">known issue</a>."
+  },
+  "datetime.minute": {
+    "note": "Accurate only to about a minute, see the <a href=\"#datetime\">known issue</a>."
+  },
+  "datetime.second": {
+    "note": "Not usable until the <a href=\"#datetime\">known issue</a> is fixed."
+  },
+  "debug.line": {
+    "script_sig": "line(x1, y1, z1, _, x2, y2, z2, _, r, g, b, _, seconds)",
+    "examples": {
+      "file": "ground_probe",
+      "lua": "local M = {}\n\nfunction M.onUpdate(self, dt)\n    local x, y, z = horizon.getPosition(self.entityId)\n    -- Four numbers per position and color, the fourth is ignored.\n    -- 0 seconds: drawn this frame only, so the shapes follow the entity.\n    horizon.debug.line(x, y, z, 0,   x, y - 2, z, 0,   1, 0, 0, 1,   0)\n    horizon.debug.sphere(x, y - 2, z, 0,   0.25,   0, 1, 0, 1,   0)\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass GroundProbe(horizon.Behavior):\n    def on_update(self, dt):\n        x, y, z = horizon.getPosition(self.entity_id)\n        # Four numbers per position and color, the fourth is ignored.\n        # 0 seconds: drawn this frame only, so the shapes follow the entity.\n        horizon.debug.line(x, y, z, 0,   x, y - 2, z, 0,   1, 0, 0, 1,   0)\n        horizon.debug.sphere(x, y - 2, z, 0,   0.25,   0, 1, 0, 1,   0)\n"
+    }
+  },
+  "debug.sphere": {
+    "script_sig": "sphere(x, y, z, _, radius, r, g, b, _, seconds)"
+  },
+  "debug.box": {
+    "script_sig": "box(minX, minY, minZ, _, maxX, maxY, maxZ, _, r, g, b, _, seconds)"
+  },
+  "ui.setText": {
+    "note": "Only a UI Text element takes it; on any other element it does nothing.",
+    "examples": {"file": "level_clock", "lua": "local M = {}\nlocal LIMIT = 90   -- seconds for the level\n\n-- This script sits on the HUD's UI Text entity.\nfunction M.onStart(self)\n    self.left = LIMIT\nend\n\nfunction M.onUpdate(self, dt)\n    if self.left <= 0 then return end\n    self.left = math.max(0, self.left - dt)\n    local e = self.entityId\n    horizon.ui.setText(e, string.format(\"%d:%02d\", self.left // 60, math.floor(self.left) % 60))\n    if self.left < 10 then\n        horizon.ui.setColor(e, 1, 0.25, 0.2, 1)   -- a colour is four numbers\n    end\n    if self.left == 0 then\n        horizon.ui.setVisible(e, false)\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nLIMIT = 90  # seconds for the level\n\n# This script sits on the HUD's UI Text entity.\nclass LevelClock(horizon.Behavior):\n    def on_start(self):\n        self.left = LIMIT\n\n    def on_update(self, dt):\n        if self.left <= 0:\n            return\n        self.left = max(0.0, self.left - dt)\n        e = self.entity_id\n        horizon.ui.setText(e, \"%d:%02d\" % (self.left // 60, int(self.left) % 60))\n        if self.left < 10:\n            horizon.ui.setColor(e, 1, 0.25, 0.2, 1)   # a colour is four numbers\n        if self.left == 0:\n            horizon.ui.setVisible(e, False)\n"}
+  },
+  "ui.getColor": { "note": "<code>(1, 1, 1, 1)</code> for an element with no Image, Text or Button." },
+  "ui.setColor": { "note": "Four numbers: <code>setColor(e, r, g, b, a)</code>. Image tint first, else Text colour, else a Button's normal colour; any other element ignores it." },
+  "ui.setVisible": { "note": "In Lua a missing <code>visible</code> reads as <code>false</code> and hides the element." },
+  "ui.setSize": { "note": "Not checked: a negative size is stored as it is." },
+  "ui.setMaterialParam": { "note": "The value is four numbers. <strong>Known issue:</strong> it writes the material asset, so every element sharing that material changes (see the <a href=\"#ui\">group notes</a>)." },
+  "ui.pointerOverUI": { "note": "Counts widgets only, and is <code>true</code> the whole time a widget dialog is open." },
+  "widget.isVisible": { "note": "<code>false</code> right after <code>createWidget</code>, and for a child or row reference, which is not a widget id." },
+  "widget.callFunction": { "note": "Only a widget with a HorizonCode graph has functions to call." },
+  "widget.addChild": { "note": "The reference is for HorizonCode's Set/Call External; from a script it is good for <code>removeChild</code>." },
+  "widget.setListCount": { "note": "A negative count becomes 0. Rows are filled by the row widget's own graph: a script gets no On Row Bind." },
+  "widget.listRow": { "note": "A reference, not a widget id; a script has no Set External to write into it." },
+  "widget.setListSelected": { "note": "An index at or past the count changes nothing and still answers <code>true</code>. A script gets no On Selection Changed." },
+  "widget.animate": { "note": "<code>ok</code> is <code>true</code> for a property name the element does not have (nothing moves), and an unknown easing runs as <code>\"Linear\"</code>." },
+  "widget.animateColor": { "note": "The colour is four numbers, as everywhere." },
+  "widget.animateVec2": { "note": "The point is two numbers." },
+  "widget.playAnimation": { "note": "A clip name the widget does not carry answers <code>false</code>. Directions: <code>\"Forward\"</code>, <code>\"Backward\"</code>, <code>\"Ping Pong\"</code>." },
+  "widget.childRef": { "note": "0 for an element that is not a component slot." },
+  "widget.showModal": {
+    "note": "A script gets no On Dismissed: ask <code>isVisible</code> to notice that the dialog was closed.",
+    "examples": {"file": "pause_dialog", "lua": "local M = {}\nlocal MENU = \"UI/pause_menu.hasset\"   -- a widget with an element called \"Panel\"\n\nfunction M.onStart(self)\n    self.menu = horizon.createWidget(MENU)   -- starts hidden; 0 if the asset is missing\nend\n\nfunction M.onInputPressed(self, name)\n    if name ~= \"Pause\" or self.paused or self.menu == 0 then return end\n    self.paused = true\n    horizon.time.pause()\n    horizon.showCursor()\n    -- A dialog: dims the game, takes the input, closes on Escape or Back.\n    horizon.widget.showModal(self.menu)\n    horizon.widget.animate(self.menu, \"Panel\", \"Render Opacity\", 0, 0, \"Linear\")\n    horizon.widget.animate(self.menu, \"Panel\", \"Render Opacity\", 1, 0.2, \"Out Quad\")\nend\n\nfunction M.onUpdate(self, dt)\n    -- A script gets no On Dismissed: notice the close by asking.\n    if self.paused and not horizon.widget.isVisible(self.menu) then\n        self.paused = false\n        horizon.time.resume()\n        horizon.hideCursor()\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nMENU = \"UI/pause_menu.hasset\"   # a widget with an element called \"Panel\"\n\nclass PauseMenu(horizon.Behavior):\n    paused = False\n\n    def on_start(self):\n        self.menu = horizon.createWidget(MENU)   # starts hidden; 0 if the asset is missing\n\n    def on_input_pressed(self, name):\n        if name != \"Pause\" or self.paused or self.menu == 0:\n            return\n        self.paused = True\n        horizon.time.pause()\n        horizon.showCursor()\n        # A dialog: dims the game, takes the input, closes on Escape or Back.\n        horizon.widget.showModal(self.menu)\n        horizon.widget.animate(self.menu, \"Panel\", \"Render Opacity\", 0, 0, \"Linear\")\n        horizon.widget.animate(self.menu, \"Panel\", \"Render Opacity\", 1, 0.2, \"Out Quad\")\n\n    def on_update(self, dt):\n        # A script gets no On Dismissed: notice the close by asking.\n        if self.paused and not horizon.widget.isVisible(self.menu):\n            self.paused = False\n            horizon.time.resume()\n            horizon.hideCursor()\n"}
+  },
+  "widget.closeTopLayer": { "note": "<code>false</code> when nothing was open." },
+  "theme.setMode": {
+    "note": "The names are exact: <code>\"dark\"</code> is ignored.",
+    "examples": {"file": "theme_toggle", "lua": "local M = {}\n-- Store the PREFERENCE, not the mode: System is a rule that follows the desktop.\nlocal NEXT = { System = \"Light\", Light = \"Dark\", Dark = \"System\" }\n\nfunction M.onStart(self)\n    horizon.theme.setMode(horizon.prefs.getString(\"theme\", \"System\"))\n    horizon.theme.setFontScale(horizon.prefs.getNumber(\"textScale\", 1))\nend\n\nfunction M.onInputPressed(self, name)\n    if name == \"CycleTheme\" then\n        local pref = NEXT[horizon.theme.getPreference()]\n        horizon.theme.setMode(pref)\n        horizon.prefs.setString(\"theme\", pref)\n        horizon.log(\"theme \" .. pref .. \", showing \" .. horizon.theme.getMode())\n    elseif name == \"BiggerText\" or name == \"SmallerText\" then\n        local step = name == \"BiggerText\" and 0.25 or -0.25\n        horizon.theme.setFontScale(horizon.theme.getFontScale() + step)   -- kept in 0.5..3\n        horizon.prefs.setNumber(\"textScale\", horizon.theme.getFontScale())\n    end\nend\n\nreturn M\n", "python": "import horizon\n\n# Store the PREFERENCE, not the mode: System is a rule that follows the desktop.\nNEXT = {\"System\": \"Light\", \"Light\": \"Dark\", \"Dark\": \"System\"}\n\nclass ThemeToggle(horizon.Behavior):\n    def on_start(self):\n        horizon.theme.setMode(horizon.prefs.getString(\"theme\", \"System\"))\n        horizon.theme.setFontScale(horizon.prefs.getNumber(\"textScale\", 1))\n\n    def on_input_pressed(self, name):\n        if name == \"CycleTheme\":\n            pref = NEXT[horizon.theme.getPreference()]\n            horizon.theme.setMode(pref)\n            horizon.prefs.setString(\"theme\", pref)\n            horizon.log(\"theme %s, showing %s\" % (pref, horizon.theme.getMode()))\n        elif name in (\"BiggerText\", \"SmallerText\"):\n            step = 0.25 if name == \"BiggerText\" else -0.25\n            horizon.theme.setFontScale(horizon.theme.getFontScale() + step)   # kept in 0.5..3\n            horizon.prefs.setNumber(\"textScale\", horizon.theme.getFontScale())\n"}
+  },
+  "theme.getMode": { "note": "Dark where the desktop reports no preference." },
+  "theme.setFontScale": { "note": "Clamped to 0.5 … 3." },
+  "window.open": { "note": "From Lua/Python always 0, see the <a href=\"#window\">group notes</a>. A width or height of 0 or less opens at 640 × 480." },
+  "window.close": { "note": "From Lua/Python this only logs, see the <a href=\"#window\">group notes</a>." },
+  "window.setTitle": { "note": "From Lua/Python this only logs, see the <a href=\"#window\">group notes</a>. Window 0 is <code>app.setTitle</code>." },
+  "window.setSize": { "note": "From Lua/Python this only logs, see the <a href=\"#window\">group notes</a>. Window 0 is <code>app.setSize</code>." },
+  "window.show": { "note": "Works from scripts, and shows the widget as well." },
+  "dialog.message": { "note": "Kind 1 is a warning, 2 an error, anything else information. A hidden run writes the text to the log instead." },
+  "dialog.confirm": { "note": "A hidden run answers <code>false</code>." },
+  "dialog.openFile": { "note": "The pick opens the path to the <code>fs</code> rows, not to <code>db.open</code> or <code>print.toPdf</code>." },
+  "dialog.pickFolder": { "note": "The pick opens the folder to the <code>fs</code> rows, not to <code>db.open</code> or <code>print.toPdf</code>." },
+  "app.quit": { "note": "The one <code>app</code> row that works from Lua and Python." },
+  "app.setTitle": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.setSize": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.minimize": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.maximize": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.showTray": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.hideTray": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.addTrayItem": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.clearTrayMenu": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.addMenu": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.addMenuItem": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.addMenuSeparator": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.clearMenuBar": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.setMenuItemEnabled": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.setMenuItemChecked": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.requestRedraw": { "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>." },
+  "app.size": { "note": "From Lua/Python always 0, 0, see the <a href=\"#app\">group notes</a>." },
+  "app.isMaximized": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.menuItemEnabled": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.menuItemChecked": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.notifyAvailable": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.autostart": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.notify": { "note": "From Lua/Python always <code>false</code>, see the <a href=\"#app\">group notes</a>." },
+  "app.setAutostart": {
+    "perm": "Run other programs",
+    "note": "From Lua/Python this does nothing, see the <a href=\"#app\">group notes</a>."
+  },
+  "process.run": {
+    "perm": "Run other programs",
+    "script_sig": "run(exe, argsIgnored, timeoutSeconds)",
+    "script_returns": "ok, exitCode, out, err",
+    "note": "<strong>Known issue:</strong> from Lua/Python the arguments are not passed, see the <a href=\"#process\">group notes</a>. A program that cannot be started gives exit code −1."
+  },
+  "process.openUrl": {
+    "perm": "Run other programs",
+    "examples": {"file": "open_manual", "lua": "local M = {}\nlocal MANUAL = \"https://example.com/manual/\"\n\nfunction M.onInputPressed(self, name)\n    if name ~= \"Help\" then return end\n    -- openUrl needs \"Run other programs\". Without it, hand the address over.\n    if horizon.process.openUrl(MANUAL) then return end\n    horizon.clipboard.setText(MANUAL)\n    horizon.dialog.message(\"Manual\", \"The manual's address is on your clipboard:\\n\" .. MANUAL, 0)\nend\n\nreturn M\n", "python": "import horizon\n\nMANUAL = \"https://example.com/manual/\"\n\nclass OpenManual(horizon.Behavior):\n    def on_input_pressed(self, name):\n        if name != \"Help\":\n            return\n        # openUrl needs \"Run other programs\". Without it, hand the address over.\n        if horizon.process.openUrl(MANUAL):\n            return\n        horizon.clipboard.setText(MANUAL)\n        horizon.dialog.message(\"Manual\", \"The manual's address is on your clipboard:\\n\" + MANUAL, 0)\n"}
+  },
+  "print.toPdf": {
+    "perm": "Files outside the project",
+    "note": "Needed even for a relative path. Only Latin-1 characters survive, others print as <code>?</code>."
+  },
+  "print.file": {
+    "perm": "Run other programs",
+    "note": "Uses <code>lp</code>; <code>false</code> on Windows and for a missing file."
+  },
+  "db.open": {
+    "perm": "Files outside the project",
+    "note": "Needed even for a relative path; a path picked in a dialog does not replace it (see the <a href=\"#db\">group notes</a>)."
+  },
+  "db.exec": { "note": "Runs only the first statement of several, and still answers <code>true</code>." },
+  "db.query": {
+    "examples": {"file": "highscores", "lua": "local M = {}\nlocal PLAYER = \"Player 1\"\n\nfunction M.onStart(self)\n    -- Lands in the project's Saved folder, but needs the \"Files outside the\n    -- project\" permission all the same (see the group notes).\n    self.db = horizon.db.open(\"scores.db\")\n    if self.db ~= 0 then\n        horizon.db.exec(self.db, \"CREATE TABLE IF NOT EXISTS scores(name TEXT, points INTEGER)\", \"\")\n    end\nend\n\nfunction M.onInputPressed(self, name)\n    if name ~= \"LevelDone\" or self.db == 0 then return end\n    local points = math.max(0, 1000 - math.floor(horizon.time.elapsed() * 10))\n    -- Values travel as a JSON array behind the ?s, never pasted into the SQL.\n    -- json.set* can overwrite array slots but not add them, so start from two.\n    local params = horizon.json.setNumber(horizon.json.setString('[\"\", 0]', \"[0]\", PLAYER), \"[1]\", points)\n    if not horizon.db.exec(self.db, \"INSERT INTO scores(name, points) VALUES(?, ?)\", params) then\n        horizon.log(\"scores: \" .. horizon.db.lastError(self.db))\n        return\n    end\n    local rows = horizon.db.query(self.db,\n        \"SELECT name, points FROM scores ORDER BY points DESC LIMIT 5\", \"\")\n    for i = 0, horizon.json.count(rows, \"\") - 1 do\n        horizon.log(string.format(\"%d. %s  %d\", i + 1,\n            horizon.json.getString(rows, \"[\" .. i .. \"].name\", \"?\"),\n            horizon.json.getNumber(rows, \"[\" .. i .. \"].points\", 0)))\n    end\nend\n\nreturn M\n", "python": "import horizon\nimport json\n\nPLAYER = \"Player 1\"\n\nclass Highscores(horizon.Behavior):\n    def on_start(self):\n        # Lands in the project's Saved folder, but needs the \"Files outside the\n        # project\" permission all the same (see the group notes).\n        self.db = horizon.db.open(\"scores.db\")\n        if self.db:\n            horizon.db.exec(self.db, \"CREATE TABLE IF NOT EXISTS scores(name TEXT, points INTEGER)\", \"\")\n\n    def on_input_pressed(self, name):\n        if name != \"LevelDone\" or not self.db:\n            return\n        points = max(0, 1000 - int(horizon.time.elapsed() * 10))\n        # Values travel as a JSON array behind the ?s, never pasted into the SQL.\n        if not horizon.db.exec(self.db, \"INSERT INTO scores(name, points) VALUES(?, ?)\",\n                               json.dumps([PLAYER, points])):\n            horizon.log(\"scores: \" + horizon.db.lastError(self.db))\n            return\n        rows = json.loads(horizon.db.query(\n            self.db, \"SELECT name, points FROM scores ORDER BY points DESC LIMIT 5\", \"\"))\n        for i, row in enumerate(rows, 1):\n            horizon.log(\"%d. %s  %d\" % (i, row[\"name\"], row[\"points\"]))\n"}
+  },
+  "db.lastInsertId": { "note": "Ids above 2 147 483 647 read back as 2 147 483 647." },
+  "http.get": {
+    "perm": "Network access",
+    "examples": {"file": "fetch_news", "lua": "local M = {}\nlocal URL = \"https://example.com/news.json\"   -- answers {\"headline\": \"...\"}\n\n-- This script sits on a UI Text entity; the headline goes there.\nfunction M.onStart(self)\n    self.ticket = horizon.http.get(URL)   -- 0: no \"Network access\" permission\n    horizon.ui.setText(self.entityId, self.ticket ~= 0 and \"Loading...\" or \"\")\nend\n\nfunction M.onUpdate(self, dt)\n    local t = self.ticket\n    -- A script gets no On Http Response: ask until the ticket is answered.\n    if t == 0 or not horizon.http.done(t) then return end\n    self.ticket = 0\n    if not horizon.http.ok(t) then                    -- never reached the server\n        horizon.ui.setText(self.entityId, \"Offline\")\n        horizon.log(\"news: \" .. horizon.http.error(t))\n    elseif horizon.http.status(t) ~= 200 then         -- reached it, and it said no\n        horizon.ui.setText(self.entityId, \"\")\n        horizon.log(\"news: HTTP \" .. horizon.http.status(t))\n    else\n        local body = horizon.http.body(t)\n        horizon.ui.setText(self.entityId, horizon.json.getString(body, \"headline\", \"\"))\n    end\n    horizon.http.forget(t)\nend\n\nreturn M\n", "python": "import horizon\n\nURL = \"https://example.com/news.json\"   # answers {\"headline\": \"...\"}\n\n# This script sits on a UI Text entity; the headline goes there.\nclass FetchNews(horizon.Behavior):\n    def on_start(self):\n        self.ticket = horizon.http.get(URL)   # 0: no \"Network access\" permission\n        horizon.ui.setText(self.entity_id, \"Loading...\" if self.ticket else \"\")\n\n    def on_update(self, dt):\n        t = self.ticket\n        # A script gets no On Http Response: ask until the ticket is answered.\n        if t == 0 or not horizon.http.done(t):\n            return\n        self.ticket = 0\n        if not horizon.http.ok(t):                     # never reached the server\n            horizon.ui.setText(self.entity_id, \"Offline\")\n            horizon.log(\"news: \" + horizon.http.error(t))\n        elif horizon.http.status(t) != 200:            # reached it, and it said no\n            horizon.ui.setText(self.entity_id, \"\")\n            horizon.log(\"news: HTTP %d\" % horizon.http.status(t))\n        else:\n            body = horizon.http.body(t)\n            horizon.ui.setText(self.entity_id, horizon.json.getString(body, \"headline\", \"\"))\n        horizon.http.forget(t)\n"}
+  },
+  "http.post": { "perm": "Network access" },
+  "http.done": { "note": "<code>false</code> again once the answer is forgotten or pushed out by 32 newer ones." },
+  "net.callServer": {
+    "script_sig": "callServer(entity, name, …)",
+    "script_returns": "ok: bool",
+    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>). On a client <code>true</code> means sent, also for a call the host then refuses. Offline and on the host a Lua or Python method is not reached: the row answers <code>false</code> and nothing runs, so call the method directly (see <a href=\"#net-calls\">Remote calls</a>)."
+  },
+  "net.callClient": {
+    "script_sig": "callClient(player, entity, name, …)",
+    "script_returns": "ok: bool",
+    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>). Answers <code>false</code> and runs nothing in a script on a client, for the host's own player and for a player number nobody has."
+  },
+  "net.callAllClients": {
+    "script_sig": "callAllClients(entity, name, …)",
+    "script_returns": "ok: bool",
+    "note": "In Lua and Python the arguments after <code>name</code> are passed on as the remote function's arguments, as many as it takes (see <a href=\"#remote-calls\">Remote calls</a>). Answers <code>false</code> on a client, and on the host for an entity without a HorizonCode class, although the clients were sent the call and ran it; the host's own script method does not run."
+  },
+  "entity.spawn": {
+    "note": "An empty name becomes <code>\"Entity\"</code>; parent 0 puts it at the top level. <strong>Known issue:</strong> the entity gets no transform, so position calls on it do nothing (see the <a href=\"#entity\">group notes</a>)."
+  },
+  "entity.self": { "note": "Always 0 in Lua and Python; use <code>self.entityId</code> / <code>self.entity_id</code>." },
+  "entity.selfObject": { "note": "Always 0 in Lua and Python." },
+  "entity.distance": { "note": "<strong>Known issue:</strong> it measures between the <em>local</em> positions, so the answer is right only for entities with the same parent (or none). An entity without a transform counts as standing at the origin." },
+  "entity.exists": {
+    "note": "<code>false</code> for 0.",
+    "examples": {"file": "boss_gate", "lua": "local M = {}\n\n-- Opens the gate once the boss is gone. Look the ids up once, not every\n-- frame: findByName walks every named entity.\nfunction M.onStart(self)\n    self.boss = horizon.entity.findByName(\"Boss\")\n    self.gate = horizon.entity.findByName(\"Gate\")\nend\n\nfunction M.onUpdate(self, dt)\n    if self.gate ~= 0 and not horizon.entity.exists(self.boss) then\n        horizon.entity.destroy(self.gate)   -- takes its children along\n        self.gate = 0\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nclass BossGate(horizon.Behavior):\n    # Opens the gate once the boss is gone. Look the ids up once, not every\n    # frame: findByName walks every named entity.\n    def on_start(self):\n        self.boss = horizon.entity.findByName(\"Boss\")\n        self.gate = horizon.entity.findByName(\"Gate\")\n\n    def on_update(self, dt):\n        if self.gate != 0 and not horizon.entity.exists(self.boss):\n            horizon.entity.destroy(self.gate)   # takes its children along\n            self.gate = 0\n"}
+  },
+  "entity.saveState": { "note": "Needs play mode, an active save and an enabled Save State component; see the <a href=\"#entity\">group notes</a>." },
+  "entity.applySavedState": { "note": "On an entity with a physics body it moves the body too and stops its motion." },
+  "scene.load": { "note": "In the editor's play mode this only logs a warning." },
+  "scene.activate": { "note": "Logs a warning when nothing was preloaded. In the editor's play mode this only logs a warning." },
+  "scene.loadAdditive": {
+    "script_sig": "loadAdditive(scene, hidden, x, y, z, _)",
+    "note": "<strong>Known issue:</strong> the position pin is typed as a colour, so Lua and Python must pass <strong>four</strong> numbers; the fourth is ignored. With three, Lua raises <em>bad argument #6</em> and Python <code>IndexError</code>. An offset of <code>0, 0, 0</code> leaves the zone where its scene put it.",
+    "examples": {"file": "cave_stream", "lua": "local M = {}\n\n-- This entity is a trigger volume at the start of the corridor. The cave\n-- loads hidden, 200 m along X, while the player walks; the door shows it.\nfunction M.onBeginOverlap(self, other)\n    if self.zone then return end\n    -- The position takes FOUR numbers from a script; the fourth is ignored.\n    self.zone = horizon.scene.loadAdditive(\"Scenes/Cave.hescene\", true, 200, 0, 0, 0)\nend\n\n-- \"Interact\" is an input action.\nfunction M.onInputPressed(self, name)\n    if name == \"Interact\" and self.zone then\n        horizon.scene.showZone(self.zone)   -- queued behind the load\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nclass CaveStream(horizon.Behavior):\n    # This entity is a trigger volume at the start of the corridor. The cave\n    # loads hidden, 200 m along X, while the player walks; the door shows it.\n    def on_start(self):\n        self.zone = 0\n\n    def on_begin_overlap(self, other):\n        if self.zone:\n            return\n        # The position takes FOUR numbers from a script; the fourth is ignored.\n        self.zone = horizon.scene.loadAdditive(\"Scenes/Cave.hescene\", True, 200, 0, 0, 0)\n\n    # \"Interact\" is an input action.\n    def on_input_pressed(self, name):\n        if name == \"Interact\" and self.zone:\n            horizon.scene.showZone(self.zone)   # queued behind the load\n"}
+  },
+  "scene.zonePosition": { "note": "<code>0, 0, 0</code> until the zone has arrived, the frame after <code>loadAdditive</code>." },
+  "scene.zoneScene": { "note": "Empty until the zone has arrived." },
+  "scene.setZonePosition": { "note": "Rebuilds the zone's collision at the new place, which stops moving bodies in it." },
+  "save.create": { "note": "Replaces the active save without writing it." },
+  "save.setNumber": { "note": "An Int or Enum field drops the fraction toward zero." },
+  "save.getNumber": { "note": "A Float field keeps about seven digits." },
+  "save.setStruct": { "note": "Needs a value from <code>horizon.structs.&lt;Name&gt;()</code> or <code>getStruct</code>; a table without <code>__type</code> is refused." },
+  "save.delete": { "note": "Deleting the active save leaves it active; <code>write</code> would create the file again." },
+  "save.write": {
+    "examples": {"file": "checkpoint", "lua": "local M = {}\nlocal SLOT = \"slot1\"\n\n-- \"level\" (Int) and \"stats\" (a struct with \"kills\") are fields of the\n-- project's SaveGame Template.\nfunction M.onStart(self)\n    -- Continue from the save if there is one, else start a new one.\n    if not (horizon.save.exists(SLOT) and horizon.save.load(SLOT)) then\n        horizon.save.create(SLOT)\n    end\n    horizon.log(string.format(\"Level %d\", horizon.save.getNumber(\"level\", 1)))\nend\n\n-- This entity is the checkpoint's trigger volume.\nfunction M.onBeginOverlap(self, other)\n    horizon.save.setNumber(\"level\", horizon.save.getNumber(\"level\", 1) + 1)\n    local stats = horizon.save.getStruct(\"stats\")   -- keeps __type\n    stats.kills = stats.kills + 1\n    horizon.save.setStruct(\"stats\", stats)\n    horizon.save.write()   -- nothing is on disk before this\nend\n\nreturn M\n", "python": "import horizon\n\nSLOT = \"slot1\"\n\nclass Checkpoint(horizon.Behavior):\n    # \"level\" (Int) and \"stats\" (a struct with \"kills\") are fields of the\n    # project's SaveGame Template.\n    def on_start(self):\n        # Continue from the save if there is one, else start a new one.\n        if not (horizon.save.exists(SLOT) and horizon.save.load(SLOT)):\n            horizon.save.create(SLOT)\n        horizon.log(f\"Level {horizon.save.getNumber('level', 1):.0f}\")\n\n    # This entity is the checkpoint's trigger volume.\n    def on_begin_overlap(self, other):\n        horizon.save.setNumber(\"level\", horizon.save.getNumber(\"level\", 1) + 1)\n        stats = horizon.save.getStruct(\"stats\")   # keeps __type\n        stats[\"kills\"] += 1\n        horizon.save.setStruct(\"stats\", stats)\n        horizon.save.write()   # nothing is on disk before this\n"}
+  },
+  "fs.rename": { "note": "<strong>Overwrites</strong> an existing file at <code>to</code>, unlike <code>copy</code>." },
+  "fs.remove": { "note": "Files only; a folder is refused." },
+  "fs.size": { "note": "Exact up to 16 MB (32-bit float)." },
+  "fs.modified": { "note": "<strong>Known issue:</strong> up to 64 seconds off, as in <a href=\"#datetime\">Date and Time</a>." },
+  "fs.watch": { "note": "Only in the exported game, and only the GameInstance's <em>On File Changed</em> hears it; scripts get no callback." },
+  "prefs.getBool": {
+    "examples": {"file": "tutorial_hint", "lua": "local M = {}\n\nfunction M.onStart(self)\n    if not horizon.prefs.getBool(\"tutorial.skip\", false) then\n        horizon.log(\"Tutorial: press Space to jump\")\n    end\nend\n\n-- \"SkipTutorial\" is an input action, e.g. on the hint's close button.\nfunction M.onInputPressed(self, name)\n    if name == \"SkipTutorial\" then\n        horizon.prefs.setBool(\"tutorial.skip\", true)   -- on disk at once\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nclass TutorialHint(horizon.Behavior):\n    def on_start(self):\n        if not horizon.prefs.getBool(\"tutorial.skip\", False):\n            horizon.log(\"Tutorial: press Space to jump\")\n\n    # \"SkipTutorial\" is an input action, e.g. on the hint's close button.\n    def on_input_pressed(self, name):\n        if name == \"SkipTutorial\":\n            horizon.prefs.setBool(\"tutorial.skip\", True)   # on disk at once\n"}
+  },
+  "prefs.setNumber": { "note": "Stored with about seven digits: <code>0.1</code> becomes <code>0.10000000149011612</code>." },
+  "json.getString": {
+    "examples": {"file": "settings_file", "lua": "local M = {}\nlocal FILE = \"settings.json\"\n\n-- settings.json in the game's data folder, e.g.\n-- {\"video\": {\"width\": 1920}, \"profiles\": [{\"name\": \"Ada\"}, {\"name\": \"Lin\"}]}\nfunction M.onStart(self)\n    local doc = horizon.fs.readText(FILE)   -- \"\" when the file is missing\n    local width = horizon.json.getNumber(doc, \"video.width\", 1280)\n    for i = 0, horizon.json.count(doc, \"profiles\") - 1 do\n        horizon.log(horizon.json.getString(doc, \"profiles[\" .. i .. \"].name\", \"?\"))\n    end\n    -- Setters return the new text; store it and write it back yourself.\n    doc = horizon.json.setNumber(doc, \"video.width\", width)\n    doc = horizon.json.setBool(doc, \"video.seen\", true)\n    horizon.fs.writeText(FILE, doc)\nend\n\nreturn M\n", "python": "import horizon\n\nFILE = \"settings.json\"\n\nclass SettingsFile(horizon.Behavior):\n    # settings.json in the game's data folder, e.g.\n    # {\"video\": {\"width\": 1920}, \"profiles\": [{\"name\": \"Ada\"}, {\"name\": \"Lin\"}]}\n    def on_start(self):\n        doc = horizon.fs.readText(FILE)   # \"\" when the file is missing\n        width = horizon.json.getNumber(doc, \"video.width\", 1280)\n        for i in range(horizon.json.count(doc, \"profiles\")):\n            horizon.log(horizon.json.getString(doc, f\"profiles[{i}].name\", \"?\"))\n        # Setters return the new text; store it and write it back yourself.\n        doc = horizon.json.setNumber(doc, \"video.width\", width)\n        doc = horizon.json.setBool(doc, \"video.seen\", True)\n        horizon.fs.writeText(FILE, doc)\n"}
+  },
+  "json.getNumber": { "note": "Exact for whole numbers up to 16 777 216." },
+  "json.has": { "note": "<code>true</code> also for a key whose value is <code>null</code>." },
+  "json.setNumber": { "note": "Writes whole numbers as <code>3.0</code> and keeps about seven digits." },
+  "physics.raycast": {
+    "script_returns": "hit, entity, px, py, pz, nx, ny, nz, distance, layer",
+    "note": "A ray that starts inside a collider hits it at distance 0, so a ray from a character's own position finds the character. Sees trigger volumes.",
+    "examples": {"file": "push_crate", "lua": "local M = {}\nlocal REACH = 2.0   -- metres in front of the character\nlocal PUSH  = 4.0   -- impulse, newton-seconds\n\n-- \"Interact\" is a button action. Pushes whatever dynamic body is in front.\nfunction M.onInputPressed(self, name)\n    if name ~= \"Interact\" then return end\n    local e = self.entityId\n    local x, y, z = horizon.getPosition(e)\n    local _, yaw = horizon.getRotation(e)\n    local r = horizon.math.radians(yaw)\n    local fx, fz = -horizon.math.sin(r), -horizon.math.cos(r)   -- facing, -Z at yaw 0\n    -- Start a step ahead: a ray from inside the own capsule would hit it.\n    local ox, oz = x + fx * 0.75, z + fz * 0.75\n    local hit, other, px, py, pz = horizon.physics.raycast(ox, y, oz, fx, 0, fz, REACH)\n    if hit and horizon.physics.hasPhysics(other) then\n        -- The hit point is world space, which is what AtPosition expects.\n        horizon.physics.addImpulseAtPosition(other, fx * PUSH, 0, fz * PUSH, px, py, pz)\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nREACH = 2.0   # metres in front of the character\nPUSH = 4.0    # impulse, newton-seconds\n\nclass PushCrate(horizon.Behavior):\n    # \"Interact\" is a button action. Pushes whatever dynamic body is in front.\n    def on_input_pressed(self, name):\n        if name != \"Interact\":\n            return\n        e = self.entity_id\n        x, y, z = horizon.getPosition(e)\n        _, yaw, _ = horizon.getRotation(e)\n        r = horizon.math.radians(yaw)\n        fx, fz = -horizon.math.sin(r), -horizon.math.cos(r)   # facing, -Z at yaw 0\n        # Start a step ahead: a ray from inside the own capsule would hit it.\n        ox, oz = x + fx * 0.75, z + fz * 0.75\n        hit, other, px, py, pz, *_ = horizon.physics.raycast(ox, y, oz, fx, 0, fz, REACH)\n        if hit and horizon.physics.hasPhysics(other):\n            # The hit point is world space, which is what AtPosition expects.\n            horizon.physics.addImpulseAtPosition(other, fx * PUSH, 0, fz * PUSH, px, py, pz)\n"}
+  },
+  "physics.raycastLayers": { "script_returns": "hit, entity, px, py, pz, nx, ny, nz, distance, layer" },
+  "physics.sphereCast": { "script_returns": "hit, entity, px, py, pz, nx, ny, nz, distance, layer", "note": "<code>point</code> is where the sphere's centre stopped, not the contact point. Ignores trigger volumes." },
+  "physics.sphereCastLayers": { "script_returns": "hit, entity, px, py, pz, nx, ny, nz, distance, layer", "note": "<code>point</code> is the sphere's centre where it stopped." },
+  "physics.boxCast": { "script_returns": "hit, entity, px, py, pz, nx, ny, nz, distance, layer", "note": "<code>point</code> is the box's centre where it stopped. Ignores trigger volumes." },
+  "physics.capsuleCast": { "script_returns": "hit, entity, px, py, pz, nx, ny, nz, distance, layer", "note": "<code>point</code> is the capsule's centre where it stopped. Ignores trigger volumes." },
+  "physics.overlapSphere": { "note": "From Lua/Python this returns <code>0</code> instead of a list (build 7d49d44f)." },
+  "physics.raycastAll": { "note": "From Lua/Python this returns nine zeros instead of five lists (build 7d49d44f)." },
+  "physics.pollJointBroken": { "note": "From Lua/Python this returns <code>0, 0</code> and still empties the queue (build 7d49d44f)." },
+  "physics.addForce": { "note": "<code>false</code> on a static or kinematic body, which includes a character." },
+  "physics.addImpulse": { "note": "<code>false</code> on a static or kinematic body, which includes a character; a character jumps with <code>locomotion.jump</code>." },
+  "physics.setVelocity": { "note": "On a character with a Movement component the next frame replaces the horizontal part with what <code>locomotion.move</code> asked for." },
+  "physics.setGravity": { "note": "Rigid bodies only: a character falls by the gravity on its own Character Controller." },
+  "physics.setPosition": { "note": "The position is <strong>local</strong>, relative to the parent, like <code>horizon.setPosition</code>. For a world point on a child use <code>transform.setWorldPosition</code> (HorizonCode only). <code>false</code> and a log line without a body." },
+  "physics.setPositionAndReset": {
+    "note": "Local position like <code>setPosition</code>; zeroes the linear and the angular velocity.",
+    "examples": {"file": "kill_plane", "lua": "local M = {}\nlocal FLOOR = -20   -- below this height the character has fallen out\n\nfunction M.onStart(self)\n    self.sx, self.sy, self.sz = horizon.getPosition(self.entityId)\nend\n\nfunction M.onUpdate(self, dt)\n    local _, y = horizon.getPosition(self.entityId)\n    if y < FLOOR then\n        -- Back to where the level started it, without the speed of the fall.\n        horizon.physics.setPositionAndReset(self.entityId, self.sx, self.sy, self.sz)\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nFLOOR = -20   # below this height the character has fallen out\n\nclass KillPlane(horizon.Behavior):\n    def on_start(self):\n        self.spawn = horizon.getPosition(self.entity_id)\n\n    def on_update(self, dt):\n        _, y, _ = horizon.getPosition(self.entity_id)\n        if y < FLOOR:\n            # Back to where the level started it, without the speed of the fall.\n            horizon.physics.setPositionAndReset(self.entity_id, *self.spawn)\n"}
+  },
+  "physics.addJoint": { "note": "A type outside 0–4 becomes Fixed. The first entity owns the joint." },
+  "physics.hasJoint": { "note": "Only the owner, the first entity passed to <code>addJoint</code>, reports <code>true</code>." },
+  "physics.setJointMotor": { "note": "<code>false</code> and an error log on a Fixed, Point or Distance joint." },
+  "locomotion.move": {
+    "note": "Does nothing, without a log line, on an entity without a Movement component. The Y component counts towards the length before it is dropped.",
+    "examples": {"file": "player_move", "lua": "local M = {}\n\n-- On a Player Character. \"Move\" is an Axis2D input action (the WASD\n-- preset: W is +y), \"Sprint\" and \"Jump\" are button actions.\nfunction M.onUpdate(self, dt)\n    local e = self.entityId\n    local x, y = horizon.input.actionAxis2D(\"Move\")\n    -- Forward is -Z. With \"Move Direction Is: Camera\" (the Player Character\n    -- default) that is away from the camera.\n    horizon.locomotion.move(e, x, 0, -y)\n    horizon.locomotion.setMaxSpeed(e, horizon.input.actionDown(\"Sprint\") and 8 or 5)\nend\n\nfunction M.onInputPressed(self, name)\n    if name == \"Jump\" and horizon.locomotion.jump(self.entityId) then\n        horizon.log(\"jump\")\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nclass PlayerMove(horizon.Behavior):\n    # On a Player Character. \"Move\" is an Axis2D input action (the WASD\n    # preset: W is +y), \"Sprint\" and \"Jump\" are button actions.\n    def on_update(self, dt):\n        e = self.entity_id\n        x, y = horizon.input.actionAxis2D(\"Move\")\n        # Forward is -Z. With \"Move Direction Is: Camera\" (the Player Character\n        # default) that is away from the camera.\n        horizon.locomotion.move(e, x, 0, -y)\n        horizon.locomotion.setMaxSpeed(e, 8 if horizon.input.actionDown(\"Sprint\") else 5)\n\n    def on_input_pressed(self, name):\n        if name == \"Jump\" and horizon.locomotion.jump(self.entity_id):\n            horizon.log(\"jump\")\n"}
+  },
+  "locomotion.look": { "note": "Several calls in a frame add up." },
+  "locomotion.setMaxSpeed": { "note": "Default 5 m/s. Not the speed of a Nav Agent, see <code>nav.setSpeed</code>." },
+  "nav.moveTo": {
+    "note": "The point must lie on the NavMesh surface; the same x/z five metres above it is refused.",
+    "examples": {"file": "patrol", "lua": "local M = {}\n\n-- On an entity with a Nav Agent. World positions on the baked NavMesh.\nlocal POINTS = { {6, 0, -6}, {6, 0, 6}, {-6, 0, 6} }\n\nlocal function goNext(self)\n    self.i = self.i % #POINTS + 1\n    local p = POINTS[self.i]\n    if not horizon.nav.moveTo(self.entityId, p[1], p[2], p[3]) then\n        horizon.log(\"patrol point \" .. self.i .. \" is not reachable\")\n    end\nend\n\nfunction M.onStart(self)\n    self.i = 0\n    goNext(self)\nend\n\nfunction M.onUpdate(self, dt)\n    -- isMoving turns false on arrival (and after a refusal).\n    if not horizon.nav.isMoving(self.entityId) then goNext(self) end\nend\n\nreturn M\n", "python": "import horizon\n\n# On an entity with a Nav Agent. World positions on the baked NavMesh.\nPOINTS = [(6, 0, -6), (6, 0, 6), (-6, 0, 6)]\n\nclass Patrol(horizon.Behavior):\n    def on_start(self):\n        self.i = -1\n        self.go_next()\n\n    def go_next(self):\n        self.i = (self.i + 1) % len(POINTS)\n        if not horizon.nav.moveTo(self.entity_id, *POINTS[self.i]):\n            horizon.log(f\"patrol point {self.i} is not reachable\")\n\n    def on_update(self, dt):\n        # isMoving turns false on arrival (and after a refusal).\n        if not horizon.nav.isMoving(self.entity_id):\n            self.go_next()\n"}
+  },
+  "nav.setSpeed": { "note": "At speed 0 the agent stands still and <code>isMoving</code> stays <code>true</code>." },
+  "player.controller": { "note": "0 in a project without a PlayerController class. A reference, not an entity: <code>entity.owned</code> gives the entity." },
+  "player.character": { "note": "A reference, not an entity: <code>horizon.entity.owned(horizon.player.character())</code> is the character's entity." },
+  "player.possess": { "note": "In Lua/Python both references are integers; <code>possess(0, …)</code> does nothing." },
+  "input.keyDown": { "note": "Case-sensitive: <code>\"w\"</code> is always <code>false</code>. Two-word keys read <code>\"Left Shift\"</code>, <code>\"Left Ctrl\"</code>." },
+  "input.scrollDelta": { "note": "<strong>Always 0</strong> in the running game and in play mode (build 7d49d44f): the wheel is not put into the snapshot. Bind Mouse Wheel to an Axis action and use <code>actionAxis</code>." },
+  "input.gamepadButton": { "note": "Not case-sensitive; <code>\"south\"</code> and <code>\"cross\"</code> are not names and read <code>false</code>." },
+  "input.gamepadAxis": { "note": "Y axes are positive <strong>downwards</strong>, as in SDL." },
+  "input.actionPressed": { "note": "Polled from <code>onUpdate</code> this is last frame's press (still exactly one frame per press); <code>onInputPressed</code> is current." },
+  "input.setModeGameAndUI": {
+    "note": "The default, and what play mode starts in.",
+    "examples": {"file": "inventory", "lua": "local M = {}\n\n-- \"Inventory\" is a button action. While the inventory is open the cursor is\n-- visible and clicks go to the UI; the game still reads the keys.\nfunction M.onInputPressed(self, name)\n    if name ~= \"Inventory\" then return end\n    self.open = not self.open\n    if self.open then\n        horizon.input.setModeGameAndUI()\n        horizon.showCursor()\n    else\n        horizon.input.setModeGameOnly()\n        horizon.hideCursor()\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nclass Inventory(horizon.Behavior):\n    open = False\n\n    # \"Inventory\" is a button action. While the inventory is open the cursor\n    # is visible and clicks go to the UI; the game still reads the keys.\n    def on_input_pressed(self, name):\n        if name != \"Inventory\":\n            return\n        self.open = not self.open\n        if self.open:\n            horizon.input.setModeGameAndUI()\n            horizon.showCursor()\n        else:\n            horizon.input.setModeGameOnly()\n            horizon.hideCursor()\n"}
+  },
+  "input.setModeUIOnly": { "note": "Also reports the gamepad as disconnected to the game. Actions with <em>Fires while the game is paused</em> still work, so the key that opened the menu can close it." },
+
+  "animator.setParam": {
+    "note": "The value is a number: in Lua <code>true</code> is an error, Python turns <code>True</code> into 1. A name the asset never declared is created.",
+    "examples": {"file": "anim_speed", "lua": "local M = {}\n\n-- On a character with Movement and an Animator State Machine whose\n-- transitions test \"Speed\" (m/s) and \"Grounded\" (1 or 0).\nfunction M.onUpdate(self, dt)\n    local e = self.entityId\n    horizon.animator.setParam(e, \"Speed\", horizon.movement.speed(e))\n    -- Parameters are numbers: a boolean has to become 1 or 0.\n    horizon.animator.setParam(e, \"Grounded\", horizon.movement.isGrounded(e) and 1 or 0)\nend\n\nreturn M\n", "python": "import horizon\n\nclass AnimSpeed(horizon.Behavior):\n    # On a character with Movement and an Animator State Machine whose\n    # transitions test \"Speed\" (m/s) and \"Grounded\" (1 or 0).\n    def on_update(self, dt):\n        e = self.entity_id\n        horizon.animator.setParam(e, \"Speed\", horizon.movement.speed(e))\n        # Parameters are numbers: a boolean has to become 1 or 0.\n        horizon.animator.setParam(e, \"Grounded\", 1 if horizon.movement.isGrounded(e) else 0)\n"}
+  },
+  "animator.setLayerWeight": { "note": "With two layers of the same name, the first one." },
+  "animator.getLayerWeight": { "note": "With two layers of the same name, the first one." },
+  "animator.notifiesOf": { "note": "Loads the clip if it is not in memory yet." },
+
+  "particle.play": { "note": "Also on an emitter that is still running: its one-shot count starts again." },
+  "particle.stop": { "note": "<code>isPlaying</code> stays <code>true</code> until the last particle already out has died." },
+  "particle.burst": {
+    "note": "Emits at the emitter's current world position. Also restarts a stopped or finished emitter. 0 for a count of 0 or below.",
+    "examples": {"file": "impact", "lua": "local M = {}\n\n-- On a crate with a Particle System whose graph does not loop (sparks):\n-- every hit fires a handful of sparks and gives the camera a short jolt.\nfunction M.onCollisionEnter(self, other)\n    local made = horizon.particle.burst(self.entityId, 24)\n    if made > 0 then\n        -- 5 cm, 0.5 degrees, 18 shakes per second, a quarter of a second.\n        horizon.camera.playShake(0.05, 0.5, 18, 0.25)\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nclass Impact(horizon.Behavior):\n    # On a crate with a Particle System whose graph does not loop (sparks):\n    # every hit fires a handful of sparks and gives the camera a short jolt.\n    def on_collision_enter(self, other):\n        made = horizon.particle.burst(self.entity_id, 24)\n        if made > 0:\n            # 5 cm, 0.5 degrees, 18 shakes per second, a quarter of a second.\n            horizon.camera.playShake(0.05, 0.5, 18, 0.25)\n"}
+  },
+  "particle.isPlaying": { "note": "<code>false</code> without a Particle System, and no warning." },
+
+  "audio.play": { "note": "0 when the asset does not load or outside a play session. In Lua a missing <code>loop</code> reads as <code>false</code>; Python needs all four arguments." },
+  "audio.playAt": {
+    "note": "The position is three numbers: <code>playAt(asset, x, y, z, volume, pitch, loop, minDist, maxDist)</code>.",
+    "examples": {"file": "footsteps", "lua": "local M = {}\nlocal STEP = \"Audio/footstep.hasset\"\n\n-- The walk clip carries \"FootL\" and \"FootR\" notifies on its timeline.\nfunction M.onAnimationNotify(self, name)\n    if name ~= \"FootL\" and name ~= \"FootR\" then return end\n    -- A finished sound is held until it is stopped, so free the last step.\n    if self.step then horizon.audio.stop(self.step) end\n    local x, y, z = horizon.getPosition(self.entityId)\n    local pitch = horizon.random.range(0.9, 1.1)   -- no two steps alike\n    self.step = horizon.audio.playAt(STEP, x, y, z, 0.7, pitch, false, 1, 25)\nend\n\nreturn M\n", "python": "import horizon\n\nSTEP = \"Audio/footstep.hasset\"\n\nclass Footsteps(horizon.Behavior):\n    step = 0\n\n    # The walk clip carries \"FootL\" and \"FootR\" notifies on its timeline.\n    def on_animation_notify(self, name):\n        if name not in (\"FootL\", \"FootR\"):\n            return\n        # A finished sound is held until it is stopped, so free the last step.\n        if self.step:\n            horizon.audio.stop(self.step)\n        x, y, z = horizon.getPosition(self.entity_id)\n        pitch = horizon.random.range(0.9, 1.1)   # no two steps alike\n        self.step = horizon.audio.playAt(STEP, x, y, z, 0.7, pitch, False, 1, 25)\n"}
+  },
+  "audio.stop": { "note": "The only way, besides <code>stopAll</code>, to free a sound that finished by itself (see the group notes)." },
+  "audio.setVolume": {
+    "note": "Not clamped: above 1 amplifies, a negative value is stored as it is.",
+    "examples": {"file": "music_fade", "lua": "local M = {}\nlocal MUSIC = \"Audio/theme.hasset\"\nlocal VOLUME, FADE = 0.6, 2.0   -- fade length in seconds\n\nfunction M.onStart(self)\n    self.music = horizon.audio.play(MUSIC, VOLUME, 1, true)\n    self.left = 0\nend\n\n-- \"EndLevel\" is a button action.\nfunction M.onInputPressed(self, name)\n    if name == \"EndLevel\" and self.music ~= 0 then self.left = FADE end\nend\n\nfunction M.onUpdate(self, dt)\n    if self.left <= 0 then return end\n    self.left = self.left - dt\n    if self.left <= 0 then\n        horizon.audio.stop(self.music)   -- stop, not volume 0: frees the voice\n        self.music = 0\n    else\n        horizon.audio.setVolume(self.music, VOLUME * self.left / FADE)\n    end\nend\n\nreturn M\n", "python": "import horizon\n\nMUSIC = \"Audio/theme.hasset\"\nVOLUME, FADE = 0.6, 2.0   # fade length in seconds\n\nclass MusicFade(horizon.Behavior):\n    def on_start(self):\n        self.music = horizon.audio.play(MUSIC, VOLUME, 1, True)\n        self.left = 0.0\n\n    # \"EndLevel\" is a button action.\n    def on_input_pressed(self, name):\n        if name == \"EndLevel\" and self.music != 0:\n            self.left = FADE\n\n    def on_update(self, dt):\n        if self.left <= 0:\n            return\n        self.left -= dt\n        if self.left <= 0:\n            horizon.audio.stop(self.music)   # stop, not volume 0: frees the voice\n            self.music = 0\n        else:\n            horizon.audio.setVolume(self.music, VOLUME * self.left / FADE)\n"}
+  },
+  "audio.getVolume": { "note": "A sound that finished by itself but was not stopped still answers its last volume." },
+  "audio.setPitch": { "note": "A pitch of 0 or below is ignored; the old pitch stays." },
+  "audio.setBusVolume": { "note": "Creates the bus when none has that name, so a misspelled name is a new, empty bus." },
+
+  "camera.setPosition": { "note": "Relative to the camera's parent. While a rig drives the camera it lasts one frame." },
+  "camera.setRotation": { "note": "While a rig drives the camera it lasts one frame." },
+  "camera.setRigMode": { "note": "Any value other than 0 is third person." },
+  "camera.setRigTarget": { "note": "0, or an id that is not an entity, also means the possessed character." },
+  "camera.setArmLength": { "note": "Not clamped: a negative length puts the camera in front of the target." },
+  "camera.setTargetYawMode": { "note": "Any value other than 0 and 2 is Follow." },
+  "camera.addYawPitch": { "note": "A default rig limits the pitch to −80° … 75°. The yaw is not wrapped: it runs past 360." },
+  "camera.setLagSpeeds": { "note": "Negative speeds become 0." },
+  "camera.playShake": { "note": "0 without a rig. The shake is written into the camera's transform, so <code>getPosition</code> jitters while it runs and returns to the unshaken pose afterwards." },
+  "camera.kickFov": {
+    "note": "Added on top of the field of view; <code>getFov</code> does not include it.",
+    "examples": {"file": "sprint_fov", "lua": "local M = {}\n\n-- \"Sprint\" is a button action. The kick widens the view for a moment and\n-- falls back by itself; getFov keeps answering the authored value.\nfunction M.onInputPressed(self, name)\n    if name == \"Sprint\" then\n        horizon.camera.kickFov(8, 0.15, 0.6, 0.4)   -- degrees, attack, hold, decay\n        horizon.camera.setLagEnabled(true)           -- the camera trails a little\n    end\nend\n\nfunction M.onInputReleased(self, name)\n    if name == \"Sprint\" then horizon.camera.setLagEnabled(false) end\nend\n\nreturn M\n", "python": "import horizon\n\nclass SprintFov(horizon.Behavior):\n    # \"Sprint\" is a button action. The kick widens the view for a moment and\n    # falls back by itself; getFov keeps answering the authored value.\n    def on_input_pressed(self, name):\n        if name == \"Sprint\":\n            horizon.camera.kickFov(8, 0.15, 0.6, 0.4)   # degrees, attack, hold, decay\n            horizon.camera.setLagEnabled(True)           # the camera trails a little\n\n    def on_input_released(self, name):\n        if name == \"Sprint\":\n            horizon.camera.setLagEnabled(False)\n"}
+  },
+  "camera.blendTo": { "note": "The new camera is Main at once. A curve outside 0 to 2 becomes smoothstep." },
+
+  "material.setParam": { "note": "<strong>Known issue:</strong> every entity with the same material changes too (see the group notes)." },
+
+  "env.setTimeOfDay": {
+    "note": "Not wrapped by the setter: 1.7 reads back as 1.7 until Auto Advance moves the clock on.",
+    "examples": {"file": "sleep", "lua": "local M = {}\n\n-- \"Sleep\" is a button action: skip to the next morning.\nfunction M.onInputPressed(self, name)\n    if name ~= \"Sleep\" then return end\n    horizon.env.setDayNightCycle(true)   -- without it the sun ignores the clock\n    horizon.env.setTimeOfDay(0.3)        -- a little after sunrise\n    -- Colours are four numbers; the fourth is ignored but required.\n    horizon.env.setSunColor(1.0, 0.85, 0.7, 1)\n    -- Weather lets go of a field a script changed, until the next preset.\n    horizon.env.setFogDensity(0.02)\nend\n\nreturn M\n", "python": "import horizon\n\nclass Sleep(horizon.Behavior):\n    # \"Sleep\" is a button action: skip to the next morning.\n    def on_input_pressed(self, name):\n        if name != \"Sleep\":\n            return\n        horizon.env.setDayNightCycle(True)   # without it the sun ignores the clock\n        horizon.env.setTimeOfDay(0.3)        # a little after sunrise\n        # Colours are four numbers; the fourth is ignored but required.\n        horizon.env.setSunColor(1.0, 0.85, 0.7, 1)\n        # Weather lets go of a field a script changed, until the next preset.\n        horizon.env.setFogDensity(0.02)\n"}
+  },
+  "net.joinDirect": {
+    "note": "Answers <code>true</code> when the attempt has started. With a wrong join code the status stays 2 and <code>lastError</code> empty (measured for 8 seconds): time the attempt out yourself, as the example does.",
+    "examples": {
+      "file": "lobby",
+      "lua": "local M = {}\nlocal PORT = 47824   -- the project's Default port. Fixed on purpose: no row reads back a port the OS picked.\n\nfunction M.onInputPressed(self, action)\n    if action == \"Host\" and horizon.net.status() == 0 then\n        if horizon.net.host(PORT, \"Host\") then\n            horizon.log(\"Hosting. Join code: \" .. horizon.net.joinCode())\n        else\n            horizon.log(\"Could not host: \" .. horizon.net.lastError())\n        end\n    end\nend\n\n-- Called by the join screen with what the player typed in.\nfunction M.join(self, address, code)\n    horizon.net.leave()                       -- a new attempt replaces an old one\n    if horizon.net.joinDirect(address, PORT, code, \"Guest\") then\n        self.waited = 0\n    end\nend\n\nfunction M.onUpdate(self, dt)\n    if self.waited == nil then return end\n    -- A wrong join code never fails: the attempt stays at 2 (Connecting). Give up yourself.\n    self.waited = self.waited + dt\n    if horizon.net.status() == 2 and self.waited > 10 then\n        horizon.net.leave()\n        self.waited = nil\n        horizon.log(\"No answer from the host. Check the address and the join code.\")\n    end\nend\n\nfunction M.onConnected(self)\n    self.waited = nil\n    horizon.log(\"Joined as player \" .. horizon.net.localPlayer())\nend\n\nfunction M.onDisconnected(self, reason)   -- 1 lost, 2 kicked, 3 refused\n    self.waited = nil\n    horizon.log(\"Out of the session (\" .. reason .. \"): \" .. horizon.net.lastError())\nend\n\nfunction M.onPlayerJoined(self, player)  -- host only\n    horizon.log(horizon.net.playerName(player) .. \" joined\")\nend\n\nreturn M\n",
+      "python": "import horizon\n\nPORT = 47824   # the project's Default port. Fixed on purpose: no row reads back a port the OS picked.\n\nclass Lobby(horizon.Behavior):\n    waited = None\n\n    def on_input_pressed(self, action):\n        if action == \"Host\" and horizon.net.status() == 0:\n            if horizon.net.host(PORT, \"Host\"):\n                horizon.log(\"Hosting. Join code: \" + horizon.net.joinCode())\n            else:\n                horizon.log(\"Could not host: \" + horizon.net.lastError())\n\n    def join(self, address, code):\n        \"\"\"Called by the join screen with what the player typed in.\"\"\"\n        horizon.net.leave()                   # a new attempt replaces an old one\n        if horizon.net.joinDirect(address, PORT, code, \"Guest\"):\n            self.waited = 0.0\n\n    def on_update(self, dt):\n        if self.waited is None:\n            return\n        # A wrong join code never fails: the attempt stays at 2 (Connecting). Give up yourself.\n        self.waited += dt\n        if horizon.net.status() == 2 and self.waited > 10:\n            horizon.net.leave()\n            self.waited = None\n            horizon.log(\"No answer from the host. Check the address and the join code.\")\n\n    def on_connected(self):\n        self.waited = None\n        horizon.log(\"Joined as player %d\" % horizon.net.localPlayer())\n\n    def on_disconnected(self, reason):    # 1 lost, 2 kicked, 3 refused\n        self.waited = None\n        horizon.log(\"Out of the session (%d): %s\" % (reason, horizon.net.lastError()))\n\n    def on_player_joined(self, player):   # host only\n        horizon.log(horizon.net.playerName(player) + \" joined\")\n"
+    }
+  },
+  "net.joinLan": {
+    "note": "<code>false</code> when there is no entry at that index, which without the system's Local Network permission is always."
+  },
+  "net.leave": {
+    "note": "Sends <code>onSessionEnded</code> on this machine. Offline it does nothing."
+  },
+  "net.status": {
+    "note": "After a kick or a lost host it stays 4 until the next <code>leave</code> or join."
+  },
+  "net.lastError": {
+    "note": "After a removal: “Removed from the session.” (anti-cheat on) or “Lost the connection to the host.”."
+  },
+  "net.joinCode": {
+    "note": "26 characters."
+  },
+  "net.refreshLan": {
+    "note": "Needs the system's Local Network permission, see the group notes above."
+  },
+  "net.localPlayer": {
+    "note": "0 on a client that is still connecting."
+  },
+  "net.playerAt": {
+    "note": "On a client <code>playerAt(0)</code> is its own number."
+  },
+  "net.playerName": {
+    "note": "Inside <code>onPlayerLeft</code> the name is already gone."
+  },
+  "net.kick": {
+    "note": "Does nothing on a client or offline."
+  },
+  "net.isLocallyControlled": {
+    "note": "Entity 0 or an id nothing answers to: <code>false</code>."
+  },
+  "net.localCharacter": {
+    "note": "0 in every state measured here (no host assigned a character)."
+  },
+  "net.declareVarBool": {
+    "note": "Entity 0 or an empty name: <code>false</code>. A missing <code>notify</code> is <code>false</code> in Lua and an <code>IndexError</code> in Python. See <a href=\"#net-vars\">Replicated variables</a>."
+  },
+  "net.declareVarInt": {
+    "note": "32-bit: 3000000000 is stored as −1294967296.",
+    "examples": {
+      "file": "health",
+      "lua": "local M = {}\n\nfunction M.onStart(self)\n    -- The same script runs on every machine; each declares the variable.\n    -- The host's value is the one every client ends up with.\n    horizon.net.declareVarInt(self.entityId, \"health\", 100, true)\nend\n\n-- Only the host decides what a hit does.\nfunction M.onCollisionEnter(self, other)\n    if not horizon.net.isAuthority() then return end\n    local hp = horizon.net.getVarInt(self.entityId, \"health\") - 10\n    horizon.net.setVarInt(self.entityId, \"health\", math.max(hp, 0))\n    self:showHealth()      -- onRep_health never runs on the host\nend\n\n-- On the clients: a new value arrived. `old` is the one before it.\nfunction M.onRep_health(self, old)\n    self:showHealth()\nend\n\nfunction M.showHealth(self)\n    horizon.log(\"health \" .. horizon.net.getVarInt(self.entityId, \"health\"))\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass Health(horizon.Behavior):\n    def on_start(self):\n        # The same script runs on every machine; each declares the variable.\n        # The host's value is the one every client ends up with.\n        horizon.net.declareVarInt(self.entity_id, \"health\", 100, True)\n\n    def on_collision_enter(self, other):\n        # Only the host decides what a hit does.\n        if not horizon.net.isAuthority():\n            return\n        hp = horizon.net.getVarInt(self.entity_id, \"health\") - 10\n        horizon.net.setVarInt(self.entity_id, \"health\", max(hp, 0))\n        self.show_health()     # on_rep_health never runs on the host\n\n    def on_rep_health(self, old):\n        # On the clients: a new value arrived. `old` is the one before it.\n        self.show_health()\n\n    def show_health(self):\n        horizon.log(\"health %d\" % horizon.net.getVarInt(self.entity_id, \"health\"))\n"
+    }
+  },
+  "net.declareVarVec3": {
+    "note": "In Lua the <code>old</code> value of <code>onRep_&lt;name&gt;</code> is the number 0 (known issue, see <a href=\"#net-vars\">Replicated variables</a>)."
+  },
+  "net.setVarBool": {
+    "note": "On a client the write is its own prediction until the host's value comes back. A variable of another type is overwritten too: the row answers <code>true</code> and the variable changes type. See <a href=\"#net-vars\">Replicated variables</a>."
+  },
+  "net.getVarBool": {
+    "note": "A variable declared with another type reads as <code>false</code>."
+  },
+  "net.hasVar": {
+    "note": "Also <code>true</code> for a variable a client declared on its own copy."
+  },
+  "net.allowAnyClient": {
+    "note": "Lasts one session: call it in <code>onSessionStarted</code>. <code>false</code> offline or for an empty name; <code>true</code> on a client and for an entity without a network id, where it does nothing. See <a href=\"#net-calls\">Remote calls</a>.",
+    "examples": {
+      "file": "lever",
+      "lua": "local M = {}\n\nfunction M.onStart(self)\n    horizon.net.declareVarBool(self.entityId, \"open\", false, true)\nend\n\n-- Per session: the list of calls any client may make starts empty with every session.\nfunction M.onSessionStarted(self)\n    -- The lever belongs to nobody. Without this only its owner could pull it,\n    -- and a refused call counts against the caller as cheating.\n    horizon.net.allowAnyClient(self.entityId, \"pull\")\nend\n\nfunction M.onInputPressed(self, action)\n    if action ~= \"Interact\" then return end\n    if horizon.net.isAuthority() then\n        self:pull()        -- host or offline: callServer would not reach a script method here\n    else\n        horizon.net.callServer(self.entityId, \"pull\")\n    end\nend\n\n-- Runs on the host, whoever asked.\nfunction M.pull(self)\n    local who = horizon.net.rpcSender()       -- 0: the host pulled it itself\n    local open = not horizon.net.getVarBool(self.entityId, \"open\")\n    horizon.net.setVarBool(self.entityId, \"open\", open)\n    local name = who ~= 0 and horizon.net.playerName(who) or \"The host\"\n    horizon.log(name .. (open and \" opened\" or \" closed\") .. \" the gate\")\nend\n\nfunction M.onRep_open(self, old)\n    horizon.log(horizon.net.getVarBool(self.entityId, \"open\") and \"gate opens\" or \"gate closes\")\nend\n\nreturn M\n",
+      "python": "import horizon\n\nclass Lever(horizon.Behavior):\n    def on_start(self):\n        horizon.net.declareVarBool(self.entity_id, \"open\", False, True)\n\n    def on_session_started(self):\n        # Per session: the list of calls any client may make starts empty with every session.\n        # The lever belongs to nobody. Without this only its owner could pull it,\n        # and a refused call counts against the caller as cheating.\n        horizon.net.allowAnyClient(self.entity_id, \"pull\")\n\n    def on_input_pressed(self, action):\n        if action != \"Interact\":\n            return\n        if horizon.net.isAuthority():\n            self.pull()        # host or offline: callServer would not reach a script method here\n        else:\n            horizon.net.callServer(self.entity_id, \"pull\")\n\n    def pull(self):\n        \"\"\"Runs on the host, whoever asked.\"\"\"\n        who = horizon.net.rpcSender()          # 0: the host pulled it itself\n        is_open = not horizon.net.getVarBool(self.entity_id, \"open\")\n        horizon.net.setVarBool(self.entity_id, \"open\", is_open)\n        name = horizon.net.playerName(who) if who else \"The host\"\n        horizon.log(name + (\" opened\" if is_open else \" closed\") + \" the gate\")\n\n    def on_rep_open(self, old):\n        horizon.log(\"gate opens\" if horizon.net.getVarBool(self.entity_id, \"open\") else \"gate closes\")\n"
+    }
+  },
+  "net.rpcSender": {
+    "note": "On a client, inside a call the host made: 1."
+  },
+  "anticheat.report": {
+    "note": "Filed at the end of the frame; <code>onCheatDetected</code> fires then. See the group notes on connection numbers."
+  },
+  "anticheat.respond": {
+    "examples": {
+      "file": "cheat_log",
+      "lua": "local M = {}\nlocal AC = horizon.anticheat\n\nfunction M.onCheatDetected(self, id)\n    if AC.reportPlayer(id) == 0 then\n        -- On a client: the host is removing us. Say why before the link drops.\n        horizon.log(\"Removed from the session: \" .. AC.reportRule(id) .. \" (code \" .. AC.reportReason(id) .. \")\")\n        return\n    end\n    -- On the host. reportPlayer is a CONNECTION number, not a net player number.\n    horizon.log(string.format(\"[anti-cheat] %s, connection %d, score %.1f: %s\",\n        AC.reportRule(id), AC.reportPlayer(id), AC.reportScore(id), AC.reportDetail(id)))\n    if AC.reportLevel(id) == 2 then\n        AC.respond(id, 1 + 16)    -- Confirmed: log and kick (the default policy only logs)\n    end\nend\n\nreturn M\n",
+      "python": "import horizon\n\nAC = horizon.anticheat\n\nclass CheatLog(horizon.Behavior):\n    def on_cheat_detected(self, rid):\n        if AC.reportPlayer(rid) == 0:\n            # On a client: the host is removing us. Say why before the link drops.\n            horizon.log(\"Removed from the session: %s (code %d)\" % (AC.reportRule(rid), AC.reportReason(rid)))\n            return\n        # On the host. reportPlayer is a CONNECTION number, not a net player number.\n        horizon.log(\"[anti-cheat] %s, connection %d, score %.1f: %s\" % (\n            AC.reportRule(rid), AC.reportPlayer(rid), AC.reportScore(rid), AC.reportDetail(rid)))\n        if AC.reportLevel(rid) == 2:\n            AC.respond(rid, 1 + 16)    # Confirmed: log and kick (the default policy only logs)\n"
+    }
+  },
+  "anticheat.kick": {
+    "note": "The client reads <code>reasonCode</code> back through <code>reportReason</code>; its ticket has level 2 and an empty rule."
+  },
+  "anticheat.reportRule": {
+    "note": "Empty on the client after an explicit <code>kick</code>, which sends a reason code instead."
+  },
+  "anticheat.reportEntity": {
+    "note": "A network id, not an entity id. 0 in every report measured here."
+  },
+  "anticheat.playerScore": {
+    "note": "Halves every 30 seconds with the default settings."
+  },
+  "anticheat.isEnabled": {
+    "note": "<code>false</code> on a client."
+  }
+}

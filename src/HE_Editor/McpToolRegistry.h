@@ -26,6 +26,7 @@
 #include <Renderer/IRenderer.h>   // EditorCameraOverride — the screenshot hooks speak it
 #include <Scripting/ScriptTypes.h>
 #include <Types/Enums.h>
+#include <Types/UUID.h>
 
 #include <cstdint>
 #include <functional>
@@ -1133,6 +1134,67 @@ struct McpClipHooks
 // The reference is captured, so `content` has to outlive the registry.
 void registerClipTools(McpToolRegistry& registry, ContentManager& content,
                        McpClipHooks hooks);
+
+// ─── A cutscene: the sequence tools ──────────────────────────────────────────
+// Two tools: `sequence_info` (the catalogue, and one sequence in full) and
+// `sequence_write` (the whole sequence, replaced).
+//
+// ── Why the WHOLE document and not one tool per key ─────────────────────────
+// Unlike a particle graph, a sequence has no on-disk index a client could break:
+// CHUNK_SEQU is already JSON with its kinds spelled out (SequenceJson.h says it
+// is "the form the MCP tools read and write"). What a cutscene edit usually is —
+// "put a cut at 3 s to camera B and move the door" — touches three tracks at
+// once, and a family of per-key tools would make that three round trips with a
+// half-edited sequence on disk in between. So the unit is the document: read
+// it, change it, write it back.
+//
+// ── Why the document is TRANSLATED on the way in and out ────────────────────
+// The chunk spells every reference as {"hi":…,"lo":…}, which no client can
+// produce. The tools speak the vocabulary the other families already use: an
+// actor is the 32-hex-digit entity uuid entity_list reports, a clip or a sound
+// is its content-relative path, a property target and a blend curve are names.
+// What `sequence_info` reports is exactly what `sequence_write` takes, so a read
+// followed by an unchanged write is a no-op.
+//
+// ── Why anything doubtful is REFUSED rather than dropped ────────────────────
+// The loader drops a bad entry and keeps going (a file must still play). A tool
+// write is the opposite case: the client is right there and can fix it, and a
+// write that silently lost the key it was meant to add would report success.
+// So a document the loader would shorten, a slot two bindings share, a track
+// naming a slot no binding has, a second camera-cut track (the runtime reads
+// only the first), keys out of order, or a length shorter than the content is
+// refused with the reason, and nothing is written.
+//
+// ── The open tab ────────────────────────────────────────────────────────────
+// Same decision as material, particle and animator: unsaved edits in an open
+// Cinematic tab are refused with `dirty`, a clean tab is told to re-read.
+struct McpSequenceHooks
+{
+	// Play-in-editor. A sequence edited under a running player would change a
+	// cutscene mid-shot; there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same shape and policy as
+	// McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Cinematic tab have edits the file
+	// does not? Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read. TRUE when a tab was holding the asset.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// Who a binding's entity uuid is in the OPEN scene: its name, and whether it
+	// carries a CameraComponent (a cut to anything else shows nothing). False =
+	// no entity with that uuid. Absent = there is no scene, which is a test, and
+	// `sequence_info` then says it could not look rather than "missing".
+	std::function<bool(const HE::UUID& entityId, std::string& name, bool& isCamera)> findActor;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerSequenceTools(McpToolRegistry& registry, ContentManager& content,
+                           McpSequenceHooks hooks);
 
 // ─── Turning the project into something that runs: the build tools ───────────
 // Three tools: `project_package` (Build ▸ Export Project — pack the game),

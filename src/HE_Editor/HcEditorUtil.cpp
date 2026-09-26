@@ -1449,7 +1449,11 @@ bool drawStructDefaultEditor(HorizonCode::Variable& v)
 	for (const HE::StructField& f : def.fields)
 	{
 		ImGui::PushID(f.name.c_str());
-		auto it = v.structDefaults.find(f.name);
+		// A field renamed since this graph was loaded still finds its override
+		// under the former name; an edit or Reset moves it off that key.
+		const std::string key = def.storedKey(f,
+			[&v](const std::string& k) { return v.structDefaults.count(k) != 0; });
+		auto it = v.structDefaults.find(key);
 		const bool overridden = it != v.structDefaults.end();
 
 		ImGui::AlignTextToFramePadding();
@@ -1502,9 +1506,10 @@ bool drawStructDefaultEditor(HorizonCode::Variable& v)
 				HE::EnumDef ed;
 				if (!HE::TypeRegistry::instance().getEnum(f.typeName, ed) || ed.entries.empty())
 				{ ImGui::TextDisabled("(no enum definition)"); break; }
-				const std::string cur = !edit.s.empty() ? edit.s
-				                      : (!f.defaultValue.s.empty() ? f.defaultValue.s
-				                                                   : ed.entries.front().name);
+				std::string cur = !edit.s.empty() ? edit.s
+				                : (!f.defaultValue.s.empty() ? f.defaultValue.s
+				                                             : ed.entries.front().name);
+				if (const HE::EnumEntry* live = ed.findEntry(cur)) cur = live->name;   // renamed entry
 				if (ImGui::BeginCombo("##sd", cur.c_str()))
 				{
 					for (const auto& en : ed.entries)
@@ -1516,12 +1521,17 @@ bool drawStructDefaultEditor(HorizonCode::Variable& v)
 			}
 			default: ImGui::TextDisabled("\xe2\x80\x94"); break;
 		}
-		if (touched) { v.structDefaults[f.name] = edit; changed = true; }
+		if (touched)
+		{
+			if (overridden && key != f.name) v.structDefaults.erase(key);
+			v.structDefaults[f.name] = edit;
+			changed = true;
+		}
 
 		ImGui::SameLine();
 		if (overridden)
 		{
-			if (EditorWidgets::smallButton("Reset")) { v.structDefaults.erase(f.name); changed = true; }
+			if (EditorWidgets::smallButton("Reset")) { v.structDefaults.erase(key); changed = true; }
 		}
 		else
 		{

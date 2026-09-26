@@ -114,6 +114,21 @@ public:
 
     // Is the camera currently on screen easing in from another one?
     static bool isBlending(entt::registry& reg);
+
+    // ── For whoever takes the view without going through update() ───────────
+    // A cutscene (SequenceSystem) switches and poses cameras itself, and while it
+    // does, update() is not called at all (SequenceSystem::ownsCamera gates it).
+
+    // Make `camera` the one and only isMain — blendTo's precondition, as a cut.
+    // Touches no rig state.
+    static void makeMain(entt::registry& reg, entt::entity camera);
+
+    // Every rig lets go of the screen: gives back the mesh it hid, its FOV
+    // offset, and forgets its blend and its lag pose. The same things update()
+    // does to a rig that has no target — without it, a first-person rig that
+    // hid the player's body keeps it hidden through the whole cutscene, and on
+    // the way back the camera sails in from where the lag left it before.
+    static void releaseAll(entt::registry& reg);
 };
 
 } // namespace HE

@@ -390,6 +390,65 @@ TEST_CASE("RenderExtractor: a slot whose material path does not exist resolves t
 	he_test::removeAllQuiet(root);
 }
 
+TEST_CASE("RenderExtractor: a slot material that appears after first sight is picked up once the content moved")
+{
+	const std::filesystem::path root = std::filesystem::temp_directory_path() / "he_test_sections_late";
+	he_test::removeAllQuiet(root);
+	std::filesystem::create_directories(root);
+	ContentManager cm(root.string());
+
+	StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "multi";
+	mesh.indices = { 0,1,2, 3,4,5 };
+	MeshSection s0; s0.indexCount = 3; s0.materialPath = "late/a.hasset";
+	MeshSection s1; s1.indexOffset = 3; s1.indexCount = 3;
+	mesh.sections = { s0, s1 };
+	const HE::UUID meshId = cm.registerStaticMesh(mesh);
+
+	HorizonWorld world;
+	auto e = world.createEntity("multi");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = meshId;
+	world.registry().emplace<MeshComponent>(e, mc);
+
+	// Each frame the way a backend does it: setContentManager, then extract.
+	RenderExtractor ex;
+	auto slot0 = [&]
+	{
+		ex.setContentManager(&cm);
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.objects.size() == 1);
+		REQUIRE(rw.objects[0].sections.size() == 2);
+		return rw.objects[0].sections[0].materialAssetId;
+	};
+	CHECK(slot0() == HE::UUID{});
+
+	// The file arrives behind this manager's back (another program, a pull):
+	// written through a second manager on the same root. Nothing here moved,
+	// so the miss is still remembered — no lookup per frame.
+	{
+		ContentManager other(root.string());
+		MaterialAsset m; m.type = HE::AssetType::Material; m.name = "a"; m.path = "late/a.hasset";
+		REQUIRE(other.saveAsset(m));
+	}
+	CHECK(slot0() == HE::UUID{});
+
+	// The editor's content refresh says so; the next frame looks once more.
+	const uint64_t before = cm.contentEpoch();
+	cm.noteContentChanged();
+	CHECK(cm.contentEpoch() != before);
+	const HE::UUID found = slot0();
+	CHECK(found != HE::UUID{});
+	CHECK(found == cm.idForPath("late/a.hasset"));
+
+	// A save through this manager moves it too.
+	const uint64_t e1 = cm.contentEpoch();
+	MaterialAsset m2; m2.type = HE::AssetType::Material; m2.name = "b"; m2.path = "late/b.hasset";
+	REQUIRE(cm.saveAsset(m2));
+	CHECK(cm.contentEpoch() != e1);
+	he_test::removeAllQuiet(root);
+}
+
 TEST_CASE("RenderExtractor: an entity material override replaces every slot (whole-mesh draw)")
 {
 	ContentManager cm;

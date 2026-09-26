@@ -115,13 +115,32 @@ public:
     void mapAxis2D(std::string name, std::vector<AxisBinding> xBindings,
                    std::vector<AxisBinding> yBindings);
 
+    // The map* calls above REPLACE whatever a name had — the right thing for a
+    // player's override of one action. The add* twins APPEND instead, which is
+    // how several mapping contexts combine into one session: a binding the
+    // name already has is skipped, not added twice (a second identical MouseX
+    // row would double the look speed, since delta sources are not clamped).
+    //
+    // Shape: an axis is 1D or 2D. addAxis2D onto a 2D name appends per
+    // component, so one context may supply X and another Y. Adding the OTHER
+    // shape to a name is a contradiction between assets; the one added last
+    // wins and the earlier bindings are dropped — the caller's order decides,
+    // which is why PlayerHost applies the contexts sorted by path.
+    void addAction(const std::string& name, const std::vector<ActionBinding>& bindings);
+    void addAxis  (const std::string& name, const std::vector<AxisBinding>&   bindings);
+    void addAxis2D(const std::string& name, const std::vector<AxisBinding>& xBindings,
+                   const std::vector<AxisBinding>& yBindings);
+
     // Clear all mappings.
     void clear();
 
     // Update all action and axis states for this frame. `mouse` is what the
     // mouse did since the last tick; pass {} where there is no mouse to give
     // (a headless test, or an editor frame that is not playing).
-    void tick(const Input& input, const MouseFrame& mouse = {});
+    // `devices` is whose hands this mapping reads (Input.h): by default the
+    // keyboard, the mouse and the merged pad; for one of several local players
+    // one pad slot, with or without the desk.
+    void tick(const Input& input, const MouseFrame& mouse = {}, InputDevices devices = {});
 
     // Returns nullptr if the action was never mapped.
     const InputActionState* getAction(const std::string& name) const;
@@ -137,6 +156,22 @@ public:
 
     size_t actionCount() const { return m_actions.size(); }
     size_t axisCount()   const { return m_axes.size(); }
+
+    // The bindings behind a name, in the order they were added (nullptr for a
+    // name never mapped). For a binding UI and for tests that need to see what
+    // a merge produced, not only what it does on one frame. axisBindings()
+    // answers a 1D axis's list or a 2D axis's X; axisYBindings() a 2D axis's Y
+    // (empty for a 1D one). axisIs2D() is false for an unknown name.
+    const std::vector<ActionBinding>* actionBindings(const std::string& name) const;
+    const std::vector<AxisBinding>*   axisBindings  (const std::string& name) const;
+    const std::vector<AxisBinding>*   axisYBindings (const std::string& name) const;
+    bool                              axisIs2D      (const std::string& name) const;
+
+    // Every mapped action / axis name, sorted — for a search across all of
+    // them (a rebind asking "who else uses this key?") that must answer the
+    // same on every machine, which the hash maps below would not.
+    std::vector<std::string> actionNames() const;
+    std::vector<std::string> axisNames() const;
 
 private:
     struct ActionEntry { std::vector<ActionBinding> bindings; InputActionState state; };

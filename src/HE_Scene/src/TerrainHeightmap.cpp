@@ -192,6 +192,27 @@ Result importTexture(TerrainComponent& tc, const TextureAsset& tex, const Option
     return importPixels(tc, src, opts);
 }
 
+bool greyFromTexture(const TextureAsset& tex, std::vector<float>& out)
+{
+    out.clear();
+    if (textureFormatIsBlock4x4(tex.format)) return false;
+    if (tex.channels < 1 || tex.channels > 4) return false;
+    const size_t level0 = static_cast<size_t>(tex.width) * tex.height * tex.channels;
+    if (tex.width == 0 || tex.height == 0 || tex.data.size() < level0) return false;
+    Source src;
+    src.pixels          = tex.data.data();
+    src.width           = tex.width;
+    src.height          = tex.height;
+    src.channels        = tex.channels;
+    src.bytesPerChannel = 1;
+    const GreyReader grey{ src };
+    out.resize(static_cast<size_t>(tex.width) * tex.height);
+    for (uint32_t y = 0; y < tex.height; ++y)
+        for (uint32_t x = 0; x < tex.width; ++x)
+            out[static_cast<size_t>(y) * tex.width + x] = grey(x, y);
+    return true;
+}
+
 Result importFile(TerrainComponent& tc, const std::string& path, const Options& opts)
 {
     Result r;

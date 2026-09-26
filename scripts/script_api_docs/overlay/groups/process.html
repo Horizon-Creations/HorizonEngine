@@ -1,0 +1,37 @@
+          <p>
+            Other programs on the machine. <code>run</code> and
+            <code>openUrl</code> need the project permission <em>Run other
+            programs</em>; <code>which</code> needs none, so a script can find out
+            what is installed before anyone decides to allow it.
+          </p>
+          <ul>
+            <li>
+              <strong><code>run</code> blocks the frame</strong> until the program
+              ends or the timeout kills it; a timeout of 0 means 30 seconds. It
+              returns four values, <code>ok, exitCode, out, err</code>:
+              <code>ok</code> is <code>true</code> for exit code 0,
+              <code>out</code> and <code>err</code> are the complete output. A
+              program that could not be started gives exit code −1. Nothing goes
+              through a shell.
+            </li>
+            <li>
+              <code>openUrl</code> hands the address to the desktop (browser, mail
+              client, file manager) and answers <code>false</code> for an empty one
+              or when the desktop refuses it. <code>which</code> answers the full
+              path, or <code>""</code>.
+            </li>
+          </ul>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue (build 7d49d44f): from Lua and Python
+              <code>run</code> passes no arguments.</strong> The argument list is a
+              <a href="#arrays">list pin</a>. A Lua table or Python list is
+              rejected (<em>bad argument #2 … string expected</em>,
+              <code>TypeError</code>); a string is accepted and dropped. So
+              <code>horizon.process.run("git", "status", 10)</code> runs
+              <code>git</code> with no arguments at all. From a script only programs
+              that need no arguments work; everything else belongs in a HorizonCode
+              graph for now.
+            </p>
+          </div>

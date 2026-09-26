@@ -26,6 +26,8 @@ const char* targetName(PropTarget t)
 	case PropTarget::MatMetallic:  return "Metallic";
 	case PropTarget::MatRoughness: return "Roughness";
 	case PropTarget::MatOpacity:   return "Opacity";
+	case PropTarget::CameraFov:    return "Field of View";
+	case PropTarget::Visible:      return "Visible";
 	}
 	// Only reachable through a file whose byte nobody wrote: said out loud
 	// rather than shown as "Position X", which would be a lie the runtime does
@@ -45,6 +47,10 @@ const char* targetGroup(PropTarget t)
 	case PropTarget::MatMetallic: case PropTarget::MatRoughness:
 	case PropTarget::MatOpacity:
 		return "Material";
+	case PropTarget::CameraFov:
+		return "Camera";
+	case PropTarget::Visible:
+		return "Visibility";
 	}
 	return "";
 }
@@ -57,6 +63,13 @@ void formatValue(PropTarget t, float v, char* buf, size_t n)
 		// TransformComponent::rotation is Euler degrees; the readout says so
 		// rather than leaving a reader to guess radians.
 		std::snprintf(buf, n, "%.1f\xC2\xB0", v);
+		break;
+	case PropTarget::CameraFov:
+		std::snprintf(buf, n, "%.1f\xC2\xB0", v);
+		break;
+	case PropTarget::Visible:
+		// A switch reads as one (the runtime's own threshold, applyChannel).
+		std::snprintf(buf, n, "%s", v >= 0.5f ? "on" : "off");
 		break;
 	default:
 		std::snprintf(buf, n, "%.3f", v);
@@ -148,7 +161,10 @@ float defaultValue(PropTarget t)
 	case PropTarget::ScaleX: case PropTarget::ScaleY: case PropTarget::ScaleZ:
 	case PropTarget::MatColorR: case PropTarget::MatColorG: case PropTarget::MatColorB:
 	case PropTarget::MatOpacity:
+	case PropTarget::Visible:
 		return 1.0f;
+	case PropTarget::CameraFov:
+		return 60.0f;   // CameraComponent's own default
 	default:
 		return 0.0f;
 	}
@@ -330,6 +346,41 @@ namespace
 	}
 }
 
+void drawRuler(ImDrawList* dl, const HE::Ed::UITimelineView& tv, float top, float rulerH,
+               float clipBottom)
+{
+	// Labels stand on the 1-2-5 rung that keeps them ~64 px apart, so zooming
+	// in turns seconds into milliseconds by itself, and a half-step tick
+	// without a label gives the eye something to halve.
+	const float laneL = tv.laneX, laneR = tv.laneX + tv.laneW, duration = tv.duration;
+	dl->PushClipRect(ImVec2(laneL, top), ImVec2(laneR, clipBottom), true);
+	dl->AddRectFilled(ImVec2(laneL, top), ImVec2(laneR, top + rulerH), kRulerBg);
+	const float step  = HE::Ed::uiTimelineTickStep(tv.pixelsPerSecond());
+	const float first = std::floor(tv.scroll / step) * step;
+	const float last  = tv.scroll + tv.visibleSpan();
+	// Counted, not accumulated: a step of a millisecond added a thousand times
+	// is not the same number as a thousand milliseconds.
+	for (int n = 0; n < 4096; ++n)
+	{
+		const float t = first + step * static_cast<float>(n);
+		if (t > last + step) break;
+		if (t < -0.0001f || t > duration + 0.0001f) continue;
+		const float x = tv.xOf(t);
+		dl->AddLine(ImVec2(x, top), ImVec2(x, top + rulerH), kRulerTick);
+		if (t + step * 0.5f <= duration)
+		{
+			const float hx = tv.xOf(t + step * 0.5f);
+			dl->AddLine(ImVec2(hx, top + rulerH * 0.6f), ImVec2(hx, top + rulerH), kRulerHalf);
+		}
+		char lbl[24];
+		if (step >= 1.0f)        std::snprintf(lbl, sizeof(lbl), "%.0f s", t);
+		else if (step >= 0.001f) std::snprintf(lbl, sizeof(lbl), "%.0f ms", t * 1000.0f);
+		else                     std::snprintf(lbl, sizeof(lbl), "%.2f ms", t * 1000.0f);
+		dl->AddText(ImVec2(x + 3.0f, top + 2.0f), kRulerText, lbl);
+	}
+	dl->PopClipRect();
+}
+
 Result draw(PropertyAnimClipAsset& clip, View& view,
             const ImVec2& size, const Intent& intent)
 {
@@ -397,35 +448,7 @@ Result draw(PropertyAnimClipAsset& clip, View& view,
 	view.zoom = tv.zoom; view.scroll = tv.scroll;
 
 	// ── The ruler ────────────────────────────────────────────────────────────
-	// Labels stand on the 1-2-5 rung that keeps them ~64 px apart, so zooming
-	// in turns seconds into milliseconds by itself, and a half-step tick
-	// without a label gives the eye something to halve.
-	dl->PushClipRect(ImVec2(laneL, top.y), ImVec2(laneR, stripBottom), true);
-	dl->AddRectFilled(ImVec2(laneL, top.y), ImVec2(laneR, top.y + M.rulerH), kRulerBg);
-	const float step  = HE::Ed::uiTimelineTickStep(tv.pixelsPerSecond());
-	const float first = std::floor(tv.scroll / step) * step;
-	const float last  = tv.scroll + tv.visibleSpan();
-	// Counted, not accumulated: a step of a millisecond added a thousand times
-	// is not the same number as a thousand milliseconds.
-	for (int n = 0; n < 4096; ++n)
-	{
-		const float t = first + step * static_cast<float>(n);
-		if (t > last + step) break;
-		if (t < -0.0001f || t > duration + 0.0001f) continue;
-		const float x = tv.xOf(t);
-		dl->AddLine(ImVec2(x, top.y), ImVec2(x, top.y + M.rulerH), kRulerTick);
-		if (t + step * 0.5f <= duration)
-		{
-			const float hx = tv.xOf(t + step * 0.5f);
-			dl->AddLine(ImVec2(hx, top.y + M.rulerH * 0.6f), ImVec2(hx, top.y + M.rulerH), kRulerHalf);
-		}
-		char lbl[24];
-		if (step >= 1.0f)        std::snprintf(lbl, sizeof(lbl), "%.0f s", t);
-		else if (step >= 0.001f) std::snprintf(lbl, sizeof(lbl), "%.0f ms", t * 1000.0f);
-		else                     std::snprintf(lbl, sizeof(lbl), "%.2f ms", t * 1000.0f);
-		dl->AddText(ImVec2(x + 3.0f, top.y + 2.0f), kRulerText, lbl);
-	}
-	dl->PopClipRect();
+	drawRuler(dl, tv, top.y, M.rulerH, stripBottom);
 
 	// The ruler strip takes clicks and drags: that is the scrub. The playhead
 	// follows the pointer for as long as the button is held, even once the

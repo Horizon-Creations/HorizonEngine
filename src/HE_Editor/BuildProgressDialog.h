@@ -144,6 +144,20 @@ namespace BuildProgressDialog
 	};
 	Snapshot snapshot();
 
+	// How the latest run ended, without the copy: snapshot() hands over the whole
+	// log, which is right for a tool asking once and wrong for a per-frame poll
+	// (EditorRewards' "build succeeded" detector). `run` counts begin() calls
+	// from 1, so a reader tells two runs apart even if one began and finished
+	// between two of its polls, and a second finish() of the same run is the
+	// same run. run == 0: nothing built this session.
+	struct Outcome
+	{
+		unsigned long long run      = 0;
+		bool               finished = false;
+		bool               success  = false;
+	};
+	Outcome outcome();
+
 	// ── Dialog ───────────────────────────────────────────────────────────────
 
 	// What the user asked for on the finished run. Polled once per frame by the

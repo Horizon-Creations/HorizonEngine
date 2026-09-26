@@ -283,8 +283,8 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 					"asset_resolve reports: Material, StaticMesh, SkeletalMesh, Texture, "
 					"Widget, Theme, HorizonCodeClass, Script, InputAction, "
 					"InputMappingContext, ParticleSystem, AnimatorStateMachine, BoneMask, "
-					"BlendSpace, StructType, EnumType, SaveGameTemplate, Prefab, Scene, "
-					"Audio, Font, AnimationClip.");
+					"BlendSpace, PropertyAnimClip, Sequence, StructType, EnumType, "
+					"SaveGameTemplate, Prefab, Scene, Audio, Font, AnimationClip.");
 
 			const bool recursive = boolArg(args, "recursive");
 			const int  limit     = std::max(1, intArg(args, "limit", 200));
@@ -375,6 +375,7 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 			                     "Theme, HorizonCodeClass, Script, InputAction, "
 			                     "InputMappingContext, ParticleSystem, "
 			                     "AnimatorStateMachine, BoneMask, BlendSpace, "
+			                     "PropertyAnimClip, Sequence, "
 			                     "StructType, EnumType, SaveGameTemplate.") },
 			{ "baseClass", stringProp("HorizonCodeClass only: the engine class it "
 			                          "derives from ('Entity', 'PlayerController', "

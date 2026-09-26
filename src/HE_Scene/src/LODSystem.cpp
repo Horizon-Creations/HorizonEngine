@@ -34,20 +34,30 @@ void LODSystem::update(HorizonWorld& world, const glm::vec3& cameraPos)
 
         const float dist = glm::distance(cameraPos, pos);
 
-        uint8_t chosen = static_cast<uint8_t>(lod.levels.size() - 1);
-        for (uint8_t i = 0; i < static_cast<uint8_t>(lod.levels.size()); ++i)
+        uint8_t  chosen   = static_cast<uint8_t>(lod.levels.size() - 1);
+        HE::UUID chosenId = lod.levels[chosen].meshId;
+        if (lod.refinedMeshId != HE::UUID{} && dist <= lod.refinedMaxDistance)
         {
-            if (dist <= lod.levels[i].maxDistance)
+            chosen   = LODComponent::kRefined;   // finer than levels[0]
+            chosenId = lod.refinedMeshId;
+        }
+        else
+        {
+            for (uint8_t i = 0; i < static_cast<uint8_t>(lod.levels.size()); ++i)
             {
-                chosen = i;
-                break;
+                if (dist <= lod.levels[i].maxDistance)
+                {
+                    chosen   = i;
+                    chosenId = lod.levels[i].meshId;
+                    break;
+                }
             }
         }
 
-        if (lod.current != chosen || mesh.meshAssetId != lod.levels[chosen].meshId)
+        if (lod.current != chosen || mesh.meshAssetId != chosenId)
         {
             lod.current        = chosen;
-            mesh.meshAssetId   = lod.levels[chosen].meshId;
+            mesh.meshAssetId   = chosenId;
             mesh.dirty         = true;
         }
     }

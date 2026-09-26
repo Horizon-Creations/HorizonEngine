@@ -1,0 +1,64 @@
+          <p>
+            Live instances of Widget Designer assets. A widget is addressed by the
+            id that <a href="#flat-createWidget"><code>horizon.createWidget(path)</code></a>
+            returns (0 when the asset does not load); showing, hiding and destroying
+            it are the flat <code>showWidget</code>, <code>hideWidget</code> and
+            <code>destroyWidget</code>. A new widget starts <em>hidden</em> until
+            <code>showWidget</code> (or <code>showModal</code>, <code>openPopup</code>,
+            <code>window.show</code>) puts it on screen. Widgets
+            live outside the entity world, so a widget id is not an entity id, and
+            in an exported game a script and a HorizonCode graph share the same
+            widgets.
+          </p>
+          <ul>
+            <li>
+              <strong>Always pass the widget.</strong> Several descriptions say
+              “leave Widget unwired” for the calling widget's own. That is a
+              HorizonCode graph living in the widget; a script has no widget of its
+              own, and 0 answers <code>false</code> or 0.
+            </li>
+            <li>
+              <strong>Scripts receive none of the widget events.</strong> <em>On Row
+              Bind</em>, <em>On Selection Changed</em>, <em>On Dismissed</em>,
+              <em>On Right Clicked</em>, <em>On Animation Finished</em> and <em>On Clip
+              Finished</em> go to the widget's own HorizonCode graph only. Neither
+              are there <em>Set External</em>, <em>Call External</em> or <em>Bind
+              Event</em> for scripts. In practice: a script can size, select and
+              scroll a ListView, but its rows are filled by the row widget's own
+              graph; a script notices a closed dialog by asking
+              <code>isVisible</code> each frame (see the example under
+              <a href="#widget-showModal"><code>showModal</code></a>).
+            </li>
+            <li>
+              <strong>References are not widget ids.</strong>
+              <code>addChild</code>, <code>listRow</code> and <code>childRef</code>
+              return object references for those HorizonCode nodes;
+              <code>isVisible</code> on one answers <code>false</code>. From a
+              script a child reference is good for <code>removeChild</code>.
+            </li>
+            <li>
+              <strong>Animation <code>ok</code> checks less than it seems.</strong>
+              It is <code>false</code> for a missing widget or element, but a
+              property name the element does not have is accepted and animates
+              nothing, and an unknown easing name runs as <code>"Linear"</code>. The
+              easings are <code>"Linear"</code>, <code>"In Quad"</code>,
+              <code>"Out Quad"</code>, <code>"In Out Quad"</code>,
+              <code>"In Cubic"</code>, <code>"Out Cubic"</code>,
+              <code>"In Out Cubic"</code> and <code>"Out Back"</code>; directions for
+              the clip rows are <code>"Forward"</code>, <code>"Backward"</code> and
+              <code>"Ping Pong"</code> (anything else is Forward). Colours are four
+              numbers, points two: <code>animateColor(w, "Card", "Color", 1, 0, 0,
+              1, 0.5, "Linear")</code>.
+            </li>
+            <li>
+              <strong>Lists</strong> are named by the element's name in the
+              designer. A negative count becomes 0; an index at or past the count
+              leaves the selection as it was, and still answers <code>true</code>.
+              <code>listRow</code> is 0 for an item that is scrolled out of view.
+            </li>
+            <li>
+              <strong>Closing is hiding.</strong> After <code>closeTopLayer</code>,
+              Escape or Back, a dialog or popup widget answers
+              <code>isVisible</code> <code>false</code>; show it again to reopen it.
+            </li>
+          </ul>

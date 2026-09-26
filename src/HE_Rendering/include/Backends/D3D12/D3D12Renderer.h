@@ -31,6 +31,17 @@ public:
     // presented and the live set comes back untouched.
     bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
                            std::vector<uint8_t>& rgba) override;
+    // An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
+    // viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
+    // recorded into its own command list and waited for. Returns the ImGui SRV
+    // handle the editor's registrar built for the slot (null without one).
+    void* RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+                             uint32_t width, uint32_t height,
+                             const EditorCameraOverride& camera,
+                             const glm::vec3& origin = glm::vec3(0.0f),
+                             const WorldPreviewEnv& env = {},
+                             glm::mat4* outViewProj = nullptr,
+                             uint32_t slot = 0) override;
     // Returns ID3D12Resource* for the viewport color RT (or nullptr if not allocated).
     // The editor allocates an SRV in its ImGui heap and calls SetViewportImGuiHandle.
     void* GetViewportD3DResource() const;

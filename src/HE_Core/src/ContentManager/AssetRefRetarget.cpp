@@ -33,7 +33,7 @@ bool isJsonChunk(uint32_t id)
 {
 	return id == HAsset::CHUNK_MGRF || id == HAsset::CHUNK_UIWT || id == HAsset::CHUNK_UIWG
 	    || id == HAsset::CHUNK_HCGR || id == HAsset::CHUNK_IACT || id == HAsset::CHUNK_IMAP
-	    || id == HAsset::CHUNK_PTGR || id == HAsset::CHUNK_ASMG;
+	    || id == HAsset::CHUNK_PTGR || id == HAsset::CHUNK_ASMG || id == HAsset::CHUNK_SEQU;
 }
 
 uint32_t readU32(const uint8_t* p) { uint32_t v = 0; std::memcpy(&v, p, sizeof(v)); return v; }

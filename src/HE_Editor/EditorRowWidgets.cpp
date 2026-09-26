@@ -7,10 +7,12 @@
                               // + the window's WorkRect, which is what moves a
                               // SeparatorText's rule short of a trailing button
 
+#include <cctype>
 #include <cfloat>
 #include <cstdarg>
 #include <cstring>
 #include <string>
+#include <vector>
 
 // ─── Labelled rows + wrapped hints ───────────────────────────────────────────
 // Split out of EditorWidgets.cpp on purpose: everything here depends on ImGui
@@ -191,6 +193,30 @@ namespace Row
 {
 namespace {
 
+// The innermost live MixedScope, or null. A plain pointer chain: scopes are
+// stack objects in the Details panel's frame, nested at most one deep.
+const MixedScope* s_mixedTop = nullptr;
+
+// What a mixed element shows instead of its number. A format without a '%'
+// prints as itself, and the drag/typed value underneath stays the real one
+// (TempInputScalar falls back to the type's own format for editing).
+constexpr const char* kMixedFmt = "\xe2\x80\x94";   // em dash
+
+// "Casts Shadow##ls" and "castsShadow" → "castsshadow": the visible part only,
+// letters and digits only, lower case.
+std::string fieldKey(const char* text)
+{
+	std::string out;
+	if (!text) return out;
+	const char* end = std::strstr(text, "##");
+	for (const char* p = text; *p && p != end; ++p)
+	{
+		const unsigned char c = static_cast<unsigned char>(*p);
+		if (std::isalnum(c)) out += static_cast<char>(std::tolower(c));
+	}
+	return out;
+}
+
 // Every row is the same three steps: scope the ids under the FULL label (so the
 // control itself can be spelled "##v" everywhere and "Speed##an" still differs
 // from "Speed##ab"), print only the part before "##", stretch the control to the
@@ -207,6 +233,13 @@ bool row(const char* label, F&& body)
 	// The label counts as part of the control for help: it is the wider target,
 	// and it is what the eye is on when the question "what IS this?" arises.
 	const bool labelHelp = helpForLabel(label);
+	// The selection disagrees on this field: said beside the label, for every
+	// kind of control — the colour and text rows have no other way to say it.
+	if (mixedMask(label) != 0)
+	{
+		ImGui::SameLine();
+		ImGui::TextDisabled("(mixed)");
+	}
 	ImGui::SetNextItemWidth(-FLT_MIN);
 	const bool changed = body();
 	// After the control, so the LAST item is still the caller's — nothing here
@@ -224,7 +257,7 @@ bool row(const char* label, F&& body)
 // INSIDE the frame rather than being a separate label so the row costs no extra
 // width, which the Details panel does not have.
 bool axisDragN(const char* id, float* v, int n, float speed, float min, float max,
-               const char* fmt)
+               const char* fmt, unsigned mixed = 0)
 {
 	// X red, Y green, Z blue — the gizmo's colours, because these fields and
 	// that gizmo edit the same three numbers. W stays neutral.
@@ -243,7 +276,8 @@ bool axisDragN(const char* id, float* v, int n, float speed, float min, float ma
 	{
 		if (i > 0) ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
 		ImGui::PushID(i);
-		changed |= ImGui::DragFloat("##c", &v[i], speed, min, max, fmt);
+		changed |= ImGui::DragFloat("##c", &v[i], speed, min, max,
+		                            (mixed & (1u << i)) ? kMixedFmt : fmt);
 		// Painted after the item so it sits on top of the frame background —
 		// clipped to the frame's rounding so the corner stays clean.
 		ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -264,37 +298,44 @@ bool axisDragN(const char* id, float* v, int n, float speed, float min, float ma
 bool sliderFloat(const char* label, float* v, float min, float max,
                  const char* fmt, ImGuiSliderFlags flags)
 {
-	return row(label, [&]{ return ImGui::SliderFloat("##v", v, min, max, fmt, flags); });
+	const char* f = mixedMask(label) ? kMixedFmt : fmt;
+	return row(label, [&]{ return ImGui::SliderFloat("##v", v, min, max, f, flags); });
 }
 
 bool sliderInt(const char* label, int* v, int min, int max, const char* fmt)
 {
-	return row(label, [&]{ return ImGui::SliderInt("##v", v, min, max, fmt); });
+	const char* f = mixedMask(label) ? kMixedFmt : fmt;
+	return row(label, [&]{ return ImGui::SliderInt("##v", v, min, max, f); });
 }
 
 bool dragFloat(const char* label, float* v, float speed, float min, float max, const char* fmt)
 {
-	return row(label, [&]{ return ImGui::DragFloat("##v", v, speed, min, max, fmt); });
+	const char* f = mixedMask(label) ? kMixedFmt : fmt;
+	return row(label, [&]{ return ImGui::DragFloat("##v", v, speed, min, max, f); });
 }
 
 bool dragFloat2(const char* label, float* v, float speed, float min, float max, const char* fmt)
 {
-	return row(label, [&]{ return axisDragN("##v", v, 2, speed, min, max, fmt); });
+	const unsigned m = mixedMask(label);
+	return row(label, [&]{ return axisDragN("##v", v, 2, speed, min, max, fmt, m); });
 }
 
 bool dragFloat3(const char* label, float* v, float speed, float min, float max, const char* fmt)
 {
-	return row(label, [&]{ return axisDragN("##v", v, 3, speed, min, max, fmt); });
+	const unsigned m = mixedMask(label);
+	return row(label, [&]{ return axisDragN("##v", v, 3, speed, min, max, fmt, m); });
 }
 
 bool dragFloat4(const char* label, float* v, float speed, float min, float max, const char* fmt)
 {
-	return row(label, [&]{ return axisDragN("##v", v, 4, speed, min, max, fmt); });
+	const unsigned m = mixedMask(label);
+	return row(label, [&]{ return axisDragN("##v", v, 4, speed, min, max, fmt, m); });
 }
 
 bool dragInt(const char* label, int* v, float speed, int min, int max)
 {
-	return row(label, [&]{ return ImGui::DragInt("##v", v, speed, min, max); });
+	const char* f = mixedMask(label) ? kMixedFmt : "%d";
+	return row(label, [&]{ return ImGui::DragInt("##v", v, speed, min, max, f); });
 }
 
 bool inputInt(const char* label, int* v)
@@ -302,13 +343,48 @@ bool inputInt(const char* label, int* v)
 	return row(label, [&]{ return ImGui::InputInt("##v", v, 0, 0); });
 }
 
+namespace
+{
+// ImGui::Combo, but previewing "—" while the selection disagrees: the same
+// BeginCombo/Selectable/EndCombo body Combo runs, with the edit marked the
+// same way, so IsItemDeactivatedAfterEdit still reports a pick to the undo.
+template <typename ItemAt>
+bool mixedCombo(int* v, int count, ItemAt&& itemAt)
+{
+	bool changed = false;
+	if (ImGui::BeginCombo("##v", kMixedFmt))
+	{
+		for (int i = 0; i < count; ++i)
+		{
+			ImGui::PushID(i);
+			if (ImGui::Selectable(itemAt(i), false)) { *v = i; changed = true; }
+			ImGui::PopID();
+		}
+		ImGui::EndCombo();
+	}
+	if (changed) ImGui::MarkItemEdited(ImGui::GetItemID());
+	return changed;
+}
+} // namespace
+
 bool combo(const char* label, int* v, const char* const items[], int count)
 {
+	if (mixedMask(label))
+		return row(label, [&]{ return mixedCombo(v, count, [&](int i) { return items[i]; }); });
 	return row(label, [&]{ return ImGui::Combo("##v", v, items, count); });
 }
 
 bool comboZ(const char* label, int* v, const char* itemsSeparatedByZeros)
 {
+	if (mixedMask(label))
+	{
+		std::vector<const char*> items;
+		for (const char* p = itemsSeparatedByZeros; p && *p; p += std::strlen(p) + 1)
+			items.push_back(p);
+		return row(label, [&]{
+			return mixedCombo(v, static_cast<int>(items.size()), [&](int i) { return items[i]; });
+		});
+	}
 	return row(label, [&]{ return ImGui::Combo("##v", v, itemsSeparatedByZeros); });
 }
 
@@ -348,6 +424,23 @@ void labelText(const char* label, const char* fmt, ...)
 	va_start(args, fmt);
 	row(label, [&]{ ImGui::TextV(fmt, args); return false; });
 	va_end(args);
+}
+
+MixedScope::MixedScope(const std::unordered_map<std::string, unsigned>& fields)
+	: m_prev(s_mixedTop)
+{
+	for (const auto& [field, mask] : fields)
+		if (mask) m_fields[fieldKey(field.c_str())] |= mask;
+	s_mixedTop = this;
+}
+
+MixedScope::~MixedScope() { s_mixedTop = m_prev; }
+
+unsigned mixedMask(const char* label)
+{
+	if (!s_mixedTop || s_mixedTop->m_fields.empty()) return 0;
+	const auto it = s_mixedTop->m_fields.find(fieldKey(label));
+	return it == s_mixedTop->m_fields.end() ? 0u : it->second;
 }
 
 } // namespace Row
@@ -417,7 +510,12 @@ void helpMarker(const char* key)
 
 bool checkbox(const char* label, bool* v)
 {
+	// ImGui's own mixed state: a dash in the box instead of a tick or nothing.
+	// A click still toggles the active entity's value, which then goes to all.
+	const bool mixed = Row::mixedMask(label) != 0;
+	if (mixed) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
 	const bool changed = ImGui::Checkbox(label, v);
+	if (mixed) ImGui::PopItemFlag();
 	helpForLabel(label);
 	return changed;
 }

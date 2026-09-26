@@ -43,6 +43,18 @@ namespace ViewportActions
 	// True while something in the scene is hidden — what enables "Show All".
 	bool anyHidden(HorizonWorld& world);
 
+	// ── Select All ──────────────────────────────────────────────────────────
+	// Every entity the Outliner lists, in its top-down order: not the world
+	// root, not the built-in sun and moon, and not a terrain's generated
+	// chunks (nor anything under them) — the rows the Outliner itself leaves
+	// out. What Ctrl+A puts into the selection.
+	std::vector<Entity> selectableEntities(HorizonWorld& world);
+
+	// Select everything selectableEntities() names. The entity that was the
+	// primary stays the primary (the Details panel keeps showing the values it
+	// showed), and the anchor stays where it was. Returns the new size.
+	std::size_t selectAll(HorizonWorld& world, EditorSelection& selection);
+
 	// Put the selection's roots under one new, empty "Group" entity. The group
 	// is created under the roots' common parent (the world root when they do
 	// not share one) at the centre of where the roots stand, and every root is

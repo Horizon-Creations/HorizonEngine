@@ -169,6 +169,56 @@ TEST_CASE("CameraRig: stick pitch follows mouse convention and invert flips it")
     CHECK(r->rig().pitch == doctest::Approx(9.0f));
 }
 
+TEST_CASE("CameraRig: the player's stick settings sit on top of the rig's")
+{
+    // Process-wide store: start clean and leave clean, or a later case turns at
+    // somebody else's speed.
+    HE::api::settings::resetToDefaults();
+
+    auto r = makeRig();
+    r->rig().stickSensitivity = 90.0f;
+    HE::CameraLookInput look;
+    look.stickX = 1.0f;
+    look.stickY = 1.0f;
+    look.dt     = 0.1f;
+
+    // A SCALE on the rig's own speed, through the row a settings menu calls.
+    const HE::api::ApiFn* scale = HE::api::find("camera.setStickSensitivityScale");
+    REQUIRE(scale != nullptr);
+    scale->invoke(r->api(), { HorizonCode::Value::ofFloat(2.0f) });
+    HE::CameraRigController::update(r->world, look);
+    CHECK(r->rig().yaw   == doctest::Approx(-18.0f));   // 90°/s × 2 × 0.1 s
+    CHECK(r->rig().pitch == doctest::Approx(-18.0f));
+    CHECK(r->rig().stickSensitivity == doctest::Approx(90.0f));   // the design untouched
+
+    // Invert REPLACES the rig's choice once made — both ways.
+    r->rig().yaw = r->rig().pitch = 0.0f;
+    HE::api::camera::setStickInvertY(true);
+    HE::CameraRigController::update(r->world, look);
+    CHECK(r->rig().pitch == doctest::Approx(18.0f));
+
+    r->rig().pitch = 0.0f;
+    r->rig().stickInvertY = true;            // the project inverts…
+    HE::api::camera::setStickInvertY(false); // …the player does not
+    HE::CameraRigController::update(r->world, look);
+    CHECK(r->rig().pitch == doctest::Approx(-18.0f));
+
+    // The mouse is not the stick's business.
+    r->rig().yaw = 0.0f;
+    r->rig().sensitivity = 0.1f;
+    HE::CameraLookInput mouse;
+    mouse.mouse.dx = 10.0f;
+    HE::CameraRigController::update(r->world, mouse);
+    CHECK(r->rig().yaw == doctest::Approx(-1.0f));
+
+    // Reset: back to the rig's own speed and invert.
+    HE::api::settings::resetToDefaults();
+    r->rig().yaw = r->rig().pitch = 0.0f;
+    HE::CameraRigController::update(r->world, look);
+    CHECK(r->rig().yaw   == doctest::Approx(-9.0f));
+    CHECK(r->rig().pitch == doctest::Approx(9.0f));    // the rig's stickInvertY again
+}
+
 TEST_CASE("CameraRig: mouse and stick combine in one update")
 {
     auto r = makeRig();
