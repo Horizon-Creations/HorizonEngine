@@ -36,9 +36,34 @@ entt::entity slotEntity(const entt::registry& reg, const SequencePlayerComponent
     return (e != entt::null && reg.valid(e)) ? e : entt::entity{ entt::null };
 }
 
-void resolve(HorizonWorld& world, const SequenceAsset& seq, SequencePlayerComponent& sp)
+void resolve(HorizonWorld& world, entt::entity player, const SequenceAsset& seq,
+             SequencePlayerComponent& sp)
 {
-    sp.slots            = HE::SequenceEval::resolveBindings(world, seq, sp.overrides);
+    if (sp.namedOverrides.empty())
+        sp.slots = HE::SequenceEval::resolveBindings(world, seq, sp.overrides);
+    else
+    {
+        // Names first, numbers after: resolveBindings applies overrides in
+        // order, so a slot bound by number wins over the same slot by name.
+        std::vector<HE::SequenceEval::SlotOverride> all;
+        all.reserve(sp.namedOverrides.size() + sp.overrides.size());
+        for (const SequencePlayerComponent::NamedOverride& n : sp.namedOverrides)
+        {
+            const auto it = std::find_if(seq.bindings.begin(), seq.bindings.end(),
+                                         [&](const SequenceBinding& b) { return b.name == n.name; });
+            if (it == seq.bindings.end())
+            {
+                HE_LOG_THROTTLE(Animation, Warning, 5.0,
+                                "Entity %u: the sequence has no binding named \"%s\" — "
+                                "sequence.bindSlot binds nothing", static_cast<uint32_t>(player),
+                                n.name.c_str());
+                continue;
+            }
+            all.push_back({ it->slot, n.entity });
+        }
+        all.insert(all.end(), sp.overrides.begin(), sp.overrides.end());
+        sp.slots = HE::SequenceEval::resolveBindings(world, seq, all);
+    }
     sp.bindingsResolved = true;
 }
 
@@ -422,8 +447,12 @@ float SequenceSystem::sectionClipTime(const SequenceSkeletalSection& s, float t,
 
 bool SequenceSystem::play(HorizonWorld& world, ContentManager& cm, entt::entity player)
 {
-    auto* sp = world.registry().try_get<SequencePlayerComponent>(player);
+    auto& reg = world.registry();
+    auto* sp  = reg.try_get<SequencePlayerComponent>(player);
     if (!sp) return false;
+    // Switched off: begin() stops a sequence whose owner is off, so starting one
+    // here would only buy a SequenceFinished on the next frame.
+    if (!HE::isEntityActive(reg, player)) return false;
     sp->started = true;
 
     if (sp->playing)
@@ -464,6 +493,9 @@ void SequenceSystem::stop(HorizonWorld& world, entt::entity player)
     auto* sp = world.registry().try_get<SequencePlayerComponent>(player);
     if (!sp) return;
     sp->started   = true;   // a stop before the first frame also cancels the autoplay
+    // A skip is a stop, and whatever waits for the end has to run after a skip
+    // too. begin() sends it; a natural end that already did leaves playing false.
+    if (sp->playing) sp->finishedPending = true;
     sp->playing   = false;
     sp->paused    = false;
     sp->finishing = false;
@@ -504,6 +536,23 @@ void SequenceSystem::bindSlot(HorizonWorld& world, entt::entity player, uint16_t
     sp->bindingsResolved = false;
 }
 
+void SequenceSystem::bindSlotByName(HorizonWorld& world, entt::entity player, const std::string& name,
+                                    entt::entity target)
+{
+    auto* sp = world.registry().try_get<SequencePlayerComponent>(player);
+    if (!sp || name.empty()) return;
+    auto& list = sp->namedOverrides;
+    auto  it   = std::find_if(list.begin(), list.end(),
+                              [&](const SequencePlayerComponent::NamedOverride& o) { return o.name == name; });
+    if (target == entt::null)
+    {
+        if (it != list.end()) list.erase(it);
+    }
+    else if (it != list.end()) it->entity = target;
+    else                       list.push_back({ name, target });
+    sp->bindingsResolved = false;
+}
+
 // ── The frame ────────────────────────────────────────────────────────────────
 
 void SequenceSystem::begin(HorizonWorld& world, ContentManager& cm, float dt,
@@ -521,6 +570,18 @@ void SequenceSystem::begin(HorizonWorld& world, ContentManager& cm, float dt,
     const HE::ActiveFilter active(reg);
     for (auto [e, sp] : reg.view<SequencePlayerComponent>().each())
     {
+        // Switched off while playing: over. Before the sound and the end below,
+        // so this frame already stops the sounds and sends SequenceFinished, and
+        // apply() hands the camera back.
+        if (sp.playing && active.off(e)) stop(world, e);
+        if (sp.finishedPending)
+        {
+            sp.finishedPending = false;
+            if (notifies)
+                notifies->push_back({ static_cast<uint32_t>(e), SequenceSystem::kSequenceFinished,
+                                      HE::AnimationNotifyEvent::Kind::Fire });
+        }
+
         if (sp.stopAudio) { stopSounds(audio, sp); sp.stopAudio = false; sp.audioPaused = false; }
         else if (audio && !sp.audioHandles.empty())
         {
@@ -556,7 +617,7 @@ void SequenceSystem::begin(HorizonWorld& world, ContentManager& cm, float dt,
                                 static_cast<unsigned long long>(sp.sequenceId.lo));
             continue;
         }
-        if (!sp.bindingsResolved) resolve(world, *seq, sp);
+        if (!sp.bindingsResolved) resolve(world, e, *seq, sp);
 
         if (sp.playing && !sp.paused)
         {
@@ -678,6 +739,12 @@ void SequenceSystem::apply(HorizonWorld& world, ContentManager& cm, float dt,
             // In the same frame: the last frame's camera pose is what the
             // hand-over starts from, and a frame later it would be one old.
             if (sp.cameraOwned) releaseCamera(world, e, sp);
+            // Into the queue drained right after tickAnimation, so a handler
+            // sees the camera already on its way back and the actors on the
+            // last frame.
+            if (notifies)
+                notifies->push_back({ static_cast<uint32_t>(e), SequenceSystem::kSequenceFinished,
+                                      HE::AnimationNotifyEvent::Kind::Fire });
         }
     }
 }

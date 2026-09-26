@@ -10,6 +10,10 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/SequenceSystem.h>
+#include <HorizonScene/EngineApi.h>
+#include <HorizonScene/EntityActive.h>
+#include <HorizonScene/ScriptContext.h>
+#include <HorizonScene/AnimationNotifySystem.h>
 #include <HorizonScene/CameraRigController.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
 #include <HorizonScene/Components/CameraComponent.h>
@@ -303,8 +307,10 @@ TEST_CASE("sequence runtime: a non-looping sequence fires its events exactly onc
 	CHECK(countOf(all, "A") == 1);
 	CHECK(countOf(all, "B") == 1);
 	CHECK(countOf(all, "Z") == 1);
-	REQUIRE(all.size() == 3);
-	CHECK(all.back() == "Z");
+	// …and then the end itself, after the last event of the same frame.
+	REQUIRE(all.size() == 4);
+	CHECK(all[2] == "Z");
+	CHECK(all.back() == SequenceSystem::kSequenceFinished);
 }
 
 TEST_CASE("sequence runtime: events go to their actor, and a missing actor takes them along")
@@ -1133,4 +1139,302 @@ TEST_CASE("sequence input: Lock Player Input holds while playing or paused, not 
 	REQUIRE(SequenceSystem::play(r.world, r.cm, r.owner));
 	r.frame();
 	CHECK_FALSE(SequenceSystem::locksPlayerInput(reg));
+}
+
+// ─── The end, and the script rows (plan step 5) ──────────────────────────────
+
+namespace
+{
+	long finishedIn(const std::vector<std::string>& v) { return countOf(v, SequenceSystem::kSequenceFinished); }
+
+	std::vector<std::string> run(Rig& r, int frames, float dt = kDt)
+	{
+		std::vector<std::string> all;
+		for (int i = 0; i < frames; ++i)
+		{
+			const auto f = r.frame(dt);
+			all.insert(all.end(), f.begin(), f.end());
+		}
+		return all;
+	}
+}
+
+TEST_CASE("sequence script: SequenceFinished comes once at the natural end, to the owner, never from a loop")
+{
+	SUBCASE("forwards")
+	{
+		Rig r;
+		SequenceAsset s;
+		s.duration = 0.5f;
+		r.make(std::move(s));
+		const auto all = run(r, 12);
+		CHECK_FALSE(r.player().playing);
+		CHECK(finishedIn(all) == 1);
+		// Played again: once more — each run ends once.
+		REQUIRE(SequenceSystem::play(r.world, r.cm, r.owner));
+		CHECK(finishedIn(run(r, 12)) == 1);
+	}
+	SUBCASE("backwards, onto 0")
+	{
+		Rig r;
+		SequenceAsset s;
+		s.duration = 0.5f;
+		r.make(std::move(s), /*autoplay=*/false, false, -1.0f);
+		SequenceSystem::setTime(r.world, r.cm, r.owner, 0.5f);
+		REQUIRE(SequenceSystem::play(r.world, r.cm, r.owner));
+		CHECK(finishedIn(run(r, 12)) == 1);
+		CHECK(r.player().time == 0.0f);
+	}
+	SUBCASE("to the owner")
+	{
+		Rig r;
+		r.make(SequenceAsset{});   // zero length: written once, over at once
+		r.frame();
+		REQUIRE(r.notifies.size() == 1);
+		CHECK(r.notifies[0].name == SequenceSystem::kSequenceFinished);
+		CHECK(r.notifies[0].entity == static_cast<uint32_t>(r.owner));
+		CHECK(r.notifies[0].kind == HE::AnimationNotifyEvent::Kind::Fire);
+	}
+	SUBCASE("a loop never ends on its own")
+	{
+		Rig r;
+		SequenceAsset s;
+		s.duration = 0.3f;
+		r.make(std::move(s), true, /*loop=*/true);
+		CHECK(finishedIn(run(r, 40)) == 0);
+		CHECK(r.player().playing);
+		// …but a stop ends it.
+		SequenceSystem::stop(r.world, r.owner);
+		CHECK(finishedIn(run(r, 2)) == 1);
+	}
+}
+
+TEST_CASE("sequence script: stop() of a running cutscene sends SequenceFinished, of a stopped one nothing")
+{
+	Rig r;
+	SequenceAsset s;
+	s.duration = 5.0f;
+	r.make(std::move(s));
+	run(r, 3);
+
+	// A skip: stop() in the middle. The next frame tells the owner.
+	SequenceSystem::stop(r.world, r.owner);
+	auto all = run(r, 1);
+	CHECK(finishedIn(all) == 1);
+	CHECK(r.player().time == 0.0f);
+
+	// Stopping a stopped player is no second end.
+	SequenceSystem::stop(r.world, r.owner);
+	CHECK(finishedIn(run(r, 3)) == 0);
+
+	// Paused counts as running: skipping a paused cutscene ends it too.
+	REQUIRE(SequenceSystem::play(r.world, r.cm, r.owner));
+	run(r, 2);
+	SequenceSystem::pause(r.world, r.owner);
+	run(r, 2);
+	SequenceSystem::stop(r.world, r.owner);
+	CHECK(finishedIn(run(r, 2)) == 1);
+
+	// A frame without a session has no queue to send it into: the first frame
+	// that has one sends it, once.
+	REQUIRE(SequenceSystem::play(r.world, r.cm, r.owner));
+	run(r, 1);
+	SequenceSystem::stop(r.world, r.owner);
+	r.frame(kDt, /*session=*/false);
+	CHECK(finishedIn(run(r, 1)) == 1);   // sent by the first frame that has a queue
+	CHECK(finishedIn(run(r, 2)) == 0);
+}
+
+TEST_CASE("sequence script: switching the owner off ends the cutscene and gives the camera back")
+{
+	Rig r;
+	auto& reg = r.world.registry();
+	const entt::entity gameplay = makeCamera(r.world, "Gameplay", { 0, 2, 0 }, 60.0f, true);
+	const entt::entity shot     = makeCamera(r.world, "Shot",     { 10, 0, 0 }, 40.0f);
+	SequenceAsset s;
+	s.duration = 5.0f;
+	s.bindings = { { 0, "Shot", r.world.entityId(shot) } };
+	s.tracks.push_back(cutTrack({ { 0.0f, 0, 0.0f } }));
+	r.make(std::move(s));
+	r.player().lockPlayerInput = true;
+
+	run(r, 3);
+	REQUIRE(SequenceSystem::ownsCamera(reg));
+	REQUIRE(isMain(reg, shot));
+	REQUIRE(SequenceSystem::locksPlayerInput(reg));
+
+	HE::setEntityActive(reg, r.owner, false);
+	const auto all = run(r, 1);
+	// BEFORE THE CHANGE: still playing, still holding the camera and the input,
+	// held by an entity nothing could see any more.
+	CHECK_FALSE(r.player().playing);
+	CHECK(finishedIn(all) == 1);
+	CHECK_FALSE(SequenceSystem::ownsCamera(reg));
+	CHECK(isMain(reg, gameplay));
+	CHECK_FALSE(SequenceSystem::locksPlayerInput(reg));
+
+	// While it is off it cannot be started…
+	CHECK_FALSE(SequenceSystem::play(r.world, r.cm, r.owner));
+	CHECK(finishedIn(run(r, 3)) == 0);
+	CHECK_FALSE(r.player().playing);
+	// …and switching it on again does not restart it on its own.
+	HE::setEntityActive(reg, r.owner, true);
+	run(r, 2);
+	CHECK_FALSE(r.player().playing);
+	CHECK(SequenceSystem::play(r.world, r.cm, r.owner));
+	run(r, 1);
+	CHECK(r.player().playing);
+	CHECK(isMain(reg, shot));
+}
+
+TEST_CASE("sequence script: bindSlot by name holds until the sequence has loaded")
+{
+	Rig r;
+	SequenceAsset s;
+	s.duration = 1.0f;
+	// Two actors, and a duplicate name: the first listed is the one bound.
+	s.bindings = { { 3, "Hero", HE::UUID{} }, { 5, "Guard", HE::UUID{} }, { 7, "Hero", HE::UUID{} } };
+	s.tracks.push_back(propertyTrack(3, PropTarget::PosY, { 0.0f, 1.0f }, { 0.0f, 1.0f }));
+	s.tracks.push_back(propertyTrack(5, PropTarget::PosX, { 0.0f, 1.0f }, { 0.0f, 1.0f }));
+	s.tracks.push_back(propertyTrack(7, PropTarget::PosZ, { 0.0f, 1.0f }, { 0.0f, 1.0f }));
+	r.make(std::move(s));
+	auto& reg = r.world.registry();
+	const entt::entity hero  = makeActor(r.world, "Hero");
+	const entt::entity guard = makeActor(r.world, "Guard");
+	const entt::entity other = makeActor(r.world, "Other");
+
+	// Not loaded yet: an id nothing knows. The script binds anyway.
+	r.player().sequenceId = HE::UUID::generate();
+	SequenceSystem::bindSlotByName(r.world, r.owner, "Hero", hero);
+	SequenceSystem::bindSlotByName(r.world, r.owner, "Guard", guard);
+	SequenceSystem::bindSlotByName(r.world, r.owner, "Nobody", other);   // warned about, binds nothing
+	r.frame();
+	CHECK(reg.get<TransformComponent>(hero).position.y == 0.0f);
+
+	// Loaded: the names find their slots.
+	r.player().sequenceId = r.seqId;
+	r.frame();
+	CHECK(reg.get<TransformComponent>(hero).position.y  == doctest::Approx(0.1f));
+	CHECK(reg.get<TransformComponent>(hero).position.z  == 0.0f);   // slot 7 is not "the" Hero
+	CHECK(reg.get<TransformComponent>(guard).position.x == doctest::Approx(0.1f));
+	CHECK(reg.get<TransformComponent>(other).position   == glm::vec3(0.0f));
+
+	// A number beats a name for the same slot.
+	SequenceSystem::bindSlot(r.world, r.owner, 5, other);
+	r.frame();
+	CHECK(reg.get<TransformComponent>(other).position.x == doctest::Approx(0.2f));
+	CHECK(reg.get<TransformComponent>(guard).position.x == doctest::Approx(0.1f));
+
+	// Cleared by name: the slot goes back to what the asset names (nobody).
+	SequenceSystem::bindSlotByName(r.world, r.owner, "Hero", entt::null);
+	r.frame();
+	CHECK(reg.get<TransformComponent>(hero).position.y == doctest::Approx(0.2f));
+}
+
+TEST_CASE("sequence script: the sequence.* rows drive a real player")
+{
+	Rig r;
+	const entt::entity door = makeActor(r.world, "Door");
+	SequenceAsset s;
+	s.duration = 2.0f;
+	s.bindings = { { 0, "Door", HE::UUID{} } };
+	s.tracks.push_back(propertyTrack(0, PropTarget::PosX, { 0.0f, 2.0f }, { 0.0f, 2.0f }));
+	r.make(std::move(s), /*autoplay=*/false);
+	auto& reg = r.world.registry();
+
+	HE::api::Ctx c;
+	c.world   = &r.world;
+	c.content = &r.cm;
+	const auto owner = static_cast<HE::api::Entity>(r.owner);
+	const auto call  = [&](const char* id, std::vector<HorizonCode::Value> args) {
+		const HE::api::ApiFn* fn = HE::api::find(id);
+		REQUIRE(fn != nullptr);
+		return fn->invoke(c, args);
+	};
+	using V = HorizonCode::Value;
+
+	CHECK(HE::api::isScriptGroup("sequence"));
+	CHECK(call("sequence.duration", { V::ofInt(owner) })[0].f == doctest::Approx(2.0f));
+	CHECK(call("sequence.isPlaying", { V::ofInt(owner) })[0].b == false);
+
+	call("sequence.bindSlot", { V::ofInt(owner), V::ofString("Door"), V::ofInt((int)static_cast<uint32_t>(door)) });
+	CHECK(call("sequence.play", { V::ofInt(owner) })[0].b == true);
+	r.frame();
+	CHECK(call("sequence.isPlaying", { V::ofInt(owner) })[0].b == true);
+	CHECK(call("sequence.getTime", { V::ofInt(owner) })[0].f == doctest::Approx(0.1f));
+	CHECK(reg.get<TransformComponent>(door).position.x == doctest::Approx(0.1f));
+
+	// Paused: the clock stands, and isPlaying says so.
+	call("sequence.pause", { V::ofInt(owner) });
+	r.frame();
+	CHECK(call("sequence.isPlaying", { V::ofInt(owner) })[0].b == false);
+	CHECK(call("sequence.getTime", { V::ofInt(owner) })[0].f == doctest::Approx(0.1f));
+
+	call("sequence.setTime", { V::ofInt(owner), V::ofFloat(1.5f) });
+	call("sequence.play", { V::ofInt(owner) });
+	r.frame();
+	CHECK(call("sequence.getTime", { V::ofInt(owner) })[0].f == doctest::Approx(1.6f));
+
+	// A target that does not exist is refused, not read as "clear".
+	const entt::entity gone = r.world.createEntity("Gone");
+	r.world.destroyEntity(gone);
+	call("sequence.bindSlot", { V::ofInt(owner), V::ofString("Door"), V::ofInt((int)static_cast<uint32_t>(gone)) });
+	r.frame();
+	CHECK(reg.get<TransformComponent>(door).position.x == doctest::Approx(1.7f));
+	// 0 clears it: the asset names nobody for "Door", so the door stays put.
+	call("sequence.bindSlot", { V::ofInt(owner), V::ofString("Door"), V::ofInt(0) });
+	r.frame();
+	CHECK(reg.get<TransformComponent>(door).position.x == doctest::Approx(1.7f));
+
+	call("sequence.stop", { V::ofInt(owner) });
+	CHECK(finishedIn(run(r, 1)) == 1);
+	CHECK(call("sequence.getTime", { V::ofInt(owner) })[0].f == 0.0f);
+
+	// No player on the entity, or no entity: neutral answers, nothing thrown.
+	const auto doorId = static_cast<HE::api::Entity>(door);
+	CHECK(call("sequence.play", { V::ofInt(doorId) })[0].b == false);
+	CHECK(call("sequence.duration", { V::ofInt(doorId) })[0].f == 0.0f);
+	CHECK(call("sequence.getTime", { V::ofInt(123456) })[0].f == 0.0f);
+	call("sequence.stop", { V::ofInt(123456) });
+}
+
+// The whole way round from a text script: Lua starts the cutscene through the
+// registry group and hears its end through the handler it already has.
+TEST_CASE("sequence script: Lua plays a cutscene and hears SequenceFinished")
+{
+	Rig r;
+	SequenceAsset s;
+	s.duration = 0.3f;
+	s.tracks.push_back(eventTrack(kSequenceNoBinding, { { "Line", 0.1f, 0.0f } }));
+	r.make(std::move(s), /*autoplay=*/false);
+
+	ScriptContext sctx(r.world);
+	sctx.setContentManager(&r.cm);
+	static const char* kScript = R"lua(
+local M = {}
+function M.onStart(self)
+    _heHeard = ""
+    _heStarted = horizon.sequence.play(_heOwner) and 1 or 0
+end
+function M.onAnimationNotify(self, name)
+    _heHeard = _heHeard .. name .. ";"
+    if name == "SequenceFinished" then _heDone = 1 end
+end
+return M
+)lua";
+	REQUIRE(sctx.engine().exec(("_heOwner = " + std::to_string(static_cast<uint32_t>(r.owner))).c_str()));
+	REQUIRE(sctx.engine().loadScript("cutscene", kScript));
+	const auto luaId = sctx.engine().createInstance("cutscene", static_cast<uint32_t>(r.owner));
+	REQUIRE(luaId != ScriptEngine::kInvalidInstance);
+	sctx.engine().callOnStart(luaId);
+	CHECK(sctx.engine().getGlobalNumber("_heStarted") == 1.0);
+
+	AnimationNotifySystem::InstanceMap lua{ { static_cast<uint32_t>(r.owner), luaId } };
+	for (int i = 0; i < 6; ++i)
+	{
+		r.frame();
+		AnimationNotifySystem::dispatch(r.notifies, r.world, &sctx, lua);
+	}
+	CHECK(sctx.engine().getGlobalString("_heHeard") == "Line;SequenceFinished;");
+	CHECK(sctx.engine().getGlobalNumber("_heDone") == 1.0);
 }

@@ -730,7 +730,7 @@ set(HCGEN_CLASSES
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived
     inherit_novars_base inherit_novars input_actions containers reroutes
-    cheat_event datetime_double
+    cheat_event datetime_double sequence_transport
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

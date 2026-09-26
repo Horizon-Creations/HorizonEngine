@@ -5,6 +5,7 @@
 #include <entt/entt.hpp>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // Plays a cinematic Sequence asset (docs/sequencer-cinematics-plan.md §3.5).
@@ -20,7 +21,7 @@ struct SequencePlayerComponent
     // ── Authored (serialized) ────────────────────────────────────────────────
     HE::UUID sequenceId;
     // Start on the first frame of the play session. Off: something (a script,
-    // step 5's sequence.play) has to start it.
+    // sequence.play) has to start it.
     bool     autoplay = true;
     // Start over at the end. Off: the playhead stops on the last frame and the
     // actors keep the pose it left them in.
@@ -69,10 +70,20 @@ struct SequencePlayerComponent
     // False after play() and bindSlot: the next frame resolves again (lazily,
     // because the sequence asset may still be streaming when play() runs).
     bool                                         bindingsResolved = false;
-    // Slot overrides set before or during playback (sequence.bindSlot, step 5).
+    // Slot overrides set before or during playback (SequenceSystem::bindSlot).
     // Precede the asset's UUID: "the player" is spawned at runtime and has no
     // UUID the asset could know.
     std::vector<HE::SequenceEval::SlotOverride>  overrides;
+    // The same by binding name (the script row sequence.bindSlot): mapped onto
+    // slots only when the bindings resolve, because the asset may not be loaded
+    // when a script binds. Applied before `overrides`, so a slot bound by
+    // number wins.
+    struct NamedOverride { std::string name; entt::entity entity; };
+    std::vector<NamedOverride>                   namedOverrides;
+
+    // stop() on a playing player asks for SequenceSystem::kSequenceFinished;
+    // begin() sends it — the transport functions have no notify queue.
+    bool  finishedPending = false;
 
     // Sounds this sequence started, so a stop can stop them. Finished ones are
     // pruned as the list is walked.

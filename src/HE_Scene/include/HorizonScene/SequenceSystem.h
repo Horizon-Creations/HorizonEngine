@@ -1,6 +1,7 @@
 #pragma once
 #include <entt/entt.hpp>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 class HorizonWorld;
@@ -72,13 +73,16 @@ namespace SequenceSystem
 
     // Resume a paused player; otherwise start one. A player standing at its end
     // (or at 0 when it plays backwards) starts over; one moved with setTime while
-    // stopped starts there. Resolves the bindings. False without a component.
+    // stopped starts there. Resolves the bindings. False without a component,
+    // and false on a switched-off owner (InactiveComponent, here or on an
+    // ancestor): begin() would stop it again on the next frame — see below.
     bool play(HorizonWorld& world, ContentManager& cm, entt::entity player);
     // Hold the clock. The actors stay owned: the frame keeps being written, so
     // another driver cannot take them over mid-cutscene.
     void pause(HorizonWorld& world, entt::entity player);
     // Stop and rewind to 0, and stop the sounds this sequence started. The actors
-    // keep whatever the last written frame left them in.
+    // keep whatever the last written frame left them in. A player that was
+    // playing (paused included) sends kSequenceFinished to its owner.
     void stop(HorizonWorld& world, entt::entity player);
     // Move the playhead, clamped to [0, duration] (or wrapped, for a looping
     // player). Nothing between the old and the new time fires — the next span
@@ -87,6 +91,35 @@ namespace SequenceSystem
     // Point a binding slot at `target` for this player (entt::null clears the
     // override). Takes effect at once if it is playing.
     void bindSlot(HorizonWorld& world, entt::entity player, uint16_t slot, entt::entity target);
+    // The same by the binding's NAME, which is what a script author sees in the
+    // editor (the slot number never shows). Kept as a name until the bindings
+    // are resolved, because the sequence may still be streaming when a script
+    // binds before play(); a name the asset does not have is warned about then.
+    // Two bindings with one name: the first listed. A slot override by number
+    // wins over one by name for the same slot.
+    void bindSlotByName(HorizonWorld& world, entt::entity player, const std::string& name,
+                        entt::entity target);
+
+    // ── The end of a sequence ────────────────────────────────────────────────
+    // The notify a player sends its OWNER when the cutscene is over, through the
+    // same NotifyQueue as the event tracks — so Lua, Python, HorizonCode and the
+    // sync graph receive it with the handlers they already have
+    // (OnAnimationNotify), and no frontend needs a new one.
+    //
+    // Sent at the natural end (the last frame written, forwards or backwards),
+    // and on stop() of a player that was playing: a skip key is stop(), and
+    // "give the player the controls back" has to run after a skipped cutscene
+    // too. Not sent by a looping player (it never ends on its own), by stop()
+    // on a stopped one, or when the owner is destroyed (nobody to tell).
+    //
+    // Switching the owner off (InactiveComponent) stops the sequence: the camera
+    // goes back, the input lock lifts, the sounds stop, and this is sent. A
+    // paused-while-off cutscene would keep the camera and the controls held by
+    // an entity nothing can see. Switching it on again does not restart it.
+    //
+    // The name is reserved: an event track key with the same name is
+    // indistinguishable from the end.
+    inline constexpr const char* kSequenceFinished = "SequenceFinished";
 
     // ── Camera and input ─────────────────────────────────────────────────────
     // A playing (or paused) sequence whose camera-cut track has a live cut

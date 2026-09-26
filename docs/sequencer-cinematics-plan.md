@@ -508,6 +508,71 @@ Bewusst **nicht** in Schritt 4:
 - Look-Eingabe während einer Sequenz, die die Kamera nicht hält: Das Rig dreht dann weiter mit
   der Maus, auch mit `lockPlayerInput`. Die Sperre gilt der Steuerung, nicht dem Blick.
 
+### Stand nach Schritt 5 (Skript-API)
+
+Umgesetzt:
+
+- **Acht Registry-Zeilen** in der neuen Gruppe `sequence` (Kategorie „Sequence“), dünn über den
+  Transport aus Schritt 3: `play` (→ `started`), `pause`, `stop`, `setTime`, `getTime`,
+  `duration`, `isPlaying`, `bindSlot`. Die Entity ist immer der **Besitzer** (die Entity mit dem
+  Sequence Player), nie ein Akteur. Ohne Welt, ohne Spieler oder mit ungültigem Handle antworten
+  sie neutral (false/0), wie jede andere Zeile gegen einen leeren `Ctx`. `duration` kam zu den
+  sieben aus §3.5 dazu: `setTime` ohne die Länge ist Raten. `isPlaying` heißt „die Uhr läuft“,
+  pausiert ist also false.
+- Die drei Registry-Stellen: Anzeigenamen („Play Sequence“ …), `HcNodeDocs` für alle acht,
+  `"sequence"` in `isScriptGroup`. Damit gibt es `horizon.sequence.*` in Lua und Python ohne
+  eine Zeile Binding-Code. **Keine vierte Stelle:** `sequence` gehört wie `animator` nicht zur
+  C++-GameLogic-Schnittstelle (`HorizonGameServices.h` hat keine Tabelle dafür).
+- **`SequenceFinished`** (`SequenceSystem::kSequenceFinished`, ein reservierter Name) geht als
+  gewöhnliche Notify an den Besitzer, über dieselbe `NotifyQueue`, die direkt nach
+  `tickAnimation` zugestellt wird. Lua/Python hören es in `onAnimationNotify`, HorizonCode in
+  `OnAnimationNotify`, ohne neuen Handler und ohne neue Stelle in den Anwendungen. Es kommt
+  - beim natürlichen Ende (vorwärts und rückwärts), im selben Frame nach den Ereignissen des
+    letzten Frames und nach der Kamera-Rückgabe;
+  - bei `stop()` eines laufenden (auch pausierten) Spielers. **Entscheidung:** Eine Skip-Taste ist
+    `stop()`, und „Steuerung zurückgeben, nächstes Level laden“ muss auch nach einem Skip laufen.
+    `stop()` hat keine Queue, also merkt es sich das (`finishedPending`) und der nächste
+    `begin()` mit Sitzung sendet es (dasselbe Muster wie `stopAudio`);
+  - nicht von einer Schleife (sie endet nie von selbst), nicht bei `stop()` eines gestoppten
+    Spielers, nicht bei zerstörtem Besitzer.
+- **Deaktivierter Besitzer = `stop()`** (die offene Frage aus Schritt 4). `begin()` stoppt einen
+  Spieler, dessen Besitzer (oder ein Vorfahr) aus ist: Kamera zurück, Eingabesperre weg, Töne
+  aus, `SequenceFinished`. `play()` auf einem abgeschalteten Besitzer antwortet false. Wieder
+  einschalten startet nicht neu. Einen Vorläufer für „einfrieren und fortsetzen“ gibt es nicht
+  (die Animations-Treiber kennen `InactiveComponent` gar nicht), und eingefroren hielte ein
+  unsichtbares Objekt Kamera und Steuerung fest.
+- **`bindSlot` per Bindungsname statt Slot-Nummer (Abweichung von §3.5):** Der Autor sieht den
+  Namen, nie die Nummer, dasselbe Argument wie bei `animator.setLayerWeight`. Der Name bleibt
+  ein Name (`SequencePlayerComponent::namedOverrides`), bis die Bindungen aufgelöst werden,
+  weil die Sequenz beim Binden vor `play()` noch streamen kann. Doppelter Name: der zuerst
+  gelistete. Ein unbekannter Name wird dann gewarnt. Eine Überschreibung per Nummer
+  (`SequenceSystem::bindSlot`, C++) gewinnt gegen eine per Name für denselben Slot. Ziel `0`
+  (in dieser API „keine Entity“) hebt die Überschreibung auf; ein Ziel, das es nicht gibt, wird
+  mit Warnung abgelehnt statt als 0 gelesen (sonst stünde der Platzhalter aus dem Asset wieder
+  in der Szene).
+- **Parity-Fixture** `fxSequenceTransport` (`sequence_transport` in `HCGEN_CLASSES`): alle acht
+  Zeilen in Reihenfolge, dazu `OnAnimationNotify` mit `string.equals` auf „SequenceFinished“.
+- Tests (`tests/test_sequence_runtime.cpp`, jetzt 33 Fälle): Ende genau einmal vorwärts, rückwärts,
+  am Besitzer, keins aus einer Schleife; `stop()` laufend/pausiert sendet, gestoppt nicht, ohne
+  Sitzung erst im nächsten Frame mit Queue; abgeschalteter Besitzer gibt Kamera und Eingabe
+  zurück, `play()` verweigert, Einschalten startet nicht; `bindSlot` per Name vor dem Laden,
+  doppelter/unbekannter Name, Nummer schlägt Name; die Zeilen gegen echte Welt; **Lua von Anfang
+  bis Ende** (`horizon.sequence.play` startet, `onAnimationNotify` hört „Line“ und
+  „SequenceFinished“ über `AnimationNotifySystem::dispatch`). Der alte Fall „non-looping …
+  exactly once“ zählt jetzt vier Namen statt drei (das Ende kommt nach „Z“). Negativkontrolle:
+  ohne die Deaktivierungszeile und ohne `"sequence"` in `isScriptGroup` werden genau die drei
+  zugehörigen Fälle rot. Dazu `codegen parity: sequence_transport`.
+
+Bewusst **nicht** in Schritt 5:
+
+- Eine Zeile, die die Sequenz eines Spielers zur Laufzeit wechselt (`setSequence(path)`): Es
+  gibt keinen Fall, den ein zweiter Sequence Player nicht besser löst.
+- `isPaused`: pausiert und gestoppt unterscheidet `getTime` (gestoppt steht auf 0).
+- Handbuchseite „Cutscenes“ und MCP-Werkzeuge: Schritt 7. Die acht Knoten stehen im Knoten-Handbuch
+  (`HcNodeDocs`).
+- Der Python-Weg ist nicht eigens getestet: Er baut seine Tabelle aus derselben
+  `isScriptGroup`-Liste wie Lua, und der Lua-Fall geht ihn von Anfang bis Ende.
+
 ---
 
 ## 6. Bewusst außen vor (v1)
