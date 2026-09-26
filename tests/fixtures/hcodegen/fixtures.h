@@ -2746,6 +2746,42 @@ inline HE::hccg::ClassSource fxDatetimeDouble()
     return f.done("datetime_double");
 }
 
+// input_rumble: the three rumble rows, the only input rows that WRITE. Exec
+// calls with Float args and a Bool result; what they reach is the host's sink,
+// which the parity test installs, so both backends must hand it the same
+// numbers in the same order — and read back the same Ok.
+inline HE::hccg::ClassSource fxInputRumble()
+{
+    Fx f;
+    f.var("ok", PT::Bool);
+    f.var("okTriggers", PT::Bool);
+
+    const int ev = f.event("Buzz");
+    const int rum = f.engineCall("input.rumble");
+    { Node* n = f.g.findNode(rum);
+      n->pinDefaults[0] = Value::ofFloat(0.5f);
+      n->pinDefaults[1] = Value::ofFloat(1.0f);
+      n->pinDefaults[2] = Value::ofFloat(0.25f); }
+    f.exec(ev, rum);
+    const int s1 = f.setVar("ok", PT::Bool);
+    f.data(rum, 0, s1, 0);
+    f.exec(rum, s1);
+
+    const int trg = f.engineCall("input.rumbleTriggers");
+    { Node* n = f.g.findNode(trg);
+      n->pinDefaults[0] = Value::ofFloat(0.25f);
+      n->pinDefaults[1] = Value::ofFloat(0.75f);
+      n->pinDefaults[2] = Value::ofFloat(0.0f); }
+    f.exec(s1, trg);
+    const int s2 = f.setVar("okTriggers", PT::Bool);
+    f.data(trg, 0, s2, 0);
+    f.exec(trg, s2);
+
+    const int stop = f.engineCall("input.stopRumble");
+    f.exec(s2, stop);
+    return f.done("input_rumble");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -2761,7 +2797,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
-        fxDatetimeDouble(),
+        fxDatetimeDouble(), fxInputRumble(),
     };
 }
 

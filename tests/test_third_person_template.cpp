@@ -21,6 +21,9 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <Types/Enums.h>
+#include <Application/Input.h>
+#include <Application/InputMapping.h>
+#include <Application/InputAssets.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HcClassResolve.h>
 
@@ -324,6 +327,54 @@ TEST_CASE("third person: the character graph drives Move and Jump from the input
 	const bool wIsForward = (neg != std::string::npos) && (neg < at + 64);
 	CHECK_MESSAGE(wIsForward,
 	              "W is not bound to the negative (forward) end of the Move axis");
+}
+
+// The mapping asset has to survive the REAL loader, not just contain the right-
+// looking text: a source name the loader does not know falls back to Key, and a
+// Key row without keys is dropped without a word. That is how the template
+// shipped "GamepadAxis"/"MouseDeltaX" rows for three weeks — Jump worked on a
+// pad, the stick moved nothing, and Look had no binding at all.
+//
+// MUTATION: spell a stick row's source "GamepadAxis" again in ProjectManager.cpp.
+TEST_CASE("third person: the default mappings bind stick and mouse through the real loader")
+{
+	const auto root = makeProject("he_tps_mappings", "Starter");
+	ContentManager cm((root / "Content").string());
+	const InputMappingContextAsset* ctx =
+		cm.getInputMappingContext(cm.loadAsset("Input/DefaultMappings.hasset"));
+	REQUIRE(ctx != nullptr);
+	const std::string mappingJson = ctx->json;   // the pool may move on the next load
+
+	InputMapping m;
+	// Move, Look and Jump. Before the fix Look lost every row and was not bound.
+	CHECK(HE::applyInputMappingContext(m, mappingJson) == 3);
+
+	// Left stick right and up: Move follows, with up as NEGATIVE Y — the same
+	// forward the W key is signed for (see the sign-chain test above).
+	GamepadFrame pad;
+	pad.connected = true;
+	pad.axes[SDL_GAMEPAD_AXIS_LEFTX] = 1.0f;
+	pad.axes[SDL_GAMEPAD_AXIS_LEFTY] = -1.0f;
+	pad.axes[SDL_GAMEPAD_AXIS_RIGHTX] = 1.0f;
+	Input input;
+	input.SetGamepadFrame(pad);
+	m.tick(input);
+	float x = 0.0f, y = 0.0f;
+	m.axis2DValue("Move", x, y);
+	CHECK(x > 0.5f);
+	CHECK(y < -0.5f);
+	m.axis2DValue("Look", x, y);
+	CHECK(x > 0.5f);
+
+	// The mouse half of Look, with the pad at rest.
+	Input idle;
+	MouseFrame mouse;
+	mouse.dx = 12.0f;
+	mouse.dy = -3.0f;
+	m.tick(idle, mouse);
+	m.axis2DValue("Look", x, y);
+	CHECK(x > 0.0f);
+	CHECK(y < 0.0f);
 }
 
 // End to end, in a real world: spawn the character the controller's graph names

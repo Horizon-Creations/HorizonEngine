@@ -87,6 +87,10 @@ struct ITestServicesProbe : IGameLogic
     // Straight at the table, past the three named setters — the only way to
     // reach the out-of-range guard the wrappers cannot produce.
     virtual void  doSetModeRaw(int mode)       const = 0;
+    // Input v2: the one write-to-device entry.
+    virtual bool  doRumble(float low, float high, float duration)          const = 0;
+    virtual bool  doRumbleTriggers(float left, float right, float duration) const = 0;
+    virtual void  doStopRumble()               const = 0;
 
     // ── Content ─────────────────────────────────────────────────────────────
     // An AssetId is a VALUE (two integers), which is the point: it crosses the

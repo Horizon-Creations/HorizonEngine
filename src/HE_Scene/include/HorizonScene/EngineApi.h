@@ -2463,6 +2463,39 @@ namespace input {
     bool  gamepadButton(const std::string& name);
     float gamepadAxis(const std::string& name);
 
+    // ── Rumble: the one input row that WRITES to a device ────────────────────
+    // The reverse of setGamepad: Input (HE_Core) owns the pads and this layer
+    // cannot see it, so the app installs a sink once at startup and the rows
+    // below call through it. No sink → every call answers false, silently.
+    struct RumbleSink
+    {
+        std::function<bool(float low, float high, uint32_t durationMs)>   rumble;
+        std::function<bool(float left, float right, uint32_t durationMs)> rumbleTriggers;
+        std::function<void()>                                             stop;
+    };
+    void setRumbleSink(RumbleSink sink);   // app hook; RumbleSink{} uninstalls
+    // App hook, EVERY frame. Two different pauses, two different answers:
+    //   allowed    — "is a game running at all" (the editor: playing and not
+    //                halted at a breakpoint/pause button; the packaged game:
+    //                always). Going false STOPS the pads and refuses further
+    //                requests — a buzz started in PIE must not outlive Stop.
+    //   gamePaused — time.isPaused(). Going true STOPS the pads, but requests
+    //                made while paused still go through: a pause menu may
+    //                want a click to be felt, the explosion before it may not
+    //                keep shaking the hands of whoever is reading that menu.
+    // Starts closed (allowed=false), so an app that never opens it — the
+    // editor in edit mode — cannot be made to buzz by a graph preview.
+    void setRumbleGate(bool allowed, bool gamePaused);
+    // Script side. Intensities 0..1, `low` = heavy motor, `high` = light motor.
+    // `duration` in SECONDS like camera.playShake; <= 0 runs until stopRumble
+    // or the next call (at most ~65 s on a positive one). ONE effect per pad:
+    // a call replaces the running one, it does not mix — no handle for that
+    // reason. True if at least one pad took it. Trigger rumble answers false on
+    // pads without trigger motors (anything but Xbox One/Series and DualSense).
+    bool rumble(float low, float high, float duration);
+    bool rumbleTriggers(float left, float right, float duration);
+    void stopRumble();
+
     // ── Input ACTIONS: the project's InputAction assets, by name ─────────────
     // What the mapping contexts resolved this frame, keyed by the logical
     // action name (the asset's stem, "Jump"). The events (Input.<Action>.* in

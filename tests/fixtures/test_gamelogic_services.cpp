@@ -95,6 +95,9 @@ public:
 	void  doSetModeGameAndUI()         const override { he::input::setModeGameAndUI(); }
 	void  doSetModeRaw(int mode) const override
 	{ if (g_heInputServices) g_heInputServices->setMode(g_heInputServices->host, mode); }
+	bool  doRumble(float lo, float hi, float d)        const override { return he::input::rumble(lo, hi, d); }
+	bool  doRumbleTriggers(float l, float r, float d) const override { return he::input::rumbleTriggers(l, r, d); }
+	void  doStopRumble()                               const override { he::input::stopRumble(); }
 
 	he::AssetId doLoadAsset(const char* path) const override
 	{ return he::content::load(path ? path : ""); }

@@ -389,6 +389,37 @@ TEST_CASE("GameLogic services: input reaches a loaded C++ module through the C A
         CHECK(HE::api::input::mode() == HE::api::input::Mode::GameAndUI);
     }
 
+    SUBCASE("rumble reaches the host's sink, through the host's gate")
+    {
+        int rumbles = 0, triggers = 0, stops = 0;
+        float lo = -1.0f, hi = -1.0f;
+        uint32_t ms = 12345;
+        HE::api::input::setRumbleSink({
+            [&](float a, float b, uint32_t m) { ++rumbles; lo = a; hi = b; ms = m; return true; },
+            [&](float, float, uint32_t)       { ++triggers; return true; },
+            [&]()                             { ++stops; } });
+
+        // Gate shut (the editor outside play): the module is refused like a
+        // script would be — it has no way around the host's decision.
+        HE::api::input::setRumbleGate(false, false);
+        CHECK_FALSE(probe->doRumble(1.0f, 1.0f, 0.5f));
+        CHECK(rumbles == 0);
+
+        HE::api::input::setRumbleGate(true, false);
+        CHECK(probe->doRumble(0.25f, 0.75f, 0.5f));
+        CHECK(rumbles == 1);
+        CHECK(lo == doctest::Approx(0.25f));
+        CHECK(hi == doctest::Approx(0.75f));
+        CHECK(ms == 500);   // seconds on this side of the table, SDL ms on the other
+        CHECK(probe->doRumbleTriggers(0.5f, 0.5f, 0.1f));
+        CHECK(triggers == 1);
+        probe->doStopRumble();
+        CHECK(stops == 1);
+
+        HE::api::input::setRumbleGate(false, false);
+        HE::api::input::setRumbleSink({});
+    }
+
     loader.unload(rig.world);
     HE::api::input::clear();
     HE::api::input::setMode(HE::api::input::Mode::GameAndUI);
@@ -414,6 +445,18 @@ TEST_CASE("GameLogic services: a table with too small an ABI version is dropped 
     CHECK_FALSE(probe->physicsAvailable());
     CHECK(probe->saveAvailable());
     CHECK(probe->inputAvailable());
+
+    // Input grew (v2: rumble). A v1 input table from an older engine ends
+    // before the rumble pointers, so a module built against v2 must not take
+    // it — the wrappers would call through memory the engine never wrote.
+    HeEngineServices oldInput = rig.umbrella;
+    HeInputServices inputV1 = rig.input;
+    inputV1.abiVersion = HE_INPUT_ABI_VERSION - 1;
+    oldInput.input = &inputV1;
+    REQUIRE(loader.injectServices(&oldInput));
+    CHECK_FALSE(probe->inputAvailable());
+    CHECK_FALSE(probe->doRumble(1.0f, 1.0f, 0.1f));   // safe no-op, not a crash
+    CHECK(probe->saveAvailable());
 
     // A NEWER engine table is accepted: append-only growth makes the module's
     // struct a prefix of the engine's, so reading it is safe.

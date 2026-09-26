@@ -1233,6 +1233,43 @@ TEST_CASE("codegen parity: datetime_double (epoch seconds on Double pins, no nar
 	CHECK(std::count_if(p.interp.trace.begin(), p.interp.trace.end(), sawT) == 2);
 }
 
+TEST_CASE("codegen parity: input_rumble (the writing input rows reach the sink identically)")
+{
+	// A recording sink behind an open gate: what the pads would be told. Both
+	// backends fire into the SAME sink, one after the other.
+	struct Call { char kind; float a, b; uint32_t ms; };
+	std::vector<Call> calls;
+	HE::api::input::setRumbleSink({
+		[&](float a, float b, uint32_t ms) { calls.push_back({ 'r', a, b, ms }); return true; },
+		[&](float a, float b, uint32_t ms) { calls.push_back({ 't', a, b, ms }); return true; },
+		[&]()                              { calls.push_back({ 's', 0.0f, 0.0f, 0 }); } });
+	HE::api::input::setRumbleGate(true, false);
+
+	ParityPair p("fix/input_rumble");
+	p.fire("Buzz");   // traces + variables compared across backends
+
+	CHECK(p.var("ok").b);
+	CHECK(p.var("okTriggers").b);
+	// Interpreter first, compiled second, each: rumble, triggers, stop.
+	REQUIRE(calls.size() == 6);
+	for (size_t base : { size_t(0), size_t(3) })
+	{
+		INFO("backend starting at call ", base);
+		CHECK(calls[base].kind == 'r');
+		CHECK(calls[base].a == 0.5f);
+		CHECK(calls[base].b == 1.0f);
+		CHECK(calls[base].ms == 250);
+		CHECK(calls[base + 1].kind == 't');
+		CHECK(calls[base + 1].a == 0.25f);
+		CHECK(calls[base + 1].b == 0.75f);
+		CHECK(calls[base + 1].ms == 0);   // 0 s = until stopped
+		CHECK(calls[base + 2].kind == 's');
+	}
+
+	HE::api::input::setRumbleGate(false, false);
+	HE::api::input::setRumbleSink({});
+}
+
 TEST_CASE("codegen parity: engine_exec_cached (one dispatch, cached reads, save round-trip)")
 {
 	ParityPair p("fix/engine_exec_cached");

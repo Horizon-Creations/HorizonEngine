@@ -1019,17 +1019,23 @@ bool scaffoldThirdPersonProject(const std::string& projectRoot)
 	//
 	// That also makes the gamepad binding the plain one: SDL's left stick already
 	// reports negative when pushed up, which is forward, so it needs no flip.
+	//
+	// Source names are the loader's (InputAssets.cpp axisSourceFromName), and
+	// it is not forgiving: an unknown one falls back to Key, and a Key row with
+	// no keys is dropped silently. "GamepadAxis"/"MouseDeltaX" shipped here for
+	// three weeks and bound nothing; test_third_person_template now loads this
+	// through the real loader.
 	constexpr const char* kMappings = R"JSON({"entries":[
  {"action":"Input/Move.hasset",
   "axesX":[{"source":"Key","positive":"D","negative":"A","scale":1.0},
-           {"source":"GamepadAxis","axis":"leftx","scale":1.0}],
+           {"source":"GamepadLeftX","scale":1.0}],
   "axesY":[{"source":"Key","positive":"W","negative":"S","scale":-1.0},
-           {"source":"GamepadAxis","axis":"lefty","scale":1.0}]},
+           {"source":"GamepadLeftY","scale":1.0}]},
  {"action":"Input/Look.hasset",
-  "axesX":[{"source":"MouseDeltaX","scale":1.0},
-           {"source":"GamepadAxis","axis":"rightx","scale":1.0}],
-  "axesY":[{"source":"MouseDeltaY","scale":1.0},
-           {"source":"GamepadAxis","axis":"righty","scale":1.0}]},
+  "axesX":[{"source":"MouseX","scale":1.0},
+           {"source":"GamepadRightX","scale":1.0}],
+  "axesY":[{"source":"MouseY","scale":1.0},
+           {"source":"GamepadRightY","scale":1.0}]},
  {"action":"Input/Jump.hasset","keys":["Space"],"gamepadButtons":["a"]}
 ]})JSON";
 	ok &= writeChunkedAsset(content / "Input" / "DefaultMappings.hasset",

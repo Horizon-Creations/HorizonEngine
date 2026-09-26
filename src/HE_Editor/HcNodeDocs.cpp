@@ -1113,6 +1113,18 @@ namespace
 	{ "input.gamepadAxis",
 	  "A gamepad axis from -1 to 1, deadzone already applied. Names are SDL's: "
 	  "\"leftx\", \"lefty\", \"righttrigger\"." },
+	{ "input.rumble",
+	  "Vibrate every connected gamepad. Low is the heavy motor (explosions, "
+	  "engines), high the light one (footsteps, ticks), both 0 to 1. Duration in "
+	  "seconds; 0 or less keeps going until Stop Gamepad Rumble. A new call "
+	  "replaces the running rumble, it does not add to it. Stops by itself when "
+	  "the game pauses or play mode ends. Ok is false when no pad could rumble." },
+	{ "input.rumbleTriggers",
+	  "Vibrate the trigger motors (Xbox One/Series, DualSense only; elsewhere Ok "
+	  "is false and nothing happens). Left and right 0 to 1, duration as for "
+	  "Rumble Gamepad. Independent of the main motors." },
+	{ "input.stopRumble",
+	  "Stop all gamepad rumble at once, main motors and triggers, on every pad." },
 	{ "input.actionDown",
 	  "Whether an input action (by the name of its InputAction asset, \"Jump\") "
 	  "is held this frame. The polling twin of the Input.<Action>.Pressed event: "
