@@ -16,7 +16,8 @@ with region-dirty regeneration, and GPU-instanced foliage with wind animation."
 
 Die 50 % lassen sich an der ursprünglichen Phase-2-Liste aus dem Landscape-Plan (Masterplan
 Forts. 19) festmachen: *Heightmap-Import, Sculpt-Brushes, Material-Splatting, Chunking/LOD,
-Tessellation, Kollision*. Davon ist heute **alles außer Tessellation da**. Der Wert ist also zu
+Tessellation, Kollision*. Davon ist heute **alles außer Tessellation da** (Nachtrag: Tessellation
+ist seit Schritt 2 ebenfalls da, siehe Abschnitt 6). Der Wert ist also zu
 niedrig, und die Beschreibung ist gleichzeitig **zu hoch**: „foliage with wind animation" gibt es
 nicht (siehe 3.3). Beides gehört korrigiert (eigener Schritt, siehe 5).
 
@@ -106,7 +107,7 @@ fünf Backends soll.
 | Erosion / Noise-/Stamp-Pinsel | nur die sechs Grund-Ops | M |
 | LOD-Geomorphing | Pop beim LOD-Wechsel, Skirts verdecken nur Risse | M |
 | Größe | Auflösung hart auf 1024 Verts/Seite (`TerrainMeshGenerator.cpp:68`), keine Kachelung/Streaming, kein Naht-Abgleich zwischen Nachbar-Terrains | L |
-| Tessellation / Displacement | nicht vorhanden (war Phase-2-Punkt) | L |
+| Tessellation / Displacement | **umgesetzt in Schritt 2** (siehe 6) | – |
 | Splines/Straßen, Wasser | nicht vorhanden (Lückenaudit 4.6 nennt sie) | L |
 
 ## 4. Die GI-Probe-Grid-Lücke, neu eingeordnet
@@ -165,3 +166,41 @@ Memory `ao-gi-roadmap` erst nach dem Zeugen umschreiben.
 Nicht hier, sondern Querverweis: D3D12/Vulkan-Paint (3.2, Zweig `backend-parity-p1` / Thema 78),
 DDGI-Grid-Skalierung (4, neues Rendering-Thema). Die Autoring-Lücken aus 3.4 jenseits von Schritt 4
 sind Backlog, keine Voraussetzung für „fertig" im Sinne der Roadmap-Beschreibung.
+
+## 6. Nachtrag Schritt 2: Tessellation (umgesetzt)
+
+**Entscheidung:** CPU-Tessellation als zusätzliche Stufe vor LOD0, **keine** Hardware-Tessellation
+(Hull/Domain, TCS/TES, Metal-Tess-Faktoren). Die Terrain-Chunks sind gewöhnliche Meshes durch die
+generische Material-Pipeline; ein Patch-Pfad hätte pro Backend eine eigene Pipeline und einen neuen
+Codegen-Zweig im Material-System gebraucht, und hier ist nur Metal laufzeitprüfbar. So rendert die
+feinere Stufe auf allen fünf Backends ohne Renderer-Änderung.
+
+Was es tut:
+
+- `TerrainComponent`: `tessellationFactor` (1 = aus, Default; 2 oder 4), `tessellationDistance`
+  (Kamera → Chunk-Mitte, wie die LOD-Stufen), `displacementTexture`, `displacementStrength`
+  (Schwarz→Weiß in Metern, Mittelgrau = 0), `displacementTiling` (0 = folgt `uvTiling`).
+  Serialisiert als Gruppe nur, wenn benutzt; alte Szenen speichern byte-gleich.
+- `generateTerrainChunkMeshTessellated` (`TerrainMeshGenerator.cpp`): Höhe per Catmull-Rom zwischen
+  den Samples (trifft jedes Sample exakt, also stimmt jede LOD0-Ecke), plus Displacement (bilinear,
+  wiederholend). Normalen = die LOD0-Normalen, gekippt um den Displacement-Gradienten, dadurch ohne
+  Displacement keine Lichtkante zum LOD0-Nachbarn. Skirt um halbe Displacement-Stärke tiefer.
+- `TerrainSystem::updateTessellation` (in `SceneSystems::tickWorld` vor `LODSystem`): baut die Stufe
+  für Chunks innerhalb 1,25 × Distanz, gibt sie jenseits 1,5 × wieder ab (Hysterese), höchstens
+  2 Builds pro Tick, höchstens 16 verfeinerte Chunks pro Terrain (nächste zuerst). Die Stufe ist
+  `LODComponent::levels[0]` mit `maxDistance = tessellationDistance`, LODSystem wählt sie wie jede
+  andere. Mesh-UUID einmal pro Chunk registriert, beim Abgeben geleert statt entladen; Meshes
+  zerstörter Chunks (Undo, Gitterwechsel, gelöschtes Terrain) werden entladen.
+- Sculpten unter der Kamera baut die Stufe im selben Tick an Ort und Stelle neu (kein Rückfall auf
+  LOD0 für ein Bild).
+- Inspector: Abschnitt „Tessellation" (Faktor, Distanz, Displacement-Slot, Stärke, Tiling) mit
+  Hilfetexten; MCP-`terrain_info` meldet Faktor und Stärke.
+- Tests: `tests/test_terrain_tessellation.cpp`.
+
+Speicher: Faktor 4 = 257² Vertices pro Chunk (~3,5 MB mit Indizes), Deckel 16 → ~60 MB pro Terrain.
+
+**Bewusste Grenzen:** Kollision (Jolt-Heightfield), Navigation und Foliage-Höhe lesen weiter das
+Höhenfeld, liegen also bis zur halben Displacement-Stärke neben der sichtbaren Oberfläche.
+Displacement ist Detail, nicht Landform. Die Umschaltung Stufe ↔ LOD0 ist ein harter Wechsel wie
+zwischen den übrigen LODs (kein Geomorphing, siehe 3.4). Hot-Reload der Displacement-Textur wird
+erst beim nächsten Neubau der Chunks sichtbar. Visuell auf echter Hardware nicht geprüft.

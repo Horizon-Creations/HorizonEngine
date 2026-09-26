@@ -3006,6 +3006,34 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			changed |= Row::dragFloat("LOD Distance##tc", &t->lodDistanceScale, 0.05f, 0.1f, 20.0f, "%.2f x"); trackEdit();
 			hint("Higher = keep full detail farther from the camera.");
 
+			// Tessellation: a level finer than LOD0 for the chunks near the
+			// camera, smooth between the height samples, plus a detail map's
+			// displacement. Any change rebuilds the chunks (changed → dirty).
+			ImGui::SeparatorText("Tessellation");
+			{
+				static const char* const kFactors[] = { "Off", "2x", "4x" };
+				int f = t->tessellationFactor >= 4 ? 2 : (t->tessellationFactor >= 2 ? 1 : 0);
+				if (Row::combo("Tessellation##tc", &f, kFactors, 3))
+					{ t->tessellationFactor = f == 2 ? 4 : (f == 1 ? 2 : 1); changed = true; }
+				trackEdit();
+				ImGui::BeginDisabled(t->tessellationFactor <= 1);
+				changed |= Row::dragFloat("Tess Distance##tc", &t->tessellationDistance,
+				                          1.0f, 1.0f, 2000.0f, "%.0f m"); trackEdit();
+				if (EditorWidgets::assetDropSlot(ctx, "Displacement", t->displacementTexture,
+				        HE::AssetType::Texture, "tcdisp",
+				        "(none — smooth only)", "texture",
+				        /*showClear=*/true) != EditorWidgets::SlotAction::None)
+					changed = true;
+				EditorWidgets::helpForKey("Terrain/Displacement");
+				changed |= Row::dragFloat("Disp. Strength##tc", &t->displacementStrength,
+				                          0.01f, 0.0f, 10.0f, "%.2f m"); trackEdit();
+				changed |= Row::dragFloat("Disp. Tiling##tc", &t->displacementTiling,
+				                          0.25f, 0.0f, 4096.0f,
+				                          t->displacementTiling > 0.0f ? "%.2f x" : "= texture tiling");
+				trackEdit();
+				ImGui::EndDisabled();
+			}
+
 			// Noise is a one-time creation input: it is baked into editable
 			// heights when the landscape is created, so these are read-only here
 			// (shown for reference) and can no longer change the terrain.

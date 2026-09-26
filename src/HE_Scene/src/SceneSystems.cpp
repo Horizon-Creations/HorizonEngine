@@ -141,6 +141,9 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     // reason everything else is: LOD swaps meshes, and nothing that produces one
     // should run after it.
     { HE_PROFILE_SCOPE_N("RopeTrail");      RopeTrailSystem::update(world, cm, renderer, cameraPos, dt); }
+    // The refined terrain level near the camera: it becomes levels[0] of the
+    // chunk's LOD chain, so it too has to land before LOD picks.
+    { HE_PROFILE_SCOPE_N("TerrainTess");    TerrainSystem::updateTessellation(world, cm, renderer, cameraPos); }
     { HE_PROFILE_SCOPE_N("LOD");            LODSystem::update(world, cameraPos); }
 
     pushProfilerSceneCounters(world, cm, gpuParticles);

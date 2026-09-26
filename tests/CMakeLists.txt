@@ -78,6 +78,9 @@ add_executable(he_tests
     test_rendergraph.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # The refined level near the camera: Catmull-Rom between the samples,
+    # displacement, the build/release life cycle and its budget.
+    test_terrain_tessellation.cpp
     # Greyscale heightmap → heights: the pixel path, the texture and file
     # wrappers (8/16-bit PGM, .r16), orientation and the down-sampling box.
     test_terrain_heightmap.cpp
