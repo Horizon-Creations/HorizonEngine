@@ -7,6 +7,16 @@ struct D3D12RendererImpl;
 class D3D12Renderer : public IRenderer
 {
 public:
+    // Frames in flight: swapchain buffer count AND the depth of the per-frame
+    // allocator/fence ring (k_frameCount in the .cpp is defined from this).
+    // Render() only waits for the fence of the slot it is about to reuse, so up
+    // to this many frames can still be executing on the GPU. Anything that keeps
+    // its own per-frame ring on our queue without a fence of its own (ImGui's DX12
+    // backend: upload-heap VB/IB picked by FrameIndex % NumFramesInFlight) must be
+    // sized from this constant; a smaller ring gets overwritten while the GPU is
+    // still reading it (Thema 97: UI flicker on fast mouse moves).
+    static constexpr uint32_t kFramesInFlight = 3;
+
     D3D12Renderer();
     ~D3D12Renderer();
     void Initialize(HE::Window* window) override;

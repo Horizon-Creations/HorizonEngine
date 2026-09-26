@@ -154,3 +154,22 @@ muss aber nicht. Ein leerer Debug-Layer-Log widerlegt H1 also nicht.
 - H2 separat: den freigegebenen Viewport-SRV-Slot erst nach `k_frameCount` Frames zurück in
   die Freiliste geben (Muster wie `m_freeSlotPending`), oder den Slot behalten und nur den
   Deskriptor neu schreiben, nachdem alle Frames fertig sind.
+
+## Umsetzung (Schritt 3)
+
+H1 behoben, H2 bewusst nicht angefasst (nachrangig, eigenes Bild beim Splitter-Ziehen).
+
+- `D3D12Renderer.h`: öffentliche Konstante `D3D12Renderer::kFramesInFlight = 3`, mit
+  Kommentar zur Race-Condition.
+- `D3D12Renderer.cpp`: `k_frameCount = D3D12Renderer::kFramesInFlight`, kein eigenes Literal mehr.
+- `EditorApplication.cpp`: `dx12Info.NumFramesInFlight = D3D12Renderer::kFramesInFlight`
+  statt der festen `2`, ebenfalls mit Kommentar.
+
+Beide Zahlen haben jetzt eine einzige Quelle. D3D11, Vulkan und die ImGui-Version sind unverändert.
+
+**Nicht gebaut und nicht verifiziert.** Alle geänderten Zeilen liegen hinter `_WIN32` bzw.
+`HE_BACKEND_D3D12` und werden auf dem Mac nicht übersetzt. Ein macOS-Bau sagt über diesen
+Fix also nichts aus. Geprüft ist nur: Der Header und die beiden Ausdrücke gehen durch
+`clang++ -std=c++20 -fsyntax-only` (mit Negativkontrolle per `static_assert`). Offen und nur
+auf Windows machbar: Bau mit D3D12, danach der längere manuelle Test (schnelle Mausbewegung
+über viele Steuerelemente, Tooltips) aus dem Unterscheidungstest oben.

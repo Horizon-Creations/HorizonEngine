@@ -69,7 +69,9 @@ using Microsoft::WRL::ComPtr;
 // buffer to free, which shows up as uneven/juddery viewport motion. A 3rd buffer gives
 // the CPU enough slack to pace frames smoothly. Used for swapchain buffers AND frames
 // in flight (allocators/fences/per-frame CBs) — both benefit.
-static constexpr UINT k_frameCount = 3;
+// The value lives in the header (D3D12Renderer::kFramesInFlight) so the editor's
+// ImGui DX12 init reads the same number; never set a literal here.
+static constexpr UINT k_frameCount = D3D12Renderer::kFramesInFlight;
 // Per-object CB ring capacity. Shared by the shadow pass and the geometry pass
 // of one frame, and the shadow pass draws each cascade's caster set (up to
 // three culls of the scene) plus up to 16 local (point/spot) atlas layers, so
