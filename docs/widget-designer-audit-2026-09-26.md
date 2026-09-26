@@ -191,3 +191,39 @@ Screenshots oben begründen:
 
 **Schritt 6 – Vollbau + volle Testsuite**, dazu die Screenshots aus Schritt 5 noch einmal
 erzeugen.
+
+## Schritt 5: Details-Panel, Vorher/Nachher (wartet auf Rückmeldung)
+
+Beide Seiten stammen aus demselben Headless-Test (`tests/test_widget_designer_ui.cpp`, echter
+`UIEditorPanel::render`) bei 1280×1600. „Vorher“ ist der Stand nach Schritt 3/4, also schon mit Flip.
+
+| Vorher | Nachher (Standardzustand) |
+|---|---|
+| ![vorher](img/widget-designer-details-2026-09-26/before-image-selected.png) | ![nachher](img/widget-designer-details-2026-09-26/after-image-selected.png) |
+
+Nachher mit allen Abschnitten offen (1280×2300):
+[after-image-all-open.png](img/widget-designer-details-2026-09-26/after-image-all-open.png).
+Nichts ausgewählt: [vorher](img/widget-designer-details-2026-09-26/before-nothing-selected.png),
+[nachher](img/widget-designer-details-2026-09-26/after-nothing-selected.png).
+
+Was sich geändert hat:
+
+- **Einklappbare Abschnitte** (`CollapsingHeader`) statt `SeparatorText`. Offen: Typ-Abschnitt,
+  Layout, Theme, Events. Zu: Surface, Material, Interaction. ImGui merkt sich den Zustand pro
+  Abschnitt, einmal zugeklappt bleibt er für jedes Element zu.
+- **Reihenfolge nach Fragen statt nach Klassenhierarchie:** Name → Abschnitt mit dem Typnamen
+  („Image“: Texture, Tint, Flip, 9-Slice) → Layout → Theme → Surface → Material → Interaction →
+  Events. Texture, Font, Listen-Zeile und Komponenten-Parameter stehen alle im Typ-Abschnitt.
+- **9-Slice** als eingeklappter Unterknoten mit einer Zeile „Margins (L, T, R, B)“. Die Überschrift
+  zeigt „off“ oder die vier Werte, ohne Textur ist er gesperrt. Die vier Properties bleiben einzeln
+  (Graphen, JSON).
+- **Flip H/V** in einer Zeile.
+- **Eine Label-Stellung:** Name über dem Feld (Hausregel aus `EditorWidgets::Row`, wie im
+  Szenen-Inspector). Der Theme-Rollen-Knopf („Literal“) steht rechts auf der Namenszeile. Checkboxen
+  behalten das Label rechts. Nichts wird mehr am Rand abgeschnitten.
+- Nebenbei: Canvas-Width war nie ein Undo-Schritt (nur Height wurde geprüft), behoben. Der
+  „Widget“-Pfad einer Komponente stand als Textfeld über den Parametern, entfernt (der Code-Kommentar
+  sagt seit jeher, dass er dort nicht hingehört). „added“ neben Event-Knöpfen lief über den Rand.
+
+Offen und bewusst nicht gemacht: Details-Spalte in der Breite ziehbar (Splitter). Label-links
+(Unreal-Stil, dichter) wäre die Alternative zur Label-oben-Regel, falls die Spalte zu lang wirkt.

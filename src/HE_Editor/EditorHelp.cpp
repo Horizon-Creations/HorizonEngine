@@ -4019,6 +4019,12 @@ namespace
 	  "The height the layout is designed for. Together with the width it fixes "
 	  "the aspect the anchors were placed against.",
 	  "", "ui#designer" },
+	{ "Canvas/Preview size", "",
+	  "Which screen the designer shows this canvas on. Authored size draws it as "
+	  "designed; any other entry resolves it for that screen through the Scale mode "
+	  "above, so anchors and stretching can be checked without running the game. "
+	  "A view setting only, never saved with the widget.",
+	  "", "ui#designer" },
 	{ "Canvas/Scale", "Canvas Scale",
 	  "How this canvas meets a screen that is not exactly the size above. Stretch "
 	  "fits each axis separately: the canvas always covers the screen exactly, "
@@ -4947,6 +4953,22 @@ namespace
 	{ "UI Widget/Bar Color", "",
 	  "What a scrollbar's thumb is filled with. There is no track behind it — an "
 	  "empty groove is furniture nobody reads.",
+	  "", "ui#elements" },
+	{ "UI Widget/9-Slice", "",
+	  "Stretches a picture without stretching its border: the four margins cut the "
+	  "texture into a frame and a centre, the corners keep their size and only the "
+	  "edges and the centre grow with the box. The heading shows the margins, or "
+	  "\"off\" while all four are 0, which draws the picture whole.",
+	  "", "ui#elements" },
+	{ "UI Widget/Margins (L, T, R, B)", "",
+	  "The 9-slice margins, left, top, right, bottom, counted in the texture's own "
+	  "pixels (the source size is shown under the Texture slot). 0 on every side "
+	  "switches slicing off. Graphs set them one at a time, as Slice Left, Slice "
+	  "Top, Slice Right and Slice Bottom.",
+	  "", "ui#elements" },
+	{ "UI Widget/Slice Fill Centre", "",
+	  "Whether the middle piece of a 9-sliced picture is drawn. Off leaves only the "
+	  "frame, for a border around content that brings its own background.",
 	  "", "ui#elements" },
 	{ "UI Widget/Flip Horizontal", "",
 	  "Mirrors the image left to right inside its box, the way the finished picture "

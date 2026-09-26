@@ -166,20 +166,40 @@ namespace
 	{
 		AppContext& ctx;
 		std::string assetPath;   // absolute, the key the panel's state is held by
+		int         height = H;  // taller for the shot with every section open
 
 		// One frame of the designer filling the whole screen. Returns the id
 		// ImGui says the pointer is on; rasterises into `shot` when given one.
 		ImGuiID frame(bool left, he_ui::Image* shot = nullptr)
 		{
 			ImGuiIO& io = ImGui::GetIO();
+			io.DisplaySize = ImVec2(float(W), float(height));
 			io.AddMouseButtonEvent(ImGuiMouseButton_Left, left);
 			ImGui::NewFrame();
-			UIEditorPanel::render(ctx, assetPath, ImVec2(0.0f, 0.0f), ImVec2(float(W), float(H)));
+			UIEditorPanel::render(ctx, assetPath, ImVec2(0.0f, 0.0f),
+			                      ImVec2(float(W), float(height)));
 			EditorWidgets::drawQueuedHelp();
 			const ImGuiID hovered = ImGui::GetHoveredID();
 			ImGui::Render();
-			if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, H);
+			if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, height);
 			return hovered;
+		}
+
+		// Open the Details panel's folding sections by name, the way a click on
+		// each header would: ImGui keeps a header's open state in its window's
+		// storage, under the label hashed into the window's id. `inside` names
+		// the section a nested node sits in (the Image's 9-Slice sits in
+		// "Image", which pushes its own id scope).
+		bool openSection(const char* label, const char* inside = nullptr)
+		{
+			for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+				if (std::strstr(w->Name, "##uiw_details"))
+				{
+					const ImGuiID seed = inside ? ImHashStr(inside, 0, w->ID) : w->ID;
+					w->StateStorage.SetInt(ImHashStr(label, 0, seed), 1);
+					return true;
+				}
+			return false;
 		}
 
 		// The id a row of the hierarchy tree carries: its label hashed into the
@@ -270,6 +290,17 @@ TEST_CASE("ui shot: widget designer — the Details panel as it is (Thema 92)")
 		const he_ui::Image img = d.shoot("widget-designer-image-details");
 		REQUIRE(img.valid());
 		CHECK(img.inkedPixels(20, 18, 15) > 10000);
+
+		// …and with every section unfolded, so the regrouping can be judged
+		// as a whole and not only by what is open on arrival. Taller, because
+		// that is the point: this is the length the folding saves.
+		for (const char* s : { "Surface", "Material", "Interaction", "Events" })
+			REQUIRE(d.openSection(s));
+		REQUIRE(d.openSection("###nineslice", "Image"));
+		d.height = 2300;
+		const he_ui::Image all = d.shoot("widget-designer-image-details-all-open");
+		REQUIRE(all.valid());
+		CHECK(all.inkedPixels(20, 18, 15) > 10000);
 	}
 
 	UIEditorPanel::forget(d.assetPath);

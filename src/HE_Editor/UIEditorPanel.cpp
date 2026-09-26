@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
 #include <cmath>
 #include <optional>
 #include <cstring>
@@ -746,13 +747,54 @@ bool isUiDomainMaterial(AppContext& ctx, const std::string& relPath)
 	return !m || m->domain == static_cast<uint8_t>(HE::MatDomain::UserInterface);
 }
 
+// ── One label position for the whole Details panel ──────────────────────────
+// The panel used three: above the field (Name, Tab index), left of it (the
+// asset slots, the anchor grid) and ImGui's own right-hand label beside every
+// Drag/Combo, which in 300 px cut "Corner Radius" and "Hover cursor" off at the
+// edge (Thema 92 audit). Every row now goes the EditorWidgets::Row way: the name
+// on its own line, the control at full width underneath. Checkboxes keep their
+// label beside the box, which is what a checkbox looks like everywhere.
+//
+// This is the half of a Row for controls Row does not wrap — a combo opened by
+// hand, a greyed-out value with a theme button on the name's line. The caller
+// draws the control next, "##"-labelled and SetNextItemWidth(-FLT_MIN).
+// scripts/editor_help_audit.py scans calls to this by name, so a label written
+// here is counted like any other.
+void detailLabel(const char* label)
+{
+	const char* hash = std::strstr(label, "##");
+	ImGui::TextUnformatted(label, hash);
+	EditorWidgets::helpForLabel(label);
+}
+
+// A collapsible section of the Details panel. Replaces the SeparatorText rules,
+// which could not be folded: a selected Image ran past the bottom of a 1600 px
+// screen. ImGui keeps each header's open state per label in this window, so a
+// section folded once stays folded for every element that has one — which is
+// what "I never need Surface" means. The body gets its own id scope, because a
+// CollapsingHeader opens none and "Width" is a row in more than one section.
+struct DetailSection
+{
+	bool open;
+	DetailSection(const char* label, bool defaultOpen)
+	{
+		ImGui::Spacing();
+		open = ImGui::CollapsingHeader(label,
+			defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None);
+		EditorWidgets::helpForLabel(label);
+		ImGui::PushID(label);
+	}
+	~DetailSection() { ImGui::PopID(); }
+	DetailSection(const DetailSection&) = delete;
+	DetailSection& operator=(const DetailSection&) = delete;
+};
+
 bool assetSlot(AppContext& ctx, const char* label, std::string& path,
                HE::AssetType wantType, const char* idSuffix,
                bool (*accept)(AppContext&, const std::string&) = nullptr)
 {
 	bool changed = false;
-	ImGui::TextUnformatted(label);
-	ImGui::SameLine(80.0f);
+	detailLabel(label);
 	const std::string shown = path.empty()
 		? "(none)" : std::filesystem::path(path).stem().string();
 	ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
@@ -987,8 +1029,8 @@ void drawTextAlignGrid(UIElement& e, bool& edit, bool& committed)
 	const int curH = e.getProp("Align H").i;
 	const int curV = e.getProp("Align V").i;
 
+	// Name above the grid, like every other row of the panel.
 	ImGui::TextUnformatted("Text Align");
-	ImGui::SameLine(80.0f);
 	ImGui::BeginGroup();
 	{
 		const float cell = 22.0f;
@@ -1037,7 +1079,8 @@ void drawTextAlignGrid(UIElement& e, bool& edit, bool& committed)
 }
 
 // ── "Where does this colour come from?" ──────────────────────────────────────
-// A small button after every colour row: unbound it says "Literal", bound it
+// A small button on every colour row, at the right end of the line that carries
+// the row's name: unbound it says "Literal", bound it
 // names the theme role, and the swatch beside it goes read-only because the
 // theme owns that value now (docs/he-apps-plan.md D1).
 //
@@ -1073,10 +1116,18 @@ void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
 		for (const std::string& p : HE::uiThemeDecidedProps(e, *g_previewTheme))
 			if (p == prop) { styled = true; break; }
 
-	ImGui::SameLine();
-	ImGui::PushID((prop + "##role").c_str());
 	const char* label = locked ? "Locked" : bound.empty() ? (styled ? "Style" : "Literal")
 	                                                      : bound.c_str();
+	// On the NAME's line, flush right — called between detailLabel and the
+	// control. The control underneath takes the whole width, so a button after
+	// it would land past the panel's edge.
+	ImGui::SameLine();
+	{
+		const float w = ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+		const float x = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - w;
+		if (x > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(x);
+	}
+	ImGui::PushID((prop + "##role").c_str());
 	if (ImGui::SmallButton(label)) ImGui::OpenPopup("##rolepick");
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip(
@@ -1120,6 +1171,22 @@ void drawThemeRoleButton(UIElement& e, const std::string& prop, bool& committed,
 	ImGui::PopID();
 }
 
+// A colour the theme may decide: the name with its role button on one line, the
+// swatch underneath, greyed while the theme holds it. The shape all four colour
+// rows of the Surface section had written out by hand. The label comes first so
+// scripts/editor_help_audit.py can read it like any other row's.
+void drawBoundColor(const char* label, UIElement& n, glm::vec4& c, bool& edit, bool& committed)
+{
+	detailLabel(label);
+	drawThemeRoleButton(n, label, committed);
+	ImGui::BeginDisabled(themeDecides(n, label));
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	edit |= ImGui::ColorEdit4((std::string("##") + label).c_str(), &c.r);
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	ImGui::EndDisabled();
+	EditorWidgets::helpForLabel(label);
+}
+
 // ── Surface style ("Schicht 0", docs/he-apps-plan.md D5) ─────────────────────
 // Rounding, border and gradient live on the BASE, not in any type's property
 // table, so the generic loop below never saw them and until now they could only
@@ -1137,7 +1204,7 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	// borrows the caller's is filed under whichever function happens to sit
 	// above it in this file.
 	HE::Ed::Help::Scope helpScope("UI Widget");
-	ImGui::SeparatorText("Surface");
+	// The heading is the caller's: a folding section of the Details panel.
 
 	// Expanded either because the author asked, or because the values ALREADY
 	// differ — collapsing that into one field would silently throw three of
@@ -1156,12 +1223,14 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 	{
 		const bool radiusBound = themeDecides(n, "Corner Radius");
 		float r = n.cornerRadius.x;
+		detailLabel("Corner Radius");
+		drawThemeRoleButton(n, "Corner Radius", committed, ThemeBindKind::SizeStep);
 		ImGui::BeginDisabled(radiusBound);
-		if (ImGui::DragFloat("Corner Radius", &r, 0.5f, 0.0f, 10000.0f))
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		if (ImGui::DragFloat("##Corner Radius", &r, 0.5f, 0.0f, 10000.0f, "%.2f"))
 		{ n.cornerRadius = glm::vec4(std::max(0.0f, r)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		ImGui::EndDisabled();
-		drawThemeRoleButton(n, "Corner Radius", committed, ThemeBindKind::SizeStep);
 		EditorWidgets::helpForLabel("Corner Radius");
 	}
 	else
@@ -1185,37 +1254,20 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 		EditorWidgets::helpForLabel("Per corner");
 	}
 
-	if (ImGui::DragFloat("Border Width", &n.borderWidth, 0.25f, 0.0f, 1000.0f))
+	if (EditorWidgets::Row::dragFloat("Border Width", &n.borderWidth, 0.25f, 0.0f, 1000.0f))
 	{ n.borderWidth = std::max(0.0f, n.borderWidth); edit = true; }
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Border Width");
 	if (n.borderWidth > 0.0f)
-	{
-		{
-			const bool bound = themeDecides(n, "Border Color");
-			ImGui::BeginDisabled(bound);
-			edit |= ImGui::ColorEdit4("Border Color", &n.borderColor.r);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::EndDisabled();
-			drawThemeRoleButton(n, "Border Color", committed);
-		}
-		EditorWidgets::helpForLabel("Border Color");
-	}
+		drawBoundColor("Border Color", n, n.borderColor, edit, committed);
 
 	if (EditorWidgets::checkbox("Gradient", &n.gradient)) committed = true;
 	if (n.gradient)
 	{
-		{
-			const bool bound = themeDecides(n, "Gradient Color");
-			ImGui::BeginDisabled(bound);
-			edit |= ImGui::ColorEdit4("Gradient Color", &n.gradientColor.r);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::EndDisabled();
-			drawThemeRoleButton(n, "Gradient Color", committed);
-		}
-		EditorWidgets::helpForLabel("Gradient Color");
+		drawBoundColor("Gradient Color", n, n.gradientColor, edit, committed);
 		static const char* kShapes[] = { "Linear", "Radial" };
-		const bool shapeOpen = ImGui::BeginCombo("Gradient Shape",
+		detailLabel("Gradient Shape");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		const bool shapeOpen = ImGui::BeginCombo("##Gradient Shape",
 			kShapes[n.gradientShape == 1 ? 1 : 0]);
 		if (!shapeOpen) EditorWidgets::helpForLabel("Gradient Shape");
 		if (shapeOpen)
@@ -1229,52 +1281,32 @@ void drawSurfaceStyle(State& st, UIElement& n, bool& edit, bool& committed)
 		// than offered and ignored.
 		if (n.gradientShape != 1)
 		{
-			edit |= ImGui::DragFloat("Gradient Angle", &n.gradientAngle, 1.0f,
-			                         -360.0f, 360.0f, "%.0f\xc2\xb0");
+			edit |= EditorWidgets::Row::dragFloat("Gradient Angle", &n.gradientAngle, 1.0f,
+			                                      -360.0f, 360.0f, "%.0f\xc2\xb0");
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Gradient Angle");
 		}
 	}
 
 	if (EditorWidgets::checkbox("Shadow", &n.shadow)) committed = true;
 	if (n.shadow)
 	{
-		{
-			const bool bound = themeDecides(n, "Shadow Color");
-			ImGui::BeginDisabled(bound);
-			edit |= ImGui::ColorEdit4("Shadow Color", &n.shadowColor.r);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::EndDisabled();
-			drawThemeRoleButton(n, "Shadow Color", committed);
-		}
-		EditorWidgets::helpForLabel("Shadow Color");
-		if (ImGui::DragFloat("Shadow Blur", &n.shadowBlur, 0.5f, 0.0f, 500.0f))
+		drawBoundColor("Shadow Color", n, n.shadowColor, edit, committed);
+		if (EditorWidgets::Row::dragFloat("Shadow Blur", &n.shadowBlur, 0.5f, 0.0f, 500.0f))
 		{ n.shadowBlur = std::max(0.0f, n.shadowBlur); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		EditorWidgets::helpForLabel("Shadow Blur");
 		float off[2] = { n.shadowOffsetX, n.shadowOffsetY };
-		if (ImGui::DragFloat2("Shadow Offset", off, 0.5f))
+		if (EditorWidgets::Row::dragFloat2("Shadow Offset", off, 0.5f))
 		{ n.shadowOffsetX = off[0]; n.shadowOffsetY = off[1]; edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		EditorWidgets::helpForLabel("Shadow Offset");
 	}
 
 	if (EditorWidgets::checkbox("Inner Shadow", &n.innerShadow)) committed = true;
 	if (n.innerShadow)
 	{
-		{
-			const bool bound = themeDecides(n, "Inner Shadow Color");
-			ImGui::BeginDisabled(bound);
-			edit |= ImGui::ColorEdit4("Inner Shadow Color", &n.innerShadowColor.r);
-			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			ImGui::EndDisabled();
-			drawThemeRoleButton(n, "Inner Shadow Color", committed);
-		}
-		EditorWidgets::helpForLabel("Inner Shadow Color");
-		if (ImGui::DragFloat("Inner Shadow Blur", &n.innerShadowBlur, 0.5f, 0.0f, 500.0f))
+		drawBoundColor("Inner Shadow Color", n, n.innerShadowColor, edit, committed);
+		if (EditorWidgets::Row::dragFloat("Inner Shadow Blur", &n.innerShadowBlur, 0.5f, 0.0f, 500.0f))
 		{ n.innerShadowBlur = std::max(0.0f, n.innerShadowBlur); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		EditorWidgets::helpForLabel("Inner Shadow Blur");
 	}
 }
 
@@ -1300,13 +1332,9 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 		const bool bound = themeDecides(e, pd.name.c_str());
 		float v = themedFloat(e, pd.name.c_str(), e.getProp(pd.name).f);
 		const bool ranged = pd.minV < pd.maxV;
-		ImGui::BeginDisabled(bound);
-		const bool ch = ranged
-			? ImGui::SliderFloat((pd.name + id).c_str(), &v, pd.minV, pd.maxV)
-			: ImGui::DragFloat((pd.name + id).c_str(), &v, 0.5f);
-		if (ch) { e.setProp(pd.name, UIPropValue::ofFloat(v)); edit = true; }
-		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		ImGui::EndDisabled();
+		// Name above, role button at the end of that line, value underneath at
+		// full width — see detailLabel.
+		detailLabel(pd.name.c_str());
 		if (bindable)
 			drawThemeRoleButton(e, pd.name, committed,
 			                    HE::uiThemeScaleFor(pd.name) == HE::UIThemeScale::Text
@@ -1316,12 +1344,21 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 		// is greyed out, so it needs the button that says why and lets you take
 		// it back.
 		else if (bound) drawThemeRoleButton(e, pd.name, committed, ThemeBindKind::NoRole);
+		ImGui::BeginDisabled(bound);
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		const bool ch = ranged
+			? ImGui::SliderFloat(id.c_str(), &v, pd.minV, pd.maxV)
+			: ImGui::DragFloat(id.c_str(), &v, 0.5f);
+		if (ch) { e.setProp(pd.name, UIPropValue::ofFloat(v)); edit = true; }
+		committed |= ImGui::IsItemDeactivatedAfterEdit();
+		ImGui::EndDisabled();
+		EditorWidgets::helpForLabel(pd.name.c_str());
 		break;
 	}
 	case UIPropType::Int:
 	{
 		int v = e.getProp(pd.name).i;
-		if (ImGui::DragInt((pd.name + id).c_str(), &v, 1))
+		if (EditorWidgets::Row::dragInt((pd.name + id).c_str(), &v, 1.0f))
 			{ e.setProp(pd.name, UIPropValue::ofInt(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		break;
@@ -1329,7 +1366,7 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 	case UIPropType::Bool:
 	{
 		bool v = e.getProp(pd.name).b;
-		if (ImGui::Checkbox((pd.name + id).c_str(), &v))
+		if (EditorWidgets::checkbox((pd.name + id).c_str(), &v))
 			{ e.setProp(pd.name, UIPropValue::ofBool(v)); committed = true; }
 		break;
 	}
@@ -1340,9 +1377,9 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 		// typed — a single-line InputText swallows Enter and the value could
 		// never contain one.
 		const bool changed = pd.multiline
-			? ImGui::InputTextMultiline((pd.name + id).c_str(), &v,
-			                            ImVec2(-1.0f, ImGui::GetTextLineHeight() * 4.0f))
-			: ImGui::InputText((pd.name + id).c_str(), &v);
+			? EditorWidgets::Row::inputTextMultiline((pd.name + id).c_str(), &v,
+			                                         ImGui::GetTextLineHeight() * 4.0f)
+			: EditorWidgets::Row::inputText((pd.name + id).c_str(), &v);
 		if (changed) { e.setProp(pd.name, UIPropValue::ofString(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		break;
@@ -1357,18 +1394,21 @@ void drawPropertyWidget(UIElement& e, const UIPropDesc& pd, bool& edit, bool& co
 		// theme decides, the stored one otherwise. A field that disagrees with
 		// the picture beside it is worse than no field.
 		glm::vec4 v = themedColor(e, pd.name.c_str(), e.getProp(pd.name).col);
+		detailLabel(pd.name.c_str());
+		drawThemeRoleButton(e, pd.name, committed);
 		ImGui::BeginDisabled(bound);
-		if (ImGui::ColorEdit4((pd.name + id).c_str(), &v.x))
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		if (ImGui::ColorEdit4(id.c_str(), &v.x))
 			{ e.setProp(pd.name, UIPropValue::ofColor(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		ImGui::EndDisabled();
-		drawThemeRoleButton(e, pd.name, committed);
+		EditorWidgets::helpForLabel(pd.name.c_str());
 		break;
 	}
 	case UIPropType::Vec2:
 	{
 		glm::vec2 v = e.getProp(pd.name).v2;
-		if (ImGui::DragFloat2((pd.name + id).c_str(), &v.x, 0.5f))
+		if (EditorWidgets::Row::dragFloat2((pd.name + id).c_str(), &v.x, 0.5f))
 			{ e.setProp(pd.name, UIPropValue::ofVec2(v)); edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		break;
@@ -1429,7 +1469,8 @@ void drawParamValues(HE::UIWidgetRef& ref, const HE::UIWidgetTree& sub,
 		ImGui::TextDisabled("This widget declares no parameters.");
 		return;
 	}
-	ImGui::SeparatorText("Parameters");
+	// No heading of its own: the Details section this is drawn in is called
+	// "Parameters".
 
 	for (const HE::UIWidgetParam& p : sub.params)
 	{
@@ -1552,9 +1593,7 @@ void drawParamValues(HE::UIWidgetRef& ref, const HE::UIWidgetTree& sub,
 void drawParameterDeclarations(State& st, AppContext& ctx)
 {
 	HE::Ed::Help::Scope helpScope("Canvas");
-	ImGui::Spacing();
-	ImGui::TextDisabled("Parameters");
-	ImGui::Separator();
+	// The heading is the caller's: the "Parameters" section of the panel.
 	ImGui::TextWrapped("What a page that embeds this widget can set. Each one "
 	                   "points at a property of one element; whatever that "
 	                   "property holds here is the default.");
@@ -1575,7 +1614,9 @@ void drawParameterDeclarations(State& st, AppContext& ctx)
 		// Which element it writes. Shown by the same name the hierarchy uses, so
 		// what is picked here is findable up there.
 		const UIElement* target = st.tree.find(p.elementId);
-		if (ImGui::BeginCombo("Element", target ? elementName(*target).c_str() : "(none)"))
+		detailLabel("Element");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		if (ImGui::BeginCombo("##Element", target ? elementName(*target).c_str() : "(none)"))
 		{
 			for (const auto& ep : st.tree.elements)
 			{
@@ -1599,7 +1640,9 @@ void drawParameterDeclarations(State& st, AppContext& ctx)
 		// read from the same table the details panel above is built from.
 		if (target)
 		{
-			if (ImGui::BeginCombo("Property",
+			detailLabel("Property");
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			if (ImGui::BeginCombo("##Property",
 			                      p.property.empty() ? "(none)" : p.property.c_str()))
 			{
 				// The type's own first, because that is what an author came for
@@ -1618,8 +1661,7 @@ void drawParameterDeclarations(State& st, AppContext& ctx)
 			EditorWidgets::helpForLabel("Property");
 		}
 
-		ImGui::InputText("Help", &p.help);
-		EditorWidgets::helpForLabel("Help");
+		EditorWidgets::Row::inputText("Help", &p.help);
 		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
 
 		ImGui::PopID();
@@ -1644,6 +1686,265 @@ void drawParameterDeclarations(State& st, AppContext& ctx)
 	EditorWidgets::helpForLabel("Add Parameter");
 }
 
+// Texture slot: the plain "put this picture on it" path, tinted by the
+// element's own colour. A material, when set, wins — it owns the pixels.
+void drawTextureSlot(AppContext& ctx, UIElement& n, bool& committed)
+{
+	HE::Ed::Help::Scope helpScope("UI Widget");
+	if (assetSlot(ctx, "Texture", n.texture, HE::AssetType::Texture, "tex"))
+	{
+		// Resolve straight away so the designer shows the picture without
+		// waiting for a play session (the runtime resolves the same way).
+		n.textureAssetId = (!n.texture.empty() && ctx.contentManager)
+			? ctx.contentManager->loadAsset(n.texture) : HE::UUID{};
+		committed = true;
+	}
+	// The source size, for the same reason the runtime resolves it: 9-slice
+	// margins are in source pixels and have to become UVs somewhere.
+	if (n.textureAssetId != HE::UUID{} && ctx.contentManager)
+	{
+		if (const TextureAsset* ta = ctx.contentManager->getTexture(n.textureAssetId))
+		{ n.textureW = ta->width; n.textureH = ta->height; }
+		if (n.textureW > 0)
+			ImGui::TextDisabled("Source %u x %u px", n.textureW, n.textureH);
+	}
+	if (!n.material.empty())
+		ImGui::TextDisabled("A material is set — it draws instead of this.");
+}
+
+// ── 9-slice: one idea, four numbers and a switch ─────────────────────────────
+// Four "Slice Left/Top/Right/Bottom" rows between the tint and the flip made
+// the commonest case, no slicing at all, the longest thing on an Image's panel.
+// Here they are one row in the order CSS and UMG use (L, T, R, B), under a
+// heading that says whether slicing is on, folded away until somebody opens it.
+// The PROPERTIES stay four, by the same names: graphs and files set them one at
+// a time, and nothing about how they are stored changes here.
+void drawNineSlice(UIElement& n, bool& edit, bool& committed)
+{
+	HE::Ed::Help::Scope helpScope("UI Widget");
+	static const char* kName[4] = { "Slice Left", "Slice Top", "Slice Right", "Slice Bottom" };
+	float m[4];
+	for (int i = 0; i < 4; ++i) m[i] = n.getProp(kName[i]).f;
+	const bool on = m[0] > 0.0f || m[1] > 0.0f || m[2] > 0.0f || m[3] > 0.0f;
+	char head[128];
+	if (on)
+		std::snprintf(head, sizeof head, "9-Slice   %g, %g, %g, %g###nineslice",
+		              m[0], m[1], m[2], m[3]);
+	else
+		std::snprintf(head, sizeof head, "9-Slice   off###nineslice");
+	const bool open = ImGui::TreeNodeEx(head, ImGuiTreeNodeFlags_SpanAvailWidth);
+	EditorWidgets::helpForKey("UI Widget/9-Slice");
+	if (!open) return;
+
+	// Margins are counted in the texture's pixels, so without one there is
+	// nothing for them to measure.
+	const bool noTexture = n.texture.empty();
+	if (noTexture) ImGui::TextDisabled("Needs a texture: the margins are in its pixels.");
+	ImGui::BeginDisabled(noTexture);
+	if (EditorWidgets::Row::dragFloat4("Margins (L, T, R, B)", m, 0.5f, 0.0f, 10000.0f, "%.0f"))
+	{
+		for (int i = 0; i < 4; ++i)
+			n.setProp(kName[i], UIPropValue::ofFloat(std::max(0.0f, m[i])));
+		edit = true;
+	}
+	committed |= ImGui::IsItemDeactivatedAfterEdit();
+	bool fill = n.getProp("Slice Fill Centre").b;
+	if (EditorWidgets::checkbox("Slice Fill Centre", &fill))
+	{ n.setProp("Slice Fill Centre", UIPropValue::ofBool(fill)); committed = true; }
+	ImGui::EndDisabled();
+	ImGui::TreePop();
+}
+
+// ── What the element SHOWS, first ────────────────────────────────────────────
+// The type's own section, named after the type and opened at the top of the
+// panel. It used to come after Layout, Theme and a bare "Properties" rule, with
+// the texture two sections further down: for an Image, "which picture" was the
+// seventh thing on the panel and the tint and 9-slice that belong to that
+// picture stood apart from it (Thema 92 audit). Everything that answers "what
+// is in it" is gathered here — the type's properties, the texture, the font, a
+// list's row, a component's parameters. Layout and the rest follow.
+void drawContentSection(State& st, AppContext& ctx, UIElement& n, bool& edit, bool& committed)
+{
+	HE::Ed::Help::Scope helpScope("UI Widget");
+	const std::vector<UIPropDesc> props = n.properties();
+	bool hasText = false;
+	for (const UIPropDesc& pd : props) if (pd.name == "FontSize") { hasText = true; break; }
+	const bool isImage = n.type() == UIWidgetType::Image;
+	const bool isRef   = n.type() == UIWidgetType::WidgetRef;
+	if (props.empty() && !n.hasTextureSlot() && !hasText && !isRef
+	    && n.type() != UIWidgetType::ListView)
+		return;
+
+	// A placed component's section holds what that copy of it is told.
+	const HE::UIWidgetTree* sub = nullptr;
+	std::string refPath;
+	if (isRef)
+	{
+		refPath = n.getProp("Widget").s;
+		sub = refPath.empty() ? nullptr : embeddedTreeFor(ctx, refPath);
+	}
+	const std::string heading = isRef ? std::string(sub ? "Parameters" : "Component")
+	                                  : std::string(n.typeName());
+	DetailSection section(heading.c_str(), true);
+	if (!section.open) return;
+
+	// For an Image the picture IS the element, so its slot leads.
+	if (isImage && n.hasTextureSlot()) drawTextureSlot(ctx, n, committed);
+
+	for (const UIPropDesc& pd : props)
+	{
+		// The Image's 9-slice is drawn as one folded row below the loop, and
+		// its two flips share a line: they are one question, "which way round".
+		if (isImage && pd.name.rfind("Slice ", 0) == 0) continue;
+		if (isImage && pd.name == "Flip Vertical") continue;
+		// A component's asset path is not a knob (see the comment at the foot
+		// of this function); the generic loop used to print it as a text box
+		// anyway, above the parameters it now heads.
+		if (isRef && pd.name == "Widget") continue;
+		if (isImage && pd.name == "Flip Horizontal")
+		{
+			bool h = n.getProp("Flip Horizontal").b, v = n.getProp("Flip Vertical").b;
+			if (EditorWidgets::checkbox("Flip Horizontal", &h))
+			{ n.setProp("Flip Horizontal", UIPropValue::ofBool(h)); committed = true; }
+			ImGui::SameLine();
+			if (EditorWidgets::checkbox("Flip Vertical", &v))
+			{ n.setProp("Flip Vertical", UIPropValue::ofBool(v)); committed = true; }
+			continue;
+		}
+		// "Align H"/"Align V" are one control, not two number fields: which
+		// of nine positions the text sits in is a thing you point at. Drawn
+		// once, at the H row, and the V row is skipped.
+		if (pd.name == "Align V") continue;
+		if (pd.name == "Align H") { drawTextAlignGrid(n, edit, committed); continue; }
+		// A list's row template is an ASSET, drawn with the picker below —
+		// a path one has to type correctly is the reason the list would be
+		// empty at run time with nothing to say why.
+		if (pd.name == "Row Widget") continue;
+		// …and its item count is runtime state. It is a property because a
+		// graph SETS it by name; it is not a field here because a number
+		// typed into the designer is thrown away the moment the list runs.
+		if (pd.name == "Item Count") continue;
+		// Three named modes, not the numbers 0, 1 and 2.
+		if (pd.name == "Selection" && n.type() == UIWidgetType::ListView)
+		{
+			static const char* kModes[] = { "None", "Single", "Multiple" };
+			int mode = std::clamp(n.getProp("Selection").i, 0, 2);
+			if (EditorWidgets::Row::combo("Selection", &mode, kModes, 3))
+			{
+				n.setProp("Selection", HE::UIPropValue::ofInt(mode));
+				edit = committed = true;
+			}
+			continue;
+		}
+		// A bitmask is a number nobody can read. One tick box per section,
+		// labelled with the section's own name — the same move the list's
+		// three named modes are, for the same reason: what the author means
+		// is "open this one", not "set bit 2".
+		if (pd.name == "Expanded" && n.type() == UIWidgetType::Accordion)
+		{
+			const auto* ac = dynamic_cast<const HE::UIAccordion*>(&n);
+			std::vector<std::string> names;
+			for (const auto& cp : st.tree.elements)
+				if (cp && cp->parentId == n.id)
+					names.push_back(cp->name.empty() ? std::string("Section") : cp->name);
+			ImGui::TextUnformatted("Expanded");
+			EditorWidgets::helpForLabel("Expanded");
+			if (names.empty())
+				ImGui::TextDisabled("Drop something in: its children are the sections.");
+			const int shown = std::min<int>(static_cast<int>(names.size()),
+			                                HE::UIAccordion::kMaxSections);
+			for (int i = 0; i < shown; ++i)
+			{
+				const uint32_t bit = 1u << static_cast<unsigned>(i);
+				bool on = (static_cast<uint32_t>(n.getProp("Expanded").i) & bit) != 0u;
+				// Through the SAME toggle the runtime uses, so Allow
+				// Multiple behaves here exactly as it does when the heading
+				// is clicked in the running application.
+				if (ImGui::Checkbox((names[i] + "##acc" + std::to_string(i)).c_str(), &on))
+				{
+					const uint32_t next = HE::UIAccordion::toggledMask(
+						static_cast<uint32_t>(n.getProp("Expanded").i), i,
+						static_cast<int>(names.size()),
+						ac ? ac->allowMultiple : true);
+					n.setProp("Expanded", HE::UIPropValue::ofInt(static_cast<int>(next)));
+					edit = committed = true;
+				}
+			}
+			if (static_cast<int>(names.size()) > HE::UIAccordion::kMaxSections)
+				ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+					"%d sections; everything past the 32nd stays folded.",
+					static_cast<int>(names.size()));
+			continue;
+		}
+		drawPropertyWidget(n, pd, edit, committed);
+	}
+	if (isImage) drawNineSlice(n, edit, committed);
+
+	// Any other element with a texture: after its own properties, where a
+	// background picture for a panel or a button belongs.
+	if (!isImage && n.hasTextureSlot()) drawTextureSlot(ctx, n, committed);
+
+	// Font slot for text-bearing elements (a "FontSize" property marks them).
+	if (hasText)
+	{
+		committed |= assetSlot(ctx, "Font", n.font, HE::AssetType::Font, "font");
+		ImGui::TextDisabled("Empty = default UI font.");
+	}
+
+	// The row a ListView repeats. Picked like any other asset, and never the
+	// widget being edited — a list whose row is the page it sits on is the same
+	// circle a self-embedding WidgetRef is, and the runtime refuses it.
+	if (n.type() == UIWidgetType::ListView)
+	{
+		std::string path = n.getProp("Row Widget").s;
+		if (assetSlot(ctx, "Row Widget", path, HE::AssetType::Widget, "lvrow"))
+		{
+			if (path == st.relPath)
+				ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+					"A list cannot use the widget it sits in as its row.");
+			else
+			{
+				n.setProp("Row Widget", HE::UIPropValue::ofString(path));
+				committed = true;
+			}
+		}
+		EditorWidgets::helpForLabel("Row Widget");
+		ImGui::TextDisabled("How many rows there are comes from the running\n"
+		                    "application (Set List Count); the list then asks\n"
+		                    "On Row Bind to fill in each one it puts up.");
+	}
+
+	// ── A placed component is a CONTROL, not a reference to one ──────────────
+	// What sits on the page is a Card, a Form Row, a Title Bar. That it happens
+	// to be carried by a WidgetRef is how the engine grafts it, not something an
+	// author has to hold in their head — so the panel does not offer to re-point
+	// it at a different asset, any more than it offers to turn a Button into a
+	// Text. Change your mind, delete it and drag the other one in.
+	//
+	// The asset path is shown ONLY when it does not resolve. A component whose
+	// widget was renamed or deleted would otherwise be a blank slot with nothing
+	// to say for itself, and there would be no way to find out what it used to
+	// be — the same rule as an unreadable grid track: visible and fixable beats
+	// silent and gone.
+	if (isRef)
+	{
+		if (!sub)
+		{
+			ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+				refPath.empty() ? "This component points at nothing."
+				                : "This component's widget cannot be loaded.");
+			if (!refPath.empty()) ImGui::TextDisabled("%s", refPath.c_str());
+			ImGui::TextDisabled("Delete it and drag the component in again.");
+		}
+		else if (auto* wr = dynamic_cast<HE::UIWidgetRef*>(&n))
+			// What this copy of it is told. Read from the referenced asset every
+			// frame rather than cached on the ref: the component is edited in
+			// another tab, and a knob that appears only after a reload is a knob
+			// nobody finds.
+			drawParamValues(*wr, *sub, edit, committed);
+	}
+}
+
 // ── Details panel ──────────────────────────────────────────────────────────────
 void drawDetails(State& st, AppContext& ctx)
 {
@@ -1651,19 +1952,26 @@ void drawDetails(State& st, AppContext& ctx)
 	if (!n)
 	{
 		// Canvas settings when nothing is selected.
+		// The same folding sections and label-above rows as an element's panel.
 		HE::Ed::Help::Scope helpScope("Canvas");
-		ImGui::TextDisabled("Canvas");
-		ImGui::Separator();
-		bool edit = false;
-		edit |= ImGui::DragFloat("Width",  &st.tree.canvasWidth,  1.0f, 64.0f, 7680.0f);
-		EditorWidgets::helpForLabel("Width");
-		edit |= ImGui::DragFloat("Height", &st.tree.canvasHeight, 1.0f, 64.0f, 4320.0f);
-		EditorWidgets::helpForLabel("Height");
+		if (DetailSection canvasSection("Canvas", true); canvasSection.open)
+		{
+		// Each field commits on its own release: the one check after both used
+		// to see only Height, so a Width drag never became an undo step.
+		bool edit = false, done = false;
+		edit |= EditorWidgets::Row::dragFloat("Width",  &st.tree.canvasWidth,  1.0f, 64.0f, 7680.0f,
+		                                      "%.0f");
+		done |= ImGui::IsItemDeactivatedAfterEdit();
+		edit |= EditorWidgets::Row::dragFloat("Height", &st.tree.canvasHeight, 1.0f, 64.0f, 4320.0f,
+		                                      "%.0f");
+		done |= ImGui::IsItemDeactivatedAfterEdit();
 		if (edit) { st.dirty = true; }
-		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+		if (done) commitEdit(st, ctx);
 
 		// How the canvas above meets a screen that is not exactly this size.
-		const bool scaleOpen = ImGui::BeginCombo("Scale", HE::uiCanvasScaleModeName(st.tree.scaleMode));
+		detailLabel("Scale");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		const bool scaleOpen = ImGui::BeginCombo("##Scale", HE::uiCanvasScaleModeName(st.tree.scaleMode));
 		if (!scaleOpen) EditorWidgets::helpForLabel("Scale");
 		if (scaleOpen)
 		{
@@ -1689,12 +1997,14 @@ void drawDetails(State& st, AppContext& ctx)
 				"Description", &st.tree.description, ImGui::GetTextLineHeight() * 3.0f))
 			st.dirty = true;
 		if (ImGui::IsItemDeactivatedAfterEdit()) commitEdit(st, ctx);
+		} // end of the Canvas section
 
 		// ── This widget's own theme ──────────────────────────────────────────
 		// The project names one theme and everything resolves against it; a
 		// single widget may say otherwise. Empty is the normal answer, and the
 		// slot says so rather than making the project's theme look optional.
-		ImGui::Spacing();
+		if (DetailSection themeSection("Theme", true); themeSection.open)
+		{
 		{
 			std::string path = st.tree.themeAsset;
 			if (assetSlot(ctx, "Theme", path, HE::AssetType::Theme, "widgettheme"))
@@ -1733,13 +2043,15 @@ void drawDetails(State& st, AppContext& ctx)
 			ImGui::SameLine();
 			ImGui::TextDisabled("%d of %d", following, total);
 		}
+		} // end of the Theme section
 
-		drawParameterDeclarations(st, ctx);
+		if (DetailSection paramSection("Parameters", true); paramSection.open)
+			drawParameterDeclarations(st, ctx);
 
-		ImGui::Spacing();
-		ImGui::TextDisabled("Preview");
-		ImGui::SetNextItemWidth(140.0f);
+		if (DetailSection previewSection("Preview", true); previewSection.open)
 		{
+			detailLabel("Preview size");
+			ImGui::SetNextItemWidth(-FLT_MIN);
 			// The designer draws the AUTHORED canvas; this is what that canvas
 			// turns into on a real screen. Purely a view setting, never saved.
 			static const struct { const char* label; float w, h; } kPreviews[] = {
@@ -1801,10 +2113,16 @@ void drawDetails(State& st, AppContext& ctx)
 
 	EditorWidgets::Row::inputText("Name", &n->name);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Name");
 
-	// Layout — shared base fields.
-	ImGui::SeparatorText("Layout");
+	// ── The order is the order of the questions ──────────────────────────────
+	// What it shows, where it sits, what the theme says about it — open. How its
+	// surface is drawn, which material, how it takes the pointer — folded, and
+	// kept folded once somebody folds them. The sections used to follow the
+	// class hierarchy instead, and none of them could be put away.
+	drawContentSection(st, ctx, *n, edit, committed);
+
+	if (DetailSection layoutSection("Layout", true); layoutSection.open)
+	{
 
 	// A child of a layout container does not place itself: anchors, position
 	// and the size on the box's axis are the box's business. Showing the
@@ -1830,25 +2148,22 @@ void drawDetails(State& st, AppContext& ctx)
 			if (withH)
 			{
 				int h = std::clamp((int)n->slotHAlign, 0, (int)UISlotHAlign::COUNT - 1);
-				if (ImGui::Combo("Slot Align H", &h, kH, (int)UISlotHAlign::COUNT))
+				if (EditorWidgets::Row::combo("Slot Align H", &h, kH, (int)UISlotHAlign::COUNT))
 				{ n->slotHAlign = (UISlotHAlign)h; edit = committed = true; }
-				EditorWidgets::helpForLabel("Slot Align H");
 			}
 			int v = std::clamp((int)n->slotVAlign, 0, (int)UISlotVAlign::COUNT - 1);
-			if (ImGui::Combo("Slot Align V", &v, kV, (int)UISlotVAlign::COUNT))
+			if (EditorWidgets::Row::combo("Slot Align V", &v, kV, (int)UISlotVAlign::COUNT))
 			{ n->slotVAlign = (UISlotVAlign)v; edit = committed = true; }
-			EditorWidgets::helpForLabel("Slot Align V");
 			// Four sides in one row, in the order CSS and UMG both use, so a
 			// number typed here means the same thing it means everywhere else.
 			float pad[4] = { n->slotPadLeft, n->slotPadTop, n->slotPadRight, n->slotPadBottom };
-			if (ImGui::DragFloat4("Slot Padding (L, T, R, B)", pad, 0.5f, 0.0f, 1000.0f))
+			if (EditorWidgets::Row::dragFloat4("Slot Padding (L, T, R, B)", pad, 0.5f, 0.0f, 1000.0f))
 			{
 				n->slotPadLeft   = std::max(0.0f, pad[0]); n->slotPadTop    = std::max(0.0f, pad[1]);
 				n->slotPadRight  = std::max(0.0f, pad[2]); n->slotPadBottom = std::max(0.0f, pad[3]);
 				edit = true;
 			}
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Slot Padding (L, T, R, B)");
 		};
 		// A wrap box gives every child its OWN size on both axes and ignores
 		// Slot Fill — a child that ate the leftover space would take the whole
@@ -1860,13 +2175,17 @@ void drawDetails(State& st, AppContext& ctx)
 			// way a box's slot is. -1 means "the next free one", which is what a
 			// form wants — fill it top to bottom and never type a coordinate.
 			int cell[2] = { n->gridColumn, n->gridRow };
-			if (ImGui::DragInt2("Cell (col, row)", cell, 0.1f, -1, 999))
+			detailLabel("Cell (col, row)");
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			if (ImGui::DragInt2("##Cell (col, row)", cell, 0.1f, -1, 999))
 			{ n->gridColumn = cell[0] < -1 ? -1 : cell[0];
 			  n->gridRow    = cell[1] < -1 ? -1 : cell[1]; edit = true; }
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			EditorWidgets::helpForLabel("Cell (col, row)");
 			int span[2] = { n->gridColumnSpan, n->gridRowSpan };
-			if (ImGui::DragInt2("Span (cols, rows)", span, 0.1f, 1, 99))
+			detailLabel("Span (cols, rows)");
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			if (ImGui::DragInt2("##Span (cols, rows)", span, 0.1f, 1, 99))
 			{ n->gridColumnSpan = span[0] < 1 ? 1 : span[0];
 			  n->gridRowSpan    = span[1] < 1 ? 1 : span[1]; edit = true; }
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -1875,35 +2194,30 @@ void drawDetails(State& st, AppContext& ctx)
 			// Its own size is read by an `auto` track and by any axis whose
 			// alignment is not Fill — everywhere else the cell decides — so it
 			// stays editable and says when it is the cell that wins.
-			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			edit |= EditorWidgets::Row::dragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 			if (n->slotHAlign == UISlotHAlign::Fill && n->slotVAlign == UISlotVAlign::Fill)
 				ImGui::TextDisabled("Only an \"auto\" track reads this size.");
-			edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
+			edit |= EditorWidgets::Row::dragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
 		}
 		else if (layoutParent->type() == UIWidgetType::WrapBox)
 		{
 			slotAlignRows(/*withH=*/false);
-			edit |= ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			edit |= EditorWidgets::Row::dragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Width");
-			edit |= ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
+			edit |= EditorWidgets::Row::dragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Height");
-			edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
+			edit |= EditorWidgets::Row::dragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			// The shared helpForLabel("Pivot") below covers both branches — it
-			// attaches to the last item drawn, which is this one.
 		}
 		else {
-		edit |= ImGui::DragFloat("Slot Fill", &n->slotFill, 0.05f, 0.0f, 100.0f);
+		edit |= EditorWidgets::Row::dragFloat("Slot Fill", &n->slotFill, 0.05f, 0.0f, 100.0f);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		if (n->slotFill < 0.0f) n->slotFill = 0.0f;
 		// The tooltip that stood here named the axis ("keep my own height") and
 		// the entry cannot, since it is one sentence for both. Worth the trade:
 		// the entry is also what F1 opens, and the axis is on screen anyway.
-		EditorWidgets::helpForLabel("Slot Fill");
 		slotAlignRows(/*withH=*/true);
 		// A size field is offered exactly where the layout reads it. Along the
 		// axis that is a slot that does not fill, or a filling one whose
@@ -1918,20 +2232,17 @@ void drawDetails(State& st, AppContext& ctx)
 		const bool showH = vert ? alongOwn  : acrossOwn;
 		if (showW)
 		{
-			edit |= ImGui::DragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			edit |= EditorWidgets::Row::dragFloat("Width",  &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Width");
 		}
 		if (showH)
 		{
-			edit |= ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
+			edit |= EditorWidgets::Row::dragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Height");
 		}
-		edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
+		edit |= EditorWidgets::Row::dragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		} // end of the stacked-box branch
-		EditorWidgets::helpForLabel("Pivot");
 	}
 	else
 	{
@@ -1952,12 +2263,10 @@ void drawDetails(State& st, AppContext& ctx)
 		if (stretchX && stretchY)
 		{
 			float lt[2] = { left, top }, rb[2] = { right, bottom };
-			bool changed = ImGui::DragFloat2("Offset TL", lt, 1.0f);
+			bool changed = EditorWidgets::Row::dragFloat2("Offset TL", lt, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Offset TL");
-			changed |= ImGui::DragFloat2("Offset BR", rb, 1.0f);
+			changed |= EditorWidgets::Row::dragFloat2("Offset BR", rb, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Offset BR");
 			if (changed)
 			{
 				HE::uiSetAnchorInsetsX(*n, lt[0], rb[0]);
@@ -1968,36 +2277,29 @@ void drawDetails(State& st, AppContext& ctx)
 		else if (stretchX)
 		{
 			float lr[2] = { left, right };
-			if (ImGui::DragFloat2("Left/Right", lr, 1.0f))
+			if (EditorWidgets::Row::dragFloat2("Left/Right", lr, 1.0f))
 			{ HE::uiSetAnchorInsetsX(*n, lr[0], lr[1]); edit = true; }
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Left/Right");
-			edit |= ImGui::DragFloat("Position Y", &n->posY, 1.0f);
+			edit |= EditorWidgets::Row::dragFloat("Position Y", &n->posY, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Position Y");
-			edit |= ImGui::DragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
+			edit |= EditorWidgets::Row::dragFloat("Height", &n->sizeY, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Height");
 		}
 		else if (stretchY)
 		{
-			edit |= ImGui::DragFloat("Position X", &n->posX, 1.0f);
+			edit |= EditorWidgets::Row::dragFloat("Position X", &n->posX, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Position X");
-			edit |= ImGui::DragFloat("Width", &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			edit |= EditorWidgets::Row::dragFloat("Width", &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Width");
 			float tb[2] = { top, bottom };
-			if (ImGui::DragFloat2("Top/Bottom", tb, 1.0f))
+			if (EditorWidgets::Row::dragFloat2("Top/Bottom", tb, 1.0f))
 			{ HE::uiSetAnchorInsetsY(*n, tb[0], tb[1]); edit = true; }
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Top/Bottom");
 		}
 		else
 		{
-			edit |= ImGui::DragFloat2("Position", &n->posX, 1.0f);
+			edit |= EditorWidgets::Row::dragFloat2("Position", &n->posX, 1.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Position");
 			// An element that sizes itself to its content owns those numbers:
 			// showing them editable would be offering a value that is
 			// overwritten before it is ever drawn. The element answers which
@@ -2009,9 +2311,8 @@ void drawDetails(State& st, AppContext& ctx)
 			// greyed, and greying the pair would take away a number the author
 			// still owns.
 			ImGui::BeginDisabled(measured == (HE::UIElement::kAxisX | HE::UIElement::kAxisY));
-			edit |= ImGui::DragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
+			edit |= EditorWidgets::Row::dragFloat2("Size", &n->sizeX, 1.0f, 1.0f, 10000.0f);
 			committed |= ImGui::IsItemDeactivatedAfterEdit();
-			EditorWidgets::helpForLabel("Size");
 			ImGui::EndDisabled();
 			if (measured == (HE::UIElement::kAxisX | HE::UIElement::kAxisY))
 				ImGui::TextDisabled("Measured from the content (Min/Max Size below).");
@@ -2021,17 +2322,16 @@ void drawDetails(State& st, AppContext& ctx)
 				ImGui::TextDisabled("The height is measured from the content.");
 		}
 	}
-	edit |= ImGui::DragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
+	edit |= EditorWidgets::Row::dragFloat2("Pivot", &n->pivotX, 0.01f, 0.0f, 1.0f);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Pivot");
 
 	// Anchor: the UMG 4×4 grid. The first three rows and columns are the nine
 	// points the anchor has always been; the fourth of each stretches the
 	// element across that whole axis of its parent — a complete side, and both
 	// together the whole available space. Each cell draws what it does: a dot,
-	// a bar along the side it spans, or a filled square.
+	// a bar along the side it spans, or a filled square. Its name goes above it
+	// like every other row's.
 	ImGui::TextUnformatted("Anchor");
-	ImGui::SameLine(80.0f);
 	ImGui::BeginGroup();
 	{
 		const int   current = HE::uiAnchorPresetOf(*n);
@@ -2087,12 +2387,10 @@ void drawDetails(State& st, AppContext& ctx)
 	// with Size To Content the measurement does. That is why they are not up in
 	// the branch that draws "Size", where they would look like a property of
 	// authored sizes only.
-	edit |= ImGui::DragFloat2("Min Size", &n->minSizeX, 1.0f, 0.0f, 10000.0f);
+	edit |= EditorWidgets::Row::dragFloat2("Min Size", &n->minSizeX, 1.0f, 0.0f, 10000.0f);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Min Size");
-	edit |= ImGui::DragFloat2("Max Size", &n->maxSizeX, 1.0f, 0.0f, 10000.0f);
+	edit |= EditorWidgets::Row::dragFloat2("Max Size", &n->maxSizeX, 1.0f, 0.0f, 10000.0f);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Max Size");
 	if (n->minSizeX < 0.0f) n->minSizeX = 0.0f;
 	if (n->minSizeY < 0.0f) n->minSizeY = 0.0f;
 	if (n->maxSizeX < 0.0f) n->maxSizeX = 0.0f;
@@ -2100,24 +2398,23 @@ void drawDetails(State& st, AppContext& ctx)
 
 	// The four tooltips that stood here are entries now, so F1 reaches them too.
 	int layer = n->layer;
-	if (ImGui::DragInt("Layer", &layer, 1)) { n->layer = layer; edit = true; }
+	if (EditorWidgets::Row::dragInt("Layer", &layer, 1.0f)) { n->layer = layer; edit = true; }
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Layer");
 	if (EditorWidgets::checkbox("Visible", &n->visible)) committed = true;
 	ImGui::SameLine();
 	if (EditorWidgets::checkbox("Enabled", &n->enabled)) committed = true;
-	edit |= ImGui::DragFloat("Rotation", &n->rotation, 0.5f, -360.0f, 360.0f, "%.1f\xc2\xb0");
+	edit |= EditorWidgets::Row::dragFloat("Rotation", &n->rotation, 0.5f, -360.0f, 360.0f,
+	                                      "%.1f\xc2\xb0");
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Rotation");
-	edit |= ImGui::SliderFloat("Opacity", &n->renderOpacity, 0.0f, 1.0f);
+	edit |= EditorWidgets::Row::sliderFloat("Opacity", &n->renderOpacity, 0.0f, 1.0f);
 	committed |= ImGui::IsItemDeactivatedAfterEdit();
-	EditorWidgets::helpForLabel("Opacity");
+	} // end of the Layout section
 
 	// ── Which style of the theme this element follows ────────────────────────
 	// One control for the element's whole look, above the values it decides.
 	// Binding property by property still exists — it is the small button beside
 	// each value — but it is the exception now, not the way you theme a button.
-	ImGui::SeparatorText("Theme");
+	if (DetailSection themeSection("Theme", true); themeSection.open)
 	{
 		const std::string typeStyle = n->typeName();
 
@@ -2127,8 +2424,9 @@ void drawDetails(State& st, AppContext& ctx)
 		// the preview theme switches what can be picked here.
 		const std::string shown = !n->themeStyled ? std::string("None")
 			: n->themeStyle.empty() ? typeStyle : n->themeStyle;
-		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
-		const bool open = ImGui::BeginCombo("Style", shown.c_str());
+		detailLabel("Style");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		const bool open = ImGui::BeginCombo("##Style", shown.c_str());
 		if (!open) EditorWidgets::helpForLabel("Style");
 		if (open)
 		{
@@ -2176,8 +2474,9 @@ void drawDetails(State& st, AppContext& ctx)
 		const std::vector<std::string> tags =
 			g_previewTheme ? g_previewTheme->tagsFor(typeStyle) : std::vector<std::string>();
 		ImGui::BeginDisabled(!n->themeStyled);
-		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
-		const bool tagOpen = ImGui::BeginCombo("Tag",
+		detailLabel("Tag");
+		ImGui::SetNextItemWidth(-FLT_MIN);
+		const bool tagOpen = ImGui::BeginCombo("##Tag",
 			n->themeTag.empty() ? "(none)" : n->themeTag.c_str());
 		if (!tagOpen) EditorWidgets::helpForLabel("Tag");
 		if (tagOpen)
@@ -2199,10 +2498,11 @@ void drawDetails(State& st, AppContext& ctx)
 
 		const int decided = n->themeStyled && g_previewTheme
 			? static_cast<int>(HE::uiThemeDecidedProps(*n, *g_previewTheme).size()) : 0;
+		// "On this panel", not "below": the element's own section stands above.
 		if (!n->themeStyled)
-			ImGui::TextDisabled("Every value below is this element's own.");
+			ImGui::TextDisabled("Every value on this panel is this element's own.");
 		else if (decided > 0)
-			ImGui::TextDisabled("%d value%s below come%s from the theme.", decided,
+			ImGui::TextDisabled("%d value%s on this panel come%s from the theme.", decided,
 			                    decided == 1 ? "" : "s", decided == 1 ? "s" : "");
 		else
 			// Not an error: pointing an element at a style is half the work, and
@@ -2210,196 +2510,31 @@ void drawDetails(State& st, AppContext& ctx)
 			ImGui::TextDisabled("The theme decides nothing about this element yet.");
 	}
 
-	// Type-specific properties (generic, driven by properties()).
-	const std::vector<UIPropDesc> props = n->properties();
-	if (!props.empty())
-	{
-		ImGui::SeparatorText("Properties");
-		for (const UIPropDesc& pd : props)
-		{
-			// "Align H"/"Align V" are one control, not two number fields: which
-			// of nine positions the text sits in is a thing you point at. Drawn
-			// once, at the H row, and the V row is skipped.
-			if (pd.name == "Align V") continue;
-			if (pd.name == "Align H") { drawTextAlignGrid(*n, edit, committed); continue; }
-			// A list's row template is an ASSET, drawn with the picker below —
-			// a path one has to type correctly is the reason the list would be
-			// empty at run time with nothing to say why.
-			if (pd.name == "Row Widget") continue;
-			// …and its item count is runtime state. It is a property because a
-			// graph SETS it by name; it is not a field here because a number
-			// typed into the designer is thrown away the moment the list runs.
-			if (pd.name == "Item Count") continue;
-			// Three named modes, not the numbers 0, 1 and 2.
-			if (pd.name == "Selection" && n->type() == UIWidgetType::ListView)
-			{
-				static const char* kModes[] = { "None", "Single", "Multiple" };
-				int mode = std::clamp(n->getProp("Selection").i, 0, 2);
-				if (ImGui::Combo("Selection", &mode, kModes, 3))
-				{
-					n->setProp("Selection", HE::UIPropValue::ofInt(mode));
-					edit = committed = true;
-				}
-				EditorWidgets::helpForLabel("Selection");
-				continue;
-			}
-			// A bitmask is a number nobody can read. One tick box per section,
-			// labelled with the section's own name — the same move the list's
-			// three named modes are, for the same reason: what the author means
-			// is "open this one", not "set bit 2".
-			if (pd.name == "Expanded" && n->type() == UIWidgetType::Accordion)
-			{
-				const auto* ac = dynamic_cast<const HE::UIAccordion*>(n);
-				std::vector<std::string> names;
-				for (const auto& cp : st.tree.elements)
-					if (cp && cp->parentId == n->id)
-						names.push_back(cp->name.empty() ? std::string("Section") : cp->name);
-				ImGui::TextUnformatted("Expanded");
-				EditorWidgets::helpForLabel("Expanded");
-				if (names.empty())
-					ImGui::TextDisabled("Drop something in: its children are the sections.");
-				const int shown = std::min<int>(static_cast<int>(names.size()),
-				                                HE::UIAccordion::kMaxSections);
-				for (int i = 0; i < shown; ++i)
-				{
-					const uint32_t bit = 1u << static_cast<unsigned>(i);
-					bool on = (static_cast<uint32_t>(n->getProp("Expanded").i) & bit) != 0u;
-					// Through the SAME toggle the runtime uses, so Allow
-					// Multiple behaves here exactly as it does when the heading
-					// is clicked in the running application.
-					if (ImGui::Checkbox((names[i] + "##acc" + std::to_string(i)).c_str(), &on))
-					{
-						const uint32_t next = HE::UIAccordion::toggledMask(
-							static_cast<uint32_t>(n->getProp("Expanded").i), i,
-							static_cast<int>(names.size()),
-							ac ? ac->allowMultiple : true);
-						n->setProp("Expanded", HE::UIPropValue::ofInt(static_cast<int>(next)));
-						edit = committed = true;
-					}
-				}
-				if (static_cast<int>(names.size()) > HE::UIAccordion::kMaxSections)
-					ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
-						"%d sections; everything past the 32nd stays folded.",
-						static_cast<int>(names.size()));
-				continue;
-			}
-			drawPropertyWidget(*n, pd, edit, committed);
-		}
-	}
-
-	// The row a ListView repeats. Picked like any other asset, and never the
-	// widget being edited — a list whose row is the page it sits on is the same
-	// circle a self-embedding WidgetRef is, and the runtime refuses it.
-	if (n->type() == UIWidgetType::ListView)
-	{
-		ImGui::SeparatorText("Rows");
-		std::string path = n->getProp("Row Widget").s;
-		if (assetSlot(ctx, "Row Widget", path, HE::AssetType::Widget, "lvrow"))
-		{
-			if (path == st.relPath)
-				ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
-					"A list cannot use the widget it sits in as its row.");
-			else
-			{
-				n->setProp("Row Widget", HE::UIPropValue::ofString(path));
-				committed = true;
-			}
-		}
-		EditorWidgets::helpForLabel("Row Widget");
-		ImGui::TextDisabled("How many rows there are comes from the running\n"
-		                    "application (Set List Count); the list then asks\n"
-		                    "On Row Bind to fill in each one it puts up.");
-	}
-
 	// "Schicht 0": the style of the element's own surface. Only where there IS
 	// one — the same question the material slot asks, and the reason a Text
 	// label is not offered a border that would outline nothing.
+	// Folded by default: most elements keep the theme's surface.
 	if (n->hasSurfaceStyle())
-		drawSurfaceStyle(st, *n, edit, committed);
+		if (DetailSection surfaceSection("Surface", false); surfaceSection.open)
+			drawSurfaceStyle(st, *n, edit, committed);
 
 	// Material slot (only types that expose one — text runs have no quad).
+	// Folded: a material replaces everything above it, which is the exception.
 	if (n->hasMaterialSlot())
-	{
-		ImGui::SeparatorText("Material");
-		committed |= assetSlot(ctx, "Material", n->material,
-		                       HE::AssetType::Material, "mat", &isUiDomainMaterial);
-		ImGui::TextDisabled("Only User Interface materials are offered here.");
-		if (!n->material.empty() && !isUiDomainMaterial(ctx, n->material))
-			ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
-				"This is a Surface material: it will not draw correctly here.");
-	}
-
-	// ── A placed component is a CONTROL, not a reference to one ──────────────
-	// What sits on the page is a Card, a Form Row, a Title Bar. That it happens
-	// to be carried by a WidgetRef is how the engine grafts it, not something an
-	// author has to hold in their head — so the panel does not offer to re-point
-	// it at a different asset, any more than it offers to turn a Button into a
-	// Text. Change your mind, delete it and drag the other one in.
-	//
-	// The asset path is shown ONLY when it does not resolve. A component whose
-	// widget was renamed or deleted would otherwise be a blank slot with nothing
-	// to say for itself, and there would be no way to find out what it used to
-	// be — the same rule as an unreadable grid track: visible and fixable beats
-	// silent and gone.
-	if (n->type() == UIWidgetType::WidgetRef)
-	{
-		const std::string path = n->getProp("Widget").s;
-		const HE::UIWidgetTree* sub = path.empty() ? nullptr : embeddedTreeFor(ctx, path);
-		if (!sub)
+		if (DetailSection materialSection("Material", false); materialSection.open)
 		{
-			ImGui::SeparatorText("Component");
-			ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
-				path.empty() ? "This component points at nothing."
-				             : "This component's widget cannot be loaded.");
-			if (!path.empty()) ImGui::TextDisabled("%s", path.c_str());
-			ImGui::TextDisabled("Delete it and drag the component in again.");
+			committed |= assetSlot(ctx, "Material", n->material,
+			                       HE::AssetType::Material, "mat", &isUiDomainMaterial);
+			ImGui::TextDisabled("Only User Interface materials are offered here.");
+			if (!n->material.empty() && !isUiDomainMaterial(ctx, n->material))
+				ImGui::TextColored(ImVec4(0.86f, 0.48f, 0.12f, 1.0f),
+					"This is a Surface material: it will not draw correctly here.");
 		}
-		else if (auto* wr = dynamic_cast<HE::UIWidgetRef*>(n))
-			// What this copy of it is told. Read from the referenced asset every
-			// frame rather than cached on the ref: the component is edited in
-			// another tab, and a knob that appears only after a reload is a knob
-			// nobody finds.
-			drawParamValues(*wr, *sub, edit, committed);
-	}
 
-	// Texture slot: the plain "put this picture on it" path, tinted by the
-	// element's own colour. A material, when set, wins — it owns the pixels.
-	if (n->hasTextureSlot())
+	// Pointer interaction: hit-testability + the cursor shown on hover. Folded,
+	// like Surface: the defaults are what almost every element wants.
+	if (DetailSection interactionSection("Interaction", false); interactionSection.open)
 	{
-		ImGui::SeparatorText("Texture");
-		if (assetSlot(ctx, "Texture", n->texture, HE::AssetType::Texture, "tex"))
-		{
-			// Resolve straight away so the designer shows the picture without
-			// waiting for a play session (the runtime resolves the same way).
-			n->textureAssetId = (!n->texture.empty() && ctx.contentManager)
-				? ctx.contentManager->loadAsset(n->texture) : HE::UUID{};
-			committed = true;
-		}
-		// The source size, for the same reason the runtime resolves it: 9-slice
-		// margins are in source pixels and have to become UVs somewhere.
-		if (n->textureAssetId != HE::UUID{} && ctx.contentManager)
-		{
-			if (const TextureAsset* ta = ctx.contentManager->getTexture(n->textureAssetId))
-			{ n->textureW = ta->width; n->textureH = ta->height; }
-			if (n->textureW > 0)
-				ImGui::TextDisabled("Source %u x %u px", n->textureW, n->textureH);
-		}
-		if (!n->material.empty())
-			ImGui::TextDisabled("A material is set — it draws instead of this.");
-	}
-
-	// Font slot for text-bearing elements (a "FontSize" property marks them).
-	bool hasText = false;
-	for (const UIPropDesc& pd : props) if (pd.name == "FontSize") { hasText = true; break; }
-	if (hasText)
-	{
-		ImGui::SeparatorText("Font");
-		committed |= assetSlot(ctx, "Font", n->font, HE::AssetType::Font, "font");
-		ImGui::TextDisabled("Empty = default UI font.");
-	}
-
-	// Pointer interaction: hit-testability + the cursor shown on hover.
-	ImGui::SeparatorText("Interaction");
 	if (EditorWidgets::checkbox("Hit-testable", &n->hitTestable)) committed = true;
 	// Directly under it, and deliberately not phrased as its opposite: this is
 	// the other thing a press here can mean, and the two are independent.
@@ -2414,7 +2549,9 @@ void drawDetails(State& st, AppContext& ctx)
 	if (EditorWidgets::checkbox("Draggable", &n->draggable)) committed = true;
 	if (n->draggable)
 		if (EditorWidgets::Row::inputText("Drag payload", &n->dragPayload)) committed = true;
-	const bool cursorOpen = ImGui::BeginCombo("Hover cursor", HE::uiCursorName(n->hoverCursor));
+	detailLabel("Hover cursor");
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	const bool cursorOpen = ImGui::BeginCombo("##Hover cursor", HE::uiCursorName(n->hoverCursor));
 	if (!cursorOpen) EditorWidgets::helpForLabel("Hover cursor");
 	if (cursorOpen)
 	{
@@ -2431,11 +2568,11 @@ void drawDetails(State& st, AppContext& ctx)
 		const std::size_t n2 = std::min(n->tooltip.size(), sizeof(buf) - 1);
 		std::memcpy(buf, n->tooltip.c_str(), n2);
 		buf[n2] = '\0';
-		if (ImGui::InputText("Tooltip", buf, sizeof(buf)))
+		if (EditorWidgets::Row::inputText("Tooltip", buf, sizeof(buf)))
 		{ n->tooltip = buf; edit = true; }
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
-		EditorWidgets::helpForLabel("Tooltip");
 	}
+	} // end of the Interaction section
 
 	if (edit) st.dirty = true;
 	if (committed) commitEdit(st, ctx);
@@ -3084,7 +3221,10 @@ void drawDetailsEvents(State& st, AppContext& ctx)
 	const std::vector<UIEventDesc> evs = n->allEvents();
 	if (evs.empty()) return;
 
-	ImGui::SeparatorText("Events");
+	// Open by default, unlike Surface and Interaction: it is the last section
+	// and short, and it is the way from this element into its logic.
+	DetailSection section("Events", true);
+	if (!section.open) return;
 	for (const UIEventDesc& d : evs)
 	{
 		const bool exists = [&]{
@@ -3093,7 +3233,11 @@ void drawDetailsEvents(State& st, AppContext& ctx)
 			return false;
 		}();
 		const std::string label = "+ " + d.name + "##ev";
-		if (ImGui::Button(label.c_str(), ImVec2(-1.0f, 0)))
+		// Room for the "added" beside it; a full-width button pushed it past
+		// the panel's edge.
+		const float room = exists
+			? ImGui::CalcTextSize("added").x + ImGui::GetStyle().ItemSpacing.x : 0.0f;
+		if (ImGui::Button(label.c_str(), ImVec2(-1.0f - room, 0)))
 			addOrFocusEvent(st, ctx, d.name, d, n->id);
 		if (exists)
 		{
