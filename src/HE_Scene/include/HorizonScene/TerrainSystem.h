@@ -30,8 +30,9 @@ namespace TerrainSystem
     // Tessellation (TerrainComponent::tessellationFactor > 1): gives the chunks
     // near `cameraPos` their refined level and takes it back from the ones the
     // camera has left. Run after updateTerrains and BEFORE LODSystem::update,
-    // which then picks the refined level like any other (it is levels[0], with
-    // maxDistance = tessellationDistance).
+    // which picks the refined level first while the camera is within
+    // tessellationDistance (LODComponent::refinedMeshId — deliberately not a
+    // `levels` entry, so levels[0] stays LOD0 for everything that reads it).
     //
     // Bounded per call: at most a couple of chunks are built per tick and at
     // most a fixed number per terrain are refined at once (nearest first), so

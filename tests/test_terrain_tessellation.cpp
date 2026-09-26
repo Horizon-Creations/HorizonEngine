@@ -279,6 +279,7 @@ TEST_CASE("Tessellation off builds nothing and leaves the LOD chain as it was")
     for (auto [e, cc, lod] : world.registry().view<TerrainChunkComponent, LODComponent>().each())
     {
         CHECK(lod.levels.size() == 4);
+        CHECK(lod.refinedMeshId == HE::UUID{});
         CHECK(cc.tessMeshId == HE::UUID{});
     }
 }
@@ -297,10 +298,17 @@ TEST_CASE("The chunk under the camera gets the refined level and LOD picks it")
     const auto& cc  = reg.get<TerrainChunkComponent>(near);
     const auto& lod = reg.get<LODComponent>(near);
     REQUIRE(cc.tessActive);
-    REQUIRE(lod.levels.size() == 5);
-    CHECK(lod.levels.front().meshId == cc.tessMeshId);
-    CHECK(lod.levels.front().maxDistance == doctest::Approx(30.0f));
+    CHECK(lod.refinedMeshId == cc.tessMeshId);
+    CHECK(lod.refinedMaxDistance == doctest::Approx(30.0f));
+    CHECK(lod.current == LODComponent::kRefined);
     CHECK(reg.get<MeshComponent>(near).meshAssetId == cc.tessMeshId);
+    // The regular chain is untouched: levels[0] is still LOD0, which is what
+    // navigation, physics and the editor read as "the full-detail mesh".
+    REQUIRE(lod.levels.size() == 4);
+    CHECK(lod.levels.front().meshId != cc.tessMeshId);
+    const StaticMeshAsset* lod0 = cm.getStaticMesh(lod.levels.front().meshId);
+    REQUIRE(lod0 != nullptr);
+    CHECK(vertexCount(*lod0) == 65u * 65u + 4u * 64u);
     const StaticMeshAsset* m = cm.getStaticMesh(cc.tessMeshId);
     REQUIRE(m != nullptr);
     CHECK(vertexCount(*m) == 257u * 257u + 4u * 256u);   // 64 cells × 4, plus skirt
@@ -328,15 +336,16 @@ TEST_CASE("Refined levels are built two per tick and given back when the camera 
     tick(world, cm, glm::vec3(0.0f, 250.0f, 0.0f));
     CHECK(countTess(world).active == 4);
 
-    // Far away: all four go, their LOD chains are the regular four again,
-    // and the meshes are emptied — but stay registered, so coming back is a
-    // replace rather than a new registration.
+    // Far away: all four go, unhooked from their LODComponents, and the
+    // meshes are emptied — but stay registered, so coming back is a replace
+    // rather than a new registration.
     tick(world, cm, glm::vec3(5000.0f, 5.0f, 0.0f));
     CHECK(countTess(world).active == 0);
     for (auto [e, cc, lod, mc] :
          world.registry().view<TerrainChunkComponent, LODComponent, MeshComponent>().each())
     {
         CHECK(lod.levels.size() == 4);
+        CHECK(lod.refinedMeshId == HE::UUID{});
         CHECK(mc.meshAssetId != cc.tessMeshId);
         const StaticMeshAsset* m = cm.getStaticMesh(cc.tessMeshId);
         REQUIRE(m != nullptr);
@@ -396,12 +405,16 @@ TEST_CASE("Sculpting under the camera rebuilds the refined level in place")
     tc.dirtyMinX = -40.0f; tc.dirtyMinZ = -40.0f; tc.dirtyMaxX = -10.0f; tc.dirtyMaxZ = -10.0f;
     TerrainSystem::updateTerrains(world, cm);
 
-    // Same UUID, still in front of the chain, already at the new height —
-    // before updateTessellation has run again.
+    // Same UUID, still hooked in AND still the drawn mesh (the editor's
+    // direct updateTerrains calls have no LOD tick behind them, so dropping
+    // to LOD0 here would pop for a frame per brush step), already at the new
+    // height — before updateTessellation or LODSystem have run again.
     const auto& cc = reg.get<TerrainChunkComponent>(near);
     CHECK(cc.tessActive);
     CHECK(cc.tessMeshId == id);
-    CHECK(reg.get<LODComponent>(near).levels.size() == 5);
+    CHECK(reg.get<LODComponent>(near).refinedMeshId == id);
+    CHECK(reg.get<LODComponent>(near).levels.size() == 4);
+    CHECK(reg.get<MeshComponent>(near).meshAssetId == id);
     const StaticMeshAsset* m = cm.getStaticMesh(id);
     REQUIRE(m != nullptr);
     REQUIRE(m->vertices.size() > 1);
@@ -412,7 +425,8 @@ TEST_CASE("Sculpting under the camera rebuilds the refined level in place")
     tc.dirty = true;
     tick(world, cm, cam);
     CHECK(countTess(world).active == 0);
-    CHECK(reg.get<LODComponent>(near).levels.size() == 4);
+    CHECK(reg.get<LODComponent>(near).refinedMeshId == HE::UUID{});
+    CHECK(reg.get<MeshComponent>(near).meshAssetId != id);
 }
 
 TEST_CASE("The refined mesh of a chunk that is gone is unloaded")

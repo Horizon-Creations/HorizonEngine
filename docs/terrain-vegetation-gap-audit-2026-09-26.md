@@ -187,9 +187,12 @@ Was es tut:
   Displacement keine Lichtkante zum LOD0-Nachbarn. Skirt um halbe Displacement-Stärke tiefer.
 - `TerrainSystem::updateTessellation` (in `SceneSystems::tickWorld` vor `LODSystem`): baut die Stufe
   für Chunks innerhalb 1,25 × Distanz, gibt sie jenseits 1,5 × wieder ab (Hysterese), höchstens
-  2 Builds pro Tick, höchstens 16 verfeinerte Chunks pro Terrain (nächste zuerst). Die Stufe ist
-  `LODComponent::levels[0]` mit `maxDistance = tessellationDistance`, LODSystem wählt sie wie jede
-  andere. Mesh-UUID einmal pro Chunk registriert, beim Abgeben geleert statt entladen; Meshes
+  2 Builds pro Tick, höchstens 16 verfeinerte Chunks pro Terrain (nächste zuerst). Die Stufe hängt
+  als `LODComponent::refinedMeshId`/`refinedMaxDistance` am Chunk, LODSystem wählt sie zuerst, wenn
+  die Kamera innerhalb der Distanz ist. **Bewusst nicht in `levels`:** Navigation-Bake,
+  PhysicsWorld, RenderExtractor und mehrere Editor-Stellen lesen `levels[0]` als „das volle Mesh";
+  das bleibt LOD0 statt des verschobenen, bis 16-mal dichteren Laufzeit-Meshes.
+  Mesh-UUID einmal pro Chunk registriert, beim Abgeben geleert statt entladen; Meshes
   zerstörter Chunks (Undo, Gitterwechsel, gelöschtes Terrain) werden entladen.
 - Sculpten unter der Kamera baut die Stufe im selben Tick an Ort und Stelle neu (kein Rückfall auf
   LOD0 für ein Bild).

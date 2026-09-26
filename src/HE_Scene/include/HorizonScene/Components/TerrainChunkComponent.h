@@ -16,7 +16,7 @@ struct TerrainChunkComponent {
     // registered ONCE per chunk and afterwards only replaced — emptied when the
     // camera leaves, refilled when it comes back — because every registration
     // can move the content manager's pool under other holders' pointers.
-    // tessActive = the mesh is filled and sits in front of LODComponent::levels.
+    // tessActive = the mesh is filled and hooked in as LODComponent::refinedMeshId.
     HE::UUID     tessMeshId{};
     bool         tessActive = false;
 };

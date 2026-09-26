@@ -191,24 +191,25 @@ namespace
     bool hasTessLevel(const LODComponent* lod, const TerrainChunkComponent& cc)
     {
         return cc.tessActive && cc.tessMeshId != HE::UUID{} && lod &&
-               !lod->levels.empty() && lod->levels.front().meshId == cc.tessMeshId;
+               lod->refinedMeshId == cc.tessMeshId;
     }
 
-    // Take the refined level out of the chunk's LOD chain and empty its mesh.
-    // The UUID stays registered and owned, so coming back is a replace.
+    // Unhook the refined level from the chunk's LODComponent and empty its
+    // mesh. The UUID stays registered and owned, so coming back is a replace.
     void emptyTessLevel(entt::registry& reg, ContentManager& cm, IRenderer* renderer,
                         entt::entity ce, TerrainChunkComponent& cc)
     {
         auto* lod = reg.try_get<LODComponent>(ce);
         if (hasTessLevel(lod, cc))
         {
-            lod->levels.erase(lod->levels.begin());
-            lod->current = 0;
+            lod->refinedMeshId      = HE::UUID{};
+            lod->refinedMaxDistance = 0.0f;
             // Off the refined mesh right now, not a tick later when LODSystem
             // runs — the mesh is about to be empty.
             if (auto* mc = reg.try_get<MeshComponent>(ce);
                 mc && mc->meshAssetId == cc.tessMeshId && !lod->levels.empty())
             {
+                lod->current    = 0;
                 mc->meshAssetId = lod->levels.front().meshId;
                 mc->dirty       = true;
             }
@@ -223,8 +224,9 @@ namespace
         cc.tessActive = false;
     }
 
-    // Fill (or refill) the chunk's refined mesh and put it in front of its LOD
-    // chain. Registers the mesh on the chunk's first refinement only.
+    // Fill (or refill) the chunk's refined mesh and hook it into the chunk's
+    // LODComponent (refinedMeshId — NOT levels, which other systems read as
+    // "LOD0 = full detail"). Registers the mesh on the first refinement only.
     void fillTessLevel(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
                        entt::entity ce, TerrainChunkComponent& cc, StaticMeshAsset mesh,
                        float maxDistance)
@@ -241,13 +243,8 @@ namespace
             g_tessMeshes[&world][static_cast<uint32_t>(ce)] = cc.tessMeshId;
         }
         auto& lod = reg.get_or_emplace<LODComponent>(ce);
-        if (hasTessLevel(&lod, cc))
-            lod.levels.front().maxDistance = maxDistance;
-        else
-        {
-            lod.levels.insert(lod.levels.begin(), LODLevel{ cc.tessMeshId, maxDistance });
-            lod.current = 0;
-        }
+        lod.refinedMeshId      = cc.tessMeshId;
+        lod.refinedMaxDistance = maxDistance;
         cc.tessActive = true;
     }
 }
@@ -273,9 +270,15 @@ namespace TerrainSystem
 
         auto* lod = reg.try_get<LODComponent>(chunkEnt);
         auto& cc  = reg.get<TerrainChunkComponent>(chunkEnt);
-        // The regular levels sit behind the refined one when there is one.
-        const size_t off = hasTessLevel(lod, cc) ? 1u : 0u;
-        const bool haveLevels = lod && lod->levels.size() == g.numLODs + off;
+        const bool haveLevels = lod && lod->levels.size() == g.numLODs;
+        // A chunk that has its refined level keeps it through the rebuild —
+        // and if that is what it draws right now, it goes on drawing it: the
+        // editor's direct updateTerrains calls have no LOD tick behind them,
+        // so falling back to LOD0 here would show for a frame per brush step.
+        const bool keepTess = hasTessLevel(lod, cc) && tessFactorOf(tc) > 1u
+                           && tc.tessellationDistance > 0.0f;
+        const auto* oldMc = reg.try_get<MeshComponent>(chunkEnt);
+        const bool drawsTess = keepTess && oldMc && oldMc->meshAssetId == cc.tessMeshId;
 
         LODComponent newLod;
         const float chunkWorld = tc.sizeX / static_cast<float>(g.chunksPerSide);
@@ -285,9 +288,9 @@ namespace TerrainSystem
             StaticMeshAsset m = generateTerrainChunkMesh(field, res, tc.sizeX, tc.sizeZ,
                                                          u0, v0, u1, v1, verts, tc.uvTiling);
             HE::UUID id;
-            if (haveLevels && cm.getStaticMesh(lod->levels[k + off].meshId) != nullptr)
+            if (haveLevels && cm.getStaticMesh(lod->levels[k].meshId) != nullptr)
             {
-                id = lod->levels[k + off].meshId;      // reuse UUID → cheap re-upload
+                id = lod->levels[k].meshId;            // reuse UUID → cheap re-upload
                 cm.replaceStaticMesh(id, std::move(m));
                 if (renderer) renderer->InvalidateMesh(id);
             }
@@ -306,8 +309,6 @@ namespace TerrainSystem
                 : base * static_cast<float>(1u << k);   // base, 2·base, 4·base
             newLod.levels.push_back({ id, maxDist });
         }
-        const bool keepTess = off == 1u && tessFactorOf(tc) > 1u
-                           && tc.tessellationDistance > 0.0f;
         reg.emplace_or_replace<LODComponent>(chunkEnt, newLod);
         if (keepTess)
             fillTessLevel(world, cm, renderer, chunkEnt, cc,
@@ -324,6 +325,11 @@ namespace TerrainSystem
         // single-frame artifact — median shadow time is ~1ms, which is fine.)
         MeshComponent mc;
         mc.meshAssetId = newLod.levels.empty() ? HE::UUID{} : newLod.levels.front().meshId;
+        if (drawsTess)
+        {
+            mc.meshAssetId = cc.tessMeshId;
+            reg.get<LODComponent>(chunkEnt).current = LODComponent::kRefined;
+        }
         mc.dirty       = true;
         reg.emplace_or_replace<MeshComponent>(chunkEnt, mc);
     }
@@ -665,7 +671,10 @@ namespace TerrainSystem
                 if (!mine)
                 {
                     if (auto* lod = reg.try_get<LODComponent>(ce); hasTessLevel(lod, cc))
-                        lod->levels.erase(lod->levels.begin());
+                    {
+                        lod->refinedMeshId      = HE::UUID{};
+                        lod->refinedMaxDistance = 0.0f;
+                    }
                     cc.tessMeshId = HE::UUID{};
                     cc.tessActive = false;
                 }
@@ -720,7 +729,7 @@ namespace TerrainSystem
                         ++kept;
                         // Distance edited in the Inspector: follow it without a rebuild.
                         if (auto* lod = reg.try_get<LODComponent>(n.e); hasTessLevel(lod, cc))
-                            lod->levels.front().maxDistance = D;
+                            lod->refinedMaxDistance = D;
                     }
                     continue;
                 }
