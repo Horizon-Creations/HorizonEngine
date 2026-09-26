@@ -2820,6 +2820,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					}
 					else
 					{
+						// Reward moment (EditorRewards.h): AssetsImported (1) — only
+						// when importSource returned true.
 						if (!Importer::importSource(srcPath, root, relDirOf(srcPath)))
 							HE_LOG_ERROR(Editor, "%s",
 								("Editor: import failed for " + srcPath.string()).c_str());

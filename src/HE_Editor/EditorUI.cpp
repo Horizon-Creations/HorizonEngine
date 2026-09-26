@@ -1109,6 +1109,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
 			filters, 1, dir.empty() ? nullptr : dir.c_str());
 	};
+	// Reward moment (EditorRewards.h): Saved — on a successful synchronous save;
+	// needs ctx.saveSceneToPath to report success first.
 	auto doSaveScene = [&]()
 	{
 		if (ctx.currentScenePath.empty()) triggerSaveSceneAs();
@@ -1141,6 +1143,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			doSaveScene();
 			return;
 		}
+		// Reward moment (EditorRewards.h): Saved — only if the tab (or its clip)
+		// HAD unsaved edits; saveAsset answers true for a no-op.
 		if (!saveAsset(ctx, path))
 			HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + path).c_str());
 		// One tab edits an asset it is not named after: the Skeletal Mesh viewer
@@ -1158,6 +1162,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// the user already closed (the edits survive the close). The scene goes LAST
 	// on purpose: an unnamed scene opens the async Save-As dialog, and that is
 	// far less confusing at the end of the run than in the middle of it.
+	// Reward moment (EditorRewards.h): Saved — ONE for the batch if anything was
+	// written and nothing failed; the doSaveScene inside must not fire a second.
 	auto doSaveAll = [&]()
 	{
 		for (const std::string& path : unsavedAssetPaths())
@@ -2524,6 +2530,7 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             {
                 std::filesystem::path p(chosen);
                 if (p.extension() != ".hescene") p += ".hescene";
+                // Reward moment (EditorRewards.h): Saved — the async Save-As.
                 ctx.saveSceneToPath(p.string());
                 // If this Save-As was the guard's "Save" choice, run the deferred
                 // action now that the scene is on disk.
@@ -2548,6 +2555,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
                 // Textures wait for the colour-space dialog (sRGB or linear is a
                 // choice the file cannot make); everything else imports now.
+                // Reward moment (EditorRewards.h): AssetsImported(imported) —
+                // one for the batch, after the loop, only if imported > 0.
                 size_t imported = 0;
                 std::vector<std::string> textures;
                 for (const std::string& src : s_pendingImportPaths)
@@ -3102,6 +3111,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		}
 
 		// Middle — status
+		// Reward feedback (EditorRewards.h) lives here: the moment's line fading
+		// back to "Ready", and the idle progress counters after it. The
+		// BuildSucceeded edge detector over BuildProgressDialog::snapshot() runs
+		// once per frame on this thread too.
 		const std::string statusText = "Ready";
 		const float       statusW    = ImGui::CalcTextSize(statusText.c_str()).x;
 		ImGui::SameLine((ImGui::GetWindowWidth() - statusW) * 0.5f);
