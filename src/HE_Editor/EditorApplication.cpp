@@ -9273,6 +9273,10 @@ void EditorApplication::setPlayMode(bool play)
 				HE::api::fs::setSandboxRoot(
 					(std::filesystem::path(projPath).parent_path() / "Saved").string());
 		}
+		// The player's settings from that sandbox's prefs, as the packaged game
+		// reads them at start — so a session begins from what was SAVED, not from
+		// the last session's unsaved slider moves. Applied below with the buses.
+		HE::api::settings::load();
 		// Savegames: PIE mirrors the packaged game — the project's default
 		// template resolves save.create(), and the play-mode gate opens for the
 		// entity save-state API. Mirrored teardown below.
@@ -9327,6 +9331,39 @@ void EditorApplication::setPlayMode(bool play)
 		// GameApplication keeps.
 		m_audioEngine.applyBusConfig(m_projectManager.currentProject().audioBuses);
 		AudioSystem::playOnStart(*m_editorWorld, m_audioEngine, &contentManager());
+
+		// The player's settings for this session, over the editor's own. The
+		// deadzone and the volumes are live, as in the packaged game, and are put
+		// back when play stops. VSync and fullscreen are recorded and saved but
+		// NOT applied: the window is the editor's, and a settings menu tried in
+		// the preview must not take the editor fullscreen.
+		{
+			HE::api::settings::Host host;
+			host.stickDeadzone = m_editorConfig.GamepadStickDeadzone;
+			host.vsync         = true;
+			host.fullscreen    = false;
+			host.applyStickDeadzone = [this](float dz) { input().stickDeadzone = dz; };
+			host.applyVolume = [this](const std::string& bus, std::optional<float> volume)
+			{
+				if (!m_audioEngine.isInitialized()) return;
+				const HE::AudioBusConfig& cfg = m_projectManager.currentProject().audioBuses;
+				const bool master = bus == HE::api::settings::kMaster;
+				float v = 1.0f;
+				if (volume)      v = *volume;
+				else if (master) v = cfg.masterVolume;
+				else if (const HE::AudioBusDef* def = cfg.find(bus)) v = def->volume;
+				if (master) { m_audioEngine.setMasterVolume(v); return; }
+				if (!m_audioEngine.hasBus(bus)) m_audioEngine.createBus(bus, v);
+				m_audioEngine.setBusVolume(bus, v);
+			};
+			host.currentVolume = [this](const std::string& bus)
+			{
+				if (!m_audioEngine.isInitialized()) return 1.0f;
+				return bus == HE::api::settings::kMaster ? m_audioEngine.getMasterVolume()
+				                                         : m_audioEngine.getBusVolume(bus);
+			};
+			HE::api::settings::install(std::move(host));
+		}
 
 		// Initialise script context and start all enabled scripts
 		m_scriptContext = std::make_unique<ScriptContext>(*m_editorWorld);
@@ -9472,6 +9509,17 @@ void EditorApplication::setPlayMode(bool play)
 		// a buzz that nothing is left to stop — a `duration <= 0` rumble would
 		// otherwise run until the next Play.
 		HE::api::input::setRumbleGate(false, false);
+		// The player's settings end with the session: hooks down (they capture
+		// `this`), and the editor's own deadzone and the project's mixer back.
+		// The values stay in memory, unused, until the next Play reloads them.
+		// Their camera half needs no undo: nothing drives a rig outside play.
+		if (HE::api::settings::installed())
+		{
+			HE::api::settings::uninstall();
+			input().stickDeadzone = m_editorConfig.GamepadStickDeadzone;
+			if (m_audioEngine.isInitialized())
+				m_audioEngine.applyBusConfig(m_projectManager.currentProject().audioBuses);
+		}
 		// The session goes with the play session it belongs to. Before the
 		// hosts come down: leave() says goodbye on the wire, and a peer learns
 		// the seat is free now rather than waiting out a transport timeout.
@@ -10422,6 +10470,9 @@ void EditorApplication::OnShutdown()
 	// Input, then take the sink down — it captures `this`.
 	HE::api::input::setRumbleGate(false, false);
 	HE::api::input::setRumbleSink({});
+	// A PIE session's settings hooks capture `this` too (normally already gone
+	// with the session).
+	HE::api::settings::uninstall();
 
 	// The recovery snapshot goes only when this is the exit the user asked for:
 	// the UI's quit (after the unsaved-changes prompt — saved, or "Don't Save"

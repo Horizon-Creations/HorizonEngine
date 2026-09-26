@@ -440,6 +440,28 @@ TEST_CASE("GameLogic services: input reaches a loaded C++ module through the C A
         HE::api::input::setBindingService({});
     }
 
+    SUBCASE("the stick deadzone reaches the player settings (v4)")
+    {
+        HE::api::settings::resetToDefaults();
+        float applied = -1.0f;
+        HE::api::settings::Host host;
+        host.stickDeadzone      = 0.2f;
+        host.applyStickDeadzone = [&](float dz) { applied = dz; };
+        HE::api::settings::install(std::move(host));
+        CHECK(applied == doctest::Approx(0.2f));        // install applies the base
+        CHECK(probe->doStickDeadzone() == doctest::Approx(0.2f));
+
+        probe->doSetStickDeadzone(0.3f);
+        CHECK(applied == doctest::Approx(0.3f));
+        CHECK(probe->doStickDeadzone() == doctest::Approx(0.3f));
+        CHECK(HE::api::settings::values().stickDeadzone.has_value());
+        probe->doSetStickDeadzone(5.0f);                // clamped like the row
+        CHECK(probe->doStickDeadzone() == doctest::Approx(0.9f));
+
+        HE::api::settings::uninstall();
+        HE::api::settings::resetToDefaults();
+    }
+
     SUBCASE("rumble reaches the host's sink, through the host's gate")
     {
         int rumbles = 0, triggers = 0, stops = 0;

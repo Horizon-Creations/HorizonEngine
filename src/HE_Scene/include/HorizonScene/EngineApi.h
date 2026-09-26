@@ -5,6 +5,8 @@
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1074,6 +1076,20 @@ namespace app {
     // bound), and on a Linux without notify-send. Worth asking once rather than
     // discovering it per notification.
     bool notifyAvailable(Ctx&);
+
+    // ── The PLAYER's display settings (see namespace settings) ──────────────
+    // Over what the export configured (config.json GameVSync / GameWindowMode),
+    // applied at once and persisted with settings.save. setFullscreen(false)
+    // goes back to the configured mode, or to a window when that mode WAS
+    // fullscreen — a game exported borderless stays borderless. The getters
+    // answer the player's choice, else the configured one.
+    //
+    // In play-in-editor both are recorded and saved but not applied: the
+    // window is the editor's.
+    void setVSync(bool enabled);
+    bool vsync();
+    void setFullscreen(bool fullscreen);
+    bool isFullscreen();
 }
 
 // ── A second window (A5, docs/he-apps-plan.md §13.3) ─────────────────────────
@@ -1217,6 +1233,23 @@ namespace camera {
     // blend starts: setting isMain by hand stays a hard cut.
     void  blendTo(Ctx&, Entity camera, float seconds, int curve);
     bool  isBlending(Ctx&);
+
+    // ── The PLAYER's stick look (settings, see namespace settings) ───────────
+    // Not the rig's fields: those are the project's design and stay scene data.
+    // These sit on top of every rig, persist with settings.save and outlive
+    // scene switches.
+    //
+    // The sensitivity is a SCALE on the rig's own degrees per second (1 = as
+    // designed, 2 = twice as fast), not a replacement for it — a project with a
+    // slow vehicle rig and a fast on-foot rig keeps the difference between them
+    // whatever the player picks. Clamped to 0.05..10.
+    //
+    // Invert replaces the rig's stickInvertY once the player has chosen; until
+    // then stickInvertY() answers false and the rig's own value applies.
+    void  setStickSensitivityScale(float scale);
+    float stickSensitivityScale();                      // 1 when never chosen
+    void  setStickInvertY(bool invert);
+    bool  stickInvertY();
 }
 
 // ── Environment (the world's EnvironmentComponent) ───────────────────────────
@@ -2023,6 +2056,88 @@ namespace prefs {
     void        clear    (Ctx&);
 }
 
+// ── Player settings: what a settings menu changes ────────────────────────────
+// The player's own choices over the project's: stick deadzone, stick look
+// speed and invert, VSync, fullscreen, volume. Each value is OPTIONAL — "never
+// chosen" means the project's (or the application's) own, so a project that
+// changes its defaults later still reaches every player who did not override
+// them. The same reasoning as the binding overrides (input.rebindBegin).
+//
+// The rows that change them are spread over the groups they belong to
+// (input.setStickDeadzone, camera.setStickSensitivityScale, app.setVSync, …);
+// what lives here is the store, the persistence and the volume rows.
+//
+// Changes apply AT ONCE, through the Host the application installs, and last
+// for the session. save() writes them to prefs (one key, "settings", holding
+// a JSON object) and the application loads and applies them at start-up.
+// Nothing is written until save — the same contract as input.saveBindings, so
+// a menu's slider does not hit the disk on every step of a drag.
+namespace settings {
+    struct Values
+    {
+        std::optional<float> stickDeadzone;           // 0..0.9
+        std::optional<float> stickSensitivityScale;   // 0.05..10
+        std::optional<bool>  stickInvertY;
+        std::optional<bool>  vsync;
+        std::optional<bool>  fullscreen;
+        std::map<std::string, float> volumes;          // bus → 0..2, kMaster = master
+    };
+    inline constexpr const char* kMaster   = "Master";
+    inline constexpr const char* kPrefsKey = "settings";
+
+    // What the application offers. The base values are what a setting falls
+    // back to when the player never chose it — the configured VSync, the app's
+    // deadzone — so the getters can answer and reset() can go back to them.
+    // Every hook may be empty (a test, an application without a window).
+    struct Host
+    {
+        float stickDeadzone = 0.15f;
+        bool  vsync         = true;
+        bool  fullscreen    = false;
+        std::function<void(float)> applyStickDeadzone;
+        std::function<void(bool)>  applyVSync;
+        std::function<void(bool)>  applyFullscreen;
+        // One bus (kMaster = master) whose player volume changed. nullopt =
+        // the player no longer overrides it: back to the project's own (the
+        // mixer's authored value). Only the buses that changed are called, so
+        // a bus a script turned down (audio.setBusVolume) is left alone.
+        std::function<void(const std::string& bus, std::optional<float> volume)> applyVolume;
+        // What a bus is at now, for volume() when the player never set it.
+        std::function<float(const std::string& bus)> currentVolume;
+    };
+    // install applies every value once (the start-up apply); uninstall only
+    // drops the hooks. The values stay — the camera rig keeps reading them.
+    void install(Host host);
+    void uninstall();
+    bool installed();
+
+    // prefs → values, applied through the host when one is installed (else
+    // install applies them when it comes). Replaces what was held,
+    // so a play session in the editor starts from what was saved rather than
+    // from the last session's unsaved changes. False when the stored text is
+    // not an object; the values are then the defaults.
+    bool          load();
+    const Values& values();
+    // Replace in memory and apply (tests, and load paths that already hold one).
+    void          set(const Values& v);
+
+    std::string toJson(const Values& v);
+    bool        fromJson(const std::string& json, Values& out);
+
+    // ── Rows ──
+    // Volume is linear gain on a mixer bus, kMaster ("Master") for everything
+    // at once; 0..2 like the mixer's faders. A bus the project has not
+    // authored is created. volume() answers the player's value, else the bus's
+    // current one (1 when neither is known).
+    void  setVolume(const std::string& bus, float volume);
+    float volume(const std::string& bus);
+    // Persist everything above (NOT the bindings — input.saveBindings) and
+    // answer whether the prefs file took it. Nothing chosen removes the key.
+    bool  save();
+    // Back to the project's values, applied at once. Not saved until save().
+    void  resetToDefaults();
+}
+
 // ── Date and time ────────────────────────────────────────────────────────────
 // The WALL clock, unlike the time group, which is the game's. An application
 // showing "last saved 14:32" needs the one that keeps running when the game is
@@ -2543,6 +2658,14 @@ namespace input {
     std::string bindingName(const std::string& action, const std::string& device);
     void        resetBindings();
     bool        saveBindings();
+
+    // ── The player's stick deadzone (settings, see namespace settings) ───────
+    // The radius around the rest position a stick has to leave before it
+    // counts, 0..0.9 (clamped). Takes effect on the next frame and is saved
+    // with settings.save. stickDeadzone() answers the player's value, else the
+    // application's (0.15 in a packaged game; the editor's preference in PIE).
+    void  setStickDeadzone(float deadzone);
+    float stickDeadzone();
 
     // ── Input ACTIONS: the project's InputAction assets, by name ─────────────
     // What the mapping contexts resolved this frame, keyed by the logical

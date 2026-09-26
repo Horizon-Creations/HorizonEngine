@@ -120,6 +120,8 @@ public:
 	{ return copyOut(he::input::bindingName(a, d), buf, cap); }
 	void  doResetBindings()                            const override { he::input::resetBindings(); }
 	bool  doSaveBindings()                             const override { return he::input::saveBindings(); }
+	void  doSetStickDeadzone(float dz)                 const override { he::input::setStickDeadzone(dz); }
+	float doStickDeadzone()                            const override { return he::input::stickDeadzone(); }
 
 	he::AssetId doLoadAsset(const char* path) const override
 	{ return he::content::load(path ? path : ""); }

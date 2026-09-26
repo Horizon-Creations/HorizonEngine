@@ -100,6 +100,9 @@ struct ITestServicesProbe : IGameLogic
     virtual int   doBindingName(const char* action, const char* device, char* buf, int cap) const = 0;
     virtual void  doResetBindings()            const = 0;
     virtual bool  doSaveBindings()             const = 0;
+    // Input v4: the player's stick deadzone.
+    virtual void  doSetStickDeadzone(float deadzone) const = 0;
+    virtual float doStickDeadzone()            const = 0;
 
     // ── Content ─────────────────────────────────────────────────────────────
     // An AssetId is a VALUE (two integers), which is the point: it crosses the

@@ -2835,6 +2835,68 @@ inline HE::hccg::ClassSource fxInputRebind()
     return f.done("input_rebind");
 }
 
+// player_settings: the settings rows — setters filed under input, camera, app
+// and settings, then every getter read back into a variable. They share one
+// store (PlayerSettings.cpp), so the compiled half starts from what the
+// interpreted half left; the parity test resets between the two and compares.
+inline HE::hccg::ClassSource fxPlayerSettings()
+{
+    Fx f;
+    f.var("dz", PT::Float);
+    f.var("scale", PT::Float);
+    f.var("invert", PT::Bool);
+    f.var("vsync", PT::Bool);
+    f.var("full", PT::Bool);
+    f.var("music", PT::Float);
+    f.var("saved", PT::Bool);
+
+    const int ev = f.event("Apply");
+    auto call1 = [&](const char* id, Value v)
+    {
+        const int n = f.engineCall(id);
+        f.g.findNode(n)->pinDefaults[0] = v;
+        return n;
+    };
+    const int dz    = call1("input.setStickDeadzone", Value::ofFloat(0.25f));
+    const int scale = call1("camera.setStickSensitivityScale", Value::ofFloat(1.5f));
+    const int inv   = call1("camera.setStickInvertY", Value::ofBool(true));
+    const int vs    = call1("app.setVSync", Value::ofBool(false));
+    const int fs    = call1("app.setFullscreen", Value::ofBool(true));
+    const int vol = f.engineCall("settings.setVolume");
+    { Node* n = f.g.findNode(vol);
+      n->pinDefaults[0] = Value::ofString("Music");
+      n->pinDefaults[1] = Value::ofFloat(0.5f); }
+    f.exec(ev, dz); f.exec(dz, scale); f.exec(scale, inv);
+    f.exec(inv, vs); f.exec(vs, fs); f.exec(fs, vol);
+
+    int last = vol;
+    auto read = [&](const char* id, const char* var, PT type)
+    {
+        const int g = f.engineCall(id);
+        const int s = f.setVar(var, type);
+        f.data(g, 0, s, 0);
+        f.exec(last, s);
+        last = s;
+        return g;
+    };
+    read("input.stickDeadzone", "dz", PT::Float);
+    read("camera.stickSensitivityScale", "scale", PT::Float);
+    read("camera.stickInvertY", "invert", PT::Bool);
+    read("app.vsync", "vsync", PT::Bool);
+    read("app.isFullscreen", "full", PT::Bool);
+    const int mv = read("settings.volume", "music", PT::Float);
+    f.g.findNode(mv)->pinDefaults[0] = Value::ofString("Music");
+
+    const int save = f.engineCall("settings.save");
+    f.exec(last, save);
+    const int s = f.setVar("saved", PT::Bool);
+    f.data(save, 0, s, 0);
+    f.exec(save, s);
+    const int reset = f.engineCall("settings.resetToDefaults");
+    f.exec(s, reset);
+    return f.done("player_settings");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -2850,7 +2912,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
-        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(),
+        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(),
     };
 }
 
