@@ -20,6 +20,10 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
+#if defined(HE_TESTS_HAVE_SHADERC)   // he_tests links d3d12 + dxgi only then
+#include <d3d12.h>
+#include <dxgi1_4.h>
+#endif
 #endif
 
 // ═══ Thema 78, Schritt 6: TAA on D3D11 / D3D12 / Vulkan ═══
@@ -428,4 +432,139 @@ TEST_CASE("TAA sharpen (HLSL, WARP): amount 0 is an exact copy, a flat image sta
 	for (size_t i = 0; i < W * H; ++i)
 		CHECK(sharpFlat[i * 4 + 0] == doctest::Approx(0.4f).epsilon(1e-5));
 }
+
+#if defined(HE_TESTS_HAVE_SHADERC)
+// D3D12Renderer builds three things for TAA that no draw on this runner ever
+// exercises: the velocity root signature (root CBV b0), the resolve root
+// signature (b0 constants + ONE t0..t2 table — the postFx one has single-SRV
+// tables) and the sharpen on the postFx root signature. CreateGraphicsPipeline-
+// State is the only judge of "does the root signature cover every register the
+// bytecode binds"; the descs below are D3D12Renderer::createTaaPipelines'.
+TEST_CASE("D3D12: the TAA velocity, resolve and sharpen PSOs build against their root signatures (WARP)")
+{
+	ComPtr<IDXGIFactory4> factory;
+	ComPtr<IDXGIAdapter>  adapter;
+	ComPtr<ID3D12Device>  dev;
+	REQUIRE(SUCCEEDED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory))));
+	REQUIRE(SUCCEEDED(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter))));
+	REQUIRE(SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev))));
+
+	auto rootSig = [&](const D3D12_ROOT_SIGNATURE_DESC& rsd) {
+		ComPtr<ID3DBlob> sig, err;
+		REQUIRE(SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)));
+		ComPtr<ID3D12RootSignature> rs;
+		REQUIRE(SUCCEEDED(dev->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+		                                           IID_PPV_ARGS(&rs))));
+		return rs;
+	};
+	D3D12_STATIC_SAMPLER_DESC samp{};
+	samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+	samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	samp.MaxLOD = D3D12_FLOAT32_MAX;
+	samp.ShaderRegister = 0; samp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+	ComPtr<ID3D12RootSignature> velRS, resolveRS, postFxRS;
+	{
+		D3D12_ROOT_PARAMETER rp{};
+		rp.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+		rp.Descriptor.ShaderRegister = 0;
+		rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+		D3D12_ROOT_SIGNATURE_DESC rsd{};
+		rsd.NumParameters = 1; rsd.pParameters = &rp;
+		rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+		velRS = rootSig(rsd);
+	}
+	{
+		D3D12_DESCRIPTOR_RANGE r{};
+		r.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r.NumDescriptors = 3; r.BaseShaderRegister = 0;
+		D3D12_ROOT_PARAMETER params[2]{};
+		params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+		params[0].Constants = { 0, 0, 4 }; params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+		params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+		params[1].DescriptorTable = { 1, &r }; params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+		D3D12_ROOT_SIGNATURE_DESC rsd{};
+		rsd.NumParameters = 2; rsd.pParameters = params;
+		rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &samp;
+		resolveRS = rootSig(rsd);
+	}
+	{
+		// D3D12Renderer::createPostFXPipelines' root signature, verbatim.
+		D3D12_DESCRIPTOR_RANGE r0{}; r0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r0.NumDescriptors = 1; r0.BaseShaderRegister = 0;
+		D3D12_DESCRIPTOR_RANGE r1{}; r1.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV; r1.NumDescriptors = 1; r1.BaseShaderRegister = 1;
+		D3D12_ROOT_PARAMETER params[3]{};
+		params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+		params[0].Constants = { 0, 0, 4 }; params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+		params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+		params[1].DescriptorTable = { 1, &r0 }; params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+		params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+		params[2].DescriptorTable = { 1, &r1 }; params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+		D3D12_STATIC_SAMPLER_DESC ps = samp; ps.MaxLOD = 0.0f;
+		D3D12_ROOT_SIGNATURE_DESC rsd{};
+		rsd.NumParameters = 3; rsd.pParameters = params;
+		rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &ps;
+		postFxRS = rootSig(rsd);
+	}
+
+	ComPtr<ID3DBlob> fsVS  = compileHlsl(HE::hlsl::kFSTriangleVS,    "main",       "vs_5_0");
+	ComPtr<ID3DBlob> velVS = compileHlsl(HE::hlsl::kTaaVelocityHLSL, "VSVelocity", "vs_5_0");
+	ComPtr<ID3DBlob> velPS = compileHlsl(HE::hlsl::kTaaVelocityHLSL, "PSVelocity", "ps_5_0");
+	ComPtr<ID3DBlob> resPS = compileHlsl(HE::hlsl::kTaaResolveHLSL,  "main",       "ps_5_0");
+	ComPtr<ID3DBlob> shpPS = compileHlsl(HE::hlsl::kTaaSharpenHLSL,  "main",       "ps_5_0");
+
+	{
+		const D3D12_INPUT_ELEMENT_DESC layout[] = {
+			{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+			{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+			{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		};
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature        = velRS.Get();
+		pd.VS                    = { velVS->GetBufferPointer(), velVS->GetBufferSize() };
+		pd.PS                    = { velPS->GetBufferPointer(), velPS->GetBufferSize() };
+		pd.InputLayout           = { layout, 3 };
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets      = 1;
+		pd.RTVFormats[0]         = DXGI_FORMAT_R16G16_FLOAT;
+		pd.DSVFormat             = DXGI_FORMAT_D32_FLOAT;
+		pd.SampleDesc.Count      = 1;
+		pd.SampleMask            = UINT_MAX;
+		pd.RasterizerState.FillMode        = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode        = D3D12_CULL_MODE_NONE;
+		pd.RasterizerState.DepthClipEnable = TRUE;
+		pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		pd.DepthStencilState.DepthEnable    = TRUE;
+		pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+		pd.DepthStencilState.DepthFunc      = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+		ComPtr<ID3D12PipelineState> pso;
+		const HRESULT hr = dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
+		CHECK_MESSAGE(SUCCEEDED(hr), "velocity PSO: ", hr);
+	}
+
+	auto fullscreen = [&](ID3D12RootSignature* rs, ID3DBlob* ps) {
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+		pd.pRootSignature = rs;
+		pd.VS = { fsVS->GetBufferPointer(), fsVS->GetBufferSize() };
+		pd.PS = { ps->GetBufferPointer(), ps->GetBufferSize() };
+		pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		pd.SampleMask = UINT_MAX;
+		pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+		pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+		pd.DepthStencilState.DepthEnable = FALSE;
+		pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+		pd.SampleDesc.Count = 1;
+		ComPtr<ID3D12PipelineState> pso;
+		return dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso));
+	};
+	const HRESULT resHr = fullscreen(resolveRS.Get(), resPS.Get());
+	CHECK_MESSAGE(SUCCEEDED(resHr), "resolve PSO: ", resHr);
+	const HRESULT shpHr = fullscreen(postFxRS.Get(), shpPS.Get());
+	CHECK_MESSAGE(SUCCEEDED(shpHr), "sharpen PSO: ", shpHr);
+	// Negative control: the resolve against the postFx root signature — whose
+	// tables stop at t1 — must be REJECTED. That is why it has its own root
+	// signature, and it proves the positive checks above can fail at all.
+	const HRESULT wrongHr = fullscreen(postFxRS.Get(), resPS.Get());
+	CHECK_MESSAGE(FAILED(wrongHr), "resolve PSO without t2 in the root signature was accepted");
+}
+#endif // HE_TESTS_HAVE_SHADERC
 #endif
