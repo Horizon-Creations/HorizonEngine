@@ -673,3 +673,118 @@ TEST_CASE("InputBinding: the mapping codec round-trips every binding kind")
     HE::Ed::decodeMapping(R"({"entries":[1,2,3]})", none);
     CHECK(none.empty());
 }
+
+// ─── Several contexts on one mapping: Union vs Replace ────────────────────────
+// PlayerHost applies every context of a project to ONE InputMapping. These pin
+// what that means per action; test_player_host.cpp pins the order.
+
+TEST_CASE("InputMapping: Union keeps both contexts' bindings, Replace keeps the last")
+{
+    const char* first  = R"({"entries":[{"action":"Input/Jump.hasset","keys":["Space"]}]})";
+    const char* second = R"({"entries":[{"action":"Input/Jump.hasset","keys":["J","Space"]}]})";
+
+    InputMapping u;
+    CHECK(HE::applyInputMappingContext(u, first)  == 1);
+    CHECK(HE::applyInputMappingContext(u, second) == 1);
+    const std::vector<ActionBinding>* ub = u.actionBindings("Jump");
+    REQUIRE(ub != nullptr);
+    REQUIRE(ub->size() == 2);              // Space once, then J
+    CHECK((*ub)[0].key == SDL_SCANCODE_SPACE);
+    CHECK((*ub)[1].key == SDL_SCANCODE_J);
+
+    InputMapping r;
+    HE::applyInputMappingContext(r, second);
+    HE::applyInputMappingContext(r, first, HE::MappingMerge::Replace);
+    const std::vector<ActionBinding>* rb = r.actionBindings("Jump");
+    REQUIRE(rb != nullptr);
+    REQUIRE(rb->size() == 1);              // the override is all that is left
+    CHECK((*rb)[0].key == SDL_SCANCODE_SPACE);
+}
+
+TEST_CASE("InputMapping: two entries for one action in ONE context both count")
+{
+    InputMapping m;
+    CHECK(HE::applyInputMappingContext(m, R"({"entries":[
+        {"action":"Input/Fire.hasset","keys":["F"]},
+        {"action":"Input/Fire.hasset","mouseButtons":["left"]}
+    ]})") == 2);
+    REQUIRE(m.actionBindings("Fire") != nullptr);
+    CHECK(m.actionBindings("Fire")->size() == 2);
+
+    Input input;
+    pressKey(input, SDL_SCANCODE_F);
+    m.tick(input);
+    CHECK(m.isPressed("Fire"));            // the first entry was not overwritten
+}
+
+TEST_CASE("InputMapping: a duplicate mouse row is not added twice")
+{
+    // Delta sources are summed unclamped: a second identical MouseX row would
+    // double the look speed without anyone having asked for it.
+    const char* ctx = R"({"entries":[
+        {"action":"Input/Look.hasset","axes":[{"source":"MouseX","scale":0.5}]}
+    ]})";
+    InputMapping m;
+    HE::applyInputMappingContext(m, ctx);
+    HE::applyInputMappingContext(m, ctx);
+    REQUIRE(m.axisBindings("Look") != nullptr);
+    CHECK(m.axisBindings("Look")->size() == 1);
+
+    Input input;
+    MouseFrame mouse;
+    mouse.dx = 10.0f;
+    m.tick(input, mouse);
+    CHECK(m.axisValue("Look") == doctest::Approx(5.0f));
+
+    // A different scale is a different binding, and both apply.
+    HE::applyInputMappingContext(m, R"({"entries":[
+        {"action":"Input/Look.hasset","axes":[{"source":"MouseX","scale":1.0}]}
+    ]})");
+    CHECK(m.axisBindings("Look")->size() == 2);
+}
+
+TEST_CASE("InputMapping: a 2D action may take X from one context and Y from another")
+{
+    InputMapping m;
+    HE::applyInputMappingContext(m, R"({"entries":[
+        {"action":"Input/Move.hasset","axesX":[{"positive":"D","negative":"A"}]}
+    ]})");
+    HE::applyInputMappingContext(m, R"({"entries":[
+        {"action":"Input/Move.hasset","axesY":[{"positive":"W","negative":"S"}]}
+    ]})");
+    CHECK(m.axisIs2D("Move"));
+    REQUIRE(m.axisBindings("Move") != nullptr);
+    CHECK(m.axisBindings("Move")->size() == 1);
+    CHECK(m.axisYBindings("Move")->size() == 1);
+
+    Input input;
+    pressKey(input, SDL_SCANCODE_D);
+    pressKey(input, SDL_SCANCODE_W);
+    m.tick(input);
+    float x = 0.0f, y = 0.0f;
+    m.axis2DValue("Move", x, y);
+    CHECK(x == doctest::Approx(1.0f));
+    CHECK(y == doctest::Approx(1.0f));
+}
+
+TEST_CASE("InputMapping: 1D in one context and 2D in the next — the later shape wins")
+{
+    InputMapping m;
+    HE::applyInputMappingContext(m, R"({"entries":[
+        {"action":"Input/Aim.hasset","axes":[{"positive":"E"}]}
+    ]})");
+    HE::applyInputMappingContext(m, R"({"entries":[
+        {"action":"Input/Aim.hasset","axesX":[{"positive":"L"}]}
+    ]})");
+    CHECK(m.axisIs2D("Aim"));
+    REQUIRE(m.axisBindings("Aim")->size() == 1);   // E is gone, not mixed into X
+    CHECK((*m.axisBindings("Aim"))[0].positiveKey == SDL_SCANCODE_L);
+
+    // And back: a 1D declaration after a 2D one drops the 2D bindings.
+    HE::applyInputMappingContext(m, R"({"entries":[
+        {"action":"Input/Aim.hasset","axes":[{"positive":"E"}]}
+    ]})");
+    CHECK_FALSE(m.axisIs2D("Aim"));
+    CHECK(m.axisBindings("Aim")->size() == 1);
+    CHECK(m.axisYBindings("Aim")->empty());
+}

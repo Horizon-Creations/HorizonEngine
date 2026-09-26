@@ -53,10 +53,14 @@ class ScriptContext;
 // table lookup and nothing else. The same tick also publishes the frame's
 // action states to HE::api::input::setActions, the polling twin of the events.
 //
-// Bindings are the union of every InputMappingContext asset in the project;
-// action value types come from the InputAction assets. Discovery walks the
-// loose content root (editor / dev builds) plus everything already registered
-// in the ContentManager (loadPak'd builds). Assets living ONLY in a mounted,
+// Bindings are the union of every InputMappingContext asset in the project:
+// the contexts are applied sorted by path, and an action named in several
+// keeps the bindings of all of them (duplicates once) — not only the last
+// context's. Replacing an action's bindings is kept for a layer on top of this
+// base (HE::MappingMerge::Replace). Action value types come from the
+// InputAction assets. Discovery walks the loose content root (editor / dev
+// builds) plus everything already registered in the ContentManager (loadPak'd
+// builds). Assets living ONLY in a mounted,
 // not-yet-streamed pak are not found — the pak path index carries no type
 // information to sniff without loading (known limitation of the v1 pump).
 //
@@ -132,6 +136,12 @@ public:
 	// character the player actually steers is whatever a controller possesses.
 	size_t fallbackCharacterCount() const { return m_characters.size(); }
 
+	// The merged bindings of this session (see the note above for how the
+	// contexts combine), and the content-relative paths of the contexts that
+	// went into it, in the order they were applied.
+	const InputMapping&             mapping() const         { return m_mapping; }
+	const std::vector<std::string>& mappingContexts() const { return m_contextPaths; }
+
 private:
 	// An action is a button, a one-dimensional axis or a two-dimensional one —
 	// three shapes, three event names, so one bool no longer says it.
@@ -153,6 +163,7 @@ private:
 	ScriptContext*                       m_scripts = nullptr;
 	const TextScriptInstances*           m_scriptInstances = nullptr;
 	InputMapping                         m_mapping;
+	std::vector<std::string>             m_contextPaths;
 	std::vector<ActionInfo>              m_actions;
 	// The instances this host CREATED, and therefore the only ones it ticks and
 	// destroys.
