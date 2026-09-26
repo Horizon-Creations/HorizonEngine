@@ -15,6 +15,14 @@ struct RenderSection {
     uint32_t indexOffset = 0;
     uint32_t indexCount  = 0;
     HE::UUID materialAssetId;
+    // PBR scalars of THIS slot's material (HE::resolveWorldMaterialScalars, see
+    // MaterialScalars.h); GeometryPass hands them to the section's DrawCall.
+    // Defaults = unresolved. Same material ⇒ same scalars, so comparing them
+    // below never splits a batch that the material id alone would keep.
+    glm::vec3 baseColor = { 1.0f, 1.0f, 1.0f };
+    float     metallic  = 0.0f;
+    float     roughness = 0.5f;
+    float     opacity   = 1.0f;
     bool operator==(const RenderSection&) const = default;
 };
 
@@ -55,7 +63,10 @@ struct RenderObject {
     HE::AABB     worldBounds;
     uint32_t     entityId       = 0;
     uint8_t      lod            = 0;
-    // PBR material scalars (resolved at extract time from MaterialAsset).
+    // PBR material scalars of materialAssetId. The extractor leaves the
+    // defaults; D3D11/D3D12/Vulkan fill them (and each section's) through
+    // HE::resolveWorldMaterialScalars before the render graph runs, GL and
+    // Metal resolve per draw instead (MaterialScalars.h).
     glm::vec3    baseColor      = { 1.0f, 1.0f, 1.0f };
     float        metallic       = 0.0f;
     float        roughness      = 0.5f;

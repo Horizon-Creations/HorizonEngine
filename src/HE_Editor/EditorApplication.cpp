@@ -1109,17 +1109,26 @@ void EditorApplication::OnInit()
 		if (m_backend == HE::RendererBackend::D3D12)
 		{
 			renderer()->SetImGuiTextureRegistrar(
-				[this](void* res, void* /*unused*/) -> void*
+				[this](void* res, void* reuse) -> void*
 			{
 				auto* dx12   = static_cast<D3D12Renderer*>(renderer());
 				auto* device = dx12 ? static_cast<ID3D12Device*>(dx12->GetDevice()) : nullptr;
 				auto* alloc  = static_cast<D3D12DescriptorHeapAllocator*>(m_d3d12SrvAllocator);
 				if (!device || !alloc || !res) return nullptr;
 
-				// Allocate an ImGui-heap SRV slot and create the texture's SRV.
+				// Allocate an ImGui-heap SRV slot and create the texture's SRV —
+				// or, with `reuse` (a handle this registrar returned before), write
+				// the new resource's SRV into THAT slot: a resized world-preview
+				// target keeps its slot instead of draining the fixed-size heap.
 				D3D12_CPU_DESCRIPTOR_HANDLE cpu{};
 				D3D12_GPU_DESCRIPTOR_HANDLE gpu{};
-				alloc->Alloc(&cpu, &gpu);
+				if (reuse)
+				{
+					gpu.ptr = static_cast<UINT64>(reinterpret_cast<uintptr_t>(reuse));
+					cpu.ptr = alloc->HeapStartCpu.ptr + static_cast<SIZE_T>(gpu.ptr - alloc->HeapStartGpu.ptr);
+				}
+				else
+					alloc->Alloc(&cpu, &gpu);
 
 				D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
 				srvDesc.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;

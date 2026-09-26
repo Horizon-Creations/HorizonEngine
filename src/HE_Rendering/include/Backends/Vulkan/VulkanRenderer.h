@@ -91,6 +91,17 @@ public:
 	// below is the part of Render() this borrows, the swapchain half stays behind.
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
+	// An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
+	// viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
+	// recorded into a one-shot command buffer and waited for. Returns the
+	// VkDescriptorSet the editor's registrar built for the slot (null without one).
+	void* RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
+	                         uint32_t width, uint32_t height,
+	                         const EditorCameraOverride& camera,
+	                         const glm::vec3& origin = glm::vec3(0.0f),
+	                         const WorldPreviewEnv& env = {},
+	                         glm::mat4* outViewProj = nullptr,
+	                         uint32_t slot = 0) override;
 	// Returns VkImageView for the viewport color image (for ImGui_ImplVulkan_AddTexture).
 	void* GetViewportVkImageView() const;
 	void* GetViewportVkSampler()   const;
@@ -170,6 +181,9 @@ private:
 	VkSampler      m_shadowSampler  = VK_NULL_HANDLE;
 	VkRenderPass   m_shadowPass     = VK_NULL_HANDLE;
 	VkPipeline     m_shadowPipeline = VK_NULL_HANDLE;
+	// Instanced twin (scene_shadow_instanced.vert): one draw per run of
+	// same-mesh casters, clip * model per caster from the instance buffer.
+	VkPipeline     m_shadowInstancedPipeline = VK_NULL_HANDLE;
 	uint32_t       m_shadowSize     = HE::kShadowMapResolution;
 	// Project ShadowSettings (IRenderer::SetShadowSettings): distance /
 	// cascade count / split lambda go to the extractor, the bias pair to the
@@ -321,6 +335,25 @@ private:
 	InstanceBuf           m_instanceBuf[2];
 	static constexpr uint32_t k_maxInstances = 65536; // instance-buffer capacity (A3)
 	static constexpr uint32_t k_instStride   = 128;   // bytes per instance = 2 × mat4 (mvp, model)
+	// Next free slot in m_instanceBuf[m_currentFrame]. A member, not a DrawScene
+	// local: the shadow pass, runGi and runSSAO record their instanced depth
+	// draws into the SAME command buffer before the geometry pass, and the GPU
+	// reads every slot only at submit — so each pass takes slots of its own.
+	// Reset at the top of Render() and DrawViewportFrame().
+	uint32_t              m_instCursor = 0;
+	// Same-mesh runs of the camera-view depth pre-passes (SSAO position, GI
+	// G-buffer); the shadow layers keep m_shadowBatches.
+	RenderSorter::DepthBatchList m_preBatches;
+	// One instanced draw for a depth-only run (shadow caster run, SSAO or GI
+	// pre-pass run): `count` {A, B} matrix pairs from fill(k, pair) go into the
+	// next free slots of the frame's instance buffer, bound at binding 1, and
+	// `restorePipe` is bound again afterwards. Vertex/index buffers are the
+	// caller's. false = nothing drawn (no twin pipeline, buffer full, a run of
+	// one, HE_DEPTH_INSTANCING=0): the caller loops. Defined in the .cpp, the
+	// only translation unit that calls it.
+	template <class Fill>
+	bool drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe, VkPipeline restorePipe,
+	                        uint32_t indexCount, uint32_t count, Fill&& fill);
 	VkDescriptorPool      m_descPool            = VK_NULL_HANDLE;
 	struct FrameUBO
 	{
@@ -577,6 +610,65 @@ private:
 	// capabilities (docs/anti-aliasing-plan.md). The final post pass writes
 	// m_viewportImage, so it always runs — only the pipeline changes.
 	HE::AAMethod m_aaMethod   = HE::AAMethod::FXAA;
+	// Post-resolve sharpen of the temporal mode (AntiAliasingSettings::sharpness).
+	float  m_aaSharpness     = 0.35f;
+
+	// ── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ──────────────────────
+	// GL's RenderVelocity/RenderTaa (and the D3D11/D3D12 ports), rebuilt for
+	// Vulkan's render passes: the scene pass now STOREs its depth, a velocity
+	// pass loads it (LESS_OR_EQUAL, no write) and writes RG16F motion, a resolve
+	// on the tonemapped LDR image writes a ping-pong RGBA8 history, and the
+	// sharpen takes the AA-resolve slot. Targets only while TAA is the mode in
+	// force (syncTaaTargets at the top of Render, and with every postFx rebuild).
+	void createTaaPipelines(VkShaderModule fullscreenVS);
+	void destroyTaaPipelines();
+	void createTaaTargets(uint32_t w, uint32_t h);
+	void destroyTaaTargets();
+	void syncTaaTargets();
+	void encodeTaaVelocity(VkCommandBuffer cmd);
+	// The rasterisation matrix: `clipViewProj` (already Vulkan clip) with this
+	// frame's jitter, or unchanged when the frame is not a TAA frame.
+	glm::mat4 taaJittered(const glm::mat4& clipViewProj) const;
+	bool taaReady() const
+	{
+		return m_postFxReady && m_taaVelocityRP && m_taaVelocityPipe && m_taaResolvePipe
+		    && m_taaSharpenPipe && m_taaDSPool;
+	}
+	bool taaWanted() const { return m_aaMethod == HE::AAMethod::TAA && taaReady(); }
+
+	VkRenderPass          m_taaVelocityRP        = VK_NULL_HANDLE; // RG16F clear + scene depth LOAD
+	VkPipeline            m_taaVelocityPipe      = VK_NULL_HANDLE; // m_scenePipelineLayout (128 B push)
+	VkDescriptorSetLayout m_taaResolveDSL        = VK_NULL_HANDLE; // current, history, velocity
+	VkPipelineLayout      m_taaResolvePipeLayout = VK_NULL_HANDLE;
+	VkPipeline            m_taaResolvePipe       = VK_NULL_HANDLE;
+	VkPipeline            m_taaSharpenPipe       = VK_NULL_HANDLE; // m_postFxPipeLayout
+	VkDescriptorPool      m_taaDSPool            = VK_NULL_HANDLE;
+	VkDescriptorSet       m_taaResolveDS[2]      = {};  // [cur] = {ldr, history[1-cur], velocity}
+	VkDescriptorSet       m_taaSharpenDS[2]      = {};  // [cur] = {history[cur], dummy}
+	VkImage        m_taaVelocityImage  = VK_NULL_HANDLE;
+	VkDeviceMemory m_taaVelocityMemory = VK_NULL_HANDLE;
+	VkImageView    m_taaVelocityView   = VK_NULL_HANDLE;
+	VkFramebuffer  m_taaVelocityFB     = VK_NULL_HANDLE;
+	VkImage        m_taaHistoryImage[2]  = {};
+	VkDeviceMemory m_taaHistoryMemory[2] = {};
+	VkImageView    m_taaHistoryView[2]   = {};
+	VkFramebuffer  m_taaHistoryFB[2]     = {};
+	uint32_t  m_taaW = 0, m_taaH = 0;
+	int       m_taaHistoryCur   = 0;
+	bool      m_taaHistoryValid = false;
+	uint32_t  m_taaFrameIndex   = 0;
+	glm::vec2 m_taaJitter{ 0.0f };
+	// True only for a frame whose post chain resolves the jitter
+	// (DrawViewportFrame's HDR branch) — every other path renders unjittered.
+	bool      m_taaFrame = false;
+	// DrawScene reached the sort this frame (m_sortedIndices is this frame's
+	// list, not a stale one from an early-returning empty scene).
+	bool      m_taaSceneSorted = false;
+	glm::mat4 m_taaViewProjClean{ 1.0f };  // this frame's, set by DrawScene
+	glm::mat4 m_taaViewProjJit{ 1.0f };
+	glm::mat4 m_taaPrevViewProj{ 1.0f };   // last TAA frame's clean one
+	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms, m_taaCurTransforms;
+
 	bool   m_postFxReady     = false;
 	float  m_exposure        = 1.0f;
 	bool   m_bloomEnabled    = true;
@@ -620,6 +712,13 @@ private:
 	void createSkyPipeline();
 	void destroySkyPipeline();
 	void drawSky(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr);
+	// The sky from any camera: `clipViewProj` already carries kVulkanClipFix,
+	// `cameraPos` anchors the 3D clouds and the aurora, `time` drives their
+	// drift. drawSky passes the scene's; the world preview passes its own
+	// camera with the clock stopped.
+	void drawSkyFrom(VkCommandBuffer cmd, bool hdr, const glm::mat4& clipViewProj,
+	                 const glm::vec3& sunDir, const glm::vec3& cameraPos, float time,
+	                 const EnvironmentSettings& env);
 
 	// Per-frame sky UBO (mirrors FrameUBO pattern).
 	struct SkyUBO
@@ -635,6 +734,10 @@ private:
 	VkPipelineLayout      m_skyPipelineLayout  = VK_NULL_HANDLE;
 	VkPipeline            m_skyPipeline        = VK_NULL_HANDLE;
 	VkPipeline            m_skyPipelineHDR     = VK_NULL_HANDLE;
+	// True when the sky pipelines run the GL sky compiled to SPIR-V at startup
+	// (HorizonRendering/SkyShaderSource.h; the UBO then holds a whole
+	// HE::SkyFrameParams); false on the reduced sky.frag.spv fallback (SkyUBOData).
+	bool                  m_skyFullModel       = false;
 
 	// Moon texture (uploaded once via SetMoonTexture).
 	VkImage        m_moonImage   = VK_NULL_HANDLE;
@@ -667,6 +770,10 @@ private:
 	void createDebugLinePipeline();
 	void destroyDebugLinePipeline();
 	void drawDebugLines(VkCommandBuffer cmd, const glm::mat4& viewProj, bool hdr = false);
+	// Any line list through the debug-line pipeline (depth test, no depth
+	// write) — drawDebugLines passes the editor's, the world preview its grid.
+	void drawLineList(VkCommandBuffer cmd, const glm::mat4& viewProj,
+	                  const std::vector<DebugLine>& lines, bool hdr);
 
 	// Per-frame debug UBO + vertex buffer.
 	struct DebugUBO
@@ -676,6 +783,49 @@ private:
 		void*           mapped = nullptr;
 		VkDescriptorSet set    = VK_NULL_HANDLE;
 	};
+	// ── World preview (RenderWorldPreview) ──────────────────────────────────
+	// One target set per slot, as on the other backends: several secondary
+	// Scene viewports draw in the same frame and ImGui samples each later.
+	// The scene half renders through m_postFxSceneRP (RGBA16F + depth, so the
+	// HDR sky and debug-line pipelines fit it), the tonemap through
+	// m_postFxFinalRP with m_tonemapPipe into an RGBA8 image that ends in
+	// SHADER_READ_ONLY for ImGui. The ImGui descriptor set is registered once
+	// per slot and REWRITTEN on a resize (vkUpdateDescriptorSets) — the
+	// registrar has no free path, and a dragged splitter would drain its pool.
+	// Every call waits for the device before and after: the shared sky/debug
+	// buffers, the rings and the descriptor sets below are then free to touch.
+	struct WorldPreviewTargetVk
+	{
+		VkImage         hdrImage = VK_NULL_HANDLE, ldrImage = VK_NULL_HANDLE, depthImage = VK_NULL_HANDLE;
+		VkDeviceMemory  hdrMem   = VK_NULL_HANDLE, ldrMem   = VK_NULL_HANDLE, depthMem   = VK_NULL_HANDLE;
+		VkImageView     hdrView  = VK_NULL_HANDLE, ldrView  = VK_NULL_HANDLE, depthView  = VK_NULL_HANDLE;
+		VkFramebuffer   sceneFB  = VK_NULL_HANDLE; // m_postFxSceneRP: hdr + depth
+		VkFramebuffer   ldrFB    = VK_NULL_HANDLE; // m_postFxFinalRP: ldr
+		VkDescriptorSet tonemapSet  = VK_NULL_HANDLE; // m_postFxDSLayout: hdr + dummy bloom
+		void*           imguiHandle = nullptr;        // registrar's set, kept across resizes
+		uint32_t        w = 0, h = 0;
+	};
+	WorldPreviewTargetVk  m_worldPreview[kWorldPreviewSlots];
+	VkDescriptorSetLayout m_previewSetLayout  = VK_NULL_HANDLE; // b0 object (dyn), b1 light, b2 bones (dyn)
+	VkPipelineLayout      m_previewPipeLayout = VK_NULL_HANDLE; // set 0 above, set 1 = m_albedoSetLayout
+	VkPipeline            m_previewMeshPipe    = VK_NULL_HANDLE;
+	VkPipeline            m_previewSkinnedPipe = VK_NULL_HANDLE;
+	VkDescriptorPool      m_previewPool       = VK_NULL_HANDLE;
+	VkDescriptorSet       m_previewSet        = VK_NULL_HANDLE;
+	VkSampler             m_previewSampler    = VK_NULL_HANDLE; // what ImGui samples the LDR with
+	struct PreviewRing { VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
+	                     void* mapped = nullptr; VkDeviceSize size = 0; };
+	PreviewRing           m_previewObjRing;   // PerObject blocks, 256 B apart
+	PreviewRing           m_previewLightBuf;  // the light, 64 B
+	PreviewRing           m_previewBoneRing;  // one 128-matrix block per skinned draw
+	bool                  m_previewReady  = false;
+	bool                  m_previewFailed = false; // built once, not retried per call
+	bool ensureWorldPreviewPipeline();
+	bool ensureWorldPreviewTarget(WorldPreviewTargetVk& wp, uint32_t w, uint32_t h);
+	void destroyWorldPreviewTarget(WorldPreviewTargetVk& wp);
+	bool ensurePreviewRing(PreviewRing& ring, VkDeviceSize size, VkBufferUsageFlags usage);
+	void destroyWorldPreview();
+
 	DebugUBO              m_debugUBO[2];
 	VkBuffer              m_debugVB[2]        = {};
 	VkDeviceMemory        m_debugVBMem[2]     = {};
@@ -746,6 +896,7 @@ private:
 
 	// Position prepass: push-constant layout (reuses scene m_scenePipelineLayout).
 	VkPipeline   m_ssaoPosGfxPipeline  = VK_NULL_HANDLE;
+	VkPipeline   m_ssaoPosInstancedPipeline = VK_NULL_HANDLE; // ssao_pos_instanced.vert
 
 	// SSAO fullscreen pass descriptors (set=0: UBO + posRT + noise).
 	VkDescriptorSetLayout m_ssaoDescLayout     = VK_NULL_HANDLE;
@@ -953,6 +1104,7 @@ private:
 	VkPipeline m_giShadowPipe   = VK_NULL_HANDLE; // compute
 	VkPipeline m_giProbePipe    = VK_NULL_HANDLE; // compute
 	VkPipeline m_giGBufPipe     = VK_NULL_HANDLE;
+	VkPipeline m_giGBufInstancedPipe = VK_NULL_HANDLE; // gi_gbuf_instanced.vert
 	VkPipeline m_giTemporalPipe = VK_NULL_HANDLE;
 	VkPipeline m_giBlurPipe     = VK_NULL_HANDLE;
 	VkRenderPass m_giGBufRP     = VK_NULL_HANDLE; // 2x RGBA16F + depth → SHADER_READ_ONLY

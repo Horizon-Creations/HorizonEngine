@@ -44,6 +44,10 @@ add_executable(he_tests
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
+    test_world_preview_backends.cpp
+    # TAA on D3D11/D3D12/Vulkan (Thema 78, Schritt 6): host jitter + the HLSL
+    # velocity/resolve/sharpen drawn on WARP (Windows only for the latter).
+    test_temporal_aa.cpp
     test_gi_bvh.cpp
     test_undo.cpp
     test_editor_selection.cpp
@@ -86,6 +90,9 @@ add_executable(he_tests
     test_camera_bookmarks.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
+    # The GL sky as the one source for Vulkan/D3D11/D3D12: prelude coverage,
+    # SkyFrameParams layout, cross-compile, and on Windows FXC + WARP.
+    test_sky_shader.cpp
     test_jobsystem.cpp
     test_terrain.cpp
     # Greyscale heightmap → heights: the pixel path, the texture and file
@@ -265,6 +272,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/LightPacking.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderGraph.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderPass.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/MaterialScalars.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/CommandBuffer.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GPUMemoryAllocator.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderResourceManager.cpp
@@ -680,6 +688,11 @@ target_include_directories(he_tests PRIVATE
 # resolves to dllexport (definitions are local to this exe) rather than dllimport,
 # which would emit unresolved __imp_ references for those same locally-built symbols.
 target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
+# test_scene_serializer.cpp outgrew the 2^16 COFF sections of a Debug MSVC
+# object (fatal error C1128); CI builds Windows in Release only and never saw it.
+if(MSVC)
+    target_compile_options(he_tests PRIVATE /bigobj)
+endif()
 # The documentation bundle the editor ships (EditorDeps is copied next to the
 # executable at build time). Handed to the test as a path rather than found by
 # walking up from the working directory, which differs between ctest, an IDE
@@ -890,6 +903,9 @@ target_link_libraries(he_tests PRIVATE
 # the material-graph tests validate that GENERATED GLSL cross-compiles through the REAL
 # path (standard vertex + lighting preamble + fragment) for the Metal + GL targets.
 target_link_libraries(he_tests PRIVATE he_materialshader)
+# test_sky_shader.cpp calls he::shaderc directly, as the Vulkan/D3D sky passes do
+# (he_materialshader links it PRIVATE, so its header does not come along).
+target_link_libraries(he_tests PRIVATE he_shadercompiler)
 # The TARGET is always there now (A3b Teil 2 — without glslang it is built against the
 # stub), so "can I link it" stopped being the question. The question these cases ask is
 # "can this build actually cross-compile", and only HE_HAVE_SHADERC answers that: a

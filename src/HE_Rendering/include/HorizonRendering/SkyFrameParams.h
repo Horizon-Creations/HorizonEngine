@@ -12,16 +12,17 @@
 // read the named fields they need out of this instead of memcpy'ing the whole
 // thing (Vulkan, D3D11 and D3D12 all do that — their UBO/CB is a subset).
 //
-// STATE OF THE MIGRATION — 4 of 5 backends translate through this. ONLY Metal
-// copies the struct wholesale; do not assume the others do:
+// STATE OF THE MIGRATION — 4 of 5 backends translate through this, and four
+// copy the struct wholesale:
 //   Metal   memcpy of the whole struct (the layout IS the MSL SkyParams).
-//   Vulkan  reads 15 named fields into its own 160-byte SkyUBOData and memcpies
-//           THAT. A blanket copy of this 336-byte struct would misalign every
-//           offset past invViewProj (VulkanRenderer.cpp, the sky UBO fill).
-//   D3D11   reads the 12 named fields its smaller SkyCB has (D3D11Renderer.cpp,
-//           D3D11RendererImpl::drawSky).
-//   D3D12   the same 12 plus the nebula pair its shader has and D3D11's lacks
-//           (D3D12Renderer.cpp, D3D12RendererImpl::drawSky).
+//   Vulkan, memcpy of the whole struct when the sky pass runs the GL sky
+//   D3D11,  compiled through he::shaderc (HorizonRendering/SkyShaderSource.h:
+//   D3D12   kSkyVulkanPrelude declares this layout as its uniform block /
+//           cbuffer; tests/test_sky_shader.cpp checks the field order). Their
+//           FALLBACK shaders (no cross-compiler, or a failed compile) still take
+//           a smaller block, and only then are named fields read out: Vulkan 15
+//           into SkyUBOData, D3D11 12 into SkyCB, D3D12 those 12 plus the nebula
+//           pair (each backend's drawSky, gated on its skyFullModel flag).
 //   OpenGL  DOES NOT. Its sky program uses loose uniforms, not a UBO, so there is
 //           no POD to memcpy into — each field must be pushed with its own
 //           glUniform* call against a cached location. It therefore still maps

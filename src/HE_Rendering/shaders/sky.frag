@@ -1,9 +1,18 @@
 #version 450
 
+// ─── FALLBACK ONLY (Thema 78, Schritt 3) ─────────────────────────────────────
+// The Vulkan sky pass no longer runs this file by default. VulkanRenderer::
+// createSkyPipeline compiles the GL sky itself — `kSkyFS` + `kSkyFuncGLSL`,
+// now in src/HE_Rendering/include/HorizonRendering/SkyShaderSource.h — behind
+// `kSkyVulkanPrelude` to SPIR-V at startup (he::shaderc), so Vulkan draws
+// exactly the GL sky. This reduced copy is only what a build without the
+// cross-compiler (HE_ENABLE_SHADERC=OFF), or a failed compile, falls back to.
+// It is kept as it was; the list below describes what the FALLBACK lacks.
+//
 // ─── DRIFT WARNING: reduced second copy of the GL sky shader ─────────────────
 // This file is NOT the reference implementation. The engine's sky lives twice:
 //
-//   reference : src/HE_Rendering/src/Backends/OpenGL/OpenGLRenderer.cpp
+//   reference : src/HE_Rendering/include/HorizonRendering/SkyShaderSource.h
 //               `kSkyFS`        — the sky fragment shader
 //               `kSkyFuncGLSL`  — the shared analytic sky, spliced in at the
 //                                 `//#SKYFUNC#` marker (Metal mirrors both in MSL)
@@ -44,9 +53,9 @@
 // (colour, brightness, size, size variation, density, glow, twinkle), moon phase
 // and rain amount.
 //
-// Audit 1a decision: DOCUMENT the drift, do not port. Porting the features (or
-// better, generating all three backends from one source) is tracked separately.
-// Until then: a change to the GL sky is NOT automatically visible on Vulkan.
+// Audit 1a decision: DOCUMENT the drift, do not port. Superseded by Thema 78
+// Schritt 3, which took the "one source" route: with the cross-compiler a change
+// to the GL sky IS visible on Vulkan (and D3D11/D3D12). Only this fallback lags.
 // ─────────────────────────────────────────────────────────────────────────────
 
 layout(location = 0) in vec2 vNDC;

@@ -109,6 +109,12 @@ void GeometryPass::execute(const RenderWorld&           world,
 				sd.indexCount      = sec.indexCount;
 				sd.sectionIndex    = static_cast<int32_t>(s);
 				sd.materialAssetId = sec.materialAssetId;
+				// The slot's own material's scalars, not the whole mesh's: a
+				// per-slot override can differ in colour AND opacity class.
+				sd.baseColor       = sec.baseColor;
+				sd.metallic        = sec.metallic;
+				sd.roughness       = sec.roughness;
+				sd.opacity         = sec.opacity;
 				// The param block belongs to the entity's whole-mesh material
 				// (RenderExtractor merges it for that one); a slot overridden with
 				// another material draws that one plain.
@@ -133,6 +139,12 @@ void GeometryPass::execute(const RenderWorld&           world,
 		dc.entityId      = obj.entityId;
 		dc.lod           = obj.lod;
 		dc.receivesShadow  = obj.receivesShadow;
+		// Colour + PBR of the entity's material. Opacity stays 1: no backend
+		// sorts or blends a skinned mesh (GL uploads a flat 1.0 for it), so a
+		// material alpha here would only leak into the target's alpha channel.
+		dc.baseColor     = obj.baseColor;
+		dc.metallic      = obj.metallic;
+		dc.roughness     = obj.roughness;
 		dc.boneMatrices  = obj.boneMatrices;
 		dc.paramOverride = obj.paramOverride; // per-entity HeParams block (empty = none)
 		if (obj.sections.empty())
@@ -153,6 +165,9 @@ void GeometryPass::execute(const RenderWorld&           world,
 			sd.indexCount      = sec.indexCount;
 			sd.sectionIndex    = static_cast<int32_t>(s);
 			sd.materialAssetId = sec.materialAssetId;
+			sd.baseColor       = sec.baseColor;   // opacity stays 1, see above
+			sd.metallic        = sec.metallic;
+			sd.roughness       = sec.roughness;
 			if (sec.materialAssetId != dc.materialAssetId) sd.paramOverride.clear();
 			outCmds.recordSkinnedDraw(sd);
 		}
