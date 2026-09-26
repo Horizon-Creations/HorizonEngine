@@ -467,6 +467,24 @@ bool ThemeAssetPanel::reloadFromDisk(const std::string& assetPath)
 void ThemeAssetPanel::appendDirtyPaths(std::vector<std::string>& out)
 { s_states.appendDirtyPaths(out); }
 
+void ThemeAssetPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, PanelState& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			const ThemeAsset* a = cm->getTheme(st.assetId);
+			if (!a) return false;
+			// A copy, and none of saveState's aftermath: handing the project
+			// theme to the widget runtime is what a SAVE does.
+			ThemeAsset copy = *a;
+			copy.json = HE::uiThemeToJson(st.theme);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
+
 bool ThemeAssetPanel::save(AppContext& ctx, const std::string& path)
 {
 	PanelState* st = s_states.find(path);

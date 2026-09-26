@@ -34,6 +34,7 @@
 // whether a person or a model is behind it, and a second switch for the
 // difference would be a switch nobody understands.
 
+#include "FrustumLines.h"
 #include "McpClientCameras.h"
 
 #include <DebugDraw/DebugDraw.h>
@@ -67,10 +68,11 @@ namespace HE::Ed::McpCameraGizmos
 	// One camera's frustum into `out`: the four edges from the eye to a
 	// rectangle `length` ahead, that rectangle (twice, nested), a smaller one a
 	// third of the way, and an "up" triangle on the far rectangle's top edge so
-	// the roll reads. `length` is in world units; callers scale it with the
-	// distance to the viewer (see appendFrustums). Deterministic line count —
+	// the roll reads — FrustumLines' shape, shared with the selected scene
+	// camera. `length` is in world units; callers scale it with the distance to
+	// the viewer (see appendFrustums). Deterministic line count —
 	// kLinesPerFrustum — so a frame that draws N cameras draws N × that.
-	constexpr int kLinesPerFrustum = 4 + 4 + 4 + 4 + 3;
+	constexpr int kLinesPerFrustum = FrustumLines::kLinesPerFrustum;
 	void appendFrustum(const McpClientCamera& cam, const glm::vec3& color,
 	                   float length, DebugDrawBuffer& out);
 

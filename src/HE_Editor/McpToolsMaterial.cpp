@@ -689,6 +689,8 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::BorderDistance:      return "BorderDistance";
 	case T::ElementState:        return "ElementState";
 	case T::Backdrop:            return "Backdrop";
+	case T::Wind:                return "Wind";
+	case T::WindSway:            return "WindSway";
 	}
 	return "";
 }
@@ -3359,21 +3361,25 @@ struct MaterialTemplate
 	bool             lit;
 	HE::MatBlendMode blend;
 	HE::MatDomain    domain;
+	bool             wind;    // a Wind Sway node on World Position Offset
 };
 
-const std::array<MaterialTemplate, 5>& materialTemplates()
+const std::array<MaterialTemplate, 6>& materialTemplates()
 {
-	static const std::array<MaterialTemplate, 5> k{ {
+	static const std::array<MaterialTemplate, 6> k{ {
 		{ "OpaquePBR",     "lit, opaque: BaseColor, Metallic, Specular, Roughness, Emissive",
-		  true,  HE::MatBlendMode::Opaque,      HE::MatDomain::Surface },
+		  true,  HE::MatBlendMode::Opaque,      HE::MatDomain::Surface,       false },
 		{ "Masked",        "lit, alpha-tested: the PBR set plus OpacityMask (cutoff 0.5)",
-		  true,  HE::MatBlendMode::Masked,      HE::MatDomain::Surface },
+		  true,  HE::MatBlendMode::Masked,      HE::MatDomain::Surface,       false },
 		{ "Translucent",   "lit, alpha-blended: the PBR set plus Opacity",
-		  true,  HE::MatBlendMode::Translucent, HE::MatDomain::Surface },
+		  true,  HE::MatBlendMode::Translucent, HE::MatDomain::Surface,       false },
 		{ "Unlit",         "unlit surface: a single Color, no lighting",
-		  false, HE::MatBlendMode::Opaque,      HE::MatDomain::Surface },
+		  false, HE::MatBlendMode::Opaque,      HE::MatDomain::Surface,       false },
 		{ "UserInterface", "widget material: a single Color in the UI domain",
-		  false, HE::MatBlendMode::Opaque,      HE::MatDomain::UserInterface },
+		  false, HE::MatBlendMode::Opaque,      HE::MatDomain::UserInterface, false },
+		{ "Foliage",       "lit, alpha-tested grass/leaves swaying in the scene wind: the "
+		                   "Masked set plus WindAmount, WindFrequency, BendHeight",
+		  true,  HE::MatBlendMode::Masked,      HE::MatDomain::Surface,       true },
 	} };
 	return k;
 }
@@ -3451,6 +3457,26 @@ HE::MaterialGraph templateGraph(const MaterialTemplate& t)
 	else if (t.blend == HE::MatBlendMode::Translucent)
 		place(HE::MatNodeType::ParamFloat, "Opacity", { 1.0f, 0.0f, 1.0f, 0.0f },
 		      HE::kMatOutputOpacityPin);
+
+	if (t.wind)
+	{
+		// Wind Sway in its own column between the parameters and Output, its
+		// three knobs as parameters for the same reason as the PBR set. The
+		// direction and strength come from the scene's environment wind.
+		const int sway = g.addNode(HE::MatNodeType::WindSway, 270, y);
+		g.connect(sway, 0, out, HE::kMatOutputWPOPin);
+		auto knob = [&](const char* name, std::array<float, 4> p, int swayPin) {
+			const int id = g.addNode(HE::MatNodeType::ParamFloat, 80, y);
+			HE::MatGraphNode* n = g.findNode(id);
+			n->s = name;
+			for (int k = 0; k < 4; ++k) n->p[k] = p[static_cast<std::size_t>(k)];
+			g.connect(id, 0, sway, swayPin);
+			y += 90.0f;
+		};
+		knob("WindAmount",    { 0.1f, 0.0f, 1.0f,  0.0f }, 0); // metres per unit of wind strength
+		knob("WindFrequency", { 0.8f, 0.0f, 4.0f,  0.0f }, 1); // sway cycles per second
+		knob("BendHeight",    { 1.0f, 0.0f, 10.0f, 0.0f }, 2); // object-space metres to full sway
+	}
 	return g;
 }
 

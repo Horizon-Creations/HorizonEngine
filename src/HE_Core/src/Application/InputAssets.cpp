@@ -157,8 +157,10 @@ std::string mouseButtonDisplayName(int button)
 	}
 }
 
-size_t applyInputMappingContext(InputMapping& mapping, const std::string& json)
+size_t applyInputMappingContext(InputMapping& mapping, const std::string& json,
+                                MappingMerge merge)
 {
+	const bool replace = merge == MappingMerge::Replace;
 	const auto j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
 	if (!j.is_object() || !j.contains("entries") || !j["entries"].is_array())
 	{
@@ -220,7 +222,12 @@ size_t applyInputMappingContext(InputMapping& mapping, const std::string& json)
 						binds.push_back(ab);
 					}
 				}
-			if (!binds.empty()) { mapping.mapAction(name, std::move(binds)); ++bound; }
+			if (!binds.empty())
+			{
+				if (replace) mapping.mapAction(name, std::move(binds));
+				else         mapping.addAction(name, binds);
+				++bound;
+			}
 		}
 		// One axis row. "source" is absent in every context written before mouse
 		// sources existed, and its default is Key — so those parse unchanged.
@@ -252,7 +259,12 @@ size_t applyInputMappingContext(InputMapping& mapping, const std::string& json)
 		if (e.contains("axes") && e["axes"].is_array())
 		{
 			std::vector<AxisBinding> binds = readAxes(e["axes"]);
-			if (!binds.empty()) { mapping.mapAxis(name, std::move(binds)); ++bound; }
+			if (!binds.empty())
+			{
+				if (replace) mapping.mapAxis(name, std::move(binds));
+				else         mapping.addAxis(name, binds);
+				++bound;
+			}
 		}
 		// A 2D action binds each component separately — "axesX"/"axesY" rather
 		// than a shape inside "axes", so the 1D reader above cannot half-read one.
@@ -264,7 +276,11 @@ size_t applyInputMappingContext(InputMapping& mapping, const std::string& json)
 			std::vector<AxisBinding> by = e.contains("axesY") ? readAxes(e["axesY"])
 			                                                  : std::vector<AxisBinding>{};
 			if (!bx.empty() || !by.empty())
-			{ mapping.mapAxis2D(name, std::move(bx), std::move(by)); ++bound; }
+			{
+				if (replace) mapping.mapAxis2D(name, std::move(bx), std::move(by));
+				else         mapping.addAxis2D(name, bx, by);
+				++bound;
+			}
 		}
 	}
 	HE_LOG_INFO(Input, "Applied input mapping context: %zu binding group(s) from %zu entry/-ies",

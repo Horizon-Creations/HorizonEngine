@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/Defines.h>
 #include <HorizonCode/HorizonCode.h>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -22,10 +23,29 @@ class ContentManager;   // global scope, like the rest of the ContentManager API
 
 namespace HE {
 
+// ── Renames (formerNames) ────────────────────────────────────────────────────
+// Fields and entries have no stable ids — everything persisted about them is
+// keyed by NAME (save files, Variable::structDefaults, enum defaults in graph
+// JSON). A rename therefore books the old name as an ALIAS, and every reader
+// that misses the current name falls back to it, so data written before the
+// rename still finds its field. Oldest first; a chain a→b→c keeps both.
+//
+// One rule decides every ambiguity: a LIVE name always wins. An alias that is
+// also the current name of another field/entry in the same definition is
+// ignored (and not persisted), so "rename x→y, then add a new x" hands old x
+// data to the new x, not to y.
+
+// Book a rename into `formerNames`: `oldName` joins it, `newName` leaves it
+// (renaming back must not leave the field aliasing itself). No-op when the two
+// are equal or `oldName` is empty.
+HE_API void noteRename(std::vector<std::string>& formerNames,
+                       const std::string& oldName, const std::string& newName);
+
 struct EnumEntry
 {
     std::string name;
     int         value = 0;
+    std::vector<std::string> formerNames;   // see "Renames" above
 };
 
 // HE_API on the struct (not just the two out-of-line methods below): findEntry/
@@ -42,8 +62,11 @@ struct HE_API EnumDef
 
     // The entry list is authoritative for both directions; misses return the
     // fallback (first entry / empty string) so stale saved ints stay harmless.
+    // findEntry matches the current names first, then former names — an entry
+    // name written before a rename still resolves to the renamed entry.
     const EnumEntry* findEntry(const std::string& n) const;
     const EnumEntry* findValue(int v) const;
+    bool isLiveName(const std::string& n) const;
 };
 
 // One field of a user-defined struct. `type` is a HorizonCode pin type; for
@@ -70,6 +93,7 @@ struct StructField
     HorizonCode::ContainerKind container = HorizonCode::ContainerKind::None;
     HorizonCode::PinType       keyType = HorizonCode::PinType::String;
     std::string                keyTypeName;
+    std::vector<std::string>   formerNames;   // see "Renames" above
 
     HorizonCode::ContainerKind kind() const
     { return HorizonCode::containerKindOf(isArray, container); }
@@ -82,8 +106,26 @@ struct HE_API StructDef
     std::string assetPath;   // project-relative path — the registry key
     std::vector<StructField> fields;
 
+    // Current names first, then former names (see "Renames" above).
     const StructField* findField(const std::string& n) const;
+    bool isLiveName(const std::string& n) const;
+
+    // The key `f`'s data sits under in a NAME-KEYED store (a save file's
+    // object, a graph's structDefaults): its current name when `has` finds it,
+    // else the newest former name `has` finds that no live field claims. Empty
+    // when neither is there. `f` must be one of this def's fields.
+    std::string storedKey(const StructField& f,
+                          const std::function<bool(const std::string&)>& has) const;
 };
+
+// Book the rename of row `index` (already carrying its NEW name) from
+// `oldName`: noteRename on that row, and the old name is taken OFF every other
+// row. An alias has exactly one owner — the row that held the name last — so
+// "x→a, later a new x→y" leaves x pointing at y, never at both. What the panel
+// and the MCP tools call; hand-edited duplicates are settled by the readers
+// (findField/findEntry: first in definition order).
+HE_API void noteFieldRename(StructDef& def, size_t index, const std::string& oldName);
+HE_API void noteEntryRename(EnumDef& def, size_t index, const std::string& oldName);
 
 // Process-global registry of every loaded struct/enum definition. Thread-safe
 // (script bootstrap and codegen run off the main thread).

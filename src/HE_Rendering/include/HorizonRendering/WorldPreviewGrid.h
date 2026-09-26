@@ -1,6 +1,9 @@
 #pragma once
 #include <glm/vec3.hpp>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <fstream>
 #include <vector>
 
 // ─── World-preview grid ─────────────────────────────────────────────────────
@@ -81,6 +84,32 @@ inline void buildPreviewGrid(float halfExtent, float step, std::vector<float>& o
     push({ origin.x, y, origin.z }, axisY); push({ origin.x, y + step, origin.z }, axisY);
     push({ origin.x - a, yr, origin.z }, axisY); push({ origin.x + a, yr, origin.z }, axisY);
     push({ origin.x, yr, origin.z - a }, axisY); push({ origin.x, yr, origin.z + a }, axisY);
+}
+
+// The headless witness every backend writes when HE_WORLD_PREVIEW_DUMP names a
+// file: the LDR result, i.e. what the editor shows, as a top-down binary PPM.
+// Takes RGBA8 rows `rowPitch` bytes apart (a GPU readback is padded), so the
+// D3D11/D3D12/Vulkan read-backs can hand over their mapped memory as it is.
+// GL (bottom-up rows) and Metal (BGRA) write their own.
+inline void writeWorldPreviewDump(const char* path, const uint8_t* rgba, int width, int height,
+                                  size_t rowPitch)
+{
+    if (!path || !*path || !rgba || width <= 0 || height <= 0) return;
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return;
+    f << "P6\n" << width << " " << height << "\n255\n";
+    std::vector<char> row(static_cast<size_t>(width) * 3);
+    for (int y = 0; y < height; ++y)
+    {
+        const uint8_t* src = rgba + static_cast<size_t>(y) * rowPitch;
+        for (int x = 0; x < width; ++x)
+        {
+            row[static_cast<size_t>(x) * 3 + 0] = static_cast<char>(src[x * 4 + 0]);
+            row[static_cast<size_t>(x) * 3 + 1] = static_cast<char>(src[x * 4 + 1]);
+            row[static_cast<size_t>(x) * 3 + 2] = static_cast<char>(src[x * 4 + 2]);
+        }
+        f.write(row.data(), static_cast<std::streamsize>(row.size()));
+    }
 }
 
 } // namespace HE

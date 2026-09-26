@@ -761,6 +761,9 @@ struct VarSlot
     // multiplayer existed still compiles and still means "does not replicate".
     bool          replicated = false;
     bool          repNotify  = false;
+    // Mirrors Variable::saveGame, appended last with a default for the same
+    // reason: an older slot() call still compiles and still means "not saved".
+    bool          saveGame   = false;
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
@@ -791,11 +794,12 @@ inline VarSlot slot(const char* name, PinType type, bool isArray, int access,
                     const char* typeName, Value def,
                     ContainerKind container = ContainerKind::None,
                     PinType keyType = PinType::String,
-                    bool replicated = false, bool repNotify = false)
+                    bool replicated = false, bool repNotify = false,
+                    bool saveGame = false)
 {
     return VarSlot{ name, type, isArray, access, typeName, std::move(def),
                     &SlotAccess<M>::get, &SlotAccess<M>::set, container, keyType,
-                    replicated, repNotify };
+                    replicated, repNotify, saveGame };
 }
 
 // Enum members are plain ints in C++, so the Value coming back out has to be
@@ -889,9 +893,11 @@ inline std::vector<HorizonCode::CompiledVarInfo> varInfosOf(const VarSlots& slot
     // The replication pair rides along, or a class shipped as generated C++
     // would replicate nothing at all: Runtime::replicatedVariablesOf reads this
     // table for a compiled instance, and an unset flag there means the variable
-    // never reaches a client (plan §6.1).
+    // never reaches a client (plan §6.1). Save Game rides along for the same
+    // reason: Runtime::savedVariablesOf reads this table too.
     for (const VarSlot& s : slots)
-        out.push_back({ s.name, s.type, s.isArray, s.access, s.replicated, s.repNotify });
+        out.push_back({ s.name, s.type, s.isArray, s.access, s.replicated, s.repNotify,
+                        s.saveGame });
     return out;
 }
 

@@ -1,0 +1,31 @@
+          <p>
+            The colours and text size of every widget. A Theme asset carries a
+            light and a dark set of colour roles; <code>set</code> switches the
+            asset, <code>setMode</code> picks between its two sets. Widgets that name
+            their own theme in the designer keep it.
+          </p>
+          <ul>
+            <li>
+              <strong>Mode names are exact:</strong> <code>"Light"</code>,
+              <code>"Dark"</code> or <code>"System"</code>. Anything else, including
+              <code>"dark"</code>, is ignored with a log line.
+            </li>
+            <li>
+              <strong>Preference and mode are two answers.</strong>
+              <code>getPreference</code> returns what was asked for, including
+              <code>"System"</code>; <code>getMode</code> returns what is on screen,
+              only ever Light or Dark. Store the preference, show the mode (see the
+              example under <a href="#theme-setMode"><code>setMode</code></a>). Where
+              the desktop reports nothing, System resolves to Dark.
+            </li>
+            <li>
+              <strong>Font scale is clamped</strong> to 0.5 … 3:
+              <code>setFontScale(5)</code> reads back 3, <code>0.1</code> reads
+              back 0.5.
+            </li>
+            <li>
+              <code>set</code> answers <code>false</code> for a path that does not
+              load and for a Theme asset whose JSON cannot be read; the current
+              theme stays.
+            </li>
+          </ul>

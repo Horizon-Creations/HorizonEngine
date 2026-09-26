@@ -3,6 +3,7 @@
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"     // shared per-tab state map
 #include "EditorHelp.h"           // "Texture Viewer/<label>" scope for the tooltips
+#include "EditorRewards.h"        // the Import button's footer moment
 #include "EditorWidgets.h"        // button, checkbox, WrapText
 #include "ImporterCommon.h"       // Importer::importSource / resolveOutput / sourceFamilyPattern
 #include "TextureImporter.h"      // raw-source decode with the importer's own settings
@@ -164,6 +165,9 @@ void load(AppContext& ctx, const std::string& assetPath, State& st)
 			? nullptr : TextureImporter::decodeFromMemory(bytes.data(), bytes.size());
 		if (!tex) st.error = "The image could not be decoded.";
 		else      takeFrom(st, *tex);
+		// The decode knows nothing of colour space; Import (no option set)
+		// takes the file-name guess, so that is what the asset will hold.
+		st.srgb = Importer::suggestTextureSrgb(assetPath);
 		st.loaded = true;
 		return;
 	}
@@ -280,6 +284,8 @@ void drawInfo(AppContext& ctx, const std::string& assetPath, State& st)
 		const std::string written = importImage(src, root, relDir);
 		if (!written.empty())
 		{
+			// Reward moment (EditorRewards.h): AssetsImported (1).
+			HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported, 1);
 			ctx.contentRefreshPending = true;
 			// This tab becomes the new asset's tab. Not done here: render() runs
 			// with `assetPath` pointing INTO ctx.tabs.
@@ -293,7 +299,9 @@ void drawInfo(AppContext& ctx, const std::string& assetPath, State& st)
 		Importer::resolveOutput({}, relDir, src.stem().string()).path.c_str());
 	if (engineLocked)
 		ImGui::TextDisabled("Engine content is read-only, so this goes to the project instead.");
-	ImGui::TextDisabled("Imported as linear (data). The picture keeps the orientation shown here.");
+	ImGui::TextDisabled("Imported as %s, guessed from the file name. The picture keeps the "
+	                    "orientation shown here.",
+	                    st.srgb ? "sRGB (colour)" : "linear (data)");
 }
 
 void drawCanvas(State& st)
@@ -469,6 +477,13 @@ std::string importImage(const std::filesystem::path& source,
 {
 	if (!isImageSource(source.string())) return {};
 	if (!Importer::importSource(source, root, relDir)) return {};
+	return importedAssetPath(source, root, relDir);
+}
+
+std::string importedAssetPath(const std::filesystem::path& source,
+                              const std::filesystem::path& root,
+                              const std::filesystem::path& relDir)
+{
 	// TextureImporter names its output exactly so (TextureImporter.cpp).
 	const std::string rel = Importer::resolveOutput({}, relDir, source.stem().string()).path;
 	return (root / rel).make_preferred().string();

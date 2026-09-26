@@ -5,6 +5,7 @@
 #include <HorizonScene/TransformHierarchy.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
+#include <HorizonScene/Components/TerrainChunkComponent.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -138,6 +139,39 @@ bool anyHidden(HorizonWorld& world)
 		if (!any && HE::entityVisibility(reg, e) == HE::Visibility::Hidden) any = true;
 	});
 	return any;
+}
+
+std::vector<Entity> selectableEntities(HorizonWorld& world)
+{
+	auto& reg = world.registry();
+	std::vector<Entity> out;
+	// Its own walk rather than forEachInScene: a chunk's subtree is pruned
+	// whole, exactly as the Outliner's collect() returns before recursing.
+	std::function<void(Entity)> walk = [&](Entity e)
+	{
+		if (!reg.valid(e)) return;
+		if (e != world.rootEntity())
+		{
+			if (world.isBuiltin(e) || reg.all_of<TerrainChunkComponent>(e)) return;
+			out.push_back(e);
+		}
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			for (const Entity c : h->children) walk(c);
+	};
+	walk(world.rootEntity());
+	return out;
+}
+
+std::size_t selectAll(HorizonWorld& world, EditorSelection& selection)
+{
+	const Entity primary = selection.primary();
+	const Entity anchor  = selection.anchor();
+	selection.setMany(selectableEntities(world));
+	// add() moves an existing member to the back (= primary) and takes the
+	// anchor with it; the anchor is put back where the user left it.
+	if (primary != entt::null && selection.contains(primary)) selection.add(primary);
+	selection.setAnchor(anchor);
+	return selection.size();
 }
 
 Entity groupSelected(HorizonWorld& world, EditorSelection& selection)

@@ -37,6 +37,8 @@ add_library(HorizonScene SHARED
     src/AnimationStateMachineSystem.cpp
     src/AnimationPreview.cpp
     src/PropertyAnimationSystem.cpp
+    src/SequenceEval.cpp
+    src/SequenceSystem.cpp
     src/NavigationSystem.cpp
     src/ParticleSystem.cpp
     src/SplineGeometry.cpp
@@ -55,6 +57,7 @@ add_library(HorizonScene SHARED
     src/ScriptContext.cpp
     src/ScriptApi.cpp
     src/EngineApi.cpp
+    src/PlayerSettings.cpp
     src/HcCodegen.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp
@@ -73,6 +76,13 @@ target_compile_definitions(HorizonScene
 )
 
 target_compile_features(HorizonScene PUBLIC cxx_std_20)
+
+# SceneSerializer.cpp outgrew the 2^16 COFF sections of a Debug MSVC object
+# (fatal error C1128). CI builds Windows in Release only, so only a local Debug
+# build ever saw it.
+if(MSVC)
+    target_compile_options(HorizonScene PRIVATE /bigobj)
+endif()
 
 target_link_libraries(HorizonScene
     PUBLIC  HorizonCore

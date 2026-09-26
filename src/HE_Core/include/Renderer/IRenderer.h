@@ -797,8 +797,11 @@ public:
     //
     // `outViewProj` reports the view-projection used, so the caller can put its
     // own overlay (origin marker, collider outlines, camera boom) on top in the
-    // same space — same contract as RenderSkeletalPreview. Returns nullptr on
-    // backends without a world-preview path (currently D3D11/D3D12/Vulkan).
+    // same space — same contract as RenderSkeletalPreview; it is GL clip space
+    // (depth -1..1) on every backend, whatever the backend drew with. Returns
+    // nullptr on backends without a world-preview path (the Software one).
+    // D3D12 and Vulkan return the ImGui handle their registrar built, so there
+    // it is also nullptr when no registrar is installed.
     static constexpr uint32_t kWorldPreviewSlots = 4;
     virtual void* RenderWorldPreview(class ContentManager& /*cm*/, HorizonWorld& /*world*/,
                                      uint32_t /*width*/, uint32_t /*height*/,
@@ -891,8 +894,14 @@ public:
     // themselves. The editor installs this callback after ImGui is initialized;
     // the backend creates+uploads the GPU texture and then calls the registrar to
     // turn its native handle into an ImGui ImTextureID.
-    //   D3D12:  a = ID3D12Resource*,  b = nullptr.
-    //   Vulkan: a = VkImageView,      b = VkSampler.
+    //   D3D12:  a = ID3D12Resource*,  b = nullptr for a new ImGui heap slot, or
+    //           a handle this registrar returned earlier: the new resource's
+    //           SRV is written into THAT slot and the same handle comes back
+    //           (a resized world-preview target; ImGui's heap has 64 slots and
+    //           no free path from here). The caller has made sure the GPU no
+    //           longer reads the old view.
+    //   Vulkan: a = VkImageView,      b = VkSampler. (A resized preview target
+    //           rewrites its descriptor set itself — vkUpdateDescriptorSets.)
     void SetImGuiTextureRegistrar(std::function<void*(void*, void*)> fn) { m_imguiTexRegistrar = std::move(fn); }
 
     // ── Night-sky moon texture (optional) ──────────────────────────────────

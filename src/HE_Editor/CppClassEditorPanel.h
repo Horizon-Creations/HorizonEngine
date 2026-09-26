@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include "AssetAutosave.h"
 #include <imgui.h>
 
 struct AppContext;
@@ -29,6 +30,9 @@ namespace CppClassEditorPanel
 	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
 	// state but leaves the tab vector, so the quit guard must ask here.
 	void appendDirtyPaths(std::vector<std::string>& out);
+	// Crash-recovery copies of the unsaved buffers, one per dirty FILE — header
+	// and source separately (EditorUI::appendAssetSnapshots).
+	void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
 
 	// Write BOTH halves of the class (header and source) to disk — the tab's own
 	// Save button only writes the half currently shown, but the close/quit prompt

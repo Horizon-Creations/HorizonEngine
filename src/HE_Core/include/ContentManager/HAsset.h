@@ -183,6 +183,11 @@ inline constexpr uint32_t CHUNK_ANOT = makeChunkId('A','N','O','T'); // root-mot
 // the values as length-prefixed float vectors (appendVec). Absent = an empty
 // clip of no length, which is what a freshly created stub is.
 inline constexpr uint32_t CHUNK_PANM = makeChunkId('P','A','N','M'); // property-animation clip
+// A cinematic Sequence: bindings, and property / skeletal / camera-cut / event /
+// audio tracks. The whole payload is ONE JSON document (HE::sequenceToJson), so
+// the reference scan and the rename retarget see the asset and entity UUIDs in
+// it. Absent = an empty sequence of no length, which is what a stub is.
+inline constexpr uint32_t CHUNK_SEQU = makeChunkId('S','E','Q','U'); // cinematic sequence (JSON)
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Writer

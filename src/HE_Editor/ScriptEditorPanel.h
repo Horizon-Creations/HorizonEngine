@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+#include "AssetAutosave.h"
 #include <imgui.h>
 
 struct AppContext;
@@ -26,6 +27,8 @@ namespace ScriptEditorPanel
 	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
 	// state but leaves the tab vector, so the quit guard must ask here.
 	void appendDirtyPaths(std::vector<std::string>& out);
+	// Crash-recovery copies of the unsaved buffers (EditorUI::appendAssetSnapshots).
+	void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
 
 	// Write the editor's buffer for `assetPath` to disk, exactly like the tab's own
 	// Save button — so the close/quit prompt can save this asset without the user

@@ -1,0 +1,59 @@
+          <p>
+            SQLite databases, as files. <code>open</code> returns a handle for the
+            other rows, 0 when it failed; at most 16 are open at once, and all close
+            when the application ends. The path follows the fs rules: relative
+            lands in the project's Saved folder, <code>..</code> is refused, an
+            absolute path needs the permission. There is no in-memory database:
+            <code>":memory:"</code> is an ordinary file name.
+          </p>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong><code>open</code> always needs the permission <em>Files outside
+              the project</em></strong>, even for a relative path inside the
+              project. A file or folder the user picked in a dialog does not stand
+              in for it, although it does for the <code>fs</code> rows and the
+              editor's permission help says it would (build 7d49d44f). Without the
+              permission <code>open</code> answers 0.
+            </p>
+          </div>
+          <ul>
+            <li>
+              <strong>Values go behind <code>?</code></strong>, as a JSON array in
+              <code>params</code>: <code>'["Ada", 36.5]'</code>. Strings, numbers,
+              <code>true</code>/<code>false</code> (stored as 1/0) and
+              <code>null</code>; a nested array or object is stored as its JSON
+              text. Placeholders the array does not reach are <code>NULL</code>,
+              and a <code>params</code> that is not an array is ignored. Python
+              builds it with <code>json.dumps</code>. Lua has no JSON writer, and
+              <code>horizon.json.set*</code> can overwrite array slots but not add
+              them: start from a template such as <code>'["", 0]'</code> (see the
+              example under <a href="#db-query"><code>query</code></a>).
+            </li>
+            <li>
+              <strong><code>exec</code> runs one statement.</strong> Of
+              <code>"INSERT …; INSERT …"</code> only the first runs, and the answer
+              is still <code>true</code>. <code>exec</code> on a SELECT runs it and
+              throws the rows away.
+            </li>
+            <li>
+              <strong><code>query</code> answers JSON text</strong>: an array with
+              one object per row, keyed by column name. Integers come back as
+              integers, REAL as floats (<code>12.0</code>), NULL and BLOB as
+              <code>null</code>. An empty result and a failed query both give
+              <code>"[]"</code>; <code>lastError</code> tells them apart. More than
+              10 000 rows are cut off, with a note in <code>lastError</code>.
+            </li>
+            <li>
+              <code>lastError</code> is SQLite's own message and empty after a call
+              that worked. On a handle that is not open, <code>exec</code> is
+              <code>false</code>, <code>query</code> <code>"[]"</code> and
+              <code>lastError</code> empty. <code>lastInsertId</code> reads back
+              ids above 2 147 483 647 as 2 147 483 647.
+            </li>
+            <li>
+              SQL cannot reach other files: <code>ATTACH</code>,
+              <code>VACUUM INTO</code> and the pragmas that move SQLite's own files
+              fail with “not authorized”.
+            </li>
+          </ul>

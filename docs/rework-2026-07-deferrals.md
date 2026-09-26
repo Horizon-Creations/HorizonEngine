@@ -42,6 +42,13 @@ other therefore edits the signature every existing `.lua`/`.py` in every user pr
 That is a migration with a compatibility story, not a refactor; this rework pass was
 behaviour-preserving by construction.
 
+> **Stand 24.09.2026 (Thema 79, am Build geprüft):** Zwei Aussagen oben sind überholt. Seit es
+> `PinType::Vec3` gibt, spreizt der Dispatcher einen Vec3-Parameter auf **drei** Zahlen
+> (`luaReadValue`/`pyReadValue`); vier sind es nur noch für `Color`/`Vec4`. Und `ui`, `widget`
+> und `physics` stehen inzwischen in `isScriptGroup()`; nicht freigeschaltet sind nur noch
+> `transform`, `material`, `cursor` und `log`. Maßgeblich für die heutige Aufruf-ABI ist
+> `scripting-reference.html#conventions` (generiert von `scripts/script_api_docs/gen_reference.py`).
+
 **What doing it involves**, roughly in order:
 
 1. A registry row per gameplay function: `params`/`results`/`cppCall`/`invoke`, satisfying

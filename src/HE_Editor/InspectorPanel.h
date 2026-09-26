@@ -62,6 +62,12 @@ namespace InspectorPanel
 	// so a caller tracking unsaved changes cannot detect the edit from the
 	// outside, and an untracked add is a component lost when the tab closes.
 	bool addComponentMenu(HorizonWorld& world, Entity entity, EditorUndo* undo);
+	// The same menu over several entities (the Details panel with a multi-
+	// selection): a row is offered while any of them lacks the component, and
+	// choosing it gives it to every one that does, under one undo snapshot.
+	// Built-ins and handles the registry no longer knows are left out.
+	bool addComponentMenu(HorizonWorld& world, const std::vector<Entity>& entities,
+	                      EditorUndo* undo);
 
 	// Details-panel section label ("Rigid Body") → the scene-format key the
 	// prefab sync speaks ("rigidbody"), or null for a section without one. What

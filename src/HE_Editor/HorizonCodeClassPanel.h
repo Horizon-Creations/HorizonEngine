@@ -3,6 +3,7 @@
 #include <imgui.h>
 #include <string>
 #include <vector>
+#include "AssetAutosave.h"
 
 struct AppContext;
 
@@ -28,6 +29,8 @@ namespace HorizonCodeClassPanel
 	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
 	// state but leaves the tab vector, so the quit guard must ask here.
 	void appendDirtyPaths(std::vector<std::string>& out);
+	// Crash-recovery copies of the unsaved classes (EditorUI::appendAssetSnapshots).
+	void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
 	// Write this tab's graph to disk, exactly like the header's Save button — so
 	// the close/quit prompt can save this asset without the user having to walk
 	// back into the tab. Returns true when nothing is left unsaved for this path

@@ -55,6 +55,8 @@ void releaseLookCapture(SDL_Window* win)
 	s_captureOwner = nullptr;
 }
 
+bool lookCaptured() { return s_rmbCaptured; }
+
 void releaseLookCaptureFor(const void* owner, SDL_Window* win)
 {
 	if (!s_rmbCaptured || s_captureOwner != owner) return;

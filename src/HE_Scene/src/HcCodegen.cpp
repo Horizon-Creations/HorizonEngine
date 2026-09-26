@@ -3264,34 +3264,38 @@ private:
                 {
                     if (v.scope != 0) continue;
                     const TypeRef tr = varType(v);
+                    // The trailing slot() arguments are POSITIONAL groups, each
+                    // written only when it or a later one differs from its
+                    // default — so a slot that uses none of them emits exactly
+                    // as it did before any existed:
+                    //   container pair  the GC reads keyType to reach objects
+                    //                   held only as map KEYS, which `type` —
+                    //                   the value side — never mentions;
+                    //   replication     (plan §6.1) without it a class shipped
+                    //                   as generated C++ replicates nothing,
+                    //                   the hole §6.5 left open;
+                    //   save game       without it entity.saveState would skip
+                    //                   every variable of a compiled class.
+                    const bool setOrMap = tr.kind() == HorizonCode::ContainerKind::Set ||
+                                          tr.kind() == HorizonCode::ContainerKind::Map;
+                    const bool saveGame = v.saveGame && HorizonCode::isSaveableType(v.type);
+                    const bool needRep  = v.replicated || saveGame;
+                    std::string trailing;
+                    if (setOrMap || needRep)
+                        trailing += setOrMap
+                            ? ", hc::ContainerKind::" +
+                              std::string(tr.kind() == HorizonCode::ContainerKind::Set ? "Set" : "Map") +
+                              ", hc::PinType::" + pinName(v.keyType)
+                            : std::string(", hc::ContainerKind::None, hc::PinType::String");
+                    if (needRep)
+                        trailing += std::string(", ") + (v.replicated ? "true" : "false") + ", " +
+                                    (v.replicated && v.repNotify ? "true" : "false");
+                    if (saveGame) trailing += ", true";
                     c += "        hc::slot<&" + m_cls + "::" + m_varMember.at(v.name) + ">(" +
                          strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
                          (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + ", " +
                          strLit(v.typeName) + ", " +
-                         toValueCall(memberDefault(v), tr, ns) +
-                         // The container kind and (for a map) the key type ride
-                         // along: the GC reads keyType to reach objects held only
-                         // as map KEYS, which `type` — the value side — never
-                         // mentions. Written only when it is not the default, so
-                         // scalar and array slots emit exactly as before.
-                         (tr.kind() == HorizonCode::ContainerKind::Set ||
-                          tr.kind() == HorizonCode::ContainerKind::Map
-                              ? ", hc::ContainerKind::" +
-                                std::string(tr.kind() == HorizonCode::ContainerKind::Set ? "Set" : "Map") +
-                                ", hc::PinType::" + pinName(v.keyType)
-                              : std::string()) +
-                         // Replication (plan §6.1). Only when the checkbox is
-                         // ticked, and then the container pair has to be spelt
-                         // out too — these are positional. Without this a class
-                         // shipped as generated C++ replicates nothing, which
-                         // is the hole §6.5 left open.
-                         (v.replicated
-                              ? (tr.kind() == HorizonCode::ContainerKind::Set ||
-                                 tr.kind() == HorizonCode::ContainerKind::Map
-                                     ? std::string()
-                                     : ", hc::ContainerKind::None, hc::PinType::String") +
-                                std::string(", true, ") + (v.repNotify ? "true" : "false")
-                              : std::string()) +
+                         toValueCall(memberDefault(v), tr, ns) + trailing +
                          "),\n";
                 }
                 c += "    };\n    return k;\n}\n\n";

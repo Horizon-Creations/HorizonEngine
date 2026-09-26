@@ -138,8 +138,8 @@ void drawPermissionsPage(AppContext& ctx)
 
 	changed |= ImGui::Checkbox("Network access", &p.allowNetwork);
 	EditorWidgets::helpForLabel("Network access");
-	ImGui::TextDisabled("Reserved: nothing reads this yet. It is here so a project that\n"
-	                    "already answered the question does not have to answer it again.");
+	ImGui::TextDisabled("Covers HTTP Get and HTTP Post. Off, they start nothing and\n"
+	                    "answer ticket 0.");
 
 	if (changed)
 	{

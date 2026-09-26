@@ -1,0 +1,9 @@
+          <p>
+            The system clipboard, shared with every other application. Text only,
+            and no permission is needed. Reading an empty clipboard gives
+            <code>""</code>, as does a clipboard holding something that is not
+            text; <code>hasText</code> is the cheap check for greying out a Paste
+            button. A process without a window (a
+            headless tool) has no clipboard: <code>setText</code> fails with a log
+            line and <code>getText</code> answers <code>""</code>.
+          </p>

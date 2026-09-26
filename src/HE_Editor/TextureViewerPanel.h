@@ -73,6 +73,13 @@ namespace TextureViewerPanel
 	                        const std::filesystem::path& root,
 	                        const std::filesystem::path& relDir);
 
+	// The absolute .hasset path an import of `source` into <root>/<relDir>
+	// writes. For callers that run Importer::importSource themselves (the
+	// colour-space dialog) and then open the tab on what it wrote.
+	std::string importedAssetPath(const std::filesystem::path& source,
+	                              const std::filesystem::path& root,
+	                              const std::filesystem::path& relDir);
+
 	// ── Pure pixel work (no ImGui, no GPU — tests/test_texture_viewer.cpp) ──
 	enum ChannelMask : unsigned
 	{
