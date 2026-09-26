@@ -679,6 +679,95 @@ Bewusst **nicht** in Schritt 6:
 - Skelett-Vorschau ohne Layer und IK: Die Klammer posiert nur den Clip
   (`AnimationPreview::evaluateClipPose`); die Laufzeit legt Layer und IK darauf.
 
+### Stand nach Schritt 7 (Durch die Kamera schauen, MCP, Doku)
+
+Umgesetzt:
+
+- **MCP-Werkzeuge** `McpToolsSequence.cpp`: `sequence_info` (Katalog; eine Sequenz als Dokument
+  samt „wer ist jede Bindung in der offenen Szene“, mit Warnung, wenn ein Schnitt auf ein Entity
+  ohne `CameraComponent` geht) und `sequence_write` (die ganze Sequenz ersetzt). **Einheit ist
+  das Dokument**, nicht ein Werkzeug pro Key: `CHUNK_SEQU` ist schon JSON ohne On-Disk-Index,
+  und eine typische Cutscene-Änderung berührt drei Spuren auf einmal. Das Dokument wird
+  **übersetzt**: Akteure als 32-stellige Entity-UUID wie `entity_list`, Clips und Töne als
+  Inhaltspfad (UUID per `assetUuidOfFile` aus dem Dateikopf, nichts wird geladen), Ziele und
+  Blend-Kurven als Namen. Was `sequence_info` meldet, nimmt `sequence_write` unverändert zurück;
+  eine Referenz ohne Datei bleibt als Hex-UUID schreibbar. **Zweifel ist Ablehnung**, nicht
+  Verwerfen: was der Loader kürzen würde (Zähler `dropped`), ein Slot für zwei Akteure, eine Spur
+  auf einen Slot ohne Bindung, Property/Skelett ohne Akteur, Keys außer Reihenfolge, eine zweite
+  Schnittspur, Inhalt nach dem Ende (`Cinematic::lastContentTime`, dieselbe Regel wie der Tab).
+  Vier Gates wie Material/Partikel (PIE, Collab-Sperre, Engine-Pfad, ungespeicherter Tab);
+  ein sauberer Tab liest neu (`CinematicPanel::reloadByContentPath`). Geschrieben wird über das
+  **geladene** Asset (`getSequenceMutable` + `saveAsset`), die einzige Ladung auf dem Weg;
+  scheitert das Schreiben, wird die residente Kopie zurückgesetzt. Neu anlegen bleibt
+  `asset_create` (seit Schritt 6).
+- **Viewport-Schalter** „Look Through Selected Camera“ im View-Popup des Szenen-Viewports
+  (`ViewportToolbar::lookThroughRows`, Zustand `State::lookThrough`). Gesperrt wird auf das
+  **Kamera-Entity**, nicht auf die Auswahl: Akteure auswählen und verschieben, während die
+  Einstellung stehen bleibt; die Kamera selbst per Gizmo verschieben bewegt das Bild. Die Pose
+  kommt aus `CinematicPreview::cameraViewOf` (herausgezogen aus dem Tab: `worldMatrixOf`, Skala
+  herausgeteilt, FOV samt Rig-Offset), der Override aus `overrideFor`; **beide** Override-Stellen
+  im Viewport (Bild und Pick-Extract) nehmen denselben, sonst landen Gizmo und Pickstrahl neben
+  dem Bild. Echte Navigation beendet die Sperre und übernimmt vorher die Kamerapose in die
+  Editor-Kamera (kein Sprung, die Linse bleibt die des Editors); ein Rechtsklick ohne Bewegung
+  (Kontextmenü) nicht. F, Keypad-Ansicht, Bookmark, Löschen der Kamera, PIE beenden sie ebenfalls.
+  Editor-Symbole sind beim Durchschauen aus (das Bild ist die Einstellung, und das Symbol der
+  eigenen Kamera säße im Auge). Die View-Zelle zeigt „Camera“. Hilfe für beide Menüzeilen.
+- **Handbuchseite „Cutscenes“** (`HorizonEngineDocs/cutscenes.html` im Website-Repo, **Zweig**
+  `claude/sequencer-cinematics`, nicht main, nicht deployt): Asset, Spuren, Tab, Look Through,
+  Sequence Player, Kamera, die acht Funktionen mit Lua/Python-Beispiel, MCP, Grenzen.
+  Seitenleisten, Pager, Startseiten-Kachel, `docs-index.json`. Das Editor-Bündel
+  `EditorDeps/Docs/he-docs.json` ist daraus neu erzeugt; die Hilfe-Einträge `Cinematic/…`,
+  `cinematic.…`, „Sequence Player“, „New Asset/Sequence“ und die zwei Viewport-Zeilen zeigen
+  jetzt auf `cutscenes#…` statt `systems#animation`.
+- **Roadmap-Eintrag** „Sequencer & Cinematics“ (in-progress, 85 %) im selben Website-Zweig.
+
+**Abweichungen, mit Grund:**
+
+1. **Der Viewport-Schalter schaut durch eine Kamera, nicht durch die Sequenz.** §3.6 sprach von
+   „Vorschau durch Schnittkamera“. Das Durchschauen durch den **Schnitt** samt Blend hat seit
+   Schritt 6 das Bild des Cinematic-Tabs, und nur dort stehen die Akteure in der Pose zur Zeit t
+   (die Klammer gilt für einen Render-Aufruf). Im Szenen-Viewport die Klammer jedes Frame
+   anzuwenden hieße, den Szenenstand um jeden Frame herum zu schreiben und zurückzuschreiben,
+   mit Gizmo und Undo dazwischen. Was dem Szenen-Viewport fehlte, war das Grundstück: überhaupt
+   durch eine Szenenkamera rendern, um eine Einstellung einzurichten.
+2. **Kein Werkzeug pro Key**, siehe oben; `McpToolsClip.cpp` war das Muster für Gates und
+   Datei-Lesen, nicht für den Zuschnitt.
+3. **Kein `onChanged`-Haken** wie bei Partikeln: ein laufender Spieler wird per PIE-Gate
+   ausgeschlossen, und Laufzeit wie Tab lesen das geschriebene residente Asset direkt.
+
+Tests:
+
+- `tests/test_mcp_tools_sequence.cpp` (7 Fälle): Schreiben und Laden über einen **frischen**
+  `ContentManager` (Entity-UUID, Clip- und Ton-Pfad, Ziel- und Kurvennamen kommen als die
+  richtigen UUIDs/Enums an, Schnitte sortiert); Lesen → unverändert Schreiben → gleiches
+  Dokument, auch mit einem Clip, dessen Datei fehlt; frischer Stub und Katalog; zwölf
+  Ablehnungen lassen die Datei **byteweise** gleich und rufen keinen Tab-Reload; die vier Gates;
+  Akteur-Auflösung samt Nicht-Kamera-Warnung; ohne Szene „nicht nachgesehen“ statt „fehlt“.
+- `tests/test_cinematic_timeline.cpp`, neuer Fall: Kamera unter gedrehtem, skaliertem Elternteil,
+  **ohne** Propagieren; Position, Blickrichtung (Skala leckt nicht in die Rotation), FOV mit
+  Offset, Near/Far, und der View-Override bildet Auge auf den Ursprung und einen Punkt voraus
+  auf −Z ab; Nicht-Kamera und zerstörte Kamera ergeben nichts.
+- **Negativkontrolle:** ohne die `dropped`-Ablehnung in `sequence_write` werden genau die zwei
+  zugehörigen Ablehnungen rot (unbekannte Spurart, `times`/`values` ungleich lang) samt
+  „Datei byteweise gleich“ und „kein Tab-Reload“.
+- **Vollbau und Suite** (Debug, macOS, `cmake --build . -j8`, `ctest -j4`): Grundlinie auf dem
+  Stand vor Schritt 7 (127718d4) **200/200** grün, danach **201/201** grün (je drei
+  `runtime_size*` übersprungen wie immer), `editor_help_audit` und `test_docs_library` mit dem
+  neuen Bündel grün.
+
+Bewusst **nicht** in Schritt 7:
+
+- **Kein Lauf im echten Editor-Fenster.** Wie in Schritt 6: gebaut, die Pose-Rechnung getestet,
+  die Menüzeile per Hilfe-Audit erfasst, aber der Schalter ist nie mit Maus in einem Fenster
+  benutzt worden. Offen ist insbesondere, ob Pick und Gizmo beim Durchschauen auf Metal/GL genau
+  auf dem Bild liegen und ob die Übernahme der Pose beim Losfliegen ohne sichtbaren Ruck geht.
+- **Kein Deploy** der Website und kein Merge des Website-Zweigs: beides erst mit dem Merge der
+  Engine. Beim Merge kollidiert `EditorDeps/Docs/he-docs.json` sicher (generiert); dann nach dem
+  Website-Merge neu erzeugen (`scripts/build_docs_bundle.py`, **mit** Pillow, sonst werden die
+  Abbildungen in voller Größe kopiert).
+- Die alte Sequencer-Vorschau (§2.6) schreibt weiter dauerhaft in Szene und Material; die
+  Klammer dort einzusetzen bleibt ein eigener kleiner Schritt.
+
 ---
 
 ## 6. Bewusst außen vor (v1)
