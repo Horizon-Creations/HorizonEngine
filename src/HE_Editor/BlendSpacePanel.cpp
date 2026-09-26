@@ -280,6 +280,22 @@ bool BlendSpacePanel::reloadByContentPath(const std::string& contentPath)
 void BlendSpacePanel::appendDirtyPaths(std::vector<std::string>& out)
 { s_states.appendDirtyPaths(out); }
 
+void BlendSpacePanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, PanelState& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			const BlendSpaceAsset* a = cm->getBlendSpace(st.assetId);
+			if (!a) return false;
+			BlendSpaceAsset copy = *a;
+			copy.json = HE::blendSpaceToJson(st.space);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
+
 bool BlendSpacePanel::save(AppContext& ctx, const std::string& path)
 {
 	PanelState* st = s_states.find(path);

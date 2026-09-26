@@ -2,6 +2,7 @@
 #include <imgui.h>
 #include <string>
 #include <vector>
+#include "AssetAutosave.h"
 
 struct AppContext;
 
@@ -31,6 +32,8 @@ namespace BlendSpacePanel
 	bool isDirtyByContentPath(const std::string& contentPath);
 	bool reloadByContentPath(const std::string& contentPath);
 	void appendDirtyPaths(std::vector<std::string>& out);
+	// Crash-recovery copies of the unsaved tabs (EditorUI::appendAssetSnapshots).
+	void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
 	bool save(AppContext& ctx, const std::string& path);
 	void forget(const std::string& path);
 }

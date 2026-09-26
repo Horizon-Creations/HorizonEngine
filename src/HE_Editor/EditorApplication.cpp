@@ -1657,6 +1657,28 @@ void EditorApplication::OnInit()
 		// The file stays where it is for the next interactive start.
 		if (!m_dumpPath.empty()) m_recoveryOffer.reset();
 
+		// The asset tabs' copies change hands too. Unlike the scene's, the
+		// previous project's go unconditionally: endProjectSession has already
+		// asked about every unsaved asset and dropped the panel state, so what
+		// the copies held was saved or knowingly let go.
+		if (!m_assetAutosave.dir().empty()) m_assetAutosave.clear();
+		{
+			const std::string& proj = m_projectManager.currentProject().path;
+			m_assetAutosave.configure(HE::Ed::AssetAutosave::recoveryDirForProject(proj),
+			                          HE::Ed::AssetAutosave::projectRootFor(proj));
+		}
+		m_assetRecoveryOffers.clear();
+		m_reloadTabsAfterPoll.clear();
+		if (m_assetAutosave.promoteStale() > 0)
+		{
+			m_assetRecoveryOffers = m_assetAutosave.pending();
+			HE_LOG_WARN(Editor, "%s",
+				("EditorApplication: " + std::to_string(m_assetRecoveryOffers.size()) +
+				 " asset recovery cop" + (m_assetRecoveryOffers.size() == 1 ? "y" : "ies") +
+				 " from an earlier session waiting in " + m_assetAutosave.pendingDir()).c_str());
+		}
+		if (!m_dumpPath.empty()) m_assetRecoveryOffers.clear();
+
 		// Which scripts this project's text needs, as early as the project is
 		// known: the font atlas is baked ONCE and every backend uploads it once,
 		// so a mask that arrives after the first label was drawn cannot be
@@ -2792,6 +2814,11 @@ void EditorApplication::OnRender(float dt)
 					break;
 				}
 			}
+			// A recovery restore rewrote these files; the poll above has put the
+			// new bytes into the ContentManager, so a tab re-reading now gets them.
+			for (const std::string& path : m_reloadTabsAfterPoll)
+				EditorUI::reloadAssetTabFromDisk(path);
+			m_reloadTabsAfterPoll.clear();
 		}
 	}
 
@@ -4232,9 +4259,15 @@ void EditorApplication::OnRender(float dt)
 	EditorUI::render(ctx, dt);
 	saveOpenTabs(); // persists only when the tab set/active index actually changed
 	// After the UI, so an edit committed this frame is in the world it reads.
-	updateAutosave(static_cast<std::uint64_t>(
-		std::chrono::duration_cast<std::chrono::milliseconds>(
-			std::chrono::steady_clock::now().time_since_epoch()).count()));
+	{
+		const auto nowMs = static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		updateAutosave(nowMs);
+		// And after the UI for the asset tabs too: a Save pressed this frame has
+		// already cleared its tab, so its copy is pruned in the same frame.
+		updateAssetAutosave(nowMs, ctx);
+	}
 
 	// ── FPS counter ───────────────────────────────────────────────────────
 	if (dt > 0.0f)
@@ -8763,6 +8796,26 @@ AppContext EditorApplication::makeContext()
 		},
 		.discardRecovery     = [this]{ m_autosave.discardPending(); m_recoveryOffer.reset(); },
 		.deferRecovery       = [this]{ m_recoveryOffer.reset(); },
+		.assetRecoveryOffers = m_assetRecoveryOffers.empty() ? nullptr : &m_assetRecoveryOffers,
+		.assetRecoveryReplacedDir = m_assetAutosave.replacedDir(),
+		.restoreAssetRecovery = [this](const std::string& key, std::string* error) {
+			const auto written = m_assetAutosave.restorePending(key, error);
+			if (!written) return false;
+			// Answered: the entry goes, whether or not anything shows the file.
+			std::erase_if(m_assetRecoveryOffers,
+			              [&key](const HE::Ed::AssetRecoveryEntry& e) { return e.key == key; });
+			// The ContentManager re-reads a loaded asset only on its hot-reload
+			// poll; run that on the next frame and reload the tabs after it.
+			m_hotReloadTimer = 1.5f;
+			m_reloadTabsAfterPoll.push_back(*written);
+			return true;
+		},
+		.discardAssetRecovery = [this](const std::string& key) {
+			m_assetAutosave.discardPending(key);
+			std::erase_if(m_assetRecoveryOffers,
+			              [&key](const HE::Ed::AssetRecoveryEntry& e) { return e.key == key; });
+		},
+		.deferAssetRecovery  = [this]{ m_assetRecoveryOffers.clear(); },
 		// ── Undo is an EDIT-MODE tool, and is switched off during play ────────
 		// EditorUndo::restore clears the world and reloads it from a snapshot, so
 		// every entt handle is reissued. FOUR play-session tables are keyed on
@@ -9988,6 +10041,23 @@ void EditorApplication::updateAutosave(std::uint64_t nowMs)
 		});
 }
 
+// The asset tabs' tick. Same settings and the same headless exception as the
+// scene's; NOT paused in Play — an asset tab is edited the same in both, and a
+// crash in Play is exactly the one worth a copy. Each panel hands in its dirty
+// files with a writer (EditorUI::appendAssetSnapshots); what left that list
+// since the last frame loses its copy here, which is how a Save anywhere
+// removes it.
+void EditorApplication::updateAssetAutosave(std::uint64_t nowMs, AppContext& ctx)
+{
+	if (!m_projectLoaded || !m_dumpPath.empty()) return;
+	m_assetAutosave.setEnabled(m_editorConfig.AutosaveEnabled);
+	m_assetAutosave.setIntervalMs(static_cast<std::uint64_t>(
+		std::max(m_editorConfig.AutosaveIntervalSec, 0)) * 1000ull);
+	std::vector<HE::Ed::AssetSnapshotSource> dirty;
+	EditorUI::appendAssetSnapshots(ctx, dirty);
+	m_assetAutosave.update(nowMs, dirty);
+}
+
 // "Restore" in the recovery dialog. Not a plain open of the snapshot file: that
 // would make the recovered state the scene's clean state, with the user's real
 // file on disk still holding the older one and nothing in the editor saying so.
@@ -10321,6 +10391,10 @@ void EditorApplication::OnShutdown()
 	// a signal (CrashHandler re-raises and never comes back this way).
 	if (m_quitConfirmed || m_undo.revision() == m_savedRevision)
 		m_autosave.clear();
+	// The asset tabs' copies by the same rule. The OS-close veto asks about
+	// unsaved assets too, so an unasked exit with none left has nothing to lose.
+	if (m_quitConfirmed || EditorUI::unsavedAssetPaths().empty())
+		m_assetAutosave.clear();
 
 	// The MCP listener goes down here for the same reason, one step milder: the
 	// endpoint file it leaves behind names a port and a pid, and a shim that

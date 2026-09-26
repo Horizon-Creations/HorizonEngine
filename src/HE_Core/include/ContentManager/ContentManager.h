@@ -44,6 +44,14 @@ public:
 	// unload or type-name an asset by the only handle a script has, its path.
 	HE::UUID idForPath(const std::string& relativePath) const;
 	bool saveAsset(RuntimeAsset& asset);
+	// The same bytes saveAsset() would write, written to `fullPath` instead —
+	// the editor's crash-recovery copy of an asset tab (AssetAutosave). It is a
+	// COPY, not a save: no onAssetSaved notification (a collaboration session
+	// must never publish a timer's snapshot as an edit), no path resolution,
+	// and the asset's own file is not touched. An asset without a UUID gets one,
+	// so META is never written without; the editor hands in a COPY of the live
+	// asset, so this never changes the one the ContentManager holds.
+	bool writeAssetTo(RuntimeAsset& asset, const std::string& fullPath) const;
 
 	// Fired after saveAsset() has written the file, with (relativePath, fullPath).
 	// A pure notification: ContentManager knows nothing about who listens or why.

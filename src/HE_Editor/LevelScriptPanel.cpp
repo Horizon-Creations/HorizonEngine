@@ -2776,6 +2776,29 @@ bool HorizonCodeClassPanel::reloadFromDisk(const std::string& assetPath)
 
 void HorizonCodeClassPanel::appendDirtyPaths(std::vector<std::string>& out) { s_classStates.appendDirtyPaths(out); }
 
+void HorizonCodeClassPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_classStates.forEach([&](const std::string&, ClassState& st) {
+		if (!st.dirty || st.path.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.path), [cm, &st](const std::string& dest) {
+			const HorizonCodeClassAsset* a = cm->getHorizonCodeClass(st.assetId);
+			if (!a) return false;
+			// saveClassState's encoding, into a copy.
+			HorizonCodeClassAsset copy = *a;
+			copy.graphJson = HorizonCode::toJson(st.graph);
+			copy.baseClass = st.baseClass;
+			if (st.compWorld && st.compRoot != entt::null)
+			{
+				SceneSerializer ser;
+				copy.componentBlob = ser.serializeSubtree(*st.compWorld, st.compRoot);
+			}
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
+
 bool HorizonCodeClassPanel::save(AppContext& ctx, const std::string& path)
 {
 	ClassState* st = s_classStates.find(path);
