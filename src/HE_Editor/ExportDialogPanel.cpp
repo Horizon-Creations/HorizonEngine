@@ -1249,6 +1249,28 @@ void startExport(AppContext& ctx)
                 // saved) must FAIL the export: shipping a project.hcfg that names
                 // a scene that is neither packed nor copied gives a game that
                 // cannot boot, reported as success.
+                //
+                // Placed prefabs are brought up to date with their assets first,
+                // the pass the editor runs when it opens a scene: a scene saved
+                // before its prefab was last pushed would otherwise ship the old
+                // copy — the push only synced the scene that was open.
+                auto syncPrefabsForExport = [&](HorizonWorld& w, const std::string& label)
+                {
+                    SceneSerializer ser;
+                    SceneSerializer::PrefabSyncReport rep;
+                    ser.syncPrefabInstances(w, *ctx.contentManager, &rep);
+                    if (rep.componentsApplied || rep.componentsRemoved ||
+                        rep.entitiesCreated || rep.entitiesRemoved)
+                        Build::log(0, "Prefab placements in " + label + " brought up to date ("
+                                      + std::to_string(rep.componentsApplied + rep.componentsRemoved)
+                                      + " component change(s), "
+                                      + std::to_string(rep.entitiesCreated + rep.entitiesRemoved)
+                                      + " entity change(s)); the scene file itself is unchanged");
+                    if (rep.unresolvedAssets)
+                        Build::log(1, label + ": " + std::to_string(rep.unresolvedAssets)
+                                      + " placed prefab(s) point at an asset that is gone; "
+                                      "shipped as they were last saved");
+                };
                 std::vector<uint8_t> sceneBinary;
                 bool sceneOk = true;
                 if (!scenePath.empty())
@@ -1256,7 +1278,10 @@ void startExport(AppContext& ctx)
                     HorizonWorld sceneWorld;
                     SceneSerializer ser;
                     if (ser.load(sceneWorld, scenePath, SerializeFormat::JSON))
+                    {
+                        syncPrefabsForExport(sceneWorld, sceneName);
                         ser.saveToMemory(sceneWorld, sceneBinary);
+                    }
                     else
                         sceneOk = false;
                 }
@@ -1285,11 +1310,12 @@ void startExport(AppContext& ctx)
                             HorizonWorld w2;
                             SceneSerializer ser2;
                             std::vector<uint8_t> bytes;
-                            if (ser2.load(w2, sit->path(), SerializeFormat::JSON) &&
-                                ser2.saveToMemory(w2, bytes))
+                            const std::string rel =
+                                sit->path().lexically_relative(projectRoot2).generic_string();
+                            const bool loaded = ser2.load(w2, sit->path(), SerializeFormat::JSON);
+                            if (loaded) syncPrefabsForExport(w2, rel);
+                            if (loaded && ser2.saveToMemory(w2, bytes))
                             {
-                                const std::string rel =
-                                    sit->path().lexically_relative(projectRoot2).generic_string();
                                 // Level script → codegen source, keyed by the scene's
                                 // pak UUID (the same key the runtime derives, §9.1).
                                 if (hcCompile)
@@ -1930,6 +1956,9 @@ void startExport(AppContext& ctx)
                     }
                     const bool ok = msg.rfind("OK:", 0) == 0;
                     Build::log(ok ? 0 : 2, msg);
+                    // Reward moment (EditorRewards.h): BuildSucceeded — worker
+                    // thread, so never fired here; the UI-thread edge detector
+                    // on BuildProgressDialog::outcome() picks it up.
                     Build::finish(ok, msg);
                     s_exportRunning.store(false); // last: UI may join right after
                 });

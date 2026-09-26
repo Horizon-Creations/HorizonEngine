@@ -5,6 +5,9 @@
 #include <HorizonRendering/RenderTarget.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/RenderSorter.h>
+#include <HorizonRendering/MaterialScalars.h>
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <memory>
 #include <string>
@@ -613,6 +616,147 @@ TEST_CASE("GeometryPass expands a two-section skinned object into one skinned dr
 	REQUIRE(cmds3.skinnedDrawCalls().size() == 1);
 	CHECK(cmds3.skinnedDrawCalls()[0].sectionIndex == -1);
 	CHECK(cmds3.skinnedDrawCalls()[0].indexCount == 0);
+}
+
+// ─── PBR scalars per slot / per skinned draw ───────────────────────────────
+// D3D11/D3D12/Vulkan draw with the scalars a DrawCall carries and split opaque
+// from blended on them BEFORE drawing, so a slot overridden with another
+// material has to arrive with THAT material's colour and opacity, and a
+// skinned draw with its object's — GL/Metal resolve per draw and never read
+// them, which is why nothing caught the missing copy before.
+
+TEST_CASE("GeometryPass gives each slot draw its own section's scalars, not the object's")
+{
+	RenderWorld world;
+	RenderObject o = makeObj(12, { 0, 0, 0 });
+	o.sections  = twoSlots();
+	o.baseColor = { 0.1f, 0.2f, 0.3f }; o.opacity = 1.0f;   // whole-mesh material
+	o.sections[0].baseColor = { 0.9f, 0.0f, 0.0f }; o.sections[0].metallic = 1.0f;
+	o.sections[1].baseColor = { 0.0f, 0.0f, 0.9f }; o.sections[1].roughness = 0.1f;
+	o.sections[1].opacity   = 0.4f;                           // slot 1 = glass override
+	world.objects.push_back(o);
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, { 0 }, cmds);
+
+	REQUIRE(cmds.drawCalls().size() == 2);
+	const DrawCall& d0 = cmds.drawCalls()[0];
+	const DrawCall& d1 = cmds.drawCalls()[1];
+	CHECK(d0.baseColor == glm::vec3(0.9f, 0.0f, 0.0f));
+	CHECK(d0.metallic  == doctest::Approx(1.0f));
+	CHECK(d0.opacity   == doctest::Approx(1.0f));
+	CHECK(d1.baseColor == glm::vec3(0.0f, 0.0f, 0.9f));
+	CHECK(d1.roughness == doctest::Approx(0.1f));
+	CHECK(d1.opacity   == doctest::Approx(0.4f));
+
+	// …and the opacity split sees it: the glass slot goes blended, the other stays.
+	std::vector<const DrawCall*> opaque, blended;
+	RenderSorter::partitionByOpacity(cmds.drawCalls(), opaque, blended, /*sectionAware=*/true);
+	REQUIRE(opaque.size()  == 1);
+	REQUIRE(blended.size() == 1);
+	CHECK(opaque[0]->sectionIndex  == 0);
+	CHECK(blended[0]->sectionIndex == 1);
+}
+
+TEST_CASE("GeometryPass hands skinned draws their colour and PBR, whole-mesh and per slot")
+{
+	RenderWorld world;
+	SkinnedRenderObject so;
+	so.meshAssetId = HE::UUID::generate();
+	so.baseColor   = { 0.2f, 0.4f, 0.6f };
+	so.metallic    = 0.7f;
+	so.roughness   = 0.3f;
+	so.opacity     = 0.5f;
+	world.skinnedObjects.push_back(so);
+
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, {}, cmds);
+	REQUIRE(cmds.skinnedDrawCalls().size() == 1);
+	const SkinnedDrawCall& d = cmds.skinnedDrawCalls()[0];
+	CHECK(d.baseColor == glm::vec3(0.2f, 0.4f, 0.6f));
+	CHECK(d.metallic  == doctest::Approx(0.7f));
+	CHECK(d.roughness == doctest::Approx(0.3f));
+	CHECK(d.opacity   == doctest::Approx(1.0f));   // never blended, as on GL
+
+	world.skinnedObjects[0].sections = twoSlots();
+	world.skinnedObjects[0].sections[1].baseColor = { 1.0f, 0.5f, 0.0f };
+	CommandBuffer cmds2;
+	GeometryPass{}.execute(world, {}, cmds2);
+	REQUIRE(cmds2.skinnedDrawCalls().size() == 2);
+	CHECK(cmds2.skinnedDrawCalls()[0].baseColor == glm::vec3(1.0f));   // slot 0 unresolved
+	CHECK(cmds2.skinnedDrawCalls()[1].baseColor == glm::vec3(1.0f, 0.5f, 0.0f));
+}
+
+TEST_CASE("resolveWorldMaterialScalars resolves every object, slot and skinned object from its own material")
+{
+	ContentManager cm;
+	auto makeMat = [&](glm::vec3 c, float metal, float rough, float opacity, uint8_t blendMode)
+	{
+		MaterialAsset m;
+		m.type = HE::AssetType::Material;
+		m.baseColor[0] = c.r; m.baseColor[1] = c.g; m.baseColor[2] = c.b;
+		m.metallic  = metal;
+		m.roughness = rough;
+		m.opacity   = opacity;
+		m.blendMode = blendMode;
+		return cm.registerMaterial(std::move(m));
+	};
+	const HE::UUID whole = makeMat({ 0.1f, 0.2f, 0.3f }, 0.0f, 0.8f, 1.0f, 0);
+	const HE::UUID slot  = makeMat({ 0.9f, 0.1f, 0.1f }, 1.0f, 0.2f, 1.0f, 0);
+	const HE::UUID glass = makeMat({ 0.8f, 0.9f, 1.0f }, 0.0f, 0.05f, 1.0f, 2); // Translucent @ 1
+	HE::UUID missing; missing.hi = 0xDEAD; missing.lo = 0xBEEF;                  // never loaded
+
+	RenderWorld world;
+	RenderObject o = makeObj(1, { 0, 0, 0 });
+	o.materialAssetId = whole;
+	o.sections = twoSlots();
+	o.sections[0].materialAssetId = whole;
+	o.sections[1].materialAssetId = slot;     // per-slot override
+	world.objects.push_back(o);
+	RenderObject g = makeObj(2, { 0, 0, 0 });
+	g.materialAssetId = glass;
+	world.objects.push_back(g);
+	RenderObject u = makeObj(3, { 0, 0, 0 });
+	u.materialAssetId = missing;
+	world.objects.push_back(u);
+	SkinnedRenderObject so;
+	so.materialAssetId = slot;                // whole-mesh override on a skinned mesh
+	world.skinnedObjects.push_back(so);
+
+	HE::resolveWorldMaterialScalars(world, &cm);
+
+	const RenderObject& ro = world.objects[0];
+	CHECK(ro.baseColor == glm::vec3(0.1f, 0.2f, 0.3f));
+	CHECK(ro.roughness == doctest::Approx(0.8f));
+	CHECK(ro.sections[0].baseColor == glm::vec3(0.1f, 0.2f, 0.3f));
+	CHECK(ro.sections[1].baseColor == glm::vec3(0.9f, 0.1f, 0.1f));
+	CHECK(ro.sections[1].metallic  == doctest::Approx(1.0f));
+	CHECK(ro.sections[1].roughness == doctest::Approx(0.2f));
+	// Translucent forces the blended class even at opacity 1, like GL/Metal.
+	CHECK(world.objects[1].opacity < RenderSorter::kOpaqueOpacityThreshold);
+	CHECK(world.objects[1].opacity == doctest::Approx(0.998f));
+	// Not loaded: the defaults stay.
+	CHECK(world.objects[2].baseColor == glm::vec3(1.0f));
+	CHECK(world.objects[2].opacity   == doctest::Approx(1.0f));
+	CHECK(world.skinnedObjects[0].baseColor == glm::vec3(0.9f, 0.1f, 0.1f));
+	CHECK(world.skinnedObjects[0].metallic  == doctest::Approx(1.0f));
+
+	// Through the pass: slot 1 draws the override's colour, the glass goes blended.
+	std::vector<uint32_t> sorted = { 0, 1, 2 };
+	CommandBuffer cmds;
+	GeometryPass{}.execute(world, sorted, cmds);
+	REQUIRE(cmds.drawCalls().size() == 4);
+	CHECK(cmds.drawCalls()[1].baseColor == glm::vec3(0.9f, 0.1f, 0.1f));
+	CHECK(RenderSorter::isTransparent(cmds.drawCalls()[2]));
+	REQUIRE(cmds.skinnedDrawCalls().size() == 1);
+	CHECK(cmds.skinnedDrawCalls()[0].baseColor == glm::vec3(0.9f, 0.1f, 0.1f));
+
+	// No content manager: nothing changes (and nothing crashes).
+	RenderWorld w2;
+	w2.objects.push_back(makeObj(4, { 0, 0, 0 }));
+	w2.objects[0].materialAssetId = slot;
+	HE::resolveWorldMaterialScalars(w2, nullptr);
+	CHECK(w2.objects[0].baseColor == glm::vec3(1.0f));
 }
 
 // ─── Depth-only (shadow) batching ───────────────────────────────────────────

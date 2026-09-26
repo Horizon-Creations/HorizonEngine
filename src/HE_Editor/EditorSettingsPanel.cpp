@@ -883,9 +883,24 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			Row::inputInt("Autosave Interval (s)", &cfg.AutosaveIntervalSec);
 			cfg.AutosaveIntervalSec = std::clamp(cfg.AutosaveIntervalSec, 10, 3600);
 		}
-		hint("Writes a copy of the edited scene to the project's Saved/Autosave "
-		     "folder. A clean exit or a real save removes it; after a crash the "
-		     "copy is what the next start can restore from.");
+		hint("Writes a copy of the edited scene and of every asset tab with unsaved "
+		     "edits to the project's Saved/Autosave folder. A clean exit or a real "
+		     "save removes it; after a crash the copy is what the next start can "
+		     "restore from.");
+	});
+
+	row("rewards", "Feedback", [&]{
+		// Read by EditorRewards on every moment and every footer frame, so a
+		// change is live without a restart. See EditorRewards.h for which moments
+		// there are and why they are words in the footer and not a popup.
+		EditorWidgets::checkbox("Success Feedback", &cfg.RewardsEnabled);
+		{
+			SubGroup sub(cfg.RewardsEnabled);
+			EditorWidgets::checkbox("Success Sound", &cfg.RewardsSound);
+		}
+		hint("A saved scene or asset, a finished build and an import say so for a "
+		     "moment in the middle of the footer. Nothing opens, nothing takes focus, "
+		     "and nothing waits for it. The sound is off unless you turn it on.");
 	});
 
 	if (mode == SettingsMode::QuickSettings && shown == 0)
@@ -1865,6 +1880,7 @@ constexpr NavItem kGeneralItems[] = {
 	{ Page::Viewport,       "Viewport" },
 	{ Page::ContentBrowser, "Content Browser" },
 	{ Page::Autosave,       "Autosave" },
+	{ Page::Feedback,       "Feedback" },
 };
 // Everything the EDITOR does that is not the renderer, under one heading. The
 // three groups that used to stand alone here (Collaboration, Source Control,
@@ -1908,7 +1924,8 @@ const char* catalogCategory(Page p)
 	case Page::Viewport:           return "Viewport";
 	case Page::ContentBrowser:     return "Content Browser";
 	case Page::Autosave:           return "Autosave";
-	case Page::Display:            return "Display";
+	case Page::Feedback:           return "Feedback";
+	case Page::Display:           return "Display";
 	case Page::PostProcessing:     return "Post-Processing";
 	case Page::GlobalIllumination: return "Global Illumination";
 	case Page::Effects:            return "Effects";
@@ -2023,7 +2040,9 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.ContentBrowserRefreshRate = 60;
 			cfg.AutosaveEnabled     = true;
 			cfg.AutosaveIntervalSec = 60;
-			cfg.BloomEnabled      = true;
+			cfg.RewardsEnabled      = true;
+			cfg.RewardsSound        = false;
+			cfg.BloomEnabled     = true;
 			cfg.BloomThreshold    = 1.0f;
 			cfg.BloomIntensity    = 0.6f;
 			cfg.SSAOEnabled       = true;

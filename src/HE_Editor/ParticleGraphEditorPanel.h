@@ -4,6 +4,7 @@
 #include <imgui.h>
 #include <string>
 #include <vector>
+#include "AssetAutosave.h"
 
 // The particle emitter node graph editor (HE::ParticleGraph) — a top-level tab
 // opened by double-clicking a ParticleSystem .hasset in the Content Browser.
@@ -35,6 +36,8 @@ namespace ParticleGraphEditorPanel
 	// See AssetPanelState::appendDirtyPaths — a closed dirty tab keeps its
 	// state but leaves the tab vector, so the quit guard must ask here.
 	void appendDirtyPaths(std::vector<std::string>& out);
+	// Crash-recovery copies of the unsaved graphs (EditorUI::appendAssetSnapshots).
+	void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
 
 	// Write this tab's graph to disk, exactly like the header's Save button — so
 	// the close/quit prompt can save this asset without the user having to walk

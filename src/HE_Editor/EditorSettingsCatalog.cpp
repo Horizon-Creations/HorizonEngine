@@ -120,6 +120,17 @@ std::vector<SettingDesc> buildCatalog()
 	                   "autosave", &EditorConfig::AutosaveIntervalSec, 10, 3600,
 	                   "Seconds between recovery snapshots of an edited scene."));
 
+	// ── General ▸ Feedback ──────────────────────────────────────────────────
+	t.push_back(boolRow("rewards.enabled", "Success Feedback", "Feedback", "rewards",
+	                    &EditorConfig::RewardsEnabled,
+	                    "Briefly show \"Saved\", \"Build succeeded\" or \"Imported N "
+	                    "assets\" in the footer when one of those just worked. "
+	                    "Off: nothing is shown or played."));
+	t.push_back(boolRow("rewards.sound", "Success Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSound,
+	                    "Play a short chime with the footer feedback. Needs Success "
+	                    "Feedback on."));
+
 	// ── Editor ▸ Collaboration ──────────────────────────────────────────────
 	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Collaboration",
 	                    "landiscovery", &EditorConfig::CollabLanDiscovery,

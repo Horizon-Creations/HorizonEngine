@@ -1,0 +1,25 @@
+          <p>
+            One random generator for the whole game, shared by every Lua and
+            Python script and every HorizonCode graph. It starts from the same
+            built-in seed at every launch, so a game that never calls
+            <code>seed</code> draws the <strong>same numbers every time it
+            starts</strong>. Seed it once at start: from the clock when every run
+            should differ, from a constant when a bug should happen again.
+          </p>
+          <p>
+            Because it is shared, a <code>seed</code> restarts the sequence for
+            everyone, and another script drawing in between changes the numbers
+            you get. A repeated run matches only if the same scripts draw in the
+            same order. Lua's <code>math.random</code> and Python's
+            <code>random</code> module are separate generators and
+            <code>seed</code> does not touch them.
+          </p>
+          <p>
+            All five are actions, because every call draws a new number (see
+            <a href="#exec-pure">Actions and queries</a>). <code>range</code> can
+            return <code>min</code> but not <code>max</code>;
+            <code>rangeInt</code> includes both ends. Either one swaps the bounds
+            when <code>max</code> is smaller than <code>min</code>.
+            <code>chance</code> treats anything below 0 as 0 and anything above 1
+            as 1.
+          </p>

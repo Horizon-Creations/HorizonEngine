@@ -44,6 +44,9 @@ namespace MacMenuBar
 		Undo, Redo,
 		// The scene's clipboard verbs, on the selected ENTITY (not on text).
 		Cut, Copy, Paste, Duplicate, Delete,
+		// Edit ▸ Select All / Deselect All, on the scene's entities. No key
+		// equivalents either: ⌘A selects the text in a field being edited.
+		SelectAll, DeselectAll,
 		// Edit ▸ Project Settings…: the tab that edits the PROJECT (Preferences
 		// stays in the app menu and edits the editor).
 		ProjectSettings,

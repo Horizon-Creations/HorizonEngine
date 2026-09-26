@@ -1,0 +1,106 @@
+{
+  "_comment": "Lifecycle + event callbacks of a Lua module table / Python horizon.Behavior subclass. Lua names come from ScriptEngine.cpp (pushInstanceMethod), Python names from PyScriptBackend.cpp (PyObject_CallMethod). 'to' = who receives it: 'entity' = only the instance on the entity concerned, 'all' = every text-script instance in the session. gen_reference.py checks both name lists against the source.",
+  "groups": [
+    {
+      "title": "Lifecycle",
+      "items": [
+        { "lua": "onStart(self)", "python": "on_start(self)", "to": "entity",
+          "when": "Once, when the script starts: at the start of play mode, in a packaged game when its scene loads, and for scripts on entities that arrive later (an additive zone). Exposed properties are already set." },
+        { "lua": "onUpdate(self, dt)", "python": "on_update(self, dt)", "to": "entity",
+          "when": "Every frame. <code>dt</code> is the scaled frame time in seconds (0 while the game is paused through <code>horizon.time.setTimeScale(0)</code>)." }
+      ]
+    },
+    {
+      "title": "Physics contacts",
+      "note": "Both entities of a contact get the event, each with the other's id. A contact where either side no longer exists is dropped entirely. A trigger contact fires <em>both</em> pairs: <code>onCollisionEnter</code> and <code>onBeginOverlap</code>, then <code>onCollisionExit</code> and <code>onEndOverlap</code>.",
+      "items": [
+        { "lua": "onCollisionEnter(self, other)", "python": "on_collision_enter(self, other)", "to": "entity",
+          "when": "Another physics body starts touching this entity." },
+        { "lua": "onCollisionExit(self, other)", "python": "on_collision_exit(self, other)", "to": "entity",
+          "when": "It stops touching." },
+        { "lua": "onBeginOverlap(self, other)", "python": "on_begin_overlap(self, other)", "to": "entity",
+          "when": "Something enters a trigger collider on this entity, or this entity enters one." },
+        { "lua": "onEndOverlap(self, other)", "python": "on_end_overlap(self, other)", "to": "entity",
+          "when": "The overlap ends." }
+      ]
+    },
+    {
+      "title": "Input actions",
+      "note": "Actions are the ones defined in the project's input mapping. These go to <em>every</em> script instance, not only to the player's entity; pick the action by <code>name</code>. For polling instead of events use <code>horizon.input.actionDown</code> and friends.",
+      "items": [
+        { "lua": "onInputPressed(self, name)", "python": "on_input_pressed(self, name)", "to": "all",
+          "when": "A button action went down this frame." },
+        { "lua": "onInputReleased(self, name)", "python": "on_input_released(self, name)", "to": "all",
+          "when": "A button action went up this frame." },
+        { "lua": "onInputAxis(self, name, value)", "python": "on_input_axis(self, name, value)", "to": "all",
+          "when": "Every frame, for each 1D axis action, with its current value (not multiplied by <code>dt</code>)." },
+        { "lua": "onInputAxis2D(self, name, x, y)", "python": "on_input_axis2d(self, name, x, y)", "to": "all",
+          "when": "Every frame, for each 2D axis action. Note the lower-case <code>d</code> in the Python name." }
+      ]
+    },
+    {
+      "title": "Timers",
+      "items": [
+        { "lua": "onTimer(self, handle)", "python": "on_timer(self, handle)", "to": "all",
+          "when": "A timer started with <code>horizon.timer.after</code> or <code>horizon.timer.every</code> went off. <code>handle</code> is the value those calls returned; compare it to tell your timers apart, because every instance receives every timer. Timers run on real time, a paused game does not stretch them." }
+      ]
+    },
+    {
+      "title": "Animation notifies",
+      "items": [
+        { "lua": "onAnimationNotify(self, name)", "python": "on_animation_notify(self, name)", "to": "entity",
+          "when": "The entity's animation passed a single-frame notify called <code>name</code>." },
+        { "lua": "onAnimationNotifyBegin(self, name)", "python": "on_animation_notify_begin(self, name)", "to": "entity",
+          "when": "A notify state (a notify with a duration) started." },
+        { "lua": "onAnimationNotifyEnd(self, name)", "python": "on_animation_notify_end(self, name)", "to": "entity",
+          "when": "The notify state ended." }
+      ]
+    },
+    {
+      "title": "In-game UI pointer",
+      "note": "Sent to scripts on entities with an interactive UI element (a button, or any element carrying a script) under the mouse.",
+      "items": [
+        { "lua": "onClick(self)", "python": "on_click(self)", "to": "entity",
+          "when": "The element was clicked: pressed and released over it." },
+        { "lua": "onHoverEnter(self)", "python": "on_hover_enter(self)", "to": "entity",
+          "when": "The pointer moved onto the element." },
+        { "lua": "onHoverExit(self)", "python": "on_hover_exit(self)", "to": "entity",
+          "when": "The pointer left it." }
+      ]
+    },
+    {
+      "title": "Multiplayer session",
+      "note": "Every script instance on the machine concerned receives these. Each event happens on one side only: the host hears players come and go, a client hears its own connection. Measured with host and client in Lua and Python.",
+      "items": [
+        { "lua": "onConnected(self)", "python": "on_connected(self)", "to": "all",
+          "when": "Client only: the connection is up and the host's world has arrived (<code>net.status()</code> is 3). A client gets no <code>onSessionStarted</code>." },
+        { "lua": "onDisconnected(self, reason)", "python": "on_disconnected(self, reason)", "to": "all",
+          "when": "Client only: the host is gone or removed us; the status is now 4. <code>reason</code>: 0 left, 1 connection lost, 2 kicked, 3 refused, 4 other engine version, 5 other project. A kick with anti-cheat off arrives as 1. Not sent for a <code>leave()</code> of our own, and not followed by <code>onSessionEnded</code>." },
+        { "lua": "onPlayerJoined(self, player)", "python": "on_player_joined(self, player)", "to": "all",
+          "when": "Host only: a player joined and has the world. <code>player</code> is their player number (2, 3, …), the one <code>net.playerName</code> takes, not an anti-cheat connection number." },
+        { "lua": "onPlayerLeft(self, player)", "python": "on_player_left(self, player)", "to": "all",
+          "when": "Host only: a player left, was kicked or timed out. <code>net.playerName(player)</code> is already empty." },
+        { "lua": "onSessionStarted(self)", "python": "on_session_started(self)", "to": "all",
+          "when": "Host only: <code>net.host</code> opened a session." },
+        { "lua": "onSessionEnded(self)", "python": "on_session_ended(self)", "to": "all",
+          "when": "<code>net.leave()</code> ended the session on this machine, on the host also when hosting again. Not sent to a client that was removed or lost the host (that is <code>onDisconnected</code>)." }
+      ]
+    },
+    {
+      "title": "Replication and remote calls",
+      "items": [
+        { "lua": "onRep_&lt;var&gt;(self, old)", "python": "on_rep_&lt;var&gt;(self, old)", "to": "entity",
+          "when": "A replicated variable (declared with <code>horizon.net.declareVarInt</code> and its siblings) arrived with a new value on this client. Never called on the host, which set the value itself. <code>&lt;var&gt;</code> is the variable's name <em>verbatim</em> (<code>health</code> gives <code>onRep_health</code> / <code>on_rep_health</code>); <code>old</code> is the previous value: in Python a list <code>[x, y, z]</code> for a Vector, in Lua the number 0 for a Vector (known issue). Read the new one with <code>horizon.net.getVarInt</code> and its siblings. Only on the entity whose variable changed, and only for variables declared with <code>notify</code>. A client that wrote the variable itself gets it again when the host's value comes back." },
+        { "lua": "&lt;name&gt;(self, …)", "python": "&lt;name&gt;(self, …)", "to": "entity",
+          "when": "A remote call from <code>horizon.net.callServer</code>, <code>callClient</code> or <code>callAllClients</code> runs the method of exactly that name on the target entity's script, with the caller's extra arguments. No renaming between languages: a Lua <code>takeDamage</code> is reached by a Python caller as <code>takeDamage</code>. On the host the method runs only for a call from a client: offline and on the host itself these rows reach a HorizonCode class only, see <a href=\"#net-calls\">Remote calls</a>." }
+      ]
+    },
+    {
+      "title": "Anti-cheat",
+      "items": [
+        { "lua": "onCheatDetected(self, reportId)", "python": "on_cheat_detected(self, reportId)", "to": "all",
+          "when": "The host's anti-cheat filed a report. Read it with <code>horizon.anticheat.reportLevel</code>, <code>reportRule</code>, <code>reportPlayer</code> … and override the host's reaction with <code>horizon.anticheat.respond</code> in the same frame. On a client it fires once, when the host is removing it (<code>reportPlayer</code> 0). Never fires in build 7d49d44f, see <a href=\"#anticheat\">Anti-Cheat</a>." }
+      ]
+    }
+  ]
+}

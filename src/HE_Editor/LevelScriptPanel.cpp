@@ -794,6 +794,20 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 			}
 			EditorWidgets::helpForLabel("Notify");
 		}
+
+		// ── Savegames (SaveStateComponent, entity.saveState) ─────────────────
+		// Like Replicated, the checkbox is the whole declaration: saveState
+		// asks Runtime::savedVariablesOf. Disabled for an Object variable with
+		// the reason at hand — the loader and the runtime refuse it again.
+		const bool canSave = HC::isSaveableType(v->type);
+		ImGui::BeginDisabled(!canSave);
+		bool save = v->saveGame && canSave;
+		if (EditorWidgets::checkbox("Save Game", &save)) { v->saveGame = save; edited = true; }
+		ImGui::EndDisabled();
+		if (!canSave && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("%s", "An object reference names something that exists only in "
+			                        "this run; save a name or an id instead.");
+		EditorWidgets::helpForLabel("Save Game");
 	}
 
 	// Single value, or a container of the type. Changing it re-types the matching
@@ -2775,6 +2789,29 @@ bool HorizonCodeClassPanel::reloadFromDisk(const std::string& assetPath)
 
 
 void HorizonCodeClassPanel::appendDirtyPaths(std::vector<std::string>& out) { s_classStates.appendDirtyPaths(out); }
+
+void HorizonCodeClassPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_classStates.forEach([&](const std::string&, ClassState& st) {
+		if (!st.dirty || st.path.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.path), [cm, &st](const std::string& dest) {
+			const HorizonCodeClassAsset* a = cm->getHorizonCodeClass(st.assetId);
+			if (!a) return false;
+			// saveClassState's encoding, into a copy.
+			HorizonCodeClassAsset copy = *a;
+			copy.graphJson = HorizonCode::toJson(st.graph);
+			copy.baseClass = st.baseClass;
+			if (st.compWorld && st.compRoot != entt::null)
+			{
+				SceneSerializer ser;
+				copy.componentBlob = ser.serializeSubtree(*st.compWorld, st.compRoot);
+			}
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
 
 bool HorizonCodeClassPanel::save(AppContext& ctx, const std::string& path)
 {

@@ -1,0 +1,58 @@
+          <p>
+            Creating, finding and removing entities. An entity is an integer id
+            (see <a href="#entity-ids">Entity ids</a>). When a destroyed entity's
+            slot is reused, the newcomer gets a different, larger id, so a kept
+            id never points at a stranger; it just stops existing. Guard it with
+            <code>exists</code>. <code>exists(0)</code> is
+            <code>false</code>: 0 is what <code>findByName</code> returns when it
+            finds nothing, even though it is also the scene root.
+          </p>
+          <ul>
+            <li>
+              <code>destroy</code> takes the entity's children with it.
+            </li>
+            <li>
+              <code>spawnClass</code> and <code>spawnClassRotated</code> need the
+              running game or play mode; they return 0 and log the reason when the
+              class path is unknown or not an Entity class. The path is the class
+              asset's content path, as in the Content Browser.
+            </li>
+            <li>
+              <code>self</code>, <code>selfObject</code> and the <code>Ref</code>
+              rows (<code>instance</code>, <code>owned</code>,
+              <code>destroyObject</code>) belong to HorizonCode objects. A Lua or
+              Python script is not one, so <code>self()</code> and
+              <code>selfObject()</code> always return 0 there; use
+              <code>self.entityId</code> / <code>self.entity_id</code>.
+            </li>
+            <li>
+              Visibility only affects drawing. An entity with nothing to draw
+              always reports <code>getVisible</code> = <code>true</code>, also
+              right after <code>setVisible(e, false)</code>.
+            </li>
+          </ul>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue: <code>spawn</code> creates no transform.</strong>
+              The new entity has a name and a parent, but no Transform component,
+              so <code>setPosition</code>, <code>setRotation</code> and
+              <code>setScale</code> on it do nothing and <code>getPosition</code>
+              returns <code>0, 0, 0</code> (measured on build 7d49d44f, also for
+              the flat <code>horizon.spawn</code>). Until this is fixed, spawn a
+              class with <code>spawnClass</code>, or give an entity its position
+              by placing it in the scene.
+            </p>
+          </div>
+          <p>
+            <code>saveState</code>, <code>hasSavedState</code> and
+            <code>applySavedState</code> store an entity's pose and visibility in
+            the active <a href="#save">save</a>, keyed by the entity's stable
+            UUID, so the same entity finds its state again after the scene is
+            loaded anew. Three things must hold, and each missing one logs its own
+            warning and returns <code>false</code>: the game is running (play
+            mode or the packaged game), a save is active
+            (<code>save.create</code> / <code>save.load</code>), and the entity
+            has an enabled <em>Save State</em> component, whose checkboxes choose
+            what is stored. Nothing is on disk until <code>save.write</code>.
+          </p>

@@ -675,6 +675,8 @@ struct AnimationClipAsset : public RuntimeAsset
 // Animates scalar properties of TransformComponent (position/rotation/scale)
 // and MaterialAsset (baseColor, metallic, roughness, opacity) on a per-entity basis.
 
+// Stored as a byte in PANM and in a Sequence's JSON, so new targets go at the
+// END and existing values never move.
 enum class PropTarget : uint8_t
 {
     PosX = 0, PosY, PosZ,
@@ -682,7 +684,18 @@ enum class PropTarget : uint8_t
     ScaleX, ScaleY, ScaleZ,
     MatColorR, MatColorG, MatColorB,
     MatMetallic, MatRoughness, MatOpacity,
+    // CameraComponent::fovDegrees — for camera moves in a cinematic Sequence.
+    CameraFov,
+    // Draw or not: the `visible` flag of every renderable the entity has (mesh,
+    // skinned mesh, light, particles, rope, trail). NOT InactiveComponent — a
+    // hidden actor keeps its script and collider. A switch, not a value: it is
+    // sampled as a STEP (PropertyAnimationSystem::isStepTarget), >= 0.5 is on.
+    Visible,
 };
+// The last target this build knows. A byte past it in a file is a newer build's
+// target, and a reader drops that track rather than casting it into an enum
+// value with no enumerator.
+inline constexpr PropTarget kLastPropTarget = PropTarget::Visible;
 
 // One animated scalar stream: times + one float value per keyframe.
 struct PropertyAnimChannel
@@ -696,4 +709,89 @@ struct PropertyAnimClipAsset : public RuntimeAsset
 {
     float                             duration = 0.0f;
     std::vector<PropertyAnimChannel>  channels;
+};
+
+// ── Cinematic Sequence ────────────────────────────────────────────────────────
+// Several actors, camera cuts, skeletal clips, events and sound on ONE clock —
+// the layer above a PropertyAnimClip, which is one entity animating itself.
+// Design: docs/sequencer-cinematics-plan.md. Stored as JSON in CHUNK_SEQU
+// (Sequence/SequenceJson.h says why JSON); evaluated by HE::SequenceEval.
+
+enum class SequenceTrackKind : uint8_t
+{
+    Property  = 0,   // one scalar channel on one actor (`channel`)
+    Skeletal  = 1,   // clip sections on one actor's skeleton (`sections`)
+    CameraCut = 2,   // which camera is live, and how it gets there (`cuts`)
+    Event     = 3,   // named notifies, fired while playing (`events`)
+    Audio     = 4,   // sounds started while playing (`audio`)
+};
+
+// "No actor": a track, cut or section that names nobody.
+inline constexpr uint16_t kSequenceNoBinding = 0xFFFF;
+
+// An actor the sequence drives. Tracks refer to it by `slot`, never by index,
+// so removing a binding does not silently re-aim every track after it.
+// Resolved by EntityIdComponent UUID; `name` is only the label the editor shows
+// when the actor is missing. A null `entityId` is a slot the player fills at
+// runtime (the spawned player character).
+struct SequenceBinding
+{
+    uint16_t    slot = 0;
+    std::string name;
+    HE::UUID    entityId;
+};
+
+struct SequenceSkeletalSection
+{
+    HE::UUID clipId;
+    float    start      = 0.0f;   // sequence time the section begins …
+    float    end        = 0.0f;   // … and ends
+    float    clipOffset = 0.0f;   // clip time at `start`
+    float    playRate   = 1.0f;
+    bool     loop       = false;  // wrap the clip, or hold its last frame
+};
+
+// The same three curves, in the same order, as HE::BlendCurve (HorizonScene/
+// CameraPose.h), which HE_Core cannot include. SequenceEval.cpp static_asserts
+// that the two lists agree.
+enum class SequenceBlendCurve : uint8_t { Linear = 0, SmoothStep = 1, EaseOut = 2 };
+
+struct SequenceCameraCut
+{
+    float              time    = 0.0f;
+    uint16_t           binding = kSequenceNoBinding;   // none = back to the gameplay camera
+    float              blendIn = 0.0f;                 // seconds; 0 = a hard cut
+    SequenceBlendCurve curve   = SequenceBlendCurve::SmoothStep;
+};
+
+// Plays at the track's actor (spatial), or flat when the track has none — the
+// cutscene's music and narration belong to nobody's position.
+struct SequenceAudioSection
+{
+    HE::UUID assetId;
+    float    start  = 0.0f;
+    float    volume = 1.0f;
+    float    pitch  = 1.0f;
+};
+
+// One track. Only the payload that matches `kind` is meaningful; the others
+// stay empty. Flat rather than a variant so a track can be built, copied and
+// compared without visiting it.
+struct SequenceTrack
+{
+    SequenceTrackKind                    kind    = SequenceTrackKind::Property;
+    uint16_t                             binding = kSequenceNoBinding;
+    PropertyAnimChannel                  channel;    // Property
+    std::vector<SequenceSkeletalSection> sections;   // Skeletal
+    std::vector<SequenceCameraCut>       cuts;       // CameraCut
+    std::vector<AnimationNotify>         events;     // Event — the notify struct, fired by the notify rule
+    std::vector<SequenceAudioSection>    audio;      // Audio
+};
+
+struct SequenceAsset : public RuntimeAsset
+{
+    float                        duration  = 0.0f;
+    float                        frameRate = 30.0f;   // snapping in the editor only; evaluation is continuous
+    std::vector<SequenceBinding> bindings;
+    std::vector<SequenceTrack>   tracks;
 };
