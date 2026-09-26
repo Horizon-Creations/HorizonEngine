@@ -1958,7 +1958,7 @@ void startExport(AppContext& ctx)
                     Build::log(ok ? 0 : 2, msg);
                     // Reward moment (EditorRewards.h): BuildSucceeded — worker
                     // thread, so never fired here; the UI-thread edge detector
-                    // on BuildProgressDialog::snapshot() picks it up.
+                    // on BuildProgressDialog::outcome() picks it up.
                     Build::finish(ok, msg);
                     s_exportRunning.store(false); // last: UI may join right after
                 });

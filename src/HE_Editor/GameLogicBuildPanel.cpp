@@ -198,7 +198,7 @@ void render(AppContext& ctx)
 			  + " — it loads the next time you press Play.";
 		Build::log(0, done);
 		// Reward moment (EditorRewards.h): BuildSucceeded — NOT fired here; the
-		// UI-thread edge detector on BuildProgressDialog::snapshot() sees it.
+		// UI-thread edge detector on BuildProgressDialog::outcome() sees it.
 		Build::finish(true, done);
 		HE::Ed::notify(HE::Ed::NoteLevel::Info, "Game logic built", done);
 	}
