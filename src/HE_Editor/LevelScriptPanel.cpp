@@ -794,6 +794,20 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 			}
 			EditorWidgets::helpForLabel("Notify");
 		}
+
+		// ── Savegames (SaveStateComponent, entity.saveState) ─────────────────
+		// Like Replicated, the checkbox is the whole declaration: saveState
+		// asks Runtime::savedVariablesOf. Disabled for an Object variable with
+		// the reason at hand — the loader and the runtime refuse it again.
+		const bool canSave = HC::isSaveableType(v->type);
+		ImGui::BeginDisabled(!canSave);
+		bool save = v->saveGame && canSave;
+		if (EditorWidgets::checkbox("Save Game", &save)) { v->saveGame = save; edited = true; }
+		ImGui::EndDisabled();
+		if (!canSave && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("%s", "An object reference names something that exists only in "
+			                        "this run; save a name or an id instead.");
+		EditorWidgets::helpForLabel("Save Game");
 	}
 
 	// Single value, or a container of the type. Changing it re-types the matching

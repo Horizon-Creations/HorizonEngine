@@ -1512,6 +1512,14 @@ namespace
 	  "Remember whether it was visible — a door that was opened, a pickup that "
 	  "was taken.",
 	  "", "scenes#scene-files" },
+	{ "Save State/Script Variables", "",
+	  "Remember the variables of this entity's HorizonCode class that are ticked "
+	  "Save Game in the class. Which ones travel is decided there, per variable; "
+	  "this box only says whether they do for this entity. A variable the class "
+	  "no longer has is skipped when loading, one the save does not have keeps "
+	  "its value. Lua and Python scripts are not captured — keep their state in "
+	  "the save's own fields (save.set / save.get).",
+	  "", "scenes#scene-files" },
 	{ "UI Canvas/Active", "",
 	  "Off hides the whole canvas and everything on it, and it stops receiving "
 	  "clicks.",
@@ -6601,6 +6609,14 @@ namespace
 	  "calls its own handler after the Set. Untick and tick again and the "
 	  "existing function is kept, not duplicated.",
 	  "", "horizoncode#functions" },
+	{ "Script Variable/Save Game", "",
+	  "Part of the savegame. When an entity running this class has a Save State "
+	  "component, entity.saveState writes this variable's value into the active "
+	  "save and entity.applySavedState sets it back, by name. Unticked variables "
+	  "are never saved. An Object variable cannot be ticked: a reference points "
+	  "at something that exists only in this run — save a name or an id "
+	  "instead.",
+	  "", "horizoncode#functions" },
 	{ "Script Variable/Position##vdef", "Default Position",
 	  "The position this Transform variable starts at. It is a starting value, "
 	  "not a binding to anything.",
@@ -6877,13 +6893,19 @@ namespace
 	  "Adds one named constant to this enum. It takes the next free value — one "
 	  "past the highest already in the list, never below 0 — and both the name "
 	  "and the number can be changed afterwards. Two entries sharing a name are "
-	  "flagged in red, because the generated constants would be ambiguous.",
+	  "flagged in red, because the generated constants would be ambiguous. "
+	  "Renaming an entry and saving keeps the old name as an alias (hover the "
+	  "name to see it), so graphs and defaults that still spell it find the "
+	  "entry; scripts that spell it in their source have to be updated by hand.",
 	  "", "" },
 	{ "Type Editor/+ Add Field", "Add Field",
 	  "Adds one field to this struct or savegame template. Give it a type, "
 	  "optionally a container, and a default. A duplicate field name is flagged "
 	  "in red, and a struct whose fields lead back to itself refuses to save — "
-	  "that cycle would never finish.",
+	  "that cycle would never finish. Renaming a field and saving keeps the old "
+	  "name as an alias (\"Formerly\" under the name), so savegames and graphs "
+	  "written before the rename still load into it. Remove and re-add loses "
+	  "them; rename instead.",
 	  "", "" },
 	{ "Type Editor/Set as Project Default", "Set as Project Default",
 	  "Makes this savegame template the one a script gets when it creates a save "

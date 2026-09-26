@@ -306,6 +306,9 @@ namespace entity {
     // play mode (PIE/packaged — the SceneSerializer owns edit-mode persistence),
     // an active save, and an enabled SaveStateComponent — anything missing
     // fails LOUD (log + false). hasSavedState only needs an active save.
+    // Script state: the entity's HorizonCode class's Save Game variables
+    // (Variable::saveGame) ride along under "vars" when saveScriptVars is on;
+    // Lua/Python script state is not captured (see SaveStateComponent.h).
     bool saveState(Ctx&, Entity e);
     bool hasSavedState(Ctx&, Entity e);
     bool applySavedState(Ctx&, Entity e);
