@@ -12,6 +12,7 @@
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
 #include <HorizonRendering/GiBvh.h>
+#include <HorizonRendering/GIProbeGrid.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
@@ -1197,19 +1198,20 @@ private:
 	// sun-lit); no border-texel wrap (accepts minor bilinear seams at probe tile
 	// edges). All are straightforward follow-ups once the base algorithm is
 	// visually verified, not correctness bugs.
-	static constexpr float kGIProbeSpacing      = 4.0f; // world units between probes
-	static constexpr int   kGIMaxProbesPerAxis  = 10;   // caps total probes/memory/cost
 	static constexpr int   kGIProbeOctSize      = 8;    // texels/side of each probe's octahedral tile (no border)
 	glm::vec3 m_giGridOrigin  = glm::vec3(0.0f); // world-space position of probe (0,0,0)
 	glm::ivec3 m_giGridCounts = glm::ivec3(0);   // probe counts per axis
+	float m_giProbeSpacing = HE::kGIProbeMinSpacing; // world units between probes; grows with the scene (GIProbeGrid.h)
 	int   m_giProbeCount   = 0;                  // gridCounts.x*y*z
 	int   m_giProbesPerRow = 0;                  // atlas tile layout (ceil(sqrt(probeCount)))
-	bool  m_giProbeGridBuilt = false;            // built lazily once; NOT rebuilt on scene change (v1 limitation)
+	bool  m_giProbeGridBuilt = false;            // built lazily; refit when the scene's geometry leaves it
+	uint64_t m_giGridSceneSig = 0;               // GIProbeSceneSignature at the last fit/check
+	bool  m_giGridRecheck = false;               // a mesh was rebuilt → re-check the fit
 	int   m_giProbeUpdateCursor = 0;             // round-robin index into [0, probeCount) for frame-sliced updates
 	void* m_giProbeUpdatePipeline = nullptr;     // id<MTLComputePipelineState>
 	void* m_giIrradianceAtlas = nullptr;         // id<MTLTexture> RGBA16F, read_write (in-place EMA blend)
 	void* m_giVisibilityAtlas = nullptr;         // id<MTLTexture> RG16F (mean, mean^2 hit distance), read_write
-	void  EnsureGIProbeGrid();                   // computes the grid from the scene AABB, once
+	void  EnsureGIProbeGrid();                   // fits the grid to the scene AABB; refits on geometry change
 	void  EnsureGIProbePipeline();                // builds m_giProbeUpdatePipeline once, only if m_giSupported
 	void  EnsureGIProbeAtlas();                   // (re)allocates the 2 atlas textures for the current grid
 	void  DestroyGIProbeAtlas();

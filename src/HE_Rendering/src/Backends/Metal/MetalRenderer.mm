@@ -8079,8 +8079,12 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 
 void MetalRenderer::EnsureGIProbeGrid()
 {
-	if (m_giProbeGridBuilt) return;
 	if (m_renderWorld.objects.empty()) return; // wait for real geometry before committing to a grid
+	// Once built, only re-check when the scene's GEOMETRY changed (objects
+	// added/removed, or a mesh rebuilt via InvalidateMesh) — never on motion
+	// alone (GIProbeGrid.h).
+	const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
+	if (m_giProbeGridBuilt && sig == m_giGridSceneSig && !m_giGridRecheck) return;
 
 	// m_renderWorld was re-extracted by EncodeGIAccelBuild's m_extractor.extract()
 	// call earlier this frame, which creates BRAND NEW RenderObjects whose
@@ -8094,21 +8098,12 @@ void MetalRenderer::EnsureGIProbeGrid()
 		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
 			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
 
-	// KNOWN v1 LIMITATION: this only unions m_renderWorld.objects (the generic
-	// mesh-asset RenderObject set) — Landscape/Terrain chunks are a separate
-	// rendering system (see [[terrain-lod-chunking]]) and are NOT included, so a
-	// scene dominated by terrain will get a probe grid sized to its small props
-	// only, leaving the terrain surfaces themselves outside grid coverage (they
-	// sample zero indirect diffuse — safe, just visibly under-lit, not a crash).
-	// Confirmed empirically: the ShadowValidation test scene's large background
-	// surface stays outside the grid even after the worldBounds refresh above.
-	// Extending probe coverage to terrain is a follow-up, not in this slice.
-	//
-	// Union of every object's (now-correct) world bounds.
-	HE::AABB bounds;
-	for (const RenderObject& obj : m_renderWorld.objects)
-		if (obj.worldBounds.isValid())
-			bounds.expand(obj.worldBounds);
+	// Landscape/Terrain chunks are ordinary MeshComponent entities, so they ARE
+	// in m_renderWorld.objects (an older note here said otherwise). What kept a
+	// terrain out of the grid was the fixed 4 m × 10-probe (36 m) cap and the
+	// one-shot fit — both replaced by the shared FitGIProbeGrid (Thema 80).
+	int unresolved = 0;
+	HE::AABB bounds = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
 	if (!bounds.isValid())
 	{
 		// Fallback: a modest default volume around the origin so GI still does
@@ -8116,16 +8111,25 @@ void MetalRenderer::EnsureGIProbeGrid()
 		bounds.min = glm::vec3(-10.0f);
 		bounds.max = glm::vec3(10.0f);
 	}
+	m_giGridSceneSig = sig;
+	m_giGridRecheck  = unresolved > 0; // keep looking until every mesh resolved
 
-	const glm::vec3 extent = bounds.max - bounds.min;
-	glm::ivec3 counts;
-	counts.x = std::clamp(static_cast<int>(std::ceil(extent.x / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
-	counts.y = std::clamp(static_cast<int>(std::ceil(extent.y / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
-	counts.z = std::clamp(static_cast<int>(std::ceil(extent.z / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
+	if (m_giProbeGridBuilt)
+	{
+		HE::GIProbeGridFit current;
+		current.origin = m_giGridOrigin; current.counts = m_giGridCounts; current.spacing = m_giProbeSpacing;
+		if (!HE::GIProbeGridNeedsRefit(current, bounds)) return;
+		// EnsureGIProbeAtlas below reallocates the atlases for the new counts;
+		// in-flight command buffers keep their own references to the old ones.
+	}
+	// Centred like GL/D3D/Vulkan (this port used to anchor at bounds.min).
+	const HE::GIProbeGridFit fit = HE::FitGIProbeGrid(bounds);
+	if (!fit.valid()) return;
 
-	m_giGridOrigin        = bounds.min;
-	m_giGridCounts        = counts;
-	m_giProbeCount        = counts.x * counts.y * counts.z;
+	m_giGridOrigin        = fit.origin;
+	m_giGridCounts        = fit.counts;
+	m_giProbeSpacing      = fit.spacing;
+	m_giProbeCount        = fit.probeCount();
 	m_giProbesPerRow      = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(m_giProbeCount))));
 	m_giProbeUpdateCursor = 0;
 	m_giProbeGridBuilt    = true;
@@ -8134,8 +8138,8 @@ void MetalRenderer::EnsureGIProbeGrid()
 
 	HE_LOG_INFO(RHI, "%s",
 		("MetalRenderer: GI probe grid built — " + std::to_string(m_giProbeCount) + " probes ("
-		 + std::to_string(counts.x) + "x" + std::to_string(counts.y) + "x" + std::to_string(counts.z)
-		 + "), spacing " + std::to_string(kGIProbeSpacing)).c_str());
+		 + std::to_string(fit.counts.x) + "x" + std::to_string(fit.counts.y) + "x" + std::to_string(fit.counts.z)
+		 + "), spacing " + std::to_string(m_giProbeSpacing)).c_str());
 }
 
 void MetalRenderer::EnsureGIProbePipeline()
@@ -8239,13 +8243,13 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 		}
 
 		GIProbeParamsCPU pp{};
-		pp.gridOrigin = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
+		pp.gridOrigin = glm::vec4(m_giGridOrigin, m_giProbeSpacing);
 		pp.gridCounts = glm::vec4(static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
 		                         static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
 		// Max ray distance: comfortably covers the grid's own diagonal so rays can
 		// reach across the whole probed volume; hysteresis matches the shadow
 		// pass's temporal-accumulation feel (converges over ~1-2s at 60fps).
-		const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
+		const float maxDist = glm::length(glm::vec3(m_giGridCounts) * m_giProbeSpacing) + m_giProbeSpacing;
 		pp.rayParams    = glm::vec4(maxDist, 0.92f, static_cast<float>(m_giProbeUpdateCursor), static_cast<float>(budget));
 		// Same dominant-directional pick as EncodeGIShadowRays: the one-bounce
 		// estimate must bounce the light the scene is actually lit by, with THAT
@@ -12590,7 +12594,7 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
 	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult
 	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
-	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
@@ -12940,7 +12944,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	scene.aaParams = glm::vec4(m_specularAA ? m_specularAAStrength : 0.0f, 0.0f, 0.0f, 0.0f);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
-	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 
@@ -13623,7 +13627,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// shaders, so heLitP's indirect diffuse matches theirs instead of
 	// falling back to flat ambient while GI is on.
 	{
-		const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+		const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 		                                      m_giGridCounts, m_giProbesPerRow,
 		                                      m_giIndirectIntensity);
 		for (int k = 0; k < 4; ++k)
@@ -14663,7 +14667,7 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// re-enables the whole block in both kernels).
 		const float hist = 0.0f;
 		rp.skyAmbient   = glm::vec4(m_renderWorld.ambient, hist);
-		rp.gridOrigin   = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
+		rp.gridOrigin   = glm::vec4(m_giGridOrigin, m_giProbeSpacing);
 		rp.gridCounts   = glm::vec4(static_cast<float>(m_giGridCounts.x),
 		                            static_cast<float>(m_giGridCounts.y),
 		                            static_cast<float>(m_giGridCounts.z),
@@ -15339,6 +15343,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					m_giSwBlasDirty = true;
 				}
 			}
+			// A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the
+			// scene box without changing which objects exist → re-check the fit.
+			if (!m_pendingMeshInvalidations.empty()) m_giGridRecheck = true;
 			m_pendingMeshInvalidations.clear();
 
 			// Same for textures rewritten in place (landscape weightmap paints).

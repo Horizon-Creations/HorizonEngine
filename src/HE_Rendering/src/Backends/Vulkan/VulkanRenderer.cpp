@@ -4853,6 +4853,9 @@ void VulkanRenderer::processPendingInvalidations()
             m_skeletalMeshCache.erase(it);
         }
     }
+    // A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the scene
+    // box without changing which objects exist → re-check the probe grid fit.
+    if (!m_pendingMeshInval.empty()) m_giGridRecheck = true;
     m_pendingMeshInval.clear();
 }
 
@@ -5117,7 +5120,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                     m_ssaoRanThisFrame ? 1.0f : 0.0f, 0.0f);
         // giParams.y == 1 iff runGi() completed this frame (mask + atlases hold
         // valid data and the scene set's bindings 4-6 point at them).
-        f.giGridOrigin  = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
+        f.giGridOrigin  = glm::vec4(m_giGridOrigin, m_giProbeSpacing);
         f.giGridCounts  = glm::vec4(float(m_giGridCounts.x), float(m_giGridCounts.y),
                                     float(m_giGridCounts.z), float(m_giProbesPerRow));
         f.giParams      = glm::vec4(m_giIndirectIntensity, m_giRanThisFrame ? 1.0f : 0.0f, 0.0f, 0.0f);
@@ -7951,31 +7954,68 @@ void VulkanRenderer::destroyGiTargets()
     m_giHistValid = false;
 }
 
-// One-shot probe-grid fit over the scene AABB. m_renderWorld was extracted by
-// runGi() with real mesh bounds refreshed (same lesson as GL/Metal: the
-// extractor seeds only fallback unit cubes).
+// Probe-grid fit over the scene AABB (GIProbeGrid.h: the spacing grows so the
+// whole scene — a 100 m terrain included — fits the probe budget).
+// m_renderWorld was extracted by runGi() with real mesh bounds refreshed (same
+// lesson as GL/Metal: the extractor seeds only fallback unit cubes). Once
+// built, the fit is only re-checked when the scene's geometry changed
+// (signature or an InvalidateMesh), and replaced when the scene left it.
 void VulkanRenderer::ensureGiProbeGrid()
 {
-    if (m_giProbeGridBuilt) return;
     if (m_renderWorld.objects.empty()) return;
+    const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
+    if (m_giProbeGridBuilt && sig == m_giGridSceneSig && !m_giGridRecheck) return;
 
-    HE::AABB sceneBox;
-    for (const RenderObject& obj : m_renderWorld.objects)
-        if (obj.worldBounds.isValid())
-            sceneBox.expand(obj.worldBounds);
+    int unresolved = 0;
+    const HE::AABB sceneBox = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
     if (!sceneBox.isValid()) return;
+    m_giGridSceneSig = sig;
+    m_giGridRecheck  = unresolved > 0; // keep looking until every mesh resolved
 
-    const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGIProbeSpacing);
-    m_giGridCounts = glm::ivec3(
-        std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
-        std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
-        std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis));
-    const glm::vec3 gridSpan = glm::vec3(m_giGridCounts - 1) * kGIProbeSpacing;
-    m_giGridOrigin     = sceneBox.center() - gridSpan * 0.5f;
-    m_giProbeCount     = m_giGridCounts.x * m_giGridCounts.y * m_giGridCounts.z;
+    if (m_giProbeGridBuilt)
+    {
+        HE::GIProbeGridFit current;
+        current.origin = m_giGridOrigin; current.counts = m_giGridCounts; current.spacing = m_giProbeSpacing;
+        if (!HE::GIProbeGridNeedsRefit(current, sceneBox)) return;
+        // New counts → new atlas. Frames in flight still sample the old one
+        // and every slot's scene set points at it: drain the GPU (refits are
+        // rare), free it, and park bindings 5/6 on the white fallback until
+        // runGi() rewrites them for the slot it records. This frame's command
+        // buffer has not touched the atlas yet — runGi() calls us first.
+        vkDeviceWaitIdle(m_device);
+        destroyGiProbeAtlas();
+        VkDescriptorImageInfo white{ m_ssaoSampler, m_ssaoWhiteView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+        {
+            if (!m_frameUBO[i].set || !m_ssaoWhiteView) continue;
+            VkWriteDescriptorSet ws[2]{};
+            for (uint32_t b = 0; b < 2; ++b)
+            {
+                ws[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                ws[b].dstSet          = m_frameUBO[i].set;
+                ws[b].dstBinding      = 5 + b;   // irradiance, visibility atlas
+                ws[b].descriptorCount = 1;
+                ws[b].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                ws[b].pImageInfo      = &white;
+            }
+            vkUpdateDescriptorSets(m_device, 2, ws, 0, nullptr);
+        }
+    }
+    const HE::GIProbeGridFit fit = HE::FitGIProbeGrid(sceneBox);
+    if (!fit.valid()) return;
+
+    m_giGridCounts     = fit.counts;
+    m_giGridOrigin     = fit.origin;
+    m_giProbeSpacing   = fit.spacing;
+    m_giProbeCount     = fit.probeCount();
     m_giProbesPerRow   = std::min(m_giProbeCount, 32);
     m_giProbeCursor    = 0;
     m_giProbeGridBuilt = true;
+    HE_LOG_INFO(RHI, "%s",
+                ("VulkanRenderer: GI probe grid " + std::to_string(m_giGridCounts.x) + "x"
+                 + std::to_string(m_giGridCounts.y) + "x" + std::to_string(m_giGridCounts.z)
+                 + " (" + std::to_string(m_giProbeCount) + " probes), spacing "
+                 + std::to_string(m_giProbeSpacing)).c_str());
 }
 
 void VulkanRenderer::ensureGiProbeAtlas()
@@ -8139,10 +8179,10 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     if (probesActive)
     {
         GiProbeUBOData pu{};
-        pu.gridOrigin = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
+        pu.gridOrigin = glm::vec4(m_giGridOrigin, m_giProbeSpacing);
         pu.gridCounts = glm::vec4(float(m_giGridCounts.x), float(m_giGridCounts.y),
                                   float(m_giGridCounts.z), float(m_giProbesPerRow));
-        const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
+        const float maxDist = glm::length(glm::vec3(m_giGridCounts) * m_giProbeSpacing) + m_giProbeSpacing;
         pu.rayParams  = glm::vec4(maxDist, 0.92f, float(m_giProbeCursor), float(probeBudget));
         pu.skyAmbient = glm::vec4(m_renderWorld.ambient, 0.0f);
         const HE::PackedLightArray pl = HE::BuildPackedLightArray(m_renderWorld);

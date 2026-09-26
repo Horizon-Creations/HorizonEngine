@@ -7651,7 +7651,7 @@ void OpenGLRenderer::PushGISceneUniforms(const GISceneLocs& L, bool active, bool
 	glUniform1i(L.irrTex,    6);
 	glUniform1i(L.visTex,    7);
 	glUniform1i(L.localTex,  8);
-	glUniform4f(L.gridOrigin, m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGIProbeSpacing);
+	glUniform4f(L.gridOrigin, m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, m_giProbeSpacing);
 	glUniform4f(L.gridCounts, static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
 	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
 	glUniform1f(L.intensity, m_giIndirectIntensity);
@@ -7888,39 +7888,49 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	m_giReflHistValid = false;
 }
 
-// One-shot probe-grid fit over the scene AABB (Metal lesson: refresh
-// worldBounds from the real mesh bounds first — the extractor leaves them
-// invalid or proxy-sized, so unioning them raw undersizes the grid).
+// Probe-grid fit over the scene AABB (GIProbeGrid.h: spacing grows so the
+// whole scene — a 100 m terrain included — fits the probe budget). Metal
+// lesson: refresh worldBounds from the real mesh bounds first — the extractor
+// leaves them invalid or proxy-sized, so unioning them raw undersizes the grid.
+// Once built, the fit is only re-checked when the scene's geometry changed
+// (signature or an InvalidateMesh), and replaced when the scene left it.
 void OpenGLRenderer::EnsureGIProbeGrid()
 {
-	if (m_giProbeGridBuilt) return;
 	if (m_renderWorld.objects.empty()) return;
+	const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
+	if (m_giProbeGridBuilt && sig == m_giGridSceneSig && !m_giGridRecheck) return;
 
-	HE::AABB sceneBox;
 	for (RenderObject& obj : m_renderWorld.objects)
-	{
 		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
 			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
-		if (obj.worldBounds.isValid())
-			sceneBox.expand(obj.worldBounds);
-	}
+	int unresolved = 0;
+	const HE::AABB sceneBox = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
 	if (!sceneBox.isValid()) return;
+	m_giGridSceneSig = sig;
+	m_giGridRecheck  = unresolved > 0; // keep looking until every mesh resolved
 
-	const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGIProbeSpacing);
-	m_giGridCounts = glm::ivec3(
-		std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
-		std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
-		std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis));
-	const glm::vec3 gridSpan = glm::vec3(m_giGridCounts - 1) * kGIProbeSpacing;
-	m_giGridOrigin   = sceneBox.center() - gridSpan * 0.5f;
-	m_giProbeCount   = m_giGridCounts.x * m_giGridCounts.y * m_giGridCounts.z;
+	if (m_giProbeGridBuilt)
+	{
+		HE::GIProbeGridFit current;
+		current.origin = m_giGridOrigin; current.counts = m_giGridCounts; current.spacing = m_giProbeSpacing;
+		if (!HE::GIProbeGridNeedsRefit(current, sceneBox)) return;
+		DestroyGIProbeAtlas(); // new counts → new atlas; probes re-converge
+	}
+	const HE::GIProbeGridFit fit = HE::FitGIProbeGrid(sceneBox);
+	if (!fit.valid()) return;
+
+	m_giGridCounts   = fit.counts;
+	m_giGridOrigin   = fit.origin;
+	m_giProbeSpacing = fit.spacing;
+	m_giProbeCount   = fit.probeCount();
 	m_giProbesPerRow = std::min(m_giProbeCount, 32);
 	m_giProbeCursor  = 0;
 	m_giProbeGridBuilt = true;
 	HE_LOG_INFO(RHI, "%s",
 	            ("OpenGLRenderer: GI probe grid " + std::to_string(m_giGridCounts.x) + "x"
 	             + std::to_string(m_giGridCounts.y) + "x" + std::to_string(m_giGridCounts.z)
-	             + " (" + std::to_string(m_giProbeCount) + " probes)").c_str());
+	             + " (" + std::to_string(m_giProbeCount) + " probes), spacing "
+	             + std::to_string(m_giProbeSpacing)).c_str());
 }
 
 void OpenGLRenderer::EnsureGIProbeAtlas()
@@ -8195,7 +8205,7 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	            static_cast<float>(lights.count));
 	glUniform4f(loc("uSunColor"), lightColorIntensity.r, lightColorIntensity.g, lightColorIntensity.b, 0.0f);
 	glUniform4f(loc("uAmbient"), m_renderWorld.ambient.r, m_renderWorld.ambient.g, m_renderWorld.ambient.b, 0.0f);
-	glUniform4f(loc("uGridOrigin"), m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGIProbeSpacing);
+	glUniform4f(loc("uGridOrigin"), m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, m_giProbeSpacing);
 	glUniform4f(loc("uGridCounts"), static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
 	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
 	glUniform4f(loc("uReflParams"), m_giReflMaxDistance, m_giReflMaxRoughness,
@@ -8384,10 +8394,10 @@ void OpenGLRenderer::DispatchGIProbeUpdate()
 	glBindImageTexture(1, m_giVisAtlas, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RG16F);
 
 	auto loc = [&](const char* n) { return glGetUniformLocation(m_giProbeCSProgram, n); };
-	glUniform4f(loc("uGridOrigin"), m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, kGIProbeSpacing);
+	glUniform4f(loc("uGridOrigin"), m_giGridOrigin.x, m_giGridOrigin.y, m_giGridOrigin.z, m_giProbeSpacing);
 	glUniform4f(loc("uGridCounts"), static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
 	            static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
-	const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
+	const float maxDist = glm::length(glm::vec3(m_giGridCounts) * m_giProbeSpacing) + m_giProbeSpacing;
 	glUniform4f(loc("uRayParams"), maxDist, 0.92f,
 	            static_cast<float>(m_giProbeCursor), static_cast<float>(budget));
 
@@ -12140,6 +12150,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			m_giBlasDirty = true;
 		}
 	}
+	// A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the scene
+	// box without changing which objects exist → re-check the probe grid fit.
+	if (!m_pendingMeshInvalidations.empty()) m_giGridRecheck = true;
 	m_pendingMeshInvalidations.clear();
 
 	// Textures rewritten in place (landscape weightmap paints) drop their cached
@@ -12916,7 +12929,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			lit.giGridOrigin[0] = m_giGridOrigin.x;
 			lit.giGridOrigin[1] = m_giGridOrigin.y;
 			lit.giGridOrigin[2] = m_giGridOrigin.z;
-			lit.giGridOrigin[3] = kGIProbeSpacing;
+			lit.giGridOrigin[3] = m_giProbeSpacing;
 			lit.giGridCounts[0] = static_cast<float>(m_giGridCounts.x);
 			lit.giGridCounts[1] = static_cast<float>(m_giGridCounts.y);
 			lit.giGridCounts[2] = static_cast<float>(m_giGridCounts.z);

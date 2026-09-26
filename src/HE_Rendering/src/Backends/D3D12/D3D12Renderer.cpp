@@ -11,6 +11,7 @@
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/D3D11/Vulkan/Metal-SW)
+#include <HorizonRendering/GIProbeGrid.h>    // GI: probe-grid fit + refit policy (all backends)
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/GL)
 #include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
@@ -3109,6 +3110,9 @@ struct D3D12RendererImpl
             // policy as the GL/D3D11 ports' InvalidateMesh handling).
             if (giBlasCache.count(id))
                 destroyGiAccel();
+            // A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the
+            // scene box without changing which objects exist → re-check the fit.
+            giGridRecheck = true;
 #if HE_D3D12_DXR
             // The DXR BLAS cache is per-mesh — retire just this entry (frames
             // in flight may still trace against it); it rebuilds lazily.
@@ -5342,8 +5346,6 @@ struct D3D12RendererImpl
         glm::vec4 baseColor;
         int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
     };
-    static constexpr float kGIProbeSpacing     = 4.0f;
-    static constexpr int   kGIMaxProbesPerAxis = 10;
     static constexpr int   kGIProbeOctSize     = 8;
 
     bool  giSupported          = true;  // FL 11.0 guarantees CS 5.0; pipeline failure clears it
@@ -5434,8 +5436,11 @@ struct D3D12RendererImpl
 
     glm::vec3  giGridOrigin{ 0.0f };
     glm::ivec3 giGridCounts{ 0 };
+    float giProbeSpacing = HE::kGIProbeMinSpacing; // metres; grows with the scene (GIProbeGrid.h)
     int  giProbeCount = 0, giProbesPerRow = 0, giProbeCursor = 0;
     bool giProbeGridBuilt = false;
+    uint64_t giGridSceneSig = 0;     // GIProbeSceneSignature at the last fit/check
+    bool     giGridRecheck  = false; // a mesh was rebuilt → re-check the fit
     ComPtr<ID3D12Resource> giIrrTex, giVisTex, giIrrPrevTex, giVisPrevTex;
     D3D12_RESOURCE_STATES  giIrrState     = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES  giVisState     = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -6119,34 +6124,60 @@ struct D3D12RendererImpl
         device->CreateShaderResourceView(res, &sv, h);
     }
 
-    // One-shot probe-grid fit over the scene AABB (worldBounds are refreshed
-    // from the real mesh bounds in DrawScene before this runs).
+    // Probe-grid fit over the scene AABB (GIProbeGrid.h: the spacing grows so
+    // the whole scene — a 100 m terrain included — fits the probe budget).
+    // worldBounds are refreshed from the real mesh bounds in DrawScene before
+    // this runs. Once built, the fit is only re-checked when the scene's
+    // geometry changed (signature or an InvalidateMesh), and replaced when the
+    // scene left it.
     void ensureGiProbeGrid(const RenderWorld& rw)
     {
-        if (giProbeGridBuilt) return;
         if (rw.objects.empty()) return;
+        const uint64_t sig = HE::GIProbeSceneSignature(rw.objects);
+        if (giProbeGridBuilt && sig == giGridSceneSig && !giGridRecheck) return;
 
-        HE::AABB sceneBox;
-        for (const RenderObject& obj : rw.objects)
-            if (obj.worldBounds.isValid())
-                sceneBox.expand(obj.worldBounds);
+        int unresolved = 0;
+        const HE::AABB sceneBox = HE::GIProbeSceneBounds(rw.objects, &unresolved);
         if (!sceneBox.isValid()) return;
+        giGridSceneSig = sig;
+        giGridRecheck  = unresolved > 0; // keep looking until every mesh resolved
 
-        const glm::vec3 padded = sceneBox.extents() + glm::vec3(kGIProbeSpacing);
-        giGridCounts = glm::ivec3(
-            std::clamp(static_cast<int>(std::ceil(padded.x * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
-            std::clamp(static_cast<int>(std::ceil(padded.y * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis),
-            std::clamp(static_cast<int>(std::ceil(padded.z * 2.0f / kGIProbeSpacing)) + 1, 2, kGIMaxProbesPerAxis));
-        const glm::vec3 gridSpan = glm::vec3(giGridCounts - 1) * kGIProbeSpacing;
-        giGridOrigin   = sceneBox.center() - gridSpan * 0.5f;
-        giProbeCount   = giGridCounts.x * giGridCounts.y * giGridCounts.z;
+        if (giProbeGridBuilt)
+        {
+            HE::GIProbeGridFit current;
+            current.origin = giGridOrigin; current.counts = giGridCounts; current.spacing = giProbeSpacing;
+            if (!HE::GIProbeGridNeedsRefit(current, sceneBox)) return;
+            retireGiProbeAtlas(); // new counts → new atlas; probes re-converge
+        }
+        const HE::GIProbeGridFit fit = HE::FitGIProbeGrid(sceneBox);
+        if (!fit.valid()) return;
+
+        giGridCounts   = fit.counts;
+        giGridOrigin   = fit.origin;
+        giProbeSpacing = fit.spacing;
+        giProbeCount   = fit.probeCount();
         giProbesPerRow = std::min(giProbeCount, 32);
         giProbeCursor  = 0;
         giProbeGridBuilt = true;
         HE_LOG_INFO(RHI, "%s",
                     ("D3D12Renderer: GI probe grid " + std::to_string(giGridCounts.x) + "x"
                      + std::to_string(giGridCounts.y) + "x" + std::to_string(giGridCounts.z)
-                     + " (" + std::to_string(giProbeCount) + " probes)").c_str());
+                     + " (" + std::to_string(giProbeCount) + " probes), spacing "
+                     + std::to_string(giProbeSpacing)).c_str());
+    }
+
+    // Refit: frames in flight may still read the old atlases, so they are
+    // retired past them rather than released. The heap slots pointing at them
+    // are rewritten by ensureGiProbeAtlas only after its waitForAllFrames().
+    void retireGiProbeAtlas()
+    {
+        const int retireN = static_cast<int>(k_frameCount) + 2;
+        auto retire = [&](ComPtr<ID3D12Resource>& t)
+        { if (t) m_retiredTextures.emplace_back(std::move(t), retireN); };
+        retire(giIrrTex); retire(giVisTex); retire(giIrrPrevTex); retire(giVisPrevTex);
+        giProbeGridBuilt = false;
+        giProbeCount = 0;
+        giProbeCursor = 0;
     }
 
     // Creates the octahedral probe atlases (irradiance RGBA16F + visibility
@@ -6154,7 +6185,7 @@ struct D3D12RendererImpl
     // zero-init a DEFAULT-heap texture at creation, so the zeros travel through
     // an upload buffer recorded on the CURRENT command list — the probe kernel
     // EMA-blends against the previous value, so undefined contents would poison
-    // the first update round. Happens once per session.
+    // the first update round. Happens once per grid fit (a refit recreates it).
     void ensureGiProbeAtlas(ID3D12GraphicsCommandList* cl)
     {
         if (giIrrTex || giProbeCount <= 0 || !cl) return;
@@ -6495,9 +6526,9 @@ struct D3D12RendererImpl
             glm::vec4 gridOrigin, gridCounts, rayParams, sunDirRadius, sunColor, skyAmbient;
             glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
         } pcb{};
-        pcb.gridOrigin = glm::vec4(giGridOrigin, kGIProbeSpacing);
+        pcb.gridOrigin = glm::vec4(giGridOrigin, giProbeSpacing);
         pcb.gridCounts = glm::vec4(glm::vec3(giGridCounts), float(giProbesPerRow));
-        const float maxDist = glm::length(glm::vec3(giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
+        const float maxDist = glm::length(glm::vec3(giGridCounts) * giProbeSpacing) + giProbeSpacing;
         pcb.rayParams = glm::vec4(maxDist, 0.92f, float(giProbeCursor), float(budget));
         glm::vec3 towardLight, lightColorIntensity;
         rw.dominantDirectionalLight(towardLight, lightColorIntensity);
@@ -8337,7 +8368,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
-        f.giGridOrigin = glm::vec4(p.giGridOrigin, D3D12RendererImpl::kGIProbeSpacing);
+        f.giGridOrigin = glm::vec4(p.giGridOrigin, p.giProbeSpacing);
         f.giGridCounts = glm::vec4(glm::vec3(p.giGridCounts), float(p.giProbesPerRow));
         // x is the gate the built-in scene shader's reflection cascade tests;
         // the roughness fade happens there, with the exact shading roughness,

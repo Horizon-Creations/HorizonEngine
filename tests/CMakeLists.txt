@@ -41,6 +41,7 @@ add_executable(he_tests
     test_culling.cpp
     test_world_preview_grid.cpp
     test_gi_bvh.cpp
+    test_gi_probe_grid.cpp
     test_undo.cpp
     test_editor_selection.cpp
     test_editor_marquee.cpp
