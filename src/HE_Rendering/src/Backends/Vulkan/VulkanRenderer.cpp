@@ -18,6 +18,7 @@
 #include <functional>
 #include <Diagnostics/Logger.h>
 #include <HorizonRendering/ClipSpace.h>
+#include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D11/D3D12)
 #include <HorizonRendering/WorldPreviewGrid.h>  // RenderWorldPreview: grid, background, dump
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/LightPacking.h>
@@ -408,6 +409,9 @@ void VulkanRenderer::Render()
         vkDeviceWaitIdle(m_device);
         createViewportResources(m_viewportReqW, m_viewportReqH);
     }
+    // TAA targets to the mode in force — before any command of this frame
+    // names them; only waits for the GPU on a toggle, never per frame.
+    syncTaaTargets();
 
     // Project shadow resolution changed (SetShadowSettings): rebuild the
     // cascade images here, before any command of this frame names them and
@@ -476,7 +480,9 @@ void VulkanRenderer::Render()
         // No viewport: the scene goes straight into the swapchain pass below, so
         // the cascades are fit to the swapchain aspect and the decal pre-pass
         // fills the swapchain-sized depth. The same two calls as before the
-        // split, with `useViewport` resolved to false.
+        // split, with `useViewport` resolved to false. No post chain on this
+        // path, so nothing would resolve a TAA jitter.
+        m_taaFrame = false;
         EncodeShadowMap(cmd, float(std::max(m_swapExtent.width,  1u))
                            / float(std::max(m_swapExtent.height, 1u)));
         m_decalDepthActive = &m_decalDepth;
@@ -559,6 +565,20 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     // only in Render(): RenderSceneImage records this frame on its own.
     m_instCursor = 0;
 
+    const bool useHDR = m_postFxReady && m_hdrFB && m_ldrFB && m_fxaaFB;
+
+    // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
+    // Chosen HERE, before the first pass: the decal depth pre-pass, the sky and
+    // the scene each rebuild the camera matrix from their own extraction, and
+    // all of them must rasterise with the same offset. Only a frame whose post
+    // chain resolves it (the HDR branch below) is jittered; the targets were
+    // synced to the mode at the top of Render (syncTaaTargets).
+    m_taaFrame = useHDR && taaWanted() && m_taaHistoryFB[0] && m_taaVelocityFB
+              && m_taaW == m_viewportW && m_taaH == m_viewportH;
+    if (m_taaFrame)
+        m_taaJitter = HE::taaJitter(m_taaFrameIndex++);
+    m_taaSceneSorted = false;
+
     // Cascade shadow maps first, in their own render passes (before the scene
     // pass), fit against the aspect of the target the scene will be drawn into.
     EncodeShadowMap(cmd, float(m_viewportW) / float(m_viewportH));
@@ -574,7 +594,6 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
     clears[0].color        = { { 0.0f, 0.0f, 0.0f, 1.0f } };
     clears[1].depthStencil = { 1.0f, 0 };
 
-    const bool useHDR = m_postFxReady && m_hdrFB && m_ldrFB && m_fxaaFB;
     if (useHDR)
     {
         // ── Ray-traced GI (software compute): G-buffer + shadow rays +
@@ -617,6 +636,12 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
         DrawScene(cmd, m_viewportW, m_viewportH, /*hdr=*/true);
         vkCmdEndRenderPass(cmd);
         m_hdrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        // ── TAA velocity (A2): its own pass right after the scene, against the
+        // depth the scene pass stored. Runs on every TAA frame, even an empty
+        // one — the pass's clear is what keeps last frame's motion out of the
+        // resolve.
+        if (m_taaFrame) encodeTaaVelocity(cmd);
 
         // Forward SSR: keep a full-res copy of the finished HDR frame
         // (opaque + sky + transparency) — NEXT frame's trace reprojects its
@@ -712,15 +737,53 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
         m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+        // ── TAA resolve (A3): (ldr, history[prev], velocity) → history[cur] ─
+        // On the tonemapped image, so a single bright HDR sample cannot poison
+        // the next dozen frames. The AA slot below then sharpens history[cur]
+        // instead of filtering ldr. Every history image is SHADER_READ_ONLY
+        // outside this block (primed at creation, re-parked after each write).
+        VkDescriptorSet aaSet = m_postFxDS[4];
+        const bool aaTaa = m_taaFrame && m_taaHistoryFB[0]
+                        && m_taaW == m_viewportW && m_taaH == m_viewportH;
+        if (aaTaa)
+        {
+            const int cur  = m_taaHistoryCur;
+            const int prev = 1 - cur;
+            VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+            bi.renderPass = m_postFxBlitF8; bi.framebuffer = m_taaHistoryFB[cur];
+            bi.renderArea.extent = { m_viewportW, m_viewportH };
+            vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_taaResolvePipe);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                m_taaResolvePipeLayout, 0, 1, &m_taaResolveDS[cur], 0, nullptr);
+            const float p[4] = { 1.0f / float(m_viewportW), 1.0f / float(m_viewportH),
+                                 m_taaHistoryValid ? HE::kTaaHistoryBlend : 0.0f, 0.0f };
+            vkCmdPushConstants(cmd, m_taaResolvePipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, p);
+            VkViewport vp{ 0, 0, (float)m_viewportW, (float)m_viewportH, 0, 1 }; vkCmdSetViewport(cmd, 0, 1, &vp);
+            VkRect2D   sc{ { 0, 0 }, { m_viewportW, m_viewportH } };          vkCmdSetScissor(cmd, 0, 1, &sc);
+            vkCmdDraw(cmd, 3, 1, 0, 0);
+            vkCmdEndRenderPass(cmd);
+            runPostFXBarrier(cmd, m_taaHistoryImage[cur],
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            aaSet = m_taaSharpenDS[cur];
+            // This frame's result IS next frame's history: flip the ping-pong.
+            m_taaHistoryCur   = prev;
+            m_taaHistoryValid = true;
+        }
+
         // ── AA resolve: ldrSRV → viewportFB ───────────────────────────
         // Always runs — it is what writes m_viewportImage. The AA method
-        // only decides which pipeline does it (FXAA vs. passthrough).
-        { const float p[4]={1.0f/float(m_viewportW),1.0f/float(m_viewportH),0,0};
+        // only decides which pipeline does it (FXAA vs. passthrough); TAA's
+        // slot is the sharpen the temporal blur asks for.
+        { const float p[4]={1.0f/float(m_viewportW),1.0f/float(m_viewportH),
+                            aaTaa ? m_aaSharpness : 0.0f, 0};
           const VkPipeline aaPipe =
+              aaTaa                                                ? m_taaSharpenPipe :
               (m_aaMethod == HE::AAMethod::Off  && m_aaBlitPipe) ? m_aaBlitPipe :
               (m_aaMethod == HE::AAMethod::SMAA && m_smaaPipe)   ? m_smaaPipe   :
                                                                    m_fxaaPipe;
-          blitPass(m_postFxFinalRP, m_fxaaFB, m_viewportW, m_viewportH, aaPipe, m_postFxDS[4], p); }
+          blitPass(m_postFxFinalRP, m_fxaaFB, m_viewportW, m_viewportH, aaPipe, aaSet, p); }
         m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         // ── UI canvas: composite onto viewport image (editor path) ──────
@@ -802,6 +865,9 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
     }
+    // The jitter belongs to this frame's viewport passes only; whatever draws
+    // after them (a world preview, the swapchain path) rasterises unjittered.
+    m_taaFrame = false;
 }
 
 IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
@@ -825,6 +891,10 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // by doing nothing. The shaders come from the cross-compiler, hence the #if.
     c.supportsScreenSpaceReflections = m_postFxReady;
 #endif
+    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the editor
+    // viewport's post chain — false only if a TAA shader (.spv) or pipeline is
+    // missing. The swapchain path renders unjittered either way (m_taaFrame).
+    c.supportsTemporalAA = taaReady();
     return c;
 }
 
@@ -3110,8 +3180,10 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
         if (vkCreateFramebuffer(m_device, &fci, nullptr, &d.fb) != VK_SUCCESS) { d.fb = VK_NULL_HANDLE; return; }
     }
 
+    // Jittered on a TAA frame: the decals reconstruct against this depth and
+    // rasterise with the scene's (jittered) matrix — both must agree.
     const glm::mat4 camClip =
-        HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+        taaJittered(HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view);
 
     VkClearValue clear{};
     clear.depthStencil = { 1.0f, 0 };
@@ -3175,7 +3247,7 @@ void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, const DecalDepth& d,
     vkCmdSetScissor(cmd, 0, 1, &sc);
 
     const glm::mat4 viewProj =
-        HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+        taaJittered(HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view);
     const glm::mat4 invViewProj = glm::inverse(viewProj);
 
     // The forward variant shades the decal itself. Same source as the material
@@ -3400,7 +3472,10 @@ void VulkanRenderer::createPostFXPipelines()
         atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         atts[1].format = m_depthFormat; atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
-        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        // STORE, not DONT_CARE: the TAA velocity pass (m_taaVelocityRP) loads
+        // this depth to test against. Load/store ops do not take part in
+        // render-pass compatibility, so every HDR pipeline stays valid.
+        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         VkAttachmentReference colorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
@@ -3480,6 +3555,7 @@ void VulkanRenderer::createPostFXPipelines()
     makePipe(fxFS, m_postFxFinalRP, m_fxaaPipe);
     makePipe(smFS, m_postFxFinalRP, m_smaaPipe);     // AA = SMAA
     makePipe(btFS, m_postFxFinalRP, m_aaBlitPipe);   // AA = Off
+    createTaaPipelines(vsM);                         // optional — see taaReady()
 
     for (auto m : {vsM,tmFS,fxFS,smFS,btFS,brFS,blFS}) vkDestroyShaderModule(m_device,m,nullptr);
 
@@ -3574,9 +3650,10 @@ void VulkanRenderer::createPostFXPipelines()
 void VulkanRenderer::destroyPostFXPipelines()
 {
     m_postFxReady = false;
+    destroyTaaPipelines();
     for (auto p : {m_bloomBrightPipe,m_bloomBlurPipe,m_tonemapPipe,m_fxaaPipe,m_smaaPipe,m_aaBlitPipe})
         if (p) vkDestroyPipeline(m_device, p, nullptr);
-    m_bloomBrightPipe=m_bloomBlurPipe=m_tonemapPipe=m_fxaaPipe=VK_NULL_HANDLE;
+    m_bloomBrightPipe=m_bloomBlurPipe=m_tonemapPipe=m_fxaaPipe=m_smaaPipe=m_aaBlitPipe=VK_NULL_HANDLE;
     if (m_postFxPipeLayout) { vkDestroyPipelineLayout(m_device, m_postFxPipeLayout, nullptr); m_postFxPipeLayout=VK_NULL_HANDLE; }
     if (m_postFxDSPool)     { vkDestroyDescriptorPool(m_device, m_postFxDSPool, nullptr); m_postFxDSPool=VK_NULL_HANDLE; }
     if (m_postFxDSLayout)   { vkDestroyDescriptorSetLayout(m_device, m_postFxDSLayout, nullptr); m_postFxDSLayout=VK_NULL_HANDLE; }
@@ -3670,11 +3747,16 @@ void VulkanRenderer::createPostFXResources(uint32_t w, uint32_t h)
         w[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[1].pImageInfo = &ii1;
         vkUpdateDescriptorSets(m_device, 2, w, 0, nullptr);
     }
+
+    // TAA's targets follow the same size and read m_ldrView / the viewport
+    // depth just (re)built; the GPU is idle (destroyPostFXResources above).
+    if (taaWanted()) createTaaTargets(w, h);
 }
 
 void VulkanRenderer::destroyPostFXResources()
 {
     vkDeviceWaitIdle(m_device);
+    destroyTaaTargets();
     if (m_uiViewportFB) { vkDestroyFramebuffer(m_device, m_uiViewportFB, nullptr); m_uiViewportFB = VK_NULL_HANDLE; }
     if (m_fxaaFB)     { vkDestroyFramebuffer(m_device, m_fxaaFB,     nullptr); m_fxaaFB=VK_NULL_HANDLE; }
     if (m_ldrFB)      { vkDestroyFramebuffer(m_device, m_ldrFB,      nullptr); m_ldrFB=VK_NULL_HANDLE; }
@@ -3693,6 +3775,419 @@ void VulkanRenderer::destroyPostFXResources()
     if (m_hdrImage)   { vkDestroyImage    (m_device, m_hdrImage,   nullptr); m_hdrImage=VK_NULL_HANDLE; }
     if (m_hdrMemory)  { vkFreeMemory      (m_device, m_hdrMemory,  nullptr); m_hdrMemory=VK_NULL_HANDLE; }
     m_hdrLayout = m_bloomLayout[0] = m_bloomLayout[1] = m_ldrLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+// ─── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ───────────────────────────
+// Three pipelines, all optional: a missing .spv or a failed create leaves
+// taaReady() false, GetCapabilities then reports no temporal AA and
+// ResolveAAMethod falls back to SMAA, exactly as on a backend without TAA.
+void VulkanRenderer::createTaaPipelines(VkShaderModule fullscreenVS)
+{
+    VkShaderModule velVS = loadShaderModule("taa_velocity.vert.spv");
+    VkShaderModule velFS = loadShaderModule("taa_velocity.frag.spv");
+    VkShaderModule resFS = loadShaderModule("taa_resolve.frag.spv");
+    VkShaderModule shpFS = loadShaderModule("taa_sharpen.frag.spv");
+    auto releaseModules = [&]() {
+        for (VkShaderModule m : { velVS, velFS, resFS, shpFS })
+            if (m) vkDestroyShaderModule(m_device, m, nullptr);
+    };
+    if (!fullscreenVS || !velVS || !velFS || !resFS || !shpFS || !m_scenePipelineLayout)
+    {
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: TAA shaders missing — temporal AA unavailable");
+        releaseModules();
+        return;
+    }
+
+    // Velocity pass: RG16F cleared to zero ("did not move") + the scene depth,
+    // LOADed from the scene pass (which STOREs it) and only tested. The external
+    // dependency makes the scene's depth writes visible to the depth test and
+    // orders the colour write after last frame's resolve read.
+    {
+        VkAttachmentDescription atts[2]{};
+        atts[0].format = VK_FORMAT_R16G16_SFLOAT; atts[0].samples = VK_SAMPLE_COUNT_1_BIT;
+        atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        atts[1].format = m_depthFormat; atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
+        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; atts[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        atts[1].finalLayout   = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        VkAttachmentReference colorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkAttachmentReference depthRef{ 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = 1; sub.pColorAttachments = &colorRef;
+        sub.pDepthStencilAttachment = &depthRef;
+        VkSubpassDependency dep{};
+        dep.srcSubpass = VK_SUBPASS_EXTERNAL; dep.dstSubpass = 0;
+        dep.srcStageMask  = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                          | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dep.dstStageMask  = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
+                          | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dep.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = 2; rpci.pAttachments = atts;
+        rpci.subpassCount = 1; rpci.pSubpasses = &sub;
+        rpci.dependencyCount = 1; rpci.pDependencies = &dep;
+        if (vkCreateRenderPass(m_device, &rpci, nullptr, &m_taaVelocityRP) != VK_SUCCESS)
+            m_taaVelocityRP = VK_NULL_HANDLE;
+    }
+
+    VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vps.viewportCount = 1; vps.scissorCount = 1;
+    // Rasterizer exactly as the scene pipelines (no culling, CCW, no depth
+    // clamp), so the velocity raster reproduces the scene's depth.
+    VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                       | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = 1; cb.pAttachments = &cba;
+    VkDynamicState dynStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dyn.dynamicStateCount = 2; dyn.pDynamicStates = dynStates;
+
+    // Velocity pipeline: positions only (location 0 of the scene's 32-byte
+    // vertex), the scene pipeline layout's 128 B of vertex push constants.
+    if (m_taaVelocityRP)
+    {
+        VkPipelineShaderStageCreateInfo st[2]{};
+        st[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   st[0].module = velVS; st[0].pName = "main";
+        st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = velFS; st[1].pName = "main";
+        VkVertexInputBindingDescription   vib{ 0, 8u * sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX };
+        VkVertexInputAttributeDescription via{ 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &vib;
+        vi.vertexAttributeDescriptionCount = 1; vi.pVertexAttributeDescriptions = &via;
+        VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        ds.depthTestEnable  = VK_TRUE;
+        ds.depthWriteEnable = VK_FALSE;
+        ds.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount = 2; pci.pStages = st;
+        pci.pVertexInputState = &vi; pci.pInputAssemblyState = &ia;
+        pci.pViewportState = &vps; pci.pRasterizationState = &rs;
+        pci.pMultisampleState = &ms; pci.pDepthStencilState = &ds;
+        pci.pColorBlendState = &cb; pci.pDynamicState = &dyn;
+        pci.layout = m_scenePipelineLayout; pci.renderPass = m_taaVelocityRP; pci.subpass = 0;
+        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &m_taaVelocityPipe) != VK_SUCCESS)
+            m_taaVelocityPipe = VK_NULL_HANDLE;
+    }
+
+    // Resolve: three samplers (current, history, velocity) through the postFx
+    // sampler — texelFetch ignores it, the history's linear fetch uses it.
+    {
+        VkDescriptorSetLayoutBinding binds[3]{};
+        for (uint32_t i = 0; i < 3; ++i)
+        {
+            binds[i].binding = i; binds[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            binds[i].descriptorCount = 1; binds[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            binds[i].pImmutableSamplers = &m_postFxSampler;
+        }
+        VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+        slci.bindingCount = 3; slci.pBindings = binds;
+        if (vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_taaResolveDSL) != VK_SUCCESS)
+            m_taaResolveDSL = VK_NULL_HANDLE;
+    }
+    if (m_taaResolveDSL)
+    {
+        VkPushConstantRange pcr{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 };
+        VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        plci.setLayoutCount = 1; plci.pSetLayouts = &m_taaResolveDSL;
+        plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pcr;
+        if (vkCreatePipelineLayout(m_device, &plci, nullptr, &m_taaResolvePipeLayout) != VK_SUCCESS)
+            m_taaResolvePipeLayout = VK_NULL_HANDLE;
+    }
+    // Two resolve sets (one per ping-pong direction) + two sharpen sets in the
+    // postFx layout ({history[cur], dummy}); written by createTaaTargets.
+    if (m_taaResolveDSL && m_postFxDSLayout)
+    {
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * 3 + 2 * 2 };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.maxSets = 4; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+        if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_taaDSPool) == VK_SUCCESS)
+        {
+            const VkDescriptorSetLayout layouts[4] = { m_taaResolveDSL, m_taaResolveDSL,
+                                                       m_postFxDSLayout, m_postFxDSLayout };
+            VkDescriptorSet sets[4]{};
+            VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            dsai.descriptorPool = m_taaDSPool; dsai.descriptorSetCount = 4; dsai.pSetLayouts = layouts;
+            if (vkAllocateDescriptorSets(m_device, &dsai, sets) == VK_SUCCESS)
+            {
+                m_taaResolveDS[0] = sets[0]; m_taaResolveDS[1] = sets[1];
+                m_taaSharpenDS[0] = sets[2]; m_taaSharpenDS[1] = sets[3];
+            }
+            else
+            {
+                vkDestroyDescriptorPool(m_device, m_taaDSPool, nullptr);
+                m_taaDSPool = VK_NULL_HANDLE;
+            }
+        }
+        else m_taaDSPool = VK_NULL_HANDLE;
+    }
+
+    // The two fullscreen passes: postfx.vert + no vertex input, no depth.
+    auto makeFullscreen = [&](VkShaderModule fs, VkPipelineLayout layout, VkRenderPass rp,
+                              VkPipeline& out) {
+        if (!layout || !rp) return;
+        VkPipelineShaderStageCreateInfo st[2]{};
+        st[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   st[0].module = fullscreenVS; st[0].pName = "main";
+        st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = fs;           st[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkGraphicsPipelineCreateInfo pci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        pci.stageCount = 2; pci.pStages = st;
+        pci.pVertexInputState = &vi; pci.pInputAssemblyState = &ia;
+        pci.pViewportState = &vps; pci.pRasterizationState = &rs;
+        pci.pMultisampleState = &ms; pci.pColorBlendState = &cb;
+        pci.pDynamicState = &dyn; pci.layout = layout;
+        pci.renderPass = rp; pci.subpass = 0;
+        if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pci, nullptr, &out) != VK_SUCCESS)
+            out = VK_NULL_HANDLE;
+    };
+    // The resolve writes a history image through the RGBA8 blit pass (left in
+    // COLOR_ATTACHMENT, parked in SHADER_READ_ONLY by an explicit barrier, the
+    // tonemap's pattern); the sharpen writes the viewport image in the AA slot.
+    makeFullscreen(resFS, m_taaResolvePipeLayout, m_postFxBlitF8,  m_taaResolvePipe);
+    makeFullscreen(shpFS, m_postFxPipeLayout,     m_postFxFinalRP, m_taaSharpenPipe);
+    releaseModules();
+
+    if (!taaReady())
+    {
+        HE_LOG_WARN(RHI, "%s", "VulkanRenderer: TAA pipelines incomplete — temporal AA unavailable");
+        destroyTaaPipelines();
+    }
+}
+
+void VulkanRenderer::destroyTaaPipelines()
+{
+    for (VkPipeline p : { m_taaVelocityPipe, m_taaResolvePipe, m_taaSharpenPipe })
+        if (p) vkDestroyPipeline(m_device, p, nullptr);
+    m_taaVelocityPipe = m_taaResolvePipe = m_taaSharpenPipe = VK_NULL_HANDLE;
+    if (m_taaResolvePipeLayout) { vkDestroyPipelineLayout(m_device, m_taaResolvePipeLayout, nullptr); m_taaResolvePipeLayout = VK_NULL_HANDLE; }
+    if (m_taaDSPool)            { vkDestroyDescriptorPool(m_device, m_taaDSPool, nullptr); m_taaDSPool = VK_NULL_HANDLE; }
+    m_taaResolveDS[0] = m_taaResolveDS[1] = m_taaSharpenDS[0] = m_taaSharpenDS[1] = VK_NULL_HANDLE;
+    if (m_taaResolveDSL)        { vkDestroyDescriptorSetLayout(m_device, m_taaResolveDSL, nullptr); m_taaResolveDSL = VK_NULL_HANDLE; }
+    if (m_taaVelocityRP)        { vkDestroyRenderPass(m_device, m_taaVelocityRP, nullptr); m_taaVelocityRP = VK_NULL_HANDLE; }
+}
+
+// Velocity + two history images at the viewport size, their framebuffers and
+// the four descriptor sets. Caller guarantees the GPU is idle (the sets may
+// have been in flight). A fresh history is garbage, not history: the first
+// frame after a (re)create shows the current frame only.
+void VulkanRenderer::createTaaTargets(uint32_t w, uint32_t h)
+{
+    destroyTaaTargets();
+    if (!taaReady() || !m_ldrView || !m_viewportDepthView || !m_dummyView || w == 0 || h == 0) return;
+
+    auto makeImg = [&](VkFormat fmt, VkImage& img, VkDeviceMemory& mem, VkImageView& view) -> bool {
+        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ici.imageType = VK_IMAGE_TYPE_2D; ici.format = fmt;
+        ici.extent = { w, h, 1 }; ici.mipLevels = 1; ici.arrayLayers = 1;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(m_device, &ici, nullptr, &img) != VK_SUCCESS) { img = VK_NULL_HANDLE; return false; }
+        VkMemoryRequirements req{}; vkGetImageMemoryRequirements(m_device, img, &req);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize = req.size;
+        mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS) { mem = VK_NULL_HANDLE; return false; }
+        vkBindImageMemory(m_device, img, mem, 0);
+        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image = img; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = fmt;
+        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        return vkCreateImageView(m_device, &vci, nullptr, &view) == VK_SUCCESS;
+    };
+    auto makeFB = [&](VkRenderPass rp, const VkImageView* views, uint32_t count, VkFramebuffer& fb) -> bool {
+        VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fci.renderPass = rp; fci.attachmentCount = count; fci.pAttachments = views;
+        fci.width = w; fci.height = h; fci.layers = 1;
+        return vkCreateFramebuffer(m_device, &fci, nullptr, &fb) == VK_SUCCESS;
+    };
+    bool ok = makeImg(VK_FORMAT_R16G16_SFLOAT, m_taaVelocityImage, m_taaVelocityMemory, m_taaVelocityView)
+           && makeImg(VK_FORMAT_R8G8B8A8_UNORM, m_taaHistoryImage[0], m_taaHistoryMemory[0], m_taaHistoryView[0])
+           && makeImg(VK_FORMAT_R8G8B8A8_UNORM, m_taaHistoryImage[1], m_taaHistoryMemory[1], m_taaHistoryView[1]);
+    if (ok)
+    {
+        const VkImageView va[2] = { m_taaVelocityView, m_viewportDepthView };
+        ok = makeFB(m_taaVelocityRP, va, 2, m_taaVelocityFB)
+          && makeFB(m_postFxBlitF8, &m_taaHistoryView[0], 1, m_taaHistoryFB[0])
+          && makeFB(m_postFxBlitF8, &m_taaHistoryView[1], 1, m_taaHistoryFB[1]);
+    }
+    if (!ok)
+    {
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: TAA targets could not be created");
+        destroyTaaTargets();
+        return;
+    }
+
+    // Prime all three into SHADER_READ_ONLY: the resolve binds history[prev]
+    // (and the velocity) from the very first frame, and sampling an image
+    // still in UNDEFINED is invalid even at blend weight 0.
+    {
+        VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+        cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+        VkCommandBuffer tmp = VK_NULL_HANDLE;
+        vkAllocateCommandBuffers(m_device, &cbai, &tmp);
+        VkCommandBufferBeginInfo cbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(tmp, &cbi);
+        VkImageMemoryBarrier b[3]{};
+        const VkImage imgs[3] = { m_taaVelocityImage, m_taaHistoryImage[0], m_taaHistoryImage[1] };
+        for (int i = 0; i < 3; ++i)
+        {
+            b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; b[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            b[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b[i].image = imgs[i]; b[i].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            b[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+        vkCmdPipelineBarrier(tmp, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 3, b);
+        vkEndCommandBuffer(tmp);
+        VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
+        vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(m_graphicsQueue);
+        vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
+    }
+
+    // resolve[cur] = {ldr, history[1-cur], velocity}; sharpen[cur] = {history[cur], dummy}.
+    auto writeSet = [&](VkDescriptorSet set, std::initializer_list<VkImageView> views) {
+        VkDescriptorImageInfo infos[3]{};
+        VkWriteDescriptorSet  writes[3]{};
+        uint32_t n = 0;
+        for (VkImageView v : views)
+        {
+            infos[n] = { VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            writes[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[n].dstSet = set; writes[n].dstBinding = n; writes[n].descriptorCount = 1;
+            writes[n].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[n].pImageInfo = &infos[n];
+            ++n;
+        }
+        vkUpdateDescriptorSets(m_device, n, writes, 0, nullptr);
+    };
+    writeSet(m_taaResolveDS[0], { m_ldrView, m_taaHistoryView[1], m_taaVelocityView });
+    writeSet(m_taaResolveDS[1], { m_ldrView, m_taaHistoryView[0], m_taaVelocityView });
+    writeSet(m_taaSharpenDS[0], { m_taaHistoryView[0], m_dummyView });
+    writeSet(m_taaSharpenDS[1], { m_taaHistoryView[1], m_dummyView });
+
+    m_taaW = w; m_taaH = h;
+    m_taaHistoryCur   = 0;
+    m_taaHistoryValid = false;
+}
+
+// Caller guarantees the GPU no longer uses the targets.
+void VulkanRenderer::destroyTaaTargets()
+{
+    if (m_taaVelocityFB) { vkDestroyFramebuffer(m_device, m_taaVelocityFB, nullptr); m_taaVelocityFB = VK_NULL_HANDLE; }
+    if (m_taaVelocityView)   { vkDestroyImageView(m_device, m_taaVelocityView, nullptr); m_taaVelocityView = VK_NULL_HANDLE; }
+    if (m_taaVelocityImage)  { vkDestroyImage    (m_device, m_taaVelocityImage, nullptr); m_taaVelocityImage = VK_NULL_HANDLE; }
+    if (m_taaVelocityMemory) { vkFreeMemory      (m_device, m_taaVelocityMemory, nullptr); m_taaVelocityMemory = VK_NULL_HANDLE; }
+    for (int i = 0; i < 2; ++i)
+    {
+        if (m_taaHistoryFB[i])     { vkDestroyFramebuffer(m_device, m_taaHistoryFB[i], nullptr); m_taaHistoryFB[i] = VK_NULL_HANDLE; }
+        if (m_taaHistoryView[i])   { vkDestroyImageView  (m_device, m_taaHistoryView[i], nullptr); m_taaHistoryView[i] = VK_NULL_HANDLE; }
+        if (m_taaHistoryImage[i])  { vkDestroyImage      (m_device, m_taaHistoryImage[i], nullptr); m_taaHistoryImage[i] = VK_NULL_HANDLE; }
+        if (m_taaHistoryMemory[i]) { vkFreeMemory        (m_device, m_taaHistoryMemory[i], nullptr); m_taaHistoryMemory[i] = VK_NULL_HANDLE; }
+    }
+    m_taaW = m_taaH = 0;
+    m_taaHistoryValid = false;
+    m_taaPrevTransforms.clear();
+    m_taaCurTransforms.clear();
+}
+
+// Targets while TAA is on, none while it is off — freed as soon as the mode is
+// off, and the history with them (a stale one would blend against a different
+// world the moment TAA comes back on). Waits for the GPU only when something
+// actually changes, i.e. on a toggle. Must run before this frame's commands.
+void VulkanRenderer::syncTaaTargets()
+{
+    const bool want = taaWanted() && m_ldrView && m_viewportW > 0 && m_viewportH > 0;
+    const bool have = m_taaHistoryImage[0] && m_taaW == m_viewportW && m_taaH == m_viewportH;
+    if (want ? have : !m_taaHistoryImage[0]) return;
+    vkDeviceWaitIdle(m_device);
+    if (want) createTaaTargets(m_viewportW, m_viewportH);
+    else      { destroyTaaTargets(); m_taaJitter = glm::vec2(0.0f); }
+}
+
+glm::mat4 VulkanRenderer::taaJittered(const glm::mat4& clipViewProj) const
+{
+    return m_taaFrame
+        ? HE::taaJitteredViewProj(clipViewProj, m_taaJitter, static_cast<int>(m_viewportW),
+                                  static_cast<int>(m_viewportH))
+        : clipViewProj;
+}
+
+// Screen-space motion of the opaque geometry: for every visible object, where
+// its vertices are now vs. where they were last frame (camera AND object
+// motion). Depth-tested LESS_OR_EQUAL, no write, against the depth the scene
+// pass stored — so only visible surfaces report; the sky, skinned meshes and
+// the blended tail keep the clear's zero, as on GL. The raster matrix is the
+// scene draws' own product (m_taaViewProjJit * transform), so it reproduces
+// their depth. Leaves the velocity image in SHADER_READ_ONLY for the resolve.
+void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
+{
+    VkClearValue clears[2]{};
+    clears[0].color = { { 0.0f, 0.0f, 0.0f, 0.0f } };   // zero = "did not move"
+    VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    bi.renderPass = m_taaVelocityRP; bi.framebuffer = m_taaVelocityFB;
+    bi.renderArea.extent = { m_viewportW, m_viewportH };
+    bi.clearValueCount = 2; bi.pClearValues = clears;
+    vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+
+    // Only when DrawScene reached its sort THIS frame — an empty scene returns
+    // before it, and m_sortedIndices would still hold last frame's objects.
+    if (m_taaSceneSorted)
+    {
+        VkViewport vp{ 0, 0, (float)m_viewportW, (float)m_viewportH, 0, 1 }; vkCmdSetViewport(cmd, 0, 1, &vp);
+        VkRect2D   sc{ { 0, 0 }, { m_viewportW, m_viewportH } };          vkCmdSetScissor(cmd, 0, 1, &sc);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_taaVelocityPipe);
+
+        // Last frame's clean matrix with THIS frame's jitter — see
+        // taa_velocity.vert: the jitter then cancels out of the difference.
+        const glm::mat4 prevJit = taaJittered(m_taaPrevViewProj);
+        m_taaCurTransforms.clear();
+        for (const uint32_t idx : m_sortedIndices)
+        {
+            const RenderObject& obj = m_renderWorld.objects[idx];
+            const GpuMesh* mesh = resolveMesh(obj.meshAssetId);
+            if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
+
+            // An object seen for the first time reports no motion — its
+            // "previous" position is where it is now.
+            const auto it = m_taaPrevTransforms.find(obj.entityId);
+            const glm::mat4 prevModel = (it != m_taaPrevTransforms.end()) ? it->second : obj.transform;
+            m_taaCurTransforms[obj.entityId] = obj.transform;
+
+            const PushConstants pc{ m_taaViewProjJit * obj.transform, prevJit * prevModel };
+            vkCmdPushConstants(cmd, m_scenePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+            VkDeviceSize offset = 0;
+            vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vbuf, &offset);
+            vkCmdBindIndexBuffer(cmd, mesh->ibuf, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmd, mesh->indexCount, 1, 0, 0, 0);
+        }
+        // Advance the history HERE, at the end of the one pass that consumed
+        // it, so a frame is never compared against itself.
+        m_taaPrevViewProj = m_taaViewProjClean;
+        m_taaPrevTransforms.swap(m_taaCurTransforms);
+    }
+    vkCmdEndRenderPass(cmd);
+    runPostFXBarrier(cmd, m_taaVelocityImage,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 }
 
 // ─── Viewport offscreen render target ─────────────────────────────────────────
@@ -4016,13 +4511,14 @@ bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW,
 //   per-frame descriptor set, so it has to run again for the live blur target.
 //   Without a live viewport there is no size to rebuild against and binding 3
 //   goes back to the 1×1 white fallback the renderer starts on.
-// * There is no TAA on Vulkan; the per-camera temporal state is forward SSR's
-//   (last frame's full-res HDR copy plus its half-res ping-pong). It gets the
-//   TAA rule: invalid before the still (implicitly — CaptureSSRColorHistory
+// * The per-camera temporal state is TAA's history and forward SSR's (last
+//   frame's full-res HDR copy plus its half-res ping-pong). Both get GL's TAA
+//   rule: invalid before the still (implicitly — createViewportResources
+//   rebuilds the TAA targets with the postFx ones, CaptureSSRColorHistory
 //   reallocates on a size change, destroySSAOTargets drops the reflection
-//   pre-pass) and invalid after, so the screenshot does not reflect the
-//   viewport's past and the viewport not the screenshot's. One frame without
-//   SSR on each side, no reflections out of a foreign camera. The GI shadow
+//   pre-pass) and invalid after, so the screenshot does not blend or reflect
+//   the viewport's past and the viewport not the screenshot's. One unconverged
+//   / SSR-less frame on each side, nothing out of a foreign camera. The GI shadow
 //   accumulation (m_giHistValid, world-space reprojected) stays, as on Metal/GL.
 //
 // Not parity with Metal/GL, and stated as such: the GI targets and the SSR
@@ -4193,9 +4689,12 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
         }
     }
     // The SSR history is the screenshot camera's now (a same-size request kept
-    // the copy, and the frame just captured into it).
+    // the copy, and the frame just captured into it). So is TAA's — rebuilt
+    // with the postFx targets above already, stated here so it does not hinge
+    // on that rebuild staying unconditional.
     m_ssrColorHistValid = false;
     m_ssrHistValid      = false;
+    m_taaHistoryValid   = false;
 
     if (!ok) rgba.clear();
     return ok;
@@ -5722,9 +6221,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     if (m_renderGraph.empty())
         m_renderGraph.addPass(std::make_unique<GeometryPass>());
 
-    // GL-convention projection from the extractor → Vulkan clip space.
-    const glm::mat4 viewProj =
+    // GL-convention projection from the extractor → Vulkan clip space. On a TAA
+    // frame the scene rasterises with the jittered matrix (taaJittered); the
+    // clean one is kept for the velocity pass, which measures with it.
+    const glm::mat4 viewProjClean =
         HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
+    const glm::mat4 viewProj = taaJittered(viewProjClean);
+    if (m_taaFrame)
+    {
+        m_taaViewProjClean = viewProjClean;
+        m_taaViewProjJit   = viewProj;
+        m_taaSceneSorted   = true;
+    }
 
     // The local (point/spot) atlas is valid this frame when EncodeShadowMap
     // rendered at least one layer into it (and the array view is bound).
@@ -6915,7 +7423,7 @@ void VulkanRenderer::destroySkyPipeline()
 void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /*height*/, bool hdr)
 {
     drawSkyFrom(cmd, hdr,
-                HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view,
+                taaJittered(HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view),
                 m_renderWorld.sunDirection, m_renderWorld.camera.position, m_wallTime, m_environment);
 }
 
@@ -9183,7 +9691,10 @@ void VulkanRenderer::SetBloomSettings(const BloomSettings& s)
 
 void VulkanRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 {
-    m_aaMethod = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+    // The TAA targets follow at the top of the next Render (syncTaaTargets) —
+    // not here, between two passes of a frame being recorded.
+    m_aaMethod    = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+    m_aaSharpness = std::clamp(s.sharpness, 0.0f, 1.0f);
 }
 
 void VulkanRenderer::InvalidateMaterial(const HE::UUID& materialId)

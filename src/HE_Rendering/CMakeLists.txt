@@ -135,6 +135,7 @@ if(HE_VULKAN_ENABLED)
                       postfx.vert postfx_tonemap.frag postfx_fxaa.frag
                       postfx_smaa.frag postfx_aa_blit.frag
                       postfx_bloom_bright.frag postfx_bloom_blur.frag
+                      taa_velocity.vert taa_velocity.frag taa_resolve.frag taa_sharpen.frag
                       sky.vert sky.frag
                       debug_line.vert debug_line.frag
                       ssao_pos.vert ssao_pos_instanced.vert ssao_pos.frag ssao.frag ssao_blur.frag

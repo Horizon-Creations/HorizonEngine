@@ -610,6 +610,65 @@ private:
 	// capabilities (docs/anti-aliasing-plan.md). The final post pass writes
 	// m_viewportImage, so it always runs — only the pipeline changes.
 	HE::AAMethod m_aaMethod   = HE::AAMethod::FXAA;
+	// Post-resolve sharpen of the temporal mode (AntiAliasingSettings::sharpness).
+	float  m_aaSharpness     = 0.35f;
+
+	// ── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ──────────────────────
+	// GL's RenderVelocity/RenderTaa (and the D3D11/D3D12 ports), rebuilt for
+	// Vulkan's render passes: the scene pass now STOREs its depth, a velocity
+	// pass loads it (LESS_OR_EQUAL, no write) and writes RG16F motion, a resolve
+	// on the tonemapped LDR image writes a ping-pong RGBA8 history, and the
+	// sharpen takes the AA-resolve slot. Targets only while TAA is the mode in
+	// force (syncTaaTargets at the top of Render, and with every postFx rebuild).
+	void createTaaPipelines(VkShaderModule fullscreenVS);
+	void destroyTaaPipelines();
+	void createTaaTargets(uint32_t w, uint32_t h);
+	void destroyTaaTargets();
+	void syncTaaTargets();
+	void encodeTaaVelocity(VkCommandBuffer cmd);
+	// The rasterisation matrix: `clipViewProj` (already Vulkan clip) with this
+	// frame's jitter, or unchanged when the frame is not a TAA frame.
+	glm::mat4 taaJittered(const glm::mat4& clipViewProj) const;
+	bool taaReady() const
+	{
+		return m_postFxReady && m_taaVelocityRP && m_taaVelocityPipe && m_taaResolvePipe
+		    && m_taaSharpenPipe && m_taaDSPool;
+	}
+	bool taaWanted() const { return m_aaMethod == HE::AAMethod::TAA && taaReady(); }
+
+	VkRenderPass          m_taaVelocityRP        = VK_NULL_HANDLE; // RG16F clear + scene depth LOAD
+	VkPipeline            m_taaVelocityPipe      = VK_NULL_HANDLE; // m_scenePipelineLayout (128 B push)
+	VkDescriptorSetLayout m_taaResolveDSL        = VK_NULL_HANDLE; // current, history, velocity
+	VkPipelineLayout      m_taaResolvePipeLayout = VK_NULL_HANDLE;
+	VkPipeline            m_taaResolvePipe       = VK_NULL_HANDLE;
+	VkPipeline            m_taaSharpenPipe       = VK_NULL_HANDLE; // m_postFxPipeLayout
+	VkDescriptorPool      m_taaDSPool            = VK_NULL_HANDLE;
+	VkDescriptorSet       m_taaResolveDS[2]      = {};  // [cur] = {ldr, history[1-cur], velocity}
+	VkDescriptorSet       m_taaSharpenDS[2]      = {};  // [cur] = {history[cur], dummy}
+	VkImage        m_taaVelocityImage  = VK_NULL_HANDLE;
+	VkDeviceMemory m_taaVelocityMemory = VK_NULL_HANDLE;
+	VkImageView    m_taaVelocityView   = VK_NULL_HANDLE;
+	VkFramebuffer  m_taaVelocityFB     = VK_NULL_HANDLE;
+	VkImage        m_taaHistoryImage[2]  = {};
+	VkDeviceMemory m_taaHistoryMemory[2] = {};
+	VkImageView    m_taaHistoryView[2]   = {};
+	VkFramebuffer  m_taaHistoryFB[2]     = {};
+	uint32_t  m_taaW = 0, m_taaH = 0;
+	int       m_taaHistoryCur   = 0;
+	bool      m_taaHistoryValid = false;
+	uint32_t  m_taaFrameIndex   = 0;
+	glm::vec2 m_taaJitter{ 0.0f };
+	// True only for a frame whose post chain resolves the jitter
+	// (DrawViewportFrame's HDR branch) — every other path renders unjittered.
+	bool      m_taaFrame = false;
+	// DrawScene reached the sort this frame (m_sortedIndices is this frame's
+	// list, not a stale one from an early-returning empty scene).
+	bool      m_taaSceneSorted = false;
+	glm::mat4 m_taaViewProjClean{ 1.0f };  // this frame's, set by DrawScene
+	glm::mat4 m_taaViewProjJit{ 1.0f };
+	glm::mat4 m_taaPrevViewProj{ 1.0f };   // last TAA frame's clean one
+	std::unordered_map<uint32_t, glm::mat4> m_taaPrevTransforms, m_taaCurTransforms;
+
 	bool   m_postFxReady     = false;
 	float  m_exposure        = 1.0f;
 	bool   m_bloomEnabled    = true;
