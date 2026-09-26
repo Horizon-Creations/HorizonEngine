@@ -1184,7 +1184,10 @@ void EditorApplication::OnInit()
 	m_editorConfig.AutosaveEnabled              = globalstate.getCustomConfigBool("AutosaveEnabled", m_editorConfig.AutosaveEnabled);
 	m_editorConfig.AutosaveIntervalSec          = globalstate.getCustomConfigInt("AutosaveIntervalSec", m_editorConfig.AutosaveIntervalSec);
 	m_editorConfig.RewardsEnabled               = globalstate.getCustomConfigBool("RewardsEnabled", m_editorConfig.RewardsEnabled);
+	m_editorConfig.RewardsVisual                = globalstate.getCustomConfigBool("RewardsVisual", m_editorConfig.RewardsVisual);
+	m_editorConfig.RewardsReducedMotion         = std::clamp(globalstate.getCustomConfigInt("RewardsReducedMotion", m_editorConfig.RewardsReducedMotion), 0, 1);
 	m_editorConfig.RewardsSound                 = globalstate.getCustomConfigBool("RewardsSound", m_editorConfig.RewardsSound);
+	m_editorConfig.RewardsVolume                = globalstate.getCustomConfigFloat("RewardsVolume", m_editorConfig.RewardsVolume);
 	m_editorConfig.RewardsShowProgress          = globalstate.getCustomConfigBool("RewardsShowProgress", m_editorConfig.RewardsShowProgress);
 	// The environment overrides the stored config in one direction only: it can
 	// turn the bridge ON for a single run (a headless test, a scripted session),
@@ -10849,7 +10852,10 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("AutosaveEnabled",            m_editorConfig.AutosaveEnabled);
 	globalstate.setCustomConfigEntry("AutosaveIntervalSec",        m_editorConfig.AutosaveIntervalSec);
 	globalstate.setCustomConfigEntry("RewardsEnabled",             m_editorConfig.RewardsEnabled);
+	globalstate.setCustomConfigEntry("RewardsVisual",              m_editorConfig.RewardsVisual);
+	globalstate.setCustomConfigEntry("RewardsReducedMotion",       m_editorConfig.RewardsReducedMotion);
 	globalstate.setCustomConfigEntry("RewardsSound",               m_editorConfig.RewardsSound);
+	globalstate.setCustomConfigEntry("RewardsVolume",              m_editorConfig.RewardsVolume);
 	globalstate.setCustomConfigEntry("RewardsShowProgress",        m_editorConfig.RewardsShowProgress);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);

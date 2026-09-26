@@ -41,17 +41,64 @@ float strengthAt(double age)
 	return static_cast<float>(1.0 - s);
 }
 
-bool Feed::push(Moment m, int count, double now, int frame)
+float gainFor(float volume)
 {
+	// !(v > 0) also catches NaN from a hand-edited config.
+	const float v = !(volume > 0.0f) ? 0.0f : std::min(volume, 1.0f);
+	return v * v;
+}
+
+int rankOf(Moment m)
+{
+	switch (m)
+	{
+	case Moment::Saved:          return 0;
+	case Moment::AssetsImported: return 1;
+	case Moment::BuildSucceeded: return 2;
+	}
+	return 0;
+}
+
+Feed::Taken Feed::take(Moment m, int count, double now, int frame, bool soundWanted)
+{
+	Taken r;
 	// frame < 0: the caller has no frame clock (no ImGui context) — nothing to
 	// fold against, every push counts.
-	if (frame >= 0 && frame == m_lastFrame) return false;
+	if (frame >= 0 && frame == m_lastFrame) return r;
 	m_lastFrame = frame;
+	r.taken = true;
+
+	const bool showing = look(now).active;
+	if (showing && m == m_moment)
+	{
+		// Rule 2: the same kind again — one line, counted up, held anew, silent.
+		m_count += std::max(count, 0);
+		m_at     = now;
+		r.shown  = true;
+		return r;
+	}
+	// Rule 3: a lower moment leaves a higher line alone (the tally has it).
+	if (showing && rankOf(m) < rankOf(m_moment)) return r;
+
 	m_has    = true;
 	m_moment = m;
 	m_count  = count;
 	m_at     = now;
-	return true;
+	r.shown  = true;
+
+	// Rules 4 and 5: the gaps run from the last tone that played.
+	if (!soundWanted) return r;
+	if (m_toned && now - m_toneAt < kToneGapSec) return r;
+	if (m == Moment::Saved && m_saveToned && now - m_saveToneAt < kSaveToneGapSec) return r;
+	m_toned  = true;
+	m_toneAt = now;
+	if (m == Moment::Saved)
+	{
+		m_saveToned  = true;
+		m_saveToneAt = now;
+	}
+	r.sound = true;
+	return r;
 }
 
 bool Feed::buildSucceeded(unsigned long long run, bool finished, bool success)
@@ -232,13 +279,13 @@ void tallyMoment(AppContext& ctx, bool build)
 	ctx.globalState->writeConfig();
 }
 
-void playChime(AppContext& ctx)
+void playChime(AppContext& ctx, float gain)
 {
-	if (!ctx.audioEngine) return;
+	if (!ctx.audioEngine || !(gain > 0.0f)) return;
 	constexpr int kRate = 44100;
 	static const std::vector<uint8_t> pcm = chimePcm16(kRate);
 	// Returns 0 when the engine never came up — nothing to do about that here.
-	ctx.audioEngine->play(pcm, kRate, 1, 1.0f);
+	ctx.audioEngine->play(pcm, kRate, 1, gain);
 }
 
 double nowSec()
@@ -260,10 +307,31 @@ int frameNo()
 
 void fire(AppContext& ctx, Moment m, int count)
 {
-	if (!ctx.editorConfig.RewardsEnabled) return;
+	const EditorConfig& cfg = ctx.editorConfig;
+	if (!cfg.RewardsEnabled) return;
 	tallyMoment(ctx, m == Moment::BuildSucceeded);
-	if (!s_feed.push(m, count, nowSec(), frameNo())) return;
-	if (ctx.editorConfig.RewardsSound) playChime(ctx);
+	// Rule 6: the switches say whether this moment may sound at all; the Feed
+	// says whether it does. Visual off still goes through the Feed, so what
+	// is heard follows the same merging and rank either way.
+	const float gain = gainFor(cfg.RewardsVolume);
+	const bool  soundWanted = cfg.RewardsSound && gain > 0.0f && !ctx.isPlaying;
+	if (s_feed.take(m, count, nowSec(), frameNo(), soundWanted).sound)
+		playChime(ctx, gain);
+}
+
+void preview(AppContext& ctx)
+{
+	playChime(ctx, gainFor(ctx.editorConfig.RewardsVolume));
+}
+
+bool systemReducesMotion()
+{
+	return false;
+}
+
+bool reducedMotion(const AppContext& ctx)
+{
+	return ctx.editorConfig.RewardsReducedMotion == 0 && systemReducesMotion();
 }
 
 void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool success)
@@ -308,8 +376,8 @@ void drawFooterStatus(AppContext& ctx, const char* idleTextIn)
 	}
 	const char* idleText = idle.c_str();
 	const float idleW    = ImGui::CalcTextSize(idleText).x;
-	const Feed::Look lk = ctx.editorConfig.RewardsEnabled ? s_feed.look(ImGui::GetTime())
-	                                                      : Feed::Look{};
+	const bool       visual = ctx.editorConfig.RewardsEnabled && ctx.editorConfig.RewardsVisual;
+	const Feed::Look lk     = visual ? s_feed.look(ImGui::GetTime()) : Feed::Look{};
 	if (!lk.active)
 	{
 		ImGui::SameLine((winW - idleW) * 0.5f);
@@ -331,7 +399,9 @@ void drawFooterStatus(AppContext& ctx, const char* idleTextIn)
 	if (lk.strength < 1.0f)
 		dl->AddText(ImVec2(pos.x + (lineW - idleW) * 0.5f, pos.y),
 		            ImGui::GetColorU32(ImGuiCol_TextDisabled, 1.0f - lk.strength), idleText);
-	// The underline shrinks towards the centre as the moment runs out.
+	// The underline shrinks towards the centre as the moment runs out — the one
+	// moving thing, so reduced motion leaves it out.
+	if (reducedMotion(ctx)) return;
 	const float y    = pos.y + ImGui::GetTextLineHeight() + 1.0f;
 	const float half = lineW * 0.5f * lk.bar;
 	const float mid  = pos.x + lineW * 0.5f;

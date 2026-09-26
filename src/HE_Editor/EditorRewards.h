@@ -86,8 +86,32 @@ struct AppContext;
 // scene, or a menu shortcut that might reach two handlers, from pulsing and
 // chiming twice.
 //
+// ── Several moments close together (topic 95) ────────────────────────────────
+// Cmd+S is a habit; a dozen saves a minute must not be a dozen chimes. All of
+// this lives in Feed (ImGui-free, tested with a hand clock), in this order:
+//   1. Once per frame, as above — the first moment of a frame wins.
+//   2. SAME KIND MERGES: the same moment again while its line still shows
+//      (hold + fade) adds its count ("Imported 1 asset" → "Imported 3 assets";
+//      a second "Saved" keeps "Saved") and restarts the hold. Never a tone.
+//   3. RANK Build > Import > Save: a lower moment does not replace a higher
+//      line that still shows — it is counted (the tally ran before the Feed),
+//      not shown, never heard, and the hold is NOT restarted. A higher one
+//      replaces a lower line and may sound under 4 and 5. Once a line has
+//      faded out, anything replaces it.
+//   4. TONE GAP: kToneGapSec between two tones, whatever the moments. A moment
+//      in the gap is shown, not heard.
+//   5. SAVE GAP: kSaveToneGapSec between two SAVE tones on top of that, so
+//      saving every minute gives an occasional tick, not one per keystroke.
+//   Both gaps run from the last tone that PLAYED: a silent moment (sound off,
+//   inside a gap, merged, outranked) never pushes the next tone further away.
+//   6. The caller decides whether a moment may sound at all (fire(): the Sound
+//      switch, volume > 0, not during Play-in-Editor — the speakers belong to
+//      the game then) and hands that in as soundWanted. Autosave, MCP saves and
+//      hc.save are not moments at all (above), so they are silent by
+//      construction. Step 3 adds the per-moment sound switches there.
+//
 // ── What the feedback is ─────────────────────────────────────────────────────
-// Visual (on with the master switch): the footer's centred "Ready" label
+// Visual (RewardsVisual, with the master on): the footer's centred "Ready" label
 // becomes the moment's line — "Saved", "Build succeeded", "Imported 12 assets" —
 // in the build window's "done" green, holds for kHoldSec, then cross-fades back
 // to "Ready" over kFadeSec. A thin line under it shrinks to nothing over the
@@ -98,12 +122,16 @@ struct AppContext;
 // frame (only the game sets Application::setEventDriven), so the fade needs no
 // redraw request.
 //
-// Sound (OFF by default — an open-plan office is the normal case): a short
-// two-note chime synthesised in code as PCM16 (chimePcm16) and played through
-// AudioEngine::play(pcm, rate, channels) on the master bus (""), so no asset has
-// to ship. Known edges, all harmless: AudioEngine::init can fail (play returns 0,
-// nothing happens); ending a play session calls stopAll(), which may cut a chime
-// short; the project's master volume/mute applies to it.
+// Sound (RewardsSound, OFF by default — an open-plan office is the normal
+// case): a short two-note chime synthesised in code as PCM16 (chimePcm16) and
+// played through AudioEngine::play(pcm, rate, channels, gain) on the master bus
+// (""), so no asset has to ship. gain = gainFor(RewardsVolume), the square of
+// the slider, so half way sounds like half as loud; volume 0 plays nothing.
+// "Preview" in the settings plays it once at that gain, past the Feed. Known
+// edges, all harmless: AudioEngine::init can fail (play returns 0, nothing
+// happens); ending a play session calls stopAll(), which may cut a chime short;
+// the project's master volume/mute applies to it. (Step 3 of topic 95 moves the
+// tones to an editor-only engine of their own.)
 //
 // Progress display (step 3): in the same centred label while idle —
 // "Ready · 3 builds today · 5 days in a row". drawFooterStatus composes it from
@@ -117,14 +145,28 @@ struct AppContext;
 // into Undo/Redo or the right-hand group.
 //
 // ── The switches (EditorConfig, Preferences ▸ Feedback) ──────────────────────
-//   bool RewardsEnabled      = true;   master: off = no feedback, no sound, no
+//   bool  RewardsEnabled      = true;  master: off = no feedback, no sound, no
 //                                      progress shown and nothing counted
-//   bool RewardsSound        = false;  the chime (only with the master on)
-//   bool RewardsShowProgress = true;   the footer counters (only with the
-//                                      master on). Off HIDES them; counting goes
-//                                      on while the master is on, so turning the
-//                                      display back on does not find a streak
-//                                      that was broken by hiding it.
+//   The rest only act with the master on, and NEVER gate each other (topic 95):
+//   sound without the line, the line without sound, either with or without
+//   the counters.
+//   bool  RewardsVisual       = true;  the moment's line and underline. Off:
+//                                      the footer stays on its idle text (with
+//                                      the counters, if those are on)
+//   int   RewardsReducedMotion = 0;    0 = follow the system's reduce-motion
+//                                      setting, 1 = off (full motion). There
+//                                      is no "always reduce": the system
+//                                      switch is where that lives. Reduced:
+//                                      no shrinking underline. The system query
+//                                      itself is step 4 — systemReducesMotion()
+//                                      answers false until then.
+//   bool  RewardsSound        = false; the chime
+//   float RewardsVolume       = 0.5;   0..1, applied squared (gainFor)
+//   bool  RewardsShowProgress = true;  the footer counters. Off HIDES them;
+//                                      counting goes on while the master is on,
+//                                      so turning the display back on does not
+//                                      find a streak that was broken by hiding
+//                                      it.
 // Wired in the six places every EditorConfig setting is, exactly like
 // AutosaveEnabled: EditorConfig.h (field) · EditorApplication.cpp load
 // (getCustomConfigBool) · EditorApplication.cpp save (setCustomConfigEntry)
@@ -182,10 +224,23 @@ namespace HE::Ed::Rewards
 	// (SameLine to the window's centre).
 	void drawFooterStatus(AppContext& ctx, const char* idleText);
 
+	// The settings' "Preview": the chime once at the current volume, past the
+	// Feed and its gaps — the user asked for exactly this sound, now.
+	void preview(AppContext& ctx);
+
+	// RewardsReducedMotion resolved: follow the system, or off.
+	bool reducedMotion(const AppContext& ctx);
+
+	// The system's reduce-motion setting. false for now: the macOS/Windows
+	// query is topic 95, step 4.
+	bool systemReducesMotion();
+
 	// ── The core, ImGui-free — the tests drive it with their own clock ───────
 
-	inline constexpr double kHoldSec = 0.9;   // the line at full strength
-	inline constexpr double kFadeSec = 0.7;   // …then back to the idle text
+	inline constexpr double kHoldSec        = 0.9;    // the line at full strength
+	inline constexpr double kFadeSec        = 0.7;    // …then back to the idle text
+	inline constexpr double kToneGapSec     = 2.0;    // between any two tones
+	inline constexpr double kSaveToneGapSec = 20.0;   // between two save tones
 
 	// What the footer says for a moment. count only matters for imports.
 	std::string lineFor(Moment m, int count);
@@ -193,12 +248,33 @@ namespace HE::Ed::Rewards
 	// 1 while holding, easing to 0 at kHoldSec + kFadeSec, 0 after; 1 before 0.
 	float strengthAt(double age);
 
+	// The volume slider (0..1) as a playback gain: squared, clamped to 0..1.
+	float gainFor(float volume);
+
+	// Build > Import > Save (rule 3 above).
+	int rankOf(Moment m);
+
 	class Feed
 	{
 	public:
-		// Take a moment at `now` (seconds) in frame `frame`. false = swallowed:
-		// a moment already arrived in this frame (see "Once" above).
-		bool push(Moment m, int count, double now, int frame);
+		struct Taken
+		{
+			bool taken = false;   // false: folded into a moment of the same frame
+			bool shown = false;   // the footer line is (now) this moment's
+			bool sound = false;   // play its tone now — the gaps are booked
+		};
+
+		// Take a moment at `now` (seconds) in frame `frame`. soundWanted: the
+		// caller's switches allow a tone for it (rule 6); the Feed then applies
+		// merging, rank and the gaps. See "Several moments close together".
+		Taken take(Moment m, int count, double now, int frame, bool soundWanted);
+
+		// take() without a tone. false = swallowed: a moment already arrived in
+		// this frame (see "Once" above).
+		bool push(Moment m, int count, double now, int frame)
+		{
+			return take(m, count, now, frame, false).taken;
+		}
 
 		// The build edge detector. true exactly once per run serial that ended
 		// in success; any finished run is consumed, success or not.
@@ -220,6 +296,10 @@ namespace HE::Ed::Rewards
 		double             m_at        = 0.0;
 		int                m_lastFrame = -1;
 		unsigned long long m_lastRun   = 0;
+		bool               m_toned     = false;   // a tone has played at all
+		double             m_toneAt    = 0.0;     // …and when the last one did
+		bool               m_saveToned = false;
+		double             m_saveToneAt = 0.0;
 	};
 
 	// ── Progress: the persistent counters (rules above) ──────────────────────

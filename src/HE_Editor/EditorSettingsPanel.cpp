@@ -10,6 +10,7 @@
 #include "ShortcutsPage.h"             // the Shortcuts page (its own module: headless-testable)
 #include "McpClientSetup.h"            // Remote Control > "Add to Claude" (claude mcp add)
 #include "NotificationStore.h"         // a settings write that fails has to say so
+#include "EditorRewards.h"             // Feedback > "Preview" plays the success chime
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
@@ -893,17 +894,32 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		// Read by EditorRewards on every moment and every footer frame, so a
 		// change is live without a restart. See EditorRewards.h for which moments
 		// there are and why they are words in the footer and not a popup.
+		// The master gates the rest; Visual Cues and Success Sound are siblings
+		// that never gate each other (topic 95).
 		EditorWidgets::checkbox("Success Feedback", &cfg.RewardsEnabled);
 		{
 			SubGroup sub(cfg.RewardsEnabled);
+			EditorWidgets::checkbox("Visual Cues", &cfg.RewardsVisual);
+			static const char* motionItems[] = { "Follow System", "Off" };
+			cfg.RewardsReducedMotion = std::clamp(cfg.RewardsReducedMotion, 0, 1);
+			Row::combo("Reduced Motion", &cfg.RewardsReducedMotion, motionItems,
+			           IM_ARRAYSIZE(motionItems));
 			EditorWidgets::checkbox("Success Sound", &cfg.RewardsSound);
+			{
+				SubGroup snd(cfg.RewardsSound);
+				Row::sliderFloat("Sound Volume", &cfg.RewardsVolume, 0.0f, 1.0f, "%.2f");
+				cfg.RewardsVolume = std::clamp(cfg.RewardsVolume, 0.0f, 1.0f);
+				if (EditorWidgets::button("Preview"))
+					HE::Ed::Rewards::preview(ctx);
+			}
 			EditorWidgets::checkbox("Show Progress", &cfg.RewardsShowProgress);
 		}
 		hint("A saved scene or asset, a finished build and an import say so for a "
 		     "moment in the middle of the footer. Nothing opens, nothing takes focus, "
-		     "and nothing waits for it. The sound is off unless you turn it on. "
-		     "Show Progress adds today's builds and your days in a row beside "
-		     "\"Ready\"; they are only kept on this computer.");
+		     "and nothing waits for it. The sound is off unless you turn it on, and "
+		     "works with or without the visual cue. Show Progress adds today's "
+		     "builds and your days in a row beside \"Ready\"; they are only kept on "
+		     "this computer.");
 	});
 
 	if (mode == SettingsMode::QuickSettings && shown == 0)
@@ -2043,9 +2059,12 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.ContentBrowserRefreshRate = 60;
 			cfg.AutosaveEnabled     = true;
 			cfg.AutosaveIntervalSec = 60;
-			cfg.RewardsEnabled      = true;
-			cfg.RewardsSound        = false;
-			cfg.RewardsShowProgress = true;
+			cfg.RewardsEnabled       = true;
+			cfg.RewardsVisual        = true;
+			cfg.RewardsReducedMotion = 0;
+			cfg.RewardsSound         = false;
+			cfg.RewardsVolume        = 0.5f;
+			cfg.RewardsShowProgress  = true;
 			cfg.BloomEnabled     = true;
 			cfg.BloomThreshold    = 1.0f;
 			cfg.BloomIntensity    = 0.6f;

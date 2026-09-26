@@ -3,6 +3,7 @@
 #include "EditorRewards.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -83,6 +84,142 @@ TEST_CASE("Rewards: the line holds, fades and is gone at the stated time")
 	CHECK(mid.strength < 1.0f);
 	CHECK(mid.bar < start.bar);
 	CHECK_FALSE(f.look(100.0 + kHoldSec + kFadeSec).active);
+}
+
+// ── Several moments close together (EditorRewards.h, topic 95) ───────────────
+
+TEST_CASE("Rewards: the same moment again merges, counts up and stays silent")
+{
+	Feed f;
+	CHECK(f.take(Moment::AssetsImported, 1, 0.0, 1, true).sound);
+	// Every import lands inside the previous one's line: one line, counted up,
+	// the hold restarted each time — and no tone, even once the 2 s tone gap
+	// has run out (t = 3).
+	for (int i = 1; i <= 3; ++i)
+	{
+		const Feed::Taken t = f.take(Moment::AssetsImported, 2, double(i), 1 + i, true);
+		CHECK(t.taken);
+		CHECK(t.shown);
+		CHECK_FALSE(t.sound);
+	}
+	CHECK(f.look(3.0).line == "Imported 7 assets");
+	CHECK(f.look(3.0 + kHoldSec).strength == 1.0f);   // held from t = 3
+	// (+1 ms: 3.0 + 0.9 + 0.7 - 3.0 rounds to just under 1.6.)
+	CHECK_FALSE(f.look(3.0 + kHoldSec + kFadeSec + 0.001).active);
+
+	// A second "Saved" keeps the line as it is.
+	Feed s;
+	s.push(Moment::Saved, 1, 0.0, 1);
+	s.push(Moment::Saved, 1, 0.5, 2);
+	CHECK(s.look(0.5).line == "Saved");
+}
+
+TEST_CASE("Rewards: a lower moment leaves a higher line alone")
+{
+	CHECK(rankOf(Moment::BuildSucceeded) > rankOf(Moment::AssetsImported));
+	CHECK(rankOf(Moment::AssetsImported) > rankOf(Moment::Saved));
+
+	Feed f;
+	CHECK(f.take(Moment::BuildSucceeded, 1, 0.0, 1, true).sound);
+	// A save and an import while "Build succeeded" shows: taken (the tally
+	// counted them), not shown, not heard — even with the tone gap over — and
+	// the build's line is not held any longer for them.
+	const Feed::Taken save = f.take(Moment::Saved, 1, 1.0, 2, true);
+	CHECK(save.taken);
+	CHECK_FALSE(save.shown);
+	CHECK_FALSE(save.sound);
+	const Feed::Taken imp = f.take(Moment::AssetsImported, 4, 1.5, 3, true);
+	CHECK_FALSE(imp.shown);
+	CHECK_FALSE(imp.sound);
+	CHECK(f.look(1.5).line == "Build succeeded");
+	CHECK_FALSE(f.look(kHoldSec + kFadeSec).active);
+
+	// Once the line has faded, anything replaces it.
+	const Feed::Taken later = f.take(Moment::Saved, 1, 5.0, 4, true);
+	CHECK(later.shown);
+	CHECK(later.sound);
+	CHECK(f.look(5.0).line == "Saved");
+
+	// A higher moment replaces a lower line that still shows.
+	const Feed::Taken up = f.take(Moment::AssetsImported, 2, 5.5, 5, false);
+	CHECK(up.shown);
+	CHECK(f.look(5.5).line == "Imported 2 assets");
+}
+
+TEST_CASE("Rewards: two tones are at least the tone gap apart")
+{
+	Feed f;
+	CHECK(f.take(Moment::Saved, 1, 0.0, 1, true).sound);
+	// Import outranks the save's line and is shown — inside the gap, silent.
+	const Feed::Taken imp = f.take(Moment::AssetsImported, 1, 1.0, 2, true);
+	CHECK(imp.shown);
+	CHECK_FALSE(imp.sound);
+	// Just short of the gap: still silent.
+	CHECK_FALSE(f.take(Moment::BuildSucceeded, 1, kToneGapSec - 0.01, 3, true).sound);
+
+	// The gap runs from the last tone that PLAYED (t = 0), not from the silent
+	// import at t = 1: a build at exactly t = 2 is heard.
+	Feed g;
+	CHECK(g.take(Moment::Saved, 1, 0.0, 1, true).sound);
+	CHECK_FALSE(g.take(Moment::AssetsImported, 1, 1.0, 2, true).sound);
+	CHECK(g.take(Moment::BuildSucceeded, 1, kToneGapSec, 3, true).sound);
+}
+
+TEST_CASE("Rewards: saves are heard at most every save gap")
+{
+	Feed f;
+	CHECK(f.take(Moment::Saved, 1, 0.0, 1, true).sound);
+	// Another kind after the tone gap is heard; the save gap is saves' own.
+	CHECK(f.take(Moment::AssetsImported, 1, 3.0, 2, true).sound);
+	// Cmd+S again at t = 10: shown (the import's line is gone), not heard.
+	const Feed::Taken again = f.take(Moment::Saved, 1, 10.0, 3, true);
+	CHECK(again.shown);
+	CHECK_FALSE(again.sound);
+	CHECK_FALSE(f.take(Moment::Saved, 1, kSaveToneGapSec - 0.5, 4, true).sound);
+	// Past twenty seconds after the last save TONE (t = 0), whatever came
+	// between — and after the t = 19.5 line has faded, or it would merge.
+	CHECK(f.take(Moment::Saved, 1, kSaveToneGapSec + 2.0, 5, true).sound);
+}
+
+TEST_CASE("Rewards: a moment that may not sound does not book a gap")
+{
+	// Sound off, Play-in-Editor, volume 0: the caller says no. The next moment
+	// that may sound is heard at once.
+	Feed f;
+	const Feed::Taken quiet = f.take(Moment::BuildSucceeded, 1, 0.0, 1, false);
+	CHECK(quiet.taken);
+	CHECK(quiet.shown);
+	CHECK_FALSE(quiet.sound);
+	CHECK(f.take(Moment::BuildSucceeded, 1, kHoldSec + kFadeSec + 0.1, 2, true).sound);
+
+	// A save that was shown silently does not start the save gap either.
+	Feed s;
+	s.take(Moment::Saved, 1, 0.0, 1, false);
+	CHECK(s.take(Moment::Saved, 1, 5.0, 2, true).sound);
+
+	// And the once-per-frame fold still comes first.
+	Feed o;
+	CHECK(o.take(Moment::Saved, 1, 0.0, 7, true).sound);
+	const Feed::Taken folded = o.take(Moment::BuildSucceeded, 1, 0.0, 7, true);
+	CHECK_FALSE(folded.taken);
+	CHECK_FALSE(folded.sound);
+}
+
+TEST_CASE("Rewards: the volume slider is squared into a gain")
+{
+	CHECK(gainFor(0.0f) == 0.0f);
+	CHECK(gainFor(0.5f) == doctest::Approx(0.25f));
+	CHECK(gainFor(1.0f) == 1.0f);
+	// Out of range from a hand-edited config: clamped, never louder than 1.
+	CHECK(gainFor(2.0f) == 1.0f);
+	CHECK(gainFor(-1.0f) == 0.0f);
+	CHECK(gainFor(std::nanf("")) == 0.0f);
+	float prev = 0.0f;
+	for (float v = 0.0f; v <= 1.0f; v += 0.05f)
+	{
+		CHECK(gainFor(v) >= prev);
+		prev = gainFor(v);
+	}
 }
 
 TEST_CASE("Rewards: the footer lines")

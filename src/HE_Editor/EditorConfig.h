@@ -90,9 +90,13 @@ struct EditorConfig
 
 	// Reward feedback (topic 75, Preferences ▸ Feedback) — see EditorRewards.h
 	// for what they switch and why the counters are NOT fields here.
-	bool RewardsEnabled      = true;    // master: the footer's "Saved"/"Build succeeded" line, and the counting
-	bool RewardsSound        = false;   // the chime with it (only with the master on)
-	bool RewardsShowProgress = true;    // "3 builds today · 5 days in a row" beside "Ready" (only with the master on)
+	// The master gates the rest; the rest never gate each other (topic 95).
+	bool  RewardsEnabled       = true;   // master: off = nothing shown, played or counted
+	bool  RewardsVisual        = true;   // the footer's "Saved"/"Build succeeded" line
+	int   RewardsReducedMotion = 0;      // 0 = follow the system, 1 = off (full motion)
+	bool  RewardsSound         = false;  // the chime
+	float RewardsVolume        = 0.5f;   // 0..1, applied squared
+	bool  RewardsShowProgress  = true;   // "3 builds today · 5 days in a row" beside "Ready"
 
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)

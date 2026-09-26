@@ -3301,10 +3301,32 @@ namespace
 	  "MCP client or a script, the autosave and failed builds show nothing. Off: "
 	  "no feedback at all, no sound and no progress counted.",
 	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Visual Cues", "",
+	  "The moment's line in the middle of the footer (\"Saved\", \"Build "
+	  "succeeded\", \"Imported 3 assets\") and the thin line under it. Off: the "
+	  "footer stays on \"Ready\" and the progress counters, the sound (if on) "
+	  "still plays and counting goes on.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Reduced Motion", "",
+	  "Follow System: when the system asks for reduced motion, the feedback "
+	  "leaves out what moves (the shrinking line under the footer text). Off: "
+	  "always the full motion. Nothing here ever blinks either way.",
+	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Success Sound", "",
-	  "A short, quiet chime together with the footer feedback. Off by default. It "
+	  "A short, quiet chime when a save, a build or an import worked. Off by "
+	  "default, and works with or without Visual Cues. At most one tone every "
+	  "two seconds; saves are heard at most every twenty seconds, and the same "
+	  "moment again right after is not heard at all. Silent during Play. It "
 	  "plays through the project's master volume, so muting the project mutes "
 	  "it too.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Sound Volume", "",
+	  "How loud the success sound is, from silent to full. The slider follows "
+	  "your ear: half way sounds about half as loud. Zero plays nothing.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Preview", "",
+	  "Play the success sound once at this volume, so you can set it without "
+	  "waiting for a build.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Show Progress", "",
 	  "Beside \"Ready\" in the footer: how many builds succeeded today, and from "

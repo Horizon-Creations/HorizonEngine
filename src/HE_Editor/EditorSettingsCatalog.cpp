@@ -126,10 +126,26 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Briefly show \"Saved\", \"Build succeeded\" or \"Imported N "
 	                    "assets\" in the footer when one of those just worked. "
 	                    "Off: nothing is shown, played or counted."));
+	t.push_back(boolRow("rewards.visual", "Visual Cues", "Feedback", "rewards",
+	                    &EditorConfig::RewardsVisual,
+	                    "Show the moment's line in the footer. Needs Success "
+	                    "Feedback on; independent of the sound."));
+	t.push_back(enumRow("rewards.reducedMotion", "Reduced Motion", "Feedback", "rewards",
+	                    &EditorConfig::RewardsReducedMotion,
+	                    { "Follow System", "Off" },
+	                    "Follow the system's reduce-motion setting (no moving "
+	                    "underline under the footer line), or always show the "
+	                    "full motion."));
 	t.push_back(boolRow("rewards.sound", "Success Sound", "Feedback", "rewards",
 	                    &EditorConfig::RewardsSound,
-	                    "Play a short chime with the footer feedback. Needs Success "
-	                    "Feedback on."));
+	                    "Play a short chime when a moment happens. Needs Success "
+	                    "Feedback on; independent of Visual Cues. At most one "
+	                    "tone every 2 s, a save's tick at most every 20 s, none "
+	                    "during Play."));
+	t.push_back(floatRow("rewards.volume", "Sound Volume", "Feedback", "rewards",
+	                     &EditorConfig::RewardsVolume, 0.0, 1.0,
+	                     "Loudness of the success sound, 0 to 1. Zero plays "
+	                     "nothing."));
 	t.push_back(boolRow("rewards.showProgress", "Show Progress", "Feedback", "rewards",
 	                    &EditorConfig::RewardsShowProgress,
 	                    "Show successful builds today and days in a row with the "
