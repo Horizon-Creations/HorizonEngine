@@ -8,6 +8,8 @@
 #include <imgui.h>
 #endif
 
+namespace HE::Ed { struct UITimelineView; }
+
 // ── The Sequencer's strip: tracks, ruler, playhead, keys and curves ──────────
 // A PropertyAnimClipAsset is a list of scalar channels — "Position X over time",
 // "Roughness over time" — and this is the picture of one: a row per channel with
@@ -204,6 +206,13 @@ namespace HE::Ed::Sequencer
 	void valueRange(const PropertyAnimChannel& ch, float& lo, float& hi);
 
 #if __has_include(<imgui.h>)
+	// The time ruler along the top of a lane: ticks on the 1-2-5 rung, labels
+	// in seconds or milliseconds. The lane is `tv`'s (laneX, laneW); the ruler
+	// is `rulerH` tall from `top`, drawn clipped to `clipBottom`. Shared with
+	// the Cinematic tab's strip (CinematicTimeline), so the two read alike.
+	void drawRuler(ImDrawList* dl, const HE::Ed::UITimelineView& tv, float top, float rulerH,
+	               float clipBottom);
+
 	// Draws the strip at the cursor, `size` big (a zero component means "the
 	// rest of the window"). The ruler takes drags (scrub), a key takes a click
 	// (select it and put the playhead on it) and a drag (move it in time — and

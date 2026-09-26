@@ -129,6 +129,7 @@ add_executable(he_tests
     test_sequencer_timeline.cpp
     test_sequence.cpp
     test_sequence_runtime.cpp
+    test_cinematic_timeline.cpp
     test_animation_ik.cpp
     test_navigation.cpp
     test_particles.cpp
@@ -488,6 +489,11 @@ add_executable(he_tests
     # "does a drag on the ruler land the playhead where the ruler says" is a
     # question about arithmetic and hit tests, not about a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SequencerTimeline.cpp
+    # The Cinematic tab's strip (a Sequence's bindings, cuts, sections, events)
+    # and its preview bracket (save, write, restore), both without AppContext —
+    # the same reason as the Sequencer's strip above.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CinematicTimeline.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CinematicPreview.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # The solo autosave's timing and file rules: when a recovery snapshot is
     # written, that the write is temp+rename with the manifest last, and what

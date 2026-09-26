@@ -238,6 +238,8 @@ add_executable(HorizonEditor WIN32
 	BlendSpacePanel.cpp
 	SequencerPanel.cpp
 	SequencerTimeline.cpp
+	CinematicTimeline.cpp
+	CinematicPreview.cpp
 	SkeletalMeshEditorPanel.cpp
 	StaticMeshEditorPanel.cpp
 	MeshMaterialSlots.cpp
