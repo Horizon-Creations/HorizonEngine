@@ -170,9 +170,10 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Feedback on; off hides the counters, they keep counting."));
 	t.push_back(boolRow("rewards.muteEditorSounds", "Mute Editor Sounds", "Feedback",
 	                    "rewards", &EditorConfig::EditorSoundsMuted,
-	                    "Silence every sound the editor itself makes, keeping each "
-	                    "sound's switch. Independent of Success Feedback; the "
-	                    "project's audio is not affected."));
+	                    "Silence the sounds the editor plays on its own output "
+	                    "(the feedback sounds), keeping each sound's switch. "
+	                    "Independent of Success Feedback; clip auditions and the "
+	                    "project's audio are not affected."));
 
 	// ── Editor ▸ Collaboration ──────────────────────────────────────────────
 	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Collaboration",

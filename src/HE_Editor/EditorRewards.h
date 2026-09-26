@@ -169,8 +169,9 @@ struct EditorConfig;
 // has a second device open; turning it off (or muting) closes it again. If
 // the device cannot be opened, that is remembered until sound is switched off
 // and on again, so a machine without output does not retry every frame.
-// EditorSoundsMuted is the switch for exactly this engine: it silences every
-// sound the editor makes itself and leaves each tone's own switch as it was.
+// EditorSoundsMuted is the switch for exactly this engine: it silences what it
+// plays (today: these tones) and leaves each tone's own switch as it was. Clip
+// auditions (Audio Editor) use the project's engine and are NOT affected.
 //
 // Progress display (step 3): in the same centred label while idle —
 // "Ready · 3 builds today · 5 days in a row". drawFooterStatus composes it from
@@ -210,7 +211,8 @@ struct EditorConfig;
 //                                      starts off, so a fresh install still
 //                                      hears nothing.
 //   bool  EditorSoundsMuted       = false; the UI-sound engine. NOT under the
-//                                      master: mutes whatever it plays
+//                                      master: mutes whatever it plays (not
+//                                      clip auditions — project engine)
 //   bool  RewardsShowProgress = true;  the footer counters. Off HIDES them;
 //                                      counting goes on while the master is on,
 //                                      so turning the display back on does not

@@ -3350,9 +3350,10 @@ namespace
 	  "not, so you can hear it without waiting for a save, build or import.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Mute Editor Sounds", "",
-	  "Silence every sound the editor itself makes, at once, and keep each "
-	  "sound's own switch as it is for when you unmute. Your project's audio "
-	  "is not affected.",
+	  "Silence the sounds the editor plays on its own output (the feedback "
+	  "sounds above) at once, and keep each sound's own switch as it is for "
+	  "when you unmute. Clips you audition in the Audio Editor and your "
+	  "project's audio play through the project's mixer and are not affected.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Show Progress", "",
 	  "Beside \"Ready\" in the footer: how many builds succeeded today, and from "

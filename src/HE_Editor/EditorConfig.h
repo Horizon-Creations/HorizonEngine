@@ -102,7 +102,8 @@ struct EditorConfig
 	bool  RewardsSoundImport      = true;   // play with the editor unfocused
 	bool  RewardsShowProgress  = true;   // "3 builds today · 5 days in a row" beside "Ready"
 	// The editor's own UI-sound engine, NOT under the master: mutes whatever
-	// it plays and leaves every switch above as it was.
+	// it plays (today: the feedback tones) and leaves every switch above as it
+	// was. Clip auditions go through the project's engine and are not muted.
 	bool  EditorSoundsMuted    = false;
 
 	// Preferences (Edit > Preferences)
