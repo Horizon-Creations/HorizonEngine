@@ -22,6 +22,7 @@
 #include "AnimatorStateMachineEditorPanel.h" // …and the animator tools these two
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
+#include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
@@ -7842,6 +7843,32 @@ void EditorApplication::setupMcpTools()
 		return SkeletalMeshEditorPanel::isDirty(rel);
 	};
 	HE::Ed::registerClipTools(m_mcp.registry(), contentManager(), std::move(clips));
+
+	// ── A cutscene ───────────────────────────────────────────────────────────
+	// The four gates of the particle family, plus the one question only a
+	// sequence asks: who its bindings ARE in the open scene. That lookup goes
+	// through findByEntityId like the runtime's, never by name.
+	HE::Ed::McpSequenceHooks seq;
+	seq.isPlaying     = [this] { return m_isPlaying; };
+	seq.lockedByOther = [this](const std::string& rel) {
+		return m_collab.assetLockedByOther(rel);
+	};
+	seq.isDirty = [](const std::string& rel) {
+		return CinematicPanel::isDirtyByContentPath(rel);
+	};
+	seq.reloadFromDisk = [](const std::string& rel) {
+		return CinematicPanel::reloadByContentPath(rel);
+	};
+	seq.findActor = [this](const HE::UUID& id, std::string& name, bool& isCamera) {
+		if (!m_editorWorld) return false;
+		const Entity e = m_editorWorld->findByEntityId(id);
+		if (e == entt::null) return false;
+		auto& reg = m_editorWorld->registry();
+		name     = reg.all_of<NameComponent>(e) ? reg.get<NameComponent>(e).name : std::string();
+		isCamera = reg.all_of<CameraComponent>(e);
+		return true;
+	};
+	HE::Ed::registerSequenceTools(m_mcp.registry(), contentManager(), std::move(seq));
 
 	// ── Making the project run ───────────────────────────────────────────────
 	// The two Build menu actions and the window they both report into. Neither

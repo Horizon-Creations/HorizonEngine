@@ -214,6 +214,7 @@ add_executable(he_tests
     test_mcp_tools_particle.cpp
     test_mcp_tools_animator.cpp
     test_mcp_tools_clip.cpp
+    test_mcp_tools_sequence.cpp
     test_mcp_tools_build.cpp
     test_mcp_tools_settings.cpp
     test_mcp_tools_batch.cpp
@@ -384,6 +385,9 @@ add_executable(he_tests
     # afterwards carries the events that were asked for, and only a real
     # AnimationClipAsset round-trip through a real ContentManager answers it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsClip.cpp
+    # And for a sequence: the claim is that the cutscene a FRESH ContentManager
+    # loads afterwards is the one that was written, references and all.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsSequence.cpp
     # The build tools. In here because the two things they actually decide can
     # be decided without a build machine: WHICH profile a run is made from (and
     # that a one-off override never reaches the stored one), and whether the one
