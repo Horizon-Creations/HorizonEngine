@@ -153,6 +153,7 @@ std::string cppScalar(const TypeRef& tr)
     switch (tr.t)
     {
         case PT::Float:     return "float";
+        case PT::Double:    return "double";
         case PT::Bool:      return "bool";
         case PT::Int:       return "int";
         case PT::String:    return "std::string";
@@ -196,6 +197,17 @@ std::string floatLit(float f)
     return s + "f";
 }
 
+// Round-trips a double exactly; no suffix, a bare literal IS a double.
+std::string doubleLit(double d)
+{
+    if (!std::isfinite(d)) return "0.0";
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%.17g", d);
+    std::string s = buf;
+    if (s.find_first_of(".eE") == std::string::npos) s += ".0";
+    return s;
+}
+
 std::string strLit(const std::string& s)
 {
     std::string out = "\"";
@@ -227,6 +239,7 @@ std::string zeroLit(const TypeRef& tr)
     switch (tr.t)
     {
         case PT::Float:     return "0.0f";
+        case PT::Double:    return "0.0";
         case PT::Bool:      return "false";
         case PT::Int:       return "0";
         case PT::String:    return "std::string()";
@@ -302,6 +315,7 @@ std::string valueLit(const Value& v, const TypeTable& tt, const TypeRef& want)
     switch (want.t)
     {
         case PT::Float:  return floatLit(v.f);
+        case PT::Double: return doubleLit(v.d);
         case PT::Bool:   return v.b ? "true" : "false";
         case PT::Int:    return std::to_string(v.i);
         case PT::String: return strLit(v.s);
@@ -340,14 +354,22 @@ Value coerceValue(Value v, PinType want)
     {
         case PT::Float: r.f = v.type == PT::Bool ? (v.b ? 1.0f : 0.0f)
                             : v.type == PT::Int ? (float)v.i
+                            : v.type == PT::Double ? (float)v.d
                             : v.type == PT::Enum ? (float)v.i : 0.0f; break;
+        case PT::Double: r.d = v.type == PT::Bool ? (v.b ? 1.0 : 0.0)
+                            : v.type == PT::Int ? (double)v.i
+                            : v.type == PT::Float ? (double)v.f
+                            : v.type == PT::Enum ? (double)v.i : 0.0; break;
         case PT::Int:   r.i = v.type == PT::Float ? (int)v.f
+                            : v.type == PT::Double ? (int)v.d
                             : v.type == PT::Bool ? (v.b ? 1 : 0)
                             : v.type == PT::Enum ? v.i : 0; break;
         case PT::Bool:  r.b = v.type == PT::Float ? v.f != 0.0f
+                            : v.type == PT::Double ? v.d != 0.0
                             : v.type == PT::Int ? v.i != 0 : false; break;
         case PT::Enum:  r.i = v.type == PT::Int ? v.i
-                            : v.type == PT::Float ? (int)v.f : 0; break;
+                            : v.type == PT::Float ? (int)v.f
+                            : v.type == PT::Double ? (int)v.d : 0; break;
         // Same three-way vector conversion as the interpreter, pad by target.
         case PT::Vec3:  r.v3 = v.type == PT::Vec4  ? glm::vec3(v.v4)
                              : v.type == PT::Color ? glm::vec3(v.col) : glm::vec3(0.0f); break;
@@ -391,15 +413,24 @@ std::string convertExpr(const std::string& e, const TypeRef& from, const TypeRef
         case PT::Float:
             if (from.t == PT::Bool) return "((" + e + ") ? 1.0f : 0.0f)";
             if (from.t == PT::Int)  return "((float)(" + e + "))";
+            if (from.t == PT::Double) return "((float)(" + e + "))";
             if (from.t == PT::Enum) return "((float)(int)(" + e + "))";
+            break;
+        case PT::Double:
+            if (from.t == PT::Bool)  return "((" + e + ") ? 1.0 : 0.0)";
+            if (from.t == PT::Int)   return "((double)(" + e + "))";
+            if (from.t == PT::Float) return "((double)(" + e + "))";
+            if (from.t == PT::Enum)  return "((double)(int)(" + e + "))";
             break;
         case PT::Int:
             if (from.t == PT::Float) return "((int)(" + e + "))";
+            if (from.t == PT::Double) return "((int)(" + e + "))";
             if (from.t == PT::Bool)  return "((" + e + ") ? 1 : 0)";
             if (from.t == PT::Enum)  return "((int)(" + e + "))";
             break;
         case PT::Bool:
             if (from.t == PT::Float) return "((" + e + ") != 0.0f)";
+            if (from.t == PT::Double) return "((" + e + ") != 0.0)";
             if (from.t == PT::Int)   return "((" + e + ") != 0)";
             break;
         // Vector ↔ colour on a statically-typed wire. This is the branch a graph
@@ -423,6 +454,7 @@ std::string convertExpr(const std::string& e, const TypeRef& from, const TypeRef
         case PT::Enum:
             if (from.t == PT::Int)   return "((" + cppScalar(to) + ")(" + e + "))";
             if (from.t == PT::Float) return "((" + cppScalar(to) + ")(int)(" + e + "))";
+            if (from.t == PT::Double) return "((" + cppScalar(to) + ")(int)(" + e + "))";
             break;
         default: break;
     }
@@ -3232,34 +3264,38 @@ private:
                 {
                     if (v.scope != 0) continue;
                     const TypeRef tr = varType(v);
+                    // The trailing slot() arguments are POSITIONAL groups, each
+                    // written only when it or a later one differs from its
+                    // default — so a slot that uses none of them emits exactly
+                    // as it did before any existed:
+                    //   container pair  the GC reads keyType to reach objects
+                    //                   held only as map KEYS, which `type` —
+                    //                   the value side — never mentions;
+                    //   replication     (plan §6.1) without it a class shipped
+                    //                   as generated C++ replicates nothing,
+                    //                   the hole §6.5 left open;
+                    //   save game       without it entity.saveState would skip
+                    //                   every variable of a compiled class.
+                    const bool setOrMap = tr.kind() == HorizonCode::ContainerKind::Set ||
+                                          tr.kind() == HorizonCode::ContainerKind::Map;
+                    const bool saveGame = v.saveGame && HorizonCode::isSaveableType(v.type);
+                    const bool needRep  = v.replicated || saveGame;
+                    std::string trailing;
+                    if (setOrMap || needRep)
+                        trailing += setOrMap
+                            ? ", hc::ContainerKind::" +
+                              std::string(tr.kind() == HorizonCode::ContainerKind::Set ? "Set" : "Map") +
+                              ", hc::PinType::" + pinName(v.keyType)
+                            : std::string(", hc::ContainerKind::None, hc::PinType::String");
+                    if (needRep)
+                        trailing += std::string(", ") + (v.replicated ? "true" : "false") + ", " +
+                                    (v.replicated && v.repNotify ? "true" : "false");
+                    if (saveGame) trailing += ", true";
                     c += "        hc::slot<&" + m_cls + "::" + m_varMember.at(v.name) + ">(" +
                          strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
                          (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + ", " +
                          strLit(v.typeName) + ", " +
-                         toValueCall(memberDefault(v), tr, ns) +
-                         // The container kind and (for a map) the key type ride
-                         // along: the GC reads keyType to reach objects held only
-                         // as map KEYS, which `type` — the value side — never
-                         // mentions. Written only when it is not the default, so
-                         // scalar and array slots emit exactly as before.
-                         (tr.kind() == HorizonCode::ContainerKind::Set ||
-                          tr.kind() == HorizonCode::ContainerKind::Map
-                              ? ", hc::ContainerKind::" +
-                                std::string(tr.kind() == HorizonCode::ContainerKind::Set ? "Set" : "Map") +
-                                ", hc::PinType::" + pinName(v.keyType)
-                              : std::string()) +
-                         // Replication (plan §6.1). Only when the checkbox is
-                         // ticked, and then the container pair has to be spelt
-                         // out too — these are positional. Without this a class
-                         // shipped as generated C++ replicates nothing, which
-                         // is the hole §6.5 left open.
-                         (v.replicated
-                              ? (tr.kind() == HorizonCode::ContainerKind::Set ||
-                                 tr.kind() == HorizonCode::ContainerKind::Map
-                                     ? std::string()
-                                     : ", hc::ContainerKind::None, hc::PinType::String") +
-                                std::string(", true, ") + (v.repNotify ? "true" : "false")
-                              : std::string()) +
+                         toValueCall(memberDefault(v), tr, ns) + trailing +
                          "),\n";
                 }
                 c += "    };\n    return k;\n}\n\n";
@@ -3587,6 +3623,7 @@ private:
         switch (t)
         {
             case PT::Float:     return "Float";
+            case PT::Double:    return "Double";
             case PT::Bool:      return "Bool";
             case PT::Int:       return "Int";
             case PT::String:    return "String";

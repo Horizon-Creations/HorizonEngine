@@ -5240,7 +5240,8 @@ void drawGraphNodeDetails(State& st, AppContext& ctx)
 				bool ed = false;
 				switch (v->type)
 				{
-					case PT::Float:  ed = ImGui::DragFloat("##vdef", &v->f[0], 0.1f); break;
+					case PT::Float:
+					case PT::Double: ed = ImGui::DragFloat("##vdef", &v->f[0], 0.1f); break;
 					case PT::Int:  { int iv = (int)v->f[0]; if (ImGui::DragInt("##vdef", &iv)) { v->f[0] = (float)iv; ed = true; } break; }
 					case PT::Bool: { bool b = v->f[0] != 0.0f; if (ImGui::Checkbox("##vdef", &b)) { v->f[0] = b ? 1.0f : 0.0f; ed = true; } break; }
 					case PT::String: ImGui::InputText("##vdef", &v->s); break;
@@ -5941,6 +5942,24 @@ bool reloadFromDisk(const std::string& assetPath)
 
 
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+
+void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, State& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			const UIWidgetAsset* a = cm->getWidget(st.assetId);
+			if (!a) return false;
+			// saveState's two lines, into a copy.
+			UIWidgetAsset copy = *a;
+			copy.treeJson  = HE::uiWidgetTreeToJson(st.tree);
+			copy.graphJson = HC::toJson(st.graph);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
 bool save(AppContext& ctx, const std::string& assetPath)

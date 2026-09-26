@@ -589,6 +589,60 @@ TEST_CASE("Enum entries are added, renumbered and removed by name")
 	CHECK(fraction.errorCode == "invalid_payload");
 }
 
+TEST_CASE("renameFrom renames in place and keeps the old name as an alias")
+{
+	// Remove + add would lose every save and graph written under the old name;
+	// a rename keeps position, type, value — and the old name, which is what
+	// the savegame loader and the graph load path fall back to.
+	Fixture f("rename");
+	f.writeStub("Types/Loadout.hasset", HE::AssetType::StructType);
+	for (const char* n : { "a", "level", "c" })
+		REQUIRE_FALSE(f.call("type_field_set", json{
+			{ "path", "Types/Loadout.hasset" }, { "name", n }, { "type", "Int" } }).isError);
+
+	const ToolResult r = f.call("type_field_set", json{
+		{ "path", "Types/Loadout.hasset" }, { "name", "rank" }, { "renameFrom", "level" } });
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(r.content["created"] == false);
+	CHECK(r.content["renamedFrom"] == "level");
+	CHECK(r.content["index"] == 1);
+	HE::StructDef def = f.registered("Types/Loadout.hasset");
+	REQUIRE(def.fields.size() == 3);
+	CHECK(def.fields[1].name == "rank");
+	CHECK(def.fields[1].type == HorizonCode::PinType::Int);
+	CHECK(def.fields[1].formerNames == std::vector<std::string>{ "level" });
+	CHECK(def.findField("level") == &def.fields[1]);
+
+	// Refusals leave the file as it was.
+	const std::string before = f.bytes("Types/Loadout.hasset");
+	const ToolResult missing = f.call("type_field_set", json{
+		{ "path", "Types/Loadout.hasset" }, { "name", "x" }, { "renameFrom", "nope" } });
+	CHECK(codeOf(missing) == "invalid_payload");
+	const ToolResult clash = f.call("type_field_set", json{
+		{ "path", "Types/Loadout.hasset" }, { "name", "c" }, { "renameFrom", "a" } });
+	CHECK(codeOf(clash) == "invalid_payload");
+	CHECK(f.bytes("Types/Loadout.hasset") == before);
+
+	f.writeStub("Types/Rarity.hasset", HE::AssetType::EnumType);
+	REQUIRE_FALSE(f.call("type_enum_set", json{
+		{ "path", "Types/Rarity.hasset" }, { "name", "Common" } }).isError);
+	REQUIRE_FALSE(f.call("type_enum_set", json{
+		{ "path", "Types/Rarity.hasset" }, { "name", "Epic" }, { "value", 4 } }).isError);
+	const ToolResult e = f.call("type_enum_set", json{
+		{ "path", "Types/Rarity.hasset" }, { "name", "Heroic" }, { "renameFrom", "Epic" } });
+	REQUIRE_MESSAGE(!e.isError, codeOf(e));
+	CHECK(e.content["value"] == 4);                       // value kept
+	CHECK(e.content["created"] == false);
+	const HE::EnumDef en = f.registeredEnum("Types/Rarity.hasset");
+	REQUIRE(en.entries.size() == 2);
+	CHECK(en.entries[1].name == "Heroic");
+	REQUIRE(en.findEntry("Epic") != nullptr);
+	CHECK(en.findEntry("Epic")->name == "Heroic");
+	const ToolResult eclash = f.call("type_enum_set", json{
+		{ "path", "Types/Rarity.hasset" }, { "name", "Common" }, { "renameFrom", "Heroic" } });
+	CHECK(codeOf(eclash) == "invalid_payload");
+}
+
 // ─── A savegame template is a struct on disk ─────────────────────────────────
 
 TEST_CASE("A SaveGame Template takes the field tools, and is not registered as a type")

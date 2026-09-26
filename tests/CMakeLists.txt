@@ -37,6 +37,10 @@ add_executable(he_tests
     test_play_error_reveal.cpp
     test_editor_dock_state.cpp
     test_scene_autosave.cpp
+    # The asset tabs' autosave: interval, the per-tick prune that makes a save
+    # remove its copy, pending at the next start, Restore's backup, and the
+    # ContentManager::writeAssetTo path every asset panel's copy takes.
+    test_asset_autosave.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
@@ -76,6 +80,12 @@ add_executable(he_tests
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
     test_scene_recovery_ui.cpp
+    # Its sibling for asset tabs: per-row answers carry the row's key, and it
+    # waits for the scene's offer.
+    test_asset_recovery_ui.cpp
+    # The texture colour-space dialog, driven the same way: Apply rewrites the
+    # rows that change, a tick changed in the dialog is the flag the import writes.
+    test_texture_colour_space_ui.cpp
     test_editorcamera.cpp
     test_camera_bookmarks.cpp
     test_asset_thumbnail_cache.cpp
@@ -101,6 +111,8 @@ add_executable(he_tests
     test_inspector_prefab_keys.cpp
     test_inputmapping.cpp
     test_input_gamepad.cpp
+    test_input_rebind.cpp
+    test_player_settings.cpp
     test_eventbus.cpp
     test_scripting.cpp
     test_scripting_binding.cpp
@@ -134,6 +146,9 @@ add_executable(he_tests
     test_animation_layers.cpp
     test_blend_space.cpp
     test_sequencer_timeline.cpp
+    test_sequence.cpp
+    test_sequence_runtime.cpp
+    test_cinematic_timeline.cpp
     test_animation_ik.cpp
     test_navigation.cpp
     test_particles.cpp
@@ -218,11 +233,14 @@ add_executable(he_tests
     test_mcp_tools_particle.cpp
     test_mcp_tools_animator.cpp
     test_mcp_tools_clip.cpp
+    test_mcp_tools_sequence.cpp
     test_mcp_tools_build.cpp
     test_mcp_tools_settings.cpp
     test_mcp_tools_batch.cpp
     test_mcp_tools_screenshot.cpp
     test_mcp_camera_gizmos.cpp
+    test_viewport_overlays.cpp
+    test_texture_colour_space.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -388,6 +406,9 @@ add_executable(he_tests
     # afterwards carries the events that were asked for, and only a real
     # AnimationClipAsset round-trip through a real ContentManager answers it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsClip.cpp
+    # And for a sequence: the claim is that the cutscene a FRESH ContentManager
+    # loads afterwards is the one that was written, references and all.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsSequence.cpp
     # The build tools. In here because the two things they actually decide can
     # be decided without a build machine: WHICH profile a run is made from (and
     # that a one-off override never reaches the stored one), and whether the one
@@ -493,12 +514,19 @@ add_executable(he_tests
     # "does a drag on the ruler land the playhead where the ruler says" is a
     # question about arithmetic and hit tests, not about a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SequencerTimeline.cpp
+    # The Cinematic tab's strip (a Sequence's bindings, cuts, sections, events)
+    # and its preview bracket (save, write, restore), both without AppContext —
+    # the same reason as the Sequencer's strip above.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CinematicTimeline.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CinematicPreview.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # The solo autosave's timing and file rules: when a recovery snapshot is
     # written, that the write is temp+rename with the manifest last, and what
     # a previous run's leftover becomes at the next start. Clock, dirty flag
     # and revision are handed in, so it runs on a fake clock, not a stopwatch.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneAutosave.cpp
+    # Its sibling for the asset tabs — same clock-in-hand design.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetAutosave.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
     # profile picture; both call into it, so the tests need it linked too.
@@ -513,6 +541,10 @@ add_executable(he_tests
     # the field of view, does every client get its own colour); the tag half
     # is ImGui and compiles away here, like the presence bar's.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpCameraGizmos.cpp
+    # The viewport's selection boxes and collider outlines: pure geometry into
+    # a DebugDrawBuffer, and the question worth asking is whether they stand at
+    # the WORLD position under a moved or scaled parent.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportOverlays.cpp
     # The graph quick-spawn key table is deliberately plain data and ImGui-free
     # (HcGraphHost turns a letter into an ImGuiKey), so its invariants can be
     # asserted here without a window.
@@ -590,6 +622,12 @@ add_executable(he_tests
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
+    # And the asset tabs' recovery dialog, for test_asset_recovery_ui.cpp.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
+    # The texture colour-space dialog, for test_texture_colour_space_ui.cpp: same
+    # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
+    # (HorizonImporters, linked below) and CollabController (already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     # The Project Settings tab, for test_project_settings_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
     # writes Config/ProjectSettings.json through the ProjectManager.
@@ -625,6 +663,10 @@ set_source_files_properties(
     test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
+    test_asset_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
+    test_texture_colour_space_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp
@@ -736,7 +778,7 @@ set(HCGEN_CLASSES
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived
     inherit_novars_base inherit_novars input_actions containers reroutes
-    cheat_event
+    cheat_event datetime_double sequence_transport input_rumble input_rebind player_settings player_slots
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

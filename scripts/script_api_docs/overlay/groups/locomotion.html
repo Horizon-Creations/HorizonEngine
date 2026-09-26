@@ -1,0 +1,54 @@
+          <p>
+            Tells a character what to do this frame. <code>move</code>,
+            <code>look</code>, <code>setMaxSpeed</code> and
+            <code>setOrientToMovement</code> write the entity's
+            <strong>Movement</strong> component and do nothing, silently, on an
+            entity without one; the jumps need a Character Controller and log
+            when there is none. A Player Character gets both components
+            automatically. The Movement system turns the request into velocity
+            once per frame before physics steps.
+          </p>
+          <ul>
+            <li>
+              <strong><code>move</code> is an intent for one frame</strong>: call it
+              every frame the character should walk. Two calls in the same frame
+              add up, and the sum is cut back to length 1, so
+              <code>move(e, 1, 0, 0)</code> twice still walks at the top speed,
+              not twice it. Length 0.5 walks at half speed.
+            </li>
+            <li>
+              The direction is read as the Movement component's <em>Move
+              Direction Is</em> setting says: <em>World</em> (the default)
+              takes it as it is, <em>Camera</em> (the default for a Player
+              Character) turns it by the main camera rig's heading, so
+              <code>(0, 0, -1)</code> is "away from the camera". With an input
+              action from the WASD preset, forward is
+              <code>move(e, x, 0, -y)</code>.
+            </li>
+            <li>
+              The Y component is dropped, but only after the length is cut to 1:
+              <code>move(e, 0.5, 3, 0)</code> walks at 0.16 of the top speed.
+              Pass 0 for Y.
+            </li>
+            <li>
+              <code>look</code> adds its yaw to the character's rotation;
+              several calls in a frame add up. The pitch is accepted and
+              ignored, nothing reads it (build 7d49d44f). Tilt the view through
+              the camera rig with
+              <a href="#camera-addYawPitch"><code>camera.addYawPitch</code></a>.
+            </li>
+            <li>
+              <code>setOrientToMovement(e, true)</code> turns the character
+              towards its travel direction at the component's turn rate
+              (720°/s by default). Leave it off while <code>look</code> or a
+              camera rig owns the facing, or the two fight each other.
+            </li>
+            <li>
+              <code>jump</code> uses the Character Controller's Jump Speed,
+              <code>jumpWith</code> a speed of its own. Both return
+              <code>true</code> only when the character left the ground; a
+              second call in the same frame, a call in mid-air or a speed of 0
+              or less returns <code>false</code>. A jump within 0.12 s of walking
+              off a ledge is still granted.
+            </li>
+          </ul>

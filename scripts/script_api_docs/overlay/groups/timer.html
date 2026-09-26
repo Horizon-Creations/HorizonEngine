@@ -1,0 +1,29 @@
+          <p>
+            A timer calls back instead of waiting. <code>after</code> and
+            <code>every</code> return a handle at once and the script carries on;
+            when the time is up the engine calls <code>onTimer(self, handle)</code>
+            (Python <code>on_timer</code>, see <a href="#callbacks">Callbacks</a>) on
+            <strong>every</strong> script instance, and fires the GameInstance's
+            <em>On Timer</em> event. Keep the handle and compare it, because the
+            other scripts' timers arrive too.
+          </p>
+          <ul>
+            <li>
+              Timers run on <strong>real time</strong>: pause, slow motion and hit
+              stop do not stretch them. To wait in game time, count
+              <code>horizon.time.deltaTime()</code> in <code>onUpdate</code>.
+            </li>
+            <li>
+              Handles count up from 1. <strong>0 means the timer did not
+              start</strong>: the interval was shorter than 0.001 seconds or not a
+              number, or 64 timers were already running.
+            </li>
+            <li>
+              A timer belongs to the session, not to the script or entity that
+              started it. Destroying the entity or loading another scene does not
+              stop it; stopping Play or quitting the game does.
+              <code>cancelAll</code> stops every timer, other scripts' and the
+              GameInstance's included. To stop only your own, use
+              <code>cancel(handle)</code>.
+            </li>
+          </ul>

@@ -1,0 +1,23 @@
+          <p>
+            The named parameters of a node-graph material, the ones its
+            <em>Param</em> nodes declare, read and written at runtime. Every
+            parameter holds four numbers whatever the shader reads, so a scalar
+            parameter is its first number. From Lua and Python,
+            <code>horizon.setMaterialParam(e, name, x [, y, z, w])</code> fills
+            missing numbers with 0 and returns <code>false</code> when the entity
+            has no Material component or the material declares no such parameter;
+            <code>horizon.getMaterialParam</code> returns four zeros then.
+          </p>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue (build 7d49d44f): a set changes every entity with
+              the same material.</strong> The value is written into the material
+              asset in memory, not onto the entity. Set a parameter on one crate and
+              every crate sharing its material changes. An entity that overrides the
+              parameter in its Details panel keeps its override, and
+              <code>getParam</code> does not see that override: it reads the asset.
+              Until this is fixed, give an entity that needs its own value its own
+              material asset.
+            </p>
+          </div>

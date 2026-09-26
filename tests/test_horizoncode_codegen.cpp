@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <cmath>
 #include <climits>   // INT_MIN: the bitwise rows' edge operand
+#include <cstdio>
+#include <ctime>     // localtime_r: what datetime_double's second must be
 #include <map>
 #include <string>
 #include <vector>
@@ -57,6 +59,9 @@ namespace
 		switch (v.type)
 		{
 			case PinType::Float:  std::snprintf(buf, sizeof buf, "f:%g", v.f); return buf;
+			// %.17g: a trace that printed a Double with %g would call two
+			// timestamps a minute apart the same value.
+			case PinType::Double: std::snprintf(buf, sizeof buf, "d:%.17g", v.d); return buf;
 			case PinType::Bool:   return v.b ? "b:true" : "b:false";
 			case PinType::Int:    return "i:" + std::to_string(v.i);
 			case PinType::String: return "s:\"" + v.s + "\"";
@@ -138,6 +143,7 @@ namespace
 		switch (a.type)
 		{
 			case PinType::Float:  return a.f == b.f;   // bit-exact parity
+			case PinType::Double: return a.d == b.d;
 			case PinType::Bool:   return a.b == b.b;
 			case PinType::Int:    return a.i == b.i;
 			case PinType::String: return a.s == b.s;
@@ -1184,6 +1190,215 @@ TEST_CASE("codegen parity: animator_sync")
 	CHECK(std::count_if(p.interp.trace.begin(), p.interp.trace.end(), isSet) == 1);
 }
 
+TEST_CASE("codegen parity: sequence_transport")
+{
+	ParityPair p("fix/sequence_transport");
+	p.fire("Skip");
+
+	// Every row once, in the graph's order, with the same arguments on both
+	// sides (fire() compared the traces). Against a null world the answers are
+	// the neutral ones, and both backends must agree on those as well.
+	const char* rows[] = { "sequence.play", "sequence.setTime", "sequence.getTime",
+	                       "sequence.duration", "sequence.isPlaying", "sequence.bindSlot",
+	                       "sequence.pause", "sequence.stop" };
+	size_t at = 0;
+	for (const char* id : rows)
+	{
+		const std::string head = std::string("callApi ") + id + "(";
+		const auto it = std::find_if(p.interp.trace.begin() + at, p.interp.trace.end(),
+		                             [&](const std::string& t) { return t.rfind(head, 0) == 0; });
+		CHECK_MESSAGE(it != p.interp.trace.end(), id);
+		if (it != p.interp.trace.end()) at = size_t(it - p.interp.trace.begin()) + 1;
+	}
+	CHECK(p.var("started").b == false);
+	CHECK(p.var("t").f == 0.0f);
+	CHECK(p.var("len").f == 0.0f);
+	CHECK(p.var("playing").b == false);
+
+	// The end comes back through the ordinary notify handler, picked by name.
+	p.fire("OnAnimationNotify", 0, Value::ofString("Footstep"));
+	p.fire("OnAnimationNotify", 0, Value::ofString("SequenceFinished"));
+	CHECK(p.var("finished").f == 1.0f);
+	CHECK(p.var("other").f == 1.0f);
+}
+
+TEST_CASE("codegen parity: datetime_double (epoch seconds on Double pins, no narrowing)")
+{
+	ParityPair p("fix/datetime_double");
+	p.fire("Query");   // variables + callApi traces compared bit-exact across backends
+
+	const double T = hcfix::kFixEpoch;
+	const std::time_t tt = static_cast<std::time_t>(T);
+	std::tm parts{};
+#ifdef _WIN32
+	localtime_s(&parts, &tt);
+#else
+	localtime_r(&tt, &parts);
+#endif
+	// Negative control for the fixture itself: T is only a probe if a float
+	// cannot hold it. If this ever fails, pick an epoch that is not a multiple
+	// of 128 — the checks below would pass even on Float pins.
+	REQUIRE(static_cast<double>(static_cast<float>(T)) != T);
+	const std::time_t tf = static_cast<std::time_t>(static_cast<float>(T));
+	std::tm partsF{};
+#ifdef _WIN32
+	localtime_s(&partsF, &tf);
+#else
+	localtime_r(&tf, &partsF);
+#endif
+	REQUIRE(partsF.tm_sec != parts.tm_sec);
+
+	// BEFORE THE CHANGE (Float pins): 20, the second of 1758800000.
+	CHECK(p.var("sec").i  == parts.tm_sec);
+	CHECK(p.var("sec2").i == parts.tm_sec);
+	char two[4];
+	std::snprintf(two, sizeof two, "%02d", parts.tm_sec);
+	CHECK(p.var("text").s == two);
+	CHECK(p.var("stamp").type == PinType::Double);
+	CHECK(p.var("stamp").d == T);
+	// Narrowing still happens where a graph asks for a Float — the same way on
+	// both sides (fire() compared it bit-exact), and to the float nearest T.
+	CHECK(p.var("narrow").f == static_cast<float>(T));
+	// The engine saw the whole number: the argument travels as a Double.
+	const auto sawT = [](const std::string& t)
+	{ return t.rfind("callApi datetime.second(d:1758800007)", 0) == 0; };
+	CHECK(std::count_if(p.interp.trace.begin(), p.interp.trace.end(), sawT) == 2);
+}
+
+TEST_CASE("codegen parity: input_rumble (the writing input rows reach the sink identically)")
+{
+	// A recording sink behind an open gate: what the pads would be told. Both
+	// backends fire into the SAME sink, one after the other.
+	struct Call { char kind; float a, b; uint32_t ms; };
+	std::vector<Call> calls;
+	HE::api::input::setRumbleSink({
+		[&](float a, float b, uint32_t ms) { calls.push_back({ 'r', a, b, ms }); return true; },
+		[&](float a, float b, uint32_t ms) { calls.push_back({ 't', a, b, ms }); return true; },
+		[&]()                              { calls.push_back({ 's', 0.0f, 0.0f, 0 }); } });
+	HE::api::input::setRumbleGate(true, false);
+
+	ParityPair p("fix/input_rumble");
+	p.fire("Buzz");   // traces + variables compared across backends
+
+	CHECK(p.var("ok").b);
+	CHECK(p.var("okTriggers").b);
+	// Interpreter first, compiled second, each: rumble, triggers, stop.
+	REQUIRE(calls.size() == 6);
+	for (size_t base : { size_t(0), size_t(3) })
+	{
+		INFO("backend starting at call ", base);
+		CHECK(calls[base].kind == 'r');
+		CHECK(calls[base].a == 0.5f);
+		CHECK(calls[base].b == 1.0f);
+		CHECK(calls[base].ms == 250);
+		CHECK(calls[base + 1].kind == 't');
+		CHECK(calls[base + 1].a == 0.25f);
+		CHECK(calls[base + 1].b == 0.75f);
+		CHECK(calls[base + 1].ms == 0);   // 0 s = until stopped
+		CHECK(calls[base + 2].kind == 's');
+	}
+
+	HE::api::input::setRumbleGate(false, false);
+	HE::api::input::setRumbleSink({});
+}
+
+TEST_CASE("codegen parity: input_rebind (the rebinding rows reach the service identically)")
+{
+	// A recording service in place of a session's PlayerHost. Both backends
+	// call into the SAME one, one after the other.
+	std::vector<std::string> calls;
+	HE::api::input::setBindingService({
+		[&](const std::string& a, const std::string& d) { calls.push_back("begin " + a + " " + d); return true; },
+		[&]() { calls.push_back("cancel"); },
+		[&]() { calls.push_back("busy?"); return true; },
+		[&]() { calls.push_back("conflict?"); return std::string("Crouch, Use"); },
+		[&](const std::string& a, const std::string& d) { calls.push_back("name " + a + " " + d); return std::string("Left Mouse Button"); },
+		[&]() { calls.push_back("reset"); },
+		[&]() { calls.push_back("save"); return true; } });
+
+	ParityPair p("fix/input_rebind");
+	p.fire("Rebind");   // traces + variables compared across backends
+
+	CHECK(p.var("ok").b);
+	CHECK(p.var("busy").b);
+	CHECK(p.var("name").s == "Left Mouse Button");
+	CHECK(p.var("conflict").s == "Crouch, Use");
+	CHECK(p.var("saved").b);
+	const std::vector<std::string> one = {
+		"begin Jump gamepad", "busy?", "name Fire keyboard", "conflict?", "cancel", "reset", "save" };
+	REQUIRE(calls.size() == one.size() * 2);
+	for (size_t i = 0; i < one.size(); ++i)
+	{
+		INFO("call ", i);
+		CHECK(calls[i] == one[i]);                  // interpreter
+		CHECK(calls[one.size() + i] == one[i]);     // compiled
+	}
+
+	HE::api::input::setBindingService({});
+}
+
+TEST_CASE("codegen parity: player_settings (the settings rows reach one store identically)")
+{
+	// A recording host in place of an application. The fixture ends with
+	// resetToDefaults, so the compiled run starts where the interpreted one did.
+	HE::api::settings::resetToDefaults();
+	std::vector<std::string> calls;
+	HE::api::settings::Host host;
+	host.stickDeadzone = 0.15f;
+	host.vsync         = true;
+	host.fullscreen    = false;
+	host.applyStickDeadzone = [&](float dz) { calls.push_back("dz " + std::to_string(dz)); };
+	host.applyVSync         = [&](bool on) { calls.push_back(on ? "vsync on" : "vsync off"); };
+	host.applyFullscreen    = [&](bool on) { calls.push_back(on ? "full on" : "full off"); };
+	host.applyVolume = [&](const std::string& bus, std::optional<float> v)
+	{ calls.push_back("vol " + bus + (v ? " " + std::to_string(*v) : " project")); };
+	HE::api::settings::install(std::move(host));
+	calls.clear();   // install's own start-up apply is not the fixture's
+
+	ParityPair p("fix/player_settings");
+	p.fire("Apply");
+
+	CHECK(p.var("dz").f == doctest::Approx(0.25f));
+	CHECK(p.var("scale").f == doctest::Approx(1.5f));
+	CHECK(p.var("invert").b);
+	CHECK_FALSE(p.var("vsync").b);
+	CHECK(p.var("full").b);
+	CHECK(p.var("music").f == doctest::Approx(0.5f));
+
+	const std::vector<std::string> one = {
+		"dz " + std::to_string(0.25f), "vsync off", "full on", "vol Music " + std::to_string(0.5f),
+		// resetToDefaults: every hook back to the base, the bus to the project's.
+		"dz " + std::to_string(0.15f), "vsync on", "full off", "vol Music project" };
+	REQUIRE(calls.size() == one.size() * 2);
+	for (size_t i = 0; i < one.size(); ++i)
+	{
+		INFO("call ", i);
+		CHECK(calls[i] == one[i]);                  // interpreter
+		CHECK(calls[one.size() + i] == one[i]);     // compiled
+	}
+
+	// settings.save may have written into whatever sandbox an earlier case
+	// left set; take the key back out so no later case loads it.
+	HE::api::Ctx ctx;
+	HE::api::prefs::remove(ctx, HE::api::settings::kPrefsKey);
+	HE::api::settings::uninstall();
+}
+
+TEST_CASE("codegen parity: player_slots (the local-player rows read one table identically)")
+{
+	// Three local players, as PlayerHost would register them.
+	HE::api::player::setControllers({ 11u, 22u, 33u });
+
+	ParityPair p("fix/player_slots");
+	p.fire("Who");
+
+	CHECK(p.var("second").ref == 22u);
+	CHECK(p.var("beyond").ref == 0u);   // no player 10
+	CHECK(p.var("count").i == 3);
+
+	HE::api::player::clear();
+}
+
 TEST_CASE("codegen parity: engine_exec_cached (one dispatch, cached reads, save round-trip)")
 {
 	ParityPair p("fix/engine_exec_cached");
@@ -2022,4 +2237,45 @@ TEST_CASE("codegen: a Replicated variable keeps its flags in the generated slot 
 	const std::size_t secEnd = all.find('\n', sec);
 	REQUIRE(secEnd != std::string::npos);
 	CHECK(all.substr(sec, secEnd - sec).find("true") == std::string::npos);
+}
+
+TEST_CASE("codegen: a Save Game variable keeps its flag in the generated slot table")
+{
+	// Same hole as Replicated would have been: entity.saveState asks
+	// Runtime::savedVariablesOf, which reads varInfos() for a compiled class —
+	// an emitter that dropped the flag would save nothing in a shipped game.
+	using PT = HorizonCode::PinType;
+	hcfix::Fx f;
+	f.var("gold", PT::Int);
+	f.var("both", PT::Int);
+	f.var("plain", PT::Int);
+	for (HorizonCode::Variable& v : f.g.variables)
+	{
+		if (v.name == "gold") v.saveGame = true;
+		if (v.name == "both") { v.saveGame = true; v.replicated = true; }
+	}
+	const int ev = f.event("Go");
+	const int s = f.setVar("gold", PT::Int);
+	f.data(f.constI(1), 0, s, 0);
+	f.exec(ev, s);
+
+	HE::hccg::Options opt;
+	HE::hccg::Result r = HE::hccg::generate({ f.done("savegame_var") }, opt);
+	REQUIRE(r.ok);
+	REQUIRE(r.fallbacks.empty());
+	std::string all;
+	for (const auto& file : r.files) all += file.contents;
+
+	auto line = [&all](const char* name)
+	{
+		const std::size_t at = all.find(std::string("\"") + name + "\"");
+		REQUIRE(at != std::string::npos);
+		return all.substr(at, all.find('\n', at) - at);
+	};
+	// The positional groups before it are spelt out, replication as "no".
+	CHECK(line("gold").find("hc::ContainerKind::None, hc::PinType::String, false, false, true")
+	      != std::string::npos);
+	CHECK(line("both").find("true, false, true") != std::string::npos);
+	// Negative control: an unticked variable emits exactly as before.
+	CHECK(line("plain").find("ContainerKind") == std::string::npos);
 }

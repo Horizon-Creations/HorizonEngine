@@ -43,6 +43,12 @@ public:
 	void stashPre(const char* label = nullptr);
 	void commitPending();   // pending → undo stack (edit session finished)
 	void snapshotNow(const char* label = nullptr);   // capture + push in one step
+	// A world state the caller captured itself (SceneSerializer::saveToMemory)
+	// BEFORE an operation, pushed only once it turned out to change something
+	// — for passes that usually change nothing and must not leave an empty
+	// entry every time they run (the prefab sync after a reload from disk).
+	void pushSnapshot(std::vector<uint8_t>&& before, const char* label = nullptr)
+	{ pushUndo(std::move(before), resolveLabel(label)); }
 
 	// The label a push with no label of its own gets. Sticky until changed;
 	// clear with "" (or let a Context scope unwind). See the note above.

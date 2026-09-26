@@ -1,0 +1,34 @@
+          <p>
+            Which player controller drives which character. The references here
+            are <strong>HorizonCode object references</strong>, not entity ids:
+            a controller is an instance of a <em>PlayerController</em> class, a
+            character an instance of a <em>PlayerCharacter</em> class. In Lua and
+            Python they are plain integers, 0 meaning "none". To get from one to
+            an entity use <a href="#entity-owned"><code>horizon.entity.owned(ref)</code></a>,
+            the other way <a href="#entity-instance"><code>horizon.entity.instance(e)</code></a>.
+          </p>
+          <ul>
+            <li>
+              <code>controller()</code> is the session's first controller, 0 in a
+              project without a PlayerController class; <code>character()</code>
+              is what it possesses. Both are 0 outside a play session.
+            </li>
+            <li>
+              A controller drives one character and a character has one
+              controller: <code>possess</code> releases the controller's previous
+              character and takes the new one away from any other controller.
+              <code>possess(0, …)</code> does nothing.
+            </li>
+            <li>
+              The table only records numbers and checks none of them, so a
+              wrong reference is stored as it is. Pass what
+              <code>controller()</code> and <code>entity.instance</code> return.
+            </li>
+          </ul>
+          <p>
+            A Lua or Python script is not a controller, so possession does not
+            decide which script hears input: input actions reach every script
+            (see <a href="#callbacks">Callbacks</a>). What possession changes is
+            which HorizonCode character graph receives the controller's input
+            events, and which character the camera rig follows.
+          </p>

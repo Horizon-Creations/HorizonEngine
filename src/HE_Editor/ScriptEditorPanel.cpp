@@ -79,7 +79,9 @@ namespace
 	// a running session keeps its already-parsed copy until the project reloads —
 	// ContentManager::loadAsset() is a no-op for an already-loaded path, and a
 	// re-parse-and-swap reload isn't exposed safely yet, so live-reload is a follow-up.
-	bool saveToDisk(State& st, const std::string& path)
+	// The asset at `path` with its CHUNK_SRC replaced by `text`, written to `dest`.
+	// dest == path is a save; anything else is AssetAutosave's recovery copy.
+	bool writeWithSource(const std::string& path, const std::string& dest, const std::string& text)
 	{
 		HAsset::Reader r;
 		if (!r.open(path)) return false;
@@ -88,9 +90,13 @@ namespace
 		for (const auto& c : r.chunks())
 			if (c.id != HAsset::CHUNK_SRC)
 				w.addChunk(c.id, c.data.data(), c.data.size());
-		const std::string text = st.editor.GetText();
 		w.addChunk(HAsset::CHUNK_SRC, text.data(), text.size());
-		if (!w.write(path, type)) return false;
+		return w.write(dest, type);
+	}
+
+	bool saveToDisk(State& st, const std::string& path)
+	{
+		if (!writeWithSource(path, path, st.editor.GetText())) return false;
 		st.savedUndoIndex = st.editor.GetUndoIndex();
 		return true;
 	}
@@ -107,6 +113,16 @@ namespace ScriptEditorPanel
 	void appendDirtyPaths(std::vector<std::string>& out)
 	{
 		s_states.appendPathsIf([](const State& st) { return st.loaded && isDirtyState(st); }, out);
+	}
+
+	void appendSnapshots(AppContext&, std::vector<HE::Ed::AssetSnapshotSource>& out)
+	{
+		s_states.forEach([&out](const std::string& path, State& st) {
+			if (!st.loaded || !isDirtyState(st)) return;
+			out.push_back({ path, [path, &st](const std::string& dest) {
+				return writeWithSource(path, dest, st.editor.GetText());
+			} });
+		});
 	}
 
 	bool save(const std::string& path)

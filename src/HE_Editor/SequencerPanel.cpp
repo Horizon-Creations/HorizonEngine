@@ -151,9 +151,14 @@ void drawControls(PanelState& st, PropertyAnimClipAsset& clip, HE::Ed::Sequencer
 	// render() has pushed this already; pushed again here because the help
 	// audit reads the file top to bottom and this function stands above it.
 	HE::Ed::Help::Scope helpScope("Sequencer");
-	int transformTracks = 0, materialTracks = 0;
+	int transformTracks = 0, materialTracks = 0, otherTracks = 0;
 	for (const PropertyAnimChannel& ch : clip.channels)
-		(Seq::targetGroup(ch.target)[0] == 'T' ? transformTracks : materialTracks)++;
+	{
+		const char* group = Seq::targetGroup(ch.target);
+		if (std::strcmp(group, "Transform") == 0)     ++transformTracks;
+		else if (std::strcmp(group, "Material") == 0) ++materialTracks;
+		else                                          ++otherTracks;   // camera FOV, visibility
+	}
 
 	// ── The transport ────────────────────────────────────────────────────────
 	// Play runs the playhead at the clip's own pace and drives every entity in
@@ -181,9 +186,14 @@ void drawControls(PanelState& st, PropertyAnimClipAsset& clip, HE::Ed::Sequencer
 	fmtTime(nowTxt, sizeof(nowTxt), st.view.playhead, clip.duration);
 	ImGui::TextDisabled("%s / %s", nowTxt, lenTxt);
 	ImGui::SameLine();
-	ImGui::TextDisabled("·  %zu track%s (%d transform, %d material)",
-	                    clip.channels.size(), clip.channels.size() == 1 ? "" : "s",
-	                    transformTracks, materialTracks);
+	if (otherTracks > 0)
+		ImGui::TextDisabled("·  %zu track%s (%d transform, %d material, %d other)",
+		                    clip.channels.size(), clip.channels.size() == 1 ? "" : "s",
+		                    transformTracks, materialTracks, otherTracks);
+	else
+		ImGui::TextDisabled("·  %zu track%s (%d transform, %d material)",
+		                    clip.channels.size(), clip.channels.size() == 1 ? "" : "s",
+		                    transformTracks, materialTracks);
 
 	// The clip's length, editable. It cannot go under the last key — a key
 	// past the end would be one nobody could reach (SequencerTimeline.h,
@@ -498,6 +508,23 @@ bool SequencerPanel::reloadByContentPath(const std::string& contentPath)
 
 void SequencerPanel::appendDirtyPaths(std::vector<std::string>& out)
 { s_states.appendDirtyPaths(out); }
+
+void SequencerPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, PanelState& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			// The loaded clip IS the edit buffer (saveState writes it as it is),
+			// so the copy is of the clip itself.
+			const PropertyAnimClipAsset* a = cm->getPropertyAnimClip(st.assetId);
+			if (!a) return false;
+			PropertyAnimClipAsset copy = *a;
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
 
 bool SequencerPanel::save(AppContext& ctx, const std::string& path)
 {

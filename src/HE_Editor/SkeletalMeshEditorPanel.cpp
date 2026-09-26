@@ -123,6 +123,23 @@ void appendDirtyPaths(std::vector<std::string>& out)
 	for (const auto& [path, id] : s_dirtyClips) out.push_back(path);
 }
 
+void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	// The loaded clip is the edit buffer, so its copy is the clip as it is.
+	for (const auto& [path, id] : s_dirtyClips)
+	{
+		const HE::UUID clipId = id;
+		out.push_back({ cm->resolveSavePath(path), [cm, clipId](const std::string& dest) {
+			const AnimationClipAsset* clip = cm->getAnimationClip(clipId);
+			if (!clip) return false;
+			AnimationClipAsset copy = *clip;
+			return cm->writeAssetTo(copy, dest);
+		} });
+	}
+}
+
 bool save(AppContext& ctx, const std::string& assetPath)
 {
 	// Every panel's save() answers true for a path it is not holding — that is

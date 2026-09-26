@@ -17,6 +17,8 @@
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/AnimationLayerComponent.h"
+#include "HorizonScene/Components/SequencePlayerComponent.h"
+#include "HorizonScene/SequenceSystem.h"
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/NavAgentComponent.h"
@@ -223,6 +225,16 @@ bool teleportToLocalPose(Ctx& c, Entity e, TransformComponent& tc,
 }
 } // namespace
 
+// The save's value codec (defined with the rest of the save further down):
+// entity.saveState writes a class's Save Game variables through it, so a
+// variable and a template field of the same type are spelt the same on disk.
+namespace save {
+namespace {
+nlohmann::json valueToJson(const Value& v);
+Value valueFromJson(const nlohmann::json& j, const HE::StructField& f);
+} // namespace
+} // namespace save
+
 // ── Entities ─────────────────────────────────────────────────────────────────
 namespace entity {
 std::string getName(Ctx& c, Entity e)                          { return c.world ? ScriptApi::getName(*c.world, e) : std::string(); }
@@ -417,6 +429,91 @@ const SaveStateComponent* saveStateGuard(const char* op, Ctx& c, Entity e, std::
     }
     return ss;
 }
+
+// The entity's HorizonCode class instance, or 0. Asked of EntityHost for the
+// reason `instance` below gives: several instances may own one entity, and the
+// class binding is the one whose variables are the entity's state.
+HorizonCode::InstanceId classInstanceOf(Ctx& c, Entity e)
+{
+    if (!c.runtime || !c.entities) return 0;
+    return c.entities->instanceOf((entt::entity)e);
+}
+
+// The class's Save Game variables, name-keyed (Runtime::savedVariablesOf).
+// Empty for an entity without a class, or a class that ticks none.
+nlohmann::json scriptVarsToJson(Ctx& c, Entity e)
+{
+    nlohmann::json vars = nlohmann::json::object();
+    const HorizonCode::InstanceId inst = classInstanceOf(c, e);
+    if (!inst) return vars;
+    for (const std::string& name : c.runtime->savedVariablesOf(inst))
+        vars[name] = save::valueToJson(c.runtime->getVariable(inst, name));
+    return vars;
+}
+
+// The decode shape of one saved variable is the LIVE variable's: the instance
+// was seeded from its declaration, and that works the same for an interpreted
+// and a generated class (a CompiledVarInfo has no typeName to ask). A
+// container's Value carries no element typeName in either backend, so a
+// container of structs takes it from a live element or, if the container is
+// empty right now, from the "__type" every saved struct element carries.
+HE::StructField savedVarShape(const Value& live, const nlohmann::json& saved)
+{
+    HE::StructField f;
+    f.type = live.type;           f.isArray = live.isArray;
+    f.container = live.container; f.typeName = live.typeName;
+    f.keyType = live.keyType;     f.keyTypeName = live.keyTypeName;
+    if (f.type == PinType::Struct && f.typeName.empty() && !f.isArray)
+    {
+        // Both backends tag a scalar struct (generated toValue bakes its path),
+        // so this is belt and braces: the saved object names its own type.
+        if (saved.is_object() && saved.value("__type", std::string()).size())
+            f.typeName = saved["__type"].get<std::string>();
+    }
+    else if (f.type == PinType::Struct && f.typeName.empty())
+    {
+        if (!live.items.empty()) f.typeName = live.items.front().typeName;
+        const nlohmann::json* elems = saved.is_array() ? &saved
+            : (saved.is_object() && saved.contains("values") ? &saved["values"] : nullptr);
+        if (f.typeName.empty() && elems && elems->is_array())
+            for (const auto& el : *elems)
+                if (el.is_object() && el.value("__type", std::string()).size())
+                { f.typeName = el["__type"].get<std::string>(); break; }
+    }
+    return f;
+}
+
+// Name-keyed and partial, like the rest of applySavedState: a variable the save
+// lacks keeps its value, a saved name the class no longer marks Save Game (or
+// no longer has) is skipped — the class decides what is state, not the file.
+void applyScriptVars(Ctx& c, Entity e, const nlohmann::json& vars)
+{
+    const HorizonCode::InstanceId inst = classInstanceOf(c, e);
+    if (!inst)
+    {
+        HE_LOG_WARN(Script, "%s", "entity.applySavedState: the save holds script variables, "
+                                  "but the entity runs no HorizonCode class — skipped");
+        return;
+    }
+    const std::vector<std::string> saved = c.runtime->savedVariablesOf(inst);
+    std::string skipped;
+    for (auto it = vars.begin(); it != vars.end(); ++it)
+    {
+        if (std::find(saved.begin(), saved.end(), it.key()) == saved.end())
+        {
+            skipped += (skipped.empty() ? "" : ", ") + it.key();
+            continue;
+        }
+        const Value live = c.runtime->getVariable(inst, it.key());
+        c.runtime->setVariable(inst, it.key(),
+                               save::valueFromJson(it.value(), savedVarShape(live, it.value())));
+    }
+    // Info, not a warning: a shipped game that unticked a variable in an update
+    // meets this on every old save until it is written again.
+    if (!skipped.empty())
+        HE_LOG_INFO(Script, "%s", ("entity.applySavedState: not a Save Game variable of the "
+                                   "class (any more), left as it is: " + skipped).c_str());
+}
 } // namespace
 
 bool saveState(Ctx& c, Entity e)
@@ -435,6 +532,11 @@ bool saveState(Ctx& c, Entity e)
     }
     if (ss->saveVisibility)
         j["visible"] = getVisible(c, e);
+    // Only when there is something: an entity whose class ticks nothing (or
+    // that has no class) writes exactly the state it wrote before this existed.
+    if (ss->saveScriptVars)
+        if (nlohmann::json vars = scriptVarsToJson(c, e); !vars.empty())
+            j["vars"] = std::move(vars);
     return save::setEntityState(uuid, j.dump());
 }
 
@@ -493,6 +595,8 @@ bool applySavedState(Ctx& c, Entity e)
     }
     if (auto v = j.find("visible"); v != j.end() && v->is_boolean() && ss->saveVisibility)
         setVisible(c, e, v->get<bool>());
+    if (auto v = j.find("vars"); v != j.end() && v->is_object() && ss->saveScriptVars)
+        applyScriptVars(c, e, *v);
     return true;
 }
 } // namespace entity
@@ -885,6 +989,74 @@ std::vector<std::string> layerNames(Ctx& c, Entity e)
     return out;
 }
 } // namespace animator
+
+// ── Sequence ─────────────────────────────────────────────────────────────────
+// Thin over SequenceSystem's transport. Every row checks the world and the
+// player itself: the parity harness calls them with an empty Ctx, and entt
+// asserts on a stale handle before try_get could answer null.
+namespace sequence {
+namespace {
+SequencePlayerComponent* playerOf(Ctx& c, Entity e)
+{
+    if (!c.world) return nullptr;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    return reg.valid(id) ? reg.try_get<SequencePlayerComponent>(id) : nullptr;
+}
+}
+bool play(Ctx& c, Entity e)
+{
+    if (!c.content || !playerOf(c, e)) return false;
+    return SequenceSystem::play(*c.world, *c.content, (entt::entity)e);
+}
+void pause(Ctx& c, Entity e)
+{
+    if (playerOf(c, e)) SequenceSystem::pause(*c.world, (entt::entity)e);
+}
+void stop(Ctx& c, Entity e)
+{
+    if (playerOf(c, e)) SequenceSystem::stop(*c.world, (entt::entity)e);
+}
+void setTime(Ctx& c, Entity e, float seconds)
+{
+    if (c.content && playerOf(c, e)) SequenceSystem::setTime(*c.world, *c.content, (entt::entity)e, seconds);
+}
+float getTime(Ctx& c, Entity e)
+{
+    const auto* sp = playerOf(c, e);
+    return sp ? sp->time : 0.0f;
+}
+float duration(Ctx& c, Entity e)
+{
+    const auto* sp = playerOf(c, e);
+    if (!sp || !c.content) return 0.0f;
+    const SequenceAsset* seq = c.content->getSequence(sp->sequenceId);
+    return seq ? seq->duration : 0.0f;
+}
+bool isPlaying(Ctx& c, Entity e)
+{
+    const auto* sp = playerOf(c, e);
+    return sp && sp->playing && !sp->paused;
+}
+void bindSlot(Ctx& c, Entity e, const std::string& binding, Entity target)
+{
+    if (!playerOf(c, e)) return;
+    entt::entity to = entt::null;
+    if (target != 0)
+    {
+        to = (entt::entity)target;
+        if (!c.world->registry().valid(to))
+        {
+            // Not read as 0: clearing would put the asset's own actor back,
+            // which is not what a script binding a despawned character meant.
+            HE_LOG_WARN(Script, "sequence.bindSlot: entity %u does not exist — binding \"%s\" left as it was",
+                        static_cast<unsigned>(target), binding.c_str());
+            return;
+        }
+    }
+    SequenceSystem::bindSlotByName(*c.world, (entt::entity)e, binding, to);
+}
+} // namespace sequence
 
 // ── Particles ────────────────────────────────────────────────────────────────
 // The group that turns an emitter from scenery into an effect. Before this there
@@ -4342,11 +4514,16 @@ nlohmann::json scalarToJson(const Value& v)
     switch (v.type)
     {
     case P::Float:  return v.f;
+    case P::Double: return v.d;
     case P::Int:    return v.i;
     case P::Enum:   return v.i;
     case P::Bool:   return v.b;
     case P::String: return v.s;
     case P::Vec2:   return nlohmann::json::array({ v.v2.x, v.v2.y });
+    // Vec3/Vec4 used to fall to `null` here — a template field of either type
+    // was saved as nothing and loaded as zero, without a word.
+    case P::Vec3:   return nlohmann::json::array({ v.v3.x, v.v3.y, v.v3.z });
+    case P::Vec4:   return nlohmann::json::array({ v.v4.x, v.v4.y, v.v4.z, v.v4.w });
     case P::Color:  return nlohmann::json::array({ v.col.x, v.col.y, v.col.z, v.col.w });
     case P::Transform:
         return nlohmann::json{
@@ -4395,6 +4572,7 @@ Value scalarFromJson(const nlohmann::json& j, HorizonCode::PinType t, const std:
     switch (t)
     {
     case P::Float:  if (j.is_number())  v.f = j.get<float>(); break;
+    case P::Double: if (j.is_number())  v.d = j.get<double>(); break;
     case P::Int:
     case P::Enum:   if (j.is_number())  v.i = j.get<int>();   break;
     case P::Bool:   if (j.is_boolean()) v.b = j.get<bool>();  break;
@@ -4402,6 +4580,14 @@ Value scalarFromJson(const nlohmann::json& j, HorizonCode::PinType t, const std:
     case P::Vec2:
         if (j.is_array() && j.size() >= 2)
             v.v2 = { j[0].get<float>(), j[1].get<float>() };
+        break;
+    case P::Vec3:
+        if (j.is_array() && j.size() >= 3)
+            v.v3 = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>() };
+        break;
+    case P::Vec4:
+        if (j.is_array() && j.size() >= 4)
+            v.v4 = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
         break;
     case P::Color:
         if (j.is_array() && j.size() >= 4)
@@ -4424,13 +4610,17 @@ Value scalarFromJson(const nlohmann::json& j, HorizonCode::PinType t, const std:
     case P::Struct:
     {
         // Seed defaults, then overwrite the fields present — a schema edit
-        // between write and load keeps missing fields at their defaults.
+        // between write and load keeps missing fields at their defaults. A
+        // field renamed since the write is found under its former name.
         v = HE::TypeRegistry::instance().makeDefaultValue(typeName);
         HE::StructDef def;
         if (j.is_object() && HE::TypeRegistry::instance().getStruct(typeName, def))
-            for (size_t i = 0; i < def.fields.size(); ++i)
-                if (auto it = j.find(def.fields[i].name); it != j.end() && i < v.items.size())
-                    v.items[i] = valueFromJson(*it, def.fields[i]);
+            for (size_t i = 0; i < def.fields.size() && i < v.items.size(); ++i)
+            {
+                const std::string key = def.storedKey(def.fields[i],
+                    [&j](const std::string& k) { return j.contains(k); });
+                if (!key.empty()) v.items[i] = valueFromJson(j.at(key), def.fields[i]);
+            }
         break;
     }
     default: break;
@@ -4547,10 +4737,15 @@ bool load(const std::string& id, ::ContentManager* cm)
     doc->id = id;
     doc->templatePath = schema.assetPath;
     doc->fields = seedFields(schema);          // defaults first — partial files load clean
+    // Name-keyed; a template field renamed since the write is found under its
+    // former name, and the next write() stores it under the current one.
     if (auto f = j.find("fields"); f != j.end() && f->is_object())
         for (size_t i = 0; i < schema.fields.size(); ++i)
-            if (auto it = f->find(schema.fields[i].name); it != f->end())
-                doc->fields[i] = valueFromJson(*it, schema.fields[i]);
+        {
+            const std::string key = schema.storedKey(schema.fields[i],
+                [&f](const std::string& k) { return f->contains(k); });
+            if (!key.empty()) doc->fields[i] = valueFromJson(f->at(key), schema.fields[i]);
+        }
     if (auto e = j.find("entities"); e != j.end() && e->is_object())
         doc->entities = *e;
     doc->schema = std::move(schema);
@@ -5136,6 +5331,12 @@ uint32_t controllerOf(uint32_t character)
 }
 uint32_t controller() { return tbl().controllers.empty() ? 0u : tbl().controllers.front(); }
 uint32_t character()  { return possessed(controller()); }
+uint32_t controllerAt(int index)
+{
+    const auto& c = tbl().controllers;
+    return index >= 0 && static_cast<size_t>(index) < c.size() ? c[static_cast<size_t>(index)] : 0u;
+}
+int localPlayerCount() { return static_cast<int>(tbl().controllers.size()); }
 
 void setControllers(const std::vector<uint32_t>& controllers)
 { tbl().controllers = controllers; }
@@ -5209,6 +5410,105 @@ float gamepadAxis(const std::string& name)
     return a != SDL_GAMEPAD_AXIS_INVALID ? snap().padAxes[a] : 0.0f;
 }
 
+// Beside the Snapshot, not in it, for the reason the mode below gives: the
+// snapshot is rewritten every frame, the sink and the gate's edges must not be.
+namespace {
+struct RumbleState
+{
+    RumbleSink sink;
+    bool allowed    = false;
+    bool gamePaused = false;
+};
+RumbleState& rumbleState() { static RumbleState r; return r; }
+
+void stopPads()
+{
+    if (rumbleState().sink.stop) rumbleState().sink.stop();
+}
+
+// Seconds → SDL milliseconds. <= 0 (and NaN) is SDL's 0, "until stopped". A
+// POSITIVE duration must never round to that 0 — a 0.0004 s tick asked for
+// would turn into a buzz that never ends — so it is at least 1 ms, and at most
+// SDL's own cap, which it would apply anyway.
+uint32_t rumbleMs(float seconds)
+{
+    if (!(seconds > 0.0f)) return 0;
+    const float ms = seconds * 1000.0f + 0.5f;
+    if (ms >= 65535.0f) return 65535;
+    return std::max<uint32_t>(1u, static_cast<uint32_t>(ms));
+}
+}
+
+void setRumbleSink(RumbleSink sink) { rumbleState().sink = std::move(sink); }
+
+void setRumbleGate(bool allowed, bool gamePaused)
+{
+    RumbleState& r = rumbleState();
+    const bool closing = r.allowed && !allowed;
+    const bool pausing = allowed && gamePaused && !r.gamePaused;
+    r.allowed    = allowed;
+    r.gamePaused = gamePaused;
+    if (closing || pausing) stopPads();
+}
+
+bool rumble(float low, float high, float duration)
+{
+    const RumbleState& r = rumbleState();
+    return r.allowed && r.sink.rumble && r.sink.rumble(low, high, rumbleMs(duration));
+}
+
+bool rumbleTriggers(float left, float right, float duration)
+{
+    const RumbleState& r = rumbleState();
+    return r.allowed && r.sink.rumbleTriggers
+        && r.sink.rumbleTriggers(left, right, rumbleMs(duration));
+}
+
+// Not gated: stopping is always safe, and a closed gate has already stopped.
+void stopRumble() { stopPads(); }
+
+// Beside the Snapshot for the same reason as the rumble state: installed once
+// per session by the PlayerHost, never rewritten by a frame.
+namespace {
+BindingService& bindingService() { static BindingService s; return s; }
+}
+
+void setBindingService(BindingService service) { bindingService() = std::move(service); }
+
+bool rebindBegin(const std::string& action, const std::string& device)
+{
+    const BindingService& s = bindingService();
+    return s.rebindBegin && s.rebindBegin(action, device);
+}
+void rebindCancel()
+{
+    if (const BindingService& s = bindingService(); s.rebindCancel) s.rebindCancel();
+}
+bool isRebinding()
+{
+    const BindingService& s = bindingService();
+    return s.isRebinding && s.isRebinding();
+}
+std::string rebindConflict()
+{
+    const BindingService& s = bindingService();
+    return s.rebindConflict ? s.rebindConflict() : std::string();
+}
+std::string bindingName(const std::string& action, const std::string& device)
+{
+    const BindingService& s = bindingService();
+    return s.bindingName ? s.bindingName(action, device) : std::string();
+}
+void resetBindings()
+{
+    if (const BindingService& s = bindingService(); s.resetBindings) s.resetBindings();
+}
+bool saveBindings()
+{
+    const BindingService& s = bindingService();
+    return s.saveBindings && s.saveBindings();
+}
+
 // The action states live beside the Snapshot rather than in it for the same
 // reason the mode below does: the snapshot is overwritten by pushSdlSnapshot
 // every frame, and that call comes from a different place (the app's frame)
@@ -5265,6 +5565,24 @@ using VV = std::vector<Value>;
 
 // Value readers — tolerant of missing args (return the type's zero).
 float       aF (const VV& a, size_t k) { return k < a.size() ? a[k].f   : 0.0f; }
+// Double reads go by the value's OWN type, like aV3 below: the datetime/fs rows
+// were Float-typed until the precision fix, and a C++ caller handing the
+// registry a Float (or an Int from `os.time()`-shaped code) still means that
+// number — reading `.d` unconditionally would turn it into 1970.
+double      aD (const VV& a, size_t k)
+{
+    if (k >= a.size()) return 0.0;
+    const Value& v = a[k];
+    switch (v.type)
+    {
+        case P::Double: return v.d;
+        case P::Float:  return (double)v.f;
+        case P::Int:
+        case P::Enum:   return (double)v.i;
+        case P::Bool:   return v.b ? 1.0 : 0.0;
+        default:        return 0.0;
+    }
+}
 bool        aB (const VV& a, size_t k) { return k < a.size() ? a[k].b   : false; }
 int         aI (const VV& a, size_t k) { return k < a.size() ? a[k].i   : 0; }
 // A Ref pin carries its instance handle in `ref`, not in `i` — reading it as an
@@ -5653,6 +5971,27 @@ const std::vector<ApiFn>& registry()
                     arr.items.push_back(Value::ofString(n));
                 return VV{ arr }; } });
 
+        // Sequence — the transport of a Sequence Player. The entity is the
+        // cutscene's owner; the end comes back as the notify "SequenceFinished".
+        t.push_back({ "sequence.play", "Sequence", true, {{"entity", P::Int}}, {{"started", P::Bool}}, "HE::api::sequence::play",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(sequence::play(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "sequence.pause", "Sequence", true, {{"entity", P::Int}}, {}, "HE::api::sequence::pause",
+            [](Ctx& c, const VV& a){ sequence::pause(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "sequence.stop", "Sequence", true, {{"entity", P::Int}}, {}, "HE::api::sequence::stop",
+            [](Ctx& c, const VV& a){ sequence::stop(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "sequence.setTime", "Sequence", true, {{"entity", P::Int}, {"seconds", P::Float}}, {}, "HE::api::sequence::setTime",
+            [](Ctx& c, const VV& a){ sequence::setTime(c, (Entity)aI(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "sequence.getTime", "Sequence", false, {{"entity", P::Int}}, {{"seconds", P::Float}}, "HE::api::sequence::getTime",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(sequence::getTime(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "sequence.duration", "Sequence", false, {{"entity", P::Int}}, {{"seconds", P::Float}}, "HE::api::sequence::duration",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(sequence::duration(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "sequence.isPlaying", "Sequence", false, {{"entity", P::Int}}, {{"playing", P::Bool}}, "HE::api::sequence::isPlaying",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(sequence::isPlaying(c, (Entity)aI(a, 0))) }; } });
+        // By binding NAME: the label the editor shows, the way layers are
+        // addressed — nobody authoring a cutscene ever sees a slot number.
+        t.push_back({ "sequence.bindSlot", "Sequence", true, {{"entity", P::Int}, {"binding", P::String}, {"target", P::Int}}, {}, "HE::api::sequence::bindSlot",
+            [](Ctx& c, const VV& a){ sequence::bindSlot(c, (Entity)aI(a, 0), aS(a, 1), (Entity)aI(a, 2)); return VV{}; } });
+
         // Movement — the reads an animator asks for. Derived from the character
         // controller on the spot, so there is no second copy to go stale.
         t.push_back({ "movement.speed", "Movement", false, {{"entity", P::Int}}, {{"speed", P::Float}}, "HE::api::movement::speed",
@@ -6032,6 +6371,15 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "app.notifyAvailable", "App", false, {}, {{"available", P::Bool}},
             "HE::api::app::notifyAvailable",
             [](Ctx& c, const VV&){ return VV{ Value::ofBool(app::notifyAvailable(c)) }; } });
+        // The player's display settings (settings, PlayerSettings.cpp).
+        t.push_back({ "app.setVSync", "App", true, {{"enabled", P::Bool}}, {}, "HE::api::app::setVSync",
+            [](Ctx&, const VV& a){ app::setVSync(aB(a, 0)); return VV{}; } });
+        t.push_back({ "app.vsync", "App", false, {}, {{"enabled", P::Bool}}, "HE::api::app::vsync",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(app::vsync()) }; } });
+        t.push_back({ "app.setFullscreen", "App", true, {{"fullscreen", P::Bool}}, {}, "HE::api::app::setFullscreen",
+            [](Ctx&, const VV& a){ app::setFullscreen(aB(a, 0)); return VV{}; } });
+        t.push_back({ "app.isFullscreen", "App", false, {}, {{"fullscreen", P::Bool}}, "HE::api::app::isFullscreen",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(app::isFullscreen()) }; } });
         t.push_back({ "app.setAutostart", "App", true, {{"enabled", P::Bool}}, {},
             "HE::api::app::setAutostart",
             [](Ctx& c, const VV& a){ app::setAutostart(c, aB(a, 0)); return VV{}; } });
@@ -6143,14 +6491,27 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "prefs.clear", "Prefs", true, {}, {}, "HE::api::prefs::clear",
             [](Ctx& c, const VV&){ prefs::clear(c); return VV{}; } });
 
-        // Date and time — the WALL clock, unlike the time group.
-        t.push_back({ "datetime.now", "DateTime", false, {}, {{"epochSeconds", P::Float}},
+        // Player settings: the store behind input.setStickDeadzone,
+        // camera.setStickSensitivityScale, app.setVSync … and the volume rows.
+        t.push_back({ "settings.setVolume", "Settings", true, {{"bus", P::String}, {"volume", P::Float}}, {}, "HE::api::settings::setVolume",
+            [](Ctx&, const VV& a){ settings::setVolume(aS(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "settings.volume", "Settings", false, {{"bus", P::String}}, {{"volume", P::Float}}, "HE::api::settings::volume",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(settings::volume(aS(a, 0))) }; } });
+        t.push_back({ "settings.save", "Settings", true, {}, {{"ok", P::Bool}}, "HE::api::settings::save",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(settings::save()) }; } });
+        t.push_back({ "settings.resetToDefaults", "Settings", true, {}, {}, "HE::api::settings::resetToDefaults",
+            [](Ctx&, const VV&){ settings::resetToDefaults(); return VV{}; } });
+
+        // Date and time — the WALL clock, unlike the time group. Double pins:
+        // at today's epoch a float steps in 128 s, so on a Float pin `now` read
+        // up to a minute wrong and `second(now())` was noise.
+        t.push_back({ "datetime.now", "DateTime", false, {}, {{"epochSeconds", P::Double}},
             "HE::api::datetime::now",
-            [](Ctx& c, const VV&){ return VV{ Value::ofFloat((float)datetime::now(c)) }; } });
+            [](Ctx& c, const VV&){ return VV{ Value::ofDouble(datetime::now(c)) }; } });
         t.push_back({ "datetime.format", "DateTime", false,
-            {{"epochSeconds", P::Float}, {"format", P::String}}, {{"text", P::String}},
+            {{"epochSeconds", P::Double}, {"format", P::String}}, {{"text", P::String}},
             "HE::api::datetime::format",
-            [](Ctx& c, const VV& a){ return VV{ Value::ofString(datetime::format(c, aF(a, 0), aS(a, 1))) }; } });
+            [](Ctx& c, const VV& a){ return VV{ Value::ofString(datetime::format(c, aD(a, 0), aS(a, 1))) }; } });
         {
             // One row per field, all the same shape.
             struct Part { const char* id; const char* cpp; int (*fn)(Ctx&, double); };
@@ -6164,9 +6525,9 @@ const std::vector<ApiFn>& registry()
                 { "datetime.weekday", "HE::api::datetime::weekday", &datetime::weekday },
             };
             for (const Part& p : kParts)
-                t.push_back({ p.id, "DateTime", false, {{"epochSeconds", P::Float}},
+                t.push_back({ p.id, "DateTime", false, {{"epochSeconds", P::Double}},
                     {{"value", P::Int}}, p.cpp,
-                    [fn = p.fn](Ctx& c, const VV& a){ return VV{ Value::ofInt(fn(c, aF(a, 0))) }; } });
+                    [fn = p.fn](Ctx& c, const VV& a){ return VV{ Value::ofInt(fn(c, aD(a, 0))) }; } });
         }
 
         // Math (pure)
@@ -6294,6 +6655,10 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofRef(player::controller()) }; } });
         t.push_back({ "player.character", "Player", false, {}, {{"character", P::Ref}}, "HE::api::player::character",
             [](Ctx&, const VV&){ return VV{ Value::ofRef(player::character()) }; } });
+        t.push_back({ "player.controllerAt", "Player", false, {{"index", P::Int}}, {{"controller", P::Ref}}, "HE::api::player::controllerAt",
+            [](Ctx&, const VV& a){ return VV{ Value::ofRef(player::controllerAt((int)aI(a, 0))) }; } });
+        t.push_back({ "player.localPlayerCount", "Player", false, {}, {{"count", P::Int}}, "HE::api::player::localPlayerCount",
+            [](Ctx&, const VV&){ return VV{ Value::ofInt(player::localPlayerCount()) }; } });
 
         // Input (pure getters; the app pushes the snapshot each frame)
         t.push_back({ "input.keyDown", "Input", false, {{"key", P::String}}, {{"down", P::Bool}}, "HE::api::input::keyDown",
@@ -6315,6 +6680,34 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::gamepadButton(aS(a, 0))) }; } });
         t.push_back({ "input.gamepadAxis", "Input", false, {{"axis", P::String}}, {{"value", P::Float}}, "HE::api::input::gamepadAxis",
             [](Ctx&, const VV& a){ return VV{ Value::ofFloat(input::gamepadAxis(aS(a, 0))) }; } });
+        t.push_back({ "input.rumble", "Input", true, {{"low", P::Float}, {"high", P::Float}, {"duration", P::Float}}, {{"ok", P::Bool}}, "HE::api::input::rumble",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::rumble(aF(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "input.rumbleTriggers", "Input", true, {{"left", P::Float}, {"right", P::Float}, {"duration", P::Float}}, {{"ok", P::Bool}}, "HE::api::input::rumbleTriggers",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::rumbleTriggers(aF(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "input.stopRumble", "Input", true, {}, {}, "HE::api::input::stopRumble",
+            [](Ctx&, const VV&){ input::stopRumble(); return VV{}; } });
+
+        // Rebinding: the player's own bindings over the project's, answered by
+        // the session's PlayerHost (see input::BindingService).
+        t.push_back({ "input.rebindBegin", "Input", true, {{"action", P::String}, {"device", P::String}}, {{"ok", P::Bool}}, "HE::api::input::rebindBegin",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::rebindBegin(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "input.rebindCancel", "Input", true, {}, {}, "HE::api::input::rebindCancel",
+            [](Ctx&, const VV&){ input::rebindCancel(); return VV{}; } });
+        t.push_back({ "input.isRebinding", "Input", false, {}, {{"rebinding", P::Bool}}, "HE::api::input::isRebinding",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(input::isRebinding()) }; } });
+        t.push_back({ "input.rebindConflict", "Input", false, {}, {{"actions", P::String}}, "HE::api::input::rebindConflict",
+            [](Ctx&, const VV&){ return VV{ Value::ofString(input::rebindConflict()) }; } });
+        t.push_back({ "input.bindingName", "Input", false, {{"action", P::String}, {"device", P::String}}, {{"name", P::String}}, "HE::api::input::bindingName",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(input::bindingName(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "input.resetBindings", "Input", true, {}, {}, "HE::api::input::resetBindings",
+            [](Ctx&, const VV&){ input::resetBindings(); return VV{}; } });
+        t.push_back({ "input.saveBindings", "Input", true, {}, {{"ok", P::Bool}}, "HE::api::input::saveBindings",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(input::saveBindings()) }; } });
+        // The player's deadzone (settings, PlayerSettings.cpp).
+        t.push_back({ "input.setStickDeadzone", "Input", true, {{"deadzone", P::Float}}, {}, "HE::api::input::setStickDeadzone",
+            [](Ctx&, const VV& a){ input::setStickDeadzone(aF(a, 0)); return VV{}; } });
+        t.push_back({ "input.stickDeadzone", "Input", false, {}, {{"deadzone", P::Float}}, "HE::api::input::stickDeadzone",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(input::stickDeadzone()) }; } });
 
         // Input actions by name — the polling twin of the Input.<Action>.*
         // events, pushed by PlayerHost each frame (see input::ActionState).
@@ -6415,6 +6808,16 @@ const std::vector<ApiFn>& registry()
             [](Ctx& c, const VV& a){ camera::blendTo(c, (Entity)aI(a, 0), aF(a, 1), aI(a, 2)); return VV{}; } });
         t.push_back({ "camera.isBlending", "Camera", false, {}, {{"blending", P::Bool}}, "HE::api::camera::isBlending",
             [](Ctx& c, const VV&){ return VV{ Value::ofBool(camera::isBlending(c)) }; } });
+
+        // The player's stick look over every rig (settings, PlayerSettings.cpp).
+        t.push_back({ "camera.setStickSensitivityScale", "Camera", true, {{"scale", P::Float}}, {}, "HE::api::camera::setStickSensitivityScale",
+            [](Ctx&, const VV& a){ camera::setStickSensitivityScale(aF(a, 0)); return VV{}; } });
+        t.push_back({ "camera.stickSensitivityScale", "Camera", false, {}, {{"scale", P::Float}}, "HE::api::camera::stickSensitivityScale",
+            [](Ctx&, const VV&){ return VV{ Value::ofFloat(camera::stickSensitivityScale()) }; } });
+        t.push_back({ "camera.setStickInvertY", "Camera", true, {{"invert", P::Bool}}, {}, "HE::api::camera::setStickInvertY",
+            [](Ctx&, const VV& a){ camera::setStickInvertY(aB(a, 0)); return VV{}; } });
+        t.push_back({ "camera.stickInvertY", "Camera", false, {}, {{"invert", P::Bool}}, "HE::api::camera::stickInvertY",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(camera::stickInvertY()) }; } });
 
         // Environment — EVERY EnvironmentComponent field, generated from the
         // HE_ENV_FIELDS_* X-lists in EngineApi.h (get = pure read, set = exec).
@@ -6538,10 +6941,13 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::makeDir(aS(a, 0))) }; } });
         t.push_back({ "fs.isDir", "File", false, {{"path", P::String}}, {{"isDir", P::Bool}}, "HE::api::fs::isDir",
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(fs::isDir(aS(a, 0))) }; } });
-        t.push_back({ "fs.size", "File", false, {{"path", P::String}}, {{"bytes", P::Float}}, "HE::api::fs::size",
-            [](Ctx&, const VV& a){ return VV{ Value::ofFloat((float)fs::size(aS(a, 0))) }; } });
-        t.push_back({ "fs.modified", "File", false, {{"path", P::String}}, {{"time", P::Float}}, "HE::api::fs::modified",
-            [](Ctx&, const VV& a){ return VV{ Value::ofFloat((float)fs::modified(aS(a, 0))) }; } });
+        // Double for the same reason as datetime: `modified` is on that clock (a
+        // file's age is `now - modified`), and a float counts bytes exactly only
+        // up to 16 MiB.
+        t.push_back({ "fs.size", "File", false, {{"path", P::String}}, {{"bytes", P::Double}}, "HE::api::fs::size",
+            [](Ctx&, const VV& a){ return VV{ Value::ofDouble(fs::size(aS(a, 0))) }; } });
+        t.push_back({ "fs.modified", "File", false, {{"path", P::String}}, {{"time", P::Double}}, "HE::api::fs::modified",
+            [](Ctx&, const VV& a){ return VV{ Value::ofDouble(fs::modified(aS(a, 0))) }; } });
         t.push_back({ "fs.list", "File", false, {{"dir", P::String}}, {{"names", P::String, /*isArray=*/true}}, "HE::api::fs::list",
             [](Ctx&, const VV& a){
                 Value arr; arr.isArray = true; arr.type = P::String;
@@ -7102,6 +7508,10 @@ const std::vector<ApiFn>& registry()
             { "animator.getLayerWeight", "Get Layer Weight" },
             { "animator.playLayer", "Play Layer" },
             { "animator.layerNames", "Get Layer Names" },
+            { "sequence.play", "Play Sequence" },           { "sequence.pause", "Pause Sequence" },
+            { "sequence.stop", "Stop Sequence" },           { "sequence.setTime", "Set Sequence Time" },
+            { "sequence.getTime", "Get Sequence Time" },    { "sequence.duration", "Get Sequence Duration" },
+            { "sequence.isPlaying", "Is Sequence Playing" }, { "sequence.bindSlot", "Bind Sequence Slot" },
             { "movement.speed", "Get Speed" }, { "movement.verticalSpeed", "Get Vertical Speed" },
             { "movement.isGrounded", "Is Grounded" }, { "movement.velocity", "Get Velocity" },
             { "movement.forwardAmount", "Get Forward Amount" },
@@ -7218,6 +7628,8 @@ const std::vector<ApiFn>& registry()
             { "app.addMenuSeparator", "Add Menu Separator" },
             { "app.notify", "Notify" },
             { "app.notifyAvailable", "Notifications Available" },
+            { "app.setVSync", "Set VSync" },               { "app.vsync", "Get VSync" },
+            { "app.setFullscreen", "Set Fullscreen" },     { "app.isFullscreen", "Is Fullscreen" },
             { "app.clearMenuBar", "Clear Menu Bar" },
             { "app.setMenuItemEnabled", "Set Menu Item Enabled" },
             { "app.setMenuItemChecked", "Set Menu Item Checked" },
@@ -7247,6 +7659,8 @@ const std::vector<ApiFn>& registry()
             { "prefs.setNumber", "Set Pref Number" }, { "prefs.setBool", "Set Pref Bool" },
             { "prefs.has", "Has Pref" }, { "prefs.remove", "Remove Pref" },
             { "prefs.clear", "Clear Prefs" },
+            { "settings.setVolume", "Set Volume Setting" }, { "settings.volume", "Get Volume Setting" },
+            { "settings.save", "Save Settings" },        { "settings.resetToDefaults", "Reset Settings" },
             { "datetime.now", "Now" }, { "datetime.format", "Format Time" },
             { "datetime.year", "Year" }, { "datetime.month", "Month" }, { "datetime.day", "Day" },
             { "datetime.hour", "Hour" }, { "datetime.minute", "Minute" },
@@ -7288,12 +7702,26 @@ const std::vector<ApiFn>& registry()
             { "player.controllerOf", "Get Controller" },
             { "player.controller", "Get Player Controller" },
             { "player.character", "Get Player Character" },
+            { "player.controllerAt", "Get Player Controller At" },
+            { "player.localPlayerCount", "Local Player Count" },
             { "input.keyDown", "Key Down" },          { "input.mouseButton", "Mouse Button" },
             { "input.mousePosition", "Mouse Position" }, { "input.mouseDelta", "Mouse Delta" },
             { "input.scrollDelta", "Scroll Delta" },
             { "input.gamepadConnected", "Gamepad Connected" },
             { "input.gamepadButton", "Gamepad Button" },
             { "input.gamepadAxis", "Gamepad Axis" },
+            { "input.rumble", "Rumble Gamepad" },
+            { "input.rumbleTriggers", "Rumble Gamepad Triggers" },
+            { "input.stopRumble", "Stop Gamepad Rumble" },
+            { "input.rebindBegin", "Rebind Input Action" },
+            { "input.rebindCancel", "Cancel Rebind" },
+            { "input.isRebinding", "Is Rebinding" },
+            { "input.rebindConflict", "Rebind Conflict" },
+            { "input.bindingName", "Input Binding Name" },
+            { "input.resetBindings", "Reset Input Bindings" },
+            { "input.saveBindings", "Save Input Bindings" },
+            { "input.setStickDeadzone", "Set Stick Deadzone" },
+            { "input.stickDeadzone", "Get Stick Deadzone" },
             { "input.actionDown", "Input Action Down" },
             { "input.actionPressed", "Input Action Pressed" },
             { "input.actionReleased", "Input Action Released" },
@@ -7325,6 +7753,10 @@ const std::vector<ApiFn>& registry()
             { "camera.stopAllShakes", "Stop All Camera Shakes" },
             { "camera.kickFov", "Kick Camera FOV" },
             { "camera.blendTo", "Blend To Camera" },         { "camera.isBlending", "Is Camera Blending" },
+            { "camera.setStickSensitivityScale", "Set Stick Look Sensitivity" },
+            { "camera.stickSensitivityScale", "Get Stick Look Sensitivity" },
+            { "camera.setStickInvertY", "Set Invert Stick Look" },
+            { "camera.stickInvertY", "Get Invert Stick Look" },
             // Environment display names — generated from the same X-lists as
             // the functions ("Get "/"Set " + the display string per field).
 #define HE_ENV_NAME_ROW(m, Name, disp) { "env.get" #Name, "Get " disp }, { "env.set" #Name, "Set " disp },
@@ -7651,6 +8083,10 @@ bool isScriptGroup(std::string_view group)
                                                     // key/value store — the two things every
                                                     // application script reaches for first.
                                                     "json", "prefs",
+                                                    // "settings" is the store behind a settings
+                                                    // menu: volume, save and reset. Its other
+                                                    // rows are filed under input, camera and app.
+                                                    "settings",
                                                     // "datetime" has no flat twin at all: without
                                                     // it a text script can read the clock as a
                                                     // number of seconds and never say what day
@@ -7693,7 +8129,14 @@ bool isScriptGroup(std::string_view group)
                                                     // from it. Nothing in it is HorizonCode-only
                                                     // — a PlayerId and an entity are both
                                                     // integers on every frontend.
-                                                    "net" };
+                                                    "net",
+                                                    // "sequence" has no flat twin either:
+                                                    // without it a Lua or Python level can
+                                                    // hold a cutscene but never start, skip
+                                                    // or cast "the player" into it. Its end
+                                                    // arrives through onAnimationNotify,
+                                                    // which both already have.
+                                                    "sequence" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }
@@ -7938,6 +8381,26 @@ void fillInputServices(::HeInputServices& out, GameServicesBinding* binding)
     out.setMode = [](void*, int m) {
         if (m < (int)input::Mode::GameOnly || m > (int)input::Mode::UIOnly) return;
         input::setMode((input::Mode)m); };
+
+    out.rumble = [](void*, float low, float high, float duration) {
+        return input::rumble(low, high, duration); };
+    out.rumbleTriggers = [](void*, float left, float right, float duration) {
+        return input::rumbleTriggers(left, right, duration); };
+    out.stopRumble = [](void*) { input::stopRumble(); };
+
+    out.rebindBegin = [](void*, const char* action, const char* device) {
+        return input::rebindBegin(action ? action : "", device ? device : ""); };
+    out.rebindCancel = [](void*) { input::rebindCancel(); };
+    out.isRebinding  = [](void*) { return input::isRebinding(); };
+    out.rebindConflict = [](void*, char* buf, int cap) {
+        return copyOut(input::rebindConflict(), buf, cap); };
+    out.bindingName = [](void*, const char* action, const char* device, char* buf, int cap) {
+        return copyOut(input::bindingName(action ? action : "", device ? device : ""), buf, cap); };
+    out.resetBindings = [](void*) { input::resetBindings(); };
+    out.saveBindings  = [](void*) { return input::saveBindings(); };
+
+    out.setStickDeadzone = [](void*, float deadzone) { input::setStickDeadzone(deadzone); };
+    out.stickDeadzone    = [](void*) { return input::stickDeadzone(); };
 }
 
 void fillContentServices(::HeContentServices& out, GameServicesBinding* binding)

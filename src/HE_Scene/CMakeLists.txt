@@ -37,6 +37,8 @@ add_library(HorizonScene SHARED
     src/AnimationStateMachineSystem.cpp
     src/AnimationPreview.cpp
     src/PropertyAnimationSystem.cpp
+    src/SequenceEval.cpp
+    src/SequenceSystem.cpp
     src/NavigationSystem.cpp
     src/ParticleSystem.cpp
     src/SplineGeometry.cpp
@@ -55,6 +57,7 @@ add_library(HorizonScene SHARED
     src/ScriptContext.cpp
     src/ScriptApi.cpp
     src/EngineApi.cpp
+    src/PlayerSettings.cpp
     src/HcCodegen.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp

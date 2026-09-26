@@ -40,7 +40,45 @@ struct PanelState
 	HE::StructDef structDef;
 	HE::EnumDef   enumDef;
 	std::string lastSaveError; // shown under the toolbar until the next save
+	// Per row (entry or field, index-parallel): its name as last saved, empty
+	// for a row added since. Rows are only ever appended or erased, never
+	// reordered, so the index is the row's identity for the life of the tab —
+	// which is how a save tells a RENAME (book the old name as an alias, so
+	// saves and graphs written before keep finding it) from an edit-in-progress.
+	std::vector<std::string> savedNames;
 };
+
+template <class Rows>
+std::vector<std::string> rowNames(const Rows& rows)
+{
+	std::vector<std::string> out;
+	out.reserve(rows.size());
+	for (const auto& r : rows) out.push_back(r.name);
+	return out;
+}
+
+// Book every row whose name differs from the one it was saved under.
+void bookRenames(HE::EnumDef& def, std::vector<std::string>& savedNames)
+{
+	savedNames.resize(def.entries.size());
+	for (size_t i = 0; i < def.entries.size(); ++i)
+		HE::noteEntryRename(def, i, savedNames[i]);
+}
+void bookRenames(HE::StructDef& def, std::vector<std::string>& savedNames)
+{
+	savedNames.resize(def.fields.size());
+	for (size_t i = 0; i < def.fields.size(); ++i)
+		HE::noteFieldRename(def, i, savedNames[i]);
+}
+
+// "Formerly: a, b" — the aliases a row still answers to.
+std::string formerNamesLabel(const std::vector<std::string>& formerNames)
+{
+	std::string s = "Formerly: ";
+	for (size_t i = 0; i < formerNames.size(); ++i)
+		s += (i ? ", " : "") + formerNames[i];
+	return s;
+}
 AssetPanelState<PanelState> s_states;
 
 bool sniffType(const std::string& path, HE::AssetType type)
@@ -89,9 +127,11 @@ bool saveState(PanelState& st, AppContext& ctx)
 		if (!a) return false;
 		st.enumDef.name = st.name;
 		st.enumDef.assetPath = st.relPath;
+		bookRenames(st.enumDef, st.savedNames);
 		a->json = HE::TypeRegistry::enumToJson(st.enumDef);
 		if (!ctx.contentManager->saveAsset(*a)) return false;
 		reg.registerEnum(st.enumDef);
+		st.savedNames = rowNames(st.enumDef.entries);
 	}
 	else if (st.isTemplate)
 	{
@@ -100,8 +140,10 @@ bool saveState(PanelState& st, AppContext& ctx)
 		if (!a) return false;
 		st.structDef.name = st.name;
 		st.structDef.assetPath = st.relPath;
+		bookRenames(st.structDef, st.savedNames);
 		a->json = HE::TypeRegistry::structToJson(st.structDef);
 		if (!ctx.contentManager->saveAsset(*a)) return false;
+		st.savedNames = rowNames(st.structDef.fields);
 	}
 	else
 	{
@@ -117,9 +159,11 @@ bool saveState(PanelState& st, AppContext& ctx)
 		}
 		StructTypeAsset* a = ctx.contentManager->getStructTypeMutable(st.assetId);
 		if (!a) return false;
+		bookRenames(st.structDef, st.savedNames);
 		a->json = HE::TypeRegistry::structToJson(st.structDef);
 		if (!ctx.contentManager->saveAsset(*a)) return false;
 		reg.registerStruct(st.structDef);
+		st.savedNames = rowNames(st.structDef.fields);
 	}
 	// C++ projects: the definitions ARE C++ types — regenerate the header so
 	// gameplay code sees this save on its next compile.
@@ -191,11 +235,15 @@ void defaultValueEditor(HE::StructField& f, bool& dirty)
 			ImGui::TextDisabled("pick an enum first");
 			break;
 		}
-		const char* shown = v.s.empty() ? ed.entries.front().name.c_str() : v.s.c_str();
+		// A default written before the entry was renamed shows (and is matched
+		// as) the entry it resolves to — the old name stays valid via the alias.
+		const HE::EnumEntry* live = v.s.empty() ? nullptr : ed.findEntry(v.s);
+		const std::string& cur = live ? live->name : v.s;
+		const char* shown = v.s.empty() ? ed.entries.front().name.c_str() : cur.c_str();
 		if (ImGui::BeginCombo("##def", shown))
 		{
 			for (const auto& e : ed.entries)
-				if (ImGui::Selectable(e.name.c_str(), e.name == v.s))
+				if (ImGui::Selectable(e.name.c_str(), e.name == cur))
 				{ v.s = e.name; dirty = true; }
 			ImGui::EndCombo();
 		}
@@ -295,6 +343,49 @@ bool TypeAssetPanel::reloadByContentPath(const std::string& contentPath)
 
 void TypeAssetPanel::appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 
+void TypeAssetPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, PanelState& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			// saveState's encoding into a copy — without registering anything:
+			// the TypeRegistry learns about a definition when it is SAVED.
+			if (st.isEnum)
+			{
+				const EnumTypeAsset* a = cm->getEnumType(st.assetId);
+				if (!a) return false;
+				HE::EnumDef def = st.enumDef;
+				def.name = st.name;
+				def.assetPath = st.relPath;
+				EnumTypeAsset copy = *a;
+				copy.json = HE::TypeRegistry::enumToJson(def);
+				return cm->writeAssetTo(copy, dest);
+			}
+			HE::StructDef def = st.structDef;
+			def.name = st.name;
+			def.assetPath = st.relPath;
+			if (st.isTemplate)
+			{
+				const SaveGameTemplateAsset* a = cm->getSaveGameTemplate(st.assetId);
+				if (!a) return false;
+				SaveGameTemplateAsset copy = *a;
+				copy.json = HE::TypeRegistry::structToJson(def);
+				return cm->writeAssetTo(copy, dest);
+			}
+			// The same refusal a save makes: a struct that closes a cycle is not
+			// something a restore may put on disk either. The previous copy stays.
+			if (HE::TypeRegistry::instance().structWouldCycle(def)) return false;
+			const StructTypeAsset* a = cm->getStructType(st.assetId);
+			if (!a) return false;
+			StructTypeAsset copy = *a;
+			copy.json = HE::TypeRegistry::structToJson(def);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
+
 bool TypeAssetPanel::save(AppContext& ctx, const std::string& path)
 {
 	PanelState* st = s_states.find(path);
@@ -323,6 +414,7 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			HE::TypeRegistry::structFromJson(a2->json, st.structDef);
 		else if (const SaveGameTemplateAsset* a3 = ctx.contentManager->getSaveGameTemplate(st.assetId))
 			HE::TypeRegistry::structFromJson(a3->json, st.structDef); // same field shape
+		st.savedNames = st.isEnum ? rowNames(st.enumDef.entries) : rowNames(st.structDef.fields);
 		st.loaded = true;
 	}
 
@@ -390,6 +482,9 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				ImGui::TableNextColumn();
 				ImGui::SetNextItemWidth(-FLT_MIN);
 				if (ImGui::InputTextWithHint("##name", "Entry name", &e.name)) st.dirty = true;
+				if (!e.formerNames.empty() && ImGui::IsItemHovered())
+					ImGui::SetTooltip("%s\nGraphs and defaults written under a former name still find this entry.",
+					                  formerNamesLabel(e.formerNames).c_str());
 				// Duplicate names would make the generated constants ambiguous.
 				bool dup = false;
 				for (int k = 0; k < static_cast<int>(st.enumDef.entries.size()); ++k)
@@ -414,14 +509,21 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			ImGui::EndTable();
 		}
 		if (removeAt >= 0)
-		{ st.enumDef.entries.erase(st.enumDef.entries.begin() + removeAt); st.dirty = true; }
+		{
+			st.enumDef.entries.erase(st.enumDef.entries.begin() + removeAt);
+			if (removeAt < static_cast<int>(st.savedNames.size()))
+				st.savedNames.erase(st.savedNames.begin() + removeAt);
+			st.dirty = true;
+		}
 
 		if (EditorWidgets::button("+ Add Entry", ImVec2(160.0f, 0.0f)))
 		{
 			// Next free value: max + 1 (0 for the first entry).
 			int next = 0;
 			for (const auto& e : st.enumDef.entries) next = std::max(next, e.value + 1);
-			st.enumDef.entries.push_back({ "Entry" + std::to_string(next), next });
+			st.enumDef.entries.push_back({ "Entry" + std::to_string(next), next, {} });
+			st.savedNames.resize(st.enumDef.entries.size() - 1);
+			st.savedNames.emplace_back();   // new row: nothing to rename from
 			st.dirty = true;
 		}
 		ImGui::End();
@@ -491,6 +593,12 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		}
 		ImGui::SameLine();
 		if (EditorWidgets::dangerButton("Remove", ImVec2(100.0f, 0.0f))) removeAt = i;
+		if (!f.formerNames.empty())
+		{
+			ImGui::TextDisabled("%s", formerNamesLabel(f.formerNames).c_str());
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip("Saves and graphs written under a former name still load into this field.");
+		}
 
 		// Row 2: type + (Enum/Struct) definition picker + array toggle.
 		ImGui::AlignTextToFramePadding();
@@ -584,13 +692,20 @@ void TypeAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		ImGui::PopID();
 	}
 	if (removeAt >= 0)
-	{ st.structDef.fields.erase(st.structDef.fields.begin() + removeAt); st.dirty = true; }
+	{
+		st.structDef.fields.erase(st.structDef.fields.begin() + removeAt);
+		if (removeAt < static_cast<int>(st.savedNames.size()))
+			st.savedNames.erase(st.savedNames.begin() + removeAt);
+		st.dirty = true;
+	}
 
 	if (EditorWidgets::button("+ Add Field", ImVec2(160.0f, 0.0f)))
 	{
 		HE::StructField f;
 		f.name = "Field" + std::to_string(st.structDef.fields.size() + 1);
 		st.structDef.fields.push_back(std::move(f));
+		st.savedNames.resize(st.structDef.fields.size() - 1);
+		st.savedNames.emplace_back();   // new row: nothing to rename from
 		st.dirty = true;
 	}
 

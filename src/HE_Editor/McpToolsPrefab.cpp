@@ -486,8 +486,10 @@ void addSave(McpToolRegistry& registry, ContentManager& content, EditorCommands&
 	McpTool t;
 	t.name        = "prefab_save";
 	t.description =
-		"Save an entity and everything under it as a new prefab asset, the same thing "
-		"'Save as Prefab' does in the Outliner. The scene is not changed. Omit 'path' "
+		"Save an entity and everything under it as a new prefab asset, the file the "
+		"Outliner's 'Save as Prefab' writes. Unlike the Outliner item, the scene is not "
+		"changed: the source entity is NOT linked to the new prefab (prefab_instantiate "
+		"places a copy that is). Omit 'path' "
 		"for 'Prefabs/<Name>.hasset', uniquified. An existing path is refused rather "
 		"than overwritten. This is the only way to create a Prefab asset — asset_create "
 		"refuses the type, because a prefab file without a subtree in it is an empty "
@@ -664,10 +666,11 @@ void addInstances(McpToolRegistry& registry, ContentManager& content, EditorComm
 	t.name        = "prefab_instances";
 	t.description =
 		"Which entities in the open scene were placed from a given prefab. Without "
-		"'path': every linked entity, grouped by the prefab it came from. Remember what "
-		"the link is and is not — it records where a placement came from, it does not "
-		"keep it in step: editing the prefab asset does not change entities already in "
-		"the scene, and an entity a human has edited since still reports the link.";
+		"'path': every linked entity, grouped by the prefab it came from. A linked "
+		"placement follows its prefab: when the asset changes (a push from another "
+		"placement, a save, a reload from disk), every property not changed on the "
+		"placement itself is brought in step. What a human changed on a placement "
+		"stays, and that placement still reports the link.";
 	t.inputSchema = objectSchema(json{
 		{ "path", stringProp("Content-relative path of one prefab, e.g. "
 		                     "'Prefabs/Lamp.hasset'. Omit for every linked entity in "

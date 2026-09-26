@@ -6665,9 +6665,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             UBlock ub;
                             ub.mvp   = viewProj * model;
                             ub.model = model;
-                            ub.color = glm::vec4(dc.baseColor, 1.0f);
+                            // Per-instance tint (RenderObject::instanceTint), as Metal and GL
+                            // multiply it in: a graph reads it through Vertex Color (the editor
+                            // icons wear their light's colour that way). Identity for the rest.
+                            ub.color = glm::vec4(dc.baseColor * glm::vec3(dc.instanceTint), 1.0f);
                             ub.flags = glm::vec4(matTextured ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-                            ub.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
+                            ub.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity * dc.instanceTint.a, 0.0f);
                             std::memcpy(static_cast<uint8_t*>(m_matObjBuf[m_currentFrame].mapped)
                                         + static_cast<size_t>(i) * k_matSlotStride, &ub, sizeof(ub));
 

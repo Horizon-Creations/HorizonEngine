@@ -11,6 +11,9 @@
 #include "EditorHelp.h"          // the options popup's scope
 
 #include <HorizonScene/EngineApi.h>   // HE::api::time — the GAME's clock, next to the editor's transport
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/CameraComponent.h>      // Look Through: is the selection a camera
+#include <HorizonScene/Components/TransformComponent.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>      // dock node: the hidden-tab-bar "unhide" corner
@@ -550,6 +553,26 @@ void viewPopup(EditorCamera& cam)
 	EditorWidgets::helpForLabel("Bookmarks");
 }
 
+void lookThroughRows(AppContext& ctx, State& st)
+{
+	HE::Ed::Help::Scope helpScope("Viewport View");
+	ImGui::Separator();
+	if (st.lookThrough != HE::UUID{})
+	{
+		if (EditorWidgets::menuItem("Stop Looking Through Camera", nullptr, true))
+			st.lookThrough = HE::UUID{};
+		return;
+	}
+	// Offered for the selected entity when it IS a camera; greyed out otherwise,
+	// and the help sentence says what to select.
+	const entt::entity sel = ctx.selection.primary();
+	const bool canLook = ctx.world && !ctx.isPlaying && sel != entt::null &&
+	                     ctx.world->registry().valid(sel) &&
+	                     ctx.world->registry().all_of<CameraComponent, TransformComponent>(sel);
+	if (EditorWidgets::menuItem("Look Through Selected Camera", nullptr, false, canLook))
+		st.lookThrough = ctx.world->entityId(sel);   // zero without an id: nothing to lock to
+}
+
 namespace
 {
 
@@ -952,16 +975,22 @@ void render(AppContext& ctx, State& st)
 			using VP = EditorCamera::ViewPreset;
 			const VP   preset = canView ? ctx.editorCamera->currentPreset() : VP::Perspective;
 			const bool ortho  = canView && ctx.editorCamera->orthographic();
-			const char* viewLabel = (ortho && preset == VP::Perspective)
+			// Locked to a scene camera, the cell says so and stays lit: the
+			// presets below it would end the lock, and "why won't it fly" has
+			// to be answerable from the bar.
+			const bool through = st.lookThrough != HE::UUID{};
+			const char* viewLabel = through ? "Camera"
+			                      : (ortho && preset == VP::Perspective)
 			                        ? "Ortho" : EditorCamera::presetName(preset);
 			if (cell(m, rx + kWellPad, w - kWellPad * 2.0f, "##vpView", iconEye,
-			         labels ? viewLabel : nullptr, ortho, canView,
+			         labels ? viewLabel : nullptr, ortho || through, canView,
 			         "View — Perspective, or an orthographic Top / Front / Side view",
 			         "viewport.view"))
 				ImGui::OpenPopup("##vpViewPopup");
 			if (ImGui::BeginPopup("##vpViewPopup"))
 			{
 				if (ctx.editorCamera) viewPopup(*ctx.editorCamera);
+				lookThroughRows(ctx, st);
 				ImGui::EndPopup();
 			}
 			rx += w + kGroupGap;

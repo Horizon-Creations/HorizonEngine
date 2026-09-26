@@ -39,8 +39,16 @@ class CompiledInstance;
 // before the split keeps its wires and coerce does the work. Vec2 stays outside
 // that set: nothing ever converted into it and adding it would only widen the
 // rules that two coerce implementations have to agree on.
+//
+// Double is the 64-bit number, for the handful of engine values a float cannot
+// hold: wall-clock seconds since the epoch (datetime.*, fs.modified) and byte
+// counts (fs.size). A float's 24-bit mantissa steps in 128 s at today's epoch,
+// so `datetime.now` on a Float pin was a clock that read a minute wrong. Double
+// converts with Float/Int/Bool like any number, which is what keeps a graph
+// that wired `now` into a Float pin before the change still wired — it just
+// narrows at that wire, where it always did. Appended last, like the rest.
 enum class PinType : uint8_t { Exec = 0, Float, Bool, Int, String, Vec2, Color, Ref, Transform,
-                               Enum, Struct, Vec3, Vec4 };
+                               Enum, Struct, Vec3, Vec4, Double };
 
 // ── Containers ───────────────────────────────────────────────────────────────
 // A pin/variable/value is a scalar or a CONTAINER of its type. `isArray` is the
@@ -86,6 +94,7 @@ struct Value
 {
     PinType     type = PinType::Float;
     float       f = 0.0f;
+    double      d = 0.0;   // type == Double; its own slot so `f` stays a float everywhere
     bool        b = false;
     int         i = 0;
     glm::vec2   v2{ 0.0f };
@@ -121,6 +130,7 @@ struct Value
     std::string        typeName;
 
     static Value ofFloat(float v)            { Value r; r.type = PinType::Float;  r.f = v;  return r; }
+    static Value ofDouble(double v)          { Value r; r.type = PinType::Double; r.d = v;  return r; }
     static Value ofBool(bool v)              { Value r; r.type = PinType::Bool;   r.b = v;  return r; }
     static Value ofInt(int v)                { Value r; r.type = PinType::Int;    r.i = v;  return r; }
     static Value ofString(std::string v)     { Value r; r.type = PinType::String; r.s = std::move(v); return r; }
@@ -458,9 +468,23 @@ struct Variable
     // not get further than a log line.
     bool        replicated = false;
     bool        repNotify  = false;
+    // ── Savegames (SaveStateComponent, entity.saveState) ─────────────────────
+    // Written into the entity's state in the active save by entity.saveState
+    // and set back by entity.applySavedState, name-keyed, when the entity
+    // carries a SaveStateComponent with saveScriptVars on. Opt-in per variable
+    // like `replicated`: a class that ticks nothing saves exactly what it did
+    // before this existed. INSTANCE variables only, and never a Ref (an object
+    // handle names nothing in the next run) — see isSaveableType.
+    bool        saveGame   = false;
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
+
+// What a Save Game variable may hold: everything but an object handle (a Ref
+// names a runtime instance of THIS run, and the next run has other ones) and
+// Exec, which is no value at all. One rule for the checkbox, the loader and the
+// runtime's enumeration.
+inline bool isSaveableType(PinType t) { return t != PinType::Ref && t != PinType::Exec; }
 
 // Where a function runs, for Node::runOn below. The numbers travel in kMsgRpc's
 // `target` byte, so they are frozen: a saved graph and a datagram agree on them.
@@ -834,8 +858,8 @@ HE_API EventId            eventId(const std::string& name);
 HE_API std::string eventName(EventId id);
 
 // May a wire carry `from` into `to`? Equal types always; beyond that exactly the
-// conversions the interpreter's `coerce` performs and no others — Float/Int/Bool
-// among themselves, and Enum against Float/Int (it is int-backed). Deliberately
+// conversions the interpreter's `coerce` performs and no others — Float/Double/
+// Int/Bool among themselves, and Enum against Float/Double/Int (it is int-backed). Deliberately
 // NOT String, whose coerce yields the zero value: allowing that at a wire would
 // look like a conversion and silently be a data loss. Arrays never convert —
 // coerce passes an array through untouched, so an element-wise reinterpretation
@@ -915,7 +939,15 @@ HE_API void remapLinksForMirror(Graph& g, const std::vector<int>& nodes);
 struct LinkRemapSnapshot
 {
     // Per node id: the pin names of each region, in pin order.
-    struct Sig { std::vector<std::string> execIns, execOuts, dataIns, dataOuts; };
+    struct Sig
+    {
+        std::vector<std::string> execIns, execOuts, dataIns, dataOuts;
+        // User-type nodes (Make/Break Struct, Switch on Enum): former field /
+        // entry name → current one, from the definition's formerNames. Lets a
+        // wire follow a RENAMED pin even when the same edit also added or
+        // removed one (the region size changed, so the index fallback is off).
+        std::unordered_map<std::string, std::string> renamed;
+    };
     std::unordered_map<int, Sig> sigs;
 };
 HE_API LinkRemapSnapshot captureLinkRemapSnapshot(const Graph& g,

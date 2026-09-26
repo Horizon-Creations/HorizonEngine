@@ -22,6 +22,7 @@
 #include "AnimatorStateMachineEditorPanel.h" // …and the animator tools these two
 #include "BlendSpacePanel.h"
 #include "SkeletalMeshEditorPanel.h"         // …and the clip tools this one, by CLIP path
+#include "CinematicPanel.h"                  // …and the sequence tools this one
 #include "ViewportPanel.h"         // appendGroundGrid — the scene view's scale reference
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
@@ -30,6 +31,7 @@
 #include "StructuralSync.h"        // which new entities get a create, and what one covers
 #include "McpToolsApi.h"           // the engine API, turned into tools by the registry itself
 #include "McpCameraGizmos.h"       // the MCP clients' screenshot cameras, drawn in the viewport
+#include "ViewportOverlays.h"      // selection boxes + collider outlines, shared with the dump
 #include "ExportDialogPanel.h"     // the packing worker the MCP build tools start
 #include "GameLogicBuildPanel.h"   // …and the native compile they start the other way
 #include "BuildProgressDialog.h"   // …and the one window both of them report into
@@ -77,6 +79,7 @@
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/RootMotion.h>
+#include <HorizonScene/SequenceSystem.h>
 #include <HorizonScene/AnimationNotify.h>              // kNotifyDominanceAlpha — which half of a blend leads
 #include <HorizonScene/AnimationPreview.h>             // rootMotionPath — the line under the selected figure
 #include <HorizonScene/AnimationIk.h>                  // findJointByName — the head the look-at line starts at
@@ -376,6 +379,14 @@ void EditorApplication::OnInit()
 	// they have no AppContext to reach m_notifications through. Cleared in
 	// OnShutdown before this object dies.
 	HE::Ed::setGlobalNotifications(&m_notifications);
+
+	// Rumble reaches the pads through Input, which the script API cannot see.
+	// Installed once; whether a request gets through is the per-frame gate's
+	// call (OnRender), which keeps it shut outside play. Removed in OnShutdown.
+	HE::api::input::setRumbleSink({
+		[this](float low, float high, uint32_t ms) { return input().rumble(low, high, ms); },
+		[this](float l, float r, uint32_t ms)      { return input().rumbleTriggers(l, r, ms); },
+		[this]()                                   { input().stopRumble(); } });
 
 	// And the catch-all underneath both: every HE_LOG_ERROR in the engine becomes
 	// a notification, so a failure nobody thought to report by hand still reaches
@@ -1665,6 +1676,28 @@ void EditorApplication::OnInit()
 		// The file stays where it is for the next interactive start.
 		if (!m_dumpPath.empty()) m_recoveryOffer.reset();
 
+		// The asset tabs' copies change hands too. Unlike the scene's, the
+		// previous project's go unconditionally: endProjectSession has already
+		// asked about every unsaved asset and dropped the panel state, so what
+		// the copies held was saved or knowingly let go.
+		if (!m_assetAutosave.dir().empty()) m_assetAutosave.clear();
+		{
+			const std::string& proj = m_projectManager.currentProject().path;
+			m_assetAutosave.configure(HE::Ed::AssetAutosave::recoveryDirForProject(proj),
+			                          HE::Ed::AssetAutosave::projectRootFor(proj));
+		}
+		m_assetRecoveryOffers.clear();
+		m_reloadTabsAfterPoll.clear();
+		if (m_assetAutosave.promoteStale() > 0)
+		{
+			m_assetRecoveryOffers = m_assetAutosave.pending();
+			HE_LOG_WARN(Editor, "%s",
+				("EditorApplication: " + std::to_string(m_assetRecoveryOffers.size()) +
+				 " asset recovery cop" + (m_assetRecoveryOffers.size() == 1 ? "y" : "ies") +
+				 " from an earlier session waiting in " + m_assetAutosave.pendingDir()).c_str());
+		}
+		if (!m_dumpPath.empty()) m_assetRecoveryOffers.clear();
+
 		// Which scripts this project's text needs, as early as the project is
 		// known: the font atlas is baked ONCE and every backend uploads it once,
 		// so a mask that arrives after the first label was drawn cannot be
@@ -2434,6 +2467,12 @@ void EditorApplication::OnRender(float dt)
 		m_appPreviewKeepState = true;
 	}
 
+	// Rumble gate, fed EVERY frame, edit mode included: the frame that halts at
+	// a breakpoint or the pause button is the one that has to stop the pads, and
+	// a graph preview in edit mode must never reach them. The game's own pause
+	// (time.pause) stops them too but keeps accepting, for pause-menu clicks.
+	HE::api::input::setRumbleGate(simulating, HE::api::time::isPaused());
+
 	// During play-in-editor, feed the engine clock + input snapshot so time.*/input.*
 	// nodes and scripts read fresh per-frame values (edit mode leaves them untouched).
 	if (m_isPlaying)
@@ -2751,10 +2790,17 @@ void EditorApplication::OnRender(float dt)
 			// twenty entities is one module, and reloading it twenty times only
 			// costs twenty compiles of the same source.
 			std::unordered_set<std::string> reloadedModules;
+			// One prefab sync per poll, however many prefab files changed —
+			// the pass walks every placement anyway. A reload that arrived
+			// during play is caught up on the first poll after it.
+			bool prefabChanged = m_prefabReloadSyncPending;
 			for (const HE::UUID& id : changed)
 			{
 				switch (contentManager().assetType(id))
 				{
+				case HE::AssetType::Prefab:
+					prefabChanged = true;
+					break;
 				case HE::AssetType::StaticMesh:
 				case HE::AssetType::SkeletalMesh:
 					renderer()->InvalidateMesh(id);
@@ -2800,6 +2846,12 @@ void EditorApplication::OnRender(float dt)
 					break;
 				}
 			}
+			if (prefabChanged) syncPrefabInstancesAfterReload();
+			// A recovery restore rewrote these files; the poll above has put the
+			// new bytes into the ContentManager, so a tab re-reading now gets them.
+			for (const std::string& path : m_reloadTabsAfterPoll)
+				EditorUI::reloadAssetTabFromDisk(path);
+			m_reloadTabsAfterPoll.clear();
 		}
 	}
 
@@ -3296,8 +3348,16 @@ void EditorApplication::OnRender(float dt)
 			// gets the cursor back without the game turning with it.
 			if (simulating)
 			{
-				m_playerHost.tick(input(), gameDt,
-				                  m_playMouseCaptured ? input().mouse() : MouseFrame{});
+				// One exception: a rebind listening while the pointer is over
+				// the game view gets the BUTTONS (no movement), so "click the
+				// mouse button you want" works in a menu with a free cursor.
+				// The host silences every action while it listens.
+				MouseFrame playerMouse = m_playMouseCaptured ? input().mouse() : MouseFrame{};
+				if (!m_playMouseCaptured && m_uiPointerValid && HE::api::input::isRebinding())
+					playerMouse.buttons = input().mouse().buttons;
+				// A cutscene with Lock Player Input silences it like a pause.
+				m_playerHost.tick(input(), gameDt, playerMouse,
+				                  SequenceSystem::locksPlayerInput(m_editorWorld->registry()));
 				// Entity classes: Tick, plus reaping the ones whose entity is gone.
 				m_entityHost.tick(gameDt);
 			}
@@ -3355,11 +3415,18 @@ void EditorApplication::OnRender(float dt)
 			// Notifies are gated on the same session, for the third form of the
 			// same argument: a null queue means they are not even evaluated, so an
 			// editor nobody plays in neither pays for them nor accumulates them.
+			//
+			// Cinematic sequences are the fourth, and the strictest: outside play
+			// a Sequence Player does not advance or write at all, because its
+			// actors would be SAVED wherever the cutscene left them. Scrubbing a
+			// sequence in the editor is the Cinematic tab's preview session.
 			const bool playing = m_animatorHost.running();
 			HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+			HE::SequenceContext   sequences{ &m_audioEngine, m_physicsWorld.get() };
 			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost,
 			                            playing ? &rootMotion : nullptr,
-			                            playing ? &m_animNotifies : nullptr);
+			                            playing ? &m_animNotifies : nullptr,
+			                            playing ? &sequences : nullptr);
 
 			// Immediately after, and not at the collision drain above: that one
 			// sits in the frame BEFORE this phase and would cost every notify a
@@ -3437,9 +3504,15 @@ void EditorApplication::OnRender(float dt)
 			const bool uiTakesInput =
 				HE::api::input::mode() != HE::api::input::Mode::GameOnly;
 			const bool uiPointerLive = m_uiPointerValid && !m_playMouseCaptured && uiTakesInput;
+			// A rebind that is listening owns every button (input.rebindBegin):
+			// the UI keeps its hover but hears no press, Back, Tab or
+			// navigation, or the press being captured would also activate the
+			// focused "Rebind" button again. Same rule as the packaged game.
+			const bool rebinding = HE::api::input::isRebinding();
+			const bool uiDown    = m_uiPointerDown && !rebinding;
 			const bool uiWantsPointer = m_editorWorld->widgets().processPointer(
 				m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY,
-				m_uiPointerDown, uiPointerLive, m_uiPointerRight && uiPointerLive);
+				uiDown, uiPointerLive, m_uiPointerRight && uiPointerLive && !rebinding);
 
 			// A double-click means "open this": the word under it in a text
 			// field, and otherwise the list row under it. The same order the
@@ -3447,7 +3520,7 @@ void EditorApplication::OnRender(float dt)
 			if (m_uiPointerDouble)
 			{
 				m_uiPointerDouble = false;
-				if (uiPointerLive &&
+				if (uiPointerLive && !rebinding &&
 				    !m_editorWorld->widgets().selectWordAtPointer(
 				        m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY))
 					m_editorWorld->widgets().activateAtPointer(
@@ -3474,14 +3547,15 @@ void EditorApplication::OnRender(float dt)
 			{
 				const bool back = input().IsKeyDown(SDL_SCANCODE_ESCAPE) ||
 				                  input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
-				if (back && !m_uiBackPrev) m_editorWorld->widgets().closeTopLayer();
+				// Edges still TRACKED while a rebind listens, only not acted on.
+				if (back && !m_uiBackPrev && !rebinding) m_editorWorld->widgets().closeTopLayer();
 				m_uiBackPrev = back;
 
 				// Tab through the form, outside the gate for the same reason:
 				// leaving a text field is exactly what it is for. Shift+Tab
 				// goes back.
 				const bool tab = input().IsKeyDown(SDL_SCANCODE_TAB);
-				if (tab && !m_uiTabPrev)
+				if (tab && !m_uiTabPrev && !rebinding)
 					m_editorWorld->widgets().focusNext(
 						input().IsKeyDown(SDL_SCANCODE_LSHIFT) ||
 						input().IsKeyDown(SDL_SCANCODE_RSHIFT),
@@ -3509,7 +3583,8 @@ void EditorApplication::OnRender(float dt)
 				    input().IsKeyDown(SDL_SCANCODE_SPACE) ||
 				    input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH))
 					now |= 1u << 4;
-				const uint8_t edges = static_cast<uint8_t>(now & ~m_uiNavPrev);
+				const uint8_t edges =
+					rebinding ? uint8_t(0) : static_cast<uint8_t>(now & ~m_uiNavPrev);
 				m_uiNavPrev = now;
 				for (int i = 0; i < 4; ++i)
 					if (edges & (1u << i))
@@ -3552,7 +3627,7 @@ void EditorApplication::OnRender(float dt)
 			UIInputSystem::update(*m_editorWorld, m_uiInputState,
 			                      m_uiViewportW, m_uiViewportH,
 			                      m_uiPointerX, m_uiPointerY,
-			                      m_uiPointerDown,
+			                      uiDown,
 			                      uiPointerLive && !uiWantsPointer,
 			                      uiEvents);
 			if (m_scriptContext)
@@ -3585,112 +3660,25 @@ void EditorApplication::OnRender(float dt)
 			// grid are the expensive ones.
 			const ViewportPanel::ShowFlags& show = ViewportPanel::showFlags();
 
-			// Selected-entity markers: unit AABB centered on each member's
-			// transform position. The primary is the bright one; the rest of a
-			// multi-selection get the same amber a shade dimmer, so which one
-			// the gizmo will move is visible without reading the outliner.
-			if (show.selection) for (Entity sel : m_selection.entities())
+			// Selected-entity markers and collider wireframes. Built in
+			// ViewportOverlays so the headless dump's HE_DUMP_SELBOXTEST
+			// witness draws them by this same code.
+			if (show.selection)
 			{
-				if (!m_editorWorld->registry().valid(sel)) continue;
-				auto* tc = m_editorWorld->registry().try_get<TransformComponent>(sel);
-				if (!tc) continue;
-				const glm::vec3 p = tc->position;
-				const glm::vec3 color = (sel == m_selection.primary())
-					? glm::vec3(1.0f, 0.8f, 0.0f)
-					: glm::vec3(0.8f, 0.6f, 0.05f);
-				dbg.aabb(p - glm::vec3(0.5f), p + glm::vec3(0.5f), color);
+				HE::Ed::ViewportOverlays::appendSelectionMarkers(*m_editorWorld, m_selection, dbg);
+				// A selected light's range / cone, a selected camera's view
+				// volume at the aspect the viewport renders at. Part of the
+				// selection's picture, so the same switch: only what is
+				// selected is drawn, and a second switch would buy nothing.
+				int vpW = 0, vpH = 0;
+				ViewportPanel::renderSizePx(vpW, vpH);
+				const float vpAspect = (vpW > 0 && vpH > 0) ? float(vpW) / float(vpH) : 0.0f;
+				HE::Ed::ViewportOverlays::appendSelectedLightAndCameraShapes(
+					*m_editorWorld, m_selection, m_editorCamera.position(), vpAspect, dbg);
 			}
-
-			// Collider wireframes: cyan for solid, magenta for triggers
 			if (show.colliders)
-			{
-				auto& reg = m_editorWorld->registry();
-				// Local-space box of a mesh asset, measured once and kept. The
-				// mesh-shaped colliders below need it every frame, a loose editor
-				// mesh carries no precomputed bounds, and measuring a hundred
-				// thousand vertices per frame for a debug line is not a trade.
-				static std::unordered_map<HE::UUID, std::pair<glm::vec3, glm::vec3>> s_colliderMeshBox;
-				for (auto [entity, col, transform] :
-				     reg.view<ColliderComponent, TransformComponent>().each())
-				{
-					const glm::vec3 color = col.isTrigger
-					    ? glm::vec3(1.0f, 0.0f, 1.0f)   // trigger: magenta
-					    : glm::vec3(0.0f, 1.0f, 1.0f);  // solid:   cyan
-					const glm::vec3 pos = transform.position;
-					switch (col.shape)
-					{
-					case ColliderShape::Box:
-						dbg.aabb(pos - col.halfExtents, pos + col.halfExtents, color);
-						break;
-					case ColliderShape::Sphere:
-						dbg.sphere(pos, col.radius, color);
-						break;
-					case ColliderShape::Capsule:
-						dbg.capsule(pos, col.radius, col.height, color);
-						break;
-					case ColliderShape::Mesh:
-					case ColliderShape::ConvexHull:
-					{
-						// These two take their geometry from the entity's MESH, so
-						// the authored half extents describe nothing and the honest
-						// outline is the mesh's own box. Same source PhysicsWorld
-						// builds the shape from — LOD0 where there is a LODComponent,
-						// because LODSystem rewrites MeshComponent's id as the camera
-						// moves and a collider that changed with the camera would be
-						// a different game at every distance.
-						HE::UUID meshId{};
-						if (const auto* mc = reg.try_get<MeshComponent>(entity))
-							meshId = mc->meshAssetId;
-						if (const auto* lod = reg.try_get<LODComponent>(entity);
-						    lod && !lod->levels.empty())
-							meshId = lod->levels.front().meshId;
-						if (meshId == HE::UUID{}) break;
-
-						auto it = s_colliderMeshBox.find(meshId);
-						if (it == s_colliderMeshBox.end())
-						{
-							const StaticMeshAsset* mesh = contentManager().getStaticMesh(meshId);
-							if (!mesh) break;   // not loaded yet — measured on a later frame
-							const bool        cooked = mesh->cooked && !mesh->interleaved.empty();
-							const std::size_t count  = cooked ? mesh->vertexCount
-							                                  : mesh->vertices.size() / 3;
-							const std::size_t stride = cooked ? 8u : 3u;
-							const float*      data   = cooked ? mesh->interleaved.data()
-							                                  : mesh->vertices.data();
-							if (count == 0 || (cooked && mesh->interleaved.size() < count * stride))
-								break;
-							glm::vec3 lo(data[0], data[1], data[2]);
-							glm::vec3 hi = lo;
-							for (std::size_t i = 1; i < count; ++i)
-							{
-								const glm::vec3 v(data[i * stride + 0], data[i * stride + 1],
-								                  data[i * stride + 2]);
-								lo = glm::min(lo, v);
-								hi = glm::max(hi, v);
-							}
-							it = s_colliderMeshBox.emplace(meshId, std::make_pair(lo, hi)).first;
-						}
-						// Scaled like the shape itself is (PhysicsWorld bakes
-						// transform.scale into the triangles). Axis-aligned, so a
-						// rotated mesh reads as its box — the same simplification
-						// the Box case above has always made.
-						dbg.aabb(pos + it->second.first  * transform.scale,
-						         pos + it->second.second * transform.scale, color);
-						break;
-					}
-					case ColliderShape::HeightField:
-						// Deliberately nothing: the height field IS the landscape
-						// mesh in the viewport, and a box around a whole terrain
-						// would hide the scene inside it.
-						break;
-					default:
-						// An enum value this build does not know. Silent here on
-						// purpose — PhysicsWorld logs it once where it matters, and
-						// a debug overlay is not the place to repeat that per frame.
-						break;
-					}
-				}
-			}
+				HE::Ed::ViewportOverlays::appendColliderWireframes(*m_editorWorld,
+				                                                   contentManager(), dbg);
 
 			// ── Joints ───────────────────────────────────────────────────────
 			// Drawn for every joint in the scene, like the colliders above and
@@ -4327,9 +4315,15 @@ void EditorApplication::OnRender(float dt)
 	EditorUI::render(ctx, dt);
 	saveOpenTabs(); // persists only when the tab set/active index actually changed
 	// After the UI, so an edit committed this frame is in the world it reads.
-	updateAutosave(static_cast<std::uint64_t>(
-		std::chrono::duration_cast<std::chrono::milliseconds>(
-			std::chrono::steady_clock::now().time_since_epoch()).count()));
+	{
+		const auto nowMs = static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+		updateAutosave(nowMs);
+		// And after the UI for the asset tabs too: a Save pressed this frame has
+		// already cleared its tab, so its copy is pruned in the same frame.
+		updateAssetAutosave(nowMs, ctx);
+	}
 
 	// ── FPS counter ───────────────────────────────────────────────────────
 	if (dt > 0.0f)
@@ -6717,6 +6711,192 @@ void EditorApplication::dumpFrameHeadless()
 			"EditorApplication: HE_DUMP_ROPETEST tube + ribbon rope and a swept trail added");
 	}
 
+	// ── Selection / collider witness (HE_DUMP_SELBOXTEST=1): entities that sit
+	// under a MOVED parent, which is where a local position and a world
+	// position part ways.
+	//   • a point light with a box collider, child of a parent shifted 3 m to
+	//     the right: its icon billboard is drawn at the WORLD position (the
+	//     extractor reads the propagated matrix), so the amber selection box and
+	//     the cyan collider outline must sit around that icon, not 3 m to the
+	//     left of it where the local position would put them;
+	//   • a cube with a convex-hull collider, child of a parent scaled ×2: the
+	//     outline must be the size the cube is drawn at, around where it is.
+	// The lines come from ViewportOverlays, the code OnRender's debug block
+	// uses, pushed by hand because the dump never runs that block. The log
+	// line counts the box corners that landed at each candidate spot — the
+	// numbers to read without looking at the picture.
+	if (const char* sb = std::getenv("HE_DUMP_SELBOXTEST"); sb && *sb && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0, 1, 0)));
+		const glm::vec3 up(0.0f, 1.0f, 0.0f);
+		const glm::vec3 base = m_editorCamera.position() + camFwd * 8.0f;
+
+		auto floorE = m_editorWorld->createEntity("SelBoxFloor");
+		TransformComponent ftc;
+		ftc.position = base - glm::vec3(0.0f, 1.5f, 0.0f);
+		ftc.scale    = glm::vec3(30.0f, 0.2f, 30.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto makeChild = [&](const char* parentName, const char* childName,
+		                     const glm::vec3& parentPos, float parentScale,
+		                     const glm::vec3& childLocal) {
+			auto p = m_editorWorld->createEntity(parentName);
+			TransformComponent ptc;
+			ptc.position = parentPos;
+			ptc.scale    = glm::vec3(parentScale);
+			reg.emplace<TransformComponent>(p, ptc);
+			auto c = m_editorWorld->createEntity(childName);
+			TransformComponent ctc;
+			ctc.position = childLocal;
+			reg.emplace<TransformComponent>(c, ctc);
+			m_editorWorld->reparentEntity(c, p);
+			reg.get<TransformComponent>(c).position = childLocal;
+			return c;
+		};
+
+		// The light: local position just left of centre, the parent carries it
+		// 3 m right, so it STANDS right of centre.
+		const glm::vec3 lightLocal = base - camRight * 1.5f;
+		const Entity light = makeChild("SelBoxParent", "SelBoxLight",
+		                               camRight * 3.0f, 1.0f, lightLocal);
+		LightComponent point; point.type = HE::LightType::Point;
+		reg.emplace<LightComponent>(light, point);
+		ColliderComponent box; box.shape = ColliderShape::Box;
+		box.halfExtents = glm::vec3(0.8f);
+		reg.emplace<ColliderComponent>(light, box);
+
+		// The cube: world = parentPos + 2 × local. Chosen so it stands above
+		// the light and its local position, read as a world point, above the
+		// wrong spot — both in frame.
+		const glm::vec3 cubeLocal = lightLocal + up * 3.0f;
+		const glm::vec3 cubeWorldWanted = base + camRight * 1.5f + up * 3.0f;
+		const Entity cube = makeChild("SelBoxScaledParent", "SelBoxCube",
+		                              cubeWorldWanted - 2.0f * cubeLocal, 2.0f, cubeLocal);
+		reg.emplace<MeshComponent>(cube, MeshComponent{ HE::kDefaultCubeMeshId });
+		ColliderComponent hull; hull.shape = ColliderShape::ConvexHull;
+		reg.emplace<ColliderComponent>(cube, hull);
+
+		m_selection.set(cube);
+		m_selection.add(light);   // the light is the primary
+
+		DebugDrawBuffer selLines, colLines;
+		HE::Ed::ViewportOverlays::appendSelectionMarkers(*m_editorWorld, m_selection, selLines);
+		HE::Ed::ViewportOverlays::appendColliderWireframes(*m_editorWorld, contentManager(), colLines);
+
+		// Box corners within `radius` of `at`. A box is 12 lines, 24 endpoints.
+		auto cornersNear = [](const DebugDrawBuffer& buf, const glm::vec3& at, float radius) {
+			int n = 0;
+			for (const DebugLine& l : buf.lines())
+				for (const glm::vec3& q : { l.start, l.end })
+					if (glm::length(q - at) < radius) ++n;
+			return n;
+		};
+		const glm::vec3 lightWorld = HE::worldPositionOf(*m_editorWorld, light);
+		const glm::vec3 cubeWorld  = HE::worldPositionOf(*m_editorWorld, cube);
+		char line[512];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: HE_DUMP_SELBOXTEST light world=(%.2f, %.2f, %.2f) "
+			"local=(%.2f, %.2f, %.2f) | selection corners near world=%d near local=%d | "
+			"box-collider corners near world=%d near local=%d | cube world=(%.2f, %.2f, %.2f) "
+			"hull-collider corners near world=%d near local=%d (of 24 each)",
+			lightWorld.x, lightWorld.y, lightWorld.z, lightLocal.x, lightLocal.y, lightLocal.z,
+			cornersNear(selLines, lightWorld, 1.0f), cornersNear(selLines, lightLocal, 1.0f),
+			cornersNear(colLines, lightWorld, 1.5f), cornersNear(colLines, lightLocal, 1.5f),
+			cubeWorld.x, cubeWorld.y, cubeWorld.z,
+			cornersNear(colLines, cubeWorld, 1.8f), cornersNear(colLines, cubeLocal, 1.8f));
+		HE_LOG_INFO(Editor, "%s", line);
+
+		std::vector<DebugLine> all = selLines.lines();
+		all.insert(all.end(), colLines.lines().begin(), colLines.lines().end());
+		r->SetDebugLines(all);
+	}
+
+	// ── Light / camera reach witness (HE_DUMP_LIGHTGIZMOTEST=1): a red point
+	// light, a green spot tilted down onto the floor and a camera looking
+	// sideways, all three selected. The picture must show the red range
+	// sphere, the green cone ending on the floor, the pale frustum, and the
+	// two light icons in their lights' colours (the camera's stays white).
+	// Lines from ViewportOverlays, pushed by hand like the witness above; the
+	// log line gives the counts and the spot's ring distance to read without
+	// the picture.
+	if (const char* lg = std::getenv("HE_DUMP_LIGHTGIZMOTEST"); lg && *lg && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		const float cp = std::cos(m_editorCamera.pitch()), sp = std::sin(m_editorCamera.pitch());
+		const float cy = std::cos(m_editorCamera.yaw()),   sy = std::sin(m_editorCamera.yaw());
+		const glm::vec3 camFwd(cp * sy, sp, -cp * cy);
+		const glm::vec3 camRight = glm::normalize(glm::cross(camFwd, glm::vec3(0, 1, 0)));
+		const glm::vec3 base = m_editorCamera.position() + camFwd * 10.0f;
+
+		auto floorE = m_editorWorld->createEntity("LightGizmoFloor");
+		TransformComponent ftc;
+		ftc.position = base - glm::vec3(0.0f, 2.0f, 0.0f);
+		ftc.scale    = glm::vec3(30.0f, 0.2f, 30.0f);
+		reg.emplace<TransformComponent>(floorE, ftc);
+		reg.emplace<MeshComponent>(floorE, MeshComponent{ HE::kDefaultCubeMeshId });
+
+		auto place = [&](const char* name, const glm::vec3& pos, const glm::vec3& rotDeg) {
+			const Entity e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.rotation = rotDeg;
+			reg.emplace<TransformComponent>(e, tc);
+			return e;
+		};
+		const Entity point = place("LightGizmoPoint", base - camRight * 3.0f, glm::vec3(0.0f));
+		LightComponent pl; pl.type = HE::LightType::Point; pl.range = 1.5f;
+		pl.color = { 0.6f, 0.05f, 0.05f };   // dim red: the icon still shows full red
+		reg.emplace<LightComponent>(point, pl);
+
+		const Entity spot = place("LightGizmoSpot", base + glm::vec3(0.0f, 1.0f, 0.0f),
+		                          glm::vec3(-90.0f, 0.0f, 0.0f));   // straight down
+		LightComponent sl; sl.type = HE::LightType::Spot; sl.range = 3.2f; sl.spotAngle = 50.0f;
+		sl.color = { 0.1f, 1.0f, 0.2f };
+		reg.emplace<LightComponent>(spot, sl);
+
+		const Entity camE = place("LightGizmoCamera", base + camRight * 3.0f,
+		                          glm::vec3(0.0f, 90.0f, 0.0f));
+		reg.emplace<CameraComponent>(camE, CameraComponent{});
+
+		m_selection.set(point);
+		m_selection.add(spot);
+		m_selection.add(camE);
+
+		DebugDrawBuffer lines;
+		HE::Ed::ViewportOverlays::appendSelectionMarkers(*m_editorWorld, m_selection, lines);
+		const size_t markerLines = lines.lines().size();
+		HE::Ed::ViewportOverlays::appendSelectedLightAndCameraShapes(
+			*m_editorWorld, m_selection, m_editorCamera.position(), 16.0f / 9.0f, lines);
+
+		// The spot's cone must end on the sphere of its range: every non-apex
+		// endpoint of its lines at `range` from the light.
+		const glm::vec3 spotPos = HE::worldPositionOf(*m_editorWorld, spot);
+		int onRange = 0, spotEnds = 0;
+		for (const DebugLine& l : lines.lines())
+		{
+			if (l.color != HE::lightDisplayColor(sl.color)) continue;
+			for (const glm::vec3& q : { l.start, l.end })
+			{
+				const float d = glm::length(q - spotPos);
+				if (d < 1e-3f) continue;
+				++spotEnds;
+				if (std::abs(d - sl.range) < 1e-3f) ++onRange;
+			}
+		}
+		char line[320];
+		std::snprintf(line, sizeof line,
+			"EditorApplication: HE_DUMP_LIGHTGIZMOTEST marker lines=%zu reach lines=%zu "
+			"| spot endpoints on its range sphere=%d of %d",
+			markerLines, lines.lines().size() - markerLines, onRange, spotEnds);
+		HE_LOG_INFO(Editor, "%s", line);
+		r->SetDebugLines(lines.lines());
+	}
+
 	// HE_DUMP_FRAMES: settle frames before the capture (default 3). Temporal
 	// features (GI-reflection glossy accumulation, probe convergence) need more
 	// frames to settle than the default — headless A/Bs raise this.
@@ -7527,6 +7707,7 @@ void EditorApplication::setupMcpTools()
 			HE::AssetType::BoneMask,
 			HE::AssetType::BlendSpace,
 			HE::AssetType::PropertyAnimClip,
+			HE::AssetType::Sequence,
 			HE::AssetType::StructType,
 			HE::AssetType::EnumType,
 			HE::AssetType::SaveGameTemplate,
@@ -7832,6 +8013,32 @@ void EditorApplication::setupMcpTools()
 		return SkeletalMeshEditorPanel::isDirty(rel);
 	};
 	HE::Ed::registerClipTools(m_mcp.registry(), contentManager(), std::move(clips));
+
+	// ── A cutscene ───────────────────────────────────────────────────────────
+	// The four gates of the particle family, plus the one question only a
+	// sequence asks: who its bindings ARE in the open scene. That lookup goes
+	// through findByEntityId like the runtime's, never by name.
+	HE::Ed::McpSequenceHooks seq;
+	seq.isPlaying     = [this] { return m_isPlaying; };
+	seq.lockedByOther = [this](const std::string& rel) {
+		return m_collab.assetLockedByOther(rel);
+	};
+	seq.isDirty = [](const std::string& rel) {
+		return CinematicPanel::isDirtyByContentPath(rel);
+	};
+	seq.reloadFromDisk = [](const std::string& rel) {
+		return CinematicPanel::reloadByContentPath(rel);
+	};
+	seq.findActor = [this](const HE::UUID& id, std::string& name, bool& isCamera) {
+		if (!m_editorWorld) return false;
+		const Entity e = m_editorWorld->findByEntityId(id);
+		if (e == entt::null) return false;
+		auto& reg = m_editorWorld->registry();
+		name     = reg.all_of<NameComponent>(e) ? reg.get<NameComponent>(e).name : std::string();
+		isCamera = reg.all_of<CameraComponent>(e);
+		return true;
+	};
+	HE::Ed::registerSequenceTools(m_mcp.registry(), contentManager(), std::move(seq));
 
 	// ── Making the project run ───────────────────────────────────────────────
 	// The two Build menu actions and the window they both report into. Neither
@@ -8672,6 +8879,26 @@ AppContext EditorApplication::makeContext()
 		},
 		.discardRecovery     = [this]{ m_autosave.discardPending(); m_recoveryOffer.reset(); },
 		.deferRecovery       = [this]{ m_recoveryOffer.reset(); },
+		.assetRecoveryOffers = m_assetRecoveryOffers.empty() ? nullptr : &m_assetRecoveryOffers,
+		.assetRecoveryReplacedDir = m_assetAutosave.replacedDir(),
+		.restoreAssetRecovery = [this](const std::string& key, std::string* error) {
+			const auto written = m_assetAutosave.restorePending(key, error);
+			if (!written) return false;
+			// Answered: the entry goes, whether or not anything shows the file.
+			std::erase_if(m_assetRecoveryOffers,
+			              [&key](const HE::Ed::AssetRecoveryEntry& e) { return e.key == key; });
+			// The ContentManager re-reads a loaded asset only on its hot-reload
+			// poll; run that on the next frame and reload the tabs after it.
+			m_hotReloadTimer = 1.5f;
+			m_reloadTabsAfterPoll.push_back(*written);
+			return true;
+		},
+		.discardAssetRecovery = [this](const std::string& key) {
+			m_assetAutosave.discardPending(key);
+			std::erase_if(m_assetRecoveryOffers,
+			              [&key](const HE::Ed::AssetRecoveryEntry& e) { return e.key == key; });
+		},
+		.deferAssetRecovery  = [this]{ m_assetRecoveryOffers.clear(); },
 		// ── Undo is an EDIT-MODE tool, and is switched off during play ────────
 		// EditorUndo::restore clears the world and reloads it from a snapshot, so
 		// every entt handle is reissued. FOUR play-session tables are keyed on
@@ -8931,8 +9158,11 @@ void EditorApplication::updatePlayCameraController(float dt)
 	// fight ImGui over, and demanding Esc-to-capture before the right stick
 	// works would be a rule nobody could discover. Mouse look keeps the
 	// capture requirement it always had.
-	const float stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX);
-	const float stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY);
+	// Player 1's stick (the camera follows player 1): all pads merged in
+	// single player, slot 0 with several local players.
+	const int   lookSlot = m_playerHost.devicesOf(0).gamepadSlot;
+	const float stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX, lookSlot);
+	const float stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY, lookSlot);
 	const bool  padLook = stickX != 0.0f || stickY != 0.0f;
 	if (!m_playMouseCaptured && !padLook) return;
 
@@ -8956,6 +9186,12 @@ void EditorApplication::updatePlayCameraController(float dt)
 		if (SDL_CursorVisible())
 			SDL_HideCursor();
 	}
+
+	// A cutscene holds the camera: neither the rig nor free flight may touch it
+	// until it hands the view back (SequenceSystem.h, "Camera and input"). After
+	// the capture re-assert above, not before: the mouse stays held through the
+	// cutscene, so the player does not have to click back in when it ends.
+	if (SequenceSystem::ownsCamera(m_editorWorld->registry())) return;
 
 	// A camera rig wins when the scene has one it can drive — PIE has to show the
 	// same camera the shipped game will, or it is not a preview.
@@ -9074,6 +9310,9 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_isPlaying = true;
 		HE::api::time::reset(); // play-relative clock (elapsed/frameCount start at 0)
+		// Open now rather than at the next frame's gate feed, or a rumble from
+		// BeginPlay/OnInit, which run before that frame, would be refused.
+		HE::api::input::setRumbleGate(true, false);
 		// Capture warnings/errors for the post-PIE report.
 		{
 			std::lock_guard<std::mutex> lk(m_playLogMutex);
@@ -9098,6 +9337,10 @@ void EditorApplication::setPlayMode(bool play)
 				HE::api::fs::setSandboxRoot(
 					(std::filesystem::path(projPath).parent_path() / "Saved").string());
 		}
+		// The player's settings from that sandbox's prefs, as the packaged game
+		// reads them at start — so a session begins from what was SAVED, not from
+		// the last session's unsaved slider moves. Applied below with the buses.
+		HE::api::settings::load();
 		// Savegames: PIE mirrors the packaged game — the project's default
 		// template resolves save.create(), and the play-mode gate opens for the
 		// entity save-state API. Mirrored teardown below.
@@ -9152,6 +9395,39 @@ void EditorApplication::setPlayMode(bool play)
 		// GameApplication keeps.
 		m_audioEngine.applyBusConfig(m_projectManager.currentProject().audioBuses);
 		AudioSystem::playOnStart(*m_editorWorld, m_audioEngine, &contentManager());
+
+		// The player's settings for this session, over the editor's own. The
+		// deadzone and the volumes are live, as in the packaged game, and are put
+		// back when play stops. VSync and fullscreen are recorded and saved but
+		// NOT applied: the window is the editor's, and a settings menu tried in
+		// the preview must not take the editor fullscreen.
+		{
+			HE::api::settings::Host host;
+			host.stickDeadzone = m_editorConfig.GamepadStickDeadzone;
+			host.vsync         = true;
+			host.fullscreen    = false;
+			host.applyStickDeadzone = [this](float dz) { input().stickDeadzone = dz; };
+			host.applyVolume = [this](const std::string& bus, std::optional<float> volume)
+			{
+				if (!m_audioEngine.isInitialized()) return;
+				const HE::AudioBusConfig& cfg = m_projectManager.currentProject().audioBuses;
+				const bool master = bus == HE::api::settings::kMaster;
+				float v = 1.0f;
+				if (volume)      v = *volume;
+				else if (master) v = cfg.masterVolume;
+				else if (const HE::AudioBusDef* def = cfg.find(bus)) v = def->volume;
+				if (master) { m_audioEngine.setMasterVolume(v); return; }
+				if (!m_audioEngine.hasBus(bus)) m_audioEngine.createBus(bus, v);
+				m_audioEngine.setBusVolume(bus, v);
+			};
+			host.currentVolume = [this](const std::string& bus)
+			{
+				if (!m_audioEngine.isInitialized()) return 1.0f;
+				return bus == HE::api::settings::kMaster ? m_audioEngine.getMasterVolume()
+				                                         : m_audioEngine.getBusVolume(bus);
+			};
+			HE::api::settings::install(std::move(host));
+		}
 
 		// Initialise script context and start all enabled scripts
 		m_scriptContext = std::make_unique<ScriptContext>(*m_editorWorld);
@@ -9292,6 +9568,22 @@ void EditorApplication::setPlayMode(bool play)
 	}
 	else
 	{
+		// Pads quiet FIRST, and the gate shut: every script teardown below
+		// (onStop, Destruct, OnShutdown) still runs, and none of them may start
+		// a buzz that nothing is left to stop — a `duration <= 0` rumble would
+		// otherwise run until the next Play.
+		HE::api::input::setRumbleGate(false, false);
+		// The player's settings end with the session: hooks down (they capture
+		// `this`), and the editor's own deadzone and the project's mixer back.
+		// The values stay in memory, unused, until the next Play reloads them.
+		// Their camera half needs no undo: nothing drives a rig outside play.
+		if (HE::api::settings::installed())
+		{
+			HE::api::settings::uninstall();
+			input().stickDeadzone = m_editorConfig.GamepadStickDeadzone;
+			if (m_audioEngine.isInitialized())
+				m_audioEngine.applyBusConfig(m_projectManager.currentProject().audioBuses);
+		}
 		// The session goes with the play session it belongs to. Before the
 		// hosts come down: leave() says goodbye on the wire, and a peer learns
 		// the seat is free now rather than waiting out a transport timeout.
@@ -9648,26 +9940,50 @@ void EditorApplication::enqueueRetargetOnDisk(const std::string& oldRel,
 	}));
 }
 
-void EditorApplication::syncPrefabInstances(const char* when)
+bool EditorApplication::syncPrefabInstances(const char* when)
 {
-	if (!m_editorWorld) return;
+	if (!m_editorWorld) return false;
 	if (m_collab.inSession())
 	{
 		HE_LOG_INFO(Editor, "Prefab sync skipped (%s): a collaboration session is running and "
 		                    "the pass does not replicate", when);
-		return;
+		return false;
 	}
 	SceneSerializer serializer;
 	SceneSerializer::PrefabSyncReport rep;
 	const size_t synced = serializer.syncPrefabInstances(*m_editorWorld, contentManager(), &rep);
 	// The save-time pass rewrites what a human may have been looking at, so
 	// say when it did — one line, only when something moved.
-	if (synced && (rep.componentsApplied || rep.componentsRemoved || rep.entitiesCreated ||
-	               rep.entitiesRemoved))
+	const bool moved = synced && (rep.componentsApplied || rep.componentsRemoved ||
+	                              rep.entitiesCreated || rep.entitiesRemoved);
+	if (moved)
 		HE_LOG_INFO(Editor, "Prefab sync (%s): %zu instance(s), %zu component(s) applied, "
 		                    "%zu removed, %zu entity/-ies created, %zu removed, %zu override(s) kept",
 		            when, synced, rep.componentsApplied, rep.componentsRemoved,
 		            rep.entitiesCreated, rep.entitiesRemoved, rep.overridesKept);
+	return moved;
+}
+
+void EditorApplication::syncPrefabInstancesAfterReload()
+{
+	if (!m_editorWorld) return;
+	if (m_isPlaying)
+	{
+		m_prefabReloadSyncPending = true;
+		return;
+	}
+	m_prefabReloadSyncPending = false;
+	if (m_editorWorld->registry().view<PrefabInstanceComponent>().empty()) return;
+	// An edit committed this very frame is marked first, as before a save —
+	// or the sync would be what undoes it.
+	recordPrefabEdits();
+	std::vector<uint8_t> before;
+	SceneSerializer serializer;
+	serializer.saveToMemory(*m_editorWorld, before);
+	if (syncPrefabInstances("reload"))
+		m_undo.pushSnapshot(std::move(before), "Prefab Update");
+	// The sync's writes are not a human's (see revertPrefabOverride).
+	m_prefabEditRevision = m_undo.revision();
 }
 
 void EditorApplication::recordPrefabEdits()
@@ -9895,6 +10211,23 @@ void EditorApplication::updateAutosave(std::uint64_t nowMs)
 			SceneSerializer serializer;
 			return serializer.save(*m_editorWorld, path, SerializeFormat::JSON);
 		});
+}
+
+// The asset tabs' tick. Same settings and the same headless exception as the
+// scene's; NOT paused in Play — an asset tab is edited the same in both, and a
+// crash in Play is exactly the one worth a copy. Each panel hands in its dirty
+// files with a writer (EditorUI::appendAssetSnapshots); what left that list
+// since the last frame loses its copy here, which is how a Save anywhere
+// removes it.
+void EditorApplication::updateAssetAutosave(std::uint64_t nowMs, AppContext& ctx)
+{
+	if (!m_projectLoaded || !m_dumpPath.empty()) return;
+	m_assetAutosave.setEnabled(m_editorConfig.AutosaveEnabled);
+	m_assetAutosave.setIntervalMs(static_cast<std::uint64_t>(
+		std::max(m_editorConfig.AutosaveIntervalSec, 0)) * 1000ull);
+	std::vector<HE::Ed::AssetSnapshotSource> dirty;
+	EditorUI::appendAssetSnapshots(ctx, dirty);
+	m_assetAutosave.update(nowMs, dirty);
 }
 
 // "Restore" in the recovery dialog. Not a plain open of the snapshot file: that
@@ -10221,6 +10554,14 @@ void EditorApplication::OnShutdown()
 	// item in this function that outlives the process if it is skipped.
 	m_collab.shutdown();
 
+	// Shut the gate (stops the pads) while the sink still points at a live
+	// Input, then take the sink down — it captures `this`.
+	HE::api::input::setRumbleGate(false, false);
+	HE::api::input::setRumbleSink({});
+	// A PIE session's settings hooks capture `this` too (normally already gone
+	// with the session).
+	HE::api::settings::uninstall();
+
 	// The recovery snapshot goes only when this is the exit the user asked for:
 	// the UI's quit (after the unsaved-changes prompt — saved, or "Don't Save"
 	// chosen knowingly) or an OS close of a clean scene, which OnEvent lets
@@ -10230,6 +10571,10 @@ void EditorApplication::OnShutdown()
 	// a signal (CrashHandler re-raises and never comes back this way).
 	if (m_quitConfirmed || m_undo.revision() == m_savedRevision)
 		m_autosave.clear();
+	// The asset tabs' copies by the same rule. The OS-close veto asks about
+	// unsaved assets too, so an unasked exit with none left has nothing to lose.
+	if (m_quitConfirmed || EditorUI::unsavedAssetPaths().empty())
+		m_assetAutosave.clear();
 
 	// The MCP listener goes down here for the same reason, one step milder: the
 	// endpoint file it leaves behind names a port and a pid, and a shim that
@@ -10710,6 +11055,16 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			}
 			if (event.key.key != SDLK_ESCAPE) return true; // swallow other keys while typing
 		}
+	}
+
+	// Esc while a rebind listens cancels THAT, ahead of the capture toggle below —
+	// which consumes the key, so the capture's own Escape check never sees it.
+	// Same order as the packaged game.
+	if (m_isPlaying && event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat
+	    && event.key.key == SDLK_ESCAPE && HE::api::input::isRebinding())
+	{
+		HE::api::input::rebindCancel();
+		return true;
 	}
 
 	// Esc toggles the play-mode mouse capture (like the packaged game): release it to
