@@ -319,6 +319,56 @@ TEST_CASE("ui shot: a Details-style panel draws its rows")
 	CHECK(int(b) == int(kBgB));
 }
 
+TEST_CASE("ui shot: several entities selected, the rows they disagree on say so")
+{
+	constexpr int W = 420, H = 380;
+	Harness harness(W, H);
+
+	float position[3] = { 1.0f, 4.5f, -2.0f };
+	float intensity   = 3.0f;
+	float range       = 10.0f;
+	float color[3]    = { 1.0f, 0.9f, 0.7f };
+	int   type        = 1;
+	bool  shadows     = true;
+	const char* kTypes[] = { "Directional", "Point", "Spot" };
+
+	auto scene = [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("Details", nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		{
+			// What the multi-selection panel sets up from EditorMultiEdit::rowMarks:
+			// Position differs in Y only; intensity, colour, type and the shadow
+			// switch differ as a whole; range is shared.
+			const EditorWidgets::Row::MixedScope mixed(
+				{ { "position", 0b010u }, { "intensity", ~0u }, { "color", ~0u },
+				  { "type", ~0u }, { "castsShadow", ~0u } });
+			ImGui::CollapsingHeader("Light", ImGuiTreeNodeFlags_DefaultOpen);
+			EditorWidgets::Row::dragFloat3("Position", position, 0.05f);
+			EditorWidgets::Row::combo("Type", &type, kTypes, 3);
+			EditorWidgets::Row::colorEdit3("Color", color);
+			EditorWidgets::Row::dragFloat("Intensity", &intensity, 0.05f);
+			EditorWidgets::Row::dragFloat("Range", &range, 0.1f);
+			EditorWidgets::checkbox("Casts Shadow##light", &shadows);
+		}
+		EditorWidgets::hint("Differs across the selection: Position (Y), Type, Color, "
+		                    "Intensity, Casts Shadow");
+		ImGui::End();
+	};
+
+	const he_ui::Image img = shoot("details-mixed", W, H, 4, scene);
+	REQUIRE(img.valid());
+	const int ink = img.inkedPixels(kBgR, kBgG, kBgB);
+	INFO("inked pixels: " << ink);
+	CHECK(ink > 4000);
+	// The values underneath are untouched by drawing them as mixed.
+	CHECK(position[1] == doctest::Approx(4.5f));
+	CHECK(type == 1);
+	CHECK(shadows);
+}
+
 TEST_CASE("ui shot: hovering a row raises its help tooltip")
 {
 	constexpr int W = 520, H = 320;

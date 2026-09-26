@@ -231,6 +231,9 @@ void install()
 		s_gameOnlyItems.push_back(heAddItem(edit, @"Duplicate", C::Duplicate, nil, 0, true));
 		s_gameOnlyItems.push_back(heAddItem(edit, @"Delete",    C::Delete,    nil, 0, true));
 		[edit addItem:[NSMenuItem separatorItem]];
+		s_gameOnlyItems.push_back(heAddItem(edit, @"Select All",   C::SelectAll,   nil, 0, true));
+		s_gameOnlyItems.push_back(heAddItem(edit, @"Deselect All", C::DeselectAll, nil, 0, true));
+		[edit addItem:[NSMenuItem separatorItem]];
 		// The project's own settings, an editor tab like Preferences (which sits
 		// in the app menu, where macOS keeps an application's preferences). No
 		// key equivalent, for the reason the whole block has none.

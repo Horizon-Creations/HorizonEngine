@@ -1,0 +1,50 @@
+          <p>
+            These rows work on <strong>entities</strong> that carry UI components:
+            an element on a UI canvas in the scene, addressed by its entity id like
+            any other entity. Widgets built in the Widget Designer are a different
+            thing with their own ids, see <a href="#widget">Widget</a>. From a
+            script, pass the id: the element the script sits on is
+            <code>self.entityId</code> (Python <code>self.entity_id</code>),
+            another one is found once with <code>horizon.entity.findByName</code>.
+          </p>
+          <ul>
+            <li>
+              <strong>Which component answers.</strong> The text rows need a UI
+              Text component: <code>setText</code> on anything else does nothing and
+              <code>getText</code> answers <code>""</code>. The colour is the Image
+              tint, else the Text colour, else a Button's normal colour, in that
+              order. An element with none of the three ignores
+              <code>setColor</code> and reads as white (1, 1, 1, 1). Visibility,
+              position and size belong to every element; an entity without UI
+              answers <code>false</code> and 0, 0.
+            </li>
+            <li>
+              <strong>A colour is four numbers</strong> and a position or size two:
+              <code>setColor(e, 1, 0.5, 0, 1)</code>, <code>setPosition(e, x, y)</code>.
+              With three colour numbers Lua throws <em>bad argument #5</em> and
+              Python an <code>IndexError</code>. A missing <code>visible</code>
+              reads as <code>false</code> in Lua, so the element disappears; Python
+              throws.
+            </li>
+            <li>
+              <strong>Nothing is clamped or checked:</strong> a negative size is
+              stored as it is.
+            </li>
+            <li>
+              <code>pointerOverUI</code> asks the widget layer: it is
+              <code>true</code> while the pointer is over a widget, and while a
+              widget dialog (<code>widget.showModal</code>) is open, wherever the
+              pointer is. UI elements on a scene canvas do not count.
+            </li>
+          </ul>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue (build 7d49d44f): <code>setMaterialParam</code>
+              changes every element with the same material.</strong> The value is
+              written into the material asset in memory, not onto the element, the
+              same as <a href="#material"><code>material.setParam</code></a>. Two
+              progress bars sharing one fill material show the same fill. Give an
+              element that needs its own value its own material asset.
+            </p>
+          </div>

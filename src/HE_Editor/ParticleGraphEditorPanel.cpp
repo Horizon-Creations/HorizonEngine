@@ -86,6 +86,22 @@ bool isParticleAsset(const std::string& path)
 bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
 
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+
+void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, State& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			const ParticleGraphAsset* a = cm->getParticleGraph(st.assetId);
+			if (!a) return false;
+			ParticleGraphAsset copy = *a;
+			copy.nodeGraphJson = HE::particleGraphToJson(st.graph);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
 CollabDocSync::DocBindings collabDocs(const std::string& assetPath)
 {
 	State* st = s_states.find(assetPath);

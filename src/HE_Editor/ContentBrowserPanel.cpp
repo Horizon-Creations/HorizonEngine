@@ -26,6 +26,7 @@
 #include "AnimatorStateMachineEditorPanel.h"
 #include "AudioEditorPanel.h"
 #include "EditorAssetTypeCache.h"
+#include "TextureColourSpaceDialog.h"    // Import / Color Space... on textures: sRGB or linear
 #include "AssetStubWriter.h"             // what a newborn asset of each type contains
 #include "GitController.h"        // per-file source-control status for the tile badge
 #include "AssetThumbnailCache.h"         // rendered mesh/material tiles for the grid
@@ -2781,15 +2782,39 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					// The item being imported lives in whichever root is currently
 					// browsed (s_selectedRootKind) — NOT always Content.
 					const std::filesystem::path root = cbRootFolder(s_selectedRootKind).fullPath;
-					std::error_code ec;
-					std::filesystem::path relDir =
-						std::filesystem::relative(srcPath.parent_path(), root, ec);
-					if (ec || relDir == ".") relDir.clear();
+					auto relDirOf = [&](const std::filesystem::path& src)
+					{
+						std::error_code ec;
+						std::filesystem::path relDir =
+							std::filesystem::relative(src.parent_path(), root, ec);
+						if (ec || relDir == ".") relDir.clear();
+						return relDir;
+					};
 
-					if (!Importer::importSource(srcPath, root, relDir))
-						HE_LOG_ERROR(Editor, "%s",
-							("Editor: import failed for " + srcPath.string()).c_str());
-					ctx.contentRefreshPending = true;
+					if (Importer::isTextureSource(srcPath))
+					{
+						// A texture is colour or data, and the file cannot say which:
+						// the dialog asks, pre-ticked from the name. Every image in
+						// the selection goes in the same dialog, so importing a
+						// material's five maps is one decision, not five.
+						std::vector<std::string> sources, relDirs;
+						const std::vector<std::string>& picked = isSelected(s_ctxMenuItem)
+							? s_selection : std::vector<std::string>{ s_ctxMenuItem };
+						for (const std::string& p : picked)
+						{
+							if (!Importer::isTextureSource(p)) continue;
+							sources.push_back(p);
+							relDirs.push_back(relDirOf(p).generic_string());
+						}
+						TextureColourSpaceDialog::openImport(sources, relDirs, root.string());
+					}
+					else
+					{
+						if (!Importer::importSource(srcPath, root, relDirOf(srcPath)))
+							HE_LOG_ERROR(Editor, "%s",
+								("Editor: import failed for " + srcPath.string()).c_str());
+						ctx.contentRefreshPending = true;
+					}
 					ImGui::CloseCurrentPopup();
 				}
 				// A mesh format the engine knows but THIS build cannot read (FBX /
@@ -2858,6 +2883,25 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					}
 					else if (!recordedSource.empty() && ImGui::IsItemHovered())
 						ImGui::SetTooltip("Re-read %s", recordedSource.c_str());
+				}
+
+				// ── Texture colour space (sRGB vs linear) ────────────────
+				// In place, no source needed: most textures that need it were
+				// imported before the flag existed, often from files long gone.
+				// Every texture in the selection, filtered per path like Delete.
+				if (!engineLocked && ext == ".hasset" && ctx.contentManager &&
+				    EditorAssetTypeCache::is(s_ctxMenuItem, HE::AssetType::Texture) &&
+				    EditorWidgets::menuItem("Color Space..."))
+				{
+					std::vector<std::string> textures;
+					const std::vector<std::string>& picked = isSelected(s_ctxMenuItem)
+						? s_selection : std::vector<std::string>{ s_ctxMenuItem };
+					for (const std::string& p : picked)
+						if (!isReadOnlyGround(p) &&
+						    EditorAssetTypeCache::is(p, HE::AssetType::Texture))
+							textures.push_back(p);
+					TextureColourSpaceDialog::openRetag(textures, ctx.contentManager->contentRoot());
+					ImGui::CloseCurrentPopup();
 				}
 
 				// ── Material → create a child INSTANCE (params/switches only) ──
@@ -2953,6 +2997,33 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					}
 					ImGui::CloseCurrentPopup();
 				}
+			}
+
+			// ── Folder: texture colour space for everything below ────────────
+			// The batch fix for a whole project: every texture under this folder,
+			// each row pre-ticked from its name. Walked on the click, not per
+			// frame — a Textures folder can hold thousands of files.
+			if (s_ctxMenuIsFolder && !engineLocked && ctx.contentManager &&
+			    !isReadOnlyGround(s_ctxMenuItem) &&
+			    EditorWidgets::menuItem("Texture Color Spaces..."))
+			{
+				std::vector<std::string> textures;
+				std::error_code ec;
+				for (std::filesystem::recursive_directory_iterator it(s_ctxMenuItem, ec), end;
+				     !ec && it != end; it.increment(ec))
+				{
+					std::error_code fileEc;
+					if (!it->is_regular_file(fileEc) || it->path().extension() != ".hasset") continue;
+					const std::string p = it->path().string();
+					if (EditorAssetTypeCache::is(p, HE::AssetType::Texture))
+						textures.push_back(p);
+				}
+				if (textures.empty())
+					HE_LOG_INFO(Editor, "%s",
+						("Editor: no texture assets under " + s_ctxMenuItem).c_str());
+				else
+					TextureColourSpaceDialog::openRetag(textures, ctx.contentManager->contentRoot());
+				ImGui::CloseCurrentPopup();
 			}
 
 			// ── Someone else is editing this: ask them for it ────────────────

@@ -499,6 +499,23 @@ bool SequencerPanel::reloadByContentPath(const std::string& contentPath)
 void SequencerPanel::appendDirtyPaths(std::vector<std::string>& out)
 { s_states.appendDirtyPaths(out); }
 
+void SequencerPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, PanelState& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			// The loaded clip IS the edit buffer (saveState writes it as it is),
+			// so the copy is of the clip itself.
+			const PropertyAnimClipAsset* a = cm->getPropertyAnimClip(st.assetId);
+			if (!a) return false;
+			PropertyAnimClipAsset copy = *a;
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
+
 bool SequencerPanel::save(AppContext& ctx, const std::string& path)
 {
 	PanelState* st = s_states.find(path);

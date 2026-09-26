@@ -124,7 +124,7 @@ namespace ViewportPanel
 	struct ShowFlags
 	{
 		bool groundGrid    = true;  // the reference grid on the ground plane
-		bool selection     = true;  // the amber box on each selected entity
+		bool selection     = true;  // the amber box on each selected entity + a selected light's range / camera's frustum
 		bool colliders     = true;  // collider wireframes (cyan / magenta)
 		bool joints        = true;  // joint lines, anchors and hinge arcs
 		bool navMesh       = true;  // baked NavMesh polygons (per component too)

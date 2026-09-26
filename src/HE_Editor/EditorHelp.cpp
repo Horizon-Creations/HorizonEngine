@@ -1609,6 +1609,19 @@ namespace
 	  "to the original. The copies become the selection; one undo removes them "
 	  "all.",
 	  "Ctrl+D", "editor#outliner" },
+	{ "Edit/Select All", "",
+	  "Selects every entity the Outliner lists, children included; the sun, the "
+	  "moon and a terrain's generated chunks stay out. The entity that was "
+	  "active stays active, so the Details panel keeps showing its values. The "
+	  "key works when a Scene view, the Outliner or the Details panel was the "
+	  "last thing clicked, and not while you type.",
+	  "Ctrl+A", "editor#outliner" },
+	{ "Edit/Deselect All", "",
+	  "Empties the selection. Esc does the same from a Scene view, the Outliner "
+	  "or the Details panel, but only when it has nothing else to do: an open "
+	  "menu or list, a field being typed into, a dialog and a fly-look in the "
+	  "viewport each take the Esc first, and the next press clears.",
+	  "Esc", "editor#outliner" },
 	{ "Edit/Project Settings", "",
 	  "Opens the project's own settings as an editor tab: its title and startup "
 	  "scene, shadows, physics rate and gravity, what the packaged build boots "
@@ -1927,13 +1940,18 @@ namespace
 	  "", "editor#viewport" },
 	{ "Viewport Show/Editor Icons", "",
 	  "The symbols standing in for lights, cameras and audio sources, which "
-	  "have no mesh of their own. With them off those entities are still there "
+	  "have no mesh of their own. A light's symbol wears the light's colour. "
+	  "With them off those entities are still there "
 	  "and still selectable in the Outliner — but not by clicking in the scene, "
 	  "since there is nothing to click.",
 	  "", "editor#viewport" },
 	{ "Viewport Show/Selection", "",
-	  "The amber box on each selected entity. Off is for judging a scene "
-	  "without the marker over the thing you are looking at; the gizmo stays.",
+	  "The amber box on each selected entity, and what a selected light or "
+	  "camera reaches: a point light's range as a sphere, a spot light's cone, "
+	  "a camera's view frustum (blue). Only for what is selected, so a scene "
+	  "full of lights is not a scene full of spheres. Off is for judging a "
+	  "scene without the marker over the thing you are looking at; the gizmo "
+	  "stays.",
 	  "", "editor#viewport" },
 	{ "Viewport Show/Colliders", "",
 	  "Collider wireframes for every entity that has one: cyan for solid, "
@@ -2174,7 +2192,36 @@ namespace
 	  "", "editor#content-browser" },
 	{ "Content Browser/Reimport", "",
 	  "Reads the source file again and rebuilds the asset from it — after the "
-	  "model was changed in the program it came from.",
+	  "model was changed in the program it came from. A texture keeps its "
+	  "color space setting.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Color Space...", "",
+	  "Says whether the selected textures hold color (sRGB, decoded by the GPU) "
+	  "or data such as normals, roughness or masks (linear). Changes the asset "
+	  "in place; nothing is re-imported.",
+	  "", "editor#content-browser" },
+	{ "Content Browser/Texture Color Spaces...", "",
+	  "Lists every texture in this folder and below with a guess from its file "
+	  "name. The fix for textures imported before the color space setting "
+	  "existed, which all read as linear and look washed out.",
+	  "", "editor#content-browser" },
+
+	// ── The color space dialog (TextureColourSpaceDialog) ────────────────────
+	{ "Texture Color Space/All Color", "",
+	  "Ticks every row: all of these textures are color, stored sRGB-encoded.",
+	  "", "editor#content-browser" },
+	{ "Texture Color Space/All Data", "",
+	  "Unticks every row: all of these textures are data (normals, masks, "
+	  "roughness and the like) and are sampled as stored.",
+	  "", "editor#content-browser" },
+	{ "Texture Color Space/Guess from Name", "",
+	  "Sets every tick back to what the file name suggests: names ending in "
+	  "_normal, _n, _orm, _rough, _metal, _ao, _height or _mask are data, "
+	  "everything else is color.",
+	  "", "editor#content-browser" },
+	{ "Texture Color Space/Keep Current", "",
+	  "Sets every tick to what the texture already has, so Apply would change "
+	  "nothing. Start here to fix only a few rows by hand.",
 	  "", "editor#content-browser" },
 	{ "Content Browser/Create Material Instance", "",
 	  "A new material that inherits this one and overrides only what you change. "
@@ -2883,7 +2930,14 @@ namespace
 	  "share, with the active entity's values. Changing a value here sets that "
 	  "same value on every selected entity that has the component — only the "
 	  "value you touched, so dragging Position X leaves each entity's Y and Z as "
-	  "they were. One undo puts all of them back.",
+	  "they were. One undo puts all of them back. A field on which the selected "
+	  "entities disagree says (mixed) beside its name.",
+	  "", "editor#details" },
+	{ "details.multi.mixed", "Differs across the selection",
+	  "The fields of this component that do not hold the same value on every "
+	  "selected entity. The row above shows the active entity's value; where "
+	  "the row is that field's own, it says (mixed) and shows a dash instead of "
+	  "the number. Setting the field gives all of them the value you set.",
 	  "", "editor#details" },
 	{ "details.multi.held", "Only the entity you hold",
 	  "In a collaboration session the editor holds a lock on the active entity "
@@ -2894,6 +2948,12 @@ namespace
 	{ "details.multi.partial", "Not on every selected entity",
 	  "Components the active entity has but at least one other selected entity "
 	  "does not. They are left out above because there is no shared value to show.",
+	  "", "editor#details" },
+	{ "details.multi.add-component", "Add Component to every selected entity",
+	  "The same menu as for one entity, over the whole selection. It lists every "
+	  "component at least one selected entity is missing, including the ones in "
+	  "the list above, and gives the one you pick to each entity that does not "
+	  "have it yet. One undo takes it off all of them again.",
 	  "", "editor#details" },
 
 	// ── Content Browser ──────────────────────────────────────────────────────
@@ -3138,15 +3198,18 @@ namespace
 	  "changed outside the editor.",
 	  "", "editor#content-browser" },
 	{ "Preferences/Autosave/Autosave", "",
-	  "Writes a recovery copy of the edited scene into the project's "
-	  "Saved/Autosave folder at a fixed interval. The scene file itself is never "
+	  "Writes a recovery copy of the edited scene, and of every asset tab with "
+	  "unsaved edits (scripts, C++ classes, materials, widgets, HorizonCode "
+	  "classes, input, types, themes, animation assets), into the project's "
+	  "Saved/Autosave folder at a fixed interval. The files themselves are never "
 	  "written by the timer: saving stays your decision. A real save or a clean "
 	  "exit removes the copy; after a crash it is what the next start can "
 	  "restore from.",
 	  "", "editor#preferences" },
 	{ "Preferences/Autosave/Autosave Interval (s)", "",
-	  "Seconds between two recovery copies. A copy is only written when the "
-	  "scene has changed since the last one. Ten seconds is the floor: below "
+	  "Seconds between two recovery copies. The scene's copy is only written when "
+	  "the scene has changed since the last one; an asset tab's is rewritten while "
+	  "the tab has unsaved edits. Ten seconds is the floor: below "
 	  "that, writing the scene is itself the pause it was meant to spare you.",
 	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
@@ -3630,7 +3693,10 @@ namespace
 	  "This is about what a SCRIPT may name on its own, never about what a PERSON "
 	  "may choose: a file somebody picks in a file dialog is allowed either way, "
 	  "because choosing it IS the permission. Most applications never need this "
-	  "switch — they need the dialog.",
+	  "switch — they need the dialog.\n\n"
+	  "Open Database and Write PDF are the exception today: they need this switch "
+	  "for every path, one inside the project included, and a file picked in a "
+	  "dialog does not count for them.",
 	  "", "editor#preferences" },
 	{ "Permissions/Run other programs", "Run other programs",
 	  "Whether Run Program and Open URL work. Off, they do nothing and say so in "
@@ -3641,9 +3707,10 @@ namespace
 	  "the permission at all.",
 	  "", "editor#preferences" },
 	{ "Permissions/Network access", "Network access",
-	  "Reserved. Nothing reads it yet — the `http` group is a later wave. It is "
-	  "here so that a project which has already thought about what it may reach "
-	  "does not have to be asked a second time when that group arrives.",
+	  "Whether HTTP Get and HTTP Post work. Off, they start no request, answer "
+	  "ticket 0 and say so in the log.\n\n"
+	  "This is the scripts' own network access. It has nothing to do with the "
+	  "engine's multiplayer sessions, which have their own settings.",
 	  "", "editor#preferences" },
 	{ "Application/Icon", "Icon",
 	  "The name of one of the engine's built-in icons — the same names <icon=…> "
@@ -3816,6 +3883,30 @@ namespace
 	  "Closes the dialog and leaves the copy where it is, so it is offered "
 	  "again the next time this project opens. The one answer that cannot lose "
 	  "anything, which is why Escape does the same.",
+	  "Esc", "editor#preferences" },
+
+	// ── The asset recovery dialog (AssetRecoveryDialog) ──────────────────────
+	// The same offer for asset tabs (scripts, materials, widgets, classes, ...).
+	// Unlike the scene's Restore, this one writes the file, so it says where the
+	// replaced version went.
+	{ "Asset Recovery/Restore", "Restore",
+	  "Writes the autosaved copy into this asset's file and reloads any tab that "
+	  "shows it. The version on disk is copied to Saved/Autosave/Assets/Replaced "
+	  "first, so nothing is lost if the copy turns out to be the wrong one.",
+	  "", "editor#preferences" },
+	{ "Asset Recovery/Delete Copy", "Delete Copy",
+	  "Removes this autosaved copy for good. The asset's file is not touched.",
+	  "", "editor#preferences" },
+	{ "Asset Recovery/Restore All", "Restore All",
+	  "Restore for every row that can be restored. A row that fails stays in the "
+	  "list with the reason underneath; the others are done.",
+	  "", "editor#preferences" },
+	{ "Asset Recovery/Delete All", "Delete All",
+	  "Removes every autosaved copy in the list. No asset file is touched.",
+	  "", "editor#preferences" },
+	{ "Asset Recovery/Keep for Later", "Keep for Later",
+	  "Closes the dialog and leaves every copy where it is, so they are offered "
+	  "again the next time this project opens. Escape does the same.",
 	  "Esc", "editor#preferences" },
 
 	// ── The material editor ──────────────────────────────────────────────────
@@ -6920,6 +7011,9 @@ namespace
 		// The panels whose controls are looked up by label within the panel.
 		{ "World Outliner/",   "editor-interface", "Editor Interface", "World Outliner" },
 		{ "Content Browser/",  "editor-interface", "Editor Interface", "Content Browser" },
+		// Raised from the Content Browser (and File ▸ Import Asset), so it is
+		// read under the same heading.
+		{ "Texture Color Space/", "editor-interface", "Editor Interface", "Content Browser" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
@@ -6996,6 +7090,7 @@ namespace
 		// The recovery dialog is the autosave's other half, so its three
 		// buttons are listed under the setting that produces the copy.
 		{ "Scene Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
+		{ "Asset Recovery/",  "editor-settings", "Settings Reference", "Autosave" },
 		{ "Graph Appearance/", "editor-settings", "Settings Reference", "Graph appearance" },
 		{ "Shortcuts/",        "editor-settings", "Settings Reference", "Shortcuts" },
 		{ "shortcuts.",        "editor-settings", "Settings Reference", "Shortcuts" },
