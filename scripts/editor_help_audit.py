@@ -40,6 +40,10 @@ VALUE = (r"(?:EditorWidgets::Row::\w+|Row::\w+|EditorWidgets::checkbox|ImGui::Ch
          # how eight pickers in the HorizonCode graphs went eight rounds without
          # anyone noticing — the scan simply never asked about them.
          r"|ImGui::BeginCombo|ImGui::RadioButton"
+         # The widget designer's Details panel puts a row's name ABOVE a control
+         # labelled "##…" (UIEditorPanel.cpp): the name is drawn by these two, so
+         # they are where the scan has to read it.
+         r"|detailLabel|drawBoundColor"
          r"|ImGui::ColorEdit\d)")
 ACTION = (r"(?:ImGui::Button|ImGui::SmallButton|ImGui::MenuItem|ImGui::BeginMenu"
           r"|ImGui::Selectable"
@@ -106,7 +110,7 @@ AREAS: dict[str, list[str]] = {
                   "ContentBrowserPanel.cpp", "ProjectHubPanel.cpp", "ConsolePanel.cpp",
                   "NotificationBar.cpp", "PlayReportPanel.cpp", "DocsPanel.cpp",
                   "TutorialPanel.cpp", "McpStatusBar.cpp", "AudioMixerPanel.cpp",
-                  "TextureColourSpaceDialog.cpp", "AssetRecoveryDialog.cpp"],
+                  "TextureViewerPanel.cpp", "TextureColourSpaceDialog.cpp", "AssetRecoveryDialog.cpp"],
     "components": ["InspectorPanel.cpp"],
     "settings": ["EditorSettingsPanel.cpp", "ProjectSettingsPanel.cpp", "ToolchainDialog.cpp"],
     "materials": ["MaterialEditorPanel.cpp"],

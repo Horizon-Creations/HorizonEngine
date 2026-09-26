@@ -26,6 +26,7 @@
 #include "ParticleGraphEditorPanel.h"
 #include "AnimatorStateMachineEditorPanel.h"
 #include "AudioEditorPanel.h"
+#include "TextureViewerPanel.h"
 #include "EditorAssetTypeCache.h"
 #include "TextureColourSpaceDialog.h"    // Import / Color Space... on textures: sRGB or linear
 #include "AssetStubWriter.h"             // what a newborn asset of each type contains
@@ -1301,6 +1302,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// HAsset sniffs, so they must be tested explicitly here.
 			if (!(CppClassEditorPanel::isCppSourceAsset(fullPath) ||
 			      AudioEditorPanel::isAudioAsset(fullPath) ||
+			      TextureViewerPanel::isTextureAsset(fullPath) ||
 			      ScriptEditorPanel::isScriptAsset(fullPath) ||
 			      MaterialEditorPanel::isMaterialAsset(fullPath) ||
 			      MaterialEditorPanel::isMaterialFunctionAsset(fullPath) ||
