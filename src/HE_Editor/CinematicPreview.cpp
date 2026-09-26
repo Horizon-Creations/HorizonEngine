@@ -16,6 +16,8 @@
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 
+#include <glm/gtc/matrix_transform.hpp>   // translate — overrideFor
+
 #include <algorithm>
 
 namespace HE::Ed::CinematicPreview
@@ -43,6 +45,42 @@ struct Bracket::SavedMaterial
 
 Bracket::Bracket()  = default;
 Bracket::~Bracket() = default;
+
+CameraView cameraViewOf(HorizonWorld& world, entt::entity e)
+{
+	CameraView v;
+	auto& reg = world.registry();
+	if (e == entt::null || !reg.valid(e) || !reg.all_of<CameraComponent, TransformComponent>(e)) return v;
+	const glm::mat4 m = HE::worldMatrixOf(world, e);
+	v.position = glm::vec3(m[3]);
+	glm::mat3 basis(m);
+	for (int i = 0; i < 3; ++i)
+	{
+		const float len = glm::length(basis[i]);
+		if (len > 1e-6f) basis[i] /= len;
+	}
+	v.rotation = glm::normalize(glm::quat_cast(basis));
+	const CameraComponent& cam = reg.get<CameraComponent>(e);
+	v.fovDegrees = cam.fovDegrees + cam.fovOffset;
+	v.nearPlane  = cam.nearPlane;
+	v.farPlane   = cam.farPlane;
+	v.camera     = e;
+	v.valid      = true;
+	return v;
+}
+
+EditorCameraOverride overrideFor(const CameraView& v)
+{
+	EditorCameraOverride ov;
+	if (!v.valid) return ov;
+	ov.active     = true;
+	ov.view       = glm::inverse(glm::translate(glm::mat4(1.0f), v.position) * glm::mat4_cast(v.rotation));
+	ov.position   = v.position;
+	ov.fovDegrees = v.fovDegrees;
+	ov.nearPlane  = v.nearPlane;
+	ov.farPlane   = v.farPlane;
+	return ov;
+}
 
 namespace
 {
@@ -73,28 +111,7 @@ namespace
 
 	// A camera's world pose now, composed from its parent chain — the preview
 	// has just moved it and nothing has propagated.
-	CameraView poseOf(HorizonWorld& world, entt::entity e)
-	{
-		CameraView v;
-		auto& reg = world.registry();
-		if (e == entt::null || !reg.valid(e) || !reg.all_of<CameraComponent, TransformComponent>(e)) return v;
-		const glm::mat4 m = HE::worldMatrixOf(world, e);
-		v.position = glm::vec3(m[3]);
-		glm::mat3 basis(m);
-		for (int i = 0; i < 3; ++i)
-		{
-			const float len = glm::length(basis[i]);
-			if (len > 1e-6f) basis[i] /= len;
-		}
-		v.rotation = glm::normalize(glm::quat_cast(basis));
-		const CameraComponent& cam = reg.get<CameraComponent>(e);
-		v.fovDegrees = cam.fovDegrees + cam.fovOffset;
-		v.nearPlane  = cam.nearPlane;
-		v.farPlane   = cam.farPlane;
-		v.camera     = e;
-		v.valid      = true;
-		return v;
-	}
+	CameraView poseOf(HorizonWorld& world, entt::entity e) { return cameraViewOf(world, e); }
 
 	// The camera on screen in the scene: isMain, else the first — the
 	// renderer's rule, and the runtime's "gameplay camera".

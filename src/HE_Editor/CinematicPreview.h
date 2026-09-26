@@ -1,6 +1,7 @@
 #pragma once
 #include <ContentManager/Assets.h>
 #include <HorizonScene/SequenceEval.h>
+#include <Renderer/IRenderer.h>   // EditorCameraOverride
 
 #include <entt/entt.hpp>
 #include <glm/glm.hpp>
@@ -53,6 +54,18 @@ namespace HE::Ed::CinematicPreview
 		float     farPlane   = 1000.0f;
 		entt::entity camera  = entt::null;   // the live cut's camera
 	};
+
+	// A scene camera's view as it stands: world pose composed from its parent
+	// chain (HE::worldMatrixOf, never the frame-old worldMatrix), scale divided
+	// out, FOV with the rig's offset — what the renderer would show through it.
+	// `valid` false when `e` is gone or has no Camera + Transform. Shared by the
+	// Cinematic tab's picture and the scene viewport's "Look Through Camera",
+	// so both look through a camera the same way.
+	CameraView cameraViewOf(HorizonWorld& world, entt::entity e);
+
+	// The render override for that view (looking down the camera's -Z). The
+	// icon flag is left at its default; the caller decides.
+	EditorCameraOverride overrideFor(const CameraView& v);
 
 	class Bracket
 	{

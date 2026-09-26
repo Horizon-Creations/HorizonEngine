@@ -732,12 +732,7 @@ void drawPreview(PanelState& st, AppContext& ctx, const SequenceAsset& seq, floa
 	const char* through = "editor camera";
 	if (st.throughCamera && cv.valid)
 	{
-		ov.active     = true;
-		ov.view       = glm::inverse(glm::translate(glm::mat4(1.0f), cv.position) * glm::mat4_cast(cv.rotation));
-		ov.position   = cv.position;
-		ov.fovDegrees = cv.fovDegrees;
-		ov.nearPlane  = cv.nearPlane;
-		ov.farPlane   = cv.farPlane;
+		ov      = HE::Ed::CinematicPreview::overrideFor(cv);
 		through = "cut camera";
 	}
 	else if (ctx.editorCamera && ctx.editorCamera->initialised())

@@ -640,3 +640,62 @@ TEST_CASE("cinematic preview: a second apply saves the author's world, not the l
 	b.restore(s.world, s.cm);
 	CHECK(reg.get<TransformComponent>(s.hero).position.x == doctest::Approx(0.0f));
 }
+
+// ── Look Through Camera ──────────────────────────────────────────────────────
+// The scene viewport's lock and the tab's picture both build their view with
+// cameraViewOf + overrideFor. What has to hold: the pose is the camera's WORLD
+// pose (a parent's rotation and scale included, the scale divided out, and read
+// fresh — not the worldMatrix a frame old), so the override's view matrix is
+// exactly the inverse of where the camera stands and looks.
+TEST_CASE("cinematic preview: a camera under a rotated, scaled parent is looked through from its world pose")
+{
+	HorizonWorld world;
+	auto& reg = world.registry();
+	const entt::entity rig = actor(world, "Rig", glm::vec3(10.0f, 0.0f, 0.0f));
+	reg.get<TransformComponent>(rig).rotation = glm::vec3(0.0f, 90.0f, 0.0f);
+	reg.get<TransformComponent>(rig).scale    = glm::vec3(2.0f);
+	const entt::entity cam = actor(world, "Cam", glm::vec3(0.0f, 1.0f, 0.0f));
+	world.reparentEntity(cam, rig);
+	auto& cc = reg.emplace_or_replace<CameraComponent>(cam);
+	cc.fovDegrees = 50.0f;
+	cc.fovOffset  = 5.0f;
+	cc.nearPlane  = 0.5f;
+	cc.farPlane   = 300.0f;
+	// Deliberately NOT propagated: worldMatrix is stale, the view must not be.
+
+	const HE::Ed::CinematicPreview::CameraView v = HE::Ed::CinematicPreview::cameraViewOf(world, cam);
+	REQUIRE(v.valid);
+	const glm::mat4 m = HE::worldMatrixOf(world, cam);
+	CHECK(v.position.x == doctest::Approx(m[3].x));
+	CHECK(v.position.y == doctest::Approx(2.0f));    // 1 m up, parent scale 2
+	CHECK(v.position.z == doctest::Approx(m[3].z));
+	CHECK(v.fovDegrees == doctest::Approx(55.0f));   // the rig's offset is part of what is shown
+	CHECK(v.nearPlane == doctest::Approx(0.5f));
+	CHECK(v.farPlane == doctest::Approx(300.0f));
+
+	// The parent turned 90° about Y, so the camera looks where the parent's -Z
+	// points in the world, and the scale does not leak into the rotation.
+	const glm::vec3 fwd    = v.rotation * glm::vec3(0.0f, 0.0f, -1.0f);
+	const glm::vec3 expect = glm::normalize(glm::vec3(m * glm::vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+	CHECK(fwd.x == doctest::Approx(expect.x).epsilon(1e-4));
+	CHECK(fwd.y == doctest::Approx(expect.y).epsilon(1e-4));
+	CHECK(fwd.z == doctest::Approx(expect.z).epsilon(1e-4));
+	CHECK(glm::length(fwd) == doctest::Approx(1.0f));
+
+	const EditorCameraOverride ov = HE::Ed::CinematicPreview::overrideFor(v);
+	REQUIRE(ov.active);
+	CHECK(ov.fovDegrees == doctest::Approx(55.0f));
+	// The eye maps to the origin, and a point ahead of the camera lands on -Z.
+	const glm::vec4 eye   = ov.view * glm::vec4(v.position, 1.0f);
+	const glm::vec4 ahead = ov.view * glm::vec4(v.position + fwd * 3.0f, 1.0f);
+	CHECK(glm::length(glm::vec3(eye)) == doctest::Approx(0.0f).epsilon(1e-4));
+	CHECK(ahead.x == doctest::Approx(0.0f).epsilon(1e-4));
+	CHECK(ahead.y == doctest::Approx(0.0f).epsilon(1e-4));
+	CHECK(ahead.z == doctest::Approx(-3.0f).epsilon(1e-4));
+
+	// Not a camera, or gone: nothing to look through, and no override.
+	CHECK_FALSE(HE::Ed::CinematicPreview::cameraViewOf(world, rig).valid);
+	CHECK_FALSE(HE::Ed::CinematicPreview::overrideFor({}).active);
+	world.destroyEntity(cam);
+	CHECK_FALSE(HE::Ed::CinematicPreview::cameraViewOf(world, cam).valid);
+}
