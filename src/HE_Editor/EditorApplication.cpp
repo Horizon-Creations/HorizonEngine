@@ -6777,8 +6777,38 @@ void EditorApplication::dumpFrameHeadless()
 			 + " deg for the captured frame").c_str());
 		settleFrames = 1;
 	}
+	// HE_DUMP_GIREFIT (with HE_DUMP_LANDSCAPELAYERS + HE_DUMP_GI): the DDGI
+	// probe-grid refit witness. Halfway through the settle frames a second
+	// landscape appears beside the first, so the scene box leaves the fitted
+	// grid and the backend must refit and recreate its probe atlases mid-run
+	// (GIProbeGrid.h) — the log shows "GI probe grid" twice, the capture still
+	// shows the first landscape lit, and Vulkan validation / the D3D12 debug
+	// layer stay quiet.
+	const char* giRefit = std::getenv("HE_DUMP_GIREFIT");
+	const bool  giRefitWitness = giRefit && *giRefit && s_layerMatId != HE::UUID{};
 	for (int i = 0; i < settleFrames; ++i)
+	{
+		if (giRefitWitness && i == settleFrames / 2)
+		{
+			auto& reg  = m_editorWorld->registry();
+			auto  land = m_editorWorld->createEntity("RefitLandscape");
+			TransformComponent tf;
+			tf.position = glm::vec3(170.0f, 300.0f, 0.0f); // beside the first, out of the top-down frame
+			reg.emplace<TransformComponent>(land, tf);
+			TerrainComponent tc;
+			tc.sizeX = tc.sizeZ = 100.0f;
+			tc.resolution  = 33;
+			tc.heightScale = 0.0f;
+			tc.seed  = 0;
+			tc.dirty = true;
+			reg.emplace<TerrainComponent>(land, tc);
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			HE_LOG_INFO(Editor, "%s",
+				("EditorApplication: HE_DUMP_GIREFIT second landscape added before settle frame "
+				 + std::to_string(i)).c_str());
+		}
 		r->Render();
+	}
 
 	std::vector<uint8_t> rgba;
 	uint32_t w = 0, h = 0;

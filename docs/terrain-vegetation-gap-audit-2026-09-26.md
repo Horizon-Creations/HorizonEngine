@@ -292,3 +292,82 @@ Vertex-Body im Asset, Fragment + Vertex kompilieren für Metal und GL).
    D3D im Windows-CI). Gebatchte Foliage auf GL: siehe Punkt 1, vom Kugel-Zeugen nicht erfasst.
    Ohne `HE_DUMP_SKYTEST` ist der Material-Zeuge auf diesem Stand komplett schwarz, auch der alte
    `switchon`-Modus ohne WPO; das liegt am Aufbau, nicht am Wind.
+
+## 8. Nachtrag Schritt 4: Terrain im DDGI-Probe-Grid (umgesetzt)
+
+**Zeuge zuerst (Release-Build von HEAD `ee323bfa`, NN-WS03, RTX 4070):** Szene
+`HE_DUMP_LANDSCAPELAYERS=1 HE_DUMP_GI=1` (nur das 100 × 100 m große Witness-Terrain, bei
+y = 300), Draufsicht `SKYTEST CAMY=392 PITCH=-89`, 90 Settle-Frames. GL und D3D11 loggen
+**`GI probe grid 10x4x10 (400 probes)`**. Das Terrain war also im Grid, und zwar als
+**einziges** Objekt; Abschnitt 4, Lesart 1 („Terrain nicht in `objects`“) ist damit widerlegt.
+Die Lücke war die Deckelung: 4 m × 10 Sonden = 36 m in der Terrainmitte. Außerhalb lieferte
+`sampleDDGIIrradiance` 0, und weil GI das diffuse Sky-Ambient **ersetzt**, verlor das Terrain
+dort das ganze Umgebungslicht, nicht nur den Bounce. Auf GL ist das Quadrat im Bild sichtbar.
+Kennzahl (GI-an / GI-aus pro Pixel, das teilt die Albedo heraus; außen / innen direkt über die
+alte Grid-Kante, nur roter Untergrund): **links 0,850, rechts 0,678**.
+
+**Umsetzung:** gemeinsame Einpassung `HorizonRendering/GIProbeGrid.h` (header-only), von allen
+fünf Backends benutzt statt fünf Kopien:
+
+- `FitGIProbeGrid`: Abstand ab 4 m in 5-%-Schritten vergrößern, bis die ganze Szene-Box mit einer
+  Spacing Rand in ein **Budget von 1000 Sonden** passt (= alter Höchstwert 10³, Speicher und
+  Kosten pro Frame bleiben gleich), höchstens 32 pro Achse (flaches Terrain bekommt die Sonden
+  in die Breite). Immer zentriert, auch Metal (verankerte bisher an `bounds.min`). Szenen, die das
+  alte Grid schon abdeckte, fitten **bit-gleich** (gleiche Formel, gleiche Reihenfolge;
+  Unit-Test gegen die alte Formel).
+- Der Abstand reist wie bisher in `gridOrigin.w`; jeder Verbraucher (scene.frag,
+  gi_probe*.comp/.hlsl, Metal-MSL, `MaterialShaderLibrary`, GL/D3D-Strings) liest ihn schon dort.
+  **Keine Shader-Änderung.** `kGIProbeSpacing`/`kGIMaxProbesPerAxis` sind aus allen Backends raus,
+  ersetzt durch ein Member (`m_giProbeSpacing` bzw. `giProbeSpacing`).
+- **Neu-Einpassen statt einmalig:** geprüft wird nur, wenn sich die *Geometrie* ändert:
+  Objekt-Signatur (Entity + Mesh, reihenfolgeunabhängig, bewusst blind für Transforms),
+  `InvalidateMesh` (Sculpt, LOD-/Tessellationsstufen) oder solange noch Objekte mit ungültigen
+  Bounds fehlen (Mesh noch nicht hochgeladen: die zweite Lesart aus 4). Reine Bewegung löst nichts
+  aus; ein aus der Welt fallender Körper bläht das Grid nicht auf. Neu eingepasst wird, wenn die
+  Box mehr als eine halbe Spacing über das Grid ragt oder ein frischer Fit mindestens doppelt so
+  fein wäre (Szene stark geschrumpft). Atlas-Neuanlage: GL/D3D11/Metal direkt (Referenzzählung),
+  D3D12 legt die alten Atlanten über `m_retiredTextures` still (Descriptor-Slots erst nach
+  `waitForAllFrames`), Vulkan `vkDeviceWaitIdle` + Bindings 5/6 aller Frame-Sets auf die weiße
+  Ersatztextur, bis `runGi` sie neu schreibt.
+- Vulkan loggt die Grid-Zeile jetzt auch; alle Zeilen nennen die Spacing.
+
+**Nachher, gleiche Szene/Kamera:** alle vier Windows-Backends `GI probe grid 15x4x15 (900 probes),
+spacing 8.731492`. GL-Kennzahl über die alte Kante: **links 0,958, rechts 0,955**; Kontrollen an
+Stellen ohne alte Kante 0,980 / 0,967, der Rest ist also der natürliche Abfall nach außen, keine
+Naht. GI-aus-Bild bit-gleich zur Baseline (1,000). Neu-Einpass-Zeuge **`HE_DUMP_GIREFIT=1`**
+(neu, `EditorApplication::dumpFrameHeadless`): nach der Hälfte der Settle-Frames kommt ein zweites
+Terrain bei x = 170 dazu → auf GL, D3D11, D3D12 (mit `HE_GPU_DEBUG=1`) und Vulkan zweite Zeile
+`22x4x11 (968 probes), spacing 14.222674`, Bild weiter sauber; D3D12-Debug-Layer nur mit dem
+bekannten „Ignoring InitialState“-Hinweis, Vulkan-Validierung nach Art und Anzahl identisch zum
+Lauf ohne Neu-Einpassen (alles vorbestehend, siehe unten). Unit-Tests `tests/test_gi_probe_grid.cpp`
+(5 Fälle), volle Suite Release 3768/3768 grün. **Metal: hier weder gebaut noch gesehen**, nur
+macOS-CI; dort ändert sich zusätzlich die Verankerung (zentriert statt `bounds.min`).
+
+**Bounce vom Terrain:** Terrain-Chunks sind `StaticMeshAsset`s mit CPU-Vertices und laufen über
+denselben `castsShadow`-Filter in BLAS/TLAS aller Backends; `InvalidateMesh` verwirft den BLAS-Cache
+(Sculpt bleibt korrekt, Cache wächst nicht). Sie werfen also GI-Schatten und liefern Bounce-Licht
+(mit der flachen Instanzfarbe, siehe `GiLandscape.h`).
+
+**Offen (nicht in diesem Schritt, belegt):**
+
+1. **Graph-Materialien bekommen auf D3D11/D3D12/Vulkan kein DDGI.** Nur GL
+   (`OpenGLRenderer.cpp`, `lit.giProbe`) und Metal füllen `giGridOrigin/giGridCounts/giProbe` im
+   Material-Lichtpräfix; D3D11/D3D12/Vulkan lassen `giProbe.y = 0`, der Material-Shader nimmt dann
+   Sky-Ambient. Jedes **bemalte** Terrain ist ein Graph-Material (`LandscapeLayerBlend`), bekommt
+   dort also Sky-Ambient statt Probe-Licht (kein Schwarz, aber kein Bounce). Messbar: D3D11 ist vor
+   und nach diesem Schritt pixelgleich im Witness, D3D12 ohne räumlichen GI-Verlauf. Die HLSL-Pins
+   für `heGIIrradiance`/`heGIVisibility` (t17/s1, t18/s3) stehen schon in `MaterialShaderLibrary`;
+   es fehlen Füllen + Binden (D3D11/D3D12) bzw. das Pipeline-Layout (Vulkan meldet schon auf main
+   für Material-Pipelines Bindings 14–18/32/33 als „not declared“, `heGIIrradiance` „invalid“).
+   Eigener Schritt, gehört zur Backend-Parität (Thema 78).
+2. **GI-Schattenmaske streift auf flachem Terrain** (waagrechte Bildschirmzeilen, GL/D3D11/Vulkan,
+   schon auf der Baseline): unabhängig vom Grid, nicht untersucht.
+3. **Tessellation verwirft den ganzen GI-BLAS-Cache:** jede neu gebaute verfeinerte Stufe ruft
+   `InvalidateMesh`, und das leert in GL/D3D11/D3D12/Vulkan/Metal-SW den *gesamten* konkatenierten
+   BLAS-Cache (Neuaufbau aller Meshes beim nächsten GI-Frame). Korrekt, aber bei bewegter Kamera
+   über Terrain teuer; per-Mesh-Splice wäre der Fix.
+4. **Kein Fade am Grid-Rand:** außerhalb des Grids weiter 0 statt Sky-Ambient. Mit der
+   Neu-Einpassung liegt statische Geometrie immer drin; betroffen sind nur Objekte, die sich aus
+   dem Grid heraus *bewegen* (bewusst kein Refit auf Bewegung).
+5. Eine sehr große Szene (km-Terrain) bekommt grobe Sonden (4 km → ~300 m); Kaskaden bzw. ein
+   kamerafolgendes Grid bleiben ein eigenes Rendering-Thema.
