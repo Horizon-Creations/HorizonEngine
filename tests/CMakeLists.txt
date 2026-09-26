@@ -163,6 +163,7 @@ add_executable(he_tests
     # Editor UI rendered on the CPU and looked at — see ImGuiSoftwareRaster.h.
     test_ui_shot.cpp
     test_widget_designer_ui.cpp
+    test_texture_viewer.cpp
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_rope_trail.cpp
@@ -606,6 +607,10 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphClipboard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorPanelState.cpp
     WidgetDesignerLinkStubs.cpp
+    # The texture viewer, for test_texture_viewer.cpp (Thema 92, Schritt 4): same
+    # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
+    # linked already.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -644,6 +649,8 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorPanelState.cpp
     WidgetDesignerLinkStubs.cpp
     test_widget_designer_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
+    test_texture_viewer.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE

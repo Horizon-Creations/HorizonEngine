@@ -6022,6 +6022,42 @@ namespace
 	  "mode, so a file from the engine library normally lands in the project's "
 	  "own content instead.",
 	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Fit", "",
+	  "Scales the picture to fill the canvas and centres it. A double-click on the "
+	  "canvas does the same. Zooming or panning leaves it again.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/1:1", "",
+	  "One texel per screen pixel, centred: the picture at its real resolution, "
+	  "which is where blur, banding and compression edges show.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Red", "",
+	  "Shows the red channel. With only one channel on, it is drawn as grey, so a "
+	  "mask or a roughness map reads as brightness. Only changes the view, never "
+	  "the texture.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Green", "",
+	  "Shows the green channel. On its own it is drawn as grey. Only changes the "
+	  "view, never the texture.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Blue", "",
+	  "Shows the blue channel. On its own it is drawn as grey. Only changes the "
+	  "view, never the texture.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Alpha", "",
+	  "Uses the alpha channel for transparency. Off, the picture is drawn opaque; "
+	  "on its own, the alpha is drawn as grey, white being fully opaque.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Checkerboard", "",
+	  "The grey checks behind the picture that make transparent pixels visible. "
+	  "They are only drawn under the picture, never around it.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Import as Texture Asset", "",
+	  "Turns the image open in this tab into a texture asset at the path printed "
+	  "under the button, and turns this tab into that asset's tab. The asset "
+	  "shows the picture the way this preview does. Only there for an image file "
+	  "that is not an asset yet; a file from the read-only engine library goes to "
+	  "the project's own content instead.",
+	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Sky", "Sky lighting",
 	  "Lights the preview with the sky at a chosen hour, so the mesh can be "
 	  "judged in the light it will actually stand in. The time slider below picks "
@@ -6931,6 +6967,7 @@ namespace
 		// The panels whose controls are looked up by label within the panel.
 		{ "World Outliner/",   "editor-interface", "Editor Interface", "World Outliner" },
 		{ "Content Browser/",  "editor-interface", "Editor Interface", "Content Browser" },
+		{ "Texture Viewer/",   "editor-interface", "Editor Interface", "Texture viewer" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },

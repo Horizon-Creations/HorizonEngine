@@ -20,6 +20,7 @@
 #include "StaticMeshEditorPanel.h"
 #include "ParticleGraphEditorPanel.h"
 #include "AudioEditorPanel.h"
+#include "TextureViewerPanel.h"
 #include "EditorInput.h"    // pointer-device grammar frame cache
 #include "AnimatorStateMachineEditorPanel.h"
 #include "ExportDialogPanel.h"           // Build > Export Project modal + packing worker
@@ -875,6 +876,7 @@ void EditorUI::discardPanelState(AppContext& ctx, const std::string& assetPath)
 	StaticMeshEditorPanel::forget(assetPath);
 	SkeletalMeshEditorPanel::forget(assetPath);
 	AudioEditorPanel::forget(assetPath);
+	TextureViewerPanel::forget(assetPath);
 }
 
 // ── Leaving a project ────────────────────────────────────────────────────────
@@ -2482,13 +2484,26 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 const std::filesystem::path root(ctx.contentManager->contentRoot());
                 const std::filesystem::path relDir = importTargetDir();
 
-                size_t imported = 0;
+                size_t imported = 0, images = 0;
+                std::string lastImage;   // the .hasset of the last image that imported
                 for (const std::string& src : s_pendingImportPaths)
                 {
-                    if (Importer::importSource(src, root, relDir)) ++imported;
+                    bool ok = false;
+                    if (TextureViewerPanel::isImageSource(src))
+                    {
+                        ++images;
+                        lastImage = TextureViewerPanel::importImage(src, root, relDir);
+                        ok = !lastImage.empty();
+                    }
+                    else ok = Importer::importSource(src, root, relDir);
+                    if (ok) ++imported;
                     else HE_LOG_ERROR(Editor, "%s",
                         ("Editor: import failed for " + src).c_str());
                 }
+                // One image: show it, in the texture viewer. A folder's worth of
+                // textures must not open a folder's worth of tabs.
+                if (images == 1 && !lastImage.empty())
+                    TextureViewerPanel::requestOpen(lastImage);
                 // One line for the whole batch, one refresh at the end: a hundred
                 // textures must not mean a hundred progress modals or a hundred
                 // rescans of the content tree.
@@ -3091,6 +3106,33 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             s_tabSelectRequest = s_activeTab;
         }
 
+        // The texture viewer: a just-imported image, or a raw-image tab whose Import
+        // ran and which now becomes the asset's tab (`replacing`) rather than a second
+        // one opening beside it. Also where the viewer frees last frame's textures.
+        TextureViewerPanel::beginFrame();
+        for (auto req = TextureViewerPanel::takeOpenRequest(); !req.path.empty();
+             req = TextureViewerPanel::takeOpenRequest())
+        {
+            auto it = std::find_if(s_tabs.begin(), s_tabs.end(),
+                [&](const AppContext::EditorTab& t){ return t.assetPath == req.path; });
+            auto old = std::find_if(s_tabs.begin(), s_tabs.end(),
+                [&](const AppContext::EditorTab& t){ return t.assetPath == req.replacing; });
+            if (it == s_tabs.end() && !req.replacing.empty() && old != s_tabs.end())
+            {
+                TextureViewerPanel::forget(old->assetPath);
+                old->assetPath = req.path;
+                old->label     = std::filesystem::path(req.path).stem().string();
+                it = old;
+            }
+            else if (it == s_tabs.end())
+            {
+                s_tabs.push_back({ std::filesystem::path(req.path).stem().string(), req.path, true, true });
+                it = s_tabs.end() - 1;
+            }
+            s_activeTab        = static_cast<int>(std::distance(s_tabs.begin(), it));
+            s_tabSelectRequest = s_activeTab;
+        }
+
         // A "go to node" from the console (HcExecTrace::requestReveal): the tab
         // half. The two editor-owned graphs are their reserved tab paths; a
         // class or widget is a content-relative path that has to become the
@@ -3516,6 +3558,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
         // which would render megabytes of PCM as text.
         else if (AudioEditorPanel::isAudioAsset(tabPath))
             AudioEditorPanel::render(ctx, tabPath, tabPos, tabSize);
+        // Texture .hasset AND raw .png/.jpg/… — the raw half is an extension check too.
+        else if (TextureViewerPanel::isTextureAsset(tabPath))
+            TextureViewerPanel::render(ctx, tabPath, tabPos, tabSize);
         // C++ source/header (raw files, extension-based) → h/cpp class viewer. Must
         // come before the ScriptEditorPanel fallthrough, which assumes an HAsset.
         else if (CppClassEditorPanel::isCppSourceAsset(tabPath))

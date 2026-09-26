@@ -25,6 +25,7 @@
 #include "ParticleGraphEditorPanel.h"
 #include "AnimatorStateMachineEditorPanel.h"
 #include "AudioEditorPanel.h"
+#include "TextureViewerPanel.h"
 #include "EditorAssetTypeCache.h"
 #include "AssetStubWriter.h"             // what a newborn asset of each type contains
 #include "GitController.h"        // per-file source-control status for the tile badge
@@ -1294,6 +1295,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			// HAsset sniffs, so they must be tested explicitly here.
 			if (!(CppClassEditorPanel::isCppSourceAsset(fullPath) ||
 			      AudioEditorPanel::isAudioAsset(fullPath) ||
+			      TextureViewerPanel::isTextureAsset(fullPath) ||
 			      ScriptEditorPanel::isScriptAsset(fullPath) ||
 			      MaterialEditorPanel::isMaterialAsset(fullPath) ||
 			      MaterialEditorPanel::isMaterialFunctionAsset(fullPath) ||
@@ -2786,7 +2788,16 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						std::filesystem::relative(srcPath.parent_path(), root, ec);
 					if (ec || relDir == ".") relDir.clear();
 
-					if (!Importer::importSource(srcPath, root, relDir))
+					// An image opens in the texture viewer once it is in, so the
+					// import is seen rather than assumed.
+					if (TextureViewerPanel::isImageSource(srcPath.string()))
+					{
+						const std::string written = TextureViewerPanel::importImage(srcPath, root, relDir);
+						if (!written.empty()) TextureViewerPanel::requestOpen(written);
+						else HE_LOG_ERROR(Editor, "%s",
+							("Editor: import failed for " + srcPath.string()).c_str());
+					}
+					else if (!Importer::importSource(srcPath, root, relDir))
 						HE_LOG_ERROR(Editor, "%s",
 							("Editor: import failed for " + srcPath.string()).c_str());
 					ctx.contentRefreshPending = true;

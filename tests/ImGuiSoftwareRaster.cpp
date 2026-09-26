@@ -4,12 +4,25 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <vector>
 
 namespace he_ui
 {
 namespace
 {
+	// Pictures handed in through registerTexture, by the id given out for them.
+	struct UserTexture
+	{
+		std::vector<std::uint8_t> rgba;
+		int width = 0, height = 0;
+	};
+	std::map<ImTextureID, UserTexture>& userTextures()
+	{
+		static std::map<ImTextureID, UserTexture> m;
+		return m;
+	}
+
 	// Straight source-over into an 8-bit sRGB buffer, no gamma correction — the
 	// same simplification the GPU backends make (they blend in the framebuffer's
 	// own space with SRC_ALPHA/ONE_MINUS_SRC_ALPHA), so the result matches what
@@ -229,6 +242,13 @@ Image rasterize(const ImDrawData* drawData, int width, int height, std::uint32_t
 				tex.height = td->Height;
 				tex.bpp    = td->BytesPerPixel;
 			}
+			else if (const auto u = userTextures().find(id); u != userTextures().end())
+			{
+				tex.pixels = u->second.rgba.data();
+				tex.width  = u->second.width;
+				tex.height = u->second.height;
+				tex.bpp    = 4;
+			}
 
 			const ImDrawIdx* tri = idx + cmd.IdxOffset;
 			for (unsigned int i = 0; i + 2 < cmd.ElemCount; i += 3)
@@ -241,6 +261,27 @@ Image rasterize(const ImDrawData* drawData, int width, int height, std::uint32_t
 		}
 	}
 	return img;
+}
+
+ImTextureID registerTexture(const void* rgba8, int width, int height)
+{
+	// Ids counted from a recognisable base, never 0 (ImGui's "no texture") and
+	// never a pointer this renderer could mistake for an ImTextureData.
+	static ImTextureID next = static_cast<ImTextureID>(0x7E57000000000000ULL);
+	if (!rgba8 || width <= 0 || height <= 0) return static_cast<ImTextureID>(0);
+	UserTexture t;
+	const auto* p = static_cast<const std::uint8_t*>(rgba8);
+	t.rgba.assign(p, p + std::size_t(width) * height * 4);
+	t.width  = width;
+	t.height = height;
+	const ImTextureID id = ++next;
+	userTextures()[id] = std::move(t);
+	return id;
+}
+
+void unregisterTexture(ImTextureID id)
+{
+	userTextures().erase(id);
 }
 
 bool writeBmp(const Image& img, const std::string& path)
