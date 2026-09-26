@@ -137,6 +137,36 @@ struct ToolchainProbe
 };
 ToolchainProbe probeToolchain();
 
+// ── Visual Studio selection (Windows) ────────────────────────────────────────
+// On Windows every configure (probe and buildDylib) names its generator itself
+// instead of inheriting cmake's default — a CMAKE_GENERATOR set globally by VS Code
+// CMake Tools, vcpkg or CLion (Ninja, NMake) otherwise sends cmake looking for a
+// cl.exe on PATH that a normal shell does not have, and the editor reports "no C++
+// compiler" with Visual Studio installed (Thema 96, H2). The instance comes from
+// vswhere.exe; these two functions are the pure half of that, compiled everywhere
+// so the choice can be tested on any machine with vswhere's output as data.
+struct VsSelection
+{
+    std::string           generator;     // "Visual Studio 18 2026"; empty ⇒ nothing usable
+    std::filesystem::path instancePath;  // installationPath → CMAKE_GENERATOR_INSTANCE
+    std::string           version;       // installationVersion, e.g. "18.10.12217.157"
+    std::string           displayName;   // "Visual Studio Community 2026"
+    bool valid() const { return !generator.empty(); }
+};
+// Pick from `vswhereJson` (the output of `vswhere -products * -requires
+// Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json -utf8`) the
+// instance to build with: the NEWEST installationVersion, compared per numeric
+// component (18.10 beats 18.9), a release beating any prerelease. Only instances
+// whose generator `cmakeGenerators` lists are considered (the names from `cmake -E
+// capabilities`) — an older cmake that does not know VS 2026 then gets VS 2022
+// rather than a generator it rejects. Empty `cmakeGenerators` ⇒ a built-in major →
+// year table decides. Anything that is not a JSON array (vswhere missing, an error
+// message) yields an invalid selection.
+VsSelection selectVsInstance(const std::string& vswhereJson,
+                             const std::vector<std::string>& cmakeGenerators);
+// The generator names in `cmake -E capabilities` output; empty when unparseable.
+std::vector<std::string> cmakeGeneratorNames(const std::string& capabilitiesJson);
+
 // ── automatic toolchain install ──────────────────────────────────────────────
 // Best-effort, platform-specific install of the missing toolchain pieces so the
 // user doesn't have to copy a command into a terminal. Installer output is
