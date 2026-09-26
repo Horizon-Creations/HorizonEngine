@@ -764,7 +764,8 @@ struct SequenceCameraCut
     SequenceBlendCurve curve   = SequenceBlendCurve::SmoothStep;
 };
 
-// Plays at the track's actor, or at the sequence's player when it has none.
+// Plays at the track's actor (spatial), or flat when the track has none — the
+// cutscene's music and narration belong to nobody's position.
 struct SequenceAudioSection
 {
     HE::UUID assetId;

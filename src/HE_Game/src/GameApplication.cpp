@@ -21,6 +21,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/RootMotion.h>
+#include <HorizonScene/SequenceSystem.h>
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
@@ -3029,8 +3030,11 @@ void GameApplication::OnRender(float deltaTime)
 		// of extraction, which consumes the bone matrices.
 		// A packaged build has no edit mode, so root motion is always applied here.
 		HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+		// Cutscenes, likewise always on here; an uninitialised audio engine
+		// (no device) makes them play silent, not stop.
+		HE::SequenceContext sequences{ &m_audioEngine, m_physicsWorld.get() };
 		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost,
-		                            &rootMotion, &m_animNotifies);
+		                            &rootMotion, &m_animNotifies, &sequences);
 
 		// Drained HERE and not at the collision drain up in the physics block:
 		// that one runs in the frame BEFORE the animation phase, so every notify

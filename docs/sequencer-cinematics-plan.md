@@ -358,6 +358,76 @@ Nebenbefund: Die Ketten in `ContentManager::unloadAsset`, `rekeyAssetPaths` und
 BlendSpace, Struct/Enum/SaveGame fehlen teils). `Sequence` steht in allen dreien; die alten
 Lücken sind nicht angefasst.
 
+### Stand nach Schritt 3 (Laufzeit)
+
+Umgesetzt:
+
+- `SequencePlayerComponent` (`Components/SequencePlayerComponent.h`): gespeichert werden nur
+  `sequenceId`, `autoplay`, `loop`, `playRate`. Abspielkopf, Zustand, aufgelöste Bindungen,
+  Slot-Überschreibungen und Ton-Handles sind Sitzungszustand und werden nie gespeichert (das
+  PIE-Snapshot ist Speichern/Neuladen, eine zweite Sitzung startet also wieder mit Autoplay).
+  Serializer (JSON und CBOR über denselben Weg), X-Makro-Schlüssel `sequenceplayer`,
+  Prefab-Schlüssel, Inspector-Abschnitt „Sequence Player“ (zeigt in PIE Zustand und Zeit),
+  Add-Component-Zeile unter „Animation“ **ohne** Skelett-Pflicht, Hilfe-Einträge (Audit 981/981).
+  Eine neue Komponente braucht außer Serializer und X-Makro noch zwei Stellen, die erst die
+  Nachbar-Tests zeigen: `SceneSerializer::isKnownComponentKey` (sonst meldet
+  `test_inspector_prefab_keys` den Prefab-Schlüssel als unbekannt) und `kComponentScopes` in
+  `EditorHelp.cpp` (sonst hat der Hilfe-Schlüssel keinen Bereich im Handbuch).
+- `SequenceSystem` (`SequenceSystem.h`) mit **zwei** Aufrufen statt einem am Ende von
+  `tickAnimation` (Abweichung von §3.5, mit Grund):
+  - `begin` **vor** den drei Skelett-Treibern: Uhr vorrücken, Ereignisse und Ton über
+    (tPrev, tEnd], und jedes Skelett, das eine Sektion zur neuen Zeit posiert, **beanspruchen**
+    (`SkeletalMeshComponent::sequencePosed`). Animator, Blend und State Machine überspringen
+    beanspruchte Skelette ganz (Uhr steht, keine Notifies, keine Pose, beim State Machine auch
+    der Sync-Graph). Damit ist die Sequenz der **Basis-Treiber** aus §3.3: Layer und IK laufen
+    genau einmal auf ihrer Pose, nicht doppelt und nicht mit der Warnung für zwei Treiber.
+    Beansprucht wird nur, wenn Clip und Mesh geladen sind; sonst behält der Animator das Skelett.
+  - `apply` **nach** dem Property Animator: erst die Property-Spuren (die Sequenz gewinnt gegen
+    einen Clip auf demselben Ziel), dann die Skelette über `sampleClip` + `poseFinalize`, damit IK
+    von der gerade geschriebenen Transform aus castet.
+- **Sitzungs-Gate:** `tickAnimation` hat einen neuen, optionalen Parameter
+  `HE::SequenceContext*` (AudioEngine, PhysicsWorld). Null heißt: keine Sequenz rückt vor,
+  schreibt oder tönt. `GameApplication` übergibt ihn immer, der Editor nur während PIE (dasselbe
+  `playing` wie für Root Motion und Notifies). Das ist die zweite Änderung an den Anwendungen
+  neben der Kamera-Abfrage aus §3.4, und sie ist nötig: ohne sie würde eine Cutscene mit
+  Autoplay die Edit-Welt verstellen, und das würde gespeichert.
+- Transport als C++ (`play`, `pause`, `stop`, `setTime`, `bindSlot`), damit die Tests die Uhr
+  treiben können; Schritt 5 registriert dafür nur noch die Zeilen. `setTime` verschiebt den
+  Anfang der nächsten Spanne mit, übersprungene Ereignisse feuern also nicht; ein gestoppter
+  Spieler schreibt den neuen Zeitpunkt einmal.
+- **Ereignisse:** `collectNotifySpan` pro Event-Spur an den gebundenen Akteur, ohne Bindung an
+  den Besitzer, bei fehlendem Akteur gar nicht. Ereignisse am Ende eines nicht schleifenden
+  Laufs feuern genau einmal (geschlossenes Ziel).
+- **Ton:** dieselbe Spannen-Regel über die Startzeiten der Sektionen, Start mit
+  `AudioEngine::play` (ohne Bindung, flach) bzw. `playSpatial` an der Weltposition des Akteurs.
+  Nur vorwärts; rückwärts und beim Springen startet nichts (`seekSound` gäbe es inzwischen, ein
+  Start mitten in der Sektion bleibt trotzdem außen vor). `pause()` pausiert die Töne der
+  Sequenz mit der Uhr, `play()` setzt sie fort, `stop()` stoppt sie, das natürliche Ende lässt
+  sie ausklingen.
+- **Skelett-Sektionen:** aktiv ist die mit dem spätesten Start, deren [start, end] t enthält
+  (Gleichstand: die später gelistete), wie bei den Schnitten; Clipzeit geloopt oder geklemmt.
+  Root Motion aus einer Sektion wird nicht angewendet (§6).
+- **Vorladen:** `collectAssetRefs` nennt die Sequenz der Komponente; ihre Clips und Töne folgen
+  ihr über einen `Sequence`-Fall in `ContentManager::expandFrontier` (gestreamtes Paket) bzw.
+  einen zweiten Durchgang in `preloadAssetRefs` (Editor, lose Dateien).
+- Tests: `tests/test_sequence_runtime.cpp` (16 Fälle) gegen echte Welt über
+  `tickAnimation`: Gate ohne Sitzung, Takt und Play Rate, Ende und Neustart, Pause/Stop gegen
+  einen Property Animator, Loop mit Ereignissen genau einmal pro Durchlauf (auch Notify-States),
+  Ereignis am Ende, Ereignis an Akteur/Besitzer, fehlender Akteur übersprungen, `setTime` ohne
+  Zwischenereignisse, Slot-Überschreibung, nicht geladene und leere Sequenz, Sektionsregel,
+  Skelett-Übernahme vom Animator und Rückgabe, Clip nicht geladen, Ton mit Pause/Fortsetzen (noDevice-AudioEngine),
+  rückwärts, Serializer, Asset-Referenzen.
+
+Bewusst **nicht** in Schritt 3:
+
+- Kamera (`ownsCamera`, Schnitt setzt `isMain`, Blends), `blendOut*` und `lockPlayerInput` an der
+  Komponente: Schritt 4. Die Felder kommen mit ihrem Verhalten, damit der Inspector keine
+  Schalter zeigt, die nichts tun. Heute wertet die Laufzeit die Camera-Cut-Spur nicht aus.
+- `SequenceFinished` und die `sequence.*`-Zeilen: Schritt 5. Das Ende ist heute an
+  `playing == false` mit `time == duration` erkennbar.
+- Innerhalb eines Frames kommen Ereignisse Spur für Spur, nicht über alle Spuren nach Zeit
+  sortiert.
+
 ---
 
 ## 6. Bewusst außen vor (v1)

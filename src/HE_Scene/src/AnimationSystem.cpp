@@ -23,6 +23,9 @@ void AnimationSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
     for (auto [e, animator, smc] : view.each())
     {
         if (!animator.playing) continue;
+        // A cutscene has this skeleton: the animator's clock stands still until
+        // it hands it back, and nothing of it fires (SequenceSystem.h).
+        if (smc.sequencePosed) continue;
 
         const AnimationClipAsset* clip = cm.getAnimationClip(animator.clipAssetId);
         if (!clip || clip->duration <= 0.0f)

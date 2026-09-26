@@ -1483,6 +1483,17 @@ void ContentManager::expandFrontier(HE::UUID id)
 			for (HE::UUID t : a->textureIds) enqueue(t);
 		}
 		break;
+	case HE::AssetType::Sequence:
+		// The clips and sounds a cutscene plays: a scene names only the sequence
+		// (SceneSystems::collectAssetRefs), and a clip still streaming when its
+		// section comes up is an actor that does not move.
+		if (const auto* a = getSequence(id))
+		{
+			std::vector<HE::UUID> refs;
+			HE::sequenceAssetRefs(*a, refs);
+			for (HE::UUID r : refs) enqueue(r);
+		}
+		break;
 	default:
 		break;
 	}

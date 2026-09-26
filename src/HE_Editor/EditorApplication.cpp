@@ -78,6 +78,7 @@
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/RootMotion.h>
+#include <HorizonScene/SequenceSystem.h>
 #include <HorizonScene/AnimationNotify.h>              // kNotifyDominanceAlpha — which half of a blend leads
 #include <HorizonScene/AnimationPreview.h>             // rootMotionPath — the line under the selected figure
 #include <HorizonScene/AnimationIk.h>                  // findJointByName — the head the look-at line starts at
@@ -3347,11 +3348,18 @@ void EditorApplication::OnRender(float dt)
 			// Notifies are gated on the same session, for the third form of the
 			// same argument: a null queue means they are not even evaluated, so an
 			// editor nobody plays in neither pays for them nor accumulates them.
+			//
+			// Cinematic sequences are the fourth, and the strictest: outside play
+			// a Sequence Player does not advance or write at all, because its
+			// actors would be SAVED wherever the cutscene left them. Scrubbing a
+			// sequence in the editor is the Cinematic tab's preview session.
 			const bool playing = m_animatorHost.running();
 			HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+			HE::SequenceContext   sequences{ &m_audioEngine, m_physicsWorld.get() };
 			SceneSystems::tickAnimation(*m_editorWorld, contentManager(), gameDt, &m_animatorHost,
 			                            playing ? &rootMotion : nullptr,
-			                            playing ? &m_animNotifies : nullptr);
+			                            playing ? &m_animNotifies : nullptr,
+			                            playing ? &sequences : nullptr);
 
 			// Immediately after, and not at the collision drain above: that one
 			// sits in the frame BEFORE this phase and would cost every notify a

@@ -52,6 +52,7 @@ namespace
 		{ "Animation Layers",       "animationlayers" },
 		{ "Inverse Kinematics",     "ik" },
 		{ "Property Animator",      "propertyanimator" },
+		{ "Sequence Player",        "sequenceplayer" },
 		{ "Particle System",        "particlesystem" },
 		{ "Save State",             "saveState" },
 		{ "LOD",                    "lod" },

@@ -46,6 +46,7 @@
 #include "HorizonScene/Components/IkComponent.h"
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/PropertyAnimatorComponent.h"
+#include "HorizonScene/Components/SequencePlayerComponent.h"
 #include "HorizonScene/Components/NavMeshComponent.h"
 #include "HorizonScene/Components/NavAgentComponent.h"
 #include "HorizonScene/NavigationSystem.h"
@@ -732,6 +733,18 @@ namespace
 				{ "playbackSpeed", pa->playbackSpeed },
 				{ "looping",       pa->looping },
 				{ "playing",       pa->playing },
+			};
+		}
+		// The authored half only. The playhead, the bindings and the sounds are
+		// session state, and a scene that saved them would start its cutscene
+		// half-way through on the next load.
+		if (auto* sp = registry.try_get<SequencePlayerComponent>(entity))
+		{
+			comps["sequenceplayer"] = {
+				{ "sequence", uuidToJson(sp->sequenceId) },
+				{ "autoplay", sp->autoplay },
+				{ "loop",     sp->loop },
+				{ "playRate", sp->playRate },
 			};
 		}
 		if (auto* nm = registry.try_get<NavMeshComponent>(entity))
@@ -1594,6 +1607,16 @@ namespace
 			pa.playing       = c.value("playing",       pa.playing);
 			registry.emplace_or_replace<PropertyAnimatorComponent>(entity, pa);
 		}
+		if (comps.contains("sequenceplayer"))
+		{
+			const json& c = comps["sequenceplayer"];
+			SequencePlayerComponent sp;
+			sp.sequenceId = jsonToUuid(c.value("sequence", json()));
+			sp.autoplay   = c.value("autoplay", sp.autoplay);
+			sp.loop       = c.value("loop",     sp.loop);
+			sp.playRate   = c.value("playRate", sp.playRate);
+			registry.emplace_or_replace<SequencePlayerComponent>(entity, std::move(sp));
+		}
 		if (comps.contains("navmesh"))
 		{
 			const json& c = comps["navmesh"];
@@ -2319,7 +2342,8 @@ namespace
 	X("rootmotion",          RootMotionComponent) \
 	X("ik",                  IkComponent) \
 	X("propertyanimator",    PropertyAnimatorComponent) \
-	X("navmesh",             NavMeshComponent) \
+	X("sequenceplayer",      SequencePlayerComponent) \
+	X("navmesh",            NavMeshComponent) \
 	X("navagent",            NavAgentComponent) \
 	X("foliage",             FoliageComponent) \
 	X("animstatemachine",    AnimatorStateMachineComponent) \
@@ -2558,7 +2582,7 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		// Which prefab an entity was instantiated from (PrefabInstanceComponent).
 		"prefab",
 		"propertyanimator",
-		"rigidbody", "rope", "saveState", "script", "skeletalmesh", "terrain",
+		"rigidbody", "rope", "saveState", "script", "sequenceplayer", "skeletalmesh", "terrain",
 		"trail",
 		"transform", "transform2d", "uibutton", "uicanvas", "uielement",
 		"uiimage", "uitext", "weather",

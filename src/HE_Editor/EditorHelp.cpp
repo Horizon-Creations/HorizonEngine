@@ -155,6 +155,12 @@ namespace
 	  "Animates component properties over time from a property clip — a moving "
 	  "platform, a fading light — with no skeleton involved.",
 	  "", "systems#animation" },
+	{ "Component/Sequence Player", "Sequence Player",
+	  "Plays a cinematic sequence: several actors, their skeletal clips, events "
+	  "and sound on one clock. The actors are the sequence's own bindings, found "
+	  "by their entity ID; this entity is the cutscene's owner and receives the "
+	  "events that name no actor. Runs only while the game plays.",
+	  "", "systems#animation" },
 	{ "Component/Particle System", "Particle System",
 	  "Emits particles from this entity. The emitter's shape, rate and look come "
 	  "from a particle system asset, edited in its own tab.",
@@ -1347,6 +1353,21 @@ namespace
 	  "", "systems#animation" },
 	{ "Property Animator/Looping", "",
 	  "Start over at the end — what a moving platform or a pulsing light wants.",
+	  "", "systems#animation" },
+	{ "Sequence Player/Sequence", "",
+	  "The sequence asset to play. Drop one from the Content Browser, or click "
+	  "to pick it.",
+	  "", "systems#animation" },
+	{ "Sequence Player/Autoplay", "",
+	  "Start on the first frame of play. Off waits for a script to start it.",
+	  "", "systems#animation" },
+	{ "Sequence Player/Loop", "",
+	  "Start over at the end. Off stops on the last frame, and the actors keep "
+	  "the pose and place it left them in.",
+	  "", "systems#animation" },
+	{ "Sequence Player/Play Rate", "",
+	  "Playback speed: 1 is as authored, negative plays backwards. Events fire "
+	  "backwards too; sounds only start going forwards.",
 	  "", "systems#animation" },
 	{ "Particle System/Playing", "",
 	  "Emits in the editor, so an effect can be judged without entering play "
@@ -2814,9 +2835,9 @@ namespace
 	  "", "editor#details" },
 	{ "Add Component/Animation", "Animation",
 	  "What moves a skeleton: a state machine, root motion, animation layers "
-	  "and inverse kinematics. Every one of them reads a Skeletal Mesh's pose, "
-	  "so the group is greyed until the entity has one — add that first, from "
-	  "Rendering.",
+	  "and inverse kinematics, which read a Skeletal Mesh's pose and are greyed "
+	  "until the entity has one — add that first, from Rendering. And a "
+	  "Sequence Player, which plays a cutscene and fits on any entity.",
 	  "", "editor#details" },
 	{ "Add Component/Gameplay", "Gameplay",
 	  "What makes the entity part of the game: a camera and its rig, movement, "
@@ -7080,7 +7101,7 @@ namespace
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",
 		"Animator State Machine", "Root Motion", "Animation Layers",
 		"Inverse Kinematics",
-		"Property Animator", "Particle System",
+		"Property Animator", "Sequence Player", "Particle System",
 		"Save State", "LOD", "Environment", "Weather", "UI Canvas", "UI Element",
 		"UI Text", "UI Image", "UI Button",
 	};
