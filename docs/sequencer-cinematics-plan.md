@@ -462,7 +462,10 @@ Umgesetzt:
   bekommt deren Transform im Übergabe-Frame zusätzlich die zuletzt gezeigte Cutscene-Pose. Sonst
   zeigt dieser Frame (die Rückgabe passiert in `tickAnimation`, nach dem Kamera-Controller) die
   Pose, die das Rig **vor** der Cutscene hatte. Eine Kamera ohne Rig (Fly) bekommt keine Pose,
-  weil sie sonst teleportiert würde; dort ist die Rückgabe ein Schnitt.
+  weil sie sonst teleportiert würde; dort ist die Rückgabe ein Schnitt. Nach `stop()` oder mit
+  zerstörtem Besitzer gibt der Kopf von `apply` zurück, **bevor** die Blend-Schreibung des
+  Vorframes zurückgenommen wird: Wer mitten im Blend-In überspringt, übergibt von der Pose, die
+  zu sehen ist, nicht von der platzierten.
 - **Eine Sequenz zur Zeit hält die Kamera.** Ein zweiter Spieler, dessen Schnitt aktiv wird,
   spielt weiter und übernimmt, sobald der erste loslässt (im selben oder im nächsten Frame).
 - **Gates in beiden Anwendungen**: `GameApplication::updateCameraController` und
@@ -478,13 +481,14 @@ Umgesetzt:
 - Komponentenfelder `blendOutSeconds` (Standard 0 = Schnitt), `blendOutCurve`, `lockPlayerInput`:
   Serializer (JSON und CBOR, Kurve als Index wie bei `camera.blendTo`), Inspector (Statuszeile
   zeigt „holds the camera“), Hilfe. Audit 984/984.
-- Tests (`tests/test_sequence_runtime.cpp`, jetzt 26 Fälle): Übernahme erst am Schnitt und
+- Tests (`tests/test_sequence_runtime.cpp`, jetzt 27 Fälle): Übernahme erst am Schnitt und
   Rückgabe am Ende; ein auf `ownsCamera` gesperrter Kamera-Controller bewegt die Schnittkamera
   nicht (Stellvertreter für den Fly-Fallback, der headless kein SDL lesen kann, mit
   Negativkontrolle ohne Gate); Blend rein von der eingefrorenen Gameplay-Pose (Position, Drehung,
   FOV zur Zeit t) und danach die unveränderte Schnittkamera; Blend zwischen zwei Kameras, von
   denen eine fährt; Rückgabe an ein echtes Rig mit Blend-Out, ohne veralteten Frame (mit
-  Negativkontrolle: ohne das Schreiben der Übergabe-Pose wird der Test rot); Körper des
+  Negativkontrolle: ohne das Schreiben der Übergabe-Pose wird der Test rot); `stop()` mitten im
+  Blend übergibt von der Pose auf dem Schirm (war vor dem Fix rot); Körper des
   First-Person-Rigs sichtbar; `stop()`, Schnitt auf keine Kamera und Slot ohne Kamera; eine
   Sequenz zur Zeit und zerstörter Besitzer; Lease ohne Sitzung verworfen; `locksPlayerInput`;
   Serializer um die drei Felder erweitert. Dazu in `tests/test_player_host.cpp`: gesperrter Frame

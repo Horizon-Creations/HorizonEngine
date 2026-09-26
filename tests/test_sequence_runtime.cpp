@@ -923,6 +923,51 @@ TEST_CASE("sequence camera: the view goes back to the rig with a blend out, with
 	CHECK(posOf(reg, rigCam).z == doctest::Approx(solved.z));
 }
 
+TEST_CASE("sequence camera: stop() mid-blend hands over from the pose on screen")
+{
+	// The skip-the-cutscene case: stopped while the view is still travelling in.
+	// The hand-over has to start where the view IS, not where the shot camera
+	// was placed — the blended write is taken back only after it is read.
+	Rig r;
+	auto& reg = r.world.registry();
+	const entt::entity target = makeActor(r.world, "Player");
+	const entt::entity rigCam = makeCamera(r.world, "RigCam", { 0, 0, 0 }, 60.0f, true);
+	CameraRigComponent rc;
+	rc.target = r.world.entityId(target);
+	rc.yaw    = 0.0f;
+	rc.pitch  = 0.0f;
+	reg.emplace<CameraRigComponent>(rigCam, rc);
+	const entt::entity shot = makeCamera(r.world, "Shot", { 50, 5, 0 });
+
+	SequenceAsset s;
+	s.duration = 5.0f;
+	s.bindings = { { 0, "Shot", r.world.entityId(shot) } };
+	s.tracks.push_back(cutTrack({ { 0.0f, 0, 1.0f, SequenceBlendCurve::Linear } }));
+	r.make(std::move(s));
+
+	HE::CameraLookInput look;
+	look.dt = kDt;
+	auto appFrame = [&]
+	{
+		if (!SequenceSystem::ownsCamera(reg)) HE::CameraRigController::update(r.world, look);
+		r.frame();
+	};
+
+	appFrame();
+	for (int i = 0; i < 4; ++i) appFrame();   // t = 0.5: halfway in
+	const glm::vec3 onScreen = posOf(reg, shot);
+	REQUIRE(onScreen.x == doctest::Approx(25.0f + 0.5f * 0.4f));   // rig pose x is the 0.4 arm offset
+
+	SequenceSystem::stop(r.world, r.owner);
+	appFrame();
+	CHECK(isMain(reg, rigCam));
+	CHECK(posOf(reg, rigCam).x == doctest::Approx(onScreen.x));
+	CHECK(posOf(reg, rigCam).y == doctest::Approx(onScreen.y));
+	CHECK(posOf(reg, rigCam).z == doctest::Approx(onScreen.z));
+	// And the shot camera is back where it was placed.
+	CHECK(posOf(reg, shot) == glm::vec3(50, 5, 0));
+}
+
 TEST_CASE("sequence camera: taking the view gives back a first-person rig's hidden body")
 {
 	Rig r;

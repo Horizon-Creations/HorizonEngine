@@ -617,13 +617,22 @@ void SequenceSystem::apply(HorizonWorld& world, ContentManager& cm, float dt,
 
     if (auto* lease = reg.ctx().find<CameraLease>())
     {
-        // Last frame's blend is taken back before any track runs, so the live
-        // camera's keys (or where it was placed) are what the tracks see.
-        restoreBlended(reg, *lease);
         const auto* owner = reg.valid(lease->owner)
                           ? reg.try_get<SequencePlayerComponent>(lease->owner) : nullptr;
-        if (!owner)                   handBack(world, *lease);    // destroyed mid-cutscene
-        else if (!owner->cameraOwned) reg.ctx().erase<CameraLease>();   // stale
+        // Destroyed mid-cutscene, or stopped since last frame: hand back FIRST.
+        // Last frame's blended write is still on the camera, and it is the pose
+        // on screen — the hand-over starts there (handBack takes the write back
+        // itself, after reading it). Skipping a cutscene mid-blend would jump
+        // otherwise.
+        if (!owner || (owner->cameraOwned && !owner->playing))
+            handBack(world, *lease);
+        else
+        {
+            // Last frame's blend is taken back before any track runs, so the
+            // live camera's keys (or where it was placed) are what they see.
+            restoreBlended(reg, *lease);
+            if (!owner->cameraOwned) reg.ctx().erase<CameraLease>();   // stale
+        }
     }
 
     std::vector<JointTRS> localTRS;
