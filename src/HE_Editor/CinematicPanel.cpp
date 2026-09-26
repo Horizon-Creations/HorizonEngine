@@ -761,7 +761,11 @@ void drawPreview(PanelState& st, AppContext& ctx, const SequenceAsset& seq, floa
 	else                               ImGui::TextDisabled("(%s)", through);
 	if (!tex)
 	{
-		ImGui::TextDisabled("(no preview on this backend)");
+		// Two different reasons, said apart: no camera to look through yet
+		// (the Scene window places the editor camera on its first frame), or
+		// a backend without the preview pass.
+		ImGui::TextDisabled(ov.active ? "(no preview on this backend)"
+		                              : "(the editor camera is not placed yet: visit the scene tab once)");
 		ImGui::Dummy(ImVec2(w, h - ImGui::GetTextLineHeightWithSpacing()));
 		return;
 	}

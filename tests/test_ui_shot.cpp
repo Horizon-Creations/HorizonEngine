@@ -13,6 +13,7 @@
 #include "EditorReference.h"
 #include "MeshMaterialSlots.h"   // the mesh tabs' slot list, over an in-memory mesh
 #include "SequencerTimeline.h"   // the sequencer's strip, over an in-memory clip
+#include "CinematicTimeline.h"   // the Cinematic tab's strip, over an in-memory sequence
 #include "UITimelineMath.h"
 
 #include <ContentManager/ContentManager.h>
@@ -2269,4 +2270,94 @@ TEST_CASE("ui shot: sequencer curve view of one track")
 	CHECK(bestR < 170);
 	img.pixel(px, py + 30, r, g, b, a);
 	CHECK(int(b) < 90);
+}
+
+// ── The Cinematic tab's strip ────────────────────────────────────────────────
+// Every kind of row at once: the Camera Cuts row with a blend ramp, an actor's
+// group with a key row, a Visible step row and a clip section, a MISSING
+// actor's group, and the Unbound group with an event state and a sound. The
+// gestures are asserted in test_cinematic_timeline.cpp; this is the picture,
+// and the two things on it that only a picture shows: the section bar is drawn
+// where its seconds are, and the missing actor's name is red.
+TEST_CASE("ui shot: cinematic strip with every kind of row")
+{
+	namespace Cin = HE::Ed::Cinematic;
+	constexpr int W = 820, H = 300;
+	Harness harness(W, H);
+
+	SequenceAsset seq;
+	seq.duration = 6.0f;
+	Cin::addBinding(seq, "Hero", HE::UUID::generate());
+	Cin::addBinding(seq, "ShotCam", HE::UUID::generate());
+	Cin::addBinding(seq, "Door_North", HE::UUID::generate());
+	SequenceTrack& cuts = seq.tracks[Cin::addTrack(seq, SequenceTrackKind::CameraCut, kSequenceNoBinding)];
+	Cin::insertCut(cuts, 0.5f, 1);
+	const int c2 = Cin::insertCut(cuts, 3.0f, kSequenceNoBinding);
+	cuts.cuts[0].blendIn = 1.0f;
+	(void)c2;
+	int t = Cin::addPropertyTrack(seq, 0, PropTarget::PosX, 0.0f);
+	HE::Ed::Sequencer::insertKey(seq.tracks[t].channel, 2.0f, 3.0f);
+	HE::Ed::Sequencer::insertKey(seq.tracks[t].channel, 4.5f, 1.0f);
+	t = Cin::addPropertyTrack(seq, 0, PropTarget::Visible, 1.0f);
+	HE::Ed::Sequencer::insertKey(seq.tracks[t].channel, 2.5f, 0.0f);
+	HE::Ed::Sequencer::insertKey(seq.tracks[t].channel, 4.0f, 1.0f);
+	const HE::UUID walk = HE::UUID::generate();
+	const int skel = Cin::addTrack(seq, SequenceTrackKind::Skeletal, 0);
+	Cin::insertSection(seq.tracks[skel], 1.0f, 3.0f, walk);
+	Cin::addPropertyTrack(seq, 2, PropTarget::RotY, 0.0f);
+	t = Cin::addTrack(seq, SequenceTrackKind::Event, kSequenceNoBinding);
+	const int e = Cin::insertEvent(seq.tracks[t], 2.0f, "OpenGate");
+	seq.tracks[t].events[e].duration = 1.0f;
+	t = Cin::addTrack(seq, SequenceTrackKind::Audio, kSequenceNoBinding);
+	Cin::insertSound(seq.tracks[t], 0.0f, HE::UUID::generate());
+
+	Cin::Labels labels;
+	labels.missing = { false, false, true };
+	labels.camera  = { false, true, false };
+	labels.assetName = [&](HE::UUID id) { return id == walk ? std::string("Walk_Fwd") : std::string("Theme_Intro"); };
+
+	Cin::View view;
+	view.playhead = 2.2f;
+	view.trackSel = skel;
+	view.itemSel  = 0;
+	Cin::Result res;
+
+	const he_ui::Image img = shoot("cinematic_strip", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("Cinematic", nullptr,
+		             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+		             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		res = Cin::draw(seq, view, ImVec2(0.0f, 0.0f), labels);
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 40000);
+
+	const std::vector<Cin::Row> rows = Cin::buildRows(seq, view);
+	// Cuts; Hero + PosX, Visible, Skeletal; ShotCam; Door_North + RotY;
+	// Unbound + Events, Sound.
+	REQUIRE(rows.size() == 11);
+	const Cin::Metrics& M = Cin::metrics();
+	const HE::Ed::UITimelineView tv{ res.laneX, res.laneW, seq.duration, view.zoom, view.scroll };
+	std::uint8_t r, g, b, a;
+
+	// The section bar (row 4) at 3.5 s — inside [1, 4], clear of its label and
+	// of the playhead — is the section blue; at 5 s the same row is lane.
+	const int barY = int(res.rowsTop + M.rowH * 4.5f);
+	img.pixel(int(std::lround(tv.xOf(3.5f))), barY, r, g, b, a);
+	CHECK(int(b) > 170);
+	CHECK(int(r) < 140);
+	img.pixel(int(std::lround(tv.xOf(5.0f))), barY, r, g, b, a);
+	CHECK(int(b) < 90);
+
+	// Door_North (row 6) is missing: its name column holds red text.
+	int reddest = 0;
+	for (int y = int(res.rowsTop + M.rowH * 6.0f); y < int(res.rowsTop + M.rowH * 7.0f); ++y)
+		for (int x = 0; x < int(M.nameW); ++x)
+		{
+			img.pixel(x, y, r, g, b, a);
+			if (int(r) > 180 && int(g) < 130 && int(b) < 130) ++reddest;
+		}
+	CHECK(reddest > 10);
 }
