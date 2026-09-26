@@ -2170,7 +2170,7 @@ void VulkanRenderer::createMaterialResources()
 
     // ── Descriptor set 0 layout: canonical bindings 0-7 (matches the generated SPIR-V)
     //    + 8/9 for the WPO custom vertex, which reads HeLighting/HeParams in the VERTEX
-    //    stage at those slots (MaterialShaderLibrary.cpp kWpoUniforms). Extra bindings are
+    //    stage at those slots (MaterialShaderLibrary.cpp wpoDeclarations). Extra bindings are
     //    harmless for the standard (non-WPO) vertex, which references none of them. ──
     VkDescriptorSetLayoutBinding b[15]{};
     auto setB = [&](int i, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stage) {

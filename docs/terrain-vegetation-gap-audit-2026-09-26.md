@@ -19,7 +19,7 @@ Forts. 19) festmachen: *Heightmap-Import, Sculpt-Brushes, Material-Splatting, Ch
 Tessellation, Kollision*. Davon ist heute **alles außer Tessellation da** (Nachtrag: Tessellation
 ist seit Schritt 2 ebenfalls da, siehe Abschnitt 6). Der Wert ist also zu
 niedrig, und die Beschreibung ist gleichzeitig **zu hoch**: „foliage with wind animation" gibt es
-nicht (siehe 3.3). Beides gehört korrigiert (eigener Schritt, siehe 5).
+nicht (siehe 3.3; Nachtrag: seit Schritt 3 da, siehe Abschnitt 7). Beides gehört korrigiert (eigener Schritt, siehe 5).
 
 ## 2. Was vorhanden ist (belegt)
 
@@ -221,11 +221,21 @@ Wolken-Shader. Jetzt liest sie auch jedes Graph-Material.
 **Transport:** In die drei bisher ungenutzten w-Kanäle des Material-Licht-Präfixes
 (`MaterialShaderLibrary::Lighting`): `sunColor.w`/`ambient.w` = Einheitsrichtung x/z (wohin der
 Wind weht), `camPos.w` = Stärke (`windSpeed`, ohne den 0,025-Faktor der Wolken, negativ = 0).
-Gründe: die WPO-Vertex-Stufe deklariert nur diese vier vec4 (`kWpoUniforms`); ein neues Feld hätte
-alle Offsets dahinter verschoben (vorkompilierte Blobs) und neue Bindings in fünf Backends
-gebraucht. Gefüllt von einem gemeinsamen Helfer `HE::FillMaterialWind` (`LightPacking.h`) an jeder
+Gründe: ein neues Feld hätte alle Offsets dahinter verschoben (vorkompilierte Blobs), und
+WPO-Vertex-Blobs von vor diesem Schritt sehen nur diese vier vec4. Gefüllt von einem gemeinsamen Helfer `HE::FillMaterialWind` (`LightPacking.h`) an jeder
 Stelle, die auch die Zeit (`sunDir.w`) schreibt: Metal UI/Forward/Resolve (`FillMaterialLighting`)
 /G-Buffer, GL UI + `fillMatLight`, D3D11, D3D12, Vulkan. Vorschauen (Zeit 0) bleiben windstill.
+
+**Mitgefixt: WPO-Materialien linkten auf OpenGL nicht.** Die WPO-Vertex-Stufe deklarierte
+`HeLighting` als Vier-vec4-Präfix, das Fragment den vollen Block. GL linkt beide Stufen in ein
+Programm und verlangt gleichnamige Blöcke identisch: jedes WPO-Material, das `heLight` las (also
+schon jedes mit Time), scheiterte mit „Uniform type mismatch '<uniform HeLighting>'" und wurde nie
+gezeichnet; Wind Sway liest `heLight` immer. Gefunden im headless GL-Dump, kein Compile-Test sah es.
+Jetzt schneidet `wpoLightingBlock()` den Block aus `kLightingPreamble` aus (eine Quelle, nur
+`binding = 8`). Alle Backends binden am Vertex-Slot ohnehin den ganzen `Lighting`-Puffer (Metal
+`setVertexBytes` in voller Größe, D3D11/D3D12 b8, Vulkan Range `sizeof`). Test „GL links a WPO
+material" vergleicht den Block in beiden cross-kompilierten GL/GLES-Stufen; mit dem alten Präfix
+schlägt er fehl (Negativkontrolle gelaufen).
 
 **Knoten** (Kategorie „Landscape"):
 
@@ -264,18 +274,21 @@ Vertex-Body im Asset, Fragment + Vertex kompilieren für Metal und GL).
    wehendes Gras wirft also einen starren Schatten (Befund aus 3.3, unverändert).
 3. **Normalen:** WPO korrigiert die Normale nicht. Für Gras-Karten und kleine Ausschläge
    unauffällig, für große Biegungen sichtbar.
-4. **Laufzeit nur auf Metal geprüft.** Zeuge `HE_DUMP_MATERIALTEST=wind` (Kugel, Wind Sway auf
-   WPO, Amount 0,6, Bend Height 1) im Debug-Editor, jeweils mit `HE_DUMP_SKYTEST=1 TOD=0.5
-   COVERAGE=0 CLOUDMODE=0`, Zeit über `HE_SKY_TIME`:
-   - Wind an, t = 0 gegen t = 0,6: 19 658 Pixel ändern sich (max 146/255), alle im Rechteck
-     y 141–323, also nur die obere Kugelhälfte; Himmel und untere Hälfte (Biegemaske 0) bleiben
-     pixelgleich.
-   - `HE_DUMP_WINDSPEED=0`, t = 0 gegen t = 0,6: **0 Pixel** Unterschied (Negativkontrolle: ohne
-     Windstärke keine Bewegung).
-   - Gleiche Zeit, Wind an gegen aus: Unterschied wieder nur in der oberen Hälfte.
+4. **Laufzeit geprüft auf Metal (Forward + Deferred) und OpenGL, eine Instanz.** Zeuge
+   `HE_DUMP_MATERIALTEST=wind` (Kugel, Wind Sway auf WPO, Amount 0,6, Bend Height 1) im
+   Debug-Editor, jeweils mit `HE_DUMP_SKYTEST=1 TOD=0.5 COVERAGE=0 CLOUDMODE=0`, Zeit über
+   `HE_SKY_TIME`, Pixel mit Abweichung > 2/255:
 
-   Damit kommen Stärke, Richtung und Zeit über `FillMaterialWind` in der Metal-Vertex-Stufe an.
-   GL, D3D11, D3D12, Vulkan: nur kompiliert (GL/Metal lokal, Vulkan per MoltenVK-Syntaxcheck mit
-   Negativkontrolle, D3D im Windows-CI). Ohne `HE_DUMP_SKYTEST` ist der Material-Zeuge auf diesem
-   Stand komplett schwarz, auch der alte `switchon`-Modus ohne WPO; das liegt am Aufbau, nicht am
-   Wind.
+   | Pfad | Wind an, t 0 gegen 0,6 | `WINDSPEED=0`, t 0 gegen 0,6 |
+   |---|---|---|
+   | Metal Forward | 19 658 px, max 146, nur y 141–323 | 0 px |
+   | Metal Deferred (`RENDERPATH=1`, G-Buffer-Füllstelle) | 19 646 px, nur y 141–323 | – |
+   | OpenGL (nach dem Link-Fix) | 18 452 px, max 127, nur y 141–323 | 0 px |
+
+   y 141–323 ist die obere Kugelhälfte: Himmel und untere Hälfte (Biegemaske 0) bleiben
+   pixelgleich. Vor dem Link-Fix zeigte GL 0 px Bewegung; Metal ist mit und ohne den Fix
+   pixelgleich. Wind an gegen aus bei gleicher Zeit unterscheidet sich ebenfalls nur oben.
+   D3D11, D3D12, Vulkan: nur kompiliert (Vulkan per MoltenVK-Syntaxcheck mit Negativkontrolle,
+   D3D im Windows-CI). Gebatchte Foliage auf GL: siehe Punkt 1, vom Kugel-Zeugen nicht erfasst.
+   Ohne `HE_DUMP_SKYTEST` ist der Material-Zeuge auf diesem Stand komplett schwarz, auch der alte
+   `switchon`-Modus ohne WPO; das liegt am Aufbau, nicht am Wind.

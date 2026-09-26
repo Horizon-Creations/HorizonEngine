@@ -2630,7 +2630,7 @@ std::vector<NodeShaderCase> allNodeShaderCases()
 		cases.push_back({ "World Position Offset (custom vertex)", gen.glsl, gen.vertexBody });
 	}
 	// Wind Sway on WPO: the vertex branch of the node (object-space `pos`, the
-	// vertex copy of the noise helpers, the wind channels of kWpoUniforms) is
+	// vertex copy of the noise helpers, the wind channels of the vertex HeLighting) is
 	// text the fragment-only sweep above never produces.
 	{
 		MaterialGraph g = MaterialGraph::makeDefault();
@@ -3816,6 +3816,52 @@ TEST_CASE("Wind Sway's vertex body cross-compiles for Metal and GL")
 		const auto& cv = lib.customVertex(vh, gen.vertexBody, b);
 		CHECK_MESSAGE(cv.ok, "Wind Sway vertex failed for backend ", (int)b, ": ", cv.log);
 		CHECK_FALSE(cv.source.empty());
+	}
+}
+
+TEST_CASE("GL links a WPO material: HeLighting is the same block in both stages")
+{
+	// OpenGL links vertex + fragment into ONE program, and a uniform block of
+	// the same name must be declared identically in both. The WPO vertex used
+	// to declare a four-vec4 prefix of HeLighting; every WPO graph that read
+	// Time (and every Wind Sway) then failed at link time on GL with
+	// "Uniform type mismatch '<uniform HeLighting>'" — seen in a headless GL
+	// dump, invisible to every compile-only test. This compares the block the
+	// two cross-compiled GLSL stages actually carry.
+	MaterialGraph g = MaterialGraph::makeDefault(); // lit → the fragment reads heLight
+	int out = 0;
+	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+	const int sway = g.addNode(MatNodeType::WindSway);
+	REQUIRE(g.connect(sway, 0, out, HE::kMatOutputWPOPin));
+	const HE::MatShaderGen gen = HE::generateFragment(g);
+	REQUIRE_FALSE(gen.vertexBody.empty());
+
+	// GLSL ES spells the fragment's members `highp vec4`; the vertex stage
+	// defaults to highp and leaves it out. Same precision, so drop the word.
+	auto block = [](const std::string& src) -> std::string {
+		const size_t b = src.find("uniform HeLighting");
+		if (b == std::string::npos) return {};
+		const size_t e = src.find("heLight;", b);
+		if (e == std::string::npos) return {};
+		std::string s = src.substr(b, e - b);
+		for (size_t p; (p = s.find("highp ")) != std::string::npos; ) s.erase(p, 6);
+		return s;
+	};
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	for (B b : { B::GLSL410, B::GLSLES300 })
+	{
+		const auto& fs = lib.fragment(std::hash<std::string>{}(gen.glsl), gen.glsl, b);
+		const auto& vs = lib.customVertex(std::hash<std::string>{}(gen.vertexBody), gen.vertexBody, b);
+		REQUIRE_MESSAGE(fs.ok, fs.log);
+		REQUIRE_MESSAGE(vs.ok, vs.log);
+		const std::string fb = block(fs.source), vb = block(vs.source);
+		REQUIRE_FALSE(fb.empty());
+		REQUIRE_FALSE(vb.empty());
+		CHECK_MESSAGE(vb == fb, "backend ", (int)b, "\nvertex:\n", vb, "\nfragment:\n", fb);
+		// The wind lives in the prefix both stages share.
+		CHECK(vb.find("vec4 camPos;") != std::string::npos);
+		CHECK(vb.find("mat4 localShadowVP[16];") != std::string::npos); // the whole block, not a prefix
 	}
 }
 #endif // HE_TESTS_HAVE_SHADERC

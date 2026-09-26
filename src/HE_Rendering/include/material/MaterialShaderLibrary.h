@@ -36,8 +36,9 @@ public:
     struct Lighting
     {
         // The engine wind rides in the three spare w channels of this legacy prefix
-        // (HE::FillMaterialWind): the WPO vertex stage only declares these four
-        // vec4s (kWpoUniforms), and a new field would shift every offset after it.
+        // (HE::FillMaterialWind): a new field would shift every offset after it,
+        // and WPO vertex blobs precompiled before the vertex stage declared the
+        // whole block (wpoLightingBlock) only see these four vec4s.
         // Zero = no wind, which is what previews and UI passes leave in place.
         float sunDir[4]   = { 0.0f, 1.0f, 0.0f, 0.0f }; // xyz = direction TO the sun; w = time (s)
         float sunColor[4] = { 1.0f, 1.0f, 1.0f, 0.0f }; // rgb = sun radiance; w = wind direction X

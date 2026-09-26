@@ -978,7 +978,8 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
 
         case MatNodeType::Wind:
             // Both stages declare the lighting prefix these channels live in
-            // (the fragment preamble and kWpoUniforms), so the text is the same.
+            // (the fragment preamble and the WPO vertex declarations), so the
+            // text is the same.
             decl = "vec3 " + v + " = vec3(heLight.sunColor.w, 0.0, heLight.ambient.w);"
                  + " float " + v + "_s = heLight.camPos.w;";
             pinExpr = { v, v + "_s", "(" + v + " * " + v + "_s)" };
