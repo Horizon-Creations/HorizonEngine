@@ -21,6 +21,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/RootMotion.h>
+#include <HorizonScene/SequenceSystem.h>
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
@@ -2310,6 +2311,11 @@ void GameApplication::updateCameraController(float dt)
 {
 	if (!m_mouseCaptured || !m_world || dt <= 0.0f) return;
 
+	// A cutscene holds the camera: it cuts, blends and poses it in the animation
+	// phase, and neither the rig nor free flight may touch it until it hands the
+	// view back (SequenceSystem.h, "Camera and input").
+	if (SequenceSystem::ownsCamera(m_world->registry())) return;
+
 	// The cursor is parked back at this window's centre every frame — but only
 	// while WE have focus, so an alt-tabbed game never yanks the cursor away from
 	// another app.
@@ -3021,7 +3027,9 @@ void GameApplication::OnRender(float deltaTime)
 	if ((m_uiWantsPointer || inputMode == HE::api::input::Mode::UIOnly) &&
 	    !HE::api::input::isRebinding())
 		playerMouse.buttons = 0;
-	m_playerHost.tick(input(), gameDt, playerMouse);
+	// A cutscene with Lock Player Input silences gameplay input like a pause.
+	m_playerHost.tick(input(), gameDt, playerMouse,
+	                  m_world && SequenceSystem::locksPlayerInput(m_world->registry()));
 	// Entity classes: Tick, plus reaping the ones whose entity is gone — and
 	// handing their bodies back as it notices them, rather than leaving them to
 	// step()'s own sweep a frame later.
@@ -3069,8 +3077,11 @@ void GameApplication::OnRender(float deltaTime)
 		// of extraction, which consumes the bone matrices.
 		// A packaged build has no edit mode, so root motion is always applied here.
 		HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+		// Cutscenes, likewise always on here; an uninitialised audio engine
+		// (no device) makes them play silent, not stop.
+		HE::SequenceContext sequences{ &m_audioEngine, m_physicsWorld.get() };
 		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost,
-		                            &rootMotion, &m_animNotifies);
+		                            &rootMotion, &m_animNotifies, &sequences);
 
 		// Drained HERE and not at the collision drain up in the physics block:
 		// that one runs in the frame BEFORE the animation phase, so every notify

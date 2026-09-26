@@ -313,6 +313,40 @@ namespace
 	  "pose. Layer names are free text with nothing checking them, so this is how "
 	  "to see what a character actually carries." },
 
+	// ── Sequence ─────────────────────────────────────────────────────────────
+	{ "sequence.play",
+	  "Starts the cutscene on the entity's Sequence Player — from the top, from "
+	  "where Set Sequence Time put it, or on from a pause. Started is false when "
+	  "the entity has no Sequence Player or is switched off. When the cutscene is "
+	  "over, the entity receives the animation notify \"SequenceFinished\"." },
+	{ "sequence.pause",
+	  "Holds the cutscene's clock and its sounds. The actors, the camera and the "
+	  "input lock stay with the cutscene; Play Sequence carries on from here." },
+	{ "sequence.stop",
+	  "Ends the cutscene and rewinds it to 0: its sounds stop, the camera goes "
+	  "back to gameplay and the input lock lifts. A cutscene that was running "
+	  "sends \"SequenceFinished\" — so a skip button is this node, and whatever "
+	  "waits for the end runs after a skip too." },
+	{ "sequence.setTime",
+	  "Jumps the cutscene to a time in seconds. Nothing between the old and the "
+	  "new time fires or sounds. Clamped to the sequence's length, wrapped for a "
+	  "looping player; a stopped cutscene shows the new moment once." },
+	{ "sequence.getTime",
+	  "Where the cutscene's playhead stands, in seconds. 0 for an entity without "
+	  "a Sequence Player." },
+	{ "sequence.duration",
+	  "How long the entity's sequence is, in seconds. 0 while the sequence is "
+	  "still loading and for an entity without a Sequence Player." },
+	{ "sequence.isPlaying",
+	  "True while the cutscene's clock runs. False when it is stopped, finished "
+	  "or paused." },
+	{ "sequence.bindSlot",
+	  "Plays one of the sequence's actors with a different entity — how \"the "
+	  "player\", spawned at runtime, gets into a cutscene authored against a "
+	  "stand-in. Binding is the actor's name in the sequence, not a number. "
+	  "Works before the sequence has loaded; a target of 0 puts the authored "
+	  "actor back." },
+
 	// ── Particles ────────────────────────────────────────────────────────────
 	{ "particle.burst",
 	  "Emits a number of particles at once from an entity's Particle System, "

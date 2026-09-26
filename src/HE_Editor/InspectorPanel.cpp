@@ -1845,6 +1845,46 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<PropertyAnimatorComponent>(entity); }
 	}
 
+	// ── Sequence Player ─────────────────────────────────────────────────────
+	// Only the authored half is editable. The playhead is session state
+	// (SequencePlayerComponent.h): it is shown during play, never saved.
+	if (auto* sp = registry.try_get<SequencePlayerComponent>(entity))
+	{
+		if (componentHeader("Sequence Player", true, removed))
+		{
+			EditorWidgets::WrapText wrap;
+			EditorWidgets::assetDropSlot(ctx, "Sequence", sp->sequenceId,
+				HE::AssetType::Sequence, "seqp");
+			const SequenceAsset* seq = (sp->sequenceId != HE::UUID{} && ctx.contentManager)
+				? ctx.contentManager->getSequence(sp->sequenceId) : nullptr;
+
+			EditorWidgets::checkbox("Autoplay##seqp", &sp->autoplay); trackEdit();
+			ImGui::SameLine();
+			EditorWidgets::checkbox("Loop##seqp", &sp->loop); trackEdit();
+			Row::dragFloat("Play Rate##seqp", &sp->playRate, 0.01f, -4.0f, 4.0f, "%.2f"); trackEdit();
+
+			// How the view goes back to gameplay, and whether the player can move
+			// meanwhile. Per player, not in the asset (SequencePlayerComponent.h).
+			Row::dragFloat("Blend Out##seqp", &sp->blendOutSeconds, 0.01f, 0.0f, 10.0f, "%.2f s"); trackEdit();
+			static const char* kCurves[] = { "Linear", "Smooth Step", "Ease Out" };
+			int curve = static_cast<int>(sp->blendOutCurve);
+			if (Row::combo("Blend Out Curve##seqp", &curve, kCurves, IM_ARRAYSIZE(kCurves)))
+			{ sp->blendOutCurve = static_cast<HE::BlendCurve>(curve); trackEdit(); }
+			EditorWidgets::checkbox("Lock Player Input##seqp", &sp->lockPlayerInput); trackEdit();
+
+			if (seq)
+			{
+				ImGui::Separator();
+				ImGui::Text("Duration: %.2f s | Tracks: %zu | Actors: %zu",
+				            seq->duration, seq->tracks.size(), seq->bindings.size());
+				if (sp->started)
+					ImGui::Text("%s at %.2f s%s", sp->playing ? (sp->paused ? "Paused" : "Playing") : "Stopped",
+					            sp->time, sp->cameraOwned ? " | holds the camera" : "");
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SequencePlayerComponent>(entity); }
+	}
+
 	// ── NavMesh ─────────────────────────────────────────────────────────────
 	if (auto* nmc = registry.try_get<NavMeshComponent>(entity))
 	{
@@ -3565,6 +3605,9 @@ constexpr AddRow kAnimationRows[] = {
 	addRow<RootMotionComponent>("Root Motion", true),
 	addRow<AnimationLayerComponent>("Animation Layers", true),
 	addRow<IkComponent>("Inverse Kinematics", true),
+	// Unlike the rows above, on ANY entity: a cutscene's owner is usually an
+	// empty trigger or level object, and its actors are bindings in the asset.
+	addRow<SequencePlayerComponent>("Sequence Player"),
 };
 constexpr AddRow kGameplayRows[] = {
 	addRow<CameraComponent>("Camera"),

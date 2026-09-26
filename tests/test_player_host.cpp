@@ -403,6 +403,70 @@ TEST_CASE("PlayerHost: Lua instances receive the action events and the poll agre
 	HE::api::player::clear();
 }
 
+// A cutscene's Lock Player Input (SequenceSystem::locksPlayerInput, handed to
+// tick by both applications) is the third reason for silence beside a pause and
+// UI-only mode, with the same exception — or the key that skips the cutscene
+// would be silenced along with the rest.
+TEST_CASE("PlayerHost: a locked frame is silenced like a pause, run-while-paused actions still arrive")
+{
+	TempDir dir("he_test_playerhost_locked");
+	ContentManager cm(dir.path.string());
+	writeInputAssets(cm);
+	InputActionAsset skip;
+	skip.type = HE::AssetType::InputAction;
+	skip.name = "Skip";
+	skip.path = "Input/Skip.hasset";
+	skip.json = HE::makeInputActionJson("Button", true);
+	REQUIRE(cm.saveAsset(skip));
+	InputMappingContextAsset mc;
+	mc.type = HE::AssetType::InputMappingContext;
+	mc.name = "IMC_Cutscene";
+	mc.path = "Input/IMC_Cutscene.hasset";
+	mc.json = R"({"entries":[{"action":"Input/Skip.hasset","keys":["E"]}]})";
+	REQUIRE(cm.saveAsset(mc));
+
+	HorizonWorld world;
+	const Entity e = world.createEntity("Listener");
+	ScriptContext scripts(world);
+	REQUIRE(scripts.engine().loadScript("listener", kListener));
+	const auto lua = scripts.engine().createInstance("listener", static_cast<uint32_t>(e));
+	REQUIRE(lua != ScriptEngine::kInvalidInstance);
+	scripts.engine().callOnStart(lua);
+	ScriptContext::InstanceMap instances{ { static_cast<uint32_t>(e), lua } };
+
+	Runtime rt;
+	PlayerHost host;
+	host.begin(rt, cm);
+	host.setTextScripts(&scripts, &instances);
+	HE::api::time::resume();
+	HE::api::input::setModeGameAndUI();
+
+	Input input;
+	host.tick(input, 1.0f / 60.0f, {}, true);
+
+	// Locked: the gameplay action and the axis are silent, the poll agrees; the
+	// run-while-paused one comes through.
+	keyEvent(input, SDL_SCANCODE_SPACE, true);
+	keyEvent(input, SDL_SCANCODE_D, true);
+	keyEvent(input, SDL_SCANCODE_E, true);
+	host.tick(input, 1.0f / 60.0f, {}, true);
+	CHECK(scripts.engine().getGlobalString("_heIn") == "+Skip");
+	CHECK(scripts.engine().getGlobalNumber("_heAxis") == doctest::Approx(0.0));
+	CHECK_FALSE(HE::api::input::actionDown("Jump"));
+	CHECK(HE::api::input::actionAxis("Move") == 0.0f);
+	CHECK(HE::api::input::actionDown("Skip"));
+
+	// The same held keys unlocked: the axis is heard at once. The press edge
+	// fell inside the lock and is gone — dropped, never queued, as in a pause.
+	host.tick(input, 1.0f / 60.0f, {}, false);
+	CHECK(scripts.engine().getGlobalNumber("_heAxis") == doctest::Approx(1.0));
+	CHECK(HE::api::input::actionDown("Jump"));
+	CHECK(scripts.engine().getGlobalString("_heIn") == "+Skip");
+
+	host.end();
+	HE::api::player::clear();
+}
+
 TEST_CASE("PlayerHost: without a sink the pump still runs and nothing crashes")
 {
 	TempDir dir("he_test_playerhost_no_sink");

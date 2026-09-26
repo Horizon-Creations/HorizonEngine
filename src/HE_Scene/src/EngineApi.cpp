@@ -17,6 +17,8 @@
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/AnimationLayerComponent.h"
+#include "HorizonScene/Components/SequencePlayerComponent.h"
+#include "HorizonScene/SequenceSystem.h"
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/NavAgentComponent.h"
@@ -885,6 +887,74 @@ std::vector<std::string> layerNames(Ctx& c, Entity e)
     return out;
 }
 } // namespace animator
+
+// ── Sequence ─────────────────────────────────────────────────────────────────
+// Thin over SequenceSystem's transport. Every row checks the world and the
+// player itself: the parity harness calls them with an empty Ctx, and entt
+// asserts on a stale handle before try_get could answer null.
+namespace sequence {
+namespace {
+SequencePlayerComponent* playerOf(Ctx& c, Entity e)
+{
+    if (!c.world) return nullptr;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    return reg.valid(id) ? reg.try_get<SequencePlayerComponent>(id) : nullptr;
+}
+}
+bool play(Ctx& c, Entity e)
+{
+    if (!c.content || !playerOf(c, e)) return false;
+    return SequenceSystem::play(*c.world, *c.content, (entt::entity)e);
+}
+void pause(Ctx& c, Entity e)
+{
+    if (playerOf(c, e)) SequenceSystem::pause(*c.world, (entt::entity)e);
+}
+void stop(Ctx& c, Entity e)
+{
+    if (playerOf(c, e)) SequenceSystem::stop(*c.world, (entt::entity)e);
+}
+void setTime(Ctx& c, Entity e, float seconds)
+{
+    if (c.content && playerOf(c, e)) SequenceSystem::setTime(*c.world, *c.content, (entt::entity)e, seconds);
+}
+float getTime(Ctx& c, Entity e)
+{
+    const auto* sp = playerOf(c, e);
+    return sp ? sp->time : 0.0f;
+}
+float duration(Ctx& c, Entity e)
+{
+    const auto* sp = playerOf(c, e);
+    if (!sp || !c.content) return 0.0f;
+    const SequenceAsset* seq = c.content->getSequence(sp->sequenceId);
+    return seq ? seq->duration : 0.0f;
+}
+bool isPlaying(Ctx& c, Entity e)
+{
+    const auto* sp = playerOf(c, e);
+    return sp && sp->playing && !sp->paused;
+}
+void bindSlot(Ctx& c, Entity e, const std::string& binding, Entity target)
+{
+    if (!playerOf(c, e)) return;
+    entt::entity to = entt::null;
+    if (target != 0)
+    {
+        to = (entt::entity)target;
+        if (!c.world->registry().valid(to))
+        {
+            // Not read as 0: clearing would put the asset's own actor back,
+            // which is not what a script binding a despawned character meant.
+            HE_LOG_WARN(Script, "sequence.bindSlot: entity %u does not exist — binding \"%s\" left as it was",
+                        static_cast<unsigned>(target), binding.c_str());
+            return;
+        }
+    }
+    SequenceSystem::bindSlotByName(*c.world, (entt::entity)e, binding, to);
+}
+} // namespace sequence
 
 // ── Particles ────────────────────────────────────────────────────────────────
 // The group that turns an emitter from scenery into an effect. Before this there
@@ -5772,6 +5842,27 @@ const std::vector<ApiFn>& registry()
                     arr.items.push_back(Value::ofString(n));
                 return VV{ arr }; } });
 
+        // Sequence — the transport of a Sequence Player. The entity is the
+        // cutscene's owner; the end comes back as the notify "SequenceFinished".
+        t.push_back({ "sequence.play", "Sequence", true, {{"entity", P::Int}}, {{"started", P::Bool}}, "HE::api::sequence::play",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(sequence::play(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "sequence.pause", "Sequence", true, {{"entity", P::Int}}, {}, "HE::api::sequence::pause",
+            [](Ctx& c, const VV& a){ sequence::pause(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "sequence.stop", "Sequence", true, {{"entity", P::Int}}, {}, "HE::api::sequence::stop",
+            [](Ctx& c, const VV& a){ sequence::stop(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "sequence.setTime", "Sequence", true, {{"entity", P::Int}, {"seconds", P::Float}}, {}, "HE::api::sequence::setTime",
+            [](Ctx& c, const VV& a){ sequence::setTime(c, (Entity)aI(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "sequence.getTime", "Sequence", false, {{"entity", P::Int}}, {{"seconds", P::Float}}, "HE::api::sequence::getTime",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(sequence::getTime(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "sequence.duration", "Sequence", false, {{"entity", P::Int}}, {{"seconds", P::Float}}, "HE::api::sequence::duration",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(sequence::duration(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "sequence.isPlaying", "Sequence", false, {{"entity", P::Int}}, {{"playing", P::Bool}}, "HE::api::sequence::isPlaying",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(sequence::isPlaying(c, (Entity)aI(a, 0))) }; } });
+        // By binding NAME: the label the editor shows, the way layers are
+        // addressed — nobody authoring a cutscene ever sees a slot number.
+        t.push_back({ "sequence.bindSlot", "Sequence", true, {{"entity", P::Int}, {"binding", P::String}, {"target", P::Int}}, {}, "HE::api::sequence::bindSlot",
+            [](Ctx& c, const VV& a){ sequence::bindSlot(c, (Entity)aI(a, 0), aS(a, 1), (Entity)aI(a, 2)); return VV{}; } });
+
         // Movement — the reads an animator asks for. Derived from the character
         // controller on the spot, so there is no second copy to go stale.
         t.push_back({ "movement.speed", "Movement", false, {{"entity", P::Int}}, {{"speed", P::Float}}, "HE::api::movement::speed",
@@ -7249,6 +7340,10 @@ const std::vector<ApiFn>& registry()
             { "animator.getLayerWeight", "Get Layer Weight" },
             { "animator.playLayer", "Play Layer" },
             { "animator.layerNames", "Get Layer Names" },
+            { "sequence.play", "Play Sequence" },           { "sequence.pause", "Pause Sequence" },
+            { "sequence.stop", "Stop Sequence" },           { "sequence.setTime", "Set Sequence Time" },
+            { "sequence.getTime", "Get Sequence Time" },    { "sequence.duration", "Get Sequence Duration" },
+            { "sequence.isPlaying", "Is Sequence Playing" }, { "sequence.bindSlot", "Bind Sequence Slot" },
             { "movement.speed", "Get Speed" }, { "movement.verticalSpeed", "Get Vertical Speed" },
             { "movement.isGrounded", "Is Grounded" }, { "movement.velocity", "Get Velocity" },
             { "movement.forwardAmount", "Get Forward Amount" },
@@ -7850,7 +7945,14 @@ bool isScriptGroup(std::string_view group)
                                                     // from it. Nothing in it is HorizonCode-only
                                                     // — a PlayerId and an entity are both
                                                     // integers on every frontend.
-                                                    "net" };
+                                                    "net",
+                                                    // "sequence" has no flat twin either:
+                                                    // without it a Lua or Python level can
+                                                    // hold a cutscene but never start, skip
+                                                    // or cast "the player" into it. Its end
+                                                    // arrives through onAnimationNotify,
+                                                    // which both already have.
+                                                    "sequence" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }

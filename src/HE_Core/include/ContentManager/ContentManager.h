@@ -120,6 +120,10 @@ public:
 	// Same contract as the animation clip above: the Sequencer edits the loaded
 	// asset in place, so what it shows is what the Property Animator plays.
 	PropertyAnimClipAsset*       getPropertyAnimClipMutable(HE::UUID id);
+	// A cinematic Sequence, parsed once at load. Mutable for the property clip's
+	// reason: the editor edits the loaded asset and persists it with saveAsset().
+	const SequenceAsset*         getSequence(HE::UUID id) const;
+	SequenceAsset*               getSequenceMutable(HE::UUID id);
 	const ThemeAsset*            getTheme(HE::UUID id) const;
 	ThemeAsset*                  getThemeMutable(HE::UUID id);
 	const BoneMaskAsset*         getBoneMask(HE::UUID id) const;
@@ -197,6 +201,7 @@ public:
 	HE::UUID registerInputMappingContext(InputMappingContextAsset asset);
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
+	HE::UUID registerSequence(SequenceAsset asset);
 	HE::UUID registerParticleGraph(ParticleGraphAsset asset);
 	HE::UUID registerAnimatorStateMachine(AnimatorStateMachineAsset asset);
 	HE::UUID registerStructType(StructTypeAsset asset);
@@ -495,6 +500,7 @@ public:
 	AssetRef<PrefabAsset>        acquirePrefab(HE::UUID id);
 	AssetRef<AnimationClipAsset>      acquireAnimationClip(HE::UUID id);
 	AssetRef<PropertyAnimClipAsset>   acquirePropertyAnimClip(HE::UUID id);
+	AssetRef<SequenceAsset>           acquireSequence(HE::UUID id);
 
 	// Pin bookkeeping — called by AssetRef; do not call directly.
 	void pinAsset(HE::UUID id);
@@ -646,6 +652,7 @@ private:
 	SlotMap<ThemeAsset>              m_themeAssets;
 	SlotMap<BoneMaskAsset>           m_boneMaskAssets;
 	SlotMap<BlendSpaceAsset>         m_blendSpaceAssets;
+	SlotMap<SequenceAsset>           m_sequenceAssets;
 
 	// ── Mounted paks (on-demand streaming) ─────────────────────────────────────
 	struct MountedPak {
@@ -770,3 +777,4 @@ inline AssetRef<ShaderAsset>        ContentManager::acquireShader(HE::UUID id)  
 inline AssetRef<PrefabAsset>        ContentManager::acquirePrefab(HE::UUID id)        { ensureResident(id); return { this, id, getPrefab(id) }; }
 inline AssetRef<AnimationClipAsset>      ContentManager::acquireAnimationClip(HE::UUID id)     { ensureResident(id); return { this, id, getAnimationClip(id) }; }
 inline AssetRef<PropertyAnimClipAsset>   ContentManager::acquirePropertyAnimClip(HE::UUID id)  { ensureResident(id); return { this, id, getPropertyAnimClip(id) }; }
+inline AssetRef<SequenceAsset>           ContentManager::acquireSequence(HE::UUID id)          { ensureResident(id); return { this, id, getSequence(id) }; }

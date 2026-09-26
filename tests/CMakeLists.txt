@@ -138,6 +138,9 @@ add_executable(he_tests
     test_animation_layers.cpp
     test_blend_space.cpp
     test_sequencer_timeline.cpp
+    test_sequence.cpp
+    test_sequence_runtime.cpp
+    test_cinematic_timeline.cpp
     test_animation_ik.cpp
     test_navigation.cpp
     test_particles.cpp
@@ -222,6 +225,7 @@ add_executable(he_tests
     test_mcp_tools_particle.cpp
     test_mcp_tools_animator.cpp
     test_mcp_tools_clip.cpp
+    test_mcp_tools_sequence.cpp
     test_mcp_tools_build.cpp
     test_mcp_tools_settings.cpp
     test_mcp_tools_batch.cpp
@@ -393,6 +397,9 @@ add_executable(he_tests
     # afterwards carries the events that were asked for, and only a real
     # AnimationClipAsset round-trip through a real ContentManager answers it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsClip.cpp
+    # And for a sequence: the claim is that the cutscene a FRESH ContentManager
+    # loads afterwards is the one that was written, references and all.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsSequence.cpp
     # The build tools. In here because the two things they actually decide can
     # be decided without a build machine: WHICH profile a run is made from (and
     # that a one-off override never reaches the stored one), and whether the one
@@ -498,6 +505,11 @@ add_executable(he_tests
     # "does a drag on the ruler land the playhead where the ruler says" is a
     # question about arithmetic and hit tests, not about a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SequencerTimeline.cpp
+    # The Cinematic tab's strip (a Sequence's bindings, cuts, sections, events)
+    # and its preview bracket (save, write, restore), both without AppContext —
+    # the same reason as the Sequencer's strip above.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CinematicTimeline.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CinematicPreview.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # The solo autosave's timing and file rules: when a recovery snapshot is
     # written, that the write is temp+rename with the manifest last, and what
@@ -752,7 +764,7 @@ set(HCGEN_CLASSES
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived
     inherit_novars_base inherit_novars input_actions containers reroutes
-    cheat_event datetime_double input_rumble input_rebind
+    cheat_event datetime_double sequence_transport input_rumble input_rebind
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

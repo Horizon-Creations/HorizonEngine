@@ -1190,6 +1190,38 @@ TEST_CASE("codegen parity: animator_sync")
 	CHECK(std::count_if(p.interp.trace.begin(), p.interp.trace.end(), isSet) == 1);
 }
 
+TEST_CASE("codegen parity: sequence_transport")
+{
+	ParityPair p("fix/sequence_transport");
+	p.fire("Skip");
+
+	// Every row once, in the graph's order, with the same arguments on both
+	// sides (fire() compared the traces). Against a null world the answers are
+	// the neutral ones, and both backends must agree on those as well.
+	const char* rows[] = { "sequence.play", "sequence.setTime", "sequence.getTime",
+	                       "sequence.duration", "sequence.isPlaying", "sequence.bindSlot",
+	                       "sequence.pause", "sequence.stop" };
+	size_t at = 0;
+	for (const char* id : rows)
+	{
+		const std::string head = std::string("callApi ") + id + "(";
+		const auto it = std::find_if(p.interp.trace.begin() + at, p.interp.trace.end(),
+		                             [&](const std::string& t) { return t.rfind(head, 0) == 0; });
+		CHECK_MESSAGE(it != p.interp.trace.end(), id);
+		if (it != p.interp.trace.end()) at = size_t(it - p.interp.trace.begin()) + 1;
+	}
+	CHECK(p.var("started").b == false);
+	CHECK(p.var("t").f == 0.0f);
+	CHECK(p.var("len").f == 0.0f);
+	CHECK(p.var("playing").b == false);
+
+	// The end comes back through the ordinary notify handler, picked by name.
+	p.fire("OnAnimationNotify", 0, Value::ofString("Footstep"));
+	p.fire("OnAnimationNotify", 0, Value::ofString("SequenceFinished"));
+	CHECK(p.var("finished").f == 1.0f);
+	CHECK(p.var("other").f == 1.0f);
+}
+
 TEST_CASE("codegen parity: datetime_double (epoch seconds on Double pins, no narrowing)")
 {
 	ParityPair p("fix/datetime_double");

@@ -5,6 +5,7 @@
 #include "HorizonScene/AnimationBlendSystem.h"
 #include "HorizonScene/AnimationStateMachineSystem.h"
 #include "HorizonScene/PropertyAnimationSystem.h"
+#include "HorizonScene/SequenceSystem.h"
 #include "HorizonScene/NavigationSystem.h"
 #include "HorizonScene/MovementSystem.h"
 #include "HorizonScene/WeatherSystem.h"
@@ -26,6 +27,7 @@
 #include "HorizonScene/Components/AnimationLayerComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/PropertyAnimatorComponent.h"
+#include "HorizonScene/Components/SequencePlayerComponent.h"
 #include "HorizonScene/Components/AudioSourceComponent.h"
 #include "HorizonScene/Components/UIImageComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
@@ -37,6 +39,7 @@
 #include "RootMotionApply.h"
 #include "PoseFinalize.h"
 #include "ContentManager/ContentManager.h"
+#include "Sequence/SequenceJson.h"
 #include "Renderer/IRenderer.h"
 #include "Diagnostics/Log.h"
 #include "Diagnostics/Profiler.h"
@@ -196,7 +199,7 @@ void SceneSystems::pushProfilerSceneCounters(HorizonWorld& world, ContentManager
 
 void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float dt,
                                  AnimatorHost* sync, HE::RootMotionContext* rootMotion,
-                                 HE::NotifyQueue* notifies)
+                                 HE::NotifyQueue* notifies, HE::SequenceContext* sequences)
 {
     HE_LOG_SLOW_SCOPE(Scene, 16.0, "SceneSystems::tickAnimation");
 
@@ -209,6 +212,11 @@ void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float 
     // second driver on the same entity.
     HE::poseBeginFrame(world);
 
+    // Cinematic sequences bracket the other drivers (SequenceSystem.h): the
+    // clock, events and sound first, together with the claim on every skeleton a
+    // sequence poses, which the three skeletal drivers below then skip …
+    { HE_PROFILE_SCOPE_N("SequenceBegin");         SequenceSystem::begin(world, cm, dt, sequences, notifies); }
+
     // Order within the phase is unchanged: the three skeletal drivers all write
     // SkeletalMeshComponent::boneMatrices, so the last one wins on an entity
     // that carries more than one of them (which nothing stops today).
@@ -216,6 +224,10 @@ void SceneSystems::tickAnimation(HorizonWorld& world, ContentManager& cm, float 
     { HE_PROFILE_SCOPE_N("AnimationBlend");        AnimationBlendSystem::update(world, cm, dt, rootMotion, notifies); }
     { HE_PROFILE_SCOPE_N("AnimationStateMachine"); AnimationStateMachineSystem::update(world, cm, dt, sync, rootMotion, notifies); }
     { HE_PROFILE_SCOPE_N("PropertyAnimation");     PropertyAnimationSystem::update(world, cm, dt); }
+
+    // … and the writes last, so a sequence wins over a Property Animator on the
+    // same target, and its skeletons are posed on top of the transforms it set.
+    { HE_PROFILE_SCOPE_N("SequenceApply");         SequenceSystem::apply(world, cm, dt, sequences, notifies); }
 
     HE::rootMotionEndFrame(world, rootMotion);
     HE::poseEndFrame(world);
@@ -242,6 +254,11 @@ std::vector<HE::UUID> SceneSystems::collectAssetRefs(HorizonWorld& world)
         for (const auto& l : c.layers)
             { add(l.clipId); add(l.blendSpaceId); add(l.maskId); add(l.additiveRefClipId); }
     for (auto [e, c] : reg.view<PropertyAnimatorComponent>().each()) add(c.clipId);
+    // The sequence only: what it plays (clips, sounds) is its OWN dependency and
+    // follows it — ContentManager::expandFrontier when streaming, the second pass
+    // in preloadAssetRefs when not. Looking into it here would need the asset
+    // loaded before the list that decides what to load is even made.
+    for (auto [e, c] : reg.view<SequencePlayerComponent>().each())  add(c.sequenceId);
     for (auto [e, c] : reg.view<AudioSourceComponent>().each())     add(c.assetId);
     for (auto [e, c] : reg.view<UIImageComponent>().each())         add(c.materialAssetId);
     for (auto [e, c] : reg.view<TerrainComponent>().each())         add(c.heightmapTexture);
@@ -261,7 +278,21 @@ size_t SceneSystems::preloadAssetRefs(HorizonWorld& world, ContentManager& cm)
 {
     HE_LOG_SLOW_SCOPE(Asset, 500.0, "SceneSystems::preloadAssetRefs");
 
-    const std::vector<HE::UUID> refs = collectAssetRefs(world);
+    std::vector<HE::UUID> refs = collectAssetRefs(world);
+
+    // A sequence's clips and sounds are nobody's component field, so the list
+    // above cannot name them; they are added once the sequence itself is in.
+    // Copied out before the loop below loads anything: a getSequence pointer
+    // dies with the next load (ContentManager's pools are dense vectors).
+    {
+        std::vector<HE::UUID> inner;
+        for (auto [e, c] : world.registry().view<SequencePlayerComponent>().each())
+            if (cm.ensureResident(c.sequenceId))
+                if (const SequenceAsset* seq = cm.getSequence(c.sequenceId))
+                    HE::sequenceAssetRefs(*seq, inner);
+        refs.insert(refs.end(), inner.begin(), inner.end());
+    }
+
     size_t resolved = 0;
     for (HE::UUID id : refs)
     {
