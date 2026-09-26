@@ -145,6 +145,33 @@ Zuordnung: Schritt 3 direkt grün + über `cmd /c` rot ⇒ H1. Beide rot mit
 „No CMAKE_CXX_COMPILER“ ⇒ H2/H3/H5 (Generatorzeile im Log ansehen).
 „cmake“-Zeile rot ⇒ H4.
 
+## 4a. Reproduktion auf NN-WS03 (Schritt 2, 2026-09-26): H1 bestätigt
+
+Normale PowerShell, kein Developer Prompt: `where cl` findet nichts, VCINSTALLDIR/
+INCLUDE/CMAKE_GENERATOR leer. vswhere findet drei Instanzen, alle mit
+`VC.Tools.x86.x64`: Community 2026 (18.10), BuildTools 2026 (18.9), Community 2022 (17.14).
+
+- cmake direkt aus PowerShell → rc=0, „Building for: Visual Studio 18 2026“. cmake
+  findet MSVC ohne jede Umgebung (H2–H5 treffen hier nicht zu).
+- `cmd /c "…"` aus PowerShell → ebenfalls rc=0. Das beweist nichts, denn PowerShell 5.1
+  quotet die Zeile für native Programme selbst um. Rezept §4.3 kann H1 deshalb nicht zeigen.
+- Editor-Aufruf 1:1 in C++ nachgebaut (shq + `std::system` + `_popen`):
+  `cmakeAnswers` rc=0 (Tool Status „cmake“ grün), Probe rc=1 mit
+  `Die Syntax für den Dateinamen, Verzeichnisnamen oder die Datenträgerbezeichnung ist falsch.`
+  (Pfad ohne Leerzeichen) bzw.
+  `Der Befehl "C:\…\he_repro\Space" ist entweder falsch geschrieben oder konnte nicht gefunden werden.`
+  (Pfad mit Leerzeichen).
+
+Fix: `cmdLine()` in HcCodegen.cpp hüllt jede Zeile für `std::system`/`_popen` auf
+Windows in ein zusätzliches Paar Anführungszeichen, und genau das entfernt cmd.
+Test: `tests/test_toolchain_quoting.cpp` (Probe und `buildDylib` über das gebündelte,
+also gequotete cmake; Leerzeichen in -S, -B und im Wert eines -D). Ohne Fix rot mit
+`Der Befehl "C:\Program" ist entweder falsch geschrieben…`, mit Fix grün.
+
+Nebenbefund: Bei drei Instanzen nahm cmakes Default-Generator „Visual Studio 18 2026“
+die `cl.exe` aus **BuildTools 18.9**, nicht aus Community 18.10 (gleiches Toolset
+14.51.36231). Wichtig nur, falls später „neueste Instanz gewinnt“ explizit gebaut wird.
+
 ## 5. Offen für Schritt 2
 
 - Reproduktion auf Windows (Rezept oben) — entscheidet zwischen H1 und H2–H5.

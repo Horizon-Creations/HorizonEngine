@@ -113,7 +113,8 @@ SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir);
 // Point the codegen at a cmake bundled next to the editor (<dir>/bin/cmake[.exe]).
 // Call once at startup (before probeToolchain/buildDylib): cmake resolution then
 // prefers the bundle over a system cmake on PATH, so a user only needs a C++ compiler.
-// Empty/unset ⇒ system cmake only. Resolution is cached on first use.
+// Empty/unset ⇒ system cmake only. Resolution is cached on first use; calling this
+// again drops the cache, so the next probe/build resolves against the new directory.
 void setBundledCmakeDir(const std::filesystem::path& dir);
 
 // True when a cmake executable (bundled or on PATH) answers --version.

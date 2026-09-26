@@ -180,6 +180,9 @@ add_executable(he_tests
     test_gamelogic_loader.cpp
     test_gamelogic_services.cpp
     test_gamelogic_build.cpp
+    # The same probe through a bundled (quoted) cmake — what a packaged editor
+    # runs, and what cmd.exe /c used to cut apart (Thema 96).
+    test_toolchain_quoting.cpp
     test_crypto_x25519.cpp
     test_net_bitstream.cpp
     test_net_loopback.cpp
