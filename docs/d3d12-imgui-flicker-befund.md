@@ -173,3 +173,8 @@ Fix also nichts aus. Geprüft ist nur: Der Header und die beiden Ausdrücke gehe
 `clang++ -std=c++20 -fsyntax-only` (mit Negativkontrolle per `static_assert`). Offen und nur
 auf Windows machbar: Bau mit D3D12, danach der längere manuelle Test (schnelle Mausbewegung
 über viele Steuerelemente, Tooltips) aus dem Unterscheidungstest oben.
+
+Für den Unterscheidungstest nach dem Fix: Den Altzustand stellt man her, indem man in
+`EditorApplication.cpp` (ImGui-DX12-Init, `dx12Info.NumFramesInFlight = …`) den Ausdruck
+`D3D12Renderer::kFramesInFlight` vorübergehend durch `2` bzw. `1` ersetzt. **Nicht** die
+Konstante im Header ändern, sonst zieht der Renderer mit und der Vergleich ist wertlos.
