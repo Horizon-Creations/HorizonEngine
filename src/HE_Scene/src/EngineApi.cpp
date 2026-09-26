@@ -5211,6 +5211,63 @@ float gamepadAxis(const std::string& name)
     return a != SDL_GAMEPAD_AXIS_INVALID ? snap().padAxes[a] : 0.0f;
 }
 
+// Beside the Snapshot, not in it, for the reason the mode below gives: the
+// snapshot is rewritten every frame, the sink and the gate's edges must not be.
+namespace {
+struct RumbleState
+{
+    RumbleSink sink;
+    bool allowed    = false;
+    bool gamePaused = false;
+};
+RumbleState& rumbleState() { static RumbleState r; return r; }
+
+void stopPads()
+{
+    if (rumbleState().sink.stop) rumbleState().sink.stop();
+}
+
+// Seconds → SDL milliseconds. <= 0 (and NaN) is SDL's 0, "until stopped". A
+// POSITIVE duration must never round to that 0 — a 0.0004 s tick asked for
+// would turn into a buzz that never ends — so it is at least 1 ms, and at most
+// SDL's own cap, which it would apply anyway.
+uint32_t rumbleMs(float seconds)
+{
+    if (!(seconds > 0.0f)) return 0;
+    const float ms = seconds * 1000.0f + 0.5f;
+    if (ms >= 65535.0f) return 65535;
+    return std::max<uint32_t>(1u, static_cast<uint32_t>(ms));
+}
+}
+
+void setRumbleSink(RumbleSink sink) { rumbleState().sink = std::move(sink); }
+
+void setRumbleGate(bool allowed, bool gamePaused)
+{
+    RumbleState& r = rumbleState();
+    const bool closing = r.allowed && !allowed;
+    const bool pausing = allowed && gamePaused && !r.gamePaused;
+    r.allowed    = allowed;
+    r.gamePaused = gamePaused;
+    if (closing || pausing) stopPads();
+}
+
+bool rumble(float low, float high, float duration)
+{
+    const RumbleState& r = rumbleState();
+    return r.allowed && r.sink.rumble && r.sink.rumble(low, high, rumbleMs(duration));
+}
+
+bool rumbleTriggers(float left, float right, float duration)
+{
+    const RumbleState& r = rumbleState();
+    return r.allowed && r.sink.rumbleTriggers
+        && r.sink.rumbleTriggers(left, right, rumbleMs(duration));
+}
+
+// Not gated: stopping is always safe, and a closed gate has already stopped.
+void stopRumble() { stopPads(); }
+
 // The action states live beside the Snapshot rather than in it for the same
 // reason the mode below does: the snapshot is overwritten by pushSdlSnapshot
 // every frame, and that call comes from a different place (the app's frame)
@@ -6337,6 +6394,12 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::gamepadButton(aS(a, 0))) }; } });
         t.push_back({ "input.gamepadAxis", "Input", false, {{"axis", P::String}}, {{"value", P::Float}}, "HE::api::input::gamepadAxis",
             [](Ctx&, const VV& a){ return VV{ Value::ofFloat(input::gamepadAxis(aS(a, 0))) }; } });
+        t.push_back({ "input.rumble", "Input", true, {{"low", P::Float}, {"high", P::Float}, {"duration", P::Float}}, {{"ok", P::Bool}}, "HE::api::input::rumble",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::rumble(aF(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "input.rumbleTriggers", "Input", true, {{"left", P::Float}, {"right", P::Float}, {"duration", P::Float}}, {{"ok", P::Bool}}, "HE::api::input::rumbleTriggers",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::rumbleTriggers(aF(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "input.stopRumble", "Input", true, {}, {}, "HE::api::input::stopRumble",
+            [](Ctx&, const VV&){ input::stopRumble(); return VV{}; } });
 
         // Input actions by name — the polling twin of the Input.<Action>.*
         // events, pushed by PlayerHost each frame (see input::ActionState).
@@ -7319,6 +7382,9 @@ const std::vector<ApiFn>& registry()
             { "input.gamepadConnected", "Gamepad Connected" },
             { "input.gamepadButton", "Gamepad Button" },
             { "input.gamepadAxis", "Gamepad Axis" },
+            { "input.rumble", "Rumble Gamepad" },
+            { "input.rumbleTriggers", "Rumble Gamepad Triggers" },
+            { "input.stopRumble", "Stop Gamepad Rumble" },
             { "input.actionDown", "Input Action Down" },
             { "input.actionPressed", "Input Action Pressed" },
             { "input.actionReleased", "Input Action Released" },
@@ -7963,6 +8029,12 @@ void fillInputServices(::HeInputServices& out, GameServicesBinding* binding)
     out.setMode = [](void*, int m) {
         if (m < (int)input::Mode::GameOnly || m > (int)input::Mode::UIOnly) return;
         input::setMode((input::Mode)m); };
+
+    out.rumble = [](void*, float low, float high, float duration) {
+        return input::rumble(low, high, duration); };
+    out.rumbleTriggers = [](void*, float left, float right, float duration) {
+        return input::rumbleTriggers(left, right, duration); };
+    out.stopRumble = [](void*) { input::stopRumble(); };
 }
 
 void fillContentServices(::HeContentServices& out, GameServicesBinding* binding)

@@ -585,6 +585,16 @@ void GameApplication::OnInit()
 {
 	HE_LOG_INFO(Core, "%s", "GameApplication::OnInit");
 
+	// Rumble reaches the pads through Input, which the script API cannot see.
+	// The gate opens right away — the packaged game is always "playing", and
+	// a start-up script may want to rumble before the first frame. OnRender
+	// feeds the pause edge; OnShutdown takes both down again.
+	HE::api::input::setRumbleSink({
+		[this](float low, float high, uint32_t ms) { return input().rumble(low, high, ms); },
+		[this](float l, float r, uint32_t ms)      { return input().rumbleTriggers(l, r, ms); },
+		[this]()                                   { input().stopRumble(); } });
+	HE::api::input::setRumbleGate(true, false);
+
 	// Grab the mouse on startup (FPS-style look). Done first so it holds even on
 	// the early-return paths below (no hcfg / no pak); Esc toggles it back so the
 	// cursor is always reachable. The window is already open by the time OnInit runs.
@@ -2865,6 +2875,10 @@ void GameApplication::OnRender(float deltaTime)
 		                           axes, SDL_GAMEPAD_AXIS_COUNT,
 		                           input().gamepad().buttons, SDL_GAMEPAD_BUTTON_COUNT);
 	}
+	// Pausing stops the pads (the explosion before the pause menu must not keep
+	// shaking); requests made while paused still go through, for menu clicks.
+	// UI-only does NOT close it — a menu is exactly where a click may be felt.
+	HE::api::input::setRumbleGate(true, HE::api::time::isPaused());
 
 	// From here on there are TWO clocks, and which one a tick gets is a design
 	// decision, not a detail:
@@ -3261,6 +3275,11 @@ void GameApplication::OnShutdown()
 	// on the way out still reaches the scripts, whose runtime is intact here.
 	m_netSession.leave();
 	dispatchNetEvents();
+
+	// Shut the gate (stops the pads) while the sink still points at a live
+	// Input, then take the sink down — it captures `this`.
+	HE::api::input::setRumbleGate(false, false);
+	HE::api::input::setRumbleSink({});
 
 	// The tray outlives the window unless it is taken down deliberately, and an
 	// icon left in the menu bar of a program that has exited is the worst thing

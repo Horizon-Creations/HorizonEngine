@@ -378,6 +378,14 @@ void EditorApplication::OnInit()
 	// OnShutdown before this object dies.
 	HE::Ed::setGlobalNotifications(&m_notifications);
 
+	// Rumble reaches the pads through Input, which the script API cannot see.
+	// Installed once; whether a request gets through is the per-frame gate's
+	// call (OnRender), which keeps it shut outside play. Removed in OnShutdown.
+	HE::api::input::setRumbleSink({
+		[this](float low, float high, uint32_t ms) { return input().rumble(low, high, ms); },
+		[this](float l, float r, uint32_t ms)      { return input().rumbleTriggers(l, r, ms); },
+		[this]()                                   { input().stopRumble(); } });
+
 	// And the catch-all underneath both: every HE_LOG_ERROR in the engine becomes
 	// a notification, so a failure nobody thought to report by hand still reaches
 	// the user instead of scrolling past in a file they do not have open. It
@@ -2425,6 +2433,12 @@ void EditorApplication::OnRender(float dt)
 		// asset changed", and an asset change should not cost what was typed.
 		m_appPreviewKeepState = true;
 	}
+
+	// Rumble gate, fed EVERY frame, edit mode included: the frame that halts at
+	// a breakpoint or the pause button is the one that has to stop the pads, and
+	// a graph preview in edit mode must never reach them. The game's own pause
+	// (time.pause) stops them too but keeps accepting, for pause-menu clicks.
+	HE::api::input::setRumbleGate(simulating, HE::api::time::isPaused());
 
 	// During play-in-editor, feed the engine clock + input snapshot so time.*/input.*
 	// nodes and scripts read fresh per-frame values (edit mode leaves them untouched).
@@ -9073,6 +9087,9 @@ void EditorApplication::setPlayMode(bool play)
 		}
 		m_isPlaying = true;
 		HE::api::time::reset(); // play-relative clock (elapsed/frameCount start at 0)
+		// Open now rather than at the next frame's gate feed, or a rumble from
+		// BeginPlay/OnInit, which run before that frame, would be refused.
+		HE::api::input::setRumbleGate(true, false);
 		// Capture warnings/errors for the post-PIE report.
 		{
 			std::lock_guard<std::mutex> lk(m_playLogMutex);
@@ -9291,6 +9308,11 @@ void EditorApplication::setPlayMode(bool play)
 	}
 	else
 	{
+		// Pads quiet FIRST, and the gate shut: every script teardown below
+		// (onStop, Destruct, OnShutdown) still runs, and none of them may start
+		// a buzz that nothing is left to stop — a `duration <= 0` rumble would
+		// otherwise run until the next Play.
+		HE::api::input::setRumbleGate(false, false);
 		// The session goes with the play session it belongs to. Before the
 		// hosts come down: leave() says goodbye on the wire, and a peer learns
 		// the seat is free now rather than waiting out a transport timeout.
@@ -10219,6 +10241,11 @@ void EditorApplication::OnShutdown()
 	// deletes it by hand. Ahead of everything else here because it is the only
 	// item in this function that outlives the process if it is skipped.
 	m_collab.shutdown();
+
+	// Shut the gate (stops the pads) while the sink still points at a live
+	// Input, then take the sink down — it captures `this`.
+	HE::api::input::setRumbleGate(false, false);
+	HE::api::input::setRumbleSink({});
 
 	// The recovery snapshot goes only when this is the exit the user asked for:
 	// the UI's quit (after the unsaved-changes prompt — saved, or "Don't Save"
