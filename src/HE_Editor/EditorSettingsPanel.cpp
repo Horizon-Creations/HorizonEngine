@@ -897,10 +897,13 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		{
 			SubGroup sub(cfg.RewardsEnabled);
 			EditorWidgets::checkbox("Success Sound", &cfg.RewardsSound);
+			EditorWidgets::checkbox("Show Progress", &cfg.RewardsShowProgress);
 		}
 		hint("A saved scene or asset, a finished build and an import say so for a "
 		     "moment in the middle of the footer. Nothing opens, nothing takes focus, "
-		     "and nothing waits for it. The sound is off unless you turn it on.");
+		     "and nothing waits for it. The sound is off unless you turn it on. "
+		     "Show Progress adds today's builds and your days in a row beside "
+		     "\"Ready\"; they are only kept on this computer.");
 	});
 
 	if (mode == SettingsMode::QuickSettings && shown == 0)
@@ -2042,6 +2045,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.AutosaveIntervalSec = 60;
 			cfg.RewardsEnabled      = true;
 			cfg.RewardsSound        = false;
+			cfg.RewardsShowProgress = true;
 			cfg.BloomEnabled     = true;
 			cfg.BloomThreshold    = 1.0f;
 			cfg.BloomIntensity    = 0.6f;

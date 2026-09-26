@@ -125,11 +125,16 @@ std::vector<SettingDesc> buildCatalog()
 	                    &EditorConfig::RewardsEnabled,
 	                    "Briefly show \"Saved\", \"Build succeeded\" or \"Imported N "
 	                    "assets\" in the footer when one of those just worked. "
-	                    "Off: nothing is shown or played."));
+	                    "Off: nothing is shown, played or counted."));
 	t.push_back(boolRow("rewards.sound", "Success Sound", "Feedback", "rewards",
 	                    &EditorConfig::RewardsSound,
 	                    "Play a short chime with the footer feedback. Needs Success "
 	                    "Feedback on."));
+	t.push_back(boolRow("rewards.showProgress", "Show Progress", "Feedback", "rewards",
+	                    &EditorConfig::RewardsShowProgress,
+	                    "Show successful builds today and days in a row with the "
+	                    "editor beside \"Ready\" in the footer. Needs Success "
+	                    "Feedback on; off hides the counters, they keep counting."));
 
 	// ── Editor ▸ Collaboration ──────────────────────────────────────────────
 	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Collaboration",

@@ -1185,6 +1185,7 @@ void EditorApplication::OnInit()
 	m_editorConfig.AutosaveIntervalSec          = globalstate.getCustomConfigInt("AutosaveIntervalSec", m_editorConfig.AutosaveIntervalSec);
 	m_editorConfig.RewardsEnabled               = globalstate.getCustomConfigBool("RewardsEnabled", m_editorConfig.RewardsEnabled);
 	m_editorConfig.RewardsSound                 = globalstate.getCustomConfigBool("RewardsSound", m_editorConfig.RewardsSound);
+	m_editorConfig.RewardsShowProgress          = globalstate.getCustomConfigBool("RewardsShowProgress", m_editorConfig.RewardsShowProgress);
 	// The environment overrides the stored config in one direction only: it can
 	// turn the bridge ON for a single run (a headless test, a scripted session),
 	// never off. Same shape as HE_COLLAB_OFFLINE and the HE_DUMP_* family.
@@ -10801,6 +10802,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("AutosaveIntervalSec",        m_editorConfig.AutosaveIntervalSec);
 	globalstate.setCustomConfigEntry("RewardsEnabled",             m_editorConfig.RewardsEnabled);
 	globalstate.setCustomConfigEntry("RewardsSound",               m_editorConfig.RewardsSound);
+	globalstate.setCustomConfigEntry("RewardsShowProgress",        m_editorConfig.RewardsShowProgress);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);

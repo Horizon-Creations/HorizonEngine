@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 // ── The reward moments' core (EditorRewards.h) ───────────────────────────────
@@ -111,4 +112,88 @@ TEST_CASE("Rewards: the chime is short, quiet and ends silent")
 	CHECK(std::abs(int(sample(0))) < 200);            // no click in…
 	CHECK(std::abs(int(sample(frames - 1))) < 200);   // …and none out
 	CHECK(chimePcm16(0).empty());
+}
+
+// ── Progress: the counters beside "Ready" (EditorRewards.h, "Rules") ─────────
+
+TEST_CASE("Rewards: dayBefore crosses months, years and leap days")
+{
+	CHECK(dayBefore("2026-09-26") == "2026-09-25");
+	CHECK(dayBefore("2026-10-01") == "2026-09-30");
+	CHECK(dayBefore("2026-03-01") == "2026-02-28");
+	CHECK(dayBefore("2028-03-01") == "2028-02-29");   // leap year
+	CHECK(dayBefore("2100-03-01") == "2100-02-28");   // century, not leap
+	CHECK(dayBefore("2000-03-01") == "2000-02-29");   // 400th, leap
+	CHECK(dayBefore("2027-01-01") == "2026-12-31");
+	// Not a date: nothing, not a crash.
+	CHECK(dayBefore("").empty());
+	CHECK(dayBefore("2026-9-26").empty());
+	CHECK(dayBefore("2026-02-30").empty());
+	CHECK(dayBefore("2026-13-01").empty());
+	CHECK(dayBefore("yesterday!").empty());
+}
+
+TEST_CASE("Rewards: a day counts once, builds every time")
+{
+	Tally t;
+	CHECK(progressText(t, "2026-09-26").empty());         // never counted: plain "Ready"
+	CHECK(recordUse(t, "2026-09-26", false));             // first moment of the day
+	CHECK(t.streakDays == 1);
+	CHECK(t.buildsToday == 0);
+	CHECK(progressText(t, "2026-09-26") == "0 builds today");
+	CHECK_FALSE(recordUse(t, "2026-09-26", false));       // a second save: nothing to write
+	CHECK(recordUse(t, "2026-09-26", true));
+	CHECK(progressText(t, "2026-09-26") == "1 build today");
+	CHECK(recordUse(t, "2026-09-26", true));
+	CHECK(progressText(t, "2026-09-26") == "2 builds today");
+	CHECK(t.streakDays == 1);
+}
+
+TEST_CASE("Rewards: consecutive days make a streak, a gap restarts it")
+{
+	Tally t;
+	CHECK(recordUse(t, "2026-12-30", false));
+	CHECK(recordUse(t, "2026-12-31", true));              // next day, a build first
+	CHECK(t.streakDays == 2);
+	CHECK(t.buildsToday == 1);
+	CHECK(progressText(t, "2026-12-31") == "1 build today · 2 days in a row");
+	CHECK(recordUse(t, "2027-01-01", false));             // across the year
+	CHECK(t.streakDays == 3);
+	CHECK(t.buildsToday == 0);                            // builds are per day
+
+	// The next morning, before any moment: the streak is still alive, today's
+	// builds are 0 — the day is not claimed by opening the editor.
+	CHECK(progressText(t, "2027-01-02") == "0 builds today · 3 days in a row");
+	// A day missed: the streak is gone from the display, and restarts at 1.
+	CHECK(progressText(t, "2027-01-03") == "0 builds today");
+	CHECK(recordUse(t, "2027-01-03", false));
+	CHECK(t.streakDays == 1);
+}
+
+TEST_CASE("Rewards: a clock set back or a hand-edited day does not break the tally")
+{
+	Tally t;
+	CHECK(recordUse(t, "2026-09-26", true));
+	CHECK(recordUse(t, "2026-09-27", false));
+	REQUIRE(t.streakDays == 2);
+	// Clock behind the stored day: left alone, nothing counted.
+	CHECK_FALSE(recordUse(t, "2026-09-25", true));
+	CHECK(t.day == "2026-09-27");
+	CHECK(t.streakDays == 2);
+	// A malformed "today" counts nothing either.
+	CHECK_FALSE(recordUse(t, "garbage", true));
+
+	// A stored day that does not parse: as if nothing was ever counted.
+	Tally bad{ "26.09.2026", 7, 9 };
+	CHECK(progressText(bad, "2026-09-26").empty());
+	CHECK(recordUse(bad, "2026-09-26", false));
+	CHECK(bad.streakDays == 1);
+	CHECK(bad.buildsToday == 0);
+}
+
+TEST_CASE("Rewards: localDay is a date dayBefore understands")
+{
+	const std::string today = localDay();
+	CHECK(today.size() == 10);
+	CHECK_FALSE(dayBefore(today).empty());
 }

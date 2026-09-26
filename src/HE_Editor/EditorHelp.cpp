@@ -3276,12 +3276,21 @@ namespace
 	  "succeeded\", \"Imported 3 assets\") and then goes back to \"Ready\". "
 	  "Nothing opens, nothing takes focus and nothing waits for it. Saves by an "
 	  "MCP client or a script, the autosave and failed builds show nothing. Off: "
-	  "no feedback at all, and no sound either.",
+	  "no feedback at all, no sound and no progress counted.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Success Sound", "",
 	  "A short, quiet chime together with the footer feedback. Off by default. It "
 	  "plays through the project's master volume, so muting the project mutes "
 	  "it too.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Show Progress", "",
+	  "Beside \"Ready\" in the footer: how many builds succeeded today, and from "
+	  "the second day on how many days in a row you have saved, built or "
+	  "imported something. A day counts from its first such action, not from "
+	  "opening the editor. No points, no levels, nothing shared: the numbers "
+	  "stay in this computer's editor settings. Off hides them; they keep "
+	  "counting while Success Feedback is on, and Success Feedback off stops "
+	  "both.",
 	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
 	  "How a variable is drawn in a HorizonCode graph's list: name and type on "

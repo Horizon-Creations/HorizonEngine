@@ -2,8 +2,12 @@
 #include "EditorApplication.h"   // AppContext, EditorConfig
 #include <HorizonScene/AudioEngine.h>
 
+#include <Diagnostics/GlobalState.h>
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
@@ -70,6 +74,98 @@ Feed::Look Feed::look(double now) const
 	return lk;
 }
 
+namespace
+{
+struct Ymd { int y = 0, m = 0, d = 0; };
+
+int daysIn(int y, int m)
+{
+	static constexpr int kDays[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+	const bool leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+	return (m == 2 && leap) ? 29 : kDays[m - 1];
+}
+
+// Strict YYYY-MM-DD: exactly ten characters, a real calendar date.
+bool parseDay(const std::string& s, Ymd& out)
+{
+	if (s.size() != 10 || s[4] != '-' || s[7] != '-') return false;
+	for (int i : { 0, 1, 2, 3, 5, 6, 8, 9 })
+		if (s[i] < '0' || s[i] > '9') return false;
+	const auto num = [&](int at, int len) { return std::stoi(s.substr(at, len)); };
+	Ymd v{ num(0, 4), num(5, 2), num(8, 2) };
+	if (v.y < 1 || v.m < 1 || v.m > 12 || v.d < 1 || v.d > daysIn(v.y, v.m)) return false;
+	out = v;
+	return true;
+}
+
+std::string formatDay(const Ymd& v)
+{
+	char buf[16];
+	std::snprintf(buf, sizeof buf, "%04d-%02d-%02d", v.y, v.m, v.d);
+	return buf;
+}
+} // namespace
+
+std::string dayBefore(const std::string& ymd)
+{
+	Ymd v;
+	if (!parseDay(ymd, v)) return {};
+	if (--v.d < 1)
+	{
+		if (--v.m < 1) { v.m = 12; --v.y; }
+		if (v.y < 1) return {};
+		v.d = daysIn(v.y, v.m);
+	}
+	return formatDay(v);
+}
+
+bool recordUse(Tally& t, const std::string& today, bool build)
+{
+	Ymd now;
+	if (!parseDay(today, now)) return false;
+	if (t.day == today)
+	{
+		if (!build) return false;   // the day is already counted
+		++t.buildsToday;
+		return true;
+	}
+	// The clock is behind the stored day. YYYY-MM-DD orders as text.
+	Ymd stored;
+	if (parseDay(t.day, stored) && today < t.day) return false;
+
+	t.streakDays  = (t.day == dayBefore(today) && t.streakDays > 0) ? t.streakDays + 1 : 1;
+	t.day         = today;
+	t.buildsToday = build ? 1 : 0;
+	return true;
+}
+
+std::string progressText(const Tally& t, const std::string& today)
+{
+	Ymd stored;
+	if (!parseDay(t.day, stored)) return {};
+	const bool isToday = t.day == today;
+	const bool alive   = isToday || t.day == dayBefore(today);
+	const int  builds  = isToday ? std::max(t.buildsToday, 0) : 0;
+
+	std::string s = builds == 1 ? std::string("1 build today")
+	                            : std::to_string(builds) + " builds today";
+	if (alive && t.streakDays >= 2)
+		s += " · " + std::to_string(t.streakDays) + " days in a row";
+	return s;
+}
+
+std::string localDay()
+{
+	const std::time_t now = std::time(nullptr);
+	std::tm tm{};
+#ifdef _WIN32
+	localtime_s(&tm, &now);
+#else
+	localtime_r(&now, &tm);
+#endif
+	return formatDay({ tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday });
+}
+
 std::vector<uint8_t> chimePcm16(int sampleRate)
 {
 	// Own constant: M_PI needs _USE_MATH_DEFINES on MSVC.
@@ -110,7 +206,31 @@ std::vector<uint8_t> chimePcm16(int sampleRate)
 
 namespace
 {
-Feed s_feed;
+Feed  s_feed;
+Tally s_tally;
+bool  s_tallyLoaded = false;
+
+void loadTally(AppContext& ctx)
+{
+	if (s_tallyLoaded) return;
+	s_tallyLoaded = true;
+	if (!ctx.globalState) return;
+	const GlobalState& gs = *ctx.globalState;
+	s_tally.day         = gs.getCustomConfigString("RewardsDay", "");
+	s_tally.buildsToday = std::max(0, gs.getCustomConfigInt("RewardsBuildsToday", 0));
+	s_tally.streakDays  = std::max(0, gs.getCustomConfigInt("RewardsStreakDays", 0));
+}
+
+// Before fire()'s once-per-frame fold — see "Rules" in the header.
+void tallyMoment(AppContext& ctx, bool build)
+{
+	loadTally(ctx);
+	if (!recordUse(s_tally, localDay(), build) || !ctx.globalState) return;
+	ctx.globalState->setCustomConfigEntry("RewardsDay",         s_tally.day);
+	ctx.globalState->setCustomConfigEntry("RewardsBuildsToday", s_tally.buildsToday);
+	ctx.globalState->setCustomConfigEntry("RewardsStreakDays",  s_tally.streakDays);
+	ctx.globalState->writeConfig();
+}
 
 void playChime(AppContext& ctx)
 {
@@ -141,6 +261,7 @@ int frameNo()
 void fire(AppContext& ctx, Moment m, int count)
 {
 	if (!ctx.editorConfig.RewardsEnabled) return;
+	tallyMoment(ctx, m == Moment::BuildSucceeded);
 	if (!s_feed.push(m, count, nowSec(), frameNo())) return;
 	if (ctx.editorConfig.RewardsSound) playChime(ctx);
 }
@@ -154,10 +275,39 @@ void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool succ
 }
 
 #ifdef HE_IMGUI_ENABLED
-void drawFooterStatus(AppContext& ctx, const char* idleText)
+namespace
 {
-	const float winW  = ImGui::GetWindowWidth();
-	const float idleW = ImGui::CalcTextSize(idleText).x;
+// localDay() once a second rather than every frame; a new day still shows
+// within a second of midnight.
+const std::string& todayCached()
+{
+	static std::string day;
+	static double      at = -1.0;
+	const double now = ImGui::GetTime();
+	if (at < 0.0 || now - at >= 1.0 || now < at) { day = localDay(); at = now; }
+	return day;
+}
+} // namespace
+
+void drawFooterStatus(AppContext& ctx, const char* idleTextIn)
+{
+	const float winW = ImGui::GetWindowWidth();
+
+	// "Ready · 3 builds today · 5 days in a row" — or plain "Ready" when the
+	// counters are off, empty, or would not fit in the middle third.
+	std::string idle = idleTextIn;
+	if (ctx.editorConfig.RewardsEnabled && ctx.editorConfig.RewardsShowProgress)
+	{
+		loadTally(ctx);
+		const std::string p = progressText(s_tally, todayCached());
+		if (!p.empty())
+		{
+			std::string full = idle + " · " + p;
+			if (ImGui::CalcTextSize(full.c_str()).x <= winW / 3.0f) idle = std::move(full);
+		}
+	}
+	const char* idleText = idle.c_str();
+	const float idleW    = ImGui::CalcTextSize(idleText).x;
 	const Feed::Look lk = ctx.editorConfig.RewardsEnabled ? s_feed.look(ImGui::GetTime())
 	                                                      : Feed::Look{};
 	if (!lk.active)
