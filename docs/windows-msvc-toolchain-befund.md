@@ -186,7 +186,7 @@ Build › Build and Reload Game Logic. Testprojekt: C++-Projekt unter `C:\hw96\H
 
 | Lauf | Editor-Pfad | Env | Toolchain-Dialog nach 15 s | GameLogic-Build |
 |---|---|---|---|---|
-| A | `C:\hw96\deploy\Editor` | sauber | keiner | ok, `GameLogic.dll` |
+| A | `C:\hw96\deploy\Editor` | sauber | nicht sauber beobachtet (erstes Bild nach 20 s, Build-Fenster schon offen) | ok, `GameLogic.dll` |
 | C | `C:\hw96\HE Test\Editor` (Leerzeichen) | sauber | keiner | ok, `GameLogic.dll` |
 | B (Negativkontrolle) | `C:\hw96\HE Test\Editor` | `CMAKE_GENERATOR=NMake Makefiles` | **„C++ Toolchain Not Found“**: „cmake 4.4.0 found.“, „No working C++ compiler was detected.“ | scheitert nach Sekunden mit cmakes eigener Meldung: `Running 'nmake' '-?' failed` / `CMAKE_CXX_COMPILER not set` |
 
@@ -197,9 +197,14 @@ cmake, Pfad mit Leerzeichen), `CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026`,
 Linker `…/18/BuildTools/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/link.exe`, Compiler-ID
 MSVC 19.51.36257.0. **Benutzt wird von den drei Instanzen BuildTools 2026 (18.9)**, wie in §4a.
 
-Lauf B zeigt, dass das Ausbleiben des Dialogs in A/C etwas bedeutet: Die Start-Probe ist nach
-15 s fertig, und ein fehlender Compiler öffnet den Dialog mit einem cmake-Fehler statt eines
-cmd-Syntaxfehlers. Nichts hängt. Code-seitig laufen unter Windows alle Aufrufe in HcCodegen durch
+Lauf B zeigt, dass das Ausbleiben des Dialogs in C etwas bedeutet: Nach 15 s ist die
+Start-Probe fertig, und ein fehlender Compiler öffnet den Dialog von selbst. Die aufgeklappten
+„Details“ habe ich nicht gesehen. Der cmake-Fehler oben stammt aus dem Build-Log von
+`buildDylib`, das über dasselbe `runStreaming` läuft, und nicht aus dem Dialog. Nichts hängt.
+Direkt beobachtet ist in B außerdem die Zeile „cmake 4.4.0 found.“, obwohl kein cmake auf PATH
+lag: Die cmake-Auflösung für Tool Status/Dialog geht also über das gebündelte, gequotete cmake.
+Dass die Quote-Hülle den Compiler-Teil nicht verschluckt, zeigt nicht B (dort sähe „kein
+Compiler“ bei kaputtem Quoting gleich aus), sondern C. Code-seitig laufen unter Windows alle Aufrufe in HcCodegen durch
 `cmdLine()`: `cmakeAnswers` (`std::system`) und `runStreaming` (`_popen`), und darüber
 auch `commandExists("winget")` und der winget-Installer hinter „Install Automatically“.
 
@@ -220,6 +225,8 @@ Verbleibende Lücken:
   Ohne gestagtes `SDK/` im Deploy wurde `he_sdk_config.json` (Dev-Fallback) aus dem Build-Baum
   neben die exe kopiert.
 - Export mit „Compile HorizonCode“ nicht gefahren; `buildDylib` ist dort derselbe Aufruf.
+- `he_tests` in diesem Schritt nicht erneut gelaufen. Stand ist der Lauf des Chefchens auf
+  `336d09f9` (218/218).
 
 ## 5. Offen für Schritt 2
 
