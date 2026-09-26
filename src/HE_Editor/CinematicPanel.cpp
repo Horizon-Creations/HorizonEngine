@@ -898,6 +898,10 @@ void CinematicPanel::render(AppContext& ctx, const std::string& assetPath,
 	const float avail    = ImGui::GetContentRegionAvail().y - readoutH;
 	const float previewH = std::clamp(avail * 0.5f, 80.0f, 520.0f);
 	drawPreview(st, ctx, *seq, previewH);
+	// Fetched again: the render's extraction may have made a material resident
+	// (RenderExtractor, ensureResident), and a load moves every asset pointer.
+	seq = seqOf(st, ctx);
+	if (!seq) { ImGui::End(); return; }
 
 	Cin::Labels labels;
 	for (const SequenceBinding& b : seq->bindings)
