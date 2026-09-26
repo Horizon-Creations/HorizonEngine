@@ -94,6 +94,7 @@ HLSL_ENTRY_PROFILE = {
     "SSAOMain": "ps_5_0", "SSAOBlurMain": "ps_5_0",
     "UIPSMain": "ps_5_0", "UIVSMain": "vs_5_0",
     "PSPreviewMesh": "ps_5_0", "PSPreviewSkinned": "ps_5_0",  # kWorldPreviewPSHLSL
+    "VSVelocity": "vs_5_0", "PSVelocity": "ps_5_0",            # kTaaVelocityHLSL
     "main": "ps_5_0",  # the common case; exceptions below
 }
 

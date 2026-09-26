@@ -33,6 +33,7 @@
 #include <HorizonRendering/WorldPreviewGrid.h> // RenderWorldPreview: grid, background, dump
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
+#include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D12/Vulkan)
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
 #include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
 #include <SDL3/SDL.h>
@@ -1570,6 +1571,164 @@ struct D3D11RendererImpl
     // capabilities (docs/anti-aliasing-plan.md). Off runs aaBlitPS instead of
     // fxaaPS — the pass itself always draws, it is what fills viewportRTV.
     HE::AAMethod aaMethod = HE::AAMethod::FXAA;
+    // Post-resolve sharpen of the temporal mode (AntiAliasingSettings::sharpness).
+    float aaSharpness = 0.35f;
+
+    // ── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ───────────────────────
+    // GL's RenderVelocity/RenderTaa, one for one: a positions-only velocity pass
+    // over the opaque objects (depth-tested LESS_EQUAL against the scene depth,
+    // no write), a resolve on the tonemapped LDR image into a ping-pong RGBA8
+    // history, and the sharpen in the AA-resolve slot. All three shaders are
+    // optional: a compile failure leaves them null, GetCapabilities then reports
+    // no temporal AA and ResolveAAMethod falls back to SMAA.
+    ComPtr<ID3D11VertexShader>       taaVelocityVS;
+    ComPtr<ID3D11PixelShader>        taaVelocityPS, taaResolvePS, taaSharpenPS;
+    ComPtr<ID3D11Buffer>             taaVelocityCB;     // HE::TaaVelocityConstants
+    ComPtr<ID3D11DepthStencilState>  taaVelocityDSS;    // LESS_EQUAL, no depth write
+    ComPtr<ID3D11Texture2D>          taaVelocityTex;    // RG16F, uvNow - uvPrev
+    ComPtr<ID3D11RenderTargetView>   taaVelocityRTV;
+    ComPtr<ID3D11ShaderResourceView> taaVelocitySRV;
+    ComPtr<ID3D11Texture2D>          taaHistoryTex[2];  // RGBA8, ping-pong
+    ComPtr<ID3D11RenderTargetView>   taaHistoryRTV[2];
+    ComPtr<ID3D11ShaderResourceView> taaHistorySRV[2];
+    uint32_t  taaW = 0, taaH = 0;
+    int       taaHistoryCur   = 0;
+    bool      taaHistoryValid = false;
+    uint32_t  taaFrameIndex   = 0;
+    glm::vec2 taaJitter{ 0.0f };
+    // Set by the caller of DrawScene: true only when this frame runs the post
+    // chain that resolves the jitter (DrawViewportFrame's HDR path). The
+    // swapchain path has no LDR image and no AA slot — jittering it would shake
+    // the image by a subpixel every frame with nothing to average it out.
+    bool      taaFrame = false;
+    glm::mat4 taaPrevViewProj{ 1.0f };
+    std::unordered_map<uint32_t, glm::mat4> taaPrevTransforms, taaCurTransforms;
+
+    bool taaReady() const
+    {
+        return taaVelocityVS && taaVelocityPS && taaResolvePS && taaSharpenPS
+            && taaVelocityCB && taaVelocityDSS;
+    }
+
+    void destroyTaaTargets()
+    {
+        taaVelocityRTV.Reset(); taaVelocitySRV.Reset(); taaVelocityTex.Reset();
+        for (int i = 0; i < 2; ++i)
+        { taaHistoryRTV[i].Reset(); taaHistorySRV[i].Reset(); taaHistoryTex[i].Reset(); }
+        taaW = taaH = 0;
+        taaHistoryValid = false;
+        taaPrevTransforms.clear();
+        taaCurTransforms.clear();
+    }
+
+    // Targets follow the scene size. A fresh history is garbage, not history:
+    // the first frame after a (re)create shows the current frame only.
+    bool ensureTaaTargets(uint32_t w, uint32_t h)
+    {
+        w = std::max(1u, w); h = std::max(1u, h);
+        if (taaHistoryTex[0] && taaW == w && taaH == h) return true;
+        destroyTaaTargets();
+        auto makeRT = [&](DXGI_FORMAT fmt, ComPtr<ID3D11Texture2D>& t,
+                          ComPtr<ID3D11RenderTargetView>& rtv,
+                          ComPtr<ID3D11ShaderResourceView>& srv) -> bool
+        {
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = w; td.Height = h;
+            td.MipLevels = td.ArraySize = 1;
+            td.Format = fmt; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(device->CreateTexture2D(&td, nullptr, &t))) return false;
+            device->CreateRenderTargetView(t.Get(), nullptr, &rtv);
+            device->CreateShaderResourceView(t.Get(), nullptr, &srv);
+            return rtv && srv;
+        };
+        const bool ok = makeRT(DXGI_FORMAT_R16G16_FLOAT, taaVelocityTex, taaVelocityRTV, taaVelocitySRV)
+                     && makeRT(DXGI_FORMAT_R8G8B8A8_UNORM, taaHistoryTex[0], taaHistoryRTV[0], taaHistorySRV[0])
+                     && makeRT(DXGI_FORMAT_R8G8B8A8_UNORM, taaHistoryTex[1], taaHistoryRTV[1], taaHistorySRV[1]);
+        if (!ok)
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: TAA targets could not be created");
+            destroyTaaTargets();
+            return false;
+        }
+        taaW = w; taaH = h;
+        taaHistoryCur   = 0;
+        taaHistoryValid = false;
+        return true;
+    }
+
+    // Screen-space motion of the opaque geometry: for every visible object,
+    // where its vertices are now vs. where they were last frame (camera AND
+    // object motion). Runs right after the opaque + skinned draws, against the
+    // depth they left in the bound DSV, so only visible surfaces report; sky,
+    // skinned meshes and the blended tail keep the clear's zero, exactly as on
+    // GL. `vpJit` must be the scene draws' own matrix — the LESS_EQUAL test only
+    // holds if the velocity raster reproduces their depth, so the product is
+    // formed in the same order (vpJit * transform). Restores the target, depth
+    // state, shaders and b0 the scene pass had.
+    void renderTaaVelocity(ID3D11DeviceContext* ctx, const glm::mat4& vpClean,
+                           const glm::mat4& vpJit, ContentManager* cm)
+    {
+        if (!taaVelocityRTV) return;
+        ComPtr<ID3D11RenderTargetView> savedRTV;
+        ComPtr<ID3D11DepthStencilView> savedDSV;
+        ctx->OMGetRenderTargets(1, savedRTV.GetAddressOf(), savedDSV.GetAddressOf());
+        if (!savedDSV) return;
+
+        // Cleared to zero ("did not move") by DrawViewportFrame, before DrawScene
+        // — which returns early on an empty scene, and the resolve must not
+        // then read last frame's motion.
+        ID3D11RenderTargetView* velRTV = taaVelocityRTV.Get();
+        ctx->OMSetRenderTargets(1, &velRTV, savedDSV.Get());
+        ctx->OMSetDepthStencilState(taaVelocityDSS.Get(), 0);
+        ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+        ctx->IASetInputLayout(inputLayout.Get());
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(taaVelocityVS.Get(), nullptr, 0);
+        ctx->PSSetShader(taaVelocityPS.Get(), nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, taaVelocityCB.GetAddressOf());
+
+        const UINT stride = 8 * sizeof(float);
+        const UINT offset = 0;
+        taaCurTransforms.clear();
+        for (const uint32_t idx : m_sortedIndices)
+        {
+            const RenderObject& obj = m_renderWorld.objects[idx];
+            const GpuMesh* mesh = resolveMesh(obj.meshAssetId, cm);
+            if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
+
+            // An object seen for the first time reports no motion — its
+            // "previous" position is where it is now.
+            const auto it = taaPrevTransforms.find(obj.entityId);
+            const glm::mat4 prevModel = (it != taaPrevTransforms.end()) ? it->second : obj.transform;
+            taaCurTransforms[obj.entityId] = obj.transform;
+
+            HE::TaaVelocityConstants c;
+            c.mvpJitter = vpJit * obj.transform;
+            c.mvpNow    = vpClean * obj.transform;
+            c.mvpPrev   = taaPrevViewProj * prevModel;
+            D3D11_MAPPED_SUBRESOURCE m{};
+            if (FAILED(ctx->Map(taaVelocityCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) continue;
+            std::memcpy(m.pData, &c, sizeof(c));
+            ctx->Unmap(taaVelocityCB.Get(), 0);
+            ctx->IASetVertexBuffers(0, 1, mesh->vbuf.GetAddressOf(), &stride, &offset);
+            ctx->IASetIndexBuffer(mesh->ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+            ctx->DrawIndexed(mesh->indexCount, 0, 0);
+        }
+
+        // Advance the history HERE, at the end of the one pass that consumed
+        // it, so a frame is never compared against itself.
+        taaPrevViewProj = vpClean;
+        taaPrevTransforms.swap(taaCurTransforms);
+
+        ID3D11RenderTargetView* rtv = savedRTV.Get();
+        ctx->OMSetRenderTargets(1, &rtv, savedDSV.Get());
+        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        ctx->VSSetShader(vs.Get(), nullptr, 0);
+        ctx->PSSetShader(ps.Get(), nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, perObjectCB.GetAddressOf());
+    }
 
     // ── SSAO pipeline ──────────────────────────────────────────────────────
     // Position prepass
@@ -3438,7 +3597,55 @@ struct D3D11RendererImpl
 
         postFxReady = fsVS && tonemapPS && fxaaPS && smaaPS && aaBlitPS && bloomBrightPS && bloomBlurPS
                    && linearSampler && noDepthDSS && fsRastState && postFxCB;
+        if (postFxReady) createTaaPipeline();
         return postFxReady;
+    }
+
+    // TAA (A2/A3): optional on top of the post chain. A failed compile logs
+    // (through `compile` above's twin) and leaves taaReady() false — the AA
+    // combo then greys TAA out and a saved TAA setting resolves to SMAA.
+    void createTaaPipeline()
+    {
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        auto compile = [&](const char* src, const char* entry, const char* profile,
+                           ComPtr<ID3DBlob>& out) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(D3DCompile(src, strlen(src), entry, nullptr, nullptr,
+                                  entry, profile, flags, 0, &out, &err)))
+            {
+                HE_LOG_ERROR(RHI, "D3D11Renderer: TAA shader '%s' failed: %s", entry,
+                             err ? static_cast<const char*>(err->GetBufferPointer()) : "?");
+                return false;
+            }
+            return true;
+        };
+        ComPtr<ID3DBlob> velVS, velPS, resPS, shpPS;
+        if (!compile(kTaaVelocityHLSL, "VSVelocity", "vs_5_0", velVS)
+         || !compile(kTaaVelocityHLSL, "PSVelocity", "ps_5_0", velPS)
+         || !compile(kTaaResolveHLSL,  "main",       "ps_5_0", resPS)
+         || !compile(kTaaSharpenHLSL,  "main",       "ps_5_0", shpPS))
+            return;
+        device->CreateVertexShader(velVS->GetBufferPointer(), velVS->GetBufferSize(), nullptr, &taaVelocityVS);
+        device->CreatePixelShader (velPS->GetBufferPointer(), velPS->GetBufferSize(), nullptr, &taaVelocityPS);
+        device->CreatePixelShader (resPS->GetBufferPointer(), resPS->GetBufferSize(), nullptr, &taaResolvePS);
+        device->CreatePixelShader (shpPS->GetBufferPointer(), shpPS->GetBufferSize(), nullptr, &taaSharpenPS);
+
+        { D3D11_BUFFER_DESC bd{};
+          bd.ByteWidth = sizeof(HE::TaaVelocityConstants); bd.Usage = D3D11_USAGE_DYNAMIC;
+          bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+          device->CreateBuffer(&bd, nullptr, &taaVelocityCB); }
+
+        // Test against the scene depth, never write it: the sky and the blended
+        // tail after the velocity pass still test against the opaque depth.
+        { D3D11_DEPTH_STENCIL_DESC ds{};
+          ds.DepthEnable    = TRUE;
+          ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+          ds.DepthFunc      = D3D11_COMPARISON_LESS_EQUAL;
+          device->CreateDepthStencilState(&ds, &taaVelocityDSS); }
     }
 
     void updatePostFxCB(const float (&data)[4])
@@ -5201,6 +5408,11 @@ void D3D11Renderer::Shutdown()
     m_impl->reflAttrRTV.Reset(); m_impl->reflAttrSRV.Reset(); m_impl->reflAttrTex.Reset();
     m_impl->reflNdcRTV.Reset();  m_impl->reflNdcSRV.Reset();  m_impl->reflNdcTex.Reset();
     m_impl->reflPrepassReady = false; m_impl->reflPrepassFailed = false;
+    // TAA: history/velocity targets and the three shaders.
+    m_impl->destroyTaaTargets();
+    m_impl->taaVelocityVS.Reset(); m_impl->taaVelocityPS.Reset();
+    m_impl->taaResolvePS.Reset();  m_impl->taaSharpenPS.Reset();
+    m_impl->taaVelocityCB.Reset(); m_impl->taaVelocityDSS.Reset();
     m_impl->uiFontAtlases.clear();
     m_impl->uiSampler.Reset();
     m_impl->gpuTimerShutdown();
@@ -5266,11 +5478,25 @@ void D3D11Renderer::DrawScene(int width, int height)
                           static_cast<float>(width) / static_cast<float>(height),
                           &m_editorCamera);
 
+    // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
+    // Chosen BEFORE anything builds a matrix, because every rasterising pass of
+    // the frame must share one offset. Two view-projections, one rule (GL's):
+    // the CLEAN one measures — velocity, the SSR/GI reprojections, the SSAO
+    // pre-pass — and the JITTERED one rasterises everything that lands in the
+    // image: sky, geometry, decals, transparency, debug lines. Without a TAA
+    // frame (see taaFrame) the two are the same matrix.
+    if (p.taaFrame)
+        p.taaJitter = HE::taaJitter(p.taaFrameIndex++);
+    const glm::mat4 viewProjClean = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+    const glm::mat4 viewProj      = p.taaFrame
+        ? HE::taaJitteredViewProj(viewProjClean, p.taaJitter, width, height)
+        : viewProjClean;
+
     // Sky is independent of scene geometry — always draw it here so it renders
     // even when objects/sortedIndices are empty (early returns below).
     {
         ID3D11DeviceContext* skyCtx = p.context.Get();
-        const glm::mat4 skyVP = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
+        const glm::mat4& skyVP = viewProj;
         p.drawSky(skyCtx, glm::inverse(skyVP), p.m_renderWorld.sunDirection, m_environment,
                   p.m_renderWorld.camera.position, p.m_wallTime);
     }
@@ -5307,7 +5533,6 @@ void D3D11Renderer::DrawScene(int width, int height)
         p.m_renderGraph.addPass(std::make_unique<GeometryPass>());
     }
 
-    const glm::mat4 viewProj  = p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view;
     const glm::mat4 camView   = p.m_renderWorld.camera.view;
     const glm::mat4 camProj   = p.m_renderWorld.camera.projection;
     const bool      shadows   = p.m_renderWorld.shadow.enabled && p.shadowSRV && p.depthVS;
@@ -5719,7 +5944,7 @@ void D3D11Renderer::DrawScene(int width, int height)
             ComPtr<ID3D11DepthStencilView> savedDSV;
             ctx->OMGetRenderTargets(1, savedRTV.GetAddressOf(), savedDSV.GetAddressOf());
 
-            giShadowSRV = p.runGiShadow(ctx, opaqueDCs_, viewProj,
+            giShadowSRV = p.runGiShadow(ctx, opaqueDCs_, viewProjClean,
                 std::max(1, width / 2), std::max(1, height / 2), p.m_renderWorld,
                 [&](HE::UUID id) -> const GpuMesh* { return p.resolveMesh(id, m_contentManager); },
                 p.cube, p.inputLayout.Get(), p.depthState.Get(), p.rasterState.Get());
@@ -5764,12 +5989,16 @@ void D3D11Renderer::DrawScene(int width, int height)
             ComPtr<ID3D11DepthStencilView> savedDSV;
             ctx->OMGetRenderTargets(1, savedRTV.GetAddressOf(), savedDSV.GetAddressOf());
 
-            aoSRV = p.runSSAO(ctx, opaqueDCs_, viewProj, camView, camProj, width, height,
+            // Unjittered while TAA is on (GL's call): the pre-pass measures, and
+            // the jitter between it and the scene raster is at most half a pixel
+            // in the AO/reflection lookups — invisible, while a jittered
+            // "previous" matrix would read the jitter as camera motion.
+            aoSRV = p.runSSAO(ctx, opaqueDCs_, viewProjClean, camView, camProj, width, height,
                 [&](HE::UUID id) -> const GpuMesh* { return p.resolveMesh(id, m_contentManager); },
                 p.cube, p.inputLayout.Get(), p.depthState.Get(), p.rasterState.Get(),
                 /*reflMrt=*/ssrFrameActive, aoWanted);
             if (ssrFrameActive)
-                ssrSRV = p.RenderForwardSSR(ctx, width, height, viewProj, camView);
+                ssrSRV = p.RenderForwardSSR(ctx, width, height, viewProjClean, camView);
 
             // Restore the scene render target and viewport
             ID3D11RenderTargetView* restRTV = savedRTV.Get();
@@ -6280,6 +6509,12 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->IASetInputLayout(p.inputLayout.Get());
         }
 
+        // ── TAA velocity (A2): screen-space motion of the opaque geometry, right
+        // after the passes whose depth it tests against and before the decals
+        // (which bind that depth as an SRV). Self-restoring.
+        if (p.taaFrame && p.taaVelocityRTV)
+            p.renderTaaVelocity(ctx, viewProjClean, viewProj, m_contentManager);
+
         // ── Screen-space decals ──────────────────────────────────────────────
         // After all opaque geometry (its depth is what the decal projects onto)
         // and before the transparent draws — the slot Metal and GL use for their
@@ -6335,6 +6570,22 @@ void D3D11Renderer::DrawViewportFrame()
     const bool useHDR = p.postFxReady && p.hdrRTV && p.ldrRTV && p.viewportRTV;
     ID3D11RenderTargetView* sceneRTV = useHDR ? p.hdrRTV.Get() : p.viewportRTV.Get();
 
+    // TAA runs only where this frame's post chain resolves it. Its targets are
+    // freed as soon as the mode is off, and the history with them — a stale one
+    // would blend against a different world the moment TAA comes back on.
+    p.taaFrame = useHDR && p.aaMethod == HE::AAMethod::TAA && p.taaReady()
+              && p.ensureTaaTargets(p.viewportW, p.viewportH);
+    if (!p.taaFrame && p.taaHistoryTex[0])
+    {
+        p.destroyTaaTargets();
+        p.taaJitter = glm::vec2(0.0f);
+    }
+    if (p.taaFrame)
+    {
+        const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };   // zero = "did not move"
+        p.context->ClearRenderTargetView(p.taaVelocityRTV.Get(), zero);
+    }
+
     p.context->OMSetRenderTargets(1, &sceneRTV, p.viewportDSV.Get());
     p.context->ClearRenderTargetView(sceneRTV, bgColor);
     p.context->ClearDepthStencilView(p.viewportDSV.Get(),
@@ -6375,22 +6626,53 @@ void D3D11Renderer::DrawViewportFrame()
           p.context->Draw(3, 0);
           ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
 
-        // AA resolve: ldrSRV → viewportRTV (final output sampled by ImGui).
-        // Always drawn — the method only picks the pixel shader.
+        // Temporal accumulation on the tonemapped image (A3): (ldr, history[prev],
+        // velocity) → history[cur]. The AA-resolve slot below then reads the
+        // resolved history instead of ldrSRV. Running on the LDR image keeps a
+        // single bright HDR sample from poisoning the next dozen frames.
+        ID3D11ShaderResourceView* aaSrc = p.ldrSRV.Get();
+        const bool aaTaa = p.taaFrame && p.taaHistoryRTV[0]
+                        && p.taaW == p.viewportW && p.taaH == p.viewportH;
+        if (aaTaa)
+        {
+            const int cur  = p.taaHistoryCur;
+            const int prev = 1 - cur;
+            const float cb[4] = { 1.0f / float(p.viewportW), 1.0f / float(p.viewportH),
+                                  p.taaHistoryValid ? HE::kTaaHistoryBlend : 0.0f, 0.0f };
+            p.updatePostFxCB(cb);
+            p.context->OMSetRenderTargets(1, p.taaHistoryRTV[cur].GetAddressOf(), nullptr);
+            p.context->PSSetShader(p.taaResolvePS.Get(), nullptr, 0);
+            ID3D11ShaderResourceView* srvs[3] = {
+                p.ldrSRV.Get(), p.taaHistorySRV[prev].Get(), p.taaVelocitySRV.Get() };
+            p.context->PSSetShaderResources(0, 3, srvs);
+            p.context->Draw(3, 0);
+            ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr);
+            ID3D11ShaderResourceView* nulls[3] = {};
+            p.context->PSSetShaderResources(0, 3, nulls);
+            // This frame's result IS next frame's history: flip the ping-pong.
+            aaSrc = p.taaHistorySRV[cur].Get();
+            p.taaHistoryCur   = prev;
+            p.taaHistoryValid = true;
+        }
+
+        // AA resolve: ldrSRV (or the TAA result) → viewportRTV (final output
+        // sampled by ImGui). Always drawn — the method only picks the pixel
+        // shader; TAA's slot is the sharpen the temporal blur asks for.
         { const float cb[4] = { 1.0f / float(p.viewportW),
-                                1.0f / float(p.viewportH), 0, 0 };
+                                1.0f / float(p.viewportH), aaTaa ? p.aaSharpness : 0.0f, 0 };
           p.updatePostFxCB(cb);
           p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
-          p.context->PSSetShader(p.aaMethod == HE::AAMethod::Off  ? p.aaBlitPS.Get()
+          p.context->PSSetShader(aaTaa                             ? p.taaSharpenPS.Get()
+                               : p.aaMethod == HE::AAMethod::Off  ? p.aaBlitPS.Get()
                                : p.aaMethod == HE::AAMethod::SMAA ? p.smaaPS.Get()
                                                                   : p.fxaaPS.Get(), nullptr, 0);
-          ID3D11ShaderResourceView* srv = p.ldrSRV.Get();
-          p.context->PSSetShaderResources(0, 1, &srv);
+          p.context->PSSetShaderResources(0, 1, &aaSrc);
           p.context->Draw(3, 0);
           ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
 
         // Clear stale bindings, restore scene pipeline state for any future draws.
-        { ID3D11ShaderResourceView* nulls[2] = {}; p.context->PSSetShaderResources(0, 2, nulls); }
+        // t0..t2: the history the sharpen just read is next frame's resolve target.
+        { ID3D11ShaderResourceView* nulls[3] = {}; p.context->PSSetShaderResources(0, 3, nulls); }
         p.context->OMSetDepthStencilState(p.depthState.Get(), 0);
         p.context->RSSetState(p.rasterState.Get());
         p.context->PSSetSamplers(0, 1, p.sampler.GetAddressOf());
@@ -6439,6 +6721,8 @@ void D3D11Renderer::Render()
         vp.Height   = static_cast<float>(p.height);
         vp.MaxDepth = 1.0f;
         p.context->RSSetViewports(1, &vp);
+        // No post chain here, so nothing would resolve a jitter (see taaFrame).
+        p.taaFrame = false;
         DrawScene(p.width, p.height);
         // UI canvas pass: swapchain RT + scene viewport already bound.
         p.renderUIPass(p.context.Get(), p.width, p.height);
@@ -6463,6 +6747,10 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     // C6). postFxReady is the honest answer: in the swapchain path the switch
     // exists but does nothing, exactly as on Vulkan.
     c.supportsScreenSpaceReflections = m_impl->postFxReady;
+    // TAA (A2/A3): velocity pass + temporal resolve + sharpen, on the same
+    // editor-viewport post chain SSR needs — false only if a TAA shader failed
+    // to compile. The swapchain path renders unjittered either way (taaFrame).
+    c.supportsTemporalAA = m_impl->postFxReady && m_impl->taaReady();
     return c;
 }
 
@@ -6564,13 +6852,14 @@ bool D3D11Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
 //   which it will not, once the live size is back. So the intermediates are
 //   rebuilt at the live size here, or the next real frame would draw a
 //   request-sized HDR image into the live viewport.
-// * There is no TAA on D3D11; the per-camera temporal state is forward SSR's
-//   (the previous frame's HDR copy plus its half-res ping-pong). It gets the
-//   TAA rule: invalid before the still (implicitly — createHDRTargets drops
-//   the copy and destroySSRTargets the ping-pong) and invalid after, so the
-//   screenshot does not reflect the viewport's past and the viewport not the
-//   screenshot's. One frame without SSR on each side, no wrong reflections.
-//   GI probe history is world-space and stays.
+// * The per-camera temporal state is TAA's history and forward SSR's (the
+//   previous frame's HDR copy plus its half-res ping-pong). Both get GL's TAA
+//   rule: invalid before the still (explicitly for TAA — a request at exactly
+//   the viewport's size keeps its targets; implicitly for SSR, createHDRTargets
+//   drops the copy and destroySSRTargets the ping-pong) and invalid after, so
+//   the screenshot does not blend or reflect the viewport's past and the
+//   viewport not the screenshot's. One unconverged / SSR-less frame on each
+//   side, no ghost. GI probe history is world-space and stays.
 //
 // Not run: the GPU-timer frame, the overlay, Present, the counter reset —
 // those belong to REAL frames. Per-request path, not per-frame.
@@ -6605,6 +6894,7 @@ bool D3D11Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 
     // Fresh pair at the request (plus HDR & co. at that size; SSR history gone).
     p.createViewportRT(width, height);
+    p.taaHistoryValid = false;
 
     bool ok = p.viewportRTV && p.viewportDSV;
     if (ok)
@@ -6638,9 +6928,11 @@ bool D3D11Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     if (liveW && liveH && (liveW != width || liveH != height))
         p.createHDRTargets(liveW, liveH);
     // The SSR history is the screenshot camera's now (a same-size request kept
-    // the targets, and the frame just captured into them).
+    // the targets, and the frame just captured into them). So is TAA's: the
+    // still's resolve marked it valid.
     p.ssrColorHistValid = false;
     p.ssrHistValid      = false;
+    p.taaHistoryValid   = false;
 
     if (!ok) rgba.clear();
     return ok;
@@ -6952,7 +7244,8 @@ void D3D11Renderer::SetBloomSettings(const BloomSettings& s)
 
 void D3D11Renderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 {
-    m_impl->aaMethod = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+    m_impl->aaMethod    = IRenderer::ResolveAAMethod(s.method, GetCapabilities());
+    m_impl->aaSharpness = std::clamp(s.sharpness, 0.0f, 1.0f);
 }
 
 void D3D11Renderer::InvalidateMaterial(const HE::UUID& materialId)

@@ -416,6 +416,127 @@ float4 main(In i) : SV_Target {
 }
 )HLSL";
 
+// ─── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ─────────────────────────
+// The HLSL twins of GL's kTaaVelocityVS/FS, kTaaResolveFS and kTaaSharpenFS
+// (OpenGLRenderer.cpp) and of Metal's kTaaMSL, same rule: the geometry is
+// RASTERIZED with the jittered matrix, the MOTION is measured with unjittered
+// ones. Mixing those up makes every static pixel report the jitter as movement,
+// and TAA then chases its own offset. The host half (jitter sequence, jitter
+// matrix, history weight, the 192-byte constant layout) is HE::taa* in
+// HorizonRendering/TemporalAA.h.
+//
+// Velocity: its own pass over the opaque objects, positions only, depth-tested
+// LESS_EQUAL without writing against the scene depth — material-agnostic, so a
+// graph material that never heard of velocity cannot leave undefined motion
+// behind. Output in TEXTURE-UV units (D3D's v points down, so ndc y is flipped
+// exactly like Metal's twin) — the resolve subtracts it from its own uv.
+// cbuffer b0 = HE::TaaVelocityConstants. Same vertex layout as the scene VS.
+inline constexpr const char* kTaaVelocityHLSL = R"HLSL(
+cbuffer TaaVelocityCB : register(b0)
+{
+    float4x4 uMvpJitter;   // rasterizes
+    float4x4 uMvpNow;      // measures (unjittered)
+    float4x4 uMvpPrev;     // measures (unjittered, last frame's camera + model)
+};
+struct VSIn  { float3 pos : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
+struct VSOut { float4 clip : SV_POSITION; float4 clipNow : TEXCOORD0; float4 clipPrev : TEXCOORD1; };
+VSOut VSVelocity(VSIn i)
+{
+    float4 p = float4(i.pos, 1.0);
+    VSOut o;
+    o.clip     = mul(uMvpJitter, p);
+    o.clipNow  = mul(uMvpNow,    p);
+    o.clipPrev = mul(uMvpPrev,   p);
+    return o;
+}
+float2 PSVelocity(VSOut i) : SV_TARGET
+{
+    float2 ndcNow  = i.clipNow.xy  / max(i.clipNow.w,  1e-6);
+    float2 ndcPrev = i.clipPrev.xy / max(i.clipPrev.w, 1e-6);
+    return (ndcNow - ndcPrev) * float2(0.5, -0.5);   // uvNow - uvPrev
+}
+)HLSL";
+
+// Blend this frame's tonemapped image (t0) with the reprojected history (t1)
+// along the velocity (t2). Current and velocity are read with Load (point,
+// clamped by hand) — the LDR texture is sampled LINEAR by FXAA/SMAA and stays
+// so; the history is sampled linear on purpose (subpixel reprojection), s0 =
+// the post chain's linear-clamp sampler.
+// cbuffer b0: x/y = 1/resolution, z = history blend weight (0 = history
+// unusable this frame — resize, first frame, a still from another camera).
+inline constexpr const char* kTaaResolveHLSL = R"HLSL(
+Texture2D    uCurrent  : register(t0);
+Texture2D    uHistory  : register(t1);
+Texture2D    uVelocity : register(t2);
+SamplerState uSamp     : register(s0);
+cbuffer CB : register(b0) { float4 uParams; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target {
+    uint w, h;
+    uCurrent.GetDimensions(w, h);
+    int2 size = int2(w, h);
+    int2 px   = int2(i.pos.xy);
+    float3 cur = uCurrent.Load(int3(px, 0)).rgb;
+    if (uParams.z <= 0.0) return float4(cur, 1.0);
+
+    // Motion of the FASTEST fragment in the 3x3 neighbourhood, not this pixel's
+    // own: on a silhouette the pixel may carry the background's motion while
+    // the eye follows the object — see the GL twin.
+    float2 vel  = uVelocity.Load(int3(px, 0)).rg;
+    float  best = length(vel);
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+        {
+            int2   q = clamp(px + int2(x, y), int2(0, 0), size - 1);
+            float2 v = uVelocity.Load(int3(q, 0)).rg;
+            float  l = length(v);
+            if (l > best) { best = l; vel = v; }
+        }
+
+    float2 histUV = i.uv - vel;
+    // Off-screen history is no history: nothing was ever accumulated there.
+    if (any(histUV < 0.0) || any(histUV > 1.0)) return float4(cur, 1.0);
+    float3 hist = uHistory.SampleLevel(uSamp, histUV, 0).rgb;
+
+    // Neighbourhood clamp — the whole defence against ghosting.
+    float3 lo = cur, hi = cur;
+    [unroll] for (int cy = -1; cy <= 1; ++cy)
+        [unroll] for (int cx = -1; cx <= 1; ++cx)
+        {
+            int2   q = clamp(px + int2(cx, cy), int2(0, 0), size - 1);
+            float3 c = uCurrent.Load(int3(q, 0)).rgb;
+            lo = min(lo, c);
+            hi = max(hi, c);
+        }
+    hist = clamp(hist, lo, hi);
+
+    // Fast motion means less history.
+    float motion = saturate(length(vel / uParams.xy) / 32.0);
+    float blend  = lerp(uParams.z, 0.0, motion);
+    return float4(lerp(cur, hist, blend), 1.0);
+}
+)HLSL";
+
+// The temporal average is softer than one frame by construction — this is the
+// sharpen that buys that back, run in the AA-resolve slot on the resolved
+// history (t0). cbuffer b0: xy = 1/resolution, z = amount (0 = exact copy).
+inline constexpr const char* kTaaSharpenHLSL = R"HLSL(
+Texture2D    uScene : register(t0);
+SamplerState uSamp  : register(s0);
+cbuffer CB : register(b0) { float4 uParams; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target {
+    float2 rcp = uParams.xy;
+    float3 c   = uScene.Sample(uSamp, i.uv).rgb;
+    if (uParams.z <= 0.0) return float4(c, 1.0);
+    float3 blur = 0.25 * (uScene.Sample(uSamp, i.uv + float2( rcp.x, 0.0)).rgb
+                        + uScene.Sample(uSamp, i.uv + float2(-rcp.x, 0.0)).rgb
+                        + uScene.Sample(uSamp, i.uv + float2(0.0,  rcp.y)).rgb
+                        + uScene.Sample(uSamp, i.uv + float2(0.0, -rcp.y)).rgb);
+    return float4(saturate(c + (c - blur) * uParams.z), 1.0);
+}
+)HLSL";
+
 // ─── Ray-traced GI (software BVH) HLSL ──────────────────────────────────────
 // Port of the GL-4.3 compute GI (kGi* in OpenGLRenderer.cpp), which in turn
 // mirrors the Metal reference. SSBOs → StructuredBuffers, image store →

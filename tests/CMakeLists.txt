@@ -41,6 +41,9 @@ add_executable(he_tests
     test_culling.cpp
     test_world_preview_grid.cpp
     test_world_preview_backends.cpp
+    # TAA on D3D11/D3D12/Vulkan (Thema 78, Schritt 6): host jitter + the HLSL
+    # velocity/resolve/sharpen drawn on WARP (Windows only for the latter).
+    test_temporal_aa.cpp
     test_gi_bvh.cpp
     test_undo.cpp
     test_editor_selection.cpp
