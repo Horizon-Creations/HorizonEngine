@@ -1,6 +1,7 @@
 #pragma once
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <Application/InputMapping.h>
+#include <Application/InputRebind.h>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -53,12 +54,28 @@ class ScriptContext;
 // table lookup and nothing else. The same tick also publishes the frame's
 // action states to HE::api::input::setActions, the polling twin of the events.
 //
-// Bindings are the union of every InputMappingContext asset in the project;
-// action value types come from the InputAction assets. Discovery walks the
-// loose content root (editor / dev builds) plus everything already registered
-// in the ContentManager (loadPak'd builds). Assets living ONLY in a mounted,
+// Bindings are the union of every InputMappingContext asset in the project:
+// the contexts are applied sorted by path, and an action named in several
+// keeps the bindings of all of them (duplicates once) — not only the last
+// context's. Replacing an action's bindings is kept for a layer on top of this
+// base (HE::MappingMerge::Replace). That layer is the PLAYER's: see
+// "Rebinding" below. Action value types come from the
+// InputAction assets. Discovery walks the loose content root (editor / dev
+// builds) plus everything already registered in the ContentManager (loadPak'd
+// builds). Assets living ONLY in a mounted,
 // not-yet-streamed pak are not found — the pak path index carries no type
 // information to sniff without loading (known limitation of the v1 pump).
+//
+// ── Rebinding ────────────────────────────────────────────────────────────────
+// The player's own bindings are a layer (HE::BindingOverrides) applied over the
+// merged contexts, per action and device class. begin() loads it from prefs
+// (kBindingsPrefsKey) right after the context loop; the script rows
+// (HE::api::input::rebindBegin …) reach this host through the BindingService it
+// installs for the length of the session. The capture (HE::BindingCapture)
+// reads Input in tick() BEFORE the mapping, so a menu in UI-only mode — where
+// every gameplay action is silent — can still hear the press. While it runs,
+// all actions are silent, the "run while paused" ones included: the Escape or
+// Start that cancels it must not also open or close the pause menu.
 //
 // The host does NOT own the runtime: the application passes its
 // GameInstanceHost runtime so player instances share its services (widgets,
@@ -137,6 +154,40 @@ public:
 	// character the player actually steers is whatever a controller possesses.
 	size_t fallbackCharacterCount() const { return m_characters.size(); }
 
+	// The merged bindings of this session (see the note above for how the
+	// contexts combine), and the content-relative paths of the contexts that
+	// went into it, in the order they were applied.
+	const InputMapping&             mapping() const         { return m_mapping; }
+	const std::vector<std::string>& mappingContexts() const { return m_contextPaths; }
+
+	// ── Rebinding (see the note above; the script rows call these) ───────────
+	// Where the player's layer is kept. ".0" is the player slot: one player
+	// today, and a per-player step adds ".1", ".2", … without moving slot 0.
+	static constexpr const char* kBindingsPrefsKey = "input.overrides.0";
+
+	// `device` "keyboard" (keys + mouse buttons) or "gamepad". False when not
+	// running, for an unknown or non-Button action, or a bad device name.
+	// A second call while one listens replaces it.
+	bool        rebindBegin(const std::string& action, const std::string& device);
+	void        rebindCancel();
+	bool        isRebinding() const { return m_capture.busy(); }
+	// The other actions/axes the last captured input also triggers, ", "-joined.
+	const std::string& rebindConflict() const { return m_rebindConflict; }
+	std::string bindingName(const std::string& action, const std::string& device) const;
+	// Drop the layer. Applied on the next tick (the mapping is rebuilt against
+	// that frame's input, so a held key does not read as a fresh press).
+	void        resetBindings();
+	// Write the layer to prefs (an empty layer removes the key).
+	bool        saveBindings();
+	const HE::BindingOverrides& bindingOverrides() const { return m_overrides; }
+
+	PlayerHost() = default;
+	PlayerHost(const PlayerHost&) = delete;
+	PlayerHost& operator=(const PlayerHost&) = delete;
+	// Only takes the BindingService down (it points at this host); end() is
+	// still the caller's, since it needs a runtime that may already be gone.
+	~PlayerHost();
+
 private:
 	// An action is a button, a one-dimensional axis or a two-dimensional one —
 	// three shapes, three event names, so one bool no longer says it.
@@ -154,10 +205,22 @@ private:
 	// controller, and additionally to whatever each of them possesses.
 	void fireInputEvent(const std::string& event, const HorizonCode::Value& arg);
 
+	// base + layer, then one tick against this frame's input so whatever is
+	// held reads as held, not as just pressed.
+	void rebuildMapping(const Input& input, const MouseFrame& mouse);
+
 	HorizonCode::Runtime*                m_runtime = nullptr;
 	ScriptContext*                       m_scripts = nullptr;
 	const TextScriptInstances*           m_scriptInstances = nullptr;
-	InputMapping                         m_mapping;
+	InputMapping                         m_mapping;       // base + player layer: what ticks
+	InputMapping                         m_baseMapping;   // the contexts alone
+	std::vector<std::string>             m_contextPaths;
+	HE::BindingOverrides                 m_overrides;
+	HE::BindingCapture                   m_capture;
+	std::string                          m_rebindAction;
+	std::string                          m_rebindConflict;
+	bool                                 m_mappingDirty = false;
+	bool                                 m_bindingServiceInstalled = false;
 	std::vector<ActionInfo>              m_actions;
 	// The instances this host CREATED, and therefore the only ones it ticks and
 	// destroys.

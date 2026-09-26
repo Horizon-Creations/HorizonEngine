@@ -1,0 +1,48 @@
+          <p>
+            Savegames with a fixed shape. A save follows a <em>SaveGame
+            Template</em> asset, which lists its fields and their defaults; the
+            project's default template (Project Settings) is the one
+            <code>create</code> uses. One save is <strong>active</strong> at a
+            time and every field call works on it, in memory, until
+            <code>write</code> puts it on disk as
+            <code>Saves/&lt;id&gt;.json</code> in the game's data folder (see
+            <a href="#fs">File System</a>). <code>write</code> replaces the file
+            in one step, so a crash leaves the old save or the new one, never
+            half of each.
+          </p>
+          <ul>
+            <li>
+              A save id may only contain <code>A–Z a–z 0–9 _ -</code>; anything
+              else (a space, a dot) fails with a warning.
+            </li>
+            <li>
+              Each getter takes a default and returns it when there is no active
+              save, the template has no such field, or the field has another
+              type; the matching setter returns <code>false</code>. All three
+              cases log a warning.
+            </li>
+            <li>
+              Numbers: a Float, Int or Enum field goes through
+              <code>setNumber</code> / <code>getNumber</code>. An Int field drops
+              the fraction toward zero (2.7 → 2, −2.7 → −2). A Float field keeps
+              about seven digits: <code>0.1</code> comes back as
+              <code>0.10000000149011612</code>.
+            </li>
+            <li>
+              A struct field takes a value built with
+              <code>horizon.structs.&lt;Name&gt;()</code> or read with
+              <code>getStruct</code> (see <a href="#user-types">Project
+              Types</a>). A plain table without <code>__type</code> is refused.
+            </li>
+            <li>
+              A save remembers its template, and <code>load</code> uses that one,
+              not the project default. It keeps the fields the template still
+              has and fills new ones with their defaults, so a save from an older
+              version of the game still loads.
+            </li>
+            <li>
+              <code>delete</code> removes the file only. If it was the active save,
+              it stays active, and the next <code>write</code> creates the file
+              again; call <code>close</code> as well.
+            </li>
+          </ul>

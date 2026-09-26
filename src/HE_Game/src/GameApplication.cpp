@@ -586,6 +586,16 @@ void GameApplication::OnInit()
 {
 	HE_LOG_INFO(Core, "%s", "GameApplication::OnInit");
 
+	// Rumble reaches the pads through Input, which the script API cannot see.
+	// The gate opens right away — the packaged game is always "playing", and
+	// a start-up script may want to rumble before the first frame. OnRender
+	// feeds the pause edge; OnShutdown takes both down again.
+	HE::api::input::setRumbleSink({
+		[this](float low, float high, uint32_t ms) { return input().rumble(low, high, ms); },
+		[this](float l, float r, uint32_t ms)      { return input().rumbleTriggers(l, r, ms); },
+		[this]()                                   { input().stopRumble(); } });
+	HE::api::input::setRumbleGate(true, false);
+
 	// Grab the mouse on startup (FPS-style look). Done first so it holds even on
 	// the early-return paths below (no hcfg / no pak); Esc toggles it back so the
 	// cursor is always reachable. The window is already open by the time OnInit runs.
@@ -2079,6 +2089,13 @@ void GameApplication::updateUIInput()
 	// answering a gesture that was never aimed at it.
 	const bool pointerValid = !m_mouseCaptured && w != nullptr && uiTakesInput &&
 	                          !m_frameResize.active();
+	// A rebind that is listening owns every button — mouse, keys and pad alike
+	// (input.rebindBegin). The UI keeps its hover but hears no press, no Back,
+	// no Tab, no navigation: otherwise the South press or click being captured
+	// would also activate the focused "Rebind" button and start the next one.
+	const bool rebinding = HE::api::input::isRebinding();
+	const bool uiLmb = (buttons & SDL_BUTTON_LMASK) != 0 && !rebinding;
+	const bool uiRmb = (buttons & SDL_BUTTON_RMASK) != 0 && !rebinding;
 
 	// Widget pointer input first — widgets draw on top of entity UI. The answer
 	// ("the pointer is on something clickable") is kept, not dropped: it is what
@@ -2088,8 +2105,7 @@ void GameApplication::updateUIInput()
 		m_world->widgets().processPointer(uiWindow,
 		                                  static_cast<float>(pw), static_cast<float>(ph),
 		                                  mx * sx, my * sy,
-		                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid,
-		                                  (buttons & SDL_BUTTON_RMASK) != 0);
+		                                  uiLmb, pointerValid, uiRmb);
 
 	// Tell the OS where the focused field is, so an input method opens its
 	// candidate list beside it instead of in the corner of the screen. Pushed
@@ -2117,7 +2133,7 @@ void GameApplication::updateUIInput()
 	// Consumed here rather than in OnEvent so it reuses the pointer arithmetic
 	// above instead of a second, drifting copy of it. The press that came with
 	// the same click already focused the field and put the caret there.
-	if (pointerValid && m_uiClickCount >= 2)
+	if (pointerValid && !rebinding && m_uiClickCount >= 2)
 	{
 		if (m_uiClickCount == 2)
 		{
@@ -2179,8 +2195,11 @@ void GameApplication::updateUIInput()
 	// input field is what Escape means everywhere.
 	if (uiTakesInput)
 	{
+		// While a rebind listens the edges are still TRACKED (the *Prev stay
+		// current) but not acted on — a button captured and then released must
+		// not look like a fresh press to the menu the moment the capture ends.
 		const bool back = input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
-		if (back && !m_uiBackPrev) m_world->widgets().closeTopLayer();
+		if (back && !m_uiBackPrev && !rebinding) m_world->widgets().closeTopLayer();
 		m_uiBackPrev = back;
 
 		// Tab is the other way through a form, and it belongs OUTSIDE the gate
@@ -2188,7 +2207,7 @@ void GameApplication::updateUIInput()
 		// field has the keyboard, because leaving that field is exactly what it
 		// is for. Shift+Tab goes back.
 		const bool tab = input().IsKeyDown(SDL_SCANCODE_TAB);
-		if (tab && !m_uiTabPrev)
+		if (tab && !m_uiTabPrev && !rebinding)
 		{
 			const bool back2 = input().IsKeyDown(SDL_SCANCODE_LSHIFT) ||
 			                   input().IsKeyDown(SDL_SCANCODE_RSHIFT);
@@ -2222,7 +2241,7 @@ void GameApplication::updateUIInput()
 		    in.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH))
 			now |= 1u << 4;
 
-		const uint8_t edges = static_cast<uint8_t>(now & ~m_uiNavPrev);
+		const uint8_t edges = rebinding ? uint8_t(0) : static_cast<uint8_t>(now & ~m_uiNavPrev);
 		m_uiNavPrev = now;
 		for (int i = 0; i < 4; ++i)
 			if (edges & (1u << i))
@@ -2238,7 +2257,7 @@ void GameApplication::updateUIInput()
 	UIInputSystem::update(*m_world, m_uiInput,
 	                      static_cast<float>(pw), static_cast<float>(ph),
 	                      mx * sx, my * sy,
-	                      (buttons & SDL_BUTTON_LMASK) != 0, pointerValid,
+	                      uiLmb, pointerValid,
 	                      events);
 
 	if (!m_scriptContext) return;
@@ -2398,6 +2417,18 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 				return true;
 			}
 		}
+	}
+
+	// Escape while a rebind listens cancels THAT and nothing else. Ahead of
+	// every other Escape meaning below (leave a field, close the menu, give the
+	// mouse back): all of those consume the key before Input sees it, so the
+	// capture's own Escape check would never fire, and the player would lose
+	// the settings menu they were rebinding in.
+	if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+	    event.key.key == SDLK_ESCAPE && HE::api::input::isRebinding())
+	{
+		HE::api::input::rebindCancel();
+		return true;
 	}
 
 	// A double- or triple-click on a text field selects a word or the line.
@@ -2871,6 +2902,10 @@ void GameApplication::OnRender(float deltaTime)
 		                           axes, SDL_GAMEPAD_AXIS_COUNT,
 		                           input().gamepad().buttons, SDL_GAMEPAD_BUTTON_COUNT);
 	}
+	// Pausing stops the pads (the explosion before the pause menu must not keep
+	// shaking); requests made while paused still go through, for menu clicks.
+	// UI-only does NOT close it — a menu is exactly where a click may be felt.
+	HE::api::input::setRumbleGate(true, HE::api::time::isPaused());
 
 	// From here on there are TWO clocks, and which one a tick gets is a design
 	// decision, not a detail:
@@ -2985,7 +3020,12 @@ void GameApplication::OnRender(float deltaTime)
 	m_netSession.update(gameDt);
 
 	MouseFrame playerMouse = input().mouse();
-	if (m_uiWantsPointer || inputMode == HE::api::input::Mode::UIOnly)
+	// …except while a rebind listens: a settings menu is UI-only by nature and
+	// the pointer is on it, yet "click the mouse button you want" has to reach
+	// the capture. Harmless for gameplay — the host silences every action while
+	// it listens, and the UI hears no button meanwhile (updateUIInput).
+	if ((m_uiWantsPointer || inputMode == HE::api::input::Mode::UIOnly) &&
+	    !HE::api::input::isRebinding())
 		playerMouse.buttons = 0;
 	// A cutscene with Lock Player Input silences gameplay input like a pause.
 	m_playerHost.tick(input(), gameDt, playerMouse,
@@ -3272,6 +3312,11 @@ void GameApplication::OnShutdown()
 	// on the way out still reaches the scripts, whose runtime is intact here.
 	m_netSession.leave();
 	dispatchNetEvents();
+
+	// Shut the gate (stops the pads) while the sink still points at a live
+	// Input, then take the sink down — it captures `this`.
+	HE::api::input::setRumbleGate(false, false);
+	HE::api::input::setRumbleSink({});
 
 	// The tray outlives the window unless it is taken down deliberately, and an
 	// icon left in the menu bar of a program that has exited is the worst thing

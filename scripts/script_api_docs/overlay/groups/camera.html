@@ -1,0 +1,47 @@
+          <p>
+            The camera the picture comes from, and the camera rig that moves it. No
+            function here takes an entity: they all act on the <strong>active
+            camera</strong>, the one marked <em>Main</em>, or the first camera in
+            the scene when none is. The rig functions act on that camera's Camera
+            Rig component; without one they do nothing and read 0.
+          </p>
+          <ul>
+            <li>
+              <strong>Position and rotation are the camera's own transform.</strong>
+              <code>getPosition</code> and <code>getRotation</code> read it and the
+              setters write it, relative to the camera's parent. A camera parented
+              under an entity at (10, 0, 0) and sitting 5 m behind it reads
+              <code>0, 2, 5</code>, not <code>10, 2, 5</code>. For a camera at the
+              top of the hierarchy that is the world position. While a rig drives
+              the camera it rewrites the transform every frame, so
+              <code>setPosition</code>/<code>setRotation</code> last until the next
+              frame; <code>setFov</code> stays.
+            </li>
+            <li>
+              <strong>Rig numbers are forgiving, not checked.</strong>
+              <code>setRigMode</code> treats anything but 0 as third person.
+              <code>setTargetYawMode</code> treats anything but 0 and 2 as Follow.
+              <code>addYawPitch</code> clamps the pitch to the rig's limits (by
+              default −80° to 75°) but lets the yaw run past 360.
+              <code>setLagSpeeds</code> turns negative speeds into 0.
+              <code>setArmLength</code> takes a negative length as it is, which
+              puts the camera in front of the target.
+            </li>
+            <li>
+              <strong>Shake moves the transform, the FOV kick does not.</strong>
+              The rig writes the shaken pose into the camera's transform, so
+              <code>getPosition</code> and <code>getRotation</code> jitter while a
+              shake runs. A FOV kick is added on top of the field of view and
+              <code>getFov</code> keeps answering the authored value.
+              <code>playShake</code> returns 0 when there is no rig; handles start
+              at 1.
+            </li>
+            <li>
+              <strong>Blending.</strong> <code>blendTo(camera, seconds, curve)</code>
+              makes that camera the main one at once (every other camera loses
+              <em>Main</em>), so from the next call on the other functions act on
+              it. The ease itself needs a Camera Rig on the camera blended to;
+              without one it is a cut and <code>isBlending</code> stays
+              <code>false</code>. Curves outside 0 to 2 become smoothstep.
+            </li>
+          </ul>

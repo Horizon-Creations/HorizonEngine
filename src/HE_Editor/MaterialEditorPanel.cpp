@@ -1850,6 +1850,36 @@ bool reloadByContentPath(const std::string& contentPath)
 }
 
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+
+void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, State& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			// Every committed edit has already gone through applyToMaterial, so the
+			// live asset carries the generated shader; what it may lack is a node
+			// dragged mid-frame (liveEdit marks dirty without regenerating), so the
+			// graph comes from the tab. A COPY, and no applyToMaterial here: that
+			// recompiles and re-derives every instance, which a timer must not do.
+			if (st.isFunction)
+			{
+				const MaterialFunctionAsset* fn = cm->getMaterialFunction(st.materialId);
+				if (!fn) return false;
+				MaterialFunctionAsset copy = *fn;
+				copy.nodeGraphJson = HE::materialGraphToJson(st.graph);
+				return cm->writeAssetTo(copy, dest);
+			}
+			const MaterialAsset* mat = cm->getMaterial(st.materialId);
+			if (!mat) return false;
+			MaterialAsset copy = *mat;
+			// An instance has no graph: its state is the asset.
+			if (!st.isInstance) copy.nodeGraphJson = HE::materialGraphToJson(st.graph);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
 void releasePreviewAssets(AppContext& ctx, const std::string& assetPath)

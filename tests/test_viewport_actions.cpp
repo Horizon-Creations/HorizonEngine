@@ -10,6 +10,7 @@
 #include <HorizonScene/Components/LightComponent.h>
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/EnvironmentLightComponent.h>
+#include <HorizonScene/Components/TerrainChunkComponent.h>
 #include <glm/glm.hpp>
 #include <cmath>
 
@@ -104,6 +105,59 @@ TEST_CASE("ViewportActions: Isolate hides the rest, keeps the selection's subtre
 	CHECK(shown.size() == 2);
 	CHECK(HE::entityVisibility(reg, b) == HE::Visibility::Visible);
 	CHECK(HE::entityVisibility(reg, c) == HE::Visibility::Visible);
+}
+
+TEST_CASE("ViewportActions: Select All takes what the Outliner lists and keeps the active entity")
+{
+	HorizonWorld world;
+	auto& reg = world.registry();
+	// The Sky entity is an ordinary Outliner row and IS selected; the built-in
+	// sun and moon under it are not.
+	const Entity sky  = world.addSky();
+	const Entity a    = meshAt(world, "A", { 0, 0, 0 });
+	const Entity aKid = meshAt(world, "A.kid", { 1, 0, 0 }, a);
+	const Entity b    = meshAt(world, "B", { 5, 0, 0 });
+	// A terrain chunk and something under it: generated, not in the Outliner.
+	const Entity chunk = world.createEntity("Chunk");
+	reg.emplace<TerrainChunkComponent>(chunk, TerrainChunkComponent{ b, 0, 0 });
+	world.reparentEntity(chunk, b);
+	const Entity underChunk = world.createEntity("UnderChunk");
+	world.reparentEntity(underChunk, chunk);
+
+	const auto all = ViewportActions::selectableEntities(world);
+	// Top-down, the Outliner's order; A.kid right after its parent.
+	REQUIRE(all.size() == 4);
+	CHECK(all[0] == sky);
+	CHECK(all[1] == a);
+	CHECK(all[2] == aKid);
+	CHECK(all[3] == b);
+	for (const Entity e : all)
+	{
+		CHECK_FALSE(world.isBuiltin(e));
+		CHECK((e != chunk && e != underChunk));
+	}
+
+	// The active entity stays the active one, and the anchor where it was.
+	EditorSelection sel;
+	sel.set(aKid);
+	sel.setAnchor(a);
+	CHECK(ViewportActions::selectAll(world, sel) == 4);
+	CHECK(sel.primary() == aKid);
+	CHECK(sel.anchor() == a);
+	CHECK(sel.contains(a));
+	CHECK(sel.contains(b));
+
+	// From nothing: everything, the last row active.
+	EditorSelection empty;
+	CHECK(ViewportActions::selectAll(world, empty) == 4);
+	CHECK(empty.primary() == b);
+
+	// An empty scene selects nothing, and clears what was there.
+	HorizonWorld bare;
+	EditorSelection stale;
+	stale.set(a);   // a handle from another world
+	CHECK(ViewportActions::selectAll(bare, stale) == 0);
+	CHECK(stale.empty());
 }
 
 TEST_CASE("ViewportActions: Group puts the roots under one parent at their centre, nothing moves")

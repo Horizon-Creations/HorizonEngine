@@ -109,6 +109,21 @@ public:
     float stickDeadzone   = 0.15f;
     float triggerDeadzone = 0.05f;
 
+    // ── Rumble ────────────────────────────────────────────────────────────
+    // Sent to EVERY open pad, which is the merge policy above read backwards:
+    // all pads are one player, so all of them feel what that player feels.
+    // Intensities 0..1 (clamped); `low` is the heavy motor, `high` the light
+    // one. A pad has ONE effect at a time — a new call replaces the running
+    // one, there is no mixing and no handle. `durationMs` 0 runs until
+    // stopRumble() or the next call; SDL caps anything else at 65535 ms.
+    // Returns true when at least one pad accepted it (false: no pad, or none
+    // with motors). Trigger rumble exists on Xbox One/Series and DualSense
+    // only; everywhere else it answers false and does nothing.
+    bool rumble(float low, float high, uint32_t durationMs);
+    bool rumbleTriggers(float left, float right, uint32_t durationMs);
+    // Both motors AND both triggers to zero, on every pad.
+    void stopRumble();
+
     // ── Internal — called by Application each frame ───────────────────────
     void ProcessEvent(const SDL_Event& event);
     // Mouse motion and wheel, fed SEPARATELY and ungated. Key events reach

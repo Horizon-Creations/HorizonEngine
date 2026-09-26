@@ -1265,6 +1265,78 @@ TEST_CASE("codegen parity: datetime_double (epoch seconds on Double pins, no nar
 	CHECK(std::count_if(p.interp.trace.begin(), p.interp.trace.end(), sawT) == 2);
 }
 
+TEST_CASE("codegen parity: input_rumble (the writing input rows reach the sink identically)")
+{
+	// A recording sink behind an open gate: what the pads would be told. Both
+	// backends fire into the SAME sink, one after the other.
+	struct Call { char kind; float a, b; uint32_t ms; };
+	std::vector<Call> calls;
+	HE::api::input::setRumbleSink({
+		[&](float a, float b, uint32_t ms) { calls.push_back({ 'r', a, b, ms }); return true; },
+		[&](float a, float b, uint32_t ms) { calls.push_back({ 't', a, b, ms }); return true; },
+		[&]()                              { calls.push_back({ 's', 0.0f, 0.0f, 0 }); } });
+	HE::api::input::setRumbleGate(true, false);
+
+	ParityPair p("fix/input_rumble");
+	p.fire("Buzz");   // traces + variables compared across backends
+
+	CHECK(p.var("ok").b);
+	CHECK(p.var("okTriggers").b);
+	// Interpreter first, compiled second, each: rumble, triggers, stop.
+	REQUIRE(calls.size() == 6);
+	for (size_t base : { size_t(0), size_t(3) })
+	{
+		INFO("backend starting at call ", base);
+		CHECK(calls[base].kind == 'r');
+		CHECK(calls[base].a == 0.5f);
+		CHECK(calls[base].b == 1.0f);
+		CHECK(calls[base].ms == 250);
+		CHECK(calls[base + 1].kind == 't');
+		CHECK(calls[base + 1].a == 0.25f);
+		CHECK(calls[base + 1].b == 0.75f);
+		CHECK(calls[base + 1].ms == 0);   // 0 s = until stopped
+		CHECK(calls[base + 2].kind == 's');
+	}
+
+	HE::api::input::setRumbleGate(false, false);
+	HE::api::input::setRumbleSink({});
+}
+
+TEST_CASE("codegen parity: input_rebind (the rebinding rows reach the service identically)")
+{
+	// A recording service in place of a session's PlayerHost. Both backends
+	// call into the SAME one, one after the other.
+	std::vector<std::string> calls;
+	HE::api::input::setBindingService({
+		[&](const std::string& a, const std::string& d) { calls.push_back("begin " + a + " " + d); return true; },
+		[&]() { calls.push_back("cancel"); },
+		[&]() { calls.push_back("busy?"); return true; },
+		[&]() { calls.push_back("conflict?"); return std::string("Crouch, Use"); },
+		[&](const std::string& a, const std::string& d) { calls.push_back("name " + a + " " + d); return std::string("Left Mouse Button"); },
+		[&]() { calls.push_back("reset"); },
+		[&]() { calls.push_back("save"); return true; } });
+
+	ParityPair p("fix/input_rebind");
+	p.fire("Rebind");   // traces + variables compared across backends
+
+	CHECK(p.var("ok").b);
+	CHECK(p.var("busy").b);
+	CHECK(p.var("name").s == "Left Mouse Button");
+	CHECK(p.var("conflict").s == "Crouch, Use");
+	CHECK(p.var("saved").b);
+	const std::vector<std::string> one = {
+		"begin Jump gamepad", "busy?", "name Fire keyboard", "conflict?", "cancel", "reset", "save" };
+	REQUIRE(calls.size() == one.size() * 2);
+	for (size_t i = 0; i < one.size(); ++i)
+	{
+		INFO("call ", i);
+		CHECK(calls[i] == one[i]);                  // interpreter
+		CHECK(calls[one.size() + i] == one[i]);     // compiled
+	}
+
+	HE::api::input::setBindingService({});
+}
+
 TEST_CASE("codegen parity: engine_exec_cached (one dispatch, cached reads, save round-trip)")
 {
 	ParityPair p("fix/engine_exec_cached");

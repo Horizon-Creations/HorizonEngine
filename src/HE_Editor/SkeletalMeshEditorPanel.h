@@ -3,6 +3,7 @@
 #include <imgui.h>
 #include <string>
 #include <vector>
+#include "AssetAutosave.h"
 
 // Skeletal Mesh Editor — a top-level tab opened by double-clicking a SkeletalMesh
 // .hasset in the Content Browser. Shows the joint hierarchy as a tree (name +
@@ -39,6 +40,8 @@ namespace SkeletalMeshEditorPanel
 	// same clip agree — there is one entry, not one per tab.
 	bool isDirty(const std::string& assetPath);
 	void appendDirtyPaths(std::vector<std::string>& out);
+	// Crash-recovery copies of the unsaved clips (EditorUI::appendAssetSnapshots).
+	void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
 	bool save(AppContext& ctx, const std::string& assetPath);
 
 	// The unsaved clip open in the tab at `tabPath`, or "". This is what Ctrl+S

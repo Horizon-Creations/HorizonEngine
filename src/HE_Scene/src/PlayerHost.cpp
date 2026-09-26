@@ -44,11 +44,51 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm,
 			                      HE::inputActionRunsWhilePaused(a->json) });
 		}
 
-	// Bindings: union of every mapping context in the project.
-	size_t bound = 0;
+	// Bindings: the union of every mapping context in the project. An action
+	// named in two contexts keeps the bindings of both (a duplicate counts once),
+	// rather than whichever context happened to be applied last — and "last"
+	// was never defined: discoverAssets hands back an unordered_map first and a
+	// directory walk after it. The contexts are applied sorted by path, so the
+	// order of the merged bindings (what a binding UI lists, and what a shape
+	// conflict between two contexts falls back to) is the same on every machine.
+	// Path and JSON are COPIED out before sorting: the getter's pointer is into
+	// the asset pool, which the next load may move.
+	std::vector<std::pair<std::string, std::string>> contexts;
 	for (const HE::UUID id : discoverAssets(cm, HE::AssetType::InputMappingContext))
 		if (const InputMappingContextAsset* m = cm.getInputMappingContext(id))
-			bound += HE::applyInputMappingContext(m_mapping, m->json);
+			contexts.emplace_back(m->path, m->json);
+	std::sort(contexts.begin(), contexts.end(),
+	          [](const auto& a, const auto& b) { return a.first < b.first; });
+	size_t bound = 0;
+	for (auto& [path, json] : contexts)
+	{
+		bound += HE::applyInputMappingContext(m_mapping, json);
+		m_contextPaths.push_back(std::move(path));
+	}
+
+	// The player's own bindings, over the contexts (see "Rebinding" in the
+	// header). The base is kept apart so a rebind or a reset can rebuild from
+	// it without going back to the content manager.
+	m_baseMapping = m_mapping;
+	{
+		HE::api::Ctx ctx;
+		const std::string saved = HE::api::prefs::getString(ctx, kBindingsPrefsKey, "");
+		if (!saved.empty() && m_overrides.fromJson(saved) && !m_overrides.empty())
+		{
+			m_overrides.applyTo(m_mapping);
+			HE_LOG_INFO(Input, "%s", ("PlayerHost: " + std::to_string(m_overrides.size()) +
+			                          " action(s) with the player's own bindings").c_str());
+		}
+	}
+	HE::api::input::setBindingService({
+		[this](const std::string& a, const std::string& d) { return rebindBegin(a, d); },
+		[this]()                                            { rebindCancel(); },
+		[this]()                                            { return isRebinding(); },
+		[this]()                                            { return rebindConflict(); },
+		[this](const std::string& a, const std::string& d) { return bindingName(a, d); },
+		[this]()                                            { resetBindings(); },
+		[this]()                                            { return saveBindings(); } });
+	m_bindingServiceInstalled = true;
 
 	// Player classes: one instance per PlayerController asset. Characters are
 	// only COUNTED — see the "What is NOT spawned here" note in the header.
@@ -212,6 +252,38 @@ void PlayerHost::fireInputEvent(const std::string& event, const HorizonCode::Val
 void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse, bool locked)
 {
 	if (!m_runtime) return;
+
+	// The capture first, on the raw device state: the mapping below is exactly
+	// what a menu has silenced. A capture that finishes this frame keeps the
+	// frame silent too (wasRebinding) — its release is not a gameplay event.
+	const bool wasRebinding = m_capture.busy();
+	switch (m_capture.update(input, mouse))
+	{
+	case HE::BindingCapture::Result::Captured:
+	{
+		const ActionBinding b = m_capture.captured();
+		const std::vector<std::string> others = HE::bindingConflicts(m_mapping, m_rebindAction, b);
+		m_rebindConflict.clear();
+		for (const std::string& o : others)
+			m_rebindConflict += (m_rebindConflict.empty() ? "" : ", ") + o;
+		m_overrides.set(m_rebindAction, m_capture.device(), { b });
+		m_mappingDirty = true;
+		HE_LOG_INFO(Input, "%s", ("Rebound " + m_rebindAction + " to " +
+		                          HE::bindingDisplayName(b)).c_str());
+		if (!others.empty())
+			HE_LOG_WARN(Input, "%s", (HE::bindingDisplayName(b) + " is now bound to " +
+			                          m_rebindAction + " and also to " + m_rebindConflict).c_str());
+		break;
+	}
+	case HE::BindingCapture::Result::Cancelled:
+		HE_LOG_INFO(Input, "%s", ("Rebinding " + m_rebindAction + " cancelled").c_str());
+		break;
+	case HE::BindingCapture::Result::None:
+		break;
+	}
+	if (m_mappingDirty) rebuildMapping(input, mouse);
+	const bool rebinding = wasRebinding || m_capture.busy();
+
 	m_mapping.tick(input, mouse);
 
 	// Tick still fires while paused — with dt 0, so anything integrating against
@@ -264,7 +336,10 @@ void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse, boo
 	{
 		HE::api::input::ActionState st;
 		st.name = a.name;
-		if (silenced && !a.runWhilePaused) { states.push_back(std::move(st)); continue; }
+		// A rebind in progress silences EVERYTHING, the run-while-paused actions
+		// included: the press being captured, or the Start that cancels it, must
+		// not also fire the pause menu's own action.
+		if ((silenced && !a.runWhilePaused) || rebinding) { states.push_back(std::move(st)); continue; }
 		switch (a.kind)
 		{
 		case ActionKind::Axis:
@@ -320,10 +395,113 @@ void PlayerHost::end()
 	m_characters.clear();
 	m_actions.clear();
 	m_mapping.clear();
+	m_baseMapping.clear();
+	m_contextPaths.clear();
+	m_overrides.clear();
+	m_capture.cancel();
+	m_rebindAction.clear();
+	m_rebindConflict.clear();
+	m_mappingDirty = false;
+	if (m_bindingServiceInstalled)
+	{
+		HE::api::input::setBindingService({});
+		m_bindingServiceInstalled = false;
+	}
 	m_runtime = nullptr;
 	m_scripts         = nullptr;
 	m_scriptInstances = nullptr;
 	// The polling rows answer "nothing" outside a session, not "whatever the
 	// last frame of the previous one held".
 	HE::api::input::clearActions();
+}
+
+PlayerHost::~PlayerHost()
+{
+	// The service's functions capture `this`; a host that dies mid-session
+	// (a test without end(), an app torn down early) must not leave the rows
+	// calling into freed memory.
+	if (m_bindingServiceInstalled) HE::api::input::setBindingService({});
+}
+
+// ── Rebinding ────────────────────────────────────────────────────────────────
+
+bool PlayerHost::rebindBegin(const std::string& action, const std::string& device)
+{
+	if (!m_runtime) return false;
+	HE::BindingDevice dev;
+	if (!HE::bindingDeviceFromName(device, dev))
+	{
+		HE_LOG_WARN(Input, "%s", ("Rebind: unknown device \"" + device +
+		                          "\" - use \"keyboard\" or \"gamepad\"").c_str());
+		return false;
+	}
+	const auto it = std::find_if(m_actions.begin(), m_actions.end(),
+	                             [&](const ActionInfo& a) { return a.name == action; });
+	if (it == m_actions.end())
+	{
+		HE_LOG_WARN(Input, "%s", ("Rebind: no input action named \"" + action + "\"").c_str());
+		return false;
+	}
+	// An axis needs a direction per key (which of W/S is "up"?) — a question
+	// this row has no parameter for yet, so it says no rather than guess.
+	if (it->kind != ActionKind::Button)
+	{
+		HE_LOG_WARN(Input, "%s", ("Rebind: \"" + action + "\" is an axis - only button "
+		                          "actions can be rebound so far").c_str());
+		return false;
+	}
+	m_rebindAction = action;
+	m_rebindConflict.clear();
+	m_capture.arm(dev);
+	return true;
+}
+
+void PlayerHost::rebindCancel()
+{
+	if (m_capture.busy())
+		HE_LOG_INFO(Input, "%s", ("Rebinding " + m_rebindAction + " cancelled").c_str());
+	m_capture.cancel();
+}
+
+std::string PlayerHost::bindingName(const std::string& action, const std::string& device) const
+{
+	HE::BindingDevice dev;
+	if (!HE::bindingDeviceFromName(device, dev)) return {};
+	const auto* rows = m_mapping.actionBindings(action);
+	if (!rows) return {};
+	std::string out;
+	for (const ActionBinding& b : *rows)
+		if (HE::bindingBelongsTo(b, dev))
+			out += (out.empty() ? "" : " / ") + HE::bindingDisplayName(b);
+	return out;
+}
+
+void PlayerHost::resetBindings()
+{
+	m_capture.cancel();
+	m_overrides.clear();
+	m_rebindConflict.clear();
+	// Not rebuilt here: this is called from a script, mid-frame, with no input
+	// in hand. The next tick rebuilds against that frame's.
+	m_mappingDirty = true;
+}
+
+bool PlayerHost::saveBindings()
+{
+	HE::api::Ctx ctx;
+	if (m_overrides.empty())
+		HE::api::prefs::remove(ctx, kBindingsPrefsKey);
+	else
+		HE::api::prefs::setString(ctx, kBindingsPrefsKey, m_overrides.toJson());
+	return true;
+}
+
+void PlayerHost::rebuildMapping(const Input& input, const MouseFrame& mouse)
+{
+	m_mapping = m_baseMapping;
+	m_overrides.applyTo(m_mapping);
+	// A fresh mapping has never seen a key: without this tick, whatever the
+	// player is holding would read as pressed THIS frame and fire again.
+	m_mapping.tick(input, mouse);
+	m_mappingDirty = false;
 }

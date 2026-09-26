@@ -5789,9 +5789,12 @@ void D3D11Renderer::DrawScene(int width, int height)
                             MatU u;
                             u.mvp   = viewProj * model;
                             u.model = model;
-                            u.color = glm::vec4(dc.baseColor, 1.0f);
+                            // Per-instance tint (RenderObject::instanceTint), as Metal and GL
+                            // multiply it in: a graph reads it through Vertex Color (the editor
+                            // icons wear their light's colour that way). Identity for the rest.
+                            u.color = glm::vec4(dc.baseColor * glm::vec3(dc.instanceTint), 1.0f);
                             u.flags = glm::vec4(matTextured ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-                            u.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
+                            u.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity * dc.instanceTint.a, 0.0f);
                             D3D11_MAPPED_SUBRESOURCE mu{};
                             if (SUCCEEDED(ctx->Map(p.m_matObjCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mu)))
                             {
