@@ -1654,6 +1654,20 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				ImGui::Button("##icon", ImVec2(k_cellSize, k_cellSize));
 			}
 
+			// V5 (EditorRewards.h): an asset an import just wrote wears a
+			// frame for two seconds from the frame it first shows — outside the
+			// tile, so it covers none of the corner badges below.
+			if (const float fresh = HE::Ed::Rewards::importHighlight(ctx, file->fullPath);
+			    fresh > 0.0f)
+			{
+				const ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+				ImGui::GetWindowDrawList()->AddRect(
+					ImVec2(mn.x - 2.0f, mn.y - 2.0f), ImVec2(mx.x + 2.0f, mx.y + 2.0f),
+					ImGui::GetColorU32(ImVec4(90.0f / 255.0f, 215.0f / 255.0f, 90.0f / 255.0f,
+					                          0.9f * fresh)),
+					ImGui::GetStyle().FrameRounding + 2.0f, 0, 2.0f);
+			}
+
 			// A material FUNCTION renders as the sphere its own editor tab shows —
 			// which is exactly a material's tile. The corner badge is what tells
 			// the two apart at a glance; drawn over the tile rather than baked into
@@ -2822,9 +2836,15 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					else
 					{
 						// Reward moment (EditorRewards.h): AssetsImported (1) — only
-						// when importSource returned true.
+						// when importSource returned true. V5: the folder before it,
+						// so the tile it wrote gets its frame.
+						const HE::Ed::Rewards::DirSnapshot before =
+							HE::Ed::Rewards::importSnapshot(ctx, (root / relDirOf(srcPath)).string());
 						if (Importer::importSource(srcPath, root, relDirOf(srcPath)))
+						{
 							HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported, 1);
+							HE::Ed::Rewards::markImported(ctx, before);
+						}
 						else
 							HE_LOG_ERROR(Editor, "%s",
 								("Editor: import failed for " + srcPath.string()).c_str());
