@@ -13,6 +13,19 @@ HE_IMPLEMENT_ENGINE_SERVICES()
 
 namespace {
 
+// A string answer back across the probe: up to `cap` bytes incl. the NUL, the
+// full length returned (the doAssetTypeName convention).
+int copyOut(const std::string& s, char* buf, int cap)
+{
+	if (buf && cap > 0)
+	{
+		const int n = (int)s.size() < cap - 1 ? (int)s.size() : cap - 1;
+		for (int i = 0; i < n; ++i) buf[i] = s[(size_t)i];
+		buf[n] = '\0';
+	}
+	return (int)s.size();
+}
+
 class TestServicesLogic final : public ITestServicesProbe {
 public:
 	void onStart(HorizonWorld&) override
@@ -98,6 +111,15 @@ public:
 	bool  doRumble(float lo, float hi, float d)        const override { return he::input::rumble(lo, hi, d); }
 	bool  doRumbleTriggers(float l, float r, float d) const override { return he::input::rumbleTriggers(l, r, d); }
 	void  doStopRumble()                               const override { he::input::stopRumble(); }
+	bool  doRebindBegin(const char* a, const char* d)  const override { return he::input::rebindBegin(a, d); }
+	void  doRebindCancel()                             const override { he::input::rebindCancel(); }
+	bool  doIsRebinding()                              const override { return he::input::isRebinding(); }
+	int   doRebindConflict(char* buf, int cap)         const override
+	{ return copyOut(he::input::rebindConflict(), buf, cap); }
+	int   doBindingName(const char* a, const char* d, char* buf, int cap) const override
+	{ return copyOut(he::input::bindingName(a, d), buf, cap); }
+	void  doResetBindings()                            const override { he::input::resetBindings(); }
+	bool  doSaveBindings()                             const override { return he::input::saveBindings(); }
 
 	he::AssetId doLoadAsset(const char* path) const override
 	{ return he::content::load(path ? path : ""); }

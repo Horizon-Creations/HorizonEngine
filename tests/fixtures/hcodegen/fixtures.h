@@ -2782,6 +2782,59 @@ inline HE::hccg::ClassSource fxInputRumble()
     return f.done("input_rumble");
 }
 
+// input_rebind: the seven rebinding rows. Exec rows with String args and Bool
+// results, pure rows answering Bool and String — all of them reach the
+// session's binding service, which the parity test replaces with a recorder,
+// so both backends must hand it the same strings and read back the same.
+inline HE::hccg::ClassSource fxInputRebind()
+{
+    Fx f;
+    f.var("ok", PT::Bool);
+    f.var("busy", PT::Bool);
+    f.var("name", PT::String);
+    f.var("conflict", PT::String);
+    f.var("saved", PT::Bool);
+
+    const int ev = f.event("Rebind");
+    const int beg = f.engineCall("input.rebindBegin");
+    { Node* n = f.g.findNode(beg);
+      n->pinDefaults[0] = Value::ofString("Jump");
+      n->pinDefaults[1] = Value::ofString("gamepad"); }
+    f.exec(ev, beg);
+    const int s1 = f.setVar("ok", PT::Bool);
+    f.data(beg, 0, s1, 0);
+    f.exec(beg, s1);
+
+    const int busy = f.engineCall("input.isRebinding");
+    const int s2 = f.setVar("busy", PT::Bool);
+    f.data(busy, 0, s2, 0);
+    f.exec(s1, s2);
+
+    const int nm = f.engineCall("input.bindingName");
+    { Node* n = f.g.findNode(nm);
+      n->pinDefaults[0] = Value::ofString("Fire");
+      n->pinDefaults[1] = Value::ofString("keyboard"); }
+    const int s3 = f.setVar("name", PT::String);
+    f.data(nm, 0, s3, 0);
+    f.exec(s2, s3);
+
+    const int cf = f.engineCall("input.rebindConflict");
+    const int s4 = f.setVar("conflict", PT::String);
+    f.data(cf, 0, s4, 0);
+    f.exec(s3, s4);
+
+    const int cancel = f.engineCall("input.rebindCancel");
+    f.exec(s4, cancel);
+    const int reset = f.engineCall("input.resetBindings");
+    f.exec(cancel, reset);
+    const int save = f.engineCall("input.saveBindings");
+    f.exec(reset, save);
+    const int s5 = f.setVar("saved", PT::Bool);
+    f.data(save, 0, s5, 0);
+    f.exec(save, s5);
+    return f.done("input_rebind");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -2797,7 +2850,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
-        fxDatetimeDouble(), fxInputRumble(),
+        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(),
     };
 }
 

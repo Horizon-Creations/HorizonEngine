@@ -1270,6 +1270,41 @@ TEST_CASE("codegen parity: input_rumble (the writing input rows reach the sink i
 	HE::api::input::setRumbleSink({});
 }
 
+TEST_CASE("codegen parity: input_rebind (the rebinding rows reach the service identically)")
+{
+	// A recording service in place of a session's PlayerHost. Both backends
+	// call into the SAME one, one after the other.
+	std::vector<std::string> calls;
+	HE::api::input::setBindingService({
+		[&](const std::string& a, const std::string& d) { calls.push_back("begin " + a + " " + d); return true; },
+		[&]() { calls.push_back("cancel"); },
+		[&]() { calls.push_back("busy?"); return true; },
+		[&]() { calls.push_back("conflict?"); return std::string("Crouch, Use"); },
+		[&](const std::string& a, const std::string& d) { calls.push_back("name " + a + " " + d); return std::string("Left Mouse Button"); },
+		[&]() { calls.push_back("reset"); },
+		[&]() { calls.push_back("save"); return true; } });
+
+	ParityPair p("fix/input_rebind");
+	p.fire("Rebind");   // traces + variables compared across backends
+
+	CHECK(p.var("ok").b);
+	CHECK(p.var("busy").b);
+	CHECK(p.var("name").s == "Left Mouse Button");
+	CHECK(p.var("conflict").s == "Crouch, Use");
+	CHECK(p.var("saved").b);
+	const std::vector<std::string> one = {
+		"begin Jump gamepad", "busy?", "name Fire keyboard", "conflict?", "cancel", "reset", "save" };
+	REQUIRE(calls.size() == one.size() * 2);
+	for (size_t i = 0; i < one.size(); ++i)
+	{
+		INFO("call ", i);
+		CHECK(calls[i] == one[i]);                  // interpreter
+		CHECK(calls[one.size() + i] == one[i]);     // compiled
+	}
+
+	HE::api::input::setBindingService({});
+}
+
 TEST_CASE("codegen parity: engine_exec_cached (one dispatch, cached reads, save round-trip)")
 {
 	ParityPair p("fix/engine_exec_cached");

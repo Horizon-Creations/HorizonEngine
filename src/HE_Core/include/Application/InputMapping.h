@@ -164,6 +164,12 @@ public:
     const std::vector<AxisBinding>*   axisYBindings (const std::string& name) const;
     bool                              axisIs2D      (const std::string& name) const;
 
+    // Every mapped action / axis name, sorted — for a search across all of
+    // them (a rebind asking "who else uses this key?") that must answer the
+    // same on every machine, which the hash maps below would not.
+    std::vector<std::string> actionNames() const;
+    std::vector<std::string> axisNames() const;
+
 private:
     struct ActionEntry { std::vector<ActionBinding> bindings; InputActionState state; };
     struct AxisEntry

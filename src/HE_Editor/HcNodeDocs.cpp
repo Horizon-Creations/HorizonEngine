@@ -1125,6 +1125,33 @@ namespace
 	  "Rumble Gamepad. Independent of the main motors." },
 	{ "input.stopRumble",
 	  "Stop all gamepad rumble at once, main motors and triggers, on every pad." },
+	{ "input.rebindBegin",
+	  "Let the player choose a new button for an input action (by the name of its "
+	  "InputAction asset, \"Jump\"). Device is \"keyboard\" (keys and mouse buttons) "
+	  "or \"gamepad\"; only that half of the action's bindings is replaced. The next "
+	  "press on that device is taken, not the one still held from the click that "
+	  "started it. Escape or the pad's Start button cancels. While it listens, "
+	  "gameplay actions and menu navigation are silent. Button actions only; Ok is "
+	  "false for an axis, an unknown action or outside a running game." },
+	{ "input.rebindCancel",
+	  "Stop a running rebind without changing anything." },
+	{ "input.isRebinding",
+	  "True from Rebind Input Action until the chosen button is let go again (or "
+	  "the rebind was cancelled). Poll it to know when to refresh the labels." },
+	{ "input.rebindConflict",
+	  "After a rebind: the other actions the new button also triggers, separated "
+	  "by commas, or empty when there are none. The binding is made anyway, so a "
+	  "settings menu can warn and let the player decide." },
+	{ "input.bindingName",
+	  "What an action is bound to on a device (\"keyboard\" or \"gamepad\"), "
+	  "readable: \"Space\", \"A (South)\", \"Left Mouse Button\". Several are joined "
+	  "with \" / \", nothing bound is empty. Keys use the player's keyboard layout." },
+	{ "input.resetBindings",
+	  "Throw away every binding the player chose and go back to the project's "
+	  "mapping contexts. Use Save Input Bindings to make that stick." },
+	{ "input.saveBindings",
+	  "Store the player's bindings in the preferences file, so the next start of "
+	  "the game loads them again. Unsaved rebinds last until the game ends." },
 	{ "input.actionDown",
 	  "Whether an input action (by the name of its InputAction asset, \"Jump\") "
 	  "is held this frame. The polling twin of the Input.<Action>.Pressed event: "

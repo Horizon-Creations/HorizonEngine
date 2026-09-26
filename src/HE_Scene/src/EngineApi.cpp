@@ -5268,6 +5268,48 @@ bool rumbleTriggers(float left, float right, float duration)
 // Not gated: stopping is always safe, and a closed gate has already stopped.
 void stopRumble() { stopPads(); }
 
+// Beside the Snapshot for the same reason as the rumble state: installed once
+// per session by the PlayerHost, never rewritten by a frame.
+namespace {
+BindingService& bindingService() { static BindingService s; return s; }
+}
+
+void setBindingService(BindingService service) { bindingService() = std::move(service); }
+
+bool rebindBegin(const std::string& action, const std::string& device)
+{
+    const BindingService& s = bindingService();
+    return s.rebindBegin && s.rebindBegin(action, device);
+}
+void rebindCancel()
+{
+    if (const BindingService& s = bindingService(); s.rebindCancel) s.rebindCancel();
+}
+bool isRebinding()
+{
+    const BindingService& s = bindingService();
+    return s.isRebinding && s.isRebinding();
+}
+std::string rebindConflict()
+{
+    const BindingService& s = bindingService();
+    return s.rebindConflict ? s.rebindConflict() : std::string();
+}
+std::string bindingName(const std::string& action, const std::string& device)
+{
+    const BindingService& s = bindingService();
+    return s.bindingName ? s.bindingName(action, device) : std::string();
+}
+void resetBindings()
+{
+    if (const BindingService& s = bindingService(); s.resetBindings) s.resetBindings();
+}
+bool saveBindings()
+{
+    const BindingService& s = bindingService();
+    return s.saveBindings && s.saveBindings();
+}
+
 // The action states live beside the Snapshot rather than in it for the same
 // reason the mode below does: the snapshot is overwritten by pushSdlSnapshot
 // every frame, and that call comes from a different place (the app's frame)
@@ -6401,6 +6443,23 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "input.stopRumble", "Input", true, {}, {}, "HE::api::input::stopRumble",
             [](Ctx&, const VV&){ input::stopRumble(); return VV{}; } });
 
+        // Rebinding: the player's own bindings over the project's, answered by
+        // the session's PlayerHost (see input::BindingService).
+        t.push_back({ "input.rebindBegin", "Input", true, {{"action", P::String}, {"device", P::String}}, {{"ok", P::Bool}}, "HE::api::input::rebindBegin",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::rebindBegin(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "input.rebindCancel", "Input", true, {}, {}, "HE::api::input::rebindCancel",
+            [](Ctx&, const VV&){ input::rebindCancel(); return VV{}; } });
+        t.push_back({ "input.isRebinding", "Input", false, {}, {{"rebinding", P::Bool}}, "HE::api::input::isRebinding",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(input::isRebinding()) }; } });
+        t.push_back({ "input.rebindConflict", "Input", false, {}, {{"actions", P::String}}, "HE::api::input::rebindConflict",
+            [](Ctx&, const VV&){ return VV{ Value::ofString(input::rebindConflict()) }; } });
+        t.push_back({ "input.bindingName", "Input", false, {{"action", P::String}, {"device", P::String}}, {{"name", P::String}}, "HE::api::input::bindingName",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(input::bindingName(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "input.resetBindings", "Input", true, {}, {}, "HE::api::input::resetBindings",
+            [](Ctx&, const VV&){ input::resetBindings(); return VV{}; } });
+        t.push_back({ "input.saveBindings", "Input", true, {}, {{"ok", P::Bool}}, "HE::api::input::saveBindings",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(input::saveBindings()) }; } });
+
         // Input actions by name — the polling twin of the Input.<Action>.*
         // events, pushed by PlayerHost each frame (see input::ActionState).
         t.push_back({ "input.actionDown", "Input", false, {{"action", P::String}}, {{"down", P::Bool}}, "HE::api::input::actionDown",
@@ -7385,6 +7444,13 @@ const std::vector<ApiFn>& registry()
             { "input.rumble", "Rumble Gamepad" },
             { "input.rumbleTriggers", "Rumble Gamepad Triggers" },
             { "input.stopRumble", "Stop Gamepad Rumble" },
+            { "input.rebindBegin", "Rebind Input Action" },
+            { "input.rebindCancel", "Cancel Rebind" },
+            { "input.isRebinding", "Is Rebinding" },
+            { "input.rebindConflict", "Rebind Conflict" },
+            { "input.bindingName", "Input Binding Name" },
+            { "input.resetBindings", "Reset Input Bindings" },
+            { "input.saveBindings", "Save Input Bindings" },
             { "input.actionDown", "Input Action Down" },
             { "input.actionPressed", "Input Action Pressed" },
             { "input.actionReleased", "Input Action Released" },
@@ -8035,6 +8101,17 @@ void fillInputServices(::HeInputServices& out, GameServicesBinding* binding)
     out.rumbleTriggers = [](void*, float left, float right, float duration) {
         return input::rumbleTriggers(left, right, duration); };
     out.stopRumble = [](void*) { input::stopRumble(); };
+
+    out.rebindBegin = [](void*, const char* action, const char* device) {
+        return input::rebindBegin(action ? action : "", device ? device : ""); };
+    out.rebindCancel = [](void*) { input::rebindCancel(); };
+    out.isRebinding  = [](void*) { return input::isRebinding(); };
+    out.rebindConflict = [](void*, char* buf, int cap) {
+        return copyOut(input::rebindConflict(), buf, cap); };
+    out.bindingName = [](void*, const char* action, const char* device, char* buf, int cap) {
+        return copyOut(input::bindingName(action ? action : "", device ? device : ""), buf, cap); };
+    out.resetBindings = [](void*) { input::resetBindings(); };
+    out.saveBindings  = [](void*) { return input::saveBindings(); };
 }
 
 void fillContentServices(::HeContentServices& out, GameServicesBinding* binding)

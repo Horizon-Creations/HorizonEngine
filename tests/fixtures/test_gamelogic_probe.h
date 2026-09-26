@@ -91,6 +91,15 @@ struct ITestServicesProbe : IGameLogic
     virtual bool  doRumble(float low, float high, float duration)          const = 0;
     virtual bool  doRumbleTriggers(float left, float right, float duration) const = 0;
     virtual void  doStopRumble()               const = 0;
+    // Input v3: rebinding. The string answers go through the he::input
+    // wrappers (their two-call fetch) and are copied out like doAssetTypeName.
+    virtual bool  doRebindBegin(const char* action, const char* device) const = 0;
+    virtual void  doRebindCancel()             const = 0;
+    virtual bool  doIsRebinding()              const = 0;
+    virtual int   doRebindConflict(char* buf, int cap) const = 0;
+    virtual int   doBindingName(const char* action, const char* device, char* buf, int cap) const = 0;
+    virtual void  doResetBindings()            const = 0;
+    virtual bool  doSaveBindings()             const = 0;
 
     // ── Content ─────────────────────────────────────────────────────────────
     // An AssetId is a VALUE (two integers), which is the point: it crosses the
