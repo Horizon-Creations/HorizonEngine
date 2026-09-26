@@ -2,6 +2,7 @@
 #include "CollabController.h"    // AssetWriteLease / publishReimport around a retag
 #include "EditorApplication.h"   // AppContext
 #include "EditorHelp.h"          // the "Texture Color Space" scope for the buttons
+#include "EditorRewards.h"       // the confirmed import's footer moment
 #include "EditorWidgets.h"       // pinDialogToEditorWindow, the button verbs, WrapText
 #include "ImporterCommon.h"      // importSource, suggestTextureSrgb, setTextureSrgb
 #include <ContentManager/ContentManager.h>
@@ -87,6 +88,11 @@ void applyImport(AppContext& ctx)
 	HE_LOG_INFO(Editor, "%s",
 		("Editor: imported " + std::to_string(imported) + " of "
 		 + std::to_string(s_rows.size()) + " texture(s)").c_str());
+	// Reward moment (EditorRewards.h): AssetsImported — the confirmed texture
+	// batch, one moment with its count. A retag (applyRetag) is not an import.
+	if (imported > 0)
+		HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported,
+		                      static_cast<int>(imported));
 	ctx.contentRefreshPending = true;
 }
 

@@ -102,6 +102,7 @@ add_executable(HorizonEditor WIN32
 	EditorApplication.cpp
 	EditorUndo.cpp
 	EditorSelection.cpp
+	EditorRewards.cpp
 	EditorMarquee.cpp
 	EditorMultiEdit.cpp
 	OutlinerFilter.cpp

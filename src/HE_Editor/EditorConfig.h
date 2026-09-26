@@ -88,9 +88,10 @@ struct EditorConfig
 	bool AutosaveEnabled     = true;
 	int  AutosaveIntervalSec = 60;
 
-	// Reward feedback (topic 75) goes here: RewardsEnabled (master, on),
-	// RewardsSound (off), RewardsShowProgress (on) — see EditorRewards.h for
-	// the six places a setting is wired and why the counters are NOT fields here.
+	// Reward feedback (topic 75, Preferences ▸ Feedback) — see EditorRewards.h
+	// for what they switch and why the counters are NOT fields here.
+	bool RewardsEnabled = true;    // master: the footer's "Saved"/"Build succeeded" line
+	bool RewardsSound   = false;   // the chime with it (only with the master on)
 
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)

@@ -68,6 +68,8 @@
 #include "HcWatchPanel.h"                // Window > Watch window (a stopped HorizonCode run's values)
 #include "EditorAssetTypeCache.h"        // shared path → AssetType sniff (invalidated below)
 #include "EditorWidgets.h"               // dialog placement + detached-modal raise
+#include "EditorRewards.h"               // the footer's "Saved"/"Build succeeded" moments
+#include "BuildProgressDialog.h"         // outcome(), polled for the build moment
 #include "HorizonVersion.h"              // HE_VERSION_FULL — Help ▸ About
 #ifdef __APPLE__
 #include "MacMenuBar.h"   // native system menu bar (replaces the ImGui menu row)
@@ -512,6 +514,13 @@ void EditorUI::render(AppContext& ctx, float dt)
 
     ImGui::NewFrame();
     ImGuizmo::BeginFrame();
+
+    // Reward moment (EditorRewards.h): BuildSucceeded — the edge detector, every
+    // frame and here rather than in the footer, which the project hub skips.
+    {
+        const BuildProgressDialog::Outcome o = BuildProgressDialog::outcome();
+        HE::Ed::Rewards::pollBuild(ctx, o.run, o.finished, o.success);
+    }
 
     // Apply the user's UI font scale preference (clamped to a sane range).
     ImGui::GetStyle().FontScaleMain = std::clamp(ctx.editorConfig.UiFontScale, 0.5f, 3.0f);
@@ -1109,12 +1118,20 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			ctx.window ? ctx.window->GetNativeWindow() : nullptr,
 			filters, 1, dir.empty() ? nullptr : dir.c_str());
 	};
-	// Reward moment (EditorRewards.h): Saved — on a successful synchronous save;
-	// needs ctx.saveSceneToPath to report success first.
+	// The scene to its known path, and nothing else: no Save-As, no reward.
+	// Save All uses it to count the scene into its one batch moment.
+	auto writeScene = [&]() -> bool
+	{
+		return ctx.saveSceneToPath && ctx.saveSceneToPath(ctx.currentScenePath);
+	};
+	// Reward moment (EditorRewards.h): Saved — a successful synchronous save of
+	// a scene that HAD unsaved edits (the Save-As path fires in its handler).
 	auto doSaveScene = [&]()
 	{
-		if (ctx.currentScenePath.empty()) triggerSaveSceneAs();
-		else if (ctx.saveSceneToPath)     ctx.saveSceneToPath(ctx.currentScenePath);
+		if (ctx.currentScenePath.empty()) { triggerSaveSceneAs(); return; }
+		const bool wasDirty = ctx.sceneDirty;
+		if (writeScene() && wasDirty)
+			HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
 	};
 	// ── Save (Ctrl/Cmd+S): the tab you are LOOKING AT ──────────────────────
 	// Saving the scene from inside a material graph is the wrong document: the
@@ -1145,8 +1162,14 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		}
 		// Reward moment (EditorRewards.h): Saved — only if the tab (or its clip)
 		// HAD unsaved edits; saveAsset answers true for a no-op.
+		bool wrote = false, failed = false;
+		const bool hadEdits = tabHasUnsavedEdits(path);
 		if (!saveAsset(ctx, path))
+		{
+			failed = true;
 			HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + path).c_str());
+		}
+		else wrote = hadEdits;
 		// One tab edits an asset it is not named after: the Skeletal Mesh viewer
 		// authors the NOTIFIES of the clip scrubbed in it. Saving the tab's own
 		// path finds nothing to write and reports success, so without this the
@@ -1154,8 +1177,16 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		// not through a second Ctrl+S owner inside the panel — two handlers for
 		// one key is how a Save starts saving the scene as well.
 		if (const std::string clip = SkeletalMeshEditorPanel::dirtyClipForTab(path); !clip.empty())
+		{
 			if (!saveAsset(ctx, clip))
+			{
+				failed = true;
 				HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + clip).c_str());
+			}
+			else wrote = true;
+		}
+		if (wrote && !failed)
+			HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
 	};
 	// ── Save All (Ctrl/Cmd+Shift+S): every unsaved asset, then the scene ────
 	// unsavedAssetPaths() is panel-driven, so this also catches assets whose tab
@@ -1163,13 +1194,25 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 	// on purpose: an unnamed scene opens the async Save-As dialog, and that is
 	// far less confusing at the end of the run than in the middle of it.
 	// Reward moment (EditorRewards.h): Saved — ONE for the batch if anything was
-	// written and nothing failed; the doSaveScene inside must not fire a second.
+	// written and nothing failed. An unnamed scene goes to Save-As, whose
+	// handler is a moment of its own (the dialog is a second user action).
 	auto doSaveAll = [&]()
 	{
+		bool wrote = false, failed = false;
 		for (const std::string& path : unsavedAssetPaths())
-			if (!saveAsset(ctx, path))
-				HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + path).c_str());
-		if (ctx.sceneDirty) doSaveScene();
+		{
+			if (saveAsset(ctx, path)) { wrote = true; continue; }
+			failed = true;
+			HE_LOG_ERROR(Editor, "%s", ("Editor: save failed for " + path).c_str());
+		}
+		if (ctx.sceneDirty)
+		{
+			if (ctx.currentScenePath.empty()) triggerSaveSceneAs();
+			else if (writeScene())            wrote  = true;
+			else                              failed = true;
+		}
+		if (wrote && !failed)
+			HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
 	};
 	// Open the project at `chosen` — the file dialog's result and a File ▸
 	// Recent Projects row end up here. End the old session BEFORE loading the
@@ -2461,6 +2504,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                     else
                     {
                         s_guardSaveError.clear();
+                        // Reward moment (EditorRewards.h): Saved — the assets
+                        // here, the scene inside doSaveScene; same frame, so one.
+                        if (!dirtyTabs.empty())
+                            HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
                         const bool hadPath = !ctx.currentScenePath.empty();
                         if (ctx.sceneDirty)
                             doSaveScene(); // synchronous if a path exists, else async Save-As
@@ -2531,7 +2578,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 std::filesystem::path p(chosen);
                 if (p.extension() != ".hescene") p += ".hescene";
                 // Reward moment (EditorRewards.h): Saved — the async Save-As.
-                ctx.saveSceneToPath(p.string());
+                if (ctx.saveSceneToPath(p.string()))
+                    HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::Saved);
                 // If this Save-As was the guard's "Save" choice, run the deferred
                 // action now that the scene is on disk.
                 if (s_guardSaveThenAct)
@@ -2556,7 +2604,8 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 // Textures wait for the colour-space dialog (sRGB or linear is a
                 // choice the file cannot make); everything else imports now.
                 // Reward moment (EditorRewards.h): AssetsImported(imported) —
-                // one for the batch, after the loop, only if imported > 0.
+                // one for the batch, after the loop, only if imported > 0. The
+                // textures are the colour-space dialog's moment.
                 size_t imported = 0;
                 std::vector<std::string> textures;
                 for (const std::string& src : s_pendingImportPaths)
@@ -2583,6 +2632,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                      + (textures.empty() ? std::string()
                         : ", " + std::to_string(textures.size())
                           + " texture(s) wait for their color space")).c_str());
+                if (imported > 0)
+                    HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported,
+                                          static_cast<int>(imported));
                 ctx.contentRefreshPending = true;
             }
             s_pendingImportPaths.clear();
@@ -3112,13 +3164,9 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 
 		// Middle — status
 		// Reward feedback (EditorRewards.h) lives here: the moment's line fading
-		// back to "Ready", and the idle progress counters after it. The
-		// BuildSucceeded edge detector over BuildProgressDialog::snapshot() runs
-		// once per frame on this thread too.
-		const std::string statusText = "Ready";
-		const float       statusW    = ImGui::CalcTextSize(statusText.c_str()).x;
-		ImGui::SameLine((ImGui::GetWindowWidth() - statusW) * 0.5f);
-		ImGui::TextDisabled("%s", statusText.c_str());
+		// back to "Ready" (the idle progress counters join it in step 3). The
+		// BuildSucceeded edge detector runs at the top of render(), every frame.
+		HE::Ed::Rewards::drawFooterStatus(ctx, "Ready");
 
         if (ctx.fontBody) ImGui::PopFont();
 

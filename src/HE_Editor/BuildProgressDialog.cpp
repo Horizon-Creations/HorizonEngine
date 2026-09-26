@@ -57,6 +57,7 @@ bool                  s_runnableHere = false;
 // but the reader is the UI thread too and one lock for one model is the rule
 // this file already follows.
 Kind                  s_kind = Kind::Export;
+unsigned long long    s_runSerial = 0;   // begin() calls so far — see outcome()
 // The HorizonCode classes this run ships interpreted instead of compiled. Kept
 // beyond finish() on purpose — the export settings dialog reads it back when
 // the user returns to fix them.
@@ -116,6 +117,7 @@ void begin(const std::vector<std::string>& stepNames, Kind kind)
 	{
 		std::lock_guard<std::mutex> lk(s_mutex);
 		s_kind = kind;
+		++s_runSerial;
 		s_steps.clear();
 		s_steps.reserve(stepNames.size());
 		for (const std::string& n : stepNames) s_steps.push_back(Step{n});
@@ -277,6 +279,12 @@ Snapshot snapshot()
 	for (const LogLine& l : s_log)
 		out.log.push_back(LogView{ l.step, l.severity, l.text });
 	return out;
+}
+
+Outcome outcome()
+{
+	std::lock_guard<std::mutex> lk(s_mutex);
+	return Outcome{ s_runSerial, s_finished, s_success };
 }
 
 void requestOpen() { s_openRequest = true; }

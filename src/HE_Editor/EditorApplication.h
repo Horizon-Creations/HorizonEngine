@@ -248,7 +248,7 @@ struct AppContext
 	// scene or an asset panel has unsaved edits (including a panel whose tab was
 	// already closed); the UI turns it into a guarded Quit and clears it.
 	bool&        exitRequested;
-	std::function<void(const std::string&)> saveSceneToPath; // write world → .hescene (JSON)
+	std::function<bool(const std::string&)> saveSceneToPath; // write world → .hescene (JSON); false = not written
 	std::function<void(const std::string&)> openScene;          // load .hescene, replacing the world
 	std::function<void(const std::string&)> openSceneAdditive; // merge .hescene into the existing world
 	std::function<void()>                    newScene;        // clear to an empty scene

@@ -1183,6 +1183,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.McpPort                      = globalstate.getCustomConfigInt("McpPort", m_editorConfig.McpPort);
 	m_editorConfig.AutosaveEnabled              = globalstate.getCustomConfigBool("AutosaveEnabled", m_editorConfig.AutosaveEnabled);
 	m_editorConfig.AutosaveIntervalSec          = globalstate.getCustomConfigInt("AutosaveIntervalSec", m_editorConfig.AutosaveIntervalSec);
+	m_editorConfig.RewardsEnabled               = globalstate.getCustomConfigBool("RewardsEnabled", m_editorConfig.RewardsEnabled);
+	m_editorConfig.RewardsSound                 = globalstate.getCustomConfigBool("RewardsSound", m_editorConfig.RewardsSound);
 	// The environment overrides the stored config in one direction only: it can
 	// turn the bridge ON for a single run (a headless test, a scripted session),
 	// never off. Same shape as HE_COLLAB_OFFLINE and the HE_DUMP_* family.
@@ -8864,7 +8866,7 @@ AppContext EditorApplication::makeContext()
 		.currentScenePath    = m_currentScenePath,
 		.sceneDirty          = m_undo.revision() != m_savedRevision,
 		.exitRequested       = m_exitRequested,
-		.saveSceneToPath     = [this](const std::string& p){ saveSceneToPath(p); },
+		.saveSceneToPath     = [this](const std::string& p){ return saveSceneToPath(p); },
 		.openScene           = [this](const std::string& p){ openScene(p); },
 		.openSceneAdditive   = [this](const std::string& p){ openSceneAdditive(p); },
 		.newScene            = [this]{ newScene(); },
@@ -10797,6 +10799,8 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("McpPort",                    m_editorConfig.McpPort);
 	globalstate.setCustomConfigEntry("AutosaveEnabled",            m_editorConfig.AutosaveEnabled);
 	globalstate.setCustomConfigEntry("AutosaveIntervalSec",        m_editorConfig.AutosaveIntervalSec);
+	globalstate.setCustomConfigEntry("RewardsEnabled",             m_editorConfig.RewardsEnabled);
+	globalstate.setCustomConfigEntry("RewardsSound",               m_editorConfig.RewardsSound);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);
