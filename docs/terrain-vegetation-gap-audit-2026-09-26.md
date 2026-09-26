@@ -386,3 +386,49 @@ denselben `castsShadow`-Filter in BLAS/TLAS aller Backends; `InvalidateMesh` ver
    dem Grid heraus *bewegen* (bewusst kein Refit auf Bewegung).
 5. Eine sehr große Szene (km-Terrain) bekommt grobe Sonden (4 km → ~300 m); Kaskaden bzw. ein
    kamerafolgendes Grid bleiben ein eigenes Rendering-Thema.
+
+## 9. Nachtrag Schritt 5: Vollbau, Tests, Roadmap-Vorschlag
+
+**Vollbau und Tests** (HEAD `90f686bd`, Release, Baum `C:/hw80` mit eigenem `DEPLOY_DIR`,
+NN-WS03, VS 18, `cmake --build -j8`; inkrementell auf dem Baum von Schritt 4, alle Ziele):
+
+| Prüfung | Ergebnis |
+|---|---|
+| Build aller Ziele | grün, inkl. Shader-Prüfschritt: 40 HLSL + 53 GLSL Laufzeit-Shader kompilieren, 0 Fehler |
+| `he_tests.exe` (volle Suite) | **3770 / 3770** Fälle, 510 385 Assertions, 0 Fehler (123 s) |
+| davon Themen-Dateien (`test_terrain*`, `test_foliage`, `test_gi_probe_grid`, `test_mcp_tools_terrain`, `test_material_graph`, `test_mcp_tools_material`) | 216 / 216 |
+| `ctest -j8` | 198 bestanden, 2 übersprungen (`runtime_size_app_basic/advanced`, Selbst-Skip), 0 Fehler; `test_inspector_ui` diesmal grün |
+| CI auf HEAD (Run 36249720659) | macOS, Linux, Windows grün, einziger Beleg für Metal |
+
+In diesem Schritt liefen **keine neuen Render-Zeugen**; die Laufzeitbelege stehen in 7 und 8.
+
+**Was im Code weiter offen ist** (auf dem Zweig nachgeprüft, Lücken auch gegen `origin/main`
+`5a63a429`, 125 Commits voraus):
+
+| Punkt | Zweig | main | Beleg |
+|---|---|---|---|
+| Sculpten streut Foliage nicht neu (3.1/1) | offen | – | Sculpt-Pfad `TerrainTools.cpp:~484` setzt nur `regionDirty`, kein `FoliageComponent::dirty` |
+| Foliage ignoriert Welt-Transformation (3.1/2) | offen | – | `FoliageSystem.cpp:54` weiter `origin = tf->position` |
+| Veralteter Metal-Kommentar (3.1/3) | **erledigt** | – | `MetalRenderer.mm:8101` sagt jetzt, dass Chunks gewöhnliche Mesh-Entities sind |
+| Gebatchte Foliage weht auf GL nicht (7, Grenze 1) | offen | – | eigener Schritt |
+| WPO in Schatten/Tiefe (7, Grenze 2) | offen | – | bewusst getrennt |
+| Paint auf D3D12/Vulkan (3.2) | offen | **offen** | `weightmapTextureId` in D3D12/Vulkan 0 Treffer auf beiden; Fix `f704282d` nur auf `origin/claude/backend-parity-p1` |
+| DDGI für Graph-Materialien (bemaltes Terrain) auf D3D11/D3D12/Vulkan (8, Offen 1) | offen | **offen** | `giProbe[` im Material-Präfix nur in GL (`OpenGLRenderer.cpp:12936`) und Metal (`MetalRenderer.mm:13637`) |
+
+**Roadmap-Vorschlag** (Entscheidung beim Chefchen bzw. Menschen; `roadmap_upsert` + `deploy`
+nicht ausgeführt, siehe 5). Gemessen am **eigenen Text des Eintrags**, nicht an der Phase-2-Liste
+(Sculpt/Paint/Blend deckt der eigene, schon `done` stehende Eintrag „Landscape Tools“ ab):
+jede Zusage des Eintrags ist jetzt im Code belegt, Wind eingeschlossen (seit Schritt 3). Hinzu
+kommen Tessellation/Displacement (2) und das Terrain im DDGI-Grid (4). Offen sind zwei
+Foliage-Korrektheitsfehler und Backend-Paritätslücken.
+
+- **Fortschritt: 85 %**, Status bleibt `in-progress`.
+- **Auf 100 % / `done`** nach: den beiden Foliage-Bugs (3.1/1+2) und der GL-Instanz-Lücke für
+  Graph-Materialien (7, Grenze 1), denn die trifft die Zusage „instanced foliage with wind“
+  genau auf einem Backend. Paint und DDGI auf D3D/Vulkan gehören zur Backend-Parität
+  (Thema 78) und blockieren diesen Eintrag nicht.
+- **Beschreibung neu** (ohne unbelegte Zusage):
+  „Chunked heightfield terrain with automatic per-chunk LOD, frustum culling and camera-driven
+  tessellation with optional displacement, in-editor sculpting with region-dirty regeneration,
+  terrain lit by the DDGI probe grid, and GPU-instanced foliage with engine-driven wind sway
+  (Wind / Wind Sway material nodes, Foliage material template).“
