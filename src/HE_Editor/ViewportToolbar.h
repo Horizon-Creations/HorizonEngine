@@ -40,7 +40,7 @@ class  EditorCamera;
 #include <imgui.h>     // ImGuizmo.h uses ImVec2/ImU32/ImDrawList without declaring them
 #include <ImGuizmo.h>
 #include "Renderer/IRenderer.h"   // HE::ViewMode
-#include <entt/entt.hpp>          // entt::entity — the camera Look Through is locked to
+#include <Types/UUID.h>           // the camera Look Through is locked to
 
 namespace ViewportToolbar
 {
@@ -83,11 +83,13 @@ struct State
 	float snapVertexRadiusPx = 24.0f;
 
 	// View ▸ Look Through Selected Camera: the scene camera the viewport
-	// renders through, or null. The ENTITY, not the selection — the point is to
-	// select and move actors while the shot stays on screen. The panel drops it
-	// when the camera goes, when play starts, and on the first navigation (which
-	// then continues from the camera's pose). Per session, not persisted.
-	entt::entity lookThrough = entt::null;
+	// renders through, or a zero id. The ENTITY, not the selection — the point
+	// is to select and move actors while the shot stays on screen. Held as its
+	// EntityIdComponent uuid, not an entt handle: undo and a scene reload remap
+	// handles, and a handle would then name nothing or a different camera. The
+	// panel drops it when the camera goes, when play starts, and on the first
+	// navigation (which then continues from the camera's pose). Per session.
+	HE::UUID lookThrough{};
 
 	// True while a translate drag is taken over by a surface/vertex probe
 	// rather than ImGuizmo's own increment.

@@ -702,7 +702,9 @@ Umgesetzt:
   `asset_create` (seit Schritt 6).
 - **Viewport-Schalter** „Look Through Selected Camera“ im View-Popup des Szenen-Viewports
   (`ViewportToolbar::lookThroughRows`, Zustand `State::lookThrough`). Gesperrt wird auf das
-  **Kamera-Entity**, nicht auf die Auswahl: Akteure auswählen und verschieben, während die
+  **Kamera-Entity**, nicht auf die Auswahl, und zwar über seine `EntityIdComponent`-UUID, jedes
+  Frame per `findByEntityId` aufgelöst (ein Undo mappt entt-Handles um; ein Handle zeigte danach
+  auf nichts oder auf eine andere Kamera): Akteure auswählen und verschieben, während die
   Einstellung stehen bleibt; die Kamera selbst per Gizmo verschieben bewegt das Bild. Die Pose
   kommt aus `CinematicPreview::cameraViewOf` (herausgezogen aus dem Tab: `worldMatrixOf`, Skala
   herausgeteilt, FOV samt Rig-Offset), der Override aus `overrideFor`; **beide** Override-Stellen
@@ -754,6 +756,9 @@ Tests:
   Stand vor Schritt 7 (127718d4) **200/200** grün, danach **201/201** grün (je drei
   `runtime_size*` übersprungen wie immer), `editor_help_audit` und `test_docs_library` mit dem
   neuen Bündel grün.
+  Die volle Suite lief auf c505a108; die anschließende Umstellung des Viewport-Zustands von
+  entt-Handle auf UUID ist gebaut (rc=0) und mit `test_cinematic_timeline`, `test_docs_library`,
+  `test_mcp_tools_sequence` und `editor_help_audit` nachgeprüft, nicht mit der ganzen Suite.
 
 Bewusst **nicht** in Schritt 7:
 

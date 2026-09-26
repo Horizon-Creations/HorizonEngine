@@ -557,10 +557,10 @@ void lookThroughRows(AppContext& ctx, State& st)
 {
 	HE::Ed::Help::Scope helpScope("Viewport View");
 	ImGui::Separator();
-	if (st.lookThrough != entt::null)
+	if (st.lookThrough != HE::UUID{})
 	{
 		if (EditorWidgets::menuItem("Stop Looking Through Camera", nullptr, true))
-			st.lookThrough = entt::null;
+			st.lookThrough = HE::UUID{};
 		return;
 	}
 	// Offered for the selected entity when it IS a camera; greyed out otherwise,
@@ -570,7 +570,7 @@ void lookThroughRows(AppContext& ctx, State& st)
 	                     ctx.world->registry().valid(sel) &&
 	                     ctx.world->registry().all_of<CameraComponent, TransformComponent>(sel);
 	if (EditorWidgets::menuItem("Look Through Selected Camera", nullptr, false, canLook))
-		st.lookThrough = sel;
+		st.lookThrough = ctx.world->entityId(sel);   // zero without an id: nothing to lock to
 }
 
 namespace
@@ -978,7 +978,7 @@ void render(AppContext& ctx, State& st)
 			// Locked to a scene camera, the cell says so and stays lit: the
 			// presets below it would end the lock, and "why won't it fly" has
 			// to be answerable from the bar.
-			const bool through = st.lookThrough != entt::null;
+			const bool through = st.lookThrough != HE::UUID{};
 			const char* viewLabel = through ? "Camera"
 			                      : (ortho && preset == VP::Perspective)
 			                        ? "Ortho" : EditorCamera::presetName(preset);

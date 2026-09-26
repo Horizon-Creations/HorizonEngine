@@ -939,12 +939,13 @@ void render(AppContext& ctx, float dt)
 				// and move actors while looking through the shot. Re-read every
 				// frame, so a camera moved by the gizmo moves the picture with
 				// it; a camera deleted or stripped of its component ends it.
+				// Found by its uuid every frame: an undo remaps entity handles.
 				HE::Ed::CinematicPreview::CameraView look;
-				if (s_tb.lookThrough != entt::null)
+				if (s_tb.lookThrough != HE::UUID{})
 				{
 					if (ctx.world && !ctx.isPlaying && !ctx.appLivePreview)
-						look = HE::Ed::CinematicPreview::cameraViewOf(*ctx.world, s_tb.lookThrough);
-					if (!look.valid) s_tb.lookThrough = entt::null;
+						look = HE::Ed::CinematicPreview::cameraViewOf(*ctx.world, ctx.world->findByEntityId(s_tb.lookThrough));
+					if (!look.valid) s_tb.lookThrough = HE::UUID{};
 				}
 				// An application's preview is always live, so its pointer is fed
 				// every frame rather than only during play (ctx.appLivePreview).
@@ -1006,7 +1007,7 @@ void render(AppContext& ctx, float dt)
 					if (look.valid && moved)
 					{
 						cam.setOrientation(look.position, look.rotation * glm::vec3(0.0f, 0.0f, -1.0f));
-						s_tb.lookThrough = entt::null;
+						s_tb.lookThrough = HE::UUID{};
 						look = {};
 					}
 					// Anything else that moves the editor camera this frame — F,
@@ -1128,7 +1129,7 @@ void render(AppContext& ctx, float dt)
 					    (cam.position() != camPosBefore || cam.yaw() != camYawBefore ||
 					     cam.pitch() != camPitchBefore || cam.orthographic() != camOrthoBefore))
 					{
-						s_tb.lookThrough = entt::null;
+						s_tb.lookThrough = HE::UUID{};
 						look = {};
 					}
 					// Push to the backend so this frame's render uses it. The
