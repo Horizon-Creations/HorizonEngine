@@ -130,12 +130,29 @@ std::vector<SettingDesc> buildCatalog()
 	                    &EditorConfig::RewardsVisual,
 	                    "Show the moment's line in the footer. Needs Success "
 	                    "Feedback on; independent of the sound."));
+	t.push_back(boolRow("rewards.checkMark", "Check Mark", "Feedback", "rewards",
+	                    &EditorConfig::RewardsCheckMark,
+	                    "Draw a check mark beside the footer line. Needs Visual "
+	                    "Cues on."));
+	t.push_back(boolRow("rewards.lightEdge", "Light Edge", "Feedback", "rewards",
+	                    &EditorConfig::RewardsLightEdge,
+	                    "One soft line of light along the top of the footer when "
+	                    "the line appears. Needs Visual Cues on."));
+	t.push_back(boolRow("rewards.tabCheck", "Tab Check on Save", "Feedback", "rewards",
+	                    &EditorConfig::RewardsTabCheck,
+	                    "A saved tab's unsaved marker turns into a check for a "
+	                    "moment. Needs Success Feedback on."));
+	t.push_back(boolRow("rewards.importHighlight", "Highlight Imports", "Feedback",
+	                    "rewards", &EditorConfig::RewardsImportHighlight,
+	                    "Assets an import just wrote get a frame in the Content "
+	                    "Browser that fades after about two seconds. Needs "
+	                    "Success Feedback on."));
 	t.push_back(enumRow("rewards.reducedMotion", "Reduced Motion", "Feedback", "rewards",
 	                    &EditorConfig::RewardsReducedMotion,
 	                    { "Follow System", "Off" },
-	                    "Follow the system's reduce-motion setting (no moving "
-	                    "underline under the footer line), or always show the "
-	                    "full motion."));
+	                    "Follow the system's reduce-motion setting (check marks "
+	                    "appear whole, no light edge, no rolling numbers, no "
+	                    "moving underline), or always show the full motion."));
 	t.push_back(boolRow("rewards.sound", "Success Sound", "Feedback", "rewards",
 	                    &EditorConfig::RewardsSound,
 	                    "Play a short sound when a moment happens (and when a "
@@ -168,6 +185,14 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Show successful builds today and days in a row with the "
 	                    "editor beside \"Ready\" in the footer. Needs Success "
 	                    "Feedback on; off hides the counters, they keep counting."));
+	t.push_back(boolRow("rewards.counterTick", "Counter Tick", "Feedback", "rewards",
+	                    &EditorConfig::RewardsCounterTick,
+	                    "A counter that just went up lights up for a moment. "
+	                    "Needs Show Progress on."));
+	t.push_back(boolRow("rewards.streakTooltip", "Recent Days Tooltip", "Feedback",
+	                    "rewards", &EditorConfig::RewardsStreakTooltip,
+	                    "Hovering the counters shows the last seven days. Only on "
+	                    "hover, never on its own. Needs Show Progress on."));
 	t.push_back(boolRow("rewards.muteEditorSounds", "Mute Editor Sounds", "Feedback",
 	                    "rewards", &EditorConfig::EditorSoundsMuted,
 	                    "Silence the sounds the editor plays on its own output "

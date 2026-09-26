@@ -901,6 +901,15 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		{
 			SubGroup sub(cfg.RewardsEnabled);
 			EditorWidgets::checkbox("Visual Cues", &cfg.RewardsVisual);
+			{
+				// V1 and V2b belong to the line; V4 and V5 live elsewhere and
+				// are siblings (EditorRewards.h, "The visual cues").
+				SubGroup vis(cfg.RewardsVisual);
+				EditorWidgets::checkbox("Check Mark", &cfg.RewardsCheckMark);
+				EditorWidgets::checkbox("Light Edge", &cfg.RewardsLightEdge);
+			}
+			EditorWidgets::checkbox("Tab Check on Save", &cfg.RewardsTabCheck);
+			EditorWidgets::checkbox("Highlight Imports", &cfg.RewardsImportHighlight);
 			static const char* motionItems[] = { "Follow System", "Off" };
 			cfg.RewardsReducedMotion = std::clamp(cfg.RewardsReducedMotion, 0, 1);
 			Row::combo("Reduced Motion", &cfg.RewardsReducedMotion, motionItems,
@@ -932,6 +941,11 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 					HE::Ed::Rewards::preview(ctx, Tone::ImportPop);
 			}
 			EditorWidgets::checkbox("Show Progress", &cfg.RewardsShowProgress);
+			{
+				SubGroup prog(cfg.RewardsShowProgress);
+				EditorWidgets::checkbox("Counter Tick", &cfg.RewardsCounterTick);
+				EditorWidgets::checkbox("Recent Days Tooltip", &cfg.RewardsStreakTooltip);
+			}
 		}
 		EditorWidgets::checkbox("Mute Editor Sounds", &cfg.EditorSoundsMuted);
 		hint("A saved scene or asset, a finished build and an import say so for a "
@@ -2082,6 +2096,10 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.AutosaveIntervalSec = 60;
 			cfg.RewardsEnabled       = true;
 			cfg.RewardsVisual        = true;
+			cfg.RewardsCheckMark     = true;
+			cfg.RewardsLightEdge     = true;
+			cfg.RewardsTabCheck      = true;
+			cfg.RewardsImportHighlight = true;
 			cfg.RewardsReducedMotion = 0;
 			cfg.RewardsSound         = false;
 			cfg.RewardsVolume        = 0.5f;
@@ -2090,6 +2108,8 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.RewardsSoundBuildFailed = true;
 			cfg.RewardsSoundImport      = true;
 			cfg.RewardsShowProgress  = true;
+			cfg.RewardsCounterTick   = true;
+			cfg.RewardsStreakTooltip = true;
 			cfg.EditorSoundsMuted    = false;
 			cfg.BloomEnabled     = true;
 			cfg.BloomThreshold    = 1.0f;

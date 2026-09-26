@@ -36,6 +36,8 @@
 #include "GameLogicBuildPanel.h"   // …and the native compile they start the other way
 #include "BuildProgressDialog.h"   // …and the one window both of them report into
 #include "HcFallbackReport.h"      // which classes an export had to ship interpreted
+#include "EditorRewards.h"         // setSystemMotionQuery — Reduced Motion's "Follow System"
+#include "EditorSystemMotion.h"    // …and the system query it follows
 #include "HorizonVersion.h"
 #include <Diagnostics/Profiler.h>
 #include <Application/AppIcon.h>    // hePngWrite — the HE_DUMP_SCENEIMAGE witness writes a PNG
@@ -1185,6 +1187,10 @@ void EditorApplication::OnInit()
 	m_editorConfig.AutosaveIntervalSec          = globalstate.getCustomConfigInt("AutosaveIntervalSec", m_editorConfig.AutosaveIntervalSec);
 	m_editorConfig.RewardsEnabled               = globalstate.getCustomConfigBool("RewardsEnabled", m_editorConfig.RewardsEnabled);
 	m_editorConfig.RewardsVisual                = globalstate.getCustomConfigBool("RewardsVisual", m_editorConfig.RewardsVisual);
+	m_editorConfig.RewardsCheckMark             = globalstate.getCustomConfigBool("RewardsCheckMark", m_editorConfig.RewardsCheckMark);
+	m_editorConfig.RewardsLightEdge             = globalstate.getCustomConfigBool("RewardsLightEdge", m_editorConfig.RewardsLightEdge);
+	m_editorConfig.RewardsTabCheck              = globalstate.getCustomConfigBool("RewardsTabCheck", m_editorConfig.RewardsTabCheck);
+	m_editorConfig.RewardsImportHighlight       = globalstate.getCustomConfigBool("RewardsImportHighlight", m_editorConfig.RewardsImportHighlight);
 	m_editorConfig.RewardsReducedMotion         = std::clamp(globalstate.getCustomConfigInt("RewardsReducedMotion", m_editorConfig.RewardsReducedMotion), 0, 1);
 	m_editorConfig.RewardsSound                 = globalstate.getCustomConfigBool("RewardsSound", m_editorConfig.RewardsSound);
 	m_editorConfig.RewardsVolume                = globalstate.getCustomConfigFloat("RewardsVolume", m_editorConfig.RewardsVolume);
@@ -1193,7 +1199,12 @@ void EditorApplication::OnInit()
 	m_editorConfig.RewardsSoundBuildFailed      = globalstate.getCustomConfigBool("RewardsSoundBuildFailed", m_editorConfig.RewardsSoundBuildFailed);
 	m_editorConfig.RewardsSoundImport           = globalstate.getCustomConfigBool("RewardsSoundImport", m_editorConfig.RewardsSoundImport);
 	m_editorConfig.RewardsShowProgress          = globalstate.getCustomConfigBool("RewardsShowProgress", m_editorConfig.RewardsShowProgress);
+	m_editorConfig.RewardsCounterTick           = globalstate.getCustomConfigBool("RewardsCounterTick", m_editorConfig.RewardsCounterTick);
+	m_editorConfig.RewardsStreakTooltip         = globalstate.getCustomConfigBool("RewardsStreakTooltip", m_editorConfig.RewardsStreakTooltip);
 	m_editorConfig.EditorSoundsMuted            = globalstate.getCustomConfigBool("EditorSoundsMuted", m_editorConfig.EditorSoundsMuted);
+	// Reduced Motion's "Follow System" asks the system through this; before
+	// the first frame, so the first footer already follows it.
+	HE::Ed::Rewards::setSystemMotionQuery(&HE::Ed::systemReducesMotionQuery);
 	// The environment overrides the stored config in one direction only: it can
 	// turn the bridge ON for a single run (a headless test, a scripted session),
 	// never off. Same shape as HE_COLLAB_OFFLINE and the HE_DUMP_* family.
@@ -10860,6 +10871,10 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("AutosaveIntervalSec",        m_editorConfig.AutosaveIntervalSec);
 	globalstate.setCustomConfigEntry("RewardsEnabled",             m_editorConfig.RewardsEnabled);
 	globalstate.setCustomConfigEntry("RewardsVisual",              m_editorConfig.RewardsVisual);
+	globalstate.setCustomConfigEntry("RewardsCheckMark",           m_editorConfig.RewardsCheckMark);
+	globalstate.setCustomConfigEntry("RewardsLightEdge",           m_editorConfig.RewardsLightEdge);
+	globalstate.setCustomConfigEntry("RewardsTabCheck",            m_editorConfig.RewardsTabCheck);
+	globalstate.setCustomConfigEntry("RewardsImportHighlight",     m_editorConfig.RewardsImportHighlight);
 	globalstate.setCustomConfigEntry("RewardsReducedMotion",       m_editorConfig.RewardsReducedMotion);
 	globalstate.setCustomConfigEntry("RewardsSound",               m_editorConfig.RewardsSound);
 	globalstate.setCustomConfigEntry("RewardsVolume",              m_editorConfig.RewardsVolume);
@@ -10868,6 +10883,8 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("RewardsSoundBuildFailed",    m_editorConfig.RewardsSoundBuildFailed);
 	globalstate.setCustomConfigEntry("RewardsSoundImport",         m_editorConfig.RewardsSoundImport);
 	globalstate.setCustomConfigEntry("RewardsShowProgress",        m_editorConfig.RewardsShowProgress);
+	globalstate.setCustomConfigEntry("RewardsCounterTick",         m_editorConfig.RewardsCounterTick);
+	globalstate.setCustomConfigEntry("RewardsStreakTooltip",       m_editorConfig.RewardsStreakTooltip);
 	globalstate.setCustomConfigEntry("EditorSoundsMuted",          m_editorConfig.EditorSoundsMuted);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);

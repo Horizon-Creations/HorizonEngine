@@ -3304,14 +3304,40 @@ namespace
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Visual Cues", "",
 	  "The moment's line in the middle of the footer (\"Saved\", \"Build "
-	  "succeeded\", \"Imported 3 assets\") and the thin line under it. Off: the "
-	  "footer stays on \"Ready\" and the progress counters, the sound (if on) "
-	  "still plays and counting goes on.",
+	  "succeeded\", \"Imported 3 assets\") and the thin line under it, with its "
+	  "check mark and light edge below. Off: the footer stays on \"Ready\" and "
+	  "the progress counters, the sound (if on) still plays and counting goes "
+	  "on. The tab check and the import highlight have switches of their own.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Check Mark", "",
+	  "A small check drawn beside the footer line, so \"it worked\" does not "
+	  "rest on the green alone. It is written in a sixth of a second, or "
+	  "appears whole with reduced motion, and fades with the line. Saving "
+	  "again right after does not draw it again.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Light Edge", "",
+	  "One thin line of light along the top edge of the footer that spreads "
+	  "from the middle and fades within about half a second when the line "
+	  "appears. One pulse, never a blink; left out with reduced motion.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Tab Check on Save", "",
+	  "When you save, the \" *\" behind the saved tab's name turns into a small "
+	  "check for about half a second, right where you are looking. Undoing back "
+	  "to the saved state is not a save and shows none.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Highlight Imports", "",
+	  "Assets an import just wrote get a green frame in the Content Browser "
+	  "that fades after about two seconds, so you can find them. The frame "
+	  "starts when the tile comes into view, as long as that is within half a "
+	  "minute of the import.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Reduced Motion", "",
-	  "Follow System: when the system asks for reduced motion, the feedback "
-	  "leaves out what moves (the shrinking line under the footer text). Off: "
-	  "always the full motion. Nothing here ever blinks either way.",
+	  "Follow System: when the system asks for reduced motion (macOS: "
+	  "Accessibility \xe2\x96\xb8 Display \xe2\x96\xb8 Reduce motion; Windows: "
+	  "Animation effects off), check marks appear whole at once and the light "
+	  "edge, the rolling numbers and the shrinking line under the footer text "
+	  "are left out; fades stay. Off: always the full motion. Nothing here ever "
+	  "blinks either way.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Success Sound", "",
 	  "Short, quiet sounds when a save, a build or an import worked, and when a "
@@ -3363,6 +3389,18 @@ namespace
 	  "stay in this computer's editor settings. Off hides them; they keep "
 	  "counting while Success Feedback is on, and Success Feedback off stops "
 	  "both.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Counter Tick", "",
+	  "When a counter beside \"Ready\" goes up, only that number lights up "
+	  "green for about half a second and the old one rolls away (with reduced "
+	  "motion it only lights up). It waits until the moment's line is gone. "
+	  "There is no bar and no goal to fill.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Recent Days Tooltip", "",
+	  "Rest the mouse on the counters beside \"Ready\" to see the last seven "
+	  "days: a dot for each day you saved, built or imported something, and "
+	  "that day's successful builds. It only appears while you hover, never "
+	  "on its own.",
 	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
 	  "How a variable is drawn in a HorizonCode graph's list: name and type on "

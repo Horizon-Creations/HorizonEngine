@@ -125,9 +125,60 @@ struct EditorConfig;
 // same time: the one moving thing, and it moves at the bottom edge of the
 // window. No window, no popup, no focus change, no layout shift. Words, not a
 // check-mark glyph: the editor font (Roboto Condensed Bold) is not known to
-// carry U+2713, and a missing glyph renders as "?". The editor draws every
+// carry U+2713, and a missing glyph renders as "?" — the check beside the
+// line (V1, below) is drawn, not typed. The editor draws every
 // frame (only the game sets Application::setEventDriven), so the fade needs no
 // redraw request.
+//
+// ── The visual cues (topic 95, step 4) ───────────────────────────────────────
+// Each has its own switch; each is drawn with ImDrawList — no glyph, no icon
+// font (the editor ImGui loads none), no layout change, no window.
+//   V1  CHECK MARK (RewardsCheckMark, part of the line): a tick drawn left of
+//       the moment's line, "written" as a two-stroke polyline over
+//       kCheckDrawSec, then fading with the line. A second, colour-free sign
+//       for "this worked" next to the green.
+//   V2b LIGHT EDGE (RewardsLightEdge, part of the line): one 1-px line along
+//       the footer's top edge that spreads from the middle outwards and fades
+//       over kEdgeSec. One pulse per line, never a blink.
+//       V1 and V2b run on the line's own clock (Look::lineAge): a MERGED
+//       moment (rule 2) restarts the hold but does not re-write the check or
+//       pulse the edge again — the second Cmd+S in a row is quiet to the eye too.
+//   V3  COUNTER TICK (RewardsCounterTick, part of the counters): when "3 builds
+//       today" becomes 4, or the streak grows, only that number lights up in
+//       the green for kTickSec and the old number rolls up out of the way over
+//       kRollSec. It waits until the moment's line is gone (the counters are
+//       hidden behind it) and shows the OLD number until then, so it never
+//       rolls from a value that was already on screen. Deliberately NOT a
+//       progress bar: a bar needs a goal ("5/10 builds"), and a goal is the
+//       first step to levels and daily targets.
+//   V4  TAB CHECK (RewardsTabCheck): a tab's unsaved marker " *" turns into a
+//       small drawn check for kTabCheckSec when that tab went from unsaved to
+//       saved within kSaveMatchSec of a Saved moment (SaveMarks). Where the
+//       user is looking anyway. Undo back to clean is not a save: no check.
+//       Edited again while the check shows: the marker is back at once.
+//   V5  FRESH IMPORTS (RewardsImportHighlight): assets an import just wrote get
+//       a frame in the Content Browser that holds and fades over
+//       kImportHoldSec + kImportFadeSec, counted from the first frame the tile
+//       is actually on screen (FreshImports), for up to kImportWindowSec after
+//       the import. "Just wrote" = new or rewritten in the import's target
+//       folder, from a listing before and after (DirSnapshot) — importSource
+//       does not say what it wrote, and a file clock would be a guess.
+//   RECENT DAYS (RewardsStreakTooltip, part of the counters): hovering the
+//       counters — and only hovering, never on its own — shows the last
+//       kRecentDays days: which had a moment, and each day's builds. Kept in
+//       GlobalState key RewardsRecent next to the tally. Words stay neutral:
+//       no "keep your streak", nothing that asks for tomorrow.
+//
+// ── Reduced motion ───────────────────────────────────────────────────────────
+// RewardsReducedMotion: follow the system (macOS "Reduce motion", Windows
+// "Show animations in Windows" off) or off (always the full motion). There
+// is no "always reduce" — the system switch is where that lives. Reduced:
+// the check marks (V1, V4) appear whole at once, no light edge (V2b), no
+// rolling digits (V3 still lights up — a colour change is not motion), no
+// shrinking underline. Fades stay: they do not move anything. The system is
+// asked through a hook the editor sets (setSystemMotionQuery — the Cocoa and
+// Win32 calls live in EditorSystemMotion.*, outside he_tests), at most once a
+// second.
 //
 // Sound (RewardsSound, OFF by default — an open-plan office is the normal
 // case): see "The tones" below. gain = gainFor(RewardsVolume), the square of
@@ -193,13 +244,13 @@ struct EditorConfig;
 //   bool  RewardsVisual       = true;  the moment's line and underline. Off:
 //                                      the footer stays on its idle text (with
 //                                      the counters, if those are on)
+//   bool  RewardsCheckMark    = true;  V1, under Visual (it sits beside the line)
+//   bool  RewardsLightEdge    = true;  V2b, under Visual (it pulses for the line)
+//   bool  RewardsTabCheck     = true;  V4 — siblings of Visual: other places,
+//   bool  RewardsImportHighlight = true; V5  not the footer line
 //   int   RewardsReducedMotion = 0;    0 = follow the system's reduce-motion
-//                                      setting, 1 = off (full motion). There
-//                                      is no "always reduce": the system
-//                                      switch is where that lives. Reduced:
-//                                      no shrinking underline. The system query
-//                                      itself is step 4 — systemReducesMotion()
-//                                      answers false until then.
+//                                      setting, 1 = off (full motion). See
+//                                      "Reduced motion" above.
 //   bool  RewardsSound        = false; the tones at all
 //   float RewardsVolume       = 0.5;   0..1, applied squared (gainFor)
 //   bool  RewardsSoundSave        = true;  the tick
@@ -218,6 +269,9 @@ struct EditorConfig;
 //                                      so turning the display back on does not
 //                                      find a streak that was broken by hiding
 //                                      it.
+//   bool  RewardsCounterTick  = true;  V3, under Show Progress
+//   bool  RewardsStreakTooltip = true; the recent-days tooltip, under Show
+//                                      Progress (no counters, nothing to hover)
 // Wired in the six places every EditorConfig setting is, exactly like
 // AutosaveEnabled: EditorConfig.h (field) · EditorApplication.cpp load
 // (getCustomConfigBool) · EditorApplication.cpp save (setCustomConfigEntry)
@@ -232,7 +286,11 @@ struct EditorConfig;
 // preferences: they go into GlobalState custom config keys (per user, across
 // projects), NOT into EditorConfig — anything in EditorConfig is in the settings
 // catalog and therefore writable through MCP settings_set. The keys:
-//   RewardsDay (YYYY-MM-DD, local time), RewardsBuildsToday, RewardsStreakDays.
+//   RewardsDay (YYYY-MM-DD, local time), RewardsBuildsToday, RewardsStreakDays,
+//   RewardsRecent ("YYYY-MM-DD:builds,…", the last kRecentDays days that had a
+//   moment, oldest first — for the tooltip). A tally from before RewardsRecent
+//   existed is seeded from its streak (seedRecent): the streak's days were
+//   used, their builds unknown except today's.
 // Loaded once, on first use; written through (writeConfig) only when a moment
 // changed them — the first moment of a day and each build, a handful of writes
 // a session. No globalState (tests): counted in memory, never written.
@@ -292,9 +350,34 @@ namespace HE::Ed::Rewards
 	// RewardsReducedMotion resolved: follow the system, or off.
 	bool reducedMotion(const AppContext& ctx);
 
-	// The system's reduce-motion setting. false for now: the macOS/Windows
-	// query is topic 95, step 4.
+	// The system's reduce-motion setting, through the query the editor set
+	// (setSystemMotionQuery), asked at most once a second. false without one.
 	bool systemReducesMotion();
+	// nullptr = no system to ask. Setting it forgets the cached answer.
+	void setSystemMotionQuery(bool (*query)());
+
+	// V4, once per tab per frame from the tab bar: key = the tab's asset path
+	// ("" = the scene tab), dirty = what its marker says this frame.
+	struct TabMark
+	{
+		bool  check  = false;  // draw the check instead of the " *"
+		float stroke = 0.0f;   // 0..1 of the check written
+		float alpha  = 0.0f;
+	};
+	TabMark tabMark(AppContext& ctx, const std::string& key, bool dirty);
+
+	// A check mark in the "done" green into the current window's draw list:
+	// its box at (x, y), size × size. What V1 and V4 draw.
+	void drawCheckMark(float x, float y, float size, float stroke, float alpha);
+
+	// V5. Before an import into `dir`: a listing to compare against (empty —
+	// and free — while the highlight is off). After it: the files that are new
+	// or rewritten since get their frame. strength: 0..1 for a Content Browser
+	// tile, 0 for anything that was not just imported.
+	struct DirSnapshot;
+	DirSnapshot importSnapshot(const AppContext& ctx, const std::string& dir);
+	void markImported(AppContext& ctx, const DirSnapshot& before);
+	float importHighlight(AppContext& ctx, const std::string& fullPath);
 
 	// ── The core, ImGui-free — the tests drive it with their own clock ───────
 
@@ -302,6 +385,16 @@ namespace HE::Ed::Rewards
 	inline constexpr double kFadeSec        = 0.7;    // …then back to the idle text
 	inline constexpr double kToneGapSec     = 2.0;    // between any two tones
 	inline constexpr double kSaveToneGapSec = 20.0;   // between two save tones
+	inline constexpr double kCheckDrawSec   = 0.15;   // V1/V4: the check is written
+	inline constexpr double kEdgeSec        = 0.6;    // V2b: spread + fade of the edge
+	inline constexpr double kTickSec        = 0.6;    // V3: a number lit up
+	inline constexpr double kRollSec        = 0.25;   // V3: …the old one rolling away
+	inline constexpr double kTabCheckSec    = 0.6;    // V4: the tab's check shows
+	inline constexpr double kSaveMatchSec   = 0.5;    // V4: dirty → clean this close to a save
+	inline constexpr double kImportHoldSec  = 1.2;    // V5: the tile's frame, full
+	inline constexpr double kImportFadeSec  = 0.8;    // V5: …then gone
+	inline constexpr double kImportWindowSec = 30.0;  // V5: to come on screen at all
+	inline constexpr int    kRecentDays     = 7;      // the tooltip's days
 
 	// What the footer says for a moment. count only matters for imports.
 	std::string lineFor(Moment m, int count);
@@ -369,6 +462,8 @@ namespace HE::Ed::Rewards
 			std::string line;
 			float       strength = 0.0f;   // 1 → 0: colour/alpha of the line
 			float       bar      = 0.0f;   // 1 → 0: the shrinking underline
+			double      lineAge  = 0.0;    // since this line began; a merge
+			                               // (rule 2) does not restart it — V1/V2b
 		};
 		Look look(double now) const;
 
@@ -377,6 +472,7 @@ namespace HE::Ed::Rewards
 		Moment             m_moment    = Moment::Saved;
 		int                m_count     = 0;
 		double             m_at        = 0.0;
+		double             m_since     = 0.0;     // the line began (not merges)
 		int                m_lastFrame = -1;
 		unsigned long long m_lastRun   = 0;
 		bool               m_toned     = false;   // a tone has played at all
@@ -385,14 +481,140 @@ namespace HE::Ed::Rewards
 		double             m_saveToneAt = 0.0;
 	};
 
+	// ── Visual cues, the parts with a clock (see "The visual cues") ──────────
+
+	// V1/V4: how much of the check is written `age` s after it began — 0 → 1
+	// over kCheckDrawSec, 1 at once when reduced.
+	float checkStroke(double age, bool reduced);
+
+	// The check as a polyline in its size × size box at (x, y), y down: the
+	// short stroke down, then the long one up. stroke 0..1 by length; fewer
+	// than two points = nothing to draw yet.
+	struct Pt { float x = 0.0f, y = 0.0f; };
+	std::vector<Pt> checkPolyline(float stroke, float x, float y, float size);
+
+	// V2b at `age` s into the line: spread 0 → 1 (half-widths of the footer
+	// from its middle), alpha one soft pulse to 0 at kEdgeSec. Reduced: none.
+	struct Edge { float spread = 0.0f; float alpha = 0.0f; };
+	Edge edgeAt(double age, bool reduced);
+
+	// V3: one counter. observe() every frame with the counter's value; a rise
+	// becomes a PENDING tick that start() — the frame the counters are on
+	// screen again — sets going. A fall (a new day, a streak run out) and the
+	// first value ever seen are not ticks.
+	class CounterTick
+	{
+	public:
+		void observe(int value);
+		void start(double now);
+
+		struct Look
+		{
+			int   shown = 0;      // the number to draw (the old one while pending)
+			int   old   = 0;      // …rolling away while roll < 1
+			float glow  = 0.0f;   // 1 → 0 over kTickSec: the green on the number
+			float roll  = 1.0f;   // 0 → 1 over kRollSec; 1 at once when reduced
+		};
+		Look look(double now, bool reduced) const;
+
+	private:
+		bool   m_known   = false;
+		bool   m_pending = false;
+		int    m_from    = 0;
+		int    m_to      = 0;
+		double m_at      = -1.0;
+	};
+
+	// V4: the tabs' dirty → clean edges. update() once per tab per frame;
+	// lastSaveAt = when the last Saved moment fired (< 0: never). Returns how
+	// long the tab's check has shown, or -1 while it shows none.
+	class SaveMarks
+	{
+	public:
+		double update(const std::string& key, bool dirty, double now, double lastSaveAt);
+
+	private:
+		struct Tab { bool dirty = false; double checkAt = -1.0; };
+		std::vector<std::pair<std::string, Tab>> m_tabs;   // a handful: a vector
+	};
+
+	// V5: a folder's files and their write times, before an import. `dir` is
+	// empty for "not taken" (the highlight was off) — changedSince is then {}.
+	struct DirSnapshot
+	{
+		std::string dir;
+		std::vector<std::pair<std::string, long long>> files;   // name, write time
+	};
+	DirSnapshot snapshotDir(const std::string& dir);
+	// Full paths (normalPath) of the files in before.dir that are new or were
+	// written since `before` was taken.
+	std::vector<std::string> changedSince(const DirSnapshot& before);
+	// lexically_normal + generic separators: one spelling per file to compare.
+	std::string normalPath(const std::string& p);
+
+	class FreshImports
+	{
+	public:
+		// These (normalPath) were just imported.
+		void mark(const std::vector<std::string>& paths, double now);
+		// The tile's frame, 0..1. The first call for a marked path starts its
+		// clock — a tile scrolled into view after 5 s still gets its 2 s — as
+		// long as that is within kImportWindowSec of the import.
+		float strength(const std::string& path, double now);
+		// Forget what never came on screen within kImportWindowSec — so the
+		// Content Browser stops asking once nothing can light up any more.
+		void  prune(double now);
+		bool  empty() const { return m_marks.empty(); }
+
+	private:
+		struct Mark { std::string path; double markedAt = 0.0; double seenAt = -1.0; };
+		std::vector<Mark> m_marks;
+	};
+
 	// ── Progress: the persistent counters (rules above) ──────────────────────
+
+	struct DayUse
+	{
+		std::string day;       // YYYY-MM-DD with at least one moment
+		int         builds = 0;
+	};
 
 	struct Tally
 	{
 		std::string day;              // YYYY-MM-DD of the last counted moment, "" = never
 		int         buildsToday = 0;  // successful builds on `day`
 		int         streakDays  = 0;  // consecutive days ending with `day`
+		std::vector<DayUse> recent;   // the last kRecentDays days WITH a moment,
+		                              // oldest first — the tooltip's history
 	};
+
+	// RewardsRecent's text form, and back. Entries that do not parse are dropped.
+	std::string formatRecent(const std::vector<DayUse>& recent);
+	std::vector<DayUse> parseRecent(const std::string& text);
+	// A tally from before RewardsRecent: its streak's days (at most
+	// kRecentDays), today's builds on its own day, 0 on the others.
+	void seedRecent(Tally& t);
+
+	// 0 = Monday … 6 = Sunday; -1 if ymd is not a valid YYYY-MM-DD.
+	int weekdayOf(const std::string& ymd);
+
+	// The tooltip's row: the n days ending with `today`, oldest first.
+	struct DayCell
+	{
+		std::string day;
+		int         weekday = -1;
+		bool        used    = false;   // a moment on that day
+		int         builds  = 0;
+	};
+	std::vector<DayCell> recentDays(const Tally& t, const std::string& today, int n = kRecentDays);
+
+	// What the footer shows, as numbers: any = something was ever counted;
+	// builds = today's; streak = the days in a row, 0 while it is not shown
+	// (below 2, or run out).
+	struct Progress { bool any = false; int builds = 0; int streak = 0; };
+	Progress progressOf(const Tally& t, const std::string& today);
+	std::string buildsPhrase(int builds);   // "1 build today", "3 builds today"
+	std::string streakPhrase(int days);     // "5 days in a row"
 
 	// "2026-03-01" → "2026-02-28"; "" if ymd is not a valid YYYY-MM-DD.
 	std::string dayBefore(const std::string& ymd);
