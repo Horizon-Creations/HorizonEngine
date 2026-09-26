@@ -1136,9 +1136,12 @@ struct FooterHarness
 
 // One frame of a footer-shaped window at the bottom: an item on the left, like
 // Undo/Redo, then the status label. `during` runs inside the frame (fire()
-// wants the frame's clock), `dt` is the time since the last frame.
+// wants the frame's clock), `dt` is the time since the last frame. Only a
+// frame that is looked at is rasterised (`shot`): on a Debug build the CPU
+// raster is most of this test's time.
 he_ui::Image footerFrame(AppContext& ctx, float dt = 1.0f / 60.0f,
-                         const std::function<void()>& during = {}, bool* tooltip = nullptr)
+                         const std::function<void()>& during = {}, bool* tooltip = nullptr,
+                         bool shot = false)
 {
 	ImGui::GetIO().DeltaTime = dt;
 	ImGui::NewFrame();
@@ -1157,7 +1160,12 @@ he_ui::Image footerFrame(AppContext& ctx, float dt = 1.0f / 60.0f,
 		*tooltip = tip && tip->Active;
 	}
 	ImGui::Render();
-	return he_ui::rasterize(ImGui::GetDrawData(), kShotW, kShotH);
+	return shot ? he_ui::rasterize(ImGui::GetDrawData(), kShotW, kShotH) : he_ui::Image{};
+}
+
+he_ui::Image footerShot(AppContext& ctx, bool* tooltip = nullptr)
+{
+	return footerFrame(ctx, 1.0f / 60.0f, {}, tooltip, true);
 }
 
 // Pixels in the box that read as the "done" green (on the dark footer).
@@ -1190,9 +1198,8 @@ void settle(AppContext& ctx)
 he_ui::Image shotAfter(AppContext& ctx, Moment m, int frames)
 {
 	footerFrame(ctx, 1.0f / 60.0f, [&] { fire(ctx, m); });
-	he_ui::Image img;
-	for (int i = 0; i < frames; ++i) img = footerFrame(ctx);
-	return img;
+	for (int i = 1; i < frames; ++i) footerFrame(ctx);
+	return footerShot(ctx);
 }
 
 // Where each cue lands: the check in the strip left of the centred line, the
@@ -1281,7 +1288,7 @@ TEST_CASE("Rewards: a counter that went up lights up, and only with its switch o
 	settle(ctx);
 	footerFrame(ctx, 1.0f / 60.0f, [&] { fire(ctx, Moment::Saved); });   // counted at all
 	settle(ctx);
-	CHECK(middleInk(footerFrame(ctx)) == 0);   // the counters, grey
+	CHECK(middleInk(footerShot(ctx)) == 0);   // the counters, grey
 
 	// Mid-roll, for the picture; then past the roll with the glow still on.
 	dumpShot(shotAfter(ctx, Moment::BuildSucceeded, 6), "rewards_footer_tick_rolling");
@@ -1291,7 +1298,7 @@ TEST_CASE("Rewards: a counter that went up lights up, and only with its switch o
 	CHECK(middleInk(ticking) > 8);
 	// Gone after kTickSec.
 	for (int i = 0; i < 60; ++i) footerFrame(ctx);
-	CHECK(middleInk(footerFrame(ctx)) == 0);
+	CHECK(middleInk(footerShot(ctx)) == 0);
 
 	bits.config.RewardsCounterTick = false;
 	CHECK(middleInk(shotAfter(ctx, Moment::BuildSucceeded, 6)) == 0);
@@ -1313,8 +1320,8 @@ TEST_CASE("Rewards: the recent days show on hover of the counters, and only then
 	{
 		ImGui::GetIO().AddMousePosEvent(x, y);
 		bool up = false;
-		he_ui::Image img;
-		for (int i = 0; i < frames; ++i) img = footerFrame(ctx, 1.0f / 60.0f, {}, &up);
+		for (int i = 1; i < frames; ++i) footerFrame(ctx);
+		he_ui::Image img = footerShot(ctx, &up);
 		return std::make_pair(up, img);
 	};
 	const float midY = kFootY + kFootH * 0.5f;
