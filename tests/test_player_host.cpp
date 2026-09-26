@@ -424,6 +424,184 @@ TEST_CASE("PlayerHost: without a sink the pump still runs and nothing crashes")
 	HE::api::player::clear();
 }
 
+// ─── Rebinding: the player's layer, through the script rows ──────────────────
+// The whole path a settings menu takes: rebindBegin from a menu in UI-only mode
+// (where gameplay is silent and the capture must still hear), the conflict
+// report, the rebuilt mapping, prefs across two sessions, reset and cancel.
+namespace
+{
+	void writeRebindAssets(ContentManager& cm)
+	{
+		writeInputAssets(cm);   // Jump (Space), Move (D/A)
+		// A pause-menu action: runs while paused / in UI-only mode, which is
+		// exactly the kind the capture has to silence as well.
+		InputActionAsset menu;
+		menu.type = HE::AssetType::InputAction;
+		menu.name = "Menu";
+		menu.path = "Input/Menu.hasset";
+		menu.json = HE::makeInputActionJson("Button", true);
+		REQUIRE(cm.saveAsset(menu));
+
+		InputMappingContextAsset mc;
+		mc.type = HE::AssetType::InputMappingContext;
+		mc.name = "IMC_Menu";
+		mc.path = "Input/IMC_Menu.hasset";
+		mc.json = R"({"entries":[
+			{"action":"Input/Menu.hasset","keys":["C"]},
+			{"action":"Input/Jump.hasset","gamepadButtons":["a"]}
+		]})";
+		REQUIRE(cm.saveAsset(mc));
+	}
+
+	void padButton(Input& input, SDL_GamepadButton b, bool down)
+	{
+		GamepadFrame f = input.gamepad();
+		f.connected  = true;
+		f.buttons[b] = down;
+		input.SetGamepadFrame(f);
+	}
+}
+
+TEST_CASE("PlayerHost: rebinding in a UI-only menu, the conflict, prefs, reset and cancel")
+{
+	using namespace HE::api;
+	TempDir dir("he_test_playerhost_rebind");
+	ContentManager cm(dir.path.string());
+	writeRebindAssets(cm);
+
+	const auto sandbox = std::filesystem::temp_directory_path() / "he_test_playerhost_rebind_prefs";
+	he_test::removeAllQuiet(sandbox);
+	HE::api::fs::setSandboxRoot(sandbox.string());
+	Ctx ctx;
+	prefs::clear(ctx);
+
+	// No session, no service: every row answers "nothing".
+	CHECK_FALSE(input::rebindBegin("Jump", "keyboard"));
+	CHECK_FALSE(input::isRebinding());
+	CHECK(input::bindingName("Jump", "keyboard").empty());
+
+	Runtime rt;
+	PlayerHost host;
+	host.begin(rt, cm);
+	time::resume();
+	const float dt = 1.0f / 60.0f;
+	Input input;
+
+	CHECK(input::bindingName("Jump", "keyboard") == "Space");
+	CHECK(input::bindingName("Jump", "gamepad") == "A (South)");
+	CHECK_FALSE(input::rebindBegin("Move", "keyboard"));    // an axis: not yet
+	CHECK_FALSE(input::rebindBegin("Nope", "keyboard"));    // no such action
+	CHECK_FALSE(input::rebindBegin("Jump", "joystick"));    // no such device
+	CHECK_FALSE(input::isRebinding());
+
+	SUBCASE("capture, conflict, save, next session, reset")
+	{
+		input::setMode(input::Mode::UIOnly);
+		// Enter pressed the menu's "Rebind Jump" button and is still down.
+		keyEvent(input, SDL_SCANCODE_RETURN, true);
+		REQUIRE(input::rebindBegin("Jump", "keyboard"));
+		CHECK(input::isRebinding());
+		host.tick(input, dt);                       // arms
+		keyEvent(input, SDL_SCANCODE_RETURN, false);
+		host.tick(input, dt);
+		CHECK(input::isRebinding());                // Enter was not the answer
+
+		// C: the Menu action's key. Menu runs in UI-only mode, but not while a
+		// rebind listens — the press is the capture's alone.
+		keyEvent(input, SDL_SCANCODE_C, true);
+		host.tick(input, dt);
+		CHECK(input::isRebinding());                // caught, waiting for the release
+		CHECK_FALSE(input::actionPressed("Menu"));
+		keyEvent(input, SDL_SCANCODE_C, false);
+		host.tick(input, dt);
+		CHECK_FALSE(input::isRebinding());
+		CHECK_FALSE(input::actionPressed("Menu"));
+		CHECK(input::rebindConflict() == "Menu");
+		CHECK(input::bindingName("Jump", "keyboard") == "C");
+		CHECK(input::bindingName("Jump", "gamepad") == "A (South)");   // other half kept
+
+		// Back in the game: C is Jump now (and still Menu), Space is nothing.
+		input::setMode(input::Mode::GameAndUI);
+		keyEvent(input, SDL_SCANCODE_C, true);
+		host.tick(input, dt);
+		CHECK(input::actionPressed("Jump"));
+		CHECK(input::actionPressed("Menu"));
+		keyEvent(input, SDL_SCANCODE_C, false);
+		host.tick(input, dt);
+		keyEvent(input, SDL_SCANCODE_SPACE, true);
+		host.tick(input, dt);
+		CHECK_FALSE(input::actionDown("Jump"));
+		keyEvent(input, SDL_SCANCODE_SPACE, false);
+		host.tick(input, dt);
+
+		// Saved under the slot-0 key; a new session picks it up.
+		CHECK(input::saveBindings());
+		CHECK(prefs::has(ctx, PlayerHost::kBindingsPrefsKey));
+		host.end();
+		CHECK_FALSE(input::rebindBegin("Jump", "keyboard"));   // service gone with the session
+		host.begin(rt, cm);
+		CHECK(input::bindingName("Jump", "keyboard") == "C");
+
+		// Reset while Space is HELD: after the rebuild Space is Jump again and
+		// down — held, not a fresh press.
+		keyEvent(input, SDL_SCANCODE_SPACE, true);
+		host.tick(input, dt);
+		input::resetBindings();
+		host.tick(input, dt);
+		CHECK(input::bindingName("Jump", "keyboard") == "Space");
+		CHECK(input::actionDown("Jump"));
+		CHECK_FALSE(input::actionPressed("Jump"));
+		keyEvent(input, SDL_SCANCODE_SPACE, false);
+		host.tick(input, dt);
+
+		// Reset is not saved until saveBindings — which then removes the key.
+		CHECK(prefs::has(ctx, PlayerHost::kBindingsPrefsKey));
+		CHECK(input::saveBindings());
+		CHECK_FALSE(prefs::has(ctx, PlayerHost::kBindingsPrefsKey));
+	}
+
+	SUBCASE("a pad rebind, cancelled by Start and by the row")
+	{
+		REQUIRE(input::rebindBegin("Jump", "gamepad"));
+		host.tick(input, dt);
+		padButton(input, SDL_GAMEPAD_BUTTON_START, true);
+		host.tick(input, dt);
+		CHECK(input::isRebinding());
+		padButton(input, SDL_GAMEPAD_BUTTON_START, false);
+		host.tick(input, dt);
+		CHECK_FALSE(input::isRebinding());
+		CHECK(input::bindingName("Jump", "gamepad") == "A (South)");
+
+		REQUIRE(input::rebindBegin("Jump", "gamepad"));
+		host.tick(input, dt);
+		input::rebindCancel();   // what the apps do on Escape
+		CHECK_FALSE(input::isRebinding());
+		padButton(input, SDL_GAMEPAD_BUTTON_NORTH, true);
+		host.tick(input, dt);
+		padButton(input, SDL_GAMEPAD_BUTTON_NORTH, false);
+		host.tick(input, dt);
+		CHECK(input::bindingName("Jump", "gamepad") == "A (South)");
+		CHECK(host.bindingOverrides().empty());
+
+		// And one that goes through: West replaces South, Space stays.
+		REQUIRE(input::rebindBegin("Jump", "gamepad"));
+		host.tick(input, dt);
+		padButton(input, SDL_GAMEPAD_BUTTON_WEST, true);
+		host.tick(input, dt);
+		padButton(input, SDL_GAMEPAD_BUTTON_WEST, false);
+		host.tick(input, dt);
+		CHECK(input::bindingName("Jump", "gamepad") == "X (West)");
+		CHECK(input::bindingName("Jump", "keyboard") == "Space");
+		CHECK(input::rebindConflict().empty());
+	}
+
+	host.end();
+	input::setMode(input::Mode::GameAndUI);
+	player::clear();
+	prefs::clear(ctx);
+	he_test::removeAllQuiet(sandbox);
+}
+
 // ─── Timers reach both frontends ─────────────────────────────────────────────
 TEST_CASE("TimerSystem: a due timer reaches the GameInstance and every Lua instance")
 {

@@ -104,6 +104,7 @@ add_executable(he_tests
     test_inspector_prefab_keys.cpp
     test_inputmapping.cpp
     test_input_gamepad.cpp
+    test_input_rebind.cpp
     test_eventbus.cpp
     test_scripting.cpp
     test_scripting_binding.cpp
@@ -751,7 +752,7 @@ set(HCGEN_CLASSES
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived
     inherit_novars_base inherit_novars input_actions containers reroutes
-    cheat_event datetime_double input_rumble
+    cheat_event datetime_double input_rumble input_rebind
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs

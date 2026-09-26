@@ -239,3 +239,21 @@ bool InputMapping::axisIs2D(const std::string& name) const
     auto it = m_axes.find(name);
     return it != m_axes.end() && it->second.is2D;
 }
+
+std::vector<std::string> InputMapping::actionNames() const
+{
+    std::vector<std::string> out;
+    out.reserve(m_actions.size());
+    for (const auto& [name, e] : m_actions) out.push_back(name);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<std::string> InputMapping::axisNames() const
+{
+    std::vector<std::string> out;
+    out.reserve(m_axes.size());
+    for (const auto& [name, e] : m_axes) out.push_back(name);
+    std::sort(out.begin(), out.end());
+    return out;
+}

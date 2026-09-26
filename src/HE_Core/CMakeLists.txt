@@ -9,6 +9,7 @@ add_library(HorizonCore SHARED
 	src/Application/Input.cpp
 	src/Application/InputMapping.cpp
 	src/Application/InputAssets.cpp
+	src/Application/InputRebind.cpp
 	src/Diagnostics/GlobalState.cpp
 	src/Diagnostics/Log.cpp
 	src/Diagnostics/Logger.cpp

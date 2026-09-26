@@ -389,6 +389,57 @@ TEST_CASE("GameLogic services: input reaches a loaded C++ module through the C A
         CHECK(HE::api::input::mode() == HE::api::input::Mode::GameAndUI);
     }
 
+    SUBCASE("rebinding reaches the session's binding service")
+    {
+        // No service (no session): safe defaults, nothing called.
+        HE::api::input::setBindingService({});
+        CHECK_FALSE(probe->doRebindBegin("Jump", "keyboard"));
+        CHECK_FALSE(probe->doIsRebinding());
+        char small[8] = "junk";
+        CHECK(probe->doBindingName("Jump", "keyboard", small, sizeof small) == 0);
+        CHECK(std::string(small).empty());
+
+        std::string begunAction, begunDevice, namedAction, namedDevice;
+        int cancels = 0, resets = 0, saves = 0;
+        bool listening = false;
+        // Longer than the wrapper's 256-byte first try, so the grow-and-retry
+        // half of the two-call fetch is what brings it across.
+        const std::string longConflict(300, 'x');
+        HE::api::input::setBindingService({
+            [&](const std::string& a, const std::string& d)
+            { begunAction = a; begunDevice = d; listening = true; return true; },
+            [&]() { ++cancels; listening = false; },
+            [&]() { return listening; },
+            [&]() { return longConflict; },
+            [&](const std::string& a, const std::string& d)
+            { namedAction = a; namedDevice = d; return std::string("Space / C"); },
+            [&]() { ++resets; },
+            [&]() { ++saves; return true; } });
+
+        CHECK(probe->doRebindBegin("Jump", "gamepad"));
+        CHECK(begunAction == "Jump");
+        CHECK(begunDevice == "gamepad");
+        CHECK(probe->doIsRebinding());
+        probe->doRebindCancel();
+        CHECK(cancels == 1);
+        CHECK_FALSE(probe->doIsRebinding());
+
+        char buf[512];
+        CHECK(probe->doRebindConflict(buf, sizeof buf) == 300);
+        CHECK(std::string(buf) == longConflict);
+        CHECK(probe->doBindingName("Fire", "keyboard", buf, sizeof buf) == 9);
+        CHECK(std::string(buf) == "Space / C");
+        CHECK(namedAction == "Fire");
+        CHECK(namedDevice == "keyboard");
+
+        probe->doResetBindings();
+        CHECK(resets == 1);
+        CHECK(probe->doSaveBindings());
+        CHECK(saves == 1);
+
+        HE::api::input::setBindingService({});
+    }
+
     SUBCASE("rumble reaches the host's sink, through the host's gate")
     {
         int rumbles = 0, triggers = 0, stops = 0;

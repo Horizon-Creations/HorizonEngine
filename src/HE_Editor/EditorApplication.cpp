@@ -3329,8 +3329,14 @@ void EditorApplication::OnRender(float dt)
 			// gets the cursor back without the game turning with it.
 			if (simulating)
 			{
-				m_playerHost.tick(input(), gameDt,
-				                  m_playMouseCaptured ? input().mouse() : MouseFrame{});
+				// One exception: a rebind listening while the pointer is over
+				// the game view gets the BUTTONS (no movement), so "click the
+				// mouse button you want" works in a menu with a free cursor.
+				// The host silences every action while it listens.
+				MouseFrame playerMouse = m_playMouseCaptured ? input().mouse() : MouseFrame{};
+				if (!m_playMouseCaptured && m_uiPointerValid && HE::api::input::isRebinding())
+					playerMouse.buttons = input().mouse().buttons;
+				m_playerHost.tick(input(), gameDt, playerMouse);
 				// Entity classes: Tick, plus reaping the ones whose entity is gone.
 				m_entityHost.tick(gameDt);
 			}
@@ -3470,9 +3476,15 @@ void EditorApplication::OnRender(float dt)
 			const bool uiTakesInput =
 				HE::api::input::mode() != HE::api::input::Mode::GameOnly;
 			const bool uiPointerLive = m_uiPointerValid && !m_playMouseCaptured && uiTakesInput;
+			// A rebind that is listening owns every button (input.rebindBegin):
+			// the UI keeps its hover but hears no press, Back, Tab or
+			// navigation, or the press being captured would also activate the
+			// focused "Rebind" button again. Same rule as the packaged game.
+			const bool rebinding = HE::api::input::isRebinding();
+			const bool uiDown    = m_uiPointerDown && !rebinding;
 			const bool uiWantsPointer = m_editorWorld->widgets().processPointer(
 				m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY,
-				m_uiPointerDown, uiPointerLive, m_uiPointerRight && uiPointerLive);
+				uiDown, uiPointerLive, m_uiPointerRight && uiPointerLive && !rebinding);
 
 			// A double-click means "open this": the word under it in a text
 			// field, and otherwise the list row under it. The same order the
@@ -3480,7 +3492,7 @@ void EditorApplication::OnRender(float dt)
 			if (m_uiPointerDouble)
 			{
 				m_uiPointerDouble = false;
-				if (uiPointerLive &&
+				if (uiPointerLive && !rebinding &&
 				    !m_editorWorld->widgets().selectWordAtPointer(
 				        m_uiViewportW, m_uiViewportH, m_uiPointerX, m_uiPointerY))
 					m_editorWorld->widgets().activateAtPointer(
@@ -3507,14 +3519,15 @@ void EditorApplication::OnRender(float dt)
 			{
 				const bool back = input().IsKeyDown(SDL_SCANCODE_ESCAPE) ||
 				                  input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
-				if (back && !m_uiBackPrev) m_editorWorld->widgets().closeTopLayer();
+				// Edges still TRACKED while a rebind listens, only not acted on.
+				if (back && !m_uiBackPrev && !rebinding) m_editorWorld->widgets().closeTopLayer();
 				m_uiBackPrev = back;
 
 				// Tab through the form, outside the gate for the same reason:
 				// leaving a text field is exactly what it is for. Shift+Tab
 				// goes back.
 				const bool tab = input().IsKeyDown(SDL_SCANCODE_TAB);
-				if (tab && !m_uiTabPrev)
+				if (tab && !m_uiTabPrev && !rebinding)
 					m_editorWorld->widgets().focusNext(
 						input().IsKeyDown(SDL_SCANCODE_LSHIFT) ||
 						input().IsKeyDown(SDL_SCANCODE_RSHIFT),
@@ -3542,7 +3555,8 @@ void EditorApplication::OnRender(float dt)
 				    input().IsKeyDown(SDL_SCANCODE_SPACE) ||
 				    input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH))
 					now |= 1u << 4;
-				const uint8_t edges = static_cast<uint8_t>(now & ~m_uiNavPrev);
+				const uint8_t edges =
+					rebinding ? uint8_t(0) : static_cast<uint8_t>(now & ~m_uiNavPrev);
 				m_uiNavPrev = now;
 				for (int i = 0; i < 4; ++i)
 					if (edges & (1u << i))
@@ -3585,7 +3599,7 @@ void EditorApplication::OnRender(float dt)
 			UIInputSystem::update(*m_editorWorld, m_uiInputState,
 			                      m_uiViewportW, m_uiViewportH,
 			                      m_uiPointerX, m_uiPointerY,
-			                      m_uiPointerDown,
+			                      uiDown,
 			                      uiPointerLive && !uiWantsPointer,
 			                      uiEvents);
 			if (m_scriptContext)
@@ -10902,6 +10916,16 @@ bool EditorApplication::OnEvent(const SDL_Event& event)
 			}
 			if (event.key.key != SDLK_ESCAPE) return true; // swallow other keys while typing
 		}
+	}
+
+	// Esc while a rebind listens cancels THAT, ahead of the capture toggle below —
+	// which consumes the key, so the capture's own Escape check never sees it.
+	// Same order as the packaged game.
+	if (m_isPlaying && event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat
+	    && event.key.key == SDLK_ESCAPE && HE::api::input::isRebinding())
+	{
+		HE::api::input::rebindCancel();
+		return true;
 	}
 
 	// Esc toggles the play-mode mouse capture (like the packaged game): release it to

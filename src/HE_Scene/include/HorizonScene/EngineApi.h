@@ -2496,6 +2496,54 @@ namespace input {
     bool rumbleTriggers(float left, float right, float duration);
     void stopRumble();
 
+    // ── Rebinding: the player's own bindings, over the project's ─────────────
+    // The session's PlayerHost owns the bindings and the capture, so it installs
+    // this for as long as it runs (begin → end); without one every row below
+    // answers false / "" and does nothing — edit mode, a session with no host.
+    // Plain functions rather than an interface so the host's header need not
+    // pull this one in (same shape as RumbleSink).
+    struct BindingService
+    {
+        std::function<bool(const std::string& action, const std::string& device)> rebindBegin;
+        std::function<void()>                                                     rebindCancel;
+        std::function<bool()>                                                     isRebinding;
+        std::function<std::string()>                                              rebindConflict;
+        std::function<std::string(const std::string& action, const std::string& device)> bindingName;
+        std::function<void()>                                                     resetBindings;
+        std::function<bool()>                                                     saveBindings;
+    };
+    void setBindingService(BindingService service);   // host hook; {} uninstalls
+    // Script side. `device` is "keyboard" (keys AND mouse buttons — one class)
+    // or "gamepad"; a rebind replaces that half of the action's bindings and
+    // leaves the other half alone. Button actions only for now.
+    //
+    // rebindBegin: listen for the next press on that device and bind it to
+    //   `action`. False for an unknown action, an axis, a bad device name, or
+    //   no running session. The press that is already down when it is called
+    //   (the menu click or South press that asked for it) never counts. Escape
+    //   or the pad's Start button cancels. While it listens, every gameplay
+    //   action is silent — even the ones marked to run while paused — and the
+    //   menu does not react to keys, pad or clicks.
+    // isRebinding: true from rebindBegin until the captured button is released
+    //   again (or the capture was cancelled). Poll it to know when to refresh
+    //   the labels.
+    // rebindConflict: after a capture, the OTHER actions that input also
+    //   triggers, comma-separated ("" = none). The binding is made anyway.
+    // bindingName: what `action` is bound to on `device`, readable ("Space",
+    //   "A (South)", "Left Mouse Button"); several joined with " / ", "" none.
+    // resetBindings: drop every player binding (the project's again). Not saved
+    //   until saveBindings.
+    // saveBindings: persist the player's bindings in prefs (key
+    //   "input.overrides.0"; a later per-player step adds 1, 2, …). Loaded
+    //   again at the start of every session.
+    bool        rebindBegin(const std::string& action, const std::string& device);
+    void        rebindCancel();
+    bool        isRebinding();
+    std::string rebindConflict();
+    std::string bindingName(const std::string& action, const std::string& device);
+    void        resetBindings();
+    bool        saveBindings();
+
     // ── Input ACTIONS: the project's InputAction assets, by name ─────────────
     // What the mapping contexts resolved this frame, keyed by the logical
     // action name (the asset's stem, "Jump"). The events (Input.<Action>.* in
