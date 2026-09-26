@@ -86,6 +86,8 @@ add_executable(he_tests
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
+    # The reward moments: once per frame, once per build run, the fade.
+    test_editor_rewards.cpp
     test_editorcamera.cpp
     test_camera_bookmarks.cpp
     test_asset_thumbnail_cache.cpp
@@ -628,6 +630,9 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
+    # The reward moments it fires (EditorRewards.h), and test_editor_rewards.cpp:
+    # same AppContext, same per-file HE_IMGUI_ENABLED.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
     # The Project Settings tab, for test_project_settings_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
     # writes Config/ProjectSettings.json through the ProjectManager.
@@ -667,6 +672,8 @@ set_source_files_properties(
     test_asset_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
+    test_editor_rewards.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp

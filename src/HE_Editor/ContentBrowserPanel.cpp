@@ -51,6 +51,7 @@
 #include "AudioImporter.h"
 #include "FontImporter.h"
 #include "ImporterCommon.h"   // Importer::gltfHasSkin — static vs. skeletal routing
+#include "EditorRewards.h"    // the "Import" item's footer moment
 
 #ifdef _WIN32
 #include <windows.h>  // must come before any header that pulls in rpcdce.h
@@ -2822,7 +2823,9 @@ void render(AppContext& ctx, int& tabSelectRequest,
 					{
 						// Reward moment (EditorRewards.h): AssetsImported (1) — only
 						// when importSource returned true.
-						if (!Importer::importSource(srcPath, root, relDirOf(srcPath)))
+						if (Importer::importSource(srcPath, root, relDirOf(srcPath)))
+							HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported, 1);
+						else
 							HE_LOG_ERROR(Editor, "%s",
 								("Editor: import failed for " + srcPath.string()).c_str());
 						ctx.contentRefreshPending = true;

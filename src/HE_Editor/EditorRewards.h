@@ -1,12 +1,16 @@
 #pragma once
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
+struct AppContext;
+
 // ── Reward moments: small, optional feedback for work that just went right ────
-// Topic 75 ("Gamification"). THIS FILE IS THE PLAN, NOT THE IMPLEMENTATION: it
-// declares nothing and nothing includes it yet. It records which editor events
-// get a reward, where exactly each one is hooked, what the feedback looks like
-// and where the switch lives, so the steps that build it do not have to rediscover
-// any of it. Every hook site named below carries a one-line
-// "Reward moment (EditorRewards.h)" marker comment pointing back here.
+// Topic 75 ("Gamification"). Which editor events get a reward, where exactly
+// each one is hooked, what the feedback looks like and where the switch lives.
+// Every hook site carries a one-line "Reward moment (EditorRewards.h)" comment
+// pointing back here.
 //
 // What this is NOT, and must never grow into: points, levels, leaderboards,
 // achievement popups, anything modal, anything that takes focus, anything that
@@ -26,23 +30,22 @@
 //                                anyway, and that is the same no-op keystroke
 //                                as the view-only tab below.
 //      • PendingFileOp::SaveScene handler — the async Save-As result.
-//      • doSaveActiveTab       — Ctrl/Cmd+S on an asset tab (saveAsset true,
-//                                incl. the Skeletal Mesh viewer's clip). Only if
-//                                the tab HAD unsaved edits (tabHasUnsavedEdits
-//                                before the call): saveAsset answers true for a
-//                                view-only tab that had nothing to write, and a
-//                                reward for a no-op keystroke is noise.
+//      • doSaveActiveTab       — Ctrl/Cmd+S on an asset tab (incl. the Skeletal
+//                                Mesh viewer's clip). Only if the tab HAD unsaved
+//                                edits (tabHasUnsavedEdits before the call):
+//                                saveAsset answers true for a view-only tab that
+//                                had nothing to write, and a reward for a no-op
+//                                keystroke is noise.
 //      • doSaveAll             — ONE moment for the whole batch, not one per
 //                                asset; fires if something was written and
-//                                nothing failed. It calls doSaveScene itself, so
-//                                that inner call must not fire a second moment.
+//                                nothing failed. It writes the scene through the
+//                                quiet writeScene, not doSaveScene.
 //      • the "save, then act" guard (Save button of the unsaved-changes prompt)
-//        goes through doSaveScene / saveAsset and therefore counts too — but the
-//        feedback must not delay runGuardedAction.
-//    Prerequisite: AppContext::saveSceneToPath is std::function<void(...)>
-//    (EditorApplication.h), so the UI cannot see whether the scene save worked.
-//    Change it to return bool (EditorApplication::saveSceneToPath already
-//    does) rather than guessing from ctx.sceneDirty afterwards.
+//        counts too; its assets and its scene land in the same frame and are
+//        one moment (see "once" below). The feedback never delays
+//        runGuardedAction.
+//    AppContext::saveSceneToPath returns bool for this, so the UI knows whether
+//    the scene save worked instead of guessing from ctx.sceneDirty afterwards.
 //    NOT a moment: the solo autosave (SceneAutosave — a recovery copy, it
 //    bypasses saveSceneToPath on purpose), MCP saves, hc.save of the level script.
 //
@@ -50,12 +53,14 @@
 //    Both kinds report into BuildProgressDialog, but from different threads:
 //    Game Logic calls Build::finish from GameLogicBuildPanel::render (UI thread),
 //    the export calls it from its worker (ExportDialogPanel.cpp). So the hook is
-//    ONE edge detector on the UI thread over BuildProgressDialog::snapshot():
-//    fire when `finished && success` becomes true for a run it has not fired
-//    for yet (a run is identified by the running→finished transition). That
-//    covers both Kind::GameLogic and Kind::Export without touching the worker.
-//    It runs every frame, not only when the footer draws (the project hub
-//    skips the footer); a moment seen there is kept until the footer shows it.
+//    ONE edge detector on the UI thread over BuildProgressDialog::outcome() — a
+//    run serial plus finished/success, NOT snapshot(), which copies the whole
+//    log and has no business in a per-frame poll. It fires once per run serial,
+//    so a run that began and ended between two frames still counts and a second
+//    finish() of the same run does not. EditorUI polls it every frame outside
+//    the footer block (the project hub skips the footer), and the serial is
+//    consumed even while the feature is off, so switching it on never rewards
+//    a build from before.
 //    Decision: an MCP-started Game Logic build (McpToolsBuild → the same
 //    GameLogicBuildPanel::start) counts as well — it is the user's project and
 //    the user sees the Build window finish; there is no separate path to skip.
@@ -63,52 +68,64 @@
 //    stays exactly as it is.
 //
 // 3. ASSETS IMPORTED — one or more source files became assets.
-//    Exactly two callers of Importer::importSource exist:
+//    Three callers of Importer::importSource do an import the user asked for:
 //      • EditorUI.cpp, PendingFileOp::ImportAsset — File ▸ Import Asset batch.
-//        ONE moment per batch, carrying the count (`imported`), only if > 0.
-//      • ContentBrowserPanel.cpp, context menu "Import" — one file; fire only
-//        when importSource returned true (the call site ignores it today apart
-//        from the error log).
-//    NOT a moment: Reimport (it refreshes an existing asset), collab-received
-//    assets. An OS file drop is not an import at all — it is handed to the
-//    preview's widget manager (EditorApplication.cpp, SDL_EVENT_DROP_COMPLETE).
+//        ONE moment per batch for the non-texture files, carrying the count,
+//        only if > 0. Textures of the batch wait for their colour space:
+//      • TextureColourSpaceDialog::applyImport — the confirmed texture batch,
+//        one moment with its count, only if > 0.
+//      • ContentBrowserPanel.cpp, context menu "Import" — one file; fires only
+//        when importSource returned true.
+//    NOT a moment: Reimport (it refreshes an existing asset), a colour-space
+//    retag, collab-received assets. An OS file drop is not an import at all — it
+//    is handed to the preview's widget manager (EditorApplication.cpp,
+//    SDL_EVENT_DROP_COMPLETE).
+//
+// Once: fire() takes at most one moment per ImGui frame — the first. A user
+// action is one frame of UI code, so this is what keeps the guard's assets +
+// scene, or a menu shortcut that might reach two handlers, from pulsing and
+// chiming twice.
 //
 // ── What the feedback is ─────────────────────────────────────────────────────
-// Visual (on by default): the footer's centred "Ready" status label, which is
-// static text today, briefly becomes the moment's line — "Saved", "Build
-// succeeded", "Imported 12 assets" — in the success colour, fading back to
-// "Ready" over ~1.5 s. No window, no popup, no focus change, no layout shift.
-// Words, not a check-mark glyph: the editor font (Roboto Condensed Bold) is not
-// known to carry U+2713, and a missing glyph renders as "?". If a mark is wanted,
-// draw it with ImDrawList lines.
+// Visual (on with the master switch): the footer's centred "Ready" label
+// becomes the moment's line — "Saved", "Build succeeded", "Imported 12 assets" —
+// in the build window's "done" green, holds for kHoldSec, then cross-fades back
+// to "Ready" over kFadeSec. A thin line under it shrinks to nothing over the
+// same time: the one moving thing, and it moves at the bottom edge of the
+// window. No window, no popup, no focus change, no layout shift. Words, not a
+// check-mark glyph: the editor font (Roboto Condensed Bold) is not known to
+// carry U+2713, and a missing glyph renders as "?". The editor draws every
+// frame (only the game sets Application::setEventDriven), so the fade needs no
+// redraw request.
 //
 // Sound (OFF by default — an open-plan office is the normal case): a short
-// chime synthesised in code as PCM16 and played through
+// two-note chime synthesised in code as PCM16 (chimePcm16) and played through
 // AudioEngine::play(pcm, rate, channels) on the master bus (""), so no asset has
 // to ship. Known edges, all harmless: AudioEngine::init can fail (play returns 0,
 // nothing happens); ending a play session calls stopAll(), which may cut a chime
 // short; the project's master volume/mute applies to it.
 //
-// Progress display (on by default): in the same centred label while idle,
-// e.g. "Ready · 3 builds today · day 5 in a row". NOT a new widget in the
-// footer's right-anchored group — that chain is hand-maintained and every
-// insertion edits every block to its left (see the comment there in EditorUI.cpp).
+// Progress display (step 3 of the topic, not built yet): in the same centred
+// label while idle, e.g. "Ready · 3 builds today · day 5 in a row" — the
+// idleText argument of drawFooterStatus. NOT a new widget in the footer's
+// right-anchored group — that chain is hand-maintained and every insertion
+// edits every block to its left (see the comment there in EditorUI.cpp).
 //
-// ── The switches (EditorConfig) ──────────────────────────────────────────────
-//   bool RewardsEnabled      = true;   master: off = no feedback, no progress,
-//                                      no counting (nothing written either)
-//   bool RewardsSound        = false;  the chime (only with the master on)
-//   bool RewardsShowProgress = true;   the idle counters in the footer
-// A new EditorConfig setting is wired in six places, exactly like
-// AutosaveEnabled:
-//   EditorConfig.h (field) · EditorApplication.cpp load (getCustomConfigBool)
-//   · EditorApplication.cpp save (setCustomConfigEntry)
-//   · EditorSettingsCatalog.cpp (boolRow, section e.g. "Feedback")
-//   · EditorSettingsPanel.cpp (row("rewards", …)) · its "Restore Defaults".
-// The catalog row's id argument must equal the panel's row() id, or pinning the
-// setting to Quick Settings breaks.
+// ── The switches (EditorConfig, Preferences ▸ Feedback) ──────────────────────
+//   bool RewardsEnabled = true;    master: off = no feedback, no sound (and, once
+//                                  step 3 lands, no progress and no counting)
+//   bool RewardsSound   = false;   the chime (only with the master on)
+// Wired in the six places every EditorConfig setting is, exactly like
+// AutosaveEnabled: EditorConfig.h (field) · EditorApplication.cpp load
+// (getCustomConfigBool) · EditorApplication.cpp save (setCustomConfigEntry)
+// · EditorSettingsCatalog.cpp (boolRow, category "Feedback", id "rewards")
+// · EditorSettingsPanel.cpp (row("rewards", "Feedback", …)) · its "Restore
+// Defaults". The catalog row's id argument must equal the panel's row() id, or
+// pinning the setting to Quick Settings breaks. Each label also has an entry in
+// EditorHelp.cpp ("Preferences/Feedback/…").
+// Step 3 adds RewardsShowProgress (on) the same way.
 //
-// ── The counters are NOT settings ────────────────────────────────────────────
+// ── The counters are NOT settings (step 3) ───────────────────────────────────
 // "Builds today", "last active day" and "days in a row" are state, not
 // preferences: they go into GlobalState custom config keys (per user, across
 // projects), NOT into EditorConfig — anything in EditorConfig is in the settings
@@ -116,13 +133,66 @@
 //   RewardsDay (YYYY-MM-DD, local time), RewardsBuildsToday, RewardsStreakDays.
 // A day counts as "used" on the first moment of that day, not on editor start,
 // so leaving the editor open overnight does not extend a streak.
-//
-// ── Planned shape (next steps) ───────────────────────────────────────────────
-//   namespace HE::Ed::Rewards {
-//     enum class Moment { Saved, BuildSucceeded, AssetsImported };
-//     void fire(AppContext& ctx, Moment m, int count = 1);  // UI thread only;
-//                                                           // a no-op when off
-//     void drawFooterStatus(AppContext& ctx);  // replaces the "Ready" label
-//   }
-// fire() is the single gate on RewardsEnabled, so a call site never checks the
-// switch itself.
+namespace HE::Ed::Rewards
+{
+	enum class Moment { Saved, BuildSucceeded, AssetsImported };
+
+	// ── The editor side (UI thread only) ─────────────────────────────────────
+
+	// A moment happened. The single gate on RewardsEnabled — a call site never
+	// checks the switch itself. count: how many assets an import brought in.
+	void fire(AppContext& ctx, Moment m, int count = 1);
+
+	// Once per frame, with BuildProgressDialog::outcome(): fires BuildSucceeded
+	// for each run serial that finished successfully. Separate from the dialog
+	// so this file does not link against it (he_tests builds it without).
+	void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool success);
+
+	// The footer's centred status label: idleText, or the moment's line while
+	// one is showing. Positions itself (SameLine to the window's centre).
+	void drawFooterStatus(AppContext& ctx, const char* idleText);
+
+	// ── The core, ImGui-free — the tests drive it with their own clock ───────
+
+	inline constexpr double kHoldSec = 0.9;   // the line at full strength
+	inline constexpr double kFadeSec = 0.7;   // …then back to the idle text
+
+	// What the footer says for a moment. count only matters for imports.
+	std::string lineFor(Moment m, int count);
+
+	// 1 while holding, easing to 0 at kHoldSec + kFadeSec, 0 after; 1 before 0.
+	float strengthAt(double age);
+
+	class Feed
+	{
+	public:
+		// Take a moment at `now` (seconds) in frame `frame`. false = swallowed:
+		// a moment already arrived in this frame (see "Once" above).
+		bool push(Moment m, int count, double now, int frame);
+
+		// The build edge detector. true exactly once per run serial that ended
+		// in success; any finished run is consumed, success or not.
+		bool buildSucceeded(unsigned long long run, bool finished, bool success);
+
+		struct Look
+		{
+			bool        active   = false;  // false = show the idle text
+			std::string line;
+			float       strength = 0.0f;   // 1 → 0: colour/alpha of the line
+			float       bar      = 0.0f;   // 1 → 0: the shrinking underline
+		};
+		Look look(double now) const;
+
+	private:
+		bool               m_has       = false;
+		Moment             m_moment    = Moment::Saved;
+		int                m_count     = 0;
+		double             m_at        = 0.0;
+		int                m_lastFrame = -1;
+		unsigned long long m_lastRun   = 0;
+	};
+
+	// The chime: mono int16 PCM, two short decaying sine notes a fifth apart,
+	// well under half a second. Built once and cached by fire().
+	std::vector<uint8_t> chimePcm16(int sampleRate);
+}

@@ -3270,6 +3270,19 @@ namespace
 	  "the tab has unsaved edits. Ten seconds is the floor: below "
 	  "that, writing the scene is itself the pause it was meant to spare you.",
 	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Success Feedback", "",
+	  "When a save you made, a build or an import has just worked, the middle of "
+	  "the footer says so for about a second and a half (\"Saved\", \"Build "
+	  "succeeded\", \"Imported 3 assets\") and then goes back to \"Ready\". "
+	  "Nothing opens, nothing takes focus and nothing waits for it. Saves by an "
+	  "MCP client or a script, the autosave and failed builds show nothing. Off: "
+	  "no feedback at all, and no sound either.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Success Sound", "",
+	  "A short, quiet chime together with the footer feedback. Off by default. It "
+	  "plays through the project's master volume, so muting the project mutes "
+	  "it too.",
+	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
 	  "How a variable is drawn in a HorizonCode graph's list: name and type on "
 	  "two lines, with the type written out and coloured. The default.",
@@ -7357,7 +7370,8 @@ namespace
 		{ "Preferences/Appearance/",          "editor-settings", "Settings Reference", "Appearance" },
 		{ "Preferences/Content Browser/",     "editor-settings", "Settings Reference", "Content Browser" },
 		{ "Preferences/Autosave/",            "editor-settings", "Settings Reference", "Autosave" },
-		{ "Preferences/",    "editor-settings", "Settings Reference", "Preferences" },
+		{ "Preferences/Feedback/",            "editor-settings", "Settings Reference", "Feedback" },
+		{ "Preferences/","editor-settings", "Settings Reference", "Preferences" },
 		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
 		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },
 		{ "Tool Status/",    "editor-settings", "Settings Reference", "Tool status" },
