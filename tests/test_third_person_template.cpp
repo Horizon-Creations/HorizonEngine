@@ -830,8 +830,24 @@ TEST_CASE("third person: the settings menu drives the player settings and the bi
 	CHECK(api::input::mode() == api::input::Mode::GameOnly);
 	CHECK_FALSE(wm.isVisible(menu));
 
-	// Reset: the project's values again, and the controls show them.
+	// Reopening: the controller calls Refresh through widget.callFunction, and
+	// the controls then show the player's values. Firing an event moves no
+	// control, so without this the reset checks below would pass on their own.
 	wm.showWidget(menu);
+	{
+		const api::ApiFn* callFn = api::find("widget.callFunction");
+		REQUIRE(callFn != nullptr);
+		api::Ctx c{ &world, nullptr, &cm };
+		const auto r = callFn->invoke(c, { HorizonCode::Value::ofRef((uint32_t)menu),
+		                                   HorizonCode::Value::ofString("Refresh") });
+		REQUIRE(!r.empty());
+		CHECK(r[0].b);
+	}
+	CHECK(prop(deadzone, "Value").f == doctest::Approx(0.3f));
+	CHECK(prop(sens, "Value").f == doctest::Approx(2.0f));
+	CHECK(prop(invert, "Checked").b);
+
+	// Reset: the project's values again, and the controls show them.
 	runtime.fireOnClicked(menu, reset);
 	CHECK_FALSE(api::settings::values().stickDeadzone.has_value());
 	CHECK(api::input::stickDeadzone() == doctest::Approx(0.15f));
