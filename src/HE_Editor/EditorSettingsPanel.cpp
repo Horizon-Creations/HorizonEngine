@@ -10,7 +10,7 @@
 #include "ShortcutsPage.h"             // the Shortcuts page (its own module: headless-testable)
 #include "McpClientSetup.h"            // Remote Control > "Add to Claude" (claude mcp add)
 #include "NotificationStore.h"         // a settings write that fails has to say so
-#include "EditorRewards.h"             // Feedback > "Preview" plays the success chime
+#include "EditorRewards.h"             // Feedback > each tone's "Preview"
 #include <HorizonScene/HcCodegen.h>      // HE::hccg::ToolchainProbe (toolchain readout)
 #include <SourceControl/GitProbe.h>
 #include <SourceControl/RepoStatus.h>
@@ -895,7 +895,8 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 		// change is live without a restart. See EditorRewards.h for which moments
 		// there are and why they are words in the footer and not a popup.
 		// The master gates the rest; Visual Cues and Success Sound are siblings
-		// that never gate each other (topic 95).
+		// that never gate each other (topic 95). Mute Editor Sounds is the UI
+		// engine's own switch and sits outside the master.
 		EditorWidgets::checkbox("Success Feedback", &cfg.RewardsEnabled);
 		{
 			SubGroup sub(cfg.RewardsEnabled);
@@ -906,20 +907,40 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const char* category
 			           IM_ARRAYSIZE(motionItems));
 			EditorWidgets::checkbox("Success Sound", &cfg.RewardsSound);
 			{
-				SubGroup snd(cfg.RewardsSound);
+				SubGroup snd(cfg.RewardsSound && !cfg.EditorSoundsMuted);
 				Row::sliderFloat("Sound Volume", &cfg.RewardsVolume, 0.0f, 1.0f, "%.2f");
 				cfg.RewardsVolume = std::clamp(cfg.RewardsVolume, 0.0f, 1.0f);
-				if (EditorWidgets::button("Preview"))
-					HE::Ed::Rewards::preview(ctx);
+				// Each tone: its switch, and a Preview that plays it whatever
+				// the switch says — hearing it is how you decide. Spelled out
+				// rather than looped, so editor_help_audit sees every label.
+				using HE::Ed::Rewards::Tone;
+				EditorWidgets::checkbox("Save Sound", &cfg.RewardsSoundSave);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##save"))
+					HE::Ed::Rewards::preview(ctx, Tone::SaveTick);
+				EditorWidgets::checkbox("Build Sound", &cfg.RewardsSoundBuild);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##build"))
+					HE::Ed::Rewards::preview(ctx, Tone::BuildChime);
+				EditorWidgets::checkbox("Build Failed Sound", &cfg.RewardsSoundBuildFailed);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##failed"))
+					HE::Ed::Rewards::preview(ctx, Tone::BuildFailed);
+				EditorWidgets::checkbox("Import Sound", &cfg.RewardsSoundImport);
+				ImGui::SameLine();
+				if (EditorWidgets::button("Preview##import"))
+					HE::Ed::Rewards::preview(ctx, Tone::ImportPop);
 			}
 			EditorWidgets::checkbox("Show Progress", &cfg.RewardsShowProgress);
 		}
+		EditorWidgets::checkbox("Mute Editor Sounds", &cfg.EditorSoundsMuted);
 		hint("A saved scene or asset, a finished build and an import say so for a "
 		     "moment in the middle of the footer. Nothing opens, nothing takes focus, "
 		     "and nothing waits for it. The sound is off unless you turn it on, and "
-		     "works with or without the visual cue. Show Progress adds today's "
-		     "builds and your days in a row beside \"Ready\"; they are only kept on "
-		     "this computer.");
+		     "works with or without the visual cue; the build sounds only play while "
+		     "the editor is in the background. Show Progress adds today's builds and "
+		     "your days in a row beside \"Ready\"; they are only kept on this "
+		     "computer.");
 	});
 
 	if (mode == SettingsMode::QuickSettings && shown == 0)
@@ -2064,7 +2085,12 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.RewardsReducedMotion = 0;
 			cfg.RewardsSound         = false;
 			cfg.RewardsVolume        = 0.5f;
+			cfg.RewardsSoundSave        = true;
+			cfg.RewardsSoundBuild       = true;
+			cfg.RewardsSoundBuildFailed = true;
+			cfg.RewardsSoundImport      = true;
 			cfg.RewardsShowProgress  = true;
+			cfg.EditorSoundsMuted    = false;
 			cfg.BloomEnabled     = true;
 			cfg.BloomThreshold    = 1.0f;
 			cfg.BloomIntensity    = 0.6f;

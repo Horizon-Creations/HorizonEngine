@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <iterator>
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
@@ -59,6 +60,35 @@ int rankOf(Moment m)
 	return 0;
 }
 
+Tone toneFor(Moment m)
+{
+	switch (m)
+	{
+	case Moment::Saved:          return Tone::SaveTick;
+	case Moment::BuildSucceeded: return Tone::BuildChime;
+	case Moment::AssetsImported: return Tone::ImportPop;
+	}
+	return Tone::SaveTick;
+}
+
+bool uiSoundPossible(const EditorConfig& cfg)
+{
+	return cfg.RewardsEnabled && cfg.RewardsSound && !cfg.EditorSoundsMuted;
+}
+
+bool toneWanted(const EditorConfig& cfg, Tone t, bool playing, bool appFocused)
+{
+	if (!uiSoundPossible(cfg) || !(gainFor(cfg.RewardsVolume) > 0.0f) || playing) return false;
+	switch (t)
+	{
+	case Tone::SaveTick:    return cfg.RewardsSoundSave;
+	case Tone::ImportPop:   return cfg.RewardsSoundImport;
+	case Tone::BuildChime:  return cfg.RewardsSoundBuild && !appFocused;
+	case Tone::BuildFailed: return cfg.RewardsSoundBuildFailed && !appFocused;
+	}
+	return false;
+}
+
 Feed::Taken Feed::take(Moment m, int count, double now, int frame, bool soundWanted)
 {
 	Taken r;
@@ -86,26 +116,31 @@ Feed::Taken Feed::take(Moment m, int count, double now, int frame, bool soundWan
 	m_at     = now;
 	r.shown  = true;
 
+	r.sound = soundWanted && takeTone(toneFor(m), now);
+	return r;
+}
+
+bool Feed::takeTone(Tone t, double now)
+{
 	// Rules 4 and 5: the gaps run from the last tone that played.
-	if (!soundWanted) return r;
-	if (m_toned && now - m_toneAt < kToneGapSec) return r;
-	if (m == Moment::Saved && m_saveToned && now - m_saveToneAt < kSaveToneGapSec) return r;
+	const bool save = t == Tone::SaveTick;
+	if (m_toned && now - m_toneAt < kToneGapSec) return false;
+	if (save && m_saveToned && now - m_saveToneAt < kSaveToneGapSec) return false;
 	m_toned  = true;
 	m_toneAt = now;
-	if (m == Moment::Saved)
+	if (save)
 	{
 		m_saveToned  = true;
 		m_saveToneAt = now;
 	}
-	r.sound = true;
-	return r;
+	return true;
 }
 
-bool Feed::buildSucceeded(unsigned long long run, bool finished, bool success)
+Feed::BuildEnd Feed::buildEnded(unsigned long long run, bool finished, bool success)
 {
-	if (!finished || run == 0 || run == m_lastRun) return false;
+	if (!finished || run == 0 || run == m_lastRun) return BuildEnd::None;
 	m_lastRun = run;
-	return success;
+	return success ? BuildEnd::Succeeded : BuildEnd::Failed;
 }
 
 Feed::Look Feed::look(double now) const
@@ -213,38 +248,173 @@ std::string localDay()
 	return formatDay({ tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday });
 }
 
+namespace
+{
+// Own constant: M_PI needs _USE_MATH_DEFINES on MSVC.
+constexpr double kTwoPi = 6.283185307179586;
+
+void putSample(std::vector<uint8_t>& out, size_t i, double v)
+{
+	const int s = static_cast<int>(std::lround(std::clamp(v, -1.0, 1.0) * 32767.0));
+	out[i * 2]     = static_cast<uint8_t>(s & 0xFF);
+	out[i * 2 + 1] = static_cast<uint8_t>((s >> 8) & 0xFF);
+}
+
+// v scaled so its loudest sample sits exactly at `peak`, after the last
+// tailSec were faded to land on exactly zero — so the level of a tone is a
+// number here and not a side effect of how its parts happen to add up.
+std::vector<uint8_t> toPcm16(std::vector<double> v, int sampleRate, double peak, double tailSec)
+{
+	const size_t n          = v.size();
+	const double tailFrames = std::max(1.0, tailSec * sampleRate);
+	double       loudest    = 0.0;
+	for (size_t i = 0; i < n; ++i)
+	{
+		v[i] *= std::min(1.0, static_cast<double>(n - 1 - i) / tailFrames);
+		loudest = std::max(loudest, std::abs(v[i]));
+	}
+	const double k = loudest > 0.0 ? peak / loudest : 0.0;
+	std::vector<uint8_t> out(n * 2);
+	for (size_t i = 0; i < n; ++i) putSample(out, i, v[i] * k);
+	return out;
+}
+
+// Struck notes: each rises over attackSec and rings out with e-folding time
+// decaySec. What the chime is made of, and the failed-build tone.
+struct Note { double hz, startSec, level; };
+std::vector<double> ringNotes(const Note* notes, size_t count, int sampleRate,
+                              double lengthSec, double attackSec, double decaySec)
+{
+	std::vector<double> v(static_cast<size_t>(lengthSec * sampleRate));
+	for (size_t i = 0; i < v.size(); ++i)
+	{
+		const double t = static_cast<double>(i) / sampleRate;
+		for (size_t k = 0; k < count; ++k)
+		{
+			const double lt = t - notes[k].startSec;
+			if (lt < 0.0) continue;
+			const double env = std::min(1.0, lt / attackSec) * std::exp(-lt / decaySec);
+			v[i] += std::sin(kTwoPi * notes[k].hz * lt) * env * notes[k].level;
+		}
+	}
+	return v;
+}
+} // namespace
+
+std::vector<uint8_t> saveTickPcm16(int sampleRate)
+{
+	// S1: E6 struck and damped almost at once, with a breath of band-passed
+	// noise on the attack — a switch's click in the tones' key, not a note.
+	// The quietest tone: it is the one heard most often.
+	constexpr double kLengthSec  = 0.06;
+	constexpr double kAttackSec  = 0.004;
+	constexpr double kToneHz     = 1318.51;   // E6
+	constexpr double kToneDecay  = 0.012;
+	constexpr double kNoiseDecay = 0.005;
+	constexpr double kNoiseLevel = 0.35;      // against the tone, both at unit peak
+	constexpr double kPeak       = 0.16;      // ≈ −16 dBFS
+	if (sampleRate <= 0) return {};
+
+	const size_t n = static_cast<size_t>(kLengthSec * sampleRate);
+	std::vector<double> tone(n), noise(n);
+	// The noise band-passed to about 1.2–3 kHz: the difference of two one-pole
+	// low-passes, so nothing of it reaches the bass. A fixed seed: the tick is
+	// the same every time, and the tests can pin it.
+	const double aHi = 1.0 - std::exp(-kTwoPi * 3000.0 / sampleRate);
+	const double aLo = 1.0 - std::exp(-kTwoPi * 1200.0 / sampleRate);
+	uint32_t     rng = 0x9E3779B9u;
+	double       lpHi = 0.0, lpLo = 0.0, toneMax = 0.0, noiseMax = 0.0;
+	for (size_t i = 0; i < n; ++i)
+	{
+		const double t   = static_cast<double>(i) / sampleRate;
+		const double rise = std::min(1.0, t / kAttackSec);
+		rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+		const double white = static_cast<double>(rng) / 4294967295.0 * 2.0 - 1.0;
+		lpHi += aHi * (white - lpHi);
+		lpLo += aLo * (white - lpLo);
+		tone[i]  = std::sin(kTwoPi * kToneHz * t) * rise * std::exp(-t / kToneDecay);
+		noise[i] = (lpHi - lpLo) * rise * std::exp(-t / kNoiseDecay);
+		toneMax  = std::max(toneMax, std::abs(tone[i]));
+		noiseMax = std::max(noiseMax, std::abs(noise[i]));
+	}
+	for (size_t i = 0; i < n; ++i)
+		tone[i] = tone[i] / std::max(toneMax, 1e-9) + kNoiseLevel * noise[i] / std::max(noiseMax, 1e-9);
+	return toPcm16(std::move(tone), sampleRate, kPeak, 0.01);
+}
+
+std::vector<uint8_t> importPopPcm16(int sampleRate)
+{
+	// I1: a sine that drops from 1.4 to 0.9 kHz in 70 ms — "something landed".
+	// The glide is exponential (even in pitch) and integrated as phase: sin of
+	// f(t)·t would sweep twice as far as it says.
+	constexpr double kLengthSec = 0.10;
+	constexpr double kAttackSec = 0.004;
+	constexpr double kFromHz    = 1400.0;
+	constexpr double kToHz      = 900.0;
+	constexpr double kGlideSec  = 0.07;
+	constexpr double kDecaySec  = 0.03;
+	constexpr double kPeak      = 0.22;       // ≈ −13 dBFS
+	if (sampleRate <= 0) return {};
+
+	std::vector<double> v(static_cast<size_t>(kLengthSec * sampleRate));
+	double phase = 0.0;
+	for (size_t i = 0; i < v.size(); ++i)
+	{
+		const double t  = static_cast<double>(i) / sampleRate;
+		const double hz = kFromHz * std::pow(kToHz / kFromHz, std::min(t, kGlideSec) / kGlideSec);
+		v[i]   = std::sin(phase) * std::min(1.0, t / kAttackSec) * std::exp(-t / kDecaySec);
+		phase += kTwoPi * hz / sampleRate;
+	}
+	return toPcm16(std::move(v), sampleRate, kPeak, 0.015);
+}
+
+std::vector<uint8_t> buildFailedPcm16(int sampleRate)
+{
+	// E6 then B5, a fourth DOWN — the chime turned downwards, on a note that
+	// does not resolve: "look at the build", not "wrong". A softer attack and
+	// a slower step than the chime, and quieter than it. No buzz, no low note.
+	constexpr Note   kNotes[]   = { { 1318.51, 0.0, 1.0 }, { 987.77, 0.11, 0.85 } };
+	constexpr double kLengthSec = 0.45;
+	constexpr double kPeak      = 0.25;       // ≈ −12 dBFS
+	if (sampleRate <= 0) return {};
+	return toPcm16(ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, 0.008, 0.10),
+	               sampleRate, kPeak, 0.03);
+}
+
+std::vector<uint8_t> tonePcm16(Tone t, int sampleRate)
+{
+	switch (t)
+	{
+	case Tone::SaveTick:    return saveTickPcm16(sampleRate);
+	case Tone::BuildChime:  return chimePcm16(sampleRate);
+	case Tone::BuildFailed: return buildFailedPcm16(sampleRate);
+	case Tone::ImportPop:   return importPopPcm16(sampleRate);
+	}
+	return {};
+}
+
 std::vector<uint8_t> chimePcm16(int sampleRate)
 {
-	// Own constant: M_PI needs _USE_MATH_DEFINES on MSVC.
-	constexpr double kTwoPi = 6.283185307179586;
 	// A5 then E6 70 ms later, each struck and left to ring out. Quiet on
 	// purpose — the peak stays well below full scale even where both overlap.
-	struct Note { double hz, startSec; };
-	constexpr Note   kNotes[]   = { { 880.0, 0.0 }, { 1318.51, 0.07 } };
+	// Topic 75's numbers, unchanged: kPeak scales the sum, it is not
+	// normalised like the newer tones.
+	constexpr Note   kNotes[]   = { { 880.0, 0.0, 1.0 }, { 1318.51, 0.07, 1.0 } };
 	constexpr double kLengthSec = 0.42;
 	constexpr double kAttackSec = 0.004;   // a ramp in, or the first sample clicks
 	constexpr double kDecaySec  = 0.09;    // e-folding time of each note
 	constexpr double kPeak      = 0.30;
 
 	if (sampleRate <= 0) return {};
-	const int frames = static_cast<int>(kLengthSec * sampleRate);
-	std::vector<uint8_t> out(static_cast<size_t>(frames) * 2);
-	for (int i = 0; i < frames; ++i)
+	const std::vector<double> v =
+		ringNotes(kNotes, std::size(kNotes), sampleRate, kLengthSec, kAttackSec, kDecaySec);
+	std::vector<uint8_t> out(v.size() * 2);
+	for (size_t i = 0; i < v.size(); ++i)
 	{
-		const double t = static_cast<double>(i) / sampleRate;
-		double v = 0.0;
-		for (const Note& n : kNotes)
-		{
-			const double lt = t - n.startSec;
-			if (lt < 0.0) continue;
-			const double env = std::min(1.0, lt / kAttackSec) * std::exp(-lt / kDecaySec);
-			v += std::sin(kTwoPi * n.hz * lt) * env;
-		}
 		// The tail fades to exactly zero at the end, so the voice stops silent.
+		const double t    = static_cast<double>(i) / sampleRate;
 		const double tail = std::min(1.0, (kLengthSec - t) / 0.02);
-		const int s = static_cast<int>(std::lround(std::clamp(v * kPeak * tail, -1.0, 1.0) * 32767.0));
-		out[static_cast<size_t>(i) * 2]     = static_cast<uint8_t>(s & 0xFF);
-		out[static_cast<size_t>(i) * 2 + 1] = static_cast<uint8_t>((s >> 8) & 0xFF);
+		putSample(out, i, v[i] * kPeak * tail);
 	}
 	return out;
 }
@@ -279,13 +449,38 @@ void tallyMoment(AppContext& ctx, bool build)
 	ctx.globalState->writeConfig();
 }
 
-void playChime(AppContext& ctx, float gain)
+bool s_appFocused   = true;    // the last pollBuild's word; focused = no build tone
+bool s_uiAudioFailed = false;  // its device would not open — see keepUiAudio
+
+// The UI-sound engine ("Routing" in the header): open while a tone is
+// possible, closed while none is. Called every frame from pollBuild, so the
+// device opens in a frame of its own and never in the frame of a save.
+void keepUiAudio(AppContext& ctx)
 {
-	if (!ctx.audioEngine || !(gain > 0.0f)) return;
+	AudioEngine* a = ctx.uiAudioEngine;
+	if (!a) return;
+	if (!uiSoundPossible(ctx.editorConfig))
+	{
+		s_uiAudioFailed = false;   // switching sound back on tries again
+		a->shutdown();             // no-op when it is not open
+		return;
+	}
+	// AudioEngine::init logs its own failure; once is enough.
+	if (!a->isInitialized() && !s_uiAudioFailed && !a->init())
+		s_uiAudioFailed = true;
+}
+
+void playTone(AppContext& ctx, Tone t, float gain)
+{
+	AudioEngine* a = ctx.uiAudioEngine;
+	if (!a || !a->isInitialized() || !(gain > 0.0f)) return;
 	constexpr int kRate = 44100;
-	static const std::vector<uint8_t> pcm = chimePcm16(kRate);
-	// Returns 0 when the engine never came up — nothing to do about that here.
-	ctx.audioEngine->play(pcm, kRate, 1, gain);
+	// Indexed by Tone.
+	static const std::vector<uint8_t> pcm[] = {
+		tonePcm16(Tone::SaveTick, kRate),    tonePcm16(Tone::BuildChime, kRate),
+		tonePcm16(Tone::BuildFailed, kRate), tonePcm16(Tone::ImportPop, kRate),
+	};
+	a->play(pcm[static_cast<int>(t)], kRate, 1, gain);
 }
 
 double nowSec()
@@ -313,15 +508,19 @@ void fire(AppContext& ctx, Moment m, int count)
 	// Rule 6: the switches say whether this moment may sound at all; the Feed
 	// says whether it does. Visual off still goes through the Feed, so what
 	// is heard follows the same merging and rank either way.
-	const float gain = gainFor(cfg.RewardsVolume);
-	const bool  soundWanted = cfg.RewardsSound && gain > 0.0f && !ctx.isPlaying;
+	const Tone tone        = toneFor(m);
+	const bool soundWanted = toneWanted(cfg, tone, ctx.isPlaying, s_appFocused);
 	if (s_feed.take(m, count, nowSec(), frameNo(), soundWanted).sound)
-		playChime(ctx, gain);
+		playTone(ctx, tone, gainFor(cfg.RewardsVolume));
 }
 
-void preview(AppContext& ctx)
+void preview(AppContext& ctx, Tone t)
 {
-	playChime(ctx, gainFor(ctx.editorConfig.RewardsVolume));
+	// The button is a click, not a save: opening the device in this frame (if
+	// Sound was switched on in this very frame, before pollBuild saw it) is
+	// fine here. keepUiAudio also answers "muted" by leaving it closed.
+	keepUiAudio(ctx);
+	playTone(ctx, t, gainFor(ctx.editorConfig.RewardsVolume));
 }
 
 bool systemReducesMotion()
@@ -334,12 +533,31 @@ bool reducedMotion(const AppContext& ctx)
 	return ctx.editorConfig.RewardsReducedMotion == 0 && systemReducesMotion();
 }
 
-void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool success)
+void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool success,
+               bool appFocused)
 {
+	s_appFocused = appFocused;
+	keepUiAudio(ctx);
 	// Consumed whether or not the feature is on: switching it on later must not
 	// reward a build that finished while it was off.
-	if (s_feed.buildSucceeded(run, finished, success))
+	switch (s_feed.buildEnded(run, finished, success))
+	{
+	case Feed::BuildEnd::Succeeded:
 		fire(ctx, Moment::BuildSucceeded);
+		break;
+	case Feed::BuildEnd::Failed:
+	{
+		// Not a moment (no line, nothing counted) — only its tone, under the
+		// same switches and the same gap as every other.
+		const EditorConfig& cfg = ctx.editorConfig;
+		if (toneWanted(cfg, Tone::BuildFailed, ctx.isPlaying, appFocused)
+		    && s_feed.takeTone(Tone::BuildFailed, nowSec()))
+			playTone(ctx, Tone::BuildFailed, gainFor(cfg.RewardsVolume));
+		break;
+	}
+	case Feed::BuildEnd::None:
+		break;
+	}
 }
 
 #ifdef HE_IMGUI_ENABLED

@@ -94,9 +94,16 @@ struct EditorConfig
 	bool  RewardsEnabled       = true;   // master: off = nothing shown, played or counted
 	bool  RewardsVisual        = true;   // the footer's "Saved"/"Build succeeded" line
 	int   RewardsReducedMotion = 0;      // 0 = follow the system, 1 = off (full motion)
-	bool  RewardsSound         = false;  // the chime
+	bool  RewardsSound         = false;  // the tones at all
 	float RewardsVolume        = 0.5f;   // 0..1, applied squared
+	bool  RewardsSoundSave        = true;   // each tone's own switch, under
+	bool  RewardsSoundBuild       = true;   // RewardsSound (the one that starts
+	bool  RewardsSoundBuildFailed = true;   // off); the two build tones only
+	bool  RewardsSoundImport      = true;   // play with the editor unfocused
 	bool  RewardsShowProgress  = true;   // "3 builds today · 5 days in a row" beside "Ready"
+	// The editor's own UI-sound engine, NOT under the master: mutes whatever
+	// it plays and leaves every switch above as it was.
+	bool  EditorSoundsMuted    = false;
 
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)

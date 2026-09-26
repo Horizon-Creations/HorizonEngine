@@ -1188,7 +1188,12 @@ void EditorApplication::OnInit()
 	m_editorConfig.RewardsReducedMotion         = std::clamp(globalstate.getCustomConfigInt("RewardsReducedMotion", m_editorConfig.RewardsReducedMotion), 0, 1);
 	m_editorConfig.RewardsSound                 = globalstate.getCustomConfigBool("RewardsSound", m_editorConfig.RewardsSound);
 	m_editorConfig.RewardsVolume                = globalstate.getCustomConfigFloat("RewardsVolume", m_editorConfig.RewardsVolume);
+	m_editorConfig.RewardsSoundSave             = globalstate.getCustomConfigBool("RewardsSoundSave", m_editorConfig.RewardsSoundSave);
+	m_editorConfig.RewardsSoundBuild            = globalstate.getCustomConfigBool("RewardsSoundBuild", m_editorConfig.RewardsSoundBuild);
+	m_editorConfig.RewardsSoundBuildFailed      = globalstate.getCustomConfigBool("RewardsSoundBuildFailed", m_editorConfig.RewardsSoundBuildFailed);
+	m_editorConfig.RewardsSoundImport           = globalstate.getCustomConfigBool("RewardsSoundImport", m_editorConfig.RewardsSoundImport);
 	m_editorConfig.RewardsShowProgress          = globalstate.getCustomConfigBool("RewardsShowProgress", m_editorConfig.RewardsShowProgress);
+	m_editorConfig.EditorSoundsMuted            = globalstate.getCustomConfigBool("EditorSoundsMuted", m_editorConfig.EditorSoundsMuted);
 	// The environment overrides the stored config in one direction only: it can
 	// turn the bridge ON for a single run (a headless test, a scripted session),
 	// never off. Same shape as HE_COLLAB_OFFLINE and the HE_DUMP_* family.
@@ -8791,6 +8796,7 @@ AppContext EditorApplication::makeContext()
 		.world               = world(),
 		.contentManager      = &contentManager(),
 		.audioEngine         = &m_audioEngine,
+		.uiAudioEngine       = &m_uiAudio,
 		.gameInstanceGraph   = &m_gameInstanceGraph,
 		.commitGameInstance  = [this]{
 			m_gameInstance.setGraph(HorizonCode::toJson(m_gameInstanceGraph));
@@ -10798,6 +10804,7 @@ void EditorApplication::OnShutdown()
 	CollabPresenceBar::Shutdown(renderer());
 
 	m_audioEngine.shutdown();
+	m_uiAudio.shutdown();
 
 	// The editor's own settings, out to config.json. Factored out of OnShutdown
 	// because it was the ONLY place that knew the key for each field, and a
@@ -10856,7 +10863,12 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("RewardsReducedMotion",       m_editorConfig.RewardsReducedMotion);
 	globalstate.setCustomConfigEntry("RewardsSound",               m_editorConfig.RewardsSound);
 	globalstate.setCustomConfigEntry("RewardsVolume",              m_editorConfig.RewardsVolume);
+	globalstate.setCustomConfigEntry("RewardsSoundSave",           m_editorConfig.RewardsSoundSave);
+	globalstate.setCustomConfigEntry("RewardsSoundBuild",          m_editorConfig.RewardsSoundBuild);
+	globalstate.setCustomConfigEntry("RewardsSoundBuildFailed",    m_editorConfig.RewardsSoundBuildFailed);
+	globalstate.setCustomConfigEntry("RewardsSoundImport",         m_editorConfig.RewardsSoundImport);
 	globalstate.setCustomConfigEntry("RewardsShowProgress",        m_editorConfig.RewardsShowProgress);
+	globalstate.setCustomConfigEntry("EditorSoundsMuted",          m_editorConfig.EditorSoundsMuted);
 	globalstate.setCustomConfigEntry("BloomEnabled",               m_editorConfig.BloomEnabled);
 	globalstate.setCustomConfigEntry("BloomThreshold",             m_editorConfig.BloomThreshold);
 	globalstate.setCustomConfigEntry("BloomIntensity",             m_editorConfig.BloomIntensity);

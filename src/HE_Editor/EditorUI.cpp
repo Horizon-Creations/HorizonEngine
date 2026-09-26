@@ -517,9 +517,13 @@ void EditorUI::render(AppContext& ctx, float dt)
 
     // Reward moment (EditorRewards.h): BuildSucceeded — the edge detector, every
     // frame and here rather than in the footer, which the project hub skips.
+    // Focus is ANY editor window holding the keyboard, floating viewports
+    // included (each is an SDL window of its own): the build tones only play
+    // while none does.
     {
         const BuildProgressDialog::Outcome o = BuildProgressDialog::outcome();
-        HE::Ed::Rewards::pollBuild(ctx, o.run, o.finished, o.success);
+        HE::Ed::Rewards::pollBuild(ctx, o.run, o.finished, o.success,
+                                   SDL_GetKeyboardFocus() != nullptr);
     }
 
     // Apply the user's UI font scale preference (clamped to a sane range).

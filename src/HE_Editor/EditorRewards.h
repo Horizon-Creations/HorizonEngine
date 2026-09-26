@@ -5,6 +5,7 @@
 #include <vector>
 
 struct AppContext;
+struct EditorConfig;
 
 // ── Reward moments: small, optional feedback for work that just went right ────
 // Topic 75 ("Gamification"). Which editor events get a reward, where exactly
@@ -64,8 +65,11 @@ struct AppContext;
 //    Decision: an MCP-started Game Logic build (McpToolsBuild → the same
 //    GameLogicBuildPanel::start) counts as well — it is the user's project and
 //    the user sees the Build window finish; there is no separate path to skip.
-//    A failed build gets NO reward feedback; the existing Problem notification
-//    stays exactly as it is.
+//    A failed build is NOT a moment: no line, nothing counted, and the existing
+//    Problem notification stays exactly as it is. It only gets a tone of its
+//    own (topic 95, "The tones" below) — information for someone looking
+//    elsewhere, not a reward. There is no "cancel" to tell apart: every
+//    finish(false) is a build that went wrong.
 //
 // 3. ASSETS IMPORTED — one or more source files became assets.
 //    Three callers of Importer::importSource do an import the user asked for:
@@ -104,11 +108,14 @@ struct AppContext;
 //      saving every minute gives an occasional tick, not one per keystroke.
 //   Both gaps run from the last tone that PLAYED: a silent moment (sound off,
 //   inside a gap, merged, outranked) never pushes the next tone further away.
-//   6. The caller decides whether a moment may sound at all (fire(): the Sound
-//      switch, volume > 0, not during Play-in-Editor — the speakers belong to
-//      the game then) and hands that in as soundWanted. Autosave, MCP saves and
+//   6. The caller decides whether a moment may sound at all (toneWanted: the
+//      switches, volume > 0, not during Play-in-Editor — the speakers belong to
+//      the game then — and the build tones only with the editor in the
+//      background) and hands that in as soundWanted. Autosave, MCP saves and
 //      hc.save are not moments at all (above), so they are silent by
-//      construction. Step 3 adds the per-moment sound switches there.
+//      construction.
+//   The failed-build tone has no moment and no line; it goes straight to
+//   takeTone() and so keeps rule 4 with the others.
 //
 // ── What the feedback is ─────────────────────────────────────────────────────
 // Visual (RewardsVisual, with the master on): the footer's centred "Ready" label
@@ -123,15 +130,47 @@ struct AppContext;
 // redraw request.
 //
 // Sound (RewardsSound, OFF by default — an open-plan office is the normal
-// case): a short two-note chime synthesised in code as PCM16 (chimePcm16) and
-// played through AudioEngine::play(pcm, rate, channels, gain) on the master bus
-// (""), so no asset has to ship. gain = gainFor(RewardsVolume), the square of
+// case): see "The tones" below. gain = gainFor(RewardsVolume), the square of
 // the slider, so half way sounds like half as loud; volume 0 plays nothing.
-// "Preview" in the settings plays it once at that gain, past the Feed. Known
-// edges, all harmless: AudioEngine::init can fail (play returns 0, nothing
-// happens); ending a play session calls stopAll(), which may cut a chime short;
-// the project's master volume/mute applies to it. (Step 3 of topic 95 moves the
-// tones to an editor-only engine of their own.)
+// Each tone's "Preview" in the settings plays it once at that gain, past the
+// Feed and past its own switch.
+//
+// ── The tones (topic 95) ─────────────────────────────────────────────────────
+// Synthesised in code as mono PCM16, so no asset ships and no licence applies.
+// Shared rules, held by the tests: at most 0.45 s, a peak well below full
+// scale, at least 4 ms of fade-in and a tail that lands on exactly zero (no
+// click either end), nothing below ~600 Hz (bass booms on some laptop speakers
+// and vanishes on others), all notes from A major pentatonic so two tones that
+// do meet still agree.
+//   Save          saveTickPcm16      S1 "tick": a short E6 with a breath of
+//                                    band-passed noise, 60 ms, the quietest —
+//                                    it is the one heard most often.
+//   Build         chimePcm16         A5 then E6, 0.42 s: the topic-75 chime.
+//                                    Only while NO editor window has keyboard
+//                                    focus: a build you watched finish needs no
+//                                    tone, one you walked away from does.
+//   Build failed  buildFailedPcm16   E6 then B5, a fourth DOWN, softer onset: the
+//                                    chime turned downwards, open rather than
+//                                    "wrong" — no buzzer, no low note, quieter
+//                                    than the chime. Same focus rule as
+//                                    the build tone (the Build window already
+//                                    says so to someone looking at it).
+//   Import        importPopPcm16     I1 "pop": a sine gliding 1.4 → 0.9 kHz in
+//                                    70 ms. The count does not change the sound.
+//
+// Routing: the tones play on an AudioEngine of their own (AppContext::
+// uiAudioEngine, owned by EditorApplication), NOT on the project's engine:
+// the project's master fader and mute do not touch them, and stopAll() at the
+// end of Play-in-Editor does not cut them. It opens its output device lazily —
+// in pollBuild, the first frame a tone becomes POSSIBLE (uiSoundPossible:
+// master, Sound, not muted), never inside the frame of the save that would
+// play, because opening a device can take a noticeable moment and the
+// feedback must never delay the action. Someone who never turns sound on never
+// has a second device open; turning it off (or muting) closes it again. If
+// the device cannot be opened, that is remembered until sound is switched off
+// and on again, so a machine without output does not retry every frame.
+// EditorSoundsMuted is the switch for exactly this engine: it silences every
+// sound the editor makes itself and leaves each tone's own switch as it was.
 //
 // Progress display (step 3): in the same centred label while idle —
 // "Ready · 3 builds today · 5 days in a row". drawFooterStatus composes it from
@@ -160,8 +199,18 @@ struct AppContext;
 //                                      no shrinking underline. The system query
 //                                      itself is step 4 — systemReducesMotion()
 //                                      answers false until then.
-//   bool  RewardsSound        = false; the chime
+//   bool  RewardsSound        = false; the tones at all
 //   float RewardsVolume       = 0.5;   0..1, applied squared (gainFor)
+//   bool  RewardsSoundSave        = true;  the tick
+//   bool  RewardsSoundBuild       = true;  the chime
+//   bool  RewardsSoundBuildFailed = true;  the failed-build tone
+//   bool  RewardsSoundImport      = true;  the pop
+//                                      Each tone's own switch, under
+//                                      RewardsSound — which is the one that
+//                                      starts off, so a fresh install still
+//                                      hears nothing.
+//   bool  EditorSoundsMuted       = false; the UI-sound engine. NOT under the
+//                                      master: mutes whatever it plays
 //   bool  RewardsShowProgress = true;  the footer counters. Off HIDES them;
 //                                      counting goes on while the master is on,
 //                                      so turning the display back on does not
@@ -208,6 +257,10 @@ namespace HE::Ed::Rewards
 {
 	enum class Moment { Saved, BuildSucceeded, AssetsImported };
 
+	// One tone per moment, and one for a failed build, which is not a moment.
+	enum class Tone { SaveTick, BuildChime, BuildFailed, ImportPop };
+	Tone toneFor(Moment m);
+
 	// ── The editor side (UI thread only) ─────────────────────────────────────
 
 	// A moment happened. The single gate on RewardsEnabled — a call site never
@@ -215,18 +268,24 @@ namespace HE::Ed::Rewards
 	void fire(AppContext& ctx, Moment m, int count = 1);
 
 	// Once per frame, with BuildProgressDialog::outcome(): fires BuildSucceeded
-	// for each run serial that finished successfully. Separate from the dialog
-	// so this file does not link against it (he_tests builds it without).
-	void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool success);
+	// for each run serial that finished successfully and plays the failed-build
+	// tone for one that did not. Separate from the dialog so this file does not
+	// link against it (he_tests builds it without). appFocused: some editor
+	// window has keyboard focus (the build tones only play without). Also the
+	// UI-sound engine's housekeeping: opened when a tone becomes possible,
+	// closed when none is.
+	void pollBuild(AppContext& ctx, unsigned long long run, bool finished, bool success,
+	               bool appFocused);
 
 	// The footer's centred status label: idleText with the progress counters
 	// after it, or the moment's line while one is showing. Positions itself
 	// (SameLine to the window's centre).
 	void drawFooterStatus(AppContext& ctx, const char* idleText);
 
-	// The settings' "Preview": the chime once at the current volume, past the
-	// Feed and its gaps — the user asked for exactly this sound, now.
-	void preview(AppContext& ctx);
+	// The settings' "Preview": one tone once at the current volume, past the
+	// Feed, its gaps and the tone's own switch — the user asked for exactly
+	// this sound, now. Silent while the editor's sounds are muted.
+	void preview(AppContext& ctx, Tone t);
 
 	// RewardsReducedMotion resolved: follow the system, or off.
 	bool reducedMotion(const AppContext& ctx);
@@ -254,6 +313,16 @@ namespace HE::Ed::Rewards
 	// Build > Import > Save (rule 3 above).
 	int rankOf(Moment m);
 
+	// Rule 6: may this tone sound at all? Master, Sound, not muted, the tone's
+	// own switch, volume > 0, not during Play, and for the two build tones no
+	// editor window focused. The Feed's merging, rank and gaps come after.
+	bool toneWanted(const EditorConfig& cfg, Tone t, bool playing, bool appFocused);
+
+	// Whether any tone could play under these switches — what keeps the
+	// UI-sound engine's device open. Volume is left out on purpose: dragging
+	// the slider through zero must not close and reopen a device.
+	bool uiSoundPossible(const EditorConfig& cfg);
+
 	class Feed
 	{
 	public:
@@ -276,9 +345,21 @@ namespace HE::Ed::Rewards
 			return take(m, count, now, frame, false).taken;
 		}
 
-		// The build edge detector. true exactly once per run serial that ended
-		// in success; any finished run is consumed, success or not.
-		bool buildSucceeded(unsigned long long run, bool finished, bool success);
+		// Rules 4 and 5 alone: may a tone play at `now`? true books the gaps.
+		// take() uses it for a moment's tone, pollBuild for the failed build.
+		bool takeTone(Tone t, double now);
+
+		// The build edge detector: Succeeded or Failed exactly once per run
+		// serial that finished, None otherwise (running, nothing built, or a run
+		// already reported).
+		enum class BuildEnd { None, Succeeded, Failed };
+		BuildEnd buildEnded(unsigned long long run, bool finished, bool success);
+
+		// buildEnded() == Succeeded.
+		bool buildSucceeded(unsigned long long run, bool finished, bool success)
+		{
+			return buildEnded(run, finished, success) == BuildEnd::Succeeded;
+		}
 
 		struct Look
 		{
@@ -324,7 +405,18 @@ namespace HE::Ed::Rewards
 	// Today's local date as YYYY-MM-DD.
 	std::string localDay();
 
-	// The chime: mono int16 PCM, two short decaying sine notes a fifth apart,
-	// well under half a second. Built once and cached by fire().
+	// ── The tones: mono int16 PCM, see "The tones" above ─────────────────────
+	// Each is built once per rate and cached by the editor side. Empty for a
+	// sampleRate <= 0.
+
+	// Build: two short decaying sine notes a fifth apart, 0.42 s.
 	std::vector<uint8_t> chimePcm16(int sampleRate);
+	// Save: S1, the tick.
+	std::vector<uint8_t> saveTickPcm16(int sampleRate);
+	// Build failed: two notes a fourth down.
+	std::vector<uint8_t> buildFailedPcm16(int sampleRate);
+	// Import: I1, the pop.
+	std::vector<uint8_t> importPopPcm16(int sampleRate);
+	// The one for `t`.
+	std::vector<uint8_t> tonePcm16(Tone t, int sampleRate);
 }
