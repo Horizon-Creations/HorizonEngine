@@ -67,7 +67,7 @@ namespace SequenceSystem
                HE::SequenceContext* ctx, HE::NotifyQueue* notifies);
 
     // ── Transport ────────────────────────────────────────────────────────────
-    // The C++ half of the script rows in step 5. None of them needs a play
+    // The C++ half of the sequence.* script rows (HE::api::sequence). None needs a play
     // session to be called; they change state that the next begin()/apply()
     // acts on, and do nothing on an entity without a SequencePlayerComponent.
 
