@@ -7536,6 +7536,7 @@ void EditorApplication::setupMcpTools()
 			HE::AssetType::BoneMask,
 			HE::AssetType::BlendSpace,
 			HE::AssetType::PropertyAnimClip,
+			HE::AssetType::Sequence,
 			HE::AssetType::StructType,
 			HE::AssetType::EnumType,
 			HE::AssetType::SaveGameTemplate,

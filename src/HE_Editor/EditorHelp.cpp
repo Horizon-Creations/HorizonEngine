@@ -4335,6 +4335,226 @@ namespace
 	  "nothing is selected or the selection already plays this clip. Undo in "
 	  "the scene takes it back.",
 	  "", "systems#animation" },
+
+	// ── The Cinematic tab: a Sequence on a timeline ─────────────────────────
+	// A cutscene: several actors on one clock, camera cuts, skeletal clips,
+	// events and sound. An ACTOR is an entity of the scene the sequence
+	// drives, remembered by its id; a TRACK is one thing done to one actor
+	// (or to nobody, for music and events); a CUT says which camera is live.
+	{ "New Asset/Sequence", "",
+	  "A cutscene: several actors moving on one clock, camera cuts and blends, "
+	  "skeletal clips, events and sound. Made here as an empty sequence and "
+	  "edited in its own Cinematic tab; a Sequence Player component in the "
+	  "scene plays it, on start or from a script (sequence.play).",
+	  "", "systems#animation" },
+	{ "cinematic.play", "Play / Pause",
+	  "Runs the playhead along the sequence and shows it in the preview above "
+	  "the strip. Nothing in the scene moves for good: the preview writes the "
+	  "sequence into the scene only while the picture is drawn and puts every "
+	  "value back straight after, so saving, Play and undo never see a "
+	  "cutscene frame. Events do not fire and sounds do not play while "
+	  "previewing; they run when a Sequence Player plays it in the game.",
+	  "Space", "systems#animation" },
+	{ "Cinematic/Stop", "",
+	  "Stops the preview and puts the playhead back to the start.",
+	  "", "systems#animation" },
+	{ "Cinematic/Loop", "",
+	  "Whether the preview wraps round at the end. How the sequence plays in "
+	  "the game is the Loop switch on its Sequence Player.",
+	  "", "systems#animation" },
+	{ "cinematic.length", "Length",
+	  "How long the sequence runs, in seconds. It cannot be shorter than the "
+	  "last thing that happens in it: a key, a cut, the end of a section or "
+	  "of an event.",
+	  "", "systems#animation" },
+	{ "Cinematic/Zoom In", "",
+	  "Spreads the time axis out around the playhead. The wheel over the "
+	  "strip does the same around the pointer, Shift+wheel slides along.",
+	  "", "systems#animation" },
+	{ "Cinematic/Zoom Out", "",
+	  "Back towards the whole sequence in one lane.",
+	  "", "systems#animation" },
+	{ "Cinematic/Fit", "",
+	  "The whole sequence across the lane again, from the start.",
+	  "", "systems#animation" },
+	{ "Cinematic/Add Track", "",
+	  "Adds a track. With an actor picked (click its name in the strip or in "
+	  "the Actors row) you get its properties, a skeletal track and events "
+	  "or sound at that actor; the Camera Cuts, Events and Sound tracks that "
+	  "belong to nobody are always there. A sequence has one Camera Cuts "
+	  "track, so that entry is greyed once it exists.",
+	  "", "systems#animation" },
+	{ "cinematic.add-target", "Property",
+	  "A property track for the picked actor. Its first key holds what the "
+	  "actor has now, so adding the track moves nothing. Greyed if the actor "
+	  "already has a track for it: a second one would only overwrite the first.",
+	  "", "systems#animation" },
+	{ "Cinematic/Skeletal Animation", "",
+	  "A track of animation clips on the picked actor's skeleton. Each "
+	  "section plays one clip over its span and takes the skeleton over from "
+	  "the actor's own animator while it runs; between sections the "
+	  "animator has it back.",
+	  "", "systems#animation" },
+	{ "Cinematic/Events on this actor", "",
+	  "Named events sent to the picked actor while the sequence plays, "
+	  "through the same handler as animation notifies (onAnimationNotify, "
+	  "OnAnimationNotify).",
+	  "", "systems#animation" },
+	{ "Cinematic/Sound at this actor", "",
+	  "Sounds started at the picked actor's position while the sequence "
+	  "plays: a line of dialogue from the one who speaks it.",
+	  "", "systems#animation" },
+	{ "Cinematic/Camera Cuts", "",
+	  "The track that says which camera is live. Each cut switches to a "
+	  "bound camera, or back to the gameplay camera, with a hard cut or a "
+	  "blend. The sequence holds the view from the first cut until it ends.",
+	  "", "systems#animation" },
+	{ "Cinematic/Events", "",
+	  "Named events that belong to nobody in particular: they go to the "
+	  "entity with the Sequence Player. Handy for \"open the gate\" or "
+	  "\"show the title\" in the owner's script.",
+	  "", "systems#animation" },
+	{ "Cinematic/Sound", "",
+	  "Sounds that play flat, not at a position: music, narration.",
+	  "", "systems#animation" },
+	{ "Cinematic/Add at Playhead", "",
+	  "Adds what the selected track holds at the playhead: a key holding the "
+	  "track's value there, a two-second section, a cut to the camera live "
+	  "there, an event called Event, or an empty sound slot to fill in below.",
+	  "", "systems#animation" },
+	{ "cinematic.actor", "Actor",
+	  "An entity of the scene this sequence drives, remembered by its id so "
+	  "it survives renaming and saving. Red means no entity in the open scene "
+	  "has that id any more: pick it, select a replacement in the scene and "
+	  "Rebind to Selected. Clicking a present one selects it in the scene.",
+	  "", "systems#animation" },
+	{ "Cinematic/Bind Selected", "",
+	  "Makes every selected entity that is not an actor yet one, under its "
+	  "own name. Greyed when there is nothing new to bind.",
+	  "", "systems#animation" },
+	{ "Cinematic/Rebind to Selected", "",
+	  "The picked actor now means the selected entity instead. Its tracks and "
+	  "cuts stay as they are, they simply drive the new entity. For an actor "
+	  "that went missing, or a shot that is re-cast.",
+	  "", "systems#animation" },
+	{ "Cinematic/Remove Binding", "",
+	  "Removes the picked actor together with its tracks and every cut to "
+	  "it. Other actors keep theirs. Ctrl+Z in this tab brings it back.",
+	  "", "systems#animation" },
+	{ "cinematic.ruler", "Time ruler",
+	  "Drag along it to scrub: the preview and every property value beside "
+	  "its track follow the playhead. Scrubbing fires no events and plays no "
+	  "sound, however often you cross them.",
+	  "", "systems#animation" },
+	{ "cinematic.fold", "Fold",
+	  "Folds this actor's tracks away, or opens them again.",
+	  "", "systems#animation" },
+	{ "cinematic.binding", "Actor",
+	  "This actor's header: its tracks are listed under it. Click to pick it "
+	  "(Add Track then offers its properties); right-click to remove it. "
+	  "Red, marked missing: the scene has no entity with its id.",
+	  "", "systems#animation" },
+	{ "cinematic.unbound", "Unbound",
+	  "Tracks that belong to no actor: music and narration, events for the "
+	  "owner, and anything whose actor was removed.",
+	  "", "systems#animation" },
+	{ "cinematic.cut-track", "Camera Cuts",
+	  "Which camera is live, cut by cut. A flag is a cut, labelled with its "
+	  "camera; the pale ramp after it is its blend-in. Double-click the row "
+	  "to add a cut there, drag a flag to move it.",
+	  "", "systems#animation" },
+	{ "cinematic.track", "Track",
+	  "One thing done to an actor. Diamonds are keys of a property (a "
+	  "Visible track is lit where the actor shows); bars are clip sections, "
+	  "dragged to move and at either edge to trim; flags are events and "
+	  "sounds. Double-click an empty spot of a key or event row to add one; "
+	  "right-click the name to remove the track.",
+	  "", "systems#animation" },
+	{ "cinematic.item", "Key, cut, section, event or sound",
+	  "Click to select it and move the playhead onto it; its fields are in "
+	  "the readout under the strip. Drag to move it in time. Right-click to "
+	  "delete it, or press Delete.",
+	  "", "systems#animation" },
+	{ "Cinematic/Remove Track", "",
+	  "Removes this track with everything on it.",
+	  "", "systems#animation" },
+	{ "cinematic.item-time", "Time",
+	  "When the selected item happens, in seconds from the start. For a "
+	  "section, when it starts; its length stays.",
+	  "", "systems#animation" },
+	{ "cinematic.key-value", "Key value",
+	  "What the property is at this key. Position and scale in scene units, "
+	  "rotation and field of view in degrees, colour and material values "
+	  "from 0 to 1. Between keys the value runs in a straight line.",
+	  "", "systems#animation" },
+	{ "Cinematic/Shown", "",
+	  "Whether the actor is drawn from this key on. A switch, not a fade: it "
+	  "holds until the next key. The actor's scripts and collision keep "
+	  "running while it is hidden.",
+	  "", "systems#animation" },
+	{ "cinematic.cut-camera", "Camera",
+	  "The camera this cut switches to. An actor without a Camera component "
+	  "is marked; cutting to it hands the view back to gameplay, as a cut to "
+	  "a missing camera does.",
+	  "", "systems#animation" },
+	{ "Cinematic/(gameplay camera)", "",
+	  "Hands the view back to the player's camera at this cut. The sequence "
+	  "takes it again at the next cut to a camera.",
+	  "", "systems#animation" },
+	{ "cinematic.blend-in", "Blend in",
+	  "Seconds the view takes to travel from the previous camera (or the "
+	  "gameplay camera, for the first cut) to this one. 0 is a hard cut. The "
+	  "blend scrubs like everything else.",
+	  "", "systems#animation" },
+	{ "cinematic.blend-curve", "Blend curve",
+	  "How the blend moves: evenly, easing in and out, or fast then settling.",
+	  "", "systems#animation" },
+	{ "cinematic.event-name", "Event name",
+	  "The name a script's handler receives. SequenceFinished is taken: it "
+	  "is what the Sequence Player sends when the sequence ends.",
+	  "", "systems#animation" },
+	{ "cinematic.event-duration", "Duration",
+	  "0 fires the event once. Longer makes it a state: a begin at its time "
+	  "and an end when the duration is over.",
+	  "", "systems#animation" },
+	{ "cinematic.sound", "Sound",
+	  "The sound asset this entry starts. Click to pick one from the project.",
+	  "", "systems#animation" },
+	{ "cinematic.volume", "Volume",
+	  "Loudness of this sound, 1 as imported.",
+	  "", "systems#animation" },
+	{ "cinematic.pitch", "Pitch",
+	  "Playback speed of this sound, 1 as imported.",
+	  "", "systems#animation" },
+	{ "cinematic.clip", "Clip",
+	  "The animation clip this section plays. Click to pick one from the "
+	  "project. It has to fit the actor's skeleton.",
+	  "", "systems#animation" },
+	{ "cinematic.section-end", "End",
+	  "When the section ends. Dragging the bar's right edge does the same.",
+	  "", "systems#animation" },
+	{ "cinematic.clip-offset", "Clip offset",
+	  "Where in the clip the section starts, in clip seconds. To begin a walk "
+	  "mid-stride, or to use the second half of a long take.",
+	  "", "systems#animation" },
+	{ "cinematic.play-rate", "Rate",
+	  "How fast the clip plays in this section: 1 as authored, 0.5 at half "
+	  "speed, negative backwards.",
+	  "", "systems#animation" },
+	{ "Cinematic/Loop Clip", "",
+	  "Whether the clip starts over when it runs out before the section "
+	  "ends. Off, it holds its last frame.",
+	  "", "systems#animation" },
+	{ "cinematic.binding-name", "Actor name",
+	  "The label this actor wears in the strip and the name a script uses "
+	  "with sequence.bindSlot to cast a different entity at run time, the "
+	  "spawned player character for instance.",
+	  "", "systems#animation" },
+	{ "Cinematic/Through Camera", "",
+	  "On, the preview looks through the sequence's live cut, blends "
+	  "included, the way the game will show it. Off, or before the first "
+	  "cut, it looks through the Scene window's editor camera.",
+	  "", "systems#animation" },
 	{ "Bone Mask Editor/Reference Skeleton", "",
 	  "A skeleton to pick joints from. It is this editor's own reference and is "
 	  "NOT saved into the mask: a mask holds joint names, so it works on every "
@@ -7087,6 +7307,8 @@ namespace
 		{ "Blend Space Editor/",        "editor-animation", "Animation Editors", "Blend space editor" },
 		{ "Sequencer/",                 "editor-animation", "Animation Editors", "Sequencer" },
 		{ "sequencer.",                 "editor-animation", "Animation Editors", "Sequencer" },
+		{ "Cinematic/",                 "editor-animation", "Animation Editors", "Cinematic" },
+		{ "cinematic.",                 "editor-animation", "Animation Editors", "Cinematic" },
 		// ── Build, diagnose, collaborate ─────────────────────────────────────
 		{ "export.",       "editor-export", "Export & Diagnostics", "Export" },
 		{ "profiler.",     "editor-export", "Export & Diagnostics", "Profiler" },
