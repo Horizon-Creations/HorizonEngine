@@ -4114,6 +4114,9 @@ const std::string& resolveCmake()
 
 void setBundledCmakeDir(const std::filesystem::path& dir)
 {
+    // Only a CHANGED directory drops the cache: the editor re-sets the same one on
+    // every Recheck, possibly while an export worker is inside resolveCmake().
+    if (dir == g_bundledCmakeDir) return;
     g_bundledCmakeDir = dir;
     g_cmakeResolved   = false;
 }
