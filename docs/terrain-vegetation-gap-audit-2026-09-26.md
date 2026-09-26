@@ -264,4 +264,18 @@ Vertex-Body im Asset, Fragment + Vertex kompilieren für Metal und GL).
    wehendes Gras wirft also einen starren Schatten (Befund aus 3.3, unverändert).
 3. **Normalen:** WPO korrigiert die Normale nicht. Für Gras-Karten und kleine Ausschläge
    unauffällig, für große Biegungen sichtbar.
-4. **Nur code- und compile-geprüft.** Kein Laufzeitbild, auf keinem Backend.
+4. **Laufzeit nur auf Metal geprüft.** Zeuge `HE_DUMP_MATERIALTEST=wind` (Kugel, Wind Sway auf
+   WPO, Amount 0,6, Bend Height 1) im Debug-Editor, jeweils mit `HE_DUMP_SKYTEST=1 TOD=0.5
+   COVERAGE=0 CLOUDMODE=0`, Zeit über `HE_SKY_TIME`:
+   - Wind an, t = 0 gegen t = 0,6: 19 658 Pixel ändern sich (max 146/255), alle im Rechteck
+     y 141–323, also nur die obere Kugelhälfte; Himmel und untere Hälfte (Biegemaske 0) bleiben
+     pixelgleich.
+   - `HE_DUMP_WINDSPEED=0`, t = 0 gegen t = 0,6: **0 Pixel** Unterschied (Negativkontrolle: ohne
+     Windstärke keine Bewegung).
+   - Gleiche Zeit, Wind an gegen aus: Unterschied wieder nur in der oberen Hälfte.
+
+   Damit kommen Stärke, Richtung und Zeit über `FillMaterialWind` in der Metal-Vertex-Stufe an.
+   GL, D3D11, D3D12, Vulkan: nur kompiliert (GL/Metal lokal, Vulkan per MoltenVK-Syntaxcheck mit
+   Negativkontrolle, D3D im Windows-CI). Ohne `HE_DUMP_SKYTEST` ist der Material-Zeuge auf diesem
+   Stand komplett schwarz, auch der alte `switchon`-Modus ohne WPO; das liegt am Aufbau, nicht am
+   Wind.
