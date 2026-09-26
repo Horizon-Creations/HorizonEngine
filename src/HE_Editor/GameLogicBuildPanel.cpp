@@ -197,6 +197,8 @@ void render(AppContext& ctx)
 			: "Built " + artifact.filename().string()
 			  + " — it loads the next time you press Play.";
 		Build::log(0, done);
+		// Reward moment (EditorRewards.h): BuildSucceeded — NOT fired here; the
+		// UI-thread edge detector on BuildProgressDialog::snapshot() sees it.
 		Build::finish(true, done);
 		HE::Ed::notify(HE::Ed::NoteLevel::Info, "Game logic built", done);
 	}

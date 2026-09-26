@@ -2786,6 +2786,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 						std::filesystem::relative(srcPath.parent_path(), root, ec);
 					if (ec || relDir == ".") relDir.clear();
 
+					// Reward moment (EditorRewards.h): AssetsImported (1) — only
+					// when importSource returned true.
 					if (!Importer::importSource(srcPath, root, relDir))
 						HE_LOG_ERROR(Editor, "%s",
 							("Editor: import failed for " + srcPath.string()).c_str());

@@ -1930,6 +1930,9 @@ void startExport(AppContext& ctx)
                     }
                     const bool ok = msg.rfind("OK:", 0) == 0;
                     Build::log(ok ? 0 : 2, msg);
+                    // Reward moment (EditorRewards.h): BuildSucceeded — worker
+                    // thread, so never fired here; the UI-thread edge detector
+                    // on BuildProgressDialog::snapshot() picks it up.
                     Build::finish(ok, msg);
                     s_exportRunning.store(false); // last: UI may join right after
                 });

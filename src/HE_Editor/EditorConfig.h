@@ -88,6 +88,10 @@ struct EditorConfig
 	bool AutosaveEnabled     = true;
 	int  AutosaveIntervalSec = 60;
 
+	// Reward feedback (topic 75) goes here: RewardsEnabled (master, on),
+	// RewardsSound (off), RewardsShowProgress (on) — see EditorRewards.h for
+	// the six places a setting is wired and why the counters are NOT fields here.
+
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
 	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second
