@@ -2743,10 +2743,17 @@ void EditorApplication::OnRender(float dt)
 			// twenty entities is one module, and reloading it twenty times only
 			// costs twenty compiles of the same source.
 			std::unordered_set<std::string> reloadedModules;
+			// One prefab sync per poll, however many prefab files changed —
+			// the pass walks every placement anyway. A reload that arrived
+			// during play is caught up on the first poll after it.
+			bool prefabChanged = m_prefabReloadSyncPending;
 			for (const HE::UUID& id : changed)
 			{
 				switch (contentManager().assetType(id))
 				{
+				case HE::AssetType::Prefab:
+					prefabChanged = true;
+					break;
 				case HE::AssetType::StaticMesh:
 				case HE::AssetType::SkeletalMesh:
 					renderer()->InvalidateMesh(id);
@@ -2792,6 +2799,7 @@ void EditorApplication::OnRender(float dt)
 					break;
 				}
 			}
+			if (prefabChanged) syncPrefabInstancesAfterReload();
 		}
 	}
 
@@ -9647,26 +9655,50 @@ void EditorApplication::enqueueRetargetOnDisk(const std::string& oldRel,
 	}));
 }
 
-void EditorApplication::syncPrefabInstances(const char* when)
+bool EditorApplication::syncPrefabInstances(const char* when)
 {
-	if (!m_editorWorld) return;
+	if (!m_editorWorld) return false;
 	if (m_collab.inSession())
 	{
 		HE_LOG_INFO(Editor, "Prefab sync skipped (%s): a collaboration session is running and "
 		                    "the pass does not replicate", when);
-		return;
+		return false;
 	}
 	SceneSerializer serializer;
 	SceneSerializer::PrefabSyncReport rep;
 	const size_t synced = serializer.syncPrefabInstances(*m_editorWorld, contentManager(), &rep);
 	// The save-time pass rewrites what a human may have been looking at, so
 	// say when it did — one line, only when something moved.
-	if (synced && (rep.componentsApplied || rep.componentsRemoved || rep.entitiesCreated ||
-	               rep.entitiesRemoved))
+	const bool moved = synced && (rep.componentsApplied || rep.componentsRemoved ||
+	                              rep.entitiesCreated || rep.entitiesRemoved);
+	if (moved)
 		HE_LOG_INFO(Editor, "Prefab sync (%s): %zu instance(s), %zu component(s) applied, "
 		                    "%zu removed, %zu entity/-ies created, %zu removed, %zu override(s) kept",
 		            when, synced, rep.componentsApplied, rep.componentsRemoved,
 		            rep.entitiesCreated, rep.entitiesRemoved, rep.overridesKept);
+	return moved;
+}
+
+void EditorApplication::syncPrefabInstancesAfterReload()
+{
+	if (!m_editorWorld) return;
+	if (m_isPlaying)
+	{
+		m_prefabReloadSyncPending = true;
+		return;
+	}
+	m_prefabReloadSyncPending = false;
+	if (m_editorWorld->registry().view<PrefabInstanceComponent>().empty()) return;
+	// An edit committed this very frame is marked first, as before a save —
+	// or the sync would be what undoes it.
+	recordPrefabEdits();
+	std::vector<uint8_t> before;
+	SceneSerializer serializer;
+	serializer.saveToMemory(*m_editorWorld, before);
+	if (syncPrefabInstances("reload"))
+		m_undo.pushSnapshot(std::move(before), "Prefab Update");
+	// The sync's writes are not a human's (see revertPrefabOverride).
+	m_prefabEditRevision = m_undo.revision();
 }
 
 void EditorApplication::recordPrefabEdits()
