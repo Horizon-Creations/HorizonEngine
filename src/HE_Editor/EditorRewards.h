@@ -21,6 +21,10 @@
 //    that function is also what MCP's scene.saveScene and the level-script
 //    hc.save call, and a save an agent did is not a save the user did.
 //      • doSaveScene           — Ctrl/Cmd+S on the scene with a known path.
+//                                Only if ctx.sceneDirty was true BEFORE the
+//                                call: saving a clean scene rewrites the file
+//                                anyway, and that is the same no-op keystroke
+//                                as the view-only tab below.
 //      • PendingFileOp::SaveScene handler — the async Save-As result.
 //      • doSaveActiveTab       — Ctrl/Cmd+S on an asset tab (saveAsset true,
 //                                incl. the Skeletal Mesh viewer's clip). Only if
