@@ -6,6 +6,10 @@
 // produces — the primary one plus its sidecars (material, textures, animation
 // clips) — is present and newer than the source (pass --force to re-import
 // everything).
+//
+// Textures are flagged sRGB (colour) or linear (data) by file name
+// (Importer::suggestTextureSrgb: *_normal, *_orm, *_rough, *_mask … → linear);
+// a texture whose .hasset already exists keeps the flag it has.
 
 #include "../AssetImporter/AnimationClipImporter.h"
 #ifdef HE_HAVE_ASSIMP
@@ -138,7 +142,18 @@ int main(int argc, char** argv)
 		bool ok = false;
 		switch (kind)
 		{
-		case SourceKind::Texture:  ok = TextureImporter::import(entry.path(), outputDir, relOut) != nullptr; break;
+		case SourceKind::Texture:
+		{
+			// Colour or data: an output that already exists keeps the flag it
+			// carries (someone may have set it in the editor since, and --force
+			// must not undo that), a new one takes the name guess. This used to
+			// be the struct default, i.e. every texture linear, albedo included.
+			TextureImporter::ImportSettings settings;
+			settings.srgb = Importer::textureSrgbOf(primary)
+			                    .value_or(Importer::suggestTextureSrgb(entry.path()));
+			ok = TextureImporter::import(entry.path(), outputDir, relOut, settings) != nullptr;
+			break;
+		}
 		case SourceKind::Mesh:     ok = MeshImporter::import(entry.path(), outputDir, relOut)    != nullptr; break;
 		case SourceKind::Material: ok = MaterialImporter::import(entry.path(), outputDir, relOut)!= nullptr; break;
 		case SourceKind::Audio:    ok = AudioImporter::import(entry.path(), outputDir, relOut)   != nullptr; break;

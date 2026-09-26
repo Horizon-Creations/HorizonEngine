@@ -665,6 +665,42 @@ namespace animator {
     std::vector<std::string> layerNames(Ctx&, Entity e);
 }
 
+// ── Sequence: playing a cutscene ─────────────────────────────────────────────
+// The transport of a Sequence Player component (docs/sequencer-cinematics-plan.md
+// §3.5), a thin layer over SequenceSystem. `e` is the entity carrying the
+// player — the cutscene's owner — never one of its actors.
+//
+// The end arrives as the notify "SequenceFinished" on the owner
+// (SequenceSystem::kSequenceFinished), through OnAnimationNotify, at the natural
+// end and after a stop of a running player; see SequenceSystem.h.
+//
+// Unknown entity or no Sequence Player: the actions do nothing, play answers
+// false, the reads answer 0/false.
+namespace sequence {
+    // Start from the top (or from where setTime put it), or resume a pause.
+    // False without a player, and on a switched-off owner.
+    bool  play(Ctx&, Entity e);
+    void  pause(Ctx&, Entity e);
+    // Stop and rewind to 0. A running cutscene sends SequenceFinished — which is
+    // what a skip key wants.
+    void  stop(Ctx&, Entity e);
+    // Jump; nothing between the old and the new time fires. Clamped to the
+    // sequence's length (wrapped, for a looping player).
+    void  setTime(Ctx&, Entity e, float seconds);
+    float getTime(Ctx&, Entity e);
+    // The sequence's length in seconds; 0 while it is still loading.
+    float duration(Ctx&, Entity e);
+    // The clock is running: false when stopped, finished, or paused.
+    bool  isPlaying(Ctx&, Entity e);
+    // Play the binding named `binding` with `target` instead of the entity the
+    // sequence names — "the player", spawned at runtime, is the reason. By NAME,
+    // the label the editor shows; it may be called before the sequence has
+    // loaded. A target of 0 — this API's "no entity" — clears the override and
+    // the asset's own actor plays again; a target that does not exist is
+    // refused with a warning rather than read as 0.
+    void  bindSlot(Ctx&, Entity e, const std::string& binding, Entity target);
+}
+
 // ── Particles: firing an effect ──────────────────────────────────────────────
 // A Particle System component used to have one control, an inspector checkbox
 // that could turn it OFF. Nothing could turn one on, nothing could fire one, and
@@ -2462,6 +2498,87 @@ namespace input {
     bool  gamepadConnected();
     bool  gamepadButton(const std::string& name);
     float gamepadAxis(const std::string& name);
+
+    // ── Rumble: the one input row that WRITES to a device ────────────────────
+    // The reverse of setGamepad: Input (HE_Core) owns the pads and this layer
+    // cannot see it, so the app installs a sink once at startup and the rows
+    // below call through it. No sink → every call answers false, silently.
+    struct RumbleSink
+    {
+        std::function<bool(float low, float high, uint32_t durationMs)>   rumble;
+        std::function<bool(float left, float right, uint32_t durationMs)> rumbleTriggers;
+        std::function<void()>                                             stop;
+    };
+    void setRumbleSink(RumbleSink sink);   // app hook; RumbleSink{} uninstalls
+    // App hook, EVERY frame. Two different pauses, two different answers:
+    //   allowed    — "is a game running at all" (the editor: playing and not
+    //                halted at a breakpoint/pause button; the packaged game:
+    //                always). Going false STOPS the pads and refuses further
+    //                requests — a buzz started in PIE must not outlive Stop.
+    //   gamePaused — time.isPaused(). Going true STOPS the pads, but requests
+    //                made while paused still go through: a pause menu may
+    //                want a click to be felt, the explosion before it may not
+    //                keep shaking the hands of whoever is reading that menu.
+    // Starts closed (allowed=false), so an app that never opens it — the
+    // editor in edit mode — cannot be made to buzz by a graph preview.
+    void setRumbleGate(bool allowed, bool gamePaused);
+    // Script side. Intensities 0..1, `low` = heavy motor, `high` = light motor.
+    // `duration` in SECONDS like camera.playShake; <= 0 runs until stopRumble
+    // or the next call (at most ~65 s on a positive one). ONE effect per pad:
+    // a call replaces the running one, it does not mix — no handle for that
+    // reason. True if at least one pad took it. Trigger rumble answers false on
+    // pads without trigger motors (anything but Xbox One/Series and DualSense).
+    bool rumble(float low, float high, float duration);
+    bool rumbleTriggers(float left, float right, float duration);
+    void stopRumble();
+
+    // ── Rebinding: the player's own bindings, over the project's ─────────────
+    // The session's PlayerHost owns the bindings and the capture, so it installs
+    // this for as long as it runs (begin → end); without one every row below
+    // answers false / "" and does nothing — edit mode, a session with no host.
+    // Plain functions rather than an interface so the host's header need not
+    // pull this one in (same shape as RumbleSink).
+    struct BindingService
+    {
+        std::function<bool(const std::string& action, const std::string& device)> rebindBegin;
+        std::function<void()>                                                     rebindCancel;
+        std::function<bool()>                                                     isRebinding;
+        std::function<std::string()>                                              rebindConflict;
+        std::function<std::string(const std::string& action, const std::string& device)> bindingName;
+        std::function<void()>                                                     resetBindings;
+        std::function<bool()>                                                     saveBindings;
+    };
+    void setBindingService(BindingService service);   // host hook; {} uninstalls
+    // Script side. `device` is "keyboard" (keys AND mouse buttons — one class)
+    // or "gamepad"; a rebind replaces that half of the action's bindings and
+    // leaves the other half alone. Button actions only for now.
+    //
+    // rebindBegin: listen for the next press on that device and bind it to
+    //   `action`. False for an unknown action, an axis, a bad device name, or
+    //   no running session. The press that is already down when it is called
+    //   (the menu click or South press that asked for it) never counts. Escape
+    //   or the pad's Start button cancels. While it listens, every gameplay
+    //   action is silent — even the ones marked to run while paused — and the
+    //   menu does not react to keys, pad or clicks.
+    // isRebinding: true from rebindBegin until the captured button is released
+    //   again (or the capture was cancelled). Poll it to know when to refresh
+    //   the labels.
+    // rebindConflict: after a capture, the OTHER actions that input also
+    //   triggers, comma-separated ("" = none). The binding is made anyway.
+    // bindingName: what `action` is bound to on `device`, readable ("Space",
+    //   "A (South)", "Left Mouse Button"); several joined with " / ", "" none.
+    // resetBindings: drop every player binding (the project's again). Not saved
+    //   until saveBindings.
+    // saveBindings: persist the player's bindings in prefs (key
+    //   "input.overrides.0"; a later per-player step adds 1, 2, …). Loaded
+    //   again at the start of every session.
+    bool        rebindBegin(const std::string& action, const std::string& device);
+    void        rebindCancel();
+    bool        isRebinding();
+    std::string rebindConflict();
+    std::string bindingName(const std::string& action, const std::string& device);
+    void        resetBindings();
+    bool        saveBindings();
 
     // ── Input ACTIONS: the project's InputAction assets, by name ─────────────
     // What the mapping contexts resolved this frame, keyed by the logical

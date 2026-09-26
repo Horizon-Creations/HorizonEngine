@@ -134,6 +134,11 @@ void AnimationStateMachineSystem::update(HorizonWorld& world, ContentManager& cm
     {
         resolveConfigIfNeeded(sm, cm);
 
+        // A cutscene has this skeleton (SequenceSystem.h). The whole machine
+        // stands still, its sync graph included: that graph only feeds the
+        // transitions below, and they are not being taken.
+        if (smc.sequencePosed) continue;
+
         // The sync graph writes this entity's parameters, and it runs HERE —
         // right before the transitions below read them. bind() is idempotent, so
         // calling it every frame is also how an entity that gained a state

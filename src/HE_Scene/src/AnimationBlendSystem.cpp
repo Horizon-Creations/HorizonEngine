@@ -36,6 +36,7 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
     for (auto [e, blend, smc] : view.each())
     {
         if (!blend.playing) continue;
+        if (smc.sequencePosed) continue;   // a cutscene has this skeleton (SequenceSystem.h)
 
         const AnimationClipAsset* clipA = cm.getAnimationClip(blend.clipAId);
         const AnimationClipAsset* clipB = cm.getAnimationClip(blend.clipBId);

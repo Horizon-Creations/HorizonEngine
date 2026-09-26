@@ -768,7 +768,8 @@ namespace
 		const glm::vec3 camUp    = glm::normalize(glm::vec3(camWorld[1]));
 		const glm::vec3 camBack  = glm::normalize(glm::vec3(camWorld[2])); // toward the viewer
 
-		auto pushIcon = [&](entt::entity e, const glm::mat4& world, const HE::UUID& material)
+		auto pushIcon = [&](entt::entity e, const glm::mat4& world, const HE::UUID& material,
+		                    const glm::vec3& tint)
 		{
 			const glm::vec3 pos = glm::vec3(world[3]);
 			// On-screen size follows the view DEPTH, not the straight-line distance:
@@ -789,6 +790,11 @@ namespace
 			obj.entityId        = static_cast<uint32_t>(e);
 			obj.castsShadow     = false;
 			obj.contributesAO   = false;
+			// The glyph is white; the icon material multiplies it by the
+			// per-instance colour (its graph's Vertex Color), so this is the
+			// colour the icon is drawn in. Alpha stays 1: the texture's own
+			// alpha is the icon's shape.
+			obj.instanceTint    = glm::vec4(tint, 1.0f);
 			out.objects.push_back(obj);
 		};
 
@@ -803,17 +809,21 @@ namespace
 			// world origin of every scene would only invite a click that selects
 			// the wrong thing; those two are the Sky panel's, not the viewport's.
 			if (reg.all_of<EnvironmentLightComponent>(e)) continue;
-			pushIcon(e, t.worldMatrix, editorIconMaterialFor(light.type));
+			// In the light's own hue (brightest channel lifted to 1, the colour
+			// the editor draws its range in too): a red lamp reads as a red
+			// lamp before anyone opens its Details.
+			pushIcon(e, t.worldMatrix, editorIconMaterialFor(light.type),
+			         HE::lightDisplayColor(light.color));
 		}
 		for (auto [e, t, cam] : reg.view<TransformComponent, CameraComponent>().each())
 		{
 			(void)cam;
-			pushIcon(e, t.worldMatrix, HE::kEditorIconCameraMaterialId);
+			pushIcon(e, t.worldMatrix, HE::kEditorIconCameraMaterialId, glm::vec3(1.0f));
 		}
 		for (auto [e, t, audio] : reg.view<TransformComponent, AudioSourceComponent>().each())
 		{
 			(void)audio;
-			pushIcon(e, t.worldMatrix, HE::kEditorIconAudioSourceMaterialId);
+			pushIcon(e, t.worldMatrix, HE::kEditorIconAudioSourceMaterialId, glm::vec3(1.0f));
 		}
 	}
 

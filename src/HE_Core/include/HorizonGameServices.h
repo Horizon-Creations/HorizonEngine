@@ -37,7 +37,8 @@
 
 #define HE_SAVE_ABI_VERSION     1u
 #define HE_PHYSICS_ABI_VERSION  1u
-#define HE_INPUT_ABI_VERSION    1u
+#define HE_INPUT_ABI_VERSION    3u   // 2 — + rumble, rumbleTriggers, stopRumble
+                                     // 3 — + rebindBegin … saveBindings
 #define HE_CONTENT_ABI_VERSION  1u
 #define HE_ANTICHEAT_ABI_VERSION 1u
 // The umbrella that carries the tables. Bumped when a table POINTER is appended
@@ -195,6 +196,29 @@ typedef struct HeInputServices
     // Mode). setMode ignores anything outside that range.
     int   (*mode)(void* host);
     void  (*setMode)(void* host, int mode);
+
+    // ── v2 ──
+    // Rumble, every connected pad. Intensities 0..1, duration in seconds
+    // (<= 0: until stopRumble). One effect per pad, a call replaces it. The
+    // one entry in this table that writes to a device rather than reading a
+    // snapshot — gated by the host exactly like the script rows (nothing
+    // outside a running game, stopped on pause), so a module cannot outlive it.
+    bool  (*rumble)(void* host, float low, float high, float duration);
+    bool  (*rumbleTriggers)(void* host, float left, float right, float duration);
+    void  (*stopRumble)(void* host);
+
+    // ── v3 ──
+    // The player's own bindings (HE::api::input::rebindBegin …). `device` is
+    // "keyboard" (keys + mouse buttons) or "gamepad". The string getters are
+    // two-call like the save table's: up to `cap` bytes incl. the NUL, the
+    // FULL length returned.
+    bool  (*rebindBegin)(void* host, const char* action, const char* device);
+    void  (*rebindCancel)(void* host);
+    bool  (*isRebinding)(void* host);
+    int   (*rebindConflict)(void* host, char* buf, int cap);
+    int   (*bindingName)(void* host, const char* action, const char* device, char* buf, int cap);
+    void  (*resetBindings)(void* host);
+    bool  (*saveBindings)(void* host);
 } HeInputServices;
 
 // ── Content (see HE::api::content) ───────────────────────────────────────────
@@ -696,6 +720,52 @@ inline bool gamepadButton(const std::string& name)
 { auto* s = detail::inputSvc(); return s && s->gamepadButton(s->host, name.c_str()); }
 inline float gamepadAxis(const std::string& name)
 { auto* s = detail::inputSvc(); return s ? s->gamepadAxis(s->host, name.c_str()) : 0.0f; }
+
+// Rumble every connected pad: `low` heavy motor, `high` light motor, 0..1;
+// `duration` in seconds, <= 0 until stopRumble(). A call replaces the running
+// rumble. False when no pad took it — or outside a running game, where the
+// host keeps the pads quiet.
+inline bool rumble(float low, float high, float duration)
+{ auto* s = detail::inputSvc(); return s && s->rumble && s->rumble(s->host, low, high, duration); }
+// Trigger motors (Xbox One/Series, DualSense); false on every other pad.
+inline bool rumbleTriggers(float left, float right, float duration)
+{
+    auto* s = detail::inputSvc();
+    return s && s->rumbleTriggers && s->rumbleTriggers(s->host, left, right, duration);
+}
+inline void stopRumble()
+{ if (auto* s = detail::inputSvc(); s && s->stopRumble) s->stopRumble(s->host); }
+
+// The player's own bindings. `device` "keyboard" (keys + mouse buttons) or
+// "gamepad". rebindBegin listens for the next press on that device (Escape or
+// Start cancels); poll isRebinding() for the end, then rebindConflict() for the
+// other actions that input also triggers ("" none, else comma-separated).
+// resetBindings drops them all, saveBindings persists them for next launch.
+inline bool rebindBegin(const std::string& action, const std::string& device)
+{
+    auto* s = detail::inputSvc();
+    return s && s->rebindBegin && s->rebindBegin(s->host, action.c_str(), device.c_str());
+}
+inline void rebindCancel()
+{ if (auto* s = detail::inputSvc(); s && s->rebindCancel) s->rebindCancel(s->host); }
+inline bool isRebinding()
+{ auto* s = detail::inputSvc(); return s && s->isRebinding && s->isRebinding(s->host); }
+inline std::string rebindConflict()
+{
+    auto* s = detail::inputSvc();
+    return s && s->rebindConflict ? detail::fetchString(s->host, s->rebindConflict) : std::string();
+}
+inline std::string bindingName(const std::string& action, const std::string& device)
+{
+    auto* s = detail::inputSvc();
+    if (!s || !s->bindingName) return {};
+    return detail::fetchString(s->host, [&](void* h, char* b, int c)
+        { return s->bindingName(h, action.c_str(), device.c_str(), b, c); });
+}
+inline void resetBindings()
+{ if (auto* s = detail::inputSvc(); s && s->resetBindings) s->resetBindings(s->host); }
+inline bool saveBindings()
+{ auto* s = detail::inputSvc(); return s && s->saveBindings && s->saveBindings(s->host); }
 
 inline Mode mode()
 { auto* s = detail::inputSvc(); return s ? (Mode)s->mode(s->host) : Mode::GameAndUI; }

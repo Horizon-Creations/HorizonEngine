@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AssetAutosave.h"
 #include "CollabDocSync.h"
 
 #include <string>
@@ -42,6 +43,10 @@ public:
 	// tab the user already CLOSED meant reopening it first. Returns true when
 	// nothing is left unsaved for that path.
 	static bool saveAsset(AppContext& ctx, const std::string& assetPath);
+	// Every unsaved FILE with a way to write a crash-recovery copy of it — the
+	// input AssetAutosave works from. Same panel list as saveAsset, same
+	// ask-everyone dispatch; a panel missing here has no recovery copy.
+	static void appendAssetSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out);
 
 	// Drop the in-memory content of whichever panel holds this tab and reload it
 	// from disk on its next frame, keeping the panel's view state (pan/zoom,

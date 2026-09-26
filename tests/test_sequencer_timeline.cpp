@@ -115,6 +115,18 @@ TEST_CASE("sequencer: every property target has a name, a group and a way to pri
 	}
 	CHECK(names.size() == 15);
 
+	// The two appended for cinematics (plan §3.2): each its own group, because
+	// neither writes the transform nor the material.
+	for (PropTarget t : { PropTarget::CameraFov, PropTarget::Visible })
+	{
+		const std::string name = targetName(t);
+		CHECK(name.size() >= 5);
+		CHECK_MESSAGE(names.insert(name).second, "two targets share the name ", name);
+	}
+	CHECK(std::string(targetGroup(PropTarget::CameraFov)) == "Camera");
+	CHECK(std::string(targetGroup(PropTarget::Visible))   == "Visibility");
+	CHECK(kTargetCount == static_cast<int>(names.size()));
+
 	char buf[32];
 	formatValue(PropTarget::RotY, 90.0f, buf, sizeof(buf));
 	// Rotation is Euler degrees on the component; the readout says so.
@@ -398,12 +410,17 @@ TEST_CASE("sequencer: tracks, defaults and the clip's length")
 	CHECK(clip.channels.size() == 2);
 	CHECK(findTrack(clip, PropTarget::PosZ) == -1);
 
-	// Every default is 0 or 1, and the ones that mean "unchanged" are 1.
+	// Every default is 0 or 1, and the ones that mean "unchanged" are 1 —
+	// except the field of view, whose "unchanged" is the camera's own 60°.
 	for (int i = 0; i < kTargetCount; ++i)
 	{
-		const float d = defaultValue(static_cast<PropTarget>(i));
+		const auto t = static_cast<PropTarget>(i);
+		if (t == PropTarget::CameraFov) continue;
+		const float d = defaultValue(t);
 		CHECK((d == 0.0f || d == 1.0f));
 	}
+	CHECK(defaultValue(PropTarget::CameraFov) == 60.0f);
+	CHECK(defaultValue(PropTarget::Visible)   == 1.0f);
 	CHECK(defaultValue(PropTarget::MatOpacity) == 1.0f);
 	CHECK(defaultValue(PropTarget::MatColorG)  == 1.0f);
 	CHECK(defaultValue(PropTarget::PosX)       == 0.0f);

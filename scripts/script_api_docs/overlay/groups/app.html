@@ -1,0 +1,45 @@
+          <p>
+            The application around the game: its window, menu bar, tray icon,
+            notifications and login item. These rows exist for desktop
+            applications built with the engine and need a host that provides each
+            piece. The exported application provides all of them. Play mode in the
+            editor provides only <code>quit</code> (it stops play mode),
+            <code>size</code> and <code>requestRedraw</code>; everything else logs
+            “no … bound by the host” and does nothing.
+          </p>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue (build 7d49d44f): from Lua and Python only
+              <code>app.quit</code> reaches the host.</strong> The script bridge
+              passes a script the quit handler and nothing else, in the exported
+              application as well. Every other row either logs “no … bound by the
+              host” and does nothing, or answers its empty value:
+              <code>size</code> 0, 0, <code>isMaximized</code>,
+              <code>notifyAvailable</code>, <code>autostart</code>,
+              <code>menuItemEnabled</code> and <code>menuItemChecked</code>
+              <code>false</code>, <code>notify</code> <code>false</code>.
+              <code>requestRedraw</code> is silent. Build window chrome, menus and the
+              tray from a HorizonCode graph; its <em>On Menu Item</em> and <em>On
+              Tray Item</em> events have no script counterpart either.
+            </p>
+          </div>
+          <ul>
+            <li>
+              <strong>Ids and labels.</strong> A menu, menu entry or tray entry
+              without an id is refused with a log line; an empty label shows the id.
+              Adding a menu id twice is one menu. A shortcut that does not parse is
+              dropped with a log line and the entry arrives without it;
+              <code>"Ctrl"</code> means Command on a Mac.
+            </li>
+            <li>
+              <strong>Refused values.</strong> <code>setSize</code> with a side of 0
+              or less is ignored; <code>notify</code> with neither title nor text
+              answers <code>false</code>. On macOS <code>notify</code> needs the
+              packaged app.
+            </li>
+            <li>
+              <code>setAutostart</code> needs the project permission <em>Run other
+              programs</em>; reading <code>autostart</code> needs none.
+            </li>
+          </ul>

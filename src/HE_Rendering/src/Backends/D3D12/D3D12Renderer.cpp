@@ -8964,9 +8964,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             MatU u;
                             u.mvp   = viewProj * model;
                             u.model = model;
-                            u.color = glm::vec4(dc.baseColor, 1.0f);
+                            // Per-instance tint (RenderObject::instanceTint), as Metal and GL
+                            // multiply it in: a graph reads it through Vertex Color (the editor
+                            // icons wear their light's colour that way). Identity for the rest.
+                            u.color = glm::vec4(dc.baseColor * glm::vec3(dc.instanceTint), 1.0f);
                             u.flags = glm::vec4(matTextured ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
-                            u.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity, 0.0f);
+                            u.pbr   = glm::vec4(dc.metallic, dc.roughness, dc.opacity * dc.instanceTint.a, 0.0f);
                             if (p.m_matObjPtr[p.frameIndex])
                                 std::memcpy(p.m_matObjPtr[p.frameIndex] + static_cast<size_t>(i) * D3D12RendererImpl::k_matSlot,
                                             &u, sizeof(u));

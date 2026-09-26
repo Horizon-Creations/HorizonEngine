@@ -13,10 +13,12 @@ public:
 		bool flipVertically = true;  // match GL-style bottom-left UV origin
 		// Colour data (base colour, emissive) vs. data (normal, ORM, masks). Recorded
 		// on the asset as TextureAsset::srgb, kept through the pack cook, and picked
-		// up by the GL and Metal uploads as the sRGB pixel format (hardware decode
-		// to linear on sample). D3D11/D3D12/Vulkan still upload linear regardless.
-		// The glTF importer is the only place that knows which is which; a manual
-		// import defaults to linear, matching every asset written before the flag.
+		// up by all five backends (GL, Metal, D3D11, D3D12, Vulkan) as the sRGB
+		// pixel format (hardware decode to linear on sample).
+		// This default is only the struct's: the policy lives with the callers. The
+		// glTF importer knows per slot; Importer::importSource (editor import,
+		// asset_compiler) takes the user's choice or Importer::suggestTextureSrgb,
+		// and a reimport keeps what the asset already carries.
 		bool srgb = false;
 	};
 

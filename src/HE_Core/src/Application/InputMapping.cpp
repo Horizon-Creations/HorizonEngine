@@ -24,6 +24,64 @@ void InputMapping::mapAxis2D(std::string name, std::vector<AxisBinding> xBinding
     e.is2D      = true;
 }
 
+namespace
+{
+// Field by field: the structs are aggregates meant to stay brace-initialisable,
+// so they get no operator== of their own.
+bool sameBinding(const ActionBinding& a, const ActionBinding& b)
+{
+    return a.key == b.key && a.gamepadButton == b.gamepadButton &&
+           a.mouseButton == b.mouseButton;
+}
+
+bool sameBinding(const AxisBinding& a, const AxisBinding& b)
+{
+    return a.positiveKey == b.positiveKey && a.negativeKey == b.negativeKey &&
+           a.scale == b.scale && a.source == b.source &&
+           a.positiveButton == b.positiveButton && a.negativeButton == b.negativeButton;
+}
+
+template <class B>
+void appendNew(std::vector<B>& into, const std::vector<B>& from)
+{
+    for (const B& b : from)
+        if (std::none_of(into.begin(), into.end(),
+                         [&](const B& have) { return sameBinding(have, b); }))
+            into.push_back(b);
+}
+} // namespace
+
+void InputMapping::addAction(const std::string& name, const std::vector<ActionBinding>& bindings)
+{
+    appendNew(m_actions[name].bindings, bindings);
+}
+
+void InputMapping::addAxis(const std::string& name, const std::vector<AxisBinding>& bindings)
+{
+    AxisEntry& e = m_axes[name];
+    if (e.is2D)
+    {
+        e.bindings.clear();
+        e.yBindings.clear();
+        e.is2D = false;
+    }
+    appendNew(e.bindings, bindings);
+}
+
+void InputMapping::addAxis2D(const std::string& name, const std::vector<AxisBinding>& xBindings,
+                             const std::vector<AxisBinding>& yBindings)
+{
+    AxisEntry& e = m_axes[name];
+    if (!e.is2D)
+    {
+        e.bindings.clear();   // a fresh entry is 1D by default and empty anyway
+        e.yBindings.clear();
+        e.is2D = true;
+    }
+    appendNew(e.bindings,  xBindings);
+    appendNew(e.yBindings, yBindings);
+}
+
 void InputMapping::clear()
 {
     m_actions.clear();
@@ -156,4 +214,46 @@ void InputMapping::axis2DValue(const std::string& name, float& x, float& y) cons
     const InputAxisState* s = getAxis(name);
     x = s ? s->x : 0.0f;
     y = s ? s->y : 0.0f;
+}
+
+const std::vector<ActionBinding>* InputMapping::actionBindings(const std::string& name) const
+{
+    auto it = m_actions.find(name);
+    return it != m_actions.end() ? &it->second.bindings : nullptr;
+}
+
+const std::vector<AxisBinding>* InputMapping::axisBindings(const std::string& name) const
+{
+    auto it = m_axes.find(name);
+    return it != m_axes.end() ? &it->second.bindings : nullptr;
+}
+
+const std::vector<AxisBinding>* InputMapping::axisYBindings(const std::string& name) const
+{
+    auto it = m_axes.find(name);
+    return it != m_axes.end() ? &it->second.yBindings : nullptr;
+}
+
+bool InputMapping::axisIs2D(const std::string& name) const
+{
+    auto it = m_axes.find(name);
+    return it != m_axes.end() && it->second.is2D;
+}
+
+std::vector<std::string> InputMapping::actionNames() const
+{
+    std::vector<std::string> out;
+    out.reserve(m_actions.size());
+    for (const auto& [name, e] : m_actions) out.push_back(name);
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::vector<std::string> InputMapping::axisNames() const
+{
+    std::vector<std::string> out;
+    out.reserve(m_axes.size());
+    for (const auto& [name, e] : m_axes) out.push_back(name);
+    std::sort(out.begin(), out.end());
+    return out;
 }

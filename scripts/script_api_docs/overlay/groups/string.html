@@ -1,0 +1,36 @@
+          <p>
+            Text functions with the same results a HorizonCode graph gets. Three
+            rules decide most surprises:
+          </p>
+          <ul>
+            <li>
+              <strong>Positions count from 0</strong>, also in Lua, whose own
+              <code>string.sub</code> and <code>string.find</code> count from 1.
+              <code>find</code> returns −1 when the piece is not there.
+            </li>
+            <li>
+              <strong>Lengths and positions are bytes.</strong> Text is UTF-8:
+              letters, digits and punctuation from plain ASCII take one byte, an
+              accented or non-Latin letter two to four. <code>length("ä")</code> is
+              2, and a <code>substring</code> can cut such a letter in half.
+              <code>toUpper</code> and <code>toLower</code> change only A to Z.
+            </li>
+            <li>
+              <strong>Comparisons are exact.</strong> <code>equals</code>,
+              <code>contains</code>, <code>find</code>, <code>startsWith</code> and
+              <code>endsWith</code> are case-sensitive; lower both sides first when
+              case should not matter.
+            </li>
+          </ul>
+          <p>
+            An empty piece is found everywhere: <code>contains(s, "")</code> is
+            true and <code>find(s, "")</code> is 0, while
+            <code>replace(s, "", x)</code> returns <code>s</code> unchanged. A
+            negative <code>start</code> in <code>substring</code> uses up part of
+            <code>count</code>, so <code>substring("hello", -2, 4)</code> is
+            <code>"he"</code>. <code>toNumber</code> reads the number at the start of
+            the text and ignores the rest: <code>"3.5abc"</code> gives 3.5,
+            <code>" 42 "</code> 42, <code>"1e3"</code> 1000 and <code>"0x10"</code>
+            16. The result is a 32-bit float, exact for whole numbers only up to
+            16,777,216.
+          </p>

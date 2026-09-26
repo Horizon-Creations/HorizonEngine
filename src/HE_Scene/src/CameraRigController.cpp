@@ -596,8 +596,7 @@ bool CameraRigController::blendTo(HorizonWorld& world, entt::entity toCamera,
 
     // The blend's precondition, not its decoration: exactly one isMain. See the
     // note on the declaration.
-    for (auto [e, cam] : reg.view<CameraComponent>().each())
-        cam.isMain = (e == toCamera);
+    makeMain(reg, toCamera);
 
     auto* rig = reg.try_get<CameraRigComponent>(toCamera);
     if (!rig) return true;   // switched; a camera without a rig cannot blend
@@ -655,6 +654,28 @@ bool CameraRigController::isBlending(entt::registry& reg)
     if (cam == entt::null) return false;
     const auto* rig = reg.try_get<CameraRigComponent>(cam);
     return rig && rig->isBlending();
+}
+
+void CameraRigController::makeMain(entt::registry& reg, entt::entity camera)
+{
+    for (auto [e, cam] : reg.view<CameraComponent>().each())
+        cam.isMain = (e == camera);
+}
+
+void CameraRigController::releaseAll(entt::registry& reg)
+{
+    for (auto [e, cam, rig] : reg.view<CameraComponent, CameraRigComponent>().each())
+    {
+        if (rig.meshHiddenEntity != entt::null)
+        {
+            applyMeshVisibility(reg, rig.meshHiddenEntity, false);
+            rig.meshHiddenEntity = entt::null;
+        }
+        cam.fovOffset      = 0.0f;
+        rig.blend          = {};
+        rig.hasLagState    = false;
+        rig.hasLastWritten = false;
+    }
 }
 
 } // namespace HE

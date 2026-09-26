@@ -1203,6 +1203,89 @@ inline HE::hccg::ClassSource fxAnimatorSync()
     return f.done("animator_sync");
 }
 
+// The cutscene transport as a level would drive it: start it, jump, read the
+// clock back, cast a spawned actor into a binding and skip it — and the one way
+// the end comes back, the notify "SequenceFinished" picked out of
+// OnAnimationNotify by name. A cutscene that ended in the editor and ran on in
+// the shipped game (or the reverse) would leave a player without controls in
+// one of them, so both backends have to make the same calls in the same order.
+inline HE::hccg::ClassSource fxSequenceTransport()
+{
+    Fx f;
+    f.var("started", PT::Bool);
+    f.var("t", PT::Float);
+    f.var("len", PT::Float);
+    f.var("playing", PT::Bool);
+    f.var("finished", PT::Float);
+    f.var("other", PT::Float);
+
+    const int ev   = f.event("Skip");
+    const int self = f.engineCall("entity.self");
+
+    const int play = f.engineCall("sequence.play");
+    f.data(self, 0, play, 0);
+    f.exec(ev, play);
+    const int sStarted = f.setVar("started", PT::Bool);
+    f.data(play, 0, sStarted, 0);   // exec row: its result is cached, read once
+    f.exec(play, sStarted);
+
+    const int setT = f.engineCall("sequence.setTime");
+    f.data(self, 0, setT, 0);
+    f.g.findNode(setT)->pinDefaults[1] = Value::ofFloat(1.5f);
+    f.exec(sStarted, setT);
+
+    const int getT = f.engineCall("sequence.getTime");
+    f.data(self, 0, getT, 0);
+    const int sT = f.setVar("t", PT::Float);
+    f.data(getT, 0, sT, 0);
+    f.exec(setT, sT);
+
+    const int dur = f.engineCall("sequence.duration");
+    f.data(self, 0, dur, 0);
+    const int sLen = f.setVar("len", PT::Float);
+    f.data(dur, 0, sLen, 0);
+    f.exec(sT, sLen);
+
+    const int isP = f.engineCall("sequence.isPlaying");
+    f.data(self, 0, isP, 0);
+    const int sP = f.setVar("playing", PT::Bool);
+    f.data(isP, 0, sP, 0);
+    f.exec(sLen, sP);
+
+    const int bind = f.engineCall("sequence.bindSlot");
+    f.data(self, 0, bind, 0);
+    f.g.findNode(bind)->pinDefaults[1] = Value::ofString("Hero");
+    f.data(self, 0, bind, 2);
+    f.exec(sP, bind);
+
+    const int pause = f.engineCall("sequence.pause");
+    f.data(self, 0, pause, 0);
+    f.exec(bind, pause);
+    const int stop = f.engineCall("sequence.stop");
+    f.data(self, 0, stop, 0);
+    f.exec(pause, stop);
+
+    // The end: one notify handler, told apart by name.
+    const int evN = f.event("OnAnimationNotify", 0, true, PT::String);
+    const int eq  = f.engineCall("string.equals");
+    f.data(evN, 0, eq, 0);
+    f.data(f.constS("SequenceFinished"), 0, eq, 1);
+    const int br = f.branch();
+    f.data(eq, 0, br, 0);
+    f.exec(evN, br);
+    auto bump = [&f](int from, int out, const char* var) {
+        const int s = f.setVar(var, PT::Float);
+        const int a = f.op(NT::Add);
+        f.data(f.getVar(var, PT::Float), 0, a, 0);
+        f.data(f.constF(1.0f), 0, a, 1);
+        f.data(a, 0, s, 0);
+        f.exec(from, s, out);
+    };
+    bump(br, 0, "finished");
+    bump(br, 1, "other");
+    return f.done("sequence_transport");
+}
+
 inline HE::hccg::ClassSource fxEngineExecCached()
 {
     Fx f;
@@ -2746,6 +2829,95 @@ inline HE::hccg::ClassSource fxDatetimeDouble()
     return f.done("datetime_double");
 }
 
+// input_rumble: the three rumble rows, the only input rows that WRITE. Exec
+// calls with Float args and a Bool result; what they reach is the host's sink,
+// which the parity test installs, so both backends must hand it the same
+// numbers in the same order — and read back the same Ok.
+inline HE::hccg::ClassSource fxInputRumble()
+{
+    Fx f;
+    f.var("ok", PT::Bool);
+    f.var("okTriggers", PT::Bool);
+
+    const int ev = f.event("Buzz");
+    const int rum = f.engineCall("input.rumble");
+    { Node* n = f.g.findNode(rum);
+      n->pinDefaults[0] = Value::ofFloat(0.5f);
+      n->pinDefaults[1] = Value::ofFloat(1.0f);
+      n->pinDefaults[2] = Value::ofFloat(0.25f); }
+    f.exec(ev, rum);
+    const int s1 = f.setVar("ok", PT::Bool);
+    f.data(rum, 0, s1, 0);
+    f.exec(rum, s1);
+
+    const int trg = f.engineCall("input.rumbleTriggers");
+    { Node* n = f.g.findNode(trg);
+      n->pinDefaults[0] = Value::ofFloat(0.25f);
+      n->pinDefaults[1] = Value::ofFloat(0.75f);
+      n->pinDefaults[2] = Value::ofFloat(0.0f); }
+    f.exec(s1, trg);
+    const int s2 = f.setVar("okTriggers", PT::Bool);
+    f.data(trg, 0, s2, 0);
+    f.exec(trg, s2);
+
+    const int stop = f.engineCall("input.stopRumble");
+    f.exec(s2, stop);
+    return f.done("input_rumble");
+}
+
+// input_rebind: the seven rebinding rows. Exec rows with String args and Bool
+// results, pure rows answering Bool and String — all of them reach the
+// session's binding service, which the parity test replaces with a recorder,
+// so both backends must hand it the same strings and read back the same.
+inline HE::hccg::ClassSource fxInputRebind()
+{
+    Fx f;
+    f.var("ok", PT::Bool);
+    f.var("busy", PT::Bool);
+    f.var("name", PT::String);
+    f.var("conflict", PT::String);
+    f.var("saved", PT::Bool);
+
+    const int ev = f.event("Rebind");
+    const int beg = f.engineCall("input.rebindBegin");
+    { Node* n = f.g.findNode(beg);
+      n->pinDefaults[0] = Value::ofString("Jump");
+      n->pinDefaults[1] = Value::ofString("gamepad"); }
+    f.exec(ev, beg);
+    const int s1 = f.setVar("ok", PT::Bool);
+    f.data(beg, 0, s1, 0);
+    f.exec(beg, s1);
+
+    const int busy = f.engineCall("input.isRebinding");
+    const int s2 = f.setVar("busy", PT::Bool);
+    f.data(busy, 0, s2, 0);
+    f.exec(s1, s2);
+
+    const int nm = f.engineCall("input.bindingName");
+    { Node* n = f.g.findNode(nm);
+      n->pinDefaults[0] = Value::ofString("Fire");
+      n->pinDefaults[1] = Value::ofString("keyboard"); }
+    const int s3 = f.setVar("name", PT::String);
+    f.data(nm, 0, s3, 0);
+    f.exec(s2, s3);
+
+    const int cf = f.engineCall("input.rebindConflict");
+    const int s4 = f.setVar("conflict", PT::String);
+    f.data(cf, 0, s4, 0);
+    f.exec(s3, s4);
+
+    const int cancel = f.engineCall("input.rebindCancel");
+    f.exec(s4, cancel);
+    const int reset = f.engineCall("input.resetBindings");
+    f.exec(cancel, reset);
+    const int save = f.engineCall("input.saveBindings");
+    f.exec(reset, save);
+    const int s5 = f.setVar("saved", PT::Bool);
+    f.data(save, 0, s5, 0);
+    f.exec(save, s5);
+    return f.done("input_rebind");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -2753,7 +2925,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxFlow(), fxCoerce(), fxMath(), fxBitwise(), fxVectorOps(), fxVariables(), fxFunctionsBasic(),
         fxFunctionsRecursive(), fxForeachArrays(), fxEventsMulti(),
         fxWidgetProps(), fxLimitsSmoke(), fxFunctionsLocals(),
-        fxEnginePureMultiout(), fxEngineExecCached(), fxAnimatorSync(),
+        fxEnginePureMultiout(), fxEngineExecCached(), fxAnimatorSync(), fxSequenceTransport(),
         fxRefTarget(), fxRefsObjects(), fxDispatchOwner(), fxDispatchListener(),
         fxDispatchSink(), fxLatentFlow(), fxEnums(), fxStructs(),
         fxGameInstance(), fxGiCaller(), fxEngineEvents(),
@@ -2761,7 +2933,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
-        fxDatetimeDouble(),
+        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(),
     };
 }
 

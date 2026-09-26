@@ -5942,6 +5942,24 @@ bool reloadFromDisk(const std::string& assetPath)
 
 
 void appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
+
+void appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, State& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			const UIWidgetAsset* a = cm->getWidget(st.assetId);
+			if (!a) return false;
+			// saveState's two lines, into a copy.
+			UIWidgetAsset copy = *a;
+			copy.treeJson  = HE::uiWidgetTreeToJson(st.tree);
+			copy.graphJson = HC::toJson(st.graph);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
 void forget(const std::string& assetPath) { s_states.forget(assetPath); }
 
 bool save(AppContext& ctx, const std::string& assetPath)

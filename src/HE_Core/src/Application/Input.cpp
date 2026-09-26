@@ -174,6 +174,45 @@ void Input::PollGamepads()
     }
 }
 
+namespace
+{
+Uint16 rumbleLevel(float v)
+{
+    // NaN fails both comparisons and lands on 0 — a garbage intensity from a
+    // script must not become full power.
+    if (!(v > 0.0f)) return 0;
+    if (v >= 1.0f)   return 0xFFFF;
+    return static_cast<Uint16>(v * 65535.0f + 0.5f);
+}
+}
+
+bool Input::rumble(float low, float high, uint32_t durationMs)
+{
+    bool any = false;
+    for (auto& [id, pad] : m_pads)
+        any |= SDL_RumbleGamepad(pad, rumbleLevel(low), rumbleLevel(high), durationMs);
+    return any;
+}
+
+bool Input::rumbleTriggers(float left, float right, uint32_t durationMs)
+{
+    bool any = false;
+    for (auto& [id, pad] : m_pads)
+        any |= SDL_RumbleGamepadTriggers(pad, rumbleLevel(left), rumbleLevel(right), durationMs);
+    return any;
+}
+
+void Input::stopRumble()
+{
+    // Triggers too, unconditionally: on a pad without them SDL just says no,
+    // and asking is cheaper than remembering which pads were told to buzz.
+    for (auto& [id, pad] : m_pads)
+    {
+        SDL_RumbleGamepad(pad, 0, 0, 0);
+        SDL_RumbleGamepadTriggers(pad, 0, 0, 0);
+    }
+}
+
 float Input::gamepadAxisFiltered(SDL_GamepadAxis axis) const
 {
     float x = 0.0f, y = 0.0f;

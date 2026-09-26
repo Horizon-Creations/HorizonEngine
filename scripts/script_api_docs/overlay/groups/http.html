@@ -1,0 +1,36 @@
+          <p>
+            Web requests that do not stop the game. <code>get</code> and
+            <code>post</code> return a <strong>ticket</strong> at once; the answer
+            is read later with that ticket. Both need the project permission
+            <em>Network access</em>. Ticket 0 means the request never started: no
+            permission, an empty URL, or a build without an HTTP backend
+            (<code>available</code>). Plain <code>http://</code> works as well as
+            <code>https://</code>.
+          </p>
+          <ul>
+            <li>
+              <strong>Scripts poll.</strong> HorizonCode gets <em>On Http
+              Response</em>; a script does not, so it asks <code>done(ticket)</code>
+              in <code>onUpdate</code> (see the example under
+              <a href="#http-get"><code>get</code></a>).
+            </li>
+            <li>
+              <strong><code>ok</code> is about the connection, not the
+              answer.</strong> A 404 is <code>ok</code> <code>true</code> with
+              status 404. When the server was never reached, <code>ok</code> is
+              <code>false</code>, the status 0 and <code>error</code> says why
+              (“Could not connect to the server.”).
+            </li>
+            <li>
+              <strong>One request at a time.</strong> Requests go out one after
+              another in the order they were made, each with a 5-second timeout, so
+              a slow server delays the ones queued behind it. <code>post</code>
+              with an empty content type sends <code>application/json</code>.
+            </li>
+            <li>
+              <strong>Answers are kept for a while, not forever.</strong> The last
+              32 are kept. An older one, a forgotten one and an unknown ticket all
+              read the same: <code>done</code> <code>false</code>, status 0, empty
+              body. Read an answer when it arrives, then <code>forget</code> it.
+            </li>
+          </ul>

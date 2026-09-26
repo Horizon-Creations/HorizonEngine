@@ -99,11 +99,13 @@ struct MetaFields
 // size would otherwise resize() to gigabytes; keeping the seek-past-payload shape
 // means keeping the bound with it.
 //
-// Field order mirrors ContentManager's buildMetaChunk: type, hi, lo, name, path,
-// source. The source is an append-only TAIL — an asset written before the field
-// existed simply runs out of bytes there, which leaves `source` empty rather than
-// failing the parse and making every existing .hasset look unreadable.
-bool readMetaFields(const std::filesystem::path& file, MetaFields& out)
+// readOneChunk is that streaming read, shared by readMetaFields and textureSrgbOf:
+// the payload of the first chunk `chunkId` in `file`, every other payload seeked
+// past. False for an unreadable or pre-v2 file (pre-v2 META has no UUID, so its
+// name/path sit where the id would be — reading it with the v2 layout would hand
+// back garbage rather than "nothing recorded") and for one without that chunk.
+bool readOneChunk(const std::filesystem::path& file, uint32_t chunkId,
+                  std::vector<uint8_t>& payload)
 {
 	std::ifstream f(file, std::ios::binary | std::ios::ate);
 	if (!f.is_open()) return false;
@@ -116,8 +118,6 @@ bool readMetaFields(const std::filesystem::path& file, MetaFields& out)
 	HAsset::FileHeader hdr{};
 	f.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
 	if (!f || std::memcmp(hdr.magic, HAsset::k_magic, 4) != 0) return false;
-	// Pre-v2 META has no UUID, so its name/path sit where the id would be — reading
-	// it with this layout would hand back garbage rather than "nothing recorded".
 	if (hdr.version < 2) return false;
 
 	uint64_t offset = sizeof(HAsset::FileHeader);
@@ -132,7 +132,7 @@ bool readMetaFields(const std::filesystem::path& file, MetaFields& out)
 		// size is an untrusted uint64 straight out of the file.
 		if (ch.size > fileSize - offset) return false;
 
-		if (ch.id != HAsset::CHUNK_META)
+		if (ch.id != chunkId)
 		{
 			f.seekg(static_cast<std::streamoff>(ch.size), std::ios::cur);
 			if (!f) return false;
@@ -140,21 +140,32 @@ bool readMetaFields(const std::filesystem::path& file, MetaFields& out)
 			continue;
 		}
 
-		std::vector<uint8_t> meta(static_cast<size_t>(ch.size));
+		payload.assign(static_cast<size_t>(ch.size), 0);
 		if (ch.size > 0)
-			f.read(reinterpret_cast<char*>(meta.data()),
+			f.read(reinterpret_cast<char*>(payload.data()),
 			       static_cast<std::streamsize>(ch.size));
-		if (!f) return false;
-
-		size_t off = sizeof(uint16_t); // skip asset type
-		if (!HAsset::Reader::readPOD(meta, off, out.id.hi))   return false;
-		if (!HAsset::Reader::readPOD(meta, off, out.id.lo))   return false;
-		if (!HAsset::Reader::readString(meta, off, out.name)) return false;
-		if (!HAsset::Reader::readString(meta, off, out.path)) return false;
-		HAsset::Reader::readString(meta, off, out.source);    // optional tail
-		return true;
+		return static_cast<bool>(f);
 	}
-	return false;   // a well-formed file with no META: nothing recorded
+	return false;   // a well-formed file without that chunk
+}
+
+// Field order mirrors ContentManager's buildMetaChunk: type, hi, lo, name, path,
+// source. The source is an append-only TAIL — an asset written before the field
+// existed simply runs out of bytes there, which leaves `source` empty rather than
+// failing the parse and making every existing .hasset look unreadable.
+bool readMetaFields(const std::filesystem::path& file, MetaFields& out)
+{
+	std::vector<uint8_t> meta;
+	if (!readOneChunk(file, HAsset::CHUNK_META, meta))
+		return false;   // includes a well-formed file with no META: nothing recorded
+
+	size_t off = sizeof(uint16_t); // skip asset type
+	if (!HAsset::Reader::readPOD(meta, off, out.id.hi))   return false;
+	if (!HAsset::Reader::readPOD(meta, off, out.id.lo))   return false;
+	if (!HAsset::Reader::readString(meta, off, out.name)) return false;
+	if (!HAsset::Reader::readString(meta, off, out.path)) return false;
+	HAsset::Reader::readString(meta, off, out.source);    // optional tail
+	return true;
 }
 } // namespace
 
@@ -172,6 +183,132 @@ std::string sourceFileOf(const std::filesystem::path& assetFile)
 	if (!readMetaFields(assetFile, meta))
 		return {};
 	return meta.source;
+}
+
+// ─── Texture colour space ────────────────────────────────────────────────────
+
+bool suggestTextureSrgb(const std::filesystem::path& path)
+{
+	std::string ext = path.extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(),
+	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	if (ext == ".hdr")
+		return false;   // radiance, stored linear by definition
+
+	std::string stem = path.stem().string();
+	std::transform(stem.begin(), stem.end(), stem.begin(),
+	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+	// Split into tokens on the usual separators. The hint is not always last:
+	// "rock_normal_2k" carries it in the middle, "T_Rock_N" at the end, so every
+	// token but the first is checked. The first is the subject, not a map type:
+	// "normal_test.png" is a test image.
+	std::vector<std::string> tokens;
+	{
+		std::string cur;
+		for (char c : stem)
+		{
+			if (c == '_' || c == '-' || c == '.' || c == ' ')
+			{
+				if (!cur.empty()) tokens.push_back(cur);
+				cur.clear();
+			}
+			else
+				cur += c;
+		}
+		if (!cur.empty()) tokens.push_back(cur);
+	}
+
+	static constexpr std::string_view kDataTokens[] = {
+		"n", "nrm", "nor", "norm", "normal", "normals", "normalmap",
+		"orm", "arm", "rma", "mra", "rough", "roughness", "gloss", "glossiness",
+		"metal", "metallic", "metalness", "ao", "occlusion",
+		"height", "disp", "displacement", "bump", "mask", "opacity",
+	};
+	auto isDataToken = [](std::string_view t) {
+		for (std::string_view d : kDataTokens)
+			if (t == d) return true;
+		return false;
+	};
+	for (size_t i = 1; i < tokens.size(); ++i)
+		if (isDataToken(tokens[i]))
+			return false;
+
+	// Separator-less names ("BrickNormal", "wallRoughness"): only the long,
+	// unambiguous words, and only as the END of the stem. "n" or "ao" as a
+	// suffix would claim "Lion" and "Cacao".
+	static constexpr std::string_view kDataSuffixes[] = {
+		"normal", "normalmap", "roughness", "metallic", "metalness",
+		"occlusion", "height", "displacement",
+	};
+	for (std::string_view s : kDataSuffixes)
+		if (stem.size() > s.size() &&
+		    std::string_view(stem).substr(stem.size() - s.size()) == s)
+			return false;
+
+	return true;
+}
+
+std::optional<bool> textureSrgbOf(const std::filesystem::path& assetFile)
+{
+	std::vector<uint8_t> txmi;
+	if (!readOneChunk(assetFile, HAsset::CHUNK_TXMI, txmi))
+		return std::nullopt;
+
+	size_t   o = 0;
+	uint32_t w = 0, h = 0, c = 0;
+	if (!HAsset::readTextureHeader(txmi, o, w, h, c))
+		return std::nullopt;
+	// Cook tail: mipLevels (u32), format (u8), srgb (u8) — the same order
+	// ContentManager reads it in. A chunk from before the tail has no answer.
+	uint32_t mips = 0; uint8_t format = 0, srgb = 0;
+	if (!HAsset::Reader::readPOD(txmi, o, mips) ||
+	    !HAsset::Reader::readPOD(txmi, o, format) ||
+	    !HAsset::Reader::readPOD(txmi, o, srgb))
+		return std::nullopt;
+	return srgb != 0;
+}
+
+bool setTextureSrgb(const std::filesystem::path& assetFile,
+                    const std::filesystem::path& contentRoot,
+                    bool                         srgb)
+{
+	std::error_code ec;
+	const std::string rel =
+		toAssetPath(std::filesystem::relative(assetFile, contentRoot, ec));
+	if (ec || rel.empty() || rel.rfind("..", 0) == 0)
+	{
+		HE_LOG_ERROR(Tool, "%s",
+			("Importer: " + assetFile.string() + " is not inside " + contentRoot.string()).c_str());
+		return false;
+	}
+
+	if (textureSrgbOf(assetFile) == srgb)
+		return true;   // nothing to write, and no reason to touch the file's mtime
+
+	// A full load and save rather than poking the one byte: a TXMI chunk from
+	// before the cook tail has no byte to poke, and the save writes the current
+	// layout. The save keeps everything the load read (UUID, name, recorded
+	// source, pixels), the same round trip writeAsset() relies on.
+	ContentManager cm(contentRoot.string());
+	const TextureAsset* loaded = cm.getTexture(cm.loadAsset(rel));
+	if (!loaded)
+	{
+		HE_LOG_ERROR(Tool, "%s",
+			("Importer: " + assetFile.string() + " is not a texture asset").c_str());
+		return false;
+	}
+	TextureAsset copy = *loaded;
+	copy.srgb = srgb;
+	if (!cm.saveAsset(copy))
+	{
+		HE_LOG_ERROR(Tool, "%s",
+			("Importer: failed to write " + assetFile.string()).c_str());
+		return false;
+	}
+	HE_LOG_INFO(Tool, "%s",
+		("Importer: " + rel + " is now " + (srgb ? "sRGB (colour)" : "linear (data)")).c_str());
+	return true;
 }
 
 bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot,
@@ -520,6 +657,11 @@ bool isImportableSource(const std::filesystem::path& sourcePath)
 	return classifySource(sourcePath) != SourceKind::None;
 }
 
+bool isTextureSource(const std::filesystem::path& sourcePath)
+{
+	return classifySource(sourcePath) == SourceKind::Texture;
+}
+
 const char* sourceFamilyLabel(SourceFamily family)   { return familyRow(family).label; }
 const char* sourceFamilyPattern(SourceFamily family) { return familyRow(family).pattern; }
 
@@ -556,7 +698,8 @@ const char* importBlockedReason(const std::filesystem::path& sourcePath)
 bool importSource(const std::filesystem::path& sourcePath,
                   const std::filesystem::path& contentRoot,
                   const std::filesystem::path& relativeOutputDir,
-                  const OutputTargets&         outputs)
+                  const OutputTargets&         outputs,
+                  const ImportOptions&         options)
 {
 	switch (classifySource(sourcePath))
 	{
@@ -579,8 +722,12 @@ bool importSource(const std::filesystem::path& sourcePath,
 		return MeshImporter::import(sourcePath, contentRoot, relativeOutputDir,
 		                            MeshImporter::ImportSettings{}, outputs)     != nullptr;
 	case SourceKind::Texture:
+	{
+		TextureImporter::ImportSettings settings;
+		settings.srgb = options.textureSrgb.value_or(suggestTextureSrgb(sourcePath));
 		return TextureImporter::import(sourcePath, contentRoot, relativeOutputDir,
-		                               TextureImporter::ImportSettings{}, outputs) != nullptr;
+		                               settings, outputs)                         != nullptr;
+	}
 	case SourceKind::Audio:
 		return AudioImporter::import(sourcePath, contentRoot, relativeOutputDir,
 		                             AudioImporter::ImportSettings{}, outputs)    != nullptr;
@@ -689,7 +836,15 @@ bool reimport(const std::filesystem::path& assetFile,
 	// a SkeletalMesh in place, under the same file and the same uuid. That is the
 	// intended outcome — the alternative is a second asset again — but it does
 	// change what every reference to it resolves to.
-	if (!importSource(source, contentRoot, relDir, outputs))
+	// A texture keeps the colour space it has: running it through importSource
+	// bare would re-guess it from the name, and a texture the user set by hand
+	// (or one a glTF import flagged, whose name says nothing) would flip back
+	// with every reimport. Only a texture from before the flag has none to keep.
+	ImportOptions options;
+	if (classifySource(source) == SourceKind::Texture)
+		options.textureSrgb = textureSrgbOf(assetFile);
+
+	if (!importSource(source, contentRoot, relDir, outputs, options))
 		return false;
 
 	if (classifySource(source) == SourceKind::Mesh && gltfHasSkin(source))

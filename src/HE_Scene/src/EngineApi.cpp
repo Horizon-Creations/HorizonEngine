@@ -17,6 +17,8 @@
 #include "HorizonScene/Components/SkeletalMeshComponent.h"
 #include "HorizonScene/Components/AnimatorStateMachineComponent.h"
 #include "HorizonScene/Components/AnimationLayerComponent.h"
+#include "HorizonScene/Components/SequencePlayerComponent.h"
+#include "HorizonScene/SequenceSystem.h"
 #include "HorizonScene/Components/MovementComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/NavAgentComponent.h"
@@ -885,6 +887,74 @@ std::vector<std::string> layerNames(Ctx& c, Entity e)
     return out;
 }
 } // namespace animator
+
+// ── Sequence ─────────────────────────────────────────────────────────────────
+// Thin over SequenceSystem's transport. Every row checks the world and the
+// player itself: the parity harness calls them with an empty Ctx, and entt
+// asserts on a stale handle before try_get could answer null.
+namespace sequence {
+namespace {
+SequencePlayerComponent* playerOf(Ctx& c, Entity e)
+{
+    if (!c.world) return nullptr;
+    auto& reg = c.world->registry();
+    const auto id = (entt::entity)e;
+    return reg.valid(id) ? reg.try_get<SequencePlayerComponent>(id) : nullptr;
+}
+}
+bool play(Ctx& c, Entity e)
+{
+    if (!c.content || !playerOf(c, e)) return false;
+    return SequenceSystem::play(*c.world, *c.content, (entt::entity)e);
+}
+void pause(Ctx& c, Entity e)
+{
+    if (playerOf(c, e)) SequenceSystem::pause(*c.world, (entt::entity)e);
+}
+void stop(Ctx& c, Entity e)
+{
+    if (playerOf(c, e)) SequenceSystem::stop(*c.world, (entt::entity)e);
+}
+void setTime(Ctx& c, Entity e, float seconds)
+{
+    if (c.content && playerOf(c, e)) SequenceSystem::setTime(*c.world, *c.content, (entt::entity)e, seconds);
+}
+float getTime(Ctx& c, Entity e)
+{
+    const auto* sp = playerOf(c, e);
+    return sp ? sp->time : 0.0f;
+}
+float duration(Ctx& c, Entity e)
+{
+    const auto* sp = playerOf(c, e);
+    if (!sp || !c.content) return 0.0f;
+    const SequenceAsset* seq = c.content->getSequence(sp->sequenceId);
+    return seq ? seq->duration : 0.0f;
+}
+bool isPlaying(Ctx& c, Entity e)
+{
+    const auto* sp = playerOf(c, e);
+    return sp && sp->playing && !sp->paused;
+}
+void bindSlot(Ctx& c, Entity e, const std::string& binding, Entity target)
+{
+    if (!playerOf(c, e)) return;
+    entt::entity to = entt::null;
+    if (target != 0)
+    {
+        to = (entt::entity)target;
+        if (!c.world->registry().valid(to))
+        {
+            // Not read as 0: clearing would put the asset's own actor back,
+            // which is not what a script binding a despawned character meant.
+            HE_LOG_WARN(Script, "sequence.bindSlot: entity %u does not exist — binding \"%s\" left as it was",
+                        static_cast<unsigned>(target), binding.c_str());
+            return;
+        }
+    }
+    SequenceSystem::bindSlotByName(*c.world, (entt::entity)e, binding, to);
+}
+} // namespace sequence
 
 // ── Particles ────────────────────────────────────────────────────────────────
 // The group that turns an emitter from scenery into an effect. Before this there
@@ -5211,6 +5281,105 @@ float gamepadAxis(const std::string& name)
     return a != SDL_GAMEPAD_AXIS_INVALID ? snap().padAxes[a] : 0.0f;
 }
 
+// Beside the Snapshot, not in it, for the reason the mode below gives: the
+// snapshot is rewritten every frame, the sink and the gate's edges must not be.
+namespace {
+struct RumbleState
+{
+    RumbleSink sink;
+    bool allowed    = false;
+    bool gamePaused = false;
+};
+RumbleState& rumbleState() { static RumbleState r; return r; }
+
+void stopPads()
+{
+    if (rumbleState().sink.stop) rumbleState().sink.stop();
+}
+
+// Seconds → SDL milliseconds. <= 0 (and NaN) is SDL's 0, "until stopped". A
+// POSITIVE duration must never round to that 0 — a 0.0004 s tick asked for
+// would turn into a buzz that never ends — so it is at least 1 ms, and at most
+// SDL's own cap, which it would apply anyway.
+uint32_t rumbleMs(float seconds)
+{
+    if (!(seconds > 0.0f)) return 0;
+    const float ms = seconds * 1000.0f + 0.5f;
+    if (ms >= 65535.0f) return 65535;
+    return std::max<uint32_t>(1u, static_cast<uint32_t>(ms));
+}
+}
+
+void setRumbleSink(RumbleSink sink) { rumbleState().sink = std::move(sink); }
+
+void setRumbleGate(bool allowed, bool gamePaused)
+{
+    RumbleState& r = rumbleState();
+    const bool closing = r.allowed && !allowed;
+    const bool pausing = allowed && gamePaused && !r.gamePaused;
+    r.allowed    = allowed;
+    r.gamePaused = gamePaused;
+    if (closing || pausing) stopPads();
+}
+
+bool rumble(float low, float high, float duration)
+{
+    const RumbleState& r = rumbleState();
+    return r.allowed && r.sink.rumble && r.sink.rumble(low, high, rumbleMs(duration));
+}
+
+bool rumbleTriggers(float left, float right, float duration)
+{
+    const RumbleState& r = rumbleState();
+    return r.allowed && r.sink.rumbleTriggers
+        && r.sink.rumbleTriggers(left, right, rumbleMs(duration));
+}
+
+// Not gated: stopping is always safe, and a closed gate has already stopped.
+void stopRumble() { stopPads(); }
+
+// Beside the Snapshot for the same reason as the rumble state: installed once
+// per session by the PlayerHost, never rewritten by a frame.
+namespace {
+BindingService& bindingService() { static BindingService s; return s; }
+}
+
+void setBindingService(BindingService service) { bindingService() = std::move(service); }
+
+bool rebindBegin(const std::string& action, const std::string& device)
+{
+    const BindingService& s = bindingService();
+    return s.rebindBegin && s.rebindBegin(action, device);
+}
+void rebindCancel()
+{
+    if (const BindingService& s = bindingService(); s.rebindCancel) s.rebindCancel();
+}
+bool isRebinding()
+{
+    const BindingService& s = bindingService();
+    return s.isRebinding && s.isRebinding();
+}
+std::string rebindConflict()
+{
+    const BindingService& s = bindingService();
+    return s.rebindConflict ? s.rebindConflict() : std::string();
+}
+std::string bindingName(const std::string& action, const std::string& device)
+{
+    const BindingService& s = bindingService();
+    return s.bindingName ? s.bindingName(action, device) : std::string();
+}
+void resetBindings()
+{
+    if (const BindingService& s = bindingService(); s.resetBindings) s.resetBindings();
+}
+bool saveBindings()
+{
+    const BindingService& s = bindingService();
+    return s.saveBindings && s.saveBindings();
+}
+
 // The action states live beside the Snapshot rather than in it for the same
 // reason the mode below does: the snapshot is overwritten by pushSdlSnapshot
 // every frame, and that call comes from a different place (the app's frame)
@@ -5672,6 +5841,27 @@ const std::vector<ApiFn>& registry()
                 for (const std::string& n : animator::layerNames(c, (Entity)aI(a, 0)))
                     arr.items.push_back(Value::ofString(n));
                 return VV{ arr }; } });
+
+        // Sequence — the transport of a Sequence Player. The entity is the
+        // cutscene's owner; the end comes back as the notify "SequenceFinished".
+        t.push_back({ "sequence.play", "Sequence", true, {{"entity", P::Int}}, {{"started", P::Bool}}, "HE::api::sequence::play",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(sequence::play(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "sequence.pause", "Sequence", true, {{"entity", P::Int}}, {}, "HE::api::sequence::pause",
+            [](Ctx& c, const VV& a){ sequence::pause(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "sequence.stop", "Sequence", true, {{"entity", P::Int}}, {}, "HE::api::sequence::stop",
+            [](Ctx& c, const VV& a){ sequence::stop(c, (Entity)aI(a, 0)); return VV{}; } });
+        t.push_back({ "sequence.setTime", "Sequence", true, {{"entity", P::Int}, {"seconds", P::Float}}, {}, "HE::api::sequence::setTime",
+            [](Ctx& c, const VV& a){ sequence::setTime(c, (Entity)aI(a, 0), aF(a, 1)); return VV{}; } });
+        t.push_back({ "sequence.getTime", "Sequence", false, {{"entity", P::Int}}, {{"seconds", P::Float}}, "HE::api::sequence::getTime",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(sequence::getTime(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "sequence.duration", "Sequence", false, {{"entity", P::Int}}, {{"seconds", P::Float}}, "HE::api::sequence::duration",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(sequence::duration(c, (Entity)aI(a, 0))) }; } });
+        t.push_back({ "sequence.isPlaying", "Sequence", false, {{"entity", P::Int}}, {{"playing", P::Bool}}, "HE::api::sequence::isPlaying",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(sequence::isPlaying(c, (Entity)aI(a, 0))) }; } });
+        // By binding NAME: the label the editor shows, the way layers are
+        // addressed — nobody authoring a cutscene ever sees a slot number.
+        t.push_back({ "sequence.bindSlot", "Sequence", true, {{"entity", P::Int}, {"binding", P::String}, {"target", P::Int}}, {}, "HE::api::sequence::bindSlot",
+            [](Ctx& c, const VV& a){ sequence::bindSlot(c, (Entity)aI(a, 0), aS(a, 1), (Entity)aI(a, 2)); return VV{}; } });
 
         // Movement — the reads an animator asks for. Derived from the character
         // controller on the spot, so there is no second copy to go stale.
@@ -6337,6 +6527,29 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::gamepadButton(aS(a, 0))) }; } });
         t.push_back({ "input.gamepadAxis", "Input", false, {{"axis", P::String}}, {{"value", P::Float}}, "HE::api::input::gamepadAxis",
             [](Ctx&, const VV& a){ return VV{ Value::ofFloat(input::gamepadAxis(aS(a, 0))) }; } });
+        t.push_back({ "input.rumble", "Input", true, {{"low", P::Float}, {"high", P::Float}, {"duration", P::Float}}, {{"ok", P::Bool}}, "HE::api::input::rumble",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::rumble(aF(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "input.rumbleTriggers", "Input", true, {{"left", P::Float}, {"right", P::Float}, {"duration", P::Float}}, {{"ok", P::Bool}}, "HE::api::input::rumbleTriggers",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::rumbleTriggers(aF(a, 0), aF(a, 1), aF(a, 2))) }; } });
+        t.push_back({ "input.stopRumble", "Input", true, {}, {}, "HE::api::input::stopRumble",
+            [](Ctx&, const VV&){ input::stopRumble(); return VV{}; } });
+
+        // Rebinding: the player's own bindings over the project's, answered by
+        // the session's PlayerHost (see input::BindingService).
+        t.push_back({ "input.rebindBegin", "Input", true, {{"action", P::String}, {"device", P::String}}, {{"ok", P::Bool}}, "HE::api::input::rebindBegin",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(input::rebindBegin(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "input.rebindCancel", "Input", true, {}, {}, "HE::api::input::rebindCancel",
+            [](Ctx&, const VV&){ input::rebindCancel(); return VV{}; } });
+        t.push_back({ "input.isRebinding", "Input", false, {}, {{"rebinding", P::Bool}}, "HE::api::input::isRebinding",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(input::isRebinding()) }; } });
+        t.push_back({ "input.rebindConflict", "Input", false, {}, {{"actions", P::String}}, "HE::api::input::rebindConflict",
+            [](Ctx&, const VV&){ return VV{ Value::ofString(input::rebindConflict()) }; } });
+        t.push_back({ "input.bindingName", "Input", false, {{"action", P::String}, {"device", P::String}}, {{"name", P::String}}, "HE::api::input::bindingName",
+            [](Ctx&, const VV& a){ return VV{ Value::ofString(input::bindingName(aS(a, 0), aS(a, 1))) }; } });
+        t.push_back({ "input.resetBindings", "Input", true, {}, {}, "HE::api::input::resetBindings",
+            [](Ctx&, const VV&){ input::resetBindings(); return VV{}; } });
+        t.push_back({ "input.saveBindings", "Input", true, {}, {{"ok", P::Bool}}, "HE::api::input::saveBindings",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(input::saveBindings()) }; } });
 
         // Input actions by name — the polling twin of the Input.<Action>.*
         // events, pushed by PlayerHost each frame (see input::ActionState).
@@ -7127,6 +7340,10 @@ const std::vector<ApiFn>& registry()
             { "animator.getLayerWeight", "Get Layer Weight" },
             { "animator.playLayer", "Play Layer" },
             { "animator.layerNames", "Get Layer Names" },
+            { "sequence.play", "Play Sequence" },           { "sequence.pause", "Pause Sequence" },
+            { "sequence.stop", "Stop Sequence" },           { "sequence.setTime", "Set Sequence Time" },
+            { "sequence.getTime", "Get Sequence Time" },    { "sequence.duration", "Get Sequence Duration" },
+            { "sequence.isPlaying", "Is Sequence Playing" }, { "sequence.bindSlot", "Bind Sequence Slot" },
             { "movement.speed", "Get Speed" }, { "movement.verticalSpeed", "Get Vertical Speed" },
             { "movement.isGrounded", "Is Grounded" }, { "movement.velocity", "Get Velocity" },
             { "movement.forwardAmount", "Get Forward Amount" },
@@ -7319,6 +7536,16 @@ const std::vector<ApiFn>& registry()
             { "input.gamepadConnected", "Gamepad Connected" },
             { "input.gamepadButton", "Gamepad Button" },
             { "input.gamepadAxis", "Gamepad Axis" },
+            { "input.rumble", "Rumble Gamepad" },
+            { "input.rumbleTriggers", "Rumble Gamepad Triggers" },
+            { "input.stopRumble", "Stop Gamepad Rumble" },
+            { "input.rebindBegin", "Rebind Input Action" },
+            { "input.rebindCancel", "Cancel Rebind" },
+            { "input.isRebinding", "Is Rebinding" },
+            { "input.rebindConflict", "Rebind Conflict" },
+            { "input.bindingName", "Input Binding Name" },
+            { "input.resetBindings", "Reset Input Bindings" },
+            { "input.saveBindings", "Save Input Bindings" },
             { "input.actionDown", "Input Action Down" },
             { "input.actionPressed", "Input Action Pressed" },
             { "input.actionReleased", "Input Action Released" },
@@ -7718,7 +7945,14 @@ bool isScriptGroup(std::string_view group)
                                                     // from it. Nothing in it is HorizonCode-only
                                                     // — a PlayerId and an entity are both
                                                     // integers on every frontend.
-                                                    "net" };
+                                                    "net",
+                                                    // "sequence" has no flat twin either:
+                                                    // without it a Lua or Python level can
+                                                    // hold a cutscene but never start, skip
+                                                    // or cast "the player" into it. Its end
+                                                    // arrives through onAnimationNotify,
+                                                    // which both already have.
+                                                    "sequence" };
     for (std::string_view g : kGroups) if (group == g) return true;
     return false;
 }
@@ -7963,6 +8197,23 @@ void fillInputServices(::HeInputServices& out, GameServicesBinding* binding)
     out.setMode = [](void*, int m) {
         if (m < (int)input::Mode::GameOnly || m > (int)input::Mode::UIOnly) return;
         input::setMode((input::Mode)m); };
+
+    out.rumble = [](void*, float low, float high, float duration) {
+        return input::rumble(low, high, duration); };
+    out.rumbleTriggers = [](void*, float left, float right, float duration) {
+        return input::rumbleTriggers(left, right, duration); };
+    out.stopRumble = [](void*) { input::stopRumble(); };
+
+    out.rebindBegin = [](void*, const char* action, const char* device) {
+        return input::rebindBegin(action ? action : "", device ? device : ""); };
+    out.rebindCancel = [](void*) { input::rebindCancel(); };
+    out.isRebinding  = [](void*) { return input::isRebinding(); };
+    out.rebindConflict = [](void*, char* buf, int cap) {
+        return copyOut(input::rebindConflict(), buf, cap); };
+    out.bindingName = [](void*, const char* action, const char* device, char* buf, int cap) {
+        return copyOut(input::bindingName(action ? action : "", device ? device : ""), buf, cap); };
+    out.resetBindings = [](void*) { input::resetBindings(); };
+    out.saveBindings  = [](void*) { return input::saveBindings(); };
 }
 
 void fillContentServices(::HeContentServices& out, GameServicesBinding* binding)
