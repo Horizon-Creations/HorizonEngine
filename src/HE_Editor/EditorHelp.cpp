@@ -2822,7 +2822,8 @@ namespace
 	  "Ctrl+Click, Shift+Click", "editor#outliner" },
 	{ "outliner.prefab", "Save as Prefab",
 	  "Saves this entity and its children as a reusable asset, so the same thing "
-	  "can be dropped into any scene.",
+	  "can be dropped into any scene. The entity itself becomes a placement of the "
+	  "new prefab and follows it from then on, like any dropped copy.",
 	  "", "scenes#prefabs" },
 	{ "outliner.create", "New entity",
 	  "Opens the Create menu — Empty, Cube, a Camera, a Light, a Rope, a Trail "
@@ -6393,7 +6394,9 @@ namespace
 	  "the choice is written into the MESH asset and saved at once, so every "
 	  "entity using the mesh picks it up. Slot 0 is the mesh's own material, "
 	  "which the single-material draw paths still use for the whole mesh; a "
-	  "slot left empty draws with slot 0. A Material component on an entity "
+	  "slot left empty draws with slot 0. A slot whose material file is gone "
+	  "shows the path it still names, with a Clear button that empties it. A "
+	  "Material component on an entity "
 	  "overrides all slots for that entity alone. Cmd/Ctrl+Z steps back over "
 	  "slot changes while this tab is hovered.",
 	  "", "editor#asset-editors" },

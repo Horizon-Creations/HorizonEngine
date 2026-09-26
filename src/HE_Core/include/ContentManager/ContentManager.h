@@ -53,6 +53,15 @@ public:
 	// asset, so this never changes the one the ContentManager holds.
 	bool writeAssetTo(RuntimeAsset& asset, const std::string& fullPath) const;
 
+	// A counter that moves whenever files may have appeared under the content
+	// root: every successful saveAsset, and every noteContentChanged() — the
+	// editor calls that after its content refresh (an import, a file copied in,
+	// a pull). For readers that remember a path as "not there" so they do not
+	// retry it every frame (RenderExtractor's section materials): when it
+	// moved, they forget and look once more. Never goes back, starts at 0.
+	uint64_t contentEpoch() const { return m_contentEpoch; }
+	void     noteContentChanged() { ++m_contentEpoch; }
+
 	// Fired after saveAsset() has written the file, with (relativePath, fullPath).
 	// A pure notification: ContentManager knows nothing about who listens or why.
 	// The editor uses it to publish authored-asset changes to a collaboration
@@ -680,6 +689,7 @@ private:
 	std::unordered_map<HE::UUID, HE::AssetType>                          m_assetTypeIndex;
 	std::unordered_map<std::string, HE::UUID>                            m_pathToUUID;
 	std::unordered_map<std::string, std::filesystem::file_time_type>     m_pathMtime;      // disk mtime at last load
+	uint64_t                                                             m_contentEpoch = 0; // see contentEpoch()
 	std::unordered_map<HE::UUID, int>                                    m_pinCounts;      // active AssetRef handles per asset
 
 	// Drop everything that belonged to the project we were pointing at, then

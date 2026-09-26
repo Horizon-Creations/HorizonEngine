@@ -142,6 +142,16 @@ bool draw(ContentManager* cm, Table& table, Session& session, const SlotWidget& 
 		const EditorWidgets::SlotAction act = slot(i, id, emptyText.c_str());
 		// Keyed by hand: the row's label is its number, which is data.
 		EditorWidgets::helpForKey("Mesh Viewer/Material Slots");
+		// A path nothing resolves has no id, and the asset field offers
+		// "(none)" and Clear only for an id — so the dangling reference could
+		// be overwritten but never emptied. Its own button, then.
+		bool clearDangling = false;
+		if (cm && id == HE::UUID{} && !sec.materialPath.empty())
+		{
+			ImGui::SameLine();
+			clearDangling = ImGui::SmallButton("Clear##missing");
+			EditorWidgets::helpForKey("Mesh Viewer/Material Slots");
+		}
 		ImGui::SameLine();
 		ImGui::TextDisabled("%u tris", sec.indexCount / 3);
 		ImGui::PopID();
@@ -153,6 +163,8 @@ bool draw(ContentManager* cm, Table& table, Session& session, const SlotWidget& 
 			if (setSlot(*cm, table, i, act == EditorWidgets::SlotAction::Cleared ? HE::UUID{} : id))
 				changed = true;
 		}
+		else if (clearDangling && setSlot(*cm, table, i, HE::UUID{}))
+			changed = true;
 	}
 
 	if (changed) session.push(table);

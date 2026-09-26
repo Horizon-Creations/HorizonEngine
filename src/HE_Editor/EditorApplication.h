@@ -1041,8 +1041,17 @@ private:
 	// before one is written, so the file on disk never lags the prefab it was
 	// placed from. Skipped in a collaboration session: the pass edits the
 	// world directly rather than through EditorCommands, and nothing it changed
-	// would reach the other participants.
-	void syncPrefabInstances(const char* when);
+	// would reach the other participants. True when the pass changed the world.
+	bool syncPrefabInstances(const char* when);
+	// The same pass when a prefab file changed on disk (git pull, source
+	// control sync, another program) and the hot-reload poll re-read it: the
+	// open scene follows at once instead of at the next open or save. Undoable,
+	// but only when something moved — the poll also re-reads a prefab this
+	// editor just pushed, and that pass changes nothing. During play the world
+	// is the running session's, so the pass waits for play to end
+	// (m_prefabReloadSyncPending, picked up by the next poll).
+	void syncPrefabInstancesAfterReload();
+	bool m_prefabReloadSyncPending = false;
 	// The other direction: what a human just changed on a placed prefab is
 	// marked as authored here (SceneSerializer::recordPrefabOverrides), or the
 	// save-time sync above would put the asset's value back over it. Runs once

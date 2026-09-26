@@ -3119,6 +3119,110 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
         }
     }
 
+    // ── Records of a nested placement ────────────────────────────────────────
+    // A placement of prefab I inside this asset brings I's records along, as
+    // they were when this asset was last pushed. The nested placement in the
+    // scene has a table of its own and is synced against I itself, so those
+    // frozen copies must not be written over what I says now — whichever sync
+    // ran last would win, and that is the order of a registry view. What IS
+    // this asset's is what its author changed on the nested placement: the
+    // override list of the nested block in this blob. So, per component of a
+    // nested record: applied whole when that list overrides it whole (or the
+    // nested sync never writes it — the nested root's transform), applied for
+    // the listed properties only, or left to the nested sync entirely. The
+    // list itself is handed to the scene's nested placement, whose own copy
+    // dates from when it was placed; without that, the nested sync would take
+    // a value this pass just applied straight back. A nested record whose
+    // placement is not in the scene any more (unlinked, relinked to another
+    // asset) has nobody else to sync it and is applied like any other.
+    struct NestedOwner
+    {
+        HE::UUID                recordKey;   // this asset's record carrying the block
+        PrefabInstanceComponent table;       // the block: asset, bindings, overrides
+    };
+    std::vector<NestedOwner> owners;
+    std::unordered_map<HE::UUID, std::vector<std::pair<size_t, HE::UUID>>> nestedOf;   // key → (owner, inner key)
+    for (const json* r : records)
+    {
+        const HE::UUID key = entityKeyOf(*r);
+        if (key == templateRoot) continue;   // the placement's own link, never a nested one
+        const json& comps = componentsOf(*r);
+        auto pc = comps.find("prefab");
+        if (pc == comps.end() || !pc->is_object()) continue;
+        NestedOwner owner;
+        owner.recordKey   = key;
+        owner.table.asset = jsonToUuid(pc->value("asset", json()));
+        if (auto it = pc->find("bindings"); it != pc->end() && it->is_array())
+            for (const json& b : *it)
+            {
+                if (!b.is_object()) continue;
+                const HE::UUID inner = jsonToUuid(b.value("template", json()));
+                const HE::UUID outer = jsonToUuid(b.value("entity",   json()));
+                if (inner == HE::UUID{} || outer == HE::UUID{}) continue;
+                owner.table.bindings.push_back({ inner, outer });
+                nestedOf[outer].push_back({ owners.size(), inner });
+            }
+        if (auto it = pc->find("overrides"); it != pc->end() && it->is_array())
+            for (const json& o : *it)
+            {
+                if (!o.is_object()) continue;
+                const HE::UUID    t    = jsonToUuid(o.value("entity", json()));
+                const std::string comp = o.value("component", std::string());
+                if (t == HE::UUID{} || comp.empty()) continue;
+                owner.table.setOverride(t, comp, o.value("property", std::string()));
+            }
+        owners.push_back(std::move(owner));
+    }
+    // The scene's placement for an owner, when it is still that placement. One
+    // this pass is creating is not: its table still names this asset's
+    // records (re-pointed at the end), and everything under it is made here.
+    auto liveOwner = [&](const NestedOwner& owner) -> Entity
+    {
+        if (created.count(owner.recordKey)) return entt::null;
+        const Entity live = counterpartOf(owner.recordKey);
+        if (live == entt::null || live == root) return entt::null;
+        const auto* pic = registry.try_get<PrefabInstanceComponent>(live);
+        if (!pic || (owner.table.asset != HE::UUID{} && pic->asset != owner.table.asset)) return entt::null;
+        return live;
+    };
+    for (const NestedOwner& owner : owners)
+    {
+        const Entity live = liveOwner(owner);
+        if (live == entt::null) continue;
+        auto& pic = registry.get<PrefabInstanceComponent>(live);
+        for (const auto& o : owner.table.overrides)
+            pic.setOverride(o.templateEntity, o.component, o.property);
+    }
+    // What this pass may write of component `k` on the bound entity `e`.
+    enum class NestedWrite { Full, Props, None };
+    auto nestedWrite = [&](const HE::UUID& key, Entity e, const std::string& k,
+                           std::vector<std::string>* props) -> NestedWrite
+    {
+        auto it = nestedOf.find(key);
+        if (it == nestedOf.end()) return NestedWrite::Full;
+        const HE::UUID eId = entityUuid(registry, e);
+        bool anyLive = false;
+        for (const auto& [idx, inner] : it->second)
+        {
+            const NestedOwner& owner = owners[idx];
+            const Entity live = liveOwner(owner);
+            if (live == entt::null) continue;
+            const bool isNestedRoot = (live == e);
+            if (!isNestedRoot && registry.get<PrefabInstanceComponent>(live).instanceOf(inner) != eId) continue;
+            anyLive = true;
+            if (k != kNameKey && !isPropagatedKey(k, isNestedRoot)) return NestedWrite::Full;
+            for (const auto& o : owner.table.overrides)
+            {
+                if (o.templateEntity != inner || o.component != k) continue;
+                if (o.property.empty()) return NestedWrite::Full;
+                if (props && std::find(props->begin(), props->end(), o.property) == props->end())
+                    props->push_back(o.property);
+            }
+        }
+        if (!anyLive) return NestedWrite::Full;
+        return (props && !props->empty()) ? NestedWrite::Props : NestedWrite::None;
+    };
+
     for (const json* r : records)
     {
         const HE::UUID key    = entityKeyOf(*r);
@@ -3139,6 +3243,30 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
         }
         else
         {
+            // New in this asset, but a record of a nested placement: that
+            // placement's own sync may have made it already (its asset gained
+            // it first), or its table says it was deleted there. Either way it
+            // is not made a second time — bound to what is there, or to
+            // nothing.
+            bool nestedHasIt = false;
+            if (auto nit = nestedOf.find(key); nit != nestedOf.end())
+                for (const auto& [idx, inner] : nit->second)
+                {
+                    const Entity live = liveOwner(owners[idx]);
+                    if (live == entt::null) continue;
+                    const auto& nb = registry.get<PrefabInstanceComponent>(live).bindings;
+                    auto bit = std::find_if(nb.begin(), nb.end(),
+                        [&](const PrefabInstanceComponent::Binding& b) { return b.templateEntity == inner; });
+                    if (bit == nb.end()) continue;
+                    nestedHasIt = true;
+                    e = world.findByEntityId(bit->instanceEntity);
+                    work.bindings.push_back({ key, e != entt::null ? bit->instanceEntity : HE::UUID{} });
+                    break;
+                }
+            if (nestedHasIt && e == entt::null) continue;
+        }
+        if (!hasBinding && e == entt::null)
+        {
             // New in the asset. Placed under the counterpart of its parent
             // record; when that one was deleted here (or never bound), the
             // child of a thing that is not there is not there either.
@@ -3155,6 +3283,16 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
             ++rep.entitiesCreated;
             structureChanged = true;
             fresh = true;
+            // A nested placement's record made here is that placement's too,
+            // or its own sync would make it again.
+            if (auto nit = nestedOf.find(key); nit != nestedOf.end())
+                for (const auto& [idx, inner] : nit->second)
+                {
+                    const Entity live = liveOwner(owners[idx]);
+                    if (live == entt::null) continue;
+                    registry.get<PrefabInstanceComponent>(live).bindings.push_back(
+                        { inner, entityUuid(registry, e) });
+                }
 
             // A record that is itself a placement becomes a nested instance
             // here, with its bindings pointed at the entities of THIS pass
@@ -3164,8 +3302,17 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
                 applyComponents(registry, e, json{ { "prefab", *pc } });
         }
 
-        // The display name, unless authored here.
-        if (!work.hasOverride(key, kNameKey))
+        // An entity this pass just made has nothing the nested sync wrote yet,
+        // so it gets this asset's copy whole — the nested sync follows up.
+        auto writeOf = [&](const std::string& k, std::vector<std::string>* props)
+        {
+            return fresh ? NestedWrite::Full : nestedWrite(key, e, k, props);
+        };
+
+        // The display name, unless authored here (or the nested asset's).
+        if (work.hasOverride(key, kNameKey))
+            ++rep.overridesKept;
+        else if (writeOf(kNameKey, nullptr) != NestedWrite::None)
         {
             const std::string want = r->value("name", "Entity");
             auto* n = registry.try_get<NameComponent>(e);
@@ -3176,8 +3323,6 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
                 ++rep.componentsApplied;
             }
         }
-        else
-            ++rep.overridesKept;
 
         // Components: the template's block, with every property the override
         // list names taken from the instance instead — then applied only when
@@ -3190,7 +3335,23 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
             if (!isPropagatedKey(k, isRoot)) continue;
             if (work.hasOverride(key, k)) { ++rep.overridesKept; continue; }
 
+            std::vector<std::string> nestedProps;
+            const NestedWrite mode = writeOf(k, &nestedProps);
+            if (mode == NestedWrite::None) continue;
             json merged = block;
+            if (mode == NestedWrite::Props)
+            {
+                // Only what this asset's author changed on the nested
+                // placement; the rest of the block is the nested asset's.
+                auto cur = iComps.find(k);
+                if (cur == iComps.end()) continue;
+                merged = *cur;
+                for (const std::string& p : nestedProps)
+                {
+                    if (block.contains(p)) merged[p] = block[p];
+                    else                   merged.erase(p);
+                }
+            }
             for (const auto& o : work.overrides)
             {
                 if (o.templateEntity != key || o.component != k || o.property.empty()) continue;
@@ -3222,6 +3383,9 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
             (void)block;
             if (!isPropagatedKey(k, isRoot) || tComps.contains(k)) continue;
             if (anyOverrideOn(work, key, k)) { ++rep.overridesKept; continue; }
+            // A component a nested record lacks here is the nested asset's to
+            // keep or drop, unless this asset's author dropped it on purpose.
+            if (writeOf(k, nullptr) != NestedWrite::Full) continue;
             if (removeComponentForKey(registry, e, k))
             {
                 HE_LOG_INFO(Serialize, "Prefab sync: '%s' ← %s: removed %s", rootName.c_str(),
@@ -3659,5 +3823,41 @@ bool SceneSerializer::pushPrefabInstance(HorizonWorld& world, Entity root,
     HE_LOG_INFO(Serialize, "Prefab push: '%s' → asset, %zu record(s), %zu byte(s)",
                 n ? n->name.c_str() : "Entity", scene["entities"].size(), outBlob.size());
     registry.get<PrefabInstanceComponent>(root) = std::move(work);
+    return true;
+}
+
+bool SceneSerializer::linkPrefabSource(HorizonWorld& world, Entity root, const HE::UUID& asset,
+                                       const std::vector<uint8_t>& blob)
+{
+    auto& registry = world.registry();
+    if (!registry.valid(root) || asset == HE::UUID{}) return false;
+    const json scene = json::from_cbor(blob, /*strict=*/true, /*allow_exceptions=*/false);
+    auto entities = scene.is_object() ? scene.find("entities") : scene.end();
+    if (scene.is_discarded() || entities == scene.end() || !entities->is_array()) return false;
+
+    const HE::UUID rootId = entityUuid(registry, root);
+    PrefabInstanceComponent inst;
+    inst.asset = asset;
+    bool rootSeen = false;
+    for (const auto& r : *entities)
+    {
+        if (!r.is_object() || !r.contains("uuid")) continue;
+        const HE::UUID key = entityKeyOf(r);
+        HE::UUID parentKey;
+        auto pit = r.find("parent");
+        const bool hasParent = (pit != r.end()) && entityRefOf(*pit, parentKey);
+        if (!hasParent)
+        {
+            if (key != rootId) return false;   // captured from something else
+            rootSeen = true;
+        }
+        // A record whose entity is not here names nothing to bind; the sync
+        // would read the gap as a child deleted here and never bring it back,
+        // so it is left unbound (new in the asset) instead.
+        if (world.findByEntityId(key) == entt::null) continue;
+        inst.bindings.push_back({ key, key });
+    }
+    if (!rootSeen) return false;
+    registry.emplace_or_replace<PrefabInstanceComponent>(root, std::move(inst));
     return true;
 }
