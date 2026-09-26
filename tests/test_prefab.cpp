@@ -1217,6 +1217,197 @@ TEST_CASE("PrefabSync: a lost record whose entity was changed here stays, as a c
     }
 }
 
+// ─── Nested placements: who owns a nested record ─────────────────────────────
+// O = Post → (nested placement of I) Lamp → Bulb. The records of the nested
+// Lamp/Bulb live in BOTH blobs: in I's (current) and in O's (as frozen when O
+// was last pushed). Values of I that O never changed are I's to propagate;
+// what O's author changed on the nested placement (an override in the nested
+// block of O's blob) is O's. Each case runs both sync orders, because the two
+// placements are separate roots and the whole-world pass visits them in view
+// order.
+
+namespace
+{
+    struct Outer
+    {
+        HorizonWorld world;
+        Entity       post   = entt::null;
+        Entity       nested = entt::null;   // the nested Lamp (its root)
+        Entity       bulb   = entt::null;   // the nested Bulb
+        HE::UUID     assetI;
+
+        explicit Outer(Template& t)
+        {
+            SceneSerializer ser;
+            assetI = HE::UUID::generate();
+            post   = world.createEntity("Post");
+            world.addComponent(post, TransformComponent{});
+            std::vector<PrefabInstanceComponent::Binding> nb;
+            nested = ser.instantiatePrefab(world, t.capture(), post, false, &nb);
+            REQUIRE((nested != entt::null));
+            PrefabInstanceComponent inst;
+            inst.asset    = assetI;
+            inst.bindings = nb;
+            world.registry().emplace_or_replace<PrefabInstanceComponent>(nested, inst);
+            bulb = childNamed(world, nested, "Bulb");
+            REQUIRE((bulb != entt::null));
+        }
+        std::vector<uint8_t> capture()
+        {
+            SceneSerializer ser;
+            return ser.serializeSubtree(world, post);
+        }
+    };
+
+    struct PlacedOuter
+    {
+        Entity root   = entt::null;
+        Entity nested = entt::null;
+        Entity bulb   = entt::null;
+    };
+    PlacedOuter placeOuter(HorizonWorld& scene, const std::vector<uint8_t>& blob)
+    {
+        SceneSerializer ser;
+        std::vector<PrefabInstanceComponent::Binding> bindings;
+        PlacedOuter p;
+        p.root = ser.instantiatePrefab(scene, blob, entt::null, false, &bindings);
+        REQUIRE((p.root != entt::null));
+        PrefabInstanceComponent inst;
+        inst.asset    = HE::UUID::generate();
+        inst.bindings = bindings;
+        scene.registry().emplace_or_replace<PrefabInstanceComponent>(p.root, inst);
+        p.nested = childNamed(scene, p.root, "Lamp");
+        REQUIRE((p.nested != entt::null));
+        REQUIRE(scene.registry().all_of<PrefabInstanceComponent>(p.nested));
+        p.bulb = childNamed(scene, p.nested, "Bulb");
+        REQUIRE((p.bulb != entt::null));
+        return p;
+    }
+
+    // Both roots, in the order asked for.
+    void syncBoth(HorizonWorld& scene, const PlacedOuter& p, const std::vector<uint8_t>& blobO,
+                  const std::vector<uint8_t>& blobI, bool outerFirst)
+    {
+        SceneSerializer ser;
+        if (outerFirst)
+        {
+            REQUIRE(ser.syncPrefabInstance(scene, p.root, blobO));
+            REQUIRE(ser.syncPrefabInstance(scene, p.nested, blobI));
+        }
+        else
+        {
+            REQUIRE(ser.syncPrefabInstance(scene, p.nested, blobI));
+            REQUIRE(ser.syncPrefabInstance(scene, p.root, blobO));
+        }
+    }
+}
+
+TEST_CASE("PrefabNested: a value the inner asset changed reaches the nested placement in either sync order")
+{
+    for (const bool outerFirst : { true, false })
+    {
+        CAPTURE(outerFirst);
+        Template t;
+        Outer o(t);
+        const auto blobO = o.capture();          // O frozen with intensity 1
+        HorizonWorld scene;
+        const PlacedOuter p = placeOuter(scene, blobO);
+        auto& reg = scene.registry();
+
+        t.world.registry().get<LightComponent>(t.bulb).intensity = 5.0f;   // I changes
+        t.world.registry().get<NameComponent>(t.bulb).name       = "Bulb2";
+        syncBoth(scene, p, blobO, t.capture(), outerFirst);
+        CHECK(reg.get<LightComponent>(p.bulb).intensity == doctest::Approx(5.0f));
+        CHECK(reg.get<NameComponent>(p.bulb).name == "Bulb2");
+
+        // A second round in the other order changes nothing any more.
+        SceneSerializer ser;
+        SceneSerializer::PrefabSyncReport repO, repI;
+        REQUIRE(ser.syncPrefabInstance(scene, p.root, blobO, &repO));
+        REQUIRE(ser.syncPrefabInstance(scene, p.nested, t.capture(), &repI));
+        CHECK(repO.componentsApplied == 0);
+        CHECK(repI.componentsApplied == 0);
+        CHECK(reg.get<LightComponent>(p.bulb).intensity == doctest::Approx(5.0f));
+    }
+}
+
+TEST_CASE("PrefabNested: what the outer asset changed on its nested placement is the outer's, the rest stays the inner's")
+{
+    for (const bool placedBefore : { false, true })
+        for (const bool outerFirst : { true, false })
+        {
+            CAPTURE(placedBefore);
+            CAPTURE(outerFirst);
+            Template t;
+            Outer o(t);
+            HorizonWorld scene;
+            PlacedOuter p;
+            // placedBefore: the scene placed O before O's author changed the
+            // nested bulb, so the scene's nested table does not carry the
+            // marker yet — the sync of O must hand it over, or the sync of I
+            // would take the value straight back.
+            if (placedBefore) p = placeOuter(scene, o.capture());
+
+            o.world.registry().get<LightComponent>(o.bulb).intensity = 4.0f;
+            o.world.registry().get<PrefabInstanceComponent>(o.nested).setOverride(t.tBulb, "light", "intensity");
+            const auto blobO = o.capture();
+            if (!placedBefore) p = placeOuter(scene, blobO);
+            auto& reg = scene.registry();
+
+            // I changes both properties; only the one O did not touch follows.
+            t.world.registry().get<LightComponent>(t.bulb).intensity = 5.0f;
+            t.world.registry().get<LightComponent>(t.bulb).range     = 20.0f;
+            syncBoth(scene, p, blobO, t.capture(), outerFirst);
+            CHECK(reg.get<LightComponent>(p.bulb).intensity == doctest::Approx(4.0f));
+            CHECK(reg.get<LightComponent>(p.bulb).range     == doctest::Approx(20.0f));
+            CHECK(reg.get<PrefabInstanceComponent>(p.nested).hasOverride(t.tBulb, "light", "intensity"));
+            CHECK_FALSE(reg.get<PrefabInstanceComponent>(p.nested).hasOverride(t.tBulb, "light", "range"));
+        }
+}
+
+TEST_CASE("PrefabNested: an edit made here on the nested placement survives both syncs in either order")
+{
+    for (const bool outerFirst : { true, false })
+    {
+        CAPTURE(outerFirst);
+        Template t;
+        Outer o(t);
+        const auto blobO = o.capture();
+        HorizonWorld scene;
+        const PlacedOuter p = placeOuter(scene, blobO);
+        auto& reg = scene.registry();
+
+        // The editor records into every placement that binds the entity.
+        SceneSerializer ser;
+        reg.get<LightComponent>(p.bulb).intensity = 9.0f;
+        CHECK(ser.recordPrefabOverrides(scene, p.root, p.bulb, blobO) == 1);
+        CHECK(ser.recordPrefabOverrides(scene, p.nested, p.bulb, t.capture()) == 1);
+
+        t.world.registry().get<LightComponent>(t.bulb).intensity = 5.0f;
+        syncBoth(scene, p, blobO, t.capture(), outerFirst);
+        CHECK(reg.get<LightComponent>(p.bulb).intensity == doctest::Approx(9.0f));
+    }
+}
+
+TEST_CASE("PrefabNested: the outer placement still moves its nested root where the outer asset put it")
+{
+    for (const bool outerFirst : { true, false })
+    {
+        CAPTURE(outerFirst);
+        Template t;
+        Outer o(t);
+        HorizonWorld scene;
+        const PlacedOuter p = placeOuter(scene, o.capture());
+        auto& reg = scene.registry();
+
+        // O moves its nested Lamp; I moves its own root (which no placement follows).
+        o.world.registry().get<TransformComponent>(o.nested).position = { 0.0f, 3.0f, 0.0f };
+        t.world.registry().get<TransformComponent>(t.lamp).position   = { 0.0f, 99.0f, 0.0f };
+        syncBoth(scene, p, o.capture(), t.capture(), outerFirst);
+        CHECK(reg.get<TransformComponent>(p.nested).position.y == doctest::Approx(3.0f));
+    }
+}
+
 TEST_CASE("PrefabSync: an asset rebuilt under a new root id keeps the placement's root")
 {
     Template t;
