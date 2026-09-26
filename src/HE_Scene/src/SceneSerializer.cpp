@@ -3749,3 +3749,39 @@ bool SceneSerializer::pushPrefabInstance(HorizonWorld& world, Entity root,
     registry.get<PrefabInstanceComponent>(root) = std::move(work);
     return true;
 }
+
+bool SceneSerializer::linkPrefabSource(HorizonWorld& world, Entity root, const HE::UUID& asset,
+                                       const std::vector<uint8_t>& blob)
+{
+    auto& registry = world.registry();
+    if (!registry.valid(root) || asset == HE::UUID{}) return false;
+    const json scene = json::from_cbor(blob, /*strict=*/true, /*allow_exceptions=*/false);
+    auto entities = scene.is_object() ? scene.find("entities") : scene.end();
+    if (scene.is_discarded() || entities == scene.end() || !entities->is_array()) return false;
+
+    const HE::UUID rootId = entityUuid(registry, root);
+    PrefabInstanceComponent inst;
+    inst.asset = asset;
+    bool rootSeen = false;
+    for (const auto& r : *entities)
+    {
+        if (!r.is_object() || !r.contains("uuid")) continue;
+        const HE::UUID key = entityKeyOf(r);
+        HE::UUID parentKey;
+        auto pit = r.find("parent");
+        const bool hasParent = (pit != r.end()) && entityRefOf(*pit, parentKey);
+        if (!hasParent)
+        {
+            if (key != rootId) return false;   // captured from something else
+            rootSeen = true;
+        }
+        // A record whose entity is not here names nothing to bind; the sync
+        // would read the gap as a child deleted here and never bring it back,
+        // so it is left unbound (new in the asset) instead.
+        if (world.findByEntityId(key) == entt::null) continue;
+        inst.bindings.push_back({ key, key });
+    }
+    if (!rootSeen) return false;
+    registry.emplace_or_replace<PrefabInstanceComponent>(root, std::move(inst));
+    return true;
+}

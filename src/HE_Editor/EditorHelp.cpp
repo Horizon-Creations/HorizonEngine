@@ -2726,7 +2726,8 @@ namespace
 	  "Ctrl+Click, Shift+Click", "editor#outliner" },
 	{ "outliner.prefab", "Save as Prefab",
 	  "Saves this entity and its children as a reusable asset, so the same thing "
-	  "can be dropped into any scene.",
+	  "can be dropped into any scene. The entity itself becomes a placement of the "
+	  "new prefab and follows it from then on, like any dropped copy.",
 	  "", "scenes#prefabs" },
 	{ "outliner.create", "New entity",
 	  "Opens the Create menu — Empty, Cube, a Camera, a Light, a Rope, a Trail "

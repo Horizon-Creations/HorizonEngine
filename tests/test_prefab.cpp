@@ -1408,6 +1408,84 @@ TEST_CASE("PrefabNested: the outer placement still moves its nested root where t
     }
 }
 
+// ─── Save as Prefab links the source ─────────────────────────────────────────
+
+TEST_CASE("PrefabSaveAs: the source becomes a placement of what it was saved as, and follows it")
+{
+    SceneSerializer ser;
+    HorizonWorld scene;
+    auto& reg = scene.registry();
+    const Entity lamp = scene.createEntity("Lamp");
+    const Entity bulb = scene.createEntity("Bulb");
+    scene.reparentEntity(bulb, lamp);
+    scene.addComponent(lamp, TransformComponent{});
+    LightComponent l;
+    l.intensity = 1.0f;
+    scene.addComponent(bulb, l);
+
+    const HE::UUID asset = HE::UUID::generate();
+    const auto blob = ser.serializeSubtree(scene, lamp);
+    REQUIRE(SceneSerializer::linkPrefabSource(scene, lamp, asset, blob));
+    const auto& inst = reg.get<PrefabInstanceComponent>(lamp);
+    CHECK(inst.asset == asset);
+    CHECK(inst.bindings.size() == 2);
+    CHECK(inst.instanceOf(idOf(reg, bulb)) == idOf(reg, bulb));   // identity
+    CHECK(inst.overrides.empty());
+
+    // Nothing to do against the blob it was just saved as, and nothing counts
+    // as changed or added here.
+    SceneSerializer::PrefabSyncReport rep;
+    REQUIRE(ser.syncPrefabInstance(scene, lamp, blob, &rep));
+    CHECK(rep.componentsApplied == 0);
+    CHECK(rep.entitiesCreated == 0);
+    CHECK(rep.entitiesRemoved == 0);
+    CHECK(ser.recordPrefabOverrides(scene, lamp, bulb, blob) == 0);
+    CHECK(SceneSerializer::prefabAddedHereCount(scene, lamp) == 0);
+
+    // A second placement, then a push from the source: the other one follows,
+    // which an unlinked source could never have offered.
+    const Placed other = place(scene, blob, asset);
+    reg.get<LightComponent>(bulb).intensity = 5.0f;
+    std::vector<uint8_t> pushed;
+    REQUIRE(ser.pushPrefabInstance(scene, lamp, blob, pushed));
+    REQUIRE(ser.syncPrefabInstance(scene, other.root, pushed));
+    CHECK(reg.get<LightComponent>(other.bulb).intensity == doctest::Approx(5.0f));
+
+    // And the other way round: the asset changes, the source follows.
+    reg.get<LightComponent>(other.bulb).intensity = 8.0f;
+    std::vector<uint8_t> pushed2;
+    REQUIRE(ser.pushPrefabInstance(scene, other.root, pushed, pushed2));
+    REQUIRE(ser.syncPrefabInstance(scene, lamp, pushed2));
+    CHECK(reg.get<LightComponent>(bulb).intensity == doctest::Approx(8.0f));
+}
+
+TEST_CASE("PrefabSaveAs: a placement saved as a new prefab is relinked, a nested one under it keeps its own")
+{
+    SceneSerializer ser;
+    Template t;
+    HorizonWorld scene;
+    auto& reg = scene.registry();
+    const HE::UUID oldAsset = HE::UUID::generate();
+    const Placed p = place(scene, t.capture(), oldAsset);
+    // A second placement nested under the first one's bulb.
+    const Placed nested = place(scene, t.capture(), HE::UUID::generate());
+    scene.reparentEntity(nested.root, p.bulb);
+    const HE::UUID nestedAsset = reg.get<PrefabInstanceComponent>(nested.root).asset;
+
+    const HE::UUID newAsset = HE::UUID::generate();
+    const auto blob = ser.serializeSubtree(scene, p.root);
+    REQUIRE(SceneSerializer::linkPrefabSource(scene, p.root, newAsset, blob));
+    CHECK(reg.get<PrefabInstanceComponent>(p.root).asset == newAsset);
+    CHECK(reg.get<PrefabInstanceComponent>(p.root).bindings.size() == 4);
+    CHECK(reg.get<PrefabInstanceComponent>(nested.root).asset == nestedAsset);
+
+    // Refused: a blob captured from something else, a null asset, garbage.
+    CHECK_FALSE(SceneSerializer::linkPrefabSource(scene, p.bulb, newAsset, blob));
+    CHECK_FALSE(SceneSerializer::linkPrefabSource(scene, p.root, HE::UUID{}, blob));
+    CHECK_FALSE(SceneSerializer::linkPrefabSource(scene, p.root, newAsset, std::vector<uint8_t>{ 1, 2, 3 }));
+    CHECK_FALSE(reg.all_of<PrefabInstanceComponent>(p.bulb));
+}
+
 TEST_CASE("PrefabSync: an asset rebuilt under a new root id keeps the placement's root")
 {
     Template t;
