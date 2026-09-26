@@ -3134,9 +3134,12 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
             }
         owners.push_back(std::move(owner));
     }
-    // The scene's placement for an owner, when it is still that placement.
+    // The scene's placement for an owner, when it is still that placement. One
+    // this pass is creating is not: its table still names this asset's
+    // records (re-pointed at the end), and everything under it is made here.
     auto liveOwner = [&](const NestedOwner& owner) -> Entity
     {
+        if (created.count(owner.recordKey)) return entt::null;
         const Entity live = counterpartOf(owner.recordKey);
         if (live == entt::null || live == root) return entt::null;
         const auto* pic = registry.try_get<PrefabInstanceComponent>(live);
@@ -3201,6 +3204,30 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
         }
         else
         {
+            // New in this asset, but a record of a nested placement: that
+            // placement's own sync may have made it already (its asset gained
+            // it first), or its table says it was deleted there. Either way it
+            // is not made a second time — bound to what is there, or to
+            // nothing.
+            bool nestedHasIt = false;
+            if (auto nit = nestedOf.find(key); nit != nestedOf.end())
+                for (const auto& [idx, inner] : nit->second)
+                {
+                    const Entity live = liveOwner(owners[idx]);
+                    if (live == entt::null) continue;
+                    const auto& nb = registry.get<PrefabInstanceComponent>(live).bindings;
+                    auto bit = std::find_if(nb.begin(), nb.end(),
+                        [&](const PrefabInstanceComponent::Binding& b) { return b.templateEntity == inner; });
+                    if (bit == nb.end()) continue;
+                    nestedHasIt = true;
+                    e = world.findByEntityId(bit->instanceEntity);
+                    work.bindings.push_back({ key, e != entt::null ? bit->instanceEntity : HE::UUID{} });
+                    break;
+                }
+            if (nestedHasIt && e == entt::null) continue;
+        }
+        if (!hasBinding && e == entt::null)
+        {
             // New in the asset. Placed under the counterpart of its parent
             // record; when that one was deleted here (or never bound), the
             // child of a thing that is not there is not there either.
@@ -3217,6 +3244,16 @@ bool SceneSerializer::syncPrefabInstance(HorizonWorld& world, Entity root,
             ++rep.entitiesCreated;
             structureChanged = true;
             fresh = true;
+            // A nested placement's record made here is that placement's too,
+            // or its own sync would make it again.
+            if (auto nit = nestedOf.find(key); nit != nestedOf.end())
+                for (const auto& [idx, inner] : nit->second)
+                {
+                    const Entity live = liveOwner(owners[idx]);
+                    if (live == entt::null) continue;
+                    registry.get<PrefabInstanceComponent>(live).bindings.push_back(
+                        { inner, entityUuid(registry, e) });
+                }
 
             // A record that is itself a placement becomes a nested instance
             // here, with its bindings pointed at the entities of THIS pass

@@ -1408,6 +1408,91 @@ TEST_CASE("PrefabNested: the outer placement still moves its nested root where t
     }
 }
 
+TEST_CASE("PrefabNested: a record the inner asset gained, also pushed into the outer one, is created once")
+{
+    for (const bool outerFirst : { true, false })
+    {
+        CAPTURE(outerFirst);
+        Template t;
+        Outer o(t);
+        HorizonWorld scene;
+        const PlacedOuter p = placeOuter(scene, o.capture());   // before either change
+        auto& reg = scene.registry();
+
+        // I gains a Shade under its Bulb; O's author syncs O's own nested
+        // placement to it and pushes, so O's blob carries the Shade too.
+        const Entity shade = t.world.createEntity("Shade");
+        t.world.reparentEntity(shade, t.bulb);
+        const auto blobI = t.capture();
+        SceneSerializer ser;
+        REQUIRE(ser.syncPrefabInstance(o.world, o.nested, blobI));
+        REQUIRE((childNamed(o.world, o.bulb, "Shade") != entt::null));
+        const auto blobO = o.capture();
+
+        syncBoth(scene, p, blobO, blobI, outerFirst);
+        size_t shades = 0;
+        Entity found  = entt::null;
+        for (Entity c : reg.get<HierarchyComponent>(p.bulb).children)
+            if (auto* n = reg.try_get<NameComponent>(c); n && n->name == "Shade") { ++shades; found = c; }
+        CHECK(shades == 1);
+        REQUIRE((found != entt::null));
+        // Bound by both placements, so neither counts it as added here.
+        const HE::UUID fid = idOf(reg, found);
+        CHECK(reg.get<PrefabInstanceComponent>(p.nested).templateOf(fid) != HE::UUID{});
+        CHECK(reg.get<PrefabInstanceComponent>(p.root).templateOf(fid) != HE::UUID{});
+
+        // And nothing more on the next round, in the other order.
+        SceneSerializer::PrefabSyncReport repO, repI;
+        REQUIRE(ser.syncPrefabInstance(scene, p.nested, blobI, &repI));
+        REQUIRE(ser.syncPrefabInstance(scene, p.root, blobO, &repO));
+        CHECK(repI.entitiesCreated == 0);
+        CHECK(repO.entitiesCreated == 0);
+    }
+}
+
+TEST_CASE("PrefabNested: a nested placement the outer asset gained arrives whole, bound, and then follows its own asset")
+{
+    Template t;
+    Outer o(t);
+    // The outer asset as it was before the nested placement: Post alone,
+    // under the same record id.
+    HorizonWorld bare;
+    const Entity bPost = bare.createEntity("Post");
+    bare.addComponent(bPost, TransformComponent{});
+    bare.registry().get<EntityIdComponent>(bPost).id = idOf(o.world.registry(), o.post);
+    SceneSerializer ser;
+    HorizonWorld scene;
+    std::vector<PrefabInstanceComponent::Binding> bindings;
+    const Entity root = ser.instantiatePrefab(scene, ser.serializeSubtree(bare, bPost), entt::null, false, &bindings);
+    REQUIRE((root != entt::null));
+    PrefabInstanceComponent inst;
+    inst.asset    = HE::UUID::generate();
+    inst.bindings = bindings;
+    scene.registry().emplace_or_replace<PrefabInstanceComponent>(root, inst);
+    auto& reg = scene.registry();
+
+    SceneSerializer::PrefabSyncReport rep;
+    REQUIRE(ser.syncPrefabInstance(scene, root, o.capture(), &rep));
+    CHECK(rep.entitiesCreated == 2);
+    const Entity nested = childNamed(scene, root, "Lamp");
+    REQUIRE((nested != entt::null));
+    REQUIRE(reg.all_of<PrefabInstanceComponent>(nested));
+    const Entity bulb = childNamed(scene, nested, "Bulb");
+    REQUIRE((bulb != entt::null));
+    CHECK(reg.get<PrefabInstanceComponent>(nested).instanceOf(t.tBulb) == idOf(reg, bulb));
+
+    // Its own sync creates nothing more, and it follows its asset.
+    t.world.registry().get<LightComponent>(t.bulb).intensity = 6.0f;
+    SceneSerializer::PrefabSyncReport repI;
+    REQUIRE(ser.syncPrefabInstance(scene, nested, t.capture(), &repI));
+    CHECK(repI.entitiesCreated == 0);
+    CHECK(reg.get<LightComponent>(bulb).intensity == doctest::Approx(6.0f));
+    SceneSerializer::PrefabSyncReport repO;
+    REQUIRE(ser.syncPrefabInstance(scene, root, o.capture(), &repO));
+    CHECK(repO.entitiesCreated == 0);
+    CHECK(reg.get<LightComponent>(bulb).intensity == doctest::Approx(6.0f));
+}
+
 // ─── Save as Prefab links the source ─────────────────────────────────────────
 
 TEST_CASE("PrefabSaveAs: the source becomes a placement of what it was saved as, and follows it")
