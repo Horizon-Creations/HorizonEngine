@@ -2564,6 +2564,11 @@ namespace player {
     uint32_t controllerOf(uint32_t character);   // who drives this character
     uint32_t controller();                       // the (first) player controller
     uint32_t character();                        // what it possesses (0 = none)
+    // Local players (couch co-op): the session's controllers are the local
+    // players, sorted by asset path — index 0 is controller(). With two or
+    // more, controller i reads pad slot i (PlayerHost). 0 = no such player.
+    uint32_t controllerAt(int index);
+    int      localPlayerCount();
     // App hooks: PlayerHost registers the session's controllers so controller()
     // has something to answer, and clears the table when the session ends.
     void     setControllers(const std::vector<uint32_t>& controllers);

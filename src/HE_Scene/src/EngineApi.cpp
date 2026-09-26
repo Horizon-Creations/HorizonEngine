@@ -5331,6 +5331,12 @@ uint32_t controllerOf(uint32_t character)
 }
 uint32_t controller() { return tbl().controllers.empty() ? 0u : tbl().controllers.front(); }
 uint32_t character()  { return possessed(controller()); }
+uint32_t controllerAt(int index)
+{
+    const auto& c = tbl().controllers;
+    return index >= 0 && static_cast<size_t>(index) < c.size() ? c[static_cast<size_t>(index)] : 0u;
+}
+int localPlayerCount() { return static_cast<int>(tbl().controllers.size()); }
 
 void setControllers(const std::vector<uint32_t>& controllers)
 { tbl().controllers = controllers; }
@@ -6649,6 +6655,10 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofRef(player::controller()) }; } });
         t.push_back({ "player.character", "Player", false, {}, {{"character", P::Ref}}, "HE::api::player::character",
             [](Ctx&, const VV&){ return VV{ Value::ofRef(player::character()) }; } });
+        t.push_back({ "player.controllerAt", "Player", false, {{"index", P::Int}}, {{"controller", P::Ref}}, "HE::api::player::controllerAt",
+            [](Ctx&, const VV& a){ return VV{ Value::ofRef(player::controllerAt((int)aI(a, 0))) }; } });
+        t.push_back({ "player.localPlayerCount", "Player", false, {}, {{"count", P::Int}}, "HE::api::player::localPlayerCount",
+            [](Ctx&, const VV&){ return VV{ Value::ofInt(player::localPlayerCount()) }; } });
 
         // Input (pure getters; the app pushes the snapshot each frame)
         t.push_back({ "input.keyDown", "Input", false, {{"key", P::String}}, {{"down", P::Bool}}, "HE::api::input::keyDown",
@@ -7692,6 +7702,8 @@ const std::vector<ApiFn>& registry()
             { "player.controllerOf", "Get Controller" },
             { "player.controller", "Get Player Controller" },
             { "player.character", "Get Player Character" },
+            { "player.controllerAt", "Get Player Controller At" },
+            { "player.localPlayerCount", "Local Player Count" },
             { "input.keyDown", "Key Down" },          { "input.mouseButton", "Mouse Button" },
             { "input.mousePosition", "Mouse Position" }, { "input.mouseDelta", "Mouse Delta" },
             { "input.scrollDelta", "Scroll Delta" },

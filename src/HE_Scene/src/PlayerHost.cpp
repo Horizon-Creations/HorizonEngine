@@ -62,47 +62,29 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm,
 	size_t bound = 0;
 	for (auto& [path, json] : contexts)
 	{
-		bound += HE::applyInputMappingContext(m_mapping, json);
+		bound += HE::applyInputMappingContext(m_baseMapping, json);
 		m_contextPaths.push_back(std::move(path));
 	}
 
-	// The player's own bindings, over the contexts (see "Rebinding" in the
-	// header). The base is kept apart so a rebind or a reset can rebuild from
-	// it without going back to the content manager.
-	m_baseMapping = m_mapping;
-	{
-		HE::api::Ctx ctx;
-		const std::string saved = HE::api::prefs::getString(ctx, kBindingsPrefsKey, "");
-		if (!saved.empty() && m_overrides.fromJson(saved) && !m_overrides.empty())
-		{
-			m_overrides.applyTo(m_mapping);
-			HE_LOG_INFO(Input, "%s", ("PlayerHost: " + std::to_string(m_overrides.size()) +
-			                          " action(s) with the player's own bindings").c_str());
-		}
-	}
-	HE::api::input::setBindingService({
-		[this](const std::string& a, const std::string& d) { return rebindBegin(a, d); },
-		[this]()                                            { rebindCancel(); },
-		[this]()                                            { return isRebinding(); },
-		[this]()                                            { return rebindConflict(); },
-		[this](const std::string& a, const std::string& d) { return bindingName(a, d); },
-		[this]()                                            { resetBindings(); },
-		[this]()                                            { return saveBindings(); } });
-	m_bindingServiceInstalled = true;
-
 	// Player classes: one instance per PlayerController asset. Characters are
 	// only COUNTED — see the "What is NOT spawned here" note in the header.
-	size_t characterClasses = 0;
+	//
+	// Sorted by path for the same reason as the contexts: the spawn order is
+	// the local player order (controller i reads pad slot i), and discovery
+	// order is an unordered_map followed by a directory walk. The paths are
+	// copied out first, because the resolve below LOADS: every ancestor of a
+	// class goes through the content manager, and its asset pool is a dense
+	// vector that moves everything in it when it grows — a pointer taken
+	// before the resolve, and the string it owns, is dead after it.
+	std::vector<std::string> classPaths;
 	for (const HE::UUID id : discoverAssets(cm, HE::AssetType::HorizonCodeClass))
+		if (const HorizonCodeClassAsset* a = cm.getHorizonCodeClass(id))
+			classPaths.push_back(a->path);
+	std::sort(classPaths.begin(), classPaths.end());
+
+	size_t characterClasses = 0;
+	for (const std::string& assetPath : classPaths)
 	{
-		const HorizonCodeClassAsset* a = cm.getHorizonCodeClass(id);
-		if (!a) continue;
-		// Copied before the resolve below, because the resolve LOADS: every
-		// ancestor of this class goes through the content manager, and its asset
-		// pool is a dense vector that moves everything in it when it grows. `a`
-		// is dead from the next line on, and the string it owns with it — which
-		// matters most here, where it is the argument being passed.
-		const std::string assetPath = a->path;
 		// The RESOLVED engine base, not the raw string: a class deriving from
 		// another class that is a PlayerController is one too, and asking the
 		// asset alone would miss every derived player in the project.
@@ -133,6 +115,46 @@ void PlayerHost::begin(HorizonCode::Runtime& runtime, ContentManager& cm,
 
 		m_controllers.push_back(inst);
 	}
+
+	// The local players (see the header): one per controller, at least one.
+	// Their bindings are the shared base plus each player's own layer (see
+	// "Rebinding" in the header); the base is kept apart so a rebind or a reset
+	// can rebuild from it without going back to the content manager. All of it
+	// is in place before any BeginPlay — a controller's BeginPlay may already
+	// ask for a binding name.
+	const size_t playerCount = std::max<size_t>(1, m_controllers.size());
+	m_players.resize(playerCount);
+	{
+		HE::api::Ctx ctx;
+		for (size_t i = 0; i < playerCount; ++i)
+		{
+			LocalPlayer& p = m_players[i];
+			if (m_controllers.size() >= 2)
+				p.devices = InputDevices{ static_cast<int>(i), i == 0 };
+			p.mapping = m_baseMapping;
+			const std::string saved = HE::api::prefs::getString(ctx, bindingsPrefsKey(i), "");
+			if (!saved.empty() && p.overrides.fromJson(saved) && !p.overrides.empty())
+			{
+				p.overrides.applyTo(p.mapping);
+				HE_LOG_INFO(Input, "%s", ("PlayerHost: player " + std::to_string(i + 1) + ": " +
+				                          std::to_string(p.overrides.size()) +
+				                          " action(s) with the player's own bindings").c_str());
+			}
+		}
+	}
+	if (m_controllers.size() >= 2)
+		HE_LOG_INFO(Input, "%s", ("PlayerHost: " + std::to_string(m_controllers.size()) +
+		                          " local players - controller N reads pad slot N, the first "
+		                          "one also the keyboard and mouse").c_str());
+	HE::api::input::setBindingService({
+		[this](const std::string& a, const std::string& d) { return rebindBegin(a, d); },
+		[this]()                                            { rebindCancel(); },
+		[this]()                                            { return isRebinding(); },
+		[this]()                                            { return rebindConflict(); },
+		[this](const std::string& a, const std::string& d) { return bindingName(a, d); },
+		[this]()                                            { resetBindings(); },
+		[this]()                                            { return saveBindings(); } });
+	m_bindingServiceInstalled = true;
 
 	// Every controller is registered BEFORE any of them runs. A controller's
 	// BeginPlay is now where the game spawns and possesses its character, so it
@@ -220,7 +242,8 @@ void PlayerHost::addCharacter(HorizonCode::InstanceId instance)
 	m_characters.push_back(instance);
 }
 
-void PlayerHost::fireInputEvent(const std::string& event, const HorizonCode::Value& arg)
+void PlayerHost::fireInputEvent(size_t player, const std::string& event,
+                                const HorizonCode::Value& arg)
 {
 	// No controller in the project: the pre-possession behaviour, so a project
 	// whose characters handle their own input keeps working unchanged.
@@ -238,53 +261,61 @@ void PlayerHost::fireInputEvent(const std::string& event, const HorizonCode::Val
 			m_runtime->fireEvent(inst, event, 0, arg);
 		return;
 	}
-	for (const HorizonCode::InstanceId ctrl : m_controllers)
-	{
-		// The controller ALWAYS gets it — possessing a character makes the
-		// controller forward input, it does not make the controller passive.
-		m_runtime->fireEvent(ctrl, event, 0, arg);
-		const HorizonCode::InstanceId pawn = HE::api::player::possessed(ctrl);
-		if (pawn != 0 && m_runtime->alive(pawn))
-			m_runtime->fireEvent(pawn, event, 0, arg);
-	}
+	// Player i is controller i (there is one player per controller whenever
+	// there is a controller at all).
+	if (player >= m_controllers.size()) return;
+	const HorizonCode::InstanceId ctrl = m_controllers[player];
+	// The controller ALWAYS gets it — possessing a character makes the
+	// controller forward input, it does not make the controller passive.
+	m_runtime->fireEvent(ctrl, event, 0, arg);
+	const HorizonCode::InstanceId pawn = HE::api::player::possessed(ctrl);
+	if (pawn != 0 && m_runtime->alive(pawn))
+		m_runtime->fireEvent(pawn, event, 0, arg);
 }
 
 void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse, bool locked)
 {
 	if (!m_runtime) return;
 
-	// The capture first, on the raw device state: the mapping below is exactly
+	// The captures first, on the raw device state: the mapping below is exactly
 	// what a menu has silenced. A capture that finishes this frame keeps the
 	// frame silent too (wasRebinding) — its release is not a gameplay event.
-	const bool wasRebinding = m_capture.busy();
-	switch (m_capture.update(input, mouse))
+	// One player's rebind silences every player: it runs in a menu, and a menu
+	// holds the whole session.
+	const bool wasRebinding = isRebinding();
+	for (size_t i = 0; i < m_players.size(); ++i)
 	{
-	case HE::BindingCapture::Result::Captured:
-	{
-		const ActionBinding b = m_capture.captured();
-		const std::vector<std::string> others = HE::bindingConflicts(m_mapping, m_rebindAction, b);
-		m_rebindConflict.clear();
-		for (const std::string& o : others)
-			m_rebindConflict += (m_rebindConflict.empty() ? "" : ", ") + o;
-		m_overrides.set(m_rebindAction, m_capture.device(), { b });
-		m_mappingDirty = true;
-		HE_LOG_INFO(Input, "%s", ("Rebound " + m_rebindAction + " to " +
-		                          HE::bindingDisplayName(b)).c_str());
-		if (!others.empty())
-			HE_LOG_WARN(Input, "%s", (HE::bindingDisplayName(b) + " is now bound to " +
-			                          m_rebindAction + " and also to " + m_rebindConflict).c_str());
-		break;
+		LocalPlayer& p = m_players[i];
+		const std::string who = m_players.size() > 1 ? "Player " + std::to_string(i + 1) + ": " : "";
+		switch (p.capture.update(input, mouse, p.devices))
+		{
+		case HE::BindingCapture::Result::Captured:
+		{
+			const ActionBinding b = p.capture.captured();
+			const std::vector<std::string> others = HE::bindingConflicts(p.mapping, p.rebindAction, b);
+			p.rebindConflict.clear();
+			for (const std::string& o : others)
+				p.rebindConflict += (p.rebindConflict.empty() ? "" : ", ") + o;
+			p.overrides.set(p.rebindAction, p.capture.device(), { b });
+			p.mappingDirty = true;
+			HE_LOG_INFO(Input, "%s", (who + "Rebound " + p.rebindAction + " to " +
+			                          HE::bindingDisplayName(b)).c_str());
+			if (!others.empty())
+				HE_LOG_WARN(Input, "%s", (who + HE::bindingDisplayName(b) + " is now bound to " +
+				                          p.rebindAction + " and also to " + p.rebindConflict).c_str());
+			break;
+		}
+		case HE::BindingCapture::Result::Cancelled:
+			HE_LOG_INFO(Input, "%s", (who + "Rebinding " + p.rebindAction + " cancelled").c_str());
+			break;
+		case HE::BindingCapture::Result::None:
+			break;
+		}
+		if (p.mappingDirty) rebuildMapping(p, input, mouse);
 	}
-	case HE::BindingCapture::Result::Cancelled:
-		HE_LOG_INFO(Input, "%s", ("Rebinding " + m_rebindAction + " cancelled").c_str());
-		break;
-	case HE::BindingCapture::Result::None:
-		break;
-	}
-	if (m_mappingDirty) rebuildMapping(input, mouse);
-	const bool rebinding = wasRebinding || m_capture.busy();
+	const bool rebinding = wasRebinding || isRebinding();
 
-	m_mapping.tick(input, mouse);
+	for (LocalPlayer& p : m_players) p.mapping.tick(input, mouse, p.devices);
 
 	// Tick still fires while paused — with dt 0, so anything integrating against
 	// it stands still. That is what lets a controller keep driving a pause menu
@@ -340,45 +371,54 @@ void PlayerHost::tick(const Input& input, float dt, const MouseFrame& mouse, boo
 		// included: the press being captured, or the Start that cancels it, must
 		// not also fire the pause menu's own action.
 		if ((silenced && !a.runWhilePaused) || rebinding) { states.push_back(std::move(st)); continue; }
-		switch (a.kind)
+		for (size_t i = 0; i < m_players.size(); ++i)
 		{
-		case ActionKind::Axis:
-		{
-			// Per-frame, like the Tick event — graphs use it as their movement
-			// pump. The value is NOT scaled by dt here: a key axis is a held
-			// state the graph integrates itself, and a mouse-sourced one is
-			// already a displacement. Doing it here would be wrong for both.
-			const float v = m_mapping.axisValue(a.name);
-			fireInputEvent(HE::inputEventAxis(a.name), HorizonCode::Value::ofFloat(v));
-			eachScript([&](uint64_t inst){ m_scripts->callOnInputAxis(inst, a.name, v); });
-			st.x = v;
-			break;
-		}
-		case ActionKind::Axis2D:
-		{
-			float x = 0.0f, y = 0.0f;
-			m_mapping.axis2DValue(a.name, x, y);
-			fireInputEvent(HE::inputEventAxis2D(a.name),
-			               HorizonCode::Value::ofVec2(glm::vec2(x, y)));
-			eachScript([&](uint64_t inst){ m_scripts->callOnInputAxis2D(inst, a.name, x, y); });
-			st.x = x; st.y = y;
-			break;
-		}
-		case ActionKind::Button:
-			st.down     = m_mapping.isPressed(a.name);
-			st.pressed  = m_mapping.justPressed(a.name);
-			st.released = m_mapping.justReleased(a.name);
-			if (st.pressed)
+			const InputMapping& m = m_players[i].mapping;
+			// Text scripts and the polling rows are player 0's (see the header).
+			const bool first = i == 0;
+			switch (a.kind)
 			{
-				fireInputEvent(HE::inputEventPressed(a.name), {});
-				eachScript([&](uint64_t inst){ m_scripts->callOnInputPressed(inst, a.name); });
-			}
-			if (st.released)
+			case ActionKind::Axis:
 			{
-				fireInputEvent(HE::inputEventReleased(a.name), {});
-				eachScript([&](uint64_t inst){ m_scripts->callOnInputReleased(inst, a.name); });
+				// Per-frame, like the Tick event — graphs use it as their movement
+				// pump. The value is NOT scaled by dt here: a key axis is a held
+				// state the graph integrates itself, and a mouse-sourced one is
+				// already a displacement. Doing it here would be wrong for both.
+				const float v = m.axisValue(a.name);
+				fireInputEvent(i, HE::inputEventAxis(a.name), HorizonCode::Value::ofFloat(v));
+				if (!first) break;
+				eachScript([&](uint64_t inst){ m_scripts->callOnInputAxis(inst, a.name, v); });
+				st.x = v;
+				break;
 			}
-			break;
+			case ActionKind::Axis2D:
+			{
+				float x = 0.0f, y = 0.0f;
+				m.axis2DValue(a.name, x, y);
+				fireInputEvent(i, HE::inputEventAxis2D(a.name),
+				               HorizonCode::Value::ofVec2(glm::vec2(x, y)));
+				if (!first) break;
+				eachScript([&](uint64_t inst){ m_scripts->callOnInputAxis2D(inst, a.name, x, y); });
+				st.x = x; st.y = y;
+				break;
+			}
+			case ActionKind::Button:
+			{
+				const bool pressed  = m.justPressed(a.name);
+				const bool released = m.justReleased(a.name);
+				if (pressed)  fireInputEvent(i, HE::inputEventPressed(a.name), {});
+				if (released) fireInputEvent(i, HE::inputEventReleased(a.name), {});
+				if (!first) break;
+				st.down     = m.isPressed(a.name);
+				st.pressed  = pressed;
+				st.released = released;
+				if (pressed)
+					eachScript([&](uint64_t inst){ m_scripts->callOnInputPressed(inst, a.name); });
+				if (released)
+					eachScript([&](uint64_t inst){ m_scripts->callOnInputReleased(inst, a.name); });
+				break;
+			}
+			}
 		}
 		states.push_back(std::move(st));
 	}
@@ -394,14 +434,9 @@ void PlayerHost::end()
 	m_controllers.clear();
 	m_characters.clear();
 	m_actions.clear();
-	m_mapping.clear();
 	m_baseMapping.clear();
 	m_contextPaths.clear();
-	m_overrides.clear();
-	m_capture.cancel();
-	m_rebindAction.clear();
-	m_rebindConflict.clear();
-	m_mappingDirty = false;
+	m_players.clear();
 	if (m_bindingServiceInstalled)
 	{
 		HE::api::input::setBindingService({});
@@ -425,14 +460,52 @@ PlayerHost::~PlayerHost()
 
 // ── Rebinding ────────────────────────────────────────────────────────────────
 
-bool PlayerHost::rebindBegin(const std::string& action, const std::string& device)
+std::string PlayerHost::bindingsPrefsKey(size_t player)
 {
-	if (!m_runtime) return false;
+	return "input.overrides." + std::to_string(player);
+}
+
+const InputMapping& PlayerHost::mapping(size_t player) const
+{
+	static const InputMapping kEmpty;
+	return player < m_players.size() ? m_players[player].mapping : kEmpty;
+}
+
+const HE::BindingOverrides& PlayerHost::bindingOverrides(size_t player) const
+{
+	static const HE::BindingOverrides kEmpty;
+	return player < m_players.size() ? m_players[player].overrides : kEmpty;
+}
+
+const std::string& PlayerHost::rebindConflict(size_t player) const
+{
+	static const std::string kNone;
+	return player < m_players.size() ? m_players[player].rebindConflict : kNone;
+}
+
+bool PlayerHost::isRebinding() const
+{
+	return std::any_of(m_players.begin(), m_players.end(),
+	                   [](const LocalPlayer& p) { return p.capture.busy(); });
+}
+
+bool PlayerHost::rebindBegin(const std::string& action, const std::string& device, size_t player)
+{
+	if (!m_runtime || player >= m_players.size()) return false;
 	HE::BindingDevice dev;
 	if (!HE::bindingDeviceFromName(device, dev))
 	{
 		HE_LOG_WARN(Input, "%s", ("Rebind: unknown device \"" + device +
 		                          "\" - use \"keyboard\" or \"gamepad\"").c_str());
+		return false;
+	}
+	LocalPlayer& p = m_players[player];
+	// The desk is player 1's (see "Local players" in the header): a capture
+	// for anyone else would listen to keys that never reach their mapping.
+	if (dev == HE::BindingDevice::KeyboardMouse && !p.devices.keyboardMouse)
+	{
+		HE_LOG_WARN(Input, "%s", ("Rebind: player " + std::to_string(player + 1) +
+		                          " has no keyboard - only player 1 does").c_str());
 		return false;
 	}
 	const auto it = std::find_if(m_actions.begin(), m_actions.end(),
@@ -450,24 +523,28 @@ bool PlayerHost::rebindBegin(const std::string& action, const std::string& devic
 		                          "actions can be rebound so far").c_str());
 		return false;
 	}
-	m_rebindAction = action;
-	m_rebindConflict.clear();
-	m_capture.arm(dev);
+	p.rebindAction = action;
+	p.rebindConflict.clear();
+	p.capture.arm(dev);
 	return true;
 }
 
 void PlayerHost::rebindCancel()
 {
-	if (m_capture.busy())
-		HE_LOG_INFO(Input, "%s", ("Rebinding " + m_rebindAction + " cancelled").c_str());
-	m_capture.cancel();
+	for (LocalPlayer& p : m_players)
+	{
+		if (p.capture.busy())
+			HE_LOG_INFO(Input, "%s", ("Rebinding " + p.rebindAction + " cancelled").c_str());
+		p.capture.cancel();
+	}
 }
 
-std::string PlayerHost::bindingName(const std::string& action, const std::string& device) const
+std::string PlayerHost::bindingName(const std::string& action, const std::string& device,
+                                    size_t player) const
 {
 	HE::BindingDevice dev;
-	if (!HE::bindingDeviceFromName(device, dev)) return {};
-	const auto* rows = m_mapping.actionBindings(action);
+	if (player >= m_players.size() || !HE::bindingDeviceFromName(device, dev)) return {};
+	const auto* rows = m_players[player].mapping.actionBindings(action);
 	if (!rows) return {};
 	std::string out;
 	for (const ActionBinding& b : *rows)
@@ -476,32 +553,38 @@ std::string PlayerHost::bindingName(const std::string& action, const std::string
 	return out;
 }
 
-void PlayerHost::resetBindings()
+void PlayerHost::resetBindings(size_t player)
 {
-	m_capture.cancel();
-	m_overrides.clear();
-	m_rebindConflict.clear();
+	if (player >= m_players.size()) return;
+	LocalPlayer& p = m_players[player];
+	p.capture.cancel();
+	p.overrides.clear();
+	p.rebindConflict.clear();
 	// Not rebuilt here: this is called from a script, mid-frame, with no input
 	// in hand. The next tick rebuilds against that frame's.
-	m_mappingDirty = true;
+	p.mappingDirty = true;
 }
 
 bool PlayerHost::saveBindings()
 {
 	HE::api::Ctx ctx;
-	if (m_overrides.empty())
-		HE::api::prefs::remove(ctx, kBindingsPrefsKey);
-	else
-		HE::api::prefs::setString(ctx, kBindingsPrefsKey, m_overrides.toJson());
+	for (size_t i = 0; i < m_players.size(); ++i)
+	{
+		const HE::BindingOverrides& o = m_players[i].overrides;
+		if (o.empty())
+			HE::api::prefs::remove(ctx, bindingsPrefsKey(i));
+		else
+			HE::api::prefs::setString(ctx, bindingsPrefsKey(i), o.toJson());
+	}
 	return true;
 }
 
-void PlayerHost::rebuildMapping(const Input& input, const MouseFrame& mouse)
+void PlayerHost::rebuildMapping(LocalPlayer& p, const Input& input, const MouseFrame& mouse)
 {
-	m_mapping = m_baseMapping;
-	m_overrides.applyTo(m_mapping);
+	p.mapping = m_baseMapping;
+	p.overrides.applyTo(p.mapping);
 	// A fresh mapping has never seen a key: without this tick, whatever the
 	// player is holding would read as pressed THIS frame and fire again.
-	m_mapping.tick(input, mouse);
-	m_mappingDirty = false;
+	p.mapping.tick(input, mouse, p.devices);
+	p.mappingDirty = false;
 }

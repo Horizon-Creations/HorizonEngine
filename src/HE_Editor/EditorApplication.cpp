@@ -9149,8 +9149,11 @@ void EditorApplication::updatePlayCameraController(float dt)
 	// fight ImGui over, and demanding Esc-to-capture before the right stick
 	// works would be a rule nobody could discover. Mouse look keeps the
 	// capture requirement it always had.
-	const float stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX);
-	const float stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY);
+	// Player 1's stick (the camera follows player 1): all pads merged in
+	// single player, slot 0 with several local players.
+	const int   lookSlot = m_playerHost.devicesOf(0).gamepadSlot;
+	const float stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX, lookSlot);
+	const float stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY, lookSlot);
 	const bool  padLook = stickX != 0.0f || stickY != 0.0f;
 	if (!m_playMouseCaptured && !padLook) return;
 

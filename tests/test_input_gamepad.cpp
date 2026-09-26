@@ -202,6 +202,118 @@ TEST_CASE("Input: EndFrame clears mouse but not gamepad state")
     CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_START)); // held state, not a displacement
 }
 
+// ─── Pad slots (local multiplayer) ───────────────────────────────────────────
+
+TEST_CASE("Slots: each slot reads its own pad, the merged frame is all of them")
+{
+    Input input;
+    GamepadFrame a, b;
+    a.connected = true;
+    a.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true;
+    a.axes[SDL_GAMEPAD_AXIS_LEFTX] = 1.0f;
+    b.connected = true;
+    b.buttons[SDL_GAMEPAD_BUTTON_EAST] = true;
+    b.axes[SDL_GAMEPAD_AXIS_LEFTX] = -0.5f;
+    input.SetGamepadFrame(0, a);
+    input.SetGamepadFrame(1, b);
+
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Connected);
+    CHECK(input.gamepadSlotState(1) == Input::GamepadSlotState::Connected);
+    CHECK(input.gamepadSlotState(2) == Input::GamepadSlotState::Free);
+
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 0));
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST, 0));
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST, 1));
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 1));
+    CHECK(input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFTX, 0) == doctest::Approx(1.0f));
+    CHECK(input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFTX, 1) < 0.0f);
+
+    // The default view is unchanged: every pad, merged.
+    CHECK(input.gamepad().connected);
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH));
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST));
+    CHECK(input.gamepad().axes[SDL_GAMEPAD_AXIS_LEFTX] == doctest::Approx(1.0f));
+    CHECK(&input.gamepad(-1) == &input.gamepad());
+
+    // Out of range and empty slots read as an idle pad, never as garbage.
+    CHECK_FALSE(input.gamepad(2).connected);
+    CHECK_FALSE(input.gamepad(Input::kMaxGamepadSlots).connected);
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 99));
+}
+
+TEST_CASE("Slots: unplugging reserves the slot and zeroes it, release frees it")
+{
+    Input input;
+    GamepadFrame a;
+    a.connected = true;
+    a.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true;
+    input.SetGamepadFrame(0, a);
+    CHECK_FALSE(input.releaseGamepadSlot(0));   // plugged in: keeps its slot
+
+    GamepadFrame gone;   // connected = false: "the cable was pulled"
+    input.SetGamepadFrame(0, gone);
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Reserved);
+    // A button held while unplugging must not stay held — for the slot, or
+    // for the merged frame.
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 0));
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH));
+    CHECK_FALSE(input.gamepad().connected);
+
+    CHECK(input.releaseGamepadSlot(0));
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Free);
+    CHECK_FALSE(input.releaseGamepadSlot(0));   // free already
+}
+
+TEST_CASE("Mapping: InputDevices reads one pad slot, with or without the desk")
+{
+    Input input;
+    GamepadFrame a, b;
+    a.connected = true;
+    a.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true;
+    b.connected = true;
+    b.axes[SDL_GAMEPAD_AXIS_LEFTX] = 1.0f;
+    input.SetGamepadFrame(0, a);
+    input.SetGamepadFrame(1, b);
+    SDL_Event key{};
+    key.type = SDL_EVENT_KEY_DOWN;
+    key.key.scancode = SDL_SCANCODE_D;
+    input.ProcessEvent(key);
+
+    auto build = [] {
+        InputMapping m;
+        m.mapAction("Jump", { { SDL_SCANCODE_UNKNOWN, SDL_GAMEPAD_BUTTON_SOUTH } });
+        AxisBinding stick;
+        stick.source = AxisSource::GamepadLeftX;
+        AxisBinding keys{ SDL_SCANCODE_D, SDL_SCANCODE_A };
+        m.mapAxis("Move", { stick, keys });
+        AxisBinding mouse;
+        mouse.source = AxisSource::MouseX;
+        m.mapAxis("Look", { mouse });
+        return m;
+    };
+    MouseFrame mouse;
+    mouse.dx = 5.0f;
+
+    InputMapping p1 = build();
+    p1.tick(input, mouse, InputDevices{ 0, true });
+    CHECK(p1.isPressed("Jump"));
+    CHECK(p1.axisValue("Move") == doctest::Approx(1.0f));   // the D key
+    CHECK(p1.axisValue("Look") == doctest::Approx(5.0f));
+
+    InputMapping p2 = build();
+    p2.tick(input, mouse, InputDevices{ 1, false });
+    CHECK_FALSE(p2.isPressed("Jump"));                      // slot 0's button
+    CHECK(p2.axisValue("Move") == doctest::Approx(1.0f));   // its own stick
+    CHECK(p2.axisValue("Look") == 0.0f);                    // no mouse without the desk
+
+    // And without its stick, the key does not reach a desk-less player.
+    GamepadFrame idle;
+    idle.connected = true;
+    input.SetGamepadFrame(1, idle);
+    p2.tick(input, mouse, InputDevices{ 1, false });
+    CHECK(p2.axisValue("Move") == 0.0f);
+}
+
 // ─── InputMapping with gamepad sources (CP1) ─────────────────────────────────
 
 namespace {
@@ -613,6 +725,87 @@ TEST_CASE("End-to-end: virtual pad drives Input and InputMapping via hot-plug")
     CHECK_FALSE(input.gamepad().connected);
     CHECK(input.gamepad().axes[SDL_GAMEPAD_AXIS_LEFTX] == 0.0f);
 
+    SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+}
+
+TEST_CASE("End-to-end: hot-plug hands out slots, a returning pad gets its own back")
+{
+    if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
+    {
+        MESSAGE("SDL gamepad subsystem unavailable here (", SDL_GetError(),
+                ") — slots covered by frame injection only");
+        return;
+    }
+
+    // Different vendor/product ids make different GUIDs — the part of the
+    // identity a virtual pad has (it reports no serial).
+    auto attach = [](Uint16 vendor, Uint16 product) {
+        SDL_VirtualJoystickDesc desc;
+        SDL_INIT_INTERFACE(&desc);
+        desc.type      = SDL_JOYSTICK_TYPE_GAMEPAD;
+        desc.naxes     = SDL_GAMEPAD_AXIS_COUNT;
+        desc.nbuttons  = SDL_GAMEPAD_BUTTON_COUNT;
+        desc.vendor_id  = vendor;
+        desc.product_id = product;
+        return SDL_AttachVirtualJoystick(&desc);
+    };
+
+    Input input;
+    auto pump = [&]{
+        SDL_UpdateJoysticks();
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) input.ProcessGamepadEvent(e);
+        input.PollGamepads();
+    };
+
+    const SDL_JoystickID a = attach(0x1111, 0x0001);
+    REQUIRE(a != 0);
+    pump();
+    const SDL_JoystickID b = attach(0x2222, 0x0002);
+    REQUIRE(b != 0);
+    pump();
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Connected);
+    CHECK(input.gamepadSlotState(1) == Input::GamepadSlotState::Connected);
+    // The player LED is told which player the pad is.
+    CHECK(SDL_GetGamepadPlayerIndex(SDL_GetGamepadFromID(a)) == 0);
+    CHECK(SDL_GetGamepadPlayerIndex(SDL_GetGamepadFromID(b)) == 1);
+
+    // B's button reaches slot 1 only.
+    SDL_SetJoystickVirtualButton(SDL_GetGamepadJoystick(SDL_GetGamepadFromID(b)),
+                                 SDL_GAMEPAD_BUTTON_SOUTH, true);
+    pump();
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 1));
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 0));
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH));   // merged
+
+    // A is pulled: slot 0 is kept for it, B stays player 2.
+    SDL_DetachVirtualJoystick(a);
+    pump();
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Reserved);
+    CHECK(input.gamepadSlotState(1) == Input::GamepadSlotState::Connected);
+
+    // A different pad arriving now does NOT take player 1's reserved slot.
+    const SDL_JoystickID c = attach(0x3333, 0x0003);
+    REQUIRE(c != 0);
+    pump();
+    CHECK(input.gamepadSlotState(2) == Input::GamepadSlotState::Connected);
+    CHECK(SDL_GetGamepadPlayerIndex(SDL_GetGamepadFromID(c)) == 2);
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Reserved);
+
+    // A comes back — with a new joystick id, as after a real reconnect — and
+    // is player 1 again.
+    const SDL_JoystickID a2 = attach(0x1111, 0x0001);
+    REQUIRE(a2 != 0);
+    CHECK(a2 != a);
+    pump();
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Connected);
+    CHECK(SDL_GetGamepadPlayerIndex(SDL_GetGamepadFromID(a2)) == 0);
+
+    SDL_DetachVirtualJoystick(a2);
+    SDL_DetachVirtualJoystick(b);
+    SDL_DetachVirtualJoystick(c);
+    pump();
+    CHECK_FALSE(input.gamepad().connected);
     SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
 }
 

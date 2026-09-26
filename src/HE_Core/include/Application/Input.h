@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 #include "Types/Defines.h"
 #include <SDL3/SDL.h>
@@ -64,9 +65,22 @@ HE_API float applyTriggerDeadzone(float value, float deadzone);
 
 // Merge one pad's state into the combined frame: per axis the larger magnitude
 // wins, buttons OR together. This is the "all pads are one player" policy —
-// swapping controllers mid-session just works, no selection UI. Per-player
-// assignment (splitscreen) is a later, separate step.
+// swapping controllers mid-session just works, no selection UI. It stays the
+// DEFAULT; a local multiplayer session reads the pads one slot at a time
+// instead (Input::gamepad(slot), InputDevices below).
 HE_API void mergeGamepadFrame(GamepadFrame& into, const GamepadFrame& from);
+
+// Which of Input's devices ONE player reads. The default is everything, merged
+// — the single-player view every project had before there were slots.
+// `gamepadSlot` -1 = the merged frame, 0.. = only that slot's pad (an empty or
+// reserved slot reads as an idle pad). `keyboardMouse` false = keys and the
+// handed-in MouseFrame are ignored: on one desk there is one keyboard, and it
+// belongs to one player (PlayerHost gives it to player 0).
+struct InputDevices
+{
+    int  gamepadSlot   = -1;
+    bool keyboardMouse = true;
+};
 
 // ── Input class ───────────────────────────────────────────────────────────────
 // Keyboard state plus the frame's raw mouse movement. SDL scancodes are used
@@ -104,13 +118,45 @@ public:
     // scalar. This is what InputMapping consumes.
     float gamepadAxisFiltered(SDL_GamepadAxis axis) const;
 
+    // ── Pad slots (local multiplayer) ─────────────────────────────────────
+    // Every pad that connects gets a SLOT, and the slot is the player: slot 0
+    // is player 1's pad, slot 1 player 2's, and the pad's player LED says so
+    // (SDL_SetGamepadPlayerIndex). A pad that is pulled keeps its slot
+    // RESERVED, so plugging it back in — a loose cable, a flat battery —
+    // returns it to the same player instead of shuffling everybody.
+    //
+    // Which slot a connecting pad gets:
+    //   1. a reserved slot that remembers THIS pad (GUID + serial — SDL hands
+    //      a reconnected pad a new joystick id, so the id cannot be the key),
+    //   2. else the lowest free slot,
+    //   3. else the lowest reserved one (its memory is dropped).
+    // Two pads of the same model without a serial look alike: if both are
+    // pulled and come back, they may come back swapped.
+    //
+    // The merged frame above is built from the connected slots and stays the
+    // default; nothing reads a slot unless it asks.
+    static constexpr int kMaxGamepadSlots = 8;
+    enum class GamepadSlotState { Free, Connected, Reserved };
+
+    // `slot` -1 = the merged frame (same as gamepad()). A slot out of range,
+    // free or reserved reads as an idle, disconnected pad.
+    const GamepadFrame& gamepad(int slot) const;
+    bool  isGamepadButtonDown(SDL_GamepadButton b, int slot) const;
+    float gamepadAxisFiltered(SDL_GamepadAxis axis, int slot) const;
+    GamepadSlotState gamepadSlotState(int slot) const;
+    // Forget a reserved slot (the player left for good), so the next new pad
+    // may take it. False for a connected or free slot — a pad that is
+    // plugged in keeps its slot.
+    bool releaseGamepadSlot(int slot);
+
     // Default deadzones. Tunable later via settings; the accessors read these
     // members so a settings slider only has to write them.
     float stickDeadzone   = 0.15f;
     float triggerDeadzone = 0.05f;
 
     // ── Rumble ────────────────────────────────────────────────────────────
-    // Sent to EVERY open pad, which is the merge policy above read backwards:
+    // Sent to EVERY open pad (every slot, not per player yet), which is the
+    // merge policy above read backwards:
     // all pads are one player, so all of them feel what that player feels.
     // Intensities 0..1 (clamped); `low` is the heavy motor, `high` the light
     // one. A pad has ONE effect at a time — a new call replaces the running
@@ -132,12 +178,13 @@ public:
     // who may act on it belongs to the consumer — the game always, the editor
     // only while play mode holds the mouse.
     void ProcessMouseEvent(const SDL_Event& event);
-    // Hot-plug only (GAMEPAD_ADDED/_REMOVED): opens/closes the SDL handle.
+    // Hot-plug only (GAMEPAD_ADDED/_REMOVED): opens/closes the SDL handle and
+    // hands out / reserves the slot (see "Pad slots" above).
     // Axis/button STATE is not event-accumulated — SDL already maintains it,
     // PollGamepads() reads it once per frame. Fed ungated like the mouse
     // stream: ImGui's "I want the keyboard" does not own a stick either.
     void ProcessGamepadEvent(const SDL_Event& event);
-    // Snapshot all open pads into the merged frame. Called once per frame by
+    // Snapshot all open pads into their slots and the merged frame. Called once per frame by
     // Application, right after event polling, so every consumer in the frame
     // sees the same values.
     void PollGamepads();
@@ -145,6 +192,11 @@ public:
     // virtual devices. PollGamepads() would rebuild it next frame, so callers
     // that inject must not also poll (an Input with no open pads never does).
     void SetGamepadFrame(const GamepadFrame& frame) { m_gamepad = frame; }
+    // The same for ONE slot, and the merged frame is rebuilt from the slots.
+    // `frame.connected` decides whether the slot counts as connected, so a
+    // test can plug and unplug pads without SDL. A slot holding a real pad is
+    // overwritten by the next poll, like the merged frame.
+    void SetGamepadFrame(int slot, const GamepadFrame& frame);
     // Clear the frame's movement. Called by Application after the frame is
     // rendered, so everything drawing that frame sees the same numbers.
     // The button mask survives — it is a held state like a key, not a
@@ -157,9 +209,23 @@ private:
     bool       m_keys[SDL_SCANCODE_COUNT]{};
     MouseFrame m_mouse;
 
-    // Merged state of all connected pads + the open SDL handles behind it.
-    // An Input constructed without SDL's gamepad subsystem (unit tests, init
-    // failure) simply has an empty map and stays all-zero — no SDL calls made.
+    struct PadSlot
+    {
+        GamepadSlotState state = GamepadSlotState::Free;
+        SDL_JoystickID   id    = 0;         // while connected
+        SDL_Gamepad*     pad   = nullptr;   // while connected to a real device
+        std::string      identity;          // GUID/serial, kept while reserved
+        GamepadFrame     frame;             // raw, zero unless connected
+    };
+
+    float filteredAxis(const GamepadFrame& f, SDL_GamepadAxis axis) const;
+    bool  anyOpenPad() const;
+    void  remerge();
+
+    // Merged state of all connected slots + the slots with the open SDL
+    // handles behind them. An Input constructed without SDL's gamepad
+    // subsystem (unit tests, init failure) simply has no open pad and stays
+    // all-zero — no SDL calls made.
     GamepadFrame m_gamepad;
-    std::unordered_map<SDL_JoystickID, SDL_Gamepad*> m_pads;
+    PadSlot      m_slots[kMaxGamepadSlots];
 };

@@ -1155,6 +1155,16 @@ namespace
 	{ "player.character",
 	  "The character the local player is driving right now. Shorthand for "
 	  "Possessed of Controller." },
+	{ "player.controllerAt",
+	  "The controller of local player Index (0 = player 1, the same as Get Player "
+	  "Controller). Every PlayerController class in the project is one local player, "
+	  "sorted by asset path. With two or more, player N listens only to the gamepad "
+	  "whose light shows N+1, and player 1 also has the keyboard and mouse. Empty "
+	  "when there is no such player." },
+	{ "player.localPlayerCount",
+	  "How many local players the session has: one per PlayerController class. One "
+	  "means single player, where every gamepad and the keyboard steer the same "
+	  "player." },
 
 	// ── Input ────────────────────────────────────────────────────────────────
 	{ "input.keyDown",

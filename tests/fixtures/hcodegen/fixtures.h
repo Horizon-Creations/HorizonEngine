@@ -2980,6 +2980,36 @@ inline HE::hccg::ClassSource fxPlayerSettings()
     return f.done("player_settings");
 }
 
+// player_slots: the local-player rows. A pure row with an Int argument
+// answering a Ref, and a pure row answering an Int — both read the table
+// PlayerHost fills, which the parity test fills by hand.
+inline HE::hccg::ClassSource fxPlayerSlots()
+{
+    Fx f;
+    f.var("second", PT::Ref);
+    f.var("beyond", PT::Ref);
+    f.var("count", PT::Int);
+
+    const int ev = f.event("Who");
+    const int at1 = f.engineCall("player.controllerAt");
+    f.g.findNode(at1)->pinDefaults[0] = Value::ofInt(1);
+    const int s1 = f.setVar("second", PT::Ref);
+    f.data(at1, 0, s1, 0);
+    f.exec(ev, s1);
+
+    const int at9 = f.engineCall("player.controllerAt");
+    f.g.findNode(at9)->pinDefaults[0] = Value::ofInt(9);
+    const int s2 = f.setVar("beyond", PT::Ref);
+    f.data(at9, 0, s2, 0);
+    f.exec(s1, s2);
+
+    const int n = f.engineCall("player.localPlayerCount");
+    const int s3 = f.setVar("count", PT::Int);
+    f.data(n, 0, s3, 0);
+    f.exec(s2, s3);
+    return f.done("player_slots");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -2995,7 +3025,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
-        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(),
+        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxPlayerSlots(),
     };
 }
 

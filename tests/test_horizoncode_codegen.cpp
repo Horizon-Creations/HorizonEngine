@@ -1384,6 +1384,21 @@ TEST_CASE("codegen parity: player_settings (the settings rows reach one store id
 	HE::api::settings::uninstall();
 }
 
+TEST_CASE("codegen parity: player_slots (the local-player rows read one table identically)")
+{
+	// Three local players, as PlayerHost would register them.
+	HE::api::player::setControllers({ 11u, 22u, 33u });
+
+	ParityPair p("fix/player_slots");
+	p.fire("Who");
+
+	CHECK(p.var("second").ref == 22u);
+	CHECK(p.var("beyond").ref == 0u);   // no player 10
+	CHECK(p.var("count").i == 3);
+
+	HE::api::player::clear();
+}
+
 TEST_CASE("codegen parity: engine_exec_cached (one dispatch, cached reads, save round-trip)")
 {
 	ParityPair p("fix/engine_exec_cached");
