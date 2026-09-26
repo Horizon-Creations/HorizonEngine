@@ -140,7 +140,7 @@ std::vector<SettingDesc> buildCatalog()
 	                    &EditorConfig::RewardsSound,
 	                    "Play a short chime when a moment happens. Needs Success "
 	                    "Feedback on; independent of Visual Cues. At most one "
-	                    "tone every 2 s, a save's tick at most every 20 s, none "
+	                    "tone every 2 s, a save's at most every 20 s, none "
 	                    "during Play."));
 	t.push_back(floatRow("rewards.volume", "Sound Volume", "Feedback", "rewards",
 	                     &EditorConfig::RewardsVolume, 0.0, 1.0,
