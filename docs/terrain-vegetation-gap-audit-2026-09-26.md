@@ -18,7 +18,7 @@ Die 50 % lassen sich an der ursprünglichen Phase-2-Liste aus dem Landscape-Plan
 Forts. 19) festmachen: *Heightmap-Import, Sculpt-Brushes, Material-Splatting, Chunking/LOD,
 Tessellation, Kollision*. Davon ist heute **alles außer Tessellation da**. Der Wert ist also zu
 niedrig, und die Beschreibung ist gleichzeitig **zu hoch**: „foliage with wind animation" gibt es
-nicht (siehe 3.3). Beides gehört korrigiert (eigener Schritt, siehe 6).
+nicht (siehe 3.3). Beides gehört korrigiert (eigener Schritt, siehe 5).
 
 ## 2. Was vorhanden ist (belegt)
 
@@ -26,7 +26,7 @@ nicht (siehe 3.3). Beides gehört korrigiert (eigener Schritt, siehe 6).
 |---|---|---|
 | Heightfield, Chunking, Auto-LOD | C×C Chunk-Kinder mit je 4 LODs (65/33/17/9 Verts), `LODComponent`, Frustum-Cull pro Chunk, Skirts gegen Risse, Master auf 2ⁿ+1 resampelt | `TerrainSystem.cpp:115-170`, `TerrainMeshGenerator.cpp` |
 | Region-Dirty-Regeneration | Pinsel setzt `regionDirty`, nur betroffene Chunks werden neu gebaut | `TerrainTools.cpp:484`, `TerrainSculpt.h` |
-| Sculpt-Pinsel | Raise, Lower, Smooth, Flatten, Ramp, Roughen (+ Set über MCP), dt-getaktet, Undo | `TerrainTools.cpp:882-887`, `TerrainSculpt.h` |
+| Sculpt-Pinsel | Raise, Lower, Smooth, Flatten, Ramp, Roughen (+ Set über MCP), dt-getaktet, ein Undo-Eintrag pro Strich | `TerrainTools.cpp:882-887`, `TerrainSculpt.h` |
 | Heightmap-Import | 8/16-bit PNG und `.r16`, aus Textur-Asset oder Datei, eigener Undo-Schritt | `TerrainHeightmap.h`, `TerrainTools.cpp:955ff` (Merge `d653f908`, Thema 40) |
 | Layer-Painting / Splatting | 4 Layer (RGBA8-Weightmap, `weightRes`=256), normalisiert, `Landscape Layer Blend`-Knoten im Material-Graph | `TerrainPaint.h`, `TerrainComponent.h:30-54` |
 | Kollision | Ein Jolt-`HeightFieldShape` pro Terrain, wird beim Sculpten im Play neu gebaut | `PhysicsWorld.cpp:866-910`, `TerrainSystem.h` (Physics-Overload) |
