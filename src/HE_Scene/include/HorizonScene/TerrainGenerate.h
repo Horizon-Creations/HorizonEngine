@@ -51,9 +51,11 @@ namespace TerrainGenerate
         // Width of the blend to zero at the rim, WORLD UNITS (the same unit as
         // TerrainSculpt's falloff — not a 0..1 fraction). Measured inwards from
         // the rim along the ray from the centre; the weight eases in by
-        // smoothstep over that distance. A falloff at least as large as the
-        // radius turns the whole area into one slope, a dome with its top at the
-        // centre; a small one gives a massif with steep flanks. 0 = hard edge.
+        // smoothstep over that distance, which is capped at the SHORT radius. On
+        // a circle, a falloff at least as large as the radius turns the whole
+        // area into one slope, a dome with its top at the centre; on a long
+        // ellipse the same gives a level ridge along the long axis. A small
+        // falloff gives a massif with steep flanks. 0 = hard edge.
         float falloff = 20.0f;
 
         // fBm detail, as in computeTerrainHeightField: `octaves` layers (1..12),

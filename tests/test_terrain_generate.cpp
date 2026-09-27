@@ -136,6 +136,26 @@ TEST_CASE("TerrainGenerate::mountain keeps the falloff in metres on both axes of
     CHECK(tc.dirtyMaxZ == doctest::Approx(0.0f));
 }
 
+TEST_CASE("TerrainGenerate::mountain has no pit at the centre of a long ellipse with a wide falloff")
+{
+    // A rectangle dragged long and thin, and a falloff wider than its short
+    // radius: the distance to the rim along the ray jumps with direction right at
+    // the centre (short radius one way, long radius the other), which once left
+    // the centre vertex at half height inside a full-height ring.
+    TerrainComponent tc = terrain();
+    const TerrainGenerate::Result r = TerrainGenerate::mountain(
+        tc, { 0.0f, 0.0f, 30.0f, 10.0f }, smooth(20.0f, 20.0f));
+    REQUIRE(r.ok);
+
+    CHECK(at(tc, 0, 0) == doctest::Approx(20.0f));
+    CHECK(at(tc, 1, 0) == doctest::Approx(at(tc, 0, 0)));
+    CHECK(at(tc, 0, 0) >= at(tc, 0, 1));
+    CHECK(at(tc, 0, 0) >= at(tc, 1, 1));
+    // Down the short axis it only falls.
+    for (int z = 1; z <= 10; ++z)
+        CHECK(at(tc, 0, z) <= at(tc, 0, z - 1));
+}
+
 TEST_CASE("TerrainGenerate::mountain adds to the landscape underneath instead of replacing it")
 {
     TerrainComponent tc = terrain(7);   // a seeded fBm landscape, not flat ground

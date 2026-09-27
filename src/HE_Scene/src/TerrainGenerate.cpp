@@ -22,6 +22,13 @@ namespace
     // that is simply radius − r; for an ellipse it keeps the blend the same
     // width in metres all the way round, instead of squeezing it on the short
     // axis the way a blend in d would.
+    //
+    // Capped at the short radius: right at the centre the ray distance depends
+    // on the direction (the short radius one way, the long one the other), so
+    // uncapped a falloff wider than the short radius left the centre vertex at
+    // half the height of its neighbours on the long axis. The cap makes it
+    // continuous; the crest of such an ellipse is a level ridge along the long
+    // axis, and the rim blend stays metre-exact wherever it is narrower.
     float rimWeight(float dx, float dz, float rx, float rz, float falloff)
     {
         const float ex = dx / rx, ez = dz / rz;
@@ -29,14 +36,12 @@ namespace
         if (d >= 1.0f) return 0.0f;
         if (falloff <= 0.0f) return 1.0f;
 
-        // The centre itself has no ray; the nearest rim is the short radius.
-        float edge;
-        if (d <= 1e-6f)
-            edge = std::min(rx, rz);
-        else
+        const float shortR = std::min(rx, rz);
+        float edge = shortR;   // the centre itself has no ray
+        if (d > 1e-6f)
         {
             const float len = std::sqrt(dx * dx + dz * dz);
-            edge = len / d - len;
+            edge = std::min(len / d - len, shortR);
         }
         const float t = std::clamp(edge / falloff, 0.0f, 1.0f);
         return t * t * (3.0f - 2.0f * t);
