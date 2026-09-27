@@ -85,6 +85,65 @@ namespace
         return kHidden;
     }
 
+    uint64_t backgroundFrameIntervalFromEnv(const char* backgroundFps,
+                                            const char* exitAfterFrames,
+                                            const char* dumpPath,
+                                            const char* captureFrame)
+    {
+        // Runs that exist to produce pictures come first: they are hidden by
+        // design and still need every frame they asked for.
+        if (exitAfterFrames && *exitAfterFrames &&
+            std::strtoull(exitAfterFrames, nullptr, 10) != 0)
+            return 0;
+        if (dumpPath && *dumpPath) return 0;
+        if (captureFrame && *captureFrame &&
+            std::strtoull(captureFrame, nullptr, 10) != 0)
+            return 0;
+
+        double fps = kDefaultBackgroundFps;
+        if (backgroundFps && *backgroundFps)
+        {
+            char* end = nullptr;
+            const double v = std::strtod(backgroundFps, &end);
+            // "0" is the off switch; garbage or a negative rate is not a
+            // request for anything, so it keeps the default.
+            if (end != backgroundFps && v == 0.0) return 0;
+            if (end != backgroundFps && v > 0.0) fps = v;
+        }
+        return static_cast<uint64_t>(1.0e9 / fps);
+    }
+
+    uint64_t backgroundFrameInterval()
+    {
+        static const uint64_t kInterval = []
+        {
+            const char* bg = std::getenv("HE_BACKGROUND_FPS");
+            const char* ex = std::getenv("HE_EXIT_AFTER_FRAMES");
+            const char* dp = std::getenv("HE_DUMP_PATH");
+            const char* cf = std::getenv("HE_CAPTURE_FRAME");
+            const uint64_t ns = backgroundFrameIntervalFromEnv(bg, ex, dp, cf);
+            // Only the exceptions are worth a line: a run that renders at full
+            // speed in the background has to say why, the default does not.
+            if (ns == 0)
+                HE_LOG_INFO(Window, "Background throttle off (%s) — a hidden, occluded or "
+                                    "minimised window keeps full frames",
+                            (ex && *ex && std::strtoull(ex, nullptr, 10) != 0)
+                                ? "HE_EXIT_AFTER_FRAMES"
+                            : (dp && *dp) ? "HE_DUMP_PATH"
+                            : (cf && *cf && std::strtoull(cf, nullptr, 10) != 0)
+                                ? "HE_CAPTURE_FRAME" : "HE_BACKGROUND_FPS=0");
+            return ns;
+        }();
+        return kInterval;
+    }
+
+    uint64_t backgroundThrottleDelayNs(uint64_t intervalNs, bool inBackground,
+                                       bool profilerRecording, uint64_t elapsedNs)
+    {
+        if (intervalNs == 0 || !inBackground || profilerRecording) return 0;
+        return elapsedNs < intervalNs ? intervalNs - elapsedNs : 0;
+    }
+
     Window::Window(const WindowProps& props, bool isPrimary) { m_isPrimary = isPrimary; Init(props); }
     Window::~Window()                        { Shutdown(); }
 
@@ -402,6 +461,13 @@ namespace
         // maximises windows too, by double-clicking the bar or hitting the OS's
         // own chord, and none of that comes through here.
         return m_window && (SDL_GetWindowFlags(m_window) & SDL_WINDOW_MAXIMIZED) != 0;
+    }
+
+    bool Window::IsInBackground() const
+    {
+        constexpr SDL_WindowFlags kUnseen =
+            SDL_WINDOW_HIDDEN | SDL_WINDOW_OCCLUDED | SDL_WINDOW_MINIMIZED;
+        return m_window && (SDL_GetWindowFlags(m_window) & kUnseen) != 0;
     }
 
     // UIWindowHit is SDL_HitTestResult with names of its own — the callback

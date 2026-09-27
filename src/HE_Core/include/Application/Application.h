@@ -258,6 +258,7 @@ namespace HE
 		bool                       m_running  = false;
 		bool                       m_vsyncEnabled = true;  // current vsync state
 		bool                       m_savedVsync   = true;  // vsync to restore after a capture
+		bool                       m_backgroundThrottled = false;  // logged on change only
 		float                      m_maxFps       = 0.0f;  // VSync-off frame cap (0 = unlimited)
 		bool                       m_eventDriven     = false; // see setEventDriven
 		bool                       m_redrawRequested = false; // see requestRedraw

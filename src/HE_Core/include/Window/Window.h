@@ -61,6 +61,39 @@ namespace HE
                                     const char* dumpPath);
     HE_API bool hiddenWindowRequested();
 
+    // ── Background throttle: a window nobody can see ──────────────────────
+    // A hidden, occluded or minimised window is not held to the display's
+    // refresh (a hidden one measured 72–77 FPS with vsync on), so until now it
+    // rendered every frame in full. One forgotten hidden editor took 35–54 % of
+    // the GPU from the window the person was actually looking at (perf audit
+    // B1, docs/perf-audit/step2-rendering-deep-dive-2026-09-27.md §1.5). Such a
+    // window now runs at a low rate instead: the loop keeps ticking (network,
+    // timers, an MCP client), it just stops drawing 70 pictures a second that
+    // nobody sees.
+    //
+    // Hidden mode alone is exactly that case, so HE_HIDDEN_WINDOW is NOT an
+    // exemption. Runs that exist to produce pictures are: a frame budget
+    // (HE_EXIT_AFTER_FRAMES≠0, same reading as the budget itself), a dump
+    // (HE_DUMP_PATH) or a capture (HE_CAPTURE_FRAME≠0) keeps full frames.
+    // HE_BACKGROUND_FPS sets the rate: unset, empty or unreadable is the
+    // default, "0" switches the throttle off, any other positive number is the
+    // rate. The default fits the fixed-step budget (1/60 s × 5 steps = 83 ms),
+    // so a minimised game's simulation does not fall behind the clock.
+    constexpr double kDefaultBackgroundFps = 15.0;
+
+    // The minimum length of a background frame in nanoseconds, 0 = unthrottled.
+    // Pure, like hiddenWindowFromEnv; the other half reads the environment once.
+    HE_API uint64_t backgroundFrameIntervalFromEnv(const char* backgroundFps,
+                                                   const char* exitAfterFrames,
+                                                   const char* dumpPath,
+                                                   const char* captureFrame);
+    HE_API uint64_t backgroundFrameInterval();
+    // How long the loop still has to sleep after a frame that took elapsedNs.
+    // Nothing for a window someone can see, for an unthrottled run, and while
+    // the profiler records (it wants the true uncapped cost, as for MaxFps).
+    HE_API uint64_t backgroundThrottleDelayNs(uint64_t intervalNs, bool inBackground,
+                                              bool profilerRecording, uint64_t elapsedNs);
+
     class HE_API Window
     {
     public:
@@ -108,6 +141,9 @@ namespace HE
         void        Maximize();
         void        Restore();
         bool        IsMaximized() const;
+        // Hidden, occluded (fully covered, macOS reports it) or minimised: in
+        // no state to show a frame to anybody. Asked of SDL, like IsMaximized.
+        bool        IsInBackground() const;
 
         // ── The frame a borderless window has to answer for (plan F3) ───────
         // Without a system title bar the OS still asks, on every mouse move,
