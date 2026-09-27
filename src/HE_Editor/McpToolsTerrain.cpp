@@ -4,6 +4,7 @@
 #include "McpToolCommon.h"
 
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/TerrainGenerate.h>
 #include <HorizonScene/TerrainMeshGenerator.h>
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
@@ -20,7 +21,7 @@
 #include <vector>
 
 // ─── Shaping the ground from outside the editor ──────────────────────────────
-// See McpToolRegistry.h for why terrain gets four tools of its own instead of
+// See McpToolRegistry.h for why terrain gets five tools of its own instead of
 // riding on entity_get / entity_set_components. In short: the component is two
 // base64 blobs, and base64 is not an interface.
 //
@@ -239,7 +240,7 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			"Describe the landscapes in the open scene: world footprint, height grid, "
 			"noise parameters and whether the ground has been sculpted or painted. With "
 			"no argument it lists every one of them, which is how a client learns the "
-			"uuid the other three terrain tools take. Every coordinate and height on "
+			"uuid the other terrain tools take. Every coordinate and height on "
 			"this interface is WORLD space.";
 		t.inputSchema = objectSchema(json{
 			{ "uuid", stringProp("Uuid of one landscape entity. Omit to describe all "
@@ -552,6 +553,180 @@ void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
 			// A grid that was never built, or one whose resolution just snapped, has
 			// to be rebuilt whole; anything else is the handful of chunks under the
 			// brush.
+			carry.fullRebuild  = wasDirty || work.dirty || keepBuiltRes == 0;
+			carry.weightsDirty = false;
+			carry.regionDirty  = work.regionDirty;
+			carry.minX = work.dirtyMinX; carry.maxX = work.dirtyMaxX;
+			carry.minZ = work.dirtyMinZ; carry.maxZ = work.dirtyMaxZ;
+
+			const ToolResult wb = writeBack(*c, r, std::move(terrain), carry, *h);
+			if (wb.isError) return wb;
+
+			result["regenerated"] = static_cast<bool>(h->regenerate);
+			return ToolResult::ok(std::move(result));
+		};
+		registry.add(std::move(t));
+	}
+
+	// ── terrain_mountain ─────────────────────────────────────────────────────
+	// The Landscape mode's Mountain tool without the drag: one area, one call,
+	// one undo step. TerrainGenerate does the maths, exactly as it does for the
+	// editor's own tool.
+	{
+		McpTool t;
+		t.name        = "terrain_mountain";
+		t.description =
+			"Grow a whole mountain inside an elliptical area in one call, instead of "
+			"dabbing it with terrain_sculpt. The formation is ADDED to the ground that "
+			"is there, so earlier sculpting stays underneath, and outside the area "
+			"nothing moves. It reaches exactly `maxHeight` above the ground at its "
+			"tallest point and blends back to nothing across `falloff` metres inside "
+			"the rim. The same seed, area and settings give the same mountain again. "
+			"Undoable in the editor like any other change; an area that misses the "
+			"landscape reports changed 0 rather than failing.";
+		t.inputSchema = objectSchema(json{
+			{ "uuid",      stringProp("Uuid of the landscape, from terrain_info.") },
+			{ "x",         numberProp("World X of the area's centre.") },
+			{ "z",         numberProp("World Z of the area's centre.") },
+			{ "radius",    numberProp("Radius of a round area in world units. Give this, "
+			                          "or radiusX and radiusZ for an ellipse.") },
+			{ "radiusX",   numberProp("Half-width of the area along world X. Overrides "
+			                          "`radius` on that axis. A long thin ellipse makes a "
+			                          "ridge.") },
+			{ "radiusZ",   numberProp("Half-width of the area along world Z. Overrides "
+			                          "`radius` on that axis.") },
+			{ "maxHeight", numberProp("Metres the tallest point rises above the ground "
+			                          "it stands on — a height ADDED, not a world Y. "
+			                          "Negative digs a basin of the same shape. "
+			                          "Default 30.") },
+			{ "falloff",   numberProp("Width of the blend to zero at the rim, in world "
+			                          "units, measured inwards. As wide as the radius "
+			                          "gives one slope up to a summit; small gives steep "
+			                          "flanks; 0 is a hard edge. Default 20.") },
+			{ "roughness", numberProp("How much of the height is noisy relief rather than "
+			                          "a smooth profile, 0..1. 0 is a clean dome. "
+			                          "Default 0.5.") },
+			{ "octaves",   json{ { "type", "integer" }, { "minimum", 1 }, { "maximum", 12 },
+			                     { "description", "Layers of fBm noise in the relief, each "
+			                                      "finer and half as high as the last. "
+			                                      "Default 5." } } },
+			{ "frequency", numberProp("Noise features across the area (per area, not per "
+			                          "metre). Default 2.") },
+			{ "seed",      json{ { "type", "integer" },
+			                     { "description", "Which variation of the noise. Default 1." } } },
+		}, { "uuid", "x", "z" });
+		t.mutates = true;
+		t.handler = [c, h](const json& args) -> ToolResult {
+			Terrain r = resolveTerrain(*c, args);
+			if (!r.ok) return r.failure;
+
+			if (!hasArg(args, "x") || !hasArg(args, "z"))
+				return failFor(CmdError::InvalidPayload,
+				               "'x' and 'z' are required: the WORLD position of the area's "
+				               "centre. terrain_info reports the landscape's bounds.");
+
+			const bool haveRadius = hasArg(args, "radius");
+			if (!haveRadius && !(hasArg(args, "radiusX") && hasArg(args, "radiusZ")))
+				return failFor(CmdError::InvalidPayload,
+				               "The area needs a size: 'radius' for a round one, or both "
+				               "'radiusX' and 'radiusZ' for an ellipse.");
+
+			const double radius = numArg(args, "radius", 0.0);
+			TerrainGenerate::Area area;
+			area.radiusX = static_cast<float>(numArg(args, "radiusX", radius));
+			area.radiusZ = static_cast<float>(numArg(args, "radiusZ", radius));
+			if (!(area.radiusX > 0.0f) || !(area.radiusZ > 0.0f))
+				return failFor(CmdError::InvalidPayload,
+				               "'radius' / 'radiusX' / 'radiusZ' must be positive — an area "
+				               "with no extent grows nothing.");
+
+			// Refused rather than clamped, so the settings that come back in the
+			// answer are the ones the mountain was actually made with.
+			TerrainGenerate::Params p;
+			p.maxHeight = static_cast<float>(numArg(args, "maxHeight", p.maxHeight));
+			p.falloff   = static_cast<float>(numArg(args, "falloff",   p.falloff));
+			p.roughness = static_cast<float>(numArg(args, "roughness", p.roughness));
+			p.octaves   = intArg(args, "octaves", p.octaves);
+			p.frequency = static_cast<float>(numArg(args, "frequency", p.frequency));
+			p.seed      = intArg(args, "seed", p.seed);
+			if (!(p.falloff >= 0.0f))
+				return failFor(CmdError::InvalidPayload,
+				               "'falloff' must not be negative. Use 0 for a hard edge.");
+			if (!(p.roughness >= 0.0f && p.roughness <= 1.0f))
+				return failFor(CmdError::InvalidPayload,
+				               "'roughness' must be between 0 and 1.");
+			if (p.octaves < 1 || p.octaves > 12)
+				return failFor(CmdError::InvalidPayload,
+				               "'octaves' must be between 1 and 12.");
+			if (!(p.frequency > 0.0f))
+				return failFor(CmdError::InvalidPayload,
+				               "'frequency' must be positive.");
+
+			// Only the XZ centre crosses into terrain-local space. maxHeight is an
+			// amount ADDED, like terrain_sculpt's raise — not a target like its
+			// 'set' — so the entity's own Y has nothing to do with it.
+			const float wx = static_cast<float>(numArg(args, "x", 0.0));
+			const float wz = static_cast<float>(numArg(args, "z", 0.0));
+			area.centerX = wx - r.worldPos.x;
+			area.centerZ = wz - r.worldPos.z;
+
+			// On a COPY, for the same reason as terrain_sculpt.
+			TerrainComponent work = *r.tc;
+			const HE::UUID      keepWeightmap = work.weightmapTextureId;
+			const std::uint32_t keepBuiltRes  = work.builtRes;
+			const std::uint32_t keepBuiltCps  = work.builtChunksPerSide;
+			const bool          wasDirty      = work.dirty;
+			work.dirty = false;   // ensureHeights sets it again if it snaps the grid
+
+			const TerrainGenerate::Result gr = TerrainGenerate::mountain(work, area, p);
+			if (!gr.ok)
+				return failFor(CmdError::InvalidPayload,
+				               "The landscape has no extent (sizeX/sizeZ must be "
+				               "positive), so there is no ground to grow a mountain on.");
+
+			const std::string uuid = uuidOf(*r.world, r.entity);
+			json result{
+				{ "uuid",       uuid },
+				{ "changed",    static_cast<int>(gr.changed) },
+				{ "resolution", work.resolution },
+				{ "center",     json::array({ wx, wz }) },
+				{ "radiusX",    area.radiusX },
+				{ "radiusZ",    area.radiusZ },
+				{ "maxHeight",  p.maxHeight },
+				{ "falloff",    p.falloff },
+				{ "roughness",  p.roughness },
+				{ "octaves",    p.octaves },
+				{ "frequency",  p.frequency },
+				{ "seed",       p.seed },
+			};
+			if (gr.changed > 0)
+			{
+				result["peakAdded"]  = gr.peakAdded;
+				result["touchedMin"] = r.worldPos.y + gr.minHeight;
+				result["touchedMax"] = r.worldPos.y + gr.maxHeight;
+			}
+
+			// Off the landscape, or a height of zero: no undo step for a change
+			// that did not happen — see terrain_sculpt.
+			if (gr.changed == 0)
+			{
+				result["regenerated"] = false;
+				return ToolResult::ok(std::move(result));
+			}
+
+			json terrain = componentsOf(*r.world, r.entity)["terrain"];
+			if (!terrain.is_object())
+				return failFor(CmdError::Failed, uuid);
+			terrain["resolution"] = work.resolution;
+			terrain["sculptHeightsB64"] = SceneSerializer::encodeBase64(
+				reinterpret_cast<const std::uint8_t*>(work.sculptHeights.data()),
+				work.sculptHeights.size() * sizeof(float));
+
+			CarryOver carry;
+			carry.weightmapTextureId = keepWeightmap;
+			carry.builtRes           = keepBuiltRes;
+			carry.builtChunksPerSide = keepBuiltCps;
+			// The region is the area's bounding box, which TerrainGenerate set.
 			carry.fullRebuild  = wasDirty || work.dirty || keepBuiltRes == 0;
 			carry.weightsDirty = false;
 			carry.regionDirty  = work.regionDirty;

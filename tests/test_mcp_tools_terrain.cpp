@@ -18,7 +18,7 @@
 #include <vector>
 
 // ─── Shaping the ground from outside the editor ──────────────────────────────
-// The four terrain tools exist because entity_set_components can only hand a
+// The five terrain tools exist because entity_set_components can only hand a
 // landscape over as base64. What is worth asking of them is what a running
 // editor could not be asked without a project, a window and a pair of eyes:
 //
@@ -126,7 +126,7 @@ TEST_CASE("Every terrain tool arrives with a schema and a name a client can use"
 	Fixture f;
 
 	const char* expected[] = { "terrain_info", "terrain_heightmap",
-	                           "terrain_sculpt", "terrain_paint" };
+	                           "terrain_sculpt", "terrain_mountain", "terrain_paint" };
 	for (const char* name : expected)
 	{
 		const McpTool* t = f.registry.find(name);
@@ -137,9 +137,10 @@ TEST_CASE("Every terrain tool arrives with a schema and a name a client can use"
 		CHECK_FALSE(t->description.empty());
 	}
 
-	// The two that change the scene are marked — that flag is what makes the
+	// The three that change the scene are marked — that flag is what makes the
 	// bridge write the `MCP:` console line a human searches for afterwards.
 	CHECK(f.registry.find("terrain_sculpt")->mutates);
+	CHECK(f.registry.find("terrain_mountain")->mutates);
 	CHECK(f.registry.find("terrain_paint")->mutates);
 	CHECK_FALSE(f.registry.find("terrain_info")->mutates);
 	CHECK_FALSE(f.registry.find("terrain_heightmap")->mutates);
@@ -322,6 +323,171 @@ TEST_CASE("terrain_sculpt refuses what a client can correct, under the code it b
 	CHECK(codeOf(f.call("terrain_sculpt", json{
 		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 },
 		{ "amount", 5.0 } })) == "play_mode");
+}
+
+// ── terrain_mountain ─────────────────────────────────────────────────────────
+// 65 vertices over 100 m is a 1.5625 m grid, so every probe below sits exactly
+// on a vertex and the numbers are the profile's, not the bilinear sampler's.
+
+TEST_CASE("terrain_mountain rises inside the world area and falls off to nothing at its rim")
+{
+	Fixture f;
+	// Five metres up as well as off to the side: maxHeight is an amount ADDED,
+	// so a tool that treated it like 'set' and subtracted the entity's Y would
+	// peak at 5 above the ground instead of 10.
+	const Entity e = f.makeTerrain(glm::vec3(200.0f, 5.0f, -50.0f), /*res=*/65);
+
+	const ToolResult r = f.call("terrain_mountain", json{
+		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 }, { "radius", 30.0 },
+		{ "maxHeight", 10.0 }, { "falloff", 10.0 }, { "roughness", 0.0 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(r.content["changed"].get<int>() > 0);
+	CHECK(r.content["peakAdded"].get<float>() == doctest::Approx(10.0f));
+	CHECK(r.content["touchedMax"].get<float>() == doctest::Approx(15.0f));
+	CHECK(r.content["regenerated"] == true);
+
+	// Full height at the centre and wherever the rim is at least `falloff` away.
+	CHECK(groundAt(f, e, 200.0f, -50.0f)            == doctest::Approx(15.0f));
+	CHECK(groundAt(f, e, 200.0f + 18.75f, -50.0f)   == doctest::Approx(15.0f));
+	// Halfway through the falloff band: smoothstep(0.5) = 0.5 of the height. On
+	// both axes, so neither was swapped or left in local space.
+	CHECK(groundAt(f, e, 200.0f + 25.0f, -50.0f)    == doctest::Approx(10.0f));
+	CHECK(groundAt(f, e, 200.0f, -50.0f - 25.0f)    == doctest::Approx(10.0f));
+	// 0.31 m inside the rim: all but gone.
+	CHECK(groundAt(f, e, 200.0f + 29.6875f, -50.0f) == doctest::Approx(5.0f).epsilon(0.01));
+	// On and past the rim, and far away: not a millimetre.
+	CHECK(groundAt(f, e, 200.0f + 31.25f, -50.0f)   == doctest::Approx(5.0f));
+	CHECK(groundAt(f, e, 160.0f, -90.0f)            == doctest::Approx(5.0f));
+
+	// Through the gateway, so one undo takes the whole formation back.
+	CHECK(f.regenCalls == 1);
+	const std::string id = f.uuid(e);
+	REQUIRE(f.snapshotUndo.undo());
+	const Entity after = HE::Ed::entityByUuid(f.world, id);
+	REQUIRE((after != entt::null));
+	CHECK(groundAt(f, after, 200.0f, -50.0f) == doctest::Approx(5.0f));
+}
+
+TEST_CASE("terrain_mountain stands on the ground that was sculpted before it")
+{
+	Fixture f;
+	const Entity e = f.makeTerrain(glm::vec3(200.0f, 0.0f, -50.0f), /*res=*/65);
+
+	// A 4 m plateau wider than the mountain will be.
+	REQUIRE_FALSE(f.call("terrain_sculpt", json{
+		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 },
+		{ "op", "set" }, { "height", 4.0 }, { "radius", 40.0 }, { "falloff", 0.0 },
+	}).isError);
+
+	const ToolResult r = f.call("terrain_mountain", json{
+		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 }, { "radius", 20.0 },
+		{ "maxHeight", 10.0 }, { "falloff", 20.0 }, { "roughness", 0.0 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+
+	// Added, not written over: the peak is plateau + mountain, and the plateau
+	// outside the mountain's rim is still exactly the plateau.
+	CHECK(groundAt(f, e, 200.0f, -50.0f)          == doctest::Approx(14.0f));
+	CHECK(groundAt(f, e, 200.0f + 31.25f, -50.0f) == doctest::Approx(4.0f));
+	CHECK(r.content["touchedMin"].get<float>() >= 4.0f);
+}
+
+TEST_CASE("terrain_mountain takes an ellipse, one radius per world axis")
+{
+	Fixture f;
+	const Entity e = f.makeTerrain(glm::vec3(200.0f, 0.0f, -50.0f), /*res=*/65);
+
+	// A ridge along X: 40 m long, 10 m short.
+	const ToolResult r = f.call("terrain_mountain", json{
+		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 },
+		{ "radiusX", 40.0 }, { "radiusZ", 10.0 },
+		{ "maxHeight", 10.0 }, { "falloff", 5.0 }, { "roughness", 0.0 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(r.content["radiusX"].get<float>() == doctest::Approx(40.0f));
+	CHECK(r.content["radiusZ"].get<float>() == doctest::Approx(10.0f));
+
+	// 31 m along the long axis is still on the crest…
+	CHECK(groundAt(f, e, 200.0f + 31.25f, -50.0f) == doctest::Approx(10.0f));
+	// …and 12.5 m along the short one is already outside.
+	CHECK(groundAt(f, e, 200.0f, -50.0f + 12.5f)  == doctest::Approx(0.0f));
+}
+
+TEST_CASE("terrain_mountain gives the same mountain for the same seed, and another for another")
+{
+	auto grow = [](int seed) {
+		Fixture f;
+		const Entity e = f.makeTerrain(glm::vec3(200.0f, 0.0f, -50.0f), /*res=*/65);
+		const ToolResult r = f.call("terrain_mountain", json{
+			{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 }, { "radius", 35.0 },
+			{ "maxHeight", 20.0 }, { "falloff", 15.0 }, { "roughness", 1.0 },
+			{ "octaves", 6 }, { "frequency", 3.0 }, { "seed", seed },
+		});
+		REQUIRE_MESSAGE(!r.isError, codeOf(r));
+		CHECK(r.content["seed"] == seed);
+		CHECK(r.content["octaves"] == 6);
+		return f.terrain(e).sculptHeights;
+	};
+
+	const std::vector<float> a = grow(7);
+	REQUIRE_FALSE(a.empty());
+	CHECK(a == grow(7));        // bit for bit
+	CHECK_FALSE(a == grow(8));
+}
+
+TEST_CASE("terrain_mountain outside the landscape changes nothing and says so")
+{
+	Fixture f;
+	const Entity e = f.makeTerrain();
+
+	const ToolResult r = f.call("terrain_mountain", json{
+		{ "uuid", f.uuid(e) }, { "x", 9000.0 }, { "z", 9000.0 }, { "radius", 30.0 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(r.content["changed"] == 0);
+	CHECK(r.content["regenerated"] == false);
+	CHECK_FALSE(r.content.contains("peakAdded"));
+	// No command, so no undo entry — and the heights baked on the copy were
+	// thrown away with it.
+	CHECK(f.regenCalls == 0);
+	CHECK(f.terrain(e).sculptHeights.empty());
+}
+
+TEST_CASE("terrain_mountain refuses what a client can correct, under the code it branches on")
+{
+	Fixture f;
+	const Entity e = f.makeTerrain();
+	const std::string id = f.uuid(e);
+	auto with = [&](json extra) {
+		json a{ { "uuid", id }, { "x", 200.0 }, { "z", -50.0 }, { "radius", 20.0 } };
+		for (auto it = extra.begin(); it != extra.end(); ++it) a[it.key()] = it.value();
+		return codeOf(f.call("terrain_mountain", a));
+	};
+
+	CHECK(codeOf(f.call("terrain_mountain", json{
+		{ "uuid", "not-a-uuid" }, { "x", 0.0 }, { "z", 0.0 }, { "radius", 5.0 } })) == "not_found");
+	// No centre, and no size at all — neither is the same as zero.
+	CHECK(codeOf(f.call("terrain_mountain", json{
+		{ "uuid", id }, { "x", 200.0 }, { "radius", 20.0 } })) == "invalid_payload");
+	CHECK(codeOf(f.call("terrain_mountain", json{
+		{ "uuid", id }, { "x", 200.0 }, { "z", -50.0 } })) == "invalid_payload");
+	// Only one of the two ellipse radii and no round one to fall back on.
+	CHECK(codeOf(f.call("terrain_mountain", json{
+		{ "uuid", id }, { "x", 200.0 }, { "z", -50.0 }, { "radiusX", 20.0 } })) == "invalid_payload");
+
+	CHECK(with({ { "radius", 0.0 } })     == "invalid_payload");
+	CHECK(with({ { "radiusZ", -3.0 } })   == "invalid_payload");
+	CHECK(with({ { "falloff", -1.0 } })   == "invalid_payload");
+	CHECK(with({ { "roughness", 1.5 } })  == "invalid_payload");
+	CHECK(with({ { "octaves", 0 } })      == "invalid_payload");
+	CHECK(with({ { "octaves", 13 } })     == "invalid_payload");
+	CHECK(with({ { "frequency", 0.0 } })  == "invalid_payload");
+	// None of those left anything behind.
+	CHECK(f.regenCalls == 0);
+
+	f.playing = true;
+	CHECK(with({}) == "play_mode");
 }
 
 TEST_CASE("terrain_heightmap reads back what terrain_sculpt wrote, as numbers")
