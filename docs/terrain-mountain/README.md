@@ -20,7 +20,15 @@ HE_SKY_TIME=30 python3 scripts/he_shot.py OUT.png MOUNTAINTEST=after \
   CAMX=0 CAMY=345 CAMZ=180 PITCH=-12 YAW=0 RHI=Metal
 ```
 
-Debug-Editor: `HE_SHOT_TIMEOUT=600` setzen, der Metal-Init braucht dort Minuten.
+Die Bilder hier entstanden nicht über `he_shot.py` selbst. Der Editor wurde mit
+genau diesen `HE_DUMP_*`-Variablen direkt gestartet, jeder Lauf mit eigener
+Ausgabe über `script -q`, weil sich parallele Läufe sonst `HorizonEngine.log`
+teilen. Der Codepfad ist derselbe.
+
+Debug-Editor: der Metal-Init braucht dort unter Last über zehn Minuten (hier
+~11–12 min pro Lauf, Low-Power-Mode, parallele Builds). `HE_SHOT_TIMEOUT=900`
+oder mehr setzen und den Aufruf wegen der 10-Minuten-Grenze der Bash-Aufrufe
+mit einer Warteschleife abwarten. Ein Release-Editor braucht nur Sekunden.
 Bereich und Parameter lassen sich per `MTRADIUS`, `MTHEIGHT`, `MTFALLOFF`,
 `MTROUGH` und `MTSEED` ändern, ohne neu zu bauen.
 
@@ -32,3 +40,6 @@ Befund:
   x 377–869, y 215–469 (Berg plus Schlagschatten). Außerhalb höchstens 1/255.
 - Im Bild steht ein Berg mit rauem fBm-Gipfel, dessen Flanke ohne Stufe in die
   Ebene ausläuft. Beide Läufe: `draws=16 tris=139264 visible=16/16`.
+- Die 4-m-Wellen der Grundfläche sind aus dieser Entfernung nicht zu sehen, sie
+  wirkt im Bild flach. Dass der Berg additiv auf das bestehende Relief kommt,
+  zeigt dieses Bild also nicht, das belegt `tests/test_terrain_generate.cpp`.
