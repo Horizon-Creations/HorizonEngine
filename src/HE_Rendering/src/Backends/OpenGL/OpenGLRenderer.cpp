@@ -64,14 +64,15 @@ static std::vector<float> BuildSkyEnvCube(int faceN, const glm::vec3& sunDir)
 	// HE::SkyColorCPU is a pure function, so this is data-race-free. Uses the engine's
 	// portable thread pool — NOT std::execution::par (which libc++/macOS lacks). At
 	// 128² this serial bake was ~47 ms (a per-frame stall under day-night auto-advance);
-	// parallel it is a few ms.
+	// parallel it is a few ms. Grain 1: a row is tens of µs of work, far above the
+	// default grain's assumption of a cheap per-index body.
 	parallel_for(static_cast<size_t>(6) * faceN, [&](size_t idx)
 	{
 		const int f = static_cast<int>(idx / faceN);
 		const int t = static_cast<int>(idx % faceN);
 		HE::BuildSkyEnvFaceRow(faceN, f, t, sunDir,
 		                       &px[((static_cast<size_t>(f) * faceN + t) * faceN) * 4]);
-	}, "SkyEnvBake");
+	}, "SkyEnvBake", 1);
 	return px;
 }
 

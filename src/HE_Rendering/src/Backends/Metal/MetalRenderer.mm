@@ -12551,6 +12551,8 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 	// to be cheap at night only because the atmosphere integral was wrongly
 	// short-circuiting there (see atmoRaySphere); with that fixed, twilight costs
 	// what daylight always did, so the parallelisation is no longer optional.
+	// Grain 1: a row is tens of µs of work, far above the default grain's
+	// assumption of a cheap per-index body.
 	std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
 	parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
 	{
@@ -12558,7 +12560,7 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 		const int t = static_cast<int>(idx % N);
 		HE::BuildSkyEnvFaceRow(N, f, t, sunDir,
 		                       &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
-	}, "SkyEnvBake");
+	}, "SkyEnvBake", 1);
 	for (int f = 0; f < 6; ++f)
 		[cube replaceRegion:MTLRegionMake2D(0, 0, N, N) mipmapLevel:0 slice:f
 		          withBytes:&px[(static_cast<size_t>(f) * N * N) * 4]
