@@ -63,6 +63,12 @@ namespace
     }
 }
 
+float terrainFbm(int seed, float x, float z, int octaves,
+                 float frequency, float lacunarity, float gain)
+{
+    return fbm(seed, x, z, octaves, frequency, lacunarity, gain);
+}
+
 std::vector<float> computeTerrainHeightField(const TerrainComponent& tc)
 {
     const uint32_t res       = std::clamp(tc.resolution, 2u, 1024u);

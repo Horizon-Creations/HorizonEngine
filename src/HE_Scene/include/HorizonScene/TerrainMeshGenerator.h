@@ -21,6 +21,13 @@ float terrainHeightAt(const TerrainComponent& tc, float localX, float localZ);
 // sculpting keeps editing TerrainComponent::sculptHeights, which feeds straight in.
 std::vector<float> computeTerrainHeightField(const TerrainComponent& tc);
 
+// The fBm computeTerrainHeightField seeds a terrain with: value noise summed over
+// `octaves` (clamped 1..12), normalised to [0, 1]. Exposed so a generator that
+// shapes PART of a landscape (TerrainGenerate) grows the same kind of relief as
+// a seeded one, rather than a second noise that looks subtly different beside it.
+float terrainFbm(int seed, float x, float z, int octaves,
+                 float frequency, float lacunarity, float gain);
+
 // Bilinearly resample a square height field oldRes×oldRes → newRes×newRes. Used to
 // snap a terrain to a 2ⁿ+1 resolution so chunk LOD0 vertices land EXACTLY on source
 // grid points (no bilinear smear of sculpted detail). One-time, near-lossless for a
