@@ -78,8 +78,11 @@ diesem Frame. Ausgewertet mit `scripts/perf/step3_frames.py` aus den vollständi
 | S1 (mit `sample`, gestört) | aus | 38.2 | 12.1 | 24.1/65.3 | 0.07/56.7 | 3.58/29.29/46.8 | 1207/3000 | 0.47/24.6 | 0.062 | 245 |
 | **N1** (Load ~10,5) | aus | 36.8 | 12.0 | 25.4/65.9 | 0.08/52.3 | **14.46**/31.56/52.8 | **381/600** | **8.72**/25.7 | 0.073 | 305 |
 | A1 (Alloc-Probe, Load ~10,5) | aus | 37.2 | 12.5 | 23.6/65.3 | 0.08/53.0 | 11.56/33.32/56.0 | 420/600 | 4.90/23.2 | 0.064 | 316 |
-| T1 (Time Profiler, Load 11 → 5) | aus | 41.2 | 14.0 | 11.8/66.2 | 7.67/60.6 | 2.57/3.11/14.8 | 92/3000 | 0.33/0.43 | 0.056 | 429 |
+| T1 (Time Profiler, Load 11 → 5) | aus | 41.2 | 14.0 | 11.8/66.2 | 7.67/60.6 | 2.57/3.11/14.8 | 92/3000 | 0.33/0.43 | 0.056 | 429 ² |
 | **N2** (Load ~2) | aus | 40.1 | 14.1 | 10.9/66.6 | 9.45/61.5 | **2.48**/2.88/3.4 | **2/600** | **0.31**/0.38 | 0.055 | 326 |
+
+² T1 lief mit angehängtem `xctrace` (Time Profiler). Der höhere RSS ist nicht untersucht; alle Läufe ohne Werkzeug am
+Prozess liegen bei 305–329 MB.
 
 Beobachtungen:
 - **Die FPS hängen unter gesperrtem Schirm nicht an der CPU.** N2 (CPU ohne ND p50 2,5 ms, GPU frei) schafft nur 40 FPS,
@@ -176,8 +179,9 @@ Systemlast. extract+cull p50 8,72 → 0,31 ms, Stall-Frames 381 → 2 von 600.
     - `:16581` (`CullCameraObjects` für SSAO und Scene)
     - Darin `parallel_for` in `FrustumCuller.cpp:61`.
 
-**Folgerung:** Die Frame-Jobs sind 1 000-fach kleiner als der Preis, sie zu verteilen. Solange alle Kerne frei sind, fällt
-das kaum auf (0,3 ms). Sobald der Rechner etwas anderes tut (Browser, Build, Spotlight, zweiter Engine-Prozess), wartet der
+**Folgerung:** Das Verteilen kostet mehr, als die verteilte Arbeit einbringt. Der Hauptthread verbringt in extract+cull
+bei niedriger Last das ~6-Fache der Worker-Arbeit (0,31 vs. 0,055 ms pro Frame, N2) und unter Last das ~120-Fache
+(8,72 vs. 0,073 ms, N1). Ein einzelner Job rechnet p50 0,7 µs. Solange alle Kerne frei sind, fällt das kaum auf (0,3 ms). Sobald der Rechner etwas anderes tut (Browser, Build, Spotlight, zweiter Engine-Prozess), wartet der
 Hauptthread auf Worker, die das System hinter andere Arbeit einreiht. Die Worker laufen dabei ohnehin auf E-Cores
 (Abschnitt 3.1). **Das trifft Editor und Runtime gleich**: `RenderExtractor`, `FrustumCuller` und
 `JobSystem` gehören zur Engine, nicht zum Editor. Nur der Viewport-Extract ist editor-eigen.
