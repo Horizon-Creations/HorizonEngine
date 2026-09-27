@@ -477,6 +477,7 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		"Landscape/Sculpt",   "Landscape/Paint",
 		"Landscape/Raise",    "Landscape/Lower",   "Landscape/Smooth",
 		"Landscape/Flatten",  "Landscape/Ramp",    "Landscape/Roughen",
+		"Landscape/Mountain", "Landscape/Rectangle", "Landscape/Circle",
 		// The Source Control window's commit button says "Commit 3 changes", so
 		// there is no fixed label either.
 		"sc.commit",

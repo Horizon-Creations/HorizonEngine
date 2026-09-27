@@ -9,6 +9,7 @@
 #include <HorizonScene/TerrainPaint.h>   // landscape layer brush
 #include <HorizonScene/FoliagePaint.h>   // foliage density-mask brush
 #include <HorizonScene/TerrainHeightmap.h> // greyscale heightmap → heights
+#include <HorizonScene/TerrainGenerate.h>  // Mountain: a formation grown in a dragged area
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -20,6 +21,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <random>                        // Mountain's "New Seed"
 #include <string>
 #include <vector>
 
@@ -31,7 +33,7 @@ namespace TerrainTools
 {
 
 // Landscape sculpt tool state (shared between the panel and viewport)
-enum class TerrainTool { Raise, Lower, Smooth, Flatten, Ramp, Roughen };
+enum class TerrainTool { Raise, Lower, Smooth, Flatten, Ramp, Roughen, Mountain };
 static TerrainTool s_terrainTool     = TerrainTool::Raise;
 // Landscape PAINT mode: the same brush writes layer weights instead of heights.
 // The paintable layers come from the assigned material's Landscape Layer Blend
@@ -56,6 +58,40 @@ static float       s_flattenTarget   = 0.0f;    // Flatten: height to pull towar
 static glm::vec3   s_rampStartWS{};             // Ramp: world-space start of the gradient
 static float       s_rampStartH      = 0.0f;    // Ramp: terrain height at the start point
 static bool        s_rampValid       = false;   // Ramp: a start point was captured this stroke
+// Mountain is an AREA tool, not a brush: the drag marks the area (corner to
+// corner for a rectangle, centre to rim for a circle) and the formation is
+// grown once, when the button comes up — TerrainGenerate::mountain does the
+// work. Radius/Falloff/Strength above do not apply to it; it has its own form.
+enum class MountainShape { Rectangle, Circle };
+static MountainShape           s_mountainShape = MountainShape::Rectangle;
+static TerrainGenerate::Params s_mountain;      // Max Height, Falloff, Roughness, Octaves, Frequency, Seed
+static glm::vec3   s_areaStartWS{};             // Mountain: world-space point where the drag began
+static glm::vec3   s_areaEndWS{};               // Mountain: last ground point the drag reached
+static bool        s_areaValid       = false;   // Mountain: the drag began on the ground
+
+namespace
+{
+	// The area a Mountain drag from `a` to `b` marks, in the same space as the
+	// two points (world XZ here; the caller moves it to terrain-local). A
+	// rectangle becomes the ellipse inscribed in it, which is what
+	// TerrainGenerate::Area is.
+	TerrainGenerate::Area dragArea(const glm::vec3& a, const glm::vec3& b, MountainShape shape)
+	{
+		TerrainGenerate::Area area;
+		if (shape == MountainShape::Circle)
+		{
+			const float r = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z));
+			area.centerX = a.x;  area.centerZ = a.z;
+			area.radiusX = r;    area.radiusZ = r;
+		}
+		else
+		{
+			area.centerX = (a.x + b.x) * 0.5f;           area.centerZ = (a.z + b.z) * 0.5f;
+			area.radiusX = std::abs(b.x - a.x) * 0.5f;   area.radiusZ = std::abs(b.z - a.z) * 0.5f;
+		}
+		return area;
+	}
+}
 
 void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
                       const ImVec2& rectMin, const ImVec2& rectMax,
@@ -174,29 +210,34 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 				}
 			}
 
-			// ── Draw brush circles on the terrain surface ─────────────
-			if (hasHit && !navigating)
+			// Mountain is armed only on the Sculpt page: in Paint or Foliage
+			// mode the same brush state paints, whatever tool Sculpt left armed.
+			const bool mountainArmed = s_terrainTool == TerrainTool::Mountain
+			                        && !s_landscapePaint && !s_landscapeFoliage;
+
+			ImDrawList* dl    = ImGui::GetWindowDrawList();
+			const float viewW = rectMax.x - rectMin.x;
+			const float viewH = rectMax.y - rectMin.y;
+			constexpr float kPi2 = 6.28318530f;
+
+			// Project a world XZ point at its actual terrain height → screen
+			auto projectPt = [&](float wx, float wz, ImVec2& outPt) -> bool
 			{
-				ImDrawList* dl    = ImGui::GetWindowDrawList();
-				const float viewW = rectMax.x - rectMin.x;
-				const float viewH = rectMax.y - rectMin.y;
+				const float wy = terrainWorldY + sampleH(wx, wz);
+				glm::vec4 clip = VP * glm::vec4(wx, wy, wz, 1.0f);
+				if (clip.w <= 0.0f) return false;
+				clip /= clip.w;
+				if (clip.z < -1.0f || clip.z > 1.0f) return false;
+				outPt = ImVec2(
+					rectMin.x + (clip.x * 0.5f + 0.5f) * viewW,
+					rectMin.y + (0.5f   - clip.y * 0.5f) * viewH);
+				return true;
+			};
 
-				// Project a world XZ point at its actual terrain height → screen
-				auto projectPt = [&](float wx, float wz, ImVec2& outPt) -> bool
-				{
-					const float wy = terrainWorldY + sampleH(wx, wz);
-					glm::vec4 clip = VP * glm::vec4(wx, wy, wz, 1.0f);
-					if (clip.w <= 0.0f) return false;
-					clip /= clip.w;
-					if (clip.z < -1.0f || clip.z > 1.0f) return false;
-					outPt = ImVec2(
-						rectMin.x + (clip.x * 0.5f + 0.5f) * viewW,
-						rectMin.y + (0.5f   - clip.y * 0.5f) * viewH);
-					return true;
-				};
-
+			// ── Draw brush circles on the terrain surface ─────────────
+			if (hasHit && !navigating && !mountainArmed)
+			{
 				constexpr int   kSeg = 48;
-				constexpr float kPi2 = 6.28318530f;
 				const float totalR   = s_brushRadius + s_falloffRadius;
 
 				// The foliage brush says what it will do by colour: green
@@ -237,6 +278,88 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 					if (projectPt(s_rampStartWS.x, s_rampStartWS.z, ps) &&
 					    projectPt(hitWS.x, hitWS.z, pe))
 						dl->AddLine(ps, pe, IM_COL32(120,200,255,230), 2.0f);
+				}
+			}
+
+			// ── Mountain: the area being dragged out ──────────────────
+			// The far corner follows the pointer while it is on the ground;
+			// off the ground (past the edge, into the sky) the last point on
+			// it stands, and that is what a release there applies.
+			if (mountainArmed && s_areaValid && s_brushWasDown && hasHit)
+				s_areaEndWS = hitWS;
+			// While the button is held, the outline lies on the ground: the
+			// dragged rectangle (faint), the rim the formation fades to 0 at
+			// (bright), and inside it the line where the falloff ends and the
+			// full height begins (faint). Before a drag, a small marker shows
+			// where the area would start.
+			if (mountainArmed && !navigating)
+			{
+				const ImU32 rimCol   = IM_COL32(255,196,110,230);
+				const ImU32 faintCol = IM_COL32(255,196,110,110);
+				if (s_areaValid && s_brushWasDown)
+				{
+					// A path over the ground, projected point by point so it
+					// follows the relief instead of cutting through hills.
+					auto groundPath = [&](auto&& at, int segments, bool closed, ImU32 col, float thick)
+					{
+						ImVec2 prev{}; bool prevValid = false;
+						const int n = closed ? segments : segments - 1;
+						for (int i = 0; i <= n; ++i)
+						{
+							const glm::vec2 p = at(static_cast<float>(i % segments)
+							                       / static_cast<float>(segments));
+							ImVec2 cur{}; const bool curValid = projectPt(p.x, p.y, cur);
+							if (prevValid && curValid) dl->AddLine(prev, cur, col, thick);
+							prev = cur; prevValid = curValid;
+						}
+					};
+
+					const TerrainGenerate::Area area = dragArea(s_areaStartWS, s_areaEndWS, s_mountainShape);
+					if (s_mountainShape == MountainShape::Rectangle)
+					{
+						const glm::vec2 c0(std::min(s_areaStartWS.x, s_areaEndWS.x),
+						                   std::min(s_areaStartWS.z, s_areaEndWS.z));
+						const glm::vec2 c1(std::max(s_areaStartWS.x, s_areaEndWS.x),
+						                   std::max(s_areaStartWS.z, s_areaEndWS.z));
+						const glm::vec2 corners[5] = { c0, { c1.x, c0.y }, c1, { c0.x, c1.y }, c0 };
+						for (int e = 0; e < 4; ++e)
+							groundPath([&](float t) { return glm::mix(corners[e], corners[e + 1], t); },
+							           24, false, faintCol, 1.0f);
+					}
+					if (area.radiusX > 0.0f && area.radiusZ > 0.0f)
+					{
+						auto rimAt = [&](float t)
+						{
+							const float a = kPi2 * t;
+							return glm::vec2(area.radiusX * std::cos(a), area.radiusZ * std::sin(a));
+						};
+						groundPath([&](float t) { return glm::vec2(area.centerX, area.centerZ) + rimAt(t); },
+						           64, true, rimCol, 1.5f);
+						// Where the full height begins: the rim pulled in along
+						// each ray by the falloff, capped at the short radius —
+						// the same geometry TerrainGenerate's blend uses. At or
+						// past the short radius it collapses to the crest.
+						const float f = std::min(std::max(0.0f, s_mountain.falloff),
+						                         std::min(area.radiusX, area.radiusZ));
+						if (f > 0.0f)
+							groundPath([&](float t)
+							{
+								const glm::vec2 rim = rimAt(t);
+								const float len = glm::length(rim);
+								const float k   = len > 1e-4f ? std::max(0.0f, 1.0f - f / len) : 0.0f;
+								return glm::vec2(area.centerX, area.centerZ) + rim * k;
+							}, 64, true, faintCol, 1.0f);
+					}
+				}
+				else if (hasHit)
+				{
+					ImVec2 p{};
+					if (projectPt(hitWS.x, hitWS.z, p))
+					{
+						dl->AddCircle(p, 6.0f, rimCol, 16, 1.5f);
+						dl->AddLine(ImVec2(p.x - 10.0f, p.y), ImVec2(p.x + 10.0f, p.y), rimCol, 1.0f);
+						dl->AddLine(ImVec2(p.x, p.y - 10.0f), ImVec2(p.x, p.y + 10.0f), rimCol, 1.0f);
+					}
 				}
 			}
 
@@ -296,7 +419,56 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			// Sculpting is suppressed while painting layers or foliage.
 			const bool sculptDown = lmbDown && !s_landscapePaint && !s_landscapeFoliage;
 
-			if (sculptDown && !s_brushWasDown)
+			// ── Mountain: mark the area on press, grow it on release ──
+			// Nothing moves while dragging — the outline above is the preview —
+			// so the undo step is taken on release, right before the one call
+			// that changes the heights, and a click that marked no area takes
+			// none at all.
+			if (mountainArmed)
+			{
+				if (sculptDown && !s_brushWasDown)
+				{
+					s_areaValid = hasHit;
+					if (hasHit) s_areaStartWS = s_areaEndWS = hitWS;
+				}
+				else if (!sculptDown && s_brushWasDown && s_areaValid)
+				{
+					s_areaValid = false;
+					TerrainGenerate::Area area = dragArea(s_areaStartWS, s_areaEndWS, s_mountainShape);
+					area.centerX -= terrainWorldPos.x;   // world → terrain-local
+					area.centerZ -= terrainWorldPos.z;
+					// Narrower than a grid cell is a click, not an area; wholly
+					// off the landscape, or with no height, nothing would move.
+					const float minR = std::min(tcStepX, tcStepZ);
+					const bool onTerrain =
+						area.centerX - area.radiusX < tcHalfX && area.centerX + area.radiusX > -tcHalfX &&
+						area.centerZ - area.radiusZ < tcHalfZ && area.centerZ + area.radiusZ > -tcHalfZ;
+					if (area.radiusX >= minR && area.radiusZ >= minR && onTerrain
+					    && s_mountain.maxHeight != 0.0f)
+					{
+						if (ctx.undoSys) ctx.undoSys->snapshotNow("Generate Mountain");
+						const TerrainGenerate::Result res = TerrainGenerate::mountain(tc, area, s_mountain);
+						if (res.changed > 0)
+						{
+							// The foliage stands on ground that just moved, as
+							// after a heightmap import.
+							if (auto* fol = terrainReg.try_get<FoliageComponent>(terrainEnt))
+								fol->dirty = true;
+							if (const auto* mc = terrainReg.try_get<MeshComponent>(terrainEnt))
+								invalidateMeshAabb(mc->meshAssetId);
+							// mountain() set the region-dirty rect to the area's
+							// bounding box, so only the chunks under it rebuild.
+							if (ctx.contentManager)
+								TerrainSystem::updateTerrains(*ctx.world, *ctx.contentManager,
+								                              ctx.renderer);
+							HE_LOG_INFO(Editor, "Mountain generated: %u vertices, peak %+.1f m",
+							            res.changed, res.peakAdded);
+						}
+					}
+				}
+			}
+
+			if (sculptDown && !s_brushWasDown && !mountainArmed)
 			{
 				if (ctx.undoSys) ctx.undoSys->snapshotNow("Sculpt Landscape");
 				// Lazy-init sculptHeights from current terrain geometry
@@ -322,7 +494,7 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			}
 			s_brushWasDown = lmbDown;
 
-			if (sculptDown && hasHit && !tc.sculptHeights.empty())
+			if (sculptDown && hasHit && !tc.sculptHeights.empty() && !mountainArmed)
 			{
 				const float totalR  = s_brushRadius + s_falloffRadius;
 				const float totalR2 = totalR * totalR;
@@ -872,32 +1044,39 @@ void renderPanel(AppContext& ctx)
         // ── Sculpt tools (hidden while painting layers or foliage) ───────
         if (!s_landscapePaint && !s_landscapeFoliage)
         {
-        // Six brushes, one armed. A well per row rather than radio buttons: the
-        // armed tool is what the mouse will do in the viewport, and that deserves
-        // the same "this is on" paint the gizmo tools get.
+        // Six brushes and the Mountain area tool, one armed. A well per row
+        // rather than radio buttons: the armed tool is what the mouse will do in
+        // the viewport, and that deserves the same "this is on" paint the gizmo
+        // tools get. Mountain sits in a row of its own — it is not a brush, it
+        // marks an area and acts once.
         {
             namespace T = EditorToolbar;
             struct Tool { const char* label; T::IconFn icon; const char* tip; };
             static const Tool kTools[] = {
-                { "Raise",   T::iconArrowUp,   "Pull the ground up" },
-                { "Lower",   T::iconArrowDown, "Push the ground down" },
-                { "Smooth",  T::iconRefresh,   "Average out the neighbourhood" },
-                { "Flatten", T::iconGrid,      "Level towards the first height touched" },
-                { "Ramp",    T::iconFlip,      "Blend between two heights along the drag" },
-                { "Roughen", T::iconSparkle,   "Add noise to the surface" },
+                { "Raise",    T::iconArrowUp,   "Pull the ground up" },
+                { "Lower",    T::iconArrowDown, "Push the ground down" },
+                { "Smooth",   T::iconRefresh,   "Average out the neighbourhood" },
+                { "Flatten",  T::iconGrid,      "Level towards the first height touched" },
+                { "Ramp",     T::iconFlip,      "Blend between two heights along the drag" },
+                { "Roughen",  T::iconSparkle,   "Add noise to the surface" },
+                { "Mountain", T::iconMountain,  "Grow a mountain in the area you drag out" },
             };
-            // Keyed by the tool's own label — the six entries say what a drag
-            // actually does, which the six four-word tips could only hint at.
+            // Keyed by the tool's own label — the entries say what a drag
+            // actually does, which the four-word tips could only hint at.
             static const char* kToolHelp[] = {
                 "Landscape/Raise",   "Landscape/Lower",   "Landscape/Smooth",
                 "Landscape/Flatten", "Landscape/Ramp",    "Landscape/Roughen",
+                "Landscape/Mountain",
             };
+            static_assert(sizeof(kTools) / sizeof(kTools[0]) == sizeof(kToolHelp) / sizeof(kToolHelp[0]));
+            static_assert(sizeof(kTools) / sizeof(kTools[0]) == static_cast<size_t>(TerrainTool::Mountain) + 1);
+            static const int kRows[][2] = { { 0, 3 }, { 3, 6 }, { 6, 7 } };   // [first, end) per row
             const int toolIdx = static_cast<int>(s_terrainTool);
-            for (int row = 0; row < 2; ++row)
+            for (const auto& row : kRows)
             {
                 T::Bar bar;
                 bar.group();
-                for (int i = row * 3; i < row * 3 + 3; ++i)
+                for (int i = row[0]; i < row[1]; ++i)
                 {
                     char id[24];
                     std::snprintf(id, sizeof(id), "##lsTool%d", i);
@@ -912,19 +1091,73 @@ void renderPanel(AppContext& ctx)
         }
 
         ImGui::Spacing();
-        ImGui::DragFloat("Radius##brush",   &s_brushRadius,   0.5f,  0.5f, 500.0f, "%.1f m");
-        EditorWidgets::helpForLabel("Radius##brush");
-        ImGui::DragFloat("Falloff##brush",  &s_falloffRadius, 0.5f,  0.0f, 500.0f, "%.1f m");
-        EditorWidgets::helpForLabel("Falloff##brush");
-        ImGui::DragFloat("Strength##brush", &s_brushStrength, 0.1f,  0.1f,  50.0f, "%.2f");
-        EditorWidgets::helpForLabel("Strength##brush");
-        s_brushRadius   = std::max(0.5f, s_brushRadius);
-        s_falloffRadius = std::max(0.0f, s_falloffRadius);
+        if (s_terrainTool == TerrainTool::Mountain)
+        {
+            // The area's shape: a dragged rectangle grows the ellipse inscribed
+            // in it, a circle is dragged from its centre out to its rim.
+            {
+                namespace T = EditorToolbar;
+                T::Bar bar;
+                bar.group();
+                if (bar.item("##mtRect", T::iconFit, "Rectangle",
+                             s_mountainShape == MountainShape::Rectangle, true,
+                             "Drag corner to corner", "Landscape/Rectangle"))
+                    s_mountainShape = MountainShape::Rectangle;
+                if (bar.item("##mtCircle", T::iconCircle, "Circle",
+                             s_mountainShape == MountainShape::Circle, true,
+                             "Drag from the centre to the rim", "Landscape/Circle"))
+                    s_mountainShape = MountainShape::Circle;
+                bar.endGroup();
+            }
+            ImGui::DragFloat("Max Height##mountain", &s_mountain.maxHeight, 0.5f, -2000.0f, 2000.0f, "%.1f m");
+            EditorWidgets::helpForLabel("Max Height##mountain");
+            ImGui::DragFloat("Falloff##mountain",    &s_mountain.falloff,   0.5f,  0.0f,  5000.0f, "%.1f m");
+            EditorWidgets::helpForLabel("Falloff##mountain");
+            ImGui::SliderFloat("Roughness##mountain", &s_mountain.roughness, 0.0f, 1.0f, "%.2f");
+            EditorWidgets::helpForLabel("Roughness##mountain");
+            ImGui::SliderInt("Octaves##mountain",     &s_mountain.octaves,   1, 12);
+            EditorWidgets::helpForLabel("Octaves##mountain");
+            ImGui::DragFloat("Frequency##mountain",  &s_mountain.frequency, 0.02f, 0.1f,  16.0f, "%.2f");
+            EditorWidgets::helpForLabel("Frequency##mountain");
+            ImGui::DragInt("Seed##mountain",         &s_mountain.seed,      1, 0, 0x7fffffff);
+            EditorWidgets::helpForLabel("Seed##mountain");
+            if (EditorWidgets::button("New Seed##mountain"))
+            {
+                // Any other seed: a fresh mountain from the same settings.
+                static std::mt19937 rng{ std::random_device{}() };
+                const int prev = s_mountain.seed;
+                while (s_mountain.seed == prev)
+                    s_mountain.seed = static_cast<int>(rng() & 0x7fffffffu);
+            }
+            EditorWidgets::helpForLabel("New Seed##mountain");
+            s_mountain.falloff   = std::max(0.0f, s_mountain.falloff);
+            s_mountain.roughness = std::clamp(s_mountain.roughness, 0.0f, 1.0f);
+            s_mountain.octaves   = std::clamp(s_mountain.octaves, 1, 12);
+            s_mountain.frequency = std::max(0.1f, s_mountain.frequency);
+            s_mountain.seed      = std::max(0, s_mountain.seed);
+        }
+        else
+        {
+            ImGui::DragFloat("Radius##brush",   &s_brushRadius,   0.5f,  0.5f, 500.0f, "%.1f m");
+            EditorWidgets::helpForLabel("Radius##brush");
+            ImGui::DragFloat("Falloff##brush",  &s_falloffRadius, 0.5f,  0.0f, 500.0f, "%.1f m");
+            EditorWidgets::helpForLabel("Falloff##brush");
+            ImGui::DragFloat("Strength##brush", &s_brushStrength, 0.1f,  0.1f,  50.0f, "%.2f");
+            EditorWidgets::helpForLabel("Strength##brush");
+            s_brushRadius   = std::max(0.5f, s_brushRadius);
+            s_falloffRadius = std::max(0.0f, s_falloffRadius);
+        }
 
         ImGui::Spacing();
         // Per-tool hint — Ramp and Flatten read the point where the drag began.
         switch (s_terrainTool)
         {
+        case TerrainTool::Mountain:
+            ImGui::TextDisabled(s_mountainShape == MountainShape::Circle
+                                    ? "Drag from the centre out to the rim;"
+                                    : "Drag across the ground to mark the area;");
+            ImGui::TextDisabled("the mountain grows when you let go");
+            break;
         case TerrainTool::Ramp:
             ImGui::TextDisabled("Drag from one spot to another:");
             ImGui::TextDisabled("ramps between their heights");
