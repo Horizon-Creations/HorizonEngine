@@ -462,10 +462,72 @@ namespace HE
 			// frame is always recorded whole or not at all.
 			profiler.beginFrame(static_cast<double>(measuredDt) * 1000.0);
 
+			// ── HE_PERF_INPUT_EVENTS: synthetic mouse load (perf audit) ─────
+			// Every scripted capture runs with nobody at the mouse, so it can only
+			// say what event handling costs when there are no events. This pushes
+			// N motion events per frame into the SDL queue right before the poll —
+			// what a 1000 Hz mouse delivers at 60 FPS is ~16 — sweeping slowly
+			// across the primary window so ImGui's hover state actually changes
+			// and the frame pays for that too, not just for the dispatch. Only
+			// ImGui and Input see the position: SDL's own mouse state is not
+			// touched by a pushed event. Read once; off (0) unless set.
+			{
+				static const int kSynthMotion = []
+				{
+					const char* v = std::getenv("HE_PERF_INPUT_EVENTS");
+					return (v && *v) ? std::max(0, std::atoi(v)) : 0;
+				}();
+				SDL_Window* sw = m_window ? m_window->GetNativeWindow() : nullptr;
+				if (kSynthMotion > 0 && sw)
+				{
+					int w = 0, h = 0;
+					SDL_GetWindowSize(sw, &w, &h);
+					// One row per 240 frames (~4 s at 60 FPS), 40 points apart —
+					// slow enough to dwell on a widget, so tooltips and help
+					// lookups get their chance.
+					static float s_x = 0.0f, s_y = 20.0f;
+					const float step = w > 0 ? static_cast<float>(w) / (240.0f * kSynthMotion) : 1.0f;
+					static bool s_logged = false;
+					if (!s_logged)
+					{
+						s_logged = true;
+						// The ImGui backend replaces a pushed position with the real
+						// cursor when the app has keyboard focus and no window is
+						// hovered; the log has to say whether that could happen.
+						HE_LOG_INFO(Core, "HE_PERF_INPUT_EVENTS=%d: pushing motion events, "
+						            "keyboard focus %s", kSynthMotion,
+						            SDL_GetKeyboardFocus() ? "held" : "none");
+					}
+					for (int i = 0; i < kSynthMotion; ++i)
+					{
+						s_x += step;
+						if (s_x >= static_cast<float>(w))
+						{
+							s_x = 0.0f;
+							s_y += 40.0f;
+							if (s_y >= static_cast<float>(h)) s_y = 20.0f;
+						}
+						SDL_Event e{};
+						e.type            = SDL_EVENT_MOUSE_MOTION;
+						e.motion.windowID = SDL_GetWindowID(sw);
+						e.motion.which    = 1;
+						e.motion.x        = s_x;
+						e.motion.y        = s_y;
+						e.motion.xrel     = step;
+						SDL_PushEvent(&e);
+					}
+				}
+			}
+
 			{
 				HE_PROFILE_SCOPE_N("PollEvents");
 				m_window->PollEvents();
 			}
+			// The positive control for HE_PERF_INPUT_EVENTS: a cost that does not
+			// move with N only means something if the events were really handled.
+			if (m_frameIndex == 100 && std::getenv("HE_PERF_INPUT_EVENTS"))
+				HE_LOG_INFO(Core, "HE_PERF_INPUT_EVENTS: frame 100 dispatched %u events",
+				            m_window->EventsLastPoll());
 			if (m_window->ShouldClose()) break;
 
 			// Snapshot pad state right after event polling so hot-plug from
