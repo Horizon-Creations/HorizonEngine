@@ -16,6 +16,7 @@
 
 #ifdef HE_IMGUI_ENABLED
 #include <imgui.h>
+#include "TextureViewerPanel.h"  // a single imported image opens in the viewer
 #endif
 
 namespace TextureColourSpaceDialog
@@ -97,6 +98,12 @@ void applyImport(AppContext& ctx)
 		if (Importer::importSource(r.path, s_root, r.relDir, {}, options)) ++imported;
 		else HE_LOG_ERROR(Editor, "%s", ("Editor: import failed for " + r.path).c_str());
 	}
+	// One image: show it, in the texture viewer, so the import is seen rather
+	// than assumed. A folder's worth of textures must not open a folder's worth
+	// of tabs.
+	if (s_rows.size() == 1 && imported == 1)
+		TextureViewerPanel::requestOpen(
+			TextureViewerPanel::importedAssetPath(s_rows[0].path, s_root, s_rows[0].relDir));
 	HE_LOG_INFO(Editor, "%s",
 		("Editor: imported " + std::to_string(imported) + " of "
 		 + std::to_string(s_rows.size()) + " texture(s)").c_str());

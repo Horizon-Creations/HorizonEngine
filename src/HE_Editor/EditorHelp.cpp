@@ -4300,6 +4300,12 @@ namespace
 	  "The height the layout is designed for. Together with the width it fixes "
 	  "the aspect the anchors were placed against.",
 	  "", "ui#designer" },
+	{ "Canvas/Preview size", "",
+	  "Which screen the designer shows this canvas on. Authored size draws it as "
+	  "designed; any other entry resolves it for that screen through the Scale mode "
+	  "above, so anchors and stretching can be checked without running the game. "
+	  "A view setting only, never saved with the widget.",
+	  "", "ui#designer" },
 	{ "Canvas/Scale", "Canvas Scale",
 	  "How this canvas meets a screen that is not exactly the size above. Stretch "
 	  "fits each axis separately: the canvas always covers the screen exactly, "
@@ -5449,6 +5455,33 @@ namespace
 	  "What a scrollbar's thumb is filled with. There is no track behind it — an "
 	  "empty groove is furniture nobody reads.",
 	  "", "ui#elements" },
+	{ "UI Widget/9-Slice", "",
+	  "Stretches a picture without stretching its border: the four margins cut the "
+	  "texture into a frame and a centre, the corners keep their size and only the "
+	  "edges and the centre grow with the box. The heading shows the margins, or "
+	  "\"off\" while all four are 0, which draws the picture whole.",
+	  "", "ui#elements" },
+	{ "UI Widget/Margins (L, T, R, B)", "",
+	  "The 9-slice margins, left, top, right, bottom, counted in the texture's own "
+	  "pixels (the source size is shown under the Texture slot). 0 on every side "
+	  "switches slicing off. Graphs set them one at a time, as Slice Left, Slice "
+	  "Top, Slice Right and Slice Bottom.",
+	  "", "ui#elements" },
+	{ "UI Widget/Slice Fill Centre", "",
+	  "Whether the middle piece of a 9-sliced picture is drawn. Off leaves only the "
+	  "frame, for a border around content that brings its own background.",
+	  "", "ui#elements" },
+	{ "UI Widget/Flip Horizontal", "",
+	  "Mirrors the image left to right inside its box, the way the finished picture "
+	  "looks: an arrow that points right now points left. On a 9-sliced image the "
+	  "whole frame is mirrored, so the Slice Left margin ends up on the right edge. "
+	  "The editor preview and the running game flip the same way.",
+	  "", "ui#elements" },
+	{ "UI Widget/Flip Vertical", "",
+	  "Mirrors the image top to bottom inside its box. Combined with Flip "
+	  "Horizontal it is the picture turned half a circle. On a 9-sliced image the "
+	  "Slice Top margin ends up at the bottom edge.",
+	  "", "ui#elements" },
 	{ "UI Widget/Corner Radius", "",
 	  "How far the surface's corners are rounded off, in canvas pixels. It is one "
 	  "number for all four; at half the shorter side the shape becomes a capsule, "
@@ -6512,6 +6545,42 @@ namespace
 	  "mode, so a file from the engine library normally lands in the project's "
 	  "own content instead.",
 	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Fit", "",
+	  "Scales the picture to fill the canvas and centres it. A double-click on the "
+	  "canvas does the same. Zooming or panning leaves it again.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/1:1", "",
+	  "One texel per screen pixel, centred: the picture at its real resolution, "
+	  "which is where blur, banding and compression edges show.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Red", "",
+	  "Shows the red channel. With only one channel on, it is drawn as grey, so a "
+	  "mask or a roughness map reads as brightness. Only changes the view, never "
+	  "the texture.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Green", "",
+	  "Shows the green channel. On its own it is drawn as grey. Only changes the "
+	  "view, never the texture.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Blue", "",
+	  "Shows the blue channel. On its own it is drawn as grey. Only changes the "
+	  "view, never the texture.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Alpha", "",
+	  "Uses the alpha channel for transparency. Off, the picture is drawn opaque; "
+	  "on its own, the alpha is drawn as grey, white being fully opaque.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Checkerboard", "",
+	  "The grey checks behind the picture that make transparent pixels visible. "
+	  "They are only drawn under the picture, never around it.",
+	  "", "editor#asset-editors" },
+	{ "Texture Viewer/Import as Texture Asset", "",
+	  "Turns the image open in this tab into a texture asset at the path printed "
+	  "under the button, and turns this tab into that asset's tab. The asset "
+	  "shows the picture the way this preview does. Only there for an image file "
+	  "that is not an asset yet; a file from the read-only engine library goes to "
+	  "the project's own content instead.",
+	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Sky", "Sky lighting",
 	  "Lights the preview with the sky at a chosen hour, so the mesh can be "
 	  "judged in the light it will actually stand in. The time slider below picks "
@@ -7437,6 +7506,7 @@ namespace
 		// The panels whose controls are looked up by label within the panel.
 		{ "World Outliner/",   "editor-interface", "Editor Interface", "World Outliner" },
 		{ "Content Browser/",  "editor-interface", "Editor Interface", "Content Browser" },
+		{ "Texture Viewer/",   "editor-interface", "Editor Interface", "Texture viewer" },
 		// Raised from the Content Browser (and File ▸ Import Asset), so it is
 		// read under the same heading.
 		{ "Texture Color Space/", "editor-interface", "Editor Interface", "Content Browser" },

@@ -3998,6 +3998,8 @@ namespace {
 // Quote one argument for the shell command line (v1: std::system on a worker
 // thread). The string overload exists for arguments that are not paths but
 // CONTAIN one — a "-DNAME=<path>" cmake define has to survive as a single word.
+// On Windows a line built from these only reaches its program intact through
+// cmdLine() below — cmd.exe /c would otherwise eat its first and last quote.
 std::string shq(const std::string& s)
 {
 #if defined(_WIN32)
@@ -4009,6 +4011,25 @@ std::string shq(const std::string& s)
 #endif
 }
 std::string shq(const std::filesystem::path& p) { return shq(p.string()); }
+
+// The string std::system/_popen hand to the shell for `line`. POSIX: unchanged.
+// Windows: both run `cmd.exe /c <string>`, and when that string starts with a quote
+// and holds more than two, cmd strips the FIRST and the LAST quote of it. A bundled
+// cmake is a quoted path, so `"…\cmake.exe" -S "…" -B "…" 2>&1` reached cmd cut
+// apart ("The filename, directory name, or volume label syntax is incorrect", or
+// "'C:\Program' is not recognized…") — the probe then reported no C++ compiler on
+// a machine with Visual Studio installed (Thema 96). One extra pair around the whole
+// line is what cmd strips instead. Every line passed here carries a redirection,
+// so cmd's keep-the-quotes special case (exactly two, nothing special between
+// them) can never apply and the stripping is unconditional.
+std::string cmdLine(const std::string& line)
+{
+#if defined(_WIN32)
+    return "\"" + line + "\"";
+#else
+    return line;
+#endif
+}
 
 // macOS/Linux apps launched from Finder/Launchpad (a packaged .app, Spotlight, the
 // Dock) inherit a minimal PATH — typically "/usr/bin:/bin:/usr/sbin:/sbin" — that
@@ -4050,11 +4071,13 @@ void ensureToolPathAugmented()
 
 namespace {
 std::filesystem::path g_bundledCmakeDir; // set by the editor to <app>/cmake (SDL_GetBasePath)
+std::string g_resolvedCmake;             // resolveCmake()'s cache; setBundledCmakeDir drops it
+bool        g_cmakeResolved = false;
 
 bool cmakeAnswers(const std::string& cmd)
 {
 #if defined(_WIN32)
-    return std::system((cmd + " --version >NUL 2>&1").c_str()) == 0;
+    return std::system(cmdLine(cmd + " --version >NUL 2>&1").c_str()) == 0;
 #else
     return std::system((cmd + " --version >/dev/null 2>&1").c_str()) == 0;
 #endif
@@ -4064,13 +4087,14 @@ bool cmakeAnswers(const std::string& cmd)
 // (<app>/cmake/bin/cmake[.exe]) so a user only has to install a C++ compiler, then
 // falling back to a system cmake on PATH. Returns a shell-ready token (a quoted path,
 // or the bare word "cmake"), or empty when neither answers --version — the caller then
-// surfaces the Toolchain-Missing dialog. Resolved once and cached.
+// surfaces the Toolchain-Missing dialog. Resolved once and cached until the bundle
+// directory changes.
 const std::string& resolveCmake()
 {
-    static std::string s_cmake;
-    static bool s_done = false;
-    if (s_done) return s_cmake;
-    s_done = true;
+    std::string& s_cmake = g_resolvedCmake;
+    if (g_cmakeResolved) return s_cmake;
+    g_cmakeResolved = true;
+    s_cmake.clear();
     ensureToolPathAugmented(); // make a Homebrew cmake on /opt/homebrew visible (see note above)
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -4092,7 +4116,14 @@ const std::string& resolveCmake()
 }
 } // namespace
 
-void setBundledCmakeDir(const std::filesystem::path& dir) { g_bundledCmakeDir = dir; }
+void setBundledCmakeDir(const std::filesystem::path& dir)
+{
+    // Only a CHANGED directory drops the cache: the editor re-sets the same one on
+    // every Recheck, possibly while an export worker is inside resolveCmake().
+    if (dir == g_bundledCmakeDir) return;
+    g_bundledCmakeDir = dir;
+    g_cmakeResolved   = false;
+}
 
 bool toolchainAvailable()
 {
@@ -4106,7 +4137,7 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
                  std::string& captured)
 {
 #if defined(_WIN32)
-    FILE* pipe = _popen((cmd + " 2>&1").c_str(), "r");
+    FILE* pipe = _popen(cmdLine(cmd + " 2>&1").c_str(), "r");
 #else
     FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");
 #endif
@@ -4127,6 +4158,245 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
 #else
     return pclose(pipe);
 #endif
+}
+
+// True if <exe> resolves on PATH — used to pick an available package manager.
+bool commandExists(const std::string& exe)
+{
+    std::string cap;
+#if defined(_WIN32)
+    return runStreaming("where " + exe, nullptr, cap) == 0;
+#else
+    return runStreaming("command -v " + exe, nullptr, cap) == 0;
+#endif
+}
+
+// "18.10.12217.157" → {18, 10, 12217, 157}. Compared as a vector this orders
+// per numeric component, so 18.10 comes after 18.9 — as a string it would not.
+std::vector<unsigned long> versionParts(const std::string& v)
+{
+    std::vector<unsigned long> out;
+    std::istringstream iss(v);
+    for (std::string part; std::getline(iss, part, '.'); )
+        out.push_back(std::strtoul(part.c_str(), nullptr, 10));
+    return out;
+}
+
+// The year in the generator name of Visual Studio <major>, for when this cmake's
+// own list could not be read. vswhere's catalog.productLineVersion is no help: it
+// says "2022" for VS 2022 but "18" for VS 2026.
+const char* vsGeneratorYear(unsigned long major)
+{
+    switch (major)
+    {
+    case 15: return "2017";
+    case 16: return "2019";
+    case 17: return "2022";
+    case 18: return "2026";
+    default: return nullptr;
+    }
+}
+
+// A JSON document that may have other output in front of it — runStreaming merges
+// stderr in. Discarded (is_discarded()) when there is none or it does not parse.
+nlohmann::json parseJsonAt(const std::string& text, char open)
+{
+    const size_t start = text.find(open);
+    if (start == std::string::npos) return nlohmann::json::value_t::discarded;
+    return nlohmann::json::parse(text.begin() + static_cast<std::ptrdiff_t>(start), text.end(),
+                                 nullptr, /*allow_exceptions=*/false);
+}
+
+std::string jsonString(const nlohmann::json& o, const char* key)
+{
+    const auto it = o.find(key);
+    return it != o.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+} // namespace
+
+std::vector<std::string> cmakeGeneratorNames(const std::string& capabilitiesJson)
+{
+    std::vector<std::string> names;
+    const nlohmann::json j = parseJsonAt(capabilitiesJson, '{');
+    if (j.is_discarded() || !j.is_object()) return names;
+    const auto gens = j.find("generators");
+    if (gens == j.end() || !gens->is_array()) return names;
+    for (const nlohmann::json& g : *gens)
+        if (g.is_object())
+            if (std::string name = jsonString(g, "name"); !name.empty()) names.push_back(std::move(name));
+    return names;
+}
+
+VsSelection selectVsInstance(const std::string& vswhereJson,
+                             const std::vector<std::string>& cmakeGenerators)
+{
+    VsSelection best;
+    const nlohmann::json j = parseJsonAt(vswhereJson, '[');
+    if (j.is_discarded() || !j.is_array()) return best;
+    std::vector<unsigned long> bestVersion;
+    bool bestPrerelease = false;
+    for (const nlohmann::json& inst : j)
+    {
+        if (!inst.is_object()) continue;
+        const std::string path    = jsonString(inst, "installationPath");
+        const std::string version = jsonString(inst, "installationVersion");
+        const std::vector<unsigned long> parts = versionParts(version);
+        if (path.empty() || parts.empty()) continue;
+
+        // cmake names the generator; vswhere only knows the major version.
+        const std::string prefix = "Visual Studio " + std::to_string(parts[0]) + " ";
+        std::string generator;
+        if (cmakeGenerators.empty())
+        {
+            if (const char* year = vsGeneratorYear(parts[0])) generator = prefix + year;
+        }
+        else
+        {
+            for (const std::string& g : cmakeGenerators)
+                if (g.rfind(prefix, 0) == 0) { generator = g; break; }
+        }
+        if (generator.empty()) continue; // this cmake cannot drive that Visual Studio
+
+        const auto pre = inst.find("isPrerelease");
+        const bool prerelease = pre != inst.end() && pre->is_boolean() && pre->get<bool>();
+        const bool better = !best.valid()
+                         || (bestPrerelease && !prerelease)
+                         || (bestPrerelease == prerelease && parts > bestVersion);
+        if (!better) continue;
+        best.generator    = generator;
+        best.instancePath = std::filesystem::path(std::u8string(path.begin(), path.end()));
+        best.version      = version;
+        best.displayName  = jsonString(inst, "displayName");
+        bestVersion       = parts;
+        bestPrerelease    = prerelease;
+    }
+    return best;
+}
+
+namespace {
+// What a configure is told about its generator. POSIX: nothing — cmake's default
+// (Makefiles/Ninja with the compiler on PATH) is right there. Windows: the newest
+// Visual Studio with the C++ tools, by name, platform and instance, so that neither
+// a global CMAKE_GENERATOR (H2) nor cmake's own pick among several instances
+// decides. Empty args ⇒ no usable Visual Studio; the configure then runs as it
+// always did, which keeps a clang/MinGW setup without Visual Studio working, and
+// `note` says why for the probe's detail text.
+struct GeneratorChoice
+{
+    std::string args;      // appended to the configure line, leading space included
+    std::string generator; // what the three cache entries below must then say
+    std::string platform;
+    std::string instance;  // generic (forward-slash) form, as cmake caches it
+    std::string note;
+};
+
+#if defined(_WIN32)
+// vswhere.exe ships with the Visual Studio Installer (2017 15.2 and later, Build
+// Tools included) under Program Files (x86); on a machine without a 32-bit Program
+// Files it is under Program Files, and a standalone copy (choco/winget) is on PATH.
+std::string resolveVswhere()
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    for (const char* var : { "ProgramFiles(x86)", "ProgramFiles" })
+        if (const char* root = std::getenv(var); root && *root)
+        {
+            const fs::path exe = fs::path(root) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe";
+            if (fs::is_regular_file(exe, ec)) return shq(exe);
+        }
+    if (commandExists("vswhere")) return "vswhere";
+    return {};
+}
+#endif
+
+GeneratorChoice chooseGenerator(const std::string& cmake)
+{
+    GeneratorChoice g;
+#if defined(_WIN32)
+    const std::string vswhere = resolveVswhere();
+    if (vswhere.empty())
+    {
+        g.note = "vswhere.exe not found — is the Visual Studio Installer present?";
+        return g;
+    }
+    // -products * or Build Tools are not listed; no -all, so an incomplete or
+    // broken install is not either. -utf8 because the output carries localised
+    // descriptions the console code page would mangle.
+    std::string listed, caps;
+    runStreaming(vswhere + " -products * -prerelease"
+                 " -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+                 " -format json -utf8", nullptr, listed);
+    runStreaming(cmake + " -E capabilities", nullptr, caps);
+    const VsSelection vs = selectVsInstance(listed, cmakeGeneratorNames(caps));
+    if (!vs.valid())
+    {
+        g.note = "vswhere found no Visual Studio with the C++ tools "
+                 "(Microsoft.VisualStudio.Component.VC.Tools.x86.x64) that this cmake supports";
+        return g;
+    }
+    g.generator = vs.generator;
+    g.platform  = "x64"; // the editor is x64, and so must be every module it loads
+    g.instance  = vs.instancePath.generic_string();
+    g.args      = " -G " + shq(g.generator) + " -A " + g.platform + " " +
+                  shq("-DCMAKE_GENERATOR_INSTANCE=" + g.instance);
+    g.note      = "using " + vs.displayName + " " + vs.version + " (" + g.generator + ")";
+#else
+    (void)cmake;
+#endif
+    return g;
+}
+
+// H3: cmake refuses to reconfigure a build directory whose cache names another
+// generator, platform or instance ("Does not match the generator used
+// previously"). A directory configured by hand with Ninja from a Developer
+// Prompt, or by an older editor that passed no -A, would then never build again
+// from here — so its cache goes and the configure starts over. Only the cache:
+// the directory is the one the scaffold's README tells a user to use by hand.
+// Returns what was different, empty when nothing was dropped.
+std::string dropForeignGeneratorCache(const std::filesystem::path& buildDir,
+                                      const GeneratorChoice& g)
+{
+    namespace fs = std::filesystem;
+    if (g.generator.empty()) return {};
+    std::ifstream f(buildDir / "CMakeCache.txt", std::ios::binary);
+    if (!f) return {};
+    std::string generator, platform, instance;
+    for (std::string line; std::getline(f, line); )
+    {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Any type: cmake keeps an instance it chose itself as :INTERNAL, but one
+        // passed with -D as :UNINITIALIZED — reading only INTERNAL made every build
+        // after the first drop the cache again.
+        const auto take = [&](const char* key, std::string& into)
+        {
+            const size_t n = std::strlen(key);
+            if (line.compare(0, n, key) != 0 || line.size() <= n || line[n] != ':') return;
+            if (const size_t eq = line.find('=', n); eq != std::string::npos) into = line.substr(eq + 1);
+        };
+        take("CMAKE_GENERATOR", generator);
+        take("CMAKE_GENERATOR_PLATFORM", platform);
+        take("CMAKE_GENERATOR_INSTANCE", instance);
+    }
+    f.close();
+    // Paths compare the way Windows does: case and slash direction do not matter.
+    const auto norm = [](std::string s)
+    {
+        for (char& c : s) c = c == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        while (!s.empty() && s.back() == '/') s.pop_back();
+        return s;
+    };
+    std::string why;
+    if (generator != g.generator)
+        why = "generator \"" + generator + "\"";
+    else if (norm(platform) != norm(g.platform))
+        why = "platform \"" + platform + "\"";
+    else if (norm(instance) != norm(g.instance))
+        why = "instance \"" + instance + "\"";
+    if (why.empty()) return {};
+    std::error_code ec;
+    fs::remove(buildDir / "CMakeCache.txt", ec);
+    fs::remove_all(buildDir / "CMakeFiles", ec);
+    return why;
 }
 } // namespace
 
@@ -4174,8 +4444,9 @@ ToolchainProbe probeToolchain()
         f << "cmake_minimum_required(VERSION 3.20)\nproject(he_toolchain_probe CXX)\n";
     }
     std::string captured;
+    const GeneratorChoice gen = chooseGenerator(cmake);
     const int rc = runStreaming(
-        cmake + " -S " + shq(dir) + " -B " + shq(dir / "build"), nullptr, captured);
+        cmake + " -S " + shq(dir) + " -B " + shq(dir / "build") + gen.args, nullptr, captured);
     p.compilerFound = (rc == 0);
     if (p.compilerFound)
     {
@@ -4189,7 +4460,9 @@ ToolchainProbe probeToolchain()
     }
     else
     {
-        // Tail of the log (last ~15 lines) — enough to show the user why.
+        // Tail of the log (last ~15 lines) — enough to show the user why —
+        // after which Visual Studio was asked for, or why none was.
+        if (!gen.note.empty()) p.detail = gen.note + "\n";
         std::vector<std::string> lines;
         std::istringstream iss(captured);
         for (std::string line; std::getline(iss, line); ) lines.push_back(line);
@@ -4201,17 +4474,6 @@ ToolchainProbe probeToolchain()
 }
 
 namespace {
-// True if <exe> resolves on PATH — used to pick an available package manager.
-bool commandExists(const std::string& exe)
-{
-    std::string cap;
-#if defined(_WIN32)
-    return runStreaming("where " + exe, nullptr, cap) == 0;
-#else
-    return runStreaming("command -v " + exe, nullptr, cap) == 0;
-#endif
-}
-
 #if defined(__APPLE__)
 // Resolve a usable Homebrew. ensureToolPathAugmented() already puts the standard
 // prefixes on PATH, but a Finder-launched app that ran before this fix, or an
@@ -4462,8 +4724,16 @@ BuildOutcome buildDylib(const DylibBuildSpec& spec,
         std::ofstream f(out.logFile, std::ios::binary | std::ios::trunc);
         if (f) f << captured;
     };
+    const GeneratorChoice gen = chooseGenerator(cmake);
+    if (const std::string why = dropForeignGeneratorCache(buildDir, gen); !why.empty())
+    {
+        const std::string msg = buildDir.string() + " was configured with " + why +
+                                " — dropping its CMakeCache.txt to reconfigure for " + gen.generator;
+        captured += msg + "\n";
+        if (onLine) onLine(msg);
+    }
     std::string configure =
-        cmake + " -S " + shq(spec.sourceDir) + " -B " + shq(buildDir) +
+        cmake + " -S " + shq(spec.sourceDir) + " -B " + shq(buildDir) + gen.args +
         " -DCMAKE_BUILD_TYPE=Release";
     // Quoted as ONE argument each: a define's value is a path (or a whole
     // semicolon-separated list of them) and may contain spaces.

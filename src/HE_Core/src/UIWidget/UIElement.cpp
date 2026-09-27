@@ -632,6 +632,8 @@ const UIPropTable& UIImage::propTable() const
         uiprop::slot<&UIImage::sliceRight> ({ "Slice Right",  UIPropType::Float }),
         uiprop::slot<&UIImage::sliceBottom>({ "Slice Bottom", UIPropType::Float }),
         uiprop::slot<&UIImage::sliceFillCentre>({ "Slice Fill Centre", UIPropType::Bool }),
+        uiprop::slot<&UIImage::flipH>({ "Flip Horizontal", UIPropType::Bool }),
+        uiprop::slot<&UIImage::flipV>({ "Flip Vertical",   UIPropType::Bool }),
     };
     return t;
 }
@@ -1213,6 +1215,20 @@ namespace
         ro.cornerRadius = glm::vec4(cornerRadius);
         ro.uvMin    = uv0;
         ro.uvMax    = uv1;
+        // Callers give uv in the PICTURE's terms: (0,0) is its top-left, so
+        // "Slice Top" means the top of the picture. A texture asset stores its
+        // rows bottom-up though (TextureImporter flips on load and the mesh
+        // importers turn their V to match — load-bearing, not to be touched
+        // there), so texel row 0, v = 0, is the picture's BOTTOM row on every
+        // backend. Turned around here, the one place every textured UI quad
+        // passes through, it reaches Metal, GL and the software rasteriser
+        // alike (Thema 92: imported pictures were drawn upside down). A
+        // material quad reads its own fixed 0..1 and never these UVs.
+        if (tex != HE::UUID{})
+        {
+            ro.uvMin.y = 1.0f - uv0.y;
+            ro.uvMax.y = 1.0f - uv1.y;
+        }
         out.push_back(std::move(ro));
     }
     // Corner radius that matches the editor preview: a small rounding clamped to
@@ -1288,8 +1304,36 @@ void UIPanel::render(const UIWidgetRect& px, const UIElementRenderState&,
     quad(out, px.x, px.y, px.w, px.h, color, mat, 0.0f, textureAssetId);
 }
 
-void UIImage::render(const UIWidgetRect& px, const UIElementRenderState&,
-                     const HE::UUID& mat, float, std::vector<UIRenderObject>& out) const
+void UIImage::render(const UIWidgetRect& px, const UIElementRenderState& rs,
+                     const HE::UUID& mat, float pxScaleY, std::vector<UIRenderObject>& out) const
+{
+    const std::size_t first = out.size();
+    renderUnflipped(px, rs, mat, pxScaleY, out);
+    if (!flipH && !flipV) return;
+    // Flip is a mirror of what was just emitted, piece by piece, inside the
+    // element's own box: each quad moves to its mirrored place and reads its
+    // source rect the other way round. Done here, after the fact, so the plain
+    // and the sliced picture get the same mirror — and so whatever convention
+    // the unflipped UVs follow, flipping is always relative to it. Rotation is
+    // folded on by WidgetManager afterwards, around the same box.
+    for (std::size_t i = first; i < out.size(); ++i)
+    {
+        UIRenderObject& ro = out[i];
+        if (flipH)
+        {
+            ro.position.x = px.x + (px.x + px.w) - (ro.position.x + ro.size.x);
+            std::swap(ro.uvMin.x, ro.uvMax.x);
+        }
+        if (flipV)
+        {
+            ro.position.y = px.y + (px.y + px.h) - (ro.position.y + ro.size.y);
+            std::swap(ro.uvMin.y, ro.uvMax.y);
+        }
+    }
+}
+
+void UIImage::renderUnflipped(const UIWidgetRect& px, const UIElementRenderState&,
+                              const HE::UUID& mat, float, std::vector<UIRenderObject>& out) const
 {
     // Plain stretch when nothing is sliced, when there is no texture to slice,
     // or when the source size is not known yet (the runtime fills it in when it
@@ -2787,6 +2831,9 @@ void UIImage::writeJson(nlohmann::json& j) const
         j["slice"] = { sliceLeft, sliceTop, sliceRight, sliceBottom };
         j["sliceFillCentre"] = sliceFillCentre;
     }
+    // The same bargain: an unflipped image writes neither key.
+    if (flipH) j["flipH"] = true;
+    if (flipV) j["flipV"] = true;
 }
 void UIImage::readJson(const nlohmann::json& j)
 {
@@ -2797,6 +2844,8 @@ void UIImage::readJson(const nlohmann::json& j)
         sliceRight  = s[2].get<float>(); sliceBottom = s[3].get<float>();
     }
     sliceFillCentre = j.value("sliceFillCentre", sliceFillCentre);
+    flipH = j.value("flipH", false);
+    flipV = j.value("flipV", false);
 }
 
 void UIText::writeJson(nlohmann::json& j) const
