@@ -27,9 +27,12 @@ von heute Nachmittag (`docs/perf-audit/raw-step2/`). **Nur Befund, kein Fix.**
    2 Tagen 19 Stunden **93 217 s GPU-Zeit** verbraucht (im Mittel ~39 % der GPU) und nimmt jedem anderen
    Renderer auf dem Gerät ein Drittel bis die Hälfte der GPU weg. `Application::Run` kennt keinen Zustand für
    verstecktes, verdecktes oder minimiertes Fenster (Abschnitt 1.5).
-5. **Die GPU-Arbeit der Szene selbst ist klein:** Die Summe der Pass-Minima liegt bei ~6 ms für 1718×884 Pixel.
-   Die teuersten Posten: Wolken im Scene-Pass (~2,2 ms), Wolkenschatten-Map im Shadow-Pass (~1,0 ms), Bloom
-   (~0,6 ms, aber mit der größten Streuung unter Last). Details in Abschnitt 2.
+5. **Die GPU-Arbeit der Szene selbst ist klein:** Die Summe der Pass-Minima liegt bei ~4,4–6 ms für 1718×884 Pixel,
+   ein Viertel bis ein Drittel des 60-Hz-Budgets. Die teuersten Posten (Minima, Nachmittags-/Mittagsserie):
+   **Wolken-Dome-Raymarch 1,4/2,2 ms** (32 Schritte, 128–544 3D-Fetches pro Himmelspixel auf eine 64-MiB-Textur
+   ohne Mips), **Himmel ohne Wolken ~1,2 ms** (Single-Scattering mit ~216 `exp` pro Pixel und Frame bei stehender
+   Sonne), **Wolkenschatten-Map 0,6/1,0 ms** (512², rechnet das 3D-Wolkenfeld für 12 × 12 km, das Terrain nutzt davon
+   ~4×4 Texel), Bloom 0,35/0,62 ms (11 Encoder, größte Streuung unter Last). Details in Abschnitt 2.
 
 ## 1. Hypothese zuerst: Warum blockiert `Metal::NextDrawable`?
 
@@ -178,12 +181,171 @@ braucht: pid 72986 beendet, Stromsparmodus-Zustand notiert, dann `he_perf_captur
 
 ## 2. Die teuersten GPU-Pässe (Scene/Wolken, Shadow/Wolkenschatten, Bloom)
 
-*(folgt)*
+### 2.1 Methode
+
+- **Minima der Detailed-Capture** (exklusive Pass-Zeit, ein Command-Buffer pro Pass, 600 Frames). Unter Fremdlast sind
+  p50/Mittel um das 3- bis 15-Fache aufgebläht; das Minimum kommt der unbelasteten Zeit am nächsten.
+- **Szenenvarianten** statt Pass-Grenzen, weil Himmel, Wolken und Terrain in einem Encoder liegen und die GPU keine
+  Draw-Boundary-Counter kann. Neu in diesem Schritt: `cloudQuality` 0/2, `lowResClouds` an, `cloudShadows` aus
+  (Läufe Y0–Y5, heute Nachmittag direkt hintereinander, `docs/perf-audit/raw-step2/Y*.summary.json`).
+- **Fetch- und Schrittzahlen aus dem Shader-Code gezählt** (`kSkyMSL`/`kSkyFuncMSL` in `MetalRenderer.mm`).
+  ISA-Instruktionszahlen und Occupancy ließen sich **nicht** messen: `xcrun metal` scheitert mit
+  „missing Metal Toolchain“ (separater Download, ~688 MB, `xcodebuild -downloadComponent MetalToolchain`, nicht
+  ohne Rückfrage installiert), und Occupancy/Limiter gibt es nur in einer Xcode-GPU-Aufnahme (GUI).
+
+### 2.2 Messwerte: exklusive GPU-Zeit pro Pass, ms, min / Mittel (Landscape-Kamera, 1718×884)
+
+| Lauf | Shadow | SSAO | Scene | Bloom | Tonemap | Present | gpuMs p50 |
+|---|---|---|---|---|---|---|---|
+| Y5 ohne Wolken | 0.16 / 1.37 | 0.21 / 1.61 | **1.20** / 2.07 | 0.34 / 2.75 | 0.12 / 0.73 | 0.24 / 0.98 | 9.45 |
+| Y1 `cloudQuality 0` | 0.74 / 2.86 | 0.21 / 1.23 | **1.95** / 2.54 | 0.35 / 2.94 | 0.12 / 0.54 | 0.24 / 0.68 | 10.86 |
+| Y0 Szene wie gespeichert (`cloudQuality 1`) | **0.73** / 2.72 | 0.00¹ / 2.50 | **2.57** / 5.25 | 0.35 / 4.51 | 0.12 / 1.39 | 0.24 / 1.39 | 17.16 |
+| Y2 `cloudQuality 2` | 0.79 / 3.25 | 0.22 / 3.51 | **4.42** / 8.62 | 0.36 / 5.93 | 0.13 / 1.89 | 0.25 / 1.39 | 25.69 |
+| Y3 `lowResClouds` an | 0.74 / 3.22 | 0.21 / 1.42 | **1.95** / 3.23 | 0.34 / 3.41 | 0.12 / 0.80 | 0.24 / 0.81 | 12.52 |
+| Y4 `cloudShadows` aus | **0.16** / 1.48 | 0.21 / 1.64 | 2.66 / 3.65 | 0.35 / 3.11 | 0.12 / 0.66 | 0.24 / 0.79 | 11.40 |
+
+¹ Einzelner Ausreißer-Frame mit 0; die übrigen Läufe zeigen 0,21 ms.
+
+Die Minima liegen heute Nachmittag niedriger als mittags in der Baseline (Scene 2,57 statt 3,41–3,55 ms, Bloom 0,35
+statt 0,62 ms). Auch das Minimum ist also noch lastabhängig. Die **Differenzen innerhalb einer Serie** sind belastbarer als die
+absoluten Werte.
+
+Daraus, pro Posten (Y-Serie / Baseline-Serie L3−L5):
+
+| Rang | Posten | GPU-Zeit (min) | Anteil an ~4,4 ms Summe (Y0) |
+|---|---|---|---|
+| 1 | **Wolken, Dome-Raymarch** im Scene-Pass (`applyClouds`, `cloudQuality 1`) | **1,37 ms** / 2,21 ms | ~31 % |
+| 2 | **Himmel ohne Wolken** (Atmosphäre `atmoScatter` + Rest von `skyFragment`) | **~1,1–1,3 ms** (Scene ohne Wolken 1,20; nur Himmel ohne Wolken 1,33) | ~27 % |
+| 3 | **Wolkenschatten-Map** (`cloudShadowFragment`, 512²) | **0,57 ms** / 1,04 ms | ~13 % |
+| 4 | Bloom (Bright + 10 Blur-Pässe) | 0,35 ms / 0,62 ms, **Mittel 2,8–5,9 ms** | ~8 % (min) |
+| 5 | SSAO | 0,21 ms / 0,33 ms | ~5 % |
+| – | Terrain-CSM 0,16, Tonemap+FXAA 0,12, Present (Drawable-Clear + ImGui, 2840×1528) 0,24 | | |
+
+**Zusammen ~4,4–6 ms für ein 1718×884-Bild.** Selbst bei 60 Hz ist das nur ein Viertel bis ein Drittel des
+Frame-Budgets. Diese Szene ist auf einer unbelasteten M5-GPU nicht GPU-limitiert. Das deckt sich mit Abschnitt 1:
+Der Editor braucht unter Konkurrenz 46 % der GPU-Zeit.
+
+### 2.3 Verdächtiger 1: Wolken-Raymarch (Dome-Pfad), Code-Befund
+
+Die Szene hat `cloudMode 0`. `skyFragment` nimmt deshalb den Zweig `applyClouds` (Dome), nicht das 3D-Raymarching
+(`MetalRenderer.mm:5470–5473`, Kopf von `applyClouds` ab Z. 3995).
+
+- **Schrittzahl:** `N = clamp(qBaseN / dir.y, qBaseN, qMaxN)`, bei Qualität 1 `qBaseN = 12`, `qMaxN = 32`.
+  Für jede Blickrichtung unter **dir.y < 0,375 (≈ 22° über dem Horizont)** ist N = **32**. Mit der Landscape-Kamera
+  (Neigung −0,25 rad) gilt das für praktisch den ganzen sichtbaren Himmel. Die Schrittzahl ist gerade dort am höchsten,
+  wo die Wolken ohnehin in den Horizontdunst ausgeblendet werden (`horizon = smoothstep(0.03, 0.22, dir.y)`).
+  Unter dir.y < 0,02 bricht der Pfad ab.
+- **Fetches pro Schritt** (alle auf die 3D-Rauschtextur, trilinear):
+  - immer 4 (`starFbm3`, 4 Oktaven, als exakte Coverage-Schranke),
+  - +3, wenn die Schranke eine Wolke zulässt (`worleyFbm`),
+  - +2 × 5 = 10, wenn Dichte > 0,001 (Licht-March `qShadow = 2` × `cloudShadowDensity` mit 3 + 2 Fetches).
+  Die Slab-Prüfung (`hgrad <= 0`) spart im Dome-Pfad fast nichts: Der Slab liegt per Konstruktion ganz in `[s0, s1]`.
+- **Pro Himmelspixel damit 128 (klarer Himmel) bis 544 (dichte Wolke) 3D-Fetches** bei Qualität 1;
+  bei Qualität 0: 72–216, bei Qualität 2: 256–1408. Der gemessene Anstieg Q0 → Q1 → Q2 (+0,75 → +1,37 → +3,22 ms)
+  folgt dieser Schritt- und Fetch-Zahl.
+  Früher Abbruch (`T < 0.02`) greift bei `coverage 0.5` selten.
+- **Himmelspixel:** Oberhalb des Horizonts liegen im Landscape-Bild etwa 45 % des Viewports (≈ 680 000 Pixel,
+  geschätzt aus `landscape_view.png`). Macht **≥ 87 Mio. trilineare 3D-Fetches pro Frame** schon bei klarem Himmel.
+- **Die Rauschtextur:** 256³ `RG16Unorm` = **64 MiB**, **ohne Mipmaps**, `MTLStorageModeShared` (Z. 6760–6775).
+  Die hohen Oktaven (Faktor bis ~8,4 bei `starFbm3`, 4,06 bei Worley) tasten ohne Mip-Stufen weit auseinanderliegende
+  Texel ab. Das ist schlecht für den Textur-Cache. `Shared` statt `Private` schließt auf Apple-GPUs verlustfreie
+  Kompression bzw. optimales Layout aus. Ob Cache-Misses oder ALU der Limiter ist, kann nur eine Xcode-GPU-Aufnahme
+  zeigen. Das ist ein Verdacht, kein Messwert.
+- **Auflösung:** volle Viewport-Auflösung. `lowResClouds` (Pre-Pass auf `sceneW/2 × sceneH/2`, Z. 15840) ist in der
+  Szene aus. Eingeschaltet spart es gemessen **0,62 ms** (Y3: Scene 1,95 statt 2,57). Das ist weniger als die
+  erwarteten ¾, weil Upsampling, Composite und der Pre-Pass als eigener Render-Pass mitkosten.
+
+### 2.4 Verdächtiger 2: Himmel ohne Wolken (Single-Scattering pro Pixel)
+
+- `skyColor` ruft für **jedes** Himmelspixel `atmoScatter` auf (`MetalRenderer.mm:5524–5580`): **12 Blickschritte ×
+  (3 `exp` + 5 Sonnenschritte × 3 `exp`)** ≈ 216 `exp`, dazu 24 Strahl-Kugel-Schnitte mit `sqrt`. Das ist reine
+  ALU-Arbeit, keine Textur.
+- Der Himmel läuft auf **allen Nicht-Terrain-Pixeln**, auch unter dem Horizont (dort mit geklemmter Richtung).
+  Im Landscape-Bild sind das ~80 % des Viewports (≈ 1,2 Mio. Pixel). Gemessen: Scene ohne Wolken 1,20 ms
+  (mit Terrain) bzw. 1,33 ms (nur Himmel).
+- **Unnötige Arbeit:** Das Ergebnis hängt nur von Blickrichtung und Sonnenrichtung ab. Die Sonne steht im
+  Edit-Modus still (`timeOfDay 0.5`, kein Tageszyklus). Die Engine backt denselben Himmel für die IBL-Cubemap
+  (128², nur bei Sonnenbewegung, `UpdateSkyEnvCube` Z. 12535) bereits auf der CPU. Für das sichtbare Himmelsbild
+  rechnet sie ihn trotzdem jeden Frame pro Pixel neu.
+- Nachtelemente (Sterne, Nebel, Aurora) sind bei Tag korrekt übersprungen (`nightF`-Zweig, kohärent).
+  Zirren, Kondensstreifen und God-Rays haben in der Szene Menge 0; ob ihre Funktionen dann früh aussteigen, ist
+  nicht einzeln gemessen.
+
+### 2.5 Verdächtiger 3: Wolkenschatten-Map, Arbeit ohne Empfänger
+
+- `EncodeCloudShadow` (`MetalRenderer.mm:10799`) rendert **jeden Frame** eine **512×512**-Map
+  (`kCloudShadowMapSize`, Z. 10773). Das sind 262 144 Texel, M = **6** Schritte entlang der Sonne pro Texel.
+- Die Map rechnet das **„realistische“ 3D-Wolkenfeld** (`cloudFieldDensity` mit `cloudStyle 1`, Szene und Standard).
+  Pro Schritt sind das 9 Fetches bis zur Präsenzprüfung (2 Domain-Warp, 4 `cloudCoverFbm`, 1 Makro, 1 Worley,
+  1 Formation), bei Präsenz +8 (4 Body, 3 Billow, 1 Carve). Macht **54–102 3D-Fetches pro Texel, 14–27 Mio. pro Frame**.
+  In `cloudCoverFbm(…, farW = 0)` werden zwei Oktaven mit 0 multipliziert. Ob der Compiler diese Fetches entfernt,
+  ist ungeprüft (Fast-Math würde es erlauben).
+- **Die sichtbaren Wolken dieser Szene kommen aus dem Dome-Pfad (`cloudMode 0`), die Schatten aus dem 3D-Feld.**
+  Das ist ein anderes, teureres Dichtefeld als das sichtbare. Optisch passen Schatten und Wolken damit ohnehin nicht
+  zusammen, bezahlt wird trotzdem das teure Feld.
+- **Abdeckung:** ±30 Wolkenhöhen um den Projektionspunkt, bei `cloudHeight 200` also 12 km × 12 km, ein Texel
+  ≈ **23 m**. Das 100×100-m-Terrain belegt davon etwa **4×4 Texel**. Von 262 144 berechneten Texeln empfangen
+  ~20 überhaupt einen Schatten.
+- Gemessen: Shadow-Pass 0,73 → 0,16 ms ohne Wolkenschatten (Y4), also **0,57 ms**. In der Baseline 1,04 ms.
+  Qualitätsunabhängig (Y1/Y0/Y2: 0,74/0,73/0,79).
+
+### 2.6 Verdächtiger 4: Bloom, viele kleine Pässe
+
+- `EncodeBloom` (`MetalRenderer.mm:10909`): Bright-Pass + **10 Blur-Pässe** (5× horizontal, 5× vertikal) in halber
+  Auflösung (859×442, RGBA16F, 8 B/Pixel). Jeder Pass ist ein **eigener Render-Encoder** mit Store, 11 insgesamt.
+  Der Blur (`blurFragment`, Z. 1448) liest **9 Taps auf ganzen Texel-Offsets**, nutzt also den Bilinear-Trick nicht
+  (5 Taps würden dasselbe liefern). Macht ~90 Fetches pro Halbauflösungspixel, **~34 Mio. Fetches** und
+  **~33 MB geschriebene Render-Targets pro Frame**.
+- Wiederholtes Gauß-Filtern wächst nur mit √n: Die Gewichte entsprechen etwa σ ≈ 1,9 Texel, nach 5 Iterationen
+  σ_eff ≈ √5 · 1,9 ≈ 4 Halbauflösungs-Texel (~8 Viewport-Pixel). Eine Mip-Kette (Downsample/Upsample) erreicht
+  mehr Radius mit weniger Pässen.
+- Gemessen: nur 0,35–0,62 ms Minimum, aber das **größte Verhältnis Mittel/Minimum aller Pässe** unter Last
+  (Y0: 4,51 / 0,35 ms, Baseline L3: p50 6,95 / min 0,62). Jede der 11 Encoder-Grenzen ist ein Punkt, an dem die GPU
+  auf einen anderen Prozess umschalten kann. Das ist eine Vermutung, erklärt aber, warum Bloom (und die ähnlich
+  gebauten SSAO-Blurs) unter Konkurrenz überproportional wachsen. Ohne Fremdlast prüfen.
+
+### 2.7 Explizit geprüft und für diese Szene ausgeschlossen
+
+| Hypothese aus dem Auftrag | Befund |
+|---|---|
+| DDGI-Rückprojektion ohne bewegte Geometrie | GI ist in den Editor-Voreinstellungen aus. GIAccel/GIShadow/GIProbes = 0 in allen Läufen |
+| TAA / SSR | AA-Modus 1 = FXAA (Tonemap-Bucket 0,12 ms inkl. FXAA); SSR aus |
+| 3D-Wolken-Raymarching (`applyClouds3D`/`applyClouds3DReal`, Worley-Nebel) | läuft nicht, `cloudMode 0`. **Aber** der Wolkenschatten nutzt das 3D-Feld (2.5) |
+| GPU-Foliage | keine Foliage in der Szene; `Foliage`-Scope 0,0007 ms |
+| Terrain-LOD-Übergänge | 4 Chunks, 34 816 Dreiecke; Terrain-CSM 0,16 ms, Terrain im Scene-Pass billiger als der Himmel, den es verdeckt (1,20 vs. 1,33 ms) |
+| IBL-Cubemap-Neubau jeden Frame | nein, nur bei Sonnenbewegung (`UpdateSkyEnvCube`, Distanz-Schwelle 1e-4) |
+| Render-Scale | skaliert linear mit den Pixeln (Baseline: Scene 1,11 / 3,41 / 14,06 ms bei 0,5 / 1,0 / 2,0). Der Scene-Pass ist fragmentgebunden |
 
 ## 3. Was dieser Schritt nicht zeigt
 
-*(folgt)*
+- **Unbelastete Zahlen**: Alle Messungen liefen neben pid 72986. Die FPS-Werte (Abschnitt 1) schwanken deshalb
+  zwischen 44 und 60, und auch die Pass-Minima (Abschnitt 2) sind noch lastabhängig.
+- **ISA-Instruktionszahl, Register, Occupancy, Limiter (ALU vs. Textur vs. Bandbreite)**: nicht messbar ohne
+  Metal-Toolchain bzw. Xcode-GPU-Aufnahme. Die Fetch-Zahlen oben sind aus dem Code gezählt, nicht gemessen.
+- **Effekt von `framebufferOnly = NO`** und der Drawable-Anzahl: unter der Streuung nicht trennbar.
+- **Effekt des Counter-Samplings** auf die „normalen“ Baseline-Läufe: kein Schalter vorhanden, nicht gemessen.
+- **Runtime (`HorizonGame`), Play-Modus, Stromsparmodus aus**: wie in Schritt 1 nicht gemessen.
+- Der Himmelsanteil im Bild (45 % bzw. 80 %) ist aus dem Screenshot geschätzt, nicht gezählt.
 
 ## 4. Nachmessen
 
-*(folgt)*
+```sh
+# 0) Vorher: kein anderer Engine-Prozess auf der GPU
+python3 scripts/perf/gpu_time_by_process.py 10          # darf nur WindowServer & Co. zeigen
+# 1) Kontroll-Probe (ohne Engine)
+clang -fobjc-arc -O2 -framework AppKit -framework Metal -framework QuartzCore \
+      scripts/perf/metal_present_probe.m -o /tmp/metal_present_probe
+/tmp/metal_present_probe --calibrate --warmup 20 --frames 120 --load 140   # gpu_min ≈ 6 ms?
+caffeinate -u -t 60 & /tmp/metal_present_probe --load 140 --vsync 0 --label P3 > probe-P3.json
+# 2) Editor im Wechsel mit der Probe (Harness aus Schritt 1)
+R() { python3 scripts/he_perf_capture.py --project /tmp/pa1/proj/Test/Test.heproj \
+        --out docs/perf-audit/raw-step2 --cam 0,25,90,0,-0.25 "$@"; }
+R --label X1-editor-landscape-vsyncoff --scene docs/perf-audit/scenes/landscape.hescene
+# 3) Pass-Kosten: Szenenvarianten (cloudQuality/lowResClouds/cloudShadows im environment-Block der .hescene)
+R --label Y0-landscape-detailed --scene docs/perf-audit/scenes/landscape.hescene --detailed
+```
+
+Rohdaten dieses Schritts: `docs/perf-audit/raw-step2/` (Probe-JSONs mit Frame-Arrays, GPU-Anteile pro Prozess,
+Editor-Zusammenfassungen und -Logs). Die vollständigen Editor-Dumps liegen gzip-komprimiert außerhalb von git unter
+`/Users/connorjansen/VSCode/HorizonEngine/out/perf-audit/2026-09-27-step2/`. Die Szenenvarianten Y1–Y4 entstehen aus
+`landscape.hescene` durch Ändern je eines Schlüssels (`cloudQuality` 0/2, `lowResClouds` true, `cloudShadows` false).
