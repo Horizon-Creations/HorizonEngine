@@ -341,10 +341,14 @@ add_executable(HorizonEditor WIN32
 
 if(APPLE)
 	target_sources(HorizonEditor PRIVATE ImGuiMetalBridge.mm ImGuiMetalBridge.h
-	                                     MacMenuBar.mm MacMenuBar.h)
-	set_source_files_properties(ImGuiMetalBridge.mm MacMenuBar.mm
+	                                     MacMenuBar.mm MacMenuBar.h
+	                                     EditorSystemMotion.mm EditorSystemMotion.h)
+	set_source_files_properties(ImGuiMetalBridge.mm MacMenuBar.mm EditorSystemMotion.mm
 		PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 	target_link_libraries(HorizonEditor PRIVATE "-framework Cocoa")
+else()
+	# The system's reduce-motion setting (EditorRewards' "Follow System").
+	target_sources(HorizonEditor PRIVATE EditorSystemMotion.cpp EditorSystemMotion.h)
 endif()
 
 target_include_directories(HorizonEditor PRIVATE

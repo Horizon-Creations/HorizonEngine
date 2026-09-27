@@ -127,6 +127,11 @@ struct AppContext
 	// kill it); everything an editor preview needs beyond play/stop lives on the
 	// transport block of AudioEngine.
 	AudioEngine*       audioEngine  = nullptr;
+	// A second engine for the editor's own UI tones (EditorRewards.h,
+	// "Routing"): not the project's mixer, so the project's master and mute do
+	// not reach it and stopAll() after Play does not cut it. Created closed;
+	// EditorRewards opens its device only while a tone is possible.
+	AudioEngine*       uiAudioEngine = nullptr;
 
 	// The project's app-wide GameInstance graph (edited in the Game Instance
 	// window). commitGameInstance re-registers it with the app runtime + saves it.
@@ -698,6 +703,9 @@ private:
 
 	// Audio engine — initialised at startup, active always (spatial update only in play mode).
 	AudioEngine m_audioEngine;
+	// The editor's UI tones (AppContext::uiAudioEngine) — never init()ed here;
+	// EditorRewards opens and closes it.
+	AudioEngine m_uiAudio;
 
 	// Script execution context (play mode only; null outside play mode).
 	std::unique_ptr<ScriptContext> m_scriptContext;

@@ -518,9 +518,13 @@ void EditorUI::render(AppContext& ctx, float dt)
 
     // Reward moment (EditorRewards.h): BuildSucceeded — the edge detector, every
     // frame and here rather than in the footer, which the project hub skips.
+    // Focus is ANY editor window holding the keyboard, floating viewports
+    // included (each is an SDL window of its own): the build tones only play
+    // while none does.
     {
         const BuildProgressDialog::Outcome o = BuildProgressDialog::outcome();
-        HE::Ed::Rewards::pollBuild(ctx, o.run, o.finished, o.success);
+        HE::Ed::Rewards::pollBuild(ctx, o.run, o.finished, o.success,
+                                   SDL_GetKeyboardFocus() != nullptr);
     }
 
     // Apply the user's UI font scale preference (clamped to a sane range).
@@ -2610,6 +2614,10 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 // textures are the colour-space dialog's moment.
                 size_t imported = 0;
                 std::vector<std::string> textures;
+                // V5: what the folder held before, so the tiles this batch
+                // writes can be told apart afterwards (EditorRewards.h).
+                const HE::Ed::Rewards::DirSnapshot before =
+                    HE::Ed::Rewards::importSnapshot(ctx, (root / relDir).string());
                 for (const std::string& src : s_pendingImportPaths)
                 {
                     if (Importer::isTextureSource(src)) { textures.push_back(src); continue; }
@@ -2635,8 +2643,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                         : ", " + std::to_string(textures.size())
                           + " texture(s) wait for their color space")).c_str());
                 if (imported > 0)
+                {
                     HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported,
                                           static_cast<int>(imported));
+                    HE::Ed::Rewards::markImported(ctx, before);
+                }
                 ctx.contentRefreshPending = true;
             }
             s_pendingImportPaths.clear();
@@ -3362,9 +3373,39 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
                 // Stable ID (### + assetPath) so appending a dirty marker to the visible
                 // label never changes the tab's identity — which would reset its state.
                 const bool tabDirty = tabHasUnsavedEdits(tab.assetPath);
-                const std::string shown = tab.label + (tabDirty ? " *" : "")
+                // V4 (EditorRewards.h, "The visual cues"): just saved, the
+                // " *" makes room for a drawn check — blanks as wide as the
+                // marker, so the tab keeps its width until the check is gone.
+                const HE::Ed::Rewards::TabMark mark =
+                    HE::Ed::Rewards::tabMark(ctx, tab.assetPath, tabDirty);
+                std::string suffix = tabDirty ? " *" : "";
+                if (mark.check)
+                {
+                    const float markW = ImGui::CalcTextSize((tab.label + " *").c_str()).x;
+                    suffix = " ";
+                    while (ImGui::CalcTextSize((tab.label + suffix).c_str()).x < markW
+                           && suffix.size() < 8)
+                        suffix += ' ';
+                }
+                const std::string shown = tab.label + suffix
                     + "###tab_" + (tab.assetPath.empty() ? std::string("scene") : tab.assetPath);
-                if (ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags))
+                const bool tabOpen =
+                    ImGui::BeginTabItem(shown.c_str(), tab.closable ? &pOpen : nullptr, flags);
+                if (mark.check)
+                {
+                    // The tab's own rect, straight after BeginTabItem (whatever
+                    // it returned): the label starts one frame padding in, and
+                    // the marker's "*" stood after the label and a space.
+                    const ImVec2 mn    = ImGui::GetItemRectMin();
+                    const float  lineH = ImGui::GetTextLineHeight();
+                    const float  size  = std::floor(lineH * 0.62f);
+                    const float  x     = mn.x + ImGui::GetStyle().FramePadding.x
+                                       + ImGui::CalcTextSize((tab.label + " ").c_str()).x;
+                    const float  y     = mn.y + ImGui::GetStyle().FramePadding.y
+                                       + (lineH - size) * 0.5f;
+                    HE::Ed::Rewards::drawCheckMark(x, y, size, mark.stroke, mark.alpha);
+                }
+                if (tabOpen)
                 {
                     s_activeTab = i;
                     ImGui::EndTabItem();

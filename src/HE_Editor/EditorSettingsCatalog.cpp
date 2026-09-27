@@ -126,15 +126,79 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Briefly show \"Saved\", \"Build succeeded\" or \"Imported N "
 	                    "assets\" in the footer when one of those just worked. "
 	                    "Off: nothing is shown, played or counted."));
+	t.push_back(boolRow("rewards.visual", "Visual Cues", "Feedback", "rewards",
+	                    &EditorConfig::RewardsVisual,
+	                    "Show the moment's line in the footer. Needs Success "
+	                    "Feedback on; independent of the sound."));
+	t.push_back(boolRow("rewards.checkMark", "Check Mark", "Feedback", "rewards",
+	                    &EditorConfig::RewardsCheckMark,
+	                    "Draw a check mark beside the footer line. Needs Visual "
+	                    "Cues on."));
+	t.push_back(boolRow("rewards.lightEdge", "Light Edge", "Feedback", "rewards",
+	                    &EditorConfig::RewardsLightEdge,
+	                    "One soft line of light along the top of the footer when "
+	                    "the line appears. Needs Visual Cues on."));
+	t.push_back(boolRow("rewards.tabCheck", "Tab Check on Save", "Feedback", "rewards",
+	                    &EditorConfig::RewardsTabCheck,
+	                    "A saved tab's unsaved marker turns into a check for a "
+	                    "moment. Needs Success Feedback on."));
+	t.push_back(boolRow("rewards.importHighlight", "Highlight Imports", "Feedback",
+	                    "rewards", &EditorConfig::RewardsImportHighlight,
+	                    "Assets an import just wrote get a frame in the Content "
+	                    "Browser that fades after about two seconds. Needs "
+	                    "Success Feedback on."));
+	t.push_back(enumRow("rewards.reducedMotion", "Reduced Motion", "Feedback", "rewards",
+	                    &EditorConfig::RewardsReducedMotion,
+	                    { "Follow System", "Off" },
+	                    "Follow the system's reduce-motion setting (check marks "
+	                    "appear whole, no light edge, no rolling numbers, no "
+	                    "moving underline), or always show the full motion."));
 	t.push_back(boolRow("rewards.sound", "Success Sound", "Feedback", "rewards",
 	                    &EditorConfig::RewardsSound,
-	                    "Play a short chime with the footer feedback. Needs Success "
-	                    "Feedback on."));
+	                    "Play a short sound when a moment happens (and when a "
+	                    "build fails); each sound has its own switch below. Needs "
+	                    "Success Feedback on; independent of Visual Cues. At most "
+	                    "one sound every 2 s, a save's at most every 20 s, none "
+	                    "during Play. Played on the editor's own output, not the "
+	                    "project's mixer."));
+	t.push_back(floatRow("rewards.volume", "Sound Volume", "Feedback", "rewards",
+	                     &EditorConfig::RewardsVolume, 0.0, 1.0,
+	                     "Loudness of the feedback sounds, 0 to 1. Zero plays "
+	                     "nothing."));
+	t.push_back(boolRow("rewards.soundSave", "Save Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundSave,
+	                    "A soft tick when you save. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundBuild", "Build Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundBuild,
+	                    "A two-note chime when a build succeeded, only while the "
+	                    "editor is in the background. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundBuildFailed", "Build Failed Sound", "Feedback",
+	                    "rewards", &EditorConfig::RewardsSoundBuildFailed,
+	                    "Two calm falling notes when a build failed, only while "
+	                    "the editor is in the background. Needs Success Sound on."));
+	t.push_back(boolRow("rewards.soundImport", "Import Sound", "Feedback", "rewards",
+	                    &EditorConfig::RewardsSoundImport,
+	                    "A short pop when files were imported as assets. Needs "
+	                    "Success Sound on."));
 	t.push_back(boolRow("rewards.showProgress", "Show Progress", "Feedback", "rewards",
 	                    &EditorConfig::RewardsShowProgress,
 	                    "Show successful builds today and days in a row with the "
 	                    "editor beside \"Ready\" in the footer. Needs Success "
 	                    "Feedback on; off hides the counters, they keep counting."));
+	t.push_back(boolRow("rewards.counterTick", "Counter Tick", "Feedback", "rewards",
+	                    &EditorConfig::RewardsCounterTick,
+	                    "A counter that just went up lights up for a moment. "
+	                    "Needs Show Progress on."));
+	t.push_back(boolRow("rewards.streakTooltip", "Recent Days Tooltip", "Feedback",
+	                    "rewards", &EditorConfig::RewardsStreakTooltip,
+	                    "Hovering the counters shows the last seven days. Only on "
+	                    "hover, never on its own. Needs Show Progress on."));
+	t.push_back(boolRow("rewards.muteEditorSounds", "Mute Editor Sounds", "Feedback",
+	                    "rewards", &EditorConfig::EditorSoundsMuted,
+	                    "Silence the sounds the editor plays on its own output "
+	                    "(the feedback sounds), keeping each sound's switch. "
+	                    "Independent of Success Feedback; clip auditions and the "
+	                    "project's audio are not affected."));
 
 	// ── Editor ▸ Collaboration ──────────────────────────────────────────────
 	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Collaboration",

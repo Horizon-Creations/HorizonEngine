@@ -3298,13 +3298,88 @@ namespace
 	  "the footer says so for about a second and a half (\"Saved\", \"Build "
 	  "succeeded\", \"Imported 3 assets\") and then goes back to \"Ready\". "
 	  "Nothing opens, nothing takes focus and nothing waits for it. Saves by an "
-	  "MCP client or a script, the autosave and failed builds show nothing. Off: "
+	  "MCP client or a script, the autosave and failed builds show nothing (a "
+	  "failed build can have a sound of its own, see Build Failed Sound). Off: "
 	  "no feedback at all, no sound and no progress counted.",
 	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Visual Cues", "",
+	  "The moment's line in the middle of the footer (\"Saved\", \"Build "
+	  "succeeded\", \"Imported 3 assets\") and the thin line under it, with its "
+	  "check mark and light edge below. Off: the footer stays on \"Ready\" and "
+	  "the progress counters, the sound (if on) still plays and counting goes "
+	  "on. The tab check and the import highlight have switches of their own.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Check Mark", "",
+	  "A small check drawn beside the footer line, so \"it worked\" does not "
+	  "rest on the green alone. It is written in a sixth of a second, or "
+	  "appears whole with reduced motion, and fades with the line. Saving "
+	  "again right after does not draw it again.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Light Edge", "",
+	  "One thin line of light along the top edge of the footer that spreads "
+	  "from the middle and fades within about half a second when the line "
+	  "appears. One pulse, never a blink; left out with reduced motion.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Tab Check on Save", "",
+	  "When you save, the \" *\" behind the saved tab's name turns into a small "
+	  "check for about half a second, right where you are looking. Undoing back "
+	  "to the saved state is not a save and shows none.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Highlight Imports", "",
+	  "Assets an import just wrote get a green frame in the Content Browser "
+	  "that fades after about two seconds, so you can find them. The frame "
+	  "starts when the tile comes into view, as long as that is within half a "
+	  "minute of the import.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Reduced Motion", "",
+	  "Follow System: when the system asks for reduced motion (macOS: "
+	  "Accessibility \xe2\x96\xb8 Display \xe2\x96\xb8 Reduce motion; Windows: "
+	  "Animation effects off), check marks appear whole at once and the light "
+	  "edge, the rolling numbers and the shrinking line under the footer text "
+	  "are left out; fades stay. Off: always the full motion. Nothing here ever "
+	  "blinks either way.",
+	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Success Sound", "",
-	  "A short, quiet chime together with the footer feedback. Off by default. It "
-	  "plays through the project's master volume, so muting the project mutes "
-	  "it too.",
+	  "Short, quiet sounds when a save, a build or an import worked, and when a "
+	  "build failed; each can be switched off below. Off by default, and works "
+	  "with or without Visual Cues. At most one sound every two seconds; saves "
+	  "are heard at most every twenty seconds, and the same moment again right "
+	  "after is not heard at all. Silent during Play. The editor plays these on "
+	  "an output of its own: the project's volume and mute do not change them, "
+	  "and the output is only opened while this is on.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Sound Volume", "",
+	  "How loud the feedback sounds are, from silent to full. The slider follows "
+	  "your ear: half way sounds about half as loud. Zero plays nothing.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Save Sound", "",
+	  "A soft tick when you save. It is the sound you would hear most, so it is "
+	  "the quietest and shortest, and at most one every twenty seconds.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Build Sound", "",
+	  "A two-note chime when a build succeeded, played only while the editor is "
+	  "in the background: a build you watched finish needs no sound, one you "
+	  "switched away from does.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Build Failed Sound", "",
+	  "Two calm notes going down when a build failed, played only while the "
+	  "editor is in the background, so you know to come back and look. The "
+	  "Build window and the problem notification say what went wrong, as "
+	  "always.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Import Sound", "",
+	  "A short pop when files were imported as assets. The same sound for one "
+	  "file or fifty.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Preview", "",
+	  "Play this sound once at the current volume, whether its switch is on or "
+	  "not, so you can hear it without waiting for a save, build or import.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Mute Editor Sounds", "",
+	  "Silence the sounds the editor plays on its own output (the feedback "
+	  "sounds above) at once, and keep each sound's own switch as it is for "
+	  "when you unmute. Clips you audition in the Audio Editor and your "
+	  "project's audio play through the project's mixer and are not affected.",
 	  "", "editor#preferences" },
 	{ "Preferences/Feedback/Show Progress", "",
 	  "Beside \"Ready\" in the footer: how many builds succeeded today, and from "
@@ -3314,6 +3389,18 @@ namespace
 	  "stay in this computer's editor settings. Off hides them; they keep "
 	  "counting while Success Feedback is on, and Success Feedback off stops "
 	  "both.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Counter Tick", "",
+	  "When a counter beside \"Ready\" goes up, only that number lights up "
+	  "green for about half a second and the old one rolls away (with reduced "
+	  "motion it only lights up). It waits until the moment's line is gone. "
+	  "There is no bar and no goal to fill.",
+	  "", "editor#preferences" },
+	{ "Preferences/Feedback/Recent Days Tooltip", "",
+	  "Rest the mouse on the counters beside \"Ready\" to see the last seven "
+	  "days: a dot for each day you saved, built or imported something, and "
+	  "that day's successful builds. It only appears while you hover, never "
+	  "on its own.",
 	  "", "editor#preferences" },
 	{ "Graph Appearance/Detailed", "",
 	  "How a variable is drawn in a HorizonCode graph's list: name and type on "

@@ -79,6 +79,18 @@ std::string collabKeyFor(AppContext& ctx, const std::string& absPath)
 void applyImport(AppContext& ctx)
 {
 	size_t imported = 0;
+	// V5 (EditorRewards.h): each target folder as it was, to find the tiles
+	// this batch wrote. Usually one folder; a Content Browser pick can span more.
+	std::vector<HE::Ed::Rewards::DirSnapshot> before;
+	for (const Row& r : s_rows)
+	{
+		const std::string dir = (std::filesystem::path(s_root) / r.relDir).string();
+		if (std::any_of(before.begin(), before.end(),
+		                [&](const auto& s) { return s.dir == dir; }))
+			continue;
+		before.push_back(HE::Ed::Rewards::importSnapshot(ctx, dir));
+		if (before.back().dir.empty()) break;   // not taken: the highlight is off
+	}
 	for (const Row& r : s_rows)
 	{
 		Importer::ImportOptions options;
@@ -98,8 +110,11 @@ void applyImport(AppContext& ctx)
 	// Reward moment (EditorRewards.h): AssetsImported — the confirmed texture
 	// batch, one moment with its count. A retag (applyRetag) is not an import.
 	if (imported > 0)
+	{
 		HE::Ed::Rewards::fire(ctx, HE::Ed::Rewards::Moment::AssetsImported,
 		                      static_cast<int>(imported));
+		for (const auto& s : before) HE::Ed::Rewards::markImported(ctx, s);
+	}
 	ctx.contentRefreshPending = true;
 }
 
