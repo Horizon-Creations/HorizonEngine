@@ -1,0 +1,31 @@
+samples: 1825 (1 ms each while on-CPU)
+per thread (samples, P/E core):
+    1150  P     0  E  1150  Main Thread
+     674  P     0  E   673  HorizonEditor
+       1  P     0  E     1  com.apple.audio.IOThread.client
+
+== Main Thread filter Help::findKey: 143 samples; inclusive by function
+     143 100.0%  main
+     143 100.0%  EditorUI::render(AppContext&, float)
+     143 100.0%  start
+     143 100.0%  HE::Ed::Help::findKey(std::__1::basic_string_view<char, std::__1::char_traits<char>>)
+     143 100.0%  EditorUI::renderEditor(AppContext&, float)
+     143 100.0%  HE::Application::Run(int, char**)
+     143 100.0%  EditorApplication::OnRender(float)
+     101  70.6%  EditorToolbar::(anonymous namespace)::cellImpl(EditorToolbar::Metrics const&, float, float, char const*, void (*)(ImDrawList*, ImVec2 const&, float, unsigned int), char c
+      95  66.4%  ViewportPanel::render(AppContext&, float)
+      95  66.4%  ViewportToolbar::render(AppContext&, ViewportToolbar::State&)
+      83  58.0%  EditorToolbar::cell(EditorToolbar::Metrics const&, float, float, char const*, void (*)(ImDrawList*, ImVec2 const&, float, unsigned int), char const*, bool, bool, char con
+      77  53.8%  EditorWidgets::helpForKey(char const*)
+      74  51.7%  _platform_strlen
+      28  19.6%  OutlinerPanel::render(AppContext&)
+      20  14.0%  ContentBrowserPanel::render(AppContext&, int&, std::__1::function<void (std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&)> cons
+      18  12.6%  EditorToolbar::Bar::item(char const*, void (*)(ImDrawList*, ImVec2 const&, float, unsigned int), char const*, bool, bool, char const*, char const*)
+       5   3.5%  DYLD-STUB$$strlen
+       4   2.8%  _platform_memcmp
+
+== leaf (self) functions
+      74  51.7%  _platform_strlen
+      60  42.0%  HE::Ed::Help::findKey(std::__1::basic_string_view<char, std::__1::char_traits<char>>)
+       5   3.5%  DYLD-STUB$$strlen
+       4   2.8%  _platform_memcmp
