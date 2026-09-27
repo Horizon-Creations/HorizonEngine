@@ -300,14 +300,14 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 				{
 					// A path over the ground, projected point by point so it
 					// follows the relief instead of cutting through hills.
-					auto groundPath = [&](auto&& at, int segments, bool closed, ImU32 col, float thick)
+					// `at` runs t over [0, 1] inclusive; a closed curve closes
+					// because at(1) == at(0).
+					auto groundPath = [&](auto&& at, int segments, ImU32 col, float thick)
 					{
 						ImVec2 prev{}; bool prevValid = false;
-						const int n = closed ? segments : segments - 1;
-						for (int i = 0; i <= n; ++i)
+						for (int i = 0; i <= segments; ++i)
 						{
-							const glm::vec2 p = at(static_cast<float>(i % segments)
-							                       / static_cast<float>(segments));
+							const glm::vec2 p = at(static_cast<float>(i) / static_cast<float>(segments));
 							ImVec2 cur{}; const bool curValid = projectPt(p.x, p.y, cur);
 							if (prevValid && curValid) dl->AddLine(prev, cur, col, thick);
 							prev = cur; prevValid = curValid;
@@ -324,7 +324,7 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 						const glm::vec2 corners[5] = { c0, { c1.x, c0.y }, c1, { c0.x, c1.y }, c0 };
 						for (int e = 0; e < 4; ++e)
 							groundPath([&](float t) { return glm::mix(corners[e], corners[e + 1], t); },
-							           24, false, faintCol, 1.0f);
+							           24, faintCol, 1.0f);
 					}
 					if (area.radiusX > 0.0f && area.radiusZ > 0.0f)
 					{
@@ -334,7 +334,7 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 							return glm::vec2(area.radiusX * std::cos(a), area.radiusZ * std::sin(a));
 						};
 						groundPath([&](float t) { return glm::vec2(area.centerX, area.centerZ) + rimAt(t); },
-						           64, true, rimCol, 1.5f);
+						           64, rimCol, 1.5f);
 						// Where the full height begins: the rim pulled in along
 						// each ray by the falloff, capped at the short radius —
 						// the same geometry TerrainGenerate's blend uses. At or
@@ -348,7 +348,7 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 								const float len = glm::length(rim);
 								const float k   = len > 1e-4f ? std::max(0.0f, 1.0f - f / len) : 0.0f;
 								return glm::vec2(area.centerX, area.centerZ) + rim * k;
-							}, 64, true, faintCol, 1.0f);
+							}, 64, faintCol, 1.0f);
 					}
 				}
 				else if (hasHit)

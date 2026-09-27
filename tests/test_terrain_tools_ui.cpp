@@ -40,6 +40,7 @@
 // in a headless ImGui context, the way test_outliner_ui.cpp drives the
 // Outliner: find the cells by asking ImGui what is under the pointer, click
 // them, drag over a top-down viewport, and read the layer's mask afterwards.
+// The Mountain area tool is driven the same way further down.
 // With HE_UI_DUMP_DIR set the panel is written out as well.
 
 using namespace HE::Ed;
