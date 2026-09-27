@@ -17,6 +17,12 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <utility>
+#include <vector>
+
+#if defined(__APPLE__)
+#include <dlfcn.h>
+#endif
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -24,6 +30,33 @@ namespace fs = std::filesystem;
 namespace {
 inline uint64_t nowNs() { return SDL_GetTicksNS(); }
 inline double   nsToMs(uint64_t ns) { return static_cast<double>(ns) * 1e-6; }
+
+// Optional allocation probe for the perf audit (scripts/perf/alloc_probe.c, injected
+// with DYLD_INSERT_LIBRARIES). In every normal run the lookups return null and none
+// of this does anything. With the probe loaded, each recorded frame gets its heap
+// allocation / file-op counts (frame begin → next frame begin) in the dump's "stats".
+struct AllocProbeCounts
+{
+	uint64_t allocs, bytes, frees, mainAllocs, mainBytes, mainFrees, fileOps, mainFileOps;
+};
+struct AllocProbe
+{
+	void (*read)(AllocProbeCounts*)   = nullptr;
+	void (*arm)(int)                  = nullptr;
+	void (*dump)(const char*, uint64_t) = nullptr;
+	AllocProbe()
+	{
+#if defined(__APPLE__)
+		read = reinterpret_cast<void (*)(AllocProbeCounts*)>(dlsym(RTLD_DEFAULT, "he_alloc_probe_read"));
+		arm  = reinterpret_cast<void (*)(int)>(dlsym(RTLD_DEFAULT, "he_alloc_probe_arm"));
+		dump = reinterpret_cast<void (*)(const char*, uint64_t)>(dlsym(RTLD_DEFAULT, "he_alloc_probe_dump"));
+#endif
+	}
+};
+const AllocProbe& allocProbe() { static AllocProbe p; return p; }
+AllocProbeCounts s_allocPrev{};
+bool             s_allocHavePrev = false;
+std::vector<std::pair<uint64_t, AllocProbeCounts>> s_allocByFrame;   // frame index → delta
 
 std::string timestampStamp()
 {
@@ -173,6 +206,13 @@ void EngineProfiler::doStart()
 	// whole happens-before argument; keep new plain state on this side of it.
 	m_generation.fetch_add(1, std::memory_order_relaxed);
 	m_recording.store(true, std::memory_order_release);
+	if (allocProbe().read)
+	{
+		s_allocByFrame.clear();
+		s_allocByFrame.reserve(m_maxFrames ? m_maxFrames + 1 : 8192);
+		s_allocHavePrev = false;
+		if (allocProbe().arm) allocProbe().arm(1);
+	}
 	HE_LOG_INFO(Profiler, "%s", "Profiler: capture started");
 }
 
@@ -211,6 +251,22 @@ void EngineProfiler::beginFrame(double deltaMs)
 	m_frameStartNs = nowNs();   // always — cheap; drives lastCpuFrameMs() for the live HUD
 	if (!m_recording) return;   // deltaMs is only stored per recorded frame (m_current.deltaMs);
 	                            // the live HUD gets its delta straight from Application's own dt
+
+	if (allocProbe().read && !m_singleMode)
+	{
+		// Begin-to-begin, so the whole loop iteration counts, and the counts belong to
+		// the frame that just ended (index m_frameCounter - 1).
+		AllocProbeCounts c{};
+		allocProbe().read(&c);
+		if (s_allocHavePrev && m_frameCounter > 0)
+			s_allocByFrame.push_back({ m_frameCounter - 1, AllocProbeCounts{
+				c.allocs - s_allocPrev.allocs, c.bytes - s_allocPrev.bytes, c.frees - s_allocPrev.frees,
+				c.mainAllocs - s_allocPrev.mainAllocs, c.mainBytes - s_allocPrev.mainBytes,
+				c.mainFrees - s_allocPrev.mainFrees, c.fileOps - s_allocPrev.fileOps,
+				c.mainFileOps - s_allocPrev.mainFileOps } });
+		s_allocPrev     = c;
+		s_allocHavePrev = true;
+	}
 
 	m_current           = ProfFrameRecord{};
 	m_current.index     = m_frameCounter;
@@ -441,6 +497,7 @@ struct Stat
 
 std::string EngineProfiler::doStopDump()
 {
+	if (allocProbe().dump) allocProbe().dump(nullptr, m_frames.size());   // stacks → HE_ALLOC_PROBE_OUT
 	std::string path = dumpNow();
 	HE_LOG_INFO(Profiler, "%s",
 	            ("Profiler: capture stopped — " + std::to_string(m_frames.size()) +
@@ -758,6 +815,21 @@ std::string EngineProfiler::dumpNow()
 			{"streamingInFlight", s.scene.streamingInFlight},
 			{"vramUsedMB", s.vramUsedMB}, {"vramBudgetMB", s.vramBudgetMB},
 		};
+		if (!s_allocByFrame.empty())
+		{
+			auto it = std::lower_bound(s_allocByFrame.begin(), s_allocByFrame.end(), f.index,
+			                           [](const auto& e, uint64_t i) { return e.first < i; });
+			if (it != s_allocByFrame.end() && it->first == f.index)
+			{
+				const AllocProbeCounts& a = it->second;
+				jf["stats"]["allocsMain"]     = a.mainAllocs;
+				jf["stats"]["allocBytesMain"] = a.mainBytes;
+				jf["stats"]["freesMain"]      = a.mainFrees;
+				jf["stats"]["allocsOther"]    = a.allocs - a.mainAllocs;
+				jf["stats"]["fileOpsMain"]    = a.mainFileOps;
+				jf["stats"]["fileOpsOther"]   = a.fileOps - a.mainFileOps;
+			}
+		}
 		frames.push_back(std::move(jf));
 	}
 	j["frames"] = frames;
