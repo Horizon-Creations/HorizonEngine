@@ -8,7 +8,7 @@ sichtbarer Reaktion?
 
 1. **Die Eingabe kostet keine Frame-Zeit.** `PollEvents` (SDL-Pump, Cocoa-Eventschleife, Dispatch an
    ImGui und `Input`) liegt bei **p50 0,08 ms / p90 0,13 ms** pro Frame. Mit 16 bzw. 64 eingespeisten
-   Mausbewegungen pro Frame steigt das um **höchstens 0,01 ms**, `OnRender` bleibt unverändert
+   Mausbewegungen pro Frame steigt das um **höchstens 0,015 ms**, `OnRender` bleibt unverändert
    (p50 1,0 ms). Eine Positivkontrolle bestätigt, dass die Events wirklich verarbeitet wurden. Input ist
    **keine** Ursache für < 60 FPS.
 2. **Die Latenz ist hoch, aber das liegt an der Pipeline, nicht am Eingabesystem.** Die Eingabe wird
@@ -60,7 +60,9 @@ entspricht einer 1000-Hz-Maus bei 60 FPS, N = 64 ist ein Stresstest. Ohne Variab
 (einmal gecachtes `getenv`).
 
 **Positivkontrolle:** Das Log meldet für Frame 100 `dispatched 64 events` (N = 64), `16` (N = 16) bzw.
-`0` (N = 0), und beim Start `keyboard focus none`. Das SDL3-Backend von ImGui ersetzt die eingespeiste
+`0` (N = 0), und beim Start `keyboard focus none`. Der Kontroll-Log kam erst mit dem zweiten Build dazu.
+Er steht deshalb in `I64-run4`/`I0-run4` und in den drei verworfenen Lastläufen, nicht in run1/run2. Der
+Injektor-Code ist in beiden Builds derselbe. Das SDL3-Backend von ImGui ersetzt die eingespeiste
 Position also nicht durch den echten Cursor (das täte es nur mit Tastaturfokus und ohne überfahrenes Fenster).
 
 Landscape-Szene, Editor Edit-Modus, vsync aus, 300 Warmup + 600 Frames, Release, Metal. Bildschirm gesperrt,
@@ -73,9 +75,13 @@ die FPS sind also nicht die am Bildschirm, die CPU-Scopes aber belastbar.
 | I16-run1 | 16 | 0,055 / 0,088 / 0,134 | 1,03 / 1,36 | 9,64 | 8,52 | 38,9 | 14,83 |
 | I16-run2 | 16 | 0,054 / 0,086 / 0,133 | 1,01 / 1,32 | 10,28 | 8,95 | 40,8 | 14,46 |
 | I64-run1 | 64 | 0,059 / 0,089 / 0,137 | 0,99 / 1,31 | 9,29 | 7,94 | 41,0 | 14,41 |
+| I64-run4 | 64 | 0,065 / 0,095 / 0,147 | 1,01 / 1,32 | 9,46 | 8,28 | 41,3 | 14,68 |
+| I0-run4 | 0 | 0,053 / 0,083 / 0,132 | 1,02 / 1,34 | 10,83 | 9,34 | 41,0 | 15,37 |
 
-**Ergebnis:** 16 Events pro Frame kosten etwa **+0,005 ms** (p50), 64 Events etwa **+0,007 ms**, also
-rund 0,1–0,3 µs pro Event. Die Hover-Folgekosten in `OnRender` liegen unter der Streuung zwischen zwei
+(run4 ist ein Paar direkt hintereinander bei Load 2,2, mit Positivkontrolle im Log.)
+
+**Ergebnis:** 16 Events pro Frame kosten etwa **+0,005 ms** (p50), 64 Events **+0,007 bis +0,012 ms**
+(p90 +0,015 ms), also rund 0,1–0,2 µs pro Event. Die Hover-Folgekosten in `OnRender` liegen unter der Streuung zwischen zwei
 Läufen ohne Eingabe (0,99 vs. 1,02 ms). Beides zusammen ist unter **0,1 % des 16,7-ms-Budgets**.
 
 **Verworfen:** Die Läufe `I64-run2`, `I0-run3` und `I16-run3` (liegen in `raw-step4/`) liefen, während
@@ -86,7 +92,7 @@ Beleg dafür aufgehoben.
 
 Die absoluten Zahlen (40 statt 69 FPS in Schritt 3, GPU p50 14,5 statt 11,3 ms) zeigen, dass der Rechner
 auch während der sauberen Läufe nicht ganz ruhig war. Der Vergleich innerhalb der Reihe ist trotzdem
-gültig: Alle fünf Läufe liegen in derselben Lastlage (FPS 38,9–41,0, GPU 14,4–15,1 ms).
+gültig: Alle sieben Läufe liegen in derselben Lastlage (FPS 38,9–41,3, GPU 14,4–15,4 ms).
 
 **Nicht gemessen:** Tastatur-Events (gleicher Dispatch-Pfad, gleiche Größenordnung zu erwarten), ein
 angeschlossener Gamepad (`PollGamepads` fällt ohne Pad sofort heraus), der Play-Modus (Spielkamera über
