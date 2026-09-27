@@ -21,6 +21,7 @@
 //   --drawables 2|3     layer.maximumDrawableCount (engine: default 3)
 //   --warmup N --frames N
 //   --calibrate         commit+wait each frame, prints the unshared GPU time of --load
+//   --hidden            never order the window on screen (like HE_HIDDEN_WINDOW=1)
 //   --label S           copied into the JSON
 // Prints one JSON object with per-frame arrays and a summary to stdout.
 
@@ -82,7 +83,7 @@ int main(int argc, const char** argv)
 	{
 		int w = 2840, h = 1528, sw = 1718, sh = 884, warmup = 300, frames = 600, drawables = 3;
 		unsigned load = 0;
-		BOOL vsync = NO, fbonly = NO, calibrate = NO;
+		BOOL vsync = NO, fbonly = NO, calibrate = NO, hidden = NO;
 		const char* label = "";
 		for (int i = 1; i < argc; ++i)
 		{
@@ -100,6 +101,7 @@ int main(int argc, const char** argv)
 			else if (!strcmp(a, "--frames"))    { frames = atoi(v); ++i; }
 			else if (!strcmp(a, "--label"))     { label = v; ++i; }
 			else if (!strcmp(a, "--calibrate")) { calibrate = YES; }
+			else if (!strcmp(a, "--hidden"))    { hidden = YES; }
 		}
 
 		[NSApplication sharedApplication];
@@ -148,7 +150,8 @@ int main(int argc, const char** argv)
 		layer.drawableSize = CGSizeMake(w, h);
 		view.layer = layer;
 		[win center];
-		[win makeKeyAndOrderFront:nil];
+		// --hidden: never ordered on screen, like SDL_WINDOW_HIDDEN (HE_HIDDEN_WINDOW=1).
+		if (!hidden) [win makeKeyAndOrderFront:nil];
 		[NSApp activateIgnoringOtherApps:YES];
 
 		const int total = warmup + frames;
@@ -158,6 +161,7 @@ int main(int argc, const char** argv)
 		double* gpu   = calloc(total, sizeof(double));
 		__block double* gpuOut = gpu;
 		__block atomic_int completed = 0;
+		int nilDrawables = 0;
 
 		double prevStart = nowMs();
 		for (int f = 0; f < total; ++f)
@@ -191,6 +195,7 @@ int main(int argc, const char** argv)
 				double n0 = nowMs();
 				id<CAMetalDrawable> drawable = calibrate ? nil : [layer nextDrawable];
 				nd[f] = nowMs() - n0;
+				if (!drawable && !calibrate && f >= warmup) ++nilDrawables;
 				if (drawable)
 				{
 					MTLRenderPassDescriptor* pp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -228,13 +233,13 @@ int main(int argc, const char** argv)
 		}
 		printf("{\n  \"label\": \"%s\", \"device\": \"%s\",\n", label, dev.name.UTF8String);
 		printf("  \"config\": {\"w\": %d, \"h\": %d, \"sw\": %d, \"sh\": %d, \"load\": %u, \"vsync\": %d, "
-		       "\"framebufferOnly\": %d, \"maximumDrawableCount\": %lu, \"calibrate\": %d, \"warmup\": %d, \"frames\": %d},\n",
-		       w, h, sw, sh, load, vsync, fbonly, (unsigned long)layer.maximumDrawableCount, calibrate, warmup, frames);
+		       "\"framebufferOnly\": %d, \"maximumDrawableCount\": %lu, \"calibrate\": %d, \"hidden\": %d, \"warmup\": %d, \"frames\": %d},\n",
+		       w, h, sw, sh, load, vsync, fbonly, (unsigned long)layer.maximumDrawableCount, calibrate, hidden, warmup, frames);
 		printf("  \"summary\": {\"fps\": %.2f, \"delta_p50\": %.2f, \"delta_p95\": %.2f, \"nd_p50\": %.2f, \"nd_p90\": %.2f, "
-		       "\"nd_under_1ms\": %d, \"cpu_p50\": %.2f, \"gpu_min\": %.2f, \"gpu_p50\": %.2f, \"gpu_p90\": %.2f, "
+		       "\"nd_under_1ms\": %d, \"nil_drawables\": %d, \"cpu_p50\": %.2f, \"gpu_min\": %.2f, \"gpu_p50\": %.2f, \"gpu_p90\": %.2f, "
 		       "\"delta_in_vsync_intervals\": [%d,%d,%d,%d,%d,%d,%d]},\n",
 		       1000.0 * frames / sumD, pct(D, frames, 50), pct(D, frames, 95), pct(N, frames, 50), pct(N, frames, 90),
-		       ndFast, pct(C, frames, 50), pct(G, frames, 0), pct(G, frames, 50), pct(G, frames, 90),
+		       ndFast, nilDrawables, pct(C, frames, 50), pct(G, frames, 0), pct(G, frames, 50), pct(G, frames, 90),
 		       hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6]);
 		printArr("deltaMs", D, frames, YES);
 		printArr("nextDrawableMs", N, frames, YES);

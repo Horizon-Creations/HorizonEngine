@@ -15,9 +15,9 @@ von heute Nachmittag (`docs/perf-audit/raw-step2/`). **Nur Befund, kein Fix.**
    (gleiche Layer-Einstellungen, gleiche Fenstergröße, 6 ms synthetische GPU-Last) zeigt unter denselben
    Bedingungen dieselben Werte wie der Editor: 44–60 FPS, NextDrawable p50 16,5–20,7 ms. Die Layer-Konfiguration
    der Engine ist Standard und nicht die Ursache.
-2. **Die GPU ist voll.** Während der Editor die Landscape-Szene rendert, teilt sich die GPU (per-Prozess-GPU-Zeit
-   aus dem IORegistry) in **Editor 46 %, verwaister Editor 35 %, WindowServer 18 %** auf, zusammen ~99 %.
-   Sobald die Summe über die Kapazität geht, verpasst das Fenster Refreshes, und es entsteht das Muster aus der
+2. **Die GPU wird geteilt.** Während der Editor die Landscape-Szene rendert, teilt sich die GPU (per-Prozess-GPU-Zeit
+   aus dem IORegistry) in **Editor 46 %, verwaister Editor 35 %, WindowServer 18 %** auf. Im Leerlauf nimmt sich der
+   Orphan allein 54 %. Zieht er mehr, verpasst das Fenster Refreshes, und es entsteht das Muster aus der
    Baseline (NextDrawable abwechselnd ~0 und 30–60 ms, 44–51 FPS).
 3. **Wenn die GPU reicht, ist NextDrawable reine vsync-Wartezeit.** Heute Nachmittag schaffte derselbe Editor mit
    derselben Landscape-Szene unter derselben Fremdlast **59,5–59,6 FPS**. NextDrawable lag dabei gleichmäßig bei ~15 ms:
@@ -29,8 +29,8 @@ von heute Nachmittag (`docs/perf-audit/raw-step2/`). **Nur Befund, kein Fix.**
    verstecktes, verdecktes oder minimiertes Fenster (Abschnitt 1.5).
 5. **Die GPU-Arbeit der Szene selbst ist klein:** Die Summe der Pass-Minima liegt bei ~4,4–6 ms für 1718×884 Pixel,
    ein Viertel bis ein Drittel des 60-Hz-Budgets. Die teuersten Posten (Minima, Nachmittags-/Mittagsserie):
-   **Wolken-Dome-Raymarch 1,4/2,2 ms** (32 Schritte, 128–544 3D-Fetches pro Himmelspixel auf eine 64-MiB-Textur
-   ohne Mips), **Himmel ohne Wolken ~1,2 ms** (Single-Scattering mit ~216 `exp` pro Pixel und Frame bei stehender
+   **Wolken-Dome-Raymarch 1,4/2,2 ms** (32 Schritte, 224–544 3D-Fetches pro Himmelspixel auf eine 64-MiB-Textur
+   ohne Mips; die Coverage-Schranke, die das sparen soll, greift bei `coverage 0.5` nie), **Himmel ohne Wolken ~1,2 ms** (Single-Scattering mit ~216 `exp` pro Pixel und Frame bei stehender
    Sonne), **Wolkenschatten-Map 0,6/1,0 ms** (512², rechnet das 3D-Wolkenfeld für 12 × 12 km, das Terrain nutzt davon
    ~4×4 Texel), Bloom 0,35/0,62 ms (11 Encoder, größte Streuung unter Last). Details in Abschnitt 2.
 
@@ -141,6 +141,9 @@ verschiedener Clients gleichzeitig laufen):
 
 - Der verwaiste Editor nimmt sich **35–54 %** der GPU. Holt er sich mehr (W1-clear: 49 %, W2: 43 %), fallen die
   FPS des Vordergrund-Renderers, und zwar auch bei einer Probe, die fast nichts rendert.
+- Die Summen um ~99 % (X5, W1-load) sprechen für eine volle GPU, beweisen sie aber nicht: Anteile verschiedener
+  Clients können sich überlappen. Der tragende Beleg ist ein anderer, nämlich dass die Probe ohne Engine dieselben
+  Einbrüche zeigt und diese mit dem Anteil des Orphans schwanken.
 - 46 % GPU-Anteil bei 58,6 FPS heißt: Der Editor braucht unter Konkurrenz ~7,9 ms GPU-Zeit pro Frame (Minimum ohne
   Konkurrenz aus der Detailed-Capture ~6 ms). Das passt in 16,7 ms, **wenn** der Rest der GPU frei ist.
 - Der WindowServer-Anteil springt zwischen 0,1 % und 44 %, ohne erkennbaren Zusammenhang mit `framebufferOnly`
@@ -158,12 +161,16 @@ verschiedener Clients gleichzeitig laufen):
   minimierte Fenster (`SDL_WINDOW_HIDDEN/OCCLUDED/MINIMIZED`, `SDL_EVENT_WINDOW_OCCLUDED`) gibt es außerhalb von
   `vendor/` nirgends.
   Ein Frame-Limit greift nur bei vsync aus und `MaxFps > 0` (Standard 0, Z. 641–651).
-- Bei einem versteckten Fenster nimmt der Compositor die Drawables nicht im Displaytakt ab. Der Editor rendert deshalb
-  so schnell, wie die GPU ihn lässt, und zwar das volle Szenenbild samt Wolken (`HE_SKY_TIME=30`).
+- **Gemessen mit der Probe** (`--hidden`: Fenster nie gezeigt, wie `SDL_WINDOW_HIDDEN`; `probe-H*.json`):
+  Ein verstecktes Fenster bekommt **mit vsync an 72–77 FPS** (H1 Clear 72,1; H2 6-ms-Last 73,0; H3 vsync aus 76,6).
+  Sichtbar schafft dieselbe Probe maximal 60. NextDrawable liefert dabei nie nil (0 Timeouts). Ein verstecktes Fenster
+  ist also **nicht an den Displaytakt gebunden**. Unbegrenzt ist es hier nicht, die Obergrenze setzt vermutlich die
+  GPU-Konkurrenz mit pid 72986. Der verwaiste Editor rendert so jedes Bild voll, samt Wolken (`HE_SKY_TIME=30`),
+  und zwar öfter als 60-mal pro Sekunde.
 - Das betrifft nicht nur verwaiste Testläufe. Es betrifft jede Situation, in der ein Engine-Fenster im Hintergrund
   läuft (Editor minimiert während eines Spiel-Exports, zweiter Editor im Collab-Test, Spiel hinter dem Editor).
-  Für den Menschen am M5 heißt das: **Jeder zweite HorizonEditor/HorizonGame-Prozess im Hintergrund halbiert die GPU
-  des Vordergrund-Fensters.**
+  Für den Menschen am M5 heißt das: **Ein zweiter HorizonEditor/HorizonGame-Prozess im Hintergrund kann dem
+  Vordergrund-Fenster ein Drittel bis die Hälfte der GPU nehmen** (gemessen am Orphan: 35–54 %).
 
 ### 1.6 Folgerungen für NextDrawable (priorisierte Verdächtige)
 
@@ -236,16 +243,29 @@ Die Szene hat `cloudMode 0`. `skyFragment` nimmt deshalb den Zweig `applyClouds`
   wo die Wolken ohnehin in den Horizontdunst ausgeblendet werden (`horizon = smoothstep(0.03, 0.22, dir.y)`).
   Unter dir.y < 0,02 bricht der Pfad ab.
 - **Fetches pro Schritt** (alle auf die 3D-Rauschtextur, trilinear):
-  - immer 4 (`starFbm3`, 4 Oktaven, als exakte Coverage-Schranke),
+  - 4 für die Coverage-Schranke (`starFbm3`, 4 Oktaven),
   - +3, wenn die Schranke eine Wolke zulässt (`worleyFbm`),
   - +2 × 5 = 10, wenn Dichte > 0,001 (Licht-March `qShadow = 2` × `cloudShadowDensity` mit 3 + 2 Fetches).
   Die Slab-Prüfung (`hgrad <= 0`) spart im Dome-Pfad fast nichts: Der Slab liegt per Konstruktion ganz in `[s0, s1]`.
-- **Pro Himmelspixel damit 128 (klarer Himmel) bis 544 (dichte Wolke) 3D-Fetches** bei Qualität 1;
-  bei Qualität 0: 72–216, bei Qualität 2: 256–1408. Der gemessene Anstieg Q0 → Q1 → Q2 (+0,75 → +1,37 → +3,22 ms)
-  folgt dieser Schritt- und Fetch-Zahl.
-  Früher Abbruch (`T < 0.02`) greift bei `coverage 0.5` selten.
-- **Himmelspixel:** Oberhalb des Horizonts liegen im Landscape-Bild etwa 45 % des Viewports (≈ 680 000 Pixel,
-  geschätzt aus `landscape_view.png`). Macht **≥ 87 Mio. trilineare 3D-Fetches pro Frame** schon bei klarem Himmel.
+- **Die „exakte Coverage-Schranke“ greift bei dieser Szene nie.** `starFbm3` liegt in [0; 0,9375], also
+  `perlin·0,5 + 0,55 ≥ 0,55`. Der Schwellwert ist `lo = mix(0.70, 0.22, coverage)` = **0,46** bei `coverage 0.5`.
+  Die Bedingung `perlin*0.5 + 0.55 < lo` ist erst für `coverage < 0,3125` überhaupt erfüllbar. Der Kommentar dort
+  schreibt der Schranke zu, dass sie jede Qualitätsstufe billiger macht. Bei der Standardbedeckung 0,5 spart sie
+  nichts, jeder Schritt zahlt mindestens 7 Fetches.
+- **Pro Himmelspixel damit 224 (klarer Himmel) bis 544 (dichte Wolke) 3D-Fetches** bei Qualität 1;
+  bei Qualität 0: 126–216, bei Qualität 2: 448–1408. Die Minima stehen im Verhältnis 1 : 1,8 : 3,6. Der gemessene
+  Anstieg über „ohne Wolken“ (Q0 → Q1 → Q2: +0,75 → +1,37 → +3,22 ms) steht im Verhältnis 1 : 1,8 : 4,3 und folgt
+  damit der Schritt- und Fetch-Zahl. Früher Abbruch (`T < 0.02`) greift bei `coverage 0.5` selten.
+- **Wolkenpixel, aus der Kamera gerechnet** (vertikales FOV 60°, `EditorCameraOverride::fovDegrees`, Neigung
+  −0,25 rad, 1718×884): **390 550 Pixel = 25,7 %** des Viewports haben dir.y ≥ 0,02 (Zeilen 0–229, Horizont ~Zeile 247).
+  **Alle** davon haben N = 32. Das gelbliche Dunstband im Screenshot liegt schon unter dem mathematischen Horizont
+  (geklemmte Atmosphäre, keine Wolken). Macht **≥ 87 Mio. trilineare 3D-Fetches pro Frame** schon bei klarem Himmel
+  (390 550 × 32 × 7).
+- **Plausibilität:** 87 Mio. Fetches in 1,37 ms wären ~64 Mrd. trilineare 3D-Fetches pro Sekunde. Das liegt in der
+  Größenordnung einer voll ausgelasteten Textureinheit einer 10-Kern-GPU (die M5-Rate ist nicht dokumentiert, geschätzt
+  eher darunter). Entweder läuft der Pass am Texturlimit, oder der Compiler spart Fetches ein (z. B. gleiche
+  Koordinaten bei `worleyNoise3`/`starNoise3` innerhalb eines Schritts). Klären kann das nur eine GPU-Aufnahme.
+  Die Zahl ist gezählt, nicht gemessen.
 - **Die Rauschtextur:** 256³ `RG16Unorm` = **64 MiB**, **ohne Mipmaps**, `MTLStorageModeShared` (Z. 6760–6775).
   Die hohen Oktaven (Faktor bis ~8,4 bei `starFbm3`, 4,06 bei Worley) tasten ohne Mip-Stufen weit auseinanderliegende
   Texel ab. Das ist schlecht für den Textur-Cache. `Shared` statt `Private` schließt auf Apple-GPUs verlustfreie
@@ -261,8 +281,8 @@ Die Szene hat `cloudMode 0`. `skyFragment` nimmt deshalb den Zweig `applyClouds`
   (3 `exp` + 5 Sonnenschritte × 3 `exp`)** ≈ 216 `exp`, dazu 24 Strahl-Kugel-Schnitte mit `sqrt`. Das ist reine
   ALU-Arbeit, keine Textur.
 - Der Himmel läuft auf **allen Nicht-Terrain-Pixeln**, auch unter dem Horizont (dort mit geklemmter Richtung).
-  Im Landscape-Bild sind das ~80 % des Viewports (≈ 1,2 Mio. Pixel). Gemessen: Scene ohne Wolken 1,20 ms
-  (mit Terrain) bzw. 1,33 ms (nur Himmel).
+  Im Landscape-Bild sind das geschätzt ~⅔ des Viewports (≈ 1 Mio. Pixel; das Terrain-Trapez deckt grob ein Drittel).
+  Gemessen: Scene ohne Wolken 1,20 ms (mit Terrain) bzw. 1,33 ms (nur Himmel, alle 1,52 Mio. Pixel).
 - **Unnötige Arbeit:** Das Ergebnis hängt nur von Blickrichtung und Sonnenrichtung ab. Die Sonne steht im
   Edit-Modus still (`timeOfDay 0.5`, kein Tageszyklus). Die Engine backt denselben Himmel für die IBL-Cubemap
   (128², nur bei Sonnenbewegung, `UpdateSkyEnvCube` Z. 12535) bereits auf der CPU. Für das sichtbare Himmelsbild
@@ -325,7 +345,9 @@ Die Szene hat `cloudMode 0`. `skyFragment` nimmt deshalb den Zweig `applyClouds`
 - **Effekt von `framebufferOnly = NO`** und der Drawable-Anzahl: unter der Streuung nicht trennbar.
 - **Effekt des Counter-Samplings** auf die „normalen“ Baseline-Läufe: kein Schalter vorhanden, nicht gemessen.
 - **Runtime (`HorizonGame`), Play-Modus, Stromsparmodus aus**: wie in Schritt 1 nicht gemessen.
-- Der Himmelsanteil im Bild (45 % bzw. 80 %) ist aus dem Screenshot geschätzt, nicht gezählt.
+- Der Wolkenpixel-Anteil (25,7 %) ist aus FOV und Neigung gerechnet (unter der Annahme, dass die Editor-Kamera das
+  Standard-FOV 60° hat); der Nicht-Terrain-Anteil (~⅔) ist aus dem Screenshot geschätzt.
+- Die Hidden-Window-Messung (72–77 FPS) lief unter GPU-Konkurrenz; ohne Orphan wäre die Obergrenze vermutlich höher.
 
 ## 4. Nachmessen
 
