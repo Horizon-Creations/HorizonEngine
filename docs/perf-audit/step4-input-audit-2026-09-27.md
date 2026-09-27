@@ -55,7 +55,8 @@ In allen Captures aus Schritt 1–3 (über 50 Läufe, Landscape/Sky, vsync an/au
 Alle Captures laufen ohne jemanden an der Maus. Deshalb gibt es jetzt einen Messhaken in
 `Application::Run` (direkt vor `PollEvents`). Er schiebt N `SDL_EVENT_MOUSE_MOTION` pro Frame in die
 SDL-Queue und fährt dabei langsam zeilenweise über das ganze Fenster (eine Zeile pro 240 Frames, 40 pt
-Abstand). So ändert sich ImGuis Hover-Zustand wirklich, auch über Toolbar, Panels und Viewport. N = 16
+Abstand). Die Absicht ist, dass sich ImGuis Hover-Zustand dabei über Toolbar, Panels und Viewport ändert.
+Unabhängig geprüft (`HoveredId`, Screenshot) ist das **nicht**, belegt ist nur der Dispatch. N = 16
 entspricht einer 1000-Hz-Maus bei 60 FPS, N = 64 ist ein Stresstest. Ohne Variable ist der Haken aus
 (einmal gecachtes `getenv`).
 
@@ -81,8 +82,9 @@ die FPS sind also nicht die am Bildschirm, die CPU-Scopes aber belastbar.
 (run4 ist ein Paar direkt hintereinander bei Load 2,2, mit Positivkontrolle im Log.)
 
 **Ergebnis:** 16 Events pro Frame kosten etwa **+0,005 ms** (p50), 64 Events **+0,007 bis +0,012 ms**
-(p90 +0,015 ms), also rund 0,1–0,2 µs pro Event. Die Hover-Folgekosten in `OnRender` liegen unter der Streuung zwischen zwei
-Läufen ohne Eingabe (0,99 vs. 1,02 ms). Beides zusammen ist unter **0,1 % des 16,7-ms-Budgets**.
+(p90 +0,015 ms), also rund 0,1–0,2 µs pro Event. Hover-Folgekosten würden in `OnRender` landen. `OnRender` bewegt sich
+aber nicht über die Streuung zwischen zwei Läufen ohne Eingabe hinaus (0,99 vs. 1,02 ms). Ob der Hover
+dabei tatsächlich über Widgets gewandert ist, ist nicht eigens bestätigt (siehe oben). Beides zusammen ist unter **0,1 % des 16,7-ms-Budgets**.
 
 **Verworfen:** Die Läufe `I64-run2`, `I0-run3` und `I16-run3` (liegen in `raw-step4/`) liefen, während
 eine andere Instanz mit etwa acht clang-Prozessen kompilierte (Load 11). Dort springt `PollEvents` auf
@@ -128,7 +130,8 @@ Solange der Hauptthread dort blockiert, pumpt er auch keine Events, neue Eingabe
 | (d) VBlank (Mittel ½ Refresh) + 1 Kompositions-Frame | ≈ 8 + 17 = 25 ms | ≈ 25 ms | angenommen (typisch macOS, Fenster) |
 | **Summe p50, Größenordnung** | **≈ 50 ms** | **≈ 90 ms** | hergeleitet |
 
-Einordnung: Ein gut gepipelinetes 60-Hz-Fensterspiel auf macOS liegt bei etwa 30–50 ms. Der vermeidbare
+Einordnung (Erfahrungswert, nicht gemessen und nicht belegt): Ein gut gepipelinetes 60-Hz-Fensterspiel auf
+macOS liegt bei etwa 30–50 ms. Der vermeidbare
 Anteil hier ist (b) ohne die eigentliche Arbeit, also das `NextDrawable`-Warten mit schon verbauter Eingabe:
 **8 ms (GPU frei) bis 19 ms (belastet) im Median, 31–51 ms im p90.** Die Frame-Zeit-Spitzen aus Schritt 3
 (Frame p95 35 ms bei p50 10 ms) machen die Latenz zusätzlich ungleichmäßig. Das spürt man im Viewport eher
@@ -147,7 +150,7 @@ als Ruckeln der Kamera denn als konstante Verzögerung.
 
 | Prio | Vorschlag | Wirkung | Aufwand/Risiko |
 |---|---|---|---|
-| 1 | **Warten vor die Eingabe ziehen:** Frames-in-flight-Semaphore (`dispatch_semaphore`, Zählwert 2–3) am Frame-Anfang **vor** `PollEvents` warten und im `addCompletedHandler` freigeben. Alternativ `CAMetalDisplayLink` (macOS 14+) für die Taktung, dann liefert der Callback Drawable und Ziel-Präsentationszeit zusammen. | Eingabe wird erst abgefragt, wenn der Frame wirklich gebaut werden kann: −8 bis −19 ms Eingabealter (p50), FPS unverändert | mittel. `Application::Run` bräuchte einen Backend-Haken („warte auf Frame-Slot“), für alle Backends zu klären. Gehört zu Schritt 5. |
+| 1 | **Warten vor die Eingabe ziehen:** Frames-in-flight-Semaphore (`dispatch_semaphore`, Zählwert 2–3) am Frame-Anfang **vor** `PollEvents` warten und im `addCompletedHandler` freigeben. Alternativ `CAMetalDisplayLink` (macOS 14+) für die Taktung, dann liefert der Callback Drawable und Ziel-Präsentationszeit zusammen. Entscheidend ist das Prinzip, erst warten und dann die Eingabe abfragen. Eine reine Completion-Semaphore begrenzt nur den CPU-Vorlauf vor der GPU. Hält unter vsync der Display die Drawables fest, kann `nextDrawable` weiter warten, darum ist die Display-Link-Variante die gründlichere. | Eingabe wird erst abgefragt, wenn der Frame wirklich gebaut werden kann: −8 bis −19 ms Eingabealter (p50), FPS unverändert | mittel. `Application::Run` bräuchte einen Backend-Haken („warte auf Frame-Slot“), für alle Backends zu klären. Gehört zu Schritt 5. |
 | 2 | Szenen-Arbeit **vor** `nextDrawable` committen (eigener Command Buffer für alles bis Tonemap/FXAA, nur der Present-Pass wartet aufs Drawable) | GPU startet früher, (c) überlappt mit dem Warten | mittel. Schon in Schritt 2 als Pipelining-Thema, hier nur die Latenzfolge. |
 | 3 | `maximumDrawableCount` 2 als Option (z. B. „Low-Latency“-Schalter) | −1 Frame Warteschlange | klein, kostet aber Durchsatz, solange die GPU am Limit ist. Erst nach 1/2 sinnvoll. |
 | – | Eingabesystem selbst: **nichts tun.** Event-Pump, Dispatch, Gamepad-Polling und Zustandslesen sind im µs-Bereich. | – | – |
