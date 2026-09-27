@@ -335,6 +335,74 @@ namespace HE
 				}
 			}
 
+			// ── HE_PROFILE_CAPTURE: a scripted F9 ───────────────────────────
+			// The same benchmark capture F9 starts, but without a person at the
+			// keyboard, so a measurement can be repeated byte-for-byte in its
+			// setup: HE_PROFILE_WARMUP frames (default 300) to let pipelines,
+			// streaming and temporal history settle, then HE_PROFILE_CAPTURE
+			// frames recorded, dumped, and the application leaves
+			// (HE_PROFILE_QUIT=0 keeps it running). HE_PROFILE_DETAILED=1 asks
+			// for the serialized per-pass GPU capture; HE_PROFILE_VSYNC=keep
+			// records at the vsync the app runs with instead of forcing it off
+			// (the paced frame rate a user sees, not the headroom);
+			// HE_PROFILE_NOTE labels the dump.
+			{
+				struct AutoCapture
+				{
+					unsigned long long warmup = 300, frames = 0;
+					bool detailed = false, keepVsync = false, quit = true;
+					std::string note;
+				};
+				static const AutoCapture kAuto = []
+				{
+					AutoCapture a;
+					auto env = [](const char* k) -> const char* {
+						const char* v = std::getenv(k);
+						return (v && *v) ? v : nullptr;
+					};
+					if (const char* v = env("HE_PROFILE_CAPTURE"))  a.frames   = std::strtoull(v, nullptr, 10);
+					if (const char* v = env("HE_PROFILE_WARMUP"))   a.warmup   = std::strtoull(v, nullptr, 10);
+					if (const char* v = env("HE_PROFILE_DETAILED")) a.detailed = std::atoi(v) != 0;
+					if (const char* v = env("HE_PROFILE_VSYNC"))    a.keepVsync = std::string(v) == "keep";
+					if (const char* v = env("HE_PROFILE_QUIT"))     a.quit     = std::atoi(v) != 0;
+					if (const char* v = env("HE_PROFILE_NOTE"))     a.note     = v;
+					if (a.warmup == 0) a.warmup = 1;
+					return a;
+				}();
+				if (kAuto.frames != 0)
+				{
+					const unsigned long long startAt = kAuto.warmup;
+					const unsigned long long stopAt  = kAuto.warmup + kAuto.frames;
+					if (m_frameIndex == startAt)
+					{
+						// The refresh rate belongs in the dump: a vsync-on
+						// capture is pinned to it and says nothing without it.
+						std::string note = kAuto.note.empty() ? std::string("HE_PROFILE_CAPTURE")
+						                                      : kAuto.note;
+						if (SDL_Window* sw = m_window ? m_window->GetNativeWindow() : nullptr)
+							if (const SDL_DisplayMode* dm =
+							        SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(sw)))
+								note += " | display " + std::to_string(dm->w) + "x" +
+								        std::to_string(dm->h) + " @" +
+								        std::to_string(dm->refresh_rate) + " Hz, density " +
+								        std::to_string(dm->pixel_density);
+						EngineProfiler::instance().setDetailedGpuCapture(kAuto.detailed);
+						toggleProfilerCapture(!kAuto.keepVsync, note.c_str());
+						HE_LOG_INFO(Core, "HE_PROFILE_CAPTURE: recording %llu frames (%s, %s) — %s",
+						            kAuto.frames, kAuto.detailed ? "detailed GPU" : "normal GPU",
+						            kAuto.keepVsync ? "vsync kept" : "vsync forced off",
+						            note.c_str());
+					}
+					else if (m_frameIndex == stopAt && EngineProfiler::instance().isRecordingOrPending())
+						toggleProfilerCapture();
+					else if (kAuto.quit && m_frameIndex == stopAt + 2)
+					{
+						HE_LOG_INFO(Core, "%s", "HE_PROFILE_CAPTURE: capture dumped — leaving cleanly");
+						m_running = false;
+					}
+				}
+			}
+
 			// ── HE_CAPTURE_FRAME / HE_CAPTURE_PATH: what it actually drew ────
 			// The companion to the frame budget above. "Does it start" is an exit
 			// code; "does it LOOK right" is not, and a shipped application has no
@@ -700,7 +768,7 @@ namespace HE
         if (m_renderer) m_renderer->SetVSync(enabled);
     }
 
-    void Application::toggleProfilerCapture()
+    void Application::toggleProfilerCapture(bool forceVsyncOff, const char* note)
     {
         EngineProfiler& profiler = EngineProfiler::instance();
         if (profiler.isRecordingOrPending())
@@ -714,7 +782,7 @@ namespace HE
         {
             // Benchmark capture: run uncapped so frame times reflect true cost.
             m_savedVsync = m_vsyncEnabled;
-            setVSync(false);
+            if (forceVsyncOff) setVSync(false);
 
             ProfSessionInfo info;
             info.backend = rhiName(m_globalState->getSelectedRHI());
@@ -732,13 +800,14 @@ namespace HE
                 info.width  = static_cast<uint32_t>(pw);
                 info.height = static_cast<uint32_t>(ph);
             }
-            info.vsync = false;
-            info.note  = "F9 benchmark capture";
+            info.vsync = m_vsyncEnabled;
+            info.note  = (note && *note) ? note : "F9 benchmark capture";
             // Cap the capture so a forgotten F9 can't grow the buffer (and the JSON
             // dump) unbounded at 200+ fps — keep the newest N frames as a ring.
             constexpr size_t kMaxCaptureFrames = 20000; // ~100 s @ 200 fps
             profiler.requestStart(info, kMaxCaptureFrames);
-            HE_LOG_INFO(Core, "%s", "Profiler: start requested (F9, vsync off)");
+            HE_LOG_INFO(Core, "Profiler: start requested (F9, vsync %s)",
+                        m_vsyncEnabled ? "on" : "off");
         }
     }
 

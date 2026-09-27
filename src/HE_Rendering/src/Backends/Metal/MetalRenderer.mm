@@ -18,6 +18,7 @@
 #include <Diagnostics/Logger.h>
 #include <cstdlib> // std::getenv / atoi / atof (HE_* debug + capture knobs)
 #include <Diagnostics/EngineProfiler.h>
+#include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — CPU split of Render()
 #include <SDL3/SDL.h>
 #include <stdexcept>
 #include <vector>
@@ -15489,12 +15490,18 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const bool shOff = m_viewportReqW > 0 && m_viewportReqH > 0;
 			shW = shOff ? (int)m_viewportReqW : pw;
 			shH = shOff ? (int)m_viewportReqH : ph;
-			EncodeShadowMap((__bridge void*)cmdBuf,
-			                shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeShadowMap");
+				EncodeShadowMap((__bridge void*)cmdBuf,
+				                shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
+			}
 			// Cloud-shadow map: rendered before the G-buffer/scene passes (both
 			// sample it at texture 16). Uses the extraction EncodeShadowMap just
 			// ran (dominant light + camera).
-			EncodeCloudShadow((__bridge void*)cmdBuf);
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeCloudShadow");
+				EncodeCloudShadow((__bridge void*)cmdBuf);
+			}
 		}
 
 		// Step the GPU weather-particle pool once per frame (primary only), before the
@@ -15550,6 +15557,20 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const int sceneW = std::max(1, (int)std::lround(outW * rscale));
 			const int sceneH = std::max(1, (int)std::lround(outH * rscale));
 			EnsureHDRTarget(sceneW, sceneH);
+			// The resolution the scene is actually shaded at, logged when it
+			// changes: the window size says nothing about it (the editor draws
+			// into a viewport pane), and a profiler capture is not comparable
+			// without it.
+			{
+				static int s_lastSceneW = 0, s_lastSceneH = 0, s_lastOutW = 0, s_lastOutH = 0;
+				if (sceneW != s_lastSceneW || sceneH != s_lastSceneH || outW != s_lastOutW || outH != s_lastOutH)
+				{
+					s_lastSceneW = sceneW; s_lastSceneH = sceneH; s_lastOutW = outW; s_lastOutH = outH;
+					HE_LOG_INFO(RHI, "Metal: scene render size %dx%d (output %dx%d, render scale %.2f, %s, window %dx%d)",
+					            sceneW, sceneH, outW, outH, rscale,
+					            offscreen ? "offscreen viewport" : "direct to window", pw, ph);
+				}
+			}
 
 			// ── Deferred G-buffer pass (docs/deferred-renderer-plan.md) ─────────
 			// When the render path is Deferred (and the pipelines built), the
@@ -15646,8 +15667,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const bool giReplacesAO = m_giEnabled && m_giSupported;
 			auto runSSAO = [&]{
 				if ((m_ssaoEnabled && !giReplacesAO) || m_fwdReflPrepassWanted)
+				{
+					HE_PROFILE_SCOPE_N("Metal::EncodeSSAO");
 					EncodeSSAO((__bridge void*)cmdBuf,
 					           std::max(1, sceneW / 2), std::max(1, sceneH / 2));
+				}
 				if (!(m_ssaoEnabled && !giReplacesAO)) m_ssaoResult = nullptr;
 			};
 			if (deferredTile) runSSAO();
@@ -15834,8 +15858,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			id<MTLRenderCommandEncoder> sceneEncoder =
 				[cmdBuf renderCommandEncoderWithDescriptor:hdrPass];
-			EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH,
-			            deferredActive ? &deferredFrame : nullptr);
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeScene");
+				EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH,
+				            deferredActive ? &deferredFrame : nullptr);
+			}
 			// Debug lines on top of the opaque scene, still in the HDR pass.
 			if (!m_debugLines.empty())
 			{
@@ -16010,7 +16037,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Skipped entirely for a capture-only frame (RenderSceneImage): the
 		// scene is already in the offscreen target above, and acquiring a
 		// drawable here would present a black frame with a stale overlay.
-		id<CAMetalDrawable> drawable = m_captureOnly ? nil : [layer nextDrawable];
+		id<CAMetalDrawable> drawable = nil;
+		{
+			// Blocks while every drawable of the layer is still queued for
+			// display — the CPU-side wait a profiler has to be able to see.
+			HE_PROFILE_SCOPE_N("Metal::NextDrawable");
+			drawable = m_captureOnly ? nil : [layer nextDrawable];
+		}
 		if (drawable)
 		{
 			MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -16049,6 +16082,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					(__bridge void*)encoder,
 					(__bridge void*)pass,
 				};
+				HE_PROFILE_SCOPE_N("Metal::Overlay");
 				m_overlayCallback(&ctx);
 			}
 
@@ -16144,7 +16178,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			}];
 		}
 
-		if (!detailed) [cmdBuf commit];   // detailed committed + waited each pass above
+		if (!detailed)
+		{
+			HE_PROFILE_SCOPE_N("Metal::Commit");
+			[cmdBuf commit];   // detailed committed + waited each pass above
+		}
 	}
 }
 

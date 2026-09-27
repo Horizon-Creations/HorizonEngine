@@ -212,7 +212,9 @@ namespace HE
 		// Toggle a profiler benchmark capture (bound to F9). On start it disables
 		// vsync (so frame times reflect true cost, not the refresh rate) and on
 		// stop it restores the previous vsync state and writes a dump.
-		void toggleProfilerCapture();
+		// forceVsyncOff=false keeps the current vsync (a scripted capture that
+		// wants the paced, user-visible frame rate); note labels the dump.
+		void toggleProfilerCapture(bool forceVsyncOff = true, const char* note = nullptr);
 
 		// What the process was started with, minus argv[0]. Kept because
 		// "open with" hands an application its document as an argument on Windows
