@@ -1,0 +1,25 @@
+{
+ "interval_s": 15.0,
+ "processes": [
+  {
+   "pid": 78074,
+   "name": "HorizonEditor",
+   "gpu_pct": 46.05
+  },
+  {
+   "pid": 72986,
+   "name": "HorizonEditor",
+   "gpu_pct": 35.18
+  },
+  {
+   "pid": 418,
+   "name": "WindowServer",
+   "gpu_pct": 18.0
+  },
+  {
+   "pid": 934,
+   "name": "com.apple.WebKit",
+   "gpu_pct": 0.25
+  }
+ ]
+}

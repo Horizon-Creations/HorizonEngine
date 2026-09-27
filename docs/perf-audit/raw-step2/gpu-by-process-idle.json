@@ -1,0 +1,15 @@
+{
+ "interval_s": 10.0,
+ "processes": [
+  {
+   "pid": 72986,
+   "name": "HorizonEditor",
+   "gpu_pct": 53.8
+  },
+  {
+   "pid": 819,
+   "name": "NotificationCent",
+   "gpu_pct": 1.48
+  }
+ ]
+}
