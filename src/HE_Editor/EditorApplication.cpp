@@ -65,6 +65,8 @@
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/TerrainSculpt.h>
+#include <HorizonScene/TerrainGenerate.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
@@ -5941,6 +5943,67 @@ void EditorApplication::dumpFrameHeadless()
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added");
+	}
+
+	// ── Mountain witness (HE_DUMP_MOUNTAINTEST=before|after): a gently rolling
+	// 240 m landscape at y=300; "after" grows one TerrainGenerate::mountain in a
+	// circle around its centre. The before/after pair is the oracle: the frames
+	// may differ only over the footprint (and its shadow), the base relief must
+	// show through the formation (additive), and the flank must run out into the
+	// untouched ground without a step. Area/params via HE_DUMP_MTRADIUS,
+	// MTHEIGHT, MTFALLOFF, MTROUGH, MTSEED. The log line carries the Result and
+	// the height the op ADDED along +X — centre, half radius, mid-falloff, one
+	// metre inside the rim, two metres outside — as a numeric twin to the image.
+	if (const char* mt = std::getenv("HE_DUMP_MOUNTAINTEST"); mt && *mt && m_editorWorld)
+	{
+		auto envF = [](const char* k, float d){ const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : d; };
+		auto& reg = m_editorWorld->registry();
+		auto land = m_editorWorld->createEntity("MountainLandscape");
+		TransformComponent ltf;
+		ltf.position = glm::vec3(0.0f, 300.0f, 0.0f); // clear of any loaded scene
+		reg.emplace<TransformComponent>(land, ltf);
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 240.0f;
+		ltc.resolution  = 257;   // already 2ⁿ+1 → no resample
+		ltc.heightScale = 4.0f;  // low rolling base the formation must sit ON
+		ltc.seed        = 7;
+		ltc.dirty       = true;
+		if (std::string_view(mt) == "after")
+		{
+			TerrainSculpt::ensureHeights(ltc);
+			const std::vector<float> base = ltc.sculptHeights;
+			TerrainGenerate::Area area;
+			area.radiusX = area.radiusZ = envF("HE_DUMP_MTRADIUS", 60.0f);
+			TerrainGenerate::Params p;
+			p.maxHeight = envF("HE_DUMP_MTHEIGHT", 40.0f);
+			p.falloff   = envF("HE_DUMP_MTFALLOFF", 30.0f);
+			p.roughness = envF("HE_DUMP_MTROUGH", 0.5f);
+			p.seed      = static_cast<int>(envF("HE_DUMP_MTSEED", 1.0f));
+			const TerrainGenerate::Result res = TerrainGenerate::mountain(ltc, area, p);
+			const uint32_t n    = ltc.resolution;
+			const float    step = ltc.sizeX / static_cast<float>(n - 1);
+			auto addedAt = [&](float x) {
+				const uint32_t xi = static_cast<uint32_t>(std::lround((x + ltc.sizeX * 0.5f) / step));
+				const size_t   i  = static_cast<size_t>(n / 2) * n + std::min(xi, n - 1);
+				return ltc.sculptHeights[i] - base[i];
+			};
+			const float rad = area.radiusX;
+			char line[320];
+			std::snprintf(line, sizeof line,
+				"EditorApplication: HE_DUMP_MOUNTAINTEST ok=%d changed=%u peakAdded=%.2f "
+				"min=%.2f max=%.2f | added along +X: centre=%.2f r/2=%.2f "
+				"mid-falloff=%.2f rim-1m=%.3f rim+2m=%.3f",
+				res.ok ? 1 : 0, res.changed, res.peakAdded, res.minHeight, res.maxHeight,
+				addedAt(0.0f), addedAt(rad * 0.5f), addedAt(rad - p.falloff * 0.5f),
+				addedAt(rad - 1.0f), addedAt(rad + 2.0f));
+			HE_LOG_INFO(Editor, "%s", line);
+		}
+		reg.emplace<TerrainComponent>(land, ltc);
+		// The headless dump renders from OnInit, BEFORE the main loop's
+		// SceneSystems::tickWorld — without this there are no chunks to draw.
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		HE_LOG_INFO(Editor, "%s",
+			(std::string("EditorApplication: HE_DUMP_MOUNTAINTEST landscape added (") + mt + ")").c_str());
 	}
 
 	pushEnvironment(0.0f); // scene environment from the World entity (no auto-advance)
