@@ -86,6 +86,13 @@ Rohdaten (Dumps gzip, Summaries, `series.log`) außerhalb von git unter
 ## Tests
 
 Debug-Vollbau grün. Volle `ctest -j4`-Suite: 215 von 216 laufenden Tests grün, 3 übersprungen (`runtime_size*`).
-`test_mcp_tools_material` schlug einmal fehl, weil der ctest einer anderen Instanz zur selben Zeit (09:38) denselben
-TMPDIR (`/var/folders/…/he_tests/test_mcp_tools_material`) benutzte. Einzeln 3 von 3 grün. `test_profiler` und
+`test_mcp_tools_material` schlug einmal fehl. Wahrscheinliche Ursache: Der ctest einer anderen Instanz lief denselben
+Test um 09:38 bis 09:39 mit demselben TMPDIR (`/var/folders/…/he_tests/test_mcp_tools_material`, die Pfade hängen nur
+am Testnamen, nicht am Worktree). Das passt zeitlich, der eigene Zeitstempel ist aber nicht mehr belegt. Einzeln
+3 von 3 grün, HE_Net/Material-Pfad nutzen `parallel_for` nicht.
+
+Nicht im Editor gemessen: der Pfad „Aufrufer holt sich Blöcke“. Die Landscape-Szene liegt mit 4 Objekten unter
+`2 × minGrain`, nachher läuft alles inline. Der gemessene Gewinn ist also die Mindest-Körnung. Das Aufteilen mit
+mitarbeitendem Aufrufer ist nur durch `tests/test_jobsystem.cpp` abgedeckt, eine Szene mit mehr als 512 Objekten
+wäre der Lasttest dafür. `test_profiler` und
 `test_jobsystem` 5 Wiederholungen grün.
