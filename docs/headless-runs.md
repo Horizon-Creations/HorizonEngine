@@ -23,6 +23,7 @@ die Kontrolle am entsperrten Bildschirm steht noch aus, siehe Audit
 | `HE_DUMP_PATH=bild.bmp` (+ `HE_DUMP_QUIT=1`, `HE_DUMP_FRAMES`, `HE_DUMP_RHI`, `HE_DUMP_<KEY>`) | nur Editor | Offscreen-Dump in `OnInit`, **vor** dem ersten UI-Frame. `HE_DUMP_QUIT=1` beendet danach. Das ist, was `he_shot.py` setzt. | ja, automatisch |
 | `HE_DUMP_LIVE=bild.bmp`, `HE_DUMP_LIVE_TRIGGER=datei` | nur Editor | Viewport des **laufenden** Editors schreiben, sobald die Trigger-Datei auftaucht. | **nein**, selbst setzen |
 | `HE_NO_SPLASH=1` | Game + Editor | Nur den Splash weglassen, Hauptfenster bleibt sichtbar. Im Hidden-Modus unnötig. | nein |
+| `HE_BACKGROUND_FPS=N` | Game + Editor | Rate für ein verstecktes, verdecktes oder minimiertes Fenster (Standard 15). `0` = nicht drosseln. Bild-Läufe (`HE_EXIT_AFTER_FRAMES`≠0, `HE_DUMP_PATH`, `HE_CAPTURE_FRAME`≠0) und eine laufende Profiler-Aufnahme sind ohnehin ausgenommen. | nein |
 
 `HE_HEADLESS_DUMP` und `HE_HEADLESS_DUMP_FRAMES` **gibt es nicht**. Der Editor
 ignoriert sie stillschweigend und startet normal mit Fenster (Audit, F4).
@@ -39,6 +40,18 @@ ignoriert sie stillschweigend und startet normal mit Fenster (Audit, F4).
 - Fehler-Messageboxen der `Application` und die Skript-Dialoge
   `dialog.message`/`dialog.confirm` werden nur geloggt; `confirm` antwortet
   „nein". Ein Fehlerlauf wird also rot, statt bis zum Timeout zu hängen.
+
+- Die Hauptschleife läuft gedrosselt (Standard 15 FPS, `HE_BACKGROUND_FPS`),
+  genau wie bei einem verdeckten oder minimierten Fenster. Ein verstecktes
+  Fenster hängt nicht am Displaytakt und rendert sonst 70+ Bilder pro Sekunde,
+  die niemand sieht (Perf-Audit B1: ein verwaister Editor nahm 35–54 % GPU).
+  `HE_HIDDEN_WINDOW` allein nimmt davon **nicht** aus, das ist genau dieser
+  Fall. Ausgenommen sind Läufe, die Bilder brauchen: `HE_EXIT_AFTER_FRAMES`≠0,
+  `HE_DUMP_PATH`, `HE_CAPTURE_FRAME`≠0. Collab-/MCP-Läufe
+  (`he_mcp_multiclient.py`) laufen gedrosselt weiter; wer dort volle Frames
+  braucht, setzt `HE_BACKGROUND_FPS=0`. Beleg im Log:
+  „Window in background — throttled to 15.0 FPS" bzw.
+  „Background throttle off (…)".
 
 **Nicht abgedeckt:** Datei-Picker (`dialog.open*`/`save*`) und eine gebündelte
 `.app` (die holt sich die Activation-Policy aus ihrem Info.plist, das

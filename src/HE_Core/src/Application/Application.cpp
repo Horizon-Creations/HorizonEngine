@@ -712,6 +712,37 @@ namespace HE
 				if (elapsed < frameCapNs)
 					SDL_DelayNS(frameCapNs - elapsed);
 			}
+
+			// Background throttle (see backgroundFrameInterval): nobody can see
+			// any window of this application, so it runs at a low rate instead
+			// of the 70+ FPS a hidden window gets. Independent of vsync — a
+			// hidden window is not held to the display at all. SDL_DelayNS, not
+			// WaitForEvent: that leaves the event queued and would return at
+			// once on every later call. Restoring the window waits at most one
+			// interval.
+			{
+				bool unseen = m_window->IsInBackground();
+				for (const auto& [id, win] : m_secondaryWindows)
+					unseen = unseen && win->IsInBackground();
+				const uint64_t interval = backgroundFrameInterval();
+				const bool throttled = interval != 0 && unseen && !profiler.isRecording();
+				if (throttled != m_backgroundThrottled)
+				{
+					m_backgroundThrottled = throttled;
+					if (throttled)
+						HE_LOG_INFO(Core, "Window in background — throttled to %.1f FPS",
+						            1.0e9 / static_cast<double>(interval));
+					else
+						HE_LOG_INFO(Core, "%s", "Window back in view — full frame rate");
+				}
+				const uint64_t sleepNs = backgroundThrottleDelayNs(
+					interval, unseen, profiler.isRecording(), SDL_GetTicksNS() - nowTick);
+				if (sleepNs > 0)
+				{
+					HE_PROFILE_SCOPE_N("BackgroundThrottle");
+					SDL_DelayNS(sleepNs);
+				}
+			}
 		}
 
 		HE_LOG_INFO(Core, "%s", "Main loop exited — shutting down");
