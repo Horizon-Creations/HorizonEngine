@@ -10,6 +10,7 @@ class PhysicsWorld;
 class AnimatorHost;
 namespace HE {
 struct RootMotionContext;
+struct SequenceContext;
 // Declared, not included: the definition lives in AnimationNotify.h and this
 // header is on every application's include path. The alias must stay spelled
 // the same in both places, which is why it is one line and not a class.
@@ -21,7 +22,8 @@ namespace SceneSystems
 {
     // Collect every asset UUID referenced by the world's components (mesh, material,
     // skeletal mesh, script, foliage, particles, animation clips, audio, UI image,
-    // terrain heightmap, weather sound, LOD levels, state-machine states). Used by
+    // terrain heightmap, weather sound, LOD levels, state-machine states, the
+    // sequence of a Sequence Player — not what is inside it). Used by
     // the game runtime as the SEED for reference-graph streaming: only these roots
     // (and their baked transitive dependencies) are streamed, so unused assets in
     // the pak are never loaded. Duplicates are fine — the loader coalesces.
@@ -80,10 +82,15 @@ namespace SceneSystems
     // when handed somewhere to collect into, and the queue therefore cannot grow
     // without bound in an editor where nobody drains it. Whoever passes one
     // drains it immediately after this call; see AnimationNotifySystem.
+    // `sequences` is the fourth gate: nullptr means no SequencePlayerComponent
+    // advances, writes or sounds (SequenceSystem.h) — a cutscene running in the
+    // editor's edit world would move its actors there, and that would be saved.
+    // A play session passes one holding the AudioEngine.
     void tickAnimation(HorizonWorld& world, ContentManager& cm, float dt,
                        AnimatorHost* sync = nullptr,
                        HE::RootMotionContext* rootMotion = nullptr,
-                       HE::NotifyQueue* notifies = nullptr);
+                       HE::NotifyQueue* notifies = nullptr,
+                       HE::SequenceContext* sequences = nullptr);
 
     // Publish scene-side counters (entities, lights, live particles, rigid bodies,
     // audio sources, scripts, in-flight streaming) to the EngineProfiler. Called at

@@ -198,9 +198,9 @@ MaterialShaderLibrary::Compiled toCompiled(he::shaderc::Result&& r)
 constexpr const char* kLightingPreamble = R"(
 layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 sunDir;    // xyz = direction TO the sun (normalized); w = engine time (s)
-    vec4 sunColor;  // rgb = sun radiance
-    vec4 ambient;   // rgb = ambient / sky fill
-    vec4 camPos;    // xyz = camera world position
+    vec4 sunColor;  // rgb = sun radiance; w = wind direction X (unit, world)
+    vec4 ambient;   // rgb = ambient / sky fill; w = wind direction Z (unit, world)
+    vec4 camPos;    // xyz = camera world position; w = wind strength (EnvironmentSettings::windSpeed)
     vec4 lightPos[8];    // xyz = position, w = type (0 dir / 1 point / 2 spot)
     vec4 lightDir[8];    // xyz = travel direction, w = cos(spot half angle)
     vec4 lightColor[8];  // rgb = colour, w = intensity
@@ -226,7 +226,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
-// 8/9 belong to the WPO custom vertex's UBOs (kWpoUniforms). Bound to 1x1
+// 8/9 belong to the WPO custom vertex's UBOs (wpoDeclarations). Bound to 1x1
 // white when GI is off; heLight.giParams.z additionally gates the samples.
 layout(set = 0, binding = 10) uniform sampler2D heGIShadow;
 layout(set = 0, binding = 11) uniform sampler2D heGILocal;
@@ -717,13 +717,31 @@ std::string injectPreamble(const std::string& src)
 
 namespace
 {
-// Blocks the WPO body may reference (Time = heLight.sunDir.w, params). Vertex-stage
-// bindings 8/9 avoid the fragment slots; Metal pins them to vertex buffers 2/3.
-constexpr const char* kWpoUniforms = R"(layout(std140, set = 0, binding = 8) uniform HeLighting {
-    vec4 sunDir; vec4 sunColor; vec4 ambient; vec4 camPos;
-} heLight;
-layout(std140, set = 0, binding = 9) uniform HeParams { vec4 v[16]; } heParams;
-)";
+// Blocks the WPO body may reference (Time = heLight.sunDir.w, wind = the .w of
+// sunColor/ambient/camPos, params). Vertex-stage bindings 8/9 avoid the fragment
+// slots; Metal pins them to vertex buffers 2/3. HeLighting is not written here:
+// see wpoLightingBlock.
+constexpr const char* kWpoParams =
+    "layout(std140, set = 0, binding = 9) uniform HeParams { vec4 v[16]; } heParams;\n";
+
+// The vertex stage's HeLighting is the fragment preamble's block, cut out of
+// kLightingPreamble and moved to binding 8 — never a shorter copy. OpenGL links
+// both stages into ONE program, and a uniform block of the same name must be
+// declared identically in each: the old four-vec4 prefix failed every WPO
+// material that read Time with "Uniform type mismatch '<uniform HeLighting>'".
+// Every backend already binds the whole Lighting buffer at the vertex slot
+// (Metal setVertexBytes sizeof, D3D11/D3D12 b8, Vulkan range sizeof).
+std::string wpoLightingBlock()
+{
+    const std::string pre = kLightingPreamble;
+    const std::string head = "layout(std140, set = 0, binding = 0) uniform HeLighting {";
+    const std::string tail = "} heLight;";
+    const size_t b = pre.find(head);
+    const size_t e = b == std::string::npos ? std::string::npos : pre.find(tail, b);
+    if (e == std::string::npos) return {}; // preamble reshaped: the WPO compile fails loudly
+    return "layout(std140, set = 0, binding = 8) uniform HeLighting {"
+         + pre.substr(b + head.size(), e + tail.size() - b - head.size()) + "\n";
+}
 
 // Noise helpers, duplicated for the vertex stage (the fragment injects its own copies).
 // glslang dead-strips whatever the body doesn't call, so including them is free.
@@ -740,7 +758,7 @@ float heFbm3(vec3 p) { float v = 0.0; float a = 0.5; for (int i = 0; i < 4; i++)
 // `declarations` as a single blob.
 const char* wpoDeclarations()
 {
-    static const std::string kDecls = std::string(kWpoUniforms) + kWpoNoise;
+    static const std::string kDecls = wpoLightingBlock() + kWpoParams + kWpoNoise;
     return kDecls.c_str();
 }
 

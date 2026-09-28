@@ -1,0 +1,406 @@
+== /Users/connorjansen/VSCode/HorizonEngine/out/perf-audit/2026-09-27-step3/C1-landscape-vsyncoff-run1.profile.json.gz
+  frames: 600
+  note: C1-landscape-vsyncoff-run1 | display 1440x932 @60.000000 Hz, density 2.000000
+  cpuMs p50/p90/p99/max: 11.027 / 32.907 / 36.332 / 47.195
+  NextDrawable p50/p90/p99/max: 7.845 / 30.497 / 33.246 / 36.488
+  cpu-minus-ND p50/p90/p99/max: 2.732 / 3.619 / 13.047 / 47.159
+  outside top-level scopes p50/p90/p99/max: 0.005 / 0.007 / 0.030 / 0.316
+  scope p50 ms (per frame):
+     ('Render', 9.7739)
+     ('Metal::NextDrawable', 7.8451)
+     ('OnRender', 1.1601)
+     ('Metal::EncodeShadowMap', 0.2915)
+     ('RenderExtractor::extract', 0.1898)
+     ('Metal::EncodeSSAO', 0.1757)
+     ('FrustumCuller::cull', 0.1422)
+     ('Metal::EncodeScene', 0.1048)
+     ('PollEvents', 0.0912)
+     ('Metal::Overlay', 0.0864)
+     ('Metal::EncodeCloudShadow', 0.0411)
+     ('SceneSystemsTick', 0.0292)
+     ('Metal::Commit', 0.0274)
+     ('Terrain', 0.0068)
+     ('LOD', 0.0056)
+     ('SceneAnimationTick', 0.0055)
+     ('EnvironmentPush', 0.0026)
+     ('Weather', 0.0018)
+     ('RopeTrail', 0.0015)
+     ('GameLogicTick', 0.001)
+     ('Movement', 0.001)
+     ('Navigation', 0.0009)
+     ('ParticleSystem', 0.0008)
+     ('Animation', 0.0008)
+     ('PropertyAnimation', 0.0007)
+  frames with cpu-minus-ND > 5.0 ms: 31
+  stall frames:
+     {'frame': 2, 'cpuMinusND': 5.105, 'outsideScopes': 0.005, 'grew': [('Metal::EncodeShadowMap', 1.535), ('FrustumCuller::cull', 1.418), ('RenderExtractor::extract', 0.421), ('OnRender', 0.402)]}
+     {'frame': 20, 'cpuMinusND': 6.286, 'outsideScopes': 0.008, 'grew': [('OnRender', 2.027), ('PollEvents', 1.452), ('SceneSystemsTick', 0.156), ('Metal::EncodeShadowMap', 0.085)]}
+     {'frame': 28, 'cpuMinusND': 7.111, 'outsideScopes': 0.006, 'grew': [('Render', 15.383), ('RenderExtractor::extract', 2.465), ('Metal::EncodeScene', 1.805), ('OnRender', 1.299)]}
+     {'frame': 36, 'cpuMinusND': 5.019, 'outsideScopes': 0.005, 'grew': [('OnRender', 1.956), ('RenderExtractor::extract', 0.902)]}
+     {'frame': 49, 'cpuMinusND': 7.726, 'outsideScopes': 0.005, 'grew': [('Metal::EncodeShadowMap', 2.774), ('RenderExtractor::extract', 2.586), ('OnRender', 1.716), ('FrustumCuller::cull', 1.584)]}
+     {'frame': 50, 'cpuMinusND': 6.918, 'outsideScopes': 0.006, 'grew': [('Render', 7.488), ('RenderExtractor::extract', 3.046), ('OnRender', 1.672), ('Metal::EncodeScene', 1.654)]}
+     {'frame': 53, 'cpuMinusND': 16.806, 'outsideScopes': 0.005, 'grew': [('Metal::EncodeShadowMap', 13.763), ('RenderExtractor::extract', 12.467), ('Render', 5.167), ('FrustumCuller::cull', 1.281)]}
+     {'frame': 59, 'cpuMinusND': 47.159, 'outsideScopes': 0.006, 'grew': [('OnRender', 43.89), ('RenderExtractor::extract', 43.88), ('Metal::EncodeShadowMap', 0.639), ('FrustumCuller::cull', 0.29)]}
+     {'frame': 126, 'cpuMinusND': 5.094, 'outsideScopes': 0.006, 'grew': [('Render', 24.752), ('RenderExtractor::extract', 0.977), ('Metal::EncodeShadowMap', 0.784), ('FrustumCuller::cull', 0.645)]}
+     {'frame': 132, 'cpuMinusND': 5.058, 'outsideScopes': 0.005, 'grew': [('OnRender', 2.194), ('RenderExtractor::extract', 1.762), ('Metal::EncodeShadowMap', 0.118)]}
+     {'frame': 138, 'cpuMinusND': 12.735, 'outsideScopes': 0.004, 'grew': [('FrustumCuller::cull', 5.327), ('RenderExtractor::extract', 3.984), ('Metal::EncodeShadowMap', 3.892), ('Metal::EncodeSSAO', 3.585)]}
+     {'frame': 139, 'cpuMinusND': 21.011, 'outsideScopes': 0.006, 'grew': [('RenderExtractor::extract', 8.652), ('FrustumCuller::cull', 7.544), ('Render', 6.516), ('Metal::EncodeScene', 6.343)]}
+     {'frame': 140, 'cpuMinusND': 13.025, 'outsideScopes': 0.004, 'grew': [('RenderExtractor::extract', 4.886), ('Metal::EncodeShadowMap', 4.751), ('FrustumCuller::cull', 4.551), ('Metal::EncodeScene', 2.263)]}
+     {'frame': 141, 'cpuMinusND': 7.345, 'outsideScopes': 0.005, 'grew': [('Metal::EncodeShadowMap', 3.177), ('RenderExtractor::extract', 2.762), ('FrustumCuller::cull', 2.169), ('OnRender', 1.439)]}
+     {'frame': 143, 'cpuMinusND': 9.794, 'outsideScopes': 0.006, 'grew': [('OnRender', 4.931), ('RenderExtractor::extract', 2.454), ('Metal::EncodeShadowMap', 1.551), ('Metal::EncodeSSAO', 0.17)]}
+  workers: 10
+  jobs/frame p50 (max): 27 (27)
+  job names (total):
+     ('ExtractMeshes', 7200)
+     ('FrustumCull', 9000)
+  worker busy ms/frame (sum over workers) p50/p90: 0.0548 / 0.0674
+  workers touched/frame p50: 10.0
+  main-thread extract+cull ms/frame p50/p90: 0.3335 / 0.7624
+  job duration ms p50/p90/max: 0.0007 / 0.0055 / 0.2815
+== /Users/connorjansen/VSCode/HorizonEngine/out/perf-audit/2026-09-27-step3/C7-landscape-vsyncoff-long.profile.json.gz
+  frames: 2400
+  note: C7-landscape-vsyncoff-long | display 1440x932 @60.000000 Hz, density 2.000000
+  cpuMs p50/p90/p99/max: 16.924 / 35.535 / 49.402 / 140.168
+  NextDrawable p50/p90/p99/max: 0.082 / 29.443 / 34.709 / 43.078
+  cpu-minus-ND p50/p90/p99/max: 3.139 / 30.668 / 49.341 / 140.098
+  outside top-level scopes p50/p90/p99/max: 0.006 / 0.008 / 0.088 / 11.834
+  scope p50 ms (per frame):
+     ('Render', 14.2043)
+     ('OnRender', 1.3444)
+     ('Metal::EncodeShadowMap', 0.3289)
+     ('RenderExtractor::extract', 0.2217)
+     ('Metal::EncodeSSAO', 0.1955)
+     ('FrustumCuller::cull', 0.152)
+     ('Metal::EncodeScene', 0.116)
+     ('PollEvents', 0.1098)
+     ('Metal::Overlay', 0.0996)
+     ('Metal::NextDrawable', 0.0817)
+     ('Metal::EncodeCloudShadow', 0.0455)
+     ('SceneSystemsTick', 0.0348)
+     ('Metal::Commit', 0.0315)
+     ('Terrain', 0.0075)
+     ('SceneAnimationTick', 0.0065)
+     ('LOD', 0.0064)
+     ('EnvironmentPush', 0.0034)
+     ('Weather', 0.0024)
+     ('RopeTrail', 0.0018)
+     ('GameLogicTick', 0.0013)
+     ('Movement', 0.0013)
+     ('Navigation', 0.001)
+     ('Animation', 0.0009)
+     ('ParticleSystem', 0.0009)
+     ('PropertyAnimation', 0.0008)
+  frames with cpu-minus-ND > 5.0 ms: 639
+  stall frames:
+     {'frame': 41, 'cpuMinusND': 15.8, 'outsideScopes': 0.004, 'grew': [('RenderExtractor::extract', 8.065), ('OnRender', 5.65), ('FrustumCuller::cull', 4.734), ('Metal::EncodeShadowMap', 4.194)]}
+     {'frame': 692, 'cpuMinusND': 24.114, 'outsideScopes': 0.043, 'grew': [('OnRender', 16.166), ('SceneSystemsTick', 3.809), ('PollEvents', 2.507), ('Terrain', 1.037)]}
+     {'frame': 871, 'cpuMinusND': 5.429, 'outsideScopes': 0.007, 'grew': [('OnRender', 2.179), ('RenderExtractor::extract', 1.096), ('PollEvents', 0.172)]}
+     {'frame': 876, 'cpuMinusND': 7.064, 'outsideScopes': 0.006, 'grew': [('Render', 21.247), ('OnRender', 1.208), ('RenderExtractor::extract', 0.655), ('FrustumCuller::cull', 0.39)]}
+     {'frame': 934, 'cpuMinusND': 18.828, 'outsideScopes': 0.006, 'grew': [('FrustumCuller::cull', 8.445), ('RenderExtractor::extract', 6.372), ('Metal::EncodeShadowMap', 6.198), ('Metal::EncodeSSAO', 5.155)]}
+     {'frame': 935, 'cpuMinusND': 17.467, 'outsideScopes': 0.005, 'grew': [('RenderExtractor::extract', 7.437), ('FrustumCuller::cull', 5.743), ('Metal::EncodeSSAO', 4.62), ('Metal::EncodeScene', 3.917)]}
+     {'frame': 936, 'cpuMinusND': 21.689, 'outsideScopes': 0.103, 'grew': [('FrustumCuller::cull', 10.159), ('RenderExtractor::extract', 7.634), ('Metal::EncodeScene', 7.068), ('Metal::EncodeSSAO', 6.444)]}
+     {'frame': 937, 'cpuMinusND': 15.004, 'outsideScopes': 0.006, 'grew': [('RenderExtractor::extract', 6.826), ('Metal::EncodeShadowMap', 6.072), ('OnRender', 5.291), ('FrustumCuller::cull', 2.917)]}
+     {'frame': 940, 'cpuMinusND': 11.513, 'outsideScopes': 0.014, 'grew': [('Metal::EncodeShadowMap', 6.753), ('RenderExtractor::extract', 3.462), ('FrustumCuller::cull', 3.31), ('OnRender', 1.376)]}
+     {'frame': 942, 'cpuMinusND': 5.07, 'outsideScopes': 0.005, 'grew': [('RenderExtractor::extract', 1.621), ('OnRender', 1.216), ('Metal::EncodeShadowMap', 0.731), ('PollEvents', 0.081)]}
+     {'frame': 943, 'cpuMinusND': 45.104, 'outsideScopes': 0.008, 'grew': [('OnRender', 30.985), ('RenderExtractor::extract', 27.448), ('FrustumCuller::cull', 3.626), ('Metal::EncodeScene', 3.587)]}
+     {'frame': 944, 'cpuMinusND': 19.577, 'outsideScopes': 0.008, 'grew': [('RenderExtractor::extract', 5.262), ('OnRender', 5.217), ('Metal::EncodeShadowMap', 3.812), ('FrustumCuller::cull', 3.35)]}
+     {'frame': 945, 'cpuMinusND': 75.609, 'outsideScopes': 0.007, 'grew': [('OnRender', 59.077), ('FrustumCuller::cull', 9.059), ('Metal::EncodeShadowMap', 7.338), ('Metal::EncodeScene', 2.956)]}
+     {'frame': 946, 'cpuMinusND': 12.804, 'outsideScopes': 0.009, 'grew': [('RenderExtractor::extract', 5.31), ('Metal::EncodeShadowMap', 4.163), ('FrustumCuller::cull', 3.248), ('OnRender', 2.678)]}
+     {'frame': 947, 'cpuMinusND': 6.533, 'outsideScopes': 0.007, 'grew': [('OnRender', 2.907), ('RenderExtractor::extract', 1.221), ('Metal::EncodeShadowMap', 0.246)]}
+  workers: 10
+  jobs/frame p50 (max): 27 (27)
+  job names (total):
+     ('ExtractMeshes', 22500)
+     ('FrustumCull', 28125)
+  worker busy ms/frame (sum over workers) p50/p90: 0.0514 / 0.0846
+  workers touched/frame p50: 10.0
+  main-thread extract+cull ms/frame p50/p90: 0.3771 / 24.5254
+  job duration ms p50/p90/max: 0.0007 / 0.0055 / 0.3889
+== /Users/connorjansen/VSCode/HorizonEngine/out/perf-audit/2026-09-27-step3/S1-landscape-vsyncoff-sampled.profile.json.gz
+  frames: 3000
+  note: S1-landscape-vsyncoff-sampled | display 1440x932 @60.000000 Hz, density 2.000000
+  cpuMs p50/p90/p99/max: 24.128 / 60.454 / 69.127 / 149.360
+  NextDrawable p50/p90/p99/max: 0.073 / 56.712 / 65.085 / 78.536
+  cpu-minus-ND p50/p90/p99/max: 3.582 / 29.286 / 46.797 / 149.274
+  outside top-level scopes p50/p90/p99/max: 0.006 / 0.007 / 0.023 / 0.672
+  scope p50 ms (per frame):
+     ('Render', 19.8653)
+     ('OnRender', 1.5921)
+     ('Metal::EncodeShadowMap', 0.4031)
+     ('RenderExtractor::extract', 0.2947)
+     ('Metal::EncodeSSAO', 0.2264)
+     ('FrustumCuller::cull', 0.1744)
+     ('Metal::EncodeScene', 0.133)
+     ('PollEvents', 0.1182)
+     ('Metal::Overlay', 0.1087)
+     ('Metal::NextDrawable', 0.0734)
+     ('Metal::EncodeCloudShadow', 0.054)
+     ('SceneSystemsTick', 0.0388)
+     ('Metal::Commit', 0.0337)
+     ('Terrain', 0.0084)
+     ('SceneAnimationTick', 0.0079)
+     ('LOD', 0.0061)
+     ('EnvironmentPush', 0.0037)
+     ('Weather', 0.0026)
+     ('RopeTrail', 0.0021)
+     ('GameLogicTick', 0.0014)
+     ('Navigation', 0.0014)
+     ('Movement', 0.0013)
+     ('ParticleSystem', 0.001)
+     ('Animation', 0.001)
+     ('PropertyAnimation', 0.0009)
+  frames with cpu-minus-ND > 5.0 ms: 1207
+  stall frames:
+     {'frame': 0, 'cpuMinusND': 129.955, 'outsideScopes': 0.01, 'grew': [('Render', 65.325), ('FrustumCuller::cull', 63.597), ('Metal::EncodeShadowMap', 59.481), ('PollEvents', 43.666)]}
+     {'frame': 1, 'cpuMinusND': 100.01, 'outsideScopes': 0.007, 'grew': [('Metal::EncodeShadowMap', 81.872), ('Render', 77.433), ('RenderExtractor::extract', 49.447), ('FrustumCuller::cull', 46.047)]}
+     {'frame': 2, 'cpuMinusND': 23.925, 'outsideScopes': 0.006, 'grew': [('FrustumCuller::cull', 11.126), ('Metal::EncodeShadowMap', 10.278), ('RenderExtractor::extract', 8.521), ('Metal::EncodeScene', 3.623)]}
+     {'frame': 3, 'cpuMinusND': 88.752, 'outsideScopes': 0.007, 'grew': [('FrustumCuller::cull', 72.018), ('Render', 62.797), ('Metal::EncodeShadowMap', 40.617), ('Metal::EncodeScene', 33.106)]}
+     {'frame': 4, 'cpuMinusND': 63.901, 'outsideScopes': 0.007, 'grew': [('RenderExtractor::extract', 43.633), ('Metal::EncodeShadowMap', 36.628), ('Render', 30.581), ('FrustumCuller::cull', 16.463)]}
+     {'frame': 5, 'cpuMinusND': 90.633, 'outsideScopes': 0.007, 'grew': [('FrustumCuller::cull', 74.71), ('Metal::EncodeShadowMap', 70.953), ('Render', 64.731), ('RenderExtractor::extract', 9.842)]}
+     {'frame': 6, 'cpuMinusND': 44.597, 'outsideScopes': 0.015, 'grew': [('Metal::EncodeShadowMap', 36.081), ('FrustumCuller::cull', 32.918), ('Render', 17.777), ('RenderExtractor::extract', 6.351)]}
+     {'frame': 10, 'cpuMinusND': 30.666, 'outsideScopes': 0.007, 'grew': [('FrustumCuller::cull', 14.013), ('Metal::EncodeShadowMap', 12.675), ('RenderExtractor::extract', 11.86), ('Render', 5.902)]}
+     {'frame': 11, 'cpuMinusND': 60.114, 'outsideScopes': 0.008, 'grew': [('RenderExtractor::extract', 42.402), ('Metal::EncodeScene', 38.314), ('Render', 34.124), ('FrustumCuller::cull', 12.218)]}
+     {'frame': 12, 'cpuMinusND': 5.944, 'outsideScopes': 0.005, 'grew': [('OnRender', 2.661), ('RenderExtractor::extract', 1.564), ('Metal::EncodeScene', 0.225), ('FrustumCuller::cull', 0.157)]}
+     {'frame': 13, 'cpuMinusND': 19.193, 'outsideScopes': 0.005, 'grew': [('Metal::EncodeScene', 17.0)]}
+     {'frame': 17, 'cpuMinusND': 46.582, 'outsideScopes': 0.006, 'grew': [('Metal::EncodeScene', 42.871), ('Render', 24.968), ('OnRender', 0.055)]}
+     {'frame': 18, 'cpuMinusND': 149.274, 'outsideScopes': 0.006, 'grew': [('RenderExtractor::extract', 126.27), ('Render', 103.908), ('Metal::EncodeSSAO', 60.232), ('Metal::EncodeShadowMap', 54.023)]}
+     {'frame': 19, 'cpuMinusND': 69.791, 'outsideScopes': 0.008, 'grew': [('FrustumCuller::cull', 54.797), ('Metal::EncodeSSAO', 49.485), ('Render', 42.742), ('Metal::EncodeShadowMap', 10.537)]}
+     {'frame': 23, 'cpuMinusND': 61.61, 'outsideScopes': 0.007, 'grew': [('RenderExtractor::extract', 42.259), ('Metal::EncodeSSAO', 37.752), ('Render', 37.037), ('FrustumCuller::cull', 14.512)]}
+  workers: 10
+  jobs/frame p50 (max): 27 (27)
+  job names (total):
+     ('ExtractMeshes', 22500)
+     ('FrustumCull', 28125)
+  worker busy ms/frame (sum over workers) p50/p90: 0.0623 / 0.0932
+  workers touched/frame p50: 9.0
+  main-thread extract+cull ms/frame p50/p90: 0.4724 / 24.6195
+  job duration ms p50/p90/max: 0.0005 / 0.0075 / 4.3325
+== /Users/connorjansen/VSCode/HorizonEngine/out/perf-audit/2026-09-27-step3/N1-landscape-vsyncoff-hookinactive.profile.json.gz
+  frames: 600
+  note: N1-landscape-vsyncoff-hookinactive | display 1440x932 @60.000000 Hz, density 2.000000
+  cpuMs p50/p90/p99/max: 25.427 / 56.427 / 68.815 / 78.811
+  NextDrawable p50/p90/p99/max: 0.079 / 52.274 / 65.194 / 74.329
+  cpu-minus-ND p50/p90/p99/max: 14.458 / 31.565 / 52.818 / 64.796
+  outside top-level scopes p50/p90/p99/max: 0.007 / 0.009 / 0.163 / 2.270
+  scope p50 ms (per frame):
+     ('Render', 20.5371)
+     ('RenderExtractor::extract', 5.2489)
+     ('Metal::EncodeShadowMap', 4.5092)
+     ('FrustumCuller::cull', 4.1156)
+     ('OnRender', 3.3042)
+     ('Metal::EncodeSSAO', 0.9712)
+     ('Metal::EncodeScene', 0.5371)
+     ('PollEvents', 0.1352)
+     ('Metal::Overlay', 0.1185)
+     ('Metal::NextDrawable', 0.0789)
+     ('Metal::EncodeCloudShadow', 0.0623)
+     ('SceneSystemsTick', 0.0447)
+     ('Metal::Commit', 0.037)
+     ('Terrain', 0.0092)
+     ('SceneAnimationTick', 0.0086)
+     ('LOD', 0.007)
+     ('EnvironmentPush', 0.0038)
+     ('Weather', 0.003)
+     ('RopeTrail', 0.0023)
+     ('GameLogicTick', 0.0019)
+     ('Movement', 0.0017)
+     ('Navigation', 0.0014)
+     ('ParticleSystem', 0.0013)
+     ('Animation', 0.0012)
+     ('PropertyAnimation', 0.001)
+  frames with cpu-minus-ND > 5.0 ms: 381
+  stall frames:
+     {'frame': 0, 'cpuMinusND': 39.131, 'outsideScopes': 0.01, 'grew': [('Render', 20.026), ('Metal::EncodeShadowMap', 11.882), ('FrustumCuller::cull', 8.231), ('Metal::Overlay', 4.948)]}
+     {'frame': 1, 'cpuMinusND': 56.696, 'outsideScopes': 0.009, 'grew': [('OnRender', 19.122), ('Render', 10.019), ('FrustumCuller::cull', 8.56), ('PollEvents', 8.341)]}
+     {'frame': 2, 'cpuMinusND': 11.553, 'outsideScopes': 0.007, 'grew': [('RenderExtractor::extract', 1.833), ('OnRender', 1.621), ('PollEvents', 0.15), ('Metal::EncodeShadowMap', 0.146)]}
+     {'frame': 8, 'cpuMinusND': 19.527, 'outsideScopes': 0.007, 'grew': [('Metal::EncodeScene', 4.258), ('Metal::EncodeSSAO', 2.971), ('FrustumCuller::cull', 2.923), ('RenderExtractor::extract', 1.323)]}
+     {'frame': 9, 'cpuMinusND': 7.649, 'outsideScopes': 0.005, 'grew': [('PollEvents', 0.119)]}
+     {'frame': 10, 'cpuMinusND': 8.758, 'outsideScopes': 0.011, 'grew': [('Render', 37.645), ('Metal::Commit', 1.437), ('GameLogicTick', 1.188), ('Metal::Overlay', 0.596)]}
+     {'frame': 11, 'cpuMinusND': 64.214, 'outsideScopes': 0.07, 'grew': [('OnRender', 29.981), ('FrustumCuller::cull', 15.271), ('Metal::EncodeShadowMap', 13.452), ('Render', 10.1)]}
+     {'frame': 12, 'cpuMinusND': 21.208, 'outsideScopes': 0.008, 'grew': [('Metal::EncodeShadowMap', 5.9), ('OnRender', 5.646), ('RenderExtractor::extract', 4.122), ('FrustumCuller::cull', 1.46)]}
+     {'frame': 13, 'cpuMinusND': 6.129, 'outsideScopes': 0.015, 'grew': [('Render', 1.735), ('Metal::Commit', 0.673), ('Metal::Overlay', 0.154)]}
+     {'frame': 16, 'cpuMinusND': 8.344, 'outsideScopes': 0.008, 'grew': [('PollEvents', 2.764), ('OnRender', 0.313)]}
+     {'frame': 17, 'cpuMinusND': 10.743, 'outsideScopes': 0.006, 'grew': [('OnRender', 5.373)]}
+     {'frame': 20, 'cpuMinusND': 8.004, 'outsideScopes': 0.008, 'grew': [('OnRender', 2.0)]}
+     {'frame': 21, 'cpuMinusND': 6.454, 'outsideScopes': 0.024, 'grew': [('Metal::EncodeCloudShadow', 0.091), ('PollEvents', 0.087)]}
+     {'frame': 22, 'cpuMinusND': 7.196, 'outsideScopes': 0.007, 'grew': [('Render', 9.051)]}
+     {'frame': 27, 'cpuMinusND': 7.808, 'outsideScopes': 0.006, 'grew': [('OnRender', 0.424), ('EnvironmentPush', 0.101), ('SceneSystemsTick', 0.072), ('LOD', 0.064)]}
+  workers: 10
+  jobs/frame p50 (max): 27 (27)
+  job names (total):
+     ('ExtractMeshes', 7200)
+     ('FrustumCull', 9000)
+  worker busy ms/frame (sum over workers) p50/p90: 0.0728 / 0.1114
+  workers touched/frame p50: 9.0
+  main-thread extract+cull ms/frame p50/p90: 8.7190 / 25.7326
+  job duration ms p50/p90/max: 0.0005 / 0.0087 / 4.3475
+== /Users/connorjansen/VSCode/HorizonEngine/out/perf-audit/2026-09-27-step3/A1-landscape-vsyncoff-allocprobe.profile.json.gz
+  frames: 600
+  note: A1-landscape-vsyncoff-allocprobe | display 1440x932 @60.000000 Hz, density 2.000000
+  cpuMs p50/p90/p99/max: 23.554 / 59.468 / 72.915 / 95.484
+  NextDrawable p50/p90/p99/max: 0.085 / 53.005 / 65.742 / 71.380
+  cpu-minus-ND p50/p90/p99/max: 11.559 / 33.320 / 55.966 / 95.013
+  outside top-level scopes p50/p90/p99/max: 0.008 / 0.018 / 0.424 / 3.180
+  scope p50 ms (per frame):
+     ('Render', 16.9541)
+     ('OnRender', 3.3836)
+     ('RenderExtractor::extract', 3.0026)
+     ('Metal::EncodeShadowMap', 2.7221)
+     ('FrustumCuller::cull', 1.3688)
+     ('Metal::EncodeSSAO', 0.3244)
+     ('Metal::EncodeScene', 0.1716)
+     ('PollEvents', 0.1471)
+     ('Metal::Overlay', 0.1209)
+     ('Metal::NextDrawable', 0.0849)
+     ('Metal::EncodeCloudShadow', 0.0608)
+     ('SceneSystemsTick', 0.0469)
+     ('Metal::Commit', 0.0398)
+     ('Terrain', 0.0098)
+     ('SceneAnimationTick', 0.0087)
+     ('LOD', 0.0083)
+     ('EnvironmentPush', 0.0042)
+     ('Weather', 0.0028)
+     ('RopeTrail', 0.0023)
+     ('GameLogicTick', 0.0017)
+     ('Movement', 0.0014)
+     ('ParticleSystem', 0.0014)
+     ('Animation', 0.0013)
+     ('Navigation', 0.0013)
+     ('Foliage', 0.001)
+  frames with cpu-minus-ND > 5.0 ms: 420
+  stall frames:
+     {'frame': 0, 'cpuMinusND': 12.356, 'outsideScopes': 0.005, 'grew': [('RenderExtractor::extract', 2.658), ('OnRender', 2.597), ('PollEvents', 1.503), ('Metal::EncodeShadowMap', 0.684)]}
+     {'frame': 1, 'cpuMinusND': 26.887, 'outsideScopes': 0.021, 'grew': [('Metal::EncodeShadowMap', 11.468), ('FrustumCuller::cull', 10.368), ('RenderExtractor::extract', 8.542), ('Render', 7.243)]}
+     {'frame': 2, 'cpuMinusND': 7.742, 'outsideScopes': 0.009, 'grew': [('Metal::EncodeScene', 2.635), ('Metal::EncodeSSAO', 1.434), ('FrustumCuller::cull', 0.536), ('Metal::EncodeCloudShadow', 0.267)]}
+     {'frame': 3, 'cpuMinusND': 7.651, 'outsideScopes': 0.008, 'grew': [('Render', 50.514), ('RenderExtractor::extract', 0.638), ('Metal::EncodeShadowMap', 0.608), ('FrustumCuller::cull', 0.435)]}
+     {'frame': 5, 'cpuMinusND': 6.251, 'outsideScopes': 0.005, 'grew': [('Render', 48.969), ('Metal::Overlay', 0.803), ('Metal::Commit', 0.59), ('FrustumCuller::cull', 0.54)]}
+     {'frame': 6, 'cpuMinusND': 45.219, 'outsideScopes': 0.062, 'grew': [('OnRender', 11.485), ('FrustumCuller::cull', 10.082), ('Render', 7.179), ('PollEvents', 6.307)]}
+     {'frame': 7, 'cpuMinusND': 25.097, 'outsideScopes': 0.006, 'grew': [('FrustumCuller::cull', 9.381), ('RenderExtractor::extract', 8.2), ('Metal::EncodeShadowMap', 7.364), ('Metal::EncodeScene', 4.281)]}
+     {'frame': 8, 'cpuMinusND': 24.571, 'outsideScopes': 0.008, 'grew': [('Metal::EncodeScene', 7.64), ('FrustumCuller::cull', 7.479), ('RenderExtractor::extract', 6.237), ('Metal::EncodeShadowMap', 4.204)]}
+     {'frame': 9, 'cpuMinusND': 27.998, 'outsideScopes': 0.007, 'grew': [('FrustumCuller::cull', 10.582), ('RenderExtractor::extract', 8.528), ('Metal::EncodeShadowMap', 7.931), ('Render', 6.081)]}
+     {'frame': 10, 'cpuMinusND': 13.437, 'outsideScopes': 0.006, 'grew': [('Metal::EncodeShadowMap', 3.883), ('FrustumCuller::cull', 2.528), ('OnRender', 2.211), ('RenderExtractor::extract', 1.233)]}
+     {'frame': 11, 'cpuMinusND': 25.142, 'outsideScopes': 0.006, 'grew': [('RenderExtractor::extract', 8.679), ('Metal::EncodeShadowMap', 7.622), ('FrustumCuller::cull', 7.328), ('Metal::EncodeScene', 5.957)]}
+     {'frame': 12, 'cpuMinusND': 38.318, 'outsideScopes': 0.01, 'grew': [('FrustumCuller::cull', 12.675), ('Metal::EncodeShadowMap', 10.078), ('RenderExtractor::extract', 9.948), ('OnRender', 9.085)]}
+     {'frame': 13, 'cpuMinusND': 19.948, 'outsideScopes': 0.007, 'grew': [('Metal::EncodeShadowMap', 6.623), ('FrustumCuller::cull', 4.855), ('RenderExtractor::extract', 4.728), ('Metal::EncodeSSAO', 2.752)]}
+     {'frame': 14, 'cpuMinusND': 18.267, 'outsideScopes': 0.005, 'grew': [('OnRender', 4.429), ('Metal::EncodeShadowMap', 3.276), ('FrustumCuller::cull', 2.688), ('RenderExtractor::extract', 1.169)]}
+     {'frame': 15, 'cpuMinusND': 36.187, 'outsideScopes': 0.007, 'grew': [('FrustumCuller::cull', 13.931), ('Metal::EncodeShadowMap', 12.796), ('Render', 9.873), ('RenderExtractor::extract', 9.769)]}
+  workers: 10
+  jobs/frame p50 (max): 27 (27)
+  job names (total):
+     ('ExtractMeshes', 7200)
+     ('FrustumCull', 9000)
+  worker busy ms/frame (sum over workers) p50/p90: 0.0641 / 0.1042
+  workers touched/frame p50: 9.0
+  main-thread extract+cull ms/frame p50/p90: 4.8976 / 23.2114
+  job duration ms p50/p90/max: 0.0005 / 0.0078 / 5.1172
+  allocsMain/frame p50/p90/max: 411 / 415 / 566
+  allocBytesMain/frame p50/p90/max: 228845 / 229189 / 1277453
+  allocsOther/frame p50/p90/max: 34 / 43 / 70
+  freesMain/frame p50/p90/max: 310 / 317 / 445
+  fileOpsMain/frame p50/p90/max: 0 / 0 / 1
+  fileOpsOther/frame p50/p90/max: 0 / 0 / 0
+== /Users/connorjansen/VSCode/HorizonEngine/out/perf-audit/2026-09-27-step3/N2-landscape-vsyncoff-lowload.profile.json.gz
+  frames: 600
+  note: N2-landscape-vsyncoff-lowload | display 1440x932 @60.000000 Hz, density 2.000000
+  cpuMs p50/p90/p99/max: 11.480 / 64.005 / 69.124 / 71.652
+  NextDrawable p50/p90/p99/max: 9.446 / 61.549 / 66.782 / 69.255
+  cpu-minus-ND p50/p90/p99/max: 2.479 / 2.876 / 3.397 / 17.888
+  outside top-level scopes p50/p90/p99/max: 0.005 / 0.006 / 0.015 / 0.024
+  scope p50 ms (per frame):
+     ('Render', 10.7321)
+     ('Metal::NextDrawable', 9.4456)
+     ('OnRender', 0.9973)
+     ('Metal::EncodeShadowMap', 0.2672)
+     ('RenderExtractor::extract', 0.1698)
+     ('Metal::EncodeSSAO', 0.1696)
+     ('FrustumCuller::cull', 0.1418)
+     ('Metal::EncodeScene', 0.0997)
+     ('Metal::Overlay', 0.0823)
+     ('PollEvents', 0.0779)
+     ('Metal::EncodeCloudShadow', 0.0382)
+     ('SceneSystemsTick', 0.0277)
+     ('Metal::Commit', 0.0251)
+     ('SceneAnimationTick', 0.0059)
+     ('LOD', 0.0055)
+     ('Terrain', 0.0052)
+     ('EnvironmentPush', 0.0026)
+     ('Weather', 0.0019)
+     ('RopeTrail', 0.0015)
+     ('Movement', 0.001)
+     ('Navigation', 0.001)
+     ('Animation', 0.0009)
+     ('PropertyAnimation', 0.0008)
+     ('ParticleSystem', 0.0008)
+     ('GameLogicTick', 0.0007)
+  frames with cpu-minus-ND > 5.0 ms: 2
+  stall frames:
+     {'frame': 412, 'cpuMinusND': 17.888, 'outsideScopes': 0.006, 'grew': [('FrustumCuller::cull', 8.083), ('RenderExtractor::extract', 5.93), ('Metal::EncodeScene', 5.019), ('Metal::EncodeShadowMap', 4.977)]}
+     {'frame': 413, 'cpuMinusND': 6.002, 'outsideScopes': 0.007, 'grew': [('Render', 54.766), ('RenderExtractor::extract', 2.087), ('OnRender', 2.02), ('FrustumCuller::cull', 0.626)]}
+  workers: 10
+  jobs/frame p50 (max): 27 (27)
+  job names (total):
+     ('ExtractMeshes', 7200)
+     ('FrustumCull', 9000)
+  worker busy ms/frame (sum over workers) p50/p90: 0.0550 / 0.0693
+  workers touched/frame p50: 10.0
+  main-thread extract+cull ms/frame p50/p90: 0.3137 / 0.3831
+  job duration ms p50/p90/max: 0.0007 / 0.0055 / 0.0546
+== /Users/connorjansen/VSCode/HorizonEngine/out/perf-audit/2026-09-27-step3/T1-landscape-vsyncoff-timeprofiler.profile.json.gz
+  frames: 3000
+  note: T1-landscape-vsyncoff-timeprofiler | display 1440x932 @60.000000 Hz, density 2.000000
+  cpuMs p50/p90/p99/max: 11.829 / 63.131 / 67.775 / 76.439
+  NextDrawable p50/p90/p99/max: 7.666 / 60.617 / 65.093 / 72.328
+  cpu-minus-ND p50/p90/p99/max: 2.573 / 3.106 / 14.830 / 33.997
+  outside top-level scopes p50/p90/p99/max: 0.005 / 0.006 / 0.014 / 0.129
+  scope p50 ms (per frame):
+     ('Render', 10.2202)
+     ('Metal::NextDrawable', 7.6664)
+     ('OnRender', 1.0708)
+     ('Metal::EncodeShadowMap', 0.2784)
+     ('RenderExtractor::extract', 0.1813)
+     ('Metal::EncodeSSAO', 0.1723)
+     ('FrustumCuller::cull', 0.1419)
+     ('Metal::EncodeScene', 0.1016)
+     ('PollEvents', 0.0892)
+     ('Metal::Overlay', 0.0878)
+     ('Metal::EncodeCloudShadow', 0.0389)
+     ('SceneSystemsTick', 0.0287)
+     ('Metal::Commit', 0.0267)
+     ('SceneAnimationTick', 0.0059)
+     ('Terrain', 0.0056)
+     ('LOD', 0.0055)
+     ('EnvironmentPush', 0.0031)
+     ('Weather', 0.0022)
+     ('RopeTrail', 0.0015)
+     ('Navigation', 0.0011)
+     ('Movement', 0.001)
+     ('GameLogicTick', 0.001)
+     ('ParticleSystem', 0.0008)
+     ('Animation', 0.0008)
+     ('PropertyAnimation', 0.0008)
+  frames with cpu-minus-ND > 5.0 ms: 92
+  stall frames:
+     {'frame': 0, 'cpuMinusND': 17.555, 'outsideScopes': 0.007, 'grew': [('Render', 7.678), ('FrustumCuller::cull', 7.639), ('Metal::EncodeShadowMap', 6.452), ('RenderExtractor::extract', 6.175)]}
+     {'frame': 1, 'cpuMinusND': 25.425, 'outsideScopes': 0.007, 'grew': [('RenderExtractor::extract', 12.756), ('Render', 11.147), ('FrustumCuller::cull', 8.921), ('Metal::EncodeShadowMap', 8.504)]}
+     {'frame': 2, 'cpuMinusND': 19.929, 'outsideScopes': 0.006, 'grew': [('RenderExtractor::extract', 8.199), ('FrustumCuller::cull', 8.068), ('Metal::EncodeShadowMap', 7.86), ('Render', 5.265)]}
+     {'frame': 3, 'cpuMinusND': 17.692, 'outsideScopes': 0.007, 'grew': [('FrustumCuller::cull', 7.871), ('RenderExtractor::extract', 6.175), ('Metal::EncodeShadowMap', 6.163), ('Render', 3.83)]}
+     {'frame': 4, 'cpuMinusND': 26.872, 'outsideScopes': 0.006, 'grew': [('FrustumCuller::cull', 12.925), ('Render', 11.431), ('RenderExtractor::extract', 9.66), ('Metal::EncodeShadowMap', 9.463)]}
+     {'frame': 5, 'cpuMinusND': 18.954, 'outsideScopes': 0.004, 'grew': [('FrustumCuller::cull', 8.884), ('Metal::EncodeShadowMap', 8.702), ('RenderExtractor::extract', 7.772), ('Render', 5.565)]}
+     {'frame': 6, 'cpuMinusND': 11.949, 'outsideScopes': 0.008, 'grew': [('FrustumCuller::cull', 5.49), ('Metal::EncodeShadowMap', 4.072), ('RenderExtractor::extract', 3.12), ('Metal::EncodeScene', 2.013)]}
+     {'frame': 7, 'cpuMinusND': 11.628, 'outsideScopes': 0.005, 'grew': [('FrustumCuller::cull', 4.513), ('RenderExtractor::extract', 3.671), ('Metal::EncodeShadowMap', 3.616), ('Metal::EncodeScene', 2.307)]}
+     {'frame': 8, 'cpuMinusND': 15.128, 'outsideScopes': 0.006, 'grew': [('FrustumCuller::cull', 6.865), ('RenderExtractor::extract', 4.698), ('Metal::EncodeScene', 3.79), ('Metal::EncodeShadowMap', 3.471)]}
+     {'frame': 9, 'cpuMinusND': 11.922, 'outsideScopes': 0.007, 'grew': [('FrustumCuller::cull', 3.685), ('RenderExtractor::extract', 3.062), ('Metal::EncodeShadowMap', 2.867), ('OnRender', 2.29)]}
+     {'frame': 10, 'cpuMinusND': 11.945, 'outsideScopes': 0.007, 'grew': [('FrustumCuller::cull', 6.054), ('Metal::EncodeShadowMap', 4.547), ('RenderExtractor::extract', 2.377), ('Metal::EncodeSSAO', 1.976)]}
+     {'frame': 11, 'cpuMinusND': 12.925, 'outsideScopes': 0.007, 'grew': [('FrustumCuller::cull', 5.094), ('RenderExtractor::extract', 4.222), ('Metal::EncodeShadowMap', 3.922), ('Metal::EncodeSSAO', 2.745)]}
+     {'frame': 12, 'cpuMinusND': 10.586, 'outsideScopes': 0.006, 'grew': [('RenderExtractor::extract', 4.081), ('FrustumCuller::cull', 3.105), ('Metal::EncodeShadowMap', 2.684), ('Metal::EncodeScene', 2.119)]}
+     {'frame': 13, 'cpuMinusND': 13.026, 'outsideScopes': 0.005, 'grew': [('RenderExtractor::extract', 5.624), ('FrustumCuller::cull', 3.988), ('Metal::EncodeShadowMap', 3.86), ('OnRender', 2.179)]}
+     {'frame': 14, 'cpuMinusND': 12.538, 'outsideScopes': 0.005, 'grew': [('FrustumCuller::cull', 4.946), ('Metal::EncodeShadowMap', 4.389), ('RenderExtractor::extract', 4.283), ('Metal::EncodeSSAO', 2.128)]}
+  workers: 10
+  jobs/frame p50 (max): 27 (27)
+  job names (total):
+     ('ExtractMeshes', 22500)
+     ('FrustumCull', 28125)
+  worker busy ms/frame (sum over workers) p50/p90: 0.0563 / 0.0707
+  workers touched/frame p50: 10.0
+  main-thread extract+cull ms/frame p50/p90: 0.3259 / 0.4309
+  job duration ms p50/p90/max: 0.0007 / 0.0057 / 0.7443

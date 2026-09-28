@@ -18,6 +18,7 @@
 #include <Diagnostics/Logger.h>
 #include <cstdlib> // std::getenv / atoi / atof (HE_* debug + capture knobs)
 #include <Diagnostics/EngineProfiler.h>
+#include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — CPU split of Render()
 #include <SDL3/SDL.h>
 #include <stdexcept>
 #include <vector>
@@ -8079,8 +8080,12 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 
 void MetalRenderer::EnsureGIProbeGrid()
 {
-	if (m_giProbeGridBuilt) return;
 	if (m_renderWorld.objects.empty()) return; // wait for real geometry before committing to a grid
+	// Once built, only re-check when the scene's GEOMETRY changed (objects
+	// added/removed, or a mesh rebuilt via InvalidateMesh) — never on motion
+	// alone (GIProbeGrid.h).
+	const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
+	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
 	// m_renderWorld was re-extracted by EncodeGIAccelBuild's m_extractor.extract()
 	// call earlier this frame, which creates BRAND NEW RenderObjects whose
@@ -8094,21 +8099,12 @@ void MetalRenderer::EnsureGIProbeGrid()
 		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
 			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
 
-	// KNOWN v1 LIMITATION: this only unions m_renderWorld.objects (the generic
-	// mesh-asset RenderObject set) — Landscape/Terrain chunks are a separate
-	// rendering system (see [[terrain-lod-chunking]]) and are NOT included, so a
-	// scene dominated by terrain will get a probe grid sized to its small props
-	// only, leaving the terrain surfaces themselves outside grid coverage (they
-	// sample zero indirect diffuse — safe, just visibly under-lit, not a crash).
-	// Confirmed empirically: the ShadowValidation test scene's large background
-	// surface stays outside the grid even after the worldBounds refresh above.
-	// Extending probe coverage to terrain is a follow-up, not in this slice.
-	//
-	// Union of every object's (now-correct) world bounds.
-	HE::AABB bounds;
-	for (const RenderObject& obj : m_renderWorld.objects)
-		if (obj.worldBounds.isValid())
-			bounds.expand(obj.worldBounds);
+	// Landscape/Terrain chunks are ordinary MeshComponent entities, so they ARE
+	// in m_renderWorld.objects (an older note here said otherwise). What kept a
+	// terrain out of the grid was the fixed 4 m × 10-probe (36 m) cap and the
+	// one-shot fit — both replaced by the shared FitGIProbeGrid (Thema 80).
+	int unresolved = 0;
+	HE::AABB bounds = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
 	if (!bounds.isValid())
 	{
 		// Fallback: a modest default volume around the origin so GI still does
@@ -8116,16 +8112,24 @@ void MetalRenderer::EnsureGIProbeGrid()
 		bounds.min = glm::vec3(-10.0f);
 		bounds.max = glm::vec3(10.0f);
 	}
+	if (!m_giGridTrack.shouldEvaluate(m_giProbeGridBuilt, sig, unresolved)) return;
 
-	const glm::vec3 extent = bounds.max - bounds.min;
-	glm::ivec3 counts;
-	counts.x = std::clamp(static_cast<int>(std::ceil(extent.x / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
-	counts.y = std::clamp(static_cast<int>(std::ceil(extent.y / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
-	counts.z = std::clamp(static_cast<int>(std::ceil(extent.z / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
+	if (m_giProbeGridBuilt)
+	{
+		HE::GIProbeGridFit current;
+		current.origin = m_giGridOrigin; current.counts = m_giGridCounts; current.spacing = m_giProbeSpacing;
+		if (!HE::GIProbeGridNeedsRefit(current, bounds)) return;
+		// EnsureGIProbeAtlas below reallocates the atlases for the new counts;
+		// in-flight command buffers keep their own references to the old ones.
+	}
+	// Centred like GL/D3D/Vulkan (this port used to anchor at bounds.min).
+	const HE::GIProbeGridFit fit = HE::FitGIProbeGrid(bounds);
+	if (!fit.valid()) return;
 
-	m_giGridOrigin        = bounds.min;
-	m_giGridCounts        = counts;
-	m_giProbeCount        = counts.x * counts.y * counts.z;
+	m_giGridOrigin        = fit.origin;
+	m_giGridCounts        = fit.counts;
+	m_giProbeSpacing      = fit.spacing;
+	m_giProbeCount        = fit.probeCount();
 	m_giProbesPerRow      = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(m_giProbeCount))));
 	m_giProbeUpdateCursor = 0;
 	m_giProbeGridBuilt    = true;
@@ -8134,8 +8138,8 @@ void MetalRenderer::EnsureGIProbeGrid()
 
 	HE_LOG_INFO(RHI, "%s",
 		("MetalRenderer: GI probe grid built — " + std::to_string(m_giProbeCount) + " probes ("
-		 + std::to_string(counts.x) + "x" + std::to_string(counts.y) + "x" + std::to_string(counts.z)
-		 + "), spacing " + std::to_string(kGIProbeSpacing)).c_str());
+		 + std::to_string(fit.counts.x) + "x" + std::to_string(fit.counts.y) + "x" + std::to_string(fit.counts.z)
+		 + "), spacing " + std::to_string(m_giProbeSpacing)).c_str());
 }
 
 void MetalRenderer::EnsureGIProbePipeline()
@@ -8239,13 +8243,13 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 		}
 
 		GIProbeParamsCPU pp{};
-		pp.gridOrigin = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
+		pp.gridOrigin = glm::vec4(m_giGridOrigin, m_giProbeSpacing);
 		pp.gridCounts = glm::vec4(static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
 		                         static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
 		// Max ray distance: comfortably covers the grid's own diagonal so rays can
 		// reach across the whole probed volume; hysteresis matches the shadow
 		// pass's temporal-accumulation feel (converges over ~1-2s at 60fps).
-		const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
+		const float maxDist = glm::length(glm::vec3(m_giGridCounts) * m_giProbeSpacing) + m_giProbeSpacing;
 		pp.rayParams    = glm::vec4(maxDist, 0.92f, static_cast<float>(m_giProbeUpdateCursor), static_cast<float>(budget));
 		// Same dominant-directional pick as EncodeGIShadowRays: the one-bounce
 		// estimate must bounce the light the scene is actually lit by, with THAT
@@ -12273,6 +12277,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 		// PBR shaders. Shared fill (HE::FillMaterialLightWindow); the UI pass has
 		// no local shadow atlas, so it passes false.
 		HE::FillMaterialLightWindow(m_renderWorld, matLight, /*localShadowsActive=*/false);
+		HE::FillMaterialWind(GetEnvironment(), matLight); // Wind nodes, next to Time
 	}
 
 	// The uiVertex's repurposed U block (see MaterialShaderLibrary::uiVertex).
@@ -12589,7 +12594,7 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
 	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult
 	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
-	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
@@ -12939,7 +12944,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	scene.aaParams = glm::vec4(m_specularAA ? m_specularAAStrength : 0.0f, 0.0f, 0.0f, 0.0f);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
-	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 
@@ -13551,6 +13556,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// texture is bound this frame.
 	HE::FillMaterialLightWindow(m_renderWorld, matLight,
 	                            /*localShadowsActive=*/m_localShadowTex != nullptr);
+	HE::FillMaterialWind(GetEnvironment(), matLight); // Wind / Wind Sway nodes, next to Time
 	// Local (point/spot) shadow atlas for heLitP — the same matrices the
 	// built-in shaders sample with, Metal depth remap AND top-left UV origin
 	// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
@@ -13621,7 +13627,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// shaders, so heLitP's indirect diffuse matches theirs instead of
 	// falling back to flat ambient while GI is on.
 	{
-		const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+		const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 		                                      m_giGridCounts, m_giProbesPerRow,
 		                                      m_giIndirectIntensity);
 		for (int k = 0; k < 4; ++k)
@@ -14661,7 +14667,7 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// re-enables the whole block in both kernels).
 		const float hist = 0.0f;
 		rp.skyAmbient   = glm::vec4(m_renderWorld.ambient, hist);
-		rp.gridOrigin   = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
+		rp.gridOrigin   = glm::vec4(m_giGridOrigin, m_giProbeSpacing);
 		rp.gridCounts   = glm::vec4(static_cast<float>(m_giGridCounts.x),
 		                            static_cast<float>(m_giGridCounts.y),
 		                            static_cast<float>(m_giGridCounts.z),
@@ -14958,6 +14964,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		// is already an encoded texel.
 		matLight.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
 		matLight.specAA[1] = 1.0f;
+		// The G-buffer's WPO vertex stage reads this block too: without the wind
+		// the deferred path would draw every Wind Sway material standing still.
+		HE::FillMaterialWind(GetEnvironment(), matLight);
 	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
@@ -15334,6 +15343,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					m_giSwBlasDirty = true;
 				}
 			}
+			// A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the
+			// scene box without changing which objects exist → re-check the fit.
+			if (!m_pendingMeshInvalidations.empty()) m_giGridTrack.meshRebuilt = true;
 			m_pendingMeshInvalidations.clear();
 
 			// Same for textures rewritten in place (landscape weightmap paints).
@@ -15478,12 +15490,18 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const bool shOff = m_viewportReqW > 0 && m_viewportReqH > 0;
 			shW = shOff ? (int)m_viewportReqW : pw;
 			shH = shOff ? (int)m_viewportReqH : ph;
-			EncodeShadowMap((__bridge void*)cmdBuf,
-			                shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeShadowMap");
+				EncodeShadowMap((__bridge void*)cmdBuf,
+				                shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
+			}
 			// Cloud-shadow map: rendered before the G-buffer/scene passes (both
 			// sample it at texture 16). Uses the extraction EncodeShadowMap just
 			// ran (dominant light + camera).
-			EncodeCloudShadow((__bridge void*)cmdBuf);
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeCloudShadow");
+				EncodeCloudShadow((__bridge void*)cmdBuf);
+			}
 		}
 
 		// Step the GPU weather-particle pool once per frame (primary only), before the
@@ -15539,6 +15557,20 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const int sceneW = std::max(1, (int)std::lround(outW * rscale));
 			const int sceneH = std::max(1, (int)std::lround(outH * rscale));
 			EnsureHDRTarget(sceneW, sceneH);
+			// The resolution the scene is actually shaded at, logged when it
+			// changes: the window size says nothing about it (the editor draws
+			// into a viewport pane), and a profiler capture is not comparable
+			// without it.
+			{
+				static int s_lastSceneW = 0, s_lastSceneH = 0, s_lastOutW = 0, s_lastOutH = 0;
+				if (sceneW != s_lastSceneW || sceneH != s_lastSceneH || outW != s_lastOutW || outH != s_lastOutH)
+				{
+					s_lastSceneW = sceneW; s_lastSceneH = sceneH; s_lastOutW = outW; s_lastOutH = outH;
+					HE_LOG_INFO(RHI, "Metal: scene render size %dx%d (output %dx%d, render scale %.2f, %s, window %dx%d)",
+					            sceneW, sceneH, outW, outH, rscale,
+					            offscreen ? "offscreen viewport" : "direct to window", pw, ph);
+				}
+			}
 
 			// ── Deferred G-buffer pass (docs/deferred-renderer-plan.md) ─────────
 			// When the render path is Deferred (and the pipelines built), the
@@ -15635,8 +15667,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const bool giReplacesAO = m_giEnabled && m_giSupported;
 			auto runSSAO = [&]{
 				if ((m_ssaoEnabled && !giReplacesAO) || m_fwdReflPrepassWanted)
+				{
+					HE_PROFILE_SCOPE_N("Metal::EncodeSSAO");
 					EncodeSSAO((__bridge void*)cmdBuf,
 					           std::max(1, sceneW / 2), std::max(1, sceneH / 2));
+				}
 				if (!(m_ssaoEnabled && !giReplacesAO)) m_ssaoResult = nullptr;
 			};
 			if (deferredTile) runSSAO();
@@ -15823,8 +15858,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			id<MTLRenderCommandEncoder> sceneEncoder =
 				[cmdBuf renderCommandEncoderWithDescriptor:hdrPass];
-			EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH,
-			            deferredActive ? &deferredFrame : nullptr);
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeScene");
+				EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH,
+				            deferredActive ? &deferredFrame : nullptr);
+			}
 			// Debug lines on top of the opaque scene, still in the HDR pass.
 			if (!m_debugLines.empty())
 			{
@@ -15999,7 +16037,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Skipped entirely for a capture-only frame (RenderSceneImage): the
 		// scene is already in the offscreen target above, and acquiring a
 		// drawable here would present a black frame with a stale overlay.
-		id<CAMetalDrawable> drawable = m_captureOnly ? nil : [layer nextDrawable];
+		id<CAMetalDrawable> drawable = nil;
+		{
+			// Blocks while every drawable of the layer is still queued for
+			// display — the CPU-side wait a profiler has to be able to see.
+			HE_PROFILE_SCOPE_N("Metal::NextDrawable");
+			drawable = m_captureOnly ? nil : [layer nextDrawable];
+		}
 		if (drawable)
 		{
 			MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -16038,6 +16082,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					(__bridge void*)encoder,
 					(__bridge void*)pass,
 				};
+				HE_PROFILE_SCOPE_N("Metal::Overlay");
 				m_overlayCallback(&ctx);
 			}
 
@@ -16133,7 +16178,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			}];
 		}
 
-		if (!detailed) [cmdBuf commit];   // detailed committed + waited each pass above
+		if (!detailed)
+		{
+			HE_PROFILE_SCOPE_N("Metal::Commit");
+			[cmdBuf commit];   // detailed committed + waited each pass above
+		}
 	}
 }
 

@@ -335,6 +335,74 @@ namespace HE
 				}
 			}
 
+			// ── HE_PROFILE_CAPTURE: a scripted F9 ───────────────────────────
+			// The same benchmark capture F9 starts, but without a person at the
+			// keyboard, so a measurement can be repeated byte-for-byte in its
+			// setup: HE_PROFILE_WARMUP frames (default 300) to let pipelines,
+			// streaming and temporal history settle, then HE_PROFILE_CAPTURE
+			// frames recorded, dumped, and the application leaves
+			// (HE_PROFILE_QUIT=0 keeps it running). HE_PROFILE_DETAILED=1 asks
+			// for the serialized per-pass GPU capture; HE_PROFILE_VSYNC=keep
+			// records at the vsync the app runs with instead of forcing it off
+			// (the paced frame rate a user sees, not the headroom);
+			// HE_PROFILE_NOTE labels the dump.
+			{
+				struct AutoCapture
+				{
+					unsigned long long warmup = 300, frames = 0;
+					bool detailed = false, keepVsync = false, quit = true;
+					std::string note;
+				};
+				static const AutoCapture kAuto = []
+				{
+					AutoCapture a;
+					auto env = [](const char* k) -> const char* {
+						const char* v = std::getenv(k);
+						return (v && *v) ? v : nullptr;
+					};
+					if (const char* v = env("HE_PROFILE_CAPTURE"))  a.frames   = std::strtoull(v, nullptr, 10);
+					if (const char* v = env("HE_PROFILE_WARMUP"))   a.warmup   = std::strtoull(v, nullptr, 10);
+					if (const char* v = env("HE_PROFILE_DETAILED")) a.detailed = std::atoi(v) != 0;
+					if (const char* v = env("HE_PROFILE_VSYNC"))    a.keepVsync = std::string(v) == "keep";
+					if (const char* v = env("HE_PROFILE_QUIT"))     a.quit     = std::atoi(v) != 0;
+					if (const char* v = env("HE_PROFILE_NOTE"))     a.note     = v;
+					if (a.warmup == 0) a.warmup = 1;
+					return a;
+				}();
+				if (kAuto.frames != 0)
+				{
+					const unsigned long long startAt = kAuto.warmup;
+					const unsigned long long stopAt  = kAuto.warmup + kAuto.frames;
+					if (m_frameIndex == startAt)
+					{
+						// The refresh rate belongs in the dump: a vsync-on
+						// capture is pinned to it and says nothing without it.
+						std::string note = kAuto.note.empty() ? std::string("HE_PROFILE_CAPTURE")
+						                                      : kAuto.note;
+						if (SDL_Window* sw = m_window ? m_window->GetNativeWindow() : nullptr)
+							if (const SDL_DisplayMode* dm =
+							        SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(sw)))
+								note += " | display " + std::to_string(dm->w) + "x" +
+								        std::to_string(dm->h) + " @" +
+								        std::to_string(dm->refresh_rate) + " Hz, density " +
+								        std::to_string(dm->pixel_density);
+						EngineProfiler::instance().setDetailedGpuCapture(kAuto.detailed);
+						toggleProfilerCapture(!kAuto.keepVsync, note.c_str());
+						HE_LOG_INFO(Core, "HE_PROFILE_CAPTURE: recording %llu frames (%s, %s) — %s",
+						            kAuto.frames, kAuto.detailed ? "detailed GPU" : "normal GPU",
+						            kAuto.keepVsync ? "vsync kept" : "vsync forced off",
+						            note.c_str());
+					}
+					else if (m_frameIndex == stopAt && EngineProfiler::instance().isRecordingOrPending())
+						toggleProfilerCapture();
+					else if (kAuto.quit && m_frameIndex == stopAt + 2)
+					{
+						HE_LOG_INFO(Core, "%s", "HE_PROFILE_CAPTURE: capture dumped — leaving cleanly");
+						m_running = false;
+					}
+				}
+			}
+
 			// ── HE_CAPTURE_FRAME / HE_CAPTURE_PATH: what it actually drew ────
 			// The companion to the frame budget above. "Does it start" is an exit
 			// code; "does it LOOK right" is not, and a shipped application has no
@@ -394,10 +462,72 @@ namespace HE
 			// frame is always recorded whole or not at all.
 			profiler.beginFrame(static_cast<double>(measuredDt) * 1000.0);
 
+			// ── HE_PERF_INPUT_EVENTS: synthetic mouse load (perf audit) ─────
+			// Every scripted capture runs with nobody at the mouse, so it can only
+			// say what event handling costs when there are no events. This pushes
+			// N motion events per frame into the SDL queue right before the poll —
+			// what a 1000 Hz mouse delivers at 60 FPS is ~16 — sweeping slowly
+			// across the primary window so ImGui's hover state actually changes
+			// and the frame pays for that too, not just for the dispatch. Only
+			// ImGui and Input see the position: SDL's own mouse state is not
+			// touched by a pushed event. Read once; off (0) unless set.
+			{
+				static const int kSynthMotion = []
+				{
+					const char* v = std::getenv("HE_PERF_INPUT_EVENTS");
+					return (v && *v) ? std::max(0, std::atoi(v)) : 0;
+				}();
+				SDL_Window* sw = m_window ? m_window->GetNativeWindow() : nullptr;
+				if (kSynthMotion > 0 && sw)
+				{
+					int w = 0, h = 0;
+					SDL_GetWindowSize(sw, &w, &h);
+					// One row per 240 frames (~4 s at 60 FPS), 40 points apart —
+					// slow enough to dwell on a widget, so tooltips and help
+					// lookups get their chance.
+					static float s_x = 0.0f, s_y = 20.0f;
+					const float step = w > 0 ? static_cast<float>(w) / (240.0f * kSynthMotion) : 1.0f;
+					static bool s_logged = false;
+					if (!s_logged)
+					{
+						s_logged = true;
+						// The ImGui backend replaces a pushed position with the real
+						// cursor when the app has keyboard focus and no window is
+						// hovered; the log has to say whether that could happen.
+						HE_LOG_INFO(Core, "HE_PERF_INPUT_EVENTS=%d: pushing motion events, "
+						            "keyboard focus %s", kSynthMotion,
+						            SDL_GetKeyboardFocus() ? "held" : "none");
+					}
+					for (int i = 0; i < kSynthMotion; ++i)
+					{
+						s_x += step;
+						if (s_x >= static_cast<float>(w))
+						{
+							s_x = 0.0f;
+							s_y += 40.0f;
+							if (s_y >= static_cast<float>(h)) s_y = 20.0f;
+						}
+						SDL_Event e{};
+						e.type            = SDL_EVENT_MOUSE_MOTION;
+						e.motion.windowID = SDL_GetWindowID(sw);
+						e.motion.which    = 1;
+						e.motion.x        = s_x;
+						e.motion.y        = s_y;
+						e.motion.xrel     = step;
+						SDL_PushEvent(&e);
+					}
+				}
+			}
+
 			{
 				HE_PROFILE_SCOPE_N("PollEvents");
 				m_window->PollEvents();
 			}
+			// The positive control for HE_PERF_INPUT_EVENTS: a cost that does not
+			// move with N only means something if the events were really handled.
+			if (m_frameIndex == 100 && std::getenv("HE_PERF_INPUT_EVENTS"))
+				HE_LOG_INFO(Core, "HE_PERF_INPUT_EVENTS: frame 100 dispatched %u events",
+				            m_window->EventsLastPoll());
 			if (m_window->ShouldClose()) break;
 
 			// Snapshot pad state right after event polling so hot-plug from
@@ -731,7 +861,7 @@ namespace HE
         if (m_renderer) m_renderer->SetVSync(enabled);
     }
 
-    void Application::toggleProfilerCapture()
+    void Application::toggleProfilerCapture(bool forceVsyncOff, const char* note)
     {
         EngineProfiler& profiler = EngineProfiler::instance();
         if (profiler.isRecordingOrPending())
@@ -745,7 +875,7 @@ namespace HE
         {
             // Benchmark capture: run uncapped so frame times reflect true cost.
             m_savedVsync = m_vsyncEnabled;
-            setVSync(false);
+            if (forceVsyncOff) setVSync(false);
 
             ProfSessionInfo info;
             info.backend = rhiName(m_globalState->getSelectedRHI());
@@ -763,13 +893,14 @@ namespace HE
                 info.width  = static_cast<uint32_t>(pw);
                 info.height = static_cast<uint32_t>(ph);
             }
-            info.vsync = false;
-            info.note  = "F9 benchmark capture";
+            info.vsync = m_vsyncEnabled;
+            info.note  = (note && *note) ? note : "F9 benchmark capture";
             // Cap the capture so a forgotten F9 can't grow the buffer (and the JSON
             // dump) unbounded at 200+ fps — keep the newest N frames as a ring.
             constexpr size_t kMaxCaptureFrames = 20000; // ~100 s @ 200 fps
             profiler.requestStart(info, kMaxCaptureFrames);
-            HE_LOG_INFO(Core, "%s", "Profiler: start requested (F9, vsync off)");
+            HE_LOG_INFO(Core, "Profiler: start requested (F9, vsync %s)",
+                        m_vsyncEnabled ? "on" : "off");
         }
     }
 

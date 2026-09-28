@@ -167,6 +167,20 @@ VSOut VSPos(VSIn i)
     o.clip    = mul(uPosMVP,       float4(i.pos, 1.0));
     return o;
 }
+// Instanced twin for a GeometryPass batch: the CPU writes the SAME two products
+// the loop puts into SSAOPosCB, one {mvp, modelView} pair per instance, into the
+// scene's 128-byte instance buffer at t3 — so the instanced frame is the loop's
+// frame, bit for bit.
+struct PosInst { float4x4 mvp; float4x4 modelView; };
+StructuredBuffer<PosInst> gPosInstances : register(t3);
+VSOut VSPosInstanced(VSIn i, uint iid : SV_InstanceID)
+{
+    PosInst x = gPosInstances[iid];
+    VSOut o;
+    o.viewPos = mul(x.modelView, float4(i.pos, 1.0)).xyz;
+    o.clip    = mul(x.mvp,       float4(i.pos, 1.0));
+    return o;
+}
 float4 PSPos(VSOut i) : SV_TARGET
 {
     return float4(i.viewPos, 1.0);  // a=1 marks valid geometry
@@ -402,6 +416,127 @@ float4 main(In i) : SV_Target {
 }
 )HLSL";
 
+// ─── Temporal AA (docs/anti-aliasing-plan.md A2/A3) ─────────────────────────
+// The HLSL twins of GL's kTaaVelocityVS/FS, kTaaResolveFS and kTaaSharpenFS
+// (OpenGLRenderer.cpp) and of Metal's kTaaMSL, same rule: the geometry is
+// RASTERIZED with the jittered matrix, the MOTION is measured with unjittered
+// ones. Mixing those up makes every static pixel report the jitter as movement,
+// and TAA then chases its own offset. The host half (jitter sequence, jitter
+// matrix, history weight, the 192-byte constant layout) is HE::taa* in
+// HorizonRendering/TemporalAA.h.
+//
+// Velocity: its own pass over the opaque objects, positions only, depth-tested
+// LESS_EQUAL without writing against the scene depth — material-agnostic, so a
+// graph material that never heard of velocity cannot leave undefined motion
+// behind. Output in TEXTURE-UV units (D3D's v points down, so ndc y is flipped
+// exactly like Metal's twin) — the resolve subtracts it from its own uv.
+// cbuffer b0 = HE::TaaVelocityConstants. Same vertex layout as the scene VS.
+inline constexpr const char* kTaaVelocityHLSL = R"HLSL(
+cbuffer TaaVelocityCB : register(b0)
+{
+    float4x4 uMvpJitter;   // rasterizes
+    float4x4 uMvpNow;      // measures (unjittered)
+    float4x4 uMvpPrev;     // measures (unjittered, last frame's camera + model)
+};
+struct VSIn  { float3 pos : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
+struct VSOut { float4 clip : SV_POSITION; float4 clipNow : TEXCOORD0; float4 clipPrev : TEXCOORD1; };
+VSOut VSVelocity(VSIn i)
+{
+    float4 p = float4(i.pos, 1.0);
+    VSOut o;
+    o.clip     = mul(uMvpJitter, p);
+    o.clipNow  = mul(uMvpNow,    p);
+    o.clipPrev = mul(uMvpPrev,   p);
+    return o;
+}
+float2 PSVelocity(VSOut i) : SV_TARGET
+{
+    float2 ndcNow  = i.clipNow.xy  / max(i.clipNow.w,  1e-6);
+    float2 ndcPrev = i.clipPrev.xy / max(i.clipPrev.w, 1e-6);
+    return (ndcNow - ndcPrev) * float2(0.5, -0.5);   // uvNow - uvPrev
+}
+)HLSL";
+
+// Blend this frame's tonemapped image (t0) with the reprojected history (t1)
+// along the velocity (t2). Current and velocity are read with Load (point,
+// clamped by hand) — the LDR texture is sampled LINEAR by FXAA/SMAA and stays
+// so; the history is sampled linear on purpose (subpixel reprojection), s0 =
+// the post chain's linear-clamp sampler.
+// cbuffer b0: x/y = 1/resolution, z = history blend weight (0 = history
+// unusable this frame — resize, first frame, a still from another camera).
+inline constexpr const char* kTaaResolveHLSL = R"HLSL(
+Texture2D    uCurrent  : register(t0);
+Texture2D    uHistory  : register(t1);
+Texture2D    uVelocity : register(t2);
+SamplerState uSamp     : register(s0);
+cbuffer CB : register(b0) { float4 uParams; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target {
+    uint w, h;
+    uCurrent.GetDimensions(w, h);
+    int2 size = int2(w, h);
+    int2 px   = int2(i.pos.xy);
+    float3 cur = uCurrent.Load(int3(px, 0)).rgb;
+    if (uParams.z <= 0.0) return float4(cur, 1.0);
+
+    // Motion of the FASTEST fragment in the 3x3 neighbourhood, not this pixel's
+    // own: on a silhouette the pixel may carry the background's motion while
+    // the eye follows the object — see the GL twin.
+    float2 vel  = uVelocity.Load(int3(px, 0)).rg;
+    float  best = length(vel);
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+        {
+            int2   q = clamp(px + int2(x, y), int2(0, 0), size - 1);
+            float2 v = uVelocity.Load(int3(q, 0)).rg;
+            float  l = length(v);
+            if (l > best) { best = l; vel = v; }
+        }
+
+    float2 histUV = i.uv - vel;
+    // Off-screen history is no history: nothing was ever accumulated there.
+    if (any(histUV < 0.0) || any(histUV > 1.0)) return float4(cur, 1.0);
+    float3 hist = uHistory.SampleLevel(uSamp, histUV, 0).rgb;
+
+    // Neighbourhood clamp — the whole defence against ghosting.
+    float3 lo = cur, hi = cur;
+    [unroll] for (int cy = -1; cy <= 1; ++cy)
+        [unroll] for (int cx = -1; cx <= 1; ++cx)
+        {
+            int2   q = clamp(px + int2(cx, cy), int2(0, 0), size - 1);
+            float3 c = uCurrent.Load(int3(q, 0)).rgb;
+            lo = min(lo, c);
+            hi = max(hi, c);
+        }
+    hist = clamp(hist, lo, hi);
+
+    // Fast motion means less history.
+    float motion = saturate(length(vel / uParams.xy) / 32.0);
+    float blend  = lerp(uParams.z, 0.0, motion);
+    return float4(lerp(cur, hist, blend), 1.0);
+}
+)HLSL";
+
+// The temporal average is softer than one frame by construction — this is the
+// sharpen that buys that back, run in the AA-resolve slot on the resolved
+// history (t0). cbuffer b0: xy = 1/resolution, z = amount (0 = exact copy).
+inline constexpr const char* kTaaSharpenHLSL = R"HLSL(
+Texture2D    uScene : register(t0);
+SamplerState uSamp  : register(s0);
+cbuffer CB : register(b0) { float4 uParams; };
+struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+float4 main(In i) : SV_Target {
+    float2 rcp = uParams.xy;
+    float3 c   = uScene.Sample(uSamp, i.uv).rgb;
+    if (uParams.z <= 0.0) return float4(c, 1.0);
+    float3 blur = 0.25 * (uScene.Sample(uSamp, i.uv + float2( rcp.x, 0.0)).rgb
+                        + uScene.Sample(uSamp, i.uv + float2(-rcp.x, 0.0)).rgb
+                        + uScene.Sample(uSamp, i.uv + float2(0.0,  rcp.y)).rgb
+                        + uScene.Sample(uSamp, i.uv + float2(0.0, -rcp.y)).rgb);
+    return float4(saturate(c + (c - blur) * uParams.z), 1.0);
+}
+)HLSL";
+
 // ─── Ray-traced GI (software BVH) HLSL ──────────────────────────────────────
 // Port of the GL-4.3 compute GI (kGi* in OpenGLRenderer.cpp), which in turn
 // mirrors the Metal reference. SSBOs → StructuredBuffers, image store →
@@ -431,6 +566,20 @@ VSOut GiGBufVS(VSIn i)
     o.worldPos = mul(uModel, float4(i.pos, 1.0)).xyz;
     o.normal   = mul((float3x3)uModel, i.normal);
     o.clip     = mul(uMVP, float4(i.pos, 1.0));
+    return o;
+}
+// Instanced twin for a GeometryPass batch: per-instance {mvp, model} from the
+// scene's 128-byte instance buffer at t3 — the loop's PerObject products, so
+// the instanced G-buffer is the loop's G-buffer.
+struct GiGBufInst { float4x4 mvp; float4x4 model; };
+StructuredBuffer<GiGBufInst> gGiGBufInstances : register(t3);
+VSOut GiGBufVSInstanced(VSIn i, uint iid : SV_InstanceID)
+{
+    GiGBufInst x = gGiGBufInstances[iid];
+    VSOut o;
+    o.worldPos = mul(x.model, float4(i.pos, 1.0)).xyz;
+    o.normal   = mul((float3x3)x.model, i.normal);
+    o.clip     = mul(x.mvp, float4(i.pos, 1.0));
     return o;
 }
 struct GiGBufOut { float4 pos : SV_Target0; float4 norm : SV_Target1; };
@@ -881,6 +1030,72 @@ void GiProbeCS(uint3 gtid : SV_GroupThreadID, uint3 groupId : SV_GroupID)
     float2 newVisSample = float2(dist, dist * dist);
     float hVis = lerp(baseH, 0.3, saturate(abs(dist - oldVis.x) / max(uGridOrigin.w, 1.0)));
     uVis[outCoord] = lerp(newVisSample, oldVis.xy, hVis);
+}
+)HLSL";
+
+// ─── World-preview pixel shaders (IRenderer::RenderWorldPreview) ─────────────
+// Ports of GL's kMeshPreviewFS / kSkelPreviewFS: the preview's own fixed
+// lighting — no shadow map, SSAO, IBL or fog is bound in a preview target —
+// with the same numbers, so a mesh viewer shows the same picture on every
+// backend. Paired with the backend's scene VS (static) and VSMainSkinned
+// (skinned), whose VSOut this repeats; b0 is their PerObject block (color.a =
+// has-texture, pbr.xy = metallic/roughness), b1 the preview's light.
+// uSun.w > 0 arms the sun (xyz points TOWARD it); w == 0 keeps the studio
+// light the thumbnails were always rendered with.
+// The albedo register is a macro because the two backends' root layouts put it
+// in different places; D3D11 takes the default.
+inline constexpr const char* kWorldPreviewPSHLSL = R"HLSL(
+#ifndef HE_PREVIEW_TEX_REG
+#define HE_PREVIEW_TEX_REG t0
+#endif
+cbuffer PerObject : register(b0)
+{
+    float4x4 uMVP;
+    float4x4 uModel;
+    float4   uColor;    // rgb = base color, a = hasTexture (0/1)
+    float4   uPBR;      // x = metallic, y = roughness
+};
+cbuffer PreviewLight : register(b1)
+{
+    float4 uCamPos;     // xyz
+    float4 uSun;        // xyz toward the light, w > 0 = armed
+    float4 uSunColor;   // rgb
+    float4 uAmbient;    // rgb
+};
+Texture2D    uPreviewTex  : register(HE_PREVIEW_TEX_REG);
+SamplerState uPreviewSamp : register(s0);
+struct VSOut { float4 clip : SV_POSITION; float3 worldPos : TEXCOORD0; float3 normal : TEXCOORD1; float2 uv : TEXCOORD2; };
+
+float3 previewAlbedo(float2 uv)
+{
+    return uColor.a > 0.5 ? uPreviewTex.Sample(uPreviewSamp, uv).rgb * uColor.rgb : uColor.rgb;
+}
+
+float4 PSPreviewMesh(VSOut i) : SV_Target
+{
+    bool   lit = uSun.w > 0.0;
+    float3 L   = lit ? normalize(uSun.xyz) : normalize(float3(0.45, 0.75, 0.55));
+    float3 lc  = lit ? uSunColor.rgb : float3(1.0, 1.0, 1.0);
+    float3 amb = lit ? uAmbient.rgb  : float3(0.32, 0.32, 0.32);
+    float3 N = normalize(i.normal);
+    float3 V = normalize(uCamPos.xyz - i.worldPos);
+    float3 H = normalize(L + V);
+    float diff  = max(dot(N, L), 0.0);
+    float rough = clamp(uPBR.y, 0.05, 1.0);
+    float spec  = pow(max(dot(N, H), 0.0), lerp(128.0, 8.0, rough))
+                * (1.0 - rough) * lerp(0.25, 1.0, saturate(uPBR.x));
+    float3 lightIn = amb + lc * (lit ? diff : 0.68 * diff);
+    return float4(previewAlbedo(i.uv) * lightIn + spec * lc, 1.0);
+}
+
+float4 PSPreviewSkinned(VSOut i) : SV_Target
+{
+    bool   lit = uSun.w > 0.0;
+    float3 L   = lit ? normalize(uSun.xyz) : normalize(float3(0.45, 0.75, 0.55));
+    float3 lc  = lit ? uSunColor.rgb : float3(1.0, 1.0, 1.0);
+    float3 amb = lit ? uAmbient.rgb  : float3(0.35, 0.35, 0.35);
+    float diff = max(dot(normalize(i.normal), L), 0.0);
+    return float4(previewAlbedo(i.uv) * (amb + lc * (lit ? diff : 0.65 * diff)), 1.0);
 }
 )HLSL";
 

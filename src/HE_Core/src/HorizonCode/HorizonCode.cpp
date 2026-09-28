@@ -1317,14 +1317,16 @@ Value variableDefaultValue(const Variable& v)
         case P::Struct:
         {
             // The definition's own field defaults, then this graph's overrides
-            // on top — matched BY NAME against the current definition.
+            // on top — matched BY NAME against the current definition (a
+            // renamed field also under its former name).
             Value r = HE::TypeRegistry::instance().makeDefaultValue(v.typeName);
             if (!v.structDefaults.empty())
             {
                 HE::StructDef def;
                 if (HE::TypeRegistry::instance().getStruct(v.typeName, def))
                     for (size_t i = 0; i < def.fields.size() && i < r.items.size(); ++i)
-                        if (auto it = v.structDefaults.find(def.fields[i].name);
+                        if (auto it = v.structDefaults.find(def.storedKey(def.fields[i],
+                                [&v](const std::string& k) { return v.structDefaults.count(k) != 0; }));
                             it != v.structDefaults.end())
                         {
                             Value ov = it->second;
@@ -1863,6 +1865,7 @@ nlohmann::json variableToJsonObj(const Variable& v)
     // nothing is byte-identical to one saved before replication existed.
     if (v.replicated) e["rep"] = true;
     if (v.repNotify)  e["repNotify"] = true;
+    if (v.saveGame)   e["saveGame"] = true;
     if (v.isArray)    e["arr"] = true;
     if (v.isArray && !v.defaultItems.empty())
     {
@@ -2001,6 +2004,9 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     // A hand-edited file may say either; nothing downstream has to check.
     if (v.type == P::Ref)  { v.replicated = false; }
     if (!v.replicated)     { v.repNotify  = false; }
+    // Same reasoning for Save Game: a handle does not survive into the next
+    // run, and a function-local is gone before anybody could save it.
+    v.saveGame = e.value("saveGame", false) && isSaveableType(v.type) && v.scope == 0;
     v.isArray = e.value("arr", false);
     v.container = (ContainerKind)e.value("ctr", (int)ContainerKind::None);
     if (v.container != ContainerKind::None) v.isArray = true;   // see loadParams
@@ -2361,6 +2367,24 @@ LinkRemapSnapshot captureLinkRemapSnapshot(const Graph& g, const std::vector<int
         sig.execOuts = names(s.execOuts);
         sig.dataIns  = names(s.dataIns);
         sig.dataOuts = names(s.dataOuts);
+        auto& reg = HE::TypeRegistry::instance();
+        if (!n->typeName.empty() &&
+            (n->type == NodeType::MakeStruct || n->type == NodeType::BreakStruct))
+        {
+            HE::StructDef def;
+            if (reg.getStruct(n->typeName, def))
+                for (const HE::StructField& f : def.fields)
+                    for (const std::string& old : f.formerNames)
+                        if (!def.isLiveName(old)) sig.renamed.emplace(old, f.name);
+        }
+        else if (!n->typeName.empty() && n->type == NodeType::SwitchOnEnum)
+        {
+            HE::EnumDef def;
+            if (reg.getEnum(n->typeName, def))
+                for (const HE::EnumEntry& e : def.entries)
+                    for (const std::string& old : e.formerNames)
+                        if (!def.isLiveName(old)) sig.renamed.emplace(old, e.name);
+        }
         snap.sigs.emplace(id, std::move(sig));
     }
     return snap;
@@ -2406,6 +2430,10 @@ void remapLinksFromSnapshot(Graph& g, const LinkRemapSnapshot& snap)
                 int seen = 0;
                 for (int i = 0; i < (int)nv.size(); ++i)
                     if (nv[i] == name && seen++ == occ) { pin = newBase + i; return true; }
+                // A field/entry renamed since: follow it under its new name.
+                if (const auto rn = c.renamed.find(name); rn != c.renamed.end())
+                    for (int i = 0; i < (int)nv.size(); ++i)
+                        if (nv[i] == rn->second) { pin = newBase + i; return true; }
                 // No pin of that name any more. Same region size means an
                 // in-place rename/retype — keeping the index is what preserves
                 // the user's wires there. A changed size means the pin was
@@ -2955,9 +2983,58 @@ void inferUserTypeNames(Graph& g)
     if (!repaired.empty()) remapLinksForMirror(g, repaired);
 }
 
+namespace
+{
+// Field and entry renames (HE::StructField/EnumEntry::formerNames): rewrite the
+// NAME-KEYED type data a graph's variables persist onto the current names, so
+// the next save of the graph carries them and the editor shows an override on
+// the field it belongs to. Readers already resolve former names on their own;
+// this is what makes the retarget stick instead of leaning on the alias forever.
+void retargetRenamedTypeNames(Graph& g)
+{
+    auto& reg = HE::TypeRegistry::instance();
+    auto entryName = [&reg](const std::string& enumPath, std::string& s)
+    {
+        HE::EnumDef ed;
+        if (s.empty() || enumPath.empty() || !reg.getEnum(enumPath, ed) || ed.isLiveName(s)) return;
+        if (const HE::EnumEntry* e = ed.findEntry(s)) s = e->name;
+    };
+    for (Variable& v : g.variables)
+    {
+        if (v.type == PinType::Enum)
+        {
+            entryName(v.typeName, v.s);
+            for (Value& it : v.defaultItems) entryName(v.typeName, it.s);
+        }
+        if (v.kind() == ContainerKind::Map && v.keyType == PinType::Enum)
+            for (Value& k : v.defaultKeys) entryName(v.keyTypeName, k.s);
+
+        HE::StructDef def;
+        if (v.type != PinType::Struct || v.structDefaults.empty() ||
+            !reg.getStruct(v.typeName, def)) continue;
+        std::unordered_map<std::string, Value> moved;
+        for (const HE::StructField& f : def.fields)
+        {
+            const std::string key = def.storedKey(f,
+                [&v](const std::string& k) { return v.structDefaults.count(k) != 0; });
+            if (key.empty()) continue;
+            Value val = std::move(v.structDefaults[key]);
+            v.structDefaults.erase(key);
+            if (f.type == PinType::Enum) entryName(f.typeName, val.s);
+            moved[f.name] = std::move(val);
+        }
+        // What no field claims stays as it was ("a name the definition no longer
+        // has simply doesn't apply") — a field deleted and re-added gets it back.
+        for (auto& [k, val] : v.structDefaults) moved.emplace(k, std::move(val));
+        v.structDefaults = std::move(moved);
+    }
+}
+} // namespace
+
 void syncTypeSignatures(Graph& g)
 {
     auto& reg = HE::TypeRegistry::instance();
+    retargetRenamedTypeNames(g);
     auto fieldsToParams = [](const HE::StructDef& def)
     {
         std::vector<FuncParam> ps;
@@ -2982,7 +3059,8 @@ void syncTypeSignatures(Graph& g)
         case NodeType::SetStructField:
         {
             // Revalidate the chosen field (params[0]) against the current def:
-            // retype a renamed-type field, keep the mirror if the def is gone,
+            // retype a renamed-type field, follow a renamed FIELD (findField
+            // knows its former names), keep the mirror if the def is gone,
             // drop the choice entirely if the FIELD is gone.
             HE::StructDef def;
             if (n.typeName.empty() || !reg.getStruct(n.typeName, def)) break;

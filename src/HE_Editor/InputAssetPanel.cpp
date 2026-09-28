@@ -417,6 +417,33 @@ bool InputAssetPanel::reloadByContentPath(const std::string& contentPath)
 
 void InputAssetPanel::appendDirtyPaths(std::vector<std::string>& out) { s_states.appendDirtyPaths(out); }
 
+void InputAssetPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_states.forEach([&](const std::string&, PanelState& st) {
+		if (!st.dirty || st.relPath.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
+			// saveState's encoding, into a copy of the asset.
+			if (st.isMapping)
+			{
+				const InputMappingContextAsset* m = cm->getInputMappingContext(st.assetId);
+				if (!m) return false;
+				InputMappingContextAsset copy = *m;
+				copy.json = encodeMapping(st.entries);
+				return cm->writeAssetTo(copy, dest);
+			}
+			const InputActionAsset* a = cm->getInputAction(st.assetId);
+			if (!a) return false;
+			InputActionAsset copy = *a;
+			copy.json = HE::makeInputActionJson(st.valueType == 2 ? "Axis2D"
+			                                    : st.valueType == 1 ? "Axis" : "Button",
+			                                    st.runWhilePaused);
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
+
 bool InputAssetPanel::save(AppContext& ctx, const std::string& path)
 {
 	PanelState* st = s_states.find(path);

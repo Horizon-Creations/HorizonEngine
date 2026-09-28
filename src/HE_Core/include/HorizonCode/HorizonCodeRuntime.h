@@ -186,6 +186,16 @@ public:
     struct ReplicatedVar { std::string name; PinType type; bool notify = false; };
     std::vector<ReplicatedVar> replicatedVariablesOf(InstanceId id) const;
 
+    // ── Save Game variables (Variable::saveGame, entity.saveState) ───────────
+    // The names of this instance's variables a savegame captures. Same shape
+    // and same reason to live here as replicatedVariablesOf: interpreted
+    // instances declare them in their graphs, generated ones in varInfos().
+    // INSTANCE variables only, never a Ref (isSaveableType); a name declared at
+    // two levels appears once. Order is declaration order, base classes first —
+    // the save itself is name-keyed, so it carries no meaning beyond being
+    // deterministic.
+    std::vector<std::string> savedVariablesOf(InstanceId id) const;
+
     // ── One function's multiplayer face (plan §7.6) ─────────────────────────
     // Here for exactly the reason replicatedVariablesOf is: it is the question
     // whose answer differs between the two backends — an interpreted instance

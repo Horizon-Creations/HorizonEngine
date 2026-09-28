@@ -23,6 +23,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>   // GetHoveredID, the open-popup stack
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -631,6 +632,10 @@ TEST_CASE("inspector ui: the component list names Replication only where there i
 // reads the world afterwards.
 namespace
 {
+	// The Add Component popup's own window, as of the last frame that drew it —
+	// so a scan can tell its rows from those of a group's submenu.
+	ImGuiWindow* s_menuPopup = nullptr;
+
 	// One frame of a window that holds the Add Component popup. `open` asks
 	// for the popup on this frame; the menu draws for as long as ImGui keeps
 	// it open. Returns what the menu reported.
@@ -647,6 +652,7 @@ namespace
 		bool added = false;
 		if (ImGui::BeginPopup("##add_component"))
 		{
+			s_menuPopup = ImGui::GetCurrentWindow();
 			added = InspectorPanel::addComponentMenu(world, entity, undo);
 			ImGui::EndPopup();
 		}
@@ -658,7 +664,9 @@ namespace
 	}
 
 	// The distinct hoverable ids down a column of the open popup, top to
-	// bottom — the same reading the header-menu tests take.
+	// bottom — the same reading the header-menu tests take. Only the popup's
+	// own rows count: hovering an enabled group opens its submenu, and a row
+	// the pointer finds in there belongs to the group, not to this list.
 	std::vector<ImGuiID> menuRowsAt(HorizonWorld& world, Entity entity, float x)
 	{
 		std::vector<ImGuiID> rows;
@@ -668,7 +676,7 @@ namespace
 			ImGui::GetIO().AddMousePosEvent(x, y);
 			menuFrame(world, entity, nullptr, false);
 			menuFrame(world, entity, nullptr, false);
-			const ImGuiID id = ImGui::GetHoveredID();
+			const ImGuiID id = GImGui->HoveredWindow == s_menuPopup ? ImGui::GetHoveredID() : 0;
 			if (id == 0 || id == last) { if (id == 0) last = 0; continue; }
 			rows.push_back(id);
 			last = id;
@@ -687,11 +695,22 @@ TEST_CASE("inspector ui: Add Component is grouped, and a typed search ends on En
 
 	const Entity crate = world.createEntity("Crate");
 	reg.emplace<TransformComponent>(crate);
+	// Nothing to paste: with a component on the clipboard the menu grows a
+	// "Paste Component (…)" row above the groups. On Windows ImGui's clipboard
+	// is the system's and outlives the context, so a Copy in an earlier case
+	// would otherwise leak that row into this one.
+	ImGui::SetClipboardText("");
+
+	// Room to the right of the popup for a group's submenu, as in the editor.
+	// On a 420-wide display the widest one (Animation) fits on neither side,
+	// and ImGui then lays it over the popup itself — right over the rows the
+	// scan below reads. The shots still take the left W×H.
+	ImGuiIO& io = ImGui::GetIO();
+	io.DisplaySize.x = 2.0f * float(W);
 
 	// The popup opens at the pointer, so the pointer sits near the window's
 	// top-left corner: a popup opened at the bottom-right would be pushed back
 	// inside the display and its rows would be anywhere.
-	ImGuiIO& io = ImGui::GetIO();
 	io.AddMousePosEvent(40.0f, 40.0f);
 	for (int i = 0; i < 3; ++i) menuFrame(world, crate, &undo, false);
 
@@ -708,13 +727,25 @@ TEST_CASE("inspector ui: Add Component is grouped, and a typed search ends on En
 	// The popup hangs at the pointer's position when it opened, so its rows
 	// are found in a column just inside its left edge.
 	// Transform is on the entity already but Transform 2D is not, so all seven
-	// groups have something to offer; the Animation group is greyed (no
-	// skeleton) and a greyed row is still a row. Fewer than seven would mean a
-	// group vanished; many more would mean the flat list is back.
+	// groups have something to offer. Animation is one of them even without a
+	// skeleton: the skeleton rows in it are greyed, but Sequence Player goes on
+	// any entity, so the group opens like the others. The rows are asked for by
+	// name — the search box and each group, and no component row, which would
+	// mean the flat list is back.
 	const std::vector<ImGuiID> rows = menuRowsAt(world, crate, 70.0f);
 	REQUIRE(popupOpen());
-	CHECK_MESSAGE(rows.size() >= 6, "found " << rows.size() << " rows in the grouped menu");
-	CHECK_MESSAGE(rows.size() <= 10, "found " << rows.size() << " rows — that is the flat list");
+	REQUIRE(s_menuPopup != nullptr);
+	auto found = [&](const char* label) {
+		const ImGuiID id = s_menuPopup->GetID(label);
+		return std::find(rows.begin(), rows.end(), id) != rows.end();
+	};
+	CHECK(found("##add_component_filter"));
+	for (const char* group : { "Transform", "Rendering", "Physics", "Animation",
+	                           "Gameplay", "Navigation", "Audio" })
+		CHECK_MESSAGE(found(group), "group " << std::string(group) << " is not in the grouped menu");
+	CHECK_FALSE(found("Mesh"));
+	CHECK_FALSE(found("Sequence Player"));
+	CHECK_MESSAGE(rows.size() == 8, "found " << rows.size() << " rows in the grouped menu");
 
 	// ── Type "camera r" ──
 	// The box has focus when the popup opens; the scan above hovered the

@@ -134,12 +134,10 @@ public:
     // Called every frame by the backends with the same manager; a DIFFERENT one
     // (another project's content) forgets which section-material paths were
     // missing, since they are missing from a content root that no longer
-    // applies.
-    void setContentManager(ContentManager* cm)
-    {
-        if (cm != m_contentManager) m_sectionMaterialMissing.clear();
-        m_contentManager = cm;
-    }
+    // applies — and so does the same one once its contentEpoch() moved (a
+    // save, an import, a refresh: the missing file may be there now).
+    // Out of line: ContentManager is only forward-declared here.
+    void setContentManager(ContentManager* cm);
 
     // Day-night cycle: when enabled, the extractor drives the sun from the time
     // of day (0..1: 0.25 sunrise, 0.5 noon, 0.75 sunset, 0/1 midnight) instead of
@@ -191,11 +189,13 @@ private:
     // by the ContentManager's own path index every frame (a lookup, never a
     // load), so nothing here can go stale against it. What IS remembered is the
     // failure: a path whose .hasset was not there when first seen, so it is not
-    // retried — and logged — every frame. Same lifetime rule the GL mesh upload
-    // has for the mesh's own material: a material that appears on disk AFTER
-    // first sight is picked up on the next editor start (or the next
-    // ContentManager, see setContentManager). Baked UUIDs never come through.
+    // retried — and logged — every frame. Forgotten when the ContentManager
+    // says files may have appeared (contentEpoch, see setContentManager), so a
+    // material that appears on disk AFTER first sight is picked up without a
+    // restart: one more lookup per missing path per content change. Baked
+    // UUIDs never come through.
     std::unordered_set<std::string> m_sectionMaterialMissing;
+    uint64_t                        m_sectionMaterialEpoch = 0;
     // setShadowSettings() state; defaults = the historical fit constants.
     float     m_shadowDistance = 250.0f;
     int       m_cascadeCount   = 3;

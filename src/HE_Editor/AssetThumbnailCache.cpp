@@ -222,6 +222,11 @@ namespace
 		// evenly spread samples bound the cost at ~260k regardless of source size
 		// and still look like a proper downscale.
 		constexpr int kMaxTaps = 4;
+		//
+		// sy counts from the picture's TOP; the asset stores its rows bottom-up
+		// (TextureImporter, see UIElement.cpp's quad helper), so the row it reads
+		// is h-1-sy — otherwise every tile, and the designer preview drawn from
+		// it, stands on its head (Thema 92).
 		for (int y = 0; y < dh; ++y)
 		{
 			const uint32_t sy0 = static_cast<uint32_t>((static_cast<float>(y)     / dh) * h);
@@ -238,7 +243,7 @@ namespace
 				for (uint32_t sy = sy0; sy < sy1 && sy < h; sy += stepY)
 					for (uint32_t sx = sx0; sx < sx1 && sx < w; sx += stepX)
 					{
-						const uint8_t* p = &tex->data[(static_cast<size_t>(sy) * w + sx) * ch];
+						const uint8_t* p = &tex->data[(static_cast<size_t>(h - 1 - sy) * w + sx) * ch];
 						if (ch == 1)      { acc[0] += p[0]; acc[1] += p[0]; acc[2] += p[0]; acc[3] += 255; }
 						else if (ch == 3) { acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2]; acc[3] += 255; }
 						else              { acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2]; acc[3] += p[3]; }

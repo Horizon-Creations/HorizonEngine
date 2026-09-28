@@ -1,0 +1,86 @@
+          <p>
+            The host's anti-cheat scores what clients send and decides what to do
+            about it. It runs on the host of a multiplayer session whose project has
+            anti-cheat switched on (Project Settings, Game, Anti-Cheat). Each report
+            reaches every script as <code>onCheatDetected(reportId)</code>; the
+            <code>report…</code> rows read it, <code>respond</code> overrules the
+            host's reaction. A client gets the same callback once, when the host
+            tells it that it is being removed.
+          </p>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue (build 7d49d44f): anti-cheat never runs, in the
+              exported game and in Play as Host alike.</strong> The project setting
+              does not reach the session: <code>net.host</code>, <code>--host</code>
+              and Play as Host all open it without the anti-cheat settings. And the
+              anti-cheat that scripts, graphs and C++ modules talk to is a second
+              object that no session is connected to. So in every frontend
+              <code>isEnabled</code> is <code>false</code>, <code>check</code>
+              <code>true</code>, <code>report</code>, <code>respond</code>,
+              <code>kick</code> and <code>setPlayerLabel</code> do nothing, the
+              readers answer 0 or <code>""</code>, and
+              <code>onCheatDetected</code> never fires. The rest of this section
+              was measured with the anti-cheat connected by hand, the way the
+              engine intends it.
+            </p>
+          </div>
+          <ul>
+            <li>
+              <strong><code>player</code> is a connection number, not a player
+              number.</strong> Every row here that takes a player, and
+              <code>reportPlayer</code>, counts the host's connections, which are
+              numbered separately from the players of <a href="#net">net</a>. The
+              first joiner was player 2 on connection 1; after a failed join attempt
+              had used connection 1, the next joiner was player 2 on connection 2.
+              No row converts one into the other, so take the number from
+              <code>reportPlayer</code>. A report filed under
+              <code>net.rpcSender()</code> (player 2) went to connection 2, which
+              was nobody, and the real caller's score stayed 0. A connection
+              nobody holds is scored and reported all the same.
+            </li>
+            <li>
+              <strong>Score and level.</strong> <code>report(player, rule, weight,
+              detail)</code> adds <code>weight</code> to that connection's score,
+              which halves every 30 seconds (the defaults on the Anti-Cheat page).
+              Reaching 5 files a <em>Suspect</em> report (level 1), 20 a
+              <em>Confirmed</em> one (level 2). <em>Hard</em> (level 3) is a single
+              observation no honest build sends, for example a
+              <a href="#net-calls">remote call</a> to an entity the client may not
+              call. <code>reportDetail</code> lists the observations behind the
+              score (“Custom 6.00 (Aimbot: through wall)”).
+            </li>
+            <li>
+              <strong>Reactions.</strong> Unless a handler says otherwise the host
+              logs Suspect and Confirmed reports and kicks on Hard.
+              <code>respond(reportId, response)</code> replaces that, but only
+              inside <code>onCheatDetected</code>, in the frame the report fired:
+              <code>respond(id, 1 + 8)</code> made the host log and flag,
+              <code>1 + 16</code> log and kick. A later call is ignored with the log
+              line “no such pending report”. Log is always kept.
+            </li>
+            <li>
+              <strong><code>check</code> always answers <code>true</code>.</strong>
+              The rules on the Anti-Cheat page are saved with the project but
+              nothing reads them yet (measured with a rule “Damage” from 0 to 100
+              and a value of 500), so code that applies a value only when
+              <code>check</code> agrees keeps working when they arrive.
+            </li>
+            <li>
+              <strong>What the kicked client learns.</strong> Its scripts get
+              <code>onCheatDetected</code> with <code>reportPlayer</code> 0 (“you”),
+              then <code>onDisconnected(2)</code> with “Removed from the session.”.
+              After <code>kick(player, code)</code> it reads
+              <code>reportReason</code> = <code>code</code>, level 2 and an empty
+              rule; after a kick by the host's policy or a <code>respond</code>, the
+              rule's name and reason 0. Score and detail are never sent to a client.
+              In the editor's Play mode nobody is kicked.
+            </li>
+            <li>
+              <strong>Labels.</strong> A client's join name is its label from the
+              start; <code>setPlayerLabel</code> replaces it in the log and in later
+              reports (“conn 1 [Anna#1]”).
+              <code>expectDisplacement</code> was not measured here: it needs a
+              moving character.
+            </li>
+          </ul>

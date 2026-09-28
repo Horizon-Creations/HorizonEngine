@@ -255,6 +255,11 @@ private:
     HE::WindowMode      m_windowMode   = HE::WindowMode::Fullscreen;
     HE::RendererBackend m_backend      = HE::RendererBackend::OpenGL;
     bool m_vsyncOn       = true;           // mirrors GetConfig().windowprops.vsync; V toggles it
+    // The window mode the player's settings last put the window in (app.setFullscreen).
+    // Starts as m_windowMode; kept apart from it because m_windowMode stays the
+    // CONFIGURED one, which "fullscreen off" goes back to.
+    HE::WindowMode m_playerWindowMode = HE::WindowMode::Fullscreen;
+    void installPlayerSettings();
     // Mirror of ProjectConfig::appMode, latched by applyShippedConfig before the
     // window exists (docs/he-apps-plan.md A1). True = this build is an
     // application: no scene, no physics, no gameplay hosts, no camera control,

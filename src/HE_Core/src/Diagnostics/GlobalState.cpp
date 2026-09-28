@@ -188,6 +188,21 @@ std::filesystem::path GlobalState::configFilePath()
 	static const fs::path resolved = [] {
 		std::error_code ec;
 
+		// 0. An automated run (he_tests sets this in its main()) replaces the
+		//    whole search below with a scratch directory. Without it every test
+		//    that reads or writes the config landed in the per-user file — or in
+		//    a config.json in the build directory ctest runs from — and a test
+		//    run reset a developer's LastProjectPath and KnownProjects to the
+		//    defaults. Ranked BELOW HE_CONFIG_DIR and the shipped pin on purpose:
+		//    tests that pin a directory of their own must still get it, and a
+		//    test that unpins falls back here rather than to the real file.
+		if (const char* fallback = std::getenv("HE_CONFIG_FALLBACK_DIR"); fallback && *fallback)
+		{
+			fs::path p = fs::path(fallback) / "config.json";
+			fs::create_directories(p.parent_path(), ec);
+			return p;
+		}
+
 		// 1. A config.json in the working directory wins. That keeps a portable
 		//    checkout and every existing development setup behaving exactly as
 		//    before, and means this never relocates settings somebody already

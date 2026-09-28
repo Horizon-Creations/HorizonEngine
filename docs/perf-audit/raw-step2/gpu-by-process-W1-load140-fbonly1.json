@@ -1,0 +1,25 @@
+{
+ "interval_s": 10.0,
+ "processes": [
+  {
+   "pid": 78587,
+   "name": "metal_present_pr",
+   "gpu_pct": 41.54
+  },
+  {
+   "pid": 72986,
+   "name": "HorizonEditor",
+   "gpu_pct": 36.0
+  },
+  {
+   "pid": 418,
+   "name": "WindowServer",
+   "gpu_pct": 21.75
+  },
+  {
+   "pid": 934,
+   "name": "com.apple.WebKit",
+   "gpu_pct": 0.14
+  }
+ ]
+}

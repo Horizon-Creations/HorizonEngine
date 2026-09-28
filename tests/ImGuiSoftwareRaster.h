@@ -54,6 +54,13 @@ struct Image
 Image rasterize(const ImDrawData* drawData, int width, int height,
                 std::uint32_t clearColor = 0xFF0F1214U);   // IM_COL32(20, 18, 15, 255)
 
+// A picture for an ImGui::Image / AddImage to name, the way a GPU backend's
+// CreateImGuiTexture would hand one out: RGBA8, rows top-down, copied. Without
+// it an image drawn with a foreign handle comes out white (see rasterize) —
+// right shape, no picture. The texture viewer's headless shot uses this.
+ImTextureID registerTexture(const void* rgba8, int width, int height);
+void        unregisterTexture(ImTextureID id);
+
 // Write an image as a 32-bit BMP. Uncompressed and dependency-free on purpose:
 // the engine ships no PNG encoder, and the existing headless dumps (the splash
 // screen, the frame dump he_shot.py drives) already write BMP and convert

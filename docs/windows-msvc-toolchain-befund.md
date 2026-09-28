@@ -1,0 +1,343 @@
+# Windows: horizoncode findet MSVC nicht — Befund (Thema 96, Schritt 1)
+
+Stand 2026-09-26, Zweig `claude/windows-msvc-toolchain-erkennung`, Basis `152659ff`.
+
+**Was dieser Bericht ist:** Lokalisierung aus dem Code plus ein Blick in den
+Windows-CI-Log. **Nicht** auf einer Windows-Maschine reproduziert — der Bericht
+entstand auf einem Mac. Alles unten ist entweder *belegt* (Code-Zeile, CI-Log)
+oder ausdrücklich als *Hypothese* markiert. Das Repro-Rezept für einen
+Windows-Rechner (NN-WS03) steht am Ende.
+
+## 1. Es gibt keine eigene MSVC-Erkennung
+
+Im Engine-Code gibt es keinen einzigen Treffer für `vswhere`, `VCINSTALLDIR`,
+`VSINSTALLDIR`, `vcvars` oder eine Suche nach `cl.exe`/`link.exe`
+(`git grep`, ohne Vendor-Code). Die Annahme im Thema („verlässt sich auf PATH
+oder VCINSTALLDIR“) trifft den Ort nicht: die **gesamte** Compiler-Erkennung ist
+ein `cmake -S … -B …` mit dem **Default-Generator** von cmake.
+
+Der Code-Pfad (alles `src/HE_Scene/src/HcCodegen.cpp`):
+
+| Stelle | Zeilen | Was passiert |
+|---|---|---|
+| `shq()` | 3997–4000 | Windows: Argument einfach in `"…"` einpacken |
+| `cmakeAnswers()` | 4050–4057 | `std::system("<cmake> --version >NUL 2>&1")` |
+| `resolveCmake()` | 4064–4088 | 1. `<Editor>/cmake/bin/cmake.exe` (gequotet via `shq`), 2. blankes `cmake` vom PATH |
+| `runStreaming()` | 4101–4105 | `_popen(cmd + " 2>&1")` → läuft als `cmd.exe /c <cmd>` |
+| `probeToolchain()` | 4129–4197 | Wegwerf-Projekt `project(he_toolchain_probe CXX)`, `cmake -S -B` (4173f.); rc≠0 ⇒ `compilerFound=false`, `detail` = letzte 15 Zeilen |
+| `buildDylib()` | 4435–4491 | Configure (4461–4468, ohne `-G`) + `cmake --build … --config Release` (4474) |
+| `installToolchain()` (Win) | 4286–4307 | winget: Kitware.CMake + VS 2022 BuildTools (VCTools-Workload) |
+
+Aufrufer:
+
+- `src/HE_Editor/EditorApplication.cpp:1797–1819` — Start-Check, setzt `setBundledCmakeDir(<Editor>/cmake)`
+- `src/HE_Editor/EditorSettingsPanel.cpp:1563–1575` — Tool-Status-Zeilen „cmake“ / „C++ compiler: not found“
+- `src/HE_Editor/ToolchainDialog.cpp:133–141` — „Details“ zeigt `ToolchainProbe::detail` (die Log-Zeilen, die der Mensch kopieren kann), `:190–194` winget-Befehl
+- `src/HE_Editor/ExportDialogPanel.cpp:1798` — Spiel-Export (HorizonCode → C++ → `HorizonCodeGen.dll`)
+- `src/HE_Editor/GameLogicBuildPanel.cpp:131` — GameLogic-DLL
+- Das generierte `CMakeLists.txt` (`generateCMakeLists`, HcCodegen.cpp:3923ff.) legt weder Generator noch Compiler fest.
+
+Nebenschauplätze (kein Editor-Pfad):
+
+- `configure_x64.bat:2` — hartkodiert `C:\Program Files\Microsoft Visual Studio\18\Community\...\vcvars64.bat`; scheitert bei Professional/Enterprise/BuildTools oder VS 2022. Nur Entwickler-Build.
+- `scripts/build_runtimes.py:105–124` — nimmt Ninja, sobald `ninja` auf PATH liegt; Ninja braucht `cl.exe` + `INCLUDE`/`LIB` aus der Umgebung ⇒ ohne Developer Prompt `No CMAKE_CXX_COMPILER could be found`. Läuft in CI nur innerhalb `msvc-dev-cmd`.
+
+## 2. Warum CI davon nichts merkt (belegt)
+
+- `.github/workflows/ci.yml:37` (und `runtime-flavors.yml:74`): `ilammy/msvc-dev-cmd@v1` — **jeder** Windows-Job läuft in einer Developer-Umgebung. Log von Lauf 36260400179 (Job 108454993111): „Found with vswhere: C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat“, MSVC 14.51.36231, `VCINSTALLDIR`/`INCLUDE`/`LIB` gesetzt.
+- Engine-Configure `ci.yml:159` mit `-G Ninja` — funktioniert nur wegen dieser Umgebung.
+- Gebündeltes cmake = das cmake des Runners, laut Log **4.4.3** (kennt „Visual Studio 18 2026“ und „17 2022“).
+- `tests/test_gamelogic_build.cpp` ruft `buildDylib` **ohne** `setBundledCmakeDir` ⇒ `resolveCmake()` liefert das blanke Wort `cmake` (ungequotet). Der Pfad, den ein ausgelieferter Editor nimmt (gequoteter Pfad zum gebündelten cmake), wird von keinem Test und keinem CI-Job ausgeführt.
+
+## 3. Wichtige Einordnung
+
+cmakes **Visual-Studio-Generator** (Default auf Windows) findet MSVC selbst über
+die VS-Setup-API (dasselbe, was vswhere benutzt) — er braucht **kein** vcvars,
+kein `VCINSTALLDIR`, kein `cl.exe` auf PATH, und er kennt auch reine Build Tools.
+Plain PowerShell + gebündeltes cmake 4.4.3 + VS 2022/2026 mit C++-Workload
+*sollte* also gehen. Das Scheitern braucht einen konkreten Mechanismus. Kandidaten,
+nach Wahrscheinlichkeit:
+
+### H1 (Hauptverdacht, Hypothese): `cmd /c` frisst Anführungszeichen
+
+`_popen` und `std::system` lassen `cmd.exe /c <Zeile>` laufen (ohne `/S`).
+Regel aus `cmd /?`: Anführungszeichen bleiben nur erhalten, wenn die Zeile
+**genau zwei** davon enthält (plus weitere Bedingungen). Sonst wird, wenn das
+erste Zeichen ein `"` ist, **das erste und das letzte `"` der Zeile entfernt**.
+
+- `cmakeAnswers`: `"C:\…\cmake\bin\cmake.exe" --version >NUL 2>&1` — genau zwei
+  Quotes ⇒ überlebt ⇒ Tool-Status „cmake: 4.4.3“ grün.
+- Probe/Configure: `"C:\…\cmake.exe" -S "C:\…\Temp\he_toolchain_probe_1234" -B "C:\…\build" 2>&1`
+  — sechs Quotes, beginnt mit `"` ⇒ cmd macht daraus
+  `C:\…\cmake.exe" -S "C:\…\he_toolchain_probe_1234" -B "C:\…\build 2>&1`
+  ⇒ zerlegter Befehl; `2>&1` steht zudem in einem offenen Quote-Bereich.
+- Ergebnis: rc≠0 ⇒ `compilerFound=false` ⇒ **„C++ compiler: not found“**,
+  obwohl VS korrekt installiert ist. Genau das Bild aus dem Thema.
+- Trifft **jeden** CI-gepackten Editor (der Pfad zum gebündelten cmake ist
+  immer gequotet); Dev-Builds (`HE_BUNDLE_CMAKE` aus, blankes `cmake`) und die
+  Tests treffen es nie. `buildDylib` (Export, GameLogic) hätte dasselbe Problem.
+- Zu erwartender Text in „Details“ etwa:
+  `'C:\…\cmake.exe" -S "C:\…' is not recognized as an internal or external command`
+  oder `The filename, directory name, or volume label syntax is incorrect.`
+  — also *kein* cmake-Compilerfehler. **Genauen Wortlaut auf Windows prüfen.**
+
+Wenn H1 stimmt, ist Schritt 2 im Kern kein vswhere-Port, sondern: Prozesse ohne
+cmd starten. `HE::Proc::run` (`src/HE_Core/include/Platform/Process.h:95`,
+`CreateProcessW` + korrektes argv-Quoting in `Process.cpp:143ff.`) existiert
+bereits und wird von HcCodegen nicht benutzt. (Alternative Minimal-Lösung: die
+ganze Zeile in ein zusätzliches Paar `"…"` hüllen.)
+
+### H2: `CMAKE_GENERATOR` in der Benutzerumgebung
+
+VS Code CMake Tools, vcpkg-Setups oder CLion setzen gern `CMAKE_GENERATOR=Ninja`
+(oder `NMake Makefiles`) global. Dann nimmt cmake Ninja/NMake statt des
+VS-Generators ⇒ braucht `cl.exe` auf PATH ⇒
+`No CMAKE_CXX_COMPILER could be found.` bzw.
+`CMAKE_CXX_COMPILER not set, after EnableLanguage`. Das wäre die Meldung, die
+wörtlich zu „findet cl.exe nicht“ passt.
+
+### H3: Veralteter Build-Ordner
+
+`buildDylib` konfiguriert in einen bestehenden `-B`-Ordner
+(`<Projekt>/Source/build`, `<genDir>/build`). Hat dort vorher jemand aus
+Developer Prompt/CLion mit Ninja konfiguriert, bleibt `CMAKE_GENERATOR` im
+Cache ⇒ wie H2, oder `cl.exe` gefunden, aber `cannot open include file
+'cstddef'` / `LNK1104 kernel32.lib`, weil `INCLUDE`/`LIB` fehlen.
+Der Editor wählt den Generator nie neu.
+
+### H4: Kein gebündeltes cmake ⇒ cmake vom PATH
+
+Editor aus eigenem Build (`HE_BUNDLE_CMAKE=OFF`, z. B. `configure_x64.bat`):
+`resolveCmake` fällt auf `cmake` vom PATH zurück. Das cmake, das VS mitbringt
+(`Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`), liegt nur in der
+Developer Prompt auf PATH ⇒ in PowerShell/Doppelklick Zeile „cmake“ rot. Liegt
+ein älteres Kitware-cmake auf PATH, das VS 18 nicht kennt (VS 2026 erst ab
+cmake 4.2), fällt es auf NMake zurück ⇒
+`Running 'nmake' '-?' failed` + `CMAKE_CXX_COMPILER not set`.
+
+### H5: VS ohne C++-Komponente
+
+VS installiert, aber ohne „Desktopentwicklung mit C++“
+(`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`): cmake überspringt die
+Instanz ⇒ gleicher NMake-Rückfall wie H4.
+
+## 4. Repro-Rezept (Windows, normale PowerShell, NICHT Developer Prompt)
+
+Auf NN-WS03 mit dem CI-Paket `HorizonEditor-windows-x64.zip`:
+
+1. Umgebung festhalten:
+   `where.exe cmake; where.exe cl; $env:CMAKE_GENERATOR; $env:VCINSTALLDIR`
+   und `& "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -all -products * -format text`
+2. Editor einmal nach `C:\HE\Editor` (ohne Leerzeichen) und einmal nach
+   `C:\HE Test\Editor` (mit) entpacken, per Doppelklick starten,
+   Preferences → Tool Status: beide Zeilen + „Details“-Text wörtlich kopieren.
+3. Probe von Hand, einmal direkt, einmal so, wie der Editor es tut:
+   ```powershell
+   mkdir $env:TEMP\probe; Set-Content $env:TEMP\probe\CMakeLists.txt "cmake_minimum_required(VERSION 3.20)`nproject(p CXX)"
+   & "C:\HE\Editor\cmake\bin\cmake.exe" -S "$env:TEMP\probe" -B "$env:TEMP\probe\build"      # erwartet: geht (H1-Kontrolle)
+   cmd /c "`"C:\HE\Editor\cmake\bin\cmake.exe`" -S `"$env:TEMP\probe`" -B `"$env:TEMP\probe\build2`" 2>&1"   # wie _popen: scheitert laut H1
+   ```
+4. Liegt schon ein `Source\build\CMakeCache.txt` im Projekt: Zeile
+   `CMAKE_GENERATOR:INTERNAL=` notieren (H3).
+5. Export- bzw. GameLogic-Build auslösen, `build.log` beilegen.
+
+Zuordnung: Schritt 3 direkt grün + über `cmd /c` rot ⇒ H1. Beide rot mit
+„No CMAKE_CXX_COMPILER“ ⇒ H2/H3/H5 (Generatorzeile im Log ansehen).
+„cmake“-Zeile rot ⇒ H4.
+
+## 4a. Reproduktion auf NN-WS03 (Schritt 2, 2026-09-26): H1 bestätigt
+
+Normale PowerShell, kein Developer Prompt: `where cl` findet nichts, VCINSTALLDIR/
+INCLUDE/CMAKE_GENERATOR leer. vswhere findet drei Instanzen, alle mit
+`VC.Tools.x86.x64`: Community 2026 (18.10), BuildTools 2026 (18.9), Community 2022 (17.14).
+
+- cmake direkt aus PowerShell → rc=0, „Building for: Visual Studio 18 2026“. cmake
+  findet MSVC ohne jede Umgebung (H2–H5 treffen hier nicht zu).
+- `cmd /c "…"` aus PowerShell → ebenfalls rc=0. Das beweist nichts, denn PowerShell 5.1
+  quotet die Zeile für native Programme selbst um. Rezept §4.3 kann H1 deshalb nicht zeigen.
+- Editor-Aufruf 1:1 in C++ nachgebaut (shq + `std::system` + `_popen`):
+  `cmakeAnswers` rc=0 (Tool Status „cmake“ grün), Probe rc=1 mit
+  `Die Syntax für den Dateinamen, Verzeichnisnamen oder die Datenträgerbezeichnung ist falsch.`
+  (Pfad ohne Leerzeichen) bzw.
+  `Der Befehl "C:\…\he_repro\Space" ist entweder falsch geschrieben oder konnte nicht gefunden werden.`
+  (Pfad mit Leerzeichen).
+
+Fix: `cmdLine()` in HcCodegen.cpp hüllt jede Zeile für `std::system`/`_popen` auf
+Windows in ein zusätzliches Paar Anführungszeichen, und genau das entfernt cmd.
+Test: `tests/test_toolchain_quoting.cpp` (Probe und `buildDylib` über das gebündelte,
+also gequotete cmake; Leerzeichen in -S, -B und im Wert eines -D). Ohne Fix rot mit
+`Der Befehl "C:\Program" ist entweder falsch geschrieben…`, mit Fix grün.
+
+Nebenbefund: Bei drei Instanzen nahm cmakes Default-Generator „Visual Studio 18 2026“
+die `cl.exe` aus **BuildTools 18.9**, nicht aus Community 18.10 (gleiches Toolset
+14.51.36231). Wichtig nur, falls später „neueste Instanz gewinnt“ explizit gebaut wird.
+
+## 4b. Live-Check im echten Editor (Schritt 3, NN-WS03, 2026-09-27)
+
+Editor aus main `336d09f9` gebaut wie das CI-Paket: Release, Ninja, `-DHE_BUNDLE_CMAKE=ON`
+(gebündelt: Kitware-cmake 4.4.0), eigener `DEPLOY_DIR`. Den Build selbst treibt vcvars, den
+Editor danach nicht. Gestartet aus einer PowerShell mit leerem `VCINSTALLDIR`/`INCLUDE`/`LIB`/
+`CMAKE_GENERATOR` und einem PATH, aus dem alle `CMake`- und `Microsoft Visual Studio`-Einträge
+entfernt waren. `where cl|cmake|link` fand nichts, antworten konnte also **nur** das gebündelte
+cmake. Privates `APPDATA` (die config.json des Menschen blieb unberührt), `HE_MCP=1`. Der
+GameLogic-Build lief über `project_build`/`project_build_status`, also denselben Weg wie
+Build › Build and Reload Game Logic. Testprojekt: C++-Projekt unter `C:\hw96\HE Proj\Probe`
+(Leerzeichen), mit Scaffold-CMakeLists + Probe-Quelle aus `tests/test_gamelogic_build.cpp`.
+
+| Lauf | Editor-Pfad | Env | Toolchain-Dialog nach 15 s | GameLogic-Build |
+|---|---|---|---|---|
+| A | `C:\hw96\deploy\Editor` | sauber | nicht sauber beobachtet (erstes Bild nach 20 s, Build-Fenster schon offen) | ok, `GameLogic.dll` |
+| C | `C:\hw96\HE Test\Editor` (Leerzeichen) | sauber | keiner | ok, `GameLogic.dll` |
+| B (Negativkontrolle) | `C:\hw96\HE Test\Editor` | `CMAKE_GENERATOR=NMake Makefiles` | **„C++ Toolchain Not Found“**: „cmake 4.4.0 found.“, „No working C++ compiler was detected.“ | scheitert nach Sekunden mit cmakes eigener Meldung: `Running 'nmake' '-?' failed` / `CMAKE_CXX_COMPILER not set` |
+
+Belege aus `<Projekt>/Source/build/CMakeCache.txt` (Lauf C):
+`CMAKE_COMMAND:INTERNAL=C:/hw96/HE Test/Editor/cmake/bin/cmake.exe` (das gebündelte, gequotete
+cmake, Pfad mit Leerzeichen), `CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026`,
+`CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools`,
+Linker `…/18/BuildTools/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/link.exe`, Compiler-ID
+MSVC 19.51.36257.0. **Benutzt wird von den drei Instanzen BuildTools 2026 (18.9)**, wie in §4a.
+
+Lauf B zeigt, dass das Ausbleiben des Dialogs in C etwas bedeutet: Nach 15 s ist die
+Start-Probe fertig, und ein fehlender Compiler öffnet den Dialog von selbst. Die aufgeklappten
+„Details“ habe ich nicht gesehen. Der cmake-Fehler oben stammt aus dem Build-Log von
+`buildDylib`, das über dasselbe `runStreaming` läuft, und nicht aus dem Dialog. Nichts hängt.
+Direkt beobachtet ist in B außerdem die Zeile „cmake 4.4.0 found.“, obwohl kein cmake auf PATH
+lag: Die cmake-Auflösung für Tool Status/Dialog geht also über das gebündelte, gequotete cmake.
+Dass die Quote-Hülle den Compiler-Teil nicht verschluckt, zeigt nicht B (dort sähe „kein
+Compiler“ bei kaputtem Quoting gleich aus), sondern C. Code-seitig laufen unter Windows alle Aufrufe in HcCodegen durch
+`cmdLine()`: `cmakeAnswers` (`std::system`) und `runStreaming` (`_popen`), und darüber
+auch `commandExists("winget")` und der winget-Installer hinter „Install Automatically“.
+
+Was nicht direkt beobachtet wurde: Preferences › Tool Status selbst. Die Konsolensitzung war
+wenige Minuten vorher aktiv, und Mausklicks per PostMessage verwirft der Editor. Die Zeilen in
+Tool Status lesen aber denselben `m_toolchainProbe` wie der Dialog, und den belegen A/B/C.
+
+Verbleibende Lücken:
+
+- **H2/H3 bleiben offen** (geschlossen in Schritt 4, siehe §4c). Lauf B ist genau H2: Ein global gesetztes `CMAKE_GENERATOR`
+  (VS Code CMake Tools, vcpkg, CLion) oder ein alter Cache mit Ninja/NMake im Build-Ordner
+  meldet „kein Compiler“, obwohl VS installiert ist. Probe und buildDylib übergeben kein `-G`.
+  Die Abhilfe (vswhere → `-G "Visual Studio <N> <Jahr>"`) samt Test mit simulierter
+  vswhere-Ausgabe (mehrere/keine/nur BuildTools) ist nicht gebaut.
+- Nur eine Maschine: NN-WS03 hat alle drei Instanzen. Eine Maschine mit ausschließlich
+  BuildTools oder nur VS 2022 wurde nicht gesehen.
+- Nicht das CI-Zip selbst: lokal gebaut mit `HE_BUNDLE_CMAKE=ON`, aber ohne `HE_PORTABLE_BUILD`.
+  Ohne gestagtes `SDK/` im Deploy wurde `he_sdk_config.json` (Dev-Fallback) aus dem Build-Baum
+  neben die exe kopiert.
+- Export mit „Compile HorizonCode“ nicht gefahren; `buildDylib` ist dort derselbe Aufruf.
+- `he_tests` in diesem Schritt nicht erneut gelaufen. Stand ist der Lauf des Chefchens auf
+  `336d09f9` (218/218).
+
+## 4c. H2/H3 geschlossen: Generator explizit über vswhere (Schritt 4, NN-WS03, 2026-09-27)
+
+Unter Windows hängen Probe (`probeToolchain`) und `buildDylib` jetzt an jeden Configure
+`-G "Visual Studio <N> <Jahr>" -A x64 "-DCMAKE_GENERATOR_INSTANCE=<installationPath>"`.
+Ein global gesetztes `CMAKE_GENERATOR` wirkt nur, wenn kein `-G` übergeben wird, und ist
+damit wirkungslos (H2). macOS/Linux bekommen weiterhin kein `-G`.
+
+Ablauf (`chooseGenerator` in `HcCodegen.cpp`):
+
+1. `vswhere.exe` unter `%ProgramFiles(x86)%\Microsoft Visual Studio\Installer`, dann
+   `%ProgramFiles%\…`, dann auf PATH (choco/winget-Kopie).
+2. `vswhere -products * -prerelease -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+   -format json -utf8`. Ohne `-products *` fehlen die Build Tools. Ohne `-all` fehlen
+   unvollständige oder kaputte Installationen, und das ist gewollt. `-utf8` ist nötig, weil
+   `description` lokalisiert ist (auf NN-WS03 mit Umlauten und Gedankenstrich).
+3. `cmake -E capabilities` liefert die Generatornamen, die dieses cmake kennt.
+4. `selectVsInstance` (rein, im Header, auf allen Plattformen kompiliert und getestet)
+   nimmt die höchste `installationVersion`, **pro Zahlenkomponente verglichen**
+   (18.10 > 18.9). Eine Release-Version schlägt jede Prerelease. Berücksichtigt werden nur
+   Instanzen, deren Generator das cmake kennt. Ein cmake 3.31 bekommt also VS 2022 statt eines
+   Generators, den es ablehnt (H4-Teilfall). Den Namen bildet `Visual Studio <Major> ` aus
+   der cmake-Liste. `catalog.productLineVersion` taugt nicht dafür, denn es sagt `"2022"` bei
+   VS 2022, aber `"18"` bei VS 2026. Gibt es keine cmake-Liste, entscheidet eine Tabelle
+   (15/2017, 16/2019, 17/2022, 18/2026).
+5. Keine passende Instanz: kein `-G`, also das alte Verhalten, damit ein clang/MinGW-Setup ohne
+   VS weiter geht. Die Probe schreibt dann vor den Log-Auszug in `detail`, warum
+   (`vswhere.exe not found …` bzw. `vswhere found no Visual Studio with the C++ tools …`).
+
+**Nebenbefund entschieden: die Wahl wird korrigiert.** cmakes Default nahm auf NN-WS03
+BuildTools 18.9 statt Community 18.10 (§4a/§4b; beobachtet, die Ursache in cmake ist nicht
+untersucht). `-G` allein ändert daran nichts, denn beide sind „Visual Studio 18 2026“. Erst
+`CMAKE_GENERATOR_INSTANCE` legt die Instanz fest. Jetzt gewinnt die neueste, also Community
+18.10. Das Toolset ist hier bei beiden 14.51.36231. Die Regel heißt „neueste gewinnt“ und ist
+unabhängig davon, in welcher Reihenfolge vswhere oder cmake die Instanzen auflisten. Beobachtet
+im Cache, den `buildDylib` auf NN-WS03 schreibt:
+`CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026`, `CMAKE_GENERATOR_PLATFORM:INTERNAL=x64`,
+`CMAKE_GENERATOR_INSTANCE:UNINITIALIZED=C:/Program Files/Microsoft Visual Studio/18/Community`.
+
+**H3: fremder Cache im Build-Ordner.** cmake verweigert einen Configure, dessen Cache einen
+anderen Generator, eine andere Plattform oder eine andere Instanz nennt. Das trifft einen von
+Hand mit NMake/Ninja konfigurierten `Source/build` und **jeden** GameLogic-Build-Ordner eines
+älteren Editors, denn der gab kein `-A` mit, im Cache steht dort `CMAKE_GENERATOR_PLATFORM`
+also leer. `buildDylib` liest deshalb vor dem Configure `CMAKE_GENERATOR`,
+`CMAKE_GENERATOR_PLATFORM` und `CMAKE_GENERATOR_INSTANCE` (`:INTERNAL=`) aus
+`CMakeCache.txt`, und zwar mit jedem Typ. Ein per `-D` übergebenes `CMAKE_GENERATOR_INSTANCE`
+legt cmake als `:UNINITIALIZED=` ab, nicht als `:INTERNAL=`. Die erste Fassung las nur
+`INTERNAL`, sah deshalb nie eine Instanz und warf den eigenen Cache bei **jedem** Build weg:
+voller Neubau, aber grün. Aufgefallen ist das erst durch den zweiten Build in denselben Ordner
+im Test. Weicht einer der drei Werte ab, löscht es `CMakeCache.txt` und `CMakeFiles/`, nicht
+den ganzen Ordner, und schreibt eine Zeile ins Build-Log. Pfade werden ohne Rücksicht auf
+Groß-/Kleinschreibung und Schrägstrichrichtung verglichen. Folge: Ein bestehendes Projekt wird
+beim ersten Build nach dem Update einmal neu konfiguriert und voll gebaut. Wer denselben
+Ordner danach wieder von Hand mit Ninja konfiguriert, löst beim nächsten Editor-Build erneut
+einen Reset aus.
+
+Tests: `tests/test_toolchain_vswhere.cpp`.
+
+- Rein, mit vswhere-JSON aus der echten Ausgabe von NN-WS03:
+  - drei Instanzen in beiden Reihenfolgen ⇒ Community 18.10
+  - 18.9 gegen 18.10 in beiden Reihenfolgen
+  - nur BuildTools
+  - keine Instanz: `[]`, leer, „'vswhere' is not recognized…“, abgeschnittenes JSON, Einträge ohne Version/Pfad
+  - stderr-Text vor dem JSON
+  - cmake ohne VS 2026 ⇒ VS 2022, und gar nichts, wenn es keine der Instanzen kennt
+  - MSYS-cmake ohne VS-Generatoren
+  - Tabellen-Rückfall, dazu eine unbekannte Major 19
+  - Release schlägt neuere Prerelease
+  - `cmakeGeneratorNames`
+- Nur Windows, gegen die echte Installation (übersprungen ohne vswhere.exe bzw. ohne
+  funktionierende Toolchain):
+  - Probe mit `CMAKE_GENERATOR=NMake Makefiles` (Lauf B) und mit einem nicht existierenden
+    Generator. Der zweite Wert scheitert auch in einer Developer Prompt, wo NMake funktionieren
+    würde.
+  - `buildDylib` in einen Ordner mit NMake-Cache.
+  - `buildDylib` in einen Ordner, den ein schlichtes `cmake -S -B` vorkonfiguriert hat, also
+    genau so, wie der alte Editor es tat.
+  - In beiden H3-Fällen zeigt der erste Build die Reset-Zeile. Danach baut `buildDylib` ein
+    zweites Mal in denselben Ordner, und dort darf **keine** Reset-Zeile mehr stehen.
+
+Ergebnisse, Release-Build `C:\hw96s4` (Ninja, eigener `DEPLOY_DIR`). he_tests lief aus einer
+PowerShell ohne `VCINSTALLDIR`/`CMAKE_GENERATOR`/`cl` auf PATH und mit privatem `APPDATA`:
+
+| Lauf | Ergebnis |
+|---|---|
+| neue + bestehende Toolchain-Fälle | 13/13 grün, 46 Assertions |
+| Negativkontrolle ohne `-G` | rot: Probe mit NMake zeigt wörtlich Lauf B (`Building for: NMake Makefiles` … `'nmake' '-?'` … `CMAKE_CXX_COMPILER not set`); Fantasie-Generator: `CMAKE_GENERATOR was set but the specified generator doesn't exist. Using CMake default.` + Configure-Fehler; NMake-Cache rot. Der Alt-Editor-Cache ist hier grün, wie erwartet, denn ohne `-G` gibt es nichts, was nicht passt |
+| Negativkontrolle mit `-G`, ohne Cache-Reset | Probe grün; beide H3-Fälle rot: `Does not match the generator used previously: NMake Makefiles` bzw. `generator platform: x64 Does not match the platform used previously:` (leer) |
+| zweiter Build, erste Fassung (nur `:INTERNAL` gelesen) | rot: Reset-Zeile auch im zweiten Build, in beiden H3-Fällen |
+| zweiter Build nach dem Fix | grün, 4/4 Toolchain-Fälle, 20 Assertions |
+| vorübergehender Schalter „nur BuildTools“ (Pfad mit `(x86)` durch `cmd /c`) | grün, 4/4. Cache: `CMAKE_GENERATOR_INSTANCE:UNINITIALIZED=C:/Program Files (x86)/Microsoft Visual Studio/18/BuildTools`, Probe mit `CMAKE_GENERATOR=NMake Makefiles` ebenfalls grün |
+| volle Suite nach Rückbau aller Kontrollschalter | 4001/4001, 524389 Assertions, 0 fehlgeschlagen |
+
+Nicht gemacht:
+
+- Kein Live-Check im Editor. Die Probe ist derselbe Code, den die Tests fahren, Tool
+  Status/Dialog lesen ihr Ergebnis (§4b).
+- Kein Build auf macOS/Linux. Dort ändert sich nur, dass die reinen Funktionen mitkompiliert
+  werden. `chooseGenerator` liefert auf POSIX leere Argumente.
+- Keine Maschine mit nur BuildTools oder nur VS 2022 real gesehen. Diese Fälle sind als
+  vswhere-Daten abgedeckt, BuildTools zusätzlich über den Schalter oben, allerdings auf einer
+  Maschine, auf der auch die anderen Instanzen liegen.
+
+## 5. Offen für Schritt 2
+
+- Reproduktion auf Windows (Rezept oben) — entscheidet zwischen H1 und H2–H5.
+- Unabhängig davon für das Thema nötig: explizite Erkennung (vswhere bzw.
+  VS-Setup-API, `-requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64`,
+  alle Editionen inkl. BuildTools, neueste Version gewinnt) und `-G "Visual Studio <N> <Jahr>"`
+  explizit übergeben statt Default/`CMAKE_GENERATOR` zu erben — sonst schlagen H2–H5 weiter zu.
+- Test: die Windows-Tests laufen in CI innerhalb `msvc-dev-cmd` und mit
+  blankem `cmake`; ein Test für „mehrere/keine Installation“ muss die Auswahl
+  von der echten Maschine trennen (vswhere-Ausgabe als Eingabe), und der gequotete
+  Bundle-Pfad braucht einen eigenen Fall.

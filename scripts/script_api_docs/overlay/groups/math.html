@@ -1,0 +1,39 @@
+          <p>
+            Pure functions over numbers: none of them changes anything, so they
+            can be called anywhere and as often as needed. In a script the
+            language's own <code>math</code> library does most of this too, and
+            with more precision. <code>horizon.math</code> is for the results a
+            HorizonCode graph would get, and for what the languages lack:
+            <code>lerp</code>, <code>clamp</code>, the vector helpers and 32-bit
+            bit operations.
+          </p>
+          <ul>
+            <li>
+              <strong>Angles.</strong> <code>sin</code>, <code>cos</code>,
+              <code>tan</code> and <code>atan2</code> work in radians, while the
+              engine's rotations are in degrees.
+              <code>radians</code> and <code>degrees</code> convert between them;
+              <code>horizon.math.sin(90)</code> is 0.894, not 1.
+            </li>
+            <li>
+              <strong>Precision.</strong> Every <code>float</code> crosses into
+              the engine as a 32-bit number, about seven significant digits:
+              <code>normalize3(3, 0, 4)</code> returns
+              <code>0.6000000238…, 0, 0.8000000119…</code>. Compare results with a
+              tolerance, not with <code>==</code>.
+            </li>
+            <li>
+              <strong>Vectors</strong> are spread like every other argument:
+              <code>length(x, y)</code>, <code>distance3(ax, ay, az, bx, by, bz)</code>.
+              <code>normalize3</code> and <code>cross</code> return three numbers.
+            </li>
+            <li>
+              <strong>Bit operations</strong> (<code>bitAnd</code> to
+              <code>shiftRight</code>) take and return 32-bit signed integers.
+              Lua accepts an integer or a float with no fraction (<code>6.0</code>);
+              <code>6.5</code> raises <em>number has no integer representation</em>.
+              Python accepts only an <code>int</code>; any <code>float</code> raises
+              <code>TypeError</code>. Results wrap at 32 bits:
+              <code>shiftLeft(1, 31)</code> is −2147483648.
+            </li>
+          </ul>

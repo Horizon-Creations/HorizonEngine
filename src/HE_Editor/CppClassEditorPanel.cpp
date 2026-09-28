@@ -150,6 +150,23 @@ namespace CppClassEditorPanel
 			[](const State& st) { return bufDirty(st.header) || bufDirty(st.source); }, out);
 	}
 
+	void appendSnapshots(AppContext&, std::vector<HE::Ed::AssetSnapshotSource>& out)
+	{
+		// Per FILE, not per tab: the header and the source are two files on disk
+		// with two dirty baselines, and a recovery copy has to name the one it
+		// puts back.
+		auto add = [&out](FileBuf& fb) {
+			if (!bufDirty(fb)) return;
+			out.push_back({ fb.path, [&fb](const std::string& dest) {
+				return writeTextFile(dest, fb.editor.GetText());
+			} });
+		};
+		s_states.forEach([&add](const std::string&, State& st) {
+			add(st.header);
+			add(st.source);
+		});
+	}
+
 	bool save(const std::string& path)
 	{
 		State* st = s_states.find(path);

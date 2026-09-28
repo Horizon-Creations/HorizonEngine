@@ -1,0 +1,41 @@
+          <p>
+            Reading and writing JSON text without a parser of your own: a config
+            file from <a href="#fs">File System</a>, a reply from
+            <a href="#http">HTTP</a>. Every call takes the whole document as a
+            string. The setters do not change it in place; they
+            <strong>return the new document</strong>, so keep the result:
+            <code>doc = horizon.json.setNumber(doc, "volume", 0.8)</code>.
+          </p>
+          <p>
+            A path is a chain of keys separated by dots, with <code>[i]</code>
+            for an array element counted from 0: <code>user.name</code>,
+            <code>items[2].id</code>. The empty path is the document itself, so
+            <code>count(text, "")</code> counts a top-level array. A key that
+            itself contains a dot cannot be reached.
+          </p>
+          <ul>
+            <li>
+              Getters never fail loudly. A missing path, a value of another type
+              and text that is not JSON all return the fallback.
+              <code>has</code> is <code>true</code> for a key whose value is
+              <code>null</code>.
+            </li>
+            <li>
+              Setters create missing objects along the path, and an empty string
+              starts a new document. They cannot add array elements: a path
+              through a missing index, or through a value that is not an object,
+              returns the document unchanged, as does text that is not JSON.
+            </li>
+            <li>
+              The returned text is compact and its keys come out in
+              <strong>alphabetical order</strong>, whatever order they had.
+            </li>
+            <li>
+              Numbers pass through a 32-bit float. <code>getNumber</code> is exact
+              for whole numbers up to 16 777 216 and keeps about seven digits
+              otherwise; <code>setNumber</code> writes <code>3</code> as
+              <code>3.0</code> and <code>0.1</code> as
+              <code>0.10000000149011612</code>. Read ids and other large numbers
+              that the source wrote as strings with <code>getString</code>.
+            </li>
+          </ul>

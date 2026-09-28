@@ -468,9 +468,23 @@ struct Variable
     // not get further than a log line.
     bool        replicated = false;
     bool        repNotify  = false;
+    // ── Savegames (SaveStateComponent, entity.saveState) ─────────────────────
+    // Written into the entity's state in the active save by entity.saveState
+    // and set back by entity.applySavedState, name-keyed, when the entity
+    // carries a SaveStateComponent with saveScriptVars on. Opt-in per variable
+    // like `replicated`: a class that ticks nothing saves exactly what it did
+    // before this existed. INSTANCE variables only, and never a Ref (an object
+    // handle names nothing in the next run) — see isSaveableType.
+    bool        saveGame   = false;
 
     ContainerKind kind() const { return containerKindOf(isArray, container); }
 };
+
+// What a Save Game variable may hold: everything but an object handle (a Ref
+// names a runtime instance of THIS run, and the next run has other ones) and
+// Exec, which is no value at all. One rule for the checkbox, the loader and the
+// runtime's enumeration.
+inline bool isSaveableType(PinType t) { return t != PinType::Ref && t != PinType::Exec; }
 
 // Where a function runs, for Node::runOn below. The numbers travel in kMsgRpc's
 // `target` byte, so they are frozen: a saved graph and a datagram agree on them.
@@ -925,7 +939,15 @@ HE_API void remapLinksForMirror(Graph& g, const std::vector<int>& nodes);
 struct LinkRemapSnapshot
 {
     // Per node id: the pin names of each region, in pin order.
-    struct Sig { std::vector<std::string> execIns, execOuts, dataIns, dataOuts; };
+    struct Sig
+    {
+        std::vector<std::string> execIns, execOuts, dataIns, dataOuts;
+        // User-type nodes (Make/Break Struct, Switch on Enum): former field /
+        // entry name → current one, from the definition's formerNames. Lets a
+        // wire follow a RENAMED pin even when the same edit also added or
+        // removed one (the region size changed, so the index fallback is off).
+        std::unordered_map<std::string, std::string> renamed;
+    };
     std::unordered_map<int, Sig> sigs;
 };
 HE_API LinkRemapSnapshot captureLinkRemapSnapshot(const Graph& g,

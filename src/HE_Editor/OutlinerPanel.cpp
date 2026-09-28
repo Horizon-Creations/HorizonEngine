@@ -211,6 +211,24 @@ namespace
             // without re-reading it. The refresh flag is what makes the
             // new file appear in the Content Browser.
             const std::string fullPath = dirAbs + "/" + name + ".hasset";
+            // The source becomes a placement of what it was just saved as, so
+            // it follows the asset from here on like a dropped copy would —
+            // before, it stayed an unlinked copy and had to be placed again.
+            // Not during play (that world is thrown away) and not in a
+            // collaboration session: the link is written straight into the
+            // world, which does not replicate, for the reason the prefab
+            // sync sits sessions out too.
+            const bool inSession = ctx.collab && ctx.collab->inSession();
+            if (!ctx.isPlaying && !inSession)
+            {
+                if (ctx.undoSys) ctx.undoSys->snapshotNow("Save as Prefab");
+                if (!SceneSerializer::linkPrefabSource(*ctx.world, entity, prefab.id, prefab.data))
+                    HE_LOG_WARN(Editor, "%s", ("Editor: saved prefab " + relPath +
+                                               ", but could not link the source to it").c_str());
+            }
+            else if (inSession)
+                HE_LOG_INFO(Editor, "%s", ("Editor: saved prefab " + relPath + "; the source stays "
+                                           "unlinked during a collaboration session").c_str());
             ctx.contentManager->registerPrefab(std::move(prefab));
             ctx.contentRefreshPending = true;
             // Announce it as a CREATE, which is what it is. Without

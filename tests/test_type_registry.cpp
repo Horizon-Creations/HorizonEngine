@@ -1,5 +1,6 @@
 #include "doctest.h"
 #include <Types/TypeRegistry.h>
+#include <set>
 
 // HE::TypeRegistry — user-defined struct/enum definitions: JSON round-trip,
 // upsert/remove semantics, cycle detection, name collisions, seeded defaults.
@@ -252,4 +253,162 @@ TEST_CASE("TypeRegistry: makeDefaultValue seeds nested defaults and guards cycle
     const Value unknown = reg.makeDefaultValue("Content/Nope.hasset");
     CHECK(unknown.type == PinType::Struct);
     CHECK(unknown.items.empty());
+}
+
+// ── Renames: formerNames ─────────────────────────────────────────────────────
+// Fields and entries have no ids; a rename books the old name as an alias so
+// data persisted under it (saves, graph defaults) still finds its field.
+
+TEST_CASE("TypeRegistry: noteRename books old names and forgets a rename-back")
+{
+    std::vector<std::string> fn;
+    HE::noteRename(fn, "level", "rank");
+    CHECK(fn == std::vector<std::string>{ "level" });
+    HE::noteRename(fn, "rank", "tier");                      // chain
+    CHECK(fn == std::vector<std::string>{ "level", "rank" });
+    HE::noteRename(fn, "rank", "tier");                      // idempotent
+    CHECK(fn.size() == 2);
+    HE::noteRename(fn, "tier", "rank");                      // renamed BACK to rank
+    CHECK(fn == std::vector<std::string>{ "level", "tier" }); // never aliases itself
+    HE::noteRename(fn, "", "x");                             // new row: nothing to book
+    HE::noteRename(fn, "same", "same");
+    CHECK(fn.size() == 2);
+}
+
+TEST_CASE("TypeRegistry: renamed fields and entries answer to their former names")
+{
+    EnumDef e;
+    e.entries = { { "Sword", 0 }, { "Wand", 2, { "Staff", "Rod" } } };
+    CHECK(e.findEntry("Wand")->value == 2);
+    CHECK(e.findEntry("Staff")->name == "Wand");
+    CHECK(e.findEntry("Rod")->name == "Wand");
+    CHECK(e.findEntry("") == nullptr);
+    CHECK(e.findEntry("Axe") == nullptr);
+    // A live name always wins over an alias of it.
+    e.entries.push_back({ "Staff", 9 });
+    CHECK(e.findEntry("Staff")->value == 9);
+
+    StructDef s;
+    StructField rank; rank.name = "rank"; rank.type = PinType::Int;
+    rank.formerNames = { "level", "lvl" };
+    StructField hp; hp.name = "hp"; hp.type = PinType::Float;
+    s.fields = { rank, hp };
+    CHECK(s.findField("level")->name == "rank");
+    CHECK(s.findField("hp")->name == "hp");
+    CHECK(s.findField("mana") == nullptr);
+
+    // storedKey: current name first, then the NEWEST former name present.
+    std::set<std::string> keys;
+    auto has = [&keys](const std::string& k) { return keys.count(k) != 0; };
+    keys = { "level", "lvl" };
+    CHECK(s.storedKey(s.fields[0], has) == "lvl");
+    keys = { "level" };
+    CHECK(s.storedKey(s.fields[0], has) == "level");
+    keys = { "rank", "level" };
+    CHECK(s.storedKey(s.fields[0], has) == "rank");
+    keys = {};
+    CHECK(s.storedKey(s.fields[0], has).empty());
+
+    // Rename level→rank, then ADD a new "level": old level data belongs to the
+    // new live field, not to rank.
+    StructField level; level.name = "level"; level.type = PinType::Int;
+    s.fields.push_back(level);
+    keys = { "level" };
+    CHECK(s.storedKey(s.fields[0], has).empty());
+    CHECK(s.storedKey(s.fields[2], has) == "level");
+    CHECK(s.findField("level") == &s.fields[2]);
+}
+
+TEST_CASE("TypeRegistry: an alias has one owner — booking moves it, readers settle duplicates")
+{
+    // x → a, later a NEW field named x → y. The name x now belongs to y (it
+    // held it last); a must let go, or a save's "x" would load into both.
+    StructDef s;
+    StructField a; a.name = "a"; a.type = PinType::Int;
+    StructField y; y.name = "y"; y.type = PinType::Int;
+    s.fields = { a, y };
+    HE::noteFieldRename(s, 0, "x");
+    CHECK(s.fields[0].formerNames == std::vector<std::string>{ "x" });
+    HE::noteFieldRename(s, 1, "x");
+    CHECK(s.fields[0].formerNames.empty());
+    CHECK(s.fields[1].formerNames == std::vector<std::string>{ "x" });
+    CHECK(s.findField("x") == &s.fields[1]);
+
+    // A hand-edited file where both still list it: exactly one field reads the
+    // value (the first, which is also what findField and the graph retarget pick).
+    s.fields[0].formerNames = { "x" };
+    auto has = [](const std::string& k) { return k == "x"; };
+    CHECK(s.storedKey(s.fields[0], has) == "x");
+    CHECK(s.storedKey(s.fields[1], has).empty());
+
+    EnumDef e;
+    e.entries = { { "Wand", 1 }, { "Rod", 2 } };
+    HE::noteEntryRename(e, 0, "Staff");
+    HE::noteEntryRename(e, 1, "Staff");
+    CHECK(e.entries[0].formerNames.empty());
+    CHECK(e.findEntry("Staff")->name == "Rod");
+    HE::noteEntryRename(e, 1, "");                     // new row: no-op
+    HE::noteEntryRename(e, 1, "Rod");                  // unchanged: no-op
+    CHECK(e.entries[1].formerNames == std::vector<std::string>{ "Staff" });
+}
+
+TEST_CASE("TypeRegistry: formerNames round-trip, and a never-renamed def keeps its bytes")
+{
+    EnumDef e;
+    e.entries = { { "Sword", 0 }, { "Bow", 7 } };
+    const std::string plainEnum = TypeRegistry::enumToJson(e);
+    CHECK(plainEnum.find("formerNames") == std::string::npos);
+
+    e.entries[1].formerNames = { "Longbow", "Sword", "", "Longbow" };   // junk mixed in
+    EnumDef eb;
+    REQUIRE(TypeRegistry::enumFromJson(TypeRegistry::enumToJson(e), eb));
+    // Only the useful alias persists: no empty, no duplicate, no live name.
+    CHECK(eb.entries[1].formerNames == std::vector<std::string>{ "Longbow" });
+    CHECK(eb.entries[0].formerNames.empty());
+    CHECK(eb.findEntry("Longbow")->value == 7);
+
+    StructDef s;
+    StructField hp; hp.name = "health"; hp.type = PinType::Float;
+    hp.defaultValue = Value::ofFloat(1.0f);
+    s.fields = { hp };
+    const std::string plainStruct = TypeRegistry::structToJson(s);
+    CHECK(plainStruct.find("formerNames") == std::string::npos);
+
+    s.fields[0].formerNames = { "hp", "health" };   // own name is not an alias
+    StructDef sb;
+    REQUIRE(TypeRegistry::structFromJson(TypeRegistry::structToJson(s), sb));
+    REQUIRE(sb.fields.size() == 1);
+    CHECK(sb.fields[0].formerNames == std::vector<std::string>{ "hp" });
+    CHECK(sb.findField("hp")->name == "health");
+}
+
+TEST_CASE("TypeRegistry: an enum field default written under a renamed entry keeps its value")
+{
+    RegistryCleanup cleanup;
+    auto& reg = TypeRegistry::instance();
+    EnumDef weapon;
+    weapon.name = "RenWeapon"; weapon.assetPath = "Content/RenWeapon.hasset";
+    // "Staff" became "Wand". Not the first entry — the old fallback for a name
+    // the definition doesn't know would have picked Sword (0) silently.
+    weapon.entries = { { "Sword", 0 }, { "Wand", 5, { "Staff" } } };
+    reg.registerEnum(weapon);
+    cleanup.paths.push_back(weapon.assetPath);
+
+    StructDef s;
+    s.name = "RenLoadout"; s.assetPath = "Content/RenLoadout.hasset";
+    StructField w; w.name = "weapon"; w.type = PinType::Enum; w.typeName = weapon.assetPath;
+    w.defaultValue.s = "Staff";                       // authored before the rename
+    StructField arr = w; arr.name = "spares"; arr.isArray = true;
+    arr.defaultValue = {}; arr.defaultValue.isArray = true;
+    arr.defaultValue.items = { Value::ofString("Staff"), Value::ofString("Sword") };
+    s.fields = { w, arr };
+    reg.registerStruct(s);
+    cleanup.paths.push_back(s.assetPath);
+
+    const Value v = reg.makeDefaultValue(s.assetPath);
+    REQUIRE(v.items.size() == 2);
+    CHECK(v.items[0].i == 5);
+    REQUIRE(v.items[1].items.size() == 2);
+    CHECK(v.items[1].items[0].i == 5);
+    CHECK(v.items[1].items[1].i == 0);
 }

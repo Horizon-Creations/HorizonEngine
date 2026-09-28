@@ -71,5 +71,14 @@ namespace HE
 	// gamepad button ("gamepadButtons"), mouse button ("mouseButtons") and/or
 	// axis ("axes") bindings. Unknown names are skipped. Returns the number of
 	// entries that produced a binding.
-	HE_API size_t applyInputMappingContext(InputMapping& mapping, const std::string& json);
+	//
+	// `merge` says what happens to an action that already has bindings — from an
+	// earlier entry of this context or from an earlier context. Union (the
+	// default) adds to them, skipping duplicates (InputMapping::add*): that is
+	// how every context of a project combines. Replace swaps them out
+	// (InputMapping::map*): meant for a layer on top of the merged base, such as
+	// a player's own bindings, where the override is the whole point.
+	enum class MappingMerge { Union, Replace };
+	HE_API size_t applyInputMappingContext(InputMapping& mapping, const std::string& json,
+	                                       MappingMerge merge = MappingMerge::Union);
 }

@@ -1,0 +1,26 @@
+          <p>
+            The wall clock: calendar date and time of day in the time zone of the
+            computer the game runs on. Unlike <a href="#time">Time</a> it keeps
+            going through pauses and has nothing to do with frames. A point in time
+            is a number of seconds since 1 January 1970 (the Unix epoch), which is
+            what <code>now</code> returns and every other function takes.
+            <code>format</code> uses <code>strftime</code> patterns:
+            <code>%Y-%m-%d</code>, <code>%H:%M</code>, <code>%A</code> for the
+            weekday name. An empty pattern, or a result longer than 511 bytes,
+            gives an empty string. <code>weekday</code> counts from 0 for Sunday.
+          </p>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue: accurate only to about a minute.</strong> The
+              seconds pass through the engine as a 32-bit float, which today can
+              only hold multiples of 128. <code>now</code> is therefore up to
+              64 seconds off, and so are <code>second</code>, <code>minute</code>
+              and <code>format</code> with <code>%S</code> or <code>%M</code>, also
+              when you pass in an exact time. The hour, day, month, year and
+              weekday are only wrong in the minute around a change. Until this is
+              fixed, take a time that has to be exact from the language:
+              <code>os.time()</code> and <code>os.date()</code> in Lua,
+              <code>time.time()</code> and <code>datetime</code> in Python.
+            </p>
+          </div>

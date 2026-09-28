@@ -1,0 +1,24 @@
+          <p>
+            Second windows for a desktop application: a tool window beside the main
+            one, a document per window. Window 0 is the main window;
+            <code>window.setTitle(0, …)</code> and <code>window.setSize(0, …)</code>
+            are <code>app.setTitle</code> and <code>app.setSize</code>, and
+            <code>close(0)</code> is refused with a pointer to <code>app.quit</code>.
+            Only an exported application has windows to give: in the editor
+            <code>open</code> answers 0, and so it does on a renderer without a
+            path into a second window (Software and Metal have one). A width or
+            height of 0 or less opens at 640 × 480.
+          </p>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue (build 7d49d44f): from Lua and Python only
+              <code>window.show</code> works.</strong> The script bridge hands a
+              script no window service, in the exported app as well:
+              <code>open</code> answers 0 and <code>close</code>,
+              <code>setTitle</code> and <code>setSize</code> only log “no window
+              service bound by the host”. <code>show</code> moves a widget between
+              windows and works, but with no second window to open, 0 is the only
+              useful target. Use these rows from a HorizonCode graph.
+            </p>
+          </div>

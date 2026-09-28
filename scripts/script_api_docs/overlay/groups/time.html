@@ -1,0 +1,45 @@
+          <p>
+            The game clock. It advances once per frame, and every query gives the
+            same answer for the rest of that frame. In the editor it runs only
+            during Play and starts from 0 each time. For the time of day use
+            <a href="#datetime">Date and Time</a>; to be called back later, use a
+            <a href="#timer">Timer</a>.
+          </p>
+          <p>
+            <code>deltaTime</code> and <code>elapsed</code> are <strong>scaled</strong>:
+            they follow the time scale and stand still while the game is paused
+            or in a hit stop. <code>unscaledDeltaTime</code> and
+            <code>unscaledElapsed</code> follow real time, which is what a pause
+            menu or a UI animation needs.
+          </p>
+          <p>
+            Three separate controls stop or slow the clock, and
+            <code>effectiveScale</code> is their result:
+          </p>
+          <ul>
+            <li>
+              <strong>Time scale</strong> (<code>setTimeScale</code>), limited to
+              0…5. A larger value becomes 5, a negative one 0.
+            </li>
+            <li>
+              <strong>Pause</strong> (<code>pause</code> / <code>resume</code>).
+              It also silences input actions, except the ones with <em>Fires
+              while the game is paused</em> ticked in the Input asset. Tick it on
+              the key that opens the pause menu, or that key cannot close it
+              again. All scripts and
+              graphs share one pause, so a <code>resume</code> anywhere lifts a
+              <code>pause</code> from anywhere. The pause the window sets when
+              it loses focus is separate; <code>resume</code> cannot lift it.
+            </li>
+            <li>
+              <strong>Hit stop</strong> (<code>hitStop</code>): a freeze for a
+              stretch of real time. Input keeps arriving, and
+              <code>isPaused</code> stays false.
+            </li>
+          </ul>
+          <p>
+            Pause and hit stop leave the time scale alone, so the game resumes at
+            the speed it had. When a game loads another scene, the scale goes back
+            to 1 and the script pause and any hit stop are lifted;
+            <code>elapsed</code> and <code>frameCount</code> keep counting.
+          </p>

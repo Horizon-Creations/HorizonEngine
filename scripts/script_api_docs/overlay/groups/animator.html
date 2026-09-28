@@ -1,0 +1,33 @@
+          <p>
+            Steering a character's animation from gameplay: the parameters its
+            animator state machine tests, and the weights of its animation layers.
+            Parameters live on the entity's Animator State Machine component,
+            layers on its Animation Layers component; without the component the
+            setters do nothing and the getters answer 0 or an empty string.
+          </p>
+          <ul>
+            <li>
+              <strong>Parameters are numbers.</strong> <code>setParam</code> takes
+              a float. A yes/no parameter is 1 or 0: in Lua
+              <code>setParam(e, "Grounded", true)</code> is an error (<em>number
+              expected, got boolean</em>), Python turns <code>True</code> into 1.
+              A name the state machine asset never declared is created, not
+              rejected, so a typo writes a parameter nothing reads.
+              <code>getParam</code> answers 0 for a name that was never set.
+            </li>
+            <li>
+              <strong>Layers are found by name, first match.</strong> Two layers
+              may share a name; every function then acts on the first of them.
+              <code>setLayerWeight</code> clamps to 0 to 1.
+              <code>playLayer</code> restarts that layer's own playhead and
+              leaves its weight alone.
+            </li>
+            <li>
+              <code>notifiesOf</code> and <code>layerNames</code> return lists,
+              which scripts cannot receive yet: from Lua and Python they answer an
+              empty string (see <a href="#arrays">List results</a>). Notifies
+              themselves reach a script as the
+              <a href="#callbacks"><code>onAnimationNotify</code></a> callbacks.
+              <code>notifiesOf</code> loads the clip if it is not in memory.
+            </li>
+          </ul>
