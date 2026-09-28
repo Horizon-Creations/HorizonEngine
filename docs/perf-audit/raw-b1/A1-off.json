@@ -1,0 +1,13 @@
+{
+ "label": "A1-off",
+ "env": {
+  "HE_BACKGROUND_FPS": "0"
+ },
+ "pid": 46557,
+ "marker": "Background throttle off (HE_BACKGROUND_FPS=0) \u2014 a hidden, occluded or minimised window keeps full frames",
+ "boot_s": 60.9,
+ "window_s": 20.23,
+ "gpu_pct": 39.15,
+ "gpu_ms_per_s": 391.51,
+ "cpu_pct": 13.9
+}
