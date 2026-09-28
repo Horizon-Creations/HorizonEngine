@@ -312,7 +312,7 @@ und **anlegt** (A):
 | `McpToolsScene.cpp` | `scene_save`, `scene_create`, `scene_open` | (über `scene_info`) | save/open | leere Szene |
 | `McpToolsEntity.cpp` | `entity_list/get/create/destroy/reparent/set_transform/set_components` | ✓ | ✓ | ✓ |
 | `McpToolsPrefab.cpp` | `prefab_info`, `prefab_instantiate`, `prefab_save`, `prefab_instances` | Baum + Komponenten-Keys | platzieren | aus Szenen-Subtree |
-| `McpToolsTerrain.cpp` | `terrain_info`, `terrain_heightmap`, `terrain_sculpt`, `terrain_paint` | ✓ | ✓ | – (Entity, kein Asset) |
+| `McpToolsTerrain.cpp` | `terrain_info`, `terrain_heightmap`, `terrain_sculpt`, `terrain_mountain`, `terrain_paint` | ✓ | ✓ | – (Entity, kein Asset) |
 | `McpToolsMaterial.cpp` | `material_info`, `material_set_param`, `material_create_instance` | Parameter, nicht Graph | Werte | nur Instanz |
 | `McpToolsWidget.cpp` | `widget_tree/types/add/remove/move/set_properties/set_anchor/save` | Element-Baum | ✓ | (Stub via `asset_create`) |
 | `McpToolsInput.cpp` | `input_bindable/actions/action_set/mappings/mapping_bind/mapping_unbind` | ✓ | ✓ | (Stub via `asset_create`) |

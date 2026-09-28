@@ -463,7 +463,7 @@ void registerSceneTools(McpToolRegistry& registry, ContentManager& content,
                         McpSceneHooks hooks);
 
 // ─── Shaping the ground ──────────────────────────────────────────────────────
-// Four tools — info, heightmap, sculpt, paint — for the one component that
+// Five tools — info, heightmap, sculpt, mountain, paint — for the one component that
 // `entity_get` and `entity_set_components` cannot usefully address.
 //
 // ── Why terrain needs tools of its own ───────────────────────────────────────
@@ -475,9 +475,10 @@ void registerSceneTools(McpToolRegistry& registry, ContentManager& content,
 // cannot change one without re-encoding the whole field, and has no way at all
 // to express "raise the ground here", which is what a landscape is edited by.
 //
-// So these four speak the vocabulary the Landscape mode speaks: a WORLD position,
-// a brush radius and falloff, an operation. The maths is TerrainSculpt (heights)
-// and TerrainPaint (layer weights) — the same functions the editor's own brushes
+// So these five speak the vocabulary the Landscape mode speaks: a WORLD position,
+// a brush radius and falloff, an operation, an area. The maths is TerrainSculpt
+// and TerrainGenerate (heights) and TerrainPaint (layer weights) — the same
+// functions the editor's own brushes
 // are built from, so a client cannot produce a landscape the editor could not
 // have produced by hand.
 //

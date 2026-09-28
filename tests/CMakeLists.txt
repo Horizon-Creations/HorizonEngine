@@ -104,6 +104,9 @@ add_executable(he_tests
     # Greyscale heightmap → heights: the pixel path, the texture and file
     # wrappers (8/16-bit PGM, .r16), orientation and the down-sampling box.
     test_terrain_heightmap.cpp
+    # A mountain grown inside an area: rises inside, blends to nothing at the
+    # rim, adds to what was there, same seed → same heights.
+    test_terrain_generate.cpp
     # Was on disk since the foliage layer landed but never in this list, so the
     # scatter had no running test until the density mask needed one.
     test_foliage.cpp

@@ -11,7 +11,10 @@ namespace HE { struct UUID; }
 // ── Landscape (terrain) editing tools ────────────────────────────────────────
 // Everything the Landscape editor mode owns: the sculpt/paint/foliage brush
 // state (tool, radius, falloff, strength, the stroke-scoped Flatten/Ramp
-// targets, the foliage Grow/Erase choice and its target density),
+// targets, the foliage Grow/Erase choice and its target density), the
+// Mountain area tool (its form, and the area a drag marks — start corner
+// captured on the LMB-down edge like the Ramp start, the formation grown by
+// TerrainGenerate::mountain on release, one undo step),
 // the brush cursor + stroke handling drawn over the Scene viewport, and the
 // Landscape tool panel that replaces Quick Settings while the mode is active.
 // Both halves share the brush state, which is why they live in one file.

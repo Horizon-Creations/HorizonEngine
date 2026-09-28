@@ -5962,7 +5962,8 @@ namespace
 	  "", "scenes#terrain" },
 	{ "Landscape/Sculpt", "Sculpt",
 	  "Shapes the ground itself: the six brushes below raise, lower, smooth, "
-	  "flatten, ramp and roughen the heights under the cursor.",
+	  "flatten, ramp and roughen the heights under the cursor, and Mountain "
+	  "grows a whole formation inside an area you drag out.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Paint", "Paint",
 	  "Paints the material's layers onto the ground instead of reshaping it. It "
@@ -6021,6 +6022,59 @@ namespace
 	{ "Landscape/Roughen", "Roughen",
 	  "Adds fixed noise bumps under the brush, for ground that came out too "
 	  "clean to read as earth.",
+	  "", "editor#landscape-mode" },
+	// ── Landscape: the Mountain area tool ────────────────────────────────────
+	{ "Landscape/Mountain", "Mountain",
+	  "Grows a mountain inside an area instead of under a brush. Drag across "
+	  "the ground to mark the area — its outline follows the pointer — and the "
+	  "whole formation appears when you let go, as one undo step. It is added "
+	  "on top of the ground that is already there, so whatever you sculpted "
+	  "stays underneath, and outside the area nothing moves.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Rectangle", "Rectangle Area",
+	  "Drag from one corner to the opposite one. The mountain fills the "
+	  "ellipse that fits inside the rectangle, so a long thin drag makes a "
+	  "ridge and a square one a round peak.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Circle", "Circle Area",
+	  "Press at the centre and drag out to the rim: the distance you drag is "
+	  "the radius of the round area the mountain fills.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Max Height##mountain", "Mountain Height",
+	  "How much the highest point of the mountain rises above the ground it "
+	  "stands on, in metres. The shape is scaled so its peak lands exactly "
+	  "here. A negative value digs a basin of the same shape instead.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Falloff##mountain", "Mountain Falloff",
+	  "How wide the slope is where the mountain blends back into the ground, "
+	  "in metres, measured inwards from the rim of the area. A small value "
+	  "gives a massif with steep flanks, a value as wide as the area gives one "
+	  "long slope up to a summit in the middle. 0 is a hard edge. The inner "
+	  "faint line in the viewport shows where the full height begins.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Roughness##mountain", "Mountain Roughness",
+	  "How much of the height is noisy relief rather than a smooth profile, "
+	  "from 0 to 1. At 0 you get a clean dome; towards 1 the noise carves "
+	  "peaks, saddles and gullies into it.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Octaves##mountain", "Mountain Octaves",
+	  "How many layers of noise make up the relief, from 1 to 12. Each "
+	  "further layer adds finer detail at half the height of the one before, "
+	  "the same noise the landscape itself is generated from.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Frequency##mountain", "Mountain Frequency",
+	  "How many noise features fit across the area. It is counted per area, "
+	  "not per metre, so the same settings give the same-looking mountain "
+	  "whether you drag out 50 m or 2 km.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Seed##mountain", "Mountain Seed",
+	  "Which variation of the noise the mountain uses. The same seed, area "
+	  "and settings give exactly the same mountain again.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/New Seed##mountain", "New Seed",
+	  "Picks a different random seed, so the next mountain you drag out has a "
+	  "fresh shape with the same settings. Mountains already made stay as "
+	  "they are.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Clear Paint", "",
 	  "Throws away every painted layer weight, putting the whole landscape back "

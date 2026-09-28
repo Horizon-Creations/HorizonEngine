@@ -668,6 +668,27 @@ void iconWave(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
 	}
 }
 
+// Two peaks on a ground line, the tall one in front — the landscape's
+// Mountain tool.
+void iconMountain(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.44f, t = stroke(s);
+	const float base = c.y + h * 0.80f;
+	dl->AddTriangle({ c.x + h * 0.05f, base }, { c.x + h * 0.52f, c.y - h * 0.20f },
+	                { c.x + h, base }, col, t * 0.8f);
+	dl->AddTriangleFilled({ c.x - h, base }, { c.x - h * 0.18f, c.y - h * 0.85f },
+	                      { c.x + h * 0.64f, base }, col);
+	dl->AddLine({ c.x - h, base }, { c.x + h, base }, col, t);
+}
+
+// A ring with its centre dot — a round area.
+void iconCircle(ImDrawList* dl, const ImVec2& c, float s, ImU32 col)
+{
+	const float h = s * 0.42f, t = stroke(s);
+	dl->AddCircle(c, h, col, 24, t);
+	dl->AddCircleFilled(c, t * 1.1f, col, 12);
+}
+
 } // namespace EditorToolbar
 
 #endif // HE_EDITOR_TOOLBAR_IMPL
