@@ -254,6 +254,11 @@ Result EditorCommands::applyCreate(const Command& cmd, Origin origin, Recorded& 
 	rec.subtree      = capture.serializeSubtree(*m_world, created);
 	rec.parentAfter  = subjectOf(cmd.parent);
 
+	// Make whatever the new subtree references resident — see the hook's own
+	// comment. Before afterCreate: a hook that reacts to the new entity (e.g.
+	// a thumbnail refresh) should see a mesh that actually resolves.
+	if (m_hooks.preloadAssetRefs) m_hooks.preloadAssetRefs();
+
 	if (m_hooks.afterCreate) m_hooks.afterCreate(created, origin);
 	return res;
 }
@@ -349,6 +354,10 @@ Result EditorCommands::applyComponents(const Command& cmd, Origin origin, Record
 		return res;
 	}
 	rec.afterComponents = cmd.blob;
+
+	// A patch can plant a fresh asset UUID the same way a create can — see the
+	// hook's own comment.
+	if (m_hooks.preloadAssetRefs) m_hooks.preloadAssetRefs();
 
 	if (auto* tc = m_world->registry().try_get<TransformComponent>(cmd.target))
 		tc->dirty = true;

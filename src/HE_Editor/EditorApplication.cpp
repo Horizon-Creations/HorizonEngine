@@ -8063,6 +8063,9 @@ void EditorApplication::setupEditorCommands()
 	                             const std::vector<std::uint8_t>& blob) {
 		m_collab.publishComponents(handle, blob);
 	};
+	h.preloadAssetRefs = [this] {
+		SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
+	};
 	h.beforeDestroy = [this](Entity e, HE::Ed::Origin origin) {
 		// Same order and the same reasons as deleteSelectedEntity: the bodies go
 		// first, because after destroyEntity the hierarchy that names them is
