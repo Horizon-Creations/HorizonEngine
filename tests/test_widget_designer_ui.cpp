@@ -44,11 +44,11 @@
 //     scripts/he_uishot.py OUT --filter "ui shot: widget designer*"
 //
 // What it cannot show by default: the texture on the canvas. The designer draws
-// it from the thumbnail cache, which needs a renderer to upload into; headless
-// there is none, so the Image element draws its empty placeholder. The DETAILS
-// side, which is what these shots are for, is complete. The Thema 107 cases at
-// the bottom hand the cache a stub renderer whose uploads land in the software
-// rasterizer, so there the canvas shows exactly the picture the cache made.
+// it through AssetThumbnailCache::image, which needs a renderer to upload into;
+// headless there is none, so the Image element draws its empty placeholder. The
+// DETAILS side, which is what these shots are for, is complete. The Thema 107
+// cases at the bottom hand the cache a stub renderer whose uploads land in the
+// software rasterizer, so there the canvas shows exactly the picture it gets.
 
 using namespace HE::Ed;
 
@@ -322,13 +322,17 @@ TEST_CASE("ui shot: widget designer — the Details panel as it is (Thema 92)")
 	std::filesystem::remove_all(root, ec);
 }
 
-// ── Thema 107: reproductions of the reported designer bugs ───────────────────
-// Diagnosis only (Schritt 1). These pin what the designer does TODAY, so the fix
-// can flip them; see docs/widget-designer-bugs-107-diagnose.md.
+// ── Thema 107: the reported designer bugs ────────────────────────────────────
+// Written as reproductions in the diagnosis (Schritt 1, see
+// docs/widget-designer-bugs-107-diagnose.md); the canvas one is flipped into
+// the fix's regression test (Schritt 2).
 namespace
 {
 	// Every texture the thumbnail cache uploads, and at what size.
 	std::vector<std::pair<int, int>> g_uploads107;
+	// The bytes of the last upload of at least 1024 px — the full image.
+	std::vector<uint8_t> g_fullUpload107;
+	int g_fullW107 = 0, g_fullH107 = 0;
 
 	// A renderer that renders nothing and uploads into the software rasterizer:
 	// enough for AssetThumbnailCache to hand the canvas a texture headless.
@@ -342,6 +346,12 @@ namespace
 		void* CreateImGuiTexture(const void* rgba, int w, int h) override
 		{
 			g_uploads107.push_back({ w, h });
+			if (w >= 1024 || h >= 1024)
+			{
+				const auto* p = static_cast<const uint8_t*>(rgba);
+				g_fullUpload107.assign(p, p + size_t(w) * h * 4);
+				g_fullW107 = w; g_fullH107 = h;
+			}
 			return reinterpret_cast<void*>(static_cast<uintptr_t>(he_ui::registerTexture(rgba, w, h)));
 		}
 		void DestroyImGuiTexture(void* t) override
@@ -393,16 +403,24 @@ namespace
 			if (img.rgba[i] == v && img.rgba[i + 1] == v && img.rgba[i + 2] == v) ++n;
 		return n;
 	}
+
+	int countColour(const he_ui::Image& img, uint8_t r, uint8_t g, uint8_t b)
+	{
+		int n = 0;
+		for (size_t i = 0; i + 3 < img.rgba.size(); i += 4)
+			if (img.rgba[i] == r && img.rgba[i + 1] == g && img.rgba[i + 2] == b) ++n;
+		return n;
+	}
 }
 
-// (1) + (4): the canvas draws an Image from the Content Browser's 128 px tile —
-// checkerboard baked in, alpha forced opaque, 8x downscaled from 1024.
-// Skipped by default because it pins the BUG; run with --no-skip:
-//     HE_UI_DUMP_DIR=/tmp/ui ./he_tests -tc="repro 107*" --no-skip
+// (1) + (4): the canvas used to draw an Image from the Content Browser's 128 px
+// tile — checkerboard baked in, alpha forced opaque, 8x downscaled from 1024.
+// It now draws the texture itself (AssetThumbnailCache::image): uploaded at its
+// own size, straight alpha, and no tile is made for the canvas at all.
+//     HE_UI_DUMP_DIR=/tmp/ui ./he_tests -tc="repro 107*"
 // HE_REPRO107_LOGO=<path to a texture .hasset> uses that picture instead of the
 // generated one (e.g. the Catania project's UI/Source/HE_Logo.hasset).
-TEST_CASE("repro 107: designer canvas draws the thumbnail tile, checker and all"
-          * doctest::skip())
+TEST_CASE("repro 107: designer canvas draws the texture itself, not the thumbnail tile")
 {
 	Harness harness;
 	namespace fs = std::filesystem;
@@ -472,7 +490,9 @@ TEST_CASE("repro 107: designer canvas draws the thumbnail tile, checker and all"
 	const he_ui::Image img = d.shoot("repro107-canvas-image");
 	REQUIRE(img.valid());
 
-	// (4) What reached the canvas is the tile, not the texture.
+	// (4) What reached the canvas is the texture at its own size. No tile at all:
+	// the Content Browser is not drawn here, so a 128 px upload could only be the
+	// canvas borrowing one again.
 	const int S = static_cast<int>(AssetThumbnailCache::thumbnailSize());
 	REQUIRE(!g_uploads107.empty());
 	bool tileSized = false, fullSized = false;
@@ -482,15 +502,34 @@ TEST_CASE("repro 107: designer canvas draws the thumbnail tile, checker and all"
 		if (w == S && h == S) tileSized = true;
 		if (w >= 1024 || h >= 1024) fullSized = true;
 	}
-	CHECK(tileSized);
-	CHECK_FALSE(fullSized);
+	CHECK_FALSE(tileSized);
+	CHECK(fullSized);
 
-	// (1) The transparent background shows the tile's checkerboard (90/130
-	// grey) where the canvas should show through.
+	// (1) No checkerboard: the tile's 90/130 greys are not on the canvas — the
+	// transparent background lets the page show through.
 	const int n90 = countGrey(img, 90), n130 = countGrey(img, 130);
-	MESSAGE("checker greys: control " << ctl90 << "/" << ctl130 << ", with tile " << n90 << "/" << n130);
-	CHECK(n90  > ctl90  + 2000);
-	CHECK(n130 > ctl130 + 2000);
+	MESSAGE("checker greys: control " << ctl90 << "/" << ctl130 << ", with image " << n90 << "/" << n130);
+	CHECK(n90  < ctl90  + 200);
+	CHECK(n130 < ctl130 + 200);
+
+	// The generated picture's own facts, so the checks above cannot pass by the
+	// canvas drawing nothing: the upload keeps its alpha (corner transparent,
+	// centre opaque orange), and the orange disc is on the canvas.
+	if (texRel != "UI/HE_Logo.hasset")
+	{
+		REQUIRE(g_fullW107 == 1024);
+		REQUIRE(g_fullH107 == 1024);
+		CHECK(g_fullUpload107[3] == 0);   // (0,0): outside the disc
+		const size_t c = (size_t(512) * 1024 + 512) * 4;
+		CHECK(g_fullUpload107[c + 3] == 255);
+		const size_t o = (size_t(300) * 1024 + 512) * 4;   // above the band
+		CHECK(g_fullUpload107[o]     == 216);
+		CHECK(g_fullUpload107[o + 1] == 128);
+		CHECK(g_fullUpload107[o + 2] == 24);
+		const int orange = countColour(img, 216, 128, 24);
+		MESSAGE("orange canvas pixels: " << orange << " (control " << countColour(none, 216, 128, 24) << ")");
+		CHECK(orange > 5000);
+	}
 
 	AssetThumbnailCache::setContext(nullptr, nullptr, "");
 	UIEditorPanel::forget(d.assetPath);

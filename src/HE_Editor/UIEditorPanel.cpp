@@ -7,7 +7,7 @@
 #include <cstdint>
 #include "EditorApplication.h"                 // AppContext
 #include "EditorAssetTypeCache.h"               // shared, invalidatable path → AssetType sniff
-#include "AssetThumbnailCache.h"                // texture previews on the designer canvas
+#include "AssetThumbnailCache.h"                // full-resolution images on the designer canvas
 #include "EditorHelp.h"                         // "UI Widget/<label>" scopes for the tooltips
 #include "EditorPanelState.h"                   // shared per-tab state map
 #include "EditorWidgets.h"                      // shared Content-Browser asset drop target
@@ -4132,14 +4132,19 @@ const HE::UIWidgetTree* embeddedTreeFor(AppContext& ctx, const std::string& path
 }
 
 // One element of a tree, with the two things every element needs resolved
-// first: its picture (from the thumbnail cache) and the inherited opacity /
-// disabled dim. Shared by the page itself and by everything embedded in it.
+// first: its picture and the inherited opacity / disabled dim. Shared by the
+// page itself and by everything embedded in it.
+//
+// The picture is the texture itself (AssetThumbnailCache::image), not the
+// Content Browser's tile: the tile is 128 px with a checkerboard baked in and
+// alpha forced opaque, which on the canvas read as a blurred logo on squares
+// where the page should show through (Thema 107).
 void drawElementIn(ImDrawList* dl, AppContext& ctx, const HE::UIWidgetTree& tree,
                    const UIElement& n, const ImVec2& mn, const ImVec2& mx, float s)
 {
 	void* texHandle = nullptr;
 	if (n.hasTextureSlot() && !n.texture.empty() && n.material.empty() && ctx.contentManager)
-		texHandle = AssetThumbnailCache::get(ctx.contentManager->contentRoot() + "/" + n.texture);
+		texHandle = AssetThumbnailCache::image(ctx.contentManager->contentRoot() + "/" + n.texture);
 	const float alpha = HE::uiElementEffectiveOpacity(tree, n);
 	const float dim   = HE::uiElementEffectiveEnabled(tree, n) ? 1.0f : HE::kUIDisabledDim;
 	drawElementPreview(dl, n, mn, mx, s, texHandle, alpha, dim, &tree);
@@ -4501,7 +4506,7 @@ void drawCanvas(State& st, AppContext& ctx, const ImVec2& avail)
 			const ImVec2 cmx = toScreen(ImVec2(clip.x + clip.w, clip.y + clip.h));
 			dl->PushClipRect(cmn, cmx, true);
 		}
-		// The element itself: its picture from the thumbnail cache, and the
+		// The element itself: its picture at full resolution, and the
 		// inherited opacity / disabled dim the runtime applies — a menu authored
 		// at half opacity has to LOOK half here too.
 		drawElementIn(dl, ctx, st.tree, *it.n, mn, mx, s);

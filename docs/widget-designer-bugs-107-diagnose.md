@@ -65,7 +65,22 @@ Karo nur *hinter* dem Bild, volle Auflösung (`TextureViewerPanel.cpp`, `toDispl
   aus den echten Logo-Bytes. Das Tile wurde exakt nach `makeTextureThumbnail` nachgebaut und auf
   550 px (Elementgröße in Catania) hochskaliert.
 
-**Hinweis für den Fix (nicht umgesetzt).** Die Leinwand braucht eine Textur in voller Auflösung
+**Fix (Schritt 2, umgesetzt).** Neuer Eintrag `AssetThumbnailCache::image(absPath)`: Level 0 der
+Textur in voller Auflösung, Zeilen über `TextureViewerPanel::toDisplayRgba` gedreht, echtes Alpha,
+nichts hineinkomponiert, roh als RGBA8-Unorm-ImGui-Textur (also weiter die Bytes des Designers, kein
+sRGB-Format, siehe (2)). Eigene Map neben den Tiles, ohne Disk-Cache und ohne Budget pro Frame (das
+Budget füllt nur `beginFrame` des Content Browsers auf, den man verbergen kann). Re-Stat wie ein Tile,
+also aktualisiert ein Re-Import die Leinwand. Ein Bild, nach dem 5 s lang keiner fragt, wird wieder
+freigegeben. `drawElementIn` (`UIEditorPanel.cpp`) fragt jetzt `image()` statt `get()`; das deckt Seite,
+eingebettete Widgets und Flächen mit Textur. Das Content-Browser-Tile ist unverändert. Der Letterbox-
+Nebenbefund ist damit mit weg (das Bild hat sein eigenes Seitenverhältnis). Der Repro-Test ist zum
+Regressionstest umgedreht (`repro 107: designer canvas draws the texture itself, not the thumbnail tile`,
+läuft normal mit): Upload 1024 × 1024, kein 128er-Tile, Karo-Grau 0/0, Alpha im Upload erhalten, Logo-
+Orange auf der Leinwand. Gegenprobe mit dem alten `get()`: 5 Fehler. Nachher-Bilder:
+`designer-canvas-catania-logo-nachher.png`, `designer-canvas-catania-logo-zoom-nachher.png` (3x, gleiche
+Stelle wie der Vorher-Zoom). Farbabweichung (2) und Opacity (3) sind davon nicht berührt.
+
+**Hinweis für den Fix (Stand Diagnose).** Die Leinwand braucht eine Textur in voller Auflösung
 mit echtem Alpha, getrennt vom Tile-Cache. Das Tile muss für den Content Browser bleiben, wie es ist.
 Ein Karo, falls überhaupt gewünscht, gehört höchstens *hinter* die Leinwandfläche (wie im
 Textur-Viewer), nicht ins Bild. Vorsicht Speicher: eine 4K-Textur pro Bildelement als ImGui-Textur.
