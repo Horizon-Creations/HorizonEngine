@@ -68,9 +68,12 @@ wie Zeile (b) im Input-Audit, aber pro Frame summiert und dann das Perzentil gen
 
 **Ergebnis:**
 
-1. **Das Eingabealter beim Commit sinkt um das ganze Warten:** Poll→Commit p50 von 10,9–12,1 ms auf
-   1,2–2,2 ms, **p90 von ~65 ms auf unter 3 ms**. Das Warten selbst ist unverändert (NextDrawable p50
-   9–10 ms, p90 ~63 ms in beiden Modi), es liegt jetzt nur vor der Eingabe.
+1. **Das Eingabealter beim Commit sinkt um das ganze Warten, pro Frame gezählt:** Poll→Commit p50 von
+   10,9–12,1 ms auf 1,2–2,2 ms, **p90 von ~65 ms auf unter 3 ms**. Das Warten selbst ist unverändert
+   (NextDrawable p50 9–10 ms, p90 ~63 ms in beiden Modi), es liegt jetzt nur vor der Eingabe.
+   *Einschränkung aus Schritt 2 (unten):* Pro Event gezählt, also „wie lange wartet eine beliebige
+   Eingabe, bis ein Frame sie committet", sind es bei diesem Takt nur **~2–3 ms**. Das Maß pro Frame
+   überträgt sich hier nicht auf das Eingabealter pro Event.
 2. **Kein Durchsatzverlust:** FPS (38,9–43,6 früh gegen 39,5–41,1 spät), GPU p50 und Frame p50 liegen
    in beiden Modi in derselben Streuung. Die ~2 ms, die das Drawable jetzt länger gehalten wird, schluckt
    die Drei-Drawable-Warteschlange.
@@ -82,12 +85,111 @@ wie Zeile (b) im Input-Audit, aber pro Frame summiert und dann das Perzentil gen
 belastbares `presentedTime`. Nach der Zerlegung des Audits (a + b + c + d) fällt Anteil (b) um
 das Warten, also um die gemessenen **~9–10 ms im Median und ~60 ms im p90** in dieser Lage. Die
 Audit-Schätzung (8–19 ms p50) passt dazu. Am entsperrten Bildschirm ohne Fremdlast wäre ein
-`addPresentedHandler`-Haken der nächste Messschritt.
+`addPresentedHandler`-Haken der nächste Messschritt. (Schritt 2 unten zeigt, dass diese Rechnung pro
+Frame gilt. Pro Event gemessen sind es bei gesperrtem Bildschirm nur 2–3 ms, bei gleichmäßigem Takt
+wären ~W zu erwarten, siehe dort.)
 
 **Nicht geprüft:** Das Bild im Fenster (Bildschirm gesperrt, und ein Headless-Screenshot liest das
 Offscreen-Target, nicht das Drawable). Der kodierte Frame ist Befehl für Befehl derselbe, nur das
 Drawable kommt früher. Live-Resize am Bildschirm und der Play-Modus sind nicht eigens angefahren, der
 Größenabgleich in `EncodeFrame` deckt den Resize-Fall ab.
+
+## Schritt 2: Vollbau, Tests, Eingabealter pro Event
+
+Zweig wie oben, Stand `c6dbf123` (Schritt 1 + Messhaken).
+
+**Vollbau und Tests (gemessen):** `ninja -j8` im Release-Baum, alle 497 Ziele, rc 0, zweiter Lauf „no work
+to do". Danach der Messhaken und inkrementell neu gebaut (rc 0). Volle Suite wie in CI
+(`ctest --output-on-failure -j4`) auf diesem Stand: **220/220 bestanden**, davon die zwei
+`runtime_size_app_*` wie in CI absichtlich übersprungen, 209 s.
+
+### Messhaken `HE_PERF_INPUT_LATENCY_HZ=N`
+
+Der Injektor aus dem Input-Audit (`HE_PERF_INPUT_EVENTS`) schiebt seine Events direkt vor `PollEvents` ein.
+Sie sind beim Abholen nie alt, er misst Verarbeitungskosten, kein Eingabealter. Deshalb ein zweiter Haken
+in `Application.cpp`: Ein eigener Thread schiebt N Events pro Sekunde (hier 1000, wie eine 1-kHz-Maus) mit
+SDLs Zeitstempel (`SDL_GetTicksNS`) in die Queue. Sie landen also mitten im Drawable-Warten oder im Encode
+und warten dort wie echte Eingaben. Ein eigener registrierter Event-Typ, der im Event-Callback abgefangen
+wird, ImGui und `Input` sehen ihn nie. Pro Event wird verbucht: Ankunft → Abholung in `PollEvents`
+(**Event→Poll**), Abholung → Commit des Frames nach `Render`/`SwapBuffers` (**Poll→Commit**) und die
+Summe (**Event→Commit**). Gezählt ab `HE_PROFILE_WARMUP`, Zusammenfassung im Log alle 600 Frames und beim
+Beenden. Ohne die Variable aus, mit `HE_PERF_INPUT_EVENTS` zusammen abgeschaltet (Warnung im Log).
+
+Positivkontrolle: Jedes Log hat die Startzeile, die Modus-Zeile von Schritt 1 und die Abschlusszeile mit
+~15 000 Events über 602 Frames bei **996–1000 Hz** erreichter Rate.
+
+### Messung (gemessen)
+
+Gleiche Lage wie Schritt 1: Release, Metal, Editor Edit-Modus, Landscape, 300 Warmup + 600 Frames, ein
+Build, A/B nur über `HE_MTL_EARLY_DRAWABLE`, zweiter Durchgang umgekehrt. Bildschirm **gesperrt**,
+Stromsparmodus aus. Gemessen erst, nachdem Build und `he_shot`-Serie des Wolken-Arbeiters 60 s geruht
+hatten, Load 1,2–2,3 fallend, kein Fremdprozess über 5 % CPU. Zwischen `lat-early1-vsyncoff-run1` und
+`lat-early0-vsyncoff-run1` sah die Stichprobe einmal einen Fremdprozess (vermutlich ein `he_shot` des
+Wolken-Arbeiters an der Laufgrenze), beide Läufe liegen aber in der Streuung der anderen.
+
+| Lauf | Events | Event→Commit p50 / p90 / p99 | Event→Poll p50 / p90 | Poll→Commit p50 / p90 | FPS |
+|---|---|---|---|---|---|
+| spät, keep, run1 | 15333 | 26,54 / 59,23 / 112,02 | 18,71 / 53,77 | 2,11 / 2,39 | 39,8 |
+| spät, keep, run2 | 15701 | 26,42 / 57,95 / 68,54 | 19,80 / 52,95 | 2,12 / 2,45 | 38,5 |
+| früh, keep, run1 | 15359 | **20,87** / 56,79 / 70,76 | 18,66 / 54,52 | 2,18 / 2,37 | 39,7 |
+| früh, keep, run2 | 15593 | **26,13** / 55,01 / 71,91 | 24,08 / 52,76 | 2,12 / 2,31 | 39,2 |
+| spät, off, run1 | 14842 | 24,72 / 54,32 / 74,93 | 18,90 / 49,52 | 2,21 / 2,67 | 41,0 |
+| spät, off, run2 | 14470 | 25,43 / 56,59 / 70,50 | 18,23 / 51,07 | 2,27 / 3,78 | 42,2 |
+| früh, off, run1 | 14907 | **22,63** / 53,47 / 67,30 | 20,65 / 51,32 | 2,12 / 2,33 | 41,0 |
+| früh, off, run2 | 14310 | **23,13** / 53,83 / 88,26 | 20,84 / 51,75 | 2,13 / 2,34 | 42,5 |
+
+(ms, pro Event; FPS aus dem Profiler)
+
+**Ergebnis pro Event:** Event→Commit p50 früh 20,9–26,1 gegen spät 26,4–26,5 (vsync keep) und früh
+22,6–23,1 gegen spät 24,7–25,4 (vsync off), also **~2–3 ms weniger**. p90 früh 53,5–56,8 gegen spät
+54,3–59,2, ebenfalls **~2–3 ms**. Die Streuung ist so groß wie der Effekt: Die zwei frühen keep-Läufe
+liegen 5 ms auseinander. Das p99 von 112 ms in einem späten Lauf ist ein Einzelausreißer, darauf stützt
+sich nichts. FPS und Durchsatz wie in Schritt 1 unverändert.
+
+### Warum pro Event so viel weniger als pro Frame
+
+Auffällig ist **Poll→Commit pro Event ~2,1–2,3 ms in beiden Modi**, obwohl `Render` im späten Modus im
+Mittel 23–24 ms dauert und das ganze Warten enthält. Die Einzelframes (`lat_analysis.py` auf den
+`*.profile.json`) erklären das:
+
+- Die Drawable-Wartezeit W wechselt lang/kurz ab: **Lag-1-Korrelation −0,69 bis −0,78**. Nach einem
+  Warten über 30 ms wartet der Folgeframe im Median **0,0 ms**.
+- **48 %** der Frames beginnen weniger als 8 ms nach dem vorigen, 23–29 % erst nach über 50 ms. Bei einem
+  angezeigten Fenster mit einem Drawable pro 60-Hz-Refresh ginge das nicht. Der gesperrte WindowServer
+  gibt die Drawables schubweise frei.
+- Ein Event wird von dem Frame abgeholt, der nach seiner Ankunft beginnt. Die Events stauen sich während
+  des langen Wartens an und gehen in den Folgeframe, der kaum wartet. Die Frames mit langem Warten tragen
+  dagegen fast keine Events (sie folgen einem kurzen Frame). Pro Event spart das frühe Holen also das
+  Warten **des abholenden Frames**, und das ist meist ~0.
+- **Gegenprobe:** Aus dem Frame-Verlauf der späten Läufe vorhergesagt (Event im Intervall vor Frame i
+  spart W[i], gewichtet mit der Intervalllänge) ergibt sich eine mittlere Ersparnis von **2,5–3,1 ms pro
+  Event**. Gemessen sind ~2–3 ms. Haken und Modell stimmen überein, der Haken misst also, was er soll.
+
+**Was daraus folgt:**
+
+1. Schritt 1s Satz „das Eingabealter sinkt um das ganze Warten" gilt **pro Frame** (was jedes angezeigte
+   Bild an Eingabe enthält). Für das Eingabealter pro Event gilt er bei diesem Takt nicht, dort sind es
+   2–3 ms.
+2. **Hergeleitet, nicht gemessen:** Bei gleichmäßigem Takt (jeder Frame wartet ungefähr gleich lang, wie
+   bei einem angezeigten Fenster mit vsync) laufen beide Maße zusammen, die Ersparnis pro Event wäre dann
+   ≈ W, also die 8–10 ms p50 aus dem Audit. Das lässt sich nur am **entsperrten Bildschirm** zeigen. Dort
+   bräuchte es denselben Haken plus `addPresentedHandler` (`presentedTime`).
+3. Die Änderung bleibt richtig: kein Durchsatzverlust, pro Frame deutlich frischere Eingabe, pro Event
+   auch bei ungünstigem Takt ein kleiner Gewinn. p50 und p90 sind in keinem frühen Lauf schlechter
+   als in einem späten derselben vsync-Einstellung. Das p99 streut in beide Richtungen (früh bis 88,
+   spät bis 112 ms) und trägt keine Aussage.
+
+Nachmessen:
+
+```sh
+R --label lat-early1-vsynckeep-run1 --vsync keep --env HE_MTL_EARLY_DRAWABLE=1 --env HE_PERF_INPUT_LATENCY_HZ=1000
+R --label lat-early0-vsynckeep-run1 --vsync keep --env HE_MTL_EARLY_DRAWABLE=0 --env HE_PERF_INPUT_LATENCY_HZ=1000
+grep "HE_PERF_INPUT_LATENCY (final)" docs/perf-audit/raw-b3/lat-*.log
+python3 docs/perf-audit/raw-b3/lat_analysis.py   # Tabelle + Takt-Auswertung (braucht die *.profile.json)
+```
+
+Rohdaten: `docs/perf-audit/raw-b3/lat-*.log` und `lat-*.summary.json`. Die `lat-*.profile.json` (je ~5 MB)
+sind wie in Schritt 1 nicht eingecheckt.
 
 ## Übertragbarkeit auf die anderen Backends (Befund, nicht umgesetzt)
 
