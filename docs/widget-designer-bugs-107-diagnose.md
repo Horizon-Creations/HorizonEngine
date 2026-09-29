@@ -237,13 +237,21 @@ Ein Graph, der auf „fertig“ wartet, wäre sonst um den leeren Rest zu spät.
   für Floats nimmt die Grenzen der Eigenschaft (`UIPropDesc::minV/maxV`, Render Opacity 0..1) mit
   `AlwaysClamp` und zieht über 200 px den ganzen Bereich. Der Nebenbefund (Opacity springt auf −7
   oder 12 und wird geklemmt) ist damit weg.
-- Hilfe-Einträge für `|<`, `>|` und „Key at End“, der Eintrag zu „Key“ nennt das Einrasten.
+- **„Stretch to Length“** in der Transport-Leiste, nur sichtbar, solange der letzte Key vor der Länge
+  liegt (also der Rest der Spur grau ist). Ein Klick multipliziert alle Key-Zeiten aller Spuren mit
+  `duration / uiAnimPlayEnd()`, der letzte Key landet exakt auf der Länge, die Abstände behalten ihre
+  Verhältnisse. Undo nimmt es zurück. Logik: `HE::uiAnimStretchToLength` (`UIWidgetAnim.cpp`).
+- Hilfe-Einträge für `|<`, `>|`, „Key at End“ und „Stretch to Length“, der Eintrag zu „Key“ nennt das
+  Einrasten.
 
 *Die Daten des Menschen* (`~/HorizonEngineProjects/Catania/Content/UI/Startup.hasset`, nicht in
-diesem Repository) sind nicht angefasst. Reparatur im Designer: Den Key bei 0,05 s ans Ende ziehen (er
-rastet ein) oder in sein Time-Feld 1 tippen.
+diesem Repository) sind nicht angefasst. Reparatur im Designer: Clip „Blend“ öffnen und
+„Stretch to Length“ drücken (Key von 0,05 s auf 1,0 s). Alternativ den Key ans Ende ziehen (er rastet
+ein) oder in sein Time-Feld 1 tippen.
 
-*Tests.* `Timeline snap: a pointer near a moment people aim at lands on it (Thema 107)`
+*Tests.* `Clips: stretching to the length puts the last key on the end` (`test_ui_widgets.cpp`, der
+Clip des Menschen: Key danach exakt bei 1,0, Mittel-Key bei 0,5, Opacity bei 0,5 s = 0,5; nichts zu tun
+bei Key schon am Ende, nur Key bei 0 oder ohne Keys), `Timeline snap: a pointer near a moment people aim at lands on it (Thema 107)`
 (`test_ui_widgets.cpp`, reine Arithmetik) und `repro 107: the timeline puts an end key exactly at the end`
 (`test_widget_designer_ui.cpp`, echte Timeline headless bedient). Der zweite öffnet den Clip über die
 Combo, wählt die Spur und drückt „Key at End“ (Key exakt bei 1,0). Dann zieht er den Key weg, mit Alt

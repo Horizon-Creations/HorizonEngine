@@ -2855,7 +2855,7 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	// Where the animation stops having anything to say: the last key, capped by
 	// the length. The designer plays to here and the lane greys out the rest,
 	// so what you watch is what the runtime will run (see uiAnimPlayEnd).
-	const float playEnd = HE::uiAnimPlayEnd(clip);
+	float playEnd = HE::uiAnimPlayEnd(clip);
 	// The transport's two ends. "To End" goes to the end of the LENGTH, not to
 	// the last key: it is how you get to the moment a fade should arrive at, and
 	// a playhead parked on the last key is already somewhere you can see. With
@@ -2891,6 +2891,25 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	fmtTime(endTxt, sizeof(endTxt), playEnd);
 	ImGui::SameLine();
 	ImGui::TextDisabled("%s / %s", nowTxt, endTxt);
+	// The motion is over before the length is: offer to spread it across the
+	// whole length. One click repairs a fade keyed 0 → 50 ms in a one-second
+	// clip (Thema 107) without re-placing a key by hand, and keeps the spacing
+	// of clips with more keys than two.
+	if (playEnd > 0.0f && playEnd < clip.duration - 0.0005f)
+	{
+		ImGui::SameLine();
+		if (EditorWidgets::smallButton("Stretch to Length"))
+		{
+			const float f = clip.duration / playEnd;
+			HE::uiAnimStretchToLength(clip);
+			// The canvas keeps showing the same moment of the motion.
+			st.playhead = std::clamp(st.playhead * f, 0.0f, clip.duration);
+			st.clipPlaying = false;
+			playEnd = HE::uiAnimPlayEnd(clip);
+			commitEdit(st, ctx);
+		}
+		EditorWidgets::helpForLabel("Stretch to Length");
+	}
 
 	// The zoom controls sit here, on the bar, but they can only be APPLIED once
 	// the lane's width is known a few lines further down — zooming around a

@@ -159,6 +159,16 @@ HE_API void uiAnimEvaluate(const UIAnimClip& clip, float time,
 // finished at once — including a looping one, because there is nothing to loop.
 HE_API float uiAnimPlayEnd(const UIAnimClip& clip);
 
+// Spread the keys out so the clip's last key lands exactly on its length: every
+// key time is multiplied by duration / uiAnimPlayEnd(), so the timing between
+// keys keeps its proportions. The repair for a clip whose motion is over long
+// before the length it was authored in (Thema 107: a fade keyed 0 → 0.05 s in a
+// one-second clip, which plays as a pop).
+//
+// False, and nothing touched, when there is nothing to stretch: no keys past
+// zero, or the last key already at the length.
+HE_API bool uiAnimStretchToLength(UIAnimClip& clip);
+
 // How long ONE pass takes in this direction: the clip's own length, or twice it
 // for a ping-pong (out and back). What playback wraps and finishes on.
 HE_API float uiAnimPlaySpan(UIAnimDirection dir, float playEnd);

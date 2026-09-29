@@ -6947,6 +6947,46 @@ TEST_CASE("Clips: playing stops at the last key, not at the authored length")
     CHECK(HE::uiAnimPlayEnd(empty) == doctest::Approx(0.0f));
 }
 
+// The repair for Thema 107: a fade keyed 0 → 50 ms in a one-second clip plays as
+// a pop. Stretching puts the last key on the length and keeps the proportions.
+TEST_CASE("Clips: stretching to the length puts the last key on the end")
+{
+    // The user's clip: Render Opacity 0 at 0 s, 1 at 0.0503 s, length 1 s.
+    HE::UIAnimClip c = fadeClip(1, "Blend", 0.0f, 1.0f, /*dur=*/0.0503144654f);
+    c.duration = 1.0f;
+    // A second track with a key in the middle of the motion, to see that the
+    // gaps keep their proportions across tracks.
+    HE::UIAnimTrack tr;
+    tr.element = 1; tr.prop = "Render Opacity";
+    tr.keys.push_back({ 0.0251572327f, HE::UIPropValue::ofFloat(0.5f), HE::UIEase::Linear });
+    c.tracks.push_back(tr);
+    REQUIRE(HE::uiAnimPlayEnd(c) == doctest::Approx(0.0503144654f));
+
+    REQUIRE(HE::uiAnimStretchToLength(c));
+    CHECK(c.tracks[0].keys.front().time == 0.0f);
+    CHECK(c.tracks[0].keys.back().time == 1.0f);          // exactly, not a hair short
+    CHECK(c.tracks[1].keys[0].time == doctest::Approx(0.5f));
+    CHECK(HE::uiAnimPlayEnd(c) == 1.0f);
+    // Values are untouched: halfway through the length is halfway through the fade.
+    std::vector<HE::UIAnimSample> s;
+    HE::uiAnimEvaluate(c, 0.5f, s);
+    REQUIRE_FALSE(s.empty());
+    CHECK(s[0].value.f == doctest::Approx(0.5f));
+
+    // Already on the end: nothing to do, and nothing moved.
+    CHECK_FALSE(HE::uiAnimStretchToLength(c));
+    CHECK(c.tracks[0].keys.back().time == 1.0f);
+
+    // Nothing past zero (only a key at 0, or no keys) has no motion to spread,
+    // and dividing by that zero must not happen.
+    HE::UIAnimClip still = fadeClip(1, "Still", 0.0f, 1.0f, 0.0f);
+    still.duration = 2.0f;
+    CHECK_FALSE(HE::uiAnimStretchToLength(still));
+    CHECK(still.tracks[0].keys.back().time == 0.0f);
+    HE::UIAnimClip empty; empty.duration = 2.0f;
+    CHECK_FALSE(HE::uiAnimStretchToLength(empty));
+}
+
 TEST_CASE("Clips: the runtime ends one at its last key, and loops there too")
 {
     TempWidgetDir dir;

@@ -5203,6 +5203,13 @@ namespace
 	  "or a slide should arrive at. Press \"Key\" there and the end state has "
 	  "its key without any aiming.",
 	  "", "ui#elements" },
+	{ "UI Timeline/Stretch to Length", "",
+	  "Shown when the last key sits before the end of the Length, which is "
+	  "where the animation stops. Spreads every key out so the last one lands "
+	  "exactly on the end and the gaps between keys keep their proportions: a "
+	  "fade keyed over 50 ms of a one-second clip becomes a one-second fade. "
+	  "Undo takes it back.",
+	  "", "ui#elements" },
 	{ "UI Timeline/Zoom In", "",
 	  "Spreads the time axis out around the playhead, so keys milliseconds "
 	  "apart become separate things you can grab. The ruler follows: its labels "
