@@ -6,6 +6,9 @@ Code-Stellen unten, die echten Assets des Menschen im Projekt
 zwei Repro-Tests in `tests/test_widget_designer_ui.cpp` und Bilder unter
 `docs/img/widget-designer-bugs-107/`.
 
+Nachtrag Schritt 2: Fix für **(1) + (4)** umgesetzt, siehe „Fix (Schritt 2, umgesetzt)“ im
+Abschnitt (1) + (4). (2) und (3) sind weiter offen.
+
 ## Kurzfassung
 
 | # | Befund | Ursache | Pfad | Hängt zusammen mit |
