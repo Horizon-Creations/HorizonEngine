@@ -105,6 +105,10 @@ struct State
 	int    trackSel = -1;       // the track new keys go on (-1 = none)
 	int    keySel   = -1;       // the key on it whose value the strip edits
 	bool   keyDragged = false;  // a key moved this drag → one undo on release
+	// Where on its diamond the key was grabbed, in pixels from its centre, so
+	// a drag moves it BY the pointer's travel instead of teleporting its
+	// centre under the pointer the moment the drag threshold is crossed.
+	float  keyGrabDx = 0.0f;
 	// The lane's view onto the clip: zoom is a multiple of FIT (1 = the whole
 	// clip spans the lane) and scroll is the second at its left edge. View
 	// state, like the canvas zoom beside it — where somebody was looking is not
@@ -2611,8 +2615,13 @@ void drawKeyEditor(State& st, AppContext& ctx, HE::UIAnimClip& clip)
 
 	bool edited = false, committed = false;
 
+	// Speeds relative to what is being dragged. A fixed 5 ms per pixel is a
+	// crawl across a ten-second clip and, on the value side, a fixed 0.5 per
+	// pixel throws a 0..1 opacity to -7 or 12 in one flick — which the element
+	// clamps, so the fade it was meant to be looks like a pop (Thema 107).
 	ImGui::SetNextItemWidth(110.0f);
-	if (ImGui::DragFloat("Time", &key.time, 0.005f, 0.0f, clip.duration, "%.3f s"))
+	if (ImGui::DragFloat("Time", &key.time, std::max(clip.duration / 200.0f, 0.001f),
+	                     0.0f, clip.duration, "%.3f s"))
 	{
 		// The playhead rides along, so the canvas keeps showing the key being
 		// moved rather than the instant it has just left.
@@ -2631,10 +2640,22 @@ void drawKeyEditor(State& st, AppContext& ctx, HE::UIAnimClip& clip)
 	switch (key.value.type)
 	{
 	case UIPropType::Float:
-		if (ImGui::DragFloat("Value", &key.value.f, 0.5f)) edited = true;
+	{
+		// The property's own range where it has one (Render Opacity 0..1): the
+		// field then cannot hold a number the element would only clamp away.
+		float lo = 0.0f, hi = 0.0f;
+		if (const UIElement* e = st.tree.find(tr.element))
+			for (const UIPropDesc& pd : e->allProperties())
+				if (pd.name == tr.prop) { lo = pd.minV; hi = pd.maxV; break; }
+		const bool ranged = lo < hi;
+		if (ImGui::DragFloat("Value", &key.value.f, ranged ? (hi - lo) / 200.0f : 0.5f,
+		                     lo, hi, "%.3f",
+		                     ranged ? ImGuiSliderFlags_AlwaysClamp : ImGuiSliderFlags_None))
+			edited = true;
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		EditorWidgets::helpForLabel("Value");
 		break;
+	}
 	case UIPropType::Color:
 		if (ImGui::ColorEdit4("Value", &key.value.col.x)) edited = true;
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -2835,6 +2856,13 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	// the length. The designer plays to here and the lane greys out the rest,
 	// so what you watch is what the runtime will run (see uiAnimPlayEnd).
 	const float playEnd = HE::uiAnimPlayEnd(clip);
+	// The transport's two ends. "To End" goes to the end of the LENGTH, not to
+	// the last key: it is how you get to the moment a fade should arrive at, and
+	// a playhead parked on the last key is already somewhere you can see. With
+	// it, "a key at the end" is two clicks and no aiming (Thema 107).
+	if (EditorWidgets::smallButton("|<")) { st.playhead = 0.0f; st.clipPlaying = false; }
+	EditorWidgets::helpForLabel("|<");
+	ImGui::SameLine();
 	if (EditorWidgets::smallButton(st.clipPlaying ? "Stop" : "Play"))
 	{
 		st.clipPlaying = !st.clipPlaying;
@@ -2843,6 +2871,9 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	// By KEY, not by label: the button says Play or Stop depending on what it
 	// would do, and a label-keyed tooltip would exist for one of the two.
 	EditorWidgets::helpForKey("ui.timeline-play");
+	ImGui::SameLine();
+	if (EditorWidgets::smallButton(">|")) { st.playhead = clip.duration; st.clipPlaying = false; }
+	EditorWidgets::helpForLabel(">|");
 
 	// Where we are, in the unit the clip is actually in. A 400 ms hover read as
 	// "0.40 s" is arithmetic the reader has to do; below two seconds the
@@ -2936,6 +2967,23 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	if (st.clipPlaying) view.reveal(st.playhead);
 	st.clipZoom = view.zoom; st.clipScroll = view.scroll;
 
+	// Where a pointer on the lane is pointing, pulled onto the moments people
+	// aim at: the two ends of the clip and every key (but the one being
+	// dragged). A key dropped "at the end" by hand lands a few pixels short —
+	// that is how the fade in Thema 107 came to end 50 ms into a one-second
+	// clip. Alt lets go of the pull for the rare key that belongs right beside
+	// another one.
+	auto snapped = [&](float t, int skipTrack, int skipKey)
+	{
+		if (ImGui::GetIO().KeyAlt) return t;
+		std::vector<float> targets{ 0.0f, clip.duration };
+		for (int ti = 0; ti < static_cast<int>(clip.tracks.size()); ++ti)
+			for (int ki = 0; ki < static_cast<int>(clip.tracks[ti].keys.size()); ++ki)
+				if (ti != skipTrack || ki != skipKey)
+					targets.push_back(clip.tracks[ti].keys[ki].time);
+		return HE::Ed::uiTimelineSnap(t, targets, 6.0f / view.pixelsPerSecond());
+	};
+
 	// The ruler. Labels stand on the 1-2-5 rung that keeps them ~64 px apart,
 	// so zooming in turns seconds into milliseconds by itself, and a half-step
 	// tick without a label gives the eye something to halve.
@@ -2973,7 +3021,7 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	ImGui::InvisibleButton("##ruler", ImVec2(laneW, 18.0f));
 	if (ImGui::IsItemActive())
 	{
-		st.playhead = view.tOf(ImGui::GetMousePos().x);
+		st.playhead = snapped(view.tOf(ImGui::GetMousePos().x), -1, -1);
 		st.clipPlaying = false;
 	}
 
@@ -3026,10 +3074,11 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 				st.keySel = k;
 				st.playhead = key.time;
 				st.clipPlaying = false;
+				st.keyGrabDx = ImGui::GetMousePos().x - cx;
 			}
 			if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left))
 			{
-				key.time = view.tOf(ImGui::GetMousePos().x);
+				key.time = snapped(view.tOf(ImGui::GetMousePos().x - st.keyGrabDx), i, k);
 				st.playhead = key.time;
 				st.dirty = true;
 				st.trackSel = i;
@@ -3168,12 +3217,14 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 
 	ImGui::SameLine();
 	const bool canKey = st.trackSel >= 0 && st.trackSel < static_cast<int>(clip.tracks.size());
-	ImGui::BeginDisabled(!canKey);
-	if (EditorWidgets::smallButton("Key"))
+	// A key on the selected track at `at`, holding what the clip shows there.
+	// Shared by "Key" (at the playhead) and "Key at End" (at the length).
+	auto addKeyAt = [&](float at)
 	{
 		HE::UIAnimTrack& tr = clip.tracks[st.trackSel];
 		if (const UIElement* e = st.tree.find(tr.element))
 		{
+			st.playhead = at;
 			// What the CLIP says here, not what the element holds: with the
 			// canvas showing the animation, a key made of the authored value
 			// would make the picture jump the moment it was added. Adding a key
@@ -3202,12 +3253,23 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 				if (std::fabs(tr.keys[k].time - st.playhead) < 0.001f) st.keySel = k;
 			commitEdit(st, ctx);
 		}
-	}
+	};
+	ImGui::BeginDisabled(!canKey);
+	if (EditorWidgets::smallButton("Key")) addKeyAt(st.playhead);
 	ImGui::EndDisabled();
 	EditorWidgets::helpForLabel("Key");
+	// The end state in one click: a fade is "this at the start, that at the
+	// end", and the end is the moment hardest to hit by hand. The key goes
+	// exactly on the length, is selected, and the playhead sits on it, so the
+	// Value field below is already the end state waiting to be typed.
+	ImGui::SameLine();
+	ImGui::BeginDisabled(!canKey);
+	if (EditorWidgets::smallButton("Key at End")) { st.clipPlaying = false; addKeyAt(clip.duration); }
+	ImGui::EndDisabled();
+	EditorWidgets::helpForLabel("Key at End");
 	ImGui::SameLine();
 	ImGui::TextDisabled("%s", canKey
-		? "Adds a key at the playhead, holding what the animation shows there."
+		? "Adds a key at the playhead (or at the end), holding what the animation shows there."
 		: "Pick a track first, or click a key to edit it.");
 
 	drawKeyEditor(st, ctx, clip);

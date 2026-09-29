@@ -13407,6 +13407,39 @@ TEST_CASE("Timeline view: the right edge never runs past the clip")
     CHECK(v.scroll == doctest::Approx(0.5f));
 }
 
+TEST_CASE("Timeline snap: a pointer near a moment people aim at lands on it (Thema 107)")
+{
+    // The fade from Thema 107: a one-second clip, a key at 0, a lane 795 px
+    // wide. Dropping the second key "at the end" leaves the hand a few pixels
+    // short of it — at 1 s over 795 px, 6 px is 7.5 ms.
+    HE::Ed::UITimelineView v{ 0.0f, 795.0f, 1.0f };
+    const float tol = 6.0f / v.pixelsPerSecond();
+    const std::vector<float> targets{ 0.0f, 1.0f };
+
+    CHECK(HE::Ed::uiTimelineSnap(v.tOf(791.0f), targets, tol) == 1.0f);   // 4 px short
+    CHECK(HE::Ed::uiTimelineSnap(v.tOf(3.0f),   targets, tol) == 0.0f);
+    // Nowhere near anything: the pointer's own moment, untouched. This is the
+    // 0.0503 s the user's key ended up at — 40 px in, a real choice, not a slip.
+    const float mid = v.tOf(40.0f);
+    CHECK(HE::Ed::uiTimelineSnap(mid, targets, tol) == doctest::Approx(40.0f / 795.0f));
+
+    // The nearer of two wins, whichever order they are listed in.
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, { 0.46f, 0.52f }, 0.05f) == 0.52f);
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, { 0.52f, 0.46f }, 0.05f) == 0.52f);
+    // Exactly one tolerance away still counts; nothing listed changes nothing.
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, { 0.75f }, 0.25f) == 0.75f);
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, {}, 0.25f) == 0.50f);
+
+    // The pull is the same few PIXELS at every zoom: zoomed 20x, the same
+    // 6 px are a twentieth of the time, so a key 10 ms from the end — plainly
+    // separate on screen — is no longer dragged onto it.
+    v.zoom = 20.0f;
+    v.scroll = v.maxScroll();
+    const float tolZoomed = 6.0f / v.pixelsPerSecond();
+    CHECK(HE::Ed::uiTimelineSnap(0.99f, targets, tolZoomed) == 0.99f);
+    CHECK(HE::Ed::uiTimelineSnap(0.9997f, targets, tolZoomed) == 1.0f);
+}
+
 TEST_CASE("Timeline view: playback brings the playhead back into view")
 {
     HE::Ed::UITimelineView v{ 0.0f, 600.0f, 10.0f };

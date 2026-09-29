@@ -5194,6 +5194,15 @@ namespace
 	  "clip at the playhead. To see the widget's own values again, pick "
 	  "\"(none)\" as the animation.",
 	  "", "ui#elements" },
+	{ "UI Timeline/|<", "To Start",
+	  "Puts the playhead at the very start of the animation, so the canvas "
+	  "shows where it begins.",
+	  "", "ui#elements" },
+	{ "UI Timeline/>|", "To End",
+	  "Puts the playhead exactly at the end of the Length — the moment a fade "
+	  "or a slide should arrive at. Press \"Key\" there and the end state has "
+	  "its key without any aiming.",
+	  "", "ui#elements" },
 	{ "UI Timeline/Zoom In", "",
 	  "Spreads the time axis out around the playhead, so keys milliseconds "
 	  "apart become separate things you can grab. The ruler follows: its labels "
@@ -5235,7 +5244,17 @@ namespace
 	  "Adds a key at the playhead, holding whatever the animation already shows "
 	  "there, and replaces one that was already at that moment. Adding it "
 	  "changes nothing on its own — that is the point: you place the moment "
-	  "first, then type what should happen at it in the row below.",
+	  "first, then type what should happen at it in the row below. Scrubbing "
+	  "the ruler and dragging a key both snap to the start, the end and the "
+	  "other keys when the pointer is a few pixels from one; hold Alt to place "
+	  "freely.",
+	  "", "ui#elements" },
+	{ "UI Timeline/Key at End", "",
+	  "Adds a key exactly at the end of the Length on the selected track, "
+	  "selects it and moves the playhead there — so the Value field is the end "
+	  "state, ready to type. A fade is a key at the start and one here; an "
+	  "animation stops at its last key, so an end key placed short of the end "
+	  "makes the whole change happen in that short stretch.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Delete Key", "",
 	  "Removes this key. The track keeps the others, and a track with one key "

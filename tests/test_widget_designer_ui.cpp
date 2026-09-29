@@ -536,6 +536,198 @@ TEST_CASE("repro 107: designer canvas draws the texture itself, not the thumbnai
 	fs::remove_all(root, ec);
 }
 
+// (3), the fix: the end state is one click, and a key dropped near the end is
+// AT the end. The real timeline, driven headless: open the clip, pick the
+// track, press "Key at End"; then drag that key away and back to a few pixels
+// short of the end — it snaps onto it, unless Alt is held.
+TEST_CASE("repro 107: the timeline puts an end key exactly at the end")
+{
+	Harness harness;
+	namespace fs = std::filesystem;
+	const fs::path root = fs::temp_directory_path() / "he_widget_designer_timeline107";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root / "UI");
+
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+	HE::UIWidgetTree t;
+	t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
+	const int logo = t.add(HE::UIWidgetType::Image);
+	t.find(logo)->name = "Logo";
+	{
+		// The user's clip before its second key: one second, one track, the
+		// fade's start at 0.
+		HE::UIAnimClip c;
+		c.name = "Blend";
+		c.duration = 1.0f;
+		HE::UIAnimTrack tr;
+		tr.element = logo;
+		tr.prop    = "Render Opacity";
+		tr.keys.push_back({ 0.0f, HE::UIPropValue::ofFloat(0.0f), HE::UIEase::Linear });
+		c.tracks.push_back(tr);
+		t.animations.push_back(c);
+	}
+	UIWidgetAsset asset;
+	asset.name     = "Anim107";
+	asset.path     = "UI/Anim107.hasset";
+	asset.treeJson = HE::uiWidgetTreeToJson(t);
+	REQUIRE(cm.registerWidget(std::move(asset)) != HE::UUID{});
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	Designer d{ ctx, (root / "UI" / "Anim107.hasset").string() };
+	for (int i = 0; i < 3; ++i) d.frame(false);
+
+	ImGuiIO& io = ImGui::GetIO();
+	auto windowNamed = [](const char* part) -> ImGuiWindow*
+	{
+		for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+			if (w->Active && std::strstr(w->Name, part)) return w;
+		return nullptr;
+	};
+	// Walk the pointer over a grid until ImGui says it is on `wanted`. The
+	// position it was found at, or (-1,-1).
+	auto find = [&](ImGuiID wanted, float x0, float x1, float y0, float y1,
+	                float sx, float sy) -> ImVec2
+	{
+		for (float y = y0; y <= y1; y += sy)
+			for (float x = x0; x <= x1; x += sx)
+			{
+				io.AddMousePosEvent(x, y);
+				d.frame(false);
+				if (d.frame(false) == wanted) return ImVec2(x, y);
+			}
+		return ImVec2(-1.0f, -1.0f);
+	};
+	auto click = [&](ImVec2 p)
+	{
+		io.AddMousePosEvent(p.x, p.y);
+		d.frame(true); d.frame(false); d.frame(false);
+	};
+	auto keys = [&]() -> std::vector<HE::UIAnimKey>&
+	{
+		HE::UIWidgetTree* live = UIEditorPanel::liveTree("UI/Anim107.hasset");
+		REQUIRE(live);
+		REQUIRE(live->animations.size() == 1);
+		REQUIRE(live->animations[0].tracks.size() == 1);
+		return live->animations[0].tracks[0].keys;
+	};
+
+	ImGuiWindow* tw = windowNamed("##uiw_timeline");
+	REQUIRE(tw);
+	const float wx0 = tw->Pos.x, wx1 = tw->Pos.x + tw->Size.x;
+	const float wy0 = tw->Pos.y, wy1 = tw->Pos.y + tw->Size.y;
+
+	// Open "Blend" through the clip combo, as a person would.
+	const ImVec2 combo = find(ImHashStr("##clip", 0, tw->ID), wx0, wx0 + 200.0f,
+	                          wy0 + 4.0f, wy0 + 30.0f, 8.0f, 4.0f);
+	REQUIRE(combo.x >= 0.0f);
+	click(combo);
+	ImGuiWindow* pop = windowNamed("##Combo_");
+	REQUIRE(pop);
+	const ImVec2 blend = find(ImHashStr("Blend##c", 0, pop->ID), pop->Pos.x + 10.0f,
+	                          pop->Pos.x + 30.0f, pop->Pos.y, pop->Pos.y + pop->Size.y,
+	                          10.0f, 2.0f);
+	REQUIRE(blend.x >= 0.0f);
+	click(blend);
+
+	// The track row: its name, under PushID(0).
+	int zero = 0;
+	const ImGuiID trackSeed = ImHashData(&zero, sizeof(zero), tw->ID);
+	const ImVec2 track = find(ImHashStr("Logo  \xC2\xB7  Render Opacity##t", 0, trackSeed),
+	                          wx0 + 20.0f, wx0 + 20.0f, wy0 + 20.0f, wy1, 10.0f, 3.0f);
+	REQUIRE(track.x >= 0.0f);
+	click(track);
+
+	// "Key at End": the row under the tracks, found by its neighbour first.
+	const ImVec2 addTrack = find(ImHashStr("Add Track", 0, tw->ID), wx0 + 10.0f, wx0 + 40.0f,
+	                             track.y, wy1, 10.0f, 3.0f);
+	REQUIRE(addTrack.x >= 0.0f);
+	const ImVec2 keyAtEnd = find(ImHashStr("Key at End", 0, tw->ID), addTrack.x, wx1,
+	                             addTrack.y, addTrack.y, 4.0f, 1.0f);
+	REQUIRE(keyAtEnd.x >= 0.0f);
+	click(keyAtEnd);
+
+	REQUIRE(keys().size() == 2);
+	CHECK(keys()[1].time == 1.0f);                     // exactly the length
+	CHECK(keys()[1].value.f == doctest::Approx(0.0f)); // holding what was there
+
+	// The end key's diamond: PushID(track 0), PushID(key 1), "##key".
+	int one = 1;
+	const ImGuiID keyId = ImHashStr("##key", 0, ImHashData(&one, sizeof(one), trackSeed));
+	// Press on `from`, carry the pointer `dx` px sideways and — with `back` —
+	// all the way back again before letting go.
+	auto drag = [&](ImVec2 from, float dx, bool alt, bool back = false)
+	{
+		io.AddKeyEvent(ImGuiMod_Alt, alt);
+		io.AddMousePosEvent(from.x, from.y);
+		d.frame(false);
+		d.frame(true);
+		for (int s = 1; s <= 10; ++s)
+		{
+			io.AddMousePosEvent(from.x + dx * float(s) / 10.0f, from.y);
+			d.frame(true);
+		}
+		if (back)
+			for (int s = 9; s >= 0; --s)
+			{
+				io.AddMousePosEvent(from.x + dx * float(s) / 10.0f, from.y);
+				d.frame(true);
+			}
+		d.frame(false); d.frame(false);
+		io.AddKeyEvent(ImGuiMod_Alt, false);
+		d.frame(false);
+	};
+	// The diamonds sit mid-row; the track's name was found near its top.
+	auto findKey = [&]
+	{
+		return find(keyId, wx0 + 190.0f, wx1, track.y + 8.0f, track.y + 8.0f, 2.0f, 1.0f);
+	};
+
+	// Grabbed 3 px right of the diamond's centre and carried 200 px left.
+	ImVec2 k = findKey();
+	REQUIRE(k.x >= 0.0f);
+	k.x += 3.0f;
+	drag(k, -200.0f, false);
+	const float away = keys()[1].time;
+	CHECK(away < 0.9f);
+	CHECK(away > 0.1f);
+
+	// Carried back to 3 px short of the end with Alt held: no pull, it stays
+	// short. The control for the next step.
+	k = findKey();
+	REQUIRE(k.x >= 0.0f);
+	drag(k, 197.0f, true);
+	const float shortOfEnd = keys()[1].time;
+	MESSAGE("key after drag away: " << away << " s, back with Alt: " << shortOfEnd << " s");
+	CHECK(shortOfEnd < 1.0f);
+	CHECK(shortOfEnd > 0.98f);
+
+	// A click on it, no travel: selecting a key must not move it — the grab
+	// offset is what keeps an off-centre click from pulling it under the pointer.
+	k = findKey();
+	REQUIRE(k.x >= 0.0f);
+	drag(k, 0.0f, false);
+	CHECK(keys()[1].time == shortOfEnd);
+
+	// The same key picked up without Alt, wiggled past the drag threshold and
+	// put down exactly where it lay, 3 px short: a few pixels from the end IS
+	// the end.
+	k = findKey();
+	REQUIRE(k.x >= 0.0f);
+	drag(k, -20.0f, false, /*back*/ true);
+	CHECK(keys()[1].time == 1.0f);
+
+	io.AddMousePosEvent(-1000.0f, -1000.0f);
+	d.frame(false);
+	UIEditorPanel::forget(d.assetPath);
+	fs::remove_all(root, ec);
+}
+
 // (3): the Catania "Blend" clip as the user authored it. The Render Opacity
 // keys are 0 -> 1, but the second key sits at 0.0503 s in a 1 s clip, and a
 // clip ends at its last key — so the fade is over in three frames: a pop. The

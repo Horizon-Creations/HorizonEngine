@@ -9,7 +9,7 @@ zwei Repro-Tests in `tests/test_widget_designer_ui.cpp` und Bilder unter
 Nachtrag Schritt 2: Fix für **(1) + (4)** umgesetzt, siehe „Fix (Schritt 2, umgesetzt)“ im
 Abschnitt (1) + (4).
 Nachtrag Schritt 3: Fix für **(2)** umgesetzt, siehe „Fix (Schritt 3, umgesetzt)“ im Abschnitt (2).
-(3) ist weiter offen.
+Nachtrag Schritt 5: Fix für **(3)** umgesetzt, siehe „Fix (Schritt 5, umgesetzt)“ im Abschnitt (3).
 
 ## Kurzfassung
 
@@ -206,6 +206,50 @@ ohne Grenzen (`:2634`). Für Render Opacity (0..1) springt ein Key damit leicht 
 (dann änderte sich festgenagelte Semantik), oder soll die Timeline das Clip-Ende am letzten Key
 sichtbar machen und das Setzen eines End-Keys erleichtern (z. B. „Key am Ende“, Time-Feld mit
 feinerer Zieh-Geschwindigkeit relativ zur Clip-Länge, Value-Feld mit den Grenzen der Eigenschaft)?
+
+**Fix (Schritt 5, umgesetzt).** Gewählt ist (a): Die Timeline macht den sauberen End-Key leicht.
+Die Laufzeit-Semantik bleibt, wie sie ist.
+
+*Warum die Laufzeit nicht geändert wird.* Der Mensch hatte freigegeben, dass ein Clip künftig bis
+`duration` läuft. Das träfe aber nicht die Ursache. Mit Keys (0 s → 0) und (0,05 s → 1) dauert die
+Blende auch dann 50 ms: vorwärts 50 ms Blende und danach 950 ms Stillstand, rückwärts erst 950 ms
+Stillstand und dann 50 ms Blende. Das bleibt ein Pop, nur später. Interpoliert wird zwischen Keys,
+nicht über die Länge. Solange der zweite Key bei 0,05 s liegt, hilft keine Laufzeit-Regel. Die bestehende
+Regel („ein Clip endet an seinem letzten Key“, `test_ui_widgets.cpp`) hat dagegen einen eigenen Grund:
+Ein Graph, der auf „fertig“ wartet, wäre sonst um den leeren Rest zu spät. Sie bleibt deshalb.
+
+*Was der Editor jetzt tut* (`UIEditorPanel.cpp`, `drawTimeline`/`drawKeyEditor`):
+- **„Key at End“** neben „Key“: ein Key exakt auf `duration` in der gewählten Spur. Er ist ausgewählt,
+  der Playhead steht darauf, das Value-Feld darunter ist also schon der End-Zustand. Eine Blende sind
+  damit vier Klicks ohne Zielen: Add Track, Value, Key at End, Value.
+- **`|<` und `>|`** am Transport: Playhead an den Anfang bzw. exakt ans Ende der Länge (nicht an den
+  letzten Key). Mit „Key“ dahinter ist das der zweite Weg zum End-Key.
+- **Einrasten** beim Scrubben im Lineal und beim Ziehen eines Keys: Liegt der Zeiger höchstens 6 px
+  neben Anfang, Ende oder einem anderen Key, landet er genau dort (`HE::Ed::uiTimelineSnap` in
+  `UITimelineMath.h`, Toleranz in Pixeln, also bei jedem Zoom gleich). Alt schaltet das Einrasten ab.
+  Das fängt den Fall „knapp neben dem Ende losgelassen“. Einen Key 40 px vor dem Ende, wie beim
+  Menschen, fängt es **nicht**, das ist eine echte Wahl und bleibt eine. Dafür sind „Key at End“ und
+  `>|` da.
+- **Greif-Versatz beim Key-Ziehen:** Der Key bewegt sich um den Weg des Zeigers und springt nicht mit
+  seiner Mitte unter den Zeiger, sobald die Zieh-Schwelle überschritten ist. Ein Klick neben die Mitte
+  verschiebt ihn also nicht mehr.
+- **Time-Feld** zieht relativ zur Länge (`duration / 200` pro Pixel statt fest 5 ms). **Value-Feld**
+  für Floats nimmt die Grenzen der Eigenschaft (`UIPropDesc::minV/maxV`, Render Opacity 0..1) mit
+  `AlwaysClamp` und zieht über 200 px den ganzen Bereich. Der Nebenbefund (Opacity springt auf −7
+  oder 12 und wird geklemmt) ist damit weg.
+- Hilfe-Einträge für `|<`, `>|` und „Key at End“, der Eintrag zu „Key“ nennt das Einrasten.
+
+*Die Daten des Menschen* (`~/HorizonEngineProjects/Catania/Content/UI/Startup.hasset`, nicht in
+diesem Repository) sind nicht angefasst. Reparatur im Designer: Den Key bei 0,05 s ans Ende ziehen (er
+rastet ein) oder in sein Time-Feld 1 tippen.
+
+*Tests.* `Timeline snap: a pointer near a moment people aim at lands on it (Thema 107)`
+(`test_ui_widgets.cpp`, reine Arithmetik) und `repro 107: the timeline puts an end key exactly at the end`
+(`test_widget_designer_ui.cpp`, echte Timeline headless bedient). Der zweite öffnet den Clip über die
+Combo, wählt die Spur und drückt „Key at End“ (Key exakt bei 1,0). Dann zieht er den Key weg, mit Alt
+zurück bis 3 px vor das Ende (bleibt bei ≈ 0,994 s, die Kontrolle), klickt ohne Weg (Key bleibt liegen)
+und zieht ohne Alt wieder hin (rastet auf 1,0). Der Fakten-Test `repro 107: the user's Render Opacity
+clip is over in three frames` bleibt unverändert grün, weil die Laufzeit sich nicht geändert hat.
 
 ## Unabhängigkeit
 
