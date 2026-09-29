@@ -1,0 +1,110 @@
+[01:25:58.789] [ INFO] [Core       ] [Main    ] [f      0] ==================== HorizonEngine ====================
+[01:25:58.789] [ INFO] [Core       ] [Main    ] [f      0] Application : HorizonEngine
+[01:25:58.789] [ INFO] [Core       ] [Main    ] [f      0] Started     : 2026-09-30 01:25:58
+[01:25:58.789] [ INFO] [Core       ] [Main    ] [f      0] Build       : Release | Clang 21.0.0 (clang-2100.3.34.2) | C++202002 | built Sep 30 2026 00:11:16
+[01:25:58.789] [ INFO] [Core       ] [Main    ] [f      0] Platform    : macOS — Darwin 27.0.0 (arm64)
+[01:25:58.789] [ INFO] [Core       ] [Main    ] [f      0] CPU         : Apple M5 (10 hardware threads)
+[01:25:58.789] [ INFO] [Core       ] [Main    ] [f      0] Memory      : 24576 MB physical
+[01:25:58.790] [ INFO] [Core       ] [Main    ] [f      0] Process     : pid 64828
+[01:25:58.790] [ INFO] [Core       ] [Main    ] [f      0] Working dir : /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor
+[01:25:58.790] [ INFO] [Core       ] [Main    ] [f      0] Executable  : /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/HorizonEditor
+[01:25:58.790] [ INFO] [Core       ] [Main    ] [f      0] Log filter  : default (Info)
+[01:25:58.790] [ INFO] [Core       ] [Main    ] [f      0] =======================================================
+[01:25:58.790] [ INFO] [Config     ] [Main    ] [f      0] Config loaded: RHI=4, lastProject='/private/tmp/b3proj/Test/Test.heproj', 1 known project(s), 6 custom entrie(s)
+[01:25:58.790] [ INFO] [Core       ] [Main    ] [f      0] Content root: /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Content
+[01:25:58.793] [ INFO] [Core       ] [Main    ] [f      0] Configuration: backend=Metal, window='Horizon Engine Editor  0.5.0 "Parhelion"' 1600x900 mode=0, vsync=on, fixedTimestep=0.0167 s, maxFixedSteps=5
+[01:25:59.553] [ INFO] [Core       ] [Main    ] [f      0] Splash: 520x268 points at 2.00x via 'metal'
+[01:25:59.616] [ INFO] [Window     ] [Main    ] [f      0] SDL 3.2.14 initialised, video driver 'cocoa'
+[01:25:59.710] [ INFO] [Window     ] [Main    ] [f      0] Primary window created: 1600x900 logical, 3200x1800 pixels, display scale 2.00, backend 4, vsync on, display 'Built-in Retina Display'
+[01:25:59.710] [ INFO] [Core       ] [Main    ] [f      0] Window created
+[01:25:59.710] [ INFO] [Core       ] [Main    ] [f      0] Window size: 1600x900 logical, 3200x1800 pixels (HiDPI scale 2.000000)
+[01:25:59.779] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: creating renderer
+[01:25:59.779] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+[01:25:59.779] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: ray-traced GI supported (hardware ray tracing)
+[01:25:59.779] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: MetalFX present but off — set HE_METALFX=1 to try it (see A5)
+[01:26:11.032] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+[01:26:11.032] [ INFO] [Core       ] [Main    ] [f      0] Renderer initialized
+[01:26:11.099] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication::OnInit — initialising ImGui
+[01:26:11.100] [ INFO] [Editor     ] [Main    ] [f      0] Editor layout file: /tmp/b3_cfg/imgui.ini
+[01:26:11.100] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: fonts loaded from /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Fonts/Roboto_Condensed-Bold.ttf
+[01:26:11.101] [ INFO] [Config     ] [Main    ] [f      0] Engine content folder refreshed.
+[01:26:11.125] [ INFO] [Editor     ] [Main    ] [f      0] Initialized ImGui Metal backend
+[01:26:11.125] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication::OnInit — ImGui backend ready
+[01:26:11.141] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: logo loaded from /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/HC_Logo.png
+[01:26:11.143] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Folder.png
+[01:26:11.146] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Material.png
+[01:26:11.147] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Model2D.png
+[01:26:11.149] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Model3D.png
+[01:26:11.152] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Script.png
+[01:26:11.153] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Sound.png
+[01:26:11.155] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Texture.png
+[01:26:11.157] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Scene.png
+[01:26:11.158] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Play.tga
+[01:26:11.158] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Stop.tga
+[01:26:11.158] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/undo.png
+[01:26:11.158] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/redo.png
+[01:26:11.160] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/MaterialFunction.png
+[01:26:11.162] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Shader.png
+[01:26:11.164] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Prefab.png
+[01:26:11.165] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/AnimationClip.png
+[01:26:11.167] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/PropertyAnimClip.png
+[01:26:11.168] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Widget.png
+[01:26:11.170] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/HorizonCodeClass.png
+[01:26:11.171] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/InputAction.png
+[01:26:11.173] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/InputMappingContext.png
+[01:26:11.175] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/ParticleSystem.png
+[01:26:11.177] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/AnimatorStateMachine.png
+[01:26:11.179] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: icon loaded — /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/Font.png
+[01:26:11.198] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: moon texture loaded from /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/Images/moon.png
+[01:26:11.291] [ INFO] [Audio      ] [Main    ] [f      0] Audio engine ready: 48000 Hz, 2 channel(s)
+[01:26:11.291] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: HorizonWorld created and registered
+[01:26:11.292] [ INFO] [Config     ] [Main    ] [f      0] Project 'Test' loaded from '/private/tmp/b3proj/Test/Test.heproj': id e5d92eced15e48a2ae3b93f34e825fa5, language HorizonCode, 2 export profile(s), startup scene '/private/tmp/b3proj/Test/Content/StartupScene.hescene'
+[01:26:11.293] [ INFO] [Config     ] [Main    ] [f      0] Engine content folder refreshed.
+[01:26:11.314] [ INFO] [SourceControl] [t954f   ] [f      0] No git repository found at or above /private/tmp/b3proj/Test
+[01:26:11.355] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: indexed 34 content assets
+[01:26:11.363] [ INFO] [Serialize  ] [Main    ] [f      0] Scene loaded (JSON): '/private/tmp/b3proj/Test/Content/StartupScene.hescene', 4 entity/-ies
+[01:26:11.367] [ INFO] [Asset      ] [Main    ] [f      0] Preloaded 1 scene asset reference(s)
+[01:26:11.725] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: on-disk material pipeline archive disabled (MTLBinaryArchive serialize is unstable on this macOS; in-session cache still active)
+[01:26:11.726] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: warmed up 1 material pipeline(s)
+[01:26:11.726] [ INFO] [Editor     ] [Main    ] [f      0] EditorApplication: startup scene loaded from /private/tmp/b3proj/Test/Content/StartupScene.hescene
+[01:26:11.726] [ INFO] [Core       ] [Main    ] [f      0] OnInit complete — entering main loop
+[01:26:11.726] [ WARN] [ContentSync] [t210d   ] [f      0] EngineContent: SFTP endpoint not configured — this build has no host/username compiled in, so the Engine folder shows local content only. Fill in cmake/EngineContentCredentials.cmake (copy the .template) and configure again.  (SftpProbe.cpp:25)
+[01:26:11.728] [ INFO] [ContentSync] [t210d   ] [f      0] EngineContent manifest loaded from the local cache (69 entries)
+[01:26:11.730] [ INFO] [Config     ] [t210d   ] [f      0] Engine content folder refreshed.
+[01:26:11.752] [ INFO] [Net        ] [te60f   ] [f      0] UPnP: gateway found at 192.168.178.1 via 192.168.178.92 (service urn:schemas-upnp-org:service:WANIPConnection:1)
+[01:26:11.969] [ INFO] [SourceControl] [t074e   ] [f      0] git 2.54.0 (/usr/bin/git), lfs 3.7.1, identity set, credential helper osxkeychain
+[01:26:11.994] [ INFO] [Core       ] [Main    ] [f      0] Primary window shown as the main loop starts
+[01:26:11.994] [ INFO] [Core       ] [Main    ] [f      0] HE_PERF_INPUT_LATENCY_HZ=1000: pushing timestamped events from a thread, measuring after frame 300
+[01:26:11.994] [ INFO] [RHI        ] [Main    ] [f      1] Metal: drawable acquired after the encode (HE_MTL_EARLY_DRAWABLE=0)
+[01:26:12.002] [ INFO] [Net        ] [Main    ] [f      1] LAN: listening on port 47823, multicast group 239.255.42.99 via 192.168.178.92 (joined)
+[01:26:12.025] [ INFO] [Editor     ] [Main    ] [f      1] [Outliner] rebuilt: 4 nodes
+[01:26:12.027] [ INFO] [RHI        ] [Main    ] [f      1] Metal: GPU timing — whole-frame + detailed-capture; counter sampling stage-boundary only
+[01:26:12.028] [ INFO] [RHI        ] [Main    ] [f      1] MetalRenderer: uploaded mesh 'terrain_chunk' (4481 verts)
+[01:26:12.030] [ INFO] [RHI        ] [Main    ] [f      1] (previous message repeated 3 more times)
+[01:26:12.030] [ INFO] [RHI        ] [Main    ] [f      1] Metal: scene render size 2840x1358 (output 2840x1358, render scale 1.00, offscreen viewport, window 2840x1528)
+[01:26:12.030] [ INFO] [RHI        ] [Main    ] [f      1] MetalRenderer: scene pass mode → forward
+[01:26:12.031] [ INFO] [Job        ] [Main    ] [f      1] ThreadPool starting with 10 worker(s)
+[01:26:12.290] [ INFO] [Config     ] [Main    ] [f      2] Content folder refreshed.
+[01:26:12.290] [ INFO] [Config     ] [Main    ] [f      2] Number of folders: 10
+[01:26:12.290] [ INFO] [Config     ] [Main    ] [f      2] Number of files: 1
+[01:26:12.291] [ INFO] [Config     ] [Main    ] [f      2] Engine content folder refreshed.
+[01:26:12.301] [ INFO] [RHI        ] [Main    ] [f      2] Metal: scene render size 1718x884 (output 1718x884, render scale 1.00, offscreen viewport, window 2840x1528)
+[01:26:19.588] [ INFO] [Core       ] [Main    ] [f    300] Profiler: start requested (F9, vsync off)
+[01:26:19.589] [ INFO] [Core       ] [Main    ] [f    300] HE_PROFILE_CAPTURE: recording 600 frames (normal GPU, vsync forced off) — lat-early0-vsyncoff-run2 | display 1440x932 @60.000000 Hz, density 2.000000
+[01:26:19.591] [ INFO] [Profiler   ] [Main    ] [f    300] Profiler: capture started
+[01:26:33.812] [ INFO] [Core       ] [Main    ] [f    900] Profiler: stop requested (F9)
+[01:26:33.982] [ INFO] [Profiler   ] [Main    ] [f    900] Profiler: wrote /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/dumps/profile_20260930_012633.json
+[01:26:34.020] [ INFO] [Profiler   ] [Main    ] [f    900] Profiler: capture stopped — 600 frames
+[01:26:34.030] [ INFO] [Core       ] [Main    ] [f    900] HE_PERF_INPUT_LATENCY (so far): 14420 events over 600 frames (from frame 301, pushed 998 Hz) | event->commit p50 25.70 p90 56.60 p99 70.50 ms | event->poll p50 18.31 p90 51.07 | poll->commit p50 2.27 p90 3.78
+[01:26:34.031] [ INFO] [Core       ] [Main    ] [f    900] Profiler dump written: /Users/connorjansen/VSCode/HorizonEngine/.claude/worktrees/claude-perf-input-zu-present-latenz-pipe/out/deploy/Editor/dumps/profile_20260930_012633.json
+[01:26:34.034] [ INFO] [Core       ] [Main    ] [f    902] HE_PROFILE_CAPTURE: capture dumped — leaving cleanly
+[01:26:34.132] [ INFO] [Core       ] [Main    ] [f    902] HE_PERF_INPUT_LATENCY (final): 14470 events over 602 frames (from frame 301, pushed 998 Hz) | event->commit p50 25.43 p90 56.59 p99 70.50 ms | event->poll p50 18.23 p90 51.07 | poll->commit p50 2.27 p90 3.78
+[01:26:34.132] [ INFO] [Core       ] [Main    ] [f    902] Main loop exited — shutting down
+[01:26:34.132] [ INFO] [Editor     ] [Main    ] [f    902] EditorApplication::OnShutdown — shutting down ImGui
+[01:26:34.133] [ INFO] [Audio      ] [Main    ] [f    902] Audio engine shutting down (0 active voice(s), 0 bus(es))
+[01:26:34.202] [ INFO] [RHI        ] [Main    ] [f    902] MetalRenderer: shutdown
+[01:26:34.213] [ INFO] [Window     ] [Main    ] [f    902] Primary window destroyed
+[01:26:34.217] [ INFO] [Core       ] [Main    ] [f    902] Application shutdown complete
+[01:26:34.218] [ INFO] [Core       ] [Main    ] [f    902] Application destructor called
+[01:26:34.219] [ INFO] [Core       ] [Main    ] [f    902] Application shutdown complete
+[01:26:34.219] [ INFO] [Core       ] [Main    ] [f    902] Session summary: 35.4 s uptime, 902 frames, 1 warning(s), 0 error(s), 0 critical
