@@ -2211,6 +2211,85 @@ TEST_CASE("specular AA widening: the numbers the shader copies implement")
 	CHECK(widen(0.95f, 1.0f, 10.0f) >= 0.95f);
 }
 
+TEST_CASE("Dome clouds: Metal and GL march and shadow them the same way")
+{
+	// Perf audit A1/A3 (Thema 103). The sky-dome clouds (cloudMode 0) are written
+	// out twice: Metal's kSkyMSL and GL's SkyShaderSource.h, which D3D and Vulkan
+	// cross-compile. Both skip the rays the horizon fade zeroes, size the step
+	// budget by that fade, and cast the cloud-shadow map from the dome's own
+	// field. Drift is invisible: nothing fails to build, one backend just marches
+	// more steps or darkens the ground from a different field than the other.
+	// Each pattern is anchored on its neighbour line, because both files carry
+	// other `horizon` fades and dir.y early-outs (3D clouds, aurora, cirrus).
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("sky shader sources not found - drift comparison skipped");
+		return;
+	}
+	const std::string gl  = stripLineComments(readFile(root / "src" / "HE_Rendering" / "include" /
+	                                                   "HorizonRendering" / "SkyShaderSource.h"));
+	const std::string mtl = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "Backends" / "Metal" / "MetalRenderer.mm"));
+	checkGroup({ "SkyShaderSource.h (GL)", "MetalRenderer.mm" }, { gl, mtl }, {
+		{ "early-out where the fade is 0",
+		  { R"(if \(dir\.y < ([0-9.]+)\) return baseSky;\s*int qBaseN)" } },
+		{ "horizon fade",
+		  { R"(float horizon = smoothstep\(([0-9.]+), ([0-9.]+), dir\.y\);\s*float s0 = kCloudBase)" } },
+		{ "fade-coupled step budget",
+		  { R"(N = max\(qBaseN, int\(float\(N\) \* ([^;]+)\)\);)" } },
+		{ "dome shadow: dome units per cloudH",
+		  { R"((domeMid) = midY / cloudH;\s*\w+\s+dxz\s+= xz / cloudH;)" } },
+		{ "dome shadow: sun-march steps",   { R"(const int MD = ([0-9]+);)" } },
+		{ "dome shadow: density field",     { R"(dens \+= (cloudShadowDensity)\(dp,)" } },
+		{ "dome shadow: optical depth",     { R"(exp\(-dens \* dds \* ([0-9.]+) \* densMul\))" } },
+		// The shadow's normalisation must stay the one the view march uses, or a
+		// cloud's ground shadow stops being as dark as the cloud looks opaque.
+		{ "dome view march: optical depth",
+		  { R"(float opticalDepth = dens \* ds \* ([0-9.]+) \* clamp\()" } },
+	});
+
+	// The budget formula itself (both copies, pinned above): above the fade band
+	// it is the old count, inside it never exceeds the old count nor drops under
+	// the base count, and over a landscape view's sky it saves a real share.
+	auto smooth = [](float a, float b, float x) {
+		const float t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+		return t * t * (3.0f - 2.0f * t);
+	};
+	auto oldN = [](float y, int base, int maxN) {
+		return static_cast<int>(std::clamp(static_cast<float>(base) / std::max(y, 0.12f),
+		                                   static_cast<float>(base), static_cast<float>(maxN)));
+	};
+	auto newN = [&](float y, int base, int maxN) {
+		if (y < 0.03f) return 0;                       // early-out, nothing marched
+		const int n = oldN(y, base, maxN);
+		return std::max(base, static_cast<int>(static_cast<float>(n) *
+		                                       std::sqrt(std::sqrt(smooth(0.03f, 0.22f, y)))));
+	};
+	const int kQuality[3][2] = { { 8, 18 }, { 12, 32 }, { 16, 64 } };
+	for (const auto& q : kQuality)
+	{
+		for (float y = 0.22f; y <= 1.0f; y += 0.01f)
+			CHECK(newN(y, q[0], q[1]) == oldN(y, q[0], q[1]));
+		for (float y = 0.03f; y < 0.22f; y += 0.001f)
+		{
+			CHECK(newN(y, q[0], q[1]) <= oldN(y, q[0], q[1]));
+			CHECK(newN(y, q[0], q[1]) >= q[0]);
+		}
+		// The audit's landscape camera: pitch -0.25 rad, vertical FOV 60°, 884 rows.
+		long before = 0, after = 0;
+		for (int r = 0; r < 884; ++r)
+		{
+			const float ndc = 1.0f - 2.0f * (static_cast<float>(r) + 0.5f) / 884.0f;
+			const float y   = std::sin(-0.25f + std::atan(ndc * std::tan(0.5236f)));
+			if (y >= 0.02f) before += oldN(y, q[0], q[1]);   // the old 0.02 early-out
+			after += newN(y, q[0], q[1]);
+		}
+		CHECK(static_cast<double>(after) < 0.85 * static_cast<double>(before));
+	}
+}
+
 // ─── OcclusionCuller ──────────────────────────────────────────────────────────
 // The rules the culler must honour, each as a scene: a wall in front of the
 // camera and something behind it. "Kept" is the conservative answer, so every
