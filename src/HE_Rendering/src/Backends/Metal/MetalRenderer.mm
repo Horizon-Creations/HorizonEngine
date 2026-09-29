@@ -6032,6 +6032,9 @@ void MetalRenderer::Shutdown()
 	for (auto& [k, tex] : m_graphTexCache)
 		if (tex) CFBridgingRelease(tex);
 	m_graphTexCache.clear();
+	for (auto& [k, tex] : m_uiTexCache)
+		if (tex) CFBridgingRelease(tex);
+	m_uiTexCache.clear();
 
 	DestroyViewportTarget();
 	DestroyHDRTarget();
@@ -8303,7 +8306,7 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 // Upload a TextureAsset (RGBA8 or a cooked ASTC/BC7/BC3 block format) into a
 // retained id<MTLTexture>, or nullptr when unusable / this GPU can't sample the
 // shipped format. Defined below; forward-declared so the mesh uploads can share it.
-static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex);
+static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, bool honourSrgb = true);
 
 const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId)
 {
@@ -8507,15 +8510,17 @@ static bool metalTexPixelFormat(id<MTLDevice> device, TextureFormat fmt, bool sr
 
 // Upload a TextureAsset into a retained id<MTLTexture> (nullptr if unusable or this
 // GPU can't sample the shipped format). Shared by the material base texture, the
-// node-graph project textures, and both mesh uploads.
-static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex)
+// node-graph project textures, and both mesh uploads. honourSrgb = false uploads
+// an sRGB-flagged texture as its plain Unorm twin (bytes sampled as they are):
+// the UI pass wants that, see ResolveUITexture.
+static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, bool honourSrgb)
 {
 	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
 		return nullptr;
 	const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
 
 	MTLPixelFormat pf = MTLPixelFormatRGBA8Unorm; bool isBlock = false, supported = false;
-	if (!metalTexPixelFormat(device, tex->format, tex->srgb, pf, isBlock, supported) || !supported)
+	if (!metalTexPixelFormat(device, tex->format, tex->srgb && honourSrgb, pf, isBlock, supported) || !supported)
 		return nullptr; // unknown format, or this GPU can't sample it → flat
 
 	MTLTextureDescriptor* desc = [MTLTextureDescriptor
@@ -8580,6 +8585,25 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
 		m_contentManager->resolveTextureRef(texId, path));
 	m_graphTexCache.emplace(key, retained);
+	return retained;
+}
+
+// The image of a UI quad (Image widget, textured Border/Button). Its own cache,
+// uploaded WITHOUT the sRGB decode: UI colours are sRGB numbers end to end (the
+// swapchain is BGRA8Unorm, nothing encodes on write), so an _sRGB texture would
+// come out linear-decoded and too dark ("the orange logo turns red", Thema 107).
+// Raw bytes in = raw bytes out, exactly what the widget designer shows. Not
+// shared with m_graphTexCache on purpose: a material samples the same asset in
+// linear light, which is right there.
+void* MetalRenderer::ResolveUITexture(const HE::UUID& texId, const std::string& path)
+{
+	const std::string key = texId != HE::UUID{}
+		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
+	if (key.empty() || !m_contentManager) return nullptr;
+	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
+	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
+		m_contentManager->resolveTextureRef(texId, path), /*honourSrgb=*/false);
+	m_uiTexCache.emplace(key, retained);
 	return retained;
 }
 
@@ -12442,7 +12466,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 		bool textured = false;
 		if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
 		{
-			if (void* t = ResolveGraphTexture(obj.textureAssetId, std::string()))
+			if (void* t = ResolveUITexture(obj.textureAssetId, std::string()))
 			{
 				[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:0];
 				boundAtlasKey = 0xFFFFFFFFu;   // not a font atlas any more
@@ -15351,15 +15375,17 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			m_pendingMeshInvalidations.clear();
 
 			// Same for textures rewritten in place (landscape weightmap paints).
-			// m_graphTexCache is keyed by "hi:lo" for UUID-resolved entries.
+			// m_graphTexCache (and m_uiTexCache, the UI-pass twin) is keyed by
+			// "hi:lo" for UUID-resolved entries.
 			for (const HE::UUID& id : m_pendingTexInvalidations)
 			{
 				const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
-				if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
-				{
-					if (it->second) RetireTexture(it->second);
-					m_graphTexCache.erase(it);
-				}
+				for (auto* cache : { &m_graphTexCache, &m_uiTexCache })
+					if (auto it = cache->find(key); it != cache->end())
+					{
+						if (it->second) RetireTexture(it->second);
+						cache->erase(it);
+					}
 			}
 			m_pendingTexInvalidations.clear();
 		}

@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 // ── The timeline's arithmetic ────────────────────────────────────────────────
 // docs/he-apps-plan.md B8. Pulled out of the panel because it is the only part
@@ -87,5 +88,33 @@ struct UITimelineView
 		clampScroll();
 	}
 };
+
+// The moment a pointer at `t` MEANS: the nearest of `targets` within
+// `tolerance` seconds, or `t` itself when none is that close.
+//
+// Thema 107: a fade authored as "0 at the start, 1 at the end" came out as a
+// key at 0.0503 s in a one-second clip, because a pointer dropped "at the end"
+// of a lane lands wherever the hand stopped — and a clip ends at its last key,
+// so the fade was over in three frames. The ends of the clip, the other keys
+// and the playhead are the moments a person aims at; a few pixels either side
+// of one of them is that moment, not a new one next to it.
+//
+// The tolerance is in SECONDS so this stays arithmetic; the caller turns its
+// pixel radius into time with the view's pixelsPerSecond(), which is what makes
+// the pull the same few pixels at every zoom.
+inline float uiTimelineSnap(float t, const std::vector<float>& targets, float tolerance)
+{
+	float best = t, bestD = tolerance;
+	bool  found = false;
+	for (float c : targets)
+	{
+		// "<=" for the first hit so a pointer exactly one tolerance away still
+		// lands; after that only a strictly nearer one replaces it, so of two
+		// equally near targets the first listed wins.
+		const float d = std::fabs(c - t);
+		if (found ? d < bestD : d <= bestD) { best = c; bestD = d; found = true; }
+	}
+	return best;
+}
 
 }

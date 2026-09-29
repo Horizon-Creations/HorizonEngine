@@ -122,6 +122,22 @@ float uiAnimPlayEnd(const UIAnimClip& clip)
     return std::min(last, std::max(clip.duration, 0.0f));
 }
 
+bool uiAnimStretchToLength(UIAnimClip& clip)
+{
+    const float end = uiAnimPlayEnd(clip);
+    // Half a millisecond is the same "already there" the timeline uses to decide
+    // whether to grey a tail out; below it there is nothing a person could see.
+    if (end <= 0.0f || end >= clip.duration - 0.0005f) return false;
+    const float f = clip.duration / end;
+    for (UIAnimTrack& tr : clip.tracks)
+        for (UIAnimKey& k : tr.keys)
+            // The last key(s) set, not multiplied: end * (duration / end) can
+            // come out a hair short in float, and a key a hair short of the end
+            // is the very thing this is here to repair.
+            k.time = k.time >= end ? clip.duration : k.time * f;
+    return true;
+}
+
 namespace
 {
     // The value between two keys, or one key's value where there is nothing to

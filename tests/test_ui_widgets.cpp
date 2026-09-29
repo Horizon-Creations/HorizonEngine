@@ -6947,6 +6947,46 @@ TEST_CASE("Clips: playing stops at the last key, not at the authored length")
     CHECK(HE::uiAnimPlayEnd(empty) == doctest::Approx(0.0f));
 }
 
+// The repair for Thema 107: a fade keyed 0 → 50 ms in a one-second clip plays as
+// a pop. Stretching puts the last key on the length and keeps the proportions.
+TEST_CASE("Clips: stretching to the length puts the last key on the end")
+{
+    // The user's clip: Render Opacity 0 at 0 s, 1 at 0.0503 s, length 1 s.
+    HE::UIAnimClip c = fadeClip(1, "Blend", 0.0f, 1.0f, /*dur=*/0.0503144654f);
+    c.duration = 1.0f;
+    // A second track with a key in the middle of the motion, to see that the
+    // gaps keep their proportions across tracks.
+    HE::UIAnimTrack tr;
+    tr.element = 1; tr.prop = "Render Opacity";
+    tr.keys.push_back({ 0.0251572327f, HE::UIPropValue::ofFloat(0.5f), HE::UIEase::Linear });
+    c.tracks.push_back(tr);
+    REQUIRE(HE::uiAnimPlayEnd(c) == doctest::Approx(0.0503144654f));
+
+    REQUIRE(HE::uiAnimStretchToLength(c));
+    CHECK(c.tracks[0].keys.front().time == 0.0f);
+    CHECK(c.tracks[0].keys.back().time == 1.0f);          // exactly, not a hair short
+    CHECK(c.tracks[1].keys[0].time == doctest::Approx(0.5f));
+    CHECK(HE::uiAnimPlayEnd(c) == 1.0f);
+    // Values are untouched: halfway through the length is halfway through the fade.
+    std::vector<HE::UIAnimSample> s;
+    HE::uiAnimEvaluate(c, 0.5f, s);
+    REQUIRE_FALSE(s.empty());
+    CHECK(s[0].value.f == doctest::Approx(0.5f));
+
+    // Already on the end: nothing to do, and nothing moved.
+    CHECK_FALSE(HE::uiAnimStretchToLength(c));
+    CHECK(c.tracks[0].keys.back().time == 1.0f);
+
+    // Nothing past zero (only a key at 0, or no keys) has no motion to spread,
+    // and dividing by that zero must not happen.
+    HE::UIAnimClip still = fadeClip(1, "Still", 0.0f, 1.0f, 0.0f);
+    still.duration = 2.0f;
+    CHECK_FALSE(HE::uiAnimStretchToLength(still));
+    CHECK(still.tracks[0].keys.back().time == 0.0f);
+    HE::UIAnimClip empty; empty.duration = 2.0f;
+    CHECK_FALSE(HE::uiAnimStretchToLength(empty));
+}
+
 TEST_CASE("Clips: the runtime ends one at its last key, and loops there too")
 {
     TempWidgetDir dir;
@@ -13405,6 +13445,39 @@ TEST_CASE("Timeline view: the right edge never runs past the clip")
     v.duration = 1.0f;
     v.clampScroll();
     CHECK(v.scroll == doctest::Approx(0.5f));
+}
+
+TEST_CASE("Timeline snap: a pointer near a moment people aim at lands on it (Thema 107)")
+{
+    // The fade from Thema 107: a one-second clip, a key at 0, a lane 795 px
+    // wide. Dropping the second key "at the end" leaves the hand a few pixels
+    // short of it — at 1 s over 795 px, 6 px is 7.5 ms.
+    HE::Ed::UITimelineView v{ 0.0f, 795.0f, 1.0f };
+    const float tol = 6.0f / v.pixelsPerSecond();
+    const std::vector<float> targets{ 0.0f, 1.0f };
+
+    CHECK(HE::Ed::uiTimelineSnap(v.tOf(791.0f), targets, tol) == 1.0f);   // 4 px short
+    CHECK(HE::Ed::uiTimelineSnap(v.tOf(3.0f),   targets, tol) == 0.0f);
+    // Nowhere near anything: the pointer's own moment, untouched. This is the
+    // 0.0503 s the user's key ended up at — 40 px in, a real choice, not a slip.
+    const float mid = v.tOf(40.0f);
+    CHECK(HE::Ed::uiTimelineSnap(mid, targets, tol) == doctest::Approx(40.0f / 795.0f));
+
+    // The nearer of two wins, whichever order they are listed in.
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, { 0.46f, 0.52f }, 0.05f) == 0.52f);
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, { 0.52f, 0.46f }, 0.05f) == 0.52f);
+    // Exactly one tolerance away still counts; nothing listed changes nothing.
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, { 0.75f }, 0.25f) == 0.75f);
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, {}, 0.25f) == 0.50f);
+
+    // The pull is the same few PIXELS at every zoom: zoomed 20x, the same
+    // 6 px are a twentieth of the time, so a key 10 ms from the end — plainly
+    // separate on screen — is no longer dragged onto it.
+    v.zoom = 20.0f;
+    v.scroll = v.maxScroll();
+    const float tolZoomed = 6.0f / v.pixelsPerSecond();
+    CHECK(HE::Ed::uiTimelineSnap(0.99f, targets, tolZoomed) == 0.99f);
+    CHECK(HE::Ed::uiTimelineSnap(0.9997f, targets, tolZoomed) == 1.0f);
 }
 
 TEST_CASE("Timeline view: playback brings the playhead back into view")
