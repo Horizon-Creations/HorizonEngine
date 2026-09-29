@@ -188,8 +188,10 @@ grep "HE_PERF_INPUT_LATENCY (final)" docs/perf-audit/raw-b3/lat-*.log
 python3 docs/perf-audit/raw-b3/lat_analysis.py   # Tabelle + Takt-Auswertung (braucht die *.profile.json)
 ```
 
-Rohdaten: `docs/perf-audit/raw-b3/lat-*.log` und `lat-*.summary.json`. Die `lat-*.profile.json` (je ~5 MB)
-sind wie in Schritt 1 nicht eingecheckt.
+Rohdaten: `docs/perf-audit/raw-b3/lat-*.log` (mit `git add -f` eingecheckt, `*.log` ist global ignoriert)
+und `lat-*.summary.json`. Die `lat-*.profile.json` (je ~5 MB) sind wie in Schritt 1 nicht eingecheckt,
+ohne sie druckt `lat_analysis.py` nur die Tabelle. Die Logs von Schritt 1 (`early*.log`) sind wegen
+derselben Regel nie im Repo gelandet, nur deren `summary.json`.
 
 ## Übertragbarkeit auf die anderen Backends (Befund, nicht umgesetzt)
 
