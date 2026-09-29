@@ -424,6 +424,10 @@ TEST_CASE("JobSystem tasks are named on the worker lanes, not all 'Job::Execute'
                                "TestCullChunk");
     // A direct submit keeps its own label too.
     globalPool().submit([]{ /* nothing */ }, "TestDirectJob").get();
+    // The future is ready INSIDE the task, but the worker closes the span's scope
+    // only after the task returns — so get() can return before the span is on the
+    // lane (seen on a loaded Linux runner). Drain so it is recorded before endFrame.
+    drainPool();
 
     prof.endFrame();
 
