@@ -132,13 +132,14 @@ Rein-/Rausspringen, im Designer genauso wie im Spiel.
 - Key bei 0,0503 s: `f1=0.33 f2=0.66 f3=0.99 f4=1.00 … f60=1.00`
 - Key bei 1,0 s: `f1=0.02 f4=0.07 f10=0.17 f30=0.50 f60=1.00`
 
-**Wie kam der Key auf 0,05 s?** Aus den Daten nicht beweisbar. Zwei Kandidaten im Code:
-- Das „Time“-Feld im Key-Editor zieht mit **5 ms pro Pixel** (`UIEditorPanel.cpp:2615`,
-  `DragFloat("Time", &key.time, 0.005f, ...)`): 10 px Ziehen = 0,05 s. Wer „ans Ende ziehen“ will,
-  bräuchte 200 px.
-- Key-Ziehen in der Spur oder Scrubben im Lineal setzt `view.tOf(mouse.x)` (`:2976`, `:3032`), mit
-  Schwelle `IsMouseDragging` (ein paar Pixel). Ein kleines Ziehen am ersten Key macht daraus einen Key
-  knapp hinter 0.
+**Wie kam der Key auf 0,05 s?** Aus einer **Maus-Geste in Spur oder Lineal**: Key-Ziehen bzw.
+Scrubben mit anschließendem „Key“ setzt `view.tOf(mouse.x)` (`UIEditorPanel.cpp:2976`, `:3032`).
+0,0503144654 = 40/795, also etwa 40 px auf einer rund 795 px breiten Spur bei Zoom 1.
+Das „Time“-Feld im Key-Editor (`:2615`, `DragFloat(..., 0.005f, ..., "%.3f s")`) scheidet aus: ImGui
+rundet beim Ziehen auf das Anzeigeformat (`imgui_widgets.cpp:2621`, kein `NoRoundToFormat`), dort
+wäre exakt 0,050 herausgekommen, nicht 0,050314…. Vermutlich wurde der zweite Key knapp neben dem
+ersten angelegt oder beim Anklicken ein Stück mitgezogen (Schwelle `IsMouseDragging`, wenige Pixel),
+statt ans Ende der 1-s-Spur gesetzt zu werden.
 
 Dazu kommt ein Darstellungsproblem: Die Timeline zeigt die volle `duration` (1 s). Dass der Clip
 schon bei 0,05 s endet, sieht man nicht, obwohl die Laufzeit dort aufhört.
