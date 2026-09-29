@@ -10,6 +10,8 @@ Nachtrag Schritt 2: Fix für **(1) + (4)** umgesetzt, siehe „Fix (Schritt 2, u
 Abschnitt (1) + (4).
 Nachtrag Schritt 3: Fix für **(2)** umgesetzt, siehe „Fix (Schritt 3, umgesetzt)“ im Abschnitt (2).
 Nachtrag Schritt 5: Fix für **(3)** umgesetzt, siehe „Fix (Schritt 5, umgesetzt)“ im Abschnitt (3).
+Nachtrag Schritt 6: Vollbau, volle Suite und Gesamtprüfung aller vier Fixes, siehe
+„Gesamtprüfung (Schritt 6)“ am Ende.
 
 ## Kurzfassung
 
@@ -267,3 +269,62 @@ clip is over in three frames` bleibt unverändert grün, weil die Laufzeit sich 
   der Designer künftig eine GPU-Textur mit sRGB-Format zeigen, müsste er ebenfalls in einer Unorm-Sicht
   abtasten, sonst kippt er auf dieselbe Seite wie das Spiel.
 - 3: unabhängig, Autorendaten plus Timeline-UX.
+
+## Gesamtprüfung (Schritt 6)
+
+Stand 29.09.2026, Zweig auf `4bcf020c` plus der Test unten. Debug, macOS, alles im Vordergrund
+abgewartet und selbst gelesen.
+
+**Vollbau.** `cmake --build build -j8`, rc = 0, 0 Fehler. Alle Objekte der geänderten Quellen sind
+jünger als ihre Quellen, es gibt also keine veralteten `.o`.
+
+**Volle Suite.** `ctest -j4` im Build-Verzeichnis: **100 % bestanden, 220 von 220**. Übersprungen sind
+nur die drei `runtime_size*`, wie immer im Debug-Build. Laufzeit 691 s. Nach dem neuen Fall liefen
+`test_widget_designer_ui`, `test_ui_widgets` und `test_culling` noch einmal, 3 von 3 grün, diesmal ohne
+`HE_REPRO107_LOGO`, also mit dem generierten Bild wie auf CI.
+
+**Alle vier auf einer Leinwand.** Neuer Fall `repro 107: all four fixes together on one canvas`
+(`tests/test_widget_designer_ui.cpp`). Die einzige Stelle, an der sich die Fixes treffen können, ist
+die Leinwand: Die Deckkraft der Blende (3) läuft als Tint-Alpha (`uiElementEffectiveOpacity`) über den
+neuen Bildpfad `AssetThumbnailCache::image` (1 + 4). Der Fall baut die Catania-Seite nach, mit dem Logo
+550 × 550 und dem Clip „Blend“ des Menschen mit Key (0 s → 0) und (0,0503 s → 1). Dann bedient er den
+echten Designer wie ein Mensch: Clip über die Combo öffnen, `|<`, `Play`, etwa eine halbe Sekunde
+laufen lassen, `Stop`, `>|`. Das geschieht einmal wie authored und einmal nach „Stretch to Length“.
+Gemessen wird nur im Leinwand-Fenster. Pixel, die sich zwischen Anfang und Ende um mehr als 24 ändern,
+müssen zur halben Zeit zwischen beiden liegen.
+
+Ergebnis mit dem echten Catania-Logo (`HE_REPRO107_LOGO=…/Catania/Content/UI/Source/HE_Logo.hasset`):
+
+| Zustand | Pixel, die die Blende ändert | echt dazwischen | außerhalb | mittlerer Fortschritt zur Hälfte |
+|---|---|---|---|---|
+| wie authored (Key bei 50 ms) | 14343 | 0 | 0 | 1,00 (nach 0,5 s schon ganz da, der Pop) |
+| nach „Stretch to Length“ (Key bei 1000 ms) | 14343 | 14343 | 0 | **0,51** (bei 517 ms) |
+
+Dazu: hochgeladen wurde 1024 × 1024 und kein 128er-Tile. Das Karo-Grau 90/130 liegt in keinem der drei
+Momente über der Schwelle, und nach dem Strecken liegt der Key exakt bei 1,0 s. Mit dem generierten
+Bild ist der Fall ebenso grün.
+
+- `schritt6-leinwand-blende-vorher-nachher.png`: Leinwand-Ausschnitt bei 0 ms, etwa 0,5 s und am Ende,
+  oben wie authored, unten gestreckt. Oben ist das Logo zur Hälfte schon voll da, unten halb durchsichtig.
+- `schritt6-timeline-vorher-nachher.png`: die Transport-Leiste. Vorher steht dort „50 ms / 50 ms“, der
+  Rest der Spur ist grau und „Stretch to Length“ ist zu sehen. Nachher „517 ms / 1000 ms“, der End-Key
+  sitzt am Ende und der Knopf ist weg.
+- `schritt6-zoom-ende-3x.png`: Logo-Kante am Ende, 3-fach. Die Kanten sind scharf, das Leinwand-Raster
+  scheint zwischen den Buchstaben durch, es gibt kein Karo und die Farben sind die des Designers.
+- `schritt6-designer-halbe-sekunde.png`: der ganze Designer bei 517 ms, 1920 × 1200.
+
+**(2) in dieser Prüfung.** Headless gibt es keinen Metal- oder GL-UI-Pass. Die Spielseite von (2) ist
+hier deshalb **nicht** als Bild gesehen. Belegt ist sie durch den Quelltext-Wächter in `test_culling`
+(grün) und durch die Bestätigung des Menschen am echten Zweig. Dass sich (2) und (1 + 4) nicht stören,
+ergibt sich aus dem Code, nicht aus einem Bild: Die Designer-Leinwand (`image()` → `CreateImGuiTexture`,
+RGBA8-Unorm) und der Spiel-UI-Pass (`ResolveUITexture`, `honourSrgb = false`) laden beide die rohen
+Bytes als Unorm. Beide Seiten zeigen also dieselben Zahlen.
+
+**Nebenbefund (nicht behoben).** „Stretch to Length“ steht ganz rechts auf der Transport-Leiste, hinter
+der Zeitanzeige, deren Breite mit dem Playhead wächst. Bei einem 1280 px breiten Designer ist die mittlere
+Spalte etwa 700 px breit, und die Leiste endet hinter `>|`. Der Knopf, und auch „Zoom Out/In/Fit“, liegt
+dann unsichtbar außerhalb, und die Leiste scrollt nicht. Das zeigt der erste Lauf dieses Falls, der deshalb
+jetzt mit 1920 px schießt. Ganz sichtbar ist der Knopf nach Augenmaß ab etwa 1450 px Designer-Breite. Auf
+einem kleinen Laptop-Bildschirm ist der Reparatur-Knopf also womöglich gar nicht zu sehen. „Key at End“
+und `>|` bleiben erreichbar, sie stehen weiter links. Umstellen, etwa in die Zeile mit „Key at End“, ist
+eine eigene Entscheidung.
