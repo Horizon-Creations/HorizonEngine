@@ -467,8 +467,12 @@ namespace HE
 			// docs/perf-audit/step4-input-audit-2026-09-27.md) used to sit
 			// between PollEvents and the commit, so every frame's input was that
 			// much older before the GPU even started on it. Same wait, same FPS —
-			// it just happens before the input is read now.
-			if (m_renderer)
+			// it just happens before the input is read now. Not for an unseen
+			// window: a minimised or occluded layer hands out no drawable and
+			// nextDrawable runs into its 1 s timeout — every turn, even the
+			// event-driven ones that end up not presenting. There the old
+			// order (wait inside Render, only when it draws) stays.
+			if (m_renderer && !m_window->IsInBackground())
 			{
 				HE_PROFILE_SCOPE_N("WaitForFrame");
 				m_renderer->WaitForFrame();

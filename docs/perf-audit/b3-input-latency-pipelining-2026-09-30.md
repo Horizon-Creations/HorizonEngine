@@ -16,7 +16,12 @@ nachher: nextDrawable (wartet) → PollEvents → OnRender → Encode → Presen
 - `IRenderer::WaitForFrame()` (neu, Default leer): „blockiere, bis das Hauptfenster einen Frame annehmen
   kann". Muss idempotent sein.
 - `Application::Run` ruft ihn direkt nach `profiler.beginFrame` und **vor** `PollEvents` auf, im Scope
-  `WaitForFrame`.
+  `WaitForFrame`, aber nur, solange das Hauptfenster nicht `IsInBackground()` ist (versteckt, minimiert,
+  verdeckt). Eine unsichtbare Layer gibt kein Drawable heraus, `nextDrawable` liefe dann in jedem Durchlauf
+  in seinen 1-s-Timeout, auch in eventgesteuerten Frames, die gar nicht präsentieren (App-Modus des
+  Spiels). Dort bleibt die alte Reihenfolge. In keinem Messlauf war das Fenster im Hintergrund (kein
+  „Window in background"-Log), ein Kontroll-Lauf mit dem Gate ergab Poll→Commit p50 2,27 / p90 2,71 ms
+  bei 41,3 FPS.
 - `MetalRenderer::WaitForFrame` gleicht erst `drawableSize` an die Fenstergröße an (wie `EncodeFrame`), holt
   dann `[layer nextDrawable]` unter dem unveränderten Scope `Metal::NextDrawable` und hält es retained
   (`m_heldDrawable`).
