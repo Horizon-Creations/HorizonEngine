@@ -4000,14 +4000,20 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	if (coverage <= 0.0) return baseSky;          // clear sky → skip the whole raymarch
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
-	if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
+	// The horizon fade at the end is exactly 0 below dir.y 0.03 (T → 1, L → 0), so
+	// a march there could never show — bail before paying for it.
+	if (dir.y < 0.03) return baseSky;
 
 	// Quality (perf knob, star2.y): 0 Low, 1 Med, 2 High. High == the original
-	// step counts; Med/Low trade horizon detail for frames. The cheap gate below
-	// makes every level cheaper than the old always-full-density march.
+	// step counts; Med/Low trade horizon detail for frames.
 	int qBaseN  = (quality < 0.5) ? 8  : (quality < 1.5 ? 12 : 16);
 	int qMaxN   = (quality < 0.5) ? 18 : (quality < 1.5 ? 32 : 64);
 	int qShadow = (quality < 0.5) ? 1  : (quality < 1.5 ? 2  : 3);
+
+	// Fade the whole cloud layer out into the horizon haze (wider so the grazing band
+	// melts into the haze instead of showing undersampling speckle). Applied after
+	// the march; computed here because it also sets the step budget below.
+	float horizon = smoothstep(0.03, 0.22, dir.y);
 
 	// March the view ray through the cloud slab between base and top heights.
 	// A deterministic per-ray offset breaks up otherwise coherent sample planes
@@ -4015,6 +4021,13 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	float s0 = kCloudBase / max(dir.y, 1e-3);
 	float s1 = kCloudTop  / max(dir.y, 1e-3);
 	int N = int(clamp(float(qBaseN) / max(dir.y, 0.12), float(qBaseN), float(qMaxN))); // denser toward horizon
+	// ...but the densest rays are exactly the ones the fade scales down: below
+	// dir.y 0.375 every ray took qMaxN steps while the fade kept only a fraction of
+	// their result. Scale the budget with fade^0.25 — the undersampling speckle
+	// it brings back is multiplied by the same fade, and above dir.y 0.22
+	// (fade 1) nothing changes. ~20 % fewer steps over a landscape view's sky;
+	// fade^0.5 saved 27 % but doubled the extra grain in the band (A/B, Thema 103).
+	N = max(qBaseN, int(float(N) * sqrt(sqrt(horizon))));
 	float ds = (s1 - s0) / float(N);
 	float jitter = cloudHash(dir.xz * 173.3 + float2(dir.y * 37.1, dir.y * 19.7));
 
@@ -4043,8 +4056,13 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 		// billow*0.55 and billow ≤ 1, so (perlin*0.5 + 0.55) is a true upper bound:
 		// where it can't reach the threshold, no cloud can form here → skip the Worley
 		// fetch + the sun light-march. Uses the SAME 4-octave perlin as cloudDensity,
-		// so it never culls a real cloud (a lower-octave estimate could). The dome slab
-		// is fully within s0..s1, so before this every step paid full density+shadow.
+		// so it never culls a real cloud (a lower-octave estimate could).
+		// It only fires below coverage ~0.31: perlin ≥ 0 keeps the bound ≥ 0.55,
+		// and lo = mix(0.70, 0.22, coverage) drops under that above 0.3125. At the
+		// default 0.5 it skips nothing, and no exact bound could: measured on the
+		// baked volume, 67 % of slab samples ARE cloud there and worleyFbm peaks at
+		// 0.87, so the billow term alone reaches lo. The per-step cost at such
+		// coverage is the light-march below, not this gate (perf audit, Thema 103).
 		float3 pp     = pos * kCloudScale + wind * time;
 		float  morph  = time * 0.030;
 		float  perlin = starFbm3(pp + float3(0.0, morph, 0.0), 4, noiseTex, noiseSamp);
@@ -4096,9 +4114,7 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 		}
 	}
 
-	// Fade the whole cloud layer out into the horizon haze (wider so the grazing band
-	// melts into the haze instead of showing undersampling speckle).
-	float horizon = smoothstep(0.03, 0.22, dir.y);
+	// Horizon fade (computed above, before the march).
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
 	outT = T;
@@ -4580,10 +4596,10 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 // Renders the cloud slab's sun transmittance over a world-space XZ region
 // around the camera into a small R8 target (one fullscreen triangle per frame).
 // Each texel = a point on the slab's MID-PLANE; a short march along the sun
-// direction through the slab accumulates the SAME density field applyClouds3D
-// raymarches (coverage fBm → presence → tower profile → billow erosion, fine
-// octave skipped — map texels are ~20 m), so ground shadows line up with the
-// clouds overhead. The lit shaders project fragments along L onto the
+// direction through the slab accumulates the SAME density field the visible
+// clouds use: applyClouds3D's (coverage fBm → presence → tower profile → billow
+// erosion, fine octave skipped — map texels are ~20 m) in cloudMode 1, the
+// dome's in cloudMode 0 — so ground shadows line up with the clouds overhead. The lit shaders project fragments along L onto the
 // mid-plane and sample this map (cloudShadowFactor / heCloudShadowFactor).
 // region: xy = region origin (world XZ), z = region world size, w = map size px.
 fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
@@ -4606,11 +4622,39 @@ fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
 	float midY    = baseY + 0.5 * thick;
 	float fluff   = clamp(p.cloud.z, 0.0, 1.0);
 	float densMul = clamp(p.cloud.y, 0.0, 3.0);
+	// Dome clouds (cloudMode 0): the sky draws applyClouds' direction-only dome,
+	// so the shadow has to come from THAT field, not from the 3D deck's
+	// cloudFieldDensity (a different, ~2-3x dearer field nobody sees in this
+	// mode). The dome has no world position; embed it at the WORLD ORIGIN with one
+	// dome unit = cloudH (dome slab kCloudBase..kCloudTop ↔ 1..2.6 cloudH). The
+	// shadows then stand still under a moving camera, like the 3D deck's, and
+	// line up exactly with the visible dome clouds for a viewer above the origin;
+	// elsewhere they are offset by camXZ/cloudH dome units, which a parallax-free
+	// sky cannot avoid. Density is the dome's own light-march field
+	// (cloudShadowDensity, 5 fetches), optical depth normalised like applyClouds
+	// (dens · ds · 7 · densMul), so a ground shadow is as dark as its cloud looks
+	// opaque against the sun.
+	if (p.cameraPos.w < 0.5)
+	{
+		float  domeMid = midY / cloudH;              // this texel's mid-plane, dome units
+		float2 dxz     = xz / cloudH;
+		float  d0 = (kCloudBase - domeMid) / sd.y;
+		float  d1 = (kCloudTop  - domeMid) / sd.y;
+		const int MD = 6;
+		float dds  = (d1 - d0) / float(MD);
+		float dens = 0.0;
+		for (int i = 0; i < MD; ++i)
+		{
+			float3 dp = float3(dxz.x, domeMid, dxz.y) + sd * (d0 + (float(i) + 0.5) * dds);
+			dens += cloudShadowDensity(dp, time, coverage, wind, noiseTex, noiseSamp);
+		}
+		return float4(exp(-dens * dds * 7.0 * densMul));
+	}
 	float lo      = mix(0.70, 0.22, coverage);
 	float nscale  = 1.6 / kCloudRefAltitude;
 	// Slab entry/exit along the sun ray through the mid-plane point. Density
 	// comes from the SHARED cloudFieldDensity (style/evolution included), so
-	// the ground shadows always match the shapes overhead.
+	// the ground shadows always match the 3D deck's shapes overhead.
 	float t0 = (baseY - midY) / sd.y;
 	float t1 = (baseY + thick - midY) / sd.y;
 	const int M = 6;

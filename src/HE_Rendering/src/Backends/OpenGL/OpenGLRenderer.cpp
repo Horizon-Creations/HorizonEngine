@@ -4647,6 +4647,10 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	            static_cast<float>(kCloudShadowMapSize));
 	glUniform1i(m_uSkyCloudStyle, env.cloudStyle);
 	glUniform1f(m_uSkyCloudEvolution, env.cloudEvolution);
+	// Dome vs 3D deck picks the density field. Set it here: the value left over
+	// from the previous frame's sky draw is stale on the first frame and for one
+	// frame after the mode is switched.
+	glUniform1i(m_uSkyCloudMode, env.cloudMode);
 	glUniform3fv(m_uSkySunDir, 1, glm::value_ptr(toward));
 	// cameraPos only carries the horizontal sample origin now — the map's slab
 	// altitude is absolute (the shader reads it from uCloudHeight).
