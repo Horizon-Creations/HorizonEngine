@@ -462,6 +462,18 @@ namespace HE
 			// frame is always recorded whole or not at all.
 			profiler.beginFrame(static_cast<double>(measuredDt) * 1000.0);
 
+			// Wait for a frame slot FIRST, then sample input. The swapchain wait
+			// (Metal: [layer nextDrawable], 8–19 ms p50 in the input audit,
+			// docs/perf-audit/step4-input-audit-2026-09-27.md) used to sit
+			// between PollEvents and the commit, so every frame's input was that
+			// much older before the GPU even started on it. Same wait, same FPS —
+			// it just happens before the input is read now.
+			if (m_renderer)
+			{
+				HE_PROFILE_SCOPE_N("WaitForFrame");
+				m_renderer->WaitForFrame();
+			}
+
 			// ── HE_PERF_INPUT_EVENTS: synthetic mouse load (perf audit) ─────
 			// Every scripted capture runs with nobody at the mouse, so it can only
 			// say what event handling costs when there are no events. This pushes
