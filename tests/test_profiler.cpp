@@ -364,6 +364,45 @@ TEST_CASE("EngineProfiler records worker scopes on their own timeline lane, not 
     prof.consumeJustDumped(dump);
 }
 
+// Every pool worker runs one task that waits for all the others, so no worker can
+// still be inside an earlier task — or its profiler scope — when this returns.
+// The FIFO hands out anything queued before these first.
+static void drainPool()
+{
+    ThreadPool& pool = globalPool();
+    const size_t n = pool.threadCount();
+    std::atomic<size_t> arrived{ 0 };
+    std::vector<std::future<void>> futs;
+    for (size_t i = 0; i < n; ++i)
+        futs.push_back(pool.submit([&] {
+            arrived.fetch_add(1, std::memory_order_acq_rel);
+            while (arrived.load(std::memory_order_acquire) < n) std::this_thread::yield();
+        }, "TestDrainPool"));
+    for (auto& f : futs) f.get();
+}
+
+// parallel_for that is guaranteed to put `name` on a worker lane inside the
+// current frame. Since B2 (Thema 102) the caller claims chunks itself and a helper
+// that wakes late finds nothing left, so on a loaded machine (ctest -j4) the
+// caller can finish a cheap body alone and the named span lands after the capture
+// or never. These tests are about the NAME on the lane, not about who wins that
+// race: hold the caller until a worker has run an index, then drain the pool so
+// the worker's scope is closed before endFrame.
+template<typename F>
+static void parallelForReachingAWorker(size_t count, F&& body, const char* name)
+{
+    const std::thread::id caller = std::this_thread::get_id();
+    std::atomic<bool> workerRan{ false };
+    parallel_for(count, [&](size_t i) {
+        if (std::this_thread::get_id() != caller)
+            workerRan.store(true, std::memory_order_release);
+        else
+            while (!workerRan.load(std::memory_order_acquire)) std::this_thread::yield();
+        body(i);
+    }, name);
+    drainPool();
+}
+
 TEST_CASE("JobSystem tasks are named on the worker lanes, not all 'Job::Execute'")
 {
     // The first real capture produced eight worker lanes carrying nothing but
@@ -378,13 +417,17 @@ TEST_CASE("JobSystem tasks are named on the worker lanes, not all 'Job::Execute'
     prof.beginFrame(16.6);
     REQUIRE(prof.isRecording());
 
-    // Enough items that the pool is actually fed (parallel_for runs chunk 0 on the
-    // calling thread, so a tiny count would never reach a worker at all).
+    // Enough items to split (below 2 × minGrain parallel_for runs inline), and a
+    // worker is made to take part — see parallelForReachingAWorker.
     std::atomic<int> sum{ 0 };
-    parallel_for(4096, [&](size_t i) { sum.fetch_add(static_cast<int>(i & 1), std::memory_order_relaxed); },
-                 "TestCullChunk");
+    parallelForReachingAWorker(4096, [&](size_t i) { sum.fetch_add(static_cast<int>(i & 1), std::memory_order_relaxed); },
+                               "TestCullChunk");
     // A direct submit keeps its own label too.
     globalPool().submit([]{ /* nothing */ }, "TestDirectJob").get();
+    // The future is ready INSIDE the task, but the worker closes the span's scope
+    // only after the task returns — so get() can return before the span is on the
+    // lane (seen on a loaded Linux runner). Drain so it is recorded before endFrame.
+    drainPool();
 
     prof.endFrame();
 
@@ -562,7 +605,7 @@ TEST_CASE("A written dump loads back into the same structures the live views use
             HE_PROFILE_SCOPE_N("Outer");
             { HE_PROFILE_SCOPE_N("Inner"); }
         }
-        parallel_for(2048, [](size_t) {}, "RoundTripJob");
+        parallelForReachingAWorker(2048, [](size_t) {}, "RoundTripJob");
         ProfRenderStats rs;
         rs.drawCalls = 11; rs.triangles = 2222;
         prof.setRenderStats(rs);

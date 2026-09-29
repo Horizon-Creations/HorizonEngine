@@ -82,9 +82,12 @@ def analyse(path, stall_ms):
     out["stall frames"] = stalls[:15]
 
     # Job system: spans on worker threads falling inside each frame window.
+    # Since B2 (Thema 102) small extract/cull calls run inline and post no jobs, so
+    # a dump may have no worker spans at all: report zeros, the main-thread number
+    # still counts.
     workers = [t for t in d.get("threads", []) if not t.get("main")]
     mainT = next((t for t in d.get("threads", []) if t.get("main")), None)
-    if workers and marks:
+    if marks:
         jobs_pf, busy_pf, active_pf = [], [], []
         starts = sorted((s, e, i) for i, (s, e) in marks.items())
         import bisect
@@ -109,13 +112,14 @@ def analyse(path, stall_ms):
             jobs_pf.append(cnt[i]); busy_pf.append(busy[i]); active_pf.append(len(act[i]))
         disp = [a.get("RenderExtractor::extract", 0.0) + a.get("FrustumCuller::cull", 0.0) for _, a, _ in per]
         out["workers"] = len(workers)
-        out["jobs/frame p50 (max)"] = f"{pct(jobs_pf, 50):.0f} ({max(jobs_pf)})"
+        out["jobs/frame p50 (max)"] = f"{pct(jobs_pf, 50):.0f} ({max(jobs_pf, default=0)})"
         out["job names (total)"] = dict(names_w)
         out["worker busy ms/frame (sum over workers) p50/p90"] = f"{pct(busy_pf, 50):.4f} / {pct(busy_pf, 90):.4f}"
         out["workers touched/frame p50"] = pct(active_pf, 50)
         out["main-thread extract+cull ms/frame p50/p90"] = f"{pct(disp, 50):.4f} / {pct(disp, 90):.4f}"
         durs = [(s["e"] - s["s"]) / 1e6 for t in workers for s in t["spans"]]
-        out["job duration ms p50/p90/max"] = f"{pct(durs, 50):.4f} / {pct(durs, 90):.4f} / {max(durs):.4f}"
+        out["job duration ms p50/p90/max"] = (f"{pct(durs, 50):.4f} / {pct(durs, 90):.4f} / {max(durs):.4f}"
+                                              if durs else "- (no worker spans)")
 
     # Allocation counters (only present with the alloc_probe build hook).
     ac = [f["stats"].get("allocsMain") for f in frames if "allocsMain" in f.get("stats", {})]

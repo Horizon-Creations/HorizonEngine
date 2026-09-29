@@ -27,7 +27,6 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 EDITOR = REPO / "out" / "deploy" / "Editor" / "HorizonEditor"
-DUMPS = EDITOR.parent / "dumps"
 
 
 def parse_val(s):
@@ -136,7 +135,12 @@ def main():
     ap.add_argument("--vsync", default="off", choices=["off", "keep"])
     ap.add_argument("--timeout", type=float, default=600)
     ap.add_argument("--env", action="append", default=[], help="extra KEY=VALUE env")
+    ap.add_argument("--editor", default=str(EDITOR),
+                    help="editor binary (default: this tree's deploy); a copied deploy "
+                         "dir lets two builds be measured A/B without redeploying")
     a = ap.parse_args()
+    editor = Path(a.editor).resolve()
+    dumps = editor.parent / "dumps"
 
     project = Path(a.project).resolve()
     if a.scene:
@@ -158,11 +162,11 @@ def main():
         k, v = kv.split("=", 1)
         env[k] = v
 
-    DUMPS.mkdir(parents=True, exist_ok=True)
-    before = set(DUMPS.glob("profile_*.json"))
-    log = EDITOR.parent / "HorizonEngine.log"
+    dumps.mkdir(parents=True, exist_ok=True)
+    before = set(dumps.glob("profile_*.json"))
+    log = editor.parent / "HorizonEngine.log"
     t0 = time.time()
-    proc = subprocess.Popen([str(EDITOR)], cwd=str(EDITOR.parent), env=env,
+    proc = subprocess.Popen([str(editor)], cwd=str(editor.parent), env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # Resident memory of the editor, sampled once a second while it runs (the
     # profiler's vram fields stay 0 on Metal, so this is the memory number).
@@ -181,7 +185,7 @@ def main():
             if r.stdout.strip():
                 rss_kb.append(int(r.stdout.strip()))
     wall = time.time() - t0
-    new = sorted(set(DUMPS.glob("profile_*.json")) - before)
+    new = sorted(set(dumps.glob("profile_*.json")) - before)
     if not new:
         print(f"[{a.label}] no dump written (rc={rc}, {wall:.0f}s)", file=sys.stderr)
         sys.exit(3)
@@ -194,7 +198,7 @@ def main():
     if rss_kb:
         summ["rssMB"] = {"max": max(rss_kb) / 1024.0, "last": rss_kb[-1] / 1024.0,
                          "samples": len(rss_kb)}
-    summ["runner"] = {"label": a.label, "rc": rc, "wallSeconds": round(wall, 1),
+    summ["runner"] = {"label": a.label, "rc": rc, "wallSeconds": round(wall, 1), "editor": str(editor),
                       "sets": a.set, "cam": a.cam, "scene": a.scene, "warmup": a.warmup,
                       "frames": a.frames, "detailed": a.detailed, "vsync": a.vsync}
     (outdir / f"{a.label}.summary.json").write_text(json.dumps(summ, indent=2))
