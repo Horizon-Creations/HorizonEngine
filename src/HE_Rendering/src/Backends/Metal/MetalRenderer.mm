@@ -200,6 +200,20 @@ static bool metalInstancingEnabled()
 	return on;
 }
 
+// HE_SKY_LUT=0 turns the Sky-View LUT (perf audit A4) off: the sky pass then
+// integrates atmoScatter per pixel exactly as before. The same-binary A/B for
+// "does the LUT sky look like the integrated one?". Read once.
+static bool skyViewLutEnabled()
+{
+	static const bool on = []{
+		const char* v = std::getenv("HE_SKY_LUT");
+		return !(v && *v && std::atoi(v) == 0);
+	}();
+	return on;
+}
+// Sky-View LUT size. MUST match kSkyLutW/H in kSkyMSL.
+static constexpr int kSkyLutW = 256, kSkyLutH = 128;
+
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
 // Mirrors the OpenGL backend's GLSL unlit shader (same light dir / ambient).
 static const char* kUnlitMSL = R"MSL(
@@ -5442,6 +5456,71 @@ float3 moonCorona(float3 dir, float3 sunDir, bool hasMoon, float moonPhase)
 	return float3(0.85, 0.90, 1.0) * (ring * lit * 0.17 * vis);  // dezent, phase-shaped
 }
 
+// ── Sky-View LUT (perf audit A4) ─────────────────────────────────────────────
+// atmoScatter() depends only on the view and sun directions (the camera sits at
+// a fixed 200 m), so for one sun it is a 2D function: elevation × azimuth
+// relative to the sun, mirror-symmetric about the sun's vertical plane. The
+// host bakes it into two small RGBA16F targets whenever the sun moves
+// (MetalRenderer::EncodeSkyViewLut), and skyFragment reads them instead of
+// running the 12×5-step integral (~216 exp) per pixel. The sharp Mie lobe is
+// left out of the bake and applied per pixel with the exact angle, so texel
+// interpolation can't soften the sun's aureole; what is baked is smooth.
+//   rows: elevation, sqrt-mapped so texels bunch at the horizon. Row 0's centre
+//         is skyColor's horizon clamp (dir.y 0.004), the last row's the zenith.
+//   cols: azimuth from the sun's, 0 .. π, both ends on texel centres.
+// Everything else in skyColor (twilight wedge, night floor, ground haze,
+// aureoles, moon) stays per pixel, see skyColorAtmo.
+constant int   kSkyLutW   = 256, kSkyLutH = 128;  // MUST match MetalRenderer.mm kSkyLutW/H
+constant float kSkyLutEl0 = 0.00400001;           // asin(0.004): skyColor's horizon clamp
+constant float kSkyLutPi  = 3.14159265;
+
+// `d` and `sunDir` normalised, d already horizon-clamped as in skyColor.
+float2 skyLutUV(float3 d, float3 sunDir)
+{
+	float2 dh = float2(d.x, d.z), sh = float2(sunDir.x, sunDir.z);
+	float  el = max(atan2(d.y, length(dh)), kSkyLutEl0);
+	float  v  = sqrt(min((el - kSkyLutEl0) / (0.5 * kSkyLutPi - kSkyLutEl0), 1.0));
+	// Straight up (view or sun) has no azimuth; the value there doesn't depend on it.
+	float  cr = abs(dh.x * sh.y - dh.y * sh.x), dt = dot(dh, sh);
+	float  u  = (length(dh) * length(sh) > 1e-8) ? atan2(cr, dt) / kSkyLutPi : 0.0;
+	return float2((u * float(kSkyLutW - 1) + 0.5) / float(kSkyLutW),
+	              (v * float(kSkyLutH - 1) + 0.5) / float(kSkyLutH));
+}
+
+struct SkyLutOut { float4 rayleigh [[color(0)]]; float4 mie [[color(1)]]; };
+// Bakes one texel: the inverse of skyLutUV at the texel centre. The sun is
+// rotated to azimuth 0 — the integral is symmetric about the vertical axis.
+// color(0) = Rayleigh term with its (smooth) phase + the multiple-scatter fill,
+// color(1) = Mie in-scatter WITHOUT its phase (atmoScatterLut applies it).
+fragment SkyLutOut skyViewLutFragment(SkyOut in [[stage_in]],
+                                      constant float4& sun [[buffer(0)]])
+{
+	float3 sunDir = normalize(sun.xyz);
+	float  u  = (in.position.x - 0.5) / float(kSkyLutW - 1);
+	float  v  = (in.position.y - 0.5) / float(kSkyLutH - 1);
+	float  el = kSkyLutEl0 + v * v * (0.5 * kSkyLutPi - kSkyLutEl0);
+	float  az = u * kSkyLutPi;
+	float3 d  = float3(cos(el) * cos(az), sin(el), cos(el) * sin(az));
+	float3 s  = float3(length(float2(sunDir.x, sunDir.z)), sunDir.y, 0.0);
+	AtmoSums a = atmoIntegrate(d, s);
+	SkyLutOut o;
+	o.rayleigh = float4(a.sumR * kAtmoBR * atmoPhaseRayleigh(dot(d, s)) * 20.0
+	                    + atmoMultiFill(a, s), 1.0);
+	o.mie      = float4(a.sumM * kAtmoBM * 20.0, 1.0);
+	return o;
+}
+
+// atmoScatter(horizon-clamped dir, sunDir) read from the LUT. dir/sunDir normalised.
+float3 atmoScatterLut(float3 dir, float3 sunDir,
+                      texture2d<float> lutRayleigh, texture2d<float> lutMie)
+{
+	constexpr sampler lutSamp(filter::linear, address::clamp_to_edge);
+	float3 d  = normalize(float3(dir.x, max(dir.y, 0.004), dir.z)); // == skyColor
+	float2 uv = skyLutUV(d, sunDir);
+	return lutRayleigh.sample(lutSamp, uv).rgb
+	     + lutMie.sample(lutSamp, uv).rgb * atmoPhaseMie(dot(d, sunDir));
+}
+
 fragment float4 skyFragment(SkyOut in [[stage_in]],
                             constant SkyParams& p [[buffer(0)]],
                             texture2d<float> moonTex [[texture(0)]],
@@ -5450,13 +5529,23 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
                             sampler noiseSamp [[sampler(1)]],
                             texture2d<float> cloudTex [[texture(2)]],
                             sampler cloudSamp [[sampler(2)]],
-                            constant float4x4& prevVP [[buffer(1)]]) // pre-pass camera (low-res cloud reprojection)
+                            constant float4x4& prevVP [[buffer(1)]], // pre-pass camera (low-res cloud reprojection)
+                            texture2d<float> skyLutRayleigh [[texture(3)]],
+                            texture2d<float> skyLutMie [[texture(4)]],
+                            constant float4& skyLut [[buffer(2)]])   // x > 0.5: the LUT holds THIS sun
 {
 	float4 wp1 = p.invViewProj * float4(in.ndc,  1.0, 1.0);
 	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
 	// normalize → stars/nebula/celestial frame don't jitter as the camera turns (GL parity).
 	float3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
-	float3 col  = skyColor(dir, p.sunDir.xyz);
+	float3 col;
+	if (skyLut.x > 0.5)
+	{
+		float3 sunN = normalize(p.sunDir.xyz);
+		col = skyColorAtmo(dir, sunN, atmoScatterLut(dir, sunN, skyLutRayleigh, skyLutMie));
+	}
+	else
+		col = skyColor(dir, p.sunDir.xyz);
 	// Star-free atmosphere base for the REALISTIC cloud path's ambient/twilight
 	// fill: feeding the full `col` (stars/nebula/moon already added) into the
 	// cloud march paints the star field ONTO the cloud bodies via the twilight
@@ -5565,27 +5654,38 @@ float2 atmoRaySphere(float3 ro, float3 rd, float R)
 	d = sqrt(d);
 	return float2(-b - d, -b + d);
 }
-float3 atmoScatter(float3 dir, float3 sunDir)
+constant float3 kAtmoBR = float3(5.802e-6, 13.558e-6, 33.1e-6); // Rayleigh scattering
+constant float  kAtmoBM = 3.996e-6;                             // Mie scattering
+constant float3 kAtmoBO = float3(0.650e-6, 1.881e-6, 0.085e-6); // ozone absorption
+float atmoPhaseRayleigh(float mu) { return 0.05968310 * (1.0 + mu * mu); } // 3/(16π)
+float atmoPhaseMie(float mu)                                               // Cornette-Shanks
+{
+	const float g = 0.76, g2 = g * g;
+	return 0.11936620 * ((1.0 - g2) * (1.0 + mu * mu)) /
+	       ((2.0 + g2) * pow(1.0 + g2 - 2.0 * g * mu, 1.5));
+}
+// The view-path integral, phase-free. atmoScatter() applies both phases; the
+// sky pass's Sky-View LUT (skyViewLutFragment) bakes the Rayleigh part and
+// leaves the sharp Mie lobe to be applied per pixel with the exact angle.
+struct AtmoSums { float3 sumR; float3 sumM; float odR; float odM; float odO; };
+AtmoSums atmoIntegrate(float3 dir, float3 sunDir)
 {
 	const float Rg = 6360.0e3, Ra = 6440.0e3;                  // ground / atmosphere-top radius
-	const float3 bR = float3(5.802e-6, 13.558e-6, 33.1e-6);    // Rayleigh scattering
-	const float bM = 3.996e-6;                                 // Mie scattering
-	const float3 bO = float3(0.650e-6, 1.881e-6, 0.085e-6);    // ozone absorption
+	const float3 bR = kAtmoBR, bO = kAtmoBO;
+	const float bM = kAtmoBM;
 	const float HR = 8500.0, HM = 1200.0;                      // scale heights
+	AtmoSums s;
+	s.sumR = float3(0.0); s.sumM = float3(0.0);
+	s.odR = 0.0; s.odM = 0.0; s.odO = 0.0;                     // view-path optical depths
 	float3 ro = float3(0.0, Rg + 200.0, 0.0);
 	float2 tA = atmoRaySphere(ro, dir, Ra);
-	if (tA.y <= 0.0) return float3(0.0);
+	if (tA.y <= 0.0) return s;                                 // all zero → atmoScatter() = 0
 	float t0 = max(tA.x, 0.0), t1 = tA.y;
 	float2 tG = atmoRaySphere(ro, dir, Rg);
 	if (tG.x > 0.0) t1 = min(t1, tG.x);                        // stop at the ground
 	float ds = (t1 - t0) / 12.0;
-	float mu = dot(dir, sunDir);
-	float phR = 0.05968310 * (1.0 + mu * mu);                  // Rayleigh phase 3/(16π)
-	const float g = 0.76, g2 = g * g;
-	float phM = 0.11936620 * ((1.0 - g2) * (1.0 + mu * mu)) /  // Cornette-Shanks
-	            ((2.0 + g2) * pow(1.0 + g2 - 2.0 * g * mu, 1.5));
 	float3 sumR = float3(0.0), sumM = float3(0.0);
-	float odR = 0.0, odM = 0.0, odO = 0.0;                     // view-path optical depths
+	float odR = 0.0, odM = 0.0, odO = 0.0;
 	for (int i = 0; i < 12; ++i)
 	{
 		float3 p   = ro + dir * (t0 + (float(i) + 0.5) * ds);
@@ -5610,18 +5710,43 @@ float3 atmoScatter(float3 dir, float3 sunDir)
 		sumR += tr * dR;
 		sumM += tr * dM;
 	}
-	float3 L = (sumR * bR * phR + sumM * bM * phM) * 20.0;     // sun irradiance → engine exposure
-	// Fake MULTIPLE scattering: single scatter alone leaves long grazing paths
-	// yellow/dark at noon (the in-filled skylight is missing). Fill proportional
-	// to how opaque the view path is, fading out toward sunset so dusk stays warm.
-	float3 Tcam = exp(-(bR * odR + (bM * 1.11) * odM + bO * odO));
-	L += (float3(1.0) - Tcam) * float3(0.30, 0.42, 0.60) * (0.35 * smoothstep(0.0, 0.35, sunDir.y));
-	return L;
+	s.sumR = sumR; s.sumM = sumM;
+	s.odR = odR; s.odM = odM; s.odO = odO;
+	return s;
 }
+// Fake MULTIPLE scattering: single scatter alone leaves long grazing paths
+// yellow/dark at noon (the in-filled skylight is missing). Fill proportional
+// to how opaque the view path is, fading out toward sunset so dusk stays warm.
+float3 atmoMultiFill(AtmoSums s, float3 sunDir)
+{
+	float3 Tcam = exp(-(kAtmoBR * s.odR + (kAtmoBM * 1.11) * s.odM + kAtmoBO * s.odO));
+	return (float3(1.0) - Tcam) * float3(0.30, 0.42, 0.60) * (0.35 * smoothstep(0.0, 0.35, sunDir.y));
+}
+float3 atmoScatter(float3 dir, float3 sunDir)
+{
+	AtmoSums s = atmoIntegrate(dir, sunDir);
+	float mu = dot(dir, sunDir);
+	float3 L = (s.sumR * kAtmoBR * atmoPhaseRayleigh(mu)
+	          + s.sumM * kAtmoBM * atmoPhaseMie(mu)) * 20.0;  // sun irradiance → engine exposure
+	return L + atmoMultiFill(s, sunDir);
+}
+// Everything skyColor() adds on top of the scattering integral. `dir` and
+// `sunDir` are normalised; `sky` is atmoScatter() at the horizon-clamped
+// direction (skyColor), or the same value read from the Sky-View LUT
+// (skyFragment, atmoScatterLut).
+float3 skyColorAtmo(float3 dir, float3 sunDir, float3 sky);
 float3 skyColor(float3 dir, float3 sunDir)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
+	// Below-horizon rays reuse the horizon colour (the ground-haze blend takes
+	// over there) — without the clamp a hard navy "ocean band" appears where the
+	// ray hits the planet after a short path.
+	return skyColorAtmo(dir, sunDir,
+	                    atmoScatter(normalize(float3(dir.x, max(dir.y, 0.004), dir.z)), sunDir));
+}
+float3 skyColorAtmo(float3 dir, float3 sunDir, float3 sky)
+{
 	float sunY = clamp(sunDir.y, -0.3, 1.0);
 	// The clamp above pins everything below -0.3, which is fine for the day/dusk
 	// tints but useless for "how deep into the night are we" — at true midnight it
@@ -5636,11 +5761,8 @@ float3 skyColor(float3 dir, float3 sunDir)
 	// never leave a dark gap between them.
 	float toNight = 1.0 - smoothstep(-0.34, -0.14, sunYd);
 
-	// Physically-based base sky: day blue, sunset reddening and the blue hour all
-	// come from the single-scattering integral above. Below-horizon rays reuse the
-	// horizon colour (the ground-haze blend takes over there) — without the clamp a
-	// hard navy "ocean band" appears where the ray hits the planet after a short path.
-	float3 sky = atmoScatter(normalize(float3(dir.x, max(dir.y, 0.004), dir.z)), sunDir);
+	// Physically-based base sky (`sky`): day blue, sunset reddening and the blue
+	// hour all come from the single-scattering integral above.
 
 	// ── Twilight wedge ──────────────────────────────────────────────────────
 	// Once the sun is under the horizon the 12-step single-scatter march has
@@ -6197,7 +6319,9 @@ void MetalRenderer::Shutdown()
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
 	DestroyCloudShadowTarget();
-	if (m_moonTexture)          { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
+	if (m_skyLutPipeline)       { CFBridgingRelease(m_skyLutPipeline);       m_skyLutPipeline = nullptr; }
+	DestroySkyViewLut();
+	if (m_moonTexture)         { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
@@ -6763,6 +6887,18 @@ void MetalRenderer::CreateScenePipeline()
 			throw std::runtime_error(std::string("MetalRenderer: cloud-shadow pipeline creation failed: ")
 				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
 		m_cloudShadowPipeline = (void*)CFBridgingRetain(csPso);
+
+		// ── Sky-View LUT bake (atmoScatter → 2 × RGBA16F, no depth; EncodeSkyViewLut) ──
+		MTLRenderPipelineDescriptor* lutDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		lutDesc.vertexFunction   = [skyLib newFunctionWithName:@"skyVertex"];
+		lutDesc.fragmentFunction = [skyLib newFunctionWithName:@"skyViewLutFragment"];
+		lutDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float; // Rayleigh + fill
+		lutDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float; // Mie, phase-free
+		id<MTLRenderPipelineState> lutPso = [device newRenderPipelineStateWithDescriptor:lutDesc error:&skyError];
+		if (!lutPso)
+			throw std::runtime_error(std::string("MetalRenderer: sky-view LUT pipeline creation failed: ")
+				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
+		m_skyLutPipeline = (void*)CFBridgingRetain(lutPso);
 
 		MTLDepthStencilDescriptor* depthDesc = [[MTLDepthStencilDescriptor alloc] init];
 		depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
@@ -9821,7 +9957,8 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 		if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
 			skyClock = static_cast<float>(std::atof(ov));
 		EncodeSky((__bridge void*)enc, glm::inverse(viewProj), snapshot.sunDirection,
-		          skyClock, previewEnvSettings, camPos, /*lowResClouds=*/false);
+		          skyClock, previewEnvSettings, camPos, /*lowResClouds=*/false,
+		          /*useSkyLut=*/false); // own command buffer: no ordering against the bake
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 	}
 
@@ -12547,7 +12684,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
                              const glm::vec3& sunDir, float time,
                              const IRenderer::EnvironmentSettings& env,
-                             const glm::vec3& camPos, bool lowResClouds)
+                             const glm::vec3& camPos, bool lowResClouds, bool useSkyLut)
 {
 	if (!m_skyPipeline) return;
 	if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
@@ -12577,7 +12714,64 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc setFragmentBytes:&m_prepassViewProj[0][0] length:sizeof(glm::mat4) atIndex:1]; // low-res cloud reprojection
+	// Sky-View LUT on 3/4, read only when it was baked for THIS sun (within the
+	// tolerance UpdateSkyEnvCube also treats as unchanged). Otherwise — LUT off,
+	// not baked yet, or baked for another sun — the shader integrates per pixel.
+	const bool lutOn = useSkyLut && skyViewLutEnabled() && m_skyLutValid
+	                && m_skyLutRayleigh && m_skyLutMie
+	                && glm::distance(sunDir, m_skyLutSunDir) < 1e-4f;
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)(lutOn ? m_skyLutRayleigh : m_dummyTexture) atIndex:3];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)(lutOn ? m_skyLutMie : m_dummyTexture) atIndex:4];
+	const simd::float4 lutFlag = { lutOn ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+	[enc setFragmentBytes:&lutFlag length:sizeof(lutFlag) atIndex:2];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+}
+
+// Bakes atmoScatter for `sunDir` into the Sky-View LUT (skyViewLutFragment).
+// Frame level, before the scene encoder that draws the sky; re-bakes only when
+// the sun has moved. Cheap either way: 256×128 texels against the ~1 M sky
+// pixels it saves the integral on.
+void MetalRenderer::EncodeSkyViewLut(void* cmdBufPtr, const glm::vec3& sunDir)
+{
+	if (!m_skyLutPipeline || !skyViewLutEnabled() || !GetEnvironment().skyEnabled) return;
+	if (m_skyLutValid && glm::distance(sunDir, m_skyLutSunDir) < 1e-4f) return;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return;
+	if (!m_skyLutRayleigh || !m_skyLutMie)
+	{
+		MTLTextureDescriptor* d = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+			width:kSkyLutW height:kSkyLutH mipmapped:NO];
+		d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		d.storageMode = MTLStorageModePrivate;
+		if (!m_skyLutRayleigh) m_skyLutRayleigh = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+		if (!m_skyLutMie)      m_skyLutMie      = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+		if (!m_skyLutRayleigh || !m_skyLutMie) return;
+	}
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	void* const targets[2] = { m_skyLutRayleigh, m_skyLutMie };
+	for (int i = 0; i < 2; ++i)
+	{
+		pass.colorAttachments[i].texture     = (__bridge id<MTLTexture>)targets[i];
+		pass.colorAttachments[i].loadAction  = MTLLoadActionDontCare; // every texel is written
+		pass.colorAttachments[i].storeAction = MTLStoreActionStore;
+	}
+	id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skyLutPipeline];
+	const simd::float4 sun = { sunDir.x, sunDir.y, sunDir.z, 0.0f };
+	[enc setFragmentBytes:&sun length:sizeof(sun) atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+	m_skyLutSunDir = sunDir;
+	m_skyLutValid  = true;
+}
+
+void MetalRenderer::DestroySkyViewLut()
+{
+	if (m_skyLutRayleigh) { CFBridgingRelease(m_skyLutRayleigh); m_skyLutRayleigh = nullptr; }
+	if (m_skyLutMie)      { CFBridgingRelease(m_skyLutMie);      m_skyLutMie = nullptr; }
+	m_skyLutValid = false;
 }
 
 void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -12797,7 +12991,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
 	auto drawSky = [&]() {
 		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, skyClock,
-		          GetEnvironment(), m_renderWorld.camera.position, /*lowResClouds=*/true);
+		          GetEnvironment(), m_renderWorld.camera.position, /*lowResClouds=*/true,
+		          /*useSkyLut=*/true);
 	};
 	// Wireframe view (SetViewMode): rasterise ONE mesh loop as lines. Bracketed
 	// per loop, never "set once and restore before X" — the resolve, sky and
@@ -15547,6 +15742,14 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeCloudShadow");
 				EncodeCloudShadow((__bridge void*)cmdBuf);
+			}
+			// Sky-View LUT for the sky pass in the scene encoder. The sun comes from
+			// the extraction EncodeShadowMap ran; if that one was skipped it is last
+			// frame's, and EncodeSky falls back to the per-pixel integral whenever
+			// the LUT's sun doesn't match the one it draws with.
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeSkyViewLut");
+				EncodeSkyViewLut((__bridge void*)cmdBuf, m_renderWorld.sunDirection);
 			}
 		}
 

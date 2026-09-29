@@ -2290,6 +2290,55 @@ TEST_CASE("Dome clouds: Metal and GL march and shadow them the same way")
 	}
 }
 
+TEST_CASE("Sky-View LUT: Metal's host code and kSkyMSL agree on its size and horizon")
+{
+	// Perf audit A4 (Thema 103). The sky pass reads atmoScatter from a baked
+	// 2D LUT (skyViewLutFragment / atmoScatterLut). Its size is written twice
+	// (host texture, shader mapping) and its bottom row sits exactly on
+	// skyColor's horizon clamp. Drift in either is invisible to the build: the
+	// shader just reads between the wrong texels, and the horizon band — the
+	// sky's steepest gradient — gets smeared.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("Metal renderer source not found - LUT drift check skipped");
+		return;
+	}
+	const std::string mtl = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "Backends" / "Metal" / "MetalRenderer.mm"));
+	auto grab = [&](const char* pattern) {
+		std::vector<std::smatch> out;
+		const std::regex re(pattern);
+		for (auto it = std::sregex_iterator(mtl.begin(), mtl.end(), re); it != std::sregex_iterator(); ++it)
+			out.push_back(*it);
+		return out;
+	};
+	const auto host = grab(R"(static constexpr int kSkyLutW = ([0-9]+), kSkyLutH = ([0-9]+);)");
+	const auto msl  = grab(R"(constant int\s+kSkyLutW\s+= ([0-9]+), kSkyLutH = ([0-9]+);)");
+	REQUIRE(host.size() == 1);
+	REQUIRE(msl.size() == 1);
+	CHECK(host[0][1] == msl[0][1]);
+	CHECK(host[0][2] == msl[0][2]);
+
+	// Every horizon clamp (skyColor, atmoScatterLut) is the same, and the LUT's
+	// bottom row is its elevation.
+	const auto clamps = grab(R"(normalize\(float3\(dir\.x, max\(dir\.y, ([0-9.]+)\), dir\.z\)\))");
+	REQUIRE(clamps.size() >= 2);
+	for (const auto& c : clamps)
+		CHECK(c[1] == clamps[0][1]);
+	const auto el0 = grab(R"(constant float kSkyLutEl0 = ([0-9.]+);)");
+	REQUIRE(el0.size() == 1);
+	CHECK(std::stod(el0[0][1]) == doctest::Approx(std::asin(std::stod(clamps[0][1]))).epsilon(1e-6));
+
+	// The Mie term is baked phase-free and multiplied in per pixel; both halves
+	// must carry the same exposure the analytic atmoScatter does.
+	CHECK(grab(R"(o\.mie\s+= float4\(a\.sumM \* kAtmoBM \* 20\.0, 1\.0\);)").size() == 1);
+	CHECK(grab(R"(atmoPhaseRayleigh\(dot\(d, s\)\) \* 20\.0)").size() == 1);
+	CHECK(grab(R"(\+ s\.sumM \* kAtmoBM \* atmoPhaseMie\(mu\)\) \* 20\.0;)").size() == 1);
+	CHECK(grab(R"(lutMie\.sample\(lutSamp, uv\)\.rgb \* atmoPhaseMie\(dot\(d, sunDir\)\))").size() == 1);
+}
+
 // ─── OcclusionCuller ──────────────────────────────────────────────────────────
 // The rules the culler must honour, each as a scene: a wall in front of the
 // camera and something behind it. "Kept" is the conservative answer, so every

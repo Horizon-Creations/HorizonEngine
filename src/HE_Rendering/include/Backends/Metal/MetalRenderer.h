@@ -442,9 +442,22 @@ private:
 	// there is one sky in this engine, and a cheaper stand-in for the preview was
 	// tried and looked like one. `lowResClouds` false forces the inline raymarch
 	// (the preview runs no quarter-res pre-pass, so there is no buffer to composite).
+	// `useSkyLut` lets the pass read the Sky-View LUT when it holds this sun.
 	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir,
 	                float time, const IRenderer::EnvironmentSettings& env,
-	                const glm::vec3& camPos, bool lowResClouds);
+	                const glm::vec3& camPos, bool lowResClouds, bool useSkyLut);
+	// Sky-View LUT (perf audit A4): atmoScatter for the current sun baked into
+	// two 256×128 RGBA16F targets (skyViewLutFragment in kSkyMSL: Rayleigh +
+	// multiple-scatter fill, and the phase-free Mie term), so the sky pass reads
+	// it instead of integrating per pixel. Baked at frame level before the scene
+	// encoder, only when the sun moved; m_skyLutSunDir is the sun it holds.
+	void*     m_skyLutPipeline = nullptr; // id<MTLRenderPipelineState> (skyVertex + skyViewLutFragment)
+	void*     m_skyLutRayleigh = nullptr; // id<MTLTexture> RGBA16F, color(0)
+	void*     m_skyLutMie      = nullptr; // id<MTLTexture> RGBA16F, color(1)
+	glm::vec3 m_skyLutSunDir   = glm::vec3(0.0f);
+	bool      m_skyLutValid    = false;
+	void  EncodeSkyViewLut(void* cmdBuf, const glm::vec3& sunDir);
+	void  DestroySkyViewLut();
 	// (Re)creates the offscreen viewport textures at the requested size.
 	void EnsureViewportTarget();
 	void DestroyViewportTarget();
