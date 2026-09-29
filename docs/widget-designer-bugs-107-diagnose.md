@@ -7,7 +7,9 @@ zwei Repro-Tests in `tests/test_widget_designer_ui.cpp` und Bilder unter
 `docs/img/widget-designer-bugs-107/`.
 
 Nachtrag Schritt 2: Fix für **(1) + (4)** umgesetzt, siehe „Fix (Schritt 2, umgesetzt)“ im
-Abschnitt (1) + (4). (2) und (3) sind weiter offen.
+Abschnitt (1) + (4).
+Nachtrag Schritt 3: Fix für **(2)** umgesetzt, siehe „Fix (Schritt 3, umgesetzt)“ im Abschnitt (2).
+(3) ist weiter offen.
 
 ## Kurzfassung
 
@@ -127,6 +129,41 @@ Upload-Format umstellen. Möglichkeiten: im UI-Pass eine Unorm-Sicht der Textur 
 ab 4.3, macOS-GL ist 4.1, also dort eher `GL_TEXTURE_SRGB_DECODE_EXT`/Sampler-Parameter), oder
 im `uiFragment` Modus 2 zurückkodieren (billig, aber doppelte Rundung in 8 Bit), oder ein eigener
 UI-Upload ohne sRGB-Flag. UI-Materialien (Domain UI) prüfen: die tasten ebenfalls Graph-Texturen ab.
+
+**Fix (Schritt 3, umgesetzt).** Gewählt ist der eigene UI-Upload ohne sRGB-Flag. Nur er ist
+bitgleich mit dem Designer: rohe Bytes als Unorm, gefiltert im sRGB-Raum. Er braucht keine
+Erweiterung (macOS-GL 4.1) und keine Metal-Textur-Sicht. Zurückkodieren im Shader hätte im linearen
+Raum gefiltert und an Kanten vom Designer abgewichen.
+- Metal: `uploadMetalTexture(device, tex, honourSrgb = true)`. Mit `false` nimmt es den Unorm-Zwilling
+  (`metalTexPixelFormat` kennt ihn auch für ASTC/BC7/BC3). Neu ist `MetalRenderer::ResolveUITexture` mit
+  eigenem `m_uiTexCache` (gleiche Schlüssel wie `m_graphTexCache`). Das Bild-Quad in `EncodeUIPass`
+  bindet jetzt `ResolveUITexture` statt `ResolveGraphTexture`.
+- OpenGL: gleich, `uploadTextureAssetGL(tex, honourSrgb = true)` → `GL_RGBA8` statt
+  `GL_SRGB8_ALPHA8`, `OpenGLRenderer::ResolveUITexture` + `m_uiTexCache`, Bild-Quad im UI-Pass.
+- Freigabe beim Herunterfahren und die Invalidierung bei Re-Import/Überschreiben
+  (`m_pendingTexInvalidations`) räumen beide Caches. Ein neu importiertes UI-Bild erscheint also auch
+  im Spiel neu.
+- `m_graphTexCache` ist **unverändert**: Materialien tasten dieselbe Textur weiter linear ab, das ist
+  dort richtig. Belegt eine Textur Material *und* UI, liegt sie zweimal im Speicher, einmal pro
+  Farbraum.
+- Mitgenommen: Die Widget-Kachel im Content Browser (`RenderWidgetThumbnail` → `EncodeUIPass`) zeigt
+  Bilder jetzt ebenfalls in den Designer-Farben.
+- **Nicht geändert: UI-Materialien (Domain UI).** Die Designer-Leinwand rendert sie nicht, sie zeigt nur
+  einen Platzhalter mit dem Materialnamen (`UIEditorPanel.cpp:3523-3532`). Es gibt also keine
+  Designer-Farbe, an die man angleichen könnte. Ein Material, das eine sRGB-Textur abtastet und direkt
+  ausgibt, zeigt im Spiel weiterhin die dunkleren, linear dekodierten Werte. Ob UI-Materialien im
+  sRGB-Zahlenraum (roh) oder linear abtasten sollen, muss der Mensch entscheiden. Es würde bestehende
+  UI-Materialien sichtbar ändern.
+- D3D11/D3D12/Vulkan: nichts zu tun, dort zeichnen UI-Bild-Quads nicht texturiert (siehe oben).
+
+Test: `UI image quads sample their texture undecoded on Metal and GL (Thema 107)` in
+`tests/test_culling.cpp` (Quelltext-Pin wie die übrigen Backend-Drift-Wächter dort; unter ctest gibt es
+keine GPU und headless keinen Metal-UI-Pass). Er prüft pro Backend: Das Bild-Quad nutzt
+`ResolveUITexture` und nicht `ResolveGraphTexture`, der Upload läuft mit `honourSrgb=false`, der Helfer
+wertet den Schalter aus und die Invalidierung räumt beide Caches. Gegenprobe mit dem alten Aufruf in
+Metal: 2 Fehler. **Nicht** auf echter GPU gegen das Catania-Logo gesehen: Ein Spiel-Screenshot mit
+UI gibt es headless nicht. Erwartet nach dem Fix: Orange (216,128,24) bleibt (216,128,24), statt
+(175,55,2) zu werden.
 
 ## (3) Render-Opacity-Animation poppt
 

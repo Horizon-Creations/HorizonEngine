@@ -240,6 +240,9 @@ private:
 	// false when the UUID is null or the material is not loaded yet.
 	bool ResolveMaterialTexture(const HE::UUID& materialId, unsigned int& outTex);
 	unsigned int ResolveGraphTexture(const HE::UUID& id, const std::string& path);
+	// A UI quad's image: same asset, uploaded without the sRGB decode, because
+	// the UI pass writes sRGB numbers straight to the target (Thema 107).
+	unsigned int ResolveUITexture(const HE::UUID& id, const std::string& path);
 
 	// Resolves a material override's PBR scalars (baseColor/metallic/roughness/
 	// opacity). Returns true if the material is loaded; leaves the outputs
@@ -598,6 +601,7 @@ private:
 	// by InvalidateMaterial via m_pendingMaterialInvalidations.
 	std::unordered_map<HE::UUID, unsigned int> m_materialTexCache;
 	std::unordered_map<std::string, unsigned int> m_graphTexCache;
+	std::unordered_map<std::string, unsigned int> m_uiTexCache; // UI quad images, same keys, never sRGB
 	std::vector<HE::UUID>                       m_pendingMaterialInvalidations;
 	std::vector<HE::UUID>                       m_pendingMeshInvalidations;
 	std::vector<HE::UUID>                       m_pendingTexInvalidations;

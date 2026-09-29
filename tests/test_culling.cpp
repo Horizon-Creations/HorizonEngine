@@ -2181,6 +2181,48 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 	}
 }
 
+TEST_CASE("UI image quads sample their texture undecoded on Metal and GL (Thema 107)")
+{
+	// The UI pass writes sRGB numbers straight into a Unorm target (Metal:
+	// BGRA8Unorm swapchain, GL: GL_FRAMEBUFFER_SRGB off), and the widget designer
+	// shows the raw bytes. An image quad that borrowed the material graph's
+	// texture (uploaded _sRGB, decoded to linear on sample) came out too dark:
+	// the Catania logo's orange (216,128,24) became (175,55,2), "orange in the
+	// designer, red in the game". The fix is a UI-only cache uploaded without
+	// the decode; the graph cache must keep decoding, materials light in linear.
+	// There is no GPU under ctest, so this pins the wiring in the source.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - UI texture pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const std::vector<std::pair<const char*, std::string>> files = {
+		{ "MetalRenderer.mm",   stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm")) },
+		{ "OpenGLRenderer.cpp", stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp")) },
+	};
+	for (const auto& [file, text] : files)
+	{
+		REQUIRE_MESSAGE(!text.empty(), file, " not readable");
+		// The image quad binds the UI cache, never the graph cache.
+		CHECK_MESSAGE(text.find("ResolveUITexture(obj.textureAssetId") != std::string::npos,
+		              file, ": the UI image quad no longer resolves through ResolveUITexture");
+		CHECK_MESSAGE(text.find("ResolveGraphTexture(obj.textureAssetId") == std::string::npos,
+		              file, ": a UI image quad samples the sRGB-decoding graph texture again");
+		// ResolveUITexture uploads with the decode switched off, and the upload
+		// helper actually honours that switch.
+		CHECK_MESSAGE(text.find("/*honourSrgb=*/false") != std::string::npos,
+		              file, ": ResolveUITexture uploads with the sRGB flag again");
+		CHECK_MESSAGE(text.find("tex->srgb && honourSrgb") != std::string::npos,
+		              file, ": the upload helper ignores honourSrgb");
+		// A re-import must reach the UI copy too, or the game keeps the old pixels.
+		CHECK_MESSAGE(text.find("{ &m_graphTexCache, &m_uiTexCache }") != std::string::npos,
+		              file, ": texture invalidation no longer drops the UI cache");
+	}
+}
+
 TEST_CASE("specular AA widening: the numbers the shader copies implement")
 {
 	// The formula itself (Kaplanyan/Filament normal filtering), so its BEHAVIOUR

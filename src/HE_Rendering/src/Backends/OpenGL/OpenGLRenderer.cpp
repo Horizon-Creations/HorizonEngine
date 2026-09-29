@@ -7214,7 +7214,7 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 		bool textured = false;
 		if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
 		{
-			if (const unsigned int t = ResolveGraphTexture(obj.textureAssetId, std::string()))
+			if (const unsigned int t = ResolveUITexture(obj.textureAssetId, std::string()))
 			{
 				glActiveTexture(GL_TEXTURE0);
 				glBindTexture(GL_TEXTURE_2D, t);
@@ -7660,12 +7660,14 @@ bool glSupportsS3tc()
 // shading works in linear light and the tonemap's gamma encode at the end is
 // the only transfer curve applied. Linear-flagged textures upload unchanged,
 // which is also what every pre-flag asset does (the loader defaults srgb=false).
-unsigned int uploadTextureAssetGL(const TextureAsset* tex)
+// honourSrgb = false uploads an sRGB-flagged texture linear anyway (bytes sampled
+// as they are): the UI pass wants that, see ResolveUITexture.
+unsigned int uploadTextureAssetGL(const TextureAsset* tex, bool honourSrgb = true)
 {
 	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
 		return 0;
 	const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
-	const bool srgb = tex->srgb;
+	const bool srgb = tex->srgb && honourSrgb;
 
 	// Resolve the block format's GL internalformat, or bail (→ flat) when this GL
 	// context can't sample it. ASTC is Metal-only and never shipped to GL.
@@ -7994,6 +7996,25 @@ unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::
 	// RGBA8 + cooked BC7/BC3 (skips a block format this GL context can't sample).
 	unsigned int tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path));
 	m_graphTexCache.emplace(key, tex);
+	return tex;
+}
+
+// The image of a UI quad (Image widget, textured Border/Button). Its own cache,
+// uploaded WITHOUT the sRGB decode: UI colours are sRGB numbers end to end
+// (GL_FRAMEBUFFER_SRGB is off for the UI pass), so a GL_SRGB8_ALPHA8 texture
+// would come out linear-decoded and too dark ("the orange logo turns red",
+// Thema 107). Raw bytes in = raw bytes out, exactly what the widget designer
+// shows. Not shared with m_graphTexCache on purpose: a material samples the same
+// asset in linear light, which is right there.
+unsigned int OpenGLRenderer::ResolveUITexture(const HE::UUID& id, const std::string& path)
+{
+	const std::string key = id != HE::UUID{}
+		? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
+	if (key.empty() || !m_contentManager) return 0;
+	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
+	unsigned int tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path),
+	                                        /*honourSrgb=*/false);
+	m_uiTexCache.emplace(key, tex);
 	return tex;
 }
 
@@ -9428,6 +9449,8 @@ void OpenGLRenderer::Shutdown()
 	if (m_previewVAO)   { glDeleteVertexArrays(1, &m_previewVAO);    m_previewVAO = 0; }
 	for (auto& [k, t] : m_graphTexCache) if (t) glDeleteTextures(1, &t);
 	m_graphTexCache.clear();
+	for (auto& [k, t] : m_uiTexCache) if (t) glDeleteTextures(1, &t);
+	m_uiTexCache.clear();
 	// Content-Browser thumbnail target + its mesh program.
 	if (m_thumbColor)         { glDeleteTextures(1, &m_thumbColor);       m_thumbColor = 0; }
 	if (m_thumbDepth)         { glDeleteRenderbuffers(1, &m_thumbDepth);  m_thumbDepth = 0; }
@@ -9932,11 +9955,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	for (const HE::UUID& id : m_pendingTexInvalidations)
 	{
 		const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
-		if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
-		{
-			if (it->second) glDeleteTextures(1, &it->second);
-			m_graphTexCache.erase(it);
-		}
+		for (auto* cache : { &m_graphTexCache, &m_uiTexCache })
+			if (auto it = cache->find(key); it != cache->end())
+			{
+				if (it->second) glDeleteTextures(1, &it->second);
+				cache->erase(it);
+			}
 	}
 	m_pendingTexInvalidations.clear();
 
