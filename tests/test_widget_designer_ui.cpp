@@ -902,6 +902,332 @@ TEST_CASE("Thema 108: Add Track offers Visible everywhere, Enabled where it acts
 	fs::remove_all(root, ec);
 }
 
+// Thema 108, looked at: both switches keyed through the timeline as a person
+// would (Add Track, a scrub to the middle, Key, the Value checkbox), then the
+// clip played on the canvas. The Logo (Visible) and the Start button (Enabled)
+// must hold still between keys and flip at them; the Title's Render Opacity,
+// which glides, is the control that the canvas does change between frames.
+//
+//     HE_UI_DUMP_DIR=/tmp/ui ./he_tests -tc="ui shot: Thema 108*"
+TEST_CASE("ui shot: Thema 108 — Visible and Enabled step on the canvas while playing")
+{
+	Harness harness;
+	namespace fs = std::filesystem;
+	const fs::path root = fs::temp_directory_path() / "he_widget_designer_shot108";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root / "UI");
+
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+	HE::UIWidgetTree t = samplePage();
+	{
+		// The control: the Title fades in over the whole second.
+		HE::UIAnimClip c;
+		c.name = "Intro";
+		c.duration = 1.0f;
+		HE::UIAnimTrack tr;
+		tr.element = 3;   // Title
+		tr.prop    = "Render Opacity";
+		tr.keys.push_back({ 0.0f, HE::UIPropValue::ofFloat(0.0f), HE::UIEase::Linear });
+		tr.keys.push_back({ 1.0f, HE::UIPropValue::ofFloat(1.0f), HE::UIEase::Linear });
+		c.tracks.push_back(tr);
+		t.animations.push_back(c);
+	}
+	UIWidgetAsset asset;
+	asset.name     = "Shot108";
+	asset.path     = "UI/Shot108.hasset";
+	asset.treeJson = HE::uiWidgetTreeToJson(t);
+	REQUIRE(cm.registerWidget(std::move(asset)) != HE::UUID{});
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	Designer d{ ctx, (root / "UI" / "Shot108.hasset").string() };
+	d.width  = 1920;   // the whole transport bar
+	d.height = 1100;
+	for (int i = 0; i < 3; ++i) d.frame(false);
+
+	ImGuiIO& io = ImGui::GetIO();
+	auto windowNamed = [](const char* part) -> ImGuiWindow*
+	{
+		for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+			if (w->Active && std::strstr(w->Name, part)) return w;
+		return nullptr;
+	};
+	auto find = [&](ImGuiID wanted, float x0, float x1, float y0, float y1,
+	                float sx, float sy) -> ImVec2
+	{
+		for (float y = y0; y <= y1; y += sy)
+			for (float x = x0; x <= x1; x += sx)
+			{
+				io.AddMousePosEvent(x, y);
+				d.frame(false);
+				if (d.frame(false) == wanted) return ImVec2(x, y);
+			}
+		return ImVec2(-1.0f, -1.0f);
+	};
+	auto click = [&](ImVec2 p)
+	{
+		io.AddMousePosEvent(p.x, p.y);
+		d.frame(true); d.frame(false); d.frame(false);
+	};
+	auto away = [&]
+	{
+		io.AddMousePosEvent(-1000.0f, -1000.0f);
+		d.frame(false);
+	};
+	auto shootNamed = [&](const std::string& name)
+	{
+		he_ui::Image img;
+		d.frame(false, &img);
+		if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+			he_ui::writeBmp(img, std::string(dir) + "/" + name + ".bmp");
+		return img;
+	};
+	auto track = [&](const char* prop) -> HE::UIAnimTrack*
+	{
+		HE::UIWidgetTree* live = UIEditorPanel::liveTree("UI/Shot108.hasset");
+		REQUIRE(live);
+		REQUIRE(live->animations.size() == 1);
+		for (HE::UIAnimTrack& tr : live->animations[0].tracks)
+			if (tr.prop == prop) return &tr;
+		return nullptr;
+	};
+
+	ImGuiWindow* tw = windowNamed("##uiw_timeline");
+	REQUIRE(tw);
+	const float wx0 = tw->Pos.x, wx1 = tw->Pos.x + tw->Size.x;
+	const float wy0 = tw->Pos.y, wy1 = tw->Pos.y + tw->Size.y;
+	auto bar = [&](const char* label)
+	{
+		return find(ImHashStr(label, 0, tw->ID), wx0, wx1, wy0 + 4.0f, wy0 + 30.0f, 6.0f, 4.0f);
+	};
+
+	// Open "Intro".
+	const ImVec2 combo = find(ImHashStr("##clip", 0, tw->ID), wx0, wx0 + 200.0f,
+	                          wy0 + 4.0f, wy0 + 30.0f, 8.0f, 4.0f);
+	REQUIRE(combo.x >= 0.0f);
+	click(combo);
+	ImGuiWindow* pop = windowNamed("##Combo_");
+	REQUIRE(pop);
+	const ImVec2 intro = find(ImHashStr("Intro##c", 0, pop->ID), pop->Pos.x + 10.0f,
+	                          pop->Pos.x + 30.0f, pop->Pos.y, pop->Pos.y + pop->Size.y,
+	                          10.0f, 2.0f);
+	REQUIRE(intro.x >= 0.0f);
+	click(intro);
+
+	ImVec2 p = bar(">|");
+	REQUIRE(p.x >= 0.0f);
+	click(p);
+
+	auto addTrackButton = [&]
+	{
+		return find(ImHashStr("Add Track", 0, tw->ID), wx0 + 10.0f, wx0 + 40.0f,
+		            wy0 + 30.0f, wy1, 10.0f, 3.0f);
+	};
+	auto entry = [&](ImGuiWindow* pw, const char* prop)
+	{
+		return find(ImHashStr(prop, 0, pw->ID), pw->Pos.x + 12.0f, pw->Pos.x + 12.0f,
+		            pw->Pos.y, pw->Pos.y + pw->Size.y, 10.0f, 2.0f);
+	};
+	// "Key" sits on the Add Track row; the key editor's Value checkbox on the
+	// row under it, after Time.
+	auto clickKey = [&]
+	{
+		const ImVec2 add = addTrackButton();
+		REQUIRE(add.x >= 0.0f);
+		const ImVec2 k = find(ImHashStr("Key", 0, tw->ID), add.x, wx0 + 500.0f,
+		                      add.y, add.y, 4.0f, 1.0f);
+		REQUIRE(k.x >= 0.0f);
+		click(k);
+	};
+	auto toggleValue = [&]
+	{
+		const ImVec2 add = addTrackButton();
+		REQUIRE(add.x >= 0.0f);
+		const ImVec2 time = find(ImHashStr("Time", 0, tw->ID), wx0 + 40.0f, wx0 + 40.0f,
+		                         add.y + 8.0f, add.y + 60.0f, 4.0f, 2.0f);
+		REQUIRE(time.x >= 0.0f);
+		const ImVec2 v = find(ImHashStr("Value", 0, tw->ID), time.x, wx0 + 500.0f,
+		                      time.y, time.y, 4.0f, 1.0f);
+		REQUIRE(v.x >= 0.0f);
+		click(v);
+	};
+
+	// ── Logo: Visible, off from 0.5 s to the end ──────────────────────────────
+	away();
+	REQUIRE(d.clickRow(d.hierarchyRowId("Logo##hn2")));
+	p = addTrackButton();
+	REQUIRE(p.x >= 0.0f);
+	click(p);
+	ImGuiWindow* addPop = windowNamed("##Popup_");
+	REQUIRE(addPop);
+	// On an Image, Enabled is listed greyed; the pointer rests on it so its
+	// tooltip says why.
+	const ImVec2 enabledOnImage = entry(addPop, "Enabled");
+	REQUIRE(enabledOnImage.x >= 0.0f);
+	for (int i = 0; i < 60; ++i) d.frame(false);
+	shootNamed("shot108-1-add-track-image");
+	const ImVec2 visible = entry(addPop, "Visible");
+	REQUIRE(visible.x >= 0.0f);
+	click(visible);
+	REQUIRE(track("Visible"));
+
+	// Scrub to the middle of the lane: the ruler, half way along.
+	const float laneL = wx0 + 8.0f + 190.0f;
+	const float laneR = wx1 - 8.0f - 8.0f;
+	const ImVec2 ruler = find(ImHashStr("##ruler", 0, tw->ID), (laneL + laneR) * 0.5f,
+	                          (laneL + laneR) * 0.5f, wy0 + 20.0f, wy0 + 80.0f, 4.0f, 2.0f);
+	REQUIRE(ruler.x >= 0.0f);
+	click(ruler);
+	clickKey();
+	toggleValue();
+	{
+		const HE::UIAnimTrack* tr = track("Visible");
+		REQUIRE(tr);
+		REQUIRE(tr->keys.size() == 3);
+		MESSAGE("Visible keys: " << tr->keys[0].time << "=" << tr->keys[0].value.b << "  "
+		        << tr->keys[1].time << "=" << tr->keys[1].value.b << "  "
+		        << tr->keys[2].time << "=" << tr->keys[2].value.b);
+		CHECK(tr->keys[0].value.b);
+		CHECK_FALSE(tr->keys[1].value.b);
+		CHECK(tr->keys[2].value.b);
+		CHECK(tr->keys[1].time > 0.3f);
+		CHECK(tr->keys[1].time < 0.7f);
+	}
+
+	// ── Start: Enabled, off from the same moment, on again at the end ─────────
+	away();
+	REQUIRE(d.clickRow(d.hierarchyRowId("Start##hn4")));
+	p = addTrackButton();
+	REQUIRE(p.x >= 0.0f);
+	click(p);
+	addPop = windowNamed("##Popup_");
+	REQUIRE(addPop);
+	const ImVec2 enabledOnButton = entry(addPop, "Enabled");
+	REQUIRE(enabledOnButton.x >= 0.0f);
+	shootNamed("shot108-2-add-track-button");
+	click(enabledOnButton);
+	REQUIRE(track("Enabled"));
+	toggleValue();                    // the key at the playhead (mid) → off
+	p = bar(">|");
+	REQUIRE(p.x >= 0.0f);
+	click(p);
+	clickKey();                       // a key at the end, holding "off"
+	toggleValue();                    // → on
+	float switchAt = 0.0f;
+	{
+		const HE::UIAnimTrack* tr = track("Enabled");
+		REQUIRE(tr);
+		REQUIRE(tr->keys.size() == 3);
+		MESSAGE("Enabled keys: " << tr->keys[0].time << "=" << tr->keys[0].value.b << "  "
+		        << tr->keys[1].time << "=" << tr->keys[1].value.b << "  "
+		        << tr->keys[2].time << "=" << tr->keys[2].value.b);
+		CHECK(tr->keys[0].value.b);
+		CHECK_FALSE(tr->keys[1].value.b);
+		CHECK(tr->keys[2].value.b);
+		CHECK(tr->keys[1].time == track("Visible")->keys[1].time);
+		switchAt = tr->keys[1].time;
+	}
+
+	// ── Play it, and look ─────────────────────────────────────────────────────
+	// Where an element sits on the screen: the canvas is fitted into its child
+	// window the way drawCanvas does it (92 % of the smaller ratio, centred).
+	ImGuiWindow* cw = windowNamed("##uiw_canvas");
+	REQUIRE(cw);
+	const ImVec2 o = cw->DC.CursorStartPos;
+	const ImVec2 avail(cw->ContentRegionRect.Max.x - o.x, cw->ContentRegionRect.Max.y - o.y);
+	const float  s = std::min(avail.x / 1280.0f, avail.y / 720.0f) * 0.92f;
+	const ImVec2 cTL(o.x + (avail.x - 1280.0f * s) * 0.5f, o.y + (avail.y - 720.0f * s) * 0.5f);
+	struct Mean { float r = 0, g = 0, b = 0; };
+	// The mean colour of the middle of an element's box (`in` of it off each
+	// edge, so a pixel of misplacement cannot matter).
+	auto mean = [&](const he_ui::Image& img, float x, float y, float w, float h, float in = 0.2f)
+	{
+		const int x0 = int(cTL.x + (x + w * in) * s), x1 = int(cTL.x + (x + w * (1.0f - in)) * s);
+		const int y0 = int(cTL.y + (y + h * in) * s), y1 = int(cTL.y + (y + h * (1.0f - in)) * s);
+		Mean m; int n = 0;
+		for (int py = y0; py < y1; ++py)
+			for (int px = x0; px < x1; ++px)
+			{
+				std::uint8_t r, g, b, a;
+				img.pixel(px, py, r, g, b, a);
+				m.r += r; m.g += g; m.b += b; ++n;
+			}
+		if (n) { m.r /= n; m.g /= n; m.b /= n; }
+		return m;
+	};
+	auto same = [](Mean a, Mean b)
+	{
+		return std::fabs(a.r - b.r) < 0.01f && std::fabs(a.g - b.g) < 0.01f && std::fabs(a.b - b.b) < 0.01f;
+	};
+	auto luma = [](Mean m) { return 0.299f * m.r + 0.587f * m.g + 0.114f * m.b; };
+	auto logo  = [&](const he_ui::Image& i) { return mean(i, 540.0f, 120.0f, 200.0f, 200.0f); };
+	// The whole box: its word sits at the left edge, where an inset misses it.
+	auto title = [&](const he_ui::Image& i) { return mean(i, 440.0f, 360.0f, 400.0f,  60.0f, 0.0f); };
+	auto start = [&](const he_ui::Image& i) { return mean(i, 540.0f, 460.0f, 200.0f,  56.0f); };
+
+	p = bar("|<");
+	REQUIRE(p.x >= 0.0f);
+	click(p);
+	p = bar("Play");
+	REQUIRE(p.x >= 0.0f);
+	io.AddMousePosEvent(p.x, p.y);
+	d.frame(true);
+	d.frame(false);          // released: playing, and this frame already advanced
+	int played = 1;
+	io.AddMousePosEvent(-1000.0f, -1000.0f);
+	// The canvas draws before the timeline advances, so a frame shows the
+	// playhead the previous one left: `played - 1` frames of 1/60 s.
+	auto playTo = [&](float at, const char* name)
+	{
+		const int frames = int(std::lround(at * 60.0f)) + 1;
+		while (played < frames - 1) { d.frame(false); ++played; }
+		he_ui::Image img = shootNamed(name);
+		++played;
+		return img;
+	};
+	const he_ui::Image a = playTo(0.25f,             "shot108-3-play-250ms");
+	const he_ui::Image b = playTo(switchAt - 0.1f,   "shot108-4-play-before-switch");
+	const he_ui::Image c = playTo(switchAt + 0.1f,   "shot108-5-play-after-switch");
+	const he_ui::Image e = playTo(0.9f,              "shot108-6-play-900ms");
+	for (int i = 0; i < 20; ++i) d.frame(false);    // past the end: stopped on 1.0 s
+	const he_ui::Image f = shootNamed("shot108-7-end");
+
+	MESSAGE("logo  luma: " << luma(logo(a))  << " " << luma(logo(b))  << " | " << luma(logo(c))
+	        << " " << luma(logo(e))  << " | end " << luma(logo(f)));
+	MESSAGE("start luma: " << luma(start(a)) << " " << luma(start(b)) << " | " << luma(start(c))
+	        << " " << luma(start(e)) << " | end " << luma(start(f)));
+	MESSAGE("title luma: " << luma(title(a)) << " " << luma(title(b)) << " | " << luma(title(c))
+	        << " " << luma(title(e)) << " | end " << luma(title(f)));
+
+	// The control first: the fade glides, so the Title brightens shot by shot
+	// (one short word in a wide box: the steps are small but they are steps).
+	// Without it, "the switches did not change" could mean "nothing played".
+	CHECK(luma(title(b)) > luma(title(a)));
+	CHECK(luma(title(c)) > luma(title(b)));
+	CHECK(luma(title(e)) > luma(title(c)));
+	// Before the switch key: both switches hold, not a hair of change.
+	CHECK(same(logo(a),  logo(b)));
+	CHECK(same(start(a), start(b)));
+	// After it: flipped, and again holding.
+	CHECK_FALSE(same(logo(b),  logo(c)));
+	CHECK(same(logo(c),  logo(e)));
+	CHECK_FALSE(same(start(b), start(c)));
+	CHECK(same(start(c), start(e)));
+	CHECK(luma(start(c)) < luma(start(b)));   // disabled = dimmed
+	// At the end both are back on, exactly as before the switch.
+	CHECK(same(logo(f),  logo(a)));
+	CHECK(same(start(f), start(a)));
+
+	away();
+	UIEditorPanel::forget(d.assetPath);
+	fs::remove_all(root, ec);
+}
+
 // (3): the Catania "Blend" clip as the user authored it. The Render Opacity
 // keys are 0 -> 1, but the second key sits at 0.0503 s in a 1 s clip, and a
 // clip ends at its last key — so the fade is over in three frames: a pop. The
