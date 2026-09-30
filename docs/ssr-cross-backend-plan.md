@@ -765,6 +765,11 @@ GI-Port:
    >   D3D-Backends mit derselben Geometrie wie Vulkan. Der Boden ist praktisch
    >   pixelgleich, an der Wand bleibt eine Abweichung von höchstens 15/255.
    > - Der Fix ist ein eigener Schritt.
+   >
+   > **Behoben in Thema 109 Schritt 2:** `kSSRTraceFS` sampelt durchgehend mit
+   > `textureLod(…, 0.0)`. Auf der RTX 4070 gemessen: D3D11/D3D12 spiegeln mit
+   > derselben Diff-Box wie Vulkan, GL und Vulkan sind unverändert. Ein
+   > FXC-Test in `tests/test_material_graph.cpp` fängt den Rückfall.
 
 `ctest` bleibt in jedem Schritt grün. Schritt 1 ändert keinen Code, es gibt hier
 also nichts zu brechen.
@@ -785,7 +790,7 @@ also nichts zu brechen.
 | — | §2.3 Kopf 1: gepinnte Preamble für D3D11-Graph-Materialien | eigener Vorgang, **jetzt der Grund, warum SSR dort nur Built-ins erreicht** |
 | — | §2.2: HDR im D3D11-Swapchain-Pfad (C6) | vorlagepflichtig, **gemeldet in Schritt 6** |
 | — | GL-Deferred-Composite (A6) | optional |
-| — | Hardware-Verify D3D11/D3D12/Vulkan (Thema 109) — **Vulkan sauber, D3D11/D3D12: `ssrTracePS` X3511, SSR aus** | `docs/ssr-hardware-verification-2026-09-30.md` |
+| — | Hardware-Verify D3D11/D3D12/Vulkan (Thema 109) — **Vulkan sauber; D3D11/D3D12: `ssrTracePS` X3511, behoben in Schritt 2 (textureLod), auf Hardware nachgemessen** | `docs/ssr-hardware-verification-2026-09-30.md` |
 
 Schritte 2 und 3 gehören zusammen und in eine Hand: Schritt 3 ist die **einzige**
 Stelle, an der sich eine Shader-Änderung auf dieser Maschine gegen echte Hardware

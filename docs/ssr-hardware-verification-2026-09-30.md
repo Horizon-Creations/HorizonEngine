@@ -220,3 +220,78 @@ und melden“):
 bestanden**, 2 übersprungen (`runtime_size_app_*`), 111 s. Die echte
 `%APPDATA%\HorizonEngine\config.json` war vorher und nachher hash-gleich. Dieser
 Schritt ändert keinen Code, nur diesen Bericht und die Bilder.
+
+## Schritt 2: Fix und Nachmessung (Thema 109)
+
+**Ursache bestätigt, keine zweite.** Der Code bestätigt den Befund oben. In
+`kSSRTraceFS` (`src/HE_Rendering/src/material/MaterialShaderLibrary.cpp`)
+läuft der Ray-March `for (int i = 0; i < steps; ++i)` mit `steps =
+int(heSSR.cfg.w)` und `break`-Ausgängen. Darin wird mit `texture()` gesampelt.
+SPIRV-Cross macht daraus `Sample()`, und fxc bricht mit X3511 ab.
+`EnsureSSRPipelines` (D3D11 und D3D12) setzt danach `ssrFailed = true`.
+
+Bindings, Barriers, Pass-Reihenfolge und Gates wurden nicht getrennt
+auditiert. Sie sind durch die Messung unten belegt: Mit dem kompilierenden
+Shader spiegelt D3D pixelgenau wie Vulkan. Ein zweiter Fehler dahinter hätte
+das verhindert.
+
+**Warum der Fehler im Log fehlte.** `Log.h` begrenzt eine Logzeile auf
+`kRingLineSize = 512` Byte. Der fxc-Fehlerblob ist über 53 KB lang, und
+`error X3511` steht erst an Offset 53 480, hinter lauter X3570-Warnungen.
+
+**Fix** (Commit auf `claude/ssr-d3d-vulkan-verify`):
+
+1. `kSSRTraceFS`: Alle neun Samples sind jetzt `textureLod(…, 0.0)`, nicht
+   nur die in der Schleife. Das ist genau die Variante, die das Experiment in
+   Schritt 1 geprüft hat.
+   - Keines der SSR-Eingangsziele hat eine Mip-Kette. Die einzigen
+     Mip-Erzeuger in den Backends sind die UI-Backdrop-Kopien von GL und Metal.
+   - Deshalb ist LOD 0 genau das, was `texture()` vorher gelesen hat.
+2. D3D11/D3D12 `EnsureSSRPipelines`: Das Compile-Log beginnt jetzt bei der
+   ersten `error X`-Zeile. Das ist zur Laufzeit **nicht verifiziert**, weil es
+   dafür einen absichtlich kaputten Shader im Deploy bräuchte.
+3. Neuer Test `FXC: the SSR passes compile exactly as D3D11/D3D12 build them`
+   (`tests/test_material_graph.cpp`, nur Windows).
+   - Übersetzt jede Stufe, die D3D für SSR zur Laufzeit kompiliert, mit
+     `D3DCompile`, einmal mit den Flags von Release und D3D11, einmal mit denen
+     von D3D12-Debug. Das sind `ssrTrace`, `ssrBlur` und der Reflexions-Vorpass
+     (VS und PS).
+   - **Negativkontrolle:** Die 9 `SampleLevel(…, 0.0)` werden wieder zu
+     `Sample()`, und fxc muss mit X3511 ablehnen. Das tut es, mit derselben
+     Meldung „115 iterations“ wie oben.
+
+**Nachmessung** auf NN-WS03 (RTX 4070), Release-Deploy `C:/hwS2`, gleiche
+`HE_DUMP_*`-Einstellungen und gleiche Metrik wie oben:
+
+| Szene | OpenGL | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|---|
+| Boden, geänderte Pixel | 11 793 | **10 962** | **10 962** | 10 957 |
+| Boden, Diff-Box | (586,466)–(693,577) | (587,470)–(692,577) | (587,470)–(692,577) | (587,470)–(692,577) |
+| Wand, geänderte Pixel | 118 931 | **116 701** | **116 701** | 117 288 |
+| Log | — | `screen-space reflection pipeline created` | `screen-space reflection pipeline created` | `SSR pipelines created (forward, half-res trace)` |
+
+- D3D11 und D3D12 sind untereinander pixelgleich (Boden und Wand 0 Pixel).
+- **Boden** gegen Vulkan: 1 Pixel über der Schwelle.
+- **Wand** gegen Vulkan: 4 055 Pixel. Das ist dieselbe Abweichung von höchstens
+  15/255, die das Experiment in Schritt 1 gemessen hat. Sie gehört nicht zu
+  diesem Fix und bleibt ein offener Punkt, falls jemand D3D gegen Vulkan
+  pixelgenau haben will.
+- **GL und Vulkan** sind die Kontrolle für die LOD-Änderung. Beide sind gegen
+  Schritt 1 unverändert, GL mit ±1 Pixel Rauschen an der Wand.
+- In keinem Log steht mehr `compile failed`.
+- Bild: `docs/img/ssr-d3d-vulkan-2026-09-30/d3d-nach-fix-boden-wand-ssr-aus-an.png`.
+
+**Tests:** `he_tests` (Release, eigenes `APPDATA`): **4093/4093** Fälle,
+557 564 Assertions grün. Die echte `config.json` war vorher und nachher
+hash-gleich.
+
+**Offen:**
+
+- **Metal** konnte auf dieser Maschine nicht gegengeprüft werden. Das A/B
+  gegen den Referenzshot nach Plan §8 Punkt 3 steht noch aus. Erwartet wird
+  pixelgleich, weil es keine Mips gibt.
+- Vor diesem Schritt prüfte der FXC-Sweep in `test_material_graph.cpp` nur
+  `standardVertex` und die Node-Fragmente. SSR-Trace, -Blur und der
+  Reflexions-Vorpass liefen nie durch fxc, jetzt schon. Ob andere
+  D3D-Laufzeitpfade Shader aus der `MaterialShaderLibrary` ohne FXC-Test
+  übersetzen, zum Beispiel Decals, wurde hier nicht geprüft.
