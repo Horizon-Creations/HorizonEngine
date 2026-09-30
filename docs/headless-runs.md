@@ -120,7 +120,8 @@ Ereignisse. Auslöser:
   Nachgemessen am 30.09. mit einem Release-Vollbau in einem weiteren neuen
   Pfad (`C:\hw110s4`, HEAD e7f5d4df). `ctest -j8` (224 Einträge) und
   ein voller `he_tests`-Lauf (4092 Fälle) liefen dort. Es gab kein Ereignis 2097 und
-  keine Regel für den Pfad, und bindlog sah nur die Routenprobe. Das Gegenstück
+  keine Regel für den Pfad. bindlog sah außerhalb von Loopback nur einen
+  UDP-Endpunkt auf `0.0.0.0`, dem Muster nach die Routenprobe. Das Gegenstück
   lief mit `HE_NET_LOOPBACK_ONLY=0` an einem schon freigegebenen Pfad. Dabei
   bestanden alle 598 Fälle der Netz-, Collab-, Engine-API-, Replikations- und
   MCP-Testdateien, darunter die drei, die sich im Loopback-Modus abmelden.
