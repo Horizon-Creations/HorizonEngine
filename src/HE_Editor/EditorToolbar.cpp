@@ -51,8 +51,10 @@ bool cellImpl(const Metrics& m, float x, float w, const char* id, IconFn icon,
 	// A cell with an entry in the help table gets the full tooltip — heading,
 	// sentence, shortcut, and F1 into the manual — instead of the one-liner the
 	// caller passed. Both are never shown: the plain one is the fallback for the
-	// cells that have no entry (yet).
-	const bool hasHelp = helpKey && HE::Ed::Help::findKey(helpKey) != nullptr;
+	// cells that have no entry (yet). Looked up once and handed on, not asked
+	// for again by key: every toolbar cell runs this every frame.
+	const HE::Ed::Help::Entry* help = helpKey ? HE::Ed::Help::findKey(helpKey) : nullptr;
+	const bool hasHelp = help != nullptr;
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	const ImVec2 p0(x, m.y + kWellPad);
 	const ImVec2 p1(x + w, p0.y + m.cell);
@@ -66,7 +68,7 @@ bool cellImpl(const Metrics& m, float x, float w, const char* id, IconFn icon,
 	// on a dimmed cell (it only repeats the label), but the help entry is NOT —
 	// "why can I not press this" is exactly the question a greyed control
 	// raises, and the entry is where the answer is.
-	if (hasHelp)                 EditorWidgets::helpForKey(helpKey);
+	if (hasHelp)                 EditorWidgets::helpForEntry(help);
 	else if (tooltip && enabled) ImGui::SetItemTooltip("%s", tooltip);
 	if (!enabled) ImGui::EndDisabled();
 

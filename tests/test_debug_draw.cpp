@@ -89,3 +89,40 @@ TEST_CASE("DebugDrawBuffer multiple primitives accumulate correctly")
 	buf.sphere({ 0,0,0 }, 1.0f, {}, 8);      // +24 = 37
 	CHECK(buf.lines().size() == 37u);
 }
+
+TEST_CASE("DebugDrawBuffer append() adds kept lines after the ones already there")
+{
+	// The editor's ground grid is built once per camera position and appended
+	// from a kept list every other frame; order and values must survive that.
+	DebugDrawBuffer kept;
+	kept.line({ 1,0,0 }, { 2,0,0 }, { 0,1,0 });
+	kept.line({ 3,0,0 }, { 4,0,0 }, { 0,0,1 });
+
+	DebugDrawBuffer buf;
+	buf.line({ 0,0,0 }, { 0,1,0 });
+	buf.append(kept.lines());
+	REQUIRE(buf.lines().size() == 3u);
+	CHECK(buf.lines()[0].end.y   == doctest::Approx(1.0f));
+	CHECK(buf.lines()[1].start.x == doctest::Approx(1.0f));
+	CHECK(buf.lines()[1].color.g == doctest::Approx(1.0f));
+	CHECK(buf.lines()[2].end.x   == doctest::Approx(4.0f));
+	CHECK(buf.lines()[2].color.b == doctest::Approx(1.0f));
+	CHECK(kept.lines().size() == 2u);   // the source is left as it was
+
+	buf.append({});
+	CHECK(buf.lines().size() == 3u);
+}
+
+TEST_CASE("DebugDrawBuffer clear() keeps the storage for the next frame")
+{
+	// The editor keeps one buffer across frames and clears it at the top of
+	// each; that only saves the per-frame regrowth if clear() does not give the
+	// storage back.
+	DebugDrawBuffer buf;
+	for (int i = 0; i < 1000; ++i) buf.line({ 0,0,0 }, { 1,0,0 });
+	const DebugLine* storage = buf.lines().data();
+	buf.clear();
+	CHECK(buf.empty());
+	for (int i = 0; i < 1000; ++i) buf.line({ 0,0,0 }, { 1,0,0 });
+	CHECK(buf.lines().data() == storage);
+}

@@ -487,16 +487,38 @@ bool queueIfHovered(const HE::Ed::Help::Entry* entry)
 	s_queued = entry;
 	return true;
 }
+
+// Is the mouse (or the keyboard cursor) on the item at all? Asked BEFORE the
+// table is searched: nearly every labelled control on screen calls this each
+// frame, and at most one of them is under the pointer. The lookup — for a
+// label, up to four of them plus the scoped key — used to run for all of them.
+//
+// No delay or Stationary flag here on purpose: those are the branches of
+// IsItemHovered that write ImGui's hover-delay state, and a probe must not
+// touch that for items that turn out to have no entry. What is left is a
+// strict superset of the ForTooltip test queueIfHovered makes afterwards, so
+// nothing that would have shown a tooltip is filtered out.
+bool mayBeHovered()
+{
+	return ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+}
 } // namespace
 
 bool helpForLabel(const char* label)
 {
+	if (!mayBeHovered()) return false;
 	return queueIfHovered(HE::Ed::Help::find(label ? label : ""));
 }
 
 bool helpForKey(const char* key)
 {
+	if (!mayBeHovered()) return false;
 	return queueIfHovered(HE::Ed::Help::findKey(key ? key : ""));
+}
+
+bool helpForEntry(const HE::Ed::Help::Entry* entry)
+{
+	return queueIfHovered(entry);
 }
 
 void helpMarker(const char* key)

@@ -8,6 +8,7 @@
 
 struct AppContext;
 struct SDL_Window;   // opaque — avoids pulling SDL into every panel that includes this
+namespace HE::Ed::Help { struct Entry; }   // EditorHelp.h — helpForEntry takes one
 
 // ── Shared editor widgets ────────────────────────────────────────────────────
 // The Content-Browser drop slot ("drag a .hasset onto this row to point the
@@ -228,6 +229,10 @@ void hint(const char* fmt, ...) IM_FMTARGS(1);
 bool helpForLabel(const char* label);
 // The same by explicit key ("viewport.play").
 bool helpForKey(const char* key);
+// The same for an entry the caller already looked up — for a control that
+// needed the entry anyway (to decide between it and a plain tooltip) and
+// should not search the table a second time. Null is fine: returns false.
+bool helpForEntry(const HE::Ed::Help::Entry* entry);
 
 // A dimmed "?" after a control that carries the same entry — for the places
 // where hovering the control itself is not discoverable enough (a section

@@ -90,6 +90,26 @@ void appendGroundGrid(const EditorCamera& cam, bool playing, DebugDrawBuffer& ou
 	if (playing || !s_showFlags.groundGrid) return;
 
 	const glm::vec3 eye  = cam.position();
+
+	// Built only when the camera has moved. Everything below is a function of
+	// the eye position alone (the colours are constants), and a viewport that
+	// is being looked at rather than flown through asks for the same ~2 000
+	// lines every frame — a copy of the kept ones is all it needs. One cache is
+	// enough: this has one caller, the Scene viewport's debug-line block in
+	// EditorApplication::OnRender, so there is no second camera to thrash it.
+	static DebugDrawBuffer s_grid;
+	static glm::vec3       s_gridEye(0.0f);
+	static bool            s_gridBuilt = false;
+	if (s_gridBuilt && eye == s_gridEye)
+	{
+		out.append(s_grid.lines());
+		return;
+	}
+	s_grid.clear();
+	s_gridEye   = eye;
+	s_gridBuilt = true;
+	DebugDrawBuffer& grid = s_grid;
+
 	const float     camX = eye.x;
 	const float     camZ = eye.z;
 
@@ -164,7 +184,7 @@ void appendGroundGrid(const EditorCamera& cam, bool playing, DebugDrawBuffer& ou
 			if (fade <= 0.02f) continue;
 			const glm::vec3 a = alongZ ? glm::vec3(offset, 0.0f, t0) : glm::vec3(t0, 0.0f, offset);
 			const glm::vec3 b = alongZ ? glm::vec3(offset, 0.0f, t1) : glm::vec3(t1, 0.0f, offset);
-			out.line(a, b, color * fade);
+			grid.line(a, b, color * fade);
 		}
 	};
 
@@ -188,6 +208,7 @@ void appendGroundGrid(const EditorCamera& cam, bool playing, DebugDrawBuffer& ou
 	// The line at x = 0 runs along Z and IS the Z axis, and vice versa.
 	emitFamily(/*alongZ=*/true,  camX, colAxisZ);
 	emitFamily(/*alongZ=*/false, camZ, colAxisX);
+	out.append(grid.lines());
 }
 
 #ifdef HE_IMGUI_ENABLED

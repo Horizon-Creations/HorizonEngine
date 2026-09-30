@@ -190,6 +190,7 @@ add_executable(he_tests
     test_third_person_template.cpp
     test_docs_library.cpp
     test_editor_help.cpp
+    test_quick_settings_favorites.cpp
     test_hc_node_docs.cpp
     # Editor UI rendered on the CPU and looked at — see ImGuiSoftwareRaster.h.
     test_ui_shot.cpp

@@ -3677,7 +3677,8 @@ void EditorApplication::OnRender(float dt)
 		// ── Debug draw overlay (selected-entity marker + colliders) ──────────
 		if (m_projectLoaded && m_editorWorld)
 		{
-			DebugDrawBuffer dbg;
+			DebugDrawBuffer& dbg = m_debugDraw;
+			dbg.clear();   // keeps its capacity: see m_debugDraw
 			// One switch per overlay (the toolbar's Show popup). Each block
 			// below is skipped at its head rather than filtered afterwards, so
 			// an overlay that is off costs nothing — the collider walk and the
@@ -4062,27 +4063,25 @@ void EditorApplication::OnRender(float dt)
 			// Collected even while the switch is off: collect() is also what
 			// AGES the timed primitives, and skipping it would freeze their
 			// clocks so that switching the overlay back on shows every line
-			// drawn in the meantime at once. They are simply not merged.
-			std::vector<DebugLine> merged = dbg.lines();
-			if (show.scriptDebug)
-				HE::api::debug::collect(simulating ? dt : 0.0f, merged);
-			else
-			{
-				std::vector<DebugLine> discard;
-				HE::api::debug::collect(simulating ? dt : 0.0f, discard);
-			}
-			renderer()->SetDebugLines(merged);
-			// Kept (moved, not copied: the renderer took its own copy) so a
+			// drawn in the meantime at once. They are simply not merged: they
+			// are appended and cut off again.
+			//
+			// Built straight into m_lastDebugLines, which is kept so a
 			// screenshot in this frame can hand the renderer the same list
-			// minus the MCP gizmos and then put this one back.
-			m_lastDebugLines = std::move(merged);
+			// minus the MCP gizmos and then put this one back. assign() reuses
+			// last frame's storage, where a copy into a fresh vector allocated
+			// the whole list anew every frame.
+			m_lastDebugLines.assign(dbg.lines().begin(), dbg.lines().end());
+			const std::size_t editorLines = m_lastDebugLines.size();
+			HE::api::debug::collect(simulating ? dt : 0.0f, m_lastDebugLines);
+			if (!show.scriptDebug) m_lastDebugLines.resize(editorLines);
+			renderer()->SetDebugLines(m_lastDebugLines);
 		}
 		else
 		{
-			std::vector<DebugLine> apiDbg;
-			HE::api::debug::collect(simulating ? dt : 0.0f, apiDbg);
-			renderer()->SetDebugLines(apiDbg);
-			m_lastDebugLines    = std::move(apiDbg);
+			m_lastDebugLines.clear();
+			HE::api::debug::collect(simulating ? dt : 0.0f, m_lastDebugLines);
+			renderer()->SetDebugLines(m_lastDebugLines);
 			m_mcpGizmoLineBegin = m_mcpGizmoLineEnd = 0;
 		}
 	}

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace HE::Ed::Help
@@ -7753,9 +7754,20 @@ namespace
 const Entry* findKey(std::string_view key)
 {
 	if (key.empty()) return nullptr;
-	for (const Entry& e : kEntries)
-		if (key == e.key) return &e;
-	return nullptr;
+	// Hashed, not walked. The walk was a string_view per entry — a strlen over
+	// each of the ~1 300 keys — and the toolbar alone asks twice per cell every
+	// frame: 12 % of the editor's main-thread CPU in the performance audit
+	// (docs/perf-audit/step3-cpu-memory-deep-dive-2026-09-27.md, 3.2).
+	// try_emplace keeps the FIRST entry for a key, which is what the walk
+	// returned, so a duplicate cannot quietly change which tooltip wins.
+	static const std::unordered_map<std::string_view, const Entry*> s_index = [] {
+		std::unordered_map<std::string_view, const Entry*> m;
+		m.reserve(std::size(kEntries));
+		for (const Entry& e : kEntries) m.try_emplace(e.key, &e);
+		return m;
+	}();
+	const auto it = s_index.find(key);
+	return it == s_index.end() ? nullptr : it->second;
 }
 
 const Entry* find(std::string_view label)
@@ -7768,9 +7780,23 @@ const Entry* find(std::string_view label)
 	const std::vector<const char*>& stack = scopes();
 	if (!stack.empty() && stack.back() && stack.back()[0])
 	{
-		std::string scoped = std::string(stack.back()) + "/";
-		if (const Entry* e = findKey(scoped + std::string(label))) return e;
-		if (const Entry* e = findKey(scoped + std::string(visible(label)))) return e;
+		// One buffer, reused: "<scope>/" stays and only the label behind it is
+		// swapped, so a lookup allocates nothing once the buffer has grown to
+		// the longest key it has seen. thread_local rather than static so a
+		// lookup from anywhere but the UI thread cannot scribble over it.
+		thread_local std::string scoped;
+		scoped.assign(stack.back());
+		scoped += '/';
+		const std::size_t prefix = scoped.size();
+		scoped.append(label);
+		if (const Entry* e = findKey(scoped)) return e;
+		const std::string_view vis = visible(label);
+		if (vis.size() != label.size())
+		{
+			scoped.resize(prefix);
+			scoped.append(vis);
+			if (const Entry* e = findKey(scoped)) return e;
+		}
 	}
 	if (const Entry* e = findKey(label)) return e;
 	return findKey(visible(label));
