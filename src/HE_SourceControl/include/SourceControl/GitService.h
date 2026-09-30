@@ -97,6 +97,31 @@ public:
 	void requestStoreCredential(const std::string& host, const std::string& username,
 	                            std::string token);
 
+	// Clone `cloneUrl` into `targetDir` (absent or empty) and make that the
+	// service's repository. Starts the worker when none is running, because a
+	// clone is what happens BEFORE any project is open.
+	//
+	// One worker pass, in phases, each announced through lastInfo():
+	//   1. `token` (optional — empty when the helper already holds one) goes to
+	//      the credential helper, then is wiped. With no helper configured
+	//      anywhere, the platform default is passed per command, since there is
+	//      no repository yet to hold a --local setting.
+	//   2. git clone, WITHOUT LFS content (see GitCli::clone).
+	//   3. The same helper is pinned repo-locally, so later push/pull find it.
+	//   4. If the tree uses LFS: `git lfs install --local` + `git lfs pull`.
+	// The URL must pass GitCli::isSafeCloneUrl — a token in the URL is refused,
+	// never stripped and used.
+	//
+	// lastClonedRoot() names the new working tree as soon as the git part
+	// succeeded — even when the LFS download then failed, because the
+	// repository exists and requestLfsPull() can finish it.
+	void requestClone(const std::string& cloneUrl, const std::filesystem::path& targetDir,
+	                  std::string token = {});
+
+	// Download the LFS objects the checkout is missing: the retry after a cut
+	// off or failed download, which a plain pull does not perform.
+	void requestLfsPull();
+
 	void requestPush(bool upstreamConfigured);
 	void requestPull();
 
@@ -111,6 +136,9 @@ public:
 	// Human-readable outcome of the last completed operation ("Pushed.",
 	// "Committed 12 file(s)."), cleared by the next one.
 	const std::string& lastInfo() const { return m_lastInfo; }
+
+	// Working tree of the last clone whose git part succeeded; empty until then.
+	const std::filesystem::path& lastClonedRoot() const { return m_lastClonedRoot; }
 
 	// origin's URL as of the last status refresh; empty = none configured.
 	const std::string& remoteUrl() const { return m_remoteUrl; }
@@ -141,7 +169,7 @@ public:
 private:
 	enum class Kind : std::uint8_t {
 		Open, Status, Init, CommitAll, Push, Pull, Fetch, SetRemote, SetupGitHub,
-		StoreCredential, RestoreTo, CreateBranch, Quit
+		StoreCredential, RestoreTo, CreateBranch, Clone, LfsPull, Quit
 	};
 
 	struct Command
@@ -164,10 +192,14 @@ private:
 		std::vector<std::string>        branches;
 		RepoStatus  status;
 		std::string error;
+		std::filesystem::path clonedRoot;    // applied even alongside an error
 	};
 
 	void workerMain();
 	void push(Command c);
+	void startWorker();
+	// Worker-side: deliver a phase update before the command has finished.
+	void post(Event ev);
 
 	std::thread             m_worker;
 	std::mutex              m_inMutex;
@@ -190,6 +222,7 @@ private:
 	std::string                            m_lastError;
 	std::string                            m_lastInfo;
 	std::string                            m_remoteUrl;
+	std::filesystem::path                  m_lastClonedRoot;
 	std::vector<GitCli::CommitInfo>        m_commits;
 	std::vector<std::string>               m_branches;
 	std::uint64_t                          m_generation = 0;

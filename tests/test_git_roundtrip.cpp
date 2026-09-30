@@ -1128,3 +1128,273 @@ TEST_CASE("Opening a directory that is not a repository is an answer, not an err
 	svc.close();
 	he_test::removeAllQuiet(plain);
 }
+
+// ─── Cloning an existing repository ─────────────────────────────────────────
+// Against a local bare repository through a file:// URL: the same clone, LFS
+// install and LFS download the editor runs against GitHub, minus the network.
+
+namespace {
+
+std::string fileUrl(const fs::path& p)
+{
+	const std::string g = p.generic_string();
+	// POSIX paths already start with '/'; a Windows "C:/..." needs the third one.
+	return "file://" + std::string(g.rfind('/', 0) == 0 ? "" : "/") + g;
+}
+
+bool lfsInstalled()
+{
+	const fs::path probe = uniqueDir("lfsprobe_clone");
+	const bool lfs = GitCli::lfsAvailable(probe);
+	he_test::removeQuiet(probe);
+	return lfs;
+}
+
+bool dirIsEmpty(const fs::path& p)
+{
+	std::error_code ec;
+	return fs::is_directory(p, ec) && fs::directory_iterator(p, ec) == fs::directory_iterator();
+}
+
+// Drive a service until its queue is drained, like waitIdle in the LFS test.
+void pumpUntilIdle(GitService& svc, int seconds = 60)
+{
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+	while (svc.busy() && std::chrono::steady_clock::now() < deadline)
+	{
+		svc.pump();
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	svc.pump();
+}
+
+// A bare remote holding one commit with one LFS-tracked binary and one plain
+// text file. `outBinary` receives the binary's exact bytes.
+fs::path makeLfsRemote(const char* stem, std::string& outBinary)
+{
+	const fs::path bare = uniqueDir((std::string(stem) + "_bare").c_str());
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+
+	const fs::path src = makeRepo((std::string(stem) + "_src").c_str());
+	REQUIRE(GitCli::run(src, { "lfs", "install", "--local" }).ok);
+	REQUIRE(GitCli::run(src, { "lfs", "track", "*.bin" }).ok);
+	outBinary.clear();
+	for (int i = 0; i < 4096; ++i) outBinary.push_back(static_cast<char>((i * 131 + 7) & 0xff));
+	writeFile(src / "Content" / "asset.bin", outBinary);
+	writeFile(src / "readme.txt", "plain");
+	commitAll(src, "assets");
+	REQUIRE(GitCli::run(src, { "remote", "add", "origin", fileUrl(bare) }).ok);
+	REQUIRE(GitCli::run(src, { "push", "-u", "origin", "main" }).ok);
+	he_test::removeAllQuiet(src);
+	return bare;
+}
+
+} // namespace
+
+TEST_CASE("Clone URLs with credentials in them or without a helper path are refused")
+{
+	std::string why;
+	CHECK(GitCli::isSafeCloneUrl("https://github.com/owner/repo.git"));
+	CHECK(GitCli::isSafeCloneUrl("https://github.example.com:8443/owner/repo.git"));
+	CHECK(GitCli::isSafeCloneUrl("file:///tmp/some bare.git"));   // local, spaces fine
+
+	// The rule of the whole module: never a token in the URL.
+	CHECK_FALSE(GitCli::isSafeCloneUrl("https://ghp_SECRET@github.com/owner/repo.git", &why));
+	CHECK(why.find("credential helper") != std::string::npos);
+	CHECK_FALSE(GitCli::isSafeCloneUrl("https://x-access-token:ghp_SECRET@github.com/o/r.git"));
+
+	CHECK_FALSE(GitCli::isSafeCloneUrl("http://github.com/owner/repo.git"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl("git@github.com:owner/repo.git"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl("ssh://git@github.com/owner/repo.git"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl("--upload-pack=touch /tmp/pwned"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl("https://github.com/o/r.git\n"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl("https:///owner/repo.git"));
+	CHECK_FALSE(GitCli::isSafeCloneUrl(""));
+
+	CHECK(GitCli::urlHost("https://github.com/owner/repo.git") == "github.com");
+	CHECK(GitCli::urlHost("https://tok@github.com/owner/repo.git").empty());
+	CHECK(GitCli::urlHost("file:///tmp/x.git").empty());
+}
+
+TEST_CASE("A clone refuses a folder that already holds files and leaves them alone")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path bare = uniqueDir("clone_refuse_bare");
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+
+	const fs::path target = uniqueDir("clone_refuse_target");
+	writeFile(target / "keep.txt", "mine");
+
+	std::string err;
+	CHECK_FALSE(GitCli::clone(fileUrl(bare), target, {}, &err));
+	CHECK(err.find("not empty") != std::string::npos);
+	CHECK(readFile(target / "keep.txt") == "mine");
+	CHECK_FALSE(fs::exists(target / ".git"));
+
+	he_test::removeAllQuiet(target);
+	he_test::removeAllQuiet(bare);
+}
+
+TEST_CASE("A failed clone leaves the target exactly as empty as it was")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path missing = uniqueDir("clone_missing_remote") / "does-not-exist.git";
+
+	// A folder that existed (empty) stays, empty; one the clone created goes.
+	const fs::path existing = uniqueDir("clone_fail_existing");
+	std::string err;
+	CHECK_FALSE(GitCli::clone(fileUrl(missing), existing, {}, &err));
+	CHECK_FALSE(err.empty());
+	CHECK(dirIsEmpty(existing));
+
+	const fs::path fresh = uniqueDir("clone_fail_parent") / "NewProject";
+	CHECK_FALSE(GitCli::clone(fileUrl(missing), fresh, {}, &err));
+	CHECK_FALSE(fs::exists(fresh));
+
+	he_test::removeAllQuiet(existing);
+	he_test::removeAllQuiet(fresh.parent_path());
+	he_test::removeAllQuiet(missing.parent_path());
+}
+
+TEST_CASE("A freshly created, empty remote clones into a repository with no commits")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	// What a brand-new GitHub repository looks like: no commits at all.
+	const fs::path bare = uniqueDir("clone_empty_bare");
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+	const fs::path target = uniqueDir("clone_empty_parent") / "Empty";
+
+	std::string err;
+	REQUIRE(GitCli::clone(fileUrl(bare), target, {}, &err));
+	RepoStatus st;
+	REQUIRE(GitCli::status(target, st, &err));
+	CHECK(st.isRepo);
+	std::vector<GitCli::CommitInfo> commits;
+	CHECK(GitCli::log(target, 5, commits, &err));
+	CHECK(commits.empty());
+	CHECK_FALSE(GitCli::usesLfs(target));
+	CHECK(GitCli::remoteUrl(target) == fileUrl(bare));
+
+	he_test::removeAllQuiet(target.parent_path());
+	he_test::removeAllQuiet(bare);
+}
+
+TEST_CASE("A credential override replaces the configured helpers for one command")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	// Before a clone there is no repository to hold a --local helper, so the
+	// helper is passed per command. Outside any repository here, on purpose.
+	// The host is unroutable and the override REPLACES every configured helper,
+	// so a developer's real keychain never receives this test value.
+	const fs::path dir  = uniqueDir("cred_override");
+	const fs::path sink = dir / "sink.txt";
+	const std::string helper =
+		"!f() { test \"$1\" = store && cat >> '" + sink.generic_string() + "'; }; f";
+
+	std::string err;
+	REQUIRE(GitCli::approveCredential(dir, "horizon-test.invalid", "x-access-token",
+	                                  "tok_CLONE_123", &err, helper));
+	const std::string all = readFile(sink);
+	CHECK(all.find("host=horizon-test.invalid") != std::string::npos);
+	CHECK(all.find("password=tok_CLONE_123") != std::string::npos);
+
+	CHECK_FALSE(GitCli::defaultCredentialHelper().empty());
+
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("The service refuses a clone URL with a token in it before storing anything")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path target = uniqueDir("clone_tokenurl_parent") / "Project";
+
+	// No open() first: a clone is what happens before any project is open.
+	GitService svc;
+	svc.requestClone("https://ghp_SECRET@github.com/owner/repo.git", target, "tok_UNUSED");
+	pumpUntilIdle(svc);
+
+	CHECK(svc.lastError().find("credential helper") != std::string::npos);
+	CHECK(svc.lastClonedRoot().empty());
+	CHECK_FALSE(fs::exists(target));
+
+	svc.close();
+	he_test::removeAllQuiet(target.parent_path());
+}
+
+TEST_CASE("Cloning through the service brings the working tree and its LFS assets")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+	if (!lfsInstalled()) { MESSAGE("git-lfs not installed — skipped"); return; }
+
+	std::string binary;
+	const fs::path bare   = makeLfsRemote("clone_lfs", binary);
+	const fs::path target = uniqueDir("clone_lfs_parent") / "Project";
+	const std::string url = fileUrl(bare);
+
+	GitService svc;
+	svc.requestClone(url, target);
+	pumpUntilIdle(svc);
+
+	CHECK(svc.lastError().empty());
+	CHECK(svc.lastInfo().find("Cloned") != std::string::npos);
+	CHECK(svc.lastClonedRoot() == target);
+	CHECK(svc.isRepo());
+	CHECK(svc.remoteUrl() == url);
+
+	// Real bytes, not the LFS pointer text the skip-smudge clone left behind.
+	const std::string got = readFile(target / "Content" / "asset.bin");
+	CHECK(got.size() == binary.size());
+	CHECK(got == binary);
+	CHECK(got.find("git-lfs.github.com/spec") == std::string::npos);
+	CHECK(readFile(target / "readme.txt") == "plain");
+	CHECK(GitCli::usesLfs(target));
+
+	// The filter lives in the repository itself, so later pulls smudge too.
+	CHECK(GitCli::run(target, { "config", "--local", "--get", "filter.lfs.process" }).ok);
+	// And a helper is reachable for push/pull (system, global or repo-local).
+	CHECK_FALSE(GitCli::credentialHelper(target).empty());
+	// Clean: the download did not leave the tree looking modified.
+	CHECK(svc.status().dirtyCount() == 0);
+
+	svc.close();
+	he_test::removeAllQuiet(target.parent_path());
+	he_test::removeAllQuiet(bare);
+}
+
+TEST_CASE("A clone whose LFS download fails still reports the repository it made")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+	if (!lfsInstalled()) { MESSAGE("git-lfs not installed — skipped"); return; }
+
+	std::string binary;
+	const fs::path bare = makeLfsRemote("clone_lfsfail", binary);
+	// The objects vanish from the remote: git history is intact, LFS is not.
+	he_test::removeAllQuiet(bare / "lfs" / "objects");
+	REQUIRE_FALSE(fs::exists(bare / "lfs" / "objects"));
+
+	const fs::path target = uniqueDir("clone_lfsfail_parent") / "Project";
+	GitService svc;
+	svc.requestClone(fileUrl(bare), target);
+	pumpUntilIdle(svc);
+
+	// Partial success, said as such: the error names LFS, and the working tree
+	// is handed over anyway so the UI can open it and retry the download.
+	CHECK(svc.lastError().find("LFS") != std::string::npos);
+	CHECK(svc.lastClonedRoot() == target);
+	CHECK(svc.isRepo());
+	CHECK(readFile(target / "readme.txt") == "plain");
+
+	// The retry reports the same missing objects instead of pretending.
+	svc.requestLfsPull();
+	pumpUntilIdle(svc);
+	CHECK_FALSE(svc.lastError().empty());
+
+	svc.close();
+	he_test::removeAllQuiet(target.parent_path());
+	he_test::removeAllQuiet(bare);
+}

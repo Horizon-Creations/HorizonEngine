@@ -87,6 +87,37 @@ public:
 	static bool setRemote(const std::filesystem::path& root, const std::string& url,
 	                      std::string* err = nullptr);
 
+	// ── Cloning ──────────────────────────────────────────────────────────────
+	// Is `url` something the editor may clone from? https:// WITHOUT userinfo,
+	// or file:// (a local bare repository — what the tests clone from). Refused:
+	// anything carrying a user or token before the host (the token would end up
+	// in .git/config and every error message), plain http:// (the credential
+	// would cross the wire readable), ssh/scp forms (no credential-helper path),
+	// a leading '-' (option injection) and control characters. `why` names the
+	// reason for the refusal.
+	static bool isSafeCloneUrl(const std::string& url, std::string* why = nullptr);
+
+	// The host of an https:// URL ("github.com"), empty for anything else. What
+	// a credential for that URL is stored under.
+	static std::string urlHost(const std::string& url);
+
+	// git clone `url` into `targetDir`, which must not exist yet or be an empty
+	// directory — a clone never merges into a folder that already holds files.
+	//
+	// LFS content is deliberately NOT downloaded here (GIT_LFS_SKIP_SMUDGE):
+	// with the global smudge filter active, one failed LFS download aborts the
+	// clone in the middle of checkout and leaves half a repository. Skipping it
+	// yields a complete git checkout first; lfsPull() then fetches the large
+	// files as a separate step that can be retried on its own.
+	//
+	// `helperOverride`, when non-empty, becomes the only credential helper for
+	// this command (`-c credential.helper= -c credential.helper=…`): before the
+	// clone there is no repository to hold a --local setting, and git exports
+	// -c config to every child, so git-lfs authenticates through the same
+	// helper. On failure the target is left as empty as it was found.
+	static bool clone(const std::string& url, const std::filesystem::path& targetDir,
+	                  const std::string& helperOverride, std::string* err = nullptr);
+
 	// ── History ──────────────────────────────────────────────────────────────
 	struct CommitInfo
 	{
@@ -158,6 +189,18 @@ public:
 	static bool lfsTrack(const std::filesystem::path& root, const std::string& repoRelativePath,
 	                     std::string* err = nullptr);
 
+	// Does the checked-out tree route anything through LFS? Answered from the
+	// committed .gitattributes files (any "filter=lfs" line), so it works on a
+	// machine without git-lfs — which is exactly the machine that needs to be
+	// told its assets are pointer files. Attributes configured outside the
+	// repository (global gitattributes) are not seen.
+	static bool usesLfs(const std::filesystem::path& root);
+
+	// Download and check out every LFS object the current checkout references.
+	// A plain `git pull` does not do this for objects that are merely missing,
+	// so this is also the retry after a cut-off download.
+	static bool lfsPull(const std::filesystem::path& root, std::string* err = nullptr);
+
 	// ── Credentials ──────────────────────────────────────────────────────────
 	// The token is handed to git's OWN credential machinery and stored nowhere
 	// else: `git credential approve` routes it into whichever helper is
@@ -165,7 +208,12 @@ public:
 	// same chain — which is exactly why a custom store would be wrong.
 
 	// The configured credential.helper, or empty when none is set anywhere.
+	// Outside a repository this is the system + global answer.
 	static std::string credentialHelper(const std::filesystem::path& root);
+
+	// The helper this module picks when none is configured: osxkeychain on
+	// macOS, manager on Windows, a bounded in-memory cache on Linux.
+	static std::string defaultCredentialHelper();
 
 	// Configure the platform-default helper FOR THIS REPO when none is set:
 	// osxkeychain on macOS, manager on Windows, cache on Linux. Fills
@@ -175,12 +223,14 @@ public:
 	                                   std::string* err = nullptr);
 
 	// Feed one credential to the configured helper. `secret` travels via stdin,
-	// never argv (argv is world-readable in a process list).
+	// never argv (argv is world-readable in a process list). `helperOverride`
+	// works as in clone(): for storing a token before any repository exists.
 	static bool approveCredential(const std::filesystem::path& root,
 	                              const std::string& host,
 	                              const std::string& username,
 	                              const std::string& secret,
-	                              std::string* err = nullptr);
+	                              std::string* err = nullptr,
+	                              const std::string& helperOverride = {});
 
 	// Read a stored credential back out of the helper (`git credential fill`),
 	// so a user already signed in for source control is not asked to produce a
