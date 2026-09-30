@@ -103,13 +103,14 @@ const char* pinTypeName(HC::PinType t)
 		case HC::PinType::Struct:    return "Struct";
 		case HC::PinType::Vec3:      return "Vec3";
 		case HC::PinType::Vec4:      return "Vec4";
+		case HC::PinType::Double:    return "Double";
 	}
 	return "Exec";
 }
 
 bool pinTypeFromName(const std::string& name, HC::PinType& out)
 {
-	for (int i = 0; i <= static_cast<int>(HC::PinType::Vec4); ++i)
+	for (int i = 0; i <= static_cast<int>(HC::PinType::Double); ++i)
 	{
 		const auto t = static_cast<HC::PinType>(i);
 		if (name == pinTypeName(t)) { out = t; return true; }
@@ -1271,6 +1272,11 @@ void registerHcTools(McpToolRegistry& registry, McpHcHooks hooks)
 							return ToolResult::fail(kBadPayload, "That pin is a Float.");
 						v.f = valArg->get<float>();
 						break;
+					case HC::PinType::Double:
+						if (!valArg->is_number())
+							return ToolResult::fail(kBadPayload, "That pin is a Double.");
+						v.d = valArg->get<double>();
+						break;
 					case HC::PinType::String:
 						if (!valArg->is_string())
 							return ToolResult::fail(kBadPayload, "That pin is a String.");
@@ -1280,7 +1286,7 @@ void registerHcTools(McpToolRegistry& registry, McpHcHooks hooks)
 						return ToolResult::fail(kBadPayload,
 							std::string("A ") + pinTypeName(desc.type) + " pin has no "
 							"inline default — the editor gives one only to Bool, Int, "
-							"Float and String. Wire a literal node into it instead.");
+							"Float, Double and String. Wire a literal node into it instead.");
 				}
 				edited.pinDefaults[dataIndex] = std::move(v);
 			}

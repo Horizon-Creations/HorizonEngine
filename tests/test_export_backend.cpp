@@ -37,6 +37,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -353,4 +354,53 @@ TEST_CASE("shipped game: the editor's settings file cannot reach it")
     GlobalState::useShippedConfig({});
     gs.setConfigPersistent(true);
     he_test::removeAllQuiet(out);
+}
+
+// ═══ he_tests never reaches a real user's settings file ══════════════════════
+//
+// Not about exports, but about the file the case above pins away from. Every
+// case that read or wrote GlobalState's config used to land in the per-user
+// file — the real one of whoever ran the suite — and a run on a developer's
+// machine reset LastProjectPath, KnownProjects and the RHI to the defaults
+// (seen on macOS and on Windows). tests/main.cpp now points
+// HE_CONFIG_FALLBACK_DIR at a scratch directory before any case runs.
+//
+// configFilePath() resolves its default search once per process, so the first
+// check below also proves nothing touched GlobalState before main() set the
+// variable (a static initializer, say): that would have baked in the real path.
+TEST_CASE("he_tests: the config file is a scratch file, never the user's own")
+{
+    namespace fs = std::filesystem;
+
+    // A developer who sets HE_CONFIG_DIR asks for that file on purpose.
+    if (const char* forced = std::getenv("HE_CONFIG_DIR"))
+    {
+        CHECK(GlobalState::configFilePath() == fs::path(forced) / "config.json");
+        MESSAGE("HE_CONFIG_DIR is set — it outranks the scratch directory, rest skipped");
+        return;
+    }
+
+    const char* fallback = std::getenv("HE_CONFIG_FALLBACK_DIR");
+    REQUIRE(fallback != nullptr);
+    const fs::path scratch = fs::path(fallback) / "config.json";
+
+    CHECK(GlobalState::configFilePath() == scratch);
+    CHECK(GlobalState::configFilePath() != GlobalState::userDataDir() / "config.json");
+    CHECK(GlobalState::configFilePath() != fs::path("config.json"));
+
+    // A case that pins a directory of its own still gets it…
+    const fs::path pinned = fs::temp_directory_path()
+        / ("he_cfg_pin_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    GlobalState::useShippedConfig(pinned);
+    CHECK(GlobalState::configFilePath() == pinned / "config.json");
+
+    // …and lifting the pin falls back to the scratch file, not to the real one.
+    GlobalState::useShippedConfig({});
+    CHECK(GlobalState::configFilePath() == scratch);
+
+    // A write really lands there.
+    GlobalState& gs = GlobalState::getInstance();
+    gs.setConfigPersistent(true);
+    REQUIRE(gs.writeConfig());
+    CHECK(fs::exists(scratch));
 }

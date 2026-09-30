@@ -65,6 +65,7 @@ const char* pinTypeName(HC t)
 	case HC::Struct:    return "Struct";
 	case HC::Vec3:      return "Vec3";
 	case HC::Vec4:      return "Vec4";
+	case HC::Double:    return "Double";
 	}
 	return "?";
 }
@@ -95,6 +96,7 @@ json schemaFor(const HE::api::ApiParam& p)
 	switch (p.type)
 	{
 	case HC::Float: s = json{ { "type", "number" } }; break;
+	case HC::Double: s = json{ { "type", "number" } }; break;
 	case HC::Bool:  s = json{ { "type", "boolean" } }; break;
 	case HC::Int:
 		if (looksLikeEntity(p))
@@ -167,6 +169,10 @@ bool scalarFromJson(const json& j, const HE::api::ApiParam& p, const McpApiHooks
 	case HC::Float:
 		if (!j.is_number()) return wrong("a number");
 		out = Value::ofFloat(j.get<float>());
+		return true;
+	case HC::Double:
+		if (!j.is_number()) return wrong("a number");
+		out = Value::ofDouble(j.get<double>());
 		return true;
 	case HC::Bool:
 		if (!j.is_boolean()) return wrong("true or false");
@@ -329,6 +335,7 @@ json scalarToJson(const Value& v, HC t)
 	switch (t)
 	{
 	case HC::Float:     return v.f;
+	case HC::Double:    return v.d;
 	case HC::Bool:      return v.b;
 	case HC::Int:
 	case HC::Enum:      return v.i;

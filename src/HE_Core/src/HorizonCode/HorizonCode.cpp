@@ -1289,6 +1289,9 @@ Value variableDefaultValue(const Variable& v)
     switch (v.type)
     {
         case P::Float:  return Value::ofFloat(v.f[0]);
+        // An authored Double default is a float literal like every other number
+        // slot here; the precision is for values that arrive at runtime.
+        case P::Double: return Value::ofDouble(v.f[0]);
         case P::Bool:   return Value::ofBool(v.f[0] != 0.0f);
         case P::Int:    return Value::ofInt((int)v.f[0]);
         case P::String: return Value::ofString(v.s);
@@ -1314,14 +1317,16 @@ Value variableDefaultValue(const Variable& v)
         case P::Struct:
         {
             // The definition's own field defaults, then this graph's overrides
-            // on top — matched BY NAME against the current definition.
+            // on top — matched BY NAME against the current definition (a
+            // renamed field also under its former name).
             Value r = HE::TypeRegistry::instance().makeDefaultValue(v.typeName);
             if (!v.structDefaults.empty())
             {
                 HE::StructDef def;
                 if (HE::TypeRegistry::instance().getStruct(v.typeName, def))
                     for (size_t i = 0; i < def.fields.size() && i < r.items.size(); ++i)
-                        if (auto it = v.structDefaults.find(def.fields[i].name);
+                        if (auto it = v.structDefaults.find(def.storedKey(def.fields[i],
+                                [&v](const std::string& k) { return v.structDefaults.count(k) != 0; }));
                             it != v.structDefaults.end())
                         {
                             Value ov = it->second;
@@ -1683,6 +1688,7 @@ nlohmann::json scalarValueToJson(const Value& v, PinType t)
     switch (t)
     {
         case P::Float:  return v.f;
+        case P::Double: return v.d;
         case P::Bool:   return v.b;
         case P::Int:    return v.i;
         case P::String: return v.s;
@@ -1715,6 +1721,7 @@ Value scalarValueFromJson(const nlohmann::json& j, PinType t)
     switch (t)
     {
         case P::Float:  if (j.is_number()) v.f = j.get<float>(); break;
+        case P::Double: if (j.is_number()) v.d = j.get<double>(); break;
         case P::Bool:   if (j.is_boolean()) v.b = j.get<bool>(); break;
         case P::Int:    if (j.is_number()) v.i = j.get<int>(); break;
         case P::String: if (j.is_string()) v.s = j.get<std::string>(); break;
@@ -1858,6 +1865,7 @@ nlohmann::json variableToJsonObj(const Variable& v)
     // nothing is byte-identical to one saved before replication existed.
     if (v.replicated) e["rep"] = true;
     if (v.repNotify)  e["repNotify"] = true;
+    if (v.saveGame)   e["saveGame"] = true;
     if (v.isArray)    e["arr"] = true;
     if (v.isArray && !v.defaultItems.empty())
     {
@@ -1996,6 +2004,9 @@ bool variableFromJsonObj(const nlohmann::json& e, Variable& v)
     // A hand-edited file may say either; nothing downstream has to check.
     if (v.type == P::Ref)  { v.replicated = false; }
     if (!v.replicated)     { v.repNotify  = false; }
+    // Same reasoning for Save Game: a handle does not survive into the next
+    // run, and a function-local is gone before anybody could save it.
+    v.saveGame = e.value("saveGame", false) && isSaveableType(v.type) && v.scope == 0;
     v.isArray = e.value("arr", false);
     v.container = (ContainerKind)e.value("ctr", (int)ContainerKind::None);
     if (v.container != ContainerKind::None) v.isArray = true;   // see loadParams
@@ -2356,6 +2367,24 @@ LinkRemapSnapshot captureLinkRemapSnapshot(const Graph& g, const std::vector<int
         sig.execOuts = names(s.execOuts);
         sig.dataIns  = names(s.dataIns);
         sig.dataOuts = names(s.dataOuts);
+        auto& reg = HE::TypeRegistry::instance();
+        if (!n->typeName.empty() &&
+            (n->type == NodeType::MakeStruct || n->type == NodeType::BreakStruct))
+        {
+            HE::StructDef def;
+            if (reg.getStruct(n->typeName, def))
+                for (const HE::StructField& f : def.fields)
+                    for (const std::string& old : f.formerNames)
+                        if (!def.isLiveName(old)) sig.renamed.emplace(old, f.name);
+        }
+        else if (!n->typeName.empty() && n->type == NodeType::SwitchOnEnum)
+        {
+            HE::EnumDef def;
+            if (reg.getEnum(n->typeName, def))
+                for (const HE::EnumEntry& e : def.entries)
+                    for (const std::string& old : e.formerNames)
+                        if (!def.isLiveName(old)) sig.renamed.emplace(old, e.name);
+        }
         snap.sigs.emplace(id, std::move(sig));
     }
     return snap;
@@ -2401,6 +2430,10 @@ void remapLinksFromSnapshot(Graph& g, const LinkRemapSnapshot& snap)
                 int seen = 0;
                 for (int i = 0; i < (int)nv.size(); ++i)
                     if (nv[i] == name && seen++ == occ) { pin = newBase + i; return true; }
+                // A field/entry renamed since: follow it under its new name.
+                if (const auto rn = c.renamed.find(name); rn != c.renamed.end())
+                    for (int i = 0; i < (int)nv.size(); ++i)
+                        if (nv[i] == rn->second) { pin = newBase + i; return true; }
                 // No pin of that name any more. Same region size means an
                 // in-place rename/retype — keeping the index is what preserves
                 // the user's wires there. A changed size means the pin was
@@ -2770,11 +2803,12 @@ bool canConvertPinType(PinType from, PinType to)
 {
     if (from == to) return true;
     auto numeric = [](PinType t)
-    { return t == P::Float || t == P::Int || t == P::Bool; };
+    { return t == P::Float || t == P::Double || t == P::Int || t == P::Bool; };
     if (numeric(from) && numeric(to)) return true;
     // Enum is int-backed, so it reads as a number and a number can name one.
-    if (from == P::Enum && (to == P::Float || to == P::Int)) return true;
-    if (to == P::Enum && (from == P::Float || from == P::Int)) return true;
+    auto number = [](PinType t) { return t == P::Float || t == P::Double || t == P::Int; };
+    if (from == P::Enum && number(to))   return true;
+    if (to == P::Enum   && number(from)) return true;
     // Vec3/Vec4/Color are three views of the same numbers. They interconvert so
     // that a graph authored while Color WAS the vec3 type keeps its wires — links
     // are restored from JSON without re-checking pin types, so the conversion is
@@ -2829,7 +2863,7 @@ bool conversionNodeFor(PinType from, ContainerKind fromKind,
         if (from == P::Enum) { out = T::EnumToString; return true; }
         // To String's input is Float; Int and Bool reach it through the very
         // coercion Graph::connect performs, so both halves provably connect.
-        if (from == P::Float || from == P::Int || from == P::Bool)
+        if (from == P::Float || from == P::Double || from == P::Int || from == P::Bool)
         { out = T::ToString; return true; }
     }
     return false;
@@ -2949,9 +2983,58 @@ void inferUserTypeNames(Graph& g)
     if (!repaired.empty()) remapLinksForMirror(g, repaired);
 }
 
+namespace
+{
+// Field and entry renames (HE::StructField/EnumEntry::formerNames): rewrite the
+// NAME-KEYED type data a graph's variables persist onto the current names, so
+// the next save of the graph carries them and the editor shows an override on
+// the field it belongs to. Readers already resolve former names on their own;
+// this is what makes the retarget stick instead of leaning on the alias forever.
+void retargetRenamedTypeNames(Graph& g)
+{
+    auto& reg = HE::TypeRegistry::instance();
+    auto entryName = [&reg](const std::string& enumPath, std::string& s)
+    {
+        HE::EnumDef ed;
+        if (s.empty() || enumPath.empty() || !reg.getEnum(enumPath, ed) || ed.isLiveName(s)) return;
+        if (const HE::EnumEntry* e = ed.findEntry(s)) s = e->name;
+    };
+    for (Variable& v : g.variables)
+    {
+        if (v.type == PinType::Enum)
+        {
+            entryName(v.typeName, v.s);
+            for (Value& it : v.defaultItems) entryName(v.typeName, it.s);
+        }
+        if (v.kind() == ContainerKind::Map && v.keyType == PinType::Enum)
+            for (Value& k : v.defaultKeys) entryName(v.keyTypeName, k.s);
+
+        HE::StructDef def;
+        if (v.type != PinType::Struct || v.structDefaults.empty() ||
+            !reg.getStruct(v.typeName, def)) continue;
+        std::unordered_map<std::string, Value> moved;
+        for (const HE::StructField& f : def.fields)
+        {
+            const std::string key = def.storedKey(f,
+                [&v](const std::string& k) { return v.structDefaults.count(k) != 0; });
+            if (key.empty()) continue;
+            Value val = std::move(v.structDefaults[key]);
+            v.structDefaults.erase(key);
+            if (f.type == PinType::Enum) entryName(f.typeName, val.s);
+            moved[f.name] = std::move(val);
+        }
+        // What no field claims stays as it was ("a name the definition no longer
+        // has simply doesn't apply") — a field deleted and re-added gets it back.
+        for (auto& [k, val] : v.structDefaults) moved.emplace(k, std::move(val));
+        v.structDefaults = std::move(moved);
+    }
+}
+} // namespace
+
 void syncTypeSignatures(Graph& g)
 {
     auto& reg = HE::TypeRegistry::instance();
+    retargetRenamedTypeNames(g);
     auto fieldsToParams = [](const HE::StructDef& def)
     {
         std::vector<FuncParam> ps;
@@ -2976,7 +3059,8 @@ void syncTypeSignatures(Graph& g)
         case NodeType::SetStructField:
         {
             // Revalidate the chosen field (params[0]) against the current def:
-            // retype a renamed-type field, keep the mirror if the def is gone,
+            // retype a renamed-type field, follow a renamed FIELD (findField
+            // knows its former names), keep the mirror if the def is gone,
             // drop the choice entirely if the FIELD is gone.
             HE::StructDef def;
             if (n.typeName.empty() || !reg.getStruct(n.typeName, def)) break;
@@ -3088,6 +3172,7 @@ bool scalarValueEquals(const Value& a, const Value& b, PinType t)
     switch (t)
     {
         case P::Float:  return a.f == b.f;
+        case P::Double: return a.d == b.d;
         case P::Bool:   return a.b == b.b;
         case P::Int:    return a.i == b.i;
         case P::String: return a.s == b.s;
@@ -3112,7 +3197,7 @@ namespace
 //     diverges from what the editor previewed.
 //   • UIWidgetBinding.cpp `uiHcValueToProp` — the widget-property bridge, which
 //     coerces into UIPropValue instead of Value but follows the same rule.
-// Only Float↔Int↔Bool convert (an Enum counts as its Int); any other mismatch
+// Only Float↔Double↔Int↔Bool convert (an Enum counts as its Int); any other mismatch
 // yields the target's zero. Coercing INTO Enum/Struct never invents a typeName —
 // wiring already type-checked the definition, so a same-type value passes
 // through above and a mismatch degrades to a typed empty value.
@@ -3125,14 +3210,22 @@ Value coerce(Value v, PinType want)
     {
         case P::Float:  r.f = v.type == P::Bool ? (v.b ? 1.0f : 0.0f)
                             : v.type == P::Int ? (float)v.i
+                            : v.type == P::Double ? (float)v.d
                             : v.type == P::Enum ? (float)v.i : 0.0f; break;
+        case P::Double: r.d = v.type == P::Bool ? (v.b ? 1.0 : 0.0)
+                            : v.type == P::Int ? (double)v.i
+                            : v.type == P::Float ? (double)v.f
+                            : v.type == P::Enum ? (double)v.i : 0.0; break;
         case P::Int:    r.i = v.type == P::Float ? (int)v.f
+                            : v.type == P::Double ? (int)v.d
                             : v.type == P::Bool ? (v.b ? 1 : 0)
                             : v.type == P::Enum ? v.i : 0; break;
         case P::Bool:   r.b = v.type == P::Float ? v.f != 0.0f
+                            : v.type == P::Double ? v.d != 0.0
                             : v.type == P::Int ? v.i != 0 : false; break;
         case P::Enum:   r.i = v.type == P::Int ? v.i
-                            : v.type == P::Float ? (int)v.f : 0; break;
+                            : v.type == P::Float ? (int)v.f
+                            : v.type == P::Double ? (int)v.d : 0; break;
         // Vector ↔ colour. Widening pads, narrowing drops — and the pad differs
         // by TARGET, not by source: a vector's fourth component is 0 (a direction
         // has no w), a colour's is 1 (opaque). Anything that is not one of the

@@ -1,0 +1,65 @@
+          <p>
+            Polling the keyboard, mouse, gamepad and the project's input actions.
+            The engine takes one snapshot per frame, so every query gives the same
+            answer for the rest of that frame. Only a running game or play mode
+            fills it; in the editor outside play the values are stale.
+            For one-shot reactions prefer the action callbacks
+            (<a href="#callbacks"><code>onInputPressed</code></a> and friends)
+            over polling.
+          </p>
+          <ul>
+            <li>
+              <strong>Key names</strong> are SDL scancode names and case-sensitive:
+              <code>"W"</code>, <code>"Space"</code>, <code>"Left Shift"</code>,
+              <code>"Return"</code>, <code>"Escape"</code>, <code>"Up"</code>.
+              <code>keyDown("w")</code> is always <code>false</code>.
+            </li>
+            <li>
+              <strong>Mouse buttons</strong>: 0 left, 1 right, 2 middle.
+              <code>mousePosition</code> and <code>mouseDelta</code> return two
+              numbers in Lua and a tuple <code>(x, y)</code> in Python.
+            </li>
+            <li>
+              <strong>Gamepad names</strong> are SDL's, not case-sensitive:
+              buttons <code>"a"</code>, <code>"b"</code>, <code>"x"</code>,
+              <code>"y"</code>, <code>"leftshoulder"</code>, <code>"dpup"</code>,
+              <code>"start"</code>; axes <code>"leftx"</code>, <code>"lefty"</code>,
+              <code>"rightx"</code>, <code>"righty"</code>, <code>"lefttrigger"</code>,
+              <code>"righttrigger"</code>. <code>"south"</code> and
+              <code>"cross"</code> are not names and read <code>false</code>.
+              Sticks go −1…1 with Y <strong>positive downwards</strong>, triggers
+              0…1, and the deadzone is already applied.
+            </li>
+            <li>
+              <strong>Actions</strong> are looked up by the InputAction asset's
+              name, case-sensitive; an unknown name reads <code>false</code> / 0.
+              <code>onUpdate</code> runs before the actions are updated, so a
+              poll from there sees the <em>previous</em> frame's state;
+              <code>actionPressed</code> is still true for exactly one frame per
+              press. The callbacks always carry the current frame. While the game
+              is paused or the input mode is UI only, an action reads as released
+              unless its asset has <em>Fires while the game is paused</em> ticked.
+            </li>
+          </ul>
+          <p>
+            <strong>Input modes</strong> decide who receives input. The default is
+            <code>GameAndUI</code>: both do, and a click on a widget is masked out
+            of the game. <code>GameOnly</code> leaves the UI drawn but deaf.
+            <code>UIOnly</code> gives the UI everything: the game then reads no
+            keys, no mouse buttons and no gamepad (it reports disconnected), only
+            <code>mousePosition</code> stays true. The mode does not show or hide
+            the cursor; do that with the flat
+            <a href="#flat-showCursor"><code>horizon.showCursor</code></a> /
+            <code>hideCursor</code>. Play mode starts in <code>GameAndUI</code>.
+          </p>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue: <code>scrollDelta</code> is always 0</strong> in
+              the running game and in play mode (build 7d49d44f). The per-frame
+              snapshot is filled without the mouse wheel. Read the wheel through
+              an input action instead: bind the Mouse Wheel source to an Axis
+              action and poll it with <code>actionAxis</code> or handle
+              <code>onInputAxis</code>.
+            </p>
+          </div>

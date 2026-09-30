@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 #include <glm/fwd.hpp>
@@ -305,10 +306,47 @@ namespace Importer
 	// (the importer has already logged why).
 	// `outputs` is empty for an import and filled in by reimport(), which has to
 	// land on files that exist rather than on the source's stem.
+	// `options` carries the choices a caller made that the file cannot tell us.
+	struct ImportOptions
+	{
+		// Texture sources only: import as colour (sRGB) or data (linear). Unset
+		// means suggestTextureSrgb(source) — NOT linear. Every manual import used
+		// to come out linear, so an albedo PNG sampled its encoded values as
+		// linear light and looked washed out and too bright.
+		std::optional<bool> textureSrgb;
+	};
 	bool importSource(const std::filesystem::path& sourcePath,
 	                  const std::filesystem::path& contentRoot,
 	                  const std::filesystem::path& relativeOutputDir = {},
-	                  const OutputTargets&         outputs = {});
+	                  const OutputTargets&         outputs = {},
+	                  const ImportOptions&         options = {});
+
+	// True when `sourcePath` routes to TextureImporter (by extension).
+	bool isTextureSource(const std::filesystem::path& sourcePath);
+
+	// ─── Texture colour space ─────────────────────────────────────────────────
+
+	// The colour space a texture named like `path` most likely holds, from the
+	// file name alone: false (linear data) for a normal / ORM / roughness /
+	// metalness / AO / height / mask map and for .hdr, true (sRGB colour)
+	// otherwise. Works on a source ("rock_normal_2k.png") and on an asset
+	// ("T_Rock_N.hasset") alike, since only the stem is read. A suggestion: the
+	// import dialog pre-ticks it and the user overrides it.
+	bool suggestTextureSrgb(const std::filesystem::path& path);
+
+	// The sRGB flag `assetFile` carries (TXMI cook tail), or nullopt when it is
+	// not a readable texture asset or predates the tail. STREAMS the file like
+	// sourceFileOf(): only the TXMI chunk is read, the pixels are seeked past.
+	std::optional<bool> textureSrgbOf(const std::filesystem::path& assetFile);
+
+	// Rewrites the sRGB flag of the texture asset `assetFile` (which must live
+	// under `contentRoot`) in place: same file, same UUID, same pixels and
+	// recorded source. No re-import, so it works on textures whose source is
+	// gone, which is most of what was imported before the flag existed. True
+	// when the file now carries `srgb` (also when it already did).
+	bool setTextureSrgb(const std::filesystem::path& assetFile,
+	                    const std::filesystem::path& contentRoot,
+	                    bool                         srgb);
 
 	// ─── Re-import bookkeeping ────────────────────────────────────────────────
 
@@ -327,7 +365,9 @@ namespace Importer
 	// (writeAsset then recovers its UUID from it). Deriving either from the source
 	// — the folder the source sits in, or the source's stem — produces a second
 	// asset with a second UUID while every reference keeps pointing at the first.
-	// A mesh's sidecars are redirected onto the ones it already names.
+	// A mesh's sidecars are redirected onto the ones it already names, and a
+	// texture keeps the sRGB flag it carries (textureSrgbOf) instead of falling
+	// back to the name guess, so a choice made at import or since survives.
 	// False (with a log) when the asset records no source, when that source is
 	// gone from disk, when the asset does not live under `contentRoot`, or when
 	// the import itself failed.

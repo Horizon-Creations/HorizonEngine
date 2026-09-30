@@ -30,7 +30,7 @@ int kindRank(HE::AnimationNotifyEvent::Kind k)
 // Everything the playhead meets on ONE segment, which by construction does not
 // cross the clip's edge. `from` → `to` is the direction of travel; the
 // destination edge is always inside, the origin edge only when `closedFrom`.
-void emitSegment(const AnimationClipAsset& clip, uint32_t entity,
+void emitSegment(const std::vector<AnimationNotify>& notifies, float duration, uint32_t entity,
                  float from, float to, bool closedFrom, HE::NotifyQueue& out)
 {
     using Kind = HE::AnimationNotifyEvent::Kind;
@@ -48,7 +48,7 @@ void emitSegment(const AnimationClipAsset& clip, uint32_t entity,
     struct Pending { float t; Kind kind; const std::string* name; };
     std::vector<Pending> pending;
 
-    for (const AnimationNotify& n : clip.notifies)
+    for (const AnimationNotify& n : notifies)
     {
         if (n.duration > 0.0f)
         {
@@ -56,7 +56,7 @@ void emitSegment(const AnimationClipAsset& clip, uint32_t entity,
             // Clamped to the clip: a state authored to run past the end of its own
             // clip ends WITH the clip. Wrapping it into the next lap instead would
             // give a non-looping clip an End before its Begin.
-            const float end = std::min(n.time + n.duration, clip.duration);
+            const float end = std::min(n.time + n.duration, duration);
             if (inSpan(end)) pending.push_back({ end, Kind::End, &n.name });
         }
         else if (inSpan(n.time))
@@ -86,10 +86,17 @@ void emitSegment(const AnimationClipAsset& clip, uint32_t entity,
 void HE::collectNotifies(const AnimationClipAsset& clip, uint32_t entity,
                          float tPrev, float tEnd, bool includeStart, NotifyQueue& out)
 {
-    if (clip.duration <= 0.0f || clip.notifies.empty()) return;
+    collectNotifySpan(clip.notifies, clip.duration, entity, tPrev, tEnd, includeStart, out);
+}
+
+void HE::collectNotifySpan(const std::vector<AnimationNotify>& notifies, float duration,
+                           uint32_t entity, float tPrev, float tEnd, bool includeStart,
+                           NotifyQueue& out)
+{
+    if (duration <= 0.0f || notifies.empty()) return;
     if (tPrev == tEnd && !includeStart) return;
 
-    const float D = clip.duration;
+    const float D = duration;
 
     // The playhead is always inside the clip; the far end is what may leave it.
     float a         = std::clamp(tPrev, 0.0f, D);
@@ -103,7 +110,7 @@ void HE::collectNotifies(const AnimationClipAsset& clip, uint32_t entity,
         while (e > D)
         {
             if (rounds++ >= kMaxRounds) { exhausted = true; break; }
-            emitSegment(clip, entity, a, D, closed, out);
+            emitSegment(notifies, D, entity, a, D, closed, out);
             e -= D;
             a  = 0.0f;
             // The seam the playhead just crossed. `duration` belonged to the lap
@@ -112,19 +119,19 @@ void HE::collectNotifies(const AnimationClipAsset& clip, uint32_t entity,
             // instead of never.
             closed = true;
         }
-        emitSegment(clip, entity, a, std::min(e, D), closed, out);
+        emitSegment(notifies, D, entity, a, std::min(e, D), closed, out);
     }
     else
     {
         while (e < 0.0f)
         {
             if (rounds++ >= kMaxRounds) { exhausted = true; break; }
-            emitSegment(clip, entity, a, 0.0f, closed, out);
+            emitSegment(notifies, D, entity, a, 0.0f, closed, out);
             e += D;
             a  = D;
             closed = true;
         }
-        emitSegment(clip, entity, a, std::max(e, 0.0f), closed, out);
+        emitSegment(notifies, D, entity, a, std::max(e, 0.0f), closed, out);
     }
 
     if (exhausted)

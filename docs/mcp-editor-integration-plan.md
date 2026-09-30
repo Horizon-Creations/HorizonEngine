@@ -1526,6 +1526,7 @@ Szene abgelehnt, die geschriebene leere Szene öffnet.
 ## 10. Nachtrag: die Terrain-Werkzeuge (Folgethema 29, Schritt 9)
 
 `terrain_info`, `terrain_heightmap`, `terrain_sculpt`, `terrain_paint` — vier
+(seit Thema 100 fünf, siehe 10.7: `terrain_mountain`)
 Werkzeuge für die eine Komponente, die `entity_get` und
 `entity_set_components` nicht sinnvoll adressieren können.
 
@@ -1610,6 +1611,29 @@ anderer. `TerrainSculpt::ensureHeights` nimmt den Schnapp deshalb vorweg, und
   Details „Heightmap", `TerrainHeightmap`) schreibt und liest der Serialisierer
   das Feld, damit läuft es durch `componentsOf` automatisch mit. Ein eigenes
   `terrain_import_heightmap`-Werkzeug gibt es noch nicht.
+
+### 10.7 Nachtrag: `terrain_mountain` (Thema 100, Schritt 3)
+
+Das fünfte Werkzeug ist das Mountain-Werkzeug des Landscape-Modus ohne das
+Ziehen: eine elliptische Fläche (`x`/`z` Weltmitte, `radius` oder
+`radiusX`/`radiusZ`), dazu `maxHeight`, `falloff` (Meter, nach innen),
+`roughness`, `octaves`, `frequency`, `seed`. Die Mathematik ist
+`TerrainGenerate::mountain`, dieselbe Funktion, die das Editor-Werkzeug beim
+Loslassen aufruft; Ablauf, Kopie, Gateway und Runtime-Übertrag sind die von
+`terrain_sculpt`.
+
+* **`maxHeight` ist ein Betrag, keine Welthöhe.** Die Formation wird auf den
+  vorhandenen Boden **addiert** wie ein `raise`; nur die XZ-Mitte wird in
+  Terrain-lokale Koordinaten umgerechnet, das Y der Entity spielt keine Rolle.
+* **Abgelehnt statt geklemmt:** `roughness` außerhalb 0..1, `octaves` außerhalb
+  1..12, negativer `falloff`, `frequency` ≤ 0, kein oder ein nicht positiver
+  Radius. Die Einstellungen, die im Ergebnis zurückkommen, sind damit die, mit
+  denen der Berg wirklich gebaut wurde.
+* Eine Fläche neben der Landschaft oder `maxHeight` 0 ist `changed 0` ohne
+  Undo-Schritt, wie beim Pinsel.
+* **Nicht aus Skripten erreichbar.** HorizonCode/Lua/Python rufen keine
+  MCP-Werkzeuge, und `HE::api` hat bisher überhaupt keine Terrain-Zeilen (auch
+  der Pinsel nicht). Eine `terrain.*`-Zeile wäre ein eigener Schritt.
 
 ## 11. Nachtrag: die Widget-Werkzeuge (Folgethema 29, Schritt 4)
 

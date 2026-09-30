@@ -4,6 +4,7 @@
 #include <algorithm>   // sort — the deterministic key order of an unordered Lua map
 #include <functional>
 #include <cstdint>
+#include <cstdio>     // snprintf — a Double default as a round-tripping Lua literal
 #include <iterator>   // std::next — the cooldown sweep in destroyInstance
 #include <filesystem>
 // For thisLibraryDir(): finding the directory this very library was loaded from.
@@ -543,6 +544,7 @@ static void luaPushFieldValue(lua_State* L, const HorizonCode::Value& v, int dep
     switch (v.type)
     {
     case P::Bool:   lua_pushboolean(L, v.b); break;
+    case P::Double: lua_pushnumber(L, v.d); break;
     case P::Int:    lua_pushinteger(L, v.i); break;
     case P::Enum:   lua_pushinteger(L, v.i); break;
     case P::String: lua_pushstring(L, v.s.c_str()); break;
@@ -698,6 +700,7 @@ static HorizonCode::Value luaToFieldValue(lua_State* L, int idx, const HE::Struc
     switch (f.type)
     {
     case P::Bool:   return V::ofBool(lua_toboolean(L, idx) != 0);
+    case P::Double: return V::ofDouble(lua_tonumber(L, idx));
     case P::Int:    return V::ofInt((int)lua_tointeger(L, idx));
     case P::Enum:
     {
@@ -768,6 +771,9 @@ static HorizonCode::Value luaReadValue(lua_State* L, int& idx, HorizonCode::PinT
     switch (t)
     {
     case P::Bool:   return V::ofBool(lua_toboolean(L, idx++) != 0);
+    // A Lua number is a double already — the whole point of this pin type is
+    // that nothing narrows it on the way in.
+    case P::Double: return V::ofDouble(luaL_checknumber(L, idx++));
     case P::Int:    return V::ofInt(static_cast<int>(luaL_checkinteger(L, idx++)));
     case P::Enum:   return V::ofInt(static_cast<int>(luaL_checkinteger(L, idx++)));
     case P::String: return V::ofString(luaL_checkstring(L, idx++));
@@ -798,6 +804,7 @@ static int luaPushValue(lua_State* L, const HorizonCode::Value& v, HorizonCode::
     switch (t)
     {
     case P::Bool:   lua_pushboolean(L, v.b); return 1;
+    case P::Double: lua_pushnumber(L, v.d); return 1;
     case P::Int:    lua_pushinteger(L, v.i); return 1;
     case P::String: lua_pushstring(L, v.s.c_str()); return 1;
     case P::Vec2:   lua_pushnumber(L, v.v2.x); lua_pushnumber(L, v.v2.y); return 2;
@@ -1049,6 +1056,7 @@ static void registerUserTypes(lua_State* L)
         case P::Bool:   return v.b ? "true" : "false";
         case P::Int:
         case P::Enum:   return std::to_string(v.i);
+        case P::Double: { char b[32]; std::snprintf(b, sizeof b, "%.17g", v.d); return std::string(b); }
         case P::String: return luaStr(v.s);
         case P::Vec2:   return "{" + std::to_string(v.v2.x) + "," + std::to_string(v.v2.y) + "}";
         case P::Color:  return "{" + std::to_string(v.col.x) + "," + std::to_string(v.col.y) + ","

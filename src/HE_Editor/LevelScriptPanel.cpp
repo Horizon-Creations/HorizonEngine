@@ -794,6 +794,20 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 			}
 			EditorWidgets::helpForLabel("Notify");
 		}
+
+		// ── Savegames (SaveStateComponent, entity.saveState) ─────────────────
+		// Like Replicated, the checkbox is the whole declaration: saveState
+		// asks Runtime::savedVariablesOf. Disabled for an Object variable with
+		// the reason at hand — the loader and the runtime refuse it again.
+		const bool canSave = HC::isSaveableType(v->type);
+		ImGui::BeginDisabled(!canSave);
+		bool save = v->saveGame && canSave;
+		if (EditorWidgets::checkbox("Save Game", &save)) { v->saveGame = save; edited = true; }
+		ImGui::EndDisabled();
+		if (!canSave && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("%s", "An object reference names something that exists only in "
+			                        "this run; save a name or an id instead.");
+		EditorWidgets::helpForLabel("Save Game");
 	}
 
 	// Single value, or a container of the type. Changing it re-types the matching
@@ -821,7 +835,10 @@ void drawVariableDetails(HC::Graph& graph, const std::vector<HC::InheritedVariab
 		ImGui::SeparatorText("Default");
 		switch (v->type)
 		{
-			case PT::Float:  if (ImGui::DragFloat("##vdef", &v->f[0], 0.1f)) edited = true; break;
+			// A Double's authored default lives in the same float slot (see
+			// variableDefaultValue); its precision is for what arrives at runtime.
+			case PT::Float:
+			case PT::Double: if (ImGui::DragFloat("##vdef", &v->f[0], 0.1f)) edited = true; break;
 			case PT::Int:  { int iv = (int)v->f[0]; if (ImGui::DragInt("##vdef", &iv)) { v->f[0] = (float)iv; edited = true; } break; }
 			case PT::Bool: { bool b = v->f[0] != 0.0f; if (ImGui::Checkbox("##vdef", &b)) { v->f[0] = b ? 1.0f : 0.0f; edited = true; } break; }
 			case PT::String: ImGui::InputText("##vdef", &v->s); if (ImGui::IsItemDeactivatedAfterEdit()) edited = true; break;
@@ -2772,6 +2789,29 @@ bool HorizonCodeClassPanel::reloadFromDisk(const std::string& assetPath)
 
 
 void HorizonCodeClassPanel::appendDirtyPaths(std::vector<std::string>& out) { s_classStates.appendDirtyPaths(out); }
+
+void HorizonCodeClassPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSnapshotSource>& out)
+{
+	ContentManager* cm = ctx.contentManager;
+	if (!cm) return;
+	s_classStates.forEach([&](const std::string&, ClassState& st) {
+		if (!st.dirty || st.path.empty()) return;
+		out.push_back({ cm->resolveSavePath(st.path), [cm, &st](const std::string& dest) {
+			const HorizonCodeClassAsset* a = cm->getHorizonCodeClass(st.assetId);
+			if (!a) return false;
+			// saveClassState's encoding, into a copy.
+			HorizonCodeClassAsset copy = *a;
+			copy.graphJson = HorizonCode::toJson(st.graph);
+			copy.baseClass = st.baseClass;
+			if (st.compWorld && st.compRoot != entt::null)
+			{
+				SceneSerializer ser;
+				copy.componentBlob = ser.serializeSubtree(*st.compWorld, st.compRoot);
+			}
+			return cm->writeAssetTo(copy, dest);
+		} });
+	});
+}
 
 bool HorizonCodeClassPanel::save(AppContext& ctx, const std::string& path)
 {

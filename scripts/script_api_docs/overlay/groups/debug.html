@@ -1,0 +1,26 @@
+          <p>
+            Lines, spheres and boxes drawn into the 3D view, to see what a script
+            is doing: where a ray went, what an overlap covered. A shape stays for
+            <code>seconds</code>; 0 draws it for one frame, so a shape that follows
+            something moving is drawn again every frame from
+            <code>onUpdate</code>. <code>seconds</code> counts down in real time,
+            so a paused game does not keep a shape alive longer; in the editor
+            the countdown runs only during Play. The color is red, green and blue from 0 to 1; its alpha is ignored.
+            <code>clear</code> removes every shape, including the ones other
+            scripts drew. Debug shapes appear in a packaged game too, so take them
+            out, or put them behind a flag of your own, before you ship.
+          </p>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Known issue: four numbers per position.</strong> The
+              positions of <code>line</code>, <code>sphere</code> and
+              <code>box</code> are declared as colors, so Lua and Python read
+              <strong>four</strong> numbers for each one. Pass a fourth number
+              (it is ignored) after every <code>x, y, z</code>:
+              <code>line</code> takes 13 arguments, not 10. With too few, Lua
+              reports <em>bad argument #11</em> and Python raises
+              <code>IndexError</code>. The signatures below show the
+              extra number as <code>_</code>.
+            </p>
+          </div>

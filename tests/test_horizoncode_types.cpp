@@ -998,6 +998,83 @@ TEST_CASE("Struct field removal: Break Struct wires follow their fields across a
     CHECK(loaded.links.size() == 2);
 }
 
+TEST_CASE("Renamed field / entry: a graph saved before the rename retargets on load")
+{
+    // formerNames (HE::StructField / HE::EnumEntry) carry a rename into data
+    // that was persisted under the old name. The load path must (a) keep every
+    // value and wire, and (b) rewrite the stored names, so the graph's next
+    // save no longer leans on the alias.
+    TypeFixture fx;
+    Graph g;
+    Variable sv; sv.name = "stats"; sv.type = PinType::Struct; sv.typeName = kStats;
+    sv.structDefaults["title"]  = Value::ofString("Hero");
+    sv.structDefaults["weapon"] = Value::ofString("Staff");   // enum override = entry NAME
+    sv.structDefaults["gone"]   = Value::ofFloat(3.0f);       // no field claims it
+    Variable ev; ev.name = "main"; ev.type = PinType::Enum; ev.typeName = kWeapon;
+    ev.s = "Staff";
+    g.variables = { sv, ev };
+
+    const int br = addTypedNode(g, NodeType::BreakStruct, kStats);
+    const int gf = addTypedNode(g, NodeType::GetStructField, kStats);
+    { Node* n = g.findNode(gf);
+      n->params = { { "title", PinType::String, false, {} } }; }
+    syncTypeSignatures(g);
+    // BreakStruct pins: dataIn Struct=0, dataOuts hp=1 title=2 weapon=3.
+    Node s1; s1.type = NodeType::SetVariable; s1.s = "t"; s1.propType = PinType::String;
+    const int t = g.addNode(std::move(s1));
+    REQUIRE(g.connect(br, 2, t, 2));   // title → t
+    const std::string json = toJson(g);
+
+    // While the graph is on disk: title → name, Staff → Wand, AND hp removed in
+    // the same edit. The BreakStruct region shrinks, so the "same size = keep
+    // the index" fallback is off — only the alias can carry title's wire.
+    {
+        auto& reg = HE::TypeRegistry::instance();
+        HE::StructDef st;
+        REQUIRE(reg.getStruct(kStats, st));
+        st.fields.erase(st.fields.begin());                       // hp gone
+        st.fields[0].name = "name"; st.fields[0].formerNames = { "title" };
+        reg.registerStruct(st);
+        HE::EnumDef we;
+        REQUIRE(reg.getEnum(kWeapon, we));
+        we.entries[2].name = "Wand"; we.entries[2].formerNames = { "Staff" };   // value 2
+        reg.registerEnum(we);
+    }
+
+    Graph loaded;
+    REQUIRE(fromJson(json, loaded));
+    REQUIRE(loaded.variables.size() == 2);
+
+    // (b) stored names follow the rename…
+    const auto& sd = loaded.variables[0].structDefaults;
+    CHECK(sd.count("name") == 1);
+    CHECK(sd.count("title") == 0);
+    REQUIRE(sd.count("weapon") == 1);
+    CHECK(sd.at("weapon").s == "Wand");
+    CHECK(sd.count("gone") == 1);                                  // untouched, not dropped
+    CHECK(loaded.variables[1].s == "Wand");
+    CHECK(loaded.findNode(gf)->params.size() == 1);
+    CHECK(loaded.findNode(gf)->params[0].name == "name");
+
+    // (a) …and the values they carry are the ones authored.
+    const Value seeded = variableDefaultValue(loaded.variables[0]);
+    REQUIRE(seeded.items.size() == 2);
+    CHECK(seeded.items[0].s == "Hero");
+    CHECK(seeded.items[1].i == 2);                                 // Wand, not the fallback
+    CHECK(variableDefaultValue(loaded.variables[1]).i == 2);
+
+    // New layout: Struct=0, name=1, weapon=2 — title's wire followed its field.
+    int titleLinks = 0;
+    for (const Link& l : loaded.links)
+        if (l.srcNode == br && l.dstNode == t) { ++titleLinks; CHECK(l.srcPin == 1); }
+    CHECK(titleLinks == 1);
+
+    // The un-retargeted variable still resolves too (readers fall back on
+    // their own, e.g. a graph that was open while the type was renamed).
+    CHECK(variableDefaultValue(sv).items[0].s == "Hero");
+    CHECK(variableDefaultValue(ev).i == 2);
+}
+
 TEST_CASE("Deleting a FunctionEntry removes its body nodes, not just the entry")
 {
     Graph g;

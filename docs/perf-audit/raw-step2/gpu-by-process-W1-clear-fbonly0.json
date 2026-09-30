@@ -1,0 +1,20 @@
+{
+ "interval_s": 10.0,
+ "processes": [
+  {
+   "pid": 418,
+   "name": "WindowServer",
+   "gpu_pct": 34.64
+  },
+  {
+   "pid": 72986,
+   "name": "HorizonEditor",
+   "gpu_pct": 32.93
+  },
+  {
+   "pid": 78684,
+   "name": "metal_present_pr",
+   "gpu_pct": 9.61
+  }
+ ]
+}

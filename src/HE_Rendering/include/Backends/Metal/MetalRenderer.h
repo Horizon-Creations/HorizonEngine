@@ -10,8 +10,10 @@
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/FrameUploadRing.h>
 #include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
 #include <HorizonRendering/GiBvh.h>
+#include <HorizonRendering/GIProbeGrid.h>
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
@@ -80,6 +82,7 @@ public:
 	void Initialize(HE::Window* window) override;
 	void Shutdown()                      override;
 	void Render()                        override;
+	void WaitForFrame()                  override;
 	Capabilities GetCapabilities() const override;
 	FrameGpuStats GetFrameGpuStats() const override;
 
@@ -441,9 +444,22 @@ private:
 	// there is one sky in this engine, and a cheaper stand-in for the preview was
 	// tried and looked like one. `lowResClouds` false forces the inline raymarch
 	// (the preview runs no quarter-res pre-pass, so there is no buffer to composite).
+	// `useSkyLut` lets the pass read the Sky-View LUT when it holds this sun.
 	void  EncodeSky(void* renderEncoder, const glm::mat4& invViewProj, const glm::vec3& sunDir,
 	                float time, const IRenderer::EnvironmentSettings& env,
-	                const glm::vec3& camPos, bool lowResClouds);
+	                const glm::vec3& camPos, bool lowResClouds, bool useSkyLut);
+	// Sky-View LUT (perf audit A4): atmoScatter for the current sun baked into
+	// two 256×128 RGBA16F targets (skyViewLutFragment in kSkyMSL: Rayleigh +
+	// multiple-scatter fill, and the phase-free Mie term), so the sky pass reads
+	// it instead of integrating per pixel. Baked at frame level before the scene
+	// encoder, only when the sun moved; m_skyLutSunDir is the sun it holds.
+	void*     m_skyLutPipeline = nullptr; // id<MTLRenderPipelineState> (skyVertex + skyViewLutFragment)
+	void*     m_skyLutRayleigh = nullptr; // id<MTLTexture> RGBA16F, color(0)
+	void*     m_skyLutMie      = nullptr; // id<MTLTexture> RGBA16F, color(1)
+	glm::vec3 m_skyLutSunDir   = glm::vec3(0.0f);
+	bool      m_skyLutValid    = false;
+	void  EncodeSkyViewLut(void* cmdBuf, const glm::vec3& sunDir);
+	void  DestroySkyViewLut();
 	// (Re)creates the offscreen viewport textures at the requested size.
 	void EnsureViewportTarget();
 	void DestroyViewportTarget();
@@ -465,6 +481,9 @@ private:
 	bool ResolveMaterialTexture(const HE::UUID& materialId, void*& outTex);
 	// Node-graph project texture (Texture Sample nodes), cached by UUID/path key.
 	void* ResolveGraphTexture(const HE::UUID& texId, const std::string& path);
+	// A UI quad's image: same asset, uploaded without the sRGB decode, because
+	// the UI pass writes sRGB numbers straight to a Unorm target (Thema 107).
+	void* ResolveUITexture(const HE::UUID& texId, const std::string& path);
 
 	// Resolves a material override's PBR scalars (baseColor/metallic/roughness/
 	// opacity). Returns true if the material is loaded; leaves outputs untouched.
@@ -1197,19 +1216,19 @@ private:
 	// sun-lit); no border-texel wrap (accepts minor bilinear seams at probe tile
 	// edges). All are straightforward follow-ups once the base algorithm is
 	// visually verified, not correctness bugs.
-	static constexpr float kGIProbeSpacing      = 4.0f; // world units between probes
-	static constexpr int   kGIMaxProbesPerAxis  = 10;   // caps total probes/memory/cost
 	static constexpr int   kGIProbeOctSize      = 8;    // texels/side of each probe's octahedral tile (no border)
 	glm::vec3 m_giGridOrigin  = glm::vec3(0.0f); // world-space position of probe (0,0,0)
 	glm::ivec3 m_giGridCounts = glm::ivec3(0);   // probe counts per axis
+	float m_giProbeSpacing = HE::kGIProbeMinSpacing; // world units between probes; grows with the scene (GIProbeGrid.h)
 	int   m_giProbeCount   = 0;                  // gridCounts.x*y*z
 	int   m_giProbesPerRow = 0;                  // atlas tile layout (ceil(sqrt(probeCount)))
-	bool  m_giProbeGridBuilt = false;            // built lazily once; NOT rebuilt on scene change (v1 limitation)
+	bool  m_giProbeGridBuilt = false;            // built lazily; refit when the scene's geometry leaves it
+	HE::GIProbeGridTracker m_giGridTrack; // when to re-check the fit (GIProbeGrid.h)
 	int   m_giProbeUpdateCursor = 0;             // round-robin index into [0, probeCount) for frame-sliced updates
 	void* m_giProbeUpdatePipeline = nullptr;     // id<MTLComputePipelineState>
 	void* m_giIrradianceAtlas = nullptr;         // id<MTLTexture> RGBA16F, read_write (in-place EMA blend)
 	void* m_giVisibilityAtlas = nullptr;         // id<MTLTexture> RG16F (mean, mean^2 hit distance), read_write
-	void  EnsureGIProbeGrid();                   // computes the grid from the scene AABB, once
+	void  EnsureGIProbeGrid();                   // fits the grid to the scene AABB; refits on geometry change
 	void  EnsureGIProbePipeline();                // builds m_giProbeUpdatePipeline once, only if m_giSupported
 	void  EnsureGIProbeAtlas();                   // (re)allocates the 2 atlas textures for the current grid
 	void  DestroyGIProbeAtlas();
@@ -1229,6 +1248,7 @@ private:
 	// InvalidateMaterial retires the texture and drops the entry.
 	std::unordered_map<HE::UUID, void*>    m_materialTexCache;
 	std::unordered_map<std::string, void*> m_graphTexCache; // node-graph textures by UUID/path key
+	std::unordered_map<std::string, void*> m_uiTexCache;    // UI quad images, same keys, never sRGB
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
 	uint32_t m_viewportReqW    = 0;  // requested by the UI, 0 = direct to window
@@ -1240,6 +1260,11 @@ private:
 	// overlay, present) is skipped — a still on request must not flash a black
 	// frame on the window it was not asked to touch.
 	bool     m_captureOnly     = false;
+	// The primary window's drawable, acquired by WaitForFrame before the frame
+	// polled its input and consumed by the swapchain pass of EncodeFrame.
+	// id<CAMetalDrawable> (retained) or null. Outlives EncodeFrame's
+	// autorelease pool on purpose; a capture-only frame never touches it.
+	void*    m_heldDrawable    = nullptr;
 
 	// Textures replaced on viewport resize. The current frame's ImGui draw
 	// list (and in-flight GPU work) may still reference the old texture, so
@@ -1268,6 +1293,24 @@ private:
 	void  CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4& viewProj,
 	                         const glm::vec3& cameraPos);
 	void  ReleaseRibbonBuffers();
+
+	// ── Per-frame upload ring (perf audit B6) ───────────────────────────────
+	// Instance matrices, clustered-light lists and debug lines used to get a
+	// fresh MTLBuffer each, hundreds per frame. They now take a slice of a
+	// long-lived shared chunk: EncodeFrame opens the ring's frame after creating
+	// its command buffer, and a completion handler on that (last) command buffer
+	// returns the frame's chunks. Held by shared_ptr so the handler outlives the
+	// renderer. Chunk i's buffer is m_uploadRingBufs[i] (CFBridgingRetain'd).
+	std::shared_ptr<HE::FrameUploadRing> m_uploadRing = std::make_shared<HE::FrameUploadRing>();
+	std::vector<void*> m_uploadRingBufs;
+	// Space for `len` bytes on the GPU for THIS frame: returns the CPU pointer to
+	// fill, the buffer (borrowed id<MTLBuffer>) and the byte offset to bind it
+	// at. Outside an open ring frame (previews, thumbnails) it falls back to a
+	// fresh buffer, the old behaviour. Null only if Metal refuses the buffer.
+	void* UploadTransient(size_t len, void*& outBuf, size_t& outOffset);
+	// Same, filled with a copy of `data`; false (nothing bound) only on failure.
+	bool  UploadTransientBytes(const void* data, size_t len, void*& outBuf, size_t& outOffset);
+	void  ReleaseUploadRing();
 
 	// ── GPU weather particles (compute simulation + vertex-pull billboards) ──
 	// A fixed camera-following rain/snow pool lives in one MTLBuffer (interleaved

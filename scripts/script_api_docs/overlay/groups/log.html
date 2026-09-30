@@ -1,0 +1,11 @@
+          <p>
+            <code>horizon.log</code> writes one line at Info level to the
+            editor's Console and to <code>HorizonEngine.log</code>, in the editor and
+            in a packaged game alike. In the editor the line is prefixed with the
+            project's script language, for example <code>[Lua]</code>. The message
+            must be text. Lua turns a number into text on its own, and anything
+            else (<code>nil</code>, a table, a boolean) is an error. Python accepts
+            only a <code>str</code>, so pass numbers through an f-string or
+            <code>str()</code>. The language's own <code>print</code> writes to
+            standard output only, which the Console does not show.
+          </p>

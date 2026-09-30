@@ -2233,6 +2233,13 @@ Später entfernt hätte er jeden Graphen dahinter umverdrahtet; jetzt kostet er 
 - **`fs.modified` fährt auf einem 32-Bit-Float-Pin**, wie `datetime.now` auch. Auf Epoch-Größe
   sind das rund zwei Minuten Auflösung. Für „wie alt ist diese Datei" reicht das; wer eine
   Änderungserkennung darauf baut, baut auf Sand und sollte die Größe vergleichen.
+  *Nachtrag 25.09.2026 (Thema 89):* behoben. Es gibt jetzt einen `PinType::Double`, und
+  `datetime.*`, `fs.modified` und `fs.size` fahren darauf, durch Lua, Python, Interpreter und
+  generiertes C++ gleichermaßen. Offen bleibt: die Mathe-Knoten rechnen weiter in Float, ein
+  „Now minus Modified" im Graphen verliert die Genauigkeit also erst dort. In Lua/Python ist es exakt.
+  Ein Graph, der vorher gespeichert wurde, trägt an diesen Knoten noch Float-Pins; der Interpreter
+  spiegelt nicht aus der Registry nach und verengt dort wie bisher (kein 1970, getestet), der Codegen
+  spiegelt veraltete Knoten selbst neu. Exakt im Editor wird so ein Knoten erst, wenn er neu gespiegelt ist.
 
 ### E4 Stufe 3: der Zustand über den Reload (01.09.2026)
 

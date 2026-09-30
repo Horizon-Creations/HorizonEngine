@@ -1,0 +1,112 @@
+{
+  "_comment": "The 35 flat horizon.* functions: hand-written shims in ScriptContext.cpp (kHorizonFuncs) and PyScriptBackend.cpp, NOT registry rows. Signatures are read off luaL_check*/luaL_opt* and PyArg_ParseTuple; [x] = optional. 'twin' = the registry id that does the same job (link target), null when there is none. gen_reference.py fails if this list and kHorizonFuncs disagree.",
+  "groups": [
+    {
+      "title": "Log and entities",
+      "items": [
+        { "name": "log", "args": "message", "returns": "—", "twin": "log",
+          "desc": "Writes a line to the Console panel and to <code>HorizonEngine.log</code>. The only way to reach the <code>log</code> row from a script: there is no <code>horizon.log.*</code> group." },
+        { "name": "getName", "args": "entity", "returns": "string", "twin": "entity.getName",
+          "desc": "The entity's name, <code>\"\"</code> for an invalid id." },
+        { "name": "spawn", "args": "parent [, name]", "returns": "entity", "twin": "entity.spawn",
+          "desc": "Creates an empty entity named <code>name</code> (default <code>\"Entity\"</code>) under <code>parent</code> and returns its id. <code>parent</code> 0 or invalid = top level. Unlike <code>horizon.entity.spawn</code>, the name is optional here." },
+        { "name": "destroy", "args": "entity", "returns": "—", "twin": "entity.destroy",
+          "desc": "Removes the entity; an invalid id is ignored. Check the id first: in a script 0 is the scene root, not “nothing”." }
+      ]
+    },
+    {
+      "title": "Transform",
+      "items": [
+        { "name": "getPosition", "args": "entity", "returns": "x, y, z", "twin": "transform.getPosition",
+          "desc": "Local position, i.e. relative to the parent. <code>(0, 0, 0)</code> for an invalid id. There is no <code>horizon.transform.*</code> group, so this is the only script route to the row." },
+        { "name": "setPosition", "args": "entity, x, y, z", "returns": "—", "twin": "transform.setPosition",
+          "desc": "Sets the local position. On an entity with a rigid body or a character controller this is a teleport, so the physics step does not snap it back." },
+        { "name": "getRotation", "args": "entity", "returns": "x, y, z", "twin": "transform.getRotation",
+          "desc": "Local Euler rotation in <strong>degrees</strong>. <code>(0, 0, 0)</code> for an invalid id." },
+        { "name": "setRotation", "args": "entity, x, y, z", "returns": "—", "twin": "transform.setRotation",
+          "desc": "Sets the local Euler rotation in degrees; a teleport on physics bodies, like <code>setPosition</code>." },
+        { "name": "getScale", "args": "entity", "returns": "x, y, z", "twin": "transform.getScale",
+          "desc": "Local scale. <code>(1, 1, 1)</code> for an invalid id." },
+        { "name": "setScale", "args": "entity, x, y, z", "returns": "—", "twin": "transform.setScale",
+          "desc": "Sets the local scale." }
+      ]
+    },
+    {
+      "title": "Physics",
+      "items": [
+        { "name": "raycast", "args": "ox, oy, oz, dx, dy, dz [, maxDist]", "returns": "hit table / nil", "twin": "physics.raycast",
+          "desc": "Casts a ray from the origin along the direction, up to <code>maxDist</code> (default <code>1000</code>). Returns a <em>flat</em> table (Lua) / dict (Python) with the keys <code>entity</code>, <code>x</code>, <code>y</code>, <code>z</code> (hit point), <code>nx</code>, <code>ny</code>, <code>nz</code> (surface normal) and <code>distance</code>, or <code>nil</code> / <code>None</code> on a miss or without a physics world. <code>horizon.physics.raycast</code> answers the same question as ten return values and also reports the hit layer." },
+        { "name": "setVelocity", "args": "entity, vx, vy, vz", "returns": "—", "twin": "physics.setVelocity",
+          "desc": "Drives the character controller if the entity has one, its rigid body otherwise. No-op without a physics world." },
+        { "name": "isGrounded", "args": "entity", "returns": "bool", "twin": "physics.isGrounded",
+          "desc": "Whether the entity's character controller stands on ground. <code>false</code> without a physics world or a controller." }
+      ]
+    },
+    {
+      "title": "Material",
+      "items": [
+        { "name": "setMaterialParam", "args": "entity, name, x [, y, z, w]", "returns": "bool", "twin": "material.setParam",
+          "desc": "Sets the node-graph material parameter <code>name</code> on the entity's material at runtime. One to four numbers, omitted ones are 0, so a scalar parameter takes just <code>x</code>. <code>false</code> when the entity has no material or the parameter does not exist. <strong>Known issue:</strong> it writes the material asset, so every entity using that material changes with it (see <a href=\"scripting-reference.html#material\">Material</a>). There is no <code>horizon.material.*</code> group." },
+        { "name": "getMaterialParam", "args": "entity, name", "returns": "x, y, z, w", "twin": "material.getParam",
+          "desc": "Reads a material parameter back as four numbers, from the material asset (an override on the entity's Details panel is not seen); <code>(0, 0, 0, 0)</code> when it cannot be found." }
+      ]
+    },
+    {
+      "title": "In-game UI elements",
+      "note": "These act on <em>entities</em> that carry UI components (a UI canvas in the scene). Widgets built in the Widget Designer are a different thing, see the next table.",
+      "items": [
+        { "name": "setUIText", "args": "entity, text", "returns": "—", "twin": "ui.setText",
+          "desc": "Replaces the text of the entity's UI Text component." },
+        { "name": "getUIText", "args": "entity", "returns": "string", "twin": "ui.getText",
+          "desc": "The text of the UI Text component, <code>\"\"</code> without one." },
+        { "name": "setUIColor", "args": "entity, r, g, b [, a]", "returns": "—", "twin": "ui.setColor",
+          "desc": "Sets the element's primary colour: image tint, text colour or button normal colour, whichever exists (image first). <code>a</code> defaults to 1." },
+        { "name": "getUIColor", "args": "entity", "returns": "r, g, b, a", "twin": "ui.getColor",
+          "desc": "The primary colour in the same order; <code>(1, 1, 1, 1)</code> when there is none." },
+        { "name": "setUIVisible", "args": "entity, visible", "returns": "—", "twin": "ui.setVisible",
+          "desc": "Switches the UI element on or off, together with everything under it." },
+        { "name": "isUIVisible", "args": "entity", "returns": "bool", "twin": "ui.getVisible",
+          "desc": "Whether the UI element is switched on." },
+        { "name": "setUIPosition", "args": "entity, x, y", "returns": "—", "twin": "ui.setPosition",
+          "desc": "Moves the element, in canvas units." },
+        { "name": "getUIPosition", "args": "entity", "returns": "x, y", "twin": "ui.getPosition",
+          "desc": "The element's position in canvas units." },
+        { "name": "setUISize", "args": "entity, w, h", "returns": "—", "twin": "ui.setSize",
+          "desc": "Resizes the element, in canvas units." },
+        { "name": "getUISize", "args": "entity", "returns": "w, h", "twin": "ui.getSize",
+          "desc": "The element's size in canvas units." },
+        { "name": "setUIMaterialParam", "args": "entity, name, x [, y, z, w]", "returns": "bool", "twin": "ui.setMaterialParam",
+          "desc": "<code>setMaterialParam</code> for the material of the entity's UI Image. <code>false</code> without one or for an unknown parameter." }
+      ]
+    },
+    {
+      "title": "Widgets",
+      "note": "Widgets are instances of Widget Designer assets. They live outside the entity world and are addressed by the widget id <code>createWidget</code> returns, not by an entity id. The rest of the widget API (lists, animation, popups, children) is <code>horizon.widget.*</code>.",
+      "items": [
+        { "name": "createWidget", "args": "assetPath", "returns": "widget", "twin": null,
+          "desc": "Instantiates the widget asset at the content-relative path and returns its id, <code>0</code> on failure. The widget starts hidden; <code>showWidget</code> puts it on screen. HorizonCode does the same with the <em>Create Widget</em> node." },
+        { "name": "destroyWidget", "args": "widget", "returns": "—", "twin": null,
+          "desc": "Removes the widget instance." },
+        { "name": "showWidget", "args": "widget", "returns": "—", "twin": null,
+          "desc": "Shows the widget on screen." },
+        { "name": "hideWidget", "args": "widget", "returns": "—", "twin": null,
+          "desc": "Hides it again; the instance and its state stay." },
+        { "name": "setWidgetZOrder", "args": "widget, z", "returns": "—", "twin": "widget.setZOrder",
+          "desc": "Draw order among widgets: higher is on top." },
+        { "name": "isWidgetVisible", "args": "widget", "returns": "bool", "twin": "widget.isVisible",
+          "desc": "Whether the widget is currently shown." },
+        { "name": "callWidgetFunction", "args": "widget, name", "returns": "bool", "twin": "widget.callFunction",
+          "desc": "Calls a <em>public</em> function of the widget's graph by name. <code>false</code> for a private or unknown function." }
+      ]
+    },
+    {
+      "title": "Cursor",
+      "items": [
+        { "name": "showCursor", "args": "", "returns": "—", "twin": "cursor.setVisible",
+          "desc": "Releases the mouse and shows the pointer, e.g. for a menu. There is no <code>horizon.cursor.*</code> group." },
+        { "name": "hideCursor", "args": "", "returns": "—", "twin": "cursor.setVisible",
+          "desc": "Hides the pointer and grabs the mouse again for camera control." }
+      ]
+    }
+  ]
+}

@@ -53,6 +53,7 @@ namespace
 		switch (t)
 		{
 			case PinType::Float:     return "Float";
+			case PinType::Double:    return "Double";
 			case PinType::Bool:      return "Bool";
 			case PinType::Int:       return "Int";
 			case PinType::String:    return "String";
@@ -109,6 +110,14 @@ namespace
 		switch (v.type)
 		{
 			case PinType::Float:  return num(v.f);
+			case PinType::Double:
+			{
+				// %.15g, not num()'s %g: a watch that shows an epoch time as
+				// 1.75883e+09 hides exactly the digits this type carries.
+				char buf[40];
+				std::snprintf(buf, sizeof(buf), "%.15g", v.d);
+				return buf;
+			}
 			case PinType::Bool:   return v.b ? "true" : "false";
 			case PinType::Int:    return std::to_string(v.i);
 			case PinType::String: return quoted(v.s);

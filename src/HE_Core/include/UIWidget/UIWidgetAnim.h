@@ -138,6 +138,9 @@ struct UIAnimSample
 //   · after the last key   → the last key's value
 //   · one key              → that value, always
 //   · two keys at the same time → the later one in the list wins
+//   · between two keys → interpolated for Float, Vec2 and Color; every other
+//     type (Bool switches, Int/String) HOLDS the earlier key until the next one
+//     is reached — a step, and the key's ease is ignored
 HE_API void uiAnimEvaluate(const UIAnimClip& clip, float time,
                            std::vector<UIAnimSample>& out);
 
@@ -159,6 +162,16 @@ HE_API void uiAnimEvaluate(const UIAnimClip& clip, float time,
 // finished at once — including a looping one, because there is nothing to loop.
 HE_API float uiAnimPlayEnd(const UIAnimClip& clip);
 
+// Spread the keys out so the clip's last key lands exactly on its length: every
+// key time is multiplied by duration / uiAnimPlayEnd(), so the timing between
+// keys keeps its proportions. The repair for a clip whose motion is over long
+// before the length it was authored in (Thema 107: a fade keyed 0 → 0.05 s in a
+// one-second clip, which plays as a pop).
+//
+// False, and nothing touched, when there is nothing to stretch: no keys past
+// zero, or the last key already at the length.
+HE_API bool uiAnimStretchToLength(UIAnimClip& clip);
+
 // How long ONE pass takes in this direction: the clip's own length, or twice it
 // for a ping-pong (out and back). What playback wraps and finishes on.
 HE_API float uiAnimPlaySpan(UIAnimDirection dir, float playEnd);
@@ -168,6 +181,29 @@ HE_API float uiAnimPlaySpan(UIAnimDirection dir, float playEnd);
 // and comes back. Clamped into [0, playEnd], so a caller that has just wrapped
 // its elapsed time cannot ask for a moment outside the clip.
 HE_API float uiAnimDirectedTime(UIAnimDirection dir, float elapsed, float playEnd);
+
+// Does a track of this type glide between its keys (Float, Vec2, Color)? False
+// means it steps: see uiAnimEvaluate. What the editor asks to decide whether a
+// key has an ease worth offering.
+HE_API bool uiAnimTypeInterpolates(UIPropType t);
+
+// ── Which properties a track may be made of ──────────────────────────────────
+// Asked per property of the selected element by the timeline's Add Track list.
+// Here rather than in the editor so the rule is one function a test can call.
+enum class UIAnimTrackOffer : uint8_t
+{
+    No,         // not in the list at all
+    Offer,      // in the list, pickable
+    // In the list but greyed out: the property exists on every element, and
+    // on this one switching it would change nothing (Enabled on an Image).
+    // Shown rather than hidden, so nobody hunts for why it is missing.
+    NoEffect,
+};
+
+// Every Float/Vec2/Color property; of the Bools only the switches Visible (any
+// element) and Enabled (elements that take input or hold children, because
+// Enabled reaches the whole subtree — otherwise NoEffect).
+HE_API UIAnimTrackOffer uiAnimTrackOffer(const UIElement& e, const UIPropDesc& pd);
 
 // The clip of that name, or null. Names are what a graph node and the editor
 // both store, so they are the identity — there is no clip id.

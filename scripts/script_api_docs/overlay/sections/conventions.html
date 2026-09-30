@@ -1,0 +1,273 @@
+        <section id="conventions" class="reveal">
+          <p class="docs-eyebrow">Read this first</p>
+          <h2>Calling Conventions</h2>
+          <div class="docs-divider"></div>
+          <p class="docs-lead">
+            Every function on this page comes from one table inside the engine,
+            the API registry. A HorizonCode graph, a Lua script, a Python script
+            and C++ game code all call the same row, so a function behaves the
+            same in all four. What differs is how you spell the call and how
+            arguments travel. These rules apply to every row below.
+          </p>
+
+          <h3>One function, four names</h3>
+          <div class="docs-table-wrap">
+            <table class="docs-table">
+              <thead>
+                <tr><th>Frontend</th><th>How <code>physics.addImpulse</code> is called</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>HorizonCode</td><td>the node <em>Add Impulse</em> (search the node menu by that name)</td></tr>
+                <tr><td>Lua</td><td><code>horizon.physics.addImpulse(self.entityId, 0, 5, 0)</code></td></tr>
+                <tr><td>Python</td><td><code>horizon.physics.addImpulse(self.entity_id, 0, 5, 0)</code></td></tr>
+                <tr><td>C++ inside the engine</td><td><code>HE::api::physics::addImpulse(ctx, entity, {0, 5, 0})</code></td></tr>
+                <tr><td>C++ game module</td><td><code>he::physics::addImpulse(entity, {0, 5, 0})</code>, where a service helper exists</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            The <em>C++</em> name listed with every row is the engine's own
+            function behind it. A native <code>GameLogic</code> module does not
+            link against the engine and cannot call it; it reaches a smaller set
+            (save, entity lookup, physics, input, content, networking and
+            anti-cheat) through the <code>he::</code> service helpers, see
+            <a href="scripting.html#cpp">Native C++</a>.
+          </p>
+          <p>
+            Function names are <strong>camelCase in Python too</strong>:
+            <code>horizon.physics.addImpulse</code>, not <code>add_impulse</code>.
+            Four groups are <strong>not</strong> reachable as
+            <code>horizon.&lt;group&gt;.*</code> from Lua and Python:
+            <code>transform</code>, <code>material</code>, <code>cursor</code> and
+            <code>log</code>. Scripts use the <a href="#flat">flat functions</a>
+            for them instead (<code>horizon.setPosition</code>,
+            <code>horizon.setMaterialParam</code>, <code>horizon.showCursor</code>,
+            <code>horizon.log</code>). Rows without a flat twin, such as
+            <code>transform.getWorldPosition</code>, are HorizonCode and C++ only.
+            Each group below says which case it is.
+          </p>
+
+          <h3>Arguments and results</h3>
+          <p>
+            Arguments are passed <strong>flat</strong>, in the order the
+            signature lists them. A vector is spread into its numbers, it is
+            not a table or a tuple:
+          </p>
+          <div class="docs-table-wrap">
+            <table class="docs-table">
+              <thead>
+                <tr><th>Type in the signature</th><th>Lua</th><th>Python</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>float</code></td><td>one number</td><td>one <code>float</code> (an <code>int</code> is accepted)</td></tr>
+                <tr><td><code>int</code>, <code>entity</code>, <code>ref</code>, <code>enum</code></td><td>one integer</td><td>one <code>int</code></td></tr>
+                <tr><td><code>bool</code></td><td><code>true</code> / <code>false</code></td><td><code>True</code> / <code>False</code></td></tr>
+                <tr><td><code>string</code></td><td>one string</td><td>one <code>str</code></td></tr>
+                <tr><td><code>vec2</code></td><td>2 numbers: <code>x, y</code></td><td>2 numbers</td></tr>
+                <tr><td><code>vec3</code></td><td>3 numbers: <code>x, y, z</code></td><td>3 numbers</td></tr>
+                <tr><td><code>color</code>, <code>vec4</code></td><td>4 numbers: <code>r, g, b, a</code></td><td>4 numbers</td></tr>
+                <tr><td><code>struct</code></td><td>one table with <code>__type</code></td><td>one <code>dict</code> with <code>"__type"</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            Results spread the same way. One value comes back as that value,
+            several as Lua multiple return values or a Python tuple, none as
+            <code>nil</code> / <code>None</code>.
+            <code>physics.raycast</code> takes two <code>vec3</code> and a
+            <code>float</code> (seven numbers) and returns a
+            <code>bool</code>, an <code>entity</code>, two <code>vec3</code>, a
+            <code>float</code> and an <code>int</code> (ten values):
+          </p>
+          <div class="docs-langs" data-lang="lua">
+            <div class="docs-langs-bar" role="tablist" aria-label="Scripting language">
+              <button type="button" class="docs-lang-btn active" role="tab"
+                      data-lang="lua" id="tab-abi-lua"
+                      aria-selected="true" aria-controls="panel-abi-lua">Lua</button>
+              <button type="button" class="docs-lang-btn" role="tab"
+                      data-lang="python" id="tab-abi-python" tabindex="-1"
+                      aria-selected="false" aria-controls="panel-abi-python">Python</button>
+            </div>
+            <div class="docs-code docs-lang-panel" data-lang="lua" role="tabpanel"
+                 id="panel-abi-lua" aria-labelledby="tab-abi-lua">
+              <div class="docs-code-bar">
+                <span class="dot red"></span><span class="dot yellow"></span
+                ><span class="dot green"></span>
+                <span class="docs-code-title">ground.lua</span>
+              </div>
+              <pre><code><span class="tok-k">local</span> x, y, z = horizon.<span class="tok-f">getPosition</span>(self.entityId)
+<span class="tok-k">local</span> hit, other, px, py, pz, nx, ny, nz, dist, layer =
+    horizon.physics.<span class="tok-f">raycast</span>(x, y, z,  <span class="tok-n">0</span>, <span class="tok-n">-1</span>, <span class="tok-n">0</span>,  <span class="tok-n">50</span>)
+<span class="tok-k">if</span> hit <span class="tok-k">then</span>
+    horizon.<span class="tok-f">log</span>(<span class="tok-s">"ground is "</span> .. dist .. <span class="tok-s">" below"</span>)
+<span class="tok-k">end</span></code></pre>
+            </div>
+            <div class="docs-code docs-lang-panel" data-lang="python" role="tabpanel"
+                 id="panel-abi-python" aria-labelledby="tab-abi-python">
+              <div class="docs-code-bar">
+                <span class="dot red"></span><span class="dot yellow"></span
+                ><span class="dot green"></span>
+                <span class="docs-code-title">ground.py</span>
+              </div>
+              <pre><code>x, y, z = horizon.<span class="tok-f">getPosition</span>(self.entity_id)
+hit, other, px, py, pz, nx, ny, nz, dist, layer = \
+    horizon.physics.<span class="tok-f">raycast</span>(x, y, z,  <span class="tok-n">0</span>, <span class="tok-n">-1</span>, <span class="tok-n">0</span>,  <span class="tok-n">50</span>)
+<span class="tok-k">if</span> hit:
+    horizon.<span class="tok-f">log</span>(<span class="tok-s">f"ground is </span>{dist}<span class="tok-s"> below"</span>)</code></pre>
+            </div>
+          </div>
+          <p>
+            <strong>Too few arguments is an error</strong>: Lua raises
+            <code>bad argument #n … (number expected, got no value)</code>, Python
+            raises <code>IndexError</code>. The one exception is a missing
+            <code>bool</code> in Lua, which silently reads as
+            <code>false</code>. Extra arguments are ignored in both languages.
+            Optional arguments exist only where a signature shows them in
+            brackets, which is only on the flat functions.
+          </p>
+
+          <h3 id="entity-ids">Entity ids and “Self”</h3>
+          <p>
+            An entity is passed as its integer id: <code>self.entityId</code> in
+            Lua, <code>self.entity_id</code> in Python, or whatever a lookup like
+            <code>horizon.entity.findByName</code> returned. Invalid ids are
+            tolerated: getters return a neutral default, setters do nothing.
+          </p>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              <strong>Always pass your own id.</strong> Parameters marked
+              <em>self in HorizonCode</em> mean “the calling object” when a graph
+              leaves the pin unconnected. A Lua or Python script is not such an
+              object, so there it does not apply: <code>0</code> is passed on
+              unchanged, the engine logs <em>“Entity is empty and there is no
+              calling object”</em>, and the call acts on entity 0, the scene root.
+              Write <code>horizon.entity.getName(self.entityId)</code>, never
+              <code>horizon.entity.getName(0)</code>.
+            </p>
+          </div>
+
+          <h3 id="arrays">List results (not yet usable from scripts)</h3>
+          <div class="callout warning">
+            <span class="callout-icon">▲</span>
+            <p>
+              A few rows return a <strong>list</strong>, such as
+              <code>physics.overlapSphere</code>, <code>physics.raycastAll</code>,
+              <code>fs.list</code>, <code>save.list</code> or
+              <code>scene.available</code>, and <code>process.run</code> takes one.
+              HorizonCode and C++ handle these fine. The Lua and Python bridge does
+              not yet translate lists: such a call currently returns a single
+              <code>0</code> or <code>""</code> instead of the list, and the list
+              argument of <code>process.run</code> only accepts a string, which it
+              then drops. These rows are
+              marked <strong>list: HorizonCode/C++ only</strong> below. Until the bridge
+              is fixed, use them from a HorizonCode graph.
+            </p>
+          </div>
+
+          <h3 id="events">Events in the descriptions</h3>
+          <p>
+            The descriptions come from the editor and name HorizonCode events
+            such as <em>On Timer</em> or <em>On Http Response</em>. A script
+            receives only the events listed under <a href="#callbacks">Callbacks</a>;
+            those are linked where they appear. The others (<em>On Http
+            Response</em>, <em>On File Changed</em>, <em>On Menu Item</em>,
+            <em>On Tray Item</em>, <em>On Row Bind</em>, <em>On Window Closed</em>,
+            <em>On Dismissed</em>, <em>On Selection Changed</em>, <em>On Right
+            Clicked</em>) have no Lua or Python callback today. Where a query
+            exists, poll it instead, for example <code>horizon.http.done(ticket)</code>
+            each frame after <code>horizon.http.get</code>. Otherwise handle that
+            part in a HorizonCode graph.
+          </p>
+
+          <h3 id="exec-pure">Actions and queries</h3>
+          <p>
+            Every row is either an <strong>action</strong> (it changes something:
+            moves, spawns, plays, writes) or a <strong>query</strong> (it only
+            reads and returns). In HorizonCode an action is a node with white
+            execution pins that runs in sequence, a query is a data node without
+            them. In a script both are ordinary calls, but the tag tells you
+            whether a call is safe to repeat freely.
+          </p>
+
+          <h3 id="permissions">Project permissions</h3>
+          <p>
+            A few rows reach outside the game and only run when the project
+            allows it, under <em>Project Settings ▸ Permissions</em>. Without the
+            permission the call does nothing and returns its “failed” value
+            (<code>false</code>, <code>0</code>, an empty result), and the log says
+            which permission is missing. The settings travel into the exported
+            app, and they bind play mode in the editor the same way.
+          </p>
+          <div class="docs-table-wrap">
+            <table class="docs-table">
+              <thead>
+                <tr><th>Permission</th><th>Rows</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Files outside the project</td><td><code>fs.*</code> with an absolute path that the user did not pick in a file dialog, <code>print.toPdf</code>, <code>db.open</code></td></tr>
+                <tr><td>Run other programs</td><td><code>process.run</code>, <code>process.openUrl</code>, <code>print.file</code>, <code>app.setAutostart</code></td></tr>
+                <tr><td>Network access</td><td><code>http.get</code>, <code>http.post</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            Dialogs and the clipboard need no permission. A path the user picked
+            in a file dialog stands in for <em>Files outside the project</em>, but
+            only for the <code>fs.*</code> rows: <code>print.toPdf</code> and
+            <code>db.open</code> need the permission for every path, a relative one
+            inside the project included (build 7d49d44f). The log line about a
+            missing permission is written for the first refused call only; further
+            refusals of any row within the next ten seconds are not logged.
+          </p>
+
+          <h3 id="remote-calls">Remote calls take any arguments</h3>
+          <p>
+            <code>horizon.net.callServer(entity, name, …)</code>,
+            <code>horizon.net.callClient(player, entity, name, …)</code> and
+            <code>horizon.net.callAllClients(entity, name, …)</code> accept any
+            number of extra arguments after the function name and pass them on.
+            Their types are taken from the values themselves: a boolean, an
+            integer, any other number, a string, or a list/table of those. This
+            is the one place where the registry signature (which has no slot for
+            them) does not describe the script call. The receiving side is a
+            method of that name on the target entity's script, see
+            <a href="#callbacks">Callbacks</a>.
+          </p>
+        </section>
+
+        <section id="user-types" class="reveal">
+          <p class="docs-eyebrow">Your own enums and structs</p>
+          <h2>Project Types in Scripts</h2>
+          <div class="docs-divider"></div>
+          <p>
+            Enums and structs you create as assets in the Content Browser are
+            available to scripts under <code>horizon.enums</code> and
+            <code>horizon.structs</code>, built when the script runtime starts.
+          </p>
+          <div class="docs-table-wrap">
+            <table class="docs-table">
+              <thead>
+                <tr><th>What</th><th>Lua</th><th>Python</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Enum entry (an integer)</td><td><code>horizon.enums.Weapon.Sword</code></td><td><code>horizon.enums.Weapon.Sword</code></td></tr>
+                <tr><td>New struct with its default values</td><td><code>horizon.structs.Loadout()</code> → table</td><td><code>horizon.structs.Loadout()</code> → <code>dict</code></td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            A struct value is a plain table / dict: one key per field plus
+            <code>__type</code>, the path of the struct asset. Keep
+            <code>__type</code> when you hand the value back, it is how the engine
+            knows which struct it is. Missing fields keep their defaults, unknown
+            keys are ignored. Inside a struct, fields are single values rather than
+            spread: a <code>vec2</code> is <code>{x, y}</code> / <code>[x, y]</code>,
+            a colour <code>{r, g, b, a}</code>, a transform
+            <code>{pos = {…}, rot = {…}, scl = {…}}</code>, a list a sequence, and a
+            nested struct a nested table. A map field is a Python <code>dict</code>
+            (it keeps its order); in Lua it is a table plus a <code>__keys</code>
+            list that holds the order. Structs go in and out of
+            <code>save.setStruct</code> / <code>save.getStruct</code> this way.
+          </p>
+        </section>

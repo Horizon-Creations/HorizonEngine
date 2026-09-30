@@ -390,6 +390,65 @@ TEST_CASE("RenderExtractor: a slot whose material path does not exist resolves t
 	he_test::removeAllQuiet(root);
 }
 
+TEST_CASE("RenderExtractor: a slot material that appears after first sight is picked up once the content moved")
+{
+	const std::filesystem::path root = std::filesystem::temp_directory_path() / "he_test_sections_late";
+	he_test::removeAllQuiet(root);
+	std::filesystem::create_directories(root);
+	ContentManager cm(root.string());
+
+	StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "multi";
+	mesh.indices = { 0,1,2, 3,4,5 };
+	MeshSection s0; s0.indexCount = 3; s0.materialPath = "late/a.hasset";
+	MeshSection s1; s1.indexOffset = 3; s1.indexCount = 3;
+	mesh.sections = { s0, s1 };
+	const HE::UUID meshId = cm.registerStaticMesh(mesh);
+
+	HorizonWorld world;
+	auto e = world.createEntity("multi");
+	world.registry().emplace<TransformComponent>(e, TransformComponent{});
+	MeshComponent mc; mc.meshAssetId = meshId;
+	world.registry().emplace<MeshComponent>(e, mc);
+
+	// Each frame the way a backend does it: setContentManager, then extract.
+	RenderExtractor ex;
+	auto slot0 = [&]
+	{
+		ex.setContentManager(&cm);
+		RenderWorld rw;
+		ex.extract(world, rw, 1.0f);
+		REQUIRE(rw.objects.size() == 1);
+		REQUIRE(rw.objects[0].sections.size() == 2);
+		return rw.objects[0].sections[0].materialAssetId;
+	};
+	CHECK(slot0() == HE::UUID{});
+
+	// The file arrives behind this manager's back (another program, a pull):
+	// written through a second manager on the same root. Nothing here moved,
+	// so the miss is still remembered — no lookup per frame.
+	{
+		ContentManager other(root.string());
+		MaterialAsset m; m.type = HE::AssetType::Material; m.name = "a"; m.path = "late/a.hasset";
+		REQUIRE(other.saveAsset(m));
+	}
+	CHECK(slot0() == HE::UUID{});
+
+	// The editor's content refresh says so; the next frame looks once more.
+	const uint64_t before = cm.contentEpoch();
+	cm.noteContentChanged();
+	CHECK(cm.contentEpoch() != before);
+	const HE::UUID found = slot0();
+	CHECK(found != HE::UUID{});
+	CHECK(found == cm.idForPath("late/a.hasset"));
+
+	// A save through this manager moves it too.
+	const uint64_t e1 = cm.contentEpoch();
+	MaterialAsset m2; m2.type = HE::AssetType::Material; m2.name = "b"; m2.path = "late/b.hasset";
+	REQUIRE(cm.saveAsset(m2));
+	CHECK(cm.contentEpoch() != e1);
+	he_test::removeAllQuiet(root);
+}
+
 TEST_CASE("RenderExtractor: an entity material override replaces every slot (whole-mesh draw)")
 {
 	ContentManager cm;
@@ -813,6 +872,13 @@ TEST_CASE("SkyNoise3D: generated volume is byte-pinned")
 
 	// Deterministic across calls (no static state, no RNG carry-over).
 	CHECK(HE::BuildSkyNoise3D(8) == v8);
+
+	// The size every backend actually bakes, and the only one that takes the
+	// threaded path (n >= 32) and wraps the 48³ Worley jitter table. Pinned from the
+	// serial per-voxel-hash3 bake before the B7 speed-up (10.7 s -> 0.45 s).
+	const std::vector<uint16_t> v256 = HE::BuildSkyNoise3D(256);
+	REQUIRE(v256.size() == 256u * 256u * 256u * 2u);
+	CHECK(heFnv1a(v256.data(), v256.size() * sizeof(uint16_t)) == 0x79c8e92e96950cc9ull);
 }
 
 TEST_CASE("SkyEnvBake: the IBL ambient cube face is pinned and backend-independent")
@@ -2122,6 +2188,48 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 	}
 }
 
+TEST_CASE("UI image quads sample their texture undecoded on Metal and GL (Thema 107)")
+{
+	// The UI pass writes sRGB numbers straight into a Unorm target (Metal:
+	// BGRA8Unorm swapchain, GL: GL_FRAMEBUFFER_SRGB off), and the widget designer
+	// shows the raw bytes. An image quad that borrowed the material graph's
+	// texture (uploaded _sRGB, decoded to linear on sample) came out too dark:
+	// the Catania logo's orange (216,128,24) became (175,55,2), "orange in the
+	// designer, red in the game". The fix is a UI-only cache uploaded without
+	// the decode; the graph cache must keep decoding, materials light in linear.
+	// There is no GPU under ctest, so this pins the wiring in the source.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("renderer sources not found - UI texture pin skipped");
+		return;
+	}
+	const fs::path be = root / "src" / "HE_Rendering" / "src" / "Backends";
+	const std::vector<std::pair<const char*, std::string>> files = {
+		{ "MetalRenderer.mm",   stripLineComments(readFile(be / "Metal" / "MetalRenderer.mm")) },
+		{ "OpenGLRenderer.cpp", stripLineComments(readFile(be / "OpenGL" / "OpenGLRenderer.cpp")) },
+	};
+	for (const auto& [file, text] : files)
+	{
+		REQUIRE_MESSAGE(!text.empty(), file, " not readable");
+		// The image quad binds the UI cache, never the graph cache.
+		CHECK_MESSAGE(text.find("ResolveUITexture(obj.textureAssetId") != std::string::npos,
+		              file, ": the UI image quad no longer resolves through ResolveUITexture");
+		CHECK_MESSAGE(text.find("ResolveGraphTexture(obj.textureAssetId") == std::string::npos,
+		              file, ": a UI image quad samples the sRGB-decoding graph texture again");
+		// ResolveUITexture uploads with the decode switched off, and the upload
+		// helper actually honours that switch.
+		CHECK_MESSAGE(text.find("/*honourSrgb=*/false") != std::string::npos,
+		              file, ": ResolveUITexture uploads with the sRGB flag again");
+		CHECK_MESSAGE(text.find("tex->srgb && honourSrgb") != std::string::npos,
+		              file, ": the upload helper ignores honourSrgb");
+		// A re-import must reach the UI copy too, or the game keeps the old pixels.
+		CHECK_MESSAGE(text.find("{ &m_graphTexCache, &m_uiTexCache }") != std::string::npos,
+		              file, ": texture invalidation no longer drops the UI cache");
+	}
+}
+
 TEST_CASE("specular AA widening: the numbers the shader copies implement")
 {
 	// The formula itself (Kaplanyan/Filament normal filtering), so its BEHAVIOUR
@@ -2150,6 +2258,195 @@ TEST_CASE("specular AA widening: the numbers the shader copies implement")
 	// It never sharpens, and never runs past fully rough.
 	CHECK(widen(0.95f, 1.0f, 10.0f) <= 1.0f);
 	CHECK(widen(0.95f, 1.0f, 10.0f) >= 0.95f);
+}
+
+TEST_CASE("Dome clouds: Metal and GL march and shadow them the same way")
+{
+	// Perf audit A1/A3 (Thema 103). The sky-dome clouds (cloudMode 0) are written
+	// out twice: Metal's kSkyMSL and GL's SkyShaderSource.h, which D3D and Vulkan
+	// cross-compile. Both skip the rays the horizon fade zeroes, size the step
+	// budget by that fade, and cast the cloud-shadow map from the dome's own
+	// field. Drift is invisible: nothing fails to build, one backend just marches
+	// more steps or darkens the ground from a different field than the other.
+	// Each pattern is anchored on its neighbour line, because both files carry
+	// other `horizon` fades and dir.y early-outs (3D clouds, aurora, cirrus).
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("sky shader sources not found - drift comparison skipped");
+		return;
+	}
+	const std::string gl  = stripLineComments(readFile(root / "src" / "HE_Rendering" / "include" /
+	                                                   "HorizonRendering" / "SkyShaderSource.h"));
+	const std::string mtl = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "Backends" / "Metal" / "MetalRenderer.mm"));
+	checkGroup({ "SkyShaderSource.h (GL)", "MetalRenderer.mm" }, { gl, mtl }, {
+		{ "early-out where the fade is 0",
+		  { R"(if \(dir\.y < ([0-9.]+)\) return baseSky;\s*int qBaseN)" } },
+		{ "horizon fade",
+		  { R"(float horizon = smoothstep\(([0-9.]+), ([0-9.]+), dir\.y\);\s*float s0 = kCloudBase)" } },
+		{ "fade-coupled step budget",
+		  { R"(N = max\(qBaseN, int\(float\(N\) \* ([^;]+)\)\);)" } },
+		{ "dome shadow: dome units per cloudH",
+		  { R"((domeMid) = midY / cloudH;\s*\w+\s+dxz\s+= xz / cloudH;)" } },
+		{ "dome shadow: sun-march steps",   { R"(const int MD = ([0-9]+);)" } },
+		{ "dome shadow: density field",     { R"(dens \+= (cloudShadowDensity)\(dp,)" } },
+		{ "dome shadow: optical depth",     { R"(exp\(-dens \* dds \* ([0-9.]+) \* densMul\))" } },
+		// The shadow's normalisation must stay the one the view march uses, or a
+		// cloud's ground shadow stops being as dark as the cloud looks opaque.
+		{ "dome view march: optical depth",
+		  { R"(float opticalDepth = dens \* ds \* ([0-9.]+) \* clamp\()" } },
+	});
+
+	// The budget formula itself (both copies, pinned above): above the fade band
+	// it is the old count, inside it never exceeds the old count nor drops under
+	// the base count, and over a landscape view's sky it saves a real share.
+	auto smooth = [](float a, float b, float x) {
+		const float t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);
+		return t * t * (3.0f - 2.0f * t);
+	};
+	auto oldN = [](float y, int base, int maxN) {
+		return static_cast<int>(std::clamp(static_cast<float>(base) / std::max(y, 0.12f),
+		                                   static_cast<float>(base), static_cast<float>(maxN)));
+	};
+	auto newN = [&](float y, int base, int maxN) {
+		if (y < 0.03f) return 0;                       // early-out, nothing marched
+		const int n = oldN(y, base, maxN);
+		return std::max(base, static_cast<int>(static_cast<float>(n) *
+		                                       std::sqrt(std::sqrt(smooth(0.03f, 0.22f, y)))));
+	};
+	const int kQuality[3][2] = { { 8, 18 }, { 12, 32 }, { 16, 64 } };
+	for (const auto& q : kQuality)
+	{
+		for (float y = 0.22f; y <= 1.0f; y += 0.01f)
+			CHECK(newN(y, q[0], q[1]) == oldN(y, q[0], q[1]));
+		for (float y = 0.03f; y < 0.22f; y += 0.001f)
+		{
+			CHECK(newN(y, q[0], q[1]) <= oldN(y, q[0], q[1]));
+			CHECK(newN(y, q[0], q[1]) >= q[0]);
+		}
+		// The audit's landscape camera: pitch -0.25 rad, vertical FOV 60°, 884 rows.
+		long before = 0, after = 0;
+		for (int r = 0; r < 884; ++r)
+		{
+			const float ndc = 1.0f - 2.0f * (static_cast<float>(r) + 0.5f) / 884.0f;
+			const float y   = std::sin(-0.25f + std::atan(ndc * std::tan(0.5236f)));
+			if (y >= 0.02f) before += oldN(y, q[0], q[1]);   // the old 0.02 early-out
+			after += newN(y, q[0], q[1]);
+		}
+		CHECK(static_cast<double>(after) < 0.85 * static_cast<double>(before));
+	}
+}
+
+TEST_CASE("Sky-View LUT: Metal's host code and kSkyMSL agree on its size and horizon")
+{
+	// Perf audit A4 (Thema 103). The sky pass reads atmoScatter from a baked
+	// 2D LUT (skyViewLutFragment / atmoScatterLut). Its size is written twice
+	// (host texture, shader mapping) and its bottom row sits exactly on
+	// skyColor's horizon clamp. Drift in either is invisible to the build: the
+	// shader just reads between the wrong texels, and the horizon band — the
+	// sky's steepest gradient — gets smeared.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("Metal renderer source not found - LUT drift check skipped");
+		return;
+	}
+	const std::string mtl = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "Backends" / "Metal" / "MetalRenderer.mm"));
+	auto grab = [&](const char* pattern) {
+		std::vector<std::smatch> out;
+		const std::regex re(pattern);
+		for (auto it = std::sregex_iterator(mtl.begin(), mtl.end(), re); it != std::sregex_iterator(); ++it)
+			out.push_back(*it);
+		return out;
+	};
+	const auto host = grab(R"(static constexpr int kSkyLutW = ([0-9]+), kSkyLutH = ([0-9]+);)");
+	const auto msl  = grab(R"(constant int\s+kSkyLutW\s+= ([0-9]+), kSkyLutH = ([0-9]+);)");
+	REQUIRE(host.size() == 1);
+	REQUIRE(msl.size() == 1);
+	CHECK(host[0][1] == msl[0][1]);
+	CHECK(host[0][2] == msl[0][2]);
+
+	// Every horizon clamp (skyColor, atmoScatterLut) is the same, and the LUT's
+	// bottom row is its elevation.
+	const auto clamps = grab(R"(normalize\(float3\(dir\.x, max\(dir\.y, ([0-9.]+)\), dir\.z\)\))");
+	REQUIRE(clamps.size() >= 2);
+	for (const auto& c : clamps)
+		CHECK(c[1] == clamps[0][1]);
+	const auto el0 = grab(R"(constant float kSkyLutEl0 = ([0-9.]+);)");
+	REQUIRE(el0.size() == 1);
+	CHECK(std::stod(el0[0][1]) == doctest::Approx(std::asin(std::stod(clamps[0][1]))).epsilon(1e-6));
+
+	// The Mie term is baked phase-free and multiplied in per pixel; both halves
+	// must carry the same exposure the analytic atmoScatter does.
+	CHECK(grab(R"(o\.mie\s+= float4\(a\.sumM \* kAtmoBM \* 20\.0, 1\.0\);)").size() == 1);
+	CHECK(grab(R"(atmoPhaseRayleigh\(dot\(d, s\)\) \* 20\.0)").size() == 1);
+	CHECK(grab(R"(\+ s\.sumM \* kAtmoBM \* atmoPhaseMie\(mu\)\) \* 20\.0;)").size() == 1);
+	CHECK(grab(R"(lutMie\.sample\(lutSamp, uv\)\.rgb \* atmoPhaseMie\(dot\(d, sunDir\)\))").size() == 1);
+}
+
+TEST_CASE("D3D12 main swapchain follows the window size (Thema 112)")
+{
+	// The D3D12 swapchain, its RTVs and the swapchain-path scene depth were
+	// created once at Initialize and never resized: after a window resize DXGI
+	// stretched the start-size image over the new client area, while ImGui laid
+	// itself out for the new DisplaySize. Nothing fails to build and there is no
+	// GPU under ctest, so this pins the wiring in the source:
+	//  - ResizeBuffers exists and gets the SAME flags the swapchain was created
+	//    with (ALLOW_TEARING on capable machines; 0 there is INVALID_CALL),
+	//  - Render() checks the size before it waits on / resets this frame slot,
+	//  - after ResizeBuffers the back buffers and RTVs are re-fetched and the
+	//    scene depth follows.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("D3D12 renderer source not found - swapchain resize pin skipped");
+		return;
+	}
+	const std::string src = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "Backends" / "D3D12" / "D3D12Renderer.cpp"));
+	REQUIRE(!src.empty());
+	auto count = [&](const char* pattern) {
+		const std::regex re(pattern);
+		return std::distance(std::sregex_iterator(src.begin(), src.end(), re), std::sregex_iterator());
+	};
+	CHECK(count(R"(scd\.Flags\s*=\s*m_impl->swapchainFlags;)") == 1);
+	CHECK(count(R"(->ResizeBuffers\(\s*k_frameCount\s*,[^;]*swapchainFlags\s*\))") == 1);
+
+	// The resize routine: flush, drop the buffers, resize, re-fetch + re-view, depth.
+	const size_t fn = src.find("bool resizeSwapchainIfNeeded()");
+	REQUIRE(fn != std::string::npos);
+	const size_t fnEnd = src.find("\n    }\n", fn);
+	REQUIRE(fnEnd != std::string::npos);
+	const std::string body = src.substr(fn, fnEnd - fn);
+	const size_t wait   = body.find("waitForAllFrames()");
+	const size_t drop   = body.find("renderTargets[i].Reset()");
+	const size_t resize = body.find("ResizeBuffers(");
+	const size_t get    = body.find("GetBuffer(");
+	const size_t rtv    = body.find("CreateRenderTargetView(");
+	const size_t depth  = body.find("createSceneDepth(");
+	const size_t index  = body.find("GetCurrentBackBufferIndex()");
+	for (size_t at : { wait, drop, resize, get, rtv, depth, index })
+		REQUIRE(at != std::string::npos);
+	CHECK(wait < drop);
+	CHECK(drop < resize);
+	CHECK(resize < get);
+	CHECK(get < rtv);
+	CHECK(resize < depth);
+	CHECK(resize < index);
+
+	// Render() resizes before it touches this frame slot.
+	const size_t render = src.find("void D3D12Renderer::Render()");
+	REQUIRE(render != std::string::npos);
+	const size_t call = src.find("p.resizeSwapchainIfNeeded()", render);
+	const size_t slot = src.find("p.waitForFrame(p.frameIndex)", render);
+	REQUIRE(call != std::string::npos);
+	REQUIRE(slot != std::string::npos);
+	CHECK(call < slot);
 }
 
 // ─── OcclusionCuller ──────────────────────────────────────────────────────────

@@ -38,3 +38,65 @@ TEST_CASE("Hidden mode: HE_HIDDEN_WINDOW=0 wins over the automatic triggers")
     // …and an empty HE_HIDDEN_WINDOW is "not set", not "0".
     CHECK(HE::hiddenWindowFromEnv("", "30", nullptr));
 }
+
+// ── Background throttle ────────────────────────────────────────────────────
+// The orphaned hidden editor of perf audit B1 ran with HE_HIDDEN_WINDOW=1 and
+// nothing else, and took a third to a half of the GPU. That run has to be
+// throttled; a screenshot or a frame budget, which are hidden too, must not be.
+
+namespace
+{
+    constexpr uint64_t kDefaultNs =
+        static_cast<uint64_t>(1.0e9 / HE::kDefaultBackgroundFps);
+}
+
+TEST_CASE("Background throttle: a hidden run with nothing to draw for is throttled")
+{
+    // The orphan: hidden mode came from HE_HIDDEN_WINDOW alone, which is not
+    // an input here at all — it is exactly the case with no exemption.
+    const uint64_t interval = HE::backgroundFrameIntervalFromEnv(nullptr, nullptr, nullptr, nullptr);
+    CHECK(interval == kDefaultNs);
+    CHECK(HE::backgroundFrameIntervalFromEnv("", "", "", "") == kDefaultNs);
+    // A 1 ms frame in a hidden/occluded/minimised window sleeps the rest.
+    CHECK(HE::backgroundThrottleDelayNs(interval, true, false, 1'000'000) == interval - 1'000'000);
+    // A frame that already took longer than the interval does not sleep more.
+    CHECK(HE::backgroundThrottleDelayNs(interval, true, false, interval + 1) == 0);
+}
+
+TEST_CASE("Background throttle: a window someone can see is never throttled")
+{
+    const uint64_t interval = HE::backgroundFrameIntervalFromEnv(nullptr, nullptr, nullptr, nullptr);
+    CHECK(HE::backgroundThrottleDelayNs(interval, false, false, 0) == 0);
+    CHECK(HE::backgroundThrottleDelayNs(interval, false, false, 1'000'000) == 0);
+}
+
+TEST_CASE("Background throttle: dump, frame budget and capture runs keep full frames")
+{
+    CHECK(HE::backgroundFrameIntervalFromEnv(nullptr, "30", nullptr, nullptr) == 0);
+    CHECK(HE::backgroundFrameIntervalFromEnv(nullptr, nullptr, "/tmp/shot.bmp", nullptr) == 0);
+    CHECK(HE::backgroundFrameIntervalFromEnv(nullptr, nullptr, nullptr, "120") == 0);
+    // …even when somebody also asked for a background rate: the picture wins.
+    CHECK(HE::backgroundFrameIntervalFromEnv("5", "30", nullptr, nullptr) == 0);
+    CHECK(HE::backgroundFrameIntervalFromEnv("5", nullptr, "/tmp/shot.bmp", nullptr) == 0);
+    // And an unthrottled run does not sleep in the background either.
+    CHECK(HE::backgroundThrottleDelayNs(0, true, false, 0) == 0);
+    // A budget or capture of zero is none (Application reads them the same way).
+    CHECK(HE::backgroundFrameIntervalFromEnv(nullptr, "0", nullptr, nullptr) == kDefaultNs);
+    CHECK(HE::backgroundFrameIntervalFromEnv(nullptr, nullptr, nullptr, "0") == kDefaultNs);
+}
+
+TEST_CASE("Background throttle: HE_BACKGROUND_FPS sets the rate, 0 turns it off")
+{
+    CHECK(HE::backgroundFrameIntervalFromEnv("0", nullptr, nullptr, nullptr) == 0);
+    CHECK(HE::backgroundFrameIntervalFromEnv("10", nullptr, nullptr, nullptr) == 100'000'000);
+    CHECK(HE::backgroundFrameIntervalFromEnv("2.5", nullptr, nullptr, nullptr) == 400'000'000);
+    // Unreadable or negative is not a request: the default stays.
+    CHECK(HE::backgroundFrameIntervalFromEnv("fast", nullptr, nullptr, nullptr) == kDefaultNs);
+    CHECK(HE::backgroundFrameIntervalFromEnv("-3", nullptr, nullptr, nullptr) == kDefaultNs);
+}
+
+TEST_CASE("Background throttle: a profiler capture records uncapped")
+{
+    const uint64_t interval = HE::backgroundFrameIntervalFromEnv(nullptr, nullptr, nullptr, nullptr);
+    CHECK(HE::backgroundThrottleDelayNs(interval, true, true, 0) == 0);
+}

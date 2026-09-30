@@ -88,6 +88,30 @@ struct EditorConfig
 	bool AutosaveEnabled     = true;
 	int  AutosaveIntervalSec = 60;
 
+	// Reward feedback (topic 75, Preferences ▸ Feedback) — see EditorRewards.h
+	// for what they switch and why the counters are NOT fields here.
+	// The master gates the rest; the rest never gate each other (topic 95).
+	bool  RewardsEnabled       = true;   // master: off = nothing shown, played or counted
+	bool  RewardsVisual        = true;   // the footer's "Saved"/"Build succeeded" line
+	bool  RewardsCheckMark     = true;   // V1: its drawn check (under Visual)
+	bool  RewardsLightEdge     = true;   // V2b: its pulse along the footer's top (under Visual)
+	bool  RewardsTabCheck      = true;   // V4: a saved tab's " *" becomes a check
+	bool  RewardsImportHighlight = true; // V5: just-imported tiles get a fading frame
+	int   RewardsReducedMotion = 0;      // 0 = follow the system, 1 = off (full motion)
+	bool  RewardsSound         = false;  // the tones at all
+	float RewardsVolume        = 0.5f;   // 0..1, applied squared
+	bool  RewardsSoundSave        = true;   // each tone's own switch, under
+	bool  RewardsSoundBuild       = true;   // RewardsSound (the one that starts
+	bool  RewardsSoundBuildFailed = true;   // off); the two build tones only
+	bool  RewardsSoundImport      = true;   // play with the editor unfocused
+	bool  RewardsShowProgress  = true;   // "3 builds today · 5 days in a row" beside "Ready"
+	bool  RewardsCounterTick   = true;   // V3: a number that rose lights up (under Progress)
+	bool  RewardsStreakTooltip = true;   // hovering the counters: the last 7 days (under Progress)
+	// The editor's own UI-sound engine, NOT under the master: mutes whatever
+	// it plays (today: the feedback tones) and leaves every switch above as it
+	// was. Clip auditions go through the project's engine and are not muted.
+	bool  EditorSoundsMuted    = false;
+
 	// Preferences (Edit > Preferences)
 	float UiFontScale       = 1.0f;   // global editor font scale (style.FontScaleMain)
 	float EditorCameraSpeed = 6.0f;   // editor fly-camera speed, world units/second

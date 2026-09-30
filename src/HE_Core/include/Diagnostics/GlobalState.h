@@ -124,6 +124,12 @@ public:
 	//
 	// After useShippedConfig() this is that directory's config.json and nothing
 	// else — no per-user fallback, no working directory.
+	//
+	// Full order: HE_CONFIG_DIR, then the shipped pin, then HE_CONFIG_FALLBACK_DIR,
+	// then ./config.json, then userDataDir(). HE_CONFIG_FALLBACK_DIR is for
+	// automated runs: he_tests sets it to a scratch directory before any test
+	// runs, so no test can reach a real user's settings, while tests that pin a
+	// directory of their own still get theirs.
 	static std::filesystem::path configFilePath();
 	void setCustomConfigEntry(const std::string& key, const json& value);
 

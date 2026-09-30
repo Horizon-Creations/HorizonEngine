@@ -17,6 +17,7 @@ Each KEY=VAL becomes HE_DUMP_<KEY>. Common keys (see dumpFrameHeadless):
     NEBULA=0.4 NEBQUALITY=2 NEBCOVER=0.5 MILKYWAY=1 AURORA=0.5 MOONPHASE=0.5
     STARSIZE=1 STARDENS=0.5 STARGLOW=1 CONTRAILS=0 CIRRUS=0
     RHI=Metal         backend to force (default Metal — the user's platform)
+    BLOOM=0           bloom off for this shot (the control for a bloom A/B)
 
 Examples:
     scripts/he_shot.py /tmp/a.png TOD=0.30 COVERAGE=0.7 PITCH=10

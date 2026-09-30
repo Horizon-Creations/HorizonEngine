@@ -240,6 +240,18 @@ public:
 		std::function<void(std::uint32_t, const std::vector<std::uint8_t>&)>
 		                   publishComponents;
 
+		// A create or a component write can plant a fresh asset UUID (a mesh,
+		// a material, …) that nothing has ever made resident — unlike the
+		// human's paste/duplicate, which the UI follows with its own
+		// SceneSystems::preloadAssetRefs call. Without this, the reference is
+		// valid JSON but resolves to nothing in the ContentManager, and every
+		// renderer backend's "mesh not found" path silently draws the default
+		// cube instead — the asset looks assigned right up until the screen.
+		// Called after a successful CreateSubtree or SetComponents, so an
+		// external client (MCP) gets the same residency the editor's own UI
+		// actions do without having to ask for it.
+		std::function<void()> preloadAssetRefs;
+
 		// ── Observers ────────────────────────────────────────────────────────
 		// beforeDestroy runs while the subtree still exists: the physics bodies
 		// have to go first, because after destroyEntity the hierarchy that names

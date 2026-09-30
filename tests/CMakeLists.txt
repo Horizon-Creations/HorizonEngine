@@ -37,10 +37,19 @@ add_executable(he_tests
     test_play_error_reveal.cpp
     test_editor_dock_state.cpp
     test_scene_autosave.cpp
+    # The asset tabs' autosave: interval, the per-tick prune that makes a save
+    # remove its copy, pending at the next start, Restore's backup, and the
+    # ContentManager::writeAssetTo path every asset panel's copy takes.
+    test_asset_autosave.cpp
     test_game_instance.cpp
     test_culling.cpp
     test_world_preview_grid.cpp
+    test_world_preview_backends.cpp
+    # TAA on D3D11/D3D12/Vulkan (Thema 78, Schritt 6): host jitter + the HLSL
+    # velocity/resolve/sharpen drawn on WARP (Windows only for the latter).
+    test_temporal_aa.cpp
     test_gi_bvh.cpp
+    test_gi_probe_grid.cpp
     test_undo.cpp
     test_editor_selection.cpp
     test_editor_marquee.cpp
@@ -72,19 +81,40 @@ add_executable(he_tests
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
     test_scene_recovery_ui.cpp
+    # Its sibling for asset tabs: per-row answers carry the row's key, and it
+    # waits for the scene's offer.
+    test_asset_recovery_ui.cpp
+    # The texture colour-space dialog, driven the same way: Apply rewrites the
+    # rows that change, a tick changed in the dialog is the flag the import writes.
+    test_texture_colour_space_ui.cpp
+    # The reward moments: once per frame, once per build run, the fade.
+    test_editor_rewards.cpp
     test_editorcamera.cpp
     test_camera_bookmarks.cpp
     test_asset_thumbnail_cache.cpp
     test_rendergraph.cpp
+    # The GL sky as the one source for Vulkan/D3D11/D3D12: prelude coverage,
+    # SkyFrameParams layout, cross-compile, and on Windows FXC + WARP.
+    test_sky_shader.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # The refined level near the camera: Catmull-Rom between the samples,
+    # displacement, the build/release life cycle and its budget.
+    test_terrain_tessellation.cpp
     # Greyscale heightmap → heights: the pixel path, the texture and file
     # wrappers (8/16-bit PGM, .r16), orientation and the down-sampling box.
     test_terrain_heightmap.cpp
+    # A mountain grown inside an area: rises inside, blends to nothing at the
+    # rim, adds to what was there, same seed → same heights.
+    test_terrain_generate.cpp
     # Was on disk since the foliage layer landed but never in this list, so the
     # scatter had no running test until the density mask needed one.
     test_foliage.cpp
     test_debug_draw.cpp
+    # Bloom's 9-tap blur folded into 5 bilinear taps (perf audit B4): CPU replay.
+    test_bloom_kernel.cpp
+    # Metal's per-frame upload ring (perf audit B6): slices, recycling, threads.
+    test_frame_upload_ring.cpp
     test_profiler.cpp
     test_profiler_stats.cpp
     test_profiler_layout.cpp
@@ -94,6 +124,8 @@ add_executable(he_tests
     test_inspector_prefab_keys.cpp
     test_inputmapping.cpp
     test_input_gamepad.cpp
+    test_input_rebind.cpp
+    test_player_settings.cpp
     test_eventbus.cpp
     test_scripting.cpp
     test_scripting_binding.cpp
@@ -118,6 +150,8 @@ add_executable(he_tests
     test_camera_rig.cpp
     test_skeletalmeshimporter.cpp
     test_meshimporter.cpp
+    test_texture_orientation.cpp
+    test_ui_image_flip.cpp
     test_assimpimport.cpp
     test_gltf_material_import.cpp
     test_skeletalmeshcomponent.cpp
@@ -127,6 +161,9 @@ add_executable(he_tests
     test_animation_layers.cpp
     test_blend_space.cpp
     test_sequencer_timeline.cpp
+    test_sequence.cpp
+    test_sequence_runtime.cpp
+    test_cinematic_timeline.cpp
     test_animation_ik.cpp
     test_navigation.cpp
     test_particles.cpp
@@ -157,9 +194,12 @@ add_executable(he_tests
     test_third_person_template.cpp
     test_docs_library.cpp
     test_editor_help.cpp
+    test_quick_settings_favorites.cpp
     test_hc_node_docs.cpp
     # Editor UI rendered on the CPU and looked at — see ImGuiSoftwareRaster.h.
     test_ui_shot.cpp
+    test_widget_designer_ui.cpp
+    test_texture_viewer.cpp
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_rope_trail.cpp
@@ -180,6 +220,10 @@ add_executable(he_tests
     test_gamelogic_loader.cpp
     test_gamelogic_services.cpp
     test_gamelogic_build.cpp
+    # The same probe through a bundled (quoted) cmake — what a packaged editor
+    # runs, and what cmd.exe /c used to cut apart (Thema 96).
+    test_toolchain_quoting.cpp
+    test_toolchain_vswhere.cpp
     test_crypto_x25519.cpp
     test_net_bitstream.cpp
     test_net_loopback.cpp
@@ -211,6 +255,7 @@ add_executable(he_tests
     test_mcp_tools_particle.cpp
     test_mcp_tools_animator.cpp
     test_mcp_tools_clip.cpp
+    test_mcp_tools_sequence.cpp
     test_mcp_tools_build.cpp
     test_mcp_tools_settings.cpp
     test_mcp_tools_batch.cpp
@@ -218,6 +263,7 @@ add_executable(he_tests
     test_mcp_tools_collab.cpp
     test_mcp_camera_gizmos.cpp
     test_viewport_overlays.cpp
+    test_texture_colour_space.cpp
     test_mcp_hc.cpp
     test_mcp_api.cpp
     test_mcp_client_setup.cpp
@@ -249,6 +295,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/LightPacking.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderGraph.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderPass.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/MaterialScalars.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/CommandBuffer.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GPUMemoryAllocator.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderResourceManager.cpp
@@ -382,6 +429,9 @@ add_executable(he_tests
     # afterwards carries the events that were asked for, and only a real
     # AnimationClipAsset round-trip through a real ContentManager answers it.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsClip.cpp
+    # And for a sequence: the claim is that the cutscene a FRESH ContentManager
+    # loads afterwards is the one that was written, references and all.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsSequence.cpp
     # The build tools. In here because the two things they actually decide can
     # be decided without a build machine: WHICH profile a run is made from (and
     # that a one-off override never reaches the stored one), and whether the one
@@ -491,12 +541,19 @@ add_executable(he_tests
     # "does a drag on the ruler land the playhead where the ruler says" is a
     # question about arithmetic and hit tests, not about a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SequencerTimeline.cpp
+    # The Cinematic tab's strip (a Sequence's bindings, cuts, sections, events)
+    # and its preview bracket (save, write, restore), both without AppContext —
+    # the same reason as the Sequencer's strip above.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CinematicTimeline.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/CinematicPreview.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetThumbnailCache.cpp
     # The solo autosave's timing and file rules: when a recovery snapshot is
     # written, that the write is temp+rename with the manifest last, and what
     # a previous run's leftover becomes at the next start. Clock, dirty flag
     # and revision are handed in, so it runs on a fake clock, not a stopwatch.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneAutosave.cpp
+    # Its sibling for the asset tabs — same clock-in-hand design.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetAutosave.cpp
     # stb_image's single translation unit. AssetThumbnailCache draws texture
     # tiles from an asset's own pixels and CollabController decodes a chosen
     # profile picture; both call into it, so the tests need it linked too.
@@ -592,12 +649,35 @@ add_executable(he_tests
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
+    # And the asset tabs' recovery dialog, for test_asset_recovery_ui.cpp.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
+    # The texture colour-space dialog, for test_texture_colour_space_ui.cpp: same
+    # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
+    # (HorizonImporters, linked below) and CollabController (already here).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
+    # The reward moments it fires (EditorRewards.h), and test_editor_rewards.cpp:
+    # same AppContext, same per-file HE_IMGUI_ENABLED.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
     # The Project Settings tab, for test_project_settings_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
     # writes Config/ProjectSettings.json through the ProjectManager.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     # The icon/splash rows the settings tab draws (shared with the Export dialog).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
+    # The UI widget designer, for test_widget_designer_ui.cpp (Thema 92): same
+    # AppContext, same per-file HE_IMGUI_ENABLED. It brings the HorizonCode
+    # canvas host along (the Graph view) and the per-tab state helper; the two
+    # symbols those would pull whole panels in for are stubbed in
+    # WidgetDesignerLinkStubs.cpp, which says which and why.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/UIEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphHost.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphClipboard.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorPanelState.cpp
+    WidgetDesignerLinkStubs.cpp
+    # The texture viewer, for test_texture_viewer.cpp (Thema 92, Schritt 4): same
+    # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
+    # linked already.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_draw.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/vendor/imgui/imgui_tables.cpp
@@ -627,9 +707,23 @@ set_source_files_properties(
     test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
+    test_asset_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
+    test_texture_colour_space_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
+    test_editor_rewards.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/UIEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphHost.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcGraphClipboard.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorPanelState.cpp
+    WidgetDesignerLinkStubs.cpp
+    test_widget_designer_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
+    test_texture_viewer.cpp
     PROPERTIES COMPILE_DEFINITIONS HE_IMGUI_ENABLED)
 
 target_include_directories(he_tests PRIVATE
@@ -648,6 +742,11 @@ target_include_directories(he_tests PRIVATE
 # resolves to dllexport (definitions are local to this exe) rather than dllimport,
 # which would emit unresolved __imp_ references for those same locally-built symbols.
 target_compile_definitions(he_tests PRIVATE HE_RENDERING_BUILD_DLL)
+# test_scene_serializer.cpp outgrew the 2^16 COFF sections of a Debug MSVC
+# object (fatal error C1128); CI builds Windows in Release only and never saw it.
+if(MSVC)
+    target_compile_options(he_tests PRIVATE /bigobj)
+endif()
 # The documentation bundle the editor ships (EditorDeps is copied next to the
 # executable at build time). Handed to the test as a path rather than found by
 # walking up from the working directory, which differs between ctest, an IDE
@@ -733,7 +832,7 @@ set(HCGEN_CLASSES
     latent_flow enums structs GameInstance gi_caller engine_events
     cast_target casts inherit_base inherit_derived
     inherit_novars_base inherit_novars input_actions containers reroutes
-    cheat_event
+    cheat_event datetime_double sequence_transport input_rumble input_rebind player_settings player_slots
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs
@@ -858,6 +957,9 @@ target_link_libraries(he_tests PRIVATE
 # the material-graph tests validate that GENERATED GLSL cross-compiles through the REAL
 # path (standard vertex + lighting preamble + fragment) for the Metal + GL targets.
 target_link_libraries(he_tests PRIVATE he_materialshader)
+# test_sky_shader.cpp calls he::shaderc directly, as the Vulkan/D3D sky passes do
+# (he_materialshader links it PRIVATE, so its header does not come along).
+target_link_libraries(he_tests PRIVATE he_shadercompiler)
 # The TARGET is always there now (A3b Teil 2 — without glslang it is built against the
 # stub), so "can I link it" stopped being the question. The question these cases ask is
 # "can this build actually cross-compile", and only HE_HAVE_SHADERC answers that: a

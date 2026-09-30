@@ -12,7 +12,9 @@
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/FoliagePaint.h>
 #include <HorizonScene/Components/FoliageComponent.h>
+#include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/TerrainMeshGenerator.h>   // terrainHeightAt
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/DefaultAssets.h>
@@ -21,9 +23,11 @@
 #include <imgui_internal.h>   // GetHoveredID / FindWindowByName: which item the pointer is on
 #include <glm/gtc/matrix_transform.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -36,6 +40,7 @@
 // in a headless ImGui context, the way test_outliner_ui.cpp drives the
 // Outliner: find the cells by asking ImGui what is under the pointer, click
 // them, drag over a top-down viewport, and read the layer's mask afterwards.
+// The Mountain area tool is driven the same way further down.
 // With HE_UI_DUMP_DIR set the panel is written out as well.
 
 using namespace HE::Ed;
@@ -216,7 +221,10 @@ namespace
 
 	// One viewport frame with the pointer at (x, y) and the button as given:
 	// the Scene window fills the display, the brush code draws into it.
-	void viewportFrame(AppContext& ctx, const RenderWorld& snap, float x, float y, bool down)
+	// `invalidateMeshAabb` stands in for the viewport's picking-cache hook.
+	void viewportFrame(AppContext& ctx, const RenderWorld& snap, float x, float y, bool down,
+	                   const std::function<void(const HE::UUID&)>& invalidateMeshAabb =
+	                       [](const HE::UUID&) {})
 	{
 		ImGuiIO& io = ImGui::GetIO();
 		io.AddMousePosEvent(x, y);
@@ -230,7 +238,7 @@ namespace
 		             ImGuiWindowFlags_NoBackground);
 		TerrainTools::sculptInViewport(ctx, snap, ImVec2(0.0f, 0.0f), ImVec2(float(W), float(H)),
 		                               /*navigating=*/false, /*viewportHovered=*/true,
-		                               /*dt=*/1.0f, [](const HE::UUID&) {});
+		                               /*dt=*/1.0f, invalidateMeshAabb);
 		ImGui::End();
 		ImGui::Render();
 	}
@@ -369,4 +377,178 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	REQUIRE(locate(ctx, panelId("##lsSculpt"), sx, sy));
 	clickAt(ctx, sx, sy);
 	REQUIRE_FALSE(locate(ctx, panelId("##folErase"), ex, ey));
+}
+
+// ── The Mountain area tool: arm it, drag an area, let go ─────────────────────
+// TerrainGenerate::mountain has its own tests (test_terrain_generate.cpp) for
+// the shape of what it grows. This one asks what only the editor can answer:
+// does the panel arm the tool and show its form instead of the brush numbers,
+// does a drag in the viewport mark the area it should (corner to corner, or
+// centre to rim) without touching the ground while the button is held, and is
+// the release one undo step that invalidates the picking cache.
+TEST_CASE("landscape ui: the Mountain tool grows a formation in the dragged area on release")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	// A flat 100 m landscape at the origin whose heights are already baked, the
+	// way Create Landscape leaves them — with an empty field the brush path
+	// could never run, and "the ground does not move while the button is held"
+	// would be true for the wrong reason. It carries a mesh id so the picking
+	// cache hook has something to invalidate.
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.sculptHeights.assign(129u * 129u, 0.0f);
+	reg.emplace<TerrainComponent>(terrain, tc);
+	auto flat = [](const TerrainComponent& t)
+	{
+		return std::all_of(t.sculptHeights.begin(), t.sculptHeights.end(),
+		                   [](float h) { return h == 0.0f; });
+	};
+	MeshComponent mesh;
+	mesh.meshAssetId = HE::kDefaultCubeMeshId;
+	reg.emplace<MeshComponent>(terrain, mesh);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	// ── Arm Mountain: its form replaces Radius / Falloff / Strength ──
+	float mx = 0.0f, my = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("##lsTool6"), mx, my), "no Mountain cell in the tool wells");
+	clickAt(ctx, mx, my);
+	float nx = 0.0f, ny = 0.0f;
+	CHECK_MESSAGE(locate(ctx, panelId("##mtRect"), nx, ny), "Mountain armed shows no Rectangle cell");
+	CHECK_MESSAGE(locate(ctx, panelId("Max Height##mountain"), nx, ny), "Mountain armed shows no Max Height");
+	CHECK_MESSAGE(locate(ctx, panelId("New Seed##mountain"), nx, ny), "Mountain armed shows no New Seed");
+	CHECK_FALSE(locate(ctx, panelId("Radius##brush"), nx, ny));
+	{
+		he_ui::Image img;
+		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+		for (int i = 0; i < 3; ++i) panelFrame(ctx, false, i == 2 ? &img : nullptr);
+		REQUIRE(img.valid());
+		dump(img, "landscape-mountain-panel");
+	}
+	const size_t depth0 = undo.undoDepth();
+
+	// Top-down at 120 m with a 60° field of view: 2·120·tan 30° / 520 px is
+	// 0.2665 m a pixel, screen right is +X and screen down is +Z. So 75 px
+	// right and down from the centre is (20, 20) on the ground.
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+	const float px = 75.0f;
+	int invalidations = 0;
+	HE::UUID invalidated{};
+	auto hook = [&](const HE::UUID& id) { ++invalidations; invalidated = id; };
+
+	// ── A click without a drag marks no area and takes no undo step ──
+	viewportFrame(ctx, snap, cx, cy, false, hook);
+	viewportFrame(ctx, snap, cx, cy, true,  hook);
+	viewportFrame(ctx, snap, cx, cy, false, hook);
+	CHECK(undo.undoDepth() == depth0);
+	CHECK(invalidations == 0);
+	CHECK(flat(reg.get<TerrainComponent>(terrain)));
+
+	// ── Rectangle: corner (0, 0) to corner (20, 20) ──
+	viewportFrame(ctx, snap, cx, cy, true, hook);
+	for (int i = 1; i <= 5; ++i)
+		viewportFrame(ctx, snap, cx + px * i / 5.0f, cy + px * i / 5.0f, true, hook);
+	// Held: the outline is the preview, the ground has not moved yet.
+	CHECK(flat(reg.get<TerrainComponent>(terrain)));
+	CHECK(undo.undoDepth() == depth0);
+	viewportFrame(ctx, snap, cx + px, cy + px, false, hook);
+
+	{
+		const auto& t = reg.get<TerrainComponent>(terrain);
+		REQUIRE_FALSE(t.sculptHeights.empty());
+		CHECK(undo.undoDepth() == depth0 + 1);
+		CHECK(undo.undoLabel() == "Generate Mountain");
+		CHECK(invalidations == 1);
+		CHECK(invalidated == HE::kDefaultCubeMeshId);
+
+		// The peak is the form's Max Height (30 m by default), inside the
+		// ellipse inscribed in the rectangle — centre (10, 10), radii 10.
+		const float peak = *std::max_element(t.sculptHeights.begin(), t.sculptHeights.end());
+		CHECK(peak == doctest::Approx(30.0f).epsilon(0.001));
+		CHECK(terrainHeightAt(t, 10.0f, 10.0f) > 10.0f);
+		// Outside the ellipse (with a metre of slack for the pixel mapping)
+		// not a vertex moved.
+		const uint32_t res = t.resolution;
+		const float step = t.sizeX / float(res - 1);
+		int outside = 0, moved = 0;
+		for (uint32_t zi = 0; zi < res; ++zi)
+			for (uint32_t xi = 0; xi < res; ++xi)
+			{
+				const float x = -50.0f + xi * step, z = -50.0f + zi * step;
+				const float ex = (x - 10.0f) / 11.0f, ez = (z - 10.0f) / 11.0f;
+				if (ex * ex + ez * ez < 1.0f) continue;
+				++outside;
+				if (t.sculptHeights[zi * res + xi] != 0.0f) ++moved;
+			}
+		CHECK(outside > 10000);
+		CHECK(moved == 0);
+	}
+
+	// One undo takes the whole mountain back.
+	REQUIRE(undo.undo());
+	const Entity terrain2 = reg.view<TerrainComponent>().front();
+	REQUIRE((terrain2 != entt::null));
+	CHECK(terrainHeightAt(reg.get<TerrainComponent>(terrain2), 10.0f, 10.0f) == 0.0f);
+
+	// ── Circle: pressed at the centre (0, 0), dragged out 16 m to the rim ──
+	float rx = 0.0f, ry = 0.0f;
+	REQUIRE(locate(ctx, panelId("##mtCircle"), rx, ry));
+	clickAt(ctx, rx, ry);
+	const float rpx = 60.0f;   // ≈ 16 m
+	viewportFrame(ctx, snap, cx, cy, false);
+	viewportFrame(ctx, snap, cx, cy, true);
+	for (int i = 1; i <= 4; ++i)
+		viewportFrame(ctx, snap, cx + rpx * i / 4.0f, cy, true);
+	viewportFrame(ctx, snap, cx + rpx, cy, false);
+	{
+		const auto& t = reg.get<TerrainComponent>(terrain2);
+		REQUIRE_FALSE(t.sculptHeights.empty());
+		CHECK(undo.undoLabel() == "Generate Mountain");
+		// Round and centred on the press point: raised on both sides of it
+		// along both axes, nothing past the 16 m rim in any direction.
+		CHECK(terrainHeightAt(t, 0.0f, 0.0f) > 5.0f);
+		const uint32_t res = t.resolution;
+		const float step = t.sizeX / float(res - 1);
+		float left = 0.0f, right = 0.0f, north = 0.0f, south = 0.0f;
+		int moved = 0;
+		for (uint32_t zi = 0; zi < res; ++zi)
+			for (uint32_t xi = 0; xi < res; ++xi)
+			{
+				const float x = -50.0f + xi * step, z = -50.0f + zi * step;
+				const float h = t.sculptHeights[zi * res + xi];
+				const float d = std::sqrt(x * x + z * z);
+				if (d >= 17.0f) { if (h != 0.0f) ++moved; continue; }
+				if (d < 8.0f) continue;
+				if (x < -8.0f) left  = std::max(left,  h);
+				if (x >  8.0f) right = std::max(right, h);
+				if (z < -8.0f) north = std::max(north, h);
+				if (z >  8.0f) south = std::max(south, h);
+			}
+		CHECK(moved == 0);
+		CHECK(left > 1.0f);
+		CHECK(right > 1.0f);
+		CHECK(north > 1.0f);
+		CHECK(south > 1.0f);
+	}
+
+	// Back to Rectangle and Raise, so the file-static tool state does not
+	// leak into another test.
+	REQUIRE(locate(ctx, panelId("##mtRect"), rx, ry));
+	clickAt(ctx, rx, ry);
+	REQUIRE(locate(ctx, panelId("##lsTool0"), rx, ry));
+	clickAt(ctx, rx, ry);
+	CHECK(locate(ctx, panelId("Radius##brush"), rx, ry));
 }

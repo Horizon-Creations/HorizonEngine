@@ -22,8 +22,8 @@ namespace
 	  "Writes a line to the editor's Console panel and to HorizonEngine.log. The "
 	  "cheapest way to find out whether an exec chain ran at all." },
 	{ "debug.line",
-	  "Draws a line in the world for Seconds (0 = this frame only). Editor and "
-	  "development builds only; a packaged game draws nothing." },
+	  "Draws a line in the world for Seconds (0 = this frame only). A packaged "
+	  "game draws it too, so take debug drawing out before you ship." },
 	{ "debug.sphere",
 	  "Draws a wireframe sphere in the world for Seconds. Useful for showing what "
 	  "an overlap or sphere cast actually covered." },
@@ -271,11 +271,14 @@ namespace
 	{ "material.getParam",
 	  "Reads one named parameter of the entity's material as a colour. The name is "
 	  "the one the material graph's Param node declares; all four components are "
-	  "stored, whatever the shader reads." },
+	  "stored, whatever the shader reads. It reads the material asset's value, not "
+	  "an override set on this entity's Details panel." },
 	{ "material.setParam",
-	  "Overrides one named material parameter for THIS entity only — the material "
-	  "asset and every other entity using it are untouched. Ok is false when the "
-	  "entity has no material or the parameter is not declared." },
+	  "Writes one named parameter of the entity's material. It writes the material "
+	  "ASSET, not this entity: every entity using the same material changes with "
+	  "it, while an entity whose Details panel overrides this parameter keeps its "
+	  "override. Ok is false when the entity has no material or the parameter is "
+	  "not declared." },
 
 	// ── Animator ─────────────────────────────────────────────────────────────
 	{ "animator.setParam",
@@ -309,6 +312,40 @@ namespace
 	  "The layer names on an entity, in the order they are laid onto the base "
 	  "pose. Layer names are free text with nothing checking them, so this is how "
 	  "to see what a character actually carries." },
+
+	// ── Sequence ─────────────────────────────────────────────────────────────
+	{ "sequence.play",
+	  "Starts the cutscene on the entity's Sequence Player — from the top, from "
+	  "where Set Sequence Time put it, or on from a pause. Started is false when "
+	  "the entity has no Sequence Player or is switched off. When the cutscene is "
+	  "over, the entity receives the animation notify \"SequenceFinished\"." },
+	{ "sequence.pause",
+	  "Holds the cutscene's clock and its sounds. The actors, the camera and the "
+	  "input lock stay with the cutscene; Play Sequence carries on from here." },
+	{ "sequence.stop",
+	  "Ends the cutscene and rewinds it to 0: its sounds stop, the camera goes "
+	  "back to gameplay and the input lock lifts. A cutscene that was running "
+	  "sends \"SequenceFinished\" — so a skip button is this node, and whatever "
+	  "waits for the end runs after a skip too." },
+	{ "sequence.setTime",
+	  "Jumps the cutscene to a time in seconds. Nothing between the old and the "
+	  "new time fires or sounds. Clamped to the sequence's length, wrapped for a "
+	  "looping player; a stopped cutscene shows the new moment once." },
+	{ "sequence.getTime",
+	  "Where the cutscene's playhead stands, in seconds. 0 for an entity without "
+	  "a Sequence Player." },
+	{ "sequence.duration",
+	  "How long the entity's sequence is, in seconds. 0 while the sequence is "
+	  "still loading and for an entity without a Sequence Player." },
+	{ "sequence.isPlaying",
+	  "True while the cutscene's clock runs. False when it is stopped, finished "
+	  "or paused." },
+	{ "sequence.bindSlot",
+	  "Plays one of the sequence's actors with a different entity — how \"the "
+	  "player\", spawned at runtime, gets into a cutscene authored against a "
+	  "stand-in. Binding is the actor's name in the sequence, not a number. "
+	  "Works before the sequence has loaded; a target of 0 puts the authored "
+	  "actor back." },
 
 	// ── Particles ────────────────────────────────────────────────────────────
 	{ "particle.burst",
@@ -348,21 +385,27 @@ namespace
 	{ "movement.velocity",
 	  "The character's full velocity vector in metres per second." },
 	{ "movement.forwardAmount",
-	  "How much of the character's motion points the way it is facing, from -1 "
-	  "(backwards) through 0 (still or sideways) to 1 (straight ahead). One half "
+	  "How fast the character moves the way it is facing, in metres per second: "
+	  "positive ahead, negative backwards, 0 when still or moving sideways. It is a "
+	  "speed and not a -1 to 1 fraction, so divide by Get Speed for that. One half "
 	  "of a locomotion blend space." },
 	{ "movement.rightAmount",
-	  "The sideways half of the same pair: -1 strafing left, 1 strafing right." },
+	  "The sideways half of the same pair, also in metres per second: negative "
+	  "strafing left, positive strafing right." },
 
 	// ── Locomotion ───────────────────────────────────────────────────────────
 	{ "locomotion.move",
-	  "Tells the character to move in a WORLD-space direction this frame; the "
-	  "length is the throttle, 0 to 1. It has to be called every frame it should "
-	  "move — the intent is cleared at the end of each one, so a missed frame "
-	  "reads as \"stopped\" rather than as \"keep going\"." },
+	  "Tells the character to move in a direction this frame; the length is the "
+	  "throttle, 0 to 1, and anything longer is cut back to 1. The direction is "
+	  "read as the Movement component's \"Move Direction Is\" says: World by "
+	  "default, the main camera's heading for a Player Character. Up and down are "
+	  "ignored. It has to "
+	  "be called every frame it should move — the intent is cleared at the end of "
+	  "each one, so a missed frame reads as \"stopped\" rather than as \"keep "
+	  "going\". Two calls in one frame add up." },
 	{ "locomotion.look",
-	  "Turns the character by these degrees this frame. Yaw turns it; pitch is "
-	  "consumed by a camera rig if one is coupled to it." },
+	  "Turns the character by Yaw degrees this frame. Pitch is accepted but "
+	  "nothing reads it yet; tilt the view with the camera rig instead." },
 	{ "locomotion.setMaxSpeed",
 	  "The character's top speed in metres per second at full input. Changing it "
 	  "is how sprinting and wading are done." },
@@ -395,7 +438,7 @@ namespace
 	  "is worth branching on, because a false means the agent will not move at "
 	  "all: no nav mesh has been baked, the destination is off the walkable "
 	  "surface, or the two ends sit on parts of the level that do not connect. A "
-	  "refused call also leaves the agent walking wherever it already was. For a "
+	  "refused call also stops an agent that was already walking somewhere. For a "
 	  "target that keeps moving, simply call it again — each call replans from "
 	  "where the agent stands." },
 	{ "nav.stop",
@@ -433,10 +476,12 @@ namespace
 	  "Replaces a UI Text element's text. The usual way a score, a timer or a "
 	  "subtitle reaches the screen." },
 	{ "ui.getColor",
-	  "The element's colour, alpha included." },
+	  "The element's colour, alpha included: an Image's tint, else a Text's colour, "
+	  "else a Button's normal colour. White for an element with none of the three." },
 	{ "ui.setColor",
-	  "Sets the element's colour. On a Text element this is the text itself; on an "
-	  "Image element it is the tint over the texture." },
+	  "Sets the element's colour. On an Image element it is the tint over the "
+	  "texture, on a Text element the text itself, on a Button its normal colour. "
+	  "Any other element ignores it." },
 	{ "ui.getVisible",
 	  "Is this UI element currently shown?" },
 	{ "ui.setVisible",
@@ -453,9 +498,12 @@ namespace
 	  "Resizes a UI element. A stretched anchor overrides this on the axes it "
 	  "stretches." },
 	{ "ui.setMaterialParam",
-	  "Overrides a material parameter on a UI element that uses a material — a "
-	  "progress bar's fill, a shader-driven panel. Ok is false when the element "
-	  "has no material or the parameter is not declared." },
+	  "Sets a material parameter for a UI Image element that uses a material — a "
+	  "progress bar's fill, a shader-driven panel. It writes the MATERIAL ASSET, "
+	  "not the element: every element and entity using the same material changes "
+	  "with it, so give an element that needs its own value its own material. Ok "
+	  "is false when the element has no material or the parameter is not "
+	  "declared." },
 	{ "ui.pointerOverUI",
 	  "Is the pointer over any UI right now? The guard to put in front of a click "
 	  "that acts on the world, so a press on a button does not also shoot." },
@@ -468,8 +516,9 @@ namespace
 	  "Which widget draws over which: higher is nearer the front. For keeping a "
 	  "pause menu above a HUD. Takes the Widget from a Create Widget node." },
 	{ "widget.isVisible",
-	  "Is this widget on screen? A new widget starts visible, so this is false "
-	  "only after Hide Widget, or for a Widget that was destroyed." },
+	  "Is this widget on screen? A new widget starts hidden, so this is false "
+	  "until Show Widget (or Show Modal, Open Popup), again after Hide Widget or "
+	  "a closed dialog, and for a Widget that was destroyed." },
 	{ "widget.callFunction",
 	  "Calls a public function on the widget's own graph by name — the way the "
 	  "outside talks to a screen. Ok is false when the widget or the function is "
@@ -741,6 +790,20 @@ namespace
 	  "Can this program show notifications at all? False in the editor preview, "
 	  "and on a Linux without notify-send. Ask once instead of finding out per "
 	  "notification." },
+	{ "app.setVSync",
+	  "The player's VSync choice, over what the export configured. Applied at "
+	  "once; Save Settings keeps it for the next start. In the editor preview it "
+	  "is remembered but the editor's window is left alone." },
+	{ "app.vsync",
+	  "Whether VSync is on: the player's choice, else the exported setting." },
+	{ "app.setFullscreen",
+	  "The player's fullscreen choice. Off goes back to the exported window mode, "
+	  "or to a window when that was fullscreen, so a borderless game stays "
+	  "borderless. Applied at once, kept by Save Settings; only remembered in the "
+	  "editor preview." },
+	{ "app.isFullscreen",
+	  "Whether the game runs fullscreen: the player's choice, else the exported "
+	  "window mode." },
 	{ "app.setMenuItemEnabled",
 	  "Greys a menu entry out, or brings it back. Addressed by the ENTRY's id — "
 	  "the same id On Menu Item carries — so an id used in two menus is one "
@@ -848,10 +911,31 @@ namespace
 	{ "prefs.clear",
 	  "Forgets every setting at once — what a \"reset to defaults\" button does." },
 
+	// ── Player settings ──────────────────────────────────────────────────────
+	{ "settings.setVolume",
+	  "The player's volume for a mixer bus (\"Music\", \"SFX\"), or \"Master\" for "
+	  "everything at once. 0 is silent, 1 as authored, up to 2. Applied at once; "
+	  "Save Settings keeps it." },
+	{ "settings.volume",
+	  "The player's volume for a bus (\"Master\" for everything), else what the "
+	  "bus is at now. What a settings menu shows its slider at." },
+	{ "settings.save",
+	  "Store the player's settings (deadzone, stick look, VSync, fullscreen, "
+	  "volumes) in the preferences file; the game applies them at every start. "
+	  "Bindings have their own Save Input Bindings. False when there is nowhere "
+	  "to write." },
+	{ "settings.resetToDefaults",
+	  "Forget the player's settings and go back to the project's, applied at "
+	  "once. Use Save Settings to make that stick; bindings have their own "
+	  "Reset Input Bindings." },
+
 	// ── Date and time ────────────────────────────────────────────────────────
 	{ "datetime.now",
 	  "The current wall-clock time as seconds since 1970. This is the clock the "
-	  "operating system shows, not the game clock: pausing does not stop it." },
+	  "operating system shows, not the game clock: pausing does not stop it. It "
+	  "comes out on a Double pin, because a Float can only count this far in "
+	  "steps of two minutes: keep it Double all the way into Format or the field "
+	  "nodes, and it stays exact to the second." },
 	{ "datetime.format",
 	  "Turns a time into text using a strftime pattern, in local time. "
 	  "\"%Y-%m-%d %H:%M\" gives you 2026-08-27 14:32." },
@@ -912,16 +996,18 @@ namespace
 	{ "math.ceil",
 	  "Rounds UP to a whole number: 2.1 becomes 3." },
 	{ "math.round",
-	  "Rounds to the nearest whole number, halves going up." },
+	  "Rounds to the nearest whole number, halves away from zero: 2.5 becomes 3, "
+	  "-2.5 becomes -3." },
 	{ "math.sign",
 	  "-1 for a negative number, 1 for a positive one, 0 for zero. Which way, "
 	  "without how far." },
 	{ "math.pow",
 	  "Raises the base to the exponent." },
 	{ "math.mod",
-	  "The remainder after division. Wrapping an angle back into 0..360, or doing "
-	  "something every Nth item. A divisor of 0 is a runtime error: it is logged "
-	  "and the result is 0 rather than a NaN." },
+	  "The remainder after division, for doing something every Nth item. It keeps "
+	  "the sign of A: -1 mod 360 is -1, not 359, so wrapping an angle into 0..360 "
+	  "takes a second Modulo of the result plus 360. A divisor of 0 is a runtime "
+	  "error: it is logged and the result is 0 rather than a NaN." },
 	{ "math.bitAnd",
 	  "Keeps only the bits set in BOTH integers. Testing a flag: AND the flags "
 	  "with the one you ask about, and the result is non-zero when it is set. Not "
@@ -987,8 +1073,10 @@ namespace
 
 	// ── Random ───────────────────────────────────────────────────────────────
 	{ "random.seed",
-	  "Fixes the random sequence, so a run can be repeated exactly. Seed with a "
-	  "constant while debugging and everything random happens the same way twice." },
+	  "Restarts the random sequence from this seed, so a run can be repeated "
+	  "exactly. Without it the sequence starts from the same built-in seed at every "
+	  "launch, so a game that should differ each time seeds once at start, from "
+	  "the clock." },
 	{ "random.value",
 	  "A random number from 0 up to (but not including) 1. An exec node, not a "
 	  "pure one, precisely because it changes every call: a pure node would be "
@@ -1067,6 +1155,16 @@ namespace
 	{ "player.character",
 	  "The character the local player is driving right now. Shorthand for "
 	  "Possessed of Controller." },
+	{ "player.controllerAt",
+	  "The controller of local player Index (0 = player 1, the same as Get Player "
+	  "Controller). Every PlayerController class in the project is one local player, "
+	  "sorted by asset path. With two or more, player N listens only to the gamepad "
+	  "whose light shows N+1, and player 1 also has the keyboard and mouse. Empty "
+	  "when there is no such player." },
+	{ "player.localPlayerCount",
+	  "How many local players the session has: one per PlayerController class. One "
+	  "means single player, where every gamepad and the keyboard steer the same "
+	  "player." },
 
 	// ── Input ────────────────────────────────────────────────────────────────
 	{ "input.keyDown",
@@ -1074,7 +1172,7 @@ namespace
 	  "\"Space\", \"Escape\"). True for as long as it is held, so use it for "
 	  "movement and put one-shot actions behind an Input Action instead." },
 	{ "input.mouseButton",
-	  "Is this mouse button held? 0 left, 1 middle, 2 right." },
+	  "Is this mouse button held? 0 left, 1 right, 2 middle." },
 	{ "input.mousePosition",
 	  "The pointer's position in window pixels, measured from the top-left." },
 	{ "input.mouseDelta",
@@ -1091,6 +1189,51 @@ namespace
 	{ "input.gamepadAxis",
 	  "A gamepad axis from -1 to 1, deadzone already applied. Names are SDL's: "
 	  "\"leftx\", \"lefty\", \"righttrigger\"." },
+	{ "input.rumble",
+	  "Vibrate every connected gamepad. Low is the heavy motor (explosions, "
+	  "engines), high the light one (footsteps, ticks), both 0 to 1. Duration in "
+	  "seconds; 0 or less keeps going until Stop Gamepad Rumble. A new call "
+	  "replaces the running rumble, it does not add to it. Stops by itself when "
+	  "the game pauses or play mode ends. Ok is false when no pad could rumble." },
+	{ "input.rumbleTriggers",
+	  "Vibrate the trigger motors (Xbox One/Series, DualSense only; elsewhere Ok "
+	  "is false and nothing happens). Left and right 0 to 1, duration as for "
+	  "Rumble Gamepad. Independent of the main motors." },
+	{ "input.stopRumble",
+	  "Stop all gamepad rumble at once, main motors and triggers, on every pad." },
+	{ "input.rebindBegin",
+	  "Let the player choose a new button for an input action (by the name of its "
+	  "InputAction asset, \"Jump\"). Device is \"keyboard\" (keys and mouse buttons) "
+	  "or \"gamepad\"; only that half of the action's bindings is replaced. The next "
+	  "press on that device is taken, not the one still held from the click that "
+	  "started it. Escape or the pad's Start button cancels. While it listens, "
+	  "gameplay actions and menu navigation are silent. Button actions only; Ok is "
+	  "false for an axis, an unknown action or outside a running game." },
+	{ "input.rebindCancel",
+	  "Stop a running rebind without changing anything." },
+	{ "input.isRebinding",
+	  "True from Rebind Input Action until the chosen button is let go again (or "
+	  "the rebind was cancelled). Poll it to know when to refresh the labels." },
+	{ "input.rebindConflict",
+	  "After a rebind: the other actions the new button also triggers, separated "
+	  "by commas, or empty when there are none. The binding is made anyway, so a "
+	  "settings menu can warn and let the player decide." },
+	{ "input.bindingName",
+	  "What an action is bound to on a device (\"keyboard\" or \"gamepad\"), "
+	  "readable: \"Space\", \"A (South)\", \"Left Mouse Button\". Several are joined "
+	  "with \" / \", nothing bound is empty. Keys use the player's keyboard layout." },
+	{ "input.resetBindings",
+	  "Throw away every binding the player chose and go back to the project's "
+	  "mapping contexts. Use Save Input Bindings to make that stick." },
+	{ "input.saveBindings",
+	  "Store the player's bindings in the preferences file, so the next start of "
+	  "the game loads them again. Unsaved rebinds last until the game ends." },
+	{ "input.setStickDeadzone",
+	  "The player's stick deadzone: how far a stick has to move before it counts, "
+	  "0 to 0.9. Raise it for a worn pad that drifts. Applied from the next frame; "
+	  "Save Settings keeps it." },
+	{ "input.stickDeadzone",
+	  "The stick deadzone in use: the player's choice, else the game's own (0.15)." },
 	{ "input.actionDown",
 	  "Whether an input action (by the name of its InputAction asset, \"Jump\") "
 	  "is held this frame. The polling twin of the Input.<Action>.Pressed event: "
@@ -1123,12 +1266,16 @@ namespace
 
 	// ── Camera ───────────────────────────────────────────────────────────────
 	{ "camera.getPosition",
-	  "The active camera's world position." },
+	  "The active camera's position, read from its own transform: relative to its "
+	  "parent when it has one, so it is the world position only for a camera at "
+	  "the top of the hierarchy. The active camera is the one marked Main, else "
+	  "the first camera in the scene." },
 	{ "camera.setPosition",
 	  "Moves the active camera. Ignored the moment a camera rig is driving it — "
 	  "the rig recomputes the position from its target every frame." },
 	{ "camera.getRotation",
-	  "The active camera's rotation as euler degrees." },
+	  "The active camera's rotation as euler degrees, from its own transform — "
+	  "relative to its parent, like Get Camera Position." },
 	{ "camera.setRotation",
 	  "Turns the active camera. Same caveat as Set Position: a rig overrides it." },
 	{ "camera.getFov",
@@ -1199,10 +1346,25 @@ namespace
 	{ "camera.blendTo",
 	  "Hands the view to another camera over a number of seconds. Curve 0 is "
 	  "linear, 1 smoothstep, 2 ease-out. 0 seconds is a straight cut, and so is "
-	  "switching the main camera by hand — a blend only ever starts here." },
+	  "switching the main camera by hand — a blend only ever starts here. The "
+	  "camera blended to needs a camera rig of its own; to a camera without one "
+	  "this is always a cut." },
 	{ "camera.isBlending",
 	  "Whether the picture is currently easing in from another camera. True "
 	  "until the blend has fully arrived." },
+	{ "camera.setStickSensitivityScale",
+	  "The player's stick look speed, as a factor on top of every camera rig's "
+	  "own Stick Sensitivity: 1 as designed, 2 twice as fast, 0.5 half. A factor "
+	  "and not a speed, so rigs keep the difference their author gave them. "
+	  "0.05 to 10; Save Settings keeps it." },
+	{ "camera.stickSensitivityScale",
+	  "The player's stick look factor, 1 when never chosen." },
+	{ "camera.setStickInvertY",
+	  "The player's \"invert look\" for the stick: up looks down. Replaces every "
+	  "rig's own Invert Stick Y once chosen; Save Settings keeps it." },
+	{ "camera.stickInvertY",
+	  "The player's stick invert choice; false when never chosen (the rig's own "
+	  "setting applies then)." },
 
 	// ── Content ──────────────────────────────────────────────────────────────
 	{ "content.load",
@@ -1231,8 +1393,8 @@ namespace
 	  "Playing take; a one-shot can simply drop it." },
 	{ "audio.playAt",
 	  "Plays a sound at a world position, quieter with distance. Full volume "
-	  "inside Min Dist, silent past Max Dist. Needs an Audio Listener in the "
-	  "scene, or there are no ears to hear it from." },
+	  "inside Min Dist, silent past Max Dist. Distance is measured from the "
+	  "scene's Audio Listener; without one the ears stay at the world origin." },
 	{ "audio.stop",
 	  "Stops one playing sound by handle. A handle that has already finished is "
 	  "harmless." },
@@ -1306,7 +1468,9 @@ namespace
 	{ "fs.modified",
 	  "When the file was last written, in seconds, on the same clock Now uses. So "
 	  "\"how old is this file\" is Now minus this, and not a second time format to "
-	  "learn. -1 when there is nothing there." },
+	  "learn. -1 when there is nothing there. A Double, like Now; the math nodes "
+	  "still work in Float, so do that subtraction in a script when the answer "
+	  "has to be exact to the second." },
 	{ "fs.list",
 	  "The names of everything directly inside a directory, sorted. Names only, "
 	  "not full paths — joining stays yours. Empty for a path that is not a "
@@ -1330,10 +1494,12 @@ namespace
 
 	// ── Printing ─────────────────────────────────────────────────────────────
 	{ "print.toPdf",
-	  "Writes text as a PDF, at a path that follows the same rules as the file "
-	  "nodes. It is set in Courier and laid out as a page of text: lines break "
-	  "at your newlines and at the page width, pages break when they are full. "
-	  "Needs the project's \"Read and write files\" permission." },
+	  "Writes text as a PDF: a relative path lands in the project's Saved folder, "
+	  "like the file nodes. It is set in Courier and laid out as a page of text: "
+	  "lines break at your newlines and at the page width, pages break when they "
+	  "are full; characters outside Latin-1 print as '?'. Needs the project's "
+	  "\"Files outside the project\" permission for EVERY path, a relative one "
+	  "included, and a path picked in a file dialog does not stand in for it." },
 	{ "print.file",
 	  "Hands a file to the system's printing. Ok means it was handed over, not "
 	  "that it came out of a printer — what the queue does next is between the "
@@ -1345,13 +1511,16 @@ namespace
 	  "piece of work." },
 
 	// ── Database ─────────────────────────────────────────────────────────────
-	// Open needs the project's "Read and write files" permission; a database is
-	// a file. The readers do not.
+	// Open needs the project's "Files outside the project" permission, for every
+	// path (EngineApi.cpp db::open checks it before resolving); a database is a
+	// file. The readers do not.
 	{ "db.open",
 	  "Opens a SQLite database file, creating it if it is not there yet, and "
-	  "gives you a handle for the other Database nodes. The path follows the "
-	  "same rules as the file nodes: relative to your project, or somewhere the "
-	  "user picked in a dialog. 0 means it did not open." },
+	  "gives you a handle for the other Database nodes. A relative path lands in "
+	  "the project's Saved folder, like the file nodes. Needs the project's "
+	  "\"Files outside the project\" permission for EVERY path, a relative one "
+	  "included, and unlike the file nodes a path picked in a dialog does not "
+	  "stand in for it. 0 means it did not open." },
 	{ "db.close",
 	  "Closes a database. They also all close when the application does." },
 	{ "db.exec",
@@ -1454,10 +1623,12 @@ namespace
 	// ── Anti-cheat ───────────────────────────────────────────────────────────
 	{ "anticheat.check",
 	  "Asks the host's anti-cheat whether a value a client claimed (damage, a "
-	  "pickup, a currency delta) is allowed by the rule of that name from the "
-	  "project's Anti-Cheat settings. True = apply it. Always true on a client, "
-	  "with anti-cheat off, or for a rule the project does not declare: a check "
-	  "the engine cannot make never blocks the game." },
+	  "pickup, a currency delta) is allowed by the rule of that name. True = "
+	  "apply it. The rule table is not built yet: the rules on the project's "
+	  "Anti-Cheat page are saved but never read, so every check answers true. "
+	  "That is also the answer on a client, with anti-cheat off and for a rule "
+	  "nobody declared: a check the engine cannot make never blocks the game. "
+	  "Player is a connection number, like Report Player's." },
 	{ "anticheat.expectDisplacement",
 	  "Tells the anti-cheat that this entity is about to move a long way on "
 	  "purpose (respawn, portal, dash), up to Max Distance. One shot: the next "
@@ -1490,8 +1661,11 @@ namespace
 	  "Displacement, or the name your own Report Observation used. On a client "
 	  "this is the one thing the host tells you about a kick." },
 	{ "anticheat.reportPlayer",
-	  "The connection the report is about — the number Set Player Label and "
-	  "Kick Player take. 0 on a client, where the report is about you." },
+	  "The connection the report is about — the number Check Rule, Report "
+	  "Observation, Set Player Label, Kick Player and Player Score take. Not a "
+	  "multiplayer player number: players are numbered 1, 2, … in join order, "
+	  "connections separately (the first joiner is usually player 2 on "
+	  "connection 1). 0 on a client, where the report is about you." },
 	{ "anticheat.reportEntity",
 	  "The network id of the entity involved, when the report names one (a "
 	  "movement report names the character). 0 when it does not." },
@@ -1517,10 +1691,11 @@ namespace
 	{ "net.host",
 	  "Opens a multiplayer session on this machine and makes it joinable. Port 0 "
 	  "takes the project's Default port (Project Settings, Game, Multiplayer), "
-	  "which is where the seats, the tick rate and the rest come from too; read "
-	  "the port that was actually opened back from the session status, and hand "
-	  "joiners the Join Code. Everyone who joins plays in YOUR world: the host "
-	  "decides what really happened." },
+	  "which is where the seats, the tick rate and the rest come from too. If "
+	  "that is 0 as well the system picks one, and no node reads it back, so a "
+	  "game that tells joiners its port hosts on a fixed one; hand them the Join "
+	  "Code too. Hosting again ends the running session first. Everyone who "
+	  "joins plays in YOUR world: the host decides what really happened." },
 	{ "net.joinDirect",
 	  "Joins a session by address and port, with the host's Join Code. The code "
 	  "is not a password you can guess past: without the right one the "
@@ -1541,7 +1716,7 @@ namespace
 	  "Empty when nothing has failed." },
 	{ "net.sessionId",
 	  "This session's short id, for showing to somebody who is about to join. "
-	  "Empty outside a session." },
+	  "Only the host has it: empty on a client and outside a session." },
 	{ "net.joinCode",
 	  "The secret a joiner needs. Only the HOST gets it — on a client this is "
 	  "deliberately empty, so a client's own UI cannot hand out seats to a "
@@ -1582,11 +1757,14 @@ namespace
 	  "The display name that player joined with. Empty for a player this machine "
 	  "does not know about — on a client that is everybody but itself." },
 	{ "net.ping",
-	  "Round trip to that player in milliseconds. 0 when there is nothing to "
-	  "measure: ourselves, and a player nobody has timed yet." },
+	  "Round trip to that player in milliseconds, as the host measures it. 0 "
+	  "when there is nothing to measure: ourselves, a player nobody has timed "
+	  "yet, and every player on a client, which knows only itself." },
 	{ "net.kick",
-	  "Host only: remove a player from the session. The same path the anti-cheat "
-	  "takes, so a session that logs one logs the other." },
+	  "Host only: remove a player from the session. With anti-cheat on it takes "
+	  "the anti-cheat's path: the player is told and sees reason 2, Kicked. "
+	  "Without, the connection is simply closed and the player sees reason 1, a "
+	  "lost connection." },
 	{ "net.ownerOf",
 	  "Which player this entity belongs to, or 0 for the host's own and for "
 	  "anything nobody owns (a door, a crate)." },
@@ -1601,22 +1779,29 @@ namespace
 	  "Ask the HOST to run a function on this entity. The ordinary way to say "
 	  "\"I pulled the lever\": a client may not change the world, so it asks. "
 	  "Nothing comes back — a remote call has no return value. Allowed for the "
-	  "entity you own, or for a function whose header has Any Client ticked. "
-	  "Offline it simply runs here, so a graph works in single player." },
+	  "entity you own, or for a function whose header has Any Client ticked; "
+	  "anything else the host drops, and with anti-cheat on it is a Hard report "
+	  "that removes the caller. Offline and on the host it runs here, on the "
+	  "entity's HorizonCode class, so a graph works in single player; a Lua or "
+	  "Python method is not reached that way." },
 	{ "net.callClient",
 	  "Host only: run a function on ONE player's machine — the hit marker, the "
 	  "message only they should see. Addressed by PlayerId. Nothing comes back." },
 	{ "net.callAllClients",
 	  "Host only: run a function on EVERY machine, including this one — the "
-	  "round-over horn, the explosion everybody sees. Nothing comes back." },
+	  "round-over horn, the explosion everybody sees. Nothing comes back. Here "
+	  "on the host only the entity's HorizonCode class runs it (a Lua or Python "
+	  "method is not reached, and the result is then false although the clients "
+	  "were sent the call)." },
 	{ "net.allowAnyClient",
 	  "Let any client call that function on this entity, not just its owner. For "
 	  "Lua, Python and C++ classes, which have no function header to tick. A door "
 	  "belongs to nobody, so without this nobody could open it." },
 	{ "net.rpcSender",
-	  "Which player asked for the call being handled right now. 0 at any other "
-	  "moment. Hand it to Report Cheat or Check when the call is a claim worth "
-	  "weighing." },
+	  "Which player asked for the call being handled right now: a player number, "
+	  "as Player Name and Kick From Session take it. 0 at any other moment. Not "
+	  "a connection number, so it is not what the anti-cheat rows take (Report "
+	  "Player gives that one)." },
 	{ "net.declareVarBool",
 	  "Declares a replicated Bool on this entity: the host owns it, every client "
 	  "is sent its value. Call it in On Init. With Notify on, the clients get "
@@ -1743,10 +1928,11 @@ namespace
 	  "and two texts arriving there both count as 0, so every id would match "
 	  "every other one." },
 	{ "string.length",
-	  "How many characters the text has." },
+	  "How long the text is in bytes. Plain letters and digits are one byte each, "
+	  "but an accented or non-Latin letter takes two to four (\"ä\" is 2)." },
 	{ "string.substring",
-	  "Count characters starting at Start (counting from 0). A range past the end "
-	  "is clamped rather than an error." },
+	  "Count bytes starting at Start (counting from 0). A range past the end is "
+	  "clamped rather than an error." },
 	{ "string.contains",
 	  "Does the text contain this piece? Case-sensitive." },
 	{ "string.find",
@@ -1754,9 +1940,11 @@ namespace
 	{ "string.replace",
 	  "Replaces every occurrence of From with To." },
 	{ "string.toUpper",
-	  "The text in upper case." },
+	  "The text in upper case. Only A to Z change; accented letters stay as they "
+	  "are." },
 	{ "string.toLower",
-	  "The text in lower case." },
+	  "The text in lower case. Only A to Z change; accented letters stay as they "
+	  "are." },
 	{ "string.trim",
 	  "Removes whitespace from both ends — what a text input needs before it is "
 	  "compared to anything." },
@@ -1770,7 +1958,7 @@ namespace
 	};
 
 	// ── The sky properties ───────────────────────────────────────────────────
-	// The Environment category is generated from an X-list in EngineApi.h: fifty
+	// The Environment category is generated from an X-list in EngineApi.h: 58
 	// fields, each producing an env.get… and an env.set… row. A hand-written
 	// table would be a hundred rows that say the same thing twice and go stale
 	// the moment a field is added — so this is keyed by the FIELD (the part after
@@ -1778,17 +1966,23 @@ namespace
 	//
 	// The sentences are the ones the Sky entity's own properties carry in the
 	// Details panel (EditorHelp.cpp), because they describe the same value.
-	struct Field { const char* name; const char* what; };
+	//
+	// `weather` says what a Weather component does to the field, read off
+	// WeatherSystem::update: Driven fields are written toward the preset every
+	// tick but released once something else changes them (its `drive` back-off),
+	// until the next preset reclaims them; Forced is rewritten every tick.
+	enum class Wx { None, Driven, Forced };
+	struct Field { const char* name; const char* what; Wx weather = Wx::None; };
 	constexpr Field kEnvFields[] = {
-		{ "TimeOfDay", "the sky's clock: 0 and 1 are midnight, 0.25 sunrise, 0.5 noon" },
-		{ "CycleSeconds", "how long a full day takes while the day-night cycle runs, in seconds" },
+		{ "TimeOfDay", "the sky's clock: 0 and 1 are midnight, 0.25 sunrise, 0.5 noon. It only moves the sun while Day Night Cycle is on" },
+		{ "CycleSeconds", "how many real seconds a full day takes while Auto Advance runs the clock" },
 		{ "SunIntensity", "how strong the sun is, and with it the whole daylit scene" },
 		{ "MoonIntensity", "how strong the moonlight is — the difference between a night you can see in and a black screen" },
 		{ "MoonPhase", "the moon's phase: 0 new, 0.5 full" },
 		{ "MoonCycleDays", "how many days a full new-to-full-to-new cycle takes" },
-		{ "CloudCoverage", "how much of the sky the cloud layer fills: 0 clear, 1 overcast" },
+		{ "CloudCoverage", "how much of the sky the cloud layer fills: 0 clear, 1 overcast", Wx::Driven },
 		{ "WindDirection", "which way the clouds drift, in degrees" },
-		{ "WindSpeed", "how fast the clouds drift" },
+		{ "WindSpeed", "how fast the clouds drift", Wx::Driven },
 		{ "CloudHeight", "the world height of the cloud deck's base, in metres" },
 		{ "CloudShadowStrength", "how dark the shadows the cloud layer casts on the ground get" },
 		{ "CloudEvolution", "how fast clouds change shape as they drift; 0 freezes the formation" },
@@ -1800,12 +1994,12 @@ namespace
 		{ "GodRays", "the shafts of light through gaps in the cloud; they need broken cover to shine through" },
 		{ "ShootingStars", "how often meteors streak across the night sky" },
 		{ "LensFlare", "the camera artefact when the sun is in shot" },
-		{ "FogDensity", "how thick the atmospheric haze is; even a very small amount gives a landscape distance" },
+		{ "FogDensity", "how thick the atmospheric haze is; even a very small amount gives a landscape distance", Wx::Driven },
 		{ "FogHeightFalloff", "how much the fog pools near the ground instead of filling the air evenly" },
-		{ "RainAmount", "how hard it is raining, 0 to 1" },
-		{ "SnowAmount", "how hard it is snowing, 0 to 1" },
-		{ "Wetness", "how wet surfaces look after rain" },
-		{ "Flash", "the lightning flash, driven per strike by the Weather system" },
+		{ "RainAmount", "how hard it is raining, 0 to 1", Wx::Driven },
+		{ "SnowAmount", "how hard it is snowing, 0 to 1", Wx::Driven },
+		{ "Wetness", "how wet surfaces look after rain", Wx::Driven },
+		{ "Flash", "the lightning flash, driven per strike by the Weather system", Wx::Forced },
 		{ "AuroraIntensity", "how strong the aurora ribbons are; 0 switches them off" },
 		{ "MilkyWayIntensity", "how bright the galaxy's band is across the night sky" },
 		{ "NebulaIntensity", "how visible the deep-space nebula is behind the stars" },
@@ -1819,14 +2013,14 @@ namespace
 		{ "StarTwinkle", "how much the stars flicker" },
 		{ "AuroraHeight", "how tall the aurora ribbons stand above the horizon" },
 		{ "AuroraFragmentation", "how broken the ribbons are, from a smooth curtain to ragged streaks" },
-		{ "DayNightCycle", "whether time of day advances on its own while the scene runs" },
-		{ "AutoAdvance", "whether the moon phase moves with the days on its own" },
-		{ "MoonPhaseAuto", "whether the moon phase advances with the day-night cycle" },
+		{ "DayNightCycle", "whether Time Of Day drives the sun, sky and shadows; off, the scene's own directional light is used" },
+		{ "AutoAdvance", "whether Time Of Day runs on by itself, one day per Day Cycle Seconds; it needs Day Night Cycle on as well" },
+		{ "MoonPhaseAuto", "whether the moon phase moves on with the days while Auto Advance runs the clock" },
 		{ "CloudShadows", "whether the cloud layer darkens the ground under it" },
 		{ "CloudInterShadows", "whether clouds cast shadows within their own body, so a tall tower darkens what is behind it" },
 		{ "LowResClouds", "whether the clouds are raymarched at quarter resolution and upscaled — much cheaper, slightly softer" },
 		{ "CloudMode", "the cloud layer: 0 painted on the sky dome (cheap, never comes closer), 1 real 3D volumes the camera can fly into" },
-		{ "CloudQuality", "how many steps the cloud raymarch takes — the most expensive sky setting there is" },
+		{ "CloudQuality", "how many steps the cloud raymarch takes: 0 low, 1 medium, 2 high — the most expensive sky setting there is" },
 		{ "CloudStyle", "0 the original flat drifting layer, 1 cauliflower shapes that tower and dissolve" },
 		{ "NebulaQuality", "the nebula's detail level: 0 performance, 1 high, 2 max" },
 		{ "SunColor", "the tint of the sunlight; the sky reddens the sun near the horizon on its own" },
@@ -1840,11 +2034,11 @@ namespace
 		{ "StarColor", "the tint over the whole star field; the per-star variation survives it" },
 	};
 
-	// The sentence both env rows for a field are built from, or null.
-	const char* envField(std::string_view name)
+	// The entry both env rows for a field are built from, or null.
+	const Field* envField(std::string_view name)
 	{
 		for (const Field& f : kEnvFields)
-			if (name == f.name) return f.what;
+			if (name == f.name) return &f;
 		return nullptr;
 	}
 
@@ -1870,18 +2064,33 @@ std::string engineCall(std::string_view id)
 	std::string_view field;
 	if (splitEnv(id, isSet, field))
 	{
-		if (const char* what = envField(field))
+		if (const Field* f = envField(field))
 		{
 			std::string out = isSet ? "Sets " : "Reads ";
-			out += what;
+			out += f->what;
 			out += ". This is the Sky entity's Environment component — the same "
-			       "value its Details panel shows";
+			       "value its Details panel shows.";
 			// The one thing a graph author has to know before writing to the sky:
-			// the Weather system owns some of these while it is present.
-			out += isSet ? ". A Weather component in the scene writes cloud "
-			               "coverage, fog, wind and precipitation every tick, so a "
-			               "value set here is overwritten while one exists."
-			             : ".";
+			// whether the Weather system owns this field while it is present.
+			if (isSet)
+			{
+				switch (f->weather)
+				{
+				case Wx::Driven:
+					out += " A Weather component in the scene steers this field toward "
+					       "its preset every tick, but lets go of it once something "
+					       "else changes it — a value set here stays until a new "
+					       "weather preset is chosen.";
+					break;
+				case Wx::Forced:
+					out += " A Weather component in the scene rewrites it every tick, "
+					       "so a value set here does not survive while one exists.";
+					break;
+				case Wx::None:
+					out += " A Weather component in the scene leaves this field alone.";
+					break;
+				}
+			}
 			return out;
 		}
 	}

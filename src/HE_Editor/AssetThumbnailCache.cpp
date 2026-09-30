@@ -1,5 +1,6 @@
 #include "AssetThumbnailCache.h"
 #include "EditorAssetTypeCache.h"      // path → AssetType (cached HAsset header sniff)
+#include "TextureViewerPanel.h"        // toDisplayRgba: a texture's level 0, top-down, for image()
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <MaterialGraph/MaterialGraph.h> // material-FUNCTION tiles wrap the graph
@@ -69,11 +70,31 @@ namespace
 	// Freed at the next beginFrame instead, by which time that draw data is gone.
 	std::vector<void*> s_pendingDestroy;
 
-	void releaseTexture(Entry& e)
+	// A full-resolution image() — the texture itself, for the designer canvas.
+	// Its own map: a tile and an image of the same asset are different pictures.
+	struct Image
 	{
-		if (e.texture) s_pendingDestroy.push_back(e.texture);
-		e.texture = nullptr;
+		void*    texture  = nullptr; // IRenderer texture handle (owned)
+		uint32_t w = 0, h = 0;
+		uint64_t stamp    = 0;
+		double   lastStat = -1.0e9;
+		double   lastUsed = 0.0;     // s_now of the last image() call
+		State    state    = State::Unknown;
+	};
+	std::unordered_map<std::string, Image> s_images;
+
+	// How long an image may go un-asked-for before it is dropped. The canvas asks
+	// every frame it draws one, so this only catches closed pages and swapped
+	// textures — and keeps a page flicking between tabs from re-uploading.
+	constexpr double kImageIdleSec = 5.0;
+
+	void retire(void*& texture)
+	{
+		if (texture) s_pendingDestroy.push_back(texture);
+		texture = nullptr;
 	}
+
+	void releaseTexture(Entry& e) { retire(e.texture); }
 
 	void drainPendingDestroy()
 	{
@@ -222,6 +243,11 @@ namespace
 		// evenly spread samples bound the cost at ~260k regardless of source size
 		// and still look like a proper downscale.
 		constexpr int kMaxTaps = 4;
+		//
+		// sy counts from the picture's TOP; the asset stores its rows bottom-up
+		// (TextureImporter, see UIElement.cpp's quad helper), so the row it reads
+		// is h-1-sy — otherwise every tile, and the designer preview drawn from
+		// it, stands on its head (Thema 92).
 		for (int y = 0; y < dh; ++y)
 		{
 			const uint32_t sy0 = static_cast<uint32_t>((static_cast<float>(y)     / dh) * h);
@@ -238,7 +264,7 @@ namespace
 				for (uint32_t sy = sy0; sy < sy1 && sy < h; sy += stepY)
 					for (uint32_t sx = sx0; sx < sx1 && sx < w; sx += stepX)
 					{
-						const uint8_t* p = &tex->data[(static_cast<size_t>(sy) * w + sx) * ch];
+						const uint8_t* p = &tex->data[(static_cast<size_t>(h - 1 - sy) * w + sx) * ch];
 						if (ch == 1)      { acc[0] += p[0]; acc[1] += p[0]; acc[2] += p[0]; acc[3] += 255; }
 						else if (ch == 3) { acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2]; acc[3] += 255; }
 						else              { acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2]; acc[3] += p[3]; }
@@ -523,6 +549,75 @@ void beginFrame(double now)
 	s_now         = now;
 	s_rendersLeft = kRendersPerFrame;
 	s_uploadsLeft = kUploadsPerFrame;
+
+	// Full images nobody drew lately go (freed at the NEXT beginFrame, like any
+	// retired texture — the canvas may still have drawn one last frame).
+	for (auto it = s_images.begin(); it != s_images.end(); )
+	{
+		if (s_now - it->second.lastUsed > kImageIdleSec)
+		{
+			retire(it->second.texture);
+			it = s_images.erase(it);
+		}
+		else ++it;
+	}
+}
+
+void* image(const std::string& absPath, uint32_t* wOut, uint32_t* hOut)
+{
+	if (absPath.empty() || !s_renderer || !s_content) return nullptr;
+	if (!EditorAssetTypeCache::is(absPath, HE::AssetType::Texture)) return nullptr;
+
+	Image& im = s_images[absPath];
+	im.lastUsed = s_now;
+
+	// Staleness exactly as get(): a re-import rewrites the file, the new stamp
+	// drops the texture and the next line rebuilds it from the new pixels.
+	if (s_now - im.lastStat >= kStatIntervalSec)
+	{
+		im.lastStat = s_now;
+		const uint64_t stamp = sourceStampOf(absPath);
+		if (stamp != im.stamp)
+		{
+			retire(im.texture);
+			im.stamp = stamp;
+			im.state = State::Unknown;
+		}
+	}
+
+	if (im.state == State::Unknown)
+	{
+		im.state = State::Unsupported;
+		if (im.stamp == 0) return nullptr; // file is gone
+
+		// Same load-and-let-go as a tile: whatever pulled the texture in first
+		// (a running scene) keeps it; an image loaded only for the canvas does not
+		// stay resident on the CPU once its GPU copy exists.
+		const std::string relPath = relPathOf(absPath);
+		const bool wasLoaded = s_content->isLoaded(relPath);
+		const HE::UUID id = s_content->loadAsset(relPath);
+		if (id == HE::UUID{}) return nullptr;
+		std::vector<uint8_t> pixels;
+		bool ok = false;
+		// Read the pointer and convert before anything else loads: a getter
+		// points into a dense vector that the next loadAsset may move.
+		if (const TextureAsset* tex = s_content->getTexture(id))
+		{
+			ok   = TextureViewerPanel::toDisplayRgba(*tex, pixels);
+			im.w = tex->width;
+			im.h = tex->height;
+		}
+		if (!wasLoaded) s_content->unloadAsset(id);
+		if (!ok) return nullptr;
+
+		im.texture = s_renderer->CreateImGuiTexture(pixels.data(), (int)im.w, (int)im.h);
+		if (im.texture) im.state = State::Ready;
+	}
+
+	if (im.state != State::Ready) return nullptr;
+	if (wOut) *wOut = im.w;
+	if (hOut) *hOut = im.h;
+	return im.texture;
 }
 
 void* get(const std::string& absPath)
@@ -760,6 +855,11 @@ void invalidate(const std::string& absPath)
 		releaseTexture(it->second);
 		s_entries.erase(it);
 	}
+	if (const auto im = s_images.find(absPath); im != s_images.end())
+	{
+		retire(im->second.texture);
+		s_images.erase(im);
+	}
 	// Drop the file too: an asset that was renamed or deleted would otherwise
 	// leave its .hthumb behind forever, and a rewritten one is re-rendered anyway.
 	if (!s_cacheDir.empty())
@@ -773,6 +873,8 @@ void clear()
 {
 	for (auto& [path, e] : s_entries) releaseTexture(e);
 	s_entries.clear();
+	for (auto& [path, im] : s_images) retire(im.texture);
+	s_images.clear();
 }
 
 void shutdown()

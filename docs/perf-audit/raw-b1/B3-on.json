@@ -1,0 +1,11 @@
+{
+ "label": "B3-on",
+ "env": {},
+ "pid": 52174,
+ "marker": "Window in background \u2014 throttled to 15.0 FPS",
+ "boot_s": 30.2,
+ "window_s": 20.28,
+ "gpu_pct": 8.32,
+ "gpu_ms_per_s": 83.22,
+ "cpu_pct": 2.3
+}

@@ -48,14 +48,34 @@ namespace AssetThumbnailCache
 	// fallback and asks again next frame).
 	void* get(const std::string& absPath);
 
+	// ── Full images: the texture itself, NOT a tile ──────────────────────────
+	// The widget designer's canvas draws an Image element at up to the page's
+	// size, and used to borrow get()'s tile for it: 128 px, with the checkerboard
+	// baked in and alpha forced opaque — so a 1024 px logo arrived blurred and a
+	// transparent background showed as squares (Thema 107). This is the picture
+	// that belongs there instead: level 0 at full resolution, rows top-down,
+	// straight alpha, nothing composited in. Raw bytes as an RGBA8 (unorm)
+	// ImGui texture, the same as the tile and the texture viewer.
+	//
+	// Texture assets only (nullptr for anything else, and for cooked BCn data,
+	// which only the backends decode). Kept apart from the tiles: its own map,
+	// no disk cache, not budgeted (a page shows a handful of images, and a budget
+	// is refilled by the Content Browser's beginFrame, which a hidden browser
+	// never calls). Re-stat'ed like a tile, so a re-import updates the canvas.
+	// A full-size texture is 16-64x a tile, so one not asked for over a few
+	// seconds of beginFrame time is dropped again. `wOut`/`hOut` (optional)
+	// receive the image size.
+	void* image(const std::string& absPath, uint32_t* wOut = nullptr, uint32_t* hOut = nullptr);
+
 	// Drop `absPath`'s thumbnail — both the texture and the .hthumb file — so the
 	// next get() re-renders it. Call wherever an asset is written, renamed or
 	// deleted; the throttled staleness check would catch a write on its own, this
-	// just makes the update immediate.
+	// just makes the update immediate. Drops its full image() as well.
 	void invalidate(const std::string& absPath);
 
-	// Drop every in-memory texture (the disk cache stays: it is keyed by content
-	// stamp, so it stays valid). For project switches and editor shutdown.
+	// Drop every in-memory texture, full images included (the disk cache stays:
+	// it is keyed by content stamp, so it stays valid). For project switches and
+	// editor shutdown.
 	void clear();
 
 	// Release GPU textures while the renderer is still alive. Call from the
@@ -165,7 +185,9 @@ namespace AssetThumbnailCache
 		uint64_t reserved;      // 0
 	};
 	static_assert(sizeof(FileHeader) == 32, "on-disk header must stay 32 bytes");
-	constexpr uint32_t kVersion = 1;
+	// 2: texture tiles read the stored rows bottom-up (Thema 92); version-1 files
+	// hold them upside down. Costs one re-render of every tile, meshes included.
+	constexpr uint32_t kVersion = 2;
 
 	// Write/read one cache file. `pixels` must hold size*size*4 bytes. readFile
 	// fails (returns false) when the file is missing, malformed, written by

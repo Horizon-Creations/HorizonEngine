@@ -139,7 +139,9 @@ TEST_CASE("element property tables are the pinned on-disk name/type list")
             { "Slice Top", UIPropType::Float },
             { "Slice Right", UIPropType::Float },
             { "Slice Bottom", UIPropType::Float },
-            { "Slice Fill Centre", UIPropType::Bool } } },
+            { "Slice Fill Centre", UIPropType::Bool },
+            { "Flip Horizontal", UIPropType::Bool },
+            { "Flip Vertical", UIPropType::Bool } } },
         { UIWidgetType::Text, {
             { "Text", UIPropType::String },
             { "FontSize", UIPropType::Float },
@@ -3261,7 +3263,9 @@ TEST_CASE("UIElement: the texture slot round-trips and reaches the quad")
     REQUIRE(out.size() == 1);
     CHECK(out[0].textureAssetId == HE::UUID{ 7, 9 });
     CHECK(out[0].uvMax.x == doctest::Approx(1.0f));   // full source rect
-    CHECK(out[0].uvMax.y == doctest::Approx(1.0f));
+    // v runs the other way on a textured quad: the asset stores its rows
+    // bottom-up, so the quad's bottom edge reads v = 0 (test_texture_orientation).
+    CHECK(out[0].uvMax.y == doctest::Approx(0.0f));
     // A clone carries both (the runtime renders from a deep copy).
     CHECK(e.clone()->textureAssetId == HE::UUID{ 7, 9 });
     CHECK(e.clone()->texture == "Textures/Other.hasset");
@@ -6943,6 +6947,329 @@ TEST_CASE("Clips: playing stops at the last key, not at the authored length")
     CHECK(HE::uiAnimPlayEnd(empty) == doctest::Approx(0.0f));
 }
 
+// The repair for Thema 107: a fade keyed 0 → 50 ms in a one-second clip plays as
+// a pop. Stretching puts the last key on the length and keeps the proportions.
+TEST_CASE("Clips: stretching to the length puts the last key on the end")
+{
+    // The user's clip: Render Opacity 0 at 0 s, 1 at 0.0503 s, length 1 s.
+    HE::UIAnimClip c = fadeClip(1, "Blend", 0.0f, 1.0f, /*dur=*/0.0503144654f);
+    c.duration = 1.0f;
+    // A second track with a key in the middle of the motion, to see that the
+    // gaps keep their proportions across tracks.
+    HE::UIAnimTrack tr;
+    tr.element = 1; tr.prop = "Render Opacity";
+    tr.keys.push_back({ 0.0251572327f, HE::UIPropValue::ofFloat(0.5f), HE::UIEase::Linear });
+    c.tracks.push_back(tr);
+    REQUIRE(HE::uiAnimPlayEnd(c) == doctest::Approx(0.0503144654f));
+
+    REQUIRE(HE::uiAnimStretchToLength(c));
+    CHECK(c.tracks[0].keys.front().time == 0.0f);
+    CHECK(c.tracks[0].keys.back().time == 1.0f);          // exactly, not a hair short
+    CHECK(c.tracks[1].keys[0].time == doctest::Approx(0.5f));
+    CHECK(HE::uiAnimPlayEnd(c) == 1.0f);
+    // Values are untouched: halfway through the length is halfway through the fade.
+    std::vector<HE::UIAnimSample> s;
+    HE::uiAnimEvaluate(c, 0.5f, s);
+    REQUIRE_FALSE(s.empty());
+    CHECK(s[0].value.f == doctest::Approx(0.5f));
+
+    // Already on the end: nothing to do, and nothing moved.
+    CHECK_FALSE(HE::uiAnimStretchToLength(c));
+    CHECK(c.tracks[0].keys.back().time == 1.0f);
+
+    // Nothing past zero (only a key at 0, or no keys) has no motion to spread,
+    // and dividing by that zero must not happen.
+    HE::UIAnimClip still = fadeClip(1, "Still", 0.0f, 1.0f, 0.0f);
+    still.duration = 2.0f;
+    CHECK_FALSE(HE::uiAnimStretchToLength(still));
+    CHECK(still.tracks[0].keys.back().time == 0.0f);
+    HE::UIAnimClip empty; empty.duration = 2.0f;
+    CHECK_FALSE(HE::uiAnimStretchToLength(empty));
+}
+
+// ═══ Thema 108: switches on the timeline ═════════════════════════════════════
+// Visible and Enabled as tracks. A Bool has no halfway, so it STEPS: the key
+// before the playhead holds until the next one is reached.
+
+namespace
+{
+    HE::UIAnimTrack boolTrack(int elem, const char* prop,
+                              std::initializer_list<std::pair<float, bool>> keys)
+    {
+        HE::UIAnimTrack tr;
+        tr.element = elem; tr.prop = prop;
+        for (const auto& [t, b] : keys)
+            tr.keys.push_back({ t, HE::UIPropValue::ofBool(b), HE::UIEase::Linear });
+        return tr;
+    }
+}
+
+TEST_CASE("Clips: a Bool track steps — the earlier key holds until the next")
+{
+    HE::UIAnimClip c;
+    c.name = "Blink"; c.duration = 1.0f;
+    c.tracks.push_back(boolTrack(1, "Visible", { { 0.2f, true }, { 0.5f, false }, { 0.8f, true } }));
+    std::vector<HE::UIAnimSample> s;
+    auto at = [&](float t)
+    {
+        s.clear(); HE::uiAnimEvaluate(c, t, s);
+        REQUIRE(s.size() == 1);
+        REQUIRE(s[0].value.type == HE::UIPropType::Bool);
+        return s[0].value.b;
+    };
+    CHECK(at(0.0f));            // before the first key: the first key's value
+    CHECK(at(0.2f));            // exactly on a key: that key
+    CHECK(at(0.3f));
+    // The bug the concept found: the old default returned the NEXT key, which
+    // switched this off the moment 0.2 was passed.
+    CHECK(at(0.4999f));
+    CHECK_FALSE(at(0.5f));      // on the "off" key: off
+    CHECK_FALSE(at(0.79f));
+    CHECK(at(0.8f));
+    CHECK(at(5.0f));            // after the last: the last
+
+    // The ease on a key is meaningless for a step and must not change anything:
+    // OutBack would push k past 1 if it were used to pick a side.
+    c.tracks[0].keys[1].ease = HE::UIEase::OutBack;
+    CHECK(at(0.4999f));
+    CHECK_FALSE(at(0.5f));
+
+    // Two keys at one time: the later in the list, as for every other type.
+    c.tracks[0].keys.push_back({ 0.8f, HE::UIPropValue::ofBool(false), HE::UIEase::Linear });
+    CHECK_FALSE(at(0.8f));
+    CHECK_FALSE(at(0.9f));
+}
+
+TEST_CASE("Clips: whatever cannot be interpolated holds, Int and mixed types too")
+{
+    HE::UIAnimClip c;
+    c.name = "Odd"; c.duration = 1.0f;
+    HE::UIAnimTrack tr;
+    tr.element = 1; tr.prop = "Whatever";
+    tr.keys.push_back({ 0.0f, HE::UIPropValue::ofInt(3), HE::UIEase::Linear });
+    tr.keys.push_back({ 1.0f, HE::UIPropValue::ofInt(9), HE::UIEase::Linear });
+    c.tracks.push_back(tr);
+    std::vector<HE::UIAnimSample> s;
+    HE::uiAnimEvaluate(c, 0.9f, s);
+    REQUIRE(s.size() == 1);
+    CHECK(s[0].value.i == 3);          // held, not jumped ahead to 9
+    s.clear(); HE::uiAnimEvaluate(c, 1.0f, s);
+    CHECK(s[0].value.i == 9);
+
+    // A hand-edited track with two types on it: nothing to blend, so it holds
+    // the earlier key like any other value that cannot be blended.
+    c.tracks[0].keys[1].value = HE::UIPropValue::ofFloat(1.0f);
+    s.clear(); HE::uiAnimEvaluate(c, 0.5f, s);
+    CHECK(s[0].value.type == HE::UIPropType::Int);
+    CHECK(s[0].value.i == 3);
+
+    CHECK(HE::uiAnimTypeInterpolates(HE::UIPropType::Float));
+    CHECK(HE::uiAnimTypeInterpolates(HE::UIPropType::Vec2));
+    CHECK(HE::uiAnimTypeInterpolates(HE::UIPropType::Color));
+    CHECK_FALSE(HE::uiAnimTypeInterpolates(HE::UIPropType::Bool));
+    CHECK_FALSE(HE::uiAnimTypeInterpolates(HE::UIPropType::Int));
+    CHECK_FALSE(HE::uiAnimTypeInterpolates(HE::UIPropType::String));
+}
+
+TEST_CASE("Clips: a Bool track played backwards and ping-pong reads the same keys")
+{
+    HE::UIAnimClip c;
+    c.name = "Gate"; c.duration = 1.0f;
+    // Off, on at 0.4, and a closing key at the end so the clip plays to 1 s.
+    c.tracks.push_back(boolTrack(1, "Enabled", { { 0.0f, false }, { 0.4f, true }, { 1.0f, true } }));
+    const float end = HE::uiAnimPlayEnd(c);
+    REQUIRE(end == doctest::Approx(1.0f));
+    std::vector<HE::UIAnimSample> s;
+    auto at = [&](HE::UIAnimDirection dir, float elapsed)
+    {
+        s.clear();
+        HE::uiAnimEvaluate(c, HE::uiAnimDirectedTime(dir, elapsed, end), s);
+        REQUIRE(s.size() == 1);
+        return s[0].value.b;
+    };
+    CHECK_FALSE(at(HE::UIAnimDirection::Forward, 0.3f));
+    CHECK(at(HE::UIAnimDirection::Forward, 0.5f));
+    // Backward starts at the far end (on) and reaches "off" 0.4 s before zero.
+    CHECK(at(HE::UIAnimDirection::Backward, 0.0f));
+    CHECK(at(HE::UIAnimDirection::Backward, 0.5f));    // clip time 0.5
+    CHECK_FALSE(at(HE::UIAnimDirection::Backward, 0.7f)); // clip time 0.3
+    // Ping-pong: out and back, off at both ends.
+    CHECK_FALSE(at(HE::UIAnimDirection::PingPong, 0.1f));
+    CHECK(at(HE::UIAnimDirection::PingPong, 1.0f));
+    CHECK_FALSE(at(HE::UIAnimDirection::PingPong, 1.7f)); // clip time 0.3
+}
+
+TEST_CASE("Clips: a Bool key survives a save as a Bool")
+{
+    HE::UIWidgetTree t;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    HE::UIAnimClip c;
+    c.name = "Unlock"; c.duration = 1.0f;
+    c.tracks.push_back(boolTrack(btn, "Enabled", { { 0.0f, false }, { 0.75f, true } }));
+    c.tracks.push_back(boolTrack(btn, "Visible", { { 0.25f, true } }));
+    t.animations.push_back(c);
+
+    HE::UIWidgetTree back;
+    REQUIRE(HE::uiWidgetTreeFromJson(HE::uiWidgetTreeToJson(t), back));
+    REQUIRE(back.animations.size() == 1);
+    const HE::UIAnimClip& r = back.animations[0];
+    REQUIRE(r.tracks.size() == 2);
+    CHECK(r.tracks[0].prop == "Enabled");
+    REQUIRE(r.tracks[0].keys.size() == 2);
+    CHECK(r.tracks[0].keys[0].value.type == HE::UIPropType::Bool);
+    CHECK_FALSE(r.tracks[0].keys[0].value.b);
+    CHECK(r.tracks[0].keys[1].value.type == HE::UIPropType::Bool);
+    CHECK(r.tracks[0].keys[1].value.b);
+    CHECK(r.tracks[0].keys[1].time == doctest::Approx(0.75f));
+    CHECK(r.tracks[1].prop == "Visible");
+    REQUIRE(r.tracks[1].keys.size() == 1);
+    CHECK(r.tracks[1].keys[0].value.b);
+}
+
+// What the timeline's Add Track list offers. Visible on everything; Enabled
+// where it can switch something off (the element takes input, or holds
+// children it reaches), greyed out elsewhere; no other Bool at all.
+TEST_CASE("Clips: which properties a track may be made of")
+{
+    HE::UIWidgetTree t;
+    auto offer = [&](int id, const char* prop)
+    {
+        const HE::UIElement* e = t.find(id);
+        REQUIRE(e);
+        for (const HE::UIPropDesc& pd : e->allProperties())
+            if (pd.name == prop) return HE::uiAnimTrackOffer(*e, pd);
+        FAIL("no property " << prop);
+        return HE::UIAnimTrackOffer::No;
+    };
+    using O = HE::UIAnimTrackOffer;
+    const int panel = t.add(HE::UIWidgetType::Panel);
+    const int btn   = t.add(HE::UIWidgetType::Button);
+    const int img   = t.add(HE::UIWidgetType::Image);
+    const int box   = t.add(HE::UIWidgetType::VerticalBox);
+    const int chk   = t.add(HE::UIWidgetType::CheckBox);
+    const int label = t.add(HE::UIWidgetType::Text);
+    const int sel   = t.add(HE::UIWidgetType::Text);
+    dynamic_cast<HE::UIText*>(t.find(sel))->selectable = true;
+
+    // What was offered before stays offered.
+    CHECK(offer(img, "Render Opacity") == O::Offer);
+    CHECK(offer(img, "Tint") == O::Offer);
+    CHECK(offer(panel, "Color") == O::Offer);
+
+    for (int id : { panel, btn, img, box, chk, label, sel })
+        CHECK(offer(id, "Visible") == O::Offer);
+
+    CHECK(offer(btn,   "Enabled") == O::Offer);   // takes input
+    CHECK(offer(chk,   "Enabled") == O::Offer);
+    CHECK(offer(panel, "Enabled") == O::Offer);   // reaches its children
+    CHECK(offer(box,   "Enabled") == O::Offer);
+    CHECK(offer(img,   "Enabled") == O::NoEffect);
+    // A Text is per instance: selectable text takes the pointer, a plain label
+    // does not — and Enabled on it means exactly that much.
+    CHECK(offer(label, "Enabled") == O::NoEffect);
+    CHECK(offer(sel,   "Enabled") == O::Offer);
+
+    // Every other Bool stays out of the list, and so does anything else that
+    // cannot be keyed usefully.
+    CHECK(offer(btn, "Hit Testable") == O::No);
+    CHECK(offer(chk, "Checked") == O::No);
+    CHECK(offer(panel, "Clip Children") == O::No);
+    CHECK(offer(label, "Text") == O::No);
+}
+
+TEST_CASE("Clips: Visible and Enabled tracks switch the running widget")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *t.find(btn);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 50.0f;
+    }
+    HE::UIAnimClip c;
+    c.name = "Intro"; c.duration = 1.0f;
+    // Hidden at first, shown at 0.25; locked until 0.75, free until 0.9, then
+    // locked again — so the clip ENDS on a value the authored one is not, and
+    // restore has something to put back.
+    c.tracks.push_back(boolTrack(btn, "Visible", { { 0.0f, false }, { 0.25f, true }, { 1.0f, true } }));
+    c.tracks.push_back(boolTrack(btn, "Enabled", { { 0.0f, false }, { 0.75f, true }, { 0.9f, false } }));
+    t.animations.push_back(c);
+    registerWidget(cm, t);
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(id != 0);
+    auto live = [&]() -> const HE::UIElement& { return *wm.tree(id)->find(btn); };
+    // Does a press on the button land on the UI at all?
+    auto takesClick = [&]
+    {
+        const bool hit = wm.processPointer(400.0f, 400.0f, 100.0f, 25.0f, true, true);
+        wm.processPointer(400.0f, 400.0f, 100.0f, 25.0f, false, true);
+        return hit;
+    };
+    REQUIRE(takesClick());                  // the control: authored, it is live
+
+    REQUIRE(wm.playAnimation(id, "Intro", nullptr, HE::UIAnimDirection::Forward,
+                             /*restore=*/true));
+    wm.tick(0.1f);
+    CHECK_FALSE(live().visible);
+    CHECK_FALSE(live().enabled);
+    wm.tick(0.2f);                          // 0.3: shown, still locked
+    CHECK(live().visible);
+    CHECK_FALSE(live().enabled);
+    CHECK_FALSE(takesClick());              // shown but inert: the press falls through
+    wm.tick(0.5f);                          // 0.8: free
+    CHECK(live().visible);
+    CHECK(live().enabled);
+    CHECK(takesClick());
+
+    wm.tick(0.15f);                         // 0.95: locked again by the last key
+    CHECK_FALSE(live().enabled);
+
+    // restore puts the authored value back once it finishes: the clip ended
+    // on "locked", the button was authored enabled.
+    wm.tick(1.0f);
+    CHECK_FALSE(wm.isPlayingAnimation(id, "Intro"));
+    CHECK(live().visible);
+    CHECK(live().enabled);
+    CHECK(takesClick());
+
+    // Without restore the last key stands: "lock it after the intro" stays locked.
+    REQUIRE(wm.playAnimation(id, "Intro"));
+    wm.tick(2.0f);
+    CHECK_FALSE(wm.isPlayingAnimation(id, "Intro"));
+    CHECK_FALSE(live().enabled);
+}
+
+// A field that had the focus when a clip (or a script) switched it off or hid
+// it takes no more keystrokes until it is back.
+TEST_CASE("Clips: a focused field switched off by a track stops taking keys")
+{
+    TextFieldFixture f("ab");
+    f.wm.inputText("c");
+    REQUIRE(f.text() == "abc");
+
+    f.live()->enabled = false;
+    f.wm.inputText("d");
+    CHECK(f.text() == "abc");
+    CHECK_FALSE(f.wm.hasFocusedTextField());   // the keyboard goes back to the game
+
+    f.live()->enabled = true;
+    f.live()->visible = false;
+    f.wm.inputText("e");
+    CHECK(f.text() == "abc");
+
+    // Back on: typing carries on where it was, without a second click.
+    f.live()->visible = true;
+    CHECK(f.wm.hasFocusedTextField());
+    f.wm.inputText("f");
+    CHECK(f.text() == "abcf");
+}
+
 TEST_CASE("Clips: the runtime ends one at its last key, and loops there too")
 {
     TempWidgetDir dir;
@@ -9107,14 +9434,15 @@ TEST_CASE("UIImage 9-slice: nine pieces, corners at their source size")
     REQUIRE(out.size() == 9);
 
     // Top-left corner: 16x16 of destination, and the top-left quarter of the
-    // source in UVs.
+    // picture in UVs — which, rows being stored bottom-up, is v 1 → 0.75.
     const UIRenderObject& tl = out[0];
     CHECK(tl.position.x == doctest::Approx(0.0f));
     CHECK(tl.size.x == doctest::Approx(16.0f));
     CHECK(tl.size.y == doctest::Approx(16.0f));
     CHECK(tl.uvMin.x == doctest::Approx(0.0f));
     CHECK(tl.uvMax.x == doctest::Approx(0.25f));
-    CHECK(tl.uvMax.y == doctest::Approx(0.25f));
+    CHECK(tl.uvMin.y == doctest::Approx(1.0f));
+    CHECK(tl.uvMax.y == doctest::Approx(0.75f));
 
     // The top edge between the corners stretches on X only.
     const UIRenderObject& top = out[1];
@@ -13400,6 +13728,39 @@ TEST_CASE("Timeline view: the right edge never runs past the clip")
     v.duration = 1.0f;
     v.clampScroll();
     CHECK(v.scroll == doctest::Approx(0.5f));
+}
+
+TEST_CASE("Timeline snap: a pointer near a moment people aim at lands on it (Thema 107)")
+{
+    // The fade from Thema 107: a one-second clip, a key at 0, a lane 795 px
+    // wide. Dropping the second key "at the end" leaves the hand a few pixels
+    // short of it — at 1 s over 795 px, 6 px is 7.5 ms.
+    HE::Ed::UITimelineView v{ 0.0f, 795.0f, 1.0f };
+    const float tol = 6.0f / v.pixelsPerSecond();
+    const std::vector<float> targets{ 0.0f, 1.0f };
+
+    CHECK(HE::Ed::uiTimelineSnap(v.tOf(791.0f), targets, tol) == 1.0f);   // 4 px short
+    CHECK(HE::Ed::uiTimelineSnap(v.tOf(3.0f),   targets, tol) == 0.0f);
+    // Nowhere near anything: the pointer's own moment, untouched. This is the
+    // 0.0503 s the user's key ended up at — 40 px in, a real choice, not a slip.
+    const float mid = v.tOf(40.0f);
+    CHECK(HE::Ed::uiTimelineSnap(mid, targets, tol) == doctest::Approx(40.0f / 795.0f));
+
+    // The nearer of two wins, whichever order they are listed in.
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, { 0.46f, 0.52f }, 0.05f) == 0.52f);
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, { 0.52f, 0.46f }, 0.05f) == 0.52f);
+    // Exactly one tolerance away still counts; nothing listed changes nothing.
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, { 0.75f }, 0.25f) == 0.75f);
+    CHECK(HE::Ed::uiTimelineSnap(0.50f, {}, 0.25f) == 0.50f);
+
+    // The pull is the same few PIXELS at every zoom: zoomed 20x, the same
+    // 6 px are a twentieth of the time, so a key 10 ms from the end — plainly
+    // separate on screen — is no longer dragged onto it.
+    v.zoom = 20.0f;
+    v.scroll = v.maxScroll();
+    const float tolZoomed = 6.0f / v.pixelsPerSecond();
+    CHECK(HE::Ed::uiTimelineSnap(0.99f, targets, tolZoomed) == 0.99f);
+    CHECK(HE::Ed::uiTimelineSnap(0.9997f, targets, tolZoomed) == 1.0f);
 }
 
 TEST_CASE("Timeline view: playback brings the playhead back into view")

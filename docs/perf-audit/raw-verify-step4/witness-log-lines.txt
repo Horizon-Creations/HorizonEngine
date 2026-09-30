@@ -1,0 +1,31 @@
+# MetalRenderer initializing -> initialized (Zeitstempel aus dem Editor-Log je Lauf)
+L-A1: [04:02:19.197] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-A1: [04:02:21.199] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-A2: [04:03:39.749] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-A2: [04:03:41.815] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-A3: [04:07:32.984] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-A3: [04:07:34.042] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-A3b: [04:09:31.659] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-A3b: [04:09:33.853] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-A4: [04:11:39.172] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-A4: [04:11:41.456] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-A5: [04:12:55.834] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-A5: [04:12:57.045] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-A6: [04:14:50.243] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-A6: [04:14:51.680] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-A7: [04:16:41.847] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-A7: [04:16:43.908] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-AN1: [04:14:08.696] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-AN1: [04:14:09.779] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-AN2: [04:15:43.678] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-AN2: [04:15:45.871] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-AN3: [04:17:37.275] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-AN3: [04:17:39.257] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-B0: [04:01:32.625] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-B0: [04:01:51.105] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-B1: [04:02:55.674] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-B1: [04:03:11.329] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-B2: [04:06:18.115] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-B2: [04:06:37.184] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5
+L-B3: [04:08:15.712] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initializing
+L-B3: [04:08:33.991] [ INFO] [RHI        ] [Main    ] [f      0] MetalRenderer: initialized on Apple M5

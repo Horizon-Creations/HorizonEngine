@@ -22,6 +22,7 @@
 #include "EditorTheme.h"                 // the stats overlay's accent line
 #include "ViewportActions.h"             // hide / isolate / show all / group — headless, tested
 #include "CameraBookmarks.h"             // the digit keys
+#include "CinematicPreview.h"            // cameraViewOf / overrideFor — Look Through Camera
 #include "EditorShortcuts.h"             // the viewport's chords, rebindable in Preferences
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -89,6 +90,26 @@ void appendGroundGrid(const EditorCamera& cam, bool playing, DebugDrawBuffer& ou
 	if (playing || !s_showFlags.groundGrid) return;
 
 	const glm::vec3 eye  = cam.position();
+
+	// Built only when the camera has moved. Everything below is a function of
+	// the eye position alone (the colours are constants), and a viewport that
+	// is being looked at rather than flown through asks for the same ~2 000
+	// lines every frame — a copy of the kept ones is all it needs. One cache is
+	// enough: this has one caller, the Scene viewport's debug-line block in
+	// EditorApplication::OnRender, so there is no second camera to thrash it.
+	static DebugDrawBuffer s_grid;
+	static glm::vec3       s_gridEye(0.0f);
+	static bool            s_gridBuilt = false;
+	if (s_gridBuilt && eye == s_gridEye)
+	{
+		out.append(s_grid.lines());
+		return;
+	}
+	s_grid.clear();
+	s_gridEye   = eye;
+	s_gridBuilt = true;
+	DebugDrawBuffer& grid = s_grid;
+
 	const float     camX = eye.x;
 	const float     camZ = eye.z;
 
@@ -163,7 +184,7 @@ void appendGroundGrid(const EditorCamera& cam, bool playing, DebugDrawBuffer& ou
 			if (fade <= 0.02f) continue;
 			const glm::vec3 a = alongZ ? glm::vec3(offset, 0.0f, t0) : glm::vec3(t0, 0.0f, offset);
 			const glm::vec3 b = alongZ ? glm::vec3(offset, 0.0f, t1) : glm::vec3(t1, 0.0f, offset);
-			out.line(a, b, color * fade);
+			grid.line(a, b, color * fade);
 		}
 	};
 
@@ -187,6 +208,7 @@ void appendGroundGrid(const EditorCamera& cam, bool playing, DebugDrawBuffer& ou
 	// The line at x = 0 runs along Z and IS the Z axis, and vice versa.
 	emitFamily(/*alongZ=*/true,  camX, colAxisZ);
 	emitFamily(/*alongZ=*/false, camZ, colAxisX);
+	out.append(grid.lines());
 }
 
 #ifdef HE_IMGUI_ENABLED
@@ -932,6 +954,20 @@ void render(AppContext& ctx, float dt)
 				// position, landing it exactly where the look-drag began). Shared with the
 				// tab-switch safety release (releaseViewportLookCapture, file scope).
 				auto endLookCapture = [&]() { releaseViewportLookCapture(sdlWin); };
+				// ── Look Through Camera ─────────────────────────────────────
+				// The view locked to a scene camera ENTITY (View ▸ Look Through
+				// Selected Camera), not to the selection: the point is to pick
+				// and move actors while looking through the shot. Re-read every
+				// frame, so a camera moved by the gizmo moves the picture with
+				// it; a camera deleted or stripped of its component ends it.
+				// Found by its uuid every frame: an undo remaps entity handles.
+				HE::Ed::CinematicPreview::CameraView look;
+				if (s_tb.lookThrough != HE::UUID{})
+				{
+					if (ctx.world && !ctx.isPlaying && !ctx.appLivePreview)
+						look = HE::Ed::CinematicPreview::cameraViewOf(*ctx.world, ctx.world->findByEntityId(s_tb.lookThrough));
+					if (!look.valid) s_tb.lookThrough = HE::UUID{};
+				}
 				// An application's preview is always live, so its pointer is fed
 				// every frame rather than only during play (ctx.appLivePreview).
 				if (ctx.editorCamera && (ctx.isPlaying || ctx.appLivePreview))
@@ -978,6 +1014,30 @@ void render(AppContext& ctx, float dt)
 					EditorCamera::Input cin;
 					navigating = EditorViewportNav::gather(ctx, navOwner(), imageHovered,
 					                                      dt, avail.y, cin);
+
+					// Flying away from a shot starts AT the shot: the first real
+					// movement hands the camera's pose to the editor camera and
+					// ends the lock, so the gesture continues from what was on
+					// screen instead of jumping back to where the editor camera
+					// was left. A press without motion (the right-click menu) is
+					// not a movement. The editor camera keeps its own lens.
+					const bool moved =
+						((cin.look || cin.orbit || cin.pan) &&
+						 (cin.mouseDelta.x != 0.0f || cin.mouseDelta.y != 0.0f)) ||
+						cin.wheel != 0.0f || cin.moveAxis != glm::vec3(0.0f);
+					if (look.valid && moved)
+					{
+						cam.setOrientation(look.position, look.rotation * glm::vec3(0.0f, 0.0f, -1.0f));
+						s_tb.lookThrough = HE::UUID{};
+						look = {};
+					}
+					// Anything else that moves the editor camera this frame — F,
+					// a keypad view, a bookmark — is a view the user picked, so it
+					// ends the lock too (compared after update() below).
+					const glm::vec3 camPosBefore   = cam.position();
+					const float     camYawBefore   = cam.yaw();
+					const float     camPitchBefore = cam.pitch();
+					const bool      camOrthoBefore = cam.orthographic();
 
 					// ── Right-click → context menu ──────────────────────────
 					// The right button is the fly-look, and gather() takes the
@@ -1086,12 +1146,22 @@ void render(AppContext& ctx, float dt)
 						bookmarkKeys(cam);
 
 					cam.update(cin);
+					if (look.valid &&
+					    (cam.position() != camPosBefore || cam.yaw() != camYawBefore ||
+					     cam.pitch() != camPitchBefore || cam.orthographic() != camOrthoBefore))
+					{
+						s_tb.lookThrough = HE::UUID{};
+						look = {};
+					}
 					// Push to the backend so this frame's render uses it. The
 					// icon switch rides on the override (see EditorCameraOverride)
 					// — set here AND on the pick extract below, or the picker and
 					// the picture disagree about whether the lamp symbol exists.
-					EditorCameraOverride ov = cam.makeOverride();
-					ov.editorIcons = s_showFlags.editorIcons;
+					EditorCameraOverride ov = look.valid ? HE::Ed::CinematicPreview::overrideFor(look)
+					                                     : cam.makeOverride();
+					// Through a camera the picture is the shot: no lamp and camera
+					// symbols (the looked-through camera's own would sit in the eye).
+					ov.editorIcons = s_showFlags.editorIcons && !look.valid;
 					ctx.renderer->SetEditorCamera(ov);
 				}
 
@@ -1107,10 +1177,14 @@ void render(AppContext& ctx, float dt)
 					else if (ImGui::IsKeyPressed(ImGuiKey_4, false)) s_tb.viewMode = HE::ViewMode::Lit;
 				}
 
+				// The same camera the picture was drawn from, or the gizmo and
+				// the picking ray land beside what is on screen.
 				EditorCameraOverride camOverride =
-					(ctx.editorCamera && !ctx.isPlaying) ? ctx.editorCamera->makeOverride()
-					                                     : EditorCameraOverride{};
-				camOverride.editorIcons = s_showFlags.editorIcons;
+					(ctx.editorCamera && !ctx.isPlaying)
+						? (look.valid ? HE::Ed::CinematicPreview::overrideFor(look)
+						              : ctx.editorCamera->makeOverride())
+						: EditorCameraOverride{};
+				camOverride.editorIcons = s_showFlags.editorIcons && !look.valid;
 				if (ctx.world)
 					s_extractor.extract(*ctx.world, s_sceneSnapshot, avail.x / avail.y,
 					                    camOverride.active ? &camOverride : nullptr);

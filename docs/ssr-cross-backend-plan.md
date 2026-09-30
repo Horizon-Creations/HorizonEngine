@@ -754,6 +754,23 @@ GI-Port:
 5. **Nutzer-Verify auf echter Hardware** wird pro Backend als **offen** gemeldet,
    nicht als erledigt.
 
+   > **Gelaufen am 30.09.2026 auf NN-WS03 (RTX 4070), Thema 109:**
+   > `docs/ssr-hardware-verification-2026-09-30.md`.
+   >
+   > - **Vulkan** spiegelt korrekt und deckt sich mit GL auf wenige Pixel.
+   > - **D3D11 und D3D12 spiegeln gar nicht.** `ssrTracePS` scheitert zur
+   >   Laufzeit in `D3DCompile` mit X3511: Der Ray-March sampelt mit implizitem
+   >   LOD in einer Schleife mit Uniform-Iterationszahl. SSR bleibt dort still aus.
+   > - Mit `textureLod(…, 0.0)` im Trace (lokal, nicht committet) spiegeln beide
+   >   D3D-Backends mit derselben Geometrie wie Vulkan. Der Boden ist praktisch
+   >   pixelgleich, an der Wand bleibt eine Abweichung von höchstens 15/255.
+   > - Der Fix ist ein eigener Schritt.
+   >
+   > **Behoben in Thema 109 Schritt 2:** `kSSRTraceFS` sampelt durchgehend mit
+   > `textureLod(…, 0.0)`. Auf der RTX 4070 gemessen: D3D11/D3D12 spiegeln mit
+   > derselben Diff-Box wie Vulkan, GL und Vulkan sind unverändert. Ein
+   > FXC-Test in `tests/test_material_graph.cpp` fängt den Rückfall.
+
 `ctest` bleibt in jedem Schritt grün. Schritt 1 ändert keinen Code, es gibt hier
 also nichts zu brechen.
 
@@ -773,6 +790,7 @@ also nichts zu brechen.
 | — | §2.3 Kopf 1: gepinnte Preamble für D3D11-Graph-Materialien | eigener Vorgang, **jetzt der Grund, warum SSR dort nur Built-ins erreicht** |
 | — | §2.2: HDR im D3D11-Swapchain-Pfad (C6) | vorlagepflichtig, **gemeldet in Schritt 6** |
 | — | GL-Deferred-Composite (A6) | optional |
+| — | Hardware-Verify D3D11/D3D12/Vulkan (Thema 109) — **Vulkan sauber; D3D11/D3D12: `ssrTracePS` X3511, behoben in Schritt 2 (textureLod), auf Hardware nachgemessen** | `docs/ssr-hardware-verification-2026-09-30.md` |
 
 Schritte 2 und 3 gehören zusammen und in eine Hand: Schritt 3 ist die **einzige**
 Stelle, an der sich eine Shader-Änderung auf dieser Maschine gegen echte Hardware

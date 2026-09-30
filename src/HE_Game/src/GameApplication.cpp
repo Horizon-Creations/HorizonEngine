@@ -21,6 +21,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/RootMotion.h>
+#include <HorizonScene/SequenceSystem.h>
 #include <HorizonScene/AudioSystem.h>
 #include <HorizonScene/CollisionSystem.h>
 #include <HorizonScene/AnimationNotifySystem.h>
@@ -585,6 +586,16 @@ void GameApplication::OnInit()
 {
 	HE_LOG_INFO(Core, "%s", "GameApplication::OnInit");
 
+	// Rumble reaches the pads through Input, which the script API cannot see.
+	// The gate opens right away — the packaged game is always "playing", and
+	// a start-up script may want to rumble before the first frame. OnRender
+	// feeds the pause edge; OnShutdown takes both down again.
+	HE::api::input::setRumbleSink({
+		[this](float low, float high, uint32_t ms) { return input().rumble(low, high, ms); },
+		[this](float l, float r, uint32_t ms)      { return input().rumbleTriggers(l, r, ms); },
+		[this]()                                   { input().stopRumble(); } });
+	HE::api::input::setRumbleGate(true, false);
+
 	// Grab the mouse on startup (FPS-style look). Done first so it holds even on
 	// the early-return paths below (no hcfg / no pak); Esc toggles it back so the
 	// cursor is always reachable. The window is already open by the time OnInit runs.
@@ -878,6 +889,11 @@ void GameApplication::OnInit()
 			SDL_free(pref);
 		}
 	}
+	// The player's settings live in the prefs file under that root, so they can
+	// be read from here on — before fireInit, so a start-up script asking
+	// settings.volume sees the saved value. APPLIED later (installPlayerSettings),
+	// once the audio device and its buses exist.
+	HE::api::settings::load();
 	// What this build may reach outside itself, straight off the hcfg. Set even
 	// when everything is false: perm::set replaces the whole struct, and a
 	// process that ran an application with permissions and then one without has
@@ -1337,6 +1353,10 @@ void GameApplication::OnInit()
 	else
 		HE_LOG_WARN(Core, "%s",
 			"GameApplication: audio device init failed — running silent");
+
+	// The player's settings over all of that: after the buses (a saved volume
+	// lands on the project's mixer, not under it) and after the window exists.
+	installPlayerSettings();
 
 	// Nothing to stream without a scene: an app's assets are reached through its
 	// widgets, which load on demand.
@@ -2078,6 +2098,13 @@ void GameApplication::updateUIInput()
 	// answering a gesture that was never aimed at it.
 	const bool pointerValid = !m_mouseCaptured && w != nullptr && uiTakesInput &&
 	                          !m_frameResize.active();
+	// A rebind that is listening owns every button — mouse, keys and pad alike
+	// (input.rebindBegin). The UI keeps its hover but hears no press, no Back,
+	// no Tab, no navigation: otherwise the South press or click being captured
+	// would also activate the focused "Rebind" button and start the next one.
+	const bool rebinding = HE::api::input::isRebinding();
+	const bool uiLmb = (buttons & SDL_BUTTON_LMASK) != 0 && !rebinding;
+	const bool uiRmb = (buttons & SDL_BUTTON_RMASK) != 0 && !rebinding;
 
 	// Widget pointer input first — widgets draw on top of entity UI. The answer
 	// ("the pointer is on something clickable") is kept, not dropped: it is what
@@ -2087,8 +2114,7 @@ void GameApplication::updateUIInput()
 		m_world->widgets().processPointer(uiWindow,
 		                                  static_cast<float>(pw), static_cast<float>(ph),
 		                                  mx * sx, my * sy,
-		                                  (buttons & SDL_BUTTON_LMASK) != 0, pointerValid,
-		                                  (buttons & SDL_BUTTON_RMASK) != 0);
+		                                  uiLmb, pointerValid, uiRmb);
 
 	// Tell the OS where the focused field is, so an input method opens its
 	// candidate list beside it instead of in the corner of the screen. Pushed
@@ -2116,7 +2142,7 @@ void GameApplication::updateUIInput()
 	// Consumed here rather than in OnEvent so it reuses the pointer arithmetic
 	// above instead of a second, drifting copy of it. The press that came with
 	// the same click already focused the field and put the caret there.
-	if (pointerValid && m_uiClickCount >= 2)
+	if (pointerValid && !rebinding && m_uiClickCount >= 2)
 	{
 		if (m_uiClickCount == 2)
 		{
@@ -2178,8 +2204,11 @@ void GameApplication::updateUIInput()
 	// input field is what Escape means everywhere.
 	if (uiTakesInput)
 	{
+		// While a rebind listens the edges are still TRACKED (the *Prev stay
+		// current) but not acted on — a button captured and then released must
+		// not look like a fresh press to the menu the moment the capture ends.
 		const bool back = input().isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST);
-		if (back && !m_uiBackPrev) m_world->widgets().closeTopLayer();
+		if (back && !m_uiBackPrev && !rebinding) m_world->widgets().closeTopLayer();
 		m_uiBackPrev = back;
 
 		// Tab is the other way through a form, and it belongs OUTSIDE the gate
@@ -2187,7 +2216,7 @@ void GameApplication::updateUIInput()
 		// field has the keyboard, because leaving that field is exactly what it
 		// is for. Shift+Tab goes back.
 		const bool tab = input().IsKeyDown(SDL_SCANCODE_TAB);
-		if (tab && !m_uiTabPrev)
+		if (tab && !m_uiTabPrev && !rebinding)
 		{
 			const bool back2 = input().IsKeyDown(SDL_SCANCODE_LSHIFT) ||
 			                   input().IsKeyDown(SDL_SCANCODE_RSHIFT);
@@ -2221,7 +2250,7 @@ void GameApplication::updateUIInput()
 		    in.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH))
 			now |= 1u << 4;
 
-		const uint8_t edges = static_cast<uint8_t>(now & ~m_uiNavPrev);
+		const uint8_t edges = rebinding ? uint8_t(0) : static_cast<uint8_t>(now & ~m_uiNavPrev);
 		m_uiNavPrev = now;
 		for (int i = 0; i < 4; ++i)
 			if (edges & (1u << i))
@@ -2237,7 +2266,7 @@ void GameApplication::updateUIInput()
 	UIInputSystem::update(*m_world, m_uiInput,
 	                      static_cast<float>(pw), static_cast<float>(ph),
 	                      mx * sx, my * sy,
-	                      (buttons & SDL_BUTTON_LMASK) != 0, pointerValid,
+	                      uiLmb, pointerValid,
 	                      events);
 
 	if (!m_scriptContext) return;
@@ -2291,6 +2320,11 @@ void GameApplication::updateCameraController(float dt)
 {
 	if (!m_mouseCaptured || !m_world || dt <= 0.0f) return;
 
+	// A cutscene holds the camera: it cuts, blends and poses it in the animation
+	// phase, and neither the rig nor free flight may touch it until it hands the
+	// view back (SequenceSystem.h, "Camera and input").
+	if (SequenceSystem::ownsCamera(m_world->registry())) return;
+
 	// The cursor is parked back at this window's centre every frame — but only
 	// while WE have focus, so an alt-tabbed game never yanks the cursor away from
 	// another app.
@@ -2303,8 +2337,12 @@ void GameApplication::updateCameraController(float dt)
 	// as it always did.
 	HE::CameraLookInput look;
 	look.mouse  = input().mouse();
-	look.stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX);
-	look.stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY);
+	// The camera follows player 1's character, so it turns with player 1's
+	// stick: every pad merged in single player, slot 0 once there are several
+	// local players (PlayerHost::devicesOf).
+	const int lookSlot = m_playerHost.devicesOf(0).gamepadSlot;
+	look.stickX = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTX, lookSlot);
+	look.stickY = input().gamepadAxisFiltered(SDL_GAMEPAD_AXIS_RIGHTY, lookSlot);
 	look.dt     = dt;
 	if (HE::CameraRigController::update(*m_world, look,
 	                                    possessedCharacterEntity(),
@@ -2392,6 +2430,18 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 				return true;
 			}
 		}
+	}
+
+	// Escape while a rebind listens cancels THAT and nothing else. Ahead of
+	// every other Escape meaning below (leave a field, close the menu, give the
+	// mouse back): all of those consume the key before Input sees it, so the
+	// capture's own Escape check would never fire, and the player would lose
+	// the settings menu they were rebinding in.
+	if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat &&
+	    event.key.key == SDLK_ESCAPE && HE::api::input::isRebinding())
+	{
+		HE::api::input::rebindCancel();
+		return true;
 	}
 
 	// A double- or triple-click on a text field selects a word or the line.
@@ -2865,6 +2915,10 @@ void GameApplication::OnRender(float deltaTime)
 		                           axes, SDL_GAMEPAD_AXIS_COUNT,
 		                           input().gamepad().buttons, SDL_GAMEPAD_BUTTON_COUNT);
 	}
+	// Pausing stops the pads (the explosion before the pause menu must not keep
+	// shaking); requests made while paused still go through, for menu clicks.
+	// UI-only does NOT close it — a menu is exactly where a click may be felt.
+	HE::api::input::setRumbleGate(true, HE::api::time::isPaused());
 
 	// From here on there are TWO clocks, and which one a tick gets is a design
 	// decision, not a detail:
@@ -2979,9 +3033,16 @@ void GameApplication::OnRender(float deltaTime)
 	m_netSession.update(gameDt);
 
 	MouseFrame playerMouse = input().mouse();
-	if (m_uiWantsPointer || inputMode == HE::api::input::Mode::UIOnly)
+	// …except while a rebind listens: a settings menu is UI-only by nature and
+	// the pointer is on it, yet "click the mouse button you want" has to reach
+	// the capture. Harmless for gameplay — the host silences every action while
+	// it listens, and the UI hears no button meanwhile (updateUIInput).
+	if ((m_uiWantsPointer || inputMode == HE::api::input::Mode::UIOnly) &&
+	    !HE::api::input::isRebinding())
 		playerMouse.buttons = 0;
-	m_playerHost.tick(input(), gameDt, playerMouse);
+	// A cutscene with Lock Player Input silences gameplay input like a pause.
+	m_playerHost.tick(input(), gameDt, playerMouse,
+	                  m_world && SequenceSystem::locksPlayerInput(m_world->registry()));
 	// Entity classes: Tick, plus reaping the ones whose entity is gone — and
 	// handing their bodies back as it notices them, rather than leaving them to
 	// step()'s own sweep a frame later.
@@ -3029,8 +3090,11 @@ void GameApplication::OnRender(float deltaTime)
 		// of extraction, which consumes the bone matrices.
 		// A packaged build has no edit mode, so root motion is always applied here.
 		HE::RootMotionContext rootMotion{ m_physicsWorld.get() };
+		// Cutscenes, likewise always on here; an uninitialised audio engine
+		// (no device) makes them play silent, not stop.
+		HE::SequenceContext sequences{ &m_audioEngine, m_physicsWorld.get() };
 		SceneSystems::tickAnimation(*m_world, contentManager(), gameDt, &m_animatorHost,
-		                            &rootMotion, &m_animNotifies);
+		                            &rootMotion, &m_animNotifies, &sequences);
 
 		// Drained HERE and not at the collision drain up in the physics block:
 		// that one runs in the frame BEFORE the animation phase, so every notify
@@ -3252,6 +3316,61 @@ void GameApplication::OnWindowClosing(HE::WindowHandle handle)
 		m_gameInstance.runtime().fireOnWindowClosed(gi, 0, static_cast<int>(handle.id));
 }
 
+// The player's settings (HE::api::settings) reach this application through
+// these hooks: the API sits in HE_Scene and cannot see Input, the window or
+// this audio engine. Base values are the CONFIGURED ones, captured here once,
+// so "never chosen" and resetToDefaults both land on what the export said.
+void GameApplication::installPlayerSettings()
+{
+	m_playerWindowMode = m_windowMode;
+
+	HE::api::settings::Host host;
+	host.stickDeadzone = input().stickDeadzone;
+	host.vsync         = m_vsyncOn;
+	host.fullscreen    = m_windowMode == HE::WindowMode::Fullscreen;
+	host.applyStickDeadzone = [this](float dz) { input().stickDeadzone = dz; };
+	// Both display hooks compare before they touch the window: install applies
+	// every value once, and re-entering the mode the window is already in is a
+	// visible flicker on some platforms for nothing.
+	host.applyVSync = [this](bool on)
+	{
+		if (on == m_vsyncOn) return;
+		m_vsyncOn = on;
+		setVSync(on);
+	};
+	host.applyFullscreen = [this](bool fullscreen)
+	{
+		// Off = the configured mode, unless THAT was fullscreen: a game exported
+		// borderless must not come back from fullscreen as a bordered window.
+		const HE::WindowMode target = fullscreen ? HE::WindowMode::Fullscreen
+			: (m_windowMode == HE::WindowMode::Fullscreen ? HE::WindowMode::Windowed : m_windowMode);
+		if (target == m_playerWindowMode) return;
+		m_playerWindowMode = target;
+		setWindowMode(target);
+	};
+	host.applyVolume = [this](const std::string& bus, std::optional<float> volume)
+	{
+		if (!m_audioEngine.isInitialized()) return;
+		const bool master = bus == HE::api::settings::kMaster;
+		// nullopt: the project's own value — the mixer's, or unity for a bus the
+		// project never authored (it exists only because the player named it).
+		float v = 1.0f;
+		if (volume)      v = *volume;
+		else if (master) v = m_config.audioBuses.masterVolume;
+		else if (const HE::AudioBusDef* def = m_config.audioBuses.find(bus)) v = def->volume;
+		if (master) { m_audioEngine.setMasterVolume(v); return; }
+		if (!m_audioEngine.hasBus(bus)) m_audioEngine.createBus(bus, v);
+		m_audioEngine.setBusVolume(bus, v);
+	};
+	host.currentVolume = [this](const std::string& bus)
+	{
+		if (!m_audioEngine.isInitialized()) return 1.0f;
+		return bus == HE::api::settings::kMaster ? m_audioEngine.getMasterVolume()
+		                                         : m_audioEngine.getBusVolume(bus);
+	};
+	HE::api::settings::install(std::move(host));
+}
+
 void GameApplication::OnShutdown()
 {
 	// The session FIRST, and said out loud: leave() writes a goodbye and drops
@@ -3261,6 +3380,13 @@ void GameApplication::OnShutdown()
 	// on the way out still reaches the scripts, whose runtime is intact here.
 	m_netSession.leave();
 	dispatchNetEvents();
+
+	// Shut the gate (stops the pads) while the sink still points at a live
+	// Input, then take the sink down — it captures `this`.
+	HE::api::input::setRumbleGate(false, false);
+	HE::api::input::setRumbleSink({});
+	// Its hooks capture `this` as well.
+	HE::api::settings::uninstall();
 
 	// The tray outlives the window unless it is taken down deliberately, and an
 	// icon left in the menu bar of a program that has exited is the worst thing

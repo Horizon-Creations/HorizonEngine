@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct TerrainComponent;
 struct TextureAsset;
@@ -91,6 +92,12 @@ namespace TerrainHeightmap
     // block-compressed texture (BC7/BC3/ASTC) is refused — it would have to be
     // decoded first, and a heightmap cooked lossy is the wrong source anyway.
     Result importTexture(TerrainComponent& tc, const TextureAsset& tex, const Options& opts);
+
+    // Level 0 of a texture asset as grey values 0..1, row-major width×height,
+    // read the way importTexture reads a heightmap (luma for colour). Used for
+    // the tessellation's displacement map. Returns false and leaves `out`
+    // empty for a block-compressed texture or one without pixel data.
+    bool greyFromTexture(const TextureAsset& tex, std::vector<float>& out);
 
     // An image file. PNG (8 and 16-bit), PGM (8 and 16-bit), plus whatever else
     // stb_image reads at 8 bits (JPEG, BMP, TGA, PSD…). `.r16` / `.raw` are

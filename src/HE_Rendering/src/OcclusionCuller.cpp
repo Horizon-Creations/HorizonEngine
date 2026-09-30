@@ -325,7 +325,9 @@ uint32_t OcclusionCuller::refine(const RenderWorld& world, const ContentManager*
 
 	// ── Occludee test ──────────────────────────────────────────────────────
 	// Hidden only when the object's NEAREST corner is farther than the buffer
-	// at EVERY pixel of its (dilated) screen rect. Reads only; parallel.
+	// at EVERY pixel of its (dilated) screen rect. Reads only; parallel. Grain 64:
+	// an 8-corner projection plus a tile/pixel scan per object is about an order
+	// of magnitude above the cheap body kParallelForMinGrain is sized for.
 	std::atomic<uint32_t> culled{ 0 }, tested{ 0 };
 	parallel_for(count, [&](size_t i) {
 		if (!visible[i]) return;
@@ -368,7 +370,7 @@ uint32_t OcclusionCuller::refine(const RenderWorld& world, const ContentManager*
 			}
 		visible[i] = 0u;
 		culled.fetch_add(1, std::memory_order_relaxed);
-	}, "OcclusionCull");
+	}, "OcclusionCull", 64);
 
 	m_stats.tested = tested.load();
 	m_stats.culled = culled.load();

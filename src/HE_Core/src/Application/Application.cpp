@@ -6,9 +6,13 @@
 #include "Diagnostics/EngineProfiler.h"
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 const char* rhiName(HE::RendererBackend api)
@@ -39,6 +43,132 @@ void showErrorBox(const char* title, const char* text)
 	}
 	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, text, nullptr);
 }
+
+// ── HE_PERF_INPUT_LATENCY_HZ: how old is the input when its frame commits ────
+// HE_PERF_INPUT_EVENTS pushes its events right before the poll, so they are
+// never old — it measures what handling costs, not how long an event waits.
+// This one pushes from its own thread at N Hz, the way a real mouse delivers,
+// so an event lands wherever the main thread happens to be — in the drawable
+// wait, in the encode — and waits there like a real one. Per event it records
+// arrival (SDL's push stamp) → dispatch in PollEvents → commit of the frame
+// that consumed it (after Render/SwapBuffers; Render ends with the commit on
+// Metal). Its own registered event type, swallowed in the event callback, so
+// neither ImGui nor Input ever sees it. Off unless set; read once.
+struct InputLatencyProbe
+{
+	int                   hz = 0;
+	Uint32                type = 0;
+	uint64_t              warmup = 300;   // same default as HE_PROFILE_WARMUP
+	std::thread           pusher;
+	std::atomic<bool>     running{ false };
+	std::atomic<uint64_t> pushed{ 0 };
+	// Main thread only.
+	struct Polled { Uint64 stampNs, dispatchNs; };
+	std::vector<Polled>   pending;
+	std::vector<double>   toPoll, pollToCommit, toCommit;   // ms, per event
+	uint64_t              frames = 0, firstFrame = 0;
+	Uint64                windowStartNs = 0;
+	uint64_t              pushedAtStart = 0;
+
+	~InputLatencyProbe() { stop(); }
+
+	void start(bool perFrameInjectorOn)
+	{
+		const char* v = std::getenv("HE_PERF_INPUT_LATENCY_HZ");
+		hz = (v && *v) ? std::max(0, std::atoi(v)) : 0;
+		if (hz <= 0) return;
+		if (perFrameInjectorOn)
+		{
+			HE_LOG_WARN(Core, "%s", "HE_PERF_INPUT_LATENCY_HZ ignored: HE_PERF_INPUT_EVENTS is on too");
+			hz = 0;
+			return;
+		}
+		if (const char* w = std::getenv("HE_PROFILE_WARMUP")) warmup = std::strtoull(w, nullptr, 10);
+		type = SDL_RegisterEvents(1);
+		if (type == 0) { hz = 0; return; }
+		HE_LOG_INFO(Core, "HE_PERF_INPUT_LATENCY_HZ=%d: pushing timestamped events from a "
+		            "thread, measuring after frame %llu", hz, static_cast<unsigned long long>(warmup));
+		running = true;
+		pusher = std::thread([this]
+		{
+			const auto period = std::chrono::nanoseconds(1000000000ll / hz);
+			auto next = std::chrono::steady_clock::now();
+			while (running.load(std::memory_order_relaxed))
+			{
+				SDL_Event e{};
+				e.type      = type;
+				e.user.code = 0xB3;
+				SDL_PushEvent(&e);   // stamps SDL_GetTicksNS() on the way in
+				pushed.fetch_add(1, std::memory_order_relaxed);
+				next += period;
+				std::this_thread::sleep_until(next);
+			}
+		});
+	}
+
+	void stop()
+	{
+		running = false;
+		if (pusher.joinable()) pusher.join();
+	}
+
+	// From the event callback. True = one of ours, swallow it.
+	bool take(const SDL_Event& e)
+	{
+		if (hz <= 0 || e.type != type) return false;
+		pending.push_back({ e.common.timestamp, SDL_GetTicksNS() });
+		return true;
+	}
+
+	// Right after the frame's commit.
+	void committed(uint64_t frameIndex)
+	{
+		if (hz <= 0) return;
+		const Uint64 now = SDL_GetTicksNS();
+		if (frameIndex > warmup)
+		{
+			if (frames == 0)
+			{
+				firstFrame    = frameIndex;
+				windowStartNs = now;
+				pushedAtStart = pushed.load(std::memory_order_relaxed);
+			}
+			++frames;
+			for (const Polled& p : pending)
+			{
+				toPoll.push_back((p.dispatchNs - p.stampNs) * 1e-6);
+				pollToCommit.push_back((now - p.dispatchNs) * 1e-6);
+				toCommit.push_back((now - p.stampNs) * 1e-6);
+			}
+			if (frames % 600 == 0) report("so far");
+		}
+		pending.clear();
+	}
+
+	static double pct(std::vector<double> v, double p)
+	{
+		if (v.empty()) return 0.0;
+		std::sort(v.begin(), v.end());
+		return v[std::min(v.size() - 1, static_cast<size_t>(p / 100.0 * (v.size() - 1) + 0.5))];
+	}
+
+	void report(const char* when)
+	{
+		if (hz <= 0 || frames == 0) return;
+		const double secs = (SDL_GetTicksNS() - windowStartNs) * 1e-9;
+		const double rate = secs > 0.0
+			? (pushed.load(std::memory_order_relaxed) - pushedAtStart) / secs : 0.0;
+		HE_LOG_INFO(Core, "HE_PERF_INPUT_LATENCY (%s): %zu events over %llu frames (from frame %llu, "
+		            "pushed %.0f Hz) | event->commit p50 %.2f p90 %.2f p99 %.2f ms | "
+		            "event->poll p50 %.2f p90 %.2f | poll->commit p50 %.2f p90 %.2f",
+		            when, toCommit.size(), static_cast<unsigned long long>(frames),
+		            static_cast<unsigned long long>(firstFrame), rate,
+		            pct(toCommit, 50), pct(toCommit, 90), pct(toCommit, 99),
+		            pct(toPoll, 50), pct(toPoll, 90),
+		            pct(pollToCommit, 50), pct(pollToCommit, 90));
+	}
+};
+InputLatencyProbe g_inputLatency;
 } // namespace
 
 namespace HE
@@ -159,6 +289,8 @@ namespace HE
 		m_window = std::make_unique<Window>(wp);
 		m_window->SetEventCallback([this](const SDL_Event& e)
 		{
+			// HE_PERF_INPUT_LATENCY_HZ's own events stop here (no-op when off).
+			if (g_inputLatency.take(e)) return;
 			// F9 toggles a profiler benchmark capture, engine-wide (editor + game).
 			if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F9 && !e.key.repeat)
 			{
@@ -271,6 +403,11 @@ namespace HE
 		// heartbeat measures against (see setEventDriven).
 		Uint64 lastDrawTick = SDL_GetTicksNS();
 
+		{
+			const char* perFrame = std::getenv("HE_PERF_INPUT_EVENTS");
+			g_inputLatency.start(perFrame && std::atoi(perFrame) > 0);
+		}
+
 		while (m_running && !m_window->ShouldClose())
 		{
 			// Event-driven idle: sleep inside SDL until something arrives instead
@@ -335,6 +472,81 @@ namespace HE
 				}
 			}
 
+			// ── HE_PROFILE_CAPTURE: a scripted F9 ───────────────────────────
+			// The same benchmark capture F9 starts, but without a person at the
+			// keyboard, so a measurement can be repeated byte-for-byte in its
+			// setup: HE_PROFILE_WARMUP frames (default 300) to let pipelines,
+			// streaming and temporal history settle, then HE_PROFILE_CAPTURE
+			// frames recorded, dumped, and the application leaves
+			// (HE_PROFILE_QUIT=0 keeps it running). HE_PROFILE_DETAILED=1 asks
+			// for the serialized per-pass GPU capture; HE_PROFILE_COUNTERS=0
+			// drops the per-encoder counter sampling of a normal capture, so an
+			// FPS run is not perturbed by it (whole-frame GPU time only);
+			// HE_PROFILE_VSYNC=keep
+			// records at the vsync the app runs with instead of forcing it off
+			// (the paced frame rate a user sees, not the headroom);
+			// HE_PROFILE_NOTE labels the dump.
+			{
+				struct AutoCapture
+				{
+					unsigned long long warmup = 300, frames = 0;
+					bool detailed = false, counters = true, keepVsync = false, quit = true;
+					std::string note;
+				};
+				static const AutoCapture kAuto = []
+				{
+					AutoCapture a;
+					auto env = [](const char* k) -> const char* {
+						const char* v = std::getenv(k);
+						return (v && *v) ? v : nullptr;
+					};
+					if (const char* v = env("HE_PROFILE_CAPTURE"))  a.frames   = std::strtoull(v, nullptr, 10);
+					if (const char* v = env("HE_PROFILE_WARMUP"))   a.warmup   = std::strtoull(v, nullptr, 10);
+					if (const char* v = env("HE_PROFILE_DETAILED")) a.detailed = std::atoi(v) != 0;
+					if (const char* v = env("HE_PROFILE_COUNTERS")) a.counters = std::atoi(v) != 0;
+					if (const char* v = env("HE_PROFILE_VSYNC"))    a.keepVsync = std::string(v) == "keep";
+					if (const char* v = env("HE_PROFILE_QUIT"))     a.quit     = std::atoi(v) != 0;
+					if (const char* v = env("HE_PROFILE_NOTE"))     a.note     = v;
+					if (a.warmup == 0) a.warmup = 1;
+					return a;
+				}();
+				if (kAuto.frames != 0)
+				{
+					const unsigned long long startAt = kAuto.warmup;
+					const unsigned long long stopAt  = kAuto.warmup + kAuto.frames;
+					if (m_frameIndex == startAt)
+					{
+						// The refresh rate belongs in the dump: a vsync-on
+						// capture is pinned to it and says nothing without it.
+						std::string note = kAuto.note.empty() ? std::string("HE_PROFILE_CAPTURE")
+						                                      : kAuto.note;
+						if (SDL_Window* sw = m_window ? m_window->GetNativeWindow() : nullptr)
+							if (const SDL_DisplayMode* dm =
+							        SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(sw)))
+								note += " | display " + std::to_string(dm->w) + "x" +
+								        std::to_string(dm->h) + " @" +
+								        std::to_string(dm->refresh_rate) + " Hz, density " +
+								        std::to_string(dm->pixel_density);
+						EngineProfiler::instance().setDetailedGpuCapture(kAuto.detailed);
+						EngineProfiler::instance().setGpuCounterSampling(kAuto.counters);
+						toggleProfilerCapture(!kAuto.keepVsync, note.c_str());
+						HE_LOG_INFO(Core, "HE_PROFILE_CAPTURE: recording %llu frames (%s, %s) — %s",
+						            kAuto.frames,
+						            kAuto.detailed ? "detailed GPU"
+						                           : (kAuto.counters ? "normal GPU" : "normal GPU, counters off"),
+						            kAuto.keepVsync ? "vsync kept" : "vsync forced off",
+						            note.c_str());
+					}
+					else if (m_frameIndex == stopAt && EngineProfiler::instance().isRecordingOrPending())
+						toggleProfilerCapture();
+					else if (kAuto.quit && m_frameIndex == stopAt + 2)
+					{
+						HE_LOG_INFO(Core, "%s", "HE_PROFILE_CAPTURE: capture dumped — leaving cleanly");
+						m_running = false;
+					}
+				}
+			}
+
 			// ── HE_CAPTURE_FRAME / HE_CAPTURE_PATH: what it actually drew ────
 			// The companion to the frame budget above. "Does it start" is an exit
 			// code; "does it LOOK right" is not, and a shipped application has no
@@ -394,10 +606,88 @@ namespace HE
 			// frame is always recorded whole or not at all.
 			profiler.beginFrame(static_cast<double>(measuredDt) * 1000.0);
 
+			// Wait for a frame slot FIRST, then sample input. The swapchain wait
+			// (Metal: [layer nextDrawable], 8–19 ms p50 in the input audit,
+			// docs/perf-audit/step4-input-audit-2026-09-27.md) used to sit
+			// between PollEvents and the commit, so every frame's input was that
+			// much older before the GPU even started on it. Same wait, same FPS —
+			// it just happens before the input is read now. Not for an unseen
+			// window: a minimised or occluded layer hands out no drawable and
+			// nextDrawable runs into its 1 s timeout — every turn, even the
+			// event-driven ones that end up not presenting. There the old
+			// order (wait inside Render, only when it draws) stays.
+			if (m_renderer && !m_window->IsInBackground())
+			{
+				HE_PROFILE_SCOPE_N("WaitForFrame");
+				m_renderer->WaitForFrame();
+			}
+
+			// ── HE_PERF_INPUT_EVENTS: synthetic mouse load (perf audit) ─────
+			// Every scripted capture runs with nobody at the mouse, so it can only
+			// say what event handling costs when there are no events. This pushes
+			// N motion events per frame into the SDL queue right before the poll —
+			// what a 1000 Hz mouse delivers at 60 FPS is ~16 — sweeping slowly
+			// across the primary window so ImGui's hover state actually changes
+			// and the frame pays for that too, not just for the dispatch. Only
+			// ImGui and Input see the position: SDL's own mouse state is not
+			// touched by a pushed event. Read once; off (0) unless set.
+			{
+				static const int kSynthMotion = []
+				{
+					const char* v = std::getenv("HE_PERF_INPUT_EVENTS");
+					return (v && *v) ? std::max(0, std::atoi(v)) : 0;
+				}();
+				SDL_Window* sw = m_window ? m_window->GetNativeWindow() : nullptr;
+				if (kSynthMotion > 0 && sw)
+				{
+					int w = 0, h = 0;
+					SDL_GetWindowSize(sw, &w, &h);
+					// One row per 240 frames (~4 s at 60 FPS), 40 points apart —
+					// slow enough to dwell on a widget, so tooltips and help
+					// lookups get their chance.
+					static float s_x = 0.0f, s_y = 20.0f;
+					const float step = w > 0 ? static_cast<float>(w) / (240.0f * kSynthMotion) : 1.0f;
+					static bool s_logged = false;
+					if (!s_logged)
+					{
+						s_logged = true;
+						// The ImGui backend replaces a pushed position with the real
+						// cursor when the app has keyboard focus and no window is
+						// hovered; the log has to say whether that could happen.
+						HE_LOG_INFO(Core, "HE_PERF_INPUT_EVENTS=%d: pushing motion events, "
+						            "keyboard focus %s", kSynthMotion,
+						            SDL_GetKeyboardFocus() ? "held" : "none");
+					}
+					for (int i = 0; i < kSynthMotion; ++i)
+					{
+						s_x += step;
+						if (s_x >= static_cast<float>(w))
+						{
+							s_x = 0.0f;
+							s_y += 40.0f;
+							if (s_y >= static_cast<float>(h)) s_y = 20.0f;
+						}
+						SDL_Event e{};
+						e.type            = SDL_EVENT_MOUSE_MOTION;
+						e.motion.windowID = SDL_GetWindowID(sw);
+						e.motion.which    = 1;
+						e.motion.x        = s_x;
+						e.motion.y        = s_y;
+						e.motion.xrel     = step;
+						SDL_PushEvent(&e);
+					}
+				}
+			}
+
 			{
 				HE_PROFILE_SCOPE_N("PollEvents");
 				m_window->PollEvents();
 			}
+			// The positive control for HE_PERF_INPUT_EVENTS: a cost that does not
+			// move with N only means something if the events were really handled.
+			if (m_frameIndex == 100 && std::getenv("HE_PERF_INPUT_EVENTS"))
+				HE_LOG_INFO(Core, "HE_PERF_INPUT_EVENTS: frame 100 dispatched %u events",
+				            m_window->EventsLastPoll());
 			if (m_window->ShouldClose()) break;
 
 			// Snapshot pad state right after event polling so hot-plug from
@@ -506,6 +796,10 @@ namespace HE
 			{
 				HE_PROFILE_SCOPE_N("SwapBuffers");
 				m_window->SwapBuffers();
+				// The frame is committed (Metal/D3D/Vulkan inside Render, GL
+				// in the swap): whatever input it polled is as old as it gets
+				// on the CPU side.
+				g_inputLatency.committed(m_frameIndex);
 			}
 
 			// Pull per-frame GPU timing + render counters from the backend while a
@@ -582,8 +876,42 @@ namespace HE
 				if (elapsed < frameCapNs)
 					SDL_DelayNS(frameCapNs - elapsed);
 			}
+
+			// Background throttle (see backgroundFrameInterval): nobody can see
+			// any window of this application, so it runs at a low rate instead
+			// of the 70+ FPS a hidden window gets. Independent of vsync — a
+			// hidden window is not held to the display at all. SDL_DelayNS, not
+			// WaitForEvent: that leaves the event queued and would return at
+			// once on every later call. Restoring the window waits at most one
+			// interval.
+			{
+				bool unseen = m_window->IsInBackground();
+				for (const auto& [id, win] : m_secondaryWindows)
+					unseen = unseen && win->IsInBackground();
+				const uint64_t interval = backgroundFrameInterval();
+				const bool throttled = interval != 0 && unseen && !profiler.isRecording();
+				if (throttled != m_backgroundThrottled)
+				{
+					m_backgroundThrottled = throttled;
+					if (throttled)
+						HE_LOG_INFO(Core, "Window in background — throttled to %.1f FPS",
+						            1.0e9 / static_cast<double>(interval));
+					else
+						HE_LOG_INFO(Core, "%s", "Window back in view — full frame rate");
+				}
+				const uint64_t sleepNs = backgroundThrottleDelayNs(
+					interval, unseen, profiler.isRecording(), SDL_GetTicksNS() - nowTick);
+				if (sleepNs > 0)
+				{
+					HE_PROFILE_SCOPE_N("BackgroundThrottle");
+					SDL_DelayNS(sleepNs);
+				}
+			}
 		}
 
+		// Before anything shuts SDL down under the pushing thread.
+		g_inputLatency.stop();
+		g_inputLatency.report("final");
 		HE_LOG_INFO(Core, "%s", "Main loop exited — shutting down");
 		OnShutdown();
 		// Detach and destroy secondary windows first — each through the same
@@ -700,7 +1028,7 @@ namespace HE
         if (m_renderer) m_renderer->SetVSync(enabled);
     }
 
-    void Application::toggleProfilerCapture()
+    void Application::toggleProfilerCapture(bool forceVsyncOff, const char* note)
     {
         EngineProfiler& profiler = EngineProfiler::instance();
         if (profiler.isRecordingOrPending())
@@ -714,7 +1042,7 @@ namespace HE
         {
             // Benchmark capture: run uncapped so frame times reflect true cost.
             m_savedVsync = m_vsyncEnabled;
-            setVSync(false);
+            if (forceVsyncOff) setVSync(false);
 
             ProfSessionInfo info;
             info.backend = rhiName(m_globalState->getSelectedRHI());
@@ -732,13 +1060,14 @@ namespace HE
                 info.width  = static_cast<uint32_t>(pw);
                 info.height = static_cast<uint32_t>(ph);
             }
-            info.vsync = false;
-            info.note  = "F9 benchmark capture";
+            info.vsync = m_vsyncEnabled;
+            info.note  = (note && *note) ? note : "F9 benchmark capture";
             // Cap the capture so a forgotten F9 can't grow the buffer (and the JSON
             // dump) unbounded at 200+ fps — keep the newest N frames as a ring.
             constexpr size_t kMaxCaptureFrames = 20000; // ~100 s @ 200 fps
             profiler.requestStart(info, kMaxCaptureFrames);
-            HE_LOG_INFO(Core, "%s", "Profiler: start requested (F9, vsync off)");
+            HE_LOG_INFO(Core, "Profiler: start requested (F9, vsync %s)",
+                        m_vsyncEnabled ? "on" : "off");
         }
     }
 

@@ -2,6 +2,7 @@
 #include <Application/Input.h>
 #include <Application/InputMapping.h>
 #include <Application/InputAssets.h>
+#include <HorizonScene/EngineApi.h>
 #include <cmath>
 
 // CP0 of gamepad support: the pure device-layer math. No SDL gamepad subsystem
@@ -199,6 +200,118 @@ TEST_CASE("Input: EndFrame clears mouse but not gamepad state")
 
     input.EndFrame();
     CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_START)); // held state, not a displacement
+}
+
+// ─── Pad slots (local multiplayer) ───────────────────────────────────────────
+
+TEST_CASE("Slots: each slot reads its own pad, the merged frame is all of them")
+{
+    Input input;
+    GamepadFrame a, b;
+    a.connected = true;
+    a.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true;
+    a.axes[SDL_GAMEPAD_AXIS_LEFTX] = 1.0f;
+    b.connected = true;
+    b.buttons[SDL_GAMEPAD_BUTTON_EAST] = true;
+    b.axes[SDL_GAMEPAD_AXIS_LEFTX] = -0.5f;
+    input.SetGamepadFrame(0, a);
+    input.SetGamepadFrame(1, b);
+
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Connected);
+    CHECK(input.gamepadSlotState(1) == Input::GamepadSlotState::Connected);
+    CHECK(input.gamepadSlotState(2) == Input::GamepadSlotState::Free);
+
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 0));
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST, 0));
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST, 1));
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 1));
+    CHECK(input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFTX, 0) == doctest::Approx(1.0f));
+    CHECK(input.gamepadAxisFiltered(SDL_GAMEPAD_AXIS_LEFTX, 1) < 0.0f);
+
+    // The default view is unchanged: every pad, merged.
+    CHECK(input.gamepad().connected);
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH));
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_EAST));
+    CHECK(input.gamepad().axes[SDL_GAMEPAD_AXIS_LEFTX] == doctest::Approx(1.0f));
+    CHECK(&input.gamepad(-1) == &input.gamepad());
+
+    // Out of range and empty slots read as an idle pad, never as garbage.
+    CHECK_FALSE(input.gamepad(2).connected);
+    CHECK_FALSE(input.gamepad(Input::kMaxGamepadSlots).connected);
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 99));
+}
+
+TEST_CASE("Slots: unplugging reserves the slot and zeroes it, release frees it")
+{
+    Input input;
+    GamepadFrame a;
+    a.connected = true;
+    a.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true;
+    input.SetGamepadFrame(0, a);
+    CHECK_FALSE(input.releaseGamepadSlot(0));   // plugged in: keeps its slot
+
+    GamepadFrame gone;   // connected = false: "the cable was pulled"
+    input.SetGamepadFrame(0, gone);
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Reserved);
+    // A button held while unplugging must not stay held — for the slot, or
+    // for the merged frame.
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 0));
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH));
+    CHECK_FALSE(input.gamepad().connected);
+
+    CHECK(input.releaseGamepadSlot(0));
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Free);
+    CHECK_FALSE(input.releaseGamepadSlot(0));   // free already
+}
+
+TEST_CASE("Mapping: InputDevices reads one pad slot, with or without the desk")
+{
+    Input input;
+    GamepadFrame a, b;
+    a.connected = true;
+    a.buttons[SDL_GAMEPAD_BUTTON_SOUTH] = true;
+    b.connected = true;
+    b.axes[SDL_GAMEPAD_AXIS_LEFTX] = 1.0f;
+    input.SetGamepadFrame(0, a);
+    input.SetGamepadFrame(1, b);
+    SDL_Event key{};
+    key.type = SDL_EVENT_KEY_DOWN;
+    key.key.scancode = SDL_SCANCODE_D;
+    input.ProcessEvent(key);
+
+    auto build = [] {
+        InputMapping m;
+        m.mapAction("Jump", { { SDL_SCANCODE_UNKNOWN, SDL_GAMEPAD_BUTTON_SOUTH } });
+        AxisBinding stick;
+        stick.source = AxisSource::GamepadLeftX;
+        AxisBinding keys{ SDL_SCANCODE_D, SDL_SCANCODE_A };
+        m.mapAxis("Move", { stick, keys });
+        AxisBinding mouse;
+        mouse.source = AxisSource::MouseX;
+        m.mapAxis("Look", { mouse });
+        return m;
+    };
+    MouseFrame mouse;
+    mouse.dx = 5.0f;
+
+    InputMapping p1 = build();
+    p1.tick(input, mouse, InputDevices{ 0, true });
+    CHECK(p1.isPressed("Jump"));
+    CHECK(p1.axisValue("Move") == doctest::Approx(1.0f));   // the D key
+    CHECK(p1.axisValue("Look") == doctest::Approx(5.0f));
+
+    InputMapping p2 = build();
+    p2.tick(input, mouse, InputDevices{ 1, false });
+    CHECK_FALSE(p2.isPressed("Jump"));                      // slot 0's button
+    CHECK(p2.axisValue("Move") == doctest::Approx(1.0f));   // its own stick
+    CHECK(p2.axisValue("Look") == 0.0f);                    // no mouse without the desk
+
+    // And without its stick, the key does not reach a desk-less player.
+    GamepadFrame idle;
+    idle.connected = true;
+    input.SetGamepadFrame(1, idle);
+    p2.tick(input, mouse, InputDevices{ 1, false });
+    CHECK(p2.axisValue("Move") == 0.0f);
 }
 
 // ─── InputMapping with gamepad sources (CP1) ─────────────────────────────────
@@ -613,4 +726,291 @@ TEST_CASE("End-to-end: virtual pad drives Input and InputMapping via hot-plug")
     CHECK(input.gamepad().axes[SDL_GAMEPAD_AXIS_LEFTX] == 0.0f);
 
     SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+}
+
+TEST_CASE("End-to-end: hot-plug hands out slots, a returning pad gets its own back")
+{
+    if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
+    {
+        MESSAGE("SDL gamepad subsystem unavailable here (", SDL_GetError(),
+                ") — slots covered by frame injection only");
+        return;
+    }
+
+    // Different vendor/product ids make different GUIDs — the part of the
+    // identity a virtual pad has (it reports no serial).
+    auto attach = [](Uint16 vendor, Uint16 product) {
+        SDL_VirtualJoystickDesc desc;
+        SDL_INIT_INTERFACE(&desc);
+        desc.type      = SDL_JOYSTICK_TYPE_GAMEPAD;
+        desc.naxes     = SDL_GAMEPAD_AXIS_COUNT;
+        desc.nbuttons  = SDL_GAMEPAD_BUTTON_COUNT;
+        desc.vendor_id  = vendor;
+        desc.product_id = product;
+        return SDL_AttachVirtualJoystick(&desc);
+    };
+
+    Input input;
+    auto pump = [&]{
+        SDL_UpdateJoysticks();
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) input.ProcessGamepadEvent(e);
+        input.PollGamepads();
+    };
+
+    const SDL_JoystickID a = attach(0x1111, 0x0001);
+    REQUIRE(a != 0);
+    pump();
+    const SDL_JoystickID b = attach(0x2222, 0x0002);
+    REQUIRE(b != 0);
+    pump();
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Connected);
+    CHECK(input.gamepadSlotState(1) == Input::GamepadSlotState::Connected);
+    // The player LED is told which player the pad is.
+    CHECK(SDL_GetGamepadPlayerIndex(SDL_GetGamepadFromID(a)) == 0);
+    CHECK(SDL_GetGamepadPlayerIndex(SDL_GetGamepadFromID(b)) == 1);
+
+    // B's button reaches slot 1 only.
+    SDL_SetJoystickVirtualButton(SDL_GetGamepadJoystick(SDL_GetGamepadFromID(b)),
+                                 SDL_GAMEPAD_BUTTON_SOUTH, true);
+    pump();
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 1));
+    CHECK_FALSE(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH, 0));
+    CHECK(input.isGamepadButtonDown(SDL_GAMEPAD_BUTTON_SOUTH));   // merged
+
+    // A is pulled: slot 0 is kept for it, B stays player 2.
+    SDL_DetachVirtualJoystick(a);
+    pump();
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Reserved);
+    CHECK(input.gamepadSlotState(1) == Input::GamepadSlotState::Connected);
+
+    // A different pad arriving now does NOT take player 1's reserved slot.
+    const SDL_JoystickID c = attach(0x3333, 0x0003);
+    REQUIRE(c != 0);
+    pump();
+    CHECK(input.gamepadSlotState(2) == Input::GamepadSlotState::Connected);
+    CHECK(SDL_GetGamepadPlayerIndex(SDL_GetGamepadFromID(c)) == 2);
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Reserved);
+
+    // A comes back — with a new joystick id, as after a real reconnect — and
+    // is player 1 again.
+    const SDL_JoystickID a2 = attach(0x1111, 0x0001);
+    REQUIRE(a2 != 0);
+    CHECK(a2 != a);
+    pump();
+    CHECK(input.gamepadSlotState(0) == Input::GamepadSlotState::Connected);
+    CHECK(SDL_GetGamepadPlayerIndex(SDL_GetGamepadFromID(a2)) == 0);
+
+    SDL_DetachVirtualJoystick(a2);
+    SDL_DetachVirtualJoystick(b);
+    SDL_DetachVirtualJoystick(c);
+    pump();
+    CHECK_FALSE(input.gamepad().connected);
+    SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+}
+
+// ─── Rumble ──────────────────────────────────────────────────────────────────
+
+TEST_CASE("Rumble: an Input without pads answers false and does nothing")
+{
+    Input input;
+    CHECK_FALSE(input.rumble(1.0f, 1.0f, 100));
+    CHECK_FALSE(input.rumbleTriggers(1.0f, 1.0f, 100));
+    input.stopRumble();   // no pads, no SDL call, no crash
+}
+
+namespace {
+struct RumbleLog
+{
+    int    calls = 0, triggerCalls = 0;
+    Uint16 low = 0xBEEF, high = 0xBEEF, left = 0xBEEF, right = 0xBEEF;
+};
+bool SDLCALL recordRumble(void* ud, Uint16 lo, Uint16 hi)
+{ auto* l = static_cast<RumbleLog*>(ud); ++l->calls; l->low = lo; l->high = hi; return true; }
+bool SDLCALL recordTriggers(void* ud, Uint16 le, Uint16 ri)
+{ auto* l = static_cast<RumbleLog*>(ud); ++l->triggerCalls; l->left = le; l->right = ri; return true; }
+}
+
+// The device end of it: a virtual pad whose motors are two callbacks. What the
+// callbacks see is what a real pad's driver would be told, after SDL's own
+// processing — so the 0..1 → Uint16 scaling and the stop are checked where it
+// matters, not against our own arithmetic.
+TEST_CASE("End-to-end: rumble reaches a virtual pad's motors, stop zeroes them")
+{
+    if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
+    {
+        MESSAGE("SDL gamepad subsystem unavailable here (", SDL_GetError(),
+                ") — rumble covered by the sink tests only");
+        return;
+    }
+
+    RumbleLog log;
+    SDL_VirtualJoystickDesc desc;
+    SDL_INIT_INTERFACE(&desc);
+    desc.type           = SDL_JOYSTICK_TYPE_GAMEPAD;
+    desc.naxes          = SDL_GAMEPAD_AXIS_COUNT;
+    desc.nbuttons       = SDL_GAMEPAD_BUTTON_COUNT;
+    desc.userdata       = &log;
+    desc.Rumble         = recordRumble;
+    desc.RumbleTriggers = recordTriggers;
+    const SDL_JoystickID vid = SDL_AttachVirtualJoystick(&desc);
+    REQUIRE(vid != 0);
+
+    Input input;
+    auto pump = [&]{
+        SDL_UpdateJoysticks();
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) input.ProcessGamepadEvent(e);
+    };
+    pump();   // ADDED → Input opens the pad
+    input.PollGamepads();
+    REQUIRE(input.gamepad().connected);
+
+    CHECK(input.rumble(0.5f, 1.0f, 1000));
+    CHECK(log.calls == 1);
+    CHECK(log.low  == 32768);    // 0.5 → half of 65535, rounded
+    CHECK(log.high == 0xFFFF);   // 1.0 → full
+
+    // Out of range and garbage clamp rather than wrap: 3.0 is full, a negative
+    // and a NaN are off — never full power by accident.
+    CHECK(input.rumble(3.0f, -2.0f, 1000));
+    CHECK(log.low  == 0xFFFF);
+    CHECK(log.high == 0);
+    CHECK(input.rumble(std::nanf(""), 0.25f, 1000));
+    CHECK(log.low  == 0);
+    CHECK(log.high == 16384);
+
+    CHECK(input.rumbleTriggers(0.25f, 0.75f, 1000));
+    CHECK(log.triggerCalls == 1);
+    CHECK(log.left  == 16384);
+    CHECK(log.right == 49151);
+
+    input.stopRumble();
+    CHECK(log.low == 0);
+    CHECK(log.high == 0);
+    CHECK(log.left == 0);
+    CHECK(log.right == 0);
+
+    SDL_DetachVirtualJoystick(vid);
+    pump();
+    CHECK_FALSE(input.rumble(1.0f, 1.0f, 100));   // pad gone, nobody to tell
+    SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+}
+
+// ─── Rumble through the script API: sink, gate, seconds ─────────────────────
+
+namespace {
+struct SinkLog
+{
+    int rumbles = 0, triggers = 0, stops = 0;
+    float a = -1.0f, b = -1.0f;
+    uint32_t ms = 12345;
+};
+// Installs a recording sink; the destructor puts the process-global state back
+// the way an app that never installed one leaves it (no sink, gate closed).
+struct ScopedSink
+{
+    SinkLog log;
+    ScopedSink()
+    {
+        HE::api::input::setRumbleSink({
+            [this](float lo, float hi, uint32_t ms) { ++log.rumbles; log.a = lo; log.b = hi; log.ms = ms; return true; },
+            [this](float l, float r, uint32_t ms)   { ++log.triggers; log.a = l; log.b = r; log.ms = ms; return true; },
+            [this]()                                { ++log.stops; } });
+    }
+    ~ScopedSink()
+    {
+        HE::api::input::setRumbleGate(false, false);
+        HE::api::input::setRumbleSink({});
+    }
+};
+}
+
+TEST_CASE("Rumble API: closed gate refuses, open gate passes, closing stops")
+{
+    ScopedSink s;
+    HE::api::input::setRumbleGate(false, false);
+    const int stopsBefore = s.log.stops;
+
+    // Closed (edit mode, halted PIE): refused, the sink never hears of it.
+    CHECK_FALSE(HE::api::input::rumble(1.0f, 1.0f, 0.5f));
+    CHECK_FALSE(HE::api::input::rumbleTriggers(1.0f, 1.0f, 0.5f));
+    CHECK(s.log.rumbles == 0);
+    CHECK(s.log.triggers == 0);
+
+    HE::api::input::setRumbleGate(true, false);
+    CHECK(HE::api::input::rumble(0.25f, 0.75f, 0.5f));
+    CHECK(s.log.rumbles == 1);
+    CHECK(s.log.a == 0.25f);
+    CHECK(s.log.b == 0.75f);
+    CHECK(s.log.ms == 500);
+    CHECK(HE::api::input::rumbleTriggers(0.5f, 0.5f, 0.1f));
+    CHECK(s.log.triggers == 1);
+
+    // Held open frame after frame: no edge, no stop.
+    HE::api::input::setRumbleGate(true, false);
+    CHECK(s.log.stops == stopsBefore);
+
+    // Stop pressed: the pads are told, and further requests are refused.
+    HE::api::input::setRumbleGate(false, false);
+    CHECK(s.log.stops == stopsBefore + 1);
+    CHECK_FALSE(HE::api::input::rumble(1.0f, 1.0f, 0.5f));
+    CHECK(s.log.rumbles == 1);
+    // Staying closed is not another edge.
+    HE::api::input::setRumbleGate(false, false);
+    CHECK(s.log.stops == stopsBefore + 1);
+}
+
+TEST_CASE("Rumble API: the game pausing stops the pads but keeps accepting")
+{
+    ScopedSink s;
+    HE::api::input::setRumbleGate(true, false);
+    CHECK(HE::api::input::rumble(1.0f, 1.0f, 0.0f));   // the endless engine hum
+    const int stops = s.log.stops;
+
+    HE::api::input::setRumbleGate(true, true);   // time.pause()
+    CHECK(s.log.stops == stops + 1);
+    HE::api::input::setRumbleGate(true, true);   // still paused: no second stop
+    CHECK(s.log.stops == stops + 1);
+
+    // The pause menu's click is felt.
+    CHECK(HE::api::input::rumble(0.0f, 0.3f, 0.05f));
+    CHECK(s.log.rumbles == 2);
+
+    HE::api::input::setRumbleGate(true, false);  // resume: no stop on the way out
+    CHECK(s.log.stops == stops + 1);
+}
+
+TEST_CASE("Rumble API: seconds become SDL milliseconds, never an accidental forever")
+{
+    ScopedSink s;
+    HE::api::input::setRumbleGate(true, false);
+    auto msFor = [&](float seconds) {
+        HE::api::input::rumble(0.5f, 0.5f, seconds);
+        return s.log.ms;
+    };
+    CHECK(msFor(0.25f) == 250);
+    CHECK(msFor(0.0f)  == 0);        // SDL's "until stopped"
+    CHECK(msFor(-1.0f) == 0);
+    CHECK(msFor(std::nanf("")) == 0);
+    // A positive duration that rounds to 0 ms would be SDL's "forever" — the
+    // shortest real buzz is 1 ms instead.
+    CHECK(msFor(0.0001f) == 1);
+    CHECK(msFor(1000.0f) == 65535);  // SDL's cap, applied here so it is visible
+
+    // stopRumble is not gated: stopping is always safe.
+    HE::api::input::setRumbleGate(false, false);
+    const int stops = s.log.stops;
+    HE::api::input::stopRumble();
+    CHECK(s.log.stops == stops + 1);
+}
+
+TEST_CASE("Rumble API: no sink installed → false, no crash")
+{
+    HE::api::input::setRumbleSink({});
+    HE::api::input::setRumbleGate(true, false);
+    CHECK_FALSE(HE::api::input::rumble(1.0f, 1.0f, 0.1f));
+    CHECK_FALSE(HE::api::input::rumbleTriggers(1.0f, 1.0f, 0.1f));
+    HE::api::input::stopRumble();
+    HE::api::input::setRumbleGate(false, false);
 }

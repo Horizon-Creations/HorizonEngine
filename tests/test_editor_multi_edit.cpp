@@ -215,3 +215,89 @@ TEST_CASE("EditorMultiEdit: one undo entry covers the active entity and every me
 	CHECK(reg.get<TransformComponent>(findByName(world, "B")).position.x == doctest::Approx(2.0f));
 	CHECK(reg.get<TransformComponent>(findByName(world, "C")).position.x == doctest::Approx(3.0f));
 }
+
+TEST_CASE("EditorMultiEdit::mixed names the leaves the selection disagrees on")
+{
+	HorizonWorld world;
+	// Same X and Z, Y differs; intensity differs; everything else equal.
+	const Entity a = makeLit(world, "A", { 1, 0, 3 }, 1.0f);
+	const Entity b = makeLit(world, "B", { 1, 5, 3 }, 1.0f);
+	const Entity c = makeLit(world, "C", { 1, 0, 3 }, 9.0f);
+	// D has a transform only: it takes part for the transform, never for light.
+	const Entity d = world.createEntity("D");
+	{
+		TransformComponent t;
+		t.position = { 1, 0, 3 };
+		world.addComponent(d, t);
+	}
+
+	const std::vector<json> states = {
+		EditorMultiEdit::state(world, a), EditorMultiEdit::state(world, b),
+		EditorMultiEdit::state(world, c), EditorMultiEdit::state(world, d) };
+	const auto m = EditorMultiEdit::mixed(states);
+	// (Components in key order — nlohmann sorts object keys — not add order.)
+	REQUIRE(m.size() == 2);
+	auto has = [&](const char* component, const char* path) {
+		for (const auto& x : m)
+			if (x.component == component && x.path.to_string() == path) return true;
+		return false;
+	};
+	CHECK(has("transform", "/position/1"));
+	CHECK(has("light", "/intensity"));
+
+	// Each leaf once, however many members disagree on it.
+	const auto again = EditorMultiEdit::mixed({ states[0], states[1], states[1], states[2] });
+	CHECK(again.size() == 2);
+
+	// One entity, or all equal: nothing is mixed.
+	CHECK(EditorMultiEdit::mixed({ states[0] }).empty());
+	CHECK(EditorMultiEdit::mixed({ states[0], states[0] }).empty());
+
+	// Once the panel has written the value everywhere, the leaf is no longer mixed.
+	world.registry().get<LightComponent>(c).intensity = 1.0f;
+	world.registry().get<TransformComponent>(b).position.y = 0.0f;
+	CHECK(EditorMultiEdit::mixed({ EditorMultiEdit::state(world, a), EditorMultiEdit::state(world, b),
+	                               EditorMultiEdit::state(world, c) }).empty());
+}
+
+TEST_CASE("EditorMultiEdit::rowMarks marks fields and vector elements, never nested leaves")
+{
+	using EditorMultiEdit::Mixed;
+	using json_pointer = json::json_pointer;
+	const std::vector<Mixed> m = {
+		{ "transform", json_pointer("/position/0") },
+		{ "transform", json_pointer("/position/2") },
+		{ "transform", json_pointer("/scale") },
+		{ "light",     json_pointer("/intensity") },
+		{ "camerarig", json_pointer("/lag/positionSpeed") },   // nested: no row mark
+		{ "rope",      json_pointer("/points/2/1") },          // nested: no row mark
+	};
+	const auto t = EditorMultiEdit::rowMarks(m, "transform");
+	REQUIRE(t.size() == 2);
+	CHECK(t.at("position") == 0b101u);
+	CHECK(t.at("scale") == ~0u);
+	CHECK(EditorMultiEdit::rowMarks(m, "light").at("intensity") == ~0u);
+	CHECK(EditorMultiEdit::rowMarks(m, "camerarig").empty());
+	CHECK(EditorMultiEdit::rowMarks(m, "rope").empty());
+	CHECK(EditorMultiEdit::rowMarks(m, "mesh").empty());
+}
+
+TEST_CASE("EditorMultiEdit::describe spells the mixed fields out for the summary line")
+{
+	using EditorMultiEdit::Mixed;
+	using json_pointer = json::json_pointer;
+	const std::vector<Mixed> m = {
+		{ "transform", json_pointer("/position/0") },
+		{ "transform", json_pointer("/position/2") },
+		{ "transform", json_pointer("/scale") },
+		{ "light",     json_pointer("/color/1") },
+		{ "light",     json_pointer("/castsShadow") },
+		{ "camerarig", json_pointer("/lag/positionSpeed") },
+		{ "rope",      json_pointer("/points/2/1") },
+	};
+	CHECK(EditorMultiEdit::describe(m, "transform") == "Position (X, Z), Scale");
+	CHECK(EditorMultiEdit::describe(m, "light") == "Color (G), Casts Shadow");
+	CHECK(EditorMultiEdit::describe(m, "camerarig") == "Lag / Position Speed");
+	CHECK(EditorMultiEdit::describe(m, "rope") == "Points / #3 / #2");
+	CHECK(EditorMultiEdit::describe(m, "mesh").empty());
+}

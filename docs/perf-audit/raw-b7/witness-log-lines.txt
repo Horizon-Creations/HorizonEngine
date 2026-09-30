@@ -1,0 +1,46 @@
+LK1-small.log:MetalRenderer: initializing
+LK1-small.log:B7 noise: mode=small n=32 storage=shared build=21.3 ms
+LK1-small.log:MetalRenderer: initialized on Apple M5
+LS0-shared.log:MetalRenderer: initializing
+LS0-shared.log:B7 noise: mode=shared n=256 storage=shared build=10706.3 ms
+LS0-shared.log:MetalRenderer: initialized on Apple M5
+LC-C1-crop.log:MetalRenderer: initializing
+LC-C1-crop.log:B7 noise: mode=crop n=32 storage=shared build=10638.6 ms
+LC-C1-crop.log:MetalRenderer: initialized on Apple M5
+LP1-private.log:MetalRenderer: initializing
+LP1-private.log:B7 noise: mode=private n=256 storage=private build=10537.8 ms
+LP1-private.log:MetalRenderer: initialized on Apple M5
+digest-old.log:MetalRenderer: initializing
+digest-old.log:B7 noise digest n=256 fnv=0x79c8e92e96950cc9
+digest-old.log:B7 noise: mode=shared n=256 storage=shared build=10761.6 ms
+digest-old.log:MetalRenderer: initialized on Apple M5
+digest-new.log:MetalRenderer: initializing
+digest-new.log:B7 noise digest n=256 fnv=0x79c8e92e96950cc9
+digest-new.log:B7 noise: mode=shared n=256 storage=shared build=2756.9 ms
+digest-new.log:MetalRenderer: initialized on Apple M5
+LR-R1-rg8.log:MetalRenderer: initializing
+LR-R1-rg8.log:B7 noise: mode=rg8 n=256 storage=shared build=10072.3 ms
+LR-R1-rg8.log:MetalRenderer: initialized on Apple M5
+LR-M1-mips.log:MetalRenderer: initializing
+LR-M1-mips.log:B7 noise: mode=mips n=256 storage=shared build=10639.2 ms
+LR-M1-mips.log:MetalRenderer: initialized on Apple M5
+digest-new4.log:MetalRenderer: initializing
+digest-new4.log:B7 noise digest n=256 fnv=0x79c8e92e96950cc9
+digest-new4.log:B7 noise: mode=shared n=256 storage=shared build=446.5 ms
+digest-new4.log:MetalRenderer: initialized on Apple M5
+digest-new5.log:MetalRenderer: initializing
+digest-new5.log:B7 noise digest n=256 fnv=0x79c8e92e96950cc9
+digest-new5.log:B7 noise: mode=shared n=256 storage=shared build=449.5 ms
+digest-new5.log:MetalRenderer: initialized on Apple M5
+digest-new1.log:MetalRenderer: initializing
+digest-new1.log:B7 noise digest n=256 fnv=0x79c8e92e96950cc9
+digest-new1.log:B7 noise: mode=shared n=256 storage=shared build=2444.7 ms
+digest-new1.log:MetalRenderer: initialized on Apple M5
+digest-new3.log:MetalRenderer: initializing
+digest-new3.log:B7 noise digest n=256 fnv=0x79c8e92e96950cc9
+digest-new3.log:B7 noise: mode=shared n=256 storage=shared build=444.8 ms
+digest-new3.log:MetalRenderer: initialized on Apple M5
+final-start1.log:MetalRenderer: initializing
+final-start1.log:MetalRenderer: initialized on Apple M5
+final-start2.log:MetalRenderer: initializing
+final-start2.log:MetalRenderer: initialized on Apple M5

@@ -6,6 +6,7 @@
 #include "EditorReference.h"
 #include "HcNodeReference.h"   // the guides link into the generated node reference
 #include "EditorWidgets.h"
+#include "EditorToolbar.h"     // a toolbar cell hands its looked-up entry on
 
 #include <imgui.h>
 #include <UIWidget/UIElement.h>   // the widget-type registry the palette lists
@@ -376,6 +377,7 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Profiler",     "Stop & Dump  (F9)" },
 		{ "Profiler",     "Start Benchmark Capture  (F9)" },
 		{ "Profiler",     "Detailed GPU pass timing (serializes GPU — capture only)" },
+		{ "Profiler",     "GPU counter sampling (per-pass split)" },
 		{ "Profiler",     "clear" },
 		// The animator, audio and mesh tabs. A transition row's six labels are
 		// looked up with their "##t" spelling and fall back to the visible name.
@@ -477,6 +479,7 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		"Landscape/Sculpt",   "Landscape/Paint",
 		"Landscape/Raise",    "Landscape/Lower",   "Landscape/Smooth",
 		"Landscape/Flatten",  "Landscape/Ramp",    "Landscape/Roughen",
+		"Landscape/Mountain", "Landscape/Rectangle", "Landscape/Circle",
 		// The Source Control window's commit button says "Commit 3 changes", so
 		// there is no fixed label either.
 		"sc.commit",
@@ -718,6 +721,117 @@ TEST_CASE("editor help: a Details row explains itself with no call site of its o
 	io.AddKeyEvent(ImGuiKey_F1, true);
 	frame("Foliage");
 	CHECK(topic == nullptr);
+}
+
+// ── The lookup is hashed, and must answer exactly what the walk answered ─────
+// findKey used to walk the whole table with a strlen per entry, twice per
+// toolbar cell per frame (12 % of the editor's main-thread CPU in the
+// performance audit, docs/perf-audit/step3-cpu-memory-deep-dive-2026-09-27.md).
+// The index that replaced it has to hand back the SAME entry object for every
+// key — tooltips and F1 compare pointers — and nothing for a near miss.
+TEST_CASE("editor help: every key finds its own entry, and a near miss finds nothing")
+{
+	for (int i = 0; i < Help::entryCount(); ++i)
+	{
+		const Help::Entry& e = Help::entryAt(i);
+		const std::string key = e.key ? e.key : "";
+		CHECK_MESSAGE(Help::findKey(key) == &e, "key does not find its own entry: ", key);
+		// One character too many, one too few: a hash that ignored the length
+		// (or an index built from truncated keys) would still answer these.
+		CHECK_MESSAGE(Help::findKey(key + "\x01") == nullptr, "longer key matched: ", key);
+		if (key.size() > 1)
+		{
+			const Help::Entry* shorter = Help::findKey(std::string_view(key).substr(0, key.size() - 1));
+			CHECK_MESSAGE((shorter == nullptr || shorter != &e), "shorter key matched: ", key);
+		}
+	}
+	CHECK(Help::findKey("") == nullptr);
+	CHECK(Help::findKey("no such key, not now, not ever") == nullptr);
+}
+
+// find() builds "<scope>/<label>" in one buffer it keeps between calls. The
+// failure that invites is a stale tail: a long label, then a short one, and the
+// short lookup still carrying the end of the long one.
+TEST_CASE("editor help: a short label after a long one is looked up as itself")
+{
+	Help::Scope scope("Environment");
+	for (int round = 0; round < 3; ++round)
+	{
+		const Help::Entry* fog = Help::find("Density##fog");
+		REQUIRE(fog != nullptr);
+		CHECK(std::string(fog->key) == "Environment/Density##fog");
+
+		const Help::Entry* cloud = Help::find("Density");
+		REQUIRE(cloud != nullptr);
+		CHECK(std::string(cloud->key) == "Environment/Density");
+
+		// Visible-label fallback after the buffer held a longer string.
+		const Help::Entry* coverage = Help::find("Coverage##a-rather-long-imgui-id-suffix");
+		REQUIRE(coverage != nullptr);
+		CHECK(std::string(coverage->key) == "Environment/Coverage");
+	}
+	// And a different scope right after: the prefix is rebuilt, not kept.
+	Help::setScope("Rigid Body");
+	const Help::Entry* mass = Help::find("Mass");
+	REQUIRE(mass != nullptr);
+	CHECK(std::string(mass->key) == "Rigid Body/Mass");
+}
+
+// The toolbar looks its entry up ONCE and hands it on (helpForEntry), and the
+// row widgets only search the table once the item is under the pointer. Both
+// have to keep what the user sees: the full tooltip under the mouse — on a
+// dimmed cell too, since "why can I not press this" is the question a greyed
+// control raises — and nothing queued for a cell the mouse is not on.
+TEST_CASE("editor help: a toolbar cell still explains itself, enabled or dimmed")
+{
+	for (const bool enabled : { true, false })
+	{
+		CAPTURE(enabled);
+		ImGuiCtx guard;
+		ImGuiIO& io = ImGui::GetIO();
+
+		ImVec2 centre{ -1.0f, -1.0f };
+		const char* topic = nullptr;
+		auto frame = [&] {
+			ImGui::NewFrame();
+			ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+			ImGui::SetNextWindowSize(ImVec2(420.0f, 120.0f));
+			ImGui::Begin("toolbar", nullptr,
+			             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+			const EditorToolbar::Metrics m = EditorToolbar::metrics(20.0f);
+			const float w = EditorToolbar::cellWidth(m, "Play");
+			EditorToolbar::cell(m, 20.0f, w, "##play", nullptr, "Play", false, enabled,
+			                    "plain fallback", "viewport.play");
+			const ImVec2 mn = ImGui::GetItemRectMin();
+			const ImVec2 mx = ImGui::GetItemRectMax();
+			centre = ImVec2((mn.x + mx.x) * 0.5f, (mn.y + mx.y) * 0.5f);
+			ImGui::End();
+			topic = EditorWidgets::drawQueuedHelp();
+			ImGui::EndFrame();
+		};
+
+		// Pointer elsewhere: nothing queued, F1 opens nothing.
+		io.AddMousePosEvent(1200.0f, 700.0f);
+		frame();
+		REQUIRE(centre.x > 0.0f);
+		io.AddKeyEvent(ImGuiKey_F1, true);
+		frame();
+		CHECK(topic == nullptr);
+		io.AddKeyEvent(ImGuiKey_F1, false);
+		frame();
+
+		// Rest on the cell (stationary for a moment, as ImGui's tooltip flags
+		// want), then F1: the control's own reference entry.
+		io.AddMousePosEvent(centre.x, centre.y);
+		for (int i = 0; i < 40; ++i) frame();
+		io.AddKeyEvent(ImGuiKey_F1, true);
+		frame();
+		REQUIRE(topic != nullptr);
+		CHECK(std::string(topic) == Help::referenceTopic("viewport.play"));
+		io.AddKeyEvent(ImGuiKey_F1, false);
+		frame();
+	}
 }
 
 TEST_CASE("editor help: a topic without its own panel falls back to its page")

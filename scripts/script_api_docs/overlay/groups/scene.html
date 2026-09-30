@@ -1,0 +1,39 @@
+          <p>
+            Every call that changes scenes is a <strong>request</strong>: it is
+            queued and carried out at the start of the next frame, before any
+            script's <code>onUpdate</code>, in the order it was made. So the code after <code>load</code> still runs
+            in the old scene, and a zone you just loaded is not there yet:
+            <code>zonePosition</code> returns <code>0, 0, 0</code> and
+            <code>zoneScene</code> an empty string until the next frame. Show,
+            hide and move requests made right after <code>loadAdditive</code>
+            still apply to the new zone, because they queue behind it. Scene paths
+            are relative to the project folder, for example
+            <code>Scenes/Level2.hescene</code>.
+          </p>
+          <ul>
+            <li>
+              <strong>Switching</strong> (<code>load</code>) replaces the whole
+              scene. With <code>hidden</code> = <code>true</code> it only
+              <em>preloads</em> the scene and its assets;
+              <code>hasPendingLevel</code> turns <code>true</code>, and
+              <code>activate</code> swaps it in without a loading hitch. A second
+              hidden load replaces the pending one.
+            </li>
+            <li>
+              <strong>Zones</strong> (<code>loadAdditive</code>) add a scene next
+              to the current one, at a world offset, and return a zone id at
+              once. Zone ids count up from 1 and are never reused. A hidden zone
+              is loaded and simulated but not drawn until <code>showZone</code>.
+              A zone gets collision, and in the packaged game its scripts start
+              when it arrives.
+            </li>
+          </ul>
+          <div class="callout note">
+            <span class="callout-icon">◆</span>
+            <p>
+              <strong>In the editor's play mode</strong> zones work, but
+              <code>load</code> and <code>activate</code> only log <em>“runs in
+              the packaged game”</em> and keep the current scene. Leaving play
+              mode removes every zone again.
+            </p>
+          </div>

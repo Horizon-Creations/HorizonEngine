@@ -190,6 +190,17 @@ public:
 	void setDetailedGpuCapture(bool on) { m_detailedGpu.store(on, std::memory_order_relaxed); }
 	bool detailedGpuCapture() const     { return m_detailedGpu.load(std::memory_order_relaxed) || m_forceDetailed; }
 
+	// ── GPU counter sampling (normal capture) ──────────────────────────────
+	// While a normal (non-detailed) capture records, Metal samples GPU timestamps
+	// at every render-encoder boundary to split the frame per pass. On a tile-
+	// deferred GPU that sampling can keep encoders from overlapping, so the frame
+	// it measures may be slower than the one a user sees (perf audit B10). Off =
+	// whole-frame GPU time only ("whole-frame" in the dump's gpuTimingModes), for
+	// FPS runs that must not be perturbed. Default on; HE_PROFILE_COUNTERS=0 turns
+	// it off for a scripted capture. Read by the renderer on the main thread.
+	void setGpuCounterSampling(bool on) { m_gpuCounters.store(on, std::memory_order_relaxed); }
+	bool gpuCounterSampling() const     { return m_gpuCounters.load(std::memory_order_relaxed); }
+
 	// ── Live overview (editor HUD) ──────────────────────────────────────────
 	// While enabled, the app pushes one ProfLiveFrame per frame (cheap; no scopes).
 	// The editor turns this on while its profiler window is open.
@@ -275,6 +286,7 @@ private:
 	// ignored (see beginScope/endScope) so the single-threaded scope model holds.
 	std::atomic<bool> m_recording{ false };
 	std::atomic<bool> m_detailedGpu{ false };  // serialized per-pass GPU capture (Metal)
+	std::atomic<bool> m_gpuCounters{ true };   // per-encoder counter sampling in a normal capture (Metal)
 	std::atomic<bool> m_timelineOn{ true };    // per-thread timeline capture (v3)
 	// Bumped on every doStart. A thread-local buffer carrying an older generation
 	// belongs to a finished capture and is reset on first touch, so a worker that

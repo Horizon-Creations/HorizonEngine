@@ -290,6 +290,16 @@ public:
     virtual void Render()                        = 0;
     virtual Capabilities GetCapabilities() const = 0;
 
+    // Blocks until the primary window can take another frame (Metal: acquires
+    // the next drawable). Application::Run calls it at the top of the frame,
+    // BEFORE input is polled — so the wait for a free swapchain image lands in
+    // front of the input sample instead of between it and the GPU, and the
+    // input a frame shows is as young as the pipeline allows. Must be
+    // idempotent: a frame that ends up not presenting (event-driven mode)
+    // keeps what it acquired for the next one. Default: nothing, the backend
+    // keeps waiting inside Render()/Present as before.
+    virtual void WaitForFrame() {}
+
     // ── Profiler GPU stats ─────────────────────────────────────────────────
     // Per-frame GPU timing + counters, pulled by the EngineProfiler when a
     // capture is recording (never on the hot path otherwise). GPU times are
@@ -797,8 +807,11 @@ public:
     //
     // `outViewProj` reports the view-projection used, so the caller can put its
     // own overlay (origin marker, collider outlines, camera boom) on top in the
-    // same space — same contract as RenderSkeletalPreview. Returns nullptr on
-    // backends without a world-preview path (currently D3D11/D3D12/Vulkan).
+    // same space — same contract as RenderSkeletalPreview; it is GL clip space
+    // (depth -1..1) on every backend, whatever the backend drew with. Returns
+    // nullptr on backends without a world-preview path (the Software one).
+    // D3D12 and Vulkan return the ImGui handle their registrar built, so there
+    // it is also nullptr when no registrar is installed.
     static constexpr uint32_t kWorldPreviewSlots = 4;
     virtual void* RenderWorldPreview(class ContentManager& /*cm*/, HorizonWorld& /*world*/,
                                      uint32_t /*width*/, uint32_t /*height*/,
@@ -891,8 +904,14 @@ public:
     // themselves. The editor installs this callback after ImGui is initialized;
     // the backend creates+uploads the GPU texture and then calls the registrar to
     // turn its native handle into an ImGui ImTextureID.
-    //   D3D12:  a = ID3D12Resource*,  b = nullptr.
-    //   Vulkan: a = VkImageView,      b = VkSampler.
+    //   D3D12:  a = ID3D12Resource*,  b = nullptr for a new ImGui heap slot, or
+    //           a handle this registrar returned earlier: the new resource's
+    //           SRV is written into THAT slot and the same handle comes back
+    //           (a resized world-preview target; ImGui's heap has 64 slots and
+    //           no free path from here). The caller has made sure the GPU no
+    //           longer reads the old view.
+    //   Vulkan: a = VkImageView,      b = VkSampler. (A resized preview target
+    //           rewrites its descriptor set itself — vkUpdateDescriptorSets.)
     void SetImGuiTextureRegistrar(std::function<void*(void*, void*)> fn) { m_imguiTexRegistrar = std::move(fn); }
 
     // ── Night-sky moon texture (optional) ──────────────────────────────────

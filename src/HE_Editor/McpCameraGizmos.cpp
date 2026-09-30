@@ -45,54 +45,12 @@ std::string labelFor(McpClientId id)
 void appendFrustum(const McpClientCamera& cam, const glm::vec3& color,
                    float length, DebugDrawBuffer& out)
 {
-	const glm::vec3 eye = cam.position;
-	const glm::vec3 f   = cam.forward();
-	const glm::vec3 r   = cam.right();
-	const glm::vec3 u   = cam.up();
-
 	// The far rectangle's half-extents follow the camera's real field of view
 	// (vertical, like the tool's `fov`) and the drawn aspect — that is the
-	// whole point of drawing a frustum rather than a box.
-	const float halfH = length * std::tan(cam.fovDeg * McpClientCamera::kPi / 360.0f);
-	const float halfW = halfH * kAspect;
-
-	auto rect = [&](float dist, float scale) {
-		const glm::vec3 c  = eye + f * dist;
-		const glm::vec3 dx = r * (halfW * (dist / length) * scale);
-		const glm::vec3 dy = u * (halfH * (dist / length) * scale);
-		const glm::vec3 p[4] = { c - dx - dy, c + dx - dy, c + dx + dy, c - dx + dy };
-		for (int i = 0; i < 4; ++i) out.line(p[i], p[(i + 1) % 4], color);
-	};
-
-	// Edges from the eye to the far corners.
-	{
-		const glm::vec3 c  = eye + f * length;
-		const glm::vec3 dx = r * halfW, dy = u * halfH;
-		out.line(eye, c - dx - dy, color);
-		out.line(eye, c + dx - dy, color);
-		out.line(eye, c + dx + dy, color);
-		out.line(eye, c - dx + dy, color);
-	}
-	// The far rectangle, twice — the line renderer has no thickness, so a
-	// second one a hair inside is how a stroke is made wide enough to survive
-	// a busy background (the collaboration rings are nested for the same
-	// reason). Then a near rectangle a third of the way, which is what makes
-	// the shape read as a frustum and not as a pyramid of four hairs.
-	rect(length, 1.0f);
-	rect(length, 0.92f);
-	rect(length / 3.0f, 1.0f);
-
-	// The "up" triangle over the far rectangle's top edge: which way is up in
-	// the picture. Without it a frustum rolled by 180° draws exactly the same.
-	{
-		const glm::vec3 top   = eye + f * length + u * halfH;
-		const glm::vec3 apex  = top + u * (halfH * 0.45f);
-		const glm::vec3 left  = top - r * (halfW * 0.35f);
-		const glm::vec3 right = top + r * (halfW * 0.35f);
-		out.line(left, apex, color);
-		out.line(apex, right, color);
-		out.line(right, left, color);
-	}
+	// whole point of drawing a frustum rather than a box. The shape itself is
+	// the one a selected scene camera is drawn with too (FrustumLines.h).
+	FrustumLines::appendPerspective(cam.position, cam.forward(), cam.right(), cam.up(),
+	                                cam.fovDeg, kAspect, length, color, out);
 }
 
 void appendFrustums(const McpClientCameras& cameras, const glm::vec3& viewer,

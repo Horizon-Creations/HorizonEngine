@@ -18,6 +18,7 @@
 #include <Diagnostics/Logger.h>
 #include <cstdlib> // std::getenv / atoi / atof (HE_* debug + capture knobs)
 #include <Diagnostics/EngineProfiler.h>
+#include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — CPU split of Render()
 #include <SDL3/SDL.h>
 #include <stdexcept>
 #include <vector>
@@ -198,6 +199,20 @@ static bool metalInstancingEnabled()
 	}();
 	return on;
 }
+
+// HE_SKY_LUT=0 turns the Sky-View LUT (perf audit A4) off: the sky pass then
+// integrates atmoScatter per pixel exactly as before. The same-binary A/B for
+// "does the LUT sky look like the integrated one?". Read once.
+static bool skyViewLutEnabled()
+{
+	static const bool on = []{
+		const char* v = std::getenv("HE_SKY_LUT");
+		return !(v && *v && std::atoi(v) == 0);
+	}();
+	return on;
+}
+// Sky-View LUT size. MUST match kSkyLutW/H in kSkyMSL.
+static constexpr int kSkyLutW = 256, kSkyLutH = 128;
 
 // ─── Embedded unlit shader ────────────────────────────────────────────────────
 // Mirrors the OpenGL backend's GLSL unlit shader (same light dir / ambient).
@@ -1448,15 +1463,16 @@ fragment float4 blurFragment(FSOut in [[stage_in]],
                              texture2d<float> img [[texture(0)]],
                              constant float4& cfg [[buffer(0)]]) // xy: texel, z: horizontal
 {
+	// The 9-tap Gaussian on whole texels, folded into 5 bilinear taps: each
+	// linear fetch between texels (1,2) and (3,4) returns their weighted sum.
+	// Derivation and constants: HorizonRendering/BloomKernel.h.
 	constexpr sampler s(filter::linear, address::clamp_to_edge);
-	float w[5] = { 0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216 };
+	const float  w0 = 0.227027, w12 = 0.3162162, w34 = 0.07027;
+	const float  o12 = 1.3846153, o34 = 3.2307670;
 	float2 dir = (cfg.z > 0.5) ? float2(cfg.x, 0.0) : float2(0.0, cfg.y);
-	float3 result = img.sample(s, in.uv).rgb * w[0];
-	for (int i = 1; i < 5; ++i)
-	{
-		result += img.sample(s, in.uv + dir * float(i)).rgb * w[i];
-		result += img.sample(s, in.uv - dir * float(i)).rgb * w[i];
-	}
+	float3 result = img.sample(s, in.uv).rgb * w0;
+	result += (img.sample(s, in.uv + dir * o12).rgb + img.sample(s, in.uv - dir * o12).rgb) * w12;
+	result += (img.sample(s, in.uv + dir * o34).rgb + img.sample(s, in.uv - dir * o34).rgb) * w34;
 	return float4(result, 1.0);
 }
 )MSL";
@@ -3999,14 +4015,20 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	if (coverage <= 0.0) return baseSky;          // clear sky → skip the whole raymarch
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
-	if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
+	// The horizon fade at the end is exactly 0 below dir.y 0.03 (T → 1, L → 0), so
+	// a march there could never show — bail before paying for it.
+	if (dir.y < 0.03) return baseSky;
 
 	// Quality (perf knob, star2.y): 0 Low, 1 Med, 2 High. High == the original
-	// step counts; Med/Low trade horizon detail for frames. The cheap gate below
-	// makes every level cheaper than the old always-full-density march.
+	// step counts; Med/Low trade horizon detail for frames.
 	int qBaseN  = (quality < 0.5) ? 8  : (quality < 1.5 ? 12 : 16);
 	int qMaxN   = (quality < 0.5) ? 18 : (quality < 1.5 ? 32 : 64);
 	int qShadow = (quality < 0.5) ? 1  : (quality < 1.5 ? 2  : 3);
+
+	// Fade the whole cloud layer out into the horizon haze (wider so the grazing band
+	// melts into the haze instead of showing undersampling speckle). Applied after
+	// the march; computed here because it also sets the step budget below.
+	float horizon = smoothstep(0.03, 0.22, dir.y);
 
 	// March the view ray through the cloud slab between base and top heights.
 	// A deterministic per-ray offset breaks up otherwise coherent sample planes
@@ -4014,6 +4036,13 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 	float s0 = kCloudBase / max(dir.y, 1e-3);
 	float s1 = kCloudTop  / max(dir.y, 1e-3);
 	int N = int(clamp(float(qBaseN) / max(dir.y, 0.12), float(qBaseN), float(qMaxN))); // denser toward horizon
+	// ...but the densest rays are exactly the ones the fade scales down: below
+	// dir.y 0.375 every ray took qMaxN steps while the fade kept only a fraction of
+	// their result. Scale the budget with fade^0.25 — the undersampling speckle
+	// it brings back is multiplied by the same fade, and above dir.y 0.22
+	// (fade 1) nothing changes. ~20 % fewer steps over a landscape view's sky;
+	// fade^0.5 saved 27 % but doubled the extra grain in the band (A/B, Thema 103).
+	N = max(qBaseN, int(float(N) * sqrt(sqrt(horizon))));
 	float ds = (s1 - s0) / float(N);
 	float jitter = cloudHash(dir.xz * 173.3 + float2(dir.y * 37.1, dir.y * 19.7));
 
@@ -4042,8 +4071,13 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 		// billow*0.55 and billow ≤ 1, so (perlin*0.5 + 0.55) is a true upper bound:
 		// where it can't reach the threshold, no cloud can form here → skip the Worley
 		// fetch + the sun light-march. Uses the SAME 4-octave perlin as cloudDensity,
-		// so it never culls a real cloud (a lower-octave estimate could). The dome slab
-		// is fully within s0..s1, so before this every step paid full density+shadow.
+		// so it never culls a real cloud (a lower-octave estimate could).
+		// It only fires below coverage ~0.31: perlin ≥ 0 keeps the bound ≥ 0.55,
+		// and lo = mix(0.70, 0.22, coverage) drops under that above 0.3125. At the
+		// default 0.5 it skips nothing, and no exact bound could: measured on the
+		// baked volume, 67 % of slab samples ARE cloud there and worleyFbm peaks at
+		// 0.87, so the billow term alone reaches lo. The per-step cost at such
+		// coverage is the light-march below, not this gate (perf audit, Thema 103).
 		float3 pp     = pos * kCloudScale + wind * time;
 		float  morph  = time * 0.030;
 		float  perlin = starFbm3(pp + float3(0.0, morph, 0.0), 4, noiseTex, noiseSamp);
@@ -4095,9 +4129,7 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 		}
 	}
 
-	// Fade the whole cloud layer out into the horizon haze (wider so the grazing band
-	// melts into the haze instead of showing undersampling speckle).
-	float horizon = smoothstep(0.03, 0.22, dir.y);
+	// Horizon fade (computed above, before the march).
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
 	outT = T;
@@ -4579,10 +4611,10 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 // Renders the cloud slab's sun transmittance over a world-space XZ region
 // around the camera into a small R8 target (one fullscreen triangle per frame).
 // Each texel = a point on the slab's MID-PLANE; a short march along the sun
-// direction through the slab accumulates the SAME density field applyClouds3D
-// raymarches (coverage fBm → presence → tower profile → billow erosion, fine
-// octave skipped — map texels are ~20 m), so ground shadows line up with the
-// clouds overhead. The lit shaders project fragments along L onto the
+// direction through the slab accumulates the SAME density field the visible
+// clouds use: applyClouds3D's (coverage fBm → presence → tower profile → billow
+// erosion, fine octave skipped — map texels are ~20 m) in cloudMode 1, the
+// dome's in cloudMode 0 — so ground shadows line up with the clouds overhead. The lit shaders project fragments along L onto the
 // mid-plane and sample this map (cloudShadowFactor / heCloudShadowFactor).
 // region: xy = region origin (world XZ), z = region world size, w = map size px.
 fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
@@ -4605,11 +4637,39 @@ fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
 	float midY    = baseY + 0.5 * thick;
 	float fluff   = clamp(p.cloud.z, 0.0, 1.0);
 	float densMul = clamp(p.cloud.y, 0.0, 3.0);
+	// Dome clouds (cloudMode 0): the sky draws applyClouds' direction-only dome,
+	// so the shadow has to come from THAT field, not from the 3D deck's
+	// cloudFieldDensity (a different, ~2-3x dearer field nobody sees in this
+	// mode). The dome has no world position; embed it at the WORLD ORIGIN with one
+	// dome unit = cloudH (dome slab kCloudBase..kCloudTop ↔ 1..2.6 cloudH). The
+	// shadows then stand still under a moving camera, like the 3D deck's, and
+	// line up exactly with the visible dome clouds for a viewer above the origin;
+	// elsewhere they are offset by camXZ/cloudH dome units, which a parallax-free
+	// sky cannot avoid. Density is the dome's own light-march field
+	// (cloudShadowDensity, 5 fetches), optical depth normalised like applyClouds
+	// (dens · ds · 7 · densMul), so a ground shadow is as dark as its cloud looks
+	// opaque against the sun.
+	if (p.cameraPos.w < 0.5)
+	{
+		float  domeMid = midY / cloudH;              // this texel's mid-plane, dome units
+		float2 dxz     = xz / cloudH;
+		float  d0 = (kCloudBase - domeMid) / sd.y;
+		float  d1 = (kCloudTop  - domeMid) / sd.y;
+		const int MD = 6;
+		float dds  = (d1 - d0) / float(MD);
+		float dens = 0.0;
+		for (int i = 0; i < MD; ++i)
+		{
+			float3 dp = float3(dxz.x, domeMid, dxz.y) + sd * (d0 + (float(i) + 0.5) * dds);
+			dens += cloudShadowDensity(dp, time, coverage, wind, noiseTex, noiseSamp);
+		}
+		return float4(exp(-dens * dds * 7.0 * densMul));
+	}
 	float lo      = mix(0.70, 0.22, coverage);
 	float nscale  = 1.6 / kCloudRefAltitude;
 	// Slab entry/exit along the sun ray through the mid-plane point. Density
 	// comes from the SHARED cloudFieldDensity (style/evolution included), so
-	// the ground shadows always match the shapes overhead.
+	// the ground shadows always match the 3D deck's shapes overhead.
 	float t0 = (baseY - midY) / sd.y;
 	float t1 = (baseY + thick - midY) / sd.y;
 	const int M = 6;
@@ -5397,6 +5457,71 @@ float3 moonCorona(float3 dir, float3 sunDir, bool hasMoon, float moonPhase)
 	return float3(0.85, 0.90, 1.0) * (ring * lit * 0.17 * vis);  // dezent, phase-shaped
 }
 
+// ── Sky-View LUT (perf audit A4) ─────────────────────────────────────────────
+// atmoScatter() depends only on the view and sun directions (the camera sits at
+// a fixed 200 m), so for one sun it is a 2D function: elevation × azimuth
+// relative to the sun, mirror-symmetric about the sun's vertical plane. The
+// host bakes it into two small RGBA16F targets whenever the sun moves
+// (MetalRenderer::EncodeSkyViewLut), and skyFragment reads them instead of
+// running the 12×5-step integral (~216 exp) per pixel. The sharp Mie lobe is
+// left out of the bake and applied per pixel with the exact angle, so texel
+// interpolation can't soften the sun's aureole; what is baked is smooth.
+//   rows: elevation, sqrt-mapped so texels bunch at the horizon. Row 0's centre
+//         is skyColor's horizon clamp (dir.y 0.004), the last row's the zenith.
+//   cols: azimuth from the sun's, 0 .. π, both ends on texel centres.
+// Everything else in skyColor (twilight wedge, night floor, ground haze,
+// aureoles, moon) stays per pixel, see skyColorAtmo.
+constant int   kSkyLutW   = 256, kSkyLutH = 128;  // MUST match MetalRenderer.mm kSkyLutW/H
+constant float kSkyLutEl0 = 0.00400001;           // asin(0.004): skyColor's horizon clamp
+constant float kSkyLutPi  = 3.14159265;
+
+// `d` and `sunDir` normalised, d already horizon-clamped as in skyColor.
+float2 skyLutUV(float3 d, float3 sunDir)
+{
+	float2 dh = float2(d.x, d.z), sh = float2(sunDir.x, sunDir.z);
+	float  el = max(atan2(d.y, length(dh)), kSkyLutEl0);
+	float  v  = sqrt(min((el - kSkyLutEl0) / (0.5 * kSkyLutPi - kSkyLutEl0), 1.0));
+	// Straight up (view or sun) has no azimuth; the value there doesn't depend on it.
+	float  cr = abs(dh.x * sh.y - dh.y * sh.x), dt = dot(dh, sh);
+	float  u  = (length(dh) * length(sh) > 1e-8) ? atan2(cr, dt) / kSkyLutPi : 0.0;
+	return float2((u * float(kSkyLutW - 1) + 0.5) / float(kSkyLutW),
+	              (v * float(kSkyLutH - 1) + 0.5) / float(kSkyLutH));
+}
+
+struct SkyLutOut { float4 rayleigh [[color(0)]]; float4 mie [[color(1)]]; };
+// Bakes one texel: the inverse of skyLutUV at the texel centre. The sun is
+// rotated to azimuth 0 — the integral is symmetric about the vertical axis.
+// color(0) = Rayleigh term with its (smooth) phase + the multiple-scatter fill,
+// color(1) = Mie in-scatter WITHOUT its phase (atmoScatterLut applies it).
+fragment SkyLutOut skyViewLutFragment(SkyOut in [[stage_in]],
+                                      constant float4& sun [[buffer(0)]])
+{
+	float3 sunDir = normalize(sun.xyz);
+	float  u  = (in.position.x - 0.5) / float(kSkyLutW - 1);
+	float  v  = (in.position.y - 0.5) / float(kSkyLutH - 1);
+	float  el = kSkyLutEl0 + v * v * (0.5 * kSkyLutPi - kSkyLutEl0);
+	float  az = u * kSkyLutPi;
+	float3 d  = float3(cos(el) * cos(az), sin(el), cos(el) * sin(az));
+	float3 s  = float3(length(float2(sunDir.x, sunDir.z)), sunDir.y, 0.0);
+	AtmoSums a = atmoIntegrate(d, s);
+	SkyLutOut o;
+	o.rayleigh = float4(a.sumR * kAtmoBR * atmoPhaseRayleigh(dot(d, s)) * 20.0
+	                    + atmoMultiFill(a, s), 1.0);
+	o.mie      = float4(a.sumM * kAtmoBM * 20.0, 1.0);
+	return o;
+}
+
+// atmoScatter(horizon-clamped dir, sunDir) read from the LUT. dir/sunDir normalised.
+float3 atmoScatterLut(float3 dir, float3 sunDir,
+                      texture2d<float> lutRayleigh, texture2d<float> lutMie)
+{
+	constexpr sampler lutSamp(filter::linear, address::clamp_to_edge);
+	float3 d  = normalize(float3(dir.x, max(dir.y, 0.004), dir.z)); // == skyColor
+	float2 uv = skyLutUV(d, sunDir);
+	return lutRayleigh.sample(lutSamp, uv).rgb
+	     + lutMie.sample(lutSamp, uv).rgb * atmoPhaseMie(dot(d, sunDir));
+}
+
 fragment float4 skyFragment(SkyOut in [[stage_in]],
                             constant SkyParams& p [[buffer(0)]],
                             texture2d<float> moonTex [[texture(0)]],
@@ -5405,13 +5530,23 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
                             sampler noiseSamp [[sampler(1)]],
                             texture2d<float> cloudTex [[texture(2)]],
                             sampler cloudSamp [[sampler(2)]],
-                            constant float4x4& prevVP [[buffer(1)]]) // pre-pass camera (low-res cloud reprojection)
+                            constant float4x4& prevVP [[buffer(1)]], // pre-pass camera (low-res cloud reprojection)
+                            texture2d<float> skyLutRayleigh [[texture(3)]],
+                            texture2d<float> skyLutMie [[texture(4)]],
+                            constant float4& skyLut [[buffer(2)]])   // x > 0.5: the LUT holds THIS sun
 {
 	float4 wp1 = p.invViewProj * float4(in.ndc,  1.0, 1.0);
 	float4 wp0 = p.invViewProj * float4(in.ndc, -1.0, 1.0);
 	// normalize → stars/nebula/celestial frame don't jitter as the camera turns (GL parity).
 	float3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
-	float3 col  = skyColor(dir, p.sunDir.xyz);
+	float3 col;
+	if (skyLut.x > 0.5)
+	{
+		float3 sunN = normalize(p.sunDir.xyz);
+		col = skyColorAtmo(dir, sunN, atmoScatterLut(dir, sunN, skyLutRayleigh, skyLutMie));
+	}
+	else
+		col = skyColor(dir, p.sunDir.xyz);
 	// Star-free atmosphere base for the REALISTIC cloud path's ambient/twilight
 	// fill: feeding the full `col` (stars/nebula/moon already added) into the
 	// cloud march paints the star field ONTO the cloud bodies via the twilight
@@ -5520,27 +5655,38 @@ float2 atmoRaySphere(float3 ro, float3 rd, float R)
 	d = sqrt(d);
 	return float2(-b - d, -b + d);
 }
-float3 atmoScatter(float3 dir, float3 sunDir)
+constant float3 kAtmoBR = float3(5.802e-6, 13.558e-6, 33.1e-6); // Rayleigh scattering
+constant float  kAtmoBM = 3.996e-6;                             // Mie scattering
+constant float3 kAtmoBO = float3(0.650e-6, 1.881e-6, 0.085e-6); // ozone absorption
+float atmoPhaseRayleigh(float mu) { return 0.05968310 * (1.0 + mu * mu); } // 3/(16π)
+float atmoPhaseMie(float mu)                                               // Cornette-Shanks
+{
+	const float g = 0.76, g2 = g * g;
+	return 0.11936620 * ((1.0 - g2) * (1.0 + mu * mu)) /
+	       ((2.0 + g2) * pow(1.0 + g2 - 2.0 * g * mu, 1.5));
+}
+// The view-path integral, phase-free. atmoScatter() applies both phases; the
+// sky pass's Sky-View LUT (skyViewLutFragment) bakes the Rayleigh part and
+// leaves the sharp Mie lobe to be applied per pixel with the exact angle.
+struct AtmoSums { float3 sumR; float3 sumM; float odR; float odM; float odO; };
+AtmoSums atmoIntegrate(float3 dir, float3 sunDir)
 {
 	const float Rg = 6360.0e3, Ra = 6440.0e3;                  // ground / atmosphere-top radius
-	const float3 bR = float3(5.802e-6, 13.558e-6, 33.1e-6);    // Rayleigh scattering
-	const float bM = 3.996e-6;                                 // Mie scattering
-	const float3 bO = float3(0.650e-6, 1.881e-6, 0.085e-6);    // ozone absorption
+	const float3 bR = kAtmoBR, bO = kAtmoBO;
+	const float bM = kAtmoBM;
 	const float HR = 8500.0, HM = 1200.0;                      // scale heights
+	AtmoSums s;
+	s.sumR = float3(0.0); s.sumM = float3(0.0);
+	s.odR = 0.0; s.odM = 0.0; s.odO = 0.0;                     // view-path optical depths
 	float3 ro = float3(0.0, Rg + 200.0, 0.0);
 	float2 tA = atmoRaySphere(ro, dir, Ra);
-	if (tA.y <= 0.0) return float3(0.0);
+	if (tA.y <= 0.0) return s;                                 // all zero → atmoScatter() = 0
 	float t0 = max(tA.x, 0.0), t1 = tA.y;
 	float2 tG = atmoRaySphere(ro, dir, Rg);
 	if (tG.x > 0.0) t1 = min(t1, tG.x);                        // stop at the ground
 	float ds = (t1 - t0) / 12.0;
-	float mu = dot(dir, sunDir);
-	float phR = 0.05968310 * (1.0 + mu * mu);                  // Rayleigh phase 3/(16π)
-	const float g = 0.76, g2 = g * g;
-	float phM = 0.11936620 * ((1.0 - g2) * (1.0 + mu * mu)) /  // Cornette-Shanks
-	            ((2.0 + g2) * pow(1.0 + g2 - 2.0 * g * mu, 1.5));
 	float3 sumR = float3(0.0), sumM = float3(0.0);
-	float odR = 0.0, odM = 0.0, odO = 0.0;                     // view-path optical depths
+	float odR = 0.0, odM = 0.0, odO = 0.0;
 	for (int i = 0; i < 12; ++i)
 	{
 		float3 p   = ro + dir * (t0 + (float(i) + 0.5) * ds);
@@ -5565,18 +5711,43 @@ float3 atmoScatter(float3 dir, float3 sunDir)
 		sumR += tr * dR;
 		sumM += tr * dM;
 	}
-	float3 L = (sumR * bR * phR + sumM * bM * phM) * 20.0;     // sun irradiance → engine exposure
-	// Fake MULTIPLE scattering: single scatter alone leaves long grazing paths
-	// yellow/dark at noon (the in-filled skylight is missing). Fill proportional
-	// to how opaque the view path is, fading out toward sunset so dusk stays warm.
-	float3 Tcam = exp(-(bR * odR + (bM * 1.11) * odM + bO * odO));
-	L += (float3(1.0) - Tcam) * float3(0.30, 0.42, 0.60) * (0.35 * smoothstep(0.0, 0.35, sunDir.y));
-	return L;
+	s.sumR = sumR; s.sumM = sumM;
+	s.odR = odR; s.odM = odM; s.odO = odO;
+	return s;
 }
+// Fake MULTIPLE scattering: single scatter alone leaves long grazing paths
+// yellow/dark at noon (the in-filled skylight is missing). Fill proportional
+// to how opaque the view path is, fading out toward sunset so dusk stays warm.
+float3 atmoMultiFill(AtmoSums s, float3 sunDir)
+{
+	float3 Tcam = exp(-(kAtmoBR * s.odR + (kAtmoBM * 1.11) * s.odM + kAtmoBO * s.odO));
+	return (float3(1.0) - Tcam) * float3(0.30, 0.42, 0.60) * (0.35 * smoothstep(0.0, 0.35, sunDir.y));
+}
+float3 atmoScatter(float3 dir, float3 sunDir)
+{
+	AtmoSums s = atmoIntegrate(dir, sunDir);
+	float mu = dot(dir, sunDir);
+	float3 L = (s.sumR * kAtmoBR * atmoPhaseRayleigh(mu)
+	          + s.sumM * kAtmoBM * atmoPhaseMie(mu)) * 20.0;  // sun irradiance → engine exposure
+	return L + atmoMultiFill(s, sunDir);
+}
+// Everything skyColor() adds on top of the scattering integral. `dir` and
+// `sunDir` are normalised; `sky` is atmoScatter() at the horizon-clamped
+// direction (skyColor), or the same value read from the Sky-View LUT
+// (skyFragment, atmoScatterLut).
+float3 skyColorAtmo(float3 dir, float3 sunDir, float3 sky);
 float3 skyColor(float3 dir, float3 sunDir)
 {
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
+	// Below-horizon rays reuse the horizon colour (the ground-haze blend takes
+	// over there) — without the clamp a hard navy "ocean band" appears where the
+	// ray hits the planet after a short path.
+	return skyColorAtmo(dir, sunDir,
+	                    atmoScatter(normalize(float3(dir.x, max(dir.y, 0.004), dir.z)), sunDir));
+}
+float3 skyColorAtmo(float3 dir, float3 sunDir, float3 sky)
+{
 	float sunY = clamp(sunDir.y, -0.3, 1.0);
 	// The clamp above pins everything below -0.3, which is fine for the day/dusk
 	// tints but useless for "how deep into the night are we" — at true midnight it
@@ -5591,11 +5762,8 @@ float3 skyColor(float3 dir, float3 sunDir)
 	// never leave a dark gap between them.
 	float toNight = 1.0 - smoothstep(-0.34, -0.14, sunYd);
 
-	// Physically-based base sky: day blue, sunset reddening and the blue hour all
-	// come from the single-scattering integral above. Below-horizon rays reuse the
-	// horizon colour (the ground-haze blend takes over there) — without the clamp a
-	// hard navy "ocean band" appears where the ray hits the planet after a short path.
-	float3 sky = atmoScatter(normalize(float3(dir.x, max(dir.y, 0.004), dir.z)), sunDir);
+	// Physically-based base sky (`sky`): day blue, sunset reddening and the blue
+	// hour all come from the single-scattering integral above.
 
 	// ── Twilight wedge ──────────────────────────────────────────────────────
 	// Once the sun is under the horizon the 12-step single-scatter march has
@@ -6004,6 +6172,12 @@ void MetalRenderer::Shutdown()
 	for (auto& [sdlWin, target] : m_secondaryTargets)
 		DestroyTarget(target);
 	m_secondaryTargets.clear();
+	// Before the layer goes: the held drawable belongs to it.
+	if (m_heldDrawable)
+	{
+		CFBridgingRelease(m_heldDrawable);
+		m_heldDrawable = nullptr;
+	}
 	DestroyTarget(m_primaryTarget);
 
 	for (auto& [id, mesh] : m_meshCache)
@@ -6031,6 +6205,9 @@ void MetalRenderer::Shutdown()
 	for (auto& [k, tex] : m_graphTexCache)
 		if (tex) CFBridgingRelease(tex);
 	m_graphTexCache.clear();
+	for (auto& [k, tex] : m_uiTexCache)
+		if (tex) CFBridgingRelease(tex);
+	m_uiTexCache.clear();
 
 	DestroyViewportTarget();
 	DestroyHDRTarget();
@@ -6152,7 +6329,9 @@ void MetalRenderer::Shutdown()
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
 	DestroyCloudShadowTarget();
-	if (m_moonTexture)          { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
+	if (m_skyLutPipeline)       { CFBridgingRelease(m_skyLutPipeline);       m_skyLutPipeline = nullptr; }
+	DestroySkyViewLut();
+	if (m_moonTexture)         { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
 	if (m_dummyTexture)    { CFBridgingRelease(m_dummyTexture);    m_dummyTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
@@ -6184,6 +6363,7 @@ void MetalRenderer::Shutdown()
 	if (m_ssaoNoiseSampler)  { CFBridgingRelease(m_ssaoNoiseSampler);  m_ssaoNoiseSampler = nullptr; }
 	if (m_debugLinePipeline) { CFBridgingRelease(m_debugLinePipeline); m_debugLinePipeline = nullptr; }
 	ReleaseRibbonBuffers();
+	ReleaseUploadRing();
 
 	if (m_imguiPassDescriptor) { CFBridgingRelease(m_imguiPassDescriptor); m_imguiPassDescriptor = nullptr; }
 	if (m_commandQueue)        { CFBridgingRelease(m_commandQueue);        m_commandQueue = nullptr; }
@@ -6268,8 +6448,11 @@ void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& vi
 		// Pack line endpoints: [pos3 color3] per vertex
 		const size_t vertCount = m_debugLines.size() * 2;
 		const size_t byteSize  = vertCount * 6 * sizeof(float);
-		id<MTLBuffer> vbuf = [device newBufferWithLength:byteSize options:MTLResourceStorageModeShared];
-		float* ptr = (float*)vbuf.contents;
+		void*  vbufPtr = nullptr;
+		size_t vbufOff = 0;
+		float* ptr = static_cast<float*>(UploadTransient(byteSize, vbufPtr, vbufOff));
+		if (!ptr) return;
+		id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)vbufPtr;
 		for (const DebugLine& l : m_debugLines)
 		{
 			*ptr++ = l.start.x; *ptr++ = l.start.y; *ptr++ = l.start.z;
@@ -6292,10 +6475,73 @@ void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& vi
 
 		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
-		[enc setVertexBuffer:vbuf offset:0 atIndex:0];
+		[enc setVertexBuffer:vbuf offset:vbufOff atIndex:0];
 		[enc setVertexBytes:&vp length:sizeof(vp) atIndex:1];
 		[enc drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertCount];
 	}
+}
+
+void* MetalRenderer::UploadTransient(size_t len, void*& outBuf, size_t& outOffset)
+{
+	outBuf    = nullptr;
+	outOffset = 0;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return nullptr;
+	len = std::max<size_t>(len, 1);
+
+	const HE::FrameUploadRing::Slice s = m_uploadRing->allocate(len);
+	if (s.valid())
+	{
+		// A chunk index the ring has not handed out before: back it now.
+		while (m_uploadRingBufs.size() < m_uploadRing->chunkCount())
+		{
+			const uint32_t i = static_cast<uint32_t>(m_uploadRingBufs.size());
+			id<MTLBuffer> b = [device newBufferWithLength:m_uploadRing->chunkCapacity(i)
+			                                      options:MTLResourceStorageModeShared];
+			if (!b) break;
+			b.label = @"HE upload ring";
+			m_uploadRingBufs.push_back((void*)CFBridgingRetain(b));
+			if (m_uploadRingBufs.size() == 8 || m_uploadRingBufs.size() == 32 || m_uploadRingBufs.size() == 128)
+				HE_LOG_INFO(RHI, "MetalRenderer: upload ring grew to %zu chunks", m_uploadRingBufs.size());
+		}
+		if (s.chunk < m_uploadRingBufs.size())
+		{
+			id<MTLBuffer> b = (__bridge id<MTLBuffer>)m_uploadRingBufs[s.chunk];
+			outBuf    = m_uploadRingBufs[s.chunk];
+			outOffset = s.offset;
+			return static_cast<uint8_t*>(b.contents) + s.offset;
+		}
+		// Metal refused the chunk: the slice is simply never used.
+	}
+
+	// No ring frame open (preview / thumbnail passes with their own command
+	// buffer): a fresh buffer, as before the ring. Autoreleased so it outlives
+	// this call; the encoder retains it once bound.
+	id<MTLBuffer> __autoreleasing fresh = [device newBufferWithLength:len
+	                                                          options:MTLResourceStorageModeShared];
+	if (!fresh) return nullptr;
+	outBuf = (__bridge void*)fresh;
+	return fresh.contents;
+}
+
+bool MetalRenderer::UploadTransientBytes(const void* data, size_t len, void*& outBuf, size_t& outOffset)
+{
+	void* dst = UploadTransient(len, outBuf, outOffset);
+	if (!dst) return false;
+	if (data && len) std::memcpy(dst, data, len);
+	return true;
+}
+
+void MetalRenderer::ReleaseUploadRing()
+{
+	// In-flight command buffers retain the chunks they bound, so dropping our
+	// references here is safe. A fresh ring keeps chunk indices and buffers in
+	// step if the renderer is initialised again; late completion handlers
+	// release into the old ring, which they keep alive.
+	for (void* b : m_uploadRingBufs)
+		if (b) CFBridgingRelease(b);
+	m_uploadRingBufs.clear();
+	m_uploadRing = std::make_shared<HE::FrameUploadRing>();
 }
 
 void MetalRenderer::ReleaseRibbonBuffers()
@@ -6719,6 +6965,18 @@ void MetalRenderer::CreateScenePipeline()
 				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
 		m_cloudShadowPipeline = (void*)CFBridgingRetain(csPso);
 
+		// ── Sky-View LUT bake (atmoScatter → 2 × RGBA16F, no depth; EncodeSkyViewLut) ──
+		MTLRenderPipelineDescriptor* lutDesc = [[MTLRenderPipelineDescriptor alloc] init];
+		lutDesc.vertexFunction   = [skyLib newFunctionWithName:@"skyVertex"];
+		lutDesc.fragmentFunction = [skyLib newFunctionWithName:@"skyViewLutFragment"];
+		lutDesc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float; // Rayleigh + fill
+		lutDesc.colorAttachments[1].pixelFormat = MTLPixelFormatRGBA16Float; // Mie, phase-free
+		id<MTLRenderPipelineState> lutPso = [device newRenderPipelineStateWithDescriptor:lutDesc error:&skyError];
+		if (!lutPso)
+			throw std::runtime_error(std::string("MetalRenderer: sky-view LUT pipeline creation failed: ")
+				+ (skyError ? [[skyError localizedDescription] UTF8String] : "unknown"));
+		m_skyLutPipeline = (void*)CFBridgingRetain(lutPso);
+
 		MTLDepthStencilDescriptor* depthDesc = [[MTLDepthStencilDescriptor alloc] init];
 		depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
 		depthDesc.depthWriteEnabled    = YES;
@@ -7117,7 +7375,6 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			                                m_shadowBatches);
 			const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
 			void* boundPipeline = m_shadowPipeline;
-			id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
 			std::vector<glm::mat4> mvps;
 			for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
 			{
@@ -7150,12 +7407,13 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 						HE_LOG_INFO(RHI, "MetalRenderer: shadow pass instanced (first run: %u casters)",
 						            static_cast<unsigned>(b.count));
 					}
-					// Fresh buffer per batch, the scene pass's convention: the encoder
-					// retains it until the command buffer completes, nothing to sync.
-					id<MTLBuffer> instBuf = [dev newBufferWithBytes:mvps.data()
-						length:mvps.size() * sizeof(glm::mat4)
-						options:MTLResourceStorageModeShared];
-					[enc setVertexBuffer:instBuf offset:0 atIndex:5];
+					// A slice of the frame's upload ring (UploadTransient), released
+					// when this frame's command buffer completes.
+					void*  instBuf = nullptr;
+					size_t instOff = 0;
+					if (!UploadTransientBytes(mvps.data(), mvps.size() * sizeof(glm::mat4), instBuf, instOff))
+						continue;
+					[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 					                indexCount:ic
 					                 indexType:MTLIndexTypeUInt32
@@ -7919,7 +8177,6 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		                             kNoOwnerEntity, m_prepassBatches);
 		const bool canInstance = m_giGBufInstancedPipeline && metalInstancingEnabled();
 		void* boundPipeline = m_giGBufPipeline;
-		id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
 		std::vector<glm::mat4> xf;
 		for (const RenderSorter::DepthBatch& b : m_prepassBatches.batches)
 		{
@@ -7954,12 +8211,12 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 					HE_LOG_INFO(RHI, "MetalRenderer: GI pre-pass instanced (first run: %u objects)",
 					            static_cast<unsigned>(b.count));
 				}
-				// Fresh buffer per batch, the scene pass's convention: the encoder
-				// retains it until the command buffer completes, nothing to sync.
-				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
-					length:xf.size() * sizeof(glm::mat4)
-					options:MTLResourceStorageModeShared];
-				[genc setVertexBuffer:instBuf offset:0 atIndex:5];
+				// A slice of the frame's upload ring (UploadTransient).
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+					continue;
+				[genc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 				[genc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
 				                  indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0
 				              instanceCount:(NSUInteger)b.count];
@@ -8079,8 +8336,12 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 
 void MetalRenderer::EnsureGIProbeGrid()
 {
-	if (m_giProbeGridBuilt) return;
 	if (m_renderWorld.objects.empty()) return; // wait for real geometry before committing to a grid
+	// Once built, only re-check when the scene's GEOMETRY changed (objects
+	// added/removed, or a mesh rebuilt via InvalidateMesh) — never on motion
+	// alone (GIProbeGrid.h).
+	const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
+	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
 	// m_renderWorld was re-extracted by EncodeGIAccelBuild's m_extractor.extract()
 	// call earlier this frame, which creates BRAND NEW RenderObjects whose
@@ -8094,21 +8355,12 @@ void MetalRenderer::EnsureGIProbeGrid()
 		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId); mesh && mesh->localBounds.isValid())
 			obj.worldBounds = mesh->localBounds.transformed(obj.transform);
 
-	// KNOWN v1 LIMITATION: this only unions m_renderWorld.objects (the generic
-	// mesh-asset RenderObject set) — Landscape/Terrain chunks are a separate
-	// rendering system (see [[terrain-lod-chunking]]) and are NOT included, so a
-	// scene dominated by terrain will get a probe grid sized to its small props
-	// only, leaving the terrain surfaces themselves outside grid coverage (they
-	// sample zero indirect diffuse — safe, just visibly under-lit, not a crash).
-	// Confirmed empirically: the ShadowValidation test scene's large background
-	// surface stays outside the grid even after the worldBounds refresh above.
-	// Extending probe coverage to terrain is a follow-up, not in this slice.
-	//
-	// Union of every object's (now-correct) world bounds.
-	HE::AABB bounds;
-	for (const RenderObject& obj : m_renderWorld.objects)
-		if (obj.worldBounds.isValid())
-			bounds.expand(obj.worldBounds);
+	// Landscape/Terrain chunks are ordinary MeshComponent entities, so they ARE
+	// in m_renderWorld.objects (an older note here said otherwise). What kept a
+	// terrain out of the grid was the fixed 4 m × 10-probe (36 m) cap and the
+	// one-shot fit — both replaced by the shared FitGIProbeGrid (Thema 80).
+	int unresolved = 0;
+	HE::AABB bounds = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
 	if (!bounds.isValid())
 	{
 		// Fallback: a modest default volume around the origin so GI still does
@@ -8116,16 +8368,24 @@ void MetalRenderer::EnsureGIProbeGrid()
 		bounds.min = glm::vec3(-10.0f);
 		bounds.max = glm::vec3(10.0f);
 	}
+	if (!m_giGridTrack.shouldEvaluate(m_giProbeGridBuilt, sig, unresolved)) return;
 
-	const glm::vec3 extent = bounds.max - bounds.min;
-	glm::ivec3 counts;
-	counts.x = std::clamp(static_cast<int>(std::ceil(extent.x / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
-	counts.y = std::clamp(static_cast<int>(std::ceil(extent.y / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
-	counts.z = std::clamp(static_cast<int>(std::ceil(extent.z / kGIProbeSpacing)) + 1, 1, kGIMaxProbesPerAxis);
+	if (m_giProbeGridBuilt)
+	{
+		HE::GIProbeGridFit current;
+		current.origin = m_giGridOrigin; current.counts = m_giGridCounts; current.spacing = m_giProbeSpacing;
+		if (!HE::GIProbeGridNeedsRefit(current, bounds)) return;
+		// EnsureGIProbeAtlas below reallocates the atlases for the new counts;
+		// in-flight command buffers keep their own references to the old ones.
+	}
+	// Centred like GL/D3D/Vulkan (this port used to anchor at bounds.min).
+	const HE::GIProbeGridFit fit = HE::FitGIProbeGrid(bounds);
+	if (!fit.valid()) return;
 
-	m_giGridOrigin        = bounds.min;
-	m_giGridCounts        = counts;
-	m_giProbeCount        = counts.x * counts.y * counts.z;
+	m_giGridOrigin        = fit.origin;
+	m_giGridCounts        = fit.counts;
+	m_giProbeSpacing      = fit.spacing;
+	m_giProbeCount        = fit.probeCount();
 	m_giProbesPerRow      = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(m_giProbeCount))));
 	m_giProbeUpdateCursor = 0;
 	m_giProbeGridBuilt    = true;
@@ -8134,8 +8394,8 @@ void MetalRenderer::EnsureGIProbeGrid()
 
 	HE_LOG_INFO(RHI, "%s",
 		("MetalRenderer: GI probe grid built — " + std::to_string(m_giProbeCount) + " probes ("
-		 + std::to_string(counts.x) + "x" + std::to_string(counts.y) + "x" + std::to_string(counts.z)
-		 + "), spacing " + std::to_string(kGIProbeSpacing)).c_str());
+		 + std::to_string(fit.counts.x) + "x" + std::to_string(fit.counts.y) + "x" + std::to_string(fit.counts.z)
+		 + "), spacing " + std::to_string(m_giProbeSpacing)).c_str());
 }
 
 void MetalRenderer::EnsureGIProbePipeline()
@@ -8239,13 +8499,13 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 		}
 
 		GIProbeParamsCPU pp{};
-		pp.gridOrigin = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
+		pp.gridOrigin = glm::vec4(m_giGridOrigin, m_giProbeSpacing);
 		pp.gridCounts = glm::vec4(static_cast<float>(m_giGridCounts.x), static_cast<float>(m_giGridCounts.y),
 		                         static_cast<float>(m_giGridCounts.z), static_cast<float>(m_giProbesPerRow));
 		// Max ray distance: comfortably covers the grid's own diagonal so rays can
 		// reach across the whole probed volume; hysteresis matches the shadow
 		// pass's temporal-accumulation feel (converges over ~1-2s at 60fps).
-		const float maxDist = glm::length(glm::vec3(m_giGridCounts) * kGIProbeSpacing) + kGIProbeSpacing;
+		const float maxDist = glm::length(glm::vec3(m_giGridCounts) * m_giProbeSpacing) + m_giProbeSpacing;
 		pp.rayParams    = glm::vec4(maxDist, 0.92f, static_cast<float>(m_giProbeUpdateCursor), static_cast<float>(budget));
 		// Same dominant-directional pick as EncodeGIShadowRays: the one-bounce
 		// estimate must bounce the light the scene is actually lit by, with THAT
@@ -8299,7 +8559,7 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 // Upload a TextureAsset (RGBA8 or a cooked ASTC/BC7/BC3 block format) into a
 // retained id<MTLTexture>, or nullptr when unusable / this GPU can't sample the
 // shipped format. Defined below; forward-declared so the mesh uploads can share it.
-static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex);
+static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, bool honourSrgb = true);
 
 const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId)
 {
@@ -8503,15 +8763,17 @@ static bool metalTexPixelFormat(id<MTLDevice> device, TextureFormat fmt, bool sr
 
 // Upload a TextureAsset into a retained id<MTLTexture> (nullptr if unusable or this
 // GPU can't sample the shipped format). Shared by the material base texture, the
-// node-graph project textures, and both mesh uploads.
-static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex)
+// node-graph project textures, and both mesh uploads. honourSrgb = false uploads
+// an sRGB-flagged texture as its plain Unorm twin (bytes sampled as they are):
+// the UI pass wants that, see ResolveUITexture.
+static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, bool honourSrgb)
 {
 	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
 		return nullptr;
 	const uint32_t mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
 
 	MTLPixelFormat pf = MTLPixelFormatRGBA8Unorm; bool isBlock = false, supported = false;
-	if (!metalTexPixelFormat(device, tex->format, tex->srgb, pf, isBlock, supported) || !supported)
+	if (!metalTexPixelFormat(device, tex->format, tex->srgb && honourSrgb, pf, isBlock, supported) || !supported)
 		return nullptr; // unknown format, or this GPU can't sample it → flat
 
 	MTLTextureDescriptor* desc = [MTLTextureDescriptor
@@ -8576,6 +8838,25 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
 		m_contentManager->resolveTextureRef(texId, path));
 	m_graphTexCache.emplace(key, retained);
+	return retained;
+}
+
+// The image of a UI quad (Image widget, textured Border/Button). Its own cache,
+// uploaded WITHOUT the sRGB decode: UI colours are sRGB numbers end to end (the
+// swapchain is BGRA8Unorm, nothing encodes on write), so an _sRGB texture would
+// come out linear-decoded and too dark ("the orange logo turns red", Thema 107).
+// Raw bytes in = raw bytes out, exactly what the widget designer shows. Not
+// shared with m_graphTexCache on purpose: a material samples the same asset in
+// linear light, which is right there.
+void* MetalRenderer::ResolveUITexture(const HE::UUID& texId, const std::string& path)
+{
+	const std::string key = texId != HE::UUID{}
+		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
+	if (key.empty() || !m_contentManager) return nullptr;
+	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
+	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
+		m_contentManager->resolveTextureRef(texId, path), /*honourSrgb=*/false);
+	m_uiTexCache.emplace(key, retained);
 	return retained;
 }
 
@@ -9773,7 +10054,8 @@ void* MetalRenderer::RenderWorldPreview(ContentManager& cm, HorizonWorld& world,
 		if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov)
 			skyClock = static_cast<float>(std::atof(ov));
 		EncodeSky((__bridge void*)enc, glm::inverse(viewProj), snapshot.sunDirection,
-		          skyClock, previewEnvSettings, camPos, /*lowResClouds=*/false);
+		          skyClock, previewEnvSettings, camPos, /*lowResClouds=*/false,
+		          /*useSkyLut=*/false); // own command buffer: no ordering against the bake
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 	}
 
@@ -11356,7 +11638,6 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		                             kNoOwnerEntity, m_prepassBatches);
 		const bool canInstance = instPipeline && metalInstancingEnabled();
 		void* boundPipeline = plainPipeline;
-		id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
 		std::vector<glm::mat4> xf;
 		for (const RenderSorter::DepthBatch& b : m_prepassBatches.batches)
 		{
@@ -11404,12 +11685,12 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 					HE_LOG_INFO(RHI, "MetalRenderer: SSAO pre-pass instanced (first run: %u objects, %s)",
 					            static_cast<unsigned>(b.count), mrt ? "MRT" : "plain");
 				}
-				// Fresh buffer per batch, the scene pass's convention: the encoder
-				// retains it until the command buffer completes, nothing to sync.
-				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
-					length:xf.size() * sizeof(glm::mat4)
-					options:MTLResourceStorageModeShared];
-				[enc setVertexBuffer:instBuf offset:0 atIndex:5];
+				// A slice of the frame's upload ring (UploadTransient).
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+					continue;
+				[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
 				                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0
 				             instanceCount:(NSUInteger)b.count];
@@ -12273,6 +12554,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 		// PBR shaders. Shared fill (HE::FillMaterialLightWindow); the UI pass has
 		// no local shadow atlas, so it passes false.
 		HE::FillMaterialLightWindow(m_renderWorld, matLight, /*localShadowsActive=*/false);
+		HE::FillMaterialWind(GetEnvironment(), matLight); // Wind nodes, next to Time
 	}
 
 	// The uiVertex's repurposed U block (see MaterialShaderLibrary::uiVertex).
@@ -12437,7 +12719,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 		bool textured = false;
 		if (obj.type == 0 && obj.textureAssetId != HE::UUID{})
 		{
-			if (void* t = ResolveGraphTexture(obj.textureAssetId, std::string()))
+			if (void* t = ResolveUITexture(obj.textureAssetId, std::string()))
 			{
 				[enc setFragmentTexture:(__bridge id<MTLTexture>)t atIndex:0];
 				boundAtlasKey = 0xFFFFFFFFu;   // not a font atlas any more
@@ -12498,7 +12780,7 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
                              const glm::vec3& sunDir, float time,
                              const IRenderer::EnvironmentSettings& env,
-                             const glm::vec3& camPos, bool lowResClouds)
+                             const glm::vec3& camPos, bool lowResClouds, bool useSkyLut)
 {
 	if (!m_skyPipeline) return;
 	if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
@@ -12528,7 +12810,64 @@ void MetalRenderer::EncodeSky(void* renderEncoder, const glm::mat4& invViewProj,
 	[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:2];
 	[enc setFragmentBytes:&p length:sizeof(p) atIndex:0];
 	[enc setFragmentBytes:&m_prepassViewProj[0][0] length:sizeof(glm::mat4) atIndex:1]; // low-res cloud reprojection
+	// Sky-View LUT on 3/4, read only when it was baked for THIS sun (within the
+	// tolerance UpdateSkyEnvCube also treats as unchanged). Otherwise — LUT off,
+	// not baked yet, or baked for another sun — the shader integrates per pixel.
+	const bool lutOn = useSkyLut && skyViewLutEnabled() && m_skyLutValid
+	                && m_skyLutRayleigh && m_skyLutMie
+	                && glm::distance(sunDir, m_skyLutSunDir) < 1e-4f;
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)(lutOn ? m_skyLutRayleigh : m_dummyTexture) atIndex:3];
+	[enc setFragmentTexture:(__bridge id<MTLTexture>)(lutOn ? m_skyLutMie : m_dummyTexture) atIndex:4];
+	const simd::float4 lutFlag = { lutOn ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+	[enc setFragmentBytes:&lutFlag length:sizeof(lutFlag) atIndex:2];
 	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+}
+
+// Bakes atmoScatter for `sunDir` into the Sky-View LUT (skyViewLutFragment).
+// Frame level, before the scene encoder that draws the sky; re-bakes only when
+// the sun has moved. Cheap either way: 256×128 texels against the ~1 M sky
+// pixels it saves the integral on.
+void MetalRenderer::EncodeSkyViewLut(void* cmdBufPtr, const glm::vec3& sunDir)
+{
+	if (!m_skyLutPipeline || !skyViewLutEnabled() || !GetEnvironment().skyEnabled) return;
+	if (m_skyLutValid && glm::distance(sunDir, m_skyLutSunDir) < 1e-4f) return;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return;
+	if (!m_skyLutRayleigh || !m_skyLutMie)
+	{
+		MTLTextureDescriptor* d = [MTLTextureDescriptor
+			texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+			width:kSkyLutW height:kSkyLutH mipmapped:NO];
+		d.usage       = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+		d.storageMode = MTLStorageModePrivate;
+		if (!m_skyLutRayleigh) m_skyLutRayleigh = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+		if (!m_skyLutMie)      m_skyLutMie      = (void*)CFBridgingRetain([device newTextureWithDescriptor:d]);
+		if (!m_skyLutRayleigh || !m_skyLutMie) return;
+	}
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	void* const targets[2] = { m_skyLutRayleigh, m_skyLutMie };
+	for (int i = 0; i < 2; ++i)
+	{
+		pass.colorAttachments[i].texture     = (__bridge id<MTLTexture>)targets[i];
+		pass.colorAttachments[i].loadAction  = MTLLoadActionDontCare; // every texel is written
+		pass.colorAttachments[i].storeAction = MTLStoreActionStore;
+	}
+	id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pass];
+	[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_skyLutPipeline];
+	const simd::float4 sun = { sunDir.x, sunDir.y, sunDir.z, 0.0f };
+	[enc setFragmentBytes:&sun length:sizeof(sun) atIndex:0];
+	[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+	[enc endEncoding];
+	m_skyLutSunDir = sunDir;
+	m_skyLutValid  = true;
+}
+
+void MetalRenderer::DestroySkyViewLut()
+{
+	if (m_skyLutRayleigh) { CFBridgingRelease(m_skyLutRayleigh); m_skyLutRayleigh = nullptr; }
+	if (m_skyLutMie)      { CFBridgingRelease(m_skyLutMie);      m_skyLutMie = nullptr; }
+	m_skyLutValid = false;
 }
 
 void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -12546,6 +12885,8 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 	// to be cheap at night only because the atmosphere integral was wrongly
 	// short-circuiting there (see atmoRaySphere); with that fixed, twilight costs
 	// what daylight always did, so the parallelisation is no longer optional.
+	// Grain 1: a row is tens of µs of work, far above the default grain's
+	// assumption of a cheap per-index body.
 	std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
 	parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
 	{
@@ -12553,7 +12894,7 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 		const int t = static_cast<int>(idx % N);
 		HE::BuildSkyEnvFaceRow(N, f, t, sunDir,
 		                       &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
-	}, "SkyEnvBake");
+	}, "SkyEnvBake", 1);
 	for (int f = 0; f < 6; ++f)
 		[cube replaceRegion:MTLRegionMake2D(0, 0, N, N) mipmapLevel:0 slice:f
 		          withBytes:&px[(static_cast<size_t>(f) * N * N) * 4]
@@ -12589,7 +12930,7 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:3];
 	const bool giActive = m_giEnabled && m_giSupported && m_giShadowResult
 	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
-	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(giActive ? m_giShadowResult : m_dummyTexture) atIndex:5];
@@ -12746,7 +13087,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
 	auto drawSky = [&]() {
 		EncodeSky(renderEncoder, glm::inverse(viewProj), sunDir, skyClock,
-		          GetEnvironment(), m_renderWorld.camera.position, /*lowResClouds=*/true);
+		          GetEnvironment(), m_renderWorld.camera.position, /*lowResClouds=*/true,
+		          /*useSkyLut=*/true);
 	};
 	// Wireframe view (SetViewMode): rasterise ONE mesh loop as lines. Bracketed
 	// per loop, never "set once and restore before X" — the resolve, sky and
@@ -12939,7 +13281,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	scene.aaParams = glm::vec4(m_specularAA ? m_specularAAStrength : 0.0f, 0.0f, 0.0f, 0.0f);
 	[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
 
-	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+	GIUniforms giUniforms = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 
@@ -13369,17 +13711,16 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					xf.push_back(viewProj * t); // mvp
 					xf.push_back(t);            // model
 				}
-				// Fresh buffer per batch, same convention as the particle path: the
-				// encoder holds every bound resource until its command buffer
-				// completes, so there is nothing to hand-synchronise. A per-frame ring
-				// would need frame-in-flight tracking this backend does not have.
-				id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
-				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
-					length:xf.size() * sizeof(glm::mat4)
-					options:MTLResourceStorageModeShared];
+				// A slice of the frame's upload ring (UploadTransient): released by
+				// the frame command buffer's completion handler, so nothing to
+				// hand-synchronise. Outside EncodeFrame (previews) a fresh buffer.
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+					continue;
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
-				[encoder setVertexBuffer:instBuf offset:0 atIndex:5];
+				[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 				[encoder setFragmentTexture:texture atIndex:0];
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
@@ -13551,6 +13892,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// texture is bound this frame.
 	HE::FillMaterialLightWindow(m_renderWorld, matLight,
 	                            /*localShadowsActive=*/m_localShadowTex != nullptr);
+	HE::FillMaterialWind(GetEnvironment(), matLight); // Wind / Wind Sway nodes, next to Time
 	// Local (point/spot) shadow atlas for heLitP — the same matrices the
 	// built-in shaders sample with, Metal depth remap AND top-left UV origin
 	// pre-baked (uvFlipY * kMetalClipFix, exactly like csmVP below) so the
@@ -13621,7 +13963,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// shaders, so heLitP's indirect diffuse matches theirs instead of
 	// falling back to flat ambient while GI is on.
 	{
-		const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, kGIProbeSpacing,
+		const GIUniforms gu = BuildGIUniforms(giActive, m_giGridOrigin, m_giProbeSpacing,
 		                                      m_giGridCounts, m_giProbesPerRow,
 		                                      m_giIndirectIntensity);
 		for (int k = 0; k < 4; ++k)
@@ -13658,7 +14000,6 @@ void MetalRenderer::EncodeClusterData(void* renderEncoder,
                                       HE::MaterialShaderLibrary::ResolveUniforms& ru)
 {
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
 	const glm::mat4 viewProj =
 		m_renderWorld.camera.projection * m_renderWorld.camera.view;
@@ -13755,19 +14096,18 @@ void MetalRenderer::EncodeClusterData(void* renderEncoder,
 	if (lightData.empty()) lightData.push_back(glm::vec4(0.0f)); // never a 0-byte buffer
 	if (indices.empty())   indices.push_back(0u);
 
-	// Fresh per-frame buffers (newBufferWithBytes) — the encoder retains them.
-	id<MTLBuffer> lightBuf = [device newBufferWithBytes:lightData.data()
-	                                             length:lightData.size() * sizeof(glm::vec4)
-	                                            options:MTLResourceStorageModeShared];
-	id<MTLBuffer> gridBuf  = [device newBufferWithBytes:grid.data()
-	                                             length:grid.size() * sizeof(uint32_t)
-	                                            options:MTLResourceStorageModeShared];
-	id<MTLBuffer> idxBuf   = [device newBufferWithBytes:indices.data()
-	                                             length:indices.size() * sizeof(uint32_t)
-	                                            options:MTLResourceStorageModeShared];
-	[encoder setFragmentBuffer:lightBuf offset:0 atIndex:4];
-	[encoder setFragmentBuffer:gridBuf  offset:0 atIndex:5];
-	[encoder setFragmentBuffer:idxBuf   offset:0 atIndex:6];
+	// Per-frame lists as slices of the frame's upload ring (UploadTransient);
+	// outside EncodeFrame each is a fresh buffer, as they all used to be.
+	void*  lightBuf = nullptr;
+	void*  gridBuf  = nullptr;
+	void*  idxBuf   = nullptr;
+	size_t lightOff = 0, gridOff = 0, idxOff = 0;
+	UploadTransientBytes(lightData.data(), lightData.size() * sizeof(glm::vec4), lightBuf, lightOff);
+	UploadTransientBytes(grid.data(),      grid.size() * sizeof(uint32_t),       gridBuf,  gridOff);
+	UploadTransientBytes(indices.data(),   indices.size() * sizeof(uint32_t),    idxBuf,   idxOff);
+	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)lightBuf offset:lightOff atIndex:4];
+	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)gridBuf  offset:gridOff  atIndex:5];
+	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)idxBuf   offset:idxOff   atIndex:6];
 
 	ru.clusterParams[0]  = static_cast<float>(kClusterGridX);
 	ru.clusterParams[1]  = static_cast<float>(kClusterGridY);
@@ -14661,7 +15001,7 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// re-enables the whole block in both kernels).
 		const float hist = 0.0f;
 		rp.skyAmbient   = glm::vec4(m_renderWorld.ambient, hist);
-		rp.gridOrigin   = glm::vec4(m_giGridOrigin, kGIProbeSpacing);
+		rp.gridOrigin   = glm::vec4(m_giGridOrigin, m_giProbeSpacing);
 		rp.gridCounts   = glm::vec4(static_cast<float>(m_giGridCounts.x),
 		                            static_cast<float>(m_giGridCounts.y),
 		                            static_cast<float>(m_giGridCounts.z),
@@ -14958,6 +15298,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		// is already an encoded texel.
 		matLight.specAA[0] = m_specularAA ? m_specularAAStrength : 0.0f;
 		matLight.specAA[1] = 1.0f;
+		// The G-buffer's WPO vertex stage reads this block too: without the wind
+		// the deferred path would draw every Wind Sway material standing still.
+		HE::FillMaterialWind(GetEnvironment(), matLight);
 	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
@@ -15236,13 +15579,13 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 					xf.push_back(viewProj * t); // mvp
 					xf.push_back(t);            // model
 				}
-				id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
-				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
-					length:xf.size() * sizeof(glm::mat4)
-					options:MTLResourceStorageModeShared];
+				void*  instBuf = nullptr;   // a slice of the frame's upload ring
+				size_t instOff = 0;
+				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+					continue;
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
-				[encoder setVertexBuffer:instBuf offset:0 atIndex:5];
+				[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 				[encoder setFragmentTexture:texture atIndex:0];
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
@@ -15334,18 +15677,23 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					m_giSwBlasDirty = true;
 				}
 			}
+			// A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the
+			// scene box without changing which objects exist → re-check the fit.
+			if (!m_pendingMeshInvalidations.empty()) m_giGridTrack.meshRebuilt = true;
 			m_pendingMeshInvalidations.clear();
 
 			// Same for textures rewritten in place (landscape weightmap paints).
-			// m_graphTexCache is keyed by "hi:lo" for UUID-resolved entries.
+			// m_graphTexCache (and m_uiTexCache, the UI-pass twin) is keyed by
+			// "hi:lo" for UUID-resolved entries.
 			for (const HE::UUID& id : m_pendingTexInvalidations)
 			{
 				const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
-				if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
-				{
-					if (it->second) RetireTexture(it->second);
-					m_graphTexCache.erase(it);
-				}
+				for (auto* cache : { &m_graphTexCache, &m_uiTexCache })
+					if (auto it = cache->find(key); it != cache->end())
+					{
+						if (it->second) RetireTexture(it->second);
+						cache->erase(it);
+					}
 			}
 			m_pendingTexInvalidations.clear();
 		}
@@ -15365,6 +15713,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 		id<MTLCommandQueue>  queue   = (__bridge id<MTLCommandQueue>)m_commandQueue;
 		id<MTLCommandBuffer> cmdBuf  = [queue commandBuffer];
+		// Per-frame uploads from here on take slices of the ring; the frame is
+		// closed and handed to the last command buffer's completion just before
+		// the commit below. No path between here and there returns early.
+		m_uploadRing->beginFrame();
 
 		// ── Per-pass GPU timing setup (only while a profiler capture records) ──
 		// Builds one over-allocated counter sample buffer for this frame; the major
@@ -15430,8 +15782,15 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Stage-boundary counter sampling — the NON-detailed per-encoder path. Off in
 		// detailed mode and where the GPU lacks counter support. (These spans overlap
 		// on TBDR; the profiler flags that. Detailed capture is the reliable per-pass.)
+		// Also off when the profiler's counter-sampling switch is off (FPS runs, perf
+		// audit B10): no sample buffer → every ftAttach* no-ops and the frame is
+		// published by the whole-frame handler below. The buffer is deliberately
+		// fresh per frame, not pooled: a reused one keeps last frame's timestamps in
+		// slots this frame never writes (an encoder without vertex work skips its
+		// start sample), and those would resolve as plausible, wrong pass times.
 		id<MTLCounterSampleBuffer> sampleBuf = nil;   // strong ref kept alive until commit
-		if (isPrimary && m_counterSamplingOk && !detailed && EngineProfiler::instance().isRecording())
+		if (isPrimary && m_counterSamplingOk && !detailed && EngineProfiler::instance().isRecording()
+		    && EngineProfiler::instance().gpuCounterSampling())
 		{
 			if (@available(macOS 11.0, *))
 			{
@@ -15478,12 +15837,26 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const bool shOff = m_viewportReqW > 0 && m_viewportReqH > 0;
 			shW = shOff ? (int)m_viewportReqW : pw;
 			shH = shOff ? (int)m_viewportReqH : ph;
-			EncodeShadowMap((__bridge void*)cmdBuf,
-			                shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeShadowMap");
+				EncodeShadowMap((__bridge void*)cmdBuf,
+				                shH > 0 ? static_cast<float>(shW) / static_cast<float>(shH) : 1.0f);
+			}
 			// Cloud-shadow map: rendered before the G-buffer/scene passes (both
 			// sample it at texture 16). Uses the extraction EncodeShadowMap just
 			// ran (dominant light + camera).
-			EncodeCloudShadow((__bridge void*)cmdBuf);
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeCloudShadow");
+				EncodeCloudShadow((__bridge void*)cmdBuf);
+			}
+			// Sky-View LUT for the sky pass in the scene encoder. The sun comes from
+			// the extraction EncodeShadowMap ran; if that one was skipped it is last
+			// frame's, and EncodeSky falls back to the per-pixel integral whenever
+			// the LUT's sun doesn't match the one it draws with.
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeSkyViewLut");
+				EncodeSkyViewLut((__bridge void*)cmdBuf, m_renderWorld.sunDirection);
+			}
 		}
 
 		// Step the GPU weather-particle pool once per frame (primary only), before the
@@ -15539,6 +15912,20 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const int sceneW = std::max(1, (int)std::lround(outW * rscale));
 			const int sceneH = std::max(1, (int)std::lround(outH * rscale));
 			EnsureHDRTarget(sceneW, sceneH);
+			// The resolution the scene is actually shaded at, logged when it
+			// changes: the window size says nothing about it (the editor draws
+			// into a viewport pane), and a profiler capture is not comparable
+			// without it.
+			{
+				static int s_lastSceneW = 0, s_lastSceneH = 0, s_lastOutW = 0, s_lastOutH = 0;
+				if (sceneW != s_lastSceneW || sceneH != s_lastSceneH || outW != s_lastOutW || outH != s_lastOutH)
+				{
+					s_lastSceneW = sceneW; s_lastSceneH = sceneH; s_lastOutW = outW; s_lastOutH = outH;
+					HE_LOG_INFO(RHI, "Metal: scene render size %dx%d (output %dx%d, render scale %.2f, %s, window %dx%d)",
+					            sceneW, sceneH, outW, outH, rscale,
+					            offscreen ? "offscreen viewport" : "direct to window", pw, ph);
+				}
+			}
 
 			// ── Deferred G-buffer pass (docs/deferred-renderer-plan.md) ─────────
 			// When the render path is Deferred (and the pipelines built), the
@@ -15635,8 +16022,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			const bool giReplacesAO = m_giEnabled && m_giSupported;
 			auto runSSAO = [&]{
 				if ((m_ssaoEnabled && !giReplacesAO) || m_fwdReflPrepassWanted)
+				{
+					HE_PROFILE_SCOPE_N("Metal::EncodeSSAO");
 					EncodeSSAO((__bridge void*)cmdBuf,
 					           std::max(1, sceneW / 2), std::max(1, sceneH / 2));
+				}
 				if (!(m_ssaoEnabled && !giReplacesAO)) m_ssaoResult = nullptr;
 			};
 			if (deferredTile) runSSAO();
@@ -15823,8 +16213,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			id<MTLRenderCommandEncoder> sceneEncoder =
 				[cmdBuf renderCommandEncoderWithDescriptor:hdrPass];
-			EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH,
-			            deferredActive ? &deferredFrame : nullptr);
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeScene");
+				EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH,
+				            deferredActive ? &deferredFrame : nullptr);
+			}
 			// Debug lines on top of the opaque scene, still in the HDR pass.
 			if (!m_debugLines.empty())
 			{
@@ -15999,7 +16392,28 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Skipped entirely for a capture-only frame (RenderSceneImage): the
 		// scene is already in the offscreen target above, and acquiring a
 		// drawable here would present a black frame with a stale overlay.
-		id<CAMetalDrawable> drawable = m_captureOnly ? nil : [layer nextDrawable];
+		id<CAMetalDrawable> drawable = nil;
+		if (!m_captureOnly)
+		{
+			// Normally WaitForFrame already acquired it, before this frame's
+			// input was polled. Only a drawable of the size this frame was
+			// drawn for is usable — a resize in between drops it (unpresented,
+			// it just goes back to the layer's pool) and a fresh one is taken.
+			if (isPrimary && m_heldDrawable)
+			{
+				drawable = (id<CAMetalDrawable>)CFBridgingRelease(m_heldDrawable);
+				m_heldDrawable = nullptr;
+				if ((int)drawable.texture.width != pw || (int)drawable.texture.height != ph)
+					drawable = nil;
+			}
+			if (!drawable)
+			{
+				// Blocks while every drawable of the layer is still queued for
+				// display — the CPU-side wait a profiler has to be able to see.
+				HE_PROFILE_SCOPE_N("Metal::NextDrawable");
+				drawable = [layer nextDrawable];
+			}
+		}
 		if (drawable)
 		{
 			MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -16038,11 +16452,25 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					(__bridge void*)encoder,
 					(__bridge void*)pass,
 				};
+				HE_PROFILE_SCOPE_N("Metal::Overlay");
 				m_overlayCallback(&ctx);
 			}
 
 			[encoder endEncoding];
 			[cmdBuf presentDrawable:drawable];
+		}
+
+		// Upload ring: this frame's chunks go back once the GPU finished the
+		// frame. cmdBuf is the frame's LAST command buffer (in detailed mode the
+		// earlier ones were committed and waited on by flushPass), so its
+		// completion covers every slice handed out since beginFrame. If the frame
+		// is ever split into buffers that are not waited on, this has to fence on
+		// all of them.
+		{
+			std::shared_ptr<HE::FrameUploadRing> ring = m_uploadRing;
+			const HE::FrameUploadRing::Ticket ticket = ring->endFrame();
+			if (!ticket.empty())
+				[cmdBuf addCompletedHandler:^(id<MTLCommandBuffer>) { ring->release(ticket); }];
 		}
 
 		// Publish GPU timing once the buffer completes (background thread). All
@@ -16133,7 +16561,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			}];
 		}
 
-		if (!detailed) [cmdBuf commit];   // detailed committed + waited each pass above
+		if (!detailed)
+		{
+			HE_PROFILE_SCOPE_N("Metal::Commit");
+			[cmdBuf commit];   // detailed committed + waited each pass above
+		}
 	}
 }
 
@@ -16206,6 +16638,49 @@ void MetalRenderer::Render()
 {
 	if (!m_primarySdlWindow || !m_primaryTarget.metalLayer) return;
 	EncodeFrame(m_primarySdlWindow, m_primaryTarget, /*isPrimary=*/true);
+}
+
+// The drawable wait, moved in front of the input poll (IRenderer::WaitForFrame,
+// docs/perf-audit/step4-input-audit-2026-09-27.md). There is no frames-in-flight
+// semaphore; nextDrawable is the only back-pressure, so taking it here makes the
+// frame wait BEFORE it reads input instead of after encoding it. The drawable is
+// held through OnRender and the encode (~2 ms), which the layer's three
+// drawables absorb. HE_MTL_EARLY_DRAWABLE=0 puts the wait back behind the
+// encode, where it was — the A/B switch for measuring it and the way out.
+void MetalRenderer::WaitForFrame()
+{
+	static const bool kEnabled = []
+	{
+		const char* e = std::getenv("HE_MTL_EARLY_DRAWABLE");
+		const bool on = !(e && *e) || std::atoi(e) != 0;
+		HE_LOG_INFO(RHI, "Metal: drawable acquired %s",
+		            on ? "before the input poll (early)" : "after the encode (HE_MTL_EARLY_DRAWABLE=0)");
+		return on;
+	}();
+	if (!kEnabled || m_heldDrawable) return;
+	if (!m_primarySdlWindow || !m_primaryTarget.metalLayer) return;
+
+	@autoreleasepool
+	{
+		// Same size sync as EncodeFrame, first — a drawable taken before it
+		// would be the old size after a resize and get dropped there.
+		int pw = 0, ph = 0;
+		SDL_GetWindowSizeInPixels(m_primarySdlWindow, &pw, &ph);
+		if (pw <= 0 || ph <= 0) return;
+		CAMetalLayer* layer = (__bridge CAMetalLayer*)m_primaryTarget.metalLayer;
+		const CGSize size = layer.drawableSize;
+		if ((int)size.width != pw || (int)size.height != ph)
+			layer.drawableSize = CGSizeMake(pw, ph);
+
+		id<CAMetalDrawable> drawable = nil;
+		{
+			// Same scope name as the late wait in EncodeFrame, so captures
+			// before and after this change compare line for line.
+			HE_PROFILE_SCOPE_N("Metal::NextDrawable");
+			drawable = [layer nextDrawable];
+		}
+		if (drawable) m_heldDrawable = (void*)CFBridgingRetain(drawable);
+	}
 }
 
 // ─── GPU weather particles (compute simulation + vertex-pull billboards) ──────
