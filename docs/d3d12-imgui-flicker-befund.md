@@ -413,3 +413,47 @@ einen abgelehnten Hunk (NFIF-Override hinter `NumFramesInFlight = 2`) von Hand s
 verglichenen Frames ab und beendet nur den eigenen Deploy-Prozess. Beispiel:
 `-Name prefix -Frames 3000` bzw. `-Name fix -Scribble 500`. Nach den Läufen wurden die Quellen
 zurückgesetzt und `C:/hw97` sauber neu gebaut. Im Deploy steckt also keine Instrumentierung mehr.
+
+## Echte OS-Maus statt synthetischer ImGui-Events (Schritt 8)
+
+Stand: 2026-09-30, NN-WS03, gleicher Release-Baum `C:/hw97`, gleiche Szene (Testie).
+
+### Werkzeug (fertig, auf NN-WS03 geprüft)
+
+Ziel ist derselbe Frame-Diff wie in Schritt 5, aber ohne `HE_T97_SWEEP`. Der Reiz ist diesmal
+der echte Cursor: `SendInput` → `WM_MOUSEMOVE` → SDL3 → ImGui.
+
+- **`docs/d3d12-imgui-flicker-osmaus.cpp`** (`t97mouse.exe`, mit `cl /O2 /EHsc /std:c++17 /utf-8`)
+  bewegt den echten Cursor per `SendInput` (`MOUSEEVENTF_ABSOLUTE|VIRTUALDESK`). Das Programm
+  ist PerMonitorV2-DPI-aware und bewegt nur, es klickt nie. Etwa alle 1 ms geht es 7 px weiter,
+  also 4 000 bis 7 000 px/s, ein schneller Wisch. Es fährt im Zickzack (23 px Zeilenabstand)
+  nacheinander über:
+  - den Toolbar-Streifen oben im Scene-Fenster,
+  - Quick Settings,
+  - World Outliner,
+  - Content Browser (Baum und Raster),
+  - Menü- und Tab-Leiste,
+  - zuletzt den ganzen Client-Bereich.
+
+  Die Rechtecke schreibt der Editor selbst ins Log (`T97WIN`). Sie werden über
+  `GetClientRect`/`ClientToScreen` auf Bildschirmkoordinaten umgerechnet.
+- **Sicherungen**, weil das der Cursor des Menschen ist:
+  - Ein `WH_MOUSE_LL`/`WH_KEYBOARD_LL`-Hook bricht bei jedem Ereignis ohne `LLMHF_INJECTED`
+    bzw. `LLKHF_INJECTED` sofort ab.
+  - Vor jedem Schritt prüft `WindowFromPoint`, ob das Fenster unter dem Cursor zum Editorprozess
+    gehört. Wenn nicht, wird der Schritt ausgelassen, nach 20 Auslassungen bricht das Programm ab.
+  - `--minidle=S` verweigert den Start, wenn in den letzten S Sekunden jemand Maus oder Tastatur
+    benutzt hat.
+  - Am Ende steht der Cursor wieder an der Ausgangsposition.
+- **`docs/d3d12-imgui-flicker-osmaus.patch`** ist die Instrumentierung aus Schritt 5 plus
+  `HE_T97_MOUSELOG`. Sie loggt alle 100 Frames `io.MousePos`, das gehoverte Fenster und die Zahl
+  der Hover-Wechsel. So ist belegt, dass der echte Cursor bei ImGui ankommt, statt es nur
+  anzunehmen.
+- **`docs/d3d12-imgui-flicker-osmaus.ps1`** entspricht dem Lauf-Skript aus Schritt 5, setzt aber
+  `HE_T97_SWEEP` bewusst **nicht**. Sonst würde `AddMousePosEvent` jeden Frame die echte Maus
+  überschreiben, und man mäße wieder den alten Reiz. `-Dry` startet den Editor und berechnet die
+  Ziele, bewegt aber nichts.
+
+Dry-Run (keine Bewegung): Editor-Client 1600×900 an (121,50). ImGui meldet dieselbe Fläche
+(Skalierung 1,000), und alle sechs Ziele werden gefunden. Die Nullprobe ohne Reiz ergibt
+300/300 Frames bitgleich, NFIF=3, 0 Überschreibungen im Flug.
