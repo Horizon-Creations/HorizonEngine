@@ -430,6 +430,25 @@ std::vector<std::string> buildEnvStrings(const Options& o)
 	return entries;
 }
 
+// A pipe whose ends close on exec. The child gets its three ends through the
+// dup2 actions (dup2 clears the flag on the copy); the originals must not reach
+// it as well. Otherwise anything it leaves running inherits them — git's
+// credential-cache daemon points 0/1/2 at /dev/null and stays, still holding
+// the stray write ends, and EOF never comes: every `git credential approve`
+// that starts the daemon ran into the timeout, and the group kill took the
+// daemon with it, so the next one did too.
+bool makePipe(int fds[2])
+{
+#if defined(__linux__)
+	return ::pipe2(fds, O_CLOEXEC) == 0;   // atomic against a spawn on another thread
+#else
+	if (::pipe(fds) != 0) return false;
+	::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+	::fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+	return true;
+#endif
+}
+
 std::int64_t nowMillis()
 {
 	timespec ts{};
@@ -447,9 +466,9 @@ Result run(const Options& o)
 	int outFds[2] = { -1, -1 };
 	int errFds[2] = { -1, -1 };
 	int inFds[2]  = { -1, -1 };
-	if (::pipe(outFds) != 0) { r.launchFailed = true; return r; }
-	if (::pipe(errFds) != 0) { ::close(outFds[0]); ::close(outFds[1]); r.launchFailed = true; return r; }
-	if (::pipe(inFds)  != 0) {
+	if (!makePipe(outFds)) { r.launchFailed = true; return r; }
+	if (!makePipe(errFds)) { ::close(outFds[0]); ::close(outFds[1]); r.launchFailed = true; return r; }
+	if (!makePipe(inFds)) {
 		::close(outFds[0]); ::close(outFds[1]); ::close(errFds[0]); ::close(errFds[1]);
 		r.launchFailed = true; return r;
 	}
@@ -479,7 +498,13 @@ Result run(const Options& o)
 	// Own process group, so a kill can take the child AND anything it spawned.
 	// Killing only the direct child leaves grandchildren holding the pipes.
 	::posix_spawnattr_setpgroup(&attr, 0);
-	::posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+	short spawnFlags = POSIX_SPAWN_SETPGROUP;
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+	// Apple: nothing but the three dup2'd descriptors reaches the child — also
+	// not a pipe another thread opened in the gap between pipe() and fcntl().
+	spawnFlags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
+	::posix_spawnattr_setflags(&attr, spawnFlags);
 
 	std::vector<std::string> argStrings;
 	argStrings.push_back(o.exe.string());
