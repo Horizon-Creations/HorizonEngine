@@ -740,6 +740,162 @@ TEST_CASE("repro 107: the timeline puts an end key exactly at the end")
 	fs::remove_all(root, ec);
 }
 
+// Thema 114: the key at 0 ms could not be grabbed. The track's "x" (remove
+// track) stood beside a 168 px name, so it reached ~9 px past the lane's left
+// edge — straight over the 12 px button of a key at time zero. It is submitted
+// first, so ImGui gave it the pointer everywhere the two overlapped.
+//     HE_UI_DUMP_DIR=/tmp/ui ./he_tests -tc="timeline: the key at 0 ms*"
+TEST_CASE("timeline: the key at 0 ms is not covered by the track's remove button")
+{
+	Harness harness;
+	namespace fs = std::filesystem;
+	const fs::path root = fs::temp_directory_path() / "he_widget_designer_key0_114";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root / "UI");
+
+	ContentManager cm;
+	cm.setContentRoot(root.string());
+	HE::UIWidgetTree t;
+	t.canvasWidth = 1280.0f; t.canvasHeight = 720.0f;
+	const int logo = t.add(HE::UIWidgetType::Image);
+	t.find(logo)->name = "Logo";
+	{
+		HE::UIAnimClip c;
+		c.name = "Blend";
+		c.duration = 1.0f;
+		HE::UIAnimTrack tr;
+		tr.element = logo;
+		tr.prop    = "Render Opacity";
+		tr.keys.push_back({ 0.0f, HE::UIPropValue::ofFloat(0.0f), HE::UIEase::Linear });
+		tr.keys.push_back({ 1.0f, HE::UIPropValue::ofFloat(1.0f), HE::UIEase::Linear });
+		c.tracks.push_back(tr);
+		t.animations.push_back(c);
+	}
+	UIWidgetAsset asset;
+	asset.name     = "Key0";
+	asset.path     = "UI/Key0.hasset";
+	asset.treeJson = HE::uiWidgetTreeToJson(t);
+	REQUIRE(cm.registerWidget(std::move(asset)) != HE::UUID{});
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	ContextBits  bits;
+	AppContext   ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	Designer d{ ctx, (root / "UI" / "Key0.hasset").string() };
+	for (int i = 0; i < 3; ++i) d.frame(false);
+
+	ImGuiIO& io = ImGui::GetIO();
+	auto windowNamed = [](const char* part) -> ImGuiWindow*
+	{
+		for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+			if (w->Active && std::strstr(w->Name, part)) return w;
+		return nullptr;
+	};
+	auto find = [&](ImGuiID wanted, float x0, float x1, float y0, float y1,
+	                float sx, float sy) -> ImVec2
+	{
+		for (float y = y0; y <= y1; y += sy)
+			for (float x = x0; x <= x1; x += sx)
+			{
+				io.AddMousePosEvent(x, y);
+				d.frame(false);
+				if (d.frame(false) == wanted) return ImVec2(x, y);
+			}
+		return ImVec2(-1.0f, -1.0f);
+	};
+	auto click = [&](ImVec2 p)
+	{
+		io.AddMousePosEvent(p.x, p.y);
+		d.frame(true); d.frame(false); d.frame(false);
+	};
+	auto clip = [&]() -> HE::UIAnimClip&
+	{
+		HE::UIWidgetTree* live = UIEditorPanel::liveTree("UI/Key0.hasset");
+		REQUIRE(live);
+		REQUIRE(live->animations.size() == 1);
+		return live->animations[0];
+	};
+
+	ImGuiWindow* tw = windowNamed("##uiw_timeline");
+	REQUIRE(tw);
+	const float wx0 = tw->Pos.x, wy0 = tw->Pos.y, wy1 = tw->Pos.y + tw->Size.y;
+
+	const ImVec2 combo = find(ImHashStr("##clip", 0, tw->ID), wx0, wx0 + 200.0f,
+	                          wy0 + 4.0f, wy0 + 30.0f, 8.0f, 4.0f);
+	REQUIRE(combo.x >= 0.0f);
+	click(combo);
+	ImGuiWindow* pop = windowNamed("##Combo_");
+	REQUIRE(pop);
+	const ImVec2 blend = find(ImHashStr("Blend##c", 0, pop->ID), pop->Pos.x + 10.0f,
+	                          pop->Pos.x + 30.0f, pop->Pos.y, pop->Pos.y + pop->Size.y,
+	                          10.0f, 2.0f);
+	REQUIRE(blend.x >= 0.0f);
+	click(blend);
+
+	int zero = 0;
+	const ImGuiID trackSeed = ImHashData(&zero, sizeof(zero), tw->ID);
+	const ImGuiID nameId    = ImHashStr("Logo  \xC2\xB7  Render Opacity##t", 0, trackSeed);
+	const ImGuiID removeId  = ImHashStr("x", 0, trackSeed);
+	const ImGuiID key0Id    = ImHashStr("##key", 0, ImHashData(&zero, sizeof(zero), trackSeed));
+	const ImVec2 track = find(nameId, wx0 + 20.0f, wx0 + 20.0f, wy0 + 20.0f, wy1, 10.0f, 3.0f);
+	REQUIRE(track.x >= 0.0f);
+
+	// Every pixel across the name column's end and the lane's start, along the
+	// middle of the row (the diamonds sit mid-row, the name was found near its
+	// top): who does ImGui say the pointer is on?
+	const float rowMid = track.y + 8.0f;
+	int keyPx = 0, removePx = 0;
+	float keyL = 1e9f, keyR = -1e9f, removeR = -1e9f;
+	for (float x = wx0 + 150.0f; x <= wx0 + 240.0f; x += 1.0f)
+	{
+		io.AddMousePosEvent(x, rowMid);
+		d.frame(false);
+		const ImGuiID h = d.frame(false);
+		if (h == key0Id)    { ++keyPx; keyL = std::min(keyL, x); keyR = std::max(keyR, x); }
+		if (h == removeId)  { ++removePx; removeR = std::max(removeR, x); }
+	}
+	MESSAGE("key at 0 ms hovered on " << keyPx << " px (" << keyL - wx0 << ".." << keyR - wx0
+	        << "), remove button on " << removePx << " px (right edge " << removeR - wx0 << ")");
+
+	// The picture: the pointer on the diamond's visible half, where a person
+	// aims — the key lights up when it is the one under the pointer.
+	if (keyPx > 0) io.AddMousePosEvent(keyR - 3.0f, rowMid);
+	d.shoot("timeline-key0-114");
+
+	// The whole 12 px button of the key belongs to the key, and the remove
+	// button still exists beside it — clear of it.
+	CHECK(keyPx >= 11);
+	CHECK(removePx >= 10);
+	CHECK(removeR < keyL);
+
+	// Grabbed where it is visible and dragged right: the first key moves.
+	REQUIRE(keyPx > 0);
+	const ImVec2 k(keyR - 2.0f, rowMid);
+	io.AddMousePosEvent(k.x, k.y);
+	d.frame(false);
+	d.frame(true);
+	for (int s = 1; s <= 10; ++s) { io.AddMousePosEvent(k.x + 8.0f * float(s), k.y); d.frame(true); }
+	d.frame(false); d.frame(false);
+	REQUIRE(clip().tracks.size() == 1);
+	REQUIRE(clip().tracks[0].keys.size() == 2);
+	MESSAGE("first key after the drag: " << clip().tracks[0].keys[0].time << " s");
+	CHECK(clip().tracks[0].keys[0].time > 0.05f);
+	CHECK(clip().tracks[0].keys[1].time == 1.0f);
+
+	// And the remove button still removes the track.
+	const ImVec2 x = find(removeId, wx0 + 150.0f, wx0 + 200.0f, rowMid, rowMid, 1.0f, 1.0f);
+	REQUIRE(x.x >= 0.0f);
+	click(x);
+	CHECK(clip().tracks.empty());
+
+	io.AddMousePosEvent(-1000.0f, -1000.0f);
+	d.frame(false);
+	UIEditorPanel::forget(d.assetPath);
+	fs::remove_all(root, ec);
+}
+
 // Thema 108: Visible and Enabled in the real Add Track list. Enabled is listed
 // but greyed on an Image (nothing there to switch off) and pickable on a
 // Button; a switch made with the playhead past 0 also gets a key at 0.
@@ -1080,7 +1236,7 @@ TEST_CASE("ui shot: Thema 108 — Visible and Enabled step on the canvas while p
 	REQUIRE(track("Visible"));
 
 	// Scrub to the middle of the lane: the ruler, half way along.
-	const float laneL = wx0 + 8.0f + 190.0f;
+	const float laneL = wx0 + 8.0f + 208.0f;   // kNameW in drawTimeline (Thema 114)
 	const float laneR = wx1 - 8.0f - 8.0f;
 	const ImVec2 ruler = find(ImHashStr("##ruler", 0, tw->ID), (laneL + laneR) * 0.5f,
 	                          (laneL + laneR) * 0.5f, wy0 + 20.0f, wy0 + 80.0f, 4.0f, 2.0f);
