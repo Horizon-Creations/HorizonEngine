@@ -6186,6 +6186,7 @@ void MetalRenderer::Shutdown()
 	if (m_ssaoNoiseSampler)  { CFBridgingRelease(m_ssaoNoiseSampler);  m_ssaoNoiseSampler = nullptr; }
 	if (m_debugLinePipeline) { CFBridgingRelease(m_debugLinePipeline); m_debugLinePipeline = nullptr; }
 	ReleaseRibbonBuffers();
+	ReleaseUploadRing();
 
 	if (m_imguiPassDescriptor) { CFBridgingRelease(m_imguiPassDescriptor); m_imguiPassDescriptor = nullptr; }
 	if (m_commandQueue)        { CFBridgingRelease(m_commandQueue);        m_commandQueue = nullptr; }
@@ -6270,8 +6271,11 @@ void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& vi
 		// Pack line endpoints: [pos3 color3] per vertex
 		const size_t vertCount = m_debugLines.size() * 2;
 		const size_t byteSize  = vertCount * 6 * sizeof(float);
-		id<MTLBuffer> vbuf = [device newBufferWithLength:byteSize options:MTLResourceStorageModeShared];
-		float* ptr = (float*)vbuf.contents;
+		void*  vbufPtr = nullptr;
+		size_t vbufOff = 0;
+		float* ptr = static_cast<float*>(UploadTransient(byteSize, vbufPtr, vbufOff));
+		if (!ptr) return;
+		id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)vbufPtr;
 		for (const DebugLine& l : m_debugLines)
 		{
 			*ptr++ = l.start.x; *ptr++ = l.start.y; *ptr++ = l.start.z;
@@ -6294,10 +6298,73 @@ void MetalRenderer::EncodeDebugLines(void* renderEncoderPtr, const glm::mat4& vi
 
 		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_debugLinePipeline];
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
-		[enc setVertexBuffer:vbuf offset:0 atIndex:0];
+		[enc setVertexBuffer:vbuf offset:vbufOff atIndex:0];
 		[enc setVertexBytes:&vp length:sizeof(vp) atIndex:1];
 		[enc drawPrimitives:MTLPrimitiveTypeLine vertexStart:0 vertexCount:vertCount];
 	}
+}
+
+void* MetalRenderer::UploadTransient(size_t len, void*& outBuf, size_t& outOffset)
+{
+	outBuf    = nullptr;
+	outOffset = 0;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return nullptr;
+	len = std::max<size_t>(len, 1);
+
+	const HE::FrameUploadRing::Slice s = m_uploadRing->allocate(len);
+	if (s.valid())
+	{
+		// A chunk index the ring has not handed out before: back it now.
+		while (m_uploadRingBufs.size() < m_uploadRing->chunkCount())
+		{
+			const uint32_t i = static_cast<uint32_t>(m_uploadRingBufs.size());
+			id<MTLBuffer> b = [device newBufferWithLength:m_uploadRing->chunkCapacity(i)
+			                                      options:MTLResourceStorageModeShared];
+			if (!b) break;
+			b.label = @"HE upload ring";
+			m_uploadRingBufs.push_back((void*)CFBridgingRetain(b));
+			if (m_uploadRingBufs.size() == 8 || m_uploadRingBufs.size() == 32 || m_uploadRingBufs.size() == 128)
+				HE_LOG_INFO(RHI, "MetalRenderer: upload ring grew to %zu chunks", m_uploadRingBufs.size());
+		}
+		if (s.chunk < m_uploadRingBufs.size())
+		{
+			id<MTLBuffer> b = (__bridge id<MTLBuffer>)m_uploadRingBufs[s.chunk];
+			outBuf    = m_uploadRingBufs[s.chunk];
+			outOffset = s.offset;
+			return static_cast<uint8_t*>(b.contents) + s.offset;
+		}
+		// Metal refused the chunk: the slice is simply never used.
+	}
+
+	// No ring frame open (preview / thumbnail passes with their own command
+	// buffer): a fresh buffer, as before the ring. Autoreleased so it outlives
+	// this call; the encoder retains it once bound.
+	id<MTLBuffer> __autoreleasing fresh = [device newBufferWithLength:len
+	                                                          options:MTLResourceStorageModeShared];
+	if (!fresh) return nullptr;
+	outBuf = (__bridge void*)fresh;
+	return fresh.contents;
+}
+
+bool MetalRenderer::UploadTransientBytes(const void* data, size_t len, void*& outBuf, size_t& outOffset)
+{
+	void* dst = UploadTransient(len, outBuf, outOffset);
+	if (!dst) return false;
+	if (data && len) std::memcpy(dst, data, len);
+	return true;
+}
+
+void MetalRenderer::ReleaseUploadRing()
+{
+	// In-flight command buffers retain the chunks they bound, so dropping our
+	// references here is safe. A fresh ring keeps chunk indices and buffers in
+	// step if the renderer is initialised again; late completion handlers
+	// release into the old ring, which they keep alive.
+	for (void* b : m_uploadRingBufs)
+		if (b) CFBridgingRelease(b);
+	m_uploadRingBufs.clear();
+	m_uploadRing = std::make_shared<HE::FrameUploadRing>();
 }
 
 void MetalRenderer::ReleaseRibbonBuffers()
@@ -7119,7 +7186,6 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			                                m_shadowBatches);
 			const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
 			void* boundPipeline = m_shadowPipeline;
-			id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
 			std::vector<glm::mat4> mvps;
 			for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
 			{
@@ -7152,12 +7218,13 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 						HE_LOG_INFO(RHI, "MetalRenderer: shadow pass instanced (first run: %u casters)",
 						            static_cast<unsigned>(b.count));
 					}
-					// Fresh buffer per batch, the scene pass's convention: the encoder
-					// retains it until the command buffer completes, nothing to sync.
-					id<MTLBuffer> instBuf = [dev newBufferWithBytes:mvps.data()
-						length:mvps.size() * sizeof(glm::mat4)
-						options:MTLResourceStorageModeShared];
-					[enc setVertexBuffer:instBuf offset:0 atIndex:5];
+					// A slice of the frame's upload ring (UploadTransient), released
+					// when this frame's command buffer completes.
+					void*  instBuf = nullptr;
+					size_t instOff = 0;
+					if (!UploadTransientBytes(mvps.data(), mvps.size() * sizeof(glm::mat4), instBuf, instOff))
+						continue;
+					[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 					                indexCount:ic
 					                 indexType:MTLIndexTypeUInt32
@@ -7921,7 +7988,6 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		                             kNoOwnerEntity, m_prepassBatches);
 		const bool canInstance = m_giGBufInstancedPipeline && metalInstancingEnabled();
 		void* boundPipeline = m_giGBufPipeline;
-		id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
 		std::vector<glm::mat4> xf;
 		for (const RenderSorter::DepthBatch& b : m_prepassBatches.batches)
 		{
@@ -7956,12 +8022,12 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 					HE_LOG_INFO(RHI, "MetalRenderer: GI pre-pass instanced (first run: %u objects)",
 					            static_cast<unsigned>(b.count));
 				}
-				// Fresh buffer per batch, the scene pass's convention: the encoder
-				// retains it until the command buffer completes, nothing to sync.
-				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
-					length:xf.size() * sizeof(glm::mat4)
-					options:MTLResourceStorageModeShared];
-				[genc setVertexBuffer:instBuf offset:0 atIndex:5];
+				// A slice of the frame's upload ring (UploadTransient).
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+					continue;
+				[genc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 				[genc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
 				                  indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0
 				              instanceCount:(NSUInteger)b.count];
@@ -11361,7 +11427,6 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		                             kNoOwnerEntity, m_prepassBatches);
 		const bool canInstance = instPipeline && metalInstancingEnabled();
 		void* boundPipeline = plainPipeline;
-		id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
 		std::vector<glm::mat4> xf;
 		for (const RenderSorter::DepthBatch& b : m_prepassBatches.batches)
 		{
@@ -11409,12 +11474,12 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 					HE_LOG_INFO(RHI, "MetalRenderer: SSAO pre-pass instanced (first run: %u objects, %s)",
 					            static_cast<unsigned>(b.count), mrt ? "MRT" : "plain");
 				}
-				// Fresh buffer per batch, the scene pass's convention: the encoder
-				// retains it until the command buffer completes, nothing to sync.
-				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
-					length:xf.size() * sizeof(glm::mat4)
-					options:MTLResourceStorageModeShared];
-				[enc setVertexBuffer:instBuf offset:0 atIndex:5];
+				// A slice of the frame's upload ring (UploadTransient).
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+					continue;
+				[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
 				                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0
 				             instanceCount:(NSUInteger)b.count];
@@ -13377,17 +13442,16 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					xf.push_back(viewProj * t); // mvp
 					xf.push_back(t);            // model
 				}
-				// Fresh buffer per batch, same convention as the particle path: the
-				// encoder holds every bound resource until its command buffer
-				// completes, so there is nothing to hand-synchronise. A per-frame ring
-				// would need frame-in-flight tracking this backend does not have.
-				id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
-				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
-					length:xf.size() * sizeof(glm::mat4)
-					options:MTLResourceStorageModeShared];
+				// A slice of the frame's upload ring (UploadTransient): released by
+				// the frame command buffer's completion handler, so nothing to
+				// hand-synchronise. Outside EncodeFrame (previews) a fresh buffer.
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+					continue;
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
-				[encoder setVertexBuffer:instBuf offset:0 atIndex:5];
+				[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 				[encoder setFragmentTexture:texture atIndex:0];
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
@@ -13667,7 +13731,6 @@ void MetalRenderer::EncodeClusterData(void* renderEncoder,
                                       HE::MaterialShaderLibrary::ResolveUniforms& ru)
 {
 	id<MTLRenderCommandEncoder> encoder = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
-	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 
 	const glm::mat4 viewProj =
 		m_renderWorld.camera.projection * m_renderWorld.camera.view;
@@ -13764,19 +13827,18 @@ void MetalRenderer::EncodeClusterData(void* renderEncoder,
 	if (lightData.empty()) lightData.push_back(glm::vec4(0.0f)); // never a 0-byte buffer
 	if (indices.empty())   indices.push_back(0u);
 
-	// Fresh per-frame buffers (newBufferWithBytes) — the encoder retains them.
-	id<MTLBuffer> lightBuf = [device newBufferWithBytes:lightData.data()
-	                                             length:lightData.size() * sizeof(glm::vec4)
-	                                            options:MTLResourceStorageModeShared];
-	id<MTLBuffer> gridBuf  = [device newBufferWithBytes:grid.data()
-	                                             length:grid.size() * sizeof(uint32_t)
-	                                            options:MTLResourceStorageModeShared];
-	id<MTLBuffer> idxBuf   = [device newBufferWithBytes:indices.data()
-	                                             length:indices.size() * sizeof(uint32_t)
-	                                            options:MTLResourceStorageModeShared];
-	[encoder setFragmentBuffer:lightBuf offset:0 atIndex:4];
-	[encoder setFragmentBuffer:gridBuf  offset:0 atIndex:5];
-	[encoder setFragmentBuffer:idxBuf   offset:0 atIndex:6];
+	// Per-frame lists as slices of the frame's upload ring (UploadTransient);
+	// outside EncodeFrame each is a fresh buffer, as they all used to be.
+	void*  lightBuf = nullptr;
+	void*  gridBuf  = nullptr;
+	void*  idxBuf   = nullptr;
+	size_t lightOff = 0, gridOff = 0, idxOff = 0;
+	UploadTransientBytes(lightData.data(), lightData.size() * sizeof(glm::vec4), lightBuf, lightOff);
+	UploadTransientBytes(grid.data(),      grid.size() * sizeof(uint32_t),       gridBuf,  gridOff);
+	UploadTransientBytes(indices.data(),   indices.size() * sizeof(uint32_t),    idxBuf,   idxOff);
+	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)lightBuf offset:lightOff atIndex:4];
+	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)gridBuf  offset:gridOff  atIndex:5];
+	[encoder setFragmentBuffer:(__bridge id<MTLBuffer>)idxBuf   offset:idxOff   atIndex:6];
 
 	ru.clusterParams[0]  = static_cast<float>(kClusterGridX);
 	ru.clusterParams[1]  = static_cast<float>(kClusterGridY);
@@ -15248,13 +15310,13 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 					xf.push_back(viewProj * t); // mvp
 					xf.push_back(t);            // model
 				}
-				id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
-				id<MTLBuffer> instBuf = [dev newBufferWithBytes:xf.data()
-					length:xf.size() * sizeof(glm::mat4)
-					options:MTLResourceStorageModeShared];
+				void*  instBuf = nullptr;   // a slice of the frame's upload ring
+				size_t instOff = 0;
+				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+					continue;
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
-				[encoder setVertexBuffer:instBuf offset:0 atIndex:5];
+				[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 				[encoder setFragmentTexture:texture atIndex:0];
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
@@ -15380,6 +15442,10 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 		id<MTLCommandQueue>  queue   = (__bridge id<MTLCommandQueue>)m_commandQueue;
 		id<MTLCommandBuffer> cmdBuf  = [queue commandBuffer];
+		// Per-frame uploads from here on take slices of the ring; the frame is
+		// closed and handed to the last command buffer's completion just before
+		// the commit below. No path between here and there returns early.
+		m_uploadRing->beginFrame();
 
 		// ── Per-pass GPU timing setup (only while a profiler capture records) ──
 		// Builds one over-allocated counter sample buffer for this frame; the major
@@ -16098,6 +16164,19 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			[encoder endEncoding];
 			[cmdBuf presentDrawable:drawable];
+		}
+
+		// Upload ring: this frame's chunks go back once the GPU finished the
+		// frame. cmdBuf is the frame's LAST command buffer (in detailed mode the
+		// earlier ones were committed and waited on by flushPass), so its
+		// completion covers every slice handed out since beginFrame. If the frame
+		// is ever split into buffers that are not waited on, this has to fence on
+		// all of them.
+		{
+			std::shared_ptr<HE::FrameUploadRing> ring = m_uploadRing;
+			const HE::FrameUploadRing::Ticket ticket = ring->endFrame();
+			if (!ticket.empty())
+				[cmdBuf addCompletedHandler:^(id<MTLCommandBuffer>) { ring->release(ticket); }];
 		}
 
 		// Publish GPU timing once the buffer completes (background thread). All

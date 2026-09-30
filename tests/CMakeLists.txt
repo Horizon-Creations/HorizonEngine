@@ -113,6 +113,8 @@ add_executable(he_tests
     test_debug_draw.cpp
     # Bloom's 9-tap blur folded into 5 bilinear taps (perf audit B4): CPU replay.
     test_bloom_kernel.cpp
+    # Metal's per-frame upload ring (perf audit B6): slices, recycling, threads.
+    test_frame_upload_ring.cpp
     test_profiler.cpp
     test_profiler_stats.cpp
     test_profiler_layout.cpp
