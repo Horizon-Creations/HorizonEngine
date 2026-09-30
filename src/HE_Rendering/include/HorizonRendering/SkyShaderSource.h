@@ -496,12 +496,18 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	if (coverage <= 0.0) return baseSky;          // clear sky → skip the whole raymarch
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
-	if (dir.y < 0.02) return baseSky;             // no clouds at/below the horizon
+	// The horizon fade at the end is exactly 0 below dir.y 0.03 (T → 1, L → 0), so
+	// a march there could never show — bail before paying for it.
+	if (dir.y < 0.03) return baseSky;
 
 	// Quality (perf knob, uCloudQuality): 0 Low, 1 Med, 2 High. High == original counts.
 	int qBaseN  = (uCloudQuality <= 0) ? 8  : (uCloudQuality == 1 ? 12 : 16);
 	int qMaxN   = (uCloudQuality <= 0) ? 18 : (uCloudQuality == 1 ? 32 : 64);
 	int qShadow = (uCloudQuality <= 0) ? 1  : (uCloudQuality == 1 ? 2  : 3);
+
+	// Fade the whole cloud layer out into the horizon haze. Applied after the
+	// march; computed here because it also sets the step budget below.
+	float horizon = smoothstep(0.03, 0.22, dir.y);
 
 	// March the view ray through the cloud slab between base and top heights.
 	// A deterministic per-ray offset breaks up otherwise coherent sample planes
@@ -513,6 +519,13 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	// step count with 1/dir.y (capped at 64) so the world-space sample spacing stays
 	// roughly constant down toward the horizon — that is the actual anti-aliasing.
 	int   N  = int(clamp(float(qBaseN) / max(dir.y, 0.12), float(qBaseN), float(qMaxN)));
+	// ...but the densest rays are exactly the ones the fade scales down: below
+	// dir.y 0.375 every ray took qMaxN steps while the fade kept only a fraction of
+	// their result. Scale the budget with fade^0.25 — the undersampling speckle
+	// it brings back is multiplied by the same fade, and above dir.y 0.22
+	// (fade 1) nothing changes. ~20 % fewer steps over a landscape view's sky;
+	// fade^0.5 saved 27 % but doubled the extra grain in the band (A/B, Thema 103).
+	N = max(qBaseN, int(float(N) * sqrt(sqrt(horizon))));
 	float ds = (s1 - s0) / float(N);
 	float jitter = cloudHash(dir.xz * 173.3 + vec2(dir.y * 37.1, dir.y * 19.7));
 
@@ -541,6 +554,10 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 		// and billow <= 1, so (perlin*0.5 + 0.55) upper-bounds it. Where that can't reach the
 		// threshold, skip the Worley fetch + the sun light-march. Uses the SAME 4-octave
 		// perlin as cloudDensity, so it never culls a real cloud.
+		// It only fires below coverage ~0.31 (perlin >= 0 keeps the bound >= 0.55, lo drops
+		// under that above 0.3125). At the default 0.5 it skips nothing and no exact bound
+		// could: 67 % of slab samples ARE cloud there (measured on the baked volume) and
+		// worleyFbm peaks at 0.87. See the Metal applyClouds() for the full note.
 		vec3  pp     = pos * kCloudScale + wind * time;
 		float morph  = time * 0.030;
 		float perlin = starFbm3(pp + vec3(0.0, morph, 0.0), 4);
@@ -593,10 +610,9 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 		}
 	}
 
-	// Fade the whole cloud layer out into the horizon haze. Start higher + wider than
-	// before so the grazing band (coarsest sampling even with the extra steps) melts
-	// into the haze instead of showing residual undersampling speckle.
-	float horizon = smoothstep(0.03, 0.22, dir.y);
+	// Horizon fade (computed above, before the march). Starts higher + wider than
+	// it once did so the grazing band (coarsest sampling) melts into the haze
+	// instead of showing residual undersampling speckle.
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
 	outT = T;
@@ -1121,9 +1137,10 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 // ── Cloud-shadow map pass (uCloudShadowPass == 1) ────────────────────────────
 // Sun transmittance of the cloud slab over a world-space XZ region around the
 // camera, one texel = a point on the slab's MID-PLANE, short march along the
-// sun through the slab with the SAME density field applyClouds3D raymarches
-// (coverage fBm → presence → tower profile → billow erosion; fine octave
-// skipped — map texels are ~20 m). The lit shaders project fragments along L
+// sun through the slab with the SAME density field the visible clouds use:
+// applyClouds3D's (coverage fBm → presence → tower profile → billow erosion;
+// fine octave skipped — map texels are ~20 m) in cloudMode 1, the dome's in
+// cloudMode 0. The lit shaders project fragments along L
 // onto the mid-plane and sample the map (cloudShadowFactor in kUnlitFS /
 // heCloudShadowFactor in the material preamble). Mirrors the Metal
 // cloudShadowFragment exactly.
@@ -1141,11 +1158,30 @@ float cloudShadowTransmittance(vec2 fragCoord)
 	float midY    = baseY + 0.5 * thick;
 	float fluff   = clamp(uCloudFluffiness, 0.0, 1.0);
 	float densMul = clamp(uCloudDensity, 0.0, 3.0);
+	// Dome clouds (cloudMode 0): the shadow comes from the dome's own field,
+	// embedded at the world origin with one dome unit = cloudH. Why, and what
+	// that embedding costs: see the Metal cloudShadowFragment.
+	if (uCloudMode != 1)                             // same switch as the sky draw
+	{
+		float domeMid = midY / cloudH;               // this texel's mid-plane, dome units
+		vec2  dxz     = xz / cloudH;
+		float d0 = (kCloudBase - domeMid) / sd.y;
+		float d1 = (kCloudTop  - domeMid) / sd.y;
+		const int MD = 6;
+		float dds  = (d1 - d0) / float(MD);
+		float dens = 0.0;
+		for (int i = 0; i < MD; ++i)
+		{
+			vec3 dp = vec3(dxz.x, domeMid, dxz.y) + sd * (d0 + (float(i) + 0.5) * dds);
+			dens += cloudShadowDensity(dp, uTime, coverage, uWind);
+		}
+		return exp(-dens * dds * 7.0 * densMul);
+	}
 	float lo      = mix(0.70, 0.22, coverage);
 	float nscale  = 1.6 / kCloudRefAltitude;
 	// Slab entry/exit along the sun ray through the mid-plane point. Density
 	// comes from the SHARED cloudFieldDensity (style/evolution included), so
-	// the ground shadows always match the shapes overhead.
+	// the ground shadows always match the 3D deck's shapes overhead.
 	float t0 = (baseY - midY) / sd.y;
 	float t1 = (baseY + thick - midY) / sd.y;
 	const int M = 6;
