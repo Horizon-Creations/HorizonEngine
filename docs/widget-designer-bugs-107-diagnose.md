@@ -396,3 +396,58 @@ Belegt ist die GPU-Seite deshalb durch den Shader-Quelltext, nicht durch ein Bil
 sein Time-Feld 1 tippen), **speichern**, das Spiel neu starten. Poppt es danach im Spiel immer noch, bitte
 die gespeicherte `Startup.hasset` anhängen. Erst dann wäre die Laufzeit wieder verdächtig, mit der
 heutigen Datei erklären die Daten allein alles. Kein Fix in diesem Schritt.
+
+## Catania-Clip repariert (Schritt 11)
+
+**Was geändert wurde.** `~/HorizonEngineProjects/Catania/Content/UI/Startup.hasset`, Clip „Blend“: der zweite
+Render-Opacity-Key liegt jetzt bei **1,0 s** statt 0,0503 s, Länge weiter 1 s. Sonst nichts: gleiche UUID,
+dieselben Elemente, derselbe Graph. Die Datei war am 30.09. um 11:15 gespeichert, md5 vorher
+`596ad7843f51960a3c337c3eb45f496c`, nachher `f7e845fc94aec892d8431a72ae08628e`.
+
+**Warum „Stretch to Length“ und kein neuer Endkey.** Der Graph spielt „Blend“ beim `Construct` vorwärts, wartet
+4 s (`Delay`) und spielt ihn rückwärts, beide Male mit `restoreAfterCompleted = false`. Gemeint ist also: Logo
+über eine Sekunde einblenden, stehen lassen, über eine Sekunde ausblenden. Der Clip ist schon 1 s lang, es fehlt
+nur der Key am Ende. Ein zusätzlicher Endkey (1 s → 1) hätte den 0,05-s-Sprung am Anfang behalten, das Strecken
+verteilt die eine Blende über die ganze Sekunde.
+
+**Wie.** Mit dem Werkzeug aus Schritt 5, nicht von Hand (die `.hasset` hat einen Binärkopf mit Längenfeldern).
+Der Test `repro 107: the Catania Startup widget repaired in the designer` öffnet die Datei im Widget-Designer
+(headless, `UIEditorPanel`), wählt „Blend“ im Clip-Combo, klickt „Stretch to Length“ und speichert
+(`UIEditorPanel::save` → `saveState` → `ContentManager::saveAsset`, derselbe Weg wie der Speichern-Knopf).
+Standardmäßig läuft er auf einer Kopie der Originalbytes (`tests/fixtures/catania_startup_107.h`). Mit
+`HE_REPAIR107_CONTENT=<Projekt>/Content` arbeitet er in der Projektdatei selbst. So ist die Catania-Datei einmal
+repariert worden. Ein zweiter Lauf auf der reparierten Datei prüft nur und schreibt nichts (md5 unverändert).
+
+**Geprüft, nach dem Speichern, mit frischem ContentManager von der Platte:**
+- UUID gleich, Keys (0 s → 0) und (1 s → 1), Länge 1 s. Der Baum ist genau der, den Stretch aus dem alten macht,
+  der Graph ist inhaltlich gleich (siehe Nebenbefund).
+- Spielpfad (`playAnimation`, `tick(1/60)`, `extract`, Alpha des Logo-Quads), vorwärts:
+  `f1=0.017 f2=0.033 f3=0.050 f10=0.167 f20=0.333 f30=0.500 f40=0.667 f50=0.833 f60=1.000 f70=1.000`,
+  rückwärts spiegelbildlich bis `f60=0.000`. 59 Stufen, größter Schritt 1/60. Vorher war dieselbe Kurve nach
+  4 Frames bei 1.
+- Designer-Leinwand mit dem echten Catania-Logo, Momente |<, 0,5 s Play, >|: Von den 14 539 Pixeln, die die
+  Blende ändert, lagen bei 0,5 s vorher **0** zwischen Anfang und Ende (Mittel 1,0, der Pop), nachher **alle
+  14 539** (Mittel 0,51).
+
+![Leinwand vorher/nachher](img/widget-designer-bugs-107/schritt11-catania-leinwand-vorher-nachher.png)
+*Oben die Fassung vom 28.09., unten die reparierte, jeweils Start, 0,5 s und Ende.*
+
+![Timeline vorher/nachher](img/widget-designer-bugs-107/schritt11-catania-timeline-vorher-nachher.png)
+*Oben der Key bei 50 ms, grauer Rest und „Stretch to Length“ angeboten. Unten der Key bei 1000 ms, Knopf weg.*
+
+Vorher- und Nachher-Datei liegen unter `img/widget-designer-bugs-107/catania/`. Catania ist kein Git-Repo, das
+dort ist die einzige versionierte Sicherung.
+
+**Nicht gesehen:** ein Bild aus dem laufenden Spiel. Headless gibt es keinen Metal/GL-UI-Pass (siehe (2)), belegt
+ist der Spielpfad bis zum Quad-Alpha, das der Shader multipliziert.
+
+**Achtung, laufender Editor.** Als repariert wurde, lief ein Editor mit Catania offen. Sein ContentManager lädt die
+Datei nach ≤ 1,5 s nach (Hot-Reload, `EditorApplication.cpp:2812`), PIE sieht den Fix also. Ein **offener**
+Designer-Tab „Startup“ hält aber seinen eigenen Baum. Speichern dort (auch „Save All“) schreibt die alte
+0,05-s-Fassung zurück. Den Tab ohne Speichern schließen und neu öffnen, oder den Editor neu starten.
+
+**Nebenbefund (nicht behoben).** `HorizonCode::Node::pinDefaults` ist eine `std::unordered_map<int, Value>`
+(`HorizonCode.h:553`). `toJson` schreibt die Pin-Defaults deshalb in Hash-Reihenfolge, und die kippt bei jedem
+Laden und Speichern (hier 3,2,1 → 1,2,3 → 3,2,1). Inhaltlich ändert sich nichts, aber jede `.hasset` und
+`.hcode` mit Pin-Defaults bekommt bei jedem Speichern einen Diff, auch ohne Änderung. Das stört in
+Git-Projekten. Abhilfe wäre, in `toJson` nach Pin-Index sortiert zu schreiben.
