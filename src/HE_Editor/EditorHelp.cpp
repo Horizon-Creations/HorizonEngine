@@ -3507,10 +3507,6 @@ namespace
 	  "Opens the project in the cloned folder, even though some of its large "
 	  "files may still be placeholders.",
 	  "", "editor#preferences" },
-	{ "Source Control/What is missing?", "",
-	  "Shows which parts of source control this machine lacks, and how to "
-	  "install them.",
-	  "", "editor#preferences" },
 	{ "Source Control/Set##remote", "Set",
 	  "Points the project at a repository that already exists — GitHub, GitLab, "
 	  "Azure DevOps, anything git can push to. Use this instead of Create & push "

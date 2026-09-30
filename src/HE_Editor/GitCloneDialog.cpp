@@ -12,6 +12,7 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -309,12 +310,11 @@ void Draw(AppContext& ctx)
 			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
 			ImGui::TextWrapped("git was not found on this machine, and cloning needs it.");
 			ImGui::PopStyleColor();
-			if (EditorWidgets::button("What is missing?"))
-			{
-				GitMissingDialog::requestShow();
-				if (ctx.recheckGit) ctx.recheckGit();
-				close = true;
-			}
+			// The remedy in place, the same one Preferences shows: raising the
+			// startup dialog instead does not work once its first probe has
+			// answered, and a second modal would have to replace this one anyway.
+			GitMissingDialog::drawGitInstallRemedy();
+			if (EditorWidgets::button("Recheck##git") && ctx.recheckGit) ctx.recheckGit();
 		}
 		else
 		{
