@@ -2388,6 +2388,67 @@ TEST_CASE("Sky-View LUT: Metal's host code and kSkyMSL agree on its size and hor
 	CHECK(grab(R"(lutMie\.sample\(lutSamp, uv\)\.rgb \* atmoPhaseMie\(dot\(d, sunDir\)\))").size() == 1);
 }
 
+TEST_CASE("D3D12 main swapchain follows the window size (Thema 112)")
+{
+	// The D3D12 swapchain, its RTVs and the swapchain-path scene depth were
+	// created once at Initialize and never resized: after a window resize DXGI
+	// stretched the start-size image over the new client area, while ImGui laid
+	// itself out for the new DisplaySize. Nothing fails to build and there is no
+	// GPU under ctest, so this pins the wiring in the source:
+	//  - ResizeBuffers exists and gets the SAME flags the swapchain was created
+	//    with (ALLOW_TEARING on capable machines; 0 there is INVALID_CALL),
+	//  - Render() checks the size before it waits on / resets this frame slot,
+	//  - after ResizeBuffers the back buffers and RTVs are re-fetched and the
+	//    scene depth follows.
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("D3D12 renderer source not found - swapchain resize pin skipped");
+		return;
+	}
+	const std::string src = stripLineComments(readFile(root / "src" / "HE_Rendering" / "src" /
+	                                                   "Backends" / "D3D12" / "D3D12Renderer.cpp"));
+	REQUIRE(!src.empty());
+	auto count = [&](const char* pattern) {
+		const std::regex re(pattern);
+		return std::distance(std::sregex_iterator(src.begin(), src.end(), re), std::sregex_iterator());
+	};
+	CHECK(count(R"(scd\.Flags\s*=\s*m_impl->swapchainFlags;)") == 1);
+	CHECK(count(R"(->ResizeBuffers\(\s*k_frameCount\s*,[^;]*swapchainFlags\s*\))") == 1);
+
+	// The resize routine: flush, drop the buffers, resize, re-fetch + re-view, depth.
+	const size_t fn = src.find("bool resizeSwapchainIfNeeded()");
+	REQUIRE(fn != std::string::npos);
+	const size_t fnEnd = src.find("\n    }\n", fn);
+	REQUIRE(fnEnd != std::string::npos);
+	const std::string body = src.substr(fn, fnEnd - fn);
+	const size_t wait   = body.find("waitForAllFrames()");
+	const size_t drop   = body.find("renderTargets[i].Reset()");
+	const size_t resize = body.find("ResizeBuffers(");
+	const size_t get    = body.find("GetBuffer(");
+	const size_t rtv    = body.find("CreateRenderTargetView(");
+	const size_t depth  = body.find("createSceneDepth(");
+	const size_t index  = body.find("GetCurrentBackBufferIndex()");
+	for (size_t at : { wait, drop, resize, get, rtv, depth, index })
+		REQUIRE(at != std::string::npos);
+	CHECK(wait < drop);
+	CHECK(drop < resize);
+	CHECK(resize < get);
+	CHECK(get < rtv);
+	CHECK(resize < depth);
+	CHECK(resize < index);
+
+	// Render() resizes before it touches this frame slot.
+	const size_t render = src.find("void D3D12Renderer::Render()");
+	REQUIRE(render != std::string::npos);
+	const size_t call = src.find("p.resizeSwapchainIfNeeded()", render);
+	const size_t slot = src.find("p.waitForFrame(p.frameIndex)", render);
+	REQUIRE(call != std::string::npos);
+	REQUIRE(slot != std::string::npos);
+	CHECK(call < slot);
+}
+
 // ─── OcclusionCuller ──────────────────────────────────────────────────────────
 // The rules the culler must honour, each as a scene: a wall in front of the
 // camera and something behind it. "Kept" is the conservative answer, so every
