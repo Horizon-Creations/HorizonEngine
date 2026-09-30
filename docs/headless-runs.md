@@ -100,7 +100,8 @@ Ereignisse. Auslöser:
   `test_net_secure` (4), `test_net_game_session` (3) und `test_engine_api`
   (2, darunter die LAN-Suche auf `0.0.0.0:47823`). Seitdem setzt
   `tests/main.cpp` `HE_NET_LOOPBACK_ONLY=1` (`HE::Net::socketLoopbackOnly`),
-  wenn es nicht schon gesetzt ist. Jeder Bind „auf alle Schnittstellen“ in
+  unter Windows, wenn es nicht schon gesetzt ist. Unter Linux/macOS ist der
+  Modus nicht erprobt und nur per `HE_NET_LOOPBACK_ONLY=1` zu haben. Jeder Bind „auf alle Schnittstellen“ in
   `HE_Net` geht dann auf Loopback, die Dual-Stack-Konstruktoren nehmen den
   IPv4-Weg, und ein ungebundener UDP-Socket wird vor dem ersten `sendto` an
   Loopback gebunden. Danach bleibt außerhalb von Loopback nur die
@@ -108,9 +109,12 @@ Ereignisse. Auslöser:
   geht kein Paket raus). Auf NN-WS03 am 30.09. von einem **neuen** Pfad
   gemessen (`C:\hw110\fwfresh`, alle Netz-Testdateien, 661 Fälle): kein
   Ereignis 2097, keine neue Regel, focuslog ohne Vordergrundwechsel. Mit dem
-  alten Code fragte heute jeder der sechs neuen `he_tests`-Pfade. Die drei
-  Tests zu Dual-Stack und globaler IPv6-Adresse melden im Loopback-Modus per
-  `MESSAGE`, dass sie übersprungen werden. Wer sie echt laufen lassen will,
+  alten Code fragte heute jeder der sechs neuen `he_tests`-Pfade, bei
+  eingeschalteter Benachrichtigung (`NotifyOnListen` auf allen Profilen). Die
+  zwei Dual-Stack-Tests in `test_net_tcp` melden im Loopback-Modus per
+  `MESSAGE`, dass sie übersprungen werden. Der Test zur globalen IPv6-Adresse
+  in `test_net_discovery` tut das nur, wenn die Maschine eine solche Adresse
+  hat. Wer sie echt laufen lassen will,
   setzt `HE_NET_LOOPBACK_ONLY=0` (CI tut das, ein Runner fragt niemanden)
   und nimmt dafür an einem neuen Pfad den Dialog in Kauf.
 
