@@ -352,10 +352,14 @@ merkt sich nur den direkten Vorgänger. ² 3 000 Frames, davon 6 absichtlich ver
 (Positivkontrolle), alle 6 gefunden.
 
 - Die Reihenfolge NFIF 1 > 2 > 3 = 0 gilt jetzt auch im Bild. Wie hoch die Rate vor dem Fix ist,
-  schwankt von Lauf zu Lauf (55 bzw. 190 bei Vsync an), weil der Wettlauf vom Timing abhängt. Sie
-  ist aber in jedem Lauf deutlich über 0. Der Fix gibt in 18 294 Frames 0.
-- **So sieht es aus** (Vsync an, 50 Hz, vor dem Fix): etwa alle 1,6 s ein grober Fehlframe mit
-  mindestens 10 000 falschen Pixeln, dazwischen kleinere. Median der Abweichung: 2 600 bis
+  schwankt von Lauf zu Lauf: 55 bzw. 190 bei Vsync an, obwohl die gezählten gefährlichen
+  Überschreibungen fast gleich waren (674 bzw. 684). Vermutlich entscheidet das Timing, wann die
+  GPU den Draw tatsächlich ausführt, ob eine Überschreibung schon im Bild landet; bewiesen ist das
+  nicht. Die Rate liegt aber in jedem Lauf deutlich über 0. Der Fix gibt in 18 294 Frames 0.
+- **So sieht es aus** (Vsync an, 50 Hz, vor dem Fix, unter Capture-Last): ab Frame 300, also in
+  rund 54 s Sweep, alle 1,4 s (`7daffeb5`, 38 Fälle) bzw. alle 4 s (Override, 13 Fälle) ein grober
+  Fehlframe mit mindestens 10 000 falschen Pixeln, dazwischen kleinere. Ohne Capture ist das
+  wahrscheinlich seltener (siehe Grenzen). Median der Abweichung: 2 600 bis
   4 500 px pro kaputtem Frame. Meist steht der Fehler genau einen Frame: Nur 22 von 190 kaputten
   Frames haben einen kaputten Nachfolger. Das ist das gemeldete „sporadische Flackern“.
 - **Beispiel `f000480`** (NFIF=2, Vsync an, mitten im Sweep): Die Ordner-Icons im Content Browser
@@ -390,8 +394,10 @@ merkt sich nur den direkten Vorgänger. ² 3 000 Frames, davon 6 absichtlich ver
 Für den Mechanismus ist nichts mehr offen. Als Abnahme im Sinne des Themas reichen ein, zwei
 Minuten im D3D12-Editor mit echter Maus: schnell über Toolbar, Quick-Settings-Slider, Outliner und
 Content Browser fahren, einmal mit Vsync an und einmal ohne. Dabei sollte nichts aufblitzen. Wer
-den Unterschied sehen will: Vor dem Fix blitzen dabei im Content Browser und in der Menüleiste
-etwa einmal pro Sekunde Font-Schnipsel und Dreiecke auf. Zusätzlich lohnt ein Dock-Splitter-Zug
+den Unterschied sehen will: Vor dem Fix blitzen dabei im Content Browser, in der Tab- und in der
+Menüleiste Font-Schnipsel und Dreiecke auf. Unter Capture-Last war das ein grober Fehler alle 1,4
+bis 4 s, ohne Capture ist es wahrscheinlich seltener. Wer den Vor-Fix-Stand also nur ein paar
+Sekunden lang nicht flackern sieht, hat ihn damit noch nicht widerlegt. Zusätzlich lohnt ein Dock-Splitter-Zug
 über den Viewport (H2, gehört nicht zu diesem Fix).
 
 ### Wiederholen
