@@ -269,6 +269,8 @@ Mechanismus ist behoben.
   freigegeben, solange er noch benutzt wird).
 - `he_tests.exe` (Release, eigene `APPDATA`): **3 742 / 3 742 Testfälle, 506 140 Assertions,
   0 Fehler.**
+- `ctest --test-dir C:/hw97 -j8` (eigene `APPDATA`): **100 % von 198 bestanden.**
+  `runtime_size_app_advanced` und `runtime_size_app_basic` melden sich selbst als „Skipped“.
 
 ### Stolperfalle im Testaufbau, kein Produktfehler
 
