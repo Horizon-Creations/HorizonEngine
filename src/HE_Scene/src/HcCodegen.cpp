@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #if defined(_WIN32)
+#include "HiddenShell.h"  // _popen/std::system without a console window
 #include <process.h>  // _getpid — avoids pulling in windows.h just for a pid
 #else
 #include <unistd.h>   // getpid
@@ -4077,7 +4078,7 @@ bool        g_cmakeResolved = false;
 bool cmakeAnswers(const std::string& cmd)
 {
 #if defined(_WIN32)
-    return std::system(cmdLine(cmd + " --version >NUL 2>&1").c_str()) == 0;
+    return HE::hiddenSystem(cmdLine(cmd + " --version >NUL 2>&1")) == 0;
 #else
     return std::system((cmd + " --version >/dev/null 2>&1").c_str()) == 0;
 #endif
@@ -4137,7 +4138,7 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
                  std::string& captured)
 {
 #if defined(_WIN32)
-    FILE* pipe = _popen(cmdLine(cmd + " 2>&1").c_str(), "r");
+    FILE* pipe = HE::hiddenPopen(cmdLine(cmd + " 2>&1"));
 #else
     FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");
 #endif
@@ -4154,7 +4155,7 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
         }
     }
 #if defined(_WIN32)
-    return _pclose(pipe);
+    return HE::hiddenPclose(pipe);
 #else
     return pclose(pipe);
 #endif

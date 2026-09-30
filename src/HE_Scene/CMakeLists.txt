@@ -60,6 +60,7 @@ add_library(HorizonScene SHARED
     src/EngineApi.cpp
     src/PlayerSettings.cpp
     src/HcCodegen.cpp
+    src/HiddenShell.cpp
     src/AudioEngine.cpp
     src/PhysicsWorld.cpp
 )

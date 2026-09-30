@@ -21,7 +21,10 @@
 //      without putting it on the command line where it lands in the process
 //      table.
 //   5. On Windows a GUI-subsystem process has no console, so each call flashes
-//      one on screen. Fine once at startup; unusable for anything polled.
+//      one on screen — and with Windows Terminal as the default terminal that
+//      is a window that takes the foreground. Not even fine once at startup:
+//      the wrapper now goes through HE_Scene's HiddenShell (CREATE_NO_WINDOW),
+//      and anything new should use run() below, which never had the problem.
 //   6. It cannot be cancelled. A network operation against an unreachable host
 //      blocks forever, and the caller has no handle to kill.
 //

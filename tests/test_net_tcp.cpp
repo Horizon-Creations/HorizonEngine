@@ -161,6 +161,11 @@ TEST_CASE("TcpTransport: an IPv6 client reaches the dual-stack listener")
     // The session directory records whichever address it observed the host
     // arrive from, and that is frequently IPv6 — a v4-only listener would be
     // unreachable for those peers, which is exactly the bug this covers.
+    if (socketLoopbackOnly()) {
+        MESSAGE("HE_NET_LOOPBACK_ONLY: listen() binds 127.0.0.1 only, there is no "
+                "dual-stack listener to reach — run with HE_NET_LOOPBACK_ONLY=0");
+        return;
+    }
     auto server = TcpTransport::listen(0);
     REQUIRE(server != nullptr);
 
@@ -194,6 +199,11 @@ TEST_CASE("TcpTransport: IPv4 still reaches the same dual-stack listener")
 {
     // Clearing IPV6_V6ONLY is what makes one socket serve both families; if that
     // regressed, IPv4 peers would stop connecting.
+    if (socketLoopbackOnly()) {
+        MESSAGE("HE_NET_LOOPBACK_ONLY: listen() binds 127.0.0.1 only, there is no "
+                "dual-stack listener to reach — run with HE_NET_LOOPBACK_ONLY=0");
+        return;
+    }
     auto server = TcpTransport::listen(0);
     REQUIRE(server != nullptr);
     auto client = TcpTransport::connect("127.0.0.1", server->boundPort());
