@@ -149,7 +149,7 @@ constexpr std::uint32_t kStepMs = 100;
 struct Peer {
     std::unique_ptr<HorizonWorld>    world   = std::make_unique<HorizonWorld>();
     std::unique_ptr<NetGameSession>  session = std::make_unique<NetGameSession>();
-    LossyTransport*                  lossy   = nullptr;   // owned by the session
+    LossyTransport*                  lossy   = nullptr;   // owned by the session; null after leavePeer
     // Client side: what the spawn seam was asked to make. Step 5 binds
     // Ctx::createObject here; at this layer the callback firing IS the oracle
     // for "the class ran on the client".
@@ -171,7 +171,7 @@ struct Rig {
     void step(int frames = 1, float dt = 1.0f / 60.0f) {
         for (int i = 0; i < frames; ++i) {
             host.lossy->advance(kStepMs);
-            for (auto& c : clients) c->lossy->advance(kStepMs);
+            for (auto& c : clients) if (c->lossy) c->lossy->advance(kStepMs);
             host.session->update(dt);
             for (auto& c : clients) c->session->update(dt);
         }
@@ -241,6 +241,15 @@ Peer& addClient(Rig& rig, NetGameSession::JoinOptions options,
 
     rig.clients.push_back(std::move(peer));
     return *rig.clients.back();
+}
+
+// leave() destroys the transport the session owns, so the rig's pointer to it
+// has to die in the same breath. Left dangling, the next step() advanced a
+// freed LossyTransport: harmless while the allocator left the bytes alone, a
+// SIGSEGV on Windows CI whenever it did not (Guard Malloc makes it every run).
+void leavePeer(Peer& p) {
+    p.session->leave();
+    p.lossy = nullptr;
 }
 
 // A replicated scene entity on the host, mirrored into a client world under the
@@ -488,7 +497,7 @@ TEST_CASE("net session: assignControl reaches the owner and nobody else") {
         CHECK_FALSE(rig.host.session->assignControl(99u, body));
     }
     SUBCASE("leaving clears it, so a second session inherits no character") {
-        anna.session->leave();
+        leavePeer(anna);
         CHECK((anna.session->localCharacter() == entt::null));
     }
 }
@@ -628,7 +637,7 @@ TEST_CASE("net session: a leaving player is reaped, and a reused id inherits not
 
     // A NEW peer on the SAME connection id. Nothing of the old one may follow
     // it: not the input tracking, not the control assignment, not a score.
-    client.session->leave();
+    leavePeer(client);
     Peer& second = addClient(rig, defaultJoin("Bert"), 4, reused);
     rig.step(20);
     REQUIRE(second.session->status() == NetGameSession::Status::Joined);
