@@ -770,6 +770,12 @@ private:
 	// block in OnRender, every frame; the gizmo range is empty when the block
 	// did not run.
 	std::vector<DebugLine> m_lastDebugLines;
+	// The buffer that block builds into, kept across frames and cleared at its
+	// top rather than made fresh: a fresh one regrew to the ground grid's ~2 000
+	// lines every frame (a dozen reallocations, 144 KiB, docs/perf-audit/
+	// step3-cpu-memory-deep-dive-2026-09-27.md 4.2). m_lastDebugLines is
+	// refilled in place for the same reason.
+	DebugDrawBuffer m_debugDraw;
 	std::size_t m_mcpGizmoLineBegin = 0;
 	std::size_t m_mcpGizmoLineEnd   = 0;
 	HE::Ed::McpBridge m_mcp;

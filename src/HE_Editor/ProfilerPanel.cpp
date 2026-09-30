@@ -815,6 +815,12 @@ void DrawProfilerWindow(AppContext& ctx, bool& open)
                 prof.setDetailedGpuCapture(detailed);
             ImGui::TextDisabled("On = exclusive per-pass GPU (ranking/upper bound). FPS during capture is meaningless.");
 
+            bool counters = prof.gpuCounterSampling();
+            if (EditorWidgets::checkbox("GPU counter sampling (per-pass split)", &counters))
+                prof.setGpuCounterSampling(counters);
+            ImGui::TextDisabled("Off = whole-frame GPU time only, for FPS runs: sampling at every encoder "
+                                "boundary can keep a tile GPU from overlapping passes.");
+
             bool timeline = prof.threadTimelineEnabled();
             if (EditorWidgets::checkbox("Per-thread timeline (worker lanes)", &timeline))
                 prof.setThreadTimelineEnabled(timeline);

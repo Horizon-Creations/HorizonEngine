@@ -342,7 +342,10 @@ namespace HE
 			// streaming and temporal history settle, then HE_PROFILE_CAPTURE
 			// frames recorded, dumped, and the application leaves
 			// (HE_PROFILE_QUIT=0 keeps it running). HE_PROFILE_DETAILED=1 asks
-			// for the serialized per-pass GPU capture; HE_PROFILE_VSYNC=keep
+			// for the serialized per-pass GPU capture; HE_PROFILE_COUNTERS=0
+			// drops the per-encoder counter sampling of a normal capture, so an
+			// FPS run is not perturbed by it (whole-frame GPU time only);
+			// HE_PROFILE_VSYNC=keep
 			// records at the vsync the app runs with instead of forcing it off
 			// (the paced frame rate a user sees, not the headroom);
 			// HE_PROFILE_NOTE labels the dump.
@@ -350,7 +353,7 @@ namespace HE
 				struct AutoCapture
 				{
 					unsigned long long warmup = 300, frames = 0;
-					bool detailed = false, keepVsync = false, quit = true;
+					bool detailed = false, counters = true, keepVsync = false, quit = true;
 					std::string note;
 				};
 				static const AutoCapture kAuto = []
@@ -363,6 +366,7 @@ namespace HE
 					if (const char* v = env("HE_PROFILE_CAPTURE"))  a.frames   = std::strtoull(v, nullptr, 10);
 					if (const char* v = env("HE_PROFILE_WARMUP"))   a.warmup   = std::strtoull(v, nullptr, 10);
 					if (const char* v = env("HE_PROFILE_DETAILED")) a.detailed = std::atoi(v) != 0;
+					if (const char* v = env("HE_PROFILE_COUNTERS")) a.counters = std::atoi(v) != 0;
 					if (const char* v = env("HE_PROFILE_VSYNC"))    a.keepVsync = std::string(v) == "keep";
 					if (const char* v = env("HE_PROFILE_QUIT"))     a.quit     = std::atoi(v) != 0;
 					if (const char* v = env("HE_PROFILE_NOTE"))     a.note     = v;
@@ -387,9 +391,12 @@ namespace HE
 								        std::to_string(dm->refresh_rate) + " Hz, density " +
 								        std::to_string(dm->pixel_density);
 						EngineProfiler::instance().setDetailedGpuCapture(kAuto.detailed);
+						EngineProfiler::instance().setGpuCounterSampling(kAuto.counters);
 						toggleProfilerCapture(!kAuto.keepVsync, note.c_str());
 						HE_LOG_INFO(Core, "HE_PROFILE_CAPTURE: recording %llu frames (%s, %s) — %s",
-						            kAuto.frames, kAuto.detailed ? "detailed GPU" : "normal GPU",
+						            kAuto.frames,
+						            kAuto.detailed ? "detailed GPU"
+						                           : (kAuto.counters ? "normal GPU" : "normal GPU, counters off"),
 						            kAuto.keepVsync ? "vsync kept" : "vsync forced off",
 						            note.c_str());
 					}

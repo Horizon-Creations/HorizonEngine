@@ -10,6 +10,7 @@
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
+#include <HorizonRendering/FrameUploadRing.h>
 #include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
 #include <HorizonRendering/GiBvh.h>
 #include <HorizonRendering/GIProbeGrid.h>
@@ -1273,6 +1274,24 @@ private:
 	void  CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4& viewProj,
 	                         const glm::vec3& cameraPos);
 	void  ReleaseRibbonBuffers();
+
+	// ── Per-frame upload ring (perf audit B6) ───────────────────────────────
+	// Instance matrices, clustered-light lists and debug lines used to get a
+	// fresh MTLBuffer each, hundreds per frame. They now take a slice of a
+	// long-lived shared chunk: EncodeFrame opens the ring's frame after creating
+	// its command buffer, and a completion handler on that (last) command buffer
+	// returns the frame's chunks. Held by shared_ptr so the handler outlives the
+	// renderer. Chunk i's buffer is m_uploadRingBufs[i] (CFBridgingRetain'd).
+	std::shared_ptr<HE::FrameUploadRing> m_uploadRing = std::make_shared<HE::FrameUploadRing>();
+	std::vector<void*> m_uploadRingBufs;
+	// Space for `len` bytes on the GPU for THIS frame: returns the CPU pointer to
+	// fill, the buffer (borrowed id<MTLBuffer>) and the byte offset to bind it
+	// at. Outside an open ring frame (previews, thumbnails) it falls back to a
+	// fresh buffer, the old behaviour. Null only if Metal refuses the buffer.
+	void* UploadTransient(size_t len, void*& outBuf, size_t& outOffset);
+	// Same, filled with a copy of `data`; false (nothing bound) only on failure.
+	bool  UploadTransientBytes(const void* data, size_t len, void*& outBuf, size_t& outOffset);
+	void  ReleaseUploadRing();
 
 	// ── GPU weather particles (compute simulation + vertex-pull billboards) ──
 	// A fixed camera-following rain/snow pool lives in one MTLBuffer (interleaved

@@ -111,6 +111,10 @@ add_executable(he_tests
     # scatter had no running test until the density mask needed one.
     test_foliage.cpp
     test_debug_draw.cpp
+    # Bloom's 9-tap blur folded into 5 bilinear taps (perf audit B4): CPU replay.
+    test_bloom_kernel.cpp
+    # Metal's per-frame upload ring (perf audit B6): slices, recycling, threads.
+    test_frame_upload_ring.cpp
     test_profiler.cpp
     test_profiler_stats.cpp
     test_profiler_layout.cpp
@@ -190,6 +194,7 @@ add_executable(he_tests
     test_third_person_template.cpp
     test_docs_library.cpp
     test_editor_help.cpp
+    test_quick_settings_favorites.cpp
     test_hc_node_docs.cpp
     # Editor UI rendered on the CPU and looked at — see ImGuiSoftwareRaster.h.
     test_ui_shot.cpp

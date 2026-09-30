@@ -113,6 +113,15 @@ public:
         }
     }
 
+    // Lines built earlier and kept (the editor's ground grid, which only changes
+    // when the camera moves), appended in one go.
+    void append(const std::vector<DebugLine>& lines)
+    {
+        m_lines.insert(m_lines.end(), lines.begin(), lines.end());
+    }
+
+    // Keeps the capacity: a buffer that lives across frames and is cleared at
+    // the top of each one stops allocating once it has grown to a frame's worth.
     void clear()                                  { m_lines.clear(); }
     const std::vector<DebugLine>& lines() const   { return m_lines; }
     bool empty()                            const { return m_lines.empty(); }

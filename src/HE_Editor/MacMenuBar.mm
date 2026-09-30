@@ -37,6 +37,12 @@ namespace
 	std::vector<NSMenuItem*>    s_gameOnlyItems;
 	NSMenu*                     s_recentMenu = nil;
 	std::vector<std::string>    s_recentPaths;
+	// The title each retitled row was last given, so setItemTitle — called
+	// every frame for Play, Pause and Lock — returns before building an
+	// NSString and walking the menu when nothing changed. Three rows: a linear
+	// lookup, like s_toggleItems.
+	struct ItemTitle { MacMenuBar::Cmd cmd; std::string title; };
+	std::vector<ItemTitle>      s_itemTitles;
 	bool s_installed     = false;
 	bool s_projectLoaded = false;
 	bool s_appProject    = false;
@@ -524,6 +530,11 @@ void setToggleState(Cmd cmd, bool on) { setToggleState(cmd, 0, on); }
 void setItemTitle(Cmd cmd, const char* title)
 {
 	if (!title) return;
+	ItemTitle* known = nullptr;
+	for (ItemTitle& t : s_itemTitles)
+		if (t.cmd == cmd) { known = &t; break; }
+	if (known && known->title == title) return;   // the every-frame case
+
 	NSMenu* main = NSApp.mainMenu;
 	if (!main) return;
 	// The retitled rows are all top-level rows of one menu (Play, Entity), so
@@ -535,6 +546,11 @@ void setItemTitle(Cmd cmd, const char* title)
 			if (it.tag != static_cast<NSInteger>(cmd) || it.representedObject) continue;
 			NSString* want = [NSString stringWithUTF8String:title];
 			if (![it.title isEqualToString:want]) it.title = want;
+			// Remembered only once the row was found: a call before install()
+			// (or with no main menu yet) must try again next frame, not be
+			// taken as done.
+			if (known) known->title = title;
+			else       s_itemTitles.push_back({ cmd, title });
 			return;
 		}
 	}

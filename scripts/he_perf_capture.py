@@ -8,10 +8,12 @@ waits for the editor to leave on its own and summarises the dump.
 
   python3 scripts/he_perf_capture.py --project /tmp/pa1/proj/Test/Test.heproj \
       --label base-vsyncoff --out docs/perf-audit/raw [--detailed] [--vsync keep] \
-      [--set SSAOEnabled=false --set RenderScale=0.5] [--scene variant.hescene]
+      [--no-counters] [--set SSAOEnabled=false --set RenderScale=0.5] [--scene variant.hescene]
 
 --scene copies the given scene over the project's startup scene first (keep a
-pristine copy of the original yourself). --set writes editor CustomConfig keys
+pristine copy of the original yourself). --no-counters turns Metal's per-encoder
+GPU counter sampling off (HE_PROFILE_COUNTERS=0): whole-frame GPU time only, the
+right setting for an FPS run, since the sampling can perturb a tile GPU. --set writes editor CustomConfig keys
 (bool/int/float/str, parsed as JSON when possible). The editor camera is pinned
 with --cam x,y,z,yaw,pitch so every run looks at the same picture.
 """
@@ -132,6 +134,8 @@ def main():
     ap.add_argument("--warmup", type=int, default=300)
     ap.add_argument("--frames", type=int, default=600)
     ap.add_argument("--detailed", action="store_true")
+    ap.add_argument("--no-counters", action="store_true",
+                    help="no per-encoder GPU counter sampling (whole-frame GPU time only)")
     ap.add_argument("--vsync", default="off", choices=["off", "keep"])
     ap.add_argument("--timeout", type=float, default=600)
     ap.add_argument("--env", action="append", default=[], help="extra KEY=VALUE env")
@@ -155,6 +159,7 @@ def main():
         "HE_PROFILE_CAPTURE": str(a.frames),
         "HE_PROFILE_WARMUP": str(a.warmup),
         "HE_PROFILE_DETAILED": "1" if a.detailed else "0",
+        "HE_PROFILE_COUNTERS": "0" if a.no_counters else "1",
         "HE_PROFILE_VSYNC": a.vsync,
         "HE_PROFILE_NOTE": a.label,
     })
@@ -200,7 +205,8 @@ def main():
                          "samples": len(rss_kb)}
     summ["runner"] = {"label": a.label, "rc": rc, "wallSeconds": round(wall, 1), "editor": str(editor),
                       "sets": a.set, "cam": a.cam, "scene": a.scene, "warmup": a.warmup,
-                      "frames": a.frames, "detailed": a.detailed, "vsync": a.vsync}
+                      "frames": a.frames, "detailed": a.detailed, "counters": not a.no_counters,
+                      "vsync": a.vsync}
     (outdir / f"{a.label}.summary.json").write_text(json.dumps(summ, indent=2))
     fps = (summ.get("fps") or {}).get("avg")
     cpu = (summ.get("cpuMs") or {}).get("p50")

@@ -8,6 +8,7 @@
 #include "EditorHelp.h"                // "Preferences/<label>" scope for the tooltips
 #include "EditorInput.h"               // pointer-device grammar (Auto/Mouse/Trackpad)
 #include "ShortcutsPage.h"             // the Shortcuts page (its own module: headless-testable)
+#include "QuickSettingsFavorites.h"    // isFavorite, without a string per row
 #include "McpClientSetup.h"            // Remote Control > "Add to Claude" (claude mcp add)
 #include "NotificationStore.h"         // a settings write that fails has to say so
 #include "EditorRewards.h"             // Feedback > each tone's "Preview"
@@ -71,8 +72,7 @@ static void ApplyVSync(AppContext& ctx)
 
 static bool isFavorite(const EditorConfig& cfg, const char* key)
 {
-	const std::string hay = "," + cfg.QuickSettingsFavorites + ",";
-	return hay.find("," + std::string(key) + ",") != std::string::npos;
+	return HE::Ed::favoritesContain(cfg.QuickSettingsFavorites, key ? key : "");
 }
 static void toggleFavorite(EditorConfig& cfg, const char* key)
 {
