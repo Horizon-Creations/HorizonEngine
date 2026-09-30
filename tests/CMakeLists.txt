@@ -243,6 +243,7 @@ add_executable(he_tests
     test_collab_undo.cpp
     test_editor_commands.cpp
     test_mcp_bridge.cpp
+    test_mcp_lock_book.cpp
     test_mcp_tools_entity.cpp
     test_mcp_tools_asset.cpp
     test_mcp_tools_scene.cpp

@@ -291,7 +291,14 @@ std::string getRHIName(HE::RendererBackend backend)
 	}
 }
 
-EditorApplication::~EditorApplication() = default;
+EditorApplication::~EditorApplication()
+{
+	// Before any member goes: stopping the bridge reports every connection to
+	// the client-gone hooks, and the lock hook reaches m_mcpLocks and m_collab,
+	// which are not all declared before m_mcp. OnShutdown normally did this
+	// already, and stop() is then a no-op.
+	m_mcp.stop();
+}
 
 HE::ApplicationConfig EditorApplication::GetConfig() const
 {
@@ -7635,6 +7642,11 @@ void EditorApplication::setupMcpTools()
 
 	HE::Ed::registerCoreTools(m_mcp.registry(), std::move(hooks));
 
+	// A client going hands back the session locks IT took, and only those
+	// (plan §20.3) — not when the editor happens to have no client left.
+	m_mcp.registry().addClientGoneHook(
+		[this](HE::Ed::McpClientId client) { releaseMcpLocksOf(client); });
+
 	// Placing and moving objects. Registered after the gateway is wired, because
 	// the tools capture a reference to it and the first `tools/call` may arrive
 	// in the same frame.
@@ -8450,20 +8462,32 @@ void EditorApplication::setupEditorCommands()
 	m_commands.setHooks(std::move(h));
 }
 
-// A subject an external client has taken. Kept in insertion order; the list is
-// at most as long as the number of entities one client touched in a session, so
-// a linear search is the right shape.
+// A subject an external client has taken — booked to THAT client. The gateway
+// hook is only handed the subject; who caused the command is the registry's
+// calling client, which the bridge sets around every tools/call (0 for a call
+// with no bridge behind it).
 void EditorApplication::rememberMcpLock(std::uint64_t subject)
 {
-	if (subject == 0) return;
-	for (const McpLock& l : m_mcpLocks)
-		if (l.subject == subject) return;
 	// Stamped now, not zero: the caller has just asked for this lock, and a zero
 	// would make updateMcpLocks ask a second time in the same frame.
 	const auto nowMs = static_cast<std::uint64_t>(
 		std::chrono::duration_cast<std::chrono::milliseconds>(
 			std::chrono::steady_clock::now().time_since_epoch()).count());
-	m_mcpLocks.push_back(McpLock{ subject, nowMs });
+	m_mcpLocks.take(subject, m_mcp.registry().callingClient(), nowMs);
+}
+
+// A client's connection is gone: its share goes back, and nobody else's. Runs
+// inside m_mcp.update(), where the bridge sees the close.
+void EditorApplication::releaseMcpLocksOf(HE::Ed::McpClientId client)
+{
+	for (const std::uint64_t subject : m_mcpLocks.clientGone(client))
+	{
+		// The human has it selected: followSelection holds the same session lock
+		// for them, and handing it back would take it from under their hands.
+		// The book forgets it either way — it is the selection's now.
+		if (subject == m_collab.heldSubject()) continue;
+		m_collab.releaseLock(subject);
+	}
 }
 
 bool EditorApplication::mcpLockedByOther(std::uint64_t subject)
@@ -8487,7 +8511,10 @@ bool EditorApplication::mcpLockedByOther(std::uint64_t subject)
 // touching an entity for the rest of the session. Disconnect is the release
 // signal rather than a timer: a timer would drop the lock a few seconds after an
 // edit, and CollabUndo::dropUnowned would then throw the undo entry that edit
-// produced (docs/mcp-editor-integration-plan.md §4).
+// produced (docs/mcp-editor-integration-plan.md §4). The disconnect is the
+// HOLDING client's (releaseMcpLocksOf, via the registry's client-gone hook);
+// a client whose socket stays open while it hangs is not noticed — there is no
+// idle timeout on the bridge, on purpose, for the same undo reason.
 void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
 {
 	if (m_mcpLocks.empty()) return;
@@ -8500,15 +8527,20 @@ void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
 	}
 	if (m_mcp.clientCount() == 0)
 	{
-		for (const McpLock& l : m_mcpLocks) m_collab.releaseLock(l.subject);
-		m_mcpLocks.clear();
+		// What is still booked here belongs to nobody who can disconnect: the
+		// anonymous caller (a tool invoked without the bridge). Every real
+		// client's share went in releaseMcpLocksOf already — stop() reports
+		// each connection too.
+		for (const std::uint64_t subject : m_mcpLocks.takeAll())
+			if (subject != m_collab.heldSubject()) m_collab.releaseLock(subject);
 		return;
 	}
 
 	// Half a second between re-asks: a grant is one round trip, and asking every
 	// frame in the meantime would put sixty requests on the wire for one answer.
 	constexpr std::uint64_t kReaskMs = 500;
-	for (auto it = m_mcpLocks.begin(); it != m_mcpLocks.end();)
+	auto& entries = m_mcpLocks.entries();
+	for (auto it = entries.begin(); it != entries.end();)
 	{
 		if (m_collab.ownsLock(it->subject)) { ++it; continue; }
 		if (mcpLockedByOther(it->subject))
@@ -8516,7 +8548,7 @@ void EditorApplication::updateMcpLocks(std::uint64_t nowMs)
 			// Someone else has it now. Forgetting it here is what keeps the next
 			// command's answer honest — it will be locked_by_other rather than a
 			// silent retry loop.
-			it = m_mcpLocks.erase(it);
+			it = entries.erase(it);
 			continue;
 		}
 		if (nowMs - it->lastAskedMs >= kReaskMs)

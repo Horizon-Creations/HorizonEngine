@@ -22,10 +22,11 @@ What it checks, each from the side that did NOT make the change:
      marker is gone, and both uuid sets are identical;
   5. A creates an entity → B sees it, same uuid, same position;
   6. B moves it (lock requested from the host, lock_pending retried) → A sees it;
-  7. while B holds that lock, A's move is refused `locked_by_other`; with every
-     MCP client of B gone, B hands the lock back, A's move lands and B sees it
-     (and, reported without asserting: what happens when only the HOLDING
-     client leaves and another stays — see the note at step 7a);
+  7. while B holds that lock, A's move is refused `locked_by_other`; a second
+     client connecting to B frees nothing, but the HOLDING client leaving while
+     that second one stays hands the lock back (it was that client's, not the
+     editor's) and A's move lands; the second client then takes it itself, and
+     with every MCP client of B gone B hands it back again;
   8. B creates and renames an entity → A sees the name;
   9. deletes both ways → gone on the other side;
  10. B leaves → A's roster shrinks back to A.
@@ -293,35 +294,73 @@ def main():
         expect(not ok and sc.get("code") == "locked_by_other",
                "A's move of B's entity is refused: %s" % (sc.get("code") if not ok else "ACCEPTED"))
         expect(close(world_pos(a, ua), [-4.0, 1.0, 2.0]), "…and did not move it on A")
-        # 7a. What B's editor does when the client that took the lock hangs up
-        #     while ANOTHER client stays connected to it. Reported, not
-        #     asserted: EditorApplication::updateMcpLocks hands the external
-        #     locks back only once clientCount() is 0, i.e. they belong to the
-        #     editor's clients as a group, not to the one that asked
-        #     (docs/mcp-editor-integration-plan.md proposed per-connection).
+        # 7a. The client that took the lock hangs up while ANOTHER client stays
+        #     connected to B. The lock is that client's, not the editor's
+        #     (McpLockBook, docs/mcp-editor-integration-plan.md §20.3), so B
+        #     hands it back and A's move lands. The first version kept it until
+        #     B had no client at all, and the survivor inherited it silently.
+        #
+        #     Control first: a second client merely CONNECTING must not free
+        #     anything — otherwise "A's move lands" below would also pass for a
+        #     lock that is dropped far too early.
         b2 = mc.Client("B2", b.ed.endpoint)
+        time.sleep(1.0)
+        ok, sc = a.raw("entity_set_transform", {"uuid": ua, "position": [9.0, 9.0, 9.0]})
+        expect(not ok and sc.get("code") == "locked_by_other",
+               "holder still connected, B2 connected too → A's move still refused: %s"
+               % (sc.get("code") if not ok else "ACCEPTED"))
         b.client.close()
         b.client = b2
-        time.sleep(2.0)
-        ok, sc = a.raw("entity_set_transform", {"uuid": ua, "position": [9.0, 9.0, 9.0]})
-        gap = "accepted" if ok else sc.get("code")
-        transcript["lock_after_holder_left_other_client_stays"] = gap
-        log("  NOTE holder hung up, a second client on B stayed → A's move: %s" % gap)
 
-        # 7b. Every client of B gone → B's editor hands the lock back.
+        def a_moves(pos):
+            """A's move, retried while B's lock is on its way back; (ok, code, s, pending)."""
+            ok, sc, pend = False, {}, 0
+            t0 = time.time()
+            while time.time() < t0 + SYNC_TIMEOUT:
+                ok, sc, p = a.retry_lock("entity_set_transform", {"uuid": ua, "position": pos})
+                pend += p
+                if ok or sc.get("code") != "locked_by_other":
+                    break
+                time.sleep(0.2)
+            return ok, sc.get("code", "ok"), time.time() - t0, pend
+
+        ok, code, dt, pend = a_moves([7.0, 0.0, 7.0])
+        transcript["lock_after_holder_left_other_client_stays"] = {
+            "accepted": ok, "code": code, "seconds": round(dt, 2)}
+        # Bounded: the release is one frame after B's bridge sees the close,
+        # then one round trip. Same order as the no-client case (0.7 s in the
+        # first run); anything near SYNC_TIMEOUT means the lock was inherited.
+        expect(ok and dt < 5.0,
+               "holder hung up, B2 stayed → B hands the lock back, A's move lands "
+               "(%.1fs, %s, %d pending)" % (dt, code, pend))
+        got, dt = wait_for("B sees A's move", lambda: close(world_pos(b, ua), [7.0, 0.0, 7.0]))
+        expect(got, "B sees A's move (%.1fs): %s" % (dt, world_pos(b, ua)))
+
+        # 7b. B2 takes the lock ITSELF (it was never B2's before), A is refused
+        #     again; then every client of B gone → B's editor hands it back.
+        #     A released nothing explicitly: A's own client lock is on A, and
+        #     A's editor keeps it while A's client is connected. So first A's
+        #     client lets go by reconnecting, which frees A's lock the same way.
+        a.reconnect()
+        ok, sc, pend = b.retry_lock("entity_set_transform", {"uuid": ua, "position": [-4.0, 1.0, 2.0]})
+        t0 = time.time()
+        while not ok and sc.get("code") == "locked_by_other" and time.time() < t0 + SYNC_TIMEOUT:
+            time.sleep(0.2)
+            ok, sc, p = b.retry_lock("entity_set_transform", {"uuid": ua, "position": [-4.0, 1.0, 2.0]})
+            pend += p
+        expect(ok, "B2 takes the lock after A's client reconnected (%.1fs, %s, %d pending)"
+               % (time.time() - t0, sc.get("code", "ok"), pend))
+        got, dt = wait_for("A sees B2's move", lambda: close(world_pos(a, ua), [-4.0, 1.0, 2.0]))
+        expect(got, "A sees B2's move (%.1fs): %s" % (dt, world_pos(a, ua)))
+        ok, sc = a.raw("entity_set_transform", {"uuid": ua, "position": [9.0, 9.0, 9.0]})
+        expect(not ok and sc.get("code") == "locked_by_other",
+               "B2 holds it now → A's move refused: %s" % (sc.get("code") if not ok else "ACCEPTED"))
+
         b.client.close()
         b.client = None
-        ok, sc, pend = False, {}, 0
-        deadline = time.time() + SYNC_TIMEOUT
-        t0 = time.time()
-        while time.time() < deadline:
-            ok, sc, p = a.retry_lock("entity_set_transform", {"uuid": ua, "position": [5.0, 0.0, 5.0]})
-            pend += p
-            if ok or sc.get("code") != "locked_by_other":
-                break
-            time.sleep(0.2)
+        ok, code, dt, pend = a_moves([5.0, 0.0, 5.0])
         expect(ok, "with no client left on B, A's move lands (%.1fs, %s, %d pending)"
-               % (time.time() - t0, sc.get("code", "ok"), pend))
+               % (dt, code, pend))
         b.reconnect()
         got, dt = wait_for("B sees A's move", lambda: close(world_pos(b, ua), [5.0, 0.0, 5.0]))
         expect(got, "B sees A's move (%.1fs): %s" % (dt, world_pos(b, ua)))

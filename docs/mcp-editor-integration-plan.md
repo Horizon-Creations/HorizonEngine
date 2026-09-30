@@ -2935,8 +2935,8 @@ geworden (der Treiber hat neu verbunden, und der neue Client hat den Lock
 still geerbt). Kapitel 2.4 hatte „Freigabe beim Disconnect" pro Verbindung
 vorgeschlagen. Für eine Pro-Client-Freigabe muss das Gateway wissen, welcher
 Client einen Befehl schickt. `EditorCommands::Hooks::requestLock` bekommt
-heute nur das Subjekt. Nicht behoben, das Skript protokolliert den Fall
-(Schritt 7a, `NOTE …`) und prüft nur den Fall ohne Client.
+heute nur das Subjekt. In Schritt 3 nicht behoben, das Skript protokollierte
+den Fall nur (Schritt 7a, `NOTE …`). **Seit Schritt 4 behoben, siehe 20.5.**
 
 ### 20.4 Was dieser Lauf nicht behauptet
 
@@ -2954,3 +2954,44 @@ und wartet auf eine Speichern-Abfrage, die im versteckten Fenster niemand
 beantwortet. Das Aufräumen beim Beenden (`CollabController::shutdown`) ist
 also in diesem Lauf nicht gelaufen. Ein `scene_save` auf beiden Seiten vor
 dem Stoppen würde es ermöglichen, ist aber nicht ausprobiert.
+
+### 20.5 Behoben: externe Locks gehören dem Client, der sie geholt hat (Thema 86, Schritt 4)
+
+**Das Buch.** `McpLockBook` (`src/HE_Editor/McpLockBook.h`, header-only, ohne
+Session und Netz) ersetzt die flache Liste `m_mcpLocks`. Pro Subjekt steht dort
+die Menge der MCP-Clients, die es geholt haben. `clientGone(id)` streicht den
+Client überall und gibt genau die Subjekte zurück, die danach niemand mehr hält.
+Eine Menge statt eines Halters, weil zwei Clients desselben Editors dieselbe
+Entity bearbeiten können: die Session hält den Lock einmal für beide, und ihn
+beim ersten Abgang zurückzugeben, würde ihn dem zweiten wegziehen.
+
+**Wer ruft.** Das Gateway (`EditorCommands::Hooks::requestLock`) bekommt weiter
+nur das Subjekt. Statt `McpCallContext` durch Entity-, Prefab- und
+Terrain-Werkzeuge bis in jeden Befehl zu fädeln, kennt die Registry den
+aufrufenden Client: `McpToolRegistry::callingClient()`, gesetzt vom Bridge per
+`CallerScope` um jedes `tools/call`. Das trägt, weil ein Aufruf synchron im
+Frame-Thread läuft; die inneren Aufrufe von `batch` liegen im selben Scope.
+Außerhalb eines Aufrufs ist es 0, der anonyme Client.
+
+**Die Freigabe.** `EditorApplication` hängt `releaseMcpLocksOf` an den
+Client-weg-Haken der Registry. Der Bridge meldet jede Verbindung, die er
+vergisst, auch beim `stop()`. `updateMcpLocks` behält den Fall
+`clientCount() == 0` nur noch für das, was dann übrig ist: Locks des anonymen
+Clients, der nie trennt. Ein Subjekt, das gerade die Auswahl des Menschen hält
+(`CollabController::heldSubject()`, dieselbe Session-Sperre), wird nicht
+zurückgegeben, sonst verlöre der Mensch seinen Lock mit dem Client.
+
+**Was es nicht abdeckt.** Freigabesignal ist das Schließen der Verbindung. Ein
+Client, der hängt, dessen Socket aber offen bleibt, wird nicht bemerkt; der
+Bridge hat keinen Leerlauf-Timeout. Das ist gewollt und derselbe Grund wie in
+§4: ein Timer würde den Lock kurz nach einer Änderung fallen lassen, und
+`CollabUndo::dropUnowned` würde deren Undo-Eintrag verwerfen.
+
+**Geprüft.** `tests/test_mcp_lock_book.cpp` (Abgang eines Clients, zwei Halter
+auf einem Subjekt, anonymer Client), `tests/test_mcp_bridge.cpp` (ein Werkzeug
+ohne Kontext liest den richtigen Client über die Registry, auch durch `batch`,
+und außerhalb eines Aufrufs 0). `scripts/he_collab_two_editors.py` Schritt 7a
+prüft den Fall jetzt statt ihn zu protokollieren: B2 verbindet sich, A bleibt
+abgewiesen (Kontrolle); der haltende Client trennt, B2 bleibt, A's Zug landet
+in unter 5 s. Danach holt B2 den Lock selbst, A wird wieder abgewiesen, und
+ohne jeden Client an B landet A's Zug wie bisher.

@@ -430,7 +430,13 @@ bool McpBridge::dispatch(ConnectionId id, const std::string& method, const json&
 		// With the caller's identity: a tool that keeps state per client (the
 		// screenshot camera) keys it on this connection, and a client can only
 		// ever reach its own share.
-		const ToolResult r = tool->invoke(McpCallContext{ id }, args);
+		// And as the registry's calling client, for what the tool reaches
+		// without the context — the gateway's lock hook books a lock to the
+		// client that caused it (McpLockBook).
+		const ToolResult r = [&] {
+			McpToolRegistry::CallerScope caller(m_registry, id);
+			return tool->invoke(McpCallContext{ id }, args);
+		}();
 
 		// MCP's own result shape, not ours: the shim forwards this to the client
 		// unchanged, so `content` has to be a content array and a refusal has to

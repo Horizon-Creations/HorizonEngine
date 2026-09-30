@@ -138,6 +138,36 @@ public:
 	void addClientGoneHook(std::function<void(McpClientId)> fn);
 	void notifyClientGone(McpClientId client) const;
 
+	// Who is calling RIGHT NOW, for code a tool reaches without being handed
+	// the context: the gateway's lock hook above all. The entity, prefab and
+	// terrain tools go through EditorCommands, which knows commands and
+	// subjects but not callers, and whose lock has to be booked to the client
+	// that caused it (McpLockBook). Threading McpCallContext through every
+	// command would be the same answer in forty places.
+	//
+	// Sound because a call is synchronous and on the frame thread: the bridge
+	// opens a CallerScope around `invoke`, the batch tool's inner calls run
+	// inside that same scope, and nothing a tool does outlives its call. 0
+	// outside any call — the anonymous caller, as everywhere else.
+	McpClientId callingClient() const { return m_callingClient; }
+
+	class CallerScope
+	{
+	public:
+		CallerScope(const McpToolRegistry& r, McpClientId client)
+			: m_registry(r), m_previous(r.m_callingClient)
+		{
+			m_registry.m_callingClient = client;
+		}
+		~CallerScope() { m_registry.m_callingClient = m_previous; }
+		CallerScope(const CallerScope&)            = delete;
+		CallerScope& operator=(const CallerScope&) = delete;
+
+	private:
+		const McpToolRegistry& m_registry;
+		McpClientId            m_previous;
+	};
+
 	// The `tools/list` payload, in MCP's own shape:
 	//   { "tools": [ { "name", "description", "inputSchema" }, … ] }
 	// Shaped like the protocol rather than like us, because the shim forwards it
@@ -151,6 +181,9 @@ public:
 private:
 	std::vector<McpTool>                          m_tools;
 	std::vector<std::function<void(McpClientId)>> m_clientGone;
+	// Mutable: the registry is const where tools are looked up and invoked,
+	// and who is calling is not part of what the registry IS.
+	mutable McpClientId                           m_callingClient = 0;
 };
 
 // Standard base64 (RFC 4648, with padding) — what an MCP image block's `data`

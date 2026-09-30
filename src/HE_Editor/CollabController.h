@@ -862,6 +862,10 @@ public:
 	// frame with the selection; releases the previous subject and claims the new
 	// one only when it actually changed, so this stays free to call.
 	void followSelection(std::uint64_t subject);
+	// The subject followSelection holds for the human, 0 for none. An external
+	// client giving up an entity the human has selected must not hand back the
+	// human's lock with it — the session holds it once for both.
+	std::uint64_t heldSubject() const { return m_heldSubject; }
 
 	// ── Asset-level locking (lazy) ───────────────────────────────────────────
 	// Assets lock on FIRST EDIT, not on open: reading a graph together is fine,
