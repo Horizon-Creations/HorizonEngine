@@ -431,3 +431,19 @@ Reprojektion liest History) und Bildrand (`HE_DUMP_YAW=-42`).
   damit allein, ob SPIRV-Cross MSL-Text erzeugt (`SSR shaders cross-compile
   for every backend`, `trace.ok`). Durch den Metal-Compiler geht der Text dort
   nicht.
+
+**CI** (`workflow_dispatch` auf diesem Zweig, Run
+[36737825785](https://github.com/Horizon-Creations/HorizonEngine/actions/runs/36737825785),
+Kopf `2f964753`; die Commits danach ändern nur diesen Bericht und Bilder):
+**grün auf allen drei Plattformen**. Linux 223/223, macOS 223/223, Windows
+224/224, jeweils mit `test_material_graph` (darin der Cross-Compile-Fall für
+Metal und auf Windows der neue FXC-Fall).
+
+**Was offen bleibt:**
+
+- Pixel-A/B auf echter Metal-Hardware (Plan §8 Punkt 3). Hier nur statisch
+  und über CI belegt, siehe oben.
+- D3D gegen Vulkan nicht pixelgenau: Wand max 15/255 im SSR-Beitrag, am
+  Bildrand ein schwacher Saum am streifenden Horizont. Die Geometrie der
+  Spiegelung ist gleich.
+- D3D11 hat keinen Debug-Layer (eigener, kleiner Schritt, falls gewünscht).
