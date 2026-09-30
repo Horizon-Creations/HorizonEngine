@@ -168,9 +168,16 @@ Danach neu gebaut:
 
 - Offline: fxc kompiliert den gepinnten Trace fehlerfrei.
 - D3D11 und D3D12 melden `screen-space reflection pipeline created`.
-- Die Boden-Diff-Box ist **pixelgenau die von Vulkan**: (587,470)–(692,577),
-  10 962 Pixel.
-- Die Wand ergibt 116 701 Pixel, Box ab x=250 statt 248.
+- Die Boden-Diff-Box ist dieselbe wie auf Vulkan: (587,470)–(692,577),
+  10 962 gegen 10 957 Pixel.
+- Direkter Bildvergleich im Bodenbereich:
+  - **Boden:** D3D11/D3D12 gegen Vulkan ergibt 1 Pixel über der Schwelle. Der
+    SSR-Beitrag (an − aus) weicht im Mittel um 0,008/255 ab, höchstens um 3.
+  - **Wand:** 116 701 Pixel, Box ab x=250 statt 248. Gegen Vulkan liegen
+    4 055 Pixel über der Schwelle, der SSR-Beitrag weicht im Mittel um 0,125/255
+    ab, höchstens um 15. Die Geometrie der Spiegelung ist also gleich, die Bilder
+    sind aber nicht pixelgenau gleich.
+  - D3D11 und D3D12 sind untereinander pixelgleich.
 - Mit `HE_GPU_DEBUG=1` meldet der Debug-Layer auf D3D11 nichts. Auf D3D12 kommt
   nur „ClearRenderTargetView: clear values do not match“, und die kommt auch mit
   SSR aus, ist also vorbestehend.

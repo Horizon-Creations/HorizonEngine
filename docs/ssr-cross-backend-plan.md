@@ -761,8 +761,9 @@ GI-Port:
    > - **D3D11 und D3D12 spiegeln gar nicht.** `ssrTracePS` scheitert zur
    >   Laufzeit in `D3DCompile` mit X3511: Der Ray-March sampelt mit implizitem
    >   LOD in einer Schleife mit Uniform-Iterationszahl. SSR bleibt dort still aus.
-   > - Mit `textureLod(…, 0.0)` im Trace (lokal, nicht committet) rendern beide
-   >   D3D-Backends pixelgenau wie Vulkan.
+   > - Mit `textureLod(…, 0.0)` im Trace (lokal, nicht committet) spiegeln beide
+   >   D3D-Backends mit derselben Geometrie wie Vulkan. Der Boden ist praktisch
+   >   pixelgleich, an der Wand bleibt eine Abweichung von höchstens 15/255.
    > - Der Fix ist ein eigener Schritt.
 
 `ctest` bleibt in jedem Schritt grün. Schritt 1 ändert keinen Code, es gibt hier
