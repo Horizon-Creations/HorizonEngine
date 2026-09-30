@@ -4569,8 +4569,14 @@ void EditorApplication::dumpFrameHeadless()
 	// macOS — where the normal loop throttles to a near-frozen frame rate and a
 	// loop-driven capture never fires.
 	r->SetOverlayCallback(nullptr);
-	r->SetBloomSettings(IRenderer::BloomSettings{
-		m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity});
+	{
+		// HE_DUMP_BLOOM=0|1: the bloom toggle for this capture only — the control
+		// shot that proves a bloom A/B has any bloom in it to compare.
+		IRenderer::BloomSettings bloom{
+			m_editorConfig.BloomEnabled, m_editorConfig.BloomThreshold, m_editorConfig.BloomIntensity};
+		if (const char* v = std::getenv("HE_DUMP_BLOOM"); v && *v) bloom.enabled = std::atof(v) > 0.5;
+		r->SetBloomSettings(bloom);
+	}
 	{
 		// HE_DUMP_SSAO: override the persisted SSAO toggle for this capture only
 		// (the GI / SSR twins below do the same), so an SSAO pre-pass A/B does

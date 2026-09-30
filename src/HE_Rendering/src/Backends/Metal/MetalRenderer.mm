@@ -1449,15 +1449,16 @@ fragment float4 blurFragment(FSOut in [[stage_in]],
                              texture2d<float> img [[texture(0)]],
                              constant float4& cfg [[buffer(0)]]) // xy: texel, z: horizontal
 {
+	// The 9-tap Gaussian on whole texels, folded into 5 bilinear taps: each
+	// linear fetch between texels (1,2) and (3,4) returns their weighted sum.
+	// Derivation and constants: HorizonRendering/BloomKernel.h.
 	constexpr sampler s(filter::linear, address::clamp_to_edge);
-	float w[5] = { 0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216 };
+	const float  w0 = 0.227027, w12 = 0.3162162, w34 = 0.07027;
+	const float  o12 = 1.3846153, o34 = 3.2307670;
 	float2 dir = (cfg.z > 0.5) ? float2(cfg.x, 0.0) : float2(0.0, cfg.y);
-	float3 result = img.sample(s, in.uv).rgb * w[0];
-	for (int i = 1; i < 5; ++i)
-	{
-		result += img.sample(s, in.uv + dir * float(i)).rgb * w[i];
-		result += img.sample(s, in.uv - dir * float(i)).rgb * w[i];
-	}
+	float3 result = img.sample(s, in.uv).rgb * w0;
+	result += (img.sample(s, in.uv + dir * o12).rgb + img.sample(s, in.uv - dir * o12).rgb) * w12;
+	result += (img.sample(s, in.uv + dir * o34).rgb + img.sample(s, in.uv - dir * o34).rgb) * w34;
 	return float4(result, 1.0);
 }
 )MSL";
