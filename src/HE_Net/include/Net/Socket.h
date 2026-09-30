@@ -42,6 +42,19 @@ enum class SocketResult : std::uint8_t {
 // Idempotent and thread-safe; safe to call from every socket entry point.
 HE_NET_API bool socketSystemInit();
 
+// True when HE_NET_LOOPBACK_ONLY=1: every bind that would take ALL interfaces
+// (INADDR_ANY, in6addr_any, the dual-stack listeners, ephemeral client ports)
+// takes the loopback address instead, and the dual-stack constructors fall back
+// to their IPv4 path. Binds to one explicitly named address are left alone.
+//
+// This exists for the test suite, which sets it in tests/main.cpp. On Windows
+// the first run of an exe from a new path that binds a non-loopback address
+// raises the Defender Firewall dialog ("Windows-Sicherheit"), which takes the
+// foreground from whoever is working at the machine — and every fresh build
+// directory is a new path. Loopback traffic between the tests' own host and
+// client is all the suite needs. Read once, on the first bind.
+HE_NET_API bool socketLoopbackOnly();
+
 // ─── Lifetime ────────────────────────────────────────────────────────────────
 
 // Create a non-blocking IPv4 TCP socket. Returns kInvalidSocket on failure.

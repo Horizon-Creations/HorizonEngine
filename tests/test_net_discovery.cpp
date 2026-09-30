@@ -758,6 +758,13 @@ TEST_CASE("The reported IPv6 address is a stable one, not a rotating privacy add
     const std::string v6 = HE::Net::socketGlobalIPv6Address();
     if (v6.empty()) return;   // no IPv6 here — a valid answer
     CAPTURE(v6);
+    if (HE::Net::socketLoopbackOnly()) {
+        // The listener below would bind 127.0.0.1, which the global address
+        // cannot reach — a failure of the mode, not of the address.
+        MESSAGE("HE_NET_LOOPBACK_ONLY: nothing binds a global address — "
+                "run with HE_NET_LOOPBACK_ONLY=0");
+        return;
+    }
 
     // The address must be one this machine actually holds and accept a
     // connection on. That is the property that matters, and it is checkable

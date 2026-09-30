@@ -184,7 +184,13 @@ jobs:
       # -j because the suite waits far more than it computes: real git
       # subprocesses, child-process kills, socket handshakes, polling sleeps.
       # Serially that was 442 s here while the test bodies sum to ~31 s.
+      #
+      # HE_NET_LOOPBACK_ONLY=0: tests/main.cpp otherwise binds every listener to
+      # loopback, which spares a developer's desktop the Windows Firewall dialog
+      # but skips the dual-stack and LAN-reachability tests. A runner asks nobody.
       - name: Run tests
+        env:
+          HE_NET_LOOPBACK_ONLY: "0"
         run: ctest --test-dir build --output-on-failure -j4
 
       # ── The two app runtimes ────────────────────────────────────────────────────

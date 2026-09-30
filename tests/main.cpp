@@ -30,6 +30,22 @@ int main(int argc, char** argv)
 	setenv("HE_COLLAB_OFFLINE", "1", 1);
 #endif
 
+	// Every listener the suite opens binds the loopback address rather than
+	// every interface (see HE::Net::socketLoopbackOnly). On Windows the first
+	// run of an exe from a new path that binds a non-loopback address raises the
+	// Defender Firewall dialog, which takes the foreground from whoever is at
+	// the machine, and every fresh build directory is a new path. The handful of
+	// tests about dual-stack or LAN-wide reachability skip, and say so. Set
+	// HE_NET_LOOPBACK_ONLY=0 to run them for real (CI does).
+	if (!std::getenv("HE_NET_LOOPBACK_ONLY"))
+	{
+#if defined(_WIN32)
+		_putenv_s("HE_NET_LOOPBACK_ONLY", "1");
+#else
+		setenv("HE_NET_LOOPBACK_ONLY", "1", 1);
+#endif
+	}
+
 	// Every test that reads or writes GlobalState's config would otherwise land
 	// in the per-user settings file (~/Library/Application Support/HorizonEngine,
 	// %APPDATA%\HorizonEngine) — the real one of whoever runs the suite. A run

@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <vector>
@@ -130,6 +131,45 @@ bool socketSystemInit() {
     return ok;
 }
 
+bool socketLoopbackOnly() {
+    // A function-local static, so the variable is read on the first bind and
+    // not while the DLL loads: tests/main.cpp sets it at the top of main(),
+    // after every DLL is already initialised. On Windows it is read from the
+    // process environment rather than through getenv, which would see the CRT
+    // copy of whichever module the caller was linked with.
+    static const bool on = [] {
+#ifdef _WIN32
+        char v[4] = {};
+        const DWORD n = ::GetEnvironmentVariableA("HE_NET_LOOPBACK_ONLY", v, sizeof(v));
+        const bool set = (n == 1 && v[0] == '1');
+#else
+        const char* v = std::getenv("HE_NET_LOOPBACK_ONLY");
+        const bool set = (v && v[0] == '1' && v[1] == '\0');
+#endif
+        if (set) {
+            HE_LOG_INFO(Net, "%s",
+                "HE_NET_LOOPBACK_ONLY=1: sockets bind the loopback address instead "
+                "of every interface — nothing here is reachable from the network");
+        }
+        return set;
+    }();
+    return on;
+}
+
+namespace {
+
+// The address a bind "to every interface" really takes. In loopback-only mode
+// that is the loopback address, which is what keeps the Windows Firewall quiet:
+// it asks about a program the first time it binds a NON-loopback address.
+std::uint32_t anyAddress4() {
+    return htonl(socketLoopbackOnly() ? INADDR_LOOPBACK : INADDR_ANY);
+}
+in6_addr anyAddress6() {
+    return socketLoopbackOnly() ? in6addr_loopback : in6addr_any;
+}
+
+} // namespace
+
 // ─── Lifetime ────────────────────────────────────────────────────────────────
 
 SocketHandle socketCreateTcp() {
@@ -215,7 +255,7 @@ bool socketBindListen(SocketHandle h, std::uint16_t port, int backlog) {
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = anyAddress4();
     addr.sin_port        = htons(port);
 
 #ifdef _WIN32
@@ -383,11 +423,15 @@ SocketResult socketCreateTcpConnecting(const std::string& host, std::uint16_t po
 SocketHandle socketCreateListenerDualStack(std::uint16_t port, int backlog) {
     if (!socketSystemInit()) return kInvalidSocket;
 
+    // Loopback-only goes straight to the IPv4 path, which then binds 127.0.0.1:
+    // one socket cannot serve both loopbacks (see socketCreateListenerLoopback),
+    // and the test suite dials the literal "127.0.0.1".
+    const bool loopbackOnly = socketLoopbackOnly();
 #ifdef _WIN32
-    SOCKET s6 = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    SOCKET s6 = loopbackOnly ? INVALID_SOCKET : ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
     const bool have6 = (s6 != INVALID_SOCKET);
 #else
-    int s6 = ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    int s6 = loopbackOnly ? -1 : ::socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
     const bool have6 = (s6 >= 0);
 #endif
 
@@ -472,7 +516,7 @@ SocketHandle socketCreateListenerDualStack(std::uint16_t port, int backlog) {
                     static_cast<unsigned>(port), errText(lastError()).c_str());
         socketClose(h);
         }
-    } else {
+    } else if (!loopbackOnly) {
         HE_LOG_WARN(Net, "No IPv6 stack available — listening on IPv4 only");
     }
 
@@ -731,7 +775,7 @@ bool socketBindUdp(SocketHandle h, std::uint16_t port) {
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = anyAddress4();
     addr.sin_port        = htons(port);
 
 #ifdef _WIN32
@@ -813,7 +857,9 @@ bool socketSetBufferSizes(SocketHandle h, int recvBytes, int sendBytes) {
 SocketHandle socketCreateUdpDualStack(std::uint16_t port) {
     if (!socketSystemInit()) return kInvalidSocket;
 
-    SocketHandle h6 = socketCreateUdp6();
+    // Loopback-only takes the IPv4 path, for the reason the TCP listener does.
+    const bool loopbackOnly = socketLoopbackOnly();
+    SocketHandle h6 = loopbackOnly ? kInvalidSocket : socketCreateUdp6();
     if (h6 != kInvalidSocket) {
         // Same discipline as the TCP listener: clear IPV6_V6ONLY, then READ IT
         // BACK, because a silently ignored option means every IPv4 client's
@@ -862,7 +908,7 @@ SocketHandle socketCreateUdpDualStack(std::uint16_t port) {
                 "(IPV6_V6ONLY could not be cleared) — binding IPv4 only.");
         }
         socketClose(h6);
-    } else {
+    } else if (!loopbackOnly) {
         HE_LOG_WARN(Net, "No IPv6 stack available — UDP socket is IPv4 only");
     }
 
@@ -892,7 +938,7 @@ SocketHandle socketCreateUdpFor(bool peerIsIPv6) {
     if (peerIsIPv6) {
         sockaddr_in6 addr{};
         addr.sin6_family = AF_INET6;
-        addr.sin6_addr   = in6addr_any;
+        addr.sin6_addr   = anyAddress6();
 #ifdef _WIN32
         bound = ::bind(static_cast<SOCKET>(h), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
 #else
@@ -1010,7 +1056,7 @@ bool socketBindUdpShared(SocketHandle h, std::uint16_t port) {
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = anyAddress4();
     addr.sin_port        = htons(port);
 #ifdef _WIN32
     return ::bind(static_cast<SOCKET>(h),
@@ -1061,6 +1107,32 @@ SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data, std::size_t 
     socklen_t addrLen = 0;
     if (!parseNumericAddress(host, port, addr, addrLen)) {
         return SocketResult::Error;
+    }
+
+    // The first sendto on an unbound socket binds it to every interface, which
+    // is a bind like any other as far as the Windows Firewall is concerned.
+    // Loopback-only binds it to the loopback of the destination's family first.
+    // Unbound reads as a failed getsockname on Windows and as port 0 elsewhere,
+    // and socketBoundPort reports both as 0.
+    if (socketLoopbackOnly() && socketBoundPort(h) == 0) {
+        sockaddr_storage local{};
+        socklen_t localLen = 0;
+        if (addr.ss_family == AF_INET6) {
+            auto* a6 = reinterpret_cast<sockaddr_in6*>(&local);
+            a6->sin6_family = AF_INET6;
+            a6->sin6_addr   = in6addr_loopback;
+            localLen = sizeof(sockaddr_in6);
+        } else {
+            auto* a4 = reinterpret_cast<sockaddr_in*>(&local);
+            a4->sin_family      = AF_INET;
+            a4->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            localLen = sizeof(sockaddr_in);
+        }
+#ifdef _WIN32
+        ::bind(static_cast<SOCKET>(h), reinterpret_cast<sockaddr*>(&local), localLen);
+#else
+        ::bind(static_cast<int>(h), reinterpret_cast<sockaddr*>(&local), localLen);
+#endif
     }
 
 #ifdef _WIN32
