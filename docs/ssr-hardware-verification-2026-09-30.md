@@ -299,3 +299,84 @@ hash-gleich.
   Reflexions-Vorpass liefen nie durch fxc, jetzt schon. Ob andere
   D3D-Laufzeitpfade Shader aus der `MaterialShaderLibrary` ohne FXC-Test
   übersetzen, zum Beispiel Decals, wurde hier nicht geprüft.
+
+## Schritt 3: Vollbau, Tests, Sichtprüfung (Thema 109)
+
+**Ergebnis: SSR wirkt auf D3D11, D3D12 und Vulkan, alle drei spiegeln
+vergleichbar. GL und Vulkan sind durch den Fix pixelgleich geblieben.** Metal
+ist nur statisch geprüft, siehe unten.
+
+**Build.** Frischer Release-Vollbau von HEAD `2f964753` in einem leeren Baum
+`C:/hwS3` (`cmake --build -j8`, `-DDEPLOY_DIR=C:/hwS3/deploy`), fehlerfrei,
+„All 105 embedded shaders compile“. Der Deploy enthält nachweislich den Fix:
+In `HorizonRendering.dll` steht `textureLod(heGBDepth, quv, 0.0)` und nicht
+mehr `texture(heGBDepth, quv)`. Alle 40 `.spv` sind hash-gleich mit dem Build.
+
+**Tests** (eigenes `APPDATA`, echte `config.json` vorher und nachher
+hash-gleich):
+
+- `ctest --test-dir C:/hwS3 -j8`: **224/224 bestanden**, 2 übersprungen
+  (`runtime_size_app_*`, wie in Schritt 1), 88 s.
+- `he_tests` zählt 4093 Fälle. Der neue Fall `FXC: the SSR passes compile
+  exactly as D3D11/D3D12 build them` läuft wirklich und besteht (Trace,
+  Blur, Vorpass-VS/-PS, beide Flag-Sätze). Alle SSR-Fälle: 4/4, 102
+  Assertions.
+
+**Aufnahmen.** Dieselben Szenen und Einstellungen wie in Schritt 1/2 (Boden,
+Wand, `HE_DUMP_SSR` 0/1, `RENDERPATH=0`, 24 Frames), aber diesmal mit
+**frischem `APPDATA` je Aufnahme** (kalter GL-Programm-Cache). Als Kontrolle
+unter identischen Bedingungen lief daneben eine Kopie des Deploys von vor
+dem Fix (`C:/hwSSR`, Basis `3bd2c153`). Metrik wie oben (Bodenband, Schwelle
+12).
+
+| Szene | OpenGL | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|---|
+| Boden, vor Fix | 11 793 | **0** | **0** | 10 957 |
+| Boden, nach Fix | 11 793 | **10 962** | **10 962** | 10 957 |
+| Boden, Diff-Box nach Fix | (586,466)–(693,577) | (587,470)–(692,577) | (587,470)–(692,577) | (587,470)–(692,577) |
+| Wand, vor Fix | 118 930 | **0** | **0** | 117 288 |
+| Wand, nach Fix | 118 931 | **116 701** | **116 701** | 117 288 |
+| Log nach Fix | — | `screen-space reflection pipeline created` | dto. | `SSR pipelines created (forward, half-res trace)` |
+
+- **Negativkontrolle:** Der Deploy von vor dem Fix meldet in derselben
+  Umgebung auf D3D11 und D3D12 wieder `SSR ssrTracePS compile failed`. In
+  keinem Log nach dem Fix steht diese Meldung.
+- **GL und Vulkan, nach gegen vor dem Fix:** Boden (SSR aus und an) ist
+  pixelgleich. Die Wand mit SSR an hat 0 Pixel über der Schwelle und
+  höchstens 1/255 in einem Kanal. Das ist der Rauschboden: Eine Wiederholung
+  derselben Aufnahme ergibt auf allen vier Backends ebenfalls 0 Pixel, max
+  1/255. **Die LOD-Änderung verändert GL und Vulkan also nicht.**
+- **D3D11 gegen D3D12:** pixelgleich (Wand max 1/255).
+- **D3D gegen Vulkan**, SSR-Beitrag (an − aus) verglichen:
+  - Boden: im Mittel 0,008/255, max 3.
+  - Wand: im Mittel 0,125/255, max 15. Roh gegen Vulkan liegen 4 056 Pixel
+    über der Schwelle.
+  - Das sind genau die Werte aus Schritt 2. Die Abweichung an der Wand bleibt
+    der dort genannte offene Punkt.
+- **Gegen Schritt 2** (`C:/hwS2`, Commit `69d9a280`): alle 16 Bilder
+  pixelgleich (max 1/255). Der Vollbau reproduziert Schritt 2 also exakt.
+- Die D3D-Exitcodes 0xC0000374/0xC0000005 nach dem Dump sind die bekannte,
+  vorbestehende Baseline.
+
+Bilder: `schritt3-boden-vorher-nachher-alle-backends.png` und
+`schritt3-wand-vorher-nachher-alle-backends.png`. Zeilen: GL, D3D11, D3D12,
+Vulkan. Spalten: SSR aus | vor Fix SSR an | nach Fix SSR an.
+
+**Metal** (auf dieser Maschine nicht ausführbar):
+
+- Metal baut den Trace nicht aus eigenem MSL, sondern über
+  `ssrTrace(Backend::Metal)` (`MetalRenderer.mm:14359`), also aus demselben
+  `kSSRTraceFS`. Der Fix erreicht Metal deshalb direkt.
+- Offline wurden `kSSRTraceFS` vor und nach dem Fix mit `glslangValidator -V`
+  und `spirv-cross --msl` übersetzt. Das MSL-Diff besteht aus genau den neun
+  `sample(s, uv)` → `sample(s, uv, level(0.0))`, sonst ändert sich nichts.
+- Die Trace-Eingänge auf Metal sind `m_hdrColor`, `m_gbColor1`,
+  `m_gbDepthLin` und die History-Ziele (`MetalRenderer.mm:14559-14571`), alles
+  Render-Targets ohne Mip-Kette. Mips gibt es auf Metal nur für Asset-Texturen
+  (`:8780`) und die UI-Backdrop-Kopie (`:12509`). `level(0)` liest also, was
+  vorher gelesen wurde.
+- Ein Pixel-A/B auf echter Metal-Hardware (Plan §8 Punkt 3) **steht weiter
+  aus**. CI rendert nicht, sie baut nur und fährt ctest. Für Metal prüft sie
+  damit allein, ob SPIRV-Cross MSL-Text erzeugt (`SSR shaders cross-compile
+  for every backend`, `trace.ok`). Durch den Metal-Compiler geht der Text dort
+  nicht.
