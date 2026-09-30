@@ -1,0 +1,439 @@
+﻿diff --git a/src/HE_Editor/EditorApplication.cpp b/src/HE_Editor/EditorApplication.cpp
+index 9ba471be..0234da79 100644
+--- a/src/HE_Editor/EditorApplication.cpp
++++ b/src/HE_Editor/EditorApplication.cpp
+@@ -287,6 +287,254 @@ std::string getRHIName(HE::RendererBackend backend)
+ 
+ EditorApplication::~EditorApplication() = default;
+ 
++#ifdef _WIN32
++static ID3D12CommandQueue* g_t97Queue = nullptr; // T97-INSTR
++static ID3D12Fence*        g_t97Fence = nullptr; // T97-INSTR
++static int                 g_t97N     = 0;       // T97-INSTR
++static uint64_t g_t97Victim[64] = {};            // T97-INSTR: frame+1 whose slot got overwritten in flight with other bytes
++extern int g_t97ScribbleThisFrame;               // T97-INSTR (imgui_impl_dx12.cpp)
++void ImGui_ImplDX12_T97_RenderReference(ImDrawData*, ID3D12GraphicsCommandList*, int); // T97-INSTR
++
++// T97-INSTR: per-frame visual check (Thema 97, Schritt 5). Each frame the back buffer
++// is copied right before ImGui into refTex; ImGui draws normally from its own (racy)
++// ring; the SAME ImDrawData is drawn again into refTex from a private 16-slot ring
++// that is never rewritten while in flight. Both are read back and compared once the
++// frame is complete. Any differing pixel is what the user would see as flicker.
++struct T97Cap
++{
++	static constexpr int R = 8;
++	bool ok = false, tried = false;
++	ID3D12Device* dev = nullptr;
++	UINT W = 0, H = 0;
++	ID3D12Resource* refTex[R] = {}; ID3D12Resource* rbMain[R] = {}; ID3D12Resource* rbRef[R] = {};
++	D3D12_RESOURCE_STATES refState[R] = {};
++	uint64_t slotFrame[R] = {}; bool slotPending[R] = {};
++	ID3D12DescriptorHeap* rtvHeap = nullptr; UINT rtvInc = 0;
++	D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{}; UINT64 rbSize = 0;
++	uint64_t compared = 0, mismatched = 0, mismatchedVictim = 0, comparedWin = 0, mismatchedWin = 0;
++	uint64_t scribbled = 0, scribbleHit = 0, scribbleMiss = 0, skipped = 0, diffPixelsTotal = 0;
++	uint64_t lastScribble[64] = {};
++	uint64_t saveNext = UINT64_MAX; int saved = 0; int maxSave = 6;
++	std::string dir; uint64_t scribbleEvery = 0;
++
++	static D3D12_RESOURCE_BARRIER tr(ID3D12Resource* r, D3D12_RESOURCE_STATES a, D3D12_RESOURCE_STATES b)
++	{
++		D3D12_RESOURCE_BARRIER x{};
++		x.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++		x.Transition.pResource = r; x.Transition.StateBefore = a; x.Transition.StateAfter = b;
++		x.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++		return x;
++	}
++
++	bool init(ID3D12Device* d, ID3D12Resource* bb)
++	{
++		tried = true; dev = d;
++		D3D12_RESOURCE_DESC td = bb->GetDesc();
++		W = static_cast<UINT>(td.Width); H = td.Height;
++		td.Alignment = 0; td.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
++		D3D12_DESCRIPTOR_HEAP_DESC hd{}; hd.NumDescriptors = R + 1; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
++		if (FAILED(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtvHeap)))) return false;
++		rtvInc = dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
++		dev->GetCopyableFootprints(&td, 0, 1, 0, &fp, nullptr, nullptr, &rbSize);
++		D3D12_HEAP_PROPERTIES defHeap{}; defHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
++		D3D12_HEAP_PROPERTIES rbHeap{};  rbHeap.Type  = D3D12_HEAP_TYPE_READBACK;
++		D3D12_RESOURCE_DESC bufDesc{};
++		bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; bufDesc.Width = rbSize; bufDesc.Height = 1;
++		bufDesc.DepthOrArraySize = 1; bufDesc.MipLevels = 1; bufDesc.SampleDesc.Count = 1;
++		bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++		for (int i = 0; i < R; ++i)
++		{
++			if (FAILED(dev->CreateCommittedResource(&defHeap, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr, IID_PPV_ARGS(&refTex[i])))) return false;
++			refState[i] = D3D12_RESOURCE_STATE_COPY_SOURCE;
++			D3D12_CPU_DESCRIPTOR_HANDLE h = rtvHeap->GetCPUDescriptorHandleForHeapStart(); h.ptr += i * rtvInc;
++			dev->CreateRenderTargetView(refTex[i], nullptr, h);
++			if (FAILED(dev->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rbMain[i])))) return false;
++			if (FAILED(dev->CreateCommittedResource(&rbHeap, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&rbRef[i])))) return false;
++		}
++		if (const char* e = std::getenv("HE_T97_CAPDIR")) dir = e;
++		if (const char* e = std::getenv("HE_T97_SCRIBBLE")) scribbleEvery = std::strtoull(e, nullptr, 10);
++		if (const char* e = std::getenv("HE_T97_MAXSAVE")) maxSave = std::atoi(e);
++		HE_LOG_INFO(Editor, "T97CAP init %ux%u fmt=%d rowPitch=%u scribbleEvery=%llu dir=%s", W, H, (int)td.Format,
++			fp.Footprint.RowPitch, (unsigned long long)scribbleEvery, dir.c_str());
++		ok = true;
++		return true;
++	}
++
++	// mode 0: plain image; mode 1: diff mask (a dimmed, differing pixels magenta vs b)
++	void writeBmp(const std::string& name, const uint8_t* a, const uint8_t* b, int mode)
++	{
++		if (dir.empty()) return;
++		FILE* f = std::fopen((dir + "/" + name).c_str(), "wb");
++		if (!f) return;
++		const uint32_t imgSize = W * H * 4, fileSize = 54 + imgSize;
++		uint8_t hdr[54] = { 'B', 'M' };
++		auto put32 = [&](int o, uint32_t v) { std::memcpy(hdr + o, &v, 4); };
++		put32(2, fileSize); put32(10, 54); put32(14, 40); put32(18, W); put32(22, static_cast<uint32_t>(-static_cast<int32_t>(H)));
++		hdr[26] = 1; hdr[28] = 32; put32(34, imgSize);
++		std::fwrite(hdr, 1, 54, f);
++		std::vector<uint8_t> row(W * 4);
++		for (UINT y = 0; y < H; ++y)
++		{
++			const uint8_t* ra = a + fp.Offset + static_cast<size_t>(y) * fp.Footprint.RowPitch;
++			const uint8_t* rb = b ? b + fp.Offset + static_cast<size_t>(y) * fp.Footprint.RowPitch : nullptr;
++			for (UINT x = 0; x < W; ++x)
++			{
++				const uint8_t* p = ra + x * 4;
++				uint8_t* o = row.data() + x * 4;
++				if (mode == 1 && std::memcmp(p, rb + x * 4, 4) != 0) { o[0] = 255; o[1] = 0; o[2] = 255; o[3] = 255; }
++				else if (mode == 1) { o[0] = p[2] / 4; o[1] = p[1] / 4; o[2] = p[0] / 4; o[3] = 255; }
++				else { o[0] = p[2]; o[1] = p[1]; o[2] = p[0]; o[3] = 255; }
++			}
++			std::fwrite(row.data(), 1, row.size(), f);
++		}
++		std::fclose(f);
++	}
++
++	void processSlot(int i)
++	{
++		const uint64_t fr = slotFrame[i];
++		uint8_t* a = nullptr; uint8_t* b = nullptr;
++		D3D12_RANGE rr{ 0, static_cast<SIZE_T>(rbSize) }, wr{ 0, 0 };
++		rbMain[i]->Map(0, &rr, reinterpret_cast<void**>(&a));
++		rbRef[i]->Map(0, &rr, reinterpret_cast<void**>(&b));
++		uint64_t diff = 0; UINT x0 = W, y0 = H, x1 = 0, y1 = 0; int maxd = 0;
++		for (UINT y = 0; y < H; ++y)
++		{
++			const uint8_t* ra = a + fp.Offset + static_cast<size_t>(y) * fp.Footprint.RowPitch;
++			const uint8_t* rb = b + fp.Offset + static_cast<size_t>(y) * fp.Footprint.RowPitch;
++			if (std::memcmp(ra, rb, W * 4) == 0) continue;
++			for (UINT x = 0; x < W; ++x)
++			{
++				if (std::memcmp(ra + x * 4, rb + x * 4, 4) == 0) continue;
++				++diff; x0 = (std::min)(x0, x); y0 = (std::min)(y0, y); x1 = (std::max)(x1, x); y1 = (std::max)(y1, y);
++				for (int c = 0; c < 3; ++c) maxd = (std::max)(maxd, std::abs(int(ra[x * 4 + c]) - int(rb[x * 4 + c])));
++			}
++		}
++		const bool victim = g_t97Victim[fr % 64] == fr + 1;
++		const bool scr    = lastScribble[fr % 64] == fr + 1;
++		++compared; ++comparedWin;
++		if (diff > 0)
++		{
++			++mismatched; ++mismatchedWin; diffPixelsTotal += diff;
++			if (victim) ++mismatchedVictim;
++			if (scr) ++scribbleHit;
++			HE_LOG_INFO(Editor, "T97CAP MISMATCH frame=%llu diffPixels=%llu bbox=(%u,%u)-(%u,%u) maxChanDiff=%d hazardVictim=%d scribble=%d",
++				(unsigned long long)fr, (unsigned long long)diff, x0, y0, x1, y1, maxd, victim ? 1 : 0, scr ? 1 : 0);
++			if (saved < maxSave)
++			{
++				++saved;
++				char nm[96];
++				std::snprintf(nm, sizeof(nm), "f%06llu_main.bmp", (unsigned long long)fr); writeBmp(nm, a, nullptr, 0);
++				std::snprintf(nm, sizeof(nm), "f%06llu_ref.bmp",  (unsigned long long)fr); writeBmp(nm, b, nullptr, 0);
++				std::snprintf(nm, sizeof(nm), "f%06llu_diff.bmp", (unsigned long long)fr); writeBmp(nm, a, b, 1);
++				const int pi = static_cast<int>((fr - 1) % R);
++				if (fr > 0 && slotFrame[pi] == fr - 1)
++				{
++					uint8_t* p = nullptr;
++					rbMain[pi]->Map(0, &rr, reinterpret_cast<void**>(&p));
++					std::snprintf(nm, sizeof(nm), "f%06llu_prev_main.bmp", (unsigned long long)fr); writeBmp(nm, p, nullptr, 0);
++					rbMain[pi]->Unmap(0, &wr);
++				}
++				saveNext = fr + 1;
++			}
++		}
++		else if (scr)
++		{
++			++scribbleMiss;
++			HE_LOG_INFO(Editor, "T97CAP SCRIBBLE-MISSED frame=%llu", (unsigned long long)fr);
++		}
++		if (fr == saveNext)
++		{
++			char nm[96];
++			std::snprintf(nm, sizeof(nm), "f%06llu_next_main.bmp", (unsigned long long)(fr - 1)); writeBmp(nm, a, nullptr, 0);
++			saveNext = UINT64_MAX;
++		}
++		rbMain[i]->Unmap(0, &wr);
++		rbRef[i]->Unmap(0, &wr);
++		slotPending[i] = false;
++		if (compared % 300 == 0)
++		{
++			HE_LOG_INFO(Editor, "T97CAP compared=%llu mismatched=%llu (last%llu=%llu) mismatchedHazardVictim=%llu diffPixelsTotal=%llu scribbled=%llu scribbleHit=%llu scribbleMiss=%llu skipped=%llu",
++				(unsigned long long)compared, (unsigned long long)mismatched, (unsigned long long)comparedWin, (unsigned long long)mismatchedWin,
++				(unsigned long long)mismatchedVictim, (unsigned long long)diffPixelsTotal, (unsigned long long)scribbled,
++				(unsigned long long)scribbleHit, (unsigned long long)scribbleMiss, (unsigned long long)skipped);
++			comparedWin = mismatchedWin = 0;
++		}
++	}
++
++	// Frames 0..completed-1 are done on the GPU (Signal(k) sits before frame k's work).
++	void process(uint64_t completed)
++	{
++		for (;;)
++		{
++			int best = -1;
++			for (int i = 0; i < R; ++i)
++				if (slotPending[i] && slotFrame[i] + 1 <= completed && (best < 0 || slotFrame[i] < slotFrame[best])) best = i;
++			if (best < 0) return;
++			processSlot(best);
++		}
++	}
++
++	void frame(ID3D12GraphicsCommandList* cl, ID3D12Resource* bb, ImDrawData* dd, uint64_t k, ID3D12DescriptorHeap* srvHeap)
++	{
++		const bool scr = scribbleEvery && (k % scribbleEvery) == scribbleEvery / 2;
++		const int s = static_cast<int>(k % R);
++		if (!ok || slotPending[s] || !bb)
++		{
++			if (ok) ++skipped;
++			g_t97ScribbleThisFrame = scr ? 1 : 0;
++			ImGui_ImplDX12_RenderDrawData(dd, cl);
++			g_t97ScribbleThisFrame = 0;
++			return;
++		}
++		D3D12_CPU_DESCRIPTOR_HANDLE heapStart = rtvHeap->GetCPUDescriptorHandleForHeapStart();
++		D3D12_CPU_DESCRIPTOR_HANDLE bbRtv = heapStart;  bbRtv.ptr  += R * rtvInc;
++		D3D12_CPU_DESCRIPTOR_HANDLE refRtv = heapStart; refRtv.ptr += s * rtvInc;
++		dev->CreateRenderTargetView(bb, nullptr, bbRtv);
++
++		// 1) back buffer as it is right before ImGui → refTex[s]
++		D3D12_RESOURCE_BARRIER b1[2] = { tr(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE),
++		                                 tr(refTex[s], refState[s], D3D12_RESOURCE_STATE_COPY_DEST) };
++		cl->ResourceBarrier(2, b1);
++		cl->CopyResource(refTex[s], bb);
++		D3D12_RESOURCE_BARRIER b2[2] = { tr(bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET),
++		                                 tr(refTex[s], D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET) };
++		cl->ResourceBarrier(2, b2);
++
++		// 2) the real draw, unchanged (renderer's RTV binding kept, ImGui's own ring)
++		g_t97ScribbleThisFrame = scr ? 1 : 0;
++		if (scr) { ++scribbled; lastScribble[k % 64] = k + 1; }
++		ImGui_ImplDX12_RenderDrawData(dd, cl);
++		g_t97ScribbleThisFrame = 0;
++
++		// 3) reference draw of the same data into refTex[s] from the private ring
++		cl->OMSetRenderTargets(1, &refRtv, FALSE, nullptr);
++		cl->SetDescriptorHeaps(1, &srvHeap);
++		D3D12_VIEWPORT vp{}; vp.Width = dd->DisplaySize.x; vp.Height = dd->DisplaySize.y; vp.MaxDepth = 1.0f;
++		cl->RSSetViewports(1, &vp);
++		D3D12_RECT sc{ 0, 0, static_cast<LONG>(dd->DisplaySize.x), static_cast<LONG>(dd->DisplaySize.y) };
++		cl->RSSetScissorRects(1, &sc);
++		ImGui_ImplDX12_T97_RenderReference(dd, cl, static_cast<int>(k % 16));
++
++		// 4) both → readback
++		D3D12_RESOURCE_BARRIER b3[2] = { tr(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE),
++		                                 tr(refTex[s], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE) };
++		cl->ResourceBarrier(2, b3);
++		D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
++		dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; dst.PlacedFootprint = fp;
++		src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
++		dst.pResource = rbMain[s]; src.pResource = bb;         cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
++		dst.pResource = rbRef[s];  src.pResource = refTex[s];  cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
++		D3D12_RESOURCE_BARRIER b4 = tr(bb, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
++		cl->ResourceBarrier(1, &b4);
++		refState[s] = D3D12_RESOURCE_STATE_COPY_SOURCE;
++		cl->OMSetRenderTargets(1, &bbRtv, FALSE, nullptr);
++		slotFrame[s] = k; slotPending[s] = true;
++	}
++};
++static T97Cap g_t97Cap; // T97-INSTR
++#endif
++
+ HE::ApplicationConfig EditorApplication::GetConfig() const
+ {
+ 	HE::ApplicationConfig cfg;
+@@ -294,6 +542,7 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
+ 	cfg.windowprops.width  = 1600;
+ 	cfg.windowprops.height = 900;
+ 	cfg.windowprops.vsync  = true;
++	if (const char* v = std::getenv("HE_T97_VSYNC"); v && *v == '0') cfg.windowprops.vsync = false; // T97-INSTR
+ 	cfg.windowprops.mode   = HE::WindowMode::Windowed;
+ 	cfg.backend = m_globalState->getSelectedRHI();
+ 	// Headless-dump backend override (HE_DUMP_RHI=Metal|OpenGL|Vulkan|D3D11|D3D12):
+@@ -958,7 +1207,11 @@ void EditorApplication::OnInit()
+ 			// buffers frame N-2 was still drawing from → UI flicker whenever the
+ 			// geometry changes every frame (hover, tooltips). Thema 97.
+ 			dx12Info.NumFramesInFlight = static_cast<int>(D3D12Renderer::kFramesInFlight);
+-			dx12Info.RTVFormat         = DXGI_FORMAT_R8G8B8A8_UNORM;
++			if (const char* e = std::getenv("HE_T97_NFIF"); e && *e) dx12Info.NumFramesInFlight = std::atoi(e); // T97-INSTR
++			g_t97Queue = cmdQueue; g_t97N = dx12Info.NumFramesInFlight; // T97-INSTR
++			device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_t97Fence)); // T97-INSTR
++			HE_LOG_INFO(Editor, "T97 ImGui NumFramesInFlight=%d renderer=%u", g_t97N, D3D12Renderer::kFramesInFlight); // T97-INSTR
++			dx12Info.RTVFormat        = DXGI_FORMAT_R8G8B8A8_UNORM;
+ 			dx12Info.DSVFormat         = DXGI_FORMAT_UNKNOWN;
+ 			dx12Info.SrvDescriptorHeap = srvHeap;
+ 			dx12Info.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo* info,
+@@ -1070,6 +1323,58 @@ void EditorApplication::OnInit()
+ 				scissor.bottom = static_cast<LONG>(drawData->DisplaySize.y);
+ 				cmdList->RSSetScissorRects(1, &scissor);
+ 
++				// T97-INSTR: ImGui (main viewport) writes VB/IB slot k % N, last used by
++				// frame k-N. Signal(k) is queued before frame k's ExecuteCommandLists, so
++				// completed >= k means frames 0..k-1 are done. Overwrite in flight iff
++				// frame k-N is not done yet: completed < k-N+1.
++				uint64_t t97k = UINT64_MAX; // T97-INSTR
++				if (g_t97Fence && drawData->DisplaySize.x > 0.0f && drawData->DisplaySize.y > 0.0f)
++				{
++					static uint64_t k = 0, viol = 0, violWin = 0, vtxChanges = 0;
++					t97k = k;
++					static int lastVtx = -1, minVtx = 1 << 30, maxVtx = 0;
++					if (drawData->TotalVtxCount != lastVtx) ++vtxChanges;
++					lastVtx = drawData->TotalVtxCount;
++					minVtx = (std::min)(minVtx, lastVtx); maxVtx = (std::max)(maxVtx, lastVtx);
++					// FNV-1a over this frame's VB+IB bytes: an in-flight overwrite only
++					// shows if the bytes differ from those of frame k-N (same slot).
++					static uint64_t hashes[16] = {}, hashChanges = 0, hazards = 0, hazardsWin = 0;
++					uint64_t hsh = 1469598103934665603ull;
++					auto mix = [&](const void* p, size_t n) { auto* b = static_cast<const unsigned char*>(p); for (size_t i = 0; i < n; ++i) { hsh ^= b[i]; hsh *= 1099511628211ull; } };
++					for (const ImDrawList* dl : drawData->CmdLists)
++					{
++						mix(dl->VtxBuffer.Data, dl->VtxBuffer.Size * sizeof(ImDrawVert));
++						mix(dl->IdxBuffer.Data, dl->IdxBuffer.Size * sizeof(ImDrawIdx));
++					}
++					if (k > 0 && hsh != hashes[(k - 1) % 16]) ++hashChanges;
++					hashes[k % 16] = hsh;
++					const uint64_t done = g_t97Fence->GetCompletedValue();
++					if (k >= static_cast<uint64_t>(g_t97N) && done < k - g_t97N + 1)
++					{
++						++viol; ++violWin;
++						if (hsh != hashes[(k - g_t97N) % 16]) { ++hazards; ++hazardsWin; g_t97Victim[(k - g_t97N) % 64] = k - g_t97N + 1; }
++					}
++					g_t97Queue->Signal(g_t97Fence, k);
++					++k;
++					if (k % 300 == 0)
++					{
++						HE_LOG_INFO(Editor, "T97 nfif=%d frames=%llu inflightOverwrites=%llu (last300=%llu) hazardous=%llu (last300=%llu) contentChangedFrames(last300)=%llu vtxCountChanged(last300)=%llu vtx=%d..%d",
++							g_t97N, (unsigned long long)k, (unsigned long long)viol, (unsigned long long)violWin,
++							(unsigned long long)hazards, (unsigned long long)hazardsWin, (unsigned long long)hashChanges,
++							(unsigned long long)vtxChanges, minVtx, maxVtx);
++						violWin = 0; hazardsWin = 0; hashChanges = 0; vtxChanges = 0; minVtx = 1 << 30; maxVtx = 0;
++					}
++				}
++				static const bool t97CapOn = std::getenv("HE_T97_CAPDIR") != nullptr; // T97-INSTR
++				if (t97CapOn && t97k != UINT64_MAX)
++				{
++					auto* dx12r = static_cast<D3D12Renderer*>(renderer());
++					auto* bb    = static_cast<ID3D12Resource*>(dx12r->T97GetBackBuffer());
++					if (!g_t97Cap.tried && bb) g_t97Cap.init(static_cast<ID3D12Device*>(dx12r->GetDevice()), bb);
++					g_t97Cap.process(g_t97Fence->GetCompletedValue());
++					g_t97Cap.frame(cmdList, bb, drawData, t97k, srvHeap);
++				}
++				else
+ 				ImGui_ImplDX12_RenderDrawData(drawData, cmdList);
+ 				break;
+ 			}
+diff --git a/src/HE_Editor/EditorUI.cpp b/src/HE_Editor/EditorUI.cpp
+index f9f6ffe5..c96dde10 100644
+--- a/src/HE_Editor/EditorUI.cpp
++++ b/src/HE_Editor/EditorUI.cpp
+@@ -505,6 +505,23 @@ void EditorUI::render(AppContext& ctx, float dt)
+         break;
+     }
+ 
++    // T97-INSTR: synthetic fast mouse sweep over the whole editor (no OS cursor).
++    static const bool t97Sweep = std::getenv("HE_T97_SWEEP") != nullptr;
++    if (t97Sweep && io.DisplaySize.x > 64.0f && io.DisplaySize.y > 64.0f)
++    {
++        static long long t97f = 0; ++t97f;
++        const long long W = static_cast<long long>(io.DisplaySize.x), H = static_cast<long long>(io.DisplaySize.y);
++        const long long step = t97f * 97;
++        float mx = static_cast<float>(step % W);
++        float my = static_cast<float>(((step / W) * 23 + 5) % H);
++        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
++        {
++            mx += ImGui::GetMainViewport()->Pos.x;
++            my += ImGui::GetMainViewport()->Pos.y;
++        }
++        io.AddMousePosEvent(mx, my);
++    }
++
+     ImGui::NewFrame();
+     ImGuizmo::BeginFrame();
+ 
+diff --git a/src/HE_Editor/vendor/imgui/backends/imgui_impl_dx12.cpp b/src/HE_Editor/vendor/imgui/backends/imgui_impl_dx12.cpp
+index d675b710..42cc6d0b 100644
+--- a/src/HE_Editor/vendor/imgui/backends/imgui_impl_dx12.cpp
++++ b/src/HE_Editor/vendor/imgui/backends/imgui_impl_dx12.cpp
+@@ -299,6 +299,18 @@ static void ImGui_ImplDX12_DrawCallback_ResetRenderState(const ImDrawList*, cons
+ static void ImGui_ImplDX12_DrawCallback_SetSamplerLinear(const ImDrawList*, const ImDrawCmd*)   { ImGui_ImplDX12_Data* bd = ImGui_ImplDX12_GetBackendData(); ImGui_ImplDX12_SetupSamplerLinear(bd->RenderState->CommandList); }
+ static void ImGui_ImplDX12_DrawCallback_SetSamplerNearest(const ImDrawList*, const ImDrawCmd*)  { ImGui_ImplDX12_Data* bd = ImGui_ImplDX12_GetBackendData(); ImGui_ImplDX12_SetupSamplerNearest(bd->RenderState->CommandList); }
+ 
++// T97-INSTR: race-free reference draw + positive-control scribble (Thema 97, Schritt 5).
++static ImGui_ImplDX12_RenderBuffers g_t97RefBuffers[16] = {}; // T97-INSTR
++static int g_t97RefSlot = -1;                                 // T97-INSTR
++int g_t97ScribbleThisFrame = 0;                               // T97-INSTR
++void ImGui_ImplDX12_RenderDrawData(ImDrawData* draw_data, ID3D12GraphicsCommandList* command_list);
++void ImGui_ImplDX12_T97_RenderReference(ImDrawData* draw_data, ID3D12GraphicsCommandList* command_list, int slot) // T97-INSTR
++{
++    g_t97RefSlot = slot;
++    ImGui_ImplDX12_RenderDrawData(draw_data, command_list);
++    g_t97RefSlot = -1;
++}
++
+ // Render function
+ void ImGui_ImplDX12_RenderDrawData(ImDrawData* draw_data, ID3D12GraphicsCommandList* command_list)
+ {
+@@ -316,8 +328,10 @@ void ImGui_ImplDX12_RenderDrawData(ImDrawData* draw_data, ID3D12GraphicsCommandL
+     // FIXME: We are assuming that this only gets called once per frame!
+     ImGui_ImplDX12_Data* bd = ImGui_ImplDX12_GetBackendData();
+     ImGui_ImplDX12_ViewportData* vd = (ImGui_ImplDX12_ViewportData*)draw_data->OwnerViewport->RendererUserData;
+-    ImGui_ImplDX12_RenderBuffers* fr = &vd->FrameRenderBuffers[vd->FrameIndex % bd->numFramesInFlight];
+-    vd->FrameIndex++;
++    ImGui_ImplDX12_RenderBuffers* fr;
++    if (g_t97RefSlot >= 0) fr = &g_t97RefBuffers[g_t97RefSlot]; // T97-INSTR: private ring, FrameIndex untouched
++    else { fr = &vd->FrameRenderBuffers[vd->FrameIndex % bd->numFramesInFlight];
++    vd->FrameIndex++; }
+ 
+     // Create and grow vertex/index buffers if needed
+     if (fr->VertexBuffer == nullptr || fr->VertexBufferSize < draw_data->TotalVtxCount)
+@@ -380,6 +394,11 @@ void ImGui_ImplDX12_RenderDrawData(ImDrawData* draw_data, ID3D12GraphicsCommandL
+         vtx_dst += draw_list->VtxBuffer.Size;
+         idx_dst += draw_list->IdxBuffer.Size;
+     }
++    // T97-INSTR positive control: corrupt the MAIN draw's uploaded vertices on chosen
++    // frames (shift the first 600 by 40 px) -- the frame diff must flag exactly those.
++    if (g_t97RefSlot < 0 && g_t97ScribbleThisFrame)
++        for (int i = 0; i < draw_data->TotalVtxCount && i < 600; ++i)
++            ((ImDrawVert*)vtx_resource)[i].pos.x += 40.0f;
+ 
+     // During Unmap() we specify the written range (as per DX12 API, this is informational and for tooling only)
+     range.End = (SIZE_T)((intptr_t)vtx_dst - (intptr_t)vtx_resource);
+diff --git a/src/HE_Rendering/include/Backends/D3D12/D3D12Renderer.h b/src/HE_Rendering/include/Backends/D3D12/D3D12Renderer.h
+index 644850c9..86819a33 100644
+--- a/src/HE_Rendering/include/Backends/D3D12/D3D12Renderer.h
++++ b/src/HE_Rendering/include/Backends/D3D12/D3D12Renderer.h
+@@ -28,6 +28,7 @@ public:
+     // Cast to ID3D12Device* / ID3D12CommandQueue* at the call site.
+     void* GetDevice()       const;
+     void* GetCommandQueue() const;
++    void* T97GetBackBuffer() const; // T97-INSTR
+     void  SetVSync(bool enabled) override;
+ 
+     // Offscreen viewport (editor scene view)
+diff --git a/src/HE_Rendering/src/Backends/D3D12/D3D12Renderer.cpp b/src/HE_Rendering/src/Backends/D3D12/D3D12Renderer.cpp
+index f7f0eec5..e79a61a3 100644
+--- a/src/HE_Rendering/src/Backends/D3D12/D3D12Renderer.cpp
++++ b/src/HE_Rendering/src/Backends/D3D12/D3D12Renderer.cpp
+@@ -9593,6 +9593,7 @@ void D3D12Renderer::SetGISettings(const GISettings& s)
+ 
+ void* D3D12Renderer::GetDevice()       const { return m_impl->device.Get(); }
+ void* D3D12Renderer::GetCommandQueue() const { return m_impl->cmdQueue.Get(); }
++void* D3D12Renderer::T97GetBackBuffer() const { return m_impl->renderTargets[m_impl->frameIndex].Get(); } // T97-INSTR
+ 
+ void D3D12Renderer::SetVSync(bool enabled)
+ {

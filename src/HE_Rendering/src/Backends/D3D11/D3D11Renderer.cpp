@@ -2574,9 +2574,17 @@ struct D3D11RendererImpl
             if (FAILED(D3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
                                   "main", "ps_5_0", 0, 0, &blob, &err)))
             {
+                // A log line holds 512 bytes and fxc lists its warnings first:
+                // start at the first error, or the warnings push it off the end
+                // (the trace's X3511 stayed invisible behind three X3570s).
+                std::string msg = err ? static_cast<const char*>(err->GetBufferPointer()) : "";
+                if (const size_t e = msg.find("error X"); e != std::string::npos)
+                {
+                    const size_t ls = msg.rfind('\n', e);
+                    msg.erase(0, ls == std::string::npos ? 0 : ls + 1);
+                }
                 HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: SSR ") + name
-                    + " compile failed: "
-                    + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+                    + " compile failed: " + msg).c_str());
                 return false;
             }
             return SUCCEEDED(device->CreatePixelShader(blob->GetBufferPointer(),

@@ -3414,6 +3414,64 @@ TEST_CASE("FXC: a wired UI-domain Backdrop compiles because heGIReflFwd is dead 
 	CHECK(s9Owners == 1);
 }
 
+// ═══ Thema 109: the SSR passes compile under FXC as D3D11/D3D12 build them ═══
+// The register checks further up read the emitted HLSL text and never reached a
+// compiler, so the trace shipped with implicit-LOD texture() inside its
+// uniform-length march loop: SPIRV-Cross emits Sample(), fxc refuses a gradient
+// in such a loop (X3511 after a failed unroll), and both D3D backends logged
+// once and ran the whole session with SSR off (docs/ssr-hardware-verification-
+// 2026-09-30.md). Every stage the D3D SSR chain compiles at runtime is built —
+// the reflection pre-pass that feeds the trace included — with both flag sets
+// the renderers use: D3D11 and D3D12 Release pass none, D3D12 Debug passes
+// DEBUG | SKIP_OPTIMIZATION.
+TEST_CASE("FXC: the SSR passes compile exactly as D3D11/D3D12 build them")
+{
+	using Microsoft::WRL::ComPtr;
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const auto& trace = lib.ssrTrace(B::HLSL);
+	const auto& blur  = lib.ssrBlur(B::HLSL);
+	const auto& preVS = lib.reflPrepassVertex(B::HLSL);
+	const auto& prePS = lib.reflPrepassFragment(B::HLSL);
+	REQUIRE_MESSAGE(trace.ok, trace.log);
+	REQUIRE_MESSAGE(blur.ok, blur.log);
+	REQUIRE_MESSAGE(preVS.ok, preVS.log);
+	REQUIRE_MESSAGE(prePS.ok, prePS.log);
+	auto compile = [](const std::string& src, UINT flags, std::string& err,
+	                  const char* profile = "ps_5_0") -> bool {
+		ComPtr<ID3DBlob> blob, cerr;
+		const HRESULT hr = D3DCompile(src.c_str(), src.size(), "ssr", nullptr, nullptr,
+		                              "main", profile, flags, 0, &blob, &cerr);
+		if (cerr) err.assign(static_cast<const char*>(cerr->GetBufferPointer()), cerr->GetBufferSize());
+		return SUCCEEDED(hr) && blob && blob->GetBufferSize() > 0;
+	};
+	for (const UINT flags : { 0u, static_cast<UINT>(D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION) })
+	{
+		std::string err;
+		CHECK_MESSAGE(compile(trace.source, flags, err), "ssrTrace (flags ", flags, "): ", err);
+		err.clear();
+		CHECK_MESSAGE(compile(blur.source, flags, err), "ssrBlur (flags ", flags, "): ", err);
+		err.clear();
+		CHECK_MESSAGE(compile(preVS.source, flags, err, "vs_5_0"), "refl pre-pass VS (flags ", flags, "): ", err);
+		err.clear();
+		CHECK_MESSAGE(compile(prePS.source, flags, err), "refl pre-pass PS (flags ", flags, "): ", err);
+	}
+
+	// Teeth: put the implicit LOD back (SampleLevel(s, uv, 0) → Sample(s, uv)) and
+	// FXC must refuse the trace again. Without this the case would stay green on
+	// a compiler that stopped caring, and nobody would know the textureLod in
+	// kSSRTraceFS is load-bearing.
+	const std::regex lod0(R"(\.SampleLevel\(([^,()]+), ([^,()]+), 0\.0f?\))");
+	const std::ptrdiff_t sites = std::distance(
+		std::sregex_iterator(trace.source.begin(), trace.source.end(), lod0), std::sregex_iterator());
+	CHECK_MESSAGE(sites >= 4, "expected the trace's explicit-LOD samples in the HLSL, found ", sites);
+	const std::string implicitLod = std::regex_replace(trace.source, lod0, ".Sample($1, $2)");
+	std::string err;
+	CHECK_FALSE_MESSAGE(compile(implicitLod, 0, err),
+	                    "FXC accepted the trace with implicit-LOD samples — the negative control is not biting");
+	CHECK_MESSAGE(err.find("X3511") != std::string::npos, "expected X3511 (loop unroll), got: ", err);
+}
+
 // ═══ Thema 57: D3D11 binds heLandscapeWeights (t14 + s0) for material draws ═══
 // D3D11Renderer's graph-material draw bound heTex0/heTexP0..3 and their samplers
 // and nothing else of the preamble's per-draw state — the landscape weightmap

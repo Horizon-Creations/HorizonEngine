@@ -1,0 +1,113 @@
+diff --git a/src/HE_Editor/EditorApplication.cpp b/src/HE_Editor/EditorApplication.cpp
+index 9ba471be..2745b2b8 100644
+--- a/src/HE_Editor/EditorApplication.cpp
++++ b/src/HE_Editor/EditorApplication.cpp
+@@ -287,6 +287,12 @@ std::string getRHIName(HE::RendererBackend backend)
+ 
+ EditorApplication::~EditorApplication() = default;
+ 
++#ifdef _WIN32
++static ID3D12CommandQueue* g_t97Queue = nullptr; // T97-INSTR
++static ID3D12Fence*        g_t97Fence = nullptr; // T97-INSTR
++static int                 g_t97N     = 0;       // T97-INSTR
++#endif
++
+ HE::ApplicationConfig EditorApplication::GetConfig() const
+ {
+ 	HE::ApplicationConfig cfg;
+@@ -294,6 +300,7 @@ HE::ApplicationConfig EditorApplication::GetConfig() const
+ 	cfg.windowprops.width  = 1600;
+ 	cfg.windowprops.height = 900;
+ 	cfg.windowprops.vsync  = true;
++	if (const char* v = std::getenv("HE_T97_VSYNC"); v && *v == '0') cfg.windowprops.vsync = false; // T97-INSTR
+ 	cfg.windowprops.mode   = HE::WindowMode::Windowed;
+ 	cfg.backend = m_globalState->getSelectedRHI();
+ 	// Headless-dump backend override (HE_DUMP_RHI=Metal|OpenGL|Vulkan|D3D11|D3D12):
+@@ -958,7 +965,11 @@ void EditorApplication::OnInit()
+ 			// buffers frame N-2 was still drawing from → UI flicker whenever the
+ 			// geometry changes every frame (hover, tooltips). Thema 97.
+ 			dx12Info.NumFramesInFlight = static_cast<int>(D3D12Renderer::kFramesInFlight);
+-			dx12Info.RTVFormat         = DXGI_FORMAT_R8G8B8A8_UNORM;
++			if (const char* e = std::getenv("HE_T97_NFIF"); e && *e) dx12Info.NumFramesInFlight = std::atoi(e); // T97-INSTR
++			g_t97Queue = cmdQueue; g_t97N = dx12Info.NumFramesInFlight; // T97-INSTR
++			device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_t97Fence)); // T97-INSTR
++			HE_LOG_INFO(Editor, "T97 ImGui NumFramesInFlight=%d renderer=%u", g_t97N, D3D12Renderer::kFramesInFlight); // T97-INSTR
++			dx12Info.RTVFormat        = DXGI_FORMAT_R8G8B8A8_UNORM;
+ 			dx12Info.DSVFormat         = DXGI_FORMAT_UNKNOWN;
+ 			dx12Info.SrvDescriptorHeap = srvHeap;
+ 			dx12Info.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo* info,
+@@ -1070,6 +1081,46 @@ void EditorApplication::OnInit()
+ 				scissor.bottom = static_cast<LONG>(drawData->DisplaySize.y);
+ 				cmdList->RSSetScissorRects(1, &scissor);
+ 
++				// T97-INSTR: ImGui (main viewport) writes VB/IB slot k % N, last used by
++				// frame k-N. Signal(k) is queued before frame k's ExecuteCommandLists, so
++				// completed >= k means frames 0..k-1 are done. Overwrite in flight iff
++				// frame k-N is not done yet: completed < k-N+1.
++				if (g_t97Fence && drawData->DisplaySize.x > 0.0f && drawData->DisplaySize.y > 0.0f)
++				{
++					static uint64_t k = 0, viol = 0, violWin = 0, vtxChanges = 0;
++					static int lastVtx = -1, minVtx = 1 << 30, maxVtx = 0;
++					if (drawData->TotalVtxCount != lastVtx) ++vtxChanges;
++					lastVtx = drawData->TotalVtxCount;
++					minVtx = (std::min)(minVtx, lastVtx); maxVtx = (std::max)(maxVtx, lastVtx);
++					// FNV-1a over this frame's VB+IB bytes: an in-flight overwrite only
++					// shows if the bytes differ from those of frame k-N (same slot).
++					static uint64_t hashes[16] = {}, hashChanges = 0, hazards = 0, hazardsWin = 0;
++					uint64_t hsh = 1469598103934665603ull;
++					auto mix = [&](const void* p, size_t n) { auto* b = static_cast<const unsigned char*>(p); for (size_t i = 0; i < n; ++i) { hsh ^= b[i]; hsh *= 1099511628211ull; } };
++					for (const ImDrawList* dl : drawData->CmdLists)
++					{
++						mix(dl->VtxBuffer.Data, dl->VtxBuffer.Size * sizeof(ImDrawVert));
++						mix(dl->IdxBuffer.Data, dl->IdxBuffer.Size * sizeof(ImDrawIdx));
++					}
++					if (k > 0 && hsh != hashes[(k - 1) % 16]) ++hashChanges;
++					hashes[k % 16] = hsh;
++					const uint64_t done = g_t97Fence->GetCompletedValue();
++					if (k >= static_cast<uint64_t>(g_t97N) && done < k - g_t97N + 1)
++					{
++						++viol; ++violWin;
++						if (hsh != hashes[(k - g_t97N) % 16]) { ++hazards; ++hazardsWin; }
++					}
++					g_t97Queue->Signal(g_t97Fence, k);
++					++k;
++					if (k % 300 == 0)
++					{
++						HE_LOG_INFO(Editor, "T97 nfif=%d frames=%llu inflightOverwrites=%llu (last300=%llu) hazardous=%llu (last300=%llu) contentChangedFrames(last300)=%llu vtxCountChanged(last300)=%llu vtx=%d..%d",
++							g_t97N, (unsigned long long)k, (unsigned long long)viol, (unsigned long long)violWin,
++							(unsigned long long)hazards, (unsigned long long)hazardsWin, (unsigned long long)hashChanges,
++							(unsigned long long)vtxChanges, minVtx, maxVtx);
++						violWin = 0; hazardsWin = 0; hashChanges = 0; vtxChanges = 0; minVtx = 1 << 30; maxVtx = 0;
++					}
++				}
+ 				ImGui_ImplDX12_RenderDrawData(drawData, cmdList);
+ 				break;
+ 			}
+diff --git a/src/HE_Editor/EditorUI.cpp b/src/HE_Editor/EditorUI.cpp
+index f9f6ffe5..c96dde10 100644
+--- a/src/HE_Editor/EditorUI.cpp
++++ b/src/HE_Editor/EditorUI.cpp
+@@ -505,6 +505,23 @@ void EditorUI::render(AppContext& ctx, float dt)
+         break;
+     }
+ 
++    // T97-INSTR: synthetic fast mouse sweep over the whole editor (no OS cursor).
++    static const bool t97Sweep = std::getenv("HE_T97_SWEEP") != nullptr;
++    if (t97Sweep && io.DisplaySize.x > 64.0f && io.DisplaySize.y > 64.0f)
++    {
++        static long long t97f = 0; ++t97f;
++        const long long W = static_cast<long long>(io.DisplaySize.x), H = static_cast<long long>(io.DisplaySize.y);
++        const long long step = t97f * 97;
++        float mx = static_cast<float>(step % W);
++        float my = static_cast<float>(((step / W) * 23 + 5) % H);
++        if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
++        {
++            mx += ImGui::GetMainViewport()->Pos.x;
++            my += ImGui::GetMainViewport()->Pos.y;
++        }
++        io.AddMousePosEvent(mx, my);
++    }
++
+     ImGui::NewFrame();
+     ImGuizmo::BeginFrame();
+ 
