@@ -58,13 +58,24 @@ ignoriert sie stillschweigend und startet normal mit Fenster (Audit, F4).
 über `std::system`/`_popen`. Weil der Editor keine eigene Konsole hat, bekam
 jeder dieser Aufrufe eine eigene, und mit Windows Terminal als
 Standard-Terminal ist das ein echtes Fenster, das den Vordergrund nimmt.
-Gemessen auf NN-WS03 waren es **drei Fenster pro Editorstart, auch mit
-`HE_HIDDEN_WINDOW=1`**. Seit Thema 110 laufen sie über
+Auf NN-WS03 beobachtet: drei solche Fenster je (sichtbarem) Editorstart. Für
+`HE_HIDDEN_WINDOW`-Läufe ist das ein Schluss, keine eigene Beobachtung. Die
+Probe läuft auch dort (fünf `cmd.exe` im versteckten Lauf), und ein einziges
+`_popen` aus einem Prozess ohne Konsole brachte in der Kontrolle ein
+WT-Fenster in den Vordergrund. Seit Thema 110 laufen die Aufrufe über
 `HE_Scene/src/HiddenShell` mit `CREATE_NO_WINDOW`, unabhängig vom
-Hidden-Modus. Mit Fix: fünf Shells, null Fenster. Git lief schon immer über
-`HE::Proc::run` und war nie betroffen. ctest/`he_tests` selbst öffnen kein
-Fenster: Sie erben die Konsole der Shell, aus der sie gestartet werden (drei
-volle Läufe, null Fenster).
+Hidden-Modus. Versteckter Editor mit Fix: fünf Shells, null Fenster. Git lief
+schon immer über `HE::Proc::run` und war nie betroffen. ctest/`he_tests`
+erben die Konsole der Shell, aus der sie gestartet werden. In allen Läufen
+mit Prozesszuordnung kam kein Fenster aus ihrem Prozessbaum. Ein WT-Fenster
+im allerersten Lauf, noch ohne Prozessprotokoll, ist nicht zuordenbar und
+trat danach nicht wieder auf.
+
+**Windows, sichtbare Fenster:** Splash und Hauptfenster eines Editors ohne
+Hidden-Modus nehmen beim Erscheinen den Vordergrund, das ist so gewollt. Läufe
+von Bienen setzen deshalb `HE_HIDDEN_WINDOW=1`. Braucht ein Lauf ein sichtbares
+Fenster, gibt es dafür noch keinen Schalter „zeigen, ohne zu aktivieren“ (SDL3
+hätte `SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN`).
 
 **Nicht abgedeckt:** Datei-Picker (`dialog.open*`/`save*`) und eine gebündelte
 `.app` (die holt sich die Activation-Policy aus ihrem Info.plist, das
