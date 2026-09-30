@@ -6,6 +6,7 @@ param(
     [int]$Secs = 60,             # length of the SendInput sweep
     [double]$MinIdle = 0,        # refuse to move the cursor if the human touched anything more recently
     [switch]$Dry,                # start the editor, compute targets, move nothing
+    [switch]$Manual,             # no SendInput: a human sweeps with the real mouse, then closes the editor
     [string]$Exe = "C:\hw97\deploy\Editor\HorizonEditor.exe",
     [string]$Mouse = "$env:TEMP\t97mouse\t97mouse.exe"
 )
@@ -32,10 +33,17 @@ $exeDir = Split-Path $Exe
 $log = Join-Path $exeDir "HorizonEngine.log"
 if (Test-Path $log) { Remove-Item -Force $log }
 $p = Start-Process -FilePath $Exe -WorkingDirectory $exeDir -PassThru
-$margs = @("$($p.Id)", $log, "$Secs", "--minidle=$MinIdle")
-if ($Dry) { $margs += "--dry" }
-$mout = & $Mouse @margs
-$mexit = $LASTEXITCODE
+if ($Manual) {
+    # A human moves the mouse and closes the editor when done; the frame diff counts meanwhile.
+    "Editor laeuft (D3D12, Vsync=$Vsync). Maus 1-2 min schnell ueber Toolbar, Quick Settings, Outliner, Content Browser fahren, dann Editor schliessen."
+    $p.WaitForExit(15 * 60 * 1000) | Out-Null
+    $mout = @("manual"); $mexit = 0
+} else {
+    $margs = @("$($p.Id)", $log, "$Secs", "--minidle=$MinIdle")
+    if ($Dry) { $margs += "--dry" }
+    $mout = & $Mouse @margs
+    $mexit = $LASTEXITCODE
+}
 Start-Sleep -Milliseconds 1500   # let the readback ring drain the last frames
 if (-not $p.HasExited) {
     $pp = Get-Process -Id $p.Id -ErrorAction SilentlyContinue

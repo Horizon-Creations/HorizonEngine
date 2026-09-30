@@ -457,3 +457,50 @@ der echte Cursor: `SendInput` → `WM_MOUSEMOVE` → SDL3 → ImGui.
 Dry-Run (keine Bewegung): Editor-Client 1600×900 an (121,50). ImGui meldet dieselbe Fläche
 (Skalierung 1,000), und alle sechs Ziele werden gefunden. Die Nullprobe ohne Reiz ergibt
 300/300 Frames bitgleich, NFIF=3, 0 Überschreibungen im Flug.
+
+### Ergebnis: nicht gefahren, das Kriterium „echte OS-Maus“ bleibt OFFEN
+
+**Es gab keinen einzigen SendInput-Lauf.** Technisch ginge es, es fehlt aber ein freier Platz an
+der Konsole:
+
+- `SendInput` bewegt den Cursor des Menschen, und das Editorfenster muss dafür vorne liegen. Der
+  Mensch arbeitete die ganze Zeit an NN-WS03. Gemessen über rund 25 min lag die Leerlaufzeit
+  (`GetLastInputInfo`) meist bei 0 bis 20 s, höchstens einmal bei 189 s.
+- Eine Freigabe habe ich im Thema erfragt (Beitrag #750), bis zum Schluss kam keine Antwort.
+- Ohne Freigabe habe ich den Cursor nicht übernommen. Selbst mit Freigabe hätte der Abbruch-Hook
+  jeden Lauf bei der nächsten echten Eingabe beendet.
+
+Automatisierbar ist der Test also, aber nur, wenn niemand am Rechner sitzt: `-MinIdle 600`
+wartet darauf, dass seit 10 min keine Eingabe kam. Die Bewegungs- und Abbruchpfade von
+`t97mouse.exe` (Hook, `WindowFromPoint`-Prüfung) sind deshalb **ungetestet**. Geprüft ist nur der
+Dry-Run.
+
+Unverändert gilt: Schritt 5 misst mit `AddMousePosEvent` 0 kaputte Frames in 18 294. Offen ist
+nur, ob der Weg über die echte OS-Maus (WM_MOUSEMOVE → SDL3) etwas anderes auslöst.
+
+### Manuelle Probe mit Messung (1–2 min, für den Menschen)
+
+Für die Probe liegt der instrumentierte Editor als eigene Kopie in
+`C:/hw97/deploy_t97instr/Editor`. `C:/hw97/deploy` ist wieder sauber gebaut. Die Kopie wurde aus
+dem neuen Pfad gestartet und läuft: 9 Ziele erkannt, Capture aktiv, kein Firewall-Ereignis 2097.
+
+So läuft die Probe:
+
+- Aus dem Worktree starten:
+
+  ```
+  .\docs\d3d12-imgui-flicker-osmaus.ps1 -Name mensch_vs1 -Manual -Exe C:\hw97\deploy_t97instr\Editor\HorizonEditor.exe
+  .\docs\d3d12-imgui-flicker-osmaus.ps1 -Name mensch_vs0 -Manual -Vsync 0 -Exe C:\hw97\deploy_t97instr\Editor\HorizonEditor.exe
+  ```
+
+- Jeweils 1–2 min die Maus schnell über den Toolbar-Streifen oben im Scene-Fenster, Quick
+  Settings samt Slidern, World Outliner und Content Browser bewegen. Dann den Editor schließen.
+- Das Skript gibt danach aus:
+  - `T97MOUSE … hoverChanges=… mouseMoveFrames=…`: Belegt, dass die echte Maus bei ImGui ankam.
+  - `T97CAP compared=… mismatched=…`: Die Zahl der Frames, die vom rennfreien Referenzbild
+    abweichen. Mit dem Fix muss sie 0 sein.
+  - Im Fehlerfall zusätzlich die ersten 6 Abweichungen als PNG unter
+    `C:/hw97/shots/s8_<Name>/`.
+
+So misst die Probe objektiv, statt sich nur auf das Auge zu verlassen. Die Negativkontrolle
+(`-Nfif 2`, dann erwartet `mismatched > 0`) geht mit demselben Befehl.
