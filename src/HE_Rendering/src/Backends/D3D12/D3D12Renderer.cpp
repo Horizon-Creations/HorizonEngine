@@ -1322,7 +1322,10 @@ struct D3D12RendererImpl
     bool                              gpuDebug    = false;  // _DEBUG or env HE_GPU_DEBUG
     bool                              deviceRemovedLogged = false; // dump DRED only once
     bool                              drawCountsLogged = false;    // log pass draw counts once
-    int                               width = 0, height = 0;
+    int                               width = 0, height = 0;       // swapchain buffer size
+    HWND                              hwnd = nullptr;              // swapchain target; its client rect drives resizes
+    UINT                              swapchainFlags = 0;          // creation flags — ResizeBuffers must repeat them
+    int                               resizeFailedW = 0, resizeFailedH = 0; // don't retry a size DXGI refused
     ComPtr<ID3D12InfoQueue>           infoQueue;  // drained to Logger each frame when gpuDebug
 
     // ── GPU frame timing (timestamp query heap) ─────────────────────────────
@@ -4031,6 +4034,56 @@ struct D3D12RendererImpl
         for (UINT i = 0; i < k_frameCount; ++i) fenceValues[i] = val;
     }
 
+    // Keep the swapchain at the window's client size. Without this the buffers
+    // stayed at the Initialize size forever and DXGI stretched them over the
+    // resized window, while ImGui laid itself out for the new DisplaySize. D3D
+    // has no VK_ERROR_OUT_OF_DATE_KHR to react to, so Render() asks every frame;
+    // the client rect is the size DXGI presents into. Returns true on a resize.
+    bool resizeSwapchainIfNeeded()
+    {
+        if (!swapchain || !hwnd) return false;
+        RECT rc{};
+        if (!GetClientRect(hwnd, &rc)) return false;
+        const int w = static_cast<int>(rc.right - rc.left);
+        const int h = static_cast<int>(rc.bottom - rc.top);
+        // Minimised windows report 0x0, which is no legal buffer size: keep the
+        // old buffers and pick the real size up once the window is restored.
+        if (w <= 0 || h <= 0 || (w == width && h == height)) return false;
+        if (w == resizeFailedW && h == resizeFailedH) return false;
+
+        // ResizeBuffers needs every back-buffer reference released and nothing
+        // in flight reading them. The flush also makes the frame-slot switch
+        // below safe: every slot's fence value is complete afterwards.
+        waitForAllFrames();
+        for (UINT i = 0; i < k_frameCount; ++i) renderTargets[i].Reset();
+        const HRESULT hr = swapchain->ResizeBuffers(k_frameCount, static_cast<UINT>(w), static_cast<UINT>(h),
+                                                    DXGI_FORMAT_UNKNOWN, swapchainFlags);
+        if (FAILED(hr))
+        {
+            // The old buffers are still valid; re-fetch them below and carry on at the old size.
+            resizeFailedW = w; resizeFailedH = h;
+            HE_LOG_ERROR(RHI, "D3D12Renderer: ResizeBuffers(%dx%d) failed hr=0x%08X — keeping %dx%d",
+                         w, h, static_cast<unsigned>(hr), width, height);
+        }
+        for (UINT i = 0; i < k_frameCount; ++i)
+        {
+            if (FAILED(swapchain->GetBuffer(i, IID_PPV_ARGS(&renderTargets[i]))))
+                throw std::runtime_error("D3D12Renderer: GetBuffer after ResizeBuffers failed");
+            device->CreateRenderTargetView(renderTargets[i].Get(), nullptr, rtvHandle(i));
+        }
+        frameIndex = swapchain->GetCurrentBackBufferIndex();
+        if (FAILED(hr)) return false;
+
+        width = w; height = h;
+        resizeFailedW = resizeFailedH = 0;
+        createSceneDepth(w, h);   // the swapchain path draws the scene against it
+        DXGI_SWAP_CHAIN_DESC1 d{};
+        swapchain->GetDesc1(&d);
+        HE_LOG_INFO(RHI, "D3D12Renderer: swapchain resized to %ux%u (client %dx%d)",
+                    d.Width, d.Height, w, h);
+        return true;
+    }
+
     ComPtr<ID3D12Resource> createUploadBuffer(UINT64 bytes, void** mappedOut, const void* initial = nullptr)
     {
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -4070,6 +4123,22 @@ struct D3D12RendererImpl
         device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&dsvHeap));
         dsvDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 
+        createSceneDepth(w, h);
+
+        // ── Cascade shadow-map array (R32_TYPELESS: DSV per slice + array SRV) ─
+        createShadowArray();
+        // ── Local (point/spot) shadow atlas (same pattern, 16 layers) ──────────
+        // Its SRVs are written by the heap builders (createPipeline /
+        // createMaterialPipeline), which run after this.
+        createLocalShadowArray();
+    }
+
+    // The swapchain-sized part of createDepth(): the scene depth, its DSV in
+    // dsvHeap[0] and its decal SRV. A swapchain resize re-runs only this — the
+    // DSV heap and the shadow arrays behind the other slots are size-independent.
+    void createSceneDepth(int w, int h)
+    {
+        depthBuffer.Reset();
         D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC rd{};
         rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -4094,13 +4163,6 @@ struct D3D12RendererImpl
         // BEFORE createPipeline() builds that heap on first init (same ordering the
         // shadow map's slot 0 has), so the heap fill there writes it a second time.
         if (sceneSrvHeap) createDepthSrv(depthBuffer.Get(), k_decalSceneDepthSlot);
-
-        // ── Cascade shadow-map array (R32_TYPELESS: DSV per slice + array SRV) ─
-        createShadowArray();
-        // ── Local (point/spot) shadow atlas (same pattern, 16 layers) ──────────
-        // Its SRVs are written by the heap builders (createPipeline /
-        // createMaterialPipeline), which run after this.
-        createLocalShadowArray();
     }
 
     bool createUIPipeline()
@@ -8752,9 +8814,19 @@ void D3D12Renderer::Initialize(HE::Window* window)
                                  : "D3D12Renderer: ALLOW_TEARING NOT supported — disabled");
     }
 
+    // Kept for ResizeBuffers, which must be given the creation flags again.
+    m_impl->hwnd           = hwnd;
+    m_impl->swapchainFlags = m_impl->allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        HE_LOG_INFO(RHI, "D3D12Renderer: swapchain created %ux%u (window size), client rect %ldx%ld",
+                    window->GetWidth(), window->GetHeight(), rc.right - rc.left, rc.bottom - rc.top);
+    }
+
     DXGI_SWAP_CHAIN_DESC1 scd{};
     scd.BufferCount      = k_frameCount;
-    scd.Flags            = m_impl->allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    scd.Flags            = m_impl->swapchainFlags;
     scd.Width            = window->GetWidth();
     scd.Height           = window->GetHeight();
     scd.Format           = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -10321,6 +10393,9 @@ void D3D12Renderer::Render()
         if (--it->second <= 0) { p.m_freeSlots.push_back(it->first); it = p.m_freeSlotPending.erase(it); }
         else                   ++it;
     }
+
+    // Swapchain to the window's client size (flushes the GPU only when it changed).
+    p.resizeSwapchainIfNeeded();
 
     // Resize viewport RT if the editor requested a different size.
     if (p.viewportReqW > 0 && p.viewportReqH > 0 &&
