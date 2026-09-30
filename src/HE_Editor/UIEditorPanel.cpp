@@ -2666,26 +2666,37 @@ void drawKeyEditor(State& st, AppContext& ctx, HE::UIAnimClip& clip)
 		committed |= ImGui::IsItemDeactivatedAfterEdit();
 		EditorWidgets::helpForLabel("Value");
 		break;
+	case UIPropType::Bool:
+		// A switch (Visible, Enabled): on or off from this key until the next.
+		// A click is the whole edit, so it commits at once.
+		if (ImGui::Checkbox("Value", &key.value.b)) { edited = true; committed = true; }
+		EditorWidgets::helpForLabel("Value");
+		break;
 	default:
 		// Only reachable through a hand-edited file — Add Track offers nothing
 		// else. Said out loud rather than hidden: a key you can neither see nor
 		// edit is a file nobody can repair.
-		ImGui::TextDisabled("(this key's type cannot be interpolated)");
+		ImGui::TextDisabled("(this key's type cannot be edited here)");
 		break;
 	}
 
-	ImGui::SameLine(); ImGui::SetNextItemWidth(130.0f);
-	const bool easeOpen = ImGui::BeginCombo("Ease", HE::uiEaseName(key.ease));
-	if (!easeOpen) EditorWidgets::helpForLabel("Ease");
-	if (easeOpen)
+	// A key that steps has no curve into it (uiAnimEvaluate ignores the ease),
+	// so there is no Ease to offer — a choice that changes nothing is a lie.
+	if (HE::uiAnimTypeInterpolates(key.value.type))
 	{
-		for (int c = 0; c < static_cast<int>(HE::UIEase::COUNT); ++c)
+		ImGui::SameLine(); ImGui::SetNextItemWidth(130.0f);
+		const bool easeOpen = ImGui::BeginCombo("Ease", HE::uiEaseName(key.ease));
+		if (!easeOpen) EditorWidgets::helpForLabel("Ease");
+		if (easeOpen)
 		{
-			const auto e = static_cast<HE::UIEase>(c);
-			if (ImGui::Selectable(HE::uiEaseName(e), key.ease == e))
-			{ key.ease = e; committed = true; }
+			for (int c = 0; c < static_cast<int>(HE::UIEase::COUNT); ++c)
+			{
+				const auto e = static_cast<HE::UIEase>(c);
+				if (ImGui::Selectable(HE::uiEaseName(e), key.ease == e))
+				{ key.ease = e; committed = true; }
+			}
+			ImGui::EndCombo();
 		}
-		ImGui::EndCombo();
 	}
 
 	ImGui::SameLine();
@@ -3123,14 +3134,18 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 			// the two things you want on a key and nowhere else to put them.
 			if (ImGui::BeginPopupContextItem("##keymenu"))
 			{
-				ImGui::TextDisabled("Easing into this key");
-				for (int c = 0; c < static_cast<int>(HE::UIEase::COUNT); ++c)
+				// A switch's key steps and has no easing (see drawKeyEditor).
+				if (HE::uiAnimTypeInterpolates(key.value.type))
 				{
-					const auto ease = static_cast<HE::UIEase>(c);
-					if (ImGui::Selectable(HE::uiEaseName(ease), key.ease == ease))
-					{ key.ease = ease; commitEdit(st, ctx); }
+					ImGui::TextDisabled("Easing into this key");
+					for (int c = 0; c < static_cast<int>(HE::UIEase::COUNT); ++c)
+					{
+						const auto ease = static_cast<HE::UIEase>(c);
+						if (ImGui::Selectable(HE::uiEaseName(ease), key.ease == ease))
+						{ key.ease = ease; commitEdit(st, ctx); }
+					}
+					ImGui::Separator();
 				}
-				ImGui::Separator();
 				if (EditorWidgets::dangerMenuItem("Delete Key"))
 				{
 					tr.keys.erase(tr.keys.begin() + k);
@@ -3218,28 +3233,61 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	{
 		ImGui::TextDisabled("A property of the selected element");
 		if (sel)
-			for (const UIPropDesc& pd : sel->allProperties())
+		{
+			// Two passes: what glides (numbers, colours, points) first, then
+			// the switches under their own heading, so it is plain before the
+			// click that those jump. Which property is offered at all is
+			// uiAnimTrackOffer's call — one rule the tests can hold down.
+			const std::vector<UIPropDesc> props = sel->allProperties();
+			for (int pass = 0; pass < 2; ++pass)
 			{
-				// Only what can be interpolated: a string has no halfway, and a
-				// track that snapped at the end would be a duration meaning
-				// nothing (the same rule animate() applies).
-				if (pd.type != UIPropType::Float && pd.type != UIPropType::Color &&
-				    pd.type != UIPropType::Vec2) continue;
-				bool have = false;
-				for (const HE::UIAnimTrack& tr : clip.tracks)
-					if (tr.element == sel->id && tr.prop == pd.name) have = true;
-				if (have || !ImGui::Selectable(pd.name.c_str())) continue;
-				HE::UIAnimTrack tr;
-				tr.element = sel->id;
-				tr.prop    = pd.name;
-				// A track starts with the value the element has now, at the
-				// playhead — an empty track is a row that evaluates to nothing.
-				tr.keys.push_back({ st.playhead, sel->getPropAny(pd.name), HE::UIEase::Linear });
-				clip.tracks.push_back(std::move(tr));
-				st.trackSel = static_cast<int>(clip.tracks.size()) - 1;
-				st.keySel = 0;
-				commitEdit(st, ctx);
+				bool headed = false;
+				for (const UIPropDesc& pd : props)
+				{
+					if (HE::uiAnimTypeInterpolates(pd.type) != (pass == 0)) continue;
+					const HE::UIAnimTrackOffer offer = HE::uiAnimTrackOffer(*sel, pd);
+					if (offer == HE::UIAnimTrackOffer::No) continue;
+					bool have = false;
+					for (const HE::UIAnimTrack& tr : clip.tracks)
+						if (tr.element == sel->id && tr.prop == pd.name) have = true;
+					if (have) continue;
+					if (pass == 1 && !headed)
+					{
+						ImGui::Separator();
+						ImGui::TextDisabled("Switches (jump at each key)");
+						headed = true;
+					}
+					// Greyed, not hidden: Enabled is on every element, and one
+					// that is missing from the list only here would be searched
+					// for. The tooltip says why it is grey.
+					const bool noEffect = offer == HE::UIAnimTrackOffer::NoEffect;
+					ImGui::BeginDisabled(noEffect);
+					const bool picked = ImGui::Selectable(pd.name.c_str());
+					ImGui::EndDisabled();
+					if (noEffect) EditorWidgets::helpForKey("ui.timeline-track-no-effect");
+					if (!picked || noEffect) continue;
+					HE::UIAnimTrack tr;
+					tr.element = sel->id;
+					tr.prop    = pd.name;
+					// A track starts with the value the element has now, at the
+					// playhead — an empty track is a row that evaluates to nothing.
+					const UIPropValue now = sel->getPropAny(pd.name);
+					// A switch also gets that value at 0. Before its first key a
+					// track holds the first key's value, so a Visible track made
+					// at 0.8 s and set to off there would hide the element from
+					// the very start — not what "off at 0.8" means.
+					if (!HE::uiAnimTypeInterpolates(pd.type) && st.playhead > 0.0f)
+						tr.keys.push_back({ 0.0f, now, HE::UIEase::Linear });
+					tr.keys.push_back({ st.playhead, now, HE::UIEase::Linear });
+					clip.tracks.push_back(std::move(tr));
+					st.trackSel = static_cast<int>(clip.tracks.size()) - 1;
+					st.keySel = static_cast<int>(clip.tracks.back().keys.size()) - 1;
+					commitEdit(st, ctx);
+					pass = 2;   // one pick per click; the popup closes on it
+					break;
+				}
 			}
+		}
 		ImGui::EndPopup();
 	}
 	else EditorWidgets::helpForLabel("Add Track");

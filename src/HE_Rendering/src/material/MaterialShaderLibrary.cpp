@@ -1283,6 +1283,14 @@ namespace
 // no ghosting. Confidence folds edge fade × facing × roughness fade × distance
 // × soft thickness (hit depth inside the assumed surface thickness).
 // Standalone canonical GLSL (no lighting preamble — nothing here shades).
+//
+// Every sample is textureLod(…, 0.0), never texture(): the march loop runs a
+// UNIFORM-driven step count with break exits, and SPIRV-Cross turns implicit-LOD
+// texture() into HLSL Sample() — a gradient instruction fxc (ps_5_0) refuses
+// inside such a loop. It tries to unroll, fails with X3511, and D3D11/D3D12 ran
+// with SSR silently off for the whole session (docs/ssr-hardware-verification-
+// 2026-09-30.md). GL/Vulkan/Metal accept either form, so only a D3D run shows
+// it. None of the inputs have a mip chain, so LOD 0 is what texture() sampled.
 constexpr const char* kSSRTraceFS = R"(#version 450
 layout(location = 0) out vec4 oSSR;     // blended radiance + confidence (= this frame's history)
 layout(location = 1) out vec4 oHistPos; // receiver world pos, w = 1 valid (temporal reprojection)
@@ -1328,9 +1336,9 @@ float heSceneZ(vec4 rowZ, vec4 rowW, float camDot, vec2 uv, float d) {
 void main() {
     vec2 uv = gl_FragCoord.xy / max(heSSR.vp.xy, vec2(1.0));
     oHistPos = vec4(0.0); // every early-out marks the receiver invalid
-    float d = texture(heGBDepth, uv).r;
+    float d = textureLod(heGBDepth, uv, 0.0).r;
     if (d >= 1.0) { oSSR = vec4(0.0); return; }             // background
-    vec4 g1 = texture(heGB1, uv);
+    vec4 g1 = textureLod(heGB1, uv, 0.0);
     float rough = clamp(g1.b, 0.0, 1.0);
     float roughFade = 1.0 - smoothstep(heSSR.cfg.z * 0.7, heSSR.cfg.z, rough);
     if (roughFade <= 0.0) { oSSR = vec4(0.0); return; }
@@ -1407,7 +1415,7 @@ void main() {
         vec3 ndc = clip.xyz / clip.w;
         vec2 quv = vec2(ndc.x * 0.5 + 0.5, (ndc.y * heSSR.conv.x) * 0.5 + 0.5);
         if (any(lessThan(quv, vec2(0.0))) || any(greaterThan(quv, vec2(1.0)))) break;
-        float sceneD = texture(heGBDepth, quv).r;
+        float sceneD = textureLod(heGBDepth, quv, 0.0).r;
         if (sceneD < 1.0)
         {
             float rayZ   = zP + zR * t;
@@ -1432,7 +1440,7 @@ void main() {
                         vec4 cm = clipP + clipR * tm;
                         vec3 nm = cm.xyz / max(cm.w, 1e-6);
                         vec2 um = vec2(nm.x * 0.5 + 0.5, (nm.y * heSSR.conv.x) * 0.5 + 0.5);
-                        float dm = texture(heGBDepth, um).r;
+                        float dm = textureLod(heGBDepth, um, 0.0).r;
                         if (zP + zR * tm > heSceneZ(rowZ, rowW, camDot, um, dm)) { t1 = tm; hitUV = um; }
                         else t0 = tm;
                     }
@@ -1452,13 +1460,13 @@ void main() {
         // march window's dz slack no longer applies) — soft: barely inside the
         // surface = confident, buried deep = fade toward the fallback.
         float gapR = (zP + zR * tHit)
-                   - heSceneZ(rowZ, rowW, camDot, hitUV, texture(heGBDepth, hitUV).r);
+                   - heSceneZ(rowZ, rowW, camDot, hitUV, textureLod(heGBDepth, hitUV, 0.0).r);
         thickConf  = 1.0 - clamp(gapR / max(heSSR.cfg.y, 1e-4), 0.0, 1.0);
         // Backface rejection: if the stored surface at the hit faces AWAY from
         // the ray, the visible colour belongs to its camera-facing side — a
         // wrong sample for this reflection. Fade it out; the composite's
         // cascade (GI reflections, sky cubemap) supplies the honest fallback.
-        vec3 hitN = heOctDecode(texture(heGB1, hitUV).rg * 2.0 - 1.0);
+        vec3 hitN = heOctDecode(textureLod(heGB1, hitUV, 0.0).rg * 2.0 - 1.0);
         thickConf *= 1.0 - smoothstep(0.0, 0.25, dot(hitN, R));
         if (thickConf <= 0.001) hit = false;
     }
@@ -1491,7 +1499,7 @@ void main() {
             }
             else colorOk = 0.0;
         }
-        sampleOut = vec4(texture(heSceneColor, uvColor).rgb,
+        sampleOut = vec4(textureLod(heSceneColor, uvColor, 0.0).rgb,
                          edge * facing * roughFade * distFade * thickConf * colorOk);
     }
     // Temporal accumulation (quality High, cfg2.y > 0): reproject the RECEIVER
@@ -1512,11 +1520,11 @@ void main() {
             vec2 puv  = vec2(ndcP.x * 0.5 + 0.5, (ndcP.y * heSSR.conv.x) * 0.5 + 0.5);
             if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThanEqual(puv, vec2(1.0))))
             {
-                vec4 hp  = texture(heSSRHistPos, puv);
+                vec4 hp  = textureLod(heSSRHistPos, puv, 0.0);
                 float tol = max(0.05 * length(P - heSSR.camPos.xyz), 0.1);
                 if (hp.w > 0.5 && length(hp.xyz - P) < tol)
                 {
-                    vec4 hist = texture(heSSRHistRad, puv);
+                    vec4 hist = textureLod(heSSRHistRad, puv, 0.0);
                     float lc  = dot(resultOut.rgb, vec3(0.299, 0.587, 0.114));
                     float lh  = dot(hist.rgb,      vec3(0.299, 0.587, 0.114));
                     float rel = abs(lh - lc) / (max(lh, lc) + 0.05);

@@ -78,7 +78,9 @@ using Microsoft::WRL::ComPtr;
 // buffer to free, which shows up as uneven/juddery viewport motion. A 3rd buffer gives
 // the CPU enough slack to pace frames smoothly. Used for swapchain buffers AND frames
 // in flight (allocators/fences/per-frame CBs) — both benefit.
-static constexpr UINT k_frameCount = 3;
+// The value lives in the header (D3D12Renderer::kFramesInFlight) so the editor's
+// ImGui DX12 init reads the same number; never set a literal here.
+static constexpr UINT k_frameCount = D3D12Renderer::kFramesInFlight;
 // Per-object CB ring capacity. Shared by the shadow pass and the geometry pass
 // of one frame, and the shadow pass draws each cascade's caster set (up to
 // three culls of the scene) plus up to 16 local (point/spot) atlas layers, so
@@ -5524,8 +5526,17 @@ struct D3D12RendererImpl
             if (SUCCEEDED(D3DCompile(src, len, name, nullptr, nullptr, entry, profile,
                                      cflags, 0, &out, &cerr)))
                 return true;
+            // A log line holds 512 bytes and fxc lists its warnings first: start
+            // at the first error, or the warnings push it off the end (the
+            // trace's X3511 stayed invisible behind three X3570s).
+            std::string msg = cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "";
+            if (const size_t e = msg.find("error X"); e != std::string::npos)
+            {
+                const size_t ls = msg.rfind('\n', e);
+                msg.erase(0, ls == std::string::npos ? 0 : ls + 1);
+            }
             HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: SSR ") + name + " compile failed: "
-                + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+                + msg).c_str());
             return false;
         };
         if (!compile(kFSTriangleVS, strlen(kFSTriangleVS), "ssrFsVS", "main", "vs_5_0", fsVS)) return false;

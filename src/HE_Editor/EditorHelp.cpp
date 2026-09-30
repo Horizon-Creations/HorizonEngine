@@ -5233,20 +5233,31 @@ namespace
 	{ "UI Timeline/Value", "",
 	  "What the animated property IS at this key. This is where an animation is "
 	  "edited: the Details panel writes the widget's own values, which is what "
-	  "the widget looks like with no animation playing.",
+	  "the widget looks like with no animation playing. On a switch (Visible, "
+	  "Enabled) it is a tick box, and the value holds from this key until the "
+	  "next one.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Ease", "",
 	  "The curve leading INTO this key — how the value arrives from the one "
 	  "before it. On the first key it means nothing; there is nothing to come "
 	  "from. Out curves land softly, In curves leave softly, and Out Back "
-	  "overshoots and settles, which is what makes a dialog land.",
+	  "overshoots and settles, which is what makes a dialog land. Switches have "
+	  "no ease: they jump at the key.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Add Track", "",
-	  "Adds a row for one property of the SELECTED element. Only what can be "
-	  "interpolated is offered — a number, a colour, a point — because a string "
-	  "has no halfway and a track that snapped at the end would be a duration "
-	  "that means nothing. The new track starts with a key holding the value the "
-	  "element has right now.",
+	  "Adds a row for one property of the SELECTED element. Numbers, colours "
+	  "and points glide from key to key. Under \"Switches\" are Visible and "
+	  "Enabled, which jump: each key holds until the next one. Visible also "
+	  "takes the element out of its layout box, so the siblings move up; fade "
+	  "Render Opacity instead if they should stay put. Enabled locks the "
+	  "element and everything inside it, dimmed. A new track starts with a key "
+	  "holding the value the element has right now; a switch also gets one at "
+	  "0, so switching it at the playhead does not reach back to the start.",
+	  "", "ui#elements" },
+	{ "ui.timeline-track-no-effect", "No effect here",
+	  "Enabled would change nothing on this element: nothing in it reacts to "
+	  "the pointer or the keyboard, and it holds no children that could. Pick "
+	  "it on the button, or on the panel around the controls to lock them all.",
 	  "", "ui#elements" },
 	{ "UI Timeline/Key", "",
 	  "Adds a key at the playhead, holding whatever the animation already shows "

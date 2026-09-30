@@ -4277,6 +4277,12 @@ HE::UITextInput* WidgetManager::focusedTextField(Instance*& outWidget)
 	if (!w || w->focusedElem == 0) return nullptr;
 	auto* ti = dynamic_cast<HE::UITextInput*>(w->tree.find(w->focusedElem));
 	if (!ti) return nullptr;
+	// Switched off or hidden while it had the focus — by a clip's Enabled or
+	// Visible track, or a script. It takes no keystrokes until it is back, the
+	// same as a click could not have focused it in that state. The focus itself
+	// stays, so a field unlocked again mid-typing carries on where it was.
+	if (!HE::uiElementEffectiveEnabled(w->tree, *ti) ||
+	    !HE::uiElementEffectiveVisible(w->tree, *ti)) return nullptr;
 	ti->clampCaret();
 	outWidget = w;
 	return ti;
@@ -5373,8 +5379,11 @@ bool WidgetManager::hasFocusedTextField() const
 	// Editable OR selectable: a read-only field still takes the arrows to move
 	// its selection and Ctrl+C to copy out of it, so it owns the keyboard just
 	// as much as one being typed into. A field that is neither is inert and
-	// keeps nothing.
-	return ti && (ti->editable || ti->selectable);
+	// keeps nothing. So is one switched off or hidden while focused (see
+	// focusedTextField): the keyboard goes back to the game until it returns.
+	return ti && (ti->editable || ti->selectable) &&
+	       HE::uiElementEffectiveEnabled(w->tree, *ti) &&
+	       HE::uiElementEffectiveVisible(w->tree, *ti);
 }
 
 bool WidgetManager::hasOpenDropdown() const
