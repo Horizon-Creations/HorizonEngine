@@ -2940,7 +2940,7 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 	}
 
 	// ── Tracks and keys ──────────────────────────────────────────────────────
-	constexpr float kNameW = 190.0f;
+	constexpr float kNameW = 208.0f;
 	constexpr float kRowH  = 22.0f;
 	const ImVec2 area = ImGui::GetContentRegionAvail();
 	const float  laneW = std::max(60.0f, area.x - kNameW - 8.0f);
@@ -3056,11 +3056,21 @@ void drawTimeline(State& st, AppContext& ctx, float height)
 		const UIElement* e = st.tree.find(tr.element);
 		const std::string label = (e ? (e->name.empty() ? std::string(e->typeName()) : e->name)
 		                             : std::string("(gone)")) + "  ·  " + tr.prop;
+		// The "x" is placed from the lane back, not after the name: a key at 0 ms
+		// has its 12 px button centred on the lane's left edge, and the "x" is
+		// submitted first, so wherever the two overlap ImGui gives the pointer to
+		// the "x". Laid out after a fixed-width name it reached 9 px into the
+		// lane and covered that key completely (Thema 114). The name stops a
+		// full ItemSpacing short because a Selectable widens its own hit rect by
+		// half of it on each side.
+		const ImGuiStyle& style = ImGui::GetStyle();
+		const float xW    = ImGui::CalcTextSize("x").x + style.FramePadding.x * 2.0f;
+		const float xLeft = laneL - 6.0f - 3.0f - xW;
 		ImGui::SetCursorScreenPos(ImVec2(top.x, rowY + 2.0f));
 		if (ImGui::Selectable((label + "##t").c_str(), st.trackSel == i, 0,
-		                      ImVec2(kNameW - 22.0f, kRowH - 4.0f)))
+		                      ImVec2(xLeft - top.x - style.ItemSpacing.x, kRowH - 4.0f)))
 			{ st.trackSel = i; st.keySel = -1; }
-		ImGui::SameLine();
+		ImGui::SetCursorScreenPos(ImVec2(xLeft, rowY + 2.0f));
 		if (EditorWidgets::dangerSmallButton("x")) removeTrack = i;
 
 		// The lane, and a diamond per key. Dragging one moves it in time, which
