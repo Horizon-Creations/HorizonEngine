@@ -87,11 +87,13 @@ Ereignisse. Auslöser:
   `CollabLanDiscovery` ist standardmäßig an) bindet beim Start
   UDP `0.0.0.0:47823` (`LanBeacon::kPort`). Mit `HE_COLLAB_OFFLINE=1` bindet
   der Editor nichts. Gemessen mit `Get-NetUDPEndpoint` an einem bereits
-  freigegebenen Pfad, also ohne Dialog. Die MCP-Brücke lauscht nur auf
-  Loopback und löst ihn nicht aus.
+  freigegebenen Pfad, also ohne Dialog. Die MCP-Brücke (`HE_MCP=1`) lauscht
+  nur auf `127.0.0.1` (gemessen mit `Get-NetTCPConnection`) und löst ihn
+  nicht aus.
 - **he_tests:** `tests/main.cpp` setzt `HE_COLLAB_OFFLINE` schon. Den Dialog
-  lösen die Netz-Tests aus, die über `HE_Net/src/Socket.cpp` auf
-  `INADDR_ANY`/`in6addr_any` binden. Daran ändert ein Schalter nichts.
+  lösen laut Code (nicht einzeln gemessen) die Netz-Tests aus, die über
+  `HE_Net/src/Socket.cpp` auf `INADDR_ANY`/`in6addr_any` binden
+  (UDP-/TCP-Transport, LAN-Beacon). Daran ändert ein Schalter nichts.
 
 Ein Pfad, der schon einmal zugelassen wurde, fragt nicht wieder. Wer ein
 Buildverzeichnis wiederverwendet, statt ein neues anzulegen, erspart dem
