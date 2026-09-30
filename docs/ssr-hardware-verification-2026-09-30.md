@@ -178,7 +178,8 @@ Danach neu gebaut:
     ab, höchstens um 15. Die Geometrie der Spiegelung ist also gleich, die Bilder
     sind aber nicht pixelgenau gleich.
   - D3D11 und D3D12 sind untereinander pixelgleich.
-- Mit `HE_GPU_DEBUG=1` meldet der Debug-Layer auf D3D11 nichts. Auf D3D12 kommt
+- Mit `HE_GPU_DEBUG=1` meldet der Debug-Layer auf D3D11 nichts (Korrektur in
+  Schritt 3: D3D11 hat gar keinen Debug-Layer). Auf D3D12 kommt
   nur „ClearRenderTargetView: clear values do not match“, und die kommt auch mit
   SSR aus, ist also vorbestehend.
 
@@ -361,6 +362,56 @@ dem Fix (`C:/hwSSR`, Basis `3bd2c153`). Metrik wie oben (Bodenband, Schwelle
 Bilder: `schritt3-boden-vorher-nachher-alle-backends.png` und
 `schritt3-wand-vorher-nachher-alle-backends.png`. Zeilen: GL, D3D11, D3D12,
 Vulkan. Spalten: SSR aus | vor Fix SSR an | nach Fix SSR an.
+
+**Qualität High (temporal), Bewegung, Bildrand.** Die Matrix oben lief auf
+der Standardqualität 1 (`EditorConfig.h:187`). Dort läuft der Temporal-Block
+nicht, und damit auch nicht die beiden History-Samples (`heSSRHistPos`,
+`heSSRHistRad`), die der Fix ebenfalls umgestellt hat. Deshalb kamen noch
+Aufnahmen mit `HE_DUMP_SSRQUALITY=2` hinzu, wieder vor und nach dem Fix:
+Boden, Boden mit einer Bildbewegung (`HE_DUMP_MBYAWSTEP=0.3`, die
+Reprojektion liest History) und Bildrand (`HE_DUMP_YAW=-42`).
+
+- Dass Q2 greift, zeigt Q2 an gegen Q1 an: 4 493 (GL) bis 11 185 (Vulkan)
+  geänderte Pixel.
+
+| Q2 | OpenGL | D3D11 | D3D12 | Vulkan |
+|---|---|---|---|---|
+| Boden aus→an, vor Fix | 11 363 | **0** | **0** | 15 756 |
+| Boden aus→an, nach Fix | 11 363 | **15 802** | **15 802** | 15 756 |
+| Bewegung (Q2 an gegen Q2 an + Schritt), vor Fix | 594 | **0** | **0** | 580 |
+| Bewegung, nach Fix | 594 | **542** | **538** | 580 |
+| Bildrand aus→an, vor Fix | 21 725 | **0** | **0** | 22 165 |
+| Bildrand aus→an, nach Fix | 21 725 | **23 175** | **23 179** | 22 165 |
+
+- **GL und Vulkan, nach gegen vor dem Fix**, jeweils SSR an (Q2, Bewegung,
+  Rand): 0 Pixel über der Schwelle, höchstens 1/255. Damit sind alle neun
+  geänderten Samples abgedeckt, auch die beiden History-Samples.
+- **D3D gegen Vulkan**, SSR-Beitrag: Q2-Boden im Mittel 0,035/255 (max 9).
+  Das Bewegungsbild liegt roh bei 1 Pixel über der Schwelle. Rand: im Mittel
+  0,066/255, max 22.
+- Am Rand ändert D3D 1 097 Pixel, die Vulkan nicht ändert. Das ist auch der
+  Grund, warum die Box auf D3D bei x=0 statt bei x=495 beginnt.
+  - 726 davon liegen links am fernen Boden (x < 400, y 360–439), also dort,
+    wo Strahlen den Horizont streifend treffen. Das ist der Streifen,
+    den Schritt 1 schon auf Vulkan beschrieben hat.
+  - Im Bild ist das ein ganz schwacher, hellerer Saum entlang der fernen
+    Bodenkante.
+  - Er gehört zum offenen Punkt „D3D gegen Vulkan nicht pixelgenau“ und ist
+    kein neuer Befund.
+- **Validierung und Debug-Layer:**
+  - Vulkan meldet vor und nach dem Fix, mit SSR an und aus, dieselben 30
+    bekannten Baseline-Zeilen. Sie unterscheiden sich nur in den
+    Handle-Adressen.
+  - D3D12 mit `HE_GPU_DEBUG=1`, Q2, SSR an: nur das vorbestehende
+    `ClearRenderTargetView: clear values do not match`, mit SSR aus
+    genauso. Das Bild ist pixelgleich mit dem Lauf ohne Debug-Layer.
+- **Korrektur zu Schritt 1:** Der D3D11-Renderer hat **keinen Debug-Layer**.
+  Im Baum gibt es für D3D11 weder `D3D11_CREATE_DEVICE_DEBUG` noch
+  `HE_GPU_DEBUG`, beides existiert nur für D3D12 und Vulkan. Die Aussage
+  oben, der Debug-Layer melde auf D3D11 nichts, hat daher nichts geprüft.
+  Für D3D11 gibt es damit keine Laufzeitvalidierung, nur das Bild.
+- Bild: `schritt3-q2-bewegung-rand-nach-fix.png` (Zeilen GL, D3D11, D3D12,
+  Vulkan; Spalten Q2 | Q2 + Bewegung | Q2 Bildrand, jeweils nach dem Fix).
 
 **Metal** (auf dieser Maschine nicht ausführbar):
 
