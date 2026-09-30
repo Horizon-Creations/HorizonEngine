@@ -15,6 +15,7 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 // ─── Against a real repository ───────────────────────────────────────────────
 // Everything except the remote server is testable with no network at all: a
@@ -487,6 +488,92 @@ TEST_CASE("GitHub create-repo responses map to actionable messages")
 
 	// Success status with a broken body must not report success.
 	CHECK_FALSE(GitHubApi::parseCreateRepoResponse(201, "not json", repo, &err));
+}
+
+TEST_CASE("GitHub repository-list pages parse into clone-picker entries")
+{
+	// Same discipline: one page of GET /user/repos, no network. The pager in
+	// listRepos decides "was this the last page?" from rawCount, so that count
+	// has to include the entries the parser drops.
+	std::vector<RepoListEntry> repos;
+	std::string err;
+	int raw = -1;
+
+	SUBCASE("a page with public, private and odd entries")
+	{
+		CHECK(GitHubApi::parseListReposResponse(200, R"([
+			{"name":"proj","full_name":"anna/proj","private":false,
+			 "clone_url":"https://github.com/anna/proj.git",
+			 "default_branch":"main","updated_at":"2026-09-30T12:00:00Z"},
+			{"name":"secret","full_name":"anna/secret","private":true,
+			 "clone_url":"https://github.com/anna/secret.git",
+			 "default_branch":null,"updated_at":"2026-09-01T08:00:00Z",
+			 "description":null},
+			{"name":"no-url","full_name":"anna/no-url"},
+			"not an object"
+		])", repos, &err, &raw));
+		CHECK(raw == 4);
+		REQUIRE(repos.size() == 2);
+
+		CHECK(repos[0].name          == "proj");
+		CHECK(repos[0].fullName      == "anna/proj");
+		CHECK(repos[0].cloneUrl      == "https://github.com/anna/proj.git");
+		CHECK(repos[0].defaultBranch == "main");
+		CHECK(repos[0].updatedAt     == "2026-09-30T12:00:00Z");
+		CHECK_FALSE(repos[0].isPrivate);
+
+		// null where a string is expected must read as empty, not throw.
+		CHECK(repos[1].isPrivate);
+		CHECK(repos[1].defaultBranch.empty());
+	}
+
+	SUBCASE("an empty page is a valid, final answer")
+	{
+		CHECK(GitHubApi::parseListReposResponse(200, "[]", repos, &err, &raw));
+		CHECK(repos.empty());
+		CHECK(raw == 0);
+	}
+
+	SUBCASE("a page replaces, never appends")
+	{
+		repos.push_back({ "stale", "x/stale", "https://github.com/x/stale.git", "", "", false });
+		CHECK(GitHubApi::parseListReposResponse(200, "[]", repos, &err));
+		CHECK(repos.empty());
+	}
+
+	SUBCASE("a success status without a list is not a success")
+	{
+		CHECK_FALSE(GitHubApi::parseListReposResponse(200, "not json", repos, &err, &raw));
+		CHECK(raw == 0);
+		CHECK_FALSE(GitHubApi::parseListReposResponse(200, R"({"name":"proj"})", repos, &err));
+		CHECK(err.find("repository list") != std::string::npos);
+	}
+
+	SUBCASE("failures map to messages a user can act on")
+	{
+		CHECK_FALSE(GitHubApi::parseListReposResponse(401,
+			R"({"message":"Bad credentials"})", repos, &err));
+		CHECK(err.find("token") != std::string::npos);
+		CHECK(repos.empty());
+
+		CHECK_FALSE(GitHubApi::parseListReposResponse(404, "{}", repos, &err));
+		CHECK(err.find("repo") != std::string::npos);
+
+		// Rate limiting arrives as 403 with GitHub's own explanation — quote it.
+		CHECK_FALSE(GitHubApi::parseListReposResponse(403,
+			R"({"message":"API rate limit exceeded"})", repos, &err));
+		CHECK(err.find("rate limit") != std::string::npos);
+	}
+}
+
+TEST_CASE("listRepos refuses to run without a token")
+{
+	// No network is reached: the check runs first.
+	std::vector<RepoListEntry> repos;
+	std::string err;
+	CHECK_FALSE(GitHubApi::listRepos("", repos, &err));
+	CHECK(repos.empty());
+	CHECK(err.find("token") != std::string::npos);
 }
 
 TEST_CASE("A credential reaches git's helper via stdin, never argv")
