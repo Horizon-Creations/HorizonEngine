@@ -290,6 +290,16 @@ public:
     virtual void Render()                        = 0;
     virtual Capabilities GetCapabilities() const = 0;
 
+    // Blocks until the primary window can take another frame (Metal: acquires
+    // the next drawable). Application::Run calls it at the top of the frame,
+    // BEFORE input is polled — so the wait for a free swapchain image lands in
+    // front of the input sample instead of between it and the GPU, and the
+    // input a frame shows is as young as the pipeline allows. Must be
+    // idempotent: a frame that ends up not presenting (event-driven mode)
+    // keeps what it acquired for the next one. Default: nothing, the backend
+    // keeps waiting inside Render()/Present as before.
+    virtual void WaitForFrame() {}
+
     // ── Profiler GPU stats ─────────────────────────────────────────────────
     // Per-frame GPU timing + counters, pulled by the EngineProfiler when a
     // capture is recording (never on the hot path otherwise). GPU times are

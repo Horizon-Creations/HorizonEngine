@@ -6,9 +6,13 @@
 #include "Diagnostics/EngineProfiler.h"
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 const char* rhiName(HE::RendererBackend api)
@@ -39,6 +43,132 @@ void showErrorBox(const char* title, const char* text)
 	}
 	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, title, text, nullptr);
 }
+
+// ── HE_PERF_INPUT_LATENCY_HZ: how old is the input when its frame commits ────
+// HE_PERF_INPUT_EVENTS pushes its events right before the poll, so they are
+// never old — it measures what handling costs, not how long an event waits.
+// This one pushes from its own thread at N Hz, the way a real mouse delivers,
+// so an event lands wherever the main thread happens to be — in the drawable
+// wait, in the encode — and waits there like a real one. Per event it records
+// arrival (SDL's push stamp) → dispatch in PollEvents → commit of the frame
+// that consumed it (after Render/SwapBuffers; Render ends with the commit on
+// Metal). Its own registered event type, swallowed in the event callback, so
+// neither ImGui nor Input ever sees it. Off unless set; read once.
+struct InputLatencyProbe
+{
+	int                   hz = 0;
+	Uint32                type = 0;
+	uint64_t              warmup = 300;   // same default as HE_PROFILE_WARMUP
+	std::thread           pusher;
+	std::atomic<bool>     running{ false };
+	std::atomic<uint64_t> pushed{ 0 };
+	// Main thread only.
+	struct Polled { Uint64 stampNs, dispatchNs; };
+	std::vector<Polled>   pending;
+	std::vector<double>   toPoll, pollToCommit, toCommit;   // ms, per event
+	uint64_t              frames = 0, firstFrame = 0;
+	Uint64                windowStartNs = 0;
+	uint64_t              pushedAtStart = 0;
+
+	~InputLatencyProbe() { stop(); }
+
+	void start(bool perFrameInjectorOn)
+	{
+		const char* v = std::getenv("HE_PERF_INPUT_LATENCY_HZ");
+		hz = (v && *v) ? std::max(0, std::atoi(v)) : 0;
+		if (hz <= 0) return;
+		if (perFrameInjectorOn)
+		{
+			HE_LOG_WARN(Core, "%s", "HE_PERF_INPUT_LATENCY_HZ ignored: HE_PERF_INPUT_EVENTS is on too");
+			hz = 0;
+			return;
+		}
+		if (const char* w = std::getenv("HE_PROFILE_WARMUP")) warmup = std::strtoull(w, nullptr, 10);
+		type = SDL_RegisterEvents(1);
+		if (type == 0) { hz = 0; return; }
+		HE_LOG_INFO(Core, "HE_PERF_INPUT_LATENCY_HZ=%d: pushing timestamped events from a "
+		            "thread, measuring after frame %llu", hz, static_cast<unsigned long long>(warmup));
+		running = true;
+		pusher = std::thread([this]
+		{
+			const auto period = std::chrono::nanoseconds(1000000000ll / hz);
+			auto next = std::chrono::steady_clock::now();
+			while (running.load(std::memory_order_relaxed))
+			{
+				SDL_Event e{};
+				e.type      = type;
+				e.user.code = 0xB3;
+				SDL_PushEvent(&e);   // stamps SDL_GetTicksNS() on the way in
+				pushed.fetch_add(1, std::memory_order_relaxed);
+				next += period;
+				std::this_thread::sleep_until(next);
+			}
+		});
+	}
+
+	void stop()
+	{
+		running = false;
+		if (pusher.joinable()) pusher.join();
+	}
+
+	// From the event callback. True = one of ours, swallow it.
+	bool take(const SDL_Event& e)
+	{
+		if (hz <= 0 || e.type != type) return false;
+		pending.push_back({ e.common.timestamp, SDL_GetTicksNS() });
+		return true;
+	}
+
+	// Right after the frame's commit.
+	void committed(uint64_t frameIndex)
+	{
+		if (hz <= 0) return;
+		const Uint64 now = SDL_GetTicksNS();
+		if (frameIndex > warmup)
+		{
+			if (frames == 0)
+			{
+				firstFrame    = frameIndex;
+				windowStartNs = now;
+				pushedAtStart = pushed.load(std::memory_order_relaxed);
+			}
+			++frames;
+			for (const Polled& p : pending)
+			{
+				toPoll.push_back((p.dispatchNs - p.stampNs) * 1e-6);
+				pollToCommit.push_back((now - p.dispatchNs) * 1e-6);
+				toCommit.push_back((now - p.stampNs) * 1e-6);
+			}
+			if (frames % 600 == 0) report("so far");
+		}
+		pending.clear();
+	}
+
+	static double pct(std::vector<double> v, double p)
+	{
+		if (v.empty()) return 0.0;
+		std::sort(v.begin(), v.end());
+		return v[std::min(v.size() - 1, static_cast<size_t>(p / 100.0 * (v.size() - 1) + 0.5))];
+	}
+
+	void report(const char* when)
+	{
+		if (hz <= 0 || frames == 0) return;
+		const double secs = (SDL_GetTicksNS() - windowStartNs) * 1e-9;
+		const double rate = secs > 0.0
+			? (pushed.load(std::memory_order_relaxed) - pushedAtStart) / secs : 0.0;
+		HE_LOG_INFO(Core, "HE_PERF_INPUT_LATENCY (%s): %zu events over %llu frames (from frame %llu, "
+		            "pushed %.0f Hz) | event->commit p50 %.2f p90 %.2f p99 %.2f ms | "
+		            "event->poll p50 %.2f p90 %.2f | poll->commit p50 %.2f p90 %.2f",
+		            when, toCommit.size(), static_cast<unsigned long long>(frames),
+		            static_cast<unsigned long long>(firstFrame), rate,
+		            pct(toCommit, 50), pct(toCommit, 90), pct(toCommit, 99),
+		            pct(toPoll, 50), pct(toPoll, 90),
+		            pct(pollToCommit, 50), pct(pollToCommit, 90));
+	}
+};
+InputLatencyProbe g_inputLatency;
 } // namespace
 
 namespace HE
@@ -159,6 +289,8 @@ namespace HE
 		m_window = std::make_unique<Window>(wp);
 		m_window->SetEventCallback([this](const SDL_Event& e)
 		{
+			// HE_PERF_INPUT_LATENCY_HZ's own events stop here (no-op when off).
+			if (g_inputLatency.take(e)) return;
 			// F9 toggles a profiler benchmark capture, engine-wide (editor + game).
 			if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_F9 && !e.key.repeat)
 			{
@@ -270,6 +402,11 @@ namespace HE
 		// Last frame that was actually drawn — the reference the event-driven
 		// heartbeat measures against (see setEventDriven).
 		Uint64 lastDrawTick = SDL_GetTicksNS();
+
+		{
+			const char* perFrame = std::getenv("HE_PERF_INPUT_EVENTS");
+			g_inputLatency.start(perFrame && std::atoi(perFrame) > 0);
+		}
 
 		while (m_running && !m_window->ShouldClose())
 		{
@@ -469,6 +606,22 @@ namespace HE
 			// frame is always recorded whole or not at all.
 			profiler.beginFrame(static_cast<double>(measuredDt) * 1000.0);
 
+			// Wait for a frame slot FIRST, then sample input. The swapchain wait
+			// (Metal: [layer nextDrawable], 8–19 ms p50 in the input audit,
+			// docs/perf-audit/step4-input-audit-2026-09-27.md) used to sit
+			// between PollEvents and the commit, so every frame's input was that
+			// much older before the GPU even started on it. Same wait, same FPS —
+			// it just happens before the input is read now. Not for an unseen
+			// window: a minimised or occluded layer hands out no drawable and
+			// nextDrawable runs into its 1 s timeout — every turn, even the
+			// event-driven ones that end up not presenting. There the old
+			// order (wait inside Render, only when it draws) stays.
+			if (m_renderer && !m_window->IsInBackground())
+			{
+				HE_PROFILE_SCOPE_N("WaitForFrame");
+				m_renderer->WaitForFrame();
+			}
+
 			// ── HE_PERF_INPUT_EVENTS: synthetic mouse load (perf audit) ─────
 			// Every scripted capture runs with nobody at the mouse, so it can only
 			// say what event handling costs when there are no events. This pushes
@@ -643,6 +796,10 @@ namespace HE
 			{
 				HE_PROFILE_SCOPE_N("SwapBuffers");
 				m_window->SwapBuffers();
+				// The frame is committed (Metal/D3D/Vulkan inside Render, GL
+				// in the swap): whatever input it polled is as old as it gets
+				// on the CPU side.
+				g_inputLatency.committed(m_frameIndex);
 			}
 
 			// Pull per-frame GPU timing + render counters from the backend while a
@@ -752,6 +909,9 @@ namespace HE
 			}
 		}
 
+		// Before anything shuts SDL down under the pushing thread.
+		g_inputLatency.stop();
+		g_inputLatency.report("final");
 		HE_LOG_INFO(Core, "%s", "Main loop exited — shutting down");
 		OnShutdown();
 		// Detach and destroy secondary windows first — each through the same

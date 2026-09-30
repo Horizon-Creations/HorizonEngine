@@ -6006,6 +6006,12 @@ void MetalRenderer::Shutdown()
 	for (auto& [sdlWin, target] : m_secondaryTargets)
 		DestroyTarget(target);
 	m_secondaryTargets.clear();
+	// Before the layer goes: the held drawable belongs to it.
+	if (m_heldDrawable)
+	{
+		CFBridgingRelease(m_heldDrawable);
+		m_heldDrawable = nullptr;
+	}
 	DestroyTarget(m_primaryTarget);
 
 	for (auto& [id, mesh] : m_meshCache)
@@ -16140,11 +16146,26 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// scene is already in the offscreen target above, and acquiring a
 		// drawable here would present a black frame with a stale overlay.
 		id<CAMetalDrawable> drawable = nil;
+		if (!m_captureOnly)
 		{
-			// Blocks while every drawable of the layer is still queued for
-			// display — the CPU-side wait a profiler has to be able to see.
-			HE_PROFILE_SCOPE_N("Metal::NextDrawable");
-			drawable = m_captureOnly ? nil : [layer nextDrawable];
+			// Normally WaitForFrame already acquired it, before this frame's
+			// input was polled. Only a drawable of the size this frame was
+			// drawn for is usable — a resize in between drops it (unpresented,
+			// it just goes back to the layer's pool) and a fresh one is taken.
+			if (isPrimary && m_heldDrawable)
+			{
+				drawable = (id<CAMetalDrawable>)CFBridgingRelease(m_heldDrawable);
+				m_heldDrawable = nullptr;
+				if ((int)drawable.texture.width != pw || (int)drawable.texture.height != ph)
+					drawable = nil;
+			}
+			if (!drawable)
+			{
+				// Blocks while every drawable of the layer is still queued for
+				// display — the CPU-side wait a profiler has to be able to see.
+				HE_PROFILE_SCOPE_N("Metal::NextDrawable");
+				drawable = [layer nextDrawable];
+			}
 		}
 		if (drawable)
 		{
@@ -16370,6 +16391,49 @@ void MetalRenderer::Render()
 {
 	if (!m_primarySdlWindow || !m_primaryTarget.metalLayer) return;
 	EncodeFrame(m_primarySdlWindow, m_primaryTarget, /*isPrimary=*/true);
+}
+
+// The drawable wait, moved in front of the input poll (IRenderer::WaitForFrame,
+// docs/perf-audit/step4-input-audit-2026-09-27.md). There is no frames-in-flight
+// semaphore; nextDrawable is the only back-pressure, so taking it here makes the
+// frame wait BEFORE it reads input instead of after encoding it. The drawable is
+// held through OnRender and the encode (~2 ms), which the layer's three
+// drawables absorb. HE_MTL_EARLY_DRAWABLE=0 puts the wait back behind the
+// encode, where it was — the A/B switch for measuring it and the way out.
+void MetalRenderer::WaitForFrame()
+{
+	static const bool kEnabled = []
+	{
+		const char* e = std::getenv("HE_MTL_EARLY_DRAWABLE");
+		const bool on = !(e && *e) || std::atoi(e) != 0;
+		HE_LOG_INFO(RHI, "Metal: drawable acquired %s",
+		            on ? "before the input poll (early)" : "after the encode (HE_MTL_EARLY_DRAWABLE=0)");
+		return on;
+	}();
+	if (!kEnabled || m_heldDrawable) return;
+	if (!m_primarySdlWindow || !m_primaryTarget.metalLayer) return;
+
+	@autoreleasepool
+	{
+		// Same size sync as EncodeFrame, first — a drawable taken before it
+		// would be the old size after a resize and get dropped there.
+		int pw = 0, ph = 0;
+		SDL_GetWindowSizeInPixels(m_primarySdlWindow, &pw, &ph);
+		if (pw <= 0 || ph <= 0) return;
+		CAMetalLayer* layer = (__bridge CAMetalLayer*)m_primaryTarget.metalLayer;
+		const CGSize size = layer.drawableSize;
+		if ((int)size.width != pw || (int)size.height != ph)
+			layer.drawableSize = CGSizeMake(pw, ph);
+
+		id<CAMetalDrawable> drawable = nil;
+		{
+			// Same scope name as the late wait in EncodeFrame, so captures
+			// before and after this change compare line for line.
+			HE_PROFILE_SCOPE_N("Metal::NextDrawable");
+			drawable = [layer nextDrawable];
+		}
+		if (drawable) m_heldDrawable = (void*)CFBridgingRetain(drawable);
+	}
 }
 
 // ─── GPU weather particles (compute simulation + vertex-pull billboards) ──────

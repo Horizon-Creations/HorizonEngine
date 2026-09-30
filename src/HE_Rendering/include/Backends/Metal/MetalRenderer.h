@@ -82,6 +82,7 @@ public:
 	void Initialize(HE::Window* window) override;
 	void Shutdown()                      override;
 	void Render()                        override;
+	void WaitForFrame()                  override;
 	Capabilities GetCapabilities() const override;
 	FrameGpuStats GetFrameGpuStats() const override;
 
@@ -1246,6 +1247,11 @@ private:
 	// overlay, present) is skipped — a still on request must not flash a black
 	// frame on the window it was not asked to touch.
 	bool     m_captureOnly     = false;
+	// The primary window's drawable, acquired by WaitForFrame before the frame
+	// polled its input and consumed by the swapchain pass of EncodeFrame.
+	// id<CAMetalDrawable> (retained) or null. Outlives EncodeFrame's
+	// autorelease pool on purpose; a capture-only frame never touches it.
+	void*    m_heldDrawable    = nullptr;
 
 	// Textures replaced on viewport resize. The current frame's ImGui draw
 	// list (and in-flight GPU work) may still reference the old texture, so
