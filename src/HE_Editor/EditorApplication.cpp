@@ -964,7 +964,14 @@ void EditorApplication::OnInit()
 			ImGui_ImplDX12_InitInfo dx12Info{};
 			dx12Info.Device            = device;
 			dx12Info.CommandQueue      = cmdQueue;
-			dx12Info.NumFramesInFlight = 2;
+			// Must equal the renderer's frames in flight. ImGui writes its
+			// vertex/index data into upload-heap buffer FrameIndex % N with no
+			// fence of its own for the main viewport; the renderer only waits
+			// for the frame kFramesInFlight back. With a hardcoded 2 against the
+			// renderer's 3, frame N overwrote (or, on growth, released) the
+			// buffers frame N-2 was still drawing from → UI flicker whenever the
+			// geometry changes every frame (hover, tooltips). Thema 97.
+			dx12Info.NumFramesInFlight = static_cast<int>(D3D12Renderer::kFramesInFlight);
 			dx12Info.RTVFormat         = DXGI_FORMAT_R8G8B8A8_UNORM;
 			dx12Info.DSVFormat         = DXGI_FORMAT_UNKNOWN;
 			dx12Info.SrvDescriptorHeap = srvHeap;
