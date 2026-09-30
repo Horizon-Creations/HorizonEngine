@@ -377,6 +377,7 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Profiler",     "Stop & Dump  (F9)" },
 		{ "Profiler",     "Start Benchmark Capture  (F9)" },
 		{ "Profiler",     "Detailed GPU pass timing (serializes GPU — capture only)" },
+		{ "Profiler",     "GPU counter sampling (per-pass split)" },
 		{ "Profiler",     "clear" },
 		// The animator, audio and mesh tabs. A transition row's six labels are
 		// looked up with their "##t" spelling and fall back to the visible name.

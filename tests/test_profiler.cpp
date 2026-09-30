@@ -523,6 +523,21 @@ TEST_CASE("Dump truncates the timeline by time, so every lane keeps the same win
     he_test::removeAllQuiet(deploy);
 }
 
+TEST_CASE("EngineProfiler GPU counter sampling is on by default and switches independently of detailed")
+{
+    // Perf audit B10: FPS runs turn the per-encoder counter sampling off; the
+    // detailed switch is a separate path and must not be dragged along.
+    auto& prof = EngineProfiler::instance();
+    CHECK(prof.gpuCounterSampling());
+    prof.setGpuCounterSampling(false);
+    CHECK_FALSE(prof.gpuCounterSampling());
+    prof.setDetailedGpuCapture(true);
+    CHECK_FALSE(prof.gpuCounterSampling());
+    prof.setDetailedGpuCapture(false);
+    prof.setGpuCounterSampling(true);
+    CHECK(prof.gpuCounterSampling());
+}
+
 TEST_CASE("EngineProfiler timeline resets between captures and can be switched off")
 {
     // A worker buffer survives its capture (shared_ptr in the registry), so the

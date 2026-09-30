@@ -6455,6 +6455,14 @@ namespace
 	  "the frame times measured during such a capture are not numbers to quote "
 	  "for a shipping build.",
 	  "", "editor#profiler" },
+	{ "Profiler/GPU counter sampling (per-pass split)", "GPU Counter Sampling",
+	  "In a normal capture, samples GPU timestamps at the start and end of every "
+	  "render pass so the frame can be split per pass. On Apple GPUs that sampling "
+	  "can stop passes from overlapping, so the frames it measures may run slower "
+	  "than the ones you see without it. Turn it off for frame-rate runs: the "
+	  "capture then records the whole-frame GPU time only. Detailed GPU pass "
+	  "timing does not use it.",
+	  "", "editor#profiler" },
 	{ "Profiler/Per-thread timeline (worker lanes)", "Per-thread Timeline",
 	  "Records scopes on every thread rather than the main one alone. This is "
 	  "what fills the Timeline tab and what shows whether the job pool is "

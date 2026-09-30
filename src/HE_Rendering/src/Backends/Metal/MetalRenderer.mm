@@ -15445,8 +15445,15 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// Stage-boundary counter sampling — the NON-detailed per-encoder path. Off in
 		// detailed mode and where the GPU lacks counter support. (These spans overlap
 		// on TBDR; the profiler flags that. Detailed capture is the reliable per-pass.)
+		// Also off when the profiler's counter-sampling switch is (FPS runs, perf
+		// audit B10): no sample buffer → every ftAttach* no-ops and the frame is
+		// published by the whole-frame handler below. The buffer is deliberately
+		// fresh per frame, not pooled: a reused one keeps last frame's timestamps in
+		// slots this frame never writes (an encoder without vertex work skips its
+		// start sample), and those would resolve as plausible, wrong pass times.
 		id<MTLCounterSampleBuffer> sampleBuf = nil;   // strong ref kept alive until commit
-		if (isPrimary && m_counterSamplingOk && !detailed && EngineProfiler::instance().isRecording())
+		if (isPrimary && m_counterSamplingOk && !detailed && EngineProfiler::instance().isRecording()
+		    && EngineProfiler::instance().gpuCounterSampling())
 		{
 			if (@available(macOS 11.0, *))
 			{
