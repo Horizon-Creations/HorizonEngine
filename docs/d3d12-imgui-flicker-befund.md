@@ -282,3 +282,128 @@ ohne GL-Kontext auf. Belegt ist das per Minidump: Die Rücksprungadresse zeigt a
 `glGetIntegerv(GL_ACTIVE_TEXTURE)` bzw. `glActiveTexture(GL_TEXTURE0)`. Wer das Backend von
 außen erzwingen will, schreibt es als `"RHI": 3` in die `config.json` (0 GL, 1 Vulkan, 2 D3D11,
 3 D3D12). Benutzer, die D3D12 in der Config gewählt haben, betrifft das nicht.
+
+## Flackern im Bild bestätigt (Schritt 5)
+
+Stand: 2026-09-30, NN-WS03 (RTX 4070, Anzeige 50 Hz), gleicher Release-Baum `C:/hw97`,
+gleiche Szene (Testie) und `APPDATA` wie in Schritt 4.
+
+**Ergebnis: Vor dem Fix zeigt der Editor unter D3D12 bei schneller Mausbewegung einzelne Frames
+mit kaputter ImGui-Geometrie, die im nächsten Frame wieder weg sind. Mit dem Fix kein einziger
+solcher Frame.** Das offene „Flackern selbst im Bild einfangen“ aus Schritt 4 ist damit erledigt.
+
+### Verfahren: jeder Frame gegen eine rennfreie Referenz
+
+PrintWindow war zu langsam (Schritt 4). Deshalb wird jetzt **jeder** Frame auf der GPU selbst
+aufgenommen, im Overlay-Callback und in derselben Command-List:
+
+1. Der Backbuffer wird unmittelbar vor ImGui in eine eigene Textur kopiert (Szene, Viewport-Bild
+   und Clear, also alles unter ImGui).
+2. ImGui zeichnet wie immer in den Backbuffer, aus seinem eigenen Ring (dem mit dem Wettlauf).
+   Diese Zeichnung bleibt unverändert.
+3. Dieselbe `ImDrawData` wird ein zweites Mal in die Kopie gezeichnet, aus einem privaten Ring mit
+   16 Puffern, den nie ein laufender Frame benutzt. `vd->FrameIndex` bleibt dabei unberührt, der
+   Wettlauf wird also nicht verschoben. Ergebnis: die **Referenz**, also so, wie der Frame aussehen
+   müsste.
+4. Beide Bilder gehen in einen Readback-Ring. Sobald der Frame laut eigenem Fence fertig ist,
+   werden sie pixelgenau verglichen. Bei einer Abweichung werden Hauptbild, Referenz, Diff-Maske
+   sowie Vorgänger- und Nachfolgerbild gespeichert (die ersten 6 je Lauf).
+
+Gleiche GPU, gleiche PSO, gleiche Bytes: Die beiden Bilder müssen bitgleich sein. Weicht ein
+Pixel ab, hat die GPU für diesen Frame andere Vertex- oder Indexdaten gelesen, als ImGui
+aufgezeichnet hatte. Das ist genau das, was der Mensch als Flackern sieht, denn der Backbuffer
+wird so präsentiert. Reiz wie in Schritt 4: `HE_T97_SWEEP=1`, jeden Frame 97 px weiter über das
+ganze Fenster.
+
+**Kontrollen, bevor irgendeine 0 zählt:**
+
+- *Nullprobe:* Im Fix-Stand müssen Hauptbild und Referenz bitgleich sein. Ergebnis: 2 994 von 2 994
+  Frames ohne Positivkontrolle sind bitgleich.
+- *Positivkontrolle:* `HE_T97_SCRIBBLE=500` verschiebt in jedem 500. Frame die ersten 600 Vertices
+  des echten Draws nach dem Upload um 40 px. Ergebnis: **genau diese 6 Frames** (250, 750, …, 2 750)
+  werden gemeldet (`scribbleHit=6`, `scribbleMiss=0`), sonst keiner. Der Detektor sieht also
+  verfälschte ImGui-Geometrie und meldet nichts, was nicht da ist.
+- *Gegenprobe zu Schritt 4:* Jede Abweichung wird mit dem Fence-/Hash-Zähler aus Schritt 4
+  abgeglichen („Opfer“ = Frame, dessen Puffer-Slot ein späterer Frame mit anderen Bytes überschrieb,
+  solange er noch lief). Bei NFIF=2 sind **alle** abweichenden Frames solche Opfer (55/55, 670/670,
+  190/190, 635/635). Das Bild und die Zählung zeigen also denselben Mechanismus.
+
+### Ergebnis (D3D12, Hauptfenster, Sweep)
+
+„Vor dem Fix“ ist hier **der echte Commit `7daffeb5`** (Elter von `47c273c8`), neu gebaut mit der
+Instrumentierung obendrauf. Gegenüber `7daffeb5` kommen in den drei Fix-Dateien nur Zeilen hinzu,
+es fehlt keine: `k_frameCount = 3` im Renderer und `NumFramesInFlight = 2` im Editor stehen dort
+wie im Original. Das Log bestätigt `T97 ImGui NumFramesInFlight=2 (pre-fix build 7daffeb5)`. Zum
+Vergleich laufen auch die Overrides aus Schritt 4 auf dem Fix-Stand (`HE_T97_NFIF`, nur ImGui,
+Renderer bleibt bei 3).
+
+| Stand | Vsync | Frames | sichtbar kaputte Frames | davon Race-Opfer | ≥ 10 000 px (ab Frame 300) |
+|---|---|---|---|---|---|
+| **`7daffeb5` (vor dem Fix)** | an | 3 000 | **190** (6,3 %) | 190 | 38 |
+| **`7daffeb5` (vor dem Fix)** | aus | 15 000 | **635** (4,2 %) | 635 | 148 |
+| Fix-Stand, NFIF=2 (Override) | an | 3 000 | 55 (1,8 %) | 55 | 13 |
+| Fix-Stand, NFIF=2 (Override) | aus | 15 000 | 670 (4,5 %) | 670 | 149 |
+| Fix-Stand, NFIF=1 (Negativkontrolle) | an | 3 000 | 529 (18 %) | 463¹ | 99 |
+| **Fix (`a1411f3e`+, ohne Override)** | an | 2 994² | **0** | – | 0 |
+| **Fix (`a1411f3e`+, ohne Override)** | aus | 15 300 | **0** | – | 0 |
+
+¹ Bei NFIF=1 kann auch ein Frame zwei Schritte später denselben Slot treffen; der Opfer-Ring
+merkt sich nur den direkten Vorgänger. ² 3 000 Frames, davon 6 absichtlich verfälscht
+(Positivkontrolle), alle 6 gefunden.
+
+- Die Reihenfolge NFIF 1 > 2 > 3 = 0 gilt jetzt auch im Bild. Wie hoch die Rate vor dem Fix ist,
+  schwankt von Lauf zu Lauf (55 bzw. 190 bei Vsync an), weil der Wettlauf vom Timing abhängt. Sie
+  ist aber in jedem Lauf deutlich über 0. Der Fix gibt in 18 294 Frames 0.
+- **So sieht es aus** (Vsync an, 50 Hz, vor dem Fix): etwa alle 1,6 s ein grober Fehlframe mit
+  mindestens 10 000 falschen Pixeln, dazwischen kleinere. Median der Abweichung: 2 600 bis
+  4 500 px pro kaputtem Frame. Meist steht der Fehler genau einen Frame: Nur 22 von 190 kaputten
+  Frames haben einen kaputten Nachfolger. Das ist das gemeldete „sporadische Flackern“.
+- **Beispiel `f000480`** (NFIF=2, Vsync an, mitten im Sweep): Die Ordner-Icons im Content Browser
+  sind durch Schnipsel des Font-Atlas ersetzt. Ein gestreckter Keil zieht sich durch die Tab-Leiste,
+  Beschriftungen sind abgeschnitten („Viewpo“, „He“, „Rea y“, „Engin“), und im 3D-Viewport steht
+  ein einzelner Strich. Referenz und Frame 481 sind sauber.
+- **Beispiel `f000059`** (`7daffeb5`, Vsync aus, Startphase): Der ganze Font-Atlas ist über den
+  3D-Viewport gemalt, die Panels sind voller Dreiecke. Bei 864 640 falschen Pixeln ist fast das
+  ganze Bild betroffen.
+- Die Bilder liegen **nicht im Repo** (Screenshots werden nicht committet, siehe `.gitignore`),
+  sondern auf NN-WS03 unter `C:/hw97/shots/s5_<lauf>/` als `fNNNNNN_{main,ref,diff,prev_main,next_main}.png`,
+  daneben das `HorizonEngine.log` des Laufs.
+
+### Grenzen der Aussage
+
+- **Die Instrumentierung verstärkt den Wettlauf.** Drei zusätzliche Vollbild-Kopien und ein
+  zweiter ImGui-Draw pro Frame lassen die GPU weiter hinterherlaufen: bei NFIF=2 und Vsync an
+  99,5 % Überschreibungen im Flug gegenüber 65 % ohne Capture (Schritt 4). Die Raten vor dem Fix
+  sind deshalb eher Obergrenzen. Für die Aussage über den Fix spielt das keine Rolle: Mit
+  NFIF=3 gibt es auch unter dieser Last 0 Überschreibungen und 0 abweichende Pixel.
+- Aufgenommen wird der Backbuffer unmittelbar vor `Present`. Was DWM daraus macht, ist nicht
+  aufgenommen. Bei Vsync an wird jeder Frame gezeigt; bei Vsync aus fallen einzelne weg.
+- Die Maus ist synthetisch (`io.AddMousePosEvent`, siehe Schritt 4). Für ImGui ist das dasselbe
+  wie die echte Maus: Hover, Tooltip-Logik und Geometrie entstehen gleich. Das OS-Cursorbild
+  gehört nicht zur ImGui-Geometrie.
+- Nur das Hauptfenster. ImGui-Fenster, die als eigene OS-Fenster laufen (Multi-Viewport), haben
+  eigene Fences in `imgui_impl_dx12.cpp` (siehe Befund) und sind hier nicht aufgenommen.
+- **H2** (Viewport-SRV beim Ziehen eines Dock-Splitters) testet der Sweep nicht, denn er zieht nichts.
+
+### Was ein Mensch am Bildschirm noch prüfen kann
+
+Für den Mechanismus ist nichts mehr offen. Als Abnahme im Sinne des Themas reichen ein, zwei
+Minuten im D3D12-Editor mit echter Maus: schnell über Toolbar, Quick-Settings-Slider, Outliner und
+Content Browser fahren, einmal mit Vsync an und einmal ohne. Dabei sollte nichts aufblitzen. Wer
+den Unterschied sehen will: Vor dem Fix blitzen dabei im Content Browser und in der Menüleiste
+etwa einmal pro Sekunde Font-Schnipsel und Dreiecke auf. Zusätzlich lohnt ein Dock-Splitter-Zug
+über den Viewport (H2, gehört nicht zu diesem Fix).
+
+### Wiederholen
+
+`docs/d3d12-imgui-flicker-bildvergleich.patch` (nur lokal, nicht mergen) enthält die komplette
+Instrumentierung: Schritt 4 (Sweep, NFIF-/Vsync-Override, Fence-Zähler) plus Referenz-Draw,
+Readback-Vergleich, Positivkontrolle und den vorübergehenden Getter
+`D3D12Renderer::T97GetBackBuffer()`. Das Patch lässt sich auf den Zweigstand anwenden. Für den
+Vor-Fix-Bau die drei Fix-Dateien aus `7daffeb5` holen, das Patch mit `-C1 --reject` anwenden und den
+einen abgelehnten Hunk (NFIF-Override hinter `NumFramesInFlight = 2`) von Hand setzen.
+`docs/d3d12-imgui-flicker-bildvergleich.ps1` fährt einen Lauf und wertet ihn aus: Er setzt
+`"RHI": 3` in der Scratch-Config, setzt alle `HE_*` zurück, startet den Editor, bricht nach N
+verglichenen Frames ab und beendet nur den eigenen Deploy-Prozess. Beispiel:
+`-Name prefix -Frames 3000` bzw. `-Name fix -Scribble 500`. Nach den Läufen wurden die Quellen
+zurückgesetzt und `C:/hw97` sauber neu gebaut. Im Deploy steckt also keine Instrumentierung mehr.
