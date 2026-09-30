@@ -280,6 +280,7 @@ add_executable(HorizonEditor WIN32
 	AppMetadataRows.cpp
 	ToolchainDialog.cpp
 	GitMissingDialog.cpp
+	GitCloneDialog.cpp
 	ReportIssueDialog.cpp
 	EditorDockState.cpp
 	GitController.cpp

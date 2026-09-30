@@ -56,6 +56,7 @@
 #include "ProjectSettingsPanel.h"        // the Project Settings tab (what travels with the project)
 #include "ToolchainDialog.h"
 #include "GitMissingDialog.h"             // startup cmake/compiler check
+#include "GitCloneDialog.h"               // clone a GitHub repository as a project
 #include "SceneRecoveryDialog.h"          // startup "unsaved work found" offer
 #include "AssetRecoveryDialog.h"          // the same for asset tabs
 #include "TextureColourSpaceDialog.h"     // sRGB or linear, at import and after
@@ -668,6 +669,10 @@ void EditorUI::render(AppContext& ctx, float dt)
     // Same placement, and for the same reason: it must overlay the Project Hub
     // as well as the editor, since a user can clone a project before opening one.
     GitMissingDialog::DrawGitMissingDialog(ctx);
+    // Clone from GitHub: raised from the Hub and from Preferences, so drawn here
+    // over both. It only leaves a .heproj path behind; the Hub and the editor
+    // each open it through their own path (takeOpenRequest).
+    GitCloneDialog::Draw(ctx);
 
     // ── "The last session left unsaved work behind" ──────────────────────────
     // After the two checks above on purpose: all three raise root-level modals
@@ -1429,6 +1434,11 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		ctx.exitRequested = false;
 		requestGuarded(GuardedAction::Quit);
 	}
+
+	// A clone finished from Preferences ▸ Source Control: open it the way File ▸
+	// Open Project does, unsaved-work prompt and session teardown included.
+	if (std::string cloned; GitCloneDialog::takeOpenRequest(cloned))
+		requestGuarded(GuardedAction::OpenProjectPath, cloned);
 
 	// ── Menu actions shared by the ImGui menu bar and the macOS native menu ────
 	// Open (or focus) the Level Script / Game Instance as editor tabs.

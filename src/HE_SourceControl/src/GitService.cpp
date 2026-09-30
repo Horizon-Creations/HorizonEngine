@@ -53,6 +53,11 @@ void GitService::requestClone(const std::string& cloneUrl,
 	// open yet when a project is about to be cloned.
 	if (!m_worker.joinable()) startWorker();
 	m_lastClonedRoot.clear();
+	// Main-thread state, so cleared here: the previous clone's "Cloned … into …"
+	// would otherwise stand as this clone's progress until its first phase lands,
+	// which comes only after the credential helper has answered.
+	m_lastInfo.clear();
+	m_lastError.clear();
 
 	Command c{ Kind::Clone, targetDir };
 	c.text   = cloneUrl;

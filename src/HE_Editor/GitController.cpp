@@ -21,8 +21,83 @@ std::string normaliseSlashes(std::string s)
 
 } // namespace
 
-GitController::GitController()  = default;
-GitController::~GitController() = default;
+GitController::GitController() = default;
+
+GitController::~GitController()
+{
+	// Bounded: every page request carries the HTTPS layer's timeout.
+	if (m_listThread.joinable()) m_listThread.join();
+}
+
+void GitController::requestListRepos(std::string token)
+{
+	const auto wipe = [](std::string& s) {
+		std::fill(s.begin(), s.end(), '\0');
+		s.clear();
+	};
+	if (m_listing || token.empty()) { wipe(token); return; }
+	// The previous thread has delivered (m_listing is only cleared after
+	// collectRepoList saw its result), so this join does not wait.
+	if (m_listThread.joinable()) m_listThread.join();
+
+	m_listing = true;
+	m_repoListError.clear();
+	m_listThread = std::thread([this, token = std::move(token), wipe]() mutable {
+		std::vector<HE::Sc::RepoListEntry> repos;
+		std::string err;
+		const bool ok = HE::Sc::GitHubApi::listRepos(token, repos, &err);
+		wipe(token);
+
+		std::lock_guard<std::mutex> lock(m_listMutex);
+		m_listResult      = std::move(repos);
+		m_listResultError = ok ? std::string{}
+		                       : (err.empty() ? std::string("Could not list your repositories.")
+		                                      : err);
+		m_listDone = true;
+	});
+}
+
+void GitController::collectRepoList()
+{
+	if (!m_listing) return;
+	{
+		std::lock_guard<std::mutex> lock(m_listMutex);
+		if (!m_listDone) return;
+		m_listDone      = false;
+		m_repoList      = std::move(m_listResult);
+		m_repoListError = std::move(m_listResultError);
+		m_listResult.clear();
+		m_listResultError.clear();
+	}
+	if (m_listThread.joinable()) m_listThread.join();
+	m_listing        = false;
+	m_repoListLoaded = true;
+}
+
+void GitController::requestClone(const std::string& cloneUrl,
+                                 const std::filesystem::path& targetDir, std::string token)
+{
+	if (cloneUrl.empty() || targetDir.empty() || m_cloneBusy)
+	{
+		std::fill(token.begin(), token.end(), '\0');
+		return;
+	}
+	m_cloneBusy = true;
+	m_cloneService.requestClone(cloneUrl, targetDir, std::move(token));
+}
+
+void GitController::requestCloneLfsPull()
+{
+	if (m_cloneBusy || m_cloneService.lastClonedRoot().empty()) return;
+	m_cloneBusy = true;
+	m_cloneService.requestLfsPull();
+}
+
+void GitController::finishClone()
+{
+	m_cloneService.close();
+	m_cloneBusy = false;
+}
 
 void GitController::openProject(const std::filesystem::path& projectRoot)
 {
@@ -117,6 +192,12 @@ void GitController::update(std::uint64_t nowMs)
 	// creates the state is never collected — the same ordering trap
 	// CollabController::pumpDirectory documents.
 	m_service.pump();
+	// The clone and the repository list run before any project is open, so
+	// they are collected before the project gate below as well.
+	const bool cloneIdle = !m_cloneService.busy();
+	m_cloneService.pump();
+	if (cloneIdle) m_cloneBusy = false;
+	collectRepoList();
 
 	// One filesystem probe per status refresh, never per tile: when the repo
 	// root and the project root are the same directory under two spellings

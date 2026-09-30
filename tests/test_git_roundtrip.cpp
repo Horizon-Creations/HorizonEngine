@@ -1398,3 +1398,81 @@ TEST_CASE("A clone whose LFS download fails still reports the repository it made
 	he_test::removeAllQuiet(target.parent_path());
 	he_test::removeAllQuiet(bare);
 }
+
+TEST_CASE("The controller clones beside the open project without re-targeting it")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	// What the clone dialog drives: a project is open (no remote), and a
+	// repository from elsewhere is cloned as a NEW project. GitService's clone
+	// re-targets the service it runs on, so the controller must run it on one
+	// of its own — the open project keeps its status and its (absent) remote.
+	const fs::path open = makeRepo("clonectl_open");
+	writeFile(open / "Open.heproj", "{}");
+	commitAll(open, "open project");
+
+	const fs::path bare = uniqueDir("clonectl_bare");
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+	const fs::path src = makeRepo("clonectl_src");
+	writeFile(src / "Cloned.heproj", "{}");
+	writeFile(src / "Content" / "readme.txt", "cloned");
+	commitAll(src, "cloned project");
+	REQUIRE(GitCli::run(src, { "remote", "add", "origin", fileUrl(bare) }).ok);
+	REQUIRE(GitCli::run(src, { "push", "-u", "origin", "main" }).ok);
+	he_test::removeAllQuiet(src);
+
+	GitController git;
+	git.openProject(open);
+	std::uint64_t now = 1;
+	const auto frames = [&](auto until, int seconds) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+		while (!until() && std::chrono::steady_clock::now() < deadline)
+		{
+			git.update(now);
+			now += 100;
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+	};
+	frames([&] { return git.status().generation != 0; }, 10);
+	REQUIRE(git.isRepo());
+	const std::string openRoot = git.status().root;
+
+	const fs::path parent = uniqueDir("clonectl_parent");
+	const fs::path target = parent / "Cloned";
+	git.requestClone(fileUrl(bare), target, {});
+	// Busy from the call itself, not from the first frame after it.
+	CHECK(git.cloneBusy());
+	frames([&] { return !git.cloneBusy(); }, 60);
+	REQUIRE_FALSE(git.cloneBusy());
+
+	// The first frame that says "done" already carries the result — the worker
+	// reports idle only after queuing it, and the controller reads idle before
+	// it pumps. A dialog reading this state never sees "finished, no root".
+	CHECK(git.cloneError().empty());
+	CHECK(git.clonedRoot() == target);
+	CHECK(fs::exists(target / "Cloned.heproj"));
+	CHECK(readFile(target / "Content" / "readme.txt") == "cloned");
+
+	// The open project is untouched: same repository, still no remote.
+	frames([&] { return false; }, 1);   // let a status poll land, if one would
+	CHECK(git.projectRoot() == open);
+	CHECK(git.status().root == openRoot);
+	CHECK(git.remoteUrl().empty());
+
+	// A second clone starts with a clean slate — no "Cloned … into …" from the
+	// first standing in as its progress.
+	const fs::path target2 = parent / "Again";
+	git.requestClone(fileUrl(bare), target2, {});
+	CHECK(git.cloneInfo().empty());
+	CHECK(git.cloneError().empty());
+	CHECK(git.clonedRoot().empty());
+	frames([&] { return !git.cloneBusy(); }, 60);
+	CHECK(git.clonedRoot() == target2);
+
+	git.finishClone();
+	CHECK_FALSE(git.cloneBusy());
+	git.closeProject();
+	he_test::removeAllQuiet(parent);
+	he_test::removeAllQuiet(bare);
+	he_test::removeQuiet(open);
+}
