@@ -2995,3 +2995,24 @@ prüft den Fall jetzt statt ihn zu protokollieren: B2 verbindet sich, A bleibt
 abgewiesen (Kontrolle); der haltende Client trennt, B2 bleibt, A's Zug landet
 in unter 5 s. Danach holt B2 den Lock selbst, A wird wieder abgewiesen, und
 ohne jeden Client an B landet A's Zug wie bisher.
+
+**Lauf (01.10., Debug, nach dem Merge von main): `RESULT: PASS (0 failures)`.**
+Beide Endpunkte nach 42 s. B2 verbunden, Halter noch da: A `locked_by_other`.
+Halter trennt, B2 bleibt: A's Zug landet nach 0,6 s (1× `lock_pending`), B sieht
+ihn nach 0,2 s. B2 holt den Lock selbst (nachdem A's Client neu verbunden und
+damit A's eigenen Lock abgegeben hat, der Host-Fall derselben Regel), A sieht
+B2's Zug nach 0,2 s und wird dann abgewiesen. Ohne Client an B landet A's Zug
+nach 0,8 s.
+
+**Nebenbefund, nicht behoben: `CollabController::publishTransform` verschluckt
+eine Rückkehr auf den zuletzt gesendeten Wert.** Die Entprellung vergleicht mit
+dem Wert, den *dieser* Editor zuletzt für das Subjekt gesendet hat
+(`m_lastTransform`), und der wird nicht zurückgesetzt, wenn ein Peer die Entity
+inzwischen verschoben hat. Der erste Lauf dieses Schritts ist daran rot
+geworden: B sendet in Schritt 6 [-4, 1, 2], A verschiebt nach [7, 0, 7], B2
+setzt wieder [-4, 1, 2]. Das Werkzeug meldet Erfolg, B zeigt [-4, 1, 2], A
+bleibt bei [7, 0, 7], die Welten laufen still auseinander. Beim Ziehen mit der
+Maus praktisch nie, bei getippten Werten (Inspector, MCP) sehr wohl. Naheliegende
+Reparatur: beim Anwenden einer fremden Transform-Änderung auf
+`m_lastTransformSubject` `m_hasLastTransform` zurücksetzen. Das Skript fährt
+Schritt 7b deshalb auf eine andere Position.

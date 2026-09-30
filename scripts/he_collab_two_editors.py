@@ -341,16 +341,21 @@ def main():
         #     A released nothing explicitly: A's own client lock is on A, and
         #     A's editor keeps it while A's client is connected. So first A's
         #     client lets go by reconnecting, which frees A's lock the same way.
+        #     NOT back to step 6's [-4, 1, 2]: CollabController::publishTransform
+        #     skips a value equal to the last one THIS editor sent for the
+        #     subject, even after a peer moved it elsewhere, so that move would
+        #     never reach A (a finding of its own, Thema 86 Schritt 4).
         a.reconnect()
-        ok, sc, pend = b.retry_lock("entity_set_transform", {"uuid": ua, "position": [-4.0, 1.0, 2.0]})
+        b2_pos = [-3.0, 1.5, 2.5]
+        ok, sc, pend = b.retry_lock("entity_set_transform", {"uuid": ua, "position": b2_pos})
         t0 = time.time()
         while not ok and sc.get("code") == "locked_by_other" and time.time() < t0 + SYNC_TIMEOUT:
             time.sleep(0.2)
-            ok, sc, p = b.retry_lock("entity_set_transform", {"uuid": ua, "position": [-4.0, 1.0, 2.0]})
+            ok, sc, p = b.retry_lock("entity_set_transform", {"uuid": ua, "position": b2_pos})
             pend += p
         expect(ok, "B2 takes the lock after A's client reconnected (%.1fs, %s, %d pending)"
                % (time.time() - t0, sc.get("code", "ok"), pend))
-        got, dt = wait_for("A sees B2's move", lambda: close(world_pos(a, ua), [-4.0, 1.0, 2.0]))
+        got, dt = wait_for("A sees B2's move", lambda: close(world_pos(a, ua), b2_pos))
         expect(got, "A sees B2's move (%.1fs): %s" % (dt, world_pos(a, ua)))
         ok, sc = a.raw("entity_set_transform", {"uuid": ua, "position": [9.0, 9.0, 9.0]})
         expect(not ok and sc.get("code") == "locked_by_other",
