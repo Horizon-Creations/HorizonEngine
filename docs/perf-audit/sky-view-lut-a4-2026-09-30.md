@@ -74,13 +74,16 @@ Scene-Pass, exklusive GPU-Zeit, ms (min / p10 / p50):
 | S2a Himmel ohne Wolken, an | 0,36 / 0,56 / 0,73 | 3,13 | 13,93 | 64 |
 | S2b Himmel ohne Wolken, aus | 2,07 / 2,08 / 3,83 | 6,23 | 11,19 | 64 |
 
+- **Landschaft** (`landscape.hescene`, Dome-Wolken coverage 0,5, Terrain; GPU-gebunden, gleichmäßiger
+  Takt): Scene p50 zwischen je zwei aufeinanderfolgenden Läufen (aus/an im Wechsel) −0,75 / −0,77 / −1,05 /
+  −0,62 / −0,71 ms, Median **−0,75 ms** bei 2840×1528. Die min-Werte driften über die Serie in beiden
+  Varianten nach unten (Takt), p50 ist das stabile Maß. Das ist die Zahl im Kontext der Audit-Szene;
+  die Audit-Schätzung „~1 ms“ war für 1718×884 angesetzt, eine saubere Nachmessung am entsperrten Mac
+  steht aus.
 - **Himmel ohne Wolken** (`skyonly_noclouds.hescene`, ganzes Bild Himmel, 4,3 M Pixel): Scene p50
-  4,0 → 0,73 ms (**−3,3 ms**), min 2,07 → 0,36 ms. Das passt zur Audit-Messung (1,33 ms für 1,52 M
-  Pixel ergibt hochgerechnet ~3,8 ms für 4,3 M).
-- **Landschaft** (`landscape.hescene`, Dome-Wolken coverage 0,5, Terrain): Scene p50 im Mittel
-  6,45 → 5,61 ms (**−0,84 ms**). Die min-Werte driften über die Serie in beiden Varianten nach
-  unten (Takt), p50 ist hier das stabile Maß. Die Audit-Schätzung „~1 ms“ bei 1718×884 ist damit
-  bestätigt: Dort deckt der Himmel ~⅔ des Bildes, die Wolken kosten zusätzlich und bleiben.
+  4,0 → 0,73 ms (−3,3 ms), min 2,07 → 0,36 ms. Das ist eine **Obergrenze**: Bei so leichter Last
+  taktet die GPU wahrscheinlich niedriger, und die „aus“-Läufe sind bimodal (min 2,07, p50 ~4).
+  Zur Größenordnung passt es (Audit: 1,33 ms für 1,52 M Pixel, hochgerechnet ~3,8 ms für 4,3 M).
 - **FPS in der Himmel-Szene nicht auswertbar:** Beide Varianten laufen im Muster kurz/lang
   (~6 ms, dann ~68 ms; je 64 Hänger). Das ist das Drawable-Pacing bei gesperrtem Bildschirm, wenn ein
   Frame fast nichts kostet. Mit der billigeren LUT-Variante tritt es häufiger auf (FPS-Mittel 32
