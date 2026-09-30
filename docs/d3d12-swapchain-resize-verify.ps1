@@ -116,6 +116,9 @@ for ($i = 0; $i -lt 25; ++$i) {
     Start-Sleep -Milliseconds 40
 }
 [HeWin]::SetClient($h, 1600, 900);  Shot "04_after_burst_1600x900"
+# WARNING: restoring the EDITOR from minimised takes the foreground even with
+# SW_SHOWNOACTIVATE (step 2 saw it twice against a human's fullscreen game).
+# Only run this part when nobody is at the console.
 [HeWin]::ShowWindow($h, 7) | Out-Null  # SW_SHOWMINNOACTIVE
 Start-Sleep -Milliseconds 2000
 [HeWin]::ShowWindow($h, 4) | Out-Null  # SW_SHOWNOACTIVATE
