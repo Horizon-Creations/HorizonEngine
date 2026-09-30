@@ -178,3 +178,105 @@ Für den Unterscheidungstest nach dem Fix: Den Altzustand stellt man her, indem 
 `EditorApplication.cpp` (ImGui-DX12-Init, `dx12Info.NumFramesInFlight = …`) den Ausdruck
 `D3D12Renderer::kFramesInFlight` vorübergehend durch `2` bzw. `1` ersetzt. **Nicht** die
 Konstante im Header ändern, sonst zieht der Renderer mit und der Vergleich ist wertlos.
+
+## Verifikation auf echter Hardware (Schritt 4)
+
+Stand: 2026-09-30, NN-WS03 (Ryzen 9 9950X, RTX 4070, Anzeige 50 Hz), Zweig auf `a1411f3e`,
+Release-Bau in eigenem Baum (`-B C:/hw97 -DDEPLOY_DIR=C:/hw97/deploy`), eigene `APPDATA`,
+Kopie eines Testprojekts (Szene mit Terrain, Himmel, Baum).
+
+### Vollbau
+
+`cmake --build C:/hw97 -j8` über alle Ziele: 0 Fehler. Gebaut sind `RendererD3D11`,
+`RendererD3D12`, `RendererVulkan` (dazu OpenGL/Software), `HorizonEditor`, `he_tests`.
+Die Prüfung der eingebetteten Shader meldet: „All 93 embedded shaders compile.“ In den geänderten
+Dateien gibt es keine Compiler-Warnung.
+
+### Messverfahren
+
+Einem Menschen beim Hinsehen zuzuschauen geht in einer Agenten-Sitzung nicht. Die echte Maus
+zu bewegen (SendInput) kam nicht in Frage, weil der Mensch zur selben Zeit an der Konsole
+arbeitete (Leerlauf < 1 s). Also wurde gezählt statt geschaut. Die Instrumentierung war
+**vorübergehend** und steckt nicht im Code des Zweigs. Zum Wiederholen liegt sie als
+`docs/d3d12-imgui-flicker-messung.patch` bei (`git apply`, nur lokal, nicht mergen):
+
+- `HE_T97_NFIF=<n>` überschreibt `dx12Info.NumFramesInFlight`, und nur diesen Wert. Der
+  Renderer bleibt bei 3. So entsteht der Altzustand wie oben beschrieben.
+- **Zähler:** Im Overlay-Callback wird vor `ImGui_ImplDX12_RenderDrawData` ein eigener Fence
+  mit dem Wert `k` auf die Queue signalisiert (Frame `k`). Diese Signalisierung steht in der
+  Queue vor dem `ExecuteCommandLists` von Frame `k`. Hat der Fence also mindestens den Wert `k`
+  erreicht, sind die Frames `0..k-1` fertig. ImGui schreibt in Slot `k % N`, den zuletzt Frame
+  `k-N` benutzt hat. Gilt `completed < k-N+1`, ist das eine **Überschreibung während des Flugs**.
+  Ist dabei zusätzlich der FNV-Hash über VB+IB anders als der von Frame `k-N`, ist sie
+  **gefährlich**: Die GPU kann andere Bytes lesen, als ihre Draw-Befehle erwarten. Nur solche
+  Überschreibungen können Flackern erzeugen.
+- **Reiz:** `HE_T97_SWEEP=1` speist vor `ImGui::NewFrame()` jeden Frame per `io.AddMousePosEvent`
+  eine Mausposition ein. Sie springt 97 px weiter und läuft zeilenweise über das ganze
+  Editorfenster (Toolbar, Slider, Outliner, Content Browser). ImGui kann das nicht von einer
+  echten Maus unterscheiden. Dass Hover wirklich greift, zeigt eine Burst-Aufnahme: Die Zeile
+  „Prefabs“ im Content Browser ist in einem Bild hervorgehoben und im nächsten nicht mehr.
+  Gepostete `WM_MOUSEMOVE` reichen dagegen **nicht**. SDL3 registriert `TME_LEAVE`, und weil
+  der echte Cursor außerhalb liegt, kommt sofort ein `WM_MOUSELEAVE` hinterher.
+
+### Ergebnis: Vorher / Nachher (D3D12, Hauptfenster)
+
+| NFIF | Vsync | Reiz | Frames | Überschr. im Flug | davon gefährlich |
+|---|---|---|---|---|---|
+| 1 (Negativkontrolle) | an | Sweep | 1 800 | 1 799 (100 %) | 246 |
+| 1 (Negativkontrolle) | aus | Sweep | 17 100 | 17 099 (100 %) | 3 022 |
+| **2 (Stand vor dem Fix)** | an | Sweep | 1 800 | 1 176 (65 %) | **246** |
+| 2 | an | keiner | 1 800 | 1 218 (68 %) | 44 |
+| **2 (Stand vor dem Fix)** | aus | Sweep | 24 900 | 21 506 (86 %) | **5 722** |
+| **3 (Fix)** | an | Sweep | 1 800 | **0** | **0** |
+| **3 (Fix)** | aus | Sweep | 25 500 | **0** | **0** |
+| **3 (Fix, ohne Override)** + Debug-Layer | an | Sweep, 3,2 min | 9 600 | **0** | **0** |
+
+- Die Reihenfolge 1 > 2 > 3 = 0 ist die, die H1 vorhersagt. Der Wettlauf ist echt, und der Fix
+  schließt ihn.
+- In beiden Sweep-Läufen ändert sich der Inhalt ähnlich oft (28 bis 54 von 300 Frames mit
+  anderem VB/IB-Hash). Der Fix verdeckt also nicht den Reiz, er beseitigt die Ursache.
+- Der Sweep verfünffacht die gefährlichen Überschreibungen gegenüber der ruhenden UI (246 gegen
+  44). Das passt zu „besonders bei schneller Mausbewegung“. Ohne Reiz ändern sich nur FPS-Text
+  und Ähnliches.
+- Der **D3D12-Debug-Layer** (`HE_GPU_DEBUG=1`) meldet auch bei NFIF=1 mit 3 022 gefährlichen
+  Überschreibungen nichts dazu. Er zeigt nur den bekannten Performance-Hinweis
+  `ClearRenderTargetView: clear values do not match`. Die Vorhersage oben stimmt also: Ein
+  stiller Debug-Layer widerlegt H1 nicht.
+- **H1a** (Pufferwachstum) wurde im Test nicht ausgelöst. Nach der Startphase blieb die Vertexzahl
+  zwischen 6 048 und 6 198 und damit unter der Puffergröße (TotalVtx + 5 000 Reserve). Gewachsen
+  ist der Puffer nur beim Aufbau der UI in den ersten Frames.
+
+### Was nicht gelang: das Flackern selbst im Bild einfangen
+
+80 PrintWindow-Aufnahmen (etwa 12 pro Sekunde bei rund 600 fps, NFIF=1, Vsync aus) zeigen
+keine kaputte Geometrie, nur saubere Hover-Paare. Das Verfahren ist dafür zu grob. DWM liefert
+den zuletzt komponierten Frame, ein falscher Frame steht bei 600 fps rund 1,7 ms. Die meisten
+gefährlichen Überschreibungen ändern nur Farben (Hover), nicht das Layout. Das Ergebnis sagt
+also nichts gegen den Fix, belegt aber auch nicht das sichtbare Flackern. **Offen ist deshalb
+der längere Blick eines Menschen auf den D3D12-Editor** mit echter Maus. Der gemessene
+Mechanismus ist behoben.
+
+### Andere Backends und Tests
+
+- Der saubere Deploy (Instrumentierung zurückgenommen, `git status` sauber, im Exe steht kein
+  `T97` mehr) startet auf **D3D12, D3D11, Vulkan und OpenGL** mit Projekt. Jedes Backend
+  initialisiert ImGui für sich, läuft 15 s ohne Absturz, und der Screenshot zeigt die normale UI.
+  Vulkan hat nur Validierungsmeldungen: die bekannten zu Barrier im Subpass, `vkCmdUpdateBuffer`
+  im Renderpass und nicht deklarierten Deskriptoren, dazu einmal in Frame 3
+  `vkFreeDescriptorSets … currently in use`. Der Zweig ändert keinen Vulkan-Code (Diff
+  `152659ff..a1411f3e`: nur D3D12-Renderer, der D3D12-Zweig in `EditorApplication.cpp` und
+  Doku), die Meldung kommt also nicht vom Fix. Vom Muster her ähnelt sie H2 (Deskriptor
+  freigegeben, solange er noch benutzt wird).
+- `he_tests.exe` (Release, eigene `APPDATA`): **3 742 / 3 742 Testfälle, 506 140 Assertions,
+  0 Fehler.**
+
+### Stolperfalle im Testaufbau, kein Produktfehler
+
+`HE_DUMP_RHI=D3D12` **ohne** Dump-Modus stürzt beim ersten Frame ab (0xC0000005, Sprung auf
+Adresse 0). Das gilt für D3D11 und D3D12, mit und ohne Fix. `EditorApplication.cpp` setzt am Ende
+von `OnInit` (`m_backend = m_globalState->getSelectedRHI()`) das Backend auf den Wert aus der
+Config zurück, im Test OpenGL. Der Overlay-Callback ruft dann `ImGui_ImplOpenGL3_RenderDrawData`
+ohne GL-Kontext auf. Belegt ist das per Minidump: Die Rücksprungadresse zeigt auf
+`glGetIntegerv(GL_ACTIVE_TEXTURE)` bzw. `glActiveTexture(GL_TEXTURE0)`. Wer das Backend von
+außen erzwingen will, schreibt es als `"RHI": 3` in die `config.json` (0 GL, 1 Vulkan, 2 D3D11,
+3 D3D12). Benutzer, die D3D12 in der Config gewählt haben, betrifft das nicht.
