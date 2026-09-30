@@ -872,6 +872,13 @@ TEST_CASE("SkyNoise3D: generated volume is byte-pinned")
 
 	// Deterministic across calls (no static state, no RNG carry-over).
 	CHECK(HE::BuildSkyNoise3D(8) == v8);
+
+	// The size every backend actually bakes, and the only one that takes the
+	// threaded path (n >= 32) and wraps the 48³ Worley jitter table. Pinned from the
+	// serial per-voxel-hash3 bake before the B7 speed-up (10.7 s -> 0.45 s).
+	const std::vector<uint16_t> v256 = HE::BuildSkyNoise3D(256);
+	REQUIRE(v256.size() == 256u * 256u * 256u * 2u);
+	CHECK(heFnv1a(v256.data(), v256.size() * sizeof(uint16_t)) == 0x79c8e92e96950cc9ull);
 }
 
 TEST_CASE("SkyEnvBake: the IBL ambient cube face is pinned and backend-independent")

@@ -25,9 +25,10 @@ namespace HE
 //       trilinear sampling of the bake is fine (no pre-smoothstep trick needed).
 // R16-per-channel keeps the threshold ramps band-free.
 //
-// Serial nested loops (one-time init): each voxel is fully independent, but the
-// parallel STL is unusable here — <execution> is unimplemented in libc++/Apple
-// Clang, and a parallel bake must not be allowed to reorder into different bytes.
+// One-time init on the calling thread plus up to 7 helper threads (z-slabs, each
+// voxel written to its own fixed index, so the bytes do not depend on the split;
+// the parallel STL is unusable here, <execution> is unimplemented in libc++/Apple
+// Clang). n = 256 took ~10.7 s serially at renderer start (perf audit B7).
 HE_RENDERING_API std::vector<uint16_t> BuildSkyNoise3D(int n);
 
 } // namespace HE
